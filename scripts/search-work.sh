@@ -57,6 +57,97 @@ if [[ ! -d "$WORK_DIR" ]]; then
   exit 1
 fi
 
+# Arc records sit at _work/_arcs/, which every work-item walk below prunes along
+# with the other underscore-prefixed substrates. They get their own scan so arc
+# titles, anchors, ledgers, and reports stay reachable from this search. Hits
+# carry kind "arc" and work-item hits carry kind "work-item": an arc very often
+# shares a slug with the work item it grew out of, so results are deduplicated
+# on the pair and never on the slug alone.
+arc_hits_json() {
+  ARC_SEARCH_DIR="$WORK_DIR/_arcs" ARC_SEARCH_QUERY="$QUERY" python3 - <<'PYEOF'
+import json
+import os
+
+arcs_dir = os.environ["ARC_SEARCH_DIR"]
+query = os.environ["ARC_SEARCH_QUERY"].lower()
+
+results = []
+if query and os.path.isdir(arcs_dir):
+    for name in sorted(os.listdir(arcs_dir)):
+        arc_dir = os.path.join(arcs_dir, name)
+        if name.startswith("_") or name.startswith(".") or not os.path.isdir(arc_dir):
+            continue
+
+        record = {}
+        meta_path = os.path.join(arc_dir, "_meta.json")
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path) as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    record = loaded
+            except ValueError:
+                pass
+
+        excerpt = ""
+        hit_path = os.path.join("_work", "_arcs", name)
+        for field in ("title", "anchor", "project"):
+            value = record.get(field)
+            if isinstance(value, str) and query in value.lower():
+                excerpt = "%s: %s" % (field, value.strip())
+                break
+
+        if not excerpt:
+            for doc in sorted(os.listdir(arc_dir)):
+                if not doc.endswith(".md"):
+                    continue
+                doc_path = os.path.join(arc_dir, doc)
+                if not os.path.isfile(doc_path):
+                    continue
+                try:
+                    with open(doc_path, errors="replace") as handle:
+                        for line in handle:
+                            if query in line.lower():
+                                excerpt = line.strip()
+                                hit_path = os.path.join("_work", "_arcs", name, doc)
+                                break
+                except OSError:
+                    continue
+                if excerpt:
+                    break
+
+        if excerpt:
+            results.append({
+                "kind": "arc",
+                "slug": record.get("slug") or name,
+                "title": record.get("title") or name,
+                "excerpt": excerpt,
+                "status": record.get("status") or "unrecorded",
+                "path": hit_path,
+            })
+
+print(json.dumps(results))
+PYEOF
+}
+
+print_arc_section() {
+  local hits="$1"
+  printf '%s' "$hits" | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+print("--- Arc matches ---")
+if not rows:
+    print("  (no matches in arcs)")
+else:
+    for row in rows:
+        print("")
+        print("  [arc] %s (%s) — %s" % (row["slug"], row["status"], row["title"]))
+        print("    %s" % row["path"])
+        print("    %s" % row["excerpt"])
+print("")
+'
+}
+
 if [[ $JSON_MODE -eq 0 ]]; then
   echo "=== Work Search: \"$QUERY\" ==="
   echo ""
@@ -92,13 +183,16 @@ if [[ $USE_FTS -eq 1 ]]; then
     ACTIVE_JSON=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --limit 10 --type work --json 2>/dev/null || true)
     ARCHIVED_JSON=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --limit 10 --type work --include-archived --json 2>/dev/null || true)
     # Merge: add "status" field — active results get "active", archived get "archived"
+    ARC_JSON=$(arc_hits_json)
     MERGED=$(python3 -c "
 import json, sys
 active_raw = sys.argv[1]
 archived_raw = sys.argv[2]
+arc_raw = sys.argv[3]
 
 active = json.loads(active_raw) if active_raw else []
 archived_all = json.loads(archived_raw) if archived_raw else []
+arcs = json.loads(arc_raw) if arc_raw else []
 
 # Mark active
 active_slugs = set()
@@ -109,6 +203,8 @@ for r in active:
     fp = r.get('file_path', '')
     parts = fp.replace('_work/', '').split('/')
     slug = parts[0] if parts else ''
+    r['kind'] = 'work-item'
+    r['slug'] = slug
     active_slugs.add(slug)
     results.append(r)
 
@@ -119,10 +215,14 @@ for r in archived_all:
     slug = parts[0] if parts else ''
     if slug not in active_slugs:
         r['status'] = 'archived'
+        r['kind'] = 'work-item'
+        r['slug'] = slug
         results.append(r)
 
+results.extend(arcs)
+
 print(json.dumps(results))
-" "$ACTIVE_JSON" "$ARCHIVED_JSON")
+" "$ACTIVE_JSON" "$ARCHIVED_JSON" "$ARC_JSON")
     json_output "$MERGED"
     exit 0
   fi
@@ -181,6 +281,8 @@ print(len(b_slugs - a_slugs))
     fi
   fi
 
+  print_arc_section "$(arc_hits_json)"
+
   echo "=== End Work Search ==="
   exit 0
 fi
@@ -231,9 +333,11 @@ if [[ $JSON_MODE -eq 1 ]]; then
     done < <(find "$ARCHIVE_DIR" -name '*.md' -print0 2>/dev/null)
   fi
 
-  # Deduplicate by slug and emit JSON array via inline python3
+  # Deduplicate on (kind, slug) and emit JSON array via inline python3
+  ARC_JSON=$(arc_hits_json)
   JSON_OUT=$(printf '%s' "$GREP_RESULTS" | python3 -c '
 import json, sys
+arcs = json.loads(sys.argv[1]) if sys.argv[1] else []
 seen = set()
 results = []
 for line in sys.stdin:
@@ -247,12 +351,18 @@ for line in sys.stdin:
     title = parts[1]
     excerpt = parts[2]
     status = parts[3] if len(parts) > 3 else "active"
-    if slug in seen:
+    if ("work-item", slug) in seen:
         continue
-    seen.add(slug)
-    results.append({"slug": slug, "title": title, "excerpt": excerpt, "status": status})
+    seen.add(("work-item", slug))
+    results.append({"kind": "work-item", "slug": slug, "title": title, "excerpt": excerpt, "status": status})
+for row in arcs:
+    key = ("arc", row["slug"])
+    if key in seen:
+        continue
+    seen.add(key)
+    results.append(row)
 print(json.dumps(results, indent=2))
-')
+' "$ARC_JSON")
   json_output "$JSON_OUT"
   exit 0
 fi
@@ -316,5 +426,7 @@ if [[ -d "$ARCHIVE_DIR" ]]; then
     fi
   fi
 fi
+
+print_arc_section "$(arc_hits_json)"
 
 echo "=== End Work Search ==="

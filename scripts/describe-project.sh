@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # describe-project.sh — Create or update a project home at _work/_projects/<slug>/
-# Usage: bash describe-project.sh <slug> [--anchor <text>] [--status <active|done|archived>] [--description <text>] [--reuse] [--json]
 # Writes _meta.json (identity source of truth) + overview.md (description body)
 # in the home directory. Creates the home when absent (omitted status defaults
 # to "active", anchor and description default empty); on update, omitted fields
@@ -14,7 +13,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
-USAGE="Usage: describe-project.sh <slug> [--anchor <text>] [--status <active|done|archived>] [--description <text>] [--reuse] [--json]"
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  lore work project describe <slug> [options]
+
+Creates the project home when it is absent, updates it otherwise. Omitted
+fields keep the values already recorded.
+
+Options:
+  --anchor <text>       What the project is for, in one line.
+  --status <status>     One of: active, done, archived. Defaults to active on create.
+  --description <text>  Body text, stored as the home's overview.md.
+  --reuse               Continue a project whose identity is archived, reactivating it.
+  --json                Emit a JSON projection of the result instead of text.
+  --help, -h            Show this help.
+
+Options may appear before or after the slug. To read a project back, use
+`lore work project show <slug>`.
+EOF
+}
 
 SLUG=""
 ANCHOR=""
@@ -38,14 +56,7 @@ is_valid_status() {
   return 1
 }
 
-if [[ $# -lt 1 ]]; then
-  echo "[work] Error: Missing required argument: slug" >&2
-  echo "$USAGE" >&2
-  exit 1
-fi
-
-SLUG="$1"
-shift
+POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -72,16 +83,42 @@ while [[ $# -gt 0 ]]; do
       JSON_MODE=1
       shift
       ;;
-    *)
+    -h|--help)
+      usage
+      exit 1
+      ;;
+    -*)
       if [[ $JSON_MODE -eq 1 ]]; then
         json_error "Unknown flag '$1'"
       fi
       echo "[work] Error: Unknown flag '$1'" >&2
-      echo "$USAGE" >&2
+      usage
       exit 1
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
       ;;
   esac
 done
+
+if [[ ${#POSITIONAL[@]} -lt 1 ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "Missing required argument: slug"
+  fi
+  echo "[work] Error: Missing required argument: slug" >&2
+  usage
+  exit 1
+fi
+if [[ ${#POSITIONAL[@]} -gt 1 ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "Unexpected argument '${POSITIONAL[1]}'"
+  fi
+  echo "[work] Error: Unexpected argument '${POSITIONAL[1]}'" >&2
+  usage
+  exit 1
+fi
+SLUG="${POSITIONAL[0]}"
 
 if [[ "$HAS_STATUS" -eq 1 ]] && ! is_valid_status "$STATUS"; then
   if [[ $JSON_MODE -eq 1 ]]; then
