@@ -287,11 +287,44 @@ EXPECTED_HOOK_COMMANDS=(
   "bash ~/.lore/scripts/guard-work-writes.sh"
 )
 
+ACTIVE_FRAMEWORK=$(resolve_active_framework 2>/dev/null || true)
+GUIDANCE_HOOK_SUPPORT="none"
+if [[ -n "$ACTIVE_FRAMEWORK" ]]; then
+  GUIDANCE_HOOK_SUPPORT=$(framework_capability native_dispatch_guidance_hook "$ACTIVE_FRAMEWORK" 2>/dev/null || echo "none")
+fi
+
+if [[ "$GUIDANCE_HOOK_SUPPORT" == "full" && "$ACTIVE_FRAMEWORK" == "claude-code" ]]; then
+  EXPECTED_HOOK_COMMANDS+=(
+    "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/validate-dispatch-guidance.sh --hook claude-code"
+  )
+fi
+
 # Harnesses without a settings surface (or with a non-JSON settings file
 # that the JSON parser cannot read) yield a single n/a issue. Operators on
 # those harnesses should consult `lore framework status` / `lore framework
 # doctor` for the per-harness installer's verdict.
-if [[ -z "$HARNESS_SETTINGS_FILE" || "$HARNESS_SETTINGS_FILE" != *.json ]]; then
+if [[ "$GUIDANCE_HOOK_SUPPORT" == "full" && "$ACTIVE_FRAMEWORK" == "codex" ]]; then
+  expected_guidance_command="LORE_FRAMEWORK=codex bash ~/.lore/scripts/validate-dispatch-guidance.sh --hook codex"
+  if [[ ! -f "$HARNESS_SETTINGS_FILE" ]]; then
+    add_issue "hooks" "missing" "$expected_guidance_command" "$HARNESS_SETTINGS_FILE not found"
+  else
+    installed_guidance_commands="$(python3 - "$HARNESS_SETTINGS_FILE" <<'PYEOF' 2>/dev/null || true
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    settings = tomllib.load(f)
+for entries in settings.get("hooks", {}).values():
+    for entry in entries:
+        command = entry.get("command")
+        if command:
+            print(command)
+PYEOF
+)"
+    if ! echo "$installed_guidance_commands" | grep -qxF "$expected_guidance_command"; then
+      add_issue "hooks" "missing" "$expected_guidance_command" \
+        "dispatch-guidance hook command not found in $HARNESS_SETTINGS_FILE"
+    fi
+  fi
+elif [[ -z "$HARNESS_SETTINGS_FILE" || "$HARNESS_SETTINGS_FILE" != *.json ]]; then
   add_issue "hooks" "n/a" "settings" \
     "active harness has no JSON settings file (was: ${HARNESS_SETTINGS_FILE:-unsupported})"
 elif [[ ! -f "$HARNESS_SETTINGS_FILE" ]]; then

@@ -198,6 +198,26 @@ const DENY_ALLOWED: ReadonlySet<LoreEvent> = new Set<LoreEvent>([
   "task_completed",
 ]);
 
+/**
+ * OpenCode documents `task` as its native subagent tool, so matching that
+ * exact tool name is a definite condition. Its plugin contract does not yet
+ * provide probe-backed prompt-field and blocking semantics for that launch,
+ * however. Fail closed on the known launch instead of guessing at aliases or
+ * rewriting an unverified payload shape. The validated adapter/session path
+ * remains available on every harness.
+ */
+export const NATIVE_TASK_GUIDANCE_REASON =
+  "Native OpenCode task launch is unavailable because its dispatch-guidance prompt contract is unverified. Run 'lore dispatch guidance' and launch through the Lore orchestration adapter or worker session.";
+
+export function refuseUnverifiedNativeTask(
+  payload: Record<string, unknown>,
+): PluginReturn | undefined {
+  if (payload.tool === "task") {
+    return { allow: false, reason: NATIVE_TASK_GUIDANCE_REASON };
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Session accumulator — contract surface with adapters/transcripts/opencode.py
 // ---------------------------------------------------------------------------
@@ -565,8 +585,17 @@ export const plugin = {
   "message.updated": async (payload: Record<string, unknown>) =>
     toPluginReturn(await dispatch("user_prompt", payload, "message.updated")),
 
-  "tool.execute.before": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("pre_tool", payload, "tool.execute.before")),
+  "tool.execute.before": async (payload: Record<string, unknown>) => {
+    const nativeTaskRefusal = refuseUnverifiedNativeTask(payload);
+    if (nativeTaskRefusal) {
+      const sessionId = extractSessionId(payload);
+      if (sessionId) {
+        appendAccumulatorEvent(sessionId, "tool.execute.before", payload);
+      }
+      return nativeTaskRefusal;
+    }
+    return toPluginReturn(await dispatch("pre_tool", payload, "tool.execute.before"));
+  },
 
   "tool.execute.after": async (payload: Record<string, unknown>) =>
     toPluginReturn(await dispatch("post_tool", payload, "tool.execute.after")),

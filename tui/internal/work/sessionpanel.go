@@ -1253,14 +1253,15 @@ func StartTerminalCmd(d SessionDescriptor, width, height int, knowledgeDir strin
 		}
 
 		// Build args: start with user-configured harness flags
-		// (~/.lore/config/harness-args.json `[<framework>].args`), then
-		// adapter-mediated flag injection for the two TUI-injected concerns
+		// (settings.json `harnesses.<framework>.args`, or `autonomous_args`
+		// when the descriptor is agent-initiated and that profile is set),
+		// then adapter-mediated flag injection for the two TUI-injected concerns
 		// (append_system_prompt, inline_settings_override). Each concern's
 		// flag spelling is resolved against the active harness; on
 		// `unsupported` the TUI skips the injection entirely rather than
 		// substituting a different flag (opencode/codex would error on an
 		// unknown flag). See adapters/agents/README.md §"TUI Launch Concerns".
-		args := append([]string(nil), config.LoadHarnessConfig(activeFramework).Args...)
+		args := append([]string(nil), config.LoadHarnessArgsForInitiator(activeFramework, d.Initiator)...)
 		if d.FollowupMode && slug != "" {
 			if sysPrompt := loadFollowupContext(slug, knowledgeDir, d.FindingIndex); sysPrompt != "" {
 				flag, supported, err := config.HarnessSystemPromptFlag(activeFramework)

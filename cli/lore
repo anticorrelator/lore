@@ -64,6 +64,7 @@ Commands:
   capture      Capture an insight to the knowledge store
   promote      Promote a Tier 3 observation row to the knowledge commons
   test         Run lore test suites (see: lore test protocols)
+  dispatch     Render dispatch-time guidance (see: lore dispatch --help)
   annotate     Record a retrieval friction annotation
   verify       Record a consumption-verification outcome (held|contradicted)
                for a knowledge entry (see: lore verify --help), or report
@@ -2012,6 +2013,45 @@ cmd_off_scale() {
   esac
 }
 
+dispatch_usage() {
+  cat >&2 <<EOF
+lore dispatch — dispatch-time guidance
+
+Usage: lore dispatch <subcommand> [args...]
+
+Subcommands:
+  guidance   Render the invocation-fresh schema-v1 guidance block
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+cmd_dispatch() {
+  if [[ $# -eq 0 ]]; then
+    dispatch_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+  case "$subcmd" in
+    --help|-h)
+      dispatch_usage
+      return 0
+      ;;
+    guidance)
+      exec "$SCRIPTS_DIR/render-dispatch-guidance.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown dispatch subcommand '$subcmd'" >&2
+      echo "" >&2
+      dispatch_usage
+      return 1
+      ;;
+  esac
+}
+
 # --- Top-level dispatch ---
 if [[ $# -eq 0 ]]; then
   exec lore-tui
@@ -2053,6 +2093,10 @@ case "$1" in
   defaults)
     shift
     exec "$SCRIPTS_DIR/render-standing-defaults.sh" "$@"
+    ;;
+  dispatch)
+    shift
+    cmd_dispatch "$@"
     ;;
   annotate)
     shift

@@ -1,19 +1,20 @@
-# Step 2 — Analysis agent prompts
+# Assessment briefs — classifier, structure analyst, cross-reference scout
 
-Read this file from `skills/renormalize/SKILL.md` Step 2 when spawning the two parallel Explore agents (Staleness scan + Usage analysis).
+Read this file from `skills/renormalize/SKILL.md` Step 3. Three read-only judgment briefs, dispatched in parallel through the probed route. None modifies knowledge files.
 
-Create a team named `renorm-<YYYYMMDD-HHMMSS>` with 2 Explore agents running in parallel:
+For each role and each retry, run `lore dispatch guidance` immediately before launch; if it fails, do not launch that brief. Assemble the prompt in this order: that invocation's complete guidance output verbatim, the resolved agent template, then the SKILL.md report contract block. Do not share one rendered block across the three roles.
 
-**Agent 1 — Staleness scan:**
-```
-Run: lore analyze staleness --json
-Report the summary back via SendMessage: total entries scanned, stale count, breakdown by reason (age, low-confidence, missing referenced files).
-```
+Resolve templates through `resolve_agent_template <name>` (sourced from `~/.lore/scripts/lib.sh`) and inject:
 
-**Agent 2 — Usage analysis:**
-```
-Run: lore analyze usage --json --write
-Report the summary back via SendMessage: total entries, hot/warm/cold counts, cold entries list, retrieval-log coverage.
-```
+- `{{kdir}}` — the resolved knowledge directory
+- `{{team_name}}` — the run id (`$RUN_ID`)
+- `{{team_lead}}` — the lead's identity for this run
+- `{{audit_set}}` — classifier only: the `entries` array from `$KDIR/_meta/audit-set.json`
 
-Wait for both agents to complete and acknowledge their reports.
+| Role | Template | Findings artifact |
+|---|---|---|
+| classifier | `resolve_agent_template classifier` | `$KDIR/_meta/classification-report.json` |
+| structure-analyst | `resolve_agent_template structure-analyst` | `$KDIR/_meta/structure-report.json` |
+| crossref-scout | `resolve_agent_template crossref-scout` | `$KDIR/_meta/crossref-report.json` |
+
+The classifier audits only the audit set. Each agent writes its own findings JSON; the contract report indexes that artifact. Acceptance additionally checks the findings file landed and parses as JSON.

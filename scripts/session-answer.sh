@@ -7,6 +7,7 @@
 # Options:
 #   --option <N>       Displayed positive option number to select (required).
 #   --expect <literal> Literal text that must still be visible in the modal (required).
+#   --registration-id <id>  Standing-decision registration authorizing this answer.
 #   --wait             Block until the answer is verified or refused.
 #   --timeout <sec>    --wait poll budget (default: 15).
 #   --requested-by <w> Requester identity (default: session instance, else user).
@@ -40,11 +41,13 @@ REQUESTED_BY=""
 TTL=30
 KDIR_OVERRIDE=""
 JSON_MODE=0
+REGISTRATION_ID=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --option) OPTION="${2:-}"; shift 2 ;;
     --expect) EXPECT="${2:-}"; shift 2 ;;
+    --registration-id) REGISTRATION_ID="${2:-}"; shift 2 ;;
     --wait) WAIT=1; shift ;;
     --timeout) TIMEOUT="${2:-}"; shift 2 ;;
     --requested-by) REQUESTED_BY="${2:-}"; shift 2 ;;
@@ -79,6 +82,9 @@ command -v jq &>/dev/null || fail "jq is required but not found on PATH"
 [[ -n "$OPTION" ]] || fail "missing required argument: --option <N>"
 [[ "$OPTION" =~ ^[1-9][0-9]*$ ]] || fail "invalid --option: '$OPTION' (must be a positive integer)"
 [[ -n "$EXPECT" ]] || fail "missing required argument: --expect <literal>"
+if [[ -n "$REGISTRATION_ID" && ! "$REGISTRATION_ID" =~ ^[a-z][a-z0-9-]*$ ]]; then
+  fail "invalid --registration-id: '$REGISTRATION_ID' (must be a stable kebab-case id)"
+fi
 [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || fail "invalid --timeout: '$TIMEOUT' (must be a non-negative integer)"
 [[ "$TTL" =~ ^[0-9]+$ ]] || fail "invalid --ttl: '$TTL' (must be a non-negative integer)"
 
@@ -111,7 +117,9 @@ ROW="$(jq -n \
   --arg expect "$EXPECT" \
   --arg requested_by "$REQUESTED_BY" \
   --arg requested_at "$REQUESTED_AT" \
-  '{request_id:$request_id,slug:$slug,target_instance:$target,option:$option,expect:$expect,requested_by:$requested_by,requested_at:$requested_at}')"
+  --arg registration_id "$REGISTRATION_ID" \
+  '{request_id:$request_id,slug:$slug,target_instance:$target,option:$option,expect:$expect,requested_by:$requested_by,requested_at:$requested_at}
+   + (if $registration_id == "" then {} else {registration_id:$registration_id} end)')"
 
 TMP="$(mktemp "$ANSWER_DIR/.tmp.${REQUEST_ID}.XXXXXX")"
 printf '%s\n' "$ROW" > "$TMP"
@@ -120,8 +128,9 @@ mv "$TMP" "$DEST"
 
 EVENT_ROW="$(jq -n \
   --arg request_id "$REQUEST_ID" --arg slug "$SLUG" --arg target "$TARGET_INSTANCE" \
-  --argjson option "$OPTION" \
-  '{event:"answer_requested",request_id:$request_id,slug:$slug,target_instance:$target,option:$option}')"
+  --argjson option "$OPTION" --arg registration_id "$REGISTRATION_ID" \
+  '{event:"answer_requested",request_id:$request_id,slug:$slug,target_instance:$target,option:$option}
+   + (if $registration_id == "" then {} else {registration_id:$registration_id} end)')"
 if ! printf '%s' "$EVENT_ROW" | bash "$SCRIPT_DIR/session-event-append.sh" --kdir "$KNOWLEDGE_DIR" >/dev/null; then
   echo "[session] warning: event append failed (answer request is durable)" >&2
 fi

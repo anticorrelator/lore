@@ -332,9 +332,13 @@ func journalCmd(script, kdir string, ev session.Event) tea.Cmd {
 }
 
 type modalObservation struct {
-	known   bool
-	blocked bool
+	known         bool
+	blocked       bool
+	framework     string
+	numberedModal *config.NumberedModalSignature
 }
+
+var matchModalAnswer = config.MatchModalAnswer
 
 // observeModalPanel reads one screen and reuses the readiness classifier's
 // interactive predicate. Resolution or snapshot failures are unobservable, not
@@ -349,7 +353,7 @@ func observeModalPanel(panel work.SessionPanelModel) modalObservation {
 		return modalObservation{}
 	}
 	state, ok := classifyScreen(framework, snap)
-	return modalObservation{known: ok, blocked: ok && state.interactive}
+	return modalObservation{known: ok, blocked: ok && state.interactive, framework: framework, numberedModal: state.numberedModal}
 }
 
 func (m model) observeModal(panel work.SessionPanelModel) modalObservation {
@@ -357,6 +361,27 @@ func (m model) observeModal(panel work.SessionPanelModel) modalObservation {
 		return m.observeModalFn(panel)
 	}
 	return observeModalPanel(panel)
+}
+
+// registeredModalAnswerCmd preserves modal_blocked as the first durable fact,
+// then delegates enqueueing to the existing session-answer verb. A failed
+// journal append prevents authorization from reaching the answer queue.
+func registeredModalAnswerCmd(script, kdir, slug string, blocked session.Event, registration config.ModalAnswerRegistration) tea.Cmd {
+	return func() tea.Msg {
+		if err := session.AppendEvent(script, kdir, blocked); err != nil {
+			return journalResultMsg{err: err}
+		}
+		answerScript := filepath.Join(filepath.Dir(script), "session-answer.sh")
+		cmd := exec.Command("bash", answerScript, slug,
+			"--option", strconv.Itoa(registration.Answer.Option),
+			"--expect", registration.Answer.Expect,
+			"--registration-id", registration.ID,
+			"--kdir", kdir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return journalResultMsg{err: fmt.Errorf("enqueue registered modal answer: %w: %s", err, strings.TrimSpace(string(out)))}
+		}
+		return journalResultMsg{}
+	}
 }
 
 // advanceModalObservations emits exactly one modal_blocked row per successfully
@@ -385,7 +410,14 @@ func (m model) advanceModalObservations() (model, []tea.Cmd) {
 			m.sessionModalBlocked = make(map[string]bool)
 		}
 		m.sessionModalBlocked[slug] = true
-		cmds = append(cmds, journalCmd(m.eventScript, m.config.KnowledgeDir, m.modalBlockedEventFor(slug, ls)))
+		blocked := m.modalBlockedEventFor(slug, ls)
+		if obs.numberedModal != nil {
+			if registration, matched := matchModalAnswer(obs.framework, *obs.numberedModal); matched {
+				cmds = append(cmds, registeredModalAnswerCmd(m.eventScript, m.config.KnowledgeDir, slug, blocked, registration))
+				continue
+			}
+		}
+		cmds = append(cmds, journalCmd(m.eventScript, m.config.KnowledgeDir, blocked))
 	}
 	return m, cmds
 }

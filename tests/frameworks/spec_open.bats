@@ -18,6 +18,11 @@ PY
 
 setup() {
   TEST_KDIR="$(mktemp -d)"
+  ORIGINAL_HOME="$HOME"
+  TEST_HOME="$TEST_KDIR/home"
+  mkdir -p "$TEST_HOME/.lore"
+  ln -s "$REPO_DIR/scripts" "$TEST_HOME/.lore/scripts"
+  export HOME="$TEST_HOME"
   export LORE_KNOWLEDGE_DIR="$TEST_KDIR"
   export LORE_FRAMEWORK=codex
   export LORE_MODEL_RESEARCHER=test-researcher-model
@@ -28,7 +33,11 @@ setup() {
   write_manifest
 }
 
-teardown() { rm -rf "$TEST_KDIR"; unset LORE_KNOWLEDGE_DIR LORE_FRAMEWORK LORE_MODEL_RESEARCHER; }
+teardown() {
+  export HOME="$ORIGINAL_HOME"
+  rm -rf "$TEST_KDIR"
+  unset LORE_KNOWLEDGE_DIR LORE_FRAMEWORK LORE_MODEL_RESEARCHER
+}
 
 json_line() { echo "$output" | grep '"schema_version"'; }
 atom_count() { grep -c '^Spec-open-atom:' "$TEST_KDIR/_work/open-item/execution-log.md" 2>/dev/null || true; }
@@ -45,6 +54,9 @@ assert d["source_manifest"]["adapter_capabilities"]["subagents"]=="partial"
 assert len(d["directives"])==3
 assert [r["ordinal"] for r in d["directives"]]==[1,2,3]
 assert all(r["action"]=="spawn" and r["teardown_payload"]["action"]=="shutdown" for r in d["directives"])
+identity=d["source_manifest"]["dispatch_guidance_identity"]
+assert identity["schema_version"]==1 and identity["defaults_digest"].startswith("sha256:")
+assert all("<!-- lore-dispatch-guidance:v1:begin -->" in r["payload"]["dispatch_guidance"] for r in d["directives"])
 '
   [ -f "$TEST_KDIR/_work/open-item/spec-dispatch.json" ]
   [ "$(atom_count)" -eq 1 ]
@@ -58,6 +70,15 @@ atom=json.loads(re.findall(r"(?m)^Spec-open-atom: (\{.*\})$",open(log).read())[-
 assert atom["artifact_sha256"]==hashlib.sha256(raw).hexdigest()
 assert atom["input_fingerprint"]==d["input_fingerprint"]
 PY
+}
+
+@test "every generated researcher directive carries guidance accepted by the canonical validator" {
+  run bash "$LORE" spec open open-item --investigations "$MANIFEST" --json
+  [ "$status" -eq 0 ]
+  local prompt="$TEST_KDIR/researcher-prompt.txt"
+  json_line | jq -r '.directives[0].payload.dispatch_guidance + "\nInvestigate the declared question."' > "$prompt"
+  run bash "$REPO_DIR/scripts/validate-dispatch-guidance.sh" --prompt-file "$prompt"
+  [ "$status" -eq 0 ]
 }
 
 @test "exact replay is reused and appends no second atom" {

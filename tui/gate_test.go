@@ -1,10 +1,12 @@
 package main
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -81,6 +83,13 @@ var (
 		"  1. Run the verification",
 		"› 2. Leave it for later",
 		"  4. Cancel",
+		"Use ↑ and ↓, then Enter to select",
+	}
+	cxAdditionalSafetyRows = []string{
+		"Additional safety checks",
+		"› 1. Retry with a faster model",
+		"  2. Keep waiting",
+		"  3. Learn more",
 		"Use ↑ and ↓, then Enter to select",
 	}
 	cxApproveSuggestionRows = []string{
@@ -172,6 +181,25 @@ func TestCodexApproveSuggestionIsHealthyComposer(t *testing.T) {
 	}
 	if state.interactive || !state.composer {
 		t.Fatalf("approved suggestion classified as %+v, want noninteractive composer", state)
+	}
+}
+
+func TestClassifyScreenDerivesExactNumberedModalSignature(t *testing.T) {
+	state, ok := classifyScreen("codex", work.ScreenSnapshot{Rows: cxAdditionalSafetyRows})
+	if !ok || !state.interactive || state.numberedModal == nil {
+		t.Fatalf("classification = %+v known=%v", state, ok)
+	}
+	want := config.NumberedModalSignature{
+		Kind:  config.NumberedModalSignatureV1,
+		Title: "Additional safety checks",
+		Options: []config.ModalAnswerOption{
+			{Number: 1, Label: "Retry with a faster model"},
+			{Number: 2, Label: "Keep waiting"},
+			{Number: 3, Label: "Learn more"},
+		},
+	}
+	if !reflect.DeepEqual(*state.numberedModal, want) {
+		t.Fatalf("signature = %+v, want %+v", *state.numberedModal, want)
 	}
 }
 

@@ -158,7 +158,11 @@ If no work item was found, fall back to deriving all sections from `git log <bas
 
 ### 6b. Cold fidelity read of the draft
 
-Before creating the PR, check that the draft survives a reader without project context. Spawn a fresh agent whose prompt contains ONLY the drafted title and body — no work item, no diff, no repository context — framed as: "You are a competent engineer who has never seen this project. Read this PR description and paraphrase back what the change does and what each key term means."
+Before creating the PR, check that the draft survives a reader without project context.
+
+**Dispatch guidance gate:** For every fresh-reader launch or retry, run `lore dispatch guidance` immediately before assembling that launch's prompt. If rendering fails, stop before that launch. Prepend that launch attempt's complete output verbatim as the first block of the prompt; do not quote, summarize, copy, or reuse its contents. The title/body isolation rule below applies to task-specific context after that required block.
+
+Spawn a fresh agent whose task-specific prompt contains ONLY the drafted title and body — no work item, no diff, no repository context — framed as: "You are a competent engineer who has never seen this project. Read this PR description and paraphrase back what the change does and what each key term means."
 
 Compare the paraphrase against your intent. The signal is *divergence* — a confident reading that doesn't match what you meant — not confusion; a reader who asks "what does X mean?" is the easy case, while the dangerous case reads X fluently and wrongly. For each diverging term or claim, either rename it to shared professional vocabulary or keep it with an inline definition plus one line on why existing vocabulary doesn't serve, then re-read your revision yourself (re-spawn a fresh reader only if the body changed substantially).
 
@@ -174,6 +178,8 @@ EOF
 ```
 
 Always pass `--base "<base>"` using the branch confirmed in Step 1. Pass `--draft` if provided in `$ARGUMENTS`.
+
+After creation, fetch the PR title and body from GitHub and perform a final external-artifact conformance check. Confirm that they describe only the shipped change in shared professional vocabulary and contain no internal process, agent/worker/skill/lore references, session links, attribution trailers, or harness-generated footers. If the created artifact violates this contract, edit it into conformance and re-fetch it before continuing. Do not report success from the local draft alone.
 
 ### 8. Update the work item
 

@@ -185,7 +185,8 @@ func TestScriptReviewVocabulary(t *testing.T) {
 		{"close_requested with request_id accepted", Event{Event: "close_requested", RequestID: "20260705T000000Z-abcd1234"}, false},
 		{"requested still accepted", Event{Event: EventRequested, RequestID: "20260705T000000Z-abcd1234"}, false},
 		{"answer requested with numeric option accepted", Event{Event: EventAnswerRequested, RequestID: "answer-1", Slug: "demo-slug", Option: 2}, false},
-		{"answered with numeric option accepted", Event{Event: EventAnswered, RequestID: "answer-1", Slug: "demo-slug", Option: 2}, false},
+		{"answered with numeric option accepted", Event{Event: EventAnswered, RequestID: "answer-1", Slug: "demo-slug", Option: 2, RegistrationID: "standing-answer-v1"}, false},
+		{"registration id outside answer lifecycle rejected", Event{Event: EventModalBlocked, Slug: "demo-slug", Reason: "modal", RegistrationID: "standing-answer-v1"}, true},
 		{"answer refusal with closed reason accepted", Event{Event: EventAnswerRefused, RequestID: "answer-1", Slug: "demo-slug", Option: 2, Reason: "not-modal"}, false},
 		{"answer lifecycle without option rejected", Event{Event: EventAnswered, RequestID: "answer-1", Slug: "demo-slug"}, true},
 		{"answer refusal with unknown reason rejected", Event{Event: EventAnswerRefused, RequestID: "answer-1", Slug: "demo-slug", Option: 2, Reason: "maybe"}, true},
@@ -281,8 +282,8 @@ func countJournalRows(t *testing.T, kdir string) int {
 func locateAppendScript(t *testing.T) string {
 	t.Helper()
 	candidates := []string{
-		filepath.Join(os.Getenv("HOME"), ".lore/scripts/session-event-append.sh"),
 		filepath.Join("..", "..", "..", "scripts", "session-event-append.sh"),
+		filepath.Join(os.Getenv("HOME"), ".lore/scripts/session-event-append.sh"),
 	}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {

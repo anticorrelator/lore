@@ -2,142 +2,105 @@
 name: bootstrap
 description: "Bootstrap a knowledge store by exploring codebase architecture — use when starting with a new or empty project, seeding knowledge, or running /bootstrap"
 user_invocable: true
-argument_description: "[--model opus|sonnet] [directory paths] — optional directory paths to scope (e.g., src/auth src/api); without paths, scopes entire repo"
+argument_description: "[--domain <topic>] [directory paths] — directory paths scope the run (e.g., src/auth src/api); no arguments scopes the entire repo; --domain <topic> seeds one domain entry after a genuinely empty retrieval and is mutually exclusive with paths"
 ---
 
 # /bootstrap Skill
 
-Seeds a knowledge store with the **map and seams** of a codebase: what subsystems exist, what each owns, and what crosses between them. The lead first builds a project sketch (kind, paradigm, vocabulary, candidate seams), then dispatches Explore agents per subsystem with a project-aware brief targeting architecture and subsystem scale — not implementation, not gotchas. Findings file via `lore batch-capture` at `confidence: medium`, `source: bootstrap`. Incremental: bootstrap some subsystems now, others later, tracked via `plan.md` checkboxes.
+Seeds a knowledge store with the **map and seams** of a codebase: what subsystems exist, what each owns, and what crosses between them. The lead builds a project sketch, dispatches explorers per subsystem at architecture/subsystem scale — not implementation, not gotchas — then synthesizes and files entries through the sanctioned capture writer with full provenance. Incremental: bootstrap some subsystems now, others later, via `plan.md` checkboxes.
 
-## Resolve Work Path
+Modes: **full repo** (no arguments) and **directory-scoped** (paths) run Steps 1–8; **`--domain <topic>`** runs the narrow-results track (§ Domain Track) and is mutually exclusive with paths — reject an invocation that passes both.
+
+## Resolve Paths and Defaults
 
 ```bash
 lore resolve
 ```
+
 Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
+
+```bash
+lore defaults
+```
+
+Binding, not advisory: role→model routes, harness selection, and standing preference directives come from this output. The skill takes no model arguments — every dispatch resolves its model through the role resolver, never a hardcoded alias.
+
+Stamp provenance from content hashes:
+
+```bash
+LEAD_TV=$(bash ~/.lore/scripts/template-version.sh "$LORE_REPO_DIR/skills/bootstrap/SKILL.md")
+EXPLORER_TV=$(bash ~/.lore/scripts/template-version.sh "$LORE_REPO_DIR/skills/bootstrap/templates/explorer-prompt.md")
+```
 
 ### Step 1: Scope
 
-Identify candidate domains.
-
-1. Parse arguments: extract optional `--model` flag (`opus` or `sonnet`, default `sonnet`) — use it as `<selected-model>` for every agent spawn below. If directory paths were provided (e.g., `/bootstrap src/auth src/api`), pass them through; otherwise scope the entire repo.
-2. Run scoping:
-   ```bash
-   lore bootstrap scope [optional dir args...]
-   ```
-   Stdout: JSON array `[{"path": "src/auth", "description": "...", "languages": ["Python"]}]`. Stderr: tree output (context, not parsed).
-3. Present the domain list:
-   ```
-   [bootstrap] Scoped N domains:
-     1. src/auth — Authentication module (Python)
-     2. src/api — API layer (Node.js)
-     ...
-   Add, remove, or merge? (Enter to proceed)
-   ```
-4. Wait for confirmation. The comprehension pass in Step 2 may reshape this list further.
+1. Run `lore bootstrap scope [optional dir args...]`, passing through any directory arguments. Stdout: JSON array `[{"path": "src/auth", "description": "...", "languages": ["Python"]}]`. Stderr: tree output (context, not parsed).
+2. Present the numbered domain list; invite add/remove/merge; wait for confirmation. Step 2 may reshape the list further.
 
 ### Step 2: Comprehend
 
-Build a project sketch before fan-out. The sketch shapes every agent's brief.
+Build a project sketch before fan-out — it shapes every explorer's brief.
 
-1. **Find or create the work item.** Look for a `bootstrap-*` work item in `$WORK_DIR/`. If present, load for resume (see "Resuming"). Otherwise:
-   ```bash
-   lore work create --title "Bootstrap <repo-name>" --tags bootstrap
-   ```
-   Set `SLUG` to the result.
+1. **Find or create the work item.** Look for a `bootstrap-*` item in `$WORK_DIR/`; if present, load for resume (§ Resuming). Otherwise `lore work create --title "Bootstrap <repo-name>" --tags bootstrap`; set `SLUG`.
 
-2. **Read the top-level shape** — pick from what exists, don't grep deep:
-   - README and top-level docs (`README*`, `ARCHITECTURE*`, `docs/README*`)
-   - Top-level entry points (`main.*`, `index.*`, `cmd/`, `bin/`)
-   - Manifest (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, etc.)
-   - Top-level interface definitions (proto files, OpenAPI specs, public type packages)
+2. **Read the top-level shape** — pick from what exists, don't grep deep: README and top-level docs, entry points (`main.*`, `cmd/`, `bin/`), the manifest, and top-level interface definitions (protos, OpenAPI specs, public type packages).
 
 3. **Write the sketch** to `$WORK_DIR/<SLUG>/findings.md`:
    ```markdown
    ## Project Sketch
-   **Kind:** <CLI tool / web service / library / framework / monorepo / data pipeline / ...>
+   **Kind:** <CLI tool / web service / library / monorepo / data pipeline / ...>
    **Paradigm:** <event-driven / request-response / pipeline / state machine / plugin host / ...>
    **Stated purpose:** <one sentence, ideally from the README>
-   **Project vocabulary:** <terms the project uses for its own concepts — agents should reuse these, not import generic terms>
-   **Candidate seams:** <where subsystems meet — public APIs, schemas, message formats, hook/plugin registries, data stores>
+   **Project vocabulary:** <the project's own terms — explorers reuse these, not generic imports>
+   **Candidate seams:** <where subsystems meet — public APIs, schemas, message formats, registries, data stores>
    ```
 
-4. **Reshape the domain list if the sketch suggests it.** Subsystems may cross or merge directory boundaries — e.g., an HTTP surface spanning `src/api` + `src/handlers`, a settings subsystem split across `config/` + `src/settings`. Present any reshape with rationale:
-   ```
-   [bootstrap] Sketch suggests subsystems differ from directory scoping:
-     · "HTTP surface" merges src/api + src/handlers (shared route + middleware contracts)
-     · "Auth" matches src/auth as-is
-   Confirm? (Enter to proceed, or specify edits)
-   ```
-   The confirmed list defines the **subsystems** for the rest of the run.
+4. **Reshape the domain list if the sketch suggests it** — subsystems may cross or merge directory boundaries (an HTTP surface spanning `src/api` + `src/handlers`). Present any reshape with rationale and confirm. The confirmed list defines the **subsystems** for the run.
 
-### Step 3: Team Setup
+### Step 3: Dispatch
 
-Create the team and one task per subsystem.
+Exploration is read-only: no worktree lease, no messaging, self-contained briefs.
 
-1. **Create the team** (MUST precede TaskCreate):
-   ```
-   TeamCreate: team_name="bootstrap-<SLUG>", description="Bootstrapping knowledge for <repo-name>"
-   ```
+1. **Assign report identities before any dispatch.** Per subsystem: attempt-specific report id `explore-<subsystem-slug>-r<attempt>` and canonical path `$WORK_DIR/<SLUG>/worker-reports/<report-id>.md` (create the directory on first landing). A re-dispatch gets a fresh id, never a reuse; reports are immutable once accepted.
 
-2. **Read your team lead name** from the active harness's teams install path (`resolve_harness_install_path teams`; typically `~/.claude/teams/bootstrap-<SLUG>/config.json`). This skill requires `team_messaging=full` per `adapters/capabilities.json.skills.bootstrap.requires`.
+2. **Probe the route at operation level** through the active agent adapter (`ADAPTER="$LORE_REPO_DIR/adapters/agents/$(resolve_active_framework).sh"`) — never a branch on the framework's name. Four operations, probed separately: spawn surface (spawn/wait/shutdown), direct result collection (`collect_result` returns the full report body), completion enforcement (`native_blocking` or lead-validator — a worker's own word is never acceptance evidence), and report materialization (the lead can land each report at its canonical path).
+   - All four present → native subagent fan-out, `min(subsystem_count, 4)` concurrent.
+   - Any missing → item-backed worker sessions, one per subsystem (`lore session request --type worker …`; dispatch shape per `/coordinate` — the session lands its own report before terminus).
+   - Neither route → the lead explores serially and lands its own reports with `Dispatch-path: lead-inline`. Every route produces the same durable artifacts.
 
-3. **Create one task per subsystem:**
-   ```
-   TaskCreate:
-     subject: "Explore: <subsystem name>"
-     description: |
-       Investigate <subsystem name> (paths: <paths>, languages: <langs>) and report at
-       architecture/subsystem scale per the worker brief in Step 4. Map boundaries,
-       contracts, and shapes. Do NOT report gotchas, line-level behavior, or
-       implementation details. Do NOT call `lore capture` — the lead files everything.
-     activeForm: "Exploring <subsystem name>"
-   ```
-
-4. Subsystems are independent — all tasks run in parallel.
-
-### Step 4: Explore
-
-Spawn agents and collect findings.
-
-1. **Per subsystem, prefetch knowledge:**
+3. **Prepare per-subsystem context:**
    ```bash
    PRIOR_KNOWLEDGE=$(lore prefetch "<subsystem name>" --format prompt --limit 5 --scale-set=architecture,subsystem)
-   ```
-
-2. **Per subsystem, get a directory tree:**
-   ```bash
    DOMAIN_TREE=$(tree -L 3 --dirsfirst -I 'node_modules|.git|vendor|__pycache__|dist|build|.next|target|coverage' <paths>)
    ```
 
-3. **Spawn `min(subsystem_count, 4)` agents in a single message:** read `skills/bootstrap/templates/explorer-prompt.md` for the Task spawn block and prompt scaffold (Project Sketch + Prior Knowledge + Subsystem Structure + Mission + Out-of-scope + Workflow). Embed `$PRIOR_KNOWLEDGE` and `$DOMAIN_TREE` into each spawn.
+4. **Render guidance at the exact brief seam.** Immediately before composing each subsystem's launch prompt, run `lore dispatch guidance`. If rendering fails, do not assemble or dispatch that explorer. The output is single-use: render again for every subsystem and retry.
 
-4. **As messages arrive, append to `$WORK_DIR/<SLUG>/findings.md`:**
-   ```markdown
-   ## <Subsystem name>
-   **Explored by:** explorer-N  
-   **Timestamp:** <ISO>
+5. **Compose one brief per subsystem** from `templates/explorer-prompt.md`, injecting the complete guidance output first and verbatim, then the sketch, `$PRIOR_KNOWLEDGE`, `$DOMAIN_TREE`, `SLUG`, the assigned report id, the dispatch path, the active harness name, and `$EXPLORER_TV`. Dispatch through the probed route; native adapters and worker-session enqueue validate the exact composed prompt without changing its knowledge or report contract.
 
-   <full report>
+### Step 4: Collect and Accept
 
-   ---
+1. **Land each report verbatim at its canonical path before checking it.** A subagent's direct return is copied to the assigned file by the lead; a worker session has already landed its own.
+
+2. **Check each landed report:** identity header complete (`Report-schema: 1` through `Template-version:`) with `Report-id:` matching the assignment; `**Artifacts:**` manifest present; every claim id under **Tier 2 evidence:** exists in `$WORK_DIR/<SLUG>/task-claims.jsonl`; sections hold architecture/subsystem altitude. Any failure rejects the report — re-dispatch that subsystem under a fresh id.
+
+3. **Journal the milestone after acceptance**, only once the report is landed and checked:
+   ```bash
+   if [[ -n "${LORE_SESSION_INSTANCE:-}" && -n "${LORE_SESSION_SLUG:-}" && -n "${LORE_SESSION_TYPE:-}" ]]; then
+     bash ~/.lore/scripts/session-step.sh \
+       --step-id "bootstrap:explore:<subsystem-slug>" --step-label "Accepted <subsystem name> exploration" \
+       || echo "[bootstrap] Warning: milestone not journaled; the landed report remains authoritative." >&2
+   fi
    ```
-   `findings.md` is the durable record that survives compaction.
-
-5. When all tasks complete: `shutdown_request` to all explorers, then `TeamDelete`. Proceed to Step 5.
+   The env gate is the hosted-session test — unhosted runs skip silently; a failed append warns without unwinding acceptance.
 
 ### Step 5: Synthesize
 
-Group findings by theme, flag contradictions, draft entries.
+1. Read the sketch in `findings.md` and every accepted report in `worker-reports/`.
 
-1. Read `findings.md` (including the sketch).
+2. **Group by theme:** subsystem-internal map → `domains/<area>` or `architecture/`; cross-subsystem contracts → `architecture/` or `architectural-models/`; project-wide conventions → `cross-cutting-conventions/`.
 
-2. **Group by theme** — cross-cuts often emerge:
-   - Subsystem-internal map → `domains/<area>` or `architecture/`
-   - Cross-subsystem contracts (data shapes, message formats, error protocols shared across subsystems) → `architecture/` or `architectural-models/`
-   - Project-wide conventions (layering pattern, dependency direction, naming of seams) → `cross-cutting-conventions/`
-
-3. **Flag contradictions** between explorer reports. Resolve by reading the file at issue before filing.
+3. **Flag contradictions** between explorer reports; resolve by reading the file at issue before filing. When the check lands on an existing knowledge entry, record it: `lore verify <entry-path> held|contradicted --source researcher` with the grounding file, line range, and exact snippet.
 
 4. **Draft entries** — bootstrap drafts eagerly; Step 6 prunes.
 
@@ -146,94 +109,67 @@ Group findings by theme, flag contradictions, draft entries.
    - **Stable** — not mid-refactor.
    - **Scale-fit** — passes the architecture substitution test (drop concrete proper nouns and the claim still reads as "A does B, C does D"), OR names a bounded subsystem and describes its internal shape. If the claim dies when you remove a function/file/line name, it's implementation-scale and does NOT belong here.
 
-   "Non-obvious" is **not** a bootstrap condition. Architectural facts that read as obvious-once-stated are still valuable — they compress many files into one claim, survive implementation rewrites, and prime search before code reading.
+   "Non-obvious" is **not** a bootstrap condition — obvious-once-stated architectural facts still compress many files into one claim and prime search before code reading.
 
-   Each entry:
-   ```
-   Title: <concise, scannable>
-   Insight: <1-3 sentences>
-   Category: <domains/<area> | architecture | architectural-models | cross-cutting-conventions>
-   Related files: <entry points and contract definitions only>
-   ```
+   Each draft: title, 1–3 sentence insight, category, declared scale (`architecture`, `subsystem`, or the adjacent pair), related files (entry points and contract definitions only), and the accepted Tier-2 claim ids that ground it.
 
 5. **Deduplicate** — merge multi-explorer overlaps into single entries.
 
 ### Step 6: File
 
-1. Present the entry list:
-   ```
-   [bootstrap] Synthesized N entries from M subsystems:
-     1. [architecture] "<title>" → <files>
-     ...
-   Prune freely. (e.g., "drop 3, edit 2")
-   ```
+1. Present the entry list for pruning (e.g., "drop 3, edit 2").
 
-2. Apply user feedback. Write approved entries to `$WORK_DIR/<SLUG>/_batch_entries.json` — one object per entry, fields match `lore capture` flags:
-   ```json
-   [{"insight": "...", "context": "Discovered during bootstrap of <repo>", "category": "<cat>", "confidence": "medium", "related_files": "<csv>"}]
-   ```
-
-3. File:
+2. Apply feedback, then file each approved entry through the sanctioned capture writer:
    ```bash
-   lore batch-capture --file "$WORK_DIR/<SLUG>/_batch_entries.json"
+   lore capture \
+     --insight "<1-3 sentence claim>" --context "Discovered during bootstrap of <repo>" \
+     --category "<category>" --scale "<declared scale>" --confidence medium --source bootstrap \
+     --related-files "<csv>" --producer-role worker --protocol-slot bootstrap-synthesize \
+     --template-version "$LEAD_TV" --work-item "$SLUG" \
+     --source-artifact-ids "<accepted Tier-2 claim ids grounding this entry>" \
+     --captured-at-branch "$(git branch --show-current)" --captured-at-sha "$(git rev-parse HEAD)" \
+     --captured-at-merge-base-sha "$(git merge-base HEAD origin/HEAD)"
    ```
-   On success delete `_batch_entries.json`. On failure retain the file; prompt the user to retry with the same command; do not proceed to heal until resolved.
+   Every footer carries the full provenance set — `producer_role`, `protocol_slot`, `template_version`, `work_item`, `source_artifact_ids`, and the `captured_at_*` triple — alongside the declared scale and `confidence: medium`. An entry whose grounding claim ids were never accepted does not file.
 
-4. Run `lore heal` regardless of partial failure.
+3. On any failure, fix and re-run that entry. Then `lore heal`.
 
 ### Step 7: Spot-Check
 
 Verify the **map matches the territory** — sample architectural claims, not file/line claims.
 
-1. Pick 3 random entries from the set just filed.
-2. Read the related files. Verify the claimed boundaries hold, the claimed contracts exist, the claimed shapes flow as described.
-3. Report:
-   ```
-   [bootstrap] Spot-check (3/N entries):
-     "HTTP surface owns route + middleware contracts" — verified
-     "Settings flow through SettingsRegistry" — INACCURATE: two paths bypass the registry
-     ...
-   ```
-4. Offer to correct or remove inaccurate entries. Advisory — does not block completion.
+1. Pick 3 random entries from the set just filed. Read their related files; verify the claimed boundaries, contracts, and shapes hold. Record each outcome with `lore verify <entry-path> held|contradicted --source researcher` plus the grounding file, line range, and exact snippet.
+2. Report held/contradicted per sampled entry; offer to correct or remove contradicted ones. Advisory — does not block completion.
 
 ### Step 8: Cleanup
 
-1. Append to `notes.md`:
-   ```markdown
-   ## YYYY-MM-DDTHH:MM
-   **Focus:** Bootstrap via /bootstrap
-   **Subsystems explored:** <list>
-   **Entries filed:** N across M categories
-   **Contradictions:** <count or "none">
-   **Spot-check:** <pass/fail summary>
-   **Next:** <remaining subsystems, or "Bootstrap complete">
-   ```
-
+1. Append a timestamped `notes.md` entry: focus, subsystems explored, entries filed, contradictions, spot-check summary, and next (remaining subsystems or "complete").
 2. Check off completed phases in `plan.md`.
+3. **All subsystems done** → `lore work archive "<SLUG>"`. **Partial** → leave active; run `lore work heal`.
+4. Journal the filing milestone (same env-gated `session-step.sh` block, `--step-id "bootstrap:file"`), then report counts: subsystems explored, entries filed (confidence: medium, source: bootstrap), spot-check results, remaining subsystems.
 
-3. **All subsystems done** → `lore work archive "<SLUG>"`. **Partial completion** → leave active; run `lore work heal`.
+## Domain Track (`--domain <topic>`)
 
-4. Report:
-   ```
-   [bootstrap] Done.
-   Subsystems explored: N
-   Entries filed: M (confidence: medium, source: bootstrap)
-   Spot-check: K/3 verified
-   Remaining: <list, or "none">
-   ```
+Seeds exactly one lazy-loaded `domains/` entry for a named topic — the smallest durable artifact that improves the next retrieval. A narrow-results *action*, not a retrieval fallback.
+
+**Gate — all must hold, else decline and say which failed:**
+
+1. A retrieval with a correctly declared `--scale-set` came back genuinely empty. A wrong declaration is fixed by re-declaring, not by bootstrap.
+2. Re-running `lore search "<topic>" --scale-set architecture,subsystem --limit 5` confirms no reusable orientation exists. Existing hits → point the requester at them and stop.
+3. What's missing is reusable orientation — the map of a bounded area. A missing implementation fact never triggers this track.
+
+**Then:**
+
+1. `lore work create --title "Bootstrap domain: <topic>" --tags bootstrap`; set `SLUG`.
+2. **Explore lead-inline, scoped to the topic** — one topic does not warrant fan-out. Read entry points and contract definitions for the named area only. As grounding claims form, append one Tier-2 row per claim via `echo '<row-json>' | bash ~/.lore/scripts/evidence-append.sh --work-item "$SLUG"` (`producer_role: "researcher"`, `task_id: "domain-<topic-slug>"`, `phase_id: "bootstrap-domain"`, explicit scale, snippet and hash per the Tier-2 contract). Record any existing entry checked against code with `lore verify`.
+3. **Synthesize exactly one entry** mapping the topic's boundaries, contracts, and shapes. File it with the Step 6 capture command, changed to: `--category "domains/<topic-slug>"`, `--scale "architecture,subsystem"`, `--producer-role researcher`, `--protocol-slot bootstrap-domain`, `--context "Domain bootstrap for <topic>"`. The footer lands at `scale: architecture,subsystem` and `confidence: medium`, with `source_artifact_ids` naming the accepted Tier-2 claim ids.
+4. **Leave unrelated discoveries uncaptured.** The contract is one seed, not a sweep — anything outside the named topic files later through organic growth, when it is actually consumed.
+5. `lore heal`, append a `notes.md` entry, journal the env-gated milestone (`--step-id "bootstrap:domain:<topic-slug>"`), then `lore work archive "$SLUG"`.
 
 ## Resuming a Bootstrap
 
 When `/bootstrap` is called and a `bootstrap-*` work item exists:
 
-1. Read `findings.md` (including the project sketch) and `plan.md` to determine completed subsystems.
-2. Re-run `lore bootstrap scope` to detect new directories.
-3. Present current state:
-   ```
-   [bootstrap] Resuming.
-   Sketch: <kind>, <paradigm>
-   Already explored: <list>
-   New/remaining: <list>
-   Proceed? (or specify edits)
-   ```
-4. User confirms. Proceed from Step 3 (Team Setup) with remaining subsystems. New findings append to existing `findings.md`; the existing sketch is preserved unless the user explicitly updates it.
+1. Read `findings.md` (the sketch), `plan.md`, and `worker-reports/` to determine completed subsystems.
+2. Re-run `lore bootstrap scope` to detect new directories; present the sketch, already-explored, and new/remaining lists; confirm.
+3. Proceed from Step 3 (Dispatch) with remaining subsystems and fresh attempt-specific report ids. The sketch is preserved unless the user explicitly updates it.

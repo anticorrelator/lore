@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -502,6 +504,100 @@ func TestHealthyCodexComposersEmitNoModalEvent(t *testing.T) {
 				t.Fatal("healthy composer armed the modal latch")
 			}
 		})
+	}
+}
+
+func normalizedEventRow(t *testing.T, kdir string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(kdir, "_sessions", "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(data), &row); err != nil {
+		t.Fatal(err)
+	}
+	delete(row, "event_id")
+	delete(row, "ts")
+	got, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func TestUnregisteredModalPathIsByteIdenticalToExistingJournalCommand(t *testing.T) {
+	baseline := sessionModelWithRealScript(t)
+	baselineCmd := journalCmd(baseline.eventScript, baseline.config.KnowledgeDir,
+		baseline.modalBlockedEventFor("demo", baseline.localSessions["demo"]))
+	runJournalCmds(t, baselineCmd)
+
+	candidate := sessionModelWithRealScript(t)
+	candidate.sessionPanels = map[string]work.SessionPanelModel{"demo": {}}
+	signature := config.NumberedModalSignature{
+		Kind: config.NumberedModalSignatureV1, Title: "Additional safety checks",
+		Options: []config.ModalAnswerOption{{Number: 1, Label: "Retry"}, {Number: 2, Label: "Keep waiting"}},
+	}
+	candidate.observeModalFn = func(work.SessionPanelModel) modalObservation {
+		return modalObservation{known: true, blocked: true, framework: "codex", numberedModal: &signature}
+	}
+	previousMatcher := matchModalAnswer
+	matchModalAnswer = func(string, config.NumberedModalSignature) (config.ModalAnswerRegistration, bool) {
+		return config.ModalAnswerRegistration{}, false
+	}
+	t.Cleanup(func() { matchModalAnswer = previousMatcher })
+	candidate, cmds := candidate.advanceModalObservations()
+	for _, cmd := range cmds {
+		runJournalCmds(t, cmd)
+	}
+	if got, want := normalizedEventRow(t, candidate.config.KnowledgeDir), normalizedEventRow(t, baseline.config.KnowledgeDir); !bytes.Equal(got, want) {
+		t.Fatalf("unregistered modal row changed:\n got %s\nwant %s", got, want)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(candidate.sessionsDir, "answer-requests", "*.json")); len(matches) != 0 {
+		t.Fatalf("unregistered modal created answer requests: %v", matches)
+	}
+}
+
+func TestRegisteredModalJournalsBeforeAnswerEnqueue(t *testing.T) {
+	m := sessionModelWithRealScript(t)
+	m.sessionPanels = map[string]work.SessionPanelModel{"demo": {}}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := session.WriteInstance(m.sessionsDir, session.Instance{
+		Name: "me", PID: os.Getpid(), Repo: "test", Started: now, InitiatorDefault: "human",
+		Sessions: []session.Session{{Slug: "demo", Type: "spec", Initiator: "human", Started: now}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	signature := config.NumberedModalSignature{
+		Kind: config.NumberedModalSignatureV1, Title: "Additional safety checks",
+		Options: []config.ModalAnswerOption{
+			{Number: 1, Label: "Retry with a faster model"},
+			{Number: 2, Label: "Keep waiting"},
+			{Number: 3, Label: "Learn more"},
+		},
+	}
+	registration := config.ModalAnswerRegistration{
+		ID: "codex-additional-safety-checks-keep-waiting-v1", Enabled: true, Framework: "codex",
+		Signature: signature, Answer: config.ModalAnswerChoice{Option: 2, Expect: "Additional safety checks"},
+	}
+	m.observeModalFn = func(work.SessionPanelModel) modalObservation {
+		return modalObservation{known: true, blocked: true, framework: "codex", numberedModal: &signature}
+	}
+	previousMatcher := matchModalAnswer
+	matchModalAnswer = func(string, config.NumberedModalSignature) (config.ModalAnswerRegistration, bool) {
+		return registration, true
+	}
+	t.Cleanup(func() { matchModalAnswer = previousMatcher })
+	m, cmds := m.advanceModalObservations()
+	for _, cmd := range cmds {
+		runJournalCmds(t, cmd)
+	}
+	if got := readEventTypes(t, m.config.KnowledgeDir); !slices.Equal(got, []string{session.EventModalBlocked, session.EventAnswerRequested}) {
+		t.Fatalf("event order = %v", got)
+	}
+	requests := session.ScanAnswerRequests(m.sessionsDir)
+	if len(requests) != 1 || requests[0].RegistrationID != registration.ID || requests[0].Option != 2 {
+		t.Fatalf("answer requests = %+v", requests)
 	}
 }
 

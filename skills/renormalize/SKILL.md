@@ -7,415 +7,187 @@ argument_description: "(no arguments) — runs full renormalization pipeline wit
 
 # /renormalize Skill
 
-Full knowledge store renormalization — prunes stale entries, merges redundancies, and rebalances category structure. This is an orchestrated multi-agent flow.
+Renormalizes the knowledge store end to end: fixes drifted entries, prunes dead ones, merges duplicates, consolidates concept clusters, rebalances category structure, and repairs the cross-reference graph. The lead runs deterministic analysis and maintenance verbs directly, dispatches judgment work (classification, structural assessment, cross-references, approved mutations), and closes with telemetry and index maintenance.
 
-### Step 1: Pre-flight check
+**Renormalize is mutation-only.** It rewrites, moves, merges, retires, and relabels existing entries; no new knowledge enters the commons through this skill. Consolidation parents and bridge entries recombine existing content under existing provenance — reorganization, not new claims.
+
+## Resolve Paths and Defaults
 
 ```bash
 KDIR=$(lore resolve)
 ```
 
-Check `format_version` in `$KDIR/_manifest.json`. If version 1 (or missing), migrate first:
 ```bash
-lore migrate format
+lore defaults
 ```
-If already version 2, continue.
 
-Ensure `$KDIR/_meta/` exists:
+Binding, not advisory: role→model routes, harness selection, and standing preference directives come from this output. The skill takes no model arguments — every dispatch resolves its model through the role resolver, never a hardcoded alias.
+
+Pre-flight:
+
+1. `format_version` in `$KDIR/_manifest.json` must be 2. If 1 or missing, run `lore migrate knowledge` first.
+2. `mkdir -p "$KDIR/_meta"`
+3. Create the run's work item and stamp identities:
+   ```bash
+   SLUG=$(lore work create --title "Renormalize $(date +%Y-%m-%d)" --tags renormalize)
+   RUN_ID="renorm-$(date +%Y%m%d-%H%M%S)"
+   ```
+   The work item hosts worker reports (`$KDIR/_work/$SLUG/worker-reports/`), Tier-2 evidence (`$KDIR/_work/$SLUG/task-claims.jsonl`), and session milestones. Archive it at close.
+
+## Dispatch Route and Report Contract
+
+**Route.** Probe the active agent adapter at operation level (`ADAPTER="$LORE_REPO_DIR/adapters/agents/$(resolve_active_framework).sh"`) — never a branch on a framework's name; capability overrides participate automatically. Dispatch needs four operations, probed separately: a spawn surface (spawn/wait/shutdown), direct result collection, completion enforcement (a worker's own word is never acceptance evidence), and report materialization (the lead can land each collected report at its canonical path).
+
+- All four present → native subagent fan-out.
+- Any missing → item-backed worker sessions (`lore session request --type worker …`; dispatch shape per `/coordinate` — the session lands its own report file before terminus).
+- Neither route → the lead does the work inline and lands its own reports with `Dispatch-path: lead-inline`.
+
+Every route produces the same durable artifacts.
+
+**Guidance floor.** Immediately before each assessment or mutation launch attempt, run `lore dispatch guidance`. A rendering failure stops that launch. Prepend the complete output verbatim to that dispatch's assembled brief, before the role template and report contract. Render again for every sibling dispatch and retry; never reuse one block across a batch or duplicate its generated contents here. This assembly rule does not change role resolution, routing, ownership, or acceptance.
+
+**Report identities.** Assign each dispatch a fresh, attempt-specific report id `<role>-r<attempt>` with canonical path `$KDIR/_work/$SLUG/worker-reports/<report-id>.md` (create the directory on first landing). A re-dispatch gets a new id, never a reuse; accepted report files are immutable.
+
+**Report contract** — append this block to every dispatched brief (a lead-inline pass follows it too):
+
+```
+Return a report that opens with the identity header:
+  Report-schema: 1
+  Report-id: <assigned id>
+  Work-item: <slug>
+  Task: <role — e.g. classifier, wave1-fixer, wave2-batch-1>
+  Producer-role: worker
+  Dispatch-path: <as dispatched>
+  Harness: <active harness>
+  Status: <completed | blocked | degraded>
+  Template-version: <injected template hash>
+Then:
+  **Artifacts:** — one entry per durable file you wrote: path, kind, writer, identity.
+  **Changes:** — entries touched, one line each.
+  **Tier 2 evidence:** — the claim ids you appended to task-claims.jsonl via
+    `echo '<row-json>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>`,
+    or `none`. One row per file-anchored claim, emitted when formed, never batched.
+  **Blockers:** — none, or what stopped you.
+```
+
+Stamp each brief's `Template-version:` from its template file: `bash ~/.lore/scripts/template-version.sh <template path>`.
+
+**Acceptance.** Land each collected report verbatim at its canonical path before checking it. Check: identity header complete and `Report-id:` matching the assignment; every artifact identity checkable; every Tier-2 claim id present in `$KDIR/_work/$SLUG/task-claims.jsonl`. Reject → re-dispatch under a fresh id.
+
+### Step 1: Analyze (direct verbs)
+
+Deterministic analysis is lead-run, never dispatched:
+
 ```bash
-mkdir -p "$KDIR/_meta"
+lore analyze staleness --json        # writes $KDIR/_meta/staleness-report.json
+lore analyze usage --json --write    # writes $KDIR/_meta/usage-report.json
+lore analyze merge-candidates        # writes $KDIR/_meta/merge-candidates.json
 ```
 
-### Step 2: Analysis (parallel agents)
+### Step 2: Audit Union
 
-Read `skills/renormalize/templates/step2-analysis-agents.md` for the team-spawn instruction and the two parallel Explore-agent prompts (Staleness scan + Usage analysis). Wait for both agents to complete and acknowledge their reports.
+Bound the classification audit to the union of three sets:
 
-### Step 2b: Audit Union + Holistic Assessment
+- **A — flagged:** entries with broken or missing related_files, from the staleness report.
+- **B — central:** top 20 entries by combined `parents` + `inferred_parents` in-degree from `_manifest.json`.
+- **C — bucket:** this cycle's rotating 1/16 of the store:
+  ```bash
+  bash ~/.lore/scripts/renormalize-audit-bucket.sh --kdir "$KDIR"
+  ```
+  Stdout is the bucket's entry paths, one per line; the script advances the cycle counter in `$KDIR/_renormalize/audit-bucket-state.json`. Every entry appears in at least one bucket across 16 cycles.
 
-### Compute audit union
+Write the deduplicated union to `$KDIR/_meta/audit-set.json` as `{"generated": <ISO timestamp>, "entries": [<paths>], "sources": {<per-set and union counts>}}`. The classifier audits only this set, never the full store.
 
-Before spawning assessment agents, compute the three-set audit union and store it for the classifier:
+### Step 3: Assess (dispatched judgment)
 
-**Set A — Flagged entries (cheap pre-pass):** entries with broken/missing related_files from the staleness scan:
-```bash
-# Read $KDIR/_meta/staleness-report.json and extract entries flagged for missing referenced files
+Read `templates/step2-analysis-agents.md` and dispatch the three assessment briefs — classifier, structure analyst, cross-reference scout — in parallel through the probed route. Assemble each brief with its own invocation-fresh guidance block as specified above. Assessment is advisory and read-only: each agent writes its findings JSON to `$KDIR/_meta/` (paths in the template) and returns a contract report. Accept all three before proceeding.
+
+Assemble `$KDIR/_meta/assessment-report.json` by mechanical union — no re-analysis: `classifications`, `demotions`, and the classification counts from the classification report; `clusters` and `imbalances` from the structure report; `suggested_backlinks` from the crossref report; a `summary` of counts.
+
+### Step 4: Plan (lead synthesis)
+
+Read the staleness, usage, assessment, and merge-candidates reports. Synthesize one action list per category below; every action names its target path(s) and a one-line reason. Write the plan to `$KDIR/_meta/renormalize-plan.json`, one array per list plus a count `summary`.
+
+1. **Fix** — stale AND hot/warm: actively used but drifted. Rewrite against current code, never prune. Include every stale member of a consolidation cluster — it must be fixed before consolidation so the parent inherits fresh content. Carry each entry's drift signals and `related_files`.
+2. **Prune** — stale AND cold. A *historical* classification with low usage strengthens the call. Safe to delete: outdated and unused.
+3. **Merge** — near-duplicates (similarity ≥ 0.5 or assessment-flagged), grouped into sets with one target. Same-scale sets only, unless the target is a bridging entry (`bridging: true` in its metadata, or path under `bridging-entries/`); cross-scale sets without a bridging target go to consolidate instead.
+4. **Demote** — correct content at an overpromoted tier. Rewrite to reduced scope and/or move down (subcategory, or `domains/`). Record current and recommended level.
+5. **Consolidate** — clusters describing one concept at different granularities (distinct from merge, which is dedup of near-identical content). Same-scale cluster → new parent entry, originals deleted. Cross-scale cluster → `consolidate-bridge`: bridging parent at the cluster's highest scale, lower-scale children preserved with a `parent:` pointer, never deleted.
+6. **Restructure** — categories with >20 flat entries, inconsistent nesting depth, or >80% scale-skew. Scale-skew proposals set `split_by_scale: true`, which drives scale-keyed subdirectories instead of topic-keyed ones.
+7. **Backlinks** — the assessment's suggested cross-references: source, target, relationship type, rationale. User-reviewed before writing.
+8. **Rescale** — entries whose META `scale:` field disagrees with the classifier. Change the field only; path and content untouched. Record entry, from/to scale, reason. A batch rescale set is acceptable when a lone relabel would strand outliers at a now-misnamed scale.
+9. **Status updates** — `current` → `superseded` or `historical` transitions, typically because a newer entry covers the same ground. Record the successor entry when one exists.
+10. **Relabels** — renames of a scale's human-readable label in `scripts/scale-registry.json` only (edit the `labels` map, bump `version`). No entry files touched.
+
+Present the plan: counts per action list, then each candidate with its reason (fix candidates include their drift signals). End with:
+
 ```
-
-**Set B — Top-central entries:** highest backlink in-degree from `_manifest.json`. Collect top 20 entries by combined `parents` + `inferred_parents` reference count across all entries.
-
-**Set C — Rotating hash bucket:** run the audit-bucket script to get this cycle's 1/16 of the store:
-```bash
-bash ~/.lore/scripts/renormalize-audit-bucket.sh --kdir "$KDIR"
-```
-This advances the bucket counter and writes `$KDIR/_renormalize/audit-bucket-state.json`. Every entry in the store appears in at least one bucket across 16 cycles.
-
-**Union:** deduplicate A ∪ B ∪ C. Write the list to `$KDIR/_meta/audit-set.json`:
-```json
-{"generated": "<ISO timestamp>", "entries": ["category/entry.md", ...], "sources": {"flagged": N, "top_central": N, "bucket": N, "union": N}}
-```
-
-Also run the merge-candidates analysis:
-```bash
-lore analyze merge-candidates
-```
-
-Spawn three Explore agents in parallel, each using a Tier 1 agent definition. This is advisory — agents do NOT modify knowledge files.
-
-Template injections for all three agents:
-- `{{team_name}}`: renorm-<timestamp>
-- `{{team_lead}}`: <your name from team config>
-- `{{kdir}}`: <resolved knowledge directory>
-
-**Agent 3a — Classifier:** Use the `classifier` agent template (resolve via `resolve_agent_template classifier`; on Claude Code that path is `~/.claude/agents/classifier.md`).
-
-Inject additional variables before spawning:
-- `{{audit_set}}`: the `entries` array from `$KDIR/_meta/audit-set.json` (JSON array of paths)
-
-The classifier audits only entries in the audit set, not the full store.
-```
-Task tool params:
-  subagent_type: "Explore"
-  team_name: "renorm-<timestamp>"
-  name: "classifier"
-  prompt: <contents of the classifier agent template with {{template}} variables resolved, including {{audit_set}}>
-```
-
-**Agent 3b — Structure Analyst:** Use the `structure-analyst` agent template (resolve via `resolve_agent_template structure-analyst`).
-```
-Task tool params:
-  subagent_type: "Explore"
-  team_name: "renorm-<timestamp>"
-  name: "structure-analyst"
-  prompt: <contents of the structure-analyst agent template with {{template}} variables resolved>
-```
-
-**Agent 3c — Cross-Reference Scout:** Use the `crossref-scout` agent template (resolve via `resolve_agent_template crossref-scout`).
-```
-Task tool params:
-  subagent_type: "Explore"
-  team_name: "renorm-<timestamp>"
-  name: "crossref-scout"
-  prompt: <contents of the crossref-scout agent template with {{template}} variables resolved>
-```
-
-Wait for all three assessment agents to complete and acknowledge their reports.
-
-### Merge assessment reports
-
-Read the three partial reports:
-- `$KDIR/_meta/classification-report.json`
-- `$KDIR/_meta/structure-report.json`
-- `$KDIR/_meta/crossref-report.json`
-
-Assemble them into the final `$KDIR/_meta/assessment-report.json` — this is a mechanical merge, not re-analysis:
-
-```json
-{
-  "generated": "<ISO timestamp>",
-  "classifications": [from classification-report],
-  "clusters": [from structure-report],
-  "imbalances": [from structure-report],
-  "demotions": [from classification-report],
-  "suggested_backlinks": [from crossref-report],
-  "summary": {
-    "total_classified": [from classification-report],
-    "architectural": [from classification-report],
-    "subsystem": [from classification-report],
-    "implementation_detail": [from classification-report],
-    "historical": [from classification-report],
-    "clusters_found": [from structure-report],
-    "demotions_recommended": [from classification-report],
-    "suggested_backlinks_count": [from crossref-report],
-    "entries_read_in_full": [from classification-report]
-  }
-}
-```
-
-Step 3 consumes `assessment-report.json`.
-
-### Step 3: Planning (lead synthesizes)
-
-Read the three reports:
-- `$KDIR/_meta/staleness-report.json`
-- `$KDIR/_meta/usage-report.json`
-- `$KDIR/_meta/assessment-report.json`
-
-Also read the merge-candidates data:
-- `$KDIR/_meta/merge-candidates.json`
-
-Synthesize a renormalization plan with these actions:
-
-1. **Prune list:** Entries that are BOTH stale (from staleness report) AND cold (from usage report). Entries classified as *historical* by the assessment with low usage are strong prune candidates. These are safe to remove — they are outdated and unused.
-2. **Fix list:** Entries that are stale (from staleness report) AND hot or warm (from usage report). These are actively used but drifted — they need content rewrite against current code, not removal. **Include stale entries that appear in consolidation clusters** — they must be fixed before consolidation so the parent entry inherits fresh content, not stale prose recombined.
-3. **Merge list:** Entries flagged as highly similar by merge-candidates report (similarity >= 0.5) or identified as near-duplicates by the assessment. Group them into merge sets. **Scale constraint:** only propose same-scale merges, OR cross-scale merges where the target is an explicit bridging entry (tagged `bridging: true` or path under `bridging-entries/`). Cross-scale near-duplicates without a bridging entry go to the consolidate list instead.
-4. **Demote list:** Entries the assessment classified at a higher significance tier than their content warrants (e.g., top-level entry that is really an implementation detail). These get rewritten to reduce scope or moved to a subcategory/domain file. The information is correct, just overpromoted.
-5. **Consolidate list:** Entry clusters identified by the assessment — multiple entries describing the same concept at different granularities. Different from merge (which is dedup of near-identical content). **Scale-aware:** same-scale clusters → standard consolidate (parent + delete originals). Cross-scale clusters → `consolidate-bridge` action (bridging parent at highest scale, lower-scale children preserved with `parent:` pointer, not deleted).
-6. **Restructure list:** Categories with structural imbalances flagged by the assessment (>20 flat entries, inconsistent nesting depth, or scale-skew >80% at one scale). For scale-skew proposals, the `split_by_scale: true` flag drives Agent 7 to create scale-keyed subdirectories instead of topic-keyed ones.
-7. **Backlink list:** Cross-reference suggestions from the assessment's `suggested_backlinks` array. These are LLM-identified conceptual relationships not captured by existing backlinks or concordance edges. Present each with source, target, relationship type, and rationale for user review before writing.
-8. **Rescale list:** Entries whose `scale:` field in the META block disagrees with the classifier's current assignment. Change only the `scale:` field — path and content are unchanged. Schema per entry: `entry_id`, `from_scale`, `to_scale`, `reason`. The classifier may co-propose a batch rescale set when a relabel would leave outliers stranded at a now-misnamed scale.
-9. **Status-update list:** Entries whose `status:` field should transition from `current` to `superseded` or `historical` — typically because a newer entry covers the same ground. Schema per entry: `entry_id`, `from_status`, `to_status`, optional `successor_entry_id`, `reason`.
-10. **Relabel list:** Proposed renames of a scale's human-readable label in `scripts/scale-registry.json`. Does NOT touch any entry files — only edits the registry's `labels` map and bumps `version`. Schema per entry: `scale_id`, `current_label`, `new_label`, `reason`.
-
-Write the plan to `$KDIR/_meta/renormalize-plan.json` with structure:
-```json
-{
-  "generated": "<ISO timestamp>",
-  "prune": [
-    {"path": "category/entry.md", "reason": "stale (age: 180d) + cold (0 retrievals)"}
-  ],
-  "fix": [
-    {"path": "category/entry.md", "reason": "stale (drift: 0.72) + warm (5 retrievals)", "signals": {"file_drift": {"commit_count": 8}, "backlink_drift": {"broken": 1, "total": 3}}, "related_files": ["scripts/some-script.sh", "skills/some-skill/SKILL.md"]}
-  ],
-  "merge": [
-    {"target": "category/kept.md", "sources": ["category/dup1.md", "category/dup2.md"], "reason": "overlapping content", "scale_notes": "same-scale or bridging (optional — omit for same-scale merges; set to 'bridging' when target is a bridging entry merging cross-scale sources)"}
-  ],
-  "demote": [
-    {"path": "category/entry.md", "current_level": "top-level", "recommended_level": "subcategory", "reason": "assessment: implementation-detail, describes single-script behavior"}
-  ],
-  "consolidate": [
-    {"parent_title": "Concept Name", "entries": ["category/entry1.md", "category/entry2.md", "category/entry3.md"], "reason": "3 entries describe same concept at different granularities", "proposed_structure": "Parent entry with subsections: overview, naming conventions, edge cases"}
-  ],
-  "consolidate_bridge": [
-    {
-      "proposed_bridge_entry": {"title": "Bridge Concept Name", "path": "category/bridge-entry.md"},
-      "parent_scale": "architectural",
-      "cluster_members": ["category/entry1.md", "category/entry2.md", "category/entry3.md"],
-      "children_by_scale": {
-        "subsystem": ["category/entry2.md"],
-        "implementation": ["category/entry3.md"]
-      },
-      "reason": "cross-scale cluster: same concept at 3 scales; bridge at architectural, preserve children"
-    }
-  ],
-  "restructure": [
-    {"category": "conventions", "action": "split", "proposed": ["conventions/naming", "conventions/testing"], "reason": "32 entries, natural grouping exists"}
-  ],
-  "backlinks": [
-    {"source": "category/source-entry.md", "target": "category/target-entry.md", "relationship_type": "cross-domain|hierarchical|causal|complementary", "rationale": "One sentence explaining the conceptual relationship."}
-  ],
-  "rescale": [
-    {"entry_id": "category/entry.md", "from_scale": "architectural", "to_scale": "subsystem", "reason": "classifier: entry describes single-script behavior, not system-wide pattern"}
-  ],
-  "status_updates": [
-    {"entry_id": "category/entry.md", "from_status": "current", "to_status": "superseded", "successor_entry_id": "category/newer-entry.md", "reason": "newer entry covers same ground with updated code references"}
-  ],
-  "relabels": [
-    {"scale_id": "implementation", "current_label": "implementation", "new_label": "detail", "reason": "classifier drift: 'implementation' label conflicts with scale-id usage in META blocks"}
-  ],
-  "summary": {"prune_count": 5, "fix_count": 2, "merge_count": 3, "demote_count": 4, "consolidate_count": 2, "consolidate_bridge_count": 1, "restructure_count": 1, "backlink_count": 3, "rescale_count": 2, "status_update_count": 1, "relabel_count": 1}
-}
-```
-
-Present the plan to the user in a readable format:
-```
-[renormalize] Proposed plan:
-  Fix: N entries (stale + actively used — content rewrite needed)
-  Prune: N entries (stale + unused)
-  Merge: N redundant entry sets
-  Demote: N entries (wrong abstraction level — rewrite or move)
-  Consolidate: N concept clusters (multiple entries → single parent)
-  Consolidate-bridge: N cross-scale clusters (bridging parent + preserved children)
-  Restructure: N categories
-  Backlinks: N cross-references to write
-  Rescale: N entries (scale field update only)
-  Status updates: N entries (status field transition)
-  Relabels: N scale label renames (registry only)
-
-Fix candidates:
-  - category/entry.md — drift: 0.72 (8 commits to related files, 1/3 backlinks broken)
-  - category/other.md — drift: 0.65 (5 commits to related files)
-
-Prune candidates:
-  [list each with path and reason]
-
-Merge sets:
-  [list each with target, sources, and reason]
-
-Demote candidates:
-  [list each with path, current level, recommended level, and reason]
-
-Consolidation clusters:
-  [list each with parent title, entries, and proposed structure]
-
-Restructure:
-  [list each with category and proposed split]
-
-Suggested backlinks:
-  [list each with source → target, relationship type, and rationale]
-
-Rescale candidates:
-  [list each with entry_id, from_scale → to_scale, and reason]
-
-Status update candidates:
-  [list each with entry_id, from_status → to_status, successor if any, and reason]
-
-Relabel candidates:
-  [list each with scale_id, current_label → new_label, and reason]
-
 Approve? (yes / yes with changes / no)
 ```
 
-**Wait for user approval before proceeding.** If the user requests changes, update the plan and re-present. If rejected, delete `$KDIR/_meta/renormalize-plan.json` and stop.
+**Wait for user approval.** Changes requested → update the plan and re-present. Rejected → delete `$KDIR/_meta/renormalize-plan.json`, archive the work item, stop.
 
-### Step 4: Execution (sequenced + parallel agents)
-
-After approval, execute in two waves. **Wave 1 MUST complete before Wave 2 starts** — this ensures consolidation and merge operate on freshly verified content, not stale prose recombined.
-
-### Wave 1: Fix stale entries (including those in consolidation clusters)
-
-Read `skills/renormalize/templates/wave1-fixer-prompt.md` for the Agent 4 Entry Fixer prompt template. Wait for Agent 4 to complete before proceeding to Wave 2.
-
-### Wave 2: Prune, merge, demote, consolidate, restructure, and backlink (parallel)
-
-Read `skills/renormalize/templates/wave2-agent-prompts.md` for the four general-purpose agent prompt templates (Agent 5 Merger/Pruner with the scale-check cross-scale merge guard, Agent 6 Demoter/Consolidator with scale-aware consolidation, Agent 7 Budget Rebalancer, Agent 8 Backlink Writer with the provenance-comment rule). Spawn all four in parallel, then wait for all agents to complete and review their reports for any errors.
-
-### Step 5: Cleanup and verification
-
-### Emit scale_drift_rate guardrail rows
-
-Before cleaning up intermediate reports, emit one `scale_drift_rate` telemetry scorecard row per `producer_role`. This must run while `$KDIR/_meta/classification-report.json` still exists:
+On approval, journal the milestone if hosted:
 
 ```bash
-bash ~/.lore/scripts/renormalize-emit-drift-guardrails.sh \
-  --kdir "$KDIR" \
-  --run-id "renorm-<timestamp>"
+if [[ -n "${LORE_SESSION_INSTANCE:-}" && -n "${LORE_SESSION_SLUG:-}" && -n "${LORE_SESSION_TYPE:-}" ]]; then
+  bash ~/.lore/scripts/session-step.sh --step-id "renormalize:plan-approved" \
+    --step-label "Plan approved" \
+    || echo "[renormalize] Warning: milestone not journaled; on-disk artifacts remain authoritative." >&2
+fi
 ```
 
-This reads the classifier's `disagreements` array, joins with `_manifest.json` for `producer_role`, and calls `scorecard-append.sh` once per role. Row shape:
-```json
-{"schema_version": "1", "kind": "telemetry", "metric": "scale_drift_rate",
- "calibration_state": "pre-calibration", "role": "<role>", "value": <float>,
- "disagreements": <int>, "entries_audited": <int>,
- "ts": "<ISO-8601>", "renormalize_run_id": "<run-id>"}
-```
+The env gate is the hosted-session test — an unhosted run skips silently. The same block journals each later milestone; a hosted run journals only after the milestone's artifacts have landed, and a failed append warns without unwinding anything.
 
-**Guardrail interpretation:** high `value` (disagreements / entries_audited) indicates the role is capturing entries at the wrong scale OR the scale matrix needs adjustment. This is diagnostic telemetry only — it must NOT feed `/evolve` citations or primary scoring.
+### Step 5: Execute
 
-### Emit retention_after_renormalize rows
+**Wave 1 fixes before Wave 2 mutates.** Consolidation and merge must combine freshly verified content, not stale prose recombined — Wave 1 reports are accepted before any Wave 2 dispatch.
 
-Emit one `retention_after_renormalize` telemetry row per living entry, tracking how many prior renormalize cycles each entry survived without being pruned:
+**Wave 1 — fix.** Read `templates/wave1-fixer-prompt.md`, inject the plan's fix list, prepend a newly rendered guidance block to each assembled brief, and dispatch. Split into multiple fixers only along disjoint entry sets.
+
+**Ownership batching.** Before Wave 2, compute each approved action's write set: entries deleted or rewritten, moved files (old and new paths), parent or bridge entries assembled from cluster content, backlink source files, and every entry whose inbound backlinks get rewritten because a target moves or dies. Partition actions into batches with pairwise-disjoint write sets — start from the four role briefs in the template (merger/pruner, demoter/consolidator, rebalancer, backlink writer) and merge or serialize any pair whose write sets overlap. Two concurrent workers never own the same file.
+
+**Wave 2 — mutate.** Read `templates/wave2-agent-prompts.md`, compose one brief per batch, prepend a newly rendered guidance block to each assembled brief, and dispatch: disjoint batches in parallel, overlapping ones serially. Invariants carried in the briefs:
+
+- Every file move emits a trust-ledger provenance migration through `~/.lore/scripts/trust-event-migrate.sh` — the only sanctioned seam for trust history to follow a moved entry. Nothing in this flow writes trust records directly.
+- The cross-scale merge guard and scale-aware consolidation rules run inside the workers, per the template.
+
+Accept every report per the contract, then journal `renormalize:wave1` and `renormalize:wave2` milestones (env-gated block above).
+
+### Step 6: Telemetry, Maintenance, Close
+
+**Telemetry first** — the drift guardrail reads `classification-report.json`, so this runs before cleanup deletes it. Each script derives rows from on-disk state and appends through the sanctioned scorecard writer. All four metrics are diagnostic telemetry only — they must not feed `/evolve` citations or primary scoring.
 
 ```bash
-bash ~/.lore/scripts/renormalize-emit-retention.sh \
-  --kdir "$KDIR" \
-  --run-id "renorm-<timestamp>"
+bash ~/.lore/scripts/renormalize-emit-drift-guardrails.sh --kdir "$KDIR" --run-id "$RUN_ID"
+bash ~/.lore/scripts/renormalize-emit-retention.sh --kdir "$KDIR" --run-id "$RUN_ID"
+bash ~/.lore/scripts/emit-downstream-adoption.sh --kdir "$KDIR" --run-id "$RUN_ID" --window 30
+bash ~/.lore/scripts/emit-correction-metrics.sh --kdir "$KDIR" --run-id "$RUN_ID" --window-days 30
 ```
 
-Reads `$KDIR/_renormalize/prune-history.jsonl` (one line per run: `{"run_id":"...","pruned":[...]}`) and `_manifest.json`. Emits one row per entry:
-```json
-{"schema_version": "1", "kind": "telemetry", "metric": "retention_after_renormalize",
- "calibration_state": "pre-calibration", "template_id": "<template_version or 'unknown'>",
- "entry_id": "<path>", "cycles_survived": <int>,
- "ts": "<ISO-8601>", "renormalize_run_id": "<run-id>"}
-```
+(Scale drift per producer role; per-entry renormalize-cycle survival; per-entry retrieval adoption; correction and precedent rates.) A first run with no prune history emits zero-survival retention rows — expected; the metric matures as runs accumulate.
 
-**First-run behavior:** if `prune-history.jsonl` does not exist, all entries emit `cycles_survived: 0` — expected; the metric becomes meaningful after multiple renormalize runs accumulate history.
-
-**Interpretation:** entries with consistently low `cycles_survived` relative to their peers are candidates for pruning review. Stratify by `template_id` to detect whether specific producer templates generate less durable knowledge. Guardrail interpretation per `skills/renormalize/SKILL.md:292` (canonical site).
-
-### Emit downstream_adoption_rate rows
-
-Emit one `downstream_adoption_rate` telemetry row per entry, measuring how often each entry was loaded to agents in the rolling window:
-
-```bash
-bash ~/.lore/scripts/emit-downstream-adoption.sh \
-  --kdir "$KDIR" \
-  --run-id "renorm-<timestamp>" \
-  --window 30
-```
-
-Reads `$KDIR/_meta/retrieval-log.jsonl` (loaded_paths from prefetch + session-start events) and `_manifest.json`. Stratifies by entry status read from the entry file's META block (`current | superseded | historical`; defaults to `current` when absent). Emits one row per entry:
-```json
-{"schema_version": "1", "kind": "telemetry", "metric": "downstream_adoption_rate",
- "calibration_state": "pre-calibration", "entry_id": "<path>",
- "status": "current|superseded|historical", "citations": <int>, "opportunities": <int>,
- "value": <float>, "window_days": 30, "ts": "<ISO-8601>", "renormalize_run_id": "<run-id>"}
-```
-
-**Interpretation:** low `value` on `status: current` entries indicates knowledge that agents rarely retrieve — candidates for consolidation or better keyword tagging. Equal or higher `value` on `status: superseded` entries vs `current` peers indicates trust signals aren't influencing retrieval behavior — feeds the trust-stamping feedback loop (Pass 2 task-21). Guardrail interpretation per `skills/renormalize/SKILL.md:292` (canonical site).
-
-### Emit correction_rate and precedent_rate rows
-
-Emit `correction_rate` (per scale) and `precedent_rate` (per registry group) telemetry rows:
-
-```bash
-bash ~/.lore/scripts/emit-correction-metrics.sh \
-  --kdir "$KDIR" \
-  --run-id "renorm-<timestamp>" \
-  --window-days 30
-```
-
-Reads `_manifest.json` and `scripts/scale-registry.json`. Walks all entries, reading `corrections[]`, `precedent_note:`, and `scale:` from each entry's HTML META block. Emits one `correction_rate` row per scale and one `precedent_rate` row per registry group (scale_id):
-
-```json
-{"schema_version": "1", "kind": "telemetry", "metric": "correction_rate",
- "calibration_state": "pre-calibration", "scale": "<scale>",
- "corrections_in_window": <int>, "entries_at_scale": <int>, "value": <float>,
- "window_days": 30, "ts": "<ISO-8601>", "renormalize_run_id": "<run-id>"}
-
-{"schema_version": "1", "kind": "telemetry", "metric": "precedent_rate",
- "calibration_state": "pre-calibration", "scale_id": "<id>",
- "l3_corrections_in_window": <int>, "corrections_in_window": <int>, "value": <float>,
- "window_days": 30, "ts": "<ISO-8601>", "renormalize_run_id": "<run-id>"}
-```
-
-`corrections_in_window` counts entries with ≥1 correction[] item dated within the window. L3 corrections (for `precedent_rate`) are entries that have both `corrections[]` AND `precedent_note:` in the META block — indicating the correction escalated to a supersedes edge. Guardrail interpretation per `skills/renormalize/SKILL.md:292` (canonical site).
-
-### Run post-execution maintenance
+**Maintenance verbs:**
 
 ```bash
 lore heal --fix
-```
-
-Generate concordance-based backlinks — writes `See also:` links for high-similarity pairs not already cross-referenced:
-```bash
 python3 ~/.lore/scripts/pk_cli.py generate-backlinks "$KDIR"
-```
-
-Rebuild FTS5 search index — **must be `--force`**, not incremental:
-```bash
 python3 ~/.lore/scripts/pk_cli.py index "$KDIR" --force
-```
-
-Renormalize mutates META blocks in place (rescale, relabel, status flips). The incremental indexer keys on file create/delete/mtime, not META content diffs, so in-place META mutations on existing files can leave the SQLite index pointing at stale `scale` values. Any operation that rewrites META across the corpus must follow the same protocol: corpus-wide META mutation → `pk_cli.py index --force`.
-
-Update manifest:
-```bash
 bash ~/.lore/scripts/update-manifest.sh
-```
-
-Mirror the post-renormalize source state to the Obsidian vault (no-op when `~/.lore/config/obsidian.json` is absent; full re-export propagates file moves, deletes, and inbound-link rewrites):
-```bash
 bash ~/.lore/scripts/export-obsidian.sh --full
 ```
 
-Clean up intermediate reports from `$KDIR/_meta/` — delete:
-- `staleness-report.json`
-- `usage-report.json`
-- `merge-candidates.json`
-- `audit-set.json`
-- `classification-report.json`
-- `structure-report.json`
-- `crossref-report.json`
-- `assessment-report.json`
-- `renormalize-plan.json`
+The index rebuild must be `--force`: renormalize mutates META blocks in place, and the incremental indexer keys on file create/delete/mtime, so in-place META changes would leave the index pointing at stale scale values. Any corpus-wide META mutation ends with a forced rebuild. The Obsidian export is a no-op without `~/.lore/config/obsidian.json`; `--full` propagates moves, deletes, and inbound-link rewrites.
 
-**Keep** these logs (they have ongoing value):
-- `retrieval-log.jsonl`
-- `friction-log.jsonl`
+**Cleanup.** Delete from `$KDIR/_meta/`: `staleness-report.json`, `usage-report.json`, `merge-candidates.json`, `audit-set.json`, `classification-report.json`, `structure-report.json`, `crossref-report.json`, `assessment-report.json`, `renormalize-plan.json`. Keep `retrieval-log.jsonl` and `friction-log.jsonl` — they have ongoing value.
 
-Delete the team (`renorm-*`).
+Append a run summary to the work item's `notes.md`, archive it (`lore work archive "$SLUG"`), and report:
 
-Report the final summary:
 ```
 [renormalize] Complete.
-  Fixed: N entries (stale content rewritten against current code)
-  Pruned: N entries
-  Merged: N entry sets (M source files consolidated)
-  Demoted: N entries (rewritten or moved to appropriate level)
-  Consolidated: N concept clusters (M entries → N parent entries)
-  Restructured: N categories
-  Backlinks (LLM-suggested): N cross-references written (M skipped, already present)
-  Backlinks (concordance): N links written (M skipped, already present)
+  Fixed: N   Pruned: N   Merged: N sets   Demoted: N
+  Consolidated: N clusters (M bridged)   Restructured: N categories
+  Backlinks: N suggested + M concordance written
+  Rescaled: N   Status updates: N   Relabels: N
   Index rebuilt, manifest updated, heal passed.
 ```

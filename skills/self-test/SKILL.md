@@ -15,6 +15,8 @@ Run a structured evaluation of the lore memory system from any codebase. Tests 9
 
 **Design principle:** Tests should surface *actionable findings*, not confirm what's already working. If a test scores 5/5 for 2+ consecutive runs, it should either get harder or be replaced with something that produces signal.
 
+**Dispatched evaluations:** The tests run inline unless a step explicitly delegates analysis or evaluation. For every such launch and retry, run `lore dispatch guidance` immediately before assembling that prompt; if rendering fails, do not launch it. Prepend the complete output verbatim before test-specific context, without copying its generated contents into this skill or changing the test's scoring, routing, or evidence contract.
+
 ## CLI Abstraction
 
 Before running tests, detect whether the `lore` CLI is available. This allows the self-test to run against any knowledge-store-backed system, not just one with `lore` installed.

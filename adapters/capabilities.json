@@ -17,6 +17,7 @@
     "tool_hooks": "Fires lore-controlled hooks before/after tool calls; used by guard-work-writes and similar invariant enforcers.",
     "permission_hooks": "Allows lore-installed policy to approve or deny tool invocations (PreToolUse-style block decisions).",
     "task_completed_hook": "Fires a lore-controlled hook at worker task completion that can block on a missing/invalid completion report.",
+    "native_dispatch_guidance_hook": "Blocks a native ad-hoc subagent launch unless its exact prompt carries the current canonical dispatch-guidance block; only `full` permits native ad-hoc dispatch.",
     "subagents": "Spawns fresh subagent contexts for fanout (worker, researcher, reviewer) so each receives a clean context window.",
     "team_messaging": "Inter-agent messaging primitive (TeamCreate / SendMessage / shared team-state) so a lead can coordinate workers in flight.",
     "transcript_provider": "Exposes a parseable session/transcript artifact that capture, digest, novelty, and ceremony-detection scripts can consume.",
@@ -304,6 +305,11 @@
           "evidence": "claude-code-task-completed-hook",
           "notes": "TaskCompleted hook runs task-completed-capture-check.sh; exit 2 + stderr blocks the worker report."
         },
+        "native_dispatch_guidance_hook": {
+          "support": "full",
+          "evidence": "claude-code-native-dispatch-guidance-hook",
+          "notes": "PreToolUse matcher=`Agent` exposes tool_input.prompt and honors a deny decision before the native launch executes."
+        },
         "subagents": {
           "support": "full",
           "evidence": "claude-code-subagents",
@@ -459,6 +465,10 @@
           "evidence": "opencode-task-completed-hook",
           "notes": "No native subagent-completion blocking event. Lead-side validator checks worker reports after collection and rejects on missing structure (D9 fallback mode: lead-side validator)."
         },
+        "native_dispatch_guidance_hook": {
+          "support": "none",
+          "notes": "The plugin runtime exposes task execution events, but the exact native subagent prompt field and a blocking pre-launch decision are not proven. Use the validating orchestration adapter or a worker session; native ad-hoc dispatch is unavailable."
+        },
         "subagents": {
           "support": "partial",
           "evidence": "opencode-subagents",
@@ -613,6 +623,11 @@
           "support": "fallback",
           "evidence": "codex-task-completed-hook",
           "notes": "No native subagent-completion blocking event. Lead-side validator checks worker reports after collection (D9 fallback mode: lead-side validator)."
+        },
+        "native_dispatch_guidance_hook": {
+          "support": "full",
+          "evidence": "codex-native-dispatch-guidance-hook",
+          "notes": "PreToolUse matcher=`Agent` covers the spawn_agent local-function alias; the hook payload exposes tool_input.message and a non-zero validator result blocks launch."
         },
         "subagents": {
           "support": "partial",

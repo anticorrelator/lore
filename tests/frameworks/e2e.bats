@@ -110,6 +110,11 @@ setup_framework() {
 EOF
 }
 
+guidance_prompt() {
+  bash "$REPO_DIR/scripts/render-dispatch-guidance.sh"
+  printf '\nTask-specific prompt.\n'
+}
+
 setup_framework_multi() {
   local framework="$1"
   export LORE_FRAMEWORK="$framework"
@@ -143,7 +148,7 @@ adapter_for() {
 }
 
 # Build a Tier 2 evidence row JSON object as the worker would emit during
-# /implement Step 4. Captures the canonical 14-field shape so the
+# /implement Step 4. Captures the canonical evidence shape so the
 # cross-framework equivalence test can compare row keys directly.
 make_tier2_row() {
   local task_id="$1" slug="$2" framework="$3"
@@ -203,7 +208,7 @@ PYEOF
   [ -f "$TEST_KNOWLEDGE_DIR/_work/$SLUG/notes.md" ]
 
   # Worker spawn directive must reflect harness roles.worker=sonnet from settings.json.
-  run bash "$CC_AGENT_ADAPTER" spawn worker "implement task-1"
+  run bash "$CC_AGENT_ADAPTER" spawn worker "$(guidance_prompt)"
   [ "$status" -eq 0 ]
   [[ "$output" =~ delegate:TaskCreate ]]
   [[ "$output" =~ role=worker ]]
@@ -224,7 +229,7 @@ PYEOF
   [ -d "$TEST_KNOWLEDGE_DIR/_work/$SLUG" ]
   [ -f "$TEST_KNOWLEDGE_DIR/_work/$SLUG/_meta.json" ]
 
-  run bash "$OC_AGENT_ADAPTER" spawn worker "implement task-1"
+  run bash "$OC_AGENT_ADAPTER" spawn worker "$(guidance_prompt)"
   [ "$status" -eq 0 ]
   [[ "$output" =~ delegate:TaskCreate ]]
   [[ "$output" =~ role=worker ]]
@@ -245,7 +250,7 @@ PYEOF
   [ -d "$TEST_KNOWLEDGE_DIR/_work/$SLUG" ]
   [ -f "$TEST_KNOWLEDGE_DIR/_work/$SLUG/_meta.json" ]
 
-  run bash "$CODEX_AGENT_ADAPTER" spawn worker "implement task-1"
+  run bash "$CODEX_AGENT_ADAPTER" spawn worker "$(guidance_prompt)"
   [ "$status" -eq 0 ]
   [[ "$output" =~ delegate:TaskCreate ]]
   [[ "$output" =~ role=worker ]]
@@ -269,7 +274,7 @@ PYEOF
   setup_framework claude-code
 
   # Sanity check: pre-mutation worker is sonnet.
-  run bash "$CC_AGENT_ADAPTER" spawn worker "task-A"
+  run bash "$CC_AGENT_ADAPTER" spawn worker "$(guidance_prompt)"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "model=sonnet" ]]
 
@@ -278,7 +283,7 @@ PYEOF
   [ "$status" -eq 0 ]
 
   # Next spawn must reflect the new binding without any restart.
-  run bash "$CC_AGENT_ADAPTER" spawn worker "task-B"
+  run bash "$CC_AGENT_ADAPTER" spawn worker "$(guidance_prompt)"
   [ "$status" -eq 0 ]
   [[ "$output" =~ "model=haiku" ]]
 }
@@ -389,9 +394,13 @@ print(','.join(sorted(row.keys())))
     return 1
   fi
 
-  # Sanity check: the canonical 14-field set names every required field.
-  expected="captured_at_sha,change_context,claim,claim_id,falsifier,file,line_range,phase_id,producer_role,protocol_slot,scale,task_id,tier,why_this_work_needs_it"
-  [ "${KEYSETS[0]}" = "$expected" ]
+  # Sanity check: the canonical set includes snippet grounding and anchor audit metadata.
+  expected="anchor_warning,captured_at_sha,captured_origin_ref,change_context,claim,claim_id,exact_snippet,falsifier,file,line_range,normalized_snippet_hash,phase_id,producer_role,protocol_slot,scale,task_id,tier,why_this_work_needs_it"
+  if [ "${KEYSETS[0]}" != "$expected" ]; then
+    echo "canonical task-claims keyset: ${KEYSETS[0]}"
+    echo "expected keyset:              $expected"
+    return 1
+  fi
 }
 
 # ============================================================

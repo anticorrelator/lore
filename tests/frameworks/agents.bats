@@ -72,6 +72,11 @@ set_framework_multi() {
 EOF
 }
 
+guidance_prompt() {
+  bash "$REPO_DIR/scripts/render-dispatch-guidance.sh"
+  printf '\nTask-specific prompt.\n'
+}
+
 # ============================================================
 # Closed-set invariant — README is the source of truth
 # ============================================================
@@ -172,7 +177,7 @@ PYEOF
 @test "claude-code agent spawn delegates to TaskCreate with resolved model" {
   [ -f "$CC_AGENT_ADAPTER" ] || skip "adapters/agents/claude-code.sh missing"
   set_framework claude-code
-  run bash "$CC_AGENT_ADAPTER" spawn worker "do thing"
+  run bash "$CC_AGENT_ADAPTER" spawn worker "$(guidance_prompt)"
   [ "$status" -eq 0 ]
   [[ "$output" =~ delegate:TaskCreate ]]
   [[ "$output" =~ role=worker ]]
@@ -182,7 +187,7 @@ PYEOF
 @test "claude-code agent spawn honors per-call model override" {
   [ -f "$CC_AGENT_ADAPTER" ] || skip "adapters/agents/claude-code.sh missing"
   set_framework claude-code
-  run bash "$CC_AGENT_ADAPTER" spawn lead "plan" haiku
+  run bash "$CC_AGENT_ADAPTER" spawn lead "$(guidance_prompt)" haiku
   [ "$status" -eq 0 ]
   [[ "$output" =~ "model=haiku" ]]
 }
@@ -250,7 +255,7 @@ PYEOF
 @test "opencode agent spawn splits provider/model bindings" {
   [ -f "$OC_AGENT_ADAPTER" ] || skip "adapters/agents/opencode.sh missing (T39 not landed yet)"
   set_framework_multi opencode
-  run bash "$OC_AGENT_ADAPTER" spawn lead "plan"
+  run bash "$OC_AGENT_ADAPTER" spawn lead "$(guidance_prompt)"
   [ "$status" -eq 0 ]
   [[ "$output" =~ delegate:TaskCreate ]]
   [[ "$output" =~ role=lead ]]
@@ -261,7 +266,7 @@ PYEOF
 @test "opencode agent spawn keeps bare model bindings unsplit" {
   [ -f "$OC_AGENT_ADAPTER" ] || skip "adapters/agents/opencode.sh missing (T39 not landed yet)"
   set_framework opencode
-  run bash "$OC_AGENT_ADAPTER" spawn worker "task"
+  run bash "$OC_AGENT_ADAPTER" spawn worker "$(guidance_prompt)"
   [ "$status" -eq 0 ]
   [[ "$output" =~ delegate:TaskCreate ]]
   [[ "$output" =~ role=worker ]]
@@ -362,7 +367,7 @@ PYEOF
 @test "codex agent spawn emits bare model directive (single-provider)" {
   [ -f "$CODEX_AGENT_ADAPTER" ] || skip "adapters/agents/codex.sh missing (T40 not landed yet)"
   set_framework codex
-  run bash "$CODEX_AGENT_ADAPTER" spawn worker "task"
+  run bash "$CODEX_AGENT_ADAPTER" spawn worker "$(guidance_prompt)"
   [ "$status" -eq 0 ]
   [[ "$output" =~ delegate:TaskCreate ]]
   [[ "$output" =~ role=worker ]]
@@ -377,7 +382,7 @@ PYEOF
 @test "codex agent spawn splits reasoning-effort model suffix" {
   [ -f "$CODEX_AGENT_ADAPTER" ] || skip "adapters/agents/codex.sh missing (T40 not landed yet)"
   set_framework codex
-  run bash "$CODEX_AGENT_ADAPTER" spawn worker "task" "gpt-5.5-high"
+  run bash "$CODEX_AGENT_ADAPTER" spawn worker "$(guidance_prompt)" "gpt-5.5-high"
   [ "$status" -eq 0 ]
   [[ "$output" =~ delegate:TaskCreate ]]
   [[ "$output" =~ role=worker ]]
@@ -392,7 +397,7 @@ PYEOF
 @test "codex agent spawn rejects provider/model override (validates binding)" {
   [ -f "$CODEX_AGENT_ADAPTER" ] || skip "adapters/agents/codex.sh missing (T40 not landed yet)"
   set_framework codex
-  run bash "$CODEX_AGENT_ADAPTER" spawn lead "plan" "anthropic/opus"
+  run bash "$CODEX_AGENT_ADAPTER" spawn lead "$(guidance_prompt)" "anthropic/opus"
   [ "$status" -ne 0 ]
   # validate_role_model_binding emits the explanatory error on stderr;
   # bats `run` merges streams, so the message appears in $output.

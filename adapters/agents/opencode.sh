@@ -101,6 +101,9 @@ cmd_spawn() {
     echo "Error: spawn requires <role> <task_prompt>" >&2
     return 1
   fi
+  if ! printf '%s' "$task_prompt" | bash "$LORE_REPO_DIR/scripts/validate-dispatch-guidance.sh"; then
+    return 1
+  fi
 
   local subagents
   subagents=$(cap subagents)
@@ -259,11 +262,14 @@ cmd_settings_override_flag() {
 # cells (mostly partial / fallback, send_message=none).
 cmd_smoke() {
   require_opencode
-  local subagents team_messaging transcript task_completed routing_shape
+  local subagents team_messaging transcript task_completed routing_shape guidance_hook native_ad_hoc
   subagents=$(cap subagents)
   team_messaging=$(cap team_messaging)
   transcript=$(cap transcript_provider)
   task_completed=$(cap task_completed_hook)
+  guidance_hook=$(cap native_dispatch_guidance_hook)
+  native_ad_hoc="unavailable"
+  [[ "$guidance_hook" == "full" ]] && native_ad_hoc="eligible"
   routing_shape=$(framework_model_routing_shape 2>/dev/null) || routing_shape="single"
 
   local mode
@@ -276,6 +282,7 @@ cmd_smoke() {
   echo "[opencode orchestration adapter smoke]"
   echo "  active framework:        opencode"
   echo "  completion enforcement:  $mode"
+  echo "  native ad-hoc dispatch:   $native_ad_hoc (guidance hook=$guidance_hook)"
   echo "  model routing shape:     $routing_shape"
   echo "  role bindings:           lead=$model_lead worker=$model_worker"
   echo

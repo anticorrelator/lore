@@ -137,6 +137,11 @@ set_framework_with_roles() {
 EOF
 }
 
+guidance_prompt() {
+  bash "$REPO_DIR/scripts/render-dispatch-guidance.sh"
+  printf '\nTask-specific prompt.\n'
+}
+
 # Resolve a capability cell from the static capabilities.json profile.
 cap_support() {
   local fw="$1" cap="$2"
@@ -383,6 +388,35 @@ cap_support() {
   fi
 }
 
+@test "adapter spawn validates the exact prompt before preserving model routing" {
+  for fw_adapter in "claude-code:$CC_AGENT" "opencode:$OC_AGENT" "codex:$CODEX_AGENT"; do
+    fw="${fw_adapter%%:*}"
+    adapter="${fw_adapter#*:}"
+    set_framework "$fw"
+
+    run bash "$adapter" spawn worker "floorless prompt" "pinned-model"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Run 'lore dispatch guidance'"* ]]
+
+    run bash "$adapter" spawn worker "$(guidance_prompt)" "pinned-model"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"model=pinned-model"* ]]
+  done
+}
+
+@test "native ad-hoc eligibility requires proven blocking guidance-hook coverage" {
+  [ "$(jq -r '.frameworks["claude-code"].capabilities.native_dispatch_guidance_hook.support' "$CAPS")" = "full" ]
+  [ "$(jq -r '.frameworks.codex.capabilities.native_dispatch_guidance_hook.support' "$CAPS")" = "full" ]
+  [ "$(jq -r '.frameworks.opencode.capabilities.native_dispatch_guidance_hook.support' "$CAPS")" = "none" ]
+
+  set_framework claude-code
+  [[ "$(bash "$CC_AGENT" smoke)" == *"native ad-hoc dispatch:   eligible"* ]]
+  set_framework codex
+  [[ "$(bash "$CODEX_AGENT" smoke)" == *"native ad-hoc dispatch:   eligible"* ]]
+  set_framework opencode
+  [[ "$(bash "$OC_AGENT" smoke)" == *"native ad-hoc dispatch:   unavailable"* ]]
+}
+
 @test "multi-provider binding uses '/' as the separator (not ':')" {
   # The convention is that multi-provider role bindings carry a single
   # forward-slash separator: 'anthropic/sonnet', 'openai/gpt-4o'.
@@ -392,7 +426,7 @@ cap_support() {
   # adapters that don't split — this test pins the spelling.
   set_framework_with_roles opencode '{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}'
   if [ -f "$OC_AGENT" ]; then
-    run bash "$OC_AGENT" spawn lead "plan"
+    run bash "$OC_AGENT" spawn lead "$(guidance_prompt)"
     [ "$status" -eq 0 ]
     # Adapter splits on '/' and emits both keys.
     [[ "$output" =~ "provider=anthropic" ]]

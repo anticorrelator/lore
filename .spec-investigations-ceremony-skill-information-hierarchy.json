@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "track": "full",
+  "investigations": [
+    {
+      "id": "external-skills-agents",
+      "kind": "fixed",
+      "question": "Which installed external skill or agent template materially contributes to implementing this four-skill information-hierarchy audit, under the strict applicability rule?",
+      "complexity": "simple",
+      "prefetch": [
+        {"query": "skill authoring progressive disclosure protocol prose audit", "scale_set": ["subsystem", "implementation"]}
+      ]
+    },
+    {
+      "id": "preferences-conventions",
+      "kind": "fixed",
+      "question": "Which preferences, conventions, and cross-cutting conventions might bind this skill-protocol prose audit, using permissive applicability and preserving the retrieval-prose hold?",
+      "complexity": "moderate",
+      "prefetch": [
+        {"query": "skill protocol revision authoring prose fable closed vocabulary", "scale_set": ["abstract", "architecture"]},
+        {"query": "mechanism backed protocol thinning graduation retrieval prose governance", "scale_set": ["subsystem", "implementation"]}
+      ]
+    },
+    {
+      "id": "spec-skill-audit",
+      "kind": "lead-authored",
+      "question": "At ffdc383 plus e8dc5ff and current HEAD, which branches of skills/spec/SKILL.md contain mechanism-backed redundancy, duplicated narration, dead or stale prose, or inert sentences; what must remain; and how should the Step 5b.0 literal ellipsis artifact be repaired? Include a fable pass against dropped rationale, wrong-schema references, and phantom pin assumptions.",
+      "complexity": "moderate",
+      "prefetch": [
+        {"query": "spec ceremony fat verb completion skill prose graduation", "scale_set": ["subsystem", "implementation"]}
+      ]
+    },
+    {
+      "id": "implement-skill-audit",
+      "kind": "lead-authored",
+      "question": "At f4c92cf plus 0abefb7 and current HEAD, audit every reachable branch of skills/implement/SKILL.md for licensed removals and required retained contracts, treating this as the largest likely remaining surface. Include templates, impl bats, retrieval-prose hold, and an in-skill fable pass.",
+      "complexity": "complex",
+      "prefetch": [
+        {"query": "implement skill branches task dispatch collapse condition fable protocol", "scale_set": ["subsystem", "implementation"]}
+      ]
+    },
+    {
+      "id": "retro-skill-audit",
+      "kind": "lead-authored",
+      "question": "At fdccc5c plus a6722e0 plus b73092e and current HEAD, verify branch-by-branch whether skills/retro/SKILL.md has any further licensed pruning after its rewrite, while retaining the forward-declared frozen stale coverage vocabulary and all judgment and filing contracts. Include a fable pass.",
+      "complexity": "moderate",
+      "prefetch": [
+        {"query": "retro prepare file evidence pack coverage vocabulary stale protocol", "scale_set": ["subsystem", "implementation"]}
+      ]
+    },
+    {
+      "id": "evolve-skill-audit",
+      "kind": "lead-authored",
+      "question": "At the listed evolve verb, rewrite, and fable SHAs plus current HEAD, audit skills/evolve/SKILL.md by branch and adjudicate the five routed obligations exactly: coordinated prose-test modernization for writer disposition residue and change_types schema pointer, eligibility duplication collapse with its pinned test, sunset tie-breaker restoration, and no action on script-owned descending K ordering. Include a fable pass.",
+      "complexity": "complex",
+      "prefetch": [
+        {"query": "evolve prepare file change_types eligibility recurring failure sunset tie breaker", "scale_set": ["subsystem", "implementation"]}
+      ]
+    },
+    {
+      "id": "behavior-collision-contract",
+      "kind": "lead-authored",
+      "question": "What exact file-set collision contract, test matrix, and model-relative before/after equivalence method should govern all removal classes across the four SKILL.md files, their templates, and pinning tests, without licensing retrieval-prose removal, adding verbs, or using a line-count target?",
+      "complexity": "complex",
+      "prefetch": [
+        {"query": "protocol prose behavioral equivalence pinned tests closed vocabulary collision contract", "scale_set": ["architecture", "subsystem"]},
+        {"query": "when thinning agent protocols graduation criterion", "scale_set": ["abstract"]}
+      ]
+    }
+  ]
+}

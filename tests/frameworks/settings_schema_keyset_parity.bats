@@ -239,7 +239,7 @@ PY
   diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$caps_set")
 }
 
-@test "harness_block requires args + permits enabled, roles, ceremony_roles, ceremonies + rejects unknown keys" {
+@test "harness_block requires args + permits autonomous_args, enabled, roles, ceremony_roles, ceremonies + rejects unknown keys" {
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os
 with open(os.environ["SCHEMA"]) as f:
@@ -247,10 +247,14 @@ with open(os.environ["SCHEMA"]) as f:
 hb = s["$defs"]["harness_block"]
 assert hb["additionalProperties"] is False, "harness_block must close additionalProperties"
 assert "args" in hb["required"], "harness_block must require args"
+assert "autonomous_args" not in hb["required"], "autonomous_args must be optional (unset ≡ prior behavior)"
 props = set(hb["properties"].keys())
 # `enabled` is the per-harness toggle (default-on; absence ≡ enabled).
 # `roles`, `ceremony_roles`, and `ceremonies` are optional overlay maps.
-assert props == {"args", "enabled", "roles", "ceremony_roles", "ceremonies"}, f"unexpected harness_block props: {props}"
+# `autonomous_args` is the optional agent-initiated arg profile (absent ≡ use args).
+assert props == {"args", "autonomous_args", "enabled", "roles", "ceremony_roles", "ceremonies"}, f"unexpected harness_block props: {props}"
+aa = hb["properties"]["autonomous_args"]
+assert aa.get("type") == "array" and aa.get("items") == {"type": "string"}, f"autonomous_args shape: {aa}"
 # enabled must be a plain boolean (no enum, no minLength) so absence ≡ enabled
 # is a clean default-on semantic.
 en = hb["properties"]["enabled"]

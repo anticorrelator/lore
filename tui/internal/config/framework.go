@@ -882,6 +882,47 @@ func LoadHarnessConfig(harness string) HarnessArgsConfig {
 	return HarnessArgsConfig{Args: LoadHarnessArgs(harness)}
 }
 
+// LoadHarnessArgsForInitiator resolves the args to prepend, selecting the
+// per-harness autonomous profile for agent-initiated spawns. When
+// initiator == "agent" and harnesses.<harness>.autonomous_args is present,
+// that array is returned; every other case (human initiator, absent key)
+// falls through to LoadHarnessArgs, so an unset autonomous_args is
+// byte-identical to prior behavior. The LORE_HARNESS_ARGS env override still
+// wins for both initiators — it is the whole-process escape hatch and outranks
+// any settings-derived profile.
+//
+// The autonomous profile encodes the user's standing consent: an
+// agent-initiated session already carries the initiator=agent provenance the
+// request row records, so this reads an existing authorization rather than
+// minting a parallel consent store.
+func LoadHarnessArgsForInitiator(harness, initiator string) []string {
+	if harness == "" {
+		fw, err := ResolveActiveFramework()
+		if err != nil {
+			return nil
+		}
+		harness = fw
+	}
+
+	if env := os.Getenv("LORE_HARNESS_ARGS"); env != "" {
+		var args []string
+		if err := json.Unmarshal([]byte(env), &args); err == nil {
+			return args
+		}
+	}
+
+	if initiator == "agent" {
+		if raw, present, _ := SettingsGet("harnesses." + harness + ".autonomous_args"); present {
+			var args []string
+			if err := json.Unmarshal([]byte(raw), &args); err == nil && args != nil {
+				return args
+			}
+		}
+	}
+
+	return LoadHarnessArgs(harness)
+}
+
 // resolveModelForRole_perRepoConfig walks up from cwd looking for a
 // .lore.config file (mirrors find_lore_config in scripts/lib.sh) and
 // returns the value for `model_for_<role>=` if present.

@@ -119,6 +119,7 @@ func TestAnswerGuardRefusalsWriteNoPTYBytes(t *testing.T) {
 
 func TestAnswerWritesOnceAndConfirmsOnlyAfterExpectationDisappears(t *testing.T) {
 	request := answerRequest("answer-2", 2, "Choose the next step")
+	request.RegistrationID = "standing-answer-v1"
 	m, sessionsDir, reader := seedAnswerRequest(t, ccOptionSelectRows, true, request)
 	m, cmd := m.handleAnswerRequestScanResolved(answerRequestScanMsg{matched: []session.AnswerRequest{request}}, "claude-code", true, nil)
 	runJournalCmds(t, cmd)
@@ -147,7 +148,7 @@ func TestAnswerWritesOnceAndConfirmsOnlyAfterExpectationDisappears(t *testing.T)
 		runJournalCmds(t, verifyCmd)
 	}
 	rows := readEventRows(t, m.config.KnowledgeDir)
-	if len(rows) != 1 || rows[0].Event != session.EventAnswered || rows[0].Option != 2 {
+	if len(rows) != 1 || rows[0].Event != session.EventAnswered || rows[0].Option != 2 || rows[0].RegistrationID != request.RegistrationID {
 		t.Fatalf("events = %+v, want one answered option=2", rows)
 	}
 	if _, ok := m.pendingAnswerVerify[request.RequestID]; ok {
@@ -157,6 +158,7 @@ func TestAnswerWritesOnceAndConfirmsOnlyAfterExpectationDisappears(t *testing.T)
 
 func TestAnswerConfirmationTimeoutRefusesWithoutReplay(t *testing.T) {
 	request := answerRequest("unconfirmed", 2, "Choose the next step")
+	request.RegistrationID = "standing-answer-v1"
 	m, _, reader := seedAnswerRequest(t, ccOptionSelectRows, true, request)
 	m, cmd := m.handleAnswerRequestScanResolved(answerRequestScanMsg{matched: []session.AnswerRequest{request}}, "claude-code", true, nil)
 	runJournalCmds(t, cmd)
@@ -179,7 +181,7 @@ func TestAnswerConfirmationTimeoutRefusesWithoutReplay(t *testing.T) {
 	}
 	assertNoPTYBytes(t, reader)
 	rows := readEventRows(t, m.config.KnowledgeDir)
-	if len(rows) != 1 || rows[0].Event != session.EventAnswerRefused || rows[0].Reason != answerReasonUnconfirmed {
+	if len(rows) != 1 || rows[0].Event != session.EventAnswerRefused || rows[0].Reason != answerReasonUnconfirmed || rows[0].RegistrationID != request.RegistrationID {
 		t.Fatalf("events = %+v, want one answer_refused unconfirmed", rows)
 	}
 }

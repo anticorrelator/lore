@@ -184,6 +184,26 @@ The exact field names are owned by the OpenCode plugin SDK;
 build time. The contract here is the Lore-side semantic mapping; the
 TypeScript shape may rename fields without breaking this contract.
 
+### Native subagent dispatch-guidance gate
+
+Native ad-hoc subagent launches are eligible only when the harness exposes a
+probe-backed prompt field and a reliable pre-execution blocking channel. The
+hook validates the exact prompt passed to the native launcher; it does not
+normalize, append to, or rewrite user text. A floorless or stale prompt is
+blocked with the corrective command `lore dispatch guidance`.
+
+| Harness | Definite launch condition | Prompt field | Enforcement |
+|---------|---------------------------|--------------|-------------|
+| Claude Code | `PreToolUse`, tool `Agent` | `tool_input.prompt` | The installed `Agent` matcher returns Claude's blocking JSON when canonical validation fails. |
+| Codex | `PreToolUse`, tool `spawn_agent` | `tool_input.message` | The installed `Agent` matcher exits non-zero when canonical validation fails. |
+| OpenCode | `tool.execute.before`, tool `task` | unverified | Native task launch is unavailable. The plugin refuses the exact documented `task` route and directs callers through the Lore orchestration adapter or worker session. |
+
+Only the conditions and fields above are recognized. Similar names, casing
+variants, and inferred aliases are not treated as launches: heuristic matching
+would either block unrelated tools or claim enforcement where the harness has
+not established it. OpenCode therefore fails closed on its definite `task`
+condition rather than parsing a speculative prompt field.
+
 #### Codex hook returns (per native event)
 
 Codex hooks (introduced in Codex CLI 0.123.0, stable in 0.124.0) signal

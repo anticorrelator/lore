@@ -42,6 +42,10 @@
         }
       }
     },
+    "standing_decisions": {
+      "$ref": "#/$defs/standing_decisions_config",
+      "description": "User-registered standing decisions. Registrations authorize only the transport named by their typed subtree; no registrations are installed by default."
+    },
     "obsidian": {
       "type": "object",
       "additionalProperties": false,
@@ -162,6 +166,11 @@
           "items": {"type": "string"},
           "description": "CLI args prepended to every harness invocation. Empty array is valid (no flags). For claude-code the legacy default was [\"--dangerously-skip-permissions\"]; other harnesses default to []."
         },
+        "autonomous_args": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Optional CLI args prepended to agent-initiated (autonomous) spawns in place of `args`. Same shape as `args`. When present, an agent-initiated session (initiator=agent on the request) uses this array; human-initiated sessions and an absent key both use `args` unchanged — unset is byte-identical to prior behavior. Used to drop interactive approval postures that re-ask consent the user's standing riders already settled (e.g. codex --ask-for-approval on-request → never) while leaving the human-opened guardian intact."
+        },
         "enabled": {
           "type": "boolean",
           "description": "Per-harness integration toggle. When false, scripts/harness-toggle/disable.sh has removed this harness's skill/agent symlinks and cleared its instruction-file lore region. Absent = enabled. Mutated only via `lore harness {enable,disable}`; direct settings.json patches that bypass the toggle scripts are rejected by the unified loaders to keep symlink/instruction-file state in sync with the flag."
@@ -198,6 +207,64 @@
       "type": "string",
       "enum": ["full", "partial", "fallback", "none"],
       "description": "Closed support-level vocabulary. Mirrors adapters/capabilities.json `support_levels`."
+    },
+
+    "standing_decisions_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "modal_answers": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/modal_answer_registration"},
+          "description": "Stable registration id to exact numbered-modal answer. Missing entries and entries with enabled=false are inactive."
+        }
+      }
+    },
+
+    "modal_answer_registration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "framework", "signature", "answer", "registered_by", "registered_at", "rationale"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "framework": {"$ref": "#/$defs/framework_id"},
+        "signature": {"$ref": "#/$defs/numbered_modal_signature"},
+        "answer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["option", "expect"],
+          "properties": {
+            "option": {"type": "integer", "minimum": 1},
+            "expect": {"type": "string", "minLength": 1}
+          }
+        },
+        "registered_by": {"type": "string", "enum": ["user"]},
+        "registered_at": {"type": "string", "format": "date-time"},
+        "rationale": {"type": "string", "minLength": 1}
+      }
+    },
+
+    "numbered_modal_signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "title", "options"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["numbered-modal-v1"]},
+        "title": {"type": "string", "minLength": 1},
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["number", "label"],
+            "properties": {
+              "number": {"type": "integer", "minimum": 1},
+              "label": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
     },
 
     "capability_overrides_map": {

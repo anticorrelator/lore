@@ -39,6 +39,14 @@ setup() {
   mkdir -p "$TEST_KDIR/_sessions"
 }
 
+worker_guidance_file() {
+  local path="$TEST_KDIR/dispatch-guidance.txt"
+  if [ ! -f "$path" ]; then
+    bash "$REPO_DIR/scripts/render-dispatch-guidance.sh" > "$path"
+  fi
+  printf '%s\n' "$path"
+}
+
 teardown() {
   if [ -n "${TEST_KDIR:-}" ] && [ -d "$TEST_KDIR" ]; then
     rm -rf "$TEST_KDIR"
@@ -167,7 +175,7 @@ journal_boundaries() {
 }
 
 @test "request --type worker with a derived slug writes a pending row" {
-  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --context "brief body" --anywhere --kdir "$TEST_KDIR"
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.type=="worker" and .slug=="impl-foo--w1"' "$pending"
@@ -187,7 +195,7 @@ journal_boundaries() {
 }
 
 @test "requested event for a worker derives links.work_item from the derived slug" {
-  bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --anywhere --kdir "$TEST_KDIR"
+  bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR"
   run jq -e 'select(.event=="requested") | .links.work_item == "impl-foo"' "$TEST_KDIR/_sessions/events.jsonl"
   [ "$status" -eq 0 ]
 }
@@ -238,7 +246,7 @@ journal_boundaries() {
     > "$TEST_KDIR/_coordination/worktrees/registry/tree-1.json"
 
   run bash "$REQUEST" --type worker --slug impl-demo--w1 --worktree-id tree-1 \
-    --execution-dir "$execution_dir" --worktree-identity "$identity" --anywhere --kdir "$TEST_KDIR" --json
+    --execution-dir "$execution_dir" --worktree-identity "$identity" --context "$(worker_guidance_file)" --anywhere --kdir "$TEST_KDIR" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e --arg dir "$execution_dir" \
     '.worktree_id == "tree-1" and .execution_dir == $dir and .enqueued == true'
@@ -419,6 +427,20 @@ journal_boundaries() {
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
   run jq -e '.extra_context.dispatch_guidance == "Run /spec and report the plan slug."' "$pending"
   [ "$status" -eq 0 ]
+}
+
+@test "worker request refuses a missing or altered canonical guidance floor before enqueue" {
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context "brief body" --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Run 'lore dispatch guidance'"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+
+  local altered="$TEST_KDIR/altered-guidance.txt"
+  sed 's/Binding: Treat/Binding: Ignore/' "$(worker_guidance_file)" > "$altered"
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --context "$altered" --anywhere --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"guidance binding declaration"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
 }
 
 @test "request stores a JSON-object --context verbatim" {
@@ -1069,13 +1091,13 @@ PYEOF
 }
 
 @test "append accepts answer lifecycle rows with numeric option and closed refusal reason" {
-  run bash "$APPEND" --row '{"event":"answer_requested","request_id":"a1","slug":"feature-x","option":2}' --kdir "$TEST_KDIR"
+  run bash "$APPEND" --row '{"event":"answer_requested","request_id":"a1","slug":"feature-x","option":2,"registration_id":"standing-answer-v1"}' --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   run bash "$APPEND" --row '{"event":"answered","request_id":"a1","slug":"feature-x","option":2}' --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
   run bash "$APPEND" --row '{"event":"answer_refused","request_id":"a2","slug":"feature-x","option":3,"reason":"expect-mismatch"}' --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
-  run jq -s -e 'map(select(.event=="answer_requested" or .event=="answered" or .event=="answer_refused")) | map(.option) == [2,2,3] and all(.[]; (.option|type)=="number")' "$TEST_KDIR/_sessions/events.jsonl"
+  run jq -s -e 'map(select(.event=="answer_requested" or .event=="answered" or .event=="answer_refused")) | map(.option) == [2,2,3] and all(.[]; (.option|type)=="number") and .[0].registration_id=="standing-answer-v1"' "$TEST_KDIR/_sessions/events.jsonl"
   [ "$status" -eq 0 ]
 }
 
@@ -1086,6 +1108,12 @@ PYEOF
   run bash "$APPEND" --row '{"event":"answer_refused","request_id":"a2","slug":"feature-x","option":2,"reason":"maybe"}' --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"answer_refused requires"* ]]
+  run bash "$APPEND" --row '{"event":"modal_blocked","slug":"feature-x","reason":"modal","registration_id":"standing-answer-v1"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"allowed only on answer lifecycle"* ]]
+  run bash "$APPEND" --row '{"event":"answered","request_id":"a3","slug":"feature-x","option":2,"registration_id":"Not Stable"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"stable kebab-case"* ]]
 }
 
 @test "append accepts terminus_reached only with hosted identity and no queue request_id" {
@@ -1298,7 +1326,24 @@ PY
   local ar; ar="$(ls "$TEST_KDIR"/_sessions/answer-requests/*.json)"
   run jq -e '.option==2 and (.option|type)=="number" and .expect=="Would you like to run" and .requested_by=="coordinator"' "$ar"
   [ "$status" -eq 0 ]
+  run jq -e 'has("registration_id") | not' "$ar"
+  [ "$status" -eq 0 ]
   run jq -e 'select(.event=="answer_requested") | .request_id and .slug=="feature-x" and .option==2 and (.option|type)=="number"' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+  run jq -e 'select(.event=="answer_requested") | has("registration_id") | not' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "answer carries a standing registration id through request and requested event" {
+  write_instance inst-a feature-x
+  run bash "$ANSWER" feature-x --option 2 --expect "Additional safety checks" \
+    --registration-id codex-additional-safety-checks-keep-waiting-v1 --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+
+  local ar; ar="$(ls "$TEST_KDIR"/_sessions/answer-requests/*.json)"
+  run jq -e '.registration_id=="codex-additional-safety-checks-keep-waiting-v1"' "$ar"
+  [ "$status" -eq 0 ]
+  run jq -e 'select(.event=="answer_requested") | .registration_id=="codex-additional-safety-checks-keep-waiting-v1"' "$TEST_KDIR/_sessions/events.jsonl"
   [ "$status" -eq 0 ]
 }
 
