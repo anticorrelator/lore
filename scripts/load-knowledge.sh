@@ -193,6 +193,7 @@ echo ""
   # --- Step 2: Relevance-ranked search via budget_search ---
   RELEVANCE_SEARCH_COUNT=0
   RELEVANCE_LOADED_PATHS=()   # track paths loaded via relevance search
+  SEARCH_DEGRADED=""          # `degraded` token from budget_search, "" when the index was healthy
 
   # Degradation guard: the relevance search is optional enrichment. If the
   # mandatory phases (signal + index + direct-resolve) already consumed most
@@ -262,7 +263,25 @@ print(' OR '.join(terms))
       if [[ -n "$DIRECT_PATHS_CSV" ]]; then
         BUDGET_ARGS+=(--exclude-paths "$DIRECT_PATHS_CSV")
       fi
-      BUDGET_RESULTS=$(python3 "$SCRIPT_DIR/pk_cli.py" "${BUDGET_ARGS[@]}" 2>/dev/null) || BUDGET_RESULTS="{}"
+      # Cap how long the search may block on the index write lock at whatever
+      # is left of the time budget, so a rebuild in another process degrades
+      # the search instead of pushing the hook past its timeout (which kills
+      # the whole payload, silently).
+      LOCK_WAIT_SECS=$((TIME_BUDGET_SECS - SECONDS))
+      if [[ $LOCK_WAIT_SECS -lt 0 ]]; then
+        LOCK_WAIT_SECS=0
+      fi
+      BUDGET_RESULTS=$(LORE_INDEX_LOCK_WAIT_SECS="$LOCK_WAIT_SECS" \
+        python3 "$SCRIPT_DIR/pk_cli.py" "${BUDGET_ARGS[@]}" 2>/dev/null) || BUDGET_RESULTS="{}"
+
+      SEARCH_DEGRADED=$(echo "$BUDGET_RESULTS" | python3 -c "
+import json, sys
+try:
+    reason = json.load(sys.stdin).get('degraded') or ''
+except Exception:
+    reason = ''
+print(reason if isinstance(reason, str) else '')
+" 2>/dev/null) || SEARCH_DEGRADED=""
 
       # Parse full entries (null-delimited: file_path\tcontent\0)
       FIRST_FULL=1
@@ -449,6 +468,37 @@ for e in data.get('titles_only', []):
     fi
   fi
 
+# --- Zero-entry delivery: say why, and where to go instead ---
+# Derived once, here, and read by both the rendered line below and the packet
+# row further down, so the two can never disagree about the same delivery.
+# The allowance is sized against the hook timeout (15s for claude-code) rather
+# than TIME_BUDGET_SECS: the content budget is routinely spent by the load
+# itself, and inheriting it would silence the explanation in exactly the slow
+# sessions that need it.
+EMPTY_REASON_TIME_BUDGET_SECS="${LORE_EMPTY_REASON_TIME_BUDGET:-12}"
+EMPTY_REASON=""
+if [[ ${#PACKET_ENTRIES[@]} -eq 0 && $SECONDS -lt $EMPTY_REASON_TIME_BUDGET_SECS ]]; then
+  if [[ -n "$SEARCH_DEGRADED" ]]; then
+    case "$SEARCH_DEGRADED" in
+      index-rebuilding)
+        EMPTY_REASON="search index is being rebuilt by another process; wait budget expired" ;;
+      index-unavailable)
+        EMPTY_REASON="no usable search index was available" ;;
+      *)
+        EMPTY_REASON="search index degraded ($SEARCH_DEGRADED)" ;;
+    esac
+  elif [[ -z "$CONTEXT_SIGNAL" ]]; then
+    EMPTY_REASON="no context signal — compact index only, no entries resolved"
+  elif [[ $RELEVANCE_SKIPPED -eq 1 ]]; then
+    EMPTY_REASON="relevance search skipped by time budget (${SECONDS}s of ${TIME_BUDGET_SECS}s); no direct-resolved entries"
+  else
+    EMPTY_REASON="context signal present but no entries resolved within budget"
+  fi
+
+  echo ""
+  echo "[knowledge] 0 entries delivered — ${EMPTY_REASON}. Reach the store directly with \`lore prefetch \"<topic>\" --scale-set <bucket>\`."
+fi
+
 echo "[Budget] ${CHARS_USED}/${BUDGET} chars | ${FILES_FULL} full, ${FILES_SUMMARY} summary, ${FILES_SKIPPED} skipped"
 if [[ $TOTAL_ENTRIES -gt 0 ]]; then
   echo "[knowledge] ${TOTAL_ENTRIES} entries across ${TOTAL_CATEGORIES} categories"
@@ -541,17 +591,6 @@ print(sid if isinstance(sid, str) and sid else "unknown")
     [[ -n "$SESSION_ID" ]] || SESSION_ID="unknown"
   fi
 
-  PACKET_EMPTY_REASON=""
-  if [[ ${#PACKET_ENTRIES[@]} -eq 0 ]]; then
-    if [[ -z "$CONTEXT_SIGNAL" ]]; then
-      PACKET_EMPTY_REASON="no context signal — compact index only, no entries resolved"
-    elif [[ $RELEVANCE_SKIPPED -eq 1 ]]; then
-      PACKET_EMPTY_REASON="relevance search skipped by time budget (${SECONDS}s of ${TIME_BUDGET_SECS}s); no direct-resolved entries"
-    else
-      PACKET_EMPTY_REASON="context signal present but no entries resolved within budget"
-    fi
-  fi
-
   # Trust snapshots mirror pk_manifest._trust_snapshot: live ledger fold,
   # never the cached trust_score column (stale-at-INSERT). All session-load
   # entries are trust-blind deliveries -> ranking_path "composite-rerank".
@@ -636,6 +675,6 @@ subprocess.run(
     ["bash", os.path.join(script_dir, "packet-append.sh"),
      "--row", json.dumps(row, ensure_ascii=False), "--kdir", kdir],
     capture_output=True, text=True, timeout=30, check=True)
-' "$SCRIPT_DIR" "$KNOWLEDGE_DIR" "$SESSION_ID" "$CHARS_USED" "$BUDGET" "$PACKET_EMPTY_REASON" \
+' "$SCRIPT_DIR" "$KNOWLEDGE_DIR" "$SESSION_ID" "$CHARS_USED" "$BUDGET" "$EMPTY_REASON" \
     >/dev/null 2>&1 || true
 fi

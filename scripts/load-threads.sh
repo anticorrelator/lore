@@ -50,7 +50,11 @@ BUDGET_EXHAUSTED=""
 # --- Extract context signal for thread loading bias ---
 CONTEXT_SIGNAL=$(extract_context_signal "$KNOWLEDGE_DIR")
 
-# If we have a context signal, find matching thread entry file paths via FTS5
+# If we have a context signal, find matching thread entry file paths via FTS5.
+# Read-only: this hook never builds or refreshes the index — the ranking bias
+# below is optional, threads render fully without it, and building here would
+# put a second writer on the index at every session start. sqlite3.connect
+# would create an empty database file, so a missing index means skip, not open.
 CONTEXT_MATCHED_FILES=""
 if [[ -n "$CONTEXT_SIGNAL" ]]; then
   CONTEXT_MATCHED_FILES=$(python3 -c "
@@ -59,7 +63,8 @@ sys.path.insert(0, '$SCRIPT_DIR')
 from pk_search import Searcher
 
 searcher = Searcher('$KNOWLEDGE_DIR')
-searcher._ensure_index()
+if not os.path.exists(searcher.db_path):
+    sys.exit(0)
 conn = sqlite3.connect(searcher.db_path)
 
 # Quote each token for FTS5 safety

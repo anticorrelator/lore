@@ -1,8 +1,10 @@
 """Tests for pk_search.py — SQLite FTS5 knowledge search."""
 
+import fcntl
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 
@@ -12,14 +14,21 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from pk_search import (
+    DEFAULT_INDEX_LOCK_WAIT_SECS,
+    DEGRADED_REBUILDING,
+    DEGRADED_UNAVAILABLE,
+    INDEX_BUSY_ERROR,
     KNOWLEDGE_BOOST,
     SOURCE_TYPES,
     Indexer,
+    IndexLockBusy,
+    IndexWriteLock,
     LinkChecker,
     MarkdownParser,
     Resolver,
     Searcher,
     Stats,
+    index_lock_wait_secs,
 )
 
 
@@ -3091,3 +3100,328 @@ class TestSearchPreferences:
         assert results == [], (
             f"unrelated query must yield empty side-channel; got {results}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Index Write Lock Tests
+# ---------------------------------------------------------------------------
+
+def _hold_lock(lock_path, hold_secs):
+    """Hold LOCK_EX on lock_path from a separate process.
+
+    Returns (Popen, ready_file). The child writes ready_file only after the
+    lock is actually held, so callers never race the acquisition itself.
+    """
+    ready = str(lock_path) + ".ready"
+    program = (
+        "import fcntl, os, sys, time\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "open(sys.argv[2], 'w').write('1')\n"
+        "time.sleep(float(sys.argv[3]))\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", program, str(lock_path), ready, str(hold_secs)]
+    )
+    deadline = time.time() + 10
+    while not os.path.exists(ready):
+        if time.time() > deadline:
+            proc.kill()
+            raise AssertionError("lock holder never signalled ready")
+        time.sleep(0.01)
+    return proc, ready
+
+
+def _invalidate_schema(kd):
+    """Make the on-disk index look like an older schema, forcing a rebuild."""
+    conn = sqlite3.connect(os.path.join(str(kd), ".pk_search.db"))
+    conn.execute(
+        "INSERT OR REPLACE INTO index_meta (key, value) VALUES ('schema_version', '1')"
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def big_knowledge_dir(tmp_path):
+    """A store large enough that a full rebuild outlasts a second process's
+    lock wait — the racing-rebuilders test needs a real window, not a stub."""
+    kd = tmp_path / "big_knowledge"
+    for i in range(1200):
+        d = kd / ("architecture" if i % 2 == 0 else "conventions")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"entry-{i:05d}.md").write_text(
+            f"# Entry {i} Service Mesh\n"
+            + (f"envoy sidecar handles retries circuit breaking and mtls at tier {i}. " * 40)
+            + "\n<!-- learned: 2025-01-01 | confidence: high -->\n",
+            encoding="utf-8",
+        )
+    return kd
+
+
+class TestIndexWriteLock:
+    def test_wait_secs_default(self, monkeypatch):
+        monkeypatch.delenv("LORE_INDEX_LOCK_WAIT_SECS", raising=False)
+        assert index_lock_wait_secs() == DEFAULT_INDEX_LOCK_WAIT_SECS
+
+    def test_wait_secs_from_env(self, monkeypatch):
+        monkeypatch.setenv("LORE_INDEX_LOCK_WAIT_SECS", "0.25")
+        assert index_lock_wait_secs() == 0.25
+
+    def test_wait_secs_rejects_negative_and_garbage(self, monkeypatch):
+        monkeypatch.setenv("LORE_INDEX_LOCK_WAIT_SECS", "-3")
+        assert index_lock_wait_secs() == 0.0
+        monkeypatch.setenv("LORE_INDEX_LOCK_WAIT_SECS", "not-a-number")
+        assert index_lock_wait_secs() == DEFAULT_INDEX_LOCK_WAIT_SECS
+
+    def test_reentrant_within_process(self, knowledge_dir):
+        """index_all holds the lock and then calls build_concordance, which
+        takes it again; nested acquisition must not deadlock."""
+        with IndexWriteLock(str(knowledge_dir), wait_secs=0.1):
+            with IndexWriteLock(str(knowledge_dir), wait_secs=0.1):
+                pass
+
+    def test_wait_expires_inside_budget(self, knowledge_dir):
+        """The wait must expire on its own rather than run past the caller's
+        deadline — a SessionStart hook is killed at its timeout."""
+        lock_path = knowledge_dir / ".pk_search.lock"
+        proc, _ = _hold_lock(lock_path, 5)
+        try:
+            start = time.time()
+            with pytest.raises(IndexLockBusy):
+                with IndexWriteLock(str(knowledge_dir), wait_secs=0.3):
+                    pass
+            assert time.time() - start < 2.0
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_lock_file_is_not_the_database(self, knowledge_dir):
+        """The lock lives beside the index, so it survives a rebuild."""
+        Indexer(str(knowledge_dir)).index_all()
+        lock_path = knowledge_dir / ".pk_search.lock"
+        assert lock_path.exists()
+        assert lock_path.name != ".pk_search.db"
+
+    def test_released_when_holder_exits(self, knowledge_dir):
+        """A killed hook must not wedge the next session."""
+        lock_path = knowledge_dir / ".pk_search.lock"
+        proc, _ = _hold_lock(lock_path, 0.2)
+        proc.wait()
+        with IndexWriteLock(str(knowledge_dir), wait_secs=1.0):
+            pass
+
+
+class TestIndexMutatorsUnderContention:
+    @pytest.fixture
+    def indexed(self, knowledge_dir):
+        Indexer(str(knowledge_dir)).index_all()
+        return knowledge_dir
+
+    def _busy(self, indexed, call):
+        proc, _ = _hold_lock(indexed / ".pk_search.lock", 5)
+        try:
+            return call(Indexer(str(indexed)))
+        finally:
+            proc.kill()
+            proc.wait()
+
+    @pytest.mark.parametrize("name, call", [
+        ("index_all", lambda i: i.index_all()),
+        ("index_all_force", lambda i: i.index_all(force=True)),
+        ("incremental_index", lambda i: i.incremental_index()),
+        ("refresh_trust_scores", lambda i: i.refresh_trust_scores()),
+        ("build_concordance", lambda i: i.build_concordance()),
+        ("update_structural_importance", lambda i: i._update_structural_importance()),
+    ])
+    def test_mutator_reports_busy(self, indexed, monkeypatch, name, call):
+        """Every index-mutating entry point reports the contention instead of
+        writing behind another process's back or hanging."""
+        monkeypatch.setenv("LORE_INDEX_LOCK_WAIT_SECS", "0.2")
+        result = self._busy(indexed, call)
+        assert result.get("error") == INDEX_BUSY_ERROR, f"{name} returned {result}"
+
+
+class TestRebuildKeepsIndexReadable:
+    def test_rebuild_does_not_replace_the_file(self, knowledge_dir):
+        """The rebuild happens in place: a reader holding the path keeps
+        reading a real index rather than a deleted inode."""
+        indexer = Indexer(str(knowledge_dir))
+        indexer.index_all()
+        before = os.stat(indexer.db_path).st_ino
+
+        indexer.index_all(force=True)
+
+        assert os.stat(indexer.db_path).st_ino == before
+
+    def test_index_stays_queryable_throughout_rebuild(self, big_knowledge_dir):
+        """A search running while another process rebuilds must see the
+        previous snapshot, never a missing or half-built index."""
+        kd = str(big_knowledge_dir)
+        Indexer(kd).index_all()
+        _invalidate_schema(kd)
+
+        program = (
+            "import sys\n"
+            f"sys.path.insert(0, {os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts')!r})\n"
+            "from pk_search import Indexer\n"
+            "Indexer(sys.argv[1]).index_all(force=True)\n"
+        )
+        rebuilder = subprocess.Popen([sys.executable, "-c", program, kd])
+        try:
+            lock_path = os.path.join(kd, ".pk_search.lock")
+            deadline = time.time() + 10
+            while True:
+                fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    held = False
+                except OSError:
+                    held = True
+                finally:
+                    os.close(fd)
+                if held:
+                    break
+                if time.time() > deadline:
+                    pytest.skip("rebuild finished before it could be observed")
+                time.sleep(0.005)
+
+            conn = sqlite3.connect(os.path.join(kd, ".pk_search.db"))
+            count = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
+            conn.close()
+            assert count == 1200, (
+                f"a rebuild in progress left {count} readable entries; the "
+                "previous snapshot must stay whole until the new one commits"
+            )
+        finally:
+            rebuilder.wait(timeout=60)
+
+
+class TestSearchDegradation:
+    def test_healthy_search_reports_no_degradation(self, knowledge_dir):
+        result = Searcher(str(knowledge_dir)).budget_search("service mesh", 8000)
+        assert result["full"], "expected matches for a healthy index"
+        assert "degraded" not in result
+
+    def test_no_match_is_not_a_degradation(self, knowledge_dir):
+        """'Nothing matched' and 'the index could not answer' are separate
+        answers; an ordinary empty result must not claim a failure."""
+        searcher = Searcher(str(knowledge_dir))
+        # Single token on purpose. A hyphenated query would be split and
+        # OR-joined by _prepare_or_query, so an "obviously unrelated" phrase
+        # like "totally-unrelated-token-xyz" matches on its common parts and
+        # stops testing the empty case at all.
+        result = searcher.budget_search("zzzqqqxyzzy", 8000)
+        assert result["full"] == []
+        assert result["titles_only"] == []
+        assert "degraded" not in result
+
+    def test_rebuild_in_progress_serves_the_existing_index(self, knowledge_dir, monkeypatch):
+        """The quiet failure this change exists to remove: a caller that
+        cannot join a rebuild used to return exit 0 with an empty result set,
+        indistinguishable from a store with nothing to say. It must now serve
+        whatever index exists and name the reason."""
+        kd = str(knowledge_dir)
+        Indexer(kd).index_all()
+        _invalidate_schema(kd)
+
+        monkeypatch.setenv("LORE_INDEX_LOCK_WAIT_SECS", "0.2")
+        proc, _ = _hold_lock(knowledge_dir / ".pk_search.lock", 5)
+        try:
+            result = Searcher(kd).budget_search("service mesh", 8000)
+        finally:
+            proc.kill()
+            proc.wait()
+
+        assert result["full"] or result["titles_only"], (
+            "a contended search must still serve the index that exists"
+        )
+        assert result["degraded"] == DEGRADED_REBUILDING
+
+    def test_no_index_and_rebuild_in_progress_reports_unavailable(self, knowledge_dir, monkeypatch):
+        """With nothing on disk to fall back to, the answer is a different
+        reason — not the same one, and not silence."""
+        kd = str(knowledge_dir)
+        assert not os.path.exists(os.path.join(kd, ".pk_search.db"))
+
+        monkeypatch.setenv("LORE_INDEX_LOCK_WAIT_SECS", "0.2")
+        proc, _ = _hold_lock(knowledge_dir / ".pk_search.lock", 5)
+        try:
+            result = Searcher(kd).budget_search("service mesh", 8000)
+        finally:
+            proc.kill()
+            proc.wait()
+
+        assert result["full"] == []
+        assert result["titles_only"] == []
+        assert result["degraded"] == DEGRADED_UNAVAILABLE
+
+    def test_warm_index_reads_while_write_lock_is_held(self, knowledge_dir):
+        """Searches take no lock: a warm, current index answers normally even
+        while another process holds the write lock."""
+        kd = str(knowledge_dir)
+        Indexer(kd).index_all()
+
+        proc, _ = _hold_lock(knowledge_dir / ".pk_search.lock", 5)
+        try:
+            start = time.time()
+            result = Searcher(kd).budget_search("service mesh", 8000)
+            elapsed = time.time() - start
+        finally:
+            proc.kill()
+            proc.wait()
+
+        assert result["full"], "a warm index must answer without the lock"
+        assert "degraded" not in result
+        assert elapsed < 1.0, f"search waited {elapsed:.2f}s on a lock it should not take"
+
+    def test_racing_rebuilders_both_return_ranked_results(self, big_knowledge_dir, monkeypatch):
+        """Two processes racing a schema-invalidated rebuild: neither raises,
+        both return ranked results, and the one that could not join names the
+        reason rather than reporting an empty store."""
+        kd = str(big_knowledge_dir)
+        Indexer(kd).index_all()
+        _invalidate_schema(kd)
+
+        program = (
+            "import sys\n"
+            f"sys.path.insert(0, {os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts')!r})\n"
+            "from pk_search import Searcher\n"
+            "r = Searcher(sys.argv[1]).budget_search('service mesh envoy', 8000)\n"
+            "print(len(r['full']) + len(r['titles_only']))\n"
+        )
+        rebuilder = subprocess.Popen(
+            [sys.executable, "-c", program, kd], stdout=subprocess.PIPE, text=True
+        )
+        try:
+            lock_path = os.path.join(kd, ".pk_search.lock")
+            deadline = time.time() + 10
+            while True:
+                fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    held = False
+                except OSError:
+                    held = True
+                finally:
+                    os.close(fd)
+                if held:
+                    break
+                if time.time() > deadline:
+                    pytest.skip("rebuild finished before it could be observed")
+                time.sleep(0.005)
+
+            monkeypatch.setenv("LORE_INDEX_LOCK_WAIT_SECS", "0.2")
+            loser = Searcher(kd).budget_search("service mesh envoy", 8000)
+        finally:
+            out, _ = rebuilder.communicate(timeout=60)
+
+        assert rebuilder.returncode == 0, "the rebuilding process must not raise"
+        assert int(out.strip()) > 0, "the rebuilding process must return results"
+        assert loser["full"] or loser["titles_only"], (
+            "the racing search returned an empty result set — the failure "
+            "shape this change exists to remove"
+        )
+        assert loser["degraded"] == DEGRADED_REBUILDING

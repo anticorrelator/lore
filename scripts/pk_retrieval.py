@@ -136,6 +136,10 @@ def partition_two_tier(results: list[dict], budget_chars: int) -> dict:
 def budget_json_payload(result: dict) -> dict:
     """Normalize a budget_search result into the public two-tier JSON shape
     (`score` exposes the composite score; internal fields are dropped).
+
+    `degraded` is copied through when present. Without it a caller reading this
+    JSON cannot tell an index that could not answer from a store that had no
+    match — both arrive as empty result lists.
     """
     full_out = []
     for r in result["full"]:
@@ -154,12 +158,15 @@ def budget_json_payload(result: dict) -> dict:
             "score": r.get("composite_score", 0),
             "category": r.get("category"),
         })
-    return {
+    payload = {
         "full": full_out,
         "titles_only": titles_out,
         "budget_used": result["budget_used"],
         "budget_total": result["budget_total"],
     }
+    if result.get("degraded"):
+        payload["degraded"] = result["degraded"]
+    return payload
 
 
 # ---------------------------------------------------------------------------

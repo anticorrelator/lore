@@ -194,6 +194,20 @@ EOF
   done
 }
 
+# --- A git repo on `main`, to run the hooks from ---
+# The context signal is derived from the current branch, so a test that needs a
+# predictable signal has to control the branch rather than the environment it
+# happens to run in. On `main` the signal comes from the most recently updated
+# active work item — or is empty when there are none.
+MAIN_REPO="$TEST_DIR/main-repo"
+setup_main_branch_repo() {
+  [[ -d "$MAIN_REPO/.git" ]] && return
+  mkdir -p "$MAIN_REPO"
+  git -C "$MAIN_REPO" init -q -b main
+  git -C "$MAIN_REPO" -c user.email=test@test -c user.name=test \
+    commit -q --allow-empty -m "init"
+}
+
 # --- Build FTS5 index so pk_cli.py search works ---
 build_index() {
   python3 "$SCRIPT_DIR/pk_cli.py" index "$KNOWLEDGE_DIR" 2>/dev/null || true
@@ -457,7 +471,9 @@ echo "Test 15: Footer total matches the compact index"
 INDEX_SUM=$(echo "$OUTPUT" | sed -n '/--- Index (compact) ---/,/^$/p' \
   | sed -n 's/^\*\*.*\*\* (\([0-9][0-9]*\) .*/\1/p' \
   | awk '{s += $1} END {print s + 0}')
-FOOTER_TOTAL=$(echo "$OUTPUT" | sed -n 's/^\[knowledge\] \([0-9][0-9]*\) entries.*/\1/p' | head -1)
+# Match on "entries across" — the zero-entry explanation line shares the
+# [knowledge] prefix and would otherwise be picked up as a count of 0.
+FOOTER_TOTAL=$(echo "$OUTPUT" | sed -n 's/^\[knowledge\] \([0-9][0-9]*\) entries across.*/\1/p' | head -1)
 assert_eq_num() {
   local label="$1" actual="$2" expected="$3"
   if [[ "$actual" == "$expected" ]]; then
@@ -475,6 +491,143 @@ if [[ "${FOOTER_TOTAL:-0}" -gt 12 ]]; then
   PASS=$((PASS + 1))
 else
   echo "  FAIL: footer total ${FOOTER_TOTAL:-missing} looks like a depth-1 count"
+  FAIL=$((FAIL + 1))
+fi
+
+# =============================================
+# Test 16: A zero-entry payload states its reason and its recovery
+# =============================================
+# The line renders on EVERY zero-entry payload, ordinary cases included — an
+# agent that has only ever seen it on failures has no baseline to read it
+# against.
+echo ""
+echo "Test 16: Zero-entry payload explains itself"
+rm -rf "$KNOWLEDGE_DIR"
+setup_v2_knowledge_store
+setup_main_branch_repo
+# No work items: on main that leaves the context signal empty, so the payload
+# is the compact index and nothing else.
+OUTPUT=$(cd "$MAIN_REPO" && bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+assert_contains "zero-entry line present" "$OUTPUT" "[knowledge] 0 entries delivered —"
+assert_contains "zero-entry line names the reason" "$OUTPUT" "no context signal"
+assert_contains "zero-entry line names the recovery" "$OUTPUT" 'lore prefetch "<topic>" --scale-set <bucket>'
+# It sits immediately above the [Budget] footer.
+ADJACENT=$(echo "$OUTPUT" | grep -A1 -F "[knowledge] 0 entries delivered" | tail -1)
+assert_contains "zero-entry line precedes the budget footer" "$ADJACENT" "[Budget]"
+
+# =============================================
+# Test 17: A payload that delivered entries stays quiet
+# =============================================
+echo ""
+echo "Test 17: Non-empty payload omits the zero-entry line"
+rm -rf "$KNOWLEDGE_DIR"
+setup_v2_knowledge_store
+setup_work_items
+setup_main_branch_repo
+build_index
+OUTPUT=$(cd "$MAIN_REPO" && bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+assert_contains "entries were delivered" "$OUTPUT" "Relevant entries"
+assert_not_contains "no zero-entry line" "$OUTPUT" "0 entries delivered"
+
+# =============================================
+# Test 18: A held index write lock degrades visibly, inside the time budget
+# =============================================
+# The hook must never wait on the lock past its own envelope: a SessionStart
+# hook killed by timeout loses its entire stdout payload with no error anywhere.
+echo ""
+echo "Test 18: Held index write lock degrades visibly and in budget"
+rm -rf "$KNOWLEDGE_DIR"
+setup_v2_knowledge_store
+setup_work_items
+setup_main_branch_repo
+# Deliberately no build_index — with the lock held, the hook cannot build one
+# either, so the search has nothing usable to read.
+LOCK_READY="$TEST_DIR/lock.ready"
+rm -f "$LOCK_READY"
+python3 -c "
+import fcntl, sys, time
+lock_path, ready_path, hold = sys.argv[1], sys.argv[2], float(sys.argv[3])
+handle = open(lock_path, 'w')
+fcntl.flock(handle, fcntl.LOCK_EX)
+open(ready_path, 'w').close()
+time.sleep(hold)
+" "$KNOWLEDGE_DIR/.pk_search.lock" "$LOCK_READY" 25 &
+LOCK_PID=$!
+for _ in $(seq 1 100); do
+  if [[ -f "$LOCK_READY" ]]; then
+    break
+  fi
+  sleep 0.1
+done
+
+export LORE_LOAD_KNOWLEDGE_TIME_BUDGET=4
+LOCK_START=$(date +%s)
+OUTPUT=$(cd "$MAIN_REPO" && bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+LOCK_ELAPSED=$(( $(date +%s) - LOCK_START ))
+unset LORE_LOAD_KNOWLEDGE_TIME_BUDGET
+kill "$LOCK_PID" 2>/dev/null || true
+wait "$LOCK_PID" 2>/dev/null || true
+
+assert_contains "lock contention yields a zero-entry line" "$OUTPUT" "[knowledge] 0 entries delivered —"
+assert_contains "lock contention names the search index" "$OUTPUT" "search index"
+assert_contains "lock contention names the recovery" "$OUTPUT" 'lore prefetch "<topic>" --scale-set <bucket>'
+assert_contains "payload still shipped" "$OUTPUT" "=== End Project Knowledge ==="
+# The hook's own envelope is 15s (claude-code); a 4s search budget plus the
+# rest of the load must stay well inside it.
+if [[ "$LOCK_ELAPSED" -lt 12 ]]; then
+  echo "  PASS: hook completed in ${LOCK_ELAPSED}s, inside its time budget"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: hook took ${LOCK_ELAPSED}s — lock wait is not bounded by the time budget"
+  FAIL=$((FAIL + 1))
+fi
+
+# =============================================
+# Test 19: load-threads.sh reads the index, never builds it
+# =============================================
+# It used to call _ensure_index(), which made session start race two builders
+# against one index. sqlite3.connect on a missing path would also leave an
+# empty database behind for the next _ensure_index to detect and discard.
+echo ""
+echo "Test 19: load-threads.sh does not build or create the index"
+rm -rf "$KNOWLEDGE_DIR"
+setup_v2_knowledge_store
+mkdir -p "$KNOWLEDGE_DIR/_threads/some-topic"
+cat > "$KNOWLEDGE_DIR/_threads/_index.json" << 'EOF'
+{"threads": [{"slug": "some-topic", "tier": "active"}]}
+EOF
+cat > "$KNOWLEDGE_DIR/_threads/some-topic/_meta.json" << EOF
+{"topic": "Naming conventions", "tier": "active", "updated": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"}
+EOF
+cat > "$KNOWLEDGE_DIR/_threads/some-topic/2026-02-06.md" << 'EOF'
+**Summary:** Discussed naming patterns and error handling.
+
+Details about camelCase naming go here.
+EOF
+setup_work_items
+setup_main_branch_repo
+THREADS_OUTPUT=$(cd "$MAIN_REPO" && bash "$SCRIPT_DIR/load-threads.sh" 2>&1)
+assert_contains "threads render without an index" "$THREADS_OUTPUT" "=== Conversational Threads ==="
+assert_contains "thread entry rendered" "$THREADS_OUTPUT" "camelCase"
+if [[ ! -e "$KNOWLEDGE_DIR/.pk_search.db" ]]; then
+  echo "  PASS: no index file created by the threads hook"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: threads hook created $KNOWLEDGE_DIR/.pk_search.db"
+  FAIL=$((FAIL + 1))
+fi
+
+# With a warm index the ranking bias still works and the hook stays a reader.
+build_index
+INDEX_MTIME_BEFORE=$(python3 -c "import os,sys; print(os.path.getmtime(sys.argv[1]))" "$KNOWLEDGE_DIR/.pk_search.db")
+THREADS_OUTPUT=$(cd "$MAIN_REPO" && bash "$SCRIPT_DIR/load-threads.sh" 2>&1)
+INDEX_MTIME_AFTER=$(python3 -c "import os,sys; print(os.path.getmtime(sys.argv[1]))" "$KNOWLEDGE_DIR/.pk_search.db")
+assert_contains "threads render with a warm index" "$THREADS_OUTPUT" "camelCase"
+if [[ "$INDEX_MTIME_BEFORE" == "$INDEX_MTIME_AFTER" ]]; then
+  echo "  PASS: warm index untouched by the threads hook"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: threads hook wrote to the index (mtime $INDEX_MTIME_BEFORE -> $INDEX_MTIME_AFTER)"
   FAIL=$((FAIL + 1))
 fi
 

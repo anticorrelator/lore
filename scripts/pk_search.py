@@ -9,6 +9,7 @@ Other extracted modules:
     pk_resolve.py  — Resolver, resolve_read_path, BACKLINK_RE
 """
 
+import fcntl
 import hashlib
 import json
 import math
@@ -25,6 +26,18 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 DB_FILENAME = ".pk_search.db"
+INDEX_LOCK_FILENAME = ".pk_search.lock"
+DEFAULT_INDEX_LOCK_WAIT_SECS = 5.0
+INDEX_LOCK_POLL_SECS = 0.05
+# Returned in the "error" slot by index-mutating methods when the write lock
+# stayed busy for the whole wait budget. Callers branch on this constant rather
+# than on the message text.
+INDEX_BUSY_ERROR = "another process is rebuilding the search index"
+# Reasons a search reports alongside an empty result set. Kept as distinct
+# strings so "the index could not answer" and "nothing matched" stay separate
+# answers to the reader.
+DEGRADED_REBUILDING = "index-rebuilding"
+DEGRADED_UNAVAILABLE = "index-unavailable"
 SKIP_FILES = {"_inbox.md", "_index.md", "_meta.md", "_meta.json", "_index.json", "_self_test_results.md", "_manifest.json"}
 SKIP_DIRS = {"_archive", "__pycache__", ".git", "_meta", "_meta_bak", "_inbox"}
 CATEGORY_DIRS = {"abstractions", "architecture", "conventions", "design-rationale", "gotchas", "principles", "workflows", "domains", "preferences"}
@@ -234,6 +247,99 @@ def attach_similar_entries(searcher: "Searcher", results: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Index write lock
+# ---------------------------------------------------------------------------
+
+class IndexLockBusy(Exception):
+    """The index write lock was still held when the wait budget ran out."""
+
+
+def index_lock_wait_secs() -> float:
+    """Seconds to wait for the index write lock.
+
+    LORE_INDEX_LOCK_WAIT_SECS overrides the default. Callers on a deadline
+    (SessionStart hooks) set it from the time they have left, so the wait
+    always expires inside the caller's own budget.
+    """
+    raw = os.environ.get("LORE_INDEX_LOCK_WAIT_SECS", "").strip()
+    if not raw:
+        return DEFAULT_INDEX_LOCK_WAIT_SECS
+    try:
+        return max(float(raw), 0.0)
+    except ValueError:
+        return DEFAULT_INDEX_LOCK_WAIT_SECS
+
+
+class IndexWriteLock:
+    """Advisory cross-process lock serializing writes to one store's index.
+
+    Held for the duration of every index mutation. Searches take nothing:
+    the index file stays in place across a rebuild, so a reader always has a
+    consistent snapshot to query.
+
+    The lock lives beside the database rather than on it, because a lock keyed
+    to the database file would not survive a rebuild that replaces it. flock is
+    released by the kernel when the holder exits, so a hook killed by its
+    timeout does not wedge the next session.
+
+    Acquisition is re-entrant within a process, refcounted over a single file
+    descriptor: flock taken on a second descriptor of the same file conflicts
+    with the first even in the same process, so nested acquisitions share one.
+    """
+
+    # Absolute lock path -> [file descriptor, nesting depth].
+    _held: dict[str, list] = {}
+
+    def __init__(self, knowledge_dir: str, wait_secs: float | None = None):
+        self.lock_path = os.path.join(
+            os.path.abspath(knowledge_dir), INDEX_LOCK_FILENAME
+        )
+        self.wait_secs = (
+            index_lock_wait_secs() if wait_secs is None else max(float(wait_secs), 0.0)
+        )
+
+    def __enter__(self) -> "IndexWriteLock":
+        held = IndexWriteLock._held.get(self.lock_path)
+        if held is not None:
+            held[1] += 1
+            return self
+
+        try:
+            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as e:
+            raise IndexLockBusy(f"cannot open {self.lock_path}: {e}") from e
+
+        deadline = time.monotonic() + self.wait_secs
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    raise IndexLockBusy(self.lock_path)
+                time.sleep(INDEX_LOCK_POLL_SECS)
+
+        IndexWriteLock._held[self.lock_path] = [fd, 1]
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        held = IndexWriteLock._held.get(self.lock_path)
+        if held is None:
+            return False
+        held[1] -= 1
+        if held[1] > 0:
+            return False
+        del IndexWriteLock._held[self.lock_path]
+        fd = held[0]
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Indexer
 # ---------------------------------------------------------------------------
 
@@ -274,77 +380,107 @@ class Indexer:
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
+    # Issued one statement at a time rather than through executescript, which
+    # commits any transaction already in progress — the in-place rebuild needs
+    # the schema recreated inside its own transaction. The entry_terms* vocab
+    # tables read `entries`, so they are created after it and dropped before it.
+    _SCHEMA_STATEMENTS = (
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS entries USING fts5(
+            file_path,
+            heading,
+            content,
+            source_type,
+            category UNINDEXED,
+            confidence UNINDEXED,
+            learned_date UNINDEXED,
+            structural_importance UNINDEXED,
+            scale UNINDEXED,
+            entry_status UNINDEXED,
+            template_version UNINDEXED,
+            trust_score UNINDEXED,
+            tokenize='porter unicode61'
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS file_meta (
+            file_path TEXT PRIMARY KEY,
+            mtime REAL,
+            content_hash TEXT,
+            source_type TEXT DEFAULT 'knowledge'
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS index_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS embeddings (
+            content_hash TEXT PRIMARY KEY,
+            embedding BLOB,
+            model_name TEXT,
+            created_at REAL
+        )
+        """,
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS entry_terms USING fts5vocab(
+            entries, 'row'
+        )
+        """,
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS entry_terms_instance USING fts5vocab(
+            entries, 'instance'
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS tfidf_vectors (
+            file_path TEXT,
+            heading TEXT,
+            vector BLOB,
+            source_type TEXT,
+            updated_at REAL,
+            PRIMARY KEY (file_path, heading)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS concordance_results (
+            file_path TEXT,
+            heading TEXT,
+            similar_entry_path TEXT,
+            similar_entry_heading TEXT,
+            similarity_score REAL,
+            result_type TEXT,
+            PRIMARY KEY (file_path, heading, similar_entry_path, similar_entry_heading, result_type)
+        )
+        """,
+    )
+
+    _REBUILD_DROP_ORDER = (
+        "entry_terms_instance",
+        "entry_terms",
+        "concordance_results",
+        "tfidf_vectors",
+        "embeddings",
+        "index_meta",
+        "file_meta",
+        "entries",
+    )
+
     def _init_schema(self, conn: sqlite3.Connection) -> None:
-        """Create tables if they don't exist."""
-        conn.executescript("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS entries USING fts5(
-                file_path,
-                heading,
-                content,
-                source_type,
-                category UNINDEXED,
-                confidence UNINDEXED,
-                learned_date UNINDEXED,
-                structural_importance UNINDEXED,
-                scale UNINDEXED,
-                entry_status UNINDEXED,
-                template_version UNINDEXED,
-                trust_score UNINDEXED,
-                tokenize='porter unicode61'
-            );
+        """Create tables if they don't exist, and commit."""
+        self._create_schema(conn)
+        conn.commit()
 
-            CREATE TABLE IF NOT EXISTS file_meta (
-                file_path TEXT PRIMARY KEY,
-                mtime REAL,
-                content_hash TEXT,
-                source_type TEXT DEFAULT 'knowledge'
-            );
-
-            CREATE TABLE IF NOT EXISTS index_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS embeddings (
-                content_hash TEXT PRIMARY KEY,
-                embedding BLOB,
-                model_name TEXT,
-                created_at REAL
-            );
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS entry_terms USING fts5vocab(
-                entries, 'row'
-            );
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS entry_terms_instance USING fts5vocab(
-                entries, 'instance'
-            );
-
-            CREATE TABLE IF NOT EXISTS tfidf_vectors (
-                file_path TEXT,
-                heading TEXT,
-                vector BLOB,
-                source_type TEXT,
-                updated_at REAL,
-                PRIMARY KEY (file_path, heading)
-            );
-
-            CREATE TABLE IF NOT EXISTS concordance_results (
-                file_path TEXT,
-                heading TEXT,
-                similar_entry_path TEXT,
-                similar_entry_heading TEXT,
-                similarity_score REAL,
-                result_type TEXT,
-                PRIMARY KEY (file_path, heading, similar_entry_path, similar_entry_heading, result_type)
-            );
-        """)
-        # Store schema version
+    def _create_schema(self, conn: sqlite3.Connection) -> None:
+        """Create tables if they don't exist, leaving any transaction open."""
+        for statement in self._SCHEMA_STATEMENTS:
+            conn.execute(statement)
         conn.execute(
             "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
             ("schema_version", str(self.SCHEMA_VERSION)),
         )
-        conn.commit()
 
     def _validate_db(self, conn: sqlite3.Connection) -> bool:
         """Check if DB schema is valid. Returns False if corrupt or outdated."""
@@ -397,6 +533,13 @@ class Indexer:
         The cheap arm of marker-triggered staleness: no file re-parse, just an
         UPDATE per indexed knowledge file with the fresh fold's scores.
         """
+        try:
+            with IndexWriteLock(self.knowledge_dir):
+                return self._refresh_trust_scores_locked()
+        except IndexLockBusy:
+            return {"error": INDEX_BUSY_ERROR}
+
+    def _refresh_trust_scores_locked(self) -> dict:
         marker_state = self._trust_marker_state()
         self._trust_fold = None
         try:
@@ -420,11 +563,34 @@ class Indexer:
         return {"trust_entries_updated": len(rows)}
 
     def _rebuild_db(self) -> sqlite3.Connection:
-        """Drop and recreate the database."""
+        """Reset the index to an empty current-schema state, in place.
+
+        Returns a connection with an open write transaction: the drop, the
+        recreate, and the caller's repopulation all land in one commit, so a
+        concurrent search keeps reading the previous index for the whole
+        rebuild instead of a half-built or missing one. The caller owns the
+        commit.
+        """
+        conn = None
+        try:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            for table in self._REBUILD_DROP_ORDER:
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
+            self._create_schema(conn)
+            return conn
+        except sqlite3.DatabaseError:
+            if conn is not None:
+                conn.close()
+
+        # The file is damaged past the point where even DROP works. Replacing
+        # it is the only way back; a search landing in the gap sees nothing,
+        # which is what the damaged file was already giving it.
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
         conn = self._connect()
-        self._init_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        self._create_schema(conn)
         return conn
 
     def _collect_md_files(self) -> list[tuple[str, str]]:
@@ -708,10 +874,18 @@ class Indexer:
         """Full index of all markdown files. Returns stats dict."""
         if not os.path.isdir(self.knowledge_dir):
             return {"error": f"Directory not found: {self.knowledge_dir}"}
+        try:
+            with IndexWriteLock(self.knowledge_dir):
+                return self._index_all_locked(force)
+        except IndexLockBusy:
+            return {"error": INDEX_BUSY_ERROR}
 
+    def _index_all_locked(self, force: bool) -> dict:
         start_time = time.time()
 
-        # Open or rebuild DB
+        # Open or rebuild DB. Validating here rather than before the lock means
+        # a rebuild that completed while this call was waiting is recognized,
+        # and this call reuses it instead of repeating it.
         if force or not os.path.exists(self.db_path):
             conn = self._rebuild_db()
         else:
@@ -724,12 +898,6 @@ class Indexer:
                     self._init_schema(conn)
             except (sqlite3.DatabaseError, sqlite3.OperationalError):
                 conn = self._rebuild_db()
-
-        if force:
-            # Clear everything on force
-            conn.execute("DELETE FROM entries")
-            conn.execute("DELETE FROM file_meta")
-            conn.commit()
 
         md_files = self._collect_md_files()
         source_files = self._collect_source_files()
@@ -786,6 +954,13 @@ class Indexer:
         Must be called after build_concordance() so concordance_results are available.
         Returns stats dict with counts of entries updated.
         """
+        try:
+            with IndexWriteLock(self.knowledge_dir):
+                return self._update_structural_importance_locked()
+        except IndexLockBusy:
+            return {"error": INDEX_BUSY_ERROR}
+
+    def _update_structural_importance_locked(self) -> dict:
         conn = self._connect()
         importance_map = self._compute_structural_importance(conn)
 
@@ -862,7 +1037,13 @@ class Indexer:
         """Re-index only changed files. Returns stats dict."""
         if not os.path.isdir(self.knowledge_dir):
             return {"error": f"Directory not found: {self.knowledge_dir}"}
+        try:
+            with IndexWriteLock(self.knowledge_dir):
+                return self._incremental_index_locked()
+        except IndexLockBusy:
+            return {"error": INDEX_BUSY_ERROR}
 
+    def _incremental_index_locked(self) -> dict:
         if not os.path.exists(self.db_path):
             return self.index_all()
 
@@ -965,8 +1146,14 @@ class Indexer:
         Returns stats dict from Concordance.build_vectors().
         """
         from pk_concordance import Concordance
-        concordance = Concordance(self.db_path)
-        return concordance.build_vectors()
+        try:
+            with IndexWriteLock(self.knowledge_dir):
+                # Concordance opens its own connection to the same database;
+                # holding the lock across the call is what keeps that
+                # connection from racing another process's rebuild.
+                return Concordance(self.db_path).build_vectors()
+        except IndexLockBusy:
+            return {"error": INDEX_BUSY_ERROR}
 
     def _compute_structural_importance(self, conn: sqlite3.Connection) -> dict[tuple[str, str], dict]:
         """Compute structural importance for all entries from three sources.
@@ -1132,23 +1319,61 @@ class Searcher:
         self.knowledge_dir = os.path.abspath(knowledge_dir)
         self.db_path = os.path.join(self.knowledge_dir, DB_FILENAME)
         self.indexer = Indexer(knowledge_dir, repo_root=repo_root)
+        # Reason the most recent search could not use a current index, or None.
+        # budget_search reports it so an empty payload can say why it is empty.
+        self.degraded: str | None = None
 
-    def _ensure_index(self) -> None:
-        """Auto-index if DB missing or stale."""
+    def _index_queryable(self) -> bool:
+        """True when the index on disk can answer a search right now."""
+        if not os.path.exists(self.db_path):
+            return False
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                conn.execute("SELECT count(*) FROM entries").fetchone()
+            finally:
+                conn.close()
+        except sqlite3.DatabaseError:
+            return False
+        return True
+
+    def _ensure_index(self) -> str | None:
+        """Auto-index if DB missing or stale.
+
+        Returns None when the search can run against a current index, or one
+        of DEGRADED_REBUILDING / DEGRADED_UNAVAILABLE when it cannot. A search
+        never waits out a rebuild it could not join: it serves whatever index
+        is already on disk and names the reason.
+        """
+        self.degraded = None
         if not os.path.exists(self.db_path):
             result = self.indexer.index_all()
-            if "error" in result:
+            if result.get("error") == INDEX_BUSY_ERROR:
+                self.degraded = (
+                    DEGRADED_REBUILDING if self._index_queryable()
+                    else DEGRADED_UNAVAILABLE
+                )
+            elif "error" in result:
                 print(f"Error: {result['error']}", file=sys.stderr)
-                sys.exit(1)
-            return
+                self.degraded = DEGRADED_UNAVAILABLE
+            return self.degraded
 
         stale = self.indexer.get_stale_files()
         if stale:
-            self.indexer.incremental_index()
+            result = self.indexer.incremental_index()
         elif self.indexer.trust_rank_stale():
             # Ledger appends don't touch entry files; the marker is the only
             # signal that the cached trust_score column needs a refresh.
-            self.indexer.refresh_trust_scores()
+            result = self.indexer.refresh_trust_scores()
+        else:
+            return None
+
+        if result.get("error") == INDEX_BUSY_ERROR:
+            self.degraded = (
+                DEGRADED_REBUILDING if self._index_queryable()
+                else DEGRADED_UNAVAILABLE
+            )
+        return self.degraded
 
     @classmethod
     def _tokenize_query(cls, query: str) -> list[str]:
@@ -1262,7 +1487,10 @@ class Searcher:
             query_kind: Logged to retrieval log ("topic" | "activity"). Reserved for v2 dispatch.
         """
         search_start = time.time()
-        self._ensure_index()
+        if self._ensure_index() == DEGRADED_UNAVAILABLE:
+            # Not logged: a search that never reached an index is not a miss,
+            # and recording it as one would misreport retrieval coverage.
+            return []
 
         prepared = (
             self._prepare_query(query) if and_mode else self._prepare_or_query(query)
@@ -1476,7 +1704,8 @@ class Searcher:
         SIDE_CHANNEL_LIMIT = 3
         SIDE_CHANNEL_THRESHOLD = -0.5
         search_start = time.time()
-        self._ensure_index()
+        if self._ensure_index() == DEGRADED_UNAVAILABLE:
+            return []
 
         prepared = self._prepare_or_query(query)
 
@@ -1631,6 +1860,8 @@ class Searcher:
             include_status=include_status,
             scale_set=scale_set,
         )
+        if not raw_results:
+            return []
 
         # Build query TF-IDF vector using precomputed corpus stats
         concordance = Concordance(self.db_path)
@@ -1777,6 +2008,12 @@ class Searcher:
             titles_only: list of result dicts (heading + file_path only)
             budget_used: total chars consumed by full results
             budget_total: the budget_chars parameter
+            degraded: present only when the index could not answer normally —
+                'index-rebuilding' (another process was mid-rebuild and this
+                caller's wait ran out, so an older index answered) or
+                'index-unavailable' (no index could answer at all). Absent
+                results with no 'degraded' key mean the store genuinely had
+                no match.
         """
         results = self.composite_search(
             query=query,
@@ -1800,7 +2037,10 @@ class Searcher:
                 results, pk_retrieval.path_exclusion_set(list(exclude_paths))
             )
 
-        return pk_retrieval.partition_two_tier(results, budget_chars)
+        payload = pk_retrieval.partition_two_tier(results, budget_chars)
+        if self.degraded:
+            payload["degraded"] = self.degraded
+        return payload
 
 
 # ---------------------------------------------------------------------------

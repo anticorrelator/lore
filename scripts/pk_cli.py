@@ -32,12 +32,29 @@ from pk_search import (  # noqa: E402
     LinkChecker,
     DEFAULT_LIMIT,
     DEFAULT_THRESHOLD,
+    DEGRADED_UNAVAILABLE,
     SOURCE_TYPES,
     attach_similar_entries,
     render_trust_stamp,
 )
 from pk_resolve import Resolver, resolve_read_path  # noqa: E402
 import pk_retrieval  # noqa: E402
+
+
+def ensure_index_or_exit(searcher: Searcher) -> None:
+    """Bring the index up to date, or stop with the reason it could not be.
+
+    For commands that go on to query the index directly, an index that cannot
+    answer is fatal — they have no partial result to fall back on. A rebuild
+    running elsewhere is not fatal: the previous index still answers.
+    """
+    if searcher._ensure_index() == DEGRADED_UNAVAILABLE:
+        print(
+            "Error: no usable search index. Another process may be rebuilding "
+            "it; try again shortly.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +158,7 @@ def cmd_search(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         # Ensure index is up to date
-        searcher._ensure_index()
+        ensure_index_or_exit(searcher)
         db_path = searcher.db_path
 
         # Load all sections from the FTS5 database
@@ -367,7 +384,7 @@ def cmd_read(args: argparse.Namespace) -> None:
             return
         # For query-based read on a thread directory, search all entry files
         searcher = Searcher(knowledge_dir)
-        searcher._ensure_index()
+        ensure_index_or_exit(searcher)
         conn = sqlite3.connect(searcher.db_path)
         conn.row_factory = sqlite3.Row
         # Get entries for all files in this directory
@@ -432,7 +449,7 @@ def cmd_read(args: argparse.Namespace) -> None:
 
     # Query-based read — search FTS5 entries scoped to this file
     searcher = Searcher(knowledge_dir)
-    searcher._ensure_index()
+    ensure_index_or_exit(searcher)
 
     conn = sqlite3.connect(searcher.db_path)
     conn.row_factory = sqlite3.Row
@@ -508,7 +525,7 @@ def cmd_analyze_concordance(args: argparse.Namespace) -> None:
     from pk_concordance import Concordance
 
     searcher = Searcher(args.knowledge_dir)
-    searcher._ensure_index()
+    ensure_index_or_exit(searcher)
 
     concordance = Concordance(searcher.db_path)
     see_also_limit = getattr(args, "see_also_limit", 10)
@@ -562,7 +579,7 @@ def cmd_analyze_merge_candidates(args: argparse.Namespace) -> None:
     from pk_concordance import Concordance
 
     searcher = Searcher(args.knowledge_dir)
-    searcher._ensure_index()
+    ensure_index_or_exit(searcher)
 
     concordance = Concordance(searcher.db_path)
     threshold = getattr(args, "threshold", 0.5)
@@ -624,7 +641,7 @@ def cmd_generate_backlinks(args: argparse.Namespace) -> None:
 
     # Ensure index is up to date
     searcher = Searcher(knowledge_dir)
-    searcher._ensure_index()
+    ensure_index_or_exit(searcher)
 
     conn = sqlite3.connect(searcher.db_path)
     rows = conn.execute(
