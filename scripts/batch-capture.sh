@@ -4,11 +4,15 @@
 #
 # Input JSON format: array of objects with the same fields as `lore capture`:
 #   [{"insight": "...", "scale": "implementation", "context": "...", "category": "...",
-#     "confidence": "high", "related_files": "...", "source": "...", "example": "..."}, ...]
+#     "confidence": "high", "related_files": "...", "source": "...", "example": "...",
+#     "kind": "hypothesis", "kind_status": "untested"}, ...]
 #
 # Required fields per entry: insight, scale
-# Optional fields: context, category, confidence, related_files, source, example
+# Optional fields: context, category, confidence, related_files, source, example,
+#   kind, kind_status, where_looked, answered_by, subsystem
 #   scale must be one of: abstract, architecture, subsystem, implementation
+#   kind must be one of: fact, hypothesis, question, theory (default: fact); each kind's
+#   own fields are validated by capture.sh against scripts/kind-registry.json
 #
 # Calls capture.sh --skip-manifest for each entry, then runs update-manifest.sh once.
 
@@ -45,8 +49,10 @@ Input JSON format:
   [{"insight": "...", "scale": "implementation", "category": "...", "confidence": "high", ...}, ...]
 
 Required per entry: insight, scale
-Optional per entry: context, category, confidence, related_files, source, example
+Optional per entry: context, category, confidence, related_files, source, example,
+                    kind, kind_status, where_looked, answered_by, subsystem
 scale must be one of: abstract, architecture, subsystem, implementation
+kind must be one of: fact, hypothesis, question, theory (default: fact)
 EOF
       exit 0
       ;;
@@ -121,18 +127,25 @@ if 'scale' not in entry or not str(entry.get('scale', '')).strip():
     sys.exit(1)
 
 args = ['--insight', entry['insight'], '--scale', entry['scale']]
-if entry.get('context'):
-    args += ['--context', entry['context']]
-if entry.get('category'):
-    args += ['--category', entry['category']]
-if entry.get('confidence'):
-    args += ['--confidence', entry['confidence']]
-if entry.get('related_files'):
-    args += ['--related-files', entry['related_files']]
-if entry.get('source'):
-    args += ['--source', entry['source']]
-if entry.get('example'):
-    args += ['--example', entry['example']]
+
+# Entry field -> capture.sh flag. A field missing from this table is silently
+# dropped from the capture, so extend it whenever capture.sh gains a flag.
+PASSTHROUGH = (
+    ('context', '--context'),
+    ('category', '--category'),
+    ('confidence', '--confidence'),
+    ('related_files', '--related-files'),
+    ('source', '--source'),
+    ('example', '--example'),
+    ('kind', '--kind'),
+    ('kind_status', '--kind-status'),
+    ('where_looked', '--where-looked'),
+    ('answered_by', '--answered-by'),
+    ('subsystem', '--subsystem'),
+)
+for field, flag in PASSTHROUGH:
+    if entry.get(field):
+        args += [flag, entry[field]]
 
 os.write(1, b'\x00'.join(a.encode() for a in args))
 " "$FILE" "$i" 2>"$TMP_ERR" | xargs -0 "$SCRIPT_DIR/capture.sh" --skip-manifest > /dev/null 2>&1; then

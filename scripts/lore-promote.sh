@@ -158,6 +158,14 @@ if [[ -z "$SCALE" ]]; then
 fi
 CAPTURED_AT_SHA=$(printf '%s' "$ROW" | jq -r '.captured_at_sha // ""')
 
+# Epistemic kind and its kind-specific fields. Absent from most rows; capture.sh
+# defaults kind to `fact` and validates the rest against scripts/kind-registry.json.
+KIND=$(printf '%s' "$ROW" | jq -r '.kind // ""')
+KIND_STATUS=$(printf '%s' "$ROW" | jq -r '.kind_status // ""')
+WHERE_LOOKED=$(printf '%s' "$ROW" | jq -r '.where_looked // ""')
+ANSWERED_BY=$(printf '%s' "$ROW" | jq -r '.answered_by // ""')
+SUBSYSTEM=$(printf '%s' "$ROW" | jq -r '.subsystem // ""')
+
 # related_files: array → comma-separated string for capture.sh --related-files
 RELATED_FILES=$(printf '%s' "$ROW" | jq -r '[.related_files // [] | .[] ] | join(",")')
 
@@ -201,6 +209,11 @@ CAPTURE_ARGS=(
 [[ -n "$SOURCE_ARTIFACT_IDS" ]] && CAPTURE_ARGS+=(--source-artifact-ids "$SOURCE_ARTIFACT_IDS")
 [[ -n "$RELATED_FILES" ]]   && CAPTURE_ARGS+=(--related-files "$RELATED_FILES")
 [[ -n "$CAPTURED_AT_SHA" ]] && CAPTURE_ARGS+=(--captured-at-sha "$CAPTURED_AT_SHA")
+[[ -n "$KIND" ]]            && CAPTURE_ARGS+=(--kind "$KIND")
+[[ -n "$KIND_STATUS" ]]     && CAPTURE_ARGS+=(--kind-status "$KIND_STATUS")
+[[ -n "$WHERE_LOOKED" ]]    && CAPTURE_ARGS+=(--where-looked "$WHERE_LOOKED")
+[[ -n "$ANSWERED_BY" ]]     && CAPTURE_ARGS+=(--answered-by "$ANSWERED_BY")
+[[ -n "$SUBSYSTEM" ]]       && CAPTURE_ARGS+=(--subsystem "$SUBSYSTEM")
 
 # --- Dry-run: print planned invocation and exit ---
 if [[ $DRY_RUN -eq 1 ]]; then
@@ -257,13 +270,17 @@ fi
 # missing row is unrecoverable — let the failure fail the promotion visibly.
 # executable_falsifier rides along when the Tier-3 row carries one — the
 # producer row is its durable home (validate-tier3.sh already type-checked it).
+# The kind fields ride along the same way: this object literal enumerates what
+# it keeps, so a field absent from it never reaches the producer row.
 COMMONS_ROW=$(printf '%s' "$ROW" | jq -c --arg ep "$ENTRY_PATH" --arg wi "$WORK_ITEM" '{
   claim_id, claim, falsifier, scale,
   related_files: (.related_files // []),
   work_item: $wi,
   captured_at_sha,
   entry_path: $ep
-} + (if has("executable_falsifier") then {executable_falsifier} else {} end)')
+}
++ (if has("executable_falsifier") then {executable_falsifier} else {} end)
++ ({kind, kind_status, where_looked, answered_by, subsystem} | with_entries(select(.value != null)))')
 if ! printf '%s' "$COMMONS_ROW" \
   | "$SCRIPT_DIR/promote-commons-append.sh" --work-item "$WORK_ITEM" --entry-path "$ENTRY_PATH"; then
   die "promote-commons-append.sh rejected the producer row — promotion failed (the falsifier is unrecoverable without it)"

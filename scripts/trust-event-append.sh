@@ -50,8 +50,9 @@
 #                             it defaults to --to-entry-path and must match it
 #                             when supplied)
 #   --source <enum>           required: worker|researcher|spec-lead|
-#                             implement-lead|drift-sweep|audit|settlement|
-#                             apply-correction|renormalize|interactive|coordinator
+#                             implement-lead|drift-sweep|expire-sweep|audit|
+#                             settlement|apply-correction|renormalize|interactive|
+#                             coordinator
 #   [--observed-at <iso8601>] [--kdir <path>] [--json]
 #
 # Grounded-or-nothing: consumption-verification rows require file, line-range,
@@ -74,6 +75,13 @@
 # needed" with "wrong". `action` is part of the dedupe basis, so a
 # retire -> restore -> retire cycle appends three distinct rows.
 #
+# `result_status` distinguishes the two ways an entry leaves that set: `retired`
+# when a person judged it no longer relevant, `expired` when a clock ran out on
+# an unresolved claim. The `expire-sweep` source belongs to the second — it is
+# what expire-sweep.sh reports as, and the reason someone auditing the sweep can
+# separate its rows from anybody's hand retirement. Both are zero-weight; the
+# distinction is for the reader, not the fold.
+#
 # Dedupe: event_id = sha256 of a pipe-joined canonical basis per event kind
 # (see README). A row whose event_id already exists is a silent no-op, exit 0
 # (`"appended": false` under --json).
@@ -92,7 +100,7 @@ usage() {
 Usage: trust-event-append.sh \
            --event <mechanical-check|consumption-verification|correction|retirement|adjudication|provenance-migration|trust-confirmation> \
            --entry-path <path-relative-to-KDIR> \
-           --source <worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator> \
+           --source <worker|researcher|spec-lead|implement-lead|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator> \
            [--observed-at <iso8601>] [--kdir <path>] [--json] \
            <event-specific payload flags>
 
@@ -270,9 +278,9 @@ esac
 
 # --- Source enum ---
 case "$SOURCE_KIND" in
-  worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator) : ;;
+  worker|researcher|spec-lead|implement-lead|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator) : ;;
   "") fail "--source is required" ;;
-  *)  fail "--source must be one of worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator (got '$SOURCE_KIND')" ;;
+  *)  fail "--source must be one of worker|researcher|spec-lead|implement-lead|drift-sweep|expire-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator (got '$SOURCE_KIND')" ;;
 esac
 
 # --- Entry-path shape: KDIR-relative, no traversal ---

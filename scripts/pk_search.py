@@ -68,12 +68,14 @@ _SCALE_REGISTRY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 # Valid status values; entries without a status field are treated as "current".
 # `corrected` is in the default set: a corrected entry was rewritten to match
 # the code, which makes it more reliable than an unexamined one, not less.
-# `superseded`, `historical`, `resolved`, and `retired` mark entries kept for
-# the record rather than for use, so reaching them takes an explicit
+# `superseded`, `historical`, `resolved`, `retired`, and `expired` mark entries
+# kept for the record rather than for use, so reaching them takes an explicit
 # include_status. `retired` differs from the other three in that it names no
 # successor, carries a written falsifier, and reverses with `lore retire
-# --restore`.
-VALID_STATUS_VALUES = {"current", "corrected", "superseded", "historical", "resolved", "retired"}
+# --restore`. `expired` is what the expiry sweep sets when an entry's review
+# window elapses untouched: a clock ran out, which is a different fact about
+# the entry than someone judging it no longer relevant.
+VALID_STATUS_VALUES = {"current", "corrected", "superseded", "historical", "resolved", "retired", "expired"}
 DEFAULT_STATUS_FILTER = ("current", "corrected")
 
 # Matches the status filter dropped, totalled over every Searcher in this
@@ -124,6 +126,26 @@ def _parse_scale_set(value: str | None) -> set[str]:
     if stripped == "" or stripped == "unknown":
         return set()
     return {part.strip() for part in stripped.split(",") if part.strip()}
+
+
+# The kind an entry has when its footer declares none.
+DEFAULT_KIND = "fact"
+
+
+def _resolve_kind(value: str | None) -> str:
+    """Resolve a META kind field value to the kind it stands for.
+
+    Single-valued, unlike `scale`: an entry has one kind, so there is no comma
+    split here. A missing or blank value resolves to DEFAULT_KIND instead of to
+    an empty result — most of the store predates the field, and treating those
+    entries as kindless would make every one of them unreachable under a kind
+    filter. This is the opposite of `_parse_scale_set`, which returns the empty
+    set and lets the filter drop the entry; do not unify the two.
+    """
+    if value is None:
+        return DEFAULT_KIND
+    stripped = value.strip().lower()
+    return stripped if stripped else DEFAULT_KIND
 
 
 def _trust_compute():
@@ -371,7 +393,7 @@ class IndexWriteLock:
 class Indexer:
     """Builds and maintains the FTS5 index."""
 
-    SCHEMA_VERSION = 11  # v11: trust_score column (ledger fold cached at index time)
+    SCHEMA_VERSION = 12  # v12: kind, kind_status columns (epistemic kind from the footer)
 
     def __init__(self, knowledge_dir: str, repo_root: str | None = None):
         self.knowledge_dir = os.path.abspath(knowledge_dir)
@@ -424,6 +446,8 @@ class Indexer:
             entry_status UNINDEXED,
             template_version UNINDEXED,
             trust_score UNINDEXED,
+            kind UNINDEXED,
+            kind_status UNINDEXED,
             tokenize='porter unicode61'
         )
         """,
@@ -865,7 +889,7 @@ class Indexer:
 
         # Extract metadata for knowledge entries
         category = self._extract_category(file_path) if source_type == "knowledge" else None
-        metadata = {"learned": None, "confidence": None, "scale": None, "entry_status": None, "template_version": None}
+        metadata = {"learned": None, "confidence": None, "scale": None, "entry_status": None, "template_version": None, "kind": None, "kind_status": None}
         if source_type == "knowledge":
             try:
                 raw_text = Path(file_path).read_text(encoding="utf-8")
@@ -875,6 +899,10 @@ class Indexer:
                 metadata["scale"] = meta.get("scale")
                 metadata["entry_status"] = meta.get("entry_status")
                 metadata["template_version"] = meta.get("template_version")
+                # Stored as the footer declared it, NULL included; the read path
+                # resolves a missing kind rather than the indexer defaulting it.
+                metadata["kind"] = meta.get("kind")
+                metadata["kind_status"] = meta.get("kind_status")
             except (OSError, UnicodeDecodeError):
                 pass
 
@@ -882,8 +910,8 @@ class Indexer:
 
         for entry in entries:
             conn.execute(
-                "INSERT INTO entries (file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (entry["file_path"], entry["heading"], entry["content"], source_type, category, metadata["confidence"], metadata["learned"], 0.0, metadata["scale"], metadata["entry_status"], metadata["template_version"], trust_score),
+                "INSERT INTO entries (file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, kind, kind_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (entry["file_path"], entry["heading"], entry["content"], source_type, category, metadata["confidence"], metadata["learned"], 0.0, metadata["scale"], metadata["entry_status"], metadata["template_version"], trust_score, metadata["kind"], metadata["kind_status"]),
             )
 
         # Update file_meta
@@ -1495,6 +1523,7 @@ class Searcher:
         include_archived: bool = False,
         include_status: tuple[str, ...] | list[str] | None = None,
         scale_set: list[str] | None = None,
+        kind: str | list[str] | None = None,
         and_mode: bool = False,
         query_kind: str = "topic",
     ) -> list[dict]:
@@ -1511,6 +1540,10 @@ class Searcher:
                        category=preferences or scale=abstract bypass this filter.
             include_status: Status values to include (e.g. ["current", "superseded"]). None = DEFAULT_STATUS_FILTER.
                             Entries without a status field are treated as "current".
+            kind: Epistemic kind filter — one kind, or several to admit any of
+                  them. None = no kind filter. An entry whose footer declares no
+                  kind counts as DEFAULT_KIND, so a `kind="fact"` search reaches
+                  the entries written before the field existed.
             and_mode: When True, multi-token queries are AND-joined (legacy behavior).
                       When False (default), multi-token queries are OR-joined (D2 default).
             query_kind: Logged to retrieval log ("topic" | "activity"). Reserved for v2 dispatch.
@@ -1562,6 +1595,12 @@ class Searcher:
             {s.strip().lower() for s in scale_set if s and s.strip()} if scale_set else set()
         )
 
+        # Resolve the kind filter the same way: a set matched post-retrieval.
+        query_kinds: set[str] = set()
+        if kind:
+            requested = [kind] if isinstance(kind, str) else kind
+            query_kinds = {k.strip().lower() for k in requested if k and k.strip()}
+
         # Resolve status filter: None include_status means the default set
         effective_statuses: set[str] | None = None
         if include_status is not None:
@@ -1574,7 +1613,7 @@ class Searcher:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
 
-        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, rank"
+        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, kind, kind_status, rank"
         # Ledger-backed trust reaches ranking here — plain search() — so that
         # default `lore search`, prefetch, and the composite path (which all
         # fetch through this method) get it from one term. rank is negative:
@@ -1629,6 +1668,7 @@ class Searcher:
             entry_scale = row["scale"]  # may be None or "unknown"
             entry_status_val = row["entry_status"]  # may be None (treat as "current")
             entry_category = row["category"]  # may be None
+            entry_kind = _resolve_kind(row["kind"])  # NULL kind resolves to DEFAULT_KIND
 
             # Scale filter: set-membership matching with bypass for horizontal entries.
             # An entry bypasses the scale filter when category=preferences (horizontal
@@ -1644,6 +1684,13 @@ class Searcher:
                         continue
                     if not (entry_scale_set & query_scale_set):
                         continue
+
+            # Kind filter: membership against the resolved kind, so entries with
+            # no kind in their footer answer to `fact` rather than dropping out.
+            # No bypass list — a kind is a property of the claim itself, which
+            # every entry has whether or not it says so.
+            if query_kinds and entry_kind not in query_kinds:
+                continue
 
             # Status filter: entries without a status field are treated as
             # "current". It runs last so status_excluded counts only entries
@@ -1681,6 +1728,8 @@ class Searcher:
                 "entry_status": effective_entry_status,
                 "template_version": row["template_version"],
                 "trust_score": row["trust_score"] if row["trust_score"] is not None else 0.0,
+                "kind": entry_kind,
+                "kind_status": row["kind_status"],
                 "score": round(score, 4),
                 "snippet": snippet,
                 "correction_recency": _parse_correction_recency(abs_path),
@@ -1767,7 +1816,7 @@ class Searcher:
 
         # trust_score is selected for result-shape parity with search();
         # side-channel ordering deliberately stays plain BM25 rank.
-        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, rank"
+        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, kind, kind_status, rank"
 
         # Pull a generous batch so README skip + threshold drop + status filter
         # still leaves SIDE_CHANNEL_LIMIT survivors when matches exist.
@@ -1849,6 +1898,8 @@ class Searcher:
                 "entry_status": effective_entry_status,
                 "template_version": row["template_version"],
                 "trust_score": row["trust_score"] if row["trust_score"] is not None else 0.0,
+                "kind": _resolve_kind(row["kind"]),
+                "kind_status": row["kind_status"],
                 "score": round(score, 4),
                 "snippet": snippet,
                 "correction_recency": _parse_correction_recency(abs_path),

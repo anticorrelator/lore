@@ -154,6 +154,24 @@ derive_entry_title() {
   echo "$text" | LC_ALL=C awk '{for(i=1;i<=NF && i<=8;i++){$i=toupper(substr($i,1,1)) substr($i,2)}; NF=(NF>8?8:NF); print}'
 }
 
+# --- sanitize_footer_value ---
+# Make a value safe for the single-line HTML metadata footer of a knowledge
+# entry. Three characters cannot survive there: "|" separates footer fields, ">"
+# ends the comment (and terminates the value class the primary parser uses), and
+# a newline or tab breaks the one-line shape the positional parsers assume. Each
+# is replaced with a space, runs of spaces are collapsed, and the result is
+# trimmed — so a value that contains none of them comes back unchanged.
+#
+# Short values belong in the footer; long-form prose does not. Put that in the
+# entry body under a heading instead.
+# Usage: safe=$(sanitize_footer_value "$raw")
+sanitize_footer_value() {
+  printf '%s' "$1" \
+    | tr '|>\n\t' '    ' \
+    | tr -s ' ' \
+    | sed 's/^ *//;s/ *$//'
+}
+
 # --- resolve_knowledge_dir ---
 # Resolve the knowledge store directory for the current project.
 # Usage: KDIR=$(resolve_knowledge_dir)

@@ -3,6 +3,7 @@
 # Usage: lore capture --insight "..." --scale "<bucket>" [--context "..."] [--category "..."] [--confidence "..."] [--related-files "..."] [--source "..."] [--example "..."]
 #        [--producer-role "..."] [--protocol-slot "..."] [--template-version "..."] [--capturer-role "..."] [--source-artifact-ids "..."]
 #        [--captured-at-branch "..."] [--captured-at-sha "..."] [--captured-at-merge-base-sha "..."] [--work-item "..."]
+#        [--kind "<kind>"] [--kind-status "<value>"] [--where-looked "..."] [--answered-by "..."] [--subsystem "..."]
 #        [--executable-falsifier '<json>'] [--kdir "<path>"]
 #
 # Writes an individual entry file to the category directory (e.g., conventions/<slug>.md).
@@ -32,6 +33,22 @@
 #   --scale <bucket>  Required. One of: abstract, architecture, subsystem, implementation (single label),
 #     or two adjacent labels comma-delimited (e.g. "subsystem,implementation").
 #     The caller declares scale explicitly; no formula derivation at capture time.
+#
+# Epistemic kind:
+#   --kind <kind>  What sort of claim the entry makes: fact, hypothesis, question, or theory.
+#     Defaults to `fact`, which is what every entry written before this field existed is.
+#     The vocabulary and each kind's own fields come from scripts/kind-registry.json.
+#   --kind-status <value>  The kind's lifecycle state — untested|supported|refuted for a
+#     hypothesis, open|answered|dissolved for a question. Required for those two kinds and
+#     rejected for the others. Deliberately NOT named `status`: that key already carries
+#     entry lifecycle, and its default retrieval filter admits only `current` and
+#     `corrected`, so an entry written as `status: untested` disappears from every
+#     unfiltered search.
+#   --where-looked <text>  Question only, optional. Where someone already looked.
+#   --answered-by <text>   Question only, optional. What answered the question.
+#   --subsystem <name>     Theory only, required. The subsystem the theory is about.
+#   Values bound for the footer are sanitized (see lib.sh sanitize_footer_value) —
+#   long-form context belongs in the entry body under a heading, not here.
 #
 # Executable falsifier (optional):
 #   --executable-falsifier '<json>'  Optional object {command, expected_output_shape[, root]}.
@@ -70,6 +87,11 @@ CAPTURED_AT_SHA=""
 CAPTURED_AT_MERGE_BASE_SHA=""
 WORK_ITEM=""
 SCALE=""
+KIND=""
+KIND_STATUS=""
+WHERE_LOOKED=""
+ANSWERED_BY=""
+SUBSYSTEM=""
 EXECUTABLE_FALSIFIER=""
 JSON_MODE=0
 SKIP_MANIFEST=0
@@ -149,6 +171,46 @@ while [[ $# -gt 0 ]]; do
       SCALE="${1#--scale=}"
       shift
       ;;
+    --kind)
+      KIND="$2"
+      shift 2
+      ;;
+    --kind=*)
+      KIND="${1#--kind=}"
+      shift
+      ;;
+    --kind-status)
+      KIND_STATUS="$2"
+      shift 2
+      ;;
+    --kind-status=*)
+      KIND_STATUS="${1#--kind-status=}"
+      shift
+      ;;
+    --where-looked)
+      WHERE_LOOKED="$2"
+      shift 2
+      ;;
+    --where-looked=*)
+      WHERE_LOOKED="${1#--where-looked=}"
+      shift
+      ;;
+    --answered-by)
+      ANSWERED_BY="$2"
+      shift 2
+      ;;
+    --answered-by=*)
+      ANSWERED_BY="${1#--answered-by=}"
+      shift
+      ;;
+    --subsystem)
+      SUBSYSTEM="$2"
+      shift 2
+      ;;
+    --subsystem=*)
+      SUBSYSTEM="${1#--subsystem=}"
+      shift
+      ;;
     --executable-falsifier)
       EXECUTABLE_FALSIFIER="$2"
       shift 2
@@ -167,7 +229,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--producer-role \"...\"] [--protocol-slot \"...\"] [--template-version \"...\"] [--capturer-role \"...\"] [--source-artifact-ids \"...\"] [--captured-at-branch \"...\"] [--captured-at-sha \"...\"] [--captured-at-merge-base-sha \"...\"] [--work-item \"...\"] [--executable-falsifier '<json>'] [--kdir <path>] [--json] [--skip-manifest]" >&2
+      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--producer-role \"...\"] [--protocol-slot \"...\"] [--template-version \"...\"] [--capturer-role \"...\"] [--source-artifact-ids \"...\"] [--captured-at-branch \"...\"] [--captured-at-sha \"...\"] [--captured-at-merge-base-sha \"...\"] [--work-item \"...\"] [--kind \"...\"] [--kind-status \"...\"] [--where-looked \"...\"] [--answered-by \"...\"] [--subsystem \"...\"] [--executable-falsifier '<json>'] [--kdir <path>] [--json] [--skip-manifest]" >&2
       exit 1
       ;;
   esac
@@ -259,6 +321,113 @@ if [[ $_scale_count -eq 2 ]]; then
     SCALE="$_second,$_first"
   else
     SCALE="$_first,$_second"
+  fi
+fi
+
+# --- Epistemic kind ---
+# The vocabulary, each kind's lifecycle values, and each kind's footer fields all
+# come from scripts/kind-registry.json so the writer and any later validator read
+# one list. The fallback keeps capture working if the registry read fails.
+_VALID_KINDS=$("$SCRIPT_DIR/kind-registry.sh" get-ids 2>/dev/null || printf '%s\n' fact hypothesis question theory)
+
+_format_enum_list() {
+  echo "$1" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//' | sed 's/ /, /g'
+}
+
+# Kind refusals carry the script's own bracketed prefix; die() emits an
+# unprefixed "Error:" line.
+refuse_kind() {
+  local msg="$1"
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "$msg"
+  fi
+  echo "[capture] Error: $msg" >&2
+  exit 1
+}
+
+if [[ -z "$KIND" ]]; then
+  KIND="fact"
+fi
+
+_kind_valid=0
+for _k in $_VALID_KINDS; do
+  if [[ "$KIND" == "$_k" ]]; then
+    _kind_valid=1
+    break
+  fi
+done
+if [[ $_kind_valid -eq 0 ]]; then
+  refuse_kind "--kind \"$KIND\" is not a registered kind id; one of: $(_format_enum_list "$_VALID_KINDS")"
+fi
+
+_registry_readable=1
+_kind_fields=$("$SCRIPT_DIR/kind-registry.sh" get-fields "$KIND" 2>/dev/null) || _registry_readable=0
+_kind_required=$("$SCRIPT_DIR/kind-registry.sh" get-required-fields "$KIND" 2>/dev/null) || _registry_readable=0
+_kind_statuses=$("$SCRIPT_DIR/kind-registry.sh" get-statuses "$KIND" 2>/dev/null) || _registry_readable=0
+
+# An unreadable registry leaves every per-kind declaration empty, which reads as
+# "this kind has no fields" and would refuse legal flags. `fact` genuinely
+# declares none, so a default capture still lands; any other kind is refused
+# rather than validated against nothing.
+if [[ $_registry_readable -eq 0 ]]; then
+  if [[ "$KIND" != "fact" || -n "$KIND_STATUS$WHERE_LOOKED$ANSWERED_BY$SUBSYSTEM" ]]; then
+    refuse_kind "cannot read the kind registry at $SCRIPT_DIR/kind-registry.json, so --kind \"$KIND\" and its fields cannot be validated"
+  fi
+fi
+
+kind_accepts_field() {
+  local field="$1" known
+  for known in $_kind_fields; do
+    [[ "$field" == "$known" ]] && return 0
+  done
+  return 1
+}
+
+# A kind-specific flag passed against a kind that has no such field would be
+# dropped from the footer without a word — refuse instead of writing an entry
+# that silently lost part of what the caller declared.
+if [[ -n "$KIND_STATUS" ]] && ! kind_accepts_field kind_status; then
+  refuse_kind "--kind-status does not apply to --kind \"$KIND\"; it belongs to hypothesis and question entries"
+fi
+if [[ -n "$WHERE_LOOKED" ]] && ! kind_accepts_field where_looked; then
+  refuse_kind "--where-looked does not apply to --kind \"$KIND\"; it belongs to question entries"
+fi
+if [[ -n "$ANSWERED_BY" ]] && ! kind_accepts_field answered_by; then
+  refuse_kind "--answered-by does not apply to --kind \"$KIND\"; it belongs to question entries"
+fi
+if [[ -n "$SUBSYSTEM" ]] && ! kind_accepts_field subsystem; then
+  refuse_kind "--subsystem does not apply to --kind \"$KIND\"; it belongs to theory entries"
+fi
+
+for _rf in $_kind_required; do
+  case "$_rf" in
+    kind_status)
+      if [[ -z "$KIND_STATUS" ]]; then
+        refuse_kind "--kind-status is required for --kind \"$KIND\"; one of: $(_format_enum_list "$_kind_statuses")"
+      fi
+      ;;
+    where_looked)
+      [[ -n "$WHERE_LOOKED" ]] || refuse_kind "--where-looked is required for --kind \"$KIND\""
+      ;;
+    answered_by)
+      [[ -n "$ANSWERED_BY" ]] || refuse_kind "--answered-by is required for --kind \"$KIND\""
+      ;;
+    subsystem)
+      [[ -n "$SUBSYSTEM" ]] || refuse_kind "--subsystem is required for --kind \"$KIND\" — a theory is a claim about one named subsystem"
+      ;;
+  esac
+done
+
+if [[ -n "$KIND_STATUS" ]]; then
+  _kind_status_valid=0
+  for _ks in $_kind_statuses; do
+    if [[ "$KIND_STATUS" == "$_ks" ]]; then
+      _kind_status_valid=1
+      break
+    fi
+  done
+  if [[ $_kind_status_valid -eq 0 ]]; then
+    refuse_kind "--kind-status \"$KIND_STATUS\" is not valid for --kind \"$KIND\"; one of: $(_format_enum_list "$_kind_statuses")"
   fi
 fi
 
@@ -372,31 +541,56 @@ TARGET_DIR="$KNOWLEDGE_DIR/$CATEGORY"
 mkdir -p "$TARGET_DIR"
 
 # --- Build metadata comment ---
-META="<!-- learned: $DATE_TODAY | confidence: $CONFIDENCE | source: $SOURCE"
+# Every value passes through sanitize_footer_value on its way in: the footer is
+# one line of " | "-joined pairs with no escaping anywhere, so a "|" or ">" in
+# any value splits or truncates that field for all six footer parsers.
+append_meta() {
+  META="$META | $1: $(sanitize_footer_value "$2")"
+}
+
+META="<!-- learned: $DATE_TODAY"
+append_meta confidence "$CONFIDENCE"
+append_meta source "$SOURCE"
 if [[ -n "$RELATED_FILES" ]]; then
-  META="$META | related_files: $RELATED_FILES"
+  append_meta related_files "$RELATED_FILES"
 fi
 if [[ -n "$PRODUCER_ROLE" ]]; then
-  META="$META | producer_role: $PRODUCER_ROLE"
+  append_meta producer_role "$PRODUCER_ROLE"
 fi
 if [[ -n "$PROTOCOL_SLOT" ]]; then
-  META="$META | protocol_slot: $PROTOCOL_SLOT"
+  append_meta protocol_slot "$PROTOCOL_SLOT"
 fi
 if [[ -n "$TEMPLATE_VERSION" ]]; then
-  META="$META | template_version: $TEMPLATE_VERSION"
+  append_meta template_version "$TEMPLATE_VERSION"
 fi
 if [[ -n "$CAPTURER_ROLE" ]]; then
-  META="$META | capturer_role: $CAPTURER_ROLE"
+  append_meta capturer_role "$CAPTURER_ROLE"
 fi
 if [[ -n "$SOURCE_ARTIFACT_IDS" ]]; then
-  META="$META | source_artifact_ids: $SOURCE_ARTIFACT_IDS"
+  append_meta source_artifact_ids "$SOURCE_ARTIFACT_IDS"
 fi
 if [[ -n "$WORK_ITEM" ]]; then
-  META="$META | work_item: $WORK_ITEM"
+  append_meta work_item "$WORK_ITEM"
 fi
 
-# Scale is always declared by the caller — emit directly.
-META="$META | scale: $SCALE"
+# Scale is always declared by the caller.
+append_meta scale "$SCALE"
+
+# Kind is always emitted, defaulted to `fact` above. Its kind-specific fields
+# follow only for the kinds that declare them.
+append_meta kind "$KIND"
+if [[ -n "$KIND_STATUS" ]]; then
+  append_meta kind_status "$KIND_STATUS"
+fi
+if [[ -n "$WHERE_LOOKED" ]]; then
+  append_meta where_looked "$WHERE_LOOKED"
+fi
+if [[ -n "$ANSWERED_BY" ]]; then
+  append_meta answered_by "$ANSWERED_BY"
+fi
+if [[ -n "$SUBSYSTEM" ]]; then
+  append_meta subsystem "$SUBSYSTEM"
+fi
 
 # Branch-provenance trio (always emitted). Fill from git when the caller did
 # not pass an explicit value; fall back to "null" on any git failure so capture
@@ -410,9 +604,9 @@ fi
 if [[ -z "$CAPTURED_AT_MERGE_BASE_SHA" ]]; then
   CAPTURED_AT_MERGE_BASE_SHA=$(captured_at_merge_base_sha)
 fi
-META="$META | captured_at_branch: $CAPTURED_AT_BRANCH"
-META="$META | captured_at_sha: $CAPTURED_AT_SHA"
-META="$META | captured_at_merge_base_sha: $CAPTURED_AT_MERGE_BASE_SHA"
+append_meta captured_at_branch "$CAPTURED_AT_BRANCH"
+append_meta captured_at_sha "$CAPTURED_AT_SHA"
+append_meta captured_at_merge_base_sha "$CAPTURED_AT_MERGE_BASE_SHA"
 META="$META | status: current"
 META="$META -->"
 

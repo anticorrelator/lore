@@ -270,3 +270,85 @@ def test_malformed_json_lines_skipped(tmp_path):
     _, _, per_entry_counts, _ = parse_retrieval_log(str(log_file))
     assert per_entry_counts["conventions/a.md"] == 1
     assert per_entry_counts["gotchas/b.md"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Epistemic-kind holds on the cold list
+# ---------------------------------------------------------------------------
+
+analyze_usage = usage_analyze.analyze_usage
+
+UNTESTED = "conventions/untested-hypothesis.md"
+FACT = "conventions/plain-fact.md"
+
+
+def write_kind_store(tmp_path):
+    """A store holding one untested hypothesis and one plain fact.
+
+    The retrieval log records a single load of the hypothesis, so the report's
+    per-entry counts come from loaded_paths rather than the FTS5 replay fallback,
+    and a caller can tell a preserved count from a zeroed one.
+    """
+    conventions = tmp_path / "conventions"
+    conventions.mkdir()
+    (tmp_path / UNTESTED).write_text(
+        "# Untested Hypothesis\n\nBody prose.\n"
+        "<!-- learned: 2025-06-01 | confidence: medium | scale: subsystem "
+        "| kind: hypothesis | kind_status: untested | status: current -->\n",
+        encoding="utf-8",
+    )
+    (tmp_path / FACT).write_text(
+        "# Plain Fact\n\nBody prose.\n"
+        "<!-- learned: 2025-06-01 | confidence: high | scale: subsystem "
+        "| kind: fact | status: current -->\n",
+        encoding="utf-8",
+    )
+    meta = tmp_path / "_meta"
+    meta.mkdir()
+    (meta / "retrieval-log.jsonl").write_text(
+        json.dumps({
+            "timestamp": "2026-08-01T00:00:00Z",
+            "budget_used": 100, "budget_total": 8000,
+            "loaded_paths": [UNTESTED],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    return str(tmp_path)
+
+
+def test_unresolved_kind_held_out_of_the_cold_list(tmp_path):
+    """The cold list feeds cleanup candidacy, so an unsettled entry is reported apart from it."""
+    report = analyze_usage(write_kind_store(tmp_path), cold_threshold=1)
+
+    assert FACT in report["cold_entries"]
+    assert UNTESTED not in report["cold_entries"]
+    assert [h["path"] for h in report["prune_holds"]["held"]] == [UNTESTED]
+    assert report["prune_holds"]["registry_available"] is True
+    assert report["summary"]["kind_held_count"] == 1
+    assert report["summary"]["cold_entry_count"] == len(report["cold_entries"])
+
+
+def test_held_entry_keeps_its_real_access_count(tmp_path):
+    """Holding an entry back from cleanup must not hide it from staleness scoring.
+
+    staleness-scan reads entry_access for its usage-freshness signal, so a held
+    entry has to stay there carrying the count it actually earned.
+    """
+    report = analyze_usage(write_kind_store(tmp_path), cold_threshold=1)
+
+    assert report["entry_access"][UNTESTED]["retrieval_count"] == 1
+    assert report["entry_access"][FACT]["retrieval_count"] == 0
+    assert report["summary"]["total_entries"] == 2
+
+
+def test_unreadable_kind_registry_is_reported_not_assumed_empty(tmp_path, monkeypatch, capsys):
+    """Losing the kind reader falls back to pre-kind behavior, and says so."""
+    knowledge_dir = write_kind_store(tmp_path)
+    monkeypatch.setattr(usage_analyze, "_load_kind_reader", lambda: None)
+
+    report = analyze_usage(knowledge_dir, cold_threshold=1)
+
+    assert report["prune_holds"]["registry_available"] is False
+    assert report["prune_holds"]["held"] == []
+    assert UNTESTED in report["cold_entries"]
+    assert "kind registry unreadable" in capsys.readouterr().err

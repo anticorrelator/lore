@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "kinds": [
+    {
+      "id": "fact",
+      "label": "fact",
+      "ordinal": 1,
+      "aliases": [],
+      "kind_statuses": [],
+      "required_fields": [],
+      "optional_fields": []
+    },
+    {
+      "id": "hypothesis",
+      "label": "hypothesis",
+      "ordinal": 2,
+      "aliases": [],
+      "kind_statuses": ["untested", "supported", "refuted"],
+      "required_fields": ["kind_status"],
+      "optional_fields": []
+    },
+    {
+      "id": "question",
+      "label": "question",
+      "ordinal": 3,
+      "aliases": [],
+      "kind_statuses": ["open", "answered", "dissolved"],
+      "required_fields": ["kind_status"],
+      "optional_fields": ["where_looked", "answered_by"]
+    },
+    {
+      "id": "theory",
+      "label": "theory",
+      "ordinal": 4,
+      "aliases": [],
+      "kind_statuses": [],
+      "required_fields": ["subsystem"],
+      "optional_fields": []
+    }
+  ],
+  "labels": {
+    "fact": "fact",
+    "hypothesis": "hypothesis",
+    "question": "question",
+    "theory": "theory"
+  }
+}

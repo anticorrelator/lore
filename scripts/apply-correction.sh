@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # apply-correction.sh — Apply a correction, mark an entry disputed, retire or
-# restore an entry, add a new entry, or advance an entry's confidence in the
-# knowledge commons.
+# restore an entry, record a corroboration, move an entry's epistemic lifecycle
+# state, add a new entry, or advance an entry's confidence in the knowledge
+# commons.
 #
-# Six modes, keyed on --add-entry / --advance-confidence / --dispute /
-# --retire / --restore (default: mutate):
+# Eight modes, keyed on --add-entry / --advance-confidence / --corroborate /
+# --dispute / --retire / --restore / --set-kind-status (default: mutate):
 #
 # Retire mode:
 #   apply-correction.sh --retire
@@ -13,6 +14,7 @@
 #                        --allow-peer-verification
 #                        --reason "<why it no longer earns its place>"
 #                        --falsifier "<what would show this was wrong>"
+#                        [--result-status <retired|expired>]
 #                        [--superseded-by <path>]
 #                        [--reported-by <role>] [--work-item <slug>]
 #                        [--date <YYYY-MM-DD>]
@@ -24,6 +26,30 @@
 #                        --verdict-source peer-verification
 #                        --allow-peer-verification
 #                        --note "<what the entry is needed for>"
+#                        [--reported-by <role>] [--work-item <slug>]
+#                        [--date <YYYY-MM-DD>]
+#                        [--dry-run]
+#
+# Corroborate mode:
+#   apply-correction.sh --corroborate
+#                        --entry <path>
+#                        --verdict-source peer-verification
+#                        --allow-peer-verification
+#                        --direction <supports|undermines>
+#                        --corroboration-source "<who or what observed it>"
+#                        --corroboration-note "<what was seen and why it counts>"
+#                        [--observed-at <YYYY-MM-DD>]
+#                        [--reported-by <role>] [--work-item <slug>]
+#                        [--date <YYYY-MM-DD>]
+#                        [--dry-run]
+#
+# Set-kind-status mode:
+#   apply-correction.sh --set-kind-status
+#                        --entry <path>
+#                        --verdict-source peer-verification
+#                        --allow-peer-verification
+#                        --kind-status <value legal for the entry's kind>
+#                        --kind-status-note "<what moved it>"
 #                        [--reported-by <role>] [--work-item <slug>]
 #                        [--date <YYYY-MM-DD>]
 #                        [--dry-run]
@@ -114,8 +140,14 @@
 # reason and the falsifier — the fact that would show the retirement was wrong
 # — sets `status: retired`, and appends a retirements[] provenance item
 # recording the status the entry held before. The file, its backlinks, and its
-# ledger history all stay where they are. Idempotent: an entry already carrying
-# `status: retired` is a no-op that reports the recorded retirement id.
+# ledger history all stay where they are. Idempotent: an entry already out of
+# the default result set is a no-op that reports the recorded retirement id.
+#
+# --result-status expired records the same transition under the `expired` status
+# instead. The two are kept apart on purpose: a clock ran out versus a person
+# judged the entry no longer relevant, and someone auditing what a sweep did
+# needs to tell them apart. Everything else — the marker, the provenance item,
+# the prior status, --restore — behaves identically.
 #
 # Restore mode: reverses a retirement. It writes a dated marker naming why the
 # entry is wanted again and returns `status:` to the prior_status recorded on
@@ -123,9 +155,27 @@
 # Restoration takes a note and nothing else: no confidence, no evidence scope,
 # no check on who retired it. Idempotent the same way retirement is.
 #
-# Retirement ids derive from <rel_path>|<action>|<index-in-that-array>, so a
-# repeated invocation converges on the record it already wrote and a
+# Retirement ids derive from <rel_path>|<result-status>|<index-in-that-array>,
+# so a repeated invocation converges on the record it already wrote and a
 # retire -> restore -> retire cycle produces distinct ids.
+#
+# Corroborate mode: records one observation for or against a hypothesis as an
+# item in the entry's corroborations[] array. Nothing else moves — the claim's
+# lifecycle state is a separate decision made through --set-kind-status, because
+# one observation pointing somewhere is not the same as someone judging the
+# question settled. Corroboration ids derive from
+# <rel_path>|<observed_at>|<source>|<direction>: two observations of the same
+# hypothesis from the same source on the same day pointing the same way are one
+# observation, and re-running converges on the item already written. The note
+# text sits outside that basis, so re-wording an existing observation does not
+# make it a second data point.
+#
+# Set-kind-status mode: moves an entry's `kind_status` — the epistemic lifecycle
+# of the claim, distinct from the `status` field that governs retrieval — and
+# appends a kind_status_transitions[] provenance item recording where it came
+# from and what moved it. The legal values come from the entry's own `kind` via
+# kind-registry.sh, so a hypothesis cannot be moved to a question's state.
+# Idempotent: an entry already at the requested value is a no-op.
 #
 # Dispute mode: records that a reader found the entry contradicted but could
 # not carry the repair. It appends a dated marker to the entry body — so the
@@ -167,9 +217,10 @@
 #   0 — success
 #   1 — usage error
 #   2 — entry not found, superseded_text not found in body, add-entry path
-#       conflict, or a retire/restore the entry's recorded state cannot carry
+#       conflict, or a transition the entry's recorded state cannot carry
 #       (restoring an entry that is not retired; a retired entry whose
-#       retirements[] record is missing)
+#       retirements[] record is missing; a kind_status move on an entry whose
+#       kind has no lifecycle)
 #   3 — META block not found (unexpected entry format)
 #   4 — verdict not authorized (write gate rejected)
 
@@ -195,8 +246,17 @@ ADVANCE_CONFIDENCE_MODE=0
 DISPUTE_MODE=0
 RETIRE_MODE=0
 RESTORE_MODE=0
+CORROBORATE_MODE=0
+SET_KIND_STATUS_MODE=0
 RETIRE_REASON=""
 RETIRE_FALSIFIER=""
+RETIRE_RESULT_STATUS="retired"
+CORROBORATION_DIRECTION=""
+CORROBORATION_SOURCE=""
+CORROBORATION_NOTE=""
+OBSERVED_AT=""
+KIND_STATUS=""
+KIND_STATUS_NOTE=""
 RESTORE_NOTE=""
 SUPERSEDED_BY=""
 OBSERVATION_ID=""
@@ -217,7 +277,30 @@ Retire mode:
                        --allow-peer-verification
                        --reason "<why it no longer earns its place>"
                        --falsifier "<what would show this was wrong>"
+                       [--result-status <retired|expired>]
                        [--superseded-by <path>]
+                       [--reported-by <role>] [--work-item <slug>]
+                       [--date <YYYY-MM-DD>]
+                       [--dry-run]
+
+Corroborate mode:
+  apply-correction.sh --corroborate --entry <path>
+                       --verdict-source peer-verification
+                       --allow-peer-verification
+                       --direction <supports|undermines>
+                       --corroboration-source "<who or what observed it>"
+                       --corroboration-note "<what was seen and why it counts>"
+                       [--observed-at <YYYY-MM-DD>]
+                       [--reported-by <role>] [--work-item <slug>]
+                       [--date <YYYY-MM-DD>]
+                       [--dry-run]
+
+Set-kind-status mode:
+  apply-correction.sh --set-kind-status --entry <path>
+                       --verdict-source peer-verification
+                       --allow-peer-verification
+                       --kind-status <value legal for the entry's kind>
+                       --kind-status-note "<what moved it>"
                        [--reported-by <role>] [--work-item <slug>]
                        [--date <YYYY-MM-DD>]
                        [--dry-run]
@@ -313,7 +396,21 @@ Optional:
                                its place in default retrieval
   --falsifier TEXT             [retire mode only] What would show the retirement
                                was wrong
+  --result-status VALUE        [retire mode only] 'retired' (default) or
+                               'expired' — the status the entry lands on
   --superseded-by PATH         [retire mode only] Entry that now says it better
+  --direction VALUE            [corroborate mode only] 'supports' or
+                               'undermines' — which way the observation points
+  --corroboration-source TEXT  [corroborate mode only] Who or what observed it
+  --corroboration-note TEXT    [corroborate mode only] What was seen and why it
+                               counts; outside the dedupe basis, so re-wording
+                               an observation does not add a second one
+  --observed-at YYYY-MM-DD     [corroborate mode only] When it was observed
+                               (default: the record date)
+  --kind-status VALUE          [set-kind-status mode only] The entry's new
+                               epistemic lifecycle state; legal values come from
+                               the entry's own kind via kind-registry.sh
+  --kind-status-note TEXT      [set-kind-status mode only] What moved it
   --note TEXT                  [restore mode only] What the entry is needed for
   --reported-by ROLE           [dispute/retire/restore modes] Role that observed it
   --work-item SLUG             [dispute/retire/restore modes] Work item it was
@@ -408,6 +505,42 @@ while [[ $# -gt 0 ]]; do
       RETIRE_FALSIFIER="$2"
       shift 2
       ;;
+    --result-status)
+      RETIRE_RESULT_STATUS="$2"
+      shift 2
+      ;;
+    --corroborate)
+      CORROBORATE_MODE=1
+      shift
+      ;;
+    --direction)
+      CORROBORATION_DIRECTION="$2"
+      shift 2
+      ;;
+    --corroboration-source)
+      CORROBORATION_SOURCE="$2"
+      shift 2
+      ;;
+    --corroboration-note)
+      CORROBORATION_NOTE="$2"
+      shift 2
+      ;;
+    --observed-at)
+      OBSERVED_AT="$2"
+      shift 2
+      ;;
+    --set-kind-status)
+      SET_KIND_STATUS_MODE=1
+      shift
+      ;;
+    --kind-status)
+      KIND_STATUS="$2"
+      shift 2
+      ;;
+    --kind-status-note)
+      KIND_STATUS_NOTE="$2"
+      shift 2
+      ;;
     --note)
       RESTORE_NOTE="$2"
       shift 2
@@ -461,8 +594,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Validate required args (per mode) ---
-if [[ $((ADD_ENTRY_MODE + ADVANCE_CONFIDENCE_MODE + DISPUTE_MODE + RETIRE_MODE + RESTORE_MODE)) -gt 1 ]]; then
-  echo "Error: --add-entry, --advance-confidence, --dispute, --retire, and --restore are mutually exclusive" >&2
+if [[ $((ADD_ENTRY_MODE + ADVANCE_CONFIDENCE_MODE + CORROBORATE_MODE + DISPUTE_MODE + RETIRE_MODE + RESTORE_MODE + SET_KIND_STATUS_MODE)) -gt 1 ]]; then
+  echo "Error: --add-entry, --advance-confidence, --corroborate, --dispute, --retire, --restore, and --set-kind-status are mutually exclusive" >&2
   exit 1
 fi
 
@@ -476,10 +609,11 @@ if [[ "$ALLOW_PEER_VERIFICATION" == "1" && "$ALLOW_SETTLEMENT_VERDICT" == "1" ]]
   exit 1
 fi
 if [[ "$ALLOW_PEER_VERIFICATION" == "1" ]]; then
-  # Retirement records key to the entry's own retirement history rather than to
-  # an observation, so they are the one peer-authorized path with no
-  # observation to name.
-  if [[ -z "$OBSERVATION_ID" && "$RETIRE_MODE" != "1" && "$RESTORE_MODE" != "1" ]]; then
+  # Retirement, corroboration, and kind-status records key to the entry's own
+  # history rather than to an observation, so they are the peer-authorized paths
+  # with no observation to name.
+  if [[ -z "$OBSERVATION_ID" && "$RETIRE_MODE" != "1" && "$RESTORE_MODE" != "1" \
+        && "$CORROBORATE_MODE" != "1" && "$SET_KIND_STATUS_MODE" != "1" ]]; then
     echo "Error: --allow-peer-verification requires --observation-id" >&2
     exit 1
   fi
@@ -519,6 +653,13 @@ if [[ "$RETIRE_MODE" == "1" || "$RESTORE_MODE" == "1" ]]; then
       echo "Error: --note applies only to --restore mode" >&2
       exit 1
     fi
+    case "$RETIRE_RESULT_STATUS" in
+      retired|expired) : ;;
+      *)
+        echo "Error: --result-status must be 'retired' or 'expired' (got '$RETIRE_RESULT_STATUS')" >&2
+        exit 1
+        ;;
+    esac
   else
     if is_blank "$RESTORE_NOTE"; then
       echo "Error: --note is required in --restore mode: say what the entry is needed for" >&2
@@ -530,6 +671,74 @@ if [[ "$RETIRE_MODE" == "1" || "$RESTORE_MODE" == "1" ]]; then
         exit 1
       fi
     done
+    if [[ "$RETIRE_RESULT_STATUS" != "retired" ]]; then
+      echo "Error: --result-status applies only to --retire mode; a restore returns the entry to its recorded prior status" >&2
+      exit 1
+    fi
+  fi
+elif [[ "$CORROBORATE_MODE" == "1" ]]; then
+  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
+    echo "Error: --corroborate forbids --superseded-text, --replacement-text, --title, --body, --scale" >&2
+    usage
+    exit 1
+  fi
+  if [[ "$ALLOW_PEER_VERIFICATION" != "1" ]]; then
+    echo "Error: --corroborate requires --allow-peer-verification" >&2
+    exit 1
+  fi
+  if [[ -z "$ENTRY_PATH" ]]; then
+    echo "Error: --entry is required in --corroborate mode" >&2
+    usage
+    exit 1
+  fi
+  case "$CORROBORATION_DIRECTION" in
+    supports|undermines) : ;;
+    "")
+      echo "Error: --direction is required in --corroborate mode: 'supports' or 'undermines'" >&2
+      exit 1
+      ;;
+    *)
+      echo "Error: --direction must be 'supports' or 'undermines' (got '$CORROBORATION_DIRECTION')" >&2
+      exit 1
+      ;;
+  esac
+  if is_blank "$CORROBORATION_SOURCE"; then
+    echo "Error: --corroboration-source is required in --corroborate mode: name who or what observed it" >&2
+    exit 1
+  fi
+  if is_blank "$CORROBORATION_NOTE"; then
+    echo "Error: --corroboration-note is required in --corroborate mode: say what was seen and why it counts" >&2
+    exit 1
+  fi
+  if [[ -n "$OBSERVED_AT" ]] && ! printf '%s' "$OBSERVED_AT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+    echo "Error: --observed-at must match YYYY-MM-DD (got '$OBSERVED_AT')" >&2
+    exit 1
+  fi
+  if [[ -z "$OBSERVED_AT" ]]; then
+    OBSERVED_AT="$DATE_TODAY"
+  fi
+elif [[ "$SET_KIND_STATUS_MODE" == "1" ]]; then
+  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
+    echo "Error: --set-kind-status forbids --superseded-text, --replacement-text, --title, --body, --scale" >&2
+    usage
+    exit 1
+  fi
+  if [[ "$ALLOW_PEER_VERIFICATION" != "1" ]]; then
+    echo "Error: --set-kind-status requires --allow-peer-verification" >&2
+    exit 1
+  fi
+  if [[ -z "$ENTRY_PATH" ]]; then
+    echo "Error: --entry is required in --set-kind-status mode" >&2
+    usage
+    exit 1
+  fi
+  if is_blank "$KIND_STATUS"; then
+    echo "Error: --kind-status is required in --set-kind-status mode" >&2
+    exit 1
+  fi
+  if is_blank "$KIND_STATUS_NOTE"; then
+    echo "Error: --kind-status-note is required in --set-kind-status mode: say what moved it" >&2
+    exit 1
   fi
 elif [[ "$DISPUTE_MODE" == "1" ]]; then
   if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
@@ -781,6 +990,7 @@ if [[ "$RETIRE_MODE" == "1" || "$RESTORE_MODE" == "1" ]]; then
   fi
   RETIRE_ENTRY_PATH="$ENTRY_PATH" \
   RETIRE_ACTION="$RETIRE_ACTION" \
+  RETIRE_RESULT_STATUS="$RETIRE_RESULT_STATUS" \
   RETIRE_REASON="$RETIRE_REASON" \
   RETIRE_FALSIFIER="$RETIRE_FALSIFIER" \
   RETIRE_NOTE="$RESTORE_NOTE" \
@@ -795,6 +1005,7 @@ import hashlib, json, os, re, sys
 
 entry_path    = os.environ["RETIRE_ENTRY_PATH"]
 action        = os.environ["RETIRE_ACTION"]
+result_status = os.environ.get("RETIRE_RESULT_STATUS") or "retired"
 reason        = os.environ.get("RETIRE_REASON", "").strip()
 falsifier     = os.environ.get("RETIRE_FALSIFIER", "").strip()
 note          = os.environ.get("RETIRE_NOTE", "").strip()
@@ -884,24 +1095,29 @@ ret_span, retirements = read_array(meta_inner, "retirements")
 res_span, restorations = read_array(meta_inner, "restorations")
 
 if action == "retired":
-    if status == "retired":
+    # An entry can be out of the default result set as `retired` or as `expired`;
+    # either way this transition has already happened and re-running converges on
+    # the record already written rather than stacking a second one.
+    if status in ("retired", "expired"):
         recorded = retirements[-1] if retirements else None
         if not recorded or not recorded.get("retirement_id"):
-            print(f"Error: {rel_path} carries status: retired with no retirements[] record — "
+            print(f"Error: {rel_path} carries status: {status} with no retirements[] record — "
                   "nothing to key this retirement to, and no prior status a restore could "
                   "return it to", file=sys.stderr)
             sys.exit(2)
         record_line("noop", [
             ("retirement_id", recorded["retirement_id"]),
             ("prior_status", recorded.get("prior_status", "current")),
-            ("result_status", "retired"),
+            ("result_status", recorded.get("result_status", status)),
         ])
-        print(f"[retire] {rel_path}: already retired ({recorded.get('date', 'undated')})")
+        print(f"[retire] {rel_path}: already {status} ({recorded.get('date', 'undated')})")
         sys.exit(0)
 
-    retirement_id = stable_id("ret-", "retired", len(retirements))
-    marker = f"**Retired {date_str}.** {reason}\n\n" f"Overturned if: {falsifier}\n"
-    tail = provenance_sentence("Retired")
+    verb = "Expired" if result_status == "expired" else "Retired"
+    id_prefix = "exp-" if result_status == "expired" else "ret-"
+    retirement_id = stable_id(id_prefix, result_status, len(retirements))
+    marker = f"**{verb} {date_str}.** {reason}\n\n" f"Overturned if: {falsifier}\n"
+    tail = provenance_sentence(verb)
     if superseded_by:
         tail = (tail + " " if tail else "") + f"Said better now by {superseded_by}."
     restore_hint = (
@@ -917,7 +1133,7 @@ if action == "retired":
         "reason": reason,
         "falsifier": falsifier,
         "prior_status": status,
-        "result_status": "retired",
+        "result_status": result_status,
     }
     if superseded_by:
         item["superseded_by"] = superseded_by
@@ -928,15 +1144,15 @@ if action == "retired":
 
     new_inner = append_item(meta_inner, "retirements", ret_span,
                             json.dumps(item, ensure_ascii=False, separators=(", ", ": ")))
-    new_inner = set_status(new_inner, "retired")
+    new_inner = set_status(new_inner, result_status)
     result_fields = [
         ("retirement_id", retirement_id),
         ("prior_status", status),
-        ("result_status", "retired"),
+        ("result_status", result_status),
     ]
-    applied_line = f"[retire] {rel_path}: retired ({date_str}), was status {status}"
+    applied_line = f"[retire] {rel_path}: {result_status} ({date_str}), was status {status}"
 else:
-    if status != "retired":
+    if status not in ("retired", "expired"):
         recorded = restorations[-1] if restorations else None
         already = (
             recorded is not None
@@ -947,29 +1163,30 @@ else:
             record_line("noop", [
                 ("retirement_id", recorded.get("restoration_id", "")),
                 ("restores_retirement_id", recorded.get("retirement_id", "")),
-                ("prior_status", "retired"),
+                ("prior_status", recorded.get("prior_status", "retired")),
                 ("result_status", recorded.get("restored_status", status)),
             ])
             print(f"[retire] {rel_path}: already restored ({recorded.get('date', 'undated')})")
             sys.exit(0)
-        print(f"Error: {rel_path} is not retired (status: {status}) — nothing to restore",
-              file=sys.stderr)
+        print(f"Error: {rel_path} is not retired or expired (status: {status}) — "
+              "nothing to restore", file=sys.stderr)
         sys.exit(2)
 
     retired_record = retirements[-1] if retirements else None
     if not retired_record or not retired_record.get("retirement_id"):
-        print(f"Error: {rel_path} carries status: retired with no retirements[] record — "
+        print(f"Error: {rel_path} carries status: {status} with no retirements[] record — "
               "there is no recorded prior status to restore it to", file=sys.stderr)
         sys.exit(2)
     restores_id = retired_record["retirement_id"]
     restored_status = retired_record.get("prior_status") or "current"
     restoration_id = stable_id("res-", "restored", len(restorations))
+    reversed_action = "expiry" if status == "expired" else "retirement"
 
     marker = f"**Restored {date_str}.** {note}\n"
     tail = provenance_sentence("Restored")
     marker += "\n" + (tail + " " if tail else "") + (
         f"Back in the default result set at status: {restored_status}; this reverses the "
-        f"retirement of {retired_record.get('date', 'an earlier date')} ({restores_id}).\n"
+        f"{reversed_action} of {retired_record.get('date', 'an earlier date')} ({restores_id}).\n"
     )
 
     item = {
@@ -977,7 +1194,7 @@ else:
         "restoration_id": restoration_id,
         "retirement_id": restores_id,
         "note": note,
-        "prior_status": "retired",
+        "prior_status": status,
         "restored_status": restored_status,
     }
     if reported_by:
@@ -991,7 +1208,7 @@ else:
     result_fields = [
         ("retirement_id", restoration_id),
         ("restores_retirement_id", restores_id),
-        ("prior_status", "retired"),
+        ("prior_status", status),
         ("result_status", restored_status),
     ]
     applied_line = f"[retire] {rel_path}: restored ({date_str}) to status {restored_status}"
@@ -1017,6 +1234,294 @@ with open(entry_path, "w", encoding="utf-8") as f:
 record_line("applied", result_fields)
 print(applied_line)
 RETIRE_PY
+  exit 0
+fi
+
+# --- Corroborate mode: record one observation for or against the claim. ---
+# Footer-only: the observation lands in corroborations[] and nothing else moves.
+# No body marker, because corroborations accumulate over a claim's life and a
+# marker each would grow the body without end; the array is what a reader and
+# the expiry sweep both read.
+if [[ "$CORROBORATE_MODE" == "1" ]]; then
+  CORR_ENTRY_PATH="$ENTRY_PATH" \
+  CORR_DIRECTION="$CORROBORATION_DIRECTION" \
+  CORR_SOURCE="$CORROBORATION_SOURCE" \
+  CORR_NOTE="$CORROBORATION_NOTE" \
+  CORR_OBSERVED_AT="$OBSERVED_AT" \
+  CORR_REPORTED_BY="$REPORTED_BY" \
+  CORR_WORK_ITEM="$WORK_ITEM" \
+  CORR_DATE="$DATE_TODAY" \
+  CORR_DRY_RUN="$DRY_RUN" \
+  CORR_KDIR="$KDIR" \
+  python3 <<'CORROBORATE_PY'
+import hashlib, json, os, re, sys
+
+entry_path  = os.environ["CORR_ENTRY_PATH"]
+direction   = os.environ["CORR_DIRECTION"]
+source      = os.environ["CORR_SOURCE"].strip()
+note        = os.environ["CORR_NOTE"].strip()
+observed_at = os.environ["CORR_OBSERVED_AT"]
+reported_by = os.environ.get("CORR_REPORTED_BY", "").strip()
+work_item   = os.environ.get("CORR_WORK_ITEM", "").strip()
+date_str    = os.environ["CORR_DATE"]
+dry_run     = os.environ["CORR_DRY_RUN"] == "1"
+kdir        = os.environ["CORR_KDIR"]
+
+try:
+    original = open(entry_path, encoding="utf-8").read()
+except (OSError, UnicodeDecodeError) as e:
+    print(f"Error: cannot read entry: {e}", file=sys.stderr)
+    sys.exit(2)
+
+META_RE = re.compile(r"(<!--)(.*?)(-->)", re.DOTALL)
+meta_matches = list(META_RE.finditer(original))
+if not meta_matches:
+    print(f"Error: no HTML META block found in entry: {entry_path!r}", file=sys.stderr)
+    sys.exit(3)
+meta_match = meta_matches[-1]
+meta_inner = meta_match.group(2)
+rel_path = os.path.relpath(entry_path, kdir) if kdir else entry_path
+
+
+def read_array(inner, field):
+    """(span, items) for a JSON array META field, or (None, []) when absent.
+
+    Decoded with raw_decode rather than a bracket regex so a note containing ']'
+    cannot truncate the array.
+    """
+    m = re.search(r"\|\s*" + field + r":\s*\[", inner)
+    if not m:
+        return None, []
+    start = m.end() - 1
+    try:
+        items, length = json.JSONDecoder().raw_decode(inner[start:])
+    except ValueError:
+        return None, []
+    if not isinstance(items, list):
+        return None, []
+    return (start, start + length), items
+
+
+def append_item(inner, field, span, item_json):
+    if span is None:
+        return inner.rstrip() + f" | {field}: [{item_json}]"
+    close = span[1] - 1
+    return inner[:close] + ", " + item_json + inner[close:]
+
+
+# Two observations of the same claim from the same source on the same day
+# pointing the same way are one observation. The note is outside the basis, so
+# re-wording an observation converges on the item already written instead of
+# recording a second data point.
+basis = f"{rel_path}|{observed_at}|{source}|{direction}"
+corroboration_id = "corr-" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:12]
+
+corr_span, corroborations = read_array(meta_inner, "corroborations")
+if any(item.get("corroboration_id") == corroboration_id
+       for item in corroborations if isinstance(item, dict)):
+    print(f"[corroborate] result=noop corroboration_id={corroboration_id} "
+          f"direction={direction} observed_at={observed_at}")
+    print(f"[corroborate] {rel_path}: this observation is already recorded")
+    sys.exit(0)
+
+item = {
+    "date": date_str,
+    "corroboration_id": corroboration_id,
+    "observed_at": observed_at,
+    "source": source,
+    "direction": direction,
+    "note": note,
+}
+if reported_by:
+    item["reported_by"] = reported_by
+if work_item:
+    item["work_item"] = work_item
+
+new_inner = append_item(meta_inner, "corroborations", corr_span,
+                        json.dumps(item, ensure_ascii=False, separators=(", ", ": ")))
+final = (
+    original[:meta_match.start()]
+    + meta_match.group(1) + new_inner + meta_match.group(3)
+    + original[meta_match.end():]
+)
+
+if dry_run:
+    print(f"[dry-run][corroborate] Would record an observation on {rel_path}")
+    print(f"[dry-run][corroborate]   corroboration_id: {corroboration_id}")
+    print(f"[dry-run][corroborate]   direction: {direction}  observed_at: {observed_at}")
+    print(f"[dry-run][corroborate]   source: {source}")
+    sys.exit(0)
+
+with open(entry_path, "w", encoding="utf-8") as f:
+    f.write(final)
+print(f"[corroborate] result=applied corroboration_id={corroboration_id} "
+      f"direction={direction} observed_at={observed_at}")
+print(f"[corroborate] {rel_path}: {direction} ({observed_at}, {source})")
+CORROBORATE_PY
+  exit 0
+fi
+
+# --- Set-kind-status mode: move the claim's epistemic lifecycle state. ---
+# `kind_status` is the claim's own lifecycle and is deliberately not the `status`
+# field that governs retrieval: a hypothesis at `untested` is a live entry, not a
+# hidden one. Legal values come from the entry's own kind, so the vocabulary
+# cannot fork between this writer and a later validator.
+if [[ "$SET_KIND_STATUS_MODE" == "1" ]]; then
+  set +e
+  ENTRY_KIND=$(python3 - "$ENTRY_PATH" <<'READ_KIND_PY'
+import re, sys
+
+try:
+    text = open(sys.argv[1], encoding="utf-8").read()
+except (OSError, UnicodeDecodeError) as e:
+    print(f"Error: cannot read entry: {e}", file=sys.stderr)
+    sys.exit(2)
+blocks = [m.group(1) for m in re.finditer(r"<!--(.*?)-->", text, re.DOTALL)]
+if not blocks:
+    print("Error: no HTML META block found in entry", file=sys.stderr)
+    sys.exit(3)
+inner = blocks[-1]
+m = re.search(r"\|\s*kind:\s*([^|>]+)", inner)
+print((m.group(1).strip() if m else "") or "fact")
+READ_KIND_PY
+)
+  READ_KIND_STATUS=$?
+  set -e
+  if [[ $READ_KIND_STATUS -ne 0 ]]; then
+    exit "$READ_KIND_STATUS"
+  fi
+
+  KIND_STATUS_VOCAB=$("$SCRIPT_DIR/kind-registry.sh" get-statuses "$ENTRY_KIND" 2>/dev/null) || {
+    echo "Error: '$ENTRY_KIND' is not a registered kind, so its lifecycle vocabulary cannot be read" >&2
+    exit 2
+  }
+  if [[ -z "$KIND_STATUS_VOCAB" ]]; then
+    echo "Error: kind '$ENTRY_KIND' declares no lifecycle, so there is no kind_status to move" >&2
+    exit 2
+  fi
+  KIND_STATUS_VALID=0
+  for _ks in $KIND_STATUS_VOCAB; do
+    if [[ "$KIND_STATUS" == "$_ks" ]]; then
+      KIND_STATUS_VALID=1
+      break
+    fi
+  done
+  if [[ $KIND_STATUS_VALID -eq 0 ]]; then
+    echo "Error: --kind-status '$KIND_STATUS' is not valid for kind '$ENTRY_KIND'; one of: $(printf '%s' "$KIND_STATUS_VOCAB" | tr '\n' '|')" >&2
+    exit 1
+  fi
+
+  KS_ENTRY_PATH="$ENTRY_PATH" \
+  KS_KIND="$ENTRY_KIND" \
+  KS_TARGET="$KIND_STATUS" \
+  KS_NOTE="$KIND_STATUS_NOTE" \
+  KS_REPORTED_BY="$REPORTED_BY" \
+  KS_WORK_ITEM="$WORK_ITEM" \
+  KS_DATE="$DATE_TODAY" \
+  KS_DRY_RUN="$DRY_RUN" \
+  KS_KDIR="$KDIR" \
+  python3 <<'KINDSTATUS_PY'
+import hashlib, json, os, re, sys
+
+entry_path  = os.environ["KS_ENTRY_PATH"]
+kind        = os.environ["KS_KIND"]
+target      = os.environ["KS_TARGET"]
+note        = os.environ["KS_NOTE"].strip()
+reported_by = os.environ.get("KS_REPORTED_BY", "").strip()
+work_item   = os.environ.get("KS_WORK_ITEM", "").strip()
+date_str    = os.environ["KS_DATE"]
+dry_run     = os.environ["KS_DRY_RUN"] == "1"
+kdir        = os.environ["KS_KDIR"]
+
+try:
+    original = open(entry_path, encoding="utf-8").read()
+except (OSError, UnicodeDecodeError) as e:
+    print(f"Error: cannot read entry: {e}", file=sys.stderr)
+    sys.exit(2)
+
+META_RE = re.compile(r"(<!--)(.*?)(-->)", re.DOTALL)
+meta_matches = list(META_RE.finditer(original))
+if not meta_matches:
+    print(f"Error: no HTML META block found in entry: {entry_path!r}", file=sys.stderr)
+    sys.exit(3)
+meta_match = meta_matches[-1]
+meta_inner = meta_match.group(2)
+rel_path = os.path.relpath(entry_path, kdir) if kdir else entry_path
+
+
+def read_array(inner, field):
+    """(span, items) for a JSON array META field, or (None, []) when absent."""
+    m = re.search(r"\|\s*" + field + r":\s*\[", inner)
+    if not m:
+        return None, []
+    start = m.end() - 1
+    try:
+        items, length = json.JSONDecoder().raw_decode(inner[start:])
+    except ValueError:
+        return None, []
+    if not isinstance(items, list):
+        return None, []
+    return (start, start + length), items
+
+
+def append_item(inner, field, span, item_json):
+    if span is None:
+        return inner.rstrip() + f" | {field}: [{item_json}]"
+    close = span[1] - 1
+    return inner[:close] + ", " + item_json + inner[close:]
+
+
+def set_kind_status(inner, value):
+    if re.search(r"\|\s*kind_status:", inner):
+        return re.sub(r"(\|\s*kind_status:\s*)\S+", r"\g<1>" + value, inner, count=1)
+    return inner.rstrip() + f" | kind_status: {value}"
+
+
+ks_match = re.search(r"\|\s*kind_status:\s*(\S+)", meta_inner)
+current = ks_match.group(1) if ks_match else ""
+if current == target:
+    print(f"[kind-status] result=noop transition_id= from={current} to={target}")
+    print(f"[kind-status] {rel_path}: already {target}")
+    sys.exit(0)
+
+trans_span, transitions = read_array(meta_inner, "kind_status_transitions")
+basis = f"{rel_path}|kind_status|{len(transitions)}"
+transition_id = "ks-" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:12]
+
+item = {
+    "date": date_str,
+    "transition_id": transition_id,
+    "kind": kind,
+    "from": current or "unset",
+    "to": target,
+    "note": note,
+}
+if reported_by:
+    item["reported_by"] = reported_by
+if work_item:
+    item["work_item"] = work_item
+
+new_inner = append_item(meta_inner, "kind_status_transitions", trans_span,
+                        json.dumps(item, ensure_ascii=False, separators=(", ", ": ")))
+new_inner = set_kind_status(new_inner, target)
+final = (
+    original[:meta_match.start()]
+    + meta_match.group(1) + new_inner + meta_match.group(3)
+    + original[meta_match.end():]
+)
+
+if dry_run:
+    print(f"[dry-run][kind-status] Would move {rel_path}")
+    print(f"[dry-run][kind-status]   kind_status: {current or 'unset'} -> {target}")
+    print(f"[dry-run][kind-status]   transition_id: {transition_id}")
+    sys.exit(0)
+
+with open(entry_path, "w", encoding="utf-8") as f:
+    f.write(final)
+print(f"[kind-status] result=applied transition_id={transition_id} "
+      f"from={current or 'unset'} to={target}")
+print(f"[kind-status] {rel_path}: {kind} {current or 'unset'} -> {target}")
+KINDSTATUS_PY
   exit 0
 fi
 
