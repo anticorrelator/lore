@@ -25,6 +25,11 @@ import pk_retrieval  # noqa: E402
 PREFETCH_BUDGET = pk_retrieval.DEFAULT_PROMPT_BUDGET
 SNIPPET_LIMIT = pk_retrieval.SNIPPET_CHAR_LIMIT
 
+# Share of the prompt ceiling the kind sections may reserve. Whatever they
+# leave unspent goes back to the entry blocks, so this caps the sections rather
+# than allocating to them.
+KIND_SECTION_BUDGET_FRACTION = 0.25
+
 
 def _log_prefetch(
     knowledge_dir: str,
@@ -216,6 +221,39 @@ def _emit_scope_pointers(knowledge_dir: str, work_item: str, query: str) -> None
         print(f"  {payload}")
 
 
+def _kind_sections(
+    searcher: Searcher,
+    query: str,
+    scale_set: list[str],
+    served_paths: list[str],
+    source_type: str | None,
+) -> dict:
+    """Kind sections for this prefetch, deduped against the ranked results.
+
+    The section queries inherit the prefetch's declared scale and type filter,
+    so a section never reaches outside the slice of the store the caller asked
+    for. On a store with no non-fact entry this costs one indexed lookup and
+    returns empty text. Failure is silent for the same reason the rest of this
+    pipeline is fail-open: a hook caller gets the entry blocks it would have
+    gotten, never a traceback.
+    """
+    reserve = int(PREFETCH_BUDGET * KIND_SECTION_BUDGET_FRACTION)
+    try:
+        import pk_kinds
+
+        return pk_kinds.build_sections(
+            searcher,
+            query,
+            reserve,
+            scale_set=scale_set,
+            served_paths=served_paths,
+            caller="prefetch",
+            source_type=source_type,
+        )
+    except (Exception, SystemExit):
+        return {"text": "", "chars_used": 0, "sections": [], "degraded": None}
+
+
 def run_prefetch(
     knowledge_dir: str,
     query: str,
@@ -384,13 +422,35 @@ def run_prefetch(
     def _backlink_block(r):
         return f'\n- {pk_retrieval.backlink_for(r["file_path"], r["heading"])}'
 
+    # Sections are rendered before the entry blocks so their actual size is
+    # known in time to come out of the entry budget, and printed after them so
+    # the order of the block is unchanged. An empty section set spends nothing,
+    # which is what leaves a store with no non-fact entry byte-identical.
+    section_result = _kind_sections(
+        searcher,
+        query,
+        scale_set,
+        [r.get("file_path", "") for r in results + pref_results],
+        source_type if source_type != "all" else None,
+    )
+    entry_budget = PREFETCH_BUDGET - section_result["chars_used"]
+
     blocks, _ = pk_retrieval.emit_degrading(
-        results, PREFETCH_BUDGET, _full_block, _snippet_block, _backlink_block
+        results, entry_budget, _full_block, _snippet_block, _backlink_block
     )
     for block in blocks:
         print(block)
+    if section_result["text"]:
+        print(section_result["text"], end="")
 
-    _log_prefetch(knowledge_dir, results, caller=caller, scale_set=scale_set)
+    section_entries = [
+        served["entry"]
+        for section in section_result["sections"]
+        for served in section["served_entries"]
+    ]
+    _log_prefetch(
+        knowledge_dir, results + section_entries, caller=caller, scale_set=scale_set
+    )
 
     if work_item:
         _emit_scope_pointers(knowledge_dir, work_item, query)

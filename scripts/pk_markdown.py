@@ -53,7 +53,7 @@ class MarkdownParser:
             <!-- learned: DATE | confidence: high | source: ... | scale: val | status: current -->
 
         Returns dict with keys: learned, confidence, source, scale, entry_status,
-        template_version, kind, kind_status (None if not found).
+        template_version, kind, kind_status, subsystem (None if not found).
         Unrecognized fields are silently ignored.
 
         `kind` is the epistemic kind of the claim (fact, hypothesis, question,
@@ -61,6 +61,9 @@ class MarkdownParser:
         separate from `status`, which carries entry lifecycle. Entries written
         before the kind field existed return None for both — consumers that
         filter on kind resolve a missing value to `fact`.
+
+        `subsystem` is the area a theory is about. Only theory entries declare
+        it, so a None here is the common case and does not resolve to anything.
         """
         # Find the first HTML comment that contains "learned:"
         for m in MarkdownParser._METADATA_COMMENT_RE.finditer(text):
@@ -82,8 +85,9 @@ class MarkdownParser:
                 "template_version": kv.get("template_version"),
                 "kind": kv.get("kind"),
                 "kind_status": kv.get("kind_status"),
+                "subsystem": kv.get("subsystem"),
             }
-        return {"learned": None, "confidence": None, "source": None, "scale": None, "entry_status": None, "template_version": None, "kind": None, "kind_status": None}
+        return {"learned": None, "confidence": None, "source": None, "scale": None, "entry_status": None, "template_version": None, "kind": None, "kind_status": None, "subsystem": None}
 
     @staticmethod
     def parse_entry_file(file_path: str) -> list[dict]:

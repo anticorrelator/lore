@@ -148,6 +148,22 @@ def _resolve_kind(value: str | None) -> str:
     return stripped if stripped else DEFAULT_KIND
 
 
+def _resolve_subsystem(value: str | None) -> str | None:
+    """Resolve a META subsystem field value to the area it names, or None.
+
+    Case-folded and trimmed so two spellings of one area group together. A
+    missing or blank value stays None: unlike `kind`, no default is defensible
+    here, because only theory entries declare a subsystem and the writer
+    refuses a theory without one. Coalescing absence to a sentinel would put
+    every subsystem-less entry into a single shared bucket, which is exactly
+    what the one-per-subsystem selection must not do.
+    """
+    if value is None:
+        return None
+    stripped = value.strip().lower()
+    return stripped if stripped else None
+
+
 def _trust_compute():
     """Import scripts/trust-compute.py (hyphenated filename) as a module."""
     import importlib.util
@@ -393,7 +409,7 @@ class IndexWriteLock:
 class Indexer:
     """Builds and maintains the FTS5 index."""
 
-    SCHEMA_VERSION = 12  # v12: kind, kind_status columns (epistemic kind from the footer)
+    SCHEMA_VERSION = 13  # v13: subsystem column (the area a theory entry is about)
 
     def __init__(self, knowledge_dir: str, repo_root: str | None = None):
         self.knowledge_dir = os.path.abspath(knowledge_dir)
@@ -448,6 +464,7 @@ class Indexer:
             trust_score UNINDEXED,
             kind UNINDEXED,
             kind_status UNINDEXED,
+            subsystem UNINDEXED,
             tokenize='porter unicode61'
         )
         """,
@@ -889,7 +906,7 @@ class Indexer:
 
         # Extract metadata for knowledge entries
         category = self._extract_category(file_path) if source_type == "knowledge" else None
-        metadata = {"learned": None, "confidence": None, "scale": None, "entry_status": None, "template_version": None, "kind": None, "kind_status": None}
+        metadata = {"learned": None, "confidence": None, "scale": None, "entry_status": None, "template_version": None, "kind": None, "kind_status": None, "subsystem": None}
         if source_type == "knowledge":
             try:
                 raw_text = Path(file_path).read_text(encoding="utf-8")
@@ -903,6 +920,7 @@ class Indexer:
                 # resolves a missing kind rather than the indexer defaulting it.
                 metadata["kind"] = meta.get("kind")
                 metadata["kind_status"] = meta.get("kind_status")
+                metadata["subsystem"] = meta.get("subsystem")
             except (OSError, UnicodeDecodeError):
                 pass
 
@@ -910,8 +928,8 @@ class Indexer:
 
         for entry in entries:
             conn.execute(
-                "INSERT INTO entries (file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, kind, kind_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (entry["file_path"], entry["heading"], entry["content"], source_type, category, metadata["confidence"], metadata["learned"], 0.0, metadata["scale"], metadata["entry_status"], metadata["template_version"], trust_score, metadata["kind"], metadata["kind_status"]),
+                "INSERT INTO entries (file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, kind, kind_status, subsystem) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (entry["file_path"], entry["heading"], entry["content"], source_type, category, metadata["confidence"], metadata["learned"], 0.0, metadata["scale"], metadata["entry_status"], metadata["template_version"], trust_score, metadata["kind"], metadata["kind_status"], metadata["subsystem"]),
             )
 
         # Update file_meta
@@ -1613,7 +1631,7 @@ class Searcher:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
 
-        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, kind, kind_status, rank"
+        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, kind, kind_status, subsystem, rank"
         # Ledger-backed trust reaches ranking here — plain search() — so that
         # default `lore search`, prefetch, and the composite path (which all
         # fetch through this method) get it from one term. rank is negative:
@@ -1730,6 +1748,7 @@ class Searcher:
                 "trust_score": row["trust_score"] if row["trust_score"] is not None else 0.0,
                 "kind": entry_kind,
                 "kind_status": row["kind_status"],
+                "subsystem": _resolve_subsystem(row["subsystem"]),
                 "score": round(score, 4),
                 "snippet": snippet,
                 "correction_recency": _parse_correction_recency(abs_path),
@@ -1816,7 +1835,7 @@ class Searcher:
 
         # trust_score is selected for result-shape parity with search();
         # side-channel ordering deliberately stays plain BM25 rank.
-        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, kind, kind_status, rank"
+        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, kind, kind_status, subsystem, rank"
 
         # Pull a generous batch so README skip + threshold drop + status filter
         # still leaves SIDE_CHANNEL_LIMIT survivors when matches exist.
@@ -1900,6 +1919,7 @@ class Searcher:
                 "trust_score": row["trust_score"] if row["trust_score"] is not None else 0.0,
                 "kind": _resolve_kind(row["kind"]),
                 "kind_status": row["kind_status"],
+                "subsystem": _resolve_subsystem(row["subsystem"]),
                 "score": round(score, 4),
                 "snippet": snippet,
                 "correction_recency": _parse_correction_recency(abs_path),

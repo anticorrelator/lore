@@ -1763,11 +1763,14 @@ cmd_search() {
   local scale_set=""
   local caller="cli"
   local args=()
+  # Recognized here rather than passed through with the rest, because --type all
+  # must route it to the knowledge half only.
+  local kind_sections_args=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --help|-h)
-        echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json]" >&2
+        echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json] [--kind-sections]" >&2
         return 0
         ;;
       --type)
@@ -1776,6 +1779,10 @@ cmd_search() {
         ;;
       --json)
         json_flag="--json"
+        shift
+        ;;
+      --kind-sections)
+        kind_sections_args=(--kind-sections)
         shift
         ;;
       --scale-set)
@@ -1802,7 +1809,7 @@ cmd_search() {
   done
 
   if [[ ${#args[@]} -eq 0 ]]; then
-    echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json]" >&2
+    echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json] [--kind-sections]" >&2
     return 1
   fi
 
@@ -1824,16 +1831,20 @@ cmd_search() {
   if [[ -n "$json_flag" ]]; then
     case "$type" in
       knowledge)
-        exec python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json "${args[@]:1}"
+        exec python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json ${kind_sections_args[@]+"${kind_sections_args[@]}"} "${args[@]:1}"
         ;;
       work)
-        exec python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json --type work "${args[@]:1}"
+        exec python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json --type work ${kind_sections_args[@]+"${kind_sections_args[@]}"} "${args[@]:1}"
         ;;
       all)
+        # Sections are asked of the knowledge half only: kinds are declared in
+        # knowledge entry footers, so the work half would spend three
+        # kind-filtered queries to return nothing, and two sections arrays would
+        # then have to be reconciled. Ask the work pool for its results alone.
         local k_json w_json
-        k_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json "${args[@]:1}")"
+        k_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json ${kind_sections_args[@]+"${kind_sections_args[@]}"} "${args[@]:1}")"
         w_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json --type work "${args[@]:1}")"
-        exec python3 -c "import json,sys; a=json.loads(sys.argv[1]); b=json.loads(sys.argv[2]); print(json.dumps(a+b,indent=2))" "$k_json" "$w_json"
+        exec python3 "$SCRIPTS_DIR/merge-search-json.py" "$k_json" "$w_json"
         ;;
       *)
         echo "Error: --type must be knowledge, work, or all" >&2
@@ -1843,13 +1854,13 @@ cmd_search() {
   else
     case "$type" in
       knowledge)
-        exec python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" "${args[@]:1}"
+        exec python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" ${kind_sections_args[@]+"${kind_sections_args[@]}"} "${args[@]:1}"
         ;;
       work)
         exec "$SCRIPTS_DIR/search-work.sh" "$query"
         ;;
       all)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" "${args[@]:1}"
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" ${kind_sections_args[@]+"${kind_sections_args[@]}"} "${args[@]:1}"
         echo ""
         exec "$SCRIPTS_DIR/search-work.sh" "$query"
         ;;
