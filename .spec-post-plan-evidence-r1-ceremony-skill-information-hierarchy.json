@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "evaluator_locator": "/Users/dustinqngo/.claude/skills/codex-plan-review/SKILL.md",
+  "evaluator_template_version": "465f163b5f06",
+  "framework": "codex",
+  "model": "gpt-5.6-sol",
+  "final_round": 1,
+  "disposition_ledger_sha256": "88cf48acc946659ed4de39dd0daa5004931c202fc23d780f49ba7959e7250f56",
+  "source_plan_sha256": "66b7fe0024a0384aad803a730b832d0cf65e2da73cc7a8954fed6f29329414bc"
+}

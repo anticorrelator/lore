@@ -1,19 +1,18 @@
-# Step 2 — Analysis agent prompts
+# Assessment briefs — classifier, structure analyst, cross-reference scout
 
-Read this file from `skills/renormalize/SKILL.md` Step 2 when spawning the two parallel Explore agents (Staleness scan + Usage analysis).
+Read this file from `skills/renormalize/SKILL.md` Step 3. Three read-only judgment briefs, dispatched in parallel through the probed route. None modifies knowledge files.
 
-Create a team named `renorm-<YYYYMMDD-HHMMSS>` with 2 Explore agents running in parallel:
+Each brief body is the resolved agent template plus the SKILL.md report contract block. Resolve templates through `resolve_agent_template <name>` (sourced from `~/.lore/scripts/lib.sh`) and inject:
 
-**Agent 1 — Staleness scan:**
-```
-Run: lore analyze staleness --json
-Report the summary back via SendMessage: total entries scanned, stale count, breakdown by reason (age, low-confidence, missing referenced files).
-```
+- `{{kdir}}` — the resolved knowledge directory
+- `{{team_name}}` — the run id (`$RUN_ID`)
+- `{{team_lead}}` — the lead's identity for this run
+- `{{audit_set}}` — classifier only: the `entries` array from `$KDIR/_meta/audit-set.json`
 
-**Agent 2 — Usage analysis:**
-```
-Run: lore analyze usage --json --write
-Report the summary back via SendMessage: total entries, hot/warm/cold counts, cold entries list, retrieval-log coverage.
-```
+| Role | Template | Findings artifact |
+|---|---|---|
+| classifier | `resolve_agent_template classifier` | `$KDIR/_meta/classification-report.json` |
+| structure-analyst | `resolve_agent_template structure-analyst` | `$KDIR/_meta/structure-report.json` |
+| crossref-scout | `resolve_agent_template crossref-scout` | `$KDIR/_meta/crossref-report.json` |
 
-Wait for both agents to complete and acknowledge their reports.
+The classifier audits only the audit set. Each agent writes its own findings JSON; the contract report indexes that artifact. Acceptance additionally checks the findings file landed and parses as JSON.
