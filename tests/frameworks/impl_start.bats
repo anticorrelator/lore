@@ -101,7 +101,7 @@ teardown() {
   echo "$output" | grep -q "\[impl start\] Widget Pipeline"
   echo "$output" | grep -q "Slug: widget-pipeline  (archived: false)"
   echo "$output" | grep -q "Models: lead=test-lead-model  worker=test-worker-model  advisor=test-advisor-model"
-  echo "$output" | grep -q "Phases: 2 with 3 unchecked tasks"
+  echo "$output" | grep -q "Plan: 2 phases with 3 unchecked tasks"
   echo "$output" | grep -q "Prior Tier 2 claims: 2 rows loaded from task-claims.jsonl"
   echo "$output" | grep -q "Branch cache: written ('impl-start-test-branch' -> 'widget-pipeline')"
   echo "$output" | grep -q "Anchor line one."
@@ -129,7 +129,7 @@ assert d["slug"] == "widget-pipeline"
 assert d["archived"] is False
 assert d["title"] == "Widget Pipeline"
 assert d["intent_anchor"] == "Anchor line one.\nAnchor line two."
-assert d["plan"] == {"phases": 2, "unchecked_tasks": 3}
+assert d["plan"] == {"tasks": 0, "phases": 2, "unchecked_tasks": 3}
 assert d["branch_cache"]["status"] == "written"
 assert d["branch_cache"]["branch"] == "impl-start-test-branch"
 assert d["models"] == {"lead": "test-lead-model", "worker": "test-worker-model", "advisor": "test-advisor-model"}
@@ -272,6 +272,40 @@ assert d["branch_cache"]["status"] == "skipped-archived"
 }
 
 # --- Resolver tri-state propagation --------------------------------------
+
+@test "a flat plan is accepted and its task headings counted" {
+  cat > "$WORK_DIR/widget-pipeline/plan.md" <<'EOF'
+# Widget Pipeline
+
+## Tasks
+
+### Task 1: Alpha
+**Files:** src/alpha.sh
+- [ ] build alpha
+
+### Task 2: Beta
+**Files:** src/beta.sh
+- [ ] build beta
+EOF
+  run bash "$LORE_CLI" impl start widget-pipeline
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "Plan: 2 tasks, 2 unchecked"
+}
+
+@test "a plan missing its task list is refused for that, not as completed work" {
+  cat > "$WORK_DIR/widget-pipeline/plan.md" <<'EOF'
+# Widget Pipeline
+
+## Goal
+Ship the pipeline.
+
+- [ ] build alpha
+EOF
+  run bash "$LORE_CLI" impl start widget-pipeline
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q -- "## Tasks"
+  ! echo "$output" | grep -q "already complete"
+}
 
 @test "no match exits 1 with the resolver error" {
   run bash "$LORE_CLI" impl start absolutely-no-such-thing-9999

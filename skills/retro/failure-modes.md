@@ -16,9 +16,9 @@ Affects: Dimension 1 (Delivery), Dimension 3 (Gaps)
 
 **Pipeline delivery failure:** Plan has backlinks but task generation drops them silently. Caps D1 at 2.
 
-**Partial resolution:** Some tasks get `## Prior Knowledge`, others don't despite phase-level backlinks. Caps D1 at 3.
+**Partial resolution:** Some tasks get `## Prior Knowledge`, others don't despite backlinks declared on their own task blocks. Caps D1 at 3.
 
-**Plan-level context block omission:** `/spec` produces plan with zero `**Knowledge context:**` blocks across all phases — tasks.json has nothing to resolve regardless of store coverage. Upstream of all other backlink failures. Detection: all tasks show "No backlinks found in plan." Caps D1 at 3 (lead prefetch can compensate). Distinct from cold-start (store has entries; plan didn't reference them). When detected, skip backlink/annotation audits and instead check if entries existed via `lore search` on phase objectives.
+**Plan-level context block omission:** `/spec` produces plan with zero `**Knowledge context:**` blocks across all tasks — tasks.json has nothing to resolve regardless of store coverage. Upstream of all other backlink failures. Detection: all tasks show "No backlinks found in plan." Caps D1 at 3 (lead prefetch can compensate). Distinct from cold-start (store has entries; plan didn't reference them). When detected, skip backlink/annotation audits and instead check if entries existed via `lore search` on each task's deliverable.
 
 **Delivery mode mismatch:** Plan specifies `**Knowledge delivery:** full` but tasks.json produces annotation-only with truncated content. Silent pipeline failure. Caps D1 at 3.
 
@@ -28,15 +28,17 @@ Affects: Dimension 1 (Delivery), Dimension 3 (Gaps)
 - **D1 = 3**: Application partial/unverifiable, OR completeness <80%. Default for ambiguous evidence.
 - **D1 = 2**: Workers misapplied/diverged, OR no pull fallback (template gap + no resolution instruction).
 
-*Behavioral vs filing-facing:* Behavioral annotations give directives ("do not call X inside Y"). Filing-facing describe the entry ("understand why X was added"). Filing-facing prevents D1=4 when mixed with behavioral phases.
+*Behavioral vs filing-facing:* Behavioral annotations give directives ("do not call X inside Y"). Filing-facing describe the entry ("understand why X was added"). Filing-facing prevents D1=4 when mixed with behavioral annotations on other tasks.
 
 **Compound failures:** When multiple modes co-occur, lowest cap applies. Do not average.
 
-**Cross-cutting backlink redundancy:** All phases share identical backlinks. Does NOT cap D1, but note as spec authoring signal. Exceptions: (1) same backlink with differentiated per-phase annotation text is good authoring; (2) single-file prose rewrite cycles where redundancy is expected.
+**Cross-cutting backlink redundancy:** All tasks share identical backlinks. Does NOT cap D1, but note as spec authoring signal. Exceptions: (1) same backlink with differentiated per-task annotation text is good authoring; (2) single-file prose rewrite cycles where redundancy is expected. An entry the plan genuinely aims at the whole cycle belongs to the cross-cutting tier — score it once for the plan, do not count it once per task, and do not double-count it if the same entry is also attached to one task's own files.
 
 **Context backlink contamination:** `_work/` references in `**Knowledge context:**` instead of `## Related`. Subtract from annotation completeness denominator.
 
-**Related-section injection:** Task generator injects `## Related` backlinks as bare entries into every task's `## Prior Knowledge`. Expected behavior, not authoring error. Subtract from annotation completeness denominator — use only per-phase `**Knowledge context:**` entries as denominator.
+**Related-section injection:** Task generator injects `## Related` backlinks as bare entries into every task's `## Prior Knowledge`. Expected behavior, not authoring error. Subtract from annotation completeness denominator — use only per-task `**Knowledge context:**` entries as denominator.
+
+**Unflattened legacy plan:** Cycle's tasks.json carries `phases[]` and no `tasks[]`, and delivery was scored over the container records instead of the tasks inside them. The denominator becomes a container count rather than a delivery count, so D1 tracks the plan's old nesting rather than what reached workers. Detection: the delivery denominator equals the number of `phases[]` entries rather than the number of tasks across them. Not a delivery failure — flatten to tasks and rescore before assigning D1. A tasks.json carrying neither shape is a delivery-evidence gap, not a zero numerator.
 
 ## B. Lead Bypass
 
@@ -63,11 +65,11 @@ Neither caps any dimension. Note when >2 workers report phantom completion.
 
 **Batch execution-log placeholder degradation:** Lead bulk-logs with placeholder text instead of verbatim observations. Reduces evidence quality. Does not cap dimensions.
 
-## C0. Implementation Phase Cold-Start
+## C0. Implementation Task Cold-Start
 
 Affects: Dimension 1, Dimension 3
 
-Phase targets file/subsystem with no knowledge entries. NOT a delivery failure. Score D1 on what was available; D3 on whether discoveries were captured (captured = D3 4, uncaptured = D3 ≤ 3). When mixed with context-rich phases, cross-cutting redundancy is expected. Mitigation: add "unmapped territory — report structural role and constraints" to cold-start phase task descriptions.
+A task targets a file/subsystem with no knowledge entries. NOT a delivery failure. Score D1 on what was available; D3 on whether discoveries were captured (captured = D3 4, uncaptured = D3 ≤ 3). When mixed with context-rich tasks, cross-cutting redundancy is expected. A task with nothing available to deliver is excluded from the task-level delivery denominator and the exclusion is named in the D1 rationale. Mitigation: add "unmapped territory — report structural role and constraints" to cold-start task descriptions.
 
 ## C. Cold-Start and Prefetch Failures
 
@@ -109,17 +111,17 @@ Affects: Dimension 5 interpretation — does not cap scores.
 
 **Prototype-cascade:** Knowledge value concentrates on first task in batched similar tasks. Score on full batch including prototype.
 
-**Same-knowledge saturation:** All phases reference same entries. Value front-loaded to first worker.
+**Same-knowledge saturation:** All tasks reference same entries. Value front-loaded to first worker.
 
 **Meta/self-referential work:** Implementation IS knowledge work. D5 = 1-2 expected; domain-native workers don't need orientation. With intent-tasks: D5 = 2-3. With prescriptive-tasks: D5 = 1-2 (harder ceiling).
 
 **Intent-vs-prescriptive calibration:** Intent tasks delegate choices — out-of-scope reads for discovery are by-design. Zero escalations + zero divergences = D5 4-5 even with reads outside `**Files:**`.
 
-**Novel domain discount:** No store entries for phase domain. D5 ceiling = 3. Score on non-novel phases.
+**Novel domain discount:** No store entries for the task's domain. D5 ceiling = 3. Score on non-novel tasks.
 
 **Annotation-only + intent-tasks compound:** Workers received framing but no resolved content for design choices. D5 ≤ 3; attribute to delivery mode, not spec quality.
 
-**Removal/deletion ceiling:** >60% deletion phases → D5 ≤ 2. Knowledge ROI on non-deletion phases only. Compounds with zero-delivery when spec omits context blocks for "simple" work — D1 ≤ 2. With `--yes`: auto-approval masks gap detection for embedded replacement phases.
+**Removal/deletion ceiling:** >60% deletion tasks → D5 ≤ 2. Knowledge ROI on non-deletion tasks only. Compounds with zero-delivery when spec omits context blocks for "simple" work — D1 ≤ 2. With `--yes`: auto-approval masks gap detection for embedded replacement tasks.
 
 **Failure-recovery amplification:** Work follows failed attempt with post-mortem in store. Value is mistake prevention at spec time, even though implementation D5 is low.
 
@@ -132,11 +134,11 @@ Affects: Dimension 5 interpretation — does not cap scores.
 **Task over-decomposition:** spec splits logically coupled changes into separate tasks targeting the same code block. Workers collide or serialize; phantom completions follow. D5 modifier plus spec-synthesis feedback; compounds with "Sequential same-file phantom work."
 <!-- Sunset: remove these two modifiers if new-failure-mode retro-evolution rows targeting skills/retro/failure-modes.md citing these patterns recur from ≥3 new distinct work items within the next 20 cycles. -->
 
-**Go same-package split constraint:** Go compiler rejects duplicate declarations in same package. Phased removal fails — all removals forced into single pass. Specs should consolidate removal tasks.
+**Go same-package split constraint:** Go compiler rejects duplicate declarations in same package. Splitting the removal across tasks fails — all removals forced into single pass. Specs should consolidate removal tasks.
 
 **Spec code reference error:** Spec cites code artifact by wrong name (e.g., BASIC_PLAN vs actual MINIMAL_PLAN). Worker must investigate — escalation-equivalent. Mitigation: `/spec` synthesis should grep cited artifacts.
 
-**Task generator parsing bugs:** Three variants: (1) *file_targets from expressions* — code expressions (`X ?? Y`) or Go field access (`msg.Err`) parsed as file targets; (2) *backlink-syntax contamination* — literal `[[knowledge:...]]` in docs examples parsed as real backlinks; (3) *empty phases from bullet lists* — plain bullets vs checkbox syntax produces `"phases": []`, bypassing delivery pipeline (caps D1 at 3). Subtract parser artifacts from annotation completeness denominators.
+**Task generator parsing bugs:** Three variants: (1) *file_targets from expressions* — code expressions (`X ?? Y`) or Go field access (`msg.Err`) parsed as file targets; (2) *backlink-syntax contamination* — literal `[[knowledge:...]]` in docs examples parsed as real backlinks; (3) *empty task list from bullet lists* — plain bullets vs checkbox syntax produces an empty `tasks[]` (an empty `phases[]` on a legacy plan), bypassing delivery pipeline (caps D1 at 3). Subtract parser artifacts from annotation completeness denominators.
 
 **Investigation-originated plan without knowledge context:** Investigation findings embedded in prose without `**Knowledge context:**` backlinks. Task generator has nothing to resolve. D1 ≤ 2; D4 = 3.
 

@@ -143,7 +143,7 @@ Verify the **map matches the territory** — sample architectural claims, not fi
 ### Step 8: Cleanup
 
 1. Append a timestamped `notes.md` entry: focus, subsystems explored, entries filed, contradictions, spot-check summary, and next (remaining subsystems or "complete").
-2. Check off completed phases in `plan.md`.
+2. Check off completed subsystems in `plan.md`.
 3. **All subsystems done** → `lore work archive "<SLUG>"`. **Partial** → leave active; run `lore work heal`.
 4. Journal the filing milestone (same env-gated `session-step.sh` block, `--step-id "bootstrap:file"`), then report counts: subsystems explored, entries filed (confidence: medium, source: bootstrap), spot-check results, remaining subsystems.
 
@@ -160,7 +160,7 @@ Seeds exactly one lazy-loaded `domains/` entry for a named topic — the smalles
 **Then:**
 
 1. `lore work create --title "Bootstrap domain: <topic>" --tags bootstrap`; set `SLUG`.
-2. **Explore lead-inline, scoped to the topic** — one topic does not warrant fan-out. Read entry points and contract definitions for the named area only. As grounding claims form, append one Tier-2 row per claim via `echo '<row-json>' | bash ~/.lore/scripts/evidence-append.sh --work-item "$SLUG"` (`producer_role: "researcher"`, `task_id: "domain-<topic-slug>"`, `phase_id: "bootstrap-domain"`, explicit scale, snippet and hash per the Tier-2 contract). Record any existing entry checked against code with `lore verify`.
+2. **Explore lead-inline, scoped to the topic** — one topic does not warrant fan-out. Read entry points and contract definitions for the named area only. As grounding claims form, append one Tier-2 row per claim via `echo '<row-json>' | bash ~/.lore/scripts/evidence-append.sh --work-item "$SLUG"` (`producer_role: "researcher"`, `task_id: "domain-<topic-slug>"`, explicit scale, snippet and hash per the Tier-2 contract; bootstrap runs outside any plan, so omit `phase_id`). Record any existing entry checked against code with `lore verify`.
 3. **Synthesize exactly one entry** mapping the topic's boundaries, contracts, and shapes. File it with the Step 6 capture command, changed to: `--category "domains/<topic-slug>"`, `--scale "architecture,subsystem"`, `--producer-role researcher`, `--protocol-slot bootstrap-domain`, `--context "Domain bootstrap for <topic>"`. The footer lands at `scale: architecture,subsystem` and `confidence: medium`, with `source_artifact_ids` naming the accepted Tier-2 claim ids.
 4. **Leave unrelated discoveries uncaptured.** The contract is one seed, not a sweep — anything outside the named topic files later through organic growth, when it is actually consumed.
 5. `lore heal`, append a `notes.md` entry, journal the env-gated milestone (`--step-id "bootstrap:domain:<topic-slug>"`), then `lore work archive "$SLUG"`.

@@ -26,6 +26,7 @@ extract_file_targets = _mod.extract_file_targets
 estimate_context_cost = _mod.estimate_context_cost
 print_sizing_diagnostics = _mod.print_sizing_diagnostics
 compute_recommended_workers = _mod.compute_recommended_workers
+PLAN_VERIFICATION_HEADING = _mod.PLAN_VERIFICATION_HEADING
 RESOLVE_CHAR_LIMIT = _mod.RESOLVE_CHAR_LIMIT
 FIXED_OVERHEAD_CHARS = _mod.FIXED_OVERHEAD_CHARS
 VERB_COMPLEXITY = _mod.VERB_COMPLEXITY
@@ -2777,3 +2778,365 @@ class TestCoordinationTaskProjection:
     def test_dependency_marker_rejects_non_task_identity(self):
         with pytest.raises(ValueError, match="expected task-N"):
             extract_explicit_dependencies("Build [depends-on: upstream]")
+
+
+# ---------------------------------------------------------------------------
+# Flat task DAG: `### Task N:` plans
+# ---------------------------------------------------------------------------
+
+FLAT_PLAN = """\
+# Flat feature
+
+## Goal
+Ship the flat form.
+
+## Strategy
+Land the parser first.
+
+## Design Decisions
+
+### D1: Parse task blocks
+**Decision:** Each task carries its own brief.
+**Rationale:** The brief was never shared.
+
+## Tasks
+
+### Task 1: Parser
+**Deliverable:** A parser that reads task blocks.
+**Files:** `scripts/parse.py`, `tests/test_parse.py`
+**Scope:**
+- Do not modify: `scripts/legacy.py`
+- Output contract: the parsed record shape later tasks read.
+**Knowledge context:**
+- [[knowledge:conventions/parsing]] — read the tokenizer conventions first
+- [ ] Implement the task-block parser in `scripts/parse.py` and `tests/test_parse.py` — keep the record shape stable [class: standard]
+
+### Task 2: Reader
+**Deliverable:** A reader over the parsed records.
+**Files:**
+- `scripts/read.py`
+- `scripts/parse.py`
+**Consultations required:**
+- serialization
+- [ ] Implement the reader in `scripts/read.py` — a prose [depends-on: task-9] mention [depends-on: task-1] [class: judgment-dense]
+
+## Verification
+- `lore impl start` accepts the flat plan
+
+## Related
+- [[knowledge:conventions/cross-cutting]] — applies to the whole plan
+"""
+
+MINIMAL_FLAT_PLAN = """\
+# Small
+
+## Tasks
+
+### Task 1: Only task
+**Deliverable:** One thing.
+**Files:** `src/only.py`
+- [ ] Implement the only thing [class: standard]
+"""
+
+
+def _flat_task(result, task_id):
+    return next(t for t in result["tasks"] if t["id"] == task_id)
+
+
+class TestFlatBranchSelection:
+    def test_flat_plan_emits_tasks_and_no_phases(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        assert [t["id"] for t in result["tasks"]] == ["task-1", "task-2"]
+        assert "phases" not in result
+
+    def test_phase_plan_still_emits_phases_and_no_tasks(self, tmp_path):
+        result = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
+        assert result["phases"]
+        assert "tasks" not in result
+
+    def test_mixed_headings_are_refused(self, tmp_path):
+        mixed = FLAT_PLAN + "\n### Phase 1: Legacy\n**Objective:** x\n- [ ] Do it in `a.py`\n"
+        with pytest.raises(ValueError, match="mixes"):
+            generate_tasks_from_plan(mixed, str(tmp_path))
+
+    def test_plan_with_neither_heading_still_emits_phases(self, tmp_path):
+        result = generate_tasks_from_plan(NO_PHASES_PLAN, str(tmp_path))
+        assert result["phases"] == []
+        assert "tasks" not in result
+
+    def test_top_level_keys_are_shared_across_branches(self, tmp_path):
+        flat = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        legacy = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
+        shared = {"plan_checksum", "generated_at", "recommended_workers",
+                  "design_decisions_present"}
+        assert shared <= set(flat)
+        assert shared <= set(legacy)
+
+
+class TestFlatTaskIdentity:
+    def test_ids_come_from_the_heading_number(self, tmp_path):
+        plan = MINIMAL_FLAT_PLAN.replace("### Task 1:", "### Task 4:")
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        assert [t["id"] for t in result["tasks"]] == ["task-4"]
+
+    def test_checked_task_is_dropped_and_its_edge_with_it(self, tmp_path):
+        plan = FLAT_PLAN.replace(
+            "- [ ] Implement the task-block parser", "- [x] Implement the task-block parser"
+        )
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        assert [t["id"] for t in result["tasks"]] == ["task-2"]
+        assert result["tasks"][0]["blockedBy"] == []
+
+    def test_duplicate_heading_number_is_refused(self, tmp_path):
+        plan = FLAT_PLAN.replace("### Task 2: Reader", "### Task 1: Reader")
+        with pytest.raises(ValueError, match="duplicate heading"):
+            generate_tasks_from_plan(plan, str(tmp_path))
+
+    def test_two_checklist_lines_under_one_heading_are_refused(self, tmp_path):
+        plan = FLAT_PLAN.replace(
+            "- [ ] Implement the reader",
+            "- [ ] Extra unit in `scripts/read.py`\n- [ ] Implement the reader",
+        )
+        with pytest.raises(ValueError, match="carries 2 checklist lines"):
+            generate_tasks_from_plan(plan, str(tmp_path))
+
+    def test_task_block_with_no_checklist_line_is_refused(self, tmp_path):
+        plan = MINIMAL_FLAT_PLAN.replace(
+            "- [ ] Implement the only thing [class: standard]\n", ""
+        )
+        with pytest.raises(ValueError, match="carries 0 checklist lines"):
+            generate_tasks_from_plan(plan, str(tmp_path))
+
+    def test_heading_name_and_deliverable_are_carried_on_the_record(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        task = _flat_task(result, "task-1")
+        assert task["name"] == "Parser"
+        assert task["deliverable"] == "A parser that reads task blocks."
+
+
+class TestFlatFileTargets:
+    def test_files_block_is_the_owned_surface(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        assert _flat_task(result, "task-1")["file_targets"] == [
+            "scripts/parse.py", "tests/test_parse.py"
+        ]
+
+    def test_bulleted_files_block_is_parsed(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        assert _flat_task(result, "task-2")["file_targets"] == [
+            "scripts/read.py", "scripts/parse.py"
+        ]
+
+    def test_inline_and_bulleted_entries_combine(self, tmp_path):
+        plan = MINIMAL_FLAT_PLAN.replace(
+            "**Files:** `src/only.py`",
+            "**Files:** `src/only.py`\n- `src/extra.py`",
+        )
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        assert result["tasks"][0]["file_targets"] == ["src/only.py", "src/extra.py"]
+
+    def test_task_line_path_absent_from_files_is_refused(self, tmp_path):
+        plan = FLAT_PLAN.replace(
+            "**Files:** `scripts/parse.py`, `tests/test_parse.py`",
+            "**Files:** `scripts/parse.py`",
+        )
+        with pytest.raises(ValueError, match="does not declare"):
+            generate_tasks_from_plan(plan, str(tmp_path))
+
+    def test_task_with_no_file_target_is_refused_naming_the_task_line(self, tmp_path):
+        plan = MINIMAL_FLAT_PLAN.replace("**Files:** `src/only.py`\n", "")
+        with pytest.raises(ValueError, match="names no file target") as excinfo:
+            generate_tasks_from_plan(plan, str(tmp_path))
+        assert "Implement the only thing" in str(excinfo.value)
+
+    def test_task_line_paths_stand_alone_without_a_files_block(self, tmp_path):
+        plan = MINIMAL_FLAT_PLAN.replace("**Files:** `src/only.py`\n", "").replace(
+            "- [ ] Implement the only thing",
+            "- [ ] Implement the only thing in `src/only.py`",
+        )
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        assert result["tasks"][0]["file_targets"] == ["src/only.py"]
+
+    def test_placeholder_files_text_yields_no_surface(self, tmp_path):
+        plan = MINIMAL_FLAT_PLAN.replace(
+            "**Files:** `src/only.py`", "**Files:** relevant file paths"
+        )
+        with pytest.raises(ValueError, match="names no file target"):
+            generate_tasks_from_plan(plan, str(tmp_path))
+
+
+class TestFlatDependencies:
+    def test_trailing_marker_wins_over_a_prose_mention(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        assert _flat_task(result, "task-2")["blockedBy"] == ["task-1"]
+
+    def test_shared_file_target_chains_tasks(self, tmp_path):
+        plan = FLAT_PLAN.replace(" [depends-on: task-1]", "")
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        assert _flat_task(result, "task-2")["blockedBy"] == ["task-1"]
+
+    def test_unknown_dependency_fails_generation(self, tmp_path):
+        plan = FLAT_PLAN.replace("[depends-on: task-1]", "[depends-on: task-9]")
+        with pytest.raises(ValueError, match="unknown dependencies"):
+            generate_tasks_from_plan(plan, str(tmp_path))
+
+    def test_recommended_workers_reads_the_flat_dag(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        assert result["recommended_workers"] == 1
+
+    def test_trailing_only_extraction_ignores_a_prose_marker(self):
+        line = "Wire it — a prose [depends-on: task-9] mention [class: standard]"
+        assert extract_explicit_dependencies(line, trailing_only=True) == []
+        assert extract_explicit_dependencies(line) == ["task-9"]
+
+    def test_trailing_only_reads_past_backlinks_and_other_markers(self):
+        line = (
+            "Wire it [[knowledge:conventions/x]] [class: standard] "
+            "[depends-on: task-2, task-3]"
+        )
+        assert extract_explicit_dependencies(line, trailing_only=True) == [
+            "task-2", "task-3"
+        ]
+
+    def test_legacy_branch_keeps_unbound_extraction(self, tmp_path):
+        plan = COORDINATION_EDGE_PLAN.replace(
+            "- [ ] Integrate source C [depends-on: task-1, task-2] [tree: writer]",
+            "- [ ] Integrate source C [depends-on: task-1, task-2] into `c.txt` [tree: writer]",
+        )
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        assert result["phases"][0]["tasks"][2]["blockedBy"] == ["task-1", "task-2"]
+
+
+class TestFlatInlineBrief:
+    def test_description_opens_with_the_deliverable(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        first_line = _flat_task(result, "task-1")["description"].splitlines()[0]
+        assert first_line == "**Deliverable:** A parser that reads task blocks."
+
+    def test_description_carries_no_phase_prefix(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        for task in result["tasks"]:
+            assert "**Phase:**" not in task["description"]
+
+    def test_description_carries_the_brief_inline(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path), "flat-feature")
+        description = _flat_task(result, "task-1")["description"]
+        for expected in (
+            "**Target files:**",
+            "**Task:**",
+            "**Scope:**",
+            "**Strategy:**",
+            "## Design Decisions",
+            "## Context (resolve before starting)",
+            "## Prior Knowledge",
+            "**Plan reference:** [[work:flat-feature]]",
+        ):
+            assert expected in description, expected
+
+    def test_consultations_required_reach_the_brief_and_the_record(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        task = _flat_task(result, "task-2")
+        assert task["consultations_required"] == ["serialization"]
+        assert "**Consultations required:**\n- serialization" in task["description"]
+        assert _flat_task(result, "task-1")["consultations_required"] == []
+
+    def test_plan_verification_renders_as_plan_owned_close_criteria(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        for task in result["tasks"]:
+            assert PLAN_VERIFICATION_HEADING in task["description"]
+            assert "- `lore impl start` accepts the flat plan" in task["description"]
+            # The bar is the plan's, so the task-owned marker never appears.
+            assert "**Verification:**" not in task["description"]
+
+    def test_bold_plan_verification_block_is_read_from_the_preamble(self, tmp_path):
+        plan = MINIMAL_FLAT_PLAN.replace(
+            "## Tasks", "**Verification:**\n- `lore search` still ranks\n\n## Tasks"
+        )
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        assert "- `lore search` still ranks" in result["tasks"][0]["description"]
+
+    def test_a_task_own_verification_block_is_not_the_plan_bar(self, tmp_path):
+        plan = MINIMAL_FLAT_PLAN.replace(
+            "**Files:** `src/only.py`",
+            "**Files:** `src/only.py`\n**Verification:**\n- not the plan bar",
+        )
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        assert PLAN_VERIFICATION_HEADING not in result["tasks"][0]["description"]
+
+    def test_backlinks_render_in_two_tiers(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        description = _flat_task(result, "task-1")["description"]
+        assert "Task-level:" in description
+        assert "Cross-cutting:" in description
+        assert "Phase-level:" not in description
+
+    def test_task_line_backlink_keeps_its_knowledge_context_annotation(self, tmp_path):
+        plan = FLAT_PLAN.replace(
+            "keep the record shape stable [class: standard]",
+            "keep the record shape stable [[knowledge:conventions/parsing]] [class: standard]",
+        )
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        description = _flat_task(result, "task-1")["description"]
+        assert (
+            "- [[knowledge:conventions/parsing]] — read the tokenizer conventions first"
+            in description
+        )
+        assert description.count("[[knowledge:conventions/parsing]] —") == 1
+
+    def test_cost_estimate_is_computed_from_the_inline_brief(self, tmp_path):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        task = _flat_task(result, "task-1")
+        assert (
+            task["context_cost_estimate"]["description_chars"]
+            == len(task["description"])
+        )
+
+
+class TestFlatPerTaskDirectives:
+    def test_retrieval_directive_is_read_per_task(self, tmp_path):
+        plan = MINIMAL_FLAT_PLAN.replace(
+            "**Files:** `src/only.py`",
+            "**Files:** `src/only.py`\n**Retrieval directive:**\n"
+            "- seeds: src/only.py\n- scale_set: implementation",
+        )
+        result = generate_tasks_from_plan(plan, str(tmp_path))
+        directive = result["tasks"][0]["retrieval_directive"]
+        assert directive["seeds"] == ["src/only.py"]
+        assert directive["scale_set"] == ["implementation"]
+
+    def test_absent_directive_is_null(self, tmp_path):
+        result = generate_tasks_from_plan(MINIMAL_FLAT_PLAN, str(tmp_path))
+        assert result["tasks"][0]["retrieval_directive"] is None
+
+    def test_invalid_v2_directive_names_the_task(self, tmp_path):
+        plan = MINIMAL_FLAT_PLAN.replace(
+            "**Files:** `src/only.py`",
+            "**Files:** `src/only.py`\n**Retrieval directive:**\n"
+            "- version: 2\n- topics:\n  - role: adjacent\n    topic: x\n",
+        )
+        with pytest.raises(ValueError, match="task 1: v2 retrieval_directive"):
+            generate_tasks_from_plan(plan, str(tmp_path))
+
+    def test_persistent_advisor_is_priced_per_task(self, tmp_path):
+        plan = MINIMAL_FLAT_PLAN.replace(
+            "**Files:** `src/only.py`",
+            "**Files:** `src/only.py`\n**Advisors:**\n"
+            "- schema-advisor — schema shape. [on-demand] mode: persistent",
+        )
+        priced = generate_tasks_from_plan(plan, str(tmp_path))
+        plain = generate_tasks_from_plan(MINIMAL_FLAT_PLAN, str(tmp_path))
+        assert (
+            priced["tasks"][0]["context_cost_estimate"]["advisory_chars"]
+            == _ADVISORY_OVERHEAD_CHARS
+        )
+        assert plain["tasks"][0]["context_cost_estimate"]["advisory_chars"] == 0
+
+
+class TestFlatSizingDiagnostics:
+    def test_diagnostics_render_for_a_flat_plan(self, tmp_path, capsys):
+        result = generate_tasks_from_plan(FLAT_PLAN, str(tmp_path))
+        print_sizing_diagnostics(result)
+        err = capsys.readouterr().err
+        assert "Context cost summary:" in err
+        assert "Parser" in err
+        assert "Reader" in err

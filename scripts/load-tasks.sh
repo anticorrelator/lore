@@ -3,7 +3,7 @@
 # Usage: bash load-tasks.sh <slug>
 #
 # Output format (one block per task, delimited by === task-N ===):
-#   [tasks] N tasks across M phases | checksum: <short> MATCH
+#   [tasks] N tasks | checksum: <short> MATCH
 #
 #   === task-1 ===
 #   subject: ...
@@ -67,10 +67,6 @@ stored_checksum = data.get("plan_checksum", "")
 checksum_short = stored_checksum[:8] if stored_checksum else "none"
 match_label = "MATCH" if plan_checksum == stored_checksum else "MISMATCH"
 
-phases = data.get("phases", [])
-total_tasks = sum(len(p.get("tasks", [])) for p in phases)
-phase_count = len(phases)
-
 if match_label == "MISMATCH":
     print(f"[load-tasks] WARNING: Checksum mismatch — plan.md was edited after tasks.json was generated.")
     print(f"  Stored:  {stored_checksum[:16]}...")
@@ -78,17 +74,33 @@ if match_label == "MISMATCH":
     print(f"  Run: lore work regen-tasks {slug}")
     sys.exit(1)
 
-print(f"[tasks] {total_tasks} tasks across {phase_count} phases | checksum: {checksum_short} {match_label}")
+# tasks[] is authoritative when present; otherwise phases[] is flattened in
+# declaration order. The generator emits one shape or the other, never both. A
+# document carrying neither is refused rather than reported as an empty plan.
+flat_tasks = data.get("tasks")
+phases = data.get("phases")
+if isinstance(flat_tasks, list):
+    groups = [(None, list(flat_tasks))]
+    summary = f"{len(flat_tasks)} tasks"
+elif isinstance(phases, list):
+    groups = [(p, p.get("tasks", [])) for p in phases]
+    total_tasks = sum(len(tasks) for _, tasks in groups)
+    summary = f"{total_tasks} tasks across {len(phases)} phases"
+else:
+    print(f"[load-tasks] Error: tasks.json for '{slug}' declares neither a "
+          f"top-level tasks array nor a phases array, so no task list could be "
+          f"read. Run: lore work regen-tasks {slug}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"[tasks] {summary} | checksum: {checksum_short} {match_label}")
 print()
 
-for phase in phases:
-    phase_num = phase.get("phase_number", "?")
-    phase_name = phase.get("phase_name", "")
-    tasks = phase.get("tasks", [])
+for phase, tasks in groups:
     if not tasks:
         continue
-    print(f"=== Phase {phase_num}: {phase_name} ===")
-    print()
+    if phase is not None:
+        print(f"=== Phase {phase.get('phase_number', '?')}: {phase.get('phase_name', '')} ===")
+        print()
     for task in tasks:
         tid = task.get("id", "")
         subject = task.get("subject", "")

@@ -185,7 +185,7 @@ Defined in [`adapters/roles.json`](../adapters/roles.json):
 
 | Role         | Description                                                                                              | Call sites                                              |
 |--------------|----------------------------------------------------------------------------------------------------------|---------------------------------------------------------|
-| `lead`       | Coordinator agent that plans phases, spawns workers, and gates phase transitions on returned reports.    | `skills/spec/SKILL.md`, `skills/implement/SKILL.md`     |
+| `lead`       | Coordinator agent that plans a work item's tasks, spawns workers, and accepts each report before dependent tasks dispatch. | `skills/spec/SKILL.md`, `skills/implement/SKILL.md`     |
 | `worker`     | Task-iterating implementation agent emitting Tier 2 evidence anchored to file:line ranges.               | `agents/worker.md`, `skills/implement`, `batch-implement` |
 | `researcher` | Task-iterating investigation agent that explores design space without modifying source files.            | `agents/researcher.md`, `skills/spec`, `batch-spec`     |
 | `reviewer`   | Single-batch evaluator that consumes a finished artifact and returns a verdict against a rubric.         | `skills/pr-review`, `generate-review-summary.sh`        |

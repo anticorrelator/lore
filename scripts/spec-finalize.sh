@@ -15,14 +15,18 @@
 #   6. emission-contract assert  every retrieval_directive in tasks.json carries
 #                                non-empty seeds AND non-empty scale_set (v2:
 #                                per topic; legacy flat: top level); failure
-#                                refuses naming the phase
+#                                refuses naming the unit it came from. Reads
+#                                tasks[] when present and falls back to phases[]
 #   6b. judgment-class gate      every task line in plan.md carries a
 #                                [class: mechanical|standard|judgment-dense]
-#                                marker AND every >1-task phase carries a
-#                                **Split rationale:** block; failure refuses
-#                                naming the offending line or phase. Emits the
-#                                split_rationale + class_distribution recorded
-#                                in the step-9 telemetry row
+#                                marker AND the plan carries the sizing
+#                                rationale its task count calls for — **Split
+#                                rationale:** above one task, **Merge
+#                                rationale:** at exactly one. Failure refuses
+#                                naming the offending line or the missing block.
+#                                Emits the split_rationale + merge_rationale +
+#                                class_distribution recorded in the step-9
+#                                telemetry row
 #   7. execution-log atom        write-execution-log.sh --source spec-verb
 #   8. attribution counts        parse execution-log.md '## ... | source: <tok>'
 #                                headers; spec-verb counts as verb-mediated,
@@ -105,7 +109,7 @@ CLASS_GATE_STATUS="not-run"
 CLASS_GATE_DETAIL=""
 # Telemetry payloads computed by the class-annotation gate (step 6b). Defaults
 # stand in only if the gate never runs — every success path overwrites this.
-CLASS_GATE_PAYLOAD='{"split_rationale": {}, "class_distribution": {"mechanical": 0, "standard": 0, "judgment-dense": 0}}'
+CLASS_GATE_PAYLOAD='{"split_rationale": {}, "merge_rationale": {}, "class_distribution": {"mechanical": 0, "standard": 0, "judgment-dense": 0}}'
 TELEMETRY_STATUS="not-run"
 VERB_MEDIATED_COUNT=0
 HAND_RUN_COUNT=0
@@ -361,6 +365,8 @@ fi
 # Every retrieval_directive must carry non-empty seeds AND non-empty scale_set.
 # v2 directives are checked per topic; legacy flat directives at top level.
 # A null directive is a legitimate absence, not a failure.
+# tasks[] is authoritative when present; a document carrying only phases[] is
+# read through the fallback so a plan authored either way still asserts.
 if [[ ! -f "$TASKS_FILE" ]]; then
   CONTRACT_STATUS="failed"
   CONTRACT_DETAIL="tasks.json missing after regen"
@@ -375,9 +381,17 @@ with open(sys.argv[1], encoding="utf-8") as f:
 
 failures = []
 checked = 0
-for phase in data.get("phases", []):
-    num = phase.get("phase_number")
-    directive = phase.get("retrieval_directive")
+
+tasks = data.get("tasks")
+if isinstance(tasks, list) and tasks:
+    units = [(task.get("id", "?"), task.get("retrieval_directive")) for task in tasks]
+else:
+    units = [
+        (f"phase {phase.get('phase_number')}", phase.get("retrieval_directive"))
+        for phase in data.get("phases", [])
+    ]
+
+for name, directive in units:
     if not isinstance(directive, dict):
         continue
     topics = directive.get("topics")
@@ -386,15 +400,15 @@ for phase in data.get("phases", []):
             checked += 1
             label = topic.get("topic") or topic.get("role") or "?"
             if not topic.get("seeds"):
-                failures.append(f"phase {num} topic '{label}': empty seeds")
+                failures.append(f"{name} topic '{label}': empty seeds")
             if not topic.get("scale_set"):
-                failures.append(f"phase {num} topic '{label}': empty scale_set")
+                failures.append(f"{name} topic '{label}': empty scale_set")
     else:
         checked += 1
         if not directive.get("seeds"):
-            failures.append(f"phase {num}: empty seeds")
+            failures.append(f"{name}: empty seeds")
         if not directive.get("scale_set"):
-            failures.append(f"phase {num}: empty scale_set")
+            failures.append(f"{name}: empty scale_set")
 
 if failures:
     print("; ".join(failures))
@@ -414,15 +428,19 @@ if [[ $CONTRACT_RC -ne 0 ]]; then
 fi
 CONTRACT_STATUS="passed"
 
-# --- 6b. Judgment-class annotation + split-rationale gate over plan.md --------
+# --- 6b. Judgment-class annotation + sizing-rationale gate over plan.md -------
 # Every task checkbox line must carry a trailing [class: mechanical|standard|
-# judgment-dense] marker, and any phase with more than one task must carry a
-# **Split rationale:** block. The gate refuses (exit 1) before any telemetry row
-# or spec-verb execution-log atom is written. On success it emits the
-# split_rationale text and class distribution the step-9 telemetry row records.
-# Class markers ride here (not on the emission-contract assert) because they are
-# a plan.md authoring property, parsed straight from the source of truth rather
-# than from the regenerated tasks.json.
+# judgment-dense] marker, and the plan must argue its task count: a plan with
+# more than one task carries **Split rationale:**, a plan with exactly one
+# carries **Merge rationale:**. Both directions are priced, so neither is the
+# free default. The gate refuses (exit 1) before any telemetry row or spec-verb
+# execution-log atom is written. On success it emits the rationale texts and
+# class distribution the step-9 telemetry row records.
+# The gate reads the whole plan, not a unit within it: the rationale is the
+# plan's, and a plan authored with either unit heading counts its task lines the
+# same way. Class markers ride here (not on the emission-contract assert)
+# because they are a plan.md authoring property, parsed straight from the source
+# of truth rather than from the regenerated tasks.json.
 set +e
 CLASS_GATE_JSON=$(python3 - "$PLAN_FILE" <<'PYEOF'
 import json, re, sys
@@ -432,61 +450,77 @@ with open(sys.argv[1], encoding="utf-8") as f:
 
 CLASS_RE = re.compile(r"\[class:\s*(mechanical|standard|judgment-dense)\s*\]")
 TASK_RE = re.compile(r"^- \[[ xX]\]\s+(.*)", re.MULTILINE)
-PHASE_RE = re.compile(r"^### Phase (\d+):\s*(.*)", re.MULTILINE)
-matches = list(PHASE_RE.finditer(plan))
 
-unannotated = []            # task lines with no [class: ...] marker
-missing_rationale = []      # >1-task phases with no **Split rationale:**
-split_rationale = {}        # phase_number -> rationale text
+
+def rationale_texts(label):
+    """Every non-empty block under **<label>:**, keyed by its ordinal position.
+
+    A plan authored with one unit level has at most one; a legacy plan repeats
+    the block per unit, and each one is kept rather than collapsed.
+    """
+    found = {}
+    pattern = re.compile(
+        r"^\*\*" + re.escape(label) + r":\*\*[ \t]*(.*?)(?=\n\*\*[A-Za-z]|\n- \[|\n#|\Z)",
+        re.DOTALL | re.MULTILINE,
+    )
+    for match in pattern.finditer(plan):
+        text = re.sub(r"<!--.*?-->", "", match.group(1), flags=re.DOTALL).strip()
+        if text.startswith("<") and text.endswith(">"):
+            continue  # unfilled <placeholder> counts as absent
+        if text:
+            found[str(len(found) + 1)] = text
+    return found
+
+
+unannotated = []
 class_distribution = {"mechanical": 0, "standard": 0, "judgment-dense": 0}
 
-for i, m in enumerate(matches):
-    phase_num = m.group(1)
-    start = m.end()
-    if i + 1 < len(matches):
-        end = matches[i + 1].start()
+task_lines = TASK_RE.findall(plan)
+for line in task_lines:
+    match = CLASS_RE.search(line)
+    if match:
+        class_distribution[match.group(1)] += 1
     else:
-        nxt = re.search(r"^## ", plan[start:], re.MULTILINE)
-        end = start + nxt.start() if nxt else len(plan)
-    body = plan[start:end]
+        unannotated.append(line.strip())
 
-    tasks = TASK_RE.findall(body)
-    for line in tasks:
-        cm = CLASS_RE.search(line)
-        if cm:
-            class_distribution[cm.group(1)] += 1
-        else:
-            unannotated.append(f"phase {phase_num}: {line.strip()}")
+split_rationale = rationale_texts("Split rationale")
+merge_rationale = rationale_texts("Merge rationale")
 
-    sr = re.search(
-        r"^\*\*Split rationale:\*\*[ \t]*(.*?)(?=\n\*\*[A-Za-z]|\n- \[|\n#|\Z)",
-        body, re.DOTALL | re.MULTILINE,
-    )
-    sr_text = re.sub(r"<!--.*?-->", "", sr.group(1), flags=re.DOTALL).strip() if sr else ""
-    if sr_text.startswith("<") and sr_text.endswith(">"):
-        sr_text = ""  # unfilled <placeholder> counts as absent
-    if sr_text:
-        split_rationale[phase_num] = sr_text
-    if len(tasks) > 1 and not sr_text:
-        missing_rationale.append(phase_num)
+missing_rationale = ""
+if len(task_lines) > 1 and not split_rationale:
+    missing_rationale = "Split rationale"
+elif len(task_lines) == 1 and not merge_rationale:
+    missing_rationale = "Merge rationale"
 
 if unannotated or missing_rationale:
     print("[spec] Error: judgment-class gate refused finalize:", file=sys.stderr)
-    for u in unannotated:
-        print(f"[spec]   unannotated task line — {u}", file=sys.stderr)
-    for p in missing_rationale:
-        print(f"[spec]   phase {p}: more than one task with no **Split rationale:** block", file=sys.stderr)
+    for line in unannotated:
+        print(f"[spec]   unannotated task line — {line}", file=sys.stderr)
+    if missing_rationale == "Split rationale":
+        print(
+            f"[spec]   plan has {len(task_lines)} tasks with no **Split rationale:** block",
+            file=sys.stderr,
+        )
+    elif missing_rationale:
+        print(
+            "[spec]   plan has one task with no **Merge rationale:** block",
+            file=sys.stderr,
+        )
     sys.exit(1)
 
-print(json.dumps({"split_rationale": split_rationale, "class_distribution": class_distribution}))
+print(json.dumps({
+    "split_rationale": split_rationale,
+    "merge_rationale": merge_rationale,
+    "class_distribution": class_distribution,
+}))
 PYEOF
 )
 CLASS_GATE_RC=$?
 set -e
 if [[ $CLASS_GATE_RC -ne 0 ]]; then
   CLASS_GATE_STATUS="failed"
-  CLASS_GATE_DETAIL="unannotated task line(s) or multi-task phase(s) missing split rationale"
-  echo "[spec] Annotate every task line with [class: mechanical|standard|judgment-dense] and add **Split rationale:** to multi-task phases, then re-run: lore spec finalize $SLUG" >&2
+  CLASS_GATE_DETAIL="unannotated task line(s) or a plan missing its sizing rationale"
+  echo "[spec] Annotate every task line with [class: mechanical|standard|judgment-dense], and give the plan a **Split rationale:** block above one task or a **Merge rationale:** block at exactly one, then re-run: lore spec finalize $SLUG" >&2
   emit_json_and_exit 1 "judgment-class gate failed: $CLASS_GATE_DETAIL"
 fi
 CLASS_GATE_STATUS="passed"
@@ -534,6 +568,7 @@ row = {
     "verb_mediated_count": int(verb_count),
     "hand_run_count": int(hand_count),
     "split_rationale": payload.get("split_rationale", {}),
+    "merge_rationale": payload.get("merge_rationale", {}),
     "class_distribution": payload.get("class_distribution", {}),
     "template_version": tv,
     "captured_at_sha": None if sha == "null" else sha,

@@ -700,8 +700,19 @@ else:
                     try:
                         tasks_doc = json.loads(tasks_path.read_text(encoding="utf-8"))
                         plan_text = plan_path.read_text(encoding="utf-8")
-                        task_rows = [task for phase in tasks_doc.get("phases", []) if isinstance(phase, dict)
-                                     for task in phase.get("tasks", []) if isinstance(task, dict)]
+                        # tasks[] is authoritative; otherwise phases[] is
+                        # flattened. Neither shape leaves task_rows None, which
+                        # routes to the evidence-gap row below rather than
+                        # reporting a plan with nothing left to do.
+                        flat = tasks_doc.get("tasks")
+                        nested = tasks_doc.get("phases")
+                        if isinstance(flat, list):
+                            task_rows = [task for task in flat if isinstance(task, dict)]
+                        elif isinstance(nested, list):
+                            task_rows = [task for phase in nested if isinstance(phase, dict)
+                                         for task in phase.get("tasks", []) if isinstance(task, dict)]
+                        else:
+                            task_rows = None
                     except (OSError, json.JSONDecodeError, AttributeError):
                         task_rows = None
                     if task_rows is None:

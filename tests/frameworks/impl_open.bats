@@ -8,7 +8,7 @@
 #   - 3-branch prior-knowledge gate routing with per-phase error containment
 #   - per-task Tier 2 extracts (task_id and file-target overlap)
 #   - skill-invocation map (plan + ceremony injection)
-#   - selection modes (--all / --phase / --task), explicit-selection requirement
+#   - selection modes (--all / --task), explicit-selection requirement
 #   - the execution-log attribution row is the only filesystem write
 #   - checksum gate, missing tasks.json, resolver tri-state propagation
 #
@@ -397,13 +397,19 @@ assert d["lead_inline_conditions"]["detail"]["ceremony_skills"] == []
 }
 
 @test "selection modes are exclusive" {
-  run bash "$LORE_CLI" impl open widget-pipeline --all --phase 2
+  run bash "$LORE_CLI" impl open widget-pipeline --all --task task-3
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "exactly one of"
 }
 
-@test "--phase selection surfaces out-of-selection blockers as external_blocked_by" {
-  run bash "$LORE_CLI" impl open widget-pipeline --phase 2 --json
+@test "the removed --phase selection is refused, naming the accepted flags" {
+  run bash "$LORE_CLI" impl open widget-pipeline --phase 2
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q -- "--task"
+}
+
+@test "--task selection surfaces out-of-selection blockers as external_blocked_by" {
+  run bash "$LORE_CLI" impl open widget-pipeline --task task-3 --task task-4 --json
   [ "$status" -eq 0 ]
   payload | python3 -c '
 import json, sys
@@ -413,6 +419,57 @@ assert sorted(creates) == ["task-3", "task-4"]
 assert creates["task-3"]["external_blocked_by"] == ["task-1"]
 assert d["initial_unblocked"] == ["task-4"]
 '
+}
+
+@test "a flat tasks array is preferred over a phases array and needs no phase" {
+  python3 - "$ITEM_DIR/tasks.json" <<'PYEOF'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["tasks"] = [
+    {"id": "task-1", "subject": "build alpha module", "activeForm": "Building alpha module",
+     "blockedBy": [], "file_targets": ["/src/alpha.sh"],
+     "name": "Alpha", "deliverable": "alpha builds",
+     "retrieval_directive": None,
+     "description": "**Deliverable:** alpha builds\n\n## Prior Knowledge\n- embedded"},
+    {"id": "task-2", "subject": "verify alpha module", "activeForm": "Verifying alpha module",
+     "blockedBy": ["task-1"], "file_targets": ["/src/alpha.sh"],
+     "name": "Verify", "deliverable": "alpha verified",
+     "retrieval_directive": None, "description": "**Deliverable:** alpha verified"},
+]
+json.dump(d, open(p, "w"), indent=1)
+PYEOF
+  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  [ "$status" -eq 0 ]
+  payload | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+creates = [op for op in d["manifest"] if op["op"] == "TaskCreate"]
+assert [op["local_id"] for op in creates] == ["task-1", "task-2"], creates
+# tasks[] wins outright: the phases[] tasks (task-3, task-4) never appear.
+assert all(op["phase"] is None for op in creates)
+assert [u["kind"] for u in d["unit_map"]] == ["task", "task"]
+assert [pk["task_id"] for pk in d["prior_knowledge"]] == ["task-1", "task-2"]
+assert d["prior_knowledge"][0]["branch"] == "task-descriptions"
+assert d["prior_knowledge"][1]["branch"] == "fallback"
+'
+}
+
+@test "a tasks.json with neither unit array is refused, not read as an empty plan" {
+  echo '{"generated_at": "2026-06-10T00:00:00Z"}' > "$ITEM_DIR/tasks.json"
+  python3 - "$ITEM_DIR" <<'PYEOF'
+import hashlib, json, os, sys
+item = sys.argv[1]
+with open(os.path.join(item, "plan.md"), "rb") as f:
+    checksum = hashlib.sha256(f.read()).hexdigest()
+p = os.path.join(item, "tasks.json")
+d = json.load(open(p))
+d["plan_checksum"] = checksum
+json.dump(d, open(p, "w"), indent=1)
+PYEOF
+  run bash "$LORE_CLI" impl open widget-pipeline --all
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "regen-tasks"
 }
 
 @test "--task selection matching nothing is a successful empty manifest with status" {

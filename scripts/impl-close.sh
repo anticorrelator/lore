@@ -706,27 +706,42 @@ try:
         data = json.load(f)
 except (OSError, ValueError):
     data = None
+# tasks[] is authoritative; otherwise phases[] is flattened. A document
+# carrying neither shape is reported rather than passed off as a cycle with no
+# tasks — downstream coverage sampling reads this array as the task census.
+task_rows = []
 if isinstance(data, dict):
-    for phase in data.get("phases", []):
-        for task in phase.get("tasks", []):
-            jc = task.get("judgment_class")
-            # standard/null and any unrecognized value route as plain worker.
-            worker_model = model_by_class.get(jc, standard_model)
-            estimate = task.get("context_cost_estimate")
-            total_chars = estimate.get("total_chars") if isinstance(estimate, dict) else None
-            tid = task.get("id")
-            spends = spend_by_task.get(tid, [])
-            if tid is not None:
-                matched.add(tid)
-            # Absent -> null; one line -> object; re-dispatch duplicates -> list.
-            spend = None if not spends else (spends[0] if len(spends) == 1 else spends)
-            attribution.append({
-                "task_id": tid,
-                "judgment_class": jc,
-                "worker_model": worker_model,
-                "context_cost_estimate": total_chars,
-                "spend": spend,
-            })
+    flat = data.get("tasks")
+    nested = data.get("phases")
+    if isinstance(flat, list):
+        task_rows = [t for t in flat if isinstance(t, dict)]
+    elif isinstance(nested, list):
+        task_rows = [t for p in nested if isinstance(p, dict)
+                     for t in p.get("tasks", []) if isinstance(t, dict)]
+    else:
+        sys.stderr.write(
+            "[impl] Warning: tasks.json declares neither a top-level tasks "
+            "array nor a phases array; task attribution is empty.\n")
+
+for task in task_rows:
+    jc = task.get("judgment_class")
+    # standard/null and any unrecognized value route as plain worker.
+    worker_model = model_by_class.get(jc, standard_model)
+    estimate = task.get("context_cost_estimate")
+    total_chars = estimate.get("total_chars") if isinstance(estimate, dict) else None
+    tid = task.get("id")
+    spends = spend_by_task.get(tid, [])
+    if tid is not None:
+        matched.add(tid)
+    # Absent -> null; one line -> object; re-dispatch duplicates -> list.
+    spend = None if not spends else (spends[0] if len(spends) == 1 else spends)
+    attribution.append({
+        "task_id": tid,
+        "judgment_class": jc,
+        "worker_model": worker_model,
+        "context_cost_estimate": total_chars,
+        "spend": spend,
+    })
 
 for tid in spend_by_task:
     if tid not in matched:

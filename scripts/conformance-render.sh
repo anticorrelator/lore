@@ -219,15 +219,31 @@ woven_by_label = {}
 if os.path.isfile(tasks_path):
     try:
         tasks_data = json.loads(pathlib.Path(tasks_path).read_text(encoding="utf-8"))
-        for phase in tasks_data.get("phases", []):
-            for task in phase.get("tasks", []):
+        # tasks[] is authoritative; otherwise phases[] is flattened. Neither
+        # shape means the norms were never readable, which is an absent
+        # coverage row rather than an empty-but-checked one.
+        flat_tasks = tasks_data.get("tasks")
+        nested_phases = tasks_data.get("phases")
+        if isinstance(flat_tasks, list):
+            task_rows = [t for t in flat_tasks if isinstance(t, dict)]
+        elif isinstance(nested_phases, list):
+            task_rows = [t for p in nested_phases if isinstance(p, dict)
+                         for t in p.get("tasks", []) if isinstance(t, dict)]
+        else:
+            task_rows = None
+        if task_rows is None:
+            woven_cov = coverage(
+                "absent",
+                "tasks.json declares neither a top-level tasks array nor a phases array")
+        else:
+            for task in task_rows:
                 task_id = task.get("id")
                 for label in task.get("woven_norms") or []:
                     if isinstance(label, str) and label.strip():
                         woven_by_label.setdefault(label.strip(), [])
                         if task_id not in woven_by_label[label.strip()]:
                             woven_by_label[label.strip()].append(task_id)
-        woven_cov = coverage("present" if woven_by_label else "present-empty")
+            woven_cov = coverage("present" if woven_by_label else "present-empty")
     except (OSError, ValueError, TypeError) as exc:
         woven_cov = coverage("absent", f"tasks.json could not be read: {exc}")
 else:

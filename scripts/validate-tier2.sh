@@ -12,9 +12,9 @@
 # This script is read-only: it does NOT write anywhere.
 #
 # Required fields (fast-path producer emissions):
-#   claim_id, tier, claim, producer_role, protocol_slot, task_id, phase_id,
-#   scale, file, line_range, falsifier, why_this_work_needs_it,
-#   captured_at_sha, change_context
+#   claim_id, tier, claim, producer_role, protocol_slot, task_id, scale,
+#   file, line_range, falsifier, why_this_work_needs_it, captured_at_sha,
+#   change_context
 #
 # D2 grandfather waiver — slow-path legacy rows
 # (provenance == "legacy-no-snippet"): all of the above are still required
@@ -39,6 +39,15 @@
 #                migration writer is the only sanctioned emitter of this state;
 #                evidence-append.sh rejects it at the writer-path gate.
 # Any other combination (mixed, partial, malformed) is rejected.
+#
+# Optional phase_id (additive, non-gating):
+#   phase_id                — string, the phase a task belongs to. Plans that
+#                             group tasks under phases still supply it; plans
+#                             whose tasks stand on their own omit it rather
+#                             than invent a value. Type-checked when present,
+#                             never required, so rows written under the older
+#                             required-field contract keep validating with no
+#                             backfill.
 #
 # Optional source-anchor metadata (additive, non-gating):
 #   file_relative           — string, path relative to a `.git/` ancestor of `file`
@@ -127,7 +136,6 @@ REQUIRED_FIELDS=(
   producer_role
   protocol_slot
   task_id
-  phase_id
   scale
   file
   line_range
@@ -293,6 +301,16 @@ else
         fi
       fi
     fi
+  fi
+fi
+
+# --- Optional phase_id: type check only ---
+# Rows from plans that group tasks under phases carry it; rows from plans whose
+# tasks stand on their own omit it. Absence is never an error, so historical
+# rows written when the field was required continue to validate unchanged.
+if printf '%s' "$ROW" | jq -e 'has("phase_id") and (.phase_id != null)' >/dev/null 2>&1; then
+  if ! printf '%s' "$ROW" | jq -e '.phase_id | type == "string" and (length > 0)' >/dev/null 2>&1; then
+    fail_field "phase_id, when present, must be a non-empty string"
   fi
 fi
 

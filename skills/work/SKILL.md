@@ -58,7 +58,7 @@ Show the script output directly.
 ```bash
 lore work show "<slug>"
 ```
-**Before calling the script**, resolve the name to an exact slug via `lore work resolve` (see "Resolving Names to Slugs" below). Show the script output, then add a brief summary: current phase, next steps, and whether `/spec` is available.
+**Before calling the script**, resolve the name to an exact slug via `lore work resolve` (see "Resolving Names to Slugs" below). Show the script output, then add a brief summary: where the work item stands, next steps, and whether `/spec` is available.
 
 ---
 
@@ -168,7 +168,7 @@ This validates the checksum and outputs tasks as structured text blocks (`=== ta
 - **Checksum mismatch:** the script exits with an error. Warn user: "plan.md was edited after tasks.json was generated. Run `/work regen-tasks <slug>` to regenerate, or revert plan.md." Wait for decision.
 - **`tasks.json` missing:** the script exits with an error. Run `lore work tasks "<slug>"` (generates the file), then re-run `lore work load-tasks`.
 
-Report: "Loaded N tasks across M phases."
+Report the script's task count: "Loaded N tasks."
 
 ---
 
@@ -180,7 +180,7 @@ lore work regen-tasks "<slug>"
 ```
 This calls `generate-tasks.py` on the work item's `plan.md`, overwrites `tasks.json` with a fresh checksum and timestamp, then runs `lore work heal` to update the work index.
 
-Show the script output. Report: "Regenerated N tasks across M phases. New checksum: [first 8 chars]"
+Show the script output. Report: "Regenerated N tasks. New checksum: [first 8 chars]"
 
 ---
 

@@ -286,6 +286,54 @@ assert "eligible" not in json.dumps(c).lower()
 
 # --- Validation / resolver tri-state ---------------------------------------------------
 
+@test "a flat tasks array is preferred and its batch entries carry no phase" {
+  cat > "$ITEM_DIR/plan.md" <<'EOF'
+# Batch Item
+
+## Tasks
+
+### Task 1: Alpha
+**Files:** /src/alpha.sh
+- [x] build alpha module
+
+### Task 2: Beta
+**Files:** /src/beta.sh
+- [ ] build beta module
+EOF
+  python3 - "$ITEM_DIR/tasks.json" <<'PYEOF'
+import json, sys
+data = {
+ "plan_checksum": "stale-by-design-for-next-batch",
+ "generated_at": "2026-06-10T00:00:00Z",
+ "recommended_workers": 1,
+ "tasks": [
+  {"id": "task-1", "subject": "build alpha module", "activeForm": "Building alpha",
+   "blockedBy": [], "file_targets": ["/src/alpha.sh"], "description": ""},
+  {"id": "task-2", "subject": "build beta module", "activeForm": "Building beta",
+   "blockedBy": ["task-1"], "file_targets": ["/src/beta.sh"], "description": ""}],
+}
+with open(sys.argv[1], "w") as f:
+    json.dump(data, f, indent=1)
+PYEOF
+  run bash "$LORE_CLI" impl next-batch batch-item --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep '^{' | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+assert d["status"] == "batch-ready", d["status"]
+assert [t["local_id"] for t in d["batch"]] == ["task-2"], d["batch"]
+assert d["batch"][0]["phase"] is None
+assert d["completed"] == ["task-1"], d["completed"]
+'
+}
+
+@test "a tasks.json with neither unit array is refused, not read as all-complete" {
+  echo '{"generated_at": "2026-06-10T00:00:00Z"}' > "$ITEM_DIR/tasks.json"
+  run bash "$LORE_CLI" impl next-batch batch-item
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "regen-tasks"
+}
+
 @test "missing tasks.json exits 1 directing to lore work tasks" {
   rm "$ITEM_DIR/tasks.json"
   run bash "$LORE_CLI" impl next-batch batch-item

@@ -162,7 +162,6 @@ row = {
     "producer_role":         "worker",
     "protocol_slot":         "implement-step-3",
     "task_id":               task_id,
-    "phase_id":              "7",
     "scale":                 "implementation",
     "file":                  "/tmp/synthetic.txt",
     "line_range":            "1-10",
@@ -394,8 +393,10 @@ print(','.join(sorted(row.keys())))
     return 1
   fi
 
-  # Sanity check: the canonical set includes snippet grounding and anchor audit metadata.
-  expected="anchor_warning,captured_at_sha,captured_origin_ref,change_context,claim,claim_id,exact_snippet,falsifier,file,line_range,normalized_snippet_hash,phase_id,producer_role,protocol_slot,scale,task_id,tier,why_this_work_needs_it"
+  # Sanity check: the canonical set includes snippet grounding and anchor audit
+  # metadata. `phase_id` is absent by design — it is optional, and a task that
+  # belongs to no phase omits it rather than inventing a value.
+  expected="anchor_warning,captured_at_sha,captured_origin_ref,change_context,claim,claim_id,exact_snippet,falsifier,file,line_range,normalized_snippet_hash,producer_role,protocol_slot,scale,task_id,tier,why_this_work_needs_it"
   if [ "${KEYSETS[0]}" != "$expected" ]; then
     echo "canonical task-claims keyset: ${KEYSETS[0]}"
     echo "expected keyset:              $expected"

@@ -13,17 +13,13 @@ You own the source-harness task lifecycle (claim, ownership re-check, descriptio
 1. Call `TaskList` to see available tasks; claim your assigned one with `TaskUpdate` (`owner` = your name, `status` = in_progress).
 2. Call `TaskGet` on it to re-check ownership (claim-race backstop) and read the full description. Capture the task id, subject, and full description body — you will hand these to Codex.
 
-### 2. Fetch phase context
+### 2. Read the brief out of the task description
 
-Derive `<slug>` from `{{team_name}}` by stripping the `impl-` prefix. Derive `<phase-number>` from the literal `**Phase:** N` first line of the task description.
+The task description IS the brief — it arrives composed, and there is nothing to fetch. It carries `**Deliverable:**`, `**Target files:**`, and `**Task:**`, then whichever of `**Scope:**`, `**Consultations required:**`, `**Plan verification (plan-owned close criteria):**`, `## Context`, and `## Prior Knowledge` this task declares. An absent block means that obligation is absent, not that a lookup failed. Capture the whole description as `$TASK_BODY` (§1) and hand it to Codex verbatim. Derive `<slug>` from `{{team_name}}` by stripping the `impl-` prefix — the evidence append in §6.3 takes it.
 
-```bash
-PHASE_BRIEF=$(lore work phase-context <slug> <phase-number>)
-```
-
-- **Empty stdout (exit 0):** legacy-fallback — the inline phase block in the task description is authoritative; proceed with it.
-- **Non-zero exit:** a real error — stop and surface the stderr message in your report; do not silently fall back.
-- **Non-empty stdout (exit 0):** the canonical phase brief. Its `**Verification:**` bullets are the phase acceptance bar (owned by the lead at phase close); Codex self-checks the bullets its diff can affect. A bullet requiring a full test suite or surfaces outside the diff is certified downstream against the composed tree — Codex notes it as not-self-checked rather than running it.
+- **Match the verification heading literally.** The bar arrives under `**Plan verification (plan-owned close criteria):**`, a heading that deliberately does not contain the substring `**Verification:**`. Searching the description for `**Verification:**` finds design-decision prose *about* verification, never the bar — read the bullets under the literal heading and nothing else.
+- **The bullets are the lead's acceptance bar at plan close, honored once for the whole plan — not a per-worker preflight.** Codex MUST still self-check its changes against each bullet its own diff can affect before finishing. A bullet requiring a full test suite or surfaces outside the diff is certified downstream against the composed tree — Codex MUST note it as not-self-checked with one line of why rather than running it.
+- **No such block means the plan declared no additional acceptance criteria.** Proceed; the changed-surface tests are still Codex's.
 
 ### 3. Select the Codex model binding
 
@@ -70,7 +66,7 @@ esac
 
 ### 4. Assemble the Codex prompt
 
-Write the prompt Codex will run to a temp file. It carries the task, the phase brief, the prior knowledge, the evidence-emission contract, and the report shape Codex must print. It must NOT tell Codex to use source-harness orchestration tools (`TaskList`/`TaskUpdate`/`SendMessage`) — Codex has none. It must NOT tell Codex to run `evidence-append.sh` — that writes to the knowledge store outside Codex's sandbox and would fail. Codex implements, prints its Tier 2 evidence rows as raw JSON in the delimited report block below, and prints its report as its single final message; you capture that final message via `-o` (§5), extract those rows from the captured file, append them from the source harness, and handle the rest of the source-harness lifecycle.
+Write the prompt Codex will run to a temp file. It carries the task, its composed brief, the prior knowledge, the evidence-emission contract, and the report shape Codex must print. It must NOT tell Codex to use source-harness orchestration tools (`TaskList`/`TaskUpdate`/`SendMessage`) — Codex has none. It must NOT tell Codex to run `evidence-append.sh` — that writes to the knowledge store outside Codex's sandbox and would fail. Codex implements, prints its Tier 2 evidence rows as raw JSON in the delimited report block below, and prints its report as its single final message; you capture that final message via `-o` (§5), extract those rows from the captured file, append them from the source harness, and handle the rest of the source-harness lifecycle.
 
 ```bash
 PROMPT_FILE=$(mktemp)
@@ -83,14 +79,11 @@ $TASK_SUBJECT
 
 $TASK_BODY
 
-## Phase context
-$PHASE_BRIEF
-
 ## Prior knowledge
 {{prior_knowledge}}
 
 ## Implement
-Read existing code first and follow codebase conventions. Self-check your change against each \`**Verification:**\` bullet in the phase context that your diff can affect before finishing. Run only tests covering the surface you changed — never the full suite; a bullet needing a full suite or surfaces you did not touch is certified downstream at integration — list it in your report as not-self-checked with one line of why.
+Read existing code first and follow codebase conventions. You MUST self-check your change against each bullet under \`**Plan verification (plan-owned close criteria):**\` in the task above that your diff can affect, before finishing. Match that heading literally — it deliberately does not contain the substring \`**Verification:**\`, so searching for that string finds design-decision prose about verification rather than the bar. Run only tests covering the surface you changed — never the full suite; a bullet needing a full suite or surfaces you did not touch is certified downstream at integration — list it in your report as not-self-checked with one line of why.
 
 ## Build your Tier 2 evidence rows
 Each time you form a claim anchored to a specific file:line_range, build one Tier 2 evidence row. The 16-field row shape and the \`normalized_snippet_hash\` recipe (\`python3 ~/.lore/scripts/snippet_normalize.py --hash\`, which you CAN run in-sandbox — it only hashes text) are documented in the worker report contract.
@@ -124,7 +117,7 @@ Then, if you formed any Tier 2 claims, print the delimited evidence block LAST w
 EOF
 ```
 
-Substitute `<slug>` and `<phase-number>` with the literal values you derived. `$TASK_ID`, `$TASK_SUBJECT`, `$TASK_BODY`, and `$PHASE_BRIEF` are the values captured in steps 1–2.
+Substitute `<slug>` with the literal value you derived. `$TASK_ID`, `$TASK_SUBJECT`, and `$TASK_BODY` are the values captured in steps 1–2.
 
 ### 5. Drive `codex exec`
 

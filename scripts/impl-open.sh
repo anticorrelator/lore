@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # impl-open.sh — Prepare the /implement dispatch manifest for a work item
-# Usage: impl-open.sh <ref> (--all | --phase <n> ... | --task <id> ...)
+# Usage: impl-open.sh <ref> (--all | --task <id> ...)
 #        [--fallback-scale-set <buckets>] [--template-version <hash>] [--json]
 #
 # Prepare-and-return emitter for /implement Steps 2–3.6. Computes the
@@ -14,11 +14,12 @@
 #     team_messaging) for the active framework
 #   - tasks.json checksum validation (delegates to load-tasks.sh; a mismatch
 #     is a hard error directing the caller to `lore work regen-tasks`)
-#   - phase map (number, name, objective, files, retrieval-directive kind)
-#   - per-phase prior knowledge via the 3-branch gate: retrieval_directive ->
-#     resolve-manifest.sh; embedded `## Prior Knowledge` in task descriptions
+#   - unit map: one entry per brief owner — a task on a flat plan, a phase on a
+#     phase-shaped one — with its name, objective, files, and directive kind
+#   - prior knowledge per brief owner via the 3-branch gate: retrieval_directive
+#     -> resolve-manifest.sh; embedded `## Prior Knowledge` in task descriptions
 #     -> skip; otherwise fallback `lore prefetch` (runs only when the caller
-#     declares --fallback-scale-set; without a declaration the phase is
+#     declares --fallback-scale-set; without a declaration the unit is
 #     returned as status=needs-prefetch with the suggested query — scale is
 #     the caller's declaration, never a default)
 #   - per-task Tier 2 extracts from task-claims.jsonl (task_id or file overlap)
@@ -62,7 +63,6 @@ VALID_BUCKETS="abstract|architecture|subsystem|implementation"
 
 REF=""
 SELECT_ALL=0
-SELECT_PHASES=()
 SELECT_TASKS=()
 FALLBACK_SCALE_SET=""
 TEMPLATE_VERSION=""
@@ -70,16 +70,15 @@ JSON_MODE=0
 
 usage() {
   cat >&2 <<EOF
-Usage: lore impl open <ref> (--all | --phase <n> ... | --task <id> ...)
+Usage: lore impl open <ref> (--all | --task <id> ...)
                       [--fallback-scale-set <buckets>] [--template-version <hash>] [--json]
 
 Selection (exactly one mode is required — no default):
   --all                 every task in tasks.json
-  --phase <n>           tasks in phase <n> (repeatable)
   --task <id>           a specific task id, e.g. task-3 (repeatable)
 
   --fallback-scale-set  scale buckets (comma-separated: $VALID_BUCKETS)
-                        declared for fallback-branch prefetch; phases needing
+                        declared for fallback-branch prefetch; units needing
                         the fallback are returned as needs-prefetch when omitted
 
 Exit codes: 0 manifest emitted, 1 error/no match, 2 ambiguous reference
@@ -98,14 +97,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --all)
       SELECT_ALL=1
-      shift
-      ;;
-    --phase)
-      SELECT_PHASES+=("${2:-}")
-      shift 2
-      ;;
-    --phase=*)
-      SELECT_PHASES+=("${1#--phase=}")
       shift
       ;;
     --task)
@@ -141,7 +132,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     --*)
-      fail "Unknown flag: $1"
+      fail "Unknown flag: $1. Accepted flags are --all, --task, --fallback-scale-set, --template-version, and --json."
       ;;
     *)
       if [[ -z "$REF" ]]; then
@@ -162,19 +153,18 @@ fi
 # --- Selection: exactly one mode, declared by the caller (no default) -------
 MODE_COUNT=0
 [[ $SELECT_ALL -eq 1 ]] && MODE_COUNT=$((MODE_COUNT + 1))
-[[ ${#SELECT_PHASES[@]} -gt 0 ]] && MODE_COUNT=$((MODE_COUNT + 1))
 [[ ${#SELECT_TASKS[@]} -gt 0 ]] && MODE_COUNT=$((MODE_COUNT + 1))
 if [[ $MODE_COUNT -eq 0 ]]; then
   usage
-  fail "a selection is required: --all, --phase <n>, or --task <id>"
+  fail "a selection is required: --all, or --task <id>"
 fi
 if [[ $MODE_COUNT -gt 1 ]]; then
-  fail "selection modes are exclusive: pass exactly one of --all, --phase, --task"
+  fail "selection modes are exclusive: pass exactly one of --all, --task"
 fi
 
-for p in ${SELECT_PHASES[@]+"${SELECT_PHASES[@]}"}; do
-  if ! [[ "$p" =~ ^[0-9]+$ ]]; then
-    fail "--phase requires a positive integer (got '$p')"
+for t in ${SELECT_TASKS[@]+"${SELECT_TASKS[@]}"}; do
+  if [[ -z "$t" ]]; then
+    fail "--task requires a task id, e.g. --task task-3"
   fi
 done
 
@@ -275,11 +265,10 @@ if [[ -z "$TEMPLATE_VERSION" ]]; then
 fi
 
 # --- Assemble the dispatch payload -------------------------------------------
-SELECT_PHASES_CSV=$(IFS=','; echo "${SELECT_PHASES[*]-}")
 SELECT_TASKS_CSV=$(IFS=','; echo "${SELECT_TASKS[*]-}")
 
 PAYLOAD=$(_LORE_CEREMONY_JSON="$CEREMONY_JSON" python3 - "$ITEM_DIR" "$SLUG" \
-  "$SELECT_ALL" "$SELECT_PHASES_CSV" "$SELECT_TASKS_CSV" \
+  "$SELECT_ALL" "$SELECT_TASKS_CSV" \
   "$FALLBACK_SCALE_SET" "$FRAMEWORK" "$ENFORCEMENT" "$TEAM_MESSAGING" \
   "$SCRIPT_DIR" "$LORE_REPO_DIR" "$CHECKSUM_LINE" "$TEMPLATE_VERSION" <<'PYEOF'
 import json
@@ -290,9 +279,9 @@ import sys
 import tempfile
 import uuid
 
-(item_dir, slug, select_all, phases_csv, tasks_csv, fallback_scale_set,
+(item_dir, slug, select_all, tasks_csv, fallback_scale_set,
  framework, enforcement, team_messaging, script_dir, repo_dir,
- checksum_line, template_version) = sys.argv[1:14]
+ checksum_line, template_version) = sys.argv[1:13]
 
 ceremony_skills = json.loads(os.environ.get("_LORE_CEREMONY_JSON", "[]"))
 
@@ -314,28 +303,34 @@ def warn(msg):
     print(f"[impl] Warning: {msg}", file=sys.stderr)
 
 
-# --- Flatten tasks and index phases ------------------------------------------
-all_tasks = []       # tasks.json document order
-task_by_id = {}
-phase_of = {}
-phases = tasks_data.get("phases", [])
-for phase in phases:
-    for task in phase.get("tasks", []):
-        all_tasks.append(task)
-        task_by_id[task["id"]] = task
-        phase_of[task["id"]] = phase.get("phase_number")
+# --- Read the task list: tasks[] is authoritative, phases[] is the fallback ---
+# The generator emits one shape or the other, never both. An externally produced
+# document carrying both is read as flat; one carrying neither is refused rather
+# than read as a plan with nothing left to do.
+flat_tasks = tasks_data.get("tasks")
+phases = tasks_data.get("phases")
+if isinstance(flat_tasks, list):
+    all_tasks = list(flat_tasks)
+    phase_of = {t["id"]: None for t in all_tasks}
+    phases = []
+elif isinstance(phases, list):
+    all_tasks = []
+    phase_of = {}
+    for phase in phases:
+        for task in phase.get("tasks", []):
+            all_tasks.append(task)
+            phase_of[task["id"]] = phase.get("phase_number")
+else:
+    print(f"[impl] Error: tasks.json for '{slug}' declares neither a top-level "
+          f"tasks array nor a phases array, so no task list could be read. "
+          f"Regenerate it with: lore work regen-tasks {slug}", file=sys.stderr)
+    sys.exit(1)
+task_by_id = {t["id"]: t for t in all_tasks}
 
 # --- Selection ----------------------------------------------------------------
 if select_all == "1":
     selection = {"mode": "all"}
     selected_ids = [t["id"] for t in all_tasks]
-elif phases_csv:
-    wanted = {int(p) for p in phases_csv.split(",") if p}
-    selection = {"mode": "phase", "phases": sorted(wanted)}
-    selected_ids = [t["id"] for t in all_tasks if phase_of[t["id"]] in wanted]
-    known_phases = {p.get("phase_number") for p in phases}
-    for p in sorted(wanted - known_phases):
-        warn(f"--phase {p} matches no phase in tasks.json")
 else:
     wanted = [t for t in tasks_csv.split(",") if t]
     selection = {"mode": "task", "tasks": wanted}
@@ -464,48 +459,95 @@ else:
     status = "empty"
     status_reason = "selection matched no tasks in tasks.json"
 
-# --- Phase map + per-phase prior knowledge (3-branch gate) ---------------------
-selected_phase_nums = sorted({phase_of[tid] for tid in eligible_ids})
-eligible_by_phase = {}
-for tid in eligible_ids:
-    eligible_by_phase.setdefault(phase_of[tid], []).append(tid)
-phase_map = []
+# --- Unit map + prior knowledge per brief owner (3-branch gate) --------------
+# A brief owner is whatever declares the retrieval directive: the task itself on
+# a flat plan, the containing phase on a phase-shaped one. Resolving per owner
+# keeps a shared legacy directive to one resolve while giving each flat task its
+# own, addressed by id rather than by position in an array.
+def unit_owners():
+    if phases:
+        for index, phase in enumerate(phases):
+            yield {
+                "kind": "phase",
+                "index": index,
+                "task_id": None,
+                "phase_number": phase.get("phase_number"),
+                "name": phase.get("phase_name", ""),
+                "label": f"Phase {phase.get('phase_number')}: {phase.get('phase_name', '')}",
+                "objective": phase.get("objective", ""),
+                "files": phase.get("files", []),
+                "directive": phase.get("retrieval_directive"),
+                "members": [t["id"] for t in phase.get("tasks", [])],
+                "descriptions": [t.get("description") or "" for t in phase.get("tasks", [])],
+            }
+        return
+    for index, task in enumerate(all_tasks):
+        name = task.get("name") or task.get("subject", "")
+        yield {
+            "kind": "task",
+            "index": index,
+            "task_id": task["id"],
+            "phase_number": None,
+            "name": name,
+            "label": f"{task['id']}: {name}",
+            "objective": task.get("deliverable", ""),
+            "files": task.get("file_targets", []),
+            "directive": task.get("retrieval_directive"),
+            "members": [task["id"]],
+            "descriptions": [task.get("description") or ""],
+        }
+
+
+unit_map = []
 prior_knowledge = []
-delivery_by_phase = {}  # phase number -> resolve-manifest delivery snapshot
-for phase in phases:
-    pnum = phase.get("phase_number")
-    directive = phase.get("retrieval_directive")
+delivery_by_unit = {}  # unit key -> resolve-manifest delivery snapshot
+unit_key_of_task = {}  # task id -> unit key
+for owner in unit_owners():
+    # Position disambiguates the key: a hand-built document may leave several
+    # phases without a phase_number, and those must not share a delivery slot.
+    key = (owner["kind"], owner["index"])
+    for member in owner["members"]:
+        unit_key_of_task[member] = key
+    directive = owner["directive"]
     if directive is None:
         directive_kind = None
     elif isinstance(directive, dict) and directive.get("version") == 2:
         directive_kind = "v2"
     else:
         directive_kind = "legacy"
-    phase_map.append({
-        "phase_number": pnum,
-        "phase_name": phase.get("phase_name", ""),
-        "objective": phase.get("objective", ""),
-        "files": phase.get("files", []),
+    unit_eligible = [tid for tid in owner["members"] if tid in eligible_set]
+    unit_map.append({
+        "kind": owner["kind"],
+        "task_id": owner["task_id"],
+        "phase_number": owner["phase_number"],
+        "name": owner["name"],
+        "objective": owner["objective"],
+        "files": owner["files"],
         "retrieval_directive_kind": directive_kind,
-        "selected": pnum in selected_phase_nums,
+        "selected": bool(unit_eligible),
     })
 
-    if pnum not in selected_phase_nums:
+    if not unit_eligible:
         continue
 
-    entry = {"phase_number": pnum, "phase_name": phase.get("phase_name", "")}
-    # Each phase resolves independently — one failed phase must not abort
-    # the manifest, so every subprocess branch is contained per-iteration.
+    entry = {"kind": owner["kind"], "task_id": owner["task_id"],
+             "phase_number": owner["phase_number"], "name": owner["name"],
+             "label": owner["label"], "unit_key": key}
+    # Each unit resolves independently — one failed unit must not abort the
+    # manifest, so every subprocess branch is contained per-iteration.
     if directive is not None:
         entry["branch"] = "directive"
         delivery_fd, delivery_path = tempfile.mkstemp(suffix=".json", prefix="rm-delivery-")
         os.close(delivery_fd)
-        rm_args = ["bash", os.path.join(script_dir, "resolve-manifest.sh"), slug, str(pnum),
-                   "--delivery-json", delivery_path]
-        # task_id attribution is only unambiguous when one task consumes the resolve
-        phase_eligible = eligible_by_phase.get(pnum, [])
-        if len(phase_eligible) == 1:
-            rm_args += ["--task-id", phase_eligible[0]]
+        rm_args = ["bash", os.path.join(script_dir, "resolve-manifest.sh"), slug]
+        if owner["kind"] == "phase":
+            rm_args.append(str(owner["phase_number"]))
+            # task_id attribution is only unambiguous when one task consumes the resolve
+            if len(unit_eligible) == 1:
+                rm_args += ["--task-id", unit_eligible[0]]
+        else:
+            rm_args += ["--task-id", owner["task_id"]]
+        rm_args += ["--delivery-json", delivery_path]
         try:
             proc = subprocess.run(rm_args, capture_output=True, text=True, timeout=120)
             if proc.returncode == 0:
@@ -525,17 +567,17 @@ for phase in phases:
                 entry["content"] = None
                 stderr_lines = (proc.stderr or "").strip().splitlines()
                 entry["note"] = stderr_lines[-1] if stderr_lines else None
-                warn(f"phase {pnum}: resolve-manifest.sh failed (exit {proc.returncode})")
+                warn(f"{owner['label']}: resolve-manifest.sh failed (exit {proc.returncode})")
         except Exception as exc:  # containment: timeout, missing binary, etc.
             entry["status"] = "error"
             entry["content"] = None
             entry["note"] = str(exc)
-            warn(f"phase {pnum}: resolve-manifest.sh failed ({exc})")
+            warn(f"{owner['label']}: resolve-manifest.sh failed ({exc})")
         try:
             with open(delivery_path, encoding="utf-8") as df:
                 snapshot_text = df.read().strip()
             if snapshot_text:
-                delivery_by_phase[pnum] = json.loads(snapshot_text)
+                delivery_by_unit[key] = json.loads(snapshot_text)
         except (OSError, ValueError):
             pass  # legacy directives and failed resolves leave no snapshot
         finally:
@@ -543,16 +585,14 @@ for phase in phases:
                 os.unlink(delivery_path)
             except OSError:
                 pass
-    elif any("## Prior Knowledge" in (t.get("description") or "")
-             for t in phase.get("tasks", [])):
+    elif any("## Prior Knowledge" in d for d in owner["descriptions"]):
         entry["branch"] = "task-descriptions"
         entry["status"] = "skipped-embedded"
         entry["content"] = None
-        entry["note"] = "phase tasks already embed ## Prior Knowledge; appending would duplicate"
+        entry["note"] = "the task descriptions already embed ## Prior Knowledge; appending would duplicate"
     else:
         entry["branch"] = "fallback"
-        files = phase.get("files", [])
-        query = " ".join([phase.get("objective", "")] + files).strip()
+        query = " ".join([owner["objective"]] + list(owner["files"])).strip()
         entry["fallback_query"] = query
         if fallback_scale_set:
             try:
@@ -568,12 +608,12 @@ for phase in phases:
                     entry["status"] = "resolved-empty" if proc.returncode == 0 else "error"
                     entry["content"] = None
                     if proc.returncode != 0:
-                        warn(f"phase {pnum}: fallback prefetch failed (exit {proc.returncode})")
+                        warn(f"{owner['label']}: fallback prefetch failed (exit {proc.returncode})")
             except Exception as exc:
                 entry["status"] = "error"
                 entry["content"] = None
                 entry["note"] = str(exc)
-                warn(f"phase {pnum}: fallback prefetch failed ({exc})")
+                warn(f"{owner['label']}: fallback prefetch failed ({exc})")
         else:
             entry["status"] = "needs-prefetch"
             entry["content"] = None
@@ -617,11 +657,12 @@ for tid in eligible_ids:
 # --- Task-scope packet emission (append-supersede; one row per eligible task) --
 # Rows go through packet-append.sh, the sole writer of _packets/packets.jsonl.
 # Fail-open: a failed append warns and leaves that task without a packet_id.
-pk_status_by_phase = {e["phase_number"]: e for e in prior_knowledge}
+pk_status_by_unit = {e["unit_key"]: e for e in prior_knowledge}
 packets = []
 for tid in eligible_ids:
     pnum = phase_of[tid]
-    snapshot = delivery_by_phase.get(pnum)
+    unit_key = unit_key_of_task.get(tid)
+    snapshot = delivery_by_unit.get(unit_key)
     delivered_entries = []
     if snapshot:
         for se in snapshot.get("entries", []):
@@ -655,9 +696,9 @@ for tid in eligible_ids:
     if snapshot and snapshot.get("trust_compute_sha"):
         row["trust_compute_sha"] = snapshot["trust_compute_sha"]
     if not delivered_entries:
-        pk_entry = pk_status_by_phase.get(pnum, {})
+        pk_entry = pk_status_by_unit.get(unit_key, {})
         row["empty_reason"] = (
-            f"phase {pnum} delivered no per-entry snapshot "
+            f"{pk_entry.get('label', tid)} delivered no per-entry snapshot "
             f"(branch={pk_entry.get('branch', 'unknown')}, "
             f"status={pk_entry.get('status', 'unknown')})")
     try:
@@ -675,12 +716,23 @@ for tid in eligible_ids:
     except Exception as exc:
         warn(f"packet append failed for {tid} ({exc})")
 
-# --- Per-phase plan content: advisors, consultations, task format --------------
-phase_blocks = {}
-matches = list(re.finditer(r"^### Phase (\d+):[^\n]*\n", plan, re.MULTILINE))
-for i, m in enumerate(matches):
-    end = matches[i + 1].start() if i + 1 < len(matches) else len(plan)
-    phase_blocks[int(m.group(1))] = plan[m.start():end]
+# --- Per-unit plan content: advisors, consultations, task format -------------
+# A flat plan declares these on its `### Task N:` blocks, a phase-shaped one on
+# its `### Phase N:` blocks. Each unit is keyed by the label it is addressed by
+# downstream — the task id, or the phase number as a string.
+def unit_blocks():
+    heading = r"^### Task (\d+):[^\n]*\n" if not phases else r"^### Phase (\d+):[^\n]*\n"
+    matches = list(re.finditer(heading, plan, re.MULTILINE))
+    blocks = {}
+    for i, m in enumerate(matches):
+        stop = matches[i + 1].start() if i + 1 < len(matches) else len(plan)
+        number = int(m.group(1))
+        key = str(number) if phases else f"task-{number}"
+        blocks[key] = plan[m.start():stop]
+    return blocks
+
+
+plan_blocks = unit_blocks()
 
 
 def advisors_block(content):
@@ -690,7 +742,7 @@ def advisors_block(content):
 
 
 persistent_advisors = []
-for pnum, content in sorted(phase_blocks.items()):
+for key, content in sorted(plan_blocks.items()):
     block = advisors_block(content)
     for line in block.splitlines():
         line = line.strip()
@@ -699,11 +751,13 @@ for pnum, content in sorted(phase_blocks.items()):
             m = re.match(r"(\S+)\s*(?:—|--)?\s*(.*?)\.?\s*mode\s*:\s*persistent\b", body)
             name = (m.group(1) if m else body.split()[0]).strip()
             domain = (m.group(2).strip() if m else "")
-            persistent_advisors.append({"name": name, "domain": domain,
-                                        "mode": "persistent", "phase": pnum})
+            advisor = {"name": name, "domain": domain, "mode": "persistent", "unit": key}
+            if phases:
+                advisor["phase"] = int(key)
+            persistent_advisors.append(advisor)
 
-consultations_by_phase = {}
-for pnum, content in sorted(phase_blocks.items()):
+consultations_by_unit = {}
+for key, content in sorted(plan_blocks.items()):
     m = re.search(r"^\*\*Consultations required:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
                   content, re.MULTILINE)
     if not m:
@@ -718,12 +772,12 @@ for pnum, content in sorted(phase_blocks.items()):
             continue
         domains.append(text)
     if domains:
-        consultations_by_phase[str(pnum)] = domains
+        consultations_by_unit[key] = domains
 
-task_format_by_phase = {}
-for pnum, content in sorted(phase_blocks.items()):
+task_format_by_unit = {}
+for key, content in sorted(plan_blocks.items()):
     m = re.search(r"\*\*Task format:\*\*\s*(.*)", content)
-    task_format_by_phase[str(pnum)] = (m.group(1).strip().lower() if m else None)
+    task_format_by_unit[key] = (m.group(1).strip().lower() if m else None)
 
 # --- Skill-invocation map: plan Related skills + ceremony injection ------------
 related_skills = []
@@ -782,11 +836,15 @@ for name in ceremony_skills:
 # --- Lead-inline gate conditions: four separate fields, never an aggregate -----
 task_count = len(all_tasks)
 single_task = task_count == 1
-single_phase = phase_of[all_tasks[0]["id"]] if single_task else None
+if single_task:
+    only_id = all_tasks[0]["id"]
+    single_unit = str(phase_of[only_id]) if phases else only_id
+else:
+    single_unit = None
 prescriptive = bool(
-    single_task and task_format_by_phase.get(str(single_phase)) == "prescriptive")
+    single_task and task_format_by_unit.get(single_unit) == "prescriptive")
 no_persistent_advisor = not persistent_advisors
-no_required_consultation = (not consultations_by_phase
+no_required_consultation = (not consultations_by_unit
                             and not ceremony_skills
                             and not related_skills)
 
@@ -797,15 +855,18 @@ lead_inline_conditions = {
     "no_required_consultation": no_required_consultation,
     "detail": {
         "task_count": task_count,
-        "task_format_by_phase": task_format_by_phase,
+        "task_format_by_unit": task_format_by_unit,
         "persistent_advisors": persistent_advisors,
-        "consultations_required_by_phase": consultations_by_phase,
+        "consultations_required_by_unit": consultations_by_unit,
         "ceremony_skills": ceremony_skills,
         "related_skills": [e["skill"] for e in related_skills],
         "file_count_diagnostic": (
             len(all_tasks[0].get("file_targets", [])) if single_task else None),
     },
 }
+
+for entry in prior_knowledge:
+    entry.pop("unit_key", None)
 
 print(json.dumps({
     "slug": slug,
@@ -825,7 +886,7 @@ print(json.dumps({
     "initial_unblocked": initial_unblocked,
     "already_complete": already_complete,
     "collisions": collisions,
-    "phase_map": phase_map,
+    "unit_map": unit_map,
     "prior_knowledge": prior_knowledge,
     "packets": packets,
     "tier2_extracts": tier2_extracts,
@@ -849,8 +910,6 @@ for op in d["manifest"]:
     counts[op["op"]] = counts.get(op["op"], 0) + 1
 sel = d["selection"]
 sel_str = sel["mode"]
-if sel.get("phases"):
-    sel_str += " " + ",".join(str(p) for p in sel["phases"])
 if sel.get("tasks"):
     sel_str += " " + ",".join(sel["tasks"])
 lines = [
@@ -902,7 +961,8 @@ for op in d["manifest"]:
         print(f"  1. TeamCreate {op['team_name']}")
     elif op["op"] == "TaskCreate":
         ext = f"  [external blockedBy: {', '.join(op['external_blocked_by'])}]" if op.get("external_blocked_by") else ""
-        print(f"  -  TaskCreate {op['local_id']} (phase {op['phase']}): {op['subject']}{ext}")
+        where = f" (phase {op['phase']})" if op.get("phase") is not None else ""
+        print(f"  -  TaskCreate {op['local_id']}{where}: {op['subject']}{ext}")
     else:
         ser = f"  [collision-serialized: {', '.join(op['collision_serialized'])}]" if op.get("collision_serialized") else ""
         print(f"  -  TaskUpdate {op['local_id']} addBlockedBy=[{', '.join(op['add_blocked_by'])}]{ser}")
@@ -915,12 +975,13 @@ if d["already_complete"]:
 print()
 print("Prior knowledge:")
 for pk in d["prior_knowledge"]:
-    print(f"  Phase {pk['phase_number']} ({pk['branch']}): {pk['status']}")
+    print(f"  {pk['label']} ({pk['branch']}): {pk['status']}")
 if d.get("packets"):
     print()
     print("Task-scope packets appended:")
     for p in d["packets"]:
-        print(f"  {p['task_id']} (phase {p['phase']}): {p['packet_id']}")
+        where = f" (phase {p['phase']})" if p.get("phase") is not None else ""
+        print(f"  {p['task_id']}{where}: {p['packet_id']}")
 print()
 c = d["lead_inline_conditions"]
 print("Lead-inline conditions (read each; the route decision is yours):")

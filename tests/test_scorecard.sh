@@ -10,6 +10,8 @@
 #   - Rollup on one valid row → correct single summary
 #   - Rollup on many rows → correct aggregation per (template_id, template_version, metric)
 #   - Rollup warns (non-fatal) when it encounters corrupt rows
+#   - task-evidence rows require task_id; phase_id is optional and, when
+#     present, must be a non-empty string
 
 set -euo pipefail
 
@@ -697,6 +699,39 @@ LORE_MODEL="env-model-id" bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLE
   --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","tier":"telemetry","metric":"model_stamp_probe_d","model":"row-model-id"}' >/dev/null
 STAMPED=$(grep '"model_stamp_probe_d"' "$ROWS_FILE" | tail -1 | jq -r '.model')
 assert_eq "row's own model field wins" "$STAMPED" "row-model-id"
+
+# =============================================
+# Test 18: task-evidence conditional schema — task_id required, phase_id optional
+# =============================================
+echo ""
+echo "Test 18: task-evidence rows require task_id and treat phase_id as optional"
+setup_store
+
+# Rows written when phase_id was required must keep appending unchanged.
+assert_exit "task-evidence row carrying phase_id is accepted" 0 \
+  bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","tier":"task-evidence","task_id":"task-6","phase_id":"1"}'
+
+# A plan whose tasks stand on their own omits the field rather than inventing
+# a phase; the writer must not reject that.
+assert_exit "task-evidence row omitting phase_id is accepted" 0 \
+  bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","tier":"task-evidence","task_id":"task-6"}'
+
+# task_id stays required — the anchor to a specific task is what makes the row
+# task-local evidence.
+assert_exit "task-evidence row missing task_id is rejected" 1 \
+  bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","tier":"task-evidence","phase_id":"1"}'
+
+# Optional does not mean unchecked.
+assert_exit "task-evidence row with empty phase_id is rejected" 1 \
+  bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","tier":"task-evidence","task_id":"task-6","phase_id":""}'
+
+OUTPUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","tier":"task-evidence","phase_id":"1"}' 2>&1 || true)
+assert_contains "rejection names task_id alone" "$OUTPUT" "task_id is required and non-empty"
 
 # =============================================
 # Summary

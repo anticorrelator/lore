@@ -23,7 +23,7 @@ Team-based divide-and-conquer: the spec-lead composes an investigation plan tabl
 
 ## Judgment boundary
 
-The verbs prepare evidence and persist decisions; they do not make them. Keep these kernels in lead prose: investigation questions, complexity labels, strict/permissive applicability, synthesis, contradiction decisions, phase/task decomposition, evaluator normalization, whether feedback changes the plan, and every harness-native dispatch or teardown call. If a verb appears able to infer one of these, stop at the boundary and supply the missing judgment explicitly.
+The verbs prepare evidence and persist decisions; they do not make them. Keep these kernels in lead prose: investigation questions, complexity labels, strict/permissive applicability, synthesis, contradiction decisions, task decomposition, evaluator normalization, whether feedback changes the plan, and every harness-native dispatch or teardown call. If a verb appears able to infer one of these, stop at the boundary and supply the missing judgment explicitly.
 
 ---
 
@@ -261,7 +261,7 @@ This step is **read-only** — do not modify `surfaced_concerns.jsonl`.
 
 ### Step 5: Synthesize — abstract plan
 
-Produce the conceptual frame first before committing to phase breakdown.
+Produce the conceptual frame first before committing to a task breakdown.
 
 Synthesis organizes the itemized findings; it does not narrate over them. Keep each finding's provenance intact and cite items rather than restating them in looser words — prose that absorbs the itemized record is where evidence quietly drops out. The Narrative section is the deliberate exception: it tells the story, while the record underneath stays itemized.
 
@@ -325,12 +325,12 @@ Synthesis organizes the itemized findings; it does not narrate over them. Keep e
   - [[knowledge:preferences/<entry>]] — what to honor at implement time (1 line)
   - [[knowledge:conventions/<entry>]] — what to honor at implement time (1 line)
   ```
-  **This block is the audit manifest, not the worker delivery channel.** It exists so a reviewer (and the post-plan ceremony) can see every preference/convention discovery surfaced. Workers do not read top-level plan.md sections — `/implement` consumes per-phase `**Knowledge context:**` backlinks (Step 3.1 directive branch resolves them via `resolve-manifest.sh` into worker `{{prior_knowledge}}`). Distribution into per-phase Knowledge context happens in Step 5b #2 (concordance-assisted annotation) — see that step for the per-phase placement rule. Entries that don't bind to any specific phase still appear here; the manifest also catches them during review even when they have no per-phase home.
+  **This block is the audit manifest, not the worker delivery channel.** It exists so a reviewer (and the post-plan ceremony) can see every preference/convention discovery surfaced. Workers do not read top-level plan.md sections — `/implement` consumes per-task `**Knowledge context:**` backlinks (Step 3.1 directive branch resolves them via `resolve-manifest.sh` into worker `{{prior_knowledge}}`). Distribution into per-task Knowledge context happens in Step 5b #2 (concordance-assisted annotation) — see that step for the per-task placement rule. Entries that don't bind to any specific task still appear here; the manifest also catches them during review even when they have no per-task home.
 
   Keep this block at the **full permissive surfaced set** regardless of what binds to a task. The manifest is permissive; the *weave* into task lines is strict (Step 5b "Deliverable contract gate" — only scope-overlapping judgment-class norms become constraint clauses). A backlink staying here while its norm is also woven into a task is correct: the manifest is provenance, the task line is delivery.
 
   The block is also a parse target: at close, the conformance renderer reads it as the spec-time discovery panel of `closure-conformance.md` and cross-tabulates each label against woven norms, recorded dispositions, and the shipped diff. Keep every bullet in the `[[knowledge:...]] — annotation` shape with a substantive annotation — a thinned or malformed manifest doesn't just weaken review, it blinds the closure read to norms nobody dispositioned.
-- **Advisor declarations:** For each matched skill whose domain overlaps with a phase's scope, consider adding an `**Advisors:**` entry. Set mode based on phase complexity — `must-consult` if the skill defines invariants workers must respect, `on-demand` otherwise.
+- **Advisor declarations:** For each matched skill whose domain overlaps a task's owned surface, consider adding an `**Advisors:**` entry to that task. Set mode by the task's complexity — `must-consult` if the skill defines invariants workers must respect, `on-demand` otherwise.
 
 ### Ceremony outcome filing contract
 
@@ -400,34 +400,26 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    Follow the anchor with a `**Scope delta:**` line (default `none — anchor preserved unchanged`; if the spec narrows the capability, name the narrowing here) and a `**Tempting narrower implementation:**` heading the spec author fills in. The anchor body and `**Scope delta:**` line are **verifier-enforced** — the Step 5.6 gate refuses to regenerate tasks if missing or divergent. The `**Tempting narrower implementation:**` body is template-prescribed but not verifier-enforced — its presence forces the author to confront the failure mode, but the content is free-text that no parser can adjudicate. For work items without an `intent_anchor` field, omit the section entirely — the Step 5.6 verifier skips with a one-line stderr info message.
 
-1. **Phases** — concrete implementation phases with tasks, file paths, objectives. Each phase includes `**Knowledge context:**`, `**Tasks:**` (checkbox lines), and optional `**Retrieval directive:**` / `**Advisors:**` / `**Verification:**` / `**Split rationale:**` (required when the phase has more than one task) / `**Scope:**` blocks.
+1. **Tasks** — the plan holds its tasks directly, one `### Task N:` block each. Every block carries `**Deliverable:**`, `**Files:**`, and exactly one `- [ ]` checkbox line; optional `**Scope:**` / `**Knowledge context:**` / `**Retrieval directive:**` / `**Consultations required:**` / `**Advisors:**` / `**Task format:**` / `**Knowledge delivery:**` blocks follow as the work needs them. The heading number is the task's id — `### Task 3:` is `task-3` — and it stays fixed as earlier work is checked off. The plan itself carries `**Verification:**` once, plus whichever sizing rationale the band below requires.
 
-   **Plan-as-unit rule.** A plan is **one** phase by default. Each additional phase is a separate `/implement` worker batch with its own dispatch ceremony — write one phase per plan unless the split earns its keep across the entire run.
+   **Sizing band.** Give every task one **design center** and at least one real design choice to make about it. A *design center* is the single interface, mechanism, or subsystem whose shape the worker decides; the term earns its place because the vocabulary already in use — scope, deliverable, file set — measures how much a task *touches*, and the band turns on how much a task *decides*. A deliverable spanning several independent design centers splits even when the parts run serially: chained tasks keep their own acceptance boundaries, their own reports, and their own premise-wrong exits.
 
-   Split a plan into multiple phases **only when all three** conditions hold:
+   Argue the sizing decision in writing, whichever way it went. Each direction is priced, and the Step 5.6 finalize gate refuses a plan that argues neither:
 
-   1. **Cross-phase parallelism** — at least one later phase has tasks with file targets disjoint from all earlier phases, so `/implement` dispatches concurrently. If file overlap forces every later phase sequential, `generate-tasks.py` chains them onto one worker — merging yields the same execution shape with less ceremony.
-   2. **Independent deliverable boundary** — each phase produces a coherent artifact a reviewer could accept, capture, or roll back on its own — not a sub-step of the next.
-   3. **Architectural checkpoint** — an interface, contract, schema, or substrate finalizes at the boundary that later phases consume as stable input. File-overlap sequencing is not a checkpoint; visual organization is not a checkpoint.
+   - **Split rationale** — required when the plan carries more than one task. Name what the split buys — parallel wall-time, separate acceptance boundaries, fresh context per worker, worker-tier separation, a scoped premise-wrong exit — against what it costs in spawn ceremony, brief duplication, and integration risk.
+   - **Merge rationale** — required when the plan carries exactly one task. Name the one design center the parts share.
 
-   If any condition fails, merge. The Phase-as-unit rule below still applies *within* the merged phase: most consolidated plans land at one phase, one task.
+   Keeping one task because merging asked nothing of you is the outcome this band exists to prevent. Both blocks live at plan level, above the first `### Task N:` heading.
 
-   **Phase-as-unit rule.** A phase is the default delegation unit. Write **one** `- [ ]` checkbox per phase by default — deliver the phase objective across the listed files while honoring the phase design decisions. Each task spawns a fresh worker that loads its fixed context plus the phase brief; the four conditions below, not a flat per-task overhead, decide whether a split earns that spawn.
+   **No residue (floor).** Fold work that is solely verification, capture, cleanup, a single CLI invocation, or a sub-edit of another task into the implementation task it serves. This bounds task size from below and is not weighable against the band.
 
-   Split a phase into multiple tasks **only when all four** conditions hold:
+   **Context-envelope ceiling.** A task's owned file set plus its brief must fit one worker's context envelope with working room to read, reason, and edit. When they do not, the split is **forced** — regardless of judgment class or of what the band concluded — because an over-large task reads as well-formed on the page yet fails *in flight* on worker-context exhaustion, the most expensive discovery point there is. This is a level-1 correctness-of-execution constraint (execution capacity), the sibling of the capability ceiling that keeps judgment-dense work off a model that cannot hold it — **not** a weighable extra condition and **not** an aesthetic size threshold. It bounds task size from above exactly as **no residue** bounds it from below; between that floor and this ceiling, size stays structure-gated — never trimmed to hit a size target.
 
-   1. **Disjoint file ownership** — tasks edit non-overlapping file sets. Tasks sharing a file get chained sequentially by `generate-tasks.py` onto one worker — the split buys nothing.
-   2. **Independently reviewable deliverables** — each task produces a coherent artifact a reviewer could accept or reject on its own.
-   3. **Real parallel execution** — the split enables concurrent work, not serialized hand-off.
-   4. **No residue** — neither side is solely verification, capture, cleanup, single-CLI invocation, or a sub-edit of the other.
+   **Judgment class and the band.** Each task line carries a judgment class (`mechanical | standard | judgment-dense`; see the Judgment-class marker below) that `/implement` routes to a worker-tier binding — mechanical to a cheaper model, judgment-dense to a stronger one. Tier separation is one of the things a split buys: pulling a judgment-dense core away from a mechanical shell routes each to its own tier instead of paying the strong-model rate across the whole deliverable, so a judgment-density transition is a design-center boundary and a legitimate split point. A uniform same-mechanism sweep stays one task regardless of worker tier — one worker doing one read-modify-write pass beats N fresh agents repeating the same edit, and spawn overhead dwarfs the model-spend saving. The tipping point is judgment density, not file count.
 
-   If any condition fails, keep one task. Cross-phase dependencies are file-based. Uniform same-mechanism edits across many files stay one task — one worker doing one read-modify-write pass beats N fresh agents repeating the same edit.
+   **Explicit dependencies.** `generate-tasks.py` chains tasks that share a file, so declare nothing for those. For an ordering no shared file expresses, end the consuming task's line with `[depends-on: task-3, task-5]` — the marker names producer tasks by heading number and seeds `blockedBy` before file-overlap chaining appends to it. Place it with the other trailing markers, after any `[[knowledge:...]]` backlinks.
 
-   **Judgment class and the split calculus.** Each task line carries a judgment class (`mechanical | standard | judgment-dense`; see the Deliverable contract gate below) that `/implement` routes to a worker-tier binding — mechanical to a cheaper model, judgment-dense to a stronger one. This gives the four conditions a second thing a split can buy beyond parallelism: separating a judgment-dense core from a mechanical shell over disjoint files, so each routes to its own tier instead of paying the strong-model rate across the whole phase. A judgment-density transition across disjoint files is a legitimate split point. But the four conditions still gate every split: a class mix that fails disjoint-file-ownership or real-parallel-execution stays one task, and a **uniform same-mechanism sweep stays one task regardless of worker tier** — a mechanical sweep never fragments into per-file tasks to shave model spend, because spawn overhead dwarfs the saving. The tipping point remains judgment density, not file count.
-
-   **Context-envelope ceiling.** A task's owned file set plus its phase brief must fit one worker's context envelope with working room to read, reason, and edit. When they do not, the split is **forced** — regardless of judgment class or whether the four conditions hold — because an over-large task passes every structural condition above yet fails *in flight* on worker-context exhaustion, the most expensive discovery point there is. This is a level-1 correctness-of-execution constraint (execution capacity), the sibling of the capability ceiling that keeps judgment-dense work off a model that cannot hold it — **not** a weighable fifth condition and **not** an aesthetic size threshold. It bounds task size from above exactly as **no residue** bounds it from below; between that floor and this ceiling, size stays structure-gated and empirically tuned via the (class, model, size) rework attribution — never trimmed to hit a size target.
-
-   **Split rationale (required for multi-task phases).** Any phase with more than one task carries a `**Split rationale:**` block — one or two sentences naming the judgment-density transition or genuine parallelism that earned the split. The Step 5.6 finalize gate refuses a multi-task phase that lacks it. A single-task phase omits the block.
+   **Output contract.** When a task finalizes an interface, contract, schema, or substrate that later tasks consume as stable input, declare it inside that task's `**Scope:**` block as `- Output contract: <what this task fixes and later tasks may rely on>`, and end each consuming task's line with `[depends-on: task-N]`. The line is the producer's acceptance declaration, read by its worker and by the lead; the scheduler never interprets its prose. The dependency edge carries the ordering — an incomplete or failed producer keeps its consumers blocked, and a completed one releases them to rely on what it declared.
 
    **Deliverable contract gate.** Every task line names a durable artifact outcome — what gets built, refactored, authored, migrated, wired, or added. The valid primary verbs are: Implement / Refactor / Author / Migrate / Add support for / Wire... The following primary verbs are **never tasks** — they belong elsewhere: Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only.
 
@@ -440,8 +432,8 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    The class is **explicit on every line** — the Step 5.6 finalize gate refuses an unannotated task line. An unclassed line is not treated as `standard`: a legacy plan with no markers still regenerates (routing as plain `worker`), but re-finalizing it demands annotation.
 
-   <!-- INVARIANT — canonical /spec weave vocabulary. Keep these terms stable; the
-        /implement worker report's `Convention handling:` field and the lead's
+   <!-- INVARIANT — canonical /spec weave and task-grammar vocabulary. Keep these terms
+        stable; the /implement worker report's `Convention handling:` field and the lead's
         completeness comparison key on them, and the task generator and closure
         conformance renderer parse them literally. Drift silently breaks the handoff.
           - "constraint clause" — the imperative norm woven into a task line
@@ -452,11 +444,16 @@ Draft concrete implementation sections on top of the approved abstract plan:
             knowledge backlink, is extracted into `tasks.json` as `woven_norms`
           - `**Related preferences/conventions:**` — the audit-manifest block label the
             closure conformance renderer parses as the spec-time panel of
-            `closure-conformance.md` -->
+            `closure-conformance.md`
+          - `### Task N:` — the unit heading the generator's flat branch discriminates on;
+            N is the task's id
+          - `[depends-on: task-N]` — the trailing task-line marker parsed into `blockedBy`
+          - `- Output contract:` — the `**Scope:**` bullet declaring what a task fixes for
+            its consumers -->
    **Weave binding judgment-class norms into the constraint clause.** When a preference/convention from Step 2 discovery *binds* to a task, render it as an imperative **constraint clause** in the task line itself — the instruction the worker executes — not only as a `**Knowledge context:**` backlink the worker must choose to fetch. The clause **names the norm by its stable label** (the entry slug/title the backlink resolves to) so the worker's `Convention handling:` report and the lead's completeness comparison reference the same identifier. Keep the backlink for provenance even when the norm is woven.
 
    A norm *binds* only when **both** hold (strict weave):
-   - **Scope-overlap** — its `related_files`, file-path globs, ceremony scope, or activity domain intersect this task's owned files, objective, or surface.
+   - **Scope-overlap** — its `related_files`, file-path globs, ceremony scope, or activity domain intersect this task's owned files, deliverable, or surface.
    - **Judgment-class** — compliance is a judgment a one-line deterministic check could not make. Mechanical/lint-class norms (file-header rules, scaffolding-marker bans, structural lint) are **never woven** — they route to the hook arm of `route-conventions-by-enforcement-class-delivery-vs`. Judgment-class but no scope-overlap → backlink only (no constraint clause); neither → top-level manifest only.
 
    Weave only this binding subset — never the full permissive surfaced set, never mechanical norms. The top-level `**Related preferences/conventions:**` audit manifest stays unchanged (Step 5 — full permissive set); strict weaving into task lines is what prevents task-description bloat and dilution.
@@ -468,17 +465,19 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    Route invalid units:
 
-   - **"Verify X" / "Check Y"** → phase-level `**Verification:**` objective; do not duplicate into each task description.
-   - **"Capture Z" / "Append session note"** → lead-side post-phase step (`lore capture` or `notes.md`); not worker work.
+   - **"Verify X" / "Check Y"** → the plan's `**Verification:**` bar; never its own task, never duplicated into a task description.
+   - **"Capture Z" / "Append session note"** → lead-side step once the plan closes (`lore capture` or `notes.md`); not worker work.
    - **Single-line edits, single CLI invocations, sub-edits** → fold into the adjacent implementation task.
 
    **Task format (intent+constraints).** Default. State what the change accomplishes, what not to do, and what success looks like at the deliverable level. Opt into prescriptive format with `**Task format:** prescriptive` for mechanical work where step-by-step instructions are required.
 
-   **Premise-wrong exit (standing, every phase).** A phase brief hands its worker two sanctioned outcomes, not one: the deliverable, or the report "this cannot be built as scoped — here is what blocked me," naming the premise that failed contact with the code. The second is a first-class result from a colleague closer to the ground than the plan was; it routes to Step 6 follow-up investigation instead of forcing an approximation of a wrong plan. Never write a phase whose only expressible outcome is success.
+   **Verification (the plan's acceptance bar).** Write `**Verification:**` once, at plan level, as 0 to 3 observable-behavior criteria — the bar the lead honors at plan close. Task generation renders those bullets into every worker brief as plan-owned close criteria, and a worker self-checks only the bullets its own diff can affect, naming the rest as not-self-checked. Omitting the block declares no additional bar. The template's anti-pattern list governs what a bullet may say; the suite-shaped bar is the one to watch, because suite-level certification happens once at integration and a bar that asks for it pushes that cost onto every worker.
 
-2. **Concordance-assisted annotation** — after drafting phases, widen each phase's `**Knowledge context:**` block:
+   **Premise-wrong exit (standing, every task).** A task brief hands its worker two sanctioned outcomes, not one: the deliverable, or the report "this cannot be built as scoped — here is what blocked me," naming the premise that failed contact with the code. The second is a first-class result from a colleague closer to the ground than the plan was; it routes to Step 6 follow-up investigation instead of forcing an approximation of a wrong plan. Never write a task whose only expressible outcome is success.
+
+2. **Concordance-assisted annotation** — after drafting the tasks, widen each task's `**Knowledge context:**` block:
    ```bash
-   lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5 --scale-set=<bucket>
+   lore prefetch "<task deliverable> <key file paths>" --type knowledge --limit 5 --scale-set=<bucket>
    ```
    Declare `--scale-set` explicitly for every prefetch call. Missing declaration is an error.
 
@@ -486,21 +485,21 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    Add relevant entries as `[[knowledge:...]]` backlinks with "— why relevant" annotations. Investigation findings are the primary source; concordance is a widener.
 
-   **Distribute surfaced preferences/conventions into per-phase Knowledge context (mandatory).** The top-level `**Related preferences/conventions:**` block from Step 2 discovery is an audit manifest — it does not reach workers. To wire into worker `{{prior_knowledge}}`, distribute each surfaced entry into `**Knowledge context:**` of every phase whose scope plausibly overlaps:
+   **Distribute surfaced preferences/conventions into per-task Knowledge context (mandatory).** The top-level `**Related preferences/conventions:**` block from Step 2 discovery is an audit manifest — it does not reach workers. Backlinks live at exactly two altitudes: the task, and the cross-cutting manifest. To wire into worker `{{prior_knowledge}}`, distribute each surfaced entry into `**Knowledge context:**` of every task whose surface plausibly overlaps:
 
-   - **Scope-overlap test:** an entry overlaps when its `related_files`, file-path globs, ceremony scope, or activity domain intersects the phase's `**Files:**`, objective, or owned subsystem. Apply permissively — the Step 2 surfacing gate carries through to distribution. If a reviewer would expect the worker aware of the entry while editing the phase's files, distribute.
+   - **Scope-overlap test:** an entry overlaps when its `related_files`, file-path globs, ceremony scope, or activity domain intersects the task's `**Files:**`, deliverable, or owned subsystem. Apply permissively — the Step 2 surfacing gate carries through to distribution. If a reviewer would expect the worker aware of the entry while editing the task's files, distribute.
    - **Format:** add as `[[knowledge:preferences/<entry>]]` (or `conventions/`, or `cross-cutting-conventions/`) in `**Knowledge context:**`, with a worker-facing "— what to honor at implement time" annotation. Implementation-facing means tell the worker what to *do*, not just what it says.
-   - **Distribute to multiple phases when warranted.** Cross-cutting conventions touching every phase's files belong in every phase's Knowledge context — duplication is correct here because each phase is its own `/implement` worker batch needing its own seeds. Do not consolidate across phases.
-   - **No-overlap entries stay in the top-level manifest only.** If after permissive review an entry binds to no phase, leave it solely in `**Related preferences/conventions:**` — the manifest preserves the audit trail.
-   - **Distribution is permissive; weaving is strict — two separate channels.** This step (per-phase `**Knowledge context:**`) carries every scope-overlapping entry, judgment-class or not, as a backlink — the worker can dismiss inapplicable ones. Weaving into a task's constraint clause (Deliverable contract gate above) is the *strict* subset: only the judgment-class entries that also scope-overlap the task become imperative constraint clauses naming the norm by its stable label. A judgment-class entry that binds to a task gets **both** — the backlink here (provenance + `{{prior_knowledge}}` seed) and the woven clause in the task line (the instruction the worker executes). A mechanical entry gets only the backlink (it is never woven).
+   - **Distribute to multiple tasks when warranted.** A convention touching several tasks' files belongs in each of their Knowledge context blocks — duplication is correct here because each task is its own worker with its own seeds. Do not consolidate across tasks.
+   - **No-overlap entries stay in the top-level manifest only.** If after permissive review an entry binds to no task, leave it solely in `**Related preferences/conventions:**` — the manifest preserves the audit trail.
+   - **Distribution is permissive; weaving is strict — two separate channels.** This step (per-task `**Knowledge context:**`) carries every scope-overlapping entry, judgment-class or not, as a backlink — the worker can dismiss inapplicable ones. Weaving into a task's constraint clause (Deliverable contract gate above) is the *strict* subset: only the judgment-class entries that also scope-overlap the task become imperative constraint clauses naming the norm by its stable label. A judgment-class entry that binds to a task gets **both** — the backlink here (provenance + `{{prior_knowledge}}` seed) and the woven clause in the task line (the instruction the worker executes). A mechanical entry gets only the backlink (it is never woven).
    - **Why distribute here:** `/implement` Step 3.1 (directive branch) resolves seeds via `resolve-manifest.sh` from `**Knowledge context:**` backlinks + `**Files:**` paths. Distributing here flows entries through seeds → directive → worker `{{prior_knowledge}}` without new protocol surface in `/implement`.
 
-3. **Retrieval directive derivation** — after concordance widening, populate `**Retrieval directive:**` for each phase. Derivable from phase content alone; no user input.
+3. **Retrieval directive derivation** — after concordance widening, populate `**Retrieval directive:**` for each task. Derivable from the task's own content alone; no user input. Directives resolve per task at dispatch, so each one is derived from that task's files and knowledge context, never from a neighbour's.
 
    **Per-topic decomposition (v2 — default):** the directive is a list of `(topic, scale_set, [activity_vocab])` — **exactly one focal topic** plus **up to five adjacent topics**. Each topic fires its own BM25 OR query at its own scale_set; the worker prompt's `## Prior Knowledge` block ends up sectioned (`### Focal: <topic>` / `### Adjacent: <topic>`).
 
-   - **Focal topic.** The phase's primary subject. Default `scale_set: subsystem,implementation`. Seeds: phase's owned files (from `**Files:**`) plus `[[knowledge:...]]` entries in `**Knowledge context:**` about that subsystem. Prefer **title-vocabulary terms** (the entry's title tokens) over the topic label — title vocabulary resolves to entries the index can rank, while raw `knowledge:...` strings tokenize as a single literal and miss the index.
-   - **Adjacent topics (≤5).** Subsystems the phase touches but does not own. Default `scale_set` one tier above focal's bottom — typically `architecture,subsystem`. Seeds: title-vocabulary terms from canonical entries about *that adjacent subsystem* — not the topic label, not the focal seeds. Weak seeds (right scale, wrong entries) are the dominant failure mode — re-derive from adjacent entries' titles and resolved paths.
+   - **Focal topic.** The task's primary subject. Default `scale_set: subsystem,implementation`. Seeds: the task's owned files (from `**Files:**`) plus `[[knowledge:...]]` entries in `**Knowledge context:**` about that subsystem. Prefer **title-vocabulary terms** (the entry's title tokens) over the topic label — title vocabulary resolves to entries the index can rank, while raw `knowledge:...` strings tokenize as a single literal and miss the index.
+   - **Adjacent topics (≤5).** Subsystems the task touches but does not own. Default `scale_set` one tier above focal's bottom — typically `architecture,subsystem`. Seeds: title-vocabulary terms from canonical entries about *that adjacent subsystem* — not the topic label, not the focal seeds. Weak seeds (right scale, wrong entries) are the dominant failure mode — re-derive from adjacent entries' titles and resolved paths.
    - **Activity vocabulary (optional, per topic).** Attach when topic files imply a recurring practice (writing tests, emitting telemetry, capturing). Look up tokens from `$KDIR/_meta/activity-vocab.yaml` by matching its file-path globs against the topic's owned files; **do not invent activity tokens inline**. The activity-vocab file is the single authority. When present, the topic fires one extra BM25 OR query at the same `scale_set` with these tokens (`query_kind=activity`).
    - **Strict v2 invariant.** A v2 directive MUST have exactly one `role: focal` entry. Zero-focal or multi-focal v2 is a hard parse error in `generate-tasks.py` — not silently accepted, not normalized to legacy. If no genuine focal candidate emerges (e.g., purely cross-cutting refactor), emit the legacy flat directive — that path remains valid for rollout compatibility.
 
@@ -540,9 +539,9 @@ Draft concrete implementation sections on top of the approved abstract plan:
    ```
    The legacy form continues to resolve to a single focal topic at the declared `scale_set` so existing plans don't break.
 
-   **Omission rule:** if a phase has neither `**Knowledge context:**` backlinks nor `**Files:**` entries, omit the `**Retrieval directive:**` block and add a comment: `<!-- no directive: no backlinks or files to derive seeds from -->`.
+   **Omission rule:** if a task has neither `**Knowledge context:**` backlinks nor `**Files:**` entries, omit the `**Retrieval directive:**` block and add a comment: `<!-- no directive: no backlinks or files to derive seeds from -->`.
 
-   **Position:** place `**Retrieval directive:**` immediately after `**Knowledge delivery:**` (or after `**Files:**` / `**Objective:**` when `**Knowledge delivery:**` is absent) and before `**Knowledge context:**`.
+   **Position:** place `**Retrieval directive:**` immediately after `**Knowledge delivery:**` (or after `**Files:**` when `**Knowledge delivery:**` is absent) and before `**Knowledge context:**`.
 
 4. **Open Questions** — anything investigations couldn't resolve.
 
@@ -556,7 +555,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
 lore work regen-tasks <slug>
 ```
 
-Inspect `phase_cost_summary` as a sanity check — a single task far larger than its peers may signal an under-decomposed deliverable worth a closer read. Cost diagnostics are advisory only; the Plan-as-unit rule, Phase-as-unit rule, and Deliverable contract gate in Step 5b are the binding gates. Do not split tasks merely because they fall above an avg-comparison threshold, and do not merge tasks merely because they fall below one. The avg-comparison heuristic is post-hoc and uniform-thinness blind; trust the intrinsic gates instead.
+Inspect the context cost summary as a sanity check — a single task far larger than its peers may signal an under-decomposed deliverable worth a closer read. Cost diagnostics are advisory only; the sizing band and the Deliverable contract gate in Step 5b are the binding gates. Do not split tasks merely because they fall above an avg-comparison threshold, and do not merge tasks merely because they fall below one. The avg-comparison heuristic is post-hoc and uniform-thinness blind; trust the intrinsic gates instead.
 
 ### Step 5.0a: Verify backlinks
 
@@ -573,7 +572,7 @@ The Step 5.6 finalize verb re-runs backlink verification terminally; this early 
 
 ### Step 5.0b: Knowledge context block audit
 
-For each phase, run `lore search "<phase objective keywords>" --scale-set subsystem,implementation --limit 3`. If results exist but the phase has no `**Knowledge context:**` block, add the most relevant entry as a backlink with an implementation-facing annotation.
+For each task, run `lore search "<task deliverable keywords>" --scale-set subsystem,implementation --limit 3`. If results exist but the task has no `**Knowledge context:**` block, add the most relevant entry as a backlink with an implementation-facing annotation.
 
 ---
 
@@ -602,7 +601,7 @@ Does this match your understanding? Any corrections?
 
 1. Identify affected plan sections via `→` trace links.
 2. Revise affected sections in `plan.md`.
-3. Re-check affected phases for tasks that depended on the corrected assumption.
+3. Re-check affected tasks that depended on the corrected assumption.
 4. Re-present only the corrected bullets:
    ```
    Updated understanding after your corrections:
@@ -616,23 +615,23 @@ Does this match your understanding? Any corrections?
 
 ### Step 5.3: Task review
 
-Before finalizing, present the plan phases as structured summaries. This is a separate gate from Step 5.1 — that validates understanding; this validates the work plan.
+Before finalizing, present the plan's tasks as structured summaries. This is a separate gate from Step 5.1 — that validates understanding; this validates the work plan.
 
-1. For each phase, produce:
+1. For each task, produce:
    ```
-   Phase N: <Name>
-     Objective: <what this phase accomplishes>
-     Mechanism: <HOW — specific technical approach, 1-3 sentences>
-     Scope:     <files and components touched>
-     Tasks:     <N tasks>
+   Task N: <Name>
+     Deliverable: <what this task produces>
+     Mechanism:   <HOW — specific technical approach, 1-3 sentences>
+     Files:       <owned file surface>
+     Depends on:  <task ids from [depends-on: ...], or "file overlap only" / "none">
    ```
-2. Present all phase summaries. Before them, add:
+2. Present all task summaries. Before them, add:
    ```
    Workers: N (max concurrent from task DAG topology)
    ```
-   Read `recommended_workers` from `tasks.json`. End with: `Review the phases above. Approve to proceed, or request changes.`
+   Read `recommended_workers` from `tasks.json`. End with: `Review the tasks above. Approve to proceed, or request changes.`
 3. **Wait for explicit approval.** **If `--yes`, skip (auto-approve).**
-4. If user requests changes: revise affected phases in `plan.md`, re-present only changed summaries. Repeat until approved.
+4. If user requests changes: revise the affected tasks in `plan.md`, re-present only changed summaries. Repeat until approved.
 5. If user needs new investigation: suggest re-running `/spec <slug>`.
 
 ---
@@ -667,7 +666,7 @@ Apply the provenance flags above on every `lore capture`.
 
 ### Step 5.4a: Theory of the touched subsystem
 
-Name the subsystem this plan touches, and put its theory page in order while the synthesis is still in one head — once the phases disperse it, nobody holds the full picture again until the next spec. If a theory page exists for the subsystem (the `### Theory` section of your session context or prefetch), read it against what investigation just taught you and revise whatever no longer describes the code; a theory describes the code, the code never answers to the theory, and whoever changes a subsystem changes its page in the same change — this step is that rule applied to the spec seat. If no page exists and the subsystem is coherent enough to deserve one, write it:
+Name the subsystem this plan touches, and put its theory page in order while the synthesis is still in one head — once the tasks disperse it, nobody holds the full picture again until the next spec. If a theory page exists for the subsystem (the `### Theory` section of your session context or prefetch), read it against what investigation just taught you and revise whatever no longer describes the code; a theory describes the code, the code never answers to the theory, and whoever changes a subsystem changes its page in the same change — this step is that rule applied to the spec seat. If no page exists and the subsystem is coherent enough to deserve one, write it:
 
 ```bash
 lore capture --kind theory --subsystem <name> --category architecture --scale architecture,subsystem --insight "<how the subsystem actually works>"
@@ -718,7 +717,7 @@ lore spec finalize <slug>
 Show the verb's output. The anchor gate enforces structural anchor preservation and scope-delta attestation, not semantic non-drift — semantic alignment between the anchor and the rest of the plan remains a spec-author responsibility, with downstream reviewers (e.g., `/codex-plan-review`) as the semantic backstop. A no-anchor work item reports the gate as `skipped` with the verifier's reason (absence is legible, not silent).
 
 **Refusal handling:**
-- **Exit 3 (intent-anchor gate) or an emission-contract assert failure:** surface the named diagnostic (verifier code 2 = section missing, 3 = body diverges, 4 = `**Scope delta:**` missing; contract failures name the failing phase), fix `plan.md`, and re-run `lore spec finalize <slug>` until it passes.
+- **Exit 3 (intent-anchor gate) or an emission-contract assert failure:** surface the named diagnostic (verifier code 2 = section missing, 3 = body diverges, 4 = `**Scope delta:**` missing; contract failures name the failing task), fix `plan.md`, and re-run `lore spec finalize <slug>` until it passes.
 - **Exit 2 (ambiguous reference):** re-run with the exact slug.
 - **Exit 1 (validation, precondition, or composed-script failure):** fix the named diagnostic before re-running.
 
@@ -744,4 +743,4 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 
 ## Plan.md Template
 
-When emitting `plan.md` in Step 5b (including item 0's Intent Anchor render), read `skills/spec/templates/plan.md` for the canonical plan structure. The sidecar holds the full fenced template — Goal, Narrative, Intent Anchor, Strategy, Context, Investigations, Design Decisions, Architecture Diagram, Phases, Open Questions, Related — with the inline HTML-comment guidance preserved alongside each section it governs.
+When emitting `plan.md` in Step 5b (including item 0's Intent Anchor render), read `skills/spec/templates/plan.md` for the canonical plan structure. The sidecar holds the full fenced template — Goal, Narrative, Intent Anchor, Strategy, Context, Investigations, Design Decisions, Architecture Diagram, Tasks, Open Questions, Related — with the inline HTML-comment guidance preserved alongside each section it governs.

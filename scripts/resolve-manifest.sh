@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# resolve-manifest.sh — Resolve a phase's retrieval_directive into a ## Prior Knowledge bundle
-# Usage: bash resolve-manifest.sh <slug> <phase_number> [--task-id <id>] [--delivery-json <path>]
+# resolve-manifest.sh — Resolve a retrieval_directive into a ## Prior Knowledge bundle
+# Usage: bash resolve-manifest.sh <slug> --task-id <id> [--delivery-json <path>]
+#        bash resolve-manifest.sh <slug> <phase_number> [--task-id <id>] [--delivery-json <path>]
 #
 # <slug>          Work item slug (must have a tasks.json in $KDIR/_work/<slug>/)
-# <phase_number>  1-based phase index (must correspond to a phase in tasks.json)
-# --task-id       Task id this resolve serves; populates manifest_load.task_id
-#                 so manifest telemetry is task-joinable (omit for phase-level
-#                 resolves shared by several tasks)
+# <phase_number>  Phase number as declared in tasks.json, for a plan whose
+#                 tasks.json carries phases[]
+# --task-id       The task this resolve serves. Without a <phase_number> it also
+#                 selects the directive: the task's own retrieval_directive when
+#                 tasks.json carries a top-level tasks[], otherwise the directive
+#                 of the phase holding that task. With a <phase_number> it only
+#                 attributes the telemetry, for a directive several tasks share.
 # --delivery-json Write a per-entry delivery snapshot (render mode + trust at
 #                 delivery) as JSON to this path (v2 directives only) — input
 #                 for packet emission; stdout is unchanged
@@ -19,8 +23,9 @@
 #
 # Stderr: Diagnostic messages on error conditions.
 # Exit 0: success
-# Exit non-zero: missing tasks.json, invalid JSON, bad phase number, null directive,
-#                empty seeds (legacy), missing scale_set (legacy), v2 invariants violated.
+# Exit non-zero: missing tasks.json, invalid JSON, unknown task id or phase number,
+#                null directive, empty seeds (legacy), missing scale_set (legacy),
+#                v2 invariants violated.
 #
 # On each successful resolve, appends a manifest_load event to $KDIR/_meta/retrieval-log.jsonl.
 # Fail-open: log write errors do not block stdout. v2 records per-section fields (topic,
@@ -34,15 +39,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 # --- Validate arguments ---
+USAGE="Usage: resolve-manifest.sh <slug> --task-id <id> [--delivery-json <path>]
+       resolve-manifest.sh <slug> <phase_number> [--task-id <id>] [--delivery-json <path>]"
+
 if [[ $# -lt 2 ]]; then
-  echo "Usage: resolve-manifest.sh <slug> <phase_number> [--task-id <id>] [--delivery-json <path>]" >&2
+  echo "Error: a work-item slug and either --task-id <id> or a phase number are required." >&2
+  echo "$USAGE" >&2
   exit 1
 fi
 
 SLUG="$1"
-PHASE_NUMBER="$2"
-shift 2
+shift
 
+PHASE_NUMBER=""
 TASK_ID=""
 DELIVERY_JSON=""
 while [[ $# -gt 0 ]]; do
@@ -63,16 +72,40 @@ while [[ $# -gt 0 ]]; do
       DELIVERY_JSON="${1#--delivery-json=}"
       shift
       ;;
-    *)
-      echo "Error: unknown argument: $1" >&2
+    -*)
+      echo "Error: unknown flag '$1'. Accepted flags are --task-id and --delivery-json." >&2
+      echo "$USAGE" >&2
       exit 1
+      ;;
+    *)
+      if [[ -n "$PHASE_NUMBER" ]]; then
+        echo "Error: unexpected extra argument '$1'; at most one phase number is accepted." >&2
+        echo "$USAGE" >&2
+        exit 1
+      fi
+      PHASE_NUMBER="$1"
+      shift
       ;;
   esac
 done
 
-if ! [[ "$PHASE_NUMBER" =~ ^[0-9]+$ ]] || [[ "$PHASE_NUMBER" -lt 1 ]]; then
-  echo "Error: phase_number must be a positive integer, got: '$PHASE_NUMBER'" >&2
+if [[ -n "$PHASE_NUMBER" ]]; then
+  if ! [[ "$PHASE_NUMBER" =~ ^[0-9]+$ ]] || [[ "$PHASE_NUMBER" -lt 1 ]]; then
+    echo "Error: the phase number must be a positive integer, got '$PHASE_NUMBER'." >&2
+    echo "$USAGE" >&2
+    exit 1
+  fi
+elif [[ -z "$TASK_ID" ]]; then
+  echo "Error: nothing to resolve — pass --task-id <id> to resolve the directive a task declares, or a phase number to resolve one a phase declares." >&2
+  echo "$USAGE" >&2
   exit 1
+fi
+
+# Names the unit this resolve is addressed to, for every diagnostic below.
+if [[ -n "$PHASE_NUMBER" ]]; then
+  UNIT_LABEL="phase $PHASE_NUMBER"
+else
+  UNIT_LABEL="task $TASK_ID"
 fi
 
 # --- Resolve knowledge dir and tasks.json path ---
@@ -84,14 +117,11 @@ if [[ ! -f "$TASKS_FILE" ]]; then
   exit 1
 fi
 
-# --- Extract retrieval_directive for the requested phase ---
-PHASE_INDEX=$(( PHASE_NUMBER - 1 ))
-
-DIRECTIVE_JSON=$(python3 - "$TASKS_FILE" "$PHASE_INDEX" <<'EXTRACT_PY'
+# --- Extract the retrieval_directive the addressed unit declares -------------
+DIRECTIVE_JSON=$(python3 - "$TASKS_FILE" "$SLUG" "$PHASE_NUMBER" "$TASK_ID" <<'EXTRACT_PY'
 import json, sys
 
-tasks_file = sys.argv[1]
-phase_index = int(sys.argv[2])
+tasks_file, slug, phase_number, task_id = sys.argv[1:5]
 
 try:
     with open(tasks_file) as f:
@@ -100,13 +130,72 @@ except json.JSONDecodeError as e:
     print(f"Error: tasks.json is not valid JSON: {e}", file=sys.stderr)
     sys.exit(1)
 
-phases = data.get("phases", [])
-if phase_index >= len(phases):
-    print(f"Error: phase_number {phase_index + 1} out of range (tasks.json has {len(phases)} phases)", file=sys.stderr)
+flat = data.get("tasks")
+phases = data.get("phases")
+have_flat = isinstance(flat, list)
+have_phases = isinstance(phases, list)
+
+if not have_flat and not have_phases:
+    print(
+        f"Error: tasks.json for '{slug}' declares neither a top-level tasks array "
+        f"nor a phases array, so there is nothing to resolve. Regenerate it with: "
+        f"lore work regen-tasks {slug}",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
-phase = phases[phase_index]
-directive = phase.get("retrieval_directive")
+if phase_number:
+    if not have_phases:
+        print(
+            f"Error: tasks.json for '{slug}' has no phases array, so phase "
+            f"{phase_number} names nothing. Address the unit by its task instead: "
+            f"--task-id <id>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    wanted = int(phase_number)
+    declared = [p.get("phase_number") for p in phases]
+    matches = [p for p in phases if p.get("phase_number") == wanted]
+    if matches:
+        owner = matches[0]
+    elif not any(n is not None for n in declared):
+        # No phase names its own number, so position is the only identity the
+        # document offers and the request is read as a 1-based index.
+        if wanted > len(phases):
+            print(
+                f"Error: '{slug}' has {len(phases)} phase(s), so phase {wanted} "
+                f"names nothing.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        owner = phases[wanted - 1]
+    else:
+        present = ", ".join(str(n) for n in declared if n is not None)
+        print(
+            f"Error: '{slug}' declares no phase {wanted} (phases present: {present}).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+else:
+    # tasks[] is authoritative when present; otherwise the task is located in
+    # phases[] and the phase holding it owns the directive.
+    owner = None
+    if have_flat:
+        owner = next((t for t in flat if t.get("id") == task_id), None)
+    if owner is None and have_phases:
+        for phase in phases:
+            if any(t.get("id") == task_id for t in phase.get("tasks", [])):
+                owner = phase
+                break
+    if owner is None:
+        print(
+            f"Error: '{slug}' has no task '{task_id}'. Check the task id against "
+            f"tasks.json, or regenerate it with: lore work regen-tasks {slug}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+directive = owner.get("retrieval_directive")
 
 if directive is None:
     print("null")
@@ -116,7 +205,7 @@ EXTRACT_PY
 ) || exit 1
 
 if [[ "$DIRECTIVE_JSON" == "null" ]]; then
-  echo "Error: phase $PHASE_NUMBER of '$SLUG' has no retrieval_directive; a scale-declared directive is required." >&2
+  echo "Error: $UNIT_LABEL of '$SLUG' has no retrieval_directive; a scale-declared directive is required." >&2
   exit 1
 fi
 
@@ -131,7 +220,8 @@ if [[ "$DIRECTIVE_VERSION" == "2" ]]; then
   # v2 grouped path — per-topic fan-out, sectioned output, per-section
   # budgets/degradation/telemetry. All of it lives in pk_manifest.py
   # (dispatched via pk_cli.py), composing Searcher + pk_retrieval.
-  V2_ARGS=(--directive "$DIRECTIVE_JSON" --slug "$SLUG" --phase "$PHASE_NUMBER")
+  V2_ARGS=(--directive "$DIRECTIVE_JSON" --slug "$SLUG")
+  [[ -n "$PHASE_NUMBER" ]] && V2_ARGS+=(--phase "$PHASE_NUMBER")
   [[ -n "$TASK_ID" ]] && V2_ARGS+=(--task-id "$TASK_ID")
   [[ -n "$DELIVERY_JSON" ]] && V2_ARGS+=(--delivery-json "$DELIVERY_JSON")
   python3 "$SCRIPT_DIR/pk_cli.py" resolve-manifest "$KNOWLEDGE_DIR" "${V2_ARGS[@]}"
@@ -177,12 +267,12 @@ print(f.get('exclude_category', '') if isinstance(f, dict) else '')
 " "$DIRECTIVE_JSON" 2>/dev/null || true)
 
 if [[ -z "$SEEDS" ]]; then
-  echo "Error: phase $PHASE_NUMBER of '$SLUG' has a retrieval_directive with no seeds; seeds are required." >&2
+  echo "Error: $UNIT_LABEL of '$SLUG' has a retrieval_directive with no seeds; seeds are required." >&2
   exit 1
 fi
 
 if [[ -z "$SCALE_SET" ]]; then
-  echo "Error: phase $PHASE_NUMBER of '$SLUG' has a retrieval_directive with no scale_set; declare a scale before fetching." >&2
+  echo "Error: $UNIT_LABEL of '$SLUG' has a retrieval_directive with no scale_set; declare a scale before fetching." >&2
   exit 1
 fi
 
@@ -223,7 +313,7 @@ import json, os, sys, datetime
 
 knowledge_dir = sys.argv[1]
 slug = sys.argv[2]
-phase = int(sys.argv[3])
+phase = int(sys.argv[3]) if sys.argv[3] else None
 paths_csv = sys.argv[4]
 task_id = sys.argv[5] or None
 

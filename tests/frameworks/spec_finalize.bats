@@ -9,7 +9,8 @@
 #   - intent-anchor gate refusal: exit 3, verifier code named, no regen, no row
 #   - no-anchor item: gate reported skipped (never passed), still exits 0
 #   - unresolved backlinks: warn and continue to attribution + telemetry
-#   - emission-contract assert: empty seeds refuse naming the phase, no row
+#   - emission-contract assert: empty seeds refuse naming the unit, on both the
+#     flat tasks[] path and the legacy phases[] fallback, no row
 #   - re-finalize appends a fresh point-event row (no dedup)
 #   - resolver tri-state passthrough (no match 1, ambiguous 2)
 #   - SKILL.md Step 5.5 routes through the verb (no hand-run verifier sequence)
@@ -19,6 +20,11 @@
 REPO_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/../.." && pwd)"
 LORE_CLI="$REPO_DIR/cli/lore"
 FINALIZE_SH="$REPO_DIR/scripts/spec-finalize.sh"
+
+# Behavior tests run FINALIZE_SH from this checkout; `lore spec finalize` execs
+# whatever spec-finalize.sh the installed ~/.lore/scripts symlink points at, so
+# routing through the CLI would test the installed copy instead of this one.
+# LORE_CLI stays for the router-surface tests, which are about the CLI itself.
 
 # Writes a plan.md for slug $1 with intent-anchor body $2 (empty = no section)
 # and retrieval-directive style $3 (v2 | legacy-empty-seeds | none).
@@ -42,10 +48,14 @@ write_plan() {
       echo "**Scope delta:** none — anchor preserved unchanged"
       echo ""
     fi
-    echo "## Phases"
+    echo "## Tasks"
     echo ""
-    echo "### Phase 1: Build"
-    echo "**Objective:** Build the module"
+    echo "**Merge rationale:**"
+    echo "One design center: the finalize module's own gate sequence."
+    echo ""
+    echo "### Task 1: Build"
+    echo "**Deliverable:** The built module"
+    echo "**Files:** \`src/a.py\`"
     case "$directive" in
       v2)
         echo '**Retrieval directive:**'
@@ -69,6 +79,29 @@ write_plan() {
       none)
         ;;
     esac
+    echo "- [ ] Implement the module in \`src/a.py\` [class: standard]"
+  } > "$dir/plan.md"
+}
+
+# Writes a legacy phase-shaped plan.md for slug $1 — the shape the emission-
+# contract assert reads through its phases[] fallback.
+write_legacy_plan() {
+  local dir="$1"
+  {
+    echo "# Fixture Item"
+    echo ""
+    echo "## Goal"
+    echo "Ship the fixture."
+    echo ""
+    echo "## Phases"
+    echo ""
+    echo "### Phase 1: Build"
+    echo "**Objective:** Build the module"
+    echo "**Merge rationale:**"
+    echo "One design center: the finalize module's own gate sequence."
+    echo '**Retrieval directive:**'
+    echo '- seeds:'
+    echo '- scale_set: implementation'
     echo "**Tasks:**"
     echo "- [ ] build the module [class: standard]"
   } > "$dir/plan.md"
@@ -178,7 +211,7 @@ json_payload() {
 # --- Happy path -------------------------------------------------------------
 
 @test "finalize on a valid anchored item exits 0 and appends one telemetry row" {
-  run bash "$LORE_CLI" spec finalize finalize-item
+  run bash "$FINALIZE_SH" finalize-item
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Finalize complete"
   [ -f "$WORK_DIR/finalize-item/tasks.json" ]
@@ -189,7 +222,7 @@ json_payload() {
   # One pre-existing hand-run atom + the spec-verb atom finalize writes.
   echo "hand-run body" | bash "$REPO_DIR/scripts/write-execution-log.sh" \
     --slug finalize-item --source spec-lead
-  run bash "$LORE_CLI" spec finalize finalize-item
+  run bash "$FINALIZE_SH" finalize-item
   [ "$status" -eq 0 ]
   python3 - "$(rows_file)" <<'PYEOF'
 import json, sys
@@ -209,14 +242,14 @@ PYEOF
 }
 
 @test "finalize stamps exactly one spec-verb execution-log atom" {
-  run bash "$LORE_CLI" spec finalize finalize-item
+  run bash "$FINALIZE_SH" finalize-item
   [ "$status" -eq 0 ]
   count=$(grep -c "| source: spec-verb" "$WORK_DIR/finalize-item/execution-log.md")
   [ "$count" -eq 1 ]
 }
 
 @test "--json output carries backlinks, anchor, contract_asserts, and telemetry fields" {
-  run bash "$LORE_CLI" spec finalize finalize-item --json
+  run bash "$FINALIZE_SH" finalize-item --json
   [ "$status" -eq 0 ]
   json_payload | python3 -c '
 import json, sys
@@ -236,7 +269,7 @@ assert d["verb_mediated_count"] == 1
 @test "diverged anchor body exits 3, names verifier code 3, regenerates no tasks, appends no row" {
   make_item "divergent-item" "Deliver the true capability." \
     "A paraphrased anchor that diverges." v2
-  run bash "$LORE_CLI" spec finalize divergent-item
+  run bash "$FINALIZE_SH" divergent-item
   [ "$status" -eq 3 ]
   echo "$output" | grep -q "3 = anchor body diverges"
   [ ! -f "$WORK_DIR/divergent-item/tasks.json" ]
@@ -246,7 +279,7 @@ assert d["verb_mediated_count"] == 1
 
 @test "missing Intent Anchor section on an anchored item exits 3 naming code 2" {
   make_item "sectionless-item" "Deliver the capability." "" v2
-  run bash "$LORE_CLI" spec finalize sectionless-item
+  run bash "$FINALIZE_SH" sectionless-item
   [ "$status" -eq 3 ]
   echo "$output" | grep -q "2 = Intent Anchor section missing"
   [ "$(row_count)" -eq 0 ]
@@ -254,7 +287,7 @@ assert d["verb_mediated_count"] == 1
 
 @test "no-anchor item reports the gate as skipped, never passed, and exits 0" {
   make_item "legacy-item" "" "" v2
-  run bash "$LORE_CLI" spec finalize legacy-item
+  run bash "$FINALIZE_SH" legacy-item
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Anchor gate:      skipped"
   echo "$output" | grep -q "no intent_anchor"
@@ -264,7 +297,7 @@ assert d["verb_mediated_count"] == 1
 
 @test "no-anchor item --json reports anchor status skipped with the verifier reason" {
   make_item "legacy-item" "" "" v2
-  run bash "$LORE_CLI" spec finalize legacy-item --json
+  run bash "$FINALIZE_SH" legacy-item --json
   [ "$status" -eq 0 ]
   json_payload | python3 -c '
 import json, sys
@@ -279,7 +312,7 @@ assert "no intent_anchor" in d["anchor"]["reason"], d["anchor"]
 @test "unresolved backlinks warn and continue to attribution and telemetry" {
   make_item "backlink-item" "Deliver the capability." \
     "Deliver the capability." v2 "[[knowledge:nonexistent/entry-xyz]]"
-  run bash "$LORE_CLI" spec finalize backlink-item
+  run bash "$FINALIZE_SH" backlink-item
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "unresolved backlink"
   echo "$output" | grep -q "Backlinks:        warned"
@@ -289,23 +322,36 @@ assert "no intent_anchor" in d["anchor"]["reason"], d["anchor"]
 
 # --- Emission-contract assert ---------------------------------------------------
 
-@test "empty seeds in a retrieval directive refuse with a diagnostic naming the phase" {
+@test "empty seeds in a retrieval directive refuse with a diagnostic naming the task" {
   make_item "empty-seeds-item" "Deliver the capability." \
     "Deliver the capability." legacy-empty-seeds
-  run bash "$LORE_CLI" spec finalize empty-seeds-item
+  run bash "$FINALIZE_SH" empty-seeds-item
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "emission-contract assert failed"
-  echo "$output" | grep -q "phase 1"
+  echo "$output" | grep -q "task-1"
   echo "$output" | grep -q "empty seeds"
   [ "$(row_count)" -eq 0 ]
   ! grep -q "| source: spec-verb" "$WORK_DIR/empty-seeds-item/execution-log.md" 2>/dev/null
 }
 
-# --- Judgment-class gate --------------------------------------------------------
+@test "a phase-shaped plan still asserts through the phases[] fallback" {
+  local dir="$WORK_DIR/legacy-seeds-item"
+  mkdir -p "$dir"
+  printf '{"title": "legacy-seeds-item", "status": "active"}\n' > "$dir/_meta.json"
+  write_legacy_plan "$dir"
+  run bash "$FINALIZE_SH" legacy-seeds-item
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "emission-contract assert failed"
+  echo "$output" | grep -q "phase 1"
+  echo "$output" | grep -q "empty seeds"
+  [ "$(row_count)" -eq 0 ]
+}
 
-# Writes a no-anchor plan.md (anchor gate skips) with a custom Phase 1 body.
+# --- Judgment-class and sizing-rationale gate -----------------------------------
+
+# Writes a no-anchor plan.md (anchor gate skips) whose ## Tasks section body is $2.
 write_class_gate_plan() {
-  local slug="$1" phase_body="$2"
+  local slug="$1" tasks_body="$2"
   local dir="$WORK_DIR/$slug"
   mkdir -p "$dir"
   printf '{"title": "%s", "status": "active"}\n' "$slug" > "$dir/_meta.json"
@@ -315,19 +361,22 @@ write_class_gate_plan() {
     echo "## Goal"
     echo "Ship the fixture."
     echo ""
-    echo "## Phases"
+    echo "## Tasks"
     echo ""
-    echo "### Phase 1: Build"
-    printf '%s\n' "$phase_body"
+    printf '%s\n' "$tasks_body"
   } > "$dir/plan.md"
 }
 
 @test "unannotated task line refuses naming the offending line, no row or atom" {
   write_class_gate_plan "unannotated-item" "$(printf '%s\n' \
-    '**Objective:** Build the module' \
-    '**Tasks:**' \
-    '- [ ] build the module with no class marker')"
-  run bash "$LORE_CLI" spec finalize unannotated-item
+    '**Merge rationale:**' \
+    'One design center: the module itself.' \
+    '' \
+    '### Task 1: Build' \
+    '**Deliverable:** The built module' \
+    '**Files:** `src/a.py`' \
+    '- [ ] build the module with no class marker in `src/a.py`')"
+  run bash "$FINALIZE_SH" unannotated-item
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "judgment-class gate"
   echo "$output" | grep -q "unannotated task line"
@@ -336,29 +385,77 @@ write_class_gate_plan() {
   ! grep -q "| source: spec-verb" "$WORK_DIR/unannotated-item/execution-log.md" 2>/dev/null
 }
 
-@test "multi-task phase without split rationale refuses naming the phase, no row" {
+@test "multi-task plan without split rationale refuses naming the plan, no row" {
   write_class_gate_plan "no-rationale-item" "$(printf '%s\n' \
-    '**Objective:** Build the module' \
-    '**Tasks:**' \
+    '### Task 1: Core' \
+    '**Deliverable:** The parser core' \
+    '**Files:** `src/a.py`' \
     '- [ ] build the core in `src/a.py` [class: judgment-dense]' \
+    '' \
+    '### Task 2: Sweep' \
+    '**Deliverable:** The renamed call sites' \
+    '**Files:** `src/b.py`' \
     '- [ ] apply the sweep in `src/b.py` [class: mechanical]')"
-  run bash "$LORE_CLI" spec finalize no-rationale-item
+  run bash "$FINALIZE_SH" no-rationale-item
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "judgment-class gate"
-  echo "$output" | grep -q "phase 1"
+  echo "$output" | grep -q "plan has 2 tasks"
   echo "$output" | grep -q "Split rationale"
   [ "$(row_count)" -eq 0 ]
 }
 
-@test "annotated multi-task phase finalizes and stamps split_rationale + class_distribution" {
+@test "one-task plan without merge rationale refuses naming the missing block, no row" {
+  write_class_gate_plan "no-merge-item" "$(printf '%s\n' \
+    '### Task 1: Build' \
+    '**Deliverable:** The built module' \
+    '**Files:** `src/a.py`' \
+    '- [ ] build the module in `src/a.py` [class: standard]')"
+  run bash "$FINALIZE_SH" no-merge-item
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "judgment-class gate"
+  echo "$output" | grep -q "plan has one task"
+  echo "$output" | grep -q "Merge rationale"
+  [ "$(row_count)" -eq 0 ]
+}
+
+@test "a one-task plan with a merge rationale finalizes and stamps merge_rationale" {
+  write_class_gate_plan "merged-item" "$(printf '%s\n' \
+    '**Merge rationale:**' \
+    'Both edits shape one parser interface, so they share a single design center.' \
+    '' \
+    '### Task 1: Build' \
+    '**Deliverable:** The built module' \
+    '**Files:** `src/a.py`' \
+    '- [ ] build the module in `src/a.py` [class: standard]')"
+  run bash "$FINALIZE_SH" merged-item
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qE "Class gate:.*passed"
+  [ "$(row_count)" -eq 1 ]
+  python3 - "$(rows_file)" <<'PYEOF'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+rows = [r for r in rows if r.get("metric") == "spec_finalize_bookkeeping"]
+r = rows[-1]
+assert r["split_rationale"] == {}, r
+assert "single design center" in r["merge_rationale"]["1"], r
+PYEOF
+}
+
+@test "annotated multi-task plan finalizes and stamps split_rationale + class_distribution" {
   write_class_gate_plan "annotated-item" "$(printf '%s\n' \
-    '**Objective:** Build the module' \
     '**Split rationale:**' \
     'Separates the judgment-dense parser core from the mechanical rename sweep so each routes to its own worker tier.' \
-    '**Tasks:**' \
+    '' \
+    '### Task 1: Core' \
+    '**Deliverable:** The parser core' \
+    '**Files:** `src/a.py`' \
     '- [ ] build the core in `src/a.py` [class: judgment-dense]' \
+    '' \
+    '### Task 2: Sweep' \
+    '**Deliverable:** The renamed call sites' \
+    '**Files:** `src/b.py`' \
     '- [ ] apply the sweep in `src/b.py` [class: mechanical]')"
-  run bash "$LORE_CLI" spec finalize annotated-item
+  run bash "$FINALIZE_SH" annotated-item
   [ "$status" -eq 0 ]
   echo "$output" | grep -qE "Class gate:.*passed"
   [ "$(row_count)" -eq 1 ]
@@ -373,15 +470,16 @@ assert r["class_distribution"]["mechanical"] == 1, r
 assert r["class_distribution"]["standard"] == 0, r
 assert "1" in r["split_rationale"], r
 assert "judgment-dense parser core" in r["split_rationale"]["1"], r
+assert r["merge_rationale"] == {}, r
 PYEOF
 }
 
 # --- Point-event semantics -------------------------------------------------------
 
 @test "re-running finalize appends a fresh row rather than deduplicating" {
-  run bash "$LORE_CLI" spec finalize finalize-item
+  run bash "$FINALIZE_SH" finalize-item
   [ "$status" -eq 0 ]
-  run bash "$LORE_CLI" spec finalize finalize-item
+  run bash "$FINALIZE_SH" finalize-item
   [ "$status" -eq 0 ]
   [ "$(row_count)" -eq 2 ]
   # Second run counts the first run's atom as verb-mediated too.
@@ -396,7 +494,7 @@ PYEOF
 # --- Reference resolution: tri-state passthrough ----------------------------------
 
 @test "no-match reference exits 1" {
-  run bash "$LORE_CLI" spec finalize no-such-item-zzz
+  run bash "$FINALIZE_SH" no-such-item-zzz
   [ "$status" -eq 1 ]
 }
 
@@ -412,14 +510,14 @@ PYEOF
   "archived": []
 }
 EOF
-  run bash "$LORE_CLI" spec finalize shared-tag
+  run bash "$FINALIZE_SH" shared-tag
   [ "$status" -eq 2 ]
 }
 
 @test "archived work item is rejected" {
   mkdir -p "$WORK_DIR/_archive/done-item"
   printf '{"title": "Done Item", "intent_anchor": "old"}\n' > "$WORK_DIR/_archive/done-item/_meta.json"
-  run bash "$LORE_CLI" spec finalize done-item
+  run bash "$FINALIZE_SH" done-item
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "archived"
 }
@@ -475,7 +573,7 @@ write_hosted_registry() {
   export LORE_SESSION_SLUG="finalize-item"
   export LORE_SESSION_TYPE="spec"
   write_hosted_registry
-  run bash "$LORE_CLI" spec finalize finalize-item
+  run bash "$FINALIZE_SH" finalize-item
   [ "$status" -eq 0 ]
   [ "$(row_count)" -eq 1 ]
   [ "$(close_request_count)" -eq 1 ]
@@ -484,7 +582,7 @@ write_hosted_registry() {
 
 @test "finalize outside a session emits no close-request and still finalizes" {
   unset LORE_SESSION_INSTANCE LORE_SESSION_SLUG LORE_SESSION_TYPE
-  run bash "$LORE_CLI" spec finalize finalize-item
+  run bash "$FINALIZE_SH" finalize-item
   [ "$status" -eq 0 ]
   [ "$(row_count)" -eq 1 ]
   [ "$(close_request_count)" -eq 0 ]
@@ -501,7 +599,7 @@ write_hosted_registry() {
   export LORE_SESSION_SLUG="finalize-item"
   export LORE_SESSION_TYPE="spec"
   write_hosted_registry
-  run bash "$LORE_CLI" spec finalize finalize-item
+  run bash "$FINALIZE_SH" finalize-item
   [ "$status" -eq 0 ]
   [ "$(row_count)" -eq 1 ]
   echo "$output" | grep -q "session close-request failed"
@@ -516,7 +614,7 @@ write_hosted_registry() {
   export LORE_SESSION_INSTANCE="tui-a1b2c3"
   export LORE_SESSION_SLUG="divergent-item"
   export LORE_SESSION_TYPE="spec"
-  run bash "$LORE_CLI" spec finalize divergent-item
+  run bash "$FINALIZE_SH" divergent-item
   [ "$status" -eq 3 ]
   [ "$(row_count)" -eq 0 ]
   [ "$(close_request_count)" -eq 0 ]
