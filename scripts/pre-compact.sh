@@ -13,7 +13,12 @@ Before context is compacted, consider whether you've discovered any reusable ins
 - Stable (unlikely to change soon)
 - High confidence (verified, not speculative)
 
+[Threads — Pre-Compaction Action]
+Update any active threads with this session's discussion before compaction. For each thread touched this session:
+1. Append a new `## YYYY-MM-DD` entry with Summary, Key points, and any Shifts
+2. Update the `updated` and `sessions` fields in the YAML frontmatter
+
 [Planning — Pre-Compaction Reminder]
-If you've been working on a plan this session, run `/plan update` to capture session progress
+If you've been working on a plan this session, run `/explore-and-plan update` to capture session progress
 (focus, decisions, progress, next steps) before context is compacted.
 EOF

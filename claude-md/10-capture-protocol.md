@@ -32,4 +32,4 @@ When you discover a reusable, non-obvious, stable insight with high confidence, 
 
 **Do NOT capture:** task-specific details, info already in docs, speculation, transient state.
 
-**Checkpoint cadence:** After completing any significant sub-task (implemented a feature, finished debugging, made a design decision, completed an investigation), briefly scan the capture triggers above. This takes 5 seconds and prevents the "forgot to capture" failure mode. If the user invokes `/memory-checkpoint`, do a thorough review of the entire conversation.
+**Checkpoint cadence:** After completing any significant sub-task (implemented a feature, finished debugging, made a design decision, completed an investigation), briefly scan the capture triggers above. This takes 5 seconds and prevents the "forgot to capture" failure mode. If the user invokes `/remember`, do a thorough review of the entire conversation.

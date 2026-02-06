@@ -41,7 +41,25 @@ if git -C "$TARGET_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
     # Lowercase
     NORMALIZED=$(echo "$NORMALIZED" | tr '[:upper:]' '[:lower:]')
 
-    echo "${BASE_DIR}/${NORMALIZED}"
+    # Compute paths
+    REMOTE_PATH="${BASE_DIR}/${NORMALIZED}"
+    REPO_ROOT=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null)
+    REPO_NAME=$(basename "$REPO_ROOT")
+    LOCAL_PATH="${BASE_DIR}/local/${REPO_NAME}"
+
+    # Check for existing knowledge stores
+    # Prefer local path if it has data but remote path doesn't (migration case)
+    if [[ ! -f "${REMOTE_PATH}/_index.md" ]] && [[ -f "${LOCAL_PATH}/_index.md" ]]; then
+      # Knowledge found at local path, not remote path — use local
+      echo "[resolve-repo] Warning: Knowledge found at local path, not remote path." >&2
+      echo "  Local: repos/local/${REPO_NAME}" >&2
+      echo "  Remote: repos/${NORMALIZED}" >&2
+      echo "  Using local path. Run migration to consolidate." >&2
+      echo "${LOCAL_PATH}"
+    else
+      # Default: use remote path (either has data or is new repo)
+      echo "${REMOTE_PATH}"
+    fi
     exit 0
   fi
 

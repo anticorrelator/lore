@@ -5,6 +5,8 @@ user_invocable: true
 argument_description: "[optional focus area or 'auto' to capture without asking]"
 ---
 
+> **Deprecated:** Use `/remember` instead. This skill will be removed in a future session.
+
 # /memory-checkpoint Skill
 
 Pause and review the current session for uncaptured knowledge and untracked plans. This is the manual safety net — use it when you suspect insights or design decisions are going unrecorded.
