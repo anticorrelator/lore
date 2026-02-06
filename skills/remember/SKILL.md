@@ -2,7 +2,7 @@
 name: remember
 description: Capture insights to knowledge inbox and update conversational threads — invoke anytime to ensure nothing is lost
 user_invocable: true
-argument_description: "[optional: focus area to review]"
+argument_description: "[optional: focus area or capture constraints]"
 ---
 
 # /remember Skill
@@ -17,9 +17,31 @@ bash ~/.project-knowledge/scripts/resolve-repo.sh
 
 Set `KNOWLEDGE_DIR` to the result. Set `THREADS_DIR` to `$KNOWLEDGE_DIR/_threads`.
 
+## Step 0: Parse capture constraints
+
+If an argument was provided, interpret it as **capture constraints** that adjust the 4-condition gate for this invocation. Constraints narrow what gets captured — they never expand it (the base gate always applies).
+
+The argument can be:
+- **A focus area** (e.g., "auth changes") — limits the scan to that topic
+- **A capture filter** (e.g., "skip style preferences, capture architecture decisions") — tightens the gate criteria
+- **Both** (e.g., "PR review feedback — capture architectural insights and gotchas, skip style nits and formatting preferences")
+
+When called from another skill, the argument typically provides context about what kind of work just happened and what's worth persisting vs what's ephemeral. Apply these constraints throughout Steps 1-4.
+
+**Examples of how constraints tighten the gate:**
+
+| Calling context | Capture | Skip |
+|----------------|---------|------|
+| PR review | Architectural feedback, corrected misconceptions, non-obvious patterns the reviewer spotted | Style preferences, formatting nits, subjective code taste, naming bikeshedding |
+| Debugging session | Root causes, misleading error messages, environment-specific gotchas | Dead-end hypotheses, one-off typos, transient state |
+| Dependency upgrade | Breaking changes, migration patterns, compatibility gotchas | Version numbers, changelog summaries, routine deprecation warnings |
+| Refactoring | Discovered coupling, extraction patterns, invariants that weren't obvious | Mechanical renames, import reordering, formatting changes |
+
+The key question for each candidate: **would a future session benefit from knowing this, or is it noise?** Constraints from the caller help answer this by providing domain-specific signal about what's ephemeral.
+
 ## Step 1: Scan for uncaptured insights
 
-Review the full conversation context and identify moments that match capture triggers:
+Review the full conversation context (filtered by any Step 0 constraints) and identify moments that match capture triggers:
 
 - A design decision was made with non-obvious rationale
 - Something was discovered to work differently than expected
@@ -34,6 +56,8 @@ For each candidate, assess against the 4-condition gate:
 2. Non-obvious (not in existing docs)?
 3. Stable (won't change soon)?
 4. High confidence (verified)?
+
+If capture constraints were provided in Step 0, apply them as an additional filter: candidates that pass the base gate but fall into the "skip" category for the current context are dropped silently.
 
 ## Step 2: Scan for thread updates
 
@@ -72,20 +96,31 @@ Review the conversation for thread-worthy content:
 - Create new threads if warranted
 - Update plans as needed
 
-**Exception: external feedback.** If an insight originates from external sources (PR review comments, code review suggestions, issue discussions, pair programming input), prompt the user before capturing. External opinions may not align with the user's own mental models.
+**Exception: external feedback.** If an insight originates from external sources (PR review comments, code review suggestions, issue discussions, pair programming input), prompt the user before capturing — unless capture constraints from Step 0 already specify how to handle external input. External opinions may not align with the user's own mental models.
 
 ```
 [external] PR reviewer suggested "use dependency injection for testability"
   → Capture to knowledge? [Their rationale: ...]
 ```
 
+## Step 4b: Organize inbox (manual invocations only)
+
+If this was a **manual invocation** (user typed `/remember` directly, no capture constraints from Step 0), check whether `_inbox.md` has pending entries — including any just captured in Step 4.
+
+If there are entries, organize them inline: follow the `/memory organize` protocol (present 1-line summaries, file into category files, deduplicate, add backlinks, clear inbox, update manifest). This combines capture and organization into a single checkpoint while the context is fresh.
+
+**Skip this step when:**
+- Capture constraints were provided (called from another skill — don't detour into unrelated organization)
+- The inbox is empty after Step 4 (nothing to organize)
+
 ## Step 5: Report summary
 
-After capturing, print a concise summary:
+After capturing (and organizing if Step 4b ran), print a concise summary:
 
 ```
 [remember] Done.
   [knowledge] Captured N entries: "insight 1", "insight 2"
+  [knowledge] Organized M entries: N to gotchas, N to conventions, ...
   [thread: topic] Updated with today's discussion
   [thread: new] Created "topic-name"
   [plan: name] Updated session notes
