@@ -194,6 +194,18 @@ class Indexer:
                     if os.path.isfile(fpath):
                         results.append((fpath, "plan"))
 
+            # Walk _plans/_archive/ — archived plans are still searchable
+            archive_dir = os.path.join(plans_dir, "_archive")
+            if os.path.isdir(archive_dir):
+                for plan_name in sorted(os.listdir(archive_dir)):
+                    plan_path = os.path.join(archive_dir, plan_name)
+                    if not os.path.isdir(plan_path):
+                        continue
+                    for fname in ("plan.md", "notes.md"):
+                        fpath = os.path.join(plan_path, fname)
+                        if os.path.isfile(fpath):
+                            results.append((fpath, "plan"))
+
         # Walk _threads/ — index all .md files
         if os.path.isdir(threads_dir):
             for fname in sorted(os.listdir(threads_dir)):
@@ -688,7 +700,7 @@ class Resolver:
         if heading:
             heading = heading.strip()
 
-        file_path = self._resolve_path(source_type, target)
+        file_path, is_archived = self._resolve_path(source_type, target)
         if not file_path:
             return {
                 "backlink": backlink,
@@ -723,7 +735,7 @@ class Resolver:
                     "error": str(e),
                 }
 
-        return {
+        result = {
             "backlink": backlink,
             "resolved": True,
             "source_type": source_type,
@@ -731,13 +743,21 @@ class Resolver:
             "heading": heading,
             "content": content.strip(),
         }
+        if is_archived:
+            result["archived"] = True
+        return result
 
     def resolve_batch(self, backlinks: list[str]) -> list[dict]:
         """Resolve multiple backlinks. Returns list of resolve results."""
         return [self.resolve(bl) for bl in backlinks]
 
-    def _resolve_path(self, source_type: str, target: str) -> str | None:
-        """Convert source_type + target to an absolute file path."""
+    def _resolve_path(self, source_type: str, target: str) -> tuple[str | None, bool]:
+        """Convert source_type + target to an absolute file path.
+
+        Returns:
+            Tuple of (file_path, is_archived). is_archived is True when a plan
+            was found in _plans/_archive/ rather than _plans/.
+        """
         if source_type == "knowledge":
             # Try target.md in knowledge_dir, then domains/target.md
             for candidate in (
@@ -746,23 +766,30 @@ class Resolver:
                 os.path.join(self.knowledge_dir, "domains", f"{target}.md"),
             ):
                 if os.path.isfile(candidate):
-                    return candidate
+                    return candidate, False
 
         elif source_type == "plan":
+            # Check active plans first
             plan_dir = os.path.join(self.knowledge_dir, "_plans", target)
             if os.path.isdir(plan_dir):
-                # Default to plan.md, fall back to notes.md
                 for fname in ("plan.md", "notes.md"):
                     candidate = os.path.join(plan_dir, fname)
                     if os.path.isfile(candidate):
-                        return candidate
+                        return candidate, False
+            # Fall back to archived plans
+            archive_dir = os.path.join(self.knowledge_dir, "_plans", "_archive", target)
+            if os.path.isdir(archive_dir):
+                for fname in ("plan.md", "notes.md"):
+                    candidate = os.path.join(archive_dir, fname)
+                    if os.path.isfile(candidate):
+                        return candidate, True
 
         elif source_type == "thread":
             candidate = os.path.join(self.knowledge_dir, "_threads", f"{target}.md")
             if os.path.isfile(candidate):
-                return candidate
+                return candidate, False
 
-        return None
+        return None, False
 
 
 # ---------------------------------------------------------------------------
@@ -787,7 +814,8 @@ class LinkChecker:
     def check_all(self) -> dict:
         """Scan all files for backlinks and check if they resolve.
 
-        Returns dict with: total_links, broken_links, broken_details (list).
+        Returns dict with: total_links, broken_links, archived_links.
+        Archived links resolve successfully but point to archived plans.
         """
         all_links: list[tuple[str, str]] = []  # (source_file, backlink)
 
@@ -808,23 +836,32 @@ class LinkChecker:
 
         # Resolve each link
         broken: list[dict] = []
+        archived: list[dict] = []
         for source_file, backlink in all_links:
             result = self.resolver.resolve(backlink)
+            try:
+                rel_source = os.path.relpath(source_file, self.knowledge_dir)
+            except ValueError:
+                rel_source = source_file
+
             if not result.get("resolved"):
-                try:
-                    rel_source = os.path.relpath(source_file, self.knowledge_dir)
-                except ValueError:
-                    rel_source = source_file
                 broken.append({
                     "source_file": rel_source,
                     "backlink": backlink,
                     "error": result.get("error", "Unknown"),
+                })
+            elif result.get("archived"):
+                archived.append({
+                    "source_file": rel_source,
+                    "backlink": backlink,
                 })
 
         return {
             "total_links": len(all_links),
             "broken_count": len(broken),
             "broken_links": broken,
+            "archived_count": len(archived),
+            "archived_links": archived,
         }
 
 
@@ -994,12 +1031,18 @@ def cmd_check_links(args: argparse.Namespace) -> None:
 
     print(f"Total backlinks scanned: {result['total_links']}")
     print(f"Broken links: {result['broken_count']}")
+    print(f"Archived references: {result['archived_count']}")
 
     if result["broken_links"]:
-        print()
+        print("\nBroken:")
         for bl in result["broken_links"]:
             print(f"  {bl['source_file']}: {bl['backlink']}")
             print(f"    {bl['error']}")
+
+    if result["archived_links"]:
+        print("\nArchived (resolved but plan is archived):")
+        for al in result["archived_links"]:
+            print(f"  {al['source_file']}: {al['backlink']}")
 
 
 def main() -> None:

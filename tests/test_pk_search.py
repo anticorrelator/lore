@@ -233,6 +233,47 @@ def link_check_dir(tmp_path):
     return kd
 
 
+@pytest.fixture
+def archive_dir(tmp_path):
+    """Knowledge directory with both active and archived plans."""
+    kd = tmp_path / "archive_test"
+    kd.mkdir()
+
+    # Knowledge file referencing both active and archived plans
+    (kd / "architecture.md").write_text(
+        "# Architecture\n\n"
+        "### Design Overview\n"
+        "See [[plan:auth-refactor]] for active auth plan.\n"
+        "See [[plan:old-migration]] for the completed migration plan.\n"
+        "See [[plan:truly-missing]] for a nonexistent plan.\n",
+        encoding="utf-8",
+    )
+
+    # Active plan
+    active_plan = kd / "_plans" / "auth-refactor"
+    active_plan.mkdir(parents=True)
+    (active_plan / "plan.md").write_text(
+        "# Auth Refactor\n\n### Goals\nMigrate to JWT tokens.\n",
+        encoding="utf-8",
+    )
+
+    # Archived plan
+    archive = kd / "_plans" / "_archive" / "old-migration"
+    archive.mkdir(parents=True)
+    (archive / "plan.md").write_text(
+        "# Old Migration Plan\n\n"
+        "### Phase 1\nMigrate database schema.\n\n"
+        "### Phase 2\nUpdate API endpoints.\n",
+        encoding="utf-8",
+    )
+    (archive / "notes.md").write_text(
+        "# Migration Notes\n\n### 2025-01-15\nCompleted migration.\n",
+        encoding="utf-8",
+    )
+
+    return kd
+
+
 # ---------------------------------------------------------------------------
 # MarkdownParser Tests
 # ---------------------------------------------------------------------------
@@ -1361,3 +1402,187 @@ class TestCLI:
         assert "broken_count" in data
         assert "broken_links" in data
         assert data["broken_count"] >= 3
+
+
+# ---------------------------------------------------------------------------
+# Archive-Aware Tests
+# ---------------------------------------------------------------------------
+
+class TestArchiveIndexing:
+    """Test that archived plans are indexed and searchable."""
+
+    def test_collect_md_files_includes_archive(self, archive_dir):
+        """_collect_md_files should include files from _plans/_archive/."""
+        indexer = Indexer(str(archive_dir))
+        md_files = indexer._collect_md_files()
+        paths = [fp for fp, _ in md_files]
+
+        # Active plan should be found
+        assert any("auth-refactor" in p and "plan.md" in p for p in paths)
+        # Archived plan files should also be found
+        assert any("_archive" in p and "old-migration" in p and "plan.md" in p for p in paths)
+        assert any("_archive" in p and "old-migration" in p and "notes.md" in p for p in paths)
+
+    def test_collect_md_files_archive_source_type(self, archive_dir):
+        """Archived plan files should have source_type 'plan'."""
+        indexer = Indexer(str(archive_dir))
+        md_files = indexer._collect_md_files()
+        archive_files = [(fp, st) for fp, st in md_files if "_plans/_archive/" in fp]
+
+        assert len(archive_files) == 2  # plan.md + notes.md
+        for _, source_type in archive_files:
+            assert source_type == "plan"
+
+    def test_index_includes_archived_entries(self, archive_dir):
+        """Full index should contain entries from archived plans."""
+        indexer = Indexer(str(archive_dir))
+        result = indexer.index_all()
+
+        conn = sqlite3.connect(indexer.db_path)
+        rows = conn.execute(
+            "SELECT heading FROM entries WHERE file_path LIKE '%_archive%old-migration%'"
+        ).fetchall()
+        conn.close()
+
+        headings = [r[0] for r in rows]
+        assert "Phase 1" in headings
+        assert "Phase 2" in headings
+
+    def test_search_finds_archived_plan_content(self, archive_dir):
+        """Search should return results from archived plans."""
+        searcher = Searcher(str(archive_dir))
+        results = searcher.search("database schema")
+
+        assert len(results) > 0
+        assert any("old-migration" in r["file_path"] for r in results)
+
+    def test_incremental_index_includes_archive(self, archive_dir):
+        """Incremental index should detect changes in archived plans."""
+        indexer = Indexer(str(archive_dir))
+        indexer.index_all()
+
+        # Modify an archived plan
+        time.sleep(0.05)
+        archive_plan = archive_dir / "_plans" / "_archive" / "old-migration" / "plan.md"
+        archive_plan.write_text(
+            "# Old Migration Plan\n\n### Phase 1 (Revised)\nUpdated schema migration.\n",
+            encoding="utf-8",
+        )
+
+        stale = indexer.get_stale_files()
+        stale_paths = [fp for fp, _ in stale]
+        assert any("old-migration" in p for p in stale_paths)
+
+    def test_stats_count_includes_archive(self, archive_dir):
+        """Stats should count archived plan files."""
+        Indexer(str(archive_dir)).index_all()
+        stats = Stats(str(archive_dir)).get_stats()
+
+        # 1 knowledge + 1 active plan + 2 archived plan files = 4
+        assert stats["file_count"] == 4
+        assert stats["type_counts"].get("plan") == 3  # 1 active + 2 archived
+
+
+class TestArchiveResolver:
+    """Test that the resolver falls back to _plans/_archive/."""
+
+    def test_resolve_archived_plan(self, archive_dir):
+        """Resolving an archived plan should succeed."""
+        resolver = Resolver(str(archive_dir))
+        result = resolver.resolve("[[plan:old-migration]]")
+
+        assert result["resolved"] is True
+        assert result["source_type"] == "plan"
+        assert result["target"] == "old-migration"
+        assert "database schema" in result["content"].lower() or "Migration Plan" in result["content"]
+
+    def test_resolve_archived_plan_has_archived_flag(self, archive_dir):
+        """Archived plan resolution should include archived=True."""
+        resolver = Resolver(str(archive_dir))
+        result = resolver.resolve("[[plan:old-migration]]")
+
+        assert result["resolved"] is True
+        assert result.get("archived") is True
+
+    def test_resolve_active_plan_no_archived_flag(self, archive_dir):
+        """Active plan resolution should NOT have archived flag."""
+        resolver = Resolver(str(archive_dir))
+        result = resolver.resolve("[[plan:auth-refactor]]")
+
+        assert result["resolved"] is True
+        assert "archived" not in result
+
+    def test_resolve_archived_plan_with_heading(self, archive_dir):
+        """Resolving a heading from an archived plan should work."""
+        resolver = Resolver(str(archive_dir))
+        result = resolver.resolve("[[plan:old-migration#Phase 1]]")
+
+        assert result["resolved"] is True
+        assert result.get("archived") is True
+        assert "database schema" in result["content"].lower()
+
+    def test_resolve_truly_missing_plan(self, archive_dir):
+        """A plan that doesn't exist anywhere should still fail."""
+        resolver = Resolver(str(archive_dir))
+        result = resolver.resolve("[[plan:truly-missing]]")
+
+        assert result["resolved"] is False
+        assert "not found" in result["error"].lower()
+
+    def test_resolve_prefers_active_over_archive(self, archive_dir):
+        """If a plan exists in both active and archive, prefer active."""
+        # Create same slug in both locations
+        active = archive_dir / "_plans" / "dual-plan"
+        active.mkdir(parents=True)
+        (active / "plan.md").write_text("# Active Version\n\n### Goals\nActive content.\n")
+
+        archived = archive_dir / "_plans" / "_archive" / "dual-plan"
+        archived.mkdir(parents=True)
+        (archived / "plan.md").write_text("# Archived Version\n\n### Goals\nArchived content.\n")
+
+        resolver = Resolver(str(archive_dir))
+        result = resolver.resolve("[[plan:dual-plan]]")
+
+        assert result["resolved"] is True
+        assert "Active content" in result["content"] or "Active Version" in result["content"]
+        assert "archived" not in result  # should resolve from active path
+
+
+class TestArchiveLinkChecker:
+    """Test that check-links distinguishes archived from broken."""
+
+    def test_check_links_separates_archived_from_broken(self, archive_dir):
+        """check_all should report archived refs separately from broken ones."""
+        checker = LinkChecker(str(archive_dir))
+        result = checker.check_all()
+
+        # [[plan:old-migration]] should be archived, not broken
+        archived_backlinks = [al["backlink"] for al in result["archived_links"]]
+        broken_backlinks = [bl["backlink"] for bl in result["broken_links"]]
+
+        assert any("old-migration" in bl for bl in archived_backlinks)
+        assert not any("old-migration" in bl for bl in broken_backlinks)
+
+        # [[plan:truly-missing]] should be broken, not archived
+        assert any("truly-missing" in bl for bl in broken_backlinks)
+        assert not any("truly-missing" in bl for bl in archived_backlinks)
+
+    def test_check_links_active_plan_not_reported(self, archive_dir):
+        """Active plans should not appear in archived or broken."""
+        checker = LinkChecker(str(archive_dir))
+        result = checker.check_all()
+
+        archived_backlinks = [al["backlink"] for al in result["archived_links"]]
+        broken_backlinks = [bl["backlink"] for bl in result["broken_links"]]
+
+        assert not any("auth-refactor" in bl for bl in archived_backlinks)
+        assert not any("auth-refactor" in bl for bl in broken_backlinks)
+
+    def test_check_links_json_includes_archived(self, archive_dir):
+        """JSON output should include archived_count and archived_links."""
+        checker = LinkChecker(str(archive_dir))
+        result = checker.check_all()
+
+        assert "archived_count" in result
+        assert "archived_links" in result
+        assert result["archived_count"] >= 1
