@@ -89,7 +89,9 @@ Full structural repair:
 5. Check for empty category files (only header, no entries) — note but don't delete them
 6. Check for entries with `confidence: low` older than 90 days — flag for review
 7. Look for duplicate entries across files — report them
-8. Report all findings and repairs
+8. Run `python3 ~/.project-knowledge/scripts/pk_search.py check-links` to scan for broken `[[backlinks]]` — report any that reference missing files or headings
+9. Check active plans for staleness: if `notes.md` mtime is >14 days old, flag as stale
+10. Report all findings and repairs
 
 ### `/memory init`
 

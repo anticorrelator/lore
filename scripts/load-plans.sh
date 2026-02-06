@@ -116,6 +116,35 @@ while IFS= read -r line; do
   fi
 done < "$INDEX"
 
+# Check notes.md mtime for staleness (>14 days without activity)
+NOTES_STALE=""
+STALE_THRESHOLD=$((14 * 86400))
+
+for plan_dir in "$PLANS_DIR"/*/; do
+  [[ -d "$plan_dir" ]] || continue
+  slug=$(basename "$plan_dir")
+  meta="$plan_dir/_meta.json"
+  notes="$plan_dir/notes.md"
+
+  # Only check active plans
+  [[ -f "$meta" ]] || continue
+  grep -q '"status".*"active"' "$meta" 2>/dev/null || continue
+  [[ -f "$notes" ]] || continue
+
+  # Get mtime (macOS vs Linux)
+  if stat -f %m "$notes" >/dev/null 2>&1; then
+    mtime=$(stat -f %m "$notes")
+  else
+    mtime=$(stat -c %Y "$notes")
+  fi
+
+  age=$((NOW_EPOCH - mtime))
+  if [[ $age -gt $STALE_THRESHOLD ]]; then
+    days=$((age / 86400))
+    NOTES_STALE="${NOTES_STALE}[Stale] Plan \"${slug}\" has no activity in ${days} days\n"
+  fi
+done
+
 # Build output (budget: ~2000 chars)
 echo "=== Active Plans ==="
 echo ""
@@ -134,6 +163,10 @@ echo -e "$ACTIVE_PLANS"
 
 if [[ -n "$STALE_PLANS" ]]; then
   echo -e "$STALE_PLANS"
+fi
+
+if [[ -n "$NOTES_STALE" ]]; then
+  echo -e "$NOTES_STALE"
 fi
 
 echo "=== End Plans ==="

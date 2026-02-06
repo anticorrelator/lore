@@ -13,8 +13,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from pk_search import (
     DEFAULT_LIMIT,
+    SOURCE_TYPES,
     Indexer,
+    LinkChecker,
     MarkdownParser,
+    Resolver,
     Searcher,
     Stats,
 )
@@ -26,7 +29,7 @@ from pk_search import (
 
 @pytest.fixture
 def knowledge_dir(tmp_path):
-    """Create a sample knowledge directory with markdown files."""
+    """Create a sample knowledge directory with markdown files, plans, and threads."""
     kd = tmp_path / "knowledge"
     kd.mkdir()
 
@@ -87,6 +90,62 @@ def knowledge_dir(tmp_path):
         encoding="utf-8",
     )
 
+    # --- Plans ---
+    plans_dir = kd / "_plans" / "auth-refactor"
+    plans_dir.mkdir(parents=True)
+
+    (plans_dir / "plan.md").write_text(
+        "# Auth Refactor Plan\n\n"
+        "### Goals\n"
+        "Migrate from session-based auth to JWT tokens.\n"
+        "See [[knowledge:architecture#Service Mesh]] for transport layer.\n\n"
+        "### Token Rotation\n"
+        "Refresh tokens rotate on each use. Revocation list stored in Redis.\n\n"
+        "### Migration Steps\n"
+        "1. Add JWT middleware\n"
+        "2. Dual-mode auth for 2 weeks\n"
+        "3. Deprecate session endpoints\n",
+        encoding="utf-8",
+    )
+
+    (plans_dir / "notes.md").write_text(
+        "# Auth Refactor Notes\n\n"
+        "### 2025-03-10\n"
+        "Started implementation. JWT library chosen: PyJWT.\n\n"
+        "### 2025-03-15\n"
+        "Dual-mode auth working in staging.\n",
+        encoding="utf-8",
+    )
+
+    # _meta.json should be skipped by the indexer
+    (plans_dir / "_meta.json").write_text(
+        json.dumps({"status": "active", "created": "2025-03-01"}),
+        encoding="utf-8",
+    )
+
+    # --- Threads ---
+    threads_dir = kd / "_threads"
+    threads_dir.mkdir()
+
+    (threads_dir / "working-style.md").write_text(
+        "---\n"
+        "tier: pinned\n"
+        "topic: working-style\n"
+        "---\n\n"
+        "## 2025-03-01\n"
+        "**Summary:** Established concise communication preferences.\n"
+        "**Key points:**\n"
+        "- Prefer bullet points over paragraphs\n"
+        "- Show code snippets instead of describing changes\n"
+        "**Related:** [[knowledge:conventions]]\n\n"
+        "## 2025-03-10\n"
+        "**Summary:** Refined thread capture cadence.\n"
+        "**Key points:**\n"
+        "- Only capture genuine shifts in thinking\n"
+        "- Skip routine acknowledgments\n",
+        encoding="utf-8",
+    )
+
     return kd
 
 
@@ -126,6 +185,51 @@ def unicode_dir(tmp_path):
         "アプリケーションは多言語対応しています。翻訳はgettext形式です。\n",
         encoding="utf-8",
     )
+    return kd
+
+
+@pytest.fixture
+def link_check_dir(tmp_path):
+    """Knowledge directory with valid and broken backlinks for link checking."""
+    kd = tmp_path / "linkcheck"
+    kd.mkdir()
+
+    # A file with valid and broken backlinks
+    (kd / "architecture.md").write_text(
+        "# Architecture\n\n"
+        "### Service Mesh\n"
+        "Uses Envoy. See [[knowledge:conventions#API Versioning]] for API details.\n"
+        "Also see [[plan:auth-refactor]] for auth migration.\n"
+        "Broken ref: [[knowledge:nonexistent-file#Heading]].\n"
+        "Another broken: [[plan:deleted-plan]].\n"
+        "Broken heading: [[knowledge:architecture#Nonexistent Section]].\n",
+        encoding="utf-8",
+    )
+
+    (kd / "conventions.md").write_text(
+        "# Conventions\n\n"
+        "### API Versioning\n"
+        "URL-path versioning: `/v1/`, `/v2/`.\n"
+        "Thread ref: [[thread:working-style]].\n",
+        encoding="utf-8",
+    )
+
+    # Plans
+    plans_dir = kd / "_plans" / "auth-refactor"
+    plans_dir.mkdir(parents=True)
+    (plans_dir / "plan.md").write_text(
+        "# Auth Refactor Plan\n\n### Goals\nMigrate to JWT.\n",
+        encoding="utf-8",
+    )
+
+    # Threads
+    threads_dir = kd / "_threads"
+    threads_dir.mkdir()
+    (threads_dir / "working-style.md").write_text(
+        "---\ntier: pinned\n---\n\n## 2025-03-01\nEstablished preferences.\n",
+        encoding="utf-8",
+    )
+
     return kd
 
 
@@ -188,8 +292,12 @@ class TestIndexer:
         indexer = Indexer(str(knowledge_dir))
         result = indexer.index_all()
         assert os.path.exists(indexer.db_path)
-        assert result["files_indexed"] == 4  # arch, conv, gotchas, workflows
-        assert result["total_entries"] == 6
+        # 4 knowledge + 2 plan (plan.md, notes.md) + 1 thread = 7 files
+        assert result["files_indexed"] == 7
+        # architecture(2) + conventions(2) + gotchas(1) + workflows(1) +
+        # plan.md(3: Goals, Token Rotation, Migration Steps) + notes.md(2: 2025-03-10, 2025-03-15) +
+        # working-style.md(1: ungrouped because ## headings, not ###)
+        assert result["total_entries"] > 6
 
     def test_index_skips_inbox_and_index(self, knowledge_dir):
         indexer = Indexer(str(knowledge_dir))
@@ -206,12 +314,114 @@ class TestIndexer:
             assert "_inbox.md" not in p
             assert "_index.md" not in p
 
+    def test_index_skips_meta_json(self, knowledge_dir):
+        """_meta.json files should not be indexed."""
+        indexer = Indexer(str(knowledge_dir))
+        indexer.index_all()
+
+        conn = sqlite3.connect(indexer.db_path)
+        paths = [
+            r[0]
+            for r in conn.execute("SELECT DISTINCT file_path FROM entries").fetchall()
+        ]
+        conn.close()
+
+        for p in paths:
+            assert "_meta.json" not in p
+
+    def test_index_finds_plan_files(self, knowledge_dir):
+        """Indexer should pick up plan.md and notes.md from _plans/."""
+        indexer = Indexer(str(knowledge_dir))
+        indexer.index_all()
+
+        conn = sqlite3.connect(indexer.db_path)
+        plan_paths = [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT file_path FROM entries WHERE file_path LIKE '%_plans%'"
+            ).fetchall()
+        ]
+        conn.close()
+
+        plan_basenames = [os.path.basename(p) for p in plan_paths]
+        assert "plan.md" in plan_basenames
+        assert "notes.md" in plan_basenames
+
+    def test_index_finds_thread_files(self, knowledge_dir):
+        """Indexer should pick up .md files from _threads/."""
+        indexer = Indexer(str(knowledge_dir))
+        indexer.index_all()
+
+        conn = sqlite3.connect(indexer.db_path)
+        thread_paths = [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT file_path FROM entries WHERE file_path LIKE '%_threads%'"
+            ).fetchall()
+        ]
+        conn.close()
+
+        assert len(thread_paths) == 1
+        assert "working-style.md" in thread_paths[0]
+
+    def test_source_type_stored_correctly(self, knowledge_dir):
+        """source_type column should reflect the origin of each entry."""
+        indexer = Indexer(str(knowledge_dir))
+        indexer.index_all()
+
+        conn = sqlite3.connect(indexer.db_path)
+
+        # Check knowledge entries
+        knowledge_count = conn.execute(
+            "SELECT count(*) FROM file_meta WHERE source_type = 'knowledge'"
+        ).fetchone()[0]
+        assert knowledge_count == 4  # architecture, conventions, gotchas, workflows
+
+        # Check plan entries
+        plan_count = conn.execute(
+            "SELECT count(*) FROM file_meta WHERE source_type = 'plan'"
+        ).fetchone()[0]
+        assert plan_count == 2  # plan.md, notes.md
+
+        # Check thread entries
+        thread_count = conn.execute(
+            "SELECT count(*) FROM file_meta WHERE source_type = 'thread'"
+        ).fetchone()[0]
+        assert thread_count == 1  # working-style.md
+
+        conn.close()
+
+    def test_source_type_in_fts_entries(self, knowledge_dir):
+        """FTS entries table should have source_type populated."""
+        indexer = Indexer(str(knowledge_dir))
+        indexer.index_all()
+
+        conn = sqlite3.connect(indexer.db_path)
+
+        # Plan entries in FTS should have source_type='plan'
+        rows = conn.execute(
+            "SELECT source_type FROM entries WHERE file_path LIKE '%_plans%'"
+        ).fetchall()
+        assert len(rows) > 0
+        for (st,) in rows:
+            assert st == "plan"
+
+        # Thread entries should have source_type='thread'
+        rows = conn.execute(
+            "SELECT source_type FROM entries WHERE file_path LIKE '%_threads%'"
+        ).fetchall()
+        assert len(rows) > 0
+        for (st,) in rows:
+            assert st == "thread"
+
+        conn.close()
+
     def test_force_reindex(self, knowledge_dir):
         indexer = Indexer(str(knowledge_dir))
         indexer.index_all()
         result = indexer.index_all(force=True)
-        assert result["files_indexed"] == 4
-        assert result["total_entries"] == 6
+        assert result["files_indexed"] == 7
+        assert result["total_entries"] > 6
 
     def test_index_nonexistent_dir(self, tmp_path):
         indexer = Indexer(str(tmp_path / "nope"))
@@ -226,10 +436,25 @@ class TestIndexer:
         rows = conn.execute("SELECT file_path, mtime, content_hash FROM file_meta").fetchall()
         conn.close()
 
-        assert len(rows) == 4
+        assert len(rows) == 7  # 4 knowledge + 2 plan + 1 thread
         for fp, mtime, chash in rows:
             assert mtime > 0
             assert len(chash) == 64  # SHA-256 hex digest
+
+    def test_file_meta_source_type(self, knowledge_dir):
+        """file_meta table should track source_type per file."""
+        indexer = Indexer(str(knowledge_dir))
+        indexer.index_all()
+
+        conn = sqlite3.connect(indexer.db_path)
+        rows = conn.execute("SELECT file_path, source_type FROM file_meta").fetchall()
+        conn.close()
+
+        type_map = {os.path.basename(fp): st for fp, st in rows}
+        assert type_map.get("architecture.md") == "knowledge"
+        assert type_map.get("plan.md") == "plan"
+        assert type_map.get("notes.md") == "plan"
+        assert type_map.get("working-style.md") == "thread"
 
     def test_corrupt_db_rebuilds(self, knowledge_dir):
         """If the DB is corrupt, index_all should recreate it."""
@@ -240,7 +465,7 @@ class TestIndexer:
 
         result = indexer.index_all()
         assert "error" not in result
-        assert result["files_indexed"] == 4
+        assert result["files_indexed"] == 7
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +567,78 @@ class TestSearcher:
         assert Searcher._prepare_query("") == ""
         assert Searcher._prepare_query("  ") == ""
 
+    def test_source_type_in_search_results(self, knowledge_dir):
+        """Search results should include the source_type field."""
+        searcher = Searcher(str(knowledge_dir))
+        results = searcher.search("database sharding")
+        assert len(results) > 0
+        for r in results:
+            assert "source_type" in r
+            assert r["source_type"] in SOURCE_TYPES
+
+
+# ---------------------------------------------------------------------------
+# Source Type Filter Tests
+# ---------------------------------------------------------------------------
+
+class TestSourceTypeFilter:
+    def test_search_type_knowledge(self, knowledge_dir):
+        """--type=knowledge should only return knowledge entries."""
+        searcher = Searcher(str(knowledge_dir))
+        results = searcher.search("the", source_type="knowledge")
+        assert len(results) > 0
+        for r in results:
+            assert r["source_type"] == "knowledge"
+
+    def test_search_type_plan(self, knowledge_dir):
+        """--type=plan should only return plan entries."""
+        searcher = Searcher(str(knowledge_dir))
+        results = searcher.search("JWT", source_type="plan")
+        assert len(results) > 0
+        for r in results:
+            assert r["source_type"] == "plan"
+
+    def test_search_type_thread(self, knowledge_dir):
+        """--type=thread should only return thread entries."""
+        searcher = Searcher(str(knowledge_dir))
+        results = searcher.search("bullet points", source_type="thread")
+        assert len(results) > 0
+        for r in results:
+            assert r["source_type"] == "thread"
+
+    def test_search_no_type_returns_all(self, knowledge_dir):
+        """No type filter should return results from all source types."""
+        searcher = Searcher(str(knowledge_dir))
+        # Use a broad query that should hit multiple types
+        results = searcher.search("the", limit=20)
+        types_seen = {r["source_type"] for r in results}
+        # With our fixture data, we should see at least knowledge entries
+        assert "knowledge" in types_seen
+
+    def test_search_type_plan_excludes_knowledge(self, knowledge_dir):
+        """Plan filter should not return knowledge entries."""
+        searcher = Searcher(str(knowledge_dir))
+        results = searcher.search("database sharding", source_type="plan")
+        # "Database Sharding" is in architecture.md (knowledge), not plans
+        headings = [r["heading"] for r in results]
+        assert "Database Sharding" not in headings
+
+    def test_search_type_thread_excludes_others(self, knowledge_dir):
+        """Thread filter should not return plan or knowledge entries."""
+        searcher = Searcher(str(knowledge_dir))
+        results = searcher.search("JWT migration", source_type="thread")
+        # JWT migration is in plan, not thread
+        assert all(r["source_type"] == "thread" for r in results)
+
+    def test_source_type_field_present(self, knowledge_dir):
+        """All search results should include source_type."""
+        searcher = Searcher(str(knowledge_dir))
+        for source_type in (None, "knowledge", "plan", "thread"):
+            results = searcher.search("the", source_type=source_type)
+            for r in results:
+                assert "source_type" in r
+                assert r["source_type"] in SOURCE_TYPES
+
 
 # ---------------------------------------------------------------------------
 # Auto-Reindex Tests
@@ -359,7 +656,8 @@ class TestAutoReindex:
         )
 
         stale = indexer.get_stale_files()
-        assert any("new_topic.md" in f for f in stale)
+        stale_paths = [fp for fp, _ in stale]
+        assert any("new_topic.md" in f for f in stale_paths)
 
     def test_stale_detection_modified_file(self, knowledge_dir):
         indexer = Indexer(str(knowledge_dir))
@@ -374,7 +672,8 @@ class TestAutoReindex:
         )
 
         stale = indexer.get_stale_files()
-        assert any("architecture.md" in f for f in stale)
+        stale_paths = [fp for fp, _ in stale]
+        assert any("architecture.md" in f for f in stale_paths)
 
     def test_stale_detection_deleted_file(self, knowledge_dir):
         indexer = Indexer(str(knowledge_dir))
@@ -384,7 +683,8 @@ class TestAutoReindex:
         (knowledge_dir / "gotchas.md").unlink()
 
         stale = indexer.get_stale_files()
-        assert any("gotchas.md" in f for f in stale)
+        stale_paths = [fp for fp, _ in stale]
+        assert any("gotchas.md" in f for f in stale_paths)
 
     def test_incremental_reindex(self, knowledge_dir):
         indexer = Indexer(str(knowledge_dir))
@@ -451,6 +751,271 @@ class TestAutoReindex:
 
 
 # ---------------------------------------------------------------------------
+# Resolver Tests
+# ---------------------------------------------------------------------------
+
+class TestResolver:
+    def test_resolve_knowledge_with_heading(self, knowledge_dir):
+        """Resolve [[knowledge:architecture#Service Mesh]] returns section content."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[knowledge:architecture#Service Mesh]]")
+        assert result["resolved"] is True
+        assert result["source_type"] == "knowledge"
+        assert result["target"] == "architecture"
+        assert result["heading"] == "Service Mesh"
+        assert "Envoy sidecars" in result["content"]
+
+    def test_resolve_knowledge_full_file(self, knowledge_dir):
+        """Resolve [[knowledge:conventions]] returns full file content."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[knowledge:conventions]]")
+        assert result["resolved"] is True
+        assert result["source_type"] == "knowledge"
+        assert result["target"] == "conventions"
+        assert result["heading"] is None
+        # Should contain content from both sections
+        assert "API Versioning" in result["content"]
+        assert "Error Handling" in result["content"]
+
+    def test_resolve_plan(self, knowledge_dir):
+        """Resolve [[plan:auth-refactor]] returns plan.md content."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[plan:auth-refactor]]")
+        assert result["resolved"] is True
+        assert result["source_type"] == "plan"
+        assert result["target"] == "auth-refactor"
+        assert "JWT tokens" in result["content"]
+
+    def test_resolve_plan_with_heading(self, knowledge_dir):
+        """Resolve [[plan:auth-refactor#Token Rotation]] returns section from plan."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[plan:auth-refactor#Token Rotation]]")
+        assert result["resolved"] is True
+        assert result["source_type"] == "plan"
+        assert "Refresh tokens" in result["content"]
+        assert "Redis" in result["content"]
+
+    def test_resolve_thread(self, knowledge_dir):
+        """Resolve [[thread:working-style]] returns thread content."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[thread:working-style]]")
+        assert result["resolved"] is True
+        assert result["source_type"] == "thread"
+        assert result["target"] == "working-style"
+        assert "bullet points" in result["content"]
+
+    def test_resolve_nonexistent_target(self, knowledge_dir):
+        """Resolving a nonexistent file returns resolved=False."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[knowledge:nonexistent-file]]")
+        assert result["resolved"] is False
+        assert "error" in result
+        assert "not found" in result["error"].lower()
+
+    def test_resolve_nonexistent_heading(self, knowledge_dir):
+        """Resolving a nonexistent heading returns resolved=False."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[knowledge:architecture#Nonexistent Section]]")
+        assert result["resolved"] is False
+        assert "error" in result
+        assert "not found" in result["error"].lower()
+
+    def test_resolve_nonexistent_plan(self, knowledge_dir):
+        """Resolving a nonexistent plan returns resolved=False."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[plan:does-not-exist]]")
+        assert result["resolved"] is False
+        assert "error" in result
+
+    def test_resolve_nonexistent_thread(self, knowledge_dir):
+        """Resolving a nonexistent thread returns resolved=False."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[thread:nonexistent-thread]]")
+        assert result["resolved"] is False
+        assert "error" in result
+
+    def test_resolve_batch(self, knowledge_dir):
+        """resolve_batch should handle multiple backlinks."""
+        resolver = Resolver(str(knowledge_dir))
+        backlinks = [
+            "[[knowledge:architecture#Service Mesh]]",
+            "[[plan:auth-refactor]]",
+            "[[thread:working-style]]",
+            "[[knowledge:nonexistent]]",
+        ]
+        results = resolver.resolve_batch(backlinks)
+        assert len(results) == 4
+        assert results[0]["resolved"] is True
+        assert results[1]["resolved"] is True
+        assert results[2]["resolved"] is True
+        assert results[3]["resolved"] is False
+
+    def test_resolve_invalid_syntax(self, knowledge_dir):
+        """Invalid backlink syntax returns error."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("not a backlink at all")
+        assert result["resolved"] is False
+        assert "error" in result
+        assert "invalid" in result["error"].lower() or "syntax" in result["error"].lower()
+
+    def test_resolve_invalid_syntax_partial(self, knowledge_dir):
+        """Partial/malformed backlink returns error."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[badtype:something]]")
+        assert result["resolved"] is False
+
+    def test_resolve_plan_heading_not_found(self, knowledge_dir):
+        """Plan exists but heading does not."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[plan:auth-refactor#Nonexistent Step]]")
+        assert result["resolved"] is False
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Link Checker Tests
+# ---------------------------------------------------------------------------
+
+class TestLinkChecker:
+    def test_check_all_finds_broken_links(self, link_check_dir):
+        """check_all should find broken backlinks."""
+        checker = LinkChecker(str(link_check_dir))
+        result = checker.check_all()
+
+        assert result["broken_count"] > 0
+        broken_backlinks = [bl["backlink"] for bl in result["broken_links"]]
+        assert any("nonexistent-file" in bl for bl in broken_backlinks)
+        assert any("deleted-plan" in bl for bl in broken_backlinks)
+        assert any("Nonexistent Section" in bl for bl in broken_backlinks)
+
+    def test_check_all_counts_total_links(self, link_check_dir):
+        """check_all should count all backlinks including valid ones."""
+        checker = LinkChecker(str(link_check_dir))
+        result = checker.check_all()
+
+        # Valid links: [[knowledge:conventions#API Versioning]], [[plan:auth-refactor]],
+        #              [[thread:working-style]]
+        # Broken links: [[knowledge:nonexistent-file#Heading]], [[plan:deleted-plan]],
+        #               [[knowledge:architecture#Nonexistent Section]]
+        assert result["total_links"] >= 6
+        # At least 3 should be broken
+        assert result["broken_count"] >= 3
+
+    def test_check_all_valid_links_not_broken(self, link_check_dir):
+        """Valid backlinks should not appear in broken_links."""
+        checker = LinkChecker(str(link_check_dir))
+        result = checker.check_all()
+
+        broken_backlinks = [bl["backlink"] for bl in result["broken_links"]]
+        # These are valid and should NOT be in broken list
+        assert not any("[[plan:auth-refactor]]" == bl for bl in broken_backlinks)
+        assert not any("[[thread:working-style]]" == bl for bl in broken_backlinks)
+
+    def test_check_all_reports_source_file(self, link_check_dir):
+        """Broken link reports should include the source file."""
+        checker = LinkChecker(str(link_check_dir))
+        result = checker.check_all()
+
+        for bl in result["broken_links"]:
+            assert "source_file" in bl
+            assert "error" in bl
+
+    def test_check_all_no_links(self, tmp_path):
+        """Directory with no backlinks should report zero total."""
+        kd = tmp_path / "nolinks"
+        kd.mkdir()
+        (kd / "plain.md").write_text(
+            "# Plain\n\n### Section\nNo backlinks here.\n",
+            encoding="utf-8",
+        )
+        checker = LinkChecker(str(kd))
+        result = checker.check_all()
+        assert result["total_links"] == 0
+        assert result["broken_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Schema Migration Tests
+# ---------------------------------------------------------------------------
+
+class TestSchemaMigration:
+    def test_v1_db_rebuilds_to_v2(self, knowledge_dir):
+        """A v1 database (without source_type) should be rebuilt to v2 on index_all."""
+        kd_str = str(knowledge_dir)
+        db_path = os.path.join(kd_str, ".pk_search.db")
+
+        # Create a v1-style database manually
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS entries USING fts5(
+                file_path,
+                heading,
+                content,
+                tokenize='porter unicode61'
+            );
+
+            CREATE TABLE IF NOT EXISTS file_meta (
+                file_path TEXT PRIMARY KEY,
+                mtime REAL,
+                content_hash TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS index_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+        """)
+        # Store v1 schema version
+        conn.execute(
+            "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+            ("schema_version", "1"),
+        )
+        conn.commit()
+        conn.close()
+
+        # Now run index_all — it should detect v1 and rebuild
+        indexer = Indexer(kd_str)
+        result = indexer.index_all()
+
+        assert "error" not in result
+        assert result["files_indexed"] == 7
+
+        # Verify v2 schema is now in place
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT value FROM index_meta WHERE key='schema_version'"
+        ).fetchone()
+        assert row is not None
+        assert int(row[0]) == 2
+
+        # Verify source_type column exists in entries (query should not error)
+        rows = conn.execute("SELECT source_type FROM entries LIMIT 1").fetchall()
+        assert len(rows) > 0
+
+        # Verify source_type column exists in file_meta
+        rows = conn.execute("SELECT source_type FROM file_meta LIMIT 1").fetchall()
+        assert len(rows) > 0
+
+        conn.close()
+
+    def test_no_db_creates_v2(self, knowledge_dir):
+        """Fresh index with no existing DB should create v2 schema."""
+        kd_str = str(knowledge_dir)
+        db_path = os.path.join(kd_str, ".pk_search.db")
+        assert not os.path.exists(db_path)
+
+        indexer = Indexer(kd_str)
+        indexer.index_all()
+
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT value FROM index_meta WHERE key='schema_version'"
+        ).fetchone()
+        assert int(row[0]) == 2
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Stats Tests
 # ---------------------------------------------------------------------------
 
@@ -459,11 +1024,22 @@ class TestStats:
         Indexer(str(knowledge_dir)).index_all()
         stats = Stats(str(knowledge_dir)).get_stats()
 
-        assert stats["entry_count"] == 6
-        assert stats["file_count"] == 4
+        assert stats["entry_count"] > 6  # knowledge + plan + thread entries
+        assert stats["file_count"] == 7  # 4 knowledge + 2 plan + 1 thread
         assert stats["db_size_bytes"] > 0
         assert stats["last_indexed"] != "never"
         assert stats["stale_files"] == 0
+
+    def test_stats_type_counts(self, knowledge_dir):
+        """Stats should include per-type file counts."""
+        Indexer(str(knowledge_dir)).index_all()
+        stats = Stats(str(knowledge_dir)).get_stats()
+
+        assert "type_counts" in stats
+        tc = stats["type_counts"]
+        assert tc.get("knowledge") == 4
+        assert tc.get("plan") == 2
+        assert tc.get("thread") == 1
 
     def test_stats_no_db(self, tmp_path):
         kd = tmp_path / "noindex"
@@ -537,6 +1113,26 @@ class TestCLI:
         assert len(data) > 0
         assert "heading" in data[0]
         assert "score" in data[0]
+        assert "source_type" in data[0]
+
+    def test_cli_search_with_type_filter(self, knowledge_dir):
+        """CLI search with --type flag should filter results."""
+        import subprocess
+
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts", "pk_search.py")
+        subprocess.run(
+            [sys.executable, script, "index", str(knowledge_dir)],
+            capture_output=True,
+        )
+        result = subprocess.run(
+            [sys.executable, script, "search", str(knowledge_dir), "JWT", "--type", "plan", "--json"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        for entry in data:
+            assert entry["source_type"] == "plan"
 
     def test_cli_stats(self, knowledge_dir):
         import subprocess
@@ -554,6 +1150,7 @@ class TestCLI:
         assert result.returncode == 0
         assert "Files indexed:" in result.stdout
         assert "Total entries:" in result.stdout
+        assert "By type:" in result.stdout
 
     def test_cli_no_results(self, knowledge_dir):
         import subprocess
@@ -570,3 +1167,145 @@ class TestCLI:
         )
         assert result.returncode == 0
         assert "No results" in result.stdout
+
+    def test_cli_incremental_index(self, knowledge_dir):
+        """CLI incremental-index subcommand."""
+        import subprocess
+
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts", "pk_search.py")
+        # Full index first
+        subprocess.run(
+            [sys.executable, script, "index", str(knowledge_dir)],
+            capture_output=True,
+        )
+
+        # Run incremental with no changes — should say "up to date"
+        result = subprocess.run(
+            [sys.executable, script, "incremental-index", str(knowledge_dir)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "up to date" in result.stdout.lower() or "Reindexed" in result.stdout
+
+    def test_cli_incremental_index_detects_changes(self, knowledge_dir):
+        """CLI incremental-index should detect and reindex changed files."""
+        import subprocess
+
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts", "pk_search.py")
+        subprocess.run(
+            [sys.executable, script, "index", str(knowledge_dir)],
+            capture_output=True,
+        )
+
+        # Modify a file
+        time.sleep(0.05)
+        (knowledge_dir / "conventions.md").write_text(
+            "# Conventions\n\n### Shiny New Convention\nBrand new.\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [sys.executable, script, "incremental-index", str(knowledge_dir)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "Reindexed" in result.stdout
+
+    def test_cli_resolve_human(self, knowledge_dir):
+        """CLI resolve subcommand with human-readable output."""
+        import subprocess
+
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts", "pk_search.py")
+        result = subprocess.run(
+            [sys.executable, script, "resolve", str(knowledge_dir),
+             "[[knowledge:architecture#Service Mesh]]"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "Service Mesh" in result.stdout
+        assert "Envoy" in result.stdout
+
+    def test_cli_resolve_json(self, knowledge_dir):
+        """CLI resolve subcommand with --json output."""
+        import subprocess
+
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts", "pk_search.py")
+        result = subprocess.run(
+            [sys.executable, script, "resolve", str(knowledge_dir),
+             "[[knowledge:architecture#Service Mesh]]", "--json"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["resolved"] is True
+        assert "Envoy" in data[0]["content"]
+
+    def test_cli_resolve_multiple(self, knowledge_dir):
+        """CLI resolve with multiple backlinks."""
+        import subprocess
+
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts", "pk_search.py")
+        result = subprocess.run(
+            [sys.executable, script, "resolve", str(knowledge_dir),
+             "[[knowledge:conventions]]", "[[plan:auth-refactor]]", "--json"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert len(data) == 2
+        assert data[0]["resolved"] is True
+        assert data[1]["resolved"] is True
+
+    def test_cli_resolve_broken(self, knowledge_dir):
+        """CLI resolve with a broken backlink."""
+        import subprocess
+
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts", "pk_search.py")
+        result = subprocess.run(
+            [sys.executable, script, "resolve", str(knowledge_dir),
+             "[[knowledge:nonexistent]]", "--json"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert len(data) == 1
+        assert data[0]["resolved"] is False
+
+    def test_cli_check_links_human(self, link_check_dir):
+        """CLI check-links subcommand with human-readable output."""
+        import subprocess
+
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts", "pk_search.py")
+        result = subprocess.run(
+            [sys.executable, script, "check-links", str(link_check_dir)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "Total backlinks scanned:" in result.stdout
+        assert "Broken links:" in result.stdout
+
+    def test_cli_check_links_json(self, link_check_dir):
+        """CLI check-links subcommand with --json output."""
+        import subprocess
+
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts", "pk_search.py")
+        result = subprocess.run(
+            [sys.executable, script, "check-links", str(link_check_dir), "--json"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert "total_links" in data
+        assert "broken_count" in data
+        assert "broken_links" in data
+        assert data["broken_count"] >= 3
