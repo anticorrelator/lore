@@ -4,7 +4,7 @@ You are a new Claude instance testing the project-knowledge memory system. This 
 
 **The core question:** Does the memory system make you effective, or do you find yourself bypassing it?
 
-Run these tests in order. For each one, note whether you used the memory system or fell back to raw search — and why. Write your results to `repos/local/.project-knowledge/_self_test_results.md` when done.
+Run these tests in order. For each one, note whether you used the memory system or fell back to raw search — and why. Track your **tool call count** and **bypass count** throughout. Write your results to `repos/local/.project-knowledge/_self_test_results.md` when done.
 
 ---
 
@@ -17,6 +17,8 @@ Without reading any files or running any searches, answer these questions using 
 3. How does `resolve-repo.sh` determine the knowledge path?
 4. What are the active plans and what state are they in?
 5. What are the conversational threads about?
+
+**Score:** X/5 questions answered confidently (not guessing).
 
 **What to note:** How much could you answer? Were the session-start hooks sufficient, or did you feel like you were guessing?
 
@@ -40,6 +42,10 @@ For each question below, try to answer it two ways: first using only the knowled
    - Knowledge path: Read `_plans/knowledge-retrieval-improvements/plan.md` phases section
    - Search path: `Grep` for "Phase 2" or "backlink resolution"
 
+**Score:** Knowledge wins X/4, Search wins X/4, Tie X/4.
+
+**Important:** Note *why* each approach won or lost. If the search path fails silently, investigate why — this is diagnostic. Pay attention to whether `repos/` content is reachable via your default search tools.
+
 **What to note:** For each, which approach got you to the answer faster? Did the knowledge store's organization save you from scanning irrelevant results?
 
 ## Test 3: Backlink Navigation
@@ -48,11 +54,15 @@ Start at `_index.md`. Pick any entry and follow its `[[backlinks]]` to find rela
 
 Example chain: `_index.md` → `[[architecture]]` → `See also: [[workflows#load-knowledge.sh]]` → `See also: [[conventions#Domain Files Are Lazy-Loaded]]`
 
+**Bonus:** Try a cross-type chain that moves between knowledge, plans, and threads (e.g., knowledge → plan → knowledge, or knowledge → thread → plan).
+
+**Score:** Hops completed: X. Dead ends: X. Stale references found: X.
+
 **What to note:** Did the backlinks take you somewhere useful, or did you hit dead ends? Were there places you expected a backlink but didn't find one?
 
 ## Test 4: Thread Awareness
 
-Read the thread files at `_threads/how-we-work.md` and `_threads/memory-system-design.md`.
+Read the thread files loaded at session start (check `_threads/` for current files).
 
 1. How should you format feedback about system operations (loading, capturing, updating)?
 2. What's the user's preference for how you communicate?
@@ -60,15 +70,19 @@ Read the thread files at `_threads/how-we-work.md` and `_threads/memory-system-d
 
 Now: Did knowing these things change how you'd write your test results? Would you format them differently than if you had no thread context?
 
+**Score:** Actionability (1-5): How much did thread context change your actual behavior in this session?
+
 **What to note:** Do threads feel like useful relationship memory, or do they feel like documentation you could have inferred from CLAUDE.md alone?
 
 ## Test 5: Plan Continuity
 
-Load the knowledge-retrieval-improvements plan (`_plans/knowledge-retrieval-improvements/`). Read `plan.md` and `notes.md`.
+Pick any active plan from the plans loaded at session start. Read its `plan.md` and `notes.md`.
 
 1. Without any other context, can you describe what's been built, what's next, and why?
-2. Could you pick up Phase 2 implementation right now? What would you need to know that the plan doesn't tell you?
-3. Are the design decisions (D1-D11) clear enough to guide implementation without re-asking the user?
+2. Could you pick up the next unfinished phase right now? What would you need to know that the plan doesn't tell you?
+3. Are the design decisions clear enough to guide implementation without re-asking the user?
+
+**Score:** Actionability (1-5): Could you act on this plan without the original conversation?
 
 **What to note:** Does the plan give you enough context to act, or would you need to have the original conversation to understand the reasoning?
 
@@ -80,20 +94,37 @@ Do something that should trigger a capture. Read any script in `scripts/` and fi
 2. Append a test entry to `_inbox.md` (you can note it's a test entry).
 3. Did you think about whether it passes the 4-condition gate, or did you just capture it?
 
+**Score:** Activation energy (1-5, where 1=effortless, 5=forced): How natural did capturing feel?
+
 **What to note:** How high is the activation energy for capturing? Is the inbox format easy to produce from memory?
 
-## Test 7: Search (if pk_search.py is working)
+## Test 7: Search and Resolution
 
-Run the FTS5 search tool:
+Resolve the knowledge directory first: `bash ~/.project-knowledge/scripts/resolve-repo.sh`
+
+### 7a: FTS5 Search
 ```bash
 python3 ~/.project-knowledge/scripts/pk_search.py search <knowledge_dir> "backlinks"
 python3 ~/.project-knowledge/scripts/pk_search.py search <knowledge_dir> "session start"
 python3 ~/.project-knowledge/scripts/pk_search.py stats <knowledge_dir>
 ```
 
-(Resolve the knowledge directory first: `bash ~/.project-knowledge/scripts/resolve-repo.sh`)
+### 7b: Backlink Resolution
+Pick a `See also: [[...]]` reference from any knowledge file and resolve it:
+```bash
+python3 ~/.project-knowledge/scripts/pk_search.py resolve <knowledge_dir> "[[knowledge:gotchas#Inbox Graveyard Risk]]"
+```
+Did it return the exact section? Compare to manually reading the file.
 
-**What to note:** Were results ranked usefully? Was this faster than Grep for finding the right section? Did the snippets give enough context to decide relevance without reading full files?
+### 7c: Link Integrity
+```bash
+python3 ~/.project-knowledge/scripts/pk_search.py check-links <knowledge_dir>
+```
+How many broken links? Are they real breaks or false positives (e.g., template syntax in code blocks)?
+
+**Score:** Search relevance (1-5): Were top-3 results the right answers? Resolution accuracy: X/X resolved correctly. Broken links: X real, X false positive.
+
+**What to note:** Were results ranked usefully? Was FTS5 faster than Grep for finding the right section? Did the snippets give enough context to decide relevance without reading full files?
 
 ## Test 8: Honest Assessment
 
@@ -112,10 +143,28 @@ Write a short reflection:
 Create `repos/local/.project-knowledge/_self_test_results.md` with:
 
 ```markdown
-# Self-Test Results — [date]
+# Self-Test Results — [date] (Session N)
 
-## Summary
-[2-3 sentence overall assessment]
+## Scores
+| Test | Score | Notes |
+|------|-------|-------|
+| 1. Orientation | X/5 | |
+| 2. Retrieval Race | Knowledge X / Search X / Tie X | |
+| 3. Backlinks | X hops, X dead ends | |
+| 4. Thread Awareness | X/5 actionability | |
+| 5. Plan Continuity | X/5 actionability | |
+| 6. Capture Protocol | X/5 activation energy | |
+| 7a. Search Relevance | X/5 | |
+| 7b. Resolution | X/X resolved | |
+| 7c. Link Integrity | X real breaks, X false positives | |
+| 8. Trust Level | X/5 | |
+
+**Tool calls:** X total (X knowledge-system, X raw-search)
+**Bypasses:** X (see bypass log)
+
+## Comparison with Previous Results
+[If a previous _self_test_results.md exists, note improvements and regressions.
+If this is the first run, note "Baseline run — no previous results."]
 
 ## Test Results
 [For each test: what happened, what you noticed, knowledge-system vs raw-search comparison]

@@ -44,7 +44,8 @@ for thread_file in "$THREADS_DIR"/*.md; do
   TIER=$(awk '/^---$/ {count++; next} count == 1 && /^tier:/ {sub(/^tier:[[:space:]]*/, ""); print; exit}' "$thread_file")
   CREATED=$(awk '/^---$/ {count++; next} count == 1 && /^created:/ {sub(/^created:[[:space:]]*/, ""); print; exit}' "$thread_file")
   UPDATED=$(awk '/^---$/ {count++; next} count == 1 && /^updated:/ {sub(/^updated:[[:space:]]*/, ""); print; exit}' "$thread_file")
-  SESSIONS=$(awk '/^---$/ {count++; next} count == 1 && /^sessions:/ {sub(/^sessions:[[:space:]]*/, ""); print; exit}' "$thread_file")
+  # Auto-count sessions from ## headings instead of relying on manually-maintained frontmatter
+  SESSIONS=$(grep -c '^## ' "$thread_file" 2>/dev/null || echo "0")
 
   # Skip if missing required fields
   [[ -z "$SLUG" ]] && continue

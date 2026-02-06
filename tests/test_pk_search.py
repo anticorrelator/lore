@@ -933,6 +933,58 @@ class TestLinkChecker:
         assert result["total_links"] == 0
         assert result["broken_count"] == 0
 
+    def test_check_all_skips_code_blocks(self, tmp_path):
+        """Backlinks inside fenced code blocks should be ignored."""
+        kd = tmp_path / "codeblocks"
+        kd.mkdir()
+        (kd / "docs.md").write_text(
+            "# Docs\n\n"
+            "### Examples\n"
+            "Here's how to use backlinks:\n\n"
+            "```markdown\n"
+            "See also: [[knowledge:fake-file#Fake Heading]]\n"
+            "And: [[plan:fake-plan]]\n"
+            "```\n\n"
+            "The above are just examples.\n",
+            encoding="utf-8",
+        )
+        checker = LinkChecker(str(kd))
+        result = checker.check_all()
+        # Backlinks inside code blocks should not be counted
+        assert result["total_links"] == 0
+        assert result["broken_count"] == 0
+
+    def test_check_all_mixed_code_and_real_links(self, link_check_dir):
+        """Real backlinks should still be found when code blocks also exist."""
+        # Add a file with both real and code-block backlinks
+        (link_check_dir / "mixed.md").write_text(
+            "# Mixed\n\n"
+            "### Real Links\n"
+            "See [[knowledge:conventions#API Versioning]].\n\n"
+            "```python\n"
+            '# Template: [[knowledge:nonexistent-template#Heading]]\n'
+            "```\n",
+            encoding="utf-8",
+        )
+        checker = LinkChecker(str(link_check_dir))
+        result = checker.check_all()
+        # The real link in mixed.md should be found, but not the code-block one
+        all_backlinks = [bl["backlink"] for bl in result["broken_links"]]
+        assert "[[knowledge:nonexistent-template#Heading]]" not in all_backlinks
+
+    def test_strip_code_blocks_static_method(self):
+        """_strip_code_blocks removes fenced blocks and preserves other content."""
+        text = (
+            "Before\n"
+            "```\n"
+            "[[knowledge:inside#Block]]\n"
+            "```\n"
+            "After [[knowledge:outside#Block]]\n"
+        )
+        stripped = LinkChecker._strip_code_blocks(text)
+        assert "[[knowledge:inside#Block]]" not in stripped
+        assert "[[knowledge:outside#Block]]" in stripped
+
 
 # ---------------------------------------------------------------------------
 # Schema Migration Tests

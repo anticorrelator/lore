@@ -306,24 +306,34 @@ Search across all plan documents:
 
 ### `/explore-and-plan tasks [name]`
 
-Generate TaskCreate calls from plan phases:
+Generate TaskCreate calls from plan phases, using backlinks for context delivery.
 
 1. Resolve plan, read `plan.md`
 2. If no `plan.md` exists, tell the user: "No structured plan doc found. Run `/explore-and-plan design` first to add phases and tasks."
-3. Read the knowledge directory path for cross-reference links
-4. For each `### Phase N:` section that contains `- [ ]` (unchecked) items:
+3. Resolve the knowledge directory path: `bash ~/.project-knowledge/scripts/resolve-repo.sh`
+4. Scan the plan's `## Related` section and `## Design Decisions` for `[[...]]` backlinks relevant to each phase
+5. For each `### Phase N:` section that contains `- [ ]` (unchecked) items:
    - For each unchecked `- [ ]` item, generate a TaskCreate call with:
      - `subject`: Imperative task title derived from the checkbox text
      - `description`: Detailed context including:
        - The phase objective from the `**Objective:**` line
        - Relevant file paths from the `**Files:**` line
-       - Knowledge store cross-references: "See `<knowledge-dir>/<file>.md` heading '### <heading>' for context"
-       - Plan file reference: "Full design at `<plans-dir>/<slug>/plan.md` Phase N"
+       - **Context backlinks** — `[[knowledge:file#heading]]`, `[[plan:slug]]`, or `[[thread:slug]]` references that provide implementation context. Include backlinks from the plan's Related section, Design Decisions, and any `See also:` references in relevant knowledge entries. Format as a "Context" section:
+         ```
+         ## Context (resolve before starting)
+         Resolve these with: python3 ~/.project-knowledge/scripts/pk_search.py resolve <knowledge_dir> "<backlink>"
+
+         - [[knowledge:architecture#Section Name]] — why this is relevant
+         - [[plan:plan-slug]] — design decisions for this feature
+         ```
+       - Plan file reference: `[[plan:<slug>]]` (agent can resolve for full design)
        - Acceptance criteria derived from the checkbox text and phase context
      - `activeForm`: Present continuous form of the task (e.g., "Implementing auth middleware")
    - Set up dependencies: tasks from Phase 2 should have `addBlockedBy` referencing Phase 1 task IDs
-5. Skip already-checked `- [x]` items
-6. Report: "Generated N tasks across M phases with dependencies"
+6. Skip already-checked `- [x]` items
+7. Report: "Generated N tasks across M phases with dependencies"
+
+**Why backlinks instead of inline context:** Backlinks are pointers — they resolve to fresh content at execution time. Inline context is a snapshot that goes stale. An agent resolving `[[knowledge:conventions#API Versioning]]` always gets the current version, not whatever was true when the task was created.
 
 ### `/explore-and-plan heal`
 

@@ -2,12 +2,12 @@
 name: remember
 description: Capture insights to knowledge inbox and update conversational threads — invoke anytime to ensure nothing is lost
 user_invocable: true
-argument_description: "[optional: 'auto' to capture without asking, or focus area]"
+argument_description: "[optional: focus area to review]"
 ---
 
 # /remember Skill
 
-Pause and review the current session for uncaptured knowledge and unupdated threads. Combines the knowledge capture from `/memory-checkpoint` with thread updates.
+Pause and review the current session for uncaptured knowledge and unupdated threads. Combines knowledge capture with thread updates.
 
 ## Resolve Paths
 
@@ -63,41 +63,35 @@ Review the conversation for thread-worthy content:
   - Cross-session work (won't finish this conversation)?
 - If a plan exists, does it need a session notes update?
 
-## Step 4: Present findings
+## Step 4: Act
 
-Format:
-```
-Remember review:
+**Default behavior: auto-capture.** Everything that passes the gate gets captured immediately. The gate is the quality filter — no additional confirmation needed.
 
-Knowledge (N candidates):
-1. "<insight summary>" — [passes gate / reason to skip]
-2. "<insight summary>" — [passes gate / reason to skip]
-
-Threads (N updates, M new):
-1. [thread: existing-topic] "<what changed>"
-2. [thread: new] "proposed-topic" — "<why it's worth tracking>"
-
-Plan status:
-- [No active plan — should create because: <reason>]
-  OR
-- [Active plan: <name> — current / needs update: <what changed>]
-  OR
-- [No plan needed — <reason>]
-```
-
-## Step 5: Act
-
-**If `/remember auto`:**
 - Capture all insights that pass the gate (append to `_inbox.md`)
 - Write all thread updates (append entries to thread files, update frontmatter)
 - Create new threads if warranted
 - Update plans as needed
-- Report: `[knowledge] Captured N entries` / `[thread: topic] Updated` / `[thread: new] Created "topic"`
 
-**Otherwise:**
-- Wait for user to approve/modify/reject each item
-- "Capture all" / "drop the 2nd one" / "skip threads" are all valid responses
-- Then execute approved actions
+**Exception: external feedback.** If an insight originates from external sources (PR review comments, code review suggestions, issue discussions, pair programming input), prompt the user before capturing. External opinions may not align with the user's own mental models.
+
+```
+[external] PR reviewer suggested "use dependency injection for testability"
+  → Capture to knowledge? [Their rationale: ...]
+```
+
+## Step 5: Report summary
+
+After capturing, print a concise summary:
+
+```
+[remember] Done.
+  [knowledge] Captured N entries: "insight 1", "insight 2"
+  [thread: topic] Updated with today's discussion
+  [thread: new] Created "topic-name"
+  [plan: name] Updated session notes
+```
+
+The user can say "don't keep that" or "drop the X entry" after seeing the summary to remove anything.
 
 ## Step 6: Update metadata
 

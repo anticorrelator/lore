@@ -769,12 +769,20 @@ class Resolver:
 # Link Checker
 # ---------------------------------------------------------------------------
 
+_FENCED_CODE_RE = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
+
+
 class LinkChecker:
     """Scan for broken [[backlink]] references across the knowledge store."""
 
     def __init__(self, knowledge_dir: str):
         self.knowledge_dir = os.path.abspath(knowledge_dir)
         self.resolver = Resolver(knowledge_dir)
+
+    @staticmethod
+    def _strip_code_blocks(text: str) -> str:
+        """Remove fenced code blocks (``` ... ```) to avoid scanning template backlinks."""
+        return _FENCED_CODE_RE.sub("", text)
 
     def check_all(self) -> dict:
         """Scan all files for backlinks and check if they resolve.
@@ -792,6 +800,9 @@ class LinkChecker:
                 text = Path(fpath).read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
+            # Strip fenced code blocks to avoid false positives from
+            # template/example backlinks in documentation
+            text = self._strip_code_blocks(text)
             for match in _BACKLINK_RE.finditer(text):
                 all_links.append((fpath, match.group(0)))
 
