@@ -1,2 +1,4 @@
 # Per-project knowledge data (user-specific, not code)
 repos/
+__pycache__/
+*.tmp
