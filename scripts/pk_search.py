@@ -30,7 +30,7 @@ SKIP_DIRS = {"_archive", "__pycache__", ".git"}
 SNIPPET_MAX_CHARS = 500
 DEFAULT_LIMIT = 10
 DEFAULT_THRESHOLD = 0.0
-SOURCE_TYPES = ("knowledge", "plan", "thread")
+SOURCE_TYPES = ("knowledge", "work", "plan", "thread")
 
 
 # ---------------------------------------------------------------------------
@@ -165,16 +165,16 @@ class Indexer:
         """Find all indexable .md files in the knowledge directory.
 
         Returns list of (file_path, source_type) tuples.
-        Walks knowledge files, _plans/, and _threads/ directories.
+        Walks knowledge files, _work/, and _threads/ directories.
         """
         results: list[tuple[str, str]] = []
-        plans_dir = os.path.join(self.knowledge_dir, "_plans")
+        work_dir = os.path.join(self.knowledge_dir, "_work")
         threads_dir = os.path.join(self.knowledge_dir, "_threads")
 
         # Walk knowledge files (top-level + domains/)
         for root, dirs, files in os.walk(self.knowledge_dir):
             # Skip special directories
-            dirs[:] = [d for d in dirs if d not in SKIP_DIRS and d not in ("_plans", "_threads")]
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS and d not in ("_work", "_threads")]
             for fname in files:
                 if not fname.endswith(".md"):
                     continue
@@ -183,28 +183,28 @@ class Indexer:
                 full = os.path.join(root, fname)
                 results.append((full, "knowledge"))
 
-        # Walk _plans/ — index plan.md and notes.md per plan subdir
-        if os.path.isdir(plans_dir):
-            for plan_name in sorted(os.listdir(plans_dir)):
-                plan_path = os.path.join(plans_dir, plan_name)
-                if not os.path.isdir(plan_path) or plan_name in SKIP_DIRS:
+        # Walk _work/ — index plan.md and notes.md per work item subdir
+        if os.path.isdir(work_dir):
+            for item_name in sorted(os.listdir(work_dir)):
+                item_path = os.path.join(work_dir, item_name)
+                if not os.path.isdir(item_path) or item_name in SKIP_DIRS:
                     continue
                 for fname in ("plan.md", "notes.md"):
-                    fpath = os.path.join(plan_path, fname)
+                    fpath = os.path.join(item_path, fname)
                     if os.path.isfile(fpath):
-                        results.append((fpath, "plan"))
+                        results.append((fpath, "work"))
 
-            # Walk _plans/_archive/ — archived plans are still searchable
-            archive_dir = os.path.join(plans_dir, "_archive")
+            # Walk _work/_archive/ — archived work items are still searchable
+            archive_dir = os.path.join(work_dir, "_archive")
             if os.path.isdir(archive_dir):
-                for plan_name in sorted(os.listdir(archive_dir)):
-                    plan_path = os.path.join(archive_dir, plan_name)
-                    if not os.path.isdir(plan_path):
+                for item_name in sorted(os.listdir(archive_dir)):
+                    item_path = os.path.join(archive_dir, item_name)
+                    if not os.path.isdir(item_path):
                         continue
                     for fname in ("plan.md", "notes.md"):
-                        fpath = os.path.join(plan_path, fname)
+                        fpath = os.path.join(item_path, fname)
                         if os.path.isfile(fpath):
-                            results.append((fpath, "plan"))
+                            results.append((fpath, "work"))
 
         # Walk _threads/ — index all .md files
         if os.path.isdir(threads_dir):
@@ -651,13 +651,15 @@ def _human_size(size_bytes: int) -> str:
 # Backlink patterns:
 #   [[knowledge:file#heading]]  → extract section from knowledge file
 #   [[knowledge:file]]          → return full knowledge file
-#   [[plan:slug]]               → return plan.md + notes.md for plan
-#   [[plan:slug#heading]]       → extract section from plan.md
+#   [[work:slug]]               → return plan.md + notes.md for work item
+#   [[work:slug#heading]]       → extract section from plan.md
+#   [[plan:slug]]               → deprecated alias for [[work:slug]]
+#   [[plan:slug#heading]]       → deprecated alias for [[work:slug#heading]]
 #   [[thread:slug]]             → return thread file
 #   [[thread:slug#heading]]     → extract section from thread file
 
 _BACKLINK_RE = re.compile(
-    r"\[\[(?P<type>knowledge|plan|thread):(?P<target>[^\]#]+)(?:#(?P<heading>[^\]]+))?\]\]"
+    r"\[\[(?P<type>knowledge|work|plan|thread):(?P<target>[^\]#]+)(?:#(?P<heading>[^\]]+))?\]\]"
 )
 
 
@@ -755,8 +757,11 @@ class Resolver:
         """Convert source_type + target to an absolute file path.
 
         Returns:
-            Tuple of (file_path, is_archived). is_archived is True when a plan
-            was found in _plans/_archive/ rather than _plans/.
+            Tuple of (file_path, is_archived). is_archived is True when a work item
+            was found in _work/_archive/ rather than _work/.
+
+        Note: source_type "plan" is a deprecated alias for "work" — both resolve
+        against _work/ and _work/_archive/.
         """
         if source_type == "knowledge":
             # Try target.md in knowledge_dir, then domains/target.md
@@ -768,16 +773,17 @@ class Resolver:
                 if os.path.isfile(candidate):
                     return candidate, False
 
-        elif source_type == "plan":
-            # Check active plans first
-            plan_dir = os.path.join(self.knowledge_dir, "_plans", target)
-            if os.path.isdir(plan_dir):
+        elif source_type in ("work", "plan"):
+            # "plan" is a deprecated alias for "work" — both resolve to _work/
+            # Check active work items first
+            work_item_dir = os.path.join(self.knowledge_dir, "_work", target)
+            if os.path.isdir(work_item_dir):
                 for fname in ("plan.md", "notes.md"):
-                    candidate = os.path.join(plan_dir, fname)
+                    candidate = os.path.join(work_item_dir, fname)
                     if os.path.isfile(candidate):
                         return candidate, False
-            # Fall back to archived plans
-            archive_dir = os.path.join(self.knowledge_dir, "_plans", "_archive", target)
+            # Fall back to archived work items
+            archive_dir = os.path.join(self.knowledge_dir, "_work", "_archive", target)
             if os.path.isdir(archive_dir):
                 for fname in ("plan.md", "notes.md"):
                     candidate = os.path.join(archive_dir, fname)
@@ -1040,7 +1046,7 @@ def cmd_check_links(args: argparse.Namespace) -> None:
             print(f"    {bl['error']}")
 
     if result["archived_links"]:
-        print("\nArchived (resolved but plan is archived):")
+        print("\nArchived (resolved but work item is archived):")
         for al in result["archived_links"]:
             print(f"  {al['source_file']}: {al['backlink']}")
 

@@ -18,7 +18,10 @@ Update any active threads with this session's discussion before compaction. For 
 1. Append a new `## YYYY-MM-DD` entry with Summary, Key points, and any Shifts
 2. Update the `updated` and `sessions` fields in the YAML frontmatter
 
-[Planning — Pre-Compaction Reminder]
-If you've been working on a plan this session, run `/explore-and-plan update` to capture session progress
+[Work — Pre-Compaction Reminder]
+If you've been working on a work item this session, run `/work update` to capture session progress
 (focus, decisions, progress, next steps) before context is compacted.
+
+If you used builtin plan mode (EnterPlanMode/ExitPlanMode) this session, verify the plan was persisted
+to `_work/`. Ephemeral plan files at `~/.claude/plans/` do not survive across sessions.
 EOF

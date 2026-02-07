@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# load-plans.sh — SessionStart hook: show active plans, detect branch match
-# Usage: bash load-plans.sh
+# load-work.sh — SessionStart hook: show active work items, detect branch match
+# Usage: bash load-work.sh
 # Called by Claude Code SessionStart hook (startup, resume, compact)
 
 set -euo pipefail
@@ -8,36 +8,36 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KNOWLEDGE_DIR=$("$SCRIPT_DIR/resolve-repo.sh" 2>/dev/null) || exit 0
 
-PLANS_DIR="$KNOWLEDGE_DIR/_plans"
+WORK_DIR="$KNOWLEDGE_DIR/_work"
 
-# Exit silently if no plans directory
-[[ -d "$PLANS_DIR" ]] || exit 0
+# Exit silently if no work directory
+[[ -d "$WORK_DIR" ]] || exit 0
 
-INDEX="$PLANS_DIR/_index.json"
+INDEX="$WORK_DIR/_index.json"
 
 # Self-heal: regenerate index if missing
 if [[ ! -f "$INDEX" ]]; then
-  "$SCRIPT_DIR/update-plan-index.sh" 2>/dev/null || exit 0
+  "$SCRIPT_DIR/update-work-index.sh" 2>/dev/null || exit 0
 fi
 
 [[ -f "$INDEX" ]] || exit 0
 
-# Check if there are any plans
-PLAN_COUNT=$(grep -c '"slug"' "$INDEX" 2>/dev/null || true)
-PLAN_COUNT=$(echo "$PLAN_COUNT" | tr -d '[:space:]')
-[[ "$PLAN_COUNT" -gt 0 ]] || exit 0
+# Check if there are any work items
+WORK_COUNT=$(grep -c '"slug"' "$INDEX" 2>/dev/null || true)
+WORK_COUNT=$(echo "$WORK_COUNT" | tr -d '[:space:]')
+[[ "$WORK_COUNT" -gt 0 ]] || exit 0
 
 # Get current git branch
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 
 OUTPUT=""
 BRANCH_MATCH=""
-ACTIVE_PLANS=""
-STALE_PLANS=""
+ACTIVE_WORK=""
+STALE_WORK=""
 NOW_EPOCH=$(date +%s)
 
-# Parse plans from index (line-by-line approach for portability)
-# Read each plan entry by extracting fields
+# Parse work items from index (line-by-line approach for portability)
+# Read each entry by extracting fields
 CURRENT_SLUG=""
 CURRENT_TITLE=""
 CURRENT_STATUS=""
@@ -63,18 +63,18 @@ while IFS= read -r line; do
     CURRENT_BRANCHES=""
   fi
 
-  # End of a plan entry — process it
+  # End of a work entry — process it
   if echo "$line" | grep -q '"has_plan_doc"'; then
     if [[ "$CURRENT_STATUS" == "active" ]]; then
       # Check for branch match
       if [[ -n "$CURRENT_BRANCH" ]]; then
         # Read branches from _meta.json directly for accuracy
-        META_FILE="$PLANS_DIR/$CURRENT_SLUG/_meta.json"
+        META_FILE="$WORK_DIR/$CURRENT_SLUG/_meta.json"
         if [[ -f "$META_FILE" ]]; then
           if grep -q "\"$CURRENT_BRANCH\"" "$META_FILE" 2>/dev/null; then
             BRANCH_MATCH="$CURRENT_SLUG"
             # Get last notes entry
-            NOTES_FILE="$PLANS_DIR/$CURRENT_SLUG/notes.md"
+            NOTES_FILE="$WORK_DIR/$CURRENT_SLUG/notes.md"
             if [[ -f "$NOTES_FILE" ]]; then
               # Extract the last ## section (last session notes)
               LAST_ENTRY=$(awk '/^## [0-9]/{start=NR; content=""} start{content=content "\n" $0} END{print content}' "$NOTES_FILE" 2>/dev/null | head -8 || true)
@@ -97,17 +97,17 @@ while IFS= read -r line; do
           else
             RELATIVE_DATE="${DAYS_AGO}d ago"
           fi
-          # Check for stale plans (>30 days)
+          # Check for stale work items (>30 days)
           if [[ $DAYS_AGO -gt 30 ]]; then
-            STALE_PLANS="${STALE_PLANS}- ${CURRENT_SLUG} — inactive ${DAYS_AGO} days, consider \`/plan archive\`\n"
+            STALE_WORK="${STALE_WORK}- ${CURRENT_SLUG} — inactive ${DAYS_AGO} days, consider \`/work archive\`\n"
           fi
         fi
       fi
 
-      ACTIVE_PLANS="${ACTIVE_PLANS}- ${CURRENT_SLUG}: ${CURRENT_TITLE} (updated ${RELATIVE_DATE:-unknown})\n"
+      ACTIVE_WORK="${ACTIVE_WORK}- ${CURRENT_SLUG}: ${CURRENT_TITLE} (updated ${RELATIVE_DATE:-unknown})\n"
     fi
 
-    # Reset for next plan
+    # Reset for next entry
     CURRENT_SLUG=""
     CURRENT_TITLE=""
     CURRENT_STATUS=""
@@ -120,13 +120,13 @@ done < "$INDEX"
 NOTES_STALE=""
 STALE_THRESHOLD=$((14 * 86400))
 
-for plan_dir in "$PLANS_DIR"/*/; do
-  [[ -d "$plan_dir" ]] || continue
-  slug=$(basename "$plan_dir")
-  meta="$plan_dir/_meta.json"
-  notes="$plan_dir/notes.md"
+for work_dir in "$WORK_DIR"/*/; do
+  [[ -d "$work_dir" ]] || continue
+  slug=$(basename "$work_dir")
+  meta="$work_dir/_meta.json"
+  notes="$work_dir/notes.md"
 
-  # Only check active plans
+  # Only check active work items
   [[ -f "$meta" ]] || continue
   grep -q '"status".*"active"' "$meta" 2>/dev/null || continue
   [[ -f "$notes" ]] || continue
@@ -141,16 +141,18 @@ for plan_dir in "$PLANS_DIR"/*/; do
   age=$((NOW_EPOCH - mtime))
   if [[ $age -gt $STALE_THRESHOLD ]]; then
     days=$((age / 86400))
-    NOTES_STALE="${NOTES_STALE}[Stale] Plan \"${slug}\" has no activity in ${days} days\n"
+    NOTES_STALE="${NOTES_STALE}[Stale] Work item \"${slug}\" has no activity in ${days} days\n"
   fi
 done
 
 # Build output (budget: ~2000 chars)
-echo "=== Active Plans ==="
+echo "=== Active Work ==="
+echo ""
+echo "[work] Use \`/work\` to check status before manual exploration"
 echo ""
 
 if [[ -n "$BRANCH_MATCH" ]]; then
-  META_FILE="$PLANS_DIR/$BRANCH_MATCH/_meta.json"
+  META_FILE="$WORK_DIR/$BRANCH_MATCH/_meta.json"
   MATCH_TITLE=$(grep '"title"' "$META_FILE" 2>/dev/null | sed 's/.*"title"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/' | head -1)
   echo "[Current branch matches: $MATCH_TITLE]"
   if [[ -n "${LAST_ENTRY:-}" ]]; then
@@ -159,14 +161,25 @@ if [[ -n "$BRANCH_MATCH" ]]; then
   echo ""
 fi
 
-echo -e "$ACTIVE_PLANS"
+echo -e "$ACTIVE_WORK"
 
-if [[ -n "$STALE_PLANS" ]]; then
-  echo -e "$STALE_PLANS"
+if [[ -n "$STALE_WORK" ]]; then
+  echo -e "$STALE_WORK"
 fi
 
 if [[ -n "$NOTES_STALE" ]]; then
   echo -e "$NOTES_STALE"
 fi
 
-echo "=== End Plans ==="
+# Check for orphaned ephemeral plan files
+EPHEMERAL_DIR="$HOME/.claude/plans"
+if [[ -d "$EPHEMERAL_DIR" ]]; then
+  ORPHAN_COUNT=$(ls -1 "$EPHEMERAL_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$ORPHAN_COUNT" -gt 0 ]]; then
+    echo "[work] $ORPHAN_COUNT ephemeral plan file(s) in ~/.claude/plans/ may not be persisted"
+    echo "[work] Use /work list to review — persist with /work create or delete if stale"
+    echo ""
+  fi
+fi
+
+echo "=== End Work ==="

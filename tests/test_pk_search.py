@@ -90,11 +90,11 @@ def knowledge_dir(tmp_path):
         encoding="utf-8",
     )
 
-    # --- Plans ---
-    plans_dir = kd / "_plans" / "auth-refactor"
-    plans_dir.mkdir(parents=True)
+    # --- Work Items ---
+    work_dir = kd / "_work" / "auth-refactor"
+    work_dir.mkdir(parents=True)
 
-    (plans_dir / "plan.md").write_text(
+    (work_dir / "plan.md").write_text(
         "# Auth Refactor Plan\n\n"
         "### Goals\n"
         "Migrate from session-based auth to JWT tokens.\n"
@@ -108,7 +108,7 @@ def knowledge_dir(tmp_path):
         encoding="utf-8",
     )
 
-    (plans_dir / "notes.md").write_text(
+    (work_dir / "notes.md").write_text(
         "# Auth Refactor Notes\n\n"
         "### 2025-03-10\n"
         "Started implementation. JWT library chosen: PyJWT.\n\n"
@@ -118,7 +118,7 @@ def knowledge_dir(tmp_path):
     )
 
     # _meta.json should be skipped by the indexer
-    (plans_dir / "_meta.json").write_text(
+    (work_dir / "_meta.json").write_text(
         json.dumps({"status": "active", "created": "2025-03-01"}),
         encoding="utf-8",
     )
@@ -199,9 +199,9 @@ def link_check_dir(tmp_path):
         "# Architecture\n\n"
         "### Service Mesh\n"
         "Uses Envoy. See [[knowledge:conventions#API Versioning]] for API details.\n"
-        "Also see [[plan:auth-refactor]] for auth migration.\n"
+        "Also see [[work:auth-refactor]] for auth migration.\n"
         "Broken ref: [[knowledge:nonexistent-file#Heading]].\n"
-        "Another broken: [[plan:deleted-plan]].\n"
+        "Another broken: [[work:deleted-work]].\n"
         "Broken heading: [[knowledge:architecture#Nonexistent Section]].\n",
         encoding="utf-8",
     )
@@ -214,10 +214,10 @@ def link_check_dir(tmp_path):
         encoding="utf-8",
     )
 
-    # Plans
-    plans_dir = kd / "_plans" / "auth-refactor"
-    plans_dir.mkdir(parents=True)
-    (plans_dir / "plan.md").write_text(
+    # Work Items
+    work_item_dir = kd / "_work" / "auth-refactor"
+    work_item_dir.mkdir(parents=True)
+    (work_item_dir / "plan.md").write_text(
         "# Auth Refactor Plan\n\n### Goals\nMigrate to JWT.\n",
         encoding="utf-8",
     )
@@ -239,26 +239,26 @@ def archive_dir(tmp_path):
     kd = tmp_path / "archive_test"
     kd.mkdir()
 
-    # Knowledge file referencing both active and archived plans
+    # Knowledge file referencing both active and archived work items
     (kd / "architecture.md").write_text(
         "# Architecture\n\n"
         "### Design Overview\n"
-        "See [[plan:auth-refactor]] for active auth plan.\n"
-        "See [[plan:old-migration]] for the completed migration plan.\n"
-        "See [[plan:truly-missing]] for a nonexistent plan.\n",
+        "See [[work:auth-refactor]] for active auth work.\n"
+        "See [[work:old-migration]] for the completed migration.\n"
+        "See [[work:truly-missing]] for a nonexistent work item.\n",
         encoding="utf-8",
     )
 
-    # Active plan
-    active_plan = kd / "_plans" / "auth-refactor"
-    active_plan.mkdir(parents=True)
-    (active_plan / "plan.md").write_text(
+    # Active work item
+    active_work = kd / "_work" / "auth-refactor"
+    active_work.mkdir(parents=True)
+    (active_work / "plan.md").write_text(
         "# Auth Refactor\n\n### Goals\nMigrate to JWT tokens.\n",
         encoding="utf-8",
     )
 
-    # Archived plan
-    archive = kd / "_plans" / "_archive" / "old-migration"
+    # Archived work item
+    archive = kd / "_work" / "_archive" / "old-migration"
     archive.mkdir(parents=True)
     (archive / "plan.md").write_text(
         "# Old Migration Plan\n\n"
@@ -370,23 +370,23 @@ class TestIndexer:
         for p in paths:
             assert "_meta.json" not in p
 
-    def test_index_finds_plan_files(self, knowledge_dir):
-        """Indexer should pick up plan.md and notes.md from _plans/."""
+    def test_index_finds_work_files(self, knowledge_dir):
+        """Indexer should pick up plan.md and notes.md from _work/."""
         indexer = Indexer(str(knowledge_dir))
         indexer.index_all()
 
         conn = sqlite3.connect(indexer.db_path)
-        plan_paths = [
+        work_paths = [
             r[0]
             for r in conn.execute(
-                "SELECT DISTINCT file_path FROM entries WHERE file_path LIKE '%_plans%'"
+                "SELECT DISTINCT file_path FROM entries WHERE file_path LIKE '%_work%'"
             ).fetchall()
         ]
         conn.close()
 
-        plan_basenames = [os.path.basename(p) for p in plan_paths]
-        assert "plan.md" in plan_basenames
-        assert "notes.md" in plan_basenames
+        work_basenames = [os.path.basename(p) for p in work_paths]
+        assert "plan.md" in work_basenames
+        assert "notes.md" in work_basenames
 
     def test_index_finds_thread_files(self, knowledge_dir):
         """Indexer should pick up .md files from _threads/."""
@@ -418,11 +418,11 @@ class TestIndexer:
         ).fetchone()[0]
         assert knowledge_count == 4  # architecture, conventions, gotchas, workflows
 
-        # Check plan entries
-        plan_count = conn.execute(
-            "SELECT count(*) FROM file_meta WHERE source_type = 'plan'"
+        # Check work entries
+        work_count = conn.execute(
+            "SELECT count(*) FROM file_meta WHERE source_type = 'work'"
         ).fetchone()[0]
-        assert plan_count == 2  # plan.md, notes.md
+        assert work_count == 2  # plan.md, notes.md
 
         # Check thread entries
         thread_count = conn.execute(
@@ -439,13 +439,13 @@ class TestIndexer:
 
         conn = sqlite3.connect(indexer.db_path)
 
-        # Plan entries in FTS should have source_type='plan'
+        # Work entries in FTS should have source_type='work'
         rows = conn.execute(
-            "SELECT source_type FROM entries WHERE file_path LIKE '%_plans%'"
+            "SELECT source_type FROM entries WHERE file_path LIKE '%_work/%'"
         ).fetchall()
         assert len(rows) > 0
         for (st,) in rows:
-            assert st == "plan"
+            assert st == "work"
 
         # Thread entries should have source_type='thread'
         rows = conn.execute(
@@ -493,8 +493,8 @@ class TestIndexer:
 
         type_map = {os.path.basename(fp): st for fp, st in rows}
         assert type_map.get("architecture.md") == "knowledge"
-        assert type_map.get("plan.md") == "plan"
-        assert type_map.get("notes.md") == "plan"
+        assert type_map.get("plan.md") == "work"
+        assert type_map.get("notes.md") == "work"
         assert type_map.get("working-style.md") == "thread"
 
     def test_corrupt_db_rebuilds(self, knowledge_dir):
@@ -631,13 +631,13 @@ class TestSourceTypeFilter:
         for r in results:
             assert r["source_type"] == "knowledge"
 
-    def test_search_type_plan(self, knowledge_dir):
-        """--type=plan should only return plan entries."""
+    def test_search_type_work(self, knowledge_dir):
+        """--type=work should only return work entries."""
         searcher = Searcher(str(knowledge_dir))
-        results = searcher.search("JWT", source_type="plan")
+        results = searcher.search("JWT", source_type="work")
         assert len(results) > 0
         for r in results:
-            assert r["source_type"] == "plan"
+            assert r["source_type"] == "work"
 
     def test_search_type_thread(self, knowledge_dir):
         """--type=thread should only return thread entries."""
@@ -656,19 +656,19 @@ class TestSourceTypeFilter:
         # With our fixture data, we should see at least knowledge entries
         assert "knowledge" in types_seen
 
-    def test_search_type_plan_excludes_knowledge(self, knowledge_dir):
-        """Plan filter should not return knowledge entries."""
+    def test_search_type_work_excludes_knowledge(self, knowledge_dir):
+        """Work filter should not return knowledge entries."""
         searcher = Searcher(str(knowledge_dir))
-        results = searcher.search("database sharding", source_type="plan")
-        # "Database Sharding" is in architecture.md (knowledge), not plans
+        results = searcher.search("database sharding", source_type="work")
+        # "Database Sharding" is in architecture.md (knowledge), not work items
         headings = [r["heading"] for r in results]
         assert "Database Sharding" not in headings
 
     def test_search_type_thread_excludes_others(self, knowledge_dir):
-        """Thread filter should not return plan or knowledge entries."""
+        """Thread filter should not return work or knowledge entries."""
         searcher = Searcher(str(knowledge_dir))
         results = searcher.search("JWT migration", source_type="thread")
-        # JWT migration is in plan, not thread
+        # JWT migration is in work item, not thread
         assert all(r["source_type"] == "thread" for r in results)
 
     def test_source_type_field_present(self, knowledge_dir):
@@ -818,23 +818,32 @@ class TestResolver:
         assert "API Versioning" in result["content"]
         assert "Error Handling" in result["content"]
 
-    def test_resolve_plan(self, knowledge_dir):
-        """Resolve [[plan:auth-refactor]] returns plan.md content."""
+    def test_resolve_work(self, knowledge_dir):
+        """Resolve [[work:auth-refactor]] returns plan.md content."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[work:auth-refactor]]")
+        assert result["resolved"] is True
+        assert result["source_type"] == "work"
+        assert result["target"] == "auth-refactor"
+        assert "JWT tokens" in result["content"]
+
+    def test_resolve_work_with_heading(self, knowledge_dir):
+        """Resolve [[work:auth-refactor#Token Rotation]] returns section from work item."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[work:auth-refactor#Token Rotation]]")
+        assert result["resolved"] is True
+        assert result["source_type"] == "work"
+        assert "Refresh tokens" in result["content"]
+        assert "Redis" in result["content"]
+
+    def test_resolve_plan_deprecated_alias(self, knowledge_dir):
+        """Resolve [[plan:auth-refactor]] still works as deprecated alias."""
         resolver = Resolver(str(knowledge_dir))
         result = resolver.resolve("[[plan:auth-refactor]]")
         assert result["resolved"] is True
         assert result["source_type"] == "plan"
         assert result["target"] == "auth-refactor"
         assert "JWT tokens" in result["content"]
-
-    def test_resolve_plan_with_heading(self, knowledge_dir):
-        """Resolve [[plan:auth-refactor#Token Rotation]] returns section from plan."""
-        resolver = Resolver(str(knowledge_dir))
-        result = resolver.resolve("[[plan:auth-refactor#Token Rotation]]")
-        assert result["resolved"] is True
-        assert result["source_type"] == "plan"
-        assert "Refresh tokens" in result["content"]
-        assert "Redis" in result["content"]
 
     def test_resolve_thread(self, knowledge_dir):
         """Resolve [[thread:working-style]] returns thread content."""
@@ -861,10 +870,10 @@ class TestResolver:
         assert "error" in result
         assert "not found" in result["error"].lower()
 
-    def test_resolve_nonexistent_plan(self, knowledge_dir):
-        """Resolving a nonexistent plan returns resolved=False."""
+    def test_resolve_nonexistent_work(self, knowledge_dir):
+        """Resolving a nonexistent work item returns resolved=False."""
         resolver = Resolver(str(knowledge_dir))
-        result = resolver.resolve("[[plan:does-not-exist]]")
+        result = resolver.resolve("[[work:does-not-exist]]")
         assert result["resolved"] is False
         assert "error" in result
 
@@ -880,7 +889,7 @@ class TestResolver:
         resolver = Resolver(str(knowledge_dir))
         backlinks = [
             "[[knowledge:architecture#Service Mesh]]",
-            "[[plan:auth-refactor]]",
+            "[[work:auth-refactor]]",
             "[[thread:working-style]]",
             "[[knowledge:nonexistent]]",
         ]
@@ -905,10 +914,10 @@ class TestResolver:
         result = resolver.resolve("[[badtype:something]]")
         assert result["resolved"] is False
 
-    def test_resolve_plan_heading_not_found(self, knowledge_dir):
-        """Plan exists but heading does not."""
+    def test_resolve_work_heading_not_found(self, knowledge_dir):
+        """Work item exists but heading does not."""
         resolver = Resolver(str(knowledge_dir))
-        result = resolver.resolve("[[plan:auth-refactor#Nonexistent Step]]")
+        result = resolver.resolve("[[work:auth-refactor#Nonexistent Step]]")
         assert result["resolved"] is False
         assert "error" in result
 
@@ -926,7 +935,7 @@ class TestLinkChecker:
         assert result["broken_count"] > 0
         broken_backlinks = [bl["backlink"] for bl in result["broken_links"]]
         assert any("nonexistent-file" in bl for bl in broken_backlinks)
-        assert any("deleted-plan" in bl for bl in broken_backlinks)
+        assert any("deleted-work" in bl for bl in broken_backlinks)
         assert any("Nonexistent Section" in bl for bl in broken_backlinks)
 
     def test_check_all_counts_total_links(self, link_check_dir):
@@ -934,9 +943,9 @@ class TestLinkChecker:
         checker = LinkChecker(str(link_check_dir))
         result = checker.check_all()
 
-        # Valid links: [[knowledge:conventions#API Versioning]], [[plan:auth-refactor]],
+        # Valid links: [[knowledge:conventions#API Versioning]], [[work:auth-refactor]],
         #              [[thread:working-style]]
-        # Broken links: [[knowledge:nonexistent-file#Heading]], [[plan:deleted-plan]],
+        # Broken links: [[knowledge:nonexistent-file#Heading]], [[work:deleted-work]],
         #               [[knowledge:architecture#Nonexistent Section]]
         assert result["total_links"] >= 6
         # At least 3 should be broken
@@ -949,7 +958,7 @@ class TestLinkChecker:
 
         broken_backlinks = [bl["backlink"] for bl in result["broken_links"]]
         # These are valid and should NOT be in broken list
-        assert not any("[[plan:auth-refactor]]" == bl for bl in broken_backlinks)
+        assert not any("[[work:auth-refactor]]" == bl for bl in broken_backlinks)
         assert not any("[[thread:working-style]]" == bl for bl in broken_backlinks)
 
     def test_check_all_reports_source_file(self, link_check_dir):
@@ -1131,7 +1140,7 @@ class TestStats:
         assert "type_counts" in stats
         tc = stats["type_counts"]
         assert tc.get("knowledge") == 4
-        assert tc.get("plan") == 2
+        assert tc.get("work") == 2
         assert tc.get("thread") == 1
 
     def test_stats_no_db(self, tmp_path):
@@ -1218,14 +1227,14 @@ class TestCLI:
             capture_output=True,
         )
         result = subprocess.run(
-            [sys.executable, script, "search", str(knowledge_dir), "JWT", "--type", "plan", "--json"],
+            [sys.executable, script, "search", str(knowledge_dir), "JWT", "--type", "work", "--json"],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
         for entry in data:
-            assert entry["source_type"] == "plan"
+            assert entry["source_type"] == "work"
 
     def test_cli_stats(self, knowledge_dir):
         import subprocess
@@ -1346,7 +1355,7 @@ class TestCLI:
         script = os.path.join(os.path.dirname(__file__), "..", "scripts", "pk_search.py")
         result = subprocess.run(
             [sys.executable, script, "resolve", str(knowledge_dir),
-             "[[knowledge:conventions]]", "[[plan:auth-refactor]]", "--json"],
+             "[[knowledge:conventions]]", "[[work:auth-refactor]]", "--json"],
             capture_output=True,
             text=True,
         )
@@ -1412,29 +1421,29 @@ class TestArchiveIndexing:
     """Test that archived plans are indexed and searchable."""
 
     def test_collect_md_files_includes_archive(self, archive_dir):
-        """_collect_md_files should include files from _plans/_archive/."""
+        """_collect_md_files should include files from _work/_archive/."""
         indexer = Indexer(str(archive_dir))
         md_files = indexer._collect_md_files()
         paths = [fp for fp, _ in md_files]
 
-        # Active plan should be found
+        # Active work item should be found
         assert any("auth-refactor" in p and "plan.md" in p for p in paths)
-        # Archived plan files should also be found
+        # Archived work item files should also be found
         assert any("_archive" in p and "old-migration" in p and "plan.md" in p for p in paths)
         assert any("_archive" in p and "old-migration" in p and "notes.md" in p for p in paths)
 
     def test_collect_md_files_archive_source_type(self, archive_dir):
-        """Archived plan files should have source_type 'plan'."""
+        """Archived work item files should have source_type 'work'."""
         indexer = Indexer(str(archive_dir))
         md_files = indexer._collect_md_files()
-        archive_files = [(fp, st) for fp, st in md_files if "_plans/_archive/" in fp]
+        archive_files = [(fp, st) for fp, st in md_files if "_work/_archive/" in fp]
 
         assert len(archive_files) == 2  # plan.md + notes.md
         for _, source_type in archive_files:
-            assert source_type == "plan"
+            assert source_type == "work"
 
     def test_index_includes_archived_entries(self, archive_dir):
-        """Full index should contain entries from archived plans."""
+        """Full index should contain entries from archived work items."""
         indexer = Indexer(str(archive_dir))
         result = indexer.index_all()
 
@@ -1448,8 +1457,8 @@ class TestArchiveIndexing:
         assert "Phase 1" in headings
         assert "Phase 2" in headings
 
-    def test_search_finds_archived_plan_content(self, archive_dir):
-        """Search should return results from archived plans."""
+    def test_search_finds_archived_work_content(self, archive_dir):
+        """Search should return results from archived work items."""
         searcher = Searcher(str(archive_dir))
         results = searcher.search("database schema")
 
@@ -1457,13 +1466,13 @@ class TestArchiveIndexing:
         assert any("old-migration" in r["file_path"] for r in results)
 
     def test_incremental_index_includes_archive(self, archive_dir):
-        """Incremental index should detect changes in archived plans."""
+        """Incremental index should detect changes in archived work items."""
         indexer = Indexer(str(archive_dir))
         indexer.index_all()
 
-        # Modify an archived plan
+        # Modify an archived work item
         time.sleep(0.05)
-        archive_plan = archive_dir / "_plans" / "_archive" / "old-migration" / "plan.md"
+        archive_plan = archive_dir / "_work" / "_archive" / "old-migration" / "plan.md"
         archive_plan.write_text(
             "# Old Migration Plan\n\n### Phase 1 (Revised)\nUpdated schema migration.\n",
             encoding="utf-8",
@@ -1474,74 +1483,74 @@ class TestArchiveIndexing:
         assert any("old-migration" in p for p in stale_paths)
 
     def test_stats_count_includes_archive(self, archive_dir):
-        """Stats should count archived plan files."""
+        """Stats should count archived work item files."""
         Indexer(str(archive_dir)).index_all()
         stats = Stats(str(archive_dir)).get_stats()
 
-        # 1 knowledge + 1 active plan + 2 archived plan files = 4
+        # 1 knowledge + 1 active work item + 2 archived work item files = 4
         assert stats["file_count"] == 4
-        assert stats["type_counts"].get("plan") == 3  # 1 active + 2 archived
+        assert stats["type_counts"].get("work") == 3  # 1 active + 2 archived
 
 
 class TestArchiveResolver:
-    """Test that the resolver falls back to _plans/_archive/."""
+    """Test that the resolver falls back to _work/_archive/."""
 
-    def test_resolve_archived_plan(self, archive_dir):
-        """Resolving an archived plan should succeed."""
+    def test_resolve_archived_work(self, archive_dir):
+        """Resolving an archived work item should succeed."""
         resolver = Resolver(str(archive_dir))
-        result = resolver.resolve("[[plan:old-migration]]")
+        result = resolver.resolve("[[work:old-migration]]")
 
         assert result["resolved"] is True
-        assert result["source_type"] == "plan"
+        assert result["source_type"] == "work"
         assert result["target"] == "old-migration"
         assert "database schema" in result["content"].lower() or "Migration Plan" in result["content"]
 
-    def test_resolve_archived_plan_has_archived_flag(self, archive_dir):
-        """Archived plan resolution should include archived=True."""
+    def test_resolve_archived_work_has_archived_flag(self, archive_dir):
+        """Archived work item resolution should include archived=True."""
         resolver = Resolver(str(archive_dir))
-        result = resolver.resolve("[[plan:old-migration]]")
+        result = resolver.resolve("[[work:old-migration]]")
 
         assert result["resolved"] is True
         assert result.get("archived") is True
 
-    def test_resolve_active_plan_no_archived_flag(self, archive_dir):
-        """Active plan resolution should NOT have archived flag."""
+    def test_resolve_active_work_no_archived_flag(self, archive_dir):
+        """Active work item resolution should NOT have archived flag."""
         resolver = Resolver(str(archive_dir))
-        result = resolver.resolve("[[plan:auth-refactor]]")
+        result = resolver.resolve("[[work:auth-refactor]]")
 
         assert result["resolved"] is True
         assert "archived" not in result
 
-    def test_resolve_archived_plan_with_heading(self, archive_dir):
-        """Resolving a heading from an archived plan should work."""
+    def test_resolve_archived_work_with_heading(self, archive_dir):
+        """Resolving a heading from an archived work item should work."""
         resolver = Resolver(str(archive_dir))
-        result = resolver.resolve("[[plan:old-migration#Phase 1]]")
+        result = resolver.resolve("[[work:old-migration#Phase 1]]")
 
         assert result["resolved"] is True
         assert result.get("archived") is True
         assert "database schema" in result["content"].lower()
 
-    def test_resolve_truly_missing_plan(self, archive_dir):
-        """A plan that doesn't exist anywhere should still fail."""
+    def test_resolve_truly_missing_work(self, archive_dir):
+        """A work item that doesn't exist anywhere should still fail."""
         resolver = Resolver(str(archive_dir))
-        result = resolver.resolve("[[plan:truly-missing]]")
+        result = resolver.resolve("[[work:truly-missing]]")
 
         assert result["resolved"] is False
         assert "not found" in result["error"].lower()
 
     def test_resolve_prefers_active_over_archive(self, archive_dir):
-        """If a plan exists in both active and archive, prefer active."""
+        """If a work item exists in both active and archive, prefer active."""
         # Create same slug in both locations
-        active = archive_dir / "_plans" / "dual-plan"
+        active = archive_dir / "_work" / "dual-item"
         active.mkdir(parents=True)
         (active / "plan.md").write_text("# Active Version\n\n### Goals\nActive content.\n")
 
-        archived = archive_dir / "_plans" / "_archive" / "dual-plan"
+        archived = archive_dir / "_work" / "_archive" / "dual-item"
         archived.mkdir(parents=True)
         (archived / "plan.md").write_text("# Archived Version\n\n### Goals\nArchived content.\n")
 
         resolver = Resolver(str(archive_dir))
-        result = resolver.resolve("[[plan:dual-plan]]")
+        result = resolver.resolve("[[work:dual-item]]")
 
         assert result["resolved"] is True
         assert "Active content" in result["content"] or "Active Version" in result["content"]
@@ -1556,19 +1565,19 @@ class TestArchiveLinkChecker:
         checker = LinkChecker(str(archive_dir))
         result = checker.check_all()
 
-        # [[plan:old-migration]] should be archived, not broken
+        # [[work:old-migration]] should be archived, not broken
         archived_backlinks = [al["backlink"] for al in result["archived_links"]]
         broken_backlinks = [bl["backlink"] for bl in result["broken_links"]]
 
         assert any("old-migration" in bl for bl in archived_backlinks)
         assert not any("old-migration" in bl for bl in broken_backlinks)
 
-        # [[plan:truly-missing]] should be broken, not archived
+        # [[work:truly-missing]] should be broken, not archived
         assert any("truly-missing" in bl for bl in broken_backlinks)
         assert not any("truly-missing" in bl for bl in archived_backlinks)
 
-    def test_check_links_active_plan_not_reported(self, archive_dir):
-        """Active plans should not appear in archived or broken."""
+    def test_check_links_active_work_not_reported(self, archive_dir):
+        """Active work items should not appear in archived or broken."""
         checker = LinkChecker(str(archive_dir))
         result = checker.check_all()
 

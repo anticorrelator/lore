@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# init-plans.sh — Create _plans/ scaffold for a repo
-# Usage: bash init-plans.sh [directory]
-# Creates _plans/ directory with _index.json and _archive/
+# init-work.sh — Create _work/ scaffold for a repo
+# Usage: bash init-work.sh [directory]
+# Creates _work/ directory with _index.json and _archive/
 
 set -euo pipefail
 
@@ -16,19 +16,19 @@ if [[ ! -d "$KNOWLEDGE_DIR" ]]; then
   exit 1
 fi
 
-PLANS_DIR="$KNOWLEDGE_DIR/_plans"
+WORK_DIR="$KNOWLEDGE_DIR/_work"
 
-if [[ -f "$PLANS_DIR/_index.json" ]]; then
-  echo "Plans already initialized at: $PLANS_DIR"
+if [[ -f "$WORK_DIR/_index.json" ]]; then
+  echo "Work directory already initialized at: $WORK_DIR"
   exit 0
 fi
 
 REPO_NAME=$(basename "$KNOWLEDGE_DIR")
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-mkdir -p "$PLANS_DIR/_archive"
+mkdir -p "$WORK_DIR/_archive"
 
-cat > "$PLANS_DIR/_index.json" << INDEXEOF
+cat > "$WORK_DIR/_index.json" << INDEXEOF
 {
   "version": 1,
   "repo": "$REPO_NAME",
@@ -37,4 +37,4 @@ cat > "$PLANS_DIR/_index.json" << INDEXEOF
 }
 INDEXEOF
 
-echo "Initialized plans at: $PLANS_DIR"
+echo "Initialized work directory at: $WORK_DIR"

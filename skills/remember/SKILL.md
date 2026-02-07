@@ -72,13 +72,13 @@ Review the conversation for thread-worthy content:
    **Key points:**
    - Specific decisions, shifts, or ideas
    **Shifts:** Change from previous entries (optional)
-   **Related:** [[plan:name]], [[knowledge:file#heading]]
+   **Related:** [[work:name]], [[knowledge:file#heading]]
    ```
 4. Check for new topics that don't match existing threads and had >2 substantive exchanges — these become new thread candidates
 
 ## Step 3: Check plan status
 
-- Is there an active plan for the current work? Check `_plans/` for branch match or recent activity.
+- Is there an active plan for the current work? Check `_work/` for branch match or recent activity.
 - If no plan exists, check auto-trigger conditions:
   - Design discussion (choosing between approaches, trade-offs)?
   - Multi-step implementation (>2-3 files)?
@@ -133,7 +133,7 @@ The user can say "don't keep that" or "drop the X entry" after seeing the summar
 After capturing:
 - Update thread YAML frontmatter (`updated`, increment `sessions`)
 - Run `bash ~/.project-knowledge/scripts/update-thread-index.sh`
-- If a plan was updated, run `bash ~/.project-knowledge/scripts/update-plan-index.sh`
+- If a plan was updated, run `bash ~/.project-knowledge/scripts/update-work-index.sh`
 
 ## Step 7: Resume work
 

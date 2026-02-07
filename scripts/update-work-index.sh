@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# update-plan-index.sh — Regenerate _plans/_index.json from _meta.json files
-# Usage: bash update-plan-index.sh [directory]
-# Scans all _plans/*/_meta.json files and rebuilds the index
+# update-work-index.sh — Regenerate _work/_index.json from _meta.json files
+# Usage: bash update-work-index.sh [directory]
+# Scans all _work/*/_meta.json files and rebuilds the index
 
 set -euo pipefail
 
@@ -10,14 +10,14 @@ TARGET_DIR="${1:-$(pwd)}"
 
 KNOWLEDGE_DIR=$("$SCRIPT_DIR/resolve-repo.sh" "$TARGET_DIR")
 
-PLANS_DIR="$KNOWLEDGE_DIR/_plans"
+WORK_DIR="$KNOWLEDGE_DIR/_work"
 
-if [[ ! -d "$PLANS_DIR" ]]; then
-  echo "No plans directory found at: $PLANS_DIR"
+if [[ ! -d "$WORK_DIR" ]]; then
+  echo "No work directory found at: $WORK_DIR"
   exit 1
 fi
 
-INDEX="$PLANS_DIR/_index.json"
+INDEX="$WORK_DIR/_index.json"
 REPO_NAME=$(basename "$KNOWLEDGE_DIR")
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
@@ -30,13 +30,13 @@ echo '  "plans": [' >> "$INDEX"
 
 FIRST=true
 
-# Scan active plan directories (exclude _archive and _index.json)
-for meta_file in "$PLANS_DIR"/*/_meta.json; do
+# Scan active work directories (exclude _archive and _index.json)
+for meta_file in "$WORK_DIR"/*/_meta.json; do
   # Handle no matches
   [[ -e "$meta_file" ]] || continue
 
-  PLAN_DIR=$(dirname "$meta_file")
-  SLUG=$(basename "$PLAN_DIR")
+  ITEM_DIR=$(dirname "$meta_file")
+  SLUG=$(basename "$ITEM_DIR")
 
   # Skip _archive
   [[ "$SLUG" == "_archive" ]] && continue
@@ -99,7 +99,7 @@ for meta_file in "$PLANS_DIR"/*/_meta.json; do
 
   # Check if plan.md exists
   HAS_PLAN_DOC=false
-  [[ -f "$PLAN_DIR/plan.md" ]] && HAS_PLAN_DOC=true
+  [[ -f "$ITEM_DIR/plan.md" ]] && HAS_PLAN_DOC=true
 
   # Add comma separator
   if [[ "$FIRST" == true ]]; then
@@ -126,4 +126,4 @@ done
 echo '  ]' >> "$INDEX"
 echo '}' >> "$INDEX"
 
-echo "Plan index updated: $INDEX"
+echo "Work index updated: $INDEX"

@@ -15,6 +15,7 @@ allowed-tools:
   - AskUserQuestion
   - Edit
   - Write
+  - Skill
 ---
 
 # Address PR Feedback
@@ -145,23 +146,50 @@ For each unresolved item, determine:
 - **Ambiguous**: Multiple valid approaches or conflicts with codebase patterns → May need user input
 - **Disagreement**: Feedback conflicts with CLAUDE.md or established patterns → Flag for user
 
-## Step 5: Create Task List
+## Step 5: Create Plan and Generate Tasks
 
-Create tasks autonomously for clear items. Use your judgment as a senior engineer.
+Create a plan from the categorized feedback, then generate tasks from it.
 
-**Task creation guidelines:**
-- Group related feedback into single tasks when they touch the same file/function
-- Prioritize by: blocking issues > correctness > style > nice-to-haves
-- Include enough context to implement without re-reading comments
-
-**Task format:**
+**Create the plan:**
 ```
-subject: Actionable imperative description
-description: |
-  **Feedback:** "quoted comment" — @author
-  **Location:** file:line (link)
-  **Approach:** Your planned implementation
-activeForm: "Present continuous description"
+/work create pr-<NUMBER>-<short-slug>
+```
+Where `<short-slug>` is 2-3 words from the PR title, slugified (e.g., `pr-42-fix-auth-flow`).
+
+**Write `plan.md`** with the feedback organized into phases by priority:
+
+```markdown
+# PR #<NUMBER>: <Title>
+
+## Goal
+Address reviewer feedback on PR #<NUMBER>.
+
+## Phases
+
+### Phase 1: Blocking / Correctness
+**Objective:** Fix issues that affect correctness or block merge
+**Files:** <affected files>
+- [ ] <feedback item as actionable task>
+- [ ] ...
+
+### Phase 2: Improvements
+**Objective:** Address substantive suggestions
+**Files:** <affected files>
+- [ ] <feedback item>
+- [ ] ...
+
+### Phase 3: Style / Minor
+**Objective:** Address style and minor items
+**Files:** <affected files>
+- [ ] <feedback item>
+- [ ] ...
+```
+
+Group related feedback into single items when they touch the same file/function. Include quoted feedback and file:line references in each item. Omit empty phases.
+
+**Generate tasks from the plan:**
+```
+/work tasks pr-<NUMBER>-<short-slug>
 ```
 
 **Only ask the user when:**
@@ -171,6 +199,8 @@ activeForm: "Present continuous description"
 - The change would have broad implications
 
 When asking, be specific: "The reviewer suggests X, but CLAUDE.md specifies Y. Which should I follow?"
+
+This step is automatic — do not ask whether to create the plan.
 
 ## Step 6: Present Summary
 
@@ -194,32 +224,20 @@ After creating tasks, show a brief summary:
 
 If there are items needing input, ask about them in a single batched question.
 
-If everything is clear, ask: "Ready to start addressing these tasks?" (single yes/no)
+## Step 7: Capture Insights and Organize
 
-## Step 7: Execute Tasks
+After presenting the summary, invoke `/remember` with capture constraints tuned for PR feedback, then organize the inbox:
 
-Work through tasks systematically:
+```
+/remember PR review feedback — capture only: architectural insights, corrected misconceptions about how the codebase works, non-obvious patterns or invariants the reviewer identified, genuine bugs or correctness issues that reveal something about the system. Skip: style preferences, naming opinions, formatting nits, nitpicking, subjective code taste, "I would have done it differently" suggestions, anything that amounts to an outside contributor's personal conventions vs the project's own patterns. PR reviewers bring valuable fresh eyes but also stylistic baggage — be highly discerning.
+```
 
-1. Mark task as `in_progress`
-2. Read relevant files
-3. Implement the fix following codebase conventions
-4. Mark task as `completed`
-5. Move to next task
+Then organize any pending inbox entries:
+```
+/memory organize
+```
 
-**Execution guidelines:**
-- Don't ask for confirmation on straightforward changes
-- Do pause and confirm before: large refactors, API changes, deleting code
-- If you discover the fix is more complex than expected, update the task description
-- If a fix would conflict with another task, handle the dependency
-
-## Step 8: Final Summary
-
-After completing all tasks (or if paused), summarize:
-- Tasks completed
-- Tasks remaining
-- Any items that need reviewer response (disagreements, clarifications)
-
-Remind user to push changes and respond to any reviewer comments that need discussion.
+This step is automatic — do not ask whether to run it.
 
 ## Error Handling
 
