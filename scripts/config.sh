@@ -7,14 +7,8 @@ LORE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export LORE_SCRIPT_DIR
 
 # LORE_DATA_DIR: where per-project knowledge data lives
-# Priority: explicit env var > ~/.lore (new default) > ~/.project-knowledge (legacy)
+# Priority: explicit env var > ~/.lore (default)
 if [ -z "${LORE_DATA_DIR:-}" ]; then
-  if [ -d "$HOME/.lore/repos" ]; then
-    LORE_DATA_DIR="$HOME/.lore"
-  elif [ -d "$HOME/.project-knowledge/repos" ]; then
-    LORE_DATA_DIR="$HOME/.project-knowledge"
-  else
-    LORE_DATA_DIR="$HOME/.lore"
-  fi
+  LORE_DATA_DIR="$HOME/.lore"
 fi
 export LORE_DATA_DIR
