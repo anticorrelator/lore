@@ -1,6 +1,6 @@
 ## Work Protocol
 
-Work items persist at `~/.project-knowledge/repos/<repo>/_work/`. Use `/work` for lifecycle management.
+Work items persist in the project's `_work/` directory (path resolved by `bash ~/.lore/scripts/resolve-repo.sh`). Use `/work` for lifecycle management.
 
 ### Default to /work
 

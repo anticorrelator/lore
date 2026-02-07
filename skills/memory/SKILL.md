@@ -7,13 +7,13 @@ argument_description: "[command] [args] — organize | add <category> <title> | 
 
 # /memory Skill
 
-Manages the per-project knowledge store at `~/.project-knowledge/repos/`.
+Manages the per-project knowledge store.
 
 ## Resolve the Knowledge Path
 
 First, resolve the knowledge directory:
 ```bash
-bash ~/.project-knowledge/scripts/resolve-repo.sh
+bash ~/.lore/scripts/resolve-repo.sh
 ```
 
 ## Commands
@@ -47,7 +47,7 @@ Process the inbox (Pass 2 operation):
    - Add `[[backlinks]]` to cross-reference related entries in other files
 5. Clear `_inbox.md` (keep the header, remove all entries)
 6. Update `_index.md` if new domain files were created
-7. Run `bash ~/.project-knowledge/scripts/update-manifest.sh`
+7. Run `bash ~/.lore/scripts/update-manifest.sh`
 8. Report what was filed: "Organized 3 entries: 1 to workflows, 1 to gotchas, 1 to domains/evaluators"
 
 **User veto:** If the user objects to any entry ("drop the 3rd one", "that's wrong"), remove it from the inbox without filing.
@@ -60,13 +60,13 @@ Quick-add directly to a category file (bypasses inbox):
 2. If the category file doesn't exist, create it (and update index for domain files)
 3. Prompt the user for the insight content, or use any content they provided after the title
 4. Append entry in organized format with `### <title>` heading
-5. Run `bash ~/.project-knowledge/scripts/update-manifest.sh`
+5. Run `bash ~/.lore/scripts/update-manifest.sh`
 
 ### `/memory search <query>`
 
 Search the knowledge store:
 
-1. Run `bash ~/.project-knowledge/scripts/search-knowledge.sh "<query>"`
+1. Run `bash ~/.lore/scripts/search-knowledge.sh "<query>"`
 2. For the top matches, read the relevant sections and present a summary
 3. Include any unfiled inbox matches
 
@@ -85,11 +85,11 @@ Full structural repair:
 1. Resolve knowledge directory
 2. Check for missing files: `_index.md`, `_manifest.json`, `domains/` directory
 3. Regenerate `_index.md` by scanning all `.md` files and their `[[backlink]]` patterns
-4. Run `bash ~/.project-knowledge/scripts/update-manifest.sh`
+4. Run `bash ~/.lore/scripts/update-manifest.sh`
 5. Check for empty category files (only header, no entries) — note but don't delete them
 6. Check for entries with `confidence: low` older than 90 days — flag for review
 7. Look for duplicate entries across files — report them
-8. Run `python3 ~/.project-knowledge/scripts/pk_search.py check-links` to scan for broken `[[backlinks]]` — report any that reference missing files or headings
+8. Run `python3 ~/.lore/scripts/pk_search.py check-links` to scan for broken `[[backlinks]]` — report any that reference missing files or headings
 9. Check active plans for staleness: if `notes.md` mtime is >14 days old, flag as stale
 10. Report all findings and repairs
 
@@ -97,5 +97,5 @@ Full structural repair:
 
 Initialize knowledge store for current project:
 
-1. Run `bash ~/.project-knowledge/scripts/init-repo.sh`
+1. Run `bash ~/.lore/scripts/init-repo.sh`
 2. Report the created path and structure

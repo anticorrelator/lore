@@ -1,13 +1,13 @@
 ---
 name: self-test
-description: Evaluate the project-knowledge memory system — run structured tests across 8 dimensions and produce scored, comparable results
+description: Evaluate the lore memory system — run structured tests across 8 dimensions and produce scored, comparable results
 user_invocable: true
 argument_description: "[optional: 'quick' for abbreviated run (Tests 1, 2, 7 only)]"
 ---
 
 # /self-test Skill
 
-Run a structured evaluation of the project-knowledge memory system from any codebase. Tests 8 dimensions of system health, produces scored results, and compares against previous runs to track regressions and improvements.
+Run a structured evaluation of the lore memory system from any codebase. Tests 8 dimensions of system health, produces scored results, and compares against previous runs to track regressions and improvements.
 
 **The core question:** Does the memory system make you effective, or do you find yourself bypassing it?
 
@@ -16,7 +16,7 @@ Run a structured evaluation of the project-knowledge memory system from any code
 ### Path Resolution
 
 ```bash
-bash ~/.project-knowledge/scripts/resolve-repo.sh
+bash ~/.lore/scripts/resolve-repo.sh
 ```
 
 Set `KNOWLEDGE_DIR` to the result. Derive all other paths from it:
@@ -184,7 +184,7 @@ Using the threads you found, answer:
 **Purpose:** Test whether the capture protocol activates naturally during work.
 
 **Script selection procedure:**
-1. List all `.sh` and `.py` files in `~/.project-knowledge/scripts/`.
+1. List all `.sh` and `.py` files in `~/.lore/scripts/`.
 2. Exclude `resolve-repo.sh` (well-documented, likely already familiar).
 3. Pick one you haven't examined before in this session. Prefer less obvious utility scripts over main hook scripts.
 
@@ -209,9 +209,9 @@ Read the selected script and find a non-obvious implementation detail. Then:
 Run these searches (replace `$KNOWLEDGE_DIR` with the resolved path):
 
 ```bash
-python3 ~/.project-knowledge/scripts/pk_search.py search "$KNOWLEDGE_DIR" "backlinks"
-python3 ~/.project-knowledge/scripts/pk_search.py search "$KNOWLEDGE_DIR" "session start"
-python3 ~/.project-knowledge/scripts/pk_search.py stats "$KNOWLEDGE_DIR"
+python3 ~/.lore/scripts/pk_search.py search "$KNOWLEDGE_DIR" "backlinks"
+python3 ~/.lore/scripts/pk_search.py search "$KNOWLEDGE_DIR" "session start"
+python3 ~/.lore/scripts/pk_search.py stats "$KNOWLEDGE_DIR"
 ```
 
 Were the top-3 results the right answers? Did snippets give enough context to decide relevance?
@@ -221,7 +221,7 @@ Were the top-3 results the right answers? Did snippets give enough context to de
 Pick a `See also: [[...]]` reference from any knowledge file and resolve it:
 
 ```bash
-python3 ~/.project-knowledge/scripts/pk_search.py resolve "$KNOWLEDGE_DIR" "[[knowledge:gotchas#Some Heading]]"
+python3 ~/.lore/scripts/pk_search.py resolve "$KNOWLEDGE_DIR" "[[knowledge:gotchas#Some Heading]]"
 ```
 
 (Adapt the backlink reference to one that actually exists in the store.)
@@ -231,7 +231,7 @@ Did it return the exact section? Compare to manually reading the file.
 ### 7c: Link Integrity
 
 ```bash
-python3 ~/.project-knowledge/scripts/pk_search.py check-links "$KNOWLEDGE_DIR"
+python3 ~/.lore/scripts/pk_search.py check-links "$KNOWLEDGE_DIR"
 ```
 
 How many broken links? Are they real breaks or false positives?

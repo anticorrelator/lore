@@ -7,13 +7,13 @@ argument_description: "[command] [name] — commands: create, list, update, arch
 
 # /work Skill
 
-Manages per-project work items at `~/.project-knowledge/repos/<repo>/_work/`.
+Manages per-project work items in the `_work/` directory of each project's knowledge store.
 
 ## Resolve Work Path
 
 First, resolve the knowledge and work directories:
 ```bash
-bash ~/.project-knowledge/scripts/resolve-repo.sh
+bash ~/.lore/scripts/resolve-repo.sh
 ```
 Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
@@ -52,7 +52,7 @@ Parse the user's arguments to determine which command to run.
 
 Create a new work item:
 
-1. Resolve knowledge dir; if `_work/` doesn't exist, run `bash ~/.project-knowledge/scripts/init-work.sh`
+1. Resolve knowledge dir; if `_work/` doesn't exist, run `bash ~/.lore/scripts/init-work.sh`
 2. Slugify the name
 3. Check that the slug doesn't already exist in `_work/`
 4. Create the directory: `_work/<slug>/`
@@ -78,7 +78,7 @@ Create a new work item:
    <!-- Append session entries below. Each entry records what happened in a session. -->
    ```
 8. **Do NOT create plan.md** — it's created on demand via `/spec`
-9. Run `bash ~/.project-knowledge/scripts/update-work-index.sh`
+9. Run `bash ~/.lore/scripts/update-work-index.sh`
 10. Report: "Created work item '<title>'. Use `/spec` when ready to add structured planning."
 
 ### `/work [name]` (load/resume — default when name given or no command matches)
@@ -103,7 +103,7 @@ Load a work item's context:
 List all work items:
 
 1. Read `_work/_index.json`
-2. If index is missing or stale, run `bash ~/.project-knowledge/scripts/update-work-index.sh` first
+2. If index is missing or stale, run `bash ~/.lore/scripts/update-work-index.sh` first
 3. Show active work items in a table/list:
    - Slug, title, status, branches, last updated, has plan doc
 4. Count archived work items in `_work/_archive/`:
@@ -138,7 +138,7 @@ Capture session progress to notes:
    ```
 5. Update `_meta.json` `updated` timestamp
 6. If `plan.md` exists and task checkboxes were completed this session, update them (`- [ ]` -> `- [x]`)
-7. Run `bash ~/.project-knowledge/scripts/update-work-index.sh`
+7. Run `bash ~/.lore/scripts/update-work-index.sh`
 
 ### `/work archive [name]`
 
@@ -153,14 +153,14 @@ Archive a completed work item:
    ```bash
    mv "$WORK_DIR/<slug>" "$WORK_DIR/_archive/<slug>"
    ```
-7. Run `bash ~/.project-knowledge/scripts/update-work-index.sh`
+7. Run `bash ~/.lore/scripts/update-work-index.sh`
 8. Report: "Archived work item '<title>'"
 
 ### `/work search <query>`
 
 Search across all work item documents:
 
-1. Run `bash ~/.project-knowledge/scripts/search-work.sh "<query>"`
+1. Run `bash ~/.lore/scripts/search-work.sh "<query>"`
 2. For the top matches, read the relevant sections and present a summary
 3. Include both active and archived results (mark archived)
 
@@ -170,7 +170,7 @@ Generate TaskCreate calls from work item phases, using backlinks for context del
 
 1. Resolve work item, read `plan.md`
 2. If no `plan.md` exists, tell the user: "No structured plan doc found. Run `/spec` first to add phases and tasks."
-3. Resolve the knowledge directory path: `bash ~/.project-knowledge/scripts/resolve-repo.sh`
+3. Resolve the knowledge directory path: `bash ~/.lore/scripts/resolve-repo.sh`
 4. Scan the plan's `## Related` section and `## Design Decisions` for `[[...]]` backlinks relevant to each phase
 5. For each `### Phase N:` section that contains `- [ ]` (unchecked) items:
    - For each unchecked `- [ ]` item, generate a TaskCreate call with:
@@ -181,7 +181,7 @@ Generate TaskCreate calls from work item phases, using backlinks for context del
        - **Context backlinks** — `[[knowledge:file#heading]]`, `[[work:slug]]`, or `[[thread:slug]]` references that provide implementation context. Include backlinks from the plan's Related section, Design Decisions, and any `See also:` references in relevant knowledge entries. Format as a "Context" section:
          ```
          ## Context (resolve before starting)
-         Resolve these with: python3 ~/.project-knowledge/scripts/pk_search.py resolve <knowledge_dir> "<backlink>"
+         Resolve these with: python3 ~/.lore/scripts/pk_search.py resolve <knowledge_dir> "<backlink>"
 
          - [[knowledge:architecture#Section Name]] — why this is relevant
          - [[work:work-slug]] — design decisions for this feature
@@ -201,12 +201,12 @@ Repair work item structure:
 
 1. Resolve work dir
 2. Check for and repair these issues:
-   - **Missing `_index.json`**: Run `bash ~/.project-knowledge/scripts/update-work-index.sh`
+   - **Missing `_index.json`**: Run `bash ~/.lore/scripts/update-work-index.sh`
    - **Orphan directories** (subdirectory of `_work/` with no `_meta.json`): Create `_meta.json` from directory name as slug/title, status "active", current timestamp
    - **Stale index** (work item count in index doesn't match directories): Run `update-work-index.sh`
    - **Missing `notes.md`**: Create with header from `_meta.json` title
    - **Work items inactive >30 days**: Report them, suggest archiving
-3. Run `bash ~/.project-knowledge/scripts/update-work-index.sh`
+3. Run `bash ~/.lore/scripts/update-work-index.sh`
 4. Report all findings and repairs
 
 ### No arguments

@@ -12,7 +12,7 @@ Pause and review the current session for uncaptured knowledge and unupdated thre
 ## Resolve Paths
 
 ```bash
-bash ~/.project-knowledge/scripts/resolve-repo.sh
+bash ~/.lore/scripts/resolve-repo.sh
 ```
 
 Set `KNOWLEDGE_DIR` to the result. Set `THREADS_DIR` to `$KNOWLEDGE_DIR/_threads`.
@@ -132,8 +132,8 @@ The user can say "don't keep that" or "drop the X entry" after seeing the summar
 
 After capturing:
 - Update thread YAML frontmatter (`updated`, increment `sessions`)
-- Run `bash ~/.project-knowledge/scripts/update-thread-index.sh`
-- If a plan was updated, run `bash ~/.project-knowledge/scripts/update-work-index.sh`
+- Run `bash ~/.lore/scripts/update-thread-index.sh`
+- If a plan was updated, run `bash ~/.lore/scripts/update-work-index.sh`
 
 ## Step 7: Resume work
 

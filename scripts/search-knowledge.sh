@@ -38,10 +38,10 @@ echo ""
 # ---------------------------------------------------------------------------
 # Try pk_search.py (FTS5 backend) first
 # ---------------------------------------------------------------------------
-PK_SEARCH="$SCRIPT_DIR/pk_search.py"
+LORE_SEARCH="$SCRIPT_DIR/pk_search.py"
 USE_FTS=0
 
-if [[ -f "$PK_SEARCH" ]] && command -v python3 &>/dev/null; then
+if [[ -f "$LORE_SEARCH" ]] && command -v python3 &>/dev/null; then
   # Verify python3 has sqlite3 with FTS5 support
   if python3 -c "import sqlite3" 2>/dev/null; then
     USE_FTS=1
@@ -52,7 +52,7 @@ if [[ $USE_FTS -eq 1 ]]; then
   echo "--- Ranked results (FTS5) ---"
   if [[ $CONCISE -eq 1 ]]; then
     # Concise mode: show file path + heading only
-    FTS_RESULTS=$(python3 "$PK_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --limit 20 --json 2>/dev/null || true)
+    FTS_RESULTS=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --limit 20 --json 2>/dev/null || true)
     if [[ -n "$FTS_RESULTS" && "$FTS_RESULTS" != "[]" ]]; then
       # Parse JSON results and display concisely
       python3 -c "
@@ -77,7 +77,7 @@ for r in results:
     fi
   else
     # Full mode: show ranked results with snippets
-    FTS_OUTPUT=$(python3 "$PK_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --limit 10 2>/dev/null || true)
+    FTS_OUTPUT=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --limit 10 2>/dev/null || true)
     if [[ -n "$FTS_OUTPUT" ]]; then
       echo "$FTS_OUTPUT"
     else

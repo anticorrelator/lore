@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 AGENT_DIR="$(dirname "$SCRIPT_DIR")"
 FRAGMENTS_DIR="$AGENT_DIR/claude-md"
 TARGET="$HOME/.claude/CLAUDE.md"
@@ -50,12 +50,12 @@ if [[ "${1:-}" == "--check" ]]; then
       echo "CLAUDE.md is up to date."
       exit 0
     else
-      echo "CLAUDE.md is out of date. Run: bash ~/.project-knowledge/scripts/assemble-claude-md.sh" >&2
+      echo "CLAUDE.md is out of date. Run: bash ~/.lore/scripts/assemble-claude-md.sh" >&2
       diff <(echo "$assembled") "$TARGET" >&2 || true
       exit 1
     fi
   else
-    echo "CLAUDE.md does not exist yet. Run: bash ~/.project-knowledge/scripts/assemble-claude-md.sh" >&2
+    echo "CLAUDE.md does not exist yet. Run: bash ~/.lore/scripts/assemble-claude-md.sh" >&2
     exit 1
   fi
 fi

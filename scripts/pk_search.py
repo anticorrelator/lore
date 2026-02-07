@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pk-search: SQLite FTS5-based knowledge search for project-knowledge stores.
+"""pk-search: SQLite FTS5-based knowledge search for lore knowledge stores.
 
 Single-file CLI with zero external dependencies (stdlib only).
 
@@ -1054,7 +1054,7 @@ def cmd_check_links(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="pk-search",
-        description="SQLite FTS5 search for project-knowledge stores",
+        description="SQLite FTS5 search for lore knowledge stores",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

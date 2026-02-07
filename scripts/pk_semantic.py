@@ -1,5 +1,5 @@
 """
-pk_semantic.py — Semantic search module for project-knowledge.
+pk_semantic.py — Semantic search module for lore.
 
 Provides vector embedding support using sentence-transformers (optional dependency).
 Can be imported by pk_search.py for --semantic and --hybrid search modes.

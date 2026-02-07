@@ -9,5 +9,5 @@
 
 To find the knowledge directory for the current project:
 ```bash
-bash ~/.project-knowledge/scripts/resolve-repo.sh
+bash ~/.lore/scripts/resolve-repo.sh
 ```

@@ -7,7 +7,7 @@ argument_description: "[short] [name or description] — existing work item name
 
 # /spec Skill
 
-Produces a `plan.md` inside a work item at `~/.project-knowledge/repos/<repo>/_work/<slug>/`.
+Produces a `plan.md` inside a work item's `_work/<slug>/` directory.
 
 **Two modes:**
 - **`/spec short [input]`** — Single agent reads key files and drafts the plan directly. For well-understood, small-scope work.
@@ -18,7 +18,7 @@ Produces a `plan.md` inside a work item at `~/.project-knowledge/repos/<repo>/_w
 ## Resolve Work Path
 
 ```bash
-bash ~/.project-knowledge/scripts/resolve-repo.sh
+bash ~/.lore/scripts/resolve-repo.sh
 ```
 Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
@@ -73,7 +73,7 @@ For single-pass plans where the scope is clear and the agent can identify key fi
 ### Step 4s: Finalize
 
 1. Incorporate user feedback
-2. Run `bash ~/.project-knowledge/scripts/update-work-index.sh`
+2. Run `bash ~/.lore/scripts/update-work-index.sh`
 
 ---
 
@@ -174,7 +174,7 @@ If gaps are identified:
 - Append new findings to the Investigations section
 - Update the synthesis
 
-Run `bash ~/.project-knowledge/scripts/update-work-index.sh` after any changes.
+Run `bash ~/.lore/scripts/update-work-index.sh` after any changes.
 
 ---
 

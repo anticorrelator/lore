@@ -15,15 +15,8 @@ The SessionStart hook detects pending inbox items and prompts Claude to run `/kn
 ## Directory Structure
 
 ```
-~/.project-knowledge/
-  _meta.md                    # This file — system documentation
-  scripts/                    # Bash scripts for hooks and utilities
-    resolve-repo.sh           # CWD -> knowledge path resolution
-    init-repo.sh              # Initialize repo knowledge structure
-    load-knowledge.sh         # SessionStart hook script
-    pre-compact.sh            # PreCompact hook script
-    search-knowledge.sh       # Keyword + full-text search
-    update-manifest.sh        # Regenerate _manifest.json
+~/.lore/                      # Data directory ($LORE_DATA_DIR)
+  scripts -> <lore-repo>/scripts/  # Symlink to logic repo
   repos/
     <normalized-remote>/      # Per-repo knowledge (e.g., github.com/arize-ai/phoenix)
       _inbox.md               # Capture queue (append-only during coding)
@@ -100,6 +93,6 @@ Target: 1-3 captures per substantial session.
 
 1. Try `git remote get-url origin`
 2. Normalize: strip protocol/auth, SSH colon -> slash, strip `.git`, lowercase
-3. Path: `~/.project-knowledge/repos/<normalized>`
+3. Path: `$LORE_DATA_DIR/repos/<normalized>`
 4. Fallback (no remote): `repos/local/<repo-root-basename>`
 5. Fallback (no git): `repos/local/<cwd-basename>`
