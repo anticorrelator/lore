@@ -5,7 +5,8 @@
 
 set -euo pipefail
 
-BASE_DIR="${HOME}/.project-knowledge/repos"
+source "$(dirname "$0")/config.sh"
+BASE_DIR="${LORE_DATA_DIR}/repos"
 TARGET_DIR="${1:-$(pwd)}"
 
 # Try to get git remote URL
