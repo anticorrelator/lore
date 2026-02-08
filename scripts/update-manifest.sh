@@ -87,15 +87,18 @@ for category in categories:
 
     cat_entry_count = 0
 
-    for fname in sorted(os.listdir(cat_dir)):
-        if not fname.endswith('.md'):
-            continue
+    # Collect all .md files recursively, then sort for deterministic output
+    md_files = []
+    for dirpath, _dirnames, filenames in os.walk(cat_dir):
+        for fname in filenames:
+            if not fname.endswith('.md'):
+                continue
+            filepath = os.path.join(dirpath, fname)
+            relpath = os.path.relpath(filepath, knowledge_dir)
+            md_files.append((relpath, filepath))
+    md_files.sort(key=lambda x: x[0])
 
-        filepath = os.path.join(cat_dir, fname)
-        if not os.path.isfile(filepath):
-            continue
-
-        relpath = os.path.join(category, fname)
+    for relpath, filepath in md_files:
 
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()

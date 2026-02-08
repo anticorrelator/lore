@@ -570,6 +570,59 @@ class Concordance:
             "elapsed_seconds": round(elapsed, 3),
         }
 
+    def find_merge_candidates(self, threshold: float = 0.5) -> list[dict]:
+        """Find knowledge-to-knowledge pairs above a similarity threshold.
+
+        Queries concordance_results for see_also pairs above threshold,
+        deduplicates symmetric pairs (keeps lower file_path as canonical),
+        and returns sorted results.
+
+        Args:
+            threshold: Minimum similarity score to include (default 0.5).
+
+        Returns:
+            List of dicts with target_path, source_path, similarity,
+            target_title, source_title — sorted by similarity descending.
+        """
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT file_path, heading, similar_entry_path, similar_entry_heading, similarity_score "
+            "FROM concordance_results "
+            "WHERE result_type = 'see_also' AND similarity_score >= ?",
+            (threshold,),
+        ).fetchall()
+        conn.close()
+
+        # Deduplicate symmetric pairs: keep lower path as target (canonical)
+        seen: set[tuple[str, str, str, str]] = set()
+        candidates: list[dict] = []
+
+        for fp, heading, sim_fp, sim_heading, score in rows:
+            # Canonical key: sort the two entries so (A,B) and (B,A) map to same key
+            if (fp, heading) <= (sim_fp, sim_heading):
+                key = (fp, heading, sim_fp, sim_heading)
+                target_path, target_title = fp, heading
+                source_path, source_title = sim_fp, sim_heading
+            else:
+                key = (sim_fp, sim_heading, fp, heading)
+                target_path, target_title = sim_fp, sim_heading
+                source_path, source_title = fp, heading
+
+            if key in seen:
+                continue
+            seen.add(key)
+
+            candidates.append({
+                "target_path": target_path,
+                "source_path": source_path,
+                "similarity": round(score, 4),
+                "target_title": target_title,
+                "source_title": source_title,
+            })
+
+        candidates.sort(key=lambda x: -x["similarity"])
+        return candidates
+
     def get_term_index(self) -> dict[str, int]:
         """Build and return the current term -> integer index mapping.
 

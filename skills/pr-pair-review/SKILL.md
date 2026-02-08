@@ -13,11 +13,11 @@ Interactive pair-review skill for GitHub PRs. Uses a structured 3-beat turn prot
 
 Argument provided: `$ARGUMENTS`
 
-**If argument provided:** Parse as PR number or GitHub PR URL.
+**If argument provided:** Parse as PR number or GitHub PR URL. If a URL is provided, extract the PR number from it. All subsequent steps use the numeric PR number.
 
 **If no argument:** Detect from current branch:
 ```bash
-gh pr list --head "$(git branch --show-current)" --json number --jq '.[0].number'
+gh pr list --state open --head "$(git branch --show-current)" --json number --jq '.[0].number' 2>/dev/null
 ```
 
 **If detection fails:** Ask the user for the PR number.
@@ -62,10 +62,12 @@ Present this summary and proceed to review rounds.
 
 Read the review protocol reference for the checklist and enrichment rules:
 ```bash
-cat ~/.lore/claude-md-files/70-review-protocol.md 2>/dev/null || cat claude-md/70-review-protocol.md
+cat claude-md/70-review-protocol.md
 ```
 
 Apply the 8-point review checklist from the protocol to each changed file or logical unit. Review follows the hierarchy: architecture first, then logic/correctness, then maintainability.
+
+**Scoping for large diffs:** For PRs touching more than ~10 files, prioritize analysis by: (1) files in identified risk areas from Step 3, (2) files with the most additions (new logic over modified logic), (3) files touching shared interfaces or public APIs. Apply the full checklist to priority files; do a lighter pass on the rest.
 
 ### Turn protocol
 
@@ -85,7 +87,7 @@ For findings with substantive labels (suggestion, issue, question, thought):
 
 1. Query the knowledge store:
    ```bash
-   lore search "<topic>" --json --limit 3
+   lore search "<topic>" --type knowledge --json --limit 3
    ```
 2. Surface 1-3 compact citations inline: `[knowledge: entry-title]` with a one-line summary of relevance.
 3. If a knowledge entry is STALE and the PR contradicts it, flag as "convention may need updating" — not "PR is wrong."
@@ -110,18 +112,19 @@ For nitpick/praise labels: skip enrichment, proceed directly to Beat 3.
 ### Round limits
 
 - Default 2 rounds per thread, extendable to 3 on request
-- Hard cap at 3 rounds — if unresolved after 3, mark as escalation candidate
+- Hard cap at 3 rounds — if unresolved after 3, mark as escalation candidate (becomes an "open" thread → Phase 3: Unresolved in the work item)
 - Each round focuses on one level of the review hierarchy
 
 ### Thread state tracking
 
 Track each thread as:
 ```
-{id, topic, status, label, blocking?, knowledge_checked, round_count, linked_task}
+{id, topic, status, label, blocking?, initiator, knowledge_checked, round_count, linked_task}
 ```
 
 Where:
 - `blocking?` — true if the finding would block merge
+- `initiator` — "agent" or "reviewer" (who raised the topic in Beat 1)
 - `knowledge_checked` — true after Beat 2 enrichment completes
 - `linked_task` — reference to generated task (set in Step 5)
 
@@ -129,15 +132,8 @@ Where:
 
 After all review threads conclude, collect findings and create a work item:
 
-```bash
-lore resolve
 ```
-
-Set `KNOWLEDGE_DIR` to the result, `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
-
-Create the work item:
-```
-/work create pr-pair-review-<branch-slug>
+/work create pr-pair-review-<PR_NUMBER>
 ```
 
 Write `plan.md` with this structure:
@@ -173,7 +169,7 @@ Write `plan.md` with this structure:
 
 Omit empty phases. Generate tasks:
 ```
-/work tasks pr-pair-review-<branch-slug>
+/work tasks pr-pair-review-<PR_NUMBER>
 ```
 
 Assess readiness:
@@ -209,6 +205,10 @@ Assess readiness:
 ```
 
 This step is automatic — do not ask whether to run it.
+
+## Resuming
+
+If re-invoked on the same PR, check for an existing work item (e.g., `pr-pair-review-<PR_NUMBER>` in `/work list`). If found, load it and continue the review from where it left off — add new threads to the existing plan rather than creating a duplicate.
 
 ## Error Handling
 

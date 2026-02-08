@@ -79,9 +79,10 @@ lore analyze — knowledge store analysis
 Usage: lore analyze <subcommand> [args...]
 
 Subcommands:
-  staleness      Scan entries for staleness (age, confidence, missing files)
-  usage          Analyze entry access patterns from retrieval logs
-  concordance    Compute see-also and related-files via TF-IDF similarity
+  staleness         Scan entries for staleness (age, confidence, missing files)
+  usage             Analyze entry access patterns from retrieval logs
+  concordance       Compute see-also and related-files via TF-IDF similarity
+  merge-candidates  Find knowledge entries that may be duplicates
 
 Options:
   --help, -h    Show this help
@@ -173,6 +174,9 @@ cmd_analyze() {
     concordance)
       cmd_analyze_concordance "$@"
       ;;
+    merge-candidates)
+      cmd_analyze_merge_candidates "$@"
+      ;;
     *)
       echo "Error: unknown analyze subcommand '$subcmd'" >&2
       echo "" >&2
@@ -234,6 +238,20 @@ cmd_analyze_concordance() {
   kdir="$(resolve_kdir)"
 
   python3 "$SCRIPTS_DIR/pk_cli.py" analyze-concordance "$kdir" "$@"
+}
+
+cmd_analyze_merge_candidates() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Usage: lore analyze merge-candidates [--threshold F] [--json]" >&2
+    echo "  Find knowledge entries that may be duplicates (high similarity)." >&2
+    echo "  Writes report to _meta/merge-candidates.json and prints a summary." >&2
+    return 0
+  fi
+
+  local kdir
+  kdir="$(resolve_kdir)"
+
+  python3 "$SCRIPTS_DIR/pk_cli.py" analyze-merge-candidates "$kdir" "$@"
 }
 
 # --- Bootstrap subgroup ---

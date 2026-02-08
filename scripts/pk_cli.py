@@ -528,6 +528,59 @@ def cmd_analyze_concordance(args: argparse.Namespace) -> None:
             print(f"    -> {sim_heading} ({rel_sim_fp}, sim: {score:.4f})")
 
 
+def cmd_analyze_merge_candidates(args: argparse.Namespace) -> None:
+    from pk_concordance import Concordance
+
+    searcher = Searcher(args.knowledge_dir)
+    searcher._ensure_index()
+
+    concordance = Concordance(searcher.db_path)
+    threshold = getattr(args, "threshold", 0.5)
+
+    candidates = concordance.find_merge_candidates(threshold=threshold)
+
+    # Write to _meta/merge-candidates.json
+    knowledge_dir_abs = os.path.abspath(args.knowledge_dir)
+    meta_dir = os.path.join(knowledge_dir_abs, "_meta")
+    os.makedirs(meta_dir, exist_ok=True)
+    output_path = os.path.join(meta_dir, "merge-candidates.json")
+
+    # Convert absolute paths to relative for the output file
+    output = []
+    for c in candidates:
+        entry = dict(c)
+        for key in ("target_path", "source_path"):
+            try:
+                entry[key] = os.path.relpath(entry[key], knowledge_dir_abs)
+            except ValueError:
+                pass
+        output.append(entry)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2)
+        f.write("\n")
+
+    if args.json:
+        print(json.dumps(output, indent=2))
+        return
+
+    print(f"Found {len(candidates)} merge candidates (threshold >= {threshold})")
+    print(f"Written to: {output_path}")
+    for c in candidates:
+        target_rel = c["target_path"]
+        source_rel = c["source_path"]
+        try:
+            target_rel = os.path.relpath(c["target_path"], knowledge_dir_abs)
+        except ValueError:
+            pass
+        try:
+            source_rel = os.path.relpath(c["source_path"], knowledge_dir_abs)
+        except ValueError:
+            pass
+        print(f"  {c['similarity']:.4f}  {c['target_title']} ({target_rel})")
+        print(f"           <-> {c['source_title']} ({source_rel})")
+
+
 def cmd_check_links(args: argparse.Namespace) -> None:
     checker = LinkChecker(args.knowledge_dir)
     include_all = getattr(args, "all", False)
@@ -641,6 +694,13 @@ def main() -> None:
     p_conc.add_argument("--see-also-limit", type=int, default=3, help="Max see-also entries per knowledge entry (default: 3)")
     p_conc.add_argument("--related-files-threshold", type=float, default=0.05, help="Min similarity for related files (default: 0.05)")
     p_conc.set_defaults(func=cmd_analyze_concordance)
+
+    # analyze-merge-candidates
+    p_merge = subparsers.add_parser("analyze-merge-candidates", help="Find knowledge entries that may be duplicates (high similarity)")
+    p_merge.add_argument("knowledge_dir", help="Path to knowledge directory")
+    p_merge.add_argument("--json", action="store_true", help="Output as JSON")
+    p_merge.add_argument("--threshold", type=float, default=0.5, help="Min similarity for merge candidates (default: 0.5)")
+    p_merge.set_defaults(func=cmd_analyze_merge_candidates)
 
     # stats
     p_stats = subparsers.add_parser("stats", help="Show index statistics")

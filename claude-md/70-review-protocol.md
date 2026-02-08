@@ -66,7 +66,7 @@ For each substantive finding:
 
 1. **Query the knowledge store:**
    ```bash
-   lore search "<topic>" --json --limit 3
+   lore search "<topic>" --type knowledge --json --limit 3
    ```
    Where `<topic>` is the specific concept, pattern, or component the finding concerns.
 

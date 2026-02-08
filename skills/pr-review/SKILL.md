@@ -44,12 +44,14 @@ Parse the results to understand:
 Read the review checklist and enrichment protocol:
 
 ```bash
-cat ~/.lore/claude-md/70-review-protocol.md
+cat claude-md/70-review-protocol.md
 ```
 
 Apply the **review hierarchy** (architecture > logic > maintainability) to the diff. Higher tiers gate lower ones — if there is an architectural problem, do not spend time on logic-level comments.
 
 Walk through each changed file or logical unit against the **8-point review checklist**. For each checklist item, determine whether there is a finding. Not every item will produce a finding — that is expected. Skip items that are clean.
+
+**Scoping for large diffs:** For PRs touching more than ~10 files, prioritize analysis by: (1) files in identified risk areas, (2) files with the most additions (new logic over modified logic), (3) files touching shared interfaces or public APIs. Apply the full checklist to priority files; do a lighter pass on the rest.
 
 Label each finding with a severity:
 - **blocking** — must fix before merge (correctness, security, data loss)
@@ -64,7 +66,7 @@ For each finding labeled blocking, suggestion, or question:
 
 1. Query the knowledge store for related conventions, decisions, or gotchas:
    ```bash
-   lore search "<finding topic>" --json --limit 3
+   lore search "<finding topic>" --type knowledge --json --limit 3
    ```
 
 2. If relevant entries exist, attach 1-3 compact citations to the finding: `[knowledge: entry-title]` with a one-line summary of relevance. Check for staleness — if a knowledge entry is marked STALE and the PR contradicts it, flag as "convention may need updating," not "PR is wrong."
@@ -173,6 +175,10 @@ Then invoke `/remember` with review-scoped constraints:
 ```
 /remember PR review findings from PR #<N> — capture: architectural insights about the reviewed codebase, convention patterns observed, cross-boundary invariants identified, non-obvious design decisions discovered during investigation escalation. Use confidence: medium for reviewer observations (not yet verified against codebase internals). Skip: style opinions, subjective preferences, naming taste, findings specific to the reviewed PR that don't generalize, nitpicks.
 ```
+
+## Resuming
+
+If re-invoked on the same PR, check for an existing work item (e.g., `pr-review-<PR_NUMBER>` in `/work list`). If found, load it and append new findings to `notes.md` rather than creating a duplicate.
 
 ## Error Handling
 

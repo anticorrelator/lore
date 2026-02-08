@@ -17,11 +17,11 @@ This skill is analysis-only — it produces an implement-ready work item but doe
 
 Argument provided: `$ARGUMENTS`
 
-**If argument provided:** Parse as PR number or URL.
+**If argument provided:** Parse as PR number or URL. If a URL is provided, extract the PR number from it. All subsequent steps use the numeric PR number.
 
 **If no argument:** Detect from current branch:
 ```bash
-gh pr list --head "$(git branch --show-current)" --json number --jq '.[0].number' 2>/dev/null
+gh pr list --state open --head "$(git branch --show-current)" --json number --jq '.[0].number' 2>/dev/null
 ```
 
 **If detection fails:** Ask the user for the PR number.
@@ -45,6 +45,8 @@ gh pr view <PR_NUMBER> --json files,title,body,baseRefName,headRefName
 
 Apply structured prompts designed to counteract self-review bias. Process each changed file or logical unit through these lenses before applying the checklist.
 
+**Scoping for large diffs:** For PRs touching more than ~10 files, prioritize analysis by: (1) files in identified risk areas from the diff, (2) files with the most additions (new logic over modified logic), (3) files touching shared interfaces or public APIs. Apply the full perspective prompts and checklist to priority files; do a lighter pass on the rest.
+
 **Perspective prompts (apply in order):**
 
 1. **External reviewer lens:** "What would a reviewer unfamiliar with this codebase question about this change?" — surfaces assumptions that feel obvious to the author but aren't documented or self-evident.
@@ -67,7 +69,7 @@ For each finding with a substantive label (suggestion, issue, question, thought)
 
 1. Query the knowledge store:
    ```bash
-   lore search "<finding topic>" --json --limit 3
+   lore search "<finding topic>" --type knowledge --json --limit 3
    ```
 
 2. Surface 1-3 compact citations inline with the finding. Format: `[knowledge: entry-title]` with a one-line summary of relevance.
@@ -85,7 +87,7 @@ Skip enrichment for nitpick and praise labels.
 Create an implement-ready work item with phased fix tasks:
 
 ```
-/work create pr-self-review-<branch-slug>
+/work create pr-self-review-<PR_NUMBER>
 ```
 
 Write `plan.md` structured for direct handoff to `/implement`:
@@ -124,7 +126,7 @@ Omit empty phases. Group related findings that touch the same file/function. Inc
 
 Generate tasks from the plan:
 ```
-/work tasks pr-self-review-<branch-slug>
+/work tasks pr-self-review-<PR_NUMBER>
 ```
 
 ## Step 6: Present Summary
@@ -149,16 +151,20 @@ Present findings framed as reviewer preparation:
 - <context that would help reviewers, surfaced by analysis>
 
 ### Work item created:
-- `pr-self-review-<branch-slug>` — implement-ready, N tasks
+- `pr-self-review-<PR_NUMBER>` — implement-ready, N tasks
 ```
 
 ## Step 7: Capture Insights
 
 ```
-/remember Self-review findings from PR on branch <branch> — capture: convention drift patterns found, cross-boundary invariants identified, architectural concerns surfaced by perspective-shifting prompts. Skip: obvious fixes, style issues, findings specific to this PR that don't generalize.
+/remember Self-review findings from PR #<N> on branch <branch> — capture: convention drift patterns found, cross-boundary invariants identified, architectural concerns surfaced by perspective-shifting prompts. Use confidence: medium (self-review blindness is structural — the reviewing model shares reasoning gaps with the authoring model). Skip: obvious fixes, style issues, findings specific to this PR that don't generalize.
 ```
 
 This step is automatic — do not ask whether to run it.
+
+## Resuming
+
+If re-invoked on the same PR, check for an existing work item (e.g., `pr-self-review-<PR_NUMBER>` in `/work list`). If found, load it and append new findings to the plan rather than creating a duplicate.
 
 ## Error Handling
 

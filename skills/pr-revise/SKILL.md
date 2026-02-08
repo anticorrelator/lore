@@ -15,11 +15,11 @@ This skill is analysis-only — it creates plans and tasks but does not modify s
 
 Argument provided: `$ARGUMENTS`
 
-**If argument provided:** Parse as PR number or URL.
+**If argument provided:** Parse as PR number or URL. If a URL is provided, extract the PR number from it. All subsequent steps use the numeric PR number.
 
 **If no argument:** Detect from current branch:
 ```bash
-gh pr list --head "$(git branch --show-current)" --json number --jq '.[0].number' 2>/dev/null
+gh pr list --state open --head "$(git branch --show-current)" --json number --jq '.[0].number' 2>/dev/null
 ```
 
 **If detection fails:** Ask the user for the PR number.
@@ -30,7 +30,7 @@ Fetch all PR data using the shared script:
 
 ```bash
 # Structured comment/review data (reviewThreads, reviews, general comments)
-scripts/fetch-pr-data.sh <PR_NUMBER>
+bash ~/.lore/scripts/fetch-pr-data.sh <PR_NUMBER>
 
 # Raw diff for context
 gh pr diff <PR_NUMBER>
@@ -60,6 +60,8 @@ Assign a Conventional Comments label to each item: `suggestion`, `issue`, `quest
 
 **Apply the 8-point review checklist** from the review protocol reference (`claude-md/70-review-protocol.md`) as an additional analysis lens when categorizing. Read the checklist at invocation time — do not duplicate it here. The checklist helps distinguish substantive feedback from style preferences.
 
+**Scoping for large diffs:** For PRs touching more than ~10 files, prioritize analysis by: (1) files with blocking/CHANGES_REQUESTED feedback, (2) files with the most review threads, (3) files touching shared interfaces or public APIs. Apply detailed categorization to priority files; batch remaining items by category.
+
 ## Step 4: Knowledge Enrichment
 
 **This step is mandatory.** Follow the Knowledge Enrichment Protocol defined in `claude-md/70-review-protocol.md`.
@@ -68,7 +70,7 @@ For each feedback item with a substantive label (suggestion, issue, question, th
 
 1. Query the knowledge store:
    ```bash
-   lore search "<feedback topic>" --json --limit 3
+   lore search "<feedback topic>" --type knowledge --json --limit 3
    ```
 
 2. Surface 1-3 compact citations inline with the categorized item. Format: `[knowledge: entry-title]` with a one-line summary of relevance.
@@ -166,6 +168,10 @@ If there are items needing input, ask about them in a single batched question.
 ```
 
 This step is automatic — do not ask whether to run it.
+
+## Resuming
+
+If re-invoked on the same PR, check for an existing work item (e.g., `pr-<NUMBER>-*` in `/work list`). If found, load it and update the plan with any new feedback rather than creating a duplicate.
 
 ## Error Handling
 
