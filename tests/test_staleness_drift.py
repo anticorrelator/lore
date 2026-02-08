@@ -423,8 +423,11 @@ class TestScoreEntry:
         fd = {"score": 1.0, "available": True, "commit_count": 15}
         bd = {"score": 0.0, "available": True, "total": 1, "broken": 0}
         drift_score, status, signals = score_entry(fd, bd, "high")
-        assert drift_score == pytest.approx(0.6)
-        assert status == "stale"
+        # No neighbor_drift or vocabulary_drift → w_conf gets 0.10+0.10=0.20
+        # w_fd=0.55, w_bd=0.25, w_conf=0.20 → total=1.0
+        # score = 0.55*1.0 + 0.25*0.0 + 0.20*0.0 = 0.55
+        assert drift_score == pytest.approx(0.55)
+        assert status == "aging"
 
     def test_broken_backlinks_cause_aging(self):
         fd = {"score": 0.0, "available": True, "commit_count": 0}
@@ -445,22 +448,31 @@ class TestScoreEntry:
         fd = {"score": 0.5, "available": True, "commit_count": 5}
         bd = {"score": 0.0, "available": False, "total": 0, "broken": 0}
         drift_score, status, signals = score_entry(fd, bd, "high")
-        # file_drift weight = 0.6 + 0.25 = 0.85, confidence weight = 0.15
-        # score = 0.85 * 0.5 + 0.15 * 0.0 = 0.425
-        assert signals["file_drift"]["weight"] == pytest.approx(0.85)
+        # No neighbor_drift or vocabulary_drift → w_conf gets 0.10+0.10=0.20
+        # w_fd=0.55, w_bd=0, w_nd=0, w_vd=0, w_conf=0.20 → total=0.75 → normalize
+        # w_fd=0.55/0.75≈0.7333, w_conf=0.20/0.75≈0.2667
+        # score = (0.55/0.75)*0.5 + (0.20/0.75)*0.0 ≈ 0.3667
+        # Signals dict rounds weights to 4 decimal places
+        assert signals["file_drift"]["weight"] == pytest.approx(round(0.55 / 0.75, 4))
         assert signals["backlink_drift"]["weight"] == 0.0
-        assert drift_score == pytest.approx(0.425)
+        # drift_score uses full-precision weights
+        assert drift_score == pytest.approx((0.55 / 0.75) * 0.5)
         assert status == "aging"
 
     def test_weight_redistribution_no_file_drift(self):
         fd = {"score": 0.0, "available": False, "commit_count": 0}
         bd = {"score": 1.0, "available": True, "total": 3, "broken": 2}
         drift_score, status, signals = score_entry(fd, bd, "high")
-        # backlink weight = 0.25 + 0.6 = 0.85
-        assert signals["backlink_drift"]["weight"] == pytest.approx(0.85)
+        # No neighbor_drift or vocabulary_drift → w_conf gets 0.10+0.10=0.20
+        # w_fd=0, w_bd=0.25, w_nd=0, w_vd=0, w_conf=0.20 → total=0.45 → normalize
+        # w_bd=0.25/0.45≈0.5556, w_conf=0.20/0.45≈0.4444
+        # score = (0.25/0.45)*1.0 + (0.20/0.45)*0.0 ≈ 0.5556
+        # Signals dict rounds weights to 4 decimal places
+        assert signals["backlink_drift"]["weight"] == pytest.approx(round(0.25 / 0.45, 4))
         assert signals["file_drift"]["weight"] == 0.0
-        assert drift_score == pytest.approx(0.85)
-        assert status == "stale"
+        # drift_score uses full-precision weights
+        assert drift_score == pytest.approx(0.25 / 0.45)
+        assert status == "aging"
 
     def test_medium_confidence_contributes(self):
         fd = {"score": 0.0, "available": False, "commit_count": 0}
@@ -476,6 +488,87 @@ class TestScoreEntry:
         drift_score, status, signals = score_entry(fd, bd, None)
         assert drift_score == pytest.approx(0.5)
         assert signals["confidence"]["level"] == "medium"
+
+
+# ---------------------------------------------------------------------------
+# Tests: score_entry with vocabulary_drift signal
+# ---------------------------------------------------------------------------
+
+class TestScoreEntryVocabularyDrift:
+    """Tests for score_entry() with vocabulary_drift signal."""
+
+    def test_vocabulary_drift_contributes_to_score(self):
+        """High vocabulary_drift should increase the drift score."""
+        fd = {"score": 0.0, "available": True, "commit_count": 0}
+        bd = {"score": 0.0, "available": True, "total": 1, "broken": 0}
+        nd = {"score": 0.0, "available": True, "detail": {}}
+        vd = {"score": 1.0, "available": True, "detail": {"top_k_terms": 10, "absent_terms": 10}}
+        drift_score, status, signals = score_entry(fd, bd, "high", nd, vd)
+        # All signals available: fd=0.55, bd=0.25, nd=0.10, vd=0.10, conf=0.0 → total=1.0
+        # score = 0.55*0 + 0.25*0 + 0.10*0 + 0.10*1.0 + 0*0 = 0.10
+        assert drift_score == pytest.approx(0.10)
+        assert signals["vocabulary_drift"]["weight"] == pytest.approx(0.10)
+        assert signals["vocabulary_drift"]["available"] is True
+
+    def test_vocabulary_drift_unavailable_fallback_to_confidence(self):
+        """When vocabulary_drift is unavailable, its weight goes to confidence fallback."""
+        fd = {"score": 0.0, "available": True, "commit_count": 0}
+        bd = {"score": 0.0, "available": True, "total": 1, "broken": 0}
+        nd = {"score": 0.0, "available": True, "detail": {}}
+        vd = {"score": 0.0, "available": False, "detail": {}}
+        drift_score, status, signals = score_entry(fd, bd, "low", nd, vd)
+        # vd unavailable → w_conf gets 0.10
+        # fd=0.55, bd=0.25, nd=0.10, vd=0, conf=0.10 → total=1.0
+        # score = 0.55*0 + 0.25*0 + 0.10*0 + 0*0 + 0.10*1.0 = 0.10
+        assert drift_score == pytest.approx(0.10)
+        assert signals["vocabulary_drift"]["weight"] == 0.0
+        assert signals["confidence"]["weight"] == pytest.approx(0.10)
+
+    def test_all_four_signals_available_weights_sum_to_one(self):
+        """When all signals are available, weights sum to 1.0."""
+        fd = {"score": 0.5, "available": True, "commit_count": 5}
+        bd = {"score": 0.5, "available": True, "total": 2, "broken": 1}
+        nd = {"score": 0.5, "available": True, "detail": {}}
+        vd = {"score": 0.5, "available": True, "detail": {}}
+        drift_score, status, signals = score_entry(fd, bd, "high", nd, vd)
+        total_weight = sum(
+            signals[s]["weight"]
+            for s in ("file_drift", "backlink_drift", "neighbor_drift", "vocabulary_drift", "confidence")
+        )
+        assert total_weight == pytest.approx(1.0)
+
+    def test_high_vocabulary_drift_with_other_signals(self):
+        """Vocabulary drift should combine with other signals."""
+        fd = {"score": 1.0, "available": True, "commit_count": 15}
+        bd = {"score": 1.0, "available": True, "total": 2, "broken": 2}
+        nd = {"score": 1.0, "available": True, "detail": {}}
+        vd = {"score": 1.0, "available": True, "detail": {"top_k_terms": 10, "absent_terms": 10}}
+        drift_score, status, signals = score_entry(fd, bd, "high", nd, vd)
+        # All signals at 1.0: 0.55*1 + 0.25*1 + 0.10*1 + 0.10*1 + 0*0 = 1.0
+        assert drift_score == pytest.approx(1.0)
+        assert status == "stale"
+
+    def test_vocabulary_drift_signals_dict_has_expected_keys(self):
+        """vocabulary_drift signal in output should have weight, score, available, detail."""
+        fd = {"score": 0.0, "available": True, "commit_count": 0}
+        bd = {"score": 0.0, "available": True, "total": 1, "broken": 0}
+        vd = {"score": 0.3, "available": True, "detail": {"top_k_terms": 10, "absent_terms": 3}}
+        drift_score, status, signals = score_entry(fd, bd, "high", vocabulary_drift=vd)
+        vd_signal = signals["vocabulary_drift"]
+        assert "weight" in vd_signal
+        assert "score" in vd_signal
+        assert "available" in vd_signal
+        assert "detail" in vd_signal
+        assert vd_signal["score"] == 0.3
+        assert vd_signal["available"] is True
+
+    def test_vocabulary_drift_none_treated_as_unavailable(self):
+        """Passing None for vocabulary_drift should be treated as unavailable."""
+        fd = {"score": 0.0, "available": True, "commit_count": 0}
+        bd = {"score": 0.0, "available": True, "total": 1, "broken": 0}
+        drift_score, status, signals = score_entry(fd, bd, "high", vocabulary_drift=None)
+        assert signals["vocabulary_drift"]["available"] is False
+        assert signals["vocabulary_drift"]["weight"] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +624,7 @@ class TestRunScanIntegration:
 
             assert "signals" in entry, f"Missing signals in {entry['file']}"
             signals = entry["signals"]
-            for signal_name in ("file_drift", "backlink_drift", "confidence"):
+            for signal_name in ("file_drift", "backlink_drift", "vocabulary_drift", "confidence"):
                 assert signal_name in signals, f"Missing signal {signal_name} in {entry['file']}"
 
     def test_entry_status_values_valid(self):
@@ -558,6 +651,18 @@ class TestRunScanIntegration:
         assert "total" in bd
         assert "broken" in bd
 
+        nd = signals["neighbor_drift"]
+        assert "weight" in nd
+        assert "score" in nd
+        assert "available" in nd
+        assert "detail" in nd
+
+        vd = signals["vocabulary_drift"]
+        assert "weight" in vd
+        assert "score" in vd
+        assert "available" in vd
+        assert "detail" in vd
+
         conf = signals["confidence"]
         assert "weight" in conf
         assert "score" in conf
@@ -570,8 +675,12 @@ class TestRunScanIntegration:
             total_weight = (
                 signals["file_drift"]["weight"]
                 + signals["backlink_drift"]["weight"]
+                + signals["neighbor_drift"]["weight"]
+                + signals["vocabulary_drift"]["weight"]
                 + signals["confidence"]["weight"]
             )
-            assert total_weight == pytest.approx(1.0), (
+            # Weights are individually rounded to 4 decimal places, so the sum
+            # may have small rounding error (up to 5 * 0.00005 = 0.00025)
+            assert total_weight == pytest.approx(1.0, abs=0.001), (
                 f"Weights don't sum to 1.0 for {entry['file']}: {total_weight}"
             )

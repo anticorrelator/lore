@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # task-completed-capture-check.sh — TaskCompleted hook
-# Ensures workers in impl-*/spec-* teams include architectural findings in
+# Ensures workers in impl-*/spec-* teams include observations in
 # their completion reports before marking tasks done.
 #
 # Input: JSON on stdin (TaskCompleted hook format)
@@ -25,9 +25,9 @@ esac
 # Check task_description for the required section
 TASK_DESC=$(echo "$INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('task_description') or '')")
 
-if echo "$TASK_DESC" | grep -qF '**Architectural patterns:**'; then
+if echo "$TASK_DESC" | grep -qE '\*\*Observations:\*\*|\*\*Architectural patterns:\*\*'; then
   exit 0
 fi
 
-echo "Update the task description with your full completion report (including **Architectural patterns:** section) before marking complete." >&2
+echo "Update the task description with your full completion report (including **Observations:** section) before marking complete." >&2
 exit 2

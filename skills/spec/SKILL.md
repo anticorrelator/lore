@@ -68,11 +68,17 @@ For single-pass plans where the scope is clear and the agent can identify key fi
 
 1. Write `plan.md` using the **plan template** below
 2. Use `## Context` instead of `## Investigations`: 3-6 bullet points summarizing key files read, constraints found, and relevant patterns
-3. Fill in Goal, Design Decisions (with `**Applies to:**` fields mapping each decision to affected phases), Phases (with `**Knowledge context:**` blocks listing relevant knowledge entries per phase), Open Questions
+3. Fill in Goal, Design Decisions (with `**Applies to:**` fields mapping each decision to affected phases), Phases, Open Questions
 
    Apply the task consolidation rule: each checkbox = one meaningful unit of work. Consolidate sequential same-file edits.
 
-4. Present to user for review
+4. **Annotate phases with knowledge context** — after drafting phases with objectives and tasks, run a concordance query per phase to surface relevant knowledge entries beyond what you encountered in Step 2s:
+   ```bash
+   lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5
+   ```
+   Review the suggestions for each phase. Add relevant entries as `[[knowledge:file#heading]] — why relevant` lines in the phase's `**Knowledge context:**` block. Your direct findings from Step 2s are the primary source — concordance is a *widener*, not a replacement. Skip entries that don't add actionable context for a worker implementing that phase.
+
+5. Present to user for review
 
 ### Step 4s: Finalize
 
@@ -157,24 +163,18 @@ Team-based divide-and-conquer for complex or uncertain-scope work.
             - <finding 2>
             **Key files:** <paths>
             **Implications:** <1-2 sentences>
-            **Architectural patterns:** <general observations about how the
-              codebase works — type mappings, inheritance patterns,
-              infrastructure conventions — even if not directly related to
-              your investigation question. Always fill this section, even
-              if "None observed.">
+            **Observations:** <anything surprising, non-obvious, or that
+              contradicts expectations — include codebase conventions, type
+              mappings, or patterns you noticed. Optional: omit or write
+              "None" if nothing stood out.>
             **Unknowns:** <anything unresolved>
        6. **Update task description** with your full findings report:
           TaskUpdate with description set to the same content from step 5
-          (including the **Architectural patterns:** section). This is required
+          (including the **Observations:** section). This is required
           for the TaskCompleted hook to verify your report.
-       7. **Capture findings:** Run `lore capture` for each architectural
-          pattern you reported (skip only if "None observed"):
-          ```
-          lore capture --insight "<pattern>" --context "Discovered while investigating: <question summary>" --category "<best guess>" --confidence "medium" --source "worker"
-          ```
-       8. Mark task completed: TaskUpdate with status=completed
-       9. Call TaskList — claim next unclaimed task if available
-       10. When no tasks remain, you're done
+       7. Mark task completed: TaskUpdate with status=completed
+       8. Call TaskList — claim next unclaimed task if available
+       9. When no tasks remain, you're done
 
        Keep findings to 500-1000 characters. Facts over opinions.
    ```
@@ -202,9 +202,23 @@ From the documented findings, draft the remaining plan sections:
 
    **Task consolidation rule:** Each `- [ ]` checkbox should be a meaningful unit of work, not a micro-edit. Multiple sequential edits to the same file should be one task (e.g., "Update worker prompt to add capture step and renumber" not three separate tasks for delete/insert/renumber). Aim for 2-5 tasks per phase. If a phase has >5 tasks, look for consolidation opportunities.
 
-4. **Open Questions** — anything investigations couldn't resolve
+4. **Concordance-assisted annotation** — after drafting phases, widen each phase's `**Knowledge context:**` block beyond what investigations explicitly mentioned. For each phase, run:
+   ```bash
+   lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5
+   ```
+   Review the suggestions against what is already listed. Add relevant entries as `[[knowledge:...]]` backlinks with a brief "— why relevant" annotation. Skip entries that duplicate what investigations already covered. Investigation findings are the primary source of knowledge references — concordance is a *widener*, not a replacement.
+
+5. **Open Questions** — anything investigations couldn't resolve
 
 Present the synthesized plan to the user for review.
+
+### Step 5a: Post-research extraction
+
+Invoke `/remember` scoped to the spec investigation:
+
+```
+/remember Research findings from <work item title> — Evaluate researcher-reported **Observations:** from investigation reports against the capture gate (reusable, non-obvious, stable, high-confidence). Capture architectural insights and gotchas discovered during research. Skip: findings already documented in plan.md (they're persisted there).
+```
 
 ### Step 5b: Generate tasks.json
 
@@ -258,6 +272,7 @@ Run `lore work heal` after any changes.
 **Objective:** What this phase accomplishes
 **Files:** relevant file paths
 **Knowledge context:**
+<!-- Each entry MUST include a "— why relevant" annotation after the backlink. Workers see these annotations as their primary context — a bare link with no explanation is not actionable. -->
 - [[knowledge:file#heading]] — why this is relevant to this phase
 - [ ] Task 1
 - [ ] Task 2

@@ -85,9 +85,9 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
 1. **Pre-fetch knowledge for worker prompts** — determine whether prefetch is needed:
 
-   **If tasks have pre-resolved knowledge** (task descriptions contain `--- Pre-resolved Knowledge ---`): **skip prefetch entirely.** The generate-tasks pipeline already resolved backlinks into task descriptions. Prefetching would duplicate this content and waste prompt budget.
+   **If tasks have pre-resolved knowledge** (task descriptions contain `## Prior Knowledge`): **skip prefetch entirely.** The generate-tasks pipeline already resolved backlinks into task descriptions. Prefetching would duplicate this content and waste prompt budget. This should be the common path — well-authored plans from `/spec` include `**Knowledge context:**` blocks in every phase, and `generate-tasks.py` resolves those backlinks into each task description automatically.
 
-   **If tasks lack pre-resolved knowledge** (fallback path, e.g. manually created tasks): run complementary prefetch using the task's `**Files:**` paths and phase objective — not a generic topic string:
+   **If tasks lack pre-resolved knowledge** (fallback path, e.g. manually created tasks or plans without `**Knowledge context:**` blocks): run complementary prefetch using the task's `**Files:**` paths and phase objective — not a generic topic string:
    ```bash
    # Use file paths + objective as query terms for targeted retrieval
    PRIOR_KNOWLEDGE=$(lore prefetch "<phase objective> <file paths from task>" --format prompt --limit 3)
@@ -105,6 +105,12 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
      prompt: |
        You are worker-N on the impl-<slug> team.
 
+       Your task descriptions contain pre-resolved knowledge context. Read the
+       '## Prior Knowledge' section in your task description first — it has
+       the design rationale and conventions relevant to your task. Only search
+       the knowledge store (`lore search`) if your task requires patterns not
+       covered there.
+
        <if prefetch was run, embed $PRIOR_KNOWLEDGE here>
 
        If the pre-loaded knowledge doesn't cover your specific area, also search:
@@ -116,6 +122,13 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
        2. Claim one: TaskUpdate with owner=your name, status=in_progress
        3. Read the full task with TaskGet
        4. Implement the change — read existing code first, follow codebase conventions
+          **For staleness fix tasks** (subjects starting with "Update stale knowledge entry"):
+          - Read the knowledge entry at the path in the task description
+          - Read each related_file listed in the task
+          - Compare the entry's claims against current code
+          - Rewrite stale content preserving format: H1 title, prose, See also backlinks, HTML metadata comment
+          - Update `learned` date to today (YYYY-MM-DD) and set `source: worker-fix` in the metadata comment
+          - If the entry needs investigation beyond the listed related_files, note it in your completion report
        5. Look for and run relevant tests:
           - Check for package.json scripts, Makefile targets, pytest, etc.
           - Run tests if found; skip silently if no test command exists
@@ -126,23 +139,18 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
             **Changes:**
             - <file>: <what changed>
             **Tests:** <ran X tests, all passed / no tests found / N failures>
-            **Architectural patterns:** <general observations about codebase
-              conventions, type mappings, inheritance patterns, infrastructure
-              patterns — even if not directly related to your task.
-              Always fill this section, even if "None observed.">
+            **Observations:** <anything surprising, non-obvious, or that
+              contradicts the plan — include codebase conventions, type
+              mappings, or patterns you noticed. Optional: omit or write
+              "None" if nothing stood out.>
             **Blockers:** <none, or description of what's blocking>
        7. **Update task description** with your full completion report:
           TaskUpdate with description set to the same content from step 6
-          (including the **Architectural patterns:** section). This is required
+          (including the **Observations:** section). This is required
           for the TaskCompleted hook to verify your report.
-       8. **Capture findings:** Run `lore capture` for each architectural
-          pattern you reported (skip only if "None observed"):
-          ```
-          lore capture --insight "<pattern>" --context "Discovered while implementing: <task subject>" --category "<best guess>" --confidence "medium" --source "worker"
-          ```
-       9. Mark task completed: TaskUpdate with status=completed
-       10. Call TaskList — claim next unclaimed, unblocked task if available
-       11. When no tasks remain, you're done
+       8. Mark task completed: TaskUpdate with status=completed
+       9. Call TaskList — claim next unclaimed, unblocked task if available
+       10. When no tasks remain, you're done
 
    ```
 
@@ -174,7 +182,7 @@ When all tasks are complete (or all remaining are blocked):
 Invoke `/remember` with capture constraints scoped to the implementation:
 
 ```
-/remember Implementation findings from <work item title> — Workers have already captured task-level findings to inbox. Focus on: cross-task patterns visible only from the lead's vantage, integration gotchas that emerged from combining worker changes, conventions confirmed or violated across multiple tasks. Skip: anything a single worker could observe (they've already captured it).
+/remember Implementation findings from <work item title> — Evaluate worker-reported **Observations:** from task completion reports against the capture gate (reusable, non-obvious, stable, high-confidence) using full project context. Also capture: cross-task patterns visible only from the lead's vantage, integration gotchas that emerged from combining worker changes, conventions confirmed or violated across multiple tasks.
 ```
 
 ## Step 6: Cleanup and report

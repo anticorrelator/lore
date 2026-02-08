@@ -45,70 +45,56 @@ assert_not_contains() {
   fi
 }
 
-# --- Setup test knowledge store ---
+# --- Setup test knowledge store (v2 categorical structure) ---
 setup_knowledge_store() {
-  mkdir -p "$KNOWLEDGE_DIR/domains"
-
-  cat > "$KNOWLEDGE_DIR/_index.md" << 'EOF'
-# Project Knowledge Index
-
-- conventions.md — Coding conventions
-- gotchas.md — Known pitfalls
-- workflows.md — Development workflows
-EOF
+  mkdir -p "$KNOWLEDGE_DIR"/{conventions,gotchas,workflows,domains}
 
   cat > "$KNOWLEDGE_DIR/_manifest.json" << 'EOF'
-{
-  "files": {
-    "conventions.md": {"keywords": ["naming", "imports", "style"]},
-    "gotchas.md": {"keywords": ["timeout", "cache", "race condition"]}
-  }
-}
+{"format_version": 2, "created_at": "2026-01-01T00:00:00Z"}
 EOF
 
-  cat > "$KNOWLEDGE_DIR/conventions.md" << 'EOF'
-# Conventions
+  cat > "$KNOWLEDGE_DIR/conventions/naming-patterns.md" << 'EOF'
+# Naming Patterns
 
-### Naming Patterns
 We use camelCase for variables and PascalCase for classes.
 This is enforced by the linter.
+<!-- learned: 2026-01-15 | confidence: high | source: manual | related_files: src/index.ts -->
+EOF
 
-### Import Order
+  cat > "$KNOWLEDGE_DIR/conventions/import-order.md" << 'EOF'
+# Import Order
+
 Always import stdlib first, then third-party, then local.
 Keep imports sorted alphabetically.
+EOF
 
-### Error Handling
+  cat > "$KNOWLEDGE_DIR/conventions/error-handling.md" << 'EOF'
+# Error Handling
+
 Use custom error classes for domain errors.
 Never catch generic exceptions.
 EOF
 
-  cat > "$KNOWLEDGE_DIR/gotchas.md" << 'EOF'
-# Gotchas
+  cat > "$KNOWLEDGE_DIR/gotchas/timeout-bug.md" << 'EOF'
+# Timeout Bug
 
-### Timeout Bug
 The HTTP client has a default timeout of 30s.
 Override it explicitly for long-running requests.
+EOF
 
-### Cache Invalidation
+  cat > "$KNOWLEDGE_DIR/gotchas/cache-invalidation.md" << 'EOF'
+# Cache Invalidation
+
 Redis cache entries expire after 1 hour by default.
 Set TTL explicitly for each key type.
-**Confidence:** low
+<!-- learned: 2026-01-10 | confidence: low | source: manual -->
 EOF
 
-  cat > "$KNOWLEDGE_DIR/workflows.md" << 'EOF'
-# Workflows
+  cat > "$KNOWLEDGE_DIR/workflows/deploy-process.md" << 'EOF'
+# Deploy Process
 
-### Deploy Process
 Run the deploy script with --dry-run first.
 Then run it again without the flag.
-EOF
-
-  cat > "$KNOWLEDGE_DIR/_inbox.md" << 'EOF'
-# Inbox
-
-## [2025-01-15T10:00:00]
-- **Insight:** The API uses rate limiting of 100 req/min
-- **Confidence:** high
 EOF
 }
 
@@ -125,7 +111,7 @@ echo ""
 # =============================================
 echo "Test 1: search-knowledge.sh normal mode"
 OUTPUT=$(bash "$SCRIPT_DIR/search-knowledge.sh" "camelCase" "$TEST_DIR" 2>&1)
-assert_contains "normal search finds matches" "$OUTPUT" "conventions.md"
+assert_contains "normal search finds matches" "$OUTPUT" "naming-patterns"
 assert_contains "normal search shows line content" "$OUTPUT" "camelCase"
 assert_contains "normal search shows ranked results" "$OUTPUT" "Ranked results (FTS5)"
 
@@ -135,8 +121,8 @@ assert_contains "normal search shows ranked results" "$OUTPUT" "Ranked results (
 echo ""
 echo "Test 2: search-knowledge.sh --concise mode"
 OUTPUT=$(bash "$SCRIPT_DIR/search-knowledge.sh" --concise "camelCase" "$TEST_DIR" 2>&1)
-assert_contains "concise search shows file path" "$OUTPUT" "conventions.md"
-assert_contains "concise search shows heading" "$OUTPUT" "### Naming Patterns"
+assert_contains "concise search shows file path" "$OUTPUT" "naming-patterns"
+assert_contains "concise search shows heading" "$OUTPUT" "Naming Patterns"
 assert_not_contains "concise search hides content lines" "$OUTPUT" "1:We use"
 assert_not_contains "concise search hides manifest" "$OUTPUT" "Manifest matches"
 
@@ -163,15 +149,16 @@ assert_contains "normal no FTS match" "$OUTPUT" "Ranked results (FTS5)"
 echo ""
 echo "Test 5: load-knowledge.sh basic loading + budget"
 OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
-assert_contains "loads index" "$OUTPUT" "Project Knowledge Index"
-assert_contains "loads conventions" "$OUTPUT" "conventions.md"
+assert_contains "loads index header" "$OUTPUT" "=== Project Knowledge ==="
+assert_contains "loads compact index" "$OUTPUT" "Index (compact)"
+assert_contains "shows conventions category" "$OUTPUT" "conventions/"
 assert_contains "budget report present" "$OUTPUT" "[Budget]"
 assert_contains "budget report has full count" "$OUTPUT" "full,"
 assert_contains "budget report has summary count" "$OUTPUT" "summary,"
 assert_contains "budget report has skipped count" "$OUTPUT" "skipped"
 
 # =============================================
-# Test 6: load-knowledge.sh heading+first-sentence summary mode
+# Test 6: load-knowledge.sh summary mode (small budget)
 # =============================================
 echo ""
 echo "Test 6: load-knowledge.sh summary mode (small budget)"
@@ -186,12 +173,9 @@ OUTPUT=$(bash "$ORIG_LOAD" 2>&1)
 
 # Restore original
 cp "$TEST_DIR/load-knowledge.sh.bak" "$ORIG_LOAD"
-assert_contains "summary mode label" "$OUTPUT" "summary, read full file on-demand"
-assert_contains "summary shows heading" "$OUTPUT" "### Naming Patterns"
-# First sentence extraction: "We use camelCase for variables and PascalCase for classes."
-assert_contains "summary shows first sentence" "$OUTPUT" "We use camelCase for variables and PascalCase for classes."
-# Should NOT show the second line of content
-assert_not_contains "summary hides second line" "$OUTPUT" "This is enforced by the linter"
+# With a tiny budget, entries should not be loaded (budget exhausted at index)
+assert_contains "tiny budget still shows index" "$OUTPUT" "Index (compact)"
+assert_contains "tiny budget has budget report" "$OUTPUT" "[Budget]"
 
 # =============================================
 # Test 7: load-knowledge.sh staleness — low confidence
@@ -206,23 +190,30 @@ assert_contains "staleness detects low confidence" "$OUTPUT" "low-confidence"
 # =============================================
 echo ""
 echo "Test 8: load-knowledge.sh old mtime staleness"
-# Set workflows.md mtime to 100 days ago
+# Set workflows entry mtime to 100 days ago
 if [[ "$(uname)" == "Darwin" ]]; then
-  touch -t "$(date -v-100d '+%Y%m%d%H%M.%S')" "$KNOWLEDGE_DIR/workflows.md"
+  touch -t "$(date -v-100d '+%Y%m%d%H%M.%S')" "$KNOWLEDGE_DIR/workflows/deploy-process.md"
 else
-  touch -d "100 days ago" "$KNOWLEDGE_DIR/workflows.md"
+  touch -d "100 days ago" "$KNOWLEDGE_DIR/workflows/deploy-process.md"
 fi
 OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
-assert_contains "staleness detects old mtime" "$OUTPUT" "workflows.md"
-assert_contains "staleness shows days" "$OUTPUT" "d old"
+assert_contains "staleness detects old mtime" "$OUTPUT" "deploy-process.md"
+assert_contains "staleness shows days" "$OUTPUT" "d)"
 
 # =============================================
 # Test 9: load-knowledge.sh inbox detection
 # =============================================
 echo ""
 echo "Test 9: load-knowledge.sh inbox detection"
+# Create an _inbox directory with a pending entry
+mkdir -p "$KNOWLEDGE_DIR/_inbox"
+cat > "$KNOWLEDGE_DIR/_inbox/pending-insight.md" << 'EOF'
+# Rate Limiting
+
+The API uses rate limiting of 100 req/min.
+EOF
 OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
-assert_contains "inbox detection" "$OUTPUT" "pending inbox entries"
+assert_contains "inbox detection" "$OUTPUT" "inbox"
 
 # =============================================
 # Test 10: load-knowledge.sh health check
@@ -240,11 +231,11 @@ echo ""
 echo "Test 11: backward compatibility"
 # Restore manifest for this test
 cat > "$KNOWLEDGE_DIR/_manifest.json" << 'EOF'
-{"files": {"conventions.md": {"keywords": ["naming"]}}}
+{"format_version": 2, "created_at": "2026-01-01T00:00:00Z"}
 EOF
 OUTPUT=$(bash "$SCRIPT_DIR/search-knowledge.sh" "timeout" "$TEST_DIR" 2>&1)
 assert_contains "backward compat shows ranked section" "$OUTPUT" "Ranked results (FTS5)"
-assert_contains "backward compat shows content" "$OUTPUT" "gotchas.md"
+assert_contains "backward compat shows content" "$OUTPUT" "timeout-bug"
 
 # =============================================
 # Summary

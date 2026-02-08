@@ -23,7 +23,7 @@ Run the scoping script to identify domains for exploration.
 1. Parse arguments: if directory paths were provided (e.g., `/bootstrap src/auth src/api`), pass them to the script. Otherwise, scope the entire repo.
 2. Run scoping:
    ```bash
-   lore bootstrap-scope [optional dir args...]
+   lore bootstrap scope [optional dir args...]
    ```
    Stdout: JSON array of domain objects `[{"path": "src/auth", "description": "...", "languages": ["Python"]}]`.
    Stderr: tree output for each scoped directory (useful context but not parsed).
@@ -143,8 +143,8 @@ Spawn Explore agents to investigate each domain in parallel.
             - External: <third-party packages>
             **Key files:**
             - <path>: <description>
-            **Cross-cutting observations:**
-            - <patterns that span beyond this domain>
+            **Observations:**
+            - <patterns that span beyond this domain, anything surprising or non-obvious>
 
           **IMPORTANT:** Do NOT call `lore capture` — report findings only.
        6. Mark task completed: TaskUpdate with status=completed

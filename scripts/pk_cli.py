@@ -5,7 +5,7 @@ pk_search.py is now a pure library (Indexer, Searcher, Stats, LinkChecker).
 
 Usage:
     python pk_cli.py index <knowledge_dir> [--force]
-    python pk_cli.py search <knowledge_dir> <query> [--limit N] [--threshold F] [--json]
+    python pk_cli.py search <knowledge_dir> <query> [--limit N] [--threshold F] [--json] [--budget N]
     python pk_cli.py stats <knowledge_dir>
     python pk_cli.py resolve <knowledge_dir> <backlinks...> [--json]
     python pk_cli.py read <knowledge_dir> <file> [--query Q] [--type T]
@@ -38,7 +38,8 @@ from pk_resolve import Resolver, resolve_read_path  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def cmd_index(args: argparse.Namespace) -> None:
-    indexer = Indexer(args.knowledge_dir)
+    repo_root = getattr(args, "repo_root", None)
+    indexer = Indexer(args.knowledge_dir, repo_root=repo_root)
     result = indexer.index_all(force=args.force)
     if "error" in result:
         print(f"Error: {result['error']}", file=sys.stderr)
@@ -59,8 +60,49 @@ def cmd_search(args: argparse.Namespace) -> None:
     searcher = Searcher(args.knowledge_dir)
     source_type = getattr(args, "type", None)
     category = getattr(args, "category", None)
+    exclude_category = getattr(args, "exclude_category", None)
     caller = getattr(args, "caller", None)
     include_archived = getattr(args, "include_archived", False)
+
+    # --budget: budget-aware search with two-tier JSON output
+    budget = getattr(args, "budget", None)
+    if budget is not None:
+        result = searcher.budget_search(
+            query=args.query,
+            budget_chars=budget,
+            limit=args.limit,
+            threshold=args.threshold,
+            source_type=source_type,
+            category=category,
+            exclude_category=exclude_category,
+            caller=caller,
+            include_archived=include_archived,
+        )
+        # Normalize full entries for JSON output
+        full_out = []
+        for r in result["full"]:
+            full_out.append({
+                "heading": r.get("heading", ""),
+                "file_path": r.get("file_path", ""),
+                "content": r.get("content", ""),
+                "score": r.get("composite_score", 0),
+                "category": r.get("category"),
+            })
+        titles_out = []
+        for r in result["titles_only"]:
+            titles_out.append({
+                "heading": r.get("heading", ""),
+                "file_path": r.get("file_path", ""),
+                "score": r.get("composite_score", 0),
+                "category": r.get("category"),
+            })
+        print(json.dumps({
+            "full": full_out,
+            "titles_only": titles_out,
+            "budget_used": result["budget_used"],
+            "budget_total": result["budget_total"],
+        }, indent=2))
+        return
 
     if mode == "composite":
         results = searcher.composite_search(
@@ -69,6 +111,7 @@ def cmd_search(args: argparse.Namespace) -> None:
             threshold=args.threshold,
             source_type=source_type,
             category=category,
+            exclude_category=exclude_category,
             caller=caller,
             include_archived=include_archived,
         )
@@ -79,6 +122,7 @@ def cmd_search(args: argparse.Namespace) -> None:
             threshold=args.threshold,
             source_type=source_type,
             category=category,
+            exclude_category=exclude_category,
             caller=caller,
             include_archived=include_archived,
         )
@@ -136,6 +180,37 @@ def cmd_search(args: argparse.Namespace) -> None:
                 print(f"Warning: {warning}", file=sys.stderr)
             results = [pk_semantic.format_result_for_cli(r, searcher.knowledge_dir) for r in results]
 
+    # --expand: enrich results with similar entries from TF-IDF concordance
+    expand = getattr(args, "expand", False)
+    if expand and results:
+        try:
+            from pk_concordance import Concordance
+            concordance = Concordance(searcher.db_path)
+            knowledge_dir_abs = os.path.abspath(args.knowledge_dir)
+            # Collect already-seen entries to avoid duplicates across results
+            seen: set[tuple[str, str]] = set()
+            for r in results:
+                abs_path = os.path.join(knowledge_dir_abs, r["file_path"])
+                seen.add((abs_path, r["heading"]))
+
+            for r in results:
+                abs_path = os.path.join(knowledge_dir_abs, r["file_path"])
+                similar = concordance.find_similar(
+                    abs_path, r["heading"],
+                    limit=3,
+                    source_type_filter="knowledge",
+                    exclude=set(seen),
+                )
+                # Convert absolute paths back to relative for display
+                for s in similar:
+                    try:
+                        s["file_path"] = os.path.relpath(s["file_path"], knowledge_dir_abs)
+                    except ValueError:
+                        pass
+                r["similar_entries"] = similar
+        except (ImportError, Exception):
+            pass  # gracefully degrade if concordance not available
+
     if args.json:
         print(json.dumps(results, indent=2))
         return
@@ -160,6 +235,10 @@ def cmd_search(args: argparse.Namespace) -> None:
         if r.get("learned_date"):
             print(f"  Learned: {r['learned_date']}")
         print(f"  Snippet: {r['snippet']}")
+        if r.get("similar_entries"):
+            print("  See also:")
+            for s in r["similar_entries"]:
+                print(f"    - {s['heading']} ({s['file_path']}, sim: {s['similarity']})")
 
 
 def cmd_stats(args: argparse.Namespace) -> None:
@@ -194,7 +273,8 @@ def cmd_stats(args: argparse.Namespace) -> None:
 
 
 def cmd_incremental_index(args: argparse.Namespace) -> None:
-    indexer = Indexer(args.knowledge_dir)
+    repo_root = getattr(args, "repo_root", None)
+    indexer = Indexer(args.knowledge_dir, repo_root=repo_root)
     result = indexer.incremental_index()
     if "error" in result:
         print(f"Error: {result['error']}", file=sys.stderr)
@@ -394,6 +474,60 @@ def cmd_read(args: argparse.Namespace) -> None:
         print()
 
 
+def cmd_analyze_concordance(args: argparse.Namespace) -> None:
+    from pk_concordance import Concordance
+
+    searcher = Searcher(args.knowledge_dir)
+    searcher._ensure_index()
+
+    concordance = Concordance(searcher.db_path)
+    see_also_limit = getattr(args, "see_also_limit", 3)
+    related_threshold = getattr(args, "related_files_threshold", 0.15)
+
+    result = concordance.run_full_analysis(
+        see_also_limit=see_also_limit,
+        related_files_threshold=related_threshold,
+    )
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return
+
+    print(f"Concordance analysis complete.")
+    print(f"  Entries analyzed: {result['entries_analyzed']}")
+    print(f"  See-also pairs:   {result['see_also_pairs']}")
+    print(f"  Related files:    {result['related_file_pairs']}")
+    print(f"  Elapsed:          {result['elapsed_seconds']}s")
+
+    # Print summary of see-also recommendations
+    knowledge_dir_abs = os.path.abspath(args.knowledge_dir)
+    conn = sqlite3.connect(searcher.db_path)
+    see_also_rows = conn.execute(
+        "SELECT file_path, heading, similar_entry_path, similar_entry_heading, similarity_score "
+        "FROM concordance_results WHERE result_type = 'see_also' "
+        "ORDER BY file_path, heading, similarity_score DESC"
+    ).fetchall()
+    conn.close()
+
+    if see_also_rows:
+        print(f"\nSee-also recommendations ({len(see_also_rows)} pairs):")
+        current_entry = None
+        for fp, heading, sim_fp, sim_heading, score in see_also_rows:
+            entry_key = (fp, heading)
+            if entry_key != current_entry:
+                try:
+                    rel_fp = os.path.relpath(fp, knowledge_dir_abs)
+                except ValueError:
+                    rel_fp = fp
+                print(f"\n  {heading} ({rel_fp})")
+                current_entry = entry_key
+            try:
+                rel_sim_fp = os.path.relpath(sim_fp, knowledge_dir_abs)
+            except ValueError:
+                rel_sim_fp = sim_fp
+            print(f"    -> {sim_heading} ({rel_sim_fp}, sim: {score:.4f})")
+
+
 def cmd_check_links(args: argparse.Namespace) -> None:
     checker = LinkChecker(args.knowledge_dir)
     include_all = getattr(args, "all", False)
@@ -448,11 +582,13 @@ def main() -> None:
     p_index = subparsers.add_parser("index", help="Build or rebuild the search index")
     p_index.add_argument("knowledge_dir", help="Path to knowledge directory")
     p_index.add_argument("--force", action="store_true", help="Force full re-index")
+    p_index.add_argument("--repo-root", default=None, help="Path to repo root for source file indexing")
     p_index.set_defaults(func=cmd_index)
 
     # incremental-index
     p_incr = subparsers.add_parser("incremental-index", help="Re-index only changed files")
     p_incr.add_argument("knowledge_dir", help="Path to knowledge directory")
+    p_incr.add_argument("--repo-root", default=None, help="Path to repo root for source file indexing")
     p_incr.set_defaults(func=cmd_incremental_index)
 
     # search
@@ -463,14 +599,17 @@ def main() -> None:
     p_search.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Min relevance score (e.g. -5.0 = only strong matches; 0 = all)")
     p_search.add_argument("--type", choices=SOURCE_TYPES, default=None, help="Filter by source type")
     p_search.add_argument("--category", nargs="+", default=None, help="Filter by category (e.g. architecture conventions)")
+    p_search.add_argument("--exclude-category", nargs="+", default=None, help="Exclude entries in these categories (e.g. domains)")
     p_search.add_argument("--json", action="store_true", help="Output as JSON")
-    p_search.add_argument("--composite", action="store_true", help="Re-rank with composite scoring: BM25 + recency + access frequency")
+    p_search.add_argument("--composite", action="store_true", help="Re-rank with composite scoring: BM25 + recency + TF-IDF similarity")
     p_search.add_argument("--semantic", action="store_true", help="Use vector similarity search (requires sentence-transformers)")
     p_search.add_argument("--hybrid", action="store_true", help="Combine BM25 + vector similarity (requires sentence-transformers)")
     p_search.add_argument("--bm25-weight", type=float, default=0.3, help="BM25 weight for hybrid search (default: 0.3)")
     p_search.add_argument("--vector-weight", type=float, default=0.7, help="Vector weight for hybrid search (default: 0.7)")
     p_search.add_argument("--caller", default=None, help="Caller identifier logged to retrieval log (e.g. 'lead', 'worker', 'prefetch')")
     p_search.add_argument("--include-archived", action="store_true", help="Include archived work items in results (excluded by default)")
+    p_search.add_argument("--expand", action="store_true", help="Expand results with similar entries from TF-IDF concordance (See also)")
+    p_search.add_argument("--budget", type=int, default=None, help="Budget in chars: return two-tier JSON (full + titles_only) within budget")
     p_search.set_defaults(func=cmd_search)
 
     # resolve
@@ -494,6 +633,14 @@ def main() -> None:
     p_check.add_argument("--json", action="store_true", help="Output as JSON")
     p_check.add_argument("--all", action="store_true", help="Include archived work items and thread files (excluded by default)")
     p_check.set_defaults(func=cmd_check_links)
+
+    # analyze-concordance
+    p_conc = subparsers.add_parser("analyze-concordance", help="Run TF-IDF concordance analysis (see-also + related files)")
+    p_conc.add_argument("knowledge_dir", help="Path to knowledge directory")
+    p_conc.add_argument("--json", action="store_true", help="Output as JSON")
+    p_conc.add_argument("--see-also-limit", type=int, default=3, help="Max see-also entries per knowledge entry (default: 3)")
+    p_conc.add_argument("--related-files-threshold", type=float, default=0.05, help="Min similarity for related files (default: 0.05)")
+    p_conc.set_defaults(func=cmd_analyze_concordance)
 
     # stats
     p_stats = subparsers.add_parser("stats", help="Show index statistics")

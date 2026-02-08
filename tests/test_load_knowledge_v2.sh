@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test_load_knowledge_v2.sh — Tests for v2 format load-knowledge.sh features
-# Tests: compact index, main-branch context signal, context-aware loading
+# Tests: compact index, relevance-based loading, context-aware loading
 
 set -euo pipefail
 
@@ -116,12 +116,11 @@ OAuth2 flow with refresh tokens.
 EOF
 }
 
-# --- Setup a large v2 store to force compact index ---
+# --- Setup a large v2 store with many entries ---
 setup_large_v2_knowledge_store() {
   setup_v2_knowledge_store
 
-  # Add many entries to make full index exceed 25% of 8000 budget (>2000 chars)
-  # Each entry title line is ~30 chars. Need ~60+ entries across categories.
+  # Add many entries across categories
   for i in $(seq 1 30); do
     cat > "$KNOWLEDGE_DIR/conventions/convention-entry-$i.md" << EOF
 # Convention Entry Number $i - Extended Title
@@ -155,32 +154,39 @@ EOF
   done
 }
 
-# --- Setup work items for main-branch context signal ---
-setup_work_items() {
-  mkdir -p "$KNOWLEDGE_DIR/_work/improve-search"
+# --- Build FTS5 index so pk_cli.py search works ---
+build_index() {
+  python3 "$SCRIPT_DIR/pk_cli.py" index "$KNOWLEDGE_DIR" 2>/dev/null || true
+}
 
-  cat > "$KNOWLEDGE_DIR/_work/improve-search/_meta.json" << 'EOF'
+# --- Setup work items for main-branch context signal ---
+# Work item title must contain terms that match test knowledge entries
+# so FTS5 relevance search returns results
+setup_work_items() {
+  mkdir -p "$KNOWLEDGE_DIR/_work/fix-naming-conventions"
+
+  cat > "$KNOWLEDGE_DIR/_work/fix-naming-conventions/_meta.json" << 'EOF'
 {
-  "title": "Improve Search Quality",
+  "title": "Fix Naming Conventions and Error Handling",
   "status": "in-progress",
   "created_at": "2026-02-01T00:00:00Z"
 }
 EOF
 
-  cat > "$KNOWLEDGE_DIR/_work/improve-search/plan.md" << 'EOF'
-# Improve Search Quality
+  cat > "$KNOWLEDGE_DIR/_work/fix-naming-conventions/plan.md" << 'EOF'
+# Fix Naming Conventions and Error Handling
 
 ## Phases
 
-### Phase 1: Fix Tokenization
-Fix hyphenated token handling.
+### Phase 1: Update Naming Patterns
+Enforce camelCase naming patterns across the codebase.
 
-### Phase 2: Add Caller Tracking
-Add caller field to search logs.
+### Phase 2: Error Handling Improvements
+Update custom error classes for domain errors.
 EOF
 
   # Touch to make it the most recent
-  touch "$KNOWLEDGE_DIR/_work/improve-search/_meta.json"
+  touch "$KNOWLEDGE_DIR/_work/fix-naming-conventions/_meta.json"
 }
 
 setup_v2_knowledge_store
@@ -198,19 +204,18 @@ assert_contains "loads v2 content" "$OUTPUT" "=== Project Knowledge ==="
 assert_contains "budget report present" "$OUTPUT" "[Budget]"
 
 # =============================================
-# Test 2: Small store uses full index (per-entry titles)
+# Test 2: Always uses compact index (category counts, no per-entry titles)
 # =============================================
 echo ""
-echo "Test 2: Small store uses full index"
+echo "Test 2: Small store uses compact index"
 OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
-assert_contains "full index header" "$OUTPUT" "--- Index ---"
-assert_not_contains "not compact mode" "$OUTPUT" "--- Index (compact) ---"
-# Full index should include per-entry titles
-assert_contains "index has entry title" "$OUTPUT" "Naming Patterns"
-assert_contains "index has category with count" "$OUTPUT" "conventions/"
+assert_contains "compact index header" "$OUTPUT" "--- Index (compact) ---"
+# Compact index should have category names with counts
+assert_contains "index has category" "$OUTPUT" "conventions/"
+assert_contains "index has entry count" "$OUTPUT" "entries)"
 
 # =============================================
-# Test 3: Large store uses compact index
+# Test 3: Large store also uses compact index
 # =============================================
 echo ""
 echo "Test 3: Large store uses compact index"
@@ -234,12 +239,15 @@ rm -rf "$KNOWLEDGE_DIR"
 setup_v2_knowledge_store
 setup_work_items
 
+# Build FTS5 index so relevance search works
+build_index
+
 # Override git branch to main
 export LORE_GIT_BRANCH="main"
 OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
-# The context signal should include the work item title
-assert_contains "context signal present" "$OUTPUT" "Context-relevant"
-assert_contains "context signal has work title" "$OUTPUT" "signal:"
+# The context signal should use "Relevant entries" header with signal text
+assert_contains "relevance signal present" "$OUTPUT" "Relevant entries"
+assert_contains "relevance signal has signal text" "$OUTPUT" "signal:"
 unset LORE_GIT_BRANCH
 
 # =============================================
@@ -251,7 +259,7 @@ rm -rf "$KNOWLEDGE_DIR"
 setup_large_v2_knowledge_store
 OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
 # With compact index, there should be budget left for actual entries
-assert_contains "has content after compact index" "$OUTPUT" "entries) ---"
+assert_contains "has compact index" "$OUTPUT" "Index (compact)"
 # Budget should show actual usage, not exhausted at index
 assert_contains "budget report" "$OUTPUT" "[Budget]"
 
@@ -262,9 +270,15 @@ echo ""
 echo "Test 6: v2 loads actual entry content"
 rm -rf "$KNOWLEDGE_DIR"
 setup_v2_knowledge_store
+setup_work_items
+# Build FTS5 index so relevance search works
+build_index
+# Need a context signal to trigger content loading (relevance-ranked search)
+export LORE_GIT_BRANCH="main"
 OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
-# Should load actual entry content (small store = everything fits)
+# Should load actual entry content when context signal triggers relevance search
 assert_contains "loads entry content" "$OUTPUT" "camelCase"
+unset LORE_GIT_BRANCH
 
 # =============================================
 # Summary

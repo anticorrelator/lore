@@ -226,7 +226,7 @@ def build_context_section(
     if all_backlinks and knowledge_dir:
         resolved = resolve_backlinks(all_backlinks, knowledge_dir, script_dir)
         if resolved:
-            lines.append("--- Pre-resolved Knowledge ---")
+            lines.append("## Prior Knowledge")
             lines.append("")
             total_chars = 0
             included = 0
@@ -250,6 +250,187 @@ def build_context_section(
                     lines.append(f"**{bl_label}:** [unresolved — {error}]")
                     lines.append("")
                 included += 1
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Staleness integration
+# ---------------------------------------------------------------------------
+
+# Staleness threshold for generating fix tasks (matches STALE_THRESHOLD in staleness-scan.py)
+STALE_DRIFT_THRESHOLD = 0.6
+
+
+def _find_repo_root() -> str:
+    """Find the git repo root from cwd, or return cwd if not in a repo."""
+    cwd = os.getcwd()
+    d = cwd
+    while True:
+        if os.path.isdir(os.path.join(d, ".git")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return cwd
+        d = parent
+
+
+def _backlink_to_entry_path(backlink: str, knowledge_dir: str) -> str | None:
+    """Map a knowledge backlink target to its absolute entry file path.
+
+    Handles both category-file and category-dir/entry-file layouts.
+    Returns None if no matching file found or if not a knowledge backlink.
+    """
+    # Only process knowledge-type backlinks
+    if not backlink.startswith("knowledge:"):
+        return None
+    target = backlink.split(":", 1)[1]
+    # Strip heading fragment
+    if "#" in target:
+        target = target.split("#", 1)[0]
+    target = target.strip()
+    if not target:
+        return None
+
+    # Try as a direct file: knowledge_dir/<target>.md
+    candidate = os.path.join(knowledge_dir, target + ".md")
+    if os.path.isfile(candidate):
+        return candidate
+
+    # Try as category dir: target may be "category/subcategory/entry-slug"
+    # The file might be at knowledge_dir/category/subcategory/entry-slug.md
+    candidate = os.path.join(knowledge_dir, target.replace("/", os.sep) + ".md")
+    if os.path.isfile(candidate):
+        return candidate
+
+    return None
+
+
+def scan_phase_knowledge_staleness(
+    phase_backlinks: list[str],
+    cross_cutting_backlinks: list[str],
+    knowledge_dir: str,
+    script_dir: str,
+) -> list[dict]:
+    """Scan knowledge entries referenced by phase backlinks for staleness.
+
+    Returns list of dicts for stale entries: {path, rel_path, drift_score, status, signals, related_files}
+    Only returns entries where file_drift is available (not confidence-only).
+    """
+    if not knowledge_dir:
+        return []
+
+    # Collect unique knowledge backlink targets
+    all_bl = []
+    seen = set()
+    for bl in phase_backlinks + cross_cutting_backlinks:
+        if bl not in seen and bl.startswith("knowledge:"):
+            all_bl.append(bl)
+            seen.add(bl)
+
+    if not all_bl:
+        return []
+
+    # Import staleness functions (co-located in scripts/)
+    # Module name has a hyphen, so use spec_from_file_location
+    ss_path = os.path.join(script_dir, "staleness-scan.py")
+    if not os.path.isfile(ss_path):
+        return []
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("staleness_scan", ss_path)
+        if spec is None or spec.loader is None:
+            return []
+        ss = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ss)
+        parse_metadata = ss.parse_metadata
+        compute_file_drift = ss.compute_file_drift
+        compute_backlink_drift = ss.compute_backlink_drift
+        score_entry = ss.score_entry
+    except (ImportError, AttributeError, OSError):
+        return []
+
+    repo_root = _find_repo_root()
+    stale_entries = []
+
+    for bl in all_bl:
+        entry_path = _backlink_to_entry_path(bl, knowledge_dir)
+        if not entry_path or not os.path.isfile(entry_path):
+            continue
+
+        meta = parse_metadata(entry_path)
+        file_drift = compute_file_drift(repo_root, meta["learned"], meta["related_files"])
+
+        # Gate: only score entries where file_drift is available
+        if not file_drift.get("available", False):
+            continue
+
+        backlink_drift = compute_backlink_drift(entry_path, knowledge_dir)
+        drift_score, status, signals = score_entry(file_drift, backlink_drift, meta["confidence"])
+
+        if drift_score >= STALE_DRIFT_THRESHOLD:
+            try:
+                rel_path = os.path.relpath(entry_path, knowledge_dir)
+            except ValueError:
+                rel_path = entry_path
+            stale_entries.append({
+                "path": rel_path,
+                "abs_path": entry_path,
+                "drift_score": drift_score,
+                "status": status,
+                "signals": signals,
+                "related_files": meta["related_files"],
+            })
+
+    return stale_entries
+
+
+def _build_fix_task_description(
+    stale_entry: dict,
+    phase_num: int,
+    objective: str,
+    slug: str,
+) -> str:
+    """Build a task description for fixing a stale knowledge entry."""
+    path = stale_entry["path"]
+    drift = stale_entry["drift_score"]
+    signals = stale_entry["signals"]
+    related = stale_entry["related_files"]
+
+    # Build drift reason string
+    reasons = []
+    fd = signals.get("file_drift", {})
+    if fd.get("available"):
+        reasons.append(f"file drift: {fd['commit_count']} commits since learned date")
+    bd = signals.get("backlink_drift", {})
+    if bd.get("available") and bd.get("broken", 0) > 0:
+        reasons.append(f"backlinks: {bd['broken']}/{bd['total']} broken")
+    drift_reason = "; ".join(reasons) if reasons else "drift threshold exceeded"
+
+    lines = []
+    if objective:
+        lines.append(f"**Phase {phase_num} objective:** {objective}")
+    lines.append(f"**Task:** Update stale knowledge entry: `{path}`")
+    lines.append(f"**Drift score:** {drift:.2f} ({drift_reason})")
+    lines.append("")
+    lines.append("**Instructions:**")
+    lines.append(f"1. Read the knowledge entry at `{path}`")
+    if related:
+        lines.append("2. Read each related file listed below and compare claims to current code")
+        lines.append("3. Rewrite the entry to match current behavior, preserving format (H1 title, prose, See also backlinks, HTML metadata comment)")
+        lines.append("4. Update `learned` date to today and set `source: worker-fix` in the HTML metadata comment")
+    else:
+        lines.append("2. Verify claims against the codebase")
+        lines.append("3. Rewrite stale content, preserving format")
+        lines.append("4. Update `learned` date to today and set `source: worker-fix`")
+    lines.append("")
+    if related:
+        lines.append("**Related files to check:**")
+        for rf in related:
+            lines.append(f"- `{rf}`")
+        lines.append("")
+    if slug:
+        lines.append(f"**Plan reference:** [[work:{slug}]]")
 
     return "\n".join(lines)
 
@@ -394,6 +575,29 @@ def generate_tasks_from_plan(
                     if prev_id not in task["blockedBy"]:
                         task["blockedBy"].append(prev_id)
                 file_last_task[ft] = task["id"]
+
+        # Staleness scan: check knowledge entries referenced by this phase
+        stale_entries = scan_phase_knowledge_staleness(
+            phase_backlinks, cross_cutting_backlinks,
+            knowledge_dir, script_dir,
+        )
+        for se in stale_entries:
+            task_counter += 1
+            fix_task_id = f"task-{task_counter}"
+            fix_subject = f"Update stale knowledge entry: `{se['path']}`"
+            fix_active = f"Updating stale knowledge entry: {se['path']}"
+            fix_desc = _build_fix_task_description(
+                se, phase_num, objective, slug,
+            )
+            phase_tasks.append({
+                "id": fix_task_id,
+                "subject": fix_subject,
+                "description": fix_desc,
+                "activeForm": fix_active,
+                "blockedBy": list(prev_phase_task_ids),
+                "file_targets": [se["path"]],
+            })
+            current_phase_task_ids.append(fix_task_id)
 
         phases.append({
             "phase_number": phase_num,

@@ -37,6 +37,7 @@ import sys
 import os
 import re
 import json
+import sqlite3
 
 knowledge_dir = sys.argv[1]
 repo_name = sys.argv[2]
@@ -49,6 +50,32 @@ for line in sys.argv[4].strip().split('\n'):
         cat = cat.strip()
         priority_map[cat] = int(score.strip())
         categories.append(cat)
+
+# Load see_also data from concordance_results if available
+see_also_map = {}  # (abs_file_path, heading) -> [(similar_path_rel, similar_heading, score)]
+db_path = os.path.join(knowledge_dir, '.pk_search.db')
+if os.path.exists(db_path):
+    try:
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            "SELECT file_path, heading, similar_entry_path, similar_entry_heading, similarity_score "
+            "FROM concordance_results WHERE result_type = 'see_also' "
+            "ORDER BY similarity_score DESC"
+        ).fetchall()
+        conn.close()
+        for fp, heading, sim_fp, sim_heading, score in rows:
+            key = (fp, heading)
+            try:
+                sim_rel = os.path.relpath(sim_fp, knowledge_dir)
+            except ValueError:
+                sim_rel = sim_fp
+            see_also_map.setdefault(key, []).append({
+                "path": sim_rel,
+                "heading": sim_heading,
+                "similarity": round(score, 4),
+            })
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
+        pass  # table may not exist yet
 
 entries = []
 category_stats = {}
@@ -108,6 +135,13 @@ for category in categories:
 
         priority_score = priority_map.get(category, 30)
 
+        # Look up see_also from concordance_results
+        see_also = []
+        heading_text = title_match.group(1) if title_match else ""
+        sa_key = (filepath, heading_text)
+        if sa_key in see_also_map:
+            see_also = see_also_map[sa_key]
+
         entry = {
             "path": relpath,
             "category": category,
@@ -116,6 +150,7 @@ for category in categories:
             "learned": learned,
             "confidence": confidence,
             "related_files": related_files,
+            "see_also": see_also,
             "priority_score": priority_score,
         }
         entries.append(entry)

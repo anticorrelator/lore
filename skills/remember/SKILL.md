@@ -17,7 +17,7 @@ lore resolve
 
 Set `KNOWLEDGE_DIR` to the result. Set `THREADS_DIR` to `$KNOWLEDGE_DIR/_threads`.
 
-## Step 0: Parse capture constraints
+## Step 1: Parse capture constraints
 
 If an argument was provided, interpret it as **capture constraints** that adjust the 4-condition gate for this invocation. Constraints narrow what gets captured — they never expand it (the base gate always applies).
 
@@ -26,7 +26,7 @@ The argument can be:
 - **A capture filter** (e.g., "skip style preferences, capture architecture decisions") — tightens the gate criteria
 - **Both** (e.g., "PR review feedback — capture architectural insights and gotchas, skip style nits and formatting preferences")
 
-When called from another skill, the argument typically provides context about what kind of work just happened and what's worth persisting vs what's ephemeral. Apply these constraints throughout Steps 1-4.
+When called from another skill, the argument typically provides context about what kind of work just happened and what's worth persisting vs what's ephemeral. Apply these constraints throughout Steps 2-5.
 
 **Examples of how constraints tighten the gate:**
 
@@ -39,9 +39,9 @@ When called from another skill, the argument typically provides context about wh
 
 The key question for each candidate: **would a future session benefit from knowing this, or is it noise?** Constraints from the caller help answer this by providing domain-specific signal about what's ephemeral.
 
-## Step 1: Scan for uncaptured insights
+## Step 2: Scan for uncaptured insights
 
-Review the full conversation context (filtered by any Step 0 constraints) and identify moments that match capture triggers:
+Review the full conversation context (filtered by any Step 1 constraints) and identify moments that match capture triggers:
 
 - A design decision was made with non-obvious rationale
 - Something was discovered to work differently than expected
@@ -57,23 +57,32 @@ For each candidate, assess against the 4-condition gate:
 3. Stable (won't change soon)?
 4. High confidence (verified)?
 
-If capture constraints were provided in Step 0, apply them as an additional filter: candidates that pass the base gate but fall into the "skip" category for the current context are dropped silently.
+If capture constraints were provided in Step 1, apply them as an additional filter: candidates that pass the base gate but fall into the "skip" category for the current context are dropped silently.
 
-## Step 2: Scan for thread updates
+## Step 3: Scan for thread updates and preference signals
 
 Review the conversation for thread-worthy content:
 
 1. Read the thread index at `$THREADS_DIR/_index.json`
 2. For each existing thread, check if this session discussed the topic
-3. If so, write a new entry file at `$THREADS_DIR/<slug>/<date>.md` (e.g., `how-we-work/2026-02-08.md`). If a file for today already exists, disambiguate with session suffix: `2026-02-08-s2.md`. Entry files do NOT contain the `## ` heading — it is reconstructed from the filename at load time. Entry content starts with `**Summary:**`:
+3. While scanning, also detect **preference signals** — patterns of user behavior or explicit statements that reveal reusable working-style preferences. Look for:
+   - **User corrections:** "Don't do X, I prefer Y" or repeated pushback on a pattern
+   - **Stated preferences:** "I like when...", "Always use...", "Skip the..."
+   - **Reinforced patterns:** The same preference surfacing across multiple exchanges or sessions
+   - **Demonstrated preferences:** Consistent choices the user makes without stating them explicitly (e.g., always choosing concise output, preferring certain file organizations)
+
+   **Not preferences:** One-off requests ("make this function shorter"), task-specific instructions, or transient choices that won't apply next session.
+
+4. If the thread was discussed, write a new entry file at `$THREADS_DIR/<slug>/<date>.md` (e.g., `how-we-work/2026-02-08.md`). If a file for today already exists, disambiguate with session suffix: `2026-02-08-s2.md`. Entry files do NOT contain the `## ` heading — it is reconstructed from the filename at load time. Entry content starts with `**Summary:**`:
    ```markdown
    **Summary:** One-sentence overview of what was discussed
    **Key points:**
    - Specific decisions, shifts, or ideas
    **Shifts:** Change from previous entries (optional)
+   **Preferences:** User preferences or working-style signals observed this session (optional — only include when a clear, reusable preference was expressed or demonstrated)
    **Related:** [[work:name]], [[knowledge:file#heading]]
    ```
-4. Check for new topics that don't match existing threads and had >2 substantive exchanges — these become new thread candidates. Create the directory `$THREADS_DIR/<slug>/` with a `_meta.json` file:
+5. Check for new topics that don't match existing threads and had >2 substantive exchanges — these become new thread candidates. Create the directory `$THREADS_DIR/<slug>/` with a `_meta.json` file:
    ```json
    {
      "slug": "<slug>",
@@ -81,12 +90,13 @@ Review the conversation for thread-worthy content:
      "tier": "active",
      "created": "<ISO timestamp>",
      "updated": "<ISO timestamp>",
-     "sessions": 1
+     "sessions": 1,
+     "accumulated_preferences": []
    }
    ```
-   Then write the first entry file as in step 3. Update `$THREADS_DIR/_index.json` to include the new thread.
+   Then write the first entry file as in step 4. Update `$THREADS_DIR/_index.json` to include the new thread.
 
-## Step 3: Check plan status
+## Step 4: Check plan status
 
 - Is there an active plan for the current work? Check `_work/` for branch match or recent activity.
 - If no plan exists, check auto-trigger conditions:
@@ -97,7 +107,7 @@ Review the conversation for thread-worthy content:
   - Cross-session work (won't finish this conversation)?
 - If a plan exists, does it need a session notes update?
 
-## Step 4: Act
+## Step 5: Act
 
 **Default behavior: auto-capture.** Everything that passes the gate gets captured immediately. The gate is the quality filter — no additional confirmation needed.
 
@@ -109,6 +119,26 @@ Review the conversation for thread-worthy content:
 - Write all thread updates (new entry files to `_threads/<slug>/<date>.md`, update `_meta.json`)
 - Create new threads if warranted (create directory, `_meta.json`, first entry file, update `_index.json`)
 - Update plans as needed
+
+### Preference accumulation
+
+After writing thread entries that contain a `**Preferences:**` field, update the thread's `_meta.json` `accumulated_preferences` array:
+
+1. **Read** the thread's current `_meta.json` and its `accumulated_preferences` array
+2. **For each preference** in the new entry's `**Preferences:**` field:
+   - **Match check:** Does it match an existing accumulated preference? (semantic match — same intent, possibly different wording)
+   - **If match found:** Update `last_reinforced` to today's date and append the entry filename to `source_entries`
+   - **If no match:** Add a new entry:
+     ```json
+     {
+       "preference": "Short description of the preference",
+       "first_seen": "YYYY-MM-DD",
+       "last_reinforced": "YYYY-MM-DD",
+       "source_entries": ["<entry-filename>.md"]
+     }
+     ```
+3. **Contradiction check:** If a new preference directly contradicts an existing accumulated preference (e.g., "prefer verbose output" vs existing "prefer concise output"), remove the old preference and add the new one. Briefly note: `[thread: <slug>] Preference updated: "<old>" → "<new>"`
+4. **Write** the updated `_meta.json`
 
 ### Post-capture conflict check
 
@@ -128,14 +158,14 @@ After all captures are filed, check each new entry for conflicts with existing e
    - **No conflict:** Move on silently
 4. When updating an older entry, also refresh its `related-files` metadata and `learned` date
 
-**Exception: external feedback.** If an insight originates from external sources (PR review comments, code review suggestions, issue discussions, pair programming input), prompt the user before capturing — unless capture constraints from Step 0 already specify how to handle external input. External opinions may not align with the user's own mental models.
+**Exception: external feedback.** If an insight originates from external sources (PR review comments, code review suggestions, issue discussions, pair programming input), prompt the user before capturing — unless capture constraints from Step 1 already specify how to handle external input. External opinions may not align with the user's own mental models.
 
 ```
 [external] PR reviewer suggested "use dependency injection for testability"
   → Capture to knowledge? [Their rationale: ...]
 ```
 
-## Step 5: Report summary
+## Step 6: Report summary
 
 After capturing, print a concise summary:
 
@@ -149,7 +179,7 @@ After capturing, print a concise summary:
 
 The user can say "don't keep that" or "drop the X entry" after seeing the summary to remove anything.
 
-## Step 6: Update metadata
+## Step 7: Update metadata
 
 After capturing:
 - Update thread `_meta.json` (`updated` timestamp, increment `sessions` count)
@@ -158,13 +188,13 @@ After capturing:
 
 ### Renormalize check
 
-After heal, check for renormalize flags:
+After running heal, check for renormalize flags:
 
 ```bash
 cat "$KNOWLEDGE_DIR/_meta/renormalize-flags.json" 2>/dev/null
 ```
 
-If the file exists, count the total flags across all arrays (`oversized_categories`, `stale_related_files`, `zero_access_entries`). If **2 or more total flags** exist, append to the Step 5 report:
+If the file exists, count the total flags across all arrays (`oversized_categories`, `stale_related_files`, `zero_access_entries`). If **2 or more total flags** exist, append to the Step 6 report:
 
 ```
   [renormalize] N flags detected (oversized: X, stale refs: Y, zero-access: Z) — run /memory renormalize
@@ -175,6 +205,6 @@ If 1 flag, note it but don't push:
   [renormalize] 1 flag (oversized: conventions at 41 entries) — /memory renormalize available when ready
 ```
 
-## Step 7: Resume work
+## Step 8: Resume work
 
 After the checkpoint, return to whatever was being worked on. The checkpoint is a pause, not a redirect.

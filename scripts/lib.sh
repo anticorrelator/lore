@@ -141,21 +141,138 @@ iso_to_epoch() {
   fi
 }
 
+# --- extract_backlinks ---
+# Extract [[knowledge:...]] backlinks from a file (notes.md or plan.md).
+# Returns one backlink path per line (the part after "knowledge:").
+# Usage: backlinks=$(extract_backlinks "$file")
+# Output: Newline-separated knowledge paths (e.g., "conventions/skills/skill-composition-via-allowed-tools")
+extract_backlinks() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  local raw
+  raw=$(grep -oE '\[\[knowledge:[^]]+\]\]' "$file" 2>/dev/null) || true
+  if [[ -n "$raw" ]]; then
+    echo "$raw" | sed 's/\[\[knowledge://;s/\]\]//' | sort -u
+  fi
+}
+
+# --- _extract_work_item_backlinks ---
+# Extract [[knowledge:...]] backlinks from a work item's notes.md and plan.md.
+# Returns deduplicated backlink paths, one per line.
+# Usage: backlinks=$(_extract_work_item_backlinks "$work_item_dir")
+_extract_work_item_backlinks() {
+  local work_item_dir="$1"
+  local notes_backlinks plan_backlinks
+  notes_backlinks=$(extract_backlinks "${work_item_dir}notes.md")
+  plan_backlinks=$(extract_backlinks "${work_item_dir}plan.md")
+
+  if [[ -n "$notes_backlinks" || -n "$plan_backlinks" ]]; then
+    printf '%s\n%s' "$notes_backlinks" "$plan_backlinks" | grep -v '^$' | sort -u
+  fi
+}
+
+# --- _extract_work_item_signal ---
+# Extract signal terms from a single work item directory.
+# Reads title, plan headings, tags from _meta.json, and first ~500 chars of notes.md.
+# Usage: output=$(_extract_work_item_signal "$work_item_dir")
+# Output format (multi-line):
+#   Line 1: Space-separated signal terms (may be empty)
+#   Line 2: "---ITEM_SOURCES---" delimiter
+#   Lines 3+: One source name per line (title, tags, plan_headings, notes)
+_extract_work_item_signal() {
+  local work_item_dir="$1"
+  local signal=""
+  local sources=()
+  local meta_file="${work_item_dir}_meta.json"
+
+  # Title
+  if [[ -f "$meta_file" ]]; then
+    local work_title
+    work_title=$(json_field "title" "$meta_file")
+    if [[ -n "$work_title" ]]; then
+      signal="${work_title}"
+      sources+=("title")
+    fi
+
+    # Tags from _meta.json (JSON array → space-separated words)
+    local tags_raw
+    tags_raw=$(json_array_field "tags" "$meta_file")
+    if [[ -n "$tags_raw" ]]; then
+      local tags_clean
+      tags_clean=$(echo "$tags_raw" | sed 's/"//g; s/,/ /g; s/-/ /g')
+      if [[ -n "$tags_clean" ]]; then
+        signal="${signal} ${tags_clean}"
+        sources+=("tags")
+      fi
+    fi
+  fi
+
+  # Plan headings
+  local plan_file="${work_item_dir}plan.md"
+  if [[ -f "$plan_file" ]]; then
+    local plan_headings
+    plan_headings=$(grep '^### ' "$plan_file" 2>/dev/null | sed 's/^### //' | head -5 | tr '\n' ' ')
+    if [[ -n "$plan_headings" ]]; then
+      signal="${signal} ${plan_headings}"
+      sources+=("plan_headings")
+    fi
+  fi
+
+  # First ~500 chars of notes.md (strip markdown headings, comments, blank lines)
+  local notes_file="${work_item_dir}notes.md"
+  if [[ -f "$notes_file" ]]; then
+    local notes_text
+    notes_text=$(sed '/^#/d; /^$/d; /^<!--/d' "$notes_file" 2>/dev/null | tr '\n' ' ' | cut -c1-500)
+    if [[ -n "$notes_text" ]]; then
+      signal="${signal} ${notes_text}"
+      sources+=("notes")
+    fi
+  fi
+
+  echo "$signal"
+  echo "---ITEM_SOURCES---"
+  if [[ ${#sources[@]} -gt 0 ]]; then
+    printf '%s\n' "${sources[@]}"
+  fi
+}
+
 # --- extract_context_signal ---
 # Extract context signal from git branch + matched work item for FTS5 ranking.
-# Combines branch name, work item title, and plan headings into a text signal.
+# Combines branch name, work item title, plan headings, tags, and notes into a text signal.
+# Also extracts [[knowledge:...]] backlinks from notes.md and plan.md.
 # On main/master, falls back to most recently updated active work item.
-# Usage: CONTEXT_SIGNAL=$(extract_context_signal "$KNOWLEDGE_DIR")
-# Output: Space-separated signal terms (may be empty).
+# Usage: OUTPUT=$(extract_context_signal "$KNOWLEDGE_DIR")
+# Output format (multi-line):
+#   Line 1: Space-separated signal terms (may be empty)
+#   Line 2: "---BACKLINKS---" delimiter
+#   Lines 3+: One knowledge backlink path per line (may be none)
+#   "---SIGNAL_SOURCES---" delimiter
+#   Remaining lines: One source name per line (branch, title, tags, plan_headings, notes, backlinks)
+# Parsing:
+#   CONTEXT_SIGNAL=$(echo "$OUTPUT" | head -1)
+#   BACKLINKS=$(echo "$OUTPUT" | sed -n '/^---BACKLINKS---$/,/^---SIGNAL_SOURCES---$/{ /^---/d; p; }')
+#   SIGNAL_SOURCES=$(echo "$OUTPUT" | sed '1,/^---SIGNAL_SOURCES---$/d')
 extract_context_signal() {
   local knowledge_dir="$1"
   local signal=""
+  local backlinks=""
+  local signal_sources=()
   local branch
   branch=$(get_git_branch)
+
+  # Helper: call _extract_work_item_signal and parse its multi-line output
+  _parse_item_signal() {
+    local item_output="$1"
+    # Signal is line 1
+    _PARSED_SIGNAL=$(echo "$item_output" | head -1)
+    # Sources are after ---ITEM_SOURCES--- delimiter
+    _PARSED_SOURCES=$(echo "$item_output" | sed '1,/^---ITEM_SOURCES---$/d')
+  }
 
   if [[ -n "$branch" && "$branch" != "main" && "$branch" != "master" ]]; then
     # Branch name as initial signal (convert hyphens/underscores to spaces)
     signal=$(echo "$branch" | tr '_/-' ' ')
+    signal_sources+=("branch")
 
     # Try to match branch to a work item for a stronger signal
     local work_dir="$knowledge_dir/_work"
@@ -167,20 +284,23 @@ extract_context_signal() {
         [[ -f "$meta_file" ]] || continue
 
         if grep -q "\"$branch\"" "$meta_file" 2>/dev/null; then
-          local work_title
-          work_title=$(json_field "title" "$meta_file")
-          if [[ -n "$work_title" ]]; then
-            signal="${signal} ${work_title}"
+          local item_output
+          item_output=$(_extract_work_item_signal "$work_item_dir")
+          _parse_item_signal "$item_output"
+          if [[ -n "$_PARSED_SIGNAL" ]]; then
+            signal="${signal} ${_PARSED_SIGNAL}"
+          fi
+          # Collect item sources
+          if [[ -n "$_PARSED_SOURCES" ]]; then
+            while IFS= read -r src; do
+              [[ -n "$src" ]] && signal_sources+=("$src")
+            done <<< "$_PARSED_SOURCES"
           fi
 
-          # Extract plan headings for strongest signal
-          local plan_file="${work_item_dir}plan.md"
-          if [[ -f "$plan_file" ]]; then
-            local plan_headings
-            plan_headings=$(grep '^### ' "$plan_file" 2>/dev/null | sed 's/^### //' | head -5 | tr '\n' ' ')
-            if [[ -n "$plan_headings" ]]; then
-              signal="${signal} ${plan_headings}"
-            fi
+          # Extract backlinks from notes.md and plan.md
+          backlinks=$(_extract_work_item_backlinks "$work_item_dir")
+          if [[ -n "$backlinks" ]]; then
+            signal_sources+=("backlinks")
           fi
           break
         fi
@@ -211,25 +331,35 @@ extract_context_signal() {
       done
 
       if [[ -n "$newest_dir" ]]; then
-        local work_title
-        work_title=$(json_field "title" "${newest_dir}_meta.json")
-        if [[ -n "$work_title" ]]; then
-          signal="$work_title"
+        local item_output
+        item_output=$(_extract_work_item_signal "$newest_dir")
+        _parse_item_signal "$item_output"
+        signal="$_PARSED_SIGNAL"
+        # Collect item sources
+        if [[ -n "$_PARSED_SOURCES" ]]; then
+          while IFS= read -r src; do
+            [[ -n "$src" ]] && signal_sources+=("$src")
+          done <<< "$_PARSED_SOURCES"
         fi
 
-        local plan_file="${newest_dir}plan.md"
-        if [[ -f "$plan_file" ]]; then
-          local plan_headings
-          plan_headings=$(grep '^### ' "$plan_file" 2>/dev/null | sed 's/^### //' | head -5 | tr '\n' ' ')
-          if [[ -n "$plan_headings" ]]; then
-            signal="${signal} ${plan_headings}"
-          fi
+        backlinks=$(_extract_work_item_backlinks "$newest_dir")
+        if [[ -n "$backlinks" ]]; then
+          signal_sources+=("backlinks")
         fi
       fi
     fi
   fi
 
+  # Output: signal on first line, delimiter, backlinks, delimiter, signal sources
   echo "$signal"
+  echo "---BACKLINKS---"
+  if [[ -n "$backlinks" ]]; then
+    echo "$backlinks"
+  fi
+  echo "---SIGNAL_SOURCES---"
+  if [[ ${#signal_sources[@]} -gt 0 ]]; then
+    printf '%s\n' "${signal_sources[@]}"
+  fi
 }
 
 # --- entry_filename_from_heading ---

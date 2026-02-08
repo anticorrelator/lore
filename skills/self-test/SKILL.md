@@ -13,7 +13,7 @@ Run a structured evaluation of the lore memory system from any codebase. Tests 8
 
 **Design principle:** Tests should surface *actionable findings*, not confirm what's already working. If a test scores 5/5 for 2+ consecutive runs, it should either get harder or be replaced with something that produces signal.
 
-## Step 0: Resolve Paths and Detect Infrastructure
+## Step 1: Resolve Paths and Detect Infrastructure
 
 ### Path Resolution
 
@@ -69,7 +69,7 @@ If parsing fails (malformed results file), note this in the output and treat as 
 
 If the argument is "quick", only run Tests 1, 2, and 7. Skip the rest and mark them as "Skipped (quick mode)" in results.
 
-## Step 1: Initialize Tracking
+## Step 2: Initialize Tracking
 
 Set up tracking counters for the entire run:
 - `TOOL_CALLS` = 0 (increment each time you use Read, Glob, Grep, Bash, or any tool)
@@ -306,7 +306,7 @@ This test replaced the previous "Honest Assessment" (Runs 1-2) which asked hypot
 - **Stale:** Key claims no longer match code — entry needs updating
 - **Wrong:** Entry contradicts current behavior — dangerous if trusted
 
-**Overall scoring:**
+**Overall scoring:** Score the original state (before fix). The score records what was found, not what was left — this preserves trend tracking across runs even when Step 3 corrects entries inline.
 - Freshness: X/3 entries fully fresh
 - Trust: 1-5 scale based on findings:
   - 5: All spot-checked entries verified accurate
@@ -317,7 +317,28 @@ This test replaced the previous "Honest Assessment" (Runs 1-2) which asked hypot
 
 **Record:** For each spot-checked entry, note what was verified, what was stale, and what was updated. Stale entries should be corrected as part of the test (fix-as-you-go), with the staleness still recorded in the score.
 
-## Step 10: Compile and Write Results
+## Step 3: Apply Mechanical Fixes
+
+**This step is mandatory.** For every entry scored as **aging** or **stale** in Test 8, attempt a mechanical fix before proceeding. The goal: leave the knowledge store more accurate than you found it, without blocking the self-test on rewrites that require deep investigation.
+
+**Scope rules — what counts as mechanical:**
+- Fix broken file paths (renamed or moved files)
+- Update renamed references (function names, variable names, script names)
+- Correct wrong counts or enumerations (e.g., "3 scripts" when there are now 4)
+- Update changed defaults or flag names
+- Fix stale `See also:` backlinks that point to renamed/moved entries
+
+**Scope limit — when to defer:**
+If a fix requires reading **more than 2 source files** to verify correctness, or requires a **full content rewrite** (the entry's core claim is wrong, not just a detail), do NOT attempt the fix inline. Instead, log it as **"deferred to /renormalize"** in the results.
+
+**Procedure:**
+1. For each aging/stale entry from Test 8, determine whether the staleness is mechanical (path, name, count, reference) or substantive (core claim outdated).
+2. **Mechanical:** Read the 1-2 relevant source files, then use the Edit tool to correct the entry in place. Update the entry's `learned` date to today.
+3. **Substantive or complex:** Log as deferred. Format: `- <entry path>: <drift reason> — deferred to /renormalize`
+
+**Record:** List each fix applied (entry, what changed) and each deferral (entry, why deferred). This feeds into Step 4's results.
+
+## Step 4: Compile and Write Results
 
 Compile all test scores into the structured results format. Write to `$RESULTS_FILE`.
 
@@ -356,7 +377,7 @@ Compile all test scores into the structured results format. Write to `$RESULTS_F
 ## Comparison with Previous Results
 [If this is the first run: "Baseline run — no previous results to compare."
 
-If previous results were loaded in Step 0, compute:
+If previous results were loaded in Step 1, compute:
 
 ### Score Delta
 | Test | Previous | Current | Change |
@@ -385,6 +406,17 @@ Note any layers that were added or removed since last run.]
 ## Test Results
 [For each test: what happened, what you noticed, specific evidence and findings]
 
+## Fixes Applied (Step 3)
+[For each entry fixed or deferred during Step 3:
+
+**Fixed:**
+- `<entry path>`: <what was corrected> (e.g., updated file path from `old/path` to `new/path`)
+
+**Deferred to /renormalize:**
+- `<entry path>`: <drift reason> — <why deferred> (e.g., core claim outdated, requires full rewrite)
+
+If no aging/stale entries were found in Test 8, note: "No fixes needed — all spot-checked entries were fresh."
+
 ## Bypass Log
 [Every time you used Grep/Glob/Explore instead of the knowledge system, note why.
 Format: Test X.Y — Bypassed because: reason]
@@ -407,7 +439,7 @@ Changes made to `skills/self-test/SKILL.md` this run:
 Rationale: <1-2 sentences on what this run taught about self-diagnosis>
 ```
 
-## Step 11: Report
+## Step 5: Report
 
 After writing results, report to the user:
 
@@ -419,11 +451,11 @@ After writing results, report to the user:
   [If previous: vs Run N-1: X improved, X regressed, X unchanged, X new]
 ```
 
-## Step 12: Evolve the Self-Test
+## Step 6: Evolve the Self-Test
 
 **This step is mandatory.** Every run should leave the self-test protocol better than it found it. A self-test that doesn't evolve calcifies — it starts confirming what's already known instead of surfacing what's actually wrong.
 
-### 12a: Analyze patterns (if Run > 1)
+### 6a: Analyze patterns (if Run > 1)
 
 If previous results exist, compare across runs:
 
@@ -438,7 +470,7 @@ If previous results exist, compare across runs:
 
 4. **Score trend analysis:** If a test has regressed for 2+ consecutive runs, flag prominently: "Test X has regressed N runs in a row."
 
-### 12b: Apply improvements to the protocol
+### 6b: Apply improvements to the protocol
 
 Based on this run's findings, **edit `skills/self-test/SKILL.md` directly**. Changes to make:
 
@@ -454,7 +486,7 @@ Based on this run's findings, **edit `skills/self-test/SKILL.md` directly**. Cha
 
 **Minimum bar:** At least one concrete improvement per run. If everything genuinely scored well and no improvements are obvious, document *why* each test is still producing useful signal — the justification itself is the deliverable.
 
-### 12c: Record changes
+### 6c: Record changes
 
 Append a `## Protocol Changes` section to the results file:
 
@@ -469,7 +501,7 @@ Changes made to `skills/self-test/SKILL.md` this run:
 Rationale: <1-2 sentences on what this run taught about self-diagnosis>
 ```
 
-### 12d: Report
+### 6d: Report
 
 ```
 [self-test] Protocol evolved:
@@ -477,11 +509,11 @@ Rationale: <1-2 sentences on what this run taught about self-diagnosis>
   Rationale: <one sentence>
 ```
 
-## Step 13: Create Work Items from Findings
+## Step 7: Create Work Items from Findings
 
 **This step is mandatory.** The self-test's purpose is to surface actionable findings — but findings without follow-through are just documentation. This step closes the loop by converting persistent or significant recommendations into tracked work items.
 
-### 13a: Triage recommendations
+### 7a: Triage recommendations
 
 Review all recommendations from the `## Recommendations` section. For each, decide:
 
@@ -495,7 +527,7 @@ Review all recommendations from the `## Recommendations` section. For each, deci
    - Trivially fixable inline during the test itself (and was already fixed)
    - Low impact and not persistent
 
-### 13b: Create work items
+### 7b: Create work items
 
 For each recommendation that warrants a work item:
 
@@ -509,11 +541,11 @@ Then write a notes.md entry scoping the work:
 - **Scope:** Rough size estimate and approach
 - **Related:** Backlinks to relevant knowledge entries
 
-### 13c: Record in results
+### 7c: Record in results
 
 Append the `## Work Items Created` section to the results file listing what was created and why. If no work items were warranted, note the reason (e.g., "all recommendations are already tracked" or "all findings were fixed inline").
 
-### 13d: Report
+### 7d: Report
 
 ```
 [self-test] Work items created: N

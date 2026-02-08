@@ -27,11 +27,17 @@ DB_FILENAME = ".pk_search.db"
 SKIP_FILES = {"_inbox.md", "_index.md", "_meta.md", "_meta.json", "_index.json", "_self_test_results.md", "_manifest.json"}
 SKIP_DIRS = {"_archive", "__pycache__", ".git", "_meta", "_meta_bak", "_inbox"}
 CATEGORY_DIRS = {"abstractions", "architecture", "conventions", "gotchas", "principles", "workflows", "domains"}
+# Category priority order for tiebreaking: higher index = higher priority
+CATEGORY_PRIORITY = ["domains", "architecture", "abstractions", "gotchas", "conventions", "workflows", "principles"]
+CATEGORY_PRIORITY_MAP = {cat: i for i, cat in enumerate(CATEGORY_PRIORITY)}
+CATEGORY_TIEBREAK_MAX = 0.04  # max bonus for highest-priority category (within 0.05 tiebreak range)
 SNIPPET_MAX_CHARS = 500
 DEFAULT_LIMIT = 10
 DEFAULT_THRESHOLD = 0.0
 KNOWLEDGE_BOOST = 2.0  # BM25 rank multiplier for knowledge entries in ORDER BY (rank is negative; higher multiplier = more negative = ranked higher)
-SOURCE_TYPES = ("knowledge", "work", "plan", "thread")
+SOURCE_TYPES = ("knowledge", "work", "plan", "thread", "source")
+SOURCE_FILE_EXTENSIONS = {".py", ".sh"}
+SOURCE_SKIP_DIRS = {"__pycache__", ".git", "node_modules", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", "dist", "build", ".egg-info"}
 
 
 # ---------------------------------------------------------------------------
@@ -49,11 +55,12 @@ from pk_resolve import Resolver, BACKLINK_RE as _BACKLINK_RE, resolve_read_path 
 class Indexer:
     """Builds and maintains the FTS5 index."""
 
-    SCHEMA_VERSION = 5  # v5: metadata columns (category, confidence, learned_date)
+    SCHEMA_VERSION = 7  # v7: concordance_results for precomputed see-also/related-files
 
-    def __init__(self, knowledge_dir: str):
+    def __init__(self, knowledge_dir: str, repo_root: str | None = None):
         self.knowledge_dir = os.path.abspath(knowledge_dir)
         self.db_path = os.path.join(self.knowledge_dir, DB_FILENAME)
+        self.repo_root = os.path.abspath(repo_root) if repo_root else None
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -91,6 +98,33 @@ class Indexer:
                 embedding BLOB,
                 model_name TEXT,
                 created_at REAL
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS entry_terms USING fts5vocab(
+                entries, 'row'
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS entry_terms_instance USING fts5vocab(
+                entries, 'instance'
+            );
+
+            CREATE TABLE IF NOT EXISTS tfidf_vectors (
+                file_path TEXT,
+                heading TEXT,
+                vector BLOB,
+                source_type TEXT,
+                updated_at REAL,
+                PRIMARY KEY (file_path, heading)
+            );
+
+            CREATE TABLE IF NOT EXISTS concordance_results (
+                file_path TEXT,
+                heading TEXT,
+                similar_entry_path TEXT,
+                similar_entry_heading TEXT,
+                similarity_score REAL,
+                result_type TEXT,
+                PRIMARY KEY (file_path, heading, similar_entry_path, similar_entry_heading, result_type)
             );
         """)
         # Store schema version
@@ -212,6 +246,40 @@ class Indexer:
 
         return sorted(results, key=lambda x: x[0])
 
+    def _collect_source_files(self) -> list[tuple[str, str]]:
+        """Find indexable source files (.py, .sh, .md) from the repo root.
+
+        Returns list of (file_path, "source") tuples.
+        Only collects files if repo_root is set. Non-knowledge .md files
+        (those outside the knowledge directory) are included.
+        """
+        if not self.repo_root or not os.path.isdir(self.repo_root):
+            return []
+
+        results: list[tuple[str, str]] = []
+        knowledge_abs = os.path.abspath(self.knowledge_dir)
+
+        for root, dirs, files in os.walk(self.repo_root):
+            # Skip common non-content directories
+            dirs[:] = [d for d in dirs if d not in SOURCE_SKIP_DIRS and not d.startswith(".")]
+
+            # Skip if we're inside the knowledge directory (already indexed as knowledge)
+            abs_root = os.path.abspath(root)
+            if abs_root.startswith(knowledge_abs + os.sep) or abs_root == knowledge_abs:
+                dirs.clear()
+                continue
+
+            for fname in sorted(files):
+                if fname.startswith("."):
+                    continue
+                _, ext = os.path.splitext(fname)
+                if ext not in SOURCE_FILE_EXTENSIONS:
+                    continue
+                full = os.path.join(root, fname)
+                results.append((full, "source"))
+
+        return sorted(results, key=lambda x: x[0])
+
     @staticmethod
     def _file_hash(file_path: str) -> str:
         """SHA-256 hash of file contents."""
@@ -296,8 +364,26 @@ class Indexer:
         # Remove old entries for this file
         conn.execute("DELETE FROM entries WHERE file_path = ?", (file_path,))
 
+        # Source files: index whole file as a single entry
+        if source_type == "source":
+            try:
+                content = Path(file_path).read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                content = ""
+            if content:
+                # Use relative path from repo root as heading
+                if self.repo_root:
+                    try:
+                        heading = os.path.relpath(file_path, self.repo_root)
+                    except ValueError:
+                        heading = os.path.basename(file_path)
+                else:
+                    heading = os.path.basename(file_path)
+                entries = [{"file_path": file_path, "heading": heading, "content": content}]
+            else:
+                entries = []
         # File-per-entry knowledge files: treat whole file as one entry
-        if source_type == "knowledge" and self._is_entry_file(file_path):
+        elif source_type == "knowledge" and self._is_entry_file(file_path):
             entries = MarkdownParser.parse_entry_file(file_path)
         elif source_type == "thread" and self._is_thread_entry_file(file_path):
             # v2 thread entry: single entry per file, heading from filename
@@ -370,16 +456,18 @@ class Indexer:
             conn.commit()
 
         md_files = self._collect_md_files()
+        source_files = self._collect_source_files()
+        all_files = md_files + source_files
         total_entries = 0
         files_indexed = 0
 
-        for fpath, source_type in md_files:
+        for fpath, source_type in all_files:
             count = self._index_file(conn, fpath, source_type)
             total_entries += count
             files_indexed += 1
 
         # Remove stale file_meta for deleted files
-        existing_paths = {fp for fp, _ in md_files}
+        existing_paths = {fp for fp, _ in all_files}
         rows = conn.execute("SELECT file_path FROM file_meta").fetchall()
         for (fp,) in rows:
             if fp not in existing_paths:
@@ -394,31 +482,39 @@ class Indexer:
         conn.commit()
         conn.close()
 
+        # Build TF-IDF concordance vectors
+        concordance_stats = self.build_concordance()
+
         elapsed = time.time() - start_time
         return {
             "files_indexed": files_indexed,
             "total_entries": total_entries,
             "elapsed_seconds": round(elapsed, 3),
             "db_path": self.db_path,
+            "concordance": concordance_stats,
         }
+
+    def _collect_all_files(self) -> list[tuple[str, str]]:
+        """Collect all indexable files: knowledge + source."""
+        return self._collect_md_files() + self._collect_source_files()
 
     def get_stale_files(self) -> list[tuple[str, str]]:
         """Return list of (file_path, source_type) tuples that have changed since last index."""
         if not os.path.exists(self.db_path):
-            return self._collect_md_files()
+            return self._collect_all_files()
 
         try:
             conn = self._connect()
         except (sqlite3.DatabaseError, sqlite3.OperationalError):
-            return self._collect_md_files()
+            return self._collect_all_files()
         if not self._validate_db(conn):
             conn.close()
-            return self._collect_md_files()
+            return self._collect_all_files()
 
         stale: list[tuple[str, str]] = []
-        md_files = self._collect_md_files()
-        existing_paths = {fp for fp, _ in md_files}
-        file_type_map = {fp: st for fp, st in md_files}
+        all_files = self._collect_all_files()
+        existing_paths = {fp for fp, _ in all_files}
+        file_type_map = {fp: st for fp, st in all_files}
 
         # Check for new or changed files
         meta_rows = {
@@ -426,7 +522,7 @@ class Indexer:
             for fp, mt, ch in conn.execute("SELECT file_path, mtime, content_hash FROM file_meta").fetchall()
         }
 
-        for fpath, source_type in md_files:
+        for fpath, source_type in all_files:
             if fpath not in meta_rows:
                 stale.append((fpath, source_type))
                 continue
@@ -467,8 +563,8 @@ class Indexer:
             return self.index_all(force=True)
 
         start_time = time.time()
-        md_files = self._collect_md_files()
-        existing_paths = {fp for fp, _ in md_files}
+        all_files = self._collect_all_files()
+        existing_paths = {fp for fp, _ in all_files}
 
         meta_rows = {
             fp: (mt, ch)
@@ -480,7 +576,7 @@ class Indexer:
         total_entries_added = 0
 
         # Re-index new or changed files
-        for fpath, source_type in md_files:
+        for fpath, source_type in all_files:
             needs_index = False
             if fpath not in meta_rows:
                 needs_index = True
@@ -514,13 +610,29 @@ class Indexer:
         conn.commit()
         conn.close()
 
+        # Rebuild concordance vectors if entries changed
+        concordance_stats = {}
+        if files_reindexed > 0 or files_removed > 0:
+            concordance_stats = self.build_concordance()
+
         elapsed = time.time() - start_time
         return {
             "files_reindexed": files_reindexed,
             "files_removed": files_removed,
             "entries_added": total_entries_added,
             "elapsed_seconds": round(elapsed, 3),
+            "concordance": concordance_stats,
         }
+
+    def build_concordance(self) -> dict:
+        """Build TF-IDF concordance vectors from the current FTS5 index.
+
+        Imports Concordance lazily to avoid circular imports.
+        Returns stats dict from Concordance.build_vectors().
+        """
+        from pk_concordance import Concordance
+        concordance = Concordance(self.db_path)
+        return concordance.build_vectors()
 
 
 # ---------------------------------------------------------------------------
@@ -533,10 +645,10 @@ class Searcher:
     # FTS5 operators that indicate the user is writing an explicit query
     _FTS5_OPERATORS = re.compile(r'[":*]|\bAND\b|\bOR\b|\bNOT\b|\bNEAR\b', re.IGNORECASE)
 
-    def __init__(self, knowledge_dir: str):
+    def __init__(self, knowledge_dir: str, repo_root: str | None = None):
         self.knowledge_dir = os.path.abspath(knowledge_dir)
         self.db_path = os.path.join(self.knowledge_dir, DB_FILENAME)
-        self.indexer = Indexer(knowledge_dir)
+        self.indexer = Indexer(knowledge_dir, repo_root=repo_root)
 
     def _ensure_index(self) -> None:
         """Auto-index if DB missing or stale."""
@@ -604,6 +716,7 @@ class Searcher:
         threshold: float = DEFAULT_THRESHOLD,
         source_type: str | None = None,
         category: str | list[str] | None = None,
+        exclude_category: str | list[str] | None = None,
         caller: str | None = None,
         include_archived: bool = False,
     ) -> list[dict]:
@@ -612,6 +725,7 @@ class Searcher:
         Args:
             source_type: Filter by source type ("knowledge", "plan", "thread"). None = all.
             category: Filter by category (e.g. "architecture", ["conventions", "gotchas"]). None = all.
+            exclude_category: Exclude entries in these categories (e.g. "domains"). None = no exclusion.
             caller: Identifier for the caller (e.g. "lead", "worker", "prefetch"). Logged to retrieval log.
             include_archived: If False (default), exclude entries from _archive/ paths.
         """
@@ -635,6 +749,14 @@ class Searcher:
                 placeholders = ", ".join("?" for _ in category)
                 extra_filters += f" AND category IN ({placeholders})"
                 filter_params.extend(category)
+        if exclude_category:
+            if isinstance(exclude_category, str):
+                extra_filters += " AND (category IS NULL OR category != ?)"
+                filter_params.append(exclude_category)
+            else:
+                placeholders = ", ".join("?" for _ in exclude_category)
+                extra_filters += f" AND (category IS NULL OR category NOT IN ({placeholders}))"
+                filter_params.extend(exclude_category)
         if not include_archived:
             extra_filters += " AND file_path NOT LIKE '%\\_archive/%' ESCAPE '\\'"
 
@@ -725,13 +847,14 @@ class Searcher:
         threshold: float = DEFAULT_THRESHOLD,
         source_type: str | None = None,
         category: str | list[str] | None = None,
+        exclude_category: str | list[str] | None = None,
         caller: str | None = None,
         include_archived: bool = False,
         bm25_weight: float = 0.5,
         recency_weight: float = 0.3,
-        frequency_weight: float = 0.2,
+        tfidf_weight: float = 0.2,
     ) -> list[dict]:
-        """Search with composite scoring: BM25 + recency + access frequency.
+        """Search with composite scoring: BM25 + recency + TF-IDF similarity.
 
         Fetches extra results from BM25, re-scores with composite weights,
         and returns the top `limit` results sorted by composite score.
@@ -739,6 +862,8 @@ class Searcher:
         Each result dict includes an additional 'composite_score' field and
         'content' field (full file content for downstream consumers).
         """
+        from pk_concordance import Concordance, sparse_cosine_similarity
+
         # Fetch more results than needed for re-ranking
         raw_results = self.search(
             query=query,
@@ -746,30 +871,31 @@ class Searcher:
             threshold=threshold,
             source_type=source_type,
             category=category,
+            exclude_category=exclude_category,
             caller=caller,
             include_archived=include_archived,
         )
 
-        # Load access frequency from retrieval log
-        access_counts: dict[str, int] = {}
-        log_path = os.path.join(self.knowledge_dir, "_meta", "retrieval-log.jsonl")
-        if os.path.isfile(log_path):
-            try:
-                with open(log_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            rec = json.loads(line)
-                            q = rec.get("query", "")
-                            if q:
-                                for word in re.sub(r'[-_/"]', " ", q).lower().split():
-                                    access_counts[word] = access_counts.get(word, 0) + 1
-                        except json.JSONDecodeError:
-                            pass
-            except OSError:
-                pass
+        # Build query TF-IDF vector using precomputed corpus stats
+        concordance = Concordance(self.db_path)
+        query_vector = concordance.build_query_vector(query)
+
+        # Preload entry vectors for results
+        entry_vectors: dict[tuple[str, str], dict[int, float]] = {}
+        if query_vector:
+            conn = sqlite3.connect(self.db_path)
+            for r in raw_results:
+                rel_path = r.get("file_path", "")
+                abs_path = os.path.join(self.knowledge_dir, rel_path)
+                heading = r.get("heading", "")
+                row = conn.execute(
+                    "SELECT vector FROM tfidf_vectors WHERE file_path = ? AND heading = ?",
+                    (abs_path, heading),
+                ).fetchone()
+                if row and row[0]:
+                    from pk_concordance import deserialize_sparse_vector
+                    entry_vectors[(rel_path, heading)] = deserialize_sparse_vector(row[0])
+            conn.close()
 
         now = time.time()
         scored = []
@@ -802,32 +928,109 @@ class Searcher:
                 except OSError:
                     pass
 
-            # Access frequency: overlap between log query terms and file content
+            # TF-IDF similarity: cosine between query vector and entry vector
+            tfidf_score = 0.0
+            if query_vector:
+                heading = r.get("heading", "")
+                entry_vec = entry_vectors.get((rel_path, heading))
+                if entry_vec:
+                    tfidf_score = sparse_cosine_similarity(query_vector, entry_vec)
+
+            # Read content for downstream consumers
             try:
                 content = Path(abs_path).read_text(encoding="utf-8").rstrip("\n")
             except (OSError, UnicodeDecodeError):
                 continue
 
-            freq_score = 0.0
-            if access_counts:
-                content_words = set(re.sub(r"[-_/]", " ", content).lower().split())
-                overlap = sum(access_counts.get(w, 0) for w in content_words if w in access_counts)
-                freq_score = min(1.0, overlap / 50.0)
-
             composite = (
                 bm25_weight * bm25_norm
                 + recency_weight * recency_score
-                + frequency_weight * freq_score
+                + tfidf_weight * tfidf_score
             )
+
+            # Category-priority tiebreaker: small bonus for higher-priority categories
+            entry_category = r.get("category")
+            cat_rank = CATEGORY_PRIORITY_MAP.get(entry_category, 0) if entry_category else 0
+            cat_bonus = CATEGORY_TIEBREAK_MAX * cat_rank / max(len(CATEGORY_PRIORITY) - 1, 1)
+            composite += cat_bonus
 
             result = dict(r)
             result["composite_score"] = round(composite, 4)
+            result["tfidf_score"] = round(tfidf_score, 4)
             result["content"] = content
             scored.append(result)
 
         # Sort by composite score descending
         scored.sort(key=lambda x: -x["composite_score"])
         return scored[:limit]
+
+    def budget_search(
+        self,
+        query: str,
+        budget_chars: int,
+        limit: int = DEFAULT_LIMIT,
+        threshold: float = DEFAULT_THRESHOLD,
+        source_type: str | None = None,
+        category: str | list[str] | None = None,
+        exclude_category: str | list[str] | None = None,
+        caller: str | None = None,
+        include_archived: bool = False,
+        bm25_weight: float = 0.5,
+        recency_weight: float = 0.3,
+        tfidf_weight: float = 0.2,
+    ) -> dict:
+        """Search with composite scoring and budget-aware result partitioning.
+
+        Wraps composite_search() and partitions results into two tiers:
+        - 'full': results whose cumulative content fits within budget_chars
+        - 'titles_only': remaining results (heading + file_path only)
+
+        Returns dict with keys:
+            full: list of result dicts (with 'content' field)
+            titles_only: list of result dicts (heading + file_path only)
+            budget_used: total chars consumed by full results
+            budget_total: the budget_chars parameter
+        """
+        results = self.composite_search(
+            query=query,
+            limit=limit,
+            threshold=threshold,
+            source_type=source_type,
+            category=category,
+            exclude_category=exclude_category,
+            caller=caller,
+            include_archived=include_archived,
+            bm25_weight=bm25_weight,
+            recency_weight=recency_weight,
+            tfidf_weight=tfidf_weight,
+        )
+
+        full: list[dict] = []
+        titles_only: list[dict] = []
+        budget_used = 0
+
+        for r in results:
+            content = r.get("content", "")
+            content_size = len(content)
+
+            if budget_used + content_size <= budget_chars:
+                full.append(r)
+                budget_used += content_size
+            else:
+                titles_only.append({
+                    "heading": r.get("heading", ""),
+                    "file_path": r.get("file_path", ""),
+                    "source_type": r.get("source_type", ""),
+                    "category": r.get("category"),
+                    "composite_score": r.get("composite_score", 0),
+                })
+
+        return {
+            "full": full,
+            "titles_only": titles_only,
+            "budget_used": budget_used,
+            "budget_total": budget_chars,
+        }
 
 
 # ---------------------------------------------------------------------------

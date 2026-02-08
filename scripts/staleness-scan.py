@@ -246,12 +246,148 @@ def compute_backlink_drift(file_path: str, knowledge_dir: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Neighbor drift (TF-IDF concordance)
+# ---------------------------------------------------------------------------
+
+
+def compute_neighbor_drift(
+    file_path: str,
+    heading: str,
+    learned_date: str | None,
+    knowledge_dir: str,
+) -> dict:
+    """Compute neighbor drift by checking if similar knowledge entries have been updated more recently.
+
+    For entry E, queries the TF-IDF concordance for E's top-N similar knowledge entries.
+    Counts how many neighbors have a learned_date newer than E's learned_date.
+
+    Args:
+        file_path: Absolute path of the entry file.
+        heading: Heading of the entry (from entry metadata or filename).
+        learned_date: Entry's learned date (YYYY-MM-DD) or None.
+        knowledge_dir: Path to knowledge directory (for DB access).
+
+    Returns:
+        dict with: score (float), available (bool),
+        detail: {neighbors_checked, neighbors_updated, weighted_score}.
+    """
+    if not learned_date or "YYYY" in learned_date:
+        return {"score": 0.0, "available": False, "detail": {}}
+
+    try:
+        entry_dt = datetime.strptime(learned_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return {"score": 0.0, "available": False, "detail": {}}
+
+    # Import concordance lazily
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, script_dir)
+    try:
+        from pk_concordance import Concordance
+        from pk_search import DB_FILENAME
+    finally:
+        sys.path.pop(0)
+
+    db_path = os.path.join(knowledge_dir, DB_FILENAME)
+    if not os.path.exists(db_path):
+        return {"score": 0.0, "available": False, "detail": {}}
+
+    concordance = Concordance(db_path)
+    similar = concordance.find_similar(
+        file_path, heading,
+        limit=5,
+        source_type_filter="knowledge",
+    )
+
+    if not similar:
+        return {"score": 0.0, "available": False, "detail": {}}
+
+    # Check how many neighbors have a newer learned_date
+    neighbors_checked = 0
+    neighbors_updated = 0
+
+    for neighbor in similar:
+        neighbor_meta = parse_metadata(neighbor["file_path"])
+        neighbor_learned = neighbor_meta.get("learned")
+        if not neighbor_learned or "YYYY" in neighbor_learned:
+            continue
+        try:
+            neighbor_dt = datetime.strptime(neighbor_learned, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+        neighbors_checked += 1
+        if neighbor_dt > entry_dt:
+            neighbors_updated += 1
+
+    if neighbors_checked == 0:
+        return {"score": 0.0, "available": False, "detail": {}}
+
+    # Score: fraction of neighbors that are newer, weighted by similarity
+    weighted_score = neighbors_updated / neighbors_checked
+
+    return {
+        "score": weighted_score,
+        "available": True,
+        "detail": {
+            "neighbors_checked": neighbors_checked,
+            "neighbors_updated": neighbors_updated,
+            "weighted_score": round(weighted_score, 4),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary drift (TF-IDF concordance)
+# ---------------------------------------------------------------------------
+
+
+def compute_vocabulary_drift(
+    file_path: str,
+    heading: str,
+    knowledge_dir: str,
+) -> dict:
+    """Compute vocabulary drift by checking if a knowledge entry's key terms still exist in the codebase.
+
+    Instantiates Concordance, calls its compute_vocabulary_drift() method to
+    find what fraction of the entry's top TF-IDF terms are absent from source
+    file vectors.
+
+    Args:
+        file_path: Absolute path of the entry file.
+        heading: Heading of the entry (from entry metadata or filename).
+        knowledge_dir: Path to knowledge directory (for DB access).
+
+    Returns:
+        dict with: score (float), available (bool),
+        detail: {top_k_terms, absent_terms, absent_term_names}.
+    """
+    # Import concordance lazily
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, script_dir)
+    try:
+        from pk_concordance import Concordance
+        from pk_search import DB_FILENAME
+    finally:
+        sys.path.pop(0)
+
+    db_path = os.path.join(knowledge_dir, DB_FILENAME)
+    if not os.path.exists(db_path):
+        return {"score": 0.0, "available": False, "detail": {}}
+
+    concordance = Concordance(db_path)
+    return concordance.compute_vocabulary_drift(file_path, heading)
+
+
+# ---------------------------------------------------------------------------
 # Drift weights and thresholds
 # ---------------------------------------------------------------------------
 
-WEIGHT_FILE_DRIFT = 0.6
+WEIGHT_FILE_DRIFT = 0.55
 WEIGHT_BACKLINK_DRIFT = 0.25
-WEIGHT_CONFIDENCE = 0.15
+WEIGHT_NEIGHBOR_DRIFT = 0.10
+WEIGHT_VOCABULARY_DRIFT = 0.10
+WEIGHT_CONFIDENCE = 0.0  # replaced by neighbor_drift; kept for fallback
 
 CONFIDENCE_SCORES = {"high": 0.0, "medium": 0.5, "low": 1.0}
 
@@ -263,6 +399,8 @@ def score_entry(
     file_drift: dict,
     backlink_drift: dict,
     confidence: str | None,
+    neighbor_drift: dict | None = None,
+    vocabulary_drift: dict | None = None,
 ) -> tuple[float, str, dict]:
     """Score an entry using weighted drift signals.
 
@@ -270,6 +408,8 @@ def score_entry(
         file_drift: Result from compute_file_drift() with keys: score, available, commit_count.
         backlink_drift: Result from compute_backlink_drift() with keys: score, available, total, broken.
         confidence: Confidence level string ("high", "medium", "low") or None.
+        neighbor_drift: Result from compute_neighbor_drift() with keys: score, available, detail.
+        vocabulary_drift: Result from compute_vocabulary_drift() with keys: score, available, detail.
 
     Returns:
         (drift_score, status, signals) where:
@@ -277,37 +417,55 @@ def score_entry(
         - status: "fresh", "aging", or "stale"
         - signals: dict with sub-dicts for each signal (weight, score, detail)
     """
-    # Confidence signal
+    neighbor_drift = neighbor_drift or {}
+    vocabulary_drift = vocabulary_drift or {}
+
+    # Confidence signal (fallback when neighbor_drift/vocabulary_drift unavailable)
     conf_score = CONFIDENCE_SCORES.get(confidence, CONFIDENCE_SCORES["medium"])
 
-    # Weight redistribution when signals are unavailable
+    # Signal availability
     fd_available = file_drift.get("available", False)
     bd_available = backlink_drift.get("available", False)
+    nd_available = neighbor_drift.get("available", False)
+    vd_available = vocabulary_drift.get("available", False)
 
-    if fd_available and bd_available:
-        w_fd = WEIGHT_FILE_DRIFT
-        w_bd = WEIGHT_BACKLINK_DRIFT
-        w_conf = WEIGHT_CONFIDENCE
-    elif fd_available and not bd_available:
-        # Redistribute backlink weight to file drift
-        w_fd = WEIGHT_FILE_DRIFT + WEIGHT_BACKLINK_DRIFT
-        w_bd = 0.0
-        w_conf = WEIGHT_CONFIDENCE
-    elif not fd_available and bd_available:
-        # Redistribute file drift weight to backlink
-        w_fd = 0.0
-        w_bd = WEIGHT_BACKLINK_DRIFT + WEIGHT_FILE_DRIFT
-        w_conf = WEIGHT_CONFIDENCE
-    else:
-        # Neither available — score is confidence-only
-        w_fd = 0.0
-        w_bd = 0.0
+    # Base weights
+    w_fd = WEIGHT_FILE_DRIFT if fd_available else 0.0
+    w_bd = WEIGHT_BACKLINK_DRIFT if bd_available else 0.0
+    w_nd = WEIGHT_NEIGHBOR_DRIFT if nd_available else 0.0
+    w_vd = WEIGHT_VOCABULARY_DRIFT if vd_available else 0.0
+    w_conf = WEIGHT_CONFIDENCE
+
+    # If neighbor_drift is unavailable, give its weight to confidence as fallback
+    if not nd_available:
+        w_conf += WEIGHT_NEIGHBOR_DRIFT
+
+    # If vocabulary_drift is unavailable, give its weight to confidence as fallback
+    if not vd_available:
+        w_conf += WEIGHT_VOCABULARY_DRIFT
+
+    # Redistribute unavailable signal weights
+    total_available = w_fd + w_bd + w_nd + w_vd + w_conf
+    if total_available == 0:
+        # No signals at all — fall back to confidence-only
         w_conf = 1.0
+        total_available = 1.0
+
+    if total_available < 1.0:
+        # Normalize weights to sum to 1.0
+        scale = 1.0 / total_available
+        w_fd *= scale
+        w_bd *= scale
+        w_nd *= scale
+        w_vd *= scale
+        w_conf *= scale
 
     fd_score = file_drift.get("score", 0.0) if fd_available else 0.0
     bd_score = backlink_drift.get("score", 0.0) if bd_available else 0.0
+    nd_score = neighbor_drift.get("score", 0.0) if nd_available else 0.0
+    vd_score = vocabulary_drift.get("score", 0.0) if vd_available else 0.0
 
-    drift_score = (w_fd * fd_score) + (w_bd * bd_score) + (w_conf * conf_score)
+    drift_score = (w_fd * fd_score) + (w_bd * bd_score) + (w_nd * nd_score) + (w_vd * vd_score) + (w_conf * conf_score)
     # Clamp to [0.0, 1.0]
     drift_score = max(0.0, min(1.0, drift_score))
 
@@ -321,20 +479,32 @@ def score_entry(
 
     signals = {
         "file_drift": {
-            "weight": w_fd,
+            "weight": round(w_fd, 4),
             "score": fd_score,
             "available": fd_available,
             "commit_count": file_drift.get("commit_count", 0),
         },
         "backlink_drift": {
-            "weight": w_bd,
+            "weight": round(w_bd, 4),
             "score": bd_score,
             "available": bd_available,
             "total": backlink_drift.get("total", 0),
             "broken": backlink_drift.get("broken", 0),
         },
+        "neighbor_drift": {
+            "weight": round(w_nd, 4),
+            "score": nd_score,
+            "available": nd_available,
+            "detail": neighbor_drift.get("detail", {}),
+        },
+        "vocabulary_drift": {
+            "weight": round(w_vd, 4),
+            "score": vd_score,
+            "available": vd_available,
+            "detail": vocabulary_drift.get("detail", {}),
+        },
         "confidence": {
-            "weight": w_conf,
+            "weight": round(w_conf, 4),
             "score": conf_score,
             "level": confidence or "medium",
         },
@@ -359,13 +529,28 @@ def run_scan(knowledge_dir: str, repo_root: str) -> dict:
     entries: list[dict] = []
     counts = {"stale": 0, "aging": 0, "fresh": 0}
 
+    # Extract heading from entry files for neighbor drift lookups
+    def _extract_heading(fpath: str) -> str:
+        """Extract heading from first line of entry file."""
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                line = f.readline().strip()
+            if line.startswith("# "):
+                return line[2:]
+        except (OSError, UnicodeDecodeError):
+            pass
+        return os.path.splitext(os.path.basename(fpath))[0]
+
     for fpath in entry_files:
         meta = parse_metadata(fpath)
         age_days = compute_age_days(meta["learned"])
         file_check = check_related_files(meta["related_files"], repo_root)
         file_drift = compute_file_drift(repo_root, meta["learned"], meta["related_files"])
         backlink_drift = compute_backlink_drift(fpath, knowledge_dir)
-        drift_score, status, signals = score_entry(file_drift, backlink_drift, meta["confidence"])
+        heading = _extract_heading(fpath)
+        neighbor_drift = compute_neighbor_drift(fpath, heading, meta["learned"], knowledge_dir)
+        vocab_drift = compute_vocabulary_drift(fpath, heading, knowledge_dir)
+        drift_score, status, signals = score_entry(file_drift, backlink_drift, meta["confidence"], neighbor_drift, vocab_drift)
 
         try:
             rel_path = os.path.relpath(fpath, knowledge_dir)
@@ -407,6 +592,20 @@ def _top_signal(signals: dict) -> str:
     bd = signals.get("backlink_drift", {})
     if bd.get("available"):
         candidates.append((bd["weight"] * bd["score"], f"backlinks ({bd['broken']}/{bd['total']} broken)"))
+    nd = signals.get("neighbor_drift", {})
+    if nd.get("available"):
+        detail = nd.get("detail", {})
+        candidates.append((
+            nd["weight"] * nd["score"],
+            f"neighbors ({detail.get('neighbors_updated', 0)}/{detail.get('neighbors_checked', 0)} updated)",
+        ))
+    vd = signals.get("vocabulary_drift", {})
+    if vd.get("available"):
+        detail = vd.get("detail", {})
+        candidates.append((
+            vd["weight"] * vd["score"],
+            f"vocab drift ({detail.get('absent_terms', 0)}/{detail.get('top_k_terms', 0)} absent)",
+        ))
     conf = signals.get("confidence", {})
     candidates.append((conf.get("weight", 0) * conf.get("score", 0), f"confidence: {conf.get('level', '?')}"))
 

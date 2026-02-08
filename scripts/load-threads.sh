@@ -23,7 +23,10 @@ fi
 source "$SCRIPT_DIR/lib.sh"
 
 BUDGET=3000
+PREFS_BUDGET=400
+ENTRY_BUDGET=$((BUDGET - PREFS_BUDGET))
 CHARS_USED=0
+PREFS_CHARS_USED=0
 PINNED_COUNT=0
 ACTIVE_COUNT=0
 DORMANT_COUNT=0
@@ -142,6 +145,28 @@ extract_entry_summary() {
   echo ""
 }
 
+# Extract accumulated preferences from _meta.json as pipe-delimited string
+# Returns empty string if no preferences or array is empty
+format_thread_preferences() {
+  local meta_file="$1"
+  if [[ ! -f "$meta_file" ]]; then
+    echo ""
+    return
+  fi
+  python3 -c "
+import json, sys
+try:
+    with open('$meta_file') as f:
+        m = json.load(f)
+    prefs = m.get('accumulated_preferences', [])
+    if not prefs:
+        sys.exit(0)
+    print(' | '.join(p['preference'] for p in prefs))
+except:
+    sys.exit(0)
+" 2>/dev/null || echo ""
+}
+
 # --- V2: Load entries from a thread directory ---
 # Lists .md files sorted descending (newest first), applies tiered budget logic.
 # Sets global return vars: _THREAD_FULL, _THREAD_SUMMARY, _THREAD_OMITTED, _ENTRY_OUTPUT, _HEADER
@@ -185,8 +210,8 @@ print('\n'.join(parts))
   fi
   local header_size=${#header}
 
-  # Check budget for header alone
-  if [[ $((CHARS_USED + header_size)) -gt $BUDGET ]]; then
+  # Check entry budget for header alone (reserves space for preferences)
+  if [[ $((CHARS_USED + header_size)) -gt $ENTRY_BUDGET ]]; then
     BUDGET_EXHAUSTED="yes"
     echo "[threads] Budget exhausted, remaining threads available on-demand"
     _THREAD_FULL=0; _THREAD_SUMMARY=0; _THREAD_OMITTED=${#entry_files[@]}
@@ -229,7 +254,7 @@ print('\n'.join(parts))
       # Full entry tier
       local entry_text="${full_text}"$'\n'
       local entry_size=${#entry_text}
-      if [[ $((CHARS_USED + header_size + ${#entry_output} + entry_size)) -gt $BUDGET ]]; then
+      if [[ $((CHARS_USED + header_size + ${#entry_output} + entry_size)) -gt $ENTRY_BUDGET ]]; then
         BUDGET_EXHAUSTED="yes"
         thread_omitted=$((thread_omitted + 1))
         OMITTED_ENTRY_COUNT=$((OMITTED_ENTRY_COUNT + 1))
@@ -248,7 +273,7 @@ print('\n'.join(parts))
         summary_line="${heading}"$'\n'"(no summary)"$'\n\n'
       fi
       local summary_size=${#summary_line}
-      if [[ $((CHARS_USED + header_size + ${#entry_output} + summary_size)) -gt $BUDGET ]]; then
+      if [[ $((CHARS_USED + header_size + ${#entry_output} + summary_size)) -gt $ENTRY_BUDGET ]]; then
         BUDGET_EXHAUSTED="yes"
         thread_omitted=$((thread_omitted + 1))
         OMITTED_ENTRY_COUNT=$((OMITTED_ENTRY_COUNT + 1))
@@ -284,10 +309,33 @@ while IFS='|' read -r slug tier; do
   THREAD_DIR="$THREADS_DIR/${slug}"
   [[ -d "$THREAD_DIR" ]] || continue
 
+  # Compute preferences block before entry loading so budget accounts for it
+  PREFS_LINE=""
+  PREFS_RESERVED=0
+  PREFS_RAW=$(format_thread_preferences "$THREAD_DIR/_meta.json")
+  if [[ -n "$PREFS_RAW" ]]; then
+    PREFS_CANDIDATE="**Preferences:** ${PREFS_RAW}"
+    PREFS_CANDIDATE_SIZE=${#PREFS_CANDIDATE}
+    if [[ $((PREFS_CHARS_USED + PREFS_CANDIDATE_SIZE)) -le $PREFS_BUDGET ]]; then
+      PREFS_LINE="${PREFS_CANDIDATE}"
+      PREFS_RESERVED=$((PREFS_CANDIDATE_SIZE + 1))  # +1 for newline
+      # Pre-charge budget so entry loading accounts for preferences space
+      CHARS_USED=$((CHARS_USED + PREFS_RESERVED))
+      PREFS_CHARS_USED=$((PREFS_CHARS_USED + PREFS_CANDIDATE_SIZE))
+    fi
+  fi
+
   load_thread_entries_v2 "$THREAD_DIR" "$slug" "$PINNED_FULL_LIMIT" "$PINNED_SUMMARY_LIMIT"
 
+  # Reclaim pre-charged budget — actual cost is tracked via COMBINED below
+  CHARS_USED=$((CHARS_USED - PREFS_RESERVED))
+
   if [[ -n "$_ENTRY_OUTPUT" ]]; then
-    COMBINED="${_HEADER}"$'\n\n'"${_ENTRY_OUTPUT}"
+    if [[ -n "$PREFS_LINE" ]]; then
+      COMBINED="${_HEADER}"$'\n'"${PREFS_LINE}"$'\n\n'"${_ENTRY_OUTPUT}"
+    else
+      COMBINED="${_HEADER}"$'\n\n'"${_ENTRY_OUTPUT}"
+    fi
     COMBINED_SIZE=${#COMBINED}
 
     echo "--- ${slug}/ (pinned, ${_THREAD_FULL} full, ${_THREAD_SUMMARY} summary, ${_THREAD_OMITTED} omitted) ---"
@@ -296,6 +344,11 @@ while IFS='|' read -r slug tier; do
 
     CHARS_USED=$((CHARS_USED + COMBINED_SIZE))
     PINNED_COUNT=$((PINNED_COUNT + 1))
+  else
+    # No entries loaded — reclaim preferences sub-budget too
+    if [[ -n "$PREFS_LINE" ]]; then
+      PREFS_CHARS_USED=$((PREFS_CHARS_USED - ${#PREFS_CANDIDATE}))
+    fi
   fi
 done <<< "$THREAD_DATA"
 
@@ -307,10 +360,32 @@ while IFS='|' read -r slug tier; do
   THREAD_DIR="$THREADS_DIR/${slug}"
   [[ -d "$THREAD_DIR" ]] || continue
 
+  # Compute preferences block before entry loading so budget accounts for it
+  PREFS_LINE=""
+  PREFS_RESERVED=0
+  PREFS_RAW=$(format_thread_preferences "$THREAD_DIR/_meta.json")
+  if [[ -n "$PREFS_RAW" ]]; then
+    PREFS_CANDIDATE="**Preferences:** ${PREFS_RAW}"
+    PREFS_CANDIDATE_SIZE=${#PREFS_CANDIDATE}
+    if [[ $((PREFS_CHARS_USED + PREFS_CANDIDATE_SIZE)) -le $PREFS_BUDGET ]]; then
+      PREFS_LINE="${PREFS_CANDIDATE}"
+      PREFS_RESERVED=$((PREFS_CANDIDATE_SIZE + 1))  # +1 for newline
+      CHARS_USED=$((CHARS_USED + PREFS_RESERVED))
+      PREFS_CHARS_USED=$((PREFS_CHARS_USED + PREFS_CANDIDATE_SIZE))
+    fi
+  fi
+
   load_thread_entries_v2 "$THREAD_DIR" "$slug" "$ACTIVE_FULL_LIMIT" "$ACTIVE_SUMMARY_LIMIT"
 
+  # Reclaim pre-charged budget — actual cost is tracked via COMBINED below
+  CHARS_USED=$((CHARS_USED - PREFS_RESERVED))
+
   if [[ -n "$_ENTRY_OUTPUT" ]]; then
-    COMBINED="${_HEADER}"$'\n\n'"${_ENTRY_OUTPUT}"
+    if [[ -n "$PREFS_LINE" ]]; then
+      COMBINED="${_HEADER}"$'\n'"${PREFS_LINE}"$'\n\n'"${_ENTRY_OUTPUT}"
+    else
+      COMBINED="${_HEADER}"$'\n\n'"${_ENTRY_OUTPUT}"
+    fi
     COMBINED_SIZE=${#COMBINED}
 
     echo "--- ${slug}/ (active, ${_THREAD_FULL} full, ${_THREAD_SUMMARY} summary, ${_THREAD_OMITTED} omitted) ---"
@@ -319,6 +394,11 @@ while IFS='|' read -r slug tier; do
 
     CHARS_USED=$((CHARS_USED + COMBINED_SIZE))
     ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
+  else
+    # No entries loaded — reclaim preferences sub-budget too
+    if [[ -n "$PREFS_LINE" ]]; then
+      PREFS_CHARS_USED=$((PREFS_CHARS_USED - ${#PREFS_CANDIDATE}))
+    fi
   fi
 done <<< "$THREAD_DATA"
 
@@ -335,6 +415,10 @@ HAS_PENDING=""
 if [[ -f "$PENDING_DIGEST" ]]; then
   HAS_PENDING="yes"
 fi
+
+# Reclaim unused preferences sub-budget for accurate reporting
+PREFS_UNUSED=$((PREFS_BUDGET - PREFS_CHARS_USED))
+ENTRY_BUDGET=$((ENTRY_BUDGET + PREFS_UNUSED))
 
 BUDGET_REMAINING=$((BUDGET - CHARS_USED))
 if [[ $BUDGET_REMAINING -lt 0 ]]; then

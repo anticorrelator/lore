@@ -30,7 +30,11 @@ PRIORITY_CATEGORIES=(principles workflows conventions gotchas abstractions archi
 
 # --- Extract context signal from git branch + matched work item ---
 # Used to bias which knowledge sections load first (when signal exists)
-CONTEXT_SIGNAL=$(extract_context_signal "$KNOWLEDGE_DIR")
+# Output format: signal, ---BACKLINKS---, backlink paths, ---SIGNAL_SOURCES---, source names
+_SIGNAL_OUTPUT=$(extract_context_signal "$KNOWLEDGE_DIR")
+CONTEXT_SIGNAL=$(echo "$_SIGNAL_OUTPUT" | head -1)
+CONTEXT_BACKLINKS=$(echo "$_SIGNAL_OUTPUT" | sed -n '/^---BACKLINKS---$/,/^---SIGNAL_SOURCES---$/{ /^---/d; p; }')
+CONTEXT_SIGNAL_SOURCES=$(echo "$_SIGNAL_OUTPUT" | sed '1,/^---SIGNAL_SOURCES---$/d')
 CURRENT_BRANCH=$(get_git_branch)
 
 # --- Job A: Detect inbox entries ---
@@ -98,233 +102,204 @@ echo ""
     fi
   fi
 
-  # Budget-check: use full index if <= 25% of budget, else compact
-  INDEX_FULL_SIZE=${#INDEX_FULL}
+  # Always show compact index — not counted against entry budget
   INDEX_COMPACT_SIZE=${#INDEX_COMPACT}
-  INDEX_BUDGET_THRESHOLD=$((BUDGET / 4))
+  if [[ $INDEX_COMPACT_SIZE -gt 0 ]]; then
+    echo "--- Index (compact) ---"
+    echo "$INDEX_COMPACT"
+  fi
 
-  if [[ $INDEX_FULL_SIZE -gt 0 ]]; then
-    if [[ $INDEX_FULL_SIZE -le $INDEX_BUDGET_THRESHOLD ]]; then
-      echo "--- Index ---"
-      echo "$INDEX_FULL"
-      CHARS_USED=$((CHARS_USED + INDEX_FULL_SIZE))
-    elif [[ $INDEX_COMPACT_SIZE -gt 0 ]]; then
-      echo "--- Index (compact) ---"
-      echo "$INDEX_COMPACT"
-      CHARS_USED=$((CHARS_USED + INDEX_COMPACT_SIZE))
+  # --- Step 1: Direct-resolve knowledge backlinks ---
+  DIRECT_RESOLVED_COUNT=0
+  DIRECT_LOADED_PATHS=()   # track loaded paths to exclude from search results
+
+  if [[ -n "$CONTEXT_BACKLINKS" ]]; then
+    FIRST_DIRECT=1
+    while IFS= read -r backlink_path; do
+      [[ -n "$backlink_path" ]] || continue
+
+      # Skip domain entries — they are lazy-loaded on demand, never at startup
+      if [[ "$backlink_path" == domains/* ]]; then
+        continue
+      fi
+
+      # Resolve backlink to an absolute file path
+      # Backlinks look like: "conventions/naming-patterns" or "architecture/service-design"
+      ABS_PATH="$KNOWLEDGE_DIR/${backlink_path}.md"
+      if [[ ! -f "$ABS_PATH" ]]; then
+        # Try without .md extension (in case it already has one or is a directory path)
+        ABS_PATH="$KNOWLEDGE_DIR/${backlink_path}"
+        [[ -f "$ABS_PATH" ]] || continue
+      fi
+
+      CONTENT=$(cat "$ABS_PATH" 2>/dev/null) || continue
+      ENTRY_SIZE=${#CONTENT}
+
+      # Check budget
+      if [[ $((CHARS_USED + ENTRY_SIZE + 2)) -gt $BUDGET ]]; then
+        continue
+      fi
+
+      if [[ $FIRST_DIRECT -eq 1 ]]; then
+        echo "--- Direct-resolved entries (from backlinks) ---"
+        echo ""
+        FIRST_DIRECT=0
+      fi
+
+      echo "$CONTENT"
+      echo ""
+      CHARS_USED=$((CHARS_USED + ENTRY_SIZE + 1))
+      DIRECT_RESOLVED_COUNT=$((DIRECT_RESOLVED_COUNT + 1))
+      FILES_FULL=$((FILES_FULL + 1))
+
+      # Track loaded path for dedup
+      DIRECT_LOADED_PATHS+=("$backlink_path")
+    done <<< "$CONTEXT_BACKLINKS"
+
+    if [[ $DIRECT_RESOLVED_COUNT -gt 0 ]]; then
+      echo ""
     fi
   fi
 
-  # --- Context-aware loading: FTS5-ranked entries first ---
-  CONTEXT_LOADED_ENTRIES=()   # entry file paths already loaded via context signal
-  CONTEXT_SECTIONS_COUNT=0
-  CONTEXT_MAX_SECTIONS=5
+  # --- Step 2: Relevance-ranked search via budget_search ---
+  RELEVANCE_SEARCH_COUNT=0
 
   if [[ -n "$CONTEXT_SIGNAL" ]]; then
     # Build FTS5 OR query from context signal
     FTS5_QUERY=$(python3 -c "
 import re, sys
 signal = sys.argv[1]
+# Strip markdown/punctuation, normalize to plain words
+signal = re.sub(r'[*\`\[\]\(\),;:!?\"{}|<>#@=+~^]', ' ', signal)
 words = re.sub(r'[-_/]', ' ', signal).lower().split()
-stop = {'and', 'or', 'not', 'near'}
+# FTS5 operators + common English stopwords
+stop = {
+    'and', 'or', 'not', 'near',  # FTS5 operators
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'shall',
+    'should', 'may', 'might', 'must', 'can', 'could',
+    'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as',
+    'into', 'through', 'during', 'before', 'after', 'above', 'below',
+    'between', 'under', 'about', 'than',
+    'this', 'that', 'these', 'those', 'it', 'its',
+    'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'his', 'she',
+    'her', 'they', 'them', 'their', 'who', 'which', 'what', 'when',
+    'where', 'how', 'why',
+    'if', 'then', 'else', 'so', 'but', 'because', 'while', 'although',
+    'no', 'yes', 'up', 'out', 'just', 'also', 'very', 'only', 'more',
+    'most', 'other', 'some', 'any', 'all', 'each', 'every', 'both',
+    'few', 'many', 'much', 'such', 'own', 'same', 'too', 'here',
+    'there', 'now', 'well', 'way', 'even', 'new', 'one', 'two',
+}
 seen, terms = set(), []
 for w in words:
-    if w not in stop and w not in seen:
+    # Strip remaining non-alphanumeric chars and skip short/stop/numeric
+    w = re.sub(r'[^a-z0-9]', '', w)
+    if len(w) <= 1 or w in stop or w.isdigit():
+        continue
+    if w not in seen:
         seen.add(w)
         terms.append('\"' + w + '\"')
-        if len(terms) >= 8:
-            break
 print(' OR '.join(terms))
 " "$CONTEXT_SIGNAL" 2>/dev/null) || FTS5_QUERY=""
 
     if [[ -n "$FTS5_QUERY" ]]; then
-      # Use composite scoring (BM25 + recency + access frequency) via pk_cli.py
-      SEARCH_RESULTS=$(python3 "$SCRIPT_DIR/pk_cli.py" search "$KNOWLEDGE_DIR" "$FTS5_QUERY" \
-        --type knowledge --limit "$CONTEXT_MAX_SECTIONS" --composite --json 2>/dev/null) || SEARCH_RESULTS="[]"
+      REMAINING_BUDGET=$((BUDGET - CHARS_USED))
 
-      # Parse composite-scored results and load matching entries
+      # Call budget_search via pk_cli.py — returns two-tier JSON
+      # Exclude domains/ (lazy-loaded on demand, never at startup)
+      BUDGET_RESULTS=$(python3 "$SCRIPT_DIR/pk_cli.py" search "$KNOWLEDGE_DIR" "$FTS5_QUERY" \
+        --type knowledge --limit 20 --budget "$REMAINING_BUDGET" \
+        --exclude-category domains 2>/dev/null) || BUDGET_RESULTS="{}"
+
+      # Build direct-loaded paths for dedup
+      DIRECT_PATHS_JSON="[]"
+      if [[ ${#DIRECT_LOADED_PATHS[@]} -gt 0 ]]; then
+        DIRECT_PATHS_JSON=$(printf '%s\n' "${DIRECT_LOADED_PATHS[@]}" | python3 -c "
+import json, sys
+paths = [line.strip() for line in sys.stdin if line.strip()]
+print(json.dumps(paths))
+" 2>/dev/null) || DIRECT_PATHS_JSON="[]"
+      fi
+
+      # Parse full entries (null-delimited: file_path\tcontent\0)
+      FIRST_FULL=1
       while IFS=$'\t' read -r -d '' rel_path entry_content; do
-        if [[ $CONTEXT_SECTIONS_COUNT -eq 0 ]]; then
-          echo "--- Context-relevant entries (signal: ${CONTEXT_SIGNAL:0:60}) ---"
+        [[ -n "$rel_path" ]] || continue
+        if [[ $FIRST_FULL -eq 1 ]]; then
+          echo "--- Relevant entries (signal: ${CONTEXT_SIGNAL:0:60}) ---"
           echo ""
+          FIRST_FULL=0
         fi
-
-        ENTRY_SIZE=${#entry_content}
-
-        # Check budget
-        if [[ $((CHARS_USED + ENTRY_SIZE + 2)) -gt $BUDGET ]]; then
-          break
-        fi
-
         echo "$entry_content"
         echo ""
+        ENTRY_SIZE=${#entry_content}
         CHARS_USED=$((CHARS_USED + ENTRY_SIZE + 1))
-        CONTEXT_SECTIONS_COUNT=$((CONTEXT_SECTIONS_COUNT + 1))
-
-        # Track loaded entries to avoid duplicates in priority pass
-        CONTEXT_LOADED_ENTRIES+=("$rel_path")
-      done < <(echo "$SEARCH_RESULTS" | python3 -c "
+        RELEVANCE_SEARCH_COUNT=$((RELEVANCE_SEARCH_COUNT + 1))
+        FILES_FULL=$((FILES_FULL + 1))
+      done < <(echo "$BUDGET_RESULTS" | python3 -c "
 import json, sys, os
-results = json.load(sys.stdin)
-knowledge_dir = sys.argv[1]
-for r in results:
-    rel_path = r.get('file_path', '')
-    content = r.get('content', '')
+data = json.load(sys.stdin)
+direct_paths = json.loads(sys.argv[1])
+knowledge_dir = sys.argv[2]
+
+# Build dedup set from direct-resolved paths
+direct_set = set()
+for dp in direct_paths:
+    direct_set.add(dp)
+    if not dp.endswith('.md'):
+        direct_set.add(dp + '.md')
+
+for e in data.get('full', []):
+    fp = e.get('file_path', '')
+    fp_no_ext = fp.rsplit('.', 1)[0] if '.' in fp else fp
+    if fp in direct_set or fp_no_ext in direct_set:
+        continue
+    content = e.get('content', '')
     if not content:
-        abs_path = os.path.join(knowledge_dir, rel_path)
+        abs_path = os.path.join(knowledge_dir, fp)
         if os.path.isfile(abs_path):
             content = open(abs_path, 'r').read().rstrip('\n')
     if content:
-        sys.stdout.write(rel_path + '\t' + content + '\0')
-" "$KNOWLEDGE_DIR" 2>/dev/null)
-    fi
+        sys.stdout.write(fp + '\t' + content + '\0')
+" "$DIRECT_PATHS_JSON" "$KNOWLEDGE_DIR" 2>/dev/null)
 
-    if [[ $CONTEXT_SECTIONS_COUNT -gt 0 ]]; then
-      echo ""
-    fi
-  fi
-
-  # --- Priority-order loading: iterate category directories ---
-  for category in "${PRIORITY_CATEGORIES[@]}"; do
-    CAT_DIR="$KNOWLEDGE_DIR/$category"
-    [[ -d "$CAT_DIR" ]] || continue
-
-    # Collect entry files
-    ENTRY_FILES=()
-    while IFS= read -r -d '' f; do
-      ENTRY_FILES+=("$f")
-    done < <(find "$CAT_DIR" -maxdepth 1 -name '*.md' -print0 2>/dev/null | sort -z)
-
-    ENTRY_COUNT=${#ENTRY_FILES[@]}
-    [[ $ENTRY_COUNT -gt 0 ]] || continue
-
-    # Calculate total category size and collect per-entry info
-    CAT_TOTAL_SIZE=0
-    ENTRY_SIZES=()
-    ENTRY_TITLES=()
-    ENTRY_RELPATHS=()
-    for entry_file in "${ENTRY_FILES[@]}"; do
-      CONTENT=$(cat "$entry_file")
-      SIZE=${#CONTENT}
-      TITLE=$(echo "$CONTENT" | head -1 | sed 's/^# //')
-      REL_PATH="${category}/$(basename "$entry_file")"
-
-      ENTRY_SIZES+=("$SIZE")
-      ENTRY_TITLES+=("$TITLE")
-      ENTRY_RELPATHS+=("$REL_PATH")
-      CAT_TOTAL_SIZE=$((CAT_TOTAL_SIZE + SIZE))
-    done
-
-    # Check if entire category fits in budget
-    if [[ $((CHARS_USED + CAT_TOTAL_SIZE)) -le $BUDGET ]]; then
-      # Load all entries in this category
-      echo "--- ${category}/ (${ENTRY_COUNT} entries) ---"
-      for i in "${!ENTRY_FILES[@]}"; do
-        REL_PATH="${ENTRY_RELPATHS[$i]}"
-
-        # Skip if already loaded via context signal
-        ALREADY_LOADED=0
-        if [[ ${#CONTEXT_LOADED_ENTRIES[@]} -gt 0 ]]; then
-          for loaded in "${CONTEXT_LOADED_ENTRIES[@]}"; do
-            if [[ "$loaded" == "$REL_PATH" ]]; then
-              ALREADY_LOADED=1
-              break
-            fi
-          done
+      # Parse titles-only entries (null-delimited: heading\tfile_path\0)
+      FIRST_TITLE=1
+      while IFS=$'\t' read -r -d '' heading title_path; do
+        [[ -n "$heading" ]] || continue
+        if [[ $FIRST_TITLE -eq 1 ]]; then
+          echo "--- Additional relevant entries (titles only) ---"
+          FIRST_TITLE=0
         fi
-        if [[ $ALREADY_LOADED -eq 1 ]]; then
-          continue
-        fi
-
-        CONTENT=$(cat "${ENTRY_FILES[$i]}")
-        echo "$CONTENT"
-        echo ""
-        CHARS_USED=$((CHARS_USED + ${ENTRY_SIZES[$i]} + 1))
-      done
-      FILES_FULL=$((FILES_FULL + 1))
-    else
-      # Category doesn't fit — try loading entries individually until budget exhausted
-      LOADED_ANY=0
-      SUMMARY_TITLES=()
-
-      for i in "${!ENTRY_FILES[@]}"; do
-        REL_PATH="${ENTRY_RELPATHS[$i]}"
-        SIZE=${ENTRY_SIZES[$i]}
-
-        # Skip if already loaded via context signal
-        ALREADY_LOADED=0
-        if [[ ${#CONTEXT_LOADED_ENTRIES[@]} -gt 0 ]]; then
-          for loaded in "${CONTEXT_LOADED_ENTRIES[@]}"; do
-            if [[ "$loaded" == "$REL_PATH" ]]; then
-              ALREADY_LOADED=1
-              break
-            fi
-          done
-        fi
-        if [[ $ALREADY_LOADED -eq 1 ]]; then
-          continue
-        fi
-
-        if [[ $((CHARS_USED + SIZE)) -le $BUDGET ]]; then
-          # Entry fits — load it
-          if [[ $LOADED_ANY -eq 0 ]]; then
-            echo "--- ${category}/ (${ENTRY_COUNT} entries, partial) ---"
-          fi
-          CONTENT=$(cat "${ENTRY_FILES[$i]}")
-          echo "$CONTENT"
-          echo ""
-          CHARS_USED=$((CHARS_USED + SIZE + 1))
-          LOADED_ANY=1
-        else
-          # Entry doesn't fit — add to summary list
-          SUMMARY_TITLES+=("${ENTRY_TITLES[$i]}")
-        fi
-      done
-
-      if [[ ${#SUMMARY_TITLES[@]} -gt 0 ]]; then
-        if [[ $LOADED_ANY -eq 0 ]]; then
-          echo "--- ${category}/ (${ENTRY_COUNT} entries, titles only) ---"
-        fi
-        # Show remaining as title list
-        TITLE_LIST=""
-        for title in "${SUMMARY_TITLES[@]}"; do
-          CANDIDATE="${TITLE_LIST}  - ${title}"$'\n'
-          if [[ $((CHARS_USED + ${#CANDIDATE})) -gt $BUDGET ]]; then
-            TITLE_LIST="${TITLE_LIST}  (...truncated)"$'\n'
-            break
-          fi
-          TITLE_LIST="$CANDIDATE"
-        done
-        echo "$TITLE_LIST"
-        CHARS_USED=$((CHARS_USED + ${#TITLE_LIST}))
+        echo "  - ${heading} (${title_path})"
         FILES_SUMMARY=$((FILES_SUMMARY + 1))
-      elif [[ $LOADED_ANY -eq 1 ]]; then
-        FILES_FULL=$((FILES_FULL + 1))
+      done < <(echo "$BUDGET_RESULTS" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+direct_paths = json.loads(sys.argv[1])
+
+direct_set = set()
+for dp in direct_paths:
+    direct_set.add(dp)
+    if not dp.endswith('.md'):
+        direct_set.add(dp + '.md')
+
+for e in data.get('titles_only', []):
+    fp = e.get('file_path', '')
+    fp_no_ext = fp.rsplit('.', 1)[0] if '.' in fp else fp
+    if fp in direct_set or fp_no_ext in direct_set:
+        continue
+    heading = e.get('heading', '')
+    if heading:
+        sys.stdout.write(heading + '\t' + fp + '\0')
+" "$DIRECT_PATHS_JSON" 2>/dev/null)
+
+      if [[ $FIRST_TITLE -eq 0 ]]; then
+        echo ""
       fi
     fi
-
-    # Stop if budget exhausted
-    if [[ $CHARS_USED -ge $BUDGET ]]; then
-      echo "[Remaining categories available on-demand]"
-      # Count remaining categories as skipped
-      FOUND_CURRENT=0
-      for remaining in "${PRIORITY_CATEGORIES[@]}"; do
-        if [[ $FOUND_CURRENT -eq 1 ]]; then
-          REMAINING_DIR="$KNOWLEDGE_DIR/$remaining"
-          if [[ -d "$REMAINING_DIR" ]]; then
-            RCOUNT=$(find "$REMAINING_DIR" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
-            if [[ "${RCOUNT:-0}" -gt 0 ]]; then
-              FILES_SKIPPED=$((FILES_SKIPPED + 1))
-            fi
-          fi
-        fi
-        if [[ "$remaining" == "$category" ]]; then
-          FOUND_CURRENT=1
-        fi
-      done
-      break
-    fi
-  done
+  fi
 
   # --- Health check (v2) ---
   ISSUES=()
@@ -434,15 +409,30 @@ echo "=== End Project Knowledge ==="
 META_DIR="$KNOWLEDGE_DIR/_meta"
 mkdir -p "$META_DIR"
 LOG_TIMESTAMP=$(timestamp_iso)
-printf '{"timestamp":"%s","format_version":%d,"budget_used":%d,"budget_total":%d,"files_full":%d,"files_summary":%d,"files_skipped":%d,"context_signal":"%s","context_sections":%d,"git_branch":"%s"}\n' \
+CONTEXT_SECTIONS_TOTAL=$((DIRECT_RESOLVED_COUNT + RELEVANCE_SEARCH_COUNT))
+
+# Build signal_sources JSON array from newline-separated source names
+SIGNAL_SOURCES_JSON="[]"
+if [[ -n "$CONTEXT_SIGNAL_SOURCES" ]]; then
+  SIGNAL_SOURCES_JSON=$(echo "$CONTEXT_SIGNAL_SOURCES" | python3 -c "
+import json, sys
+sources = [line.strip() for line in sys.stdin if line.strip()]
+print(json.dumps(sources))
+" 2>/dev/null) || SIGNAL_SOURCES_JSON="[]"
+fi
+
+printf '{"timestamp":"%s","format_version":%d,"budget_used":%d,"budget_total":%d,"files_full":%d,"files_summary":%d,"files_skipped":%d,"context_signal":"%s","context_sections":%d,"direct_resolved":%d,"relevance_search":%d,"signal_sources":%s,"git_branch":"%s"}\n' \
   "$LOG_TIMESTAMP" \
-  2 \
+  4 \
   "$CHARS_USED" \
   "$BUDGET" \
   "$FILES_FULL" \
   "$FILES_SUMMARY" \
   "$FILES_SKIPPED" \
   "$(echo "$CONTEXT_SIGNAL" | tr '"\\' '__')" \
-  "$CONTEXT_SECTIONS_COUNT" \
+  "$CONTEXT_SECTIONS_TOTAL" \
+  "$DIRECT_RESOLVED_COUNT" \
+  "$RELEVANCE_SEARCH_COUNT" \
+  "$SIGNAL_SOURCES_JSON" \
   "$(echo "$CURRENT_BRANCH" | tr '"\\' '__')" \
   >> "$META_DIR/retrieval-log.jsonl" 2>/dev/null || true

@@ -79,8 +79,9 @@ lore analyze — knowledge store analysis
 Usage: lore analyze <subcommand> [args...]
 
 Subcommands:
-  staleness    Scan entries for staleness (age, confidence, missing files)
-  usage        Analyze entry access patterns from retrieval logs
+  staleness      Scan entries for staleness (age, confidence, missing files)
+  usage          Analyze entry access patterns from retrieval logs
+  concordance    Compute see-also and related-files via TF-IDF similarity
 
 Options:
   --help, -h    Show this help
@@ -169,6 +170,9 @@ cmd_analyze() {
     usage)
       cmd_analyze_usage "$@"
       ;;
+    concordance)
+      cmd_analyze_concordance "$@"
+      ;;
     *)
       echo "Error: unknown analyze subcommand '$subcmd'" >&2
       echo "" >&2
@@ -216,6 +220,20 @@ cmd_analyze_usage() {
   fi
 
   python3 "$script" "$kdir" "$@"
+}
+
+cmd_analyze_concordance() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Usage: lore analyze concordance [--json] [--see-also-limit N] [--related-files-threshold F]" >&2
+    echo "  Compute see-also and related-files for all knowledge entries via TF-IDF." >&2
+    echo "  Stores results in the concordance_results table." >&2
+    return 0
+  fi
+
+  local kdir
+  kdir="$(resolve_kdir)"
+
+  python3 "$SCRIPTS_DIR/pk_cli.py" analyze-concordance "$kdir" "$@"
 }
 
 # --- Bootstrap subgroup ---
