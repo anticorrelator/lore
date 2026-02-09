@@ -38,6 +38,7 @@ Commands:
   assemble     Assemble CLAUDE.md from fragments
 
   work         Work item management (see: lore work --help)
+  journal      Effectiveness journal (see: lore journal --help)
   thread       Thread management (see: lore thread --help)
   migrate      Format migration (see: lore migrate --help)
   manifest     Manifest management (see: lore manifest --help)
@@ -568,6 +569,10 @@ case "$1" in
   work)
     shift
     cmd_work "$@"
+    ;;
+  journal)
+    shift
+    "$SCRIPTS_DIR/journal.sh" "$@"
     ;;
   thread)
     shift

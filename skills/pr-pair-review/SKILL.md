@@ -2,25 +2,34 @@
 name: pr-pair-review
 description: "Interactive pair-review with knowledge-enriched turn protocol"
 user_invocable: true
-argument_description: "[PR_number_or_URL] — PR to review (or auto-detect from branch)"
+argument_description: "[PR_number_or_URL] [focus context] — PR to review (or auto-detect from branch). Optional focus context steers which areas to prioritize (e.g., '42 concentrate on the new turn protocol logic')"
 ---
 
 # /pr-pair-review Skill
 
 Interactive pair-review skill for GitHub PRs. Uses a structured 3-beat turn protocol (raise, enrich, respond) with mandatory knowledge enrichment. Analysis-only — produces a work item with findings and action items but does not modify source code.
 
-## Step 1: Identify PR
+## Step 1: Identify PR and Focus Context
 
 Argument provided: `$ARGUMENTS`
 
-**If argument provided:** Parse as PR number or GitHub PR URL. If a URL is provided, extract the PR number from it. All subsequent steps use the numeric PR number.
+**Parse arguments:** The first token that looks like a PR number (digits) or GitHub URL is the PR identifier. Everything else is **focus context** — free-text guidance about which areas to concentrate on during the review.
 
-**If no argument:** Detect from current branch:
+Examples:
+- `42` → PR #42, no focus context
+- `42 focus on the new turn protocol logic` → PR #42, focus on turn protocol
+- `concentrate on the knowledge enrichment pipeline` → no PR (auto-detect), focus context provided
+
+**If no PR identifier:** Detect from current branch:
 ```bash
-gh pr list --state open --head "$(git branch --show-current)" --json number --jq '.[0].number' 2>/dev/null
+gh pr list --state open --head "$(git branch --show-current)" --json number,baseRefName --jq '.[] | "#\(.number) → \(.baseRefName)"' 2>/dev/null
 ```
 
-**If detection fails:** Ask the user for the PR number.
+**If multiple PRs found:** Present the list with base branches and ask the user which one to review.
+
+**If no PRs found:** Ask the user for the PR number. If they provide a base branch instead, search by base: `gh pr list --state open --base <branch> --head "$(git branch --show-current)" ...`
+
+**Carry focus context forward** — it influences risk area identification in Step 3 (focused areas are listed first and marked as priority) and topic selection in Step 4 (the first review round should address the focused area).
 
 ## Step 2: Fetch PR data
 
@@ -39,7 +48,8 @@ Parse the JSON output. Identify:
 - Unresolved review threads (actionable)
 - Review bodies with state (CHANGES_REQUESTED, APPROVED, COMMENTED)
 - General PR comments
-- Resolved/outdated threads (skip unless referenced)
+- Outdated threads (`isOutdated: true`) — filter out unless the concern clearly still applies to the current diff. Threads on subsequently-changed code are likely addressed by later commits; do not treat as needing action.
+- Resolved threads — skip unless explicitly referenced by an unresolved thread
 
 ## Step 3: Generate structured PR summary
 

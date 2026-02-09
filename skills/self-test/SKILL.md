@@ -7,21 +7,58 @@ argument_description: "[optional: 'quick' for abbreviated run (Tests 1, 2, 7 onl
 
 # /self-test Skill
 
+This self-test evaluates any knowledge-store-backed memory system. It uses `lore` CLI when available but falls back to direct file operations.
+
 Run a structured evaluation of the lore memory system from any codebase. Tests 8 dimensions of system health, produces scored results, and compares against previous runs to track regressions and improvements.
 
 **The core question:** Does the memory system make you effective, or do you find yourself bypassing it?
 
 **Design principle:** Tests should surface *actionable findings*, not confirm what's already working. If a test scores 5/5 for 2+ consecutive runs, it should either get harder or be replaced with something that produces signal.
 
-## Step 1: Resolve Paths and Detect Infrastructure
+## CLI Abstraction
 
-### Path Resolution
+Before running tests, detect whether the `lore` CLI is available. This allows the self-test to run against any knowledge-store-backed system, not just one with `lore` installed.
+
+### CLI Detection
 
 ```bash
 lore resolve
 ```
 
-Set `KNOWLEDGE_DIR` to the result. Derive all other paths from it:
+If `lore resolve` succeeds, set `HAS_CLI` = true and `KNOWLEDGE_DIR` to the result.
+
+If it fails, fall back:
+1. Check `$KNOWLEDGE_DIR` environment variable
+2. If neither works, ask the agent for the knowledge store path
+
+### Command Fallbacks
+
+When `HAS_CLI` is false, use these fallbacks for CLI commands referenced throughout the test:
+
+**Critical commands (used in multiple tests):**
+
+| Command | Fallback |
+|---------|----------|
+| `lore search "<query>"` | Grep `.md` files in `$KNOWLEDGE_DIR` for the query term |
+| `lore resolve "[[backlink]]"` | Parse the `[[type:file#heading]]` reference, read the file, and find the heading manually |
+| `lore index` | Read `$KNOWLEDGE_DIR/_index.md` if it exists, otherwise glob category directories for `.md` files |
+| `lore capture --insight "..." ...` | Skip with note: "Capture skipped — lore CLI not available" |
+
+**Non-critical commands:**
+
+| Command | Fallback |
+|---------|----------|
+| `lore stats` | Count `.md` files and directories in `$KNOWLEDGE_DIR` directly |
+| `lore check-links` | Skip — score as N/A with note: "Link checker requires lore CLI" |
+| `lore work list` / `lore work search` | Read `$WORK_DIR/_index.json` or glob `$WORK_DIR/*/_meta.json` directly |
+
+Throughout the test steps below, use the CLI command when `HAS_CLI` is true; otherwise use the fallback.
+
+## Step 1: Resolve Paths and Detect Infrastructure
+
+### Path Resolution
+
+Run CLI Detection (see **CLI Abstraction** above) to set `HAS_CLI` and `KNOWLEDGE_DIR`. Derive all other paths from `KNOWLEDGE_DIR`:
 
 - `MANIFEST_FILE` = `$KNOWLEDGE_DIR/_manifest.json`
 - `THREADS_DIR` = `$KNOWLEDGE_DIR/_threads`
@@ -39,7 +76,7 @@ Before running tests, detect what infrastructure exists. Read each path and reco
 | Manifest | `_manifest.json` exists | `HAS_MANIFEST` |
 | Threads | `_threads/` has thread directories with `.md` entry files (v2) or monolithic `.md` files (v1) | `HAS_THREADS` |
 | Work | `_work/` has subdirectories with `_meta.json` files | `HAS_WORK` |
-| FTS5 search | `lore search` and `lore stats` work | `HAS_SEARCH` |
+| FTS5 search | `lore search` and `lore stats` work (requires `HAS_CLI`) | `HAS_SEARCH` |
 | Inbox | `_inbox/` directory exists | `HAS_INBOX` |
 | Previous results | `_self_test_results.md` exists | `HAS_PREVIOUS` |
 
@@ -438,6 +475,19 @@ Changes made to `skills/self-test/SKILL.md` this run:
 
 Rationale: <1-2 sentences on what this run taught about self-diagnosis>
 ```
+
+## Step 4b: Write Effectiveness Journal Entry
+
+**This step is mandatory.** After writing the results file, record the run in the effectiveness journal so it appears in aggregated timeline views alongside retrieval and friction data.
+
+```bash
+lore journal write \
+  --observation "Self-test Run N: Orientation X/5 | Retrieval X/5 | Backlinks X hops X% | Threads X/5 | Plans X/5 | Utilization X/5 | Search X/5 | Trust X/5. Key regressions: <list or 'none'>. Key improvements: <list or 'none'>. Most actionable finding: <1-2 sentences on the single most important thing to fix>." \
+  --context "self-test run N" \
+  --role "self-test"
+```
+
+The observation should be 3-5 sentences containing: all 8 scores, any regressions or improvements compared to the previous run, and the single most actionable finding from this run.
 
 ## Step 5: Report
 

@@ -210,6 +210,7 @@ Invoke `/remember` with capture constraints scoped to the implementation:
    Completed: N/M tasks
    Knowledge captured: K entries to knowledge store
    Remaining: <list if any, or "none — work item archived">
+   Consider `/retro <slug>` to evaluate knowledge system effectiveness for this work.
    ```
 
 ## Handling Partial Completion

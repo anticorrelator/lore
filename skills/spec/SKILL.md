@@ -89,6 +89,7 @@ For single-pass plans where the scope is clear and the agent can identify key fi
    ```
    This pre-computes TaskCreate payloads so `/work tasks` and `/implement` can load them directly without re-parsing `plan.md`.
 3. Run `lore work heal`
+4. Suggest retrospective: `Consider /retro <slug> to evaluate knowledge system effectiveness for this spec.`
 
 ---
 
@@ -236,6 +237,11 @@ If gaps are identified:
 - Update the synthesis
 
 Run `lore work heal` after any changes.
+
+After finalization or iteration is complete, suggest:
+```
+Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spec.
+```
 
 ---
 

@@ -2,21 +2,27 @@
 name: pr-review
 description: "Review someone else's PR with knowledge-enriched analysis"
 user_invocable: true
-argument_description: "[PR_number_or_URL] — PR to review"
+argument_description: "[PR_number_or_URL] [focus context] — PR to review. Optional focus context steers which areas to prioritize (e.g., '42 focus on the cross-boundary invariants in the auth module')"
 ---
 
 # /pr-review Skill
 
 You are a senior engineer reviewing someone else's pull request. Your job is to produce high-quality, knowledge-enriched review comments that surface project-specific context the PR author may not know. This is an external-facing review — findings become GitHub comments, not local plans.
 
-## Step 1: Identify PR
+## Step 1: Identify PR and Focus Context
 
 Argument provided: `$ARGUMENTS`
 
-**Required.** Parse as PR number or URL. This skill reviews someone else's PR — there is no branch auto-detection.
+**Parse arguments:** The first token that looks like a PR number (digits) or GitHub URL is the PR identifier. Everything else is **focus context** — free-text guidance about which areas to concentrate on during the review.
 
-- If a URL is provided, extract the PR number.
-- If no argument is provided, ask the user for the PR number. This is the only acceptable prompt in this skill.
+Examples:
+- `42` → PR #42, no focus context
+- `42 focus on the auth module changes` → PR #42, focus on auth module
+- `concentrate on cross-boundary invariants` → no PR identifier (ask for it), focus context provided
+
+This skill reviews someone else's PR — there is no branch auto-detection. If no PR identifier is found in the arguments, ask the user for the PR number.
+
+**Carry focus context forward** — it influences file prioritization in Step 3 (focused areas get full checklist treatment first) and finding severity in Step 5 (findings in focused areas are presented first).
 
 ## Step 2: Fetch PR Data and Diff
 
@@ -37,7 +43,7 @@ gh pr view <PR_NUMBER> --json files,title,body,author,commits
 Parse the results to understand:
 - **PR scope:** which files changed, how many, what subsystems are touched
 - **PR intent:** what the title, body, and commit messages say the change does
-- **Existing discussion:** any reviews or comments already posted (avoid duplicating feedback)
+- **Existing discussion:** any reviews or comments already posted (avoid duplicating feedback). Filter out outdated threads (`isOutdated: true`) — these are on code that has been subsequently changed and are likely addressed. Only note an outdated thread if the concern clearly still applies to the current diff.
 
 ## Step 3: Structured Analysis
 

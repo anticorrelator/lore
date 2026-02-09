@@ -2,7 +2,7 @@
 name: pr-revise
 description: "Read all PR review feedback and create an implement-ready work item to address it"
 user_invocable: true
-argument_description: "[PR_number_or_URL] — PR with feedback to address (or auto-detect from branch)"
+argument_description: "[PR_number_or_URL] [focus context] — PR with feedback to address (or auto-detect from branch). Optional focus context steers which feedback areas to prioritize (e.g., '42 concentrate on the reviewer comments about error handling')"
 ---
 
 # /pr-revise Skill
@@ -11,18 +11,27 @@ Read all comments and reviews on a GitHub Pull Request, categorize feedback with
 
 This skill is analysis-only — it creates plans and tasks but does not modify source code.
 
-## Step 1: Identify PR
+## Step 1: Identify PR and Focus Context
 
 Argument provided: `$ARGUMENTS`
 
-**If argument provided:** Parse as PR number or URL. If a URL is provided, extract the PR number from it. All subsequent steps use the numeric PR number.
+**Parse arguments:** The first token that looks like a PR number (digits) or GitHub URL is the PR identifier. Everything else is **focus context** — free-text guidance about which feedback areas to concentrate on.
 
-**If no argument:** Detect from current branch:
+Examples:
+- `42` → PR #42, no focus context
+- `42 concentrate on the reviewer comments about error handling` → PR #42, focus on error handling feedback
+- `prioritize the architectural concerns` → no PR (auto-detect), focus context provided
+
+**If no PR identifier:** Detect from current branch:
 ```bash
-gh pr list --state open --head "$(git branch --show-current)" --json number --jq '.[0].number' 2>/dev/null
+gh pr list --state open --head "$(git branch --show-current)" --json number,baseRefName --jq '.[] | "#\(.number) → \(.baseRefName)"' 2>/dev/null
 ```
 
-**If detection fails:** Ask the user for the PR number.
+**If multiple PRs found:** Present the list with base branches and ask the user which one to review.
+
+**If no PRs found:** Ask the user for the PR number. If they provide a base branch instead, search by base: `gh pr list --state open --base <branch> --head "$(git branch --show-current)" ...`
+
+**Carry focus context forward** — it influences categorization priority in Step 3 (focused feedback areas are analyzed first) and plan phase ordering in Step 5 (focused items are grouped into earlier phases).
 
 ## Step 2: Fetch All Comments
 
@@ -48,7 +57,8 @@ Parse the response and categorize:
 1. **Unresolved Review Threads** — These need action
 2. **Review Bodies with CHANGES_REQUESTED** — High priority feedback
 3. **General Comments** — May contain actionable items
-4. **Resolved/Outdated** — Skip unless referenced
+4. **Outdated** (`isOutdated: true` in GraphQL response) — Filter out. These are on code that has been subsequently changed and are likely addressed by later commits. Only surface an outdated thread if the concern clearly still applies to the *current* state of the diff — verify against the current diff, not the outdated context. Do not count toward "unresolved items needing action."
+5. **Resolved** — Skip unless referenced by an unresolved thread
 
 For each unresolved item, determine:
 - **Clear fix**: Obvious what to do (typo, naming, style) -> Create task directly
