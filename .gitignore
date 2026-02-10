@@ -1,2 +1,28 @@
 __pycache__/
 *.tmp
+
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*
+secrets*
+*secret*
+*.keystore
+
+# Databases
+*.sqlite
+*.sqlite3
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
