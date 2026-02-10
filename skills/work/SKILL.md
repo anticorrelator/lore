@@ -126,10 +126,7 @@ Show the script output directly.
 ---
 
 ### No arguments
-Infer from context:
-1. Git branch matches an active work item → run **load** with that slug
-2. A work item was loaded earlier in this conversation → show its current status
-3. Otherwise → run **list**
+Run **list**. Show the script output directly — no additional processing or summarization.
 
 ---
 

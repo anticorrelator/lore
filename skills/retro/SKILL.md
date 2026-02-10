@@ -131,6 +131,8 @@ Would this work cycle have gone meaningfully differently without the memory syst
 - 2: Marginal — system was consulted but didn't change outcomes
 - 1: No measurable impact — work would have been identical without it
 
+**Interpretation note:** When Dimensions 1-4 are all 4-5 but Delta is 3 or below, this is a **plumbing-vs-value gap** — the delivery mechanics were sound but the knowledge didn't change outcomes. This is expected for small, well-patterned work items where existing code already demonstrates the pattern. The knowledge system's delta for such items is primarily at *spec time* (informing scope, design decisions, gap identification), not implementation time. Score Delta based on the full work cycle including spec, not just implementation.
+
 ## Step 4: Write Journal Entry
 
 **This step is mandatory.** Call `lore journal write` with:
@@ -158,6 +160,8 @@ Patterns to watch for:
 4. **Evidence quality:** If a dimension score was hard to justify because the right evidence didn't exist in the artifacts, note what evidence would be needed and whether it's worth adding to worker/spec reporting.
 
 5. **Knowledge-as-consumer vs knowledge-as-contributor:** If a retro reveals the knowledge store was primarily *updated by* the work rather than *informing* the work, note this in Dimension 4. This is a signal the store is lagging behind active development and needs proactive updates before the next cycle.
+
+6. **Plumbing-vs-value gap:** If Dimensions 1-4 are all 4-5/5 but Delta is ≤3/5, the knowledge system's delivery mechanics are working but its *value contribution* is low for this work item type. Before treating this as a problem, consider: (a) was the work item small/well-patterned enough that code alone was sufficient? (b) did the knowledge contribute at spec time rather than implementation time? If (a), this is an expected ceiling — the knowledge system adds more value to novel or cross-cutting work. If (b), consider whether the retro should expand its scope to include the spec phase, not just implementation.
 
 Record all changes in the journal entry and the report.
 

@@ -95,16 +95,32 @@ A conditional escalation path when knowledge enrichment alone is insufficient. M
 
 #### Escalation procedure
 
-When all three gate conditions are met, spawn an Explore agent to investigate:
+When all three gate conditions are met:
 
-```
-Task: Investigate whether [specific concern] holds.
-Scope: [list of files/directories to examine]
-Question: [precise question to answer]
-Report: Return findings as structured observations — confirmed/refuted/uncertain with evidence.
-```
+1. **Prefetch knowledge for the agent prompt** — use the concern and scope files as query terms:
+   ```bash
+   PRIOR_KNOWLEDGE=$(lore prefetch "<concern> <scope files>" --format prompt --limit 3)
+   ```
+   For example, if the concern is "cross-boundary state mutation" and scope is `scripts/pk_search.py scripts/pk_cli.py`, the query would be `"cross-boundary state mutation pk_search.py pk_cli.py"`.
 
-The Explore agent traces invariants, reads related files, and scans for patterns that the knowledge store doesn't cover. Its findings are incorporated into the review finding before reporting.
+2. **Spawn an Explore agent** with the prefetched context embedded:
+   ```
+   Task: Investigate whether [specific concern] holds.
+   Scope: [list of files/directories to examine]
+   Question: [precise question to answer]
+
+   ## Prior Knowledge
+   <embed $PRIOR_KNOWLEDGE here — omit section if prefetch returned empty>
+
+   If the above context doesn't cover your area, search:
+   ```bash
+   lore search "<query>" --type knowledge --json --limit 3
+   ```
+
+   Report: Return findings as structured observations — confirmed/refuted/uncertain with evidence.
+   ```
+
+The Explore agent traces invariants, reads related files, and scans for patterns that the knowledge store doesn't cover. The prefetched knowledge gives it project-specific context without requiring it to search voluntarily. Its findings are incorporated into the review finding before reporting.
 
 #### Escalation budget
 
