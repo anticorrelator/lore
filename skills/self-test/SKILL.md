@@ -159,9 +159,15 @@ This test replaced the previous "Retrieval Race" (Runs 1-2) which compared knowl
 **Scoring:**
 - Accuracy: X/3 answers fully accurate when verified against code
 - Completeness: X/3 answers had no significant gaps
-- Overall: (Accuracy + Completeness) / 6, mapped to a 1-5 scale
+- Token efficiency: average elimination percentage across all 3 questions, mapped to 1-5:
+  - 5: >80% of code reading eliminated — knowledge entry was nearly self-contained
+  - 4: 60-80% eliminated — most exploration prevented, minor verification needed
+  - 3: 40-60% eliminated — meaningful savings but substantial code reading still required
+  - 2: 20-40% eliminated — some orientation value but most answers came from code
+  - 1: <20% eliminated — knowledge entry added negligible value over starting from scratch
+- Overall: average of Accuracy (mapped to 1-5), Completeness (mapped to 1-5), and Token efficiency
 
-**Record:** For each question, note whether the knowledge entry alone would have been sufficient for someone implementing a feature, or whether they'd need to read code anyway. This is the real measure of knowledge value.
+**Record:** For each question, estimate: how many file reads did the knowledge entry prevent? How many were still needed? What percentage of code consumption was eliminated? Also note the token economics: entry tokens consumed (~150-300) vs. file-read tokens prevented (~N x 500-3000). An entry that eliminates 3 of 5 file reads is valuable (60% elimination, ~1500-9000 tokens saved for ~150 consumed) even though the agent still reads 2 files — this is not "insufficient," it is a measurable efficiency gain. Entries are efficient when they replace reads, not supplement them.
 
 ## Test 3: Backlink Navigation
 
@@ -395,7 +401,7 @@ Compile all test scores into the structured results format. Write to `$RESULTS_F
 | Test | Score | Notes |
 |------|-------|-------|
 | 1. Orientation | X/5 | depth: X/2 breadth: X/3 |
-| 2. Retrieval Value | X/5 | accuracy: X/3 completeness: X/3 |
+| 2. Retrieval Value | X/5 | accuracy: X/3 completeness: X/3 efficiency: X% eliminated |
 | 3. Backlinks | X hops, X dead ends, X% connected | |
 | 4. Thread Awareness | X/5 actionability | N behaviors evidenced |
 | 5. Plan Continuity | X/5 actionability | N missing-context items |

@@ -9,7 +9,7 @@ argument_description: "[PR_number_or_URL] [focus context] — PR to self-review 
 
 Reflective review of work you just completed on a PR. This is a turn-based dialog — you and the user explore the PR together, discussing aspects one at a time rather than producing a batch report. Self-review blindness is structural when reviewing agent-generated code, so the dialog format forces genuine re-examination rather than rubber-stamping.
 
-Since this is your own work, the review can end with an implement-ready work item. This distinguishes it from `/pr-review` (reviewing someone else's code) and `/pr-revise` (addressing existing external feedback).
+Since this is your own work, locally-scoped findings can be implement-ready. Findings with cross-boundary implications get verification directives instead. This distinguishes it from `/pr-review` (reviewing someone else's code) and `/pr-revise` (addressing existing external feedback).
 
 This skill does not modify source code.
 
@@ -43,6 +43,8 @@ bash ~/.lore/scripts/fetch-pr-data.sh <PR_NUMBER>
 gh pr diff <PR_NUMBER>
 gh pr view <PR_NUMBER> --json files,title,body,baseRefName,headRefName,commits
 ```
+
+The fetch script returns grouped JSON: `grouped_reviews` (reviews with inline comments attached), `unmatched_threads`, and `orphan_comments`. For self-review, note any existing reviewer feedback to avoid duplicating observations already raised.
 
 ## Step 3: Overview and Opening Observation
 
@@ -149,6 +151,8 @@ Write `plan.md` structured for `/implement`:
 ```markdown
 # Self-Review: <PR Title>
 
+> **Review-level analysis.** These findings came from a code review (diff-level analysis). Investigation agents should verify assumptions against the full codebase, not accept them as validated.
+
 ## Goal
 Address findings from self-review dialog before requesting external review.
 
@@ -175,6 +179,24 @@ Address findings from self-review dialog before requesting external review.
 
 Omit empty phases. Include knowledge citations so `/implement` workers have context.
 
+### Verification directives for cross-boundary items
+
+Not all action items are implement-ready. Classify each item:
+
+- **Implement-ready:** The fix is locally scoped — contained within the file(s) in the diff, with no assumptions about code outside the diff. These go into the plan as standard implementation tasks.
+- **Spec-needed:** The fix involves cross-boundary implications — depends on invariants in other modules, changes a shared interface, or makes assumptions about code not visible in the diff. These get a verification directive instead of an implementation instruction.
+
+Format verification directives as:
+```
+- [ ] **[verify]** <hypothesis about what needs to change> — Verify whether <specific invariant or assumption> holds in `<file:function>` before implementing
+```
+
+The `[verify]` prefix signals to `/implement` that the item needs investigation (via `/spec`) before coding, not that it should be implemented directly.
+
+Assess overall work item readiness:
+- **implement-ready** — all action items are locally scoped
+- **spec-needed** — one or more items have verification directives
+
 Generate tasks:
 ```
 /work tasks pr-self-review-<PR_NUMBER>
@@ -195,7 +217,7 @@ Generate tasks:
 - <key insight or decision from the dialog>
 - ...
 
-### Work item: <slug if created, or "none — no action items">
+### Work item: <slug if created, or "none — no action items"> (<readiness: implement-ready or spec-needed>)
 ```
 
 ## Step 7: Capture Insights
@@ -208,7 +230,7 @@ This step is automatic — do not ask whether to run it.
 
 ## Resuming
 
-If re-invoked on the same PR, check for an existing work item (`pr-self-review-<PR_NUMBER>` in `/work list`). If found, load it and continue from where the previous dialog left off — review which areas were already discussed and pick up with unexplored ones.
+If re-invoked on the same PR, check for an existing work item (`pr-self-review-<PR_NUMBER>` in `/work list`). If found, load `plan.md` and continue from where the previous dialog left off — review which areas were already discussed (check existing phases and verification directives) and pick up with unexplored ones. Append new findings to existing phases or add new `[verify]` directives as needed rather than creating a duplicate work item.
 
 ## Error Handling
 

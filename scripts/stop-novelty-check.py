@@ -391,6 +391,10 @@ def write_pending_captures(knowledge_dir, candidates):
             "",
             "**Evaluate:** Does this meet the capture gate? (Reusable, Non-obvious, Stable, High-confidence)",
             "",
+            "**Synthesis check:** Does this insight combine information from multiple sources "
+            "(files, sessions, or components), or could it be read from a single file? "
+            "(Synthesis = high loading priority, single-source = searchable tier)",
+            "",
         ]
 
         try:

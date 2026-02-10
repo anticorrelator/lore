@@ -59,6 +59,8 @@ For each candidate, assess against the 4-condition gate:
 
 If capture constraints were provided in Step 1, apply them as an additional filter: candidates that pass the base gate but fall into the "skip" category for the current context are dropped silently.
 
+**Synthesis quality signal:** When multiple candidates pass the gate, prefer those that synthesize across sources — insights that required combining information from multiple files, sessions, or components. The following categories are strong positive indicators of synthesis: architectural models, design rationale, cross-cutting conventions, behavioral directives, mental models, and directional intent. Single-source entries (readable from one file) are still captured but rank lower for auto-loading.
+
 ## Step 3: Scan for thread updates and preference signals
 
 Review the conversation for thread-worthy content:

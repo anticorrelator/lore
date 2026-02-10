@@ -1,15 +1,15 @@
 ---
 name: pr-revise
-description: "Read all PR review feedback and create an implement-ready work item to address it"
+description: "Read all PR review feedback and create a work item with categorized findings and verification directives"
 user_invocable: true
 argument_description: "[PR_number_or_URL] [focus context] — PR with feedback to address (or auto-detect from branch). Optional focus context steers which feedback areas to prioritize (e.g., '42 concentrate on the reviewer comments about error handling')"
 ---
 
 # /pr-revise Skill
 
-Read all comments and reviews on a GitHub Pull Request, categorize feedback with knowledge enrichment, and create an implement-ready work item. The knowledge store helps distinguish "reviewer bringing valid insight" from "reviewer imposing personal preference that contradicts project conventions."
+Read all comments and reviews on a GitHub Pull Request, categorize feedback with knowledge enrichment, and create a work item with verification directives. Default readiness is `spec-needed` — review findings are hypotheses until verified against the full codebase. The knowledge store helps distinguish "reviewer bringing valid insight" from "reviewer imposing personal preference that contradicts project conventions."
 
-This skill is analysis-only — it creates plans and tasks but does not modify source code.
+This skill is analysis-only — it creates work items with notes and tasks but does not modify source code.
 
 ## Step 1: Identify PR and Focus Context
 
@@ -38,7 +38,7 @@ gh pr list --state open --head "$(git branch --show-current)" --json number,base
 Fetch all PR data using the shared script:
 
 ```bash
-# Structured comment/review data (reviewThreads, reviews, general comments)
+# Grouped review data (grouped_reviews, unmatched_threads, orphan_comments)
 bash ~/.lore/scripts/fetch-pr-data.sh <PR_NUMBER>
 
 # Raw diff for context
@@ -48,19 +48,23 @@ gh pr diff <PR_NUMBER>
 gh pr view <PR_NUMBER> --json files,title,body,baseRefName,headRefName
 ```
 
-CRITICAL: The GraphQL query fetches all comment types. The GitHub UI hides/folds comments — the API is the only reliable source.
+CRITICAL: The fetch script groups comments by review submission. The GitHub UI hides/folds comments — the API is the only reliable source.
 
-## Step 3: Analyze and Categorize
+## Step 3: Select Review Batch and Categorize
 
-Parse the response and categorize:
+**Review Selection:** Follow the Review Selection protocol defined in `claude-md/70-review-protocol.md`. Present fetched reviews as batches grouped by reviewer and let the user select which batch to work through. Only categorize and process comments from the selected batch — other batches are deferred to subsequent invocations.
+
+If the PR has only one reviewer with feedback, skip the selection prompt and proceed with that batch automatically.
+
+**Categorize the selected batch:**
 
 1. **Unresolved Review Threads** — These need action
 2. **Review Bodies with CHANGES_REQUESTED** — High priority feedback
-3. **General Comments** — May contain actionable items
+3. **General Comments** — May contain actionable items (only those belonging to the selected batch)
 4. **Outdated** (`isOutdated: true` in GraphQL response) — Filter out. These are on code that has been subsequently changed and are likely addressed by later commits. Only surface an outdated thread if the concern clearly still applies to the *current* state of the diff — verify against the current diff, not the outdated context. Do not count toward "unresolved items needing action."
 5. **Resolved** — Skip unless referenced by an unresolved thread
 
-For each unresolved item, determine:
+For each unresolved item in the selected batch, determine:
 - **Clear fix**: Obvious what to do (typo, naming, style) -> Create task directly
 - **Needs context**: Requires reading code to understand -> Read first, then decide
 - **Ambiguous**: Multiple valid approaches or conflicts with codebase patterns -> May need user input
@@ -93,7 +97,7 @@ For each feedback item with a substantive label (suggestion, issue, question, th
 
 Skip enrichment for nitpick and praise labels.
 
-## Step 5: Create Plan and Generate Tasks
+## Step 5: Create Work Item with Notes
 
 Create a work item from the categorized, enriched feedback:
 
@@ -103,41 +107,46 @@ Create a work item from the categorized, enriched feedback:
 
 Where `<short-slug>` is 2-3 words from the PR title, slugified (e.g., `pr-42-fix-auth-flow`).
 
-Write `plan.md` with feedback organized into phases by priority:
+Write `notes.md` (not `plan.md`) with feedback organized by actionability:
 
 ```markdown
 # PR #<NUMBER>: <Title>
 
+> **Review-level analysis.** These findings came from a code review (diff-level analysis). Investigation agents should verify assumptions against the full codebase, not accept them as validated.
+
 ## Goal
-Address reviewer feedback on PR #<NUMBER>.
+Address reviewer feedback from @<reviewer>'s review on PR #<NUMBER>.
 
-## Phases
-
-### Phase 1: Blocking / Correctness
-**Objective:** Fix issues that affect correctness or block merge
-**Files:** <affected files>
-- [ ] <feedback item as actionable task with file:line reference and knowledge citation>
+## Agreed Changes
+Trivially obvious fixes only — typos, naming corrections, clear style fixes. Each must be verifiable from the diff alone without reading surrounding code.
+- [ ] <"Clear fix" item with file:line reference and quoted reviewer feedback>
 - [ ] ...
 
-### Phase 2: Improvements
-**Objective:** Address substantive suggestions
-**Files:** <affected files>
-- [ ] <feedback item with knowledge citation>
+## Verification Needed
+Reviewer claims requiring `/spec` investigation before implementation. Each item includes an explicit verification directive.
+- [ ] <"Needs context" item> — **Verify:** <what to check> in `<file:function>` [knowledge: <citation>]
+- [ ] <"Ambiguous" item> — **Verify:** <which approach is correct> given <constraint> [knowledge: <citation>]
 - [ ] ...
 
-### Phase 3: Style / Minor
-**Objective:** Address style and minor items
-**Files:** <affected files>
-- [ ] <feedback item>
+## Deferred
+Out of scope for this revision pass, or blocked on user input.
+- [ ] <item> — <reason deferred>
 - [ ] ...
 ```
 
-Group related feedback into single items when they touch the same file/function. Include quoted feedback and file:line references in each item. Include knowledge citations so `/implement` workers have context. Omit empty phases.
+Group related feedback into single items when they touch the same file/function. Include quoted feedback and file:line references in each item. Include knowledge citations so `/spec` investigators have context. Omit empty sections.
 
-Generate tasks from the plan:
+Generate tasks from the notes:
 ```
 /work tasks pr-<NUMBER>-<short-slug>
 ```
+
+### Readiness assessment
+
+Default readiness is `spec-needed`. Override to `implement-ready` only when ALL of these are true:
+- Every item is in "Agreed Changes" (no "Verification Needed" items exist)
+- All items are trivially obvious fixes verifiable from the diff alone
+- No item touches cross-boundary invariants or shared interfaces
 
 **Only ask the user when:**
 - Feedback contradicts project conventions (knowledge enrichment will surface this)
@@ -147,7 +156,7 @@ Generate tasks from the plan:
 
 When asking, be specific: "The reviewer suggests X, but convention Y applies here [knowledge: entry-title]. Which should I follow?"
 
-This step is automatic — do not ask whether to create the plan.
+This step is automatic — do not ask whether to create the work item.
 
 ## Step 6: Present Summary
 
@@ -155,21 +164,32 @@ This step is automatic — do not ask whether to create the plan.
 ## PR Feedback Summary
 
 **PR:** #<number> — <title>
-**Unresolved items:** N
-**Tasks created:** M
-**Skipped (resolved/outdated):** K
+**Reviewed batch:** @<reviewer> (<STATE>) — N inline comments
+**Readiness:** spec-needed | implement-ready
+**Agreed changes:** N (direct tasks)
+**Verification needed:** M (requires /spec)
+**Deferred:** K
+**Skipped (resolved/outdated):** J
 **Knowledge enrichments:** X queries, Y citations surfaced
 
-### Tasks:
+### Agreed Changes:
 1. [task subject] — file.py:123
-2. [task subject] — component.tsx:45
-...
+2. ...
+
+### Verification Directives:
+1. [item] — Verify: [what to check] in `file:function`
+2. ...
 
 ### Items needing your input:
 - [description with knowledge context — e.g., "Reviewer suggests X, but convention Y applies"]
+
+### Deferred batches:
+- @<reviewer2> (<STATE>) — N inline comments
 ```
 
 If there are items needing input, ask about them in a single batched question.
+
+If there are deferred batches, note that the user can re-invoke `/pr-revise` on the same PR to process the next batch.
 
 ## Step 7: Capture Insights
 
@@ -181,7 +201,10 @@ This step is automatic — do not ask whether to run it.
 
 ## Resuming
 
-If re-invoked on the same PR, check for an existing work item (e.g., `pr-<NUMBER>-*` in `/work list`). If found, load it and update the plan with any new feedback rather than creating a duplicate.
+If re-invoked on the same PR, check for an existing work item (e.g., `pr-<NUMBER>-*` in `/work list`). If found, load `notes.md` and determine the context:
+
+- **Processing a deferred batch:** Re-fetch PR data, present remaining unprocessed reviewer batches for selection, and append the new batch's categorized feedback to the existing notes — new fixes to Agreed Changes, new directives to Verification Needed, new deferrals to Deferred.
+- **New feedback on an already-processed batch:** Update existing notes sections with any new comments rather than creating duplicates.
 
 ## Error Handling
 

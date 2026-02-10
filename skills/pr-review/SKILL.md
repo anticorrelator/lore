@@ -40,7 +40,7 @@ gh pr diff <PR_NUMBER>
 gh pr view <PR_NUMBER> --json files,title,body,author,commits
 ```
 
-Parse the results to understand:
+Parse the grouped JSON output (`grouped_reviews`, `unmatched_threads`, `orphan_comments`) to understand:
 - **PR scope:** which files changed, how many, what subsystems are touched
 - **PR intent:** what the title, body, and commit messages say the change does
 - **Existing discussion:** any reviews or comments already posted (avoid duplicating feedback). Filter out outdated threads (`isOutdated: true`) — these are on code that has been subsequently changed and are likely addressed. Only note an outdated thread if the concern clearly still applies to the current diff.
@@ -170,7 +170,7 @@ Create a documentation work item recording what was posted:
 /work create pr-review-<PR_NUMBER>
 ```
 
-Write `notes.md` documenting:
+Write `notes.md` as a record of what was submitted (not an action plan — the PR author owns the response):
 - PR number, title, author
 - Findings posted (severity + short title + file target)
 - Review state submitted (approve/request-changes/comment)

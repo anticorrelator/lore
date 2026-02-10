@@ -38,11 +38,15 @@ Read existing artifacts only. No new exploration or code reading needed.
 
 ### 2a: Worker observations
 
-Check for `tasks.json` in the work item directory. If it exists, read task descriptions from the `phases[].tasks[]` arrays and extract all `**Observations:**` sections. If `tasks.json` does not exist, check `notes.md` for session entries from `/implement` runs that reference worker findings. For review-only cycles, note "no workers" and instead look for subagent launches (background analysis agents in `/pr-self-review`, `/pr-review`) and whether they received knowledge preambles.
+Worker observations come from the **implementation transcript** (worker SendMessage reports to the lead and TaskUpdate descriptions), NOT from `tasks.json` (which is pre-generated before workers run and contains task definitions, not results). For retros run in the same session as `/implement`, observations are available in the conversation context. For cross-session retros, check `notes.md` for session entries from `/implement` runs that reference worker findings (the `/implement` lead records key findings in its session entry). For review-only cycles, note "no workers" and instead look for subagent launches (background analysis agents in `/pr-self-review`, `/pr-review`) and whether they received knowledge preambles.
 
-### 2b: Knowledge context blocks
+### 2b: Knowledge context blocks and backlink resolution
 
 Read `plan.md` and extract every `**Knowledge context:**` block per phase. These record what knowledge was supposed to be delivered to workers/researchers. For review-only cycles, also check for inline `[knowledge: ...]` citations in plan.md tasks — these indicate knowledge was consulted during plan authoring even without formal context blocks.
+
+**Backlink resolution audit:** If `tasks.json` exists, check the `## Prior Knowledge` sections in task descriptions for `[unresolved — Target not found]` markers. Count resolved vs unresolved backlinks. A high unresolved rate (>30%) indicates knowledge store restructuring broke plan references — this is a delivery failure independent of content quality. Report the resolution rate in the evidence summary.
+
+**Fallback path audit:** If `tasks.json` does not exist and `lore work tasks` was used (check notes.md for `/implement` session entries), compare the plan's `**Knowledge context:**` backlinks against what the generated task descriptions actually contain. If plan phases have backlinks but generated tasks show "No backlinks found" or lack `## Prior Knowledge` sections, this is a **pipeline delivery failure** — the task generation script dropped the plan's knowledge context. This is worse than an unresolved backlink (which at least signals something was attempted) because it's completely silent. Score Dimension 1 no higher than 2 when this occurs.
 
 ### 2c: Session entries
 
@@ -56,14 +60,19 @@ Determine the work period from `notes.md` timestamps (first session entry to las
 
 Read `$KNOWLEDGE_DIR/_meta/friction-log.jsonl` and filter entries within the same timestamp range. Summarize: total friction events, outcomes breakdown (found / found_but_unhelpful / not_found).
 
+### 2f: Token efficiency estimate
+
+For each knowledge context block delivered to workers, estimate how many file reads it replaced and the approximate token cost of those reads (~500-3000 tokens per file depending on size). This is a rough estimate, not an exact measurement. Count: files a worker would have needed to read to discover the same information, grep/search cycles that were avoided, and wrong-path explorations that were short-circuited by the knowledge context. Summarize as: total file reads prevented, estimated tokens saved.
+
 Report:
 ```
 [retro] Evidence gathered:
   Worker observations: N tasks with observations
-  Knowledge context blocks: N phases with context
+  Knowledge context blocks: N phases with context (M/K backlinks resolved)
   Session entries: N entries spanning <date range>
   Retrieval events: N in period
   Friction events: N in period
+  Token efficiency: ~N file reads prevented, ~Nk tokens saved (estimate)
 ```
 
 ## Step 3: Evaluate Dimensions
@@ -80,7 +89,7 @@ Was knowledge context prefetched and delivered to workers/researchers? For each 
 - 5: Every phase had knowledge context, and workers referenced or built on it
 - 4: Most phases had context delivered; workers used it with minor gaps
 - 3: Context was delivered but workers didn't reference it (decorative)
-- 2: Some phases lacked context; workers searched manually. For reviews: knowledge was consulted during authoring but not delivered to subagents
+- 2: Some phases lacked context; workers searched manually. Also: context blocks existed but >30% of backlinks were unresolved (ghost references from knowledge store restructuring). Also: plan had backlinks but task generation pipeline dropped them (fallback path failure). For reviews: knowledge was consulted during authoring but not delivered to subagents
 - 1: No knowledge context delivered; workers started from scratch
 
 ### Dimension 2 — Retrieval Quality
@@ -122,16 +131,18 @@ Did the plan's design decisions reference knowledge entries that actually influe
 
 ### Dimension 5 — Overall Delta
 
-Would this work cycle have gone meaningfully differently without the memory system? Be honest. Consider: would workers have been slower? Would they have made mistakes the knowledge prevented? Or would they have read the same source files and produced the same output regardless?
+Would this work cycle have gone meaningfully differently without the memory system? Be honest. Consider both outcome changes (prevented mistakes, better design) AND token efficiency (eliminated unnecessary code reading, file exploration, or re-discovery). Saved exploration time = saved tokens = extended peak agent awareness.
 
 **Scoring:**
-- 5: Memory system was essential — work would have been significantly slower or wrong without it
-- 4: Clear speedup or prevented at least one mistake
-- 3: Modest help — saved some exploration time but workers would have figured it out
-- 2: Marginal — system was consulted but didn't change outcomes
+- 5: Memory system was essential — prevented significant mistakes OR saved substantial exploration (estimate: >10 file reads prevented, ~20k+ tokens). Work would have been materially slower or wrong without it
+- 4: Clear speedup or prevented at least one mistake. Demonstrable token savings (estimate: 5-10 file reads prevented, ~10-20k tokens) OR prevented a wrong-path exploration
+- 3: Saved meaningful exploration time (estimate: 2-5 file reads prevented, ~5-10k tokens) — workers would have reached the same conclusion but spent more context window getting there
+- 2: Marginal — system was consulted but savings were minimal (estimate: <2 file reads prevented, <5k tokens). Didn't change outcomes or significantly reduce exploration
 - 1: No measurable impact — work would have been identical without it
 
 **Interpretation note:** When Dimensions 1-4 are all 4-5 but Delta is 3 or below, this is a **plumbing-vs-value gap** — the delivery mechanics were sound but the knowledge didn't change outcomes. This is expected for small, well-patterned work items where existing code already demonstrates the pattern. The knowledge system's delta for such items is primarily at *spec time* (informing scope, design decisions, gap identification), not implementation time. Score Delta based on the full work cycle including spec, not just implementation.
+
+**Token efficiency note:** A 150-token knowledge entry that eliminates 5000 tokens of code reading is a 33x efficiency gain. When estimating token savings, count: file reads prevented (each ~500-2000 tokens), grep/search cycles avoided, wrong-path explorations short-circuited. "Would have figured it out" is not neutral if figuring it out costs thousands of tokens of context window.
 
 ## Step 4: Write Journal Entry
 
@@ -162,6 +173,10 @@ Patterns to watch for:
 5. **Knowledge-as-consumer vs knowledge-as-contributor:** If a retro reveals the knowledge store was primarily *updated by* the work rather than *informing* the work, note this in Dimension 4. This is a signal the store is lagging behind active development and needs proactive updates before the next cycle.
 
 6. **Plumbing-vs-value gap:** If Dimensions 1-4 are all 4-5/5 but Delta is ≤3/5, the knowledge system's delivery mechanics are working but its *value contribution* is low for this work item type. Before treating this as a problem, consider: (a) was the work item small/well-patterned enough that code alone was sufficient? (b) did the knowledge contribute at spec time rather than implementation time? If (a), this is an expected ceiling — the knowledge system adds more value to novel or cross-cutting work. If (b), consider whether the retro should expand its scope to include the spec phase, not just implementation.
+
+7. **Backlink staleness:** If >30% of backlinks in tasks.json `## Prior Knowledge` sections are unresolved, knowledge store restructuring (e.g., `/renormalize`) broke plan references. This is a delivery infrastructure failure — entries exist but can't be found. Consider: (a) whether `/renormalize` should update backlinks in active work items, (b) whether `tasks.json` generation should warn on unresolved backlinks rather than silently including `[unresolved]` markers.
+
+8. **Pipeline delivery failures:** If the plan has `**Knowledge context:**` backlinks but the task generation path (especially fallback `lore work tasks`) produces tasks without resolved knowledge, the entire knowledge delivery pipeline is broken for that implementation. This is a silent failure — the plan looks complete, the tasks look reasonable, but workers get zero knowledge context. Track whether this recurs across retros; if so, the fix is in `generate-tasks.py` backlink resolution, not in `/implement` or `/retro`.
 
 Record all changes in the journal entry and the report.
 

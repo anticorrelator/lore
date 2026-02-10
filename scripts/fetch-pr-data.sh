@@ -2,7 +2,11 @@
 # fetch-pr-data.sh — Fetch PR data (comments, reviews, review threads) via GitHub GraphQL API
 # Usage: fetch-pr-data.sh <PR_NUMBER> [--repo OWNER/REPO]
 #
-# Outputs structured JSON with all PR comment types.
+# Outputs structured JSON with comments grouped by review submission.
+# Output fields: title, body, state, author, baseRefName, headRefName,
+#   grouped_reviews (reviews with inline_comments attached),
+#   unmatched_threads (review threads not matched to any review),
+#   orphan_comments (general PR comments not part of a review).
 # Requires: gh CLI authenticated (gh auth status)
 
 set -euo pipefail
@@ -74,7 +78,7 @@ fi
 
 # --- Fetch PR data via GraphQL ---
 # Single query fetches all comment types: reviewThreads, reviews, general comments
-gh api graphql -f query='
+RAW_JSON=$(gh api graphql -f query='
 query($owner: String!, $repo: String!, $pr: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $pr) {
@@ -121,4 +125,103 @@ query($owner: String!, $repo: String!, $pr: Int!) {
       }
     }
   }
-}' -F owner="$OWNER" -F repo="$REPO" -F pr="$PR_NUMBER"
+}' -F owner="$OWNER" -F repo="$REPO" -F pr="$PR_NUMBER")
+
+# --- Post-process: group comments by review submission ---
+# Groups review thread comments under their parent review (matched by author + timing).
+# Unmatched threads (no parent review) and orphan comments (general PR comments) are separate.
+echo "$RAW_JSON" | jq '
+.data.repository.pullRequest as $pr |
+
+# Build list of reviews with empty inline_comments arrays
+[$pr.reviews.nodes[] | {
+  reviewer: .author.login,
+  state: .state,
+  submittedAt: .createdAt,
+  body: .body,
+  url: .url,
+  inline_comments: []
+}] |
+
+# For each review thread, find the best matching review and attach it.
+# Match criteria: same author as thread opener, review submitted at or after thread comment.
+# Among matches, pick the review with the earliest submittedAt (closest in time).
+reduce ($pr.reviewThreads.nodes[] | select(.comments.nodes | length > 0)) as $thread (
+  .;
+
+  . as $revs |
+  $thread.comments.nodes[0].author.login as $thread_author |
+  $thread.comments.nodes[0].createdAt as $thread_created |
+
+  {
+    path: $thread.path,
+    line: $thread.line,
+    startLine: $thread.startLine,
+    diffSide: $thread.diffSide,
+    isResolved: $thread.isResolved,
+    isOutdated: $thread.isOutdated,
+    comments: $thread.comments.nodes
+  } as $thread_obj |
+
+  # Find index of best matching review
+  (reduce range($revs | length) as $i (
+    null;
+    if $revs[$i].reviewer == $thread_author
+       and $revs[$i].submittedAt >= $thread_created
+    then
+      if . == null then $i
+      elif $revs[$i].submittedAt < $revs[.].submittedAt then $i
+      else .
+      end
+    else .
+    end
+  )) as $match_idx |
+
+  if $match_idx != null then
+    .[$match_idx].inline_comments += [$thread_obj]
+  else .
+  end
+) |
+
+. as $grouped |
+
+# Collect thread first-comment keys that were matched to a review
+[$grouped[] | .inline_comments[] | .comments[0] | (.author.login + "|" + .createdAt)] |
+  unique as $matched_keys |
+
+# Unmatched threads: review threads not assigned to any review
+[
+  $pr.reviewThreads.nodes[]
+  | select(.comments.nodes | length > 0)
+  | .comments.nodes[0] as $first
+  | select(
+      ($first.author.login + "|" + $first.createdAt) as $k |
+      ($matched_keys | index($k)) == null
+    )
+  | {
+      path: .path,
+      line: .line,
+      startLine: .startLine,
+      diffSide: .diffSide,
+      isResolved: .isResolved,
+      isOutdated: .isOutdated,
+      comments: .comments.nodes
+    }
+] as $unmatched_threads |
+
+{
+  title: $pr.title,
+  body: $pr.body,
+  state: $pr.state,
+  author: $pr.author.login,
+  baseRefName: $pr.baseRefName,
+  headRefName: $pr.headRefName,
+  grouped_reviews: $grouped,
+  unmatched_threads: $unmatched_threads,
+  orphan_comments: [$pr.comments.nodes[] | {
+    author: .author.login,
+    body: .body,
+    createdAt: .createdAt,
+    url: .url
+  }]
+}'
