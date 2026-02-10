@@ -1,0 +1,558 @@
+#!/usr/bin/env bash
+# lore — CLI dispatcher for the lore knowledge system
+# Routes subcommands to scripts in ~/.lore/scripts/
+
+set -euo pipefail
+
+LORE_VERSION="0.1.0"
+
+# Resolve SCRIPTS_DIR via the ~/.lore/scripts symlink
+SCRIPTS_DIR="$(cd "$(readlink ~/.lore/scripts || echo ~/.lore/scripts)" && pwd)"
+
+# Resolve KDIR once for commands that need it (suppress errors for commands that don't)
+resolve_kdir() {
+  "$SCRIPTS_DIR/resolve-repo.sh"
+}
+
+# --- Usage ---
+usage() {
+  cat >&2 <<EOF
+lore $LORE_VERSION — knowledge system CLI
+
+Usage: lore <command> [args...]
+
+Commands:
+  read         Read a file with optional query filtering
+  search       Search knowledge and/or work items
+  capture      Capture an insight to the knowledge store
+  annotate     Record a retrieval friction annotation
+  resolve      Resolve repo path or [[backlink]] references
+  prefetch     Prefetch knowledge for agent prompts
+  init         Initialize a knowledge store
+  index        Show dynamic knowledge index (category + entry list)
+  heal         Detect and repair structural issues
+  stats        Show knowledge index statistics
+  curate       Scan for curation issues (pre-scan for /memory curate)
+  check-links  Scan for broken [[backlink]] references
+  status       Show knowledge store health summary
+  assemble     Assemble CLAUDE.md from fragments
+
+  work         Work item management (see: lore work --help)
+  thread       Thread management (see: lore thread --help)
+  migrate      Format migration (see: lore migrate --help)
+  manifest     Manifest management (see: lore manifest --help)
+  analyze      Knowledge store analysis (see: lore analyze --help)
+  bootstrap    Bootstrap knowledge store (see: lore bootstrap --help)
+
+Options:
+  --help, -h       Show this help
+  --version, -v    Show version
+EOF
+}
+
+work_usage() {
+  cat >&2 <<EOF
+lore work — work item management
+
+Usage: lore work <subcommand> [args...]
+
+Subcommands:
+  create    Create a new work item
+  list      List active work items
+  show      Show a work item's full context
+  archive   Archive a completed work item
+  search    Search across work items
+  tasks        Generate tasks from a plan
+  regen-tasks  Regenerate tasks.json from plan.md
+  check        Check off a plan task
+  heal         Detect and fix work structure issues
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+analyze_usage() {
+  cat >&2 <<EOF
+lore analyze — knowledge store analysis
+
+Usage: lore analyze <subcommand> [args...]
+
+Subcommands:
+  staleness    Scan entries for staleness (age, confidence, missing files)
+  usage        Analyze entry access patterns from retrieval logs
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+thread_usage() {
+  cat >&2 <<EOF
+lore thread — thread management
+
+Usage: lore thread <subcommand> [args...]
+
+Subcommands:
+  init       Initialize _threads/ directory structure
+  list       List threads (regenerate _threads/_index.json)
+  migrate    Migrate monolithic thread files to directory-per-entry format
+  reindex    Regenerate _threads/_index.json from thread metadata
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+migrate_usage() {
+  cat >&2 <<EOF
+lore migrate — format migration
+
+Usage: lore migrate <subcommand> [args...]
+
+Subcommands:
+  knowledge    Migrate monolithic .md files to file-per-entry directories
+  threads      Migrate monolithic thread files to directory-per-entry format
+
+Options:
+  --help, -h    Show this help
+  --dry-run     Preview changes without writing
+EOF
+}
+
+manifest_usage() {
+  cat >&2 <<EOF
+lore manifest — manifest management
+
+Usage: lore manifest <subcommand> [args...]
+
+Subcommands:
+  update    Regenerate _manifest.json from knowledge files
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+bootstrap_usage() {
+  cat >&2 <<EOF
+lore bootstrap — bootstrap knowledge store
+
+Usage: lore bootstrap <subcommand> [args...]
+
+Subcommands:
+  scope [dir...]   Analyze codebase structure and detect domains
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+# --- Analyze subgroup ---
+cmd_analyze() {
+  if [[ $# -eq 0 ]]; then
+    analyze_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      analyze_usage
+      return 0
+      ;;
+    staleness)
+      cmd_analyze_staleness "$@"
+      ;;
+    usage)
+      cmd_analyze_usage "$@"
+      ;;
+    *)
+      echo "Error: unknown analyze subcommand '$subcmd'" >&2
+      echo "" >&2
+      analyze_usage
+      return 1
+      ;;
+  esac
+}
+
+cmd_analyze_staleness() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Usage: lore analyze staleness [--repo-root PATH] [--json]" >&2
+    echo "  Scan knowledge entries for staleness based on age, confidence, and file existence." >&2
+    echo "  Writes report to _meta/staleness-report.json and prints a summary." >&2
+    return 0
+  fi
+
+  local kdir
+  kdir="$(resolve_kdir)"
+
+  local script="$SCRIPTS_DIR/staleness-scan.py"
+  if [[ ! -f "$script" ]]; then
+    echo "Error: staleness-scan.py not found at $script" >&2
+    return 1
+  fi
+
+  python3 "$script" "$kdir" "$@"
+}
+
+cmd_analyze_usage() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Usage: lore analyze usage [--cold-threshold N] [--json] [--write]" >&2
+    echo "  Analyze entry access patterns from retrieval logs." >&2
+    echo "  Use --write to save report to _meta/usage-report.json." >&2
+    return 0
+  fi
+
+  local kdir
+  kdir="$(resolve_kdir)"
+
+  local script="$SCRIPTS_DIR/usage-analyze.py"
+  if [[ ! -f "$script" ]]; then
+    echo "Error: usage-analyze.py not found at $script" >&2
+    return 1
+  fi
+
+  python3 "$script" "$kdir" "$@"
+}
+
+# --- Bootstrap subgroup ---
+cmd_bootstrap() {
+  if [[ $# -eq 0 ]]; then
+    bootstrap_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      bootstrap_usage
+      return 0
+      ;;
+    scope)
+      "$SCRIPTS_DIR/bootstrap-scope.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown bootstrap subcommand '$subcmd'" >&2
+      echo "" >&2
+      bootstrap_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Thread subgroup ---
+cmd_thread() {
+  if [[ $# -eq 0 ]]; then
+    thread_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      thread_usage
+      return 0
+      ;;
+    init)
+      "$SCRIPTS_DIR/init-threads.sh" "$@"
+      ;;
+    list|reindex)
+      "$SCRIPTS_DIR/update-thread-index.sh" "$@"
+      ;;
+    migrate)
+      "$SCRIPTS_DIR/migrate-threads.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown thread subcommand '$subcmd'" >&2
+      echo "" >&2
+      thread_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Migrate subgroup ---
+cmd_migrate() {
+  if [[ $# -eq 0 ]]; then
+    migrate_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      migrate_usage
+      return 0
+      ;;
+    knowledge|format)
+      "$SCRIPTS_DIR/migrate-knowledge-format.sh" "$@"
+      ;;
+    threads)
+      "$SCRIPTS_DIR/migrate-threads.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown migrate subcommand '$subcmd'" >&2
+      echo "" >&2
+      migrate_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Manifest subgroup ---
+cmd_manifest() {
+  if [[ $# -eq 0 ]]; then
+    manifest_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      manifest_usage
+      return 0
+      ;;
+    update)
+      "$SCRIPTS_DIR/update-manifest.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown manifest subcommand '$subcmd'" >&2
+      echo "" >&2
+      manifest_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Search ---
+cmd_search() {
+  local type="all"
+  local args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        echo "Usage: lore search <query> [--type knowledge|work|all]" >&2
+        return 0
+        ;;
+      --type)
+        type="$2"
+        shift 2
+        ;;
+      *)
+        args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [[ ${#args[@]} -eq 0 ]]; then
+    echo "Usage: lore search <query> [--type knowledge|work|all]" >&2
+    return 1
+  fi
+
+  local query="${args[0]}"
+  local kdir
+  kdir="$(resolve_kdir)"
+
+  case "$type" in
+    knowledge)
+      python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" "${args[@]:1}"
+      ;;
+    work)
+      "$SCRIPTS_DIR/search-work.sh" "$query"
+      ;;
+    all)
+      python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" "${args[@]:1}"
+      echo ""
+      "$SCRIPTS_DIR/search-work.sh" "$query"
+      ;;
+    *)
+      echo "Error: --type must be knowledge, work, or all" >&2
+      return 1
+      ;;
+  esac
+}
+
+# --- Work subgroup ---
+cmd_work() {
+  if [[ $# -eq 0 ]]; then
+    work_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      work_usage
+      return 0
+      ;;
+    create)
+      "$SCRIPTS_DIR/create-work.sh" "$@"
+      ;;
+    list)
+      "$SCRIPTS_DIR/list-work.sh" "$@"
+      ;;
+    show)
+      "$SCRIPTS_DIR/load-work-item.sh" "$@"
+      ;;
+    archive)
+      "$SCRIPTS_DIR/archive-work.sh" "$@"
+      ;;
+    search)
+      "$SCRIPTS_DIR/search-work.sh" "$@"
+      ;;
+    tasks)
+      "$SCRIPTS_DIR/generate-tasks-from-plan.sh" "$@"
+      ;;
+    regen-tasks)
+      "$SCRIPTS_DIR/regen-tasks.sh" "$@"
+      ;;
+    check)
+      "$SCRIPTS_DIR/update-plan-checkbox.sh" "$@"
+      ;;
+    heal)
+      "$SCRIPTS_DIR/heal-work.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown work subcommand '$subcmd'" >&2
+      echo "" >&2
+      work_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Top-level dispatch ---
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 1
+fi
+
+case "$1" in
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  --version|-v)
+    echo "lore $LORE_VERSION"
+    exit 0
+    ;;
+  read)
+    shift
+    "$SCRIPTS_DIR/filtered-read.sh" "$@"
+    ;;
+  search)
+    shift
+    cmd_search "$@"
+    ;;
+  capture)
+    shift
+    "$SCRIPTS_DIR/capture.sh" "$@"
+    ;;
+  annotate)
+    shift
+    "$SCRIPTS_DIR/annotate.sh" "$@"
+    ;;
+  resolve)
+    shift
+    if [[ $# -eq 0 ]]; then
+      resolve_kdir
+    else
+      case "$1" in
+        --help|-h)
+          echo "Usage: lore resolve [backlink...]" >&2
+          echo "  No args: print knowledge directory path" >&2
+          echo "  With args: resolve [[backlink]] references" >&2
+          exit 0
+          ;;
+        *)
+          kdir="$(resolve_kdir)"
+          python3 "$SCRIPTS_DIR/pk_cli.py" resolve "$kdir" "$@"
+          ;;
+      esac
+    fi
+    ;;
+  prefetch)
+    shift
+    "$SCRIPTS_DIR/prefetch-knowledge.sh" "$@"
+    ;;
+  index)
+    shift
+    "$SCRIPTS_DIR/generate-index.sh" "$@"
+    ;;
+  init)
+    shift
+    "$SCRIPTS_DIR/init-repo.sh" "$@"
+    ;;
+  heal)
+    shift
+    "$SCRIPTS_DIR/heal-knowledge.sh" "$@"
+    "$SCRIPTS_DIR/heal-work.sh" "$@"
+    ;;
+  stats)
+    shift
+    kdir="$(resolve_kdir)"
+    python3 "$SCRIPTS_DIR/pk_cli.py" stats "$kdir" "$@"
+    ;;
+  check-links)
+    shift
+    kdir="$(resolve_kdir)"
+    python3 "$SCRIPTS_DIR/pk_cli.py" check-links "$kdir" "$@"
+    ;;
+  curate)
+    shift
+    "$SCRIPTS_DIR/curate-scan.sh" "$@"
+    ;;
+  status)
+    shift
+    "$SCRIPTS_DIR/status.sh" "$@"
+    ;;
+  assemble)
+    shift
+    "$SCRIPTS_DIR/assemble-claude-md.sh" "$@"
+    ;;
+  analyze)
+    shift
+    cmd_analyze "$@"
+    ;;
+  work)
+    shift
+    cmd_work "$@"
+    ;;
+  thread)
+    shift
+    cmd_thread "$@"
+    ;;
+  migrate)
+    shift
+    cmd_migrate "$@"
+    ;;
+  manifest)
+    shift
+    cmd_manifest "$@"
+    ;;
+  bootstrap)
+    shift
+    cmd_bootstrap "$@"
+    ;;
+  *)
+    echo "Error: unknown command '$1'" >&2
+    echo "" >&2
+    usage
+    exit 1
+    ;;
+esac
