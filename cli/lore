@@ -36,6 +36,8 @@ Commands:
   check-links  Scan for broken [[backlink]] references
   status       Show knowledge store health summary
   assemble     Assemble CLAUDE.md from fragments
+  batch-spec   Batch-run /spec short on eligible work items
+  batch-implement  Batch-run /implement on ready work items
 
   work         Work item management (see: lore work --help)
   journal      Effectiveness journal (see: lore journal --help)
@@ -589,6 +591,14 @@ case "$1" in
   bootstrap)
     shift
     cmd_bootstrap "$@"
+    ;;
+  batch-spec)
+    shift
+    "$SCRIPTS_DIR/batch-spec.sh" "$@"
+    ;;
+  batch-implement)
+    shift
+    "$SCRIPTS_DIR/batch-implement.sh" "$@"
     ;;
   *)
     echo "Error: unknown command '$1'" >&2

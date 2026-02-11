@@ -85,10 +85,12 @@ Was knowledge context prefetched and delivered to workers/researchers? For each 
 
 **For review-only cycles:** Score based on whether background analysis agents received knowledge preambles and whether the reviewer's session-start retrieval provided useful orientation context.
 
+**For spec-only cycles:** Also audit ad-hoc subagents spawned during interactive spec work (e.g., Explore agents for investigation). These are not formal "workers" but still benefit from knowledge preambles. If the spec author dispatched subagents without knowledge context while knowledge search tools were available, this is a delivery failure — the same push-over-pull gap that affects implementation workers applies to spec-time exploration.
+
 **Scoring:**
 - 5: Every phase had knowledge context, and workers referenced or built on it
 - 4: Most phases had context delivered; workers used it with minor gaps
-- 3: Context was delivered but workers didn't reference it (decorative)
+- 3: Context was delivered but workers didn't reference it (decorative). Also: spec-only cycles where the author consulted knowledge but ad-hoc subagents received none
 - 2: Some phases lacked context; workers searched manually. Also: context blocks existed but >30% of backlinks were unresolved (ghost references from knowledge store restructuring). Also: plan had backlinks but task generation pipeline dropped them (fallback path failure). For reviews: knowledge was consulted during authoring but not delivered to subagents
 - 1: No knowledge context delivered; workers started from scratch
 
@@ -177,6 +179,10 @@ Patterns to watch for:
 7. **Backlink staleness:** If >30% of backlinks in tasks.json `## Prior Knowledge` sections are unresolved, knowledge store restructuring (e.g., `/renormalize`) broke plan references. This is a delivery infrastructure failure — entries exist but can't be found. Consider: (a) whether `/renormalize` should update backlinks in active work items, (b) whether `tasks.json` generation should warn on unresolved backlinks rather than silently including `[unresolved]` markers.
 
 8. **Pipeline delivery failures:** If the plan has `**Knowledge context:**` backlinks but the task generation path (especially fallback `lore work tasks`) produces tasks without resolved knowledge, the entire knowledge delivery pipeline is broken for that implementation. This is a silent failure — the plan looks complete, the tasks look reasonable, but workers get zero knowledge context. Track whether this recurs across retros; if so, the fix is in `generate-tasks.py` backlink resolution, not in `/implement` or `/retro`.
+
+9. **Lead-bypass of pre-resolved knowledge:** When tasks.json has `## Prior Knowledge` sections (backlinks resolved, content embedded) but the lead writes custom TaskCreate descriptions that omit this content, workers receive no knowledge store context despite the pipeline succeeding. This happens when the lead judges a concrete code reference (e.g., "read sibling-script.sh") as more actionable than abstracted knowledge entries. Detection: compare tasks.json task descriptions against the actual TaskCreate descriptions used in the `/implement` session — if the lead's descriptions lack `## Prior Knowledge` content that tasks.json provided, this is a lead-bypass. Scoring impact: Dimension 1 no higher than 2 (delivery failed at the last mile). Note whether the bypass was *justified* (code reference was genuinely more useful) vs *accidental* (lead forgot to include pre-resolved knowledge). For pattern-following work items where a sibling file IS the reference, this may be the correct choice — but it should be explicit, not silent.
+
+10. **Cold-start research penalty:** When `/spec` investigates a domain with no existing knowledge entries, `lore prefetch` returns empty and the lead may skip embedding preambles entirely — researchers then do 100% manual exploration. This is a valid cold-start scenario (no knowledge exists yet), but the lead should still run prefetch and embed whatever is returned (even cross-domain entries can provide useful orientation). When prefetch returns truly nothing, the researcher prompt should explicitly note "No prior knowledge found for this domain — report any architectural patterns or conventions you discover for capture." This turns cold-start research into a knowledge-seeding opportunity rather than a silent gap. Track cold-start occurrences: if the same domain gets cold-start penalties across retros, the store has a coverage gap worth proactively filling.
 
 Record all changes in the journal entry and the report.
 
