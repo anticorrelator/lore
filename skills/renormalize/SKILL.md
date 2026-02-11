@@ -44,118 +44,81 @@ Report the summary back via SendMessage: total entries, hot/warm/cold counts, co
 
 Wait for both agents to complete and acknowledge their reports.
 
-## Step 2b: Holistic Assessment (single agent)
+## Step 2b: Holistic Assessment (parallel agents)
 
 Also run the merge-candidates analysis:
 ```bash
 lore analyze merge-candidates
 ```
 
-Spawn one Explore agent that performs an LLM-based holistic assessment of the knowledge store. This is an advisory classification — it does NOT modify files.
+Spawn three Explore agents in parallel, each using a Tier 1 agent definition. This is advisory — agents do NOT modify knowledge files.
 
-**Agent 3 — Holistic Assessment:**
+Template injections for all three agents:
+- `{{team_name}}`: renorm-<timestamp>
+- `{{team_lead}}`: <your name from team config>
+- `{{kdir}}`: <resolved knowledge directory>
+
+**Agent 3a — Classifier:** Use `~/.claude/agents/classifier.md`
 ```
-You are assessing a knowledge store for renormalization. You will receive structured context (not raw files) and produce a classification report.
+Task tool params:
+  subagent_type: "Explore"
+  team_name: "renorm-<timestamp>"
+  name: "classifier"
+  prompt: <contents of ~/.claude/agents/classifier.md with {{template}} variables resolved>
+```
 
-## Input context
+**Agent 3b — Structure Analyst:** Use `~/.claude/agents/structure-analyst.md`
+```
+Task tool params:
+  subagent_type: "Explore"
+  team_name: "renorm-<timestamp>"
+  name: "structure-analyst"
+  prompt: <contents of ~/.claude/agents/structure-analyst.md with {{template}} variables resolved>
+```
 
-Read the following reports:
-- Entry index: $KDIR/_manifest.json (full entry list with titles, categories, metadata)
-- Staleness report: $KDIR/_meta/staleness-report.json
-- Usage report: $KDIR/_meta/usage-report.json
-- Merge candidates: $KDIR/_meta/merge-candidates.json
+**Agent 3c — Cross-Reference Scout:** Use `~/.claude/agents/crossref-scout.md`
+```
+Task tool params:
+  subagent_type: "Explore"
+  team_name: "renorm-<timestamp>"
+  name: "crossref-scout"
+  prompt: <contents of ~/.claude/agents/crossref-scout.md with {{template}} variables resolved>
+```
 
-## Tasks
+Wait for all three assessment agents to complete and acknowledge their reports.
 
-### 1. Entry-by-entry significance classification
+### Merge assessment reports
 
-Classify each entry into one of 4 tiers:
-- **architectural**: System-level, cross-cutting pattern or principle. A new developer needs this to understand how the system works.
-- **subsystem**: Important within a specific domain or component. Needed to work effectively in that area.
-- **implementation-detail**: Specific to one file, function, or script. Only needed to debug that component.
-- **historical**: Was relevant during a past phase (migration, early design), no longer applies to the current system state.
+Read the three partial reports:
+- `$KDIR/_meta/classification-report.json`
+- `$KDIR/_meta/structure-report.json`
+- `$KDIR/_meta/crossref-report.json`
 
-Provide a 1-sentence rationale for each entry.
-
-**Calibration — decision boundaries:**
-- **architectural** vs **subsystem**: Does it affect how multiple subsystems interact or how the whole system is designed? If yes → architectural. If it matters only within one component (e.g., only the search subsystem, only the scripting layer) → subsystem.
-- **subsystem** vs **implementation-detail**: Does it describe a pattern or convention for a component, or a specific behavior of a single function/file? Pattern → subsystem. Single function → implementation-detail.
-- **implementation-detail** vs **historical**: Is the described behavior still present in the codebase? If yes → implementation-detail. If the feature was removed, the migration completed, or the approach superseded → historical.
-- Key question: "Would a new developer need this entry to understand the system's architecture, or only to debug a specific component?"
-
-**Calibration — reference examples** (from this store):
-- **architectural**: "Push Over Pull" (principles/push-over-pull.md) — system-wide design principle affecting knowledge delivery, agent prompts, and skill design
-- **architectural**: "Four Integrated Components" (architecture/four-integrated-components.md) — defines the system's top-level structure
-- **subsystem**: "Shell Script Conventions" (conventions/scripting/shell-script-conventions.md) — important for anyone writing scripts, but scoped to the scripting subsystem
-- **subsystem**: "Budget-Based Context Loading" (architecture/knowledge-delivery/budget-based-context-loading.md) — critical for the knowledge delivery subsystem, not cross-cutting
-- **implementation-detail**: "generate-tasks.py Calls pk_search.py via Subprocess" (architecture/generate-tasks-py-calls-pk-search-py-via-subprocess-not-pyth.md) — documents one function's implementation choice in one script
-- **implementation-detail**: "Bash Functions That Need to Return Multiple Values" (conventions/bash-functions-that-need-to-return-multiple-values.md) — specific coding pattern in specific files
-- **historical**: Entries referencing completed format migrations, removed CLI commands, or early-stage design patterns that were replaced
-
-Use these examples to anchor your judgments. When uncertain between two adjacent tiers, lean toward the lower tier (subsystem over architectural, implementation-detail over subsystem) — it is cheaper to under-classify and revisit than to over-classify and pollute high-priority loading.
-
-**Read-on-demand protocol:** Make classification decisions from metadata first — title, category, learned date, confidence, backlink count, staleness score, usage tier. These signals are usually sufficient:
-- Entries in `principles/` are likely architectural (verify via title)
-- Entries in `gotchas/` with narrow titles (referencing a single script or function) are likely implementation-detail
-- Entries with many backlinks are more likely subsystem or architectural
-- Entries with low confidence or old learned dates paired with cold usage are candidates for historical
-Only read the full entry file when the title is ambiguous or could reasonably belong to two tiers. Keep token cost proportional to ambiguity, not store size. Target: read <20% of entries in full.
-
-### 2. Cluster identification
-
-Identify groups of 2+ entries that describe the same concept at different granularities or from different angles. For each cluster, propose a consolidation structure (which entry becomes the parent, what subsections would it have). Use the merge-candidates report as a starting signal, but also identify semantic clusters below the 0.5 threshold that share the same insight in different words.
-
-### 3. Structural imbalance report
-
-Flag categories or subcategories where depth or entry count suggests restructuring (e.g., flat category with 50+ entries, subcategory with only 1 entry, inconsistent nesting depth).
-
-### 4. Demotion candidates
-
-Identify entries whose significance has likely decreased as the system matured — entries that were architectural during early development but are now implementation details of settled subsystems.
-
-## Output
-
-Write the report to $KDIR/_meta/assessment-report.json. This report is consumed directly by the planning step (Step 3) — every field should be pre-summarized and actionable without further LLM processing.
+Assemble them into the final `$KDIR/_meta/assessment-report.json` — this is a mechanical merge, not re-analysis:
 
 ```json
 {
   "generated": "<ISO timestamp>",
-  "classifications": [
-    {"path": "category/entry.md", "tier": "architectural|subsystem|implementation-detail|historical", "rationale": "One sentence explaining the classification."}
-  ],
-  "clusters": [
-    {
-      "concept": "Short name for the shared concept",
-      "entries": ["path1.md", "path2.md"],
-      "proposed_structure": "Which entry becomes the parent and what subsections it would have",
-      "source": "merge-candidates|semantic-analysis|both"
-    }
-  ],
-  "imbalances": [
-    {"category": "category/subcategory", "issue": "What's wrong (e.g., 54 flat entries, inconsistent nesting)", "recommendation": "Specific action (e.g., create subcategories X, Y, Z)"}
-  ],
-  "demotions": [
-    {"path": "category/entry.md", "from_tier": "architectural", "to_tier": "implementation-detail", "rationale": "Why significance decreased."}
-  ],
+  "classifications": [from classification-report],
+  "clusters": [from structure-report],
+  "imbalances": [from structure-report],
+  "demotions": [from classification-report],
+  "suggested_backlinks": [from crossref-report],
   "summary": {
-    "total_classified": 0,
-    "architectural": 0,
-    "subsystem": 0,
-    "implementation_detail": 0,
-    "historical": 0,
-    "clusters_found": 0,
-    "demotions_recommended": 0,
-    "entries_read_in_full": 0
+    "total_classified": [from classification-report],
+    "architectural": [from classification-report],
+    "subsystem": [from classification-report],
+    "implementation_detail": [from classification-report],
+    "historical": [from classification-report],
+    "clusters_found": [from structure-report],
+    "demotions_recommended": [from classification-report],
+    "suggested_backlinks_count": [from crossref-report],
+    "entries_read_in_full": [from classification-report]
   }
 }
 ```
 
-The `entries_read_in_full` count in the summary tracks how many entries you read beyond metadata — this helps calibrate the read-on-demand protocol over time.
-
-Report the summary back via SendMessage when complete.
-```
-
-Wait for the assessment agent to complete and acknowledge its report.
+Step 3 consumes `assessment-report.json` — the schema is unchanged.
 
 ## Step 3: Planning (lead synthesizes)
 
@@ -170,11 +133,12 @@ Also read the merge-candidates data:
 Synthesize a renormalization plan with these actions:
 
 1. **Prune list:** Entries that are BOTH stale (from staleness report) AND cold (from usage report). Entries classified as *historical* by the assessment with low usage are strong prune candidates. These are safe to remove — they are outdated and unused.
-2. **Fix list:** Entries that are stale (from staleness report) AND hot or warm (from usage report). These are actively used but drifted — they need content rewrite against current code, not removal.
+2. **Fix list:** Entries that are stale (from staleness report) AND hot or warm (from usage report). These are actively used but drifted — they need content rewrite against current code, not removal. **Include stale entries that appear in consolidation clusters** — they must be fixed before consolidation so the parent entry inherits fresh content, not stale prose recombined.
 3. **Merge list:** Entries flagged as highly similar by merge-candidates report (similarity >= 0.5) or identified as near-duplicates by the assessment. Group them into merge sets.
 4. **Demote list:** Entries the assessment classified at a higher significance tier than their content warrants (e.g., top-level entry that is really an implementation detail). These get rewritten to reduce scope or moved to a subcategory/domain file. The information is correct, just overpromoted.
 5. **Consolidate list:** Entry clusters identified by the assessment — multiple entries describing the same concept at different granularities. These get merged into a parent entry with subsections, preserving all unique insights. Different from merge (which is dedup of near-identical content).
 6. **Restructure list:** Categories with structural imbalances flagged by the assessment (>20 flat entries, inconsistent nesting depth) that should be split into subcategories or promoted to domain files.
+7. **Backlink list:** Cross-reference suggestions from the assessment's `suggested_backlinks` array. These are LLM-identified conceptual relationships not captured by existing backlinks or concordance edges. Present each with source, target, relationship type, and rationale for user review before writing.
 
 Write the plan to `$KDIR/_meta/renormalize-plan.json` with structure:
 ```json
@@ -198,7 +162,10 @@ Write the plan to `$KDIR/_meta/renormalize-plan.json` with structure:
   "restructure": [
     {"category": "conventions", "action": "split", "proposed": ["conventions/naming", "conventions/testing"], "reason": "32 entries, natural grouping exists"}
   ],
-  "summary": {"prune_count": 5, "fix_count": 2, "merge_count": 3, "demote_count": 4, "consolidate_count": 2, "restructure_count": 1}
+  "backlinks": [
+    {"source": "category/source-entry.md", "target": "category/target-entry.md", "relationship_type": "cross-domain|hierarchical|causal|complementary", "rationale": "One sentence explaining the conceptual relationship."}
+  ],
+  "summary": {"prune_count": 5, "fix_count": 2, "merge_count": 3, "demote_count": 4, "consolidate_count": 2, "restructure_count": 1, "backlink_count": 3}
 }
 ```
 
@@ -211,6 +178,7 @@ Present the plan to the user in a readable format:
   Demote: N entries (wrong abstraction level — rewrite or move)
   Consolidate: N concept clusters (multiple entries → single parent)
   Restructure: N categories
+  Backlinks: N cross-references to write
 
 Fix candidates:
   - category/entry.md — drift: 0.72 (8 commits to related files, 1/3 backlinks broken)
@@ -231,6 +199,9 @@ Consolidation clusters:
 Restructure:
   [list each with category and proposed split]
 
+Suggested backlinks:
+  [list each with source → target, relationship type, and rationale]
+
 Approve? (yes / yes with changes / no)
 ```
 
@@ -238,11 +209,11 @@ Approve? (yes / yes with changes / no)
 
 ## Step 4: Execution (sequenced + parallel agents)
 
-After approval, execute in two waves. Agent 3 runs first so merge and restructure operate on fresh content.
+After approval, execute in two waves. **Wave 1 MUST complete before Wave 2 starts** — this ensures consolidation and merge operate on freshly verified content, not stale prose recombined.
 
-### Wave 1: Fix stale entries
+### Wave 1: Fix stale entries (including those in consolidation clusters)
 
-**Agent 3 — Entry Fixer:**
+**Agent 4 — Entry Fixer:**
 ```
 Read $KDIR/_meta/renormalize-plan.json.
 Execute the "fix" actions: for each fix-candidate entry, read the entry file and each of its related_files from the repo. Compare the entry's claims to current code. Rewrite the entry preserving format:
@@ -251,16 +222,19 @@ Execute the "fix" actions: for each fix-candidate entry, read the entry file and
 - Preserve or update See also: backlinks
 - Update the HTML metadata comment: set `learned` date to today, set `source: renormalize-fix`
 If a related_file is missing from the repo, skip that entry and report it.
+
+IMPORTANT: The fix list includes stale entries that are also members of consolidation clusters. These MUST be fixed now so that Wave 2 consolidation combines fresh content. Do not skip an entry because it will later be consolidated — fix it first.
+
 Report: entries fixed, entries skipped (with reasons), any issues encountered.
 ```
 
-Wait for Agent 3 to complete before proceeding to Wave 2.
+Wait for Agent 4 to complete before proceeding to Wave 2.
 
-### Wave 2: Prune, merge, demote, consolidate, and restructure (parallel)
+### Wave 2: Prune, merge, demote, consolidate, restructure, and backlink (parallel)
 
-Spawn 3 general-purpose agents:
+Spawn 4 general-purpose agents:
 
-**Agent 4 — Merger/Pruner:**
+**Agent 5 — Merger/Pruner:**
 ```
 Read $KDIR/_meta/renormalize-plan.json.
 Execute the "prune" actions: delete each listed file.
@@ -268,7 +242,7 @@ Execute the "merge" actions: for each merge set, combine content from source ent
 Report: files pruned, files merged, any issues encountered.
 ```
 
-**Agent 5 — Demoter/Consolidator:**
+**Agent 6 — Demoter/Consolidator:**
 ```
 Read $KDIR/_meta/renormalize-plan.json.
 Execute the "demote" actions: for each demote candidate, read the entry and rewrite it to reduce scope/prominence appropriate to the recommended level. If recommended_level is "subcategory", move the file to the appropriate subcategory directory (create it if needed). If recommended_level is "domain", move to domains/. Update the HTML metadata comment: set source to "renormalize-demote". Update any inbound backlinks that reference the old path.
@@ -276,11 +250,28 @@ Execute the "consolidate" actions: for each consolidation cluster, create a new 
 Report: entries demoted (with old/new paths), clusters consolidated (with parent paths), any issues encountered.
 ```
 
-**Agent 6 — Budget Rebalancer:**
+**Agent 7 — Budget Rebalancer:**
 ```
 Read $KDIR/_meta/renormalize-plan.json.
 Execute the "restructure" actions: create new subdirectories, move entries into appropriate groupings, update any backlinks that reference moved entries.
 Report: categories restructured, entries moved, backlinks updated.
+```
+
+**Agent 8 — Backlink Writer:**
+```
+Read $KDIR/_meta/assessment-report.json.
+Execute the "suggested_backlinks" actions: for each suggestion, read the source entry file and check whether a backlink to the target already exists. If not, append a `See also:` line with the backlink and a provenance comment:
+
+See also: [[knowledge:target-entry]]
+<!-- source: renormalize-backlinks -->
+
+Rules:
+- If the source file already has a "See also:" section, append the new link to it.
+- If no "See also:" section exists, add one at the end of the file (after a blank line).
+- Skip the link if [[knowledge:target-entry]] already appears anywhere in the source file.
+- The `<!-- source: renormalize-backlinks -->` comment MUST appear on the line immediately after the backlink line. This provenance marker is used by the structural importance computation to weight LLM-suggested links at 0.8 (vs 1.0 for explicit backlinks).
+
+Report: links written (with source → target pairs), links skipped (already present), any issues encountered.
 ```
 
 Wait for all agents to complete and review their reports for any errors.
@@ -291,6 +282,11 @@ Run post-execution maintenance:
 
 ```bash
 lore heal --fix
+```
+
+Generate concordance-based backlinks — writes `See also:` links for high-similarity pairs not already cross-referenced:
+```bash
+python3 ~/.lore/scripts/pk_cli.py generate-backlinks "$KDIR"
 ```
 
 Rebuild FTS5 search index:
@@ -307,6 +303,9 @@ Clean up intermediate reports from `$KDIR/_meta/` — delete:
 - `staleness-report.json`
 - `usage-report.json`
 - `merge-candidates.json`
+- `classification-report.json`
+- `structure-report.json`
+- `crossref-report.json`
 - `assessment-report.json`
 - `renormalize-plan.json`
 
@@ -325,5 +324,7 @@ Report the final summary:
   Demoted: N entries (rewritten or moved to appropriate level)
   Consolidated: N concept clusters (M entries → N parent entries)
   Restructured: N categories
+  Backlinks (LLM-suggested): N cross-references written (M skipped, already present)
+  Backlinks (concordance): N links written (M skipped, already present)
   Index rebuilt, manifest updated, heal passed.
 ```

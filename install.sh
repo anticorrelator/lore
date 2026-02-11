@@ -41,6 +41,18 @@ if $UNINSTALL; then
     done
   fi
 
+  # Remove agent symlinks
+  if [ -d "$CLAUDE_DIR/agents" ]; then
+    for agent_file in "$LORE_REPO_DIR"/agents/*.md; do
+      agent_name="$(basename "$agent_file")"
+      target="$CLAUDE_DIR/agents/$agent_name"
+      if [ -L "$target" ]; then
+        info "Removing agent symlink: $target"
+        dry rm -f "$target"
+      fi
+    done
+  fi
+
   # Remove CLI symlink
   if [ -L "$HOME/.local/bin/lore" ]; then
     info "Removing CLI symlink: $HOME/.local/bin/lore"
@@ -144,6 +156,19 @@ for skill_dir in "$LORE_REPO_DIR"/skills/*/; do
   fi
   info "Linking skill: $skill_name"
   dry ln -s "$skill_dir" "$target"
+done
+
+# --- 4b. Symlink agents ---
+dry mkdir -p "$CLAUDE_DIR/agents"
+for agent_file in "$LORE_REPO_DIR"/agents/*.md; do
+  [ -f "$agent_file" ] || continue
+  agent_name="$(basename "$agent_file")"
+  target="$CLAUDE_DIR/agents/$agent_name"
+  if [ -L "$target" ] || [ -e "$target" ]; then
+    dry rm -f "$target"
+  fi
+  info "Linking agent: $agent_name"
+  dry ln -s "$agent_file" "$target"
 done
 
 # --- 5. Inject hooks into settings.json ---
@@ -262,6 +287,7 @@ echo "  Data dir:    $LORE_DATA_DIR"
 echo "  Scripts:     $LORE_DATA_DIR/scripts -> $LORE_REPO_DIR/scripts"
 echo "  CLI:         ~/.local/bin/lore -> $LORE_REPO_DIR/cli/lore"
 echo "  Skills:      $CLAUDE_DIR/skills/ ($(ls -d "$LORE_REPO_DIR"/skills/*/ 2>/dev/null | wc -l | tr -d ' ') linked)"
+echo "  Agents:      $CLAUDE_DIR/agents/ ($(ls "$LORE_REPO_DIR"/agents/*.md 2>/dev/null | wc -l | tr -d ' ') linked)"
 echo "  Hooks:       $CLAUDE_DIR/settings.json (updated)"
 echo "  CLAUDE.md:   $CLAUDE_DIR/CLAUDE.md (assembled)"
 echo ""

@@ -16,6 +16,7 @@ WORK_DIR="$KNOWLEDGE_DIR/_work"
 MAX_BUDGET="2.0"
 MODEL="sonnet"
 DRY_RUN=false
+USE_JUDGE=true
 INCLUDE_SLUGS=()
 EXCLUDE_SLUGS=()
 
@@ -30,6 +31,7 @@ Options:
   --max-budget N       Per-item cost cap in USD (default: 2.0)
   --model <model>      Model to use for spec generation (default: sonnet)
   --dry-run            Show candidates without executing
+  --without-judge      Skip LLM suitability judge (on by default)
   --include <slug>     Only process these slugs (repeatable)
   --exclude <slug>     Skip these slugs (repeatable)
   -h, --help           Show this help message
@@ -59,6 +61,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run)
       DRY_RUN=true
+      shift
+      ;;
+    --without-judge)
+      USE_JUDGE=false
       shift
       ;;
     --include)
@@ -307,6 +313,209 @@ score_readiness() {
   echo "[batch-spec] Readiness scores: $high high, $medium medium, $low low"
 }
 
+# --- judge_candidates ---
+# Run LLM judge on candidates to evaluate autonomous execution suitability.
+# Reads from CANDIDATE_SLUGS[]/CANDIDATE_TITLES[]/CANDIDATE_READINESS[].
+# Populates parallel arrays:
+#   CANDIDATE_VERDICT[]      — "suitable", "marginal", "unsuitable", or "—" (skipped)
+#   CANDIDATE_JUDGE_REASON[] — one-sentence reasoning from judge
+# Also populates:
+#   SKIPPED_JUDGE[]          — slugs filtered as unsuitable by judge
+#   SKIPPED_JUDGE_REASON[]   — corresponding reasons
+judge_candidates() {
+  CANDIDATE_VERDICT=()
+  CANDIDATE_JUDGE_REASON=()
+  SKIPPED_JUDGE=()
+  SKIPPED_JUDGE_REASON=()
+
+  if [[ "$USE_JUDGE" != true ]]; then
+    for i in "${!CANDIDATE_SLUGS[@]}"; do
+      CANDIDATE_VERDICT+=("—")
+      CANDIDATE_JUDGE_REASON+=("")
+    done
+    return 0
+  fi
+
+  # Check claude CLI
+  if ! command -v claude &>/dev/null; then
+    echo "[batch-spec] Warning: claude CLI not found, skipping judge"
+    for i in "${!CANDIDATE_SLUGS[@]}"; do
+      CANDIDATE_VERDICT+=("—")
+      CANDIDATE_JUDGE_REASON+=("")
+    done
+    return 0
+  fi
+
+  echo "[batch-spec] Running LLM judge on ${#CANDIDATE_SLUGS[@]} candidates..."
+
+  # Build candidate JSON via python3
+  local candidates_json
+  candidates_json=$(python3 -c "
+import json, sys, os
+
+work_dir = sys.argv[1]
+slugs = sys.argv[2].split(',') if sys.argv[2] else []
+readiness = sys.argv[3].split(',') if sys.argv[3] else []
+
+candidates = []
+for i, slug in enumerate(slugs):
+    notes_path = os.path.join(work_dir, slug, 'notes.md')
+    notes = ''
+    if os.path.isfile(notes_path):
+        with open(notes_path) as f:
+            notes = f.read()
+    candidates.append({
+        'slug': slug,
+        'heuristic_readiness': readiness[i] if i < len(readiness) else 'unknown',
+        'notes_content': notes
+    })
+
+print(json.dumps(candidates, indent=2))
+" "$WORK_DIR" "$(IFS=,; echo "${CANDIDATE_SLUGS[*]}")" "$(IFS=,; echo "${CANDIDATE_READINESS[*]}")")
+
+  # Read system prompt
+  local system_prompt
+  system_prompt=$(cat "$SCRIPT_DIR/batch-judge-prompt.md")
+
+  # Build user prompt
+  local prompt_file
+  prompt_file=$(mktemp /tmp/batch-spec-judge-XXXXXX.md)
+  cat > "$prompt_file" <<PROMPT
+# Batch-Spec Candidate Evaluation
+
+Evaluate each work item for suitability as an autonomous \`/spec short\` target.
+The agent reads notes, explores the codebase, and produces a plan.md — no human input.
+
+## Candidates
+
+$candidates_json
+
+Return ONLY a JSON array. Each element: {"slug": "...", "verdict": "suitable|marginal|unsuitable", "reasoning": "...", "key_risk": "..."}
+PROMPT
+
+  # Call claude
+  local output_file
+  output_file=$(mktemp /tmp/batch-spec-judge-result-XXXXXX.txt)
+
+  local judge_ok=true
+  claude -p "$(cat "$prompt_file")" \
+    --model "$MODEL" \
+    --append-system-prompt "$system_prompt" \
+    --output-format text \
+    --max-turns 1 \
+    > "$output_file" 2>/dev/null || judge_ok=false
+
+  rm -f "$prompt_file"
+
+  if [[ "$judge_ok" == false ]]; then
+    echo "[batch-spec] Warning: judge call failed, proceeding without filtering"
+    rm -f "$output_file"
+    for i in "${!CANDIDATE_SLUGS[@]}"; do
+      CANDIDATE_VERDICT+=("—")
+      CANDIDATE_JUDGE_REASON+=("")
+    done
+    return 0
+  fi
+
+  # Parse judge response into parallel arrays
+  local parse_ok=true
+  local parsed
+  parsed=$(python3 -c "
+import json, sys, re
+
+text = sys.stdin.read().strip()
+
+# Strip markdown fences if present
+fence = re.search(r'\`\`\`(?:json)?\s*\n(.*?)\n\`\`\`', text, re.DOTALL)
+if fence:
+    text = fence.group(1)
+
+try:
+    data = json.loads(text)
+    for item in data:
+        slug = item.get('slug', '')
+        verdict = item.get('verdict', 'unknown')
+        reasoning = item.get('reasoning', '').replace('\t', ' ')
+        print(f'{slug}\t{verdict}\t{reasoning}')
+except Exception as e:
+    print(f'PARSE_ERROR\t{e}', file=sys.stderr)
+    sys.exit(1)
+" < "$output_file") || parse_ok=false
+
+  rm -f "$output_file"
+
+  if [[ "$parse_ok" == false ]]; then
+    echo "[batch-spec] Warning: could not parse judge response, proceeding without filtering"
+    for i in "${!CANDIDATE_SLUGS[@]}"; do
+      CANDIDATE_VERDICT+=("—")
+      CANDIDATE_JUDGE_REASON+=("")
+    done
+    return 0
+  fi
+
+  # Populate arrays by matching slugs from parsed output
+  for i in "${!CANDIDATE_SLUGS[@]}"; do
+    local slug="${CANDIDATE_SLUGS[$i]}"
+    local verdict="unknown"
+    local reason=""
+    while IFS=$'\t' read -r p_slug p_verdict p_reason; do
+      if [[ "$p_slug" == "$slug" ]]; then
+        verdict="$p_verdict"
+        reason="$p_reason"
+        break
+      fi
+    done <<< "$parsed"
+    CANDIDATE_VERDICT+=("$verdict")
+    CANDIDATE_JUDGE_REASON+=("$reason")
+  done
+
+  # Count verdicts
+  local suitable=0 marginal=0 unsuitable=0
+  for v in "${CANDIDATE_VERDICT[@]}"; do
+    case "$v" in
+      suitable)   suitable=$((suitable + 1)) ;;
+      marginal)   marginal=$((marginal + 1)) ;;
+      unsuitable) unsuitable=$((unsuitable + 1)) ;;
+    esac
+  done
+  echo "[batch-spec] Judge verdicts: $suitable suitable, $marginal marginal, $unsuitable unsuitable"
+
+  # Filter unsuitable candidates
+  if [[ $unsuitable -gt 0 ]]; then
+    local new_slugs=() new_titles=() new_readiness=() new_words=() new_headings=() new_bullets=() new_paths=() new_updated=() new_verdicts=() new_reasons=()
+    for i in "${!CANDIDATE_SLUGS[@]}"; do
+      if [[ "${CANDIDATE_VERDICT[$i]}" == "unsuitable" ]]; then
+        SKIPPED_JUDGE+=("${CANDIDATE_SLUGS[$i]}")
+        SKIPPED_JUDGE_REASON+=("${CANDIDATE_JUDGE_REASON[$i]}")
+      else
+        new_slugs+=("${CANDIDATE_SLUGS[$i]}")
+        new_titles+=("${CANDIDATE_TITLES[$i]}")
+        new_readiness+=("${CANDIDATE_READINESS[$i]}")
+        new_words+=("${CANDIDATE_WORD_COUNT[$i]}")
+        new_headings+=("${CANDIDATE_HEADINGS[$i]}")
+        new_bullets+=("${CANDIDATE_BULLETS[$i]}")
+        new_paths+=("${CANDIDATE_HAS_PATHS[$i]}")
+        new_updated+=("${CANDIDATE_UPDATED[$i]}")
+        new_verdicts+=("${CANDIDATE_VERDICT[$i]}")
+        new_reasons+=("${CANDIDATE_JUDGE_REASON[$i]}")
+      fi
+    done
+
+    CANDIDATE_SLUGS=("${new_slugs[@]}")
+    CANDIDATE_TITLES=("${new_titles[@]}")
+    CANDIDATE_READINESS=("${new_readiness[@]}")
+    CANDIDATE_WORD_COUNT=("${new_words[@]}")
+    CANDIDATE_HEADINGS=("${new_headings[@]}")
+    CANDIDATE_BULLETS=("${new_bullets[@]}")
+    CANDIDATE_HAS_PATHS=("${new_paths[@]}")
+    CANDIDATE_UPDATED=("${new_updated[@]}")
+    CANDIDATE_VERDICT=("${new_verdicts[@]}")
+    CANDIDATE_JUDGE_REASON=("${new_reasons[@]}")
+
+    echo "[batch-spec] Filtered $unsuitable unsuitable candidate(s)"
+  fi
+}
+
 # --- present_batch ---
 # Display a formatted table of candidates with readiness scores and prompt for approval.
 # Reads from parallel arrays populated by discover_candidates() and score_readiness().
@@ -352,8 +561,14 @@ present_batch() {
   echo ""
   echo "=== Batch Spec Candidates ==="
   echo ""
-  printf "  %-35s %-40s %-6s %5s %4s  %-10s\n" "SLUG" "TITLE" "READY" "WORDS" "SECT" "UPDATED"
-  printf "  %-35s %-40s %-6s %5s %4s  %-10s\n" "----" "-----" "-----" "-----" "----" "-------"
+
+  if [[ "$USE_JUDGE" == true ]]; then
+    printf "  %-33s %-33s %-6s %-10s %5s %4s  %-10s\n" "SLUG" "TITLE" "READY" "JUDGE" "WORDS" "SECT" "UPDATED"
+    printf "  %-33s %-33s %-6s %-10s %5s %4s  %-10s\n" "----" "-----" "-----" "-----" "-----" "----" "-------"
+  else
+    printf "  %-35s %-40s %-6s %5s %4s  %-10s\n" "SLUG" "TITLE" "READY" "WORDS" "SECT" "UPDATED"
+    printf "  %-35s %-40s %-6s %5s %4s  %-10s\n" "----" "-----" "-----" "-----" "----" "-------"
+  fi
 
   local i
   for i in "${!CANDIDATE_SLUGS[@]}"; do
@@ -362,22 +577,46 @@ present_batch() {
     local readiness="${CANDIDATE_READINESS[$i]}"
     local words="${CANDIDATE_WORD_COUNT[$i]}"
     local sections="${CANDIDATE_HEADINGS[$i]}"
+    local verdict="${CANDIDATE_VERDICT[$i]:-—}"
     local updated
     updated=$(_relative_date "${CANDIDATE_UPDATED[$i]}")
 
-    # Truncate title for display
-    if [[ ${#title} -gt 38 ]]; then
-      title="${title:0:35}..."
+    if [[ "$USE_JUDGE" == true ]]; then
+      # Truncate for narrower columns with judge
+      if [[ ${#title} -gt 31 ]]; then
+        title="${title:0:28}..."
+      fi
+      if [[ ${#slug} -gt 31 ]]; then
+        slug="${slug:0:28}..."
+      fi
+      printf "  %-33s %-33s %-6s %-10s %5s %4s  %-10s\n" "$slug" "$title" "$readiness" "$verdict" "$words" "$sections" "$updated"
+    else
+      if [[ ${#title} -gt 38 ]]; then
+        title="${title:0:35}..."
+      fi
+      if [[ ${#slug} -gt 33 ]]; then
+        slug="${slug:0:30}..."
+      fi
+      printf "  %-35s %-40s %-6s %5s %4s  %-10s\n" "$slug" "$title" "$readiness" "$words" "$sections" "$updated"
     fi
-    # Truncate slug for display
-    if [[ ${#slug} -gt 33 ]]; then
-      slug="${slug:0:30}..."
-    fi
-
-    printf "  %-35s %-40s %-6s %5s %4s  %-10s\n" "$slug" "$title" "$readiness" "$words" "$sections" "$updated"
   done
 
   echo ""
+
+  # Show judge-filtered items
+  if [[ ${#SKIPPED_JUDGE[@]} -gt 0 ]]; then
+    echo "  Filtered by judge (unsuitable):"
+    for i in "${!SKIPPED_JUDGE[@]}"; do
+      local reason="${SKIPPED_JUDGE_REASON[$i]:-}"
+      if [[ -n "$reason" ]]; then
+        printf "    %-33s %s\n" "${SKIPPED_JUDGE[$i]}" "$reason"
+      else
+        printf "    %s\n" "${SKIPPED_JUDGE[$i]}"
+      fi
+    done
+    echo ""
+  fi
+
   echo "  Total: ${#CANDIDATE_SLUGS[@]} candidate(s)"
   echo ""
 
@@ -826,6 +1065,9 @@ main() {
   fi
 
   score_readiness
+
+  # Phase 1b: Judge suitability
+  judge_candidates
 
   # Phase 2: Present for approval
   if ! present_batch; then

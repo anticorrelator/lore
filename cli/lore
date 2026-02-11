@@ -38,6 +38,7 @@ Commands:
   assemble     Assemble CLAUDE.md from fragments
   batch-spec   Batch-run /spec short on eligible work items
   batch-implement  Batch-run /implement on ready work items
+  backlinks    Backlink management (see: lore backlinks --help)
 
   work         Work item management (see: lore work --help)
   journal      Effectiveness journal (see: lore journal --help)
@@ -147,6 +148,20 @@ Usage: lore bootstrap <subcommand> [args...]
 
 Subcommands:
   scope [dir...]   Analyze codebase structure and detect domains
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+backlinks_usage() {
+  cat >&2 <<EOF
+lore backlinks — backlink management
+
+Usage: lore backlinks <subcommand> [args...]
+
+Subcommands:
+  generate    Generate See-also backlinks from concordance similarity pairs
 
 Options:
   --help, -h    Show this help
@@ -279,6 +294,35 @@ cmd_bootstrap() {
       echo "Error: unknown bootstrap subcommand '$subcmd'" >&2
       echo "" >&2
       bootstrap_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Backlinks subgroup ---
+cmd_backlinks() {
+  if [[ $# -eq 0 ]]; then
+    backlinks_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      backlinks_usage
+      return 0
+      ;;
+    generate)
+      local kdir
+      kdir="$(resolve_kdir)"
+      python3 "$SCRIPTS_DIR/pk_cli.py" generate-backlinks "$kdir" "$@"
+      ;;
+    *)
+      echo "Error: unknown backlinks subcommand '$subcmd'" >&2
+      echo "" >&2
+      backlinks_usage
       return 1
       ;;
   esac
@@ -591,6 +635,10 @@ case "$1" in
   bootstrap)
     shift
     cmd_bootstrap "$@"
+    ;;
+  backlinks)
+    shift
+    cmd_backlinks "$@"
     ;;
   batch-spec)
     shift

@@ -486,7 +486,7 @@ class Concordance:
 
     def run_full_analysis(
         self,
-        see_also_limit: int = 3,
+        see_also_limit: int = 10,
         related_files_threshold: float = 0.15,
         related_files_limit: int = 10,
     ) -> dict:

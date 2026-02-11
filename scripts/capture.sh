@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # capture.sh — Capture an insight to the knowledge store
-# Usage: lore capture --insight "..." [--context "..."] [--category "..."] [--confidence "..."] [--related-files "..."] [--source "..."]
+# Usage: lore capture --insight "..." [--context "..."] [--category "..."] [--confidence "..."] [--related-files "..."] [--source "..."] [--example "..."]
 #
 # Writes an individual entry file to the category directory (e.g., conventions/<slug>.md).
 
@@ -16,6 +16,7 @@ CATEGORY=""
 CONFIDENCE="high"
 RELATED_FILES=""
 SOURCE="manual"
+EXAMPLE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,9 +44,13 @@ while [[ $# -gt 0 ]]; do
       SOURCE="$2"
       shift 2
       ;;
+    --example)
+      EXAMPLE="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"]" >&2
+      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"]" >&2
       exit 1
       ;;
   esac
@@ -107,6 +112,9 @@ fi
 {
   echo "# $TITLE"
   echo "$INSIGHT"
+  if [[ -n "$EXAMPLE" ]]; then
+    echo "**Example:** $EXAMPLE"
+  fi
   echo "$META"
 } > "$TARGET_FILE"
 

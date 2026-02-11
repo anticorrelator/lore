@@ -11,6 +11,7 @@ Other extracted modules:
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -55,7 +56,7 @@ from pk_resolve import Resolver, BACKLINK_RE as _BACKLINK_RE, resolve_read_path 
 class Indexer:
     """Builds and maintains the FTS5 index."""
 
-    SCHEMA_VERSION = 7  # v7: concordance_results for precomputed see-also/related-files
+    SCHEMA_VERSION = 8  # v8: structural_importance column for backlink/concordance in-degree ranking
 
     def __init__(self, knowledge_dir: str, repo_root: str | None = None):
         self.knowledge_dir = os.path.abspath(knowledge_dir)
@@ -78,6 +79,7 @@ class Indexer:
                 category UNINDEXED,
                 confidence UNINDEXED,
                 learned_date UNINDEXED,
+                structural_importance UNINDEXED,
                 tokenize='porter unicode61'
             );
 
@@ -415,8 +417,8 @@ class Indexer:
 
         for entry in entries:
             conn.execute(
-                "INSERT INTO entries (file_path, heading, content, source_type, category, confidence, learned_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (entry["file_path"], entry["heading"], entry["content"], source_type, category, metadata["confidence"], metadata["learned"]),
+                "INSERT INTO entries (file_path, heading, content, source_type, category, confidence, learned_date, structural_importance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (entry["file_path"], entry["heading"], entry["content"], source_type, category, metadata["confidence"], metadata["learned"], 0.0),
             )
 
         # Update file_meta
@@ -485,6 +487,9 @@ class Indexer:
         # Build TF-IDF concordance vectors
         concordance_stats = self.build_concordance()
 
+        # Compute and store structural importance scores
+        importance_stats = self._update_structural_importance()
+
         elapsed = time.time() - start_time
         return {
             "files_indexed": files_indexed,
@@ -492,6 +497,33 @@ class Indexer:
             "elapsed_seconds": round(elapsed, 3),
             "db_path": self.db_path,
             "concordance": concordance_stats,
+            "importance": importance_stats,
+        }
+
+    def _update_structural_importance(self) -> dict:
+        """Compute structural importance and UPDATE entries table.
+
+        Must be called after build_concordance() so concordance_results are available.
+        Returns stats dict with counts of entries updated.
+        """
+        conn = self._connect()
+        importance_map = self._compute_structural_importance(conn)
+
+        updated = 0
+        for (file_path, heading), info in importance_map.items():
+            importance = info.get("importance", 0.0)
+            if importance > 0:
+                conn.execute(
+                    "UPDATE entries SET structural_importance = ? WHERE file_path = ? AND heading = ?",
+                    (importance, file_path, heading),
+                )
+                updated += 1
+
+        conn.commit()
+        conn.close()
+        return {
+            "entries_with_importance": updated,
+            "total_computed": len(importance_map),
         }
 
     def _collect_all_files(self) -> list[tuple[str, str]]:
@@ -615,6 +647,21 @@ class Indexer:
         if files_reindexed > 0 or files_removed > 0:
             concordance_stats = self.build_concordance()
 
+        # Recompute structural importance (link structure is global —
+        # any file change can affect importance scores)
+        importance_updated = 0
+        if files_reindexed > 0 or files_removed > 0:
+            imp_conn = self._connect()
+            importance_map = self._compute_structural_importance(imp_conn)
+            for (fp, heading), scores in importance_map.items():
+                imp_conn.execute(
+                    "UPDATE entries SET structural_importance = ? WHERE file_path = ? AND heading = ?",
+                    (scores["importance"], fp, heading),
+                )
+                importance_updated += 1
+            imp_conn.commit()
+            imp_conn.close()
+
         elapsed = time.time() - start_time
         return {
             "files_reindexed": files_reindexed,
@@ -622,6 +669,7 @@ class Indexer:
             "entries_added": total_entries_added,
             "elapsed_seconds": round(elapsed, 3),
             "concordance": concordance_stats,
+            "importance_updated": importance_updated,
         }
 
     def build_concordance(self) -> dict:
@@ -633,6 +681,131 @@ class Indexer:
         from pk_concordance import Concordance
         concordance = Concordance(self.db_path)
         return concordance.build_vectors()
+
+    def _compute_structural_importance(self, conn: sqlite3.Connection) -> dict[tuple[str, str], dict]:
+        """Compute structural importance for all entries from three sources.
+
+        Sources:
+          (a) Explicit backlinks: [[knowledge:...]] links found in indexed files.
+              Each link contributes 1.0, or 0.8 if adjacent to a
+              <!-- source: renormalize-backlinks --> HTML comment (LLM-suggested),
+              or the concordance similarity score if adjacent to a
+              <!-- source: concordance-backlinks --> comment (mechanical).
+          (b) Concordance see_also edges: similarity_score from concordance_results
+              where result_type='see_also' and similarity_score >= 0.15.
+
+        Returns:
+            Dict mapping (file_path, heading) -> {
+                importance: float (total weighted in-degree),
+                explicit: int (count of explicit backlinks),
+                llm: int (count of LLM-suggested backlinks),
+                concordance_backlinks: int (count of concordance-generated backlinks),
+                concordance: float (sum of concordance similarity scores),
+            }
+        """
+        from pk_resolve import BACKLINK_RE
+
+        # Build entry lookup: map file_path -> list of headings
+        entry_rows = conn.execute(
+            "SELECT file_path, heading FROM entries WHERE source_type = 'knowledge'"
+        ).fetchall()
+        entry_keys: set[tuple[str, str]] = {(fp, h) for fp, h in entry_rows}
+
+        # Initialize importance tracking
+        importance: dict[tuple[str, str], dict] = {}
+        for key in entry_keys:
+            importance[key] = {"importance": 0.0, "explicit": 0, "llm": 0, "concordance_backlinks": 0, "concordance": 0.0}
+
+        # Regex to detect backlink provenance comments
+        renormalize_comment_re = re.compile(r"<!--\s*source:\s*renormalize-backlinks\s*-->")
+        concordance_comment_re = re.compile(r"<!--\s*source:\s*concordance-backlinks\s*-->")
+
+        # Build concordance similarity lookup for concordance-backlinks weighting
+        concordance_scores: dict[tuple[str, str], float] = {}
+        try:
+            sim_rows = conn.execute(
+                "SELECT entry_path, similar_entry_path, similarity_score "
+                "FROM concordance_results "
+                "WHERE result_type = 'see_also' AND similarity_score >= 0.15"
+            ).fetchall()
+            for entry_path, sim_path, score in sim_rows:
+                concordance_scores[(entry_path, sim_path)] = score
+        except sqlite3.OperationalError:
+            pass
+
+        # (a) Scan all indexed files for [[knowledge:...]] backlinks
+        resolver = Resolver(self.knowledge_dir)
+        file_rows = conn.execute("SELECT DISTINCT file_path FROM entries").fetchall()
+
+        for (file_path,) in file_rows:
+            if not os.path.isfile(file_path):
+                continue
+            try:
+                text = Path(file_path).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            # Strip code blocks to avoid template backlinks
+            stripped = _FENCED_CODE_RE.sub("", text)
+            stripped = _INLINE_CODE_RE.sub("", stripped)
+
+            for match in BACKLINK_RE.finditer(stripped):
+                source_type = match.group("type")
+                if source_type != "knowledge":
+                    continue
+
+                target = match.group("target").strip()
+                if target in _PLACEHOLDER_TARGETS:
+                    continue
+
+                # Resolve the backlink target to a file path
+                resolved_path, _ = resolver._resolve_path("knowledge", target)
+                if not resolved_path:
+                    continue
+
+                # Check for provenance comments in surrounding context
+                start = max(0, match.start() - 100)
+                end = min(len(stripped), match.end() + 100)
+                context = stripped[start:end]
+                is_concordance = bool(concordance_comment_re.search(context))
+                is_llm = bool(renormalize_comment_re.search(context))
+
+                if is_concordance:
+                    # Weight at concordance similarity score, fallback to 0.5
+                    weight = concordance_scores.get((file_path, resolved_path), 0.5)
+                elif is_llm:
+                    weight = 0.8
+                else:
+                    weight = 1.0
+
+                # Credit all entries in the target file
+                for key in entry_keys:
+                    if key[0] == resolved_path:
+                        if is_concordance:
+                            importance[key]["concordance_backlinks"] += 1
+                        elif is_llm:
+                            importance[key]["llm"] += 1
+                        else:
+                            importance[key]["explicit"] += 1
+                        importance[key]["importance"] += weight
+
+        # (b) Concordance see_also edges with similarity >= 0.15
+        try:
+            concordance_rows = conn.execute(
+                "SELECT similar_entry_path, similar_entry_heading, similarity_score "
+                "FROM concordance_results "
+                "WHERE result_type = 'see_also' AND similarity_score >= 0.15"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            concordance_rows = []
+
+        for sim_path, sim_heading, score in concordance_rows:
+            key = (sim_path, sim_heading)
+            if key in importance:
+                importance[key]["concordance"] += score
+                importance[key]["importance"] += score
+
+        return importance
 
 
 # ---------------------------------------------------------------------------
@@ -765,7 +938,7 @@ class Searcher:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
 
-        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, rank"
+        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, rank"
         order_expr = f"rank * CASE WHEN source_type = 'knowledge' THEN {KNOWLEDGE_BOOST} ELSE 1.0 END"
 
         try:
@@ -826,6 +999,7 @@ class Searcher:
                 "category": row["category"],
                 "confidence": row["confidence"],
                 "learned_date": row["learned_date"],
+                "structural_importance": row["structural_importance"] or 0.0,
                 "score": round(score, 4),
                 "snippet": snippet,
             })
@@ -850,11 +1024,12 @@ class Searcher:
         exclude_category: str | list[str] | None = None,
         caller: str | None = None,
         include_archived: bool = False,
-        bm25_weight: float = 0.5,
-        recency_weight: float = 0.3,
-        tfidf_weight: float = 0.2,
+        bm25_weight: float = 0.45,
+        recency_weight: float = 0.25,
+        tfidf_weight: float = 0.15,
+        importance_weight: float = 0.1,
     ) -> list[dict]:
-        """Search with composite scoring: BM25 + recency + TF-IDF similarity.
+        """Search with composite scoring: BM25 + recency + TF-IDF similarity + structural importance.
 
         Fetches extra results from BM25, re-scores with composite weights,
         and returns the top `limit` results sorted by composite score.
@@ -897,6 +1072,12 @@ class Searcher:
                     entry_vectors[(rel_path, heading)] = deserialize_sparse_vector(row[0])
             conn.close()
 
+        # Compute max structural importance for log-normalization
+        max_importance = max(
+            (r.get("structural_importance", 0.0) or 0.0 for r in raw_results),
+            default=0.0,
+        )
+
         now = time.time()
         scored = []
         for r in raw_results:
@@ -936,6 +1117,13 @@ class Searcher:
                 if entry_vec:
                     tfidf_score = sparse_cosine_similarity(query_vector, entry_vec)
 
+            # Structural importance: log-normalized to 0-1 range
+            raw_importance = r.get("structural_importance", 0.0) or 0.0
+            if max_importance > 0 and raw_importance > 0:
+                importance_norm = min(1.0, math.log(1 + raw_importance) / math.log(1 + max_importance))
+            else:
+                importance_norm = 0.0
+
             # Read content for downstream consumers
             try:
                 content = Path(abs_path).read_text(encoding="utf-8").rstrip("\n")
@@ -946,6 +1134,7 @@ class Searcher:
                 bm25_weight * bm25_norm
                 + recency_weight * recency_score
                 + tfidf_weight * tfidf_score
+                + importance_weight * importance_norm
             )
 
             # Category-priority tiebreaker: small bonus for higher-priority categories
@@ -957,6 +1146,13 @@ class Searcher:
             result = dict(r)
             result["composite_score"] = round(composite, 4)
             result["tfidf_score"] = round(tfidf_score, 4)
+            result["importance_score"] = round(importance_norm, 4)
+            result["score_breakdown"] = {
+                "bm25": round(bm25_norm, 4),
+                "recency": round(recency_score, 4),
+                "tfidf": round(tfidf_score, 4),
+                "importance": round(importance_norm, 4),
+            }
             result["content"] = content
             scored.append(result)
 
@@ -975,9 +1171,10 @@ class Searcher:
         exclude_category: str | list[str] | None = None,
         caller: str | None = None,
         include_archived: bool = False,
-        bm25_weight: float = 0.5,
-        recency_weight: float = 0.3,
-        tfidf_weight: float = 0.2,
+        bm25_weight: float = 0.45,
+        recency_weight: float = 0.25,
+        tfidf_weight: float = 0.15,
+        importance_weight: float = 0.1,
     ) -> dict:
         """Search with composite scoring and budget-aware result partitioning.
 
@@ -1003,6 +1200,7 @@ class Searcher:
             bm25_weight=bm25_weight,
             recency_weight=recency_weight,
             tfidf_weight=tfidf_weight,
+            importance_weight=importance_weight,
         )
 
         full: list[dict] = []
@@ -1091,6 +1289,45 @@ class Stats:
             last_indexed = float(last_indexed_row[0]) if last_indexed_row else 0.0
 
             db_size = os.path.getsize(self.db_path)
+
+            # Structural importance distribution (v8+)
+            importance_stats: dict = {}
+            try:
+                row = conn.execute(
+                    "SELECT count(*), max(structural_importance), avg(structural_importance) "
+                    "FROM entries WHERE structural_importance > 0"
+                ).fetchone()
+                nonzero_count = row[0] if row else 0
+                max_importance = round(row[1], 4) if row and row[1] else 0.0
+                avg_importance = round(row[2], 4) if row and row[2] else 0.0
+
+                # Top-5 entries by importance
+                top_rows = conn.execute(
+                    "SELECT file_path, heading, structural_importance "
+                    "FROM entries WHERE structural_importance > 0 "
+                    "ORDER BY structural_importance DESC LIMIT 5"
+                ).fetchall()
+                top_entries = []
+                for fp, heading, imp in top_rows:
+                    try:
+                        rel_fp = os.path.relpath(fp, self.knowledge_dir)
+                    except ValueError:
+                        rel_fp = fp
+                    top_entries.append({
+                        "file_path": rel_fp,
+                        "heading": heading,
+                        "importance": round(imp, 4),
+                    })
+
+                importance_stats = {
+                    "nonzero_count": nonzero_count,
+                    "max": max_importance,
+                    "avg": avg_importance,
+                    "top_entries": top_entries,
+                }
+            except sqlite3.OperationalError:
+                pass  # older schema without structural_importance column
+
         except (sqlite3.OperationalError, sqlite3.DatabaseError):
             conn.close()
             return {"error": "Database is corrupt. Run 'pk_search.py index --force'."}
@@ -1101,7 +1338,7 @@ class Stats:
         indexer = Indexer(self.knowledge_dir)
         stale_files = indexer.get_stale_files()
 
-        return {
+        result = {
             "knowledge_dir": self.knowledge_dir,
             "entry_count": entry_count,
             "file_count": file_count,
@@ -1118,6 +1355,9 @@ class Stats:
             "stale_files": len(stale_files),
             "stale_file_list": [fp for fp, _ in stale_files],
         }
+        if importance_stats:
+            result["importance"] = importance_stats
+        return result
 
 
 def _human_size(size_bytes: int) -> str:

@@ -10,6 +10,7 @@ Usage:
     python pk_cli.py resolve <knowledge_dir> <backlinks...> [--json]
     python pk_cli.py read <knowledge_dir> <file> [--query Q] [--type T]
     python pk_cli.py check-links <knowledge_dir> [--json] [--all]
+    python pk_cli.py generate-backlinks <knowledge_dir> [--json] [--threshold F] [--dry-run]
 """
 
 import argparse
@@ -266,6 +267,15 @@ def cmd_stats(args: argparse.Namespace) -> None:
     print(f"Total entries: {result['entry_count']}")
     print(f"Database size: {result['db_size_human']}")
     print(f"Last indexed:  {result['last_indexed']}")
+    importance = result.get("importance")
+    if importance:
+        print(f"Structural importance:")
+        print(f"  Entries with importance: {importance['nonzero_count']}")
+        print(f"  Max: {importance['max']}, Avg: {importance['avg']}")
+        if importance.get("top_entries"):
+            print(f"  Top entries:")
+            for e in importance["top_entries"]:
+                print(f"    {e['importance']}  {e['heading']} ({e['file_path']})")
     print(f"Stale files:   {result['stale_files']}")
     if result["stale_file_list"]:
         for f in result["stale_file_list"]:
@@ -481,7 +491,7 @@ def cmd_analyze_concordance(args: argparse.Namespace) -> None:
     searcher._ensure_index()
 
     concordance = Concordance(searcher.db_path)
-    see_also_limit = getattr(args, "see_also_limit", 3)
+    see_also_limit = getattr(args, "see_also_limit", 10)
     related_threshold = getattr(args, "related_files_threshold", 0.15)
 
     result = concordance.run_full_analysis(
@@ -579,6 +589,170 @@ def cmd_analyze_merge_candidates(args: argparse.Namespace) -> None:
             pass
         print(f"  {c['similarity']:.4f}  {c['target_title']} ({target_rel})")
         print(f"           <-> {c['source_title']} ({source_rel})")
+
+
+def cmd_generate_backlinks(args: argparse.Namespace) -> None:
+    """Generate backlinks from concordance see_also pairs.
+
+    Reads concordance_results for see_also pairs with similarity >= threshold,
+    checks if links already exist, and appends See also references with
+    concordance-backlinks provenance comments.
+    """
+    knowledge_dir = os.path.abspath(args.knowledge_dir)
+    threshold = getattr(args, "threshold", 0.20)
+    dry_run = getattr(args, "dry_run", False)
+
+    # Ensure index is up to date
+    searcher = Searcher(knowledge_dir)
+    searcher._ensure_index()
+
+    conn = sqlite3.connect(searcher.db_path)
+    rows = conn.execute(
+        "SELECT file_path, heading, similar_entry_path, similar_entry_heading, similarity_score "
+        "FROM concordance_results "
+        "WHERE result_type = 'see_also' AND similarity_score >= ? "
+        "ORDER BY similarity_score DESC",
+        (threshold,),
+    ).fetchall()
+    conn.close()
+
+    # Build a map of knowledge entry file_path -> slug for backlink construction
+    from pk_search import CATEGORY_DIRS
+
+    def path_to_slug(file_path: str) -> str | None:
+        """Convert absolute file path to knowledge backlink slug (category/name)."""
+        try:
+            rel = os.path.relpath(file_path, knowledge_dir)
+        except ValueError:
+            return None
+        parts = rel.split(os.sep)
+        if len(parts) < 2 or parts[0] not in CATEGORY_DIRS:
+            return None
+        # Remove .md extension from last part
+        parts[-1] = parts[-1].replace(".md", "")
+        return "/".join(parts)  # include category dir for backlink format
+
+    pairs_checked = 0
+    links_added = 0
+    links_skipped = 0
+    added_details: list[dict] = []
+    skipped_details: list[dict] = []
+
+    for source_fp, _, target_fp, _, score in rows:
+        # Only process knowledge entries
+        source_slug = path_to_slug(source_fp)
+        target_slug = path_to_slug(target_fp)
+        if not source_slug or not target_slug:
+            continue
+
+        pairs_checked += 1
+        target_backlink = f"[[knowledge:{target_slug}]]"
+
+        # Check if target backlink already exists in source file
+        if not os.path.isfile(source_fp):
+            continue
+
+        try:
+            content = Path(source_fp).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        if target_slug in content:
+            links_skipped += 1
+            skipped_details.append({
+                "source": os.path.relpath(source_fp, knowledge_dir),
+                "target": os.path.relpath(target_fp, knowledge_dir),
+                "reason": "already present",
+                "similarity": round(score, 4),
+            })
+            continue
+
+        # Append backlink with provenance
+        if dry_run:
+            links_added += 1
+            added_details.append({
+                "source": os.path.relpath(source_fp, knowledge_dir),
+                "target": os.path.relpath(target_fp, knowledge_dir),
+                "backlink": target_backlink,
+                "similarity": round(score, 4),
+            })
+            continue
+
+        # Check for existing "See also:" section
+        lines = content.rstrip("\n").split("\n")
+        see_also_idx = None
+        for i, line in enumerate(lines):
+            if line.strip().lower().startswith("see also:"):
+                see_also_idx = i
+                # Find the last See also line in this section
+                for j in range(i + 1, len(lines)):
+                    stripped = lines[j].strip()
+                    if stripped.startswith("See also:") or stripped.startswith("<!-- source:"):
+                        see_also_idx = j
+                    elif stripped == "":
+                        continue
+                    else:
+                        break
+
+        backlink_line = f"See also: {target_backlink}"
+        provenance_line = "<!-- source: concordance-backlinks -->"
+
+        if see_also_idx is not None:
+            # Insert after existing See also section
+            insert_pos = see_also_idx + 1
+            lines.insert(insert_pos, backlink_line)
+            lines.insert(insert_pos + 1, provenance_line)
+        else:
+            # Append new See also section at end
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.append(backlink_line)
+            lines.append(provenance_line)
+
+        new_content = "\n".join(lines) + "\n"
+        try:
+            Path(source_fp).write_text(new_content, encoding="utf-8")
+        except OSError as e:
+            print(f"Error writing {source_fp}: {e}", file=sys.stderr)
+            continue
+
+        links_added += 1
+        added_details.append({
+            "source": os.path.relpath(source_fp, knowledge_dir),
+            "target": os.path.relpath(target_fp, knowledge_dir),
+            "backlink": target_backlink,
+            "similarity": round(score, 4),
+        })
+
+    result = {
+        "pairs_checked": pairs_checked,
+        "links_added": links_added,
+        "links_skipped": links_skipped,
+        "dry_run": dry_run,
+        "threshold": threshold,
+        "added": added_details,
+        "skipped": skipped_details,
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return
+
+    prefix = "[dry-run] " if dry_run else ""
+    print(f"{prefix}Generate backlinks from concordance (threshold >= {threshold}):")
+    print(f"  Pairs checked: {pairs_checked}")
+    print(f"  Links {'would add' if dry_run else 'added'}: {links_added}")
+    print(f"  Links skipped (already present): {links_skipped}")
+    if added_details:
+        print(f"\n{'Would add' if dry_run else 'Added'}:")
+        for d in added_details:
+            print(f"  {d['source']} -> {d['target']} (sim: {d['similarity']})")
+    if skipped_details and not args.json:
+        print(f"\nSkipped (already present):")
+        for d in skipped_details[:10]:
+            print(f"  {d['source']} -> {d['target']}")
+        if len(skipped_details) > 10:
+            print(f"  ... and {len(skipped_details) - 10} more")
 
 
 def cmd_check_links(args: argparse.Namespace) -> None:
@@ -691,7 +865,7 @@ def main() -> None:
     p_conc = subparsers.add_parser("analyze-concordance", help="Run TF-IDF concordance analysis (see-also + related files)")
     p_conc.add_argument("knowledge_dir", help="Path to knowledge directory")
     p_conc.add_argument("--json", action="store_true", help="Output as JSON")
-    p_conc.add_argument("--see-also-limit", type=int, default=3, help="Max see-also entries per knowledge entry (default: 3)")
+    p_conc.add_argument("--see-also-limit", type=int, default=10, help="Max see-also entries per knowledge entry (default: 10)")
     p_conc.add_argument("--related-files-threshold", type=float, default=0.05, help="Min similarity for related files (default: 0.05)")
     p_conc.set_defaults(func=cmd_analyze_concordance)
 
@@ -701,6 +875,14 @@ def main() -> None:
     p_merge.add_argument("--json", action="store_true", help="Output as JSON")
     p_merge.add_argument("--threshold", type=float, default=0.5, help="Min similarity for merge candidates (default: 0.5)")
     p_merge.set_defaults(func=cmd_analyze_merge_candidates)
+
+    # generate-backlinks
+    p_genbl = subparsers.add_parser("generate-backlinks", help="Generate See also backlinks from concordance see_also pairs")
+    p_genbl.add_argument("knowledge_dir", help="Path to knowledge directory")
+    p_genbl.add_argument("--json", action="store_true", help="Output as JSON")
+    p_genbl.add_argument("--threshold", type=float, default=0.20, help="Min similarity for backlink generation (default: 0.20)")
+    p_genbl.add_argument("--dry-run", action="store_true", help="Preview links without writing")
+    p_genbl.set_defaults(func=cmd_generate_backlinks)
 
     # stats
     p_stats = subparsers.add_parser("stats", help="Show index statistics")

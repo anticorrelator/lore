@@ -171,24 +171,58 @@ def extract_file_targets(task_text: str, phase_files: list[str]) -> list[str]:
     return list(phase_files)
 
 
+def detect_reference_files(
+    phase_files: list[str], all_task_targets: list[list[str]]
+) -> list[str]:
+    """Detect phase files that are not targeted by any task in the phase.
+
+    These are "reference files" — files listed at the phase level that no task
+    directly modifies. Workers should read them for context before starting.
+
+    Args:
+        phase_files: The phase-level ``**Files:**`` list.
+        all_task_targets: List of each task's ``file_targets`` within the phase.
+
+    Returns:
+        Phase files not present in any task's targets, preserving original order.
+        Empty list when every phase file appears in at least one task's targets.
+    """
+    targeted: set[str] = set()
+    for targets in all_task_targets:
+        targeted.update(targets)
+    return [f for f in phase_files if f not in targeted]
+
+
 def build_context_section(
     phase_backlinks: list[str],
     cross_cutting_backlinks: list[str],
     knowledge_dir: str,
     script_dir: str,
     task_backlinks: list[str] | None = None,
+    reference_files: list[str] | None = None,
 ) -> str:
     """Build the context section for a task description.
 
     Task-level backlinks (from the individual checklist item) are resolved
     first and given priority within the char budget. Phase-level and
     cross-cutting backlinks fill remaining budget.
+
+    When reference_files is non-empty, a **Reference files:** block is
+    prepended before the ## Context heading.
     """
-    lines = [
+    lines = []
+
+    if reference_files:
+        lines.append("**Reference files:**")
+        for rf in sorted(reference_files):
+            lines.append(f"- `{rf}` — read this first for patterns and conventions")
+        lines.append("")
+
+    lines.extend([
         "## Context (resolve before starting)",
         'Resolve these with: lore resolve "<backlink>"',
         "",
-    ]
+    ])
 
     if task_backlinks:
         lines.append("Task-level:")
@@ -522,23 +556,41 @@ def generate_tasks_from_plan(
         current_phase_task_ids: list[str] = []
         phase_tasks = []
 
+        # First pass: parse tasks, extract file_targets and backlinks
+        parsed_items: list[dict] = []
+        all_task_targets: list[list[str]] = []
         for item_text in unchecked:
             task_counter += 1
             task_id = f"task-{task_counter}"
             subject = item_text.strip()
             active_form = to_active_form(subject)
-
-            # Extract file targets for intra-phase ordering
             file_targets = extract_file_targets(item_text, files)
-
-            # Extract task-level backlinks from the checklist item
             task_backlinks = extract_task_backlinks(item_text)
+            parsed_items.append({
+                "task_id": task_id,
+                "subject": subject,
+                "active_form": active_form,
+                "file_targets": file_targets,
+                "task_backlinks": task_backlinks,
+            })
+            all_task_targets.append(file_targets)
 
-            # Build context (task-level backlinks get priority)
+        # Compute reference files: phase files not targeted by any task
+        reference_files = detect_reference_files(files, all_task_targets)
+
+        # Second pass: build context and descriptions with reference files
+        for item in parsed_items:
+            task_id = item["task_id"]
+            subject = item["subject"]
+            active_form = item["active_form"]
+            file_targets = item["file_targets"]
+            task_backlinks = item["task_backlinks"]
+
             context = build_context_section(
                 phase_backlinks, cross_cutting_backlinks,
                 knowledge_dir, script_dir,
                 task_backlinks=task_backlinks,
+                reference_files=reference_files,
             )
 
             # Build description

@@ -85,6 +85,151 @@ Do tests verify the *requirements*, or do they just confirm the generated code's
 
 **Failure mode:** Tautological tests — agent writes implementation then writes tests that pass by construction because they test what the code does rather than what it should do. These tests provide false confidence and don't catch regressions.
 
+### Severity Classification
+
+Every review finding MUST be assigned exactly one severity level. These definitions are the single source of truth — individual lens and review skills reference this section rather than defining their own taxonomy.
+
+#### Levels
+
+- **blocking** — The PR must not merge with this issue unresolved. Use for: correctness bugs, security vulnerabilities, data loss risks, broken invariants, API contract violations. The bar is "this will cause a defect or incident if shipped."
+- **suggestion** — The PR should address this but it is not a merge blocker. Use for: design improvements, convention violations, missing edge case handling, suboptimal patterns, maintainability concerns. The bar is "the code works but could be meaningfully better."
+- **question** — The reviewer cannot assess correctness without additional information from the author. Use for: unclear intent, ambiguous behavior, missing context on why an approach was chosen. The bar is "I need to understand this before I can evaluate it."
+
+#### Classification rules
+
+1. **Default to suggestion.** When uncertain between blocking and suggestion, choose suggestion. Overcalling blocking erodes trust and slows velocity.
+2. **Questions are not soft suggestions.** A question means the reviewer genuinely does not know the answer. If you know the answer and think the code should change, that is a suggestion or blocking finding, not a question.
+3. **Severity is independent of effort.** A one-line fix can be blocking (security). A large refactor can be a suggestion (design improvement). Classify by impact, not by size of the required change.
+
+#### Relationship to Conventional Comments labels
+
+Existing review skills (`/pr-review`, `/pr-self-review`, `/pr-pair-review`, `/pr-revise`) use the full Conventional Comments label set (`suggestion`, `issue`, `question`, `thought`, `nitpick`, `praise`). The severity levels above are a simplified taxonomy for lens skills that produce structured findings. The mapping:
+
+| Severity    | Conventional Comments equivalents        |
+|-------------|------------------------------------------|
+| blocking    | issue (when merge-blocking)              |
+| suggestion  | suggestion, issue (non-blocking), thought |
+| question    | question                                 |
+| (not used)  | nitpick, praise                          |
+
+Lens skills do not produce nitpick or praise findings — those are conversational labels suited to interactive review, not structured analysis output.
+
+### Findings Output Format
+
+Lens skills produce structured JSON findings that can be consumed by `post-review.sh`, written to work items, or presented to the user. This schema is the contract between lens skills and downstream consumers.
+
+#### Schema
+
+```json
+{
+  "lens": "<lens-name>",
+  "pr": <pr-number>,
+  "repo": "<owner>/<repo>",
+  "findings": [
+    {
+      "severity": "blocking | suggestion | question",
+      "title": "Short description of the finding",
+      "file": "path/to/file.ext",
+      "line": 42,
+      "body": "Detailed explanation of the finding. May include markdown formatting.",
+      "knowledge_context": [
+        "entry-title — one-line relevance summary"
+      ]
+    }
+  ]
+}
+```
+
+#### Field definitions
+
+- **lens** — Identifier for the lens that produced the findings. One of: `correctness`, `regressions`, `thematic`, `blast-radius`, `test-quality`.
+- **pr** — The PR number (integer).
+- **repo** — Repository in `owner/repo` format. Derived from the current git remote.
+- **findings** — Array of finding objects. Empty array `[]` when the lens finds no issues.
+- **severity** — One of the three levels defined in the Severity Classification section above. All severity levels are substantive and require knowledge enrichment.
+- **title** — A concise summary (under 80 characters) suitable for use as a review comment heading.
+- **file** — Path relative to repository root. Required for inline PR comments. Omit only for PR-level (non-file-specific) findings.
+- **line** — Line number in the diff where the finding applies. Required for inline comments. Omit for file-level or PR-level findings.
+- **body** — Full explanation. Should include: what the issue is, why it matters, and (for suggestions) what to do about it. Markdown formatting allowed.
+- **knowledge_context** — Array of knowledge store entries cited during enrichment. Each entry is a string in the format `"entry-title — relevance summary"`. Empty array `[]` when no relevant knowledge was found.
+
+#### Validation rules
+
+1. **At least `lens`, `pr`, `repo`, and `findings` are required** at the top level.
+2. **Each finding must have `severity`, `title`, and `body`.** The `file` and `line` fields are required for inline comments but may be omitted for PR-level findings.
+3. **`knowledge_context` must always be present** (empty array if no knowledge was found). This makes enrichment compliance auditable — a missing field is distinguishable from an empty result.
+4. **Severity values must be exactly one of `blocking`, `suggestion`, or `question`.** No other values are accepted.
+
+#### Output location
+
+Each lens writes its findings JSON to the shared work item at `pr-lens-review-<PR>/notes.md` under a heading for that lens. The JSON is embedded in a fenced code block:
+
+````
+## Correctness Lens
+
+```json
+{ "lens": "correctness", "pr": 42, ... }
+```
+````
+
+This structure allows multiple lenses to append findings to the same work item, and allows `post-review.sh` to extract and merge findings from all lenses.
+
+### Lens Review Workflow
+
+The lens review system provides focused, single-concern analysis of PRs. Each lens skill examines the PR through one analytical perspective and produces structured findings. This complements the 8-point agent-code checklist in `/pr-review` — lenses are deeper and narrower, the checklist is broader and agent-specific.
+
+#### Available lenses
+
+| Skill | Lens ID | Focus |
+|-------|---------|-------|
+| `/pr-correctness` | `correctness` | Logic paths, boundary conditions, error handling, intent alignment |
+| `/pr-regressions` | `regressions` | Deletions, removed capabilities, behavioral narrowing |
+| `/pr-thematic` | `thematic` | Scope coherence, scope creep, missing pieces |
+| `/pr-blast-radius` | `blast-radius` | Impact on code outside the diff — consumers, callers, dependents |
+| `/pr-test-quality` | `test-quality` | Test coverage, tautological tests, assertion quality, edge cases |
+
+#### Phase 1: Run lenses
+
+Run one or more lens skills against a PR. Each lens can be invoked independently:
+
+```
+/pr-correctness 42
+/pr-regressions 42
+/pr-blast-radius 42
+```
+
+Each lens fetches the PR data, applies its methodology, enriches findings with the knowledge store, and writes structured JSON to a shared work item at `pr-lens-review-<PR_NUMBER>/notes.md`. Multiple lenses append to the same work item under separate headings (`## Correctness Lens`, `## Regressions Lens`, etc.).
+
+Lenses can be run in any order and in separate sessions. The work item accumulates findings across runs.
+
+#### Phase 2: Review and post
+
+After running the desired lenses, review the accumulated findings in the work item:
+
+```
+/work show pr-lens-review-42
+```
+
+When ready to post findings to GitHub as a batched review submission:
+
+```bash
+bash ~/.lore/scripts/post-review.sh <findings.json> --pr 42 [--dry-run]
+```
+
+The `--dry-run` flag previews the review without posting. `post-review.sh` accepts either a single lens findings object or an array of multiple lens outputs. It determines the review state automatically:
+- Any `blocking` finding: `REQUEST_CHANGES`
+- Only `suggestion`/`question` findings: `COMMENT`
+- No findings: `APPROVE`
+
+Inline comments are placed at the specific file and line. PR-level findings (without file/line) are included in the review body.
+
+#### When to use lenses vs. /pr-review
+
+- **`/pr-review`** — Interactive, conversational review using the 8-point agent-code checklist. Best for: comprehensive review of agent-generated code, iterative review with the author, reviews that need the full breadth of the checklist.
+- **Lens skills** — Structured, single-concern analysis producing machine-readable findings. Best for: deep-dive analysis of specific concerns, automated review pipelines, accumulating findings across sessions, posting batched reviews.
+
+The two approaches can be combined: run lenses for targeted analysis, then use `/pr-review` for broader evaluation.
+
 ### Knowledge Enrichment Protocol
 
 **This is mandatory, not optional.** When a checklist item surfaces a substantive finding (any finding labeled suggestion, issue, question, or thought), the reviewer MUST enrich it with knowledge store context before reporting. This is the primary defense against faster-path preference bypass — skipping enrichment is the most common way review quality degrades.

@@ -2,7 +2,7 @@
 name: spec
 description: "Create a technical specification — `/spec short` for single-pass plans, `/spec` for full team-based investigation"
 user_invocable: true
-argument_description: "[short] [name or description] — existing work item name, or a freeform description to start from"
+argument_description: "[short] [--without-verification] [name or description] — existing work item name, or a freeform description to start from"
 ---
 
 # /spec Skill
@@ -24,7 +24,7 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
 ## Step 1: Parse and resolve (both modes)
 
-1. Parse arguments: if first arg after `/spec` is `short`, use **Short Flow**; otherwise **Full Flow**. The remaining text is the **input**.
+1. Parse arguments: if first arg after `/spec` is `short`, use **Short Flow**; otherwise **Full Flow**. If `--without-verification` is present, skip Step 4b (assertion verification). The remaining text is the **input**.
 2. Try to resolve input as an existing work item (fuzzy match or branch inference, same algorithm as `/work`)
 3. **If resolved** → load the work item:
    - If `plan.md` exists with `## Investigations` and completed findings, skip to synthesis (Step 5)
@@ -56,6 +56,8 @@ If the user's description is already specific enough (clear scope, stated constr
 
 For single-pass plans where the scope is clear and the agent can identify key files without parallel research.
 
+**No verification agents.** The short flow is single-agent — assertions in `### Key Assertions` are self-generated and unverified. The user serves as the verifier via the understanding confirmation step (Step 3.5s). All assertion-sourced bullets are tagged `[unverified]` to reflect this.
+
 ### Step 2s: Read key context
 
 1. From conversation context and the work item, identify 3-8 key files to read
@@ -68,17 +70,43 @@ For single-pass plans where the scope is clear and the agent can identify key fi
 
 1. Write `plan.md` using the **plan template** below
 2. Use `## Context` instead of `## Investigations`: 3-6 bullet points summarizing key files read, constraints found, and relevant patterns
-3. Fill in Goal, Design Decisions (with `**Applies to:**` fields mapping each decision to affected phases), Phases, Open Questions
+3. Under `## Context`, add a `### Key Assertions` subsection with 3-5 concrete, falsifiable claims about the codebase. These are the assumptions the plan is built on — the same format as researcher assertions but self-generated:
+   ```
+   ### Key Assertions
+   - <claim about how the code works, referencing specific files/functions>
+   - <claim about constraints or patterns discovered>
+   - <claim about scope boundaries or dependencies>
+   ```
+   State each as fact ("X does Y"), not speculation. These assertions surface in the understanding confirmation step.
+4. Fill in Goal, Design Decisions (with `**Applies to:**` fields mapping each decision to affected phases), Phases, Open Questions
 
    Apply the task consolidation rule: each checkbox = one meaningful unit of work. Consolidate sequential same-file edits.
 
-4. **Annotate phases with knowledge context** — after drafting phases with objectives and tasks, run a concordance query per phase to surface relevant knowledge entries beyond what you encountered in Step 2s:
+5. **Annotate phases with knowledge context** — after drafting phases with objectives and tasks, run a concordance query per phase to surface relevant knowledge entries beyond what you encountered in Step 2s:
    ```bash
    lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5
    ```
    Review the suggestions for each phase. Add relevant entries as `[[knowledge:file#heading]] — why relevant` lines in the phase's `**Knowledge context:**` block. Your direct findings from Step 2s are the primary source — concordance is a *widener*, not a replacement. Skip entries that don't add actionable context for a worker implementing that phase.
 
-5. Present to user for review
+6. Present to user for review
+
+### Step 3.5s: Confirm understanding
+
+Same purpose as the full flow's Step 5.1 — surface assumptions before finalizing.
+
+**Present 5-10 bullet points** from the Key Assertions and Design Decisions. Since short flow has no verification agents, all assertion-sourced bullets are tagged `[unverified]`:
+
+```
+Before finalizing this plan, here is my understanding of the key assumptions:
+
+- [unverified] <claim from Key Assertions> → Context: Key Assertions
+- <design decision> → Design Decision: <decision name>
+...
+
+Does this match your understanding? Any corrections?
+```
+
+**Gate:** Do not proceed to Step 4s until the user explicitly confirms or provides corrections. If corrections are needed, revise the affected plan sections (same approach as the full flow's Step 5.2) and re-present the corrected bullets.
 
 ### Step 4s: Finalize
 
@@ -136,7 +164,11 @@ Team-based divide-and-conquer for complex or uncertain-scope work.
    ```
    This produces a "## Prior Knowledge" block with pre-resolved content from the knowledge store.
 
-5. **Spawn researcher agents** — launch `min(investigation_count, 4)` in a single message for parallelism:
+5. **Spawn researcher agents** — launch `min(investigation_count, 4)` in a single message. Use the **researcher** agent definition (`~/.claude/agents/researcher.md`) as the base prompt, with these template injections:
+   - `{{team_name}}` → `spec-<slug>`
+   - `{{team_lead}}` → the lead name read from team config in Step 3.2
+   - `{{prior_knowledge}}` → the `$PRIOR_KNOWLEDGE` block from Step 3.4
+
    ```
    Task:
      subagent_type: "Explore"
@@ -144,40 +176,7 @@ Team-based divide-and-conquer for complex or uncertain-scope work.
      team_name: "spec-<slug>"
      name: "researcher-N"
      prompt: |
-       You are a researcher on the spec-<slug> team.
-
-       <embed $PRIOR_KNOWLEDGE here — the pre-fetched knowledge block>
-
-       If the pre-loaded knowledge doesn't cover your specific area, also search:
-       lore search "<query>" --type knowledge --json --limit 5
-
-       1. Call TaskList to see available investigation tasks
-       2. Claim one: TaskUpdate with owner=your name, status=in_progress
-       3. Read the full task with TaskGet
-       4. Investigate using Glob, Grep, Read, LSP
-       5. Send findings to "<team-lead-name>" via SendMessage:
-          summary: "Findings: <topic>"
-          content: |
-            **Question:** <the question>
-            **Findings:**
-            - <finding 1>
-            - <finding 2>
-            **Key files:** <paths>
-            **Implications:** <1-2 sentences>
-            **Observations:** <anything surprising, non-obvious, or that
-              contradicts expectations — include codebase conventions, type
-              mappings, or patterns you noticed. Optional: omit or write
-              "None" if nothing stood out.>
-            **Unknowns:** <anything unresolved>
-       6. **Update task description** with your full findings report:
-          TaskUpdate with description set to the same content from step 5
-          (including the **Observations:** section). This is required
-          for the TaskCompleted hook to verify your report.
-       7. Mark task completed: TaskUpdate with status=completed
-       8. Call TaskList — claim next unclaimed task if available
-       9. When no tasks remain, you're done
-
-       Keep findings to 500-1000 characters. Facts over opinions.
+       <contents of ~/.claude/agents/researcher.md with {{template}} variables resolved>
    ```
 
    If more questions than researchers, agents pick up additional tasks after completing their first.
@@ -187,12 +186,66 @@ Team-based divide-and-conquer for complex or uncertain-scope work.
 As researcher messages arrive (delivered automatically):
 1. Write each finding to the `## Investigations` section of `plan.md`
 2. Use the investigation entry format from the template below
+3. **Preserve `**Assertions:**` verbatim** — copy researcher assertions exactly as reported. Do not rephrase, merge, or summarize them. These are falsifiable claims that downstream verification will test against the code.
 
 When all investigation tasks are complete:
 1. Send shutdown requests to all researchers via `SendMessage` (type: `shutdown_request`)
 2. Run `TeamDelete` to clean up the team
 
 This is the critical persistence step — findings survive compaction, session boundaries, and context limits.
+
+### Step 4b: Verify assertions
+
+**Skip this step if `--without-verification` was passed.** All assertions proceed to synthesis as unverified researcher claims.
+
+After all investigations are complete, verify the assertions researchers reported before using them in synthesis.
+
+1. **Extract assertions** — collect all `**Assertions:**` entries from the `## Investigations` section of `plan.md`. Deduplicate assertions that make the same claim about the same code.
+
+2. **Spawn verification agents** — launch 1-2 Explore agents with the verifier-verdict protocol mixin (`scripts/agent-protocols/verifier-verdict.md`). Split assertions across agents if there are more than 5.
+
+   ```
+   Task:
+     subagent_type: "Explore"
+     model: "sonnet"
+     prompt: |
+       <contents of scripts/agent-protocols/verifier-verdict.md>
+
+       ## Assertions to Verify
+       <list of assertions with their source investigation topic>
+   ```
+
+3. **Collect verdicts** — when verification agents report back, update each assertion in `plan.md` with its verdict:
+   - **CONFIRMED** assertions remain as-is
+   - **REFUTED** assertions get the correction appended: `~~original~~ REFUTED: <actual behavior>`
+   - **UNVERIFIABLE** assertions are marked: `<original> (UNVERIFIABLE: <reason>)`
+
+4. **Apply corrections** — for each REFUTED assertion, update the corresponding investigation entry in `plan.md`:
+   - Add a `**Corrections:**` block to the investigation entry (after `**Assertions:**`)
+   - Each correction includes the original assertion, the verifier's evidence, and the actual behavior
+   - Format:
+     ```
+     **Corrections:**
+     - "original assertion" — REFUTED. Actual behavior: <correction from verifier>. Evidence: <file:line>
+     ```
+   - If a correction contradicts a finding in the same investigation, update `**Findings:**` to reflect the corrected understanding
+   - Do NOT delete the original assertion — the strikethrough markup preserves the audit trail
+
+5. **Log summary** — add a brief verification summary after the `## Investigations` section:
+   ```
+   ### Verification Summary
+   Confirmed: N | Refuted: N | Unverifiable: N
+   ```
+   If any assertions were refuted, synthesis (Step 5) must use the corrected information, not the original assertions.
+
+**Graceful degradation:** If verification agents fail, timeout, or return malformed output:
+- Mark all unverified assertions as `(UNVERIFIED — verification failed)` in `plan.md`
+- Log the failure in the verification summary:
+  ```
+  ### Verification Summary
+  Verification failed: <reason>. All assertions treated as unverified.
+  ```
+- **Proceed to synthesis.** Unverified assertions are treated as researcher claims without independent confirmation — usable but flagged. Do not block the spec on verification failure.
 
 ### Step 5: Synthesize
 
@@ -212,6 +265,61 @@ From the documented findings, draft the remaining plan sections:
 5. **Open Questions** — anything investigations couldn't resolve
 
 Present the synthesized plan to the user for review.
+
+### Step 5.1: Confirm understanding
+
+Before finalizing, present a concise understanding summary for the user to validate. This surfaces the assumptions and claims the plan is built on so the user can catch misunderstandings before they propagate to implementation.
+
+**Present 5-10 bullet points covering:**
+- Key assumptions about the codebase architecture
+- Behavioral claims from verified assertions (mark with `[verified]`) or unverified researcher claims (mark with `[unverified]`)
+- Design decisions and their rationale
+- Scope boundaries — what is and is not included
+
+**Traceability:** Each bullet must trace to a specific source. Use `→` to link the claim to its origin:
+- Assertion-sourced bullets: trace to the investigation topic and verification verdict
+- Design decision bullets: trace to the Design Decisions section entry
+- Scope bullets: trace to the Goal or user input that established the boundary
+
+**Format:**
+```
+Before finalizing this plan, here is my understanding of the key assumptions:
+
+- [verified] <claim> → Investigation: <topic>, Assertion #N
+- [unverified] <claim> → Investigation: <topic>, Assertion #N
+- <design decision> → Design Decision: <decision name>
+- <scope boundary> → Goal / user input
+...
+
+Does this match your understanding? Any corrections?
+```
+
+**Gate:** Do not proceed to Step 5a until the user explicitly confirms or provides corrections. If the user identifies incorrect points, go to Step 5.2 (handle corrections) before continuing. The prompt "Does this match your understanding? Any corrections?" is not rhetorical — wait for a response.
+
+### Step 5.2: Handle corrections (if needed)
+
+When the user corrects one or more understanding bullets:
+
+1. **Identify affected plan sections** — for each correction, trace the `→` link to determine what needs updating:
+   - Corrected assertion → update the corresponding investigation entry and its assertions
+   - Corrected design decision → update the Design Decisions section
+   - Corrected scope → update the Goal section
+
+2. **Revise affected sections** — update `plan.md` with the corrected understanding. If a correction invalidates a design decision, revise the decision and its rationale. If it changes scope, update the Goal and adjust phases accordingly.
+
+3. **Re-check affected phases** — for each corrected bullet, check whether its `**Applies to:**` phases are still valid. If a phase's tasks depend on the corrected assumption, revise those tasks.
+
+4. **Re-present understanding** — after applying corrections, return to Step 5.1 with an updated summary. Only re-list the corrected bullets (not the full set) for efficiency:
+   ```
+   Updated understanding after your corrections:
+
+   - [corrected] <revised claim> → <source>
+   ...
+
+   Anything else to adjust?
+   ```
+
+5. If the user confirms, proceed to Step 5a.
 
 ### Step 5a: Post-research extraction
 
@@ -268,6 +376,9 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 - Finding 2
 **Key files:** `path/to/file.ts`, `path/to/other.ts`
 **Implications:** How this affects the design
+**Assertions:**
+- <falsifiable claim 1, preserved verbatim from researcher report>
+- <falsifiable claim 2, preserved verbatim from researcher report>
 
 ## Design Decisions
 <!-- Key architectural choices with rationale. Each decision should include an **Applies to:** field mapping it to the affected phases/tasks. -->

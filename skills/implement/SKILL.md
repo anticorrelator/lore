@@ -94,7 +94,11 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
    ```
    For example, if a task has `**Files:** scripts/pk_search.py` and `**Phase objective:** Fix hyphenated-term quoting`, the prefetch query would be `"Fix hyphenated-term quoting pk_search.py"`.
 
-2. **Spawn worker agents** — launch `min(task_count, 4)` in a single message:
+2. **Spawn worker agents** — launch `min(task_count, 4)` in a single message. Use the **worker** agent definition (`~/.claude/agents/worker.md`) as the base prompt, with these template injections:
+   - `{{team_name}}` → `impl-<slug>`
+   - `{{team_lead}}` → the lead name read from team config in Step 2
+   - `{{prior_knowledge}}` → the `$PRIOR_KNOWLEDGE` block from Step 3.1 (or empty if tasks have pre-resolved knowledge)
+
    ```
    Task:
      subagent_type: "general-purpose"
@@ -103,55 +107,7 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
      name: "worker-N"
      mode: "bypassPermissions"
      prompt: |
-       You are worker-N on the impl-<slug> team.
-
-       Your task descriptions contain pre-resolved knowledge context. Read the
-       '## Prior Knowledge' section in your task description first — it has
-       the design rationale and conventions relevant to your task. Only search
-       the knowledge store (`lore search`) if your task requires patterns not
-       covered there.
-
-       <if prefetch was run, embed $PRIOR_KNOWLEDGE here>
-
-       If the pre-loaded knowledge doesn't cover your specific area, also search:
-       KDIR=$(lore resolve)
-       lore search "<query>" --json --limit 5
-
-       ## Workflow
-       1. Call TaskList to see available tasks
-       2. Claim one: TaskUpdate with owner=your name, status=in_progress
-       3. Read the full task with TaskGet
-       4. Implement the change — read existing code first, follow codebase conventions
-          **For staleness fix tasks** (subjects starting with "Update stale knowledge entry"):
-          - Read the knowledge entry at the path in the task description
-          - Read each related_file listed in the task
-          - Compare the entry's claims against current code
-          - Rewrite stale content preserving format: H1 title, prose, See also backlinks, HTML metadata comment
-          - Update `learned` date to today (YYYY-MM-DD) and set `source: worker-fix` in the metadata comment
-          - If the entry needs investigation beyond the listed related_files, note it in your completion report
-       5. Look for and run relevant tests:
-          - Check for package.json scripts, Makefile targets, pytest, etc.
-          - Run tests if found; skip silently if no test command exists
-       6. Send completion report to "<team-lead-name>" via SendMessage:
-          summary: "Done: <task subject>"
-          content: |
-            **Task:** <subject>
-            **Changes:**
-            - <file>: <what changed>
-            **Tests:** <ran X tests, all passed / no tests found / N failures>
-            **Observations:** <anything surprising, non-obvious, or that
-              contradicts the plan — include codebase conventions, type
-              mappings, or patterns you noticed. Optional: omit or write
-              "None" if nothing stood out.>
-            **Blockers:** <none, or description of what's blocking>
-       7. **Update task description** with your full completion report:
-          TaskUpdate with description set to the same content from step 6
-          (including the **Observations:** section). This is required
-          for the TaskCompleted hook to verify your report.
-       8. Mark task completed: TaskUpdate with status=completed
-       9. Call TaskList — claim next unclaimed, unblocked task if available
-       10. When no tasks remain, you're done
-
+       <contents of ~/.claude/agents/worker.md with {{template}} variables resolved>
    ```
 
 3. If more tasks than workers, agents pick up additional tasks after completing their first.
