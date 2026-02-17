@@ -80,6 +80,110 @@ def to_active_form(subject: str) -> str:
     return (ing + " " + rest).strip()
 
 
+def parse_design_decisions(plan_content: str) -> list[dict]:
+    """Parse structured design decisions from the ## Design Decisions section.
+
+    Returns list of dicts with keys:
+        id: e.g. "D1"
+        title: decision title
+        decision: the decision text
+        rationale: the rationale text
+        applies_to: raw Applies-to text
+        phase_numbers: list of int phase numbers (empty list means all phases)
+    """
+    # Find the ## Design Decisions section
+    section_re = re.compile(r"^## Design Decisions\s*$", re.MULTILINE)
+    section_match = section_re.search(plan_content)
+    if not section_match:
+        return []
+
+    start = section_match.end()
+    # Find next ## heading or end of content
+    next_h2 = re.search(r"^## ", plan_content[start:], re.MULTILINE)
+    end = start + next_h2.start() if next_h2 else len(plan_content)
+    section_text = plan_content[start:end]
+
+    # Parse individual ### DN: Title blocks
+    decision_re = re.compile(r"^### (D\d+):\s*(.*)", re.MULTILINE)
+    decision_matches = list(decision_re.finditer(section_text))
+    if not decision_matches:
+        return []
+
+    decisions = []
+    for i, dm in enumerate(decision_matches):
+        d_id = dm.group(1)
+        d_title = dm.group(2).strip()
+
+        # Get decision block content
+        block_start = dm.end()
+        if i + 1 < len(decision_matches):
+            block_end = decision_matches[i + 1].start()
+        else:
+            block_end = len(section_text)
+        block = section_text[block_start:block_end]
+
+        # Extract fields — use ^ with MULTILINE to match field markers at
+        # line start only, avoiding false matches within backtick content
+        decision_match = re.search(
+            r"^\*\*Decision:\*\*\s*(.*?)(?=\n\*\*[A-Z]|\Z)",
+            block, re.DOTALL | re.MULTILINE,
+        )
+        rationale_match = re.search(
+            r"^\*\*Rationale:\*\*\s*(.*?)(?=\n\*\*[A-Z]|\Z)",
+            block, re.DOTALL | re.MULTILINE,
+        )
+        applies_match = re.search(
+            r"^\*\*Applies to:\*\*\s*(.*?)(?=\n\*\*[A-Z]|\n###|\Z)",
+            block, re.DOTALL | re.MULTILINE,
+        )
+
+        decision_text = decision_match.group(1).strip() if decision_match else ""
+        rationale_text = rationale_match.group(1).strip() if rationale_match else ""
+        applies_text = applies_match.group(1).strip() if applies_match else ""
+
+        # Parse phase numbers from Applies-to
+        phase_numbers = _parse_applies_to(applies_text)
+
+        decisions.append({
+            "id": d_id,
+            "title": d_title,
+            "decision": decision_text,
+            "rationale": rationale_text,
+            "applies_to": applies_text,
+            "phase_numbers": phase_numbers,
+        })
+
+    return decisions
+
+
+def _parse_applies_to(applies_text: str) -> list[int]:
+    """Parse phase numbers from an Applies-to field.
+
+    Handles:
+        "Phase 1 (name)" -> [1]
+        "Phase 1 (name), Phase 3 (name)" -> [1, 3]
+        "All phases (reason)" -> [] (empty = all phases)
+    """
+    if not applies_text:
+        return []
+    if re.match(r"(?i)\ball\b", applies_text):
+        return []  # empty list signals "all phases"
+    return [int(m.group(1)) for m in re.finditer(r"Phase\s+(\d+)", applies_text)]
+
+
+def decisions_for_phase(
+    decisions: list[dict], phase_num: int
+) -> list[dict]:
+    """Filter design decisions relevant to a given phase number.
+
+    Decisions with empty phase_numbers apply to all phases.
+    """
+    return [
+        d for d in decisions
+        if not d["phase_numbers"] or phase_num in d["phase_numbers"]
+    ]
+
+
 def extract_backlinks(plan_content: str, section_name: str) -> list[str]:
     """Extract [[...]] backlink targets from a named ## section."""
     pattern = re.compile(
@@ -200,6 +304,7 @@ def build_context_section(
     script_dir: str,
     task_backlinks: list[str] | None = None,
     reference_files: list[str] | None = None,
+    design_decisions: list[dict] | None = None,
 ) -> str:
     """Build the context section for a task description.
 
@@ -207,10 +312,26 @@ def build_context_section(
     first and given priority within the char budget. Phase-level and
     cross-cutting backlinks fill remaining budget.
 
+    When design_decisions is non-empty, a ## Design Decisions block is
+    rendered before the ## Context heading, showing Decision + Rationale
+    for each relevant decision.
+
     When reference_files is non-empty, a **Reference files:** block is
     prepended before the ## Context heading.
     """
     lines = []
+
+    if design_decisions:
+        lines.append("## Design Decisions")
+        lines.append("")
+        for d in design_decisions:
+            lines.append(f"### {d['id']}: {d['title']}")
+            if d.get("decision"):
+                lines.append(f"**Decision:** {d['decision']}")
+            if d.get("rationale"):
+                lines.append(f"**Rationale:** {d['rationale']}")
+            lines.append("")
+        lines.append("")
 
     if reference_files:
         lines.append("**Reference files:**")
@@ -289,187 +410,6 @@ def build_context_section(
 
 
 # ---------------------------------------------------------------------------
-# Staleness integration
-# ---------------------------------------------------------------------------
-
-# Staleness threshold for generating fix tasks (matches STALE_THRESHOLD in staleness-scan.py)
-STALE_DRIFT_THRESHOLD = 0.6
-
-
-def _find_repo_root() -> str:
-    """Find the git repo root from cwd, or return cwd if not in a repo."""
-    cwd = os.getcwd()
-    d = cwd
-    while True:
-        if os.path.isdir(os.path.join(d, ".git")):
-            return d
-        parent = os.path.dirname(d)
-        if parent == d:
-            return cwd
-        d = parent
-
-
-def _backlink_to_entry_path(backlink: str, knowledge_dir: str) -> str | None:
-    """Map a knowledge backlink target to its absolute entry file path.
-
-    Handles both category-file and category-dir/entry-file layouts.
-    Returns None if no matching file found or if not a knowledge backlink.
-    """
-    # Only process knowledge-type backlinks
-    if not backlink.startswith("knowledge:"):
-        return None
-    target = backlink.split(":", 1)[1]
-    # Strip heading fragment
-    if "#" in target:
-        target = target.split("#", 1)[0]
-    target = target.strip()
-    if not target:
-        return None
-
-    # Try as a direct file: knowledge_dir/<target>.md
-    candidate = os.path.join(knowledge_dir, target + ".md")
-    if os.path.isfile(candidate):
-        return candidate
-
-    # Try as category dir: target may be "category/subcategory/entry-slug"
-    # The file might be at knowledge_dir/category/subcategory/entry-slug.md
-    candidate = os.path.join(knowledge_dir, target.replace("/", os.sep) + ".md")
-    if os.path.isfile(candidate):
-        return candidate
-
-    return None
-
-
-def scan_phase_knowledge_staleness(
-    phase_backlinks: list[str],
-    cross_cutting_backlinks: list[str],
-    knowledge_dir: str,
-    script_dir: str,
-) -> list[dict]:
-    """Scan knowledge entries referenced by phase backlinks for staleness.
-
-    Returns list of dicts for stale entries: {path, rel_path, drift_score, status, signals, related_files}
-    Only returns entries where file_drift is available (not confidence-only).
-    """
-    if not knowledge_dir:
-        return []
-
-    # Collect unique knowledge backlink targets
-    all_bl = []
-    seen = set()
-    for bl in phase_backlinks + cross_cutting_backlinks:
-        if bl not in seen and bl.startswith("knowledge:"):
-            all_bl.append(bl)
-            seen.add(bl)
-
-    if not all_bl:
-        return []
-
-    # Import staleness functions (co-located in scripts/)
-    # Module name has a hyphen, so use spec_from_file_location
-    ss_path = os.path.join(script_dir, "staleness-scan.py")
-    if not os.path.isfile(ss_path):
-        return []
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("staleness_scan", ss_path)
-        if spec is None or spec.loader is None:
-            return []
-        ss = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ss)
-        parse_metadata = ss.parse_metadata
-        compute_file_drift = ss.compute_file_drift
-        compute_backlink_drift = ss.compute_backlink_drift
-        score_entry = ss.score_entry
-    except (ImportError, AttributeError, OSError):
-        return []
-
-    repo_root = _find_repo_root()
-    stale_entries = []
-
-    for bl in all_bl:
-        entry_path = _backlink_to_entry_path(bl, knowledge_dir)
-        if not entry_path or not os.path.isfile(entry_path):
-            continue
-
-        meta = parse_metadata(entry_path)
-        file_drift = compute_file_drift(repo_root, meta["learned"], meta["related_files"])
-
-        # Gate: only score entries where file_drift is available
-        if not file_drift.get("available", False):
-            continue
-
-        backlink_drift = compute_backlink_drift(entry_path, knowledge_dir)
-        drift_score, status, signals = score_entry(file_drift, backlink_drift, meta["confidence"])
-
-        if drift_score >= STALE_DRIFT_THRESHOLD:
-            try:
-                rel_path = os.path.relpath(entry_path, knowledge_dir)
-            except ValueError:
-                rel_path = entry_path
-            stale_entries.append({
-                "path": rel_path,
-                "abs_path": entry_path,
-                "drift_score": drift_score,
-                "status": status,
-                "signals": signals,
-                "related_files": meta["related_files"],
-            })
-
-    return stale_entries
-
-
-def _build_fix_task_description(
-    stale_entry: dict,
-    phase_num: int,
-    objective: str,
-    slug: str,
-) -> str:
-    """Build a task description for fixing a stale knowledge entry."""
-    path = stale_entry["path"]
-    drift = stale_entry["drift_score"]
-    signals = stale_entry["signals"]
-    related = stale_entry["related_files"]
-
-    # Build drift reason string
-    reasons = []
-    fd = signals.get("file_drift", {})
-    if fd.get("available"):
-        reasons.append(f"file drift: {fd['commit_count']} commits since learned date")
-    bd = signals.get("backlink_drift", {})
-    if bd.get("available") and bd.get("broken", 0) > 0:
-        reasons.append(f"backlinks: {bd['broken']}/{bd['total']} broken")
-    drift_reason = "; ".join(reasons) if reasons else "drift threshold exceeded"
-
-    lines = []
-    if objective:
-        lines.append(f"**Phase {phase_num} objective:** {objective}")
-    lines.append(f"**Task:** Update stale knowledge entry: `{path}`")
-    lines.append(f"**Drift score:** {drift:.2f} ({drift_reason})")
-    lines.append("")
-    lines.append("**Instructions:**")
-    lines.append(f"1. Read the knowledge entry at `{path}`")
-    if related:
-        lines.append("2. Read each related file listed below and compare claims to current code")
-        lines.append("3. Rewrite the entry to match current behavior, preserving format (H1 title, prose, See also backlinks, HTML metadata comment)")
-        lines.append("4. Update `learned` date to today and set `source: worker-fix` in the HTML metadata comment")
-    else:
-        lines.append("2. Verify claims against the codebase")
-        lines.append("3. Rewrite stale content, preserving format")
-        lines.append("4. Update `learned` date to today and set `source: worker-fix`")
-    lines.append("")
-    if related:
-        lines.append("**Related files to check:**")
-        for rf in related:
-            lines.append(f"- `{rf}`")
-        lines.append("")
-    if slug:
-        lines.append(f"**Plan reference:** [[work:{slug}]]")
-
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
 # Core: generate_tasks_from_plan
 # ---------------------------------------------------------------------------
 
@@ -503,6 +443,9 @@ def generate_tasks_from_plan(
     cross_cutting_backlinks = sorted(
         set(related_backlinks + design_backlinks)
     )
+
+    # Parse design decisions for propagation to workers
+    all_design_decisions = parse_design_decisions(plan_content)
 
     # Parse phases
     phase_re = re.compile(r"^### Phase (\d+):\s*(.*)", re.MULTILINE)
@@ -578,6 +521,11 @@ def generate_tasks_from_plan(
         # Compute reference files: phase files not targeted by any task
         reference_files = detect_reference_files(files, all_task_targets)
 
+        # Filter design decisions relevant to this phase
+        phase_decisions = decisions_for_phase(
+            all_design_decisions, phase_num
+        )
+
         # Second pass: build context and descriptions with reference files
         for item in parsed_items:
             task_id = item["task_id"]
@@ -591,6 +539,7 @@ def generate_tasks_from_plan(
                 knowledge_dir, script_dir,
                 task_backlinks=task_backlinks,
                 reference_files=reference_files,
+                design_decisions=phase_decisions,
             )
 
             # Build description
@@ -627,29 +576,6 @@ def generate_tasks_from_plan(
                     if prev_id not in task["blockedBy"]:
                         task["blockedBy"].append(prev_id)
                 file_last_task[ft] = task["id"]
-
-        # Staleness scan: check knowledge entries referenced by this phase
-        stale_entries = scan_phase_knowledge_staleness(
-            phase_backlinks, cross_cutting_backlinks,
-            knowledge_dir, script_dir,
-        )
-        for se in stale_entries:
-            task_counter += 1
-            fix_task_id = f"task-{task_counter}"
-            fix_subject = f"Update stale knowledge entry: `{se['path']}`"
-            fix_active = f"Updating stale knowledge entry: {se['path']}"
-            fix_desc = _build_fix_task_description(
-                se, phase_num, objective, slug,
-            )
-            phase_tasks.append({
-                "id": fix_task_id,
-                "subject": fix_subject,
-                "description": fix_desc,
-                "activeForm": fix_active,
-                "blockedBy": list(prev_phase_task_ids),
-                "file_targets": [se["path"]],
-            })
-            current_phase_task_ids.append(fix_task_id)
 
         phases.append({
             "phase_number": phase_num,

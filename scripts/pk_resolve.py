@@ -37,6 +37,62 @@ BACKLINK_RE = re.compile(
 
 
 # ---------------------------------------------------------------------------
+# Backlink Construction
+# ---------------------------------------------------------------------------
+
+def build_backlink_from_result(result: dict) -> str:
+    """Build a [[backlink]] string from a search result dictionary.
+
+    Args:
+        result: Search result dict with keys: source_type, file_path, heading
+
+    Returns:
+        Backlink string like [[knowledge:target#heading]] or [[work:slug]]
+    """
+    source_type = result.get("source_type", "")
+    file_path = result.get("file_path", "")
+    heading = result.get("heading", "")
+
+    if source_type == "knowledge":
+        # file_path like "conventions.md" or "domains/auth.md"
+        target = file_path
+        if target.endswith(".md"):
+            target = target[:-3]
+    elif source_type in ("work", "plan"):
+        # file_path like "_work/slug/plan.md" or "_work/_archive/slug/plan.md"
+        parts = file_path.split("/")
+        if "_archive" in parts:
+            idx = parts.index("_archive")
+            target = parts[idx + 1] if idx + 1 < len(parts) else file_path
+        elif "_work" in parts:
+            idx = parts.index("_work")
+            target = parts[idx + 1] if idx + 1 < len(parts) else file_path
+        else:
+            target = file_path
+        source_type = "work"  # Normalize "plan" to "work"
+    elif source_type == "thread":
+        # v2: file_path like "_threads/slug/2026-02-06-s6.md"
+        # v1: file_path like "_threads/slug.md"
+        parts = file_path.split("/")
+        if "_threads" in parts:
+            idx = parts.index("_threads")
+            target = parts[idx + 1] if idx + 1 < len(parts) else file_path
+            if target.endswith(".md"):
+                target = target[:-3]
+        else:
+            target = os.path.basename(file_path)
+            if target.endswith(".md"):
+                target = target[:-3]
+    else:
+        target = file_path
+
+    if heading and heading != "(ungrouped)":
+        return f"[[{source_type}:{target}#{heading}]]"
+    else:
+        return f"[[{source_type}:{target}]]"
+
+
+# ---------------------------------------------------------------------------
 # Filename <-> heading conversion (duplicated from Indexer for independence)
 # ---------------------------------------------------------------------------
 

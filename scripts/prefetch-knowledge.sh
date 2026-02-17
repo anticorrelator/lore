@@ -97,6 +97,7 @@ fi
 # --- Format output ---
 export _PK_RESULTS="$RESULTS"
 export _PK_EXCLUDE_BACKLINKS="$EXCLUDE_BACKLINKS"
+export _PK_SCRIPT_DIR="$SCRIPT_DIR"
 python3 - "$KNOWLEDGE_DIR" "$FORMAT" "$QUERY" "$LORE_SEARCH" <<'PYEOF'
 import importlib.util
 import json
@@ -104,6 +105,12 @@ import os
 import sqlite3
 import subprocess
 import sys
+
+# Import build_backlink_from_result from pk_resolve
+script_dir = os.environ.get("_PK_SCRIPT_DIR", "")
+if script_dir:
+    sys.path.insert(0, script_dir)
+from pk_resolve import build_backlink_from_result
 
 knowledge_dir = sys.argv[1]
 fmt = sys.argv[2]
@@ -208,50 +215,7 @@ def get_staleness_annotation(file_path_rel):
     return ""
 
 
-def build_backlink(r):
-    """Build a [[backlink]] string from a search result for resolve."""
-    source_type = r["source_type"]
-    file_path = r["file_path"]
-    heading = r["heading"]
-
-    if source_type == "knowledge":
-        # file_path like "conventions.md" or "domains/auth.md"
-        target = file_path
-        if target.endswith(".md"):
-            target = target[:-3]
-    elif source_type in ("work", "plan"):
-        # file_path like "_work/slug/plan.md"
-        parts = file_path.split("/")
-        # Find the slug: typically _work/<slug>/plan.md or _work/_archive/<slug>/plan.md
-        if "_archive" in parts:
-            idx = parts.index("_archive")
-            target = parts[idx + 1] if idx + 1 < len(parts) else file_path
-        elif "_work" in parts:
-            idx = parts.index("_work")
-            target = parts[idx + 1] if idx + 1 < len(parts) else file_path
-        else:
-            target = file_path
-        source_type = "work"
-    elif source_type == "thread":
-        # v2: file_path like "_threads/slug/2026-02-06-s6.md"
-        # v1: file_path like "_threads/slug.md"
-        parts = file_path.split("/")
-        if "_threads" in parts:
-            idx = parts.index("_threads")
-            target = parts[idx + 1] if idx + 1 < len(parts) else file_path
-            if target.endswith(".md"):
-                target = target[:-3]
-        else:
-            target = os.path.basename(file_path)
-            if target.endswith(".md"):
-                target = target[:-3]
-    else:
-        target = file_path
-
-    if heading and heading != "(ungrouped)":
-        return f"[[{source_type}:{target}#{heading}]]"
-    else:
-        return f"[[{source_type}:{target}]]"
+# build_backlink function now imported from pk_resolve above
 
 
 # --- Filter out results matching excluded backlink paths ---
@@ -265,7 +229,7 @@ if exclude_raw:
     if exclude_set:
         filtered = []
         for r in results:
-            bl = build_backlink(r).strip("[]")
+            bl = build_backlink_from_result(r).strip("[]")
             # Match exact backlink or base (without heading fragment)
             base = bl.split("#")[0]
             if bl not in exclude_set and base not in exclude_set:
@@ -292,7 +256,7 @@ print(f'## Prior Knowledge')
 print(f'Results from knowledge store for: "{query}"')
 
 for r in results:
-    backlink = build_backlink(r)
+    backlink = build_backlink_from_result(r)
     # Compute staleness annotation for knowledge entries
     stale_tag = ""
     if r.get("source_type") == "knowledge":

@@ -81,8 +81,12 @@ CURRENT_SLUG=""
 CURRENT_TITLE=""
 CURRENT_STATUS=""
 CURRENT_UPDATED=""
+CURRENT_ISSUE=""
+CURRENT_PR=""
 CURRENT_HAS_PLAN=""
 ACTIVE_COUNT=0
+HAS_ANY_ISSUE=false
+HAS_ANY_PR=false
 ITEMS=""
 
 while IFS= read -r line; do
@@ -97,6 +101,12 @@ while IFS= read -r line; do
   fi
   if echo "$line" | grep -q '"updated"'; then
     CURRENT_UPDATED=$(echo "$line" | sed 's/.*"updated"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/')
+  fi
+  if echo "$line" | grep -q '"issue"'; then
+    CURRENT_ISSUE=$(echo "$line" | sed 's/.*"issue"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/')
+  fi
+  if echo "$line" | grep -q '"pr"'; then
+    CURRENT_PR=$(echo "$line" | sed 's/.*"pr"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/')
   fi
 
   # End of entry — has_plan_doc is the last field
@@ -113,19 +123,25 @@ while IFS= read -r line; do
       CURRENT_TITLE=""
       CURRENT_STATUS=""
       CURRENT_UPDATED=""
+      CURRENT_ISSUE=""
+      CURRENT_PR=""
       CURRENT_HAS_PLAN=""
       continue
     fi
 
     REL_DATE=$(relative_date "$CURRENT_UPDATED")
 
-    # Truncate title for display
-    DISPLAY_TITLE="$CURRENT_TITLE"
-    if [[ ${#DISPLAY_TITLE} -gt 50 ]]; then
-      DISPLAY_TITLE="${DISPLAY_TITLE:0:47}..."
-    fi
+    # Track whether any item has issue/pr populated
+    [[ -n "$CURRENT_ISSUE" ]] && HAS_ANY_ISSUE=true
+    [[ -n "$CURRENT_PR" ]] && HAS_ANY_PR=true
 
-    ITEMS="${ITEMS}  ${CURRENT_SLUG}|${DISPLAY_TITLE}|${CURRENT_STATUS}|${REL_DATE}|${CURRENT_HAS_PLAN}\n"
+    # Format issue/pr with # prefix when populated
+    local_issue=""
+    local_pr=""
+    [[ -n "$CURRENT_ISSUE" ]] && local_issue="#${CURRENT_ISSUE}"
+    [[ -n "$CURRENT_PR" ]] && local_pr="#${CURRENT_PR}"
+
+    ITEMS="${ITEMS}${CURRENT_SLUG}|${CURRENT_STATUS}|${REL_DATE}|${local_issue}|${local_pr}|${CURRENT_HAS_PLAN}\n"
     ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
 
     # Reset
@@ -133,6 +149,8 @@ while IFS= read -r line; do
     CURRENT_TITLE=""
     CURRENT_STATUS=""
     CURRENT_UPDATED=""
+    CURRENT_ISSUE=""
+    CURRENT_PR=""
     CURRENT_HAS_PLAN=""
   fi
 done < "$INDEX"
@@ -155,15 +173,23 @@ if [[ $ACTIVE_COUNT -eq 0 ]]; then
     echo "No active work items."
   fi
 else
-  # Print table header
-  printf "  %-30s %-50s %-10s %-12s %-5s\n" "SLUG" "TITLE" "STATUS" "UPDATED" "PLAN"
-  printf "  %-30s %-50s %-10s %-12s %-5s\n" "----" "-----" "------" "-------" "----"
+  # Build column spec and select columns conditionally
+  # Row data is: slug(1)|status(2)|updated(3)|issue(4)|pr(5)|plan(6)
+  COL_SPEC="SLUG:flex:100:left|STATUS:fixed:8:left|UPDATED:fixed:10:left"
+  KEEP_COLS="1,2,3"
+  if [[ "$HAS_ANY_ISSUE" == true ]]; then
+    COL_SPEC="${COL_SPEC}|ISSUE:fixed:8:left"
+    KEEP_COLS="${KEEP_COLS},4"
+  fi
+  if [[ "$HAS_ANY_PR" == true ]]; then
+    COL_SPEC="${COL_SPEC}|PR:fixed:8:left"
+    KEEP_COLS="${KEEP_COLS},5"
+  fi
+  COL_SPEC="${COL_SPEC}|PLAN:fixed:4:left"
+  KEEP_COLS="${KEEP_COLS},6"
 
-  # Print items
-  echo -e "$ITEMS" | while IFS='|' read -r slug title status updated plan; do
-    [[ -z "$slug" ]] && continue
-    printf "  %-30s %-50s %-10s %-12s %-5s\n" "$slug" "$title" "$status" "$updated" "$plan"
-  done
+  # Print table with only the relevant columns
+  echo -e "$ITEMS" | grep -v '^$' | cut -d'|' -f"$KEEP_COLS" | render_table "$COL_SPEC"
 fi
 
 echo ""
@@ -178,7 +204,12 @@ if [[ "$SHOW_ALL" == true && $ARCHIVE_COUNT -gt 0 ]]; then
     meta="$archive_dir/_meta.json"
     if [[ -f "$meta" ]]; then
       title=$(json_field "title" "$meta")
-      echo "  $slug: $title"
+      refs=""
+      a_issue=$(json_field "issue" "$meta" || true)
+      a_pr=$(json_field "pr" "$meta" || true)
+      [[ -n "$a_issue" ]] && refs="${refs} issue:#${a_issue}"
+      [[ -n "$a_pr" ]] && refs="${refs} pr:#${a_pr}"
+      echo "  $slug: $title${refs}"
     else
       echo "  $slug"
     fi

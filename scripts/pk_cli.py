@@ -31,7 +31,7 @@ from pk_search import (  # noqa: E402
     DEFAULT_THRESHOLD,
     SOURCE_TYPES,
 )
-from pk_resolve import Resolver, resolve_read_path  # noqa: E402
+from pk_resolve import Resolver, resolve_read_path, build_backlink_from_result  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

@@ -597,18 +597,17 @@ present_batch() {
   echo "=== Batch Implement Candidates ==="
   echo ""
 
+  local table_spec
   if [[ "$USE_JUDGE" == true ]]; then
-    printf "  %-33s %-30s %-6s %-10s %6s %5s %5s  %-10s\n" "SLUG" "TITLE" "RISK" "JUDGE" "PHASES" "TASKS" "FILES" "UPDATED"
-    printf "  %-33s %-30s %-6s %-10s %6s %5s %5s  %-10s\n" "----" "-----" "----" "-----" "------" "-----" "-----" "-------"
+    table_spec="SLUG:flex:100:left|RISK:fixed:6:left|JUDGE:fixed:10:left|PHASES:fixed:6:right|TASKS:fixed:5:right|FILES:fixed:5:right|UPDATED:fixed:10:left"
   else
-    printf "  %-35s %-35s %-6s %6s %5s %5s  %-10s\n" "SLUG" "TITLE" "RISK" "PHASES" "TASKS" "FILES" "UPDATED"
-    printf "  %-35s %-35s %-6s %6s %5s %5s  %-10s\n" "----" "-----" "----" "------" "-----" "-----" "-------"
+    table_spec="SLUG:flex:100:left|RISK:fixed:6:left|PHASES:fixed:6:right|TASKS:fixed:5:right|FILES:fixed:5:right|UPDATED:fixed:10:left"
   fi
 
+  local table_rows=""
   local i
   for i in "${!CANDIDATE_SLUGS[@]}"; do
     local slug="${CANDIDATE_SLUGS[$i]}"
-    local title="${CANDIDATE_TITLES[$i]}"
     local risk="${CANDIDATE_RISK[$i]}"
     local phases="${CANDIDATE_PHASES[$i]}"
     local tasks="${CANDIDATE_TASKS[$i]}"
@@ -618,23 +617,12 @@ present_batch() {
     updated=$(_relative_date "${CANDIDATE_UPDATED[$i]}")
 
     if [[ "$USE_JUDGE" == true ]]; then
-      if [[ ${#title} -gt 28 ]]; then
-        title="${title:0:25}..."
-      fi
-      if [[ ${#slug} -gt 31 ]]; then
-        slug="${slug:0:28}..."
-      fi
-      printf "  %-33s %-30s %-6s %-10s %6s %5s %5s  %-10s\n" "$slug" "$title" "$risk" "$verdict" "$phases" "$tasks" "$files" "$updated"
+      table_rows+="${slug}|${risk}|${verdict}|${phases}|${tasks}|${files}|${updated}"$'\n'
     else
-      if [[ ${#title} -gt 33 ]]; then
-        title="${title:0:30}..."
-      fi
-      if [[ ${#slug} -gt 33 ]]; then
-        slug="${slug:0:30}..."
-      fi
-      printf "  %-35s %-35s %-6s %6s %5s %5s  %-10s\n" "$slug" "$title" "$risk" "$phases" "$tasks" "$files" "$updated"
+      table_rows+="${slug}|${risk}|${phases}|${tasks}|${files}|${updated}"$'\n'
     fi
   done
+  printf '%s' "$table_rows" | render_table "$table_spec"
 
   echo ""
 
@@ -922,7 +910,7 @@ verify_item() {
 # Print summary of batch run and write machine-readable JSON to _batch-runs/.
 # Reads from RESULT_SLUGS[], RESULT_STATUS[], RESULT_COST[], RESULT_DURATION[],
 # RESULT_OUTPUT_FILE[], RESULT_ERROR[], and RESULT_VERIFY[] arrays.
-# Writes JSON to _work/_batch-runs/implement-<timestamp>.json.
+# Writes JSON to _batch-runs/implement-<timestamp>.json.
 report_results() {
   local attempted=0 completed=0 partial=0 failed=0 skipped=0
   local total_cost=0 total_duration=0
@@ -981,19 +969,20 @@ report_results() {
 
   # List each item with status
   echo "Implementation results:"
+  local path_width=$(( $(term_width) - 30 ))
   for i in "${!RESULT_SLUGS[@]}"; do
     local slug="${RESULT_SLUGS[$i]}"
     local status="${RESULT_STATUS[$i]}"
     local verify="${RESULT_VERIFY[$i]:-unknown}"
 
     if [[ "$status" == "skipped" ]]; then
-      printf "  %-45s (skipped)\n" "_work/$slug/"
+      printf "  %-${path_width}s (skipped)\n" "_work/$slug/"
       continue
     fi
 
     case "$verify" in
       completed)
-        printf "  %-45s (completed)\n" "_work/$slug/"
+        printf "  %-${path_width}s (completed)\n" "_work/$slug/"
         ;;
       partial)
         local plan_file="$WORK_DIR/$slug/plan.md"
@@ -1002,14 +991,14 @@ report_results() {
           checked=$(grep -c '^\- \[x\]' "$plan_file" 2>/dev/null || true)
           total_tasks=$(( checked + $(grep -c '^\- \[ \]' "$plan_file" 2>/dev/null || true) ))
         fi
-        printf "  %-45s (partial -- %s/%s tasks)\n" "_work/$slug/" "$checked" "$total_tasks"
+        printf "  %-${path_width}s (partial -- %s/%s tasks)\n" "_work/$slug/" "$checked" "$total_tasks"
         ;;
       *)
         local error="${RESULT_ERROR[$i]:-}"
         if [[ -n "$error" ]]; then
-          printf "  %-45s (failed -- %s)\n" "_work/$slug/" "$error"
+          printf "  %-${path_width}s (failed -- %s)\n" "_work/$slug/" "$error"
         else
-          printf "  %-45s (failed)\n" "_work/$slug/"
+          printf "  %-${path_width}s (failed)\n" "_work/$slug/"
         fi
         ;;
     esac
@@ -1021,7 +1010,7 @@ report_results() {
   fi
 
   # Write machine-readable JSON
-  local batch_dir="$WORK_DIR/_batch-runs"
+  local batch_dir="$KNOWLEDGE_DIR/_batch-runs"
   mkdir -p "$batch_dir"
 
   local ts

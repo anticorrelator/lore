@@ -6,6 +6,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # --- Parse arguments ---
@@ -26,11 +27,11 @@ done
 # --- Output ---
 if [[ -n "$COMPARE_REF" ]]; then
   # Comparison mode
-  printf "%-25s %8s %8s %8s %6s\n" "Skill" "Before" "After" "Saved" "%"
-  printf "%-25s %8s %8s %8s %6s\n" "─────────────────────────" "────────" "────────" "────────" "──────"
+  table_spec="SKILL:flex:100:left|BEFORE:fixed:8:right|AFTER:fixed:8:right|SAVED:fixed:8:right|%:fixed:6:right"
 
   total_before=0
   total_after=0
+  rows=""
 
   for skill_dir in "$REPO_DIR"/skills/*/; do
     skill_name=$(basename "$skill_dir")
@@ -41,16 +42,16 @@ if [[ -n "$COMPARE_REF" ]]; then
     before=$(git -C "$REPO_DIR" show "$COMPARE_REF:skills/$skill_name/SKILL.md" 2>/dev/null | wc -l | tr -d '[:space:]')
 
     if [[ -z "$before" ]] || [[ "$before" == "0" ]]; then
-      printf "%-25s %8s %8s %8s %5s%%\n" "$skill_name" "(new)" "$after" "-" "-"
+      rows+="${skill_name}|(new)|${after}|-|-"$'\n'
       total_after=$((total_after + after))
     else
       saved=$((before - after))
       if [[ "$before" -gt 0 ]]; then
-        pct=$(printf "%.1f" "$(echo "scale=1; $saved * 100 / $before" | bc)")
+        pct=$(printf "%.1f%%" "$(echo "scale=1; $saved * 100 / $before" | bc)")
       else
-        pct="0.0"
+        pct="0.0%"
       fi
-      printf "%-25s %8s %8s %8s %5s%%\n" "$skill_name" "$before" "$after" "$saved" "$pct"
+      rows+="${skill_name}|${before}|${after}|${saved}|${pct}"$'\n'
       total_before=$((total_before + before))
       total_after=$((total_after + after))
     fi
@@ -58,21 +59,23 @@ if [[ -n "$COMPARE_REF" ]]; then
 
   total_saved=$((total_before - total_after))
   if [[ "$total_before" -gt 0 ]]; then
-    total_pct=$(printf "%.1f" "$(echo "scale=1; $total_saved * 100 / $total_before" | bc)")
+    total_pct=$(printf "%.1f%%" "$(echo "scale=1; $total_saved * 100 / $total_before" | bc)")
   else
-    total_pct="0.0"
+    total_pct="0.0%"
   fi
 
-  printf "%-25s %8s %8s %8s %6s\n" "─────────────────────────" "────────" "────────" "────────" "──────"
-  printf "%-25s %8s %8s %8s %5s%%\n" "Total" "$total_before" "$total_after" "$total_saved" "$total_pct"
+  rows+="Total|${total_before}|${total_after}|${total_saved}|${total_pct}"
+
+  printf '%s' "$rows" | render_table "$table_spec"
   echo ""
   echo "Estimated token savings: ~$(( total_saved * 10 )) tokens (assuming ~10 tokens/line)"
 else
   # Simple mode — just current sizes
-  printf "%-25s %8s %10s\n" "Skill" "Lines" "Est.Tokens"
-  printf "%-25s %8s %10s\n" "─────────────────────────" "────────" "──────────"
+  table_spec="SKILL:flex:100:left|LINES:fixed:8:right|EST.TOKENS:fixed:10:right"
 
   total_lines=0
+  rows=""
+
   for skill_dir in "$REPO_DIR"/skills/*/; do
     skill_name=$(basename "$skill_dir")
     skill_file="$skill_dir/SKILL.md"
@@ -81,10 +84,11 @@ else
     lines=$(wc -l < "$skill_file" | tr -d '[:space:]')
     tokens=$((lines * 10))
     total_lines=$((total_lines + lines))
-    printf "%-25s %8s %10s\n" "$skill_name" "$lines" "$tokens"
+    rows+="${skill_name}|${lines}|${tokens}"$'\n'
   done
 
   total_tokens=$((total_lines * 10))
-  printf "%-25s %8s %10s\n" "─────────────────────────" "────────" "──────────"
-  printf "%-25s %8s %10s\n" "Total" "$total_lines" "$total_tokens"
+  rows+="Total|${total_lines}|${total_tokens}"
+
+  printf '%s' "$rows" | render_table "$table_spec"
 fi

@@ -282,9 +282,13 @@ def main():
 
     except Exception as e:
         # Fail gracefully - log to stderr but exit 0
-        print(f"Error in extract-session-digest: {e}", file=sys.stderr)
+        print(f"[hook] extract-session-digest: {e}", file=sys.stderr)
         sys.exit(0)
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"[hook] extract-session-digest: {e}", file=sys.stderr)
+        sys.exit(0)

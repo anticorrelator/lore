@@ -16,6 +16,17 @@ source "$(dirname "$0")/config.sh"
 BASE_DIR="${LORE_DATA_DIR}/repos"
 TARGET_DIR="${1:-$(pwd)}"
 
+# Check for .lore.config (linked directory)
+source "$(dirname "$0")/lib.sh"
+LORE_CONFIG=$(find_lore_config "$TARGET_DIR" 2>/dev/null) || true
+if [[ -n "$LORE_CONFIG" ]]; then
+  REPO_VALUE=$(parse_lore_config "repo" "$LORE_CONFIG") || true
+  if [[ -n "$REPO_VALUE" ]]; then
+    echo "${BASE_DIR}/${REPO_VALUE}"
+    exit 0
+  fi
+fi
+
 # Try to get git remote URL
 if git -C "$TARGET_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
   REMOTE_URL=$(git -C "$TARGET_DIR" remote get-url origin 2>/dev/null || echo "")

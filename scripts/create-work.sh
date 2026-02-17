@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # create-work.sh — Create a new work item in _work/
 # Usage: bash create-work.sh <name> [directory]
-#        bash create-work.sh --title <name> [--description <text>] [--directory <path>]
+#        bash create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>]
 # Creates _work/<slug>/ with _meta.json and notes.md, then updates the index.
 
 set -euo pipefail
@@ -13,6 +13,8 @@ source "$SCRIPT_DIR/lib.sh"
 NAME=""
 DESCRIPTION=""
 TARGET_DIR=""
+ISSUE=""
+PR=""
 
 if [[ $# -ge 1 && "$1" == --* ]]; then
   # Flag mode
@@ -30,9 +32,17 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
         TARGET_DIR="$2"
         shift 2
         ;;
+      --issue)
+        ISSUE="$2"
+        shift 2
+        ;;
+      --pr)
+        PR="$2"
+        shift 2
+        ;;
       *)
         echo "[work] Error: Unknown flag '$1'" >&2
-        echo "Usage: create-work.sh --title <name> [--description <text>] [--directory <path>]" >&2
+        echo "Usage: create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>]" >&2
         exit 1
         ;;
     esac
@@ -48,7 +58,7 @@ TARGET_DIR="${TARGET_DIR:-$(pwd)}"
 if [[ -z "$NAME" ]]; then
   echo "[work] Error: Missing work item name." >&2
   echo "Usage: create-work.sh <name> [directory]" >&2
-  echo "       create-work.sh --title <name> [--description <text>] [--directory <path>]" >&2
+  echo "       create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>]" >&2
   exit 1
 fi
 KNOWLEDGE_DIR=$(resolve_knowledge_dir)
@@ -100,6 +110,8 @@ cat > "$WORK_DIR/$SLUG/_meta.json" << METAEOF
   "status": "active",
   "branches": $BRANCHES_JSON,
   "tags": [],
+  "issue": "$ISSUE",
+  "pr": "$PR",
   "created": "$TIMESTAMP",
   "updated": "$TIMESTAMP",
   "related_knowledge": []

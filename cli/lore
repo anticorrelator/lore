@@ -8,6 +8,7 @@ LORE_VERSION="0.1.0"
 
 # Resolve SCRIPTS_DIR via the ~/.lore/scripts symlink
 SCRIPTS_DIR="$(cd "$(readlink ~/.lore/scripts || echo ~/.lore/scripts)" && pwd)"
+source "$SCRIPTS_DIR/lib.sh"
 
 # Resolve KDIR once for commands that need it (suppress errors for commands that don't)
 resolve_kdir() {
@@ -64,6 +65,7 @@ Subcommands:
   create    Create a new work item
   list      List active work items
   show      Show a work item's full context
+  set       Set metadata fields (issue, pr) on a work item
   archive   Archive a completed work item
   search    Search across work items
   tasks        Generate tasks from a plan
@@ -492,6 +494,9 @@ cmd_work() {
     show)
       "$SCRIPTS_DIR/load-work-item.sh" "$@"
       ;;
+    set)
+      "$SCRIPTS_DIR/set-work-meta.sh" "$@"
+      ;;
     archive)
       "$SCRIPTS_DIR/archive-work.sh" "$@"
       ;;
@@ -499,7 +504,9 @@ cmd_work() {
       "$SCRIPTS_DIR/search-work.sh" "$@"
       ;;
     tasks)
-      "$SCRIPTS_DIR/generate-tasks-from-plan.sh" "$@"
+      SLUG="$1"
+      KDIR=$(resolve_kdir)
+      python3 "$SCRIPTS_DIR/generate-tasks.py" "$KDIR/_work/$SLUG/plan.md" --knowledge-dir "$KDIR" --slug "$SLUG"
       ;;
     regen-tasks)
       "$SCRIPTS_DIR/regen-tasks.sh" "$@"

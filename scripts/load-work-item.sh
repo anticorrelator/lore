@@ -49,6 +49,8 @@ TITLE=$(json_field "title" "$META")
 STATUS=$(json_field "status" "$META")
 CREATED=$(json_field "created" "$META")
 UPDATED=$(json_field "updated" "$META")
+ISSUE=$(json_field "issue" "$META")
+PR=$(json_field "pr" "$META")
 
 # Extract branches and tags as comma-separated display strings
 BRANCHES=$(json_array_field "branches" "$META" | sed 's/"//g; s/,/, /g')
@@ -60,6 +62,8 @@ echo "Slug: $SLUG"
 echo "Status: $STATUS"
 echo "Branches: ${BRANCHES:-none}"
 echo "Tags: ${TAGS:-none}"
+echo "Issue: ${ISSUE:-none}"
+echo "PR: ${PR:-none}"
 echo "Created: $CREATED"
 echo "Updated: $UPDATED"
 echo ""

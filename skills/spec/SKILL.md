@@ -78,7 +78,7 @@ For single-pass plans where the scope is clear and the agent can identify key fi
    - <claim about scope boundaries or dependencies>
    ```
    State each as fact ("X does Y"), not speculation. These assertions surface in the understanding confirmation step.
-4. Fill in Goal, Design Decisions (with `**Applies to:**` fields mapping each decision to affected phases), Phases, Open Questions
+4. Fill in Goal, Design Decisions (using the `### DN: Title` structured format with `**Decision:**`, `**Rationale:**`, `**Alternatives considered:**`, and `**Applies to:**` fields), Phases, Open Questions
 
    Apply the task consolidation rule: each checkbox = one meaningful unit of work. Consolidate sequential same-file edits.
 
@@ -94,13 +94,13 @@ For single-pass plans where the scope is clear and the agent can identify key fi
 
 Same purpose as the full flow's Step 5.1 — surface assumptions before finalizing.
 
-**Present 5-10 bullet points** from the Key Assertions and Design Decisions. Since short flow has no verification agents, all assertion-sourced bullets are tagged `[unverified]`:
+**Present 5-10 bullet points** from the Key Assertions and Design Decisions. Since short flow has no verification agents, all assertion-sourced bullets are tagged `[unverified]`. For each design decision, include both the decision and its key alternative to surface trade-offs:
 
 ```
 Before finalizing this plan, here is my understanding of the key assumptions:
 
 - [unverified] <claim from Key Assertions> → Context: Key Assertions
-- <design decision> → Design Decision: <decision name>
+- <decision statement> (over <rejected alternative>) → Design Decision: D1: <title>
 ...
 
 Does this match your understanding? Any corrections?
@@ -132,15 +132,38 @@ Team-based divide-and-conquer for complex or uncertain-scope work.
    - Be answerable by exploring files (not by asking the user)
    - Be independent enough to run in parallel
 2. Check the knowledge store index for file hints to include with each investigation
-3. Present the investigation plan to the user:
+3. **Assess complexity** for each investigation using these heuristics:
+   - **simple** — 1-2 key files, narrow question targeting a single function or module
+   - **moderate** — 3-5 key files, or a multi-part question spanning related modules
+   - **complex** — 6+ key files, or a cross-cutting concern (e.g., touches config, runtime, and tests)
+4. Present the investigation plan to the user as a structured preview table:
    ```
-   I'll investigate these areas in parallel:
-   1. <Question 1> — will look at <file hints>
-   2. <Question 2> — will look at <file hints>
+   ## Investigation Plan
+
+   | # | Area / Topic | Key Files | Complexity |
+   |---|-------------|-----------|------------|
+   | 1 | <topic>     | `file1`, `file2` | simple |
+   | 2 | <topic>     | `file1`, `file2`, `file3` | moderate |
+   | 3 | <topic>     | `file1`, ... `file6` | complex |
    ...
-   Proceed, or adjust?
+
+   Proceed, or adjust? (You can request changes — e.g., split a question, drop an area, add a new one, or change scope.)
    ```
-4. Wait for user confirmation before dispatching
+5. Wait for user confirmation before dispatching. If the user requests adjustments (freeform text), revise the table and re-present it. Repeat until approved.
+
+**Example** — for a "add rate limiting to the API" spec:
+```
+## Investigation Plan
+
+| # | Area / Topic | Key Files | Complexity |
+|---|-------------|-----------|------------|
+| 1 | Current middleware chain | `src/middleware/index.ts`, `src/app.ts` | simple |
+| 2 | Auth + session handling | `src/auth/session.ts`, `src/auth/middleware.ts`, `src/types/auth.ts` | moderate |
+| 3 | Request lifecycle & error paths | `src/handlers/`, `src/errors/`, `src/middleware/`, `src/logging/`, `tests/integration/` | complex |
+| 4 | Existing config & env patterns | `src/config.ts`, `src/env.ts` | simple |
+
+Proceed, or adjust? (You can request changes — e.g., split a question, drop an area, add a new one, or change scope.)
+```
 
 ### Step 3: Create investigation team
 
@@ -251,7 +274,7 @@ After all investigations are complete, verify the assertions researchers reporte
 
 From the documented findings, draft the remaining plan sections:
 1. **Goal** — what we're building/changing and why (1 paragraph)
-2. **Design Decisions** — architectural choices with rationale from findings. Include an `**Applies to:**` field in each decision mapping it to affected phases (e.g., "Phase 1 (template update), Phase 3 (migration)")
+2. **Design Decisions** — use the `### DN: Title` format from the template. Each decision requires `**Decision:**`, `**Rationale:**`, `**Alternatives considered:**`, and `**Applies to:**` fields. Number decisions sequentially (D1, D2, ...).
 3. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include a `**Knowledge context:**` block listing knowledge entries relevant to that phase — these flow directly to worker agents via task generation
 
    **Task consolidation rule:** Each `- [ ]` checkbox should be a meaningful unit of work, not a micro-edit. Multiple sequential edits to the same file should be one task (e.g., "Update worker prompt to add capture step and renumber" not three separate tasks for delete/insert/renumber). Aim for 2-5 tasks per phase. If a phase has >5 tasks, look for consolidation opportunities.
@@ -273,12 +296,12 @@ Before finalizing, present a concise understanding summary for the user to valid
 **Present 5-10 bullet points covering:**
 - Key assumptions about the codebase architecture
 - Behavioral claims from verified assertions (mark with `[verified]`) or unverified researcher claims (mark with `[unverified]`)
-- Design decisions and their rationale
+- Design decisions with their key rejected alternative — surfacing what was chosen *over what* makes trade-offs explicit
 - Scope boundaries — what is and is not included
 
 **Traceability:** Each bullet must trace to a specific source. Use `→` to link the claim to its origin:
 - Assertion-sourced bullets: trace to the investigation topic and verification verdict
-- Design decision bullets: trace to the Design Decisions section entry
+- Design decision bullets: trace to the Design Decisions section entry by DN identifier (e.g., `D1: <title>`)
 - Scope bullets: trace to the Goal or user input that established the boundary
 
 **Format:**
@@ -287,7 +310,7 @@ Before finalizing this plan, here is my understanding of the key assumptions:
 
 - [verified] <claim> → Investigation: <topic>, Assertion #N
 - [unverified] <claim> → Investigation: <topic>, Assertion #N
-- <design decision> → Design Decision: <decision name>
+- <decision statement> (over <rejected alternative>) → Design Decision: D1: <title>
 - <scope boundary> → Goal / user input
 ...
 
@@ -381,7 +404,12 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 - <falsifiable claim 2, preserved verbatim from researcher report>
 
 ## Design Decisions
-<!-- Key architectural choices with rationale. Each decision should include an **Applies to:** field mapping it to the affected phases/tasks. -->
+
+### D1: <Decision Title>
+**Decision:** What was decided — a concrete, actionable statement
+**Rationale:** Why this choice over others — the reasoning, constraints, or evidence that led here
+**Alternatives considered:** What other approaches were evaluated and why they were rejected
+**Applies to:** Phase N (<name>), Phase M (<name>) — which phases/tasks this decision affects
 
 ## Phases
 

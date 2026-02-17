@@ -397,6 +397,17 @@ def write_pending_captures(knowledge_dir, candidates):
             "",
         ]
 
+        # Trigger-specific evaluation guidance
+        if c["trigger"] == "design-decision":
+            lines.extend([
+                "**Design rationale priority:** This candidate was flagged as a design decision. "
+                "Capture the *why* — the rationale behind the choice — not just *what* was chosen. "
+                "A statement explaining why a choice was made is more valuable than describing what "
+                "was chosen; the 'what' is recoverable from code, the 'why' is not. If both a "
+                "rationale and a factual observation are present, prefer the rationale.",
+                "",
+            ])
+
         try:
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines))
@@ -411,7 +422,8 @@ def write_pending_captures(knowledge_dir, candidates):
 def main():
     try:
         hook_input = json.loads(sys.stdin.read())
-    except (json.JSONDecodeError, Exception):
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"[hook] stop-novelty-check: Failed to parse hook input: {e}", file=sys.stderr)
         sys.exit(0)
 
     # Guard 1: Prevent infinite loops
@@ -499,4 +511,8 @@ def main():
 
 
 if __name__ == "__main__":
-    fail_open(main)()
+    try:
+        fail_open(main)()
+    except Exception as e:
+        print(f"[hook] stop-novelty-check: {e}", file=sys.stderr)
+        sys.exit(0)

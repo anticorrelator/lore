@@ -74,10 +74,10 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
    ```bash
    lore work tasks <slug>
    ```
-   This outputs a JSON array of task objects with `subject`, `description`, `activeForm`, and `phase` fields. The script extracts unchecked `- [ ]` items from each phase, includes phase objectives, file paths, and backlink context (phase-level `**Knowledge context:**` + cross-cutting `## Related`/`## Design Decisions` references). Already-checked `- [x]` items are skipped (supports resume).
-   Parse the JSON output and execute a `TaskCreate` call for each task object.
+   This outputs the full `tasks.json` schema (`{plan_checksum, generated_at, phases[]}`). Each task in `phases[].tasks[]` has pre-computed `id`, `subject`, `description`, `activeForm`, and `blockedBy` fields. Task descriptions include a `## Prior Knowledge` heading (4000-char budget) with resolved backlinks from phase-level `**Knowledge context:**` + cross-cutting `## Related`/`## Design Decisions` references. The script extracts unchecked `- [ ]` items from each phase (already-checked `- [x]` items are skipped, supports resume).
+   Parse the JSON output and execute a `TaskCreate` call for each task in `phases[].tasks[]`. Set up dependencies using the pre-computed `blockedBy` arrays (these reference task IDs like `"task-1"`, `"task-2"` — map them to actual TaskCreate IDs).
 
-6. **Set up phase dependencies:** Tasks from Phase N+1 get `addBlockedBy` referencing Phase N task IDs (use the `phase` field to group, or the `blockedBy` arrays from `tasks.json`).
+6. **Set up phase dependencies:** Use the pre-computed `blockedBy` arrays from the JSON output. Both the pre-computed `tasks.json` path (item 4c) and the fallback `lore work tasks` path (item 5) produce the same schema with pre-computed dependencies — no manual phase grouping needed.
 
 ## Step 3: Spawn agents
 

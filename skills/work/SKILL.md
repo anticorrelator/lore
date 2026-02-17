@@ -2,7 +2,7 @@
 name: work
 description: "Check project status, remaining tasks, and session context — USE FIRST when asked 'what's left', 'what should I do', 'remaining work', or status questions. Also: create, update, archive, search work items."
 user_invocable: true
-argument_description: "[command] [name] — commands: create, list, update, archive, search, tasks, regen-tasks, heal"
+argument_description: "[command] [name] — commands: create, list, update, set, archive, search, tasks, regen-tasks, heal"
 ---
 
 # /work Skill
@@ -15,11 +15,11 @@ Match the first word of `$ARGUMENTS` to a command below. If no command matches b
 
 ---
 
-### `create <name>`
+### `create <name> [--issue <value>] [--pr <value>]`
 ```bash
-lore work create "<name>"
+lore work create --title "<name>" [--issue "<value>"] [--pr "<value>"]
 ```
-Show the script output. If it exits non-zero, show the error.
+Pass `--issue` and `--pr` only when provided by the user. Show the script output. If it exits non-zero, show the error.
 
 ---
 
@@ -76,6 +76,15 @@ Show the script output.
 
 ---
 
+### `set <name> --issue <value> --pr <value>`
+Resolve name to slug (fuzzy match), then run:
+```bash
+lore work set "<slug>" --issue "<value>" --pr "<value>"
+```
+Both flags are optional — pass only what the user provided. Show the script output.
+
+---
+
 ### `search <query>`
 ```bash
 lore work search "<query>"
@@ -99,7 +108,8 @@ Resolve name to slug (fuzzy match). If no `plan.md` exists, tell the user to run
    ```bash
    lore work tasks "<slug>"
    ```
-   Parse the JSON output. For each task object, execute `TaskCreate` with the `subject`, `description`, and `activeForm` fields. Set up phase dependencies: Phase N+1 tasks get `addBlockedBy` referencing Phase N task IDs.
+   This outputs the full `tasks.json` schema (`{plan_checksum, generated_at, phases[]}`). Each task in `phases[].tasks[]` has pre-computed `id`, `subject`, `description`, `activeForm`, and `blockedBy` fields. Task descriptions include a `## Prior Knowledge` heading (4000-char budget) with resolved backlinks from phase-level `**Knowledge context:**` + cross-cutting `## Related`/`## Design Decisions` references.
+   Parse the JSON output and execute `TaskCreate` for each task in `phases[].tasks[]`. Set up dependencies using the pre-computed `blockedBy` arrays (these reference task IDs like `"task-1"`, `"task-2"` — map them to actual TaskCreate IDs).
 
 Report: "Generated N tasks across M phases with dependencies."
 
@@ -130,7 +140,7 @@ Run **list**. Show the script output directly — no additional processing or su
 
 ---
 
-## Fuzzy Matching (for load, archive, tasks, regen-tasks)
+## Fuzzy Matching (for load, set, archive, tasks, regen-tasks)
 
 When a subcommand needs a slug but the user provided a name, resolve it:
 1. **Exact slug** — exists in `_work/`

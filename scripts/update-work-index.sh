@@ -47,6 +47,8 @@ for meta_file in "$WORK_DIR"/*/_meta.json; do
   STATUS=$(json_field "status" "$meta_file")
   CREATED=$(json_field "created" "$meta_file")
   UPDATED=$(json_field "updated" "$meta_file")
+  ISSUE=$(json_field "issue" "$meta_file" || true)
+  PR=$(json_field "pr" "$meta_file" || true)
 
   # Extract JSON arrays
   BRANCHES=$(json_array_field "branches" "$meta_file")
@@ -72,6 +74,8 @@ for meta_file in "$WORK_DIR"/*/_meta.json; do
       "tags": [${TAGS}],
       "created": "$CREATED",
       "updated": "$UPDATED",
+      "issue": "$ISSUE",
+      "pr": "$PR",
       "has_plan_doc": $HAS_PLAN_DOC
     }
 ENTRY

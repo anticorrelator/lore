@@ -45,5 +45,8 @@ CHECKSUM=$(echo "$OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin);
 
 echo "[work] Regenerated $TASK_COUNT tasks across $PHASE_COUNT phases. New checksum: $CHECKSUM"
 
+# Update _meta.json timestamp
+update_meta_timestamp "$WORK_ITEM_DIR"
+
 # Update work index
 bash "$SCRIPT_DIR/heal-work.sh"

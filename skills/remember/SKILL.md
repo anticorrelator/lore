@@ -61,6 +61,8 @@ If capture constraints were provided in Step 1, apply them as an additional filt
 
 **Synthesis quality signal:** When multiple candidates pass the gate, prefer those that synthesize across sources — insights that required combining information from multiple files, sessions, or components. The following categories are strong positive indicators of synthesis: architectural models, design rationale, cross-cutting conventions, behavioral directives, mental models, and directional intent. Single-source entries (readable from one file) are still captured but rank lower for auto-loading.
 
+**Why > what:** A statement explaining *why* a choice was made is more valuable than a statement describing *what* was chosen. When both a rationale statement and a factual observation pass the gate, prefer the rationale. For example, "we use script-first skill design because it prevents instruction fade in SKILL.md" outranks "skills delegate to bash scripts" — the second is recoverable from code; the first is not.
+
 ## Step 3: Scan for thread updates and preference signals
 
 Review the conversation for thread-worthy content:

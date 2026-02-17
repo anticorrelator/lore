@@ -28,12 +28,24 @@ json_field() {
 
 # --- slugify ---
 # Convert a string to a URL-friendly kebab-case slug.
+# Strips common stopwords to produce more compact slugs.
 # Usage: slug=$(slugify "My Work Item Name")
 # Output: "my-work-item-name"
 slugify() {
   local input="$1"
-  echo "$input" \
-    | tr '[:upper:]' '[:lower:]' \
+  local lower
+  lower=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+  local stripped
+  stripped=$(echo "$lower" \
+    | sed -E 's/(^| )(the|a|an|and|or|but|with|for|via|from|into|after|before|between|through|about|during|using|based)( |$)/ /g' \
+    | sed -E 's/(^| )(the|a|an|and|or|but|with|for|via|from|into|after|before|between|through|about|during|using|based)( |$)/ /g')
+  # Fall back to original if stopword removal left only whitespace
+  local check
+  check=$(echo "$stripped" | tr -d '[:space:]')
+  if [[ -z "$check" ]]; then
+    stripped="$lower"
+  fi
+  echo "$stripped" \
     | sed 's/[^a-z0-9]/-/g' \
     | sed 's/--*/-/g' \
     | sed 's/^-//;s/-$//' \
@@ -74,6 +86,52 @@ get_mtime() {
   else
     stat -c %Y "$file" 2>/dev/null || echo "0"
   fi
+}
+
+# --- find_lore_config ---
+# Walk from a starting directory up to / looking for a .lore.config file.
+# Echoes the absolute path to the file and returns 0 if found, returns 1 if not.
+# Usage: config_path=$(find_lore_config) && echo "found at $config_path"
+#        find_lore_config "/some/start/dir"
+find_lore_config() {
+  local dir="${1:-$(pwd)}"
+  dir="$(cd "$dir" 2>/dev/null && pwd)" || return 1
+  while true; do
+    if [[ -f "$dir/.lore.config" ]]; then
+      echo "$dir/.lore.config"
+      return 0
+    fi
+    [[ "$dir" == "/" ]] && break
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+# --- parse_lore_config ---
+# Extract a value by key from a .lore.config file.
+# Ignores blank lines and lines starting with #.
+# Usage: repo=$(parse_lore_config "repo" "/path/to/.lore.config")
+# Output: The value after the = sign, with leading/trailing whitespace stripped.
+# Returns 0 if key found, 1 if not found or file missing.
+parse_lore_config() {
+  local key="$1"
+  local file="$2"
+  [[ -f "$file" ]] || return 1
+  local line value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Skip blank lines and comments
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    # Match key= at start of line
+    if [[ "$line" == "${key}="* ]]; then
+      value="${line#"${key}="}"
+      # Strip leading and trailing whitespace
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      echo "$value"
+      return 0
+    fi
+  done < "$file"
+  return 1
 }
 
 # --- json_array_field ---
@@ -117,6 +175,25 @@ check_fts_available() {
   USE_FTS=0
   if command -v python3 &>/dev/null && python3 -c "import sqlite3" 2>/dev/null; then
     USE_FTS=1
+  fi
+}
+
+# --- update_meta_timestamp ---
+# Update the "updated" field in a work item's _meta.json to the current UTC time.
+# Usage: update_meta_timestamp "$WORK_DIR/$slug"
+# Args: $1 = work item directory (containing _meta.json)
+# No-op if _meta.json doesn't exist.
+update_meta_timestamp() {
+  local work_item_dir="$1"
+  local meta_file="$work_item_dir/_meta.json"
+  [[ -f "$meta_file" ]] || return 0
+  local ts
+  ts=$(timestamp_iso)
+  # Replace the "updated" field value in-place
+  if [[ "$(uname)" == "Darwin" ]]; then
+    sed -i '' "s/\"updated\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"updated\": \"$ts\"/" "$meta_file"
+  else
+    sed -i "s/\"updated\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"updated\": \"$ts\"/" "$meta_file"
   fi
 }
 
@@ -483,4 +560,161 @@ else:
     # Fallback: use the filename as-is
     print(f'## {name}')
 " "$filename"
+}
+
+# --- term_width ---
+# Get the current terminal width in columns.
+# Tries tput first, falls back to $COLUMNS or 100. Enforces a minimum of 100.
+# Usage: width=$(term_width)
+# Output: Integer column count (e.g., "120")
+term_width() {
+  local w
+  w=$(tput cols 2>/dev/null | tr -d '[:space:]')
+  if [[ -z "$w" || "$w" -le 0 ]] 2>/dev/null; then
+    w="${COLUMNS:-100}"
+    w=$(echo "$w" | tr -d '[:space:]')
+  fi
+  if [[ "$w" -lt 100 ]] 2>/dev/null; then
+    w=100
+  fi
+  echo "$w"
+}
+
+# --- render_table ---
+# Render a formatted table to stdout with dynamic column widths.
+# Reads pipe-delimited data rows from stdin and formats them according to a
+# column specification string.
+#
+# Column spec format: "NAME:type:size:align|NAME:type:size:align|..."
+#   type  — "flex" (proportional) or "fixed" (absolute)
+#   size  — character width (fixed) or relative weight (flex)
+#   align — "left" or "right"
+#
+# Flex columns share the remaining terminal width after fixed columns are
+# allocated. Minimum flex column width is 10 characters. Values that exceed
+# their column width are truncated with a ".." suffix.
+#
+# Usage: echo "val1|val2|val3" | render_table "COL1:flex:40:left|COL2:fixed:10:right|COL3:flex:60:left"
+# Output:
+#   COL1          COL2       COL3
+#   ----------    ---------- ----------------
+#   val1               val2 val3
+render_table() {
+  local spec="$1"
+  local tw
+  tw=$(term_width)
+
+  # Parse column spec into parallel arrays
+  local -a col_names col_types col_sizes col_aligns col_widths
+  local IFS='|'
+  local i=0
+  for col_spec in $spec; do
+    local saved_ifs="$IFS"
+    IFS=':'
+    local -a parts=($col_spec)
+    IFS="$saved_ifs"
+    col_names+=("${parts[0]}")
+    col_types+=("${parts[1]}")
+    col_sizes+=("${parts[2]}")
+    col_aligns+=("${parts[3]}")
+    i=$((i + 1))
+  done
+  local ncols=$i
+
+  # Calculate fixed total and flex total weight
+  local fixed_total=0
+  local flex_weight_total=0
+  for ((i = 0; i < ncols; i++)); do
+    if [[ "${col_types[$i]}" == "fixed" ]]; then
+      fixed_total=$((fixed_total + col_sizes[$i]))
+    else
+      flex_weight_total=$((flex_weight_total + col_sizes[$i]))
+    fi
+  done
+
+  # Gaps between columns: (ncols - 1) single spaces
+  local gaps=$((ncols - 1))
+  # 2-char indent
+  local indent=2
+  local flex_space=$((tw - indent - fixed_total - gaps))
+  if [[ "$flex_space" -lt 0 ]]; then
+    flex_space=0
+  fi
+
+  # Assign widths
+  for ((i = 0; i < ncols; i++)); do
+    if [[ "${col_types[$i]}" == "fixed" ]]; then
+      col_widths+=("${col_sizes[$i]}")
+    else
+      local w=10
+      if [[ "$flex_weight_total" -gt 0 ]]; then
+        w=$((flex_space * col_sizes[$i] / flex_weight_total))
+      fi
+      if [[ "$w" -lt 10 ]]; then
+        w=10
+      fi
+      col_widths+=("$w")
+    fi
+  done
+
+  # Build printf format string
+  local fmt="  "  # 2-space indent
+  for ((i = 0; i < ncols; i++)); do
+    if [[ "$i" -gt 0 ]]; then
+      fmt="${fmt} "
+    fi
+    if [[ "${col_aligns[$i]}" == "right" ]]; then
+      fmt="${fmt}%${col_widths[$i]}s"
+    else
+      fmt="${fmt}%-${col_widths[$i]}s"
+    fi
+  done
+
+  # Helper: truncate a value to a given width, appending ".." if needed
+  _trunc() {
+    local val="$1"
+    local maxw="$2"
+    if [[ "${#val}" -gt "$maxw" ]]; then
+      if [[ "$maxw" -le 2 ]]; then
+        echo "${val:0:$maxw}"
+      else
+        echo "${val:0:$((maxw - 2))}.."
+      fi
+    else
+      echo "$val"
+    fi
+  }
+
+  # Render header
+  local -a hdr_vals
+  for ((i = 0; i < ncols; i++)); do
+    hdr_vals+=("$(_trunc "${col_names[$i]}" "${col_widths[$i]}")")
+  done
+  printf "${fmt}\n" "${hdr_vals[@]}"
+
+  # Render separator
+  local -a sep_vals
+  for ((i = 0; i < ncols; i++)); do
+    local dashes=""
+    local w="${col_widths[$i]}"
+    dashes=$(printf '%*s' "$w" '' | tr ' ' '-')
+    sep_vals+=("$dashes")
+  done
+  printf "${fmt}\n" "${sep_vals[@]}"
+
+  # Render data rows from stdin
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" ]] && continue
+    local -a row_vals=()
+    local saved_ifs="$IFS"
+    IFS='|'
+    local -a fields=($line)
+    IFS="$saved_ifs"
+    for ((i = 0; i < ncols; i++)); do
+      local val="${fields[$i]:-}"
+      row_vals+=("$(_trunc "$val" "${col_widths[$i]}")")
+    done
+    printf "${fmt}\n" "${row_vals[@]}"
+  done
 }

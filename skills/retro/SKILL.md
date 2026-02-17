@@ -34,7 +34,9 @@ Report:
 
 Read existing artifacts only. No new exploration or code reading needed.
 
-**Work cycle type detection:** Determine if this was an implementation cycle (has `tasks.json` or `/implement` session entries) or a review/research cycle (no workers, findings came from interactive dialog). This affects how Dimensions 1 and 4 are scored — see scoring notes below.
+**Work cycle type detection:** Determine if this was an implementation cycle (has `tasks.json` or `/implement` session entries), a review/research cycle (no workers, findings came from interactive dialog), or a **spec-short cycle** (`/spec short` — single-agent plan authoring, no workers or subagents). This affects how Dimensions 1 and 4 are scored — see scoring notes below.
+
+**Spec-short cycle evidence profile:** Most evidence steps return empty (no workers, no friction log). Primary evidence: `plan.md` (design decisions + knowledge context blocks), `tasks.json` (backlink resolution quality), conversation context. Score Dimension 1 as "setup quality" (did the plan set up good delivery for future workers?) and Dimension 4 on whether knowledge entries were load-bearing in design decisions.
 
 ### 2a: Worker observations
 
@@ -48,7 +50,7 @@ Read `plan.md` and extract every `**Knowledge context:**` block per phase. These
 
 **Fallback path audit:** If `tasks.json` does not exist and `lore work tasks` was used (check notes.md for `/implement` session entries), compare the plan's `**Knowledge context:**` backlinks against what the generated task descriptions actually contain. If plan phases have backlinks but generated tasks show "No backlinks found" or lack `## Prior Knowledge` sections, this is a **pipeline delivery failure** — the task generation script dropped the plan's knowledge context. This is worse than an unresolved backlink (which at least signals something was attempted) because it's completely silent. Score Dimension 1 no higher than 2 when this occurs.
 
-**Prefetch hit rate (spec-only cycles):** When the spec lead ran `lore prefetch` for each investigation topic, count how many returned useful content vs. empty results. A low hit rate (<40%) indicates a domain coverage gap — the spec investigated an area where little or no prior knowledge exists. This is the most direct measure of store coverage for the investigated domain. Report as: "Prefetch hit rate: N/M investigations received prior knowledge (X%)". Affects Dimension 1 (attempted delivery but nothing to deliver ≠ didn't attempt delivery) and Dimension 3 (systematic coverage gap). A low hit rate with high Dimension 2 (what existed was good) and low Dimension 3 (many gaps) signals a focused coverage gap worth proactive seeding — the store's quality is fine, its breadth is the problem.
+**Prefetch hit rate (spec-only cycles):** When the spec lead ran `lore prefetch` for each investigation topic, count how many returned useful content vs. empty results. A low hit rate (<40%) indicates either a domain coverage gap OR a query recall failure — disambiguate by checking the knowledge index for entries in the same domain under different terms. If entries exist but queries missed them, this is a recall failure (see `failure-modes.md` Section C), not a coverage gap. Report as: "Prefetch hit rate: N/M investigations received prior knowledge (X%). Cause: coverage gap / query recall failure / mixed." Affects Dimension 1 (attempted delivery but nothing to deliver ≠ didn't attempt delivery ≠ failed to retrieve what exists) and Dimension 3 (coverage gap only, not recall failure). A low hit rate from recall failure with entries confirmed present signals a retrieval tooling problem, not a store quality problem — score Dimension 3 based on actual coverage, not prefetch results.
 
 ### 2c: Session entries
 
@@ -148,11 +150,7 @@ Workers who read code *with* design rationale ("we're resisting instruction fade
 - 2: Marginal — system was consulted but savings were minimal (estimate: <2 file reads prevented, <5k tokens). Didn't change outcomes or significantly reduce exploration
 - 1: No measurable impact — work would have been identical without it
 
-**Interpretation note:** When Dimensions 1-4 are all 4-5 but Delta is 3 or below, this is a **plumbing-vs-value gap** — the delivery mechanics were sound but the knowledge didn't change outcomes. This is expected for small, well-patterned work items where existing code already demonstrates the pattern. The knowledge system's delta for such items is primarily at *spec time* (informing scope, design decisions, gap identification), not implementation time. Score Delta based on the full work cycle including spec, not just implementation.
-
-**Token efficiency note:** A 150-token knowledge entry that eliminates 5000 tokens of code reading is a 33x efficiency gain. When estimating token savings, count: file reads prevented (each ~500-2000 tokens), grep/search cycles avoided, wrong-path explorations short-circuited. "Would have figured it out" is not neutral if figuring it out costs thousands of tokens of context window.
-
-**Meta/self-referential work items:** When the implementation IS knowledge work (creating entries, editing knowledge conventions, enhancing the knowledge store itself), Delta will be inherently low (1-2) regardless of delivery quality. Workers are already knowledge-domain-native — they understand entry formats, capture criteria, and store conventions from their agent prompt and task descriptions. The knowledge system helps build itself, but the tasks don't need its guidance the way code-implementation tasks do. Score honestly but note the meta-work classification so it doesn't drag down trend analysis. These items are better evaluated on *outcome quality* (did the new entries/conventions actually improve subsequent work?) than on *implementation delta*.
+**Interpretation notes:** See `failure-modes.md` section D for Delta modifiers (plumbing-vs-value gap, meta-work, prototype-cascade, knowledge saturation). Key calibration: "would have figured it out" is not neutral if figuring it out costs thousands of tokens. Count file reads prevented (each ~500-2000 tokens), grep cycles avoided, wrong-path explorations short-circuited. Score Delta based on the full work cycle including spec, not just implementation.
 
 ## Step 4: Write Journal Entry
 
@@ -168,57 +166,23 @@ lore journal write \
 
 ## Step 5: Evolve the Protocol
 
-**This step is mandatory.** At least one concrete change per retro. Edit `skills/retro/SKILL.md` directly.
+**This step is mandatory.** At least one concrete change per retro. Edit `skills/retro/SKILL.md` or `skills/retro/failure-modes.md` directly.
 
-Patterns to watch for:
+### Meta-patterns to watch for
 
-1. **Ceiling dimensions:** Any dimension at 5/5 for 2+ consecutive retros on different work items: raise the bar (add sub-criteria, require stronger evidence) or replace with a dimension that produces more signal.
+1. **Ceiling dimensions:** Any dimension at 5/5 for 2+ consecutive retros on different work items — raise the bar or replace with a dimension that produces more signal.
+2. **New failure modes:** If this retro revealed a failure not in `failure-modes.md`, add it there.
+3. **Dead dimensions:** Dimensions that consistently score 3/5 regardless of performance — restructure scoring criteria or replace.
+4. **Evidence quality:** If a score was hard to justify because evidence didn't exist in artifacts, note what's needed and whether it's worth adding to worker/spec reporting.
 
-2. **New failure modes:** If this retro revealed a knowledge system failure not covered by any existing dimension, add a sub-dimension or new dimension to catch it in future retros.
+### Specific failure mode reference
 
-3. **Dead dimensions:** Dimensions that consistently produce no signal (always 3/5 regardless of actual performance): restructure the scoring criteria to discriminate better, or replace.
-
-4. **Evidence quality:** If a dimension score was hard to justify because the right evidence didn't exist in the artifacts, note what evidence would be needed and whether it's worth adding to worker/spec reporting.
-
-5. **Knowledge-as-consumer vs knowledge-as-contributor:** If a retro reveals the knowledge store was primarily *updated by* the work rather than *informing* the work, note this in Dimension 4. This is a signal the store is lagging behind active development and needs proactive updates before the next cycle.
-
-6. **Plumbing-vs-value gap:** If Dimensions 1-4 are all 4-5/5 but Delta is ≤3/5, the knowledge system's delivery mechanics are working but its *value contribution* is low for this work item type. Before treating this as a problem, consider: (a) was the work item small/well-patterned enough that code alone was sufficient? (b) did the knowledge contribute at spec time rather than implementation time? If (a), this is an expected ceiling — the knowledge system adds more value to novel or cross-cutting work. If (b), consider whether the retro should expand its scope to include the spec phase, not just implementation.
-
-7. **Backlink staleness:** If >30% of backlinks in tasks.json `## Prior Knowledge` sections are unresolved, knowledge store restructuring (e.g., `/renormalize`) broke plan references. This is a delivery infrastructure failure — entries exist but can't be found. Consider: (a) whether `/renormalize` should update backlinks in active work items, (b) whether `tasks.json` generation should warn on unresolved backlinks rather than silently including `[unresolved]` markers.
-
-8. **Pipeline delivery failures:** If the plan has `**Knowledge context:**` backlinks but the task generation path (especially fallback `lore work tasks`) produces tasks without resolved knowledge, the entire knowledge delivery pipeline is broken for that implementation. This is a silent failure — the plan looks complete, the tasks look reasonable, but workers get zero knowledge context. Track whether this recurs across retros; if so, the fix is in `generate-tasks.py` backlink resolution, not in `/implement` or `/retro`.
-
-9. **Lead-bypass of pre-resolved knowledge:** When tasks.json has `## Prior Knowledge` sections (backlinks resolved, content embedded) but the lead writes custom TaskCreate descriptions that omit or condense this content, workers receive degraded knowledge store context despite the pipeline succeeding. Two severity levels:
-
-   **Full bypass** (Dimension 1 ≤ 2): Lead's TaskCreate descriptions completely omit `## Prior Knowledge` content. Workers start with zero knowledge context. This happens when the lead judges a concrete code reference (e.g., "read sibling-script.sh") as more actionable than abstracted knowledge entries. For pattern-following work items where a sibling file IS the reference, this may be justified — but it should be explicit, not silent.
-
-   **Pointer bypass** (Dimension 1 ≤ 3): Lead's TaskCreate descriptions include a reference/pointer to pre-resolved knowledge (e.g., "Tasks contain pre-resolved knowledge — read the full task description for design rationale") but don't embed the actual content. Workers know knowledge exists but must search for it, converting push delivery into pull. Less severe than full bypass because awareness is maintained, but violates push-over-pull — the content was already resolved and available.
-
-   Detection: compare tasks.json task descriptions against the actual TaskCreate descriptions used in the `/implement` session. Note whether the bypass was *justified* vs *accidental* (lead condensed descriptions for brevity without realizing the content loss).
-
-10. **Cold-start research penalty:** When `/spec` investigates a domain with no existing knowledge entries, `lore prefetch` returns empty and the lead may skip embedding preambles entirely — researchers then do 100% manual exploration. This is a valid cold-start scenario (no knowledge exists yet), but the lead should still run prefetch and embed whatever is returned (even cross-domain entries can provide useful orientation). When prefetch returns truly nothing, the researcher prompt should explicitly note "No prior knowledge found for this domain — report any architectural patterns or conventions you discover for capture." This turns cold-start research into a knowledge-seeding opportunity rather than a silent gap. Track cold-start occurrences: if the same domain gets cold-start penalties across retros, the store has a coverage gap worth proactively filling.
-
-11. **Prefetch pipeline silent failure:** When `lore prefetch` produces no output (exits 0 but returns empty), the lead may silently fall back to manually composing preambles from session-start context or skip knowledge injection entirely. This masks a tool failure — researchers get knowledge through a fragile manual path (or none at all) while the pipeline appears functional. Detection: check whether researcher prompts contain `## Prior Knowledge` blocks that came from prefetch output vs manually-composed content from session-start loaded entries. If the lead composed preambles manually while prefetch was available, this is a pipeline failure regardless of whether researchers got useful context. Scoring impact: Dimension 1 no higher than 3 (delivery succeeded manually but pipeline failed). Track whether prefetch failures correlate with specific query patterns or knowledge store sizes.
-
-12. **Phantom backlinks vs stale backlinks:** Distinguish between two causes of unresolved backlinks in tasks.json:
-
-   **Stale backlinks** (item 7): Entry existed once but was moved/renamed by `/renormalize` or manual restructuring. The slug was valid at plan-authoring time. Fix: update backlinks in active work items during renormalize.
-
-   **Phantom backlinks**: Plan author cited entries that *never existed* — the slug describes a concept that should have an entry but doesn't. This signals a **knowledge coverage gap**, not an infrastructure failure. The plan author's intuition about what knowledge should exist is itself valuable signal.
-
-   Detection: for each unresolved backlink, check whether any entry ever existed at that path (search by slug fragments across categories). If no match anywhere, it's phantom. If a similar entry exists under a different path/name, it's stale.
-
-   Scoring impact: Phantom backlinks affect Dimension 3 (gaps) more than Dimension 1 (delivery) — the pipeline correctly reported "not found" because the knowledge genuinely doesn't exist. Stale backlinks affect Dimension 1 (delivery infrastructure failed). When both co-occur, score both dimensions accordingly.
-
-   Action: Phantom backlink slugs from retros should be collected as proactive capture candidates. If the same domain produces phantoms across retros, create a work item for knowledge seeding in that area.
-
-13. **Compound failure scoring:** When multiple failure modes co-occur (e.g., high unresolved rate + lead bypass + phantom backlinks), the lowest individual dimension cap applies. Do not average — compound failures are worse than their individual components because each layer that should compensate (tasks.json pre-resolution → lead prefetch → lead manual embedding) failed in sequence. When all three layers fail, Dimension 1 is 1-2 regardless of whether workers eventually found what they needed through manual exploration.
-
-14. **Prototype-cascade effect on Delta scoring:** When a batch of similar tasks exists (e.g., 5 lens skills following the same skeleton), the knowledge system's value concentrates on the first task — the prototype. Once the prototype is created, subsequent workers reference it as the primary template rather than knowledge entries. This is correct behavior (concrete code > abstract conventions), but it means Delta for the batch overstates the knowledge system's per-task contribution. When scoring Delta for batched work, assess: (a) did knowledge entries shape the prototype's design? (b) would the prototype have been different without knowledge context? If yes to both, the knowledge system's contribution is real but indirect for tasks 2-N. Score Delta based on the full batch including the prototype, not averaged across tasks. Note when prototype-cascade occurred so trend analysis can distinguish "knowledge shaped the template" from "knowledge was irrelevant after task 1."
-
-15. **Spec-cycle cold-start tracking:** When `/spec` runs prefetch for researcher prompts and gets empty results, this signals a knowledge coverage gap in that investigation domain. The lead should: (a) note which investigations had cold-start (empty prefetch) in the `/remember` step as knowledge-seeding targets, (b) after investigations complete, assess whether the findings would have been useful as pre-existing knowledge entries (most will be — that's what capture is for). Scoring impact on Dimension 1: cold-start for >50% of investigations caps Delivery at 3 — the pipeline worked but the store lacked coverage. Cold-start for >75% caps at 2. When the same investigation domains produce cold-starts across multiple specs (e.g., "agent communication patterns" is always empty), create a proactive knowledge-seeding work item rather than waiting for organic capture.
-
-16. **Justified lead-bypass and the code-level-instructions pattern:** When the lead reads all target files before spawning workers (to verify plan feasibility or compose dependencies), the lead accumulates enough context to write code-level worker prompts (exact line numbers, code snippets, precise edit instructions). These prompts are strictly more actionable than abstract knowledge entries for simple, well-specified edits. The lead then rationally bypasses tasks.json knowledge content — not from ignorance but from having better information. Detection: lead's worker prompts contain code-level specifics (line numbers, function signatures, exact before/after) rather than referencing `## Prior Knowledge` sections. Scoring: Dimension 1 stays at 2 (workers still received zero knowledge context), but Delta should note that the bypass was rational — knowledge value was at spec time (plan authoring), not implementation time. The actionable takeaway is not "deliver knowledge to workers" but "the knowledge system's ROI for small/well-specified work items is in plan quality, not worker efficiency." When this pattern recurs, consider whether `/implement` should skip knowledge delivery for work items below a complexity threshold (e.g., ≤5 tasks, all single-file edits).
+Consult `skills/retro/failure-modes.md` when scoring reveals anomalies. It catalogs five groups:
+- **A. Backlink resolution failures** — stale, phantom, pipeline, partial, compound (affects Dim 1, 3)
+- **B. Lead bypass** — full, pointer, justified, with evidence availability notes (affects Dim 1, 5)
+- **C. Cold-start and prefetch failures** — domain gaps, silent tool failures, spec-cycle tracking (affects Dim 1, 3)
+- **C2. Spec investigation factual errors** — lifecycle misclassification, duplication overestimates, caller count errors (affects Dim 3, 4)
+- **D. Delta modifiers** — prototype-cascade, knowledge saturation, meta-work, plumbing-vs-value gap (affects Dim 5)
 
 Record all changes in the journal entry and the report.
 

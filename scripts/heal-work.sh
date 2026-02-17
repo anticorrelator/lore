@@ -47,7 +47,9 @@ for dir in "$WORK_DIR"/*/; do
   "tags": [],
   "created": "$TIMESTAMP",
   "updated": "$TIMESTAMP",
-  "related_knowledge": []
+  "related_knowledge": [],
+  "issue": "",
+  "pr": ""
 }
 METAEOF
     FINDINGS+=("[heal] Created missing _meta.json for '$DIRNAME'")

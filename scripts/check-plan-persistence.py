@@ -22,7 +22,8 @@ from transcript import resolve_knowledge_dir, fail_open
 def main():
     try:
         hook_input = json.loads(sys.stdin.read())
-    except (json.JSONDecodeError, Exception):
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"[hook] check-plan-persistence: Failed to parse hook input: {e}", file=sys.stderr)
         sys.exit(0)
 
     # Prevent infinite loops — if we already blocked once, let it through
@@ -135,4 +136,8 @@ def main():
 
 
 if __name__ == "__main__":
-    fail_open(main)()
+    try:
+        fail_open(main)()
+    except Exception as e:
+        print(f"[hook] check-plan-persistence: {e}", file=sys.stderr)
+        sys.exit(0)

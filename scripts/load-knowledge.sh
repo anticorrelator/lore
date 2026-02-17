@@ -5,6 +5,11 @@
 
 set -euo pipefail
 
+SCRIPT_NAME="load-knowledge"
+
+# Hook failure diagnostic trap
+trap 'echo "[hook] $SCRIPT_NAME: Failed at line $LINENO with exit code $?" >&2' ERR
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KNOWLEDGE_DIR=$("$SCRIPT_DIR/resolve-repo.sh" 2>/dev/null) || exit 0
 

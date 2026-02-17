@@ -19,9 +19,11 @@ lore capture --insight "..." --context "..." --category "..." --confidence "high
 - A gotcha or pitfall is encountered that would bite someone again
 - The user corrects a misconception or provides domain knowledge
 
+**Why > what:** A statement explaining *why* a choice was made is more valuable than a statement describing *what* was chosen. The "what" is recoverable from code; the "why" is not. When both a rationale and a factual observation pass the capture gate, prefer the rationale.
+
 **High-value capture categories (all require synthesis across multiple sources):**
-1. **Architectural models** — how components connect, what the layers are, where data flows. *Example: "Lore separates logic (repo) from data (~/.lore/). The symlink at ~/.lore/scripts/ is the portability layer."*
-2. **Design rationale** — why the architecture is this way, what was rejected, what constraints drove decisions. *Example: "Script-first because mechanical subcommands are faster than improvisation."*
+1. **Design rationale** — why the architecture is this way, what was rejected, what constraints drove decisions. *Example: "Script-first because mechanical subcommands are faster than improvisation."*
+2. **Architectural models** — how components connect, what the layers are, where data flows. *Example: "Lore separates logic (repo) from data (~/.lore/). The symlink at ~/.lore/scripts/ is the portability layer."*
 3. **Cross-cutting conventions** — patterns that span many files and can't be seen from one. *Example: "All scripts source lib.sh; defensive tr -d sanitization throughout."*
 4. **Behavioral directives** — observed mistakes crystallized into rules. *Example: "Don't bypass /work for CRUD ops."*
 5. **Mental models** — frameworks for recognizing categories of situations. *Example: "Bypass taxonomy: instruction fade, faster-path, abstract activation threshold."*

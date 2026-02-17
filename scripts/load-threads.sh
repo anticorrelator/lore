@@ -5,6 +5,11 @@
 
 set -euo pipefail
 
+SCRIPT_NAME="load-threads"
+
+# Hook failure diagnostic trap
+trap 'echo "[hook] $SCRIPT_NAME: Failed at line $LINENO with exit code $?" >&2' ERR
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KNOWLEDGE_DIR=$("$SCRIPT_DIR/resolve-repo.sh" 2>/dev/null) || exit 0
 
@@ -73,6 +78,87 @@ echo "=== Conversational Threads ==="
 echo ""
 
 # Parse index and get threads with their tiers
+THREAD_DATA=$(python3 -c "
+import json, sys
+try:
+    with open('$INDEX_FILE', 'r') as f:
+        idx = json.load(f)
+    threads = idx.get('threads', [])
+    for t in threads:
+        print(f\"{t['slug']}|{t['tier']}\")
+except Exception as e:
+    sys.exit(0)
+" 2>/dev/null) || exit 0
+
+# --- Auto-demote stale active threads ---
+# Demote active threads to dormant if not updated in last 14 days (~10 sessions).
+# Uses the 'updated' timestamp from _meta.json to determine staleness.
+STALENESS_DAYS=14
+CURRENT_TIMESTAMP=$(date -u +%s)
+STALENESS_SECONDS=$((STALENESS_DAYS * 86400))
+
+while IFS='|' read -r slug tier; do
+  [[ "$tier" == "active" ]] || continue
+  THREAD_DIR="$THREADS_DIR/${slug}"
+  META_FILE="$THREAD_DIR/_meta.json"
+  [[ -f "$META_FILE" ]] || continue
+
+  # Get updated timestamp and convert to unix epoch
+  UPDATED_TS=$(python3 -c "
+import json, sys
+from datetime import datetime
+try:
+    with open('$META_FILE') as f:
+        m = json.load(f)
+    updated_str = m.get('updated', '')
+    if not updated_str:
+        print(0)
+    else:
+        dt = datetime.fromisoformat(updated_str.replace('Z', '+00:00'))
+        print(int(dt.timestamp()))
+except:
+    print(0)
+" 2>/dev/null)
+
+  if [[ $UPDATED_TS -eq 0 ]]; then
+    continue
+  fi
+
+  AGE_SECONDS=$((CURRENT_TIMESTAMP - UPDATED_TS))
+
+  if [[ $AGE_SECONDS -gt $STALENESS_SECONDS ]]; then
+    # Demote to dormant
+    python3 -c "
+import json, sys
+try:
+    with open('$META_FILE', 'r') as f:
+        m = json.load(f)
+    m['tier'] = 'dormant'
+    with open('$META_FILE', 'w') as f:
+        json.dump(m, f, indent=2)
+except Exception as e:
+    sys.exit(1)
+" 2>/dev/null
+
+    # Update index to reflect tier change
+    python3 -c "
+import json, sys
+try:
+    with open('$INDEX_FILE', 'r') as f:
+        idx = json.load(f)
+    for t in idx.get('threads', []):
+        if t['slug'] == '$slug':
+            t['tier'] = 'dormant'
+            break
+    with open('$INDEX_FILE', 'w') as f:
+        json.dump(idx, f, indent=2)
+except:
+    sys.exit(1)
+" 2>/dev/null
+  fi
+done <<< "$THREAD_DATA"
+
+# Re-read THREAD_DATA after potential demotions
 THREAD_DATA=$(python3 -c "
 import json, sys
 try:

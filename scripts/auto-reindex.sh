@@ -5,6 +5,11 @@
 
 set -euo pipefail
 
+SCRIPT_NAME="auto-reindex"
+
+# Hook failure diagnostic trap
+trap 'echo "[hook] $SCRIPT_NAME: Failed at line $LINENO with exit code $?" >&2' ERR
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Resolve the knowledge directory for the current project
