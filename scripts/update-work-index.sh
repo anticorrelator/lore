@@ -58,6 +58,10 @@ for meta_file in "$WORK_DIR"/*/_meta.json; do
   HAS_PLAN_DOC=false
   [[ -f "$ITEM_DIR/plan.md" ]] && HAS_PLAN_DOC=true
 
+  # Check if execution-log.md exists
+  HAS_EXECUTION_LOG=false
+  [[ -f "$ITEM_DIR/execution-log.md" ]] && HAS_EXECUTION_LOG=true
+
   # Add comma separator
   if [[ "$FIRST" == true ]]; then
     FIRST=false
@@ -76,7 +80,8 @@ for meta_file in "$WORK_DIR"/*/_meta.json; do
       "updated": "$UPDATED",
       "issue": "$ISSUE",
       "pr": "$PR",
-      "has_plan_doc": $HAS_PLAN_DOC
+      "has_plan_doc": $HAS_PLAN_DOC,
+      "has_execution_log": $HAS_EXECUTION_LOG
     }
 ENTRY
 

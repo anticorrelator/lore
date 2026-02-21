@@ -17,6 +17,7 @@ Canonical source lives in the repo's `agents/` directory. `install.sh` symlinks 
 **Current agents:**
 - `researcher.md` — read-only investigation agent used by `/spec`
 - `worker.md` — read-write implementation agent used by `/implement`
+- `advisor.md` — read-only domain advisor agent used by `/implement` when plans declare advisors
 - `classifier.md` — read-only significance classification agent used by `/renormalize`
 - `structure-analyst.md` — read-only cluster/imbalance analysis agent used by `/renormalize`
 - `crossref-scout.md` — read-only cross-reference discovery agent used by `/renormalize`
@@ -27,7 +28,9 @@ Single-file protocol fragments that define a specific output format or behaviora
 
 **When to use:** A specific output format or constraint applies to some invocations of an agent but not all. Rather than forking the agent definition, add a mixin that layers the additional protocol on top.
 
-**Example:** A `verifier-verdict.md` mixin defines the structured verdict format (confirmed/refuted/uncertain + evidence) for agents performing assertion verification. The same researcher agent definition works for both general investigation and verification — the mixin adds the verdict protocol only when needed.
+**Examples:**
+- `verifier-verdict.md` — defines the structured verdict format (confirmed/refuted/uncertain + evidence) for agents performing assertion verification. The same researcher agent definition works for both general investigation and verification — the mixin adds the verdict protocol only when needed.
+- `advisory-consultation.md` — defines the consultation workflow for workers that have access to advisor agents. Contains a `{{advisors}}` template variable resolved at injection time with advisor names, domains, and consultation modes (must-consult vs on-demand). Workers follow the mixin to request domain-specific guidance via SendMessage before or during implementation.
 
 ### Tier 3: Ad-Hoc Agents
 
@@ -51,4 +54,8 @@ No definition file. The lead composes the agent's behavior entirely in the spawn
 
 ## File Convention
 
-Protocol mixin files in this directory use the naming pattern `<purpose>.md` (e.g., `verifier-verdict.md`). Each file is self-contained: it defines the output format, any constraints, and examples. Skills inject the file content into agent prompts using `Read` or `cat`.
+Protocol mixin files in this directory use the naming pattern `<purpose>.md`. Each file is self-contained: it defines the output format, any constraints, and examples. Skills inject the file content into agent prompts using `Read` or `cat`. Mixins that use template variables (e.g., `{{advisors}}` in `advisory-consultation.md`) are resolved by the injecting skill before concatenation into the agent prompt.
+
+**Current mixins:**
+- `verifier-verdict.md` — structured verdict format for assertion verification
+- `advisory-consultation.md` — advisor consultation workflow with template variable injection

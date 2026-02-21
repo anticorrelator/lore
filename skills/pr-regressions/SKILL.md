@@ -1,11 +1,13 @@
 ---
 name: pr-regressions
-description: "Focused lens review: detect capability loss from deletions and modifications in a PR"
+description: "Focused lens review: detect capability loss from deletions and modifications in a PR. Use /pr-review for integrated multi-lens coverage."
 user_invocable: true
 argument_description: "[PR_number_or_URL] — PR to analyze for regressions"
 ---
 
 # /pr-regressions Skill
+
+Focused variant. For holistic coverage, use `/pr-review`.
 
 You are running the **regressions lens** — a focused review that examines deletions and modifications in a PR to detect lost capabilities, broken behavior paths, and unintended removals. This lens complements the 8-point agent-code checklist in `/pr-review`; it targets regression risks, not general correctness concerns.
 
@@ -129,6 +131,12 @@ If the work item already exists, load it instead of creating a duplicate. Append
 > ```bash
 > bash ~/.lore/scripts/post-review.sh <findings.json> --pr <PR_NUMBER> [--dry-run]
 > ```
+
+## Step 6: Capture
+
+```
+/remember PR regressions analysis from PR #<N> — capture: deletion safety patterns, refactoring preservation conventions, behavioral contract dependencies discovered in the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR that don't generalize, one-off deletion inventories, transient code structure.
+```
 
 ## Error Handling
 

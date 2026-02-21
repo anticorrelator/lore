@@ -423,17 +423,22 @@ cmd_manifest() {
 # --- Search ---
 cmd_search() {
   local type="all"
+  local json_flag=""
   local args=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --help|-h)
-        echo "Usage: lore search <query> [--type knowledge|work|all]" >&2
+        echo "Usage: lore search <query> [--type knowledge|work|all] [--json]" >&2
         return 0
         ;;
       --type)
         type="$2"
         shift 2
+        ;;
+      --json)
+        json_flag="--json"
+        shift
         ;;
       *)
         args+=("$1")
@@ -443,7 +448,7 @@ cmd_search() {
   done
 
   if [[ ${#args[@]} -eq 0 ]]; then
-    echo "Usage: lore search <query> [--type knowledge|work|all]" >&2
+    echo "Usage: lore search <query> [--type knowledge|work|all] [--json]" >&2
     return 1
   fi
 
@@ -451,23 +456,44 @@ cmd_search() {
   local kdir
   kdir="$(resolve_kdir)"
 
-  case "$type" in
-    knowledge)
-      python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" "${args[@]:1}"
-      ;;
-    work)
-      "$SCRIPTS_DIR/search-work.sh" "$query"
-      ;;
-    all)
-      python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" "${args[@]:1}"
-      echo ""
-      "$SCRIPTS_DIR/search-work.sh" "$query"
-      ;;
-    *)
-      echo "Error: --type must be knowledge, work, or all" >&2
-      return 1
-      ;;
-  esac
+  if [[ -n "$json_flag" ]]; then
+    case "$type" in
+      knowledge)
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --json "${args[@]:1}"
+        ;;
+      work)
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --json --type work "${args[@]:1}"
+        ;;
+      all)
+        local k_json w_json
+        k_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --json "${args[@]:1}")"
+        w_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --json --type work "${args[@]:1}")"
+        python3 -c "import json,sys; a=json.loads(sys.argv[1]); b=json.loads(sys.argv[2]); print(json.dumps(a+b,indent=2))" "$k_json" "$w_json"
+        ;;
+      *)
+        echo "Error: --type must be knowledge, work, or all" >&2
+        return 1
+        ;;
+    esac
+  else
+    case "$type" in
+      knowledge)
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" "${args[@]:1}"
+        ;;
+      work)
+        "$SCRIPTS_DIR/search-work.sh" "$query"
+        ;;
+      all)
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" "${args[@]:1}"
+        echo ""
+        "$SCRIPTS_DIR/search-work.sh" "$query"
+        ;;
+      *)
+        echo "Error: --type must be knowledge, work, or all" >&2
+        return 1
+        ;;
+    esac
+  fi
 }
 
 # --- Work subgroup ---

@@ -1,11 +1,13 @@
 ---
 name: pr-blast-radius
-description: "Focused lens review: trace the impact of PR changes on code outside the diff"
+description: "Focused lens review: trace the impact of PR changes on code outside the diff. Use /pr-review for integrated multi-lens coverage."
 user_invocable: true
 argument_description: "[PR_number_or_URL] — PR to analyze for impact on consumers and dependents outside the diff"
 ---
 
 # /pr-blast-radius Skill
+
+Focused variant. For holistic coverage, use `/pr-review`.
 
 You are running the **blast radius lens** — a focused review that traces the impact of PR changes on code outside the diff. This lens identifies files, modules, and consumers NOT in the PR that are affected by the changes. It complements the 8-point agent-code checklist in `/pr-review`; it targets downstream impact, not correctness of the changed code itself.
 
@@ -123,6 +125,12 @@ If the work item already exists, load it instead of creating a duplicate. Append
 > ```bash
 > bash ~/.lore/scripts/post-review.sh <findings.json> --pr <PR_NUMBER> [--dry-run]
 > ```
+
+## Step 6: Capture
+
+```
+/remember PR blast radius analysis from PR #<N> — capture: cross-module dependency patterns, interface contract conventions, consumer update requirements discovered in the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR that don't generalize, one-off consumer lists, repo-specific import topology.
+```
 
 ## Error Handling
 

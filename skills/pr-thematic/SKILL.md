@@ -1,11 +1,13 @@
 ---
 name: pr-thematic
-description: "Focused lens review: evaluate thematic coherence and scope of a PR"
+description: "Focused lens review: evaluate thematic coherence and scope of a PR. Use /pr-review for integrated multi-lens coverage."
 user_invocable: true
 argument_description: "[PR_number_or_URL] — PR to analyze for thematic coherence and scope creep"
 ---
 
 # /pr-thematic Skill
+
+Focused variant. For holistic coverage, use `/pr-review`.
 
 You are running the **thematic lens** — a focused review that evaluates whether all changes in a PR support a coherent theme and identifies scope creep or missing pieces. This lens complements the 8-point agent-code checklist in `/pr-review`; it targets thematic coherence and scope alignment, not correctness.
 
@@ -123,6 +125,12 @@ If the work item already exists, load it instead of creating a duplicate. Append
 > ```bash
 > bash ~/.lore/scripts/post-review.sh <findings.json> --pr <PR_NUMBER> [--dry-run]
 > ```
+
+## Step 6: Capture
+
+```
+/remember PR thematic analysis from PR #<N> — capture: scope management patterns, PR decomposition conventions, thematic coherence signals discovered in the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR that don't generalize, per-file alignment details, one-off scope decisions.
+```
 
 ## Error Handling
 

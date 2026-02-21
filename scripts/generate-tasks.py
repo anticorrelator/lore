@@ -254,6 +254,27 @@ def extract_task_backlinks(item_text: str) -> list[str]:
     return backlinks
 
 
+def _is_file_path(candidate: str) -> bool:
+    """Return True if a backtick-quoted string looks like a real file path."""
+    # Must contain '/' or '.' to look like a path
+    if "/" not in candidate and "." not in candidate:
+        return False
+    # Exclude backlinks inside backticks: [[knowledge:...]]
+    if candidate.startswith("[["):
+        return False
+    # Exclude bash variables: $WORK_DIR, $KNOWLEDGE_DIR
+    if candidate.startswith("$"):
+        return False
+    # Exclude bracketed expressions: phases[], tasks[], build_context_section()
+    if "[]" in candidate or "()" in candidate:
+        return False
+    # Exclude bare skill/command names with leading slash but no extension
+    # e.g. /implement, /spec, /work — these have a single slash and no '.'
+    if re.match(r"^/[a-z-]+$", candidate):
+        return False
+    return True
+
+
 def extract_file_targets(task_text: str, phase_files: list[str]) -> list[str]:
     """Extract file targets from a task's text, falling back to phase files.
 
@@ -265,8 +286,7 @@ def extract_file_targets(task_text: str, phase_files: list[str]) -> list[str]:
     seen: set[str] = set()
     for m in re.finditer(r"`([^`]+)`", task_text):
         candidate = m.group(1).strip()
-        # Must look like a file path: contains '/' or '.' (but not just a word)
-        if ("/" in candidate or "." in candidate) and candidate not in seen:
+        if _is_file_path(candidate) and candidate not in seen:
             targets.append(candidate)
             seen.add(candidate)
     if targets:
@@ -276,37 +296,64 @@ def extract_file_targets(task_text: str, phase_files: list[str]) -> list[str]:
 
 
 def detect_reference_files(
-    phase_files: list[str], all_task_targets: list[list[str]]
+    phase_files: list[str], task_targets: list[str]
 ) -> list[str]:
-    """Detect phase files that are not targeted by any task in the phase.
+    """Detect phase files that this task does not target.
 
-    These are "reference files" — files listed at the phase level that no task
-    directly modifies. Workers should read them for context before starting.
+    These are "reference files" — phase-level files that the task should
+    read for context but is not expected to modify.
 
     Args:
         phase_files: The phase-level ``**Files:**`` list.
-        all_task_targets: List of each task's ``file_targets`` within the phase.
+        task_targets: This task's ``file_targets``.
 
     Returns:
-        Phase files not present in any task's targets, preserving original order.
-        Empty list when every phase file appears in at least one task's targets.
+        Phase files not in this task's targets, preserving original order.
+        Empty list when every phase file is also a target of this task.
     """
-    targeted: set[str] = set()
-    for targets in all_task_targets:
-        targeted.update(targets)
+    targeted = set(task_targets)
     return [f for f in phase_files if f not in targeted]
 
 
+def _unpack_backlink(item: "str | tuple[str, str]") -> tuple[str, str]:
+    """Normalize a backlink item to (target, annotation).
+
+    Accepts either a plain string ``"knowledge:foo"`` or a tuple
+    ``("knowledge:foo", "why this matters")``.  Returns ``(target, "")``
+    for plain strings.
+    """
+    if isinstance(item, tuple):
+        return (item[0], item[1] if len(item) > 1 else "")
+    return (item, "")
+
+
+def _format_backlink_line(item: "str | tuple[str, str]") -> str:
+    """Format a backlink item as a markdown list entry.
+
+    With annotation:  ``- [[knowledge:foo]] — why this matters``
+    Without:          ``- [[knowledge:foo]]``
+    """
+    target, annotation = _unpack_backlink(item)
+    if annotation:
+        return f"- [[{target}]] — {annotation}"
+    return f"- [[{target}]]"
+
+
 def build_context_section(
-    phase_backlinks: list[str],
-    cross_cutting_backlinks: list[str],
+    phase_backlinks: list,
+    cross_cutting_backlinks: list,
     knowledge_dir: str,
     script_dir: str,
-    task_backlinks: list[str] | None = None,
+    task_backlinks: list | None = None,
     reference_files: list[str] | None = None,
     design_decisions: list[dict] | None = None,
+    resolve_full_content: bool = False,
 ) -> str:
     """Build the context section for a task description.
+
+    Backlink lists accept either plain strings (``"knowledge:foo"``) or
+    tuples (``("knowledge:foo", "annotation text")``).  Annotations are
+    rendered inline: ``- [[target]] — annotation``.
 
     Task-level backlinks (from the individual checklist item) are resolved
     first and given priority within the char budget. Phase-level and
@@ -348,19 +395,19 @@ def build_context_section(
     if task_backlinks:
         lines.append("Task-level:")
         for bl in task_backlinks:
-            lines.append(f"- [[{bl}]]")
+            lines.append(_format_backlink_line(bl))
         lines.append("")
 
     if phase_backlinks:
         lines.append("Phase-level:")
         for bl in phase_backlinks:
-            lines.append(f"- [[{bl}]]")
+            lines.append(_format_backlink_line(bl))
         lines.append("")
 
     if cross_cutting_backlinks:
         lines.append("Cross-cutting:")
         for bl in cross_cutting_backlinks:
-            lines.append(f"- [[{bl}]]")
+            lines.append(_format_backlink_line(bl))
         lines.append("")
 
     has_any = task_backlinks or phase_backlinks or cross_cutting_backlinks
@@ -369,16 +416,17 @@ def build_context_section(
         lines.append("")
 
     # Build prioritized resolution order: task-level first, then phase, then cross-cutting
-    # Deduplicate while preserving priority order
+    # Deduplicate while preserving priority order (annotations not needed for resolution)
     all_backlinks: list[str] = []
     seen: set[str] = set()
     for bl_list in (task_backlinks or [], phase_backlinks, cross_cutting_backlinks):
         for bl in bl_list:
-            if bl not in seen:
-                all_backlinks.append(bl)
-                seen.add(bl)
+            target, _ = _unpack_backlink(bl)
+            if target not in seen:
+                all_backlinks.append(target)
+                seen.add(target)
 
-    if all_backlinks and knowledge_dir:
+    if all_backlinks and resolve_full_content and knowledge_dir:
         resolved = resolve_backlinks(all_backlinks, knowledge_dir, script_dir)
         if resolved:
             lines.append("## Prior Knowledge")
@@ -405,6 +453,25 @@ def build_context_section(
                     lines.append(f"**{bl_label}:** [unresolved — {error}]")
                     lines.append("")
                 included += 1
+    elif all_backlinks and not resolve_full_content:
+        # Annotation-only mode: emit backlink labels with annotations, no resolution
+        # Build annotation lookup from all backlink lists
+        annotation_map: dict[str, str] = {}
+        for bl_list in (task_backlinks or [], phase_backlinks, cross_cutting_backlinks):
+            for bl in bl_list:
+                target, annotation = _unpack_backlink(bl)
+                if target not in annotation_map and annotation:
+                    annotation_map[target] = annotation
+
+        lines.append("## Prior Knowledge")
+        lines.append("")
+        for target in all_backlinks:
+            annotation = annotation_map.get(target, "")
+            if annotation:
+                lines.append(f"- **[[{target}]]** — {annotation}")
+            else:
+                lines.append(f"- **[[{target}]]**")
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -479,17 +546,38 @@ def generate_tasks_from_plan(
         files_raw = files_match.group(1).strip() if files_match else ""
         files = [f.strip().strip("`") for f in files_raw.split(",") if f.strip()] if files_raw else []
 
-        # Extract phase-level knowledge context backlinks
+        # Extract optional knowledge delivery mode (default: annotation-only)
+        kd_match = re.search(
+            r"\*\*Knowledge delivery:\*\*\s*(.*)", phase_content
+        )
+        resolve_full_content = (
+            kd_match is not None
+            and kd_match.group(1).strip().lower() == "full"
+        )
+
+        # Extract phase-level knowledge context backlinks with annotations
         kc_match = re.search(
             r"\*\*Knowledge context:\*\*\s*\n((?:- .*\n?)*)", phase_content
         )
-        phase_backlinks = []
+        phase_backlinks: list[tuple[str, str]] = []
         if kc_match:
             kc_block = kc_match.group(1)
-            for bl_match in re.finditer(r"\[\[([^\]]+)\]\]", kc_block):
+            seen_targets: set[str] = set()
+            for line in kc_block.splitlines():
+                bl_match = re.search(r"\[\[([^\]]+)\]\]", line)
+                if not bl_match:
+                    continue
                 target = bl_match.group(1).strip()
-                if target not in phase_backlinks:
-                    phase_backlinks.append(target)
+                if target in seen_targets:
+                    continue
+                seen_targets.add(target)
+                # Extract annotation text after the backlink: " — <annotation>"
+                annotation = ""
+                after_bl = line[bl_match.end():]
+                ann_match = re.match(r"\s*—\s*(.*)", after_bl)
+                if ann_match:
+                    annotation = ann_match.group(1).strip()
+                phase_backlinks.append((target, annotation))
 
         # Extract unchecked task items
         unchecked = re.findall(r"^- \[ \]\s+(.*)", phase_content, re.MULTILINE)
@@ -501,7 +589,6 @@ def generate_tasks_from_plan(
 
         # First pass: parse tasks, extract file_targets and backlinks
         parsed_items: list[dict] = []
-        all_task_targets: list[list[str]] = []
         for item_text in unchecked:
             task_counter += 1
             task_id = f"task-{task_counter}"
@@ -516,17 +603,13 @@ def generate_tasks_from_plan(
                 "file_targets": file_targets,
                 "task_backlinks": task_backlinks,
             })
-            all_task_targets.append(file_targets)
-
-        # Compute reference files: phase files not targeted by any task
-        reference_files = detect_reference_files(files, all_task_targets)
 
         # Filter design decisions relevant to this phase
         phase_decisions = decisions_for_phase(
             all_design_decisions, phase_num
         )
 
-        # Second pass: build context and descriptions with reference files
+        # Second pass: build context and descriptions with per-task reference files
         for item in parsed_items:
             task_id = item["task_id"]
             subject = item["subject"]
@@ -534,12 +617,16 @@ def generate_tasks_from_plan(
             file_targets = item["file_targets"]
             task_backlinks = item["task_backlinks"]
 
+            # Per-task reference files: phase files minus this task's targets
+            reference_files = detect_reference_files(files, file_targets)
+
             context = build_context_section(
                 phase_backlinks, cross_cutting_backlinks,
                 knowledge_dir, script_dir,
                 task_backlinks=task_backlinks,
                 reference_files=reference_files,
                 design_decisions=phase_decisions,
+                resolve_full_content=resolve_full_content,
             )
 
             # Build description
@@ -548,7 +635,13 @@ def generate_tasks_from_plan(
                 desc_parts.append(
                     f"**Phase {phase_num} objective:** {objective}"
                 )
-            if files_raw:
+            if file_targets:
+                formatted_targets = ", ".join(f"`{f}`" for f in file_targets)
+                desc_parts.append(
+                    f"**Target files:** {formatted_targets}"
+                    " — files this task is expected to modify"
+                )
+            elif files_raw:
                 desc_parts.append(f"**Files:** {files_raw}")
             desc_parts.append(f"**Task:** {subject}")
             desc_parts.append("")

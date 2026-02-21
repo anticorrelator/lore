@@ -503,6 +503,7 @@ Test that category-level backlinks resolve correctly.
 ### Phase 1: Setup
 **Objective:** Verify category resolution
 **Files:** `src/setup.ts`
+**Knowledge delivery:** full
 **Knowledge context:**
 - [[knowledge:gotchas#ENV Variable Pitfalls]] — env gotcha
 - [ ] Create setup module
@@ -572,6 +573,7 @@ Test that task-level backlinks are extracted and prioritized.
 ### Phase 1: Setup
 **Objective:** Configure the system
 **Files:** `src/config.ts`
+**Knowledge delivery:** full
 **Knowledge context:**
 - [[knowledge:conventions#Config Patterns]] — phase-level ref
 - [ ] Create config using [[knowledge:gotchas#ENV Variable Pitfalls]]
@@ -914,6 +916,7 @@ class TestResolveCharLimit:
 ### Phase 1: Fix
 **Objective:** Fix the issue
 **Files:** `src/fix.ts`
+**Knowledge delivery:** full
 **Knowledge context:**
 - [[knowledge:gotchas#Test Gotcha]]
 - [ ] Apply the fix

@@ -1,11 +1,13 @@
 ---
 name: pr-test-quality
-description: "Focused lens review: evaluate test coverage, quality, and assertion rigor in a PR"
+description: "Focused lens review: evaluate test coverage, quality, and assertion rigor in a PR. Use /pr-review for integrated multi-lens coverage."
 user_invocable: true
 argument_description: "[PR_number_or_URL] — PR to analyze for test coverage and test quality"
 ---
 
 # /pr-test-quality Skill
+
+Focused variant. For holistic coverage, use `/pr-review`.
 
 You are running the **test quality lens** — a focused review that evaluates whether tests in a PR verify requirements rather than confirm implementation, and whether test coverage matches the scope of changes. This lens complements the 8-point agent-code checklist in `/pr-review`; it provides a more thorough and systematic analysis than checklist item 8 alone.
 
@@ -133,6 +135,12 @@ If the work item already exists, load it instead of creating a duplicate. Append
 > ```bash
 > bash ~/.lore/scripts/post-review.sh <findings.json> --pr <PR_NUMBER> [--dry-run]
 > ```
+
+## Step 6: Capture
+
+```
+/remember PR test quality analysis from PR #<N> — capture: testing conventions, assertion patterns, tautological test anti-patterns, edge case coverage expectations discovered in the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR that don't generalize, test file names, one-off coverage gaps.
+```
 
 ## Error Handling
 

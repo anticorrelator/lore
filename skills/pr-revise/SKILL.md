@@ -136,10 +136,7 @@ Out of scope for this revision pass, or blocked on user input.
 
 Group related feedback into single items when they touch the same file/function. Include quoted feedback and file:line references in each item. Include knowledge citations so `/spec` investigators have context. Omit empty sections.
 
-Generate tasks from the notes:
-```
-/work tasks pr-<NUMBER>-<short-slug>
-```
+> **Next step:** To generate implementation tasks, run `/spec pr-<NUMBER>-<short-slug>` on this work item after investigation validates the findings. The pipeline is: review findings (notes.md) -> `/spec` investigation (plan.md) -> `/implement` execution. Do not skip the `/spec` step — review findings are diff-level hypotheses, not validated implementation plans.
 
 ### Readiness assessment
 

@@ -42,11 +42,15 @@ Read existing artifacts only. No new exploration or code reading needed.
 
 Worker observations come from the **implementation transcript** (worker SendMessage reports to the lead and TaskUpdate descriptions), NOT from `tasks.json` (which is pre-generated before workers run and contains task definitions, not results). For retros run in the same session as `/implement`, observations are available in the conversation context. For cross-session retros, check `notes.md` for session entries from `/implement` runs that reference worker findings (the `/implement` lead records key findings in its session entry). For review-only cycles, note "no workers" and instead look for subagent launches (background analysis agents in `/pr-self-review`, `/pr-review`) and whether they received knowledge preambles.
 
+**If `execution-log.md` exists** in the work item directory, read it as the **primary** implementation evidence source. Extract per-task completion entries organized by phase: each entry records the task subject, worker Changes and Observations fields, and test result. This is more complete than notes.md session summaries (which capture phase-level highlights) and more reliable than cross-session memory (which degrades). Treat execution-log entries as authoritative for task-level decisions — use them to answer: which tasks completed vs. were rejected, what observations were reported, and which changes were made.
+
 ### 2b: Knowledge context blocks and backlink resolution
 
 Read `plan.md` and extract every `**Knowledge context:**` block per phase. These record what knowledge was supposed to be delivered to workers/researchers. For review-only cycles, also check for inline `[knowledge: ...]` citations in plan.md tasks — these indicate knowledge was consulted during plan authoring even without formal context blocks.
 
-**Backlink resolution audit:** If `tasks.json` exists, check the `## Prior Knowledge` sections in task descriptions for `[unresolved — Target not found]` markers. Count resolved vs unresolved backlinks. A high unresolved rate (>30%) indicates knowledge store restructuring broke plan references — this is a delivery failure independent of content quality. Report the resolution rate in the evidence summary.
+**Backlink resolution audit:** First, check which phases used `**Knowledge delivery:** full` vs. annotation-only (the default). For **full-resolution phases**, check `## Prior Knowledge` sections in task descriptions for `[unresolved — Target not found]` markers. Count resolved vs unresolved backlinks. A high unresolved rate (>30%) indicates knowledge store restructuring broke plan references — this is a delivery failure independent of content quality. Report the resolution rate.
+
+**Annotation quality audit (annotation-only phases):** For phases *without* `**Knowledge delivery:** full`, check the `## Prior Knowledge` section for empty annotation entries — backlinks appearing as `- **[[target]]**` with no `— annotation` suffix. Empty annotations mean the spec lead wrote bare backlinks without `— why relevant` text. Count entries with annotation vs. entries without. A high empty-annotation rate (>40%) is a delivery failure for annotation-only phases — the entire ROI of this delivery mode depends on annotation text. Report as: "Annotation completeness: N/M entries had annotation text (X%)."
 
 **Fallback path audit:** If `tasks.json` does not exist and `lore work tasks` was used (check notes.md for `/implement` session entries), compare the plan's `**Knowledge context:**` backlinks against what the generated task descriptions actually contain. If plan phases have backlinks but generated tasks show "No backlinks found" or lack `## Prior Knowledge` sections, this is a **pipeline delivery failure** — the task generation script dropped the plan's knowledge context. This is worse than an unresolved backlink (which at least signals something was attempted) because it's completely silent. Score Dimension 1 no higher than 2 when this occurs.
 
@@ -55,6 +59,8 @@ Read `plan.md` and extract every `**Knowledge context:**` block per phase. These
 ### 2c: Session entries
 
 Read `notes.md` and extract all `## YYYY-MM-DD` session entries. These record what actually happened: progress, findings, blockers, remaining work. If `notes.md` is empty or missing session entries, note this as degraded evidence — scoring will rely on plan.md, thread entries, and retrieval logs instead.
+
+**Source hierarchy when `execution-log.md` exists:** If `execution-log.md` has entries covering the implementation period (timestamped entries from `implement-lead`), prefer those for **task-level decisions** — which tasks ran, what changed, what workers observed. Use `notes.md` for **session-level context** that execution-log doesn't capture: blockers encountered mid-session, "what's next" notes, and the lead's synthesis of cross-task patterns. The two sources are complementary, not redundant.
 
 ### 2d: Retrieval log
 
@@ -66,7 +72,11 @@ Read `$KNOWLEDGE_DIR/_meta/friction-log.jsonl` and filter entries within the sam
 
 ### 2f: Token efficiency estimate
 
-For each knowledge context block delivered to workers, estimate how many file reads it replaced and the approximate token cost of those reads (~500-3000 tokens per file depending on size). This is a rough estimate, not an exact measurement. Count: files a worker would have needed to read to discover the same information, grep/search cycles that were avoided, and wrong-path explorations that were short-circuited by the knowledge context. Summarize as: total file reads prevented, estimated tokens saved.
+Token efficiency differs by delivery mode — evaluate each phase accordingly.
+
+**Annotation-only phases (default):** `## Prior Knowledge` contains labels + annotation text (~50-200 tokens per phase total). This mode does *not* substitute for file reads — workers still read source files. Estimate value as: (1) wrong-path explorations prevented by orientation framing, (2) first-attempt accuracy gains from "why a choice was made" context, (3) context window savings from not loading full resolved content (~2k-4k tokens avoided per task per phase). Do not apply file-read-replacement estimates here.
+
+**Full-resolution phases (`**Knowledge delivery:** full`):** Estimate how many file reads the resolved content replaced and the approximate token cost (~500-3000 tokens per file). Count: files a worker would have needed to read to discover the same information, grep/search cycles avoided, and wrong-path explorations short-circuited. Summarize as: total file reads prevented, estimated tokens saved.
 
 Report:
 ```
@@ -91,12 +101,16 @@ Was knowledge context prefetched and delivered to workers/researchers? For each 
 
 **For spec-only cycles:** Also audit ad-hoc subagents spawned during interactive spec work (e.g., Explore agents for investigation). These are not formal "workers" but still benefit from knowledge preambles. If the spec author dispatched subagents without knowledge context while knowledge search tools were available, this is a delivery failure — the same push-over-pull gap that affects implementation workers applies to spec-time exploration.
 
+**For prose/convention implementation cycles:** When workers edit prose files (SKILL.md, protocol documents, convention files), implementation output is a valid evidence source for knowledge application — not just explicit worker citations in `**Observations:**`. A worker who received `push-over-pull` and produced "This gate is not skippable" and "wait for explicit approval" in the output has demonstrably applied the knowledge, even without citing it. Score Dimension 1 based on the implementation output's alignment with delivered design principles, not solely on whether workers named the entries. Do not penalize workers for applying knowledge silently when the output proves the application.
+
+**Annotation-only delivery note:** For the default annotation-only path, workers don't reference `## Prior Knowledge` entries by name — they internalize orientation framing from annotation text. Evidence of delivery success is the *implementation output*: correct approach choices, absence of wrong-path detours, first-attempt accuracy. Do not penalize annotation-only phases for lack of explicit citation.
+
 **Scoring:**
-- 5: Every phase had knowledge context, and workers referenced or built on it
-- 4: Most phases had context delivered; workers used it with minor gaps
-- 3: Context was delivered but workers didn't reference it (decorative). Also: spec-only cycles where the author consulted knowledge but ad-hoc subagents received none
-- 2: Some phases lacked context; workers searched manually. Also: context blocks existed but >30% of backlinks were unresolved (ghost references from knowledge store restructuring). Also: plan had backlinks but task generation pipeline dropped them (fallback path failure). For reviews: knowledge was consulted during authoring but not delivered to subagents
-- 1: No knowledge context delivered; workers started from scratch
+- 5: Every phase had knowledge context delivered; implementation output shows correct approach choices aligned with design rationale (explicit citations OR correct application evident). For annotation-only: annotations were implementation-facing and completeness was high (>80% non-empty).
+- 4: Most phases had context delivered with minor gaps. For annotation-only: some annotations were filing-facing but implementation output still shows orientation effects.
+- 3: Context delivered but annotation-only phases had high filing-facing or empty annotation rate (>40%) — framing arrived structurally but was too vague to orient workers. OR: spec-only cycles where the author consulted knowledge but ad-hoc subagents received none.
+- 2: Some phases lacked context; workers searched manually. Also: full-resolution phases with >30% unresolved backlinks. Also: pipeline dropped backlinks silently (plan had context blocks but tasks show none). For reviews: knowledge consulted during authoring but not delivered to subagents.
+- 1: No knowledge context delivered; workers started from scratch.
 
 ### Dimension 2 — Retrieval Quality
 
@@ -143,12 +157,14 @@ Would this work cycle have gone meaningfully differently without the memory syst
 
 Workers who read code *with* design rationale ("we're resisting instruction fade via structural enforcement") make different implementation choices than workers who read the same code cold and infer intent. Even when workers must still read the actual files, the "why" context prevents wrong-path explorations and produces first-attempt accuracy. "Would have figured it out" understates the value — figuring out WHAT code does is different from understanding WHY a design choice was made.
 
+**Delivery-mode calibration:** Token efficiency estimates depend on which delivery mode was used. For annotation-only phases, do not apply file-read-replacement estimates — score based on orientation value (wrong-path prevention, first-attempt accuracy, context window savings from not loading full content). For full-resolution phases, file-read-replacement estimates apply as before.
+
 **Scoring:**
-- 5: Memory system was essential — prevented significant mistakes, produced first-attempt accuracy across workers, OR saved substantial exploration (estimate: >10 file reads prevented, ~20k+ tokens). Work would have been materially slower or wrong without it
-- 4: Clear quality improvement — workers made consistently correct implementation choices guided by design rationale. Demonstrable token savings (estimate: 5-10 file reads prevented, ~10-20k tokens) OR prevented wrong-path explorations
-- 3: Saved meaningful exploration time (estimate: 2-5 file reads prevented, ~5-10k tokens) — workers would have reached the same conclusion but spent more context window getting there. Design rationale provided but didn't measurably change worker choices
-- 2: Marginal — system was consulted but savings were minimal (estimate: <2 file reads prevented, <5k tokens). Didn't change outcomes or significantly reduce exploration
-- 1: No measurable impact — work would have been identical without it
+- 5: Memory system was essential — prevented significant mistakes, produced first-attempt accuracy across workers. For full-resolution: >10 file reads prevented, ~20k+ tokens saved. For annotation-only: framing demonstrably guided correct approach choices on first attempt, or prevented known wrong-path that would have required backtracking.
+- 4: Clear quality improvement — workers made correct implementation choices guided by design rationale. For full-resolution: 5-10 file reads prevented, ~10-20k tokens. For annotation-only: evidence of orientation effect in implementation output (correct patterns, no detours), plus context window savings from annotation-only delivery (~2k-4k tokens per task not loaded).
+- 3: Moderate value — saved meaningful exploration time. For full-resolution: 2-5 file reads prevented, ~5-10k tokens. For annotation-only: annotations delivered but filing-facing (workers received structure without actionable framing); or design rationale provided but didn't measurably change worker choices.
+- 2: Marginal — system was consulted but impact was minimal. For full-resolution: <2 file reads prevented, <5k tokens. For annotation-only: high empty-annotation rate meant framing was absent; or work cycle too short for orientation value to materialize.
+- 1: No measurable impact — work would have been identical without it.
 
 **Interpretation notes:** See `failure-modes.md` section D for Delta modifiers (plumbing-vs-value gap, meta-work, prototype-cascade, knowledge saturation). Key calibration: "would have figured it out" is not neutral if figuring it out costs thousands of tokens. Count file reads prevented (each ~500-2000 tokens), grep cycles avoided, wrong-path explorations short-circuited. Score Delta based on the full work cycle including spec, not just implementation.
 

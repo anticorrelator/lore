@@ -90,5 +90,5 @@ if git -C "$TARGET_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
 fi
 
 # Fallback: not a git repo
-DIR_NAME=$(basename "$TARGET_DIR")
+DIR_NAME="${TARGET_DIR##*/}"
 echo "${BASE_DIR}/local/${DIR_NAME}"

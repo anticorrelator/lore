@@ -106,9 +106,28 @@ Before finalizing this plan, here is my understanding of the key assumptions:
 Does this match your understanding? Any corrections?
 ```
 
-**Gate:** Do not proceed to Step 4s until the user explicitly confirms or provides corrections. If corrections are needed, revise the affected plan sections (same approach as the full flow's Step 5.2) and re-present the corrected bullets.
+**Gate:** Do not proceed to Step 3.7s until the user explicitly confirms or provides corrections. If corrections are needed, revise the affected plan sections (same approach as the full flow's Step 5.2) and re-present the corrected bullets.
+
+### Step 3.7s: Task review
+
+Same purpose as the full flow's Step 5.3 — validate the implementation approach before finalizing. Use the same phase summary format (objective, mechanism, scope, task count) as described in Step 5.3.
+
+1. **Synthesize phase summaries from plan.md** — for each phase, produce a summary block with objective, mechanism, scope, and task count. The mechanism descriptions come from the plan's task content — synthesize them from existing context without additional file reads.
+
+2. **Present the phase summaries** to the user. End with:
+   ```
+   Review the phases above. Approve to proceed, or request changes.
+   ```
+
+3. **Wait for explicit approval.** Do not proceed to Step 4s until the user explicitly approves. This gate is not skippable.
+
+4. **If the user requests changes** — revise the affected phases in `plan.md`, then re-present only the changed phase summaries. Repeat until the user approves.
+
+5. **If the user needs new investigation** — suggest re-running `/spec` rather than patching the plan ad-hoc.
 
 ### Step 4s: Finalize
+
+**Prerequisite:** The task review gate (Step 3.7s) must be explicitly approved before finalization proceeds.
 
 1. Incorporate user feedback
 2. Generate `tasks.json` — after `plan.md` is finalized, run:
@@ -270,12 +289,32 @@ After all investigations are complete, verify the assertions researchers reporte
   ```
 - **Proceed to synthesis.** Unverified assertions are treated as researcher claims without independent confirmation — usable but flagged. Do not block the spec on verification failure.
 
+### Step 4c: Write investigation log entry
+
+After verification (or after Step 4 if `--without-verification` was passed), append an investigation summary to `execution-log.md`. Resolve the slug from the current plan context (already loaded in Step 1).
+
+```bash
+printf 'Investigations: %d\nTopics: %s\nVerification: confirmed=%d, refuted=%d, unverifiable=%d\nRefuted assertions: %s\n' \
+  "<N>" \
+  "<comma-separated investigation topics>" \
+  "<confirmed count>" "<refuted count>" "<unverifiable count>" \
+  "<list of refuted assertions that shaped synthesis, or 'none'>" \
+  | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source spec-lead
+```
+
+- **Investigation count:** number of researcher agents that reported back
+- **Topics:** the investigation topics from Step 2 (not the full questions — short labels)
+- **Verification fields:** from the `### Verification Summary` in `plan.md`; use `0` for all if `--without-verification` was passed
+- **Refuted assertions:** only those that changed the synthesis direction — omit confirmed and unverifiable assertions
+
 ### Step 5: Synthesize
 
 From the documented findings, draft the remaining plan sections:
 1. **Goal** — what we're building/changing and why (1 paragraph)
 2. **Design Decisions** — use the `### DN: Title` format from the template. Each decision requires `**Decision:**`, `**Rationale:**`, `**Alternatives considered:**`, and `**Applies to:**` fields. Number decisions sequentially (D1, D2, ...).
-3. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include a `**Knowledge context:**` block listing knowledge entries relevant to that phase — these flow directly to worker agents via task generation
+3. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include a `**Knowledge context:**` block listing knowledge entries relevant to that phase — these flow directly to worker agents via task generation. For multi-worker phases or novel implementations without codebase precedent, add `**Knowledge delivery:** full` to deliver fully resolved knowledge content to workers instead of annotation-only summaries.
+
+   **Advisor identification:** When investigations reveal domain complexity in a phase — unfamiliar invariants, cross-cutting constraints, or areas where uninformed changes risk breaking correctness — add an `**Advisors:**` block declaring domain-expert advisors for that phase. Use the format: `- advisor-name — domain scope. [must-consult|on-demand]`. Use `must-consult` when the domain has hard invariants that workers must respect (e.g., auth, data migration); use `on-demand` when the domain is complex but workers can start independently and ask questions as needed. `/implement` spawns declared advisors as persistent team members with investigation findings as their domain baseline.
 
    **Task consolidation rule:** Each `- [ ]` checkbox should be a meaningful unit of work, not a micro-edit. Multiple sequential edits to the same file should be one task (e.g., "Update worker prompt to add capture step and renumber" not three separate tasks for delete/insert/renumber). Aim for 2-5 tasks per phase. If a phase has >5 tasks, look for consolidation opportunities.
 
@@ -317,7 +356,7 @@ Before finalizing this plan, here is my understanding of the key assumptions:
 Does this match your understanding? Any corrections?
 ```
 
-**Gate:** Do not proceed to Step 5a until the user explicitly confirms or provides corrections. If the user identifies incorrect points, go to Step 5.2 (handle corrections) before continuing. The prompt "Does this match your understanding? Any corrections?" is not rhetorical — wait for a response.
+**Gate:** Do not proceed to Step 5.3 until the user explicitly confirms or provides corrections. If the user identifies incorrect points, go to Step 5.2 (handle corrections) before continuing. The prompt "Does this match your understanding? Any corrections?" is not rhetorical — wait for a response.
 
 ### Step 5.2: Handle corrections (if needed)
 
@@ -342,9 +381,55 @@ When the user corrects one or more understanding bullets:
    Anything else to adjust?
    ```
 
-5. If the user confirms, proceed to Step 5a.
+5. If the user confirms, proceed to Step 5.3.
 
-### Step 5a: Post-research extraction
+### Step 5.3: Task review
+
+Before finalizing, present the plan's phases as a structured summary for the user to review the implementation approach. This is a separate gate from Step 5.1 — that step validates *understanding* (assumptions and decisions); this step validates the *work plan* (what will actually be built and how).
+
+1. **Synthesize phase summaries** — for each phase in `plan.md`, produce a summary block with four fields:
+
+   ```
+   Phase N: <Name>
+     Objective: <what this phase accomplishes>
+     Mechanism: <HOW — the specific technical approach, 1-3 sentences>
+     Scope:     <files and components touched>
+     Tasks:     <N tasks>
+   ```
+
+   **Example:**
+   ```
+   Phase 1: Add rate limiter middleware
+     Objective: Introduce per-endpoint rate limiting before auth checks
+     Mechanism: Create a new Express middleware using a sliding-window counter backed by Redis.
+                Register it in the middleware chain before the auth middleware in app.ts.
+     Scope:     src/middleware/rate-limiter.ts (new), src/middleware/index.ts, src/app.ts
+     Tasks:     3 tasks
+
+   Phase 2: Configure rate limit policies
+     Objective: Define per-route rate limit thresholds via config
+     Mechanism: Extend the existing config schema to accept a rate_limits map keyed by route
+                pattern. Load defaults from env with per-route overrides in config.yaml.
+     Scope:     src/config.ts, src/config.schema.ts, config.yaml
+     Tasks:     2 tasks
+   ```
+
+2. **Present the full set of phase summaries** to the user. End with:
+   ```
+   Review the phases above. Approve to proceed, or request changes.
+   ```
+
+3. **Wait for explicit approval.** Do not proceed to Step 5.4 until the user explicitly approves (e.g., "approved", "looks good", "proceed"). This gate is not skippable.
+
+4. **If the user requests changes** — revise the affected phases in `plan.md`, then re-present only the changed phase summaries. Repeat steps 2-3 until the user approves.
+
+5. **If the user needs new investigation** — the task review is bounded to what the existing findings support. If the user identifies gaps that require exploring new code or revisiting assumptions, suggest re-running `/spec` rather than patching the plan ad-hoc:
+   ```
+   This change requires new investigation beyond the current findings.
+   Consider re-running `/spec <slug>` to explore this area.
+   ```
+
+### Step 5.4: Post-research extraction
 
 Invoke `/remember` scoped to the spec investigation:
 
@@ -352,7 +437,7 @@ Invoke `/remember` scoped to the spec investigation:
 /remember Research findings from <work item title> — Evaluate researcher-reported **Observations:** from investigation reports against the capture gate (reusable, non-obvious, stable, high-confidence). Capture architectural insights and gotchas discovered during research. Skip: findings already documented in plan.md (they're persisted there).
 ```
 
-### Step 5b: Generate tasks.json
+### Step 5.5: Generate tasks.json
 
 After the user approves the plan (or after incorporating feedback), generate `tasks.json`:
 ```bash
@@ -416,9 +501,18 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 ### Phase 1: <Name>
 **Objective:** What this phase accomplishes
 **Files:** relevant file paths
+**Knowledge delivery:** full  <!-- optional — omit for default annotation-only delivery (~50-200 tokens per backlink). Use `full` for: (1) multi-worker phases where cross-worker consistency matters (all workers need the same reference content), or (2) novel implementations without codebase precedent (no existing patterns to anchor against). Full resolution costs ~2k-4k tokens per task. -->
 **Knowledge context:**
-<!-- Each entry MUST include a "— why relevant" annotation after the backlink. Workers see these annotations as their primary context — a bare link with no explanation is not actionable. -->
+<!-- Each entry MUST include a "— why relevant" annotation after the backlink.
+     Good annotations are implementation-facing — they tell the worker what to DO with the knowledge entry, not what the entry is about.
+     GOOD: "— understand the call graph before modifying resolve_backlinks()" / "— reuse this pattern for the new middleware"
+     BAD:  "— explains the push-over-pull principle" (filing-facing: describes the entry, not how to use it)
+     BAD:  "— provides context for this phase" (vague: could apply to anything)
+     A worker who hasn't read the entry should understand from the annotation alone why it matters to their task. -->
 - [[knowledge:file#heading]] — why this is relevant to this phase
+**Advisors:**
+<!-- Optional — declare domain-expert advisors for this phase. /implement spawns these as persistent team members that workers can consult. Omit this field if no advisors are needed. -->
+- advisor-name — domain scope. [must-consult|on-demand]
 - [ ] Task 1
 - [ ] Task 2
 

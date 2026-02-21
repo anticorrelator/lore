@@ -85,19 +85,68 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
 1. **Pre-fetch knowledge for worker prompts** — determine whether prefetch is needed:
 
-   **If tasks have pre-resolved knowledge** (task descriptions contain `## Prior Knowledge`): **skip prefetch entirely.** The generate-tasks pipeline already resolved backlinks into task descriptions. Prefetching would duplicate this content and waste prompt budget. This should be the common path — well-authored plans from `/spec` include `**Knowledge context:**` blocks in every phase, and `generate-tasks.py` resolves those backlinks into each task description automatically.
-
-   **If tasks lack pre-resolved knowledge** (fallback path, e.g. manually created tasks or plans without `**Knowledge context:**` blocks): run complementary prefetch using the task's `**Files:**` paths and phase objective — not a generic topic string:
+   **If tasks lack knowledge context** (manually created tasks or plans without `**Knowledge context:**` blocks — no `## Prior Knowledge` section in task descriptions): run complementary prefetch using the task's file paths and phase objective:
    ```bash
    # Use file paths + objective as query terms for targeted retrieval
    PRIOR_KNOWLEDGE=$(lore prefetch "<phase objective> <file paths from task>" --format prompt --limit 3)
    ```
    For example, if a task has `**Files:** scripts/pk_search.py` and `**Phase objective:** Fix hyphenated-term quoting`, the prefetch query would be `"Fix hyphenated-term quoting pk_search.py"`.
 
-2. **Spawn worker agents** — launch `min(task_count, 4)` in a single message. Use the **worker** agent definition (`~/.claude/agents/worker.md`) as the base prompt, with these template injections:
+   **If tasks have knowledge context** (task descriptions contain `## Prior Knowledge`): **skip prefetch.** This section contains either annotation-only summaries (default) or fully resolved content (when the phase specifies `**Knowledge delivery:** full`). In both cases, `generate-tasks.py` has already embedded the relevant knowledge — prefetching would duplicate or conflict with it.
+
+2. **Prepare advisory mixin (if advisors present)** — scan all phases in `plan.md` for `**Advisors:**` blocks. If any phase declares advisors:
+
+   a. **Collect advisor declarations** from all phases into a single list. Each entry has the format: `- advisor-name — domain scope. [must-consult|on-demand]`
+
+   b. **Read the advisory mixin:** Read `scripts/agent-protocols/advisory-consultation.md`.
+
+   c. **Build the `{{advisors}}` replacement block** from the collected declarations. Format as a markdown list with name, domain, and mode clearly separated:
+      ```
+      - **advisor-name** — domain scope. Mode: must-consult
+      - **advisor-name** — domain scope. Mode: on-demand
+      ```
+
+   d. **Resolve `{{advisors}}`** in the mixin content by replacing the placeholder with the block from (c). Store the resolved mixin as `$ADVISORY_MIXIN`.
+
+   If no phases declare advisors, set `$ADVISORY_MIXIN` to empty.
+
+3. **Spawn advisor agents (if advisors present)** — if Step 3.2 found advisor declarations, spawn each unique advisor as a persistent team member before spawning workers.
+
+   For each unique advisor name collected in Step 3.2a:
+
+   a. **Build domain context** — find the `## Investigations` section(s) in `plan.md` whose topic relates to the advisor's domain scope. Extract the relevant investigation entry (findings, verified assertions, key files, implications) and format it as the advisor's domain baseline.
+
+   b. **Spawn the advisor** using the **advisor** agent definition (`agents/advisor.md`) with these template injections:
+      - `{{team_name}}` → `impl-<slug>`
+      - `{{advisor_domain}}` → the advisor's domain scope from the plan annotation
+      - `{{domain_context}}` → the investigation excerpt from Step 3.3a
+
+      ```
+      Task:
+        subagent_type: "general-purpose"
+        model: "<selected-model>"
+        team_name: "impl-<slug>"
+        name: "<advisor-name>"
+        mode: "bypassPermissions"
+        prompt: |
+          <contents of agents/advisor.md with {{template}} variables resolved>
+      ```
+
+   Advisors are persistent — they remain active for the entire implementation session and are shut down alongside workers in Step 4.
+
+   c. **Write execution log entries** — after all advisors are spawned, log each advisor's lifecycle event:
+      ```bash
+      printf 'Advisor spawned: %s\nDomain: %s\nMode: %s\n' \
+        "<advisor-name>" "<domain scope>" "<must-consult|on-demand>" \
+        | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
+      ```
+
+4. **Spawn worker agents** — launch `min(task_count, 4)` in a single message. Use the **worker** agent definition (`agents/worker.md`) as the base prompt, with these template injections:
    - `{{team_name}}` → `impl-<slug>`
    - `{{team_lead}}` → the lead name read from team config in Step 2
    - `{{prior_knowledge}}` → the `$PRIOR_KNOWLEDGE` block from Step 3.1 (or empty if tasks have pre-resolved knowledge)
+
+   **If `$ADVISORY_MIXIN` is non-empty:** append the resolved mixin content after the fully resolved `worker.md` content, separated by a blank line. The worker prompt becomes: `<resolved worker.md>\n\n<resolved advisory-consultation.md>`.
 
    ```
    Task:
@@ -107,10 +156,11 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
      name: "worker-N"
      mode: "bypassPermissions"
      prompt: |
-       <contents of ~/.claude/agents/worker.md with {{template}} variables resolved>
+       <contents of agents/worker.md with {{template}} variables resolved>
+       <if advisors: contents of advisory-consultation.md with {{advisors}} resolved>
    ```
 
-3. If more tasks than workers, agents pick up additional tasks after completing their first.
+5. If more tasks than workers, agents pick up additional tasks after completing their first.
 
 ## Step 4: Collect progress
 
@@ -121,6 +171,15 @@ As worker messages arrive (delivered automatically):
    lore work check <slug> "<task-subject>"
    ```
    If this fails or is missed, Step 6 reconciles from the task system.
+
+   **Write execution log entry** — immediately after `lore work check`, append to `execution-log.md`:
+   ```bash
+   printf 'Task: %s\nChanges: %s\nObservations: %s\nTest result: %s\n' \
+     "<task-subject>" "<worker Changes field>" "<worker Observations field>" "<passed|failed|skipped>" \
+     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
+   ```
+   Use the worker's reported **Changes:** and **Observations:** fields verbatim. If the worker did not report a test result, use `skipped`. `execution-log.md` is created on first write.
+
 2. **Log architectural findings** — note interesting patterns reported by workers for Step 5
 3. **Handle blockers** — if a worker reports blockers:
    - Read the relevant code/context
@@ -130,8 +189,14 @@ As worker messages arrive (delivered automatically):
 Do NOT gate on reviewing diffs — workers proceed autonomously. The user reviews at the end.
 
 When all tasks are complete (or all remaining are blocked):
-1. Send `shutdown_request` to all workers
-2. Run `TeamDelete`
+1. Send `shutdown_request` to all workers and all advisor agents (if any were spawned in Step 3.3)
+2. **Write advisor shutdown log entries** — for each advisor that was spawned, log the shutdown:
+   ```bash
+   printf 'Advisor shutdown: %s\nDomain: %s\n' \
+     "<advisor-name>" "<domain scope>" \
+     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
+   ```
+3. Run `TeamDelete`
 
 ## Step 5: Post-implementation extraction
 

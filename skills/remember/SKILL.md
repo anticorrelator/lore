@@ -39,6 +39,19 @@ When called from another skill, the argument typically provides context about wh
 
 The key question for each candidate: **would a future session benefit from knowing this, or is it noise?** Constraints from the caller help answer this by providing domain-specific signal about what's ephemeral.
 
+## Step 1b: Resolve active work item
+
+Run work item resolution once; the result flows to Step 5 (execution-log write):
+
+```bash
+lore work list --json
+```
+
+Parse the JSON output and match the current git branch against each item's `branches` array:
+- **Branch match found:** Set `RESOLVED_SLUG` to that item's slug.
+- **No branch match:** Check if the invocation's capture-constraint string (from Step 1) contains a substring matching any active work item's title (case-insensitive). If matched, set `RESOLVED_SLUG`.
+- **No match either way:** Leave `RESOLVED_SLUG` unset. Subsequent steps skip the execution-log write silently.
+
 ## Step 2: Scan for uncaptured insights
 
 Review the full conversation context (filtered by any Step 1 constraints) and identify moments that match capture triggers:
@@ -123,6 +136,16 @@ Review the conversation for thread-worthy content:
 - Write all thread updates (new entry files to `_threads/<slug>/<date>.md`, update `_meta.json`)
 - Create new threads if warranted (create directory, `_meta.json`, first entry file, update `_index.json`)
 - Update plans as needed
+
+**Write execution-log entry** — if `RESOLVED_SLUG` was set in Step 1b, append a session summary to `execution-log.md`:
+```bash
+printf 'Captures: %s\nThreads updated: %s\nSummary: %s\n' \
+  "<N entries captured: title1, title2, ...>" \
+  "<thread slugs updated or created>" \
+  "<one-sentence summary of what was done this session>" \
+  | bash ~/.lore/scripts/write-execution-log.sh --slug "$RESOLVED_SLUG" --source remember
+```
+Derive the summary from the captures and thread updates just made. If no captures were made and no threads updated, omit the write.
 
 ### Preference accumulation
 

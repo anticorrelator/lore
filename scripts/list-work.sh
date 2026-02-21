@@ -33,6 +33,7 @@ fi
 # Parse arguments
 SHOW_ALL=false
 FILTER_STATUS=""
+JSON_OUTPUT=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,12 +45,27 @@ while [[ $# -gt 0 ]]; do
       FILTER_STATUS="$2"
       shift 2
       ;;
+    --json)
+      JSON_OUTPUT=true
+      shift
+      ;;
     *)
       echo "[work] Error: Unknown argument: $1" >&2
       exit 1
       ;;
   esac
 done
+
+# JSON output: return the plans array from _index.json directly
+if [[ "$JSON_OUTPUT" == true ]]; then
+  python3 -c "
+import json, sys
+with open('$INDEX') as f:
+    data = json.load(f)
+print(json.dumps(data.get('plans', [])))
+"
+  exit 0
+fi
 
 # Calculate relative date (macOS compatible)
 NOW_EPOCH=$(date +%s)
