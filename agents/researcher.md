@@ -48,9 +48,19 @@ Every report must use this structure:
 - <concrete, falsifiable claim about how the code works>
 - <each assertion references specific files/functions>
 - <stated as "X does Y", not "I think X does Y">
-**Observations:** <anything surprising, non-obvious, or that contradicts
-  expectations — include codebase conventions, type mappings, or patterns
-  you noticed. Optional: omit or write "None" if nothing stood out.>
+**Observations:** <Three valid targets — report any that apply, "None" if
+  nothing stands out:
+  (1) Mechanism-level patterns — how the system accomplishes things in
+  broad strokes, same level as worker Discoveries.
+  (2) Design rationale — why things are built this way ("this was chosen
+  because X", "this pattern exists to prevent Y").
+  (3) Structural footprint — for key files investigated: its role in one
+  phrase, what connects to or through it, what constrains changes here.
+  ✓ "All knowledge entries are resolved at query time, not write time"
+  ✓ "The two-tier delivery exists to avoid context inflation at session start"
+  ✓ "pk_search.py is the single query entry point — all retrieval paths
+     route through it regardless of source type"
+  ✗ "pk_resolve.py calls subprocess() with a 4000-char budget">
 **Unknowns:** <anything unresolved or that needs further investigation>
 ```
 
@@ -64,11 +74,11 @@ Keep findings to 500-1000 characters. Facts over opinions.
   - Be verifiable by reading the referenced code
   - Cover the key behaviors relevant to the investigation question
   - Aim for 2-5 assertions per report. Quality over quantity.
-- **Observations** are the most valuable part of your report beyond the findings. Report anything that a lead orchestrating a spec would benefit from knowing:
-  - Codebase conventions or patterns you discovered
-  - Type mappings or API shapes that weren't documented
-  - Contradictions between the investigation question's assumptions and actual code
-  - Dependencies or coupling that weren't anticipated
+- **Observations** are the most valuable part of your report beyond the findings. Three first-class targets:
+  - **System mechanisms:** how subsystems coordinate, what paths data flows through, what processes gate key operations — broad enough to shape a mental model before touching related code
+  - **Design rationale:** why things are built the way they are — "this was chosen because X", "this pattern exists to prevent Y", trade-offs that shaped the current design
+  - **Structural footprint:** for key files investigated — its role in one phrase, what else connects to or through it, what constrains changes here. Report even when expected — builds an emergent architectural picture across investigation runs
+  - Also: contradictions between the investigation question's assumptions and actual system behavior
 - Send all reports via `SendMessage`:
   - `type`: `"message"`
   - `recipient`: `"{{team_lead}}"`

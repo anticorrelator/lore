@@ -27,9 +27,10 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 1. Parse arguments: if first arg after `/spec` is `short`, use **Short Flow**; otherwise **Full Flow**. If `--without-verification` is present, skip Step 4b (assertion verification). The remaining text is the **input**.
 2. Try to resolve input as an existing work item (fuzzy match or branch inference, same algorithm as `/work`)
 3. **If resolved** → load the work item:
-   - If `plan.md` exists with `## Investigations` and completed findings, skip to synthesis (Step 5)
+   - If `plan.md` exists with synthesis already complete (Design Decisions + Phases present), skip to Step 5.1 (Confirm understanding) — run the approval gates before finalizing. If a `## Strategy` section exists, load it silently as shaping context.
+   - If `plan.md` exists with `## Investigations` and completed findings but no synthesis yet, skip to synthesis (Step 5). If a `## Strategy` section exists in plan.md, load it silently and use it as shaping context during synthesis — do not re-prompt.
    - If it has investigations but `## Open Questions` needing follow-up, dispatch targeted follow-ups
-   - If `plan.md` exists but is incomplete, present for discussion/editing
+   - If `plan.md` exists but is incomplete, present for discussion/editing. If no `## Strategy` section exists and synthesis has not yet run, offer the strategy gate (Step 4d) before synthesizing.
    - If no `plan.md`, continue to Step 2 (the appropriate flow)
 4. **If NOT resolved** → treat input as a freeform description, go to **Goal Refinement**
 5. **If no input at all** → try branch inference; if no match, ask what they want to spec
@@ -65,6 +66,42 @@ For single-pass plans where the scope is clear and the agent can identify key fi
 2. Check the knowledge store (`lore index`, `_manifest.json`) for relevant domain files
 3. Read the files yourself — do NOT spawn subagents
 4. Note key findings as you go
+
+### Step 2.5s: Strategy gate
+
+Before drafting, offer the user a chance to shape the plan with high-level strategy.
+
+1. **Check for existing strategy** — scan `plan.md` for a `## Strategy` section.
+   - If found: read it silently. Do not re-prompt. Proceed to Step 3s with the strategy as additional shaping context.
+
+2. **If no `## Strategy` exists**, present a lightweight context summary and prompt:
+
+   **Compressed summary format:**
+   ```
+   ## Context Summary
+
+   Files read: <list of key files>
+   Top findings:
+   - <key finding 1>
+   - <key finding 2>
+   - <key finding 3>
+   ```
+
+   Then prompt:
+   ```
+   Any strategy to apply to the plan? (Enter to skip)
+   ```
+
+3. **If the user skips (Enter with no input):** proceed directly to Step 3s with no changes — behavior is identical to the current flow.
+
+4. **If the user supplies strategy:** append a `## Strategy` section to `plan.md` immediately (before drafting):
+   ```markdown
+   ## Strategy
+   <user's strategy verbatim>
+   ```
+   Then proceed to Step 3s with the strategy as additional shaping context for design decisions and phase structure.
+
+**Activation note:** Always present the context summary and prompt — do not skip this step because the scope seems clear. The user's Enter-to-skip response is the only gate.
 
 ### Step 3s: Draft plan
 
@@ -307,6 +344,43 @@ printf 'Investigations: %d\nTopics: %s\nVerification: confirmed=%d, refuted=%d, 
 - **Verification fields:** from the `### Verification Summary` in `plan.md`; use `0` for all if `--without-verification` was passed
 - **Refuted assertions:** only those that changed the synthesis direction — omit confirmed and unverifiable assertions
 
+### Step 4d: Strategy gate
+
+Before synthesizing, offer the user a chance to shape the plan with high-level strategy.
+
+1. **Check for existing strategy** — scan `plan.md` for a `## Strategy` section.
+   - If found: read it silently. Do not re-prompt. Proceed to Step 5 with the strategy as additional shaping context.
+
+2. **If no `## Strategy` exists**, present a compressed investigation summary and prompt:
+
+   **Compressed summary format:**
+   ```
+   ## Investigation Summary
+
+   | Area | Key Finding | Assertions |
+   |------|-------------|------------|
+   | <topic> | <1-sentence finding> | <N confirmed, M refuted> |
+   ...
+
+   Refuted: <list refuted assertions briefly, or "none">
+   ```
+
+   Then prompt:
+   ```
+   Any strategy to apply to the plan? (Enter to skip)
+   ```
+
+3. **If the user skips (Enter with no input):** proceed directly to Step 5 with no changes — behavior is identical to the current flow.
+
+4. **If the user supplies strategy:** append a `## Strategy` section to `plan.md` immediately (before synthesis):
+   ```markdown
+   ## Strategy
+   <user's strategy verbatim>
+   ```
+   Then proceed to Step 5 with the strategy as additional shaping context for design decisions and phase structure.
+
+**Activation note:** This step is a concrete prompt-and-respond interaction, not an evaluation condition. Always present the compressed summary and prompt — do not assess whether strategy "seems needed" and skip. The user's Enter-to-skip response is the only gate.
+
 ### Step 5: Synthesize
 
 From the documented findings, draft the remaining plan sections:
@@ -434,7 +508,7 @@ Before finalizing, present the plan's phases as a structured summary for the use
 Invoke `/remember` scoped to the spec investigation:
 
 ```
-/remember Research findings from <work item title> — Evaluate researcher-reported **Observations:** from investigation reports against the capture gate (reusable, non-obvious, stable, high-confidence). Capture architectural insights and gotchas discovered during research. Skip: findings already documented in plan.md (they're persisted there).
+/remember Research findings from <work item title> — Read all **Observations:** entries from investigation reports in plan.md and evaluate each — mechanism-level patterns (how the system accomplishes X broadly) and design rationale ("this was chosen because X") both qualify; implementation facts already expressed in Assertions do not. Also capture: cross-investigation synthesis patterns not surfaced individually. Skip: findings already documented in plan.md Assertions (they're persisted there).
 ```
 
 ### Step 5.5: Generate tasks.json
@@ -468,6 +542,24 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 
 ## Goal
 <!-- One paragraph: what we're building/changing and why -->
+
+## Strategy
+<!-- Optional. Written verbatim from user input at the strategy gate (Step 4d / Step 2.5s).
+     Omit this section entirely if the user skips the strategy prompt — absence is the default.
+     On continuation runs, this section is read silently and used to shape synthesis.
+
+     Format: free-form text block written as a worker-facing directive.
+     Write the user's input as-is — do not summarize, annotate, or interpret.
+     If the user provides a list, preserve it as a list. If prose, preserve as prose.
+
+     Examples of valid strategy content:
+       "Prefer composition over inheritance throughout. No new abstract base classes."
+       "Phase the rollout: core types first, then adapters, then update call sites."
+       "Keep changes backward-compatible — the v1 API must still work after this."
+
+     This content is injected into worker task descriptions alongside design decisions.
+     Write it so a worker reading it for the first time understands what to do, not just
+     what was discussed. -->
 
 ## Context
 <!-- SHORT FLOW ONLY: 3-6 bullets summarizing key files, constraints, and patterns found -->
@@ -528,6 +620,7 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 
 When `/spec` is called on a work item that already has a plan:
 - Read existing investigations/context — they are your memory (no need to re-explore)
+- If a `## Strategy` section exists in plan.md, read it silently and use it as shaping context during synthesis — do not re-prompt. plan.md is the memory; strategy captured in a prior session carries forward automatically.
 - Check if synthesis (Design/Phases) is complete; if not, synthesize from existing findings
 - Check Open Questions — dispatch follow-up investigations for unresolved items
-- Present current state and ask what needs refinement
+- **Always run the approval gates before finalizing:** whether synthesis was just completed or carried over from a prior session, proceed through Step 5.1 (Confirm understanding) and Step 5.3 (Task review). Do not skip these because the plan "already exists" — the structured understanding summary and phase review are the mechanism for catching misalignments regardless of when synthesis ran.

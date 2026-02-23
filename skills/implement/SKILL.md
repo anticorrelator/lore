@@ -174,11 +174,11 @@ As worker messages arrive (delivered automatically):
 
    **Write execution log entry** — immediately after `lore work check`, append to `execution-log.md`:
    ```bash
-   printf 'Task: %s\nChanges: %s\nObservations: %s\nTest result: %s\n' \
-     "<task-subject>" "<worker Changes field>" "<worker Observations field>" "<passed|failed|skipped>" \
+   printf 'Task: %s\nChanges: %s\nDiscoveries: %s\nTest result: %s\n' \
+     "<task-subject>" "<worker Changes field>" "<worker Discoveries field>" "<passed|failed|skipped>" \
      | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
    ```
-   Use the worker's reported **Changes:** and **Observations:** fields verbatim. If the worker did not report a test result, use `skipped`. `execution-log.md` is created on first write.
+   Use the worker's reported **Changes:** and **Discoveries:** fields verbatim. If the worker did not report a test result, use `skipped`. `execution-log.md` is created on first write.
 
 2. **Log architectural findings** — note interesting patterns reported by workers for Step 5
 3. **Handle blockers** — if a worker reports blockers:
@@ -203,7 +203,7 @@ When all tasks are complete (or all remaining are blocked):
 Invoke `/remember` with capture constraints scoped to the implementation:
 
 ```
-/remember Implementation findings from <work item title> — Evaluate worker-reported **Observations:** from task completion reports against the capture gate (reusable, non-obvious, stable, high-confidence) using full project context. Also capture: cross-task patterns visible only from the lead's vantage, integration gotchas that emerged from combining worker changes, conventions confirmed or violated across multiple tasks.
+/remember Implementation findings from <work item title> — Read all **Discoveries:** entries from execution-log.md and evaluate each against the capture gate. Two valid capture targets: (1) mechanism-level patterns — how the system accomplishes X broadly, evaluate for novelty against existing knowledge; (2) structural footprint — module roles, integration points, what connects to/through a file, what constrains changes — evaluate against existing architectural knowledge for what isn't yet recorded. Function-level details do not qualify. Also capture: cross-task patterns visible only from the lead's vantage.
 ```
 
 ## Step 6: Cleanup and report

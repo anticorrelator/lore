@@ -207,6 +207,28 @@ def extract_backlinks(plan_content: str, section_name: str) -> list[str]:
     return backlinks
 
 
+def extract_strategy(plan_content: str) -> str:
+    """Extract the ## Strategy section content from plan_content.
+
+    Returns the trimmed text between ## Strategy and the next ## heading,
+    or an empty string if the section is absent, empty, or contains only
+    HTML comments (e.g., template placeholder text).
+    """
+    pattern = re.compile(r"^##\s+Strategy\s*$", re.MULTILINE)
+    match = pattern.search(plan_content)
+    if not match:
+        return ""
+
+    start = match.end()
+    next_h2 = re.search(r"^## ", plan_content[start:], re.MULTILINE)
+    end = start + next_h2.start() if next_h2 else len(plan_content)
+    section_text = plan_content[start:end]
+
+    # Strip HTML comments (template placeholders) before checking content
+    section_text = re.sub(r"<!--.*?-->", "", section_text, flags=re.DOTALL).strip()
+    return section_text
+
+
 def resolve_backlinks(
     backlinks: list[str], knowledge_dir: str, script_dir: str
 ) -> list[dict]:
@@ -348,6 +370,7 @@ def build_context_section(
     reference_files: list[str] | None = None,
     design_decisions: list[dict] | None = None,
     resolve_full_content: bool = False,
+    strategy: str | None = None,
 ) -> str:
     """Build the context section for a task description.
 
@@ -359,6 +382,9 @@ def build_context_section(
     first and given priority within the char budget. Phase-level and
     cross-cutting backlinks fill remaining budget.
 
+    When strategy is non-empty, a **Strategy:** block is prepended before
+    the ## Design Decisions block.
+
     When design_decisions is non-empty, a ## Design Decisions block is
     rendered before the ## Context heading, showing Decision + Rationale
     for each relevant decision.
@@ -367,6 +393,11 @@ def build_context_section(
     prepended before the ## Context heading.
     """
     lines = []
+
+    if strategy:
+        lines.append("**Strategy:**")
+        lines.append(strategy)
+        lines.append("")
 
     if design_decisions:
         lines.append("## Design Decisions")
@@ -511,6 +542,9 @@ def generate_tasks_from_plan(
         set(related_backlinks + design_backlinks)
     )
 
+    # Extract strategy for propagation to workers
+    strategy = extract_strategy(plan_content)
+
     # Parse design decisions for propagation to workers
     all_design_decisions = parse_design_decisions(plan_content)
 
@@ -627,6 +661,7 @@ def generate_tasks_from_plan(
                 reference_files=reference_files,
                 design_decisions=phase_decisions,
                 resolve_full_content=resolve_full_content,
+                strategy=strategy or None,
             )
 
             # Build description
