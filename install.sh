@@ -59,6 +59,12 @@ if $UNINSTALL; then
     dry rm -f "$HOME/.local/bin/lore"
   fi
 
+  # Remove TUI binary
+  if [ -f "$HOME/.local/bin/lore-tui" ]; then
+    info "Removing TUI binary: $HOME/.local/bin/lore-tui"
+    dry rm -f "$HOME/.local/bin/lore-tui"
+  fi
+
   # Remove scripts symlink
   if [ -L "$LORE_DATA_DIR/scripts" ]; then
     info "Removing scripts symlink: $LORE_DATA_DIR/scripts"
@@ -143,6 +149,18 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then
   echo ""
   echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
   echo ""
+fi
+
+# --- 3b. Build and install TUI ---
+if command -v go >/dev/null 2>&1; then
+  info "Building TUI"
+  if ! $DRY_RUN; then
+    (cd "$LORE_REPO_DIR/tui" && go build -o "$HOME/.local/bin/lore-tui" .)
+  else
+    echo "  [dry-run] (cd $LORE_REPO_DIR/tui && go build -o ~/.local/bin/lore-tui .)"
+  fi
+else
+  info "Skipping TUI build — go not found on PATH"
 fi
 
 # --- 4. Symlink skills ---
@@ -286,6 +304,11 @@ echo ""
 echo "  Data dir:    $LORE_DATA_DIR"
 echo "  Scripts:     $LORE_DATA_DIR/scripts -> $LORE_REPO_DIR/scripts"
 echo "  CLI:         ~/.local/bin/lore -> $LORE_REPO_DIR/cli/lore"
+if [ -f "$HOME/.local/bin/lore-tui" ]; then
+  echo "  TUI:         ~/.local/bin/lore-tui (built)"
+else
+  echo "  TUI:         skipped (go not found)"
+fi
 echo "  Skills:      $CLAUDE_DIR/skills/ ($(ls -d "$LORE_REPO_DIR"/skills/*/ 2>/dev/null | wc -l | tr -d ' ') linked)"
 echo "  Agents:      $CLAUDE_DIR/agents/ ($(ls "$LORE_REPO_DIR"/agents/*.md 2>/dev/null | wc -l | tr -d ' ') linked)"
 echo "  Hooks:       $CLAUDE_DIR/settings.json (updated)"

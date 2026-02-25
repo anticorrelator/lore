@@ -40,6 +40,7 @@ Commands:
   batch-spec   Batch-run /spec short on eligible work items
   batch-implement  Batch-run /implement on ready work items
   backlinks    Backlink management (see: lore backlinks --help)
+  rebuild      Rebuild and reinstall the lore-tui binary
 
   work         Work item management (see: lore work --help)
   journal      Effectiveness journal (see: lore journal --help)
@@ -67,11 +68,13 @@ Subcommands:
   show      Show a work item's full context
   set       Set metadata fields (issue, pr) on a work item
   archive   Archive a completed work item
+  unarchive Restore an archived work item
   search    Search across work items
   tasks        Generate tasks from a plan
   regen-tasks  Regenerate tasks.json from plan.md
   check        Check off a plan task
   heal         Detect and fix work structure issues
+  ai           Create work items from a natural-language prompt (headless Claude)
 
 Options:
   --help, -h    Show this help
@@ -526,6 +529,9 @@ cmd_work() {
     archive)
       "$SCRIPTS_DIR/archive-work.sh" "$@"
       ;;
+    unarchive)
+      "$SCRIPTS_DIR/unarchive-work.sh" "$@"
+      ;;
     search)
       "$SCRIPTS_DIR/search-work.sh" "$@"
       ;;
@@ -543,6 +549,9 @@ cmd_work() {
     heal)
       "$SCRIPTS_DIR/heal-work.sh" "$@"
       ;;
+    ai)
+      "$SCRIPTS_DIR/work-ai.sh" "$@"
+      ;;
     *)
       echo "Error: unknown work subcommand '$subcmd'" >&2
       echo "" >&2
@@ -554,8 +563,7 @@ cmd_work() {
 
 # --- Top-level dispatch ---
 if [[ $# -eq 0 ]]; then
-  usage
-  exit 1
+  exec lore-tui
 fi
 
 case "$1" in
@@ -680,6 +688,21 @@ case "$1" in
   batch-implement)
     shift
     "$SCRIPTS_DIR/batch-implement.sh" "$@"
+    ;;
+  rebuild)
+    if ! command -v go >/dev/null 2>&1; then
+      echo "Error: go not found on PATH" >&2
+      exit 1
+    fi
+    REPO_DIR="$(dirname "$SCRIPTS_DIR")"
+    TUI_DIR="$REPO_DIR/tui"
+    if [[ ! -d "$TUI_DIR" ]]; then
+      echo "Error: tui/ directory not found at $TUI_DIR" >&2
+      exit 1
+    fi
+    echo "Building lore-tui..."
+    (cd "$TUI_DIR" && go build -o "$HOME/.local/bin/lore-tui" .)
+    echo "Installed: ~/.local/bin/lore-tui"
     ;;
   *)
     echo "Error: unknown command '$1'" >&2

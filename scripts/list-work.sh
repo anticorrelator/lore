@@ -179,7 +179,7 @@ if [[ -d "$ARCHIVE_DIR" ]]; then
 fi
 
 # Output
-echo "=== Work Items ==="
+draw_separator "Work Items"
 echo ""
 
 if [[ $ACTIVE_COUNT -eq 0 ]]; then
@@ -233,4 +233,4 @@ if [[ "$SHOW_ALL" == true && $ARCHIVE_COUNT -gt 0 ]]; then
 fi
 
 echo ""
-echo "=== End Work Items ==="
+draw_separator

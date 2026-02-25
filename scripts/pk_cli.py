@@ -247,8 +247,15 @@ def cmd_stats(args: argparse.Namespace) -> None:
     result = stats.get_stats()
 
     if "error" in result:
+        if getattr(args, "json", False):
+            print(json.dumps({"error": result["error"]}))
+            sys.exit(1)
         print(f"Error: {result['error']}", file=sys.stderr)
         sys.exit(1)
+
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2))
+        return
 
     print(f"Knowledge dir: {result['knowledge_dir']}")
     print(f"Files indexed: {result['file_count']}")
@@ -887,6 +894,7 @@ def main() -> None:
     # stats
     p_stats = subparsers.add_parser("stats", help="Show index statistics")
     p_stats.add_argument("knowledge_dir", help="Path to knowledge directory")
+    p_stats.add_argument("--json", action="store_true", help="Output as JSON")
     p_stats.set_defaults(func=cmd_stats)
 
     args = parser.parse_args()

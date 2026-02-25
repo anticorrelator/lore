@@ -16,6 +16,28 @@ die() {
   exit 1
 }
 
+# --- json_error ---
+# Print a JSON error object to stdout and exit with status 1.
+# The message is properly escaped for JSON (handles quotes, backslashes, newlines).
+# Usage: json_error "something went wrong"
+# Output: {"error": "something went wrong"}
+json_error() {
+  local msg="$1"
+  local escaped
+  escaped=$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()), end="")')
+  printf '{"error": %s}\n' "$escaped"
+  exit 1
+}
+
+# --- json_output ---
+# Print a JSON string to stdout and exit with status 0.
+# The caller is responsible for providing valid JSON.
+# Usage: json_output '{"key": "value"}'
+json_output() {
+  printf '%s\n' "$1"
+  exit 0
+}
+
 # --- json_field ---
 # Extract a JSON string field value using grep/sed.
 # Usage: value=$(json_field "title" "$file")
@@ -578,6 +600,34 @@ term_width() {
     w=100
   fi
   echo "$w"
+}
+
+# --- draw_separator ---
+# Draw a box-drawing separator line filling the terminal width.
+# With a title:  "── Title ────────────...──"
+# Without:       "──────────────────────...──"
+# Usage: draw_separator "Section Title"
+#        draw_separator   # no title
+draw_separator() {
+  local title="${1:-}"
+  local width
+  width=$(term_width)
+
+  if [[ -z "$title" ]]; then
+    # Full-width line
+    printf '%*s\n' "$width" '' | tr ' ' '─'
+  else
+    local prefix="── "
+    local suffix=" "
+    local decorated="${prefix}${title}${suffix}"
+    local decorated_len=${#decorated}
+    local remaining=$((width - decorated_len))
+    if [[ "$remaining" -lt 1 ]]; then
+      remaining=1
+    fi
+    printf '%s' "$decorated"
+    printf '%*s\n' "$remaining" '' | tr ' ' '─'
+  fi
 }
 
 # --- render_table ---

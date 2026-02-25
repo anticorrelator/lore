@@ -16,6 +16,8 @@ TARGET_DIR=""
 ISSUE=""
 PR=""
 TAGS=""
+JSON_MODE=0
+DETECT_PR=0
 
 if [[ $# -ge 1 && "$1" == --* ]]; then
   # Flag mode
@@ -45,9 +47,17 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
         TAGS="$2"
         shift 2
         ;;
+      --json)
+        JSON_MODE=1
+        shift
+        ;;
+      --detect-pr)
+        DETECT_PR=1
+        shift
+        ;;
       *)
         echo "[work] Error: Unknown flag '$1'" >&2
-        echo "Usage: create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>]" >&2
+        echo "Usage: create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--json] [--detect-pr]" >&2
         exit 1
         ;;
     esac
@@ -62,9 +72,17 @@ else
         TAGS="$2"
         shift 2
         ;;
+      --json)
+        JSON_MODE=1
+        shift
+        ;;
+      --detect-pr)
+        DETECT_PR=1
+        shift
+        ;;
       --*)
         echo "[work] Error: Unknown flag '$1'. Use --title flag mode for multiple options." >&2
-        echo "Usage: create-work.sh <name> [directory] [--tags <tag1,tag2>]" >&2
+        echo "Usage: create-work.sh <name> [directory] [--tags <tag1,tag2>] [--json] [--detect-pr]" >&2
         exit 1
         ;;
       *)
@@ -78,6 +96,9 @@ fi
 TARGET_DIR="${TARGET_DIR:-$(pwd)}"
 
 if [[ -z "$NAME" ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "Missing work item name"
+  fi
   echo "[work] Error: Missing work item name." >&2
   echo "Usage: create-work.sh <name> [directory]" >&2
   echo "       create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>]" >&2
@@ -96,12 +117,18 @@ fi
 SLUG=$(slugify "$NAME")
 
 if [[ -z "$SLUG" ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "Name '$NAME' produced an empty slug"
+  fi
   echo "[work] Error: Name '$NAME' produced an empty slug." >&2
   exit 1
 fi
 
 # Check for duplicate
 if [[ -d "$WORK_DIR/$SLUG" ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "Work item '$SLUG' already exists"
+  fi
   echo "[work] Error: Work item '$SLUG' already exists at $WORK_DIR/$SLUG" >&2
   exit 1
 fi
@@ -175,7 +202,30 @@ cat > "$WORK_DIR/$SLUG/notes.md" << NOTESEOF
 NOTESEOF
 fi
 
+# --- Auto-detect PR from branch ---
+# Only run if --detect-pr is active, no explicit --pr was given, and we have a branch
+if [[ $DETECT_PR -eq 1 && -z "$PR" && -n "$BRANCH" ]]; then
+  if command -v gh &>/dev/null; then
+    DETECTED_PR=$(gh pr list --head "$BRANCH" --json number --limit 1 2>/dev/null \
+      | python3 -c "import json,sys; data=json.load(sys.stdin); print(data[0]['number'] if data else '')" 2>/dev/null) || true
+    if [[ -n "$DETECTED_PR" ]]; then
+      # Update pr field in _meta.json
+      META_FILE="$WORK_DIR/$SLUG/_meta.json"
+      if [[ "$(uname)" == "Darwin" ]]; then
+        sed -i '' "s/\"pr\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"pr\": \"$DETECTED_PR\"/" "$META_FILE"
+      else
+        sed -i "s/\"pr\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"pr\": \"$DETECTED_PR\"/" "$META_FILE"
+      fi
+    fi
+  fi
+fi
+
 # Update the work index
+if [[ $JSON_MODE -eq 1 ]]; then
+  bash "$SCRIPT_DIR/update-work-index.sh" "$TARGET_DIR" > /dev/null 2>&1 || true
+  json_output "$(cat "$WORK_DIR/$SLUG/_meta.json")"
+fi
+
 bash "$SCRIPT_DIR/update-work-index.sh" "$TARGET_DIR"
 
 echo "Created work item '$TITLE' at $WORK_DIR/$SLUG"

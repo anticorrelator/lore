@@ -17,6 +17,7 @@ CONFIDENCE="high"
 RELATED_FILES=""
 SOURCE="manual"
 EXAMPLE=""
+JSON_MODE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -48,15 +49,22 @@ while [[ $# -gt 0 ]]; do
       EXAMPLE="$2"
       shift 2
       ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"]" >&2
+      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--json]" >&2
       exit 1
       ;;
   esac
 done
 
 if [[ -z "$INSIGHT" ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "--insight is required"
+  fi
   die "--insight is required"
 fi
 
@@ -65,6 +73,9 @@ KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 
 # --- Verify knowledge store exists ---
 if [[ ! -f "$KNOWLEDGE_DIR/_manifest.json" ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "No knowledge store found at: $KNOWLEDGE_DIR"
+  fi
   die "No knowledge store found at: $KNOWLEDGE_DIR. Run \`lore init\` to initialize one."
 fi
 
@@ -119,7 +130,6 @@ fi
 } > "$TARGET_FILE"
 
 RELPATH="${TARGET_FILE#$KNOWLEDGE_DIR/}"
-echo "[capture] Filed to $RELPATH"
 
 # --- Append to capture log ---
 LOG_FILE="$KNOWLEDGE_DIR/_capture_log.csv"
@@ -130,3 +140,15 @@ echo "$(timestamp_iso),$SOURCE,$CATEGORY,$CONFIDENCE" >> "$LOG_FILE"
 
 # --- Run manifest update ---
 "$SCRIPT_DIR/update-manifest.sh" > /dev/null 2>&1 || true
+
+# --- Output ---
+if [[ $JSON_MODE -eq 1 ]]; then
+  JSON_RESULT=$(python3 -c "
+import json, sys
+d = {'path': sys.argv[1], 'category': sys.argv[2], 'title': sys.argv[3], 'confidence': sys.argv[4]}
+print(json.dumps(d))
+" "$RELPATH" "$CATEGORY" "$TITLE" "$CONFIDENCE")
+  json_output "$JSON_RESULT"
+fi
+
+echo "[capture] Filed to $RELPATH"

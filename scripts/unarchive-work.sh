@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# archive-work.sh — Archive a work item by slug
-# Usage: bash archive-work.sh <slug>
-# Updates _meta.json status to "archived", moves to _archive/, rebuilds index.
+# unarchive-work.sh — Unarchive a work item by slug
+# Usage: bash unarchive-work.sh [--json] <slug>
+# Moves _archive/<slug>/ back to _work/<slug>/, updates _meta.json status to "active", rebuilds index.
 
 set -euo pipefail
 
@@ -32,7 +32,7 @@ if [[ -z "$SLUG" ]]; then
     json_error "Missing required argument: slug"
   fi
   echo "[work] Error: Missing required argument: slug" >&2
-  echo "Usage: bash archive-work.sh [--json] <slug>" >&2
+  echo "Usage: bash unarchive-work.sh [--json] <slug>" >&2
   exit 1
 fi
 
@@ -47,18 +47,27 @@ if [[ ! -d "$WORK_DIR" ]]; then
   exit 1
 fi
 
-ITEM_DIR="$WORK_DIR/$SLUG"
+ARCHIVE_DIR="$WORK_DIR/_archive"
+
+if [[ ! -d "$ARCHIVE_DIR" ]]; then
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    json_error "No archive directory found"
+  fi
+  echo "[work] Error: No archive directory found." >&2
+  exit 1
+fi
+
+ITEM_DIR="$ARCHIVE_DIR/$SLUG"
 
 if [[ ! -d "$ITEM_DIR" ]]; then
   if [[ "$JSON_OUTPUT" == true ]]; then
-    json_error "Work item not found: $SLUG"
+    json_error "Archived work item not found: $SLUG"
   fi
-  echo "[work] Error: Work item not found: $SLUG" >&2
-  echo "Available items:" >&2
-  for d in "$WORK_DIR"/*/; do
+  echo "[work] Error: Archived work item not found: $SLUG" >&2
+  echo "Available archived items:" >&2
+  for d in "$ARCHIVE_DIR"/*/; do
     [[ -d "$d" ]] || continue
     name=$(basename "$d")
-    [[ "$name" == "_archive" ]] && continue
     echo "  $name" >&2
   done
   exit 1
@@ -74,56 +83,42 @@ if [[ ! -f "$META_FILE" ]]; then
   exit 1
 fi
 
-# Check if already archived
-CURRENT_STATUS=$(json_field "status" "$META_FILE")
-if [[ "$CURRENT_STATUS" == "archived" ]]; then
+# Check for name collision in active work
+if [[ -d "$WORK_DIR/$SLUG" ]]; then
   if [[ "$JSON_OUTPUT" == true ]]; then
-    json_error "Work item '$SLUG' is already archived"
+    json_error "Active work already contains an item named '$SLUG'"
   fi
-  echo "[work] Error: Work item '$SLUG' is already archived." >&2
+  echo "[work] Error: Active work already contains an item named '$SLUG'." >&2
   exit 1
 fi
 
 # Update status in _meta.json
-sed -i '' 's/"status"[[:space:]]*:[[:space:]]*"[^"]*"/"status": "archived"/' "$META_FILE"
+sed -i '' 's/"status"[[:space:]]*:[[:space:]]*"[^"]*"/"status": "active"/' "$META_FILE"
 
-# Add archived timestamp
-ARCHIVE_TS=$(timestamp_iso)
-sed -i '' "s/\"updated\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"updated\": \"$ARCHIVE_TS\"/" "$META_FILE"
+# Update timestamp
+UNARCHIVE_TS=$(timestamp_iso)
+sed -i '' "s/\"updated\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"updated\": \"$UNARCHIVE_TS\"/" "$META_FILE"
 
-# Create _archive directory if needed
-ARCHIVE_DIR="$WORK_DIR/_archive"
-mkdir -p "$ARCHIVE_DIR"
-
-# Check for name collision in archive
-if [[ -d "$ARCHIVE_DIR/$SLUG" ]]; then
-  if [[ "$JSON_OUTPUT" == true ]]; then
-    json_error "Archive already contains an item named '$SLUG'"
-  fi
-  echo "[work] Error: Archive already contains an item named '$SLUG'." >&2
-  exit 1
-fi
-
-# Move to archive
-mv "$ITEM_DIR" "$ARCHIVE_DIR/$SLUG"
+# Move back to active work
+mv "$ITEM_DIR" "$WORK_DIR/$SLUG"
 
 # Rebuild index
 "$SCRIPT_DIR/update-work-index.sh" >/dev/null 2>/dev/null || true
 
 # Get title for confirmation
-TITLE=$(json_field "title" "$ARCHIVE_DIR/$SLUG/_meta.json")
+TITLE=$(json_field "title" "$WORK_DIR/$SLUG/_meta.json")
 
 if [[ "$JSON_OUTPUT" == true ]]; then
   python3 -c "
 import json, sys
 print(json.dumps({
     'slug': sys.argv[1],
-    'archived_to': sys.argv[2],
+    'restored_to': sys.argv[2],
     'title': sys.argv[3]
 }))
-" "$SLUG" "_work/_archive/$SLUG" "$TITLE"
+" "$SLUG" "_work/$SLUG" "$TITLE"
   exit 0
 fi
 
-echo "[work] Archived: $SLUG ($TITLE)"
-echo "[work] Moved to: _work/_archive/$SLUG"
+echo "[work] Unarchived: $SLUG ($TITLE)"
+echo "[work] Restored to: _work/$SLUG"

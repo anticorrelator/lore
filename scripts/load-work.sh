@@ -21,6 +21,9 @@ WORK_DIR="$KNOWLEDGE_DIR/_work"
 
 INDEX="$WORK_DIR/_index.json"
 
+# Freshen the index before reading (catches archived items not yet reflected in stale index)
+"$SCRIPT_DIR/update-work-index.sh" >/dev/null 2>/dev/null || true
+
 # Self-heal: regenerate index if missing
 if [[ ! -f "$INDEX" ]]; then
   "$SCRIPT_DIR/update-work-index.sh" 2>/dev/null || exit 0
@@ -36,119 +39,124 @@ WORK_COUNT=$(echo "$WORK_COUNT" | tr -d '[:space:]')
 # Get current git branch
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 
-OUTPUT=""
-BRANCH_MATCH=""
-ACTIVE_WORK=""
-STALE_WORK=""
-NOW_EPOCH=$(date +%s)
+# Parse work items, check branch match, calculate dates, check staleness — single python3 pass
+eval "$(python3 -c "
+import json, os, time, re, sys
+from datetime import datetime, timezone
 
-# Parse work items from index (line-by-line approach for portability)
-# Read each entry by extracting fields
-CURRENT_SLUG=""
-CURRENT_TITLE=""
-CURRENT_STATUS=""
-CURRENT_UPDATED=""
-CURRENT_BRANCHES=""
+work_dir = sys.argv[1]
+index_path = sys.argv[2]
+current_branch = sys.argv[3]
+now = time.time()
 
-while IFS= read -r line; do
-  # Detect slug
-  if echo "$line" | grep -q '"slug"'; then
-    CURRENT_SLUG=$(echo "$line" | sed 's/.*"slug"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/')
-  fi
-  if echo "$line" | grep -q '"title"'; then
-    CURRENT_TITLE=$(echo "$line" | sed 's/.*"title"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/')
-  fi
-  if echo "$line" | grep -q '"status"'; then
-    CURRENT_STATUS=$(echo "$line" | sed 's/.*"status"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/')
-  fi
-  if echo "$line" | grep -q '"updated"'; then
-    CURRENT_UPDATED=$(echo "$line" | sed 's/.*"updated"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/')
-  fi
-  # Collect branch entries within the branches array
-  if echo "$line" | grep -q '"branches"'; then
-    CURRENT_BRANCHES=""
-  fi
+with open(index_path) as f:
+    data = json.load(f)
 
-  # End of a work entry — process it
-  if echo "$line" | grep -q '"has_plan_doc"'; then
-    if [[ "$CURRENT_STATUS" == "active" ]]; then
-      # Check for branch match
-      if [[ -n "$CURRENT_BRANCH" ]]; then
-        # Read branches from _meta.json directly for accuracy
-        META_FILE="$WORK_DIR/$CURRENT_SLUG/_meta.json"
-        if [[ -f "$META_FILE" ]]; then
-          if grep -q "\"$CURRENT_BRANCH\"" "$META_FILE" 2>/dev/null; then
-            BRANCH_MATCH="$CURRENT_SLUG"
-            # Get last notes entry
-            NOTES_FILE="$WORK_DIR/$CURRENT_SLUG/notes.md"
-            if [[ -f "$NOTES_FILE" ]]; then
-              # Extract the last ## section (last session notes)
-              LAST_ENTRY=$(awk '/^## [0-9]/{start=NR; content=""} start{content=content "\n" $0} END{print content}' "$NOTES_FILE" 2>/dev/null | head -8 || true)
-            fi
-          fi
-        fi
-      fi
+active_work_lines = []
+stale_work_lines = []
+notes_stale_lines = []
+branch_match = ''
+last_entry = ''
 
-      # Calculate relative date
-      RELATIVE_DATE=""
-      if [[ -n "$CURRENT_UPDATED" ]]; then
-        # Parse ISO date to epoch
-        UPDATED_EPOCH=$(iso_to_epoch "$CURRENT_UPDATED")
-        if [[ "$UPDATED_EPOCH" -gt 0 ]]; then
-          DAYS_AGO=$(( (NOW_EPOCH - UPDATED_EPOCH) / 86400 ))
-          if [[ $DAYS_AGO -eq 0 ]]; then
-            RELATIVE_DATE="today"
-          elif [[ $DAYS_AGO -eq 1 ]]; then
-            RELATIVE_DATE="yesterday"
-          else
-            RELATIVE_DATE="${DAYS_AGO}d ago"
-          fi
-          # Check for stale work items (>30 days)
-          if [[ $DAYS_AGO -gt 30 ]]; then
-            STALE_WORK="${STALE_WORK}- ${CURRENT_SLUG} — inactive ${DAYS_AGO} days, consider \`/work archive\`\n"
-          fi
-        fi
-      fi
+def relative_date(iso_str):
+    if not iso_str:
+        return 'unknown', -1
+    try:
+        # Handle both Z suffix and plain ISO
+        clean = iso_str.replace('Z', '+00:00')
+        dt = datetime.fromisoformat(clean)
+        days = int((now - dt.timestamp()) / 86400)
+        if days == 0:
+            return 'today', days
+        elif days == 1:
+            return 'yesterday', days
+        else:
+            return f'{days}d ago', days
+    except (ValueError, OSError):
+        return 'unknown', -1
 
-      ACTIVE_WORK="${ACTIVE_WORK}- ${CURRENT_SLUG}: ${CURRENT_TITLE} (updated ${RELATIVE_DATE:-unknown})\n"
-    fi
+def get_last_notes_section(notes_path, max_lines=8):
+    \"\"\"Extract last ## section from notes.md, up to max_lines.\"\"\"
+    try:
+        with open(notes_path) as f:
+            lines = f.readlines()
+    except (OSError, IOError):
+        return ''
+    # Find all ## heading positions
+    headings = [i for i, l in enumerate(lines) if l.startswith('## ')]
+    if not headings:
+        return ''
+    start = headings[-1]
+    section = lines[start:start + max_lines]
+    return ''.join(section).rstrip()
 
-    # Reset for next entry
-    CURRENT_SLUG=""
-    CURRENT_TITLE=""
-    CURRENT_STATUS=""
-    CURRENT_UPDATED=""
-    CURRENT_BRANCHES=""
-  fi
-done < "$INDEX"
+for item in data.get('plans', []):
+    slug = item.get('slug', '')
+    title = item.get('title', '')
+    status = item.get('status', '')
+    updated = item.get('updated', '')
 
-# Check notes.md mtime for staleness (>14 days without activity)
-NOTES_STALE=""
-STALE_THRESHOLD=$((14 * 86400))
+    if status != 'active':
+        continue
 
-for work_dir in "$WORK_DIR"/*/; do
-  [[ -d "$work_dir" ]] || continue
-  slug=$(basename "$work_dir")
-  meta="$work_dir/_meta.json"
-  notes="$work_dir/notes.md"
+    rel, days_ago = relative_date(updated)
 
-  # Only check active work items
-  [[ -f "$meta" ]] || continue
-  grep -q '"status".*"active"' "$meta" 2>/dev/null || continue
-  [[ -f "$notes" ]] || continue
+    # Branch match: read _meta.json for branches array
+    if current_branch and not branch_match:
+        meta_path = os.path.join(work_dir, slug, '_meta.json')
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path) as mf:
+                    meta = json.load(mf)
+                if current_branch in meta.get('branches', []):
+                    branch_match = slug
+                    notes_path = os.path.join(work_dir, slug, 'notes.md')
+                    if os.path.isfile(notes_path):
+                        last_entry = get_last_notes_section(notes_path)
+            except (json.JSONDecodeError, OSError):
+                pass
 
-  # Get mtime (cross-platform)
-  mtime=$(get_mtime "$notes")
+    # Stale work (>30 days since updated)
+    if days_ago > 30:
+        stale_work_lines.append(
+            f'- {slug} — inactive {days_ago} days, consider \`/work archive\`'
+        )
 
-  age=$((NOW_EPOCH - mtime))
-  if [[ $age -gt $STALE_THRESHOLD ]]; then
-    days=$((age / 86400))
-    NOTES_STALE="${NOTES_STALE}[Stale] Work item \"${slug}\" has no activity in ${days} days\n"
-  fi
-done
+    active_work_lines.append(f'- {slug}: {title} (updated {rel})')
+
+    # Notes.md staleness check (>14 days since file modification)
+    notes_path = os.path.join(work_dir, slug, 'notes.md')
+    if os.path.isfile(notes_path):
+        try:
+            mtime = os.path.getmtime(notes_path)
+            age_days = int((now - mtime) / 86400)
+            if age_days > 14:
+                notes_stale_lines.append(
+                    f'[Stale] Work item \"{slug}\" has no activity in {age_days} days'
+                )
+        except OSError:
+            pass
+
+# Shell-escape helper for single quotes
+def sq(s):
+    return s.replace(\"'\", \"'\\\\''\" )
+
+# Output shell variable assignments
+print(f\"BRANCH_MATCH='{sq(branch_match)}'\")
+print(f\"LAST_ENTRY='{sq(last_entry)}'\")
+
+active = '\\n'.join(active_work_lines)
+print(f\"ACTIVE_WORK='{sq(active)}'\")
+
+stale = '\\n'.join(stale_work_lines)
+print(f\"STALE_WORK='{sq(stale)}'\")
+
+notes_stale = '\\n'.join(notes_stale_lines)
+print(f\"NOTES_STALE='{sq(notes_stale)}'\")
+" "$WORK_DIR" "$INDEX" "$CURRENT_BRANCH")"
 
 # Build output (budget: ~2000 chars)
-echo "=== Active Work ==="
+draw_separator "Active Work"
 echo ""
 echo "[work] Use \`/work\` to check status before manual exploration"
 echo ""
@@ -163,14 +171,14 @@ if [[ -n "$BRANCH_MATCH" ]]; then
   echo ""
 fi
 
-echo -e "$ACTIVE_WORK"
+echo "$ACTIVE_WORK"
 
 if [[ -n "$STALE_WORK" ]]; then
-  echo -e "$STALE_WORK"
+  echo "$STALE_WORK"
 fi
 
 if [[ -n "$NOTES_STALE" ]]; then
-  echo -e "$NOTES_STALE"
+  echo "$NOTES_STALE"
 fi
 
 # Check for orphaned ephemeral plan files
@@ -184,4 +192,4 @@ if [[ -d "$EPHEMERAL_DIR" ]]; then
   fi
 fi
 
-echo "=== End Work ==="
+draw_separator

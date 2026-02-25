@@ -191,20 +191,20 @@ print(json.dumps(data, indent=2))
 fi
 
 # --- Human-readable output ---
-echo "=== Knowledge Store Status ==="
+draw_separator "Knowledge Store Status"
 echo ""
 echo "Store: $KDIR"
 echo "Format version: $FORMAT_VERSION"
 echo ""
 
-echo "## Entries"
+draw_separator "Entries"
 echo "  Total: $ENTRY_COUNT across $CATEGORY_COUNT categories"
 if [[ "$INBOX_COUNT" -gt 0 ]]; then
   echo "  Inbox pending: $INBOX_COUNT"
 fi
 echo ""
 
-echo "## Budget"
+draw_separator "Budget"
 echo "  Last load: ${BUDGET_USED}/${BUDGET_TOTAL} tokens (${BUDGET_PCT}%)"
 echo "  Retrieval sessions logged: $RETRIEVAL_SESSIONS"
 if [[ -n "$LAST_RETRIEVAL" ]]; then
@@ -213,7 +213,7 @@ fi
 echo ""
 
 if [[ -f "$META_DIR/staleness-report.json" ]]; then
-  echo "## Staleness"
+  draw_separator "Staleness"
   echo "  Fresh: $FRESH_COUNT | Aging: $AGING_COUNT | Stale: $STALE_COUNT"
   if [[ -n "$STALENESS_SCAN_TIME" ]]; then
     echo "  Last scan: $STALENESS_SCAN_TIME"
@@ -222,7 +222,7 @@ if [[ -f "$META_DIR/staleness-report.json" ]]; then
 fi
 
 if [[ -f "$META_DIR/usage-report.json" ]]; then
-  echo "## Usage"
+  draw_separator "Usage"
   echo "  Cold entries (never retrieved): $COLD_ENTRIES"
   if [[ -n "$USAGE_SCAN_TIME" ]]; then
     echo "  Last scan: $USAGE_SCAN_TIME"
@@ -231,7 +231,7 @@ if [[ -f "$META_DIR/usage-report.json" ]]; then
 fi
 
 if [[ "$RENORM_FLAG_COUNT" -gt 0 ]]; then
-  echo "## Renormalize"
+  draw_separator "Renormalize"
   echo "  Flags accumulated: $RENORM_FLAG_COUNT"
   if [[ -n "$LAST_RENORMALIZE" ]]; then
     echo "  Last renormalize: $LAST_RENORMALIZE"
@@ -240,4 +240,4 @@ if [[ "$RENORM_FLAG_COUNT" -gt 0 ]]; then
   echo ""
 fi
 
-echo "=== End Status ==="
+draw_separator

@@ -14,10 +14,12 @@ ISSUE=""
 PR=""
 HAS_ISSUE=0
 HAS_PR=0
+DETECT_PR=0
+JSON_MODE=0
 
 if [[ $# -lt 1 ]]; then
   echo "[work] Error: Missing required argument: slug" >&2
-  echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>]" >&2
+  echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--detect-pr] [--json]" >&2
   exit 1
 fi
 
@@ -36,16 +38,27 @@ while [[ $# -gt 0 ]]; do
       HAS_PR=1
       shift 2
       ;;
+    --detect-pr)
+      DETECT_PR=1
+      shift
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
     *)
       echo "[work] Error: Unknown flag '$1'" >&2
-      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>]" >&2
+      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--detect-pr] [--json]" >&2
       exit 1
       ;;
   esac
 done
 
-if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 ]]; then
-  echo "[work] Error: No fields to set. Provide --issue and/or --pr." >&2
+if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 && "$DETECT_PR" -eq 0 ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "No fields to set. Provide --issue, --pr, and/or --detect-pr."
+  fi
+  echo "[work] Error: No fields to set. Provide --issue, --pr, and/or --detect-pr." >&2
   exit 1
 fi
 
@@ -54,6 +67,9 @@ KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 WORK_DIR="$KNOWLEDGE_DIR/_work"
 
 if [[ ! -d "$WORK_DIR" ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "No work directory found"
+  fi
   echo "[work] Error: No work directory found." >&2
   exit 1
 fi
@@ -61,6 +77,9 @@ fi
 ITEM_DIR="$WORK_DIR/$SLUG"
 
 if [[ ! -d "$ITEM_DIR" ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "Work item not found: $SLUG"
+  fi
   echo "[work] Error: Work item not found: $SLUG" >&2
   echo "Available items:" >&2
   for d in "$WORK_DIR"/*/; do
@@ -75,8 +94,31 @@ fi
 META_FILE="$ITEM_DIR/_meta.json"
 
 if [[ ! -f "$META_FILE" ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "No _meta.json found for: $SLUG"
+  fi
   echo "[work] Error: No _meta.json found for: $SLUG" >&2
   exit 1
+fi
+
+# --- Detect PR from branch (if requested and --pr not explicitly set) ---
+if [[ "$DETECT_PR" -eq 1 && "$HAS_PR" -eq 0 ]]; then
+  BRANCH=$(json_array_field "branches" "$META_FILE" | sed 's/"//g' | cut -d, -f1)
+  if [[ -n "$BRANCH" ]] && command -v gh &>/dev/null; then
+    DETECTED_PR=$(gh pr list --head "$BRANCH" --json number,url --limit 1 2>/dev/null | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if data:
+        print(data[0].get("url", ""))
+except Exception:
+    pass
+' 2>/dev/null || true)
+    if [[ -n "$DETECTED_PR" ]]; then
+      PR="$DETECTED_PR"
+      HAS_PR=1
+    fi
+  fi
 fi
 
 # --- Update fields ---
@@ -94,17 +136,31 @@ fi
 
 if [[ "$HAS_PR" -eq 1 ]]; then
   if grep -q '"pr"' "$META_FILE" 2>/dev/null; then
-    sed -i '' "s/\"pr\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"pr\": \"$PR\"/" "$META_FILE"
+    # Use | as sed delimiter to handle URLs with slashes
+    sed -i '' "s|\"pr\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"pr\": \"$PR\"|" "$META_FILE"
   else
     # Insert before "created" line
-    sed -i '' "s/\"created\"[[:space:]]*:/\"pr\": \"$PR\",\n  \"created\":/" "$META_FILE"
+    sed -i '' "s|\"created\"[[:space:]]*:|\"pr\": \"$PR\",\n  \"created\":|" "$META_FILE"
   fi
   CHANGES+=("pr=$PR")
 fi
 
+# --- Check if any changes were actually made ---
+if [[ ${#CHANGES[@]} -eq 0 ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_output "$(cat "$META_FILE")"
+  fi
+  echo "[work] No changes made to $SLUG (--detect-pr found no associated PR)"
+  exit 0
+fi
+
 # --- Update timestamp and rebuild index ---
 update_meta_timestamp "$ITEM_DIR"
-"$SCRIPT_DIR/update-work-index.sh" 2>/dev/null || true
+"$SCRIPT_DIR/update-work-index.sh" >/dev/null 2>/dev/null || true
+
+if [[ $JSON_MODE -eq 1 ]]; then
+  json_output "$(cat "$META_FILE")"
+fi
 
 TITLE=$(json_field "title" "$META_FILE")
 echo "[work] Updated $SLUG ($TITLE): ${CHANGES[*]}"
