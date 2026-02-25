@@ -60,6 +60,22 @@ Detection: check conversation context for "File does not exist" when reading `~/
 
 **Evidence availability:** TaskCreate descriptions are ephemeral (conversation context only). Lead-bypass detection is only fully verifiable in **same-session retros**. For cross-session retros, infer from: (a) worker observations about missing context, (b) notes.md delivery gaps, (c) absence of knowledge-traceable guidance in worker reports. Cap Dimension 1 at 3 cross-session without direct evidence of delivery.
 
+## C0. Implementation Phase Cold-Start
+
+Affects: Dimension 1 (Delivery), Dimension 3 (Gaps)
+
+**Pattern:** A spec phase targets a file or subsystem that has no knowledge entries — the target is genuinely unmapped territory. The spec correctly delivers whatever global/cross-cutting knowledge exists, but workers receive no orientation specific to the implementation target. Workers discover the target's architecture from scratch, then `/remember` captures it post-implementation. This is distinct from Section C (spec investigation cold-start, where investigators search for domain knowledge before planning) — here the cold-start occurs at implementation time, for a phase target the spec never needed to investigate.
+
+**Detection:** When a phase's `**Knowledge context:**` block contains only cross-cutting entries (global principles, install conventions) and the target file appears in no `related_files` metadata across any existing knowledge entry, that phase is cold-start. Confirm post-hoc: mid-cycle captures with `context` fields referencing the phase's target file for the first time indicate unmapped territory.
+
+**Scoring impact:** Cold-start phases are NOT delivery failures — you cannot deliver knowledge that doesn't exist. Score Dimension 1 based on what was available. Score Dimension 3 based on capture outcomes: if workers produced discoveries that were captured for future cycles, the gap is addressed (D3 = 4); if workers discovered something and it wasn't captured, the gap persists (D3 ≤ 3).
+
+**Cross-cutting redundancy in mixed plans:** When a multi-phase plan has one cold-start phase (no file-specific entries) alongside phases with strong knowledge context, the spec may deliver identical cross-cutting annotations to all phases. The cross-cutting annotation is correct for context-rich phases but filing-facing for the cold-start phase (workers must still read the target file regardless). This is not a spec authoring error — it signals a knowledge coverage gap, not a delivery precision error. Detection: all phases share identical `## Prior Knowledge` content AND one or more phases have no file-specific entries. Note in D1 narrative as "cross-cutting redundancy from cold-start phase, not spec precision failure."
+
+**Mitigation (spec authoring):** When a phase targets a file with no `related_files` hits in the knowledge store, add a note to that phase's task description: "Note: no prior knowledge exists for `<file>` — treat this as unmapped territory and report its structural role, integration points, and constraints in Discoveries." This primes workers without requiring knowledge that doesn't exist.
+
+**Mitigation (task generator):** The `lore work tasks` generator could detect when a phase's target files appear in no knowledge entry's `related_files` and auto-inject the unmapped-territory signal into task descriptions.
+
 ## C. Cold-Start and Prefetch Failures
 
 Affects: Dimension 1 (Delivery), Dimension 3 (Gaps)

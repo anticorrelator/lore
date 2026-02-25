@@ -53,6 +53,7 @@ json_field() {
 # Strips common stopwords to produce more compact slugs.
 # Usage: slug=$(slugify "My Work Item Name")
 # Output: "my-work-item-name"
+MAX_SLUG_LENGTH=60
 slugify() {
   local input="$1"
   local lower
@@ -71,7 +72,7 @@ slugify() {
     | sed 's/[^a-z0-9]/-/g' \
     | sed 's/--*/-/g' \
     | sed 's/^-//;s/-$//' \
-    | cut -c1-60
+    | cut -c1-$MAX_SLUG_LENGTH
 }
 
 # --- resolve_knowledge_dir ---

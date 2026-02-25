@@ -24,6 +24,8 @@ const (
 // pointer to the underlying KnowledgeEntry.
 type treeNode struct {
 	isCategory bool
+	folded     bool            // category nodes: whether children are hidden
+	isLast     bool            // entry nodes: last entry in its category group (└── vs ├──)
 	entry      *KnowledgeEntry // nil for category headers
 	label      string          // display text (category name or entry title)
 }
@@ -36,8 +38,10 @@ func buildTree(manifest *Manifest) []treeNode {
 	for _, cat := range manifest.Categories {
 		nodes = append(nodes, treeNode{
 			isCategory: true,
+			folded:     false,
 			label:      cat.Name,
 		})
+		firstEntry := len(nodes)
 		for i := range manifest.Entries {
 			e := &manifest.Entries[i]
 			if e.Category == cat.Name {
@@ -47,14 +51,54 @@ func buildTree(manifest *Manifest) []treeNode {
 				})
 			}
 		}
+		// Mark the last entry in this category group
+		if len(nodes) > firstEntry {
+			nodes[len(nodes)-1].isLast = true
+		}
 	}
 	return nodes
 }
 
-// firstEntryIndex returns the index of the first non-category node, or 0.
-func firstEntryIndex(nodes []treeNode) int {
-	for i, n := range nodes {
-		if !n.isCategory {
+// toggleFold flips the folded state of the category node at idx.
+// No-op if idx is out of range or not a category node.
+func toggleFold(nodes []treeNode, idx int) {
+	if idx >= 0 && idx < len(nodes) && nodes[idx].isCategory {
+		nodes[idx].folded = !nodes[idx].folded
+	}
+}
+
+// findParentCategory walks backwards from entryIdx to find the nearest
+// preceding category node. Returns -1 if none is found.
+func findParentCategory(nodes []treeNode, entryIdx int) int {
+	for i := entryIdx - 1; i >= 0; i-- {
+		if nodes[i].isCategory {
+			return i
+		}
+	}
+	return -1
+}
+
+// isVisible returns whether the node at idx should be displayed.
+// Category nodes are always visible. Entry nodes are hidden when their
+// parent category has folded == true.
+func isVisible(nodes []treeNode, idx int) bool {
+	if idx < 0 || idx >= len(nodes) {
+		return false
+	}
+	if nodes[idx].isCategory {
+		return true
+	}
+	parent := findParentCategory(nodes, idx)
+	if parent < 0 {
+		return true
+	}
+	return !nodes[parent].folded
+}
+
+// firstVisible returns the index of the first visible node, or 0.
+func firstVisible(nodes []treeNode) int {
+	for i := range nodes {
+		if isVisible(nodes, i) {
 			return i
 		}
 	}
@@ -147,30 +191,30 @@ func (m *BrowserModel) loadCurrentEntry() tea.Cmd {
 	return LoadEntryCmd(m.knowledgeDir, entry.Path)
 }
 
-// nextEntry returns the index of the next non-category node after idx, or idx if none.
-func nextEntry(nodes []treeNode, idx int) int {
+// nextVisible returns the index of the next visible node after idx, or idx if none.
+func nextVisible(nodes []treeNode, idx int) int {
 	for i := idx + 1; i < len(nodes); i++ {
-		if !nodes[i].isCategory {
+		if isVisible(nodes, i) {
 			return i
 		}
 	}
 	return idx
 }
 
-// prevEntry returns the index of the previous non-category node before idx, or idx if none.
-func prevEntry(nodes []treeNode, idx int) int {
+// prevVisible returns the index of the previous visible node before idx, or idx if none.
+func prevVisible(nodes []treeNode, idx int) int {
 	for i := idx - 1; i >= 0; i-- {
-		if !nodes[i].isCategory {
+		if isVisible(nodes, i) {
 			return i
 		}
 	}
 	return idx
 }
 
-// lastEntryIndex returns the index of the last non-category node, or 0.
-func lastEntryIndex(nodes []treeNode) int {
+// lastVisible returns the index of the last visible node, or 0.
+func lastVisible(nodes []treeNode) int {
 	for i := len(nodes) - 1; i >= 0; i-- {
-		if !nodes[i].isCategory {
+		if isVisible(nodes, i) {
 			return i
 		}
 	}
@@ -197,7 +241,7 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 		}
 		m.manifest = msg.Manifest
 		m.nodes = buildTree(msg.Manifest)
-		m.cursor = firstEntryIndex(m.nodes)
+		m.cursor = firstVisible(m.nodes)
 		// Auto-load the first entry into the detail panel
 		cmd := m.loadCurrentEntry()
 		return m, cmd
@@ -216,6 +260,11 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 		// Find the matching node and move cursor to it
 		for i, n := range m.nodes {
 			if !n.isCategory && n.entry != nil && n.entry.Path == msg.FilePath {
+				// Ensure parent category is expanded so the entry is visible
+				parent := findParentCategory(m.nodes, i)
+				if parent >= 0 && m.nodes[parent].folded {
+					toggleFold(m.nodes, parent)
+				}
 				m.cursor = i
 				break
 			}
@@ -232,19 +281,16 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 			}
 			contentH := m.innerHeight()
 
-			// Build visual line → node index mapping (same logic as viewTree).
+			// Build visual line → node index mapping: 1 line per visible node.
 			type visualLine struct{ nodeIndex int }
 			var allLines []visualLine
-			for i, node := range m.nodes {
-				if node.isCategory {
+			for i := range m.nodes {
+				if isVisible(m.nodes, i) {
 					allLines = append(allLines, visualLine{i})
-				} else {
-					allLines = append(allLines, visualLine{i}) // title line
-					allLines = append(allLines, visualLine{i}) // metadata line
 				}
 			}
 
-			// Compute scroll offset (same as viewTree).
+			// Compute scroll offset (same as viewTree: 1 line per node).
 			cursorVisualLine := 0
 			for vi, vl := range allLines {
 				if vl.nodeIndex == m.cursor {
@@ -252,26 +298,22 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 					break
 				}
 			}
-			cursorEndLine := cursorVisualLine
-			if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isCategory {
-				cursorEndLine = cursorVisualLine + 1
-			}
 			offset := 0
-			if cursorEndLine >= contentH {
-				offset = cursorEndLine - contentH + 1
+			if cursorVisualLine >= contentH {
+				offset = cursorVisualLine - contentH + 1
 			}
 
 			// Map click Y to visual line index: Y=0 is top border, content starts at Y=1.
 			clickedVisualLine := offset + (msg.Y - 1)
 			if clickedVisualLine >= 0 && clickedVisualLine < len(allLines) {
 				targetNode := allLines[clickedVisualLine].nodeIndex
-				// Skip category headers — only select entry nodes.
-				if targetNode < len(m.nodes) && !m.nodes[targetNode].isCategory {
-					if targetNode != m.cursor {
-						m.cursor = targetNode
+				if targetNode < len(m.nodes) && targetNode != m.cursor {
+					m.cursor = targetNode
+					if !m.nodes[targetNode].isCategory {
 						cmd := m.loadCurrentEntry()
 						return m, cmd
 					}
+					return m, nil
 				}
 			}
 		} else {
@@ -302,7 +344,7 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 			return m, func() tea.Msg { return BrowserDismissedMsg{} }
 		case "j", "down":
 			if m.focusedPanel == panelLeft {
-				next := nextEntry(m.nodes, m.cursor)
+				next := nextVisible(m.nodes, m.cursor)
 				if next != m.cursor {
 					m.cursor = next
 					cmd := m.loadCurrentEntry()
@@ -316,7 +358,7 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 			}
 		case "k", "up":
 			if m.focusedPanel == panelLeft {
-				prev := prevEntry(m.nodes, m.cursor)
+				prev := prevVisible(m.nodes, m.cursor)
 				if prev != m.cursor {
 					m.cursor = prev
 					cmd := m.loadCurrentEntry()
@@ -329,7 +371,7 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 			}
 		case "g", "home":
 			if m.focusedPanel == panelLeft {
-				first := firstEntryIndex(m.nodes)
+				first := firstVisible(m.nodes)
 				if first != m.cursor {
 					m.cursor = first
 					cmd := m.loadCurrentEntry()
@@ -338,12 +380,57 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 			}
 		case "G", "end":
 			if m.focusedPanel == panelLeft {
-				last := lastEntryIndex(m.nodes)
+				last := lastVisible(m.nodes)
 				if last != m.cursor {
 					m.cursor = last
 					cmd := m.loadCurrentEntry()
 					return m, cmd
 				}
+			}
+		case "enter", " ":
+			if m.focusedPanel == panelLeft && m.cursor < len(m.nodes) {
+				if m.nodes[m.cursor].isCategory {
+					toggleFold(m.nodes, m.cursor)
+					return m, nil
+				}
+				cmd := m.loadCurrentEntry()
+				return m, cmd
+			}
+		case "left":
+			if m.focusedPanel == panelLeft && m.cursor < len(m.nodes) {
+				if m.nodes[m.cursor].isCategory {
+					// Fold if expanded, no-op if already folded
+					if !m.nodes[m.cursor].folded {
+						toggleFold(m.nodes, m.cursor)
+					}
+					return m, nil
+				}
+				// Entry node: fold parent category and move cursor to it
+				parent := findParentCategory(m.nodes, m.cursor)
+				if parent >= 0 {
+					if !m.nodes[parent].folded {
+						toggleFold(m.nodes, parent)
+					}
+					m.cursor = parent
+				}
+				return m, nil
+			}
+		case "right":
+			if m.focusedPanel == panelLeft && m.cursor < len(m.nodes) {
+				if m.nodes[m.cursor].isCategory && m.nodes[m.cursor].folded {
+					// Expand folded category and move cursor to first child entry
+					toggleFold(m.nodes, m.cursor)
+					next := nextVisible(m.nodes, m.cursor)
+					if next != m.cursor {
+						m.cursor = next
+						cmd := m.loadCurrentEntry()
+						return m, cmd
+					}
+					return m, nil
+				}
+				// Expanded category or entry: switch focus to right panel
+				m.focusedPanel = panelRight
+				return m, nil
 			}
 		case "l":
 			if m.focusedPanel == panelLeft {
@@ -407,16 +494,14 @@ func (m BrowserModel) View() string {
 	return m.viewSplit()
 }
 
-// viewTree renders the left panel: a flat, always-expanded knowledge tree.
-// Category headers are cyan bold ending in "/"; entries are 2-line rows
-// with "> " cursor prefix + title on line 1, dim metadata on line 2.
-// All lines are padded to exactly leftPanelWidth visual columns.
+// viewTree renders the left panel: a foldable knowledge tree with Unicode
+// indent guides. Category headers show ▼/▶ fold indicators; entries show
+// ├──/└── tree connectors. Each visible node is exactly one visual line,
+// padded to leftPanelWidth columns.
 func (m BrowserModel) viewTree() string {
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	catStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	selTitleStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
-	selMetaStyle := lipgloss.NewStyle().Background(lipgloss.Color("237"))
-	confStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	selStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
 
 	if len(m.nodes) == 0 {
 		line := dimStyle.Render("  No knowledge entries.")
@@ -425,7 +510,7 @@ func (m BrowserModel) viewTree() string {
 
 	contentH := m.innerHeight()
 
-	// Build visual lines: category = 1 line, entry = 2 lines (title + metadata).
+	// Build visual lines: 1 line per visible node.
 	type visualLine struct {
 		text      string
 		nodeIndex int
@@ -433,48 +518,41 @@ func (m BrowserModel) viewTree() string {
 	var allLines []visualLine
 
 	for i, node := range m.nodes {
+		if !isVisible(m.nodes, i) {
+			continue
+		}
+
+		selected := i == m.cursor
+
 		if node.isCategory {
-			line := catStyle.Render("  " + node.label + "/")
-			allLines = append(allLines, visualLine{text: padLine(line, leftPanelWidth), nodeIndex: i})
+			// Category: fold indicator + name + "/"
+			indicator := "▼ "
+			if node.folded {
+				indicator = "▶ "
+			}
+			line := catStyle.Render(indicator + node.label + "/")
+			line = padLine(line, leftPanelWidth)
+			if selected {
+				line = selStyle.Render(line)
+			}
+			allLines = append(allLines, visualLine{text: line, nodeIndex: i})
 		} else {
-			selected := i == m.cursor
-
-			// Line 1: cursor prefix + title truncated to 38 chars
-			cursorPrefix := "  "
+			// Entry: tree connector + title
+			connector := "  ├── "
+			if node.isLast {
+				connector = "  └── "
+			}
+			title := truncateText(node.label, leftPanelWidth-6)
+			line := connector + title
+			line = padLine(line, leftPanelWidth)
 			if selected {
-				cursorPrefix = "> "
+				line = selStyle.Render(line)
 			}
-			title := truncateText(node.label, leftPanelWidth-2)
-			line1 := cursorPrefix + title
-			line1 = padLine(line1, leftPanelWidth)
-
-			// Line 2: dim metadata (confidence + learned date)
-			var metaParts []string
-			if node.entry != nil {
-				if node.entry.Confidence != "" {
-					metaParts = append(metaParts, confStyle.Render(node.entry.Confidence))
-				}
-				if node.entry.Learned != "" {
-					metaParts = append(metaParts, dimStyle.Render(node.entry.Learned))
-				}
-			}
-			line2 := "    " // 4-char indent for metadata
-			if len(metaParts) > 0 {
-				line2 += strings.Join(metaParts, " ")
-			}
-			line2 = padLine(line2, leftPanelWidth)
-
-			if selected {
-				line1 = selTitleStyle.Render(line1)
-				line2 = selMetaStyle.Render(line2)
-			}
-
-			allLines = append(allLines, visualLine{text: line1, nodeIndex: i})
-			allLines = append(allLines, visualLine{text: line2, nodeIndex: i})
+			allLines = append(allLines, visualLine{text: line, nodeIndex: i})
 		}
 	}
 
-	// Find the visual line index where the cursor's first line appears.
+	// Find the visual line index where the cursor appears.
 	cursorVisualLine := 0
 	for vi, vl := range allLines {
 		if vl.nodeIndex == m.cursor {
@@ -483,16 +561,10 @@ func (m BrowserModel) viewTree() string {
 		}
 	}
 
-	// For entry nodes the cursor occupies 2 lines — ensure both are visible.
-	cursorEndLine := cursorVisualLine
-	if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isCategory {
-		cursorEndLine = cursorVisualLine + 1
-	}
-
-	// Scroll so the cursor is visible.
+	// Scroll so the cursor is visible (1 line per node — no multi-line adjustment).
 	offset := 0
-	if cursorEndLine >= contentH {
-		offset = cursorEndLine - contentH + 1
+	if cursorVisualLine >= contentH {
+		offset = cursorVisualLine - contentH + 1
 	}
 
 	end := offset + contentH
@@ -533,8 +605,16 @@ func (m BrowserModel) viewSplit() string {
 	leftBS := lipgloss.NewStyle().Foreground(leftBorderColor)
 	rightBS := lipgloss.NewStyle().Foreground(rightBorderColor)
 
-	leftTitleS := lipgloss.NewStyle().Foreground(leftBorderColor).Bold(m.focusedPanel == panelLeft)
-	rightTitleS := lipgloss.NewStyle().Foreground(rightBorderColor).Bold(m.focusedPanel == panelRight)
+	leftTitleFg := lipgloss.Color("7")
+	if m.focusedPanel == panelLeft {
+		leftTitleFg = activeBorderColor
+	}
+	rightTitleFg := lipgloss.Color("7")
+	if m.focusedPanel == panelRight {
+		rightTitleFg = activeBorderColor
+	}
+	leftTitleS := lipgloss.NewStyle().Foreground(leftTitleFg).Bold(m.focusedPanel == panelLeft)
+	rightTitleS := lipgloss.NewStyle().Foreground(rightTitleFg).Bold(m.focusedPanel == panelRight)
 
 	// Build panel titles
 	leftTitle := "Knowledge"

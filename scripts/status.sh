@@ -149,6 +149,36 @@ if [[ -d "$KDIR/_inbox" ]]; then
   INBOX_COUNT=$(find "$KDIR/_inbox" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
 fi
 
+# --- Agent symlink drift ---
+AGENT_TOTAL=0
+MISSING_AGENTS=()
+LORE_REPO_DIR=""
+LORE_SCRIPTS_LINK="$HOME/.lore/scripts"
+if [[ -L "$LORE_SCRIPTS_LINK" ]]; then
+  LORE_REPO_DIR="$(cd "$(dirname "$(readlink "$LORE_SCRIPTS_LINK")")" && pwd)"
+  if [[ -d "$LORE_REPO_DIR/agents" ]]; then
+    for agent_file in "$LORE_REPO_DIR"/agents/*.md; do
+      [[ -f "$agent_file" ]] || continue
+      agent_name="$(basename "$agent_file")"
+      if [[ ! -L "$HOME/.claude/agents/$agent_name" ]]; then
+        MISSING_AGENTS+=("$agent_name")
+      fi
+      AGENT_TOTAL=$((AGENT_TOTAL + 1))
+    done
+  fi
+fi
+AGENT_LINKED=$((AGENT_TOTAL - ${#MISSING_AGENTS[@]}))
+
+# Build JSON-safe missing agents array
+MISSING_AGENTS_JSON="[]"
+if [[ ${#MISSING_AGENTS[@]} -gt 0 ]]; then
+  MISSING_AGENTS_JSON=$(printf '%s\n' "${MISSING_AGENTS[@]}" | python3 -c "
+import sys, json
+names = [line.strip().removesuffix('.md') for line in sys.stdin if line.strip()]
+print(json.dumps(names))
+")
+fi
+
 # --- JSON output ---
 if [[ "$JSON_OUTPUT" -eq 1 ]]; then
   python3 -c "
@@ -183,6 +213,11 @@ data = {
     'renormalize': {
         'flag_count': $RENORM_FLAG_COUNT,
         'last_renormalize': '$LAST_RENORMALIZE',
+    },
+    'agents': {
+        'total': $AGENT_TOTAL,
+        'linked': $AGENT_LINKED,
+        'missing': $MISSING_AGENTS_JSON,
     },
 }
 print(json.dumps(data, indent=2))
@@ -237,6 +272,21 @@ if [[ "$RENORM_FLAG_COUNT" -gt 0 ]]; then
     echo "  Last renormalize: $LAST_RENORMALIZE"
   fi
   echo "  Run /memory renormalize to optimize."
+  echo ""
+fi
+
+if [[ "$AGENT_TOTAL" -gt 0 ]]; then
+  draw_separator "Agents"
+  if [[ ${#MISSING_AGENTS[@]} -eq 0 ]]; then
+    echo "  Agents: ${AGENT_LINKED}/${AGENT_TOTAL} linked"
+  else
+    echo "  Agents: ${AGENT_LINKED}/${AGENT_TOTAL} linked"
+    echo "  [warning] Missing symlinks in ~/.claude/agents/:"
+    for agent in "${MISSING_AGENTS[@]}"; do
+      echo "    - ${agent%.md}"
+    done
+    echo "  Run: bash install.sh to fix"
+  fi
   echo ""
 fi
 

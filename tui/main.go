@@ -134,6 +134,13 @@ type planMtimeCheckedMsg struct {
 	err   error
 }
 
+// detailMtimeCheckedMsg carries the result of stat-ing a work item's detail files.
+type detailMtimeCheckedMsg struct {
+	slug  string
+	mtime time.Time
+	err   error
+}
+
 // planContentReadMsg carries freshly-read plan.md content for an in-place refresh.
 type planContentReadMsg struct {
 	slug    string
@@ -149,6 +156,29 @@ func checkPlanMtime(workDir, slug string) tea.Cmd {
 			return planMtimeCheckedMsg{slug: slug, err: err}
 		}
 		return planMtimeCheckedMsg{slug: slug, mtime: info.ModTime()}
+	}
+}
+
+// checkDetailMtime stats _meta.json, notes.md, execution-log.md, and tasks.json
+// for the given slug and sends detailMtimeCheckedMsg with the most recent mtime.
+func checkDetailMtime(workDir, slug string) tea.Cmd {
+	return func() tea.Msg {
+		dir := filepath.Join(workDir, slug)
+		files := []string{"_meta.json", "notes.md", "execution-log.md", "tasks.json"}
+		var maxMtime time.Time
+		for _, f := range files {
+			info, err := os.Stat(filepath.Join(dir, f))
+			if err != nil {
+				continue // file may not exist yet
+			}
+			if mt := info.ModTime(); mt.After(maxMtime) {
+				maxMtime = mt
+			}
+		}
+		if maxMtime.IsZero() {
+			return detailMtimeCheckedMsg{slug: slug, err: errors.New("no detail files found")}
+		}
+		return detailMtimeCheckedMsg{slug: slug, mtime: maxMtime}
 	}
 }
 
@@ -226,7 +256,8 @@ type model struct {
 	// indexPath is the absolute path to _index.json, used for mtime polling.
 	indexPath      string
 	lastIndexMtime time.Time
-	lastPlanMtime  time.Time
+	lastPlanMtime    time.Time
+	lastDetailMtime  time.Time
 }
 
 // currentSpecPanel returns the spec panel for the currently selected work item, if any.
@@ -478,9 +509,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case indexPollTickMsg:
 		cmds := []tea.Cmd{checkIndexMtime(m.indexPath), indexPollTick()}
-		// While a spec is running for the current item, also poll plan.md for live updates.
-		if slug := m.list.CurrentSlug(); slug != "" && m.hasSpecPanel(slug) {
+		// Poll plan.md and detail files for the current item on every tick.
+		if slug := m.list.CurrentSlug(); slug != "" {
 			cmds = append(cmds, checkPlanMtime(m.config.WorkDir, slug))
+			cmds = append(cmds, checkDetailMtime(m.config.WorkDir, slug))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -522,6 +554,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detail = dm
 		return m, cmd
 
+	case detailMtimeCheckedMsg:
+		if msg.err != nil || msg.slug != m.list.CurrentSlug() {
+			return m, nil
+		}
+		if m.lastDetailMtime.IsZero() {
+			m.lastDetailMtime = msg.mtime // baseline initialization
+			return m, nil
+		}
+		if !msg.mtime.Equal(m.lastDetailMtime) {
+			m.lastDetailMtime = msg.mtime
+			// Preserve active tab across the reload.
+			m.detail.PreserveTab()
+			// Invalidate cache so the reload fetches fresh data.
+			if m.detailCache != nil {
+				delete(m.detailCache, msg.slug)
+			}
+			return m, work.LoadDetail(m.config.WorkDir, msg.slug)
+		}
+		return m, nil
 
 	case tea.MouseMsg:
 		// Centralized click routing: main.go owns all panel geometry,
@@ -1047,7 +1098,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case work.ItemSelectedMsg:
 		// Enter on list item: load detail and shift focus to right panel
 		m.focusedPanel = panelRight
-		m.lastPlanMtime = time.Time{} // reset so new item's plan.md gets a fresh baseline
+		m.lastPlanMtime = time.Time{}   // reset so new item's plan.md gets a fresh baseline
+		m.lastDetailMtime = time.Time{} // reset so new item's detail files get a fresh baseline
 		return m.loadDetail(msg.Item.Slug)
 
 	case work.DetailLoadedMsg:
@@ -1286,9 +1338,17 @@ func (m model) viewSplitPane() string {
 	leftBS := lipgloss.NewStyle().Foreground(leftBorderColor)
 	rightBS := lipgloss.NewStyle().Foreground(rightBorderColor)
 
-	// Title styles: bold+colored when focused, dim when not
-	leftTitleS := lipgloss.NewStyle().Foreground(leftBorderColor).Bold(m.focusedPanel == panelLeft)
-	rightTitleS := lipgloss.NewStyle().Foreground(rightBorderColor).Bold(m.focusedPanel == panelRight)
+	// Title styles: blue+bold when focused, default-color (full-visibility) when not
+	leftTitleFg := lipgloss.Color("7") // default bright — always visible
+	if m.focusedPanel == panelLeft {
+		leftTitleFg = activeBorderColor
+	}
+	rightTitleFg := lipgloss.Color("7")
+	if m.focusedPanel == panelRight {
+		rightTitleFg = activeBorderColor
+	}
+	leftTitleS := lipgloss.NewStyle().Foreground(leftTitleFg).Bold(m.focusedPanel == panelLeft)
+	rightTitleS := lipgloss.NewStyle().Foreground(rightTitleFg).Bold(m.focusedPanel == panelRight)
 
 	// Build panel titles (label reflects active/archived filter mode)
 	modeLabel := "Active"
@@ -1359,7 +1419,11 @@ func (m model) viewSplitPane() string {
 		specSepBorderColor = lipgloss.Color("1")
 	}
 	specSepBS := lipgloss.NewStyle().Foreground(specSepBorderColor)
-	specTitleS := lipgloss.NewStyle().Foreground(specSepBorderColor).Bold(m.focusedPanel == panelSpec)
+	specTitleFg := lipgloss.Color("7")
+	if m.focusedPanel == panelSpec || (hasCurrentSpec && currentSpec.HasError()) {
+		specTitleFg = specSepBorderColor
+	}
+	specTitleS := lipgloss.NewStyle().Foreground(specTitleFg).Bold(m.focusedPanel == panelSpec)
 	specSepLine := renderBorderTitle("Spec", rightInner, specTitleS, specSepBS)
 
 	var b strings.Builder
@@ -1456,9 +1520,17 @@ func (m model) viewSplitPaneTopBottom() string {
 	topBS := lipgloss.NewStyle().Foreground(topBorderColor)
 	bottomBS := lipgloss.NewStyle().Foreground(bottomBorderColor)
 
-	// Title styles: bold+colored when focused, dim when not
-	topTitleS := lipgloss.NewStyle().Foreground(topBorderColor).Bold(m.focusedPanel == panelLeft)
-	bottomTitleS := lipgloss.NewStyle().Foreground(bottomBorderColor).Bold(m.focusedPanel == panelRight)
+	// Title styles: blue+bold when focused, default-color (full-visibility) when not
+	topTitleFg := lipgloss.Color("7")
+	if m.focusedPanel == panelLeft {
+		topTitleFg = activeBorderColor
+	}
+	bottomTitleFg := lipgloss.Color("7")
+	if m.focusedPanel == panelRight {
+		bottomTitleFg = activeBorderColor
+	}
+	topTitleS := lipgloss.NewStyle().Foreground(topTitleFg).Bold(m.focusedPanel == panelLeft)
+	bottomTitleS := lipgloss.NewStyle().Foreground(bottomTitleFg).Bold(m.focusedPanel == panelRight)
 
 	// Build panel titles
 	modeLabel := "Active"
@@ -1503,7 +1575,11 @@ func (m model) viewSplitPaneTopBottom() string {
 		specSepBorderColor = lipgloss.Color("1")
 	}
 	specSepBS := lipgloss.NewStyle().Foreground(specSepBorderColor)
-	specTitleS := lipgloss.NewStyle().Foreground(specSepBorderColor).Bold(m.focusedPanel == panelSpec)
+	specTitleFgTB := lipgloss.Color("7")
+	if m.focusedPanel == panelSpec || (hasCurrentSpecTB && currentSpecTB.HasError()) {
+		specTitleFgTB = specSepBorderColor
+	}
+	specTitleS := lipgloss.NewStyle().Foreground(specTitleFgTB).Bold(m.focusedPanel == panelSpec)
 	specSepLine := renderBorderTitle("Spec", panelW, specTitleS, specSepBS)
 
 	// padLine pads or truncates a content line to exactly panelW visual width.

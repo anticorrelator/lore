@@ -111,13 +111,21 @@ META="$META -->"
 # --- Write individual entry file ---
 TARGET_FILE="$TARGET_DIR/${SLUG}.md"
 
-# Avoid overwriting existing entries
+# Avoid overwriting existing entries — keep final stem ≤ MAX_SLUG_LENGTH
 if [[ -f "$TARGET_FILE" ]]; then
+  SLUG_BASE="$SLUG"
   COUNTER=2
-  while [[ -f "$TARGET_DIR/${SLUG}-${COUNTER}.md" ]]; do
+  while true; do
+    SUFFIX="-${COUNTER}"
+    TRIMMED="${SLUG_BASE:0:$((MAX_SLUG_LENGTH - ${#SUFFIX}))}"
+    TRIMMED="${TRIMMED%-}"
+    CANDIDATE="${TRIMMED}${SUFFIX}"
+    if [[ ! -f "$TARGET_DIR/${CANDIDATE}.md" ]]; then
+      break
+    fi
     COUNTER=$((COUNTER + 1))
   done
-  TARGET_FILE="$TARGET_DIR/${SLUG}-${COUNTER}.md"
+  TARGET_FILE="$TARGET_DIR/${CANDIDATE}.md"
 fi
 
 {

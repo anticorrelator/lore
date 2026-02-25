@@ -52,6 +52,7 @@ type DetailModel struct {
 	err       error
 	tabs      []tabInfo
 	activeTab int
+	savedTab  int // 1-indexed tab index to restore after reload; 0 = not set
 	width     int
 	height    int
 
@@ -112,7 +113,16 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		}
 		m.detail = msg.Detail
 		m.tabs = m.buildTabs()
-		m.activeTab = 0
+		if m.savedTab > 0 {
+			restored := m.savedTab - 1
+			if restored >= len(m.tabs) {
+				restored = len(m.tabs) - 1
+			}
+			m.activeTab = restored
+			m.savedTab = 0
+		} else {
+			m.activeTab = 0
+		}
 		m.notesTab = NewNotesTabModel(m.detail.NotesContent, m.contentWidth(), m.contentHeight())
 		if m.detail.PlanContent != nil {
 			rendered := renderMarkdown(*m.detail.PlanContent, m.contentWidth())
@@ -284,6 +294,13 @@ func (m *DetailModel) JumpTo(loc SearchLocation) {
 func (m *DetailModel) SetContentStart(y, x int) {
 	m.contentStartY = y
 	m.contentStartX = x
+}
+
+// PreserveTab snapshots the current active tab so it can be restored after a
+// poll-triggered reload. The value is stored 1-indexed so that zero means
+// "no tab saved".
+func (m *DetailModel) PreserveTab() {
+	m.savedTab = m.activeTab + 1
 }
 
 // Detail returns the loaded detail, or nil if still loading.

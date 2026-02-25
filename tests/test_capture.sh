@@ -287,6 +287,51 @@ OUTPUT=$(bash "$SCRIPT_DIR/capture.sh" --insight "This should fail" 2>&1 || true
 assert_contains "error about missing knowledge store" "$OUTPUT" "No knowledge store found"
 
 # =============================================
+# Test 13: Slug length cap — dedup collision keeps stems ≤ 60 chars
+# =============================================
+echo ""
+echo "Test 13: Slug length cap — dedup keeps stems ≤ 60 chars"
+setup_knowledge_store
+
+# Create _manifest.json so capture.sh passes its existence check
+echo '{}' > "$KNOWLEDGE_DIR/_manifest.json"
+
+LONG_INSIGHT="authentication authorization infrastructure configuration implementation deployment environment management"
+
+# First capture — creates the base slug file
+bash "$SCRIPT_DIR/capture.sh" --insight "$LONG_INSIGHT" --category "conventions" > /dev/null 2>&1
+
+# Second capture — triggers dedup, should trim slug before appending suffix
+bash "$SCRIPT_DIR/capture.sh" --insight "$LONG_INSIGHT" --category "conventions" > /dev/null 2>&1
+
+# Assert all file stems in the conventions dir are ≤ 60 chars
+ALL_WITHIN_LIMIT=1
+for f in "$KNOWLEDGE_DIR/conventions/"*.md; do
+  [[ -f "$f" ]] || continue
+  stem=$(basename "$f" .md)
+  if [[ ${#stem} -gt 60 ]]; then
+    echo "  FAIL: stem exceeds 60 chars: '$stem' (${#stem} chars)"
+    ALL_WITHIN_LIMIT=0
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+if [[ $ALL_WITHIN_LIMIT -eq 1 ]]; then
+  echo "  PASS: all file stems ≤ 60 chars"
+  PASS=$((PASS + 1))
+fi
+
+# Also verify that two files were actually created (dedup worked)
+FILE_COUNT=$(ls "$KNOWLEDGE_DIR/conventions/"*.md 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$FILE_COUNT" -ge 2 ]]; then
+  echo "  PASS: dedup created $FILE_COUNT files"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: expected ≥ 2 files, got $FILE_COUNT"
+  FAIL=$((FAIL + 1))
+fi
+
+# =============================================
 # Summary
 # =============================================
 echo ""
