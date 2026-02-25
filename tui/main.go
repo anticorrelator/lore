@@ -397,7 +397,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				panel, _ = panel.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: specH})
 				m.setSpecPanel(slug, panel)
 				m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: detailH})
-				m.focusedPanel = panelSpec
 				return m, work.StartTerminalCmd(slug, m.specConfirmTitle, m.config.ProjectDir, m.rightPanelWidth(), specH, extraContext, m.specConfirmShortMode, m.specConfirmChatMode, m.specConfirmSkipConfirm)
 			case "shift+enter":
 				// Insert a newline into the textarea.
