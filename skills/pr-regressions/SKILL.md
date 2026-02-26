@@ -84,7 +84,7 @@ git log --oneline --follow -5 -- <deleted-file-path>
 
 Read the enrichment protocol:
 ```bash
-cat claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/70-review-protocol.md
 ```
 
 For each finding, query the knowledge store:
@@ -102,7 +102,7 @@ If a finding involves cross-boundary regression concerns (deleted code that may 
 
 Read the severity classification and findings output format from:
 ```bash
-cat claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/70-review-protocol.md
 ```
 
 **5a. Build findings JSON** conforming to the Findings Output Format schema:

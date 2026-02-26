@@ -10,7 +10,9 @@ Affects: Dimension 1 (Delivery), Dimension 3 (Gaps)
 
 **Phantom backlinks:** Plan author cited entries that *never existed* — the slug describes a concept that should have an entry but doesn't. Signals a coverage gap, not infrastructure failure. Affects Dimension 3 more than Dimension 1. Collect phantom slugs as proactive capture candidates.
 
-**Detection:** For each unresolved backlink, search by slug fragments across categories. Match found under different path = stale. No match anywhere = phantom.
+**Misrouted citation (phantom sub-type):** Spec lead wrote a plausible-sounding path that doesn't match actual store structure, but the relevant content EXISTS under a different path. Example: citing `architecture/install-and-deployment.md` when the content is at `architecture/portability-via-lore-scripts-symlink.md`, or `architecture/claude-md-fragment-assembly.md` when it's at `workflows/assemble-claude-md-sh.md`. Distinct from true phantom (no content anywhere) and stale (entry was moved — path was valid at write time). Misrouted citations indicate the spec lead reasoned about what the path *should* be rather than searching the store to find what *exists*. Scoring: same as phantom for D1 (delivery failed), but D3 is lower-severity (content exists, just uncited). Detection: for each phantom, run `lore search <slug-fragments>` — if matching content is found anywhere, it's misrouted, not truly missing. Mitigation: `/spec` synthesis step should verify each backlink with `lore search` before writing the path.
+
+**Detection:** For each unresolved backlink, search by slug fragments across categories. Match found under different path = stale. No match anywhere = phantom. Match found in different category or under different slug = misrouted citation.
 
 **Pipeline delivery failure:** Plan has `**Knowledge context:**` backlinks but task generation produces tasks without resolved knowledge. Silent failure — plan looks complete, tasks look reasonable, workers get zero context. Caps Dimension 1 at 2.
 

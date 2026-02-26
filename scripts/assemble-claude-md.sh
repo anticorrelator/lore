@@ -14,6 +14,9 @@ AGENT_DIR="$(dirname "$SCRIPT_DIR")"
 FRAGMENTS_DIR="$AGENT_DIR/claude-md"
 TARGET="$HOME/.claude/CLAUDE.md"
 
+# Fragments to exclude from assembly (loaded on-demand by skills instead)
+EXCLUDE=("70-review-protocol.md")
+
 if [[ ! -d "$FRAGMENTS_DIR" ]]; then
   echo "Error: fragments directory not found: $FRAGMENTS_DIR" >&2
   exit 1
@@ -28,6 +31,7 @@ assembled=""
 first=true
 for fragment in "$FRAGMENTS_DIR"/*.md; do
   [[ -f "$fragment" ]] || continue
+  [[ " ${EXCLUDE[*]} " == *" $(basename "$fragment") "* ]] && continue
   if [[ "$first" == true ]]; then
     first=false
   else
@@ -61,4 +65,6 @@ if [[ "${1:-}" == "--check" ]]; then
 fi
 
 echo "$assembled" > "$TARGET"
-echo "Assembled $(ls "$FRAGMENTS_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ') fragments → $TARGET"
+total=$(ls "$FRAGMENTS_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ')
+excluded=${#EXCLUDE[@]}
+echo "Assembled $((total - excluded)) of $total fragments → $TARGET (excluded: ${EXCLUDE[*]})"

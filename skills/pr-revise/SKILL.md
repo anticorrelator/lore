@@ -50,9 +50,15 @@ gh pr view <PR_NUMBER> --json files,title,body,baseRefName,headRefName
 
 CRITICAL: The fetch script groups comments by review submission. The GitHub UI hides/folds comments — the API is the only reliable source.
 
+Load the review protocol for use by Steps 3-4:
+
+```bash
+cat ~/.lore/claude-md/70-review-protocol.md
+```
+
 ## Step 3: Select Review Batch and Categorize
 
-**Review Selection:** Follow the Review Selection protocol defined in `claude-md/70-review-protocol.md`. Present fetched reviews as batches grouped by reviewer and let the user select which batch to work through. Only categorize and process comments from the selected batch — other batches are deferred to subsequent invocations.
+**Review Selection:** Follow the Review Selection protocol defined in `~/.lore/claude-md/70-review-protocol.md`. Present fetched reviews as batches grouped by reviewer and let the user select which batch to work through. Only categorize and process comments from the selected batch — other batches are deferred to subsequent invocations.
 
 If the PR has only one reviewer with feedback, skip the selection prompt and proceed with that batch automatically.
 
@@ -72,13 +78,13 @@ For each unresolved item in the selected batch, determine:
 
 Assign a Conventional Comments label to each item: `suggestion`, `issue`, `question`, `thought`, `nitpick`, or `praise`.
 
-**Apply the 8-point review checklist** from the review protocol reference (`claude-md/70-review-protocol.md`) as an additional analysis lens when categorizing. Read the checklist at invocation time — do not duplicate it here. The checklist helps distinguish substantive feedback from style preferences.
+**Apply the 8-point review checklist** from the review protocol reference (`~/.lore/claude-md/70-review-protocol.md`) as an additional analysis lens when categorizing. Read the checklist at invocation time — do not duplicate it here. The checklist helps distinguish substantive feedback from style preferences.
 
 **Scoping for large diffs:** For PRs touching more than ~10 files, prioritize analysis by: (1) files with blocking/CHANGES_REQUESTED feedback, (2) files with the most review threads, (3) files touching shared interfaces or public APIs. Apply detailed categorization to priority files; batch remaining items by category.
 
 ## Step 4: Knowledge Enrichment
 
-**This step is mandatory.** Follow the Knowledge Enrichment Protocol defined in `claude-md/70-review-protocol.md`.
+**This step is mandatory.** Follow the Knowledge Enrichment Protocol defined in `~/.lore/claude-md/70-review-protocol.md`.
 
 For each feedback item with a substantive label (suggestion, issue, question, thought):
 
@@ -93,7 +99,7 @@ For each feedback item with a substantive label (suggestion, issue, question, th
 
 **This enrichment is critical for /pr-revise specifically:** external reviewers bring fresh eyes but also stylistic baggage. Knowledge enrichment distinguishes project conventions from reviewer preferences. When a reviewer suggests something that contradicts a known convention, the enrichment surfaces the convention so the user can make an informed decision.
 
-**Investigation escalation:** When all three gate conditions are met (substantive label + insufficient knowledge results + multi-file analysis needed), spawn an Explore agent to investigate cross-boundary concerns before finalizing the categorization. Follow the Investigation Escalation procedure in `claude-md/70-review-protocol.md`. Maximum 2 escalations per review.
+**Investigation escalation:** When all three gate conditions are met (substantive label + insufficient knowledge results + multi-file analysis needed), spawn an Explore agent to investigate cross-boundary concerns before finalizing the categorization. Follow the Investigation Escalation procedure in `~/.lore/claude-md/70-review-protocol.md`. Maximum 2 escalations per review.
 
 Skip enrichment for nitpick and praise labels.
 

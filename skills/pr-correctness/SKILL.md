@@ -50,7 +50,7 @@ From the fetched data, identify:
 
 Read the shared review protocol (severity classification, enrichment, findings format):
 ```bash
-cat claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/70-review-protocol.md
 ```
 
 For each file with logic changes, apply this methodology:

@@ -9,7 +9,7 @@ argument_description: "[PR_number_or_URL] [--self] [--pair] [--ai] [--thorough] 
 
 You are running a **holistic multi-lens PR review**. This skill orchestrates the full review pipeline: triage, thematic anchor, adaptive lens selection, parallel lens execution by agent teams, cross-lens synthesis, and structured presentation. It replaces manual lens-by-lens invocation with a single entry point that handles coordination automatically.
 
-For focused single-concern analysis, use individual lens skills directly (`/pr-correctness`, `/pr-security`, etc.). See the integration protocol in `claude-md/70-review-protocol.md` for guidance on choosing your entry point.
+For focused single-concern analysis, use individual lens skills directly (`/pr-correctness`, `/pr-security`, etc.). See the integration protocol in `~/.lore/claude-md/70-review-protocol.md` for guidance on choosing your entry point.
 
 This skill does not modify source code. Findings are structured and can be posted to GitHub via `post-review.sh`.
 
@@ -115,9 +115,15 @@ The full diff must be available to lens agents spawned in Step 5. Strategy depen
 
 Store the diff delivery method (inline or file path) for use in Step 5.
 
+Load the review protocol for use by Steps 3-8:
+
+```bash
+cat ~/.lore/claude-md/70-review-protocol.md
+```
+
 ## Step 3: Triage
 
-Apply the Risk-Tier Triage protocol from `claude-md/70-review-protocol.md` to classify the PR and select lenses. This step is a hard gate — no lens work begins until the user confirms the triage.
+Apply the Risk-Tier Triage protocol from `~/.lore/claude-md/70-review-protocol.md` to classify the PR and select lenses. This step is a hard gate — no lens work begins until the user confirms the triage.
 
 ### 3a. Classify risk tier
 
@@ -214,7 +220,7 @@ Identify signals from the thematic analysis that downstream lens agents should k
 
 ### 4e. Write thematic findings
 
-Build thematic findings JSON conforming to the Findings Output Format in `claude-md/70-review-protocol.md`:
+Build thematic findings JSON conforming to the Findings Output Format in `~/.lore/claude-md/70-review-protocol.md`:
 
 ```json
 {
@@ -268,7 +274,7 @@ For each selected lens, read its Step 3 methodology from the corresponding SKILL
 | Lens | Source | Step 3 heading |
 |------|--------|---------------|
 | Correctness | `skills/pr-correctness/SKILL.md` | Correctness Analysis |
-| Security | `claude-md/70-review-protocol.md` | Security Lens Methodology |
+| Security | `~/.lore/claude-md/70-review-protocol.md` | Security Lens Methodology |
 | Blast Radius | `skills/pr-blast-radius/SKILL.md` | Blast Radius Analysis |
 | Regressions | `skills/pr-regressions/SKILL.md` | Regressions Analysis |
 | Test Quality | `skills/pr-test-quality/SKILL.md` | Test Quality Analysis |
@@ -394,7 +400,7 @@ Proceed to Step 7 with the full set of findings from all lenses.
 
 ## Step 7: Synthesis
 
-Read all lens findings from the work item and apply the Cross-Lens Synthesis rules from `claude-md/70-review-protocol.md`. This step transforms independent lens outputs into a unified review.
+Read all lens findings from the work item and apply the Cross-Lens Synthesis rules from `~/.lore/claude-md/70-review-protocol.md`. This step transforms independent lens outputs into a unified review.
 
 ### 7a. Load all findings
 

@@ -269,7 +269,7 @@ The `Disposition` column starts as `—` (undispositioned) and is updated during
 
 Read the review protocol reference:
 ```bash
-cat claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/70-review-protocol.md
 ```
 
 Present a concise PR overview with the areas list built from lens findings:

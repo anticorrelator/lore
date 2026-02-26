@@ -694,7 +694,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = true
 			return m, nil
 		case "q":
-			if m.state == stateWork {
+			if m.state == stateWork && m.focusedPanel != panelSpec {
 				return m, tea.Quit
 			}
 		case "N":

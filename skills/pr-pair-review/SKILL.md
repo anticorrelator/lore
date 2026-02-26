@@ -75,7 +75,7 @@ Present this summary and proceed to review rounds.
 
 Read the review protocol reference for the enrichment and escalation rules:
 ```bash
-cat claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/70-review-protocol.md
 ```
 
 The reviewer's comments from the selected batch are the discussion agenda. Present them one at a time. The agent facilitates — it does not generate its own review topics. The 8-point checklist (from the protocol) is available as a secondary tool after reviewer comments are exhausted (see optional checklist pass below), not as the primary topic source.

@@ -50,7 +50,7 @@ From the fetched data, identify:
 
 Read the shared review protocol (severity classification, enrichment, findings format) and the Security Lens Methodology:
 ```bash
-cat claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/70-review-protocol.md
 ```
 
 For each file with security-relevant changes, apply the Security Lens Methodology defined in the protocol:

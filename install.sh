@@ -71,6 +71,12 @@ if $UNINSTALL; then
     dry rm -f "$LORE_DATA_DIR/scripts"
   fi
 
+  # Remove claude-md symlink
+  if [ -L "$LORE_DATA_DIR/claude-md" ]; then
+    info "Removing claude-md symlink: $LORE_DATA_DIR/claude-md"
+    dry rm -f "$LORE_DATA_DIR/claude-md"
+  fi
+
   # Remove lore hooks from settings.json
   if [ -f "$CLAUDE_DIR/settings.json" ]; then
     info "Removing lore hooks from settings.json"
@@ -135,6 +141,10 @@ dry mkdir -p "$LORE_DATA_DIR/repos"
 # --- 2. Create/update stable scripts symlink ---
 info "Linking scripts -> $LORE_REPO_DIR/scripts"
 dry ln -sfn "$LORE_REPO_DIR/scripts" "$LORE_DATA_DIR/scripts"
+
+# --- 2b. Create/update stable claude-md symlink ---
+info "Linking claude-md -> $LORE_REPO_DIR/claude-md"
+dry ln -sfn "$LORE_REPO_DIR/claude-md" "$LORE_DATA_DIR/claude-md"
 
 # --- 3. Install CLI to PATH ---
 info "Installing CLI to ~/.local/bin/lore"
@@ -303,6 +313,7 @@ echo "Lore installed successfully."
 echo ""
 echo "  Data dir:    $LORE_DATA_DIR"
 echo "  Scripts:     $LORE_DATA_DIR/scripts -> $LORE_REPO_DIR/scripts"
+echo "  Claude-md:   $LORE_DATA_DIR/claude-md -> $LORE_REPO_DIR/claude-md"
 echo "  CLI:         ~/.local/bin/lore -> $LORE_REPO_DIR/cli/lore"
 if [ -f "$HOME/.local/bin/lore-tui" ]; then
   echo "  TUI:         ~/.local/bin/lore-tui (built)"
