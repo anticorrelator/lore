@@ -59,25 +59,21 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
 2. **Read your team lead name** from `~/.claude/teams/impl-<slug>/config.json`.
 
-3. **Check for pre-computed tasks:** Look for `tasks.json` in the work item directory (`$WORK_DIR/<slug>/tasks.json`).
+3. **Load tasks** — run a single command that validates the checksum and outputs all tasks as structured text:
+   ```bash
+   lore work load-tasks <slug>
+   ```
+   - **If `tasks.json` exists and checksum matches:** outputs a header line followed by `=== task-N ===` blocks, one per task, each with `subject`, `activeForm`, `blockedBy`, and `description`.
+   - **If `tasks.json` exists but checksum mismatches:** exits with an error. Tell the user: "plan.md was edited after tasks.json was generated. Run `/work regen-tasks <slug>` to regenerate, or edit plan.md back." Wait for user decision.
+   - **If `tasks.json` does not exist:** exits with an error. Run the fallback instead (item 4 below).
 
-4. **If `tasks.json` exists:**
-   a. Compute the SHA256 checksum of `plan.md`:
-      ```bash
-      PLAN_CHECKSUM=$(shasum -a 256 "$WORK_DIR/<slug>/plan.md" | cut -d' ' -f1)
-      ```
-   b. Read `tasks.json` and compare `plan_checksum` against the computed checksum.
-   c. **If checksums match:** Load tasks directly from the `phases[].tasks[]` arrays in the JSON. Each task has pre-computed `id`, `subject`, `description`, `activeForm`, and `blockedBy` fields. Execute a `TaskCreate` call for each task. Set up dependencies using the `blockedBy` arrays (these reference task IDs like `"task-1"`, `"task-2"` — map them to actual TaskCreate IDs).
-   d. **If checksums differ:** Warn the user: "plan.md was edited after tasks.json was generated. Run `/work regen-tasks` to regenerate tasks, or proceed with current tasks.json." Wait for user confirmation before continuing with either the stale JSON or falling back to script generation.
-
-5. **If `tasks.json` does not exist (fallback):** Run the task generation script:
+4. **Fallback — `tasks.json` missing:** Run the task generation script:
    ```bash
    lore work tasks <slug>
    ```
-   This outputs the full `tasks.json` schema (`{plan_checksum, generated_at, phases[]}`). Each task in `phases[].tasks[]` has pre-computed `id`, `subject`, `description`, `activeForm`, and `blockedBy` fields. Task descriptions include a `## Prior Knowledge` heading (4000-char budget) with resolved backlinks from phase-level `**Knowledge context:**` + cross-cutting `## Related`/`## Design Decisions` references. The script extracts unchecked `- [ ]` items from each phase (already-checked `- [x]` items are skipped, supports resume).
-   Parse the JSON output and execute a `TaskCreate` call for each task in `phases[].tasks[]`. Set up dependencies using the pre-computed `blockedBy` arrays (these reference task IDs like `"task-1"`, `"task-2"` — map them to actual TaskCreate IDs).
+   This generates and prints the full `tasks.json` schema. Pipe through `lore work load-tasks <slug>` afterward (it will now find the file), or re-run `lore work load-tasks <slug>` directly.
 
-6. **Set up phase dependencies:** Use the pre-computed `blockedBy` arrays from the JSON output. Both the pre-computed `tasks.json` path (item 4c) and the fallback `lore work tasks` path (item 5) produce the same schema with pre-computed dependencies — no manual phase grouping needed.
+5. **Create tasks from the output:** Read the `lore work load-tasks` output once. For each `=== task-N ===` block, execute one `TaskCreate` call using the `subject`, `activeForm`, and `description` fields. Track the mapping of `task-N` IDs to actual TaskCreate return IDs, then call `TaskUpdate(addBlockedBy=[...])` for any task with a non-empty `blockedBy` field.
 
 ## Step 3: Spawn agents
 

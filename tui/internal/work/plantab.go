@@ -16,6 +16,18 @@ type PlanTabModel struct {
 	empty    bool
 }
 
+// NewPlanTabModel constructs a PlanTabModel from optional content.
+// Content is treated as empty when nil, blank, or whitespace-only.
+func NewPlanTabModel(content *string, width, height int) PlanTabModel {
+	if content == nil || strings.TrimSpace(*content) == "" {
+		return PlanTabModel{empty: true}
+	}
+	rendered := renderMarkdown(*content, width)
+	vp := viewport.New(width, height)
+	vp.SetContent(rendered)
+	return PlanTabModel{viewport: vp, ready: true}
+}
+
 func (m PlanTabModel) Update(msg tea.Msg) (PlanTabModel, tea.Cmd) {
 	if m.empty {
 		return m, nil

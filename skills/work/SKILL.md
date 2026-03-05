@@ -98,22 +98,17 @@ Show the script output. For the top matches, briefly summarize the relevant cont
 ### `tasks [name]`
 Resolve name to slug (fuzzy match). If no `plan.md` exists, tell the user to run `/spec` first.
 
-**Check for pre-computed tasks first:**
+Run:
+```bash
+lore work load-tasks "<slug>"
+```
 
-1. Look for `tasks.json` in the work item directory (`$WORK_DIR/<slug>/tasks.json`)
-2. **If `tasks.json` exists:**
-   - Compute SHA256 of `plan.md`: `shasum -a 256 "$WORK_DIR/<slug>/plan.md" | cut -d' ' -f1`
-   - Compare with `plan_checksum` field in `tasks.json`
-   - **Checksum matches:** Load tasks directly from `tasks.json`. For each task in each phase, execute `TaskCreate` with the pre-computed `subject`, `description`, `activeForm`, and `blockedBy` fields. Report: "Loaded N tasks across M phases from tasks.json."
-   - **Checksum mismatch:** Warn user: "plan.md was edited after tasks.json was generated (checksum mismatch). Run `/work regen-tasks <slug>` to regenerate tasks, or proceed with current tasks.json." Wait for user decision.
-3. **If `tasks.json` does not exist** (backward compatibility): fall back to generating tasks from plan.md:
-   ```bash
-   lore work tasks "<slug>"
-   ```
-   This outputs the full `tasks.json` schema (`{plan_checksum, generated_at, phases[]}`). Each task in `phases[].tasks[]` has pre-computed `id`, `subject`, `description`, `activeForm`, and `blockedBy` fields. Task descriptions include a `## Prior Knowledge` heading (4000-char budget) with resolved backlinks from phase-level `**Knowledge context:**` + cross-cutting `## Related`/`## Design Decisions` references.
-   Parse the JSON output and execute `TaskCreate` for each task in `phases[].tasks[]`. Set up dependencies using the pre-computed `blockedBy` arrays (these reference task IDs like `"task-1"`, `"task-2"` — map them to actual TaskCreate IDs).
+This validates the checksum and outputs tasks as structured text blocks (`=== task-N ===`), one per task, each with `subject`, `activeForm`, `blockedBy`, and `description`. Read the output once and fire `TaskCreate` for each task. Track the `task-N` → actual TaskCreate ID mapping, then set up dependencies via `TaskUpdate(addBlockedBy=[...])`.
 
-Report: "Generated N tasks across M phases with dependencies."
+- **Checksum mismatch:** the script exits with an error. Warn user: "plan.md was edited after tasks.json was generated. Run `/work regen-tasks <slug>` to regenerate, or revert plan.md." Wait for decision.
+- **`tasks.json` missing:** the script exits with an error. Run `lore work tasks "<slug>"` (generates the file), then re-run `lore work load-tasks`.
+
+Report: "Loaded N tasks across M phases."
 
 ---
 

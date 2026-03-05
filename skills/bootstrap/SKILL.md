@@ -69,6 +69,8 @@ Create the agent team and one task per domain.
        Investigate and report:
        - Architecture: how is this module/directory structured? What are the layers?
        - Key patterns: design patterns, conventions, idioms used
+       - Design rationale: why is this module structured this way? What constraints or decisions shaped it?
+       - Behavioral pitfalls: non-obvious behaviors, gotchas, or rules that would bite a developer new to this area
        - Entry points: main files, exports, public API surface
        - Data flow: how data moves through this module
        - Dependencies: internal (what other parts of the codebase does this depend on) and external (third-party packages)
@@ -78,6 +80,8 @@ Create the agent team and one task per domain.
        **Domain:** <path>
        **Architecture:** (bullets)
        **Key patterns:** (bullets)
+       **Design rationale:** why is this module structured this way? What constraints shaped it? (bullets)
+       **Behavioral directives:** non-obvious behaviors, pitfalls, or rules that would bite a developer new to this area (bullets)
        **Entry points:** (bullets)
        **Data flow:** (1-2 sentences)
        **Dependencies:** internal: ..., external: ...
@@ -126,7 +130,7 @@ Spawn Explore agents to investigate each domain in parallel.
        4. Explore the domain using Glob, Grep, Read:
           - Start with entry points and key files
           - Read enough code to understand architecture, not every line
-          - Focus on: structure, patterns, conventions, data flow, dependencies
+          - Focus on: structure, patterns, conventions, data flow, dependencies, design rationale, behavioral pitfalls
        5. Send findings to "<team-lead-name>" via SendMessage:
           summary: "Findings: <domain path>"
           content: |
@@ -135,6 +139,10 @@ Spawn Explore agents to investigate each domain in parallel.
             - <structural observations>
             **Key patterns:**
             - <design patterns, conventions, idioms>
+            **Design rationale:**
+            - <why is this module structured this way? what constraints or decisions shaped it?>
+            **Behavioral directives:**
+            - <non-obvious behaviors, pitfalls, or rules that would bite a developer new to this area>
             **Entry points:**
             - <main files, exports, public API>
             **Data flow:** <how data moves>
@@ -197,10 +205,22 @@ Group findings by theme, flag contradictions, and draft knowledge entries.
    ```
    Resolve contradictions by reading the relevant files before filing.
 
-4. **Draft entry list.** For each finding that meets the (relaxed) bootstrap gate:
+4. **Draft entry list.** Bootstrap drafts eagerly — Step 6 is the pruning pass, not this step. When in doubt, draft the entry.
+
+   **Baseline conditions** (all three must hold):
    - **Reusable** beyond a single task? (yes — bootstrap targets architectural knowledge)
    - **Non-obvious** to someone new? (the whole point of bootstrap)
    - **Stable** enough to be worth filing? (skip anything that looks mid-refactor)
+
+   **High-value categories** — draft any finding that fits one or more:
+   - **Design rationale** — why the architecture is this way, what was rejected, what constraints drove decisions
+   - **Architectural models** — how components connect, what the layers are, where data flows
+   - **Cross-cutting conventions** — patterns that span many files and can't be seen from one
+   - **Behavioral directives** — non-obvious behaviors, pitfalls, or rules that would bite someone new
+   - **Mental models** — frameworks for recognizing categories of situations
+   - **Directional intent** — aspirations and context not yet realized in code
+
+   The Synthesis condition from the main capture gate (requiring cross-source combination) is satisfied structurally here: the lead synthesizes across multiple explorer reports, so cross-domain entries qualify by construction.
 
    Draft each entry with:
    ```
@@ -228,7 +248,7 @@ Present entries to the user and file approved ones.
       → scripts/migrate.sh, scripts/seed.sh
    ...
 
-   Accept all, or specify numbers to reject/edit? (e.g., "drop 3, edit 2")
+   Prune freely — entries are drafted with high eagerness. Drop anything that seems obvious, unstable, or better expressed in code. (e.g., "drop 3, edit 2")
    ```
 
 2. **Process user feedback:** Remove rejected entries, apply edits.

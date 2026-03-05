@@ -188,7 +188,7 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 
 		items := m.visibleItems()
 		switch msg.String() {
-		case "a":
+		case "ctrl+a":
 			// Toggle between active and archived
 			if m.filterMode == FilterActive {
 				m.filterMode = FilterArchived
@@ -328,7 +328,7 @@ func (m ListModel) viewCompact() string {
 		if m.filterMode == FilterArchived {
 			label = "archived"
 		}
-		return dimStyle.Render(fmt.Sprintf("  No %s work items.  (a to switch)", label))
+		return dimStyle.Render(fmt.Sprintf("  No %s work items.  (ctrl+a to switch)", label))
 	}
 
 	titleSelStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
@@ -468,9 +468,10 @@ func (m ListModel) viewFull() string {
 	slugW := 50 // default; grows to fill terminal width
 
 	// Adapt to terminal width: slug absorbs all spare space.
-	// Fixed columns: status(12) + issue(8) + pr(10) + updated(12) + gaps(8) = 50
+	// Fixed columns: status(12) + issue(8) + pr(10) + updated(12) + gaps(10) = 52
+	// Gaps: 5 pairs of "  " separators (leading + 4 inter-column) = 10 chars.
 	if m.width > 0 {
-		slugW = m.width - statusW - issueW - prW - updatedW - 8
+		slugW = m.width - statusW - issueW - prW - updatedW - 10
 		if slugW < 20 {
 			slugW = 20
 		}

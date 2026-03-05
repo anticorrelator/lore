@@ -111,6 +111,15 @@ func (m TasksModel) Update(msg tea.Msg) (TasksModel, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
+	case tea.MouseMsg:
+		visible := m.visibleRows()
+		switch msg.Button {
+		case tea.MouseButtonWheelDown:
+			m.cursor = m.nextVisible(m.cursor, 1, visible)
+		case tea.MouseButtonWheelUp:
+			m.cursor = m.nextVisible(m.cursor, -1, visible)
+		}
+
 	case tea.KeyMsg:
 		visible := m.visibleRows()
 		switch msg.String() {

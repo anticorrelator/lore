@@ -5,26 +5,36 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+// ExtraFile holds the name and content of a non-canonical document found in a
+// work item directory (any .md file that isn't plan.md, notes.md, or
+// execution-log.md).
+type ExtraFile struct {
+	Name    string `json:"name"`    // filename without the .md extension
+	Content string `json:"content"`
+}
 
 // WorkItemDetail holds the full detail of a single work item, as returned by
 // `lore work show <slug> --json`.
 type WorkItemDetail struct {
-	Slug            string     `json:"slug"`
-	Title           string     `json:"title"`
-	Status          string     `json:"status"`
-	Branches        []string   `json:"branches"`
-	Tags            []string   `json:"tags"`
-	Issue           string     `json:"issue"`
-	PR              string     `json:"pr"`
-	Created         string     `json:"created"`
-	Updated         string     `json:"updated"`
-	PlanContent     *string    `json:"plan_content"`
-	NotesContent    *string    `json:"notes_content"`
-	HasExecutionLog bool       `json:"has_execution_log"`
-	HasTasks        bool       `json:"has_tasks"`
-	TasksContent    *TasksFile `json:"tasks_content,omitempty"`
-	ExecLogContent  *string    `json:"exec_log_content,omitempty"`
+	Slug            string      `json:"slug"`
+	Title           string      `json:"title"`
+	Status          string      `json:"status"`
+	Branches        []string    `json:"branches"`
+	Tags            []string    `json:"tags"`
+	Issue           string      `json:"issue"`
+	PR              string      `json:"pr"`
+	Created         string      `json:"created"`
+	Updated         string      `json:"updated"`
+	PlanContent     *string     `json:"plan_content"`
+	NotesContent    *string     `json:"notes_content"`
+	HasExecutionLog bool        `json:"has_execution_log"`
+	HasTasks        bool        `json:"has_tasks"`
+	TasksContent    *TasksFile  `json:"tasks_content,omitempty"`
+	ExecLogContent  *string     `json:"exec_log_content,omitempty"`
+	ExtraFiles      []ExtraFile `json:"extra_files,omitempty"`
 }
 
 // SearchLocation identifies a navigable position within a detail view tab.
@@ -118,6 +128,31 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 		detail.HasExecutionLog = true
 		s := string(data)
 		detail.ExecLogContent = &s
+	}
+
+	// Scan for any additional .md files not already handled above.
+	// os.ReadDir returns entries in lexicographic order, so tab order is stable.
+	canonical := map[string]bool{
+		"plan.md":          true,
+		"notes.md":         true,
+		"execution-log.md": true,
+	}
+	if entries, err := os.ReadDir(itemDir); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".md") || strings.HasPrefix(name, "_") {
+				continue
+			}
+			if canonical[name] {
+				continue
+			}
+			if data, err := os.ReadFile(filepath.Join(itemDir, name)); err == nil {
+				detail.ExtraFiles = append(detail.ExtraFiles, ExtraFile{
+					Name:    strings.TrimSuffix(name, ".md"),
+					Content: string(data),
+				})
+			}
+		}
 	}
 
 	return detail, nil

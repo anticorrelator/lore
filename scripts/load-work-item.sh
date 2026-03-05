@@ -113,7 +113,20 @@ result = {
     'notes_content': read_file(notes_path),
     'has_execution_log': os.path.isfile(exec_log_path),
     'has_tasks': os.path.isfile(tasks_path),
+    'exec_log_content': read_file(exec_log_path),
 }
+
+# Collect extra .md files (not plan, notes, execution-log, or _-prefixed)
+canonical = {'plan.md', 'notes.md', 'execution-log.md'}
+extra_files = []
+for name in sorted(os.listdir(item_dir)):
+    if not name.endswith('.md') or name.startswith('_') or name in canonical:
+        continue
+    content = read_file(os.path.join(item_dir, name))
+    if content is not None:
+        extra_files.append({'name': name[:-3], 'content': content})
+if extra_files:
+    result['extra_files'] = extra_files
 
 print(json.dumps(result))
 " "$ITEM_DIR" "$SLUG"
@@ -183,6 +196,21 @@ else
   echo "(no session notes)"
 fi
 draw_separator
+
+# --- Additional .md files (sorted, excluding already-shown files) ---
+for md_file in $(ls "$ITEM_DIR"/*.md 2>/dev/null | sort); do
+  basename_file=$(basename "$md_file")
+  case "$basename_file" in
+    plan.md|notes.md) continue ;;
+  esac
+  # Strip .md extension and title-case for display
+  display_name="${basename_file%.md}"
+  draw_separator "$display_name"
+  cat "$md_file"
+  echo ""
+  draw_separator
+  echo ""
+done
 
 echo ""
 draw_separator

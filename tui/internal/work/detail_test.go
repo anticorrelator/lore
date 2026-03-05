@@ -215,6 +215,42 @@ func TestLoadWorkItemDetailDirectMinimal(t *testing.T) {
 	}
 }
 
+func TestLoadWorkItemDetailDirectExtraFiles(t *testing.T) {
+	workDir := t.TempDir()
+	slug := "extra-files"
+	itemDir := filepath.Join(workDir, slug)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"slug":"extra-files","title":"Extra Files","status":"active","created":"2026-02-26T00:00:00Z","updated":"2026-02-26T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+	os.WriteFile(filepath.Join(itemDir, "plan.md"), []byte("# Plan"), 0644)
+	os.WriteFile(filepath.Join(itemDir, "notes.md"), []byte("## 2026-02-26\nNotes."), 0644)
+	os.WriteFile(filepath.Join(itemDir, "research.md"), []byte("# Research\n\nSome research."), 0644)
+	os.WriteFile(filepath.Join(itemDir, "context.md"), []byte("# Context\n\nBackground."), 0644)
+	// Internal files and non-.md files should be excluded.
+	os.WriteFile(filepath.Join(itemDir, "_internal.md"), []byte("internal"), 0644)
+	os.WriteFile(filepath.Join(itemDir, "data.json"), []byte("{}"), 0644)
+
+	detail, err := loadWorkItemDetailDirect(workDir, slug)
+	if err != nil {
+		t.Fatalf("loadWorkItemDetailDirect: %v", err)
+	}
+
+	if len(detail.ExtraFiles) != 2 {
+		t.Fatalf("ExtraFiles len = %d, want 2", len(detail.ExtraFiles))
+	}
+	// os.ReadDir is lexicographic: context.md before research.md
+	if detail.ExtraFiles[0].Name != "context" {
+		t.Errorf("ExtraFiles[0].Name = %q, want %q", detail.ExtraFiles[0].Name, "context")
+	}
+	if detail.ExtraFiles[1].Name != "research" {
+		t.Errorf("ExtraFiles[1].Name = %q, want %q", detail.ExtraFiles[1].Name, "research")
+	}
+	if detail.ExtraFiles[1].Content != "# Research\n\nSome research." {
+		t.Errorf("ExtraFiles[1].Content = %q", detail.ExtraFiles[1].Content)
+	}
+}
+
 func TestLoadWorkItemDetailDirectMissingMeta(t *testing.T) {
 	workDir := t.TempDir()
 	_, err := loadWorkItemDetailDirect(workDir, "nonexistent")

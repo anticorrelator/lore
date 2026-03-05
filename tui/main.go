@@ -38,7 +38,6 @@ type panelFocus int
 const (
 	panelLeft panelFocus = iota
 	panelRight
-	panelSpec
 )
 
 // popupContext distinguishes which handler processes PopupSelectedMsg.
@@ -95,6 +94,20 @@ type aiTickMsg struct{}
 
 func aiTick() tea.Cmd {
 	return tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return aiTickMsg{} })
+}
+
+func enableKittyKeyboard() tea.Cmd {
+	return func() tea.Msg {
+		os.Stdout.WriteString("\x1b[>1u")
+		return nil
+	}
+}
+
+func disableKittyKeyboard() tea.Cmd {
+	return func() tea.Msg {
+		os.Stdout.WriteString("\x1b[<u")
+		return nil
+	}
 }
 
 // popupSearchResultMsg carries results from a debounced popup search subprocess.
@@ -235,7 +248,8 @@ type model struct {
 	// specPanels holds one SpecPanelModel per work item slug that is currently
 	// speccing (or has just completed). The spec panel for the currently
 	// selected list item is shown in the right panel when present.
-	specPanels map[string]work.SpecPanelModel
+	specPanels   map[string]work.SpecPanelModel
+	terminalMode bool
 
 	specConfirmActive        bool
 	specConfirmSlug          string
@@ -244,6 +258,7 @@ type model struct {
 	specConfirmShortMode     bool
 	specConfirmSkipConfirm   bool
 	specConfirmChatMode      bool
+	specLaunchedFromModal    bool
 
 	showHelp bool
 
@@ -391,27 +406,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				slug := m.specConfirmSlug
 				// Mark item as speccing in the list.
 				m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug})
-				// Create spec panel sized to its sub-panel region.
-				detailH, specH := m.specPanelDims()
+				// Create spec panel sized to the panel slot it occupies (detailPanelHeight).
+				specH := m.detailPanelHeight()
+				specW := m.rightPanelWidth() - 2 // 1-char buffer on each side
 				panel := work.NewSpecPanelModel(slug)
-				panel, _ = panel.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: specH})
+				panel, _ = panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
 				m.setSpecPanel(slug, panel)
-				m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: detailH})
-				return m, work.StartTerminalCmd(slug, m.specConfirmTitle, m.config.ProjectDir, m.rightPanelWidth(), specH, extraContext, m.specConfirmShortMode, m.specConfirmChatMode, m.specConfirmSkipConfirm)
-			case "shift+enter":
-				// Insert a newline into the textarea.
-				var taCmd tea.Cmd
-				m.specConfirmInput, taCmd = m.specConfirmInput.Update(tea.KeyMsg{Type: tea.KeyEnter})
-				return m, taCmd
+				m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+				m.specLaunchedFromModal = true
+				return m, work.StartTerminalCmd(slug, m.specConfirmTitle, m.config.ProjectDir, specW, specH, extraContext, m.specConfirmShortMode, m.specConfirmChatMode, m.specConfirmSkipConfirm)
 			case "esc", "ctrl+c":
 				m.specConfirmActive = false
 				return m, nil
-			case "1":
+			case "alt+1":
 				if !m.specConfirmChatMode {
 					m.specConfirmShortMode = !m.specConfirmShortMode
 				}
 				return m, nil
-			case "2":
+			case "alt+2":
 				if !m.specConfirmChatMode {
 					m.specConfirmSkipConfirm = !m.specConfirmSkipConfirm
 				}
@@ -438,11 +450,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.aiLoading = true
 				m.aiDots = 0
 				return m, tea.Batch(runWorkAI(prompt), aiTick())
-			case "shift+enter":
-				// Insert a newline into the textarea.
-				var taCmd tea.Cmd
-				m.aiInput, taCmd = m.aiInput.Update(tea.KeyMsg{Type: tea.KeyEnter})
-				return m, taCmd
 			case "esc", "ctrl+c":
 				m.aiInputActive = false
 				return m, nil
@@ -588,20 +595,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if msg.X < xBoundary {
 						m.focusedPanel = panelLeft
 					} else {
-						// Check if click lands in the spec panel zone (lower portion of right panel).
-						_, hasSpec := m.currentSpecPanel()
-						if hasSpec {
-							detailH, _ := m.specPanelDims()
-							// Content rows start at Y=2 (1 blank line + 1 top border row).
-							specStartY := 2 + detailH + 1 // +1 for separator row
-							if msg.Y >= specStartY {
-								m.focusedPanel = panelSpec
-							} else {
-								m.focusedPanel = panelRight
-							}
-						} else {
-							m.focusedPanel = panelRight
-						}
+						m.focusedPanel = panelRight
 					}
 				}
 			} else {
@@ -615,33 +609,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if msg.Y <= 1+topH {
 						m.focusedPanel = panelLeft
 					} else {
-						_, hasSpec := m.currentSpecPanel()
-						if hasSpec {
-							detailH, _ := m.specPanelDims()
-							specStartY := 5 + topH + detailH // 1 blank + 1 top-border + topH content + 1 bottom-border + 1 bottom-top-border + 1 content offset + detailH content
-							if msg.Y >= specStartY {
-								m.focusedPanel = panelSpec
-							} else {
-								m.focusedPanel = panelRight
-							}
-						} else {
-							m.focusedPanel = panelRight
-						}
+						m.focusedPanel = panelRight
 					}
 				}
 			}
 			// Forward MouseMsg to the now-focused sub-model so click/wheel
 			// events reach per-pane handlers (viewport scroll, tab clicks, etc.).
 			switch m.focusedPanel {
-			case panelSpec:
-				slug := m.list.CurrentSlug()
-				if m.specPanels != nil {
-					if panel, ok := m.specPanels[slug]; ok {
-						sm, cmd := panel.Update(msg)
-						m.specPanels[slug] = sm
-						return m, cmd
-					}
-				}
 			case panelLeft:
 				prevSlug := m.list.CurrentSlug()
 				lm, cmd := m.list.Update(msg)
@@ -654,6 +628,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, cmd
 			default: // panelRight
+				// When terminal mode is active, route mouse events to the spec panel.
+				if m.terminalMode {
+					slug := m.list.CurrentSlug()
+					if m.specPanels != nil {
+						if panel, ok := m.specPanels[slug]; ok {
+							sm, cmd := panel.Update(msg)
+							m.specPanels[slug] = sm
+							return m, cmd
+						}
+					}
+				}
 				// Set absolute position so detail can hit-test tab bar clicks.
 				if m.layoutMode == config.LayoutLeftRight {
 					m.detail.SetContentStart(2, leftPanelWidth+5)
@@ -682,19 +667,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
-			// In terminal focus mode, ctrl+c terminates the terminal panel only.
-			if m.focusedPanel == panelSpec {
+			// In terminal mode, ctrl+c terminates the terminal panel only.
+			if m.state == stateWork && m.terminalMode {
 				slug := m.list.CurrentSlug()
 				return m, func() tea.Msg { return work.TerminalTerminateMsg{Slug: slug} }
 			}
+			for slug := range m.specPanels {
+				work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
+			}
 			return m, tea.Quit
 		case "ctrl+d":
-			return m, tea.Quit
+			if !(m.state == stateWork && m.terminalMode) {
+				for slug := range m.specPanels {
+					work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
+				}
+				return m, tea.Quit
+			}
 		case "?":
-			m.showHelp = true
-			return m, nil
+			if !m.terminalMode {
+				m.showHelp = true
+				return m, nil
+			}
 		case "q":
-			if m.state == stateWork && m.focusedPanel != panelSpec {
+			if m.state == stateWork && !m.terminalMode {
+				for slug := range m.specPanels {
+					work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
+				}
 				return m, tea.Quit
 			}
 		case "N":
@@ -732,22 +730,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.list, _ = m.list.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
 
 				// Re-apply dimensions to detail and all open spec panels.
-				_, hasSpec := m.currentSpecPanel()
-				if hasSpec {
-					detailH, specH := m.specPanelDims()
-					m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: detailH})
-					for slug, panel := range m.specPanels {
-						sm, _ := panel.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: specH})
-						if ptmx := sm.Ptmx(); ptmx != nil {
-							_ = pty.Setsize(ptmx, &pty.Winsize{
-								Rows: uint16(specH),
-								Cols: uint16(m.rightPanelWidth()),
-							})
-						}
-						m.specPanels[slug] = sm
+				m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+				specH := m.detailPanelHeight()
+				specW := m.rightPanelWidth() - 2
+				for slug, panel := range m.specPanels {
+					sm, _ := panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
+					if ptmx := sm.Ptmx(); ptmx != nil {
+						_ = pty.Setsize(ptmx, &pty.Winsize{
+							Rows: uint16(specH),
+							Cols: uint16(specW),
+						})
 					}
-				} else {
-					m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+					m.specPanels[slug] = sm
 				}
 
 				// Persist preference asynchronously
@@ -766,7 +760,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.popupCtx = contextList
 				return m, m.popup.Init()
 			}
-			if m.state == stateWork && m.focusedPanel == panelRight && m.detail.Detail() != nil {
+			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode && m.detail.Detail() != nil {
 				locs := m.detail.BuildSearchIndex()
 				items := make([]search.PopupItem, len(locs))
 				for i, loc := range locs {
@@ -783,27 +777,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.popupCtx = contextDetail
 				return m, m.popup.Init()
 			}
-			// panelSpec / stateKnowledge: no-op.
+			// stateKnowledge / no match: no-op.
 		case "K":
-			if m.state == stateWork {
+			if m.state == stateWork && !m.terminalMode {
 				m.state = stateKnowledge
 				m.browser = knowledge.NewBrowserModel(m.config.KnowledgeDir)
 				m.browser, _ = m.browser.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
 				return m, knowledge.LoadManifestCmd(m.config.KnowledgeDir)
 			}
-		case "h", "esc":
-			// h/Esc shifts focus back to left (list) panel from the right detail panel.
-			// When panelSpec is focused, Esc is intercepted by the spec panel (detach).
-			if m.state == stateWork && m.focusedPanel == panelRight {
+		case "h":
+			// h shifts focus back to left (list) panel from the right detail panel.
+			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
 				m.focusedPanel = panelLeft
 				return m, nil
 			}
-		case "i":
-			// i focuses the terminal subpanel from the detail panel.
+		case "esc":
+			// Esc from right panel (detail mode only): back to list.
+			// In terminal mode, esc falls through to spec panel which sends TerminalDetachMsg.
+			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
+				m.focusedPanel = panelLeft
+				return m, nil
+			}
+		case "ctrl+t":
+			// ctrl+t toggles the right panel between detail and terminal, like a tab.
+			// Handled here (before route-to-active-view) so it is never forwarded to the PTY.
 			if m.state == stateWork && m.focusedPanel == panelRight {
+				if m.terminalMode {
+					m.terminalMode = false
+					return m, disableKittyKeyboard()
+				}
 				if panel, ok := m.currentSpecPanel(); ok && panel.Ptmx() != nil {
-					m.focusedPanel = panelSpec
-					return m, tea.EnableMouseCellMotion
+					m.terminalMode = true
+					return m, tea.Batch(tea.EnableMouseCellMotion, enableKittyKeyboard())
 				}
 			}
 		case "tab":
@@ -812,6 +817,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state == stateWork && m.focusedPanel == panelLeft {
 				m.focusedPanel = panelRight
 				return m, nil
+			}
+		case "s":
+			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
+				if slug := m.list.CurrentSlug(); slug != "" {
+					return m, func() tea.Msg { return work.SpecRequestMsg{Slug: slug} }
+				}
+			}
+		case "c":
+			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
+				if slug := m.list.CurrentSlug(); slug != "" {
+					title := slug
+					for _, item := range m.list.Items() {
+						if item.Slug == slug {
+							title = item.Title
+							break
+						}
+					}
+					return m, func() tea.Msg { return work.ChatRequestMsg{Slug: slug, Title: title} }
+				}
 			}
 		}
 
@@ -832,23 +856,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Size detail — reduced when current item has a spec panel open.
 		var dcmd tea.Cmd
-		_, hasSpec := m.currentSpecPanel()
-		if hasSpec {
-			detailH, specH := m.specPanelDims()
-			m.detail, dcmd = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: detailH})
-			// Resize all open spec panels (they all share the same dimensions).
-			for slug, panel := range m.specPanels {
-				sm, _ := panel.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: specH})
-				if ptmx := sm.Ptmx(); ptmx != nil {
-					_ = pty.Setsize(ptmx, &pty.Winsize{
-						Rows: uint16(specH),
-						Cols: uint16(m.rightPanelWidth()),
-					})
-				}
-				m.specPanels[slug] = sm
+		m.detail, dcmd = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+		specH := m.detailPanelHeight()
+		specW := m.rightPanelWidth() - 2
+		for slug, panel := range m.specPanels {
+			sm, _ := panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
+			if ptmx := sm.Ptmx(); ptmx != nil {
+				_ = pty.Setsize(ptmx, &pty.Winsize{
+					Rows: uint16(specH),
+					Cols: uint16(specW),
+				})
 			}
-		} else {
-			m.detail, dcmd = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+			m.specPanels[slug] = sm
 		}
 
 		sp, scmd := m.searchPanel.Update(msg)
@@ -922,10 +941,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, work.LoadDetail(m.config.WorkDir, item.Slug))
 				}
 			}
-			if currentSlug != "" {
-				m.detail = work.NewDetailModel(m.config.WorkDir, currentSlug)
-				cmds = append(cmds, m.detail.Init())
-			}
 		}
 		return m, tea.Batch(cmds...)
 
@@ -938,12 +953,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case work.SpecRequestMsg:
-		// 's' on list item: if spec already running, re-focus the panel.
+		// 's' on list item: if spec already running, jump to terminal focus.
 		// Otherwise show confirmation modal before launching subprocess.
-		// If spec already running for this slug, just re-focus the panel.
 		if m.hasSpecPanel(msg.Slug) {
+			m.terminalMode = true
 			m.focusedPanel = panelRight
-			return m, nil
+			return m, tea.Batch(tea.EnableMouseCellMotion, enableKittyKeyboard())
 		}
 		ta := textarea.New()
 		ta.Placeholder = ""
@@ -994,6 +1009,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		sm, cmd := panel.Update(msg) // SpecProcessStartedMsg sets ptmx + starts PollTerminalCmd
 		m.setSpecPanel(slug, sm)
+		work.WriteSession(m.config.WorkDir, slug, "spec") //nolint:errcheck
+		// Auto-enter terminal focus when session starts for the currently viewed item,
+		// unless the spec was launched from the confirmation modal — in that case,
+		// return focus to the listing view so the user stays oriented.
+		if slug == m.list.CurrentSlug() {
+			if m.specLaunchedFromModal {
+				m.specLaunchedFromModal = false
+				m.terminalMode = true
+				m.focusedPanel = panelLeft
+				return m, tea.Batch(cmd, tea.EnableMouseCellMotion)
+			}
+			m.terminalMode = true
+			m.focusedPanel = panelRight
+			return m, tea.Batch(cmd, tea.EnableMouseCellMotion, enableKittyKeyboard())
+		}
 		return m, cmd
 
 	case work.TerminalOutputMsg:
@@ -1017,11 +1047,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if panel, ok := m.specPanels[slug]; ok {
 				panel.Cleanup()
 				delete(m.specPanels, slug)
-				if m.focusedPanel == panelSpec && m.list.CurrentSlug() == slug {
+				if m.terminalMode && m.list.CurrentSlug() == slug {
 					m.focusedPanel = panelRight
 					wasSpec = true
 				}
 			}
+		}
+		if m.list.CurrentSlug() == slug {
+			m.terminalMode = false
 		}
 		m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
 		// Restore detail to full height now that the spec panel is gone.
@@ -1034,12 +1067,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmds []tea.Cmd
 		if wasSpec {
-			cmds = append(cmds, tea.EnableMouseCellMotion)
+			cmds = append(cmds, tea.EnableMouseCellMotion, disableKittyKeyboard())
 		}
 		cmds = append(cmds, loadWorkItems(m.config.WorkDir))
 		if m.list.CurrentSlug() == slug {
 			cmds = append(cmds, m.detail.Init()) // reload detail to show updated plan.md
 		}
+		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
 		return m, tea.Batch(cmds...)
 
 	case work.StreamErrorMsg:
@@ -1052,22 +1086,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				sm, _ := panel.Update(msg) // marks hasError+done
 				sm = sm.Cleanup()
 				m.specPanels[slug] = sm
-				if m.focusedPanel == panelSpec && m.list.CurrentSlug() == slug {
+				if m.terminalMode && m.list.CurrentSlug() == slug {
 					m.focusedPanel = panelRight
 					wasSpec = true
 				}
 			}
 		}
+		if m.list.CurrentSlug() == slug {
+			m.terminalMode = false
+		}
 		m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
+		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
 		if wasSpec {
-			return m, tea.Batch(tea.EnableMouseCellMotion, loadWorkItems(m.config.WorkDir))
+			return m, tea.Batch(tea.EnableMouseCellMotion, disableKittyKeyboard(), loadWorkItems(m.config.WorkDir))
 		}
 		return m, loadWorkItems(m.config.WorkDir)
 
 	case work.TerminalDetachMsg:
-		// User detached from terminal focus (Esc) — return to detail panel.
-		m.focusedPanel = panelRight
-		return m, tea.EnableMouseCellMotion
+		// User pressed Esc from terminal focus — return to list view.
+		m.focusedPanel = panelLeft
+		m.terminalMode = false
+		return m, tea.Batch(tea.EnableMouseCellMotion, disableKittyKeyboard())
 
 	case work.TerminalTerminateMsg:
 		// User killed the subprocess (Ctrl+\\) — cleanup and remove the panel.
@@ -1079,26 +1118,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				delete(m.specPanels, slug)
 			}
 		}
-		wasSpec := m.focusedPanel == panelSpec
-		if wasSpec {
-			m.focusedPanel = panelRight
-		}
+		wasSpec := m.terminalMode
+		m.terminalMode = false
+
 		m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
-		// Restore detail to full height now that this spec panel is gone.
-		_, hasSpec := m.currentSpecPanel()
-		if !hasSpec {
-			m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-		}
+		m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
 		if wasSpec {
-			return m, tea.Batch(tea.EnableMouseCellMotion, loadWorkItems(m.config.WorkDir))
+			return m, tea.Batch(tea.EnableMouseCellMotion, disableKittyKeyboard(), loadWorkItems(m.config.WorkDir))
 		}
 		return m, loadWorkItems(m.config.WorkDir)
 
 	case work.ItemSelectedMsg:
 		// Enter on list item: load detail and shift focus to right panel
 		m.focusedPanel = panelRight
-		m.lastPlanMtime = time.Time{}   // reset so new item's plan.md gets a fresh baseline
-		m.lastDetailMtime = time.Time{} // reset so new item's detail files get a fresh baseline
 		return m.loadDetail(msg.Item.Slug)
 
 	case work.DetailLoadedMsg:
@@ -1146,6 +1179,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case search.SearchResultSelectedMsg:
 		m.state = stateWork
+		m.list.SetCursorBySlug(msg.Slug)
 		return m.loadDetail(msg.Slug)
 
 	case knowledge.BrowserDismissedMsg:
@@ -1166,8 +1200,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Route to active view
 	switch m.state {
 	case stateWork:
-		if m.focusedPanel == panelSpec {
-			// Route to the spec panel for the currently selected work item.
+		if m.focusedPanel == panelRight && m.terminalMode {
+			// Route to the spec panel (terminal mode) for the currently selected work item.
 			slug := m.list.CurrentSlug()
 			if m.specPanels != nil {
 				if panel, ok := m.specPanels[slug]; ok {
@@ -1176,8 +1210,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, cmd
 				}
 			}
-			// No panel for current item — detach.
-			m.focusedPanel = panelRight
+			// No panel for current item — fall back to detail.
+			m.terminalMode = false
+			dm, cmd := m.detail.Update(msg)
+			m.detail = dm
+			return m, tea.Batch(cmd, disableKittyKeyboard())
 		}
 		if m.focusedPanel == panelLeft {
 			prevSlug := m.list.CurrentSlug()
@@ -1211,37 +1248,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // and serves content from the detail cache if available.
 // renderMarkdown is synchronous and fast (<1ms), so cache hits are instant.
 func (m model) loadDetail(slug string) (model, tea.Cmd) {
+	m.lastPlanMtime = time.Time{}   // reset so new item's plan.md gets a fresh baseline
+	m.lastDetailMtime = time.Time{} // reset so new item's detail files get a fresh baseline
 	m.detail = work.NewDetailModel(m.config.WorkDir, slug)
-	detailH := m.detailPanelHeight()
-	if m.hasSpecPanel(slug) {
-		detailH, _ = m.specPanelDims()
-	}
-	m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: detailH})
+	m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+	m.terminalMode = m.hasSpecPanel(slug)
 
+	var initCmd tea.Cmd
 	if m.detailCache != nil {
 		if cached, ok := m.detailCache[slug]; ok {
 			dm, _ := m.detail.Update(work.DetailLoadedMsg{Slug: slug, Detail: cached})
 			m.detail = dm
-			return m, nil
+		} else {
+			initCmd = m.detail.Init()
 		}
+	} else {
+		initCmd = m.detail.Init()
 	}
-	return m, m.detail.Init() // cache miss — fire LoadDetail goroutine (file I/O only)
-}
 
-// specPanelDims returns (detailH, specH) — the correct heights for the detail
-// and spec sub-panels when the spec panel is open. Called from both Update()
-// (on resize and spec open) and viewSplitPane() (for layout rendering).
-// Uses detailPanelHeight() so it works correctly in both layout modes.
-func (m model) specPanelDims() (detailH, specH int) {
-	contentH := m.detailPanelHeight()
-	sh := contentH * 50 / 100
-	if sh < 8 {
-		sh = 8
+	if m.terminalMode && m.focusedPanel == panelRight {
+		return m, tea.Batch(initCmd, tea.EnableMouseCellMotion)
 	}
-	if sh > contentH-4 {
-		sh = contentH - 4
-	}
-	return contentH - sh - 1, sh
+	return m, initCmd
 }
 
 // rightPanelWidth returns the inner content width for the right (or bottom) panel.
@@ -1300,22 +1328,8 @@ func (m model) viewSplitPane() string {
 	leftInner := leftPanelWidth
 	rightInner := m.rightPanelWidth()
 
-	// When the current item has a spec panel, split the right panel vertically.
-	// specH = lower portion for spec, detailH = upper portion for detail,
-	// 1 line for the separator between them.
+	// Check whether the current item has an active spec panel.
 	currentSpec, hasCurrentSpec := m.currentSpecPanel()
-	specH := 0
-	detailH := contentH
-	if hasCurrentSpec {
-		specH = contentH * 50 / 100
-		if specH < 8 {
-			specH = 8
-		}
-		if specH > contentH-4 {
-			specH = contentH - 4
-		}
-		detailH = contentH - specH - 1 // 1 for separator
-	}
 
 	// Focus-aware border colors
 	activeBorderColor := lipgloss.Color("4")     // blue
@@ -1323,15 +1337,11 @@ func (m model) viewSplitPane() string {
 
 	leftBorderColor := inactiveBorderColor
 	rightBorderColor := inactiveBorderColor
-	specBorderColor := inactiveBorderColor
 	if m.focusedPanel == panelLeft {
 		leftBorderColor = activeBorderColor
 	}
-	if m.focusedPanel == panelRight || m.focusedPanel == panelSpec {
+	if m.focusedPanel == panelRight {
 		rightBorderColor = activeBorderColor
-	}
-	if m.focusedPanel == panelSpec {
-		specBorderColor = activeBorderColor
 	}
 
 	leftBS := lipgloss.NewStyle().Foreground(leftBorderColor)
@@ -1371,22 +1381,44 @@ func (m model) viewSplitPane() string {
 		rightTitle = slug
 	}
 
-	// Annotation on left panel: dim hint showing which mode "a" toggles to.
-	annotMode := "archived"
+	// Tab indicator for list panel: active · archived, highlight current mode.
+	listTabActiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	listTabInactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	listTabSepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	var listActiveTabS, listArchivedTabS lipgloss.Style
 	if m.list.GetFilterMode() == work.FilterArchived {
-		annotMode = "active"
+		listActiveTabS, listArchivedTabS = listTabInactiveS, listTabActiveS
+	} else {
+		listActiveTabS, listArchivedTabS = listTabActiveS, listTabInactiveS
 	}
-	annotKeyS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	annotLabelS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	leftAnnot := annotKeyS.Render("a") + annotLabelS.Render(" "+annotMode)
-	leftAnnotW := 2 + len(annotMode) // "a " + annotMode (all ASCII)
+	leftAnnot := listTabSepS.Render("ctrl+a  ") + listActiveTabS.Render("active") + listTabSepS.Render(" · ") + listArchivedTabS.Render("archived")
+	leftAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
 
-	// Top border: ┌─ Title ──── a archived ─┐┌─ Title ─────────────────────────────┐
+	// Right panel annotation: show "ctrl+t  detail · terminal" mode indicator when a spec session exists.
+	var rightBorderTitle string
+	if hasCurrentSpec {
+		activeS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+		inactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+		sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+		var detailS, terminalS lipgloss.Style
+		if m.terminalMode {
+			detailS, terminalS = inactiveS, activeS
+		} else {
+			detailS, terminalS = activeS, inactiveS
+		}
+		modeAnnot := sepS.Render("ctrl+t  ") + detailS.Render("detail") + sepS.Render(" · ") + terminalS.Render("terminal")
+		modeAnnotW := 8 + 6 + 3 + 8 // "ctrl+t  " + "detail" + " · " + "terminal"
+		rightBorderTitle = renderBorderTitleWithAnnot(rightTitle, rightInner, rightTitleS, rightBS, modeAnnot, modeAnnotW)
+	} else {
+		rightBorderTitle = renderBorderTitle(rightTitle, rightInner, rightTitleS, rightBS)
+	}
+
+	// Top border: ┌─ Title ──── active · archived ─┐┌─ Title ──── ctrl+t  detail · terminal ─┐
 	topRow := leftBS.Render("┌") +
 		renderBorderTitleWithAnnot(leftTitle, leftInner, leftTitleS, leftBS, leftAnnot, leftAnnotW) +
 		leftBS.Render("┐") +
 		rightBS.Render("┌") +
-		renderBorderTitle(rightTitle, rightInner, rightTitleS, rightBS) +
+		rightBorderTitle +
 		rightBS.Render("┐")
 
 	// Bottom border: └──────────────────────┘└──────────────────────────────────────┘
@@ -1398,32 +1430,20 @@ func (m model) viewSplitPane() string {
 		rightBS.Render("┘")
 
 	leftView := m.list.View()
-	rightView := m.detail.View()
 	leftLines := strings.Split(leftView, "\n")
-	rightLines := strings.Split(rightView, "\n")
 
-	// Prepare spec panel lines for the current item (if it has one).
-	var specLines []string
-	if hasCurrentSpec {
+	// Right panel content: terminal mode shows spec panel, otherwise detail view.
+	var rightLines []string
+	if m.terminalMode && hasCurrentSpec {
 		specView := currentSpec.View()
-		specLines = strings.Split(specView, "\n")
+		rightLines = strings.Split(specView, "\n")
+	} else {
+		rightView := m.detail.View()
+		rightLines = strings.Split(rightView, "\n")
 	}
 
 	leftBorderChar := leftBS.Render("│")
 	rightBorderChar := rightBS.Render("│")
-
-	// Build spec separator title: "─ Spec ──────────" (red on error)
-	specSepBorderColor := specBorderColor
-	if hasCurrentSpec && currentSpec.HasError() {
-		specSepBorderColor = lipgloss.Color("1")
-	}
-	specSepBS := lipgloss.NewStyle().Foreground(specSepBorderColor)
-	specTitleFg := lipgloss.Color("7")
-	if m.focusedPanel == panelSpec || (hasCurrentSpec && currentSpec.HasError()) {
-		specTitleFg = specSepBorderColor
-	}
-	specTitleS := lipgloss.NewStyle().Foreground(specTitleFg).Bold(m.focusedPanel == panelSpec)
-	specSepLine := renderBorderTitle("Spec", rightInner, specTitleS, specSepBS)
 
 	var b strings.Builder
 	b.WriteString("\n")
@@ -1435,24 +1455,15 @@ func (m model) viewSplitPane() string {
 			left = leftLines[i]
 		}
 
-		// Determine right column content based on row position
 		var right string
-		if hasCurrentSpec && i == detailH {
-			// Separator row between detail and spec
-			right = specSepLine
-		} else if hasCurrentSpec && i > detailH {
-			// Spec panel rows
-			specIdx := i - detailH - 1
-			right = "  " // default: 2-char margin
-			if specIdx < len(specLines) {
-				right = "  " + specLines[specIdx]
-			}
-		} else {
-			// Detail rows (or all rows when spec not open)
-			right = "  "
-			if i < len(rightLines) {
+		if i < len(rightLines) {
+			if m.terminalMode && hasCurrentSpec {
+				right = " " + rightLines[i] // 1-char left buffer; right buffer from padding
+			} else {
 				right = "  " + rightLines[i]
 			}
+		} else {
+			right = "  "
 		}
 
 		lW := lipgloss.Width(left)
@@ -1492,12 +1503,8 @@ func (m model) viewSplitPaneTopBottom() string {
 	bottomH := m.detailPanelHeight()
 	panelW := m.topPanelWidth()
 
-	// When current item has a spec panel, split the bottom panel vertically.
+	// Check whether the current item has an active spec panel.
 	currentSpecTB, hasCurrentSpecTB := m.currentSpecPanel()
-	detailH := bottomH
-	if hasCurrentSpecTB {
-		detailH, _ = m.specPanelDims()
-	}
 
 	// Focus-aware border colors
 	activeBorderColor := lipgloss.Color("4")     // blue
@@ -1505,15 +1512,11 @@ func (m model) viewSplitPaneTopBottom() string {
 
 	topBorderColor := inactiveBorderColor
 	bottomBorderColor := inactiveBorderColor
-	specBorderColor := inactiveBorderColor
 	if m.focusedPanel == panelLeft {
 		topBorderColor = activeBorderColor
 	}
 	if m.focusedPanel == panelRight {
 		bottomBorderColor = activeBorderColor
-	}
-	if m.focusedPanel == panelSpec {
-		specBorderColor = activeBorderColor
 	}
 
 	topBS := lipgloss.NewStyle().Foreground(topBorderColor)
@@ -1558,28 +1561,16 @@ func (m model) viewSplitPaneTopBottom() string {
 
 	topView := m.list.View()
 	topLines := strings.Split(topView, "\n")
-	bottomView := m.detail.View()
-	bottomLines := strings.Split(bottomView, "\n")
 
-	// Prepare spec panel lines for the current item (if it has one).
-	var specLines []string
-	if hasCurrentSpecTB {
+	// Bottom panel content: terminal mode shows spec panel, otherwise detail view.
+	var bottomLines []string
+	if m.terminalMode && hasCurrentSpecTB {
 		specView := currentSpecTB.View()
-		specLines = strings.Split(specView, "\n")
+		bottomLines = strings.Split(specView, "\n")
+	} else {
+		bottomView := m.detail.View()
+		bottomLines = strings.Split(bottomView, "\n")
 	}
-
-	// Build spec separator title
-	specSepBorderColor := specBorderColor
-	if hasCurrentSpecTB && currentSpecTB.HasError() {
-		specSepBorderColor = lipgloss.Color("1")
-	}
-	specSepBS := lipgloss.NewStyle().Foreground(specSepBorderColor)
-	specTitleFgTB := lipgloss.Color("7")
-	if m.focusedPanel == panelSpec || (hasCurrentSpecTB && currentSpecTB.HasError()) {
-		specTitleFgTB = specSepBorderColor
-	}
-	specTitleS := lipgloss.NewStyle().Foreground(specTitleFgTB).Bold(m.focusedPanel == panelSpec)
-	specSepLine := renderBorderTitle("Spec", panelW, specTitleS, specSepBS)
 
 	// padLine pads or truncates a content line to exactly panelW visual width.
 	padLine := func(line string) string {
@@ -1596,15 +1587,18 @@ func (m model) viewSplitPaneTopBottom() string {
 	var b strings.Builder
 	b.WriteString("\n")
 
-	// Annotation on top panel: dim hint showing which mode "a" toggles to.
-	tbAnnotMode := "archived"
+	// Tab indicator for top (list) panel: active · archived, highlight current mode.
+	tbActiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	tbInactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	tbSepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	var tbActiveTabS, tbArchivedTabS lipgloss.Style
 	if m.list.GetFilterMode() == work.FilterArchived {
-		tbAnnotMode = "active"
+		tbActiveTabS, tbArchivedTabS = tbInactiveS, tbActiveS
+	} else {
+		tbActiveTabS, tbArchivedTabS = tbActiveS, tbInactiveS
 	}
-	tbAnnotKeyS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	tbAnnotLabelS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	topAnnot := tbAnnotKeyS.Render("a") + tbAnnotLabelS.Render(" "+tbAnnotMode)
-	topAnnotW := 2 + len(tbAnnotMode) // "a " + annotMode (all ASCII)
+	topAnnot := tbSepS.Render("ctrl+a  ") + tbActiveTabS.Render("active") + tbSepS.Render(" · ") + tbArchivedTabS.Render("archived")
+	topAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
 
 	// === Top panel (list) ===
 	b.WriteString(topBS.Render("┌"))
@@ -1626,29 +1620,39 @@ func (m model) viewSplitPaneTopBottom() string {
 	b.WriteString(topBS.Render("┘"))
 	b.WriteString("\n")
 
-	// === Bottom panel (detail + optional spec) ===
+	// === Bottom panel (detail or terminal) ===
+	// Bottom panel annotation: show "detail · terminal" mode indicator when a spec session exists.
+	var bottomBorderTitle string
+	if hasCurrentSpecTB {
+		btActiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+		btInactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+		btSepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+		var btDetailS, btTerminalS lipgloss.Style
+		if m.terminalMode {
+			btDetailS, btTerminalS = btInactiveS, btActiveS
+		} else {
+			btDetailS, btTerminalS = btActiveS, btInactiveS
+		}
+		btModeAnnot := btSepS.Render("ctrl+t  ") + btDetailS.Render("detail") + btSepS.Render(" · ") + btTerminalS.Render("terminal")
+		btModeAnnotW := 8 + 6 + 3 + 8 // "ctrl+t  " + "detail" + " · " + "terminal"
+		bottomBorderTitle = renderBorderTitleWithAnnot(bottomTitle, panelW, bottomTitleS, bottomBS, btModeAnnot, btModeAnnotW)
+	} else {
+		bottomBorderTitle = renderBorderTitle(bottomTitle, panelW, bottomTitleS, bottomBS)
+	}
 	b.WriteString(bottomBS.Render("┌"))
-	b.WriteString(renderBorderTitle(bottomTitle, panelW, bottomTitleS, bottomBS))
+	b.WriteString(bottomBorderTitle)
 	b.WriteString(bottomBS.Render("┐"))
 	b.WriteString("\n")
 	for i := 0; i < bottomH; i++ {
 		var content string
-		if hasCurrentSpecTB && i == detailH {
-			// Separator row between detail and spec
-			content = specSepLine
-		} else if hasCurrentSpecTB && i > detailH {
-			// Spec panel rows
-			specIdx := i - detailH - 1
-			content = "  "
-			if specIdx < len(specLines) {
-				content = "  " + specLines[specIdx]
-			}
-		} else {
-			// Detail rows
-			content = "  "
-			if i < len(bottomLines) {
+		if i < len(bottomLines) {
+			if m.terminalMode && hasCurrentSpecTB {
+				content = " " + bottomLines[i] // 1-char left buffer; right buffer from padding
+			} else {
 				content = "  " + bottomLines[i]
 			}
+		} else {
+			content = "  "
 		}
 		b.WriteString(bottomBorderChar)
 		b.WriteString(padLine(content))
@@ -1778,9 +1782,9 @@ func (m model) renderSpecConfirmModal() string {
 			skipCheck = "[x]"
 		}
 		checkboxes := " " + s.key.Render(shortCheck) + " " + s.dim.Render("Short mode") +
-			"  " + s.sep.Render("(") + s.key.Render("1") + s.sep.Render(")") +
+			"  " + s.sep.Render("(") + s.key.Render("Alt+1") + s.sep.Render(")") +
 			"\n " + s.key.Render(skipCheck) + " " + s.dim.Render("Skip confirmations") +
-			"  " + s.sep.Render("(") + s.key.Render("2") + s.sep.Render(")")
+			"  " + s.sep.Render("(") + s.key.Render("Alt+2") + s.sep.Render(")")
 		body = "\n" + checkboxes + "\n\n" +
 			s.dim.Render(" additional context for claude (optional):") +
 			"\n" + inputBox + "\n\n " + hints + "\n"
@@ -1823,7 +1827,7 @@ func (m model) renderHelpModal(_ string) string {
 		row("c", "chat about spec") + "\n" +
 		row("N", "create work items with AI") + "\n" +
 		row("L", "toggle layout") + "\n" +
-		row("a", "toggle archived") + "\n" +
+		row("ctrl+a", "toggle archived") + "\n" +
 		row("K", "knowledge browser") + "\n" +
 		"\n" +
 		sectionS.Render("Work Detail") + "\n" +
@@ -1831,14 +1835,17 @@ func (m model) renderHelpModal(_ string) string {
 		row("j / k", "scroll") + "\n" +
 		row("h / Esc", "back to list") + "\n" +
 		"\n" +
-		sectionS.Render("Spec Panel") + "\n" +
+		sectionS.Render("Spec Panel (terminal mode)") + "\n" +
 		row("scroll wheel", "scroll output") + "\n" +
-		row("Enter", "send input") + "\n" +
-		row("Esc", "detach (return to detail)") + "\n" +
+		row("ctrl+t", "switch to detail view") + "\n" +
+		row("Esc", "back to list") + "\n" +
+		row("Ctrl+c", "terminate subprocess") + "\n" +
+		row("Ctrl+\\", "terminate subprocess") + "\n" +
+		row("(all other keys)", "forwarded to subprocess") + "\n" +
 		"\n" +
 		sectionS.Render("Global") + "\n" +
 		row("?", "this help") + "\n" +
-		row("q / Ctrl+C", "quit")
+		row("q / Ctrl+C / Ctrl+D", "quit")
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1876,23 +1883,22 @@ func (m model) renderStatusBar(width int) string {
 				hint("q", "quit"),
 				hint("?", "help"),
 			}
-		} else if m.focusedPanel == panelSpec {
-			// panelSpec == PTY focus mode
+		} else if m.terminalMode {
+			// terminal mode: keys go to PTY
 			hints = []string{
+				hint("ctrl+t", "detail"),
+				hint("Esc", "back to list"),
 				hint("Ctrl+c", "terminate"),
-				hint("Ctrl+d", "quit"),
-				hint("Esc", "detach"),
 			}
 		} else {
-			// panelRight — detail panel (spec subpanel may be visible below)
+			// panelRight — detail view (content tabs)
 			hints = []string{
+				hint("s", "spec"),
+				hint("c", "chat"),
 				hint("Tab/Shift-Tab", "cycle tabs"),
 				hint("j/k", "scroll"),
 				hint("h/Esc", "back to list"),
 				hint("?", "help"),
-			}
-			if _, hasSpec := m.currentSpecPanel(); hasSpec {
-				hints = append(hints[:len(hints)-1], hint("i", "enter terminal"), hints[len(hints)-1])
 			}
 		}
 	case stateSearch:

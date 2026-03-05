@@ -6,6 +6,59 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func TestExtraFileLabel(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"research", "Research"},
+		{"my-research", "My Research"},
+		{"background_context", "Background Context"},
+		{"multi-word-file-name", "Multi Word File Name"},
+	}
+	for _, tc := range cases {
+		got := extraFileLabel(tc.input)
+		if got != tc.want {
+			t.Errorf("extraFileLabel(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestDetailModelExtraFileTabs(t *testing.T) {
+	planContent := "# Plan"
+	detail := WorkItemDetail{
+		PlanContent: &planContent,
+		ExtraFiles: []ExtraFile{
+			{Name: "research", Content: "# Research"},
+			{Name: "context", Content: "# Context"},
+		},
+	}
+	m := NewDetailModel("", "test")
+	m.detail = &detail
+	m.tabs = m.buildTabs()
+
+	// Expected: Meta, Plan, Notes, Research, Context
+	wantLabels := []string{"Meta", "Plan", "Notes", "Research", "Context"}
+	if len(m.tabs) != len(wantLabels) {
+		t.Fatalf("got %d tabs, want %d: %v", len(m.tabs), len(wantLabels), m.tabs)
+	}
+	for i, want := range wantLabels {
+		if m.tabs[i].label != want {
+			t.Errorf("tab[%d].label = %q, want %q", i, m.tabs[i].label, want)
+		}
+	}
+	// Extra tabs should have TabFile id and correct extraIndex
+	if m.tabs[3].id != TabFile {
+		t.Errorf("tab[3].id = %v, want TabFile", m.tabs[3].id)
+	}
+	if m.tabs[3].extraIndex != 0 {
+		t.Errorf("tab[3].extraIndex = %d, want 0", m.tabs[3].extraIndex)
+	}
+	if m.tabs[4].extraIndex != 1 {
+		t.Errorf("tab[4].extraIndex = %d, want 1", m.tabs[4].extraIndex)
+	}
+}
+
 func TestDetailModelTabBuilding(t *testing.T) {
 	planContent := "# Plan"
 	tests := []struct {

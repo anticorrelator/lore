@@ -2,7 +2,7 @@
 name: spec
 description: "Create a technical specification — `/spec short` for single-pass plans, `/spec` for full team-based investigation"
 user_invocable: true
-argument_description: "[short] [--without-verification] [name or description] — existing work item name, or a freeform description to start from"
+argument_description: "[short] [--yes] [--without-verification] [name or description] — existing work item name, or a freeform description to start from"
 ---
 
 # /spec Skill
@@ -24,7 +24,7 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
 ## Step 1: Parse and resolve (both modes)
 
-1. Parse arguments: if first arg after `/spec` is `short`, use **Short Flow**; otherwise **Full Flow**. If `--without-verification` is present, skip Step 4b (assertion verification). The remaining text is the **input**.
+1. Parse arguments: if first arg after `/spec` is `short`, use **Short Flow**; otherwise **Full Flow**. If `--yes` is present, skip all interactive confirmation gates (auto-proceed through investigation plan confirmation, strategy gates, confirm understanding, and task review). If `--without-verification` is present, skip Step 4b (assertion verification). The remaining text is the **input**.
 2. Try to resolve input as an existing work item (fuzzy match or branch inference, same algorithm as `/work`)
 3. **If resolved** → load the work item:
    - If `plan.md` exists with synthesis already complete (Design Decisions + Phases present), skip to Step 5.1 (Confirm understanding) — run the approval gates before finalizing. If a `## Strategy` section exists, load it silently as shaping context.
@@ -66,6 +66,16 @@ For single-pass plans where the scope is clear and the agent can identify key fi
 2. Check the knowledge store (`lore index`, `_manifest.json`) for relevant domain files
 3. Read the files yourself — do NOT spawn subagents
 4. Note key findings as you go
+5. **Skill-applicability scan** — after reading key files, check for skills that may be relevant to the work item:
+   a. Review the skill names and descriptions available in the system prompt (the `---` frontmatter of each skill's SKILL.md lists `name` and `description`)
+   b. Match the work item title, description, and key findings against skill names and descriptions using keyword overlap (e.g., a work item about "rate limiting the API" matches a skill with "api" or "middleware" in its description)
+   c. If applicable skills are found: add a `**Related skills:**` block to the `## Context` section of `plan.md` listing each skill with a one-phrase rationale:
+      ```
+      **Related skills:**
+      - /skill-name — why this skill is relevant to this work item
+      - /other-skill — rationale
+      ```
+   d. If no applicable skills are found, skip silently — do not add the block
 
 ### Step 2.5s: Strategy gate
 
@@ -101,7 +111,7 @@ Before drafting, offer the user a chance to shape the plan with high-level strat
    ```
    Then proceed to Step 3s with the strategy as additional shaping context for design decisions and phase structure.
 
-**Activation note:** Always present the context summary and prompt — do not skip this step because the scope seems clear. The user's Enter-to-skip response is the only gate.
+**Activation note:** Always present the context summary and prompt — do not skip this step because the scope seems clear. The user's Enter-to-skip response is the only gate. **Exception: if `--yes` was passed, skip this step entirely (no strategy).**
 
 ### Step 3s: Draft plan
 
@@ -143,7 +153,7 @@ Before finalizing this plan, here is my understanding of the key assumptions:
 Does this match your understanding? Any corrections?
 ```
 
-**Gate:** Do not proceed to Step 3.7s until the user explicitly confirms or provides corrections. If corrections are needed, revise the affected plan sections (same approach as the full flow's Step 5.2) and re-present the corrected bullets.
+**Gate:** Do not proceed to Step 3.7s until the user explicitly confirms or provides corrections. If corrections are needed, revise the affected plan sections (same approach as the full flow's Step 5.2) and re-present the corrected bullets. **If `--yes` was passed, skip this step (auto-proceed).**
 
 ### Step 3.7s: Task review
 
@@ -156,7 +166,7 @@ Same purpose as the full flow's Step 5.3 — validate the implementation approac
    Review the phases above. Approve to proceed, or request changes.
    ```
 
-3. **Wait for explicit approval.** Do not proceed to Step 4s until the user explicitly approves. This gate is not skippable.
+3. **Wait for explicit approval.** Do not proceed to Step 4s until the user explicitly approves. **If `--yes` was passed, skip this step (auto-approve).**
 
 4. **If the user requests changes** — revise the affected phases in `plan.md`, then re-present only the changed phase summaries. Repeat until the user approves.
 
@@ -167,13 +177,17 @@ Same purpose as the full flow's Step 5.3 — validate the implementation approac
 **Prerequisite:** The task review gate (Step 3.7s) must be explicitly approved before finalization proceeds.
 
 1. Incorporate user feedback
-2. Generate `tasks.json` — after `plan.md` is finalized, run:
+2. **Post-research extraction** — invoke `/remember` scoped to the spec:
+   ```
+   /remember Research findings from <work item title> — Review the **Context** and **Key Assertions** sections in plan.md. Capture mechanism-level patterns (how the system accomplishes something broadly) and design rationale ("this was chosen because X"). Skip: implementation facts already expressed as Key Assertions (they're persisted in plan.md). Focus on cross-cutting patterns discovered during file exploration that would apply beyond this work item.
+   ```
+3. Generate `tasks.json` — after `plan.md` is finalized, run:
    ```bash
    lore work regen-tasks <slug>
    ```
    This pre-computes TaskCreate payloads so `/work tasks` and `/implement` can load them directly without re-parsing `plan.md`.
-3. Run `lore work heal`
-4. Suggest retrospective: `Consider /retro <slug> to evaluate knowledge system effectiveness for this spec.`
+4. Run `lore work heal`
+5. Suggest retrospective: `Consider /retro <slug> to evaluate knowledge system effectiveness for this spec.`
 
 ---
 
@@ -205,7 +219,7 @@ Team-based divide-and-conquer for complex or uncertain-scope work.
 
    Proceed, or adjust? (You can request changes — e.g., split a question, drop an area, add a new one, or change scope.)
    ```
-5. Wait for user confirmation before dispatching. If the user requests adjustments (freeform text), revise the table and re-present it. Repeat until approved.
+5. Wait for user confirmation before dispatching. If the user requests adjustments (freeform text), revise the table and re-present it. Repeat until approved. **If `--yes` was passed, skip this confirmation and dispatch immediately.**
 
 **Example** — for a "add rate limiting to the API" spec:
 ```
@@ -243,10 +257,51 @@ Proceed, or adjust? (You can request changes — e.g., split a question, drop an
    ```
    This produces a "## Prior Knowledge" block with pre-resolved content from the knowledge store.
 
-5. **Spawn researcher agents** — launch `min(investigation_count, 4)` in a single message. Use the **researcher** agent definition (`~/.claude/agents/researcher.md`) as the base prompt, with these template injections:
+5. **Skill-applicability scan and advisor provisioning** — before spawning researchers, check for skills that may benefit the investigation:
+
+   a. **Apply the applicability heuristic** — review the skill names and descriptions available in the system prompt. A skill is applicable if:
+      - Its name or description contains keywords from the work item title or domain (e.g., a work item about "improving the spec flow" matches the `/spec` skill)
+      - The work item is about modifying, extending, or interacting with that skill
+      - Investigation topics overlap with the skill's described capabilities
+
+      Match the work item title, description, and investigation topics against skill names and descriptions using keyword overlap. The skill list is small (~15 skills), so this is a quick scan.
+
+   b. **If applicable skills are found** — provision skill-backed advisors:
+
+      i. For each applicable skill, read its SKILL.md file to obtain the full skill definition.
+
+      ii. **Spawn an advisor** for each applicable skill using the **advisor** agent definition (`agents/advisor.md`) with these template injections:
+         - `{{team_name}}` → `spec-<slug>`
+         - `{{advisor_domain}}` → the skill name and a brief scope description (e.g., "implement skill — execution protocol and worker coordination")
+         - `{{domain_context}}` → the SKILL.md content for the applicable skill
+
+         ```
+         Task:
+           subagent_type: "general-purpose"
+           model: "sonnet"
+           team_name: "spec-<slug>"
+           name: "<skill-name>-advisor"
+           mode: "bypassPermissions"
+           prompt: |
+             <contents of agents/advisor.md with {{template}} variables resolved>
+         ```
+
+      iii. **Build the `$ADVISORY_MIXIN`** — read `scripts/agent-protocols/advisory-consultation.md`. Build the `{{advisors}}` replacement block from the spawned advisors:
+         ```
+         - **<skill-name>-advisor** — <skill domain scope>. Mode: on-demand
+         ```
+         Resolve `{{advisors}}` in the mixin content. Store the result as `$ADVISORY_MIXIN`.
+
+         All skill-backed advisors use `on-demand` mode — must-consult would block researchers before they begin work, which is incompatible with parallel investigation.
+
+   c. **If no applicable skills are found** — set `$ADVISORY_MIXIN` to empty. No advisors are spawned.
+
+6. **Spawn researcher agents** — launch `min(investigation_count, 4)` in a single message. Use the **researcher** agent definition (`~/.claude/agents/researcher.md`) as the base prompt, with these template injections:
    - `{{team_name}}` → `spec-<slug>`
    - `{{team_lead}}` → the lead name read from team config in Step 3.2
    - `{{prior_knowledge}}` → the `$PRIOR_KNOWLEDGE` block from Step 3.4
+
+   **If `$ADVISORY_MIXIN` is non-empty:** append the resolved mixin content after the fully resolved `researcher.md` content, separated by a blank line. The researcher prompt becomes: `<resolved researcher.md>\n\n<resolved advisory-consultation.md>`.
 
    ```
    Task:
@@ -256,6 +311,7 @@ Proceed, or adjust? (You can request changes — e.g., split a question, drop an
      name: "researcher-N"
      prompt: |
        <contents of ~/.claude/agents/researcher.md with {{template}} variables resolved>
+       <if advisors: contents of advisory-consultation.md with {{advisors}} resolved>
    ```
 
    If more questions than researchers, agents pick up additional tasks after completing their first.
@@ -268,7 +324,7 @@ As researcher messages arrive (delivered automatically):
 3. **Preserve `**Assertions:**` verbatim** — copy researcher assertions exactly as reported. Do not rephrase, merge, or summarize them. These are falsifiable claims that downstream verification will test against the code.
 
 When all investigation tasks are complete:
-1. Send shutdown requests to all researchers via `SendMessage` (type: `shutdown_request`)
+1. Send shutdown requests to all researchers and all advisor agents (if any were spawned in Step 3.5) via `SendMessage` (type: `shutdown_request`)
 2. Run `TeamDelete` to clean up the team
 
 This is the critical persistence step — findings survive compaction, session boundaries, and context limits.
@@ -379,7 +435,7 @@ Before synthesizing, offer the user a chance to shape the plan with high-level s
    ```
    Then proceed to Step 5 with the strategy as additional shaping context for design decisions and phase structure.
 
-**Activation note:** This step is a concrete prompt-and-respond interaction, not an evaluation condition. Always present the compressed summary and prompt — do not assess whether strategy "seems needed" and skip. The user's Enter-to-skip response is the only gate.
+**Activation note:** This step is a concrete prompt-and-respond interaction, not an evaluation condition. Always present the compressed summary and prompt — do not assess whether strategy "seems needed" and skip. The user's Enter-to-skip response is the only gate. **Exception: if `--yes` was passed, skip this step entirely (no strategy).**
 
 ### Step 5: Synthesize
 
@@ -430,7 +486,7 @@ Before finalizing this plan, here is my understanding of the key assumptions:
 Does this match your understanding? Any corrections?
 ```
 
-**Gate:** Do not proceed to Step 5.3 until the user explicitly confirms or provides corrections. If the user identifies incorrect points, go to Step 5.2 (handle corrections) before continuing. The prompt "Does this match your understanding? Any corrections?" is not rhetorical — wait for a response.
+**Gate:** Do not proceed to Step 5.3 until the user explicitly confirms or provides corrections. If the user identifies incorrect points, go to Step 5.2 (handle corrections) before continuing. The prompt "Does this match your understanding? Any corrections?" is not rhetorical — wait for a response. **If `--yes` was passed, skip this step (auto-proceed).**
 
 ### Step 5.2: Handle corrections (if needed)
 
@@ -493,7 +549,7 @@ Before finalizing, present the plan's phases as a structured summary for the use
    Review the phases above. Approve to proceed, or request changes.
    ```
 
-3. **Wait for explicit approval.** Do not proceed to Step 5.4 until the user explicitly approves (e.g., "approved", "looks good", "proceed"). This gate is not skippable.
+3. **Wait for explicit approval.** Do not proceed to Step 5.4 until the user explicitly approves (e.g., "approved", "looks good", "proceed"). **If `--yes` was passed, skip this step (auto-approve).**
 
 4. **If the user requests changes** — revise the affected phases in `plan.md`, then re-present only the changed phase summaries. Repeat steps 2-3 until the user approves.
 
@@ -623,4 +679,4 @@ When `/spec` is called on a work item that already has a plan:
 - If a `## Strategy` section exists in plan.md, read it silently and use it as shaping context during synthesis — do not re-prompt. plan.md is the memory; strategy captured in a prior session carries forward automatically.
 - Check if synthesis (Design/Phases) is complete; if not, synthesize from existing findings
 - Check Open Questions — dispatch follow-up investigations for unresolved items
-- **Always run the approval gates before finalizing:** whether synthesis was just completed or carried over from a prior session, proceed through Step 5.1 (Confirm understanding) and Step 5.3 (Task review). Do not skip these because the plan "already exists" — the structured understanding summary and phase review are the mechanism for catching misalignments regardless of when synthesis ran.
+- **Always run the approval gates before finalizing:** whether synthesis was just completed or carried over from a prior session, proceed through Step 5.1 (Confirm understanding) and Step 5.3 (Task review). Do not skip these because the plan "already exists" — the structured understanding summary and phase review are the mechanism for catching misalignments regardless of when synthesis ran. Exception: if `--yes` was passed, these gates are auto-approved.

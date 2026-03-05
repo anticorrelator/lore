@@ -1,12 +1,14 @@
 package work
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -54,13 +56,112 @@ type TerminalTerminateMsg struct {
 const maxScrollBufLines = 5000
 
 // ansiStripRE matches ANSI/VT escape sequences for removal from scrollback text.
-var ansiStripRE = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[^[\]])`)
+var ansiStripRE = regexp.MustCompile(`\x1b(?:\[M[\x00-\xff]{3}|\[[0-9;?]*[\x40-\x7e]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[^[\]])`)
+
+// cursorUpRE matches CSI cursor-up sequences (ESC [ N A) used by animated TUI
+// output (e.g., Ink/React-based spinners) to re-render lines in place.
+var cursorUpRE = regexp.MustCompile(`\x1b\[(\d*)A`)
 
 func stripAnsi(s string) string {
 	s = ansiStripRE.ReplaceAllString(s, "")
+	// \r\n → \n (Windows line endings).
 	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\r", "\n")
+	// Standalone \r means "return to start of current line" — within each
+	// \n-delimited segment only keep content after the last \r, so spinner
+	// overwrite-frames collapse to their final state rather than each becoming
+	// a separate scrollback line.
+	segs := strings.Split(s, "\n")
+	for i, seg := range segs {
+		if idx := strings.LastIndex(seg, "\r"); idx >= 0 {
+			segs[i] = seg[idx+1:]
+		}
+	}
+	s = strings.Join(segs, "\n")
+	// Remove any ESC bytes left by chunk-boundary splits (partial sequences the
+	// regex couldn't match). A bare \x1b in plain-text output corrupts the outer
+	// terminal's rendering state when the scrollback view is displayed.
+	s = strings.ReplaceAll(s, "\x1b", "")
 	return s
+}
+
+// countCursorUp returns the total cursor-up line count from all ESC[NA sequences
+// in s. Used before stripping to know how many scrollBuf entries to pop before
+// appending the re-rendered lines, so animated multi-line output (e.g., a
+// thinking blurb that rewrites itself every 100ms) doesn't inflate the scrollback.
+func countCursorUp(s string) int {
+	total := 0
+	for _, m := range cursorUpRE.FindAllStringSubmatch(s, -1) {
+		n := 1
+		if m[1] != "" {
+			if v, err := strconv.Atoi(m[1]); err == nil && v > 0 {
+				n = v
+			}
+		}
+		total += n
+	}
+	return total
+}
+
+// trimIncompleteEscape splits s into a safe prefix and a trailing incomplete
+// escape sequence (if any). It scans the last 8 bytes for ESC (\x1b). If found
+// and the bytes after it don't form a complete sequence (no terminal letter),
+// the incomplete tail is returned separately so the caller can buffer it for
+// the next chunk.
+func trimIncompleteEscape(s string) (safe, tail string) {
+	n := len(s)
+	if n == 0 {
+		return s, ""
+	}
+	// Scan last 8 bytes (or fewer) for ESC.
+	start := n - 8
+	if start < 0 {
+		start = 0
+	}
+	escIdx := strings.LastIndex(s[start:], "\x1b")
+	if escIdx < 0 {
+		return s, ""
+	}
+	escIdx += start // absolute index in s
+
+	after := s[escIdx:]
+	aLen := len(after)
+
+	// Bare ESC at end — definitely incomplete.
+	if aLen == 1 {
+		return s[:escIdx], after
+	}
+
+	second := after[1]
+
+	// ESC [ ... — CSI sequence: complete when a byte in [0x40, 0x7e] terminates
+	// it (ECMA-48 final byte range: letters, ~, @, ^, _, etc.).
+	if second == '[' {
+		for i := 2; i < aLen; i++ {
+			c := after[i]
+			if c >= 0x40 && c <= 0x7e {
+				// Found terminal byte — sequence is complete.
+				return s, ""
+			}
+		}
+		// No terminal byte yet — incomplete CSI.
+		return s[:escIdx], after
+	}
+
+	// ESC ] ... — OSC sequence: complete when BEL (\x07) or ST (\x1b\\) terminates.
+	if second == ']' {
+		for i := 2; i < aLen; i++ {
+			if after[i] == 0x07 {
+				return s, ""
+			}
+			if after[i] == 0x1b && i+1 < aLen && after[i+1] == '\\' {
+				return s, ""
+			}
+		}
+		return s[:escIdx], after
+	}
+
+	// ESC + single non-bracket byte (e.g., ESC c, ESC 7) — complete 2-byte sequence.
+	return s, ""
 }
 
 // SpecPanelModel is the Bubble Tea model for the interactive spec panel.
@@ -76,10 +177,23 @@ type SpecPanelModel struct {
 	cmd        *exec.Cmd
 	outputChan <-chan []byte
 
+	// cachedRender holds the last emulator.Render() output, updated in Update()
+	// handlers so that View() can return it in O(1) without re-rendering.
+	cachedRender string
+
 	// scrollBuf accumulates ANSI-stripped lines for scrollback viewing.
 	// scrollOffset is lines from the bottom (0 = live view).
 	scrollBuf    []string
 	scrollOffset int
+
+	// rawTail holds a trailing incomplete escape sequence from the previous
+	// PTY chunk, to be prepended to the next chunk before ANSI stripping.
+	rawTail []byte
+
+	// prevChunkLines tracks the number of non-empty lines committed to
+	// scrollBuf by the most recent TerminalOutputMsg. Used to cap cursor-up
+	// pop so only same-cycle re-renders are collapsed.
+	prevChunkLines int
 }
 
 // NewSpecPanelModel creates a spec panel model for the given work item slug.
@@ -157,22 +271,64 @@ func (m SpecPanelModel) Update(msg tea.Msg) (SpecPanelModel, tea.Cmd) {
 		return m, PollTerminalCmd(m.slug, m.outputChan)
 
 	case TerminalOutputMsg:
-		if len(msg.Data) > 0 {
-			_, _ = m.emulator.Write(msg.Data)
-			stripped := stripAnsi(string(msg.Data))
-			for _, line := range strings.Split(stripped, "\n") {
-				if line != "" {
-					m.scrollBuf = append(m.scrollBuf, line)
+		_, _ = m.emulator.Write(msg.Data)
+		raw := string(m.rawTail) + string(msg.Data)
+		safe, tail := trimIncompleteEscape(raw)
+		m.rawTail = []byte(tail)
+		// Count cursor-up movements before stripping: Ink-style TUI output
+		// (e.g., Claude Code's thinking blurb) re-renders animated content by
+		// emitting ESC[NA to move up N lines, then rewriting them. Pop those
+		// lines from scrollBuf so each re-render replaces rather than appends.
+		upCount := countCursorUp(safe)
+		if upCount > 0 && len(m.scrollBuf) > 0 {
+			pop := upCount
+			if pop > m.prevChunkLines {
+				pop = m.prevChunkLines
+			}
+			if pop > len(m.scrollBuf) {
+				pop = len(m.scrollBuf)
+			}
+			m.scrollBuf = m.scrollBuf[:len(m.scrollBuf)-pop]
+			if m.scrollOffset > 0 {
+				m.scrollOffset -= pop
+				if m.scrollOffset < 0 {
+					m.scrollOffset = 0
 				}
 			}
-			if len(m.scrollBuf) > maxScrollBufLines {
-				m.scrollBuf = m.scrollBuf[len(m.scrollBuf)-maxScrollBufLines:]
+		}
+		stripped := stripAnsi(safe)
+		prevLen := len(m.scrollBuf)
+		for _, line := range strings.Split(stripped, "\n") {
+			if line != "" {
+				m.scrollBuf = append(m.scrollBuf, line)
 			}
 		}
+		newLines := len(m.scrollBuf) - prevLen
+		m.prevChunkLines = newLines
+		if m.scrollOffset > 0 {
+			m.scrollOffset += newLines
+		}
+		if len(m.scrollBuf) > maxScrollBufLines {
+			m.scrollBuf = m.scrollBuf[len(m.scrollBuf)-maxScrollBufLines:]
+		}
+		if m.scrollOffset > 0 {
+			visH := m.height
+			if visH < 1 {
+				visH = 1
+			}
+			maxOff := len(m.scrollBuf) - visH
+			if maxOff < 0 {
+				maxOff = 0
+			}
+			if m.scrollOffset > maxOff {
+				m.scrollOffset = maxOff
+			}
+		}
+		m.cachedRender = strings.ReplaceAll(m.emulator.Render(), "\r\n", "\n")
 		return m, nil
 
 	case tea.MouseMsg:
-		visH := m.height - 2
+		visH := m.height
 		if visH < 1 {
 			visH = 1
 		}
@@ -197,12 +353,12 @@ func (m SpecPanelModel) Update(msg tea.Msg) (SpecPanelModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// Reserve 1 line for title
-		vpHeight := msg.Height - 1
+		vpHeight := msg.Height
 		if vpHeight < 1 {
 			vpHeight = 1
 		}
 		m.emulator.Resize(msg.Width, vpHeight)
+		m.cachedRender = strings.ReplaceAll(m.emulator.Render(), "\r\n", "\n")
 		return m, nil
 
 	case StreamCompleteMsg:
@@ -213,6 +369,7 @@ func (m SpecPanelModel) Update(msg tea.Msg) (SpecPanelModel, tea.Cmd) {
 		m.hasError = true
 		m.done = true
 		m.emulator.Write([]byte(fmt.Sprintf("\n[error] %v\n", msg.Err)))
+		m.cachedRender = strings.ReplaceAll(m.emulator.Render(), "\r\n", "\n")
 		return m, nil
 
 	case tea.KeyMsg:
@@ -227,6 +384,32 @@ func (m SpecPanelModel) Update(msg tea.Msg) (SpecPanelModel, tea.Cmd) {
 			slug := m.slug
 			return m, func() tea.Msg { return TerminalTerminateMsg{Slug: slug} }
 
+		case tea.KeyPgUp: // PgUp — scroll up by half a page
+			visH := m.height
+			if visH < 1 {
+				visH = 1
+			}
+			m.scrollOffset += visH / 2
+			maxOff := len(m.scrollBuf) - visH
+			if maxOff < 0 {
+				maxOff = 0
+			}
+			if m.scrollOffset > maxOff {
+				m.scrollOffset = maxOff
+			}
+			return m, nil
+
+		case tea.KeyPgDown: // PgDown — scroll down by half a page
+			visH := m.height
+			if visH < 1 {
+				visH = 1
+			}
+			m.scrollOffset -= visH / 2
+			if m.scrollOffset < 0 {
+				m.scrollOffset = 0
+			}
+			return m, nil
+
 		default:
 			if m.ptmx != nil {
 				if b := keyToBytes(msg); b != nil {
@@ -237,32 +420,35 @@ func (m SpecPanelModel) Update(msg tea.Msg) (SpecPanelModel, tea.Cmd) {
 		}
 	}
 
+	// Forward raw bytes for unrecognized messages — e.g. bubbletea's unexported
+	// unknownCSISequenceMsg carries kitty-protocol sequences (like Shift+Enter = \x1b[13;2u)
+	// as a []byte slice. The reflect check is the only way to access them without forking bubbletea.
+	if m.ptmx != nil {
+		v := reflect.ValueOf(msg)
+		if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.Uint8 {
+			b := v.Bytes()
+			// Intercept kitty-encoded Escape (\x1b[27u) — same semantic as tea.KeyEscape
+			if bytes.Equal(b, []byte{0x1b, '[', '2', '7', 'u'}) {
+				slug := m.slug
+				return m, func() tea.Msg { return TerminalDetachMsg{Slug: slug} }
+			}
+			// Intercept kitty-encoded Ctrl+\ (\x1b[92;5u) — same semantic as tea.KeyCtrlBackslash
+			if bytes.Equal(b, []byte{0x1b, '[', '9', '2', ';', '5', 'u'}) {
+				slug := m.slug
+				return m, func() tea.Msg { return TerminalTerminateMsg{Slug: slug} }
+			}
+			m.ptmx.Write(b) //nolint:errcheck
+		}
+	}
+
 	return m, nil
 }
 
 
 func (m SpecPanelModel) View() string {
-	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
-	if m.hasError {
-		titleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	}
-
-	var title string
-	if m.done {
-		if m.hasError {
-			title = "Spec · error"
-		} else {
-			title = "Spec · done"
-		}
-	} else if m.scrollOffset > 0 {
-		title = fmt.Sprintf("Spec · %s [↑ scroll · wheel to navigate]", m.slug)
-	} else {
-		title = fmt.Sprintf("Spec · %s [live]", m.slug)
-	}
-
 	// Scrollback view: render from accumulated text buffer when scrolled up.
 	if m.scrollOffset > 0 && len(m.scrollBuf) > 0 {
-		visH := m.height - 2
+		visH := m.height
 		if visH < 1 {
 			visH = 1
 		}
@@ -281,34 +467,42 @@ func (m SpecPanelModel) View() string {
 		for len(lines) < visH {
 			lines = append(lines, "")
 		}
-		return "  " + titleStyle.Render(title) + "\n" + strings.Join(lines, "\n")
+		return strings.Join(lines, "\n")
 	}
 
-	// Live view via VT emulator
-	rendered := m.emulator.Render()
-	if rendered == "" && !m.done {
+	// Live view: return the cached render (updated in Update() handlers).
+	if m.cachedRender == "" && !m.done {
 		dimS := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-		return "  " + titleStyle.Render(title) + "\n" + dimS.Render("  Waiting for output...")
+		return dimS.Render("  Waiting for output...")
 	}
 
-	return "  " + titleStyle.Render(title) + "\n" + rendered
+	return m.cachedRender
 }
 
-// PollTerminalCmd returns a Cmd that waits 50ms then drains one chunk from the
-// PTY output channel. Returns TerminalOutputMsg with the byte data (tagged with
-// slug), or StreamCompleteMsg when the channel is closed.
+// PollTerminalCmd returns a Cmd that blocks until PTY data arrives, then drains
+// up to 9 chunks total before returning a single TerminalOutputMsg. Returns
+// StreamCompleteMsg when the channel is closed.
 func PollTerminalCmd(slug string, ch <-chan []byte) tea.Cmd {
-	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
-		select {
-		case data, ok := <-ch:
-			if !ok {
-				return StreamCompleteMsg{Slug: slug}
-			}
-			return TerminalOutputMsg{Slug: slug, Data: data}
-		default:
-			return TerminalOutputMsg{Slug: slug, Data: nil}
+	return func() tea.Msg {
+		chunk, ok := <-ch
+		if !ok {
+			return StreamCompleteMsg{Slug: slug}
 		}
-	})
+		data := make([]byte, len(chunk))
+		copy(data, chunk)
+		for i := 0; i < 8; i++ {
+			select {
+			case more, ok := <-ch:
+				if !ok {
+					return TerminalOutputMsg{Slug: slug, Data: data}
+				}
+				data = append(data, more...)
+			default:
+				return TerminalOutputMsg{Slug: slug, Data: data}
+			}
+		}
+		return TerminalOutputMsg{Slug: slug, Data: data}
+	}
 }
 
 // StartTerminalCmd spawns the claude subprocess for /spec inside a PTY and
@@ -324,7 +518,7 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 		// immediately — no PTY-write timing hack needed.
 		var initialPrompt string
 		if chatMode {
-			initialPrompt = "Let's talk about the " + title + " work item"
+			initialPrompt = "Let's talk about the " + slug + " work item"
 			if extraContext != "" {
 				initialPrompt += ": " + extraContext
 			}

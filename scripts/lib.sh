@@ -182,6 +182,7 @@ json_array_field() {
     collecting && /\]/ {
       buf = buf $0
       gsub(/[[:space:]\]\[]/, "", buf)
+      sub(/,$/, "", buf)
       print buf
       collecting = 0
       next

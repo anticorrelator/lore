@@ -71,6 +71,7 @@ Subcommands:
   unarchive Restore an archived work item
   search    Search across work items
   tasks        Generate tasks from a plan
+  load-tasks   Validate tasks.json and output tasks as structured text (for /implement)
   regen-tasks  Regenerate tasks.json from plan.md
   check        Check off a plan task
   heal         Detect and fix work structure issues
@@ -539,6 +540,9 @@ cmd_work() {
       SLUG="$1"
       KDIR=$(resolve_kdir)
       python3 "$SCRIPTS_DIR/generate-tasks.py" "$KDIR/_work/$SLUG/plan.md" --knowledge-dir "$KDIR" --slug "$SLUG"
+      ;;
+    load-tasks)
+      "$SCRIPTS_DIR/load-tasks.sh" "$@"
       ;;
     regen-tasks)
       "$SCRIPTS_DIR/regen-tasks.sh" "$@"

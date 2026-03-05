@@ -18,12 +18,14 @@ const (
 	TabNotes
 	TabTasks
 	TabExecLog
+	TabFile // extra document tabs; use tabInfo.extraIndex to identify the viewport
 )
 
 // tabInfo holds display metadata for a tab.
 type tabInfo struct {
-	id    Tab
-	label string
+	id         Tab
+	label      string
+	extraIndex int // index into DetailModel.extraViewports; only meaningful for TabFile
 }
 
 // DetailLoadedMsg is sent when work item detail finishes loading.
@@ -62,10 +64,11 @@ type DetailModel struct {
 	contentStartY int
 	contentStartX int
 
-	planTab     PlanTabModel
-	notesTab    NotesTabModel
-	tasksModel  TasksModel
-	execLogModel ExecLogModel
+	planTab       PlanTabModel
+	notesTab      NotesTabModel
+	tasksModel    TasksModel
+	execLogModel  ExecLogModel
+	extraViewports []viewport.Model
 }
 
 // NewDetailModel creates a detail model for the given slug and starts loading.
@@ -100,6 +103,10 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		m.notesTab, _ = m.notesTab.Update(inner)
 		m.tasksModel, _ = m.tasksModel.Update(inner)
 		m.execLogModel, _ = m.execLogModel.Update(inner)
+		for i := range m.extraViewports {
+			m.extraViewports[i].Width = m.contentWidth()
+			m.extraViewports[i].Height = m.contentHeight()
+		}
 		return m, nil
 
 	case DetailLoadedMsg:
@@ -150,6 +157,13 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 			}
 			m.execLogModel.width = m.contentWidth()
 			m.execLogModel.height = m.contentHeight()
+		}
+		m.extraViewports = nil
+		for _, ef := range m.detail.ExtraFiles {
+			rendered := renderMarkdown(ef.Content, m.contentWidth())
+			vp := viewport.New(m.contentWidth(), m.contentHeight())
+			vp.SetContent(rendered)
+			m.extraViewports = append(m.extraViewports, vp)
 		}
 		return m, nil
 
@@ -220,6 +234,13 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		m.tasksModel, cmd = m.tasksModel.Update(msg)
 	case TabExecLog:
 		m.execLogModel, cmd = m.execLogModel.Update(msg)
+	case TabFile:
+		if m.activeTab < len(m.tabs) {
+			idx := m.tabs[m.activeTab].extraIndex
+			if idx >= 0 && idx < len(m.extraViewports) {
+				m.extraViewports[idx], cmd = m.extraViewports[idx].Update(msg)
+			}
+		}
 	}
 
 	return m, cmd
@@ -245,7 +266,25 @@ func (m DetailModel) buildTabs() []tabInfo {
 		tabs = append(tabs, tabInfo{id: TabExecLog, label: "Exec Log"})
 	}
 
+	for i, ef := range m.detail.ExtraFiles {
+		tabs = append(tabs, tabInfo{id: TabFile, label: extraFileLabel(ef.Name), extraIndex: i})
+	}
+
 	return tabs
+}
+
+// extraFileLabel converts a filename stem (without .md) into a display label
+// by replacing hyphens and underscores with spaces and title-casing each word.
+func extraFileLabel(name string) string {
+	name = strings.ReplaceAll(name, "-", " ")
+	name = strings.ReplaceAll(name, "_", " ")
+	words := strings.Fields(name)
+	for i, w := range words {
+		if len(w) > 0 {
+			words[i] = strings.ToUpper(w[:1]) + w[1:]
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // ActiveTab returns the currently active tab ID.
@@ -394,6 +433,13 @@ func (m DetailModel) renderTabContent(width, height int) string {
 		return m.tasksModel.View()
 	case TabExecLog:
 		return m.execLogModel.View()
+	case TabFile:
+		if m.activeTab < len(m.tabs) {
+			idx := m.tabs[m.activeTab].extraIndex
+			if idx >= 0 && idx < len(m.extraViewports) {
+				return m.extraViewports[idx].View()
+			}
+		}
 	}
 	return ""
 }

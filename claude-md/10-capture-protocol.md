@@ -42,7 +42,7 @@ lore capture --insight "..." --context "..." --category "..." --confidence "high
 
 When `_pending_captures/` directory exists in the knowledge store at session start:
 1. Glob `_pending_captures/*.md` — each file contains one candidate segment extracted by the stop hook's novelty detection
-2. For each file, read it and evaluate the candidate against the capture gate (reusable, non-obvious, stable, high-confidence) and assess synthesis level for tier placement
+2. For each file, read it and evaluate the candidate against the capture gate (reusable, non-obvious, stable, high-confidence) and assess synthesis level for tier placement. **Staleness branch:** when the "non-obvious" check reveals a similar entry may already exist, run `lore search "<key terms>" --type knowledge --limit 3`, read the top match, and branch: (a) same claim — skip the candidate, (b) divergent (contradicts or supersedes) — edit the existing entry file in-place to reflect the new insight, update its `learned` date to today, then skip the new capture. Note: `[staleness] Updated "<existing title>" — superseded by new finding`.
 3. For qualifying insights, run `lore capture` with appropriate parameters
 4. Delete each file after evaluation (regardless of whether the candidate qualified)
 5. Remove the `_pending_captures/` directory once empty
