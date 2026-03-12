@@ -66,16 +66,12 @@ For single-pass plans where the scope is clear and the agent can identify key fi
 2. Check the knowledge store (`lore index`, `_manifest.json`) for relevant domain files
 3. Read the files yourself — do NOT spawn subagents
 4. Note key findings as you go
-5. **Skill-applicability scan** — after reading key files, check for skills that may be relevant to the work item:
-   a. Review the skill names and descriptions available in the system prompt (the `---` frontmatter of each skill's SKILL.md lists `name` and `description`)
-   b. Match the work item title, description, and key findings against skill names and descriptions using keyword overlap (e.g., a work item about "rate limiting the API" matches a skill with "api" or "middleware" in its description)
-   c. If applicable skills are found: add a `**Related skills:**` block to the `## Context` section of `plan.md` listing each skill with a one-phrase rationale:
-      ```
-      **Related skills:**
-      - /skill-name — why this skill is relevant to this work item
-      - /other-skill — rationale
-      ```
-   d. If no applicable skills are found, skip silently — do not add the block
+5. **Skill and agent discovery** — after reading key files, scan for relevant skills and agents:
+   a. Glob `~/.claude/skills/*/SKILL.md` — read the YAML frontmatter (`name`, `description`) and first section of each
+   b. Glob `~/.claude/agents/*.md` — read each agent template name and opening description
+   c. Match the work item title, description, and key findings against skill/agent names and descriptions using keyword overlap
+   d. Deep-read any SKILL.md or agent template that shows strong overlap with the work item domain
+   e. Record results for the `**Skill discovery:**` block emitted in Step 2.5s — this block is mandatory; do not skip it
 
 ### Step 2.5s: Strategy gate
 
@@ -95,6 +91,11 @@ Before drafting, offer the user a chance to shape the plan with high-level strat
    - <key finding 1>
    - <key finding 2>
    - <key finding 3>
+
+   **Skill discovery:**
+   Considered: <comma-separated list of skills checked>
+   Matched: <skill-name — rationale> (or "none")
+   Agents reviewed: <comma-separated list of agent templates checked>
    ```
 
    Then prompt:
@@ -129,6 +130,13 @@ Before drafting, offer the user a chance to shape the plan with high-level strat
 
    Apply the task consolidation rule: each checkbox = one meaningful unit of work. Consolidate sequential same-file edits.
 
+   **Discovery findings → Related skills:** If any skills were listed under `Matched:` in the `**Skill discovery:**` block from Step 2.5s, add a `**Related skills:**` block to the `## Context` section:
+   ```
+   **Related skills:**
+   - /skill-name — why this skill is relevant to this work item
+   ```
+   If no skills matched, omit this block.
+
 5. **Annotate phases with knowledge context** — after drafting phases with objectives and tasks, run a concordance query per phase to surface relevant knowledge entries beyond what you encountered in Step 2s:
    ```bash
    lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5
@@ -137,17 +145,32 @@ Before drafting, offer the user a chance to shape the plan with high-level strat
 
 6. Present to user for review
 
+### Step 3.4s: Verify backlinks
+
+After drafting plan.md, verify all `[[knowledge:...]]` and `[[work:...]]` backlinks are resolvable:
+
+```bash
+bash ~/.lore/scripts/verify-plan-backlinks.sh "$WORK_DIR/<slug>/plan.md" "$KNOWLEDGE_DIR" --fix
+```
+
+The script outputs JSON: `{verified: N, corrected: [...], unresolved: [...]}`.
+
+- **If corrections were applied** (corrected is non-empty): briefly note the corrections made (e.g., "Corrected 2 backlinks: `[[knowledge:old-path]]` → `[[knowledge:new-path]]`").
+- **If unresolved backlinks remain**: carry them forward into Step 3.5s as additional bullets (tagged `[broken backlink]`).
+- **If all resolved**: proceed silently.
+
 ### Step 3.5s: Confirm understanding
 
 Same purpose as the full flow's Step 5.1 — surface assumptions before finalizing.
 
-**Present 5-10 bullet points** from the Key Assertions and Design Decisions. Since short flow has no verification agents, all assertion-sourced bullets are tagged `[unverified]`. For each design decision, include both the decision and its key alternative to surface trade-offs:
+**Present 5-10 bullet points** from the Key Assertions and Design Decisions. Since short flow has no verification agents, all assertion-sourced bullets are tagged `[unverified]`. For each design decision, include both the decision and its key alternative to surface trade-offs. If Step 3.4s reported unresolved backlinks, include them as additional bullets:
 
 ```
 Before finalizing this plan, here is my understanding of the key assumptions:
 
 - [unverified] <claim from Key Assertions> → Context: Key Assertions
 - <decision statement> (over <rejected alternative>) → Design Decision: D1: <title>
+- [broken backlink] [[knowledge:path]] could not be resolved — verify or remove → Step 3.4s backlink check
 ...
 
 Does this match your understanding? Any corrections?
@@ -201,12 +224,13 @@ Team-based divide-and-conquer for complex or uncertain-scope work.
    - Target a specific part of the codebase or concern
    - Be answerable by exploring files (not by asking the user)
    - Be independent enough to run in parallel
-2. Check the knowledge store index for file hints to include with each investigation
-3. **Assess complexity** for each investigation using these heuristics:
+2. **Always include** one additional fixed investigation topic: **Skill and agent applicability** — which installed skills and agent templates are relevant to this work item? Key files: `~/.claude/skills/*/SKILL.md`, `~/.claude/agents/*.md`. This investigation is mandatory and counts toward the 3-7 total.
+3. Check the knowledge store index for file hints to include with each investigation
+4. **Assess complexity** for each investigation using these heuristics:
    - **simple** — 1-2 key files, narrow question targeting a single function or module
    - **moderate** — 3-5 key files, or a multi-part question spanning related modules
    - **complex** — 6+ key files, or a cross-cutting concern (e.g., touches config, runtime, and tests)
-4. Present the investigation plan to the user as a structured preview table:
+5. Present the investigation plan to the user as a structured preview table:
    ```
    ## Investigation Plan
 
@@ -219,7 +243,7 @@ Team-based divide-and-conquer for complex or uncertain-scope work.
 
    Proceed, or adjust? (You can request changes — e.g., split a question, drop an area, add a new one, or change scope.)
    ```
-5. Wait for user confirmation before dispatching. If the user requests adjustments (freeform text), revise the table and re-present it. Repeat until approved. **If `--yes` was passed, skip this confirmation and dispatch immediately.**
+6. Wait for user confirmation before dispatching. If the user requests adjustments (freeform text), revise the table and re-present it. Repeat until approved. **If `--yes` was passed, skip this confirmation and dispatch immediately.**
 
 **Example** — for a "add rate limiting to the API" spec:
 ```
@@ -251,20 +275,42 @@ Proceed, or adjust? (You can request changes — e.g., split a question, drop an
    - `description`: The full question, context, file hints, and expected report format (see below)
    - `activeForm`: "Investigating \<short topic\>"
 
+   **Discovery researcher spec** — for the mandatory "Skill and agent applicability" investigation, the task description must include these additional instructions:
+   - Glob `~/.claude/skills/*/SKILL.md` — read the YAML frontmatter (`name`, `description`) and first section of each to assess relevance
+   - Deep-read any SKILL.md that overlaps with the work item title, description, or investigation topics (keyword match on `name`/`description` fields)
+   - Glob `~/.claude/agents/*.md` — read each agent template to assess applicability
+   - Report format adds two extra fields after `**Implications:**`:
+     ```
+     **Matched skills:**
+     - /skill-name — why this skill is relevant to the work item
+     - (none) if no skills matched
+     **Matched agents:**
+     - agent-name — why this agent template is relevant
+     - (none) if no agents matched
+     ```
+   - Assertions for this investigation should be concrete claims about which skills/agents are relevant and why, not general codebase claims
+
 4. **Pre-fetch knowledge for each investigation** — before constructing prompts, run:
    ```bash
    PRIOR_KNOWLEDGE=$(lore prefetch "<investigation topic>" --format prompt --limit 5)
    ```
    This produces a "## Prior Knowledge" block with pre-resolved content from the knowledge store.
 
-5. **Skill-applicability scan and advisor provisioning** — before spawning researchers, check for skills that may benefit the investigation:
+5. **Skill-applicability scan and advisor provisioning** — before spawning researchers, scan and emit a discovery block:
 
-   a. **Apply the applicability heuristic** — review the skill names and descriptions available in the system prompt. A skill is applicable if:
+   a. **Scan the skill list in your system prompt** — for each skill, check if its name, description, or trigger conditions overlap with the work item's domain. A skill is applicable if:
       - Its name or description contains keywords from the work item title or domain (e.g., a work item about "improving the spec flow" matches the `/spec` skill)
       - The work item is about modifying, extending, or interacting with that skill
       - Investigation topics overlap with the skill's described capabilities
 
-      Match the work item title, description, and investigation topics against skill names and descriptions using keyword overlap. The skill list is small (~15 skills), so this is a quick scan.
+      **Emit a skill discovery block** (mandatory — always output this, even if no matches):
+      ```
+      **Skill discovery:**
+      Considered: <comma-separated list of all skills checked>
+      Matched: <skill-name — rationale> (or "none")
+      ```
+
+      Note: The discovery researcher (from Step 2) reads actual SKILL.md files; this scan uses only system prompt summaries. Use this scan to provision advisors — the discovery researcher's findings provide the authoritative matched skills list for the plan's `**Related skills:**` block.
 
    b. **If applicable skills are found** — provision skill-backed advisors:
 
@@ -446,6 +492,14 @@ From the documented findings, draft the remaining plan sections:
 
    **Advisor identification:** When investigations reveal domain complexity in a phase — unfamiliar invariants, cross-cutting constraints, or areas where uninformed changes risk breaking correctness — add an `**Advisors:**` block declaring domain-expert advisors for that phase. Use the format: `- advisor-name — domain scope. [must-consult|on-demand]`. Use `must-consult` when the domain has hard invariants that workers must respect (e.g., auth, data migration); use `on-demand` when the domain is complex but workers can start independently and ask questions as needed. `/implement` spawns declared advisors as persistent team members with investigation findings as their domain baseline.
 
+   **Discovery findings integration** — after drafting phases, apply the discovery researcher's `**Matched skills:**` and `**Matched agents:**` findings:
+   - **Related skills block:** If the discovery researcher reported matched skills, add a `**Related skills:**` block to the `## Context` or `## Investigations` section (under the discovery investigation entry):
+     ```
+     **Related skills:**
+     - /skill-name — why this skill is relevant to this work item
+     ```
+   - **Advisor declarations:** For each matched skill whose domain overlaps with a phase's scope, consider adding an `**Advisors:**` entry for that phase. Use the skill name as the advisor name (e.g., `spec-advisor`) and scope it to the phase's domain. Set mode based on phase complexity — `must-consult` if the skill defines invariants workers must respect, `on-demand` otherwise.
+
    **Task consolidation rule:** Each `- [ ]` checkbox should be a meaningful unit of work, not a micro-edit. Multiple sequential edits to the same file should be one task (e.g., "Update worker prompt to add capture step and renumber" not three separate tasks for delete/insert/renumber). Aim for 2-5 tasks per phase. If a phase has >5 tasks, look for consolidation opportunities.
 
 4. **Concordance-assisted annotation** — after drafting phases, widen each phase's `**Knowledge context:**` block beyond what investigations explicitly mentioned. For each phase, run:
@@ -458,6 +512,20 @@ From the documented findings, draft the remaining plan sections:
 
 Present the synthesized plan to the user for review.
 
+### Step 5.0.5: Verify backlinks
+
+After completing synthesis, verify all `[[knowledge:...]]` and `[[work:...]]` backlinks in plan.md are resolvable:
+
+```bash
+bash ~/.lore/scripts/verify-plan-backlinks.sh "$WORK_DIR/<slug>/plan.md" "$KNOWLEDGE_DIR" --fix
+```
+
+The script outputs JSON: `{verified: N, corrected: [...], unresolved: [...]}`.
+
+- **If corrections were applied** (corrected is non-empty): briefly note the corrections made (e.g., "Corrected 2 backlinks: `[[knowledge:old-path]]` → `[[knowledge:new-path]]`").
+- **If unresolved backlinks remain**: carry them forward into Step 5.1 as additional bullets (tagged `[broken backlink]`).
+- **If all resolved**: proceed silently.
+
 ### Step 5.1: Confirm understanding
 
 Before finalizing, present a concise understanding summary for the user to validate. This surfaces the assumptions and claims the plan is built on so the user can catch misunderstandings before they propagate to implementation.
@@ -467,11 +535,13 @@ Before finalizing, present a concise understanding summary for the user to valid
 - Behavioral claims from verified assertions (mark with `[verified]`) or unverified researcher claims (mark with `[unverified]`)
 - Design decisions with their key rejected alternative — surfacing what was chosen *over what* makes trade-offs explicit
 - Scope boundaries — what is and is not included
+- Any unresolved backlinks reported by Step 5.0.5 (tagged `[broken backlink]`)
 
 **Traceability:** Each bullet must trace to a specific source. Use `→` to link the claim to its origin:
 - Assertion-sourced bullets: trace to the investigation topic and verification verdict
 - Design decision bullets: trace to the Design Decisions section entry by DN identifier (e.g., `D1: <title>`)
 - Scope bullets: trace to the Goal or user input that established the boundary
+- Broken backlink bullets: trace to the backlink verification step
 
 **Format:**
 ```
@@ -481,6 +551,7 @@ Before finalizing this plan, here is my understanding of the key assumptions:
 - [unverified] <claim> → Investigation: <topic>, Assertion #N
 - <decision statement> (over <rejected alternative>) → Design Decision: D1: <title>
 - <scope boundary> → Goal / user input
+- [broken backlink] [[knowledge:path]] could not be resolved — verify or remove → Step 5.0.5 backlink check
 ...
 
 Does this match your understanding? Any corrections?

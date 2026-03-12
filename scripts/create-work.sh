@@ -124,12 +124,38 @@ if [[ -z "$SLUG" ]]; then
   exit 1
 fi
 
-# Check for duplicate
+# Check for duplicate (exact match)
 if [[ -d "$WORK_DIR/$SLUG" ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
     json_error "Work item '$SLUG' already exists"
   fi
   echo "[work] Error: Work item '$SLUG' already exists at $WORK_DIR/$SLUG" >&2
+  exit 1
+fi
+
+# Check for similar slugs (substring overlap in either direction)
+SIMILAR=()
+for existing_dir in "$WORK_DIR"/*/; do
+  [[ ! -d "$existing_dir" ]] && continue
+  existing_slug=$(basename "$existing_dir")
+  [[ "$existing_slug" == _* ]] && continue  # skip _archive, _index, etc.
+  # Check if new slug contains existing slug or vice versa
+  if [[ "$SLUG" == *"$existing_slug"* || "$existing_slug" == *"$SLUG"* ]]; then
+    existing_title=$(python3 -c "import json; print(json.load(open('$existing_dir/_meta.json'))['title'])" 2>/dev/null || echo "$existing_slug")
+    SIMILAR+=("$existing_slug ($existing_title)")
+  fi
+done
+
+if [[ ${#SIMILAR[@]} -gt 0 ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    # In JSON mode, emit a warning field but still block creation
+    json_error "Similar work item(s) already exist: ${SIMILAR[*]}"
+  fi
+  echo "[work] Warning: Similar work item(s) already exist:" >&2
+  for s in "${SIMILAR[@]}"; do
+    echo "  - $s" >&2
+  done
+  echo "[work] Error: Refusing to create '$SLUG' — use a distinct name or work with the existing item." >&2
   exit 1
 fi
 

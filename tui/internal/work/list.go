@@ -52,6 +52,11 @@ type SpecStatusMsg struct {
 	Done       bool
 }
 
+// ExternalSessionMsg carries the set of slugs with active sessions from other TUI instances.
+type ExternalSessionMsg struct {
+	Slugs map[string]bool
+}
+
 // specTickMsg drives the animated dots on the speccing status line.
 type specTickMsg struct{}
 
@@ -78,6 +83,7 @@ type ListModel struct {
 	specActiveSlugs     map[string]bool // all slugs currently speccing
 	specNeedsInputSlugs map[string]bool // slugs with active input prompt
 	specDots            int
+	externalActiveSlugs map[string]bool // slugs with sessions from other TUI instances
 	confirmArchive      bool
 	pendingArchiveSlug  string
 	pendingArchiveTitle string
@@ -161,6 +167,9 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 			m.specDots = (m.specDots + 1) % 4
 			return m, specTick()
 		}
+
+	case ExternalSessionMsg:
+		m.externalActiveSlugs = msg.Slugs
 
 	case tea.KeyMsg:
 		// Confirm mode: intercept keys for the confirmation prompt
@@ -360,10 +369,13 @@ func (m ListModel) viewCompact() string {
 			cursor = "> "
 		}
 
-		// Spec indicator: ◆ (amber) only when waiting for input, nothing when just running.
+		// Spec indicator: ● (amber) only when waiting for input, nothing when just running.
+		// External session indicator: dim ◆ when another TUI instance is working on this slug.
 		specGlyph := ""
 		if m.specActiveSlugs[item.Slug] && m.specNeedsInputSlugs[item.Slug] {
-			specGlyph = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("◆") + " "
+			specGlyph = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("●") + " "
+		} else if !m.specActiveSlugs[item.Slug] && m.externalActiveSlugs[item.Slug] {
+			specGlyph = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("◆") + " "
 		}
 
 		// Line 1: title (fall back to slug)
@@ -420,10 +432,13 @@ func (m ListModel) buildInfoCompact(item WorkItem) string {
 	var parts []string
 
 	// When this item is actively speccing, show animated status instead of readiness.
+	// When another TUI has the session, show dim "active".
 	if m.specActiveSlugs[item.Slug] {
 		dots := strings.Repeat(".", m.specDots)
 		specS := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 		parts = append(parts, specS.Render("speccing"+dots+strings.Repeat(" ", 3-len(dots))))
+	} else if m.externalActiveSlugs[item.Slug] {
+		parts = append(parts, lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("active"))
 	} else {
 		label, color := readinessLabel(item)
 		parts = append(parts, lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(label))
@@ -461,6 +476,7 @@ func (m ListModel) viewFull() string {
 	var b strings.Builder
 
 	// Column widths — no TITLE column; slug expands to fill available space.
+	dotW := 1
 	statusW := 12 // "needs tasks" = 11 chars
 	issueW := 8   // "#12345" = 7 chars
 	updatedW := 12
@@ -468,10 +484,10 @@ func (m ListModel) viewFull() string {
 	slugW := 50 // default; grows to fill terminal width
 
 	// Adapt to terminal width: slug absorbs all spare space.
-	// Fixed columns: status(12) + issue(8) + pr(10) + updated(12) + gaps(10) = 52
-	// Gaps: 5 pairs of "  " separators (leading + 4 inter-column) = 10 chars.
+	// Fixed columns: dot(1) + status(12) + issue(8) + pr(10) + updated(12) + gaps(12) = 55
+	// Gaps: 6 pairs of "  " separators (leading + dot-slug gap + 4 inter-column) = 12 chars.
 	if m.width > 0 {
-		slugW = m.width - statusW - issueW - prW - updatedW - 10
+		slugW = m.width - dotW - statusW - issueW - prW - updatedW - 12
 		if slugW < 20 {
 			slugW = 20
 		}
@@ -483,7 +499,8 @@ func (m ListModel) viewFull() string {
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
 	// Header
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s",
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+		dotW, " ",
 		slugW, "SLUG",
 		statusW, "READINESS",
 		issueW, "ISSUE",
@@ -520,13 +537,24 @@ func (m ListModel) viewFull() string {
 		updated = truncate(updated, updatedW)
 		pr := m.prBadge(item.PR, prW)
 
-		// Readiness label — replaced with animated "speccing" when active.
+		// Dot column — shows ● (amber) when spec is waiting for input.
+		var dotStr string
+		if m.specNeedsInputSlugs[item.Slug] {
+			dotStr = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("●")
+		} else {
+			dotStr = " "
+		}
+
+		// Readiness label — animated "speccing" when active, or dim "◆ active" for external sessions.
 		var statusLabel string
 		var statusColor string
 		if m.specActiveSlugs[item.Slug] {
 			dots := strings.Repeat(".", m.specDots)
 			statusLabel = "speccing" + dots + strings.Repeat(" ", 3-len(dots))
 			statusColor = "6" // cyan
+		} else if m.externalActiveSlugs[item.Slug] {
+			statusLabel = "◆ active"
+			statusColor = "8" // dim
 		} else {
 			statusLabel, statusColor = readinessLabel(item)
 		}
@@ -539,7 +567,8 @@ func (m ListModel) viewFull() string {
 		}
 		issue := dimStyle.Render(truncate(issueStr, issueW))
 
-		row := fmt.Sprintf("  %-*s  %s%s  %s%s  %s%s  %-*s",
+		row := fmt.Sprintf("  %s  %-*s  %s%s  %s%s  %s%s  %-*s",
+			dotStr,
 			slugW, slug,
 			status, strings.Repeat(" ", max(0, statusW-lipgloss.Width(status))),
 			issue, strings.Repeat(" ", max(0, issueW-lipgloss.Width(issue))),

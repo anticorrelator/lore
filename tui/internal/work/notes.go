@@ -24,7 +24,7 @@ type NotesTabModel struct {
 	empty   bool
 }
 
-var noteHeaderRe = regexp.MustCompile(`^## (\d{4}-\d{2}-\d{2}T\d{2}:\d{2})`)
+var noteHeaderRe = regexp.MustCompile(`^## (\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?)`)
 
 // NewNotesTabModel creates a notes tab from notes_content.
 func NewNotesTabModel(notesContent *string, width, height int) NotesTabModel {

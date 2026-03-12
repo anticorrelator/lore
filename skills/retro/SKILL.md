@@ -135,6 +135,8 @@ What did workers need that wasn't in the store? Look for: workers who reported s
 
 **Execution-log gap inference:** `source: remember` entries in `execution-log.md` enumerate mid-cycle captures. Each capture listed was absent from the store at cycle start — use them as a confirmed gap list. More reliable than reconstructing worker reports. Severity assessment: (a) *Pattern knowable in advance* — an existing convention or known gotcha that wasn't yet captured. Genuine coverage failure. (b) *Genuinely novel discovery* — implementation surfaced something new, not previously encountered anywhere. Expected; not a coverage failure. Distinguish by reading each capture's `context` field: if it describes re-discovering something that should have been known, score as (a); if it describes first-time observation during implementation, score as (b). A cycle with 0 mid-cycle captures scores 5 by default on this signal.
 
+**Trivial-scope D3=5 note:** For small, single-phase, single-file work items (≤4 tasks, 1-2 target files), D3=5 is trivially achievable — the scope is too narrow to expose knowledge gaps. When scoring D3=5 on such work items, note "trivial scope — gap dimension low-signal" in the narrative. This is not a scoring error but a reduced-confidence indicator. Do not artificially lower the score — just flag it so trend analysis across retros can weight it appropriately.
+
 **Scoring:**
 - 5: No significant gaps — workers found everything they needed
 - 4: One minor gap that didn't slow work

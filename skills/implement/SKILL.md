@@ -26,12 +26,16 @@ allowed-tools:
 
 Executes a work item's `plan.md` with a team of knowledge-aware agents. Agents read existing knowledge before working, report architectural findings, and the lead captures reusable insights afterward.
 
-## Resolve Work Path
+## Resolve Paths
 
 ```bash
 lore resolve
 ```
 Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
+
+Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). Do NOT use `git rev-parse --show-toplevel` for agent paths — the current repo is the target project, not the lore repo.
+
+**MANDATORY:** You MUST read the actual template files from `~/.claude/agents/` when spawning agents. Do NOT skip this step. Do NOT generate inline agent prompts as a substitute. If the directory or files are missing, stop and report the error — never fall back to improvised prompts.
 
 ## Step 1: Load work item and validate
 
@@ -106,16 +110,33 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
    If no phases declare advisors, set `$ADVISORY_MIXIN` to empty.
 
-3. **Spawn advisor agents (if advisors present)** — if Step 3.2 found advisor declarations, spawn each unique advisor as a persistent team member before spawning workers.
+3. **Skill reconciliation** — before spawning advisors, check if plan.md's `**Related skills:**` block lists skills that weren't declared as advisors in any phase:
 
-   For each unique advisor name collected in Step 3.2a:
+   a. **Read `**Related skills:**`** from plan.md's `## Context` or `## Investigations` section (if present). This is the discovery researcher's output from `/spec`.
+
+   b. **For each matched skill**, check whether any phase in `plan.md` declares it as an advisor (in a `**Advisors:**` block). A skill that appears in `**Related skills:**` but not in any `**Advisors:**` block is a candidate for late advisor declaration.
+
+   c. **Declare missing advisors** — for each candidate, assess whether the skill's domain overlaps with any uncompleted phase's scope. If so, add an `**Advisors:**` entry to that phase in plan.md:
+      ```
+      **Advisors:**
+      - <skill-name>-advisor — <skill domain scope>. on-demand
+      ```
+      Use `on-demand` mode for late-declared advisors (workers have already started context accumulation; must-consult would block them unnecessarily).
+
+   d. **If no `**Related skills:**` block exists** or all matched skills are already declared as advisors, skip silently — proceed to Step 3.4.
+
+   e. **If new advisors were declared**, re-collect all advisor declarations from plan.md phases and rebuild `$ADVISORY_MIXIN` (repeat Steps 3.2a–3.2d) before proceeding.
+
+4. **Spawn advisor agents (if advisors present)** — if Step 3.2 or Step 3.3 found advisor declarations, spawn each unique advisor as a persistent team member before spawning workers.
+
+   For each unique advisor name collected from Step 3.2a and Step 3.3c:
 
    a. **Build domain context** — find the `## Investigations` section(s) in `plan.md` whose topic relates to the advisor's domain scope. Extract the relevant investigation entry (findings, verified assertions, key files, implications) and format it as the advisor's domain baseline.
 
-   b. **Spawn the advisor** using the **advisor** agent definition (`agents/advisor.md`) with these template injections:
+   b. **Spawn the advisor** using the **advisor** agent definition (`~/.claude/agents/advisor.md`) with these template injections:
       - `{{team_name}}` → `impl-<slug>`
       - `{{advisor_domain}}` → the advisor's domain scope from the plan annotation
-      - `{{domain_context}}` → the investigation excerpt from Step 3.3a
+      - `{{domain_context}}` → the investigation excerpt from Step 3.4a
 
       ```
       Task:
@@ -125,7 +146,7 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
         name: "<advisor-name>"
         mode: "bypassPermissions"
         prompt: |
-          <contents of agents/advisor.md with {{template}} variables resolved>
+          <contents of ~/.claude/agents/advisor.md with {{template}} variables resolved>
       ```
 
    Advisors are persistent — they remain active for the entire implementation session and are shut down alongside workers in Step 4.
@@ -137,7 +158,7 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
         | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
       ```
 
-4. **Spawn worker agents** — launch `min(task_count, 4)` in a single message. Use the **worker** agent definition (`agents/worker.md`) as the base prompt, with these template injections:
+5. **Spawn worker agents** — launch `min(task_count, 4)` in a single message. Use the **worker** agent definition (`~/.claude/agents/worker.md`) as the base prompt, with these template injections:
    - `{{team_name}}` → `impl-<slug>`
    - `{{team_lead}}` → the lead name read from team config in Step 2
    - `{{prior_knowledge}}` → the `$PRIOR_KNOWLEDGE` block from Step 3.1 (or empty if tasks have pre-resolved knowledge)
@@ -152,11 +173,11 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
      name: "worker-N"
      mode: "bypassPermissions"
      prompt: |
-       <contents of agents/worker.md with {{template}} variables resolved>
+       <contents of ~/.claude/agents/worker.md with {{template}} variables resolved>
        <if advisors: contents of advisory-consultation.md with {{advisors}} resolved>
    ```
 
-5. If more tasks than workers, agents pick up additional tasks after completing their first.
+6. If more tasks than workers, agents pick up additional tasks after completing their first.
 
 ## Step 4: Collect progress
 
@@ -185,7 +206,7 @@ As worker messages arrive (delivered automatically):
 Do NOT gate on reviewing diffs — workers proceed autonomously. The user reviews at the end.
 
 When all tasks are complete (or all remaining are blocked):
-1. Send `shutdown_request` to all workers and all advisor agents (if any were spawned in Step 3.3)
+1. Send `shutdown_request` to all workers and all advisor agents (if any were spawned in Step 3.4)
 2. **Write advisor shutdown log entries** — for each advisor that was spawned, log the shutdown:
    ```bash
    printf 'Advisor shutdown: %s\nDomain: %s\n' \

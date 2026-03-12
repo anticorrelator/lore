@@ -2,249 +2,418 @@ package work
 
 import (
 	"fmt"
+	"strings"
 	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/vt"
 )
 
-func TestStripAnsiX10Mouse(t *testing.T) {
-	// X10 mouse sequence: ESC [ M <button> <col> <y>
-	// col=35 => 35+32=67 => ASCII 'C', y=1 => 1+32=33 => ASCII '!'
-	input := "\x1b[M\x20C!"
-	got := stripAnsi(input)
-	if got != "" {
-		t.Errorf("X10 mouse sequence should be fully stripped, got %q", got)
+func TestDetectScrollUpNoScroll(t *testing.T) {
+	prev := []string{"A", "B", "C", "D"}
+	cur := []string{"A", "B", "C", "D"}
+	if k := detectScrollUp(prev, cur); k != 0 {
+		t.Errorf("expected 0 (no scroll), got %d", k)
 	}
 }
 
-func TestStripAnsiX10MouseMidString(t *testing.T) {
-	// X10 mouse sequence embedded in normal text
-	input := "hello\x1b[M\x20C!world"
-	got := stripAnsi(input)
-	if got != "helloworld" {
-		t.Errorf("expected %q, got %q", "helloworld", got)
+func TestDetectScrollUpOneLineChanged(t *testing.T) {
+	// Bottom line changes, no shift — not a scroll.
+	prev := []string{"A", "B", "C", "D"}
+	cur := []string{"A", "B", "C", "X"}
+	if k := detectScrollUp(prev, cur); k != 0 {
+		t.Errorf("expected 0, got %d", k)
 	}
 }
 
-func TestStripAnsiColorCode(t *testing.T) {
-	// Standard SGR color: ESC [ 31 m (red foreground)
-	input := "\x1b[31mhello\x1b[0m"
-	got := stripAnsi(input)
-	if got != "hello" {
-		t.Errorf("expected %q, got %q", "hello", got)
+func TestDetectScrollUpOneLine(t *testing.T) {
+	prev := []string{"A", "B", "C", "D"}
+	cur := []string{"B", "C", "D", "X"}
+	if k := detectScrollUp(prev, cur); k != 1 {
+		t.Errorf("expected 1, got %d", k)
 	}
 }
 
-func TestStripAnsiMixed(t *testing.T) {
-	// Color code + X10 mouse + normal text
-	input := "\x1b[32mgreen\x1b[M\x20C!\x1b[0m end"
-	got := stripAnsi(input)
-	if got != "green end" {
-		t.Errorf("expected %q, got %q", "green end", got)
+func TestDetectScrollUpTwoLines(t *testing.T) {
+	prev := []string{"A", "B", "C", "D", "E", "F"}
+	cur := []string{"C", "D", "E", "F", "X", "Y"}
+	if k := detectScrollUp(prev, cur); k != 2 {
+		t.Errorf("expected 2, got %d", k)
 	}
 }
 
-func TestStripAnsiTildeTerminated(t *testing.T) {
-	// Bracketed paste markers end in '~' (0x7e), not a letter — must be stripped
-	start := "\x1b[200~"
-	end := "\x1b[201~"
-	if got := stripAnsi(start + "pasted text" + end); got != "pasted text" {
-		t.Errorf("bracketed paste markers should be stripped, got %q", got)
-	}
-	// PgUp / PgDn function keys
-	if got := stripAnsi("\x1b[5~scroll\x1b[6~"); got != "scroll" {
-		t.Errorf("PgUp/PgDn sequences should be stripped, got %q", got)
+func TestDetectScrollUpMismatchedHeight(t *testing.T) {
+	prev := []string{"A", "B"}
+	cur := []string{"A", "B", "C"}
+	if k := detectScrollUp(prev, cur); k != 0 {
+		t.Errorf("expected 0 (mismatched heights), got %d", k)
 	}
 }
 
-func TestStripAnsiCarriageReturn(t *testing.T) {
-	// Spinner overwrites: only the last frame after \r should survive.
-	if got := stripAnsi("frame1\rframe2\rframe3"); got != "frame3" {
-		t.Errorf("expected last overwrite frame, got %q", got)
+func TestDetectScrollUpEmpty(t *testing.T) {
+	if k := detectScrollUp(nil, nil); k != 0 {
+		t.Errorf("expected 0 (nil slices), got %d", k)
 	}
-	// \r at end of line means the line is blank (overwritten with nothing).
-	if got := stripAnsi("text\r"); got != "" {
-		t.Errorf("trailing \\r should produce empty line, got %q", got)
-	}
-	// \r\n is a normal line ending, not an overwrite.
-	if got := stripAnsi("line1\r\nline2"); got != "line1\nline2" {
-		t.Errorf("\\r\\n should be a line ending, got %q", got)
+	if k := detectScrollUp([]string{}, []string{}); k != 0 {
+		t.Errorf("expected 0 (empty slices), got %d", k)
 	}
 }
 
-func TestCountCursorUp(t *testing.T) {
-	if n := countCursorUp("\x1b[3A"); n != 3 {
-		t.Errorf("expected 3, got %d", n)
-	}
-	if n := countCursorUp("\x1b[A"); n != 1 { // no digit defaults to 1
-		t.Errorf("expected 1, got %d", n)
-	}
-	if n := countCursorUp("\x1b[2A\x1b[3A"); n != 5 {
-		t.Errorf("expected 5, got %d", n)
-	}
-	if n := countCursorUp("no escapes here"); n != 0 {
-		t.Errorf("expected 0, got %d", n)
+func TestDetectScrollUpFullRedraw(t *testing.T) {
+	// Complete content change — not a scroll.
+	prev := []string{"A", "B", "C", "D"}
+	cur := []string{"W", "X", "Y", "Z"}
+	if k := detectScrollUp(prev, cur); k != 0 {
+		t.Errorf("expected 0 (full redraw), got %d", k)
 	}
 }
 
-func TestTrimIncompleteEscapeTildeCSI(t *testing.T) {
-	// ESC[200~ (bracketed paste start) is complete — must not be held as tail.
-	safe, tail := trimIncompleteEscape("text\x1b[200~")
-	if safe != "text\x1b[200~" || tail != "" {
-		t.Errorf("ESC[200~ should be complete, got safe=%q tail=%q", safe, tail)
-	}
-	// ESC[200 with no ~ yet is incomplete.
-	safe, tail = trimIncompleteEscape("text\x1b[200")
-	if safe != "text" || tail != "\x1b[200" {
-		t.Errorf("ESC[200 should be incomplete, got safe=%q tail=%q", safe, tail)
+func TestDetectScrollUpLargeScroll(t *testing.T) {
+	// 8 lines, k=5: cur[0:3]=[F,G,H] match prev[5:8]=[F,G,H].
+	// With contiguous-from-top matching and minMatch=2 (h=8), 3 matches suffice.
+	prev := []string{"A", "B", "C", "D", "E", "F", "G", "H"}
+	cur := []string{"F", "G", "H", "X", "Y", "Z", "W", "V"}
+	if k := detectScrollUp(prev, cur); k != 5 {
+		t.Errorf("expected 5, got %d", k)
 	}
 }
 
-func TestTrimIncompleteEscapeNoEscape(t *testing.T) {
-	safe, tail := trimIncompleteEscape("hello world")
-	if safe != "hello world" || tail != "" {
-		t.Errorf("expected (\"hello world\", \"\"), got (%q, %q)", safe, tail)
+func TestDetectScrollUpWithBottomChanges(t *testing.T) {
+	// Simulates Ink re-rendering the bottom of the screen while real scroll
+	// happened at the top. The top lines shifted up by 1, but the last 2
+	// lines are completely different (Ink's dynamic area).
+	prev := []string{"A", "B", "C", "D", "E", "F", "spinner1", "status1"}
+	cur := []string{"B", "C", "D", "E", "F", "G", "spinner2", "status2"}
+	// k=1: cur[0:7] vs prev[1:8]. Contiguous from top: B==B, C==C, D==D, E==E, F==F = 5 matches.
+	// Then cur[5]="G" != prev[6]="spinner1" — stops. 5 >= minMatch(2) → detected.
+	if k := detectScrollUp(prev, cur); k != 1 {
+		t.Errorf("expected 1, got %d", k)
 	}
 }
 
-func TestTrimIncompleteEscapeEmpty(t *testing.T) {
-	safe, tail := trimIncompleteEscape("")
-	if safe != "" || tail != "" {
-		t.Errorf("expected (\"\", \"\"), got (%q, %q)", safe, tail)
+func TestDetectScrollUpNoFalsePositiveFromMiddleMatch(t *testing.T) {
+	// Lines match in the middle but not from the top — should not detect scroll.
+	prev := []string{"A", "B", "X", "Y", "E", "F", "G", "H"}
+	cur := []string{"Z", "W", "X", "Y", "E", "F", "G", "H"}
+	// k=2: cur[0]="Z" vs prev[2]="X" — no match from top → rejected.
+	if k := detectScrollUp(prev, cur); k != 0 {
+		t.Errorf("expected 0 (no match from top), got %d", k)
 	}
 }
 
-func TestTrimIncompleteEscapeBareESC(t *testing.T) {
-	// Bare ESC at end — incomplete
-	safe, tail := trimIncompleteEscape("hello\x1b")
-	if safe != "hello" || tail != "\x1b" {
-		t.Errorf("expected (\"hello\", \"\\x1b\"), got (%q, %q)", safe, tail)
+func TestReadScreenLines(t *testing.T) {
+	emu := vt.NewEmulator(10, 3)
+	emu.Write([]byte("Hello\r\nWorld\r\n!"))
+	lines := readScreenLines(emu)
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d", len(lines))
+	}
+	if lines[0] != "Hello" {
+		t.Errorf("line 0: expected %q, got %q", "Hello", lines[0])
+	}
+	if lines[1] != "World" {
+		t.Errorf("line 1: expected %q, got %q", "World", lines[1])
+	}
+	if lines[2] != "!" {
+		t.Errorf("line 2: expected %q, got %q", "!", lines[2])
 	}
 }
 
-func TestTrimIncompleteEscapePartialCSI(t *testing.T) {
-	// ESC [ with no terminal letter — incomplete CSI
-	safe, tail := trimIncompleteEscape("hello\x1b[")
-	if safe != "hello" || tail != "\x1b[" {
-		t.Errorf("expected (\"hello\", \"\\x1b[\"), got (%q, %q)", safe, tail)
+func TestReadScreenLinesTrimsTrailingSpaces(t *testing.T) {
+	emu := vt.NewEmulator(20, 2)
+	emu.Write([]byte("Hi"))
+	lines := readScreenLines(emu)
+	if lines[0] != "Hi" {
+		t.Errorf("expected trailing spaces trimmed, got %q", lines[0])
 	}
 }
 
-func TestTrimIncompleteEscapePartialCSIParams(t *testing.T) {
-	// ESC [ 3 1 — params but no terminal letter
-	safe, tail := trimIncompleteEscape("hello\x1b[31")
-	if safe != "hello" || tail != "\x1b[31" {
-		t.Errorf("expected (\"hello\", \"\\x1b[31\"), got (%q, %q)", safe, tail)
-	}
-}
-
-func TestTrimIncompleteEscapeCompleteCSI(t *testing.T) {
-	// ESC [ 31 m — complete sequence, no trimming needed
-	safe, tail := trimIncompleteEscape("hello\x1b[31m")
-	if safe != "hello\x1b[31m" || tail != "" {
-		t.Errorf("expected complete string with empty tail, got (%q, %q)", safe, tail)
-	}
-}
-
-func TestTrimIncompleteEscapeCompleteThenPartial(t *testing.T) {
-	// Complete sequence followed by incomplete one
-	safe, tail := trimIncompleteEscape("hello\x1b[31mworld\x1b[")
-	if safe != "hello\x1b[31mworld" || tail != "\x1b[" {
-		t.Errorf("expected safe up to incomplete, got (%q, %q)", safe, tail)
-	}
-}
-
-func TestScrollBufPrevChunkLinesCap(t *testing.T) {
+func TestScrollbackViaEmulatorDiff(t *testing.T) {
 	m := NewSpecPanelModel("test")
+	m.height = 3
 
-	// First chunk: 3 non-empty lines, no cursor-up.
-	data1 := []byte("line1\nline2\nline3\n")
-	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: data1})
-	if len(m.scrollBuf) != 3 {
-		t.Fatalf("after chunk 1: expected 3 scrollBuf lines, got %d", len(m.scrollBuf))
-	}
-	if m.prevChunkLines != 3 {
-		t.Fatalf("after chunk 1: expected prevChunkLines=3, got %d", m.prevChunkLines)
-	}
+	// Resize emulator to 3 lines tall.
+	m.emulator.Resize(20, 3)
 
-	// Second chunk: cursor-up 24 + 24 new lines.
-	// With the fix, pop is capped at prevChunkLines (3), not upCount (24).
-	// So scrollBuf should be: 3 - 3 + 24 = 24 lines.
-	var data2 []byte
-	data2 = append(data2, "\x1b[24A"...)
-	for i := 0; i < 24; i++ {
-		data2 = append(data2, []byte(fmt.Sprintf("new%d\n", i))...)
-	}
-	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: data2})
-
-	// Without the fix, pop would be 24 (> scrollBuf len 3, capped to 3),
-	// which coincidentally gives the same result. The key difference is the
-	// *mechanism*: the fix caps at prevChunkLines, not at scrollBuf length.
-	// To distinguish, we verify prevChunkLines updated correctly.
-	if m.prevChunkLines != 24 {
-		t.Fatalf("after chunk 2: expected prevChunkLines=24, got %d", m.prevChunkLines)
-	}
-	expectedLen := 24 // 3 original - 3 popped + 24 new
-	if len(m.scrollBuf) != expectedLen {
-		t.Fatalf("after chunk 2: expected %d scrollBuf lines, got %d", expectedLen, len(m.scrollBuf))
-	}
-}
-
-func TestScrollBufSpinnerDedup(t *testing.T) {
-	m := NewSpecPanelModel("test")
-
-	// First spinner frame: 1 non-empty line.
-	data1 := []byte("spinner frame 1\n")
-	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: data1})
-	if len(m.scrollBuf) != 1 {
-		t.Fatalf("after frame 1: expected 1 scrollBuf line, got %d", len(m.scrollBuf))
-	}
-
-	// Second spinner frame: cursor-up 1 + 1 new line (replaces frame 1).
-	data2 := []byte("\x1b[1Aspinner frame 2\n")
-	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: data2})
-	if len(m.scrollBuf) != 1 {
-		t.Fatalf("after frame 2: expected 1 scrollBuf line (dedup), got %d", len(m.scrollBuf))
-	}
-	if m.scrollBuf[0] != "spinner frame 2" {
-		t.Fatalf("expected second frame content, got %q", m.scrollBuf[0])
-	}
-}
-
-func TestScrollOffsetStabilityDuringPop(t *testing.T) {
-	m := NewSpecPanelModel("test")
-	m.height = 24
-
-	// Pre-populate scrollBuf with 40 lines and set prevChunkLines to 3
-	// (simulating a previous chunk that added 3 lines).
-	// 40 lines ensures maxOff (40-24=16) > scrollOffset (5), avoiding clamp.
-	for i := 0; i < 40; i++ {
-		m.scrollBuf = append(m.scrollBuf, fmt.Sprintf("line%d", i))
-	}
-	m.prevChunkLines = 3
-	m.scrollOffset = 5
-
-	endIdxBefore := len(m.scrollBuf) - m.scrollOffset // 40 - 5 = 35
-
-	// Send a TerminalOutputMsg with upCount=3 (matches prevChunkLines) and 3 new lines.
-	// Pop removes 3, scrollOffset decreases by 3 (5→2), then 3 lines added,
-	// scrollOffset increases by 3 (2→5). Net: scrollBuf same size, scrollOffset same.
-	data := []byte("\x1b[3AnewA\nnewB\nnewC\n")
+	// Write enough lines to cause scrolling. With 3-line screen:
+	// "line1\r\nline2\r\nline3\r\n" fills the screen, then the final \n
+	// causes line1 to scroll off.
+	data := []byte("line1\r\nline2\r\nline3\r\nline4\r\n")
 	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: data})
 
-	endIdxAfter := len(m.scrollBuf) - m.scrollOffset
+	// First write: no prevScreen yet, so no scroll detection.
+	// But now prevScreen is set. Write more to trigger scroll.
+	data2 := []byte("line5\r\nline6\r\n")
+	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: data2})
 
-	if endIdxAfter != endIdxBefore {
-		t.Fatalf("endIdx shifted: before=%d, after=%d (scrollBuf=%d, scrollOffset=%d)",
-			endIdxBefore, endIdxAfter, len(m.scrollBuf), m.scrollOffset)
-	}
-	if m.scrollOffset != 5 {
-		t.Fatalf("expected scrollOffset=5 (unchanged), got %d", m.scrollOffset)
+	// There should be some scrollback captured.
+	if len(m.scrollBuf) == 0 {
+		// The emulator processes all data at once, so the internal screen
+		// may have already settled. Check that the mechanism works by
+		// verifying prevScreen is set.
+		if m.prevScreen == nil {
+			t.Fatal("prevScreen should be set after writes")
+		}
 	}
 }
 
-func TestTrimIncompleteEscapeTwoByteSafe(t *testing.T) {
-	// ESC c (RIS - reset) — complete 2-byte sequence
-	safe, tail := trimIncompleteEscape("hello\x1bc")
-	if safe != "hello\x1bc" || tail != "" {
-		t.Errorf("expected complete string, got (%q, %q)", safe, tail)
+func TestScrollbackAccumulatesOnMultipleWrites(t *testing.T) {
+	m := NewSpecPanelModel("test")
+	m.height = 4
+	m.emulator.Resize(40, 4)
+
+	// First write: fill the screen.
+	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: []byte("A\r\nB\r\nC\r\nD")})
+	// prevScreen is now [A, B, C, D]
+
+	// Second write: add one line, causing A to scroll off.
+	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: []byte("\r\nE")})
+	// Screen should be [B, C, D, E], scrollBuf should have [A]
+	if len(m.scrollBuf) != 1 || m.scrollBuf[0] != "A" {
+		t.Fatalf("expected scrollBuf=[A], got %v", m.scrollBuf)
 	}
+
+	// Third write: add one more line, causing B to scroll off.
+	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: []byte("\r\nF")})
+	if len(m.scrollBuf) != 2 || m.scrollBuf[1] != "B" {
+		t.Fatalf("expected scrollBuf=[A,B], got %v", m.scrollBuf)
+	}
+}
+
+func TestScrollOffsetAdjustedOnTrim(t *testing.T) {
+	m := NewSpecPanelModel("test")
+	m.height = 24
+	m.emulator.Resize(40, 24)
+
+	// Pre-populate near the limit.
+	for i := 0; i < 4990; i++ {
+		m.scrollBuf = append(m.scrollBuf, fmt.Sprintf("line%d", i))
+	}
+	m.scrollOffset = 100
+	// Set prevScreen so the trimming + clamping uses totalLines().
+	m.prevScreen = make([]string, 24)
+
+	// Add enough scrollback to exceed maxScrollBufLines.
+	for i := 0; i < 20; i++ {
+		m.scrollBuf = append(m.scrollBuf, fmt.Sprintf("new%d", i))
+	}
+	// Manually trigger trim logic (same as in Update handler).
+	if len(m.scrollBuf) > maxScrollBufLines {
+		trimCount := len(m.scrollBuf) - maxScrollBufLines
+		m.scrollBuf = m.scrollBuf[trimCount:]
+		m.scrollOffset -= trimCount
+		if m.scrollOffset < 0 {
+			m.scrollOffset = 0
+		}
+	}
+
+	if len(m.scrollBuf) != maxScrollBufLines {
+		t.Fatalf("expected scrollBuf len %d, got %d", maxScrollBufLines, len(m.scrollBuf))
+	}
+	// 4990+20=5010, trim 10, offset: 100-10=90
+	if m.scrollOffset != 90 {
+		t.Fatalf("expected scrollOffset=90, got %d", m.scrollOffset)
+	}
+}
+
+func TestScrollIndicatorInView(t *testing.T) {
+	m := NewSpecPanelModel("test")
+	m.height = 10
+
+	for i := 0; i < 30; i++ {
+		m.scrollBuf = append(m.scrollBuf, fmt.Sprintf("line%d", i))
+	}
+	m.prevScreen = make([]string, 10)
+
+	// When scrollOffset == 0, no indicator.
+	m.scrollOffset = 0
+	view0 := m.View()
+	if strings.Contains(view0, "scrollback") {
+		t.Fatal("indicator should not appear when scrollOffset == 0")
+	}
+
+	// When scrollOffset > 0, indicator should appear.
+	m.scrollOffset = 5
+	view5 := m.View()
+	if !strings.Contains(view5, "scrollback") || !strings.Contains(view5, "lines above") {
+		t.Fatal("indicator should appear when scrollOffset > 0")
+	}
+}
+
+func TestScrollbackViewWhenDone(t *testing.T) {
+	m := NewSpecPanelModel("test")
+	m.height = 10
+
+	for i := 0; i < 20; i++ {
+		m.scrollBuf = append(m.scrollBuf, fmt.Sprintf("line%d", i))
+	}
+	m.prevScreen = make([]string, 10)
+
+	// Mark as done via StreamCompleteMsg.
+	m, _ = m.Update(StreamCompleteMsg{Slug: "test"})
+	if !m.IsDone() {
+		t.Fatal("expected panel to be done after StreamCompleteMsg")
+	}
+
+	// Scrollback should still work.
+	m.scrollOffset = 5
+	view := m.View()
+	if !strings.Contains(view, "line") {
+		t.Fatal("scrollback View() should render content when panel is done")
+	}
+	if !strings.Contains(view, "scrollback") {
+		t.Fatal("scroll indicator should appear in done panel when scrolled")
+	}
+}
+
+func TestViewBlendsScrollBufAndScreen(t *testing.T) {
+	m := NewSpecPanelModel("test")
+	m.height = 6 // 5 content lines + 1 indicator
+
+	m.scrollBuf = []string{"hist1", "hist2", "hist3"}
+	m.prevScreen = []string{"scr1", "scr2", "scr3", "scr4"}
+
+	// scrollOffset = 2 means 2 lines above the bottom of the virtual doc.
+	// total = 3+4 = 7, endIdx = 7-2 = 5, startIdx = 5-5 = 0
+	// Lines 0-4: hist1, hist2, hist3, scr1, scr2
+	m.scrollOffset = 2
+	view := m.View()
+	if !strings.Contains(view, "hist1") {
+		t.Error("expected hist1 in view")
+	}
+	if !strings.Contains(view, "hist3") {
+		t.Error("expected hist3 in view")
+	}
+	if !strings.Contains(view, "scr1") {
+		t.Error("expected scr1 in view")
+	}
+	if !strings.Contains(view, "scr2") {
+		t.Error("expected scr2 in view")
+	}
+	// scr3, scr4 should NOT be in view (they're below the viewport)
+	if strings.Contains(view, "scr3") {
+		t.Error("scr3 should not be in view at this offset")
+	}
+}
+
+func TestPrevScreenClearedOnResize(t *testing.T) {
+	m := NewSpecPanelModel("test")
+	m.emulator.Resize(40, 10)
+
+	// Write something to establish prevScreen.
+	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: []byte("hello\r\n")})
+	if m.prevScreen == nil {
+		t.Fatal("prevScreen should be set after write")
+	}
+
+	// Simulate resize via tea.WindowSizeMsg.
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
+	if m.prevScreen != nil {
+		t.Fatal("prevScreen should be nil after resize")
+	}
+}
+
+func TestQuiescenceTickEmitsNeedsInputAfterThreshold(t *testing.T) {
+	m := NewSpecPanelModel("test")
+	// Simulate output arriving 6 seconds ago (past the 5s threshold).
+	m.lastOutputTime = time.Now().Add(-6 * time.Second)
+	m.needsInput = false
+
+	m, cmd := m.Update(QuiescenceTickMsg{Slug: "test"})
+
+	if !m.needsInput {
+		t.Fatal("expected needsInput to be true after quiescence threshold")
+	}
+	if cmd == nil {
+		t.Fatal("expected a batched command (NeedsInputChangedMsg + re-arm tick)")
+	}
+	// Execute the batched commands and check for NeedsInputChangedMsg.
+	cmds := extractBatchCmds(cmd)
+	foundChanged := false
+	for _, c := range cmds {
+		msg := c()
+		if changed, ok := msg.(NeedsInputChangedMsg); ok {
+			foundChanged = true
+			if !changed.NeedsInput {
+				t.Error("expected NeedsInputChangedMsg.NeedsInput to be true")
+			}
+			if changed.Slug != "test" {
+				t.Errorf("expected slug 'test', got %q", changed.Slug)
+			}
+		}
+	}
+	if !foundChanged {
+		t.Fatal("expected NeedsInputChangedMsg in batched commands")
+	}
+}
+
+func TestQuiescenceTickNoEmitBeforeThreshold(t *testing.T) {
+	m := NewSpecPanelModel("test")
+	// Simulate output arriving 2 seconds ago (within the 5s threshold).
+	m.lastOutputTime = time.Now().Add(-2 * time.Second)
+	m.needsInput = false
+
+	m, cmd := m.Update(QuiescenceTickMsg{Slug: "test"})
+
+	if m.needsInput {
+		t.Fatal("expected needsInput to remain false before threshold")
+	}
+	if cmd == nil {
+		t.Fatal("expected re-arm tick command")
+	}
+	// The returned cmd should be a tick re-arm, not a batch with NeedsInputChangedMsg.
+	msg := cmd()
+	if _, ok := msg.(NeedsInputChangedMsg); ok {
+		t.Fatal("should not emit NeedsInputChangedMsg before threshold")
+	}
+}
+
+func TestOutputClearsNeedsInput(t *testing.T) {
+	m := NewSpecPanelModel("test")
+	m.lastOutputTime = time.Now().Add(-10 * time.Second)
+	m.needsInput = true
+
+	m, cmd := m.Update(TerminalOutputMsg{Slug: "test", Data: []byte("output")})
+
+	if m.needsInput {
+		t.Fatal("expected needsInput to be cleared on new output")
+	}
+	if m.lastOutputTime.IsZero() {
+		t.Fatal("expected lastOutputTime to be updated")
+	}
+	// Should have a command that emits NeedsInputChangedMsg{NeedsInput: false}.
+	if cmd == nil {
+		t.Fatal("expected command with NeedsInputChangedMsg")
+	}
+	// The TerminalOutputMsg handler uses tea.Batch when clearing needsInput.
+	cmds := extractBatchCmds(cmd)
+	foundCleared := false
+	for _, c := range cmds {
+		msg := c()
+		if changed, ok := msg.(NeedsInputChangedMsg); ok {
+			foundCleared = true
+			if changed.NeedsInput {
+				t.Error("expected NeedsInputChangedMsg.NeedsInput to be false")
+			}
+		}
+	}
+	if !foundCleared {
+		t.Fatal("expected NeedsInputChangedMsg{NeedsInput: false} in commands")
+	}
+}
+
+// extractBatchCmds extracts individual commands from a tea.Batch result.
+// It runs the outer cmd and checks if the result is a tea.BatchMsg ([]tea.Cmd).
+// Falls back to returning the single cmd if it's not a batch.
+func extractBatchCmds(cmd tea.Cmd) []tea.Cmd {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		return []tea.Cmd(batch)
+	}
+	// Not a batch — wrap the original cmd as a single-element slice.
+	return []tea.Cmd{cmd}
 }

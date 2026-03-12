@@ -861,7 +861,29 @@ class Searcher:
                     parts.append('"' + st.replace('"', '""') + '"')
         return " ".join(parts)
 
-    def _log_search(self, query: str, source_type: str | None, result_count: int, elapsed_ms: float, caller: str | None = None) -> None:
+    @classmethod
+    def _prepare_or_query(cls, query: str) -> str:
+        """Prepare a user query for FTS5 with OR-joined tokens.
+
+        Same hyphen-expansion and quoting as _prepare_query, but tokens are
+        joined with OR so any single matching term produces a result. Used for
+        fallback when an AND query returns zero results.
+        """
+        query = query.strip()
+        if not query:
+            return query
+        if cls._FTS5_OPERATORS.search(query):
+            return query
+        tokens = query.split()
+        parts: list[str] = []
+        for token in tokens:
+            sub_tokens = token.split("-")
+            for st in sub_tokens:
+                if st:  # skip empty from leading/trailing hyphens
+                    parts.append('"' + st.replace('"', '""') + '"')
+        return " OR ".join(parts)
+
+    def _log_search(self, query: str, source_type: str | None, result_count: int, elapsed_ms: float, caller: str | None = None, or_fallback: bool = False) -> None:
         """Append a JSONL record to _meta/retrieval-log.jsonl."""
         meta_dir = os.path.join(self.knowledge_dir, "_meta")
         log_path = os.path.join(meta_dir, "retrieval-log.jsonl")
@@ -875,6 +897,8 @@ class Searcher:
         }
         if caller:
             record["caller"] = caller
+        if or_fallback:
+            record["or_fallback"] = True
         try:
             os.makedirs(meta_dir, exist_ok=True)
             with open(log_path, "a", encoding="utf-8") as f:
@@ -973,6 +997,31 @@ class Searcher:
             else:
                 raise
 
+        # OR-fallback: if AND query returned nothing and query has 2+ tokens,
+        # retry with OR-joined tokens so partial matches surface.
+        or_fallback = False
+        if not rows and len(query.split()) >= 2:
+            or_prepared = self._prepare_or_query(query)
+            or_params: list = [or_prepared] + filter_params + [limit * 3]
+            conn2 = sqlite3.connect(self.db_path)
+            conn2.row_factory = sqlite3.Row
+            try:
+                rows = conn2.execute(
+                    f"""
+                    SELECT {select_cols}
+                    FROM entries
+                    WHERE entries MATCH ?{extra_filters}
+                    ORDER BY {order_expr}
+                    LIMIT ?
+                    """,
+                    or_params,
+                ).fetchall()
+                or_fallback = True
+            except sqlite3.OperationalError:
+                rows = []
+            finally:
+                conn2.close()
+
         results = []
         for row in rows:
             score = row["rank"]
@@ -992,7 +1041,7 @@ class Searcher:
             except ValueError:
                 rel_path = abs_path
 
-            results.append({
+            result = {
                 "heading": row["heading"],
                 "file_path": rel_path,
                 "source_type": row["source_type"],
@@ -1002,7 +1051,10 @@ class Searcher:
                 "structural_importance": row["structural_importance"] or 0.0,
                 "score": round(score, 4),
                 "snippet": snippet,
-            })
+            }
+            if or_fallback:
+                result["or_fallback"] = True
+            results.append(result)
 
             if len(results) >= limit:
                 break
@@ -1010,7 +1062,7 @@ class Searcher:
         conn.close()
 
         elapsed_ms = (time.time() - search_start) * 1000
-        self._log_search(query, source_type, len(results), elapsed_ms, caller=caller)
+        self._log_search(query, source_type, len(results), elapsed_ms, caller=caller, or_fallback=or_fallback)
 
         return results
 

@@ -81,7 +81,7 @@ if [[ $USE_FTS -eq 0 ]]; then
 fi
 
 # --- Build search command ---
-SEARCH_ARGS=("search" "$KNOWLEDGE_DIR" "$QUERY" "--limit" "$LIMIT" "--json")
+SEARCH_ARGS=("search" "$KNOWLEDGE_DIR" "$QUERY" "--limit" "$LIMIT" "--json" "--caller" "prefetch")
 if [[ "$TYPE" != "all" ]]; then
   SEARCH_ARGS+=("--type" "$TYPE")
 fi

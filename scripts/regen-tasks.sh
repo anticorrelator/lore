@@ -48,5 +48,8 @@ echo "[work] Regenerated $TASK_COUNT tasks across $PHASE_COUNT phases. New check
 # Update _meta.json timestamp
 update_meta_timestamp "$WORK_ITEM_DIR"
 
-# Update work index
-bash "$SCRIPT_DIR/heal-work.sh"
+# Update work index unconditionally so _index.json mtime always changes.
+# heal-work.sh only rebuilds _index.json when item count changes, which means
+# the TUI (which polls _index.json mtime to detect changes) would miss a
+# tasks.json appearing for an existing item and keep showing "needs tasks".
+bash "$SCRIPT_DIR/update-work-index.sh" >/dev/null

@@ -2470,3 +2470,94 @@ class TestCombinedBoostAndExclusion:
             assert "_archive" not in r["file_path"], (
                 f"Archived work should be excluded by default: {r['file_path']}"
             )
+
+
+# ---------------------------------------------------------------------------
+# OR-Fallback Tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def or_fallback_dir(tmp_path):
+    """Knowledge directory where 6 unique terms exist in separate entries,
+    so no single entry contains all 6 terms simultaneously."""
+    kd = tmp_path / "or_fallback_knowledge"
+    kd.mkdir()
+
+    arch_dir = kd / "architecture"
+    arch_dir.mkdir()
+
+    # Entry 1: contains "alpha" and "beta"
+    (arch_dir / "alpha-entry.md").write_text(
+        "# Alpha Entry\n"
+        "This entry discusses alpha and beta concepts in system design.\n"
+        "<!-- learned: 2025-01-01 | confidence: high -->\n",
+        encoding="utf-8",
+    )
+
+    # Entry 2: contains "gamma" and "delta"
+    (arch_dir / "gamma-entry.md").write_text(
+        "# Gamma Entry\n"
+        "This entry covers gamma and delta behavior in pipelines.\n"
+        "<!-- learned: 2025-01-02 | confidence: high -->\n",
+        encoding="utf-8",
+    )
+
+    # Entry 3: contains "epsilon" and "zeta"
+    (arch_dir / "epsilon-entry.md").write_text(
+        "# Epsilon Entry\n"
+        "This entry explains epsilon and zeta patterns.\n"
+        "<!-- learned: 2025-01-03 | confidence: high -->\n",
+        encoding="utf-8",
+    )
+
+    return kd
+
+
+class TestOrFallback:
+    def test_six_word_query_and_returns_zero_or_returns_results(self, or_fallback_dir):
+        """6-word query where individual terms exist in separate entries:
+        AND returns zero, OR fallback returns ranked results."""
+        searcher = Searcher(str(or_fallback_dir))
+        # Each pair of terms exists in one entry, but no entry has all 6
+        results = searcher.search("alpha beta gamma delta epsilon zeta")
+        assert len(results) > 0, "OR fallback should return results when AND returns zero"
+        for r in results:
+            assert r.get("or_fallback") is True, (
+                f"Each result should carry or_fallback=True, got: {r}"
+            )
+
+    def test_two_word_query_and_succeeds_no_fallback(self, or_fallback_dir):
+        """2-word query where both terms co-exist in one entry:
+        AND succeeds, OR fallback does NOT fire."""
+        searcher = Searcher(str(or_fallback_dir))
+        # "alpha" and "beta" both exist in alpha-entry.md
+        results = searcher.search("alpha beta")
+        assert len(results) > 0, "AND query should return results when both terms co-exist"
+        for r in results:
+            assert "or_fallback" not in r, (
+                f"or_fallback should not be set when AND query succeeds, got: {r}"
+            )
+
+    def test_single_word_query_no_fallback(self, or_fallback_dir):
+        """Single-word query: no fallback triggered, results returned normally."""
+        searcher = Searcher(str(or_fallback_dir))
+        results = searcher.search("gamma")
+        assert len(results) > 0, "Single-word query should return results"
+        for r in results:
+            assert "or_fallback" not in r, (
+                f"or_fallback should not be set for single-word query, got: {r}"
+            )
+
+    def test_or_fallback_field_in_retrieval_log(self, or_fallback_dir):
+        """When OR fallback fires, or_fallback=True should appear in retrieval log."""
+        searcher = Searcher(str(or_fallback_dir))
+        # Trigger OR fallback with a 6-word query that can't be satisfied by AND
+        searcher.search("alpha beta gamma delta epsilon zeta")
+
+        log_path = os.path.join(str(or_fallback_dir), "_meta", "retrieval-log.jsonl")
+        assert os.path.exists(log_path), "Retrieval log should exist after search"
+        with open(log_path, encoding="utf-8") as f:
+            record = json.loads(f.readline())
+        assert record.get("or_fallback") is True, (
+            f"Log record should have or_fallback=True when fallback fires, got: {record}"
+        )

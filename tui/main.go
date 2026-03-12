@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -94,20 +96,6 @@ type aiTickMsg struct{}
 
 func aiTick() tea.Cmd {
 	return tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return aiTickMsg{} })
-}
-
-func enableKittyKeyboard() tea.Cmd {
-	return func() tea.Msg {
-		os.Stdout.WriteString("\x1b[>1u")
-		return nil
-	}
-}
-
-func disableKittyKeyboard() tea.Cmd {
-	return func() tea.Msg {
-		os.Stdout.WriteString("\x1b[<u")
-		return nil
-	}
 }
 
 // popupSearchResultMsg carries results from a debounced popup search subprocess.
@@ -207,9 +195,11 @@ func readPlanContent(workDir, slug string) tea.Cmd {
 }
 
 // runWorkAI runs lore work ai headlessly and returns workAIFinishedMsg when done.
-func runWorkAI(prompt string) tea.Cmd {
+func runWorkAI(ctx context.Context, prompt string) tea.Cmd {
 	return func() tea.Msg {
-		exec.Command("lore", "work", "ai", prompt).Run()
+		cmd := exec.CommandContext(ctx, "lore", "work", "ai", prompt)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Run()
 		return workAIFinishedMsg{}
 	}
 }
@@ -221,7 +211,9 @@ func runArchive(slug string, unarchive bool) tea.Cmd {
 		if unarchive {
 			subcmd = "unarchive"
 		}
-		err := exec.Command("lore", "work", subcmd, slug).Run()
+		cmd := exec.Command("lore", "work", subcmd, slug)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		err := cmd.Run()
 		return work.ArchiveFinishedMsg{Err: err}
 	}
 }
@@ -244,6 +236,8 @@ type model struct {
 	aiLoading     bool
 	aiDots        int
 	aiInput       textarea.Model
+	aiCtx         context.Context
+	aiCancel      context.CancelFunc
 
 	// specPanels holds one SpecPanelModel per work item slug that is currently
 	// speccing (or has just completed). The spec panel for the currently
@@ -302,6 +296,19 @@ func (m *model) setSpecPanel(slug string, panel work.SpecPanelModel) {
 	m.specPanels[slug] = panel
 }
 
+// cleanupAllSubprocesses cancels any running AI command, cleans up all spec
+// panels, and clears session locks. Call before quitting.
+func (m *model) cleanupAllSubprocesses() {
+	if m.aiCancel != nil {
+		m.aiCancel()
+		m.aiCancel = nil
+	}
+	for slug, panel := range m.specPanels {
+		m.specPanels[slug] = panel.Cleanup()
+		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
+	}
+}
+
 type workItemsLoadedMsg struct {
 	items []work.WorkItem
 	err   error
@@ -310,6 +317,18 @@ type workItemsLoadedMsg struct {
 type prStatusLoadedMsg struct {
 	statuses map[string]gh.PRStatus
 	err      error
+}
+
+// activeSessionsCheckedMsg carries all non-stale sessions discovered on disk.
+type activeSessionsCheckedMsg struct {
+	sessions map[string]work.SessionInfo
+}
+
+// listActiveSessions returns a Cmd that reads all session lock files and sends activeSessionsCheckedMsg.
+func listActiveSessions(workDir string) tea.Cmd {
+	return func() tea.Msg {
+		return activeSessionsCheckedMsg{sessions: work.ListActiveSessions(workDir)}
+	}
 }
 
 func loadWorkItems(workDir string) tea.Cmd {
@@ -384,7 +403,16 @@ func (m model) Init() tea.Cmd {
 	)
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
+	defer func() {
+		if r := recover(); r != nil {
+			crashLog := filepath.Join(os.TempDir(), "lore-tui-crash.log")
+			stack := fmt.Sprintf("panic in Update(%T): %v\n\n%s", msg, r, debug.Stack())
+			_ = os.WriteFile(crashLog, []byte(stack), 0644)
+			panic(r)
+		}
+	}()
+
 	// Help modal: intercept all keys; Esc or ? closes it.
 	if m.showHelp {
 		if km, ok := msg.(tea.KeyMsg); ok {
@@ -400,6 +428,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.specConfirmActive {
 		if km, ok := msg.(tea.KeyMsg); ok {
 			switch km.String() {
+			case "alt+enter":
+				m.specConfirmInput.InsertRune('\n')
+				return m, nil
 			case "enter":
 				extraContext := strings.TrimSpace(m.specConfirmInput.Value())
 				m.specConfirmActive = false
@@ -441,6 +472,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.aiInputActive {
 		if km, ok := msg.(tea.KeyMsg); ok {
 			switch km.String() {
+			case "alt+enter":
+				m.aiInput.InsertRune('\n')
+				return m, nil
 			case "enter":
 				prompt := strings.TrimSpace(m.aiInput.Value())
 				m.aiInputActive = false
@@ -449,7 +483,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.aiLoading = true
 				m.aiDots = 0
-				return m, tea.Batch(runWorkAI(prompt), aiTick())
+				ctx, cancel := context.WithCancel(context.Background())
+				m.aiCtx = ctx
+				m.aiCancel = cancel
+				return m, tea.Batch(runWorkAI(ctx, prompt), aiTick())
 			case "esc", "ctrl+c":
 				m.aiInputActive = false
 				return m, nil
@@ -495,6 +532,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case workAIFinishedMsg:
 		m.aiLoading = false
+		m.aiCancel = nil
 		// Reload the work item list to pick up newly created items.
 		return m, loadWorkItems(m.config.WorkDir)
 
@@ -520,6 +558,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, checkPlanMtime(m.config.WorkDir, slug))
 			cmds = append(cmds, checkDetailMtime(m.config.WorkDir, slug))
 		}
+		// Touch session files for locally active slugs and discover external sessions.
+		for slug := range m.specPanels {
+			work.TouchSession(m.config.WorkDir, slug) //nolint:errcheck
+		}
+		cmds = append(cmds, listActiveSessions(m.config.WorkDir))
 		return m, tea.Batch(cmds...)
 
 	case indexMtimeCheckedMsg:
@@ -534,6 +577,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastIndexMtime = msg.mtime
 			return m, loadWorkItems(m.config.WorkDir)
 		}
+		return m, nil
+
+	case activeSessionsCheckedMsg:
+		// Filter out locally owned sessions — only external ones matter for the indicator.
+		external := make(map[string]bool)
+		myPID := os.Getpid()
+		for slug, info := range msg.sessions {
+			if info.PID != myPID {
+				external[slug] = true
+			}
+		}
+		m.list, _ = m.list.Update(work.ExternalSessionMsg{Slugs: external})
+		// Tell the detail view whether the currently displayed slug has an external session.
+		currentSlug := m.list.CurrentSlug()
+		m.detail, _ = m.detail.Update(work.DetailExternalSessionMsg{Active: external[currentSlug]})
 		return m, nil
 
 	case planMtimeCheckedMsg:
@@ -667,22 +725,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
-			// In terminal mode, ctrl+c terminates the terminal panel only.
+			// In terminal mode, ctrl+c terminates the terminal panel only,
+			// but still cancel any background AI subprocess.
 			if m.state == stateWork && m.terminalMode {
+				if m.aiCancel != nil {
+					m.aiCancel()
+					m.aiCancel = nil
+				}
 				slug := m.list.CurrentSlug()
 				return m, func() tea.Msg { return work.TerminalTerminateMsg{Slug: slug} }
 			}
-			for slug := range m.specPanels {
-				work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
-			}
+			m.cleanupAllSubprocesses()
 			return m, tea.Quit
 		case "ctrl+d":
-			if !(m.state == stateWork && m.terminalMode) {
-				for slug := range m.specPanels {
-					work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
-				}
-				return m, tea.Quit
-			}
+			m.cleanupAllSubprocesses()
+			return m, tea.Quit
 		case "?":
 			if !m.terminalMode {
 				m.showHelp = true
@@ -690,9 +747,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "q":
 			if m.state == stateWork && !m.terminalMode {
-				for slug := range m.specPanels {
-					work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
-				}
+				m.cleanupAllSubprocesses()
 				return m, tea.Quit
 			}
 		case "N":
@@ -804,11 +859,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state == stateWork && m.focusedPanel == panelRight {
 				if m.terminalMode {
 					m.terminalMode = false
-					return m, disableKittyKeyboard()
+					return m, nil
 				}
-				if panel, ok := m.currentSpecPanel(); ok && panel.Ptmx() != nil {
+				if panel, ok := m.currentSpecPanel(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
 					m.terminalMode = true
-					return m, tea.Batch(tea.EnableMouseCellMotion, enableKittyKeyboard())
+					return m, tea.EnableMouseCellMotion
 				}
 			}
 		case "tab":
@@ -958,7 +1013,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.hasSpecPanel(msg.Slug) {
 			m.terminalMode = true
 			m.focusedPanel = panelRight
-			return m, tea.Batch(tea.EnableMouseCellMotion, enableKittyKeyboard())
+			return m, tea.EnableMouseCellMotion
 		}
 		ta := textarea.New()
 		ta.Placeholder = ""
@@ -1002,7 +1057,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// PTY subprocess launched — attach PTY to the pre-created spec panel and start polling.
 		slug := msg.Slug
 		var panel work.SpecPanelModel
-		if existing, ok := m.specPanels[slug]; ok {
+		if existing, ok := m.specPanels[slug]; ok && !existing.IsDone() {
 			panel = existing
 		} else {
 			panel = work.NewSpecPanelModel(slug)
@@ -1022,53 +1077,76 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.terminalMode = true
 			m.focusedPanel = panelRight
-			return m, tea.Batch(cmd, tea.EnableMouseCellMotion, enableKittyKeyboard())
+			return m, tea.Batch(cmd, tea.EnableMouseCellMotion)
 		}
 		return m, cmd
 
 	case work.TerminalOutputMsg:
 		// Route output to the correct spec panel, then continue polling.
+		// The panel may return a NeedsInputChangedMsg cmd if output clears quiescence.
 		slug := msg.Slug
 		if m.specPanels != nil {
 			if panel, ok := m.specPanels[slug]; ok {
-				sm, _ := panel.Update(msg)
+				sm, panelCmd := panel.Update(msg)
 				m.specPanels[slug] = sm
-				return m, work.PollTerminalCmd(slug, sm.OutputChan())
+				// Only re-arm polling if the panel hasn't completed — re-arming
+				// on a closed channel creates a tight StreamCompleteMsg loop.
+				var cmds []tea.Cmd
+				if !sm.IsDone() {
+					cmds = append(cmds, work.PollTerminalCmd(slug, sm.OutputChan()))
+				}
+				if panelCmd != nil {
+					cmds = append(cmds, panelCmd)
+				}
+				if len(cmds) > 0 {
+					return m, tea.Batch(cmds...)
+				}
+				return m, nil
 			}
 		}
 		return m, nil
 
-	case work.StreamCompleteMsg:
-		// PTY channel closed (subprocess exited normally). Auto-dismiss the spec
-		// panel so the detail view expands and shows the freshly written plan.md.
+	case work.QuiescenceTickMsg:
+		// Route quiescence tick to the correct spec panel.
 		slug := msg.Slug
-		wasSpec := false
 		if m.specPanels != nil {
 			if panel, ok := m.specPanels[slug]; ok {
-				panel.Cleanup()
-				delete(m.specPanels, slug)
-				if m.terminalMode && m.list.CurrentSlug() == slug {
-					m.focusedPanel = panelRight
-					wasSpec = true
-				}
+				sm, cmd := panel.Update(msg)
+				m.specPanels[slug] = sm
+				return m, cmd
 			}
 		}
-		if m.list.CurrentSlug() == slug {
-			m.terminalMode = false
+		return m, nil
+
+	case work.NeedsInputChangedMsg:
+		// Spec panel's quiescence state changed — forward to list for indicator update.
+		m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: msg.Slug, NeedsInput: msg.NeedsInput})
+		return m, nil
+
+	case work.StreamCompleteMsg:
+		// PTY channel closed (subprocess exited normally). Clean up PTY resources
+		// but keep the panel in the map so scrollback history remains accessible.
+		slug := msg.Slug
+		if m.specPanels != nil {
+			if panel, ok := m.specPanels[slug]; ok {
+				sm := panel.Cleanup()
+				sm, _ = sm.Update(msg) // sets done = true
+				m.specPanels[slug] = sm
+			}
 		}
+		// Do NOT force m.terminalMode = false — if we're in terminal mode for
+		// this slug, keep it so the user can scroll through the output history.
 		m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
-		// Restore detail to full height now that the spec panel is gone.
+		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
+		// Pre-size detail view and invalidate cache so it's ready when the user
+		// exits terminal mode (or immediately if not in terminal mode).
 		if m.list.CurrentSlug() == slug {
 			m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-			// Invalidate cache so reload picks up plan.md written by spec.
 			if m.detailCache != nil {
 				delete(m.detailCache, slug)
 			}
 		}
 		var cmds []tea.Cmd
-		if wasSpec {
-			cmds = append(cmds, tea.EnableMouseCellMotion, disableKittyKeyboard())
-		}
 		cmds = append(cmds, loadWorkItems(m.config.WorkDir))
 		if m.list.CurrentSlug() == slug {
 			cmds = append(cmds, m.detail.Init()) // reload detail to show updated plan.md
@@ -1098,7 +1176,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
 		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
 		if wasSpec {
-			return m, tea.Batch(tea.EnableMouseCellMotion, disableKittyKeyboard(), loadWorkItems(m.config.WorkDir))
+			return m, tea.Batch(tea.EnableMouseCellMotion, loadWorkItems(m.config.WorkDir))
 		}
 		return m, loadWorkItems(m.config.WorkDir)
 
@@ -1106,7 +1184,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// User pressed Esc from terminal focus — return to list view.
 		m.focusedPanel = panelLeft
 		m.terminalMode = false
-		return m, tea.Batch(tea.EnableMouseCellMotion, disableKittyKeyboard())
+		return m, tea.EnableMouseCellMotion
 
 	case work.TerminalTerminateMsg:
 		// User killed the subprocess (Ctrl+\\) — cleanup and remove the panel.
@@ -1125,7 +1203,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
 		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
 		if wasSpec {
-			return m, tea.Batch(tea.EnableMouseCellMotion, disableKittyKeyboard(), loadWorkItems(m.config.WorkDir))
+			return m, tea.Batch(tea.EnableMouseCellMotion, loadWorkItems(m.config.WorkDir))
 		}
 		return m, loadWorkItems(m.config.WorkDir)
 
@@ -1214,7 +1292,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.terminalMode = false
 			dm, cmd := m.detail.Update(msg)
 			m.detail = dm
-			return m, tea.Batch(cmd, disableKittyKeyboard())
+			return m, cmd
 		}
 		if m.focusedPanel == panelLeft {
 			prevSlug := m.list.CurrentSlug()
@@ -1406,8 +1484,14 @@ func (m model) viewSplitPane() string {
 		} else {
 			detailS, terminalS = activeS, inactiveS
 		}
-		modeAnnot := sepS.Render("ctrl+t  ") + detailS.Render("detail") + sepS.Render(" · ") + terminalS.Render("terminal")
-		modeAnnotW := 8 + 6 + 3 + 8 // "ctrl+t  " + "detail" + " · " + "terminal"
+		termLabel := "terminal"
+		termLabelW := 8
+		if currentSpec.IsDone() {
+			termLabel = "terminal (done)"
+			termLabelW = 15
+		}
+		modeAnnot := sepS.Render("ctrl+t  ") + detailS.Render("detail") + sepS.Render(" · ") + terminalS.Render(termLabel)
+		modeAnnotW := 8 + 6 + 3 + termLabelW // "ctrl+t  " + "detail" + " · " + termLabel
 		rightBorderTitle = renderBorderTitleWithAnnot(rightTitle, rightInner, rightTitleS, rightBS, modeAnnot, modeAnnotW)
 	} else {
 		rightBorderTitle = renderBorderTitle(rightTitle, rightInner, rightTitleS, rightBS)
@@ -1633,8 +1717,14 @@ func (m model) viewSplitPaneTopBottom() string {
 		} else {
 			btDetailS, btTerminalS = btActiveS, btInactiveS
 		}
-		btModeAnnot := btSepS.Render("ctrl+t  ") + btDetailS.Render("detail") + btSepS.Render(" · ") + btTerminalS.Render("terminal")
-		btModeAnnotW := 8 + 6 + 3 + 8 // "ctrl+t  " + "detail" + " · " + "terminal"
+		btTermLabel := "terminal"
+		btTermLabelW := 8
+		if currentSpecTB.IsDone() {
+			btTermLabel = "terminal (done)"
+			btTermLabelW = 15
+		}
+		btModeAnnot := btSepS.Render("ctrl+t  ") + btDetailS.Render("detail") + btSepS.Render(" · ") + btTerminalS.Render(btTermLabel)
+		btModeAnnotW := 8 + 6 + 3 + btTermLabelW // "ctrl+t  " + "detail" + " · " + btTermLabel
 		bottomBorderTitle = renderBorderTitleWithAnnot(bottomTitle, panelW, bottomTitleS, bottomBS, btModeAnnot, btModeAnnotW)
 	} else {
 		bottomBorderTitle = renderBorderTitle(bottomTitle, panelW, bottomTitleS, bottomBS)
@@ -1762,7 +1852,7 @@ func (m model) renderSpecConfirmModal() string {
 		Render(m.specConfirmInput.View())
 	hints := s.key.Render("Enter") + " " + s.dim.Render("start") +
 		s.sep.Render("  ·  ") +
-		s.key.Render("Shift+Enter") + " " + s.dim.Render("newline") +
+		s.key.Render("Alt+Enter") + " " + s.dim.Render("newline") +
 		s.sep.Render("  ·  ") +
 		s.key.Render("Esc") + " " + s.dim.Render("cancel")
 
@@ -1802,7 +1892,7 @@ func (m model) renderAIModal(_ string) string {
 		Render(m.aiInput.View())
 	hints := s.key.Render("Enter") + " " + s.dim.Render("run") +
 		s.sep.Render("  ·  ") +
-		s.key.Render("Shift+Enter") + " " + s.dim.Render("newline") +
+		s.key.Render("Alt+Enter") + " " + s.dim.Render("newline") +
 		s.sep.Render("  ·  ") +
 		s.key.Render("Esc") + " " + s.dim.Render("cancel")
 	body := "\n" + s.dim.Render(" describe what work items to create:") +
@@ -1938,6 +2028,17 @@ func (m model) renderStatusBar(width int) string {
 }
 
 func main() {
+	// Capture panics to a crash log for debugging.
+	crashLog := filepath.Join(os.TempDir(), "lore-tui-crash.log")
+	defer func() {
+		if r := recover(); r != nil {
+			stack := fmt.Sprintf("panic: %v\n\n%s", r, debug.Stack())
+			_ = os.WriteFile(crashLog, []byte(stack), 0644)
+			fmt.Fprintf(os.Stderr, "TUI crashed. Stack trace written to %s\n", crashLog)
+			os.Exit(1)
+		}
+	}()
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

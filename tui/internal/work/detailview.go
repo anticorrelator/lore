@@ -38,6 +38,11 @@ type DetailLoadedMsg struct {
 // BackToListMsg is sent when the user exits the detail view.
 type BackToListMsg struct{}
 
+// DetailExternalSessionMsg tells the detail view whether an external session is active.
+type DetailExternalSessionMsg struct {
+	Active bool
+}
+
 // DetailPlanRefreshedMsg carries freshly-read plan.md content for an in-place
 // update that preserves the active tab and scroll position.
 type DetailPlanRefreshedMsg struct {
@@ -63,6 +68,8 @@ type DetailModel struct {
 	// Used for mouse hit-testing (tab bar clicks).
 	contentStartY int
 	contentStartX int
+
+	externalSession bool // true when another TUI instance has an active session on this slug
 
 	planTab       PlanTabModel
 	notesTab      NotesTabModel
@@ -107,6 +114,10 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 			m.extraViewports[i].Width = m.contentWidth()
 			m.extraViewports[i].Height = m.contentHeight()
 		}
+		return m, nil
+
+	case DetailExternalSessionMsg:
+		m.externalSession = msg.Active
 		return m, nil
 
 	case DetailLoadedMsg:
@@ -379,6 +390,12 @@ func (m DetailModel) View() string {
 	}
 
 	var b strings.Builder
+
+	if m.externalSession {
+		banner := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  ◆ active session in another window")
+		b.WriteString(banner)
+		b.WriteString("\n")
+	}
 
 	// Tab bar (title is in the box border — no need to repeat it here)
 	b.WriteString("\n")

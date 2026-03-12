@@ -21,6 +21,8 @@ lore work create --title "<name>" [--issue "<value>"] [--pr "<value>"]
 ```
 **Before running:** If you are deriving the name, keep it concise — 3–6 words that identify the goal, not a sentence. The slug is generated directly from the name (stopwords stripped, kebab-cased, capped at 60 chars). A long or verbose name produces a long slug that is hard to type and read. Good: `"TUI Mouse Click Focus"`. Bad: `"Add Mouse Click To Focus Panel In TUI When User Clicks"`.
 
+**Dedup:** The script rejects creation if the new slug overlaps with an existing slug (substring match). If this happens, use the existing item — do NOT retry with a different name for the same topic.
+
 Pass `--issue` and `--pr` only when provided by the user. Show the script output. If it exits non-zero, show the error.
 
 ---

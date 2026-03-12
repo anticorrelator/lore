@@ -5,16 +5,39 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
-	"regexp"
-	"strconv"
+	"runtime/debug"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 )
+
+// NeedsInputChangedMsg is sent when a spec panel's needsInput state changes.
+type NeedsInputChangedMsg struct {
+	Slug       string
+	NeedsInput bool
+}
+
+// QuiescenceTickMsg is the periodic tick used to check for output quiescence.
+type QuiescenceTickMsg struct {
+	Slug string
+}
+
+// quiescenceThreshold is how long after the last PTY output before we consider
+// the session idle and potentially waiting for user input.
+const quiescenceThreshold = 5 * time.Second
+
+// QuiescenceTickCmd returns a tea.Cmd that fires a QuiescenceTickMsg after 1 second.
+func QuiescenceTickCmd(slug string) tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return QuiescenceTickMsg{Slug: slug}
+	})
+}
 
 // StreamCompleteMsg is sent when the subprocess stream channel is closed (process exited).
 type StreamCompleteMsg struct {
@@ -55,113 +78,101 @@ type TerminalTerminateMsg struct {
 
 const maxScrollBufLines = 5000
 
-// ansiStripRE matches ANSI/VT escape sequences for removal from scrollback text.
-var ansiStripRE = regexp.MustCompile(`\x1b(?:\[M[\x00-\xff]{3}|\[[0-9;?]*[\x40-\x7e]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[^[\]])`)
-
-// cursorUpRE matches CSI cursor-up sequences (ESC [ N A) used by animated TUI
-// output (e.g., Ink/React-based spinners) to re-render lines in place.
-var cursorUpRE = regexp.MustCompile(`\x1b\[(\d*)A`)
-
-func stripAnsi(s string) string {
-	s = ansiStripRE.ReplaceAllString(s, "")
-	// \r\n → \n (Windows line endings).
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	// Standalone \r means "return to start of current line" — within each
-	// \n-delimited segment only keep content after the last \r, so spinner
-	// overwrite-frames collapse to their final state rather than each becoming
-	// a separate scrollback line.
-	segs := strings.Split(s, "\n")
-	for i, seg := range segs {
-		if idx := strings.LastIndex(seg, "\r"); idx >= 0 {
-			segs[i] = seg[idx+1:]
-		}
-	}
-	s = strings.Join(segs, "\n")
-	// Remove any ESC bytes left by chunk-boundary splits (partial sequences the
-	// regex couldn't match). A bare \x1b in plain-text output corrupts the outer
-	// terminal's rendering state when the scrollback view is displayed.
-	s = strings.ReplaceAll(s, "\x1b", "")
-	return s
+// writeCrashLog writes a panic stack trace to a temp file for post-mortem debugging.
+func writeCrashLog(label string, r interface{}) {
+	crashLog := filepath.Join(os.TempDir(), "lore-tui-crash.log")
+	stack := fmt.Sprintf("panic in %s: %v\n\n%s", label, r, debug.Stack())
+	_ = os.WriteFile(crashLog, []byte(stack), 0644)
 }
 
-// countCursorUp returns the total cursor-up line count from all ESC[NA sequences
-// in s. Used before stripping to know how many scrollBuf entries to pop before
-// appending the re-rendered lines, so animated multi-line output (e.g., a
-// thinking blurb that rewrites itself every 100ms) doesn't inflate the scrollback.
-func countCursorUp(s string) int {
-	total := 0
-	for _, m := range cursorUpRE.FindAllStringSubmatch(s, -1) {
-		n := 1
-		if m[1] != "" {
-			if v, err := strconv.Atoi(m[1]); err == nil && v > 0 {
-				n = v
+// readScreenLines reads the current emulator screen as plain text lines,
+// one string per row, with trailing spaces trimmed.
+func readScreenLines(emu *vt.Emulator) []string {
+	h := emu.Height()
+	w := emu.Width()
+	lines := make([]string, h)
+	for y := 0; y < h; y++ {
+		var b strings.Builder
+		for x := 0; x < w; x++ {
+			cell := emu.CellAt(x, y)
+			if cell == nil || cell.Width == 0 {
+				// Zero-width cells are placeholders for wide chars — skip.
+				continue
 			}
+			b.WriteString(cell.Content)
 		}
-		total += n
+		lines[y] = strings.TrimRight(b.String(), " ")
 	}
-	return total
+	return lines
 }
 
-// trimIncompleteEscape splits s into a safe prefix and a trailing incomplete
-// escape sequence (if any). It scans the last 8 bytes for ESC (\x1b). If found
-// and the bytes after it don't form a complete sequence (no terminal letter),
-// the incomplete tail is returned separately so the caller can buffer it for
-// the next chunk.
-func trimIncompleteEscape(s string) (safe, tail string) {
-	n := len(s)
-	if n == 0 {
-		return s, ""
-	}
-	// Scan last 8 bytes (or fewer) for ESC.
-	start := n - 8
-	if start < 0 {
-		start = 0
-	}
-	escIdx := strings.LastIndex(s[start:], "\x1b")
-	if escIdx < 0 {
-		return s, ""
-	}
-	escIdx += start // absolute index in s
+// safeReadScreenLines wraps readScreenLines with panic recovery to guard
+// against vt emulator bugs (e.g. CellAt on corrupt state).
+func safeReadScreenLines(emu *vt.Emulator) (lines []string) {
+	defer func() {
+		if r := recover(); r != nil {
+			lines = nil
+		}
+	}()
+	return readScreenLines(emu)
+}
 
-	after := s[escIdx:]
-	aLen := len(after)
+// safeRender wraps emulator.Render() with panic recovery.
+func safeRender(emu *vt.Emulator) (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = ""
+		}
+	}()
+	return strings.ReplaceAll(emu.Render(), "\r\n", "\n")
+}
 
-	// Bare ESC at end — definitely incomplete.
-	if aLen == 1 {
-		return s[:escIdx], after
+// detectScrollUp compares the previous and current screen snapshots to find
+// how many lines scrolled off the top. Returns the smallest k >= 1 where a
+// sufficient number of contiguous lines from the top of cur match the
+// corresponding lines from prev shifted by k, meaning prev[0:k] scrolled off.
+//
+// Uses contiguous-from-top matching rather than requiring all h-k lines to
+// match. This is critical for Ink-based apps (like Claude Code) which
+// re-render the bottom portion of the screen (spinner, streaming token) on
+// every update — only the top portion (committed static content) is stable
+// across writes.
+func detectScrollUp(prev, cur []string) int {
+	h := len(prev)
+	if h == 0 || h != len(cur) {
+		return 0
 	}
 
-	second := after[1]
+	// Minimum contiguous matching lines from the top to accept a scroll.
+	minMatch := 3
+	if h <= 4 {
+		minMatch = 1
+	} else if h <= 8 {
+		minMatch = 2
+	}
 
-	// ESC [ ... — CSI sequence: complete when a byte in [0x40, 0x7e] terminates
-	// it (ECMA-48 final byte range: letters, ~, @, ^, _, etc.).
-	if second == '[' {
-		for i := 2; i < aLen; i++ {
-			c := after[i]
-			if c >= 0x40 && c <= 0x7e {
-				// Found terminal byte — sequence is complete.
-				return s, ""
+	// Allow detecting scrolls up to h - minMatch lines (need at least
+	// minMatch lines remaining to compare).
+	limit := h - minMatch
+	if limit < 1 {
+		limit = 1
+	}
+
+	for k := 1; k <= limit; k++ {
+		// Count contiguous matching lines from the top.
+		matchCount := 0
+		for i := 0; i < h-k; i++ {
+			if cur[i] == prev[i+k] {
+				matchCount++
+			} else {
+				break
 			}
 		}
-		// No terminal byte yet — incomplete CSI.
-		return s[:escIdx], after
-	}
-
-	// ESC ] ... — OSC sequence: complete when BEL (\x07) or ST (\x1b\\) terminates.
-	if second == ']' {
-		for i := 2; i < aLen; i++ {
-			if after[i] == 0x07 {
-				return s, ""
-			}
-			if after[i] == 0x1b && i+1 < aLen && after[i+1] == '\\' {
-				return s, ""
-			}
+		if matchCount >= minMatch {
+			return k
 		}
-		return s[:escIdx], after
 	}
-
-	// ESC + single non-bracket byte (e.g., ESC c, ESC 7) — complete 2-byte sequence.
-	return s, ""
+	return 0
 }
 
 // SpecPanelModel is the Bubble Tea model for the interactive spec panel.
@@ -181,27 +192,89 @@ type SpecPanelModel struct {
 	// handlers so that View() can return it in O(1) without re-rendering.
 	cachedRender string
 
-	// scrollBuf accumulates ANSI-stripped lines for scrollback viewing.
-	// scrollOffset is lines from the bottom (0 = live view).
+	// scrollBuf accumulates lines that scrolled off the top of the emulator
+	// screen, detected by diffing screen snapshots between writes.
+	// scrollOffset is lines from the bottom of the virtual document (0 = live view).
 	scrollBuf    []string
 	scrollOffset int
 
-	// rawTail holds a trailing incomplete escape sequence from the previous
-	// PTY chunk, to be prepended to the next chunk before ANSI stripping.
-	rawTail []byte
+	// prevScreen holds the screen content (one string per row) after the
+	// last emulator write. Used to detect scrolling via screen-diff.
+	prevScreen []string
 
-	// prevChunkLines tracks the number of non-empty lines committed to
-	// scrollBuf by the most recent TerminalOutputMsg. Used to cap cursor-up
-	// pop so only same-cycle re-renders are collapsed.
-	prevChunkLines int
+	// lastOutputTime records when the last TerminalOutputMsg was received.
+	// Used for quiescence detection — if no output arrives for a threshold
+	// period, the session is considered idle and may need user input.
+	lastOutputTime time.Time
+
+	// needsInput is true when the terminal session has been quiescent
+	// (no PTY output) for longer than the quiescence threshold, indicating
+	// the subprocess is likely waiting for user input.
+	needsInput bool
+
+	// stopDrain signals the emulator response drain goroutine to exit.
+	stopDrain chan struct{}
+	// ptmxCh sends the PTY master to the drain goroutine for response forwarding.
+	ptmxCh chan *os.File
 }
 
 // NewSpecPanelModel creates a spec panel model for the given work item slug.
+// A background goroutine drains the emulator's response pipe so that DA1,
+// XTVERSION, and similar query responses don't block emulator.Write().
+// Responses are forwarded to the PTY once attached via SetPtmx.
 func NewSpecPanelModel(slug string) SpecPanelModel {
+	emu := vt.NewEmulator(80, 24)
+	stopDrain := make(chan struct{})
+	ptmxCh := make(chan *os.File, 1)
+	go drainEmulatorResponses(emu, ptmxCh, stopDrain)
 	return SpecPanelModel{
-		slug:     slug,
-		open:     true,
-		emulator: vt.NewEmulator(80, 24),
+		slug:      slug,
+		open:      true,
+		emulator:  emu,
+		stopDrain: stopDrain,
+		ptmxCh:    ptmxCh,
+	}
+}
+
+// drainEmulatorResponses reads from the emulator's response pipe and optionally
+// forwards data to the PTY master. Runs until the emulator is closed (Read
+// returns an error). The ptmxCh delivers the PTY master once available.
+func drainEmulatorResponses(emu *vt.Emulator, ptmxCh <-chan *os.File, stop <-chan struct{}) {
+	var ptmx *os.File
+	buf := make([]byte, 4096)
+	// emu.Read blocks on io.Pipe, so run it in a sub-goroutine and
+	// multiplex with the stop channel.
+	type readResult struct {
+		n   int
+		err error
+	}
+	readCh := make(chan readResult, 1)
+	go func() {
+		for {
+			n, err := emu.Read(buf)
+			readCh <- readResult{n, err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-stop:
+			emu.Close() // unblocks the Read goroutine
+			return
+		case f := <-ptmxCh:
+			ptmx = f
+		case r := <-readCh:
+			if r.n > 0 && ptmx != nil {
+				data := make([]byte, r.n)
+				copy(data, buf[:r.n])
+				ptmx.Write(data) //nolint:errcheck
+			}
+			if r.err != nil {
+				return
+			}
+		}
 	}
 }
 
@@ -220,6 +293,17 @@ func (m SpecPanelModel) IsDone() bool {
 	return m.done
 }
 
+// NeedsInput returns true if the terminal session has been quiescent long
+// enough to suggest the subprocess is waiting for user input.
+func (m SpecPanelModel) NeedsInput() bool {
+	return m.needsInput
+}
+
+// LastOutputTime returns when the last PTY output was received.
+func (m SpecPanelModel) LastOutputTime() time.Time {
+	return m.lastOutputTime
+}
+
 // Ptmx returns the PTY master file descriptor, or nil if no PTY is active.
 func (m SpecPanelModel) Ptmx() *os.File {
 	return m.ptmx
@@ -231,17 +315,25 @@ func (m SpecPanelModel) OutputChan() <-chan []byte {
 }
 
 // SetPtmx stores the PTY master, command, and output channel after process launch.
+// Also notifies the drain goroutine so emulator responses are forwarded to the PTY.
 // Returns the updated model (value semantics).
 func (m SpecPanelModel) SetPtmx(ptmx *os.File, cmd *exec.Cmd, output <-chan []byte) SpecPanelModel {
 	m.ptmx = ptmx
 	m.cmd = cmd
 	m.outputChan = output
+	if m.ptmxCh != nil && ptmx != nil {
+		select {
+		case m.ptmxCh <- ptmx:
+		default:
+		}
+	}
 	return m
 }
 
-// Cleanup closes the PTY master and kills the subprocess immediately, then
-// reaps it in a background goroutine so the caller is never blocked.
-// Safe to call multiple times (nil ptmx check).
+// Cleanup closes the PTY master, kills the subprocess, stops the emulator
+// response drain goroutine, and closes the emulator. Reaps the subprocess in
+// a background goroutine so the caller is never blocked.
+// Safe to call multiple times (nil checks throughout).
 func (m SpecPanelModel) Cleanup() SpecPanelModel {
 	if m.ptmx != nil {
 		m.ptmx.Close()
@@ -255,6 +347,13 @@ func (m SpecPanelModel) Cleanup() SpecPanelModel {
 		}
 		go cmd.Wait() // reap without blocking the event loop
 	}
+	if m.stopDrain != nil {
+		close(m.stopDrain)
+		m.stopDrain = nil
+	}
+	if m.emulator != nil {
+		m.emulator.Close()
+	}
 	return m
 }
 
@@ -262,61 +361,84 @@ func (m SpecPanelModel) Init() tea.Cmd {
 	return nil
 }
 
-func (m SpecPanelModel) Update(msg tea.Msg) (SpecPanelModel, tea.Cmd) {
+// totalLines returns the total number of lines in the virtual document
+// (scrollback history + current screen).
+func (m SpecPanelModel) totalLines() int {
+	return len(m.scrollBuf) + len(m.prevScreen)
+}
+
+func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
+	defer func() {
+		if r := recover(); r != nil {
+			writeCrashLog(fmt.Sprintf("SpecPanelModel.Update(%T)", msg), r)
+		}
+	}()
 	switch msg := msg.(type) {
 	case SpecProcessStartedMsg:
 		m.ptmx = msg.Ptmx
 		m.cmd = msg.Cmd
 		m.outputChan = msg.Output
-		return m, PollTerminalCmd(m.slug, m.outputChan)
+		// Notify drain goroutine so it can forward emulator responses to the PTY.
+		if m.ptmxCh != nil && msg.Ptmx != nil {
+			select {
+			case m.ptmxCh <- msg.Ptmx:
+			default:
+			}
+		}
+		return m, tea.Batch(
+			PollTerminalCmd(m.slug, m.outputChan),
+			QuiescenceTickCmd(m.slug),
+		)
 
 	case TerminalOutputMsg:
-		_, _ = m.emulator.Write(msg.Data)
-		raw := string(m.rawTail) + string(msg.Data)
-		safe, tail := trimIncompleteEscape(raw)
-		m.rawTail = []byte(tail)
-		// Count cursor-up movements before stripping: Ink-style TUI output
-		// (e.g., Claude Code's thinking blurb) re-renders animated content by
-		// emitting ESC[NA to move up N lines, then rewriting them. Pop those
-		// lines from scrollBuf so each re-render replaces rather than appends.
-		upCount := countCursorUp(safe)
-		if upCount > 0 && len(m.scrollBuf) > 0 {
-			pop := upCount
-			if pop > m.prevChunkLines {
-				pop = m.prevChunkLines
-			}
-			if pop > len(m.scrollBuf) {
-				pop = len(m.scrollBuf)
-			}
-			m.scrollBuf = m.scrollBuf[:len(m.scrollBuf)-pop]
-			if m.scrollOffset > 0 {
-				m.scrollOffset -= pop
-				if m.scrollOffset < 0 {
-					m.scrollOffset = 0
+		func() {
+			defer func() { recover() }() // guard against vt emulator panics
+			m.emulator.Write(msg.Data)
+		}()
+
+		// Track output timing for quiescence detection.
+		m.lastOutputTime = time.Now()
+		var cmds []tea.Cmd
+		if m.needsInput {
+			m.needsInput = false
+			slug := m.slug
+			cmds = append(cmds, func() tea.Msg {
+				return NeedsInputChangedMsg{Slug: slug, NeedsInput: false}
+			})
+		}
+
+		// Snapshot current screen and detect scrolled-off lines.
+		curScreen := safeReadScreenLines(m.emulator)
+		if m.prevScreen != nil {
+			k := detectScrollUp(m.prevScreen, curScreen)
+			if k > 0 {
+				for i := 0; i < k; i++ {
+					m.scrollBuf = append(m.scrollBuf, m.prevScreen[i])
+				}
+				if m.scrollOffset > 0 {
+					m.scrollOffset += k
 				}
 			}
 		}
-		stripped := stripAnsi(safe)
-		prevLen := len(m.scrollBuf)
-		for _, line := range strings.Split(stripped, "\n") {
-			if line != "" {
-				m.scrollBuf = append(m.scrollBuf, line)
+		m.prevScreen = curScreen
+
+		// Trim scrollback buffer to cap.
+		if len(m.scrollBuf) > maxScrollBufLines {
+			trimCount := len(m.scrollBuf) - maxScrollBufLines
+			m.scrollBuf = m.scrollBuf[trimCount:]
+			m.scrollOffset -= trimCount
+			if m.scrollOffset < 0 {
+				m.scrollOffset = 0
 			}
 		}
-		newLines := len(m.scrollBuf) - prevLen
-		m.prevChunkLines = newLines
-		if m.scrollOffset > 0 {
-			m.scrollOffset += newLines
-		}
-		if len(m.scrollBuf) > maxScrollBufLines {
-			m.scrollBuf = m.scrollBuf[len(m.scrollBuf)-maxScrollBufLines:]
-		}
+
+		// Clamp scroll offset.
 		if m.scrollOffset > 0 {
 			visH := m.height
 			if visH < 1 {
 				visH = 1
 			}
-			maxOff := len(m.scrollBuf) - visH
+			maxOff := m.totalLines() - visH
 			if maxOff < 0 {
 				maxOff = 0
 			}
@@ -324,8 +446,29 @@ func (m SpecPanelModel) Update(msg tea.Msg) (SpecPanelModel, tea.Cmd) {
 				m.scrollOffset = maxOff
 			}
 		}
-		m.cachedRender = strings.ReplaceAll(m.emulator.Render(), "\r\n", "\n")
+
+		m.cachedRender = safeRender(m.emulator)
+		if len(cmds) > 0 {
+			return m, tea.Batch(cmds...)
+		}
 		return m, nil
+
+	case QuiescenceTickMsg:
+		// Ignore ticks for other panels or if panel is done.
+		if msg.Slug != m.slug || m.done {
+			return m, nil
+		}
+		// Check if output has been quiescent long enough.
+		if !m.lastOutputTime.IsZero() && time.Since(m.lastOutputTime) > quiescenceThreshold && !m.needsInput {
+			m.needsInput = true
+			slug := m.slug
+			return m, tea.Batch(
+				func() tea.Msg { return NeedsInputChangedMsg{Slug: slug, NeedsInput: true} },
+				QuiescenceTickCmd(m.slug),
+			)
+		}
+		// Re-arm the tick.
+		return m, QuiescenceTickCmd(m.slug)
 
 	case tea.MouseMsg:
 		visH := m.height
@@ -335,7 +478,7 @@ func (m SpecPanelModel) Update(msg tea.Msg) (SpecPanelModel, tea.Cmd) {
 		switch msg.Type {
 		case tea.MouseWheelUp:
 			m.scrollOffset += 3
-			maxOff := len(m.scrollBuf) - visH
+			maxOff := m.totalLines() - visH
 			if maxOff < 0 {
 				maxOff = 0
 			}
@@ -353,23 +496,35 @@ func (m SpecPanelModel) Update(msg tea.Msg) (SpecPanelModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		vpWidth := msg.Width
+		if vpWidth < 1 {
+			vpWidth = 1
+		}
 		vpHeight := msg.Height
 		if vpHeight < 1 {
 			vpHeight = 1
 		}
-		m.emulator.Resize(msg.Width, vpHeight)
-		m.cachedRender = strings.ReplaceAll(m.emulator.Render(), "\r\n", "\n")
+		m.emulator.Resize(vpWidth, vpHeight)
+		// Invalidate prevScreen — height changed, screen content is reflowed.
+		m.prevScreen = nil
+		m.cachedRender = safeRender(m.emulator)
 		return m, nil
 
 	case StreamCompleteMsg:
 		m.done = true
+		// Capture final screen state so it's available for scrollback viewing.
+		m.prevScreen = safeReadScreenLines(m.emulator)
 		return m, nil
 
 	case StreamErrorMsg:
 		m.hasError = true
 		m.done = true
-		m.emulator.Write([]byte(fmt.Sprintf("\n[error] %v\n", msg.Err)))
-		m.cachedRender = strings.ReplaceAll(m.emulator.Render(), "\r\n", "\n")
+		func() {
+			defer func() { recover() }()
+			m.emulator.Write([]byte(fmt.Sprintf("\n[error] %v\n", msg.Err)))
+		}()
+		m.prevScreen = safeReadScreenLines(m.emulator)
+		m.cachedRender = safeRender(m.emulator)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -390,7 +545,7 @@ func (m SpecPanelModel) Update(msg tea.Msg) (SpecPanelModel, tea.Cmd) {
 				visH = 1
 			}
 			m.scrollOffset += visH / 2
-			maxOff := len(m.scrollBuf) - visH
+			maxOff := m.totalLines() - visH
 			if maxOff < 0 {
 				maxOff = 0
 			}
@@ -408,6 +563,22 @@ func (m SpecPanelModel) Update(msg tea.Msg) (SpecPanelModel, tea.Cmd) {
 			if m.scrollOffset < 0 {
 				m.scrollOffset = 0
 			}
+			return m, nil
+
+		case tea.KeyEnd: // End — snap to live view (bottom)
+			m.scrollOffset = 0
+			return m, nil
+
+		case tea.KeyHome: // Home — scroll to top of buffer
+			visH := m.height
+			if visH < 1 {
+				visH = 1
+			}
+			maxOff := m.totalLines() - visH
+			if maxOff < 0 {
+				maxOff = 0
+			}
+			m.scrollOffset = maxOff
 			return m, nil
 
 		default:
@@ -444,29 +615,54 @@ func (m SpecPanelModel) Update(msg tea.Msg) (SpecPanelModel, tea.Cmd) {
 	return m, nil
 }
 
-
-func (m SpecPanelModel) View() string {
-	// Scrollback view: render from accumulated text buffer when scrolled up.
-	if m.scrollOffset > 0 && len(m.scrollBuf) > 0 {
+func (m SpecPanelModel) View() (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			writeCrashLog("SpecPanelModel.View", r)
+			result = fmt.Sprintf("[view panic: %v]", r)
+		}
+	}()
+	// Scrollback view: render from the virtual document (scrollBuf + current screen).
+	if m.scrollOffset > 0 && m.totalLines() > 0 {
 		visH := m.height
 		if visH < 1 {
 			visH = 1
 		}
-		endIdx := len(m.scrollBuf) - m.scrollOffset
+		// Reserve last line for scroll position indicator.
+		contentH := visH - 1
+		if contentH < 1 {
+			contentH = 1
+		}
+
+		total := m.totalLines()
+		endIdx := total - m.scrollOffset
 		if endIdx < 0 {
 			endIdx = 0
 		}
-		startIdx := endIdx - visH
+		startIdx := endIdx - contentH
 		if startIdx < 0 {
 			startIdx = 0
 		}
+
 		var lines []string
-		for i := startIdx; i < endIdx && i < len(m.scrollBuf); i++ {
-			lines = append(lines, "  "+m.scrollBuf[i])
+		sbLen := len(m.scrollBuf)
+		for i := startIdx; i < endIdx; i++ {
+			if i < sbLen {
+				lines = append(lines, "  "+m.scrollBuf[i])
+			} else {
+				screenIdx := i - sbLen
+				if m.prevScreen != nil && screenIdx < len(m.prevScreen) {
+					lines = append(lines, "  "+m.prevScreen[screenIdx])
+				}
+			}
 		}
-		for len(lines) < visH {
+		// Pad content area then append indicator.
+		for len(lines) < contentH {
 			lines = append(lines, "")
 		}
+		dimS := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+		indicator := fmt.Sprintf("-- scrollback (%d lines above) --", m.scrollOffset)
+		lines = append(lines, "  "+dimS.Render(indicator))
 		return strings.Join(lines, "\n")
 	}
 
@@ -483,7 +679,13 @@ func (m SpecPanelModel) View() string {
 // up to 9 chunks total before returning a single TerminalOutputMsg. Returns
 // StreamCompleteMsg when the channel is closed.
 func PollTerminalCmd(slug string, ch <-chan []byte) tea.Cmd {
-	return func() tea.Msg {
+	return func() (result tea.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				writeCrashLog("PollTerminalCmd", r)
+				result = StreamErrorMsg{Slug: slug, Err: fmt.Errorf("poll panic: %v", r)}
+			}
+		}()
 		chunk, ok := <-ch
 		if !ok {
 			return StreamCompleteMsg{Slug: slug}
@@ -512,7 +714,13 @@ func PollTerminalCmd(slug string, ch <-chan []byte) tea.Cmd {
 // projectDir must be the project root (not the knowledge _work/ dir) so that
 // the /spec skill can explore the correct codebase.
 func StartTerminalCmd(slug, title, projectDir string, width, height int, extraContext string, shortMode, chatMode, skipConfirm bool) tea.Cmd {
-	return func() tea.Msg {
+	return func() (result tea.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				writeCrashLog("StartTerminalCmd", r)
+				result = StreamErrorMsg{Slug: slug, Err: fmt.Errorf("start panic: %v", r)}
+			}
+		}()
 		// Build the initial prompt to auto-submit. Passing it as a positional
 		// argument to claude starts an interactive session and submits it
 		// immediately — no PTY-write timing hack needed.
@@ -555,6 +763,11 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 		outputCh := make(chan []byte, 64)
 		go func() {
 			defer close(outputCh)
+			defer func() {
+				if r := recover(); r != nil {
+					writeCrashLog("PTY reader goroutine", r)
+				}
+			}()
 			buf := make([]byte, 32*1024)
 			for {
 				n, err := ptmx.Read(buf)

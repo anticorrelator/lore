@@ -404,9 +404,10 @@ for e in data.get('titles_only', []):
 
 echo "[Budget] ${CHARS_USED}/${BUDGET} chars | ${FILES_FULL} full, ${FILES_SUMMARY} summary, ${FILES_SKIPPED} skipped"
 if [[ $TOTAL_ENTRIES -gt 0 ]]; then
-  echo "[knowledge] ${TOTAL_ENTRIES} entries across ${TOTAL_CATEGORIES} categories — use \`/memory search <query>\` before raw exploration"
+  echo "[knowledge] ${TOTAL_ENTRIES} entries across ${TOTAL_CATEGORIES} categories"
 fi
-echo "[search] lore search \"<query>\" --json | /memory search <query> | /work search <query>"
+echo ""
+echo "IMPORTANT: Run \`lore search \"<topic>\"\` BEFORE Grep/Glob/Explore. The knowledge store already documents most conventions, architecture, and past decisions. Raw exploration duplicates work that's already captured."
 echo ""
 echo "=== End Project Knowledge ==="
 
