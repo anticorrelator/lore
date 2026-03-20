@@ -31,6 +31,7 @@ lore search "<query>" --json --limit 5
      **Changes:**
      - <file>: <what changed>
      **Tests:** <ran X tests, all passed / no tests found / N failures>
+     **Skills used:** <comma-separated list of /skill-name invoked via the Skill tool, or "None">
      **Discoveries:** <Two targets — report either or both, "None" if
        nothing stands out:
        (1) Mechanism-level patterns — how the system accomplishes X

@@ -128,7 +128,19 @@ Before drafting, offer the user a chance to shape the plan with high-level strat
    State each as fact ("X does Y"), not speculation. These assertions surface in the understanding confirmation step.
 4. Fill in Goal, Design Decisions (using the `### DN: Title` structured format with `**Decision:**`, `**Rationale:**`, `**Alternatives considered:**`, and `**Applies to:**` fields), Phases, Open Questions
 
-   Apply the task consolidation rule: each checkbox = one meaningful unit of work. Consolidate sequential same-file edits.
+   Apply the task consolidation rule: each checkbox = one meaningful unit of work. Consolidate sequential same-file edits. Tasks sharing a file target within a phase are chained sequentially by generate-tasks.py and can only use 1 worker — splitting same-file work inflates recommended_workers without enabling parallelism. Cross-phase dependencies are also file-based: a task in a later phase is only blocked by earlier-phase tasks that share a file target; tasks with disjoint file targets run in parallel across phases. If you need strict sequential ordering between phases for tasks with non-overlapping files, include the shared file in both phases' `**Files:**` headers. After drafting phases, run `lore work regen-tasks <slug>` and review the `phase_cost_summary` in `tasks.json`. Tasks with `total_chars` above the phase median by >2x should be split; tasks below the phase median by >2x can be merged with adjacent tasks targeting the same files.
+
+   **Task format (default — intent+constraints):** Task descriptions state *what the change accomplishes* (intent), *what not to do* (scope limits and anti-patterns), and *how to verify correctness* (verification criteria) — not exact code or line numbers. Opt a phase into prescriptive format with `**Task format:** prescriptive` for mechanical work where the implementation is fully determined.
+
+   **Intent+constraints (default):**
+   ```
+   - [ ] Extract phase-level Scope and Verification fields from plan.md task blocks and inject them into task descriptions
+   ```
+
+   **Prescriptive (opt-in for mechanical work):**
+   ```
+   - [ ] In `generate-tasks.py` line 87, replace `context_block` with `build_context_block(task, phase, decisions)`
+   ```
 
    **Discovery findings → Related skills:** If any skills were listed under `Matched:` in the `**Skill discovery:**` block from Step 2.5s, add a `**Related skills:**` block to the `## Context` section:
    ```
@@ -144,6 +156,21 @@ Before drafting, offer the user a chance to shape the plan with high-level strat
    Review the suggestions for each phase. Add relevant entries as `[[knowledge:file#heading]] — why relevant` lines in the phase's `**Knowledge context:**` block. Your direct findings from Step 2s are the primary source — concordance is a *widener*, not a replacement. Skip entries that don't add actionable context for a worker implementing that phase.
 
 6. Present to user for review
+
+### Step 3.3s: Review context cost estimates
+
+After drafting phases, generate `tasks.json` and review the sizing output:
+
+```bash
+lore work regen-tasks <slug>
+```
+
+Read `tasks.json` and check the `phase_cost_summary` for each phase. For each phase, compare each task's `context_cost_estimate.total_chars` against the phase's `avg_per_task`:
+
+- **Tasks >2x the phase `avg_per_task`:** Too large — split into separate tasks targeting different files or concerns
+- **Tasks <0.5x the phase `avg_per_task`:** Too small — consider merging with an adjacent task that targets the same file
+
+Update `plan.md` to reflect any splits or merges, then re-run `lore work regen-tasks <slug>` to confirm the revised estimates. Proceed once no phase has outlier tasks.
 
 ### Step 3.4s: Verify backlinks
 
@@ -218,13 +245,15 @@ Same purpose as the full flow's Step 5.3 — validate the implementation approac
 
 Team-based divide-and-conquer for complex or uncertain-scope work.
 
+> **Sequencing constraint:** Do not dispatch research agents (Explore, Agent tool) before completing Step 2. The investigation plan is a completeness checklist and user approval gate, not just a dispatch list. Pre-existing research does not substitute for the formal investigation plan.
+
 ### Step 2: Decompose into investigations
 
 1. From the feature description, identify 3-7 focused investigation questions. Each should:
    - Target a specific part of the codebase or concern
    - Be answerable by exploring files (not by asking the user)
    - Be independent enough to run in parallel
-2. **Always include** one additional fixed investigation topic: **Skill and agent applicability** — which installed skills and agent templates are relevant to this work item? Key files: `~/.claude/skills/*/SKILL.md`, `~/.claude/agents/*.md`. This investigation is mandatory and counts toward the 3-7 total.
+2. **Always include** one additional fixed investigation topic: **Skill and agent applicability** — which installed skills and agent templates should be invoked during **implementation** of this work item (i.e., when the plan is executed, not during this investigation step)? Key files: `~/.claude/skills/*/SKILL.md`, `~/.claude/agents/*.md`. This investigation is mandatory and counts toward the 3-7 total.
 3. Check the knowledge store index for file hints to include with each investigation
 4. **Assess complexity** for each investigation using these heuristics:
    - **simple** — 1-2 key files, narrow question targeting a single function or module
@@ -236,9 +265,10 @@ Team-based divide-and-conquer for complex or uncertain-scope work.
 
    | # | Area / Topic | Key Files | Complexity |
    |---|-------------|-----------|------------|
-   | 1 | <topic>     | `file1`, `file2` | simple |
-   | 2 | <topic>     | `file1`, `file2`, `file3` | moderate |
-   | 3 | <topic>     | `file1`, ... `file6` | complex |
+   | 1 | Skill and agent applicability *(mandatory — do not remove)* | `~/.claude/skills/*/SKILL.md`, `~/.claude/agents/*.md` | simple |
+   | 2 | <topic>     | `file1`, `file2` | simple |
+   | 3 | <topic>     | `file1`, `file2`, `file3` | moderate |
+   | 4 | <topic>     | `file1`, ... `file6` | complex |
    ...
 
    Proceed, or adjust? (You can request changes — e.g., split a question, drop an area, add a new one, or change scope.)
@@ -251,15 +281,18 @@ Team-based divide-and-conquer for complex or uncertain-scope work.
 
 | # | Area / Topic | Key Files | Complexity |
 |---|-------------|-----------|------------|
-| 1 | Current middleware chain | `src/middleware/index.ts`, `src/app.ts` | simple |
-| 2 | Auth + session handling | `src/auth/session.ts`, `src/auth/middleware.ts`, `src/types/auth.ts` | moderate |
-| 3 | Request lifecycle & error paths | `src/handlers/`, `src/errors/`, `src/middleware/`, `src/logging/`, `tests/integration/` | complex |
-| 4 | Existing config & env patterns | `src/config.ts`, `src/env.ts` | simple |
+| 1 | Skill and agent applicability *(mandatory — do not remove)* | `~/.claude/skills/*/SKILL.md`, `~/.claude/agents/*.md` | simple |
+| 2 | Current middleware chain | `src/middleware/index.ts`, `src/app.ts` | simple |
+| 3 | Auth + session handling | `src/auth/session.ts`, `src/auth/middleware.ts`, `src/types/auth.ts` | moderate |
+| 4 | Request lifecycle & error paths | `src/handlers/`, `src/errors/`, `src/middleware/`, `src/logging/`, `tests/integration/` | complex |
+| 5 | Existing config & env patterns | `src/config.ts`, `src/env.ts` | simple |
 
 Proceed, or adjust? (You can request changes — e.g., split a question, drop an area, add a new one, or change scope.)
 ```
 
 ### Step 3: Create investigation team
+
+**Prerequisite:** Step 2 must be complete — an approved investigation plan table must exist in the conversation. Do NOT create teams, tasks, or spawn agents before Step 2 approval (or `--yes` auto-approval). This applies to initial dispatch only; follow-up investigations (Step 6) use existing findings as their scope.
 
 **All investigations are executed by fresh researcher agents.** The lead decomposes questions and pre-fetches knowledge; researchers investigate. Exception: `/spec short` is explicitly single-agent for small-scope work.
 
@@ -276,19 +309,20 @@ Proceed, or adjust? (You can request changes — e.g., split a question, drop an
    - `activeForm`: "Investigating \<short topic\>"
 
    **Discovery researcher spec** — for the mandatory "Skill and agent applicability" investigation, the task description must include these additional instructions:
-   - Glob `~/.claude/skills/*/SKILL.md` — read the YAML frontmatter (`name`, `description`) and first section of each to assess relevance
+   - **Context:** The purpose of this investigation is to identify skills and agents that would be useful during the **implementation phase** — i.e., when a developer or `/implement` agent team executes the plan produced by this spec. Do NOT evaluate applicability to the investigation/research step you are currently performing.
+   - Glob `~/.claude/skills/*/SKILL.md` — read the YAML frontmatter (`name`, `description`) and first section of each to assess relevance to implementation
    - Deep-read any SKILL.md that overlaps with the work item title, description, or investigation topics (keyword match on `name`/`description` fields)
-   - Glob `~/.claude/agents/*.md` — read each agent template to assess applicability
+   - Glob `~/.claude/agents/*.md` — read each agent template to assess applicability to implementation
    - Report format adds two extra fields after `**Implications:**`:
      ```
      **Matched skills:**
-     - /skill-name — why this skill is relevant to the work item
+     - /skill-name — why this skill would be invoked during implementation
      - (none) if no skills matched
      **Matched agents:**
-     - agent-name — why this agent template is relevant
+     - agent-name — why this agent template would be used during implementation
      - (none) if no agents matched
      ```
-   - Assertions for this investigation should be concrete claims about which skills/agents are relevant and why, not general codebase claims
+   - Assertions for this investigation should be concrete claims about which skills/agents are relevant to implementation and why, not general codebase claims
 
 4. **Pre-fetch knowledge for each investigation** — before constructing prompts, run:
    ```bash
@@ -488,7 +522,7 @@ Before synthesizing, offer the user a chance to shape the plan with high-level s
 From the documented findings, draft the remaining plan sections:
 1. **Goal** — what we're building/changing and why (1 paragraph)
 2. **Design Decisions** — use the `### DN: Title` format from the template. Each decision requires `**Decision:**`, `**Rationale:**`, `**Alternatives considered:**`, and `**Applies to:**` fields. Number decisions sequentially (D1, D2, ...).
-3. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include a `**Knowledge context:**` block listing knowledge entries relevant to that phase — these flow directly to worker agents via task generation. For multi-worker phases or novel implementations without codebase precedent, add `**Knowledge delivery:** full` to deliver fully resolved knowledge content to workers instead of annotation-only summaries.
+3. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include a `**Knowledge context:**` block listing knowledge entries relevant to that phase — these flow directly to worker agents via task generation. For multi-worker phases, novel implementations without codebase precedent, or phases using intent+constraints task format, add `**Knowledge delivery:** full` — workers interpreting intent and constraints need resolved knowledge content, not just backlink labels.
 
    **Advisor identification:** When investigations reveal domain complexity in a phase — unfamiliar invariants, cross-cutting constraints, or areas where uninformed changes risk breaking correctness — add an `**Advisors:**` block declaring domain-expert advisors for that phase. Use the format: `- advisor-name — domain scope. [must-consult|on-demand]`. Use `must-consult` when the domain has hard invariants that workers must respect (e.g., auth, data migration); use `on-demand` when the domain is complex but workers can start independently and ask questions as needed. `/implement` spawns declared advisors as persistent team members with investigation findings as their domain baseline.
 
@@ -500,7 +534,19 @@ From the documented findings, draft the remaining plan sections:
      ```
    - **Advisor declarations:** For each matched skill whose domain overlaps with a phase's scope, consider adding an `**Advisors:**` entry for that phase. Use the skill name as the advisor name (e.g., `spec-advisor`) and scope it to the phase's domain. Set mode based on phase complexity — `must-consult` if the skill defines invariants workers must respect, `on-demand` otherwise.
 
-   **Task consolidation rule:** Each `- [ ]` checkbox should be a meaningful unit of work, not a micro-edit. Multiple sequential edits to the same file should be one task (e.g., "Update worker prompt to add capture step and renumber" not three separate tasks for delete/insert/renumber). Aim for 2-5 tasks per phase. If a phase has >5 tasks, look for consolidation opportunities.
+   **Task consolidation rule:** Each `- [ ]` checkbox should be a meaningful unit of work, not a micro-edit. Multiple sequential edits to the same file should be one task (e.g., "Update worker prompt to add capture step and renumber" not three separate tasks for delete/insert/renumber). Tasks sharing a file target within a phase are chained sequentially by generate-tasks.py and can only use 1 worker — splitting same-file work inflates recommended_workers without enabling parallelism. Cross-phase dependencies are also file-based: a task in a later phase is only blocked by earlier-phase tasks that share a file target; tasks with disjoint file targets run in parallel across phases. If you need strict sequential ordering between phases for tasks with non-overlapping files, include the shared file in both phases' `**Files:**` headers. After drafting phases, run `lore work regen-tasks <slug>` and review the `phase_cost_summary` in `tasks.json`. Tasks with `total_chars` above the phase median by >2x should be split; tasks below the phase median by >2x can be merged with adjacent tasks targeting the same files.
+
+   **Task format (default — intent+constraints):** Task descriptions state *what the change accomplishes* (intent), *what not to do* (scope limits and anti-patterns), and *how to verify correctness* (verification criteria) — not exact code or line numbers. Opt a phase into prescriptive format with `**Task format:** prescriptive` for mechanical work where the implementation is fully determined.
+
+   **Intent+constraints (default):**
+   ```
+   - [ ] Extract phase-level Scope and Verification fields from plan.md task blocks and inject them into task descriptions
+   ```
+
+   **Prescriptive (opt-in for mechanical work):**
+   ```
+   - [ ] In `generate-tasks.py` line 87, replace `context_block` with `build_context_block(task, phase, decisions)`
+   ```
 
 4. **Concordance-assisted annotation** — after drafting phases, widen each phase's `**Knowledge context:**` block beyond what investigations explicitly mentioned. For each phase, run:
    ```bash
@@ -511,6 +557,21 @@ From the documented findings, draft the remaining plan sections:
 5. **Open Questions** — anything investigations couldn't resolve
 
 Present the synthesized plan to the user for review.
+
+### Step 5.0: Review context cost estimates
+
+After completing synthesis, generate `tasks.json` and review the sizing output:
+
+```bash
+lore work regen-tasks <slug>
+```
+
+Read `tasks.json` and check the `phase_cost_summary` for each phase. For each phase, compare each task's `context_cost_estimate.total_chars` against the phase's `avg_per_task`:
+
+- **Tasks >2x the phase `avg_per_task`:** Too large — split into separate tasks targeting different files or concerns
+- **Tasks <0.5x the phase `avg_per_task`:** Too small — consider merging with an adjacent task that targets the same file
+
+Update `plan.md` to reflect any splits or merges, then re-run `lore work regen-tasks <slug>` to confirm the revised estimates. Proceed once no phase has outlier tasks.
 
 ### Step 5.0.5: Verify backlinks
 
@@ -720,7 +781,12 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 ### Phase 1: <Name>
 **Objective:** What this phase accomplishes
 **Files:** relevant file paths
-**Knowledge delivery:** full  <!-- optional — omit for default annotation-only delivery (~50-200 tokens per backlink). Use `full` for: (1) multi-worker phases where cross-worker consistency matters (all workers need the same reference content), or (2) novel implementations without codebase precedent (no existing patterns to anchor against). Full resolution costs ~2k-4k tokens per task. -->
+**Scope:**
+<!-- Optional — list files/components workers must NOT modify in this phase, and any output contracts (e.g., "do not change public API signatures"). Omit if no scope fencing is needed. -->
+- Do not modify: `path/to/file`
+- Output contract: <what the phase must produce without changing>
+**Task format:** prescriptive  <!-- optional — omit for default intent+constraints format. Use `prescriptive` only when the implementation is fully determined (e.g., mechanical substitutions, exact insertions). Default format: task descriptions state intent, scope constraints, and verification criteria — not code. -->
+**Knowledge delivery:** full  <!-- optional — omit for default annotation-only delivery (~50-200 tokens per backlink). Use `full` for: (1) multi-worker phases where cross-worker consistency matters (all workers need the same reference content), (2) novel implementations without codebase precedent (no existing patterns to anchor against), or (3) phases using intent+constraints task format — workers interpret design patterns from knowledge content, not code; annotation-only leaves backlink labels with no resolved content for workers to act on. Full resolution costs ~2k-4k tokens per task. -->
 **Knowledge context:**
 <!-- Each entry MUST include a "— why relevant" annotation after the backlink.
      Good annotations are implementation-facing — they tell the worker what to DO with the knowledge entry, not what the entry is about.
@@ -732,6 +798,10 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 **Advisors:**
 <!-- Optional — declare domain-expert advisors for this phase. /implement spawns these as persistent team members that workers can consult. Omit this field if no advisors are needed. -->
 - advisor-name — domain scope. [must-consult|on-demand]
+**Verification:**
+<!-- Optional — list concrete pass/fail criteria workers check after implementation. Each criterion should be independently verifiable. Use plain bullets (not checkboxes) so they are not parsed as tasks. Omit if verification is self-evident. -->
+- <criterion 1 — e.g., "existing tests pass unchanged">
+- <criterion 2 — e.g., "lore work regen-tasks produces no outlier tasks">
 - [ ] Task 1
 - [ ] Task 2
 

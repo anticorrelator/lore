@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
 # regen-tasks.sh — Regenerate tasks.json from plan.md for a work item
-# Usage: bash regen-tasks.sh <slug>
+# Usage: bash regen-tasks.sh <slug> [--quiet]
 # Calls generate-tasks.py, writes tasks.json, then heals the work index.
+# --quiet: suppress per-phase diagnostics output (for scripted usage)
 
 set -euo pipefail
 
-if [[ $# -lt 1 ]]; then
+QUIET=false
+POSITIONAL=()
+for arg in "$@"; do
+  case "$arg" in
+    --quiet) QUIET=true ;;
+    *) POSITIONAL+=("$arg") ;;
+  esac
+done
+
+if [[ ${#POSITIONAL[@]} -lt 1 ]]; then
   echo "[work] Error: Missing work item slug." >&2
-  echo "Usage: regen-tasks.sh <slug>" >&2
+  echo "Usage: regen-tasks.sh <slug> [--quiet]" >&2
   exit 1
 fi
 
-SLUG="$1"
+SLUG="${POSITIONAL[0]}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
@@ -31,10 +41,17 @@ if [[ ! -f "$PLAN_FILE" ]]; then
   exit 1
 fi
 
-# Generate tasks.json from plan.md
-OUTPUT=$(python3 "$SCRIPT_DIR/generate-tasks.py" "$PLAN_FILE" \
-  --knowledge-dir "$KNOWLEDGE_DIR" \
-  --slug "$SLUG")
+# Generate tasks.json from plan.md (diagnostics printed to stderr unless --quiet)
+if $QUIET; then
+  OUTPUT=$(python3 "$SCRIPT_DIR/generate-tasks.py" "$PLAN_FILE" \
+    --knowledge-dir "$KNOWLEDGE_DIR" \
+    --slug "$SLUG")
+else
+  OUTPUT=$(python3 "$SCRIPT_DIR/generate-tasks.py" "$PLAN_FILE" \
+    --knowledge-dir "$KNOWLEDGE_DIR" \
+    --slug "$SLUG" \
+    --diagnostics)
+fi
 
 echo "$OUTPUT" > "$TASKS_FILE"
 

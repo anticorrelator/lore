@@ -54,9 +54,20 @@ with open(index_path) as f:
 
 active_work_lines = []
 stale_work_lines = []
-notes_stale_lines = []
 branch_match = ''
 last_entry = ''
+
+def dir_max_mtime(path):
+    \"\"\"Return max mtime across all files in a directory, or 0 if empty/missing.\"\"\"
+    try:
+        mtimes = [
+            os.path.getmtime(os.path.join(path, f))
+            for f in os.listdir(path)
+            if os.path.isfile(os.path.join(path, f))
+        ]
+        return max(mtimes) if mtimes else 0
+    except OSError:
+        return 0
 
 def relative_date(iso_str):
     if not iso_str:
@@ -101,41 +112,37 @@ for item in data.get('plans', []):
 
     rel, days_ago = relative_date(updated)
 
+    item_dir = os.path.join(work_dir, slug)
+
     # Branch match: read _meta.json for branches array
     if current_branch and not branch_match:
-        meta_path = os.path.join(work_dir, slug, '_meta.json')
+        meta_path = os.path.join(item_dir, '_meta.json')
         if os.path.isfile(meta_path):
             try:
                 with open(meta_path) as mf:
                     meta = json.load(mf)
                 if current_branch in meta.get('branches', []):
                     branch_match = slug
-                    notes_path = os.path.join(work_dir, slug, 'notes.md')
+                    notes_path = os.path.join(item_dir, 'notes.md')
                     if os.path.isfile(notes_path):
                         last_entry = get_last_notes_section(notes_path)
             except (json.JSONDecodeError, OSError):
                 pass
 
-    # Stale work (>30 days since updated)
-    if days_ago > 30:
+    # Stale work: use directory-wide max mtime as activity signal
+    dir_mtime = dir_max_mtime(item_dir)
+    dir_age_days = int((now - dir_mtime) / 86400) if dir_mtime else -1
+    if dir_age_days > 30:
+        has_plan = item.get('has_plan_doc', os.path.isfile(os.path.join(item_dir, 'plan.md')))
+        if has_plan:
+            guidance = 'consider \`/work\` to review status'
+        else:
+            guidance = 'consider \`/work archive\`'
         stale_work_lines.append(
-            f'- {slug} — inactive {days_ago} days, consider \`/work archive\`'
+            f'[stale] {slug} — inactive {dir_age_days} days, {guidance}'
         )
 
     active_work_lines.append(f'- {slug}: {title} (updated {rel})')
-
-    # Notes.md staleness check (>14 days since file modification)
-    notes_path = os.path.join(work_dir, slug, 'notes.md')
-    if os.path.isfile(notes_path):
-        try:
-            mtime = os.path.getmtime(notes_path)
-            age_days = int((now - mtime) / 86400)
-            if age_days > 14:
-                notes_stale_lines.append(
-                    f'[Stale] Work item \"{slug}\" has no activity in {age_days} days'
-                )
-        except OSError:
-            pass
 
 # Shell-escape helper for single quotes
 def sq(s):
@@ -150,9 +157,6 @@ print(f\"ACTIVE_WORK='{sq(active)}'\")
 
 stale = '\\n'.join(stale_work_lines)
 print(f\"STALE_WORK='{sq(stale)}'\")
-
-notes_stale = '\\n'.join(notes_stale_lines)
-print(f\"NOTES_STALE='{sq(notes_stale)}'\")
 " "$WORK_DIR" "$INDEX" "$CURRENT_BRANCH")"
 
 # Build output (budget: ~2000 chars)
@@ -175,10 +179,6 @@ echo "$ACTIVE_WORK"
 
 if [[ -n "$STALE_WORK" ]]; then
   echo "$STALE_WORK"
-fi
-
-if [[ -n "$NOTES_STALE" ]]; then
-  echo "$NOTES_STALE"
 fi
 
 # Check for orphaned ephemeral plan files

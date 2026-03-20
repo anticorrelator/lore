@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -84,6 +86,10 @@ func (m model) detailPanelHeight() int {
 	}
 	return m.innerHeight()
 }
+
+// shiftEnterMsg is synthesized from the kitty keyboard protocol CSI u sequence \x1b[13;2u.
+// It signals Shift+Enter in modal text inputs (insert newline).
+type shiftEnterMsg struct{}
 
 // prefsSavedMsg is a no-op message returned after asynchronously persisting layout preferences.
 type prefsSavedMsg struct{}
@@ -256,6 +262,8 @@ type model struct {
 
 	showHelp bool
 
+	kittyModeActive bool // true while kitty keyboard protocol is enabled
+
 	popup          search.PopupModel
 	popupActive    bool
 	popupCtx       popupContext
@@ -307,6 +315,27 @@ func (m *model) cleanupAllSubprocesses() {
 		m.specPanels[slug] = panel.Cleanup()
 		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
 	}
+	m.disableKittyKeyboard()
+}
+
+// enableKittyKeyboard writes the kitty keyboard protocol enable sequence (mode 1)
+// to stdout. No-op if kitty mode is already active.
+func (m *model) enableKittyKeyboard() {
+	if m.kittyModeActive {
+		return
+	}
+	os.Stdout.WriteString("\x1b[>1u") //nolint:errcheck
+	m.kittyModeActive = true
+}
+
+// disableKittyKeyboard writes the kitty keyboard protocol pop sequence to stdout.
+// No-op if kitty mode is not active.
+func (m *model) disableKittyKeyboard() {
+	if !m.kittyModeActive {
+		return
+	}
+	os.Stdout.WriteString("\x1b[<u") //nolint:errcheck
+	m.kittyModeActive = false
 }
 
 type workItemsLoadedMsg struct {
@@ -413,6 +442,8 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 	}()
 
+	msg = translateCSIu(msg)
+
 	// Help modal: intercept all keys; Esc or ? closes it.
 	if m.showHelp {
 		if km, ok := msg.(tea.KeyMsg); ok {
@@ -426,6 +457,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	// Spec confirm modal: intercept all keys before launching subprocess.
 	if m.specConfirmActive {
+		if _, ok := msg.(shiftEnterMsg); ok {
+			m.specConfirmInput.InsertRune('\n')
+			return m, nil
+		}
 		if km, ok := msg.(tea.KeyMsg); ok {
 			switch km.String() {
 			case "alt+enter":
@@ -434,6 +469,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			case "enter":
 				extraContext := strings.TrimSpace(m.specConfirmInput.Value())
 				m.specConfirmActive = false
+				m.disableKittyKeyboard()
 				slug := m.specConfirmSlug
 				// Mark item as speccing in the list.
 				m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug})
@@ -448,6 +484,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, work.StartTerminalCmd(slug, m.specConfirmTitle, m.config.ProjectDir, specW, specH, extraContext, m.specConfirmShortMode, m.specConfirmChatMode, m.specConfirmSkipConfirm)
 			case "esc", "ctrl+c":
 				m.specConfirmActive = false
+				m.disableKittyKeyboard()
 				return m, nil
 			case "alt+1":
 				if !m.specConfirmChatMode {
@@ -470,6 +507,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	// AI modal: intercept all keys when the input is active.
 	if m.aiInputActive {
+		if _, ok := msg.(shiftEnterMsg); ok {
+			m.aiInput.InsertRune('\n')
+			return m, nil
+		}
 		if km, ok := msg.(tea.KeyMsg); ok {
 			switch km.String() {
 			case "alt+enter":
@@ -478,6 +519,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			case "enter":
 				prompt := strings.TrimSpace(m.aiInput.Value())
 				m.aiInputActive = false
+				m.disableKittyKeyboard()
 				if prompt == "" {
 					return m, nil
 				}
@@ -489,6 +531,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, tea.Batch(runWorkAI(ctx, prompt), aiTick())
 			case "esc", "ctrl+c":
 				m.aiInputActive = false
+				m.disableKittyKeyboard()
 				return m, nil
 			default:
 				var taCmd tea.Cmd
@@ -763,6 +806,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				focusCmd := ta.Focus()
 				m.aiInput = ta
 				m.aiInputActive = true
+				m.enableKittyKeyboard()
 				return m, focusCmd
 			}
 		case "L":
@@ -1030,6 +1074,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.specConfirmSkipConfirm = true
 		m.specConfirmChatMode = false
 		m.specConfirmActive = true
+		m.enableKittyKeyboard()
 		return m, focusCmd
 
 	case work.ChatRequestMsg:
@@ -1051,6 +1096,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.specConfirmInput = ta
 		m.specConfirmChatMode = true
 		m.specConfirmActive = true
+		m.enableKittyKeyboard()
 		return m, focusCmd
 
 	case work.SpecProcessStartedMsg:
@@ -1852,7 +1898,7 @@ func (m model) renderSpecConfirmModal() string {
 		Render(m.specConfirmInput.View())
 	hints := s.key.Render("Enter") + " " + s.dim.Render("start") +
 		s.sep.Render("  ·  ") +
-		s.key.Render("Alt+Enter") + " " + s.dim.Render("newline") +
+		s.key.Render("Shift+Enter") + " " + s.dim.Render("newline") +
 		s.sep.Render("  ·  ") +
 		s.key.Render("Esc") + " " + s.dim.Render("cancel")
 
@@ -1892,7 +1938,7 @@ func (m model) renderAIModal(_ string) string {
 		Render(m.aiInput.View())
 	hints := s.key.Render("Enter") + " " + s.dim.Render("run") +
 		s.sep.Render("  ·  ") +
-		s.key.Render("Alt+Enter") + " " + s.dim.Render("newline") +
+		s.key.Render("Shift+Enter") + " " + s.dim.Render("newline") +
 		s.sep.Render("  ·  ") +
 		s.key.Render("Esc") + " " + s.dim.Render("cancel")
 	body := "\n" + s.dim.Render(" describe what work items to create:") +
@@ -2056,4 +2102,95 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// translateCSIu converts kitty keyboard protocol CSI u sequences to synthetic tea.Msg values.
+// bubbletea delivers unrecognized escape sequences as an unexported unknownCSISequenceMsg ([]uint8),
+// accessible only via reflect. This mirrors the pattern used in specpanel.go.
+//
+// Kitty mode 1 (disambiguate) sends ALL keys as CSI u: ESC [ <codepoint> [; <modifiers>] u
+// where codepoint is the Unicode value and modifiers encode shift(2), alt(3), ctrl(5), etc.
+// We must translate every key the modals use, not just a handful — otherwise the textarea
+// can't receive typed characters and the modal freezes (same failure as the first attempt).
+func translateCSIu(msg tea.Msg) tea.Msg {
+	v := reflect.ValueOf(msg)
+	if v.Kind() != reflect.Slice || v.Type().Elem().Kind() != reflect.Uint8 {
+		return msg
+	}
+	b := v.Bytes()
+
+	// Parse CSI u format: ESC [ <codepoint> [; <modifiers>] u
+	if len(b) < 4 || b[0] != 0x1b || b[1] != '[' || b[len(b)-1] != 'u' {
+		return msg
+	}
+	// Extract the parameter string between '[' and 'u'
+	params := b[2 : len(b)-1]
+
+	var codepoint, modifiers int
+	if idx := bytes.IndexByte(params, ';'); idx >= 0 {
+		codepoint = parseDecimal(params[:idx])
+		modifiers = parseDecimal(params[idx+1:])
+	} else {
+		codepoint = parseDecimal(params)
+		modifiers = 1 // default: no modifiers
+	}
+
+	if codepoint < 0 {
+		return msg // malformed
+	}
+
+	// Kitty modifier bits: 1=none, 2=shift, 3=alt, 4=shift+alt, 5=ctrl,
+	// 6=ctrl+shift, 7=ctrl+alt, 8=ctrl+shift+alt
+	// The value is 1-based (1 means no modifiers).
+	modBits := modifiers - 1
+	hasShift := modBits&0x01 != 0
+	hasAlt := modBits&0x02 != 0
+	hasCtrl := modBits&0x04 != 0
+
+	// Shift+Enter → custom shiftEnterMsg (bubbletea has no KeyShiftEnter).
+	if codepoint == 13 && hasShift && !hasAlt && !hasCtrl {
+		return shiftEnterMsg{}
+	}
+
+	// Map special codepoints to bubbletea key types.
+	if kt, ok := csiuSpecialKeys[codepoint]; ok {
+		return tea.KeyMsg{Type: kt, Alt: hasAlt}
+	}
+
+	// Ctrl+<letter> → map to bubbletea's KeyCtrl* constants.
+	if hasCtrl && codepoint >= 'a' && codepoint <= 'z' {
+		ctrlType := tea.KeyCtrlA + tea.KeyType(codepoint-'a')
+		return tea.KeyMsg{Type: ctrlType, Alt: hasAlt}
+	}
+
+	// Printable characters → tea.KeyMsg with Runes.
+	if codepoint >= 32 {
+		r := rune(codepoint)
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}, Alt: hasAlt}
+	}
+
+	return msg
+}
+
+// parseDecimal parses a decimal integer from a byte slice. Returns -1 on error.
+func parseDecimal(b []byte) int {
+	if len(b) == 0 {
+		return -1
+	}
+	n := 0
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return -1
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+// csiuSpecialKeys maps kitty CSI u codepoints to bubbletea key types.
+var csiuSpecialKeys = map[int]tea.KeyType{
+	9:   tea.KeyTab,
+	13:  tea.KeyEnter,
+	27:  tea.KeyEscape,
+	127: tea.KeyBackspace,
 }

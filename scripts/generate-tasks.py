@@ -53,6 +53,31 @@ VERB_MAP = {
 # Regex for CVC short verbs that double final consonant (Run->Running)
 SHORT_CVC_RE = re.compile(r"^[A-Z][a-z]*[^aeiou]$")
 
+# Context cost estimation constants.
+# FIXED_OVERHEAD_CHARS: base per-task overhead (CLAUDE.md + MEMORY.md + worker.md +
+# advisory mixin — approximately 22 KB for a typical worker session).
+FIXED_OVERHEAD_CHARS = 22000
+
+# Verb complexity multiplier: fraction of file read size to reserve for edit space.
+# "high" verbs (write/create/refactor) require more output space; "low" verbs (check/verify) less.
+VERB_COMPLEXITY: dict[str, float] = {
+    # high — substantial rewrites
+    "Write": 0.5, "Create": 0.5, "Implement": 0.5, "Refactor": 0.5,
+    "Replace": 0.5, "Merge": 0.5, "Split": 0.5, "Generate": 0.5,
+    # medium — targeted edits
+    "Update": 0.3, "Add": 0.3, "Remove": 0.3, "Delete": 0.3,
+    "Fix": 0.3, "Move": 0.3, "Extract": 0.3, "Configure": 0.3,
+    "Install": 0.3, "Enable": 0.3, "Disable": 0.3, "Rename": 0.3,
+    "Consolidate": 0.3, "Parse": 0.3, "Validate": 0.3, "Build": 0.3,
+    "Deploy": 0.3, "Document": 0.3,
+    # low — read-mostly or investigative
+    "Test": 0.1, "Run": 0.1, "Set": 0.1, "Measure": 0.1,
+    "Capture": 0.1, "Decide": 0.1, "Verify": 0.1, "Check": 0.1,
+    "Ensure": 0.1, "Audit": 0.1,
+}
+_DEFAULT_VERB_MULTIPLIER = 1.0
+_ADVISORY_OVERHEAD_CHARS = 500  # extra chars allocated when has_advisory=True
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -361,6 +386,54 @@ def _format_backlink_line(item: "str | tuple[str, str]") -> str:
     return f"- [[{target}]]"
 
 
+def estimate_context_cost(
+    description: str,
+    file_targets: list[str],
+    subject: str,
+    has_advisory: bool = False,
+) -> dict:
+    """Estimate the context window cost (in chars) for a single task.
+
+    Returns a dict with:
+        fixed_overhead_chars  — base per-task overhead (system framing, etc.)
+        description_chars     — len(description)
+        file_read_chars       — sum of os.path.getsize() for each file_target;
+                                missing files contribute 0
+        edit_space_chars      — file_read_chars * verb_multiplier, where the
+                                multiplier is derived from the first word of
+                                subject via VERB_COMPLEXITY
+        advisory_chars        — extra overhead when has_advisory=True
+        total_chars           — sum of all components above
+    """
+    fixed = FIXED_OVERHEAD_CHARS
+    description_chars = len(description)
+
+    file_read_chars = 0
+    for path in file_targets:
+        try:
+            file_read_chars += os.path.getsize(path)
+        except OSError:
+            pass  # missing or inaccessible file → 0
+
+    # Derive verb multiplier from subject's first word
+    first_word = subject.split()[0] if subject.split() else ""
+    multiplier = VERB_COMPLEXITY.get(first_word, _DEFAULT_VERB_MULTIPLIER)
+    edit_space_chars = int(file_read_chars * multiplier)
+
+    advisory_chars = _ADVISORY_OVERHEAD_CHARS if has_advisory else 0
+
+    total_chars = fixed + description_chars + file_read_chars + edit_space_chars + advisory_chars
+
+    return {
+        "fixed_overhead_chars": fixed,
+        "description_chars": description_chars,
+        "file_read_chars": file_read_chars,
+        "edit_space_chars": edit_space_chars,
+        "advisory_chars": advisory_chars,
+        "total_chars": total_chars,
+    }
+
+
 def build_context_section(
     phase_backlinks: list,
     cross_cutting_backlinks: list,
@@ -423,21 +496,46 @@ def build_context_section(
         "",
     ])
 
-    if task_backlinks:
+    # Build per-tier filtered display lists: lower-priority tiers exclude targets
+    # already shown in a higher-priority tier. Original lists are kept intact for
+    # the all_backlinks resolution path below.
+    seen_display: set[str] = set()
+    display_task: list = []
+    for bl in (task_backlinks or []):
+        target, _ = _unpack_backlink(bl)
+        if target not in seen_display:
+            display_task.append(bl)
+            seen_display.add(target)
+
+    display_phase: list = []
+    for bl in phase_backlinks:
+        target, _ = _unpack_backlink(bl)
+        if target not in seen_display:
+            display_phase.append(bl)
+            seen_display.add(target)
+
+    display_cross: list = []
+    for bl in cross_cutting_backlinks:
+        target, _ = _unpack_backlink(bl)
+        if target not in seen_display:
+            display_cross.append(bl)
+            seen_display.add(target)
+
+    if display_task:
         lines.append("Task-level:")
-        for bl in task_backlinks:
+        for bl in display_task:
             lines.append(_format_backlink_line(bl))
         lines.append("")
 
-    if phase_backlinks:
+    if display_phase:
         lines.append("Phase-level:")
-        for bl in phase_backlinks:
+        for bl in display_phase:
             lines.append(_format_backlink_line(bl))
         lines.append("")
 
-    if cross_cutting_backlinks:
+    if display_cross:
         lines.append("Cross-cutting:")
-        for bl in cross_cutting_backlinks:
+        for bl in display_cross:
             lines.append(_format_backlink_line(bl))
         lines.append("")
 
@@ -508,6 +606,64 @@ def build_context_section(
 
 
 # ---------------------------------------------------------------------------
+# DAG width: compute_recommended_workers
+# ---------------------------------------------------------------------------
+
+def compute_recommended_workers(all_tasks: list[dict]) -> int:
+    """Compute recommended worker count from the task dependency DAG.
+
+    Takes a flat list of task dicts (each with ``id`` and ``blockedBy``),
+    assigns topological levels via BFS from roots (tasks with no blockers),
+    and returns the maximum number of tasks at any single level.
+
+    This equals the maximum number of workers that can be usefully active
+    simultaneously. Fully-sequential plans (width=1) and fully-parallel
+    plans (width=N) are handled correctly.
+
+    Args:
+        all_tasks: Flat list of task dicts with ``id`` and ``blockedBy`` keys.
+
+    Returns:
+        Maximum level width (>= 1), or 0 if all_tasks is empty.
+    """
+    if not all_tasks:
+        return 0
+
+    # Build id -> task lookup and in-degree count
+    task_by_id: dict[str, dict] = {t["id"]: t for t in all_tasks}
+    level: dict[str, int] = {}
+
+    # Memoized recursive level assignment
+    def get_level(task_id: str, visiting: set[str]) -> int:
+        if task_id in level:
+            return level[task_id]
+        task = task_by_id.get(task_id)
+        if task is None:
+            return 0
+        blocked_by = task.get("blockedBy", [])
+        if not blocked_by:
+            level[task_id] = 0
+            return 0
+        # Guard against cycles (treat cycle members as level 0)
+        if task_id in visiting:
+            return 0
+        visiting = visiting | {task_id}
+        max_pred_level = max(get_level(pred, visiting) for pred in blocked_by)
+        level[task_id] = max_pred_level + 1
+        return level[task_id]
+
+    for t in all_tasks:
+        get_level(t["id"], set())
+
+    # Count tasks per level and return max
+    level_counts: dict[int, int] = {}
+    for lvl in level.values():
+        level_counts[lvl] = level_counts.get(lvl, 0) + 1
+
+    return max(level_counts.values()) if level_counts else 0
+
+
+# ---------------------------------------------------------------------------
 # Core: generate_tasks_from_plan
 # ---------------------------------------------------------------------------
 
@@ -554,7 +710,7 @@ def generate_tasks_from_plan(
 
     phases = []
     task_counter = 0
-    prev_phase_task_ids: list[str] = []
+    file_last_task: dict[str, str] = {}  # file -> last task id targeting it (across all phases)
 
     for i, match in enumerate(phase_matches):
         phase_num = int(match.group(1))
@@ -613,12 +769,60 @@ def generate_tasks_from_plan(
                     annotation = ann_match.group(1).strip()
                 phase_backlinks.append((target, annotation))
 
+        # Detect whether this phase declares advisors
+        has_advisory = bool(re.search(r"^\*\*Advisors:\*\*", phase_content, re.MULTILINE))
+
+        # Detect task format: prescriptive vs intent+constraints (default)
+        tf_match = re.search(r"\*\*Task format:\*\*\s*(.*)", phase_content)
+        is_prescriptive = (
+            tf_match is not None
+            and tf_match.group(1).strip().lower() == "prescriptive"
+        )
+
+        # Extract Scope block (plain bullet lines after **Scope:**)
+        scope_match = re.search(
+            r"^\*\*Scope:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
+            phase_content, re.MULTILINE
+        )
+        scope_lines: list[str] = []
+        if scope_match:
+            for line in scope_match.group(1).splitlines():
+                stripped = line.strip()
+                if stripped.startswith("- ") and not stripped.startswith("- [ ]") and not stripped.startswith("- [x]"):
+                    text = stripped[2:].strip()
+                    # Skip template placeholder lines
+                    if not text.startswith("Do not modify:") and not text.startswith("Output contract:"):
+                        scope_lines.append(stripped)
+                    elif "path/to/file" not in text and "<what" not in text:
+                        scope_lines.append(stripped)
+
+        # Extract Verification block (plain bullet lines after **Verification:**)
+        verif_match = re.search(
+            r"^\*\*Verification:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
+            phase_content, re.MULTILINE
+        )
+        verif_lines: list[str] = []
+        if verif_match:
+            for line in verif_match.group(1).splitlines():
+                stripped = line.strip()
+                if stripped.startswith("- ") and not stripped.startswith("- [ ]") and not stripped.startswith("- [x]"):
+                    text = stripped[2:].strip()
+                    # Skip template placeholder lines (angle-bracket content)
+                    if not (text.startswith("<") and text.endswith(">")):
+                        verif_lines.append(stripped)
+
+        # Annotation quality warning: intent-based + annotation-only delivery
+        annotation_warning = (
+            not is_prescriptive
+            and not resolve_full_content
+            and bool(phase_backlinks)
+        )
+
         # Extract unchecked task items
         unchecked = re.findall(r"^- \[ \]\s+(.*)", phase_content, re.MULTILINE)
         if not unchecked:
             continue
 
-        current_phase_task_ids: list[str] = []
         phase_tasks = []
 
         # First pass: parse tasks, extract file_targets and backlinks
@@ -679,24 +883,46 @@ def generate_tasks_from_plan(
             elif files_raw:
                 desc_parts.append(f"**Files:** {files_raw}")
             desc_parts.append(f"**Task:** {subject}")
+            if scope_lines:
+                desc_parts.append("")
+                desc_parts.append("**Scope:**")
+                desc_parts.extend(scope_lines)
+            if verif_lines:
+                desc_parts.append("")
+                desc_parts.append("**Verification:**")
+                desc_parts.extend(verif_lines)
+            if annotation_warning:
+                desc_parts.append("")
+                desc_parts.append(
+                    "> **Note:** This phase uses intent+constraints task format with annotation-only "
+                    "knowledge delivery. Workers interpret design patterns from knowledge context — "
+                    "consider using `**Knowledge delivery:** full` so workers receive resolved content, "
+                    "not just backlink labels."
+                )
             desc_parts.append("")
             desc_parts.append(context)
             if slug:
                 desc_parts.append(f"**Plan reference:** [[work:{slug}]]")
             description = "\n".join(desc_parts)
 
+            context_cost_estimate = estimate_context_cost(
+                description=description,
+                file_targets=file_targets,
+                subject=subject,
+                has_advisory=has_advisory,
+            )
+
             phase_tasks.append({
                 "id": task_id,
                 "subject": subject,
                 "description": description,
                 "activeForm": active_form,
-                "blockedBy": list(prev_phase_task_ids),
+                "blockedBy": [],
                 "file_targets": file_targets,
+                "context_cost_estimate": context_cost_estimate,
             })
-            current_phase_task_ids.append(task_id)
 
-        # Intra-phase ordering: chain tasks that share a file target
-        file_last_task: dict[str, str] = {}  # file -> last task id targeting it
+        # Chain tasks that share a file target (within and across phases)
         for task in phase_tasks:
             for ft in task.get("file_targets", []):
                 if ft in file_last_task:
@@ -705,20 +931,110 @@ def generate_tasks_from_plan(
                         task["blockedBy"].append(prev_id)
                 file_last_task[ft] = task["id"]
 
+        # Compute phase-level cost summary from per-task estimates
+        task_totals = [
+            t["context_cost_estimate"]["total_chars"]
+            for t in phase_tasks
+            if "context_cost_estimate" in t
+        ]
+        if task_totals:
+            phase_cost_summary = {
+                "total_chars": sum(task_totals),
+                "avg_per_task": int(sum(task_totals) / len(task_totals)),
+                "max_task": max(task_totals),
+                "min_task": min(task_totals),
+            }
+        else:
+            phase_cost_summary = {
+                "total_chars": 0,
+                "avg_per_task": 0,
+                "max_task": 0,
+                "min_task": 0,
+            }
+
         phases.append({
             "phase_number": phase_num,
             "phase_name": phase_name,
             "objective": objective,
             "files": files,
             "tasks": phase_tasks,
+            "phase_cost_summary": phase_cost_summary,
         })
-        prev_phase_task_ids = current_phase_task_ids
+
+    # Compute recommended worker count from the assembled DAG
+    all_tasks = [task for phase in phases for task in phase["tasks"]]
+    recommended_workers = compute_recommended_workers(all_tasks)
 
     return {
         "plan_checksum": plan_checksum,
         "generated_at": generated_at,
+        "recommended_workers": recommended_workers,
         "phases": phases,
     }
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------------
+
+def print_sizing_diagnostics(result: dict) -> None:
+    """Print per-phase sizing summary and outlier warnings to stderr.
+
+    Outputs:
+        - A summary table: phase name, task count, avg cost (chars), max cost (chars)
+        - Warnings for tasks whose total_chars exceeds 2x the phase avg_per_task
+
+    Args:
+        result: The dict returned by generate_tasks_from_plan().
+    """
+    phases = result.get("phases", [])
+    if not phases:
+        return
+
+    # Header
+    print("", file=sys.stderr)
+    print("Context cost summary:", file=sys.stderr)
+    print(
+        f"  {'Phase':<30}  {'Tasks':>5}  {'Avg (chars)':>12}  {'Max (chars)':>12}",
+        file=sys.stderr,
+    )
+    print("  " + "-" * 65, file=sys.stderr)
+
+    warnings: list[str] = []
+
+    for phase in phases:
+        phase_name = phase.get("phase_name", "")
+        tasks = phase.get("tasks", [])
+        summary = phase.get("phase_cost_summary", {})
+        avg = summary.get("avg_per_task", 0)
+        max_cost = summary.get("max_task", 0)
+        task_count = len(tasks)
+
+        # Truncate phase name for table formatting
+        display_name = phase_name[:28] + ".." if len(phase_name) > 30 else phase_name
+        print(
+            f"  {display_name:<30}  {task_count:>5}  {avg:>12,}  {max_cost:>12,}",
+            file=sys.stderr,
+        )
+
+        # Collect outlier warnings
+        for task in tasks:
+            estimate = task.get("context_cost_estimate", {})
+            total = estimate.get("total_chars", 0)
+            if avg > 0 and total > 2 * avg:
+                warnings.append(
+                    f"  WARNING: Phase '{phase_name}' — task '{task.get('subject', '')}'"
+                    f" is {total:,} chars ({total / avg:.1f}x phase avg {avg:,})"
+                    f" — consider splitting"
+                )
+
+    if warnings:
+        print("", file=sys.stderr)
+        print("Oversized tasks (>2x phase avg):", file=sys.stderr)
+        for w in warnings:
+            print(w, file=sys.stderr)
+
+    print("", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -735,6 +1051,14 @@ def main():
     )
     parser.add_argument(
         "--slug", default="", help="Work item slug"
+    )
+    parser.add_argument(
+        "--diagnostics", action="store_true",
+        help="Print per-phase context cost summary and warnings to stderr"
+    )
+    parser.add_argument(
+        "--quiet", action="store_true",
+        help="Suppress diagnostics output (overrides --diagnostics)"
     )
     args = parser.parse_args()
 
@@ -756,6 +1080,9 @@ def main():
         slug=slug,
         script_dir=os.path.dirname(os.path.abspath(__file__)),
     )
+
+    if args.diagnostics and not args.quiet:
+        print_sizing_diagnostics(result)
 
     print(json.dumps(result, indent=2))
 

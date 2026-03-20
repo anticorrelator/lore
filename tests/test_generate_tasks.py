@@ -19,7 +19,14 @@ generate_tasks_from_plan = _mod.generate_tasks_from_plan
 extract_task_backlinks = _mod.extract_task_backlinks
 build_context_section = _mod.build_context_section
 extract_file_targets = _mod.extract_file_targets
+estimate_context_cost = _mod.estimate_context_cost
+print_sizing_diagnostics = _mod.print_sizing_diagnostics
+compute_recommended_workers = _mod.compute_recommended_workers
 RESOLVE_CHAR_LIMIT = _mod.RESOLVE_CHAR_LIMIT
+FIXED_OVERHEAD_CHARS = _mod.FIXED_OVERHEAD_CHARS
+VERB_COMPLEXITY = _mod.VERB_COMPLEXITY
+_DEFAULT_VERB_MULTIPLIER = _mod._DEFAULT_VERB_MULTIPLIER
+_ADVISORY_OVERHEAD_CHARS = _mod._ADVISORY_OVERHEAD_CHARS
 
 
 # --- Fixture plan content ---
@@ -410,10 +417,11 @@ class TestOutputSchema:
         result = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
         phase1_ids = [t["id"] for t in result["phases"][0]["tasks"]]
         phase2_tasks = result["phases"][1]["tasks"]
-        # All phase 2 tasks should include all phase 1 task IDs (inter-phase)
+        # MINIMAL_PLAN uses disjoint files (src/config.ts vs src/feature.ts),
+        # so Phase 2 tasks should have NO cross-phase deps — only file-based chaining applies
         for task in phase2_tasks:
             for pid in phase1_ids:
-                assert pid in task["blockedBy"]
+                assert pid not in task["blockedBy"]
 
     def test_phase1_tasks_not_blocked(self, tmp_path):
         result = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
@@ -850,34 +858,42 @@ class TestIntraPhaseChainingNoFiles:
 
 
 class TestInterPhasePlusIntraPhaseBlocking:
-    """Existing inter-phase blocking composes with intra-phase chaining."""
+    """Intra-phase chaining only — no cross-phase deps when files are disjoint.
 
-    def test_phase2_first_task_has_only_inter_phase_deps(self, tmp_path):
-        """First task in Phase 2 should only be blocked by Phase 1 tasks."""
+    INTER_PLUS_INTRA_PLAN uses disjoint files (src/setup.ts vs src/impl.ts),
+    so Phase 2 tasks should only have intra-phase file-chaining deps, not
+    cross-phase deps from Phase 1.
+    """
+
+    def test_phase2_first_task_has_no_blockers(self, tmp_path):
+        """First task in Phase 2 should be unblocked — no shared files with Phase 1."""
         result = generate_tasks_from_plan(INTER_PLUS_INTRA_PLAN, str(tmp_path))
         phase1_ids = [t["id"] for t in result["phases"][0]["tasks"]]
         phase2_tasks = result["phases"][1]["tasks"]
-        assert phase2_tasks[0]["blockedBy"] == phase1_ids
-
-    def test_phase2_second_task_has_both_dep_types(self, tmp_path):
-        """Second task in Phase 2 should have inter-phase AND intra-phase deps."""
-        result = generate_tasks_from_plan(INTER_PLUS_INTRA_PLAN, str(tmp_path))
-        phase1_ids = [t["id"] for t in result["phases"][0]["tasks"]]
-        phase2_tasks = result["phases"][1]["tasks"]
-        # Should have inter-phase deps (from phase 1)
+        # No cross-phase deps since files are disjoint
+        assert phase2_tasks[0]["blockedBy"] == []
         for pid in phase1_ids:
-            assert pid in phase2_tasks[1]["blockedBy"]
-        # Should also have intra-phase dep (blocked by first phase 2 task)
+            assert pid not in phase2_tasks[0]["blockedBy"]
+
+    def test_phase2_second_task_has_only_intra_phase_dep(self, tmp_path):
+        """Second task in Phase 2 blocked only by first Phase 2 task (same file)."""
+        result = generate_tasks_from_plan(INTER_PLUS_INTRA_PLAN, str(tmp_path))
+        phase1_ids = [t["id"] for t in result["phases"][0]["tasks"]]
+        phase2_tasks = result["phases"][1]["tasks"]
+        # No cross-phase deps
+        for pid in phase1_ids:
+            assert pid not in phase2_tasks[1]["blockedBy"]
+        # Intra-phase dep: blocked by first Phase 2 task (same src/impl.ts file)
         assert phase2_tasks[0]["id"] in phase2_tasks[1]["blockedBy"]
 
-    def test_phase2_third_task_chained_to_second(self, tmp_path):
-        """Third task blocked by second (intra-phase) plus all of Phase 1 (inter-phase)."""
+    def test_phase2_third_task_chained_to_second_only(self, tmp_path):
+        """Third task blocked by second (intra-phase chain), not by Phase 1 tasks."""
         result = generate_tasks_from_plan(INTER_PLUS_INTRA_PLAN, str(tmp_path))
         phase1_ids = [t["id"] for t in result["phases"][0]["tasks"]]
         phase2_tasks = result["phases"][1]["tasks"]
-        # Inter-phase deps
+        # No cross-phase deps
         for pid in phase1_ids:
-            assert pid in phase2_tasks[2]["blockedBy"]
+            assert pid not in phase2_tasks[2]["blockedBy"]
         # Intra-phase: blocked by second task, not first
         assert phase2_tasks[1]["id"] in phase2_tasks[2]["blockedBy"]
         assert phase2_tasks[0]["id"] not in phase2_tasks[2]["blockedBy"]
@@ -928,3 +944,1014 @@ class TestResolveCharLimit:
         task = result["phases"][0]["tasks"][0]
         assert "truncated" not in task["description"]
         assert "Important gotcha" in task["description"]
+
+
+class TestEstimateContextCost:
+    """Unit tests for estimate_context_cost()."""
+
+    def test_fixed_overhead_is_22000(self):
+        """FIXED_OVERHEAD_CHARS constant should be ~22000."""
+        assert FIXED_OVERHEAD_CHARS == 22000
+
+    def test_returns_all_required_keys(self):
+        """Return dict must contain all documented keys."""
+        result = estimate_context_cost(
+            description="Some task description",
+            file_targets=[],
+            subject="Add something",
+        )
+        assert "fixed_overhead_chars" in result
+        assert "description_chars" in result
+        assert "file_read_chars" in result
+        assert "edit_space_chars" in result
+        assert "advisory_chars" in result
+        assert "total_chars" in result
+
+    def test_description_chars_matches_len(self):
+        """description_chars should equal len(description)."""
+        desc = "This is a test description with known length."
+        result = estimate_context_cost(description=desc, file_targets=[], subject="Add x")
+        assert result["description_chars"] == len(desc)
+
+    def test_missing_file_contributes_zero(self, tmp_path):
+        """Non-existent file paths should contribute 0 to file_read_chars."""
+        result = estimate_context_cost(
+            description="desc",
+            file_targets=[str(tmp_path / "nonexistent.py")],
+            subject="Add x",
+        )
+        assert result["file_read_chars"] == 0
+
+    def test_existing_file_measured_by_size(self, tmp_path):
+        """Existing file should contribute its byte size to file_read_chars."""
+        content = "x" * 1000
+        f = tmp_path / "test.py"
+        f.write_text(content, encoding="utf-8")
+        result = estimate_context_cost(
+            description="desc",
+            file_targets=[str(f)],
+            subject="Add x",
+        )
+        assert result["file_read_chars"] == 1000
+
+    def test_multiple_files_summed(self, tmp_path):
+        """Multiple files should have their sizes summed."""
+        f1 = tmp_path / "a.py"
+        f1.write_text("a" * 500, encoding="utf-8")
+        f2 = tmp_path / "b.py"
+        f2.write_text("b" * 300, encoding="utf-8")
+        result = estimate_context_cost(
+            description="desc",
+            file_targets=[str(f1), str(f2)],
+            subject="Add x",
+        )
+        assert result["file_read_chars"] == 800
+
+    def test_partial_missing_files_graceful(self, tmp_path):
+        """Mix of existing and missing files — missing ones contribute 0."""
+        f = tmp_path / "exists.py"
+        f.write_text("y" * 200, encoding="utf-8")
+        result = estimate_context_cost(
+            description="desc",
+            file_targets=[str(f), str(tmp_path / "missing.py")],
+            subject="Add x",
+        )
+        assert result["file_read_chars"] == 200
+
+    def test_verb_complexity_high_verb(self, tmp_path):
+        """High-complexity verb (Implement) uses 0.5 multiplier."""
+        f = tmp_path / "file.py"
+        f.write_text("x" * 1000, encoding="utf-8")
+        result = estimate_context_cost(
+            description="desc",
+            file_targets=[str(f)],
+            subject="Implement the feature",
+        )
+        assert result["edit_space_chars"] == int(1000 * VERB_COMPLEXITY["Implement"])
+        assert result["edit_space_chars"] == 500
+
+    def test_verb_complexity_medium_verb(self, tmp_path):
+        """Medium-complexity verb (Add) uses 0.3 multiplier."""
+        f = tmp_path / "file.py"
+        f.write_text("x" * 1000, encoding="utf-8")
+        result = estimate_context_cost(
+            description="desc",
+            file_targets=[str(f)],
+            subject="Add the feature",
+        )
+        assert result["edit_space_chars"] == int(1000 * VERB_COMPLEXITY["Add"])
+        assert result["edit_space_chars"] == 300
+
+    def test_verb_complexity_low_verb(self, tmp_path):
+        """Low-complexity verb (Check) uses 0.1 multiplier."""
+        f = tmp_path / "file.py"
+        f.write_text("x" * 1000, encoding="utf-8")
+        result = estimate_context_cost(
+            description="desc",
+            file_targets=[str(f)],
+            subject="Check the output",
+        )
+        assert result["edit_space_chars"] == int(1000 * VERB_COMPLEXITY["Check"])
+        assert result["edit_space_chars"] == 100
+
+    def test_unknown_verb_uses_default_multiplier(self, tmp_path):
+        """Unknown verb falls back to _DEFAULT_VERB_MULTIPLIER."""
+        f = tmp_path / "file.py"
+        f.write_text("x" * 1000, encoding="utf-8")
+        result = estimate_context_cost(
+            description="desc",
+            file_targets=[str(f)],
+            subject="Frobnicate the feature",
+        )
+        assert result["edit_space_chars"] == int(1000 * _DEFAULT_VERB_MULTIPLIER)
+
+    def test_no_advisory_zero_advisory_chars(self):
+        """Without has_advisory, advisory_chars should be 0."""
+        result = estimate_context_cost(
+            description="desc",
+            file_targets=[],
+            subject="Add x",
+            has_advisory=False,
+        )
+        assert result["advisory_chars"] == 0
+
+    def test_with_advisory_adds_overhead(self):
+        """With has_advisory=True, advisory_chars should be _ADVISORY_OVERHEAD_CHARS."""
+        result = estimate_context_cost(
+            description="desc",
+            file_targets=[],
+            subject="Add x",
+            has_advisory=True,
+        )
+        assert result["advisory_chars"] == _ADVISORY_OVERHEAD_CHARS
+        assert result["advisory_chars"] == 500
+
+    def test_total_chars_is_sum_of_components(self, tmp_path):
+        """total_chars should equal the sum of all component fields."""
+        f = tmp_path / "file.py"
+        f.write_text("x" * 500, encoding="utf-8")
+        desc = "Test description"
+        result = estimate_context_cost(
+            description=desc,
+            file_targets=[str(f)],
+            subject="Add x",
+            has_advisory=True,
+        )
+        expected = (
+            result["fixed_overhead_chars"]
+            + result["description_chars"]
+            + result["file_read_chars"]
+            + result["edit_space_chars"]
+            + result["advisory_chars"]
+        )
+        assert result["total_chars"] == expected
+
+    def test_empty_inputs_total_equals_overhead_plus_desc(self):
+        """With no files and empty description, total = fixed_overhead + description_chars."""
+        result = estimate_context_cost(
+            description="",
+            file_targets=[],
+            subject="Add x",
+        )
+        assert result["file_read_chars"] == 0
+        assert result["edit_space_chars"] == 0
+        assert result["advisory_chars"] == 0
+        assert result["total_chars"] == FIXED_OVERHEAD_CHARS
+
+
+class TestContextCostIntegration:
+    """Integration tests: verify context_cost_estimate appears in task output."""
+
+    SAMPLE_PLAN = """\
+# Sample Feature
+
+## Goal
+Implement a sample feature.
+
+## Phases
+
+### Phase 1: Core
+**Objective:** Add the core module
+**Files:** `src/core.py`
+- [ ] Implement the main function
+- [ ] Add helper utilities
+
+### Phase 2: Tests
+**Objective:** Add tests
+**Files:** `tests/test_core.py`
+- [ ] Write unit tests
+- [ ] Add integration tests
+"""
+
+    def test_context_cost_estimate_present_in_each_task(self):
+        """Every task dict in the output should have a context_cost_estimate key."""
+        result = generate_tasks_from_plan(self.SAMPLE_PLAN)
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                assert "context_cost_estimate" in task, (
+                    f"Task '{task.get('subject')}' missing context_cost_estimate"
+                )
+
+    def test_context_cost_estimate_has_required_keys(self):
+        """context_cost_estimate must contain all six required keys."""
+        required_keys = {
+            "fixed_overhead_chars",
+            "description_chars",
+            "file_read_chars",
+            "edit_space_chars",
+            "advisory_chars",
+            "total_chars",
+        }
+        result = generate_tasks_from_plan(self.SAMPLE_PLAN)
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                estimate = task["context_cost_estimate"]
+                assert required_keys.issubset(estimate.keys()), (
+                    f"Task '{task.get('subject')}' estimate missing keys: "
+                    f"{required_keys - estimate.keys()}"
+                )
+
+    def test_context_cost_estimate_total_is_positive(self):
+        """total_chars should be positive (at minimum fixed overhead + description)."""
+        result = generate_tasks_from_plan(self.SAMPLE_PLAN)
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                total = task["context_cost_estimate"]["total_chars"]
+                assert total > 0, f"Task '{task.get('subject')}' has non-positive total_chars"
+
+    def test_context_cost_estimate_fixed_overhead_matches_constant(self):
+        """fixed_overhead_chars in each estimate should equal FIXED_OVERHEAD_CHARS."""
+        result = generate_tasks_from_plan(self.SAMPLE_PLAN)
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                assert task["context_cost_estimate"]["fixed_overhead_chars"] == FIXED_OVERHEAD_CHARS
+
+    def test_phase_cost_summary_present(self):
+        """Each phase dict should contain a phase_cost_summary key."""
+        result = generate_tasks_from_plan(self.SAMPLE_PLAN)
+        for phase in result["phases"]:
+            assert "phase_cost_summary" in phase, (
+                f"Phase '{phase.get('phase_name')}' missing phase_cost_summary"
+            )
+
+    def test_phase_cost_summary_has_required_keys(self):
+        """phase_cost_summary must contain total_chars, avg_per_task, max_task, min_task."""
+        required_keys = {"total_chars", "avg_per_task", "max_task", "min_task"}
+        result = generate_tasks_from_plan(self.SAMPLE_PLAN)
+        for phase in result["phases"]:
+            summary = phase["phase_cost_summary"]
+            assert required_keys.issubset(summary.keys())
+
+    def test_phase_cost_summary_total_equals_sum_of_task_totals(self):
+        """phase_cost_summary.total_chars should equal sum of task total_chars."""
+        result = generate_tasks_from_plan(self.SAMPLE_PLAN)
+        for phase in result["phases"]:
+            summary = phase["phase_cost_summary"]
+            task_total = sum(
+                t["context_cost_estimate"]["total_chars"]
+                for t in phase["tasks"]
+            )
+            assert summary["total_chars"] == task_total
+
+
+class TestPrintSizingDiagnostics:
+    """Tests for print_sizing_diagnostics() output format and warning thresholds."""
+
+    def _make_result(self, phases):
+        """Build a minimal result dict with the given phase list."""
+        return {"plan_checksum": "abc123", "generated_at": "2026-01-01T00:00:00Z", "phases": phases}
+
+    def _make_task(self, subject, total_chars, file_read_chars=0):
+        """Build a minimal task dict with a context_cost_estimate."""
+        return {
+            "id": "task-1",
+            "subject": subject,
+            "description": "desc",
+            "activeForm": "Doing x",
+            "blockedBy": [],
+            "file_targets": [],
+            "context_cost_estimate": {
+                "fixed_overhead_chars": FIXED_OVERHEAD_CHARS,
+                "description_chars": total_chars - FIXED_OVERHEAD_CHARS,
+                "file_read_chars": file_read_chars,
+                "edit_space_chars": 0,
+                "advisory_chars": 0,
+                "total_chars": total_chars,
+            },
+        }
+
+    def _make_phase(self, phase_name, tasks, avg_per_task):
+        """Build a minimal phase dict with phase_cost_summary."""
+        total = sum(t["context_cost_estimate"]["total_chars"] for t in tasks)
+        max_task = max(t["context_cost_estimate"]["total_chars"] for t in tasks)
+        min_task = min(t["context_cost_estimate"]["total_chars"] for t in tasks)
+        return {
+            "phase_number": 1,
+            "phase_name": phase_name,
+            "objective": "",
+            "files": [],
+            "tasks": tasks,
+            "phase_cost_summary": {
+                "total_chars": total,
+                "avg_per_task": avg_per_task,
+                "max_task": max_task,
+                "min_task": min_task,
+            },
+        }
+
+    def test_summary_header_in_stderr(self, capsys):
+        """Output should include 'Context cost summary:' header on stderr."""
+        tasks = [self._make_task("Add x", 30000)]
+        phase = self._make_phase("Core", tasks, avg_per_task=30000)
+        result = self._make_result([phase])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "Context cost summary:" in captured.err
+
+    def test_phase_name_appears_in_output(self, capsys):
+        """Phase name should appear in the summary table."""
+        tasks = [self._make_task("Add x", 30000)]
+        phase = self._make_phase("MyPhase", tasks, avg_per_task=30000)
+        result = self._make_result([phase])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "MyPhase" in captured.err
+
+    def test_task_count_appears_in_output(self, capsys):
+        """Task count should appear in the summary table."""
+        tasks = [
+            self._make_task("Add x", 30000),
+            self._make_task("Update y", 30000),
+            self._make_task("Fix z", 30000),
+        ]
+        phase = self._make_phase("Core", tasks, avg_per_task=30000)
+        result = self._make_result([phase])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "3" in captured.err
+
+    def test_no_warning_when_no_outliers(self, capsys):
+        """No 'WARNING:' line should appear when all tasks are within threshold."""
+        tasks = [
+            self._make_task("Add x", 30000),
+            self._make_task("Add y", 32000),
+        ]
+        # avg = 31000; max = 32000 < 2 * 31000 = 62000 — no warning
+        phase = self._make_phase("Core", tasks, avg_per_task=31000)
+        result = self._make_result([phase])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "WARNING" not in captured.err
+
+    def test_warning_when_task_exceeds_2x_avg(self, capsys):
+        """A 'WARNING:' line should appear for tasks > 2x the phase avg."""
+        tasks = [
+            self._make_task("Add x", 10000),
+            self._make_task("Implement giant feature", 60000),
+        ]
+        # avg = 35000; 60000 > 2 * 35000? No. Let's make avg=10000 and outlier=25000
+        tasks = [
+            self._make_task("Add x", 10000),
+            self._make_task("Implement giant feature", 25000),
+        ]
+        # avg_per_task = 10000 (simulate — 25000 > 2 * 10000 = 20000 → warning)
+        phase = self._make_phase("Core", tasks, avg_per_task=10000)
+        result = self._make_result([phase])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err
+        assert "Implement giant feature" in captured.err
+
+    def test_warning_includes_task_subject(self, capsys):
+        """Warning message should identify the specific oversized task."""
+        tasks = [
+            self._make_task("Small task", 5000),
+            self._make_task("Huge refactor task", 30000),
+        ]
+        # avg = 5000; 30000 > 2 * 5000 = 10000 → warning
+        phase = self._make_phase("Core", tasks, avg_per_task=5000)
+        result = self._make_result([phase])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "Huge refactor task" in captured.err
+
+    def test_empty_phases_no_output(self, capsys):
+        """Empty phases list should produce no output."""
+        result = self._make_result([])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out == ""
+
+    def test_output_goes_to_stderr_not_stdout(self, capsys):
+        """All diagnostic output should go to stderr, not stdout."""
+        tasks = [self._make_task("Add x", 30000)]
+        phase = self._make_phase("Core", tasks, avg_per_task=30000)
+        result = self._make_result([phase])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert len(captured.err) > 0
+
+
+class TestPrintSizingDiagnostics:
+    """Tests for print_sizing_diagnostics() output format and warning thresholds."""
+
+    def _make_result_with_tasks(self, task_totals: list[int]) -> dict:
+        """Build a minimal result dict with the specified task total_chars values."""
+        tasks = []
+        for i, total in enumerate(task_totals):
+            tasks.append({
+                "id": f"task-{i+1}",
+                "subject": f"Task {i+1}",
+                "context_cost_estimate": {
+                    "fixed_overhead_chars": FIXED_OVERHEAD_CHARS,
+                    "description_chars": 100,
+                    "file_read_chars": 0,
+                    "edit_space_chars": 0,
+                    "advisory_chars": 0,
+                    "total_chars": total,
+                },
+            })
+        avg = int(sum(task_totals) / len(task_totals)) if task_totals else 0
+        phase_cost_summary = {
+            "total_chars": sum(task_totals),
+            "avg_per_task": avg,
+            "max_task": max(task_totals) if task_totals else 0,
+            "min_task": min(task_totals) if task_totals else 0,
+        }
+        return {
+            "plan_checksum": "test",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "phases": [{
+                "phase_number": 1,
+                "phase_name": "Test Phase",
+                "objective": "Test",
+                "files": [],
+                "tasks": tasks,
+                "phase_cost_summary": phase_cost_summary,
+            }],
+        }
+
+    def test_empty_phases_produces_no_output(self, capsys):
+        """With no phases, diagnostics should output nothing."""
+        print_sizing_diagnostics({"phases": []})
+        captured = capsys.readouterr()
+        assert captured.err == ""
+
+    def test_summary_header_in_output(self, capsys):
+        """Output should include 'Context cost summary:' header."""
+        result = self._make_result_with_tasks([30000, 40000])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "Context cost summary:" in captured.err
+
+    def test_phase_name_in_output(self, capsys):
+        """Phase name should appear in the summary table."""
+        result = self._make_result_with_tasks([30000, 40000])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "Test Phase" in captured.err
+
+    def test_task_count_in_output(self, capsys):
+        """Task count should appear in the summary table."""
+        result = self._make_result_with_tasks([30000, 40000])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "2" in captured.err
+
+    def test_no_warning_when_tasks_below_threshold(self, capsys):
+        """No warning when no task exceeds 2x the phase avg."""
+        # avg = (20000 + 30000) / 2 = 25000; max = 30000 < 2 * 25000 = 50000
+        result = self._make_result_with_tasks([20000, 30000])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "WARNING" not in captured.err
+
+    def test_warning_when_task_exceeds_2x_avg(self, capsys):
+        """WARNING should appear when a task's total_chars exceeds 2x the phase avg."""
+        # avg = (10000 + 10000 + 90000) / 3 = ~36666; 90000 > 2 * 36666 = 73333
+        result = self._make_result_with_tasks([10000, 10000, 90000])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err
+
+    def test_warning_identifies_oversized_task_subject(self, capsys):
+        """Warning message should include the oversized task's subject."""
+        result = self._make_result_with_tasks([10000, 10000, 90000])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "Task 3" in captured.err
+
+    def test_warning_suggests_splitting(self, capsys):
+        """Warning message should suggest splitting."""
+        result = self._make_result_with_tasks([10000, 10000, 90000])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "consider splitting" in captured.err
+
+    def test_output_goes_to_stderr_not_stdout(self, capsys):
+        """All diagnostic output should go to stderr, not stdout."""
+        result = self._make_result_with_tasks([30000, 40000])
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert len(captured.err) > 0
+
+    def test_exactly_2x_avg_does_not_trigger_warning(self, capsys):
+        """A task at exactly 2x avg should NOT trigger a warning (threshold is strictly >2x)."""
+        # avg = (10000 + 30000) / 2 = 20000; 40000 would be 2x avg — use 40000
+        result = self._make_result_with_tasks([10000, 30000])
+        # avg = 20000, max = 30000 which is 1.5x avg, not >2x
+        print_sizing_diagnostics(result)
+        captured = capsys.readouterr()
+        assert "WARNING" not in captured.err
+
+
+# --- Fixtures for Scope/Verification and annotation warning tests ---
+
+SCOPE_AND_VERIFICATION_PLAN = """\
+# Feature SV
+
+## Goal
+Feature with scope and verification fields.
+
+## Phases
+
+### Phase 1: Setup
+**Objective:** Create scaffolding
+**Files:** `src/config.ts`
+**Scope:**
+- Do not modify: `src/other.ts`
+- Output contract: config schema must remain backward-compatible
+**Verification:**
+- existing tests pass unchanged
+- lore work regen-tasks produces no outlier tasks
+- [ ] Create config file
+- [ ] Add default values
+"""
+
+SCOPE_ONLY_PLAN = """\
+# Feature Scope
+
+## Goal
+Feature with scope but no verification.
+
+## Phases
+
+### Phase 1: Setup
+**Objective:** Create scaffolding
+**Files:** `src/config.ts`
+**Scope:**
+- Do not modify: `src/auth.ts`
+- [ ] Create config file
+"""
+
+VERIFICATION_ONLY_PLAN = """\
+# Feature Verif
+
+## Goal
+Feature with verification but no scope.
+
+## Phases
+
+### Phase 1: Setup
+**Objective:** Create scaffolding
+**Files:** `src/config.ts`
+**Verification:**
+- run pytest and confirm all tests pass
+- [ ] Create config file
+"""
+
+PRESCRIPTIVE_WITH_KNOWLEDGE_PLAN = """\
+# Feature Prescriptive
+
+## Goal
+Prescriptive phase with knowledge context — should NOT trigger annotation warning.
+
+## Phases
+
+### Phase 1: Setup
+**Objective:** Mechanical edits
+**Files:** `src/config.ts`
+**Task format:** prescriptive
+**Knowledge context:**
+- [[knowledge:conventions#Config Patterns]] — follow this
+- [ ] Insert config key at line 42
+"""
+
+INTENT_WITH_KNOWLEDGE_PLAN = """\
+# Feature Intent
+
+## Goal
+Intent-based phase with annotation-only knowledge context — SHOULD trigger warning.
+
+## Phases
+
+### Phase 1: Setup
+**Objective:** Implement feature
+**Files:** `src/feature.ts`
+**Knowledge context:**
+- [[knowledge:conventions#Feature Patterns]] — understand before modifying
+- [ ] Implement rate limiting middleware
+"""
+
+INTENT_WITH_FULL_DELIVERY_PLAN = """\
+# Feature Intent Full
+
+## Goal
+Intent-based phase with full knowledge delivery — should NOT trigger annotation warning.
+
+## Phases
+
+### Phase 1: Setup
+**Objective:** Implement feature
+**Files:** `src/feature.ts`
+**Knowledge delivery:** full
+**Knowledge context:**
+- [[knowledge:conventions#Feature Patterns]] — understand before modifying
+- [ ] Implement rate limiting middleware
+"""
+
+TEMPLATE_PLACEHOLDER_SCOPE_PLAN = """\
+# Feature Template
+
+## Goal
+Phase where scope/verification fields have template placeholder values.
+
+## Phases
+
+### Phase 1: Setup
+**Objective:** Create scaffolding
+**Files:** `src/config.ts`
+**Scope:**
+- Do not modify: `path/to/file`
+- Output contract: <what the phase must produce without changing>
+**Verification:**
+- <criterion 1 — e.g., "existing tests pass unchanged">
+- <criterion 2 — e.g., "lore work regen-tasks produces no outlier tasks">
+- [ ] Create config file
+"""
+
+
+class TestScopeField:
+    """Scope field extraction and emission in task descriptions."""
+
+    def test_scope_lines_appear_in_description(self, tmp_path):
+        """Scope lines should appear in task descriptions."""
+        result = generate_tasks_from_plan(SCOPE_AND_VERIFICATION_PLAN, str(tmp_path))
+        task = result["phases"][0]["tasks"][0]
+        assert "**Scope:**" in task["description"]
+        assert "Do not modify: `src/other.ts`" in task["description"]
+        assert "Output contract: config schema must remain backward-compatible" in task["description"]
+
+    def test_scope_appears_after_task_before_prior_knowledge(self, tmp_path):
+        """Scope block should appear between **Task:** and ## Prior Knowledge."""
+        result = generate_tasks_from_plan(SCOPE_AND_VERIFICATION_PLAN, str(tmp_path))
+        task = result["phases"][0]["tasks"][0]
+        desc = task["description"]
+        task_pos = desc.find("**Task:**")
+        scope_pos = desc.find("**Scope:**")
+        prior_knowledge_pos = desc.find("## Prior Knowledge")
+        assert task_pos < scope_pos
+        if prior_knowledge_pos != -1:
+            assert scope_pos < prior_knowledge_pos
+
+    def test_no_scope_field_produces_no_scope_in_description(self, tmp_path):
+        """Phases without **Scope:** should not add scope to descriptions."""
+        result = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                assert "**Scope:**" not in task["description"]
+
+    def test_template_placeholder_scope_excluded(self, tmp_path):
+        """Template placeholder scope lines should not appear in descriptions."""
+        result = generate_tasks_from_plan(TEMPLATE_PLACEHOLDER_SCOPE_PLAN, str(tmp_path))
+        task = result["phases"][0]["tasks"][0]
+        desc = task["description"]
+        assert "path/to/file" not in desc
+        assert "<what the phase" not in desc
+
+    def test_scope_only_no_verification(self, tmp_path):
+        """A phase with scope but no verification should include scope without verification."""
+        result = generate_tasks_from_plan(SCOPE_ONLY_PLAN, str(tmp_path))
+        task = result["phases"][0]["tasks"][0]
+        assert "**Scope:**" in task["description"]
+        assert "**Verification:**" not in task["description"]
+
+
+class TestVerificationField:
+    """Verification field extraction and emission in task descriptions."""
+
+    def test_verification_lines_appear_in_description(self, tmp_path):
+        """Verification lines should appear in task descriptions."""
+        result = generate_tasks_from_plan(SCOPE_AND_VERIFICATION_PLAN, str(tmp_path))
+        task = result["phases"][0]["tasks"][0]
+        assert "**Verification:**" in task["description"]
+        assert "existing tests pass unchanged" in task["description"]
+        assert "lore work regen-tasks produces no outlier tasks" in task["description"]
+
+    def test_verification_plain_bullets_not_parsed_as_tasks(self, tmp_path):
+        """Verification plain bullet lines must not create extra tasks."""
+        result = generate_tasks_from_plan(SCOPE_AND_VERIFICATION_PLAN, str(tmp_path))
+        total_tasks = sum(len(p["tasks"]) for p in result["phases"])
+        assert total_tasks == 2  # only the two - [ ] checkboxes
+
+    def test_no_verification_field_produces_no_verification_in_description(self, tmp_path):
+        """Phases without **Verification:** should not add verification to descriptions."""
+        result = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                assert "**Verification:**" not in task["description"]
+
+    def test_template_placeholder_verification_excluded(self, tmp_path):
+        """Template placeholder verification lines should not appear in descriptions."""
+        result = generate_tasks_from_plan(TEMPLATE_PLACEHOLDER_SCOPE_PLAN, str(tmp_path))
+        task = result["phases"][0]["tasks"][0]
+        desc = task["description"]
+        assert "<criterion 1" not in desc
+        assert "<criterion 2" not in desc
+
+    def test_verification_only_no_scope(self, tmp_path):
+        """A phase with verification but no scope should include verification without scope."""
+        result = generate_tasks_from_plan(VERIFICATION_ONLY_PLAN, str(tmp_path))
+        task = result["phases"][0]["tasks"][0]
+        assert "**Verification:**" in task["description"]
+        assert "**Scope:**" not in task["description"]
+
+
+class TestAnnotationWarning:
+    """Annotation quality warning for intent-based phases with annotation-only delivery."""
+
+    def test_intent_with_annotation_only_triggers_warning(self, tmp_path):
+        """Intent-based phase with annotation-only delivery should include warning."""
+        result = generate_tasks_from_plan(INTENT_WITH_KNOWLEDGE_PLAN, str(tmp_path))
+        task = result["phases"][0]["tasks"][0]
+        assert "intent+constraints" in task["description"]
+        assert "annotation-only" in task["description"]
+
+    def test_prescriptive_with_annotation_only_no_warning(self, tmp_path):
+        """Prescriptive phase should NOT trigger annotation warning even with annotation-only delivery."""
+        result = generate_tasks_from_plan(PRESCRIPTIVE_WITH_KNOWLEDGE_PLAN, str(tmp_path))
+        task = result["phases"][0]["tasks"][0]
+        assert "annotation-only" not in task["description"]
+
+    def test_intent_with_full_delivery_no_warning(self, tmp_path):
+        """Intent-based phase with full delivery should NOT trigger annotation warning."""
+        result = generate_tasks_from_plan(INTENT_WITH_FULL_DELIVERY_PLAN, str(tmp_path))
+        task = result["phases"][0]["tasks"][0]
+        assert "annotation-only" not in task["description"]
+
+    def test_intent_without_knowledge_context_no_warning(self, tmp_path):
+        """Intent-based phase with no knowledge context should NOT trigger warning (no backlinks)."""
+        result = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                assert "annotation-only" not in task["description"]
+
+
+class TestCrossTierDeduplication:
+    """Cross-tier deduplication in build_context_section() display output.
+
+    Assertions are scoped to the ## Context display block (before ## Prior Knowledge)
+    to avoid false positives from the resolved backlinks section.
+    """
+
+    @staticmethod
+    def _display_block(result: str) -> str:
+        """Extract the ## Context display block, stopping before ## Prior Knowledge."""
+        prior_marker = "## Prior Knowledge"
+        if prior_marker in result:
+            return result[: result.index(prior_marker)]
+        return result
+
+    def test_phase_and_cross_cutting_dedup(self, tmp_path):
+        """Backlink in both phase and cross-cutting appears only once under 'Phase-level:'."""
+        shared = "knowledge:conventions"
+        result = build_context_section(
+            phase_backlinks=[shared],
+            cross_cutting_backlinks=[shared],
+            knowledge_dir=str(tmp_path),
+            script_dir="",
+        )
+        display = self._display_block(result)
+        assert display.count(f"[[{shared}]]") == 1
+        assert "Phase-level:" in display
+        assert "Cross-cutting:" not in display
+
+    def test_task_and_phase_dedup(self, tmp_path):
+        """Backlink in both task and phase appears only once under 'Task-level:'."""
+        shared = "knowledge:conventions"
+        result = build_context_section(
+            phase_backlinks=[shared],
+            cross_cutting_backlinks=[],
+            knowledge_dir=str(tmp_path),
+            script_dir="",
+            task_backlinks=[shared],
+        )
+        display = self._display_block(result)
+        assert display.count(f"[[{shared}]]") == 1
+        assert "Task-level:" in display
+        assert "Phase-level:" not in display
+
+    def test_all_three_tiers_dedup(self, tmp_path):
+        """Backlink in task, phase, and cross-cutting appears only once under 'Task-level:'."""
+        shared = "knowledge:conventions"
+        result = build_context_section(
+            phase_backlinks=[shared],
+            cross_cutting_backlinks=[shared],
+            knowledge_dir=str(tmp_path),
+            script_dir="",
+            task_backlinks=[shared],
+        )
+        display = self._display_block(result)
+        assert display.count(f"[[{shared}]]") == 1
+        assert "Task-level:" in display
+        assert "Phase-level:" not in display
+        assert "Cross-cutting:" not in display
+
+    def test_tier_label_omitted_when_all_entries_deduplicated(self, tmp_path):
+        """Tier label is omitted when all its entries are deduplicated away."""
+        shared = "knowledge:conventions"
+        unique_phase = "knowledge:architecture"
+        result = build_context_section(
+            phase_backlinks=[shared, unique_phase],
+            cross_cutting_backlinks=[shared],
+            knowledge_dir=str(tmp_path),
+            script_dir="",
+        )
+        display = self._display_block(result)
+        # shared appears only in Phase-level (higher priority)
+        assert display.count(f"[[{shared}]]") == 1
+        assert "Phase-level:" in display
+        # Cross-cutting label should be omitted since its only entry was deduped
+        assert "Cross-cutting:" not in display
+
+
+# --- Cross-phase file-based blocking fixtures ---
+
+CROSS_PHASE_SHARED_FILE_PLAN = """\
+# Feature: Cross-Phase File Blocking
+
+## Goal
+Test that cross-phase deps are created only for tasks sharing a file target.
+
+## Phases
+
+### Phase 1: Setup
+**Objective:** Create the shared file
+**Files:** `src/shared.ts`
+- [ ] Create shared module
+
+### Phase 2: Extension
+**Objective:** Extend and add
+**Files:** `src/shared.ts`, `src/other.ts`
+- [ ] Extend shared module in `src/shared.ts`
+- [ ] Add other module in `src/other.ts`
+"""
+
+THREE_PHASE_SKIP_LEVEL_PLAN = """\
+# Feature: Three Phase Skip-Level
+
+## Goal
+Test that Phase 3 task is blocked by Phase 1 task (not Phase 2) via shared file.
+
+## Phases
+
+### Phase 1: Create
+**Objective:** Create shared file
+**Files:** `src/shared.ts`
+- [ ] Create shared module
+
+### Phase 2: Middle
+**Objective:** Work on a different file
+**Files:** `src/middle.ts`
+- [ ] Add middle module
+
+### Phase 3: Revisit
+**Objective:** Revisit shared file
+**Files:** `src/shared.ts`
+- [ ] Update shared module
+"""
+
+
+class TestCrossPhaseFileBasedBlocking:
+    """Cross-phase deps are created only for tasks sharing a file target."""
+
+    def test_shared_file_task_blocked_by_phase1_task(self, tmp_path):
+        """Phase 2 task targeting src/shared.ts should be blocked by Phase 1 task."""
+        result = generate_tasks_from_plan(CROSS_PHASE_SHARED_FILE_PLAN, str(tmp_path))
+        phase1_tasks = result["phases"][0]["tasks"]
+        phase2_tasks = result["phases"][1]["tasks"]
+        # Phase 2 first task targets src/shared.ts — same as Phase 1 task
+        shared_task = next(t for t in phase2_tasks if "Extend shared" in t["subject"])
+        assert phase1_tasks[0]["id"] in shared_task["blockedBy"]
+
+    def test_other_file_task_not_blocked_by_phase1(self, tmp_path):
+        """Phase 2 task targeting src/other.ts should NOT be blocked by Phase 1 task."""
+        result = generate_tasks_from_plan(CROSS_PHASE_SHARED_FILE_PLAN, str(tmp_path))
+        phase1_tasks = result["phases"][0]["tasks"]
+        phase2_tasks = result["phases"][1]["tasks"]
+        # Phase 2 second task targets src/other.ts — different from Phase 1 target
+        other_task = next(t for t in phase2_tasks if "other module" in t["subject"])
+        for p1t in phase1_tasks:
+            assert p1t["id"] not in other_task["blockedBy"]
+
+    def test_other_file_task_has_empty_blocked_by(self, tmp_path):
+        """Phase 2 task targeting a new file should have empty blockedBy."""
+        result = generate_tasks_from_plan(CROSS_PHASE_SHARED_FILE_PLAN, str(tmp_path))
+        phase2_tasks = result["phases"][1]["tasks"]
+        other_task = next(t for t in phase2_tasks if "other module" in t["subject"])
+        assert other_task["blockedBy"] == []
+
+    def test_phase1_task_not_blocked(self, tmp_path):
+        """Phase 1 task has no predecessors — should be unblocked."""
+        result = generate_tasks_from_plan(CROSS_PHASE_SHARED_FILE_PLAN, str(tmp_path))
+        phase1_tasks = result["phases"][0]["tasks"]
+        assert phase1_tasks[0]["blockedBy"] == []
+
+
+class TestThreePhaseSkipLevelBlocking:
+    """Phase 3 task sharing a file with Phase 1 (but not Phase 2) blocks correctly."""
+
+    def test_phase3_task_blocked_by_phase1_task(self, tmp_path):
+        """Phase 3 task targeting src/shared.ts should be blocked by Phase 1 task."""
+        result = generate_tasks_from_plan(THREE_PHASE_SKIP_LEVEL_PLAN, str(tmp_path))
+        phase1_tasks = result["phases"][0]["tasks"]
+        phase3_tasks = result["phases"][2]["tasks"]
+        # Phase 3 targets src/shared.ts — same as Phase 1, different from Phase 2
+        assert phase1_tasks[0]["id"] in phase3_tasks[0]["blockedBy"]
+
+    def test_phase3_task_not_blocked_by_phase2_task(self, tmp_path):
+        """Phase 3 task should NOT be blocked by Phase 2 task (different files)."""
+        result = generate_tasks_from_plan(THREE_PHASE_SKIP_LEVEL_PLAN, str(tmp_path))
+        phase2_tasks = result["phases"][1]["tasks"]
+        phase3_tasks = result["phases"][2]["tasks"]
+        for p2t in phase2_tasks:
+            assert p2t["id"] not in phase3_tasks[0]["blockedBy"]
+
+    def test_phase2_task_not_blocked(self, tmp_path):
+        """Phase 2 task targets src/middle.ts — no shared file with Phase 1."""
+        result = generate_tasks_from_plan(THREE_PHASE_SKIP_LEVEL_PLAN, str(tmp_path))
+        phase2_tasks = result["phases"][1]["tasks"]
+        assert phase2_tasks[0]["blockedBy"] == []
+
+    def test_phase1_task_not_blocked(self, tmp_path):
+        """Phase 1 task is the root — unblocked."""
+        result = generate_tasks_from_plan(THREE_PHASE_SKIP_LEVEL_PLAN, str(tmp_path))
+        phase1_tasks = result["phases"][0]["tasks"]
+        assert phase1_tasks[0]["blockedBy"] == []
+
+
+class TestComputeRecommendedWorkers:
+    """Unit tests for compute_recommended_workers()."""
+
+    def test_empty_list_returns_zero(self):
+        """Empty task list should return 0."""
+        assert compute_recommended_workers([]) == 0
+
+    def test_single_task_returns_one(self):
+        """Single task with no deps returns 1."""
+        tasks = [{"id": "task-1", "blockedBy": []}]
+        assert compute_recommended_workers(tasks) == 1
+
+    def test_fully_parallel_returns_task_count(self):
+        """N tasks with no deps should return N (all at level 0)."""
+        tasks = [{"id": f"task-{i}", "blockedBy": []} for i in range(1, 5)]
+        assert compute_recommended_workers(tasks) == 4
+
+    def test_sequential_chain_returns_one(self):
+        """A fully sequential chain (each task blocked by previous) returns 1."""
+        tasks = [
+            {"id": "task-1", "blockedBy": []},
+            {"id": "task-2", "blockedBy": ["task-1"]},
+            {"id": "task-3", "blockedBy": ["task-2"]},
+            {"id": "task-4", "blockedBy": ["task-3"]},
+        ]
+        assert compute_recommended_workers(tasks) == 1
+
+    def test_mixed_dag_cross_phase_file_deps(self, tmp_path):
+        """Plan with cross-phase file deps returns correct DAG width."""
+        result = generate_tasks_from_plan(CROSS_PHASE_SHARED_FILE_PLAN, str(tmp_path))
+        # Phase 1: 1 task (root)
+        # Phase 2: shared task (blocked by p1 task), other task (unblocked)
+        # Level 0: [phase1-task, other-task] = 2 tasks
+        # Level 1: [shared-task] = 1 task
+        # Max width = 2
+        assert result["recommended_workers"] == 2
+
+    def test_recommended_workers_in_result(self, tmp_path):
+        """generate_tasks_from_plan result should include recommended_workers key."""
+        result = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
+        assert "recommended_workers" in result
+        assert isinstance(result["recommended_workers"], int)
+        assert result["recommended_workers"] >= 0
+
+    def test_two_level_diamond_dag(self):
+        """Diamond DAG: two parallel tasks feeding into one — max width is 2."""
+        tasks = [
+            {"id": "task-1", "blockedBy": []},
+            {"id": "task-2", "blockedBy": []},
+            {"id": "task-3", "blockedBy": ["task-1", "task-2"]},
+        ]
+        assert compute_recommended_workers(tasks) == 2

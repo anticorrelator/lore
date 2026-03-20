@@ -158,7 +158,7 @@ Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). D
         | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
       ```
 
-5. **Spawn worker agents** — launch `min(task_count, 4)` in a single message. Use the **worker** agent definition (`~/.claude/agents/worker.md`) as the base prompt, with these template injections:
+5. **Spawn worker agents** — launch `min(recommended_workers, 4)` workers in a single message, where `recommended_workers` is the top-level field from `tasks.json` (fallback: `min(task_count, 4)` if the field is absent, for backward compatibility with old `tasks.json` files). Use the **worker** agent definition (`~/.claude/agents/worker.md`) as the base prompt, with these template injections:
    - `{{team_name}}` → `impl-<slug>`
    - `{{team_lead}}` → the lead name read from team config in Step 2
    - `{{prior_knowledge}}` → the `$PRIOR_KNOWLEDGE` block from Step 3.1 (or empty if tasks have pre-resolved knowledge)
@@ -191,11 +191,11 @@ As worker messages arrive (delivered automatically):
 
    **Write execution log entry** — immediately after `lore work check`, append to `execution-log.md`:
    ```bash
-   printf 'Task: %s\nChanges: %s\nDiscoveries: %s\nTest result: %s\n' \
-     "<task-subject>" "<worker Changes field>" "<worker Discoveries field>" "<passed|failed|skipped>" \
+   printf 'Task: %s\nChanges: %s\nSkills: %s\nDiscoveries: %s\nTest result: %s\n' \
+     "<task-subject>" "<worker Changes field>" "<worker Skills used field>" "<worker Discoveries field>" "<passed|failed|skipped>" \
      | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
    ```
-   Use the worker's reported **Changes:** and **Discoveries:** fields verbatim. If the worker did not report a test result, use `skipped`. `execution-log.md` is created on first write.
+   Use the worker's reported **Changes:**, **Skills used:**, and **Discoveries:** fields verbatim. If the worker did not report a test result, use `skipped`. If the worker did not report a Skills used field, use `None`. `execution-log.md` is created on first write.
 
 2. **Log architectural findings** — note interesting patterns reported by workers for Step 5
 3. **Handle blockers** — if a worker reports blockers:

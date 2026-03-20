@@ -137,11 +137,13 @@ What did workers need that wasn't in the store? Look for: workers who reported s
 
 **Trivial-scope D3=5 note:** For small, single-phase, single-file work items (≤4 tasks, 1-2 target files), D3=5 is trivially achievable — the scope is too narrow to expose knowledge gaps. When scoring D3=5 on such work items, note "trivial scope — gap dimension low-signal" in the narrative. This is not a scoring error but a reduced-confidence indicator. Do not artificially lower the score — just flag it so trend analysis across retros can weight it appropriately.
 
+**Novel-vs-coverage split:** When mid-cycle captures include a mix of genuinely novel discoveries and coverage failures, weight coverage failures more heavily than novel discoveries. A cycle with 2 captures where both are genuinely novel (first-time observation of a runtime behavior never encountered in the codebase) scores D3=4; a cycle with 2 captures where both are coverage failures (pattern exists elsewhere in codebase but wasn't captured) scores D3=3. Mixed cycles: count coverage failures for the primary score, then note novel discoveries as expected and non-penalizing.
+
 **Scoring:**
 - 5: No significant gaps — workers found everything they needed
-- 4: One minor gap that didn't slow work
-- 3: One significant gap or several minor ones
-- 2: Multiple gaps; workers did significant manual exploration
+- 4: One minor gap that didn't slow work, OR only genuinely novel discoveries (not coverage failures)
+- 3: One significant coverage failure or several minor ones (patterns that should have been in the store)
+- 2: Multiple coverage failures; workers did significant manual exploration
 - 1: Workers essentially worked without knowledge system support
 
 ### Dimension 4 — Plan-Knowledge Alignment
@@ -157,22 +159,24 @@ Did the plan's design decisions reference knowledge entries that actually influe
 - 2: Plan cited knowledge entries but implementation diverged significantly. For reviews: knowledge was stale and needed correction from review findings
 - 1: No meaningful alignment between plan knowledge and actual work
 
-### Dimension 5 — Overall Delta
+### Dimension 5 — Spec Utility
 
-Would this work cycle have gone meaningfully differently without the memory system? Be honest. Consider three value dimensions: (1) **mistake prevention** — design rationale that guided workers toward correct implementation choices on the first attempt, (2) **token efficiency** — eliminated unnecessary code reading, file exploration, or re-discovery, (3) **outcome quality** — better design from knowledge-informed decisions.
+Did the spec give workers sufficient guidance that they needed less independent exploration than raw codebase reading would have required?
 
-Workers who read code *with* design rationale ("we're resisting instruction fade via structural enforcement") make different implementation choices than workers who read the same code cold and infer intent. Even when workers must still read the actual files, the "why" context prevents wrong-path explorations and produces first-attempt accuracy. "Would have figured it out" understates the value — figuring out WHAT code does is different from understanding WHY a design choice was made.
-
-**Delivery-mode calibration:** Token efficiency estimates depend on which delivery mode was used. For annotation-only phases, do not apply file-read-replacement estimates — score based on orientation value (wrong-path prevention, first-attempt accuracy, context window savings from not loading full content). For full-resolution phases, file-read-replacement estimates apply as before.
+**Evidence sources:** Read execution-log entries and worker completion reports. Look for:
+- **Worker escalations** — workers who sent messages asking for clarification or raised blockers (each escalation signals a gap in spec guidance)
+- **Out-of-scope file reads** — workers who read files not listed in the phase's `**Files:**` or `**Scope:**` fields (signals that spec didn't provide sufficient orientation; discount reads of obvious shared utilities like lib.sh)
+- **Divergent implementation choices** — workers who chose a different approach than the spec suggested (check execution-log Observations or worker completion report Discoveries fields for "I did X instead of Y")
+- **Unexpected discoveries** — execution-log Observations fields reporting non-obvious patterns workers had to discover themselves (signals gaps in spec context that knowledge delivery should have covered)
 
 **Scoring:**
-- 5: Memory system was essential — prevented significant mistakes, produced first-attempt accuracy across workers. For full-resolution: >10 file reads prevented, ~20k+ tokens saved. For annotation-only: framing demonstrably guided correct approach choices on first attempt, or prevented known wrong-path that would have required backtracking.
-- 4: Clear quality improvement — workers made correct implementation choices guided by design rationale. For full-resolution: 5-10 file reads prevented, ~10-20k tokens. For annotation-only: evidence of orientation effect in implementation output (correct patterns, no detours), plus context window savings from annotation-only delivery (~2k-4k tokens per task not loaded).
-- 3: Moderate value — saved meaningful exploration time. For full-resolution: 2-5 file reads prevented, ~5-10k tokens. For annotation-only: annotations delivered but filing-facing (workers received structure without actionable framing); or design rationale provided but didn't measurably change worker choices.
-- 2: Marginal — system was consulted but impact was minimal. For full-resolution: <2 file reads prevented, <5k tokens. For annotation-only: high empty-annotation rate meant framing was absent; or work cycle too short for orientation value to materialize.
-- 1: No measurable impact — work would have been identical without it.
+- 5: Workers needed no out-of-scope exploration — all decisions were spec-guided. Zero escalations. No unexpected discoveries that spec should have anticipated. Workers' Observations confirm spec context was sufficient.
+- 4: Workers made one or two out-of-scope reads for minor orientation, or one escalation, but implementations matched spec intent. Unexpected discoveries were genuinely novel (not spec gaps).
+- 3: Workers made several out-of-scope reads or had 2-3 escalations. Some divergent choices. Unexpected discoveries suggest the spec left workers to infer context the spec author had but didn't encode.
+- 2: Workers frequently explored beyond spec-listed files or escalated repeatedly. Multiple divergent choices. Spec provided task decomposition but insufficient guidance — workers essentially re-investigated the codebase independently.
+- 1: Spec provided no meaningful guidance beyond task names. Workers did all orientation themselves. Equivalent to receiving a task list with no context.
 
-**Interpretation notes:** See `failure-modes.md` section D for Delta modifiers (plumbing-vs-value gap, meta-work, prototype-cascade, knowledge saturation). Key calibration: "would have figured it out" is not neutral if figuring it out costs thousands of tokens. Count file reads prevented (each ~500-2000 tokens), grep cycles avoided, wrong-path explorations short-circuited. Score Delta based on the full work cycle including spec, not just implementation.
+**Interpretation notes:** See `failure-modes.md` section D for Spec Utility modifiers. Out-of-scope reads for obviously-shared utilities (lib.sh, test fixtures) should not count against the score. Divergent choices are only penalties when the spec had a clear intent that workers ignored — if the spec was silent on approach, worker divergence is expected. A spec that achieves 5 on this dimension has converted knowledge into structural guidance workers followed without independent re-investigation.
 
 ## Step 4: Write Journal Entry
 
@@ -180,7 +184,7 @@ Workers who read code *with* design rationale ("we're resisting instruction fade
 
 ```bash
 lore journal write \
-  --observation "Delivery: X/5 | Quality: X/5 | Gaps: X/5 | Alignment: X/5 | Delta: X/5. Key finding: <one sentence summary of most important insight>. Most actionable gap: <specific gap that should be addressed>." \
+  --observation "Delivery: X/5 | Quality: X/5 | Gaps: X/5 | Alignment: X/5 | Spec Utility: X/5. Key finding: <one sentence summary of most important insight>. Most actionable gap: <specific gap that should be addressed>." \
   --context "retro: <slug>" \
   --work-item "<slug>" \
   --role "retro"
@@ -204,7 +208,7 @@ Consult `skills/retro/failure-modes.md` when scoring reveals anomalies. It catal
 - **B. Lead bypass** — full, pointer, justified, with evidence availability notes (affects Dim 1, 5)
 - **C. Cold-start and prefetch failures** — domain gaps, silent tool failures, spec-cycle tracking (affects Dim 1, 3)
 - **C2. Spec investigation factual errors** — lifecycle misclassification, duplication overestimates, caller count errors (affects Dim 3, 4)
-- **D. Delta modifiers** — prototype-cascade, knowledge saturation, meta-work, plumbing-vs-value gap (affects Dim 5)
+- **D. Spec Utility modifiers** — prototype-cascade, knowledge saturation, meta-work, plumbing-vs-value gap, prescriptive micro-scope ceiling (affects Dim 5)
 
 Record all changes in the journal entry and the report.
 
@@ -212,7 +216,7 @@ Record all changes in the journal entry and the report.
 
 ```
 [retro] <slug>
-  Delivery: X/5 | Quality: X/5 | Gaps: X/5 | Alignment: X/5 | Delta: X/5
+  Delivery: X/5 | Quality: X/5 | Gaps: X/5 | Alignment: X/5 | Spec Utility: X/5
   Key finding: <one sentence>
   Protocol changes: <what evolved>
 ```

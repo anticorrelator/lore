@@ -46,7 +46,7 @@ For on-demand advisors, consult when you have a specific question that the advis
 
 ## Report Format Addition
 
-Include an `**Advisor input:**` section in your completion report (between `**Tests:**` and `**Discoveries:**`):
+Include an `**Advisor input:**` section in your completion report (between `**Skills used:**` and `**Discoveries:**`):
 
 ```
 **Advisor input:**

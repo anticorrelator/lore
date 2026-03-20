@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # create-work.sh — Create a new work item in _work/
 # Usage: bash create-work.sh <name> [directory]
-#        bash create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>]
+#        bash create-work.sh --title <name> [--slug <slug>] [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>]
 # Creates _work/<slug>/ with _meta.json and notes.md, then updates the index.
 
 set -euo pipefail
@@ -11,6 +11,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 # --- Parse arguments (flags or positional) ---
 NAME=""
+SLUG_OVERRIDE=""
 DESCRIPTION=""
 TARGET_DIR=""
 ISSUE=""
@@ -25,6 +26,10 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
     case "$1" in
       --title)
         NAME="$2"
+        shift 2
+        ;;
+      --slug)
+        SLUG_OVERRIDE="$2"
         shift 2
         ;;
       --description)
@@ -57,7 +62,7 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
         ;;
       *)
         echo "[work] Error: Unknown flag '$1'" >&2
-        echo "Usage: create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--json] [--detect-pr]" >&2
+        echo "Usage: create-work.sh --title <name> [--slug <slug>] [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--json] [--detect-pr]" >&2
         exit 1
         ;;
     esac
@@ -113,8 +118,12 @@ if [[ ! -d "$WORK_DIR" ]]; then
   bash "$SCRIPT_DIR/init-work.sh" "$TARGET_DIR"
 fi
 
-# Slugify the name
-SLUG=$(slugify "$NAME")
+# Slugify the name (or use explicit --slug override)
+if [[ -n "$SLUG_OVERRIDE" ]]; then
+  SLUG=$(slugify "$SLUG_OVERRIDE")
+else
+  SLUG=$(slugify "$NAME")
+fi
 
 if [[ -z "$SLUG" ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
