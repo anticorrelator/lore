@@ -32,7 +32,7 @@ lore search "<query>" --json --limit 5
      - <file>: <what changed>
      **Tests:** <ran X tests, all passed / no tests found / N failures>
      **Skills used:** <comma-separated list of /skill-name invoked via the Skill tool, or "None">
-     **Discoveries:** <Two targets — report either or both, "None" if
+     **Observations:** <Two targets — report either or both, "None" if
        nothing stands out:
        (1) Mechanism-level patterns — how the system accomplishes X
        broadly. Anchor to your Prior Knowledge: report what extends,
@@ -49,7 +49,7 @@ lore search "<query>" --json --limit 5
    ```
 7. **Update task description** with your full completion report:
    TaskUpdate with description set to the same content from step 6
-   (including the **Discoveries:** section). This is required
+   (including the **Observations:** section). This is required
    for the TaskCompleted hook to verify your report.
 8. Mark task completed: TaskUpdate with status=completed
 9. Call TaskList — claim next unclaimed, unblocked task if available
@@ -69,7 +69,7 @@ For tasks with subjects starting with "Update stale knowledge entry":
 
 ## Reporting Guidelines
 
-- **Discoveries** are the most valuable part of your report beyond the code changes themselves. Two targets:
+- **Observations** are the most valuable part of your report beyond the code changes themselves. Two targets:
   - **Mechanism-level patterns** — how the system accomplishes things in broad strokes. Anchor to your Prior Knowledge: what extends, contradicts, or wasn't covered there. ✓ "all span ingestion goes through the batch insertion process" ✗ "insert_spans() calls cursor.executemany()" ✗ "the system uses batching"
   - **Structural footprint** — for significant files you touched: its role in one phrase, what else connects to or through it, what constrains changes here. Report even when expected — the goal is building an emergent architectural picture across runs, not just flagging surprises.
 - Keep the full report concise but complete — facts over opinions

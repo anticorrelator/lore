@@ -191,11 +191,11 @@ As worker messages arrive (delivered automatically):
 
    **Write execution log entry** — immediately after `lore work check`, append to `execution-log.md`:
    ```bash
-   printf 'Task: %s\nChanges: %s\nSkills: %s\nDiscoveries: %s\nTest result: %s\n' \
-     "<task-subject>" "<worker Changes field>" "<worker Skills used field>" "<worker Discoveries field>" "<passed|failed|skipped>" \
+   printf 'Task: %s\nChanges: %s\nSkills: %s\nObservations: %s\nTest result: %s\n' \
+     "<task-subject>" "<worker Changes field>" "<worker Skills used field>" "<worker Observations field>" "<passed|failed|skipped>" \
      | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
    ```
-   Use the worker's reported **Changes:**, **Skills used:**, and **Discoveries:** fields verbatim. If the worker did not report a test result, use `skipped`. If the worker did not report a Skills used field, use `None`. `execution-log.md` is created on first write.
+   Use the worker's reported **Changes:**, **Skills used:**, and **Observations:** fields verbatim. If the worker did not report a test result, use `skipped`. If the worker did not report a Skills used field, use `None`. `execution-log.md` is created on first write.
 
 2. **Log architectural findings** — note interesting patterns reported by workers for Step 5
 3. **Handle blockers** — if a worker reports blockers:
@@ -220,7 +220,7 @@ When all tasks are complete (or all remaining are blocked):
 Invoke `/remember` with capture constraints scoped to the implementation:
 
 ```
-/remember Implementation findings from <work item title> — Read all **Discoveries:** entries from execution-log.md and evaluate each against the capture gate. Two valid capture targets: (1) mechanism-level patterns — how the system accomplishes X broadly, evaluate for novelty against existing knowledge; (2) structural footprint — module roles, integration points, what connects to/through a file, what constrains changes — evaluate against existing architectural knowledge for what isn't yet recorded. Function-level details do not qualify. Also capture: cross-task patterns visible only from the lead's vantage.
+/remember Implementation findings from <work item title> — Read all **Observations:** entries from execution-log.md and evaluate each against the capture gate. Two valid capture targets: (1) mechanism-level patterns — how the system accomplishes X broadly, evaluate for novelty against existing knowledge; (2) structural footprint — module roles, integration points, what connects to/through a file, what constrains changes — evaluate against existing architectural knowledge for what isn't yet recorded. Function-level details do not qualify. Also capture: cross-task patterns visible only from the lead's vantage.
 ```
 
 ## Step 6: Cleanup and report
