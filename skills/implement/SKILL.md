@@ -177,8 +177,6 @@ Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). D
        <if advisors: contents of advisory-consultation.md with {{advisors}} resolved>
    ```
 
-6. If more tasks than workers, agents pick up additional tasks after completing their first.
-
 ## Step 4: Collect progress
 
 As worker messages arrive (delivered automatically):
@@ -191,11 +189,12 @@ As worker messages arrive (delivered automatically):
 
    **Write execution log entry** — immediately after `lore work check`, append to `execution-log.md`:
    ```bash
-   printf 'Task: %s\nChanges: %s\nSkills: %s\nObservations: %s\nTest result: %s\n' \
-     "<task-subject>" "<worker Changes field>" "<worker Skills used field>" "<worker Observations field>" "<passed|failed|skipped>" \
+   printf 'Task: %s\nChanges: %s\nSkills: %s\nObservations: %s\nInvestigation: %s\nBlockers: %s\nAdvisor input: %s\nTest result: %s\n' \
+     "<task-subject>" "<worker Changes field>" "<worker Skills used field>" "<worker Observations field>" \
+     "<worker Investigation field>" "<worker Blockers field>" "<worker Advisor input field>" "<passed|failed|skipped>" \
      | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
    ```
-   Use the worker's reported **Changes:**, **Skills used:**, and **Observations:** fields verbatim. If the worker did not report a test result, use `skipped`. If the worker did not report a Skills used field, use `None`. `execution-log.md` is created on first write.
+   Use the worker's reported **Changes:**, **Skills used:**, **Observations:**, **Investigation:**, **Blockers:**, and **Advisor input:** fields verbatim. If the worker did not report a test result, use `skipped`. If the worker did not report a Skills used field, use `None`. If the worker omitted Investigation, Blockers, or Advisor input, use `None`. `execution-log.md` is created on first write.
 
 2. **Log architectural findings** — note interesting patterns reported by workers for Step 5
 3. **Handle blockers** — if a worker reports blockers:
@@ -205,22 +204,27 @@ As worker messages arrive (delivered automatically):
 
 Do NOT gate on reviewing diffs — workers proceed autonomously. The user reviews at the end.
 
-When all tasks are complete (or all remaining are blocked):
-1. Send `shutdown_request` to all workers and all advisor agents (if any were spawned in Step 3.4)
-2. **Write advisor shutdown log entries** — for each advisor that was spawned, log the shutdown:
-   ```bash
-   printf 'Advisor shutdown: %s\nDomain: %s\n' \
-     "<advisor-name>" "<domain scope>" \
-     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
-   ```
-3. Run `TeamDelete`
+When a batch of workers has all reported completion:
+1. Call `TaskList` to count remaining tasks with status `pending` and no `blockedBy` dependencies (unblocked tasks).
+2. **If unblocked tasks remain:** spawn `min(unblocked_count, max_workers)` fresh workers (same worker template and injections as Step 3.5, incrementing worker names as `worker-N` continuing from the last worker index used). Then continue collecting progress from the new batch.
+   - `max_workers` is the same cap used in Step 3.5: `min(recommended_workers, 4)`
+   - Repeat this respawn cycle after each batch completes until no unblocked tasks remain.
+3. **If no unblocked tasks remain** (all tasks are complete or all remaining are blocked):
+   a. Send `shutdown_request` to all active workers and all advisor agents (if any were spawned in Step 3.4)
+   b. **Write advisor shutdown log entries** — for each advisor that was spawned, log the shutdown:
+      ```bash
+      printf 'Advisor shutdown: %s\nDomain: %s\n' \
+        "<advisor-name>" "<domain scope>" \
+        | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
+      ```
+   c. Run `TeamDelete`
 
 ## Step 5: Post-implementation extraction
 
 Invoke `/remember` with capture constraints scoped to the implementation:
 
 ```
-/remember Implementation findings from <work item title> — Read all **Observations:** entries from execution-log.md and evaluate each against the capture gate. Two valid capture targets: (1) mechanism-level patterns — how the system accomplishes X broadly, evaluate for novelty against existing knowledge; (2) structural footprint — module roles, integration points, what connects to/through a file, what constrains changes — evaluate against existing architectural knowledge for what isn't yet recorded. Function-level details do not qualify. Also capture: cross-task patterns visible only from the lead's vantage.
+/remember Implementation findings from <work item title> — Read all **Observations:** and **Investigation:** entries from execution-log.md and evaluate each against the capture gate. Two valid capture targets: (1) mechanism-level patterns — how the system accomplishes X broadly, evaluate for novelty against existing knowledge; (2) structural footprint — module roles, integration points, what connects to/through a file, what constrains changes — evaluate against existing architectural knowledge for what isn't yet recorded. Function-level details do not qualify. Also capture: cross-task patterns visible only from the lead's vantage. Investigation entries (debugging detours, design pivots) qualify when the root cause or resolution reveals something non-obvious about the system.
 ```
 
 ## Step 6: Cleanup and report

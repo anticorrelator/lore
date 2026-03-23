@@ -46,7 +46,7 @@ For on-demand advisors, consult when you have a specific question that the advis
 
 ## Report Format Addition
 
-Include an `**Advisor input:**` section in your completion report (between `**Skills used:**` and `**Discoveries:**`):
+Include an `**Advisor input:**` section in your completion report (between `**Skills used:**` and `**Observations:**`). The full field order is: Changes → Tests → Skills used → **Advisor input** → Observations → Investigation → Blockers.
 
 ```
 **Advisor input:**

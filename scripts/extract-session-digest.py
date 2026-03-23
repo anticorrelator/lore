@@ -14,7 +14,22 @@ from pathlib import Path
 
 # Shared transcript infrastructure
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from transcript import resolve_knowledge_dir as _resolve_knowledge_dir
+from transcript import resolve_knowledge_dir as _resolve_knowledge_dir, extract_file_paths as _extract_file_paths
+
+# Reuse debugging detection patterns from stop-novelty-check
+try:
+    from stop_novelty_check import DEBUG_ROOT_CAUSE_RE, SELF_CORRECTION_RE
+except ImportError:
+    # Fallback: import by file path (module name has hyphens)
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location(
+        "stop_novelty_check",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "stop-novelty-check.py"),
+    )
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    DEBUG_ROOT_CAUSE_RE = _mod.DEBUG_ROOT_CAUSE_RE
+    SELF_CORRECTION_RE = _mod.SELF_CORRECTION_RE
 
 
 # Common stopwords to filter out from topic detection
@@ -110,6 +125,121 @@ def parse_jsonl_file(jsonl_path, max_lines=300):
         return [], [], None, None
 
 
+def extract_debug_evidence(lines, debug_match_indices, window=3):
+    """Extract expanded assistant text and tool_result content near debugging matches.
+
+    For sessions flagged as debugging, returns:
+    - assistant_texts: up to 500-char excerpts from messages near debug match indices
+    - tool_results: up to 500-char excerpts from tool_result blocks adjacent to
+      debug matches (max 5 total across the session)
+
+    Args:
+        lines: raw JSONL lines from the transcript file (list of str)
+        debug_match_indices: set/list of line indices where debugging patterns matched
+        window: how many lines before/after a match to consider "adjacent"
+
+    Returns:
+        (expanded_assistant_texts, tool_result_excerpts)
+        Both are lists of strings (already trimmed).
+    """
+    if not debug_match_indices:
+        return [], []
+
+    match_set = set(debug_match_indices)
+    near_indices = set()
+    for idx in match_set:
+        for offset in range(-window, window + 1):
+            near_indices.add(idx + offset)
+
+    expanded_texts = []
+    tool_results = []
+
+    for i, line in enumerate(lines):
+        if i not in near_indices:
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        msg_type = data.get('type')
+        message = data.get('message', {})
+        content = message.get('content')
+        if not isinstance(content, list):
+            continue
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+
+            block_type = block.get('type')
+
+            if block_type == 'text' and msg_type == 'assistant':
+                text = block.get('text', '').strip()
+                if text:
+                    excerpt = text[:500]
+                    if len(text) > 500:
+                        excerpt += '...'
+                    expanded_texts.append(excerpt)
+
+            elif block_type == 'tool_result':
+                if len(tool_results) >= 5:
+                    break
+                result_content = block.get('content', '')
+                if isinstance(result_content, list):
+                    # tool_result content may itself be a list of blocks
+                    parts = []
+                    for sub in result_content:
+                        if isinstance(sub, dict) and sub.get('type') == 'text':
+                            parts.append(sub.get('text', ''))
+                    result_content = '\n'.join(parts)
+                result_str = str(result_content).strip()
+                if result_str:
+                    excerpt = result_str[:500]
+                    if len(result_str) > 500:
+                        excerpt += '...'
+                    tool_results.append(excerpt)
+
+    return expanded_texts, tool_results
+
+
+def scan_for_debugging(lines):
+    """Scan raw JSONL lines for debugging pattern matches.
+
+    Returns a list of line indices where DEBUG_ROOT_CAUSE_RE or
+    SELF_CORRECTION_RE matched in assistant text blocks. These indices are
+    passed to extract_debug_evidence() to locate adjacent diagnostic content.
+    """
+    match_indices = []
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get('type') != 'assistant':
+            continue
+        message = data.get('message', {})
+        content = message.get('content', [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get('type') != 'text':
+                continue
+            text = block.get('text', '')
+            if DEBUG_ROOT_CAUSE_RE.search(text) or SELF_CORRECTION_RE.search(text):
+                match_indices.append(i)
+                break  # one match per message is enough
+    return match_indices
+
+
 def extract_topics(user_messages, top_n=8):
     """Extract top keywords from user messages."""
     # Combine all user text
@@ -158,8 +288,16 @@ def find_previous_session_file(project_dir):
     return jsonl_files[1]
 
 
-def write_digest(knowledge_dir, user_messages, assistant_texts, session_id, session_date, topics):
-    """Write the digest to _pending_digest.md."""
+def write_digest(knowledge_dir, user_messages, assistant_texts, session_id, session_date, topics,
+                 debug_assistant_texts=None, debug_tool_results=None,
+                 files_touched=None):
+    """Write the digest to _pending_digest.md.
+
+    Optional args:
+        debug_assistant_texts: expanded (500-char) assistant excerpts near debugging matches
+        debug_tool_results: tool_result excerpts (500 chars each) from debugging regions
+        files_touched: list of unique file paths accessed via Read/Edit/Write/Glob tool calls
+    """
     threads_dir = Path(knowledge_dir) / '_threads'
     threads_dir.mkdir(exist_ok=True)
 
@@ -198,6 +336,33 @@ def write_digest(knowledge_dir, user_messages, assistant_texts, session_id, sess
     lines.append("## Topics Detected")
     for word, count in topics:
         lines.append(f"- {word} ({count} mentions)")
+
+    # Files Touched section — always included when file paths are available
+    if files_touched:
+        lines.append("")
+        lines.append("## Files Touched")
+        for path in files_touched:
+            lines.append(f"- `{path}`")
+
+    # Debugging Evidence section — only included when debugging patterns were detected
+    has_debug_texts = debug_assistant_texts and len(debug_assistant_texts) > 0
+    has_debug_results = debug_tool_results and len(debug_tool_results) > 0
+    if has_debug_texts or has_debug_results:
+        lines.append("")
+        lines.append("## Debugging Evidence")
+        lines.append("*Extracted from messages near debugging pattern matches.*")
+        lines.append("")
+        if has_debug_texts:
+            lines.append("### Assistant Analysis")
+            for text in debug_assistant_texts:
+                summary = text.replace('\n', ' ')
+                lines.append(f"- {summary}")
+            lines.append("")
+        if has_debug_results:
+            lines.append("### Tool Output")
+            for result in debug_tool_results:
+                summary = result.replace('\n', ' ')
+                lines.append(f"- {summary}")
 
     # Write to file
     with open(digest_path, 'w', encoding='utf-8') as f:
@@ -255,6 +420,13 @@ def main():
                 # Already processed this session
                 sys.exit(0)
 
+        # Read raw lines for debugging detection and evidence extraction
+        try:
+            with open(prev_session_file, 'r', encoding='utf-8') as _f:
+                raw_lines = _f.readlines()
+        except Exception:
+            raw_lines = []
+
         # Parse the JSONL file
         user_messages, assistant_texts, session_id, session_date = parse_jsonl_file(
             prev_session_file
@@ -263,6 +435,20 @@ def main():
         # Check if session is too short
         if len(user_messages) < 3:
             sys.exit(0)
+
+        # Detect debugging patterns and extract evidence if present
+        debug_assistant_texts = None
+        debug_tool_results = None
+        if raw_lines:
+            debug_match_indices = scan_for_debugging(raw_lines)
+            if debug_match_indices:
+                debug_assistant_texts, debug_tool_results = extract_debug_evidence(
+                    raw_lines, debug_match_indices
+                )
+
+        # Extract unique file paths from tool_use blocks
+        file_path_tuples = _extract_file_paths(str(prev_session_file))
+        files_touched = list(dict.fromkeys(p for p, _ in file_path_tuples)) if file_path_tuples else None
 
         # Extract topics
         topics = extract_topics(user_messages)
@@ -274,7 +460,10 @@ def main():
             assistant_texts,
             session_id,
             session_date,
-            topics
+            topics,
+            debug_assistant_texts=debug_assistant_texts,
+            debug_tool_results=debug_tool_results,
+            files_touched=files_touched,
         )
 
         # Success (silent)

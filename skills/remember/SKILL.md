@@ -63,6 +63,16 @@ Review the full conversation context (filtered by any Step 1 constraints) and id
 - A gotcha or pitfall was encountered
 - The user corrected a misconception or shared domain knowledge
 - A workaround was used (and the reason why matters)
+- An investigation or usage workflow was discovered ("to debug X, do Y then Z") — **operational procedure**
+- A symptom-to-cause mapping was encountered ("error X means Y, verify with Z") — **error signature**
+- A non-code-visible rule was discovered ("can't do X because of Y constraint") — **implicit constraint**
+
+**Debugging narrative format:** When a debugging session surfaces a non-obvious root cause, structure the capture using this 5-field template — it teaches pattern recognition and improves retrieval utility beyond a bare symptom description:
+- **Symptom:** what the error or failure looked like
+- **False starts:** approaches tried that didn't work and why
+- **Key diagnostic:** the observation or tool output that cracked it
+- **Root cause:** the actual underlying reason
+- **Fix:** what resolved it
 
 For each candidate, assess against the 4-condition gate:
 1. Reusable (beyond this task)?
@@ -74,7 +84,7 @@ If capture constraints were provided in Step 1, apply them as an additional filt
 
 **Staleness branch:** when the "non-obvious" check reveals a similar entry may already exist, run `lore search "<key terms>" --type knowledge --limit 3`, read the top match, and branch: (a) same claim — skip the candidate, (b) divergent (contradicts or supersedes) — edit the existing entry file in-place to reflect the new insight, update its `learned` date to today, then skip the new capture. Note: `[staleness] Updated "<existing title>" — superseded by new finding`.
 
-**Synthesis quality signal:** When multiple candidates pass the gate, prefer those that synthesize across sources — insights that required combining information from multiple files, sessions, or components. The following categories are strong positive indicators of synthesis: architectural models, design rationale, cross-cutting conventions, behavioral directives, mental models, and directional intent. Single-source entries (readable from one file) are still captured but rank lower for auto-loading.
+**Synthesis quality signal:** When multiple candidates pass the gate, prefer those that synthesize across sources — insights that required combining information from multiple files, sessions, or components. The following categories are strong positive indicators of synthesis: architectural models, design rationale, cross-cutting conventions, behavioral directives, mental models, and directional intent. Operational procedures, error signatures, and implicit constraints often qualify too — they typically combine runtime behavior with code structure. Single-source entries (readable from one file) are still captured but rank lower for auto-loading.
 
 **Why > what:** A statement explaining *why* a choice was made is more valuable than a statement describing *what* was chosen. When both a rationale statement and a factual observation pass the gate, prefer the rationale. For example, "we use script-first skill design because it prevents instruction fade in SKILL.md" outranks "skills delegate to bash scripts" — the second is recoverable from code; the first is not.
 

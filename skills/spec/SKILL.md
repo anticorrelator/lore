@@ -211,7 +211,11 @@ Same purpose as the full flow's Step 5.3 — validate the implementation approac
 
 1. **Synthesize phase summaries from plan.md** — for each phase, produce a summary block with objective, mechanism, scope, and task count. The mechanism descriptions come from the plan's task content — synthesize them from existing context without additional file reads.
 
-2. **Present the phase summaries** to the user. End with:
+2. **Present the phase summaries** to the user. Before the per-phase blocks, add a plan-level header line read from `tasks.json`:
+   ```
+   Workers: N (max concurrent from task DAG topology)
+   ```
+   Read `recommended_workers` from `tasks.json` in the work item directory. End with:
    ```
    Review the phases above. Approve to proceed, or request changes.
    ```
@@ -676,7 +680,11 @@ Before finalizing, present the plan's phases as a structured summary for the use
      Tasks:     2 tasks
    ```
 
-2. **Present the full set of phase summaries** to the user. End with:
+2. **Present the full set of phase summaries** to the user. Before the per-phase blocks, add a plan-level header line read from `tasks.json`:
+   ```
+   Workers: N (max concurrent from task DAG topology)
+   ```
+   Read `recommended_workers` from `tasks.json` in the work item directory. End with:
    ```
    Review the phases above. Approve to proceed, or request changes.
    ```

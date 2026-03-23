@@ -137,6 +137,8 @@ What did workers need that wasn't in the store? Look for: workers who reported s
 
 **Trivial-scope D3=5 note:** For small, single-phase, single-file work items (≤4 tasks, 1-2 target files), D3=5 is trivially achievable — the scope is too narrow to expose knowledge gaps. When scoring D3=5 on such work items, note "trivial scope — gap dimension low-signal" in the narrative. This is not a scoring error but a reduced-confidence indicator. Do not artificially lower the score — just flag it so trend analysis across retros can weight it appropriately.
 
+**Stale-correction-only cycles:** When `/remember` produces 0 new captures but corrects N stale entries, this is a positive D3 signal — the store was comprehensive enough that implementation revealed only drift (outdated claims), not absence (missing patterns). Stale corrections confirm coverage; they do not count as gaps. Score D3 based on uncorrected gaps only. Note "N stale corrections, 0 new gaps" in the narrative as evidence of store maturity for the affected domain.
+
 **Novel-vs-coverage split:** When mid-cycle captures include a mix of genuinely novel discoveries and coverage failures, weight coverage failures more heavily than novel discoveries. A cycle with 2 captures where both are genuinely novel (first-time observation of a runtime behavior never encountered in the codebase) scores D3=4; a cycle with 2 captures where both are coverage failures (pattern exists elsewhere in codebase but wasn't captured) scores D3=3. Mixed cycles: count coverage failures for the primary score, then note novel discoveries as expected and non-penalizing.
 
 **Scoring:**
@@ -162,6 +164,8 @@ Did the plan's design decisions reference knowledge entries that actually influe
 ### Dimension 5 — Spec Utility
 
 Did the spec give workers sufficient guidance that they needed less independent exploration than raw codebase reading would have required?
+
+**Spec-only cycle scoring:** When no `/implement` workers have run yet, Dimension 5 is scored on **structural plan quality** — not worker behavior. Evidence: scope constraints, verification criteria, knowledge context coverage, annotation completeness, external review corrections. Always tag the score as `(predictive)` and note "validate after implementation." A spec that required N external review corrections before handoff caps at 4/5 predictive — the corrections indicate gaps that workers *would have* hit. The definitive D5 score comes from the post-implementation retro, which should re-score this dimension based on actual worker behavior and explicitly compare against the predictive score.
 
 **Evidence sources:** Read execution-log entries and worker completion reports. Look for:
 - **Worker escalations** — workers who sent messages asking for clarification or raised blockers (each escalation signals a gap in spec guidance)

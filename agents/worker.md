@@ -32,7 +32,7 @@ lore search "<query>" --json --limit 5
      - <file>: <what changed>
      **Tests:** <ran X tests, all passed / no tests found / N failures>
      **Skills used:** <comma-separated list of /skill-name invoked via the Skill tool, or "None">
-     **Observations:** <Two targets — report either or both, "None" if
+     **Observations:** <Five targets — report any that apply, "None" if
        nothing stands out:
        (1) Mechanism-level patterns — how the system accomplishes X
        broadly. Anchor to your Prior Knowledge: report what extends,
@@ -40,11 +40,21 @@ lore search "<query>" --json --limit 5
        (2) Structural footprint — for significant files you touched:
        its role in one phrase, what else connects to or through it,
        what constrains changes here.
+       (3) Operational procedures — investigation or usage workflows
+       discovered during the task ("to debug X, do Y then Z").
+       (4) Error signatures — symptom-to-cause mappings encountered
+       ("error X means Y, verify with Z").
+       (5) Implicit constraints — non-code-visible rules discovered
+       ("can't do X because of Y constraint").
        ✓ "All span ingestion goes through the batch insertion process"
        ✓ "skills/implement/SKILL.md is the contract between lead and
           workers — defines coordination protocol, called only by the
           /implement skill"
        ✗ "insert_spans() calls cursor.executemany()">
+     **Investigation:** <Optional. Report debugging detours, design pivots,
+       or surprising behaviors encountered during this task. Use the format:
+       what you expected → what you found → what you did about it. Omit if
+       the task completed straightforwardly.>
      **Blockers:** <none, or description of what's blocking>
    ```
 7. **Update task description** with your full completion report:
@@ -52,8 +62,6 @@ lore search "<query>" --json --limit 5
    (including the **Observations:** section). This is required
    for the TaskCompleted hook to verify your report.
 8. Mark task completed: TaskUpdate with status=completed
-9. Call TaskList — claim next unclaimed, unblocked task if available
-10. When no tasks remain, you're done
 
 ## Specialized Task Types
 
@@ -69,7 +77,11 @@ For tasks with subjects starting with "Update stale knowledge entry":
 
 ## Reporting Guidelines
 
-- **Observations** are the most valuable part of your report beyond the code changes themselves. Two targets:
+- **Observations** are the most valuable part of your report beyond the code changes themselves. Five targets — report any that apply:
   - **Mechanism-level patterns** — how the system accomplishes things in broad strokes. Anchor to your Prior Knowledge: what extends, contradicts, or wasn't covered there. ✓ "all span ingestion goes through the batch insertion process" ✗ "insert_spans() calls cursor.executemany()" ✗ "the system uses batching"
   - **Structural footprint** — for significant files you touched: its role in one phrase, what else connects to or through it, what constrains changes here. Report even when expected — the goal is building an emergent architectural picture across runs, not just flagging surprises.
+  - **Operational procedures** — investigation or usage workflows discovered during the task ("to debug X, do Y then Z").
+  - **Error signatures** — symptom-to-cause mappings encountered ("error X means Y, verify with Z").
+  - **Implicit constraints** — non-code-visible rules discovered ("can't do X because of Y constraint").
+- **Investigation** is optional — use it when the task involved unexpected friction. Format: what you expected → what you found → what you did about it. Skip entirely for straightforward tasks.
 - Keep the full report concise but complete — facts over opinions

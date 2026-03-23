@@ -174,18 +174,25 @@ func (m TasksModel) View() string {
 	blockedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
 
 	visible := m.visibleRows()
-	visibleSet := make(map[int]bool, len(visible))
-	for _, idx := range visible {
-		visibleSet[idx] = true
+	if len(visible) == 0 {
+		return b.String()
 	}
 
-	// Scrolling (footer removed — status bar handles hints)
-	maxRows := m.height
-	if maxRows < 1 {
-		maxRows = len(visible)
+	// Line-count-based windowing: m.height is in terminal lines, not logical rows.
+	// Pre-compute per-row heights, then walk outward from the cursor to find the
+	// visible window where total rendered lines fit within m.height.
+	budget := m.height
+	if budget < 1 {
+		budget = 1<<31 - 1 // unbounded when height not set
 	}
 
-	// Find cursor position in visible list
+	// Pre-compute heights for all visible rows.
+	heights := make([]int, len(visible))
+	for i, idx := range visible {
+		heights[i] = m.rowHeight(idx)
+	}
+
+	// Find cursor position in the visible list.
 	cursorPos := 0
 	for i, idx := range visible {
 		if idx == m.cursor {
@@ -194,14 +201,31 @@ func (m TasksModel) View() string {
 		}
 	}
 
-	offset := 0
-	if cursorPos >= maxRows {
-		offset = cursorPos - maxRows + 1
-	}
+	// Walk outward from cursor, consuming the line budget.
+	// Always include the cursor row first.
+	offset := cursorPos
+	end := cursorPos + 1
+	used := heights[cursorPos]
 
-	end := offset + maxRows
-	if end > len(visible) {
-		end = len(visible)
+	// Expand window forward and backward greedily.
+	lo, hi := cursorPos-1, cursorPos+1
+	for used < budget {
+		addedAny := false
+		if hi < len(visible) && used+heights[hi] <= budget {
+			used += heights[hi]
+			end = hi + 1
+			hi++
+			addedAny = true
+		}
+		if lo >= 0 && used+heights[lo] <= budget {
+			used += heights[lo]
+			offset = lo
+			lo--
+			addedAny = true
+		}
+		if !addedAny {
+			break
+		}
 	}
 
 	for vi := offset; vi < end; vi++ {
@@ -266,6 +290,31 @@ func (m TasksModel) View() string {
 	}
 
 	return b.String()
+}
+
+// rowHeight returns the number of terminal lines a visible row renders.
+// Phase headers: 1 line for the header + wrapped objective lines if not collapsed.
+// Task rows: 1 line for the subject + 1 if blockedBy is non-empty + wrapped
+// description lines if expanded.
+func (m TasksModel) rowHeight(idx int) int {
+	row := m.rows[idx]
+	if row.isPhase {
+		h := 1
+		phaseIdx := m.phaseIndexAt(idx)
+		if !m.collapsed[phaseIdx] && row.phase.Objective != "" {
+			h += len(wrapText(row.phase.Objective, m.width-6))
+		}
+		return h
+	}
+	// Task row
+	h := 1
+	if len(row.task.BlockedBy) > 0 {
+		h++
+	}
+	if m.expanded == idx && row.task.Description != "" {
+		h += len(wrapText(row.task.Description, m.width-10))
+	}
+	return h
 }
 
 // visibleRows returns indices of rows that are not hidden by collapsed phases.

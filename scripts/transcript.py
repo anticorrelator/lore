@@ -2,6 +2,7 @@
 
 Provides:
     parse_transcript(path) — parse JSONL into structured messages
+    extract_file_paths(path) — extract (file_path, message_index) from tool_use blocks
     resolve_knowledge_dir(cwd) — Python-native repo resolution (no subprocess)
     fail_open(func) — decorator: catch all exceptions, exit 0
 
@@ -74,6 +75,56 @@ def parse_transcript(transcript_path):
         return []
 
     return messages
+
+
+FILE_PATH_TOOLS = frozenset({"Read", "Edit", "Write", "Glob"})
+
+
+def extract_file_paths(transcript_path):
+    """Extract file paths from tool_use blocks in the transcript.
+
+    Parses Read, Edit, Write, and Glob tool calls and extracts their
+    file_path (or pattern for Glob) argument.
+
+    Returns list of (file_path, message_index) tuples, in transcript order.
+    Duplicate paths are included (same file accessed multiple times).
+    """
+    results = []
+    try:
+        with open(transcript_path, "r") as f:
+            for i, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                msg = entry.get("message", {})
+                content = msg.get("content", [])
+                if not isinstance(content, list):
+                    continue
+
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") != "tool_use":
+                        continue
+                    name = block.get("name", "")
+                    if name not in FILE_PATH_TOOLS:
+                        continue
+                    tool_input = block.get("input", {})
+                    if not isinstance(tool_input, dict):
+                        continue
+                    # Read/Edit/Write use "file_path"; Glob uses "pattern"
+                    path = tool_input.get("file_path") or tool_input.get("pattern")
+                    if path and isinstance(path, str):
+                        results.append((path, i))
+    except (OSError, Exception):
+        return []
+
+    return results
 
 
 def count_tool_uses(messages):

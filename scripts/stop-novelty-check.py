@@ -21,10 +21,11 @@ import json
 import os
 import re
 import sys
+from collections import defaultdict
 
 # Shared transcript infrastructure
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from transcript import parse_transcript, count_tool_uses, has_recent_capture, resolve_knowledge_dir, fail_open
+from transcript import parse_transcript, extract_file_paths, count_tool_uses, has_recent_capture, resolve_knowledge_dir, fail_open
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +58,12 @@ DEBUG_ROOT_CAUSE_RE = re.compile(
     r"traced (?:it |this )?(?:back )?to|"
     r"the bug (?:is|was) (?:actually |really )?(?:in|caused|due)|"
     r"(?:found|discovered|identified) the (?:source|origin|cause)|"
-    r"turns out the (?:error|issue|problem|bug)"
+    r"turns out the (?:error|issue|problem|bug)|"
+    r"(?:failure|error|crash|bug) (?:is |was )?caused by|"
+    r"(?:issue|problem|bug) stems from|"
+    r"the problem is that|"
+    r"caused by (?:a|an|the)\b|"
+    r"due to a bug in"
     r")\b",
     re.IGNORECASE,
 )
@@ -173,6 +179,150 @@ def scan_heuristics(messages):
                         "trigger": label,
                         "matched_text": context,
                     })
+
+    return hits
+
+
+def scan_structural_signals(messages, transcript_path=""):
+    """Detect structural patterns that signal debugging or investigation sessions.
+
+    Detects four signal types based on tool_use sequences rather than phrasing:
+      - structural-investigation: ≥3 Read/Grep/Bash within 10 messages then Edit
+      - structural-iterative-debug: same file path in ≥2 Reads within 15 messages
+      - structural-test-fix: Bash→Edit→Bash within 20 messages
+      - structural-synthesis: >500 char assistant message after ≥5 tool_use messages
+
+    Returns list of dicts: {index, role, trigger, matched_text}
+    Same format as scan_heuristics() so results can be merged into heuristic_hits.
+
+    Args:
+        messages: list of parsed message dicts from parse_transcript()
+        transcript_path: path to transcript file (needed for file-path signals)
+    """
+    hits = []
+    msg_by_index = {m["index"]: m for m in messages}
+
+    # Tools that indicate reading/investigating
+    INVESTIGATION_TOOLS = frozenset({"Read", "Grep", "Glob", "Bash"})
+    EDIT_TOOLS = frozenset({"Edit", "Write"})
+    READ_TOOLS = frozenset({"Read"})
+
+    # --- Signal 1: Investigation-then-fix ---
+    # ≥3 Read/Grep/Bash within 10 messages followed by Edit
+    indices = [m["index"] for m in messages if m["has_tool_use"]]
+    for i, idx in enumerate(indices):
+        msg = msg_by_index[idx]
+        if not (EDIT_TOOLS & set(msg["tool_names"])):
+            continue
+        # This message has an Edit — look back 10 messages for ≥3 investigation tools
+        window_start = idx - 10
+        invest_count = sum(
+            1 for j in indices
+            if window_start <= j < idx
+            and INVESTIGATION_TOOLS & set(msg_by_index[j]["tool_names"])
+        )
+        if invest_count >= 3:
+            hits.append({
+                "index": idx,
+                "role": "assistant",
+                "trigger": "structural-investigation",
+                "matched_text": (
+                    f"Edit after {invest_count} investigation tools "
+                    f"in messages {window_start}-{idx}"
+                ),
+            })
+
+    # --- Signal 2: Iterative debugging — same file in ≥2 Reads within 15 messages ---
+    if transcript_path:
+        file_reads = extract_file_paths(transcript_path)
+        # Group by file path, collect (path, msg_idx) pairs for Read-type tools only
+        # extract_file_paths returns all FILE_PATH_TOOLS; filter to Read only
+        # We can't easily distinguish Read vs Edit from extract_file_paths alone,
+        # so use the raw approach: find file paths appearing ≥2x within a 15-msg window
+        path_indices = defaultdict(list)
+        for path, msg_idx in file_reads:
+            # Only count if the message at msg_idx used Read (not just any file tool)
+            msg = msg_by_index.get(msg_idx)
+            if msg and READ_TOOLS & set(msg["tool_names"]):
+                path_indices[path].append(msg_idx)
+
+        for path, read_indices in path_indices.items():
+            read_indices.sort()
+            for i in range(len(read_indices)):
+                # Check if any later read is within 15 messages
+                for j in range(i + 1, len(read_indices)):
+                    if read_indices[j] - read_indices[i] <= 15:
+                        hits.append({
+                            "index": read_indices[j],
+                            "role": "assistant",
+                            "trigger": "structural-iterative-debug",
+                            "matched_text": (
+                                f"File '{path}' read ≥2 times "
+                                f"(messages {read_indices[i]}, {read_indices[j]})"
+                            ),
+                        })
+                        break  # one hit per file is enough
+
+    # --- Signal 3: Test-fix cycle — Bash→Edit→Bash within 20 messages ---
+    tool_seq = [
+        (m["index"], m["tool_names"])
+        for m in messages
+        if m["has_tool_use"] and m["tool_names"]
+    ]
+    for i, (bash_idx1, names1) in enumerate(tool_seq):
+        if "Bash" not in names1:
+            continue
+        for j in range(i + 1, len(tool_seq)):
+            edit_idx, names2 = tool_seq[j]
+            if edit_idx - bash_idx1 > 20:
+                break
+            if not (EDIT_TOOLS & set(names2)):
+                continue
+            # Found a Bash then Edit — look for another Bash after
+            for k in range(j + 1, len(tool_seq)):
+                bash_idx2, names3 = tool_seq[k]
+                if bash_idx2 - bash_idx1 > 20:
+                    break
+                if "Bash" in names3:
+                    hits.append({
+                        "index": bash_idx2,
+                        "role": "assistant",
+                        "trigger": "structural-test-fix",
+                        "matched_text": (
+                            f"Bash→Edit→Bash cycle "
+                            f"(messages {bash_idx1}, {edit_idx}, {bash_idx2})"
+                        ),
+                    })
+                    break
+            break
+
+    # --- Signal 4: Synthesis moment — >500 char assistant message after ≥5 tool_use msgs ---
+    # Find runs of ≥5 consecutive tool-use messages followed by a long text message
+    tool_use_msgs = [m for m in messages if m["has_tool_use"]]
+    tool_use_indices = set(m["index"] for m in tool_use_msgs)
+
+    for msg in messages:
+        if msg["role"] != "assistant":
+            continue
+        full_text = "\n".join(msg["text_blocks"])
+        if len(full_text) <= 500:
+            continue
+        # Count tool_use messages in the 10 messages before this one
+        prior_tool_count = sum(
+            1 for j in range(max(0, msg["index"] - 10), msg["index"])
+            if j in tool_use_indices
+        )
+        if prior_tool_count >= 5:
+            snippet = full_text[:120].strip()
+            hits.append({
+                "index": msg["index"],
+                "role": "assistant",
+                "trigger": "structural-synthesis",
+                "matched_text": (
+                    f"Long synthesis message ({len(full_text)} chars) "
+                    f"after {prior_tool_count} tool calls: {snippet}…"
+                ),
+            })
 
     return hits
 
@@ -353,6 +503,145 @@ def and_gate(heuristic_hits, novelty_results):
 
 
 # ---------------------------------------------------------------------------
+# Related file extraction
+# ---------------------------------------------------------------------------
+
+FILE_CONTEXT_WINDOW = 10  # message indices on each side of heuristic hit
+
+
+def extract_related_files(transcript_path, heuristic_index):
+    """Extract file paths from tool_use blocks near a heuristic hit.
+
+    Collects file paths from tool_use blocks within +/- FILE_CONTEXT_WINDOW
+    message indices of `heuristic_index`. Deduplicates and returns a list
+    of file paths sorted by first appearance.
+
+    Args:
+        transcript_path: path to the JSONL transcript file
+        heuristic_index: message index of the heuristic match
+
+    Returns:
+        list of unique file path strings, in order of first appearance
+    """
+    all_paths = extract_file_paths(transcript_path)
+    lo = heuristic_index - FILE_CONTEXT_WINDOW
+    hi = heuristic_index + FILE_CONTEXT_WINDOW
+
+    seen = set()
+    related = []
+    for path, msg_idx in all_paths:
+        if lo <= msg_idx <= hi and path not in seen:
+            seen.add(path)
+            related.append(path)
+    return related
+
+
+# ---------------------------------------------------------------------------
+# Debug context extraction
+# ---------------------------------------------------------------------------
+
+DEBUG_CONTEXT_WINDOW = 10  # message indices on each side for co-located hit scan
+DEBUG_CONTEXT_CHARS = 800  # target character budget for expanded context
+
+
+def extract_debug_context(messages, heuristic_index):
+    """Extract expanded context for a debug-root-cause heuristic hit.
+
+    Scans backward (and forward) from `heuristic_index` to collect up to
+    ~800 chars of assistant text surrounding the match. Also collects any
+    co-located heuristic hits within +/- DEBUG_CONTEXT_WINDOW message indices.
+
+    Returns a structured string block with the investigation chain:
+        - Expanded assistant text around the match (up to ~800 chars)
+        - Co-located heuristic hits (other triggers firing nearby)
+
+    Args:
+        messages: list of parsed message dicts from parse_transcript()
+        heuristic_index: message index of the debug-root-cause match
+
+    Returns:
+        str: formatted investigation chain context block
+    """
+    # Build index -> message map for quick lookup
+    msg_by_index = {m["index"]: m for m in messages}
+
+    # Collect assistant text in a window around the heuristic hit
+    lo = heuristic_index - DEBUG_CONTEXT_WINDOW
+    hi = heuristic_index + DEBUG_CONTEXT_WINDOW
+
+    # Gather assistant messages in window, ordered by index
+    window_msgs = [
+        m for m in messages
+        if lo <= m["index"] <= hi and m["role"] == "assistant" and m["text_blocks"]
+    ]
+    window_msgs.sort(key=lambda m: m["index"])
+
+    # Build expanded text, prioritizing messages closest to heuristic hit
+    # Start with the heuristic message itself, then extend backward/forward
+    text_parts = []
+    total_chars = 0
+    hit_msg = msg_by_index.get(heuristic_index)
+    if hit_msg and hit_msg["text_blocks"]:
+        hit_text = "\n".join(hit_msg["text_blocks"])
+        text_parts.append((heuristic_index, hit_text))
+        total_chars += len(hit_text)
+
+    # Extend with adjacent messages until budget is reached
+    before = sorted(
+        [m for m in window_msgs if m["index"] < heuristic_index],
+        key=lambda m: m["index"],
+        reverse=True,  # closest first
+    )
+    after = sorted(
+        [m for m in window_msgs if m["index"] > heuristic_index],
+        key=lambda m: m["index"],
+    )
+
+    for msg in before:
+        if total_chars >= DEBUG_CONTEXT_CHARS:
+            break
+        t = "\n".join(msg["text_blocks"])
+        text_parts.insert(0, (msg["index"], t))
+        total_chars += len(t)
+
+    for msg in after:
+        if total_chars >= DEBUG_CONTEXT_CHARS:
+            break
+        t = "\n".join(msg["text_blocks"])
+        text_parts.append((msg["index"], t))
+        total_chars += len(t)
+
+    # Concatenate ordered text, truncating to budget
+    combined = "\n\n".join(t for _, t in sorted(text_parts, key=lambda x: x[0]))
+    if len(combined) > DEBUG_CONTEXT_CHARS:
+        combined = combined[:DEBUG_CONTEXT_CHARS].rstrip() + "…"
+
+    # Collect co-located heuristic hits (other patterns firing in the window)
+    co_hits = []
+    for m in window_msgs:
+        if m["index"] == heuristic_index:
+            continue
+        full_text = "\n".join(m["text_blocks"])
+        for label, pattern in HEURISTIC_PATTERNS:
+            match = pattern.search(full_text)
+            if match:
+                start = max(0, match.start() - 40)
+                end = min(len(full_text), match.end() + 40)
+                snippet = full_text[start:end].strip()
+                co_hits.append(f"[{label}] (msg {m['index']}): {snippet}")
+                break  # one hit per message is enough
+
+    # Format the structured context block
+    lines = ["**Investigation chain:**", combined]
+    if co_hits:
+        lines.append("")
+        lines.append("**Co-located signals:**")
+        lines.extend(f"- {h}" for h in co_hits)
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Write _pending_captures/ directory with individual candidate files
 # ---------------------------------------------------------------------------
 
@@ -362,13 +651,21 @@ def candidate_hash(candidate):
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
 
-def write_pending_captures(knowledge_dir, candidates):
+def write_pending_captures(knowledge_dir, candidates, transcript_path="", messages=None):
     """Write individual candidate files into _pending_captures/ directory.
 
     Each candidate gets its own file named {sha256(trigger+matched_text)[:12]}.md.
     This makes writes idempotent: the same candidate always produces the same
     filename, so re-running the hook with identical candidates is a harmless
     overwrite. The agent processes and deletes files individually at first turn.
+
+    When transcript_path is provided, each candidate file includes a
+    **Related files:** field listing file paths from tool_use blocks
+    within +/- FILE_CONTEXT_WINDOW indices of the heuristic hit.
+
+    When messages is provided and the candidate trigger is "debug-root-cause",
+    an expanded **Investigation chain:** block (~800 chars) replaces the
+    standard 120-char **Context:** excerpt.
     """
     pending_dir = os.path.join(knowledge_dir, "_pending_captures")
 
@@ -381,13 +678,35 @@ def write_pending_captures(knowledge_dir, candidates):
         filename = f"{candidate_hash(c)}.md"
         filepath = os.path.join(pending_dir, filename)
 
+        # Extract related files from transcript if path is available
+        related_files = []
+        if transcript_path:
+            related_files = extract_related_files(transcript_path, c["heuristic_index"])
+
+        # For debug-root-cause with messages, emit expanded debug-narrative format
+        is_debug = c["trigger"] == "debug-root-cause" and messages
+        display_trigger = "debug-narrative" if is_debug else c["trigger"]
+
         lines = [
-            f"# Capture Candidate: {c['trigger']}",
+            f"# Capture Candidate: {display_trigger}",
             "",
-            f"**Trigger:** {c['trigger']}",
+            f"**Trigger:** {display_trigger}",
             f"**Context:** {c['matched_text']}",
+        ]
+
+        if is_debug:
+            debug_ctx = extract_debug_context(messages, c["heuristic_index"])
+            lines += [
+                f"**Narrative context:**",
+                "",
+                debug_ctx,
+                "",
+            ]
+
+        lines += [
             f"**Novel phrase:** {c['novel_phrase']}",
             f"**Transcript region:** messages {c['heuristic_index']}-{c['novelty_index']}",
+            f"**Related files:** {', '.join(related_files) if related_files else 'none'}",
             "",
             "**Evaluate:** Does this meet the capture gate? (Reusable, Non-obvious, Stable, High-confidence)",
             "",
@@ -462,8 +781,10 @@ def main():
     ):
         sys.exit(0)
 
-    # Heuristic pattern scan
+    # Heuristic pattern scan (regex + structural)
     heuristic_hits = scan_heuristics(messages)
+    structural_hits = scan_structural_signals(messages, transcript_path=transcript_path)
+    heuristic_hits = heuristic_hits + structural_hits
     if not heuristic_hits:
         sys.exit(0)
 
@@ -481,7 +802,7 @@ def main():
         sys.exit(0)
 
     # Write individual candidate files for agent evaluation at next session start
-    write_pending_captures(knowledge_dir, candidates)
+    write_pending_captures(knowledge_dir, candidates, transcript_path=transcript_path, messages=messages)
 
     # Decision: block only if session is substantial (>10 tool uses)
     # This avoids interrupting quick sessions
