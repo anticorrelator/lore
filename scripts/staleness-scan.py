@@ -139,27 +139,71 @@ def check_related_files(related_files: list[str], repo_root: str) -> dict:
     }
 
 
-def compute_file_drift(repo_root: str, learned_date: str | None, related_files: list[str]) -> dict:
+def compute_file_drift(
+    repo_root: str,
+    learned_date: str | None,
+    related_files: list[str],
+    file_path: str = "",
+    heading: str = "",
+    knowledge_dir: str = "",
+) -> dict:
     """Compute file drift by counting git commits touching related files since learned date.
 
-    Returns dict with: commit_count (int), score (float), available (bool).
+    When related_files is empty, falls back to Concordance.suggest_related_files() to
+    dynamically discover related source files (threshold=0.10 for precision).
+
+    Returns dict with: commit_count (int), score (float), available (bool),
+    source ("explicit" | "dynamic").
     Score mapping: 0 commits = 0.0, 1-3 = 0.3, 4-9 = 0.6, 10+ = 1.0.
-    Weight: 0.6 (applied by caller).
+    Weight: 0.55 (applied by caller).
     """
-    if not related_files or not learned_date:
-        return {"commit_count": 0, "score": 0.0, "available": False}
+    if not learned_date:
+        return {"commit_count": 0, "score": 0.0, "available": False, "source": "explicit"}
 
     # Validate learned_date is parseable
     if "YYYY" in learned_date:
-        return {"commit_count": 0, "score": 0.0, "available": False}
+        return {"commit_count": 0, "score": 0.0, "available": False, "source": "explicit"}
     try:
         datetime.strptime(learned_date, "%Y-%m-%d")
     except ValueError:
-        return {"commit_count": 0, "score": 0.0, "available": False}
+        return {"commit_count": 0, "score": 0.0, "available": False, "source": "explicit"}
 
     # Check that repo_root is a git repo
     if not os.path.isdir(os.path.join(repo_root, ".git")):
-        return {"commit_count": 0, "score": 0.0, "available": False}
+        return {"commit_count": 0, "score": 0.0, "available": False, "source": "explicit"}
+
+    drift_source = "explicit"
+
+    if not related_files:
+        # Dynamic fallback: use concordance to discover related source files
+        if not file_path or not heading or not knowledge_dir:
+            return {"commit_count": 0, "score": 0.0, "available": False, "source": "explicit"}
+
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, script_dir)
+        try:
+            from pk_concordance import Concordance
+            from pk_search import DB_FILENAME
+        finally:
+            sys.path.pop(0)
+
+        db_path = os.path.join(knowledge_dir, DB_FILENAME)
+        if not os.path.exists(db_path):
+            return {"commit_count": 0, "score": 0.0, "available": False, "source": "explicit"}
+
+        try:
+            concordance = Concordance(db_path)
+            suggestions = concordance.suggest_related_files(
+                file_path, heading, threshold=0.10, limit=5
+            )
+        except Exception:
+            return {"commit_count": 0, "score": 0.0, "available": False, "source": "explicit"}
+
+        if not suggestions:
+            return {"commit_count": 0, "score": 0.0, "available": False, "source": "dynamic"}
+
+        related_files = [s["file_path"] for s in suggestions]
+        drift_source = "dynamic"
 
     try:
         cmd = [
@@ -175,12 +219,12 @@ def compute_file_drift(repo_root: str, learned_date: str | None, related_files: 
             timeout=30,
         )
         if result.returncode != 0:
-            return {"commit_count": 0, "score": 0.0, "available": False}
+            return {"commit_count": 0, "score": 0.0, "available": False, "source": drift_source}
 
         lines = [line for line in result.stdout.strip().splitlines() if line]
         commit_count = len(lines)
     except (subprocess.TimeoutExpired, OSError):
-        return {"commit_count": 0, "score": 0.0, "available": False}
+        return {"commit_count": 0, "score": 0.0, "available": False, "source": drift_source}
 
     # Normalize score
     if commit_count == 0:
@@ -192,7 +236,7 @@ def compute_file_drift(repo_root: str, learned_date: str | None, related_files: 
     else:
         score = 1.0
 
-    return {"commit_count": commit_count, "score": score, "available": True}
+    return {"commit_count": commit_count, "score": score, "available": True, "source": drift_source}
 
 
 # Backlink pattern — matches [[type:target]] and [[type:target#heading]]
@@ -483,6 +527,7 @@ def score_entry(
             "score": fd_score,
             "available": fd_available,
             "commit_count": file_drift.get("commit_count", 0),
+            "source": file_drift.get("source", "explicit"),
         },
         "backlink_drift": {
             "weight": round(w_bd, 4),
@@ -544,10 +589,13 @@ def run_scan(knowledge_dir: str, repo_root: str) -> dict:
     for fpath in entry_files:
         meta = parse_metadata(fpath)
         age_days = compute_age_days(meta["learned"])
-        file_check = check_related_files(meta["related_files"], repo_root)
-        file_drift = compute_file_drift(repo_root, meta["learned"], meta["related_files"])
-        backlink_drift = compute_backlink_drift(fpath, knowledge_dir)
         heading = _extract_heading(fpath)
+        file_check = check_related_files(meta["related_files"], repo_root)
+        file_drift = compute_file_drift(
+            repo_root, meta["learned"], meta["related_files"],
+            file_path=fpath, heading=heading, knowledge_dir=knowledge_dir,
+        )
+        backlink_drift = compute_backlink_drift(fpath, knowledge_dir)
         neighbor_drift = compute_neighbor_drift(fpath, heading, meta["learned"], knowledge_dir)
         vocab_drift = compute_vocabulary_drift(fpath, heading, knowledge_dir)
         drift_score, status, signals = score_entry(file_drift, backlink_drift, meta["confidence"], neighbor_drift, vocab_drift)
@@ -588,7 +636,11 @@ def _top_signal(signals: dict) -> str:
     candidates = []
     fd = signals.get("file_drift", {})
     if fd.get("available"):
-        candidates.append((fd["weight"] * fd["score"], f"file drift ({fd['commit_count']} commits)"))
+        fd_label = "file drift ({} commits{})".format(
+            fd["commit_count"],
+            ", dynamic" if fd.get("source") == "dynamic" else "",
+        )
+        candidates.append((fd["weight"] * fd["score"], fd_label))
     bd = signals.get("backlink_drift", {})
     if bd.get("available"):
         candidates.append((bd["weight"] * bd["score"], f"backlinks ({bd['broken']}/{bd['total']} broken)"))

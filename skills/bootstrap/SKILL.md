@@ -44,7 +44,7 @@ Create the agent team and one task per domain.
 
 1. **Check for existing work item:** Look for a `bootstrap-*` work item in `$WORK_DIR/`. If found, load it for resume (see "Resuming a Bootstrap" below). If not found, create one:
    ```bash
-   lore work create "Bootstrap <repo-name>" --tags bootstrap
+   lore work create --title "Bootstrap <repo-name>" --tags bootstrap
    ```
    Set `SLUG` to the resulting slug.
 

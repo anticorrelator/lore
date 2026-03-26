@@ -1,0 +1,12 @@
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "Let me read the file."}, {"type": "tool_use", "name": "Read", "input": {"file_path": "/src/config.py"}}]}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "Checking the module."}, {"type": "tool_use", "name": "Grep", "input": {"pattern": "load"}}]}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "Searching for usage."}, {"type": "tool_use", "name": "Bash", "input": {"command": "grep -r load"}}]}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "Reading again."}, {"type": "tool_use", "name": "Read", "input": {"file_path": "/src/config.py"}}]}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "I initially assumed the config was loaded eagerly, but it turns out it uses lazy initialization. The root cause was a missing null check in the loader."}]}}
+{"message": {"role": "user", "content": [{"type": "text", "text": "No, that's not correct. You should actually use the v2 API endpoint instead."}]}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "Now editing the fix."}, {"type": "tool_use", "name": "Edit", "input": {"file_path": "/src/config.py", "old_string": "old", "new_string": "new"}}]}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "Running tests."}, {"type": "tool_use", "name": "Bash", "input": {"command": "pytest"}}]}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "Watch out for the edge case where the input list is empty. It silently fails without raising an error."}]}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "We chose SQLite over PostgreSQL because the dataset fits in memory and we need zero-configuration deployment."}]}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "Step 10."}, {"type": "tool_use", "name": "Bash", "input": {"command": "echo done"}}]}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "Step 11."}, {"type": "tool_use", "name": "Bash", "input": {"command": "echo done2"}}]}}

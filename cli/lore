@@ -49,6 +49,7 @@ Commands:
   manifest     Manifest management (see: lore manifest --help)
   analyze      Knowledge store analysis (see: lore analyze --help)
   bootstrap    Bootstrap knowledge store (see: lore bootstrap --help)
+  ceremony     Ceremony config management (see: lore ceremony --help)
 
 Options:
   --help, -h       Show this help
@@ -154,6 +155,23 @@ Usage: lore bootstrap <subcommand> [args...]
 
 Subcommands:
   scope [dir...]   Analyze codebase structure and detect domains
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+ceremony_usage() {
+  cat >&2 <<EOF
+lore ceremony — ceremony config management
+
+Usage: lore ceremony <subcommand> [args...]
+
+Subcommands:
+  get <ceremony>             Get advisor list for a ceremony
+  add <ceremony> <advisor>   Add an advisor to a ceremony
+  remove <ceremony> <advisor> Remove an advisor from a ceremony
+  list                       List all ceremony overrides
 
 Options:
   --help, -h    Show this help
@@ -329,6 +347,33 @@ cmd_backlinks() {
       echo "Error: unknown backlinks subcommand '$subcmd'" >&2
       echo "" >&2
       backlinks_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Ceremony subgroup ---
+cmd_ceremony() {
+  if [[ $# -eq 0 ]]; then
+    ceremony_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      ceremony_usage
+      return 0
+      ;;
+    get|add|remove|list)
+      "$SCRIPTS_DIR/ceremony-config.sh" "$subcmd" "$@"
+      ;;
+    *)
+      echo "Error: unknown ceremony subcommand '$subcmd'" >&2
+      echo "" >&2
+      ceremony_usage
       return 1
       ;;
   esac
@@ -684,6 +729,10 @@ case "$1" in
   backlinks)
     shift
     cmd_backlinks "$@"
+    ;;
+  ceremony)
+    shift
+    cmd_ceremony "$@"
     ;;
   batch-spec)
     shift

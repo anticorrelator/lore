@@ -1,6 +1,6 @@
 ---
 name: self-test
-description: Evaluate the lore memory system — run structured tests across 8 dimensions and produce scored, comparable results
+description: Evaluate the lore memory system — run structured tests across 8 dimensions, produce scored comparable results, and log protocol evolution suggestions
 user_invocable: true
 argument_description: "[optional: 'quick' for abbreviated run (Tests 1, 2, 7 only)]"
 ---
@@ -474,10 +474,9 @@ Format: Test X.Y — Bypassed because: reason]
 If no work items warranted, note why.]
 
 ## Protocol Changes (Run N)
-Changes made to `skills/self-test/SKILL.md` this run:
-- [Test X]: <what changed and why>
-- [New]: <any new test dimensions added>
-- [Removed]: <any test dimensions removed and why>
+Evolution suggestions logged to journal this run:
+- [Test X]: <what was suggested and why>
+- [New]: <any new test dimensions suggested>
 
 Rationale: <1-2 sentences on what this run taught about self-diagnosis>
 ```
@@ -490,7 +489,8 @@ Rationale: <1-2 sentences on what this run taught about self-diagnosis>
 lore journal write \
   --observation "Self-test Run N: Orientation X/5 | Retrieval X/5 | Backlinks X hops X% | Threads X/5 | Plans X/5 | Utilization X/5 | Search X/5 | Trust X/5. Key regressions: <list or 'none'>. Key improvements: <list or 'none'>. Most actionable finding: <1-2 sentences on the single most important thing to fix>." \
   --context "self-test run N" \
-  --role "self-test"
+  --role "self-test" \
+  --scores '{"t1_orientation": X, "t2_retrieval": X, "t3_backlinks": X, "t4_threads": X, "t5_plans": X, "t6_utilization": X, "t7_search": X, "t8_trust": X}'
 ```
 
 The observation should be 3-5 sentences containing: all 8 scores, any regressions or improvements compared to the previous run, and the single most actionable finding from this run.
@@ -507,9 +507,9 @@ After writing results, report to the user:
   [If previous: vs Run N-1: X improved, X regressed, X unchanged, X new]
 ```
 
-## Step 6: Evolve the Self-Test
+## Step 6: Log Evolution Suggestions
 
-**This step is mandatory.** Every run should leave the self-test protocol better than it found it. A self-test that doesn't evolve calcifies — it starts confirming what's already known instead of surfacing what's actually wrong.
+**This step is mandatory.** Every run should produce at least one protocol improvement suggestion. A self-test that doesn't evolve calcifies — it starts confirming what's already known instead of surfacing what's actually wrong. Log suggestions to the journal — do **not** edit `skills/self-test/SKILL.md` directly. The `/evolve` skill applies batched journal suggestions on demand.
 
 ### 6a: Analyze patterns (if Run > 1)
 
@@ -526,9 +526,19 @@ If previous results exist, compare across runs:
 
 4. **Score trend analysis:** If a test has regressed for 2+ consecutive runs, flag prominently: "Test X has regressed N runs in a row."
 
-### 6b: Apply improvements to the protocol
+### 6b: Log improvement suggestions
 
-Based on this run's findings, **edit `skills/self-test/SKILL.md` directly**. Changes to make:
+Based on this run's findings, write a journal entry for each protocol improvement identified:
+
+```bash
+lore journal write \
+  --observation "Target: <file> | Change type: <ceiling-test/new-failure-mode/dead-test/evidence-gap> | Section: <section> | Suggestion: <specific change> | Evidence: <self-test finding that surfaced this>" \
+  --context "self-test-evolution: run N" \
+  --work-item "<slug if applicable>" \
+  --role "self-test-evolution"
+```
+
+**Suggestion categories to consider:**
 
 1. **Tests that hit ceiling:** Tighten scoring criteria, add harder sub-questions, or replace the test entirely. A test at ceiling is a test that's wasting time.
 
@@ -538,21 +548,19 @@ Based on this run's findings, **edit `skills/self-test/SKILL.md` directly**. Cha
 
 4. **Scoring rubric adjustments:** If the rubric made it easy to justify a high score without real evidence, tighten it. Every score should require concrete demonstration, not self-assessment.
 
-5. **Structural changes:** If the test missed something important about how the system is actually used (vs how it was designed to be used), restructure to test real usage patterns.
+**One entry per suggestion.** If multiple improvements are identified, write multiple journal entries. The observation should be 2-4 sentences: the suggested change, the target test or section, the rationale, and which pattern triggered it.
 
-**Minimum bar:** At least one concrete improvement per run. If everything genuinely scored well and no improvements are obvious, document *why* each test is still producing useful signal — the justification itself is the deliverable.
+**Minimum bar:** At least one suggestion per run. If scoring went smoothly and no improvements are obvious, log why each test is still producing useful signal — the justification is the deliverable.
 
-### 6c: Record changes
+### 6c: Record in results file
 
-Append a `## Protocol Changes` section to the results file:
+Append a `## Protocol Changes` section to the results file noting what was logged (not what was applied):
 
 ```markdown
 ## Protocol Changes (Run N)
-Changes made to `skills/self-test/SKILL.md` this run:
-- [Test X]: <what changed and why>
-- [Test Y]: <what changed and why>
-- [New]: <any new test dimensions added>
-- [Removed]: <any test dimensions removed and why>
+Evolution suggestions logged to journal this run:
+- [Test X]: <what was suggested and why>
+- [Test Y]: <what was suggested and why>
 
 Rationale: <1-2 sentences on what this run taught about self-diagnosis>
 ```
@@ -560,8 +568,8 @@ Rationale: <1-2 sentences on what this run taught about self-diagnosis>
 ### 6d: Report
 
 ```
-[self-test] Protocol evolved:
-  Changes: N test(s) modified | Ceiling tests addressed: N | New dimensions: N
+[self-test] Evolution suggestions logged: N (run /evolve self-test to apply)
+  Ceiling tests addressed: N | New failure modes: N | Dead tests: N | Evidence gaps: N
   Rationale: <one sentence>
 ```
 
@@ -588,7 +596,7 @@ Review all recommendations from the `## Recommendations` section. For each, deci
 For each recommendation that warrants a work item:
 
 ```bash
-lore work create "<slug>"
+lore work create --title "<slug>"
 ```
 
 Then write a notes.md entry scoping the work:

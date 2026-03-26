@@ -323,6 +323,7 @@ func (m *DetailModel) JumpTo(loc SearchLocation) {
 			m.notesTab.cursor = loc.EntryIdx
 			m.notesTab.scroll = 0
 		}
+		// fallback mode: no entries — tab switch above is sufficient, no cursor to set
 	case TabExecLog:
 		if loc.EntryIdx >= 0 && loc.EntryIdx < len(m.execLogModel.entries) {
 			m.execLogModel.cursor = loc.EntryIdx
@@ -560,8 +561,16 @@ func (m DetailModel) BuildSearchIndex() []SearchLocation {
 
 	var locs []SearchLocation
 
-	// Notes tab: one entry per note.
-	if !m.notesTab.empty {
+	// Notes tab: one entry per note, or a single fallback entry for raw content.
+	if m.notesTab.fallback {
+		locs = append(locs, SearchLocation{
+			TabID:    TabNotes,
+			TabLabel: "Notes",
+			Label:    "Notes (raw)",
+			Subtitle: "Notes",
+			EntryIdx: -1,
+		})
+	} else if !m.notesTab.empty {
 		for i, entry := range m.notesTab.entries {
 			locs = append(locs, SearchLocation{
 				TabID:    TabNotes,

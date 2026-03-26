@@ -6,13 +6,15 @@ Work items persist in the project's `_work/` directory (path resolved by `lore r
 
 `/work` is the primary way to create and manage work items. It handles persistence, indexing, and cross-referencing automatically.
 
+**Never write work item files directly** (mkdir, Write `_meta.json`, etc.). Always use `lore work create --title "<name>"` — this handles slug generation, indexing, and metadata consistently. This applies to agents and subagents too: if a task requires creating a work item, invoke the CLI, not the filesystem.
+
 **Builtin plan mode (EnterPlanMode/ExitPlanMode) produces ephemeral plans** that live at `~/.claude/plans/` and are lost across sessions. Only use it for quick, small-scope planning that doesn't need to survive the current session. For anything that warrants persistence — multi-step work, design decisions, cross-session tasks — use `/work` instead.
 
 ### Every Work Item Gets Persisted
 
 ALL planning work MUST create durable artifacts in `_work/` — whether triggered by `/work`, builtin `EnterPlanMode`, or inline design discussion. **No ephemeral plans.**
 
-**If you used builtin plan mode:** A Stop hook will remind you to persist. Don't wait for it — persist immediately after the user approves the plan. Create the `_work/<slug>/` directory with `_meta.json` and `plan.md`.
+**If you used builtin plan mode:** A Stop hook will remind you to persist. Don't wait for it — persist immediately after the user approves the plan via `/work create`.
 
 ### Auto-Create Work Items (Low Threshold)
 

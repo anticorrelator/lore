@@ -1017,6 +1017,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			m.detailCache = make(map[string]*work.WorkItemDetail)
 			if currentSlug != "" {
 				m.detail = work.NewDetailModel(m.config.WorkDir, currentSlug)
+				m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
 				cmds = append(cmds, m.detail.Init())
 			}
 			for _, item := range msg.items {

@@ -136,7 +136,7 @@ lore annotate                    # Record a retrieval friction annotation
 
 # Work items
 lore work list                   # List active work items
-lore work create "name"          # Create a work item
+lore work create --title "name"  # Create a work item
 lore work show "slug"            # Show work item details
 lore work set "slug" --pr 123    # Set metadata (issue, pr) on a work item
 lore work archive "slug"         # Archive completed work item

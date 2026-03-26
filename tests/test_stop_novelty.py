@@ -610,3 +610,503 @@ class TestNormalMessagesStillTrigger:
         ]
         hits = snc.scan_heuristics(messages)
         assert len(hits) == 0
+
+
+# ---------------------------------------------------------------------------
+# Test: load_config() — missing file, partial fields, invalid values
+# ---------------------------------------------------------------------------
+
+class TestLoadConfig:
+    """Tests for load_config(): config loading with fallback to hardcoded defaults."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_config_path(self, tmp_path, monkeypatch):
+        """Redirect config path to a temp directory for all tests in this class."""
+        self.config_dir = tmp_path / ".lore" / "config"
+        self.config_dir.mkdir(parents=True)
+        self.config_path = self.config_dir / "capture-config.json"
+        _original = os.path.expanduser
+        monkeypatch.setattr(
+            os.path, "expanduser",
+            lambda p: str(self.config_path) if "capture-config.json" in p else _original(p),
+        )
+
+    def test_missing_file_returns_all_defaults(self):
+        """When config file does not exist, load_config() returns all defaults."""
+        # config_path does not exist (not written)
+        result = snc.load_config()
+        assert result == snc.DEFAULTS
+
+    def test_partial_config_overrides_specified_fields(self):
+        """Partial config overrides only the specified fields, others stay default."""
+        self.config_path.write_text(
+            json.dumps({"region_window": 10, "max_candidates": 3}),
+            encoding="utf-8",
+        )
+        result = snc.load_config()
+        assert result["region_window"] == 10
+        assert result["max_candidates"] == 3
+        # Unspecified fields stay at defaults
+        assert result["novelty_threshold"] == snc.DEFAULTS["novelty_threshold"]
+        assert result["min_tool_uses"] == snc.DEFAULTS["min_tool_uses"]
+        assert result["synthesis_char_threshold"] == snc.DEFAULTS["synthesis_char_threshold"]
+
+    def test_invalid_json_falls_back_to_defaults_with_warning(self, capsys):
+        """Malformed JSON falls back to all defaults and logs to stderr."""
+        self.config_path.write_text("not valid json {{{", encoding="utf-8")
+        result = snc.load_config()
+        assert result == snc.DEFAULTS
+        captured = capsys.readouterr()
+        assert "invalid capture-config.json" in captured.err
+        assert "using defaults" in captured.err
+
+    def test_wrong_type_falls_back_per_field(self, capsys):
+        """Wrong types fall back to defaults for those fields, with stderr warning."""
+        self.config_path.write_text(
+            json.dumps({
+                "region_window": "not_a_number",
+                "max_candidates": 7,
+            }),
+            encoding="utf-8",
+        )
+        result = snc.load_config()
+        # region_window has wrong type — should stay at default
+        assert result["region_window"] == snc.DEFAULTS["region_window"]
+        # max_candidates is valid — should be overridden
+        assert result["max_candidates"] == 7
+        captured = capsys.readouterr()
+        assert "invalid type" in captured.err
+        assert "region_window" in captured.err
+
+    def test_non_dict_json_falls_back_to_defaults(self, capsys):
+        """JSON that parses but isn't an object falls back to defaults."""
+        self.config_path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+        result = snc.load_config()
+        assert result == snc.DEFAULTS
+        captured = capsys.readouterr()
+        assert "not a JSON object" in captured.err
+
+    def test_empty_config_returns_all_defaults(self):
+        """Empty JSON object returns all defaults unchanged (plus adaptive=False)."""
+        self.config_path.write_text("{}", encoding="utf-8")
+        result = snc.load_config()
+        expected = dict(snc.DEFAULTS)
+        expected["adaptive"] = False
+        assert result == expected
+
+    def test_unknown_keys_ignored(self):
+        """Keys not in DEFAULTS are silently ignored."""
+        self.config_path.write_text(
+            json.dumps({"unknown_key": 42, "region_window": 8}),
+            encoding="utf-8",
+        )
+        result = snc.load_config()
+        assert "unknown_key" not in result
+        assert result["region_window"] == 8
+
+    def test_float_value_for_int_field_coerced(self):
+        """Float value for an int-default field is coerced to int."""
+        self.config_path.write_text(
+            json.dumps({"region_window": 7.9}),
+            encoding="utf-8",
+        )
+        result = snc.load_config()
+        assert result["region_window"] == 7
+        assert isinstance(result["region_window"], int)
+
+    def test_all_fields_overridden(self):
+        """Every field can be overridden at once."""
+        overrides = {k: v * 2 for k, v in snc.DEFAULTS.items()}
+        self.config_path.write_text(json.dumps(overrides), encoding="utf-8")
+        result = snc.load_config()
+        for key, val in overrides.items():
+            expected_type = type(snc.DEFAULTS[key])
+            assert result[key] == expected_type(val)
+
+
+# ---------------------------------------------------------------------------
+# Test: behavioral equivalence — no config produces identical output to pre-change
+# ---------------------------------------------------------------------------
+
+FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
+
+# Import transcript parser
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+from transcript import parse_transcript
+
+
+class TestBehavioralEquivalence:
+    """Regression test: with no config file, scan_heuristics and scan_structural_signals
+    produce the exact same hits as the golden transcript fixture. This proves config
+    externalization introduced no behavioral changes when no config is present."""
+
+    @pytest.fixture
+    def golden_transcript(self):
+        return os.path.join(FIXTURES_DIR, "golden_transcript.jsonl")
+
+    @pytest.fixture
+    def golden_expected(self):
+        with open(os.path.join(FIXTURES_DIR, "golden_expected.json"), "r") as f:
+            return json.load(f)
+
+    def _normalize_hits(self, hits):
+        """Extract (index, role, trigger) tuples sorted for comparison."""
+        return sorted(
+            (h["index"], h["role"], h["trigger"]) for h in hits
+        )
+
+    def test_heuristic_hits_match_golden(self, golden_transcript, golden_expected):
+        """scan_heuristics produces the same hits as the golden fixture."""
+        messages = parse_transcript(golden_transcript)
+        actual = snc.scan_heuristics(messages)
+        expected = golden_expected["heuristic_hits"]
+
+        assert self._normalize_hits(actual) == self._normalize_hits(expected)
+
+    def test_structural_hits_match_golden(self, golden_transcript, golden_expected):
+        """scan_structural_signals produces the same hits as the golden fixture."""
+        messages = parse_transcript(golden_transcript)
+        actual = snc.scan_structural_signals(messages, transcript_path=golden_transcript)
+        expected = golden_expected["structural_hits"]
+
+        assert self._normalize_hits(actual) == self._normalize_hits(expected)
+
+    def test_combined_hits_match_golden(self, golden_transcript, golden_expected):
+        """Combined heuristic + structural hits match golden fixture exactly."""
+        messages = parse_transcript(golden_transcript)
+        heuristic = snc.scan_heuristics(messages)
+        structural = snc.scan_structural_signals(messages, transcript_path=golden_transcript)
+        actual_combined = heuristic + structural
+
+        expected_combined = (
+            golden_expected["heuristic_hits"] + golden_expected["structural_hits"]
+        )
+
+        assert self._normalize_hits(actual_combined) == self._normalize_hits(expected_combined)
+
+    def test_defaults_match_original_hardcoded_values(self):
+        """DEFAULTS dict contains exactly the original hardcoded values from pre-config code."""
+        # These are the values that were hardcoded before config externalization.
+        # If any change, this test fails — proving behavioral equivalence.
+        expected = {
+            "novelty_threshold": -1.0,
+            "region_window": 5,
+            "max_candidates": 5,
+            "max_phrases": 15,
+            "min_tool_uses": 5,
+            "max_tool_uses": 10,
+            "investigation_window": 10,
+            "iterative_debug_window": 15,
+            "test_fix_window": 20,
+            "synthesis_char_threshold": 500,
+            "synthesis_tool_threshold": 5,
+            "file_context_window": 10,
+            "debug_context_window": 10,
+            "debug_context_chars": 800,
+        }
+        assert snc.DEFAULTS == expected
+
+
+# ---------------------------------------------------------------------------
+# Test: read_store_stats() — _manifest.json parsing
+# ---------------------------------------------------------------------------
+
+class TestReadStoreStats:
+    """Tests for read_store_stats(): reads entry count from _manifest.json."""
+
+    def test_valid_manifest_returns_entry_count(self, tmp_path):
+        """Returns the number of entries in a valid _manifest.json."""
+        manifest = {"entries": [{"title": f"entry-{i}"} for i in range(25)]}
+        (tmp_path / "_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        assert snc.read_store_stats(str(tmp_path)) == 25
+
+    def test_empty_entries_returns_zero(self, tmp_path):
+        """Returns 0 when entries list is empty."""
+        (tmp_path / "_manifest.json").write_text(
+            json.dumps({"entries": []}), encoding="utf-8"
+        )
+        assert snc.read_store_stats(str(tmp_path)) == 0
+
+    def test_missing_manifest_returns_none(self, tmp_path):
+        """Returns None when _manifest.json does not exist."""
+        assert snc.read_store_stats(str(tmp_path)) is None
+
+    def test_corrupt_json_returns_none(self, tmp_path, capsys):
+        """Returns None for malformed JSON and logs to stderr."""
+        (tmp_path / "_manifest.json").write_text(
+            "not valid json {{{", encoding="utf-8"
+        )
+        assert snc.read_store_stats(str(tmp_path)) is None
+        captured = capsys.readouterr()
+        assert "failed to read _manifest.json" in captured.err
+
+    def test_non_dict_manifest_returns_none(self, tmp_path):
+        """Returns None when manifest is valid JSON but not a dict."""
+        (tmp_path / "_manifest.json").write_text(
+            json.dumps([1, 2, 3]), encoding="utf-8"
+        )
+        assert snc.read_store_stats(str(tmp_path)) is None
+
+    def test_missing_entries_key_returns_none(self, tmp_path):
+        """Returns None when manifest is a dict but has no 'entries' key."""
+        (tmp_path / "_manifest.json").write_text(
+            json.dumps({"version": 1}), encoding="utf-8"
+        )
+        assert snc.read_store_stats(str(tmp_path)) is None
+
+    def test_entries_not_a_list_returns_none(self, tmp_path):
+        """Returns None when 'entries' is not a list."""
+        (tmp_path / "_manifest.json").write_text(
+            json.dumps({"entries": "not a list"}), encoding="utf-8"
+        )
+        assert snc.read_store_stats(str(tmp_path)) is None
+
+    def test_large_manifest_returns_correct_count(self, tmp_path):
+        """Correctly counts a large number of entries."""
+        manifest = {"entries": [{"title": f"e-{i}"} for i in range(500)]}
+        (tmp_path / "_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        assert snc.read_store_stats(str(tmp_path)) == 500
+
+
+# ---------------------------------------------------------------------------
+# Test: compute_adaptive_threshold() — threshold adjustment based on store maturity
+# ---------------------------------------------------------------------------
+
+class TestAdaptiveThreshold:
+    """Tests for compute_adaptive_threshold(knowledge_dir, base_threshold):
+    adjusts novelty threshold based on store entry count from _manifest.json.
+
+    Mapping:
+    - Young store (<50 entries): -0.5 (looser, capture more)
+    - Mature store (>200 entries): -1.5 (tighter, capture less)
+    - Default range (50-200): base_threshold unchanged
+    - Missing/corrupt manifest: fall back to base_threshold
+    """
+
+    def _make_manifest(self, path, count):
+        """Create a _manifest.json with the given number of entries."""
+        manifest = {"entries": [{"title": f"entry-{i}"} for i in range(count)]}
+        (path / "_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+
+    def test_young_store_gets_loose_threshold(self, tmp_path):
+        """Store with <50 entries gets looser threshold (-0.5)."""
+        self._make_manifest(tmp_path, 30)
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        assert result == -0.5
+
+    def test_mature_store_gets_tight_threshold(self, tmp_path):
+        """Store with >200 entries gets tighter threshold (-1.5)."""
+        self._make_manifest(tmp_path, 250)
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        assert result == -1.5
+
+    def test_default_range_interpolates(self, tmp_path):
+        """Store with 100 entries interpolates: t=(100-50)/150, result=-0.5+t*(-1.0)."""
+        self._make_manifest(tmp_path, 100)
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        expected = -0.5 + ((100 - 50) / 150.0) * (-1.0)
+        assert result == pytest.approx(expected)
+
+    def test_boundary_50_starts_interpolation(self, tmp_path):
+        """Exactly 50 entries is the start of interpolation range (-0.5)."""
+        self._make_manifest(tmp_path, 50)
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        assert result == pytest.approx(-0.5)
+
+    def test_boundary_200_ends_interpolation(self, tmp_path):
+        """Exactly 200 entries is the end of interpolation range (-1.5)."""
+        self._make_manifest(tmp_path, 200)
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        assert result == pytest.approx(-1.5)
+
+    def test_boundary_49_is_young(self, tmp_path):
+        """49 entries is in the young range."""
+        self._make_manifest(tmp_path, 49)
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        assert result == -0.5
+
+    def test_boundary_201_is_mature(self, tmp_path):
+        """201 entries is in the mature range."""
+        self._make_manifest(tmp_path, 201)
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        assert result == -1.5
+
+    def test_zero_entries_is_young(self, tmp_path):
+        """Empty store (0 entries) is in the young range."""
+        self._make_manifest(tmp_path, 0)
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        assert result == -0.5
+
+    def test_missing_manifest_returns_base_threshold(self, tmp_path):
+        """Missing _manifest.json gracefully falls back to base threshold."""
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        assert result == -1.0
+
+    def test_corrupt_manifest_returns_base_threshold(self, tmp_path):
+        """Corrupt _manifest.json gracefully falls back to base threshold."""
+        (tmp_path / "_manifest.json").write_text(
+            "not valid json {{{", encoding="utf-8"
+        )
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        assert result == -1.0
+
+    def test_custom_base_threshold_ignored_when_adaptive(self, tmp_path):
+        """When adaptive is on, interpolation uses fixed -0.5 to -1.5 range regardless of base."""
+        self._make_manifest(tmp_path, 100)
+        result = snc.compute_adaptive_threshold(str(tmp_path), -2.0)
+        # Interpolation at 100 entries: t=(100-50)/150, result=-0.5+t*(-1.0)
+        expected = -0.5 + ((100 - 50) / 150.0) * (-1.0)
+        assert result == pytest.approx(expected)
+
+    def test_large_entry_count(self, tmp_path):
+        """Very large entry count still returns -1.5."""
+        self._make_manifest(tmp_path, 10000)
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        assert result == -1.5
+
+    def test_non_dict_manifest_returns_base(self, tmp_path):
+        """Non-dict manifest (valid JSON, wrong shape) falls back to base."""
+        (tmp_path / "_manifest.json").write_text(
+            json.dumps([1, 2, 3]), encoding="utf-8"
+        )
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        assert result == -1.0
+
+    def test_manifest_missing_entries_key_returns_base(self, tmp_path):
+        """Manifest without 'entries' key falls back to base."""
+        (tmp_path / "_manifest.json").write_text(
+            json.dumps({"version": 1}), encoding="utf-8"
+        )
+        result = snc.compute_adaptive_threshold(str(tmp_path), -1.0)
+        assert result == -1.0
+
+
+# ---------------------------------------------------------------------------
+# Test: adapt_threshold() — core threshold logic with config dict
+# ---------------------------------------------------------------------------
+
+class TestAdaptThreshold:
+    """Tests for adapt_threshold(config, entry_count): the core function that
+    checks the adaptive flag and applies threshold mapping."""
+
+    def _config(self, adaptive=True, threshold=-1.0):
+        config = dict(snc.DEFAULTS)
+        config["adaptive"] = adaptive
+        config["novelty_threshold"] = threshold
+        return config
+
+    def test_adaptive_false_returns_base(self):
+        """adaptive=false returns base threshold regardless of entry count."""
+        assert snc.adapt_threshold(self._config(adaptive=False), 30) == -1.0
+
+    def test_adaptive_false_custom_base(self):
+        """adaptive=false returns custom base threshold unchanged."""
+        assert snc.adapt_threshold(self._config(adaptive=False, threshold=-2.5), 30) == -2.5
+
+    def test_adaptive_false_mature_store(self):
+        """adaptive=false with mature store still returns base."""
+        assert snc.adapt_threshold(self._config(adaptive=False), 500) == -1.0
+
+    def test_adaptive_false_none_count(self):
+        """adaptive=false with None entry count returns base."""
+        assert snc.adapt_threshold(self._config(adaptive=False), None) == -1.0
+
+    def test_adaptive_true_young(self):
+        """adaptive=true with young store returns -0.5."""
+        assert snc.adapt_threshold(self._config(), 30) == -0.5
+
+    def test_adaptive_true_mature(self):
+        """adaptive=true with mature store returns -1.5."""
+        assert snc.adapt_threshold(self._config(), 250) == -1.5
+
+    def test_adaptive_true_interpolation(self):
+        """adaptive=true with 125 entries returns midpoint (-1.0)."""
+        assert snc.adapt_threshold(self._config(), 125) == pytest.approx(-1.0)
+
+    def test_adaptive_true_none_count(self):
+        """adaptive=true with None entry count falls back to base."""
+        assert snc.adapt_threshold(self._config(), None) == -1.0
+
+    def test_adaptive_true_none_count_custom_base(self):
+        """adaptive=true with None entry count falls back to custom base."""
+        assert snc.adapt_threshold(self._config(threshold=-2.5), None) == -2.5
+
+
+# ---------------------------------------------------------------------------
+# Test: adaptive=false in config produces no threshold change
+# ---------------------------------------------------------------------------
+
+class TestAdaptiveFalseNoChange:
+    """When adaptive=false in config, the main() code path does not call
+    compute_adaptive_threshold, so the base threshold is used unchanged."""
+
+    def _make_manifest(self, path, count):
+        manifest = {"entries": [{"title": f"entry-{i}"} for i in range(count)]}
+        (path / "_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+
+    def test_adaptive_false_config_preserves_threshold(self, tmp_path, monkeypatch):
+        """With adaptive=false, load_config returns adaptive=False and threshold unchanged."""
+        config_path = tmp_path / "capture-config.json"
+        config_path.write_text(json.dumps({
+            "core": {"novelty_threshold": -1.0},
+            "structural_signals": {},
+            "adaptive": False,
+        }), encoding="utf-8")
+
+        _original = os.path.expanduser
+        monkeypatch.setattr(
+            os.path, "expanduser",
+            lambda p: str(config_path) if "capture-config.json" in p else _original(p),
+        )
+
+        config = snc.load_config()
+        assert config["adaptive"] is False
+        assert config["novelty_threshold"] == -1.0
+
+    def test_adaptive_true_config_sets_flag(self, tmp_path, monkeypatch):
+        """With adaptive=true, load_config returns adaptive=True."""
+        config_path = tmp_path / "capture-config.json"
+        config_path.write_text(json.dumps({
+            "core": {"novelty_threshold": -1.0},
+            "structural_signals": {},
+            "adaptive": True,
+        }), encoding="utf-8")
+
+        _original = os.path.expanduser
+        monkeypatch.setattr(
+            os.path, "expanduser",
+            lambda p: str(config_path) if "capture-config.json" in p else _original(p),
+        )
+
+        config = snc.load_config()
+        assert config["adaptive"] is True
+
+    def test_adaptive_flag_gates_threshold_adjustment(self, tmp_path):
+        """Simulates main() logic: only adjusts threshold when adaptive=True."""
+        self._make_manifest(tmp_path, 30)  # young store
+
+        # adaptive=false path
+        config_off = dict(snc.DEFAULTS)
+        config_off["adaptive"] = False
+        if config_off.get("adaptive", False):
+            config_off["novelty_threshold"] = snc.compute_adaptive_threshold(
+                str(tmp_path), config_off["novelty_threshold"]
+            )
+        assert config_off["novelty_threshold"] == -1.0  # unchanged
+
+        # adaptive=true path
+        config_on = dict(snc.DEFAULTS)
+        config_on["adaptive"] = True
+        if config_on.get("adaptive", False):
+            config_on["novelty_threshold"] = snc.compute_adaptive_threshold(
+                str(tmp_path), config_on["novelty_threshold"]
+            )
+        assert config_on["novelty_threshold"] == -0.5  # adjusted for young store

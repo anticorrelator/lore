@@ -74,6 +74,8 @@ Detection: check conversation context for "File does not exist" when reading `~/
 
 **Evidence availability:** TaskCreate descriptions are ephemeral (conversation context only). Lead-bypass detection is only fully verifiable in **same-session retros**. For cross-session retros, infer from: (a) worker observations about missing context, (b) notes.md delivery gaps, (c) absence of knowledge-traceable guidance in worker reports. Cap Dimension 1 at 3 cross-session without direct evidence of delivery.
 
+**Batch execution-log placeholder degradation:** When the implement lead logs task completions in bulk (e.g., catching up on multiple worker reports at once), execution-log entries may contain placeholder text like "(logged from task system)" instead of the worker's actual Observations content. This degrades retro evidence quality — per-task observation evaluation becomes impossible for affected entries, and Dimensions 2-4 scoring must rely on the lead's notes.md summary or conversation context instead. Detection: execution-log entries with `source: implement-lead` that have identical boilerplate Observations text across multiple tasks. Scoring impact: does not cap any dimension, but note as reduced-confidence evidence when scoring. The lead's notes.md session entry partially compensates (it captures cross-task synthesis), but individual worker observations are lost. Mitigation: the `/implement` lead should write execution-log entries immediately after each worker report arrives, using the worker's verbatim Observations — not batch them after the implementation session completes.
+
 ## C0. Implementation Phase Cold-Start
 
 Affects: Dimension 1 (Delivery), Dimension 3 (Gaps)

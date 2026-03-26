@@ -29,6 +29,184 @@ from transcript import parse_transcript, extract_file_paths, count_tool_uses, ha
 
 
 # ---------------------------------------------------------------------------
+# Configuration loading with fallback to hardcoded defaults
+# ---------------------------------------------------------------------------
+
+DEFAULTS = {
+    # Core thresholds
+    "novelty_threshold": -1.0,
+    "region_window": 5,
+    "max_candidates": 5,
+    "max_phrases": 15,
+    "min_tool_uses": 5,
+    "max_tool_uses": 10,
+    # Structural signal thresholds
+    "investigation_window": 10,
+    "iterative_debug_window": 15,
+    "test_fix_window": 20,
+    "synthesis_char_threshold": 500,
+    "synthesis_tool_threshold": 5,
+    "file_context_window": 10,
+    "debug_context_window": 10,
+    "debug_context_chars": 800,
+}
+
+
+def load_config():
+    """Load capture-config.json with fallback to hardcoded defaults.
+
+    Resolution order:
+    1. ~/.lore/config/capture-config.json (if exists and valid)
+    2. Hardcoded DEFAULTS
+
+    With no config file, returns DEFAULTS unchanged.
+    With partial config, overridden fields use config values, others use defaults.
+    With invalid config (malformed JSON, wrong types), falls back to all defaults
+    and logs a warning to stderr.
+
+    Returns:
+        dict with all keys from DEFAULTS, values overridden by config where present.
+    """
+    config = dict(DEFAULTS)
+
+    config_path = os.path.expanduser("~/.lore/config/capture-config.json")
+    if not os.path.isfile(config_path):
+        return config
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(
+            f"[hook] stop-novelty-check: invalid capture-config.json, using defaults: {e}",
+            file=sys.stderr,
+        )
+        return config
+
+    if not isinstance(raw, dict):
+        print(
+            "[hook] stop-novelty-check: capture-config.json is not a JSON object, using defaults",
+            file=sys.stderr,
+        )
+        return config
+
+    # Flatten nested groups ("core" and "structural_signals") into top-level keys
+    flat = {}
+    for group_key in ("core", "structural_signals"):
+        group = raw.get(group_key)
+        if isinstance(group, dict):
+            flat.update(group)
+    # Also merge any top-level keys (supports flat config format)
+    for key, val in raw.items():
+        if key not in ("core", "structural_signals", "adaptive"):
+            flat[key] = val
+
+    # Merge recognized keys with type validation
+    for key, default_val in DEFAULTS.items():
+        if key in flat:
+            val = flat[key]
+            if isinstance(val, (int, float)) and isinstance(default_val, (int, float)):
+                config[key] = type(default_val)(val)
+            else:
+                print(
+                    f"[hook] stop-novelty-check: invalid type for '{key}' in config, using default",
+                    file=sys.stderr,
+                )
+
+    # Read adaptive flag (boolean, default false)
+    adaptive = raw.get("adaptive", False)
+    config["adaptive"] = bool(adaptive) if isinstance(adaptive, bool) else False
+
+    return config
+
+
+def read_store_stats(knowledge_dir):
+    """Read store statistics from _manifest.json.
+
+    Returns the entry count from the manifest, or None if the manifest
+    is missing, corrupt, or has an unexpected structure.
+
+    Args:
+        knowledge_dir: path to the knowledge store directory
+
+    Returns:
+        int or None: number of entries in the knowledge store
+    """
+    manifest_path = os.path.join(knowledge_dir, "_manifest.json")
+    if not os.path.isfile(manifest_path):
+        return None
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(
+            f"[hook] stop-novelty-check: failed to read _manifest.json: {e}",
+            file=sys.stderr,
+        )
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        return None
+
+    return len(entries)
+
+
+def adapt_threshold(config, entry_count):
+    """Adjust novelty threshold based on store maturity when adaptive mode is enabled.
+
+    When adaptive is false (default), returns the base threshold unchanged.
+    When adaptive is true, maps entry count to a threshold:
+        - Young store (< 50 entries): -0.5 (looser, capture more)
+        - Mature store (> 200 entries): -1.5 (tighter, capture less)
+        - Default range (50-200): linear interpolation from -0.5 to -1.5
+        - None entry_count: fall back to base threshold
+
+    Args:
+        config: config dict from load_config() (must include 'adaptive' and 'novelty_threshold')
+        entry_count: number of entries in the knowledge store (int or None)
+
+    Returns:
+        float: the novelty threshold to use
+    """
+    base = config["novelty_threshold"]
+
+    if not config.get("adaptive", False):
+        return base
+
+    if entry_count is None:
+        return base
+
+    if entry_count < 50:
+        return -0.5
+    elif entry_count > 200:
+        return -1.5
+    else:
+        # Linear interpolation: 50 entries -> -0.5, 200 entries -> -1.5
+        t = (entry_count - 50) / 150.0
+        return -0.5 + t * (-1.5 - (-0.5))
+
+
+def compute_adaptive_threshold(knowledge_dir, base_threshold):
+    """Convenience wrapper: read store stats and compute adaptive threshold.
+
+    Args:
+        knowledge_dir: path to the knowledge store directory
+        base_threshold: the configured base novelty threshold
+
+    Returns:
+        float: the novelty threshold to use
+    """
+    config = {"novelty_threshold": base_threshold, "adaptive": True}
+    entry_count = read_store_stats(knowledge_dir)
+    return adapt_threshold(config, entry_count)
+
+
+# ---------------------------------------------------------------------------
 # Heuristic patterns -- regex-based detection of reactive triggers
 # ---------------------------------------------------------------------------
 
@@ -183,14 +361,14 @@ def scan_heuristics(messages):
     return hits
 
 
-def scan_structural_signals(messages, transcript_path=""):
+def scan_structural_signals(messages, transcript_path="", config=None):
     """Detect structural patterns that signal debugging or investigation sessions.
 
     Detects four signal types based on tool_use sequences rather than phrasing:
-      - structural-investigation: ≥3 Read/Grep/Bash within 10 messages then Edit
-      - structural-iterative-debug: same file path in ≥2 Reads within 15 messages
-      - structural-test-fix: Bash→Edit→Bash within 20 messages
-      - structural-synthesis: >500 char assistant message after ≥5 tool_use messages
+      - structural-investigation: ≥3 Read/Grep/Bash within investigation_window messages then Edit
+      - structural-iterative-debug: same file path in ≥2 Reads within iterative_debug_window messages
+      - structural-test-fix: Bash→Edit→Bash within test_fix_window messages
+      - structural-synthesis: >synthesis_char_threshold char assistant message after ≥synthesis_tool_threshold tool_use messages
 
     Returns list of dicts: {index, role, trigger, matched_text}
     Same format as scan_heuristics() so results can be merged into heuristic_hits.
@@ -198,7 +376,15 @@ def scan_structural_signals(messages, transcript_path=""):
     Args:
         messages: list of parsed message dicts from parse_transcript()
         transcript_path: path to transcript file (needed for file-path signals)
+        config: configuration dict (uses DEFAULTS if None)
     """
+    if config is None:
+        config = DEFAULTS
+    investigation_window = config["investigation_window"]
+    iterative_debug_window = config["iterative_debug_window"]
+    test_fix_window = config["test_fix_window"]
+    synthesis_char_threshold = config["synthesis_char_threshold"]
+    synthesis_tool_threshold = config["synthesis_tool_threshold"]
     hits = []
     msg_by_index = {m["index"]: m for m in messages}
 
@@ -208,14 +394,14 @@ def scan_structural_signals(messages, transcript_path=""):
     READ_TOOLS = frozenset({"Read"})
 
     # --- Signal 1: Investigation-then-fix ---
-    # ≥3 Read/Grep/Bash within 10 messages followed by Edit
+    # ≥3 Read/Grep/Bash within investigation_window messages followed by Edit
     indices = [m["index"] for m in messages if m["has_tool_use"]]
     for i, idx in enumerate(indices):
         msg = msg_by_index[idx]
         if not (EDIT_TOOLS & set(msg["tool_names"])):
             continue
-        # This message has an Edit — look back 10 messages for ≥3 investigation tools
-        window_start = idx - 10
+        # This message has an Edit — look back investigation_window messages for ≥3 investigation tools
+        window_start = idx - investigation_window
         invest_count = sum(
             1 for j in indices
             if window_start <= j < idx
@@ -232,13 +418,13 @@ def scan_structural_signals(messages, transcript_path=""):
                 ),
             })
 
-    # --- Signal 2: Iterative debugging — same file in ≥2 Reads within 15 messages ---
+    # --- Signal 2: Iterative debugging — same file in ≥2 Reads within iterative_debug_window messages ---
     if transcript_path:
         file_reads = extract_file_paths(transcript_path)
         # Group by file path, collect (path, msg_idx) pairs for Read-type tools only
         # extract_file_paths returns all FILE_PATH_TOOLS; filter to Read only
         # We can't easily distinguish Read vs Edit from extract_file_paths alone,
-        # so use the raw approach: find file paths appearing ≥2x within a 15-msg window
+        # so use the raw approach: find file paths appearing ≥2x within iterative_debug_window
         path_indices = defaultdict(list)
         for path, msg_idx in file_reads:
             # Only count if the message at msg_idx used Read (not just any file tool)
@@ -249,9 +435,9 @@ def scan_structural_signals(messages, transcript_path=""):
         for path, read_indices in path_indices.items():
             read_indices.sort()
             for i in range(len(read_indices)):
-                # Check if any later read is within 15 messages
+                # Check if any later read is within iterative_debug_window messages
                 for j in range(i + 1, len(read_indices)):
-                    if read_indices[j] - read_indices[i] <= 15:
+                    if read_indices[j] - read_indices[i] <= iterative_debug_window:
                         hits.append({
                             "index": read_indices[j],
                             "role": "assistant",
@@ -263,7 +449,7 @@ def scan_structural_signals(messages, transcript_path=""):
                         })
                         break  # one hit per file is enough
 
-    # --- Signal 3: Test-fix cycle — Bash→Edit→Bash within 20 messages ---
+    # --- Signal 3: Test-fix cycle — Bash→Edit→Bash within test_fix_window messages ---
     tool_seq = [
         (m["index"], m["tool_names"])
         for m in messages
@@ -274,14 +460,14 @@ def scan_structural_signals(messages, transcript_path=""):
             continue
         for j in range(i + 1, len(tool_seq)):
             edit_idx, names2 = tool_seq[j]
-            if edit_idx - bash_idx1 > 20:
+            if edit_idx - bash_idx1 > test_fix_window:
                 break
             if not (EDIT_TOOLS & set(names2)):
                 continue
             # Found a Bash then Edit — look for another Bash after
             for k in range(j + 1, len(tool_seq)):
                 bash_idx2, names3 = tool_seq[k]
-                if bash_idx2 - bash_idx1 > 20:
+                if bash_idx2 - bash_idx1 > test_fix_window:
                     break
                 if "Bash" in names3:
                     hits.append({
@@ -296,8 +482,7 @@ def scan_structural_signals(messages, transcript_path=""):
                     break
             break
 
-    # --- Signal 4: Synthesis moment — >500 char assistant message after ≥5 tool_use msgs ---
-    # Find runs of ≥5 consecutive tool-use messages followed by a long text message
+    # --- Signal 4: Synthesis moment — >synthesis_char_threshold char assistant message after ≥synthesis_tool_threshold tool_use msgs ---
     tool_use_msgs = [m for m in messages if m["has_tool_use"]]
     tool_use_indices = set(m["index"] for m in tool_use_msgs)
 
@@ -305,14 +490,14 @@ def scan_structural_signals(messages, transcript_path=""):
         if msg["role"] != "assistant":
             continue
         full_text = "\n".join(msg["text_blocks"])
-        if len(full_text) <= 500:
+        if len(full_text) <= synthesis_char_threshold:
             continue
         # Count tool_use messages in the 10 messages before this one
         prior_tool_count = sum(
             1 for j in range(max(0, msg["index"] - 10), msg["index"])
             if j in tool_use_indices
         )
-        if prior_tool_count >= 5:
+        if prior_tool_count >= synthesis_tool_threshold:
             snippet = full_text[:120].strip()
             hits.append({
                 "index": msg["index"],
@@ -341,15 +526,15 @@ STOP_PHRASES = frozenset({
 
 # Minimum phrase length to query FTS5
 MIN_PHRASE_LEN = 3
-# Maximum number of phrases to search
-MAX_PHRASES = 15
 
 
-def extract_key_phrases(messages, last_n=20):
+def extract_key_phrases(messages, last_n=20, config=None):
     """Extract meaningful phrases from the last N assistant text blocks.
 
     Returns list of (phrase, message_index) tuples.
     """
+    if config is None:
+        config = DEFAULTS
     # Collect last N assistant messages
     assistant_msgs = [m for m in messages if m["role"] == "assistant" and m["text_blocks"]]
     recent = assistant_msgs[-last_n:] if len(assistant_msgs) > last_n else assistant_msgs
@@ -392,14 +577,17 @@ def extract_key_phrases(messages, last_n=20):
         if key not in seen:
             seen.add(key)
             unique.append((phrase, idx))
-    return unique[:MAX_PHRASES]
+    return unique[:config["max_phrases"]]
 
 
-def score_novelty(knowledge_dir, phrases):
+def score_novelty(knowledge_dir, phrases, config=None):
     """Query FTS5 for each phrase, flag those without strong matches as novel.
 
     Returns list of dicts: {phrase, message_index, is_novel, best_score}
     """
+    if config is None:
+        config = DEFAULTS
+    novelty_threshold = config["novelty_threshold"]
     if not phrases:
         return []
 
@@ -444,8 +632,8 @@ def score_novelty(knowledge_dir, phrases):
         else:
             best = hits[0]["score"]
             # Score is negative; more negative = stronger match.
-            # If best match is weak (score > -1.0), the phrase is novel.
-            is_novel = best > -1.0
+            # If best match is weak (score > threshold), the phrase is novel.
+            is_novel = best > novelty_threshold
             results.append({
                 "phrase": phrase,
                 "message_index": msg_idx,
@@ -460,17 +648,18 @@ def score_novelty(knowledge_dir, phrases):
 # AND gate: co-location check
 # ---------------------------------------------------------------------------
 
-REGION_WINDOW = 5  # message indices
-
-
-def and_gate(heuristic_hits, novelty_results):
+def and_gate(heuristic_hits, novelty_results, config=None):
     """Apply dual-criteria AND gate: both heuristic + novel phrase in same region.
 
-    A "region" is defined as +/- REGION_WINDOW message indices.
+    A "region" is defined as +/- region_window message indices.
 
     Returns list of candidate dicts ready for _pending_captures/:
         {trigger, matched_text, novel_phrase, heuristic_index, novelty_index}
     """
+    if config is None:
+        config = DEFAULTS
+    region_window = config["region_window"]
+    max_candidates = config["max_candidates"]
     novel_items = [r for r in novelty_results if r["is_novel"]]
     if not novel_items or not heuristic_hits:
         return []
@@ -483,7 +672,7 @@ def and_gate(heuristic_hits, novelty_results):
         h_idx = hit["index"]
         for novel in novel_items:
             n_idx = novel["message_index"]
-            if abs(h_idx - n_idx) <= REGION_WINDOW:
+            if abs(h_idx - n_idx) <= region_window:
                 # Co-located -- this is a candidate
                 h_key = (hit["index"], hit["trigger"])
                 n_key = novel["phrase"]
@@ -498,34 +687,35 @@ def and_gate(heuristic_hits, novelty_results):
                         "novelty_index": n_idx,
                     })
 
-    # Limit to 5 candidates max (same as old agent prompt)
-    return candidates[:5]
+    return candidates[:max_candidates]
 
 
 # ---------------------------------------------------------------------------
 # Related file extraction
 # ---------------------------------------------------------------------------
 
-FILE_CONTEXT_WINDOW = 10  # message indices on each side of heuristic hit
-
-
-def extract_related_files(transcript_path, heuristic_index):
+def extract_related_files(transcript_path, heuristic_index, config=None):
     """Extract file paths from tool_use blocks near a heuristic hit.
 
-    Collects file paths from tool_use blocks within +/- FILE_CONTEXT_WINDOW
+    Collects file paths from tool_use blocks within +/- file_context_window
     message indices of `heuristic_index`. Deduplicates and returns a list
     of file paths sorted by first appearance.
 
     Args:
         transcript_path: path to the JSONL transcript file
         heuristic_index: message index of the heuristic match
+        config: configuration dict (uses DEFAULTS if None)
 
     Returns:
         list of unique file path strings, in order of first appearance
     """
+    if config is None:
+        config = DEFAULTS
+    file_context_window = config["file_context_window"]
+
     all_paths = extract_file_paths(transcript_path)
-    lo = heuristic_index - FILE_CONTEXT_WINDOW
-    hi = heuristic_index + FILE_CONTEXT_WINDOW
+    lo = heuristic_index - file_context_window
+    hi = heuristic_index + file_context_window
 
     seen = set()
     related = []
@@ -540,34 +730,36 @@ def extract_related_files(transcript_path, heuristic_index):
 # Debug context extraction
 # ---------------------------------------------------------------------------
 
-DEBUG_CONTEXT_WINDOW = 10  # message indices on each side for co-located hit scan
-DEBUG_CONTEXT_CHARS = 800  # target character budget for expanded context
-
-
-def extract_debug_context(messages, heuristic_index):
+def extract_debug_context(messages, heuristic_index, config=None):
     """Extract expanded context for a debug-root-cause heuristic hit.
 
     Scans backward (and forward) from `heuristic_index` to collect up to
-    ~800 chars of assistant text surrounding the match. Also collects any
-    co-located heuristic hits within +/- DEBUG_CONTEXT_WINDOW message indices.
+    ~debug_context_chars of assistant text surrounding the match. Also collects any
+    co-located heuristic hits within +/- debug_context_window message indices.
 
     Returns a structured string block with the investigation chain:
-        - Expanded assistant text around the match (up to ~800 chars)
+        - Expanded assistant text around the match (up to ~debug_context_chars)
         - Co-located heuristic hits (other triggers firing nearby)
 
     Args:
         messages: list of parsed message dicts from parse_transcript()
         heuristic_index: message index of the debug-root-cause match
+        config: configuration dict (uses DEFAULTS if None)
 
     Returns:
         str: formatted investigation chain context block
     """
+    if config is None:
+        config = DEFAULTS
+    debug_context_window = config["debug_context_window"]
+    debug_context_chars = config["debug_context_chars"]
+
     # Build index -> message map for quick lookup
     msg_by_index = {m["index"]: m for m in messages}
 
     # Collect assistant text in a window around the heuristic hit
-    lo = heuristic_index - DEBUG_CONTEXT_WINDOW
-    hi = heuristic_index + DEBUG_CONTEXT_WINDOW
+    lo = heuristic_index - debug_context_window
+    hi = heuristic_index + debug_context_window
 
     # Gather assistant messages in window, ordered by index
     window_msgs = [
@@ -598,14 +790,14 @@ def extract_debug_context(messages, heuristic_index):
     )
 
     for msg in before:
-        if total_chars >= DEBUG_CONTEXT_CHARS:
+        if total_chars >= debug_context_chars:
             break
         t = "\n".join(msg["text_blocks"])
         text_parts.insert(0, (msg["index"], t))
         total_chars += len(t)
 
     for msg in after:
-        if total_chars >= DEBUG_CONTEXT_CHARS:
+        if total_chars >= debug_context_chars:
             break
         t = "\n".join(msg["text_blocks"])
         text_parts.append((msg["index"], t))
@@ -613,8 +805,8 @@ def extract_debug_context(messages, heuristic_index):
 
     # Concatenate ordered text, truncating to budget
     combined = "\n\n".join(t for _, t in sorted(text_parts, key=lambda x: x[0]))
-    if len(combined) > DEBUG_CONTEXT_CHARS:
-        combined = combined[:DEBUG_CONTEXT_CHARS].rstrip() + "…"
+    if len(combined) > debug_context_chars:
+        combined = combined[:debug_context_chars].rstrip() + "…"
 
     # Collect co-located heuristic hits (other patterns firing in the window)
     co_hits = []
@@ -651,7 +843,7 @@ def candidate_hash(candidate):
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
 
-def write_pending_captures(knowledge_dir, candidates, transcript_path="", messages=None):
+def write_pending_captures(knowledge_dir, candidates, transcript_path="", messages=None, config=None):
     """Write individual candidate files into _pending_captures/ directory.
 
     Each candidate gets its own file named {sha256(trigger+matched_text)[:12]}.md.
@@ -681,7 +873,7 @@ def write_pending_captures(knowledge_dir, candidates, transcript_path="", messag
         # Extract related files from transcript if path is available
         related_files = []
         if transcript_path:
-            related_files = extract_related_files(transcript_path, c["heuristic_index"])
+            related_files = extract_related_files(transcript_path, c["heuristic_index"], config=config)
 
         # For debug-root-cause with messages, emit expanded debug-narrative format
         is_debug = c["trigger"] == "debug-root-cause" and messages
@@ -695,7 +887,7 @@ def write_pending_captures(knowledge_dir, candidates, transcript_path="", messag
         ]
 
         if is_debug:
-            debug_ctx = extract_debug_context(messages, c["heuristic_index"])
+            debug_ctx = extract_debug_context(messages, c["heuristic_index"], config=config)
             lines += [
                 f"**Narrative context:**",
                 "",
@@ -753,14 +945,17 @@ def main():
     if not transcript_path or not os.path.exists(transcript_path):
         sys.exit(0)
 
+    # Load configuration with fallback to defaults
+    config = load_config()
+
     # Parse transcript
     messages = parse_transcript(transcript_path)
     if not messages:
         sys.exit(0)
 
-    # Guard 2: Skip trivial sessions (fewer than 5 tool uses)
+    # Guard 2: Skip trivial sessions (fewer than min_tool_uses tool uses)
     tool_use_count = count_tool_uses(messages)
-    if tool_use_count < 5:
+    if tool_use_count < config["min_tool_uses"]:
         sys.exit(0)
 
     # Guard 3: Lightweight dedup -- if captures already ran this session,
@@ -781,19 +976,32 @@ def main():
     ):
         sys.exit(0)
 
+    # Adaptive threshold: adjust novelty_threshold based on store maturity
+    if config.get("adaptive", False):
+        base_threshold = config["novelty_threshold"]
+        entry_count = read_store_stats(knowledge_dir)
+        config["novelty_threshold"] = adapt_threshold(config, entry_count)
+        if config["novelty_threshold"] != base_threshold:
+            count_str = str(entry_count) if entry_count is not None else "unknown"
+            print(
+                f"[novelty] adaptive threshold: {config['novelty_threshold']} "
+                f"(store: {count_str} entries)",
+                file=sys.stderr,
+            )
+
     # Heuristic pattern scan (regex + structural)
     heuristic_hits = scan_heuristics(messages)
-    structural_hits = scan_structural_signals(messages, transcript_path=transcript_path)
+    structural_hits = scan_structural_signals(messages, transcript_path=transcript_path, config=config)
     heuristic_hits = heuristic_hits + structural_hits
     if not heuristic_hits:
         sys.exit(0)
 
     # FTS5 novelty scoring
-    phrases = extract_key_phrases(messages)
-    novelty_results = score_novelty(knowledge_dir, phrases)
+    phrases = extract_key_phrases(messages, config=config)
+    novelty_results = score_novelty(knowledge_dir, phrases, config=config)
 
     # AND gate: both criteria must fire in the same region
-    candidates = and_gate(heuristic_hits, novelty_results)
+    candidates = and_gate(heuristic_hits, novelty_results, config=config)
     if not candidates:
         sys.exit(0)
 
@@ -802,11 +1010,11 @@ def main():
         sys.exit(0)
 
     # Write individual candidate files for agent evaluation at next session start
-    write_pending_captures(knowledge_dir, candidates, transcript_path=transcript_path, messages=messages)
+    write_pending_captures(knowledge_dir, candidates, transcript_path=transcript_path, messages=messages, config=config)
 
-    # Decision: block only if session is substantial (>10 tool uses)
+    # Decision: block only if session is substantial (>max_tool_uses tool uses)
     # This avoids interrupting quick sessions
-    if tool_use_count > 10:
+    if tool_use_count > config["max_tool_uses"]:
         reason_parts = [
             f"Detected {len(candidates)} potential uncaptured insight(s):",
         ]

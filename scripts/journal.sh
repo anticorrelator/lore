@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # journal.sh — Write and read effectiveness journal entries
-# Usage: lore journal write --observation "..." --context "..." [--work-item "..."] [--role "..."]
+# Usage: lore journal write --observation "..." --context "..." [--work-item "..."] [--role "..."] [--scores '<json>']
 #        lore journal show [--limit N] [--role <role>] [--since <date>]
 #        lore journal show --aggregate [--limit N] [--since <date>]
 #
@@ -14,7 +14,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 # --- write subcommand ---
 journal_write() {
-  local observation="" context="" work_item="" role="interactive"
+  local observation="" context="" work_item="" role="interactive" scores=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,22 +34,27 @@ journal_write() {
         role="$2"
         shift 2
         ;;
+      --scores)
+        scores="$2"
+        shift 2
+        ;;
       --help|-h)
         cat >&2 <<EOF
-Usage: lore journal write --observation "..." --context "..." [--work-item "..."] [--role "..."]
+Usage: lore journal write --observation "..." --context "..." [--work-item "..."] [--role "..."] [--scores '<json>']
 
 Options:
   --observation   The observation to record (required)
   --context       Context for the observation (required)
   --work-item     Associated work item slug (optional)
   --role          Role of the observer: interactive, worker, hook, spec, retro (default: interactive)
+  --scores        JSON object with numeric scores (optional, e.g. '{"accuracy": 0.8}')
   --help, -h      Show this help
 EOF
         return 0
         ;;
       *)
         echo "Unknown argument: $1" >&2
-        echo "Usage: lore journal write --observation \"...\" --context \"...\"" >&2
+        echo "Usage: lore journal write --observation \"...\" --context \"...\" [--scores '<json>']" >&2
         return 1
         ;;
     esac
@@ -92,8 +97,10 @@ entry = {
 }
 if sys.argv[6]:
     entry['work_item'] = sys.argv[6]
+if sys.argv[7]:
+    entry['scores'] = json.loads(sys.argv[7])
 print(json.dumps(entry, ensure_ascii=False))
-" "$timestamp" "$observation" "$context" "$role" "$branch" "$work_item")
+" "$timestamp" "$observation" "$context" "$role" "$branch" "$work_item" "$scores")
 
   # Append to journal
   local logfile="$meta_dir/effectiveness-journal.jsonl"
@@ -280,6 +287,151 @@ for ts, source, entry in all_entries:
 " "$meta_dir" "$limit" "$since"
 }
 
+# --- query subcommand ---
+journal_query() {
+  local role_filter="" extract_scores=0 since="" json_output=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --role)
+        role_filter="$2"
+        shift 2
+        ;;
+      --extract-scores)
+        extract_scores=1
+        shift
+        ;;
+      --since)
+        since="$2"
+        shift 2
+        ;;
+      --json)
+        json_output=1
+        shift
+        ;;
+      --help|-h)
+        cat >&2 <<EOF
+Usage: lore journal query --role <role> --extract-scores [--since <date>] [--json]
+
+Extract structured scores from journal entries over time.
+
+Options:
+  --role <role>      Filter by role (e.g. retro, self-test) (required)
+  --extract-scores   Output a table of scores over time (required)
+  --since <date>     Only include entries after this date (ISO 8601)
+  --json             Output as JSON array instead of table
+  --help, -h         Show this help
+EOF
+        return 0
+        ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        echo "Usage: lore journal query --role <role> --extract-scores [--since <date>] [--json]" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  if [[ "$extract_scores" -ne 1 ]]; then
+    die "--extract-scores is required for journal query"
+  fi
+  if [[ -z "$role_filter" ]]; then
+    die "--role is required for journal query"
+  fi
+
+  # Resolve knowledge directory
+  local knowledge_dir
+  knowledge_dir=$(resolve_knowledge_dir)
+
+  local logfile="$knowledge_dir/_meta/effectiveness-journal.jsonl"
+
+  if [[ ! -f "$logfile" ]]; then
+    echo "No journal entries yet."
+    return 0
+  fi
+
+  python3 -c "
+import json, re, sys
+
+logfile = sys.argv[1]
+role_filter = sys.argv[2]
+since = sys.argv[3]
+json_output = int(sys.argv[4])
+
+entries = []
+with open(logfile) as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if role_filter and entry.get('role') != role_filter:
+            continue
+        ts = entry.get('timestamp', '')
+        if since and ts < since:
+            continue
+
+        # Extract scores: structured field first, fallback to regex
+        scores = entry.get('scores')
+        if not scores or not isinstance(scores, dict):
+            # Backward compatibility: parse scores from observation text
+            scores = {}
+            obs = entry.get('observation', '') + ' ' + entry.get('context', '')
+            # Match patterns like 'accuracy: 0.8' or 'accuracy=0.8' or 'accuracy 0.8/1.0'
+            for m in re.finditer(r'(\b[a-z_-]+)\s*[:=]\s*(\d+(?:\.\d+)?)', obs, re.IGNORECASE):
+                key = m.group(1).lower().replace('-', '_')
+                try:
+                    val = float(m.group(2))
+                    scores[key] = val
+                except ValueError:
+                    pass
+
+        if scores:
+            entries.append({
+                'timestamp': ts[:10],  # date only
+                'scores': scores,
+            })
+
+if not entries:
+    print('No entries with scores found.')
+    sys.exit(0)
+
+if json_output:
+    print(json.dumps(entries, indent=2))
+    sys.exit(0)
+
+# Collect all score keys across entries
+all_keys = []
+seen = set()
+for e in entries:
+    for k in e['scores']:
+        if k not in seen:
+            seen.add(k)
+            all_keys.append(k)
+
+# Print table header
+header = 'Date       '
+for k in all_keys:
+    header += f' | {k:>10}'
+print(header)
+print('-' * len(header))
+
+# Print rows
+for e in entries:
+    row = f'{e[\"timestamp\"]:10}'
+    for k in all_keys:
+        val = e['scores'].get(k)
+        if val is not None:
+            row += f' | {val:>10.2f}'
+        else:
+            row += f' | {\"—\":>10}'
+    print(row)
+" "$logfile" "$role_filter" "$since" "$json_output"
+}
+
 # --- Subcommand dispatch ---
 if [[ $# -eq 0 ]]; then
   cat >&2 <<EOF
@@ -288,6 +440,7 @@ Usage: lore journal <subcommand> [args...]
 Subcommands:
   write   Record a journal observation
   show    Display journal entries (default or --aggregate)
+  query   Extract structured data from journal entries
 
 Run 'lore journal <subcommand> --help' for details.
 EOF
@@ -304,6 +457,9 @@ case "$SUBCMD" in
   show)
     journal_show "$@"
     ;;
+  query)
+    journal_query "$@"
+    ;;
   --help|-h)
     cat >&2 <<EOF
 Usage: lore journal <subcommand> [args...]
@@ -311,6 +467,7 @@ Usage: lore journal <subcommand> [args...]
 Subcommands:
   write   Record a journal observation
   show    Display journal entries (default or --aggregate)
+  query   Extract structured data from journal entries
 
 Run 'lore journal <subcommand> --help' for details.
 EOF

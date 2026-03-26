@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # create-work.sh — Create a new work item in _work/
-# Usage: bash create-work.sh <name> [directory]
-#        bash create-work.sh --title <name> [--slug <slug>] [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>]
+# Usage: bash create-work.sh --title <name> [--slug <slug>] [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--json] [--detect-pr]
 # Creates _work/<slug>/ with _meta.json and notes.md, then updates the index.
 
 set -euo pipefail
@@ -9,7 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
-# --- Parse arguments (flags or positional) ---
+# --- Parse arguments ---
 NAME=""
 SLUG_OVERRIDE=""
 DESCRIPTION=""
@@ -68,34 +67,8 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
     esac
   done
 else
-  # Positional mode: NAME is first arg, then optional directory, then optional flags
-  NAME="${1:-}"
-  shift || true
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --tags)
-        TAGS="$2"
-        shift 2
-        ;;
-      --json)
-        JSON_MODE=1
-        shift
-        ;;
-      --detect-pr)
-        DETECT_PR=1
-        shift
-        ;;
-      --*)
-        echo "[work] Error: Unknown flag '$1'. Use --title flag mode for multiple options." >&2
-        echo "Usage: create-work.sh <name> [directory] [--tags <tag1,tag2>] [--json] [--detect-pr]" >&2
-        exit 1
-        ;;
-      *)
-        TARGET_DIR="$1"
-        shift
-        ;;
-    esac
-  done
+  echo "[work] Error: Use flag mode: create-work.sh --title <name> [--description <text>] [--tags <tags>] [--json]" >&2
+  exit 1
 fi
 
 TARGET_DIR="${TARGET_DIR:-$(pwd)}"
@@ -105,8 +78,7 @@ if [[ -z "$NAME" ]]; then
     json_error "Missing work item name"
   fi
   echo "[work] Error: Missing work item name." >&2
-  echo "Usage: create-work.sh <name> [directory]" >&2
-  echo "       create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>]" >&2
+  echo "Usage: create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--json]" >&2
   exit 1
 fi
 KNOWLEDGE_DIR=$(resolve_knowledge_dir)
@@ -223,7 +195,7 @@ if [[ -n "$DESCRIPTION" ]]; then
 cat > "$WORK_DIR/$SLUG/notes.md" << NOTESEOF
 # Session Notes: $TITLE
 
-<!-- Append session entries below. Each entry records what happened in a session. -->
+<!-- Append session entries below. Entry format: ## YYYY-MM-DDTHH:MM followed by **Focus:**, **Progress:**, **Next:** fields. -->
 
 ## $(date -u +%Y-%m-%dT%H:%M)
 **Focus:** Initial scoping
@@ -233,7 +205,7 @@ else
 cat > "$WORK_DIR/$SLUG/notes.md" << NOTESEOF
 # Session Notes: $TITLE
 
-<!-- Append session entries below. Each entry records what happened in a session. -->
+<!-- Append session entries below. Entry format: ## YYYY-MM-DDTHH:MM followed by **Focus:**, **Progress:**, **Next:** fields. -->
 NOTESEOF
 fi
 

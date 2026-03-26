@@ -189,3 +189,139 @@ func TestDetailModelLoadedMsg(t *testing.T) {
 		t.Error("tabs should be built after loading")
 	}
 }
+
+func TestBuildSearchIndexFallbackNotes(t *testing.T) {
+	t.Run("fallback notes produce single Notes (raw) SearchLocation", func(t *testing.T) {
+		// Content that has no date headers but has meaningful text after stripping boilerplate.
+		notesContent := "# Session Notes\n\nSome freeform text without date headers."
+		m := NewDetailModel("", "test")
+		m.detail = &WorkItemDetail{}
+		m.notesTab = NewNotesTabModel(&notesContent, 80, 24)
+
+		if !m.notesTab.fallback {
+			t.Fatal("expected notesTab to be in fallback mode")
+		}
+
+		locs := m.BuildSearchIndex()
+		var notesLocs []SearchLocation
+		for _, l := range locs {
+			if l.TabID == TabNotes {
+				notesLocs = append(notesLocs, l)
+			}
+		}
+
+		if len(notesLocs) != 1 {
+			t.Fatalf("expected 1 notes SearchLocation, got %d", len(notesLocs))
+		}
+		if notesLocs[0].Label != "Notes (raw)" {
+			t.Errorf("Label = %q, want %q", notesLocs[0].Label, "Notes (raw)")
+		}
+		if notesLocs[0].Subtitle != "Notes" {
+			t.Errorf("Subtitle = %q, want %q", notesLocs[0].Subtitle, "Notes")
+		}
+		if notesLocs[0].EntryIdx != -1 {
+			t.Errorf("EntryIdx = %d, want -1", notesLocs[0].EntryIdx)
+		}
+	})
+
+	t.Run("empty notes produce no SearchLocation entries", func(t *testing.T) {
+		m := NewDetailModel("", "test")
+		m.detail = &WorkItemDetail{}
+		m.notesTab = NewNotesTabModel(nil, 80, 24)
+
+		if !m.notesTab.empty {
+			t.Fatal("expected notesTab to be empty")
+		}
+
+		locs := m.BuildSearchIndex()
+		for _, l := range locs {
+			if l.TabID == TabNotes {
+				t.Errorf("expected no TabNotes SearchLocation for empty notes, got %+v", l)
+			}
+		}
+	})
+
+	t.Run("dated notes produce per-entry SearchLocation entries", func(t *testing.T) {
+		notesContent := "## 2026-03-24T10:00\nfirst\n## 2026-03-25T14:00\nsecond"
+		m := NewDetailModel("", "test")
+		m.detail = &WorkItemDetail{}
+		m.notesTab = NewNotesTabModel(&notesContent, 80, 24)
+
+		if m.notesTab.empty || m.notesTab.fallback {
+			t.Fatal("expected notesTab to have dated entries")
+		}
+
+		locs := m.BuildSearchIndex()
+		var notesLocs []SearchLocation
+		for _, l := range locs {
+			if l.TabID == TabNotes {
+				notesLocs = append(notesLocs, l)
+			}
+		}
+
+		if len(notesLocs) != 2 {
+			t.Fatalf("expected 2 notes SearchLocations, got %d", len(notesLocs))
+		}
+		if notesLocs[0].Label != "2026-03-24T10:00" {
+			t.Errorf("notesLocs[0].Label = %q, want %q", notesLocs[0].Label, "2026-03-24T10:00")
+		}
+		if notesLocs[0].EntryIdx != 0 {
+			t.Errorf("notesLocs[0].EntryIdx = %d, want 0", notesLocs[0].EntryIdx)
+		}
+		if notesLocs[1].Label != "2026-03-25T14:00" {
+			t.Errorf("notesLocs[1].Label = %q, want %q", notesLocs[1].Label, "2026-03-25T14:00")
+		}
+		if notesLocs[1].EntryIdx != 1 {
+			t.Errorf("notesLocs[1].EntryIdx = %d, want 1", notesLocs[1].EntryIdx)
+		}
+	})
+
+	t.Run("JumpTo fallback notes switches tab without setting cursor", func(t *testing.T) {
+		notesContent := "# Session Notes\n\nFreeform content."
+		m := NewDetailModel("", "test")
+		m.detail = &WorkItemDetail{}
+		m.tabs = m.buildTabs()
+		m.notesTab = NewNotesTabModel(&notesContent, 80, 24)
+		m.activeTab = 0 // start on Meta tab
+
+		m.JumpTo(SearchLocation{TabID: TabNotes, Label: "Notes (raw)", EntryIdx: -1})
+
+		// Should have switched to Notes tab
+		if m.ActiveTab() != TabNotes {
+			t.Errorf("ActiveTab() = %v, want TabNotes", m.ActiveTab())
+		}
+		// No cursor mutation needed — notesTab.cursor stays at default 0
+		if m.notesTab.cursor != 0 {
+			t.Errorf("notesTab.cursor = %d, want 0 (unchanged)", m.notesTab.cursor)
+		}
+	})
+}
+
+func TestDetailModelDimensionsAfterWindowThenLoad(t *testing.T) {
+	// Simulate the initial-load sequence: WindowSizeMsg arrives before DetailLoadedMsg.
+	// After both messages, contentWidth/contentHeight should reflect the window size,
+	// not the fallback minimums (20 and 5).
+	m := NewDetailModel("", "test")
+
+	// Step 1: parent forwards WindowSizeMsg (as fixed by the initial-load path).
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
+
+	// Step 2: detail finishes loading.
+	planContent := "# Plan"
+	m, _ = m.Update(DetailLoadedMsg{
+		Slug: "test",
+		Detail: &WorkItemDetail{
+			Slug:        "test",
+			Title:       "Test Item",
+			PlanContent: &planContent,
+		},
+	})
+
+	// contentWidth = width - 4 = 96, contentHeight = height - 3 = 47
+	if got, want := m.contentWidth(), 96; got != want {
+		t.Errorf("contentWidth() = %d, want %d", got, want)
+	}
+	if got, want := m.contentHeight(), 47; got != want {
+		t.Errorf("contentHeight() = %d, want %d", got, want)
+	}
+}

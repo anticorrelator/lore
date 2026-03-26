@@ -138,6 +138,39 @@ echo ""
 info "Creating data directory"
 dry mkdir -p "$LORE_DATA_DIR/repos"
 
+# --- 1b. Create default capture-config.json (idempotent) ---
+dry mkdir -p "$LORE_DATA_DIR/config"
+if [ ! -f "$LORE_DATA_DIR/config/capture-config.json" ]; then
+  info "Creating default capture-config.json"
+  if ! $DRY_RUN; then
+    cat > "$LORE_DATA_DIR/config/capture-config.json" <<'CONFIGEOF'
+{
+  "core": {
+    "novelty_threshold": -1.0,
+    "region_window": 5,
+    "max_candidates": 5,
+    "max_phrases": 15,
+    "min_tool_uses": 5,
+    "max_tool_uses": 10
+  },
+  "structural_signals": {
+    "investigation_window": 10,
+    "iterative_debug_window": 15,
+    "test_fix_window": 20,
+    "synthesis_char_threshold": 500,
+    "synthesis_tool_threshold": 5,
+    "file_context_window": 10,
+    "debug_context_window": 10,
+    "debug_context_chars": 800
+  },
+  "adaptive": false
+}
+CONFIGEOF
+  fi
+else
+  info "capture-config.json already exists, skipping"
+fi
+
 # --- 2. Create/update stable scripts symlink ---
 info "Linking scripts -> $LORE_REPO_DIR/scripts"
 dry ln -sfn "$LORE_REPO_DIR/scripts" "$LORE_DATA_DIR/scripts"
@@ -236,6 +269,7 @@ lore_hooks = [
     ("Stop",         None, "command", "python3 ~/.lore/scripts/stop-novelty-check.py", 10),
     ("Stop",         None, "command", "python3 ~/.lore/scripts/check-plan-persistence.py", 10),
     ("TaskCompleted", None, "command", "bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
+    ("PreToolUse",   "Write", "command", "bash ~/.lore/scripts/guard-work-writes.sh", 5),
     ("SessionEnd",   "clear", "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
 ]
 
@@ -314,6 +348,7 @@ echo ""
 echo "  Data dir:    $LORE_DATA_DIR"
 echo "  Scripts:     $LORE_DATA_DIR/scripts -> $LORE_REPO_DIR/scripts"
 echo "  Claude-md:   $LORE_DATA_DIR/claude-md -> $LORE_REPO_DIR/claude-md"
+echo "  Config:      $LORE_DATA_DIR/config/capture-config.json"
 echo "  CLI:         ~/.local/bin/lore -> $LORE_REPO_DIR/cli/lore"
 if [ -f "$HOME/.local/bin/lore-tui" ]; then
   echo "  TUI:         ~/.local/bin/lore-tui (built)"

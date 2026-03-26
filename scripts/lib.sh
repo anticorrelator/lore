@@ -191,6 +191,16 @@ json_array_field() {
   ' "$file"
 }
 
+# --- resolve_ceremony_config_path ---
+# Resolve the path to the global ceremony config file (ceremonies.json)
+# at $LORE_DATA_DIR/ceremonies.json (defaults to ~/.lore/ceremonies.json).
+# Usage: config_path=$(resolve_ceremony_config_path)
+# Output: Absolute path to ceremonies.json (file may not exist yet)
+resolve_ceremony_config_path() {
+  source "$LORE_LIB_DIR/config.sh"
+  echo "${LORE_DATA_DIR}/ceremonies.json"
+}
+
 # --- check_fts_available ---
 # Check if FTS5 search backend is available (python3 + sqlite3).
 # Sets USE_FTS=1 if available, USE_FTS=0 otherwise.

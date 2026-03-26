@@ -125,8 +125,8 @@ def main():
                 "persisted to `_work/`. The builtin plan file at `~/.claude/plans/` is ephemeral "
                 "and will be lost across sessions.\n\n"
                 "Persist the plan now:\n"
-                "1. Use `/work create` to persist via the skill, OR\n"
-                "2. Manually create `_work/<slug>/` with `_meta.json` and `plan.md`\n\n"
+                "1. Use `/work create` to create a work item and persist the plan, OR\n"
+                "2. Tell the user you used plan mode and let them decide.\n\n"
                 "If you intentionally chose not to persist this plan (e.g., quick scratch planning), "
                 "tell the user and they can dismiss."
             ),

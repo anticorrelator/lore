@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -16,15 +17,34 @@ type NoteEntry struct {
 
 // NotesTabModel is the Bubble Tea model for the Notes tab.
 type NotesTabModel struct {
-	entries []NoteEntry
-	cursor  int    // selected entry in the left pane
-	scroll  int    // scroll offset for the right pane content
-	width   int
-	height  int
-	empty   bool
+	entries  []NoteEntry
+	cursor   int    // selected entry in the left pane
+	scroll   int    // scroll offset for the right pane content
+	width    int
+	height   int
+	empty    bool
+	fallback bool           // true when content exists but has no date entries
+	vp       viewport.Model // used only in fallback mode
 }
 
 var noteHeaderRe = regexp.MustCompile(`^## (\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?)`)
+var htmlCommentRe = regexp.MustCompile(`(?s)<!--.*?-->`)
+
+// stripNotesBoilerplate removes the H1 title line and HTML comment lines from
+// a notes.md document, returning the remaining content trimmed of leading/trailing whitespace.
+func stripNotesBoilerplate(content string) string {
+	lines := strings.Split(content, "\n")
+	var kept []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "# ") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	joined := strings.Join(kept, "\n")
+	joined = htmlCommentRe.ReplaceAllString(joined, "")
+	return strings.TrimSpace(joined)
+}
 
 // NewNotesTabModel creates a notes tab from notes_content.
 func NewNotesTabModel(notesContent *string, width, height int) NotesTabModel {
@@ -33,15 +53,29 @@ func NewNotesTabModel(notesContent *string, width, height int) NotesTabModel {
 	}
 
 	entries := parseNotes(*notesContent)
-	if len(entries) == 0 {
+	if len(entries) > 0 {
+		return NotesTabModel{
+			entries: entries,
+			cursor:  0,
+			width:   width,
+			height:  height,
+		}
+	}
+
+	// No dated entries — check whether meaningful content remains after stripping boilerplate.
+	stripped := stripNotesBoilerplate(*notesContent)
+	if stripped == "" {
 		return NotesTabModel{empty: true, width: width, height: height}
 	}
 
+	rendered := renderMarkdown(stripped, width)
+	vp := viewport.New(width, height)
+	vp.SetContent(rendered)
 	return NotesTabModel{
-		entries: entries,
-		cursor:  0,
-		width:   width,
-		height:  height,
+		fallback: true,
+		vp:       vp,
+		width:    width,
+		height:   height,
 	}
 }
 
@@ -50,6 +84,7 @@ func parseNotes(content string) []NoteEntry {
 	var entries []NoteEntry
 	var current *NoteEntry
 	var contentLines []string
+	var preamble []string
 
 	for _, line := range lines {
 		matches := noteHeaderRe.FindStringSubmatch(line)
@@ -65,12 +100,23 @@ func parseNotes(content string) []NoteEntry {
 
 		if current != nil {
 			contentLines = append(contentLines, line)
+		} else {
+			preamble = append(preamble, line)
 		}
 	}
 
 	if current != nil {
 		current.Content = strings.TrimSpace(strings.Join(contentLines, "\n"))
 		entries = append(entries, *current)
+	}
+
+	if len(entries) > 0 && strings.TrimSpace(strings.Join(preamble, "\n")) != "" {
+		preambleText := strings.TrimSpace(strings.Join(preamble, "\n"))
+		if entries[0].Content != "" {
+			entries[0].Content = preambleText + "\n---\n" + entries[0].Content
+		} else {
+			entries[0].Content = preambleText
+		}
 	}
 
 	return entries
@@ -81,6 +127,21 @@ func (m NotesTabModel) Init() tea.Cmd {
 }
 
 func (m NotesTabModel) Update(msg tea.Msg) (NotesTabModel, tea.Cmd) {
+	if m.fallback {
+		switch msg := msg.(type) {
+		case tea.WindowSizeMsg:
+			m.width = msg.Width
+			m.height = msg.Height
+			m.vp.Width = msg.Width
+			m.vp.Height = msg.Height
+		default:
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -148,6 +209,10 @@ func (m NotesTabModel) View() string {
 	if m.empty {
 		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 		return "  " + dimStyle.Render("No session notes.")
+	}
+
+	if m.fallback {
+		return m.vp.View()
 	}
 
 	// Split into left (entry list) and right (content) panes

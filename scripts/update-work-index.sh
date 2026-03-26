@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # update-work-index.sh — Regenerate _work/_index.json from _meta.json files
 # Usage: bash update-work-index.sh [directory]
-# Scans all _work/*/_meta.json files and rebuilds the index
+# Scans all _work/*/_meta.json files and rebuilds the index using Python for
+# correct JSON parsing/generation, tolerating malformed _meta.json files.
 
 set -euo pipefail
 
@@ -18,76 +19,85 @@ if [[ ! -d "$WORK_DIR" ]]; then
   exit 1
 fi
 
-INDEX="$WORK_DIR/_index.json"
-REPO_NAME=$(basename "$KNOWLEDGE_DIR")
-TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+python3 - "$WORK_DIR" << 'PYEOF'
+import json, os, sys, glob
+from datetime import datetime, timezone
 
-# Start JSON
-echo '{' > "$INDEX"
-echo "  \"version\": 1," >> "$INDEX"
-echo "  \"repo\": \"$REPO_NAME\"," >> "$INDEX"
-echo "  \"last_updated\": \"$TIMESTAMP\"," >> "$INDEX"
-echo '  "plans": [' >> "$INDEX"
+work_dir = sys.argv[1]
+index_path = os.path.join(work_dir, "_index.json")
+repo_name = os.path.basename(os.path.dirname(work_dir))
 
-FIRST=true
+plans = []
+seen_slugs = set()
 
-# Scan active work directories (exclude _archive and _index.json)
-for meta_file in "$WORK_DIR"/*/_meta.json; do
-  # Handle no matches
-  [[ -e "$meta_file" ]] || continue
+for meta_path in sorted(glob.glob(os.path.join(work_dir, "*", "_meta.json"))):
+    slug = os.path.basename(os.path.dirname(meta_path))
+    if slug == "_archive" or slug in seen_slugs:
+        continue
+    seen_slugs.add(slug)
 
-  ITEM_DIR=$(dirname "$meta_file")
-  SLUG=$(basename "$ITEM_DIR")
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[warn] Skipping {slug}: {e}", file=sys.stderr)
+        continue
 
-  # Skip _archive
-  [[ "$SLUG" == "_archive" ]] && continue
+    parent = os.path.dirname(meta_path)
 
-  # Extract fields from _meta.json
-  TITLE=$(json_field "title" "$meta_file")
-  STATUS=$(json_field "status" "$meta_file")
-  CREATED=$(json_field "created" "$meta_file")
-  UPDATED=$(json_field "updated" "$meta_file")
-  ISSUE=$(json_field "issue" "$meta_file" || true)
-  PR=$(json_field "pr" "$meta_file" || true)
+    # Normalize fields — tolerate non-standard _meta.json schemas by
+    # coercing types and providing defaults for missing keys.
+    def str_field(key, default="", aliases=None):
+        """Extract a string field, coercing non-string values."""
+        val = meta.get(key, None)
+        if val is None and aliases:
+            for alias in aliases:
+                val = meta.get(alias, None)
+                if val is not None:
+                    break
+        if val is None:
+            return default
+        return str(val)
 
-  # Extract JSON arrays
-  BRANCHES=$(json_array_field "branches" "$meta_file")
-  TAGS=$(json_array_field "tags" "$meta_file")
+    def list_field(key, default=None, aliases=None):
+        """Extract a list field, wrapping scalars in a list."""
+        val = meta.get(key, None)
+        if val is None and aliases:
+            for alias in aliases:
+                val = meta.get(alias, None)
+                if val is not None:
+                    break
+        if val is None:
+            return default or []
+        if isinstance(val, list):
+            return val
+        return [val]
 
-  # Check if plan.md exists
-  HAS_PLAN_DOC=false
-  [[ -f "$ITEM_DIR/plan.md" ]] && HAS_PLAN_DOC=true
+    plans.append({
+        "slug": meta.get("slug", slug),
+        "title": str_field("title", slug),
+        "status": str_field("status", "active"),
+        "branches": list_field("branches", aliases=["branch"]),
+        "tags": list_field("tags"),
+        "created": str_field("created"),
+        "updated": str_field("updated"),
+        "issue": str_field("issue"),
+        "pr": str_field("pr"),
+        "has_plan_doc": os.path.exists(os.path.join(parent, "plan.md")),
+        "has_execution_log": os.path.exists(os.path.join(parent, "execution-log.md"))
+                          or os.path.exists(os.path.join(parent, "execution_log.md")),
+    })
 
-  # Check if execution-log.md exists
-  HAS_EXECUTION_LOG=false
-  [[ -f "$ITEM_DIR/execution-log.md" ]] && HAS_EXECUTION_LOG=true
+index = {
+    "version": 1,
+    "repo": repo_name,
+    "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "plans": plans,
+}
 
-  # Add comma separator
-  if [[ "$FIRST" == true ]]; then
-    FIRST=false
-  else
-    echo '    ,' >> "$INDEX"
-  fi
+with open(index_path, "w") as f:
+    json.dump(index, f, indent=2)
+    f.write("\n")
 
-  cat >> "$INDEX" << ENTRY
-    {
-      "slug": "$SLUG",
-      "title": "$TITLE",
-      "status": "$STATUS",
-      "branches": [${BRANCHES}],
-      "tags": [${TAGS}],
-      "created": "$CREATED",
-      "updated": "$UPDATED",
-      "issue": "$ISSUE",
-      "pr": "$PR",
-      "has_plan_doc": $HAS_PLAN_DOC,
-      "has_execution_log": $HAS_EXECUTION_LOG
-    }
-ENTRY
-
-done
-
-echo '  ]' >> "$INDEX"
-echo '}' >> "$INDEX"
-
-echo "Work index updated: $INDEX"
+print(f"Work index updated: {index_path} ({len(plans)} items)")
+PYEOF

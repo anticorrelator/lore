@@ -71,7 +71,7 @@ For single-pass plans where the scope is clear and the agent can identify key fi
    b. Glob `~/.claude/agents/*.md` — read each agent template name and opening description
    c. Match the work item title, description, and key findings against skill/agent names and descriptions using keyword overlap
    d. Deep-read any SKILL.md or agent template that shows strong overlap with the work item domain
-   e. Record results for the `**Skill discovery:**` block emitted in Step 2.5s — this block is mandatory; do not skip it
+   e. Record results for the `**Skill discovery:**` block emitted in Step 2.5s — this block is mandatory; do not skip it:
 
 ### Step 2.5s: Strategy gate
 
@@ -241,7 +241,16 @@ Same purpose as the full flow's Step 5.3 — validate the implementation approac
    ```
    This pre-computes TaskCreate payloads so `/work tasks` and `/implement` can load them directly without re-parsing `plan.md`.
 4. Run `lore work heal`
-5. Suggest retrospective: `Consider /retro <slug> to evaluate knowledge system effectiveness for this spec.`
+5. **Ceremony config evaluation** — check for configured post-plan evaluators:
+   ```bash
+   EVALUATORS=$(lore ceremony get spec)
+   ```
+   If the result is a non-empty JSON array (not `[]`), for each skill name in the array, invoke it via the Skill tool with the work item slug as the argument:
+   ```
+   /codex-plan-review <slug>
+   ```
+   Present the evaluator's output to the user. If the evaluator identifies WEAK or MISSING areas, ask the user whether to address them before proceeding.
+6. Suggest retrospective: `Consider /retro <slug> to evaluate knowledge system effectiveness for this spec.`
 
 ---
 
@@ -380,7 +389,7 @@ Proceed, or adjust? (You can request changes — e.g., split a question, drop an
 
    c. **If no applicable skills are found** — set `$ADVISORY_MIXIN` to empty. No advisors are spawned.
 
-6. **Spawn researcher agents** — launch `min(investigation_count, 4)` in a single message. Use the **researcher** agent definition (`~/.claude/agents/researcher.md`) as the base prompt, with these template injections:
+7. **Spawn researcher agents** — launch `min(investigation_count, 4)` in a single message. Use the **researcher** agent definition (`~/.claude/agents/researcher.md`) as the base prompt, with these template injections:
    - `{{team_name}}` → `spec-<slug>`
    - `{{team_lead}}` → the lead name read from team config in Step 3.2
    - `{{prior_knowledge}}` → the `$PRIOR_KNOWLEDGE` block from Step 3.4
@@ -715,9 +724,21 @@ lore work regen-tasks <slug>
 ```
 This pre-computes TaskCreate payloads so `/work tasks` and `/implement` can load them directly without re-parsing `plan.md`.
 
+### Step 5.6: Ceremony config evaluation
+
+Check for configured post-plan evaluators:
+```bash
+EVALUATORS=$(lore ceremony get spec)
+```
+If the result is a non-empty JSON array (not `[]`), for each skill name in the array, invoke it via the Skill tool with the work item slug as the argument:
+```
+/<skill-name> <slug>
+```
+Present the evaluator's output to the user. If the evaluator identifies WEAK or MISSING areas, ask the user whether to address them before proceeding. If the user wants to address gaps, proceed to Step 6.
+
 ### Step 6: Iterate (if needed)
 
-If gaps are identified:
+If gaps are identified (from evaluator feedback or user review):
 - Create a new investigation team (same pattern) for targeted follow-ups
 - Append new findings to the Investigations section
 - Update the synthesis

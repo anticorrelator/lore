@@ -127,16 +127,40 @@ Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). D
 
    e. **If new advisors were declared**, re-collect all advisor declarations from plan.md phases and rebuild `$ADVISORY_MIXIN` (repeat Steps 3.2a–3.2d) before proceeding.
 
-4. **Spawn advisor agents (if advisors present)** — if Step 3.2 or Step 3.3 found advisor declarations, spawn each unique advisor as a persistent team member before spawning workers.
+4. **Ceremony config injection** — read ceremony-level advisor overrides and merge them into the advisor pipeline:
 
-   For each unique advisor name collected from Step 3.2a and Step 3.3c:
+   a. **Read configured advisors:**
+      ```bash
+      lore ceremony get implement
+      ```
+      This returns a JSON array of skill names (e.g., `["my-custom-skill"]`), or `[]` if no ceremony overrides are configured. **If the result is `[]`, skip to Step 3.5.**
+
+   b. **Declare config-injected advisors** — for each skill in the returned array, check whether it is already declared as an advisor in any phase's `**Advisors:**` block. For each skill not already declared, add an `**Advisors:**` entry to the first uncompleted phase in plan.md:
+      ```
+      **Advisors:**
+      - <skill-name>-advisor — <skill-name> domain (ceremony config). on-demand
+      ```
+      Use `on-demand` mode for config-injected advisors. If the phase already has an `**Advisors:**` block, append to it rather than creating a duplicate block.
+
+   c. **Rebuild advisory mixin** — if any new advisors were declared in (b), re-collect all advisor declarations from all plan.md phases and rebuild `$ADVISORY_MIXIN` (repeat Steps 3.2a–3.2d).
+
+   d. **Log config-injected advisors** — for each advisor added from ceremony config, write an execution log entry:
+      ```bash
+      printf 'Config-injected advisor: %s\nSource: ceremony config\nMode: on-demand\n' \
+        "<skill-name>-advisor" \
+        | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
+      ```
+
+5. **Spawn advisor agents (if advisors present)** — if Step 3.2, Step 3.3, or Step 3.4 found advisor declarations, spawn each unique advisor as a persistent team member before spawning workers.
+
+   For each unique advisor name collected from Step 3.2a, Step 3.3c, and Step 3.4b:
 
    a. **Build domain context** — find the `## Investigations` section(s) in `plan.md` whose topic relates to the advisor's domain scope. Extract the relevant investigation entry (findings, verified assertions, key files, implications) and format it as the advisor's domain baseline.
 
    b. **Spawn the advisor** using the **advisor** agent definition (`~/.claude/agents/advisor.md`) with these template injections:
       - `{{team_name}}` → `impl-<slug>`
       - `{{advisor_domain}}` → the advisor's domain scope from the plan annotation
-      - `{{domain_context}}` → the investigation excerpt from Step 3.4a
+      - `{{domain_context}}` → the investigation excerpt from Step 3.5a
 
       ```
       Task:
@@ -158,7 +182,7 @@ Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). D
         | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
       ```
 
-5. **Spawn worker agents** — launch `min(recommended_workers, 4)` workers in a single message, where `recommended_workers` is the top-level field from `tasks.json` (fallback: `min(task_count, 4)` if the field is absent, for backward compatibility with old `tasks.json` files). Use the **worker** agent definition (`~/.claude/agents/worker.md`) as the base prompt, with these template injections:
+6. **Spawn worker agents** — launch `min(recommended_workers, 4)` workers in a single message, where `recommended_workers` is the top-level field from `tasks.json` (fallback: `min(task_count, 4)` if the field is absent, for backward compatibility with old `tasks.json` files). Use the **worker** agent definition (`~/.claude/agents/worker.md`) as the base prompt, with these template injections:
    - `{{team_name}}` → `impl-<slug>`
    - `{{team_lead}}` → the lead name read from team config in Step 2
    - `{{prior_knowledge}}` → the `$PRIOR_KNOWLEDGE` block from Step 3.1 (or empty if tasks have pre-resolved knowledge)
@@ -206,11 +230,11 @@ Do NOT gate on reviewing diffs — workers proceed autonomously. The user review
 
 When a batch of workers has all reported completion:
 1. Call `TaskList` to count remaining tasks with status `pending` and no `blockedBy` dependencies (unblocked tasks).
-2. **If unblocked tasks remain:** spawn `min(unblocked_count, max_workers)` fresh workers (same worker template and injections as Step 3.5, incrementing worker names as `worker-N` continuing from the last worker index used). Then continue collecting progress from the new batch.
-   - `max_workers` is the same cap used in Step 3.5: `min(recommended_workers, 4)`
+2. **If unblocked tasks remain:** spawn `min(unblocked_count, max_workers)` fresh workers (same worker template and injections as Step 3.6, incrementing worker names as `worker-N` continuing from the last worker index used). Then continue collecting progress from the new batch.
+   - `max_workers` is the same cap used in Step 3.6: `min(recommended_workers, 4)`
    - Repeat this respawn cycle after each batch completes until no unblocked tasks remain.
 3. **If no unblocked tasks remain** (all tasks are complete or all remaining are blocked):
-   a. Send `shutdown_request` to all active workers and all advisor agents (if any were spawned in Step 3.4)
+   a. Send `shutdown_request` to all active workers and all advisor agents (if any were spawned in Step 3.5)
    b. **Write advisor shutdown log entries** — for each advisor that was spawned, log the shutdown:
       ```bash
       printf 'Advisor shutdown: %s\nDomain: %s\n' \

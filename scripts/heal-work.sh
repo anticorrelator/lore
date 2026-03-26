@@ -69,7 +69,7 @@ for dir in "$WORK_DIR"/*/; do
     cat > "$dir/notes.md" << NOTESEOF
 # Session Notes: $TITLE
 
-<!-- Append session entries below. Each entry records what happened in a session. -->
+<!-- Append session entries below. Entry format: ## YYYY-MM-DDTHH:MM followed by **Focus:**, **Progress:**, **Next:** fields. -->
 NOTESEOF
     FINDINGS+=("[heal] Created missing notes.md for '$DIRNAME'")
     FIXES=$((FIXES + 1))

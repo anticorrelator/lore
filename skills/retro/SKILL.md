@@ -1,6 +1,6 @@
 ---
 name: retro
-description: "Evaluate knowledge system effectiveness after a work cycle — scores 5 dimensions, writes journal entry, evolves the protocol"
+description: "Evaluate knowledge system effectiveness after a work cycle — scores 5 dimensions, writes journal entry, suggests protocol evolution"
 user_invocable: true
 argument_description: "[work item name or slug]"
 ---
@@ -9,7 +9,7 @@ argument_description: "[work item name or slug]"
 
 Evaluate how the memory system performed during a specific work cycle. The core question: did the knowledge system make this work meaningfully better, or would you have done the same thing without it?
 
-This is a self-evolving protocol. Like `/self-test`, every invocation must produce at least one concrete protocol improvement.
+This is a self-evolving protocol. Like `/self-test`, every invocation must produce at least one concrete evolution suggestion (applied in batch via `/evolve`).
 
 ## Step 1: Resolve Work Item
 
@@ -191,17 +191,18 @@ lore journal write \
   --observation "Delivery: X/5 | Quality: X/5 | Gaps: X/5 | Alignment: X/5 | Spec Utility: X/5. Key finding: <one sentence summary of most important insight>. Most actionable gap: <specific gap that should be addressed>." \
   --context "retro: <slug>" \
   --work-item "<slug>" \
-  --role "retro"
+  --role "retro" \
+  --scores '{"d1_delivery": X, "d2_quality": X, "d3_gaps": X, "d4_alignment": X, "d5_spec_utility": X}'
 ```
 
-## Step 5: Evolve the Protocol
+## Step 5: Log Evolution Suggestions
 
-**This step is mandatory.** At least one concrete change per retro. Edit `skills/retro/SKILL.md` or `skills/retro/failure-modes.md` directly.
+**This step is mandatory.** At least one concrete suggestion per retro. Log suggestions to the journal — do **not** edit `skills/retro/SKILL.md` or `skills/retro/failure-modes.md` directly. The `/evolve` skill applies batched journal suggestions on demand.
 
 ### Meta-patterns to watch for
 
 1. **Ceiling dimensions:** Any dimension at 5/5 for 2+ consecutive retros on different work items — raise the bar or replace with a dimension that produces more signal.
-2. **New failure modes:** If this retro revealed a failure not in `failure-modes.md`, add it there.
+2. **New failure modes:** If this retro revealed a failure not in `failure-modes.md`, suggest adding it.
 3. **Dead dimensions:** Dimensions that consistently score 3/5 regardless of performance — restructure scoring criteria or replace.
 4. **Evidence quality:** If a score was hard to justify because evidence didn't exist in artifacts, note what's needed and whether it's worth adding to worker/spec reporting.
 
@@ -214,7 +215,23 @@ Consult `skills/retro/failure-modes.md` when scoring reveals anomalies. It catal
 - **C2. Spec investigation factual errors** — lifecycle misclassification, duplication overestimates, caller count errors (affects Dim 3, 4)
 - **D. Spec Utility modifiers** — prototype-cascade, knowledge saturation, meta-work, plumbing-vs-value gap, prescriptive micro-scope ceiling (affects Dim 5)
 
-Record all changes in the journal entry and the report.
+### Logging suggestions
+
+For each protocol improvement identified, write a journal entry:
+
+```bash
+lore journal write \
+  --observation "Target: <file> | Change type: <ceiling/new-failure-mode/dead-dimension/evidence-gap> | Section: <section> | Suggestion: <specific change> | Evidence: <retro finding that surfaced this>" \
+  --context "retro-evolution: <slug>" \
+  --work-item "<slug>" \
+  --role "retro-evolution"
+```
+
+**One entry per suggestion.** If multiple improvements are identified, write multiple journal entries. The observation should be 2-4 sentences: the suggested change, the target (SKILL.md section or failure-modes.md group), the rationale, and which meta-pattern triggered it.
+
+**Minimum bar:** At least one suggestion per retro. If scoring went smoothly and no improvements are obvious, log why each dimension is still producing useful signal — the justification is the deliverable.
+
+Record all suggestions in the Step 6 report.
 
 ## Step 6: Report
 
@@ -222,5 +239,5 @@ Record all changes in the journal entry and the report.
 [retro] <slug>
   Delivery: X/5 | Quality: X/5 | Gaps: X/5 | Alignment: X/5 | Spec Utility: X/5
   Key finding: <one sentence>
-  Protocol changes: <what evolved>
+  Evolution suggestions logged: N (run /evolve retro to apply)
 ```
