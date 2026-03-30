@@ -168,6 +168,7 @@ echo ""
 
   # --- Step 2: Relevance-ranked search via budget_search ---
   RELEVANCE_SEARCH_COUNT=0
+  RELEVANCE_LOADED_PATHS=()   # track paths loaded via relevance search
 
   if [[ -n "$CONTEXT_SIGNAL" ]]; then
     # Build FTS5 OR query from context signal
@@ -242,6 +243,7 @@ print(json.dumps(paths))
         CHARS_USED=$((CHARS_USED + ENTRY_SIZE + 1))
         RELEVANCE_SEARCH_COUNT=$((RELEVANCE_SEARCH_COUNT + 1))
         FILES_FULL=$((FILES_FULL + 1))
+        RELEVANCE_LOADED_PATHS+=("$rel_path")
       done < <(echo "$BUDGET_RESULTS" | python3 -c "
 import json, sys, os
 data = json.load(sys.stdin)
@@ -417,6 +419,17 @@ mkdir -p "$META_DIR"
 LOG_TIMESTAMP=$(timestamp_iso)
 CONTEXT_SECTIONS_TOTAL=$((DIRECT_RESOLVED_COUNT + RELEVANCE_SEARCH_COUNT))
 
+# Build loaded_paths JSON array from DIRECT_LOADED_PATHS + RELEVANCE_LOADED_PATHS
+ALL_LOADED_PATHS=(${DIRECT_LOADED_PATHS[@]+"${DIRECT_LOADED_PATHS[@]}"} ${RELEVANCE_LOADED_PATHS[@]+"${RELEVANCE_LOADED_PATHS[@]}"})
+LOADED_PATHS_JSON="[]"
+if [[ ${#ALL_LOADED_PATHS[@]} -gt 0 ]]; then
+  LOADED_PATHS_JSON=$(printf '%s\n' "${ALL_LOADED_PATHS[@]}" | python3 -c "
+import json, sys
+paths = [line.strip() for line in sys.stdin if line.strip()]
+print(json.dumps(paths))
+" 2>/dev/null) || LOADED_PATHS_JSON="[]"
+fi
+
 # Build signal_sources JSON array from newline-separated source names
 SIGNAL_SOURCES_JSON="[]"
 if [[ -n "$CONTEXT_SIGNAL_SOURCES" ]]; then
@@ -427,7 +440,7 @@ print(json.dumps(sources))
 " 2>/dev/null) || SIGNAL_SOURCES_JSON="[]"
 fi
 
-printf '{"timestamp":"%s","format_version":%d,"budget_used":%d,"budget_total":%d,"files_full":%d,"files_summary":%d,"files_skipped":%d,"context_signal":"%s","context_sections":%d,"direct_resolved":%d,"relevance_search":%d,"signal_sources":%s,"git_branch":"%s"}\n' \
+printf '{"timestamp":"%s","format_version":%d,"budget_used":%d,"budget_total":%d,"files_full":%d,"files_summary":%d,"files_skipped":%d,"context_signal":"%s","context_sections":%d,"direct_resolved":%d,"relevance_search":%d,"signal_sources":%s,"git_branch":"%s","loaded_paths":%s}\n' \
   "$LOG_TIMESTAMP" \
   4 \
   "$CHARS_USED" \
@@ -441,4 +454,5 @@ printf '{"timestamp":"%s","format_version":%d,"budget_used":%d,"budget_total":%d
   "$RELEVANCE_SEARCH_COUNT" \
   "$SIGNAL_SOURCES_JSON" \
   "$(echo "$CURRENT_BRANCH" | tr '"\\' '__')" \
+  "$LOADED_PATHS_JSON" \
   >> "$META_DIR/retrieval-log.jsonl" 2>/dev/null || true

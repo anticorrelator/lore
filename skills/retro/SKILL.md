@@ -20,14 +20,14 @@ lore resolve
 Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
 1. Parse the argument as a work item slug. Use the same fuzzy matching as `/work`:
-   - Exact slug match -> substring match on title -> substring on slug -> branch match -> recency
-2. Load `plan.md`, `notes.md`, `_meta.json` from `$WORK_DIR/<slug>/`.
+   - Exact slug match -> substring match on title -> substring on slug -> branch match -> recency -> archive fallback
+2. Load `plan.md`, `notes.md`, `_meta.json` from `$WORK_DIR/<slug>/`. If the resolved item is tagged `[archived]`, load from `$WORK_DIR/_archive/<slug>/` instead.
 3. If no argument provided, infer from the current git branch.
 4. If no work item found, ask the user what work cycle to evaluate.
 
 Report:
 ```
-[retro] Evaluating: <work item title> (<slug>)
+[retro] Evaluating: <work item title> (<slug>) [archived]  ← include [archived] only when item was resolved from archive
 ```
 
 ## Step 2: Gather Evidence

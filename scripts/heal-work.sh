@@ -48,6 +48,7 @@ for dir in "$WORK_DIR"/*/; do
   "created": "$TIMESTAMP",
   "updated": "$TIMESTAMP",
   "related_knowledge": [],
+  "related_work": [],
   "issue": "",
   "pr": ""
 }

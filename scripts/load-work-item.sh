@@ -50,19 +50,18 @@ WORK_DIR="$KNOWLEDGE_DIR/_work"
 ITEM_DIR="$WORK_DIR/$SLUG"
 
 # Check if item exists — if not, check archive, then fail
+ARCHIVED=false
 if [[ ! -d "$ITEM_DIR" ]]; then
   if [[ -d "$WORK_DIR/_archive/$SLUG" ]]; then
+    ITEM_DIR="$WORK_DIR/_archive/$SLUG"
+    ARCHIVED=true
+  else
     if [[ "$JSON_OUTPUT" == true ]]; then
-      json_error "'$SLUG' is archived"
+      json_error "Work item not found: $SLUG"
     fi
-    echo "[work] '$SLUG' is archived. Use /work search to view."
-    exit 0
+    echo "[work] Error: Work item not found: $SLUG" >&2
+    exit 1
   fi
-  if [[ "$JSON_OUTPUT" == true ]]; then
-    json_error "Work item not found: $SLUG"
-  fi
-  echo "[work] Error: Work item not found: $SLUG" >&2
-  exit 1
 fi
 
 META="$ITEM_DIR/_meta.json"
@@ -82,6 +81,7 @@ import json, os, sys
 
 item_dir = sys.argv[1]
 slug = sys.argv[2]
+archived = sys.argv[3] == 'true'
 meta_file = os.path.join(item_dir, '_meta.json')
 
 with open(meta_file) as f:
@@ -103,12 +103,14 @@ result = {
     'slug': slug,
     'title': meta.get('title', ''),
     'status': meta.get('status', ''),
+    'archived': archived,
     'branches': meta.get('branches', []),
     'tags': meta.get('tags', []),
     'issue': meta.get('issue', ''),
     'pr': meta.get('pr', ''),
     'created': meta.get('created', ''),
     'updated': meta.get('updated', ''),
+    'related_work': meta.get('related_work', []),
     'plan_content': read_file(plan_path),
     'notes_content': read_file(notes_path),
     'has_execution_log': os.path.isfile(exec_log_path),
@@ -129,7 +131,7 @@ if extra_files:
     result['extra_files'] = extra_files
 
 print(json.dumps(result))
-" "$ITEM_DIR" "$SLUG"
+" "$ITEM_DIR" "$SLUG" "$ARCHIVED"
   exit 0
 fi
 
@@ -138,19 +140,29 @@ TITLE=$(json_field "title" "$META")
 STATUS=$(json_field "status" "$META")
 CREATED=$(json_field "created" "$META")
 UPDATED=$(json_field "updated" "$META")
-ISSUE=$(json_field "issue" "$META")
-PR=$(json_field "pr" "$META")
+ISSUE=$(json_field "issue" "$META" || true)
+PR=$(json_field "pr" "$META" || true)
 
-# Extract branches and tags as comma-separated display strings
+# Extract branches, tags, and related_work as comma-separated display strings
 BRANCHES=$(json_array_field "branches" "$META" | sed 's/"//g; s/,/, /g')
 TAGS=$(json_array_field "tags" "$META" | sed 's/"//g; s/,/, /g')
+RELATED_WORK=$(json_array_field "related_work" "$META" | sed 's/"//g; s/,/, /g')
 
 # --- Output structured metadata ---
-draw_separator "Work Item: $TITLE"
+if [[ "$ARCHIVED" == true ]]; then
+  draw_separator "[archived] Work Item: $TITLE"
+  echo "[archived] This work item has been archived."
+  echo ""
+else
+  draw_separator "Work Item: $TITLE"
+fi
 echo "Slug: $SLUG"
 echo "Status: $STATUS"
 echo "Branches: ${BRANCHES:-none}"
 echo "Tags: ${TAGS:-none}"
+if [[ -n "$RELATED_WORK" ]]; then
+  echo "Related: $RELATED_WORK"
+fi
 echo "Issue: ${ISSUE:-none}"
 echo "PR: ${PR:-none}"
 echo "Created: $CREATED"

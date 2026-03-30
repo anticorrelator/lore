@@ -24,6 +24,7 @@ type WorkItemDetail struct {
 	Status          string      `json:"status"`
 	Branches        []string    `json:"branches"`
 	Tags            []string    `json:"tags"`
+	RelatedWork     []string    `json:"related_work"`
 	Issue           string      `json:"issue"`
 	PR              string      `json:"pr"`
 	Created         string      `json:"created"`
@@ -49,15 +50,16 @@ type SearchLocation struct {
 
 // workItemMeta mirrors the _meta.json schema for a work item.
 type workItemMeta struct {
-	Slug     string   `json:"slug"`
-	Title    string   `json:"title"`
-	Status   string   `json:"status"`
-	Branches []string `json:"branches"`
-	Tags     []string `json:"tags"`
-	Issue    string   `json:"issue"`
-	PR       string   `json:"pr"`
-	Created  string   `json:"created"`
-	Updated  string   `json:"updated"`
+	Slug        string   `json:"slug"`
+	Title       string   `json:"title"`
+	Status      string   `json:"status"`
+	Branches    []string `json:"branches"`
+	Tags        []string `json:"tags"`
+	RelatedWork []string `json:"related_work"`
+	Issue       string   `json:"issue"`
+	PR          string   `json:"pr"`
+	Created     string   `json:"created"`
+	Updated     string   `json:"updated"`
 }
 
 // loadWorkItemDetailDirect reads work item files directly from disk,
@@ -91,17 +93,21 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 	if meta.Tags == nil {
 		meta.Tags = []string{}
 	}
+	if meta.RelatedWork == nil {
+		meta.RelatedWork = []string{}
+	}
 
 	detail := &WorkItemDetail{
-		Slug:     slug,
-		Title:    meta.Title,
-		Status:   meta.Status,
-		Branches: meta.Branches,
-		Tags:     meta.Tags,
-		Issue:    meta.Issue,
-		PR:       meta.PR,
-		Created:  meta.Created,
-		Updated:  meta.Updated,
+		Slug:        slug,
+		Title:       meta.Title,
+		Status:      meta.Status,
+		Branches:    meta.Branches,
+		Tags:        meta.Tags,
+		RelatedWork: meta.RelatedWork,
+		Issue:       meta.Issue,
+		PR:          meta.PR,
+		Created:     meta.Created,
+		Updated:     meta.Updated,
 	}
 
 	// Read optional content files — nil when absent

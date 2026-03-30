@@ -44,7 +44,7 @@ The key question for each candidate: **would a future session benefit from knowi
 Run work item resolution once; the result flows to Step 5 (execution-log write):
 
 ```bash
-lore work list --json
+lore work list --json --all
 ```
 
 Parse the JSON output and match the current git branch against each item's `branches` array:
@@ -74,7 +74,7 @@ Review the full conversation context (filtered by any Step 1 constraints) and id
 - **Root cause:** the actual underlying reason
 - **Fix:** what resolved it
 
-For each candidate, assess against the 4-condition gate:
+For each candidate, assess against the capture gate — all 4 conditions must be true:
 1. Reusable (beyond this task)?
 2. Non-obvious (not in existing docs)?
 3. Stable (won't change soon)?
@@ -84,7 +84,9 @@ If capture constraints were provided in Step 1, apply them as an additional filt
 
 **Staleness branch:** when the "non-obvious" check reveals a similar entry may already exist, run `lore search "<key terms>" --type knowledge --limit 3`, read the top match, and branch: (a) same claim — skip the candidate, (b) divergent (contradicts or supersedes) — edit the existing entry file in-place to reflect the new insight, update its `learned` date to today, then skip the new capture. Note: `[staleness] Updated "<existing title>" — superseded by new finding`.
 
-**Synthesis quality signal:** When multiple candidates pass the gate, prefer those that synthesize across sources — insights that required combining information from multiple files, sessions, or components. The following categories are strong positive indicators of synthesis: architectural models, design rationale, cross-cutting conventions, behavioral directives, mental models, and directional intent. Operational procedures, error signatures, and implicit constraints often qualify too — they typically combine runtime behavior with code structure. Single-source entries (readable from one file) are still captured but rank lower for auto-loading.
+**Synthesis as a loading signal:** After an entry qualifies, assess whether it required combining information from multiple files, sessions, or components. Synthesis entries load at startup; single-source entries are still captured — they provide real token savings when retrieved on demand — but rank lower in auto-loading naturally. The following categories are strong positive indicators of synthesis: architectural models, design rationale, cross-cutting conventions, behavioral directives, mental models, and directional intent. Operational procedures, error signatures, and implicit constraints often qualify too — they typically combine runtime behavior with code structure.
+
+**Anti-pattern — existence ≠ recoverability:** Information existing in a file is not the same as understanding being recoverable from that file. A rationale comment buried in code is not a captured insight — it will be missed in future sessions. The presence of a pattern in source does not make it "obvious." When in doubt, the question is: could a future session reconstruct this understanding from the code alone, in the time available? If not, capture it.
 
 **Why > what:** A statement explaining *why* a choice was made is more valuable than a statement describing *what* was chosen. When both a rationale statement and a factual observation pass the gate, prefer the rationale. For example, "we use script-first skill design because it prevents instruction fade in SKILL.md" outranks "skills delegate to bash scripts" — the second is recoverable from code; the first is not.
 

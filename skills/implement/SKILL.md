@@ -41,7 +41,8 @@ Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). D
 
 1. Parse arguments: extract work item name and optional `--model` flag (default: `sonnet`, accept `opus`)
 2. Resolve work item using the same fuzzy matching algorithm as `/work`:
-   - Exact slug match → substring match on title → substring on slug → branch match → recency
+   - Exact slug match → substring match on title → substring on slug → branch match → recency → archive fallback
+   - **If resolved item is tagged `[archived]`:** Warn the user: "This work item is archived. Proceed anyway?" Wait for explicit confirmation before continuing. If the user confirms, load from `$WORK_DIR/_archive/<slug>/`.
 3. Read `_meta.json`, `plan.md`, and last entry of `notes.md`
 4. **If no `plan.md`:** Tell user "No structured plan found. Run `/spec` first to create phases and tasks."
 5. **If `plan.md` has no `## Phases` or no unchecked `- [ ]` items:** Tell user "All plan tasks are already complete."

@@ -57,13 +57,24 @@ while [[ $# -gt 0 ]]; do
 done
 
 # JSON output: return the plans array from _index.json directly
+# With --all, also return the archived array
 if [[ "$JSON_OUTPUT" == true ]]; then
-  python3 -c "
+  if [[ "$SHOW_ALL" == true ]]; then
+    python3 -c "
+import json, sys
+with open('$INDEX') as f:
+    data = json.load(f)
+result = {'plans': data.get('plans', []), 'archived': data.get('archived', [])}
+print(json.dumps(result))
+"
+  else
+    python3 -c "
 import json, sys
 with open('$INDEX') as f:
     data = json.load(f)
 print(json.dumps(data.get('plans', [])))
 "
+  fi
   exit 0
 fi
 
@@ -171,12 +182,27 @@ while IFS= read -r line; do
   fi
 done < "$INDEX"
 
-# Count archived items
+# Count archived items — prefer index, fall back to filesystem
 ARCHIVE_DIR="$WORK_DIR/_archive"
 ARCHIVE_COUNT=0
-if [[ -d "$ARCHIVE_DIR" ]]; then
-  ARCHIVE_COUNT=$(ls -1d "$ARCHIVE_DIR"/*/ 2>/dev/null | wc -l | tr -d ' ')
-fi
+ARCHIVE_COUNT=$(python3 -c "
+import json, os
+index = '$INDEX'
+archive_dir = '$ARCHIVE_DIR'
+try:
+    with open(index) as f:
+        data = json.load(f)
+    archived = data.get('archived', None)
+    if archived is not None:
+        print(len(archived))
+    elif os.path.isdir(archive_dir):
+        entries = [d for d in os.listdir(archive_dir) if os.path.isdir(os.path.join(archive_dir, d))]
+        print(len(entries))
+    else:
+        print(0)
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
 
 # Output
 draw_separator "Work Items"
@@ -214,22 +240,58 @@ echo "Active: $ACTIVE_COUNT | Archived: $ARCHIVE_COUNT"
 if [[ "$SHOW_ALL" == true && $ARCHIVE_COUNT -gt 0 ]]; then
   echo ""
   echo "--- Archived ---"
-  for archive_dir in "$ARCHIVE_DIR"/*/; do
-    [[ -d "$archive_dir" ]] || continue
-    slug=$(basename "$archive_dir")
-    meta="$archive_dir/_meta.json"
-    if [[ -f "$meta" ]]; then
-      title=$(json_field "title" "$meta")
-      refs=""
-      a_issue=$(json_field "issue" "$meta" || true)
-      a_pr=$(json_field "pr" "$meta" || true)
-      [[ -n "$a_issue" ]] && refs="${refs} issue:#${a_issue}"
-      [[ -n "$a_pr" ]] && refs="${refs} pr:#${a_pr}"
-      echo "  $slug: $title${refs}"
-    else
-      echo "  $slug"
-    fi
-  done
+  python3 -c "
+import json, os, sys
+
+index_path = '$INDEX'
+archive_dir = '$ARCHIVE_DIR'
+
+try:
+    with open(index_path) as f:
+        data = json.load(f)
+    archived = data.get('archived', None)
+    if archived is not None:
+        for item in archived:
+            slug = item.get('slug', '')
+            title = item.get('title', slug)
+            refs = ''
+            issue = item.get('issue', '')
+            pr = item.get('pr', '')
+            if issue:
+                refs += f' issue:#{issue}'
+            if pr:
+                refs += f' pr:#{pr}'
+            print(f'  {slug}: {title}{refs}')
+        sys.exit(0)
+except Exception:
+    pass
+
+# Fallback: filesystem scan
+if not os.path.isdir(archive_dir):
+    sys.exit(0)
+for slug in sorted(os.listdir(archive_dir)):
+    item_dir = os.path.join(archive_dir, slug)
+    if not os.path.isdir(item_dir):
+        continue
+    meta_path = os.path.join(item_dir, '_meta.json')
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            title = meta.get('title', slug)
+            refs = ''
+            issue = meta.get('issue', '')
+            pr = meta.get('pr', '')
+            if issue:
+                refs += f' issue:#{issue}'
+            if pr:
+                refs += f' pr:#{pr}'
+            print(f'  {slug}: {title}{refs}')
+        except Exception:
+            print(f'  {slug}')
+    else:
+        print(f'  {slug}')
+"
 fi
 
 echo ""

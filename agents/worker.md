@@ -39,7 +39,18 @@ lore search "<query>" --json --limit 5
        contradicts, or wasn't covered there.
        (2) Structural footprint — for significant files you touched:
        its role in one phrase, what else connects to or through it,
-       what constrains changes here.
+       what constrains changes here. Sub-target: design contracts —
+       intended usage, composition, and extension models: how components
+       are designed to work together, how subsystems are meant to be
+       extended, what usage patterns maintain coherence. Look for:
+       repeated structural patterns across files (extension model),
+       registration/factory mechanisms (intended extension point),
+       pipeline ordering (compositional protocol), guard mechanisms
+       enforcing usage patterns.
+       ✓ "lore capture CLI is the single write path — all capture routes
+          through it, enforced by stop hook and worker template prompts
+          (compositional protocol)"
+       ✗ "capture.sh calls sqlite3 with an INSERT statement"
        (3) Operational procedures — investigation or usage workflows
        discovered during the task ("to debug X, do Y then Z").
        (4) Error signatures — symptom-to-cause mappings encountered
@@ -79,7 +90,7 @@ For tasks with subjects starting with "Update stale knowledge entry":
 
 - **Observations** are the most valuable part of your report beyond the code changes themselves. Five targets — report any that apply:
   - **Mechanism-level patterns** — how the system accomplishes things in broad strokes. Anchor to your Prior Knowledge: what extends, contradicts, or wasn't covered there. ✓ "all span ingestion goes through the batch insertion process" ✗ "insert_spans() calls cursor.executemany()" ✗ "the system uses batching"
-  - **Structural footprint** — for significant files you touched: its role in one phrase, what else connects to or through it, what constrains changes here. Report even when expected — the goal is building an emergent architectural picture across runs, not just flagging surprises.
+  - **Structural footprint** — for significant files you touched: its role in one phrase, what else connects to or through it, what constrains changes here. Sub-target: **design contracts** — intended usage, composition, and extension models: how components are designed to work together, how subsystems are meant to be extended, what usage patterns maintain coherence. Look for: repeated structural patterns across files (extension model), registration/factory mechanisms (intended extension point), pipeline ordering (compositional protocol), guard mechanisms enforcing usage patterns. Report even when expected — the goal is building an emergent architectural picture across runs, not just flagging surprises.
   - **Operational procedures** — investigation or usage workflows discovered during the task ("to debug X, do Y then Z").
   - **Error signatures** — symptom-to-cause mappings encountered ("error X means Y, verify with Z").
   - **Implicit constraints** — non-code-visible rules discovered ("can't do X because of Y constraint").

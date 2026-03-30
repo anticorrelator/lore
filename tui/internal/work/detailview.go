@@ -550,6 +550,10 @@ func (m DetailModel) renderMetaTab(width int) string {
 		field("Tags", "")
 	}
 
+	if len(d.RelatedWork) > 0 {
+		field("Related", strings.Join(d.RelatedWork, ", "))
+	}
+
 	return b.String()
 }
 

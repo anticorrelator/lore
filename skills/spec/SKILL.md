@@ -25,7 +25,8 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 ## Step 1: Parse and resolve (both modes)
 
 1. Parse arguments: if first arg after `/spec` is `short`, use **Short Flow**; otherwise **Full Flow**. If `--yes` is present, skip all interactive confirmation gates (auto-proceed through investigation plan confirmation, strategy gates, confirm understanding, and task review). If `--without-verification` is present, skip Step 4b (assertion verification). The remaining text is the **input**.
-2. Try to resolve input as an existing work item (fuzzy match or branch inference, same algorithm as `/work`)
+2. Try to resolve input as an existing work item (fuzzy match or branch inference, same algorithm as `/work`, including archive fallback)
+   - **If resolved item is tagged `[archived]`:** Warn the user: "This work item is archived. Proceed anyway?" Wait for explicit confirmation before continuing.
 3. **If resolved** → load the work item:
    - If `plan.md` exists with synthesis already complete (Design Decisions + Phases present), skip to Step 5.1 (Confirm understanding) — run the approval gates before finalizing. If a `## Strategy` section exists, load it silently as shaping context.
    - If `plan.md` exists with `## Investigations` and completed findings but no synthesis yet, skip to synthesis (Step 5). If a `## Strategy` section exists in plan.md, load it silently and use it as shaping context during synthesis — do not re-prompt.
@@ -149,13 +150,17 @@ Before drafting, offer the user a chance to shape the plan with high-level strat
    ```
    If no skills matched, omit this block.
 
-5. **Annotate phases with knowledge context** — after drafting phases with objectives and tasks, run a concordance query per phase to surface relevant knowledge entries beyond what you encountered in Step 2s:
+5. **Generate Architecture Diagram (conditional)** — after drafting Design Decisions, decide whether to include a `## Architecture Diagram` section. Include it when the work involves multi-component systems, novel data flows, or module boundaries that are not self-evident from the phase list. Omit for single-file or mechanical changes.
+
+   If included, write a Mermaid diagram (```mermaid block) using actual file/module names. Choose the diagram type based on what best captures the structure (flowchart for pipelines, sequenceDiagram for interactions, classDiagram for type hierarchies). Place the section after `## Design Decisions` and before `## Phases`.
+
+6. **Annotate phases with knowledge context** — after drafting phases with objectives and tasks, run a concordance query per phase to surface relevant knowledge entries beyond what you encountered in Step 2s:
    ```bash
    lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5
    ```
    Review the suggestions for each phase. Add relevant entries as `[[knowledge:file#heading]] — why relevant` lines in the phase's `**Knowledge context:**` block. Your direct findings from Step 2s are the primary source — concordance is a *widener*, not a replacement. Skip entries that don't add actionable context for a worker implementing that phase.
 
-6. Present to user for review
+7. Present to user for review
 
 ### Step 3.3s: Review context cost estimates
 
@@ -415,6 +420,7 @@ As researcher messages arrive (delivered automatically):
 1. Write each finding to the `## Investigations` section of `plan.md`
 2. Use the investigation entry format from the template below
 3. **Preserve `**Assertions:**` verbatim** — copy researcher assertions exactly as reported. Do not rephrase, merge, or summarize them. These are falsifiable claims that downstream verification will test against the code.
+4. **Preserve `**Observations:**` verbatim** — copy researcher observations exactly as reported. Do not rephrase, merge, or summarize them. These are mechanism-level patterns, design rationale, and structural footprint signals that feed the Step 5.4 capture step.
 
 When all investigation tasks are complete:
 1. Send shutdown requests to all researchers and all advisor agents (if any were spawned in Step 3.5) via `SendMessage` (type: `shutdown_request`)
@@ -535,7 +541,11 @@ Before synthesizing, offer the user a chance to shape the plan with high-level s
 From the documented findings, draft the remaining plan sections:
 1. **Goal** — what we're building/changing and why (1 paragraph)
 2. **Design Decisions** — use the `### DN: Title` format from the template. Each decision requires `**Decision:**`, `**Rationale:**`, `**Alternatives considered:**`, and `**Applies to:**` fields. Number decisions sequentially (D1, D2, ...).
-3. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include a `**Knowledge context:**` block listing knowledge entries relevant to that phase — these flow directly to worker agents via task generation. For multi-worker phases, novel implementations without codebase precedent, or phases using intent+constraints task format, add `**Knowledge delivery:** full` — workers interpreting intent and constraints need resolved knowledge content, not just backlink labels.
+3. **Architecture Diagram (conditional)** — after drafting Design Decisions, decide whether to include a `## Architecture Diagram` section. Include it when the work involves multi-component systems, novel data flows, or module boundaries that are not self-evident from the phase list. Omit for single-file or mechanical changes.
+
+   If included, write a Mermaid diagram (```mermaid block) using actual file/module names — investigation findings provide the component relationships and data flows to model. Choose the diagram type based on what best captures the structure (flowchart for pipelines, sequenceDiagram for interactions, classDiagram for type hierarchies). Place the section after `## Design Decisions` and before `## Phases`.
+
+4. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include a `**Knowledge context:**` block listing knowledge entries relevant to that phase — these flow directly to worker agents via task generation. For multi-worker phases, novel implementations without codebase precedent, or phases using intent+constraints task format, add `**Knowledge delivery:** full` — workers interpreting intent and constraints need resolved knowledge content, not just backlink labels.
 
    **Advisor identification:** When investigations reveal domain complexity in a phase — unfamiliar invariants, cross-cutting constraints, or areas where uninformed changes risk breaking correctness — add an `**Advisors:**` block declaring domain-expert advisors for that phase. Use the format: `- advisor-name — domain scope. [must-consult|on-demand]`. Use `must-consult` when the domain has hard invariants that workers must respect (e.g., auth, data migration); use `on-demand` when the domain is complex but workers can start independently and ask questions as needed. `/implement` spawns declared advisors as persistent team members with investigation findings as their domain baseline.
 
@@ -561,13 +571,13 @@ From the documented findings, draft the remaining plan sections:
    - [ ] In `generate-tasks.py` line 87, replace `context_block` with `build_context_block(task, phase, decisions)`
    ```
 
-4. **Concordance-assisted annotation** — after drafting phases, widen each phase's `**Knowledge context:**` block beyond what investigations explicitly mentioned. For each phase, run:
+5. **Concordance-assisted annotation** — after drafting phases, widen each phase's `**Knowledge context:**` block beyond what investigations explicitly mentioned. For each phase, run:
    ```bash
    lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5
    ```
    Review the suggestions against what is already listed. Add relevant entries as `[[knowledge:...]]` backlinks with a brief "— why relevant" annotation. Skip entries that duplicate what investigations already covered. Investigation findings are the primary source of knowledge references — concordance is a *widener*, not a replacement.
 
-5. **Open Questions** — anything investigations couldn't resolve
+6. **Open Questions** — anything investigations couldn't resolve
 
 Present the synthesized plan to the user for review.
 
@@ -713,7 +723,7 @@ Before finalizing, present the plan's phases as a structured summary for the use
 Invoke `/remember` scoped to the spec investigation:
 
 ```
-/remember Research findings from <work item title> — Read all **Observations:** entries from investigation reports in plan.md and evaluate each — mechanism-level patterns (how the system accomplishes X broadly) and design rationale ("this was chosen because X") both qualify; implementation facts already expressed in Assertions do not. Also capture: cross-investigation synthesis patterns not surfaced individually. Skip: findings already documented in plan.md Assertions (they're persisted there).
+/remember Research findings from <work item title> — Read all **Observations:** entries from investigation reports in plan.md and evaluate each — mechanism-level patterns (how the system accomplishes X broadly), design rationale ("this was chosen because X"), and structural footprint signals (module roles, integration points, what constrains changes) all qualify; implementation facts already expressed in Assertions do not. Also capture: cross-investigation synthesis patterns not surfaced individually. Skip: findings already documented in plan.md Assertions (they're persisted there).
 ```
 
 ### Step 5.5: Generate tasks.json
@@ -796,6 +806,8 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 **Assertions:**
 - <falsifiable claim 1, preserved verbatim from researcher report>
 - <falsifiable claim 2, preserved verbatim from researcher report>
+**Observations:**
+- <mechanism-level pattern, design rationale, or structural footprint signal, preserved verbatim from researcher report>
 
 ## Design Decisions
 
@@ -804,6 +816,12 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 **Rationale:** Why this choice over others — the reasoning, constraints, or evidence that led here
 **Alternatives considered:** What other approaches were evaluated and why they were rejected
 **Applies to:** Phase N (<name>), Phase M (<name>) — which phases/tasks this decision affects
+
+## Architecture Diagram
+<!-- Optional — include when the work involves multi-component systems, novel data flows, or module boundaries that are not self-evident from the phase list. Omit for single-file or straightforward additive changes.
+     Format: Mermaid markdown (```mermaid block). Choose the diagram type (flowchart, sequenceDiagram, classDiagram, etc.) based on what best captures the structure.
+     Content: label components with actual file/module names (not generic boxes). Show component relationships, data flow direction, and module boundaries that matter for implementation.
+     Example types to consider: flowchart for data pipelines, sequenceDiagram for request/response interactions, classDiagram for type hierarchies. -->
 
 ## Phases
 

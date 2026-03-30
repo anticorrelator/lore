@@ -224,6 +224,16 @@ func runArchive(slug string, unarchive bool) tea.Cmd {
 	}
 }
 
+// runDelete runs lore work delete and returns DeleteFinishedMsg when done.
+func runDelete(slug string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("lore", "work", "delete", slug)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		err := cmd.Run()
+		return work.DeleteFinishedMsg{Err: err}
+	}
+}
+
 type model struct {
 	state        appState
 	focusedPanel panelFocus
@@ -262,6 +272,11 @@ type model struct {
 
 	showHelp bool
 
+	// Confirm modal for archive/delete actions.
+	confirmAction      string // "archive", "unarchive", or "delete"; empty = inactive
+	confirmSlug        string
+	confirmTitle       string
+
 	kittyModeActive bool // true while kitty keyboard protocol is enabled
 
 	popup          search.PopupModel
@@ -275,6 +290,10 @@ type model struct {
 	lastIndexMtime time.Time
 	lastPlanMtime    time.Time
 	lastDetailMtime  time.Time
+
+	// flashErr holds a transient error message shown in the status bar.
+	// It is cleared on the next key press.
+	flashErr string
 }
 
 // currentSpecPanel returns the spec panel for the currently selected work item, if any.
@@ -455,6 +474,30 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// Non-key messages (e.g. window resize) fall through.
 	}
 
+	// Confirm modal for archive/delete: intercept all keys.
+	if m.confirmAction != "" {
+		if km, ok := msg.(tea.KeyMsg); ok {
+			switch km.String() {
+			case "y", "enter":
+				action := m.confirmAction
+				slug := m.confirmSlug
+				m.confirmAction = ""
+				m.confirmSlug = ""
+				m.confirmTitle = ""
+				if action == "delete" {
+					return m, runDelete(slug)
+				}
+				return m, runArchive(slug, action == "unarchive")
+			default:
+				// Any other key cancels.
+				m.confirmAction = ""
+				m.confirmSlug = ""
+				m.confirmTitle = ""
+			}
+			return m, nil
+		}
+	}
+
 	// Spec confirm modal: intercept all keys before launching subprocess.
 	if m.specConfirmActive {
 		if _, ok := msg.(shiftEnterMsg); ok {
@@ -584,7 +627,16 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	case work.ArchiveFinishedMsg:
 		if msg.Err != nil {
-			m.err = fmt.Errorf("archive operation failed: %w", msg.Err)
+			m.flashErr = fmt.Sprintf("archive failed: %v", msg.Err)
+		}
+		return m, loadWorkItems(m.config.WorkDir)
+
+	case work.DeleteRequestMsg:
+		return m, runDelete(msg.Slug)
+
+	case work.DeleteFinishedMsg:
+		if msg.Err != nil {
+			m.flashErr = fmt.Sprintf("delete failed: %v", msg.Err)
 		}
 		return m, loadWorkItems(m.config.WorkDir)
 
@@ -766,6 +818,8 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// Clear any transient flash error on the next key press.
+		m.flashErr = ""
 		switch msg.String() {
 		case "ctrl+c":
 			// In terminal mode, ctrl+c terminates the terminal panel only,
@@ -792,6 +846,44 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			if m.state == stateWork && !m.terminalMode {
 				m.cleanupAllSubprocesses()
 				return m, tea.Quit
+			}
+		case "A":
+			// A opens archive/unarchive confirmation modal (left panel only).
+			if m.state == stateWork && m.focusedPanel == panelLeft {
+				items := m.list.Items()
+				cur := m.list.Cursor()
+				if cur < len(items) {
+					item := items[cur]
+					title := item.Title
+					if title == "" {
+						title = item.Slug
+					}
+					if item.Status == "archived" {
+						m.confirmAction = "unarchive"
+					} else {
+						m.confirmAction = "archive"
+					}
+					m.confirmSlug = item.Slug
+					m.confirmTitle = title
+					return m, nil
+				}
+			}
+		case "D":
+			// D opens delete confirmation modal (left panel only).
+			if m.state == stateWork && m.focusedPanel == panelLeft {
+				items := m.list.Items()
+				cur := m.list.Cursor()
+				if cur < len(items) {
+					item := items[cur]
+					title := item.Title
+					if title == "" {
+						title = item.Slug
+					}
+					m.confirmAction = "delete"
+					m.confirmSlug = item.Slug
+					m.confirmTitle = title
+					return m, nil
+				}
 			}
 		case "N":
 			// N opens the AI work item prompt (left panel only).
@@ -1441,6 +1533,9 @@ func (m model) View() string {
 	if m.aiInputActive {
 		return m.renderAIModal(base)
 	}
+	if m.confirmAction != "" {
+		return m.renderConfirmModal(base)
+	}
 	if m.showHelp {
 		return m.renderHelpModal(base)
 	}
@@ -1947,6 +2042,33 @@ func (m model) renderAIModal(_ string) string {
 	return m.placeModal(buildModalBox(s, "Add Work Items via AI", body))
 }
 
+// renderConfirmModal overlays a centered confirmation modal for archive/delete actions.
+func (m model) renderConfirmModal(_ string) string {
+	s := newModalStyles()
+
+	var title, body string
+	switch m.confirmAction {
+	case "archive":
+		title = "Archive Work Item"
+		body = fmt.Sprintf("Archive %s?\n\n", s.key.Render(m.confirmTitle)) +
+			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
+			s.key.Render("any key") + s.dim.Render("  cancel")
+	case "unarchive":
+		title = "Unarchive Work Item"
+		body = fmt.Sprintf("Unarchive %s?\n\n", s.key.Render(m.confirmTitle)) +
+			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
+			s.key.Render("any key") + s.dim.Render("  cancel")
+	case "delete":
+		warnS := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))
+		title = warnS.Render("Delete Work Item")
+		body = fmt.Sprintf("Permanently delete %s?\n\n", s.key.Render(m.confirmTitle)) +
+			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
+			s.key.Render("any key") + s.dim.Render("  cancel")
+	}
+
+	return m.placeModal(buildModalBox(s, title, body))
+}
+
 // renderHelpModal overlays a centered modal listing all keybindings.
 func (m model) renderHelpModal(_ string) string {
 	s := newModalStyles()
@@ -1964,6 +2086,8 @@ func (m model) renderHelpModal(_ string) string {
 		row("c", "chat about spec") + "\n" +
 		row("N", "create work items with AI") + "\n" +
 		row("L", "toggle layout") + "\n" +
+		row("A", "archive / unarchive") + "\n" +
+		row("D", "delete") + "\n" +
 		row("ctrl+a", "toggle archived") + "\n" +
 		row("K", "knowledge browser") + "\n" +
 		"\n" +
@@ -2054,6 +2178,16 @@ func (m model) renderStatusBar(width int) string {
 			hint("Esc", "exit"),
 			hint("?", "help"),
 		}
+	}
+
+	if m.flashErr != "" {
+		errS := lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+		bar := "  " + errS.Render(m.flashErr)
+		barW := lipgloss.Width(bar)
+		if barW < width {
+			bar += strings.Repeat(" ", width-barW)
+		}
+		return bar
 	}
 
 	if m.aiLoading {

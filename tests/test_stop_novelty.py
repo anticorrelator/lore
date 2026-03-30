@@ -613,6 +613,156 @@ class TestNormalMessagesStillTrigger:
 
 
 # ---------------------------------------------------------------------------
+# Test: ±200 char context window in scan_heuristics
+# ---------------------------------------------------------------------------
+
+class TestContextWindow:
+    """scan_heuristics extracts up to ±200 chars of surrounding context.
+
+    The context window is measured from match.start() (before) and match.end()
+    (after) of the matched keyword — not from the edges of the trigger phrase.
+    After widening from ±60 to ±200, matched_text should include content up to
+    200 chars before match.start() and up to 200 chars after match.end().
+    """
+
+    def _make_assistant(self, text, index=0):
+        return {
+            "index": index,
+            "role": "assistant",
+            "text_blocks": [text],
+            "has_tool_use": False,
+            "is_tool_result": False,
+            "tool_names": [],
+        }
+
+    def _make_user(self, text, index=0):
+        return {
+            "index": index,
+            "role": "user",
+            "text_blocks": [text],
+            "has_tool_use": False,
+            "is_tool_result": False,
+            "tool_names": [],
+        }
+
+    def test_context_includes_200_chars_before_match_start(self):
+        """matched_text includes exactly 200 chars before the matched keyword.
+
+        'root cause' is the matched keyword. Place exactly 200 chars of 'a's
+        before it (with a space for word boundary), so the full prefix appears.
+        """
+        # 199 'a's + space = 200 chars; 'root cause' starts at position 200
+        prefix = "a" * 199 + " "
+        text = prefix + "root cause was a missing import"
+        messages = [self._make_assistant(text)]
+        hits = snc.scan_heuristics(messages)
+        debug_hits = [h for h in hits if h["trigger"] == "debug-root-cause"]
+        assert len(debug_hits) == 1
+        matched = debug_hits[0]["matched_text"]
+        # All 199 'a's should be present (match.start()=200, window starts at 0)
+        assert "a" * 199 in matched
+
+    def test_context_includes_200_chars_after_match_end(self):
+        """matched_text includes up to 200 chars after the matched keyword ends.
+
+        'root cause' ends at position 10. With +200 window, chars up to
+        position 210 are included. Place 200 chars after the keyword.
+        """
+        # keyword + space + 199 'b's = 200 chars after match.start()
+        # match.end()=10, so end=210; 'b's start at 11, run to 210 -> 199 b's
+        text = "root cause " + "b" * 199
+        messages = [self._make_assistant(text)]
+        hits = snc.scan_heuristics(messages)
+        debug_hits = [h for h in hits if h["trigger"] == "debug-root-cause"]
+        assert len(debug_hits) == 1
+        matched = debug_hits[0]["matched_text"]
+        assert "b" * 199 in matched
+
+    def test_prefix_beyond_200_chars_from_match_is_excluded(self):
+        """Text more than 200 chars before match.start() is not included.
+
+        Place a unique sentinel string exactly 202 chars before the keyword.
+        With ±200 window, the sentinel is outside the window and must not appear
+        in matched_text.
+        """
+        # sentinel (5 chars) + filler (197 chars) + space + keyword
+        # match.start() = 203; window start = max(0, 203-200) = 3
+        # sentinel occupies positions 0..4, which is BEFORE position 3 after window start
+        sentinel = "ZZZZ "
+        filler = "a" * 197 + " "
+        text = sentinel + filler + "root cause was a missing null check"
+        messages = [self._make_assistant(text)]
+        hits = snc.scan_heuristics(messages)
+        debug_hits = [h for h in hits if h["trigger"] == "debug-root-cause"]
+        assert len(debug_hits) == 1
+        matched = debug_hits[0]["matched_text"]
+        # The sentinel is >200 chars before match.start() and must be excluded
+        assert "ZZZZ" not in matched
+        # But content within 200 chars of match.start() should be present
+        assert "a" * 100 in matched
+
+    def test_suffix_beyond_200_chars_from_match_end_is_excluded(self):
+        """Text more than 200 chars after match.end() is not included.
+
+        With 'root cause' at start (match.end()~=10) and 300 'b's after,
+        the window ends at 210 — so only ~199 of the 300 'b's appear.
+        """
+        # match.end()=10; end = min(10+200=210, total); 'b's from pos 11 to 210 = 199 b's
+        text = "root cause " + "b" * 300
+        messages = [self._make_assistant(text)]
+        hits = snc.scan_heuristics(messages)
+        debug_hits = [h for h in hits if h["trigger"] == "debug-root-cause"]
+        assert len(debug_hits) == 1
+        matched = debug_hits[0]["matched_text"]
+        assert "b" * 200 not in matched
+
+    def test_short_text_returns_full_context(self):
+        """When full text is shorter than ±200 chars, the entire text is returned."""
+        text = "We chose SQLite because it fits in memory."
+        messages = [self._make_assistant(text)]
+        hits = snc.scan_heuristics(messages)
+        design_hits = [h for h in hits if h["trigger"] == "design-decision"]
+        assert len(design_hits) == 1
+        matched = design_hits[0]["matched_text"]
+        assert matched == text.strip()
+
+    def test_old_60_char_boundary_is_no_longer_the_limit(self):
+        """Text between 61 and 200 chars from the match is now included (was excluded at ±60).
+
+        With 150 'a's before the keyword, the old ±60 window would have included
+        only 60 of them. The new ±200 window includes all 150.
+        """
+        # 149 'a's + space = 150 chars; match.start()=150, old window start=90, new=0
+        prefix = "a" * 149 + " "
+        text = prefix + "root cause was a missing import"
+        messages = [self._make_assistant(text)]
+        hits = snc.scan_heuristics(messages)
+        debug_hits = [h for h in hits if h["trigger"] == "debug-root-cause"]
+        assert len(debug_hits) == 1
+        matched = debug_hits[0]["matched_text"]
+        # With ±60 only 60 a's would appear; with ±200 all 149 appear
+        assert "a" * 149 in matched
+
+    def test_user_pattern_context_window_is_also_200(self):
+        """USER_PATTERNS (user-correction) uses the same ±200 char context window.
+
+        Place 150 'a's before the user-correction keyword to verify the window
+        extends far enough to include text beyond the old ±60 limit.
+        """
+        # USER_CORRECTION_RE matches 'no' at word boundary
+        # 149 'a's + space + 'no, ...' -> match.start()=150, window start=0
+        prefix = "a" * 149 + " "
+        text = prefix + "no, that is not correct, use the other approach"
+        messages = [self._make_user(text)]
+        hits = snc.scan_heuristics(messages)
+        correction_hits = [h for h in hits if h["trigger"] == "user-correction"]
+        assert len(correction_hits) == 1
+        matched = correction_hits[0]["matched_text"]
+        # All 149 'a's should appear — they are within 200 chars of match.start()
+        assert "a" * 149 in matched
+
+
+# ---------------------------------------------------------------------------
 # Test: load_config() — missing file, partial fields, invalid values
 # ---------------------------------------------------------------------------
 

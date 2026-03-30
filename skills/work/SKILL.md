@@ -148,6 +148,7 @@ When a subcommand needs a slug but the user provided a name, resolve it:
 4. **Tag match** — matches a tag value
 5. **Branch match** — current git branch matches a work item's `branches`
 6. **Recency** — most recently updated active item
-7. **Ambiguous** — list candidates, ask user to pick
+7. **Archive fallback** — if all active steps above fail, check the `"archived"` array from `lore work list --json --all` and retry steps 1–3 against archived items; tag result as `[archived]` in output
+8. **Ambiguous** — list candidates, ask user to pick
 
-Read `_work/_index.json` for resolution. Scripts accept exact slugs only.
+Read `_work/_index.json` for active resolution. Scripts accept exact slugs only.

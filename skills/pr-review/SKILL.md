@@ -147,7 +147,7 @@ Apply the Adaptive Lens Selection criteria table from the review protocol. This 
 
 **If mode is `--thorough`:** Select all lenses. Skip signal matching.
 
-**Otherwise:** Start with the default set (Correctness + Regressions + Test Quality), then:
+**Otherwise:** Start with the default set (Correctness + Regressions + Test Quality + Interface Clarity), then:
 1. For each remaining lens (Security, Blast Radius), check trigger signals against the PR's changed files and diff content
 2. If `AI_INVOLVED=true`: force-add Correctness and Security regardless of signals
 3. If risk tier is High: force-add Security regardless of signals
@@ -170,6 +170,7 @@ Change types detected: [list]
 | Lens | Reason |
 |------|--------|
 | Correctness | Default selection |
+| Interface Clarity | Default selection |
 | Security | AI involvement flag + auth changes detected |
 | Regressions | Default selection |
 | Test Quality | Default selection |
@@ -274,6 +275,7 @@ For each selected lens, read its Step 3 methodology from the corresponding SKILL
 | Lens | Source | Step 3 heading |
 |------|--------|---------------|
 | Correctness | `skills/pr-correctness/SKILL.md` | Correctness Analysis |
+| Interface Clarity | `skills/pr-interface-clarity/SKILL.md` | Interface Clarity Analysis |
 | Security | `~/.lore/claude-md/70-review-protocol.md` | Security Lens Methodology |
 | Blast Radius | `skills/pr-blast-radius/SKILL.md` | Blast Radius Analysis |
 | Regressions | `skills/pr-regressions/SKILL.md` | Regressions Analysis |
@@ -568,9 +570,9 @@ Present findings grouped by severity. Within each group, compound findings appea
 
 After presenting findings, offer actions:
 
-- **Post to GitHub:** Post findings as a batched PR review via `post-review.sh`. The user can approve, edit, or remove individual findings before posting.
-- **Create work item:** Proceed to Step 10 for a gated work item.
-- **Done:** End the review without posting.
+- **Post to GitHub:** Post findings as a batched PR review via `post-review.sh`. The user can approve, edit, or remove individual findings before posting. Then proceed to Step 11.
+- **Create work item:** Proceed to Step 10 for a gated work item, then Step 11.
+- **Done:** Skip to Step 11 (Capture Insights).
 
 If posting to GitHub:
 
@@ -592,7 +594,7 @@ This organizes findings into actionable categories (Agreed Changes / Verificatio
 [Y/n]
 ```
 
-If the user declines, skip to Step 10d (capture only).
+If the user declines, skip to Step 11 (Capture Insights).
 
 ### 10b. Create work item
 
@@ -642,12 +644,14 @@ Default readiness: `spec-needed`. Override to `implement-ready` only when ALL:
 - All items are trivially obvious fixes verifiable from the diff alone
 - No item touches cross-boundary invariants or shared interfaces
 
-### 10d. Capture
+## Step 11: Capture Insights
+
+This step always runs — after Step 9c (Post to GitHub, Create work item, or Done) and after Step 10 completes (if invoked).
 
 Invoke `/remember` with review-scoped constraints:
 
 ```
-/remember Holistic review of PR #<N> — capture: architectural insights discovered across lenses, cross-lens convergence patterns, convention patterns observed, non-obvious design decisions. Use confidence: medium for reviewer observations. Skip: findings specific to this PR, style opinions, lens-specific methodology notes.
+/remember Holistic review of PR #<N> — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered (why the architecture is this way, what constraints drove decisions), cross-lens convergence patterns (areas where multiple lenses flagged the same concern), convention patterns observed across the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR, style opinions, lens-specific methodology notes.
 ```
 
 ## Error Handling

@@ -186,7 +186,8 @@ cat > "$WORK_DIR/$SLUG/_meta.json" << METAEOF
   "pr": "$PR",
   "created": "$TIMESTAMP",
   "updated": "$TIMESTAMP",
-  "related_knowledge": []
+  "related_knowledge": [],
+  "related_work": []
 }
 METAEOF
 

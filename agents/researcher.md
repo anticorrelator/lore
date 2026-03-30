@@ -56,11 +56,23 @@ Every report must use this structure:
   because X", "this pattern exists to prevent Y").
   (3) Structural footprint — for key files investigated: its role in one
   phrase, what connects to or through it, what constrains changes here.
+  Sub-target: design contracts — intended usage, composition, and extension
+  models: how components are designed to work together, how subsystems are
+  meant to be extended, what usage patterns maintain coherence. Look for:
+  repeated structural patterns across files (extension model),
+  registration/factory mechanisms (intended extension point), pipeline
+  ordering (compositional protocol), guard mechanisms enforcing usage
+  patterns.
   ✓ "All knowledge entries are resolved at query time, not write time"
   ✓ "The two-tier delivery exists to avoid context inflation at session start"
   ✓ "pk_search.py is the single query entry point — all retrieval paths
-     route through it regardless of source type"
-  ✗ "pk_resolve.py calls subprocess() with a 4000-char budget">
+     route through it regardless of source type; callers must not bypass it
+     to hit storage directly (guard mechanism)"
+  ✓ "All scripts source lib.sh before using slugify/resolve_knowledge_dir —
+     lib.sh is the portability contract; adding a new script means sourcing
+     lib.sh first (extension model)"
+  ✗ "pk_resolve.py calls subprocess() with a 4000-char budget"
+  ✗ "lib.sh defines slugify() using tr and sed"
 **Unknowns:** <anything unresolved or that needs further investigation>
 ```
 
@@ -77,7 +89,7 @@ Keep findings to 500-1000 characters. Facts over opinions.
 - **Observations** are the most valuable part of your report beyond the findings. Three first-class targets:
   - **System mechanisms:** how subsystems coordinate, what paths data flows through, what processes gate key operations — broad enough to shape a mental model before touching related code
   - **Design rationale:** why things are built the way they are — "this was chosen because X", "this pattern exists to prevent Y", trade-offs that shaped the current design
-  - **Structural footprint:** for key files investigated — its role in one phrase, what else connects to or through it, what constrains changes here. Report even when expected — builds an emergent architectural picture across investigation runs
+  - **Structural footprint:** for key files investigated — its role in one phrase, what else connects to or through it, what constrains changes here. Report even when expected — builds an emergent architectural picture across investigation runs. Sub-target: **design contracts** — intended usage, composition, and extension models: how components are designed to work together, how subsystems are meant to be extended, what usage patterns maintain coherence. Look for: repeated structural patterns across files (extension model), registration/factory mechanisms (intended extension point), pipeline ordering (compositional protocol), guard mechanisms enforcing usage patterns.
   - Also: contradictions between the investigation question's assumptions and actual system behavior
 - Send all reports via `SendMessage`:
   - `type`: `"message"`

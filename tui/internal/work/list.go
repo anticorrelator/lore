@@ -44,6 +44,16 @@ type ArchiveFinishedMsg struct {
 	Err error
 }
 
+// DeleteRequestMsg is sent when the user confirms a delete action.
+type DeleteRequestMsg struct {
+	Slug string
+}
+
+// DeleteFinishedMsg is sent when the delete command completes.
+type DeleteFinishedMsg struct {
+	Err error
+}
+
 // SpecStatusMsg is dispatched from main.go to update the list's spec indicator.
 // Done=true clears the indicator; otherwise sets specActiveSlug and specNeedsInput.
 type SpecStatusMsg struct {
@@ -84,10 +94,6 @@ type ListModel struct {
 	specNeedsInputSlugs map[string]bool // slugs with active input prompt
 	specDots            int
 	externalActiveSlugs map[string]bool // slugs with sessions from other TUI instances
-	confirmArchive      bool
-	pendingArchiveSlug  string
-	pendingArchiveTitle string
-	pendingUnarchive    bool
 	width               int
 	height              int
 	err                 error
@@ -172,29 +178,6 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 		m.externalActiveSlugs = msg.Slugs
 
 	case tea.KeyMsg:
-		// Confirm mode: intercept keys for the confirmation prompt
-		if m.confirmArchive {
-			switch msg.String() {
-			case "y", "enter":
-				slug := m.pendingArchiveSlug
-				unarchive := m.pendingUnarchive
-				m.confirmArchive = false
-				m.pendingArchiveSlug = ""
-				m.pendingArchiveTitle = ""
-				m.pendingUnarchive = false
-				return m, func() tea.Msg {
-					return ArchiveRequestMsg{Slug: slug, Unarchive: unarchive}
-				}
-			default:
-				// Any other key cancels (n, esc, etc.)
-				m.confirmArchive = false
-				m.pendingArchiveSlug = ""
-				m.pendingArchiveTitle = ""
-				m.pendingUnarchive = false
-			}
-			return m, nil
-		}
-
 		items := m.visibleItems()
 		switch msg.String() {
 		case "ctrl+a":
@@ -205,17 +188,6 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 				m.filterMode = FilterActive
 			}
 			m.cursor = 0
-		case "A":
-			if len(items) > 0 {
-				item := items[m.cursor]
-				m.confirmArchive = true
-				m.pendingArchiveSlug = item.Slug
-				m.pendingArchiveTitle = item.Title
-				if m.pendingArchiveTitle == "" {
-					m.pendingArchiveTitle = item.Slug
-				}
-				m.pendingUnarchive = m.filterMode == FilterArchived
-			}
 		case "j", "down":
 			if m.cursor < len(items)-1 {
 				m.cursor++
@@ -303,18 +275,6 @@ func (m ListModel) View() string {
 		content = m.viewCompact()
 	} else {
 		content = m.viewFull()
-	}
-
-	if m.confirmArchive {
-		action := "Archive"
-		if m.pendingUnarchive {
-			action = "Unarchive"
-		}
-		promptStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
-		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-		prompt := promptStyle.Render(fmt.Sprintf("%s \"%s\"?", action, m.pendingArchiveTitle)) +
-			dimStyle.Render(" [y]es [n]o")
-		content += "\n" + prompt
 	}
 
 	return content

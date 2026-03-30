@@ -423,18 +423,20 @@ class TestScoreEntry:
         fd = {"score": 1.0, "available": True, "commit_count": 15}
         bd = {"score": 0.0, "available": True, "total": 1, "broken": 0}
         drift_score, status, signals = score_entry(fd, bd, "high")
-        # No neighbor_drift or vocabulary_drift → w_conf gets 0.10+0.10=0.20
-        # w_fd=0.55, w_bd=0.25, w_conf=0.20 → total=1.0
-        # score = 0.55*1.0 + 0.25*0.0 + 0.20*0.0 = 0.55
-        assert drift_score == pytest.approx(0.55)
+        # No nd/vd/uf → w_conf gets 0.10+0.10=0.20
+        # w_fd=0.40, w_bd=0.25, w_uf=0, w_conf=0.20 → total=0.85 → normalize
+        # score = (0.40/0.85)*1.0 ≈ 0.4706
+        assert drift_score == pytest.approx(0.40 / 0.85)
         assert status == "aging"
 
     def test_broken_backlinks_cause_aging(self):
         fd = {"score": 0.0, "available": True, "commit_count": 0}
         bd = {"score": 1.0, "available": True, "total": 2, "broken": 1}
         drift_score, status, signals = score_entry(fd, bd, "high")
-        assert drift_score == pytest.approx(0.25)
-        assert status == "fresh"  # 0.25 < 0.3 threshold
+        # w_fd=0.40, w_bd=0.25, w_conf=0.20 → total=0.85 → normalize
+        # score = (0.25/0.85)*1.0 ≈ 0.2941
+        assert drift_score == pytest.approx(0.25 / 0.85)
+        assert status == "fresh"  # 0.2941 < 0.3 threshold
 
     def test_low_confidence_only(self):
         fd = {"score": 0.0, "available": False, "commit_count": 0}
@@ -448,15 +450,13 @@ class TestScoreEntry:
         fd = {"score": 0.5, "available": True, "commit_count": 5}
         bd = {"score": 0.0, "available": False, "total": 0, "broken": 0}
         drift_score, status, signals = score_entry(fd, bd, "high")
-        # No neighbor_drift or vocabulary_drift → w_conf gets 0.10+0.10=0.20
-        # w_fd=0.55, w_bd=0, w_nd=0, w_vd=0, w_conf=0.20 → total=0.75 → normalize
-        # w_fd=0.55/0.75≈0.7333, w_conf=0.20/0.75≈0.2667
-        # score = (0.55/0.75)*0.5 + (0.20/0.75)*0.0 ≈ 0.3667
-        # Signals dict rounds weights to 4 decimal places
-        assert signals["file_drift"]["weight"] == pytest.approx(round(0.55 / 0.75, 4))
+        # No nd/vd/uf → w_conf gets 0.10+0.10=0.20
+        # w_fd=0.40, w_bd=0, w_conf=0.20 → total=0.60 → normalize
+        # w_fd=0.40/0.60≈0.6667, w_conf=0.20/0.60≈0.3333
+        # score = (0.40/0.60)*0.5 + (0.20/0.60)*0.0 ≈ 0.3333
+        assert signals["file_drift"]["weight"] == pytest.approx(round(0.40 / 0.60, 4))
         assert signals["backlink_drift"]["weight"] == 0.0
-        # drift_score uses full-precision weights
-        assert drift_score == pytest.approx((0.55 / 0.75) * 0.5)
+        assert drift_score == pytest.approx((0.40 / 0.60) * 0.5)
         assert status == "aging"
 
     def test_weight_redistribution_no_file_drift(self):
@@ -504,10 +504,11 @@ class TestScoreEntryVocabularyDrift:
         nd = {"score": 0.0, "available": True, "detail": {}}
         vd = {"score": 1.0, "available": True, "detail": {"top_k_terms": 10, "absent_terms": 10}}
         drift_score, status, signals = score_entry(fd, bd, "high", nd, vd)
-        # All signals available: fd=0.55, bd=0.25, nd=0.10, vd=0.10, conf=0.0 → total=1.0
-        # score = 0.55*0 + 0.25*0 + 0.10*0 + 0.10*1.0 + 0*0 = 0.10
-        assert drift_score == pytest.approx(0.10)
-        assert signals["vocabulary_drift"]["weight"] == pytest.approx(0.10)
+        # 4 signals available (no uf): fd=0.40, bd=0.25, nd=0.10, vd=0.10, conf=0.0 → total=0.85 → normalize
+        # vd_weight = 0.10/0.85 ≈ 0.1176
+        # score = (0.10/0.85)*1.0 ≈ 0.1176
+        assert drift_score == pytest.approx(0.10 / 0.85)
+        assert signals["vocabulary_drift"]["weight"] == pytest.approx(round(0.10 / 0.85, 4))
         assert signals["vocabulary_drift"]["available"] is True
 
     def test_vocabulary_drift_unavailable_fallback_to_confidence(self):
@@ -517,15 +518,15 @@ class TestScoreEntryVocabularyDrift:
         nd = {"score": 0.0, "available": True, "detail": {}}
         vd = {"score": 0.0, "available": False, "detail": {}}
         drift_score, status, signals = score_entry(fd, bd, "low", nd, vd)
-        # vd unavailable → w_conf gets 0.10
-        # fd=0.55, bd=0.25, nd=0.10, vd=0, conf=0.10 → total=1.0
-        # score = 0.55*0 + 0.25*0 + 0.10*0 + 0*0 + 0.10*1.0 = 0.10
-        assert drift_score == pytest.approx(0.10)
+        # vd unavailable → w_conf gets 0.10. No uf.
+        # fd=0.40, bd=0.25, nd=0.10, vd=0, uf=0, conf=0.10 → total=0.85 → normalize
+        # score = (0.10/0.85)*1.0 ≈ 0.1176
+        assert drift_score == pytest.approx(0.10 / 0.85)
         assert signals["vocabulary_drift"]["weight"] == 0.0
-        assert signals["confidence"]["weight"] == pytest.approx(0.10)
+        assert signals["confidence"]["weight"] == pytest.approx(round(0.10 / 0.85, 4))
 
     def test_all_four_signals_available_weights_sum_to_one(self):
-        """When all signals are available, weights sum to 1.0."""
+        """When all original signals are available (no uf), weights sum to 1.0."""
         fd = {"score": 0.5, "available": True, "commit_count": 5}
         bd = {"score": 0.5, "available": True, "total": 2, "broken": 1}
         nd = {"score": 0.5, "available": True, "detail": {}}
@@ -533,9 +534,9 @@ class TestScoreEntryVocabularyDrift:
         drift_score, status, signals = score_entry(fd, bd, "high", nd, vd)
         total_weight = sum(
             signals[s]["weight"]
-            for s in ("file_drift", "backlink_drift", "neighbor_drift", "vocabulary_drift", "confidence")
+            for s in ("file_drift", "backlink_drift", "neighbor_drift", "vocabulary_drift", "usage_freshness", "confidence")
         )
-        assert total_weight == pytest.approx(1.0)
+        assert total_weight == pytest.approx(1.0, abs=0.001)
 
     def test_high_vocabulary_drift_with_other_signals(self):
         """Vocabulary drift should combine with other signals."""
@@ -544,7 +545,8 @@ class TestScoreEntryVocabularyDrift:
         nd = {"score": 1.0, "available": True, "detail": {}}
         vd = {"score": 1.0, "available": True, "detail": {"top_k_terms": 10, "absent_terms": 10}}
         drift_score, status, signals = score_entry(fd, bd, "high", nd, vd)
-        # All signals at 1.0: 0.55*1 + 0.25*1 + 0.10*1 + 0.10*1 + 0*0 = 1.0
+        # All signals at 1.0 (no uf): normalized weights still sum to 1.0
+        # score = sum of all normalized weights * 1.0 = 1.0
         assert drift_score == pytest.approx(1.0)
         assert status == "stale"
 
@@ -624,7 +626,7 @@ class TestRunScanIntegration:
 
             assert "signals" in entry, f"Missing signals in {entry['file']}"
             signals = entry["signals"]
-            for signal_name in ("file_drift", "backlink_drift", "vocabulary_drift", "confidence"):
+            for signal_name in ("file_drift", "backlink_drift", "vocabulary_drift", "usage_freshness", "confidence"):
                 assert signal_name in signals, f"Missing signal {signal_name} in {entry['file']}"
 
     def test_entry_status_values_valid(self):
@@ -677,10 +679,203 @@ class TestRunScanIntegration:
                 + signals["backlink_drift"]["weight"]
                 + signals["neighbor_drift"]["weight"]
                 + signals["vocabulary_drift"]["weight"]
+                + signals["usage_freshness"]["weight"]
                 + signals["confidence"]["weight"]
             )
             # Weights are individually rounded to 4 decimal places, so the sum
-            # may have small rounding error (up to 5 * 0.00005 = 0.00025)
+            # may have small rounding error (up to 6 * 0.00005 = 0.0003)
             assert total_weight == pytest.approx(1.0, abs=0.001), (
                 f"Weights don't sum to 1.0 for {entry['file']}: {total_weight}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests: compute_usage_freshness
+# ---------------------------------------------------------------------------
+
+compute_usage_freshness = staleness_scan.compute_usage_freshness
+
+
+class TestComputeUsageFreshness:
+    """Unit tests for compute_usage_freshness()."""
+
+    def test_missing_report_returns_unavailable(self, tmp_path):
+        """Missing usage-report.json → available=False."""
+        kd = tmp_path / "knowledge"
+        kd.mkdir()
+        (kd / "_meta").mkdir()
+        result = compute_usage_freshness(str(kd))
+        assert result["available"] is False
+        assert result["scores"] == {}
+
+    def test_empty_entry_access_returns_unavailable(self, tmp_path):
+        """Empty entry_access dict → available=False."""
+        kd = tmp_path / "knowledge"
+        kd.mkdir()
+        meta = kd / "_meta"
+        meta.mkdir()
+        import json
+        (meta / "usage-report.json").write_text(json.dumps({"entry_access": {}}))
+        result = compute_usage_freshness(str(kd))
+        assert result["available"] is False
+
+    def test_legacy_search_appearances_only_returns_unavailable(self, tmp_path):
+        """Report with only search_appearances (no retrieval_count) → available=False."""
+        kd = tmp_path / "knowledge"
+        kd.mkdir()
+        meta = kd / "_meta"
+        meta.mkdir()
+        import json
+        report = {"entry_access": {
+            "arch/entry.md": {"search_appearances": 1, "total_accesses": 1},
+        }}
+        (meta / "usage-report.json").write_text(json.dumps(report))
+        result = compute_usage_freshness(str(kd))
+        assert result["available"] is False
+
+    def test_zero_accesses_score_one(self, tmp_path):
+        """Entries with retrieval_count=0 get freshness score 1.0 (no dampening)."""
+        kd = tmp_path / "knowledge"
+        kd.mkdir()
+        meta = kd / "_meta"
+        meta.mkdir()
+        import json
+        report = {"entry_access": {
+            "conventions/entry-a.md": {"retrieval_count": 0},
+            "conventions/entry-b.md": {"retrieval_count": 5},
+        }}
+        (meta / "usage-report.json").write_text(json.dumps(report))
+        result = compute_usage_freshness(str(kd))
+        assert result["available"] is True
+        assert result["scores"]["conventions/entry-a.md"] == 1.0
+
+    def test_high_accesses_near_zero(self, tmp_path):
+        """Entries at or above p75 get freshness score near 0.0 (full dampening)."""
+        kd = tmp_path / "knowledge"
+        kd.mkdir()
+        meta = kd / "_meta"
+        meta.mkdir()
+        import json
+        # Create entries with varied counts — p75 should be around 8
+        report = {"entry_access": {
+            f"entry-{i}.md": {"retrieval_count": i}
+            for i in range(11)  # 0,1,2,...,10
+        }}
+        (meta / "usage-report.json").write_text(json.dumps(report))
+        result = compute_usage_freshness(str(kd))
+        assert result["available"] is True
+        # Entry with count=10 (above p75) should score 0.0
+        assert result["scores"]["entry-10.md"] == 0.0
+
+    def test_moderate_accesses_mid_range(self, tmp_path):
+        """Entries with moderate counts get mid-range scores."""
+        kd = tmp_path / "knowledge"
+        kd.mkdir()
+        meta = kd / "_meta"
+        meta.mkdir()
+        import json
+        report = {"entry_access": {
+            "entry-low.md": {"retrieval_count": 0},
+            "entry-mid.md": {"retrieval_count": 5},
+            "entry-high.md": {"retrieval_count": 10},
+        }}
+        (meta / "usage-report.json").write_text(json.dumps(report))
+        result = compute_usage_freshness(str(kd))
+        assert result["available"] is True
+        mid_score = result["scores"]["entry-mid.md"]
+        assert 0.0 < mid_score < 1.0, f"Mid-range score should be between 0 and 1, got {mid_score}"
+
+    def test_malformed_json_returns_unavailable(self, tmp_path):
+        """Malformed JSON file → available=False."""
+        kd = tmp_path / "knowledge"
+        kd.mkdir()
+        meta = kd / "_meta"
+        meta.mkdir()
+        (meta / "usage-report.json").write_text("not valid json {{{")
+        result = compute_usage_freshness(str(kd))
+        assert result["available"] is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: score_entry with usage_freshness signal
+# ---------------------------------------------------------------------------
+
+class TestScoreEntryUsageFreshness:
+    """Tests for score_entry() with the usage_freshness signal."""
+
+    def test_usage_freshness_dampens_drift(self):
+        """Active usage (score=0.0) should reduce overall drift score."""
+        fd = {"score": 1.0, "available": True, "commit_count": 15}
+        bd = {"score": 0.0, "available": True, "total": 1, "broken": 0}
+        uf = {"score": 0.0, "available": True}  # heavily used → dampens
+        score_with_uf, _, _ = score_entry(fd, bd, "high", usage_freshness=uf)
+        score_without_uf, _, _ = score_entry(fd, bd, "high")
+        assert score_with_uf < score_without_uf, (
+            f"Usage freshness should dampen: {score_with_uf} should be < {score_without_uf}"
+        )
+
+    def test_no_usage_no_dampening(self):
+        """Zero usage (score=1.0) should not dampen drift — all signals at max."""
+        fd = {"score": 1.0, "available": True, "commit_count": 15}
+        bd = {"score": 1.0, "available": True, "total": 2, "broken": 2}
+        nd = {"score": 1.0, "available": True, "detail": {}}
+        vd = {"score": 1.0, "available": True, "detail": {}}
+        uf = {"score": 1.0, "available": True}  # never used → no dampening
+        score_uf, _, _ = score_entry(fd, bd, "high", nd, vd, usage_freshness=uf)
+        # All 5 signals at 1.0, conf=0.0 for "high": sum = 1.0
+        assert score_uf == pytest.approx(1.0)
+
+    def test_usage_freshness_unavailable_redistributes(self):
+        """When uf unavailable, its weight redistributes to other signals."""
+        fd = {"score": 0.5, "available": True, "commit_count": 5}
+        bd = {"score": 0.5, "available": True, "total": 2, "broken": 1}
+        nd = {"score": 0.5, "available": True, "detail": {}}
+        vd = {"score": 0.5, "available": True, "detail": {}}
+        uf_unavail = {"score": 0.0, "available": False}
+        _, _, signals = score_entry(fd, bd, "high", nd, vd, usage_freshness=uf_unavail)
+        assert signals["usage_freshness"]["weight"] == 0.0
+        assert signals["usage_freshness"]["available"] is False
+        # Other weights should sum to 1.0 via redistribution
+        total = sum(
+            signals[s]["weight"]
+            for s in ("file_drift", "backlink_drift", "neighbor_drift", "vocabulary_drift", "usage_freshness", "confidence")
+        )
+        assert total == pytest.approx(1.0, abs=0.001)
+
+    def test_all_five_signals_available_weights_sum(self):
+        """With all 5 signals available, weights sum to 1.0."""
+        fd = {"score": 0.3, "available": True, "commit_count": 3}
+        bd = {"score": 0.0, "available": True, "total": 1, "broken": 0}
+        nd = {"score": 0.2, "available": True, "detail": {}}
+        vd = {"score": 0.1, "available": True, "detail": {}}
+        uf = {"score": 0.5, "available": True}
+        _, _, signals = score_entry(fd, bd, "high", nd, vd, usage_freshness=uf)
+        total = sum(
+            signals[s]["weight"]
+            for s in ("file_drift", "backlink_drift", "neighbor_drift", "vocabulary_drift", "usage_freshness", "confidence")
+        )
+        assert total == pytest.approx(1.0, abs=0.001)
+        # Verify usage_freshness has its base weight (all signals available → no redistribution)
+        assert signals["usage_freshness"]["weight"] == pytest.approx(0.15)
+        assert signals["usage_freshness"]["available"] is True
+
+    def test_usage_freshness_weight_in_signals_output(self):
+        """usage_freshness signal dict has expected keys in output."""
+        fd = {"score": 0.0, "available": True, "commit_count": 0}
+        bd = {"score": 0.0, "available": True, "total": 1, "broken": 0}
+        uf = {"score": 0.3, "available": True}
+        _, _, signals = score_entry(fd, bd, "high", usage_freshness=uf)
+        uf_signal = signals["usage_freshness"]
+        assert "weight" in uf_signal
+        assert "score" in uf_signal
+        assert "available" in uf_signal
+        assert uf_signal["score"] == 0.3
+        assert uf_signal["available"] is True
+
+    def test_usage_freshness_none_treated_as_unavailable(self):
+        """Passing None for usage_freshness is treated as unavailable."""
+        fd = {"score": 0.0, "available": True, "commit_count": 0}
+        bd = {"score": 0.0, "available": True, "total": 1, "broken": 0}
+        _, _, signals = score_entry(fd, bd, "high", usage_freshness=None)
+        assert signals["usage_freshness"]["available"] is False
+        assert signals["usage_freshness"]["weight"] == 0.0

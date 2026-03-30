@@ -31,17 +31,24 @@ CATEGORY_DIRS = {"abstractions", "architecture", "conventions", "gotchas",
 # Log Parser
 # ---------------------------------------------------------------------------
 
-def parse_retrieval_log(log_path: str) -> tuple[list[dict], list[dict]]:
-    """Parse retrieval-log.jsonl into session-start events and search events.
+def parse_retrieval_log(
+    log_path: str,
+) -> tuple[list[dict], list[dict], dict[str, int]]:
+    """Parse retrieval-log.jsonl into session-start events, search events,
+    and per-entry load counts.
 
     Returns:
-        Tuple of (session_events, search_events).
+        Tuple of (session_events, search_events, per_entry_counts).
+        per_entry_counts maps relative entry path → total appearances across
+        all session-load and prefetch events that include a `loaded_paths`
+        array.
     """
     session_events: list[dict] = []
     search_events: list[dict] = []
+    per_entry_counts: dict[str, int] = defaultdict(int)
 
     if not os.path.isfile(log_path):
-        return session_events, search_events
+        return session_events, search_events, dict(per_entry_counts)
 
     with open(log_path, "r", encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
@@ -53,13 +60,22 @@ def parse_retrieval_log(log_path: str) -> tuple[list[dict], list[dict]]:
             except json.JSONDecodeError:
                 continue
 
-            if record.get("event") == "search":
+            event_type = record.get("event")
+            if event_type == "search":
                 search_events.append(record)
+            elif event_type == "prefetch":
+                # Prefetch events emitted by prefetch-knowledge.sh
+                for path in record.get("loaded_paths", []):
+                    if path:
+                        per_entry_counts[path] += 1
             elif "budget_used" in record:
                 # Session-start load event (no explicit "event" field)
                 session_events.append(record)
+                for path in record.get("loaded_paths", []):
+                    if path:
+                        per_entry_counts[path] += 1
 
-    return session_events, search_events
+    return session_events, search_events, dict(per_entry_counts)
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +136,7 @@ def analyze_usage(
         Usage report dict.
     """
     log_path = os.path.join(knowledge_dir, "_meta", "retrieval-log.jsonl")
-    session_events, search_events = parse_retrieval_log(log_path)
+    session_events, search_events, per_entry_counts = parse_retrieval_log(log_path)
 
     # Collect all known entries from manifest
     manifest_entries = collect_manifest_entries(knowledge_dir)
@@ -135,32 +151,12 @@ def analyze_usage(
         all_entry_paths.add(path)
 
     # --- Per-entry access stats ---
-    # Search events reference entries via file_path (relative to knowledge_dir)
-    # and heading. In v2 format, each search result's file_path points to an
-    # entry file like "conventions/script-first-skill-design.md".
     entry_stats: dict[str, dict] = {}
     for path in sorted(all_entry_paths):
         entry_stats[path] = {
             "path": path,
-            "search_appearances": 0,
-            "last_search_appearance": None,
-            "queries_matched": [],
+            "retrieval_count": 0,
         }
-
-    # Count search result appearances per entry
-    # Search events log the query and result_count, but don't list individual
-    # result paths. However, we can re-derive which entries match by checking
-    # if the search event's source_type includes knowledge entries.
-    #
-    # Since the log only records aggregate search metadata (query + count),
-    # we approximate by running each unique query against the index to find
-    # which entries it matches. For efficiency, we batch unique queries.
-    #
-    # Alternative approach: count based on query terms appearing in entry
-    # titles/content. But the most accurate approach uses the FTS5 index.
-
-    # For now, use a simpler heuristic: track unique queries and their
-    # timestamps. We'll note this limitation in the report.
 
     # --- Session stats ---
     total_sessions = len(session_events)
@@ -219,51 +215,48 @@ def analyze_usage(
         if search_latencies else 0.0
     )
 
-    # --- Cross-reference: find entries with zero search appearances ---
-    # Since the retrieval log doesn't record per-entry access for session loads
-    # or search results, we identify "cold" entries as those that have never
-    # appeared in any search result. We use the FTS5 index for this.
-    #
-    # Strategy: replay each unique search query and track which entries appear.
-    accessed_entries: set[str] = set()
+    # --- Cross-reference: per-entry retrieval counts ---
+    # Primary: use per_entry_counts from loaded_paths arrays in the log.
+    # Fallback: FTS5 search-replay when no loaded_paths data exists (old logs).
 
-    try:
-        # Import the search module from the same directory
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        sys.path.insert(0, script_dir)
-        from pk_search import Searcher  # noqa: E402
+    if per_entry_counts:
+        # Direct lookup from log — real frequency counts
+        for path in entry_stats:
+            entry_stats[path]["retrieval_count"] = per_entry_counts.get(path, 0)
+    else:
+        # Fallback: replay each unique search query via FTS5 index to approximate
+        # which entries were ever accessed (binary, not frequency).
+        accessed_entries: set[str] = set()
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            sys.path.insert(0, script_dir)
+            from pk_search import Searcher  # noqa: E402
 
-        searcher = Searcher(knowledge_dir)
-        searcher._ensure_index()
+            searcher = Searcher(knowledge_dir)
+            searcher._ensure_index()
 
-        for query in query_counts:
-            try:
-                results = searcher.search(
-                    query=query,
-                    limit=50,  # generous limit to capture all appearances
-                    source_type="knowledge",
-                )
-                for r in results:
-                    fp = r.get("file_path", "")
-                    accessed_entries.add(fp)
-            except Exception:
-                continue
-    except ImportError:
-        # pk_search not available — skip cross-reference
-        pass
+            for query in query_counts:
+                try:
+                    results = searcher.search(
+                        query=query,
+                        limit=50,
+                        source_type="knowledge",
+                    )
+                    for r in results:
+                        fp = r.get("file_path", "")
+                        accessed_entries.add(fp)
+                except Exception:
+                    continue
+        except ImportError:
+            pass
 
-    # Update entry stats with access info
-    for path in entry_stats:
-        if path in accessed_entries:
-            entry_stats[path]["search_appearances"] = 1  # at least once
-            # We don't have exact counts without per-result logging
-        else:
-            entry_stats[path]["search_appearances"] = 0
+        for path in entry_stats:
+            entry_stats[path]["retrieval_count"] = 1 if path in accessed_entries else 0
 
-    # Cold entries: never appeared in any search result
+    # Cold entries: retrieval_count at or below threshold
     cold_entries = [
         path for path, stats in entry_stats.items()
-        if stats["search_appearances"] <= cold_threshold
+        if stats["retrieval_count"] <= cold_threshold
     ]
 
     # --- Build report ---
@@ -288,7 +281,7 @@ def analyze_usage(
         "cold_entries": sorted(cold_entries),
         "entry_access": {
             path: {
-                "search_appearances": stats["search_appearances"],
+                "retrieval_count": stats["retrieval_count"],
             }
             for path, stats in sorted(entry_stats.items())
         },

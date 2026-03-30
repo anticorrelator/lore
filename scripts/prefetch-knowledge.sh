@@ -99,6 +99,7 @@ export _PK_RESULTS="$RESULTS"
 export _PK_EXCLUDE_BACKLINKS="$EXCLUDE_BACKLINKS"
 export _PK_SCRIPT_DIR="$SCRIPT_DIR"
 python3 - "$KNOWLEDGE_DIR" "$FORMAT" "$QUERY" "$LORE_SEARCH" <<'PYEOF'
+import datetime
 import importlib.util
 import json
 import os
@@ -121,6 +122,20 @@ results = json.loads(os.environ["_PK_RESULTS"])
 
 if not results:
     sys.exit(0)
+
+
+def _log_prefetch(served_results):
+    """Append a prefetch event to retrieval-log.jsonl."""
+    log_path = os.path.join(knowledge_dir, "_meta", "retrieval-log.jsonl")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    loaded_paths = [r["file_path"] for r in served_results if r.get("file_path")]
+    log_line = json.dumps({"timestamp": ts, "event": "prefetch", "loaded_paths": loaded_paths})
+    try:
+        with open(log_path, "a") as _lf:
+            _lf.write(log_line + "\n")
+    except OSError:
+        pass
 
 
 # --- Load see-also data from concordance_results ---
@@ -236,6 +251,7 @@ if exclude_raw:
                 filtered.append(r)
         results = filtered
     if not results:
+        _log_prefetch(results)
         sys.exit(0)
 
 
@@ -249,6 +265,7 @@ if fmt == "summary":
             snippet += "..."
         score = r.get("score", 0)
         print(f'- **{r["heading"]}** ({r["file_path"]}, score: {score}): {snippet}')
+    _log_prefetch(results)
     sys.exit(0)
 
 # prompt format — resolve each result to full content
@@ -297,4 +314,6 @@ for r in results:
         print(snippet)
         if sa_line:
             print(sa_line)
+
+_log_prefetch(results)
 PYEOF

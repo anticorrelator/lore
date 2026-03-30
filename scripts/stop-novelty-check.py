@@ -329,9 +329,9 @@ def scan_heuristics(messages):
             for label, pattern in HEURISTIC_PATTERNS:
                 match = pattern.search(full_text)
                 if match:
-                    # Extract surrounding context (up to 120 chars around match)
-                    start = max(0, match.start() - 60)
-                    end = min(len(full_text), match.end() + 60)
+                    # Extract surrounding context (up to 400 chars around match)
+                    start = max(0, match.start() - 200)
+                    end = min(len(full_text), match.end() + 200)
                     context = full_text[start:end].strip()
                     hits.append({
                         "index": msg["index"],
@@ -348,8 +348,8 @@ def scan_heuristics(messages):
             for label, pattern in USER_PATTERNS:
                 match = pattern.search(full_text)
                 if match:
-                    start = max(0, match.start() - 60)
-                    end = min(len(full_text), match.end() + 60)
+                    start = max(0, match.start() - 200)
+                    end = min(len(full_text), match.end() + 200)
                     context = full_text[start:end].strip()
                     hits.append({
                         "index": msg["index"],

@@ -69,12 +69,14 @@ Subcommands:
   show      Show a work item's full context
   set       Set metadata fields (issue, pr) on a work item
   archive   Archive a completed work item
+  delete    Permanently delete a work item
   unarchive Restore an archived work item
   search    Search across work items
   tasks        Generate tasks from a plan
   load-tasks   Validate tasks.json and output tasks as structured text (for /implement)
   regen-tasks  Regenerate tasks.json from plan.md
   check        Check off a plan task
+  relate       Add or remove related work item links
   heal         Detect and fix work structure issues
   ai           Create work items from a natural-language prompt (headless Claude)
 
@@ -575,6 +577,9 @@ cmd_work() {
     archive)
       "$SCRIPTS_DIR/archive-work.sh" "$@"
       ;;
+    delete)
+      "$SCRIPTS_DIR/delete-work.sh" "$@"
+      ;;
     unarchive)
       "$SCRIPTS_DIR/unarchive-work.sh" "$@"
       ;;
@@ -597,6 +602,9 @@ cmd_work() {
       ;;
     heal)
       "$SCRIPTS_DIR/heal-work.sh" "$@"
+      ;;
+    relate)
+      "$SCRIPTS_DIR/relate-work.sh" "$@"
       ;;
     ai)
       "$SCRIPTS_DIR/work-ai.sh" "$@"

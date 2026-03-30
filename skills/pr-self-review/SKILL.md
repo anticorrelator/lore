@@ -1,13 +1,13 @@
 ---
 name: pr-self-review
-description: "Author-calibrated self-review: parallel lens pre-scan (Blast Radius, Security, Test Quality, Correctness, Regressions) then confirmatory dialog to disposition findings into a phased plan.md"
+description: "Author-calibrated self-review: parallel lens pre-scan (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity) then confirmatory dialog to disposition findings into a phased plan.md"
 user_invocable: true
 argument_description: "[PR_number_or_URL] [--skip-pre-scan] [focus context] — PR to self-review (or auto-detect from branch). --skip-pre-scan skips the lens team and uses heuristic dialog instead (useful for resuming, very small PRs, or targeted exploration). Optional focus context steers finding priority (e.g., '42 focus on error handling')"
 ---
 
 # /pr-self-review Skill
 
-Author-calibrated self-review combining structured analysis with interactive dialog. A parallel lens team (Blast Radius, Security, Test Quality, Correctness, Regressions) runs a pre-scan, then you and the user discuss each finding in a confirmatory dialog — assigning dispositions (action/accepted/deferred/open) rather than generating observations from scratch. Self-review blindness is structural when reviewing agent-generated code, so the lens team provides external analytical perspectives while the dialog forces genuine re-examination.
+Author-calibrated self-review combining structured analysis with interactive dialog. A parallel lens team (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity) runs a pre-scan, then you and the user discuss each finding in a confirmatory dialog — assigning dispositions (action/accepted/deferred/open) rather than generating observations from scratch. Self-review blindness is structural when reviewing agent-generated code, so the lens team provides external analytical perspectives while the dialog forces genuine re-examination.
 
 Since this is your own work, locally-scoped action items can be implement-ready. Findings with cross-boundary implications (especially from Blast Radius) get verification directives instead. This distinguishes it from `/pr-review` (reviewing someone else's code) and `/pr-revise` (addressing existing external feedback).
 
@@ -67,7 +67,7 @@ If the diff exceeds 400 LOC, append a size warning:
 Size: <N> LOC (large — consider --skip-pre-scan for targeted exploration)
 ```
 
-The default lens set for self-review is: **Blast Radius, Security, Test Quality, Correctness, Regressions**. Thematic is omitted — lens utility for self-review correlates inversely with reliance on inferring intent (the author already knows intent).
+The default lens set for self-review is: **Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity**. Thematic is omitted — lens utility for self-review correlates inversely with reliance on inferring intent (the author already knows intent). Interface Clarity is included — self-review blindness for clarity is strong; authors routinely miss unclear names, implicit preconditions, and poor call-site ergonomics in their own code.
 
 This is a soft gate — no explicit confirmation is required to proceed. If the user names lenses to add or remove, adjust the set. If they press Enter or continue the conversation, proceed with the displayed set.
 
@@ -132,6 +132,7 @@ For each selected lens, read its Step 3 methodology from the corresponding sourc
 | Test Quality | `skills/pr-test-quality/SKILL.md` | Test Quality Analysis |
 | Correctness | `skills/pr-correctness/SKILL.md` | Correctness Analysis |
 | Regressions | `skills/pr-regressions/SKILL.md` | Regressions Analysis |
+| Interface Clarity | `skills/pr-interface-clarity/SKILL.md` | Interface Clarity Analysis |
 
 Read each selected lens's Step 3 content. You will embed this verbatim in the agent task description.
 
@@ -185,7 +186,7 @@ Report back with your findings JSON when complete.
 
 ### Spawn agents
 
-Spawn one agent per selected lens in parallel using the assembled prompts. Maximum 5 concurrent agents. For diffs >400 LOC, write the diff to `/tmp/pr-self-review-<PR_NUMBER>.diff` before spawning so agents can read it.
+Spawn one agent per selected lens in parallel using the assembled prompts. Maximum 6 concurrent agents. For diffs >400 LOC, write the diff to `/tmp/pr-self-review-<PR_NUMBER>.diff` before spawning so agents can read it.
 
 ## Step 3c: Collect and Synthesize Lens Findings
 
@@ -525,7 +526,7 @@ Omit phase counts that are zero. Omit the work item section entirely if the no-a
 ## Step 7: Capture Insights
 
 ```
-/remember Self-review of PR #<N> (lens pre-scan + dialog) — capture: convention drift patterns found by lenses, cross-boundary invariants identified (especially from Blast Radius), architectural concerns surfaced during disposition dialog, design rationale clarified through discussion. Use confidence: medium (self-review blindness is structural — lens agents mitigate but don't eliminate confirmation bias in disposition decisions). Skip: obvious fixes, style issues, findings specific to this PR that don't generalize, findings dispositioned as accepted without novel reasoning.
+/remember Self-review of PR #<N> (lens pre-scan + dialog) — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered or clarified (why the architecture is this way, what constraints drove decisions), convention drift patterns found by lenses, cross-boundary invariants identified (especially from Blast Radius), architectural concerns surfaced during disposition dialog. Use confidence: medium (self-review blindness is structural — lens agents mitigate but don't eliminate confirmation bias in disposition decisions). Skip: obvious fixes, style issues, findings specific to this PR that don't generalize, findings dispositioned as accepted without novel reasoning.
 ```
 
 This step is automatic — do not ask whether to run it.

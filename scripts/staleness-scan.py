@@ -424,13 +424,102 @@ def compute_vocabulary_drift(
 
 
 # ---------------------------------------------------------------------------
+# Usage freshness (cross-reference with usage-report.json)
+# ---------------------------------------------------------------------------
+
+
+def compute_usage_freshness(knowledge_dir: str) -> dict:
+    """Compute per-entry freshness scores from materialized access counts.
+
+    Reads _meta/usage-report.json and maps each entry's retrieval_count to a
+    freshness score in [0.0, 1.0], where:
+      - 0.0 = heavily accessed (fresh by usage — dampens staleness score)
+      - 1.0 = never accessed (no dampening)
+
+    Scoring uses a percentile-based scale relative to the store's access
+    distribution, so a highly-retrieved entry in a store with low average
+    counts still scores near 0.0.
+
+    Returns:
+        dict with keys:
+          available (bool): False when report missing or has no loaded_paths data.
+          scores (dict[str, float]): entry path → freshness score.
+          max_count (int): maximum retrieval count observed.
+          p75_count (int): 75th-percentile retrieval count.
+    """
+    report_path = os.path.join(knowledge_dir, "_meta", "usage-report.json")
+    if not os.path.isfile(report_path):
+        return {"available": False, "scores": {}, "max_count": 0, "p75_count": 0}
+
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {"available": False, "scores": {}, "max_count": 0, "p75_count": 0}
+
+    entry_access = report.get("entry_access", {})
+    if not entry_access:
+        return {"available": False, "scores": {}, "max_count": 0, "p75_count": 0}
+
+    # Extract per-entry counts — prefer retrieval_count (v2), fall back to search_appearances
+    counts: dict[str, int] = {}
+    for path, stats in entry_access.items():
+        count = stats.get("retrieval_count")
+        if count is None:
+            count = stats.get("search_appearances", 0)
+        counts[path] = int(count)
+
+    # Require at least some loaded_paths-sourced data: any entry with retrieval_count > 0
+    # (search_appearances is binary 0/1 from FTS5 replay — not from loaded_paths)
+    has_loaded_paths_data = any(
+        stats.get("retrieval_count") is not None
+        for stats in entry_access.values()
+    )
+    if not has_loaded_paths_data:
+        return {"available": False, "scores": {}, "max_count": 0, "p75_count": 0}
+
+    all_counts = list(counts.values())
+    max_count = max(all_counts) if all_counts else 0
+
+    # Compute 75th percentile for scale anchor
+    if all_counts:
+        sorted_counts = sorted(all_counts)
+        p75_idx = int(len(sorted_counts) * 0.75)
+        p75_count = sorted_counts[min(p75_idx, len(sorted_counts) - 1)]
+    else:
+        p75_count = 0
+
+    # Map count → freshness score
+    # 0 accesses → 1.0 (no dampening)
+    # >= p75_count (or max_count if p75=0) → 0.0 (full dampening)
+    # Linear interpolation between 0 and the scale anchor
+    scale = float(p75_count) if p75_count > 0 else float(max_count) if max_count > 0 else 1.0
+
+    scores: dict[str, float] = {}
+    for path, count in counts.items():
+        if count <= 0:
+            scores[path] = 1.0
+        else:
+            raw = 1.0 - min(count / scale, 1.0)
+            scores[path] = round(max(0.0, raw), 4)
+
+    return {
+        "available": True,
+        "scores": scores,
+        "max_count": max_count,
+        "p75_count": p75_count,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Drift weights and thresholds
 # ---------------------------------------------------------------------------
 
-WEIGHT_FILE_DRIFT = 0.55
+WEIGHT_FILE_DRIFT = 0.40
 WEIGHT_BACKLINK_DRIFT = 0.25
 WEIGHT_NEIGHBOR_DRIFT = 0.10
 WEIGHT_VOCABULARY_DRIFT = 0.10
+WEIGHT_USAGE_FRESHNESS = 0.15
 WEIGHT_CONFIDENCE = 0.0  # replaced by neighbor_drift; kept for fallback
 
 CONFIDENCE_SCORES = {"high": 0.0, "medium": 0.5, "low": 1.0}
@@ -445,6 +534,7 @@ def score_entry(
     confidence: str | None,
     neighbor_drift: dict | None = None,
     vocabulary_drift: dict | None = None,
+    usage_freshness: dict | None = None,
 ) -> tuple[float, str, dict]:
     """Score an entry using weighted drift signals.
 
@@ -454,6 +544,9 @@ def score_entry(
         confidence: Confidence level string ("high", "medium", "low") or None.
         neighbor_drift: Result from compute_neighbor_drift() with keys: score, available, detail.
         vocabulary_drift: Result from compute_vocabulary_drift() with keys: score, available, detail.
+        usage_freshness: Optional dict with keys: score (float), available (bool).
+            score=0.0 means heavily accessed (dampens staleness); score=1.0 means never accessed.
+            When available=False or None, weight redistributes to other signals.
 
     Returns:
         (drift_score, status, signals) where:
@@ -463,6 +556,7 @@ def score_entry(
     """
     neighbor_drift = neighbor_drift or {}
     vocabulary_drift = vocabulary_drift or {}
+    usage_freshness = usage_freshness or {}
 
     # Confidence signal (fallback when neighbor_drift/vocabulary_drift unavailable)
     conf_score = CONFIDENCE_SCORES.get(confidence, CONFIDENCE_SCORES["medium"])
@@ -472,12 +566,14 @@ def score_entry(
     bd_available = backlink_drift.get("available", False)
     nd_available = neighbor_drift.get("available", False)
     vd_available = vocabulary_drift.get("available", False)
+    uf_available = usage_freshness.get("available", False)
 
     # Base weights
     w_fd = WEIGHT_FILE_DRIFT if fd_available else 0.0
     w_bd = WEIGHT_BACKLINK_DRIFT if bd_available else 0.0
     w_nd = WEIGHT_NEIGHBOR_DRIFT if nd_available else 0.0
     w_vd = WEIGHT_VOCABULARY_DRIFT if vd_available else 0.0
+    w_uf = WEIGHT_USAGE_FRESHNESS if uf_available else 0.0
     w_conf = WEIGHT_CONFIDENCE
 
     # If neighbor_drift is unavailable, give its weight to confidence as fallback
@@ -489,7 +585,7 @@ def score_entry(
         w_conf += WEIGHT_VOCABULARY_DRIFT
 
     # Redistribute unavailable signal weights
-    total_available = w_fd + w_bd + w_nd + w_vd + w_conf
+    total_available = w_fd + w_bd + w_nd + w_vd + w_uf + w_conf
     if total_available == 0:
         # No signals at all — fall back to confidence-only
         w_conf = 1.0
@@ -502,14 +598,23 @@ def score_entry(
         w_bd *= scale
         w_nd *= scale
         w_vd *= scale
+        w_uf *= scale
         w_conf *= scale
 
     fd_score = file_drift.get("score", 0.0) if fd_available else 0.0
     bd_score = backlink_drift.get("score", 0.0) if bd_available else 0.0
     nd_score = neighbor_drift.get("score", 0.0) if nd_available else 0.0
     vd_score = vocabulary_drift.get("score", 0.0) if vd_available else 0.0
+    uf_score = usage_freshness.get("score", 0.0) if uf_available else 0.0
 
-    drift_score = (w_fd * fd_score) + (w_bd * bd_score) + (w_nd * nd_score) + (w_vd * vd_score) + (w_conf * conf_score)
+    drift_score = (
+        (w_fd * fd_score)
+        + (w_bd * bd_score)
+        + (w_nd * nd_score)
+        + (w_vd * vd_score)
+        + (w_uf * uf_score)
+        + (w_conf * conf_score)
+    )
     # Clamp to [0.0, 1.0]
     drift_score = max(0.0, min(1.0, drift_score))
 
@@ -548,6 +653,11 @@ def score_entry(
             "available": vd_available,
             "detail": vocabulary_drift.get("detail", {}),
         },
+        "usage_freshness": {
+            "weight": round(w_uf, 4),
+            "score": uf_score,
+            "available": uf_available,
+        },
         "confidence": {
             "weight": round(w_conf, 4),
             "score": conf_score,
@@ -574,6 +684,9 @@ def run_scan(knowledge_dir: str, repo_root: str) -> dict:
     entries: list[dict] = []
     counts = {"stale": 0, "aging": 0, "fresh": 0}
 
+    # Pre-compute usage freshness for all entries
+    usage_freshness_data = compute_usage_freshness(knowledge_dir)
+
     # Extract heading from entry files for neighbor drift lookups
     def _extract_heading(fpath: str) -> str:
         """Extract heading from first line of entry file."""
@@ -598,15 +711,25 @@ def run_scan(knowledge_dir: str, repo_root: str) -> dict:
         backlink_drift = compute_backlink_drift(fpath, knowledge_dir)
         neighbor_drift = compute_neighbor_drift(fpath, heading, meta["learned"], knowledge_dir)
         vocab_drift = compute_vocabulary_drift(fpath, heading, knowledge_dir)
-        drift_score, status, signals = score_entry(file_drift, backlink_drift, meta["confidence"], neighbor_drift, vocab_drift)
-
+        # Build per-entry usage freshness signal
         try:
-            rel_path = os.path.relpath(fpath, knowledge_dir)
+            entry_rel_path = os.path.relpath(fpath, knowledge_dir)
         except ValueError:
-            rel_path = fpath
+            entry_rel_path = fpath
+        uf_score = usage_freshness_data["scores"].get(entry_rel_path)
+        entry_usage_freshness = {
+            "available": usage_freshness_data["available"] and uf_score is not None,
+            "score": uf_score if uf_score is not None else 1.0,
+        }
+
+        drift_score, status, signals = score_entry(
+            file_drift, backlink_drift, meta["confidence"],
+            neighbor_drift, vocab_drift,
+            usage_freshness=entry_usage_freshness,
+        )
 
         entry = {
-            "file": rel_path,
+            "file": entry_rel_path,
             "status": status,
             "drift_score": drift_score,
             "signals": signals,

@@ -1,0 +1,145 @@
+---
+name: pr-interface-clarity
+description: "Focused lens review: evaluate interface clarity, naming, and abstraction coherence in a PR. Use /pr-review for integrated multi-lens coverage."
+user_invocable: true
+argument_description: "[PR_number_or_URL] — PR to analyze for interface clarity issues"
+---
+
+# /pr-interface-clarity Skill
+
+Focused variant. For holistic coverage, use `/pr-review`.
+
+You are running the **interface clarity lens** — a focused review that evaluates whether PR changes make interfaces self-documenting, abstraction boundaries coherent, and usage patterns consistent. This lens targets API surface legibility, naming precision, and the structural signals that enable correct use without reading implementation details.
+
+Findings are structured JSON written to a shared work item. Posting to GitHub is a separate step via `post-review.sh`.
+
+## Step 1: Identify PR
+
+Argument provided: `$ARGUMENTS`
+
+Parse the first token as a PR number (digits) or GitHub URL. Extract the numeric PR identifier.
+
+If no PR identifier is found, ask the user for the PR number.
+
+Resolve the repo owner/name from the git remote:
+```bash
+REMOTE_URL=$(git remote get-url origin)
+```
+Extract `OWNER/REPO` from the remote URL.
+
+## Step 2: Fetch PR Data and Diff
+
+```bash
+bash ~/.lore/scripts/fetch-pr-data.sh <PR_NUMBER>
+```
+
+```bash
+gh pr diff <PR_NUMBER>
+```
+
+```bash
+gh pr view <PR_NUMBER> --json files,title,body,commits
+```
+
+From the fetched data, identify:
+- **Changed files** and which contain interface changes (public APIs, exported types, function signatures, module boundaries)
+- **PR intent** from the title, body, and commit messages
+- **Existing reviews** — filter out `isOutdated: true` threads. Note any interface clarity concerns already raised to avoid duplication.
+
+## Step 3: Interface Clarity Analysis
+
+Read the shared review protocol (severity classification, enrichment, findings format):
+```bash
+cat ~/.lore/claude-md/70-review-protocol.md
+```
+
+For each file with interface changes, apply this methodology:
+
+**3a. Self-documenting interfaces** — Evaluate whether the interface communicates its contract without requiring callers to read implementation:
+- Do parameter names and types unambiguously convey what is expected?
+- Are return types precise enough that the caller knows what to do with the result?
+- Do error types or return values communicate failure modes, or do callers need to guess?
+- Are boolean parameters replaced with named types or enums where ambiguity exists at the call site?
+
+**3b. Abstraction boundary coherence** — Check whether each changed module or type has a single, legible responsibility:
+- Does the public surface expose only what callers need, or does it leak implementation detail?
+- Are concepts that belong together grouped, and concepts that don't belong together separated?
+- Do the exported names form a coherent vocabulary, or do they mix metaphors from different abstraction levels?
+
+**3c. Pattern consistency** — Evaluate whether new interfaces follow established conventions in the codebase:
+- Do similar operations use the same parameter ordering, naming style, and return shape as existing peers?
+- Are new error handling patterns consistent with how errors are handled elsewhere in the same layer?
+- Does the new surface follow the same initialization and teardown conventions as adjacent code?
+
+**3d. Naming and signature clarity** — Review names for precision and freedom from false affordances:
+- Do function names describe the operation at the right level of specificity (not too generic, not implementation-leaking)?
+- Do struct or class names accurately predict their behavior? Would a different name mislead?
+- Do parameter names reveal intent without needing inline comments to interpret them?
+- Are there names that suggest the wrong type (e.g., `list` for something unordered, `id` for something non-unique)?
+
+**3e. Extension surface** — Assess whether the interface design makes correct extension easy and incorrect extension hard:
+- Are there extension points that are easy to misuse (e.g., optional parameters with dangerous defaults, variadic args where order matters)?
+- Does the interface make the common case simple and the uncommon case possible without exposing footguns in the primary path?
+- Are there interface shapes that would require callers to maintain invariants the implementation should own?
+
+**Scoping for large diffs:** If more than ~10 files have interface changes, prioritize: (1) files that define or modify public APIs or exported types, (2) files at module or package boundaries, (3) files with the most callers. Apply full methodology to priority files; do a lighter pass on the rest.
+
+## Step 4: Knowledge Enrichment
+
+**Mandatory for every finding.** For each finding, query the knowledge store:
+```bash
+lore search "<finding topic>" --type knowledge --json --limit 3
+```
+
+Attach relevant citations as `knowledge_context` entries in the finding. Follow the enrichment gate and output cap from the shared protocol. If no relevant knowledge is found, set `knowledge_context` to an empty array.
+
+### Investigation Escalation
+
+If a finding involves cross-boundary interface concerns (e.g., a naming pattern that affects how multiple callers use a shared abstraction) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `70-review-protocol.md`. Budget: maximum 2 escalations per lens run.
+
+## Step 5: Write Findings
+
+**5a. Build findings JSON** conforming to the Findings Output Format schema in `claude-md/70-review-protocol.md`:
+```json
+{
+  "lens": "interface-clarity",
+  "pr": <PR_NUMBER>,
+  "repo": "<OWNER>/<REPO>",
+  "findings": [...]
+}
+```
+
+Severity patterns for this lens:
+- **blocking** — ambiguous API contracts that will cause misuse: a parameter whose name implies the wrong type, a return value whose shape doesn't match what the docstring says, an interface that requires callers to maintain invariants the implementation should own
+- **suggestion** — convention and clarity improvements (most common): rename for precision, add a named type where a bare primitive is ambiguous, reorder parameters to match the established pattern
+- **question** — design intent unclear: cases where the interface shape may be intentional but the rationale isn't visible, and understanding the goal would change the finding
+
+Classify each finding using the Severity Classification definitions. Default to `suggestion` when uncertain between blocking and suggestion.
+
+**5b. Present findings** to the user grouped by severity (blocking first, then suggestions, then questions). For each finding show: severity, title, file:line, body, and knowledge context.
+
+**5c. Write to work item.** Create or update the shared lens review work item:
+```
+/work create pr-lens-review-<PR_NUMBER>
+```
+
+If the work item already exists, load it instead of creating a duplicate. Append the findings JSON under a `## Interface Clarity Lens` heading in `notes.md` as a fenced JSON code block.
+
+**5d. Notify about posting.** After writing findings, remind the user:
+> Findings written to work item. To post as a PR review, run:
+> ```bash
+> bash ~/.lore/scripts/post-review.sh <findings.json> --pr <PR_NUMBER> [--dry-run]
+> ```
+
+## Step 6: Capture
+
+```
+/remember PR interface clarity analysis from PR #<N> — capture: non-obvious interface design patterns, naming conventions, abstraction boundary decisions, misuse-resistant API patterns discovered in the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR that don't generalize, style preferences, naming opinions without broader pattern significance.
+```
+
+## Error Handling
+
+- **No gh CLI or not authenticated:** Tell user to run `gh auth login`
+- **PR not found:** Confirm the PR number and repo access
+- **Empty diff:** PR may have no changes — confirm with user
+- **No findings:** Report "Interface clarity lens: no findings" and write empty findings array to the work item
