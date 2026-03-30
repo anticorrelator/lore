@@ -152,7 +152,7 @@ Before drafting, offer the user a chance to shape the plan with high-level strat
 
 5. **Generate Architecture Diagram (conditional)** — after drafting Design Decisions, decide whether to include a `## Architecture Diagram` section. Include it when the work involves multi-component systems, novel data flows, or module boundaries that are not self-evident from the phase list. Omit for single-file or mechanical changes.
 
-   If included, write a Mermaid diagram (```mermaid block) using actual file/module names. Choose the diagram type based on what best captures the structure (flowchart for pipelines, sequenceDiagram for interactions, classDiagram for type hierarchies). Place the section after `## Design Decisions` and before `## Phases`.
+   If included, write a plain-text ASCII diagram inside a fenced code block (` ```text ` or bare ` ``` `). Use box-drawing characters (─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼), arrows (──►, ──┐, ◄──), and vertical pipes for connections. Label components with actual file/module names (not generic boxes). Do NOT use Mermaid or other diagram DSLs — the TUI renders markdown with a line-by-line parser that cannot interpret them; only plain text art is universally readable across terminal, file browser, and TUI. Place the section after `## Design Decisions` and before `## Phases`.
 
 6. **Annotate phases with knowledge context** — after drafting phases with objectives and tasks, run a concordance query per phase to surface relevant knowledge entries beyond what you encountered in Step 2s:
    ```bash
@@ -543,7 +543,7 @@ From the documented findings, draft the remaining plan sections:
 2. **Design Decisions** — use the `### DN: Title` format from the template. Each decision requires `**Decision:**`, `**Rationale:**`, `**Alternatives considered:**`, and `**Applies to:**` fields. Number decisions sequentially (D1, D2, ...).
 3. **Architecture Diagram (conditional)** — after drafting Design Decisions, decide whether to include a `## Architecture Diagram` section. Include it when the work involves multi-component systems, novel data flows, or module boundaries that are not self-evident from the phase list. Omit for single-file or mechanical changes.
 
-   If included, write a Mermaid diagram (```mermaid block) using actual file/module names — investigation findings provide the component relationships and data flows to model. Choose the diagram type based on what best captures the structure (flowchart for pipelines, sequenceDiagram for interactions, classDiagram for type hierarchies). Place the section after `## Design Decisions` and before `## Phases`.
+   If included, write a plain-text ASCII diagram inside a fenced code block (` ```text ` or bare ` ``` `). Use box-drawing characters (─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼), arrows (──►, ──┐, ◄──), and vertical pipes for connections. Label components with actual file/module names — investigation findings provide the component relationships and data flows to model. Do NOT use Mermaid or other diagram DSLs — the TUI renders markdown with a line-by-line parser that cannot interpret them; only plain text art is universally readable across terminal, file browser, and TUI. Place the section after `## Design Decisions` and before `## Phases`.
 
 4. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include a `**Knowledge context:**` block listing knowledge entries relevant to that phase — these flow directly to worker agents via task generation. For multi-worker phases, novel implementations without codebase precedent, or phases using intent+constraints task format, add `**Knowledge delivery:** full` — workers interpreting intent and constraints need resolved knowledge content, not just backlink labels.
 
@@ -819,9 +819,8 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 
 ## Architecture Diagram
 <!-- Optional — include when the work involves multi-component systems, novel data flows, or module boundaries that are not self-evident from the phase list. Omit for single-file or straightforward additive changes.
-     Format: Mermaid markdown (```mermaid block). Choose the diagram type (flowchart, sequenceDiagram, classDiagram, etc.) based on what best captures the structure.
-     Content: label components with actual file/module names (not generic boxes). Show component relationships, data flow direction, and module boundaries that matter for implementation.
-     Example types to consider: flowchart for data pipelines, sequenceDiagram for request/response interactions, classDiagram for type hierarchies. -->
+     Format: plain-text ASCII art inside a fenced code block (```text or bare ```). Use box-drawing characters (─ │ ┌ ┐ └ ┘ ├ ┤), arrows (──►, ──┐, ◄──), and vertical pipes. Do NOT use Mermaid or other diagram DSLs — the TUI's line-by-line markdown renderer cannot interpret them.
+     Content: label components with actual file/module names (not generic boxes). Show component relationships, data flow direction, and module boundaries that matter for implementation. -->
 
 ## Phases
 
