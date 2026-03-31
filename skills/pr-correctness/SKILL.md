@@ -48,9 +48,11 @@ From the fetched data, identify:
 
 ## Step 3: Correctness Analysis
 
-Read the shared review protocol (severity classification, enrichment, findings format):
+Read review protocol sections (severity classification, enrichment, findings format):
 ```bash
-cat ~/.lore/claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/review-protocol/severity.md
+cat ~/.lore/claude-md/review-protocol/enrichment.md
+cat ~/.lore/claude-md/review-protocol/findings-format.md
 ```
 
 For each file with logic changes, apply this methodology:
@@ -73,6 +75,18 @@ For each file with logic changes, apply this methodology:
 - Do comments in the code match the code's behavior?
 - Are commit messages accurate descriptions of what changed?
 
+**3e. Finding grounding** — For each candidate finding, state the specific failure scenario before writing it up:
+- What input or condition triggers the bug?
+- What incorrect output or behavior results?
+- What is the user-visible or system-visible consequence?
+
+A finding without a concrete scenario is not ready to report. Ground every finding before moving to Step 4.
+
+| | Example |
+|---|---|
+| **Ungrounded** | "off-by-one error in loop" |
+| **Grounded** | "loop iterates `n+1` times instead of `n`, causing the last element to be processed twice — duplicate entries in the output list" |
+
 **Scoping for large diffs:** If more than ~10 files have logic changes, prioritize: (1) files with the most complex logic additions, (2) files touching shared interfaces or public APIs, (3) files handling user input or external data. Apply full methodology to priority files; do a lighter pass on the rest.
 
 ## Step 4: Knowledge Enrichment
@@ -86,11 +100,11 @@ Attach relevant citations as `knowledge_context` entries in the finding. Follow 
 
 ### Investigation Escalation
 
-If a finding involves cross-boundary correctness concerns (invariants spanning multiple files) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `70-review-protocol.md`. Budget: maximum 2 escalations per lens run.
+If a finding involves cross-boundary correctness concerns (invariants spanning multiple files) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `claude-md/review-protocol/escalation.md`. Budget: maximum 2 escalations per lens run.
 
 ## Step 5: Write Findings
 
-**5a. Build findings JSON** conforming to the Findings Output Format schema in `claude-md/70-review-protocol.md`:
+**5a. Build findings JSON** conforming to the Findings Output Format schema in `claude-md/review-protocol/findings-format.md`:
 ```json
 {
   "lens": "correctness",

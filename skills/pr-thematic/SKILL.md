@@ -72,9 +72,12 @@ From the fetched data, identify:
 
 ## Step 4: Knowledge Enrichment
 
-Read the enrichment protocol:
+Read review protocol sections (enrichment, escalation, severity, findings format):
 ```bash
-cat ~/.lore/claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/review-protocol/enrichment.md
+cat ~/.lore/claude-md/review-protocol/escalation.md
+cat ~/.lore/claude-md/review-protocol/severity.md
+cat ~/.lore/claude-md/review-protocol/findings-format.md
 ```
 
 For each finding, query the knowledge store:
@@ -86,14 +89,9 @@ Attach relevant citations as `knowledge_context` entries in the finding. Follow 
 
 ### Investigation Escalation
 
-If a finding involves cross-boundary scope concerns (changes that appear unrelated but may have hidden dependencies) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `70-review-protocol.md`. Budget: maximum 2 escalations per lens run.
+If a finding involves cross-boundary scope concerns (changes that appear unrelated but may have hidden dependencies) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `claude-md/review-protocol/escalation.md`. Budget: maximum 2 escalations per lens run.
 
 ## Step 5: Write Findings
-
-Read the severity classification and findings output format from:
-```bash
-cat ~/.lore/claude-md/70-review-protocol.md
-```
 
 **5a. Build findings JSON** conforming to the Findings Output Format schema:
 ```json

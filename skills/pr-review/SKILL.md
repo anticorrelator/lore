@@ -9,7 +9,7 @@ argument_description: "[PR_number_or_URL] [--self] [--pair] [--ai] [--thorough] 
 
 You are running a **holistic multi-lens PR review**. This skill orchestrates the full review pipeline: triage, thematic anchor, adaptive lens selection, parallel lens execution by agent teams, cross-lens synthesis, and structured presentation. It replaces manual lens-by-lens invocation with a single entry point that handles coordination automatically.
 
-For focused single-concern analysis, use individual lens skills directly (`/pr-correctness`, `/pr-security`, etc.). See the integration protocol in `~/.lore/claude-md/70-review-protocol.md` for guidance on choosing your entry point.
+For focused single-concern analysis, use individual lens skills directly (`/pr-correctness`, `/pr-security`, etc.). See the integration protocol in `~/.lore/claude-md/review-protocol/lens-workflow.md` for guidance on choosing your entry point.
 
 This skill does not modify source code. Findings are structured and can be posted to GitHub via `post-review.sh`.
 
@@ -115,15 +115,22 @@ The full diff must be available to lens agents spawned in Step 5. Strategy depen
 
 Store the diff delivery method (inline or file path) for use in Step 5.
 
-Load the review protocol for use by Steps 3-8:
+Load review protocol sections for Steps 3-8:
 
 ```bash
-cat ~/.lore/claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/review-protocol/risk-triage.md
+cat ~/.lore/claude-md/review-protocol/ai-awareness.md
+cat ~/.lore/claude-md/review-protocol/lens-workflow.md
+cat ~/.lore/claude-md/review-protocol/security-methodology.md
+cat ~/.lore/claude-md/review-protocol/cross-lens-synthesis.md
+cat ~/.lore/claude-md/review-protocol/severity.md
+cat ~/.lore/claude-md/review-protocol/findings-format.md
+cat ~/.lore/claude-md/review-protocol/enrichment.md
 ```
 
 ## Step 3: Triage
 
-Apply the Risk-Tier Triage protocol from `~/.lore/claude-md/70-review-protocol.md` to classify the PR and select lenses. This step is a hard gate — no lens work begins until the user confirms the triage.
+Apply the Risk-Tier Triage protocol from `~/.lore/claude-md/review-protocol/risk-triage.md` to classify the PR and select lenses. This step is a hard gate — no lens work begins until the user confirms the triage.
 
 ### 3a. Classify risk tier
 
@@ -221,7 +228,7 @@ Identify signals from the thematic analysis that downstream lens agents should k
 
 ### 4e. Write thematic findings
 
-Build thematic findings JSON conforming to the Findings Output Format in `~/.lore/claude-md/70-review-protocol.md`:
+Build thematic findings JSON conforming to the Findings Output Format in `~/.lore/claude-md/review-protocol/findings-format.md`:
 
 ```json
 {
@@ -276,7 +283,7 @@ For each selected lens, read its Step 3 methodology from the corresponding SKILL
 |------|--------|---------------|
 | Correctness | `skills/pr-correctness/SKILL.md` | Correctness Analysis |
 | Interface Clarity | `skills/pr-interface-clarity/SKILL.md` | Interface Clarity Analysis |
-| Security | `~/.lore/claude-md/70-review-protocol.md` | Security Lens Methodology |
+| Security | `~/.lore/claude-md/review-protocol/security-methodology.md` | Security Lens Methodology |
 | Blast Radius | `skills/pr-blast-radius/SKILL.md` | Blast Radius Analysis |
 | Regressions | `skills/pr-regressions/SKILL.md` | Regressions Analysis |
 | Test Quality | `skills/pr-test-quality/SKILL.md` | Test Quality Analysis |
@@ -319,6 +326,12 @@ Produce findings JSON conforming to the Findings Output Format:
 - repo: "<owner>/<repo>"
 - Severity: blocking / suggestion / question (default to suggestion when uncertain)
 - Each finding: severity, title, file, line, body, knowledge_context
+
+Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line in the body stating the concrete basis for the severity claim:
+- blocking: `**Grounding:** <what breaks> for <whom> when <conditions>.`
+- suggestion: `**Grounding:** <specific improvement> benefits <beneficiary>.`
+
+Findings without a `**Grounding:**` line will be downgraded or dropped during synthesis.
 
 Query the knowledge store for each finding:
 ```bash
@@ -402,7 +415,7 @@ Proceed to Step 7 with the full set of findings from all lenses.
 
 ## Step 7: Synthesis
 
-Read all lens findings from the work item and apply the Cross-Lens Synthesis rules from `~/.lore/claude-md/70-review-protocol.md`. This step transforms independent lens outputs into a unified review.
+Read all lens findings from the work item and apply the Cross-Lens Synthesis rules from `~/.lore/claude-md/review-protocol/cross-lens-synthesis.md`. This step transforms independent lens outputs into a unified review.
 
 ### 7a. Load all findings
 
@@ -422,14 +435,7 @@ Apply the compound finding rules from the Cross-Lens Synthesis protocol:
 2. Within each file, identify findings from different lenses whose `line` values are within 3 lines of each other
 3. Two or more such findings form a compound finding
 
-For each compound finding, apply the severity elevation table:
-
-| Contributing severities | Result |
-|------------------------|--------|
-| Any `blocking` | `blocking` |
-| 2+ `suggestion` from different lenses | `blocking` |
-| 1 `suggestion` + 1+ `question` | `suggestion` |
-| All `question` | `question` |
+For each compound finding, apply the severity elevation table from the Cross-Lens Synthesis section (loaded in Step 2).
 
 Merge compound findings into a single finding with all contributing lens IDs and a merged body preserving each lens's observation.
 
@@ -570,9 +576,9 @@ Present findings grouped by severity. Within each group, compound findings appea
 
 After presenting findings, offer actions:
 
-- **Post to GitHub:** Post findings as a batched PR review via `post-review.sh`. The user can approve, edit, or remove individual findings before posting. Then proceed to Step 11.
-- **Create work item:** Proceed to Step 10 for a gated work item, then Step 11.
-- **Done:** Skip to Step 11 (Capture Insights).
+- **Post to GitHub:** Post findings as a batched PR review via `post-review.sh`. The user can approve, edit, or remove individual findings before posting. Then proceed to Step 12.
+- **Create work item:** Proceed to Step 10 for a gated work item, then Step 12.
+- **Done:** Skip to Step 12 (Capture Insights).
 
 If posting to GitHub:
 
@@ -594,7 +600,7 @@ This organizes findings into actionable categories (Agreed Changes / Verificatio
 [Y/n]
 ```
 
-If the user declines, skip to Step 11 (Capture Insights).
+If the user declines, skip to Step 12 (Capture Insights).
 
 ### 10b. Create work item
 
@@ -644,9 +650,139 @@ Default readiness: `spec-needed`. Override to `implement-ready` only when ALL:
 - All items are trivially obvious fixes verifiable from the diff alone
 - No item touches cross-boundary invariants or shared interfaces
 
-## Step 11: Capture Insights
+## Step 11: Generate Followup Report
 
-This step always runs — after Step 9c (Post to GitHub, Create work item, or Done) and after Step 10 completes (if invoked).
+This step is mandatory and must not be skipped.
+
+This step always runs automatically after Step 9c resolves (and after optional Step 10 completes). It produces a structured followup report and persists it via `create-followup.sh`.
+
+### 11a. PR Narrative
+
+Using the thematic anchor output from Steps 4a–4d, synthesize a 2–3 paragraph narrative. Do not perform new analysis — assemble from what was already established:
+
+- **Paragraph 1 — Theme and scope:** Restate the theme statement (Step 4a) and the scope verdict (Step 4c). If the verdict is Mixed or Scattered, note which files are tangential or unrelated and why that matters.
+- **Paragraph 2 — Design signals:** Expand on the design signals (Step 4d). Describe the architectural patterns or conventions observed, any cross-cutting concerns, and areas of higher risk or complexity identified in the thematic pass.
+- **Paragraph 3 — Alignment highlights (optional):** If the per-file alignment map (Step 4b) contains notable entries — files that are unrelated to the theme, files where the thematic role is surprising, or missing pieces flagged as verification targets — call them out by name. Omit this paragraph if the PR is coherent with no noteworthy alignment observations.
+
+```
+## PR Narrative
+
+<2–3 paragraphs as described above>
+```
+
+### 11b. Implementation Diagram
+
+Build an ASCII logical flow diagram that shows how the PR's changes work mechanically. This is a behavioral diagram, not a module dependency chart — it should show call chains, state transitions, or data flow depending on what the PR does.
+
+Read diagram conventions:
+```bash
+cat ~/.lore/claude-md/review-protocol/followup-template.md
+```
+
+### 11c. Review Findings
+
+Reproduce all synthesized findings from Steps 7 and 8, grouped by severity. This is a faithful copy of the Step 9b output — no summarization, no omission.
+
+For each finding, include:
+- Severity badge: `[BLOCKING]`, `[SUGGESTION]`, or `[QUESTION]`
+- Title
+- Contributing lens(es)
+- File and line reference
+- Full finding body
+- Knowledge citations (if any)
+
+```
+## Review Findings
+
+**Verdict:** <BLOCKING / SUGGESTIONS ONLY / CLEAN>
+**Blocking:** <count> | **Suggestions:** <count> | **Questions:** <count>
+
+### Blocking
+
+#### [BLOCKING] <title>
+**Lens:** <lens(es)>
+**File:** `<file:line>`
+
+<body>
+
+**Knowledge:** <citation — or omit if none>
+
+---
+
+### Suggestions
+
+#### [SUGGESTION] <title>
+...
+
+### Questions
+
+#### [QUESTION] <title>
+...
+```
+
+Omit empty severity sections. For a CLEAN verdict, write: "No findings — PR is ready to approve."
+
+### 11d. Determine severity and suggested actions
+
+Using the synthesized findings from Step 7 and the verdict from Step 9a:
+
+| Review outcome | --severity | --suggested-actions primary type |
+|---|---|---|
+| All clean / CLEAN verdict | low | approve |
+| Suggestions only | medium | comment_on_pr |
+| Blocking findings exist | high | create_work_item |
+| Deferred items exist (no blocking) | medium | create_work_item |
+
+### 11e. Assemble and persist the report
+
+Assemble the full report body combining the sections above. Then persist via `create-followup.sh`:
+
+```bash
+bash ~/.lore/scripts/create-followup.sh \
+  --source "pr-review" \
+  --title "Review: <PR title> (#<N>)" \
+  --severity <per 11d> \
+  --attachments '[{"type":"pr","ref":"#<N>"}]' \
+  --suggested-actions '[{"type": "<type>", "label": "<label>"}]' \
+  --content "<full report body>"
+```
+
+The `--content` value is the report body (without the heading — `create-followup.sh` adds the `# <title>` heading automatically):
+
+```
+One-line diagnostic summary: <CLEAN | SUGGESTIONS ONLY | BLOCKING — N blocking, M suggestions>
+
+<PR Narrative from 11a>
+
+<Implementation Diagram fenced block from 11b>
+
+<Review Findings from 11c>
+```
+
+The one-line diagnostic summary must be the **first non-heading line** so it appears as the excerpt in the TUI.
+
+### 11f. Present report to user
+
+Present the report before proceeding to Step 12:
+
+```
+## Followup Report: PR #<N>
+
+<diagnostic summary>
+
+<PR Narrative>
+
+<Implementation Diagram>
+
+<Review Findings>
+
+---
+Followup persisted as: Review Report: PR #<N>
+```
+
+## Step 12: Capture Insights
+
+This step always runs — after Step 11 completes.
 
 Invoke `/remember` with review-scoped constraints:
 

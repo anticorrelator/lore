@@ -780,3 +780,20 @@ render_table() {
     printf "${fmt}\n" "${row_vals[@]}"
   done
 }
+
+# --- init_followups_dir ---
+# Create $KNOWLEDGE_DIR/_followups/ if it does not already exist.
+# Usage: init_followups_dir "$KNOWLEDGE_DIR"
+# Args: $1 = knowledge directory path
+# Returns 0 if created or already exists. Exits 1 if KNOWLEDGE_DIR does not exist.
+init_followups_dir() {
+  local knowledge_dir="$1"
+  if [[ ! -d "$knowledge_dir" ]]; then
+    echo "Error: knowledge store not found at: $knowledge_dir" >&2
+    return 1
+  fi
+  local followups_dir="$knowledge_dir/_followups"
+  if [[ ! -d "$followups_dir" ]]; then
+    mkdir -p "$followups_dir"
+  fi
+}

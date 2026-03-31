@@ -43,6 +43,7 @@ Commands:
   rebuild      Rebuild and reinstall the lore-tui binary
 
   work         Work item management (see: lore work --help)
+  followup     Follow-up artifact management (see: lore followup --help)
   journal      Effectiveness journal (see: lore journal --help)
   thread       Thread management (see: lore thread --help)
   migrate      Format migration (see: lore migrate --help)
@@ -113,6 +114,25 @@ Subcommands:
   list       List threads (regenerate _threads/_index.json)
   migrate    Migrate monolithic thread files to directory-per-entry format
   reindex    Regenerate _threads/_index.json from thread metadata
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+followup_usage() {
+  cat >&2 <<EOF
+lore followup — follow-up artifact management
+
+Usage: lore followup <subcommand> [args...]
+
+Subcommands:
+  create    Create a new follow-up artifact
+  list      List follow-ups (default: pending only)
+  view      View a single follow-up's content and metadata
+  update    Update a follow-up's status or add resolution notes
+  promote   Promote a follow-up to a work item
+  dismiss   Dismiss a follow-up with an optional reason
 
 Options:
   --help, -h    Show this help
@@ -618,6 +638,47 @@ cmd_work() {
   esac
 }
 
+cmd_followup() {
+  if [[ $# -eq 0 ]]; then
+    followup_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      followup_usage
+      return 0
+      ;;
+    create)
+      "$SCRIPTS_DIR/create-followup.sh" "$@"
+      ;;
+    list)
+      "$SCRIPTS_DIR/list-followups.sh" "$@"
+      ;;
+    view)
+      "$SCRIPTS_DIR/load-followup.sh" "$@"
+      ;;
+    update)
+      "$SCRIPTS_DIR/update-followup.sh" "$@"
+      ;;
+    promote)
+      "$SCRIPTS_DIR/promote-followup.sh" "$@"
+      ;;
+    dismiss)
+      "$SCRIPTS_DIR/dismiss-followup.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown followup subcommand '$subcmd'" >&2
+      echo "" >&2
+      followup_usage
+      return 1
+      ;;
+  esac
+}
+
 # --- Top-level dispatch ---
 if [[ $# -eq 0 ]]; then
   exec lore-tui
@@ -709,6 +770,10 @@ case "$1" in
   analyze)
     shift
     cmd_analyze "$@"
+    ;;
+  followup)
+    shift
+    cmd_followup "$@"
     ;;
   work)
     shift

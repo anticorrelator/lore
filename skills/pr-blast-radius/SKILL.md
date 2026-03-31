@@ -69,13 +69,28 @@ This lens inherently requires multi-file exploration beyond the diff. Prioritize
 - Identify callers that may depend on the previous behavior.
 - Flag implicit contract changes that type systems cannot catch: changed error messages that callers parse, changed event ordering, changed timing characteristics.
 
+**3e. Finding grounding** — For each candidate finding, name the specific consumers affected and describe exactly how they break:
+- Which file and call site is affected (with file:line)?
+- What specific mismatch exists between the new interface and the consumer's usage?
+- What is the runtime or compile-time consequence?
+
+A finding that only identifies a changed interface without naming a concrete consumer and breakage mode is not ready to report. Ground every finding before moving to Step 4.
+
+| | Example |
+|---|---|
+| **Ungrounded** | "this change may break callers" |
+| **Grounded** | "`render_panel()` in `tui/main.go:215` passes 3 args to this function — the new required 4th parameter will cause a compile error" |
+
 **Scoping for large diffs:** If more than ~10 files have interface or export changes, prioritize: (1) changes to shared libraries or utility modules, (2) changes to public APIs or external interfaces, (3) changes to types or schemas used across module boundaries. Apply full methodology to priority changes; do a lighter pass on the rest.
 
 ## Step 4: Knowledge Enrichment
 
-Read the enrichment protocol:
+Read review protocol sections (enrichment, escalation, severity, findings format):
 ```bash
-cat ~/.lore/claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/review-protocol/enrichment.md
+cat ~/.lore/claude-md/review-protocol/escalation.md
+cat ~/.lore/claude-md/review-protocol/severity.md
+cat ~/.lore/claude-md/review-protocol/findings-format.md
 ```
 
 For each finding, query the knowledge store:
@@ -87,14 +102,9 @@ Attach relevant citations as `knowledge_context` entries in the finding. Follow 
 
 ### Investigation Escalation
 
-If a finding involves deep cross-boundary impact (invariants spanning multiple modules where consumer behavior is unclear) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `70-review-protocol.md`. Budget: maximum 2 escalations per lens run.
+If a finding involves deep cross-boundary impact (invariants spanning multiple modules where consumer behavior is unclear) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `claude-md/review-protocol/escalation.md`. Budget: maximum 2 escalations per lens run.
 
 ## Step 5: Write Findings
-
-Read the severity classification and findings output format from:
-```bash
-cat ~/.lore/claude-md/70-review-protocol.md
-```
 
 **5a. Build findings JSON** conforming to the Findings Output Format schema:
 ```json

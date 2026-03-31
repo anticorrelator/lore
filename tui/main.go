@@ -21,6 +21,7 @@ import (
 	"github.com/creack/pty"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/gh"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/search"
@@ -34,6 +35,7 @@ const (
 	stateWork appState = iota
 	stateSearch
 	stateKnowledge
+	stateFollowUps
 )
 
 // panelFocus tracks which panel has keyboard focus in split-pane mode.
@@ -48,8 +50,9 @@ const (
 type popupContext int
 
 const (
-	contextList   popupContext = iota // list-context: jump to work item
-	contextDetail                     // detail-context: jump within detail view
+	contextList       popupContext = iota // list-context: jump to work item
+	contextDetail                        // detail-context: jump within detail view
+	contextFollowups                     // followup-list-context: jump to follow-up item
 )
 
 const leftPanelWidth = 40
@@ -189,6 +192,24 @@ func checkDetailMtime(workDir, slug string) tea.Cmd {
 	}
 }
 
+// followupIndexMtimeCheckedMsg carries the result of stat-ing _followup_index.json.
+type followupIndexMtimeCheckedMsg struct {
+	mtime time.Time
+	err   error
+}
+
+// checkFollowupIndexMtime stats _followup_index.json and sends followupIndexMtimeCheckedMsg.
+func checkFollowupIndexMtime(knowledgeDir string) tea.Cmd {
+	return func() tea.Msg {
+		p := filepath.Join(knowledgeDir, "_followup_index.json")
+		info, err := os.Stat(p)
+		if err != nil {
+			return followupIndexMtimeCheckedMsg{err: err}
+		}
+		return followupIndexMtimeCheckedMsg{mtime: info.ModTime()}
+	}
+}
+
 // readPlanContent reads plan.md for the given slug and sends planContentReadMsg.
 func readPlanContent(workDir, slug string) tea.Cmd {
 	return func() tea.Msg {
@@ -224,6 +245,26 @@ func runArchive(slug string, unarchive bool) tea.Cmd {
 	}
 }
 
+// runPromoteFollowUp runs lore followup promote and returns ActionCompleteMsg when done.
+func runPromoteFollowUp(id string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("lore", "followup", "promote", "--followup-id", id)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		err := cmd.Run()
+		return followup.ActionCompleteMsg{ID: id, Action: "promote", Err: err}
+	}
+}
+
+// runDismissFollowUp runs lore followup dismiss and returns ActionCompleteMsg when done.
+func runDismissFollowUp(id string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("lore", "followup", "dismiss", "--followup-id", id)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		err := cmd.Run()
+		return followup.ActionCompleteMsg{ID: id, Action: "dismiss", Err: err}
+	}
+}
+
 // runDelete runs lore work delete and returns DeleteFinishedMsg when done.
 func runDelete(slug string) tea.Cmd {
 	return func() tea.Msg {
@@ -236,12 +277,15 @@ func runDelete(slug string) tea.Cmd {
 
 type model struct {
 	state        appState
+	prevState    appState // state to return to when leaving knowledge browser
 	focusedPanel panelFocus
 	layoutMode   config.LayoutMode
-	list         work.ListModel
-	detail       work.DetailModel
-	searchPanel  search.PanelModel
-	browser      knowledge.BrowserModel
+	list           work.ListModel
+	detail         work.DetailModel
+	searchPanel    search.PanelModel
+	browser        knowledge.BrowserModel
+	followupList   followup.ListModel
+	followupDetail followup.DetailModel
 	config       config.Config
 	width        int
 	height       int
@@ -268,6 +312,7 @@ type model struct {
 	specConfirmShortMode     bool
 	specConfirmSkipConfirm   bool
 	specConfirmChatMode      bool
+	specConfirmFollowupMode  bool
 	specLaunchedFromModal    bool
 
 	showHelp bool
@@ -291,6 +336,9 @@ type model struct {
 	lastPlanMtime    time.Time
 	lastDetailMtime  time.Time
 
+	// lastFollowupIndexMtime is the mtime of _followup_index.json from the last poll.
+	lastFollowupIndexMtime time.Time
+
 	// flashErr holds a transient error message shown in the status bar.
 	// It is cleared on the next key press.
 	flashErr string
@@ -306,6 +354,19 @@ func (m model) currentSpecPanel() (work.SpecPanelModel, bool) {
 		return work.SpecPanelModel{}, false
 	}
 	panel, ok := m.specPanels[slug]
+	return panel, ok
+}
+
+// currentFollowupPanel returns the spec panel for the currently selected follow-up item, if any.
+func (m model) currentFollowupPanel() (work.SpecPanelModel, bool) {
+	if m.specPanels == nil {
+		return work.SpecPanelModel{}, false
+	}
+	id := m.followupDetail.CurrentID()
+	if id == "" {
+		return work.SpecPanelModel{}, false
+	}
+	panel, ok := m.specPanels[id]
 	return panel, ok
 }
 
@@ -401,6 +462,23 @@ func buildWorkItemPopupItems(items []work.WorkItem) []search.PopupItem {
 			ID:       item.Slug,
 			Label:    item.Title,
 			Subtitle: item.Slug,
+		}
+	}
+	return result
+}
+
+// buildFollowupPopupItems converts follow-up items into popup items for the search overlay.
+func buildFollowupPopupItems(items []followup.FollowUpItem) []search.PopupItem {
+	result := make([]search.PopupItem, len(items))
+	for i, item := range items {
+		label := item.Title
+		if label == "" {
+			label = item.ID
+		}
+		result[i] = search.PopupItem{
+			ID:       item.ID,
+			Label:    label,
+			Subtitle: item.Severity + " · " + item.Source,
 		}
 	}
 	return result
@@ -653,6 +731,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			cmds = append(cmds, checkPlanMtime(m.config.WorkDir, slug))
 			cmds = append(cmds, checkDetailMtime(m.config.WorkDir, slug))
 		}
+		// Poll follow-up index when in stateFollowUps to detect CLI mutations.
+		if m.state == stateFollowUps {
+			cmds = append(cmds, checkFollowupIndexMtime(m.config.KnowledgeDir))
+		}
 		// Touch session files for locally active slugs and discover external sessions.
 		for slug := range m.specPanels {
 			work.TouchSession(m.config.WorkDir, slug) //nolint:errcheck
@@ -671,6 +753,20 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		if !msg.mtime.Equal(m.lastIndexMtime) {
 			m.lastIndexMtime = msg.mtime
 			return m, loadWorkItems(m.config.WorkDir)
+		}
+		return m, nil
+
+	case followupIndexMtimeCheckedMsg:
+		if msg.err != nil {
+			return m, nil // index may not exist yet; skip
+		}
+		if m.lastFollowupIndexMtime.IsZero() {
+			m.lastFollowupIndexMtime = msg.mtime // baseline
+			return m, nil
+		}
+		if !msg.mtime.Equal(m.lastFollowupIndexMtime) {
+			m.lastFollowupIndexMtime = msg.mtime
+			return m, followup.LoadIndexCmd(m.config.KnowledgeDir)
 		}
 		return m, nil
 
@@ -815,6 +911,53 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			bm, cmd := m.browser.Update(msg)
 			m.browser = bm
 			return m, cmd
+		case stateFollowUps:
+			if m.layoutMode == config.LayoutLeftRight {
+				if isClick {
+					xBoundary := leftPanelWidth + 2
+					if msg.X < xBoundary {
+						m.focusedPanel = panelLeft
+					} else {
+						m.focusedPanel = panelRight
+					}
+				}
+			} else {
+				if isClick {
+					topH := m.topPanelHeight()
+					if msg.Y <= 1+topH {
+						m.focusedPanel = panelLeft
+					} else {
+						m.focusedPanel = panelRight
+					}
+				}
+			}
+			switch m.focusedPanel {
+			case panelLeft:
+				prevID := m.followupList.CurrentID()
+				fl, cmd := m.followupList.Update(msg)
+				m.followupList = fl
+				newID := m.followupList.CurrentID()
+				if newID != "" && newID != prevID {
+					loadCmd := m.followupDetail.SetID(newID)
+					return m, tea.Batch(cmd, loadCmd)
+				}
+				return m, cmd
+			default: // panelRight
+				// When terminal mode is active, route mouse events to the spec panel.
+				if m.terminalMode {
+					id := m.followupDetail.CurrentID()
+					if m.specPanels != nil {
+						if panel, ok := m.specPanels[id]; ok {
+							sm, cmd := panel.Update(msg)
+							m.specPanels[id] = sm
+							return m, cmd
+						}
+					}
+				}
+				fd, cmd := m.followupDetail.Update(msg)
+				m.followupDetail = fd
+				return m, cmd
+			}
 		}
 
 	case tea.KeyMsg:
@@ -824,12 +967,17 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		case "ctrl+c":
 			// In terminal mode, ctrl+c terminates the terminal panel only,
 			// but still cancel any background AI subprocess.
-			if m.state == stateWork && m.terminalMode {
+			if m.terminalMode && (m.state == stateWork || m.state == stateFollowUps) {
 				if m.aiCancel != nil {
 					m.aiCancel()
 					m.aiCancel = nil
 				}
-				slug := m.list.CurrentSlug()
+				var slug string
+				if m.state == stateFollowUps {
+					slug = m.followupDetail.CurrentID()
+				} else {
+					slug = m.list.CurrentSlug()
+				}
 				return m, func() tea.Msg { return work.TerminalTerminateMsg{Slug: slug} }
 			}
 			m.cleanupAllSubprocesses()
@@ -843,7 +991,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, nil
 			}
 		case "q":
-			if m.state == stateWork && !m.terminalMode {
+			if (m.state == stateWork || m.state == stateFollowUps) && !m.terminalMode {
 				m.cleanupAllSubprocesses()
 				return m, tea.Quit
 			}
@@ -903,36 +1051,45 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 		case "L":
 			// L toggles layout between left/right and top/bottom (left panel only).
-			if m.state == stateWork && m.focusedPanel == panelLeft {
+			if (m.state == stateWork || m.state == stateFollowUps) && m.focusedPanel == panelLeft {
 				if m.layoutMode == config.LayoutLeftRight {
 					m.layoutMode = config.LayoutTopBottom
 				} else {
 					m.layoutMode = config.LayoutLeftRight
 				}
-				m.list.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
 
-				// Re-apply dimensions to list
-				listW := leftPanelWidth
-				listH := m.innerHeight()
-				if m.layoutMode == config.LayoutTopBottom {
-					listW = m.topPanelWidth()
-					listH = m.topPanelHeight()
-				}
-				m.list, _ = m.list.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
+				if m.state == stateWork {
+					m.list.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
 
-				// Re-apply dimensions to detail and all open spec panels.
-				m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-				specH := m.detailPanelHeight()
-				specW := m.rightPanelWidth() - 2
-				for slug, panel := range m.specPanels {
-					sm, _ := panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
-					if ptmx := sm.Ptmx(); ptmx != nil {
-						_ = pty.Setsize(ptmx, &pty.Winsize{
-							Rows: uint16(specH),
-							Cols: uint16(specW),
-						})
+					// Re-apply dimensions to list
+					listW := leftPanelWidth
+					listH := m.innerHeight()
+					if m.layoutMode == config.LayoutTopBottom {
+						listW = m.topPanelWidth()
+						listH = m.topPanelHeight()
 					}
-					m.specPanels[slug] = sm
+					m.list, _ = m.list.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
+
+					// Re-apply dimensions to detail and all open spec panels.
+					m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+					specH := m.detailPanelHeight()
+					specW := m.rightPanelWidth() - 2
+					for slug, panel := range m.specPanels {
+						sm, _ := panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
+						if ptmx := sm.Ptmx(); ptmx != nil {
+							_ = pty.Setsize(ptmx, &pty.Winsize{
+								Rows: uint16(specH),
+								Cols: uint16(specW),
+							})
+						}
+						m.specPanels[slug] = sm
+					}
+				} else {
+					// stateFollowUps: re-apply dimensions to followup models.
+					m.followupList.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
+					fuListW, fuListH := followupListDims(m)
+					m.followupList, _ = m.followupList.Update(tea.WindowSizeMsg{Width: fuListW, Height: fuListH})
+					m.followupDetail, _ = m.followupDetail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
 				}
 
 				// Persist preference asynchronously
@@ -968,24 +1125,49 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.popupCtx = contextDetail
 				return m, m.popup.Init()
 			}
+			if m.state == stateFollowUps && m.focusedPanel == panelLeft {
+				items := buildFollowupPopupItems(m.followupList.Items())
+				m.popup = search.New(items, "Search Follow-ups")
+				m.popup.SetSize(m.width, m.height)
+				m.popupActive = true
+				m.popupCtx = contextFollowups
+				return m, m.popup.Init()
+			}
 			// stateKnowledge / no match: no-op.
 		case "K":
-			if m.state == stateWork && !m.terminalMode {
+			if (m.state == stateWork || m.state == stateFollowUps) && !m.terminalMode {
+				m.prevState = m.state
 				m.state = stateKnowledge
 				m.browser = knowledge.NewBrowserModel(m.config.KnowledgeDir)
 				m.browser, _ = m.browser.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
 				return m, knowledge.LoadManifestCmd(m.config.KnowledgeDir)
 			}
-		case "h":
-			// h shifts focus back to left (list) panel from the right detail panel.
-			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
+		case "f":
+			if m.state == stateWork && !m.terminalMode {
+				m.state = stateFollowUps
+				m.followupList = followup.NewListModel(nil)
+				m.followupList.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
+				fuListW, fuListH := followupListDims(m)
+				m.followupList, _ = m.followupList.Update(tea.WindowSizeMsg{Width: fuListW, Height: fuListH})
+				m.followupDetail = followup.NewDetailModel(m.config.KnowledgeDir)
+				m.followupDetail, _ = m.followupDetail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
 				m.focusedPanel = panelLeft
+				return m, followup.LoadIndexCmd(m.config.KnowledgeDir)
+			}
+		case "w":
+			if m.state == stateFollowUps {
+				m.state = stateWork
+				m.terminalMode = false
 				return m, nil
 			}
 		case "esc":
 			// Esc from right panel (detail mode only): back to list.
 			// In terminal mode, esc falls through to spec panel which sends TerminalDetachMsg.
 			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
+				m.focusedPanel = panelLeft
+				return m, nil
+			}
+			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
 				m.focusedPanel = panelLeft
 				return m, nil
 			}
@@ -1002,10 +1184,24 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					return m, tea.EnableMouseCellMotion
 				}
 			}
+			if m.state == stateFollowUps && m.focusedPanel == panelRight {
+				if m.terminalMode {
+					m.terminalMode = false
+					return m, nil
+				}
+				if panel, ok := m.currentFollowupPanel(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
+					m.terminalMode = true
+					return m, tea.EnableMouseCellMotion
+				}
+			}
 		case "tab":
 			// Tab moves focus left→right only. When on the right panel, Tab
 			// falls through to the detail view so it can cycle through tabs.
 			if m.state == stateWork && m.focusedPanel == panelLeft {
+				m.focusedPanel = panelRight
+				return m, nil
+			}
+			if m.state == stateFollowUps && m.focusedPanel == panelLeft {
 				m.focusedPanel = panelRight
 				return m, nil
 			}
@@ -1026,6 +1222,46 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 						}
 					}
 					return m, func() tea.Msg { return work.ChatRequestMsg{Slug: slug, Title: title} }
+				}
+			}
+			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
+				if id := m.followupDetail.CurrentID(); id != "" {
+					msg := followup.FollowupChatRequestMsg{
+						ID:             id,
+						Title:          m.followupDetail.Title(),
+						Source:         m.followupDetail.Source(),
+						Severity:       m.followupDetail.Severity(),
+						FindingExcerpt: m.followupDetail.FindingExcerpt(),
+					}
+					return m, func() tea.Msg { return msg }
+				}
+			}
+		case "p":
+			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
+				id := m.followupDetail.CurrentID()
+				status := m.followupDetail.Status()
+				if id == "" {
+					break
+				}
+				switch status {
+				case "open", "pending", "reviewed":
+					return m, func() tea.Msg { return followup.PromoteRequestMsg{ID: id} }
+				default:
+					m.flashErr = fmt.Sprintf("cannot promote: follow-up is already %s", status)
+				}
+			}
+		case "d":
+			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
+				id := m.followupDetail.CurrentID()
+				status := m.followupDetail.Status()
+				if id == "" {
+					break
+				}
+				switch status {
+				case "open", "pending", "reviewed":
+					return m, func() tea.Msg { return followup.DismissRequestMsg{ID: id} }
+				default:
+					m.flashErr = fmt.Sprintf("cannot dismiss: follow-up is already %s", status)
 				}
 			}
 		}
@@ -1065,6 +1301,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.searchPanel = sp
 		bm, bcmd := m.browser.Update(msg)
 		m.browser = bm
+		fuListW, fuListH := followupListDims(m)
+		fl, _ := m.followupList.Update(tea.WindowSizeMsg{Width: fuListW, Height: fuListH})
+		m.followupList = fl
+		fd, _ := m.followupDetail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+		m.followupDetail = fd
 		m.popup.SetSize(msg.Width, msg.Height)
 
 		return m, tea.Batch(lcmd, dcmd, scmd, bcmd)
@@ -1166,6 +1407,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.specConfirmShortMode = true
 		m.specConfirmSkipConfirm = true
 		m.specConfirmChatMode = false
+		m.specConfirmFollowupMode = false
 		m.specConfirmActive = true
 		m.enableKittyKeyboard()
 		return m, focusCmd
@@ -1188,9 +1430,35 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.specConfirmTitle = msg.Title
 		m.specConfirmInput = ta
 		m.specConfirmChatMode = true
+		m.specConfirmFollowupMode = false
 		m.specConfirmActive = true
 		m.enableKittyKeyboard()
 		return m, focusCmd
+
+	case followup.FollowupChatRequestMsg:
+		// 'c' on a follow-up item: open a chat session about the follow-up.
+		if m.hasSpecPanel(msg.ID) {
+			m.focusedPanel = panelRight
+			return m, nil
+		}
+		ta2 := textarea.New()
+		ta2.Placeholder = ""
+		ta2.Prompt = " "
+		ta2.ShowLineNumbers = false
+		ta2.CharLimit = 0
+		ta2.SetWidth(54)
+		ta2.SetHeight(4)
+		focusCmd2 := ta2.Focus()
+		m.specConfirmSlug = msg.ID
+		m.specConfirmTitle = msg.Title
+		m.specConfirmShortMode = false
+		m.specConfirmSkipConfirm = false
+		m.specConfirmInput = ta2
+		m.specConfirmChatMode = true
+		m.specConfirmFollowupMode = true
+		m.specConfirmActive = true
+		m.enableKittyKeyboard()
+		return m, focusCmd2
 
 	case work.SpecProcessStartedMsg:
 		// PTY subprocess launched — attach PTY to the pre-created spec panel and start polling.
@@ -1214,6 +1482,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.focusedPanel = panelLeft
 				return m, tea.Batch(cmd, tea.EnableMouseCellMotion)
 			}
+			m.terminalMode = true
+			m.focusedPanel = panelRight
+			return m, tea.Batch(cmd, tea.EnableMouseCellMotion)
+		}
+		// Auto-enter terminal focus for follow-up chat sessions.
+		if m.state == stateFollowUps && slug == m.followupDetail.CurrentID() {
 			m.terminalMode = true
 			m.focusedPanel = panelRight
 			return m, tea.Batch(cmd, tea.EnableMouseCellMotion)
@@ -1307,9 +1581,13 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					m.focusedPanel = panelRight
 					wasSpec = true
 				}
+				if m.terminalMode && m.state == stateFollowUps && m.followupDetail.CurrentID() == slug {
+					m.focusedPanel = panelRight
+					wasSpec = true
+				}
 			}
 		}
-		if m.list.CurrentSlug() == slug {
+		if m.list.CurrentSlug() == slug || (m.state == stateFollowUps && m.followupDetail.CurrentID() == slug) {
 			m.terminalMode = false
 		}
 		m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
@@ -1381,6 +1659,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.detail.JumpTo(loc)
 			}
 			return m, nil
+		case contextFollowups:
+			id := msg.Item.ID
+			m.followupList.SetCursorByID(id)
+			m.focusedPanel = panelRight
+			m.terminalMode = m.hasSpecPanel(id)
+			return m, m.followupDetail.SetID(id)
 		}
 
 	case popupSearchResultMsg:
@@ -1400,8 +1684,69 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m.loadDetail(msg.Slug)
 
 	case knowledge.BrowserDismissedMsg:
+		m.state = m.prevState
+		if m.state != stateWork && m.state != stateFollowUps {
+			m.state = stateWork
+		}
+		return m, nil
+
+	case followup.ListDismissedMsg:
 		m.state = stateWork
 		return m, nil
+
+	case followup.FollowUpSelectedMsg:
+		loadCmd := m.followupDetail.SetID(msg.Item.ID)
+		m.focusedPanel = panelRight
+		// Restore terminal mode if a spec panel already exists for this follow-up.
+		m.terminalMode = m.hasSpecPanel(msg.Item.ID)
+		return m, loadCmd
+
+	case followup.LoadDetailMsg:
+		loadCmd := m.followupDetail.SetID(msg.ID)
+		return m, loadCmd
+
+	case followup.PromoteRequestMsg:
+		return m, runPromoteFollowUp(msg.ID)
+
+	case followup.DismissRequestMsg:
+		return m, runDismissFollowUp(msg.ID)
+
+	case followup.IndexLoadedMsg:
+		if msg.Err == nil {
+			prevID := m.followupDetail.CurrentID()
+			m.followupList.SetItems(msg.Items)
+			m.followupList.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
+			// Always sync detail to the current list item after reload.
+			// This handles: initial load (detail empty), post-dismiss/promote
+			// (dismissed item gone, cursor moved to next), and live-reload.
+			if curID := m.followupList.CurrentID(); curID != "" && curID != prevID {
+				loadCmd := m.followupDetail.SetID(curID)
+				return m, loadCmd
+			}
+			// Same ID but content may have changed (e.g. status update) — force reload.
+			if curID := m.followupList.CurrentID(); curID != "" && curID == prevID {
+				m.followupDetail.ClearID()
+				loadCmd := m.followupDetail.SetID(curID)
+				return m, loadCmd
+			}
+			// No visible items remain — clear the detail panel.
+			if m.followupList.CurrentID() == "" {
+				m.followupDetail.ClearID()
+			}
+		}
+		return m, nil
+
+	case followup.DetailLoadedMsg:
+		fd, cmd := m.followupDetail.Update(msg)
+		m.followupDetail = fd
+		return m, cmd
+
+	case followup.ActionCompleteMsg:
+		if msg.Err != nil {
+			m.flashErr = fmt.Sprintf("%s failed: %v", msg.Action, msg.Err)
+		}
+		// Reload index; cursor position is preserved by ListModel.SetItems clamping.
+		return m, followup.LoadIndexCmd(m.config.KnowledgeDir)
 
 	case knowledge.ManifestLoadedMsg:
 		bm, cmd := m.browser.Update(msg)
@@ -1455,6 +1800,37 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case stateKnowledge:
 		bm, cmd := m.browser.Update(msg)
 		m.browser = bm
+		return m, cmd
+	case stateFollowUps:
+		if m.focusedPanel == panelRight && m.terminalMode {
+			// Route to the spec panel (terminal mode) for the currently selected follow-up.
+			id := m.followupDetail.CurrentID()
+			if m.specPanels != nil {
+				if panel, ok := m.specPanels[id]; ok {
+					sm, cmd := panel.Update(msg)
+					m.specPanels[id] = sm
+					return m, cmd
+				}
+			}
+			// No panel for current follow-up — fall back to detail.
+			m.terminalMode = false
+			fd, cmd := m.followupDetail.Update(msg)
+			m.followupDetail = fd
+			return m, cmd
+		}
+		if m.focusedPanel == panelLeft {
+			prevID := m.followupList.CurrentID()
+			fl, cmd := m.followupList.Update(msg)
+			m.followupList = fl
+			newID := m.followupList.CurrentID()
+			if newID != "" && newID != prevID {
+				loadCmd := m.followupDetail.SetID(newID)
+				return m, tea.Batch(cmd, loadCmd)
+			}
+			return m, cmd
+		}
+		fd, cmd := m.followupDetail.Update(msg)
+		m.followupDetail = fd
 		return m, cmd
 	}
 
@@ -1520,6 +1896,8 @@ func (m model) View() string {
 		return m.searchPanel.View()
 	case stateKnowledge:
 		return m.browser.View()
+	case stateFollowUps:
+		base = m.viewFollowUps()
 	default:
 		return ""
 	}
@@ -1544,7 +1922,7 @@ func (m model) View() string {
 
 // viewSplitPane renders the split-pane work view with lazygit-style box borders.
 func (m model) viewSplitPane() string {
-	contentH := m.innerHeight()
+	contentH := m.innerHeight() - 1 // 1 line reserved for tab indicator
 	leftInner := leftPanelWidth
 	rightInner := m.rightPanelWidth()
 
@@ -1672,6 +2050,7 @@ func (m model) viewSplitPane() string {
 	rightBorderChar := rightBS.Render("│")
 
 	var b strings.Builder
+	b.WriteString(renderTabIndicator(m.state, len(m.list.Items()), m.followupList.FollowUpCount(), m.width))
 	b.WriteString("\n")
 	b.WriteString(topRow)
 	b.WriteString("\n")
@@ -1725,7 +2104,7 @@ func (m model) viewSplitPaneTopBottom() string {
 	if m.width <= 0 || m.height <= 0 {
 		return ""
 	}
-	topH := m.topPanelHeight()
+	topH := m.topPanelHeight() - 1 // 1 line reserved for tab indicator
 	bottomH := m.detailPanelHeight()
 	panelW := m.topPanelWidth()
 
@@ -1811,6 +2190,7 @@ func (m model) viewSplitPaneTopBottom() string {
 	}
 
 	var b strings.Builder
+	b.WriteString(renderTabIndicator(m.state, len(m.list.Items()), m.followupList.FollowUpCount(), m.width))
 	b.WriteString("\n")
 
 	// Tab indicator for top (list) panel: active · archived, highlight current mode.
@@ -1913,6 +2293,37 @@ func truncateLine(s string, maxW int) string {
 		}
 	}
 	return "…"
+}
+
+// renderTabIndicator renders a full-width tab row showing "work (N) · follow-ups (N)".
+// The active tab is highlighted; the inactive tab is dimmed. Width is the total line width.
+// Only the key to switch to the inactive view is shown (f when in work view, w when in follow-ups view).
+func renderTabIndicator(activeTab appState, workCount, followupCount, width int) string {
+	activeS := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
+	inactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	hintS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+	var workS, followupS lipgloss.Style
+	var hint string
+	if activeTab == stateFollowUps {
+		workS, followupS = inactiveS, activeS
+		hint = "w  "
+	} else {
+		workS, followupS = activeS, inactiveS
+		hint = "f  "
+	}
+
+	workLabel := fmt.Sprintf("work (%d)", workCount)
+	followupLabel := fmt.Sprintf("follow-ups (%d)", followupCount)
+	sep := sepS.Render(" · ")
+
+	line := "  " + hintS.Render(hint) + workS.Render(workLabel) + sep + followupS.Render(followupLabel)
+	lineW := 2 + 3 + len(workLabel) + 3 + len(followupLabel)
+	if lineW < width {
+		line += strings.Repeat(" ", width-lineW)
+	}
+	return line
 }
 
 // renderBorderTitle renders "─ Title ──────────" filling exactly width chars.
@@ -2079,7 +2490,16 @@ func (m model) renderHelpModal(_ string) string {
 		return k + s.dim.Render(desc)
 	}
 
-	content := sectionS.Render("Work List") + "\n" +
+	content := sectionS.Render("Follow-Ups") + "\n" +
+		row("j / k", "navigate") + "\n" +
+		row("ctrl+a", "toggle active/archived") + "\n" +
+		row("Enter", "open detail") + "\n" +
+		row("p", "promote to work item") + "\n" +
+		row("d", "dismiss") + "\n" +
+		row("c", "chat about follow-up") + "\n" +
+		row("Esc", "exit follow-ups") + "\n" +
+		"\n" +
+		sectionS.Render("Work List") + "\n" +
 		row("j / k", "navigate") + "\n" +
 		row("Enter", "open detail") + "\n" +
 		row("s", "run spec") + "\n" +
@@ -2116,6 +2536,355 @@ func (m model) renderHelpModal(_ string) string {
 			s.dim.Render("  Press ? or Esc to close"))
 
 	return m.placeModal(box)
+}
+
+// viewFollowUps dispatches to the appropriate compositor based on layoutMode.
+func (m model) viewFollowUps() string {
+	if m.layoutMode == config.LayoutTopBottom {
+		return m.viewFollowUpsTopBottom()
+	}
+	return m.viewFollowUpsSideBySide()
+}
+
+// viewFollowUpsSideBySide renders the stateFollowUps split pane: follow-up list on the left,
+// detail pane on the right, using the same compositor pattern as viewSplitPane.
+func (m model) viewFollowUpsSideBySide() string {
+	contentH := m.innerHeight() - 1 // 1 line reserved for tab indicator
+	leftInner := leftPanelWidth
+	rightInner := m.rightPanelWidth()
+
+	activeBorderColor := lipgloss.Color("4")
+	inactiveBorderColor := lipgloss.Color("238")
+
+	leftBorderColor := inactiveBorderColor
+	rightBorderColor := inactiveBorderColor
+	if m.focusedPanel == panelLeft {
+		leftBorderColor = activeBorderColor
+	}
+	if m.focusedPanel == panelRight {
+		rightBorderColor = activeBorderColor
+	}
+
+	leftBS := lipgloss.NewStyle().Foreground(leftBorderColor)
+	rightBS := lipgloss.NewStyle().Foreground(rightBorderColor)
+
+	leftTitleFg := lipgloss.Color("7")
+	if m.focusedPanel == panelLeft {
+		leftTitleFg = activeBorderColor
+	}
+	rightTitleFg := lipgloss.Color("7")
+	if m.focusedPanel == panelRight {
+		rightTitleFg = activeBorderColor
+	}
+	leftTitleS := lipgloss.NewStyle().Foreground(leftTitleFg).Bold(m.focusedPanel == panelLeft)
+	rightTitleS := lipgloss.NewStyle().Foreground(rightTitleFg).Bold(m.focusedPanel == panelRight)
+
+	leftTitle := "Follow-ups"
+	if items := m.followupList.Items(); len(items) > 0 {
+		leftTitle = fmt.Sprintf("Follow-ups (%d)", len(items))
+	}
+	rightTitle := "Detail"
+	if t := m.followupDetail.Title(); t != "" {
+		maxW := rightInner - 6
+		if lipgloss.Width(t) > maxW && maxW > 3 {
+			runes := []rune(t)
+			t = string(runes[:maxW-1]) + "…"
+		}
+		rightTitle = t
+	}
+
+	// Filter annotation: ctrl+a  active · archived, highlight current
+	fuTabActiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	fuTabInactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	fuTabSepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	fuFilter := m.followupList.GetFilterLabel()
+	fuActiveS := fuTabInactiveS
+	if fuFilter == "active" {
+		fuActiveS = fuTabActiveS
+	}
+	fuArchivedS := fuTabInactiveS
+	if fuFilter == "archived" {
+		fuArchivedS = fuTabActiveS
+	}
+	filterAnnot := fuTabSepS.Render("ctrl+a  ") + fuActiveS.Render("active") + fuTabSepS.Render(" · ") + fuArchivedS.Render("archived")
+	filterAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
+
+	// Right panel annotation: show "ctrl+t  detail · terminal" mode indicator when a spec session exists.
+	currentFUSpec, hasCurrentFUSpec := m.currentFollowupPanel()
+	var rightBorderTitle string
+	if hasCurrentFUSpec {
+		activeS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+		inactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+		sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+		var detailS, terminalS lipgloss.Style
+		if m.terminalMode {
+			detailS, terminalS = inactiveS, activeS
+		} else {
+			detailS, terminalS = activeS, inactiveS
+		}
+		termLabel := "terminal"
+		termLabelW := 8
+		if currentFUSpec.IsDone() {
+			termLabel = "terminal (done)"
+			termLabelW = 15
+		}
+		modeAnnot := sepS.Render("ctrl+t  ") + detailS.Render("detail") + sepS.Render(" · ") + terminalS.Render(termLabel)
+		modeAnnotW := 8 + 6 + 3 + termLabelW // "ctrl+t  " + "detail" + " · " + termLabel
+		rightBorderTitle = renderBorderTitleWithAnnot(rightTitle, rightInner, rightTitleS, rightBS, modeAnnot, modeAnnotW)
+	} else {
+		rightBorderTitle = renderBorderTitle(rightTitle, rightInner, rightTitleS, rightBS)
+	}
+
+	topRow := leftBS.Render("┌") +
+		renderBorderTitleWithAnnot(leftTitle, leftInner, leftTitleS, leftBS, filterAnnot, filterAnnotW) +
+		leftBS.Render("┐") +
+		rightBS.Render("┌") +
+		rightBorderTitle +
+		rightBS.Render("┐")
+
+	bottomRow := leftBS.Render("└") +
+		leftBS.Render(strings.Repeat("─", leftInner)) +
+		leftBS.Render("┘") +
+		rightBS.Render("└") +
+		rightBS.Render(strings.Repeat("─", rightInner)) +
+		rightBS.Render("┘")
+
+	leftLines := strings.Split(m.followupList.View(), "\n")
+
+	// Right panel content: terminal mode shows spec panel, otherwise detail view.
+	var rightLines []string
+	if m.terminalMode && hasCurrentFUSpec {
+		rightLines = strings.Split(currentFUSpec.View(), "\n")
+	} else {
+		rightLines = strings.Split(m.followupDetail.View(), "\n")
+	}
+
+	leftBorderChar := leftBS.Render("│")
+	rightBorderChar := rightBS.Render("│")
+
+	var b strings.Builder
+	b.WriteString(renderTabIndicator(stateFollowUps, len(m.list.Items()), m.followupList.FollowUpCount(), m.width))
+	b.WriteString("\n")
+	b.WriteString(topRow)
+	b.WriteString("\n")
+	for i := 0; i < contentH; i++ {
+		left := ""
+		if i < len(leftLines) {
+			left = leftLines[i]
+		}
+		var right string
+		if i < len(rightLines) {
+			if m.terminalMode && hasCurrentFUSpec {
+				right = " " + rightLines[i] // 1-char left buffer; right buffer from padding
+			} else {
+				right = "  " + rightLines[i]
+			}
+		} else {
+			right = "  "
+		}
+
+		lW := lipgloss.Width(left)
+		if lW > leftInner {
+			left = truncateLine(left, leftInner)
+		} else if lW < leftInner {
+			left += strings.Repeat(" ", leftInner-lW)
+		}
+		rW := lipgloss.Width(right)
+		if rW > rightInner {
+			right = truncateLine(right, rightInner)
+		} else if rW < rightInner {
+			right += strings.Repeat(" ", rightInner-rW)
+		}
+
+		b.WriteString(leftBorderChar)
+		b.WriteString(left)
+		b.WriteString(leftBorderChar)
+		b.WriteString(rightBorderChar)
+		b.WriteString(right)
+		b.WriteString(rightBorderChar)
+		b.WriteString("\n")
+	}
+	b.WriteString(bottomRow)
+	b.WriteString("\n")
+	b.WriteString(m.renderStatusBar(m.width))
+	return b.String()
+}
+
+// followupListDims returns the width and height to pass to followupList based on layoutMode.
+func followupListDims(m model) (int, int) {
+	if m.layoutMode == config.LayoutTopBottom {
+		return m.topPanelWidth(), m.topPanelHeight()
+	}
+	return leftPanelWidth, m.innerHeight()
+}
+
+// viewFollowUpsTopBottom renders the stateFollowUps stacked layout: list on top, detail on bottom.
+func (m model) viewFollowUpsTopBottom() string {
+	if m.width <= 0 || m.height <= 0 {
+		return ""
+	}
+	topH := m.topPanelHeight() - 1 // 1 line reserved for tab indicator
+	bottomH := m.detailPanelHeight()
+	panelW := m.topPanelWidth()
+
+	activeBorderColor := lipgloss.Color("4")
+	inactiveBorderColor := lipgloss.Color("238")
+
+	topBorderColor := inactiveBorderColor
+	bottomBorderColor := inactiveBorderColor
+	if m.focusedPanel == panelLeft {
+		topBorderColor = activeBorderColor
+	}
+	if m.focusedPanel == panelRight {
+		bottomBorderColor = activeBorderColor
+	}
+
+	topBS := lipgloss.NewStyle().Foreground(topBorderColor)
+	bottomBS := lipgloss.NewStyle().Foreground(bottomBorderColor)
+
+	topTitleFg := lipgloss.Color("7")
+	if m.focusedPanel == panelLeft {
+		topTitleFg = activeBorderColor
+	}
+	bottomTitleFg := lipgloss.Color("7")
+	if m.focusedPanel == panelRight {
+		bottomTitleFg = activeBorderColor
+	}
+	topTitleS := lipgloss.NewStyle().Foreground(topTitleFg).Bold(m.focusedPanel == panelLeft)
+	bottomTitleS := lipgloss.NewStyle().Foreground(bottomTitleFg).Bold(m.focusedPanel == panelRight)
+
+	topTitle := "Follow-ups"
+	if items := m.followupList.Items(); len(items) > 0 {
+		topTitle = fmt.Sprintf("Follow-ups (%d)", len(items))
+	}
+	bottomTitle := "Detail"
+	if t := m.followupDetail.Title(); t != "" {
+		maxW := panelW - 6
+		if lipgloss.Width(t) > maxW && maxW > 3 {
+			runes := []rune(t)
+			t = string(runes[:maxW-1]) + "…"
+		}
+		bottomTitle = t
+	}
+
+	// Filter annotation for top panel: ctrl+a  active · archived, highlight current
+	fuTabActiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	fuTabInactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	fuTabSepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	fuFilter := m.followupList.GetFilterLabel()
+	fuActiveS := fuTabInactiveS
+	if fuFilter == "active" {
+		fuActiveS = fuTabActiveS
+	}
+	fuArchivedS := fuTabInactiveS
+	if fuFilter == "archived" {
+		fuArchivedS = fuTabActiveS
+	}
+	filterAnnot := fuTabSepS.Render("ctrl+a  ") + fuActiveS.Render("active") + fuTabSepS.Render(" · ") + fuArchivedS.Render("archived")
+	filterAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
+
+	// Bottom panel annotation: show "ctrl+t  detail · terminal" when a spec session exists.
+	currentFUSpecTB, hasCurrentFUSpecTB := m.currentFollowupPanel()
+	var bottomBorderTitle string
+	if hasCurrentFUSpecTB {
+		activeS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+		inactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+		sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+		var detailS, terminalS lipgloss.Style
+		if m.terminalMode {
+			detailS, terminalS = inactiveS, activeS
+		} else {
+			detailS, terminalS = activeS, inactiveS
+		}
+		termLabel := "terminal"
+		termLabelW := 8
+		if currentFUSpecTB.IsDone() {
+			termLabel = "terminal (done)"
+			termLabelW = 15
+		}
+		modeAnnot := sepS.Render("ctrl+t  ") + detailS.Render("detail") + sepS.Render(" · ") + terminalS.Render(termLabel)
+		modeAnnotW := 8 + 6 + 3 + termLabelW // "ctrl+t  " + "detail" + " · " + termLabel
+		bottomBorderTitle = renderBorderTitleWithAnnot(bottomTitle, panelW, bottomTitleS, bottomBS, modeAnnot, modeAnnotW)
+	} else {
+		bottomBorderTitle = renderBorderTitle(bottomTitle, panelW, bottomTitleS, bottomBS)
+	}
+
+	topBorderChar := topBS.Render("│")
+	bottomBorderChar := bottomBS.Render("│")
+
+	topLines := strings.Split(m.followupList.View(), "\n")
+
+	// Bottom panel content: terminal mode shows spec panel, otherwise detail view.
+	var bottomLines []string
+	if m.terminalMode && hasCurrentFUSpecTB {
+		bottomLines = strings.Split(currentFUSpecTB.View(), "\n")
+	} else {
+		bottomLines = strings.Split(m.followupDetail.View(), "\n")
+	}
+
+	padLine := func(line string) string {
+		w := lipgloss.Width(line)
+		if w > panelW {
+			return truncateLine(line, panelW)
+		}
+		if w < panelW {
+			return line + strings.Repeat(" ", panelW-w)
+		}
+		return line
+	}
+
+	var b strings.Builder
+	b.WriteString(renderTabIndicator(stateFollowUps, len(m.list.Items()), m.followupList.FollowUpCount(), m.width))
+	b.WriteString("\n")
+
+	// === Top panel (list) ===
+	b.WriteString(topBS.Render("┌"))
+	b.WriteString(renderBorderTitleWithAnnot(topTitle, panelW, topTitleS, topBS, filterAnnot, filterAnnotW))
+	b.WriteString(topBS.Render("┐"))
+	b.WriteString("\n")
+	for i := 0; i < topH; i++ {
+		line := ""
+		if i < len(topLines) {
+			line = topLines[i]
+		}
+		b.WriteString(topBorderChar)
+		b.WriteString(padLine(line))
+		b.WriteString(topBorderChar)
+		b.WriteString("\n")
+	}
+	b.WriteString(topBS.Render("└"))
+	b.WriteString(topBS.Render(strings.Repeat("─", panelW)))
+	b.WriteString(topBS.Render("┘"))
+	b.WriteString("\n")
+
+	// === Bottom panel (detail or terminal) ===
+	b.WriteString(bottomBS.Render("┌"))
+	b.WriteString(bottomBorderTitle)
+	b.WriteString(bottomBS.Render("┐"))
+	b.WriteString("\n")
+	for i := 0; i < bottomH; i++ {
+		var content string
+		if i < len(bottomLines) {
+			if m.terminalMode && hasCurrentFUSpecTB {
+				content = " " + bottomLines[i] // 1-char left buffer; right buffer from padding
+			} else {
+				content = "  " + bottomLines[i]
+			}
+		} else {
+			content = "  "
+		}
+		b.WriteString(bottomBorderChar)
+		b.WriteString(padLine(content))
+		b.WriteString(bottomBorderChar)
+		b.WriteString("\n")
+	}
+	b.WriteString(bottomBS.Render("└"))
+	b.WriteString(bottomBS.Render(strings.Repeat("─", panelW)))
+	b.WriteString(bottomBS.Render("┘"))
+	b.WriteString("\n")
+
+	b.WriteString(m.renderStatusBar(m.width))
+	return b.String()
 }
 
 // renderStatusBar renders a single-line context-sensitive keybinding hint bar.
@@ -2177,6 +2946,32 @@ func (m model) renderStatusBar(width int) string {
 			hint("/", "search"),
 			hint("Esc", "exit"),
 			hint("?", "help"),
+		}
+	case stateFollowUps:
+		if m.focusedPanel == panelLeft {
+			hints = []string{
+				hint("j/k", "navigate"),
+				hint("ctrl+a", "active/archived"),
+				hint("Enter", "detail"),
+				hint("w", "work list"),
+				hint("Esc", "exit"),
+				hint("?", "help"),
+			}
+		} else if m.terminalMode {
+			hints = []string{
+				hint("ctrl+t", "detail"),
+				hint("Esc", "back to list"),
+				hint("Ctrl+c", "terminate"),
+			}
+		} else {
+			hints = []string{
+				hint("p", "promote"),
+				hint("d", "dismiss"),
+				hint("c", "chat"),
+				hint("j/k", "scroll"),
+				hint("h/Esc", "back to list"),
+				hint("?", "help"),
+			}
 		}
 	}
 

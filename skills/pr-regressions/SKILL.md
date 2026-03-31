@@ -78,13 +78,28 @@ git log --oneline --follow -5 -- <deleted-file-path>
 - Were default values, fallback paths, or backward-compatibility shims removed?
 - Did parameter changes narrow the accepted input range?
 
+**3e. Finding grounding** — For each candidate finding, state what capability is lost and who relied on it:
+- What specific behavior or protection did the deleted/modified code provide?
+- Which callers, consumers, or users depended on that capability?
+- What is the observable consequence of the loss (error propagation, silent data loss, broken flow)?
+
+A finding that names a deletion without identifying the lost capability and its dependents is not ready to report. Ground every finding before moving to Step 4.
+
+| | Example |
+|---|---|
+| **Ungrounded** | "removed error handling" |
+| **Grounded** | "the removed `catch` block at line 87 handled network timeouts — callers in `sync.go` depend on this to retry; without it, transient failures will propagate as unrecoverable errors" |
+
 **Scoping for large diffs:** If more than ~10 files have deletions or modifications, prioritize: (1) files with the largest deletion count, (2) files touching shared interfaces or exports, (3) files modifying error handling or fallback logic. Apply full methodology to priority files; do a lighter pass on the rest.
 
 ## Step 4: Knowledge Enrichment
 
-Read the enrichment protocol:
+Read review protocol sections (enrichment, escalation, severity, findings format):
 ```bash
-cat ~/.lore/claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/review-protocol/enrichment.md
+cat ~/.lore/claude-md/review-protocol/escalation.md
+cat ~/.lore/claude-md/review-protocol/severity.md
+cat ~/.lore/claude-md/review-protocol/findings-format.md
 ```
 
 For each finding, query the knowledge store:
@@ -96,14 +111,9 @@ Attach relevant citations as `knowledge_context` entries in the finding. Follow 
 
 ### Investigation Escalation
 
-If a finding involves cross-boundary regression concerns (deleted code that may be depended on by modules outside the diff) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `70-review-protocol.md`. Budget: maximum 2 escalations per lens run.
+If a finding involves cross-boundary regression concerns (deleted code that may be depended on by modules outside the diff) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `claude-md/review-protocol/escalation.md`. Budget: maximum 2 escalations per lens run.
 
 ## Step 5: Write Findings
-
-Read the severity classification and findings output format from:
-```bash
-cat ~/.lore/claude-md/70-review-protocol.md
-```
 
 **5a. Build findings JSON** conforming to the Findings Output Format schema:
 ```json

@@ -48,9 +48,11 @@ From the fetched data, identify:
 
 ## Step 3: Interface Clarity Analysis
 
-Read the shared review protocol (severity classification, enrichment, findings format):
+Read review protocol sections (severity classification, enrichment, findings format):
 ```bash
-cat ~/.lore/claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/review-protocol/severity.md
+cat ~/.lore/claude-md/review-protocol/enrichment.md
+cat ~/.lore/claude-md/review-protocol/findings-format.md
 ```
 
 For each file with interface changes, apply this methodology:
@@ -82,6 +84,18 @@ For each file with interface changes, apply this methodology:
 - Does the interface make the common case simple and the uncommon case possible without exposing footguns in the primary path?
 - Are there interface shapes that would require callers to maintain invariants the implementation should own?
 
+**3f. Finding grounding** — For each candidate finding, state the specific misuse the unclear interface enables before writing it up:
+- What about this interface invites incorrect use?
+- What concrete mistake would a caller make, and where in the codebase are likely callers?
+- What is the user-visible or system-visible consequence of that misuse?
+
+A finding without a concrete misuse scenario is not ready to report. Ground every finding before moving to Step 4.
+
+| | Example |
+|---|---|
+| **Ungrounded** | "parameter name is unclear" |
+| **Grounded** | "`timeout` parameter accepts milliseconds but the name suggests seconds — callers in `client.go:45` and `worker.go:92` both pass `30` (likely intending 30 seconds), which would set a 30ms timeout causing premature failures" |
+
 **Scoping for large diffs:** If more than ~10 files have interface changes, prioritize: (1) files that define or modify public APIs or exported types, (2) files at module or package boundaries, (3) files with the most callers. Apply full methodology to priority files; do a lighter pass on the rest.
 
 ## Step 4: Knowledge Enrichment
@@ -95,11 +109,11 @@ Attach relevant citations as `knowledge_context` entries in the finding. Follow 
 
 ### Investigation Escalation
 
-If a finding involves cross-boundary interface concerns (e.g., a naming pattern that affects how multiple callers use a shared abstraction) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `70-review-protocol.md`. Budget: maximum 2 escalations per lens run.
+If a finding involves cross-boundary interface concerns (e.g., a naming pattern that affects how multiple callers use a shared abstraction) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `claude-md/review-protocol/escalation.md`. Budget: maximum 2 escalations per lens run.
 
 ## Step 5: Write Findings
 
-**5a. Build findings JSON** conforming to the Findings Output Format schema in `claude-md/70-review-protocol.md`:
+**5a. Build findings JSON** conforming to the Findings Output Format schema in `claude-md/review-protocol/findings-format.md`:
 ```json
 {
   "lens": "interface-clarity",
