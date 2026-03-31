@@ -1,14 +1,14 @@
 {
   "heuristic_hits": [
-    {"index": 4, "role": "assistant", "trigger": "debug-root-cause"},
-    {"index": 4, "role": "assistant", "trigger": "self-correction"},
-    {"index": 5, "role": "user", "trigger": "user-correction"},
-    {"index": 8, "role": "assistant", "trigger": "gotcha"},
-    {"index": 9, "role": "assistant", "trigger": "design-decision"}
+    {"index": 6, "role": "assistant", "trigger": "debug-root-cause"},
+    {"index": 6, "role": "assistant", "trigger": "self-correction"},
+    {"index": 7, "role": "user", "trigger": "user-correction"},
+    {"index": 10, "role": "assistant", "trigger": "gotcha"},
+    {"index": 11, "role": "assistant", "trigger": "design-decision"}
   ],
   "structural_hits": [
-    {"index": 3, "role": "assistant", "trigger": "structural-iterative-debug"},
-    {"index": 6, "role": "assistant", "trigger": "structural-investigation"},
-    {"index": 7, "role": "assistant", "trigger": "structural-test-fix"}
+    {"index": 5, "role": "assistant", "trigger": "structural-iterative-debug"},
+    {"index": 8, "role": "assistant", "trigger": "structural-investigation"},
+    {"index": 9, "role": "assistant", "trigger": "structural-test-fix"}
   ]
 }

@@ -1,6 +1,8 @@
 {"message": {"role": "assistant", "content": [{"type": "text", "text": "Let me read the file."}, {"type": "tool_use", "name": "Read", "input": {"file_path": "/src/config.py"}}]}}
 {"message": {"role": "assistant", "content": [{"type": "text", "text": "Checking the module."}, {"type": "tool_use", "name": "Grep", "input": {"pattern": "load"}}]}}
 {"message": {"role": "assistant", "content": [{"type": "text", "text": "Searching for usage."}, {"type": "tool_use", "name": "Bash", "input": {"command": "grep -r load"}}]}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "Checking related imports."}, {"type": "tool_use", "name": "Glob", "input": {"pattern": "src/**/*.py"}}]}}
+{"message": {"role": "assistant", "content": [{"type": "text", "text": "Tracing the call chain."}, {"type": "tool_use", "name": "Grep", "input": {"pattern": "config\\.load"}}]}}
 {"message": {"role": "assistant", "content": [{"type": "text", "text": "Reading again."}, {"type": "tool_use", "name": "Read", "input": {"file_path": "/src/config.py"}}]}}
 {"message": {"role": "assistant", "content": [{"type": "text", "text": "I initially assumed the config was loaded eagerly, but it turns out it uses lazy initialization. The root cause was a missing null check in the loader."}]}}
 {"message": {"role": "user", "content": [{"type": "text", "text": "No, that's not correct. You should actually use the v2 API endpoint instead."}]}}
