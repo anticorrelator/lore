@@ -282,6 +282,11 @@ GOTCHA_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Tools that indicate agent team coordination
+TEAM_TOOLS = frozenset({"Agent", "SendMessage"})
+TEAM_COOLDOWN = 5  # messages after last team tool use to still exclude
+
+
 # All heuristic patterns with labels
 HEURISTIC_PATTERNS = [
     ("self-correction", SELF_CORRECTION_RE),
@@ -305,12 +310,80 @@ def _has_system_reminder(text_blocks):
     return any("<system-reminder>" in t for t in text_blocks)
 
 
-def scan_heuristics(messages):
+def _has_teammate_message(text_blocks):
+    """Check if any text block contains a <teammate-message> tag."""
+    return any("<teammate-message" in t for t in text_blocks)
+
+
+# ---------------------------------------------------------------------------
+# Team session detection — adjust behavior for Agent/SendMessage workflows
+# ---------------------------------------------------------------------------
+
+def _is_team_session(messages):
+    """Check if the session involves agent teams (Agent/SendMessage tool usage).
+
+    Returns True if any message in the session used Agent or SendMessage tools.
+    """
+    return any(
+        TEAM_TOOLS & set(m["tool_names"])
+        for m in messages if m["has_tool_use"]
+    )
+
+
+def _build_team_exclusion_set(messages):
+    """Build set of assistant message indices to exclude from heuristic scanning.
+
+    In team sessions, assistant messages between the first Agent/SendMessage call
+    and TEAM_COOLDOWN messages after the last such call are excluded. These messages
+    contain synthesis of agent results and routinely match heuristic trigger patterns
+    (e.g. "the root cause was...", "we chose X because...") without representing
+    independent reactive discoveries.
+
+    Uses message list positions (not JSONL line numbers) for the window, since
+    consecutive messages can be many line numbers apart in real transcripts.
+
+    Returns an empty set for non-team sessions.
+    """
+    # Find list positions of team tool messages
+    team_positions = [
+        pos for pos, m in enumerate(messages)
+        if m["has_tool_use"] and TEAM_TOOLS & set(m["tool_names"])
+    ]
+    if not team_positions:
+        return set()
+
+    first_pos, last_pos = team_positions[0], team_positions[-1]
+    cooldown_end = last_pos + TEAM_COOLDOWN
+
+    return {
+        m["index"] for pos, m in enumerate(messages)
+        if m["role"] == "assistant" and first_pos <= pos <= cooldown_end
+    }
+
+
+def _count_lead_tool_uses(messages):
+    """Count tool uses from the lead agent, excluding pure Agent/SendMessage messages.
+
+    Messages that contain ONLY Agent/SendMessage tool calls are excluded.
+    Messages with a mix of team and non-team tools (e.g. Agent + Read) are counted.
+    """
+    return sum(
+        1 for m in messages
+        if m["has_tool_use"] and m["tool_names"]
+        and not all(t in TEAM_TOOLS for t in m["tool_names"])
+    )
+
+
+def scan_heuristics(messages, team_exclusions=None):
     """Scan messages for heuristic trigger patterns.
 
     Excludes messages containing <system-reminder> tags (coordination noise)
     and tool_result messages from USER_PATTERNS matching (teammate output,
     not user corrections).
+
+    When team_exclusions is provided (set of message indices), assistant messages
+    at those indices are skipped — they contain synthesis of agent findings, not
+    independent reactive discoveries.
 
     Returns list of dicts: {index, role, trigger, matched_text}
     """
@@ -326,6 +399,9 @@ def scan_heuristics(messages):
             continue
 
         if msg["role"] == "assistant":
+            # In team sessions, skip assistant messages in agent coordination window
+            if team_exclusions and msg["index"] in team_exclusions:
+                continue
             for label, pattern in HEURISTIC_PATTERNS:
                 match = pattern.search(full_text)
                 if match:
@@ -341,9 +417,11 @@ def scan_heuristics(messages):
                     })
 
         elif msg["role"] == "user":
-            # Skip tool_result messages — they contain teammate output,
-            # not user corrections
+            # Skip tool_result messages and teammate messages — they contain
+            # agent output, not user corrections
             if msg.get("is_tool_result", False):
+                continue
+            if _has_teammate_message(msg["text_blocks"]):
                 continue
             for label, pattern in USER_PATTERNS:
                 match = pattern.search(full_text)
@@ -407,7 +485,7 @@ def scan_structural_signals(messages, transcript_path="", config=None):
             if window_start <= j < idx
             and INVESTIGATION_TOOLS & set(msg_by_index[j]["tool_names"])
         )
-        if invest_count >= 3:
+        if invest_count >= 5:
             hits.append({
                 "index": idx,
                 "role": "assistant",
@@ -953,9 +1031,15 @@ def main():
     if not messages:
         sys.exit(0)
 
+    # Detect team sessions (Agent/SendMessage usage) for adjusted behavior
+    is_team = _is_team_session(messages)
+
     # Guard 2: Skip trivial sessions (fewer than min_tool_uses tool uses)
+    # For team sessions, only count lead tool uses — Agent/SendMessage calls
+    # inflate the count without representing substantive lead work
     tool_use_count = count_tool_uses(messages)
-    if tool_use_count < config["min_tool_uses"]:
+    effective_tool_count = _count_lead_tool_uses(messages) if is_team else tool_use_count
+    if effective_tool_count < config["min_tool_uses"]:
         sys.exit(0)
 
     # Guard 3: Lightweight dedup -- if captures already ran this session,
@@ -989,10 +1073,16 @@ def main():
                 file=sys.stderr,
             )
 
-    # Heuristic pattern scan (regex + structural)
-    heuristic_hits = scan_heuristics(messages)
-    structural_hits = scan_structural_signals(messages, transcript_path=transcript_path, config=config)
-    heuristic_hits = heuristic_hits + structural_hits
+    # Heuristic pattern scan — in team sessions, exclude agent coordination window
+    team_exclusions = _build_team_exclusion_set(messages) if is_team else None
+    heuristic_hits = scan_heuristics(messages, team_exclusions=team_exclusions)
+
+    # Structural signals — skip entirely in team sessions. Agent workflows
+    # routinely produce investigation-then-fix, test-fix, and synthesis patterns
+    # that are normal coordination, not debugging discoveries.
+    if not is_team:
+        structural_hits = scan_structural_signals(messages, transcript_path=transcript_path, config=config)
+        heuristic_hits = heuristic_hits + structural_hits
     if not heuristic_hits:
         sys.exit(0)
 
@@ -1005,16 +1095,44 @@ def main():
     if not candidates:
         sys.exit(0)
 
+    # Guard 5: Filter out candidates whose message ranges were already evaluated
+    # (prevents recurring false positives when _pending_captures/ is deleted but
+    # the same transcript messages keep triggering the same heuristic patterns)
+    evaluated_path = os.path.join(knowledge_dir, "_evaluated_ranges.json")
+    evaluated_ranges = set()
+    if os.path.isfile(evaluated_path):
+        try:
+            with open(evaluated_path, "r", encoding="utf-8") as f:
+                evaluated_ranges = set(tuple(r) for r in json.load(f))
+        except (json.JSONDecodeError, OSError):
+            evaluated_ranges = set()
+
+    candidates = [
+        c for c in candidates
+        if (c.get("heuristic_index", 0), c.get("novelty_index", 0)) not in evaluated_ranges
+    ]
+    if not candidates:
+        sys.exit(0)
+
     # If captures already ran and we only have weak candidates, skip
     if already_captured and len(candidates) <= 1:
         sys.exit(0)
+
+    # Record evaluated ranges so we don't re-trigger on the same messages
+    for c in candidates:
+        evaluated_ranges.add((c.get("heuristic_index", 0), c.get("novelty_index", 0)))
+    try:
+        with open(evaluated_path, "w", encoding="utf-8") as f:
+            json.dump(sorted(list(r) for r in evaluated_ranges), f)
+    except OSError:
+        pass  # best-effort
 
     # Write individual candidate files for agent evaluation at next session start
     write_pending_captures(knowledge_dir, candidates, transcript_path=transcript_path, messages=messages, config=config)
 
     # Decision: block only if session is substantial (>max_tool_uses tool uses)
-    # This avoids interrupting quick sessions
-    if tool_use_count > config["max_tool_uses"]:
+    # For team sessions, use effective (lead-only) tool count
+    if effective_tool_count > config["max_tool_uses"]:
         reason_parts = [
             f"Detected {len(candidates)} potential uncaptured insight(s):",
         ]

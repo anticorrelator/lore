@@ -1260,3 +1260,319 @@ class TestAdaptiveFalseNoChange:
                 str(tmp_path), config_on["novelty_threshold"]
             )
         assert config_on["novelty_threshold"] == -0.5  # adjusted for young store
+
+
+# ---------------------------------------------------------------------------
+# Test: team session detection and filtering
+# ---------------------------------------------------------------------------
+
+class TestTeamSessionDetection:
+    """Tests for _is_team_session(), _count_lead_tool_uses(),
+    and _build_team_exclusion_set() — helpers that detect agent team usage
+    and adjust stop hook behavior to prevent false positives."""
+
+    def _make_msg(self, role, text, index=0, tool_names=None, has_tool_use=False, is_tool_result=False):
+        return {
+            "index": index,
+            "role": role,
+            "text_blocks": [text],
+            "has_tool_use": has_tool_use,
+            "is_tool_result": is_tool_result,
+            "tool_names": tool_names or [],
+        }
+
+    # --- _is_team_session ---
+
+    def test_team_session_with_agent_tool(self):
+        """Session with Agent tool use is detected as team session."""
+        messages = [
+            self._make_msg("assistant", "Spawning agent", index=0, tool_names=["Agent"], has_tool_use=True),
+            self._make_msg("user", "agent result", index=1, is_tool_result=True),
+        ]
+        assert snc._is_team_session(messages) is True
+
+    def test_team_session_with_send_message(self):
+        """Session with SendMessage tool use is detected as team session."""
+        messages = [
+            self._make_msg("assistant", "Sending", index=0, tool_names=["SendMessage"], has_tool_use=True),
+        ]
+        assert snc._is_team_session(messages) is True
+
+    def test_non_team_session(self):
+        """Session with only Read/Edit/Bash is NOT a team session."""
+        messages = [
+            self._make_msg("assistant", "Reading", index=0, tool_names=["Read"], has_tool_use=True),
+            self._make_msg("assistant", "Editing", index=1, tool_names=["Edit"], has_tool_use=True),
+            self._make_msg("assistant", "Running", index=2, tool_names=["Bash"], has_tool_use=True),
+        ]
+        assert snc._is_team_session(messages) is False
+
+    def test_empty_session_is_not_team(self):
+        """Empty message list is not a team session."""
+        assert snc._is_team_session([]) is False
+
+    def test_no_tool_use_is_not_team(self):
+        """Session with no tool uses is not a team session."""
+        messages = [
+            self._make_msg("assistant", "Hello", index=0),
+            self._make_msg("user", "Hi", index=1),
+        ]
+        assert snc._is_team_session(messages) is False
+
+    # --- _count_lead_tool_uses ---
+
+    def test_lead_count_excludes_pure_agent_messages(self):
+        """Pure Agent/SendMessage messages are not counted."""
+        messages = [
+            self._make_msg("assistant", "Read file", index=0, tool_names=["Read"], has_tool_use=True),
+            self._make_msg("assistant", "Spawn agent", index=1, tool_names=["Agent"], has_tool_use=True),
+            self._make_msg("assistant", "Send msg", index=2, tool_names=["SendMessage"], has_tool_use=True),
+            self._make_msg("assistant", "Edit file", index=3, tool_names=["Edit"], has_tool_use=True),
+        ]
+        assert snc._count_lead_tool_uses(messages) == 2  # Read + Edit
+
+    def test_lead_count_includes_mixed_tool_messages(self):
+        """Messages with both Agent and other tools ARE counted."""
+        messages = [
+            self._make_msg("assistant", "Agent+Read", index=0, tool_names=["Agent", "Read"], has_tool_use=True),
+        ]
+        assert snc._count_lead_tool_uses(messages) == 1
+
+    def test_lead_count_all_non_team(self):
+        """All non-team tool messages are counted."""
+        messages = [
+            self._make_msg("assistant", "Step 1", index=i, tool_names=["Bash"], has_tool_use=True)
+            for i in range(5)
+        ]
+        assert snc._count_lead_tool_uses(messages) == 5
+
+    def test_lead_count_all_team(self):
+        """All-Agent session counts as 0 lead tool uses."""
+        messages = [
+            self._make_msg("assistant", "Agent", index=i, tool_names=["Agent"], has_tool_use=True)
+            for i in range(5)
+        ]
+        assert snc._count_lead_tool_uses(messages) == 0
+
+    def test_lead_count_skips_non_tool_messages(self):
+        """Messages without tool_use are not counted regardless of tool_names."""
+        messages = [
+            self._make_msg("assistant", "No tool use", index=0, tool_names=["Read"], has_tool_use=False),
+        ]
+        assert snc._count_lead_tool_uses(messages) == 0
+
+    # --- _build_team_exclusion_set ---
+
+    def test_exclusion_set_covers_agent_window(self):
+        """Assistant messages from first Agent call to TEAM_COOLDOWN messages after are excluded.
+
+        Uses position-based window (not JSONL line numbers), so sparse indices
+        don't shrink the effective cooldown.
+        """
+        # Positions:  0        1(Agent)  2        3         4         5         6         7
+        messages = [
+            self._make_msg("assistant", "Before agents", index=0, tool_names=["Read"], has_tool_use=True),
+            self._make_msg("assistant", "Spawn agent", index=50, tool_names=["Agent"], has_tool_use=True),
+            self._make_msg("user", "Agent result", index=80, is_tool_result=True),
+            self._make_msg("assistant", "Synthesize findings", index=90),
+            self._make_msg("assistant", "More synthesis", index=100),
+            self._make_msg("assistant", "Still in cooldown", index=110),
+            self._make_msg("assistant", "Last in cooldown", index=120),
+            self._make_msg("assistant", "After cooldown", index=200),
+        ]
+        exclusions = snc._build_team_exclusion_set(messages)
+        # Position 0 (index=0) is before the Agent call at position 1 — NOT excluded
+        assert 0 not in exclusions
+        # Positions 1-6 are within the window (Agent at pos 1, cooldown=5, end=6)
+        assert 90 in exclusions   # position 3 — synthesis
+        assert 100 in exclusions  # position 4
+        assert 110 in exclusions  # position 5
+        assert 120 in exclusions  # position 6 — last in cooldown
+        # Position 7 (index=200) is past cooldown — NOT excluded
+        assert 200 not in exclusions
+
+    def test_exclusion_set_uses_positions_not_line_numbers(self):
+        """Window uses message list positions, not JSONL line numbers.
+
+        With sparse indices (real transcripts have gaps), a line-number-based
+        window would miss messages that are nearby in the conversation but
+        have distant line numbers.
+        """
+        messages = [
+            self._make_msg("assistant", "Agent call", index=10, tool_names=["Agent"], has_tool_use=True),
+            self._make_msg("user", "Result", index=500, is_tool_result=True),
+            self._make_msg("assistant", "Synthesis", index=900),
+        ]
+        exclusions = snc._build_team_exclusion_set(messages)
+        # Despite index=900 being far from index=10, it's at position 2
+        # which is within TEAM_COOLDOWN (5) of position 0 — should be excluded
+        assert 900 in exclusions
+
+    def test_exclusion_set_empty_for_non_team(self):
+        """Non-team sessions produce empty exclusion set."""
+        messages = [
+            self._make_msg("assistant", "Read", index=0, tool_names=["Read"], has_tool_use=True),
+            self._make_msg("assistant", "Edit", index=1, tool_names=["Edit"], has_tool_use=True),
+        ]
+        assert snc._build_team_exclusion_set(messages) == set()
+
+    def test_exclusion_set_only_excludes_assistant_messages(self):
+        """User messages in the window are NOT excluded (handled separately)."""
+        messages = [
+            self._make_msg("assistant", "Spawn", index=5, tool_names=["Agent"], has_tool_use=True),
+            self._make_msg("user", "Agent result", index=6, is_tool_result=True),
+            self._make_msg("assistant", "Synthesis", index=7),
+        ]
+        exclusions = snc._build_team_exclusion_set(messages)
+        assert 6 not in exclusions  # user message, not excluded
+        assert 7 in exclusions  # assistant in window
+
+
+# ---------------------------------------------------------------------------
+# Test: team session heuristic filtering with exclusions
+# ---------------------------------------------------------------------------
+
+class TestTeamSessionHeuristicFiltering:
+    """Tests that scan_heuristics() correctly filters assistant messages
+    in team sessions while preserving user correction detection."""
+
+    def _make_msg(self, role, text, index=0, tool_names=None, has_tool_use=False, is_tool_result=False):
+        return {
+            "index": index,
+            "role": role,
+            "text_blocks": [text],
+            "has_tool_use": has_tool_use,
+            "is_tool_result": is_tool_result,
+            "tool_names": tool_names or [],
+        }
+
+    def test_excluded_assistant_messages_not_scanned(self):
+        """Assistant messages in team_exclusions are skipped for heuristic patterns."""
+        messages = [
+            self._make_msg(
+                "assistant",
+                "The root cause was a race condition in the connection pool.",
+                index=7,
+            ),
+        ]
+        # Without exclusions — should match
+        hits_without = snc.scan_heuristics(messages)
+        assert len(hits_without) > 0
+
+        # With exclusions — should NOT match
+        hits_with = snc.scan_heuristics(messages, team_exclusions={7})
+        assert len(hits_with) == 0
+
+    def test_non_excluded_assistant_messages_still_scanned(self):
+        """Assistant messages NOT in team_exclusions are scanned normally."""
+        messages = [
+            self._make_msg(
+                "assistant",
+                "I was wrong about the cache. It turns out it uses lazy init.",
+                index=20,
+            ),
+        ]
+        hits = snc.scan_heuristics(messages, team_exclusions={5, 6, 7})
+        assert len(hits) > 0
+        assert any(h["trigger"] == "self-correction" for h in hits)
+
+    def test_user_corrections_still_detected_in_team_sessions(self):
+        """User corrections are still detected even when team_exclusions is set."""
+        messages = [
+            self._make_msg(
+                "user",
+                "No, that's not correct. You should actually use the v2 API.",
+                index=3,
+            ),
+        ]
+        hits = snc.scan_heuristics(messages, team_exclusions={5, 6, 7, 8})
+        assert len(hits) > 0
+        assert any(h["trigger"] == "user-correction" for h in hits)
+
+    def test_teammate_messages_still_filtered_in_team_sessions(self):
+        """Teammate messages in user role are still filtered (double protection)."""
+        messages = [
+            self._make_msg(
+                "user",
+                '<teammate-message from="reviewer-1">No, you should use the v2 API instead</teammate-message>',
+                index=3,
+            ),
+        ]
+        hits = snc.scan_heuristics(messages, team_exclusions={5, 6, 7})
+        assert len(hits) == 0
+
+    def test_realistic_team_conversation(self):
+        """End-to-end: a realistic team session with agent coordination.
+
+        Agent call is at list position 1. With TEAM_COOLDOWN=5 the exclusion
+        window covers positions 1-6.  We pad with filler messages so the
+        post-cooldown discovery lands at position 7+.
+        """
+        messages = [
+            # pos 0 — Lead reads files (before agent coordination)
+            self._make_msg("assistant", "Let me read the code.", index=0, tool_names=["Read"], has_tool_use=True),
+            # pos 1 — Lead spawns agents
+            self._make_msg("assistant", "Spawning review team.", index=5, tool_names=["Agent"], has_tool_use=True),
+            # pos 2 — Agent results come back
+            self._make_msg("user", "The root cause was a missing null check", index=6, is_tool_result=True),
+            # pos 3 — Lead synthesizes (trigger phrases, should be excluded)
+            self._make_msg(
+                "assistant",
+                "The reviewer found the root cause was a missing null check. "
+                "We chose to add validation because the API contract requires it. "
+                "Watch out for the edge case where input is empty.",
+                index=7,
+            ),
+            # pos 4 — Another agent result
+            self._make_msg("user", '<teammate-message from="sec">should use parameterized queries instead</teammate-message>', index=8),
+            # pos 5 — More synthesis
+            self._make_msg(
+                "assistant",
+                "The security review found that we should use parameterized queries. "
+                "I traced it back to the legacy SQL builder.",
+                index=9,
+            ),
+            # pos 6 — last position in cooldown window
+            self._make_msg("assistant", "Wrapping up agent findings.", index=10),
+            # pos 7 — past cooldown, independent work
+            self._make_msg(
+                "assistant",
+                "It turns out the config was loaded eagerly, not lazily as I expected.",
+                index=50,
+            ),
+        ]
+
+        team_exclusions = snc._build_team_exclusion_set(messages)
+        hits = snc.scan_heuristics(messages, team_exclusions=team_exclusions)
+
+        # Messages at indices 7 and 9 should be excluded (in agent window)
+        hit_indices = {h["index"] for h in hits}
+        assert 7 not in hit_indices
+        assert 9 not in hit_indices
+
+        # Post-cooldown message (index=50, position 7) should be scanned
+        assert 50 in hit_indices
+
+    def test_none_exclusions_scans_everything(self):
+        """team_exclusions=None (non-team session) scans all messages."""
+        messages = [
+            self._make_msg(
+                "assistant",
+                "The root cause was a null pointer dereference.",
+                index=0,
+            ),
+        ]
+        hits = snc.scan_heuristics(messages, team_exclusions=None)
+        assert len(hits) > 0
+
+    def test_empty_exclusions_scans_everything(self):
+        """Empty team_exclusions set scans all messages."""
+        messages = [
+            self._make_msg(
+                "assistant",
+                "The root cause was a null pointer dereference.",
+                index=0,
+            ),
+        ]
+        hits = snc.scan_heuristics(messages, team_exclusions=set())
+        assert len(hits) > 0
