@@ -10,11 +10,11 @@ import (
 // sampleItems returns a slice of FollowUpItems covering all statuses for test use.
 func sampleItems() []FollowUpItem {
 	return []FollowUpItem{
-		{ID: "open-1", Title: "Open One", Status: "open", Severity: "high", Source: "pr", Updated: "2026-03-01T00:00:00Z"},
-		{ID: "pending-1", Title: "Pending One", Status: "pending", Severity: "medium", Source: "ci", Updated: "2026-03-02T00:00:00Z"},
-		{ID: "reviewed-1", Title: "Reviewed One", Status: "reviewed", Severity: "low", Source: "review", Updated: "2026-03-03T00:00:00Z"},
-		{ID: "promoted-1", Title: "Promoted One", Status: "promoted", Severity: "low", Source: "manual", Updated: "2026-03-04T00:00:00Z"},
-		{ID: "dismissed-1", Title: "Dismissed One", Status: "dismissed", Severity: "low", Source: "bot", Updated: "2026-03-05T00:00:00Z"},
+		{ID: "open-1", Title: "Open One", Status: "open", Source: "pr", Updated: "2026-03-01T00:00:00Z"},
+		{ID: "pending-1", Title: "Pending One", Status: "pending", Source: "ci", Updated: "2026-03-02T00:00:00Z"},
+		{ID: "reviewed-1", Title: "Reviewed One", Status: "reviewed", Source: "review", Updated: "2026-03-03T00:00:00Z"},
+		{ID: "promoted-1", Title: "Promoted One", Status: "promoted", Source: "manual", Updated: "2026-03-04T00:00:00Z"},
+		{ID: "dismissed-1", Title: "Dismissed One", Status: "dismissed", Source: "bot", Updated: "2026-03-05T00:00:00Z"},
 	}
 }
 
@@ -222,7 +222,7 @@ func TestListModelGetFilterLabel(t *testing.T) {
 func TestListModelSetItemsUpdatesVisible(t *testing.T) {
 	m := NewListModel(sampleItems())
 	m.SetItems([]FollowUpItem{
-		{ID: "new-1", Title: "New One", Status: "open", Severity: "low", Source: "test"},
+		{ID: "new-1", Title: "New One", Status: "open", Source: "test"},
 	})
 	if m.FollowUpCount() != 1 {
 		t.Errorf("after SetItems, FollowUpCount = %d, want 1", m.FollowUpCount())
@@ -237,7 +237,7 @@ func TestListModelSetItemsClampsCursor(t *testing.T) {
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	// Replace with a single-item list — cursor should clamp to 0.
 	m.SetItems([]FollowUpItem{
-		{ID: "only", Title: "Only", Status: "open", Severity: "low", Source: "test"},
+		{ID: "only", Title: "Only", Status: "open", Source: "test"},
 	})
 	if m.Cursor() != 0 {
 		t.Errorf("cursor after SetItems shrink = %d, want 0", m.Cursor())

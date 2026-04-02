@@ -133,6 +133,7 @@ Subcommands:
   update    Update a follow-up's status or add resolution notes
   promote   Promote a follow-up to a work item
   dismiss   Dismiss a follow-up with an optional reason
+  delete    Permanently delete a follow-up
 
 Options:
   --help, -h    Show this help
@@ -669,6 +670,9 @@ cmd_followup() {
       ;;
     dismiss)
       "$SCRIPTS_DIR/dismiss-followup.sh" "$@"
+      ;;
+    delete)
+      "$SCRIPTS_DIR/delete-followup.sh" "$@"
       ;;
     *)
       echo "Error: unknown followup subcommand '$subcmd'" >&2

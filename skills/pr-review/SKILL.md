@@ -45,7 +45,7 @@ Run these in parallel:
 ```bash
 bash ~/.lore/scripts/fetch-pr-data.sh <PR_NUMBER>
 gh pr diff <PR_NUMBER>
-gh pr view <PR_NUMBER> --json files,title,body,author,commits
+gh pr view <PR_NUMBER> --json files,title,body,author,commits,headRefOid
 ```
 
 From the fetched data, extract:
@@ -87,6 +87,17 @@ cat ~/.lore/claude-md/review-protocol/risk-triage.md
 2. If risk tier is High: force-add Security regardless of signals
 3. Apply skip conditions — only skip a lens if ALL its skip conditions are true
 
+**Ceremony config lookup:** After adaptive selection, check for ceremony-configured lenses:
+
+```bash
+lore ceremony get pr-review
+```
+
+If the result is non-empty (not `[]`), append each returned skill to the selected lens set. Ceremony lenses:
+- Are tagged `[ceremony]` in the triage table with reason "Ceremony config"
+- Are **not** subject to adaptive skip conditions — they always run when configured
+- Can be removed by the user at the triage gate (Step 2c) like any other lens
+
 ### 2c. Present triage
 
 ```
@@ -105,11 +116,12 @@ Change types detected: [list]
 | Security | Auth changes detected |
 | Regressions | Default selection |
 | Test Quality | Default selection |
+| [ceremony] insecure-defaults | Ceremony config |
 
 Proceed with this lens set? You can add or remove lenses before we begin.
 ```
 
-Present the triage summary and proceed immediately to Step 3. If the user interjects to adjust the lens set before agents launch, update the selection accordingly.
+Present the triage summary and proceed immediately to Step 3. If the user interjects to adjust the lens set before agents launch, update the selection accordingly. Ceremony lenses appear in the table with the `[ceremony]` prefix and can be removed by name like any other lens.
 
 If the diff is >400 LOC, include a note:
 ```
@@ -215,6 +227,20 @@ Report back with your findings JSON when complete.
 
 Spawn one agent per selected lens in parallel. Maximum 5 concurrent agents.
 
+### 3b-ceremony. Dispatch ceremony lenses
+
+After built-in lens agents are spawned, dispatch any ceremony lenses from the selected set. Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b.
+
+For each ceremony lens in the selected set, invoke it via the Skill tool with the PR number as the sole argument:
+
+```
+/<skill-name> <PR_NUMBER>
+```
+
+Ceremony lenses fetch their own PR data — do **not** pass diff content, review context, or metadata. Run all ceremony lens invocations in parallel.
+
+Ceremony lens results are collected alongside built-in lens results in Step 3d. If a ceremony lens does not produce findings in the standard Findings Output Format, its output is handled as non-conforming (see Step 3d).
+
 ### 3c. Self-review perspective lenses (--self mode only)
 
 If mode is `--self`, after standard lens agents complete, spawn perspective-lens agents:
@@ -228,6 +254,13 @@ If mode is `--self`, after standard lens agents complete, spawn perspective-lens
 ### 3d. Collect and finalize
 
 As each lens agent reports findings JSON, verify it conforms to the Findings Output Format. If an agent fails or times out, proceed with available findings and note the coverage gap.
+
+**Ceremony lens two-tier classification:** For each ceremony lens result, check whether the output conforms to the Findings Output Format (`lens`, `pr`, `repo`, `findings[]` with each finding having `severity`, `title`, `file`, `line`, `body`):
+
+- **Conforming:** Include findings in the synthesis pipeline (Step 4) alongside built-in lens findings. These participate in compound detection, severity grouping, and deduplication.
+- **Non-conforming:** Store the raw output separately as a supplementary report. Tag it with the ceremony lens name. Non-conforming output does **not** enter synthesis — it is presented verbatim in the Supplementary Reports section (Step 5b).
+- **Malformed JSON:** Treat as non-conforming with an additional `[malformed]` tag. Store the raw text for supplementary presentation.
+- **Failure/timeout:** Note the coverage gap in the verdict. The review continues with available findings.
 
 Clean up the temp diff file if one was created:
 ```bash
@@ -309,7 +342,7 @@ Verdict logic:
 Present findings grouped by severity. Compound findings appear first within each group.
 
 ```
-### Blocking (<count>)
+### Findings requiring action
 
 #### 1. [compound] <title>
 **Lenses:** correctness, security
@@ -331,78 +364,47 @@ Present findings grouped by severity. Compound findings appear first within each
 
 ---
 
-### Suggestions (<count>)
+### Improvement opportunities
 ...
 
-### Questions (<count>)
+### Open questions
 ...
 ```
+
+### 5b-supplementary. Supplementary Reports
+
+This section appears **only** when one or more ceremony lenses produced non-conforming output (classified in Step 3d). Present each non-conforming ceremony lens result verbatim under its own header:
+
+```
+### Supplementary Reports
+
+These reports are from ceremony-configured lenses that did not produce findings in the standard format. They are presented as-is and are not included in the synthesis verdict.
+
+#### <skill-name> [ceremony]
+
+<raw output from the ceremony lens>
+
+---
+
+#### <skill-name> [ceremony] [malformed]
+
+<raw text from the ceremony lens that produced malformed JSON>
+```
+
+Supplementary reports are:
+- **Excluded** from synthesis (Step 4) — they do not affect compound detection, severity counts, or the verdict
+- **Excluded** from `post-review.sh` output — they are not posted as GitHub review comments
+- **Included** in the followup report body (Step 6d) for record-keeping
 
 ### 5c. User interaction
 
-After presenting findings, offer actions:
+After presenting findings, offer the user a chance to discuss or ask questions. Findings are captured in the followup report (Step 6) with proposed comments for downstream TUI posting. Proceed to Step 6.
 
-- **Post to GitHub:** Post findings as a batched PR review via `post-review.sh`. The user can approve, edit, or remove individual findings before posting.
-- **Create work item:** Proceed to Step 6.
-- **Done:** Proceed to Step 7 (Generate Followup Report).
+## Step 6: Generate Followup Report
 
-If posting to GitHub:
+This step is mandatory and must not be skipped. It always runs after Step 5c resolves.
 
-```bash
-bash ~/.lore/scripts/post-review.sh <findings.json> --pr <PR_NUMBER> [--dry-run]
-```
-
-The review state is determined by findings: any blocking -> `REQUEST_CHANGES`, suggestions/questions only -> `COMMENT`, no findings -> `APPROVE`.
-
-## Step 6: Work Item (Optional)
-
-This step runs only if the user chose "Create work item" in Step 5c.
-
-```
-/work create pr-review-<PR_NUMBER>
-```
-
-Write `notes.md` with findings organized by actionability:
-
-```markdown
-# PR #<NUMBER>: <Title>
-
-> **Review findings.** These findings came from a multi-lens review (diff-level analysis). Items in Verification Needed should be investigated against the full codebase before implementation.
-
-## Goal
-Address findings from holistic review of PR #<NUMBER>.
-Lenses applied: <list>
-Verdict: <BLOCKING / SUGGESTIONS ONLY / CLEAN>
-
-## Agreed Changes
-Findings where the fix is clear and verifiable from the diff alone.
-- [ ] <finding title> (`file:line`) — <brief description> [<lens>]
-
-## Verification Needed
-Findings requiring investigation before implementation.
-- [ ] <finding title> (`file:line`) — **Verify:** <what to check> [<lens>] [knowledge: <citation>]
-
-## Deferred
-Findings that are out of scope or need user input.
-- [ ] <finding title> — <reason deferred>
-```
-
-**Categorization rules:**
-- **Agreed Changes:** Blocking findings with clear fixes, suggestions where the right action is obvious. Must be verifiable from the diff alone.
-- **Verification Needed:** Compound findings, blocking findings without clear fixes, findings touching cross-boundary invariants. Each gets a `**Verify:**` directive.
-- **Deferred:** Questions awaiting author response, suggestions the reviewer disagrees with, findings dependent on design decisions not yet made.
-
-Omit empty sections.
-
-Default readiness: `spec-needed`. Override to `implement-ready` only when ALL findings are in "Agreed Changes" and all are trivially obvious fixes.
-
-After creating the work item (or if the user declined), proceed to Step 7.
-
-## Step 7: Generate Followup Report
-
-This step is mandatory and must not be skipped. It always runs after Step 5c resolves (and after optional Step 6 completes).
-
-### 7a. PR Narrative
+### 6a. PR Narrative
 
 Using the review brief from Step 3a, synthesize a 1-2 paragraph narrative:
 - What the PR does structurally (drawn from the alignment map)
@@ -415,7 +417,7 @@ Using the review brief from Step 3a, synthesize a 1-2 paragraph narrative:
 <1-2 paragraphs>
 ```
 
-### 7b. Implementation Diagram
+### 6b. Implementation Diagram
 
 Build an ASCII logical flow diagram showing how the PR's changes work mechanically.
 
@@ -424,51 +426,101 @@ Read diagram conventions:
 cat ~/.lore/claude-md/review-protocol/followup-template.md
 ```
 
-### 7c. Determine severity and suggested actions
+### 6c. Determine suggested actions
 
-| Review outcome | --severity | --suggested-actions primary type |
-|---|---|---|
-| All clean / CLEAN verdict | low | approve |
-| Suggestions only | medium | comment_on_pr |
-| Blocking findings exist | high | create_work_item |
-| Deferred items exist (no blocking) | medium | create_work_item |
+| Review outcome | --suggested-actions primary type |
+|---|---|
+| All clean / CLEAN verdict | approve |
+| Suggestions only | comment_on_pr |
+| Blocking findings exist | create_work_item |
+| Deferred items exist (no blocking) | create_work_item |
 
-### 7d. Assemble and persist the report
+### 6d. Verify grounding and prepare external bodies
 
-Assemble the report body and persist:
+This step is mandatory and must not be skipped. It has two parts:
 
-```bash
-bash ~/.lore/scripts/create-followup.sh \
-  --source "pr-review" \
-  --title "Review: <PR title> (#<N>)" \
-  --severity <per 7c> \
-  --attachments '[{"type":"pr","ref":"#<N>"}]' \
-  --suggested-actions '[{"type": "<type>", "label": "<label>"}]' \
-  --content "<report body>"
+**6d-i. Verify grounding survived synthesis.** Re-check that every `blocking` and `suggestion` finding has grounding — a concrete failure scenario (blocking) or specific improvement claim (suggestion) — per the bars defined in `severity.md`. Step 4b should have already enforced this, but findings can lose grounding during compound merging or deduplication. Any finding that lacks grounding at this point: downgrade blocking → suggestion, drop ungrounded suggestions.
+
+The test: if the PR author asks "why does this matter?", the finding must answer with a specific scenario, not a vague assertion. A finding that cannot survive that question is not grounded.
+
+**6d-ii. Strip internal protocol language for external output.** Remove `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, and compound markers from finding bodies. These are internal analytical scaffolding — the author should see the grounding *content* (the concrete impact claim) woven into the finding body, not protocol headers. Use uncertain framing per the User-Facing Framing rules in `severity.md`.
+
+### 6e. Assemble the full report body
+
+Assemble the `--content` value with **all** of the following sections. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
+
+**First line:** One-line diagnostic summary (e.g., `BLOCKING — 2 blocking, 3 suggestions`). This must be the first non-heading line — it appears as the excerpt in the TUI.
+
+**Section 1 — PR Narrative** (from 6a):
+
+```markdown
+## PR Narrative
+
+<1-2 paragraphs from 6a — include verbatim, do not re-summarize>
 ```
 
-The `--content` value structure:
+**Section 2 — Implementation Diagram** (from 6b):
 
+```markdown
+## Implementation Diagram
+
+<ASCII box-drawing diagram from 6b — include verbatim>
 ```
-One-line diagnostic summary: <CLEAN | SUGGESTIONS ONLY | BLOCKING — N blocking, M suggestions>
 
-<PR Narrative from 7a>
+**Section 3 — Review Findings:**
 
-<Implementation Diagram from 7b>
+Include the full finding details from Step 5b with internal protocol headers stripped per Step 6d-ii. The report is an author-facing artifact. If ceremony lenses produced non-conforming output (Step 5b-supplementary), append the Supplementary Reports block after the structured findings. Supplementary reports are presentation-only — they do **not** generate review code blocks in Section 4 or entries in `proposed-comments.json`.
 
+```markdown
 ## Review Findings
 
 **Verdict:** <BLOCKING / SUGGESTIONS ONLY / CLEAN>
 **Blocking:** <count> | **Suggestions:** <count> | **Questions:** <count>
 
-<Findings from Step 5b — reference the same content, do not regenerate>
+<Findings grouped by severity, internal headers stripped per 6d-ii>
+
+### Supplementary Reports
+
+<Include only if non-conforming ceremony output exists — omit this heading entirely otherwise>
+
+#### <skill-name> [ceremony]
+
+<raw output from the ceremony lens>
 ```
 
-The one-line diagnostic summary must be the **first non-heading line** so it appears as the excerpt in the TUI.
+**Section 4 — Proposed Comments:**
 
-## Step 8: Capture Insights
+For each finding with `file` and `line` fields, render a review code block with internal headers stripped per Step 6d-ii:
 
-**Gate:** Do not execute this step until Step 7 has completed and `create-followup.sh` has been called. If Step 7 was not executed, go back and execute it now before proceeding.
+````markdown
+## Proposed Comments
+
+```review
+file: path/to/file.ext
+line: <N>
+<finding body, internal headers stripped>
+```
+````
+
+### 6f. Persist the report
+
+Build the proposed comments JSON array: for each finding that has both `file` and `line` fields, produce `{"path": "<file>", "line": <line>, "body": "<finding body>"}`. The body must have internal protocol headers stripped per Step 6d-ii and grounding content preserved.
+
+Pass the **complete report body from 6e** as `--content`:
+
+```bash
+bash ~/.lore/scripts/create-followup.sh \
+  --source "pr-review" \
+  --title "Review: <PR title> (#<N>)" \
+  --attachments '[{"type":"pr","ref":"#<N>"}]' \
+  --suggested-actions '[{"type": "<type>", "label": "<label>"}]' \
+  --proposed-comments '<json array of {path, line, body} objects>' \
+  --content "<complete report body from 6e — all 4 sections>"
+```
+
+## Step 7: Capture Insights
+
+**Gate:** Do not execute this step until Step 6 has completed and `create-followup.sh` has been called. If Step 6 was not executed, go back and execute it now before proceeding.
 
 ```
 /remember Holistic review of PR #<N> — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered (why the architecture is this way, what constraints drove decisions), cross-lens convergence patterns (areas where multiple lenses flagged the same concern), convention patterns observed across the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR, style opinions, lens-specific methodology notes.

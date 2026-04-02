@@ -169,20 +169,6 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 	return m, nil
 }
 
-// severityColor returns a terminal color code for the given severity.
-func severityColor(severity string) lipgloss.Color {
-	switch severity {
-	case "critical":
-		return lipgloss.Color("1") // red
-	case "high":
-		return lipgloss.Color("214") // orange/amber
-	case "medium":
-		return lipgloss.Color("3") // yellow
-	default: // low
-		return lipgloss.Color("8") // dim
-	}
-}
-
 // statusGlyph returns a short indicator for the follow-up status.
 func statusGlyph(status string) (string, lipgloss.Color) {
 	switch status {
@@ -243,7 +229,6 @@ func (m ListModel) viewFull() string {
 	var b strings.Builder
 
 	// Column widths — ID absorbs spare space.
-	sevW := 8  // "critical" = 8 chars
 	statusW := 9  // "dismissed" = 9 chars
 	sourceW := 14
 	prW := 8
@@ -252,10 +237,10 @@ func (m ListModel) viewFull() string {
 	idW := 30 // default; grows to fill terminal width
 
 	// Adapt to terminal width: ID absorbs all spare space.
-	// Fixed: sev(8) + status(9) + source(14) + pr(8) + work(20) + updated(10) + gaps(16) = 85
-	// Gaps: 2 leading + 7 pairs of "  " separators = 16 chars.
+	// Fixed: status(9) + source(14) + pr(8) + work(20) + updated(10) + gaps(14) = 75
+	// Gaps: 2 leading + 6 pairs of "  " separators = 14 chars.
 	if m.width > 0 {
-		idW = m.width - sevW - statusW - sourceW - prW - workW - updatedW - 16
+		idW = m.width - statusW - sourceW - prW - workW - updatedW - 14
 		if idW < 16 {
 			idW = 16
 		}
@@ -267,8 +252,7 @@ func (m ListModel) viewFull() string {
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
 	// Header
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
-		sevW, "SEVERITY",
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
 		idW, "ID",
 		statusW, "STATUS",
 		sourceW, "SOURCE",
@@ -300,10 +284,6 @@ func (m ListModel) viewFull() string {
 
 	for i := offset; i < end; i++ {
 		item := items[i]
-
-		// Severity with color
-		sevColor := severityColor(item.Severity)
-		sev := lipgloss.NewStyle().Foreground(sevColor).Render(truncateFollowUp(item.Severity, sevW))
 
 		// ID (title preferred, falls back to ID)
 		idStr := item.Title
@@ -340,8 +320,7 @@ func (m ListModel) viewFull() string {
 		}
 		updatedCell := dimStyle.Render(truncateFollowUp(updated, updatedW))
 
-		row := fmt.Sprintf("  %s%s  %-*s  %s%s  %s%s  %s%s  %s%s  %s",
-			sev, strings.Repeat(" ", max(0, sevW-lipgloss.Width(sev))),
+		row := fmt.Sprintf("  %-*s  %s%s  %s%s  %s%s  %s%s  %s",
 			idW, idStr,
 			statusStr, strings.Repeat(" ", max(0, statusW-lipgloss.Width(statusStr))),
 			source, strings.Repeat(" ", max(0, sourceW-lipgloss.Width(source))),
@@ -408,19 +387,15 @@ func (m ListModel) viewCompact() string {
 			cursor = "> "
 		}
 
-		// Severity badge
-		sevColor := severityColor(item.Severity)
-		sevBadge := lipgloss.NewStyle().Foreground(sevColor).Render(item.Severity)
-
 		// Title line
-		titleAvail := panelWidth - 2 - lipgloss.Width(sevBadge) - 1 // 2 cursor, 1 space
+		titleAvail := panelWidth - 2 // 2 cursor chars
 		title := item.Title
 		if title == "" {
 			title = item.ID
 		}
 		titleTrunc := truncateFollowUp(title, titleAvail)
 
-		line1 := cursor + sevBadge + " " + titleTrunc
+		line1 := cursor + titleTrunc
 		for lipgloss.Width(line1) < panelWidth {
 			line1 += " "
 		}

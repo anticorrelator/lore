@@ -269,7 +269,6 @@ Check for incomplete tasks or explicit blockers. Skip silently if everything com
 bash ~/.lore/scripts/create-followup.sh \
   --title "Deferred work: <work item title>" \
   --source "implement" \
-  --severity <high if blockers prevented completion, medium otherwise> \
   --attachments '[{"type":"work_item","slug":"<slug>"}]' \
   --suggested-actions '[{"type":"create_work_item"}]' \
   --content "<one-line summary of what didn't finish and why, followed by a checklist of remaining items>"

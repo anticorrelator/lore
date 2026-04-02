@@ -81,9 +81,9 @@ For each unresolved item in the selected batch, determine:
 
 Assign a Conventional Comments label to each item: `suggestion`, `issue`, `question`, `thought`, `nitpick`, or `praise`.
 
-**Grounding:** For each item labeled `issue` or `suggestion`, include a `**Grounding:**` line stating the concrete basis:
-- `issue`: `**Grounding:** <what breaks> for <whom> when <conditions>.`
-- `suggestion`: `**Grounding:** <specific improvement> benefits <beneficiary>.`
+**Grounding:** For each item labeled `issue` or `suggestion`, include a `**Grounding:**` line stating the impact-grounded basis using uncertain language:
+- `issue`: `**Grounding:** This may cause <what breaks> for <whom> when <conditions>.`
+- `suggestion`: `**Grounding:** This could benefit <beneficiary> by <specific improvement>.`
 
 Items without grounding are demoted to `thought` (tracked but not actionable). This prevents reviewer style preferences from being elevated to action items.
 
@@ -209,16 +209,16 @@ This step is mandatory and must not be skipped.
 
 This step is automatic — runs after Step 6, before Step 8.
 
-### 7a. Determine severity and suggested actions
+### 7a. Determine suggested actions
 
-Map feedback categories to followup severity and suggested actions:
+Map feedback categories to followup suggested actions:
 
-| Feedback outcome | `--severity` | `--suggested-actions` primary type |
-|-----------------|-----------|---|
-| Verification Needed items exist | `high` | `create_work_item` (spec-needed) |
-| Deferred items exist (no Verification Needed) | `medium` | `create_work_item` (defer rationale) |
-| All Agreed Changes only (no Verification Needed, no Deferred) | `low` | `create_work_item` (implement-ready) |
-| All categories empty (nothing to action) | `low` | `approve` |
+| Feedback outcome | `--suggested-actions` primary type |
+|-----------------|---|
+| Verification Needed items exist | `create_work_item` (spec-needed) |
+| Deferred items exist (no Verification Needed) | `create_work_item` (defer rationale) |
+| All Agreed Changes only (no Verification Needed, no Deferred) | `create_work_item` (implement-ready) |
+| All categories empty (nothing to action) | `approve` |
 
 Produce a suggested-actions JSON array, omitting types for empty categories:
 
@@ -230,9 +230,9 @@ Produce a suggested-actions JSON array, omitting types for empty categories:
 ]
 ```
 
-### 7b. Assemble the three-section report body
+### 7b. Assemble the full report body
 
-Assemble the `finding.md` body with the following structure:
+Assemble the `--content` value with **all** of the following sections. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
 
 **First line:** One-line diagnostic summary (e.g., "agreed 3, verification 2, deferred 1 findings from @reviewer's review"). This must be the first non-heading line — it appears as the excerpt in the TUI.
 
@@ -273,28 +273,30 @@ List all categorized feedback items from Step 3. Include every item regardless o
 ```markdown
 ## Review Findings
 
-| # | Label | Item | File:Line | Category | Knowledge | Reviewer Quote |
-|---|-------|------|-----------|----------|-----------|----------------|
-| 1 | issue | <title> | <file:line> | Agreed Changes | <citation or —> | "<verbatim quote>" |
-| 2 | suggestion | <title> | <file:line> | Verification Needed | <citation or —> | "<verbatim quote>" |
-| 3 | question | <title> | <file:line> | Deferred | <citation or —> | "<verbatim quote>" |
+| # | Label | Item | File:Line | Category | Knowledge | Reviewer Quote | Summary |
+|---|-------|------|-----------|----------|-----------|----------------|---------|
+| 1 | issue | <title> | <file:line> | Agreed Changes | <citation or —> | "<verbatim quote>" | <uncertain framing> |
+| 2 | suggestion | <title> | <file:line> | Verification Needed | <citation or —> | "<verbatim quote>" | <uncertain framing> |
+| 3 | question | <title> | <file:line> | Deferred | <citation or —> | "<verbatim quote>" | <uncertain framing> |
 ```
 
 - **Label** column: the Conventional Comments label assigned in Step 3 (`suggestion`, `issue`, `question`, `thought`, `nitpick`, `praise`).
 - **Category** column: `Agreed Changes`, `Verification Needed`, or `Deferred`.
 - **Knowledge** column: the `[knowledge: entry-title]` citation from Step 4 enrichment, or `—` if no citation applies.
 - **Reviewer Quote** column: the verbatim reviewer comment (truncated to ~80 chars if long; use `...` to indicate truncation).
+- **Summary** column: impact-grounded uncertain framing derived from the analysis in Step 3. Use the hedge form: "This may cause..." for issues, "This could benefit..." for suggestions, or the reviewer's open question for question-labeled items. Do not restate the observed code fact — summarize the inferred impact. Do not include internal analysis headers (`**Grounding:**`, `**Severity:**`, etc.) — these are internal protocol language and must not appear in the report.
 
-### 7c. Create followup
+### 7c. Persist the report
+
+Pass the **complete report body from 7b** as `--content`:
 
 ```bash
 bash ~/.lore/scripts/create-followup.sh \
   --title "PR #<NUMBER>: <short reviewer name> feedback" \
   --source "pr-revise" \
-  --severity "<severity from 7a>" \
   --attachments '[{"type":"pr","ref":"#<NUMBER>"}]' \
   --suggested-actions '<json array from 7a>' \
-  --content '<report body from 7b>'
+  --content '<complete report body from 7b — all 3 sections>'
 ```
 
 ## Step 8: Capture Insights

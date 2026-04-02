@@ -9,7 +9,7 @@ A single Sonnet-class agent will:
 1. Read the work item notes.md
 2. Identify 3-8 key files to read from the codebase
 3. Search a knowledge store for relevant prior decisions
-4. Draft a plan.md with: Goal, Context, Design Decisions, Phases (with tasks), Open Questions
+4. Draft a plan.md with: Goal, Narrative, Architecture Diagram, Context, Design Decisions, Phases (with tasks), Open Questions
 5. Generate tasks.json from the plan
 
 The agent has NO access to the user. It cannot ask clarifying questions.

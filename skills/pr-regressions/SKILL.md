@@ -127,7 +127,7 @@ If a finding involves cross-boundary regression concerns (deleted code that may 
 
 Classify each finding using the Severity Classification definitions. Default to `suggestion` when uncertain between blocking and suggestion.
 
-**5b. Present findings** to the user grouped by severity (blocking first, then suggestions, then questions). For each finding show: severity, title, file:line, body, and knowledge context.
+**5b. Present findings** to the user grouped by severity (blocking first, then suggestions, then questions). For each finding show: severity, title, file:line, body, and knowledge context. Strip internal protocol headers (`**Grounding:**`, `**Severity:**`, etc.) from user-visible output — these are internal scaffolding. The grounding content (the concrete capability loss and who relied on it) must be preserved as the substance of the finding.
 
 **5c. Write to work item.** Create or update the shared lens review work item:
 ```

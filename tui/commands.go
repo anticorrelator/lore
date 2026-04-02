@@ -17,7 +17,10 @@ import (
 )
 
 // workAIFinishedMsg is sent after lore work ai returns.
-type workAIFinishedMsg struct{}
+type workAIFinishedMsg struct {
+	Err    error
+	Output string
+}
 
 // aiTickMsg drives the loading-dots animation while aiLoading is true.
 type aiTickMsg struct{}
@@ -73,8 +76,8 @@ func runWorkAI(ctx context.Context, prompt string) tea.Cmd {
 	return func() tea.Msg {
 		cmd := exec.CommandContext(ctx, "lore", "work", "ai", prompt)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Run()
-		return workAIFinishedMsg{}
+		out, err := cmd.CombinedOutput()
+		return workAIFinishedMsg{Err: err, Output: string(out)}
 	}
 }
 
@@ -112,6 +115,16 @@ func runDismissFollowUp(id string) tea.Cmd {
 	}
 }
 
+// runDeleteFollowUp runs lore followup delete and returns ActionCompleteMsg when done.
+func runDeleteFollowUp(id string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("lore", "followup", "delete", "--followup-id", id)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		err := cmd.Run()
+		return followup.ActionCompleteMsg{ID: id, Action: "delete", Err: err}
+	}
+}
+
 // runDelete runs lore work delete and returns DeleteFinishedMsg when done.
 func runDelete(slug string) tea.Cmd {
 	return func() tea.Msg {
@@ -146,7 +159,7 @@ func buildFollowupPopupItems(items []followup.FollowUpItem) []search.PopupItem {
 		result[i] = search.PopupItem{
 			ID:       item.ID,
 			Label:    label,
-			Subtitle: item.Severity + " · " + item.Source,
+			Subtitle: item.Source,
 		}
 	}
 	return result

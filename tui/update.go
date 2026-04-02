@@ -145,6 +145,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				if action == "delete" {
 					return m, runDelete(slug)
 				}
+				if action == "dismiss" {
+					return m, runDismissFollowUp(slug)
+				}
+				if action == "delete_followup" {
+					return m, runDeleteFollowUp(slug)
+				}
 				return m, runArchive(slug, action == "unarchive")
 			default:
 				// Any other key cancels.
@@ -182,7 +188,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.setSpecPanel(slug, panel)
 				m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
 				m.sessionLaunchedFromModal = m.state == stateWork
-				return m, work.StartTerminalCmd(slug, m.sessionConfirmTitle, m.config.ProjectDir, specW, specH, extraContext, m.sessionConfirmShortMode, m.sessionConfirmChatMode, m.sessionConfirmSkipConfirm)
+				return m, work.StartTerminalCmd(slug, m.sessionConfirmTitle, m.config.ProjectDir, specW, specH, extraContext, m.sessionConfirmShortMode, m.sessionConfirmChatMode, m.sessionConfirmSkipConfirm, m.sessionConfirmFollowupMode, m.config.KnowledgeDir)
 			case "esc", "ctrl+c":
 				m.sessionConfirmActive = false
 				m.disableKittyKeyboard()
@@ -277,6 +283,29 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case workAIFinishedMsg:
 		m.aiLoading = false
 		m.aiCancel = nil
+		if msg.Err != nil {
+			errStr := fmt.Sprintf("ai failed: %v", msg.Err)
+			if len(errStr) > 80 {
+				errStr = errStr[:80]
+			}
+			m.flashErr = errStr
+		} else if msg.Output != "" {
+			// Surface the last non-empty line (e.g. "Created: ...") as a brief status.
+			lines := strings.Split(strings.TrimSpace(msg.Output), "\n")
+			last := ""
+			for i := len(lines) - 1; i >= 0; i-- {
+				if strings.TrimSpace(lines[i]) != "" {
+					last = strings.TrimSpace(lines[i])
+					break
+				}
+			}
+			if last != "" {
+				if len(last) > 80 {
+					last = last[:80]
+				}
+				m.flashErr = last
+			}
+		}
 		// Reload the work item list to pick up newly created items.
 		return m, loadWorkItems(m.config.WorkDir)
 
@@ -392,7 +421,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					m.followupDetail, cmd = m.followupDetail.Update(dmsg)
 					return cmd
 				},
-				setContentStart: nil,
+				// Set absolute position so detail can hit-test tab bar clicks.
+				setContentStart: func() {
+					if m.layoutMode == config.LayoutLeftRight {
+						m.followupDetail.SetContentStart(2, leftPanelWidth+5)
+					} else {
+						m.followupDetail.SetContentStart(m.topPanelHeight()+4, 3)
+					}
+				},
 			}
 			cmd, _ := handlePanelRouting(&m, msg, cb)
 			return m, cmd
@@ -434,6 +470,22 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, tea.Quit
 			}
 		case "A":
+			// A opens dismiss confirmation modal for follow-ups (left panel only, dismissable statuses).
+			if m.state == stateFollowUps && m.focusedPanel == panelLeft {
+				if item, ok := m.followupList.CurrentItem(); ok {
+					status := item.Status
+					if status == "open" || status == "pending" || status == "reviewed" {
+						title := item.Title
+						if title == "" {
+							title = item.ID
+						}
+						m.confirmAction = "dismiss"
+						m.confirmSlug = item.ID
+						m.confirmTitle = title
+						return m, nil
+					}
+				}
+			}
 			// A opens archive/unarchive confirmation modal (left panel only).
 			if m.state == stateWork && m.focusedPanel == panelLeft {
 				items := m.list.Items()
@@ -455,6 +507,19 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				}
 			}
 		case "D":
+			// D opens delete confirmation modal for follow-ups (left panel only).
+			if m.state == stateFollowUps && m.focusedPanel == panelLeft {
+				if item, ok := m.followupList.CurrentItem(); ok {
+					title := item.Title
+					if title == "" {
+						title = item.ID
+					}
+					m.confirmAction = "delete_followup"
+					m.confirmSlug = item.ID
+					m.confirmTitle = title
+					return m, nil
+				}
+			}
 			// D opens delete confirmation modal (left panel only).
 			if m.state == stateWork && m.focusedPanel == panelLeft {
 				items := m.list.Items()
@@ -655,13 +720,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					return m, func() tea.Msg { return work.ChatRequestMsg{Slug: slug, Title: title} }
 				}
 			}
-			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
-				if id := m.followupDetail.CurrentID(); id != "" {
+			if m.state == stateFollowUps && !m.terminalMode {
+				if item, ok := m.followupList.CurrentItem(); ok {
 					msg := followup.FollowupChatRequestMsg{
-						ID:             id,
-						Title:          m.followupDetail.Title(),
-						Source:         m.followupDetail.Source(),
-						Severity:       m.followupDetail.Severity(),
+						ID:             item.ID,
+						Title:          item.Title,
+						Source:         item.Source,
 						FindingExcerpt: m.followupDetail.FindingExcerpt(),
 					}
 					return m, func() tea.Msg { return msg }

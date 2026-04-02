@@ -40,6 +40,7 @@ func (m model) handleChatRequest(msg work.ChatRequestMsg) (model, tea.Cmd) {
 	m.sessionConfirmTitle = msg.Title
 	m.sessionConfirmInput = ta
 	m.sessionConfirmChatMode = true
+	m.sessionConfirmFollowupMode = false
 	m.sessionConfirmActive = true
 	m.enableKittyKeyboard()
 	return m, focusCmd
@@ -59,6 +60,7 @@ func (m model) handleFollowupChatRequest(msg followup.FollowupChatRequestMsg) (m
 	m.sessionConfirmSkipConfirm = false
 	m.sessionConfirmInput = ta2
 	m.sessionConfirmChatMode = true
+	m.sessionConfirmFollowupMode = true
 	m.sessionConfirmActive = true
 	m.enableKittyKeyboard()
 	return m, focusCmd2

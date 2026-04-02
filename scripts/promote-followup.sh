@@ -89,7 +89,6 @@ fi
 # --- Read follow-up metadata ---
 FOLLOWUP_TITLE=$(json_field "title" "$META_FILE")
 FOLLOWUP_SOURCE=$(json_field "source" "$META_FILE")
-FOLLOWUP_SEVERITY=$(json_field "severity" "$META_FILE")
 
 # Determine work item title: prefer explicit override, fall back to follow-up title
 WORK_TITLE="${TITLE_OVERRIDE:-$FOLLOWUP_TITLE}"
@@ -100,9 +99,6 @@ FINDING_FILE="$FOLLOWUP_DIR/finding.md"
 DESCRIPTION="Promoted from follow-up: $FOLLOWUP_ID"
 if [[ -n "$FOLLOWUP_SOURCE" ]]; then
   DESCRIPTION="$DESCRIPTION (source: $FOLLOWUP_SOURCE)"
-fi
-if [[ -n "$FOLLOWUP_SEVERITY" ]]; then
-  DESCRIPTION="$DESCRIPTION, severity: $FOLLOWUP_SEVERITY"
 fi
 if [[ -f "$FINDING_FILE" ]]; then
   FINDING_EXCERPT=$(head -5 "$FINDING_FILE" 2>/dev/null | grep -v '^#' | grep -v '^$' | head -3 | tr '\n' ' ' | cut -c1-200)

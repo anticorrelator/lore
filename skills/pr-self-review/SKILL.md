@@ -46,18 +46,28 @@ Note any existing reviewer feedback to avoid duplicating observations.
 
 **Skip if `--skip-pre-scan` was set.**
 
-Compute total LOC changed. Display:
+Compute total LOC changed.
+
+**Ceremony config lookup:** After assembling the built-in lens set, check for ceremony-configured lenses:
+
+```bash
+lore ceremony get pr-review
+```
+
+If the result is non-empty (not `[]`), append each returned skill to the lens set. Ceremony lenses are not subject to adaptive skip conditions — they always run when configured.
+
+Display:
 
 ```
 [pr-self-review] Triage
 Size: <N> LOC across <M> files
-Lenses: Blast Radius · Security · Test Quality · Correctness · Regressions · Interface Clarity
+Lenses: Blast Radius · Security · Test Quality · Correctness · Regressions · Interface Clarity · [ceremony] insecure-defaults
 Add or remove lenses? (enter lens names, or press Enter to proceed)
 ```
 
 If the diff exceeds 400 LOC, append: `Size: <N> LOC (large — consider --skip-pre-scan for targeted exploration)`
 
-This is a soft gate — no explicit confirmation required. If the user names lenses to add or remove, adjust. Otherwise proceed.
+This is a soft gate — no explicit confirmation required. If the user names lenses to add or remove (including ceremony lenses by name), adjust. Otherwise proceed.
 
 ## Step 2: Lens Scan
 
@@ -154,9 +164,35 @@ Report back with your findings JSON when complete.
 
 Spawn one agent per lens in parallel. Maximum 6 concurrent agents. For diffs >400 LOC, write the diff to `/tmp/pr-self-review-<PR_NUMBER>.diff` before spawning.
 
+### 2b-ceremony. Dispatch ceremony lenses
+
+After built-in lens agents are spawned, dispatch any ceremony lenses from the selected set (those tagged `[ceremony]` in Step 1c).
+
+**PR guard:** If running in base-branch-only mode (no PR number — the user provided only a base branch to diff against), skip ceremony lens dispatch entirely:
+```
+[ceremony] Skipped: no PR number available
+```
+
+When a PR number is available, invoke each ceremony lens via the Skill tool with the PR number as the sole argument:
+
+```
+/<skill-name> <PR_NUMBER>
+```
+
+Ceremony lenses fetch their own PR data — do **not** pass diff content, review context, or metadata. Run all ceremony lens invocations in parallel.
+
+Ceremony lens results are collected alongside built-in lens results in Step 2c. If a ceremony lens does not produce findings in the standard Findings Output Format, its output is handled as non-conforming during synthesis.
+
 ### 2c. Collect and synthesize
 
 Collect findings from lens agents as they complete. If a lens agent fails or times out, proceed with available findings and note the coverage gap.
+
+**Ceremony lens two-tier classification:** For each ceremony lens result, check whether the output conforms to the Findings Output Format (`lens`, `pr`, `repo`, `findings[]` with each finding having `severity`, `title`, `file`, `line`, `body`):
+
+- **Conforming:** Include findings in the synthesis pipeline below alongside built-in lens findings. These participate in compound detection, severity grouping, and deduplication. Conforming ceremony findings appear in the dialog findings list (Step 3).
+- **Non-conforming:** Store the raw output separately as a supplementary report. Tag it with the ceremony lens name. Non-conforming output does **not** enter synthesis or the dialog — it is presented in the summary (Step 4).
+- **Malformed JSON:** Treat as non-conforming with an additional `[malformed]` tag. Store the raw text for supplementary presentation.
+- **Failure/timeout:** Note the coverage gap in the summary. The review continues with available findings.
 
 Clean up the temp diff file:
 ```bash
@@ -221,7 +257,13 @@ Present a concise PR overview:
 
 Sort: blocking first (compound before single-lens), then suggestions, then questions. If focus context was provided, reorder matching items first within each severity tier.
 
-Then **open the first finding** for discussion with its label, lens, file:line, body, and knowledge citations. End with an open question.
+**Ceremony lens findings:** Conforming ceremony lens findings are included in the prioritized list above — they sort by severity alongside built-in lens findings and show their ceremony lens name (e.g., `[suggestion] Token rotation check — codex-pr-review — auth.go:42`). If any ceremony lenses produced non-conforming output, append a summary line after the findings list:
+
+```
+Supplementary reports: <skill-name>, <skill-name> (non-standard format — see below)
+```
+
+Then **open the first finding** for discussion with its label, lens, file:line, body, and knowledge citations. End with an open question. Strip internal protocol headers (`**Grounding:**`, `**Severity:**`, etc.) from dialog presentation — these are internal scaffolding. The grounding content itself must be preserved as the substance of the finding.
 
 **Heuristic fallback:** If the pre-scan produced zero findings or `--skip-pre-scan` was set, scan the diff for risk concentration, complexity, and architectural decisions. Open topics using perspective lenses:
 1. "What would a reviewer unfamiliar with this codebase question?"
@@ -344,72 +386,26 @@ Generate tasks:
 ### Discussion highlights:
 - <key insight or decision from the dialog>
 
+### Supplementary Reports
+<skill-name> [ceremony] — non-standard format, presented verbatim
+
 ### Work item: <slug if created, or "none — reviewed and confirmed"> (<readiness>)
   Phase 1 (Blocking): <count> tasks
   Phase 2 (Convention): <count> tasks
   Phase 3 (Improvements): <count> tasks
 ```
 
+If ceremony lenses ran, include them in the lens coverage count. Show: `**Lens coverage:** <L> lenses (<M> ceremony), <N> findings (<K> blocking, <J> suggestions, <Q> questions)`
+
 If lenses ran in degraded mode, show: `**Lens coverage:** <L>/<T> lenses (<degraded names> degraded), <N> findings`
+
+The `### Supplementary Reports` section appears **only** when non-conforming ceremony lens output exists. Omit entirely when all ceremony lenses were conforming or no ceremony lenses ran.
 
 Omit zero counts. Omit work item section if no-action-items path was taken.
 
-## Step 5: Generate Followup Report
+## Step 5: Capture Insights
 
-This step is mandatory and must not be skipped. It always runs after Step 4.
-
-### 5a. Determine severity and suggested actions
-
-| Review outcome | `--severity` | `--suggested-actions` primary type |
-|---|---|---|
-| Blocking findings with `action` disposition | `high` | `create_work_item` |
-| `deferred` items present (no blocking) | `medium` | `create_work_item` |
-| Suggestions only with `action` disposition | `medium` | `create_work_item` |
-| `open` items (no `action` or `deferred`) | `medium` | `create_work_item` |
-| All `accepted` / "no action items" path | `low` | `approve` |
-
-**Base-branch-only case:** If there is no PR number, omit `approve` from action types.
-
-### 5b. Assemble the report body
-
-**First line:** One-line diagnostic summary (e.g., "3 action items, 2 accepted, 1 deferred — blocking findings present"). Must be the first non-heading line.
-
-**Section 1 — PR Narrative:** Summarize what the PR does structurally from the alignment map and design signals. Include discussion highlights if notable.
-
-**Section 2 — Implementation Diagram:** ASCII logical flow diagram.
-```bash
-cat ~/.lore/claude-md/review-protocol/followup-template.md
-```
-Omit if directional relationships cannot be determined.
-
-**Section 3 — Review Findings:** Table of all dispositioned findings:
-
-```markdown
-## Review Findings
-
-| # | Severity | Title | Lens | File:Line | Disposition | Summary |
-|---|----------|-------|------|-----------|-------------|---------|
-| 1 | blocking | <title> | <lens> | <file:line> | action | <outcome> |
-| 2 | suggestion | <title> | <lens> | <file:line> | accepted | <rationale> |
-```
-
-### 5c. Create followup
-
-```bash
-bash ~/.lore/scripts/create-followup.sh \
-  --title "Self-Review: <PR title>" \
-  --source "pr-self-review" \
-  --severity "<severity from 5a>" \
-  --attachments '[{"type":"pr","ref":"#<N>"}]' \
-  --suggested-actions '<json-array>' \
-  --content "<report body from 5b>"
-```
-
-For base-branch-only runs, omit `--attachments`.
-
-## Step 6: Capture Insights
-
-**Gate:** Do not execute this step until Step 5 has completed and `create-followup.sh` has been called. If Step 5 was not executed, go back and execute it now before proceeding.
+**Gate:** When Step 4 creates a plan (action items exist), do not execute this step until Step 4 has completed and `plan.md` has been written. When Step 4's "No action items path" is taken (all findings dispositioned as `accepted` or `deferred`), the gate is met as soon as all findings are dispositioned.
 
 ```
 /remember Self-review of PR #<N> (lens pre-scan + dialog) — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered or clarified (why the architecture is this way, what constraints drove decisions), convention drift patterns found by lenses, cross-boundary invariants identified (especially from Blast Radius), architectural concerns surfaced during disposition dialog. Use confidence: medium. Skip: obvious fixes, style issues, findings specific to this PR that don't generalize.

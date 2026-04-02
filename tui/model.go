@@ -127,8 +127,9 @@ type model struct {
 	sessionConfirmInput       textarea.Model
 	sessionConfirmShortMode   bool
 	sessionConfirmSkipConfirm bool
-	sessionConfirmChatMode    bool
-	sessionLaunchedFromModal  bool
+	sessionConfirmChatMode      bool
+	sessionConfirmFollowupMode  bool
+	sessionLaunchedFromModal    bool
 
 	showHelp bool
 

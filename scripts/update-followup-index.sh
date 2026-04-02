@@ -59,7 +59,6 @@ for meta_path in sorted(glob.glob(os.path.join(followups_dir, "*", "_meta.json")
         "id": meta.get("id", followup_id),
         "title": str_field(meta, "title", followup_id),
         "status": str_field(meta, "status", "pending"),
-        "severity": str_field(meta, "severity", ""),
         "source": str_field(meta, "source", ""),
         "attachments": list_field(meta, "attachments"),
         "suggested_actions": list_field(meta, "suggested_actions"),

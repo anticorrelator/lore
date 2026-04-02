@@ -29,7 +29,6 @@ type FollowUpItem struct {
 	ID               string           `json:"id"`
 	Title            string           `json:"title"`
 	Status           string           `json:"status"`
-	Severity         string           `json:"severity"`
 	Source           string           `json:"source"`
 	Attachments      []Attachment     `json:"attachments"`
 	SuggestedActions []SuggestedAction `json:"suggested_actions"`
@@ -173,7 +172,6 @@ type FollowupChatRequestMsg struct {
 	ID             string
 	Title          string
 	Source         string
-	Severity       string
 	FindingExcerpt string
 }
 

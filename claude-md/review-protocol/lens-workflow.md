@@ -13,6 +13,36 @@ The lens review system provides focused, single-concern analysis of PRs. Each le
 | `/pr-test-quality` | `test-quality` | Test coverage, tautological tests, assertion quality, edge cases |
 | `/pr-security` | `security` | Input validation, injection, auth/authz boundaries, cryptographic misuse, secrets exposure |
 | `/pr-interface-clarity` | `interface-clarity` | Function signatures, naming, return types, parameter design, contract explicitness |
+| (ceremony) | User-registered via `lore ceremony add pr-review` | Varies |
+
+#### Ceremony Lens Registration
+
+Users can register external skills as ceremony lenses that run alongside the built-in set during PR review.
+
+**Registration:**
+
+```bash
+lore ceremony add pr-review <skill-name>
+```
+
+For example, `lore ceremony add pr-review insecure-defaults` registers the `/insecure-defaults` skill as a ceremony lens for PR reviews. To list registered lenses:
+
+```bash
+lore ceremony get pr-review
+```
+
+**Invocation contract:**
+
+Ceremony lenses receive the PR number as their sole argument (e.g., `/<skill-name> <PR_NUMBER>`). They are responsible for fetching their own PR data — the orchestrator does not pass diff content, review context, or metadata.
+
+**Two-tier output handling:**
+
+Ceremony lens output is classified into one of two tiers based on format:
+
+1. **Conforming** — Output matches the Findings Output Format (structured JSON with `lens`, `pr`, `repo`, `findings` fields). Conforming output participates fully in cross-lens synthesis: findings are grouped, deduplicated, severity-elevated, and merged alongside built-in lens results.
+2. **Non-conforming** — Output does not match the Findings Output Format. Non-conforming output is preserved verbatim in a Supplementary Reports section appended after the synthesized findings. It is presented to the user but does not participate in synthesis.
+
+This two-tier model allows ceremony lenses to provide value regardless of whether they implement the findings schema. Skills that want their findings to influence the review verdict and synthesis should emit conforming JSON; skills that produce prose reports or alternative formats are still included as supplementary context.
 
 #### Adaptive Lens Selection
 
@@ -22,14 +52,13 @@ After the thematic pass, the lead agent selects lenses based on the criteria tab
 
 - **Default** — Correctness + Regressions + Test Quality + Interface Clarity. Applied when no flags override.
 - **`--thorough`** — All lenses. No signal matching; every lens runs.
-- **`--ai`** — Correctness and Security are always selected regardless of signal matching. Other lenses follow normal signal rules.
 
 **Criteria table:**
 
 | Lens | Trigger signals (select when ANY present) | Skip conditions (skip when ALL true) |
 |------|-------------------------------------------|---------------------------------------|
-| Correctness | Logic changes, business rules, algorithm modifications, API interactions, new control flow | — (always selected in default and `--ai` modes) |
-| Security | Auth/authz changes, input validation, external API calls, database queries, cryptographic code, secrets handling, user-facing endpoints | No auth/input/crypto/secrets code touched AND not `--ai` AND not high-risk tier |
+| Correctness | Logic changes, business rules, algorithm modifications, API interactions, new control flow | — (always selected in default mode) |
+| Security | Auth/authz changes, input validation, external API calls, database queries, cryptographic code, secrets handling, user-facing endpoints | No auth/input/crypto/secrets code touched AND not high-risk tier |
 | Blast Radius | Changes to exported interfaces, shared utilities, base classes, public APIs, configuration files | All changes are internal to a single module with no external consumers |
 | Regressions | Modifications to existing behavior, deletions, refactoring of working code, signature changes | All changes are net-new additions with no modifications to existing code |
 | Test Quality | Test files changed, new features without accompanying tests, modified behavior without test updates | No test files in diff AND all behavioral changes have existing test coverage |
@@ -82,7 +111,6 @@ Use when you want comprehensive, multi-lens coverage of a PR. `/pr-review` runs 
 ```
 /pr-review 42              # standard holistic review
 /pr-review 42 --thorough   # all lenses, no signal matching
-/pr-review 42 --ai         # AI-calibrated review
 /pr-review 42 --self       # self-review mode (adds perspective lenses)
 ```
 

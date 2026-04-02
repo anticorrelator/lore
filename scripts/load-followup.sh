@@ -89,18 +89,25 @@ def read_file(path):
     return None
 
 finding_path = os.path.join(item_dir, 'finding.md')
+proposed_comments_path = os.path.join(item_dir, 'proposed-comments.json')
+
+def read_json(path):
+    if os.path.isfile(path):
+        with open(path) as f:
+            return json.load(f)
+    return None
 
 result = {
     'id': followup_id,
     'title': meta.get('title', ''),
     'source': meta.get('source', ''),
-    'severity': meta.get('severity', ''),
     'status': meta.get('status', ''),
     'attachments': meta.get('attachments', []),
     'suggested_actions': meta.get('suggested_actions', []),
     'created': meta.get('created', ''),
     'updated': meta.get('updated', ''),
     'finding_content': read_file(finding_path),
+    'proposed_comments': read_json(proposed_comments_path),
 }
 
 print(json.dumps(result))
@@ -111,7 +118,6 @@ fi
 # --- Extract metadata fields ---
 TITLE=$(json_field "title" "$META")
 SOURCE=$(json_field "source" "$META")
-SEVERITY=$(json_field "severity" "$META")
 STATUS=$(json_field "status" "$META")
 CREATED=$(json_field "created" "$META")
 UPDATED=$(json_field "updated" "$META")
@@ -120,7 +126,6 @@ UPDATED=$(json_field "updated" "$META")
 draw_separator "Follow-up: $TITLE"
 echo "ID: $ID"
 echo "Source: $SOURCE"
-echo "Severity: $SEVERITY"
 echo "Status: $STATUS"
 echo "Created: $CREATED"
 echo "Updated: $UPDATED"

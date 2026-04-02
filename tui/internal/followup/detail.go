@@ -14,12 +14,35 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/render"
 )
 
+// ProposedComment represents a single review comment from the proposed-comments.json sidecar.
+type ProposedComment struct {
+	ID         string   `json:"id"`
+	Path       string   `json:"path"`
+	Line       int      `json:"line"`
+	Side       string   `json:"side"`
+	Body       string   `json:"body"`
+	Selected   bool     `json:"selected"`
+	Severity   string   `json:"severity"`
+	Lenses     []string `json:"lenses"`
+	Confidence float64  `json:"confidence"`
+}
+
+// ProposedReview is the top-level wrapper for the proposed-comments.json sidecar.
+// It carries PR metadata alongside the proposed comments so the posting script
+// can resolve the target without re-deriving it.
+type ProposedReview struct {
+	PR       int               `json:"pr"`
+	Owner    string            `json:"owner"`
+	Repo     string            `json:"repo"`
+	HeadSHA  string            `json:"head_sha"`
+	Comments []ProposedComment `json:"comments"`
+}
+
 // FollowUpDetail holds the full content of a single follow-up artifact.
 type FollowUpDetail struct {
 	ID               string            `json:"id"`
 	Title            string            `json:"title"`
 	Status           string            `json:"status"`
-	Severity         string            `json:"severity"`
 	Source           string            `json:"source"`
 	Attachments      []Attachment      `json:"attachments"`
 	SuggestedActions []SuggestedAction `json:"suggested_actions"`
@@ -27,6 +50,7 @@ type FollowUpDetail struct {
 	Updated          string            `json:"updated"`
 	PromotedTo       string            `json:"promoted_to"`
 	FindingContent   string            // contents of finding.md
+	ProposedComments *ProposedReview   // from proposed-comments.json sidecar (nil when absent)
 	Malformed        bool              `json:"malformed,omitempty"`
 }
 
@@ -42,7 +66,6 @@ type followUpMeta struct {
 	ID               string            `json:"id"`
 	Title            string            `json:"title"`
 	Status           string            `json:"status"`
-	Severity         string            `json:"severity"`
 	Source           string            `json:"source"`
 	Attachments      []Attachment      `json:"attachments"`
 	SuggestedActions []SuggestedAction `json:"suggested_actions"`
@@ -89,7 +112,6 @@ func LoadFollowUpDetail(knowledgeDir, id string) (*FollowUpDetail, error) {
 		ID:               meta.ID,
 		Title:            meta.Title,
 		Status:           meta.Status,
-		Severity:         meta.Severity,
 		Source:           meta.Source,
 		Attachments:      meta.Attachments,
 		SuggestedActions: meta.SuggestedActions,
@@ -102,19 +124,57 @@ func LoadFollowUpDetail(knowledgeDir, id string) (*FollowUpDetail, error) {
 		detail.FindingContent = string(data)
 	}
 
+	// Load proposed-comments.json sidecar when present. Missing or malformed
+	// sidecar is not an error — the field stays nil.
+	// The sidecar may be either a ProposedReview wrapper object or a bare
+	// JSON array of comments (the format produced by /pr-review).
+	if sidecarBytes, err := os.ReadFile(filepath.Join(itemDir, "proposed-comments.json")); err == nil {
+		var review ProposedReview
+		if json.Unmarshal(sidecarBytes, &review) == nil && len(review.Comments) > 0 {
+			detail.ProposedComments = &review
+		} else {
+			// Try bare array of comments.
+			var comments []ProposedComment
+			if json.Unmarshal(sidecarBytes, &comments) == nil && len(comments) > 0 {
+				detail.ProposedComments = &ProposedReview{Comments: comments}
+			}
+		}
+	}
+
 	return detail, nil
+}
+
+// Tab identifies a detail view tab.
+type Tab int
+
+const (
+	TabMeta     Tab = iota
+	TabFinding
+	TabComments
+)
+
+// tabInfo holds display metadata for a tab.
+type tabInfo struct {
+	id    Tab
+	label string
 }
 
 // DetailModel is the Bubble Tea model for the follow-up detail pane.
 type DetailModel struct {
-	knowledgeDir string
-	id           string
-	detail       *FollowUpDetail
-	loading      bool
-	err          error
-	viewport     viewport.Model
-	width        int
-	height       int
+	knowledgeDir  string
+	id            string
+	detail        *FollowUpDetail
+	loading       bool
+	err           error
+	viewport      viewport.Model
+	reviewCards   *ReviewCardsModel
+	tabs          []tabInfo
+	activeTab     int
+	savedTab      int // 1-indexed tab index to restore after reload; 0 = not set
+	contentStartY int
+	contentStartX int
+	width         int
+	height        int
 }
 
 // NewDetailModel creates a DetailModel. Call LoadDetail to populate it.
@@ -141,11 +201,26 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - headerHeight(m.detail)
+		cw := m.contentWidth()
+		ch := m.contentHeight()
+		m.viewport.Width = cw
+		m.viewport.Height = ch
 		if m.detail != nil {
 			m.viewport.SetContent(m.renderFinding())
 		}
+		if m.reviewCards != nil {
+			rc := *m.reviewCards
+			rc, _ = rc.Update(tea.WindowSizeMsg{Width: cw, Height: ch})
+			m.reviewCards = &rc
+		}
+
+	case WriteSidecarMsg:
+		if m.reviewCards != nil {
+			rc := *m.reviewCards
+			rc, _ = rc.Update(msg)
+			m.reviewCards = &rc
+		}
+		return m, nil
 
 	case DetailLoadedMsg:
 		if msg.ID == m.id {
@@ -154,21 +229,98 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 				m.err = msg.Err
 			} else {
 				m.detail = msg.Detail
-				m.viewport.Width = m.width
-				m.viewport.Height = m.height - headerHeight(m.detail)
+				cw := m.contentWidth()
+				ch := m.contentHeight()
+
+				// Initialize ReviewCardsModel when sidecar is present.
+				if m.detail.ProposedComments != nil {
+					rc := NewReviewCardsModel(m.knowledgeDir, m.id, m.detail.ProposedComments)
+					rc, _ = rc.Update(tea.WindowSizeMsg{Width: cw, Height: ch})
+					m.reviewCards = &rc
+				} else {
+					m.reviewCards = nil
+				}
+
+				m.tabs = m.buildTabs()
+				if m.savedTab > 0 {
+					restored := m.savedTab - 1
+					if restored >= len(m.tabs) {
+						restored = len(m.tabs) - 1
+					}
+					m.activeTab = restored
+					m.savedTab = 0
+				} else if m.detail.ProposedComments != nil {
+					m.activeTab = m.tabIndexFor(TabComments)
+				} else {
+					m.activeTab = m.tabIndexFor(TabFinding)
+				}
+
+				m.viewport.Width = cw
+				m.viewport.Height = ch
 				m.viewport.SetContent(m.renderFinding())
 			}
 		}
 		return m, nil
 
 	case tea.KeyMsg:
-		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(msg)
-		return m, cmd
+		switch msg.String() {
+		case "tab":
+			if len(m.tabs) > 0 {
+				m.activeTab = (m.activeTab + 1) % len(m.tabs)
+			}
+			return m, nil
+		case "shift+tab":
+			if len(m.tabs) > 0 {
+				m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
+			}
+			return m, nil
+		}
+		switch m.ActiveTab() {
+		case TabComments:
+			if m.reviewCards != nil {
+				rc := *m.reviewCards
+				var cmd tea.Cmd
+				rc, cmd = rc.Update(msg)
+				m.reviewCards = &rc
+				return m, cmd
+			}
+		case TabFinding:
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			return m, cmd
+		}
+		return m, nil
 
 	case tea.MouseMsg:
+		// Tab bar click hit-test: only switch tabs on left-click press.
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			tabBarY := m.contentStartY + 1
+			if msg.Y == tabBarY && len(m.tabs) > 0 {
+				// Tab bar format: "  " + [" label "] + " " + [" label "] + ...
+				// Each label rendered with Padding(0,1) so visual width = len(label)+2.
+				x := m.contentStartX + 2 // "  " indent
+				for i, tab := range m.tabs {
+					tabW := len(tab.label) + 2 // padding(0,1) adds 1 char each side
+					if msg.X >= x && msg.X < x+tabW {
+						m.activeTab = i
+						return m, nil
+					}
+					x += tabW + 1 // +1 for the " " separator between tabs
+				}
+			}
+		}
+		// Forward mouse to active tab for scroll handling.
 		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(msg)
+		switch m.ActiveTab() {
+		case TabFinding:
+			m.viewport, cmd = m.viewport.Update(msg)
+		case TabComments:
+			if m.reviewCards != nil {
+				rc := *m.reviewCards
+				rc, cmd = rc.Update(msg)
+				m.reviewCards = &rc
+			}
+		}
 		return m, cmd
 	}
 	return m, nil
@@ -203,12 +355,28 @@ func (m DetailModel) Source() string {
 	return m.detail.Source
 }
 
-// Severity returns the severity of the currently loaded follow-up, or "" if none is loaded.
-func (m DetailModel) Severity() string {
-	if m.detail == nil {
-		return ""
+// ActiveTab returns the currently active tab ID.
+func (m DetailModel) ActiveTab() Tab {
+	if m.activeTab < len(m.tabs) {
+		return m.tabs[m.activeTab].id
 	}
-	return m.detail.Severity
+	return TabMeta
+}
+
+// tabIndexFor searches m.tabs for the given ID and returns its index (or 0 if not found).
+func (m DetailModel) tabIndexFor(id Tab) int {
+	for i, tab := range m.tabs {
+		if tab.id == id {
+			return i
+		}
+	}
+	return 0
+}
+
+// PreserveTab snapshots the current active tab so it can be restored after a
+// reload. The value is stored 1-indexed so that zero means "no tab saved".
+func (m *DetailModel) PreserveTab() {
+	m.savedTab = m.activeTab + 1
 }
 
 // FindingExcerpt returns up to the first 3 non-empty, non-heading lines of the finding
@@ -236,6 +404,10 @@ func (m DetailModel) FindingExcerpt() string {
 func (m *DetailModel) ClearID() {
 	m.id = ""
 	m.detail = nil
+	m.reviewCards = nil
+	m.tabs = nil
+	m.activeTab = 0
+	m.savedTab = 0
 }
 
 // SetID sets the follow-up ID and returns a Cmd to load it.
@@ -247,26 +419,53 @@ func (m *DetailModel) SetID(id string) tea.Cmd {
 	m.loading = true
 	m.err = nil
 	m.detail = nil
+	m.reviewCards = nil
+	m.tabs = nil
+	m.activeTab = 0
+	m.savedTab = 0
 	m.viewport.SetContent("")
 	return LoadDetail(m.knowledgeDir, id)
 }
 
-// headerHeight returns the number of lines used by the metadata header.
-func headerHeight(detail *FollowUpDetail) int {
-	if detail == nil {
-		return 2
+// buildTabs creates the visible tab list based on what content is available.
+// TabComments is included only when the ReviewCardsModel is present.
+func (m DetailModel) buildTabs() []tabInfo {
+	tabs := []tabInfo{
+		{id: TabMeta, label: "Meta"},
+		{id: TabFinding, label: "Finding"},
 	}
-	h := 3 // status/severity row + source row + blank
-	if len(detail.Attachments) > 0 {
-		h++
+	if m.reviewCards != nil {
+		tabs = append(tabs, tabInfo{id: TabComments, label: "Comments"})
 	}
-	if len(detail.SuggestedActions) > 0 {
-		h += 2 // label + actions
+	return tabs
+}
+
+// SetContentStart stores the absolute terminal coordinates of the first row
+// of the detail view's output. Called by the parent when layout changes.
+func (m *DetailModel) SetContentStart(y, x int) {
+	m.contentStartY = y
+	m.contentStartX = x
+}
+
+func (m DetailModel) contentHeight() int {
+	// overhead: blank(1) + tabbar(1) + blank(1) = 3
+	h := m.height - 3
+	if h < 5 {
+		h = 5
 	}
 	return h
 }
 
-func (m DetailModel) renderHeader() string {
+func (m DetailModel) contentWidth() int {
+	w := m.width - 4
+	if w < 20 {
+		w = 20
+	}
+	return w
+}
+
+
+func (m DetailModel) renderMetaTab() string {
 	if m.detail == nil {
 		return ""
 	}
@@ -276,12 +475,10 @@ func (m DetailModel) renderHeader() string {
 
 	var b strings.Builder
 
-	// Status + severity
+	// Status
 	glyph, glyphColor := statusGlyph(m.detail.Status)
 	statusStr := lipgloss.NewStyle().Foreground(glyphColor).Render(glyph + " " + m.detail.Status)
-	sevColor := severityColor(m.detail.Severity)
-	sevStr := lipgloss.NewStyle().Foreground(sevColor).Render(m.detail.Severity)
-	b.WriteString(statusStr + dimStyle.Render("  ") + sevStr)
+	b.WriteString(statusStr)
 	b.WriteString("\n")
 
 	// Source
@@ -320,15 +517,53 @@ func (m DetailModel) renderHeader() string {
 	return b.String()
 }
 
+func (m DetailModel) renderTabBar() string {
+	activeStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("0")).
+		Background(lipgloss.Color("4")).
+		Padding(0, 1)
+
+	inactiveStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("7")).
+		Background(lipgloss.Color("238")).
+		Padding(0, 1)
+
+	var parts []string
+	for i, tab := range m.tabs {
+		if i == m.activeTab {
+			parts = append(parts, activeStyle.Render(tab.label))
+		} else {
+			parts = append(parts, inactiveStyle.Render(tab.label))
+		}
+	}
+
+	return "  " + strings.Join(parts, " ")
+}
+
 func (m DetailModel) renderFinding() string {
 	if m.detail == nil {
 		return ""
 	}
-	width := m.width
+	width := m.contentWidth()
 	if width <= 0 {
 		width = 80
 	}
 	return render.Markdown(m.detail.FindingContent, width)
+}
+
+func (m DetailModel) renderTabContent() string {
+	switch m.ActiveTab() {
+	case TabMeta:
+		return m.renderMetaTab()
+	case TabComments:
+		if m.reviewCards != nil {
+			return m.reviewCards.View()
+		}
+		return ""
+	default: // TabFinding
+		return m.viewport.View()
+	}
 }
 
 func (m DetailModel) View() string {
@@ -344,5 +579,5 @@ func (m DetailModel) View() string {
 	if m.detail == nil {
 		return ""
 	}
-	return m.renderHeader() + m.viewport.View()
+	return "\n" + m.renderTabBar() + "\n\n" + m.renderTabContent()
 }

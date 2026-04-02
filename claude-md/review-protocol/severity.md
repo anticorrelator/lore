@@ -27,3 +27,34 @@ Existing review skills (`/pr-review`, `/pr-self-review`, `/pr-pair-review`, `/pr
 
 Lens skills do not produce nitpick or praise findings — those are conversational labels suited to interactive review, not structured analysis output.
 
+#### User-Facing Framing
+
+Internal severity values (`blocking`, `suggestion`, `question`) remain in JSON for routing and aggregation. User-visible output — section headers, verdict lines, and finding descriptions — uses impact-grounded language that presents evidence without issuing a severity verdict.
+
+**Rule: hedge the inference, not the observed code fact.**
+
+The observed code fact is stated plainly. The impact claim — what will break, who is affected, under what conditions — is framed as a grounded scenario, not a certainty.
+
+- Do not write: "This is a security vulnerability."
+- Write instead: "If `input` is user-controlled, this reaches `exec()` unsanitized — a path that could allow command injection."
+
+**Section header format (user-facing output):**
+
+| Internal label | User-facing section header |
+|----------------|----------------------------|
+| blocking findings | `### Findings requiring action (<count>)` |
+| suggestion findings | `### Improvement opportunities (<count>)` |
+| question findings | `### Questions (<count>)` |
+
+Do not use `### Blocking (<count>)` or `### Suggestions (<count>)` in user-visible output.
+
+**Verdict line format (user-facing output):**
+
+| Outcome | Verdict line |
+|---------|--------------|
+| Has blocking findings | `ACTION NEEDED` |
+| Clean, no findings | `CLEAN` |
+| Has suggestions only | `SUGGESTIONS` |
+
+Do not use `BLOCKING` or `SUGGESTIONS ONLY` as verdict tokens in user-visible output.
+

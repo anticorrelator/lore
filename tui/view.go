@@ -474,6 +474,8 @@ func (m model) renderStatusBar(width int) string {
 				hint("j/k", "navigate"),
 				hint("ctrl+a", "active/archived"),
 				hint("Enter", "detail"),
+				hint("A", "dismiss"),
+				hint("D", "delete"),
 				hint("w", "work list"),
 				hint("Esc", "exit"),
 				hint("?", "help"),
@@ -486,6 +488,7 @@ func (m model) renderStatusBar(width int) string {
 			}
 		} else {
 			hints = []string{
+				hint("Tab/Shift-Tab", "cycle tabs"),
 				hint("p", "promote"),
 				hint("d", "dismiss"),
 				hint("c", "chat"),

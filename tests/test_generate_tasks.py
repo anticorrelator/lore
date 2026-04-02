@@ -232,6 +232,99 @@ Feature with phase-level knowledge context.
 - [[knowledge:workflows#Deploy Process]]
 """
 
+PLAN_WITH_NARRATIVE_AND_DIAGRAM = """\
+# Feature X
+
+## Goal
+Add feature X.
+
+## Design Decisions
+
+### 1. Use existing config layer
+**Choice:** Reuse src/config.ts
+- No new abstraction needed
+
+## Narrative
+
+This feature adds the scaffolding and implementation for feature X.
+The config layer is reused to avoid duplication. The implementation
+phase wires up endpoints after the scaffolding is in place.
+
+## Architecture Diagram
+
+```
+[Config Layer] --> [Feature X] --> [Endpoints]
+```
+
+## Phases
+
+### Phase 1: Setup
+**Objective:** Create scaffolding
+**Files:** `src/config.ts`
+- [ ] Create config file
+- [ ] Add default values
+
+### Phase 2: Implementation
+**Objective:** Build the feature
+**Files:** `src/feature.ts`
+- [ ] Implement core logic
+- [ ] Wire up endpoints
+
+## Related
+- [[knowledge:conventions#Naming Patterns]] — naming rules
+- [[work:previous-feature]] — prior art
+"""
+
+
+class TestNarrativeAndDiagramSections:
+    """Plans with ## Narrative and ## Architecture Diagram between Design Decisions and Phases."""
+
+    def test_phase_count_matches_minimal_plan(self, tmp_path):
+        """Narrative and Architecture Diagram sections do not affect phase count."""
+        result_with = generate_tasks_from_plan(PLAN_WITH_NARRATIVE_AND_DIAGRAM, str(tmp_path))
+        result_without = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
+        assert len(result_with["phases"]) == len(result_without["phases"])
+
+    def test_task_count_matches_minimal_plan(self, tmp_path):
+        """Narrative and Architecture Diagram sections do not affect task count."""
+        result_with = generate_tasks_from_plan(PLAN_WITH_NARRATIVE_AND_DIAGRAM, str(tmp_path))
+        result_without = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
+        total_with = sum(len(p["tasks"]) for p in result_with["phases"])
+        total_without = sum(len(p["tasks"]) for p in result_without["phases"])
+        assert total_with == total_without
+
+    def test_task_subjects_match_minimal_plan(self, tmp_path):
+        """Task subjects are identical with or without Narrative/Architecture Diagram sections."""
+        result_with = generate_tasks_from_plan(PLAN_WITH_NARRATIVE_AND_DIAGRAM, str(tmp_path))
+        result_without = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
+        subjects_with = [
+            t["subject"]
+            for p in result_with["phases"]
+            for t in p["tasks"]
+        ]
+        subjects_without = [
+            t["subject"]
+            for p in result_without["phases"]
+            for t in p["tasks"]
+        ]
+        assert subjects_with == subjects_without
+
+    def test_narrative_content_not_in_task_subjects(self, tmp_path):
+        """Narrative section prose does not leak into task subjects."""
+        result = generate_tasks_from_plan(PLAN_WITH_NARRATIVE_AND_DIAGRAM, str(tmp_path))
+        all_subjects = [t["subject"] for p in result["phases"] for t in p["tasks"]]
+        for subject in all_subjects:
+            assert "adds the scaffolding" not in subject
+            assert "Config Layer" not in subject
+
+    def test_phase_objectives_correct(self, tmp_path):
+        """Phase objectives are extracted correctly despite intervening sections."""
+        result = generate_tasks_from_plan(PLAN_WITH_NARRATIVE_AND_DIAGRAM, str(tmp_path))
+        phase1 = next(p for p in result["phases"] if p["phase_number"] == 1)
+        phase2 = next(p for p in result["phases"] if p["phase_number"] == 2)
+        assert phase1["objective"] == "Create scaffolding"
+        assert phase2["objective"] == "Build the feature"
+
 
 class TestNoPhases:
     """Plan with no ## Phases section at all."""

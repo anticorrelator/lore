@@ -180,26 +180,24 @@ for item in items:
     id_ = item.get('id', '')
     title = item.get('title', '')
     status = item.get('status', '')
-    severity = item.get('severity', '')
     source = item.get('source', '')
     created = item.get('created', '')
     attachments = item.get('attachments', [])
     att_summary = ','.join(f\"{a.get('type','')}:{a.get('ref','')}\" for a in attachments) if attachments else ''
-    # Pipe-delimited row: id|title|status|severity|source|created|att_summary
+    # Pipe-delimited row: id|title|status|source|created|att_summary
     # Escape pipes in fields
     row = '|'.join([
         id_.replace('|',''),
         title.replace('|',''),
         status.replace('|',''),
-        severity.replace('|',''),
         source.replace('|',''),
         created.replace('|',''),
         att_summary.replace('|',','),
     ])
     print(row)
-" | while IFS='|' read -r id title status severity source created att_summary; do
+" | while IFS='|' read -r id title status source created att_summary; do
     REL_DATE=$(relative_date "$created")
-    echo "${id}|${title}|${status}|${severity}|${source}|${REL_DATE}|${att_summary}"
+    echo "${id}|${title}|${status}|${source}|${REL_DATE}|${att_summary}"
     TOTAL_COUNT=$((TOTAL_COUNT + 1))
 done > /tmp/lore_followups_rows_$$.txt
 
@@ -215,9 +213,9 @@ if [[ "$TOTAL_COUNT" -eq 0 ]]; then
     echo "No follow-ups with status: $FILTER_STATUS"
   fi
 else
-  COL_SPEC="ID:fixed:28:left|TITLE:flex:100:left|SEV:fixed:8:left|SOURCE:fixed:16:left|CREATED:fixed:10:left|ATTACHMENTS:fixed:20:left"
+  COL_SPEC="ID:fixed:28:left|TITLE:flex:100:left|SOURCE:fixed:16:left|CREATED:fixed:10:left|ATTACHMENTS:fixed:20:left"
   cat /tmp/lore_followups_rows_$$.txt \
-    | cut -d'|' -f1,2,4,5,6,7 \
+    | cut -d'|' -f1,2,4,5,6 \
     | render_table "$COL_SPEC"
 fi
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # create-followup.sh — Create a new follow-up artifact in _followups/
-# Usage: bash create-followup.sh --title <name> --source <agent> [--severity <level>]
+# Usage: bash create-followup.sh --title <name> --source <agent>
 #   [--attachments <json-array>] [--suggested-actions <json-array>]
-#   [--content <body>] [--json]
+#   [--proposed-comments <filepath>] [--content <body>] [--json]
 # Creates $KNOWLEDGE_DIR/_followups/<id>/ with _meta.json and finding.md
 
 set -euo pipefail
@@ -13,9 +13,9 @@ source "$SCRIPT_DIR/lib.sh"
 # --- Parse arguments ---
 TITLE=""
 SOURCE=""
-SEVERITY="medium"
 ATTACHMENTS="[]"
 SUGGESTED_ACTIONS="[]"
+PROPOSED_COMMENTS=""
 CONTENT=""
 JSON_MODE=0
 
@@ -29,16 +29,16 @@ while [[ $# -gt 0 ]]; do
       SOURCE="$2"
       shift 2
       ;;
-    --severity)
-      SEVERITY="$2"
-      shift 2
-      ;;
     --attachments)
       ATTACHMENTS="$2"
       shift 2
       ;;
     --suggested-actions)
       SUGGESTED_ACTIONS="$2"
+      shift 2
+      ;;
+    --proposed-comments)
+      PROPOSED_COMMENTS="$2"
       shift 2
       ;;
     --content)
@@ -51,7 +51,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "[followup] Error: Unknown flag '$1'" >&2
-      echo "Usage: create-followup.sh --title <name> --source <agent> [--severity <level>] [--attachments <json>] [--suggested-actions <json>] [--content <body>] [--json]" >&2
+      echo "Usage: create-followup.sh --title <name> --source <agent> [--attachments <json>] [--suggested-actions <json>] [--proposed-comments <filepath>] [--content <body>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -72,18 +72,6 @@ if [[ -z "$SOURCE" ]]; then
   echo "[followup] Error: Missing --source." >&2
   exit 1
 fi
-
-# Validate severity
-case "$SEVERITY" in
-  low|medium|high|critical) ;;
-  *)
-    if [[ $JSON_MODE -eq 1 ]]; then
-      json_error "Invalid severity '$SEVERITY': must be low, medium, high, or critical"
-    fi
-    echo "[followup] Error: Invalid severity '$SEVERITY'. Must be: low, medium, high, critical." >&2
-    exit 1
-    ;;
-esac
 
 KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 FOLLOWUPS_DIR="$KNOWLEDGE_DIR/_followups"
@@ -119,7 +107,6 @@ escape_json() {
 
 TITLE_JSON=$(escape_json "$TITLE")
 SOURCE_JSON=$(escape_json "$SOURCE")
-SEVERITY_JSON=$(escape_json "$SEVERITY")
 
 # Write _meta.json
 cat > "$ITEM_DIR/_meta.json" << METAEOF
@@ -127,7 +114,6 @@ cat > "$ITEM_DIR/_meta.json" << METAEOF
   "id": "$ID",
   "title": $TITLE_JSON,
   "source": $SOURCE_JSON,
-  "severity": $SEVERITY_JSON,
   "status": "open",
   "attachments": $ATTACHMENTS,
   "suggested_actions": $SUGGESTED_ACTIONS,
@@ -149,6 +135,23 @@ else
 
 <!-- Add finding details here. -->
 FINDINGEOF
+fi
+
+# Write proposed-comments.json sidecar (accepts filepath or inline JSON)
+if [[ -n "$PROPOSED_COMMENTS" ]]; then
+  if [[ -f "$PROPOSED_COMMENTS" ]]; then
+    # It's a file path — copy it
+    cp "$PROPOSED_COMMENTS" "$ITEM_DIR/proposed-comments.json"
+  elif printf '%s' "$PROPOSED_COMMENTS" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+    # It's inline JSON — write it directly
+    printf '%s\n' "$PROPOSED_COMMENTS" > "$ITEM_DIR/proposed-comments.json"
+  else
+    if [[ $JSON_MODE -eq 1 ]]; then
+      json_error "Proposed comments: not a valid file path or JSON"
+    fi
+    echo "[followup] Error: --proposed-comments is neither a valid file path nor valid JSON" >&2
+    exit 1
+  fi
 fi
 
 # Update the followup index

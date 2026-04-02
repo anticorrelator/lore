@@ -415,8 +415,8 @@ func TestBuildPaneConfigStateFollowUpsEmptyList(t *testing.T) {
 
 func TestBuildPaneConfigStateFollowUpsWithItems(t *testing.T) {
 	fuItems := []followup.FollowUpItem{
-		{ID: "fu-1", Title: "Follow Up One", Status: "open", Severity: "high"},
-		{ID: "fu-2", Title: "Follow Up Two", Status: "pending", Severity: "medium"},
+		{ID: "fu-1", Title: "Follow Up One", Status: "open"},
+		{ID: "fu-2", Title: "Follow Up Two", Status: "pending"},
 	}
 	m := minimalModel(stateFollowUps, nil, fuItems)
 	cfg := m.buildPaneConfig()

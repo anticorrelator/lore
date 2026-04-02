@@ -140,6 +140,17 @@ func (m model) renderConfirmModal() string {
 		body = fmt.Sprintf("Permanently delete %s?\n\n", s.key.Render(m.confirmTitle)) +
 			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
 			s.key.Render("any key") + s.dim.Render("  cancel")
+	case "dismiss":
+		title = "Dismiss Follow-up"
+		body = fmt.Sprintf("Dismiss %s?\n\n", s.key.Render(m.confirmTitle)) +
+			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
+			s.key.Render("any key") + s.dim.Render("  cancel")
+	case "delete_followup":
+		warnS := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))
+		title = warnS.Render("Delete Follow-up")
+		body = fmt.Sprintf("Permanently delete %s?\n\n", s.key.Render(m.confirmTitle)) +
+			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
+			s.key.Render("any key") + s.dim.Render("  cancel")
 	}
 
 	return m.placeModal(buildModalBox(s, title, body))
@@ -159,8 +170,11 @@ func (m model) renderHelpModal() string {
 		row("j / k", "navigate") + "\n" +
 		row("ctrl+a", "toggle active/archived") + "\n" +
 		row("Enter", "open detail") + "\n" +
+		row("Tab / Shift-Tab", "cycle tabs") + "\n" +
 		row("p", "promote to work item") + "\n" +
 		row("d", "dismiss") + "\n" +
+		row("A", "dismiss from list") + "\n" +
+		row("D", "delete from list") + "\n" +
 		row("c", "chat about follow-up") + "\n" +
 		row("Esc", "exit follow-ups") + "\n" +
 		"\n" +

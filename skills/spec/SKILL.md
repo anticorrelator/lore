@@ -150,17 +150,34 @@ Before drafting, offer the user a chance to shape the plan with high-level strat
    ```
    If no skills matched, omit this block.
 
-5. **Generate Architecture Diagram (conditional)** — after drafting Design Decisions, decide whether to include a `## Architecture Diagram` section. Include it when the work involves multi-component systems, novel data flows, or module boundaries that are not self-evident from the phase list. Omit for single-file or mechanical changes.
+5. **Draft Narrative** — after drafting Design Decisions, synthesize the goal and chosen approach into a `## Narrative` section (1-2 paragraphs). Place it after `## Goal`. The narrative answers: what is this work building or changing, why, and what key architectural choices shape it? Write for a reader who wants the story without reading all sections. Draw from Goal (the what/why) and Design Decisions (trade-offs chosen). Omit file paths and task lists — those belong in Phases.
 
-   If included, write a plain-text ASCII diagram inside a fenced code block (` ```text ` or bare ` ``` `). Use box-drawing characters (─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼), arrows (──►, ──┐, ◄──), and vertical pipes for connections. Label components with actual file/module names (not generic boxes). Do NOT use Mermaid or other diagram DSLs — the TUI renders markdown with a line-by-line parser that cannot interpret them; only plain text art is universally readable across terminal, file browser, and TUI. Place the section after `## Design Decisions` and before `## Phases`.
+6. **Generate Architecture Diagram (conditional)** — after drafting the Narrative, decide whether to include a `## Architecture Diagram` section.
 
-6. **Annotate phases with knowledge context** — after drafting phases with objectives and tasks, run a concordance query per phase to surface relevant knowledge entries beyond what you encountered in Step 2s:
+   Read diagram conventions:
+   ```bash
+   cat ~/.lore/claude-md/review-protocol/followup-template.md
+   ```
+
+   **Inclusion gate:** Include only when the work touches 2 or more distinct modules (grouped by first directory component). Omit for single-file or mechanical changes.
+
+   **Diagram type selection:**
+   | Work character | Diagram type |
+   |---|---|
+   | Adds or modifies a feature with a clear invocation path | Call chain: entry point → handlers → outputs |
+   | Introduces new state or modifies state transitions | State machine: states as boxes, transitions as labeled arrows |
+   | Moves data between components or transforms it | Data flow: sources → transforms → sinks |
+   | Mixed (multiple types apply) | Use the dominant type; annotate secondary flows inline |
+
+   Write a plain-text ASCII diagram inside a fenced code block. Use box-drawing characters (─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼), arrows (──►, ──┐, ◄──), and label arrows with the key function name, event name, or data type that flows along the edge. Label components with actual file/module names. Do NOT use Mermaid or other diagram DSLs — the TUI's line-by-line markdown renderer cannot interpret them. Place after `## Design Decisions` and before `## Phases`.
+
+7. **Annotate phases with knowledge context** — after drafting phases with objectives and tasks, run a concordance query per phase to surface relevant knowledge entries beyond what you encountered in Step 2s:
    ```bash
    lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5
    ```
    Review the suggestions for each phase. Add relevant entries as `[[knowledge:file#heading]] — why relevant` lines in the phase's `**Knowledge context:**` block. Your direct findings from Step 2s are the primary source — concordance is a *widener*, not a replacement. Skip entries that don't add actionable context for a worker implementing that phase.
 
-7. Present to user for review
+8. Present to user for review
 
 ### Step 3.3s: Review context cost estimates
 
@@ -541,11 +558,27 @@ Before synthesizing, offer the user a chance to shape the plan with high-level s
 From the documented findings, draft the remaining plan sections:
 1. **Goal** — what we're building/changing and why (1 paragraph)
 2. **Design Decisions** — use the `### DN: Title` format from the template. Each decision requires `**Decision:**`, `**Rationale:**`, `**Alternatives considered:**`, and `**Applies to:**` fields. Number decisions sequentially (D1, D2, ...).
-3. **Architecture Diagram (conditional)** — after drafting Design Decisions, decide whether to include a `## Architecture Diagram` section. Include it when the work involves multi-component systems, novel data flows, or module boundaries that are not self-evident from the phase list. Omit for single-file or mechanical changes.
+3. **Draft Narrative** — after drafting Design Decisions, synthesize the goal and chosen approach into a `## Narrative` section (1-2 paragraphs). Place it after `## Goal`. The narrative answers: what is this work building or changing, why, and what key architectural choices shape it? Write for a reader who wants the story without reading all sections. Draw from Goal (the what/why), investigation findings (the discovered context), and Design Decisions (trade-offs chosen). Omit file paths and task lists — those belong in Phases.
+4. **Architecture Diagram (conditional)** — after drafting the Narrative, decide whether to include a `## Architecture Diagram` section.
 
-   If included, write a plain-text ASCII diagram inside a fenced code block (` ```text ` or bare ` ``` `). Use box-drawing characters (─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼), arrows (──►, ──┐, ◄──), and vertical pipes for connections. Label components with actual file/module names — investigation findings provide the component relationships and data flows to model. Do NOT use Mermaid or other diagram DSLs — the TUI renders markdown with a line-by-line parser that cannot interpret them; only plain text art is universally readable across terminal, file browser, and TUI. Place the section after `## Design Decisions` and before `## Phases`.
+   Read diagram conventions:
+   ```bash
+   cat ~/.lore/claude-md/review-protocol/followup-template.md
+   ```
 
-4. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include a `**Knowledge context:**` block listing knowledge entries relevant to that phase — these flow directly to worker agents via task generation. For multi-worker phases, novel implementations without codebase precedent, or phases using intent+constraints task format, add `**Knowledge delivery:** full` — workers interpreting intent and constraints need resolved knowledge content, not just backlink labels.
+   **Inclusion gate:** Include only when the work touches 2 or more distinct modules (grouped by first directory component). Omit for single-file or mechanical changes.
+
+   **Diagram type selection:**
+   | Work character | Diagram type |
+   |---|---|
+   | Adds or modifies a feature with a clear invocation path | Call chain: entry point → handlers → outputs |
+   | Introduces new state or modifies state transitions | State machine: states as boxes, transitions as labeled arrows |
+   | Moves data between components or transforms it | Data flow: sources → transforms → sinks |
+   | Mixed (multiple types apply) | Use the dominant type; annotate secondary flows inline |
+
+   Write a plain-text ASCII diagram inside a fenced code block. Use box-drawing characters (─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼), arrows (──►, ──┐, ◄──), and label arrows with the key function name, event name, or data type that flows along the edge. Label components with actual file/module names — investigation findings provide the component relationships and data flows to model. Do NOT use Mermaid or other diagram DSLs — the TUI's line-by-line markdown renderer cannot interpret them. Place after `## Design Decisions` and before `## Phases`.
+
+5. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include a `**Knowledge context:**` block listing knowledge entries relevant to that phase — these flow directly to worker agents via task generation. For multi-worker phases, novel implementations without codebase precedent, or phases using intent+constraints task format, add `**Knowledge delivery:** full` — workers interpreting intent and constraints need resolved knowledge content, not just backlink labels.
 
    **Advisor identification:** When investigations reveal domain complexity in a phase — unfamiliar invariants, cross-cutting constraints, or areas where uninformed changes risk breaking correctness — add an `**Advisors:**` block declaring domain-expert advisors for that phase. Use the format: `- advisor-name — domain scope. [must-consult|on-demand]`. Use `must-consult` when the domain has hard invariants that workers must respect (e.g., auth, data migration); use `on-demand` when the domain is complex but workers can start independently and ask questions as needed. `/implement` spawns declared advisors as persistent team members with investigation findings as their domain baseline.
 
@@ -571,13 +604,13 @@ From the documented findings, draft the remaining plan sections:
    - [ ] In `generate-tasks.py` line 87, replace `context_block` with `build_context_block(task, phase, decisions)`
    ```
 
-5. **Concordance-assisted annotation** — after drafting phases, widen each phase's `**Knowledge context:**` block beyond what investigations explicitly mentioned. For each phase, run:
+6. **Concordance-assisted annotation** — after drafting phases, widen each phase's `**Knowledge context:**` block beyond what investigations explicitly mentioned. For each phase, run:
    ```bash
    lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5
    ```
    Review the suggestions against what is already listed. Add relevant entries as `[[knowledge:...]]` backlinks with a brief "— why relevant" annotation. Skip entries that duplicate what investigations already covered. Investigation findings are the primary source of knowledge references — concordance is a *widener*, not a replacement.
 
-6. **Open Questions** — anything investigations couldn't resolve
+7. **Open Questions** — anything investigations couldn't resolve
 
 Present the synthesized plan to the user for review.
 
@@ -769,6 +802,12 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 
 ## Goal
 <!-- One paragraph: what we're building/changing and why -->
+
+## Narrative
+<!-- 1-2 paragraphs synthesizing the goal and key design choices into a readable story.
+     Written for a reader who wants the "what, why, and how it fits together" without reading all sections.
+     Draw from Goal (the what/why) and Design Decisions (trade-offs chosen).
+     Omit file paths and task lists — those belong in Phases. -->
 
 ## Strategy
 <!-- Optional. Written verbatim from user input at the strategy gate (Step 4d / Step 2.5s).
