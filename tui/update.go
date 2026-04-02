@@ -21,6 +21,86 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
+// handlePanelRouting handles shared mouse-focus routing and tab/esc/ctrl+t key
+// handling for split-pane states (stateWork and stateFollowUps). It mutates m
+// in place and returns a command and a bool indicating whether the message was
+// consumed. If consumed is false the caller must handle the message itself.
+// Entity-specific action keys (s, c, p, d, …) are NOT handled here.
+func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool) {
+	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		isClick := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && !msg.Shift
+		if isClick {
+			if m.layoutMode == config.LayoutLeftRight {
+				xBoundary := leftPanelWidth + 2
+				if msg.X < xBoundary {
+					m.focusedPanel = panelLeft
+				} else {
+					m.focusedPanel = panelRight
+				}
+			} else {
+				topH := m.topPanelHeight()
+				if msg.Y <= 1+topH {
+					m.focusedPanel = panelLeft
+				} else {
+					m.focusedPanel = panelRight
+				}
+			}
+		}
+		switch m.focusedPanel {
+		case panelLeft:
+			cmd, prevID, newID := cb.listUpdate(msg)
+			if newID != "" && newID != prevID {
+				detailCmd := cb.loadDetail(newID)
+				return tea.Batch(cmd, detailCmd), true
+			}
+			return cmd, true
+		default: // panelRight
+			if m.terminalMode {
+				id := cb.currentSlug()
+				if m.specPanels != nil {
+					if panel, ok := m.specPanels[id]; ok {
+						sm, cmd := panel.Update(msg)
+						m.specPanels[id] = sm
+						return cmd, true
+					}
+				}
+			}
+			if cb.setContentStart != nil {
+				cb.setContentStart()
+			}
+			cmd := cb.detailUpdate(msg)
+			return cmd, true
+		}
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc":
+			if m.focusedPanel == panelRight && !m.terminalMode {
+				m.focusedPanel = panelLeft
+				return nil, true
+			}
+		case "ctrl+t":
+			if m.focusedPanel == panelRight {
+				if m.terminalMode {
+					m.terminalMode = false
+					return nil, true
+				}
+				if panel, ok := cb.specPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
+					m.terminalMode = true
+					return tea.EnableMouseCellMotion, true
+				}
+			}
+		case "tab":
+			if m.focusedPanel == panelLeft {
+				m.focusedPanel = panelRight
+				return nil, true
+			}
+		}
+	}
+	return nil, false
+}
+
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		loadWorkItems(m.config.WorkDir),
@@ -77,21 +157,21 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	}
 
 	// Spec confirm modal: intercept all keys before launching subprocess.
-	if m.specConfirmActive {
+	if m.sessionConfirmActive {
 		if _, ok := msg.(shiftEnterMsg); ok {
-			m.specConfirmInput.InsertRune('\n')
+			m.sessionConfirmInput.InsertRune('\n')
 			return m, nil
 		}
 		if km, ok := msg.(tea.KeyMsg); ok {
 			switch km.String() {
 			case "alt+enter":
-				m.specConfirmInput.InsertRune('\n')
+				m.sessionConfirmInput.InsertRune('\n')
 				return m, nil
 			case "enter":
-				extraContext := strings.TrimSpace(m.specConfirmInput.Value())
-				m.specConfirmActive = false
+				extraContext := strings.TrimSpace(m.sessionConfirmInput.Value())
+				m.sessionConfirmActive = false
 				m.disableKittyKeyboard()
-				slug := m.specConfirmSlug
+				slug := m.sessionConfirmSlug
 				// Mark item as speccing in the list.
 				m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug})
 				// Create spec panel sized to the panel slot it occupies (detailPanelHeight).
@@ -101,25 +181,25 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				panel, _ = panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
 				m.setSpecPanel(slug, panel)
 				m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-				m.specLaunchedFromModal = m.state == stateWork
-				return m, work.StartTerminalCmd(slug, m.specConfirmTitle, m.config.ProjectDir, specW, specH, extraContext, m.specConfirmShortMode, m.specConfirmChatMode, m.specConfirmSkipConfirm)
+				m.sessionLaunchedFromModal = m.state == stateWork
+				return m, work.StartTerminalCmd(slug, m.sessionConfirmTitle, m.config.ProjectDir, specW, specH, extraContext, m.sessionConfirmShortMode, m.sessionConfirmChatMode, m.sessionConfirmSkipConfirm)
 			case "esc", "ctrl+c":
-				m.specConfirmActive = false
+				m.sessionConfirmActive = false
 				m.disableKittyKeyboard()
 				return m, nil
 			case "alt+1":
-				if !m.specConfirmChatMode {
-					m.specConfirmShortMode = !m.specConfirmShortMode
+				if !m.sessionConfirmChatMode {
+					m.sessionConfirmShortMode = !m.sessionConfirmShortMode
 				}
 				return m, nil
 			case "alt+2":
-				if !m.specConfirmChatMode {
-					m.specConfirmSkipConfirm = !m.specConfirmSkipConfirm
+				if !m.sessionConfirmChatMode {
+					m.sessionConfirmSkipConfirm = !m.sessionConfirmSkipConfirm
 				}
 				return m, nil
 			default:
 				var taCmd tea.Cmd
-				m.specConfirmInput, taCmd = m.specConfirmInput.Update(msg)
+				m.sessionConfirmInput, taCmd = m.sessionConfirmInput.Update(msg)
 				return m, taCmd
 			}
 		}
@@ -248,74 +328,41 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case tea.MouseMsg:
 		// Centralized click routing: main.go owns all panel geometry,
 		// so mouse events are routed here before reaching sub-models.
-		isClick := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && !msg.Shift
 		switch m.state {
 		case stateWork:
-			if m.layoutMode == config.LayoutLeftRight {
-				// LayoutLeftRight X routing:
-				// Layout: ┌(1) + leftContent(leftPanelWidth) + ┐(1) | ┌(1) + rightContent + ┐(1)
-				// Left panel occupies X in [0, leftPanelWidth+1]; right starts at leftPanelWidth+2.
-				if isClick {
-					xBoundary := leftPanelWidth + 2
-					if msg.X < xBoundary {
-						m.focusedPanel = panelLeft
-					} else {
-						m.focusedPanel = panelRight
-					}
-				}
-			} else {
-				// Top/bottom layout Y thresholds (from viewSplitPaneTopBottom rendering):
-				// Row 0: blank, Row 1: top border, Rows 2..(1+topH): top content,
-				// Row (2+topH): top bottom-border, Row (3+topH): bottom top-border,
-				// Rows (4+topH+i) for i in 0..bottomH-1: bottom content rows.
-				// Spec zone starts at row 4+topH+detailH+1 = 5+topH+detailH.
-				if isClick {
-					topH := m.topPanelHeight()
-					if msg.Y <= 1+topH {
-						m.focusedPanel = panelLeft
-					} else {
-						m.focusedPanel = panelRight
-					}
-				}
-			}
-			// Forward MouseMsg to the now-focused sub-model so click/wheel
-			// events reach per-pane handlers (viewport scroll, tab clicks, etc.).
-			switch m.focusedPanel {
-			case panelLeft:
-				prevSlug := m.list.CurrentSlug()
-				lm, cmd := m.list.Update(msg)
-				m.list = lm
-				newSlug := m.list.CurrentSlug()
-				if newSlug != "" && newSlug != prevSlug {
-					var detailCmd tea.Cmd
-					m, detailCmd = m.loadDetail(newSlug)
-					return m, tea.Batch(cmd, detailCmd)
-				}
-				return m, cmd
-			default: // panelRight
-				// When terminal mode is active, route mouse events to the spec panel.
-				if m.terminalMode {
-					slug := m.list.CurrentSlug()
-					if m.specPanels != nil {
-						if panel, ok := m.specPanels[slug]; ok {
-							sm, cmd := panel.Update(msg)
-							m.specPanels[slug] = sm
-							return m, cmd
-						}
-					}
-				}
+			cb := panelCallbacks{
+				currentSlug: func() string { return m.list.CurrentSlug() },
+				loadDetail: func(slug string) tea.Cmd {
+					var cmd tea.Cmd
+					m, cmd = m.loadDetail(slug)
+					return cmd
+				},
+				specPanelFn: func() (work.SpecPanelModel, bool) { return m.currentSpecPanel() },
+				listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
+					prevSlug := m.list.CurrentSlug()
+					lm, cmd := m.list.Update(lmsg)
+					m.list = lm
+					return cmd, prevSlug, m.list.CurrentSlug()
+				},
+				detailUpdate: func(dmsg tea.Msg) tea.Cmd {
+					var cmd tea.Cmd
+					m.detail, cmd = m.detail.Update(dmsg)
+					return cmd
+				},
 				// Set absolute position so detail can hit-test tab bar clicks.
-				if m.layoutMode == config.LayoutLeftRight {
-					m.detail.SetContentStart(2, leftPanelWidth+5)
-				} else {
-					m.detail.SetContentStart(m.topPanelHeight()+4, 3)
-				}
-				var cmd tea.Cmd
-				m.detail, cmd = m.detail.Update(msg)
-				return m, cmd
+				setContentStart: func() {
+					if m.layoutMode == config.LayoutLeftRight {
+						m.detail.SetContentStart(2, leftPanelWidth+5)
+					} else {
+						m.detail.SetContentStart(m.topPanelHeight()+4, 3)
+					}
+				},
 			}
+			cmd, _ := handlePanelRouting(&m, msg, cb)
+			return m, cmd
 		case stateKnowledge:
 			// Browser uses the same leftPanelWidth split as stateWork LayoutLeftRight.
+			isClick := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && !msg.Shift
 			if isClick {
 				xBoundary := leftPanelWidth + 2
 				if msg.X < xBoundary {
@@ -328,52 +375,27 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			m.browser = bm
 			return m, cmd
 		case stateFollowUps:
-			if m.layoutMode == config.LayoutLeftRight {
-				if isClick {
-					xBoundary := leftPanelWidth + 2
-					if msg.X < xBoundary {
-						m.focusedPanel = panelLeft
-					} else {
-						m.focusedPanel = panelRight
-					}
-				}
-			} else {
-				if isClick {
-					topH := m.topPanelHeight()
-					if msg.Y <= 1+topH {
-						m.focusedPanel = panelLeft
-					} else {
-						m.focusedPanel = panelRight
-					}
-				}
+			cb := panelCallbacks{
+				currentSlug: func() string { return m.followupDetail.CurrentID() },
+				loadDetail: func(id string) tea.Cmd {
+					return m.followupDetail.SetID(id)
+				},
+				specPanelFn: func() (work.SpecPanelModel, bool) { return m.currentFollowupPanel() },
+				listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
+					prevID := m.followupList.CurrentID()
+					fl, cmd := m.followupList.Update(lmsg)
+					m.followupList = fl
+					return cmd, prevID, m.followupList.CurrentID()
+				},
+				detailUpdate: func(dmsg tea.Msg) tea.Cmd {
+					var cmd tea.Cmd
+					m.followupDetail, cmd = m.followupDetail.Update(dmsg)
+					return cmd
+				},
+				setContentStart: nil,
 			}
-			switch m.focusedPanel {
-			case panelLeft:
-				prevID := m.followupList.CurrentID()
-				fl, cmd := m.followupList.Update(msg)
-				m.followupList = fl
-				newID := m.followupList.CurrentID()
-				if newID != "" && newID != prevID {
-					loadCmd := m.followupDetail.SetID(newID)
-					return m, tea.Batch(cmd, loadCmd)
-				}
-				return m, cmd
-			default: // panelRight
-				// When terminal mode is active, route mouse events to the spec panel.
-				if m.terminalMode {
-					id := m.followupDetail.CurrentID()
-					if m.specPanels != nil {
-						if panel, ok := m.specPanels[id]; ok {
-							sm, cmd := panel.Update(msg)
-							m.specPanels[id] = sm
-							return m, cmd
-						}
-					}
-				}
-				fd, cmd := m.followupDetail.Update(msg)
-				m.followupDetail = fd
-				return m, cmd
-			}
+			cmd, _ := handlePanelRouting(&m, msg, cb)
+			return m, cmd
 		}
 
 	case tea.KeyMsg:
@@ -495,11 +517,23 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 						m.specPanels[slug] = sm
 					}
 				} else {
-					// stateFollowUps: re-apply dimensions to followup models.
+					// stateFollowUps: re-apply dimensions to followup models and open spec panels.
 					m.followupList.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
 					fuListW, fuListH := followupListDims(m)
 					m.followupList, _ = m.followupList.Update(tea.WindowSizeMsg{Width: fuListW, Height: fuListH})
 					m.followupDetail, _ = m.followupDetail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+					specH := m.detailPanelHeight()
+					specW := m.rightPanelWidth() - 2
+					for slug, panel := range m.specPanels {
+						sm, _ := panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
+						if ptmx := sm.Ptmx(); ptmx != nil {
+							_ = pty.Setsize(ptmx, &pty.Winsize{
+								Rows: uint16(specH),
+								Cols: uint16(specW),
+							})
+						}
+						m.specPanels[slug] = sm
+					}
 				}
 
 				// Persist preference asynchronously
@@ -572,33 +606,25 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		case "esc":
 			// Esc from right panel (detail mode only): back to list.
 			// In terminal mode, esc falls through to spec panel which sends TerminalDetachMsg.
-			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
-				m.focusedPanel = panelLeft
-				return m, nil
-			}
-			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
+			if (m.state == stateWork || m.state == stateFollowUps) && m.focusedPanel == panelRight && !m.terminalMode {
 				m.focusedPanel = panelLeft
 				return m, nil
 			}
 		case "ctrl+t":
 			// ctrl+t toggles the right panel between detail and terminal, like a tab.
 			// Handled here (before route-to-active-view) so it is never forwarded to the PTY.
-			if m.state == stateWork && m.focusedPanel == panelRight {
+			if (m.state == stateWork || m.state == stateFollowUps) && m.focusedPanel == panelRight {
 				if m.terminalMode {
 					m.terminalMode = false
 					return m, nil
 				}
-				if panel, ok := m.currentSpecPanel(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
-					m.terminalMode = true
-					return m, tea.EnableMouseCellMotion
+				var specPanelFn func() (work.SpecPanelModel, bool)
+				if m.state == stateFollowUps {
+					specPanelFn = m.currentFollowupPanel
+				} else {
+					specPanelFn = m.currentSpecPanel
 				}
-			}
-			if m.state == stateFollowUps && m.focusedPanel == panelRight {
-				if m.terminalMode {
-					m.terminalMode = false
-					return m, nil
-				}
-				if panel, ok := m.currentFollowupPanel(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
+				if panel, ok := specPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
 					m.terminalMode = true
 					return m, tea.EnableMouseCellMotion
 				}
@@ -606,11 +632,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		case "tab":
 			// Tab moves focus left→right only. When on the right panel, Tab
 			// falls through to the detail view so it can cycle through tabs.
-			if m.state == stateWork && m.focusedPanel == panelLeft {
-				m.focusedPanel = panelRight
-				return m, nil
-			}
-			if m.state == stateFollowUps && m.focusedPanel == panelLeft {
+			if (m.state == stateWork || m.state == stateFollowUps) && m.focusedPanel == panelLeft {
 				m.focusedPanel = panelRight
 				return m, nil
 			}

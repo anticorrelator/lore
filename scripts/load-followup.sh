@@ -75,8 +75,12 @@ item_dir = sys.argv[1]
 followup_id = sys.argv[2]
 meta_file = os.path.join(item_dir, '_meta.json')
 
-with open(meta_file) as f:
-    meta = json.load(f)
+try:
+    with open(meta_file) as f:
+        meta = json.load(f)
+except json.JSONDecodeError as e:
+    print(json.dumps({'error': f'malformed _meta.json: {e}'}))
+    sys.exit(1)
 
 def read_file(path):
     if os.path.isfile(path):
@@ -125,8 +129,11 @@ echo ""
 # --- Attachments ---
 ATTACHMENTS=$(python3 -c "
 import json, sys
-with open(sys.argv[1]) as f:
-    meta = json.load(f)
+try:
+    with open(sys.argv[1]) as f:
+        meta = json.load(f)
+except json.JSONDecodeError:
+    meta = {}
 attachments = meta.get('attachments', [])
 if attachments:
     for a in attachments:
@@ -142,8 +149,11 @@ fi
 # --- Suggested actions ---
 SUGGESTED=$(python3 -c "
 import json, sys
-with open(sys.argv[1]) as f:
-    meta = json.load(f)
+try:
+    with open(sys.argv[1]) as f:
+        meta = json.load(f)
+except json.JSONDecodeError:
+    meta = {}
 actions = meta.get('suggested_actions', [])
 if actions:
     for a in actions:

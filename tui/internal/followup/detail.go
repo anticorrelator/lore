@@ -27,6 +27,7 @@ type FollowUpDetail struct {
 	Updated          string            `json:"updated"`
 	PromotedTo       string            `json:"promoted_to"`
 	FindingContent   string            // contents of finding.md
+	Malformed        bool              `json:"malformed,omitempty"`
 }
 
 // DetailLoadedMsg is sent when detail loading finishes.
@@ -63,7 +64,18 @@ func LoadFollowUpDetail(knowledgeDir, id string) (*FollowUpDetail, error) {
 
 	var meta followUpMeta
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		return nil, fmt.Errorf("parsing _meta.json for %s: %w", id, err)
+		// Malformed _meta.json — return a stub so the TUI can still render the item.
+		detail := &FollowUpDetail{
+			ID:               id,
+			Title:            "[malformed] " + id,
+			Attachments:      []Attachment{},
+			SuggestedActions: []SuggestedAction{},
+			Malformed:        true,
+		}
+		if data, err := os.ReadFile(filepath.Join(itemDir, "finding.md")); err == nil {
+			detail.FindingContent = string(data)
+		}
+		return detail, nil
 	}
 
 	if meta.Attachments == nil {

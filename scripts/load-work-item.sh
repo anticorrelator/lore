@@ -84,8 +84,12 @@ slug = sys.argv[2]
 archived = sys.argv[3] == 'true'
 meta_file = os.path.join(item_dir, '_meta.json')
 
-with open(meta_file) as f:
-    meta = json.load(f)
+try:
+    with open(meta_file) as f:
+        meta = json.load(f)
+except json.JSONDecodeError as e:
+    print(json.dumps({'error': f'malformed _meta.json: {e}'}))
+    sys.exit(1)
 
 # Read optional content files
 def read_file(path):

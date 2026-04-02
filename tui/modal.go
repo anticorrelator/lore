@@ -67,7 +67,7 @@ func (m model) renderSpecConfirmModal() string {
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color("238")).
 		Width(modalInnerW - 2).
-		Render(m.specConfirmInput.View())
+		Render(m.sessionConfirmInput.View())
 	hints := s.key.Render("Enter") + " " + s.dim.Render("start") +
 		s.sep.Render("  ·  ") +
 		s.key.Render("Shift+Enter") + " " + s.dim.Render("newline") +
@@ -75,18 +75,18 @@ func (m model) renderSpecConfirmModal() string {
 		s.key.Render("Esc") + " " + s.dim.Render("cancel")
 
 	var title, body string
-	if m.specConfirmChatMode {
-		title = "Chat about " + m.specConfirmSlug + "?"
+	if m.sessionConfirmChatMode {
+		title = "Chat about " + m.sessionConfirmSlug + "?"
 		body = "\n" + s.dim.Render(" opening message (optional):") +
 			"\n" + inputBox + "\n\n " + hints + "\n"
 	} else {
-		title = "Run /spec for " + m.specConfirmSlug + "?"
+		title = "Run /spec for " + m.sessionConfirmSlug + "?"
 		shortCheck := "[ ]"
-		if m.specConfirmShortMode {
+		if m.sessionConfirmShortMode {
 			shortCheck = "[x]"
 		}
 		skipCheck := "[ ]"
-		if m.specConfirmSkipConfirm {
+		if m.sessionConfirmSkipConfirm {
 			skipCheck = "[x]"
 		}
 		checkboxes := " " + s.key.Render(shortCheck) + " " + s.dim.Render("Short mode") +

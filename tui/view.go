@@ -7,7 +7,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
-	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
 func (m model) View() string {
@@ -15,26 +14,22 @@ func (m model) View() string {
 		return fmt.Sprintf("Error: %v\n\nPress q to quit.\n", m.err)
 	}
 
-	var base string
-	switch m.state {
-	case stateWork:
-		if m.layoutMode == config.LayoutTopBottom {
-			base = m.viewSplitPaneTopBottom()
-		} else {
-			base = m.viewSplitPane()
-		}
-	case stateKnowledge:
+	if m.state == stateKnowledge {
 		return m.browser.View()
-	case stateFollowUps:
-		base = m.viewFollowUps()
-	default:
-		return ""
+	}
+
+	cfg := m.buildPaneConfig()
+	var base string
+	if m.layoutMode == config.LayoutTopBottom {
+		base = m.viewTopBottom(cfg)
+	} else {
+		base = m.viewSideBySide(cfg)
 	}
 
 	if m.popupActive {
 		return lipgloss.Place(m.width, m.height-1, lipgloss.Center, lipgloss.Center, m.popup.View())
 	}
-	if m.specConfirmActive {
+	if m.sessionConfirmActive {
 		return m.renderSpecConfirmModal()
 	}
 	if m.aiInputActive {
@@ -49,365 +44,6 @@ func (m model) View() string {
 	return base
 }
 
-// viewSplitPane renders the split-pane work view with lazygit-style box borders.
-func (m model) viewSplitPane() string {
-	contentH := m.innerHeight() - 1 // 1 line reserved for tab indicator
-	leftInner := leftPanelWidth
-	rightInner := m.rightPanelWidth()
-
-	// Check whether the current item has an active spec panel.
-	currentSpec, hasCurrentSpec := m.currentSpecPanel()
-
-	// Focus-aware border colors
-	activeBorderColor := lipgloss.Color("4")     // blue
-	inactiveBorderColor := lipgloss.Color("238") // dim
-
-	leftBorderColor := inactiveBorderColor
-	rightBorderColor := inactiveBorderColor
-	if m.focusedPanel == panelLeft {
-		leftBorderColor = activeBorderColor
-	}
-	if m.focusedPanel == panelRight {
-		rightBorderColor = activeBorderColor
-	}
-
-	leftBS := lipgloss.NewStyle().Foreground(leftBorderColor)
-	rightBS := lipgloss.NewStyle().Foreground(rightBorderColor)
-
-	// Title styles: blue+bold when focused, default-color (full-visibility) when not
-	leftTitleFg := lipgloss.Color("7") // default bright — always visible
-	if m.focusedPanel == panelLeft {
-		leftTitleFg = activeBorderColor
-	}
-	rightTitleFg := lipgloss.Color("7")
-	if m.focusedPanel == panelRight {
-		rightTitleFg = activeBorderColor
-	}
-	leftTitleS := lipgloss.NewStyle().Foreground(leftTitleFg).Bold(m.focusedPanel == panelLeft)
-	rightTitleS := lipgloss.NewStyle().Foreground(rightTitleFg).Bold(m.focusedPanel == panelRight)
-
-	// Build panel titles (label reflects active/archived filter mode)
-	modeLabel := "Active"
-	if m.list.GetFilterMode() == work.FilterArchived {
-		modeLabel = "Archived"
-	}
-	leftTitle := modeLabel
-	if items := m.list.Items(); len(items) > 0 {
-		leftTitle = fmt.Sprintf("%s (%d)", modeLabel, len(items))
-	}
-	rightTitle := "Detail"
-	if d := m.detail.Detail(); d != nil {
-		t := d.Title
-		maxW := rightInner - 6
-		if lipgloss.Width(t) > maxW && maxW > 3 {
-			runes := []rune(t)
-			t = string(runes[:maxW-1]) + "…"
-		}
-		rightTitle = t
-	} else if slug := m.list.CurrentSlug(); slug != "" {
-		rightTitle = slug
-	}
-
-	// Tab indicator for list panel: active · archived, highlight current mode.
-	listTabActiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	listTabInactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	listTabSepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	var listActiveTabS, listArchivedTabS lipgloss.Style
-	if m.list.GetFilterMode() == work.FilterArchived {
-		listActiveTabS, listArchivedTabS = listTabInactiveS, listTabActiveS
-	} else {
-		listActiveTabS, listArchivedTabS = listTabActiveS, listTabInactiveS
-	}
-	leftAnnot := listTabSepS.Render("ctrl+a  ") + listActiveTabS.Render("active") + listTabSepS.Render(" · ") + listArchivedTabS.Render("archived")
-	leftAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
-
-	// Right panel annotation: show "ctrl+t  detail · terminal" mode indicator when a spec session exists.
-	var rightBorderTitle string
-	if hasCurrentSpec {
-		activeS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-		inactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-		sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-		var detailS, terminalS lipgloss.Style
-		if m.terminalMode {
-			detailS, terminalS = inactiveS, activeS
-		} else {
-			detailS, terminalS = activeS, inactiveS
-		}
-		termLabel := "terminal"
-		termLabelW := 8
-		if currentSpec.IsDone() {
-			termLabel = "terminal (done)"
-			termLabelW = 15
-		}
-		modeAnnot := sepS.Render("ctrl+t  ") + detailS.Render("detail") + sepS.Render(" · ") + terminalS.Render(termLabel)
-		modeAnnotW := 8 + 6 + 3 + termLabelW // "ctrl+t  " + "detail" + " · " + termLabel
-		rightBorderTitle = renderBorderTitleWithAnnot(rightTitle, rightInner, rightTitleS, rightBS, modeAnnot, modeAnnotW)
-	} else {
-		rightBorderTitle = renderBorderTitle(rightTitle, rightInner, rightTitleS, rightBS)
-	}
-
-	// Top border: ┌─ Title ──── active · archived ─┐┌─ Title ──── ctrl+t  detail · terminal ─┐
-	topRow := leftBS.Render("┌") +
-		renderBorderTitleWithAnnot(leftTitle, leftInner, leftTitleS, leftBS, leftAnnot, leftAnnotW) +
-		leftBS.Render("┐") +
-		rightBS.Render("┌") +
-		rightBorderTitle +
-		rightBS.Render("┐")
-
-	// Bottom border: └──────────────────────┘└──────────────────────────────────────┘
-	bottomRow := leftBS.Render("└") +
-		leftBS.Render(strings.Repeat("─", leftInner)) +
-		leftBS.Render("┘") +
-		rightBS.Render("└") +
-		rightBS.Render(strings.Repeat("─", rightInner)) +
-		rightBS.Render("┘")
-
-	leftView := m.list.View()
-	leftLines := strings.Split(leftView, "\n")
-
-	// Right panel content: terminal mode shows spec panel, otherwise detail view.
-	var rightLines []string
-	if m.terminalMode && hasCurrentSpec {
-		specView := currentSpec.View()
-		rightLines = strings.Split(specView, "\n")
-	} else {
-		rightView := m.detail.View()
-		rightLines = strings.Split(rightView, "\n")
-	}
-
-	leftBorderChar := leftBS.Render("│")
-	rightBorderChar := rightBS.Render("│")
-
-	var b strings.Builder
-	b.WriteString(renderTabIndicator(m.state, len(m.list.Items()), m.followupList.FollowUpCount(), m.width))
-	b.WriteString("\n")
-	b.WriteString(topRow)
-	b.WriteString("\n")
-	for i := 0; i < contentH; i++ {
-		left := ""
-		if i < len(leftLines) {
-			left = leftLines[i]
-		}
-
-		var right string
-		if i < len(rightLines) {
-			if m.terminalMode && hasCurrentSpec {
-				right = " " + rightLines[i] // 1-char left buffer; right buffer from padding
-			} else {
-				right = "  " + rightLines[i]
-			}
-		} else {
-			right = "  "
-		}
-
-		lW := lipgloss.Width(left)
-		if lW > leftInner {
-			left = truncateLine(left, leftInner)
-		} else if lW < leftInner {
-			left += strings.Repeat(" ", leftInner-lW)
-		}
-		rW := lipgloss.Width(right)
-		if rW > rightInner {
-			right = truncateLine(right, rightInner)
-		} else if rW < rightInner {
-			right += strings.Repeat(" ", rightInner-rW)
-		}
-
-		b.WriteString(leftBorderChar)
-		b.WriteString(left)
-		b.WriteString(leftBorderChar)
-		b.WriteString(rightBorderChar)
-		b.WriteString(right)
-		b.WriteString(rightBorderChar)
-		b.WriteString("\n")
-	}
-	b.WriteString(bottomRow)
-	b.WriteString("\n")
-	b.WriteString(m.renderStatusBar(m.width))
-
-	return b.String()
-}
-
-// viewSplitPaneTopBottom renders the stacked top/bottom layout: list on top, detail on bottom.
-func (m model) viewSplitPaneTopBottom() string {
-	if m.width <= 0 || m.height <= 0 {
-		return ""
-	}
-	topH := m.topPanelHeight() - 1 // 1 line reserved for tab indicator
-	bottomH := m.detailPanelHeight()
-	panelW := m.topPanelWidth()
-
-	// Check whether the current item has an active spec panel.
-	currentSpecTB, hasCurrentSpecTB := m.currentSpecPanel()
-
-	// Focus-aware border colors
-	activeBorderColor := lipgloss.Color("4")     // blue
-	inactiveBorderColor := lipgloss.Color("238") // dim
-
-	topBorderColor := inactiveBorderColor
-	bottomBorderColor := inactiveBorderColor
-	if m.focusedPanel == panelLeft {
-		topBorderColor = activeBorderColor
-	}
-	if m.focusedPanel == panelRight {
-		bottomBorderColor = activeBorderColor
-	}
-
-	topBS := lipgloss.NewStyle().Foreground(topBorderColor)
-	bottomBS := lipgloss.NewStyle().Foreground(bottomBorderColor)
-
-	// Title styles: blue+bold when focused, default-color (full-visibility) when not
-	topTitleFg := lipgloss.Color("7")
-	if m.focusedPanel == panelLeft {
-		topTitleFg = activeBorderColor
-	}
-	bottomTitleFg := lipgloss.Color("7")
-	if m.focusedPanel == panelRight {
-		bottomTitleFg = activeBorderColor
-	}
-	topTitleS := lipgloss.NewStyle().Foreground(topTitleFg).Bold(m.focusedPanel == panelLeft)
-	bottomTitleS := lipgloss.NewStyle().Foreground(bottomTitleFg).Bold(m.focusedPanel == panelRight)
-
-	// Build panel titles
-	modeLabel := "Active"
-	if m.list.GetFilterMode() == work.FilterArchived {
-		modeLabel = "Archived"
-	}
-	topTitle := modeLabel
-	if items := m.list.Items(); len(items) > 0 {
-		topTitle = fmt.Sprintf("%s (%d)", modeLabel, len(items))
-	}
-	bottomTitle := "Detail"
-	if d := m.detail.Detail(); d != nil {
-		t := d.Title
-		maxW := panelW - 6
-		if lipgloss.Width(t) > maxW && maxW > 3 {
-			runes := []rune(t)
-			t = string(runes[:maxW-1]) + "…"
-		}
-		bottomTitle = t
-	} else if slug := m.list.CurrentSlug(); slug != "" {
-		bottomTitle = slug
-	}
-
-	topBorderChar := topBS.Render("│")
-	bottomBorderChar := bottomBS.Render("│")
-
-	topView := m.list.View()
-	topLines := strings.Split(topView, "\n")
-
-	// Bottom panel content: terminal mode shows spec panel, otherwise detail view.
-	var bottomLines []string
-	if m.terminalMode && hasCurrentSpecTB {
-		specView := currentSpecTB.View()
-		bottomLines = strings.Split(specView, "\n")
-	} else {
-		bottomView := m.detail.View()
-		bottomLines = strings.Split(bottomView, "\n")
-	}
-
-	// padLine pads or truncates a content line to exactly panelW visual width.
-	padLine := func(line string) string {
-		w := lipgloss.Width(line)
-		if w > panelW {
-			return truncateLine(line, panelW)
-		}
-		if w < panelW {
-			return line + strings.Repeat(" ", panelW-w)
-		}
-		return line
-	}
-
-	var b strings.Builder
-	b.WriteString(renderTabIndicator(m.state, len(m.list.Items()), m.followupList.FollowUpCount(), m.width))
-	b.WriteString("\n")
-
-	// Tab indicator for top (list) panel: active · archived, highlight current mode.
-	tbActiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	tbInactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	tbSepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	var tbActiveTabS, tbArchivedTabS lipgloss.Style
-	if m.list.GetFilterMode() == work.FilterArchived {
-		tbActiveTabS, tbArchivedTabS = tbInactiveS, tbActiveS
-	} else {
-		tbActiveTabS, tbArchivedTabS = tbActiveS, tbInactiveS
-	}
-	topAnnot := tbSepS.Render("ctrl+a  ") + tbActiveTabS.Render("active") + tbSepS.Render(" · ") + tbArchivedTabS.Render("archived")
-	topAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
-
-	// === Top panel (list) ===
-	b.WriteString(topBS.Render("┌"))
-	b.WriteString(renderBorderTitleWithAnnot(topTitle, panelW, topTitleS, topBS, topAnnot, topAnnotW))
-	b.WriteString(topBS.Render("┐"))
-	b.WriteString("\n")
-	for i := 0; i < topH; i++ {
-		line := ""
-		if i < len(topLines) {
-			line = topLines[i]
-		}
-		b.WriteString(topBorderChar)
-		b.WriteString(padLine(line))
-		b.WriteString(topBorderChar)
-		b.WriteString("\n")
-	}
-	b.WriteString(topBS.Render("└"))
-	b.WriteString(topBS.Render(strings.Repeat("─", panelW)))
-	b.WriteString(topBS.Render("┘"))
-	b.WriteString("\n")
-
-	// === Bottom panel (detail or terminal) ===
-	// Bottom panel annotation: show "detail · terminal" mode indicator when a spec session exists.
-	var bottomBorderTitle string
-	if hasCurrentSpecTB {
-		btActiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-		btInactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-		btSepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-		var btDetailS, btTerminalS lipgloss.Style
-		if m.terminalMode {
-			btDetailS, btTerminalS = btInactiveS, btActiveS
-		} else {
-			btDetailS, btTerminalS = btActiveS, btInactiveS
-		}
-		btTermLabel := "terminal"
-		btTermLabelW := 8
-		if currentSpecTB.IsDone() {
-			btTermLabel = "terminal (done)"
-			btTermLabelW = 15
-		}
-		btModeAnnot := btSepS.Render("ctrl+t  ") + btDetailS.Render("detail") + btSepS.Render(" · ") + btTerminalS.Render(btTermLabel)
-		btModeAnnotW := 8 + 6 + 3 + btTermLabelW // "ctrl+t  " + "detail" + " · " + btTermLabel
-		bottomBorderTitle = renderBorderTitleWithAnnot(bottomTitle, panelW, bottomTitleS, bottomBS, btModeAnnot, btModeAnnotW)
-	} else {
-		bottomBorderTitle = renderBorderTitle(bottomTitle, panelW, bottomTitleS, bottomBS)
-	}
-	b.WriteString(bottomBS.Render("┌"))
-	b.WriteString(bottomBorderTitle)
-	b.WriteString(bottomBS.Render("┐"))
-	b.WriteString("\n")
-	for i := 0; i < bottomH; i++ {
-		var content string
-		if i < len(bottomLines) {
-			if m.terminalMode && hasCurrentSpecTB {
-				content = " " + bottomLines[i] // 1-char left buffer; right buffer from padding
-			} else {
-				content = "  " + bottomLines[i]
-			}
-		} else {
-			content = "  "
-		}
-		b.WriteString(bottomBorderChar)
-		b.WriteString(padLine(content))
-		b.WriteString(bottomBorderChar)
-		b.WriteString("\n")
-	}
-	b.WriteString(bottomBS.Render("└"))
-	b.WriteString(bottomBS.Render(strings.Repeat("─", panelW)))
-	b.WriteString(bottomBS.Render("┘"))
-	b.WriteString("\n")
-
-	b.WriteString(m.renderStatusBar(m.width))
-	return b.String()
-}
 
 // truncateLine clips s to at most maxW visual columns, appending "…" if needed.
 func truncateLine(s string, maxW int) string {
@@ -482,22 +118,16 @@ func renderBorderTitleWithAnnot(title string, width int, titleS, borderS lipglos
 	return prefix + rendered + borderS.Render(strings.Repeat("─", middle)) + borderS.Render(" ") + annot + borderS.Render(" ─")
 }
 
-func (m model) viewFollowUps() string {
-	if m.layoutMode == config.LayoutTopBottom {
-		return m.viewFollowUpsTopBottom()
-	}
-	return m.viewFollowUpsSideBySide()
-}
 
-// viewFollowUpsSideBySide renders the stateFollowUps split pane: follow-up list on the left,
-// detail pane on the right, using the same compositor pattern as viewSplitPane.
-func (m model) viewFollowUpsSideBySide() string {
+// viewSideBySide renders a side-by-side split pane using the entity-neutral paneConfig.
+// It replaces viewSplitPane (stateWork) and viewFollowUpsSideBySide (stateFollowUps).
+func (m model) viewSideBySide(cfg paneConfig) string {
 	contentH := m.innerHeight() - 1 // 1 line reserved for tab indicator
 	leftInner := leftPanelWidth
 	rightInner := m.rightPanelWidth()
 
-	activeBorderColor := lipgloss.Color("4")
-	inactiveBorderColor := lipgloss.Color("238")
+	activeBorderColor := lipgloss.Color("4")     // blue
+	inactiveBorderColor := lipgloss.Color("238") // dim
 
 	leftBorderColor := inactiveBorderColor
 	rightBorderColor := inactiveBorderColor
@@ -522,40 +152,17 @@ func (m model) viewFollowUpsSideBySide() string {
 	leftTitleS := lipgloss.NewStyle().Foreground(leftTitleFg).Bold(m.focusedPanel == panelLeft)
 	rightTitleS := lipgloss.NewStyle().Foreground(rightTitleFg).Bold(m.focusedPanel == panelRight)
 
-	leftTitle := "Follow-ups"
-	if items := m.followupList.Items(); len(items) > 0 {
-		leftTitle = fmt.Sprintf("Follow-ups (%d)", len(items))
-	}
-	rightTitle := "Detail"
-	if t := m.followupDetail.Title(); t != "" {
-		maxW := rightInner - 6
-		if lipgloss.Width(t) > maxW && maxW > 3 {
-			runes := []rune(t)
-			t = string(runes[:maxW-1]) + "…"
-		}
-		rightTitle = t
+	// Truncate detail title to fit the right panel.
+	rightTitle := cfg.detailTitle
+	maxTitleW := rightInner - 6
+	if lipgloss.Width(rightTitle) > maxTitleW && maxTitleW > 3 {
+		runes := []rune(rightTitle)
+		rightTitle = string(runes[:maxTitleW-1]) + "…"
 	}
 
-	// Filter annotation: ctrl+a  active · archived, highlight current
-	fuTabActiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	fuTabInactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	fuTabSepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	fuFilter := m.followupList.GetFilterLabel()
-	fuActiveS := fuTabInactiveS
-	if fuFilter == "active" {
-		fuActiveS = fuTabActiveS
-	}
-	fuArchivedS := fuTabInactiveS
-	if fuFilter == "archived" {
-		fuArchivedS = fuTabActiveS
-	}
-	filterAnnot := fuTabSepS.Render("ctrl+a  ") + fuActiveS.Render("active") + fuTabSepS.Render(" · ") + fuArchivedS.Render("archived")
-	filterAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
-
-	// Right panel annotation: show "ctrl+t  detail · terminal" mode indicator when a spec session exists.
-	currentFUSpec, hasCurrentFUSpec := m.currentFollowupPanel()
+	// Right panel annotation: show "ctrl+t  detail · terminal" when a spec session exists.
 	var rightBorderTitle string
-	if hasCurrentFUSpec {
+	if cfg.hasSpecPanel {
 		activeS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 		inactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 		sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
@@ -567,7 +174,7 @@ func (m model) viewFollowUpsSideBySide() string {
 		}
 		termLabel := "terminal"
 		termLabelW := 8
-		if currentFUSpec.IsDone() {
+		if cfg.specPanel.IsDone() {
 			termLabel = "terminal (done)"
 			termLabelW = 15
 		}
@@ -579,7 +186,7 @@ func (m model) viewFollowUpsSideBySide() string {
 	}
 
 	topRow := leftBS.Render("┌") +
-		renderBorderTitleWithAnnot(leftTitle, leftInner, leftTitleS, leftBS, filterAnnot, filterAnnotW) +
+		renderBorderTitleWithAnnot(cfg.listTitle, leftInner, leftTitleS, leftBS, cfg.filterAnnot, cfg.filterAnnotW) +
 		leftBS.Render("┐") +
 		rightBS.Render("┌") +
 		rightBorderTitle +
@@ -592,21 +199,21 @@ func (m model) viewFollowUpsSideBySide() string {
 		rightBS.Render(strings.Repeat("─", rightInner)) +
 		rightBS.Render("┘")
 
-	leftLines := strings.Split(m.followupList.View(), "\n")
+	leftLines := strings.Split(cfg.listView, "\n")
 
 	// Right panel content: terminal mode shows spec panel, otherwise detail view.
 	var rightLines []string
-	if m.terminalMode && hasCurrentFUSpec {
-		rightLines = strings.Split(currentFUSpec.View(), "\n")
+	if m.terminalMode && cfg.hasSpecPanel {
+		rightLines = strings.Split(cfg.specPanel.View(), "\n")
 	} else {
-		rightLines = strings.Split(m.followupDetail.View(), "\n")
+		rightLines = strings.Split(cfg.detailView, "\n")
 	}
 
 	leftBorderChar := leftBS.Render("│")
 	rightBorderChar := rightBS.Render("│")
 
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(stateFollowUps, len(m.list.Items()), m.followupList.FollowUpCount(), m.width))
+	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, m.width))
 	b.WriteString("\n")
 	b.WriteString(topRow)
 	b.WriteString("\n")
@@ -617,7 +224,7 @@ func (m model) viewFollowUpsSideBySide() string {
 		}
 		var right string
 		if i < len(rightLines) {
-			if m.terminalMode && hasCurrentFUSpec {
+			if m.terminalMode && cfg.hasSpecPanel {
 				right = " " + rightLines[i] // 1-char left buffer; right buffer from padding
 			} else {
 				right = "  " + rightLines[i]
@@ -653,16 +260,9 @@ func (m model) viewFollowUpsSideBySide() string {
 	return b.String()
 }
 
-// followupListDims returns the width and height to pass to followupList based on layoutMode.
-func followupListDims(m model) (int, int) {
-	if m.layoutMode == config.LayoutTopBottom {
-		return m.topPanelWidth(), m.topPanelHeight()
-	}
-	return leftPanelWidth, m.innerHeight()
-}
-
-// viewFollowUpsTopBottom renders the stateFollowUps stacked layout: list on top, detail on bottom.
-func (m model) viewFollowUpsTopBottom() string {
+// viewTopBottom renders a stacked top/bottom split using the entity-neutral paneConfig.
+// It replaces viewSplitPaneTopBottom (stateWork) and viewFollowUpsTopBottom (stateFollowUps).
+func (m model) viewTopBottom(cfg paneConfig) string {
 	if m.width <= 0 || m.height <= 0 {
 		return ""
 	}
@@ -670,8 +270,8 @@ func (m model) viewFollowUpsTopBottom() string {
 	bottomH := m.detailPanelHeight()
 	panelW := m.topPanelWidth()
 
-	activeBorderColor := lipgloss.Color("4")
-	inactiveBorderColor := lipgloss.Color("238")
+	activeBorderColor := lipgloss.Color("4")     // blue
+	inactiveBorderColor := lipgloss.Color("238") // dim
 
 	topBorderColor := inactiveBorderColor
 	bottomBorderColor := inactiveBorderColor
@@ -696,73 +296,25 @@ func (m model) viewFollowUpsTopBottom() string {
 	topTitleS := lipgloss.NewStyle().Foreground(topTitleFg).Bold(m.focusedPanel == panelLeft)
 	bottomTitleS := lipgloss.NewStyle().Foreground(bottomTitleFg).Bold(m.focusedPanel == panelRight)
 
-	topTitle := "Follow-ups"
-	if items := m.followupList.Items(); len(items) > 0 {
-		topTitle = fmt.Sprintf("Follow-ups (%d)", len(items))
-	}
-	bottomTitle := "Detail"
-	if t := m.followupDetail.Title(); t != "" {
-		maxW := panelW - 6
-		if lipgloss.Width(t) > maxW && maxW > 3 {
-			runes := []rune(t)
-			t = string(runes[:maxW-1]) + "…"
-		}
-		bottomTitle = t
-	}
-
-	// Filter annotation for top panel: ctrl+a  active · archived, highlight current
-	fuTabActiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	fuTabInactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	fuTabSepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	fuFilter := m.followupList.GetFilterLabel()
-	fuActiveS := fuTabInactiveS
-	if fuFilter == "active" {
-		fuActiveS = fuTabActiveS
-	}
-	fuArchivedS := fuTabInactiveS
-	if fuFilter == "archived" {
-		fuArchivedS = fuTabActiveS
-	}
-	filterAnnot := fuTabSepS.Render("ctrl+a  ") + fuActiveS.Render("active") + fuTabSepS.Render(" · ") + fuArchivedS.Render("archived")
-	filterAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
-
-	// Bottom panel annotation: show "ctrl+t  detail · terminal" when a spec session exists.
-	currentFUSpecTB, hasCurrentFUSpecTB := m.currentFollowupPanel()
-	var bottomBorderTitle string
-	if hasCurrentFUSpecTB {
-		activeS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-		inactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-		sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-		var detailS, terminalS lipgloss.Style
-		if m.terminalMode {
-			detailS, terminalS = inactiveS, activeS
-		} else {
-			detailS, terminalS = activeS, inactiveS
-		}
-		termLabel := "terminal"
-		termLabelW := 8
-		if currentFUSpecTB.IsDone() {
-			termLabel = "terminal (done)"
-			termLabelW = 15
-		}
-		modeAnnot := sepS.Render("ctrl+t  ") + detailS.Render("detail") + sepS.Render(" · ") + terminalS.Render(termLabel)
-		modeAnnotW := 8 + 6 + 3 + termLabelW // "ctrl+t  " + "detail" + " · " + termLabel
-		bottomBorderTitle = renderBorderTitleWithAnnot(bottomTitle, panelW, bottomTitleS, bottomBS, modeAnnot, modeAnnotW)
-	} else {
-		bottomBorderTitle = renderBorderTitle(bottomTitle, panelW, bottomTitleS, bottomBS)
+	// Truncate detail title to fit the bottom panel.
+	bottomTitle := cfg.detailTitle
+	maxTitleW := panelW - 6
+	if lipgloss.Width(bottomTitle) > maxTitleW && maxTitleW > 3 {
+		runes := []rune(bottomTitle)
+		bottomTitle = string(runes[:maxTitleW-1]) + "…"
 	}
 
 	topBorderChar := topBS.Render("│")
 	bottomBorderChar := bottomBS.Render("│")
 
-	topLines := strings.Split(m.followupList.View(), "\n")
+	topLines := strings.Split(cfg.listView, "\n")
 
 	// Bottom panel content: terminal mode shows spec panel, otherwise detail view.
 	var bottomLines []string
-	if m.terminalMode && hasCurrentFUSpecTB {
-		bottomLines = strings.Split(currentFUSpecTB.View(), "\n")
+	if m.terminalMode && cfg.hasSpecPanel {
+		bottomLines = strings.Split(cfg.specPanel.View(), "\n")
 	} else {
-		bottomLines = strings.Split(m.followupDetail.View(), "\n")
+		bottomLines = strings.Split(cfg.detailView, "\n")
 	}
 
 	padLine := func(line string) string {
@@ -776,13 +328,38 @@ func (m model) viewFollowUpsTopBottom() string {
 		return line
 	}
 
+	// Bottom panel annotation: show "ctrl+t  detail · terminal" when a spec session exists.
+	var bottomBorderTitle string
+	if cfg.hasSpecPanel {
+		activeS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+		inactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+		sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+		var detailS, terminalS lipgloss.Style
+		if m.terminalMode {
+			detailS, terminalS = inactiveS, activeS
+		} else {
+			detailS, terminalS = activeS, inactiveS
+		}
+		termLabel := "terminal"
+		termLabelW := 8
+		if cfg.specPanel.IsDone() {
+			termLabel = "terminal (done)"
+			termLabelW = 15
+		}
+		modeAnnot := sepS.Render("ctrl+t  ") + detailS.Render("detail") + sepS.Render(" · ") + terminalS.Render(termLabel)
+		modeAnnotW := 8 + 6 + 3 + termLabelW // "ctrl+t  " + "detail" + " · " + termLabel
+		bottomBorderTitle = renderBorderTitleWithAnnot(bottomTitle, panelW, bottomTitleS, bottomBS, modeAnnot, modeAnnotW)
+	} else {
+		bottomBorderTitle = renderBorderTitle(bottomTitle, panelW, bottomTitleS, bottomBS)
+	}
+
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(stateFollowUps, len(m.list.Items()), m.followupList.FollowUpCount(), m.width))
+	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, m.width))
 	b.WriteString("\n")
 
 	// === Top panel (list) ===
 	b.WriteString(topBS.Render("┌"))
-	b.WriteString(renderBorderTitleWithAnnot(topTitle, panelW, topTitleS, topBS, filterAnnot, filterAnnotW))
+	b.WriteString(renderBorderTitleWithAnnot(cfg.listTitle, panelW, topTitleS, topBS, cfg.filterAnnot, cfg.filterAnnotW))
 	b.WriteString(topBS.Render("┐"))
 	b.WriteString("\n")
 	for i := 0; i < topH; i++ {
@@ -808,7 +385,7 @@ func (m model) viewFollowUpsTopBottom() string {
 	for i := 0; i < bottomH; i++ {
 		var content string
 		if i < len(bottomLines) {
-			if m.terminalMode && hasCurrentFUSpecTB {
+			if m.terminalMode && cfg.hasSpecPanel {
 				content = " " + bottomLines[i] // 1-char left buffer; right buffer from padding
 			} else {
 				content = "  " + bottomLines[i]
@@ -828,6 +405,14 @@ func (m model) viewFollowUpsTopBottom() string {
 
 	b.WriteString(m.renderStatusBar(m.width))
 	return b.String()
+}
+
+// followupListDims returns the width and height to pass to followupList based on layoutMode.
+func followupListDims(m model) (int, int) {
+	if m.layoutMode == config.LayoutTopBottom {
+		return m.topPanelWidth(), m.topPanelHeight()
+	}
+	return leftPanelWidth, m.innerHeight()
 }
 
 // renderStatusBar renders a single-line context-sensitive keybinding hint bar.

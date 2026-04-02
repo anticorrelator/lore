@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/followup"
@@ -118,14 +121,14 @@ type model struct {
 	specPanels   map[string]work.SpecPanelModel
 	terminalMode bool
 
-	specConfirmActive      bool
-	specConfirmSlug        string
-	specConfirmTitle       string
-	specConfirmInput       textarea.Model
-	specConfirmShortMode   bool
-	specConfirmSkipConfirm bool
-	specConfirmChatMode    bool
-	specLaunchedFromModal  bool
+	sessionConfirmActive      bool
+	sessionConfirmSlug        string
+	sessionConfirmTitle       string
+	sessionConfirmInput       textarea.Model
+	sessionConfirmShortMode   bool
+	sessionConfirmSkipConfirm bool
+	sessionConfirmChatMode    bool
+	sessionLaunchedFromModal  bool
 
 	showHelp bool
 
@@ -154,6 +157,18 @@ type model struct {
 	// flashErr holds a transient error message shown in the status bar.
 	// It is cleared on the next key press.
 	flashErr string
+}
+
+// panelCallbacks abstracts entity-specific operations for shared routing helpers.
+// Callers build this via closures that capture *model so mutations are visible
+// to the helper. setContentStart may be nil (followup path omits it).
+type panelCallbacks struct {
+	currentSlug     func() string
+	loadDetail      func(id string) tea.Cmd
+	specPanelFn     func() (work.SpecPanelModel, bool)
+	listUpdate      func(msg tea.Msg) (tea.Cmd, string, string) // returns cmd, prevID, newID
+	detailUpdate    func(msg tea.Msg) tea.Cmd
+	setContentStart func() // nil for followup
 }
 
 // currentSpecPanel returns the spec panel for the currently selected work item, if any.
@@ -228,4 +243,122 @@ func (m *model) disableKittyKeyboard() {
 	}
 	os.Stdout.WriteString("\x1b[<u") //nolint:errcheck
 	m.kittyModeActive = false
+}
+
+// paneConfig carries all state-varying inputs the compositor functions need.
+// buildPaneConfig() constructs one per render cycle; the compositor functions
+// (viewSideBySide, viewTopBottom) consume it without touching m directly.
+type paneConfig struct {
+	// listView is the pre-rendered left/top panel (list of items).
+	listView string
+	// detailView is the pre-rendered right/bottom panel in non-terminal mode.
+	detailView string
+	// specPanel is the active spec panel for the selected item (if any).
+	specPanel work.SpecPanelModel
+	// hasSpecPanel reports whether specPanel is valid.
+	hasSpecPanel bool
+	// listTitle is the title shown in the list panel border (e.g. "Active (3)").
+	listTitle string
+	// detailTitle is the title shown in the detail panel border (e.g. item title or "Detail").
+	detailTitle string
+	// filterAnnot is the pre-rendered filter annotation string (may contain ANSI codes).
+	filterAnnot string
+	// filterAnnotW is the visual width of filterAnnot (ANSI-stripped character count).
+	filterAnnotW int
+	// state is the active appState, used by renderTabIndicator.
+	state appState
+	// listItemCount is the count passed to renderTabIndicator for the work tab.
+	listItemCount int
+	// fuItemCount is the count passed to renderTabIndicator for the follow-ups tab.
+	fuItemCount int
+}
+
+// buildPaneConfig constructs a paneConfig from the current model state.
+// It switches on m.state and populates the config from the appropriate sub-models.
+func (m model) buildPaneConfig() paneConfig {
+	tabActiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	tabInactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	tabSepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+	listItemCount := len(m.list.Items())
+	fuItemCount := m.followupList.FollowUpCount()
+
+	switch m.state {
+	case stateFollowUps:
+		fuFilter := m.followupList.GetFilterLabel()
+		fuActiveS := tabInactiveS
+		if fuFilter == "active" {
+			fuActiveS = tabActiveS
+		}
+		fuArchivedS := tabInactiveS
+		if fuFilter == "archived" {
+			fuArchivedS = tabActiveS
+		}
+		filterAnnot := tabSepS.Render("ctrl+a  ") + fuActiveS.Render("active") + tabSepS.Render(" · ") + fuArchivedS.Render("archived")
+		filterAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
+
+		listTitle := "Follow-ups"
+		if items := m.followupList.Items(); len(items) > 0 {
+			listTitle = fmt.Sprintf("Follow-ups (%d)", len(items))
+		}
+		detailTitle := "Detail"
+		if t := m.followupDetail.Title(); t != "" {
+			detailTitle = t
+		}
+
+		specPanel, hasSpecPanel := m.currentFollowupPanel()
+		return paneConfig{
+			listView:      m.followupList.View(),
+			detailView:    m.followupDetail.View(),
+			specPanel:     specPanel,
+			hasSpecPanel:  hasSpecPanel,
+			listTitle:     listTitle,
+			detailTitle:   detailTitle,
+			filterAnnot:   filterAnnot,
+			filterAnnotW:  filterAnnotW,
+			state:         stateFollowUps,
+			listItemCount: listItemCount,
+			fuItemCount:   fuItemCount,
+		}
+	default: // stateWork
+		modeLabel := "Active"
+		if m.list.GetFilterMode() == work.FilterArchived {
+			modeLabel = "Archived"
+		}
+		listTitle := modeLabel
+		if items := m.list.Items(); len(items) > 0 {
+			listTitle = fmt.Sprintf("%s (%d)", modeLabel, len(items))
+		}
+
+		var activeTabS, archivedTabS lipgloss.Style
+		if m.list.GetFilterMode() == work.FilterArchived {
+			activeTabS, archivedTabS = tabInactiveS, tabActiveS
+		} else {
+			activeTabS, archivedTabS = tabActiveS, tabInactiveS
+		}
+		filterAnnot := tabSepS.Render("ctrl+a  ") + activeTabS.Render("active") + tabSepS.Render(" · ") + archivedTabS.Render("archived")
+		filterAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
+
+		detailTitle := "Detail"
+		if d := m.detail.Detail(); d != nil {
+			detailTitle = d.Title
+		} else if slug := m.list.CurrentSlug(); slug != "" {
+			detailTitle = slug
+		}
+
+		specPanel, hasSpecPanel := m.currentSpecPanel()
+		return paneConfig{
+			listView:      m.list.View(),
+			detailView:    m.detail.View(),
+			specPanel:     specPanel,
+			hasSpecPanel:  hasSpecPanel,
+			listTitle:     listTitle,
+			detailTitle:   detailTitle,
+			filterAnnot:   filterAnnot,
+			filterAnnotW:  filterAnnotW,
+			state:         stateWork,
+			listItemCount: listItemCount,
+			fuItemCount:   fuItemCount,
+		}
+	}
 }

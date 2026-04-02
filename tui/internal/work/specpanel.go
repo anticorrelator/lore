@@ -726,7 +726,7 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 		// immediately — no PTY-write timing hack needed.
 		var initialPrompt string
 		if chatMode {
-			initialPrompt = "Let's talk about the " + slug + " work item"
+			initialPrompt = "Let's talk about " + title
 			if extraContext != "" {
 				initialPrompt += ": " + extraContext
 			}

@@ -17,13 +17,13 @@ func (m model) handleSpecRequest(msg work.SpecRequestMsg) (model, tea.Cmd) {
 	}
 	ta := newModalTextarea()
 	focusCmd := ta.Focus()
-	m.specConfirmSlug = msg.Slug
-	m.specConfirmTitle = msg.Slug
-	m.specConfirmInput = ta
-	m.specConfirmShortMode = true
-	m.specConfirmSkipConfirm = true
-	m.specConfirmChatMode = false
-	m.specConfirmActive = true
+	m.sessionConfirmSlug = msg.Slug
+	m.sessionConfirmTitle = msg.Slug
+	m.sessionConfirmInput = ta
+	m.sessionConfirmShortMode = true
+	m.sessionConfirmSkipConfirm = true
+	m.sessionConfirmChatMode = false
+	m.sessionConfirmActive = true
 	m.enableKittyKeyboard()
 	return m, focusCmd
 }
@@ -36,11 +36,11 @@ func (m model) handleChatRequest(msg work.ChatRequestMsg) (model, tea.Cmd) {
 	}
 	ta := newModalTextarea()
 	focusCmd := ta.Focus()
-	m.specConfirmSlug = msg.Slug
-	m.specConfirmTitle = msg.Title
-	m.specConfirmInput = ta
-	m.specConfirmChatMode = true
-	m.specConfirmActive = true
+	m.sessionConfirmSlug = msg.Slug
+	m.sessionConfirmTitle = msg.Title
+	m.sessionConfirmInput = ta
+	m.sessionConfirmChatMode = true
+	m.sessionConfirmActive = true
 	m.enableKittyKeyboard()
 	return m, focusCmd
 }
@@ -53,13 +53,13 @@ func (m model) handleFollowupChatRequest(msg followup.FollowupChatRequestMsg) (m
 	}
 	ta2 := newModalTextarea()
 	focusCmd2 := ta2.Focus()
-	m.specConfirmSlug = msg.ID
-	m.specConfirmTitle = msg.Title
-	m.specConfirmShortMode = false
-	m.specConfirmSkipConfirm = false
-	m.specConfirmInput = ta2
-	m.specConfirmChatMode = true
-	m.specConfirmActive = true
+	m.sessionConfirmSlug = msg.ID
+	m.sessionConfirmTitle = msg.Title
+	m.sessionConfirmShortMode = false
+	m.sessionConfirmSkipConfirm = false
+	m.sessionConfirmInput = ta2
+	m.sessionConfirmChatMode = true
+	m.sessionConfirmActive = true
 	m.enableKittyKeyboard()
 	return m, focusCmd2
 }
@@ -80,8 +80,8 @@ func (m model) handleSpecProcessStarted(msg work.SpecProcessStartedMsg) (model, 
 	// unless the spec was launched from the confirmation modal — in that case,
 	// return focus to the listing view so the user stays oriented.
 	if slug == m.list.CurrentSlug() {
-		if m.specLaunchedFromModal {
-			m.specLaunchedFromModal = false
+		if m.sessionLaunchedFromModal {
+			m.sessionLaunchedFromModal = false
 			m.terminalMode = true
 			m.focusedPanel = panelLeft
 			return m, tea.Batch(cmd, tea.EnableMouseCellMotion)
@@ -158,7 +158,9 @@ func (m model) handleStreamComplete(msg work.StreamCompleteMsg) (model, tea.Cmd)
 	// Do NOT force m.terminalMode = false — if we're in terminal mode for
 	// this slug, keep it so the user can scroll through the output history.
 	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
-	work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
+	if m.state != stateFollowUps {
+		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
+	}
 	// Pre-size detail view and invalidate cache so it's ready when the user
 	// exits terminal mode (or immediately if not in terminal mode).
 	if m.list.CurrentSlug() == slug {
@@ -168,11 +170,14 @@ func (m model) handleStreamComplete(msg work.StreamCompleteMsg) (model, tea.Cmd)
 		}
 	}
 	var cmds []tea.Cmd
-	cmds = append(cmds, loadWorkItems(m.config.WorkDir))
-	if m.list.CurrentSlug() == slug {
-		cmds = append(cmds, m.detail.Init()) // reload detail to show updated plan.md
+	if m.state == stateFollowUps {
+		cmds = append(cmds, followup.LoadIndexCmd(m.config.KnowledgeDir))
+	} else {
+		cmds = append(cmds, loadWorkItems(m.config.WorkDir))
+		if m.list.CurrentSlug() == slug {
+			cmds = append(cmds, m.detail.Init()) // reload detail to show updated plan.md
+		}
 	}
-	work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
 	return m, tea.Batch(cmds...)
 }
 
@@ -200,11 +205,19 @@ func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 		m.terminalMode = false
 	}
 	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
-	work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
-	if wasSpec {
-		return m, tea.Batch(tea.EnableMouseCellMotion, loadWorkItems(m.config.WorkDir))
+	if m.state != stateFollowUps {
+		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
 	}
-	return m, loadWorkItems(m.config.WorkDir)
+	var reloadCmd tea.Cmd
+	if m.state == stateFollowUps {
+		reloadCmd = followup.LoadIndexCmd(m.config.KnowledgeDir)
+	} else {
+		reloadCmd = loadWorkItems(m.config.WorkDir)
+	}
+	if wasSpec {
+		return m, tea.Batch(tea.EnableMouseCellMotion, reloadCmd)
+	}
+	return m, reloadCmd
 }
 
 func (m model) handleTerminalDetach(_ work.TerminalDetachMsg) (model, tea.Cmd) {
@@ -229,9 +242,17 @@ func (m model) handleTerminalTerminate(msg work.TerminalTerminateMsg) (model, te
 
 	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
 	m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-	work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
-	if wasSpec {
-		return m, tea.Batch(tea.EnableMouseCellMotion, loadWorkItems(m.config.WorkDir))
+	if m.state != stateFollowUps {
+		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
 	}
-	return m, loadWorkItems(m.config.WorkDir)
+	var reloadCmd tea.Cmd
+	if m.state == stateFollowUps {
+		reloadCmd = followup.LoadIndexCmd(m.config.KnowledgeDir)
+	} else {
+		reloadCmd = loadWorkItems(m.config.WorkDir)
+	}
+	if wasSpec {
+		return m, tea.Batch(tea.EnableMouseCellMotion, reloadCmd)
+	}
+	return m, reloadCmd
 }
