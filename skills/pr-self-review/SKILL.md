@@ -213,7 +213,7 @@ Display summary:
 ### 2d. Persist findings for resume
 
 ```
-/work create pr-self-review-<PR_NUMBER>
+/work create pr-self-review-<PR_NUMBER> --pr <PR_NUMBER>
 ```
 
 Write the synthesized findings to `notes.md` under a `## Lens Scan` heading:
@@ -239,7 +239,28 @@ cat ~/.lore/claude-md/review-protocol/enrichment.md
 cat ~/.lore/claude-md/review-protocol/checklist.md
 ```
 
-### 3a. Overview and opening finding
+### 3a. Triage findings into interactive vs. auto-dispositioned
+
+Classify each finding into one of two buckets:
+
+**Interactive (require user dialog):**
+- All `blocking` findings
+- Compound findings (multiple lenses converging on the same location)
+- Suggestions with cross-boundary implications (Blast Radius findings, changes affecting public APIs or shared interfaces)
+- Findings where the correct disposition is genuinely ambiguous — you could argue for `action` or `accepted` with equal confidence
+- Findings matching user-provided focus context
+
+**Auto-disposition (use your best judgment):**
+- `question` findings where you can answer the question yourself from the diff and codebase context
+- `suggestion` findings that are locally scoped, low-risk, and have an obvious disposition:
+  - Clear style/convention nits → auto-accept or auto-action based on project conventions
+  - Missing test coverage for trivial branches → auto-action
+  - Naming suggestions with no semantic impact → auto-accept
+- Any finding where you are confident (not merely uncertain) about the right call
+
+**When in doubt, make it interactive.** The goal is to skip the obvious ones, not to avoid discussion.
+
+### 3b. Overview and auto-disposition summary
 
 Present a concise PR overview:
 
@@ -249,21 +270,32 @@ Present a concise PR overview:
 **Branch:** <head> → <base>
 **Scope:** <N files, brief characterization>
 
-### Findings to discuss:
+### Auto-dispositioned (<M> findings):
+| # | Severity | Title | Lens | File:Line | Disposition | Rationale |
+|---|----------|-------|------|-----------|-------------|-----------|
+| 3 | suggestion | <title> | <lens> | <file:line> | accepted | <one-line reason> |
+| 5 | question | <title> | <lens> | <file:line> | accepted | <one-line reason> |
+| 7 | suggestion | <title> | <lens> | <file:line> | action | <one-line reason> |
+
+> Override any of these? (enter finding numbers, or press Enter to confirm)
+
+### Findings to discuss (<N> findings):
 1. [blocking] <finding title> — <lens> — <file:line>
 2. [suggestion] <finding title> — <lens> — <file:line>
 ...
 ```
 
-Sort: blocking first (compound before single-lens), then suggestions, then questions. If focus context was provided, reorder matching items first within each severity tier.
+Sort interactive findings: blocking first (compound before single-lens), then suggestions, then questions. If focus context was provided, reorder matching items first within each severity tier.
 
-**Ceremony lens findings:** Conforming ceremony lens findings are included in the prioritized list above — they sort by severity alongside built-in lens findings and show their ceremony lens name (e.g., `[suggestion] Token rotation check — codex-pr-review — auth.go:42`). If any ceremony lenses produced non-conforming output, append a summary line after the findings list:
+**User override:** If the user names finding numbers from the auto-dispositioned table, move those findings into the interactive list and reset their disposition. Otherwise, auto-dispositions are confirmed and recorded.
+
+**Ceremony lens findings:** Conforming ceremony lens findings are included in the lists above — they sort by severity alongside built-in lens findings and show their ceremony lens name (e.g., `[suggestion] Token rotation check — codex-pr-review — auth.go:42`). If any ceremony lenses produced non-conforming output, append a summary line after the findings list:
 
 ```
 Supplementary reports: <skill-name>, <skill-name> (non-standard format — see below)
 ```
 
-Then **open the first finding** for discussion with its label, lens, file:line, body, and knowledge citations. End with an open question. Strip internal protocol headers (`**Grounding:**`, `**Severity:**`, etc.) from dialog presentation — these are internal scaffolding. The grounding content itself must be preserved as the substance of the finding.
+Then **open the first interactive finding** for discussion with its label, lens, file:line, body, and knowledge citations. End with an open question. Strip internal protocol headers (`**Grounding:**`, `**Severity:**`, etc.) from dialog presentation — these are internal scaffolding. The grounding content itself must be preserved as the substance of the finding.
 
 **Heuristic fallback:** If the pre-scan produced zero findings or `--skip-pre-scan` was set, scan the diff for risk concentration, complexity, and architectural decisions. Open topics using perspective lenses:
 1. "What would a reviewer unfamiliar with this codebase question?"
@@ -272,13 +304,13 @@ Then **open the first finding** for discussion with its label, lens, file:line, 
 
 Enrich heuristic observations via `lore search` before presenting.
 
-### 3b. Dialog rounds
+### 3c. Dialog rounds
 
 Each round follows this sequence:
 
 1. **Present finding** with disposition prompt: `(a)ction / (ok) accepted / (d)efer / (?) open`
 2. **Discuss** — user may assign a disposition directly, challenge, go deeper, or redirect
-3. **Record disposition** and advance to the next undispositioned finding
+3. **Record disposition** and advance to the next undispositioned interactive finding
 
 **Dispositions:**
 - **action** — needs a fix; becomes a task in the plan
@@ -286,9 +318,9 @@ Each round follows this sequence:
 - **deferred** — valid but out of scope
 - **open** — needs more investigation
 
-**User-steered flow:** The user can jump to any finding, batch-accept, raise new topics, or wrap up at any time. Undispositioned findings at wrap-up are recorded as `open`.
+**User-steered flow:** The user can jump to any finding (including auto-dispositioned ones), batch-accept, raise new topics, or wrap up at any time. Undispositioned findings at wrap-up are recorded as `open`.
 
-**After all lens findings:** Offer to continue exploring areas not covered by lenses. If declined, proceed to Step 4.
+**After all interactive findings:** Offer to continue exploring areas not covered by lenses. If declined, proceed to Step 4.
 
 **Perspective escalation:** When the user challenges a finding, offer:
 - **perspective-external:** "Re-examine as if seeing this code for the first time."
@@ -313,7 +345,7 @@ Proceed directly to Step 5.
 ### Create plan
 
 ```
-/work create pr-self-review-<PR_NUMBER>
+/work create pr-self-review-<PR_NUMBER> --pr <PR_NUMBER>
 ```
 
 Write `plan.md` structured for `/implement`:

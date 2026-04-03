@@ -260,6 +260,7 @@ else:
 #   hook_kind: "command" or "agent"
 #   payload: command string for "command" hooks, prompt string for "agent" hooks
 lore_hooks = [
+    ("SessionStart", None, "command", "bash ~/.lore/scripts/doctor.sh --quiet", 5),
     ("SessionStart", None, "command", "bash ~/.lore/scripts/auto-reindex.sh", 5),
     ("SessionStart", None, "command", "bash ~/.lore/scripts/load-knowledge.sh", 5),
     ("SessionStart", None, "command", "bash ~/.lore/scripts/load-work.sh", 5),

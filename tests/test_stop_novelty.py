@@ -947,9 +947,9 @@ class TestBehavioralEquivalence:
             "max_tool_uses": 10,
             "investigation_window": 10,
             "iterative_debug_window": 15,
-            "test_fix_window": 20,
-            "synthesis_char_threshold": 500,
-            "synthesis_tool_threshold": 5,
+            "test_fix_window": 10,
+            "synthesis_char_threshold": 1000,
+            "synthesis_tool_threshold": 8,
             "file_context_window": 10,
             "debug_context_window": 10,
             "debug_context_chars": 800,
@@ -1576,3 +1576,543 @@ class TestTeamSessionHeuristicFiltering:
         ]
         hits = snc.scan_heuristics(messages, team_exclusions=set())
         assert len(hits) > 0
+
+
+# ---------------------------------------------------------------------------
+# Test: tightened SELF_CORRECTION_RE — bare "actually" no longer matches
+# ---------------------------------------------------------------------------
+
+class TestSelfCorrectionRETightened:
+    """SELF_CORRECTION_RE was tightened: the bare `actually[,\\s]` alternative was
+    removed. It now requires context like 'I thought/expected/assumed...but actually'.
+
+    False positive cases:
+      - 'This actually uses a buffer pool' — no I-thought context, should NOT fire
+      - 'It actually works fine' — bare 'actually', should NOT fire
+
+    True positive cases:
+      - 'I thought it used malloc but actually it uses a buffer pool' — hits
+      - 'I assumed it was lazy but actually it is eager' — hits
+      - 'I expected it to fail but actually it succeeded' — hits
+    """
+
+    def _make_assistant(self, text, index=0):
+        return {
+            "index": index,
+            "role": "assistant",
+            "text_blocks": [text],
+            "has_tool_use": False,
+            "is_tool_result": False,
+            "tool_names": [],
+        }
+
+    def test_bare_actually_no_hit(self):
+        """'This actually uses a buffer pool' does NOT produce a self-correction hit.
+
+        Without I-thought context, bare 'actually' was a common false positive.
+        """
+        messages = [self._make_assistant("This actually uses a buffer pool.")]
+        hits = snc.scan_heuristics(messages)
+        self_hits = [h for h in hits if h["trigger"] == "self-correction"]
+        assert len(self_hits) == 0
+
+    def test_bare_actually_works_fine_no_hit(self):
+        """'It actually works fine' does NOT produce a self-correction hit."""
+        messages = [self._make_assistant("It actually works fine.")]
+        hits = snc.scan_heuristics(messages)
+        self_hits = [h for h in hits if h["trigger"] == "self-correction"]
+        assert len(self_hits) == 0
+
+    def test_i_thought_but_actually_hits(self):
+        """'I thought it used malloc but actually it uses a buffer pool' fires."""
+        messages = [self._make_assistant(
+            "I thought it used malloc but actually it uses a buffer pool."
+        )]
+        hits = snc.scan_heuristics(messages)
+        self_hits = [h for h in hits if h["trigger"] == "self-correction"]
+        assert len(self_hits) > 0
+
+    def test_i_assumed_but_actually_hits(self):
+        """'I assumed it was lazy but actually it is eager' fires."""
+        messages = [self._make_assistant(
+            "I assumed it was lazy but actually it is eager."
+        )]
+        hits = snc.scan_heuristics(messages)
+        self_hits = [h for h in hits if h["trigger"] == "self-correction"]
+        assert len(self_hits) > 0
+
+    def test_i_expected_but_actually_hits(self):
+        """'I expected it to fail but actually it succeeded' fires."""
+        messages = [self._make_assistant(
+            "I expected it to fail but actually it succeeded."
+        )]
+        hits = snc.scan_heuristics(messages)
+        self_hits = [h for h in hits if h["trigger"] == "self-correction"]
+        assert len(self_hits) > 0
+
+    def test_it_turns_out_still_hits(self):
+        """'it turns out' still fires (unrelated to the tightened alternative)."""
+        messages = [self._make_assistant(
+            "It turns out the module was never initialized."
+        )]
+        hits = snc.scan_heuristics(messages)
+        self_hits = [h for h in hits if h["trigger"] == "self-correction"]
+        assert len(self_hits) > 0
+
+
+# ---------------------------------------------------------------------------
+# Test: tightened DEBUG_ROOT_CAUSE_RE — error context required for "caused by"
+# ---------------------------------------------------------------------------
+
+class TestDebugRootCauseRETightened:
+    """DEBUG_ROOT_CAUSE_RE was tightened:
+    - 'the problem is that' was removed entirely
+    - 'caused by (a|an|the)' now requires an error context word
+      (error|bug|failure|crash|issue|problem) within 50 chars before it
+
+    False positive cases:
+      - 'The retry mechanism is caused by a design choice' — no error context, no hit
+      - 'The latency is caused by a slow network' — no error context, no hit
+
+    True positive cases:
+      - 'The crash was caused by a null pointer' — 'crash' within 50 chars, hits
+      - 'This issue was caused by a missing import' — 'issue' within 50 chars, hits
+      - 'The error is caused by an invalid config' — 'error' within 50 chars, hits
+    """
+
+    def _make_assistant(self, text, index=0):
+        return {
+            "index": index,
+            "role": "assistant",
+            "text_blocks": [text],
+            "has_tool_use": False,
+            "is_tool_result": False,
+            "tool_names": [],
+        }
+
+    def test_no_error_context_no_hit(self):
+        """'The retry mechanism is caused by a design choice' does NOT fire.
+
+        'caused by a' appears but 'retry mechanism' is not an error context word.
+        """
+        messages = [self._make_assistant(
+            "The retry mechanism is caused by a design choice."
+        )]
+        hits = snc.scan_heuristics(messages)
+        debug_hits = [h for h in hits if h["trigger"] == "debug-root-cause"]
+        assert len(debug_hits) == 0
+
+    def test_latency_caused_by_no_hit(self):
+        """'The latency is caused by a slow network' does NOT fire.
+
+        'latency' is not an error context word.
+        """
+        messages = [self._make_assistant(
+            "The latency is caused by a slow network connection."
+        )]
+        hits = snc.scan_heuristics(messages)
+        debug_hits = [h for h in hits if h["trigger"] == "debug-root-cause"]
+        assert len(debug_hits) == 0
+
+    def test_crash_caused_by_hits(self):
+        """'The crash was caused by a null pointer' fires.
+
+        'crash' is within 50 chars and is an error context word.
+        """
+        messages = [self._make_assistant(
+            "The crash was caused by a null pointer dereference."
+        )]
+        hits = snc.scan_heuristics(messages)
+        debug_hits = [h for h in hits if h["trigger"] == "debug-root-cause"]
+        assert len(debug_hits) > 0
+
+    def test_issue_caused_by_hits(self):
+        """'This issue was caused by a missing import' fires."""
+        messages = [self._make_assistant(
+            "This issue was caused by a missing import in the config module."
+        )]
+        hits = snc.scan_heuristics(messages)
+        debug_hits = [h for h in hits if h["trigger"] == "debug-root-cause"]
+        assert len(debug_hits) > 0
+
+    def test_error_caused_by_hits(self):
+        """'The error is caused by an invalid config' fires."""
+        messages = [self._make_assistant(
+            "The error is caused by an invalid config value."
+        )]
+        hits = snc.scan_heuristics(messages)
+        debug_hits = [h for h in hits if h["trigger"] == "debug-root-cause"]
+        assert len(debug_hits) > 0
+
+    def test_root_cause_still_hits(self):
+        """'root cause' still fires (unrelated to the tightened alternative)."""
+        messages = [self._make_assistant(
+            "The root cause was a missing null check in the serializer."
+        )]
+        hits = snc.scan_heuristics(messages)
+        debug_hits = [h for h in hits if h["trigger"] == "debug-root-cause"]
+        assert len(debug_hits) > 0
+
+    def test_failure_caused_by_hits(self):
+        """'The failure was caused by the connection timeout' fires."""
+        messages = [self._make_assistant(
+            "The failure was caused by the connection timeout handler."
+        )]
+        hits = snc.scan_heuristics(messages)
+        debug_hits = [h for h in hits if h["trigger"] == "debug-root-cause"]
+        assert len(debug_hits) > 0
+
+
+# ---------------------------------------------------------------------------
+# Test: _is_structured_output() — templated/quoted content exclusion
+# ---------------------------------------------------------------------------
+
+class TestIsStructuredOutput:
+    """_is_structured_output(text_blocks) returns True when text blocks contain
+    markers of templated or quoted output:
+    - **Trigger:** or **Decision:** labels (capture candidate / plan templates)
+    - <!-- HTML comments (knowledge store metadata)
+
+    These markers indicate the assistant is formatting structured artifacts,
+    not expressing independent reactive discoveries.
+    """
+
+    def test_trigger_label_detected(self):
+        """Text block with **Trigger:** returns True."""
+        assert snc._is_structured_output(["**Trigger:** gotcha"]) is True
+
+    def test_decision_label_detected(self):
+        """Text block with **Decision:** returns True."""
+        assert snc._is_structured_output(["**Decision:** use sqlite"]) is True
+
+    def test_html_comment_detected(self):
+        """Text block with <!-- returns True."""
+        assert snc._is_structured_output(["<!-- metadata here -->"]) is True
+
+    def test_trigger_in_multiblock_message(self):
+        """**Trigger:** in any text block returns True."""
+        assert snc._is_structured_output([
+            "Some preamble text.",
+            "**Trigger:** self-correction",
+            "More content.",
+        ]) is True
+
+    def test_plain_text_returns_false(self):
+        """Plain text without structured markers returns False."""
+        assert snc._is_structured_output([
+            "I thought it used malloc but actually it uses a buffer pool."
+        ]) is False
+
+    def test_empty_blocks_returns_false(self):
+        """Empty text block list returns False."""
+        assert snc._is_structured_output([]) is False
+
+    def test_empty_string_block_returns_false(self):
+        """Block containing only whitespace returns False."""
+        assert snc._is_structured_output(["   "]) is False
+
+    def test_partial_trigger_no_closing_bold_no_match(self):
+        """**Trigger without closing ** does not match the pattern."""
+        assert snc._is_structured_output(["**Trigger: gotcha"]) is False
+
+    def test_structured_output_skips_scan(self):
+        """scan_heuristics skips an assistant message with **Trigger:** label.
+
+        Even though the message contains trigger-matching text, the structured
+        output check fires first and prevents any heuristic match.
+        """
+        messages = [
+            {
+                "index": 0,
+                "role": "assistant",
+                "text_blocks": [
+                    "**Trigger:** gotcha\n"
+                    "**Context:** Watch out for the edge case when input is empty.\n"
+                    "I was wrong about this approach. The root cause was a race condition."
+                ],
+                "has_tool_use": False,
+                "is_tool_result": False,
+                "tool_names": [],
+            },
+        ]
+        hits = snc.scan_heuristics(messages)
+        assert len(hits) == 0
+
+    def test_structured_output_decision_label_skips_scan(self):
+        """scan_heuristics skips an assistant message with **Decision:** label."""
+        messages = [
+            {
+                "index": 0,
+                "role": "assistant",
+                "text_blocks": [
+                    "**Decision:** use Redis\n"
+                    "We chose Redis because of latency requirements."
+                ],
+                "has_tool_use": False,
+                "is_tool_result": False,
+                "tool_names": [],
+            },
+        ]
+        hits = snc.scan_heuristics(messages)
+        design_hits = [h for h in hits if h["trigger"] == "design-decision"]
+        assert len(design_hits) == 0
+
+    def test_html_comment_in_message_skips_scan(self):
+        """scan_heuristics skips an assistant message containing <!-- comment."""
+        messages = [
+            {
+                "index": 0,
+                "role": "assistant",
+                "text_blocks": [
+                    "<!-- category: gotcha -->\n"
+                    "Watch out for the edge case where input is empty."
+                ],
+                "has_tool_use": False,
+                "is_tool_result": False,
+                "tool_names": [],
+            },
+        ]
+        hits = snc.scan_heuristics(messages)
+        assert len(hits) == 0
+
+    def test_no_structured_markers_still_triggers(self):
+        """Message with trigger text but no structured markers still produces hits."""
+        messages = [
+            {
+                "index": 0,
+                "role": "assistant",
+                "text_blocks": [
+                    "Watch out for the edge case where input is empty — "
+                    "it silently drops the value."
+                ],
+                "has_tool_use": False,
+                "is_tool_result": False,
+                "tool_names": [],
+            },
+        ]
+        hits = snc.scan_heuristics(messages)
+        gotcha_hits = [h for h in hits if h["trigger"] == "gotcha"]
+        assert len(gotcha_hits) > 0
+
+
+# ---------------------------------------------------------------------------
+# Test: structural-synthesis thresholds (char + tool count)
+# ---------------------------------------------------------------------------
+
+class TestStructuralSynthesisThresholds:
+    """scan_structural_signals() structural-synthesis signal fires when:
+    - assistant message length > synthesis_char_threshold (1000 chars)  AND
+    - >= synthesis_tool_threshold (8) tool_use messages in the 10 messages before it
+
+    Below either threshold: no hit.
+    Both thresholds met: hit.
+    """
+
+    def _make_tool_msg(self, index, tool="Bash"):
+        return {
+            "index": index,
+            "role": "assistant",
+            "text_blocks": [f"Running step {index}"],
+            "has_tool_use": True,
+            "is_tool_result": False,
+            "tool_names": [tool],
+        }
+
+    def _make_assistant(self, index, text):
+        return {
+            "index": index,
+            "role": "assistant",
+            "text_blocks": [text],
+            "has_tool_use": False,
+            "is_tool_result": False,
+            "tool_names": [],
+        }
+
+    def _config(self, char_threshold=1000, tool_threshold=8):
+        cfg = dict(snc.DEFAULTS)
+        cfg["synthesis_char_threshold"] = char_threshold
+        cfg["synthesis_tool_threshold"] = tool_threshold
+        return cfg
+
+    def test_below_char_threshold_no_hit(self):
+        """600-char message after 6 tool uses does NOT fire structural-synthesis.
+
+        Both char (600 <= 1000) and tool count (6 < 8) are below threshold.
+        """
+        # 6 tool-use messages at indices 0-5
+        messages = [self._make_tool_msg(i) for i in range(6)]
+        # assistant message at index 6 with 600-char text
+        messages.append(self._make_assistant(6, "x" * 600))
+
+        hits = snc.scan_structural_signals(messages, config=self._config())
+        synthesis_hits = [h for h in hits if h["trigger"] == "structural-synthesis"]
+        assert len(synthesis_hits) == 0
+
+    def test_below_tool_threshold_only_no_hit(self):
+        """1200-char message after only 6 tool uses does NOT fire.
+
+        Char threshold met (1200 > 1000) but tool count (6 < 8) is not.
+        """
+        messages = [self._make_tool_msg(i) for i in range(6)]
+        messages.append(self._make_assistant(6, "x" * 1200))
+
+        hits = snc.scan_structural_signals(messages, config=self._config())
+        synthesis_hits = [h for h in hits if h["trigger"] == "structural-synthesis"]
+        assert len(synthesis_hits) == 0
+
+    def test_below_char_threshold_only_no_hit(self):
+        """600-char message after 9 tool uses does NOT fire.
+
+        Tool threshold met (9 >= 8) but char count (600 <= 1000) is not.
+        """
+        messages = [self._make_tool_msg(i) for i in range(9)]
+        messages.append(self._make_assistant(9, "x" * 600))
+
+        hits = snc.scan_structural_signals(messages, config=self._config())
+        synthesis_hits = [h for h in hits if h["trigger"] == "structural-synthesis"]
+        assert len(synthesis_hits) == 0
+
+    def test_both_thresholds_met_fires(self):
+        """1200-char message after 9 tool uses DOES fire structural-synthesis.
+
+        Both char (1200 > 1000) and tool count (9 >= 8) exceed thresholds.
+        """
+        messages = [self._make_tool_msg(i) for i in range(9)]
+        messages.append(self._make_assistant(9, "x" * 1200))
+
+        hits = snc.scan_structural_signals(messages, config=self._config())
+        synthesis_hits = [h for h in hits if h["trigger"] == "structural-synthesis"]
+        assert len(synthesis_hits) == 1
+        assert synthesis_hits[0]["index"] == 9
+
+    def test_exactly_at_char_threshold_no_hit(self):
+        """Message exactly at char threshold (1000) does NOT fire — condition is strict >."""
+        messages = [self._make_tool_msg(i) for i in range(9)]
+        messages.append(self._make_assistant(9, "x" * 1000))
+
+        hits = snc.scan_structural_signals(messages, config=self._config())
+        synthesis_hits = [h for h in hits if h["trigger"] == "structural-synthesis"]
+        assert len(synthesis_hits) == 0
+
+    def test_exactly_at_tool_threshold_fires(self):
+        """Exactly synthesis_tool_threshold (8) prior tool uses does fire — condition is >=."""
+        messages = [self._make_tool_msg(i) for i in range(8)]
+        messages.append(self._make_assistant(8, "x" * 1200))
+
+        hits = snc.scan_structural_signals(messages, config=self._config())
+        synthesis_hits = [h for h in hits if h["trigger"] == "structural-synthesis"]
+        assert len(synthesis_hits) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test: _evaluated_ranges.json cap — keeps 50 highest-index entries
+# ---------------------------------------------------------------------------
+
+class TestEvaluatedRangesCap:
+    """When _evaluated_ranges.json has more than 50 entries, main() prunes to
+    the 50 highest-index pairs (sorted descending, keep last 50).
+
+    The cap is applied immediately after loading, before candidate filtering.
+    This prevents unbounded growth of the file across many sessions.
+    """
+
+    def test_cap_keeps_50_highest_when_60_present(self, tmp_path):
+        """When file has 60 entries, only the 50 with highest indices survive.
+
+        Entries are (heuristic_index, novelty_index) tuples. Sorting is
+        lexicographic: highest first index wins, then highest second index.
+        """
+        # Create 60 entries with indices 0..59 paired with themselves
+        entries = [[i, i] for i in range(60)]
+        evaluated_path = tmp_path / "_evaluated_ranges.json"
+        evaluated_path.write_text(json.dumps(entries), encoding="utf-8")
+
+        # Load and apply the cap (replicate main() logic)
+        with open(str(evaluated_path), "r", encoding="utf-8") as f:
+            evaluated_ranges = set(tuple(r) for r in json.load(f))
+
+        assert len(evaluated_ranges) == 60
+
+        if len(evaluated_ranges) > 50:
+            evaluated_ranges = set(sorted(evaluated_ranges)[-50:])
+
+        assert len(evaluated_ranges) == 50
+        # The 50 highest-index entries are (10,10)..(59,59)
+        assert (59, 59) in evaluated_ranges
+        assert (10, 10) in evaluated_ranges
+        # The 10 lowest entries (0,0)..(9,9) should be pruned
+        for i in range(10):
+            assert (i, i) not in evaluated_ranges
+
+    def test_exactly_50_entries_unchanged(self, tmp_path):
+        """When file has exactly 50 entries, no pruning occurs."""
+        entries = [[i, i] for i in range(50)]
+        evaluated_path = tmp_path / "_evaluated_ranges.json"
+        evaluated_path.write_text(json.dumps(entries), encoding="utf-8")
+
+        with open(str(evaluated_path), "r", encoding="utf-8") as f:
+            evaluated_ranges = set(tuple(r) for r in json.load(f))
+
+        if len(evaluated_ranges) > 50:
+            evaluated_ranges = set(sorted(evaluated_ranges)[-50:])
+
+        assert len(evaluated_ranges) == 50
+        # All original entries present
+        for i in range(50):
+            assert (i, i) in evaluated_ranges
+
+    def test_fewer_than_50_entries_unchanged(self, tmp_path):
+        """When file has fewer than 50 entries, all are preserved."""
+        entries = [[i, i] for i in range(20)]
+        evaluated_path = tmp_path / "_evaluated_ranges.json"
+        evaluated_path.write_text(json.dumps(entries), encoding="utf-8")
+
+        with open(str(evaluated_path), "r", encoding="utf-8") as f:
+            evaluated_ranges = set(tuple(r) for r in json.load(f))
+
+        if len(evaluated_ranges) > 50:
+            evaluated_ranges = set(sorted(evaluated_ranges)[-50:])
+
+        assert len(evaluated_ranges) == 20
+
+    def test_cap_uses_sort_order_not_insertion_order(self, tmp_path):
+        """Pruning is by sort order (highest tuples), not insertion order.
+
+        Even if small-index entries were written last, they get pruned.
+        """
+        # Write high-index entries first, then low-index entries
+        entries = [[i + 50, i + 50] for i in range(50)] + [[i, i] for i in range(20)]
+        evaluated_path = tmp_path / "_evaluated_ranges.json"
+        evaluated_path.write_text(json.dumps(entries), encoding="utf-8")
+
+        with open(str(evaluated_path), "r", encoding="utf-8") as f:
+            evaluated_ranges = set(tuple(r) for r in json.load(f))
+
+        if len(evaluated_ranges) > 50:
+            evaluated_ranges = set(sorted(evaluated_ranges)[-50:])
+
+        assert len(evaluated_ranges) == 50
+        # All 70 entries loaded; after cap, 20 low-index entries pruned
+        for i in range(20):
+            assert (i, i) not in evaluated_ranges
+        # High-index entries kept
+        for i in range(50):
+            assert (i + 50, i + 50) in evaluated_ranges
+
+    def test_51_entries_prunes_to_50(self, tmp_path):
+        """Boundary: 51 entries triggers the cap, leaving 50."""
+        entries = [[i, i] for i in range(51)]
+        evaluated_path = tmp_path / "_evaluated_ranges.json"
+        evaluated_path.write_text(json.dumps(entries), encoding="utf-8")
+
+        with open(str(evaluated_path), "r", encoding="utf-8") as f:
+            evaluated_ranges = set(tuple(r) for r in json.load(f))
+
+        if len(evaluated_ranges) > 50:
+            evaluated_ranges = set(sorted(evaluated_ranges)[-50:])
+
+        assert len(evaluated_ranges) == 50
+        # Entry (0, 0) is the lowest and should be pruned
+        assert (0, 0) not in evaluated_ranges
+        # Entry (50, 50) is highest and should be kept
+        assert (50, 50) in evaluated_ranges

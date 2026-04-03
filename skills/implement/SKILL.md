@@ -46,7 +46,12 @@ Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). D
 3. Read `_meta.json`, `plan.md`, and last entry of `notes.md`
 4. **If no `plan.md`:** Tell user "No structured plan found. Run `/spec` first to create phases and tasks."
 5. **If `plan.md` has no `## Phases` or no unchecked `- [ ]` items:** Tell user "All plan tasks are already complete."
-6. Present a brief summary and proceed immediately:
+6. **Write branch cache** — associate the current branch with this work item for downstream lookup:
+   ```bash
+   lore work cache-branch --write <slug>
+   ```
+   If the command fails, log `[implement] Warning: branch cache write failed` and continue — this is non-fatal.
+7. Present a brief summary and proceed immediately:
    ```
    [implement] <Title>
    Model: sonnet (override with --model opus)

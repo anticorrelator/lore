@@ -271,7 +271,7 @@ Same purpose as the full flow's Step 5.3 — validate the implementation approac
    ```
    /codex-plan-review <slug>
    ```
-   Present the evaluator's output to the user. If the evaluator identifies WEAK or MISSING areas, ask the user whether to address them before proceeding.
+   **The codex gate is mandatory.** The plan cannot proceed to implementation until the gate passes (or the user explicitly overrides). If the evaluator identifies WEAK or MISSING areas, work with the user to address them through the iterative remediation loop defined in the codex-plan-review skill. Do not suggest `/implement` until the gate has passed or been overridden.
 6. Suggest retrospective: `Consider /retro <slug> to evaluate knowledge system effectiveness for this spec.`
 
 ---
@@ -642,6 +642,14 @@ The script outputs JSON: `{verified: N, corrected: [...], unresolved: [...]}`.
 - **If corrections were applied** (corrected is non-empty): briefly note the corrections made (e.g., "Corrected 2 backlinks: `[[knowledge:old-path]]` → `[[knowledge:new-path]]`").
 - **If unresolved backlinks remain**: carry them forward into Step 5.1 as additional bullets (tagged `[broken backlink]`).
 - **If all resolved**: proceed silently.
+
+### Step 5.0.6: Knowledge context block audit
+
+Check whether plan phases have `**Knowledge context:**` blocks when the knowledge store has relevant entries.
+
+For each phase, run `lore search "<phase objective keywords>" --limit 3`. If results exist but the phase has no `**Knowledge context:**` block, add the most relevant entry as a backlink with an implementation-facing annotation. This prevents the "plan-level context block omission" failure mode (see `/retro` failure-modes.md Section A) where the task generator has nothing to resolve despite available store entries.
+
+Skip this step if all phases already have context blocks.
 
 ### Step 5.1: Confirm understanding
 

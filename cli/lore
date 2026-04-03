@@ -41,6 +41,7 @@ Commands:
   batch-implement  Batch-run /implement on ready work items
   backlinks    Backlink management (see: lore backlinks --help)
   rebuild      Rebuild and reinstall the lore-tui binary
+  doctor       Check installation health and detect stale components
 
   work         Work item management (see: lore work --help)
   followup     Follow-up artifact management (see: lore followup --help)
@@ -80,6 +81,7 @@ Subcommands:
   relate       Add or remove related work item links
   heal         Detect and fix work structure issues
   ai           Create work items from a natural-language prompt (headless Claude)
+  cache-branch Cache or retrieve the active branch for a work item
 
 Options:
   --help, -h    Show this help
@@ -630,6 +632,9 @@ cmd_work() {
     ai)
       "$SCRIPTS_DIR/work-ai.sh" "$@"
       ;;
+    cache-branch)
+      "$SCRIPTS_DIR/cache-branch.sh" "$@"
+      ;;
     *)
       echo "Error: unknown work subcommand '$subcmd'" >&2
       echo "" >&2
@@ -818,6 +823,10 @@ case "$1" in
   batch-implement)
     shift
     "$SCRIPTS_DIR/batch-implement.sh" "$@"
+    ;;
+  doctor)
+    shift
+    "$SCRIPTS_DIR/doctor.sh" "$@"
     ;;
   rebuild)
     if ! command -v go >/dev/null 2>&1; then
