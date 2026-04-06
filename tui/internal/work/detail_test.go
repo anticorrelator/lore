@@ -251,6 +251,74 @@ func TestLoadWorkItemDetailDirectExtraFiles(t *testing.T) {
 	}
 }
 
+func TestLoadWorkItemDetailDirectMalformedMeta(t *testing.T) {
+	workDir := t.TempDir()
+	slug := "bad-meta"
+	itemDir := filepath.Join(workDir, slug)
+	os.MkdirAll(itemDir, 0755)
+
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte("not valid json{{{"), 0644)
+
+	detail, err := loadWorkItemDetailDirect(workDir, slug)
+	if err != nil {
+		t.Fatalf("malformed meta should not return error, got: %v", err)
+	}
+	if !detail.Malformed {
+		t.Error("Malformed should be true")
+	}
+	if detail.Slug != slug {
+		t.Errorf("Slug = %q, want %q", detail.Slug, slug)
+	}
+	if detail.Title != "[malformed] "+slug {
+		t.Errorf("Title = %q, want %q", detail.Title, "[malformed] "+slug)
+	}
+	if detail.Branches == nil {
+		t.Error("Branches should be non-nil (empty slice)")
+	}
+	if detail.Tags == nil {
+		t.Error("Tags should be non-nil (empty slice)")
+	}
+	if detail.RelatedWork == nil {
+		t.Error("RelatedWork should be non-nil (empty slice)")
+	}
+}
+
+func TestLoadWorkItemDetailDirectMalformedMetaReadsSiblings(t *testing.T) {
+	workDir := t.TempDir()
+	slug := "bad-meta-siblings"
+	itemDir := filepath.Join(workDir, slug)
+	os.MkdirAll(itemDir, 0755)
+
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte("{corrupt}"), 0644)
+	os.WriteFile(filepath.Join(itemDir, "plan.md"), []byte("# Plan\n\nStill readable."), 0644)
+	os.WriteFile(filepath.Join(itemDir, "notes.md"), []byte("## 2026-03-01\nSome notes."), 0644)
+	os.WriteFile(filepath.Join(itemDir, "execution-log.md"), []byte("# Log\n\nEntry."), 0644)
+	os.WriteFile(filepath.Join(itemDir, "research.md"), []byte("# Research\n\nData."), 0644)
+
+	detail, err := loadWorkItemDetailDirect(workDir, slug)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !detail.Malformed {
+		t.Error("Malformed should be true")
+	}
+	if detail.PlanContent == nil || *detail.PlanContent != "# Plan\n\nStill readable." {
+		t.Errorf("PlanContent = %v, want plan content", detail.PlanContent)
+	}
+	if detail.NotesContent == nil || *detail.NotesContent != "## 2026-03-01\nSome notes." {
+		t.Errorf("NotesContent = %v, want notes content", detail.NotesContent)
+	}
+	if !detail.HasExecutionLog {
+		t.Error("HasExecutionLog should be true")
+	}
+	if detail.ExecLogContent == nil || *detail.ExecLogContent != "# Log\n\nEntry." {
+		t.Errorf("ExecLogContent = %v, want log content", detail.ExecLogContent)
+	}
+	if len(detail.ExtraFiles) != 1 || detail.ExtraFiles[0].Name != "research" {
+		t.Errorf("ExtraFiles = %v, want [{research ...}]", detail.ExtraFiles)
+	}
+}
+
 func TestLoadWorkItemDetailDirectMissingMeta(t *testing.T) {
 	workDir := t.TempDir()
 	_, err := loadWorkItemDetailDirect(workDir, "nonexistent")

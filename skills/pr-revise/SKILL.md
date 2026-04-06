@@ -50,15 +50,18 @@ gh pr view <PR_NUMBER> --json files,title,body,baseRefName,headRefName
 
 CRITICAL: The fetch script groups comments by review submission. The GitHub UI hides/folds comments — the API is the only reliable source.
 
-Load the review protocol for use by Steps 3-4:
+Load protocol sections for Steps 3-4:
 
 ```bash
-cat ~/.lore/claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/review-protocol/review-selection.md
+cat ~/.lore/claude-md/review-protocol/checklist.md
+cat ~/.lore/claude-md/review-protocol/enrichment.md
+cat ~/.lore/claude-md/review-protocol/escalation.md
 ```
 
 ## Step 3: Select Review Batch and Categorize
 
-**Review Selection:** Follow the Review Selection protocol defined in `~/.lore/claude-md/70-review-protocol.md`. Present fetched reviews as batches grouped by reviewer and let the user select which batch to work through. Only categorize and process comments from the selected batch — other batches are deferred to subsequent invocations.
+**Review Selection:** Follow the Review Selection protocol defined in `~/.lore/claude-md/review-protocol/review-selection.md`. Present fetched reviews as batches grouped by reviewer and let the user select which batch to work through. Only categorize and process comments from the selected batch — other batches are deferred to subsequent invocations.
 
 If the PR has only one reviewer with feedback, skip the selection prompt and proceed with that batch automatically.
 
@@ -78,13 +81,19 @@ For each unresolved item in the selected batch, determine:
 
 Assign a Conventional Comments label to each item: `suggestion`, `issue`, `question`, `thought`, `nitpick`, or `praise`.
 
-**Apply the 8-point review checklist** from the review protocol reference (`~/.lore/claude-md/70-review-protocol.md`) as an additional analysis lens when categorizing. Read the checklist at invocation time — do not duplicate it here. The checklist helps distinguish substantive feedback from style preferences.
+**Grounding:** For each item labeled `issue` or `suggestion`, include a `**Grounding:**` line stating the impact-grounded basis using uncertain language. Use the hedged phrasing patterns from `~/.lore/claude-md/review-protocol/review-voice.md` — key forms:
+- `issue`: `**Grounding:** This may cause <what breaks> for <whom> when <conditions>.`
+- `suggestion`: `**Grounding:** This could benefit <beneficiary> by <specific improvement>.`
+
+Items without grounding are demoted to `thought` (tracked but not actionable). This prevents reviewer style preferences from being elevated to action items.
+
+**Apply the 8-point review checklist** from `~/.lore/claude-md/review-protocol/checklist.md` as an additional analysis lens when categorizing. Read the checklist at invocation time — do not duplicate it here. The checklist helps distinguish substantive feedback from style preferences.
 
 **Scoping for large diffs:** For PRs touching more than ~10 files, prioritize analysis by: (1) files with blocking/CHANGES_REQUESTED feedback, (2) files with the most review threads, (3) files touching shared interfaces or public APIs. Apply detailed categorization to priority files; batch remaining items by category.
 
 ## Step 4: Knowledge Enrichment
 
-**This step is mandatory.** Follow the Knowledge Enrichment Protocol defined in `~/.lore/claude-md/70-review-protocol.md`.
+**This step is mandatory.** Follow the Knowledge Enrichment Protocol defined in `~/.lore/claude-md/review-protocol/enrichment.md`.
 
 For each feedback item with a substantive label (suggestion, issue, question, thought):
 
@@ -99,7 +108,7 @@ For each feedback item with a substantive label (suggestion, issue, question, th
 
 **This enrichment is critical for /pr-revise specifically:** external reviewers bring fresh eyes but also stylistic baggage. Knowledge enrichment distinguishes project conventions from reviewer preferences. When a reviewer suggests something that contradicts a known convention, the enrichment surfaces the convention so the user can make an informed decision.
 
-**Investigation escalation:** When all three gate conditions are met (substantive label + insufficient knowledge results + multi-file analysis needed), spawn an Explore agent to investigate cross-boundary concerns before finalizing the categorization. Follow the Investigation Escalation procedure in `~/.lore/claude-md/70-review-protocol.md`. Maximum 2 escalations per review.
+**Investigation escalation:** When all three gate conditions are met (substantive label + insufficient knowledge results + multi-file analysis needed), spawn an Explore agent to investigate cross-boundary concerns before finalizing the categorization. Follow the Investigation Escalation procedure in `~/.lore/claude-md/review-protocol/escalation.md`. Maximum 2 escalations per review.
 
 Skip enrichment for nitpick and praise labels.
 
@@ -194,7 +203,105 @@ If there are items needing input, ask about them in a single batched question.
 
 If there are deferred batches, note that the user can re-invoke `/pr-revise` on the same PR to process the next batch.
 
-## Step 7: Capture Insights
+## Step 7: Generate Followup Report
+
+This step is mandatory and must not be skipped.
+
+This step is automatic — runs after Step 6, before Step 8.
+
+### 7a. Determine suggested actions
+
+Map feedback categories to followup suggested actions:
+
+| Feedback outcome | `--suggested-actions` primary type |
+|-----------------|---|
+| Verification Needed items exist | `create_work_item` (spec-needed) |
+| Deferred items exist (no Verification Needed) | `create_work_item` (defer rationale) |
+| All Agreed Changes only (no Verification Needed, no Deferred) | `create_work_item` (implement-ready) |
+| All categories empty (nothing to action) | `approve` |
+
+Produce a suggested-actions JSON array, omitting types for empty categories:
+
+```json
+[
+  {"type": "create_work_item", "description": "implement-ready: <N> agreed changes"},
+  {"type": "create_work_item", "description": "spec-needed: <M> verification items"},
+  {"type": "create_work_item", "description": "deferred: <K> items — <defer rationale summary>"}
+]
+```
+
+### 7b. Assemble the full report body
+
+Assemble the `--content` value with **all** of the following sections. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
+
+**First line:** One-line diagnostic summary (e.g., "agreed 3, verification 2, deferred 1 findings from @reviewer's review"). This must be the first non-heading line — it appears as the excerpt in the TUI.
+
+**Section 1 — PR Narrative**
+
+Derive from three sources:
+- **PR description and commit messages:** the stated purpose and context of the change, drawn from `gh pr view` output (title, body, commits).
+- **Reviewer feedback themes:** recurring concerns or patterns across the selected batch (e.g., "reviewer flagged missing error handling in two places", "two suggestions about naming consistency").
+- **Knowledge enrichment context:** any conventions or architectural patterns surfaced by Step 4 enrichment that are relevant to understanding the feedback.
+
+```markdown
+## PR Narrative
+
+<1–3 sentences summarizing what the PR does, drawn from its description and commits>
+
+**Reviewer themes:** <patterns or recurring concerns across the feedback batch, or "None" if feedback is isolated>
+
+**Knowledge context:** <relevant conventions or patterns from Step 4 enrichment, or "None" if no relevant citations>
+```
+
+Omit **Reviewer themes** if all feedback items are isolated (no recurring patterns). Omit **Knowledge context** if Step 4 produced no citations relevant to the PR's overall direction.
+
+**Section 2 — Implementation Diagram**
+
+Draw an ASCII box-drawing diagram showing the logical flow of the PR's changes as understood from the diff: which components were added or modified, how they connect, and the direction of data or control flow.
+
+Read diagram conventions:
+```bash
+cat ~/.lore/claude-md/review-protocol/followup-template.md
+```
+
+If directional relationships cannot be determined from the diff alone, omit the diagram.
+
+**Section 3 — Review Findings**
+
+List all categorized feedback items from Step 3. Include every item regardless of category — Agreed Changes, Verification Needed, and Deferred are all listed with their full context.
+
+```markdown
+## Review Findings
+
+| # | Label | Item | File:Line | Category | Knowledge | Reviewer Quote | Summary |
+|---|-------|------|-----------|----------|-----------|----------------|---------|
+| 1 | issue | <title> | <file:line> | Agreed Changes | <citation or —> | "<verbatim quote>" | <uncertain framing> |
+| 2 | suggestion | <title> | <file:line> | Verification Needed | <citation or —> | "<verbatim quote>" | <uncertain framing> |
+| 3 | question | <title> | <file:line> | Deferred | <citation or —> | "<verbatim quote>" | <uncertain framing> |
+```
+
+- **Label** column: the Conventional Comments label assigned in Step 3 (`suggestion`, `issue`, `question`, `thought`, `nitpick`, `praise`).
+- **Category** column: `Agreed Changes`, `Verification Needed`, or `Deferred`.
+- **Knowledge** column: the `[knowledge: entry-title]` citation from Step 4 enrichment, or `—` if no citation applies.
+- **Reviewer Quote** column: the verbatim reviewer comment (truncated to ~80 chars if long; use `...` to indicate truncation).
+- **Summary** column: impact-grounded uncertain framing derived from the analysis in Step 3. Follow the hedged phrasing patterns in `~/.lore/claude-md/review-protocol/review-voice.md` — key forms: "This may cause..." for issues, "This could benefit..." for suggestions, or the reviewer's open question for question-labeled items. Do not restate the observed code fact — summarize the inferred impact. Do not include internal analysis headers (`**Grounding:**`, `**Severity:**`, etc.) — these are internal protocol language and must not appear in the report.
+
+### 7c. Persist the report
+
+Pass the **complete report body from 7b** as `--content`:
+
+```bash
+bash ~/.lore/scripts/create-followup.sh \
+  --title "PR #<NUMBER>: <short reviewer name> feedback" \  # ≤70 chars
+  --source "pr-revise" \
+  --attachments '[{"type":"pr","ref":"#<NUMBER>"}]' \
+  --suggested-actions '<json array from 7a>' \
+  --content '<complete report body from 7b — all 3 sections>'
+```
+
+## Step 8: Capture Insights
+
+**Gate:** Do not execute this step until Step 7 (Generate Followup Report) has completed and `create-followup.sh` has been called. If Step 7 was not executed, go back and execute it now before proceeding.
 
 ```
 /remember PR review feedback from PR #<N> — capture: architectural insights, corrected misconceptions about how the codebase works, non-obvious patterns or invariants the reviewer identified, genuine bugs or correctness issues that reveal something about the system. Skip: style preferences, naming opinions, formatting nits, nitpicking, subjective code taste, "I would have done it differently" suggestions, anything that amounts to an outside contributor's personal conventions vs the project's own patterns. PR reviewers bring valuable fresh eyes but also stylistic baggage — be highly discerning. Use confidence: medium for reviewer-sourced insights (not verified against codebase internals).

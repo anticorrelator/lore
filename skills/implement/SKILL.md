@@ -46,7 +46,12 @@ Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). D
 3. Read `_meta.json`, `plan.md`, and last entry of `notes.md`
 4. **If no `plan.md`:** Tell user "No structured plan found. Run `/spec` first to create phases and tasks."
 5. **If `plan.md` has no `## Phases` or no unchecked `- [ ]` items:** Tell user "All plan tasks are already complete."
-6. Present a brief summary and proceed immediately:
+6. **Write branch cache** — associate the current branch with this work item for downstream lookup:
+   ```bash
+   lore work cache-branch --write <slug>
+   ```
+   If the command fails, log `[implement] Warning: branch cache write failed` and continue — this is non-fatal.
+7. Present a brief summary and proceed immediately:
    ```
    [implement] <Title>
    Model: sonnet (override with --model opus)
@@ -210,7 +215,7 @@ As worker messages arrive (delivered automatically):
    ```bash
    lore work check <slug> "<task-subject>"
    ```
-   If this fails or is missed, Step 6 reconciles from the task system.
+   If this fails or is missed, Step 7 reconciles from the task system.
 
    **Write execution log entry** — immediately after `lore work check`, append to `execution-log.md`:
    ```bash
@@ -252,7 +257,29 @@ Invoke `/remember` with capture constraints scoped to the implementation:
 /remember Implementation findings from <work item title> — Read all **Observations:** and **Investigation:** entries from execution-log.md and evaluate each against the capture gate. Two valid capture targets: (1) mechanism-level patterns — how the system accomplishes X broadly, evaluate for novelty against existing knowledge; (2) structural footprint — module roles, integration points, what connects to/through a file, what constrains changes — evaluate against existing architectural knowledge for what isn't yet recorded. Function-level details do not qualify. Also capture: cross-task patterns visible only from the lead's vantage. Investigation entries (debugging detours, design pivots) qualify when the root cause or resolution reveals something non-obvious about the system.
 ```
 
-## Step 6: Cleanup and report
+## Step 6: Followup Creation Gate
+
+Check for incomplete tasks or explicit blockers. Skip silently if everything completed cleanly.
+
+**Signal detection** — check two sources:
+
+1. **Incomplete tasks** — call `TaskList`. Flag if any tasks remain with status `pending` or `in_progress`.
+2. **Explicit blockers** — read `execution-log.md` for worker report entries where `Blockers:` contains any text other than `none` (case-insensitive).
+
+**If no signals found:** skip to Step 7.
+
+**If signals found:** create a followup:
+
+```bash
+bash ~/.lore/scripts/create-followup.sh \
+  --title "Deferred work: <work item title>" \  # ≤70 chars
+  --source "implement" \
+  --attachments '[{"type":"work_item","slug":"<slug>"}]' \
+  --suggested-actions '[{"type":"create_work_item"}]' \
+  --content "<one-line summary of what didn't finish and why, followed by a checklist of remaining items>"
+```
+
+## Step 7: Cleanup and report
 
 1. Append a session entry to `notes.md`:
    ```markdown
@@ -277,6 +304,7 @@ Invoke `/remember` with capture constraints scoped to the implementation:
    Completed: N/M tasks
    Knowledge captured: K entries to knowledge store
    Remaining: <list if any, or "none — work item archived">
+   Followup: <"<title>" if created, omit line if not>
    Consider `/retro <slug>` to evaluate knowledge system effectiveness for this work.
    ```
 
@@ -284,7 +312,7 @@ Invoke `/remember` with capture constraints scoped to the implementation:
 
 If workers hit blockers or the team can't finish all tasks:
 1. Capture progress to `notes.md` via the session entry above
-2. Reconcile plan.md from the task system (Step 6.2) — completed tasks get checked, incomplete ones stay unchecked
+2. Reconcile plan.md from the task system (Step 7.2) — completed tasks get checked, incomplete ones stay unchecked
 3. Report what completed and what's left
 4. The user can re-run `/implement` later to pick up remaining tasks (Step 2 skips checked items)
 

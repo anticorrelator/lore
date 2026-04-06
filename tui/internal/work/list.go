@@ -493,7 +493,7 @@ func (m ListModel) viewFull() string {
 		item := items[i]
 
 		slug := truncate(item.Slug, slugW)
-		updated := formatRelativeTime(item.Updated)
+		updated := FormatRelativeTime(item.Updated)
 		updated = truncate(updated, updatedW)
 		pr := m.prBadge(item.PR, prW)
 
@@ -616,7 +616,7 @@ func truncate(s string, maxW int) string {
 	return "…"
 }
 
-func formatRelativeTime(iso string) string {
+func FormatRelativeTime(iso string) string {
 	t, err := time.Parse(time.RFC3339, iso)
 	if err != nil {
 		// Try date-only

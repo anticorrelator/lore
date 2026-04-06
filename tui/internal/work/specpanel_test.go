@@ -403,6 +403,104 @@ func TestOutputClearsNeedsInput(t *testing.T) {
 	}
 }
 
+// TestBuildInitialPrompt covers the four prompt construction paths in StartTerminalCmd.
+func TestBuildInitialPrompt(t *testing.T) {
+	tests := []struct {
+		name         string
+		slug         string
+		title        string
+		extraContext string
+		shortMode    bool
+		chatMode     bool
+		skipConfirm  bool
+		followupMode bool
+		wantPrefix   string
+		wantContains []string
+	}{
+		{
+			name:         "followup chat mode uses /followup-discuss prefix",
+			slug:         "my-followup",
+			title:        "My Followup",
+			chatMode:     true,
+			followupMode: true,
+			wantPrefix:   "/followup-discuss ",
+			wantContains: []string{"my-followup"},
+		},
+		{
+			name:         "followup chat mode with extraContext appends it",
+			slug:         "my-followup",
+			title:        "My Followup",
+			extraContext: "extra info",
+			chatMode:     true,
+			followupMode: true,
+			wantPrefix:   "/followup-discuss ",
+			wantContains: []string{"my-followup", ": extra info"},
+		},
+		{
+			name:         "regular chat mode uses Let's talk about prefix",
+			slug:         "some-slug",
+			title:        "Some Title",
+			chatMode:     true,
+			followupMode: false,
+			wantPrefix:   "Let's talk about ",
+			wantContains: []string{"Some Title"},
+		},
+		{
+			name:         "regular chat mode with extraContext appends it",
+			slug:         "some-slug",
+			title:        "Some Title",
+			extraContext: "more context",
+			chatMode:     true,
+			followupMode: false,
+			wantPrefix:   "Let's talk about ",
+			wantContains: []string{"Some Title", ": more context"},
+		},
+		{
+			name:         "spec mode uses /spec prefix",
+			slug:         "my-spec",
+			chatMode:     false,
+			wantPrefix:   "/spec ",
+			wantContains: []string{"my-spec"},
+		},
+		{
+			name:         "spec short mode includes short keyword",
+			slug:         "my-spec",
+			chatMode:     false,
+			shortMode:    true,
+			wantPrefix:   "/spec ",
+			wantContains: []string{"short ", "my-spec"},
+		},
+		{
+			name:         "spec mode with skipConfirm appends --yes",
+			slug:         "my-spec",
+			chatMode:     false,
+			skipConfirm:  true,
+			wantContains: []string{"my-spec --yes"},
+		},
+		{
+			name:         "spec mode with extraContext appends -- separator",
+			slug:         "my-spec",
+			chatMode:     false,
+			extraContext: "some extra",
+			wantContains: []string{"my-spec -- some extra"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildInitialPrompt(tc.slug, tc.title, tc.extraContext, tc.shortMode, tc.chatMode, tc.skipConfirm, tc.followupMode)
+			if tc.wantPrefix != "" && !strings.HasPrefix(got, tc.wantPrefix) {
+				t.Errorf("expected prefix %q, got %q", tc.wantPrefix, got)
+			}
+			for _, want := range tc.wantContains {
+				if !strings.Contains(got, want) {
+					t.Errorf("expected %q to contain %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 // extractBatchCmds extracts individual commands from a tea.Batch result.
 // It runs the outer cmd and checks if the result is a tea.BatchMsg ([]tea.Cmd).
 // Falls back to returning the single cmd if it's not a batch.

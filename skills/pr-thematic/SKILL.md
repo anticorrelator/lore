@@ -72,9 +72,13 @@ From the fetched data, identify:
 
 ## Step 4: Knowledge Enrichment
 
-Read the enrichment protocol:
+Read review protocol sections (enrichment, escalation, severity, findings format):
 ```bash
-cat ~/.lore/claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/review-protocol/enrichment.md
+cat ~/.lore/claude-md/review-protocol/escalation.md
+cat ~/.lore/claude-md/review-protocol/severity.md
+cat ~/.lore/claude-md/review-protocol/findings-format.md
+cat ~/.lore/claude-md/review-protocol/review-voice.md
 ```
 
 For each finding, query the knowledge store:
@@ -86,14 +90,9 @@ Attach relevant citations as `knowledge_context` entries in the finding. Follow 
 
 ### Investigation Escalation
 
-If a finding involves cross-boundary scope concerns (changes that appear unrelated but may have hidden dependencies) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `70-review-protocol.md`. Budget: maximum 2 escalations per lens run.
+If a finding involves cross-boundary scope concerns (changes that appear unrelated but may have hidden dependencies) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `claude-md/review-protocol/escalation.md`. Budget: maximum 2 escalations per lens run.
 
 ## Step 5: Write Findings
-
-Read the severity classification and findings output format from:
-```bash
-cat ~/.lore/claude-md/70-review-protocol.md
-```
 
 **5a. Build findings JSON** conforming to the Findings Output Format schema:
 ```json
@@ -111,7 +110,7 @@ Classify each finding using the Severity Classification definitions. Default to 
 - Missing pieces that are nice-to-have: **suggestion**
 - Unclear PR description making theme assessment difficult: **question**
 
-**5b. Present findings** to the user. Lead with the theme statement and per-file alignment map, then list findings grouped by severity (blocking first, then suggestions, then questions). For each finding show: severity, title, file:line (when applicable), body, and knowledge context.
+**5b. Present findings** to the user. Lead with the theme statement and per-file alignment map, then list findings grouped by severity (blocking first, then suggestions, then questions). For each finding show: severity, title, file:line (when applicable), body, and knowledge context. Strip internal protocol headers (`**Grounding:**`, `**Severity:**`, etc.) from user-visible output — these are internal scaffolding. The grounding content (the concrete scope or coherence concern) must be preserved as the substance of the finding.
 
 **5c. Write to work item.** Create or update the shared lens review work item:
 ```

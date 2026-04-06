@@ -41,8 +41,10 @@ Commands:
   batch-implement  Batch-run /implement on ready work items
   backlinks    Backlink management (see: lore backlinks --help)
   rebuild      Rebuild and reinstall the lore-tui binary
+  doctor       Check installation health and detect stale components
 
   work         Work item management (see: lore work --help)
+  followup     Follow-up artifact management (see: lore followup --help)
   journal      Effectiveness journal (see: lore journal --help)
   thread       Thread management (see: lore thread --help)
   migrate      Format migration (see: lore migrate --help)
@@ -79,6 +81,7 @@ Subcommands:
   relate       Add or remove related work item links
   heal         Detect and fix work structure issues
   ai           Create work items from a natural-language prompt (headless Claude)
+  cache-branch Cache or retrieve the active branch for a work item
 
 Options:
   --help, -h    Show this help
@@ -113,6 +116,26 @@ Subcommands:
   list       List threads (regenerate _threads/_index.json)
   migrate    Migrate monolithic thread files to directory-per-entry format
   reindex    Regenerate _threads/_index.json from thread metadata
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+followup_usage() {
+  cat >&2 <<EOF
+lore followup — follow-up artifact management
+
+Usage: lore followup <subcommand> [args...]
+
+Subcommands:
+  create    Create a new follow-up artifact
+  list      List follow-ups (default: pending only)
+  view      View a single follow-up's content and metadata
+  update    Update a follow-up's status or add resolution notes
+  promote   Promote a follow-up to a work item
+  dismiss   Dismiss a follow-up with an optional reason
+  delete    Permanently delete a follow-up
 
 Options:
   --help, -h    Show this help
@@ -609,10 +632,57 @@ cmd_work() {
     ai)
       "$SCRIPTS_DIR/work-ai.sh" "$@"
       ;;
+    cache-branch)
+      "$SCRIPTS_DIR/cache-branch.sh" "$@"
+      ;;
     *)
       echo "Error: unknown work subcommand '$subcmd'" >&2
       echo "" >&2
       work_usage
+      return 1
+      ;;
+  esac
+}
+
+cmd_followup() {
+  if [[ $# -eq 0 ]]; then
+    followup_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      followup_usage
+      return 0
+      ;;
+    create)
+      "$SCRIPTS_DIR/create-followup.sh" "$@"
+      ;;
+    list)
+      "$SCRIPTS_DIR/list-followups.sh" "$@"
+      ;;
+    view)
+      "$SCRIPTS_DIR/load-followup.sh" "$@"
+      ;;
+    update)
+      "$SCRIPTS_DIR/update-followup.sh" "$@"
+      ;;
+    promote)
+      "$SCRIPTS_DIR/promote-followup.sh" "$@"
+      ;;
+    dismiss)
+      "$SCRIPTS_DIR/dismiss-followup.sh" "$@"
+      ;;
+    delete)
+      "$SCRIPTS_DIR/delete-followup.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown followup subcommand '$subcmd'" >&2
+      echo "" >&2
+      followup_usage
       return 1
       ;;
   esac
@@ -710,6 +780,10 @@ case "$1" in
     shift
     cmd_analyze "$@"
     ;;
+  followup)
+    shift
+    cmd_followup "$@"
+    ;;
   work)
     shift
     cmd_work "$@"
@@ -749,6 +823,10 @@ case "$1" in
   batch-implement)
     shift
     "$SCRIPTS_DIR/batch-implement.sh" "$@"
+    ;;
+  doctor)
+    shift
+    "$SCRIPTS_DIR/doctor.sh" "$@"
     ;;
   rebuild)
     if ! command -v go >/dev/null 2>&1; then

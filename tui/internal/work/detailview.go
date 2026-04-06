@@ -507,7 +507,7 @@ func (m DetailModel) renderMetaTab(width int) string {
 	// Updated with relative time
 	updatedDisplay := d.Updated
 	if d.Updated != "" {
-		rel := formatRelativeTime(d.Updated)
+		rel := FormatRelativeTime(d.Updated)
 		updatedDisplay = d.Updated + " " + dimStyle.Render("("+rel+")")
 	}
 	b.WriteString("  ")

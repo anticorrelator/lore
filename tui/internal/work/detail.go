@@ -36,6 +36,7 @@ type WorkItemDetail struct {
 	TasksContent    *TasksFile  `json:"tasks_content,omitempty"`
 	ExecLogContent  *string     `json:"exec_log_content,omitempty"`
 	ExtraFiles      []ExtraFile `json:"extra_files,omitempty"`
+	Malformed       bool        `json:"malformed,omitempty"`
 }
 
 // SearchLocation identifies a navigable position within a detail view tab.
@@ -83,7 +84,61 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 
 	var meta workItemMeta
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		return nil, fmt.Errorf("parsing _meta.json for %s: %w", slug, err)
+		// Malformed _meta.json — return a stub so the TUI can still render the item.
+		detail := &WorkItemDetail{
+			Slug:        slug,
+			Title:       "[malformed] " + slug,
+			Branches:    []string{},
+			Tags:        []string{},
+			RelatedWork: []string{},
+			Malformed:   true,
+		}
+
+		// Still attempt to read sibling files on the stub.
+		if data, err := os.ReadFile(filepath.Join(itemDir, "plan.md")); err == nil {
+			s := string(data)
+			detail.PlanContent = &s
+		}
+		if data, err := os.ReadFile(filepath.Join(itemDir, "notes.md")); err == nil {
+			s := string(data)
+			detail.NotesContent = &s
+		}
+		if data, err := os.ReadFile(filepath.Join(itemDir, "tasks.json")); err == nil {
+			detail.HasTasks = true
+			var tf TasksFile
+			if err := json.Unmarshal(data, &tf); err == nil {
+				detail.TasksContent = &tf
+			}
+		}
+		if data, err := os.ReadFile(filepath.Join(itemDir, "execution-log.md")); err == nil {
+			detail.HasExecutionLog = true
+			s := string(data)
+			detail.ExecLogContent = &s
+		}
+		canonical := map[string]bool{
+			"plan.md":          true,
+			"notes.md":         true,
+			"execution-log.md": true,
+		}
+		if entries, err := os.ReadDir(itemDir); err == nil {
+			for _, entry := range entries {
+				name := entry.Name()
+				if entry.IsDir() || !strings.HasSuffix(name, ".md") || strings.HasPrefix(name, "_") {
+					continue
+				}
+				if canonical[name] {
+					continue
+				}
+				if data, err := os.ReadFile(filepath.Join(itemDir, name)); err == nil {
+					detail.ExtraFiles = append(detail.ExtraFiles, ExtraFile{
+						Name:    strings.TrimSuffix(name, ".md"),
+						Content: string(data),
+					})
+				}
+			}
+		}
+
+		return detail, nil
 	}
 
 	// Ensure slices are non-nil (match subprocess behavior: empty array, not null)

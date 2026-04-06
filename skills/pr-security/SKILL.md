@@ -48,9 +48,13 @@ From the fetched data, identify:
 
 ## Step 3: Security Analysis
 
-Read the shared review protocol (severity classification, enrichment, findings format) and the Security Lens Methodology:
+Read review protocol sections (severity classification, enrichment, findings format, security methodology):
 ```bash
-cat ~/.lore/claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/review-protocol/severity.md
+cat ~/.lore/claude-md/review-protocol/enrichment.md
+cat ~/.lore/claude-md/review-protocol/findings-format.md
+cat ~/.lore/claude-md/review-protocol/review-voice.md
+cat ~/.lore/claude-md/review-protocol/security-methodology.md
 ```
 
 For each file with security-relevant changes, apply the Security Lens Methodology defined in the protocol:
@@ -96,6 +100,13 @@ For each file with security-relevant changes, apply the Security Lens Methodolog
 - Are there paths that combine individually-benign operations into a harmful sequence?
 - Does this change widen the attack surface (new endpoints, new input sources, new dependencies)?
 
+**3h. Finding grounding** — Before finalizing each finding, verify it is grounded: it must name the attack vector, identify who can exploit it, describe what they gain, and specify what preconditions are needed.
+
+- **Ungrounded:** "missing input validation"
+- **Grounded:** "user-supplied `name` parameter is interpolated into shell command at line 42 without sanitization — an attacker with access to the API endpoint can inject arbitrary commands via `; <cmd>`, gaining code execution on the server"
+
+A finding that names only a class of vulnerability (e.g., "missing validation", "weak auth") without specifying the concrete exploit path is incomplete. Reject vague findings and rewrite them with: the specific code location, the exploit mechanism, and the concrete impact.
+
 **Scoping for large diffs:** If more than ~10 files have security-relevant changes, prioritize: (1) authentication/authorization boundaries, (2) external input handlers, (3) cryptographic operations, (4) new endpoints or API surfaces. Apply full methodology to priority files; do a lighter pass on the rest.
 
 ## Step 4: Knowledge Enrichment
@@ -109,11 +120,11 @@ Attach relevant citations as `knowledge_context` entries in the finding. Follow 
 
 ### Investigation Escalation
 
-If a finding involves cross-boundary security concerns (auth checks spanning multiple modules, permission propagation across layers) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `70-review-protocol.md`. Budget: maximum 2 escalations per lens run.
+If a finding involves cross-boundary security concerns (auth checks spanning multiple modules, permission propagation across layers) and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `claude-md/review-protocol/escalation.md`. Budget: maximum 2 escalations per lens run.
 
 ## Step 5: Write Findings
 
-**5a. Build findings JSON** conforming to the Findings Output Format schema in `claude-md/70-review-protocol.md`:
+**5a. Build findings JSON** conforming to the Findings Output Format schema in `claude-md/review-protocol/findings-format.md`:
 ```json
 {
   "lens": "security",
@@ -130,7 +141,7 @@ Classify each finding using the Severity Classification definitions. Default to 
 - Missing rate limiting or hardening: **suggestion**
 - Unclear security implications of a design choice: **question**
 
-**5b. Present findings** to the user grouped by severity (blocking first, then suggestions, then questions). For each finding show: severity, title, file:line, body, and knowledge context.
+**5b. Present findings** to the user grouped by severity (blocking first, then suggestions, then questions). For each finding show: severity, title, file:line, body, and knowledge context. Strip internal protocol headers (`**Grounding:**`, `**Severity:**`, etc.) from user-visible output — these are internal scaffolding. The grounding content (the concrete attack vector or improvement claim) must be preserved as the substance of the finding.
 
 **5c. Write to work item.** Create or update the shared lens review work item:
 ```

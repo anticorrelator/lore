@@ -43,9 +43,9 @@ DEFAULTS = {
     # Structural signal thresholds
     "investigation_window": 10,
     "iterative_debug_window": 15,
-    "test_fix_window": 20,
-    "synthesis_char_threshold": 500,
-    "synthesis_tool_threshold": 5,
+    "test_fix_window": 10,
+    "synthesis_char_threshold": 1000,
+    "synthesis_tool_threshold": 8,
     "file_context_window": 10,
     "debug_context_window": 10,
     "debug_context_chars": 800,
@@ -213,7 +213,6 @@ def compute_adaptive_threshold(knowledge_dir, base_threshold):
 # Trigger 1: Self-correction / expectation violation
 SELF_CORRECTION_RE = re.compile(
     r"\b(?:"
-    r"actually[,\s]|"
     r"I was wrong|"
     r"it turns out|"
     r"unexpectedly|"
@@ -239,8 +238,7 @@ DEBUG_ROOT_CAUSE_RE = re.compile(
     r"turns out the (?:error|issue|problem|bug)|"
     r"(?:failure|error|crash|bug) (?:is |was )?caused by|"
     r"(?:issue|problem|bug) stems from|"
-    r"the problem is that|"
-    r"caused by (?:a|an|the)\b|"
+    r"(?:error|bug|failure|crash|issue|problem).{0,50}caused by (?:a|an|the)\b|"
     r"due to a bug in"
     r")\b",
     re.IGNORECASE,
@@ -313,6 +311,25 @@ def _has_system_reminder(text_blocks):
 def _has_teammate_message(text_blocks):
     """Check if any text block contains a <teammate-message> tag."""
     return any("<teammate-message" in t for t in text_blocks)
+
+
+def _is_structured_output(text_blocks):
+    """Check if text blocks contain markers of templated/quoted output.
+
+    Returns True when text blocks contain:
+    - Capture candidate / plan template language: **Trigger:** or **Decision:** labels
+    - Knowledge store metadata: <!-- HTML comments
+
+    These are indicators that the assistant is quoting or formatting structured
+    artifacts (pending captures, plan templates, knowledge store entries) rather
+    than expressing independent reactive discoveries.
+    """
+    for block in text_blocks:
+        if re.search(r"\*\*(?:Trigger|Decision):\*\*", block):
+            return True
+        if "<!-- " in block:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +418,10 @@ def scan_heuristics(messages, team_exclusions=None):
         if msg["role"] == "assistant":
             # In team sessions, skip assistant messages in agent coordination window
             if team_exclusions and msg["index"] in team_exclusions:
+                continue
+            # Skip messages containing structured/templated output (capture candidates,
+            # plan templates, knowledge store entries with HTML comments)
+            if _is_structured_output(msg["text_blocks"]):
                 continue
             for label, pattern in HEURISTIC_PATTERNS:
                 match = pattern.search(full_text)
@@ -1106,6 +1127,10 @@ def main():
                 evaluated_ranges = set(tuple(r) for r in json.load(f))
         except (json.JSONDecodeError, OSError):
             evaluated_ranges = set()
+
+    # Prune to the 50 most recent entries to prevent unbounded growth
+    if len(evaluated_ranges) > 50:
+        evaluated_ranges = set(sorted(evaluated_ranges)[-50:])
 
     candidates = [
         c for c in candidates

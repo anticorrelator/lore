@@ -2,6 +2,7 @@ package work
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -707,13 +708,90 @@ func PollTerminalCmd(slug string, ch <-chan []byte) tea.Cmd {
 	}
 }
 
+// followupData holds the JSON fields returned by `lore followup load --json`.
+type followupData struct {
+	Title            string `json:"title"`
+	Source           string `json:"source"`
+	Status           string `json:"status"`
+	SuggestedActions []struct {
+		Type string `json:"type"`
+	} `json:"suggested_actions"`
+	FindingContent *string `json:"finding_content"`
+}
+
+// loadFollowupContext runs `lore followup view --json <id>` and returns a
+// structured system prompt string. Returns "" on any error (graceful degradation).
+func loadFollowupContext(id, knowledgeDir string) string {
+	out, err := exec.Command("lore", "followup", "view", "--json", id).Output()
+	if err != nil {
+		writeCrashLog("loadFollowupContext", fmt.Sprintf("lore followup view failed for %q: %v", id, err))
+		return ""
+	}
+
+	var data followupData
+	if err := json.Unmarshal(out, &data); err != nil {
+		writeCrashLog("loadFollowupContext", fmt.Sprintf("JSON parse failed for %q: %v", id, err))
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("# Followup Context\n\n")
+	b.WriteString("**Title:** " + data.Title + "\n")
+	b.WriteString("**Source:** " + data.Source + "\n")
+	b.WriteString("**Status:** " + data.Status + "\n")
+
+	if len(data.SuggestedActions) > 0 {
+		actions := make([]string, len(data.SuggestedActions))
+		for i, a := range data.SuggestedActions {
+			actions[i] = a.Type
+		}
+		b.WriteString("**Suggested Actions:** " + strings.Join(actions, ", ") + "\n")
+	}
+
+	if data.FindingContent != nil && *data.FindingContent != "" {
+		b.WriteString("\n## Finding Content\n")
+		b.WriteString(*data.FindingContent + "\n")
+	}
+
+	return b.String()
+}
+
 // StartTerminalCmd spawns the claude subprocess for /spec inside a PTY and
+// buildInitialPrompt constructs the prompt string passed to claude at startup.
+// It encodes four modes: followup chat, regular chat, short spec, and full spec.
+func buildInitialPrompt(slug, title, extraContext string, shortMode, chatMode, skipConfirm, followupMode bool) string {
+	var p string
+	if chatMode {
+		if followupMode {
+			p = "/followup-discuss " + slug
+		} else {
+			p = "Let's talk about " + title
+		}
+		if extraContext != "" {
+			p += ": " + extraContext
+		}
+	} else {
+		p = "/spec "
+		if shortMode {
+			p += "short "
+		}
+		p += slug
+		if skipConfirm {
+			p += " --yes"
+		}
+		if extraContext != "" {
+			p += " -- " + extraContext
+		}
+	}
+	return p
+}
+
 // returns SpecProcessStartedMsg with the PTY master, exec.Cmd, and a channel
 // of raw byte chunks read from the PTY. The PTY master is the read/write
 // interface — write user keystrokes, read subprocess output.
 // projectDir must be the project root (not the knowledge _work/ dir) so that
 // the /spec skill can explore the correct codebase.
-func StartTerminalCmd(slug, title, projectDir string, width, height int, extraContext string, shortMode, chatMode, skipConfirm bool) tea.Cmd {
+func StartTerminalCmd(slug, title, projectDir string, width, height int, extraContext string, shortMode, chatMode, skipConfirm, followupMode bool, knowledgeDir string) tea.Cmd {
 	return func() (result tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -724,27 +802,19 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 		// Build the initial prompt to auto-submit. Passing it as a positional
 		// argument to claude starts an interactive session and submits it
 		// immediately — no PTY-write timing hack needed.
-		var initialPrompt string
-		if chatMode {
-			initialPrompt = "Let's talk about the " + slug + " work item"
-			if extraContext != "" {
-				initialPrompt += ": " + extraContext
-			}
-		} else {
-			initialPrompt = "/spec "
-			if shortMode {
-				initialPrompt += "short "
-			}
-			initialPrompt += slug
-			if skipConfirm {
-				initialPrompt += " --yes"
-			}
-			if extraContext != "" {
-				initialPrompt += " -- " + extraContext
+		initialPrompt := buildInitialPrompt(slug, title, extraContext, shortMode, chatMode, skipConfirm, followupMode)
+
+		// Build args: optionally inject --append-system-prompt before the
+		// positional initialPrompt when followupMode is active.
+		args := []string{"--dangerously-skip-permissions"}
+		if followupMode && slug != "" {
+			if sysPrompt := loadFollowupContext(slug, knowledgeDir); sysPrompt != "" {
+				args = append(args, "--append-system-prompt", sysPrompt)
 			}
 		}
+		args = append(args, initialPrompt)
 
-		cmd := exec.Command("claude", "--dangerously-skip-permissions", initialPrompt)
+		cmd := exec.Command("claude", args...)
 		cmd.Dir = projectDir
 		// Do NOT set cmd.Stderr = io.Discard here: with a PTY the subprocess's
 		// stdin/stdout/stderr are all wired to the PTY slave, so claude's full

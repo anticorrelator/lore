@@ -130,11 +130,11 @@ All review skills use `scripts/fetch-pr-data.sh` for GraphQL data retrieval — 
 
 ### Checklist Embedding
 
-All review skills embed the 8-item review checklist defined in `claude-md/70-review-protocol.md`. The checklist is referenced (read at invocation time), not duplicated into each SKILL.md. This ensures checklist updates apply uniformly.
+All review skills embed the 8-item review checklist defined in `claude-md/review-protocol/checklist.md`. The checklist is referenced (read at invocation time), not duplicated into each SKILL.md. This ensures checklist updates apply uniformly.
 
 ### Knowledge Enrichment
 
-All review skills implement mandatory knowledge enrichment for substantive findings: when a checklist item surfaces a non-trivial concern, the skill enriches the finding with context from the knowledge store and codebase before reporting it. Cross-boundary concerns (findings that touch multiple subsystems or contradict known conventions) trigger conditional investigation escalation — deeper exploration before concluding. The enrichment protocol is defined in `claude-md/70-review-protocol.md`.
+All review skills implement mandatory knowledge enrichment for substantive findings: when a checklist item surfaces a non-trivial concern, the skill enriches the finding with context from the knowledge store and codebase before reporting it. Cross-boundary concerns (findings that touch multiple subsystems or contradict known conventions) trigger conditional investigation escalation — deeper exploration before concluding. The enrichment protocol is defined in `claude-md/review-protocol/enrichment.md`.
 
 ### Capture Convention
 
@@ -173,7 +173,7 @@ Skills that share behavioral rules (checklists, enrichment procedures, labeling 
 - SKILL.md files stay focused on workflow, not rule definitions
 - No duplication drift between skills
 
-Reference the protocol file by its path (e.g., `claude-md/70-review-protocol.md`). The file is assembled into the agent's context by the claude-md assembly pipeline, so skills can reference it either way.
+Reference protocol files by their paths under `claude-md/review-protocol/` (e.g., `claude-md/review-protocol/checklist.md`). Each skill reads only the section files it needs via selective `cat` commands, reducing token footprint.
 
 ## Intentional Differences
 

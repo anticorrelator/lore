@@ -77,13 +77,29 @@ From the fetched data, identify:
 - Are error messages and error types asserted, not just "throws"?
 - Flag tests with a high code-to-assertion ratio (lots of setup, few meaningful assertions).
 
+**3f. Finding grounding** — For each candidate finding, state the specific defect that would go undetected before writing it up:
+- What specific input, condition, or code path lacks coverage?
+- What defect or failure would that gap allow to go undetected?
+- What is the user-visible or system-visible consequence if that defect ships?
+
+A finding without a concrete missing-defect scenario is not ready to report. Ground every finding before moving to Step 4.
+
+| | Example |
+|---|---|
+| **Ungrounded** | "no test for error path" |
+| **Grounded** | "the new `parse_config()` function has no test for malformed JSON input — a syntax error in the config file would cause an unhandled exception at startup, but no test catches this" |
+
 **Scoping for large diffs:** If more than ~10 test files are changed, prioritize: (1) tests for the most complex logic changes, (2) tests for public API changes, (3) newly created test files. Apply full methodology to priority tests; do a lighter pass on the rest.
 
 ## Step 4: Knowledge Enrichment
 
-Read the enrichment protocol:
+Read review protocol sections (enrichment, escalation, severity, findings format):
 ```bash
-cat ~/.lore/claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/review-protocol/enrichment.md
+cat ~/.lore/claude-md/review-protocol/escalation.md
+cat ~/.lore/claude-md/review-protocol/severity.md
+cat ~/.lore/claude-md/review-protocol/findings-format.md
+cat ~/.lore/claude-md/review-protocol/review-voice.md
 ```
 
 For each finding, query the knowledge store:
@@ -95,14 +111,9 @@ Attach relevant citations as `knowledge_context` entries in the finding. Follow 
 
 ### Investigation Escalation
 
-If a finding involves test coverage concerns that require understanding untested code paths across multiple files and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `70-review-protocol.md`. Budget: maximum 2 escalations per lens run.
+If a finding involves test coverage concerns that require understanding untested code paths across multiple files and the knowledge store has no relevant entries, escalate per the Investigation Escalation protocol in `claude-md/review-protocol/escalation.md`. Budget: maximum 2 escalations per lens run.
 
 ## Step 5: Write Findings
-
-Read the severity classification and findings output format from:
-```bash
-cat ~/.lore/claude-md/70-review-protocol.md
-```
 
 **5a. Build findings JSON** conforming to the Findings Output Format schema:
 ```json
@@ -121,7 +132,7 @@ Classify each finding using the Severity Classification definitions. Default to 
 - Missing edge case tests: **suggestion**
 - Unclear what a test is verifying: **question**
 
-**5b. Present findings** to the user grouped by severity (blocking first, then suggestions, then questions). For each finding show: severity, title, file:line, body, and knowledge context.
+**5b. Present findings** to the user grouped by severity (blocking first, then suggestions, then questions). For each finding show: severity, title, file:line, body, and knowledge context. Strip internal protocol headers (`**Grounding:**`, `**Severity:**`, etc.) from user-visible output — these are internal scaffolding. The grounding content (the specific defect that would go undetected) must be preserved as the substance of the finding.
 
 **5c. Write to work item.** Create or update the shared lens review work item:
 ```

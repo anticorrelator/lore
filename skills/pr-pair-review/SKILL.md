@@ -46,7 +46,7 @@ gh pr view <PR_NUMBER> --json files --jq '.files[].path'
 
 Parse the grouped JSON output. The script returns `grouped_reviews` (reviews with inline comments attached), `unmatched_threads` (review threads not matched to any review), and `orphan_comments` (general PR comments).
 
-**Review Selection:** Follow the Review Selection protocol defined in `claude-md/70-review-protocol.md`. Present fetched reviews as batches grouped by reviewer and let the user select which batch to work through. Only process comments from the selected batch — other batches are deferred to subsequent invocations.
+**Review Selection:** Follow the Review Selection protocol defined in `claude-md/review-protocol/review-selection.md`. Present fetched reviews as batches grouped by reviewer and let the user select which batch to work through. Only process comments from the selected batch — other batches are deferred to subsequent invocations.
 
 If the PR has only one reviewer with feedback, skip the selection prompt and proceed with that batch automatically.
 
@@ -73,9 +73,12 @@ Present this summary and proceed to review rounds.
 
 ## Step 4: Review rounds — reviewer comments drive the agenda
 
-Read the review protocol reference for the enrichment and escalation rules:
+Read protocol sections for enrichment and escalation rules:
 ```bash
-cat ~/.lore/claude-md/70-review-protocol.md
+cat ~/.lore/claude-md/review-protocol/enrichment.md
+cat ~/.lore/claude-md/review-protocol/escalation.md
+cat ~/.lore/claude-md/review-protocol/checklist.md
+cat ~/.lore/claude-md/review-protocol/review-voice.md
 ```
 
 The reviewer's comments from the selected batch are the discussion agenda. Present them one at a time. The agent facilitates — it does not generate its own review topics. The 8-point checklist (from the protocol) is available as a secondary tool after reviewer comments are exhausted (see optional checklist pass below), not as the primary topic source.
@@ -186,7 +189,7 @@ All of @<reviewer>'s points discussed (<resolved> resolved, <deferred> deferred,
 Want me to do an additional pass using the 8-point review checklist? This checks for issues the reviewer may not have covered — semantic contract violations, cross-boundary invariants, proportionality, etc.
 ```
 
-- **If the user accepts:** Apply the full 8-point checklist from `claude-md/70-review-protocol.md` to each changed file or logical unit, following the same 3-beat turn protocol (raise, enrich, respond) for any new findings. Findings from the checklist pass are tracked as agent-initiated threads (`initiator: "agent"`). Do not re-raise topics already covered in the reviewer's batch.
+- **If the user accepts:** Apply the full 8-point checklist from `claude-md/review-protocol/checklist.md` to each changed file or logical unit, following the same 3-beat turn protocol (raise, enrich, respond) for any new findings. Findings from the checklist pass are tracked as agent-initiated threads (`initiator: "agent"`). Do not re-raise topics already covered in the reviewer's batch.
 - **If the user declines:** Proceed directly to the wrap-up gate.
 
 This offer is a single prompt — do not ask repeatedly or push back on a decline.
