@@ -100,12 +100,13 @@ For each file with security-relevant changes, apply the Security Lens Methodolog
 - Are there paths that combine individually-benign operations into a harmful sequence?
 - Does this change widen the attack surface (new endpoints, new input sources, new dependencies)?
 
-**3h. Finding grounding** — Before finalizing each finding, verify it is grounded: it must name the attack vector, identify who can exploit it, describe what they gain, and specify what preconditions are needed.
+**3h. Finding grounding** — Before finalizing each finding, trace the full chain from vulnerability to human/operational consequence: name the attack vector, identify who can exploit it, describe what they gain, specify what preconditions are needed, and land on the downstream impact (data exposure, service disruption, compliance violation, etc.).
 
 - **Ungrounded:** "missing input validation"
-- **Grounded:** "user-supplied `name` parameter is interpolated into shell command at line 42 without sanitization — an attacker with access to the API endpoint can inject arbitrary commands via `; <cmd>`, gaining code execution on the server"
+- **Mechanism only:** "user-supplied `name` parameter is interpolated into shell command at line 42 without sanitization — an attacker with access to the API endpoint can inject arbitrary commands via `; <cmd>`, gaining code execution on the server"
+- **Grounded:** "user-supplied `name` parameter is interpolated into shell command at line 42 without sanitization — any authenticated user can inject arbitrary commands via `; <cmd>`, gaining code execution on the server and access to environment variables including database credentials and API keys"
 
-A finding that names only a class of vulnerability (e.g., "missing validation", "weak auth") without specifying the concrete exploit path is incomplete. Reject vague findings and rewrite them with: the specific code location, the exploit mechanism, and the concrete impact.
+A finding that names only a class of vulnerability (e.g., "missing validation", "weak auth") without specifying the concrete exploit path is incomplete. A finding that stops at the exploit mechanism ("gains code execution") without stating the downstream consequence is weak. Reject vague findings and rewrite them with: the specific code location, the exploit mechanism, and the observable human/operational impact.
 
 **Scoping for large diffs:** If more than ~10 files have security-relevant changes, prioritize: (1) authentication/authorization boundaries, (2) external input handlers, (3) cryptographic operations, (4) new endpoints or API surfaces. Apply full methodology to priority files; do a lighter pass on the rest.
 

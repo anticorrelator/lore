@@ -543,13 +543,20 @@ func (m ReviewCardsModel) View() string {
 				sevStr = sevLow.Render(c.Severity)
 			}
 
-			// First line: checkbox + path:line + severity
+			// First line: checkbox + path:line + severity [lenses] confidence%
+			var lensToken, confToken string
+			if len(c.Lenses) > 0 {
+				lensToken = "  " + dimStyle.Render("["+strings.Join(c.Lenses, ",")+"]")
+			}
+			if c.Confidence > 0 {
+				confToken = "  " + dimStyle.Render(fmt.Sprintf("%d%%", int(c.Confidence*100)))
+			}
 			line1 := fmt.Sprintf("  %s %s:%d  %s",
 				check,
 				pathStyle.Render(c.Path),
 				c.Line,
 				sevStr,
-			)
+			) + lensToken + confToken
 
 			editingThis := m.editing && m.editIdx == backingIdx
 

@@ -473,11 +473,9 @@ func (m model) renderStatusBar(width int) string {
 		if m.focusedPanel == panelLeft {
 			hints = []string{
 				hint("j/k", "navigate"),
-				hint("ctrl+a", "active/archived"),
 				hint("Enter", "detail"),
 				hint("A", "dismiss"),
 				hint("D", "delete"),
-				hint("w", "work list"),
 				hint("Esc", "exit"),
 				hint("?", "help"),
 			}
@@ -492,9 +490,6 @@ func (m model) renderStatusBar(width int) string {
 				hint("j/k", "navigate"),
 				hint("space/x", "toggle"),
 				hint("a", "all"),
-				hint("i", "invert"),
-				hint("S", "by severity"),
-				hint("f", "filter"),
 				hint("p", "promote"),
 				hint("Tab/Shift-Tab", "cycle tabs"),
 				hint("h/Esc", "back to list"),
@@ -503,11 +498,8 @@ func (m model) renderStatusBar(width int) string {
 		} else if m.followupDetail.ActiveTab() == followup.TabComments {
 			hints = []string{
 				hint("a", "all"),
-				hint("i", "inv"),
-				hint("f", "filter"),
 				hint("y", "copy"),
 				hint("E", "editor"),
-				hint("D", "del"),
 				hint("P", "post"),
 				hint("Tab/Shift-Tab", "cycle tabs"),
 				hint("h/Esc", "back to list"),

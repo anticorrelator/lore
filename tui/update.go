@@ -687,11 +687,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.focusedPanel = panelLeft
 				return m, followup.LoadIndexCmd(m.config.KnowledgeDir)
 			}
-		case "w":
-			if m.state == stateFollowUps && !m.terminalMode {
-				cmd := m.leaveFollowups()
-				return m, cmd
-			}
 		case "esc":
 			// Esc from right panel (detail mode only): back to list.
 			// In terminal mode, esc falls through to spec panel which sends TerminalDetachMsg.

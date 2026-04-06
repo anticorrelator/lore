@@ -173,7 +173,6 @@ func (m model) renderHelpModal() string {
 
 	content := sectionS.Render("Follow-Ups") + "\n" +
 		row("j / k", "navigate") + "\n" +
-		row("ctrl+a", "toggle active/archived") + "\n" +
 		row("Enter", "open detail") + "\n" +
 		row("Tab / Shift-Tab", "cycle tabs") + "\n" +
 		row("p", "promote to work item") + "\n" +
@@ -186,16 +185,10 @@ func (m model) renderHelpModal() string {
 		sectionS.Render("Triage Tab") + "\n" +
 		row("space / x / Enter", "toggle selection") + "\n" +
 		row("a", "select all / deselect all") + "\n" +
-		row("i", "invert selection") + "\n" +
-		row("S", "select by severity (cycle)") + "\n" +
-		row("f", "filter by disposition") + "\n" +
 		row("p", "promote with selected findings") + "\n" +
 		"\n" +
 		sectionS.Render("Comments Tab") + "\n" +
 		row("a", "select all / deselect all") + "\n" +
-		row("i", "invert selection") + "\n" +
-		row("S", "select by severity (cycle)") + "\n" +
-		row("f", "filter by severity") + "\n" +
 		row("y", "copy body to clipboard") + "\n" +
 		row("E", "edit body in $EDITOR") + "\n" +
 		row("D", "delete comment (confirm)") + "\n" +

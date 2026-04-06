@@ -76,17 +76,18 @@ For each file with logic changes, apply this methodology:
 - Do comments in the code match the code's behavior?
 - Are commit messages accurate descriptions of what changed?
 
-**3e. Finding grounding** — For each candidate finding, state the specific failure scenario before writing it up:
-- What input or condition triggers the bug?
-- What incorrect output or behavior results?
-- What is the user-visible or system-visible consequence?
+**3e. Finding grounding** — For each candidate finding, trace the full chain from mechanism to consequence before writing it up:
+- What input or condition triggers the bug? (trigger)
+- What incorrect output or behavior results? (mechanism)
+- What does a real user experience, or what operational impact follows? (consequence)
 
-A finding without a concrete scenario is not ready to report. Ground every finding before moving to Step 4.
+A finding that stops at the mechanism ("duplicate entries in the output list") without landing on the consequence ("users see repeated items in their dashboard and may act on stale data") is not ready to report. Ground every finding through to consequence before moving to Step 4.
 
 | | Example |
 |---|---|
 | **Ungrounded** | "off-by-one error in loop" |
-| **Grounded** | "loop iterates `n+1` times instead of `n`, causing the last element to be processed twice — duplicate entries in the output list" |
+| **Mechanism only** | "loop iterates `n+1` times instead of `n`, causing the last element to be processed twice — duplicate entries in the output list" |
+| **Grounded** | "loop iterates `n+1` times instead of `n`, processing the last element twice — users see duplicate entries in their results, and any downstream aggregation (totals, counts) is silently inflated" |
 
 **Scoping for large diffs:** If more than ~10 files have logic changes, prioritize: (1) files with the most complex logic additions, (2) files touching shared interfaces or public APIs, (3) files handling user input or external data. Apply full methodology to priority files; do a lighter pass on the rest.
 

@@ -81,11 +81,11 @@ For each unresolved item in the selected batch, determine:
 
 Assign a Conventional Comments label to each item: `suggestion`, `issue`, `question`, `thought`, `nitpick`, or `praise`.
 
-**Grounding:** For each item labeled `issue` or `suggestion`, include a `**Grounding:**` line stating the impact-grounded basis using uncertain language. Use the hedged phrasing patterns from `~/.lore/claude-md/review-protocol/review-voice.md` — key forms:
-- `issue`: `**Grounding:** This may cause <what breaks> for <whom> when <conditions>.`
-- `suggestion`: `**Grounding:** This could benefit <beneficiary> by <specific improvement>.`
+**Grounding:** For each item labeled `issue` or `suggestion`, include a `**Grounding:**` line that traces from technical mechanism to observable human/operational consequence, using uncertain language. Use the hedged phrasing patterns from `~/.lore/claude-md/review-protocol/review-voice.md` — key forms:
+- `issue`: `**Grounding:** <mechanism — what may break, for whom, when> → <consequence — what the user experiences or what operational impact follows>.`
+- `suggestion`: `**Grounding:** <situation — when a real person encounters the problem> → <improvement — what changes for them>.`
 
-Items without grounding are demoted to `thought` (tracked but not actionable). This prevents reviewer style preferences from being elevated to action items.
+Items without grounding are demoted to `thought` (tracked but not actionable). Grounding that stops at the technical mechanism without landing on a human/operational consequence is treated as weak and will be rewritten. This prevents reviewer style preferences from being elevated to action items.
 
 **Apply the 8-point review checklist** from `~/.lore/claude-md/review-protocol/checklist.md` as an additional analysis lens when categorizing. Read the checklist at invocation time — do not duplicate it here. The checklist helps distinguish substantive feedback from style preferences.
 

@@ -95,7 +95,8 @@ A finding without a concrete misuse scenario is not ready to report. Ground ever
 | | Example |
 |---|---|
 | **Ungrounded** | "parameter name is unclear" |
-| **Grounded** | "`timeout` parameter accepts milliseconds but the name suggests seconds — callers in `client.go:45` and `worker.go:92` both pass `30` (likely intending 30 seconds), which would set a 30ms timeout causing premature failures" |
+| **Mechanism only** | "`timeout` parameter accepts milliseconds but the name suggests seconds — callers in `client.go:45` and `worker.go:92` both pass `30` (likely intending 30 seconds), which would set a 30ms timeout" |
+| **Grounded** | "`timeout` parameter accepts milliseconds but the name suggests seconds — callers in `client.go:45` and `worker.go:92` both pass `30` (likely intending 30 seconds), setting a 30ms timeout that causes requests to fail before the server can respond, surfacing as intermittent 'connection timeout' errors to end users" |
 
 **Scoping for large diffs:** If more than ~10 files have interface changes, prioritize: (1) files that define or modify public APIs or exported types, (2) files at module or package boundaries, (3) files with the most callers. Apply full methodology to priority files; do a lighter pass on the rest.
 

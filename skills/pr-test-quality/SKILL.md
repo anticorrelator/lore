@@ -87,7 +87,8 @@ A finding without a concrete missing-defect scenario is not ready to report. Gro
 | | Example |
 |---|---|
 | **Ungrounded** | "no test for error path" |
-| **Grounded** | "the new `parse_config()` function has no test for malformed JSON input — a syntax error in the config file would cause an unhandled exception at startup, but no test catches this" |
+| **Mechanism only** | "the new `parse_config()` function has no test for malformed JSON input — a syntax error in the config file would cause an unhandled exception at startup, but no test catches this" |
+| **Grounded** | "the new `parse_config()` function has no test for malformed JSON input — a syntax error in the config file causes an unhandled exception at startup, and without test coverage this ships silently: the service fails to start in production with no actionable error message, requiring manual log inspection to diagnose" |
 
 **Scoping for large diffs:** If more than ~10 test files are changed, prioritize: (1) tests for the most complex logic changes, (2) tests for public API changes, (3) newly created test files. Apply full methodology to priority tests; do a lighter pass on the rest.
 

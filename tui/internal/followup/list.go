@@ -20,18 +20,9 @@ type LoadDetailMsg struct {
 	ID string
 }
 
-// StatusFilterMode controls which follow-up statuses are shown in the list.
-type StatusFilterMode int
-
-const (
-	FilterActive   StatusFilterMode = iota // show open/pending follow-ups
-	FilterArchived                         // show reviewed/promoted/dismissed follow-ups
-)
-
 // ListModel is the Bubble Tea model for the follow-up list panel.
 type ListModel struct {
 	allItems    []FollowUpItem
-	filter      StatusFilterMode
 	cursor      int
 	compactMode bool
 	width       int
@@ -43,7 +34,6 @@ type ListModel struct {
 func NewListModel(items []FollowUpItem) ListModel {
 	return ListModel{
 		allItems: items,
-		filter:   FilterActive,
 		cursor:   0,
 	}
 }
@@ -56,19 +46,12 @@ func (m *ListModel) SetItems(items []FollowUpItem) {
 	}
 }
 
-// visibleItems returns items matching the current filter.
+// visibleItems returns active (open/pending) follow-up items.
 func (m ListModel) visibleItems() []FollowUpItem {
 	var out []FollowUpItem
 	for _, item := range m.allItems {
-		switch m.filter {
-		case FilterActive:
-			if item.Status == "open" || item.Status == "pending" {
-				out = append(out, item)
-			}
-		case FilterArchived:
-			if item.Status == "reviewed" || item.Status == "promoted" || item.Status == "dismissed" {
-				out = append(out, item)
-			}
+		if item.Status == "open" || item.Status == "pending" {
+			out = append(out, item)
 		}
 	}
 	return out
@@ -123,20 +106,6 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 		switch msg.String() {
 		case "esc":
 			return m, func() tea.Msg { return ListDismissedMsg{} }
-		case "ctrl+a":
-			// Toggle filter: active ↔ archived
-			if m.filter == FilterActive {
-				m.filter = FilterArchived
-			} else {
-				m.filter = FilterActive
-			}
-			m.cursor = 0
-			items = m.visibleItems()
-			if len(items) > 0 {
-				return m, func() tea.Msg { return LoadDetailMsg{ID: items[0].ID} }
-			}
-			return m, nil
-
 		case "j", "down":
 			if m.cursor < len(items)-1 {
 				m.cursor++
@@ -198,19 +167,6 @@ func (m *ListModel) SetCursorByID(id string) {
 // SetCompactMode enables or disables compact rendering.
 func (m *ListModel) SetCompactMode(compact bool) {
 	m.compactMode = compact
-}
-
-// GetFilterLabel returns a short display label for the current filter mode.
-func (m ListModel) GetFilterLabel() string {
-	return m.filterLabel()
-}
-
-// filterLabel returns a short display label for the current filter mode.
-func (m ListModel) filterLabel() string {
-	if m.filter == FilterArchived {
-		return "archived"
-	}
-	return "active"
 }
 
 func (m ListModel) View() string {
@@ -344,7 +300,7 @@ func (m ListModel) viewCompact() string {
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
 	if len(items) == 0 {
-		b.WriteString(dimStyle.Render(fmt.Sprintf("  No %s follow-ups.  (ctrl+a to switch)", m.filterLabel())))
+		b.WriteString(dimStyle.Render("  No active follow-ups."))
 		b.WriteString("\n")
 		return b.String()
 	}

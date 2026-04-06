@@ -69,17 +69,18 @@ This lens inherently requires multi-file exploration beyond the diff. Prioritize
 - Identify callers that may depend on the previous behavior.
 - Flag implicit contract changes that type systems cannot catch: changed error messages that callers parse, changed event ordering, changed timing characteristics.
 
-**3e. Finding grounding** — For each candidate finding, name the specific consumers affected and describe exactly how they break:
+**3e. Finding grounding** — For each candidate finding, trace the full chain from interface change to human/operational consequence:
 - Which file and call site is affected (with file:line)?
 - What specific mismatch exists between the new interface and the consumer's usage?
-- What is the runtime or compile-time consequence?
+- What does the developer, CI pipeline, or end user experience as a result?
 
-A finding that only identifies a changed interface without naming a concrete consumer and breakage mode is not ready to report. Ground every finding before moving to Step 4.
+A finding that stops at the technical breakage ("compile error") without landing on the consequence ("this blocks the release pipeline until the caller is updated") is not ready to report. Ground every finding through to consequence before moving to Step 4.
 
 | | Example |
 |---|---|
 | **Ungrounded** | "this change may break callers" |
-| **Grounded** | "`render_panel()` in `tui/main.go:215` passes 3 args to this function — the new required 4th parameter will cause a compile error" |
+| **Mechanism only** | "`render_panel()` in `tui/main.go:215` passes 3 args to this function — the new required 4th parameter will cause a compile error" |
+| **Grounded** | "`render_panel()` in `tui/main.go:215` passes 3 args to this function — the new required 4th parameter causes a compile error, blocking CI and any downstream PR that touches the TUI until the call site is updated" |
 
 **Scoping for large diffs:** If more than ~10 files have interface or export changes, prioritize: (1) changes to shared libraries or utility modules, (2) changes to public APIs or external interfaces, (3) changes to types or schemas used across module boundaries. Apply full methodology to priority changes; do a lighter pass on the rest.
 

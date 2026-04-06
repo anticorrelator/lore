@@ -88,7 +88,8 @@ A finding that names a deletion without identifying the lost capability and its 
 | | Example |
 |---|---|
 | **Ungrounded** | "removed error handling" |
-| **Grounded** | "the removed `catch` block at line 87 handled network timeouts — callers in `sync.go` depend on this to retry; without it, transient failures will propagate as unrecoverable errors" |
+| **Mechanism only** | "the removed `catch` block at line 87 handled network timeouts — callers in `sync.go` depend on this to retry; without it, transient failures will propagate as unrecoverable errors" |
+| **Grounded** | "the removed `catch` block at line 87 handled network timeouts — callers in `sync.go` depend on this to retry; without it, a single transient network blip causes the entire sync operation to fail permanently, requiring the user to manually re-trigger it" |
 
 **Scoping for large diffs:** If more than ~10 files have deletions or modifications, prioritize: (1) files with the largest deletion count, (2) files touching shared interfaces or exports, (3) files modifying error handling or fallback logic. Apply full methodology to priority files; do a lighter pass on the rest.
 

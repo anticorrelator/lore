@@ -33,28 +33,10 @@ func TestListModelFilterActiveShowsOpenAndPending(t *testing.T) {
 	}
 }
 
-func TestListModelFilterArchivedShowsReviewedPromotedDismissed(t *testing.T) {
-	m := NewListModel(sampleItems())
-	m.filter = FilterArchived
-	visible := m.visibleItems()
-	for _, item := range visible {
-		if item.Status != "reviewed" && item.Status != "promoted" && item.Status != "dismissed" {
-			t.Errorf("FilterArchived: got unexpected status %q for item %q", item.Status, item.ID)
-		}
-	}
-	if len(visible) != 3 {
-		t.Errorf("FilterArchived: got %d items, want 3 (reviewed + promoted + dismissed)", len(visible))
-	}
-}
-
 func TestListModelFollowUpCountMatchesVisible(t *testing.T) {
 	m := NewListModel(sampleItems())
 	if m.FollowUpCount() != 2 {
 		t.Errorf("FollowUpCount (active) = %d, want 2", m.FollowUpCount())
-	}
-	m.filter = FilterArchived
-	if m.FollowUpCount() != 3 {
-		t.Errorf("FollowUpCount (archived) = %d, want 3", m.FollowUpCount())
 	}
 }
 
@@ -174,46 +156,6 @@ func TestListModelEscEmitsDismissedMsg(t *testing.T) {
 	msg := cmd()
 	if _, ok := msg.(ListDismissedMsg); !ok {
 		t.Fatalf("cmd() returned %T, want ListDismissedMsg", msg)
-	}
-}
-
-// --- filter toggle ---
-
-func TestListModelCtrlATogglesFilter(t *testing.T) {
-	m := NewListModel(sampleItems())
-	if m.filter != FilterActive {
-		t.Fatal("initial filter should be FilterActive")
-	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
-	if m.filter != FilterArchived {
-		t.Errorf("after ctrl+a, filter = %d, want FilterArchived", m.filter)
-	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
-	if m.filter != FilterActive {
-		t.Errorf("after second ctrl+a, filter = %d, want FilterActive", m.filter)
-	}
-}
-
-func TestListModelCtrlAResetsToZero(t *testing.T) {
-	m := NewListModel(sampleItems())
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
-	if m.Cursor() != 1 {
-		t.Fatalf("pre-condition: cursor should be 1, got %d", m.Cursor())
-	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
-	if m.Cursor() != 0 {
-		t.Errorf("after ctrl+a, cursor = %d, want 0", m.Cursor())
-	}
-}
-
-func TestListModelGetFilterLabel(t *testing.T) {
-	m := NewListModel(sampleItems())
-	if m.GetFilterLabel() != "active" {
-		t.Errorf("GetFilterLabel (active) = %q, want %q", m.GetFilterLabel(), "active")
-	}
-	m.filter = FilterArchived
-	if m.GetFilterLabel() != "archived" {
-		t.Errorf("GetFilterLabel (archived) = %q, want %q", m.GetFilterLabel(), "archived")
 	}
 }
 

@@ -147,14 +147,9 @@ func TestLensFindingsViewShowsHeader(t *testing.T) {
 	m.SetSize(80, 40)
 
 	out := m.View()
-	if !strings.Contains(out, "0/4 selected") {
-		t.Errorf("View header should show '0/4 selected', got: %q", out)
-	}
-	if !strings.Contains(out, "4 visible") {
-		t.Errorf("View header should show '4 visible', got: %q", out)
-	}
-	if !strings.Contains(out, "filter: all") {
-		t.Error("View header should show 'filter: all' by default")
+	// accepted and deferred are pre-seeded, so 2/4 start selected.
+	if !strings.Contains(out, "2/4 selected") {
+		t.Errorf("View header should show '2/4 selected', got: %q", out)
 	}
 }
 
@@ -203,124 +198,6 @@ func TestLensFindingsCursorNavigation(t *testing.T) {
 	}
 }
 
-func TestLensFindingsDispositionFilterCycling(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	if m.filter != DispFilterAll {
-		t.Fatalf("initial filter = %d, want DispFilterAll", m.filter)
-	}
-
-	// First f: all → action
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	if m.filter != DispFilterAction {
-		t.Errorf("after f: filter = %d, want DispFilterAction", m.filter)
-	}
-	visible := m.visibleFindings()
-	if len(visible) != 1 {
-		t.Errorf("action filter: %d visible, want 1", len(visible))
-	}
-
-	// Second f: action → accepted
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	if m.filter != DispFilterAccepted {
-		t.Errorf("after f: filter = %d, want DispFilterAccepted", m.filter)
-	}
-	visible = m.visibleFindings()
-	if len(visible) != 1 {
-		t.Errorf("accepted filter: %d visible, want 1", len(visible))
-	}
-
-	// Third f: accepted → deferred
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	if m.filter != DispFilterDeferred {
-		t.Errorf("after f: filter = %d, want DispFilterDeferred", m.filter)
-	}
-
-	// Fourth f: deferred → open
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	if m.filter != DispFilterOpen {
-		t.Errorf("after f: filter = %d, want DispFilterOpen", m.filter)
-	}
-
-	// Fifth f: open → all
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	if m.filter != DispFilterAll {
-		t.Errorf("after f: filter = %d, want DispFilterAll", m.filter)
-	}
-}
-
-func TestLensFindingsFilterResetssCursor(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	// Move cursor to position 2
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	if m.cursor != 2 {
-		t.Fatalf("cursor = %d, want 2", m.cursor)
-	}
-
-	// Filter cycling resets cursor to 0
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	if m.cursor != 0 {
-		t.Errorf("after filter change: cursor = %d, want 0", m.cursor)
-	}
-}
-
-func TestLensFindingsFilterHeaderLabel(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	// Filter to action
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	out := m.View()
-	if !strings.Contains(out, "filter: action") {
-		t.Errorf("View should show 'filter: action', got header in: %q", out)
-	}
-	if !strings.Contains(out, "1 visible") {
-		t.Errorf("View should show '1 visible' for action filter, got: %q", out)
-	}
-}
-
-func TestLensFindingsFilterNoMatch(t *testing.T) {
-	// Create review with only "action" dispositions — filtering to "accepted" should show empty.
-	review := &LensReview{
-		PR: 1,
-		Findings: []LensFinding{
-			{Severity: "blocking", File: "a.go", Line: 1, Body: "test", Lens: "correctness", Disposition: "action"},
-		},
-	}
-	m := NewLensFindingsModel("", "", review)
-	m.SetSize(80, 40)
-
-	// Cycle to accepted filter
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}}) // action
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}}) // accepted
-
-	out := m.View()
-	if !strings.Contains(out, "No findings match filter.") {
-		t.Errorf("View should show 'No findings match filter.' when no matches, got: %q", out)
-	}
-}
-
-func TestLensFindingsUnknownDispositionAlwaysVisible(t *testing.T) {
-	review := &LensReview{
-		PR: 1,
-		Findings: []LensFinding{
-			{Severity: "blocking", File: "a.go", Line: 1, Body: "test", Lens: "x", Disposition: "custom-unknown"},
-		},
-	}
-	m := NewLensFindingsModel("", "", review)
-	m.SetSize(80, 40)
-
-	// Under any named filter, unknown disposition should still be visible.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}}) // action
-	visible := m.visibleFindings()
-	if len(visible) != 1 {
-		t.Errorf("unknown disposition should be visible under action filter, got %d visible", len(visible))
-	}
-}
 
 func TestLensFindingsWindowSizeMsg(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
@@ -388,12 +265,14 @@ func TestLensFindingsSelectedCount(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
-	if m.selectedCount() != 0 {
-		t.Errorf("initial selectedCount = %d, want 0", m.selectedCount())
+	// accepted (idx 1) and deferred (idx 3) are pre-seeded; action (idx 0) and open (idx 2) are not.
+	if m.selectedCount() != 2 {
+		t.Errorf("initial selectedCount = %d, want 2 (pre-seeded accepted+deferred)", m.selectedCount())
 	}
 
-	// select finding 0 and 1
+	// Toggle action (idx 0): select it → 3 selected.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	// Move to accepted (idx 1) and toggle: deselect it → back to 2 selected.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
 
@@ -440,132 +319,19 @@ func TestLensFindingsBulkDeselectAllWhenAllSelected(t *testing.T) {
 	}
 }
 
-func TestLensFindingsInvertSelection(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
 
-	// Select finding 0
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
-	if !m.findings[0].Selected {
-		t.Fatal("findings[0] should be selected before invert")
-	}
-
-	// i inverts: 0 deselected, rest selected
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
-	if m.findings[0].Selected {
-		t.Error("findings[0] should be deselected after invert")
-	}
-	if !m.findings[1].Selected {
-		t.Error("findings[1] should be selected after invert")
-	}
-	if !m.findings[2].Selected {
-		t.Error("findings[2] should be selected after invert")
-	}
-	if !m.findings[3].Selected {
-		t.Error("findings[3] should be selected after invert")
-	}
-	// review should be synced
-	for i, f := range m.review.Findings {
-		if f.Selected != m.findings[i].Selected {
-			t.Errorf("review.Findings[%d].Selected not synced after invert", i)
-		}
-	}
-}
-
-func TestLensFindingsSeveritySelectCycleBlocking(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	// S cycle 1: blocking only
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	if !m.findings[0].Selected { // blocking
-		t.Error("findings[0] (blocking) should be selected after S cycle 1")
-	}
-	if m.findings[1].Selected { // suggestion
-		t.Error("findings[1] (suggestion) should not be selected after S cycle 1")
-	}
-	if m.findings[2].Selected { // question
-		t.Error("findings[2] (question) should not be selected after S cycle 1")
-	}
-}
-
-func TestLensFindingsSeveritySelectCycleSuggestion(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	// S cycle 2: suggestion only
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}}) // blocking
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}}) // suggestion
-	if m.findings[0].Selected {                                          // blocking
-		t.Error("findings[0] (blocking) should not be selected after S cycle 2")
-	}
-	if !m.findings[1].Selected { // suggestion
-		t.Error("findings[1] (suggestion) should be selected after S cycle 2")
-	}
-	if m.findings[2].Selected { // question
-		t.Error("findings[2] (question) should not be selected after S cycle 2")
-	}
-	if !m.findings[3].Selected { // suggestion
-		t.Error("findings[3] (suggestion) should be selected after S cycle 2")
-	}
-}
-
-func TestLensFindingsSeveritySelectCycleQuestion(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	// S cycle 3: question only
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}}) // blocking
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}}) // suggestion
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}}) // question
-	if m.findings[0].Selected {                                          // blocking
-		t.Error("findings[0] (blocking) should not be selected after S cycle 3")
-	}
-	if m.findings[1].Selected { // suggestion
-		t.Error("findings[1] (suggestion) should not be selected after S cycle 3")
-	}
-	if !m.findings[2].Selected { // question
-		t.Error("findings[2] (question) should be selected after S cycle 3")
-	}
-}
-
-func TestLensFindingsSeveritySelectCycleAll(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	// S cycle 4 (wraps to 0): all selected
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}}) // blocking
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}}) // suggestion
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}}) // question
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}}) // all
-	if m.selectedCount() != len(m.findings) {
-		t.Errorf("after S cycle 0 (all): selectedCount = %d, want %d", m.selectedCount(), len(m.findings))
-	}
-}
-
-func TestLensFindingsSCycleSyncsReview(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	for i, f := range m.review.Findings {
-		if f.Selected != m.findings[i].Selected {
-			t.Errorf("review.Findings[%d].Selected not synced after S", i)
-		}
-	}
-}
-
-func TestLensFindingsViewShowsUncheckedByDefault(t *testing.T) {
+func TestLensFindingsViewShowsCheckboxes(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
 	out := m.View()
+	// action and open findings start unselected.
 	if !strings.Contains(out, "[ ]") {
 		t.Error("View should show unchecked checkbox '[ ]' for unselected findings")
 	}
-	// No findings selected by default, so [x] should not appear.
-	if strings.Contains(out, "[x]") {
-		t.Error("View should not show '[x]' when no findings are selected")
+	// accepted and deferred are pre-seeded selected.
+	if !strings.Contains(out, "[x]") {
+		t.Error("View should show '[x]' for pre-seeded accepted/deferred findings")
 	}
 }
 
@@ -594,5 +360,71 @@ func TestLensFindingsViewSelectionHeaderCount(t *testing.T) {
 	out := m.View()
 	if !strings.Contains(out, "2/4 selected") {
 		t.Errorf("View header should show '2/4 selected', got: %q", out)
+	}
+}
+
+// --- pre-seeding behavior ---
+
+// TestLensFindingsPreSeedFreshReview verifies that accepted and deferred
+// findings start selected, while action and open findings start unselected,
+// when no prior user selections exist.
+func TestLensFindingsPreSeedFreshReview(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+
+	// testLensReview fixture: [0]=action, [1]=accepted, [2]=open, [3]=deferred
+	for _, f := range m.findings {
+		switch f.Disposition {
+		case "accepted", "deferred":
+			if !f.Selected {
+				t.Errorf("finding with disposition %q should be pre-selected, got Selected=false", f.Disposition)
+			}
+		case "action", "open":
+			if f.Selected {
+				t.Errorf("finding with disposition %q should not be pre-selected, got Selected=true", f.Disposition)
+			}
+		}
+	}
+}
+
+// TestLensFindingsPreSeedSkippedWhenSelectionsExist verifies that when at
+// least one finding is already selected, pre-seeding is skipped and all
+// selections are preserved as-is.
+func TestLensFindingsPreSeedSkippedWhenSelectionsExist(t *testing.T) {
+	review := testLensReview()
+	// Pre-set only the action finding (not a disposition that would be pre-seeded).
+	review.Findings[0].Selected = true // action
+
+	m := NewLensFindingsModel("", "", review)
+
+	// action finding should remain selected (it was pre-set).
+	if !m.findings[0].Selected {
+		t.Error("pre-set action finding should remain selected")
+	}
+	// accepted finding should NOT be pre-seeded (existing selections present).
+	if m.findings[1].Selected {
+		t.Error("accepted finding should not be auto-selected when existing selections present")
+	}
+	// deferred finding should NOT be pre-seeded.
+	if m.findings[3].Selected {
+		t.Error("deferred finding should not be auto-selected when existing selections present")
+	}
+}
+
+// TestLensFindingsPreSeedFlowsToSelectedLensFindings verifies that pre-seeded
+// selections are visible to SelectedLensFindings() without any user interaction,
+// confirming the pre-seeding flows through to the promotion payload.
+func TestLensFindingsPreSeedFlowsToSelectedLensFindings(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+
+	selected := m.SelectedLensFindings()
+
+	// Should contain exactly the accepted and deferred findings.
+	if len(selected) != 2 {
+		t.Fatalf("SelectedLensFindings() returned %d findings, want 2 (accepted + deferred)", len(selected))
+	}
+	for _, f := range selected {
+		if f.Disposition != "accepted" && f.Disposition != "deferred" {
+			t.Errorf("SelectedLensFindings() returned unexpected disposition %q", f.Disposition)
+		}
 	}
 }

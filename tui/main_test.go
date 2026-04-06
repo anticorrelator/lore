@@ -369,9 +369,6 @@ func TestBuildPaneConfigStateWorkEmptyList(t *testing.T) {
 	if cfg.fuItemCount != 0 {
 		t.Errorf("fuItemCount = %d, want 0", cfg.fuItemCount)
 	}
-	if cfg.filterAnnotW != 25 {
-		t.Errorf("filterAnnotW = %d, want 25", cfg.filterAnnotW)
-	}
 }
 
 func TestBuildPaneConfigStateWorkWithItems(t *testing.T) {
@@ -409,9 +406,6 @@ func TestBuildPaneConfigStateFollowUpsEmptyList(t *testing.T) {
 	}
 	if cfg.fuItemCount != 0 {
 		t.Errorf("fuItemCount = %d, want 0", cfg.fuItemCount)
-	}
-	if cfg.filterAnnotW != 25 {
-		t.Errorf("filterAnnotW = %d, want 25", cfg.filterAnnotW)
 	}
 }
 
@@ -467,16 +461,6 @@ func TestBuildPaneConfigStatesDontCrossContaminate(t *testing.T) {
 	}
 	if cfgFU.fuItemCount != 2 {
 		t.Errorf("stateFollowUps: fuItemCount = %d, want 2", cfgFU.fuItemCount)
-	}
-}
-
-func TestBuildPaneConfigFilterAnnotWConsistentAcrossStates(t *testing.T) {
-	mWork := minimalModel(stateWork, nil, nil)
-	mFU := minimalModel(stateFollowUps, nil, nil)
-	wW := mWork.buildPaneConfig().filterAnnotW
-	wFU := mFU.buildPaneConfig().filterAnnotW
-	if wW != wFU {
-		t.Errorf("filterAnnotW differs: stateWork=%d stateFollowUps=%d", wW, wFU)
 	}
 }
 
@@ -669,26 +653,7 @@ func TestHandlePanelRoutingEntitySpecificKeyNotConsumed(t *testing.T) {
 	}
 }
 
-// --- leaveFollowups / w-key / ListDismissedMsg tests ---
-
-func TestWKeyInStateFollowUpsYieldsWorkItemsLoadedMsg(t *testing.T) {
-	m := minimalModel(stateFollowUps, nil, nil)
-	m.config.WorkDir = t.TempDir()
-
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("w")})
-
-	nm := next.(model)
-	if nm.state != stateWork {
-		t.Errorf("state = %v, want stateWork", nm.state)
-	}
-	if cmd == nil {
-		t.Fatal("expected non-nil cmd from w key in stateFollowUps")
-	}
-	msg := cmd()
-	if _, ok := msg.(workItemsLoadedMsg); !ok {
-		t.Errorf("cmd() produced %T, want workItemsLoadedMsg", msg)
-	}
-}
+// --- leaveFollowups / ListDismissedMsg tests ---
 
 func TestHandleIndexPollTickExcludesCheckFollowupDetailMtimeInStateWork(t *testing.T) {
 	m := minimalModel(stateWork, nil, nil)
@@ -1488,7 +1453,7 @@ func followupModelWithLensFindings(t *testing.T, selectAll bool) model {
 		},
 		{
 			Severity: "suggestion", Title: "Extract helper", File: "util.go", Line: 55,
-			Body: "Refactor opportunity.", Lens: "clarity", Disposition: "accepted",
+			Body: "Refactor opportunity.", Lens: "clarity", Disposition: "action",
 			Rationale: "", Selected: selectAll,
 		},
 	}

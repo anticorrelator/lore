@@ -147,11 +147,11 @@ Produce findings JSON conforming to the Findings Output Format:
 - Severity: blocking / suggestion / question (default to suggestion when uncertain)
 - Each finding: severity, title, file, line, body, knowledge_context
 
-Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line in the body stating the concrete basis for the severity claim:
-- blocking: `**Grounding:** <what breaks> for <whom> when <conditions>.`
-- suggestion: `**Grounding:** <specific improvement> benefits <beneficiary>.`
+Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line in the body that traces from technical mechanism to observable human/operational consequence:
+- blocking: `**Grounding:** <mechanism — what breaks, for whom, when> → <consequence — what the user experiences or what operational impact follows>.`
+- suggestion: `**Grounding:** <situation — when a real person encounters the problem> → <improvement — what changes for them>.`
 
-Findings without a `**Grounding:**` line will be downgraded or dropped during synthesis.
+Grounding that stops at the technical mechanism without landing on a human/operational consequence is weak and will be rewritten during synthesis. Findings without a `**Grounding:**` line will be downgraded or dropped.
 
 Query the knowledge store for each finding:
 ```bash
@@ -462,6 +462,8 @@ Build the `lens-findings.json` payload from the in-memory dispositioned findings
   ]
 }
 ```
+
+**Selection contract — producers omit `selected`:** The `selected` field is intentionally absent from the schema above. The TUI owns selection state: on first load it pre-seeds `selected = true` for `accepted` and `deferred` findings, leaving `action`, `open`, and unknown dispositions unselected. Do not set `selected` in the JSON you produce — the field uses `omitempty` and a pre-set value would suppress the TUI's first-load pre-seeding logic.
 
 Include ALL findings (action, accepted, deferred, open). If `--skip-pre-scan` was set and no findings were generated, use an empty findings array `[]`.
 

@@ -4,8 +4,8 @@ Every review finding MUST be assigned exactly one severity level. These definiti
 
 #### Levels
 
-- **blocking** — The PR must not merge with this issue unresolved. Use for: correctness bugs, security vulnerabilities, data loss risks, broken invariants, API contract violations. The bar is "this will cause a defect or incident if shipped." **Required grounding:** state the concrete failure scenario — what breaks, for whom, and under what conditions. A blocking finding without a described failure scenario is not actionable and must be downgraded to suggestion.
-- **suggestion** — The PR should address this but it is not a merge blocker. Use for: design improvements, convention violations, missing edge case handling, suboptimal patterns, maintainability concerns. The bar is "the code works but could be meaningfully better." **Required grounding:** state the specific improvement and who benefits from it. A suggestion without a named improvement and beneficiary is a vague preference, not a review finding.
+- **blocking** — The PR must not merge with this issue unresolved. Use for: correctness bugs, security vulnerabilities, data loss risks, broken invariants, API contract violations. The bar is "this will cause a defect or incident if shipped." **Required grounding:** state the concrete failure scenario — what breaks, for whom, and under what conditions — then land on the observable human or operational consequence. A blocking finding that stops at the technical mechanism ("nil dereference panics") without stating the downstream impact ("users see a 500 and lose their in-progress work") is incomplete and must be rewritten.
+- **suggestion** — The PR should address this but it is not a merge blocker. Use for: design improvements, convention violations, missing edge case handling, suboptimal patterns, maintainability concerns. The bar is "the code works but could be meaningfully better." **Required grounding:** state the specific improvement, who benefits, and the concrete situation where that benefit is felt. A suggestion that names an abstract quality ("reduces cognitive load") without a scenario where a real person encounters the problem ("the next engineer debugging a retry failure has to trace three identical copies") is a vague preference, not a review finding.
 - **question** — The reviewer cannot assess correctness without additional information from the author. Use for: unclear intent, ambiguous behavior, missing context on why an approach was chosen. The bar is "I need to understand this before I can evaluate it." No grounding required beyond the question itself.
 
 #### Classification rules
@@ -26,26 +26,28 @@ Evaluate each finding's `**Grounding:**` line against this rubric before finaliz
 
 | Outcome | Criteria |
 |---------|----------|
-| Sound | Names what breaks, who is affected, and under what conditions |
-| Weak | Names a concern but omits who is affected or when it triggers |
+| Sound | Names the technical mechanism AND the downstream human/operational consequence — the chain from code state to observable impact is complete |
+| Weak | Names the technical mechanism but stops there — the reader knows *what breaks* but not *why it matters*. Also weak: names a concern but omits who is affected or when it triggers |
 | Unsound | No realistic failure scenario — theoretical risk only, or finding is a style preference |
 
 Examples:
-- Sound: "If `session.user` is nil when the route is called without authentication, the nil dereference panics and crashes the server — affects all unauthenticated requests to `/api/admin`."
-- Weak: "This could cause a nil pointer dereference in some cases." (missing: which cases, what request path, who hits it)
+- Sound: "If `session.user` is nil when the route is called without authentication, the nil dereference panics and crashes the server — any user hitting `/api/admin` while unauthenticated sees a 500 error and loses their in-progress request."
+- Weak (mechanism only): "If `session.user` is nil when the route is called without authentication, the nil dereference panics and crashes the server." (stops at the technical failure — missing: what the user experiences, what operational consequence follows)
+- Weak (vague): "This could cause a nil pointer dereference in some cases." (missing: which cases, what request path, who hits it, what they experience)
 - Unsound: "Nil dereferences are bad practice." (no scenario where this code actually crashes)
 
 **Suggestion findings:**
 
 | Outcome | Criteria |
 |---------|----------|
-| Sound | Names the specific improvement and who benefits from it |
-| Weak | Claims "better" or "cleaner" without naming what improves or for whom |
+| Sound | Names the specific improvement, who benefits, and a concrete situation where a real person encounters the problem or feels the benefit |
+| Weak | Names an abstract quality improvement ("reduces cognitive load", "improves readability") without a scenario where someone actually encounters the friction |
 | Unsound | Subjective preference with no concrete benefit to maintainers, callers, or future readers |
 
 Examples:
-- Sound: "Extracting the retry loop into `withRetry()` lets callers test timeout behavior independently — reduces test setup from 40 lines to 5 in each caller."
-- Weak: "This would be cleaner if extracted into a helper." (missing: what specifically improves, who benefits)
+- Sound: "The retry loop appears identically in three callsites. The next engineer debugging a retry failure has to trace all three to find the failing one — extracting into `withRetry()` makes the failing callsite immediately identifiable in stack traces and reduces test setup from 40 lines to 5 per caller."
+- Weak (abstract benefit): "Extracting the retry loop into `withRetry()` lets callers test timeout behavior independently — reduces test setup from 40 lines to 5 in each caller." (names a technical benefit but not the situation where someone actually hits the problem)
+- Weak (vaguer): "This would be cleaner if extracted into a helper." (missing: what specifically improves, who benefits, when they encounter it)
 - Unsound: "I prefer early returns over nested conditionals." (personal style, no concrete maintainability benefit stated)
 
 **Action by outcome:** Sound → report as-is. Weak → rewrite grounding with missing specifics, then report. Unsound → downgrade to question if the concern is worth raising, or drop entirely.

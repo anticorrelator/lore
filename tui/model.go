@@ -290,18 +290,6 @@ func (m model) buildPaneConfig() paneConfig {
 
 	switch m.state {
 	case stateFollowUps:
-		fuFilter := m.followupList.GetFilterLabel()
-		fuActiveS := tabInactiveS
-		if fuFilter == "active" {
-			fuActiveS = tabActiveS
-		}
-		fuArchivedS := tabInactiveS
-		if fuFilter == "archived" {
-			fuArchivedS = tabActiveS
-		}
-		filterAnnot := tabSepS.Render("ctrl+a  ") + fuActiveS.Render("active") + tabSepS.Render(" · ") + fuArchivedS.Render("archived")
-		filterAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
-
 		listTitle := "Follow-ups"
 		if items := m.followupList.Items(); len(items) > 0 {
 			listTitle = fmt.Sprintf("Follow-ups (%d)", len(items))
@@ -319,8 +307,6 @@ func (m model) buildPaneConfig() paneConfig {
 			hasSpecPanel:  hasSpecPanel,
 			listTitle:     listTitle,
 			detailTitle:   detailTitle,
-			filterAnnot:   filterAnnot,
-			filterAnnotW:  filterAnnotW,
 			state:         stateFollowUps,
 			listItemCount: listItemCount,
 			fuItemCount:   fuItemCount,

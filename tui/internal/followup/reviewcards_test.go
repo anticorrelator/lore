@@ -1240,3 +1240,57 @@ func TestReviewCardsNumberKeyNoopOnNilReview(t *testing.T) {
 	}
 	_ = m
 }
+
+func TestReviewCardsViewShowsLensAndConfidence(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	out := m.View()
+
+	// Populated lenses and confidence should appear.
+	if !strings.Contains(out, "[correctness]") {
+		t.Error("View should contain [correctness] lens for comment c1")
+	}
+	if !strings.Contains(out, "90%") {
+		t.Error("View should contain 90% confidence for comment c1")
+	}
+	if !strings.Contains(out, "[clarity]") {
+		t.Error("View should contain [clarity] lens for comment c2")
+	}
+	if !strings.Contains(out, "70%") {
+		t.Error("View should contain 70% confidence for comment c2")
+	}
+	if !strings.Contains(out, "[style]") {
+		t.Error("View should contain [style] lens for comment c3")
+	}
+
+	// Empty/zero fields should be omitted.
+	emptyReview := &ProposedReview{
+		PR: 1,
+		Comments: []ProposedComment{
+			{
+				ID:         "e1",
+				Path:       "empty.go",
+				Line:       1,
+				Body:       "no lens or confidence",
+				Selected:   true,
+				Severity:   "low",
+				Lenses:     nil,
+				Confidence: 0,
+			},
+		},
+	}
+	m2 := NewReviewCardsModel("", "", emptyReview)
+	m2.width = 80
+	m2.height = 40
+	out2 := m2.View()
+
+	if strings.Contains(out2, "[]") {
+		t.Error("View should not render empty [] for nil lenses")
+	}
+	if strings.Contains(out2, "0%") {
+		t.Error("View should not render 0% for zero confidence")
+	}
+}

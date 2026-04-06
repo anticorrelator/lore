@@ -34,12 +34,12 @@ Lens skills produce structured JSON findings that can be consumed by `post-revie
 - **title** — A concise summary (under 80 characters) suitable for use as a review comment heading.
 - **file** — Path relative to repository root. Required for inline PR comments. Omit only for PR-level (non-file-specific) findings.
 - **line** — Line number in the diff where the finding applies. Required for inline comments. Omit for file-level or PR-level findings.
-- **body** — Full explanation. Should include: what the issue is, why it matters, and (for suggestions) what to do about it. Markdown formatting allowed. **Required structure:** include a `**Grounding:**` line that states the concrete basis for the severity claim, calibrated to the severity level:
-  - *blocking*: `**Grounding:** <what breaks> for <whom> when <conditions>.` Example: `**Grounding:** Token expiry check is skipped when `exp` is absent, allowing expired tokens to authenticate any user indefinitely.`
-  - *suggestion*: `**Grounding:** <specific improvement> benefits <beneficiary>.` Example: `**Grounding:** Extracting this into a named function reduces cognitive load for future maintainers reading the auth flow.`
+- **body** — Full explanation. Should include: what the issue is, why it matters, and (for suggestions) what to do about it. Markdown formatting allowed. **Required structure:** include a `**Grounding:**` line that traces from technical mechanism to observable human/operational consequence, calibrated to the severity level:
+  - *blocking*: `**Grounding:** <mechanism — what breaks, for whom, when> → <consequence — what the user experiences or what operational impact follows>.` Example: `**Grounding:** Token expiry check is skipped when `exp` is absent, so any token without that claim authenticates indefinitely — an attacker who obtains a single token retains account access permanently, surviving password resets and revocations.`
+  - *suggestion*: `**Grounding:** <situation — when a real person encounters the problem> → <improvement — what changes for them>.` Example: `**Grounding:** The next engineer debugging an auth failure has to mentally reconstruct the token validation flow across three inline blocks — extracting into a named function makes the validation sequence explicit and grep-able.`
   - *question*: no `**Grounding:**` line required.
 
-  A body missing the `**Grounding:**` line for a `blocking` or `suggestion` finding is incomplete. Presence alone is not sufficient — the orchestrator evaluates grounding quality against the rubric in `severity.md`. Weak grounding (vague or assertion-only) will be rewritten by the orchestrator before output; unsound grounding (speculative or no causal link) triggers a severity downgrade or drop.
+  A body missing the `**Grounding:**` line for a `blocking` or `suggestion` finding is incomplete. Presence alone is not sufficient — the orchestrator evaluates grounding quality against the rubric in `severity.md`. Grounding that stops at the technical mechanism without landing on a human/operational consequence is **weak** and will be rewritten. Unsound grounding (speculative or no causal link) triggers a severity downgrade or drop.
 - **knowledge_context** — Array of knowledge store entries cited during enrichment. Each entry is a string in the format `"entry-title — relevance summary"`. Empty array `[]` when no relevant knowledge was found.
 
 #### Validation rules
@@ -87,7 +87,7 @@ lenses: correctness, security
 
 Detailed explanation of the finding. May include markdown formatting.
 
-**Grounding:** What breaks for whom when conditions are met.
+**Grounding:** What breaks for whom when conditions are met — what the user experiences or what operational impact follows.
 ```
 ````
 

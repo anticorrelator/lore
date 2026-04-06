@@ -1321,11 +1321,6 @@ func TestDetailModelKeyDelegationToLensFindings(t *testing.T) {
 		t.Errorf("after j: lensFindings cursor = %d, want 1", updated.lensFindings.cursor)
 	}
 
-	// f should cycle disposition filter.
-	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	if updated.lensFindings.filter != DispFilterAction {
-		t.Errorf("after f: lensFindings filter = %d, want DispFilterAction", updated.lensFindings.filter)
-	}
 }
 
 func TestDetailModelTabPreservationAcrossReload(t *testing.T) {

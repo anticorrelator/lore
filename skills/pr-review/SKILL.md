@@ -213,11 +213,11 @@ Produce findings JSON conforming to the Findings Output Format:
 - Severity: blocking / suggestion / question (default to suggestion when uncertain)
 - Each finding: severity, title, file, line, body, knowledge_context
 
-Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line in the body stating the concrete basis for the severity claim:
-- blocking: `**Grounding:** <what breaks> for <whom> when <conditions>.`
-- suggestion: `**Grounding:** <specific improvement> benefits <beneficiary>.`
+Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line in the body that traces from technical mechanism to observable human/operational consequence:
+- blocking: `**Grounding:** <mechanism — what breaks, for whom, when> → <consequence — what the user experiences or what operational impact follows>.`
+- suggestion: `**Grounding:** <situation — when a real person encounters the problem> → <improvement — what changes for them>.`
 
-Findings without a `**Grounding:**` line will be downgraded or dropped during synthesis.
+Grounding that stops at the technical mechanism without landing on a human/operational consequence is weak and will be rewritten during synthesis. Findings without a `**Grounding:**` line will be downgraded or dropped.
 
 Query the knowledge store for each finding:
 ```bash
@@ -294,8 +294,8 @@ Apply the Grounding Quality Rubric from `severity.md` (already loaded above) to 
 
 **Outcomes by classification:**
 
-- **Sound** — grounding is concrete and proportionate. Pass through unchanged.
-- **Weak** — grounding names a concern but lacks specificity (missing who is affected, when it triggers, or what specifically improves). Rewrite the `**Grounding:**` line with a concrete impact scenario derived from the finding body, diff context, and review brief. Keep the finding's severity intact.
+- **Sound** — grounding traces from technical mechanism to observable human/operational consequence. Pass through unchanged.
+- **Weak** — grounding stops at the technical mechanism without landing on a downstream consequence, or names an abstract benefit without a scenario where someone encounters the problem. Rewrite the `**Grounding:**` line to complete the chain: mechanism → who is affected → what they experience. Derive the consequence from the finding body, diff context, and review brief. Keep the finding's severity intact.
 - **Unsound** — no realistic failure scenario (blocking) or no concrete benefit (suggestion). For `blocking` findings: downgrade to `suggestion` and rewrite the `**Grounding:**` line to match the weaker severity bar. For `suggestion` findings: drop the finding.
 
 **Missing grounding line** — treat the same as unsound: downgrade `blocking` to `suggestion`, drop `suggestion`.

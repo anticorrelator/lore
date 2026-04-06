@@ -33,36 +33,35 @@ func WriteLensSidecarCmd(knowledgeDir, followupID string, review *LensReview) te
 	}
 }
 
-// DispositionFilter controls which findings are visible by disposition.
-type DispositionFilter int
-
-const (
-	DispFilterAll      DispositionFilter = 0
-	DispFilterAction   DispositionFilter = 1
-	DispFilterAccepted DispositionFilter = 2
-	DispFilterDeferred DispositionFilter = 3
-	DispFilterOpen     DispositionFilter = 4
-)
-
 // LensFindingsModel is the Bubble Tea model for lens review findings.
-// It renders finding cards with cursor navigation and disposition filtering,
+// It renders finding cards with cursor navigation,
 // following the budget-based windowing pattern from ReviewCardsModel.
 type LensFindingsModel struct {
-	review          *LensReview
-	findings        []LensFinding
-	cursor          int
-	width           int
-	height          int
-	filter          DispositionFilter
-	knowledgeDir    string
-	followupID      string
-	sevSelectCycle  int // tracks S-cycle position: 0=all, 1=blocking, 2=suggestion, 3=question
+	review       *LensReview
+	findings     []LensFinding
+	cursor       int
+	width        int
+	height       int
+	knowledgeDir string
+	followupID   string
 }
 
 // NewLensFindingsModel creates a LensFindingsModel from a loaded LensReview.
 // knowledgeDir and followupID are required for write-back via WriteLensSidecarCmd.
 // Caller ensures review is non-nil.
+//
+// Pre-seeding: when no finding is already selected (fresh review), accepted
+// and deferred findings are pre-selected so they appear ready-to-promote by
+// default. action, open, and unknown dispositions start unselected.
 func NewLensFindingsModel(knowledgeDir, followupID string, review *LensReview) LensFindingsModel {
+	if !hasExistingSelections(review.Findings) {
+		for i := range review.Findings {
+			switch review.Findings[i].Disposition {
+			case "accepted", "deferred":
+				review.Findings[i].Selected = true
+			}
+		}
+	}
 	m := LensFindingsModel{
 		review:       review,
 		findings:     review.Findings,
@@ -70,6 +69,17 @@ func NewLensFindingsModel(knowledgeDir, followupID string, review *LensReview) L
 		followupID:   followupID,
 	}
 	return m
+}
+
+// hasExistingSelections reports whether any finding has Selected == true.
+// Used to determine whether pre-seeding should be applied.
+func hasExistingSelections(findings []LensFinding) bool {
+	for _, f := range findings {
+		if f.Selected {
+			return true
+		}
+	}
+	return false
 }
 
 // SetSize updates the available rendering dimensions.
@@ -82,35 +92,11 @@ func (m LensFindingsModel) Init() tea.Cmd {
 	return nil
 }
 
-// visibleFindings returns indices into m.findings matching the current filter.
+// visibleFindings returns indices into m.findings (all findings are visible).
 func (m LensFindingsModel) visibleFindings() []int {
-	out := make([]int, 0, len(m.findings))
-	for i, f := range m.findings {
-		var visible bool
-		switch m.filter {
-		case DispFilterAction:
-			visible = f.Disposition == "action"
-		case DispFilterAccepted:
-			visible = f.Disposition == "accepted"
-		case DispFilterDeferred:
-			visible = f.Disposition == "deferred"
-		case DispFilterOpen:
-			visible = f.Disposition == "open"
-		default:
-			visible = true
-		}
-		// Unknown dispositions are always visible under a named filter.
-		if m.filter != DispFilterAll {
-			switch f.Disposition {
-			case "action", "accepted", "deferred", "open":
-				// already evaluated above
-			default:
-				visible = true
-			}
-		}
-		if visible {
-			out = append(out, i)
-		}
+	out := make([]int, len(m.findings))
+	for i := range m.findings {
+		out[i] = i
 	}
 	return out
 }
@@ -138,10 +124,6 @@ func (m LensFindingsModel) Update(msg tea.Msg) (LensFindingsModel, tea.Cmd) {
 			if len(visible) > 0 {
 				m.cursor = len(visible) - 1
 			}
-		case "f":
-			// Cycle disposition filter: all → action → accepted → deferred → open → all.
-			m.filter = DispositionFilter((int(m.filter) + 1) % 5)
-			m.cursor = 0
 		case " ", "x", "enter":
 			// Toggle selection on the current finding (via backing index).
 			if m.cursor >= 0 && m.cursor < len(visible) {
@@ -163,40 +145,6 @@ func (m LensFindingsModel) Update(msg tea.Msg) (LensFindingsModel, tea.Cmd) {
 				}
 				for i := range m.review.Findings {
 					m.review.Findings[i].Selected = target
-				}
-				return m, WriteLensSidecarCmd(m.knowledgeDir, m.followupID, m.review)
-			}
-		case "i":
-			// Invert all selections.
-			if m.review != nil {
-				for i := range m.findings {
-					m.findings[i].Selected = !m.findings[i].Selected
-					if i < len(m.review.Findings) {
-						m.review.Findings[i].Selected = m.findings[i].Selected
-					}
-				}
-				return m, WriteLensSidecarCmd(m.knowledgeDir, m.followupID, m.review)
-			}
-		case "S":
-			// Advance severity-select cycle (0=all, 1=blocking, 2=suggestion, 3=question).
-			if m.review != nil {
-				m.sevSelectCycle = (m.sevSelectCycle + 1) % 4
-				for i := range m.findings {
-					var selected bool
-					switch m.sevSelectCycle {
-					case 0:
-						selected = true
-					case 1:
-						selected = m.findings[i].Severity == "blocking"
-					case 2:
-						selected = m.findings[i].Severity == "suggestion"
-					case 3:
-						selected = m.findings[i].Severity == "question"
-					}
-					m.findings[i].Selected = selected
-				}
-				for i := range m.review.Findings {
-					m.review.Findings[i].Selected = m.findings[i].Selected
 				}
 				return m, WriteLensSidecarCmd(m.knowledgeDir, m.followupID, m.review)
 			}
@@ -258,24 +206,13 @@ func (m LensFindingsModel) View() string {
 
 	var b strings.Builder
 
-	// Header: selection count + filter
-	filterLabel := "all"
-	switch m.filter {
-	case DispFilterAction:
-		filterLabel = "action"
-	case DispFilterAccepted:
-		filterLabel = "accepted"
-	case DispFilterDeferred:
-		filterLabel = "deferred"
-	case DispFilterOpen:
-		filterLabel = "open"
-	}
-	header := fmt.Sprintf("  %d/%d selected | %d visible | filter: %s", m.selectedCount(), len(m.findings), len(visible), filterLabel)
+	// Header: selection count
+	header := fmt.Sprintf("  %d/%d selected", m.selectedCount(), len(m.findings))
 	b.WriteString(dimStyle.Render(header))
 	b.WriteString("\n\n")
 
 	if len(visible) == 0 {
-		b.WriteString(dimStyle.Render("  No findings match filter."))
+		b.WriteString(dimStyle.Render("  No findings."))
 		b.WriteString("\n")
 	} else {
 		// Budget-based windowing
