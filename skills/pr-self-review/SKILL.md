@@ -1,13 +1,13 @@
 ---
 name: pr-self-review
-description: "Author-calibrated self-review: parallel lens pre-scan (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity) then confirmatory dialog to disposition findings into a phased plan.md"
+description: "Author-calibrated self-review: parallel lens pre-scan (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) then confirmatory dialog to disposition findings into a phased plan.md"
 user_invocable: true
 argument_description: "[PR_number_or_URL] [--skip-pre-scan] [focus context] — PR to self-review (or auto-detect from branch). --skip-pre-scan skips the lens team and uses heuristic dialog instead. Optional focus context steers finding priority (e.g., '42 focus on error handling')"
 ---
 
 # /pr-self-review Skill
 
-Author-calibrated self-review combining structured analysis with interactive dialog. A parallel lens team (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity) runs a pre-scan, then you and the user discuss each finding in a confirmatory dialog — assigning dispositions (action/accepted/deferred/open) rather than generating observations from scratch.
+Author-calibrated self-review combining structured analysis with interactive dialog. A parallel lens team (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) runs a pre-scan, then you and the user discuss each finding in a confirmatory dialog — assigning dispositions (action/accepted/deferred/open) rather than generating observations from scratch.
 
 Since this is your own work, locally-scoped action items can be implement-ready. Findings with cross-boundary implications (especially from Blast Radius) get verification directives instead.
 
@@ -61,7 +61,7 @@ Display:
 ```
 [pr-self-review] Triage
 Size: <N> LOC across <M> files
-Lenses: Blast Radius · Security · Test Quality · Correctness · Regressions · Interface Clarity · [ceremony] insecure-defaults
+Lenses: Blast Radius · Security · Test Quality · Correctness · Regressions · Interface Clarity · User Impact · [ceremony] insecure-defaults
 Add or remove lenses? (enter lens names, or press Enter to proceed)
 ```
 
@@ -111,6 +111,7 @@ For each selected lens, read its Step 3 methodology:
 | Correctness | `skills/pr-correctness/SKILL.md` | Correctness Analysis |
 | Regressions | `skills/pr-regressions/SKILL.md` | Regressions Analysis |
 | Interface Clarity | `skills/pr-interface-clarity/SKILL.md` | Interface Clarity Analysis |
+| User Impact | `skills/pr-user-impact/SKILL.md` | User Impact Analysis |
 
 For each lens, create a task:
 
@@ -162,7 +163,7 @@ Report back with your findings JSON when complete.
 
 **Correctness lens modification:** Append: "Skip step 3d (intent alignment). The author already knows the intent."
 
-Spawn one agent per lens in parallel. Maximum 6 concurrent agents. For diffs >400 LOC, write the diff to `/tmp/pr-self-review-<PR_NUMBER>.diff` before spawning.
+Spawn one agent per lens in parallel. Maximum 7 concurrent agents. For diffs >400 LOC, write the diff to `/tmp/pr-self-review-<PR_NUMBER>.diff` before spawning.
 
 ### 2b-ceremony. Dispatch ceremony lenses
 
@@ -295,7 +296,7 @@ Sort interactive findings: blocking first (compound before single-lens), then su
 Supplementary reports: <skill-name>, <skill-name> (non-standard format — see below)
 ```
 
-Then **open the first interactive finding** for discussion with its label, lens, file:line, body, and knowledge citations. End with an open question. Strip internal protocol headers (`**Grounding:**`, `**Severity:**`, etc.) from dialog presentation — these are internal scaffolding. The grounding content itself must be preserved as the substance of the finding.
+Then **open the first interactive finding** for discussion with its label, lens, file:line, body, and knowledge citations. End with an open question. Strip internal protocol headers (`**Grounding:**`, `**Severity:**`, etc.) from dialog presentation — these are internal scaffolding. The grounding content itself must be preserved as the substance of the finding. Dialog presentation must follow the voice guide in `~/.lore/claude-md/review-protocol/review-voice.md`.
 
 **Heuristic fallback:** If the pre-scan produced zero findings or `--skip-pre-scan` was set, scan the diff for risk concentration, complexity, and architectural decisions. Open topics using perspective lenses:
 1. "What would a reviewer unfamiliar with this codebase question?"

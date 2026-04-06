@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -139,9 +140,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			case "y", "enter":
 				action := m.confirmAction
 				slug := m.confirmSlug
+				count := m.confirmCount
 				m.confirmAction = ""
 				m.confirmSlug = ""
 				m.confirmTitle = ""
+				m.confirmCount = 0
 				if action == "delete" {
 					return m, runDelete(slug)
 				}
@@ -151,12 +154,16 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				if action == "delete_followup" {
 					return m, runDeleteFollowUp(slug)
 				}
+				if action == "post_review" {
+					return m, runPostReview(m.config.KnowledgeDir, slug, count)
+				}
 				return m, runArchive(slug, action == "unarchive")
 			default:
 				// Any other key cancels.
 				m.confirmAction = ""
 				m.confirmSlug = ""
 				m.confirmTitle = ""
+				m.confirmCount = 0
 			}
 			return m, nil
 		}
@@ -354,6 +361,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case detailMtimeCheckedMsg:
 		return m.handleDetailMtimeChecked(msg)
 
+	case followupDetailMtimeCheckedMsg:
+		return m.handleFollowupDetailMtimeChecked(msg)
+
 	case tea.MouseMsg:
 		// Centralized click routing: main.go owns all panel geometry,
 		// so mouse events are routed here before reaching sub-models.
@@ -407,7 +417,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			cb := panelCallbacks{
 				currentSlug: func() string { return m.followupDetail.CurrentID() },
 				loadDetail: func(id string) tea.Cmd {
-					return m.followupDetail.SetID(id)
+					return m.loadFollowupDetail(id)
 				},
 				specPanelFn: func() (work.SpecPanelModel, bool) { return m.currentFollowupPanel() },
 				listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
@@ -660,13 +670,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.followupList, _ = m.followupList.Update(tea.WindowSizeMsg{Width: fuListW, Height: fuListH})
 				m.followupDetail = followup.NewDetailModel(m.config.KnowledgeDir)
 				m.followupDetail, _ = m.followupDetail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+				m.lastFollowupDetailMtime = time.Time{}
 				m.focusedPanel = panelLeft
 				return m, followup.LoadIndexCmd(m.config.KnowledgeDir)
 			}
 		case "w":
 			if m.state == stateFollowUps && !m.terminalMode {
-				m.state = stateWork
-				return m, nil
+				cmd := m.leaveFollowups()
+				return m, cmd
 			}
 		case "esc":
 			// Esc from right panel (detail mode only): back to list.
@@ -758,6 +769,28 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				default:
 					m.flashErr = fmt.Sprintf("cannot dismiss: follow-up is already %s", status)
 				}
+			}
+		case "P":
+			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
+				if m.followupDetail.ActiveTab() != followup.TabComments {
+					m.flashErr = "P: switch to Comments tab to post"
+					break
+				}
+				selectedCount := m.followupDetail.SelectedCount()
+				if selectedCount == 0 {
+					m.flashErr = "P: no comments selected"
+					break
+				}
+				if !m.followupDetail.HasPRMetadata() {
+					m.flashErr = "P: sidecar missing PR metadata"
+					break
+				}
+				prNumber := m.followupDetail.PRNumber()
+				m.confirmAction = "post_review"
+				m.confirmSlug = m.followupDetail.CurrentID()
+				m.confirmTitle = fmt.Sprintf("Post %d comments to PR #%d?", selectedCount, prNumber)
+				m.confirmCount = selectedCount
+				return m, nil
 			}
 		}
 
@@ -950,8 +983,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			id := msg.Item.ID
 			m.followupList.SetCursorByID(id)
 			m.focusedPanel = panelRight
-			m.terminalMode = m.hasSpecPanel(id)
-			return m, m.followupDetail.SetID(id)
+			return m, m.loadFollowupDetail(id)
 		}
 
 	case popupSearchResultMsg:
@@ -969,19 +1001,15 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m, nil
 
 	case followup.ListDismissedMsg:
-		m.state = stateWork
-		return m, nil
+		cmd := m.leaveFollowups()
+		return m, cmd
 
 	case followup.FollowUpSelectedMsg:
-		loadCmd := m.followupDetail.SetID(msg.Item.ID)
 		m.focusedPanel = panelRight
-		// Restore terminal mode if a spec panel already exists for this follow-up.
-		m.terminalMode = m.hasSpecPanel(msg.Item.ID)
-		return m, loadCmd
+		return m, m.loadFollowupDetail(msg.Item.ID)
 
 	case followup.LoadDetailMsg:
-		loadCmd := m.followupDetail.SetID(msg.ID)
-		return m, loadCmd
+		return m, m.loadFollowupDetail(msg.ID)
 
 	case followup.PromoteRequestMsg:
 		return m, runPromoteFollowUp(msg.ID)
@@ -998,14 +1026,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// This handles: initial load (detail empty), post-dismiss/promote
 			// (dismissed item gone, cursor moved to next), and live-reload.
 			if curID := m.followupList.CurrentID(); curID != "" && curID != prevID {
-				loadCmd := m.followupDetail.SetID(curID)
-				return m, loadCmd
+				return m, m.loadFollowupDetail(curID)
 			}
 			// Same ID but content may have changed (e.g. status update) — force reload.
 			if curID := m.followupList.CurrentID(); curID != "" && curID == prevID {
 				m.followupDetail.ClearID()
-				loadCmd := m.followupDetail.SetID(curID)
-				return m, loadCmd
+				return m, m.loadFollowupDetail(curID)
 			}
 			// No visible items remain — clear the detail panel.
 			if m.followupList.CurrentID() == "" {
@@ -1019,12 +1045,66 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.followupDetail = fd
 		return m, cmd
 
+	case followup.ExternalEditDoneMsg:
+		fd, cmd := m.followupDetail.Update(msg)
+		m.followupDetail = fd
+		return m, cmd
+
 	case followup.ActionCompleteMsg:
 		if msg.Err != nil {
 			m.flashErr = fmt.Sprintf("%s failed: %v", msg.Action, msg.Err)
 		}
 		// Reload index; cursor position is preserved by ListModel.SetItems clamping.
 		return m, followup.LoadIndexCmd(m.config.KnowledgeDir)
+
+	case followup.PostReviewCompleteMsg:
+		if msg.Err != nil {
+			m.flashErr = fmt.Sprintf("post failed: %v", msg.Err)
+		} else {
+			m.flashErr = fmt.Sprintf("Posted %d comments", msg.PostedCount)
+		}
+		// Reload detail to reflect updated sidecar state.
+		m.followupDetail.PreserveTab()
+		m.lastFollowupDetailMtime = time.Time{}
+		m.followupDetail.ClearID()
+		loadCmd := m.followupDetail.SetID(msg.ID)
+		return m, loadCmd
+
+	case followup.ExternalEditRequestMsg:
+		editor := os.Getenv("EDITOR")
+		if editor == "" {
+			// $EDITOR not set — nothing to do; ReviewCardsModel already set flashMsg.
+			return m, nil
+		}
+		tmpFile, err := os.CreateTemp("", "lore-comment-*.md")
+		if err != nil {
+			return m, func() tea.Msg {
+				return followup.ExternalEditDoneMsg{Err: err}
+			}
+		}
+		tmpPath := tmpFile.Name()
+		if _, writeErr := tmpFile.WriteString(msg.Body); writeErr != nil {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpPath)
+			return m, func() tea.Msg {
+				return followup.ExternalEditDoneMsg{Err: writeErr}
+			}
+		}
+		_ = tmpFile.Close()
+		cmd := exec.Command(editor, tmpPath) //nolint:gosec
+		backingIdx := msg.BackingIdx
+		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			if err != nil {
+				_ = os.Remove(tmpPath)
+				return followup.ExternalEditDoneMsg{Err: err}
+			}
+			content, readErr := os.ReadFile(tmpPath)
+			_ = os.Remove(tmpPath)
+			if readErr != nil {
+				return followup.ExternalEditDoneMsg{Err: readErr}
+			}
+			return followup.ExternalEditDoneMsg{BackingIdx: backingIdx, NewBody: string(content)}
+		})
 
 	case knowledge.ManifestLoadedMsg:
 		bm, cmd := m.browser.Update(msg)
@@ -1098,8 +1178,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			m.followupList = fl
 			newID := m.followupList.CurrentID()
 			if newID != "" && newID != prevID {
-				loadCmd := m.followupDetail.SetID(newID)
-				return m, tea.Batch(cmd, loadCmd)
+				return m, tea.Batch(cmd, m.loadFollowupDetail(newID))
 			}
 			return m, cmd
 		}
@@ -1109,6 +1188,27 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// leaveFollowups transitions the model from stateFollowUps back to stateWork
+// and reloads the work item list so it reflects any changes made while in followup view.
+func (m *model) leaveFollowups() tea.Cmd {
+	m.state = stateWork
+	return loadWorkItems(m.config.WorkDir)
+}
+
+// loadFollowupDetail is the single chokepoint for all followup navigation paths.
+// It resets the mtime baseline, syncs terminalMode, and initiates the detail load.
+// When arriving at an item that has an active terminal and right-panel focus,
+// it also re-emits tea.EnableMouseCellMotion to restore app-level mouse tracking.
+func (m *model) loadFollowupDetail(id string) tea.Cmd {
+	m.lastFollowupDetailMtime = time.Time{}
+	m.terminalMode = m.hasSpecPanel(id)
+	loadCmd := m.followupDetail.SetID(id)
+	if m.terminalMode && m.focusedPanel == panelRight {
+		return tea.Batch(loadCmd, tea.EnableMouseCellMotion)
+	}
+	return loadCmd
 }
 
 // loadDetail creates a fresh DetailModel for slug, applies current dimensions,

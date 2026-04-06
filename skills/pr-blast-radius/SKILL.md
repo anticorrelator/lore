@@ -91,6 +91,7 @@ cat ~/.lore/claude-md/review-protocol/enrichment.md
 cat ~/.lore/claude-md/review-protocol/escalation.md
 cat ~/.lore/claude-md/review-protocol/severity.md
 cat ~/.lore/claude-md/review-protocol/findings-format.md
+cat ~/.lore/claude-md/review-protocol/review-voice.md
 ```
 
 For each finding, query the knowledge store:

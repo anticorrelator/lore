@@ -134,9 +134,10 @@ type model struct {
 	showHelp bool
 
 	// Confirm modal for archive/delete actions.
-	confirmAction string // "archive", "unarchive", or "delete"; empty = inactive
+	confirmAction string // "archive", "unarchive", "delete", "post_review", etc.; empty = inactive
 	confirmSlug   string
 	confirmTitle  string
+	confirmCount  int // used by post_review to capture SelectedCount at dispatch time
 
 	kittyModeActive bool // true while kitty keyboard protocol is enabled
 
@@ -154,6 +155,9 @@ type model struct {
 
 	// lastFollowupIndexMtime is the mtime of _followup_index.json from the last poll.
 	lastFollowupIndexMtime time.Time
+
+	// lastFollowupDetailMtime is the mtime of the currently selected follow-up's detail file from the last poll.
+	lastFollowupDetailMtime time.Time
 
 	// flashErr holds a transient error message shown in the status bar.
 	// It is cleared on the next key press.

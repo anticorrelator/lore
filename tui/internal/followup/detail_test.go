@@ -463,8 +463,8 @@ func TestDetailModelUsesReviewCardsWhenSidecarPresent(t *testing.T) {
 	if len(updated.tabs) != 3 {
 		t.Errorf("tabs len = %d, want 3 (Meta+Finding+Comments)", len(updated.tabs))
 	}
-	if updated.ActiveTab() != TabComments {
-		t.Errorf("active tab = %v, want TabComments (default when sidecar present)", updated.ActiveTab())
+	if updated.ActiveTab() != TabFinding {
+		t.Errorf("active tab = %v, want TabFinding (default)", updated.ActiveTab())
 	}
 	if updated.reviewCards == nil {
 		t.Fatal("reviewCards should be initialized")
@@ -549,9 +549,9 @@ func TestDetailModelTabCyclesThroughTabs(t *testing.T) {
 
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
-	// Should start on TabComments (index 2) since sidecar is present.
-	if updated.ActiveTab() != TabComments {
-		t.Fatalf("initial tab = %v, want TabComments", updated.ActiveTab())
+	// Should start on TabFinding (default).
+	if updated.ActiveTab() != TabFinding {
+		t.Fatalf("initial tab = %v, want TabFinding", updated.ActiveTab())
 	}
 	startIdx := updated.activeTab
 
@@ -672,12 +672,18 @@ func TestDetailModelKeyRoutesToActiveTab(t *testing.T) {
 
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
-	// Sidecar present: default active tab is TabComments.
-	if updated.ActiveTab() != TabComments {
-		t.Fatalf("active tab = %v, want TabComments", updated.ActiveTab())
+	// Sidecar present: default active tab is TabFinding.
+	if updated.ActiveTab() != TabFinding {
+		t.Fatalf("active tab = %v, want TabFinding", updated.ActiveTab())
 	}
 	if updated.reviewCards.cursor != 0 {
 		t.Fatalf("initial cards cursor = %d, want 0", updated.reviewCards.cursor)
+	}
+
+	// Switch to TabComments to test j key routing to reviewCards.
+	updated.activeTab = updated.tabIndexFor(TabComments)
+	if updated.ActiveTab() != TabComments {
+		t.Fatalf("active tab = %v, want TabComments after manual switch", updated.ActiveTab())
 	}
 
 	// j key routes to reviewCards when active tab is TabComments.
@@ -826,5 +832,236 @@ func TestDetailModelMetaTabRendersMetadata(t *testing.T) {
 	}
 	if !strings.Contains(out, "anticorrelator/lore#42") {
 		t.Errorf("View on Meta tab should contain attachment ref, got:\n%s", out)
+	}
+}
+
+// --- DetailModel accessor tests ---
+
+func TestDetailModelSelectedCountNilReviewCards(t *testing.T) {
+	m := NewDetailModel("")
+	if m.SelectedCount() != 0 {
+		t.Errorf("SelectedCount on unloaded model = %d, want 0", m.SelectedCount())
+	}
+}
+
+func TestDetailModelSelectedCountWithComments(t *testing.T) {
+	m := NewDetailModel("")
+	m.width = 80
+	m.height = 40
+	id := "sel-count"
+	m.SetID(id)
+
+	detail := &FollowUpDetail{
+		ID:     id,
+		Title:  "Sel Count",
+		Status: "open",
+		Source: "test",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		ProposedComments: &ProposedReview{
+			PR: 1, Owner: "o", Repo: "r", HeadSHA: "sha",
+			Comments: []ProposedComment{
+				{ID: "c1", Path: "a.go", Line: 1, Body: "A.", Severity: "high", Selected: true},
+				{ID: "c2", Path: "b.go", Line: 2, Body: "B.", Severity: "low", Selected: false},
+			},
+		},
+	}
+
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+	if updated.SelectedCount() != 1 {
+		t.Errorf("SelectedCount = %d, want 1", updated.SelectedCount())
+	}
+}
+
+func TestDetailModelHasPRMetadataReturnsFalseWhenNil(t *testing.T) {
+	m := NewDetailModel("")
+	if m.HasPRMetadata() {
+		t.Error("HasPRMetadata should be false when no detail loaded")
+	}
+}
+
+func TestDetailModelHasPRMetadataReturnsFalseWithIncompleteMetadata(t *testing.T) {
+	m := NewDetailModel("")
+	m.width = 80
+	m.height = 40
+	id := "no-meta"
+	m.SetID(id)
+
+	// Missing PR number → incomplete metadata.
+	detail := &FollowUpDetail{
+		ID:     id,
+		Title:  "No Meta",
+		Status: "open",
+		Source: "test",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		ProposedComments: &ProposedReview{
+			PR: 0, Owner: "o", Repo: "r", HeadSHA: "sha",
+			Comments: []ProposedComment{{ID: "c1", Path: "a.go", Line: 1, Body: "A.", Severity: "low"}},
+		},
+	}
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+	if updated.HasPRMetadata() {
+		t.Error("HasPRMetadata should be false when PR=0")
+	}
+}
+
+func TestDetailModelHasPRMetadataReturnsTrueWithCompleteMetadata(t *testing.T) {
+	m := NewDetailModel("")
+	m.width = 80
+	m.height = 40
+	id := "has-meta"
+	m.SetID(id)
+
+	detail := &FollowUpDetail{
+		ID:     id,
+		Title:  "Has Meta",
+		Status: "open",
+		Source: "test",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		ProposedComments: &ProposedReview{
+			PR: 42, Owner: "anticorrelator", Repo: "lore", HeadSHA: "abc123",
+			Comments: []ProposedComment{{ID: "c1", Path: "a.go", Line: 1, Body: "A.", Severity: "high"}},
+		},
+	}
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+	if !updated.HasPRMetadata() {
+		t.Error("HasPRMetadata should be true with complete PR metadata")
+	}
+}
+
+func TestDetailModelPRNumberReturnsCorrectValue(t *testing.T) {
+	m := NewDetailModel("")
+	m.width = 80
+	m.height = 40
+	id := "pr-number"
+	m.SetID(id)
+
+	detail := &FollowUpDetail{
+		ID:     id,
+		Title:  "PR Num",
+		Status: "open",
+		Source: "test",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		ProposedComments: &ProposedReview{
+			PR: 99, Owner: "o", Repo: "r", HeadSHA: "sha",
+			Comments: []ProposedComment{{ID: "c1", Path: "a.go", Line: 1, Body: "A.", Severity: "low"}},
+		},
+	}
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+	if updated.PRNumber() != 99 {
+		t.Errorf("PRNumber = %d, want 99", updated.PRNumber())
+	}
+}
+
+// --- D19 sidecar rule tests ---
+
+func TestLoadFollowUpDetailD19WrapperWithValidMetaZeroCommentsPreserved(t *testing.T) {
+	// D19 Case 1: wrapper with valid PR metadata and zero comments → keep ProposedComments.
+	knowledgeDir := t.TempDir()
+	id := "d19-case1"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"d19-case1","title":"D19 Case 1","status":"open","source":"test","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+
+	sidecar := `{"pr":42,"owner":"anticorrelator","repo":"lore","head_sha":"abc123","comments":[]}`
+	os.WriteFile(filepath.Join(itemDir, "proposed-comments.json"), []byte(sidecar), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.ProposedComments == nil {
+		t.Fatal("D19 Case 1: ProposedComments should be preserved (valid metadata, zero comments)")
+	}
+	if detail.ProposedComments.PR != 42 {
+		t.Errorf("PR = %d, want 42", detail.ProposedComments.PR)
+	}
+}
+
+func TestLoadFollowUpDetailD19WrapperWithoutValidMetaZeroCommentsDropped(t *testing.T) {
+	// D19 Case 2: wrapper without valid metadata and zero comments → nil.
+	knowledgeDir := t.TempDir()
+	id := "d19-case2"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"d19-case2","title":"D19 Case 2","status":"open","source":"test","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+
+	// No owner/repo/PR/HeadSHA → not valid metadata.
+	sidecar := `{"pr":0,"owner":"","repo":"","head_sha":"","comments":[]}`
+	os.WriteFile(filepath.Join(itemDir, "proposed-comments.json"), []byte(sidecar), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.ProposedComments != nil {
+		t.Errorf("D19 Case 2: ProposedComments should be nil (no metadata, zero comments), got %+v", detail.ProposedComments)
+	}
+}
+
+func TestLoadFollowUpDetailD19BareArrayZeroCommentsDropped(t *testing.T) {
+	// D19 Case 3: bare array with zero comments → nil.
+	knowledgeDir := t.TempDir()
+	id := "d19-case3"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"d19-case3","title":"D19 Case 3","status":"open","source":"test","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+
+	// Empty bare array.
+	sidecar := `[]`
+	os.WriteFile(filepath.Join(itemDir, "proposed-comments.json"), []byte(sidecar), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.ProposedComments != nil {
+		t.Errorf("D19 Case 3: ProposedComments should be nil (bare array, zero comments), got %+v", detail.ProposedComments)
+	}
+}
+
+func TestLoadFollowUpDetailAuthorField(t *testing.T) {
+	knowledgeDir := t.TempDir()
+	id := "author-test"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"author-test","title":"Author Test","status":"open","author":"alice","source":"test","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.Author != "alice" {
+		t.Errorf("Author = %q, want %q", detail.Author, "alice")
+	}
+}
+
+func TestLoadFollowUpDetailAuthorFieldMissing(t *testing.T) {
+	// Backward compatibility: _meta.json without "author" field should result in Author == "".
+	knowledgeDir := t.TempDir()
+	id := "no-author-test"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"no-author-test","title":"No Author Test","status":"open","source":"test","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.Author != "" {
+		t.Errorf("Author = %q, want empty string for meta without author field", detail.Author)
 	}
 }

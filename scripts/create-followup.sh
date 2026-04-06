@@ -13,6 +13,7 @@ source "$SCRIPT_DIR/lib.sh"
 # --- Parse arguments ---
 TITLE=""
 SOURCE=""
+AUTHOR=""
 ATTACHMENTS="[]"
 SUGGESTED_ACTIONS="[]"
 PROPOSED_COMMENTS=""
@@ -27,6 +28,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --source)
       SOURCE="$2"
+      shift 2
+      ;;
+    --author)
+      AUTHOR="$2"
       shift 2
       ;;
     --attachments)
@@ -107,6 +112,7 @@ escape_json() {
 
 TITLE_JSON=$(escape_json "$TITLE")
 SOURCE_JSON=$(escape_json "$SOURCE")
+AUTHOR_JSON=$(escape_json "$AUTHOR")
 
 # Write _meta.json
 cat > "$ITEM_DIR/_meta.json" << METAEOF
@@ -114,6 +120,7 @@ cat > "$ITEM_DIR/_meta.json" << METAEOF
   "id": "$ID",
   "title": $TITLE_JSON,
   "source": $SOURCE_JSON,
+  "author": $AUTHOR_JSON,
   "status": "open",
   "attachments": $ATTACHMENTS,
   "suggested_actions": $SUGGESTED_ACTIONS,

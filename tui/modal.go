@@ -151,6 +151,11 @@ func (m model) renderConfirmModal() string {
 		body = fmt.Sprintf("Permanently delete %s?\n\n", s.key.Render(m.confirmTitle)) +
 			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
 			s.key.Render("any key") + s.dim.Render("  cancel")
+	case "post_review":
+		title = "Post Review Comments"
+		body = fmt.Sprintf("%s\n\n", s.key.Render(m.confirmTitle)) +
+			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
+			s.key.Render("n / Esc") + s.dim.Render("  cancel")
 	}
 
 	return m.placeModal(buildModalBox(s, title, body))
@@ -177,6 +182,16 @@ func (m model) renderHelpModal() string {
 		row("D", "delete from list") + "\n" +
 		row("c", "chat about follow-up") + "\n" +
 		row("Esc", "exit follow-ups") + "\n" +
+		"\n" +
+		sectionS.Render("Comments Tab") + "\n" +
+		row("a", "select all / deselect all") + "\n" +
+		row("i", "invert selection") + "\n" +
+		row("S", "select by severity (cycle)") + "\n" +
+		row("f", "filter by severity") + "\n" +
+		row("y", "copy body to clipboard") + "\n" +
+		row("E", "edit body in $EDITOR") + "\n" +
+		row("D", "delete comment (confirm)") + "\n" +
+		row("P", "post selected comments to PR") + "\n" +
 		"\n" +
 		sectionS.Render("Work List") + "\n" +
 		row("j / k", "navigate") + "\n" +

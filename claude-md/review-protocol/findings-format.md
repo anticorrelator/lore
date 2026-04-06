@@ -26,7 +26,7 @@ Lens skills produce structured JSON findings that can be consumed by `post-revie
 
 #### Field definitions
 
-- **lens** — Identifier for the lens that produced the findings. Built-in IDs: `correctness`, `security`, `regressions`, `thematic`, `blast-radius`, `test-quality`, `interface-clarity`. Ceremony-registered lenses use their skill name as the lens ID (e.g., `codex-pr-review`). This field is not restricted to the built-in set.
+- **lens** — Identifier for the lens that produced the findings. Built-in IDs: `correctness`, `security`, `regressions`, `thematic`, `blast-radius`, `test-quality`, `interface-clarity`, `user-impact`. Ceremony-registered lenses use their skill name as the lens ID (e.g., `codex-pr-review`). This field is not restricted to the built-in set.
 - **pr** — The PR number (integer).
 - **repo** — Repository in `owner/repo` format. Derived from the current git remote.
 - **findings** — Array of finding objects. Empty array `[]` when the lens finds no issues.
@@ -39,7 +39,7 @@ Lens skills produce structured JSON findings that can be consumed by `post-revie
   - *suggestion*: `**Grounding:** <specific improvement> benefits <beneficiary>.` Example: `**Grounding:** Extracting this into a named function reduces cognitive load for future maintainers reading the auth flow.`
   - *question*: no `**Grounding:**` line required.
 
-  A body missing the `**Grounding:**` line for a `blocking` or `suggestion` finding is incomplete.
+  A body missing the `**Grounding:**` line for a `blocking` or `suggestion` finding is incomplete. Presence alone is not sufficient — the orchestrator evaluates grounding quality against the rubric in `severity.md`. Weak grounding (vague or assertion-only) will be rewritten by the orchestrator before output; unsound grounding (speculative or no causal link) triggers a severity downgrade or drop.
 - **knowledge_context** — Array of knowledge store entries cited during enrichment. Each entry is a string in the format `"entry-title — relevance summary"`. Empty array `[]` when no relevant knowledge was found.
 
 #### Validation rules
@@ -55,7 +55,20 @@ Before a finding body appears in external-facing output — proposed comments, f
 
 The grounding content itself (the concrete failure scenario, improvement claim, or question) must be preserved — it is the substance of the comment. Only the protocol headers and labels are stripped.
 
-Use uncertain framing per the User-Facing Framing rules in `severity.md`: hedge the inference, not the observed code fact.
+**Uncertain framing — hedge the inference, not the observed code fact.** See `review-voice.md` for the full voice guide including uncertain framing patterns, verification urgency by severity, sentence structure, and vocabulary guidance.
+
+**User-facing vocabulary mapping:**
+
+| Internal value | User-facing equivalent |
+|----------------|------------------------|
+| `blocking` findings | `Findings requiring action` |
+| `suggestion` findings | `Improvement opportunities` |
+| `question` findings | `Questions` |
+| Verdict: has blocking | `ACTION NEEDED` |
+| Verdict: suggestions only | `SUGGESTIONS` |
+| Verdict: clean | `CLEAN` |
+
+Internal severity values remain in JSON and sidecar files for routing. User-visible output (section headers, verdict lines, finding descriptions) uses the user-facing equivalents above.
 
 #### Review Code Block Format
 

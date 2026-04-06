@@ -53,6 +53,7 @@ Read review protocol sections (severity classification, enrichment, findings for
 cat ~/.lore/claude-md/review-protocol/severity.md
 cat ~/.lore/claude-md/review-protocol/enrichment.md
 cat ~/.lore/claude-md/review-protocol/findings-format.md
+cat ~/.lore/claude-md/review-protocol/review-voice.md
 ```
 
 For each file with logic changes, apply this methodology:

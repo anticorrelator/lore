@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/followup"
 )
 
 func (m model) View() string {
@@ -485,6 +486,19 @@ func (m model) renderStatusBar(width int) string {
 				hint("ctrl+t", "detail"),
 				hint("Esc", "back to list"),
 				hint("Ctrl+c", "terminate"),
+			}
+		} else if m.followupDetail.ActiveTab() == followup.TabComments {
+			hints = []string{
+				hint("a", "all"),
+				hint("i", "inv"),
+				hint("f", "filter"),
+				hint("y", "copy"),
+				hint("E", "editor"),
+				hint("D", "del"),
+				hint("P", "post"),
+				hint("Tab/Shift-Tab", "cycle tabs"),
+				hint("h/Esc", "back to list"),
+				hint("?", "help"),
 			}
 		} else {
 			hints = []string{

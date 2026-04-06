@@ -13,6 +13,7 @@ The lens review system provides focused, single-concern analysis of PRs. Each le
 | `/pr-test-quality` | `test-quality` | Test coverage, tautological tests, assertion quality, edge cases |
 | `/pr-security` | `security` | Input validation, injection, auth/authz boundaries, cryptographic misuse, secrets exposure |
 | `/pr-interface-clarity` | `interface-clarity` | Function signatures, naming, return types, parameter design, contract explicitness |
+| `/pr-user-impact` | `user-impact` | User and developer workflow impact, design trade-offs, UX regressions |
 | (ceremony) | User-registered via `lore ceremony add pr-review` | Varies |
 
 #### Ceremony Lens Registration
@@ -50,7 +51,7 @@ After the thematic pass, the lead agent selects lenses based on the criteria tab
 
 **Selection modes:**
 
-- **Default** — Correctness + Regressions + Test Quality + Interface Clarity. Applied when no flags override.
+- **Default** — Correctness + Regressions + Test Quality + Interface Clarity + User Impact. Applied when no flags override.
 - **`--thorough`** — All lenses. No signal matching; every lens runs.
 
 **Criteria table:**
@@ -63,6 +64,7 @@ After the thematic pass, the lead agent selects lenses based on the criteria tab
 | Regressions | Modifications to existing behavior, deletions, refactoring of working code, signature changes | All changes are net-new additions with no modifications to existing code |
 | Test Quality | Test files changed, new features without accompanying tests, modified behavior without test updates | No test files in diff AND all behavioral changes have existing test coverage |
 | Interface Clarity | — (always selected in default mode) | — (always selected in default mode) |
+| User Impact | Default — always selected | (n/a) |
 
 **After selection, present the proposed lens set to the user for confirmation before any lens work begins.**
 

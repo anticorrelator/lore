@@ -78,6 +78,7 @@ Read protocol sections for enrichment and escalation rules:
 cat ~/.lore/claude-md/review-protocol/enrichment.md
 cat ~/.lore/claude-md/review-protocol/escalation.md
 cat ~/.lore/claude-md/review-protocol/checklist.md
+cat ~/.lore/claude-md/review-protocol/review-voice.md
 ```
 
 The reviewer's comments from the selected batch are the discussion agenda. Present them one at a time. The agent facilitates — it does not generate its own review topics. The 8-point checklist (from the protocol) is available as a secondary tool after reviewer comments are exhausted (see optional checklist pass below), not as the primary topic source.

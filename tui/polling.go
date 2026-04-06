@@ -91,6 +91,13 @@ func checkDetailMtime(workDir, slug string) tea.Cmd {
 	}
 }
 
+// followupDetailMtimeCheckedMsg carries the result of stat-ing a follow-up item's detail file.
+type followupDetailMtimeCheckedMsg struct {
+	id    string
+	mtime time.Time
+	err   error
+}
+
 // followupIndexMtimeCheckedMsg carries the result of stat-ing _followup_index.json.
 type followupIndexMtimeCheckedMsg struct {
 	mtime time.Time
@@ -106,6 +113,29 @@ func checkFollowupIndexMtime(knowledgeDir string) tea.Cmd {
 			return followupIndexMtimeCheckedMsg{err: err}
 		}
 		return followupIndexMtimeCheckedMsg{mtime: info.ModTime()}
+	}
+}
+
+// checkFollowupDetailMtime stats _meta.json and finding.md in the follow-up item's directory
+// and sends followupDetailMtimeCheckedMsg with the most recent mtime.
+func checkFollowupDetailMtime(knowledgeDir, id string) tea.Cmd {
+	return func() tea.Msg {
+		dir := filepath.Join(knowledgeDir, "_followups", id)
+		files := []string{"_meta.json", "finding.md"}
+		var maxMtime time.Time
+		for _, f := range files {
+			info, err := os.Stat(filepath.Join(dir, f))
+			if err != nil {
+				continue // file may not exist yet
+			}
+			if mt := info.ModTime(); mt.After(maxMtime) {
+				maxMtime = mt
+			}
+		}
+		if maxMtime.IsZero() {
+			return followupDetailMtimeCheckedMsg{id: id, err: errors.New("no detail files found")}
+		}
+		return followupDetailMtimeCheckedMsg{id: id, mtime: maxMtime}
 	}
 }
 
@@ -129,9 +159,12 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 		cmds = append(cmds, checkPlanMtime(m.config.WorkDir, slug))
 		cmds = append(cmds, checkDetailMtime(m.config.WorkDir, slug))
 	}
-	// Poll follow-up index when in stateFollowUps to detect CLI mutations.
+	// Poll follow-up index and current follow-up detail when in stateFollowUps to detect CLI mutations.
 	if m.state == stateFollowUps {
 		cmds = append(cmds, checkFollowupIndexMtime(m.config.KnowledgeDir))
+		if id := m.followupList.CurrentID(); id != "" {
+			cmds = append(cmds, checkFollowupDetailMtime(m.config.KnowledgeDir, id))
+		}
 	}
 	// Touch session files for locally active slugs and discover external sessions.
 	for slug := range m.specPanels {
@@ -219,6 +252,24 @@ func (m model) handlePlanContentRead(msg planContentReadMsg) (model, tea.Cmd) {
 	dm, cmd := m.detail.Update(work.DetailPlanRefreshedMsg{Slug: msg.slug, Content: msg.content})
 	m.detail = dm
 	return m, cmd
+}
+
+// handleFollowupDetailMtimeChecked compares the follow-up detail file mtime and triggers
+// a detail reload when the file has changed.
+func (m model) handleFollowupDetailMtimeChecked(msg followupDetailMtimeCheckedMsg) (model, tea.Cmd) {
+	if msg.err != nil || msg.id != m.followupDetail.CurrentID() {
+		return m, nil
+	}
+	if m.lastFollowupDetailMtime.IsZero() {
+		m.lastFollowupDetailMtime = msg.mtime // baseline initialization
+		return m, nil
+	}
+	if !msg.mtime.Equal(m.lastFollowupDetailMtime) {
+		m.lastFollowupDetailMtime = msg.mtime
+		m.followupDetail.PreserveTab()
+		return m, followup.LoadDetail(m.config.KnowledgeDir, msg.id)
+	}
+	return m, nil
 }
 
 // handleDetailMtimeChecked compares the detail file mtime and triggers a full detail

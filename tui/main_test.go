@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -667,6 +669,188 @@ func TestHandlePanelRoutingEntitySpecificKeyNotConsumed(t *testing.T) {
 	}
 }
 
+// --- leaveFollowups / w-key / ListDismissedMsg tests ---
+
+func TestWKeyInStateFollowUpsYieldsWorkItemsLoadedMsg(t *testing.T) {
+	m := minimalModel(stateFollowUps, nil, nil)
+	m.config.WorkDir = t.TempDir()
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("w")})
+
+	nm := next.(model)
+	if nm.state != stateWork {
+		t.Errorf("state = %v, want stateWork", nm.state)
+	}
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd from w key in stateFollowUps")
+	}
+	msg := cmd()
+	if _, ok := msg.(workItemsLoadedMsg); !ok {
+		t.Errorf("cmd() produced %T, want workItemsLoadedMsg", msg)
+	}
+}
+
+func TestHandleIndexPollTickExcludesCheckFollowupDetailMtimeInStateWork(t *testing.T) {
+	m := minimalModel(stateWork, nil, nil)
+	m.config.KnowledgeDir = t.TempDir()
+	m.config.WorkDir = t.TempDir()
+	m.indexPath = "/dev/null"
+
+	_, cmd := m.handleIndexPollTick()
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd from handleIndexPollTick")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected tea.BatchMsg, got %T", msg)
+	}
+
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		result := c()
+		if _, ok := result.(followupDetailMtimeCheckedMsg); ok {
+			t.Error("unexpected followupDetailMtimeCheckedMsg in batch when stateWork")
+		}
+	}
+}
+
+func TestHandleIndexPollTickIncludesCheckFollowupDetailMtimeInStateFollowUps(t *testing.T) {
+	fuItems := []followup.FollowUpItem{
+		{ID: "fu-123", Title: "Test FU", Status: "open"},
+	}
+	m := minimalModel(stateFollowUps, nil, fuItems)
+	m.config.KnowledgeDir = t.TempDir()
+	m.config.WorkDir = t.TempDir()
+	m.indexPath = "/dev/null"
+
+	_, cmd := m.handleIndexPollTick()
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd from handleIndexPollTick")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected tea.BatchMsg, got %T", msg)
+	}
+
+	foundFollowupDetailMtime := false
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		result := c()
+		if _, ok := result.(followupDetailMtimeCheckedMsg); ok {
+			foundFollowupDetailMtime = true
+			break
+		}
+	}
+	if !foundFollowupDetailMtime {
+		t.Error("expected followupDetailMtimeCheckedMsg in batch when stateFollowUps with currentID set")
+	}
+}
+
+func TestListDismissedMsgTransitionsToStateWork(t *testing.T) {
+	m := minimalModel(stateFollowUps, nil, nil)
+	m.config.WorkDir = t.TempDir()
+
+	next, cmd := m.Update(followup.ListDismissedMsg{})
+
+	nm := next.(model)
+	if nm.state != stateWork {
+		t.Errorf("state = %v, want stateWork", nm.state)
+	}
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd from ListDismissedMsg")
+	}
+	msg := cmd()
+	if _, ok := msg.(workItemsLoadedMsg); !ok {
+		t.Errorf("cmd() produced %T, want workItemsLoadedMsg", msg)
+	}
+}
+
+func TestLeaveFollowupsTransitionsState(t *testing.T) {
+	m := minimalModel(stateFollowUps, nil, nil)
+	m.config.WorkDir = t.TempDir()
+
+	cmd := m.leaveFollowups()
+
+	if m.state != stateWork {
+		t.Errorf("state = %v, want stateWork", m.state)
+	}
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd from leaveFollowups()")
+	}
+	msg := cmd()
+	if _, ok := msg.(workItemsLoadedMsg); !ok {
+		t.Errorf("cmd() produced %T, want workItemsLoadedMsg", msg)
+	}
+}
+
+// --- handleFollowupDetailMtimeChecked tests ---
+
+func TestHandleFollowupDetailMtimeCheckedRejectsStaleID(t *testing.T) {
+	fuItems := []followup.FollowUpItem{
+		{ID: "fu-current", Title: "Current FU", Status: "open"},
+	}
+	m := minimalModel(stateFollowUps, nil, fuItems)
+	m.config.KnowledgeDir = t.TempDir()
+	m.followupDetail.SetID("fu-current") //nolint:errcheck
+
+	// Send a msg with a different (stale) ID.
+	staleMsg := followupDetailMtimeCheckedMsg{
+		id:    "fu-stale",
+		mtime: time.Now(),
+	}
+	_, cmd := m.handleFollowupDetailMtimeChecked(staleMsg)
+	if cmd != nil {
+		t.Errorf("expected nil cmd for stale msg.id, got non-nil")
+	}
+}
+
+func TestHandleFollowupDetailMtimeCheckedMtimeChangeProducesDetailLoadedMsg(t *testing.T) {
+	knowledgeDir := t.TempDir()
+	id := "fu-watch"
+
+	// Create the minimal _meta.json so LoadFollowUpDetail succeeds.
+	fuDir := knowledgeDir + "/_followups/" + id
+	if err := os.MkdirAll(fuDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	metaJSON := `{"id":"fu-watch","title":"Watch FU","status":"open","source":"test","attachments":[],"suggested_actions":[]}`
+	if err := os.WriteFile(fuDir+"/_meta.json", []byte(metaJSON), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	fuItems := []followup.FollowUpItem{
+		{ID: id, Title: "Watch FU", Status: "open"},
+	}
+	m := minimalModel(stateFollowUps, nil, fuItems)
+	m.config.KnowledgeDir = knowledgeDir
+	m.followupDetail.SetID(id) //nolint:errcheck
+
+	// Establish a non-zero baseline mtime so the handler sees a change.
+	baseline := time.Now().Add(-time.Second)
+	m.lastFollowupDetailMtime = baseline
+
+	newMtime := time.Now()
+	msg := followupDetailMtimeCheckedMsg{id: id, mtime: newMtime}
+	nm, cmd := m.handleFollowupDetailMtimeChecked(msg)
+
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd on mtime change")
+	}
+	result := cmd()
+	if _, ok := result.(followup.DetailLoadedMsg); !ok {
+		t.Errorf("cmd() produced %T, want followup.DetailLoadedMsg", result)
+	}
+	if nm.lastFollowupDetailMtime != newMtime {
+		t.Errorf("lastFollowupDetailMtime not updated: got %v, want %v", nm.lastFollowupDetailMtime, newMtime)
+	}
+}
+
 // --- Test helpers ---
 
 func assertKeyMsg(t *testing.T, msg tea.Msg) tea.KeyMsg {
@@ -683,4 +867,400 @@ func assertKeyString(t *testing.T, km tea.KeyMsg, want string) {
 	if km.String() != want {
 		t.Errorf("expected %q, got %q", want, km.String())
 	}
+}
+
+// --- Posting flow tests ---
+
+// modelWithLoadedFollowup builds a stateFollowUps model with the Comments tab active
+// and a follow-up detail loaded with the given ProposedReview.
+func modelWithLoadedFollowup(t *testing.T, id string, review *followup.ProposedReview, selectedCount int) model {
+	t.Helper()
+	m := minimalModel(stateFollowUps, nil, nil)
+	m.state = stateFollowUps
+	m.focusedPanel = panelRight
+	m.width = 120
+	m.height = 40
+
+	// Build a detail with ProposedComments.
+	detail := &followup.FollowUpDetail{
+		ID:               id,
+		Title:            "Test Follow-Up",
+		Status:           "reviewed",
+		Source:           "pr-review",
+		Attachments:      []followup.Attachment{},
+		SuggestedActions: []followup.SuggestedAction{},
+		ProposedComments: review,
+	}
+
+	// Inject the loaded detail into the followupDetail model.
+	fd, _ := m.followupDetail.Update(followup.DetailLoadedMsg{ID: id, Detail: detail})
+	m.followupDetail = fd
+
+	// Set the detail's ID so CurrentID() returns it.
+	_ = m.followupDetail.SetID(id)
+	// Re-inject since SetID resets state.
+	fd, _ = m.followupDetail.Update(followup.DetailLoadedMsg{ID: id, Detail: detail})
+	m.followupDetail = fd
+
+	// Activate the Comments tab.
+	for i := 0; i < 10; i++ {
+		if m.followupDetail.ActiveTab() == followup.TabComments {
+			break
+		}
+		fd, _ := m.followupDetail.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m.followupDetail = fd
+	}
+
+	return m
+}
+
+func TestPKeyTriggersConfirmModalWithSelectedComments(t *testing.T) {
+	review := &followup.ProposedReview{
+		PR: 42, Owner: "anticorrelator", Repo: "lore", HeadSHA: "abc123",
+		Comments: []followup.ProposedComment{
+			{ID: "c1", Path: "a.go", Line: 1, Body: "A.", Severity: "high", Selected: true},
+			{ID: "c2", Path: "b.go", Line: 2, Body: "B.", Severity: "low", Selected: false},
+		},
+	}
+	m := modelWithLoadedFollowup(t, "test-fu", review, 1)
+
+	if m.followupDetail.ActiveTab() != followup.TabComments {
+		t.Fatalf("pre-condition: active tab should be TabComments, got %v", m.followupDetail.ActiveTab())
+	}
+	if m.followupDetail.SelectedCount() != 1 {
+		t.Fatalf("pre-condition: SelectedCount = %d, want 1", m.followupDetail.SelectedCount())
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	nm := next.(model)
+
+	if nm.confirmAction != "post_review" {
+		t.Errorf("confirmAction = %q, want %q", nm.confirmAction, "post_review")
+	}
+	if nm.confirmCount != 1 {
+		t.Errorf("confirmCount = %d, want 1", nm.confirmCount)
+	}
+	if nm.confirmSlug != "test-fu" {
+		t.Errorf("confirmSlug = %q, want %q", nm.confirmSlug, "test-fu")
+	}
+}
+
+func TestPKeyWithZeroSelectedSetsFlashErr(t *testing.T) {
+	review := &followup.ProposedReview{
+		PR: 42, Owner: "anticorrelator", Repo: "lore", HeadSHA: "abc123",
+		Comments: []followup.ProposedComment{
+			{ID: "c1", Path: "a.go", Line: 1, Body: "A.", Severity: "high", Selected: false},
+		},
+	}
+	m := modelWithLoadedFollowup(t, "test-fu-zero", review, 0)
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	nm := next.(model)
+
+	if nm.confirmAction != "" {
+		t.Errorf("confirmAction should not be set when no comments selected, got %q", nm.confirmAction)
+	}
+	if nm.flashErr == "" {
+		t.Error("flashErr should be set when no comments selected")
+	}
+}
+
+func TestPKeyWithoutPRMetadataSetsFlashErr(t *testing.T) {
+	// Missing owner/repo/pr/sha → no valid metadata.
+	review := &followup.ProposedReview{
+		PR: 0, Owner: "", Repo: "", HeadSHA: "",
+		Comments: []followup.ProposedComment{
+			{ID: "c1", Path: "a.go", Line: 1, Body: "A.", Severity: "high", Selected: true},
+		},
+	}
+	m := modelWithLoadedFollowup(t, "test-fu-nometa", review, 1)
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	nm := next.(model)
+
+	if nm.confirmAction != "" {
+		t.Errorf("confirmAction should not be set without PR metadata, got %q", nm.confirmAction)
+	}
+	if nm.flashErr == "" {
+		t.Error("flashErr should be set when PR metadata is missing")
+	}
+}
+
+func TestPostReviewCompleteMsgHandledCorrectly(t *testing.T) {
+	m := minimalModel(stateFollowUps, nil, nil)
+	m.config.KnowledgeDir = t.TempDir()
+
+	// PostReviewCompleteMsg with no error should set flashErr to success message
+	// and emit a cmd to reload the detail.
+	next, cmd := m.Update(followup.PostReviewCompleteMsg{ID: "fu-1", PostedCount: 2, Err: nil})
+	nm := next.(model)
+
+	if !strings.Contains(nm.flashErr, "2") {
+		t.Errorf("flashErr should contain posted count on success, got %q", nm.flashErr)
+	}
+	if cmd == nil {
+		t.Error("PostReviewCompleteMsg should emit a cmd (reload detail)")
+	}
+}
+
+func TestPostReviewCompleteMsgWithErrorSetsFlashErr(t *testing.T) {
+	m := minimalModel(stateFollowUps, nil, nil)
+	m.config.KnowledgeDir = t.TempDir()
+
+	next, _ := m.Update(followup.PostReviewCompleteMsg{
+		ID: "fu-1", PostedCount: 0, Err: fmt.Errorf("auth failed"),
+	})
+	nm := next.(model)
+
+	if nm.flashErr == "" {
+		t.Error("flashErr should be set on PostReviewCompleteMsg error")
+	}
+	if !strings.Contains(nm.flashErr, "auth failed") {
+		t.Errorf("flashErr = %q, want it to contain 'auth failed'", nm.flashErr)
+	}
+}
+
+// --- terminalMode sync integration tests ---
+//
+// Each test below covers one of the 6 followup selection paths and verifies
+// that terminalMode is synced to true when a spec panel is pre-registered for
+// the target follow-up ID. Tests dispatch messages directly to model.Update so
+// they exercise the real routing logic end-to-end.
+
+// fuModelWithSpecPanel returns a stateFollowUps model with a spec panel
+// pre-registered for id. The list is seeded with fuItems so cursor navigation works.
+func fuModelWithSpecPanel(fuItems []followup.FollowUpItem, id string) model {
+	m := minimalModel(stateFollowUps, nil, fuItems)
+	m.focusedPanel = panelLeft
+	m.setSpecPanel(id, work.NewSpecPanelModel(id))
+	return m
+}
+
+// TestFollowupSelectedMsgSyncsTerminalMode verifies that FollowUpSelectedMsg
+// (path 1: Enter key) sets terminalMode=true when a spec panel exists.
+func TestFollowupSelectedMsgSyncsTerminalMode(t *testing.T) {
+	id := "fu-with-panel"
+	fuItems := []followup.FollowUpItem{
+		{ID: id, Title: "Panel FU", Status: "open"},
+	}
+	m := fuModelWithSpecPanel(fuItems, id)
+	m.terminalMode = false
+
+	next, _ := m.Update(followup.FollowUpSelectedMsg{Item: fuItems[0]})
+	nm := next.(model)
+
+	if !nm.terminalMode {
+		t.Error("terminalMode should be true after FollowUpSelectedMsg when spec panel exists")
+	}
+}
+
+// TestFollowupSelectedMsgNoSpecPanelLeavesTerminalModeOff verifies that
+// FollowUpSelectedMsg does not set terminalMode when no spec panel is registered.
+func TestFollowupSelectedMsgNoSpecPanelLeavesTerminalModeOff(t *testing.T) {
+	id := "fu-no-panel"
+	fuItems := []followup.FollowUpItem{
+		{ID: id, Title: "No-Panel FU", Status: "open"},
+	}
+	m := minimalModel(stateFollowUps, nil, fuItems)
+	m.terminalMode = false
+
+	next, _ := m.Update(followup.FollowUpSelectedMsg{Item: fuItems[0]})
+	nm := next.(model)
+
+	if nm.terminalMode {
+		t.Error("terminalMode should remain false after FollowUpSelectedMsg when no spec panel")
+	}
+}
+
+// TestIndexLoadedMsgSyncsTerminalMode verifies that IndexLoadedMsg (path 3:
+// initial load/reload) sets terminalMode=true when the first visible item has
+// a pre-registered spec panel.
+func TestIndexLoadedMsgSyncsTerminalMode(t *testing.T) {
+	id := "fu-indexed"
+	fuItems := []followup.FollowUpItem{
+		{ID: id, Title: "Indexed FU", Status: "open"},
+	}
+	// Start with an empty list (no current ID) so IndexLoadedMsg sees a new item.
+	m := minimalModel(stateFollowUps, nil, nil)
+	m.setSpecPanel(id, work.NewSpecPanelModel(id))
+	m.terminalMode = false
+
+	next, _ := m.Update(followup.IndexLoadedMsg{Items: fuItems, Err: nil})
+	nm := next.(model)
+
+	if !nm.terminalMode {
+		t.Error("terminalMode should be true after IndexLoadedMsg when spec panel exists for first item")
+	}
+}
+
+// TestLoadDetailMsgSyncsTerminalMode verifies that LoadDetailMsg (path 4:
+// hover-prefetch) sets terminalMode=true when a spec panel exists for the target ID.
+func TestLoadDetailMsgSyncsTerminalMode(t *testing.T) {
+	id := "fu-hover"
+	fuItems := []followup.FollowUpItem{
+		{ID: id, Title: "Hover FU", Status: "open"},
+	}
+	m := fuModelWithSpecPanel(fuItems, id)
+	m.terminalMode = false
+
+	next, _ := m.Update(followup.LoadDetailMsg{ID: id})
+	nm := next.(model)
+
+	if !nm.terminalMode {
+		t.Error("terminalMode should be true after LoadDetailMsg when spec panel exists")
+	}
+}
+
+// TestLoadDetailMsgNoSpecPanelLeavesTerminalModeOff verifies that LoadDetailMsg
+// does not set terminalMode when no spec panel is registered for the target ID.
+func TestLoadDetailMsgNoSpecPanelLeavesTerminalModeOff(t *testing.T) {
+	id := "fu-hover-no-panel"
+	fuItems := []followup.FollowUpItem{
+		{ID: id, Title: "Hover No-Panel FU", Status: "open"},
+	}
+	m := minimalModel(stateFollowUps, nil, fuItems)
+	m.terminalMode = false
+
+	next, _ := m.Update(followup.LoadDetailMsg{ID: id})
+	nm := next.(model)
+
+	if nm.terminalMode {
+		t.Error("terminalMode should remain false after LoadDetailMsg when no spec panel")
+	}
+}
+
+// TestFollowupLeftPanelKeySyncsTerminalMode verifies that a j/k key press on
+// the left panel (path 6) syncs terminalMode when the new cursor item has a
+// pre-registered spec panel. The list has two items; cursor starts on item[0]
+// (no panel) and j moves to item[1] (has panel).
+func TestFollowupLeftPanelKeySyncsTerminalMode(t *testing.T) {
+	idNone := "fu-no-panel-left"
+	idPanel := "fu-with-panel-left"
+	fuItems := []followup.FollowUpItem{
+		{ID: idNone, Title: "No Panel FU", Status: "open"},
+		{ID: idPanel, Title: "Panel FU", Status: "open"},
+	}
+	m := minimalModel(stateFollowUps, nil, fuItems)
+	m.setSpecPanel(idPanel, work.NewSpecPanelModel(idPanel))
+	m.focusedPanel = panelLeft
+	m.terminalMode = false
+	// Cursor starts at 0 (idNone); pressing j moves it to 1 (idPanel).
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	nm := next.(model)
+
+	if !nm.terminalMode {
+		t.Error("terminalMode should be true after j key moves cursor to item with spec panel")
+	}
+}
+
+// TestFollowupLeftPanelKeyNoSpecPanelLeavesTerminalModeOff verifies that a j/k
+// key press does not set terminalMode when the new item has no spec panel.
+func TestFollowupLeftPanelKeyNoSpecPanelLeavesTerminalModeOff(t *testing.T) {
+	id1 := "fu-a"
+	id2 := "fu-b"
+	fuItems := []followup.FollowUpItem{
+		{ID: id1, Title: "FU A", Status: "open"},
+		{ID: id2, Title: "FU B", Status: "open"},
+	}
+	m := minimalModel(stateFollowUps, nil, fuItems)
+	m.focusedPanel = panelLeft
+	m.terminalMode = false
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	nm := next.(model)
+
+	if nm.terminalMode {
+		t.Error("terminalMode should remain false after j key when new item has no spec panel")
+	}
+}
+
+// --- loadFollowupDetail unit tests ---
+
+// cmdContainsMouseEnable reports whether cmd, when executed, produces a BatchMsg
+// that contains tea.EnableMouseCellMotion (identified by the returned msg type name).
+func cmdContainsMouseEnable(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		// Single cmd — check directly.
+		return fmt.Sprintf("%T", msg) == "tea.enableMouseCellMotionMsg"
+	}
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		if fmt.Sprintf("%T", c()) == "tea.enableMouseCellMotionMsg" {
+			return true
+		}
+	}
+	return false
+}
+
+// TestLoadFollowupDetailSyncsTerminalMode tests loadFollowupDetail directly for
+// three cases: (a) spec panel + panelRight → terminalMode=true, cmd contains
+// EnableMouseCellMotion; (b) no spec panel → terminalMode=false, cmd does not
+// contain EnableMouseCellMotion; (c) spec panel + panelLeft → terminalMode=true,
+// cmd is NOT a batch (no EnableMouseCellMotion injected).
+func TestLoadFollowupDetailSyncsTerminalMode(t *testing.T) {
+	const id = "fu-test"
+	panel := work.NewSpecPanelModel(id)
+
+	t.Run("spec_panel_right_focus", func(t *testing.T) {
+		m := minimalModel(stateFollowUps, nil, nil)
+		m.focusedPanel = panelRight
+		m.setSpecPanel(id, panel)
+
+		cmd := m.loadFollowupDetail(id)
+
+		if !m.terminalMode {
+			t.Error("terminalMode should be true when spec panel exists")
+		}
+		if m.lastFollowupDetailMtime != (time.Time{}) {
+			t.Error("lastFollowupDetailMtime should be reset to zero")
+		}
+		if !cmdContainsMouseEnable(cmd) {
+			t.Error("cmd should contain EnableMouseCellMotion when terminalMode && focusedPanel==panelRight")
+		}
+	})
+
+	t.Run("no_spec_panel", func(t *testing.T) {
+		m := minimalModel(stateFollowUps, nil, nil)
+		m.focusedPanel = panelRight
+		m.terminalMode = true // pre-set; should be cleared
+
+		cmd := m.loadFollowupDetail(id)
+
+		if m.terminalMode {
+			t.Error("terminalMode should be false when no spec panel exists")
+		}
+		if m.lastFollowupDetailMtime != (time.Time{}) {
+			t.Error("lastFollowupDetailMtime should be reset to zero")
+		}
+		if cmdContainsMouseEnable(cmd) {
+			t.Error("cmd should not contain EnableMouseCellMotion when no spec panel")
+		}
+	})
+
+	t.Run("spec_panel_left_focus", func(t *testing.T) {
+		m := minimalModel(stateFollowUps, nil, nil)
+		m.focusedPanel = panelLeft
+		m.setSpecPanel(id, panel)
+
+		cmd := m.loadFollowupDetail(id)
+
+		if !m.terminalMode {
+			t.Error("terminalMode should be true when spec panel exists")
+		}
+		if m.lastFollowupDetailMtime != (time.Time{}) {
+			t.Error("lastFollowupDetailMtime should be reset to zero")
+		}
+		// When focus is on the left panel, EnableMouseCellMotion should NOT be batched.
+		if cmdContainsMouseEnable(cmd) {
+			t.Error("cmd should not contain EnableMouseCellMotion when focusedPanel==panelLeft")
+		}
+	})
 }

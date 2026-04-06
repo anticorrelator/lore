@@ -43,6 +43,7 @@ type FollowUpDetail struct {
 	ID               string            `json:"id"`
 	Title            string            `json:"title"`
 	Status           string            `json:"status"`
+	Author           string            `json:"author"`
 	Source           string            `json:"source"`
 	Attachments      []Attachment      `json:"attachments"`
 	SuggestedActions []SuggestedAction `json:"suggested_actions"`
@@ -66,6 +67,7 @@ type followUpMeta struct {
 	ID               string            `json:"id"`
 	Title            string            `json:"title"`
 	Status           string            `json:"status"`
+	Author           string            `json:"author"`
 	Source           string            `json:"source"`
 	Attachments      []Attachment      `json:"attachments"`
 	SuggestedActions []SuggestedAction `json:"suggested_actions"`
@@ -112,6 +114,7 @@ func LoadFollowUpDetail(knowledgeDir, id string) (*FollowUpDetail, error) {
 		ID:               meta.ID,
 		Title:            meta.Title,
 		Status:           meta.Status,
+		Author:           meta.Author,
 		Source:           meta.Source,
 		Attachments:      meta.Attachments,
 		SuggestedActions: meta.SuggestedActions,
@@ -128,16 +131,29 @@ func LoadFollowUpDetail(knowledgeDir, id string) (*FollowUpDetail, error) {
 	// sidecar is not an error — the field stays nil.
 	// The sidecar may be either a ProposedReview wrapper object or a bare
 	// JSON array of comments (the format produced by /pr-review).
+	//
+	// Three-case zero-comment sidecar rule (D19):
+	//   1. Wrapper with valid PR metadata (Owner, Repo, PR>0, HeadSHA non-empty)
+	//      and len(Comments)==0 → keep ProposedComments (tab stays, shows empty state).
+	//   2. Wrapper without valid metadata and len(Comments)==0 → nil (tab disappears).
+	//   3. Bare array with len(comments)==0 → nil (tab disappears).
 	if sidecarBytes, err := os.ReadFile(filepath.Join(itemDir, "proposed-comments.json")); err == nil {
 		var review ProposedReview
-		if json.Unmarshal(sidecarBytes, &review) == nil && len(review.Comments) > 0 {
-			detail.ProposedComments = &review
+		if json.Unmarshal(sidecarBytes, &review) == nil {
+			hasValidMeta := review.Owner != "" && review.Repo != "" && review.PR > 0 && review.HeadSHA != ""
+			if len(review.Comments) > 0 || hasValidMeta {
+				// Case 1: non-empty comments, or wrapper with valid PR metadata.
+				detail.ProposedComments = &review
+			}
+			// Case 2: wrapper without valid metadata and zero comments — leave nil.
 		} else {
 			// Try bare array of comments.
 			var comments []ProposedComment
 			if json.Unmarshal(sidecarBytes, &comments) == nil && len(comments) > 0 {
+				// Case 3 (non-empty): bare array with comments.
 				detail.ProposedComments = &ProposedReview{Comments: comments}
 			}
+			// Case 3 (empty): bare array with zero comments — leave nil.
 		}
 	}
 
@@ -222,6 +238,16 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		}
 		return m, nil
 
+	case ExternalEditDoneMsg:
+		if m.reviewCards != nil {
+			rc := *m.reviewCards
+			var cmd tea.Cmd
+			rc, cmd = rc.Update(msg)
+			m.reviewCards = &rc
+			return m, cmd
+		}
+		return m, nil
+
 	case DetailLoadedMsg:
 		if msg.ID == m.id {
 			m.loading = false
@@ -249,8 +275,6 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 					}
 					m.activeTab = restored
 					m.savedTab = 0
-				} else if m.detail.ProposedComments != nil {
-					m.activeTab = m.tabIndexFor(TabComments)
 				} else {
 					m.activeTab = m.tabIndexFor(TabFinding)
 				}
@@ -353,6 +377,31 @@ func (m DetailModel) Source() string {
 		return ""
 	}
 	return m.detail.Source
+}
+
+// SelectedCount returns the number of currently selected proposed comments, or 0 if none loaded.
+func (m DetailModel) SelectedCount() int {
+	if m.reviewCards == nil {
+		return 0
+	}
+	return m.reviewCards.SelectedCount()
+}
+
+// HasPRMetadata returns true when the loaded sidecar has complete PR posting metadata.
+func (m DetailModel) HasPRMetadata() bool {
+	if m.detail == nil || m.detail.ProposedComments == nil {
+		return false
+	}
+	r := m.detail.ProposedComments
+	return r.Owner != "" && r.Repo != "" && r.PR > 0 && r.HeadSHA != ""
+}
+
+// PRNumber returns the PR number from the loaded sidecar, or 0 if unavailable.
+func (m DetailModel) PRNumber() int {
+	if m.detail == nil || m.detail.ProposedComments == nil {
+		return 0
+	}
+	return m.detail.ProposedComments.PR
 }
 
 // ActiveTab returns the currently active tab ID.
@@ -480,6 +529,12 @@ func (m DetailModel) renderMetaTab() string {
 	statusStr := lipgloss.NewStyle().Foreground(glyphColor).Render(glyph + " " + m.detail.Status)
 	b.WriteString(statusStr)
 	b.WriteString("\n")
+
+	// Author
+	if m.detail.Author != "" {
+		b.WriteString(dimStyle.Render("author: " + m.detail.Author))
+		b.WriteString("\n")
+	}
 
 	// Source
 	if m.detail.Source != "" {

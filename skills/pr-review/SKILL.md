@@ -82,7 +82,7 @@ cat ~/.lore/claude-md/review-protocol/risk-triage.md
 
 **If mode is `--thorough`:** Select all lenses. Skip signal matching.
 
-**Otherwise:** Start with the default set (Correctness + Regressions + Test Quality + Interface Clarity), then:
+**Otherwise:** Start with the default set (Correctness + Regressions + Test Quality + Interface Clarity + User Impact), then:
 1. For each remaining lens (Security, Blast Radius), check trigger signals against the PR's changed files and diff content
 2. If risk tier is High: force-add Security regardless of signals
 3. Apply skip conditions — only skip a lens if ALL its skip conditions are true
@@ -116,6 +116,7 @@ Change types detected: [list]
 | Security | Auth changes detected |
 | Regressions | Default selection |
 | Test Quality | Default selection |
+| User Impact | Default selection |
 | [ceremony] insecure-defaults | Ceremony config |
 
 Proceed with this lens set? You can add or remove lenses before we begin.
@@ -176,6 +177,7 @@ For each selected lens, read its Step 3 methodology:
 | Blast Radius | `skills/pr-blast-radius/SKILL.md` | Blast Radius Analysis |
 | Regressions | `skills/pr-regressions/SKILL.md` | Regressions Analysis |
 | Test Quality | `skills/pr-test-quality/SKILL.md` | Test Quality Analysis |
+| User Impact | `skills/pr-user-impact/SKILL.md` | User Impact Analysis |
 
 For each selected lens, create a task with this structure:
 
@@ -222,10 +224,15 @@ Query the knowledge store for each finding:
 lore search "<topic>" --type knowledge --json --limit 3
 ```
 
+Apply the voice guide when writing finding bodies:
+```bash
+cat ~/.lore/claude-md/review-protocol/review-voice.md
+```
+
 Report back with your findings JSON when complete.
 ```
 
-Spawn one agent per selected lens in parallel. Maximum 5 concurrent agents.
+Spawn one agent per selected lens in parallel. Maximum 6 concurrent agents.
 
 ### 3b-ceremony. Dispatch ceremony lenses
 
@@ -281,13 +288,19 @@ Group findings by `file`. Within each file, identify findings from different len
 
 Apply the severity elevation table from the Cross-Lens Synthesis protocol. Merge compound findings into a single finding with all contributing lens IDs and a merged body.
 
-### 4b. Grounding check
+### 4b. Grounding quality evaluation
 
-For each finding with severity `blocking` or `suggestion`, verify it has a `**Grounding:**` line. If missing:
-- `blocking` without grounding → downgrade to `suggestion`
-- `suggestion` without grounding → drop the finding
+Apply the Grounding Quality Rubric from `severity.md` (already loaded above) to every `blocking` and `suggestion` finding. For each finding, evaluate the `**Grounding:**` content and classify it as **sound**, **weak**, or **unsound**.
 
-Compound findings inherit grounding from their contributing findings — if none were grounded, drop the compound finding.
+**Outcomes by classification:**
+
+- **Sound** — grounding is concrete and proportionate. Pass through unchanged.
+- **Weak** — grounding names a concern but lacks specificity (missing who is affected, when it triggers, or what specifically improves). Rewrite the `**Grounding:**` line with a concrete impact scenario derived from the finding body, diff context, and review brief. Keep the finding's severity intact.
+- **Unsound** — no realistic failure scenario (blocking) or no concrete benefit (suggestion). For `blocking` findings: downgrade to `suggestion` and rewrite the `**Grounding:**` line to match the weaker severity bar. For `suggestion` findings: drop the finding.
+
+**Missing grounding line** — treat the same as unsound: downgrade `blocking` to `suggestion`, drop `suggestion`.
+
+**Compound findings** — evaluate grounding across all contributing findings. If at least one contributing finding has sound or weak grounding, the compound finding qualifies (apply rewrite if the merged grounding is weak). If all contributing findings are unsound or ungrounded, drop the compound finding.
 
 ### 4c. Deduplicate
 
@@ -443,13 +456,20 @@ This step is mandatory and must not be skipped. It has two parts:
 
 The test: if the PR author asks "why does this matter?", the finding must answer with a specific scenario, not a vague assertion. A finding that cannot survive that question is not grounded.
 
-**6d-ii. Strip internal protocol language for external output.** Remove `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, and compound markers from finding bodies. These are internal analytical scaffolding — the author should see the grounding *content* (the concrete impact claim) woven into the finding body, not protocol headers. Use uncertain framing per the User-Facing Framing rules in `severity.md`.
+**6d-ii. Strip internal protocol language for external output.** Remove `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, and compound markers from finding bodies. These are internal analytical scaffolding — the author should see the grounding *content* (the concrete impact claim) woven into the finding body, not protocol headers.
+
+Apply the voice guide when writing external bodies:
+```bash
+cat ~/.lore/claude-md/review-protocol/review-voice.md
+```
 
 ### 6e. Assemble the full report body
 
 Assemble the `--content` value with **all** of the following sections. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
 
-**First line:** One-line diagnostic summary (e.g., `BLOCKING — 2 blocking, 3 suggestions`). This must be the first non-heading line — it appears as the excerpt in the TUI.
+**First line:** One-line diagnostic summary (e.g., `ACTION NEEDED — 2 findings requiring action, 3 improvement opportunities`). This must be the first non-heading line — it appears as the excerpt in the TUI.
+
+**Second line:** `**Author:** @<author>` — the PR author's GitHub handle from the `gh pr view` data fetched in Step 1c.
 
 **Section 1 — PR Narrative** (from 6a):
 
@@ -474,10 +494,17 @@ Include the full finding details from Step 5b with internal protocol headers str
 ```markdown
 ## Review Findings
 
-**Verdict:** <BLOCKING / SUGGESTIONS ONLY / CLEAN>
-**Blocking:** <count> | **Suggestions:** <count> | **Questions:** <count>
+**Verdict:** <ACTION NEEDED / SUGGESTIONS / CLEAN>
+**Findings requiring action:** <count> | **Improvement opportunities:** <count> | **Questions:** <count>
 
-<Findings grouped by severity, internal headers stripped per 6d-ii>
+### Findings requiring action (<count>)
+<findings with internal severity "blocking", headers stripped per 6d-ii>
+
+### Improvement opportunities (<count>)
+<findings with internal severity "suggestion", headers stripped per 6d-ii>
+
+### Questions (<count>)
+<findings with internal severity "question">
 
 ### Supplementary Reports
 
@@ -512,6 +539,7 @@ Pass the **complete report body from 6e** as `--content`:
 bash ~/.lore/scripts/create-followup.sh \
   --source "pr-review" \
   --title "Review: <PR title> (#<N>)" \
+  --author "@<author>" \
   --attachments '[{"type":"pr","ref":"#<N>"}]' \
   --suggested-actions '[{"type": "<type>", "label": "<label>"}]' \
   --proposed-comments '<json array of {path, line, body} objects>' \

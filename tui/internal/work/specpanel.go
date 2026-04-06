@@ -757,6 +757,35 @@ func loadFollowupContext(id, knowledgeDir string) string {
 }
 
 // StartTerminalCmd spawns the claude subprocess for /spec inside a PTY and
+// buildInitialPrompt constructs the prompt string passed to claude at startup.
+// It encodes four modes: followup chat, regular chat, short spec, and full spec.
+func buildInitialPrompt(slug, title, extraContext string, shortMode, chatMode, skipConfirm, followupMode bool) string {
+	var p string
+	if chatMode {
+		if followupMode {
+			p = "/followup-discuss " + slug
+		} else {
+			p = "Let's talk about " + title
+		}
+		if extraContext != "" {
+			p += ": " + extraContext
+		}
+	} else {
+		p = "/spec "
+		if shortMode {
+			p += "short "
+		}
+		p += slug
+		if skipConfirm {
+			p += " --yes"
+		}
+		if extraContext != "" {
+			p += " -- " + extraContext
+		}
+	}
+	return p
+}
+
 // returns SpecProcessStartedMsg with the PTY master, exec.Cmd, and a channel
 // of raw byte chunks read from the PTY. The PTY master is the read/write
 // interface — write user keystrokes, read subprocess output.
@@ -773,29 +802,7 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 		// Build the initial prompt to auto-submit. Passing it as a positional
 		// argument to claude starts an interactive session and submits it
 		// immediately — no PTY-write timing hack needed.
-		var initialPrompt string
-		if chatMode {
-			if followupMode {
-				initialPrompt = "Let's discuss this followup: " + slug
-			} else {
-				initialPrompt = "Let's talk about " + title
-			}
-			if extraContext != "" {
-				initialPrompt += ": " + extraContext
-			}
-		} else {
-			initialPrompt = "/spec "
-			if shortMode {
-				initialPrompt += "short "
-			}
-			initialPrompt += slug
-			if skipConfirm {
-				initialPrompt += " --yes"
-			}
-			if extraContext != "" {
-				initialPrompt += " -- " + extraContext
-			}
-		}
+		initialPrompt := buildInitialPrompt(slug, title, extraContext, shortMode, chatMode, skipConfirm, followupMode)
 
 		// Build args: optionally inject --append-system-prompt before the
 		// positional initialPrompt when followupMode is active.

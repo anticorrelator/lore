@@ -81,7 +81,7 @@ For each unresolved item in the selected batch, determine:
 
 Assign a Conventional Comments label to each item: `suggestion`, `issue`, `question`, `thought`, `nitpick`, or `praise`.
 
-**Grounding:** For each item labeled `issue` or `suggestion`, include a `**Grounding:**` line stating the impact-grounded basis using uncertain language:
+**Grounding:** For each item labeled `issue` or `suggestion`, include a `**Grounding:**` line stating the impact-grounded basis using uncertain language. Use the hedged phrasing patterns from `~/.lore/claude-md/review-protocol/review-voice.md` — key forms:
 - `issue`: `**Grounding:** This may cause <what breaks> for <whom> when <conditions>.`
 - `suggestion`: `**Grounding:** This could benefit <beneficiary> by <specific improvement>.`
 
@@ -284,7 +284,7 @@ List all categorized feedback items from Step 3. Include every item regardless o
 - **Category** column: `Agreed Changes`, `Verification Needed`, or `Deferred`.
 - **Knowledge** column: the `[knowledge: entry-title]` citation from Step 4 enrichment, or `—` if no citation applies.
 - **Reviewer Quote** column: the verbatim reviewer comment (truncated to ~80 chars if long; use `...` to indicate truncation).
-- **Summary** column: impact-grounded uncertain framing derived from the analysis in Step 3. Use the hedge form: "This may cause..." for issues, "This could benefit..." for suggestions, or the reviewer's open question for question-labeled items. Do not restate the observed code fact — summarize the inferred impact. Do not include internal analysis headers (`**Grounding:**`, `**Severity:**`, etc.) — these are internal protocol language and must not appear in the report.
+- **Summary** column: impact-grounded uncertain framing derived from the analysis in Step 3. Follow the hedged phrasing patterns in `~/.lore/claude-md/review-protocol/review-voice.md` — key forms: "This may cause..." for issues, "This could benefit..." for suggestions, or the reviewer's open question for question-labeled items. Do not restate the observed code fact — summarize the inferred impact. Do not include internal analysis headers (`**Grounding:**`, `**Severity:**`, etc.) — these are internal protocol language and must not appear in the report.
 
 ### 7c. Persist the report
 

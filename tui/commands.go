@@ -125,6 +125,17 @@ func runDeleteFollowUp(id string) tea.Cmd {
 	}
 }
 
+// runPostReview runs post-proposed-review.sh and returns PostReviewCompleteMsg when done.
+// postedCount is captured from the caller (SelectedCount at dispatch time).
+func runPostReview(knowledgeDir, followupID string, postedCount int) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("post-proposed-review.sh", followupID, "--force")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		err := cmd.Run()
+		return followup.PostReviewCompleteMsg{ID: followupID, PostedCount: postedCount, Err: err}
+	}
+}
+
 // runDelete runs lore work delete and returns DeleteFinishedMsg when done.
 func runDelete(slug string) tea.Cmd {
 	return func() tea.Msg {
