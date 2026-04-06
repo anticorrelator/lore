@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -15,6 +16,33 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/search"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
+
+// initFinishedMsg is sent after the onboarding init scripts complete.
+type initFinishedMsg struct {
+	Err error
+}
+
+// runInit runs init-repo.sh then init-work.sh sequentially, returning initFinishedMsg.
+// Both scripts are idempotent; if init-repo fails, init-work is skipped.
+func runInit(projectDir string) tea.Cmd {
+	return func() tea.Msg {
+		repoCmd := exec.Command("bash", os.ExpandEnv("$HOME/.lore/scripts/init-repo.sh"))
+		repoCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		repoCmd.Dir = projectDir
+		if err := repoCmd.Run(); err != nil {
+			return initFinishedMsg{Err: err}
+		}
+
+		workCmd := exec.Command("bash", os.ExpandEnv("$HOME/.lore/scripts/init-work.sh"))
+		workCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		workCmd.Dir = projectDir
+		if err := workCmd.Run(); err != nil {
+			return initFinishedMsg{Err: err}
+		}
+
+		return initFinishedMsg{}
+	}
+}
 
 // workAIFinishedMsg is sent after lore work ai returns.
 type workAIFinishedMsg struct {

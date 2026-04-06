@@ -103,6 +103,9 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 }
 
 func (m model) Init() tea.Cmd {
+	if m.state == stateOnboarding {
+		return nil
+	}
 	return tea.Batch(
 		loadWorkItems(m.config.WorkDir),
 		loadPRStatus(),
@@ -287,6 +290,19 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case initFinishedMsg:
+		m.initLoading = false
+		if msg.Err != nil {
+			m.flashErr = fmt.Sprintf("init failed: %v", msg.Err)
+			return m, nil
+		}
+		m.state = stateWork
+		return m, tea.Batch(
+			loadWorkItems(m.config.WorkDir),
+			loadPRStatus(),
+			indexPollTick(),
+		)
+
 	case workAIFinishedMsg:
 		m.aiLoading = false
 		m.aiCancel = nil
@@ -447,6 +463,22 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case tea.KeyMsg:
 		// Clear any transient flash error on the next key press.
 		m.flashErr = ""
+
+		// Onboarding state: only accept Enter (init), q, ctrl+c, ctrl+d (quit).
+		if m.state == stateOnboarding {
+			switch msg.String() {
+			case "enter":
+				if !m.initLoading {
+					m.initLoading = true
+					return m, runInit(m.config.ProjectDir)
+				}
+				return m, nil
+			case "q", "ctrl+c", "ctrl+d":
+				return m, tea.Quit
+			default:
+				return m, nil
+			}
+		}
 
 		// Edit-mode guard: when the follow-up detail has an active inline textarea,
 		// skip all global shortcuts (except ctrl+c and ctrl+d) and route directly
@@ -686,6 +718,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.lastFollowupDetailMtime = time.Time{}
 				m.focusedPanel = panelLeft
 				return m, followup.LoadIndexCmd(m.config.KnowledgeDir)
+			}
+		case "w":
+			if m.state == stateFollowUps && !m.terminalMode {
+				cmd := m.leaveFollowups()
+				return m, cmd
 			}
 		case "esc":
 			// Esc from right panel (detail mode only): back to list.

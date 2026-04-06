@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -13,6 +14,10 @@ import (
 func (m model) View() string {
 	if m.err != nil {
 		return fmt.Sprintf("Error: %v\n\nPress q to quit.\n", m.err)
+	}
+
+	if m.state == stateOnboarding {
+		return m.viewOnboarding()
 	}
 
 	if m.state == stateKnowledge {
@@ -45,6 +50,26 @@ func (m model) View() string {
 	return base
 }
 
+
+// viewOnboarding renders a full-screen centered welcome view for first-time initialization.
+func (m model) viewOnboarding() string {
+	titleS := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
+	dimS := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	repoName := filepath.Base(m.config.ProjectDir)
+	title := titleS.Render(repoName)
+
+	var action string
+	if m.initLoading {
+		action = dimS.Render("Initializing...")
+	} else {
+		action = dimS.Render("Press Enter to initialize")
+	}
+	quit := dimS.Render("Press q to quit")
+
+	content := title + "\n\n" + action + "\n" + quit
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+}
 
 // truncateLine clips s to at most maxW visual columns, appending "…" if needed.
 func truncateLine(s string, maxW int) string {
@@ -429,6 +454,15 @@ func (m model) renderStatusBar(width int) string {
 
 	var hints []string
 	switch m.state {
+	case stateOnboarding:
+		if m.initLoading {
+			hints = []string{dimS.Render("Initializing...")}
+		} else {
+			hints = []string{
+				hint("Enter", "initialize"),
+				hint("q", "quit"),
+			}
+		}
 	case stateWork:
 		if m.focusedPanel == panelLeft {
 			hints = []string{
@@ -476,6 +510,7 @@ func (m model) renderStatusBar(width int) string {
 				hint("Enter", "detail"),
 				hint("A", "dismiss"),
 				hint("D", "delete"),
+				hint("w", "work list"),
 				hint("Esc", "exit"),
 				hint("?", "help"),
 			}

@@ -24,6 +24,7 @@ const (
 	stateWork appState = iota
 	stateKnowledge
 	stateFollowUps
+	stateOnboarding
 )
 
 // panelFocus tracks which panel has keyboard focus in split-pane mode.
@@ -162,6 +163,10 @@ type model struct {
 	// flashErr holds a transient error message shown in the status bar.
 	// It is cleared on the next key press.
 	flashErr string
+
+	// initLoading is true while the background initialization command is running
+	// during the onboarding flow.
+	initLoading bool
 }
 
 // panelCallbacks abstracts entity-specific operations for shared routing helpers.

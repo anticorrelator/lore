@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,45 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
+
+func TestClassifyStartupState_BothPresent(t *testing.T) {
+	dir := t.TempDir()
+	workDir := filepath.Join(dir, "_work")
+	os.MkdirAll(workDir, 0755)
+	os.WriteFile(filepath.Join(dir, "_manifest.json"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(workDir, "_index.json"), []byte("[]"), 0644)
+
+	cfg := config.Config{KnowledgeDir: dir, WorkDir: workDir}
+	if got := classifyStartupState(cfg); got != stateWork {
+		t.Errorf("both markers present: got %d, want stateWork (%d)", got, stateWork)
+	}
+}
+
+func TestClassifyStartupState_ManifestMissing(t *testing.T) {
+	dir := t.TempDir()
+	workDir := filepath.Join(dir, "_work")
+	os.MkdirAll(workDir, 0755)
+	// No _manifest.json
+	os.WriteFile(filepath.Join(workDir, "_index.json"), []byte("[]"), 0644)
+
+	cfg := config.Config{KnowledgeDir: dir, WorkDir: workDir}
+	if got := classifyStartupState(cfg); got != stateOnboarding {
+		t.Errorf("manifest missing: got %d, want stateOnboarding (%d)", got, stateOnboarding)
+	}
+}
+
+func TestClassifyStartupState_IndexMissing(t *testing.T) {
+	dir := t.TempDir()
+	workDir := filepath.Join(dir, "_work")
+	os.MkdirAll(workDir, 0755)
+	os.WriteFile(filepath.Join(dir, "_manifest.json"), []byte("{}"), 0644)
+	// No _index.json
+
+	cfg := config.Config{KnowledgeDir: dir, WorkDir: workDir}
+	if got := classifyStartupState(cfg); got != stateOnboarding {
+		t.Errorf("index missing: got %d, want stateOnboarding (%d)", got, stateOnboarding)
+	}
+}
 
 // fakeCSIMsg simulates bubbletea's unexported unknownCSISequenceMsg,
 // which is a []byte ([]uint8 under the hood). The reflect check in
@@ -1544,5 +1584,138 @@ func TestPromoteRequestMsgWithFindingsJSONDispatchesToRunPromote(t *testing.T) {
 
 	if cmd == nil {
 		t.Fatal("PromoteRequestMsg with FindingsJSON: expected non-nil Cmd from runPromoteFollowUp")
+	}
+}
+
+// TestStateOnboardingRendersWelcomeScreen verifies that a model in stateOnboarding
+// renders the welcome/onboarding screen rather than the split-pane work view.
+func TestStateOnboardingRendersWelcomeScreen(t *testing.T) {
+	m := minimalModel(stateOnboarding, nil, nil)
+	m.config.ProjectDir = "/tmp/my-repo"
+	m.width = 80
+	m.height = 24
+
+	out := m.View()
+
+	// Should contain the repo name.
+	if !strings.Contains(out, "my-repo") {
+		t.Errorf("onboarding view should contain repo name 'my-repo', got:\n%s", out)
+	}
+	// Should contain the Enter hint.
+	if !strings.Contains(out, "Press Enter to initialize") {
+		t.Errorf("onboarding view should contain 'Press Enter to initialize', got:\n%s", out)
+	}
+	// Should contain the quit hint.
+	if !strings.Contains(out, "Press q to quit") {
+		t.Errorf("onboarding view should contain 'Press q to quit', got:\n%s", out)
+	}
+	// Should NOT contain split-pane elements (tab indicator with "work" and "follow-ups").
+	if strings.Contains(out, "follow-ups") {
+		t.Errorf("onboarding view should NOT render the split-pane tab indicator, but found 'follow-ups'")
+	}
+}
+
+// TestStateOnboardingEnterDispatchesInit verifies that pressing Enter in
+// stateOnboarding sets initLoading=true and returns a non-nil Cmd (runInit).
+func TestStateOnboardingEnterDispatchesInit(t *testing.T) {
+	m := minimalModel(stateOnboarding, nil, nil)
+	m.config.ProjectDir = "/tmp/my-repo"
+	m.width = 80
+	m.height = 24
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := next.(model)
+
+	if !updated.initLoading {
+		t.Error("Enter in stateOnboarding should set initLoading=true")
+	}
+	if cmd == nil {
+		t.Error("Enter in stateOnboarding should return a non-nil Cmd (runInit)")
+	}
+	if updated.state != stateOnboarding {
+		t.Errorf("state should remain stateOnboarding, got %v", updated.state)
+	}
+}
+
+// TestStateOnboardingEnterWhileLoadingIsNoop verifies that pressing Enter
+// while initLoading is already true is a no-op (no duplicate init).
+func TestStateOnboardingEnterWhileLoadingIsNoop(t *testing.T) {
+	m := minimalModel(stateOnboarding, nil, nil)
+	m.config.ProjectDir = "/tmp/my-repo"
+	m.initLoading = true
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if cmd != nil {
+		t.Error("Enter while initLoading=true should return nil Cmd, got non-nil")
+	}
+}
+
+// TestInitFinishedMsgSuccessTransitionsToStateWork verifies that a successful
+// initFinishedMsg transitions the model from stateOnboarding to stateWork.
+func TestInitFinishedMsgSuccessTransitionsToStateWork(t *testing.T) {
+	m := minimalModel(stateOnboarding, nil, nil)
+	m.config.ProjectDir = "/tmp/my-repo"
+	m.config.WorkDir = t.TempDir()
+	m.initLoading = true
+
+	next, cmd := m.Update(initFinishedMsg{Err: nil})
+	updated := next.(model)
+
+	if updated.state != stateWork {
+		t.Errorf("state should transition to stateWork, got %v", updated.state)
+	}
+	if updated.initLoading {
+		t.Error("initLoading should be false after successful init")
+	}
+	if cmd == nil {
+		t.Error("successful initFinishedMsg should return a non-nil Cmd (tea.Batch of loadWorkItems, etc.)")
+	}
+}
+
+// TestInitFinishedMsgErrorStaysInOnboarding verifies that an initFinishedMsg
+// with an error keeps the model in stateOnboarding and sets flashErr.
+func TestInitFinishedMsgErrorStaysInOnboarding(t *testing.T) {
+	m := minimalModel(stateOnboarding, nil, nil)
+	m.config.ProjectDir = "/tmp/my-repo"
+	m.initLoading = true
+
+	testErr := fmt.Errorf("init-repo.sh failed")
+	next, cmd := m.Update(initFinishedMsg{Err: testErr})
+	updated := next.(model)
+
+	if updated.state != stateOnboarding {
+		t.Errorf("state should remain stateOnboarding on error, got %v", updated.state)
+	}
+	if updated.initLoading {
+		t.Error("initLoading should be false after error")
+	}
+	if updated.flashErr == "" {
+		t.Error("flashErr should be set on init error")
+	}
+	if !strings.Contains(updated.flashErr, "init failed") {
+		t.Errorf("flashErr = %q, want it to contain 'init failed'", updated.flashErr)
+	}
+	if cmd != nil {
+		t.Error("initFinishedMsg with error should return nil Cmd")
+	}
+}
+
+// TestStateOnboardingLoadingRendersInitializing verifies that when initLoading
+// is true, the onboarding view shows "Initializing..." instead of "Press Enter".
+func TestStateOnboardingLoadingRendersInitializing(t *testing.T) {
+	m := minimalModel(stateOnboarding, nil, nil)
+	m.config.ProjectDir = "/tmp/my-repo"
+	m.width = 80
+	m.height = 24
+	m.initLoading = true
+
+	out := m.View()
+
+	if !strings.Contains(out, "Initializing...") {
+		t.Errorf("onboarding view with initLoading should contain 'Initializing...', got:\n%s", out)
+	}
+	if strings.Contains(out, "Press Enter to initialize") {
+		t.Errorf("onboarding view with initLoading should NOT contain 'Press Enter to initialize'")
 	}
 }

@@ -11,6 +11,18 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
+// classifyStartupState returns stateOnboarding if the knowledge store is
+// uninitialized (manifest or work index missing), otherwise stateWork.
+func classifyStartupState(cfg config.Config) appState {
+	if _, err := os.Stat(filepath.Join(cfg.KnowledgeDir, "_manifest.json")); err != nil {
+		return stateOnboarding
+	}
+	if _, err := os.Stat(filepath.Join(cfg.WorkDir, "_index.json")); err != nil {
+		return stateOnboarding
+	}
+	return stateWork
+}
+
 func main() {
 	// Capture panics to a crash log for debugging.
 	crashLog := filepath.Join(os.TempDir(), "lore-tui-crash.log")
@@ -30,7 +42,9 @@ func main() {
 	}
 
 	prefs := config.LoadPrefs()
+
 	m := model{
+		state:      classifyStartupState(cfg),
 		config:     cfg,
 		layoutMode: prefs.Layout,
 		indexPath:  filepath.Join(cfg.WorkDir, "_index.json"),
