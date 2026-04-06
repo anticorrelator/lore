@@ -272,7 +272,7 @@ Check for incomplete tasks or explicit blockers. Skip silently if everything com
 
 ```bash
 bash ~/.lore/scripts/create-followup.sh \
-  --title "Deferred work: <work item title>" \
+  --title "Deferred work: <work item title>" \  # ≤70 chars
   --source "implement" \
   --attachments '[{"type":"work_item","slug":"<slug>"}]' \
   --suggested-actions '[{"type":"create_work_item"}]' \

@@ -538,7 +538,7 @@ Pass the **complete report body from 6e** as `--content`:
 ```bash
 bash ~/.lore/scripts/create-followup.sh \
   --source "pr-review" \
-  --title "Review: <PR title> (#<N>)" \
+  --title "Review: <PR title> (#<N>)" \  # ≤70 chars; truncate PR title if needed
   --author "@<author>" \
   --attachments '[{"type":"pr","ref":"#<N>"}]' \
   --suggested-actions '[{"type": "<type>", "label": "<label>"}]' \

@@ -81,6 +81,11 @@ if [[ -z "$NAME" ]]; then
   echo "Usage: create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--json]" >&2
   exit 1
 fi
+# Warn on long titles (>70 chars, git convention)
+if [[ ${#NAME} -gt 70 ]]; then
+  echo "[work] Warning: Title is ${#NAME} chars (recommended ≤70)." >&2
+fi
+
 KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 
 WORK_DIR="$KNOWLEDGE_DIR/_work"
@@ -105,15 +110,6 @@ if [[ -z "$SLUG" ]]; then
   exit 1
 fi
 
-# Check for duplicate (exact match)
-if [[ -d "$WORK_DIR/$SLUG" ]]; then
-  if [[ $JSON_MODE -eq 1 ]]; then
-    json_error "Work item '$SLUG' already exists"
-  fi
-  echo "[work] Error: Work item '$SLUG' already exists at $WORK_DIR/$SLUG" >&2
-  exit 1
-fi
-
 # Check for similar slugs (substring overlap in either direction)
 SIMILAR=()
 for existing_dir in "$WORK_DIR"/*/; do
@@ -129,7 +125,6 @@ done
 
 if [[ ${#SIMILAR[@]} -gt 0 ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
-    # In JSON mode, emit a warning field but still block creation
     json_error "Similar work item(s) already exist: ${SIMILAR[*]}"
   fi
   echo "[work] Warning: Similar work item(s) already exist:" >&2
@@ -138,6 +133,16 @@ if [[ ${#SIMILAR[@]} -gt 0 ]]; then
   done
   echo "[work] Error: Refusing to create '$SLUG' — use a distinct name or work with the existing item." >&2
   exit 1
+fi
+
+# Exact duplicate: append numeric suffix (-2, -3, ...)
+if [[ -d "$WORK_DIR/$SLUG" ]]; then
+  BASE_SLUG="$SLUG"
+  N=2
+  while [[ -d "$WORK_DIR/${BASE_SLUG}-${N}" ]]; do
+    N=$((N + 1))
+  done
+  SLUG="${BASE_SLUG}-${N}"
 fi
 
 # Get current git branch (may be empty if not in a git repo)

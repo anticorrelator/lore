@@ -253,7 +253,7 @@ func (m ListModel) viewFull() string {
 
 	// Header
 	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
-		idW, "ID",
+		idW, "SLUG",
 		statusW, "STATUS",
 		sourceW, "SOURCE",
 		prW, "PR",
@@ -285,12 +285,8 @@ func (m ListModel) viewFull() string {
 	for i := offset; i < end; i++ {
 		item := items[i]
 
-		// ID (title preferred, falls back to ID)
-		idStr := item.Title
-		if idStr == "" {
-			idStr = item.ID
-		}
-		idStr = truncateFollowUp(idStr, idW)
+		// ID — always show the slug for quick identification.
+		idStr := truncateFollowUp(item.ID, idW)
 
 		// Status with glyph
 		glyph, glyphColor := statusGlyph(item.Status)
@@ -387,13 +383,9 @@ func (m ListModel) viewCompact() string {
 			cursor = "> "
 		}
 
-		// Title line
+		// Title line — always show the slug (ID) for quick identification.
 		titleAvail := panelWidth - 2 // 2 cursor chars
-		title := item.Title
-		if title == "" {
-			title = item.ID
-		}
-		titleTrunc := truncateFollowUp(title, titleAvail)
+		titleTrunc := truncateFollowUp(item.ID, titleAvail)
 
 		line1 := cursor + titleTrunc
 		for lipgloss.Width(line1) < panelWidth {

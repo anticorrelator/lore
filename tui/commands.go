@@ -96,9 +96,15 @@ func runArchive(slug string, unarchive bool) tea.Cmd {
 }
 
 // runPromoteFollowUp runs lore followup promote and returns ActionCompleteMsg when done.
-func runPromoteFollowUp(id string) tea.Cmd {
+// When findingsJSON is non-empty it is passed as --findings-json so the script
+// can embed selected lens findings in the promoted work item's notes.md.
+func runPromoteFollowUp(id, findingsJSON string) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("lore", "followup", "promote", "--followup-id", id)
+		args := []string{"followup", "promote", "--followup-id", id}
+		if findingsJSON != "" {
+			args = append(args, "--findings-json", findingsJSON)
+		}
+		cmd := exec.Command("lore", args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		err := cmd.Run()
 		return followup.ActionCompleteMsg{ID: id, Action: "promote", Err: err}
@@ -163,13 +169,9 @@ func buildWorkItemPopupItems(items []work.WorkItem) []search.PopupItem {
 func buildFollowupPopupItems(items []followup.FollowUpItem) []search.PopupItem {
 	result := make([]search.PopupItem, len(items))
 	for i, item := range items {
-		label := item.Title
-		if label == "" {
-			label = item.ID
-		}
 		result[i] = search.PopupItem{
 			ID:       item.ID,
-			Label:    label,
+			Label:    item.ID,
 			Subtitle: item.Source,
 		}
 	}

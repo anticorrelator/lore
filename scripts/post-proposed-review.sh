@@ -122,8 +122,25 @@ if [[ "$HEAD_SHA" != "$CURRENT_HEAD" ]]; then
   fi
 fi
 
+# --- Read review event from sidecar ---
+review_event=$(jq -r '.review_event // "COMMENT"' "$SIDECAR")
+case "$review_event" in
+  COMMENT|APPROVE|REQUEST_CHANGES) ;;
+  "") review_event="COMMENT" ;;
+  *) die "Invalid review_event: $review_event" ;;
+esac
+
 # --- Build review payload ---
-REVIEW_BODY="Review from lore (${SELECTED_COUNT} comments)"
+REVIEW_BODY_CUSTOM=$(jq -r '.review_body // empty' "$SIDECAR")
+REVIEW_BODY_SELECTED=$(jq -r '.review_body_selected // false' "$SIDECAR")
+
+if [[ "$REVIEW_BODY_SELECTED" == "true" && -n "$REVIEW_BODY_CUSTOM" ]]; then
+  REVIEW_BODY="$REVIEW_BODY_CUSTOM"
+  REVIEW_BODY_SOURCE="custom"
+else
+  REVIEW_BODY="Review from lore (${SELECTED_COUNT} comments)"
+  REVIEW_BODY_SOURCE="default"
+fi
 
 # Transform selected comments into the GitHub API inline comments format
 INLINE_COMMENTS=$(echo "$SELECTED_JSON" | jq '
@@ -137,7 +154,7 @@ INLINE_COMMENTS=$(echo "$SELECTED_JSON" | jq '
 PAYLOAD=$(jq -n \
   --arg commit_id "$HEAD_SHA" \
   --arg body "$REVIEW_BODY" \
-  --arg event "COMMENT" \
+  --arg event "$review_event" \
   --argjson comments "$INLINE_COMMENTS" \
   '{commit_id: $commit_id, body: $body, event: $event, comments: $comments}')
 
@@ -147,9 +164,9 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "[post-proposed-review] DRY RUN — would post the following review:"
   echo ""
   echo "Commit: ${HEAD_SHA}"
-  echo "Event: COMMENT"
+  echo "Event: ${review_event}"
   echo ""
-  echo "Body: ${REVIEW_BODY}"
+  echo "Body [${REVIEW_BODY_SOURCE}]: ${REVIEW_BODY}"
   echo ""
   echo "Inline comments:"
   echo "$INLINE_COMMENTS" | jq '.'

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -78,12 +79,12 @@ type ReviewCardsModel struct {
 	knowledgeDir      string
 	followupID        string
 	writeErr          error
-	deleteConfirm     bool                 // double-press deletion: true after first D press
 	flashMsg          string               // transient feedback rendered in Comments tab view, cleared on next keypress
-	sevSelectCycle    int                  // tracks S-cycle position: 0-3, resets on deletion/reload
 	clipboardWriteFn  func(string) error   // injectable clipboard seam (D17)
-	severityFilter    SeverityFilter       // active severity filter for visible comments
-	editing           bool                 // true while ExternalEditRequestMsg is pending (prevents re-entrant E press)
+	externalEditing   bool                 // true while ExternalEditRequestMsg is pending (prevents re-entrant E press)
+	editing           bool                 // true while inline textarea edit is active (lowercase e)
+	editInput         textarea.Model       // textarea for inline body editing
+	editIdx           int                  // backing index of the comment being edited inline
 }
 
 // NewReviewCardsModel creates a ReviewCardsModel from a loaded ProposedReview.
@@ -97,6 +98,9 @@ func NewReviewCardsModel(knowledgeDir, followupID string, review *ProposedReview
 	}
 	if review != nil {
 		m.comments = review.Comments
+		if review.ReviewEvent == "" {
+			review.ReviewEvent = "COMMENT"
+		}
 	}
 	return m
 }
@@ -122,40 +126,45 @@ func (m ReviewCardsModel) TotalCount() int {
 	return len(m.comments)
 }
 
-// IsEditing returns true when an external editor session is in progress.
-// A second E press while editing is a no-op.
+// IsEditing returns true when inline textarea editing is active.
+// Used by the parent model to suppress global key shortcuts.
 func (m ReviewCardsModel) IsEditing() bool {
 	return m.editing
 }
 
-// visibleComments returns the indices into m.comments that match the current severityFilter.
-// Unknown severities are always visible regardless of active filter. FilterAll returns all indices.
+// ReviewEvent returns the review event type stored in the sidecar (e.g. "COMMENT", "APPROVE", "REQUEST_CHANGES").
+// Returns an empty string when no review is loaded.
+func (m ReviewCardsModel) ReviewEvent() string {
+	if m.review == nil {
+		return ""
+	}
+	return m.review.ReviewEvent
+}
+
+// hasGeneralCard returns true when a general comment card should be rendered
+// at the top of the card list. When true, cursor == -1 selects that card.
+func (m ReviewCardsModel) hasGeneralCard() bool {
+	return m.review != nil
+}
+
+// generalCardHeight returns the number of terminal lines the general comment card renders.
+func (m ReviewCardsModel) generalCardHeight() int {
+	if m.review == nil {
+		return 0
+	}
+	if m.review.ReviewBody == "" {
+		return 2 // header + placeholder line
+	}
+	bodyW := m.width - 8
+	bodyLines := m.wrapBody(m.review.ReviewBody, bodyW)
+	return 1 + len(bodyLines)
+}
+
+// visibleComments returns the indices of all comments.
 func (m ReviewCardsModel) visibleComments() []int {
-	out := make([]int, 0, len(m.comments))
-	for i, c := range m.comments {
-		var visible bool
-		switch m.severityFilter {
-		case FilterHigh:
-			visible = c.Severity == "high" || c.Severity == "critical"
-		case FilterMedium:
-			visible = c.Severity == "medium"
-		case FilterLow:
-			visible = c.Severity == "low"
-		default: // FilterAll or unknown filter value
-			visible = true
-		}
-		// Unknown severity values are always visible even under a named filter.
-		if m.severityFilter != FilterAll {
-			switch c.Severity {
-			case "high", "critical", "medium", "low":
-				// already evaluated above
-			default:
-				visible = true
-			}
-		}
-		if visible {
-			out = append(out, i)
-		}
+	out := make([]int, len(m.comments))
+	for i := range m.comments {
+		out[i] = i
 	}
 	return out
 }
@@ -169,12 +178,19 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.editing {
+			w := m.width - 8
+			if w < 20 {
+				w = 20
+			}
+			m.editInput.SetWidth(w)
+		}
 
 	case WriteSidecarMsg:
 		m.writeErr = msg.Err
 
 	case ExternalEditDoneMsg:
-		m.editing = false
+		m.externalEditing = false
 		if msg.Err != nil {
 			m.flashMsg = fmt.Sprintf("Editor error: %v", msg.Err)
 			return m, nil
@@ -196,28 +212,65 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 	case tea.KeyMsg:
 		// Clear any transient flash message on every keypress.
 		m.flashMsg = ""
-		// Reset delete-confirm arm on any non-D key.
-		if msg.String() != "D" {
-			m.deleteConfirm = false
+
+		// Edit-mode routing: when inline textarea is active, intercept Enter/Esc/Alt+Enter;
+		// all other keys are forwarded to editInput so the textarea handles them.
+		if m.editing {
+			switch msg.String() {
+			case "enter":
+				// Save: sync textarea value back to the model.
+				newBody := m.editInput.Value()
+				if m.editIdx == -1 {
+					// General comment card.
+					m.review.ReviewBody = newBody
+				} else {
+					m.comments[m.editIdx].Body = newBody
+					if m.review != nil && m.editIdx < len(m.review.Comments) {
+						m.review.Comments[m.editIdx].Body = newBody
+					}
+				}
+				m.editing = false
+				return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
+			case "esc":
+				// Cancel: discard changes.
+				m.editing = false
+				return m, nil
+			case "alt+enter":
+				// Insert a literal newline into the textarea.
+				m.editInput.InsertRune('\n')
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.editInput, cmd = m.editInput.Update(msg)
+				return m, cmd
+			}
 		}
+
 		visible := m.visibleComments()
 		switch msg.String() {
 		case "j", "down":
-			if m.cursor < len(visible)-1 {
+			if m.cursor == -1 {
+				// Move from general card to first inline comment.
+				if len(visible) > 0 {
+					m.cursor = 0
+				}
+			} else if m.cursor < len(visible)-1 {
 				m.cursor++
 			}
 		case "k", "up":
 			if m.cursor > 0 {
 				m.cursor--
-			}
-		case "g", "home":
-			m.cursor = 0
-		case "G", "end":
-			if len(visible) > 0 {
-				m.cursor = len(visible) - 1
+			} else if m.cursor == 0 && m.hasGeneralCard() {
+				// Move up from first inline comment to general card.
+				m.cursor = -1
 			}
 		case " ", "x", "enter":
-			// Toggle selection on the current comment (via backing index).
+			if m.cursor == -1 && m.hasGeneralCard() {
+				// Toggle ReviewBodySelected on the general comment card.
+				m.review.ReviewBodySelected = !m.review.ReviewBodySelected
+				return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
+			}
+			// Toggle selection on the current inline comment (via backing index).
 			if m.cursor >= 0 && m.cursor < len(visible) {
 				backingIdx := visible[m.cursor]
 				m.comments[backingIdx].Selected = !m.comments[backingIdx].Selected
@@ -227,37 +280,6 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 				}
 				return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
 			}
-		case "D":
-			if !m.deleteConfirm {
-				// First D press: arm deletion.
-				m.deleteConfirm = true
-				m.flashMsg = "D to confirm delete"
-			} else {
-				// Second D press: confirm deletion via backing index.
-				if m.cursor >= 0 && m.cursor < len(visible) {
-					backingIdx := visible[m.cursor]
-					m.comments = append(m.comments[:backingIdx], m.comments[backingIdx+1:]...)
-					if m.review != nil && backingIdx < len(m.review.Comments) {
-						m.review.Comments = append(m.review.Comments[:backingIdx], m.review.Comments[backingIdx+1:]...)
-					}
-					// Recompute visible after deletion and clamp cursor.
-					newVisible := m.visibleComments()
-					if m.cursor >= len(newVisible) && len(newVisible) > 0 {
-						m.cursor = len(newVisible) - 1
-					} else if len(newVisible) == 0 {
-						m.cursor = 0
-					}
-				}
-				m.deleteConfirm = false
-				m.sevSelectCycle = 0
-				if m.review != nil {
-					return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
-				}
-			}
-		case "f":
-			// Cycle severity filter: FilterAll → FilterHigh → FilterMedium → FilterLow → FilterAll.
-			m.severityFilter = SeverityFilter((int(m.severityFilter) + 1) % 4)
-			m.cursor = 0
 		case "a":
 			// Toggle select-all / deselect-all over all comments.
 			if m.review != nil {
@@ -271,43 +293,6 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 				}
 				return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
 			}
-		case "i":
-			// Invert all selections.
-			if m.review != nil {
-				for i := range m.comments {
-					m.comments[i].Selected = !m.comments[i].Selected
-					// Sync using the already-inverted value rather than re-negating.
-					// m.comments and m.review.Comments may share a backing array, so
-					// a second !m.review.Comments[i].Selected would double-invert.
-					if i < len(m.review.Comments) {
-						m.review.Comments[i].Selected = m.comments[i].Selected
-					}
-				}
-				return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
-			}
-		case "S":
-			// Advance severity-select cycle (0=all, 1=high/critical, 2=medium, 3=low) per D12.
-			if m.review != nil {
-				m.sevSelectCycle = (m.sevSelectCycle + 1) % 4
-				for i := range m.comments {
-					var selected bool
-					switch m.sevSelectCycle {
-					case 0:
-						selected = true
-					case 1:
-						selected = m.comments[i].Severity == "high" || m.comments[i].Severity == "critical"
-					case 2:
-						selected = m.comments[i].Severity == "medium"
-					case 3:
-						selected = m.comments[i].Severity == "low"
-					}
-					m.comments[i].Selected = selected
-				}
-				for i := range m.review.Comments {
-					m.review.Comments[i].Selected = m.comments[i].Selected
-				}
-				return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
-			}
 		case "y":
 			// Copy current comment body to clipboard (via backing index).
 			if m.cursor >= 0 && m.cursor < len(visible) && m.clipboardWriteFn != nil {
@@ -318,9 +303,48 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 					m.flashMsg = "Copied to clipboard"
 				}
 			}
+		case "e":
+			// Enter inline textarea edit mode for the focused card body.
+			if m.editing || m.externalEditing {
+				break
+			}
+			if m.cursor == -1 && m.hasGeneralCard() {
+				// Edit general comment (ReviewBody).
+				ta := newInlineTextarea(m.width)
+				ta.SetValue(m.review.ReviewBody)
+				m.editInput = ta
+				m.editIdx = -1
+				m.editing = true
+				return m, m.editInput.Focus()
+			}
+			if m.cursor < 0 || m.cursor >= len(visible) {
+				break
+			}
+			backingIdx := visible[m.cursor]
+			ta := newInlineTextarea(m.width)
+			ta.SetValue(m.comments[backingIdx].Body)
+			m.editInput = ta
+			m.editIdx = backingIdx
+			m.editing = true
+			return m, m.editInput.Focus()
+		case "1":
+			if m.review != nil && m.review.ReviewEvent != "COMMENT" {
+				m.review.ReviewEvent = "COMMENT"
+				return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
+			}
+		case "2":
+			if m.review != nil && m.review.ReviewEvent != "APPROVE" {
+				m.review.ReviewEvent = "APPROVE"
+				return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
+			}
+		case "3":
+			if m.review != nil && m.review.ReviewEvent != "REQUEST_CHANGES" {
+				m.review.ReviewEvent = "REQUEST_CHANGES"
+				return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
+			}
 		case "E":
 			// Open current comment body in external editor.
-			if m.editing || m.IsEmpty() || m.cursor < 0 || m.cursor >= len(visible) {
+			if m.externalEditing || m.editing || m.IsEmpty() || m.cursor < 0 || m.cursor >= len(visible) {
 				break
 			}
 			editor := os.Getenv("EDITOR")
@@ -329,7 +353,7 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 				break
 			}
 			backingIdx := visible[m.cursor]
-			m.editing = true
+			m.externalEditing = true
 			return m, func() tea.Msg {
 				return ExternalEditRequestMsg{BackingIdx: backingIdx, Body: m.comments[backingIdx].Body}
 			}
@@ -339,7 +363,7 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 }
 
 func (m ReviewCardsModel) View() string {
-	if m.IsEmpty() {
+	if m.IsEmpty() && !m.hasGeneralCard() {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  No proposed comments.")
 	}
 
@@ -349,29 +373,108 @@ func (m ReviewCardsModel) View() string {
 	sevHigh := lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 	sevMed := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	sevLow := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	generalLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Bold(true)
 
 	visible := m.visibleComments()
 
 	var b strings.Builder
 
-	// Header: selection count + filter status
+	// Header: selection count
 	header := fmt.Sprintf("  %d/%d selected", m.SelectedCount(), m.TotalCount())
-	if m.severityFilter != FilterAll {
-		var filterLabel string
-		switch m.severityFilter {
-		case FilterHigh:
-			filterLabel = "high"
-		case FilterMedium:
-			filterLabel = "medium"
-		case FilterLow:
-			filterLabel = "low"
-		}
-		header += fmt.Sprintf(" | filter: %s", filterLabel)
-	}
 	b.WriteString(dimStyle.Render(header))
 	b.WriteString("\n\n")
 
-	// When filter is active but no comments match, show a hint.
+	// PR Review box — groups event type radio buttons and general comment card
+	// inside a bordered box, visually separating them from inline comments.
+	if m.hasGeneralCard() {
+		var box strings.Builder
+
+		// Event type radio buttons
+		activeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
+		events := []struct {
+			key, label, value string
+		}{
+			{"1", "Comment", "COMMENT"},
+			{"2", "Approve", "APPROVE"},
+			{"3", "Request Changes", "REQUEST_CHANGES"},
+		}
+		eventLine := "  "
+		for i, ev := range events {
+			radio := "○"
+			label := dimStyle.Render(fmt.Sprintf("%s %s %s", radio, ev.key, ev.label))
+			if m.review.ReviewEvent == ev.value {
+				radio = "●"
+				label = activeStyle.Render(fmt.Sprintf("%s %s %s", radio, ev.key, ev.label))
+			}
+			eventLine += label
+			if i < len(events)-1 {
+				eventLine += "   "
+			}
+		}
+		box.WriteString(eventLine)
+		box.WriteString("\n\n")
+
+		// General comment card
+		check := "[ ]"
+		if m.review.ReviewBodySelected {
+			check = "[x]"
+		}
+		editingGeneral := m.editing && m.editIdx == -1
+		label := generalLabelStyle.Render("General Comment")
+		if editingGeneral {
+			label = generalLabelStyle.Render("General Comment") + dimStyle.Render(" [editing — Enter to save, Esc to cancel]")
+		}
+		line1 := fmt.Sprintf("  %s %s", check, label)
+
+		if m.cursor == -1 {
+			box.WriteString(selectedBg.Render(line1))
+			box.WriteByte('\n')
+		} else {
+			box.WriteString(line1)
+			box.WriteByte('\n')
+		}
+
+		if editingGeneral {
+			box.WriteString("      ")
+			box.WriteString(m.editInput.View())
+			box.WriteByte('\n')
+		} else {
+			bodyW := m.width - 12 // account for border + indent
+			var bodyLines []string
+			if m.review.ReviewBody == "" {
+				bodyLines = []string{dimStyle.Render("      No general review comment — press e to add one")}
+			} else {
+				for _, bl := range m.wrapBody(m.review.ReviewBody, bodyW) {
+					bodyLines = append(bodyLines, dimStyle.Render("      "+bl))
+				}
+			}
+			if m.cursor == -1 {
+				for _, bl := range bodyLines {
+					box.WriteString(selectedBg.Render(bl))
+					box.WriteByte('\n')
+				}
+			} else {
+				for _, bl := range bodyLines {
+					box.WriteString(bl)
+					box.WriteByte('\n')
+				}
+			}
+		}
+
+		// Render the box with a rounded border
+		boxW := m.width - 2
+		if boxW < 20 {
+			boxW = 20
+		}
+		borderStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("8")).
+			Width(boxW - 2) // subtract border width
+		b.WriteString(borderStyle.Render(box.String()))
+		b.WriteString("\n")
+	}
+
+	// When filter is active but no inline comments match, show a hint.
 	if len(visible) == 0 {
 		b.WriteString(dimStyle.Render("  No comments match filter."))
 		b.WriteString("\n")
@@ -388,12 +491,18 @@ func (m ReviewCardsModel) View() string {
 			heights[i] = m.cardHeight(backingIdx)
 		}
 
-		// Walk outward from cursor (position in visible slice).
-		offset := m.cursor
-		end := m.cursor + 1
-		used := heights[m.cursor]
+		// When the general card is focused (cursor == -1), start the inline window from 0.
+		cursorInVisible := m.cursor
+		if cursorInVisible < 0 {
+			cursorInVisible = 0
+		}
 
-		lo, hi := m.cursor-1, m.cursor+1
+		// Walk outward from cursor (position in visible slice).
+		offset := cursorInVisible
+		end := cursorInVisible + 1
+		used := heights[cursorInVisible]
+
+		lo, hi := cursorInVisible-1, cursorInVisible+1
 		for used < budget {
 			addedAny := false
 			if hi < len(visible) && used+heights[hi] <= budget {
@@ -442,24 +551,40 @@ func (m ReviewCardsModel) View() string {
 				sevStr,
 			)
 
-			// Body: word-wrap the full text to the available width.
-			bodyW := m.width - 8 // 6 indent + 2 margin
-			bodyLines := m.wrapBody(c.Body, bodyW)
+			editingThis := m.editing && m.editIdx == backingIdx
 
 			var card strings.Builder
-			if visPos == m.cursor {
-				card.WriteString(selectedBg.Render(line1))
-				card.WriteByte('\n')
-				for _, bl := range bodyLines {
-					card.WriteString(selectedBg.Render(dimStyle.Render("      "+bl)))
-					card.WriteByte('\n')
+			if m.cursor >= 0 && visPos == m.cursor {
+				headerLine := line1
+				if editingThis {
+					headerLine = line1 + dimStyle.Render(" [editing — Enter to save, Esc to cancel]")
 				}
+				card.WriteString(selectedBg.Render(headerLine))
+				card.WriteByte('\n')
 			} else {
 				card.WriteString(line1)
 				card.WriteByte('\n')
-				for _, bl := range bodyLines {
-					card.WriteString(dimStyle.Render("      " + bl))
-					card.WriteByte('\n')
+			}
+
+			if editingThis {
+				// Render inline textarea indented to match body.
+				card.WriteString("      ")
+				card.WriteString(m.editInput.View())
+				card.WriteByte('\n')
+			} else {
+				// Body: word-wrap the full text to the available width.
+				bodyW := m.width - 8 // 6 indent + 2 margin
+				bodyLines := m.wrapBody(c.Body, bodyW)
+				if m.cursor >= 0 && visPos == m.cursor {
+					for _, bl := range bodyLines {
+						card.WriteString(selectedBg.Render(dimStyle.Render("      " + bl)))
+						card.WriteByte('\n')
+					}
+				} else {
+					for _, bl := range bodyLines {
+						card.WriteString(dimStyle.Render("      " + bl))
+						card.WriteByte('\n')
+					}
 				}
 			}
 
@@ -481,22 +606,35 @@ func (m ReviewCardsModel) View() string {
 		b.WriteString("\n")
 	}
 
-	// Render deleteConfirm hint when double-press deletion is armed.
-	if m.deleteConfirm {
-		b.WriteString("\n")
-		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(
-			"  Press D again to confirm deletion"))
-		b.WriteString("\n")
-	}
 
 	return b.String()
 }
 
 // cardHeight returns the number of terminal lines a single card renders.
+// When the card is being edited inline, returns header(1) + textarea height.
 func (m ReviewCardsModel) cardHeight(idx int) int {
+	if m.editing && m.editIdx == idx {
+		return 1 + m.editInput.Height()
+	}
 	bodyW := m.width - 8
 	bodyLines := m.wrapBody(m.comments[idx].Body, bodyW)
 	return 1 + len(bodyLines) // header + wrapped body lines
+}
+
+// newInlineTextarea creates a textarea pre-configured for inline comment body editing.
+func newInlineTextarea(width int) textarea.Model {
+	ta := textarea.New()
+	ta.Placeholder = ""
+	ta.Prompt = " "
+	ta.ShowLineNumbers = false
+	ta.CharLimit = 0
+	w := width - 8 // match body indent
+	if w < 20 {
+		w = 20
+	}
+	ta.SetWidth(w)
+	ta.SetHeight(6)
+	return ta
 }
 
 // wrapBody splits the comment body into word-wrapped lines.

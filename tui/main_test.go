@@ -1264,3 +1264,320 @@ func TestLoadFollowupDetailSyncsTerminalMode(t *testing.T) {
 		}
 	})
 }
+
+// --- Edit-mode guard integration tests ---
+
+// followupModelWithEditingActive constructs a stateFollowUps model with
+// followupDetail in inline edit mode (reviewCards.editing == true).
+func followupModelWithEditingActive(t *testing.T) model {
+	t.Helper()
+	review := &followup.ProposedReview{
+		PR:      1,
+		Owner:   "o",
+		Repo:    "r",
+		HeadSHA: "abc",
+		Comments: []followup.ProposedComment{
+			{ID: "c1", Path: "f.go", Line: 1, Body: "original body", Severity: "medium"},
+		},
+	}
+	m := minimalModel(stateFollowUps, nil, nil)
+	m.width = 120
+	m.height = 40
+	m.focusedPanel = panelRight
+
+	// Build a loaded detail with ProposedComments.
+	detail := &followup.FollowUpDetail{
+		ID:               "test-fu",
+		Title:            "Test FU",
+		Status:           "open",
+		Attachments:      []followup.Attachment{},
+		SuggestedActions: []followup.SuggestedAction{},
+		ProposedComments: review,
+	}
+
+	// Feed the detail to the followupDetail model via DetailLoadedMsg.
+	m.followupDetail.SetID("test-fu")
+	next, _ := m.Update(followup.DetailLoadedMsg{ID: "test-fu", Detail: detail})
+	m = next.(model)
+
+	// Send 'e' to enter edit mode on the first inline comment.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = next.(model)
+
+	if !m.followupDetail.IsEditing() {
+		t.Fatal("setup: followupDetail should be in edit mode after 'e' key")
+	}
+	return m
+}
+
+func TestEditModeGuardEscDoesNotShiftPanelFocus(t *testing.T) {
+	m := followupModelWithEditingActive(t)
+
+	// Esc during editing should NOT move focus to panelLeft.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	nm := next.(model)
+
+	if nm.focusedPanel != panelRight {
+		t.Errorf("Esc during editing: focusedPanel = %v, want panelRight", nm.focusedPanel)
+	}
+	// Editing should be cancelled.
+	if nm.followupDetail.IsEditing() {
+		t.Error("Esc during editing: IsEditing should be false after Esc")
+	}
+}
+
+func TestEditModeGuardEscShiftsFocusWhenNotEditing(t *testing.T) {
+	m := minimalModel(stateFollowUps, nil, nil)
+	m.focusedPanel = panelRight
+
+	// Esc when not editing should move focus to panelLeft.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	nm := next.(model)
+
+	if nm.focusedPanel != panelLeft {
+		t.Errorf("Esc when not editing: focusedPanel = %v, want panelLeft", nm.focusedPanel)
+	}
+}
+
+// --- P key confirmTitle event type tests ---
+
+// followupModelWithReview builds a stateFollowUps model with a loaded
+// ProposedReview sidecar, panelRight focus, and the given event type.
+// Comments tab is the default when only ProposedComments are present.
+func followupModelWithReview(t *testing.T, eventType string, selectedCount int) model {
+	t.Helper()
+	comments := make([]followup.ProposedComment, selectedCount)
+	for i := range comments {
+		comments[i] = followup.ProposedComment{
+			ID: fmt.Sprintf("c%d", i), Path: "f.go", Line: i + 1,
+			Body: "body", Severity: "medium", Selected: true,
+		}
+	}
+	review := &followup.ProposedReview{
+		PR: 99, Owner: "o", Repo: "r", HeadSHA: "abc",
+		ReviewEvent: eventType,
+		Comments:    comments,
+	}
+	m := minimalModel(stateFollowUps, nil, nil)
+	m.width = 120
+	m.height = 40
+	m.focusedPanel = panelRight
+
+	detail := &followup.FollowUpDetail{
+		ID: "fu-1", Title: "Test FU", Status: "open",
+		Attachments:      []followup.Attachment{},
+		SuggestedActions: []followup.SuggestedAction{},
+		ProposedComments: review,
+	}
+	m.followupDetail.SetID("fu-1")
+	next, _ := m.Update(followup.DetailLoadedMsg{ID: "fu-1", Detail: detail})
+	m = next.(model)
+
+	if m.followupDetail.ActiveTab() != followup.TabComments {
+		t.Fatalf("setup: expected TabComments to be active, got %v", m.followupDetail.ActiveTab())
+	}
+	return m
+}
+
+func TestPKeyConfirmTitleContainsDefaultCOMMENT(t *testing.T) {
+	m := followupModelWithReview(t, "COMMENT", 2)
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	nm := next.(model)
+
+	if nm.confirmAction != "post_review" {
+		t.Fatalf("confirmAction = %q, want %q", nm.confirmAction, "post_review")
+	}
+	if !strings.Contains(nm.confirmTitle, "COMMENT") {
+		t.Errorf("confirmTitle = %q, want it to contain COMMENT", nm.confirmTitle)
+	}
+	if !strings.Contains(nm.confirmTitle, "99") {
+		t.Errorf("confirmTitle = %q, want it to contain PR number 99", nm.confirmTitle)
+	}
+}
+
+func TestPKeyConfirmTitleInterpolatesAPPROVE(t *testing.T) {
+	m := followupModelWithReview(t, "APPROVE", 1)
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	nm := next.(model)
+
+	if nm.confirmAction != "post_review" {
+		t.Fatalf("confirmAction = %q, want %q", nm.confirmAction, "post_review")
+	}
+	if !strings.Contains(nm.confirmTitle, "APPROVE") {
+		t.Errorf("confirmTitle = %q, want it to contain APPROVE", nm.confirmTitle)
+	}
+}
+
+func TestPKeyConfirmTitleInterpolatesREQUESTCHANGES(t *testing.T) {
+	m := followupModelWithReview(t, "REQUEST_CHANGES", 3)
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	nm := next.(model)
+
+	if nm.confirmAction != "post_review" {
+		t.Fatalf("confirmAction = %q, want %q", nm.confirmAction, "post_review")
+	}
+	if !strings.Contains(nm.confirmTitle, "REQUEST_CHANGES") {
+		t.Errorf("confirmTitle = %q, want it to contain REQUEST_CHANGES", nm.confirmTitle)
+	}
+}
+
+func TestPKeyNoopWhenNoCommentsSelected(t *testing.T) {
+	m := followupModelWithReview(t, "COMMENT", 0)
+	// Mark all comments unselected (none were added above since selectedCount=0).
+	// confirmAction should not be set.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	nm := next.(model)
+
+	if nm.confirmAction != "" {
+		t.Errorf("confirmAction = %q, want empty (no selected comments)", nm.confirmAction)
+	}
+	if nm.flashErr == "" {
+		t.Error("P with no selected comments should set flashErr")
+	}
+}
+
+func TestEditModeGuardGlobalShortcutsSuppressedDuringEditing(t *testing.T) {
+	m := followupModelWithEditingActive(t)
+
+	// 'w' should NOT leave stateFollowUps during editing.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	nm := next.(model)
+	if nm.state != stateFollowUps {
+		t.Errorf("w during editing: state changed to %v, want stateFollowUps", nm.state)
+	}
+
+	// '?' should NOT open help during editing.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	nm = next.(model)
+	if nm.showHelp {
+		t.Error("? during editing: showHelp was set, want suppressed")
+	}
+}
+
+func TestEditModeGuardTabDoesNotShiftPanelFocusDuringEditing(t *testing.T) {
+	m := followupModelWithEditingActive(t)
+
+	// Tab during editing should not move focus to left panel.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	nm := next.(model)
+
+	if nm.focusedPanel != panelRight {
+		t.Errorf("tab during editing: focusedPanel = %v, want panelRight", nm.focusedPanel)
+	}
+	// Still editing after tab.
+	if !nm.followupDetail.IsEditing() {
+		t.Error("tab during editing: IsEditing should still be true")
+	}
+}
+
+// --- Lens Findings Tab p key (promote with findings) tests ---
+
+// followupModelWithLensFindings builds a stateFollowUps model loaded with a
+// lens-findings sidecar. The Findings tab is the default when only LensFindings
+// are present. If selectAll is true, all findings are pre-selected.
+func followupModelWithLensFindings(t *testing.T, selectAll bool) model {
+	t.Helper()
+	findings := []followup.LensFinding{
+		{
+			Severity: "blocking", Title: "Missing check", File: "main.go", Line: 10,
+			Body: "Error ignored.", Lens: "correctness", Disposition: "action",
+			Rationale: "Could cause data loss.", Selected: selectAll,
+		},
+		{
+			Severity: "suggestion", Title: "Extract helper", File: "util.go", Line: 55,
+			Body: "Refactor opportunity.", Lens: "clarity", Disposition: "accepted",
+			Rationale: "", Selected: selectAll,
+		},
+	}
+	lensReview := &followup.LensReview{PR: 7, WorkItem: "test-wi", Findings: findings}
+	detail := &followup.FollowUpDetail{
+		ID:               "fu-lens",
+		Title:            "Lens Test FU",
+		Status:           "open",
+		Attachments:      []followup.Attachment{},
+		SuggestedActions: []followup.SuggestedAction{},
+		LensFindings:     lensReview,
+	}
+	m := minimalModel(stateFollowUps, nil, nil)
+	m.width = 120
+	m.height = 40
+	m.focusedPanel = panelRight
+	m.followupDetail.SetID("fu-lens")
+	next, _ := m.Update(followup.DetailLoadedMsg{ID: "fu-lens", Detail: detail})
+	m = next.(model)
+	if m.followupDetail.ActiveTab() != followup.TabTriage {
+		t.Fatalf("setup: expected TabTriage to be active, got %v", m.followupDetail.ActiveTab())
+	}
+	return m
+}
+
+// TestFindingsTabPKeyEmitsPromoteRequestMsgWithFindings checks that pressing p
+// on the Findings tab with selected findings produces a PromoteRequestMsg
+// carrying non-empty FindingsJSON.
+func TestFindingsTabPKeyEmitsPromoteRequestMsgWithFindings(t *testing.T) {
+	m := followupModelWithLensFindings(t, true) // all findings selected
+
+	var captured followup.PromoteRequestMsg
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	_ = next
+
+	if cmd == nil {
+		t.Fatal("p key: expected a non-nil Cmd, got nil")
+	}
+	msg := cmd()
+	pm, ok := msg.(followup.PromoteRequestMsg)
+	if !ok {
+		t.Fatalf("p key: cmd() returned %T, want PromoteRequestMsg", msg)
+	}
+	captured = pm
+	if captured.ID != "fu-lens" {
+		t.Errorf("PromoteRequestMsg.ID = %q, want %q", captured.ID, "fu-lens")
+	}
+	if captured.FindingsJSON == "" {
+		t.Error("PromoteRequestMsg.FindingsJSON is empty — expected marshaled findings")
+	}
+	if !strings.Contains(captured.FindingsJSON, "main.go") {
+		t.Errorf("FindingsJSON = %q, want it to contain 'main.go'", captured.FindingsJSON)
+	}
+}
+
+// TestFindingsTabPKeyEmitsPromoteRequestMsgWithEmptyFindingsWhenNoneSelected checks
+// that p with no selected findings still emits PromoteRequestMsg but with empty FindingsJSON.
+func TestFindingsTabPKeyEmitsPromoteRequestMsgWithEmptyFindingsWhenNoneSelected(t *testing.T) {
+	m := followupModelWithLensFindings(t, false) // no findings selected
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	_ = next
+
+	if cmd == nil {
+		t.Fatal("p key: expected a non-nil Cmd, got nil")
+	}
+	msg := cmd()
+	pm, ok := msg.(followup.PromoteRequestMsg)
+	if !ok {
+		t.Fatalf("p key: cmd() returned %T, want PromoteRequestMsg", msg)
+	}
+	if pm.ID != "fu-lens" {
+		t.Errorf("PromoteRequestMsg.ID = %q, want %q", pm.ID, "fu-lens")
+	}
+	if pm.FindingsJSON != "" {
+		t.Errorf("PromoteRequestMsg.FindingsJSON = %q, want empty (none selected)", pm.FindingsJSON)
+	}
+}
+
+// TestPromoteRequestMsgWithFindingsJSONDispatchesToRunPromote checks that the
+// top-level Update handler for PromoteRequestMsg returns a non-nil Cmd when
+// FindingsJSON is set.
+func TestPromoteRequestMsgWithFindingsJSONDispatchesToRunPromote(t *testing.T) {
+	m := minimalModel(stateFollowUps, nil, nil)
+
+	msg := followup.PromoteRequestMsg{ID: "fu-1", FindingsJSON: `[{"severity":"blocking","file":"a.go"}]`}
+	_, cmd := m.Update(msg)
+
+	if cmd == nil {
+		t.Fatal("PromoteRequestMsg with FindingsJSON: expected non-nil Cmd from runPromoteFollowUp")
+	}
+}

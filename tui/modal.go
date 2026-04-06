@@ -183,6 +183,14 @@ func (m model) renderHelpModal() string {
 		row("c", "chat about follow-up") + "\n" +
 		row("Esc", "exit follow-ups") + "\n" +
 		"\n" +
+		sectionS.Render("Triage Tab") + "\n" +
+		row("space / x / Enter", "toggle selection") + "\n" +
+		row("a", "select all / deselect all") + "\n" +
+		row("i", "invert selection") + "\n" +
+		row("S", "select by severity (cycle)") + "\n" +
+		row("f", "filter by disposition") + "\n" +
+		row("p", "promote with selected findings") + "\n" +
+		"\n" +
 		sectionS.Render("Comments Tab") + "\n" +
 		row("a", "select all / deselect all") + "\n" +
 		row("i", "invert selection") + "\n" +

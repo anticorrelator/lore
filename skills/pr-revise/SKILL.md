@@ -292,7 +292,7 @@ Pass the **complete report body from 7b** as `--content`:
 
 ```bash
 bash ~/.lore/scripts/create-followup.sh \
-  --title "PR #<NUMBER>: <short reviewer name> feedback" \
+  --title "PR #<NUMBER>: <short reviewer name> feedback" \  # ≤70 chars
   --source "pr-revise" \
   --attachments '[{"type":"pr","ref":"#<NUMBER>"}]' \
   --suggested-actions '<json array from 7a>' \

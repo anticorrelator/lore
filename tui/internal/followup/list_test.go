@@ -280,28 +280,28 @@ func TestListModelSetCompactMode(t *testing.T) {
 	}
 }
 
-func TestListModelViewCompactContainsTitles(t *testing.T) {
+func TestListModelViewCompactContainsSlugs(t *testing.T) {
 	m := NewListModel(sampleItems())
 	m.SetCompactMode(true)
 	m.width = 80
 	m.height = 20
 	view := m.View()
 	for _, item := range m.visibleItems() {
-		if !strings.Contains(view, item.Title) {
-			t.Errorf("compact view missing title %q", item.Title)
+		if !strings.Contains(view, item.ID) {
+			t.Errorf("compact view missing slug %q", item.ID)
 		}
 	}
 }
 
-func TestListModelViewFullContainsTitles(t *testing.T) {
+func TestListModelViewFullContainsSlugs(t *testing.T) {
 	m := NewListModel(sampleItems())
 	m.SetCompactMode(false)
 	m.width = 120
 	m.height = 20
 	view := m.View()
 	for _, item := range m.visibleItems() {
-		if !strings.Contains(view, item.Title) {
-			t.Errorf("full view missing title %q", item.Title)
+		if !strings.Contains(view, item.ID) {
+			t.Errorf("full view missing slug %q", item.ID)
 		}
 	}
 }

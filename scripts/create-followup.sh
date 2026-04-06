@@ -2,7 +2,8 @@
 # create-followup.sh — Create a new follow-up artifact in _followups/
 # Usage: bash create-followup.sh --title <name> --source <agent>
 #   [--attachments <json-array>] [--suggested-actions <json-array>]
-#   [--proposed-comments <filepath>] [--content <body>] [--json]
+#   [--proposed-comments <filepath>] [--lens-findings <filepath>]
+#   [--content <body>] [--json]
 # Creates $KNOWLEDGE_DIR/_followups/<id>/ with _meta.json and finding.md
 
 set -euo pipefail
@@ -17,6 +18,7 @@ AUTHOR=""
 ATTACHMENTS="[]"
 SUGGESTED_ACTIONS="[]"
 PROPOSED_COMMENTS=""
+LENS_FINDINGS=""
 CONTENT=""
 JSON_MODE=0
 
@@ -46,6 +48,10 @@ while [[ $# -gt 0 ]]; do
       PROPOSED_COMMENTS="$2"
       shift 2
       ;;
+    --lens-findings)
+      LENS_FINDINGS="$2"
+      shift 2
+      ;;
     --content)
       CONTENT="$2"
       shift 2
@@ -56,7 +62,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "[followup] Error: Unknown flag '$1'" >&2
-      echo "Usage: create-followup.sh --title <name> --source <agent> [--attachments <json>] [--suggested-actions <json>] [--proposed-comments <filepath>] [--content <body>] [--json]" >&2
+      echo "Usage: create-followup.sh --title <name> --source <agent> [--attachments <json>] [--suggested-actions <json>] [--proposed-comments <filepath>] [--lens-findings <filepath>] [--content <body>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -68,6 +74,11 @@ if [[ -z "$TITLE" ]]; then
   fi
   echo "[followup] Error: Missing --title." >&2
   exit 1
+fi
+
+# Warn on long titles (>70 chars, git convention)
+if [[ ${#TITLE} -gt 70 ]]; then
+  echo "[followup] Warning: Title is ${#TITLE} chars (recommended ≤70)." >&2
 fi
 
 if [[ -z "$SOURCE" ]]; then
@@ -86,22 +97,20 @@ if [[ ! -d "$FOLLOWUPS_DIR" ]]; then
   mkdir -p "$FOLLOWUPS_DIR"
 fi
 
-# Generate timestamp-based unique ID
+# Generate readable slug; append numeric suffix (-2, -3, ...) on collision.
 TIMESTAMP=$(timestamp_iso)
-# Convert to filesystem-safe slug: 20260330T143000Z
-TS_SLUG=$(echo "$TIMESTAMP" | tr -d ':-' | tr 'T' 't' | tr 'Z' 'z')
-TITLE_SLUG=$(slugify "$TITLE" | cut -c1-40)
-ID="${TS_SLUG}-${TITLE_SLUG}"
+TITLE_SLUG=$(slugify "$TITLE")
+ID="$TITLE_SLUG"
+
+if [[ -d "$FOLLOWUPS_DIR/$ID" ]]; then
+  N=2
+  while [[ -d "$FOLLOWUPS_DIR/${TITLE_SLUG}-${N}" ]]; do
+    N=$((N + 1))
+  done
+  ID="${TITLE_SLUG}-${N}"
+fi
 
 ITEM_DIR="$FOLLOWUPS_DIR/$ID"
-
-if [[ -d "$ITEM_DIR" ]]; then
-  if [[ $JSON_MODE -eq 1 ]]; then
-    json_error "Follow-up '$ID' already exists (timestamp collision)"
-  fi
-  echo "[followup] Error: Follow-up '$ID' already exists." >&2
-  exit 1
-fi
 
 mkdir -p "$ITEM_DIR"
 
@@ -157,6 +166,23 @@ if [[ -n "$PROPOSED_COMMENTS" ]]; then
       json_error "Proposed comments: not a valid file path or JSON"
     fi
     echo "[followup] Error: --proposed-comments is neither a valid file path nor valid JSON" >&2
+    exit 1
+  fi
+fi
+
+# Write lens-findings.json sidecar (accepts filepath or inline JSON)
+if [[ -n "$LENS_FINDINGS" ]]; then
+  if [[ -f "$LENS_FINDINGS" ]]; then
+    # It's a file path — copy it
+    cp "$LENS_FINDINGS" "$ITEM_DIR/lens-findings.json"
+  elif printf '%s' "$LENS_FINDINGS" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+    # It's inline JSON — write it directly
+    printf '%s\n' "$LENS_FINDINGS" > "$ITEM_DIR/lens-findings.json"
+  else
+    if [[ $JSON_MODE -eq 1 ]]; then
+      json_error "Lens findings: not a valid file path or JSON"
+    fi
+    echo "[followup] Error: --lens-findings is neither a valid file path nor valid JSON" >&2
     exit 1
   fi
 fi

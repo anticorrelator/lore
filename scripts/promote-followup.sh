@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # promote-followup.sh — Promote a follow-up to a work item
-# Usage: bash promote-followup.sh --followup-id <id> [--title <override>] [--json]
+# Usage: bash promote-followup.sh --followup-id <id> [--title <override>] [--findings-json <json>] [--json]
 # Creates a work item from the follow-up, updates follow-up status to promoted,
 # and records the cross-link in both artifacts.
+# --findings-json: JSON array of selected LensFinding objects to embed in notes.md
 
 set -euo pipefail
 
@@ -12,6 +13,7 @@ source "$SCRIPT_DIR/lib.sh"
 # --- Parse arguments ---
 FOLLOWUP_ID=""
 TITLE_OVERRIDE=""
+FINDINGS_JSON=""
 JSON_MODE=0
 
 while [[ $# -gt 0 ]]; do
@@ -24,13 +26,17 @@ while [[ $# -gt 0 ]]; do
       TITLE_OVERRIDE="$2"
       shift 2
       ;;
+    --findings-json)
+      FINDINGS_JSON="$2"
+      shift 2
+      ;;
     --json)
       JSON_MODE=1
       shift
       ;;
     *)
       echo "[followup] Error: Unknown flag '$1'" >&2
-      echo "Usage: promote-followup.sh --followup-id <id> [--title <override>] [--json]" >&2
+      echo "Usage: promote-followup.sh --followup-id <id> [--title <override>] [--findings-json <json>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -41,7 +47,7 @@ if [[ -z "$FOLLOWUP_ID" ]]; then
     json_error "Missing required flag: --followup-id"
   fi
   echo "[followup] Error: Missing required flag: --followup-id" >&2
-  echo "Usage: promote-followup.sh --followup-id <id> [--title <override>] [--json]" >&2
+  echo "Usage: promote-followup.sh --followup-id <id> [--title <override>] [--findings-json <json>] [--json]" >&2
   exit 1
 fi
 
@@ -165,7 +171,7 @@ with open(meta_path, "w") as f:
 PYEOF
 fi
 
-# --- Add follow-up cross-reference to work item notes.md ---
+# --- Add follow-up cross-reference and findings to work item notes.md ---
 WORK_DIR="$KNOWLEDGE_DIR/_work"
 WORK_NOTES="$WORK_DIR/$WORK_SLUG/notes.md"
 if [[ -f "$WORK_NOTES" ]]; then
@@ -173,6 +179,47 @@ if [[ -f "$WORK_NOTES" ]]; then
 
 <!-- cross-reference: promoted from follow-up $FOLLOWUP_ID -->
 NOTESEOF
+
+  # Append selected lens findings as a structured section when provided.
+  if [[ -n "$FINDINGS_JSON" ]]; then
+    python3 - "$WORK_NOTES" "$FINDINGS_JSON" << 'PYEOF'
+import json, sys
+
+notes_path = sys.argv[1]
+findings_raw = sys.argv[2]
+
+try:
+    findings = json.loads(findings_raw)
+except json.JSONDecodeError:
+    sys.exit(0)  # Malformed input — skip silently
+
+if not findings:
+    sys.exit(0)
+
+lines = ["\n## Selected Lens Findings\n"]
+for f in findings:
+    severity = f.get("severity", "")
+    lens = f.get("lens", "")
+    file_path = f.get("file", "")
+    line_no = f.get("line", 0)
+    body = f.get("body", "")
+    rationale = f.get("rationale", "")
+
+    loc = file_path
+    if line_no:
+        loc = f"{file_path}:{line_no}"
+
+    header = f"- **[{severity}]** `{loc}` ({lens})"
+    lines.append(header)
+    if body:
+        lines.append(f"  {body}")
+    if rationale:
+        lines.append(f"  *Rationale: {rationale}*")
+
+with open(notes_path, "a") as f:
+    f.write("\n".join(lines) + "\n")
+PYEOF
+  fi
 fi
 
 # --- Rebuild follow-up index ---

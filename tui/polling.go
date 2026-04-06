@@ -116,12 +116,12 @@ func checkFollowupIndexMtime(knowledgeDir string) tea.Cmd {
 	}
 }
 
-// checkFollowupDetailMtime stats _meta.json and finding.md in the follow-up item's directory
+// checkFollowupDetailMtime stats sidecar files in the follow-up item's directory
 // and sends followupDetailMtimeCheckedMsg with the most recent mtime.
 func checkFollowupDetailMtime(knowledgeDir, id string) tea.Cmd {
 	return func() tea.Msg {
 		dir := filepath.Join(knowledgeDir, "_followups", id)
-		files := []string{"_meta.json", "finding.md"}
+		files := []string{"_meta.json", "finding.md", "lens-findings.json"}
 		var maxMtime time.Time
 		for _, f := range files {
 			info, err := os.Stat(filepath.Join(dir, f))

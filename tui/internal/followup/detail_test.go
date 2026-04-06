@@ -463,8 +463,8 @@ func TestDetailModelUsesReviewCardsWhenSidecarPresent(t *testing.T) {
 	if len(updated.tabs) != 3 {
 		t.Errorf("tabs len = %d, want 3 (Meta+Finding+Comments)", len(updated.tabs))
 	}
-	if updated.ActiveTab() != TabFinding {
-		t.Errorf("active tab = %v, want TabFinding (default)", updated.ActiveTab())
+	if updated.ActiveTab() != TabComments {
+		t.Errorf("active tab = %v, want TabComments (default when comments present)", updated.ActiveTab())
 	}
 	if updated.reviewCards == nil {
 		t.Fatal("reviewCards should be initialized")
@@ -549,9 +549,9 @@ func TestDetailModelTabCyclesThroughTabs(t *testing.T) {
 
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
-	// Should start on TabFinding (default).
-	if updated.ActiveTab() != TabFinding {
-		t.Fatalf("initial tab = %v, want TabFinding", updated.ActiveTab())
+	// Should start on TabComments (default when comments present).
+	if updated.ActiveTab() != TabComments {
+		t.Fatalf("initial tab = %v, want TabComments", updated.ActiveTab())
 	}
 	startIdx := updated.activeTab
 
@@ -672,18 +672,12 @@ func TestDetailModelKeyRoutesToActiveTab(t *testing.T) {
 
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
-	// Sidecar present: default active tab is TabFinding.
-	if updated.ActiveTab() != TabFinding {
-		t.Fatalf("active tab = %v, want TabFinding", updated.ActiveTab())
+	// Sidecar present: default active tab is TabComments.
+	if updated.ActiveTab() != TabComments {
+		t.Fatalf("active tab = %v, want TabComments", updated.ActiveTab())
 	}
 	if updated.reviewCards.cursor != 0 {
 		t.Fatalf("initial cards cursor = %d, want 0", updated.reviewCards.cursor)
-	}
-
-	// Switch to TabComments to test j key routing to reviewCards.
-	updated.activeTab = updated.tabIndexFor(TabComments)
-	if updated.ActiveTab() != TabComments {
-		t.Fatalf("active tab = %v, want TabComments after manual switch", updated.ActiveTab())
 	}
 
 	// j key routes to reviewCards when active tab is TabComments.
@@ -870,6 +864,88 @@ func TestDetailModelSelectedCountWithComments(t *testing.T) {
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 	if updated.SelectedCount() != 1 {
 		t.Errorf("SelectedCount = %d, want 1", updated.SelectedCount())
+	}
+}
+
+// --- ReviewEvent persistence tests ---
+
+func TestLoadFollowUpDetailPreservesReviewEvent(t *testing.T) {
+	knowledgeDir := t.TempDir()
+	id := "review-event-sidecar"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"review-event-sidecar","title":"Review Event","status":"open","severity":"high","source":"pr-review","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+
+	sidecar := `{
+		"pr": 7,
+		"owner": "anticorrelator",
+		"repo": "lore",
+		"head_sha": "sha1",
+		"review_event": "APPROVE",
+		"comments": [
+			{"id":"c1","path":"main.go","line":1,"body":"LGTM.","selected":true,"severity":"low","lenses":[],"confidence":0.9}
+		]
+	}`
+	os.WriteFile(filepath.Join(itemDir, "proposed-comments.json"), []byte(sidecar), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.ProposedComments == nil {
+		t.Fatal("ProposedComments should be non-nil")
+	}
+	if detail.ProposedComments.ReviewEvent != "APPROVE" {
+		t.Errorf("ReviewEvent = %q, want %q", detail.ProposedComments.ReviewEvent, "APPROVE")
+	}
+}
+
+func TestDetailModelReviewEventNilReviewCards(t *testing.T) {
+	m := NewDetailModel("")
+	// reviewCards is nil (no sidecar loaded) — ReviewEvent() must return "COMMENT".
+	if m.ReviewEvent() != "COMMENT" {
+		t.Errorf("ReviewEvent() = %q, want %q when reviewCards is nil", m.ReviewEvent(), "COMMENT")
+	}
+}
+
+func TestDetailModelReviewEventRoundTrip(t *testing.T) {
+	knowledgeDir := t.TempDir()
+	id := "review-event-roundtrip"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"review-event-roundtrip","title":"Round Trip","status":"open","severity":"high","source":"pr-review","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+
+	// Write initial sidecar with ReviewEvent="APPROVE".
+	review := &ProposedReview{
+		PR:          99,
+		Owner:       "anticorrelator",
+		Repo:        "lore",
+		HeadSHA:     "abc",
+		ReviewEvent: "APPROVE",
+		Comments: []ProposedComment{
+			{ID: "c1", Path: "x.go", Line: 5, Body: "Nice.", Severity: "low", Selected: true},
+		},
+	}
+	cmd := WriteSidecarCmd(knowledgeDir, id, review)
+	msg := cmd()
+	if wsm, ok := msg.(WriteSidecarMsg); !ok || wsm.Err != nil {
+		t.Fatalf("WriteSidecarCmd failed: %v", msg)
+	}
+
+	// Reload and verify ReviewEvent is preserved.
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected reload error: %v", err)
+	}
+	if detail.ProposedComments == nil {
+		t.Fatal("ProposedComments should be non-nil after reload")
+	}
+	if detail.ProposedComments.ReviewEvent != "APPROVE" {
+		t.Errorf("ReviewEvent after round-trip = %q, want %q", detail.ProposedComments.ReviewEvent, "APPROVE")
 	}
 }
 
@@ -1063,5 +1139,400 @@ func TestLoadFollowUpDetailAuthorFieldMissing(t *testing.T) {
 	}
 	if detail.Author != "" {
 		t.Errorf("Author = %q, want empty string for meta without author field", detail.Author)
+	}
+}
+
+// --- LensFindings integration tests ---
+
+// testDetailWithLensFindings returns a FollowUpDetail with both proposed comments and lens findings.
+func testDetailWithLensFindings() *FollowUpDetail {
+	return &FollowUpDetail{
+		ID:               "lens-test",
+		Title:            "Lens Findings Test",
+		Status:           "open",
+		Source:           "review",
+		FindingContent:   "# Finding\n\nSome content.",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		ProposedComments: &ProposedReview{
+			PR: 42, Owner: "test", Repo: "repo", HeadSHA: "abc",
+			Comments: []ProposedComment{
+				{ID: "c1", Path: "a.go", Line: 1, Body: "Fix.", Selected: true, Severity: "high"},
+			},
+		},
+		LensFindings: &LensReview{
+			PR: 42, WorkItem: "wi",
+			Findings: []LensFinding{
+				{Severity: "blocking", File: "b.go", Line: 5, Body: "Critical.", Lens: "security", Disposition: "action"},
+			},
+		},
+	}
+}
+
+func TestDetailModelTabVisibilityWithLensFindings(t *testing.T) {
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+
+	id := "lens-test"
+	m.SetID(id)
+	detail := testDetailWithLensFindings()
+
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+
+	// Four tabs: Meta, Finding, Findings, Comments.
+	if len(updated.tabs) != 4 {
+		t.Errorf("tabs len = %d, want 4 (Meta+Finding+Findings+Comments)", len(updated.tabs))
+	}
+
+	// Verify tab order.
+	wantOrder := []Tab{TabMeta, TabFinding, TabTriage, TabComments}
+	for i, want := range wantOrder {
+		if i < len(updated.tabs) && updated.tabs[i].id != want {
+			t.Errorf("tab[%d].id = %v, want %v", i, updated.tabs[i].id, want)
+		}
+	}
+
+	if updated.lensFindings == nil {
+		t.Fatal("lensFindings should be initialized")
+	}
+
+	out := updated.View()
+	if !strings.Contains(out, "Triage") {
+		t.Error("View should contain Triage tab label")
+	}
+}
+
+func TestDetailModelTabVisibilityWithoutLensFindings(t *testing.T) {
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+
+	id := "no-lens"
+	m.SetID(id)
+	detail := &FollowUpDetail{
+		ID:               id,
+		Title:            "No Lens",
+		Status:           "open",
+		Source:           "review",
+		FindingContent:   "# Finding",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		ProposedComments: &ProposedReview{
+			PR: 10, Owner: "test", Repo: "repo", HeadSHA: "def",
+			Comments: []ProposedComment{
+				{ID: "c1", Path: "a.go", Line: 1, Body: "Fix.", Severity: "low"},
+			},
+		},
+	}
+
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+
+	// Three tabs: Meta, Finding, Comments — no Findings.
+	if len(updated.tabs) != 3 {
+		t.Errorf("tabs len = %d, want 3 (Meta+Finding+Comments)", len(updated.tabs))
+	}
+	for _, tab := range updated.tabs {
+		if tab.id == TabTriage {
+			t.Error("TabTriage should not appear when LensFindings is nil")
+		}
+	}
+	if updated.lensFindings != nil {
+		t.Error("lensFindings should be nil when no sidecar")
+	}
+}
+
+func TestDetailModelDefaultTabTriagePreferred(t *testing.T) {
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+
+	id := "default-tab"
+	m.SetID(id)
+	detail := testDetailWithLensFindings()
+
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+
+	// Default tab should be TabTriage when lens findings are present.
+	if updated.ActiveTab() != TabTriage {
+		t.Errorf("default tab = %v, want TabTriage", updated.ActiveTab())
+	}
+}
+
+func TestDetailModelDefaultTabCommentsWhenNoFindings(t *testing.T) {
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+
+	id := "comments-default"
+	m.SetID(id)
+	detail := &FollowUpDetail{
+		ID: id, Title: "Comments Default", Status: "open", Source: "review",
+		FindingContent:   "# Finding",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		ProposedComments: &ProposedReview{
+			PR: 10, Owner: "test", Repo: "repo", HeadSHA: "def",
+			Comments: []ProposedComment{
+				{ID: "c1", Path: "a.go", Line: 1, Body: "Fix.", Severity: "low"},
+			},
+		},
+	}
+
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+
+	if updated.ActiveTab() != TabComments {
+		t.Errorf("default tab = %v, want TabComments when no lens findings", updated.ActiveTab())
+	}
+}
+
+func TestDetailModelKeyDelegationToLensFindings(t *testing.T) {
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+
+	id := "key-delegation"
+	m.SetID(id)
+	review := &LensReview{
+		PR: 1, WorkItem: "wi",
+		Findings: []LensFinding{
+			{Severity: "blocking", File: "a.go", Line: 1, Body: "First.", Lens: "x", Disposition: "action"},
+			{Severity: "suggestion", File: "b.go", Line: 2, Body: "Second.", Lens: "y", Disposition: "open"},
+		},
+	}
+	detail := &FollowUpDetail{
+		ID: id, Title: "Key Delegation", Status: "open", Source: "review",
+		FindingContent:   "# Finding",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		LensFindings:     review,
+	}
+
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+
+	// Should default to TabTriage.
+	if updated.ActiveTab() != TabTriage {
+		t.Fatalf("active tab = %v, want TabTriage", updated.ActiveTab())
+	}
+
+	// j should be delegated to LensFindingsModel (cursor moves down).
+	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if updated.lensFindings.cursor != 1 {
+		t.Errorf("after j: lensFindings cursor = %d, want 1", updated.lensFindings.cursor)
+	}
+
+	// f should cycle disposition filter.
+	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	if updated.lensFindings.filter != DispFilterAction {
+		t.Errorf("after f: lensFindings filter = %d, want DispFilterAction", updated.lensFindings.filter)
+	}
+}
+
+func TestDetailModelTabPreservationAcrossReload(t *testing.T) {
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+
+	id := "tab-preserve"
+	m.SetID(id)
+	detail := testDetailWithLensFindings()
+
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+
+	// Switch to Comments tab.
+	for updated.ActiveTab() != TabComments {
+		updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	if updated.ActiveTab() != TabComments {
+		t.Fatalf("active tab = %v, want TabComments", updated.ActiveTab())
+	}
+
+	// Preserve and reload.
+	updated.PreserveTab()
+
+	// Simulate reload with same detail.
+	updated, _ = updated.Update(DetailLoadedMsg{ID: id, Detail: detail})
+
+	if updated.ActiveTab() != TabComments {
+		t.Errorf("after reload: active tab = %v, want TabComments (preserved)", updated.ActiveTab())
+	}
+}
+
+func TestDetailModelTabPreservationByIDNotIndex(t *testing.T) {
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+
+	id := "tab-id-preserve"
+	m.SetID(id)
+	detail := testDetailWithLensFindings()
+
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+
+	// Navigate to TabTriage.
+	for updated.ActiveTab() != TabTriage {
+		updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	updated.PreserveTab()
+
+	// Reload with detail that no longer has ProposedComments — Findings tab shifts index.
+	detailNoComments := &FollowUpDetail{
+		ID: id, Title: "No Comments", Status: "open", Source: "review",
+		FindingContent:   "# Finding",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		LensFindings:     detail.LensFindings,
+	}
+	updated, _ = updated.Update(DetailLoadedMsg{ID: id, Detail: detailNoComments})
+
+	// Tab should still be TabTriage despite index change.
+	if updated.ActiveTab() != TabTriage {
+		t.Errorf("after reload with fewer tabs: active tab = %v, want TabTriage (preserved by ID)", updated.ActiveTab())
+	}
+}
+
+func TestLoadFollowUpDetailLensFindingsSidecar(t *testing.T) {
+	knowledgeDir := t.TempDir()
+	id := "with-lens"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"with-lens","title":"With Lens","status":"open","source":"review","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+
+	lensJSON := `{"pr":42,"work_item":"wi","findings":[{"severity":"blocking","title":"Test","file":"a.go","line":1,"body":"Bug.","lens":"correctness","disposition":"action","rationale":""}]}`
+	os.WriteFile(filepath.Join(itemDir, "lens-findings.json"), []byte(lensJSON), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.LensFindings == nil {
+		t.Fatal("LensFindings should be populated from sidecar")
+	}
+	if len(detail.LensFindings.Findings) != 1 {
+		t.Errorf("findings len = %d, want 1", len(detail.LensFindings.Findings))
+	}
+}
+
+func TestLoadFollowUpDetailLensFindingsEmptyFindings(t *testing.T) {
+	knowledgeDir := t.TempDir()
+	id := "empty-lens"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"empty-lens","title":"Empty Lens","status":"open","source":"test","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+
+	// Empty findings array → nil (no tab).
+	os.WriteFile(filepath.Join(itemDir, "lens-findings.json"), []byte(`{"pr":1,"work_item":"","findings":[]}`), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.LensFindings != nil {
+		t.Error("LensFindings should be nil for empty findings array")
+	}
+}
+
+func TestLoadFollowUpDetailLensFindingsMalformed(t *testing.T) {
+	knowledgeDir := t.TempDir()
+	id := "bad-lens"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"bad-lens","title":"Bad Lens","status":"open","source":"test","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+
+	// Malformed JSON → nil (no tab).
+	os.WriteFile(filepath.Join(itemDir, "lens-findings.json"), []byte("not valid json{{{"), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.LensFindings != nil {
+		t.Error("LensFindings should be nil for malformed JSON")
+	}
+}
+
+// --- DetailModel IsEditing and tab suppression tests ---
+
+func testDetailWithReviewCards(t *testing.T) DetailModel {
+	t.Helper()
+	review := &ProposedReview{
+		PR:      1,
+		Owner:   "o",
+		Repo:    "r",
+		HeadSHA: "abc",
+		Comments: []ProposedComment{
+			{ID: "c1", Path: "f.go", Line: 1, Body: "body1", Selected: false, Severity: "medium"},
+			{ID: "c2", Path: "g.go", Line: 2, Body: "body2", Selected: false, Severity: "low"},
+		},
+	}
+	m := NewDetailModel("/tmp")
+	m.width = 80
+	m.height = 40
+	rc := NewReviewCardsModel("/tmp", "test", review)
+	rc, _ = rc.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+	m.reviewCards = &rc
+	m.tabs = m.buildTabs()
+	// Set active tab to TabComments.
+	m.activeTab = m.tabIndexFor(TabComments)
+	return m
+}
+
+func TestDetailModelIsEditingFalseWhenNoReviewCards(t *testing.T) {
+	m := NewDetailModel("/tmp")
+	if m.IsEditing() {
+		t.Error("IsEditing should be false when reviewCards is nil")
+	}
+}
+
+func TestDetailModelIsEditingDelegatesToReviewCards(t *testing.T) {
+	m := testDetailWithReviewCards(t)
+
+	if m.IsEditing() {
+		t.Fatal("IsEditing should be false before editing starts")
+	}
+
+	// Enter edit mode via 'e' key forwarded through the detail model.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+
+	if !m.IsEditing() {
+		t.Error("IsEditing should be true after 'e' on TabComments")
+	}
+}
+
+func TestDetailModelKeyEventsForwardedToReviewCardsOnTabComments(t *testing.T) {
+	m := testDetailWithReviewCards(t)
+	// cursor is at 0 in the reviewCards; press 'j' to advance.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if m.reviewCards.cursor != 1 {
+		t.Errorf("j forwarded to reviewCards: cursor = %d, want 1", m.reviewCards.cursor)
+	}
+}
+
+func TestDetailModelTabSuppressedDuringEditing(t *testing.T) {
+	m := testDetailWithReviewCards(t)
+	tabBefore := m.activeTab
+
+	// Enter edit mode.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if !m.IsEditing() {
+		t.Fatal("must be editing for this test to be meaningful")
+	}
+
+	// Tab should not cycle tabs while editing.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if m.activeTab != tabBefore {
+		t.Errorf("tab during editing changed activeTab from %d to %d", tabBefore, m.activeTab)
+	}
+
+	// Shift+tab should also not cycle.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.activeTab != tabBefore {
+		t.Errorf("shift+tab during editing changed activeTab from %d to %d", tabBefore, m.activeTab)
 	}
 }

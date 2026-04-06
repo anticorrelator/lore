@@ -31,11 +31,34 @@ type ProposedComment struct {
 // It carries PR metadata alongside the proposed comments so the posting script
 // can resolve the target without re-deriving it.
 type ProposedReview struct {
-	PR       int               `json:"pr"`
-	Owner    string            `json:"owner"`
-	Repo     string            `json:"repo"`
-	HeadSHA  string            `json:"head_sha"`
-	Comments []ProposedComment `json:"comments"`
+	PR                 int               `json:"pr"`
+	Owner              string            `json:"owner"`
+	Repo               string            `json:"repo"`
+	HeadSHA            string            `json:"head_sha"`
+	Comments           []ProposedComment `json:"comments"`
+	ReviewBody         string            `json:"review_body"`
+	ReviewBodySelected bool              `json:"review_body_selected"`
+	ReviewEvent        string            `json:"review_event"`
+}
+
+// LensFinding represents a single finding from a PR review lens.
+type LensFinding struct {
+	Severity    string `json:"severity"`
+	Title       string `json:"title"`
+	File        string `json:"file"`
+	Line        int    `json:"line"`
+	Body        string `json:"body"`
+	Lens        string `json:"lens"`
+	Disposition string `json:"disposition"`
+	Rationale   string `json:"rationale"`
+	Selected    bool   `json:"selected,omitempty"`
+}
+
+// LensReview is the top-level wrapper for the lens-findings.json sidecar.
+type LensReview struct {
+	PR       int           `json:"pr"`
+	WorkItem string        `json:"work_item"`
+	Findings []LensFinding `json:"findings"`
 }
 
 // FollowUpDetail holds the full content of a single follow-up artifact.
@@ -52,6 +75,7 @@ type FollowUpDetail struct {
 	PromotedTo       string            `json:"promoted_to"`
 	FindingContent   string            // contents of finding.md
 	ProposedComments *ProposedReview   // from proposed-comments.json sidecar (nil when absent)
+	LensFindings     *LensReview       // from lens-findings.json sidecar (nil when absent)
 	Malformed        bool              `json:"malformed,omitempty"`
 }
 
@@ -157,6 +181,20 @@ func LoadFollowUpDetail(knowledgeDir, id string) (*FollowUpDetail, error) {
 		}
 	}
 
+	// Load lens-findings.json sidecar when present. Missing or malformed
+	// sidecar is not an error — the field stays nil.
+	// Loader rules:
+	//   1. File absent → nil.
+	//   2. Valid JSON with len(findings) > 0 → populated.
+	//   3. Valid JSON with len(findings) == 0 → nil.
+	//   4. Malformed JSON → nil.
+	if lfBytes, err := os.ReadFile(filepath.Join(itemDir, "lens-findings.json")); err == nil {
+		var review LensReview
+		if json.Unmarshal(lfBytes, &review) == nil && len(review.Findings) > 0 {
+			detail.LensFindings = &review
+		}
+	}
+
 	return detail, nil
 }
 
@@ -167,6 +205,7 @@ const (
 	TabMeta     Tab = iota
 	TabFinding
 	TabComments
+	TabTriage
 )
 
 // tabInfo holds display metadata for a tab.
@@ -184,9 +223,10 @@ type DetailModel struct {
 	err           error
 	viewport      viewport.Model
 	reviewCards   *ReviewCardsModel
+	lensFindings  *LensFindingsModel
 	tabs          []tabInfo
 	activeTab     int
-	savedTab      int // 1-indexed tab index to restore after reload; 0 = not set
+	savedTabID    Tab // Tab ID to restore after reload; -1 = not set
 	contentStartY int
 	contentStartX int
 	width         int
@@ -197,6 +237,7 @@ type DetailModel struct {
 func NewDetailModel(knowledgeDir string) DetailModel {
 	return DetailModel{
 		knowledgeDir: knowledgeDir,
+		savedTabID:   -1,
 	}
 }
 
@@ -228,6 +269,9 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 			rc := *m.reviewCards
 			rc, _ = rc.Update(tea.WindowSizeMsg{Width: cw, Height: ch})
 			m.reviewCards = &rc
+		}
+		if m.lensFindings != nil {
+			m.lensFindings.SetSize(cw, ch)
 		}
 
 	case WriteSidecarMsg:
@@ -267,16 +311,27 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 					m.reviewCards = nil
 				}
 
-				m.tabs = m.buildTabs()
-				if m.savedTab > 0 {
-					restored := m.savedTab - 1
-					if restored >= len(m.tabs) {
-						restored = len(m.tabs) - 1
-					}
-					m.activeTab = restored
-					m.savedTab = 0
+				// Initialize LensFindingsModel when sidecar is present.
+				if m.detail.LensFindings != nil {
+					lf := NewLensFindingsModel(m.knowledgeDir, m.id, m.detail.LensFindings)
+					lf.SetSize(cw, ch)
+					m.lensFindings = &lf
 				} else {
-					m.activeTab = m.tabIndexFor(TabFinding)
+					m.lensFindings = nil
+				}
+
+				m.tabs = m.buildTabs()
+				if m.savedTabID >= 0 {
+					idx := m.tabIndexFor(m.savedTabID)
+					// tabIndexFor returns 0 if not found; verify it actually matched.
+					if idx > 0 || (len(m.tabs) > 0 && m.tabs[0].id == m.savedTabID) {
+						m.activeTab = idx
+					} else {
+						m.activeTab = m.defaultTabIndex()
+					}
+					m.savedTabID = -1
+				} else {
+					m.activeTab = m.defaultTabIndex()
 				}
 
 				m.viewport.Width = cw
@@ -289,17 +344,33 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "tab":
+			// Suppress tab cycling when the review cards textarea is active.
+			if m.reviewCards != nil && m.reviewCards.IsEditing() {
+				break
+			}
 			if len(m.tabs) > 0 {
 				m.activeTab = (m.activeTab + 1) % len(m.tabs)
 			}
 			return m, nil
 		case "shift+tab":
+			// Suppress tab cycling when the review cards textarea is active.
+			if m.reviewCards != nil && m.reviewCards.IsEditing() {
+				break
+			}
 			if len(m.tabs) > 0 {
 				m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
 			}
 			return m, nil
 		}
 		switch m.ActiveTab() {
+		case TabTriage:
+			if m.lensFindings != nil {
+				lf := *m.lensFindings
+				var cmd tea.Cmd
+				lf, cmd = lf.Update(msg)
+				m.lensFindings = &lf
+				return m, cmd
+			}
 		case TabComments:
 			if m.reviewCards != nil {
 				rc := *m.reviewCards
@@ -338,6 +409,12 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		switch m.ActiveTab() {
 		case TabFinding:
 			m.viewport, cmd = m.viewport.Update(msg)
+		case TabTriage:
+			if m.lensFindings != nil {
+				lf := *m.lensFindings
+				lf, cmd = lf.Update(msg)
+				m.lensFindings = &lf
+			}
 		case TabComments:
 			if m.reviewCards != nil {
 				rc := *m.reviewCards
@@ -387,6 +464,40 @@ func (m DetailModel) SelectedCount() int {
 	return m.reviewCards.SelectedCount()
 }
 
+// SelectedLensFindingsJSON returns a JSON array of selected lens findings,
+// or "" if the Findings tab is not loaded or no findings are selected.
+// Used by the parent to pass --findings-json to promote-followup.sh.
+func (m DetailModel) SelectedLensFindingsJSON() string {
+	if m.lensFindings == nil {
+		return ""
+	}
+	selected := m.lensFindings.SelectedLensFindings()
+	if len(selected) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(selected)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// IsEditing returns true when the review cards model has an inline textarea active.
+// Used by the parent model to suppress global key shortcuts.
+func (m DetailModel) IsEditing() bool {
+	return m.reviewCards != nil && m.reviewCards.IsEditing()
+}
+
+// ReviewEvent returns the review event type from the review cards model
+// (e.g. "COMMENT", "APPROVE", "REQUEST_CHANGES"). Returns "COMMENT" if no
+// review cards model is loaded.
+func (m DetailModel) ReviewEvent() string {
+	if m.reviewCards == nil {
+		return "COMMENT"
+	}
+	return m.reviewCards.ReviewEvent()
+}
+
 // HasPRMetadata returns true when the loaded sidecar has complete PR posting metadata.
 func (m DetailModel) HasPRMetadata() bool {
 	if m.detail == nil || m.detail.ProposedComments == nil {
@@ -422,10 +533,23 @@ func (m DetailModel) tabIndexFor(id Tab) int {
 	return 0
 }
 
-// PreserveTab snapshots the current active tab so it can be restored after a
-// reload. The value is stored 1-indexed so that zero means "no tab saved".
+// PreserveTab snapshots the current active tab ID so it can be restored after
+// a reload. On restore, the saved ID is looked up in the new tabs list; if not
+// found, the default precedence applies.
 func (m *DetailModel) PreserveTab() {
-	m.savedTab = m.activeTab + 1
+	m.savedTabID = m.ActiveTab()
+}
+
+// defaultTabIndex returns the tab index to use when no saved tab is set.
+// Precedence: LensFindings > ProposedComments > TabFinding.
+func (m DetailModel) defaultTabIndex() int {
+	if m.lensFindings != nil {
+		return m.tabIndexFor(TabTriage)
+	}
+	if m.reviewCards != nil {
+		return m.tabIndexFor(TabComments)
+	}
+	return m.tabIndexFor(TabFinding)
 }
 
 // FindingExcerpt returns up to the first 3 non-empty, non-heading lines of the finding
@@ -454,9 +578,10 @@ func (m *DetailModel) ClearID() {
 	m.id = ""
 	m.detail = nil
 	m.reviewCards = nil
+	m.lensFindings = nil
 	m.tabs = nil
 	m.activeTab = 0
-	m.savedTab = 0
+	m.savedTabID = -1
 }
 
 // SetID sets the follow-up ID and returns a Cmd to load it.
@@ -469,19 +594,23 @@ func (m *DetailModel) SetID(id string) tea.Cmd {
 	m.err = nil
 	m.detail = nil
 	m.reviewCards = nil
+	m.lensFindings = nil
 	m.tabs = nil
 	m.activeTab = 0
-	m.savedTab = 0
+	m.savedTabID = -1
 	m.viewport.SetContent("")
 	return LoadDetail(m.knowledgeDir, id)
 }
 
 // buildTabs creates the visible tab list based on what content is available.
-// TabComments is included only when the ReviewCardsModel is present.
+// Tab order: Meta | Finding | Triage | Comments. Absent tabs are omitted.
 func (m DetailModel) buildTabs() []tabInfo {
 	tabs := []tabInfo{
 		{id: TabMeta, label: "Meta"},
 		{id: TabFinding, label: "Finding"},
+	}
+	if m.lensFindings != nil {
+		tabs = append(tabs, tabInfo{id: TabTriage, label: "Triage"})
 	}
 	if m.reviewCards != nil {
 		tabs = append(tabs, tabInfo{id: TabComments, label: "Comments"})
@@ -611,6 +740,11 @@ func (m DetailModel) renderTabContent() string {
 	switch m.ActiveTab() {
 	case TabMeta:
 		return m.renderMetaTab()
+	case TabTriage:
+		if m.lensFindings != nil {
+			return m.lensFindings.View()
+		}
+		return ""
 	case TabComments:
 		if m.reviewCards != nil {
 			return m.reviewCards.View()

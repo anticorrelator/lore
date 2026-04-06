@@ -341,7 +341,7 @@ If all findings were dispositioned as `accepted` or `deferred` (zero `action` it
 Reviewed and confirmed: <N> findings examined, no changes needed (<K> accepted, <L> deferred)
 ```
 
-Proceed directly to Step 5.
+Proceed to Step 4.5 (followup creation is unconditional — all review outcomes produce a followup record).
 
 ### Create plan
 
@@ -436,9 +436,67 @@ The `### Supplementary Reports` section appears **only** when non-conforming cer
 
 Omit zero counts. Omit work item section if no-action-items path was taken.
 
+## Step 4.5: Create Followup Record
+
+**This step runs unconditionally** — both the action-items path and the no-action-items path produce a followup record. The followup persists the review outcome for TUI browsing regardless of whether a work item was created.
+
+### Assemble lens-findings.json
+
+Build the `lens-findings.json` payload from the in-memory dispositioned findings (do NOT re-parse notes.md):
+
+```json
+{
+  "pr": <PR_NUMBER>,
+  "work_item": "pr-self-review-<PR_NUMBER>",
+  "findings": [
+    {
+      "severity": "<blocking|suggestion|question>",
+      "title": "<finding title>",
+      "file": "<relative path>",
+      "line": <1-indexed, 0 for file-level>,
+      "body": "<finding body, may contain markdown>",
+      "lens": "<lens id>",
+      "disposition": "<action|accepted|deferred|open>",
+      "rationale": "<disposition rationale from dialog>"
+    }
+  ]
+}
+```
+
+Include ALL findings (action, accepted, deferred, open). If `--skip-pre-scan` was set and no findings were generated, use an empty findings array `[]`.
+
+If no work item was created (no-action-items path), set `"work_item": ""`.
+
+### Build --content summary
+
+Build the finding content body with a diagnostic summary first line for TUI excerpt compatibility:
+
+```
+Self-review of PR #<N>: <A> action, <C> accepted, <D> deferred, <O> open across <L> lenses
+
+Reviewed <M> files on branch <head> → <base>.
+
+| # | Severity | Title | Lens | File:Line | Disposition |
+|---|----------|-------|------|-----------|-------------|
+| 1 | blocking | <title> | <lens> | <file:line> | action |
+| 2 | suggestion | <title> | <lens> | <file:line> | accepted |
+...
+```
+
+### Create followup
+
+```bash
+bash ~/.lore/scripts/create-followup.sh \
+  --source "pr-self-review" \
+  --title "Self-Review: <PR Title>" \  # ≤70 chars; truncate PR title if needed
+  --lens-findings '<lens-findings JSON>' \
+  --content '<summary body>' \
+  --attachments '[{"type":"pr","ref":"#<N>"}]'
+```
+
 ## Step 5: Capture Insights
 
-**Gate:** When Step 4 creates a plan (action items exist), do not execute this step until Step 4 has completed and `plan.md` has been written. When Step 4's "No action items path" is taken (all findings dispositioned as `accepted` or `deferred`), the gate is met as soon as all findings are dispositioned.
+**Gate:** Do not execute this step until Step 4.5 (followup creation) has completed. When Step 4 creates a plan, `plan.md` must also be written before proceeding.
 
 ```
 /remember Self-review of PR #<N> (lens pre-scan + dialog) — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered or clarified (why the architecture is this way, what constraints drove decisions), convention drift patterns found by lenses, cross-boundary invariants identified (especially from Blast Radius), architectural concerns surfaced during disposition dialog. Use confidence: medium. Skip: obvious fixes, style issues, findings specific to this PR that don't generalize.

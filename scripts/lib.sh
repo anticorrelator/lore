@@ -53,7 +53,7 @@ json_field() {
 # Strips common stopwords to produce more compact slugs.
 # Usage: slug=$(slugify "My Work Item Name")
 # Output: "my-work-item-name"
-MAX_SLUG_LENGTH=60
+MAX_SLUG_LENGTH=50
 slugify() {
   local input="$1"
   local lower

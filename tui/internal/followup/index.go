@@ -147,8 +147,11 @@ type IndexLoadedMsg struct {
 type ListDismissedMsg struct{}
 
 // PromoteRequestMsg is sent when the user requests promoting a follow-up to a work item.
+// FindingsJSON, when non-empty, is a JSON array of selected LensFinding objects
+// to pass as --findings-json to promote-followup.sh.
 type PromoteRequestMsg struct {
-	ID string
+	ID           string
+	FindingsJSON string
 }
 
 // DismissRequestMsg is sent when the user requests dismissing a follow-up.

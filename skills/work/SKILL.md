@@ -19,7 +19,7 @@ Match the first word of `$ARGUMENTS` to a command below. If no command matches b
 ```bash
 lore work create --title "<name>" [--issue "<value>"] [--pr "<value>"]
 ```
-**Before running:** If you are deriving the name, keep it concise — 3–6 words that identify the goal, not a sentence. The slug is generated directly from the name (stopwords stripped, kebab-cased, capped at 60 chars). A long or verbose name produces a long slug that is hard to type and read. Good: `"TUI Mouse Click Focus"`. Bad: `"Add Mouse Click To Focus Panel In TUI When User Clicks"`.
+**Before running:** Titles must be ≤70 characters (same as git/PR title convention). Keep it concise — 3–6 words that identify the goal, not a sentence. The slug is generated from the title (stopwords stripped, kebab-cased, capped at 50 chars). Good: `"TUI Mouse Click Focus"`. Bad: `"Add Mouse Click To Focus Panel In TUI When User Clicks"`.
 
 **Dedup:** The script rejects creation if the new slug overlaps with an existing slug (substring match). If this happens, use the existing item — do NOT retry with a different name for the same topic.
 

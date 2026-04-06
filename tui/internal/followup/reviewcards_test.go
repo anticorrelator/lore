@@ -249,10 +249,15 @@ func TestReviewCardsCursorClampsAtBoundaries(t *testing.T) {
 	m.width = 80
 	m.height = 40
 
-	// At top, pressing k should stay at 0.
+	// At top (cursor 0), pressing k moves to the general comment card (-1).
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
-	if m.cursor != 0 {
-		t.Errorf("k at top: cursor = %d, want 0", m.cursor)
+	if m.cursor != -1 {
+		t.Errorf("k at top: cursor = %d, want -1 (general card)", m.cursor)
+	}
+	// Pressing k again on the general card stays at -1.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if m.cursor != -1 {
+		t.Errorf("k at general card: cursor = %d, want -1 (no card above general)", m.cursor)
 	}
 
 	// Move to bottom.
@@ -265,25 +270,6 @@ func TestReviewCardsCursorClampsAtBoundaries(t *testing.T) {
 	}
 }
 
-func TestReviewCardsCursorHomeEnd(t *testing.T) {
-	review := testReview()
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-	m.cursor = 1
-
-	// g goes to first.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
-	if m.cursor != 0 {
-		t.Errorf("after g: cursor = %d, want 0", m.cursor)
-	}
-
-	// G goes to last.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
-	if m.cursor != 2 {
-		t.Errorf("after G: cursor = %d, want 2", m.cursor)
-	}
-}
 
 // --- Selection toggle tests ---
 
@@ -567,141 +553,6 @@ func TestReviewCardsBulkDeselectAllWhenAllSelected(t *testing.T) {
 	}
 }
 
-func TestReviewCardsBulkInvert(t *testing.T) {
-	review := testReview() // comment 0 selected, 1 and 2 not
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
-
-	// After invert: 0 unselected, 1 and 2 selected.
-	if m.comments[0].Selected {
-		t.Error("after i: comment 0 should be unselected (was selected)")
-	}
-	if !m.comments[1].Selected {
-		t.Error("after i: comment 1 should be selected (was unselected)")
-	}
-	if !m.comments[2].Selected {
-		t.Error("after i: comment 2 should be selected (was unselected)")
-	}
-	if cmd == nil {
-		t.Error("invert should emit WriteSidecarCmd")
-	}
-}
-
-func TestReviewCardsBulkSCycleHigh(t *testing.T) {
-	review := testReview() // comments: high, medium, low
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-
-	// First S press: cycle to 1 = select high/critical.
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	if m.sevSelectCycle != 1 {
-		t.Errorf("sevSelectCycle = %d, want 1", m.sevSelectCycle)
-	}
-	if !m.comments[0].Selected { // high
-		t.Error("high comment should be selected after S cycle 1")
-	}
-	if m.comments[1].Selected { // medium
-		t.Error("medium comment should not be selected after S cycle 1")
-	}
-	if m.comments[2].Selected { // low
-		t.Error("low comment should not be selected after S cycle 1")
-	}
-	if cmd == nil {
-		t.Error("S should emit WriteSidecarCmd")
-	}
-}
-
-func TestReviewCardsBulkSCycleMedium(t *testing.T) {
-	review := testReview()
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-
-	// Two S presses: cycle to 2 = select medium.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	if m.sevSelectCycle != 2 {
-		t.Errorf("sevSelectCycle = %d, want 2", m.sevSelectCycle)
-	}
-	if m.comments[0].Selected { // high
-		t.Error("high comment should not be selected after S cycle 2")
-	}
-	if !m.comments[1].Selected { // medium
-		t.Error("medium comment should be selected after S cycle 2")
-	}
-	if m.comments[2].Selected { // low
-		t.Error("low comment should not be selected after S cycle 2")
-	}
-}
-
-func TestReviewCardsBulkSCycleLow(t *testing.T) {
-	review := testReview()
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-
-	// Three S presses: cycle to 3 = select low.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	if m.sevSelectCycle != 3 {
-		t.Errorf("sevSelectCycle = %d, want 3", m.sevSelectCycle)
-	}
-	if m.comments[0].Selected { // high
-		t.Error("high comment should not be selected after S cycle 3")
-	}
-	if m.comments[1].Selected { // medium
-		t.Error("medium comment should not be selected after S cycle 3")
-	}
-	if !m.comments[2].Selected { // low
-		t.Error("low comment should be selected after S cycle 3")
-	}
-}
-
-func TestReviewCardsBulkSCycleWrapsToAll(t *testing.T) {
-	review := testReview()
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-
-	// Four S presses: cycle wraps back to 0 = select all.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	if m.sevSelectCycle != 0 {
-		t.Errorf("sevSelectCycle after 4 S presses = %d, want 0", m.sevSelectCycle)
-	}
-	if m.SelectedCount() != 3 {
-		t.Errorf("after S cycle 0 (all): SelectedCount = %d, want 3", m.SelectedCount())
-	}
-}
-
-func TestReviewCardsSevSelectCycleResetsOnDeletion(t *testing.T) {
-	review := testReview()
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-
-	// Advance cycle to 2.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	if m.sevSelectCycle != 2 {
-		t.Fatalf("pre-condition: sevSelectCycle = %d, want 2", m.sevSelectCycle)
-	}
-
-	// Delete current comment via double-press D.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-
-	if m.sevSelectCycle != 0 {
-		t.Errorf("sevSelectCycle after deletion = %d, want 0", m.sevSelectCycle)
-	}
-}
 
 func TestReviewCardsBulkOpNoopOnEmpty(t *testing.T) {
 	m := NewReviewCardsModel("", "", nil)
@@ -719,6 +570,301 @@ func TestReviewCardsBulkOpNoopOnEmpty(t *testing.T) {
 	}
 	if cmdS != nil {
 		t.Error("'S' on empty model should not emit cmd")
+	}
+}
+
+// --- Inline edit mode tests ---
+
+// enterEditOnComment positions cursor on the first inline comment and presses e.
+// cursor starts at 0 (first inline comment) when review is non-nil.
+func enterEditOnComment(m ReviewCardsModel) (ReviewCardsModel, tea.Cmd) {
+	return m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+}
+
+func TestReviewCardsEditModeEntersWithCorrectBody(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	m, _ = enterEditOnComment(m)
+
+	if !m.editing {
+		t.Fatal("e should set editing=true")
+	}
+	if m.editIdx != 0 {
+		t.Errorf("editIdx = %d, want 0 (first comment)", m.editIdx)
+	}
+	if got := m.editInput.Value(); got != review.Comments[0].Body {
+		t.Errorf("textarea value = %q, want %q", got, review.Comments[0].Body)
+	}
+}
+
+func TestReviewCardsEditModeEnterSaves(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	m, _ = enterEditOnComment(m)
+
+	// Simulate typing by setting the textarea value directly.
+	m.editInput.SetValue("Updated body text")
+
+	// Press Enter to save.
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.editing {
+		t.Error("Enter should clear editing flag")
+	}
+	if m.comments[0].Body != "Updated body text" {
+		t.Errorf("comment body = %q, want %q", m.comments[0].Body, "Updated body text")
+	}
+	if m.review.Comments[0].Body != "Updated body text" {
+		t.Errorf("review.Comments[0].Body = %q, want %q", m.review.Comments[0].Body, "Updated body text")
+	}
+	if cmd == nil {
+		t.Error("Enter should emit WriteSidecarCmd")
+	}
+}
+
+func TestReviewCardsEditModeEscCancels(t *testing.T) {
+	review := testReview()
+	originalBody := review.Comments[0].Body
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	m, _ = enterEditOnComment(m)
+	m.editInput.SetValue("discarded content")
+
+	// Press Esc to cancel.
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	if m.editing {
+		t.Error("Esc should clear editing flag")
+	}
+	if m.comments[0].Body != originalBody {
+		t.Errorf("cancel: body changed to %q, want %q", m.comments[0].Body, originalBody)
+	}
+	if cmd != nil {
+		t.Error("Esc cancel should NOT emit WriteSidecarCmd")
+	}
+}
+
+func TestReviewCardsEditModeSuppressesNavKeys(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	m, _ = enterEditOnComment(m)
+	cursorBefore := m.cursor
+
+	// j/k/g/G should not move cursor while editing.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if m.cursor != cursorBefore {
+		t.Errorf("j during edit: cursor moved to %d, want %d", m.cursor, cursorBefore)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if m.cursor != cursorBefore {
+		t.Errorf("k during edit: cursor moved to %d, want %d", m.cursor, cursorBefore)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if m.cursor != cursorBefore {
+		t.Errorf("g during edit: cursor moved to %d, want %d", m.cursor, cursorBefore)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	if m.cursor != cursorBefore {
+		t.Errorf("G during edit: cursor moved to %d, want %d", m.cursor, cursorBefore)
+	}
+}
+
+func TestReviewCardsEditModeSuppressesSelectionKeys(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	m, _ = enterEditOnComment(m)
+	selectedBefore := m.comments[0].Selected
+
+	// space/x should not toggle selection while editing; selection state is unchanged.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if m.comments[0].Selected != selectedBefore {
+		t.Error("space during edit should not toggle selection")
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if m.comments[0].Selected != selectedBefore {
+		t.Error("x during edit should not toggle selection")
+	}
+}
+
+func TestReviewCardsEditModeAltEnterInsertsNewline(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	m, _ = enterEditOnComment(m)
+	m.editInput.SetValue("line1")
+
+	// Alt+Enter should insert a newline (not save).
+	// KeyMsg.String() == "alt+enter" for the alt+enter combination.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	// Model should still be editing.
+	if !m.editing {
+		t.Error("alt+enter should not exit editing")
+	}
+}
+
+func TestReviewCardsEditEOnEmptyIsNoop(t *testing.T) {
+	// Model with no review (nil), no general card.
+	m := NewReviewCardsModel("", "", nil)
+	m.width = 80
+	m.height = 40
+
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if m.editing {
+		t.Error("e on nil review model should not enter edit mode")
+	}
+	if cmd != nil {
+		t.Error("e on nil review model should not emit cmd")
+	}
+}
+
+func TestReviewCardsEditModeViewShowsTextarea(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	m, _ = enterEditOnComment(m)
+
+	out := m.View()
+	if !strings.Contains(out, "editing") {
+		t.Error("View should show editing indicator when in edit mode")
+	}
+}
+
+func TestReviewCardsEnterTogglesSelectionWhenNotEditing(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	// cursor starts at 0 (first inline comment).
+	selectedBefore := m.comments[0].Selected
+
+	// Enter should toggle selection when not editing.
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.comments[0].Selected == selectedBefore {
+		t.Error("Enter should toggle selection when not editing")
+	}
+	if cmd == nil {
+		t.Error("Enter should emit WriteSidecarCmd when toggling selection")
+	}
+}
+
+// --- General comment card tests ---
+
+func TestReviewCardsGeneralCardRendersAtTop(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	out := m.View()
+	if !strings.Contains(out, "General Comment") {
+		t.Error("View should contain 'General Comment' label")
+	}
+}
+
+func TestReviewCardsGeneralCardPlaceholderWhenEmpty(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	out := m.View()
+	if !strings.Contains(out, "No general review comment") {
+		t.Error("View should show placeholder when ReviewBody is empty")
+	}
+}
+
+func TestReviewCardsGeneralCardToggleSyncsReviewBodySelected(t *testing.T) {
+	review := testReview()
+	if review.ReviewBodySelected {
+		t.Fatal("ReviewBodySelected should start false")
+	}
+
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	// Navigate to general card via k (up from cursor 0).
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if m.cursor != -1 {
+		t.Fatalf("k should move to general card (cursor -1), got %d", m.cursor)
+	}
+
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if !m.review.ReviewBodySelected {
+		t.Error("space on general card should set ReviewBodySelected=true")
+	}
+	if cmd == nil {
+		t.Error("toggling general card should emit WriteSidecarCmd")
+	}
+}
+
+func TestReviewCardsEditGeneralCardSavesToReviewBody(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	// Navigate to general card via k (up from cursor 0).
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if m.cursor != -1 {
+		t.Fatalf("k should move to general card (cursor -1), got %d", m.cursor)
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if !m.editing {
+		t.Fatal("e on general card should enter edit mode")
+	}
+	if m.editIdx != -1 {
+		t.Errorf("editIdx = %d, want -1 for general card", m.editIdx)
+	}
+
+	m.editInput.SetValue("Overall review summary.")
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.editing {
+		t.Error("Enter should exit editing")
+	}
+	if m.review.ReviewBody != "Overall review summary." {
+		t.Errorf("review.ReviewBody = %q, want %q", m.review.ReviewBody, "Overall review summary.")
+	}
+	if cmd == nil {
+		t.Error("Enter save on general card should emit WriteSidecarCmd")
+	}
+}
+
+func TestReviewCardsGeneralCardUnselectedByDefault(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	if m.review.ReviewBodySelected {
+		t.Error("general card should be unselected by default")
+	}
+	out := m.View()
+	// The general card's checkbox should be [ ] not [x].
+	if !strings.Contains(out, "[ ]") {
+		t.Error("general card checkbox should show '[ ]' when unselected")
 	}
 }
 
@@ -740,171 +886,18 @@ func TestReviewCardsBulkWritesThroughToBothArrays(t *testing.T) {
 		}
 	}
 
-	// Invert — both arrays must reflect the flip.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	// Deselect all — both arrays must reflect the flip.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	for i := range m.comments {
 		if m.comments[i].Selected {
-			t.Errorf("m.comments[%d].Selected not inverted", i)
+			t.Errorf("m.comments[%d].Selected not deselected", i)
 		}
 		if m.review.Comments[i].Selected {
-			t.Errorf("m.review.Comments[%d].Selected not synced after invert", i)
+			t.Errorf("m.review.Comments[%d].Selected not synced after deselect-all", i)
 		}
 	}
 }
 
-// --- Deletion tests ---
-
-func TestReviewCardsDFirstPressArmsConfirm(t *testing.T) {
-	review := testReview()
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-	if !m.deleteConfirm {
-		t.Error("first D press should arm deleteConfirm")
-	}
-	if cmd != nil {
-		t.Error("first D press should not emit a cmd (no write yet)")
-	}
-}
-
-func TestReviewCardsDDoublePressDeletesComment(t *testing.T) {
-	review := testReview() // 3 comments
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-	initialCount := m.TotalCount()
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-
-	if m.TotalCount() != initialCount-1 {
-		t.Errorf("after D,D: TotalCount = %d, want %d", m.TotalCount(), initialCount-1)
-	}
-	if m.deleteConfirm {
-		t.Error("deleteConfirm should be cleared after confirmed deletion")
-	}
-	if cmd == nil {
-		t.Error("D,D should emit WriteSidecarCmd")
-	}
-}
-
-func TestReviewCardsDThenOtherKeyCancels(t *testing.T) {
-	review := testReview()
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-
-	// Arm deletion.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-	if !m.deleteConfirm {
-		t.Fatal("pre-condition: deleteConfirm should be armed")
-	}
-
-	// Any other key cancels.
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	if m.deleteConfirm {
-		t.Error("non-D key should cancel deleteConfirm")
-	}
-	if m.TotalCount() != 3 {
-		t.Error("non-D key should not delete the comment")
-	}
-	if cmd != nil {
-		t.Error("cancelled deletion should not emit a cmd")
-	}
-}
-
-func TestReviewCardsDeletionClampsCursor(t *testing.T) {
-	review := testReview() // 3 comments
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-	// Move cursor to last item.
-	m.cursor = 2
-
-	// Delete last item.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-
-	if m.cursor >= m.TotalCount() {
-		t.Errorf("cursor %d should be clamped below TotalCount %d", m.cursor, m.TotalCount())
-	}
-}
-
-func TestReviewCardsDeletionOnLastCommentWritesEmptySidecar(t *testing.T) {
-	// Only one comment — deleting it should leave an empty sidecar.
-	review := &ProposedReview{
-		PR:      1,
-		Owner:   "o",
-		Repo:    "r",
-		HeadSHA: "sha",
-		Comments: []ProposedComment{
-			{ID: "c1", Path: "a.go", Line: 1, Body: "Only comment.", Severity: "low"},
-		},
-	}
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-
-	if m.TotalCount() != 0 {
-		t.Errorf("TotalCount after deleting last comment = %d, want 0", m.TotalCount())
-	}
-	// WriteSidecarCmd should still be emitted (D9: write empty sidecar).
-	if cmd == nil {
-		t.Error("deleting last comment should emit WriteSidecarCmd for empty sidecar")
-	}
-}
-
-func TestReviewCardsDeletionOnEmptyNoops(t *testing.T) {
-	m := NewReviewCardsModel("", "", nil)
-
-	// D on empty model should not panic and should not arm deleteConfirm.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-
-	if cmd != nil {
-		t.Error("D,D on empty model should not emit cmd")
-	}
-	_ = m
-}
-
-func TestReviewCardsDeletionSyncsReviewComments(t *testing.T) {
-	review := testReview() // 3 comments; delete comment at cursor 0
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-
-	// Capture the path of comment 0 before deletion.
-	deletedPath := m.comments[0].Path
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-
-	// Both m.comments and m.review.Comments should be updated.
-	if len(m.comments) != 2 {
-		t.Fatalf("m.comments length = %d, want 2", len(m.comments))
-	}
-	if len(m.review.Comments) != 2 {
-		t.Fatalf("m.review.Comments length = %d, want 2", len(m.review.Comments))
-	}
-	// The deleted comment's path should no longer appear.
-	for _, c := range m.comments {
-		if c.Path == deletedPath {
-			t.Errorf("deleted comment path %q still in m.comments", deletedPath)
-		}
-	}
-	for _, c := range m.review.Comments {
-		if c.Path == deletedPath {
-			t.Errorf("deleted comment path %q still in m.review.Comments", deletedPath)
-		}
-	}
-}
-
-// --- Filtering tests ---
 
 // --- Clipboard tests ---
 
@@ -1020,184 +1013,18 @@ func testReviewWithSeverities() *ProposedReview {
 	}
 }
 
-func TestReviewCardsFFilterCyclesConstants(t *testing.T) {
-	review := testReviewWithSeverities()
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-
-	if m.severityFilter != FilterAll {
-		t.Fatalf("initial severityFilter = %d, want FilterAll(%d)", m.severityFilter, FilterAll)
-	}
-
-	// f → FilterHigh
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	if m.severityFilter != FilterHigh {
-		t.Errorf("after 1x f: severityFilter = %d, want FilterHigh(%d)", m.severityFilter, FilterHigh)
-	}
-
-	// f → FilterMedium
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	if m.severityFilter != FilterMedium {
-		t.Errorf("after 2x f: severityFilter = %d, want FilterMedium(%d)", m.severityFilter, FilterMedium)
-	}
-
-	// f → FilterLow
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	if m.severityFilter != FilterLow {
-		t.Errorf("after 3x f: severityFilter = %d, want FilterLow(%d)", m.severityFilter, FilterLow)
-	}
-
-	// f → FilterAll (wraps)
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	if m.severityFilter != FilterAll {
-		t.Errorf("after 4x f: severityFilter = %d, want FilterAll(%d)", m.severityFilter, FilterAll)
-	}
-}
-
-func TestReviewCardsVisibleCommentsFilterAll(t *testing.T) {
+func TestReviewCardsVisibleCommentsReturnsAllIndices(t *testing.T) {
 	review := testReviewWithSeverities()
 	m := NewReviewCardsModel("", "", review)
 
 	visible := m.visibleComments()
 	if len(visible) != 5 {
-		t.Errorf("FilterAll: visibleComments len = %d, want 5", len(visible))
+		t.Errorf("visibleComments len = %d, want 5", len(visible))
 	}
-	// All indices should be present in order.
 	for i, idx := range visible {
 		if idx != i {
-			t.Errorf("FilterAll: visible[%d] = %d, want %d", i, idx, i)
+			t.Errorf("visible[%d] = %d, want %d", i, idx, i)
 		}
-	}
-}
-
-func TestReviewCardsVisibleCommentsFilterHighMatchesHighAndCritical(t *testing.T) {
-	review := testReviewWithSeverities() // indices: 0=high, 1=critical, 2=medium, 3=low, 4=info(unknown)
-	m := NewReviewCardsModel("", "", review)
-	m.severityFilter = FilterHigh
-
-	visible := m.visibleComments()
-	// FilterHigh should match high(0), critical(1), and unknown(4, always visible).
-	expectedIndices := map[int]bool{0: true, 1: true, 4: true}
-	if len(visible) != len(expectedIndices) {
-		t.Errorf("FilterHigh: visibleComments len = %d, want %d; got indices %v", len(visible), len(expectedIndices), visible)
-	}
-	for _, idx := range visible {
-		if !expectedIndices[idx] {
-			t.Errorf("FilterHigh: unexpected index %d in visible", idx)
-		}
-	}
-}
-
-func TestReviewCardsVisibleCommentsFilterMedium(t *testing.T) {
-	review := testReviewWithSeverities()
-	m := NewReviewCardsModel("", "", review)
-	m.severityFilter = FilterMedium
-
-	visible := m.visibleComments()
-	// FilterMedium: medium(2) + unknown(4).
-	expectedIndices := map[int]bool{2: true, 4: true}
-	if len(visible) != len(expectedIndices) {
-		t.Errorf("FilterMedium: visibleComments len = %d, want %d; got %v", len(visible), len(expectedIndices), visible)
-	}
-	for _, idx := range visible {
-		if !expectedIndices[idx] {
-			t.Errorf("FilterMedium: unexpected index %d", idx)
-		}
-	}
-}
-
-func TestReviewCardsVisibleCommentsFilterLow(t *testing.T) {
-	review := testReviewWithSeverities()
-	m := NewReviewCardsModel("", "", review)
-	m.severityFilter = FilterLow
-
-	visible := m.visibleComments()
-	// FilterLow: low(3) + unknown(4).
-	expectedIndices := map[int]bool{3: true, 4: true}
-	if len(visible) != len(expectedIndices) {
-		t.Errorf("FilterLow: visibleComments len = %d, want %d; got %v", len(visible), len(expectedIndices), visible)
-	}
-	for _, idx := range visible {
-		if !expectedIndices[idx] {
-			t.Errorf("FilterLow: unexpected index %d", idx)
-		}
-	}
-}
-
-func TestReviewCardsUnknownSeverityAlwaysVisible(t *testing.T) {
-	// A comment with an unrecognized severity should be visible under every filter.
-	review := &ProposedReview{
-		Comments: []ProposedComment{
-			{ID: "u1", Path: "a.go", Line: 1, Body: "Unknown sev.", Severity: "info"},
-		},
-	}
-	m := NewReviewCardsModel("", "", review)
-
-	for _, filter := range []SeverityFilter{FilterAll, FilterHigh, FilterMedium, FilterLow} {
-		m.severityFilter = filter
-		visible := m.visibleComments()
-		if len(visible) != 1 {
-			t.Errorf("filter=%d: unknown severity comment should always be visible, got %v", filter, visible)
-		}
-	}
-}
-
-func TestReviewCardsFResetsCursorToZero(t *testing.T) {
-	review := testReviewWithSeverities()
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-	m.cursor = 3 // move to some non-zero position
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	if m.cursor != 0 {
-		t.Errorf("after f: cursor = %d, want 0", m.cursor)
-	}
-}
-
-func TestReviewCardsSelectionToggleUsesBackingIndex(t *testing.T) {
-	// Filter to high only; cursor 0 points to high(0), cursor 1 points to critical(1) (visible).
-	// Actually with testReviewWithSeverities: FilterHigh visible = [0, 1, 4].
-	// cursor=1 → backingIdx=1 (critical comment).
-	review := testReviewWithSeverities()
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-	m.severityFilter = FilterHigh
-	m.cursor = 1 // visible[1] = backing index 1 (critical)
-
-	if m.comments[1].Selected {
-		t.Fatal("pre-condition: critical comment should start unselected")
-	}
-
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
-	// cursor=1 under FilterHigh → backingIdx=1
-	if !m.comments[1].Selected {
-		t.Error("toggle via filter: comments[1] (critical) should be selected")
-	}
-	if cmd == nil {
-		t.Error("toggle should emit WriteSidecarCmd")
-	}
-}
-
-func TestReviewCardsEmptyFilterResultRendersMessage(t *testing.T) {
-	// A review with only high comments; FilterLow produces no visible comments.
-	review := &ProposedReview{
-		Comments: []ProposedComment{
-			{ID: "h1", Path: "a.go", Line: 1, Body: "High only.", Severity: "high"},
-		},
-	}
-	m := NewReviewCardsModel("", "", review)
-	m.width = 80
-	m.height = 40
-	m.severityFilter = FilterLow
-
-	out := m.View()
-	// With no visible comments under the filter, the view should render an empty/message state.
-	// Either the standard "No proposed comments" or a filter-specific message.
-	if strings.Contains(out, "High only.") {
-		t.Error("filtered-out comment body should not appear in View output")
 	}
 }
 
@@ -1215,8 +1042,8 @@ func TestReviewCardsEEmitsRequestMsgWithCorrectBackingIdx(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("E should emit a command")
 	}
-	if !m.editing {
-		t.Error("editing should be set to true after E press")
+	if !m.externalEditing {
+		t.Error("externalEditing should be set to true after E press")
 	}
 
 	msg := cmd()
@@ -1237,13 +1064,13 @@ func TestReviewCardsExternalEditDoneMsgUpdatesBodyAndWritesSidecar(t *testing.T)
 	m := NewReviewCardsModel("", "", review)
 	m.width = 80
 	m.height = 40
-	m.editing = true // simulate editor open
+	m.externalEditing = true // simulate editor open
 
 	newBody := "Updated comment body."
 	m, cmd := m.Update(ExternalEditDoneMsg{BackingIdx: 0, NewBody: newBody})
 
-	if m.editing {
-		t.Error("editing should be false after ExternalEditDoneMsg")
+	if m.externalEditing {
+		t.Error("externalEditing should be false after ExternalEditDoneMsg")
 	}
 	if m.comments[0].Body != newBody {
 		t.Errorf("m.comments[0].Body = %q, want %q", m.comments[0].Body, newBody)
@@ -1259,12 +1086,12 @@ func TestReviewCardsExternalEditDoneMsgUpdatesBodyAndWritesSidecar(t *testing.T)
 func TestReviewCardsExternalEditDoneMsgWithErrSetsFlashMsg(t *testing.T) {
 	review := testReview()
 	m := NewReviewCardsModel("", "", review)
-	m.editing = true
+	m.externalEditing = true
 
 	m, cmd := m.Update(ExternalEditDoneMsg{Err: fmt.Errorf("editor crashed")})
 
-	if m.editing {
-		t.Error("editing should be false after ExternalEditDoneMsg with error")
+	if m.externalEditing {
+		t.Error("externalEditing should be false after ExternalEditDoneMsg with error")
 	}
 	if !strings.Contains(m.flashMsg, "editor crashed") {
 		t.Errorf("flashMsg = %q, want it to contain 'editor crashed'", m.flashMsg)
@@ -1277,7 +1104,7 @@ func TestReviewCardsExternalEditDoneMsgWithErrSetsFlashMsg(t *testing.T) {
 func TestReviewCardsExternalEditDoneMsgUnchangedBodySkipsWrite(t *testing.T) {
 	review := testReview()
 	m := NewReviewCardsModel("", "", review)
-	m.editing = true
+	m.externalEditing = true
 	originalBody := m.comments[0].Body
 
 	m, cmd := m.Update(ExternalEditDoneMsg{BackingIdx: 0, NewBody: originalBody})
@@ -1293,11 +1120,11 @@ func TestReviewCardsEDuringEditingIsNoop(t *testing.T) {
 	m := NewReviewCardsModel("", "", review)
 	m.width = 80
 	m.height = 40
-	m.editing = true // already editing
+	m.externalEditing = true // already editing externally
 
 	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 	if cmd != nil {
-		t.Error("E during editing should be a no-op (no cmd)")
+		t.Error("E during externalEditing should be a no-op (no cmd)")
 	}
 }
 
@@ -1325,7 +1152,91 @@ func TestReviewCardsEWhenEditorUnsetSetsFlashMsg(t *testing.T) {
 	if m.flashMsg == "" {
 		t.Error("E with EDITOR unset should set flashMsg")
 	}
-	if m.editing {
-		t.Error("editing should not be set when EDITOR is unset")
+	if m.externalEditing {
+		t.Error("externalEditing should not be set when EDITOR is unset")
 	}
+}
+
+// --- ReviewEvent cycling tests ---
+
+func TestNewReviewCardsModelNormalizesEmptyReviewEvent(t *testing.T) {
+	review := testReview()
+	review.ReviewEvent = ""
+
+	m := NewReviewCardsModel("", "", review)
+
+	if m.review.ReviewEvent != "COMMENT" {
+		t.Errorf("NewReviewCardsModel should normalize empty ReviewEvent to COMMENT, got %q", m.review.ReviewEvent)
+	}
+}
+
+func TestReviewCardsNumberKeysSelectEventType(t *testing.T) {
+	review := testReview()
+	review.ReviewEvent = "COMMENT"
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	// 1 on COMMENT is no-op (already selected)
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	if m.review.ReviewEvent != "COMMENT" {
+		t.Errorf("after 1: ReviewEvent = %q, want COMMENT", m.review.ReviewEvent)
+	}
+	if cmd != nil {
+		t.Error("1 on already-selected COMMENT should not emit cmd")
+	}
+
+	// 2 selects APPROVE
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	if m.review.ReviewEvent != "APPROVE" {
+		t.Errorf("after 2: ReviewEvent = %q, want APPROVE", m.review.ReviewEvent)
+	}
+	if cmd == nil {
+		t.Error("2 key should emit WriteSidecarCmd")
+	}
+
+	// 3 selects REQUEST_CHANGES
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	if m.review.ReviewEvent != "REQUEST_CHANGES" {
+		t.Errorf("after 3: ReviewEvent = %q, want REQUEST_CHANGES", m.review.ReviewEvent)
+	}
+	if cmd == nil {
+		t.Error("3 key should emit WriteSidecarCmd")
+	}
+
+	// 1 switches back to COMMENT
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	if m.review.ReviewEvent != "COMMENT" {
+		t.Errorf("after 1 again: ReviewEvent = %q, want COMMENT", m.review.ReviewEvent)
+	}
+	if cmd == nil {
+		t.Error("1 key should emit WriteSidecarCmd when switching from REQUEST_CHANGES")
+	}
+}
+
+func TestReviewCardsReviewEventGetterReflectsSelectedValue(t *testing.T) {
+	review := testReview()
+	review.ReviewEvent = "COMMENT"
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	if m.ReviewEvent() != "COMMENT" {
+		t.Errorf("ReviewEvent() = %q, want COMMENT", m.ReviewEvent())
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	if m.ReviewEvent() != "APPROVE" {
+		t.Errorf("ReviewEvent() after 2 = %q, want APPROVE", m.ReviewEvent())
+	}
+}
+
+func TestReviewCardsNumberKeyNoopOnNilReview(t *testing.T) {
+	m := NewReviewCardsModel("", "", nil)
+
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	if cmd != nil {
+		t.Error("2 on nil review should not emit cmd")
+	}
+	_ = m
 }

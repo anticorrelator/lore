@@ -487,6 +487,19 @@ func (m model) renderStatusBar(width int) string {
 				hint("Esc", "back to list"),
 				hint("Ctrl+c", "terminate"),
 			}
+		} else if m.followupDetail.ActiveTab() == followup.TabTriage {
+			hints = []string{
+				hint("j/k", "navigate"),
+				hint("space/x", "toggle"),
+				hint("a", "all"),
+				hint("i", "invert"),
+				hint("S", "by severity"),
+				hint("f", "filter"),
+				hint("p", "promote"),
+				hint("Tab/Shift-Tab", "cycle tabs"),
+				hint("h/Esc", "back to list"),
+				hint("?", "help"),
+			}
 		} else if m.followupDetail.ActiveTab() == followup.TabComments {
 			hints = []string{
 				hint("a", "all"),

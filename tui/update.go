@@ -447,6 +447,19 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case tea.KeyMsg:
 		// Clear any transient flash error on the next key press.
 		m.flashErr = ""
+
+		// Edit-mode guard: when the follow-up detail has an active inline textarea,
+		// skip all global shortcuts (except ctrl+c and ctrl+d) and route directly
+		// to the detail model so every keystroke reaches the textarea.
+		if m.state == stateFollowUps && m.followupDetail.IsEditing() {
+			key := msg.String()
+			if key != "ctrl+c" && key != "ctrl+d" {
+				var cmd tea.Cmd
+				m.followupDetail, cmd = m.followupDetail.Update(msg)
+				return m, cmd
+			}
+		}
+
 		switch msg.String() {
 		case "ctrl+c":
 			// In terminal mode, ctrl+c terminates the terminal panel only,
@@ -751,7 +764,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				}
 				switch status {
 				case "open", "pending", "reviewed":
-					return m, func() tea.Msg { return followup.PromoteRequestMsg{ID: id} }
+					findingsJSON := m.followupDetail.SelectedLensFindingsJSON()
+					return m, func() tea.Msg {
+						return followup.PromoteRequestMsg{ID: id, FindingsJSON: findingsJSON}
+					}
 				default:
 					m.flashErr = fmt.Sprintf("cannot promote: follow-up is already %s", status)
 				}
@@ -786,9 +802,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					break
 				}
 				prNumber := m.followupDetail.PRNumber()
+				eventType := m.followupDetail.ReviewEvent()
 				m.confirmAction = "post_review"
 				m.confirmSlug = m.followupDetail.CurrentID()
-				m.confirmTitle = fmt.Sprintf("Post %d comments to PR #%d?", selectedCount, prNumber)
+				m.confirmTitle = fmt.Sprintf("Post %d comments to PR #%d as %s?", selectedCount, prNumber, eventType)
 				m.confirmCount = selectedCount
 				return m, nil
 			}
@@ -1012,7 +1029,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m, m.loadFollowupDetail(msg.ID)
 
 	case followup.PromoteRequestMsg:
-		return m, runPromoteFollowUp(msg.ID)
+		return m, runPromoteFollowUp(msg.ID, msg.FindingsJSON)
 
 	case followup.DismissRequestMsg:
 		return m, runDismissFollowUp(msg.ID)
