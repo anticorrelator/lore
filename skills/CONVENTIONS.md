@@ -98,7 +98,7 @@ Procedural skills that produce insights delegate capture to `/remember` with sco
 /remember <context> — <constraints describing what to capture and skip>
 ```
 
-**Documented exception:** `/bootstrap` uses direct `lore capture` calls because it produces structured domain entries from parallel exploration, not conversation-derived insights. The lead handles deduplication in the synthesis and spot-check steps.
+**Documented exception:** `/bootstrap` uses `lore batch-capture` with a JSON file instead of direct `lore capture` calls because it produces structured domain entries from parallel exploration, not conversation-derived insights. Workers write entries to a shared JSON file; the lead invokes `lore batch-capture` in the synthesis step to ingest all entries at once, skipping manifest updates until the final pass.
 
 ## Resume Pattern
 
@@ -181,7 +181,7 @@ These are deliberate design choices, not inconsistencies:
 
 - **Routing-table vs procedural** — different skill types for different purposes.
 - **Pre-resolved vs prefetched knowledge** — implement pre-resolves backlinks at task generation time (optimization for well-authored plans); spec/bootstrap prefetch at spawn time (appropriate for discovery-oriented work). Both use the `## Prior Knowledge` header.
-- **Bootstrap direct capture** — documented exception to the `/remember` delegation rule.
+- **Bootstrap batch capture** — documented exception to the `/remember` delegation rule; uses `lore batch-capture` with a JSON file instead of per-entry `lore capture` calls.
 - **Skill-specific agent types** — spec uses `Explore` agents (read-only research); implement uses `general-purpose` agents (need edit/write for implementation).
 - **Review skill output types** — `/pr-review` posts GitHub comments (external-facing); the other three produce only local work items. This reflects the audience: `/pr-review` is for someone else's PR, the others are for your own.
 - **Review skill label sets** — `/pr-review` uses blocking/suggestion/question (maps to GitHub review states: REQUEST_CHANGES/COMMENT/COMMENT). The other three use full Conventional Comments labels (suggestion/issue/question/thought/nitpick/praise) because their output is local work items, not GitHub API submissions.

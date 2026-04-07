@@ -20,10 +20,21 @@ type LoadDetailMsg struct {
 	ID string
 }
 
+// FollowUpFilterMode controls which follow-up items are shown in the list.
+type FollowUpFilterMode int
+
+const (
+	// FilterOpen shows only open/pending follow-ups (default).
+	FilterOpen FollowUpFilterMode = iota
+	// FilterClosed shows reviewed, promoted, and dismissed follow-ups.
+	FilterClosed
+)
+
 // ListModel is the Bubble Tea model for the follow-up list panel.
 type ListModel struct {
-	allItems    []FollowUpItem
-	cursor      int
+	allItems   []FollowUpItem
+	filterMode FollowUpFilterMode
+	cursor     int
 	compactMode bool
 	width       int
 	height      int
@@ -46,15 +57,26 @@ func (m *ListModel) SetItems(items []FollowUpItem) {
 	}
 }
 
-// visibleItems returns active (open/pending) follow-up items.
+// visibleItems returns follow-up items matching the current filter mode.
 func (m ListModel) visibleItems() []FollowUpItem {
 	var out []FollowUpItem
 	for _, item := range m.allItems {
-		if item.Status == "open" || item.Status == "pending" {
-			out = append(out, item)
+		if m.filterMode == FilterClosed {
+			if item.Status == "reviewed" || item.Status == "promoted" || item.Status == "dismissed" {
+				out = append(out, item)
+			}
+		} else {
+			if item.Status == "open" || item.Status == "pending" {
+				out = append(out, item)
+			}
 		}
 	}
 	return out
+}
+
+// GetFilterMode returns the current filter mode.
+func (m ListModel) GetFilterMode() FollowUpFilterMode {
+	return m.filterMode
 }
 
 // Items returns the currently visible (filtered) follow-up items.
@@ -104,6 +126,13 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 		items := m.visibleItems()
 		prevCursor := m.cursor
 		switch msg.String() {
+		case "ctrl+a":
+			if m.filterMode == FilterOpen {
+				m.filterMode = FilterClosed
+			} else {
+				m.filterMode = FilterOpen
+			}
+			m.cursor = 0
 		case "esc":
 			return m, func() tea.Msg { return ListDismissedMsg{} }
 		case "j", "down":
@@ -300,7 +329,11 @@ func (m ListModel) viewCompact() string {
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
 	if len(items) == 0 {
-		b.WriteString(dimStyle.Render("  No active follow-ups."))
+		label := "active"
+		if m.filterMode == FilterClosed {
+			label = "closed"
+		}
+		b.WriteString(dimStyle.Render(fmt.Sprintf("  No %s follow-ups.  (ctrl+a to switch)", label)))
 		b.WriteString("\n")
 		return b.String()
 	}

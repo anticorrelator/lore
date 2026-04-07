@@ -719,9 +719,29 @@ type followupData struct {
 	FindingContent *string `json:"finding_content"`
 }
 
+// lensFindingJSON is a minimal local struct for deserializing lens-findings.json
+// entries. Mirrors followup.LensFinding without creating a cross-package dependency.
+type lensFindingJSON struct {
+	Severity    string `json:"severity"`
+	Title       string `json:"title"`
+	File        string `json:"file"`
+	Line        int    `json:"line"`
+	Body        string `json:"body"`
+	Lens        string `json:"lens"`
+	Disposition string `json:"disposition"`
+	Rationale   string `json:"rationale"`
+}
+
+// lensReviewJSON is a minimal local struct for deserializing lens-findings.json.
+type lensReviewJSON struct {
+	Findings []lensFindingJSON `json:"findings"`
+}
+
 // loadFollowupContext runs `lore followup view --json <id>` and returns a
 // structured system prompt string. Returns "" on any error (graceful degradation).
-func loadFollowupContext(id, knowledgeDir string) string {
+// When findingIndex >= 0, loads lens-findings.json and builds a finding-scoped
+// prompt; falls back to full-followup context if the index is out of range.
+func loadFollowupContext(id, knowledgeDir string, findingIndex int) string {
 	out, err := exec.Command("lore", "followup", "view", "--json", id).Output()
 	if err != nil {
 		writeCrashLog("loadFollowupContext", fmt.Sprintf("lore followup view failed for %q: %v", id, err))
@@ -748,6 +768,19 @@ func loadFollowupContext(id, knowledgeDir string) string {
 		b.WriteString("**Suggested Actions:** " + strings.Join(actions, ", ") + "\n")
 	}
 
+	// Finding-scoped context: load lens-findings.json and append the specific finding.
+	if findingIndex >= 0 {
+		sidecarPath := filepath.Join(knowledgeDir, "_followups", id, "lens-findings.json")
+		sidecarBytes, err := os.ReadFile(sidecarPath)
+		if err == nil {
+			if scoped := appendFindingContext(b.String(), sidecarBytes, findingIndex); scoped != "" {
+				return scoped
+			}
+			// findingIndex out of range or JSON error — fall through to full-followup context.
+		}
+	}
+
+	// Full-followup context (no finding scope or fallback).
 	if data.FindingContent != nil && *data.FindingContent != "" {
 		b.WriteString("\n## Finding Content\n")
 		b.WriteString(*data.FindingContent + "\n")
@@ -756,14 +789,53 @@ func loadFollowupContext(id, knowledgeDir string) string {
 	return b.String()
 }
 
+// appendFindingContext appends finding details to the base prompt string using
+// the provided lens-findings.json bytes and finding index. Returns "" if the
+// index is out of range or the JSON is malformed (caller falls back to full context).
+func appendFindingContext(base string, sidecarBytes []byte, findingIndex int) string {
+	var review lensReviewJSON
+	if err := json.Unmarshal(sidecarBytes, &review); err != nil || findingIndex < 0 || findingIndex >= len(review.Findings) {
+		return ""
+	}
+	f := review.Findings[findingIndex]
+	var b strings.Builder
+	b.WriteString(base)
+	b.WriteString(fmt.Sprintf("**Finding Index:** %d of %d\n", findingIndex, len(review.Findings)))
+	b.WriteString("\n## Finding\n")
+	b.WriteString("**Title:** " + f.Title + "\n")
+	b.WriteString("**Severity:** " + f.Severity + "\n")
+	b.WriteString("**Disposition:** " + f.Disposition + "\n")
+	if f.Rationale != "" {
+		b.WriteString("**Rationale:** " + f.Rationale + "\n")
+	}
+	if f.File != "" {
+		if f.Line > 0 {
+			b.WriteString(fmt.Sprintf("**File:** %s:%d\n", f.File, f.Line))
+		} else {
+			b.WriteString("**File:** " + f.File + "\n")
+		}
+	}
+	if f.Lens != "" {
+		b.WriteString("**Lens:** " + f.Lens + "\n")
+	}
+	if f.Body != "" {
+		b.WriteString("\n" + f.Body + "\n")
+	}
+	return b.String()
+}
+
 // StartTerminalCmd spawns the claude subprocess for /spec inside a PTY and
 // buildInitialPrompt constructs the prompt string passed to claude at startup.
 // It encodes four modes: followup chat, regular chat, short spec, and full spec.
-func buildInitialPrompt(slug, title, extraContext string, shortMode, chatMode, skipConfirm, followupMode bool) string {
+// findingIndex, when >= 0 and followupMode is true, inserts "--finding <N>" after the followup ID.
+func buildInitialPrompt(slug, title, extraContext string, shortMode, chatMode, skipConfirm, followupMode bool, findingIndex int) string {
 	var p string
 	if chatMode {
 		if followupMode {
 			p = "/followup-discuss " + slug
+			if findingIndex >= 0 {
+				p += fmt.Sprintf(" --finding %d", findingIndex)
+			}
 		} else {
 			p = "Let's talk about " + title
 		}
@@ -791,7 +863,7 @@ func buildInitialPrompt(slug, title, extraContext string, shortMode, chatMode, s
 // interface — write user keystrokes, read subprocess output.
 // projectDir must be the project root (not the knowledge _work/ dir) so that
 // the /spec skill can explore the correct codebase.
-func StartTerminalCmd(slug, title, projectDir string, width, height int, extraContext string, shortMode, chatMode, skipConfirm, followupMode bool, knowledgeDir string) tea.Cmd {
+func StartTerminalCmd(slug, title, projectDir string, width, height int, extraContext string, shortMode, chatMode, skipConfirm, followupMode bool, knowledgeDir string, findingIndex int) tea.Cmd {
 	return func() (result tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -802,16 +874,17 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 		// Build the initial prompt to auto-submit. Passing it as a positional
 		// argument to claude starts an interactive session and submits it
 		// immediately — no PTY-write timing hack needed.
-		initialPrompt := buildInitialPrompt(slug, title, extraContext, shortMode, chatMode, skipConfirm, followupMode)
+		initialPrompt := buildInitialPrompt(slug, title, extraContext, shortMode, chatMode, skipConfirm, followupMode, findingIndex)
 
 		// Build args: optionally inject --append-system-prompt before the
 		// positional initialPrompt when followupMode is active.
 		args := []string{"--dangerously-skip-permissions"}
 		if followupMode && slug != "" {
-			if sysPrompt := loadFollowupContext(slug, knowledgeDir); sysPrompt != "" {
+			if sysPrompt := loadFollowupContext(slug, knowledgeDir, findingIndex); sysPrompt != "" {
 				args = append(args, "--append-system-prompt", sysPrompt)
 			}
 		}
+		args = append(args, "--settings", `{}`)
 		args = append(args, initialPrompt)
 
 		cmd := exec.Command("claude", args...)

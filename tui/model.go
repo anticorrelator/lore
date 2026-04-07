@@ -25,6 +25,7 @@ const (
 	stateKnowledge
 	stateFollowUps
 	stateOnboarding
+	stateNoRepo
 )
 
 // panelFocus tracks which panel has keyboard focus in split-pane mode.
@@ -122,14 +123,15 @@ type model struct {
 	specPanels   map[string]work.SpecPanelModel
 	terminalMode bool
 
-	sessionConfirmActive      bool
-	sessionConfirmSlug        string
-	sessionConfirmTitle       string
-	sessionConfirmInput       textarea.Model
-	sessionConfirmShortMode   bool
-	sessionConfirmSkipConfirm bool
+	sessionConfirmActive        bool
+	sessionConfirmSlug          string
+	sessionConfirmTitle         string
+	sessionConfirmInput         textarea.Model
+	sessionConfirmShortMode     bool
+	sessionConfirmSkipConfirm   bool
 	sessionConfirmChatMode      bool
 	sessionConfirmFollowupMode  bool
+	sessionConfirmFindingIndex  int
 	sessionLaunchedFromModal    bool
 
 	showHelp bool
@@ -295,14 +297,27 @@ func (m model) buildPaneConfig() paneConfig {
 
 	switch m.state {
 	case stateFollowUps:
-		listTitle := "Follow-ups"
+		modeLabel := "Open"
+		if m.followupList.GetFilterMode() == followup.FilterClosed {
+			modeLabel = "Closed"
+		}
+		listTitle := modeLabel
 		if items := m.followupList.Items(); len(items) > 0 {
-			listTitle = fmt.Sprintf("Follow-ups (%d)", len(items))
+			listTitle = fmt.Sprintf("%s (%d)", modeLabel, len(items))
 		}
 		detailTitle := "Detail"
 		if t := m.followupDetail.Title(); t != "" {
 			detailTitle = t
 		}
+
+		var openTabS, closedTabS lipgloss.Style
+		if m.followupList.GetFilterMode() == followup.FilterClosed {
+			openTabS, closedTabS = tabInactiveS, tabActiveS
+		} else {
+			openTabS, closedTabS = tabActiveS, tabInactiveS
+		}
+		filterAnnot := tabSepS.Render("ctrl+a  ") + openTabS.Render("open") + tabSepS.Render(" · ") + closedTabS.Render("closed")
+		filterAnnotW := 8 + 4 + 3 + 6 // "ctrl+a  " + "open" + " · " + "closed"
 
 		specPanel, hasSpecPanel := m.currentFollowupPanel()
 		return paneConfig{
@@ -312,6 +327,8 @@ func (m model) buildPaneConfig() paneConfig {
 			hasSpecPanel:  hasSpecPanel,
 			listTitle:     listTitle,
 			detailTitle:   detailTitle,
+			filterAnnot:   filterAnnot,
+			filterAnnotW:  filterAnnotW,
 			state:         stateFollowUps,
 			listItemCount: listItemCount,
 			fuItemCount:   fuItemCount,

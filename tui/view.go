@@ -16,6 +16,10 @@ func (m model) View() string {
 		return fmt.Sprintf("Error: %v\n\nPress q to quit.\n", m.err)
 	}
 
+	if m.state == stateNoRepo {
+		return m.viewNoRepo()
+	}
+
 	if m.state == stateOnboarding {
 		return m.viewOnboarding()
 	}
@@ -56,7 +60,7 @@ func (m model) viewOnboarding() string {
 	titleS := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
 	dimS := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
-	repoName := filepath.Base(m.config.ProjectDir)
+	repoName := m.config.RepoIdentifier
 	title := titleS.Render(repoName)
 
 	var action string
@@ -68,6 +72,21 @@ func (m model) viewOnboarding() string {
 	quit := dimS.Render("Press q to quit")
 
 	content := title + "\n\n" + action + "\n" + quit
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+}
+
+// viewNoRepo renders a full-screen centered view when the TUI is launched outside a git repository.
+func (m model) viewNoRepo() string {
+	titleS := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
+	dimS := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	dirName := filepath.Base(m.config.ProjectDir)
+	title := titleS.Render(dirName)
+	line1 := dimS.Render("Not inside a git repository")
+	line2 := dimS.Render("Navigate to a git repo and relaunch")
+	quit := dimS.Render("Press q to quit")
+
+	content := title + "\n\n" + line1 + "\n" + line2 + "\n\n" + quit
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 }
 
@@ -520,11 +539,19 @@ func (m model) renderStatusBar(width int) string {
 				hint("Esc", "back to list"),
 				hint("Ctrl+c", "terminate"),
 			}
+		} else if m.followupDetail.ActiveTab() == followup.TabTriage && m.followupDetail.ActionMenuOpen() {
+			hints = []string{
+				hint("c", "chat"),
+				hint("d", "disposition"),
+				hint("e", "edit"),
+				hint("Esc", "cancel"),
+			}
 		} else if m.followupDetail.ActiveTab() == followup.TabTriage {
 			hints = []string{
 				hint("j/k", "navigate"),
 				hint("space/x", "toggle"),
 				hint("a", "all"),
+				hint("Enter", "actions"),
 				hint("p", "promote"),
 				hint("Tab/Shift-Tab", "cycle tabs"),
 				hint("h/Esc", "back to list"),

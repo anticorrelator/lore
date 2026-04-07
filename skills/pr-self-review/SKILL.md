@@ -1,17 +1,17 @@
 ---
 name: pr-self-review
-description: "Author-calibrated self-review: parallel lens pre-scan (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) then confirmatory dialog to disposition findings into a phased plan.md"
+description: "Author-calibrated self-review: parallel lens pre-scan (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) then auto-disposition findings into a followup sidecar for TUI triage"
 user_invocable: true
-argument_description: "[PR_number_or_URL] [--skip-pre-scan] [focus context] — PR to self-review (or auto-detect from branch). --skip-pre-scan skips the lens team and uses heuristic dialog instead. Optional focus context steers finding priority (e.g., '42 focus on error handling')"
+argument_description: "[PR_number_or_URL] [--skip-pre-scan] [focus context] — PR to self-review (or auto-detect from branch). --skip-pre-scan skips the lens team and uses heuristic auto-disposition instead. Optional focus context steers finding priority (e.g., '42 focus on error handling')"
 ---
 
 # /pr-self-review Skill
 
-Author-calibrated self-review combining structured analysis with interactive dialog. A parallel lens team (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) runs a pre-scan, then you and the user discuss each finding in a confirmatory dialog — assigning dispositions (action/accepted/deferred/open) rather than generating observations from scratch.
+Author-calibrated self-review combining structured lens analysis with automatic disposition. A parallel lens team (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) runs a pre-scan, then findings are auto-dispositioned and persisted as a followup sidecar (`lens-findings.json`) for interactive TUI triage via the per-finding action menu.
 
 Since this is your own work, locally-scoped action items can be implement-ready. Findings with cross-boundary implications (especially from Blast Radius) get verification directives instead.
 
-This skill does not modify source code.
+This skill does not modify source code. Interactive finding review happens in the TUI Triage tab, not in this skill's dialog.
 
 ## Step 1: Setup
 
@@ -56,18 +56,15 @@ lore ceremony get pr-review
 
 If the result is non-empty (not `[]`), append each returned skill to the lens set. Ceremony lenses are not subject to adaptive skip conditions — they always run when configured.
 
-Display:
+Display and proceed immediately (no confirmation gate):
 
 ```
 [pr-self-review] Triage
 Size: <N> LOC across <M> files
 Lenses: Blast Radius · Security · Test Quality · Correctness · Regressions · Interface Clarity · User Impact · [ceremony] insecure-defaults
-Add or remove lenses? (enter lens names, or press Enter to proceed)
 ```
 
 If the diff exceeds 400 LOC, append: `Size: <N> LOC (large — consider --skip-pre-scan for targeted exploration)`
-
-This is a soft gate — no explicit confirmation required. If the user names lenses to add or remove (including ceremony lenses by name), adjust. Otherwise proceed.
 
 ## Step 2: Lens Scan
 
@@ -229,9 +226,9 @@ Write the synthesized findings to `notes.md` under a `## Lens Scan` heading:
 | 2 | suggestion | <title> | <lens> | <file:line> | — |
 ```
 
-The `Disposition` column starts as `—` and is updated during Step 3.
+The `Disposition` column starts as `—` and is filled during Step 3 auto-disposition.
 
-## Step 3: Dialog
+## Step 3: Auto-Disposition
 
 Read protocol sections:
 ```bash
@@ -240,30 +237,35 @@ cat ~/.lore/claude-md/review-protocol/enrichment.md
 cat ~/.lore/claude-md/review-protocol/checklist.md
 ```
 
-### 3a. Triage findings into interactive vs. auto-dispositioned
+### 3a. Disposition all findings automatically
 
-Classify each finding into one of two buckets:
+Apply dispositions to every finding using your best judgment as the PR author:
 
-**Interactive (require user dialog):**
-- All `blocking` findings
-- Compound findings (multiple lenses converging on the same location)
-- Suggestions with cross-boundary implications (Blast Radius findings, changes affecting public APIs or shared interfaces)
-- Findings where the correct disposition is genuinely ambiguous — you could argue for `action` or `accepted` with equal confidence
-- Findings matching user-provided focus context
+**Disposition rules:**
+- `blocking` findings → `action` (these need fixes)
+- Compound findings (multiple lenses converging) → `action`
+- Suggestions with cross-boundary implications (Blast Radius, public API changes) → `action`
+- `question` findings where you can answer from diff and codebase context → `accepted`
+- Locally scoped, low-risk suggestions with obvious answers:
+  - Clear style/convention nits → `accepted`
+  - Missing test coverage for trivial branches → `action`
+  - Naming suggestions with no semantic impact → `accepted`
+- Ambiguous findings where the correct call is genuinely uncertain → `open` (the user will triage these in the TUI)
 
-**Auto-disposition (use your best judgment):**
-- `question` findings where you can answer the question yourself from the diff and codebase context
-- `suggestion` findings that are locally scoped, low-risk, and have an obvious disposition:
-  - Clear style/convention nits → auto-accept or auto-action based on project conventions
-  - Missing test coverage for trivial branches → auto-action
-  - Naming suggestions with no semantic impact → auto-accept
-- Any finding where you are confident (not merely uncertain) about the right call
+**When in doubt, use `open`.** The TUI Triage tab's per-finding action menu lets the user change dispositions, launch scoped chats, and customize responses — uncertain findings are better left for interactive triage than auto-resolved incorrectly.
 
-**When in doubt, make it interactive.** The goal is to skip the obvious ones, not to avoid discussion.
+For each finding, record a one-line rationale explaining the disposition choice.
 
-### 3b. Overview and auto-disposition summary
+**Heuristic fallback:** If the pre-scan produced zero findings or `--skip-pre-scan` was set, scan the diff for risk concentration, complexity, and architectural decisions. Generate findings using perspective lenses:
+1. "What would a reviewer unfamiliar with this codebase question?"
+2. "What are the weakest assumptions in this change?"
+3. "What invariants in other files does this change depend on?"
 
-Present a concise PR overview:
+Enrich heuristic observations via `lore search` before generating findings.
+
+### 3b. Present disposition summary
+
+Display the full disposition table (no confirmation gate — proceed immediately to Step 4):
 
 ```
 ## Self-Review: #<N> — <title>
@@ -271,67 +273,26 @@ Present a concise PR overview:
 **Branch:** <head> → <base>
 **Scope:** <N files, brief characterization>
 
-### Auto-dispositioned (<M> findings):
 | # | Severity | Title | Lens | File:Line | Disposition | Rationale |
 |---|----------|-------|------|-----------|-------------|-----------|
-| 3 | suggestion | <title> | <lens> | <file:line> | accepted | <one-line reason> |
-| 5 | question | <title> | <lens> | <file:line> | accepted | <one-line reason> |
-| 7 | suggestion | <title> | <lens> | <file:line> | action | <one-line reason> |
-
-> Override any of these? (enter finding numbers, or press Enter to confirm)
-
-### Findings to discuss (<N> findings):
-1. [blocking] <finding title> — <lens> — <file:line>
-2. [suggestion] <finding title> — <lens> — <file:line>
+| 1 | blocking | <title> | <lens> | <file:line> | action | <one-line reason> |
+| 2 | suggestion | <title> | <lens> | <file:line> | accepted | <one-line reason> |
+| 3 | suggestion | <title> | <lens> | <file:line> | open | <one-line reason> |
 ...
+
+Dispositions: <A> action, <C> accepted, <D> deferred, <O> open
+→ Creating followup for TUI triage
 ```
 
-Sort interactive findings: blocking first (compound before single-lens), then suggestions, then questions. If focus context was provided, reorder matching items first within each severity tier.
-
-**User override:** If the user names finding numbers from the auto-dispositioned table, move those findings into the interactive list and reset their disposition. Otherwise, auto-dispositions are confirmed and recorded.
-
-**Ceremony lens findings:** Conforming ceremony lens findings are included in the lists above — they sort by severity alongside built-in lens findings and show their ceremony lens name (e.g., `[suggestion] Token rotation check — codex-pr-review — auth.go:42`). If any ceremony lenses produced non-conforming output, append a summary line after the findings list:
+**Ceremony lens findings:** Conforming ceremony lens findings are included in the table above. If any ceremony lenses produced non-conforming output, append:
 
 ```
-Supplementary reports: <skill-name>, <skill-name> (non-standard format — see below)
+Supplementary reports: <skill-name>, <skill-name> (non-standard format — see Step 4 summary)
 ```
-
-Then **open the first interactive finding** for discussion with its label, lens, file:line, body, and knowledge citations. End with an open question. Strip internal protocol headers (`**Grounding:**`, `**Severity:**`, etc.) from dialog presentation — these are internal scaffolding. The grounding content itself must be preserved as the substance of the finding. Dialog presentation must follow the voice guide in `~/.lore/claude-md/review-protocol/review-voice.md`.
-
-**Heuristic fallback:** If the pre-scan produced zero findings or `--skip-pre-scan` was set, scan the diff for risk concentration, complexity, and architectural decisions. Open topics using perspective lenses:
-1. "What would a reviewer unfamiliar with this codebase question?"
-2. "What are the weakest assumptions in this change?"
-3. "What invariants in other files does this change depend on?"
-
-Enrich heuristic observations via `lore search` before presenting.
-
-### 3c. Dialog rounds
-
-Each round follows this sequence:
-
-1. **Present finding** with disposition prompt: `(a)ction / (ok) accepted / (d)efer / (?) open`
-2. **Discuss** — user may assign a disposition directly, challenge, go deeper, or redirect
-3. **Record disposition** and advance to the next undispositioned interactive finding
-
-**Dispositions:**
-- **action** — needs a fix; becomes a task in the plan
-- **accepted** — confirmed fine as-is
-- **deferred** — valid but out of scope
-- **open** — needs more investigation
-
-**User-steered flow:** The user can jump to any finding (including auto-dispositioned ones), batch-accept, raise new topics, or wrap up at any time. Undispositioned findings at wrap-up are recorded as `open`.
-
-**After all interactive findings:** Offer to continue exploring areas not covered by lenses. If declined, proceed to Step 4.
-
-**Perspective escalation:** When the user challenges a finding, offer:
-- **perspective-external:** "Re-examine as if seeing this code for the first time."
-- **perspective-assumption:** "What is the weakest assumption? Does the severity change?"
-
-Discuss findings like a thoughtful colleague — the structured format is for tracking, not reading aloud verbatim.
 
 ## Step 4: Work Item and Summary
 
-After the dialog concludes, collect all dispositioned findings.
+Collect all auto-dispositioned findings from Step 3.
 
 ### No action items path
 
@@ -367,17 +328,17 @@ Address findings from self-review dialog before requesting external review.
 ### Phase 1: Blocking / Correctness
 **Objective:** Fix issues that affect correctness or violate cross-boundary invariants
 **Files:** <affected files>
-- [ ] <finding title> [<lens>] — <file:line> — <one-line action from dialog>
+- [ ] <finding title> [<lens>] — <file:line> — <one-line action>
 
 ### Phase 2: Convention Alignment
 **Objective:** Align with project conventions
 **Files:** <affected files>
-- [ ] <finding title> [<lens>] — <file:line> — <one-line action from dialog>
+- [ ] <finding title> [<lens>] — <file:line> — <one-line action>
 
 ### Phase 3: Improvements
 **Objective:** Address remaining suggestions
 **Files:** <affected files>
-- [ ] <finding title> [<lens>] — <file:line> — <one-line action from dialog>
+- [ ] <finding title> [<lens>] — <file:line> — <one-line action>
 
 ### Phase 4: Reviewed and Confirmed
 - <finding title> [<lens>] — Confirmed fine because: <rationale>
@@ -416,8 +377,8 @@ Generate tasks:
 **Lens coverage:** <L> lenses, <N> findings (<K> blocking, <J> suggestions, <Q> questions)
 **Dispositions:** <A> action, <C> accepted, <D> deferred, <O> open
 
-### Discussion highlights:
-- <key insight or decision from the dialog>
+### Auto-disposition highlights:
+- <key insight or notable finding from the scan>
 
 ### Supplementary Reports
 <skill-name> [ceremony] — non-standard format, presented verbatim
@@ -471,19 +432,102 @@ If no work item was created (no-action-items path), set `"work_item": ""`.
 
 ### Build --content summary
 
-Build the finding content body with a diagnostic summary first line for TUI excerpt compatibility:
+Assemble the `--content` value with all sections below. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
+
+**First line:** One-line diagnostic summary for TUI excerpt compatibility (FindingExcerpt skips `#` heading lines and blank lines, returning the first 3 non-heading non-empty lines — this summary must be first):
 
 ```
 Self-review of PR #<N>: <A> action, <C> accepted, <D> deferred, <O> open across <L> lenses
+```
 
-Reviewed <M> files on branch <head> → <base>.
+**Section 1 — PR Narrative** (from Step 2a review context and PR metadata):
 
-| # | Severity | Title | Lens | File:Line | Disposition |
-|---|----------|-------|------|-----------|-------------|
-| 1 | blocking | <title> | <lens> | <file:line> | action |
-| 2 | suggestion | <title> | <lens> | <file:line> | accepted |
+Using the review context built in Step 2a (alignment map and design signals) and the PR metadata (title, body, branch), synthesize a 1-2 paragraph narrative:
+- What the PR does structurally (drawn from the alignment map)
+- Design signals and cross-cutting concerns identified
+- Notable alignment observations (unrelated files, missing pieces) — omit if the PR is coherent
+
+```markdown
+## PR Narrative
+
+<1-2 paragraphs>
+```
+
+**Section 2 — Implementation Diagram** (conditional):
+
+Include only when the PR touches 2 or more distinct modules (grouped by first directory component, or `(root)` for repo-root files). Read diagram conventions:
+
+```bash
+cat ~/.lore/claude-md/review-protocol/followup-template.md
+```
+
+Build an ASCII logical flow diagram showing how the PR's changes work mechanically. Omit this section entirely for single-module PRs or when directional relationships cannot be determined from available context.
+
+```markdown
+## Implementation Diagram
+
+<ASCII box-drawing diagram per followup-template.md conventions>
+```
+
+**Section 3 — Review Findings:**
+
+Include the full finding details, stripped of internal protocol headers per the pr-review Step 6d-ii pattern: remove `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, and compound markers from finding bodies. Weave grounding content (the concrete scenario/consequence) into the body text without the protocol label.
+
+Findings are grouped by severity with user-facing labels (blocking → "Findings requiring action", suggestion → "Improvement opportunities", question → "Questions"). Empty severity groups render `None.` — do not omit the subheading. If zero findings overall, still emit `## Review Findings` with an explicit no-findings statement.
+
+```markdown
+## Review Findings
+
+**Verdict:** <ACTION NEEDED / SUGGESTIONS / CLEAN>
+**Findings requiring action:** <count> | **Improvement opportunities:** <count> | **Questions:** <count>
+
+### Findings requiring action (<count>)
+
+#### 1. <title>
+**Lens:** <lens>
+**File:** `<file:line>`
+
+<finding body, internal headers stripped, grounding woven inline>
+
+---
+
+### Improvement opportunities (<count>)
+
+...
+
+### Questions (<count>)
+
 ...
 ```
+
+If non-conforming ceremony lens output exists, append after the structured findings:
+
+```markdown
+### Supplementary Reports
+
+#### <skill-name> [ceremony]
+
+<raw output from the ceremony lens>
+```
+
+Omit the `### Supplementary Reports` heading entirely when all ceremony lenses were conforming or no ceremony lenses ran.
+
+**Section 4 — Disposition Summary:**
+
+A table summarizing all findings with their dispositions. Self-review replaces `## Proposed Comments` (which posts to GitHub) with this table — `create-followup.sh` does not post review comments.
+
+```markdown
+## Disposition Summary
+
+| # | Severity | Title | Lens | File:Line | Disposition | Rationale |
+|---|----------|-------|------|-----------|-------------|-----------|
+| 1 | blocking | <title> | <lens> | <file:line> | action | <one-line reason> |
+| 2 | suggestion | <title> | <lens> | <file:line> | accepted | <one-line reason> |
+| 3 | suggestion | <title> | <lens> | <file:line> | open | <one-line reason> |
+...
+```
+
+Include all findings (action, accepted, deferred, open). If zero findings, emit `## Disposition Summary` with `None.` as the body rather than omitting the section.
 
 ### Create followup
 
@@ -501,7 +545,7 @@ bash ~/.lore/scripts/create-followup.sh \
 **Gate:** Do not execute this step until Step 4.5 (followup creation) has completed. When Step 4 creates a plan, `plan.md` must also be written before proceeding.
 
 ```
-/remember Self-review of PR #<N> (lens pre-scan + dialog) — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered or clarified (why the architecture is this way, what constraints drove decisions), convention drift patterns found by lenses, cross-boundary invariants identified (especially from Blast Radius), architectural concerns surfaced during disposition dialog. Use confidence: medium. Skip: obvious fixes, style issues, findings specific to this PR that don't generalize.
+/remember Self-review of PR #<N> (lens pre-scan + auto-disposition) — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered or clarified (why the architecture is this way, what constraints drove decisions), convention drift patterns found by lenses, cross-boundary invariants identified (especially from Blast Radius). Use confidence: medium. Skip: obvious fixes, style issues, findings specific to this PR that don't generalize.
 ```
 
 This step is automatic — do not ask whether to run it.
@@ -510,11 +554,11 @@ This step is automatic — do not ask whether to run it.
 
 If re-invoked on the same PR, check for an existing work item (`pr-self-review-<PR_NUMBER>` in `/work list`). If found:
 
-1. **Load lens scan findings** — read the `## Lens Scan` section from `notes.md`. Parse which findings are dispositioned vs `—`.
-2. **Skip the lens team** — do not re-run Step 2. Display: `[pr-self-review] Resuming: <N> undispositioned findings from previous scan`
-3. **Resume dialog** — skip to Step 3 and present findings with dispositioned items marked.
-4. **If no lens scan section** — offer to re-run the lens team or continue with heuristic dialog.
-5. **If `plan.md` already exists** — load the plan and check for new undispositioned findings.
+1. **Load lens scan findings** — read the `## Lens Scan` section from `notes.md`.
+2. **Skip the lens team** — do not re-run Step 2. Display: `[pr-self-review] Resuming: using cached lens scan`
+3. **Re-run auto-disposition** — skip to Step 3 with cached findings.
+4. **If no lens scan section** — re-run the full lens team (Step 2).
+5. **If `plan.md` already exists** — load the plan and check for new findings.
 
 Append new findings to existing phases rather than creating a duplicate work item.
 

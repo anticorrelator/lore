@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,15 +37,22 @@ func main() {
 	}()
 
 	cfg, err := config.Load()
-	if err != nil {
+	if err != nil && !errors.Is(err, config.ErrNoRepo) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	prefs := config.LoadPrefs()
 
+	startState := stateWork
+	if errors.Is(err, config.ErrNoRepo) {
+		startState = stateNoRepo
+	} else {
+		startState = classifyStartupState(cfg)
+	}
+
 	m := model{
-		state:      classifyStartupState(cfg),
+		state:      startState,
 		config:     cfg,
 		layoutMode: prefs.Layout,
 		indexPath:  filepath.Join(cfg.WorkDir, "_index.json"),

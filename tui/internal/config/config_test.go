@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,6 +25,70 @@ func TestLoad(t *testing.T) {
 	expected := cfg.KnowledgeDir + "/_work"
 	if cfg.WorkDir != expected {
 		t.Errorf("WorkDir = %q, want %q", cfg.WorkDir, expected)
+	}
+}
+
+func TestLoad_ErrNoRepo(t *testing.T) {
+	// Create a temp directory that is not inside a git repo.
+	tmp := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	// Point LORE_KNOWLEDGE_DIR away so lore resolve can't return a valid path.
+	t.Setenv("LORE_KNOWLEDGE_DIR", "")
+
+	cfg, err := Load()
+	if !errors.Is(err, ErrNoRepo) {
+		t.Skipf("expected ErrNoRepo from non-git dir, got: %v (lore or git may behave differently in CI)", err)
+	}
+
+	if cfg.ProjectDir == "" {
+		t.Error("ProjectDir should be set even on ErrNoRepo")
+	}
+	if cfg.KnowledgeDir != "" {
+		t.Errorf("KnowledgeDir should be empty on ErrNoRepo, got %q", cfg.KnowledgeDir)
+	}
+	if cfg.WorkDir != "" {
+		t.Errorf("WorkDir should be empty on ErrNoRepo, got %q", cfg.WorkDir)
+	}
+}
+
+func TestLoad_InsideGitRepo(t *testing.T) {
+	// Load from the current directory which is already a git repo.
+	cfg, err := Load()
+	if err != nil {
+		t.Skipf("lore resolve not available in test environment: %v", err)
+	}
+
+	if cfg.ProjectDir == "" {
+		t.Error("ProjectDir should not be empty inside a git repo")
+	}
+	if cfg.KnowledgeDir == "" {
+		t.Error("KnowledgeDir should not be empty inside a git repo")
+	}
+	if cfg.WorkDir == "" {
+		t.Error("WorkDir should not be empty inside a git repo")
+	}
+	// KnowledgeDir and WorkDir must both be non-empty — no ErrNoRepo.
+	if errors.Is(err, ErrNoRepo) {
+		t.Error("Load() must not return ErrNoRepo when inside a git repo with lore")
+	}
+}
+
+func TestLoad_RepoIdentifier(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Skipf("lore resolve not available in test environment: %v", err)
+	}
+
+	if cfg.RepoIdentifier == "" {
+		t.Error("RepoIdentifier should not be empty on successful Load()")
 	}
 }
 

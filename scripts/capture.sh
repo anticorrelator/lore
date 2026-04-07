@@ -18,6 +18,7 @@ RELATED_FILES=""
 SOURCE="manual"
 EXAMPLE=""
 JSON_MODE=0
+SKIP_MANIFEST=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,9 +54,13 @@ while [[ $# -gt 0 ]]; do
       JSON_MODE=1
       shift
       ;;
+    --skip-manifest)
+      SKIP_MANIFEST=1
+      shift
+      ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--json]" >&2
+      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--json] [--skip-manifest]" >&2
       exit 1
       ;;
   esac
@@ -147,7 +152,9 @@ fi
 echo "$(timestamp_iso),$SOURCE,$CATEGORY,$CONFIDENCE" >> "$LOG_FILE"
 
 # --- Run manifest update ---
-"$SCRIPT_DIR/update-manifest.sh" > /dev/null 2>&1 || true
+if [[ $SKIP_MANIFEST -eq 0 ]]; then
+  "$SCRIPT_DIR/update-manifest.sh" > /dev/null 2>&1 || true
+fi
 
 # --- Output ---
 if [[ $JSON_MODE -eq 1 ]]; then

@@ -463,8 +463,8 @@ func TestDetailModelUsesReviewCardsWhenSidecarPresent(t *testing.T) {
 	if len(updated.tabs) != 3 {
 		t.Errorf("tabs len = %d, want 3 (Meta+Finding+Comments)", len(updated.tabs))
 	}
-	if updated.ActiveTab() != TabComments {
-		t.Errorf("active tab = %v, want TabComments (default when comments present)", updated.ActiveTab())
+	if updated.ActiveTab() != TabFinding {
+		t.Errorf("active tab = %v, want TabFinding (default tab)", updated.ActiveTab())
 	}
 	if updated.reviewCards == nil {
 		t.Fatal("reviewCards should be initialized")
@@ -549,9 +549,9 @@ func TestDetailModelTabCyclesThroughTabs(t *testing.T) {
 
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
-	// Should start on TabComments (default when comments present).
-	if updated.ActiveTab() != TabComments {
-		t.Fatalf("initial tab = %v, want TabComments", updated.ActiveTab())
+	// Should start on TabFinding (always the default).
+	if updated.ActiveTab() != TabFinding {
+		t.Fatalf("initial tab = %v, want TabFinding", updated.ActiveTab())
 	}
 	startIdx := updated.activeTab
 
@@ -672,10 +672,11 @@ func TestDetailModelKeyRoutesToActiveTab(t *testing.T) {
 
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
-	// Sidecar present: default active tab is TabComments.
-	if updated.ActiveTab() != TabComments {
-		t.Fatalf("active tab = %v, want TabComments", updated.ActiveTab())
+	// Default active tab is TabFinding.
+	if updated.ActiveTab() != TabFinding {
+		t.Fatalf("active tab = %v, want TabFinding", updated.ActiveTab())
 	}
+	updated.activeTab = updated.tabIndexFor(TabComments)
 	if updated.reviewCards.cursor != 0 {
 		t.Fatalf("initial cards cursor = %d, want 0", updated.reviewCards.cursor)
 	}
@@ -1253,9 +1254,9 @@ func TestDetailModelDefaultTabTriagePreferred(t *testing.T) {
 
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
-	// Default tab should be TabTriage when lens findings are present.
-	if updated.ActiveTab() != TabTriage {
-		t.Errorf("default tab = %v, want TabTriage", updated.ActiveTab())
+	// Default tab should be TabFinding when lens findings are present.
+	if updated.ActiveTab() != TabFinding {
+		t.Errorf("default tab = %v, want TabFinding", updated.ActiveTab())
 	}
 }
 
@@ -1281,8 +1282,8 @@ func TestDetailModelDefaultTabCommentsWhenNoFindings(t *testing.T) {
 
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
-	if updated.ActiveTab() != TabComments {
-		t.Errorf("default tab = %v, want TabComments when no lens findings", updated.ActiveTab())
+	if updated.ActiveTab() != TabFinding {
+		t.Errorf("default tab = %v, want TabFinding when no lens findings", updated.ActiveTab())
 	}
 }
 
@@ -1310,10 +1311,11 @@ func TestDetailModelKeyDelegationToLensFindings(t *testing.T) {
 
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
-	// Should default to TabTriage.
-	if updated.ActiveTab() != TabTriage {
-		t.Fatalf("active tab = %v, want TabTriage", updated.ActiveTab())
+	// Default is TabFinding; switch to TabTriage to test key delegation.
+	if updated.ActiveTab() != TabFinding {
+		t.Fatalf("active tab = %v, want TabFinding (default)", updated.ActiveTab())
 	}
+	updated.activeTab = updated.tabIndexFor(TabTriage)
 
 	// j should be delegated to LensFindingsModel (cursor moves down).
 	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})

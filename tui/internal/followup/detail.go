@@ -482,6 +482,15 @@ func (m DetailModel) SelectedLensFindingsJSON() string {
 	return string(data)
 }
 
+// ActionMenuOpen returns true when the Triage tab's inline action menu is open.
+// Used by the parent model to show action menu hints in the status bar.
+func (m DetailModel) ActionMenuOpen() bool {
+	if m.lensFindings == nil {
+		return false
+	}
+	return m.lensFindings.ActionMenuOpen()
+}
+
 // IsEditing returns true when the review cards model has an inline textarea active.
 // Used by the parent model to suppress global key shortcuts.
 func (m DetailModel) IsEditing() bool {
@@ -541,14 +550,7 @@ func (m *DetailModel) PreserveTab() {
 }
 
 // defaultTabIndex returns the tab index to use when no saved tab is set.
-// Precedence: LensFindings > ProposedComments > TabFinding.
 func (m DetailModel) defaultTabIndex() int {
-	if m.lensFindings != nil {
-		return m.tabIndexFor(TabTriage)
-	}
-	if m.reviewCards != nil {
-		return m.tabIndexFor(TabComments)
-	}
 	return m.tabIndexFor(TabFinding)
 }
 

@@ -251,13 +251,341 @@ func TestLensFindingsXTogglesSelection(t *testing.T) {
 	}
 }
 
-func TestLensFindingsEnterTogglesSelection(t *testing.T) {
+func TestLensFindingsEnterOpensActionMenu(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.actionMenuOpen {
+		t.Error("enter should open the action menu")
+	}
+	if m.actionMenu != actionMenuMain {
+		t.Errorf("enter should set actionMenu=actionMenuMain, got %v", m.actionMenu)
+	}
+	// Selection should NOT be toggled.
+	if m.findings[0].Selected {
+		t.Error("enter should not toggle finding selection")
+	}
+}
+
+func TestLensFindingsEscClosesActionMenu(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	// Open menu
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.actionMenuOpen {
+		t.Fatal("expected menu to be open after enter")
+	}
+
+	// Esc should close it
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.actionMenuOpen {
+		t.Error("esc should close the action menu")
+	}
+	if m.actionMenu != actionMenuNone {
+		t.Errorf("esc should set actionMenu=actionMenuNone, got %v", m.actionMenu)
+	}
+}
+
+func TestLensFindingsJDismissesMenuAndNavigates(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.actionMenuOpen {
+		t.Fatal("expected menu to be open")
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if m.actionMenuOpen {
+		t.Error("j should dismiss the action menu")
+	}
+	if m.cursor != 1 {
+		t.Errorf("j should move cursor to 1 after dismissing menu, got %d", m.cursor)
+	}
+}
+
+func TestLensFindingsKDismissesMenuAtTop(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.actionMenuOpen {
+		t.Fatal("expected menu to be open")
+	}
+
+	// k at top: dismisses menu, cursor stays at 0
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if m.actionMenuOpen {
+		t.Error("k should dismiss the action menu")
+	}
+	if m.cursor != 0 {
+		t.Errorf("k at top should keep cursor at 0, got %d", m.cursor)
+	}
+}
+
+func TestLensFindingsMenuSwallowsOtherKeys(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.actionMenuOpen {
+		t.Fatal("expected menu to be open")
+	}
+	selBefore := m.findings[0].Selected
+
+	// space should be swallowed (no selection toggle)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	if !m.actionMenuOpen {
+		t.Error("space should be swallowed, menu should remain open")
+	}
+	if m.findings[0].Selected != selBefore {
+		t.Error("space should not toggle selection while menu is open")
+	}
+}
+
+func TestLensFindingsDKeyOpensDispositionSubMenu(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	// Open main menu
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.actionMenu != actionMenuMain {
+		t.Fatal("expected actionMenuMain after enter")
+	}
+
+	// Press d to open disposition sub-menu
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if m.actionMenu != actionMenuDisposition {
+		t.Errorf("d should transition to actionMenuDisposition, got %v", m.actionMenu)
+	}
+	if !m.actionMenuOpen {
+		t.Error("menu should remain open after d")
+	}
+}
+
+func TestLensFindingsDispositionSubMenuAction(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+	// cursor is at finding[0] (action disposition, unselected)
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if m.actionMenu != actionMenuDisposition {
+		t.Fatal("expected disposition sub-menu")
+	}
+
+	// a → action, selected=false
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if m.actionMenuOpen {
+		t.Error("menu should close after disposition set")
+	}
+	if m.findings[0].Disposition != "action" {
+		t.Errorf("disposition should be 'action', got %q", m.findings[0].Disposition)
+	}
+	if m.findings[0].Selected {
+		t.Error("selected should be false for action disposition")
+	}
+	if m.review.Findings[0].Disposition != "action" {
+		t.Error("review.Findings[0].Disposition should be synced")
+	}
+	if m.review.Findings[0].Selected {
+		t.Error("review.Findings[0].Selected should be synced (false for action)")
+	}
+}
+
+func TestLensFindingsDispositionSubMenuDeferred(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+
+	// d → deferred, selected=true
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if m.actionMenuOpen {
+		t.Error("menu should close after disposition set")
+	}
+	if m.findings[0].Disposition != "deferred" {
+		t.Errorf("disposition should be 'deferred', got %q", m.findings[0].Disposition)
+	}
 	if !m.findings[0].Selected {
-		t.Error("enter should select finding 0")
+		t.Error("selected should be true for deferred disposition")
+	}
+}
+
+func TestLensFindingsDispositionSubMenuAccepted(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+
+	// enter → accepted (ok/confirm), selected=true
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.actionMenuOpen {
+		t.Error("menu should close after disposition set")
+	}
+	if m.findings[0].Disposition != "accepted" {
+		t.Errorf("enter should set disposition to 'accepted', got %q", m.findings[0].Disposition)
+	}
+	if !m.findings[0].Selected {
+		t.Error("selected should be true for accepted disposition")
+	}
+}
+
+func TestLensFindingsDispositionSubMenuQuestionMark(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+
+	// ? → open, selected=false
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	if m.actionMenuOpen {
+		t.Error("menu should close after disposition set")
+	}
+	if m.findings[0].Disposition != "open" {
+		t.Errorf("? should set disposition to 'open', got %q", m.findings[0].Disposition)
+	}
+	if m.findings[0].Selected {
+		t.Error("selected should be false for open disposition")
+	}
+}
+
+func TestLensFindingsDispositionSubMenuEscBackToMain(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if m.actionMenu != actionMenuDisposition {
+		t.Fatal("expected disposition sub-menu")
+	}
+
+	// esc should go back to main menu, not close entirely
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.actionMenu != actionMenuMain {
+		t.Errorf("esc from disposition sub-menu should return to main, got %v", m.actionMenu)
+	}
+	if !m.actionMenuOpen {
+		t.Error("menu should still be open after esc from disposition sub-menu")
+	}
+}
+
+func TestLensFindingsDispositionSubMenuSwallowsUnknownKeys(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+	origDisp := m.findings[0].Disposition
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+
+	// Unknown key — should be swallowed, menu stays open
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	if !m.actionMenuOpen {
+		t.Error("unknown key should be swallowed, menu should remain open")
+	}
+	if m.findings[0].Disposition != origDisp {
+		t.Error("unknown key should not change disposition")
+	}
+}
+
+func TestLensFindingsViewMainMenuRow(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	// Open action menu
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.actionMenuOpen {
+		t.Fatal("expected menu to be open")
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "(c)hat") {
+		t.Error("main menu row should contain '(c)hat'")
+	}
+	if !strings.Contains(out, "(d)isposition") {
+		t.Error("main menu row should contain '(d)isposition'")
+	}
+	if !strings.Contains(out, "(e)dit") {
+		t.Error("main menu row should contain '(e)dit'")
+	}
+	// Disposition sub-menu labels should NOT appear
+	if strings.Contains(out, "(a)ction") {
+		t.Error("main menu should not show disposition sub-menu options")
+	}
+}
+
+func TestLensFindingsViewDispositionMenuRow(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	// Open main menu then disposition sub-menu
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if m.actionMenu != actionMenuDisposition {
+		t.Fatal("expected disposition sub-menu")
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "(a)ction") {
+		t.Error("disposition menu row should contain '(a)ction'")
+	}
+	if !strings.Contains(out, "(d)efer") {
+		t.Error("disposition menu row should contain '(d)efer'")
+	}
+	if !strings.Contains(out, "(?)open") {
+		t.Error("disposition menu row should contain '(?)open'")
+	}
+	// Main menu labels should NOT appear
+	if strings.Contains(out, "(c)hat") {
+		t.Error("disposition sub-menu should not show main menu options")
+	}
+}
+
+func TestLensFindingsViewNoMenuRowWhenClosed(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	out := m.View()
+	if strings.Contains(out, "(c)hat") {
+		t.Error("menu row should not appear when menu is closed")
+	}
+	if strings.Contains(out, "(a)ction") {
+		t.Error("menu row should not appear when menu is closed")
+	}
+}
+
+func TestLensFindingsCardHeightIncludesMenuRow(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+
+	heightClosed := m.cardHeight(0)
+
+	// Open the menu
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	heightOpen := m.cardHeight(0)
+
+	if heightOpen != heightClosed+1 {
+		t.Errorf("cardHeight with menu open should be +1, got closed=%d open=%d", heightClosed, heightOpen)
+	}
+
+	// Non-cursor card height should be unaffected
+	heightNonCursor := m.cardHeight(1)
+	heightNonCursorClosed := heightClosed // compare against pre-open baseline for idx 1
+	_ = heightNonCursorClosed
+	if m.cursor != 0 {
+		t.Fatal("cursor should still be 0")
+	}
+	// idx 1 (non-cursor) should not gain the extra row
+	m2 := NewLensFindingsModel("", "", testLensReview())
+	m2.SetSize(80, 40)
+	heightIdx1Closed := m2.cardHeight(1)
+	if heightNonCursor != heightIdx1Closed {
+		t.Errorf("non-cursor cardHeight should be unchanged by menu open: closed=%d open=%d", heightIdx1Closed, heightNonCursor)
 	}
 }
 

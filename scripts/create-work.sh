@@ -197,13 +197,14 @@ cat > "$WORK_DIR/$SLUG/_meta.json" << METAEOF
 METAEOF
 
 # Write notes.md
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M)"
 if [[ -n "$DESCRIPTION" ]]; then
 cat > "$WORK_DIR/$SLUG/notes.md" << NOTESEOF
 # Session Notes: $TITLE
 
 <!-- Append session entries below. Entry format: ## YYYY-MM-DDTHH:MM followed by **Focus:**, **Progress:**, **Next:** fields. -->
 
-## $(date -u +%Y-%m-%dT%H:%M)
+## $TIMESTAMP
 **Focus:** Initial scoping
 $DESCRIPTION
 NOTESEOF
@@ -212,6 +213,9 @@ cat > "$WORK_DIR/$SLUG/notes.md" << NOTESEOF
 # Session Notes: $TITLE
 
 <!-- Append session entries below. Entry format: ## YYYY-MM-DDTHH:MM followed by **Focus:**, **Progress:**, **Next:** fields. -->
+
+## $TIMESTAMP
+**Focus:** Initial scoping
 NOTESEOF
 fi
 

@@ -33,17 +33,28 @@ func WriteLensSidecarCmd(knowledgeDir, followupID string, review *LensReview) te
 	}
 }
 
+// actionMenuMode tracks which layer of the inline action menu is active.
+type actionMenuMode int
+
+const (
+	actionMenuNone        actionMenuMode = iota
+	actionMenuMain                       // top-level menu (chat / disposition)
+	actionMenuDisposition                // disposition sub-menu
+)
+
 // LensFindingsModel is the Bubble Tea model for lens review findings.
 // It renders finding cards with cursor navigation,
 // following the budget-based windowing pattern from ReviewCardsModel.
 type LensFindingsModel struct {
-	review       *LensReview
-	findings     []LensFinding
-	cursor       int
-	width        int
-	height       int
-	knowledgeDir string
-	followupID   string
+	review         *LensReview
+	findings       []LensFinding
+	cursor         int
+	width          int
+	height         int
+	knowledgeDir   string
+	followupID     string
+	actionMenuOpen bool
+	actionMenu     actionMenuMode
 }
 
 // NewLensFindingsModel creates a LensFindingsModel from a loaded LensReview.
@@ -109,7 +120,114 @@ func (m LensFindingsModel) Update(msg tea.Msg) (LensFindingsModel, tea.Cmd) {
 
 	case tea.KeyMsg:
 		visible := m.visibleFindings()
+
+		// Action menu is open: intercept keys before normal navigation.
+		if m.actionMenuOpen {
+			if m.actionMenu == actionMenuDisposition {
+				// Disposition sub-menu: set disposition and sync selection per state table.
+				// State table: action→selected=false, accepted→selected=true,
+				//              deferred→selected=true, open→selected=false.
+				var newDisp string
+				switch msg.String() {
+				case "a":
+					newDisp = "action"
+				case "enter":
+					// Enter confirms/accepts the current finding (ok).
+					newDisp = "accepted"
+				case "d":
+					newDisp = "deferred"
+				case "?":
+					newDisp = "open"
+				case "esc":
+					// Back to main menu.
+					m.actionMenu = actionMenuMain
+					return m, nil
+				default:
+					// Swallow.
+					return m, nil
+				}
+				if newDisp != "" && m.cursor >= 0 && m.cursor < len(visible) {
+					backingIdx := visible[m.cursor]
+					m.findings[backingIdx].Disposition = newDisp
+					switch newDisp {
+					case "accepted", "deferred":
+						m.findings[backingIdx].Selected = true
+					default:
+						m.findings[backingIdx].Selected = false
+					}
+					if m.review != nil && backingIdx < len(m.review.Findings) {
+						m.review.Findings[backingIdx].Disposition = newDisp
+						m.review.Findings[backingIdx].Selected = m.findings[backingIdx].Selected
+					}
+					m.actionMenuOpen = false
+					m.actionMenu = actionMenuNone
+					return m, WriteLensSidecarCmd(m.knowledgeDir, m.followupID, m.review)
+				}
+				m.actionMenuOpen = false
+				m.actionMenu = actionMenuNone
+				return m, nil
+			}
+
+			// actionMenuMain layer.
+			switch msg.String() {
+			case "esc", "enter":
+				m.actionMenuOpen = false
+				m.actionMenu = actionMenuNone
+			case "d":
+				// Open disposition sub-menu.
+				m.actionMenu = actionMenuDisposition
+			case "c":
+				// Chat about this finding (no pre-filled prompt).
+				if m.cursor >= 0 && m.cursor < len(visible) {
+					backingIdx := visible[m.cursor]
+					m.actionMenuOpen = false
+					m.actionMenu = actionMenuNone
+					chatMsg := FollowupChatRequestMsg{
+						ID:           m.followupID,
+						FindingIndex: backingIdx,
+						EditPrompt:   "",
+					}
+					return m, func() tea.Msg { return chatMsg }
+				}
+			case "e":
+				// Chat about this finding with a pre-filled edit prompt.
+				if m.cursor >= 0 && m.cursor < len(visible) {
+					backingIdx := visible[m.cursor]
+					f := m.findings[backingIdx]
+					editPrompt := buildFindingEditPrompt(f)
+					m.actionMenuOpen = false
+					m.actionMenu = actionMenuNone
+					chatMsg := FollowupChatRequestMsg{
+						ID:           m.followupID,
+						FindingIndex: backingIdx,
+						EditPrompt:   editPrompt,
+					}
+					return m, func() tea.Msg { return chatMsg }
+				}
+			case "j", "down":
+				m.actionMenuOpen = false
+				m.actionMenu = actionMenuNone
+				if m.cursor < len(visible)-1 {
+					m.cursor++
+				}
+			case "k", "up":
+				m.actionMenuOpen = false
+				m.actionMenu = actionMenuNone
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			}
+			// All other keys are swallowed while menu is open.
+			return m, nil
+		}
+
 		switch msg.String() {
+		case "enter":
+			// Open the action menu at the main layer.
+			if m.cursor >= 0 && m.cursor < len(visible) {
+				m.actionMenuOpen = true
+				m.actionMenu = actionMenuMain
+			}
 		case "j", "down":
 			if m.cursor < len(visible)-1 {
 				m.cursor++
@@ -124,7 +242,7 @@ func (m LensFindingsModel) Update(msg tea.Msg) (LensFindingsModel, tea.Cmd) {
 			if len(visible) > 0 {
 				m.cursor = len(visible) - 1
 			}
-		case " ", "x", "enter":
+		case " ", "x":
 			// Toggle selection on the current finding (via backing index).
 			if m.cursor >= 0 && m.cursor < len(visible) {
 				backingIdx := visible[m.cursor]
@@ -148,9 +266,42 @@ func (m LensFindingsModel) Update(msg tea.Msg) (LensFindingsModel, tea.Cmd) {
 				}
 				return m, WriteLensSidecarCmd(m.knowledgeDir, m.followupID, m.review)
 			}
+		case "c":
+			// Discuss this finding: open a finding-scoped chat without a pre-filled prompt.
+			if m.cursor >= 0 && m.cursor < len(visible) {
+				backingIdx := visible[m.cursor]
+				id := m.followupID
+				return m, func() tea.Msg {
+					return FollowupChatRequestMsg{
+						ID:           id,
+						FindingIndex: backingIdx,
+						EditPrompt:   "",
+					}
+				}
+			}
+		case "e":
+			// Edit prompt for this finding: open a finding-scoped chat with a pre-filled prompt.
+			if m.cursor >= 0 && m.cursor < len(visible) {
+				backingIdx := visible[m.cursor]
+				f := m.findings[backingIdx]
+				prompt := buildFindingEditPrompt(f)
+				id := m.followupID
+				return m, func() tea.Msg {
+					return FollowupChatRequestMsg{
+						ID:           id,
+						FindingIndex: backingIdx,
+						EditPrompt:   prompt,
+					}
+				}
+			}
 		}
 	}
 	return m, nil
+}
+
+// ActionMenuOpen returns true when the inline action menu is open.
+func (m LensFindingsModel) ActionMenuOpen() bool {
+	return m.actionMenuOpen
 }
 
 // selectedCount returns the number of findings currently selected.
@@ -322,6 +473,27 @@ func (m LensFindingsModel) View() string {
 					card.WriteString(selectedBg.Render(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true).Render("      " + rl)))
 					card.WriteByte('\n')
 				}
+				if m.actionMenuOpen {
+					accentStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+					var menuRow string
+					switch m.actionMenu {
+					case actionMenuDisposition:
+						menuRow = fmt.Sprintf("  ↳ %s  %s  %s  %s",
+							accentStyle.Render("(a)ction"),
+							accentStyle.Render("ok"),
+							accentStyle.Render("(d)efer"),
+							accentStyle.Render("(?)open"),
+						)
+					default: // actionMenuMain
+						menuRow = fmt.Sprintf("  ↳ %s  %s  %s",
+							accentStyle.Render("(c)hat"),
+							accentStyle.Render("(d)isposition"),
+							accentStyle.Render("(e)dit & chat"),
+						)
+					}
+					card.WriteString(menuRow)
+					card.WriteByte('\n')
+				}
 			} else {
 				card.WriteString(line1)
 				card.WriteByte('\n')
@@ -343,6 +515,7 @@ func (m LensFindingsModel) View() string {
 }
 
 // cardHeight returns the number of terminal lines a single card renders.
+// The action menu row adds one line when the menu is open for the cursor card.
 func (m LensFindingsModel) cardHeight(idx int) int {
 	bodyW := m.width - 8
 	bodyLines := m.wrapBody(m.findings[idx].Body, bodyW)
@@ -350,7 +523,27 @@ func (m LensFindingsModel) cardHeight(idx int) int {
 	if m.findings[idx].Rationale != "" {
 		h += len(m.wrapBody("rationale: "+m.findings[idx].Rationale, bodyW))
 	}
+	if m.actionMenuOpen && idx == m.cursor {
+		h++ // action menu row
+	}
 	return h
+}
+
+// buildFindingEditPrompt returns a default pre-filled prompt for the 'e' key handler.
+// Format: "<title> [file:line]: <body excerpt>"
+func buildFindingEditPrompt(f LensFinding) string {
+	location := f.File
+	if f.Line > 0 {
+		location = fmt.Sprintf("%s:%d", f.File, f.Line)
+	}
+	excerpt := f.Body
+	if len(excerpt) > 120 {
+		excerpt = excerpt[:120] + "..."
+	}
+	if location != "" {
+		return fmt.Sprintf("%s [%s]: %s", f.Title, location, excerpt)
+	}
+	return fmt.Sprintf("%s: %s", f.Title, excerpt)
 }
 
 // wrapBody splits text into word-wrapped lines.

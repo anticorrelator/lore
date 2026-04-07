@@ -36,17 +36,13 @@ WORK_COUNT=$(grep -c '"slug"' "$INDEX" 2>/dev/null || true)
 WORK_COUNT=$(echo "$WORK_COUNT" | tr -d '[:space:]')
 [[ "$WORK_COUNT" -gt 0 ]] || exit 0
 
-# Get current git branch
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-
-# Parse work items, check branch match, calculate dates, check staleness — single python3 pass
+# Parse work items, calculate dates, check staleness — single python3 pass
 eval "$(python3 -c "
 import json, os, time, re, sys
 from datetime import datetime, timezone
 
 work_dir = sys.argv[1]
 index_path = sys.argv[2]
-current_branch = sys.argv[3]
 now = time.time()
 
 with open(index_path) as f:
@@ -54,9 +50,6 @@ with open(index_path) as f:
 
 active_work_lines = []
 stale_work_lines = []
-branch_match = ''
-last_entry = ''
-
 def dir_max_mtime(path):
     \"\"\"Return max mtime across all files in a directory, or 0 if empty/missing.\"\"\"
     try:
@@ -86,21 +79,6 @@ def relative_date(iso_str):
     except (ValueError, OSError):
         return 'unknown', -1
 
-def get_last_notes_section(notes_path, max_lines=8):
-    \"\"\"Extract last ## section from notes.md, up to max_lines.\"\"\"
-    try:
-        with open(notes_path) as f:
-            lines = f.readlines()
-    except (OSError, IOError):
-        return ''
-    # Find all ## heading positions
-    headings = [i for i, l in enumerate(lines) if l.startswith('## ')]
-    if not headings:
-        return ''
-    start = headings[-1]
-    section = lines[start:start + max_lines]
-    return ''.join(section).rstrip()
-
 for item in data.get('plans', []):
     slug = item.get('slug', '')
     title = item.get('title', '')
@@ -113,21 +91,6 @@ for item in data.get('plans', []):
     rel, days_ago = relative_date(updated)
 
     item_dir = os.path.join(work_dir, slug)
-
-    # Branch match: read _meta.json for branches array
-    if current_branch and not branch_match:
-        meta_path = os.path.join(item_dir, '_meta.json')
-        if os.path.isfile(meta_path):
-            try:
-                with open(meta_path) as mf:
-                    meta = json.load(mf)
-                if current_branch in meta.get('branches', []):
-                    branch_match = slug
-                    notes_path = os.path.join(item_dir, 'notes.md')
-                    if os.path.isfile(notes_path):
-                        last_entry = get_last_notes_section(notes_path)
-            except (json.JSONDecodeError, OSError):
-                pass
 
     # Stale work: use directory-wide max mtime as activity signal
     dir_mtime = dir_max_mtime(item_dir)
@@ -149,31 +112,18 @@ def sq(s):
     return s.replace(\"'\", \"'\\\\''\" )
 
 # Output shell variable assignments
-print(f\"BRANCH_MATCH='{sq(branch_match)}'\")
-print(f\"LAST_ENTRY='{sq(last_entry)}'\")
-
 active = '\\n'.join(active_work_lines)
 print(f\"ACTIVE_WORK='{sq(active)}'\")
 
 stale = '\\n'.join(stale_work_lines)
 print(f\"STALE_WORK='{sq(stale)}'\")
-" "$WORK_DIR" "$INDEX" "$CURRENT_BRANCH")"
+" "$WORK_DIR" "$INDEX")"
 
 # Build output (budget: ~2000 chars)
 draw_separator "Active Work"
 echo ""
 echo "[work] Use \`/work\` to check status before manual exploration"
 echo ""
-
-if [[ -n "$BRANCH_MATCH" ]]; then
-  META_FILE="$WORK_DIR/$BRANCH_MATCH/_meta.json"
-  MATCH_TITLE=$(json_field "title" "$META_FILE")
-  echo "[Current branch matches: $MATCH_TITLE]"
-  if [[ -n "${LAST_ENTRY:-}" ]]; then
-    echo "$LAST_ENTRY" | head -6
-  fi
-  echo ""
-fi
 
 echo "$ACTIVE_WORK"
 

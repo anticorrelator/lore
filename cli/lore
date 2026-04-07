@@ -37,8 +37,9 @@ Commands:
   check-links  Scan for broken [[backlink]] references
   status       Show knowledge store health summary
   assemble     Assemble CLAUDE.md from fragments
-  batch-spec   Batch-run /spec short on eligible work items
+  batch-spec       Batch-run /spec short on eligible work items
   batch-implement  Batch-run /implement on ready work items
+  batch-capture    Capture multiple insights from a JSON array
   backlinks    Backlink management (see: lore backlinks --help)
   rebuild      Rebuild and reinstall the lore-tui binary
   doctor       Check installation health and detect stale components
@@ -823,6 +824,10 @@ case "$1" in
   batch-implement)
     shift
     "$SCRIPTS_DIR/batch-implement.sh" "$@"
+    ;;
+  batch-capture)
+    shift
+    "$SCRIPTS_DIR/batch-capture.sh" "$@"
     ;;
   doctor)
     shift

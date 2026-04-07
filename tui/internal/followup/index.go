@@ -171,11 +171,15 @@ type ActionCompleteMsg struct {
 
 // FollowupChatRequestMsg is sent when the user presses c on a follow-up in the right panel.
 // The handler in main.go uses these fields to build the specConfirm modal and seed the chat.
+// FindingIndex is the backing index into LensFindingsModel.findings (-1 = whole-followup).
+// EditPrompt, when non-empty, is pre-filled into sessionConfirmExtraContext.
 type FollowupChatRequestMsg struct {
 	ID             string
 	Title          string
 	Source         string
 	FindingExcerpt string
+	FindingIndex   int
+	EditPrompt     string
 }
 
 // LoadIndexCmd returns a Cmd that reads _followup_index.json and sends IndexLoadedMsg.

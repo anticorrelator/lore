@@ -234,7 +234,7 @@ Group findings by theme, flag contradictions, and draft knowledge entries.
 
 ## Step 6: Filing
 
-Present entries to the user and file approved ones.
+Present entries to the user, then file approved ones via a single batch-capture call.
 
 1. **Present the entry list** to the user for review:
    ```
@@ -253,12 +253,34 @@ Present entries to the user and file approved ones.
 
 2. **Process user feedback:** Remove rejected entries, apply edits.
 
-3. **File approved entries** — serialize all `lore capture` calls (one at a time, not concurrent):
-   ```bash
-   lore capture --insight "<insight text>" --context "Discovered during bootstrap of <repo>" --category "<category>" --confidence "medium" --related-files "<comma-separated paths>"
+3. **Write approved entries to a JSON file** at `$WORK_DIR/<SLUG>/_batch_entries.json`:
+   ```json
+   [
+     {
+       "insight": "<insight text>",
+       "context": "Discovered during bootstrap of <repo>",
+       "category": "<category>",
+       "confidence": "medium",
+       "related_files": "<comma-separated paths>"
+     },
+     ...
+   ]
    ```
+   One object per approved entry. Fields match `lore capture` flags.
 
-4. **Run heal once** after all captures:
+4. **File all entries in one call:**
+   ```bash
+   lore batch-capture --file "$WORK_DIR/<SLUG>/_batch_entries.json"
+   ```
+   - On success: delete `_batch_entries.json`.
+   - On failure: retain `_batch_entries.json` and prompt the user:
+     ```
+     [bootstrap] batch-capture failed for N entries — _batch_entries.json retained.
+     Retry with `lore batch-capture --file <path>`, or fix entries and re-run.
+     ```
+     Do not proceed to heal until the user resolves the failure.
+
+5. **Run heal once** regardless of partial failure:
    ```bash
    lore heal
    ```

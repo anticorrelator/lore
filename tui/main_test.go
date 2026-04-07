@@ -1592,6 +1592,7 @@ func TestPromoteRequestMsgWithFindingsJSONDispatchesToRunPromote(t *testing.T) {
 func TestStateOnboardingRendersWelcomeScreen(t *testing.T) {
 	m := minimalModel(stateOnboarding, nil, nil)
 	m.config.ProjectDir = "/tmp/my-repo"
+	m.config.RepoIdentifier = "my-repo"
 	m.width = 80
 	m.height = 24
 
@@ -1717,5 +1718,63 @@ func TestStateOnboardingLoadingRendersInitializing(t *testing.T) {
 	}
 	if strings.Contains(out, "Press Enter to initialize") {
 		t.Errorf("onboarding view with initLoading should NOT contain 'Press Enter to initialize'")
+	}
+}
+
+// TestStateNoRepoRendersMessage verifies that a model in stateNoRepo renders
+// the directory name and "not inside a git repository" message.
+func TestStateNoRepoRendersMessage(t *testing.T) {
+	m := minimalModel(stateNoRepo, nil, nil)
+	m.config.ProjectDir = "/home/user/myproject"
+	m.width = 80
+	m.height = 24
+
+	out := m.View()
+
+	if !strings.Contains(out, "myproject") {
+		t.Errorf("no-repo view should contain directory name 'myproject', got:\n%s", out)
+	}
+	if !strings.Contains(out, "Not inside a git repository") {
+		t.Errorf("no-repo view should contain 'Not inside a git repository', got:\n%s", out)
+	}
+	if !strings.Contains(out, "Press q to quit") {
+		t.Errorf("no-repo view should contain 'Press q to quit', got:\n%s", out)
+	}
+}
+
+// TestStateNoRepoInitReturnsNil verifies that Init() returns nil for stateNoRepo
+// (no background commands should be started).
+func TestStateNoRepoInitReturnsNil(t *testing.T) {
+	m := minimalModel(stateNoRepo, nil, nil)
+	cmd := m.Init()
+	if cmd != nil {
+		t.Error("Init() in stateNoRepo should return nil Cmd")
+	}
+}
+
+// TestStateNoRepoKeyHandling verifies that q triggers quit and other keys are
+// consumed silently (no Cmd returned, state unchanged).
+func TestStateNoRepoKeyHandling(t *testing.T) {
+	m := minimalModel(stateNoRepo, nil, nil)
+
+	// q should return tea.Quit
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd == nil {
+		t.Error("q key in stateNoRepo should return a non-nil Cmd (tea.Quit)")
+	}
+
+	// ctrl+c should return tea.Quit
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Error("ctrl+c in stateNoRepo should return a non-nil Cmd (tea.Quit)")
+	}
+
+	// an unrelated key (e.g. 'j') should be consumed silently
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if cmd != nil {
+		t.Error("unrelated key in stateNoRepo should return nil Cmd")
+	}
+	if next.(model).state != stateNoRepo {
+		t.Error("state should remain stateNoRepo after unrelated key")
 	}
 }

@@ -52,16 +52,26 @@ func (m model) handleFollowupChatRequest(msg followup.FollowupChatRequestMsg) (m
 		m.focusedPanel = panelRight
 		return m, nil
 	}
+	// Title/Source may be empty when the message originates from LensFindingsModel
+	// (which only knows the followup ID). Fill from the currently loaded detail.
+	title := msg.Title
+	if title == "" {
+		title = m.followupDetail.Title()
+	}
 	ta2 := newModalTextarea()
 	focusCmd2 := ta2.Focus()
 	m.sessionConfirmSlug = msg.ID
-	m.sessionConfirmTitle = msg.Title
+	m.sessionConfirmTitle = title
 	m.sessionConfirmShortMode = false
 	m.sessionConfirmSkipConfirm = false
 	m.sessionConfirmInput = ta2
 	m.sessionConfirmChatMode = true
 	m.sessionConfirmFollowupMode = true
+	m.sessionConfirmFindingIndex = msg.FindingIndex
 	m.sessionConfirmActive = true
+	if msg.EditPrompt != "" {
+		ta2.SetValue(msg.EditPrompt)
+	}
 	m.enableKittyKeyboard()
 	return m, focusCmd2
 }

@@ -103,7 +103,7 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 }
 
 func (m model) Init() tea.Cmd {
-	if m.state == stateOnboarding {
+	if m.state == stateOnboarding || m.state == stateNoRepo {
 		return nil
 	}
 	return tea.Batch(
@@ -198,7 +198,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.setSpecPanel(slug, panel)
 				m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
 				m.sessionLaunchedFromModal = m.state == stateWork
-				return m, work.StartTerminalCmd(slug, m.sessionConfirmTitle, m.config.ProjectDir, specW, specH, extraContext, m.sessionConfirmShortMode, m.sessionConfirmChatMode, m.sessionConfirmSkipConfirm, m.sessionConfirmFollowupMode, m.config.KnowledgeDir)
+				findingIndex := m.sessionConfirmFindingIndex
+				m.sessionConfirmFindingIndex = -1
+				return m, work.StartTerminalCmd(slug, m.sessionConfirmTitle, m.config.ProjectDir, specW, specH, extraContext, m.sessionConfirmShortMode, m.sessionConfirmChatMode, m.sessionConfirmSkipConfirm, m.sessionConfirmFollowupMode, m.config.KnowledgeDir, findingIndex)
 			case "esc", "ctrl+c":
 				m.sessionConfirmActive = false
 				m.disableKittyKeyboard()
@@ -463,6 +465,16 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case tea.KeyMsg:
 		// Clear any transient flash error on the next key press.
 		m.flashErr = ""
+
+		// No-repo state: only accept q, ctrl+c, ctrl+d (quit).
+		if m.state == stateNoRepo {
+			switch msg.String() {
+			case "q", "ctrl+c", "ctrl+d":
+				return m, tea.Quit
+			default:
+				return m, nil
+			}
+		}
 
 		// Onboarding state: only accept Enter (init), q, ctrl+c, ctrl+d (quit).
 		if m.state == stateOnboarding {
@@ -783,6 +795,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 						Title:          item.Title,
 						Source:         item.Source,
 						FindingExcerpt: m.followupDetail.FindingExcerpt(),
+						FindingIndex:   -1,
 					}
 					return m, func() tea.Msg { return msg }
 				}

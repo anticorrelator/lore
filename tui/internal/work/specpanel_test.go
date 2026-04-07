@@ -488,7 +488,7 @@ func TestBuildInitialPrompt(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildInitialPrompt(tc.slug, tc.title, tc.extraContext, tc.shortMode, tc.chatMode, tc.skipConfirm, tc.followupMode)
+			got := buildInitialPrompt(tc.slug, tc.title, tc.extraContext, tc.shortMode, tc.chatMode, tc.skipConfirm, tc.followupMode, -1)
 			if tc.wantPrefix != "" && !strings.HasPrefix(got, tc.wantPrefix) {
 				t.Errorf("expected prefix %q, got %q", tc.wantPrefix, got)
 			}
@@ -499,6 +499,131 @@ func TestBuildInitialPrompt(t *testing.T) {
 			}
 		})
 	}
+
+	// Verify --finding flag is inserted after the followup ID for finding-scoped sessions.
+	t.Run("followup chat with findingIndex inserts --finding flag", func(t *testing.T) {
+		got := buildInitialPrompt("my-followup", "My Followup", "", false, true, false, true, 3)
+		want := "/followup-discuss my-followup --finding 3"
+		if got != want {
+			t.Errorf("expected %q, got %q", want, got)
+		}
+	})
+
+	t.Run("followup chat with findingIndex and extraContext", func(t *testing.T) {
+		got := buildInitialPrompt("my-followup", "My Followup", "some context", false, true, false, true, 0)
+		if !strings.Contains(got, "--finding 0") {
+			t.Errorf("expected --finding 0 in %q", got)
+		}
+		if !strings.Contains(got, ": some context") {
+			t.Errorf("expected ': some context' in %q", got)
+		}
+	})
+}
+
+// TestAppendFindingContext covers the finding-scoped prompt building logic.
+func TestAppendFindingContext(t *testing.T) {
+	sidecar := `{
+		"pr": 42,
+		"work_item": "test-work",
+		"findings": [
+			{
+				"severity": "blocking",
+				"title": "Missing error check",
+				"file": "main.go",
+				"line": 10,
+				"body": "This ignores the error return value.",
+				"lens": "correctness",
+				"disposition": "action",
+				"rationale": "Silent data loss."
+			},
+			{
+				"severity": "suggestion",
+				"title": "Extract helper",
+				"file": "utils.go",
+				"line": 0,
+				"body": "Could be a helper.",
+				"lens": "clarity",
+				"disposition": "deferred",
+				"rationale": ""
+			}
+		]
+	}`
+	base := "# Followup Context\n\n**Title:** My Followup\n"
+
+	t.Run("finding index 0 — full fields", func(t *testing.T) {
+		out := appendFindingContext(base, []byte(sidecar), 0)
+		if out == "" {
+			t.Fatal("expected non-empty output for valid index 0")
+		}
+		if !strings.Contains(out, "**Finding Index:** 0 of 2") {
+			t.Errorf("expected finding index header, got: %q", out)
+		}
+		if !strings.Contains(out, "**Title:** Missing error check") {
+			t.Error("expected finding title")
+		}
+		if !strings.Contains(out, "**Severity:** blocking") {
+			t.Error("expected severity")
+		}
+		if !strings.Contains(out, "**Disposition:** action") {
+			t.Error("expected disposition")
+		}
+		if !strings.Contains(out, "**Rationale:** Silent data loss.") {
+			t.Error("expected rationale")
+		}
+		if !strings.Contains(out, "**File:** main.go:10") {
+			t.Error("expected file with line number")
+		}
+		if !strings.Contains(out, "**Lens:** correctness") {
+			t.Error("expected lens")
+		}
+		if !strings.Contains(out, "This ignores the error return value.") {
+			t.Error("expected body text")
+		}
+		// Base prompt should be preserved.
+		if !strings.HasPrefix(out, base) {
+			t.Error("output should begin with base prompt")
+		}
+	})
+
+	t.Run("finding index 1 — zero line, empty rationale", func(t *testing.T) {
+		out := appendFindingContext(base, []byte(sidecar), 1)
+		if out == "" {
+			t.Fatal("expected non-empty output for valid index 1")
+		}
+		if !strings.Contains(out, "**Finding Index:** 1 of 2") {
+			t.Error("expected finding index header")
+		}
+		if !strings.Contains(out, "**File:** utils.go") {
+			t.Error("expected file without line suffix for line=0")
+		}
+		if strings.Contains(out, "utils.go:0") {
+			t.Error("should not include :0 suffix for zero line")
+		}
+		if strings.Contains(out, "**Rationale:**") {
+			t.Error("should omit Rationale line when empty")
+		}
+	})
+
+	t.Run("out of range index returns empty string", func(t *testing.T) {
+		out := appendFindingContext(base, []byte(sidecar), 99)
+		if out != "" {
+			t.Errorf("expected empty string for out-of-range index, got %q", out)
+		}
+	})
+
+	t.Run("malformed JSON returns empty string", func(t *testing.T) {
+		out := appendFindingContext(base, []byte("not json"), 0)
+		if out != "" {
+			t.Errorf("expected empty string for malformed JSON, got %q", out)
+		}
+	})
+
+	t.Run("negative index returns empty string", func(t *testing.T) {
+		out := appendFindingContext(base, []byte(sidecar), -1)
+		if out != "" {
+			t.Errorf("expected empty string for negative index, got %q", out)
+		}
+	})
 }
 
 // extractBatchCmds extracts individual commands from a tea.Batch result.
