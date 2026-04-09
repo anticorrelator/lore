@@ -163,7 +163,7 @@ func runDeleteFollowUp(id string) tea.Cmd {
 // postedCount is captured from the caller (SelectedCount at dispatch time).
 func runPostReview(knowledgeDir, followupID string, postedCount int) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("post-proposed-review.sh", followupID, "--force")
+		cmd := exec.Command("bash", os.ExpandEnv("$HOME/.lore/scripts/post-proposed-review.sh"), followupID, "--force")
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		err := cmd.Run()
 		return followup.PostReviewCompleteMsg{ID: followupID, PostedCount: postedCount, Err: err}

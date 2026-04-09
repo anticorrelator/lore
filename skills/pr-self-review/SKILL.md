@@ -37,8 +37,14 @@ gh pr list --state open --head "$(git branch --show-current)" --json number,base
 ```bash
 bash ~/.lore/scripts/fetch-pr-data.sh <PR_NUMBER>
 gh pr diff <PR_NUMBER>
-gh pr view <PR_NUMBER> --json files,title,body,baseRefName,headRefName,commits
+gh pr view <PR_NUMBER> --json files,title,body,baseRefName,headRefName,commits,headRefOid
 ```
+
+Resolve the repo owner/name from the git remote:
+```bash
+REMOTE_URL=$(git remote get-url origin)
+```
+Extract `OWNER/REPO` from the remote URL.
 
 Note any existing reviewer feedback to avoid duplicating observations.
 
@@ -537,7 +543,11 @@ bash ~/.lore/scripts/create-followup.sh \
   --title "Self-Review: <PR Title>" \  # ≤70 chars; truncate PR title if needed
   --lens-findings '<lens-findings JSON>' \
   --content '<summary body>' \
-  --attachments '[{"type":"pr","ref":"#<N>"}]'
+  --attachments '[{"type":"pr","ref":"#<N>"}]' \
+  --pr <N> \
+  --owner <owner> \
+  --repo <repo> \
+  --head-sha <headRefOid>
 ```
 
 ## Step 5: Capture Insights

@@ -543,6 +543,10 @@ bash ~/.lore/scripts/create-followup.sh \
   --attachments '[{"type":"pr","ref":"#<N>"}]' \
   --suggested-actions '[{"type": "<type>", "label": "<label>"}]' \
   --proposed-comments '<json array of {path, line, body} objects>' \
+  --pr <N> \
+  --owner <owner> \
+  --repo <repo> \
+  --head-sha <headRefOid> \
   --content "<complete report body from 6e — all 4 sections>"
 ```
 

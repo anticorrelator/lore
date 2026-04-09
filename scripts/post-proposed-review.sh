@@ -138,7 +138,7 @@ if [[ "$REVIEW_BODY_SELECTED" == "true" && -n "$REVIEW_BODY_CUSTOM" ]]; then
   REVIEW_BODY="$REVIEW_BODY_CUSTOM"
   REVIEW_BODY_SOURCE="custom"
 else
-  REVIEW_BODY="Review from lore (${SELECTED_COUNT} comments)"
+  REVIEW_BODY=""
   REVIEW_BODY_SOURCE="default"
 fi
 

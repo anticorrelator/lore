@@ -45,8 +45,14 @@ bash ~/.lore/scripts/fetch-pr-data.sh <PR_NUMBER>
 gh pr diff <PR_NUMBER>
 
 # File scope and metadata
-gh pr view <PR_NUMBER> --json files,title,body,baseRefName,headRefName
+gh pr view <PR_NUMBER> --json files,title,body,baseRefName,headRefName,headRefOid
 ```
+
+Resolve the repo owner/name from the git remote:
+```bash
+REMOTE_URL=$(git remote get-url origin)
+```
+Extract `OWNER/REPO` from the remote URL.
 
 CRITICAL: The fetch script groups comments by review submission. The GitHub UI hides/folds comments — the API is the only reliable source.
 
@@ -296,6 +302,10 @@ bash ~/.lore/scripts/create-followup.sh \
   --source "pr-revise" \
   --attachments '[{"type":"pr","ref":"#<NUMBER>"}]' \
   --suggested-actions '<json array from 7a>' \
+  --pr <NUMBER> \
+  --owner <owner> \
+  --repo <repo> \
+  --head-sha <headRefOid> \
   --content '<complete report body from 7b — all 3 sections>'
 ```
 

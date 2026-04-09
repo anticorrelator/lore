@@ -4,7 +4,10 @@
 #   [--attachments <json-array>] [--suggested-actions <json-array>]
 #   [--proposed-comments <filepath>] [--lens-findings <filepath>]
 #   [--content <body>] [--json]
+#   [--pr <number>] [--owner <owner>] [--repo <repo>] [--head-sha <sha>]
 # Creates $KNOWLEDGE_DIR/_followups/<id>/ with _meta.json and finding.md
+# When --pr/--owner/--repo/--head-sha are all provided with --proposed-comments,
+# the sidecar is written in ProposedReview wrapper format.
 
 set -euo pipefail
 
@@ -21,6 +24,10 @@ PROPOSED_COMMENTS=""
 LENS_FINDINGS=""
 CONTENT=""
 JSON_MODE=0
+PR_NUMBER=""
+PR_OWNER=""
+PR_REPO=""
+PR_HEAD_SHA=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -60,9 +67,25 @@ while [[ $# -gt 0 ]]; do
       JSON_MODE=1
       shift
       ;;
+    --pr)
+      PR_NUMBER="$2"
+      shift 2
+      ;;
+    --owner)
+      PR_OWNER="$2"
+      shift 2
+      ;;
+    --repo)
+      PR_REPO="$2"
+      shift 2
+      ;;
+    --head-sha)
+      PR_HEAD_SHA="$2"
+      shift 2
+      ;;
     *)
       echo "[followup] Error: Unknown flag '$1'" >&2
-      echo "Usage: create-followup.sh --title <name> --source <agent> [--attachments <json>] [--suggested-actions <json>] [--proposed-comments <filepath>] [--lens-findings <filepath>] [--content <body>] [--json]" >&2
+      echo "Usage: create-followup.sh --title <name> --source <agent> [--attachments <json>] [--suggested-actions <json>] [--proposed-comments <filepath>] [--lens-findings <filepath>] [--content <body>] [--json] [--pr <number> --owner <owner> --repo <repo> --head-sha <sha>]" >&2
       exit 1
       ;;
   esac
@@ -86,6 +109,32 @@ if [[ -z "$SOURCE" ]]; then
     json_error "Missing --source"
   fi
   echo "[followup] Error: Missing --source." >&2
+  exit 1
+fi
+
+# All-or-nothing validation: PR metadata flags must all be present together
+# when --proposed-comments is also provided
+PR_FLAGS_SET=0
+PR_FLAGS_MISSING=0
+for _flag in "$PR_NUMBER" "$PR_OWNER" "$PR_REPO" "$PR_HEAD_SHA"; do
+  if [[ -n "$_flag" ]]; then
+    PR_FLAGS_SET=$((PR_FLAGS_SET + 1))
+  else
+    PR_FLAGS_MISSING=$((PR_FLAGS_MISSING + 1))
+  fi
+done
+if [[ $PR_FLAGS_SET -gt 0 && $PR_FLAGS_MISSING -gt 0 ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "PR metadata flags --pr, --owner, --repo, --head-sha must all be provided together"
+  fi
+  echo "[followup] Error: PR metadata flags --pr, --owner, --repo, --head-sha must all be provided together." >&2
+  exit 1
+fi
+if [[ $PR_FLAGS_SET -eq 4 && -z "$PROPOSED_COMMENTS" ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "PR metadata flags require --proposed-comments"
+  fi
+  echo "[followup] Error: PR metadata flags require --proposed-comments." >&2
   exit 1
 fi
 
@@ -155,18 +204,45 @@ fi
 
 # Write proposed-comments.json sidecar (accepts filepath or inline JSON)
 if [[ -n "$PROPOSED_COMMENTS" ]]; then
+  # Resolve the raw comments array first
   if [[ -f "$PROPOSED_COMMENTS" ]]; then
-    # It's a file path — copy it
-    cp "$PROPOSED_COMMENTS" "$ITEM_DIR/proposed-comments.json"
+    _raw_comments=$(cat "$PROPOSED_COMMENTS")
   elif printf '%s' "$PROPOSED_COMMENTS" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
-    # It's inline JSON — write it directly
-    printf '%s\n' "$PROPOSED_COMMENTS" > "$ITEM_DIR/proposed-comments.json"
+    _raw_comments="$PROPOSED_COMMENTS"
   else
     if [[ $JSON_MODE -eq 1 ]]; then
       json_error "Proposed comments: not a valid file path or JSON"
     fi
     echo "[followup] Error: --proposed-comments is neither a valid file path nor valid JSON" >&2
     exit 1
+  fi
+
+  if [[ $PR_FLAGS_SET -eq 4 ]]; then
+    # Wrap in ProposedReview format when all PR metadata flags are provided
+    # Write raw comments to a temp file, then wrap via Python to avoid quoting issues
+    _tmp_comments=$(mktemp)
+    printf '%s\n' "$_raw_comments" > "$_tmp_comments"
+    python3 - "$_tmp_comments" "$ITEM_DIR/proposed-comments.json" \
+      "$PR_NUMBER" "$PR_OWNER" "$PR_REPO" "$PR_HEAD_SHA" << 'PYEOF'
+import json, sys
+comments_path, out_path, pr_number, owner, repo, head_sha = sys.argv[1:]
+with open(comments_path) as f:
+    comments = json.load(f)
+wrapper = {
+    "pr": pr_number,
+    "owner": owner,
+    "repo": repo,
+    "head_sha": head_sha,
+    "comments": comments,
+}
+with open(out_path, "w") as f:
+    json.dump(wrapper, f, indent=2)
+    f.write("\n")
+PYEOF
+    rm -f "$_tmp_comments"
+  else
+    # Bare-array behavior when no PR flags
+    printf '%s\n' "$_raw_comments" > "$ITEM_DIR/proposed-comments.json"
   fi
 fi
 
@@ -192,8 +268,9 @@ if [[ -x "$SCRIPT_DIR/update-followup-index.sh" ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
     bash "$SCRIPT_DIR/update-followup-index.sh" > /dev/null 2>&1 || true
     json_output "$(cat "$ITEM_DIR/_meta.json")"
+  else
+    bash "$SCRIPT_DIR/update-followup-index.sh"
   fi
-  bash "$SCRIPT_DIR/update-followup-index.sh"
 else
   if [[ $JSON_MODE -eq 1 ]]; then
     json_output "$(cat "$ITEM_DIR/_meta.json")"

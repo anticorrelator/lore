@@ -510,10 +510,10 @@ func TestBuildPaneConfigStatesDontCrossContaminate(t *testing.T) {
 // Tests override only the fields they care about.
 func noopCallbacks() panelCallbacks {
 	return panelCallbacks{
-		currentSlug: func() string { return "" },
-		loadDetail:  func(string) tea.Cmd { return nil },
-		specPanelFn: func() (work.SpecPanelModel, bool) { return work.SpecPanelModel{}, false },
-		listUpdate:  func(tea.Msg) (tea.Cmd, string, string) { return nil, "", "" },
+		currentSlug:  func() string { return "" },
+		loadDetail:   func(string) tea.Cmd { return nil },
+		specPanelFn:  func() (work.SpecPanelModel, bool) { return work.SpecPanelModel{}, false },
+		listUpdate:   func(tea.Msg) (tea.Cmd, string, string) { return nil, "", "" },
 		detailUpdate: func(tea.Msg) tea.Cmd { return nil },
 	}
 }
@@ -791,6 +791,77 @@ func TestLeaveFollowupsTransitionsState(t *testing.T) {
 	msg := cmd()
 	if _, ok := msg.(workItemsLoadedMsg); !ok {
 		t.Errorf("cmd() produced %T, want workItemsLoadedMsg", msg)
+	}
+}
+
+func TestLoadDetailCacheHitStillRevalidatesSelectedItem(t *testing.T) {
+	workDir := t.TempDir()
+	slug := "new-item"
+	itemDir := filepath.Join(workDir, slug)
+	if err := os.MkdirAll(itemDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	metaJSON := `{
+		"slug":"new-item",
+		"title":"New Item",
+		"status":"active",
+		"branches":[],
+		"tags":[],
+		"related_work":[],
+		"created":"2026-04-08T12:00:00Z",
+		"updated":"2026-04-08T12:00:00Z"
+	}`
+	if err := os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(metaJSON), 0644); err != nil {
+		t.Fatalf("WriteFile _meta.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(itemDir, "notes.md"), []byte("fresh notes"), 0644); err != nil {
+		t.Fatalf("WriteFile notes.md: %v", err)
+	}
+
+	m := minimalModel(stateWork, []work.WorkItem{{Slug: slug, Title: "New Item", Status: "active"}}, nil)
+	m.config.WorkDir = workDir
+	m.width = 120
+	m.height = 40
+	m.detailCache = map[string]*work.WorkItemDetail{
+		slug: {
+			Slug:         slug,
+			Title:        "New Item",
+			Status:       "active",
+			Branches:     []string{},
+			Tags:         []string{},
+			RelatedWork:  []string{},
+			NotesContent: nil, // stale background cache entry
+		},
+	}
+
+	m, cmd := m.loadDetail(slug)
+	if cmd == nil {
+		t.Fatal("loadDetail() should queue a fresh load even on cache hit")
+	}
+	if got := m.detail.Detail(); got == nil || got.NotesContent != nil {
+		t.Fatalf("cache seed should be shown immediately; got detail=%+v", got)
+	}
+
+	msg := cmd()
+	loaded, ok := msg.(work.DetailLoadedMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want work.DetailLoadedMsg", msg)
+	}
+	if loaded.Err != nil {
+		t.Fatalf("fresh load returned error: %v", loaded.Err)
+	}
+	if loaded.Detail == nil || loaded.Detail.NotesContent == nil || *loaded.Detail.NotesContent != "fresh notes" {
+		t.Fatalf("fresh load did not pick up on-disk notes: %+v", loaded.Detail)
+	}
+
+	next, _ := m.Update(loaded)
+	updated := next.(model)
+	if got := updated.detail.Detail(); got == nil || got.NotesContent == nil || *got.NotesContent != "fresh notes" {
+		t.Fatalf("selected detail model did not refresh after DetailLoadedMsg: %+v", got)
+	}
+	if got := updated.detailCache[slug]; got == nil || got.NotesContent == nil || *got.NotesContent != "fresh notes" {
+		t.Fatalf("detail cache did not refresh after DetailLoadedMsg: %+v", got)
 	}
 }
 

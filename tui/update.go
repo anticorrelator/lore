@@ -1274,8 +1274,9 @@ func (m *model) loadFollowupDetail(id string) tea.Cmd {
 }
 
 // loadDetail creates a fresh DetailModel for slug, applies current dimensions,
-// and serves content from the detail cache if available.
-// renderMarkdown is synchronous and fast (<1ms), so cache hits are instant.
+// seeds it from the detail cache when available, and revalidates from disk in
+// the background so newly created items can't get stuck on a stale cache entry.
+// renderMarkdown is synchronous and fast (<1ms), so cached content is instant.
 func (m model) loadDetail(slug string) (model, tea.Cmd) {
 	m.lastPlanMtime = time.Time{}   // reset so new item's plan.md gets a fresh baseline
 	m.lastDetailMtime = time.Time{} // reset so new item's detail files get a fresh baseline
@@ -1288,6 +1289,10 @@ func (m model) loadDetail(slug string) (model, tea.Cmd) {
 		if cached, ok := m.detailCache[slug]; ok {
 			dm, _ := m.detail.Update(work.DetailLoadedMsg{Slug: slug, Detail: cached})
 			m.detail = dm
+			// Auto-refresh can cache a brand-new item before its sidecar files have
+			// settled. Revalidate on selection so the active detail model always gets
+			// a fresh DetailLoadedMsg.
+			initCmd = m.detail.Init()
 		} else {
 			initCmd = m.detail.Init()
 		}
