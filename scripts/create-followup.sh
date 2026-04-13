@@ -226,10 +226,15 @@ if [[ -n "$PROPOSED_COMMENTS" ]]; then
       "$PR_NUMBER" "$PR_OWNER" "$PR_REPO" "$PR_HEAD_SHA" << 'PYEOF'
 import json, sys
 comments_path, out_path, pr_number, owner, repo, head_sha = sys.argv[1:]
+try:
+    pr_number_int = int(pr_number)
+except ValueError:
+    print(f"[followup] Error: --pr must be a number, got: {pr_number!r}", file=sys.stderr)
+    sys.exit(1)
 with open(comments_path) as f:
     comments = json.load(f)
 wrapper = {
-    "pr": pr_number,
+    "pr": pr_number_int,
     "owner": owner,
     "repo": repo,
     "head_sha": head_sha,

@@ -1107,6 +1107,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.followupDetail = fd
 		return m, cmd
 
+	case followup.MergeStatusLoadedMsg:
+		fd, cmd := m.followupDetail.Update(msg)
+		m.followupDetail = fd
+		return m, cmd
+
 	case followup.ExternalEditDoneMsg:
 		fd, cmd := m.followupDetail.Update(msg)
 		m.followupDetail = fd
@@ -1122,15 +1127,16 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case followup.PostReviewCompleteMsg:
 		if msg.Err != nil {
 			m.flashErr = fmt.Sprintf("post failed: %v", msg.Err)
-		} else {
-			m.flashErr = fmt.Sprintf("Posted %d comments", msg.PostedCount)
+			// Reload detail to reflect any partial state.
+			m.followupDetail.PreserveTab()
+			m.lastFollowupDetailMtime = time.Time{}
+			m.followupDetail.ClearID()
+			return m, m.followupDetail.SetID(msg.ID)
 		}
-		// Reload detail to reflect updated sidecar state.
-		m.followupDetail.PreserveTab()
-		m.lastFollowupDetailMtime = time.Time{}
-		m.followupDetail.ClearID()
-		loadCmd := m.followupDetail.SetID(msg.ID)
-		return m, loadCmd
+		m.flashErr = fmt.Sprintf("Posted %d comments — marked reviewed", msg.PostedCount)
+		// Mark the followup reviewed so it moves out of the pending filter;
+		// the resulting ActionCompleteMsg triggers an index reload which refreshes the detail.
+		return m, runMarkFollowUpReviewed(msg.ID)
 
 	case followup.ExternalEditRequestMsg:
 		editor := os.Getenv("EDITOR")

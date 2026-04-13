@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -41,6 +42,39 @@ type ProposedReview struct {
 	ReviewEvent        string            `json:"review_event"`
 }
 
+// UnmarshalJSON widens the accepted JSON shape for the "pr" field so that
+// both a JSON number (42) and a digit-only JSON string ("42") decode to the
+// same int value. Non-numeric strings return a clear error, never a silent zero.
+func (r *ProposedReview) UnmarshalJSON(data []byte) error {
+	type alias struct {
+		PR                 json.RawMessage   `json:"pr"`
+		Owner              string            `json:"owner"`
+		Repo               string            `json:"repo"`
+		HeadSHA            string            `json:"head_sha"`
+		Comments           []ProposedComment `json:"comments"`
+		ReviewBody         string            `json:"review_body"`
+		ReviewBodySelected bool              `json:"review_body_selected"`
+		ReviewEvent        string            `json:"review_event"`
+	}
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	pr, err := decodePRField(a.PR)
+	if err != nil {
+		return err
+	}
+	r.PR = pr
+	r.Owner = a.Owner
+	r.Repo = a.Repo
+	r.HeadSHA = a.HeadSHA
+	r.Comments = a.Comments
+	r.ReviewBody = a.ReviewBody
+	r.ReviewBodySelected = a.ReviewBodySelected
+	r.ReviewEvent = a.ReviewEvent
+	return nil
+}
+
 // LensFinding represents a single finding from a PR review lens.
 type LensFinding struct {
 	Severity    string `json:"severity"`
@@ -61,6 +95,53 @@ type LensReview struct {
 	Findings []LensFinding `json:"findings"`
 }
 
+// UnmarshalJSON widens the accepted JSON shape for the "pr" field so that
+// both a JSON number (42) and a digit-only JSON string ("42") decode to the
+// same int value. Non-numeric strings return a clear error, never a silent zero.
+func (r *LensReview) UnmarshalJSON(data []byte) error {
+	type alias struct {
+		PR       json.RawMessage `json:"pr"`
+		WorkItem string          `json:"work_item"`
+		Findings []LensFinding   `json:"findings"`
+	}
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	pr, err := decodePRField(a.PR)
+	if err != nil {
+		return err
+	}
+	r.PR = pr
+	r.WorkItem = a.WorkItem
+	r.Findings = a.Findings
+	return nil
+}
+
+// decodePRField accepts a raw JSON value that is either a number or a
+// digit-only quoted string and returns the corresponding int.
+func decodePRField(raw json.RawMessage) (int, error) {
+	if len(raw) == 0 {
+		return 0, nil
+	}
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return 0, err
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return 0, fmt.Errorf("pr: %q is not a valid int: %w", s, err)
+		}
+		return n, nil
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // FollowUpDetail holds the full content of a single follow-up artifact.
 type FollowUpDetail struct {
 	ID               string            `json:"id"`
@@ -77,6 +158,7 @@ type FollowUpDetail struct {
 	ProposedComments *ProposedReview   // from proposed-comments.json sidecar (nil when absent)
 	LensFindings     *LensReview       // from lens-findings.json sidecar (nil when absent)
 	Malformed        bool              `json:"malformed,omitempty"`
+	SidecarErrors    map[string]string // keyed by filename; populated only for present-but-malformed sidecars
 }
 
 // DetailLoadedMsg is sent when detail loading finishes.
@@ -151,10 +233,9 @@ func LoadFollowUpDetail(knowledgeDir, id string) (*FollowUpDetail, error) {
 		detail.FindingContent = string(data)
 	}
 
-	// Load proposed-comments.json sidecar when present. Missing or malformed
-	// sidecar is not an error — the field stays nil.
-	// The sidecar may be either a ProposedReview wrapper object or a bare
-	// JSON array of comments (the format produced by /pr-review).
+	// Load proposed-comments.json sidecar when present. Missing sidecar is silent.
+	// Malformed sidecar (neither wrapper nor bare-array decode succeeds) is non-fatal
+	// but recorded in SidecarErrors so the TUI can surface a diagnostic.
 	//
 	// Three-case zero-comment sidecar rule (D19):
 	//   1. Wrapper with valid PR metadata (Owner, Repo, PR>0, HeadSHA non-empty)
@@ -163,7 +244,7 @@ func LoadFollowUpDetail(knowledgeDir, id string) (*FollowUpDetail, error) {
 	//   3. Bare array with len(comments)==0 → nil (tab disappears).
 	if sidecarBytes, err := os.ReadFile(filepath.Join(itemDir, "proposed-comments.json")); err == nil {
 		var review ProposedReview
-		if json.Unmarshal(sidecarBytes, &review) == nil {
+		if wrapperErr := json.Unmarshal(sidecarBytes, &review); wrapperErr == nil {
 			hasValidMeta := review.Owner != "" && review.Repo != "" && review.PR > 0 && review.HeadSHA != ""
 			if len(review.Comments) > 0 || hasValidMeta {
 				// Case 1: non-empty comments, or wrapper with valid PR metadata.
@@ -173,24 +254,36 @@ func LoadFollowUpDetail(knowledgeDir, id string) (*FollowUpDetail, error) {
 		} else {
 			// Try bare array of comments.
 			var comments []ProposedComment
-			if json.Unmarshal(sidecarBytes, &comments) == nil && len(comments) > 0 {
+			bareErr := json.Unmarshal(sidecarBytes, &comments)
+			if bareErr == nil && len(comments) > 0 {
 				// Case 3 (non-empty): bare array with comments.
 				detail.ProposedComments = &ProposedReview{Comments: comments}
+			} else if bareErr != nil {
+				// Both wrapper and bare-array decode failed — record diagnostic.
+				if detail.SidecarErrors == nil {
+					detail.SidecarErrors = make(map[string]string)
+				}
+				detail.SidecarErrors["proposed-comments.json"] = wrapperErr.Error()
 			}
-			// Case 3 (empty): bare array with zero comments — leave nil.
+			// Case 3 (empty bare array): leave nil, no error.
 		}
 	}
 
-	// Load lens-findings.json sidecar when present. Missing or malformed
-	// sidecar is not an error — the field stays nil.
+	// Load lens-findings.json sidecar when present. Missing sidecar is silent.
+	// Malformed sidecar is non-fatal but recorded in SidecarErrors.
 	// Loader rules:
 	//   1. File absent → nil.
 	//   2. Valid JSON with len(findings) > 0 → populated.
 	//   3. Valid JSON with len(findings) == 0 → nil.
-	//   4. Malformed JSON → nil.
+	//   4. Malformed JSON → nil + SidecarErrors entry.
 	if lfBytes, err := os.ReadFile(filepath.Join(itemDir, "lens-findings.json")); err == nil {
 		var review LensReview
-		if json.Unmarshal(lfBytes, &review) == nil && len(review.Findings) > 0 {
+		if lfErr := json.Unmarshal(lfBytes, &review); lfErr != nil {
+			if detail.SidecarErrors == nil {
+				detail.SidecarErrors = make(map[string]string)
+			}
+			detail.SidecarErrors["lens-findings.json"] = lfErr.Error()
+		} else if len(review.Findings) > 0 {
 			detail.LensFindings = &review
 		}
 	}
@@ -216,28 +309,31 @@ type tabInfo struct {
 
 // DetailModel is the Bubble Tea model for the follow-up detail pane.
 type DetailModel struct {
-	knowledgeDir  string
-	id            string
-	detail        *FollowUpDetail
-	loading       bool
-	err           error
-	viewport      viewport.Model
-	reviewCards   *ReviewCardsModel
-	lensFindings  *LensFindingsModel
-	tabs          []tabInfo
-	activeTab     int
-	savedTabID    Tab // Tab ID to restore after reload; -1 = not set
-	contentStartY int
-	contentStartX int
-	width         int
-	height        int
+	knowledgeDir          string
+	id                    string
+	detail                *FollowUpDetail
+	loading               bool
+	err                   error
+	viewport              viewport.Model
+	reviewCards           *ReviewCardsModel
+	lensFindings          *LensFindingsModel
+	tabs                  []tabInfo
+	activeTab             int
+	savedTabID            Tab // Tab ID to restore after reload; -1 = not set
+	contentStartY         int
+	contentStartX         int
+	width                 int
+	height                int
+	mergeStatusRequestSeq uint64                                                                   // incremented on each dispatch; used to discard stale responses
+	fetchMergeStatusCmd   func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd // injectable for tests
 }
 
 // NewDetailModel creates a DetailModel. Call LoadDetail to populate it.
 func NewDetailModel(knowledgeDir string) DetailModel {
 	return DetailModel{
-		knowledgeDir: knowledgeDir,
-		savedTabID:   -1,
+		knowledgeDir:        knowledgeDir,
+		savedTabID:          -1,
+		fetchMergeStatusCmd: FetchMergeStatusCmd,
 	}
 }
 
@@ -292,7 +388,21 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		}
 		return m, nil
 
+	case MergeStatusLoadedMsg:
+		// Discard stale responses: cross-item (wrong followup) and same-item stale
+		// (superseded by mtime polling or post-review reload that incremented requestSeq).
+		if msg.FollowupID != m.id || msg.RequestSeq != m.mergeStatusRequestSeq {
+			return m, nil
+		}
+		if m.reviewCards != nil {
+			rc := *m.reviewCards
+			rc, _ = rc.Update(msg)
+			m.reviewCards = &rc
+		}
+		return m, nil
+
 	case DetailLoadedMsg:
+		var fetchCmd tea.Cmd
 		if msg.ID == m.id {
 			m.loading = false
 			if msg.Err != nil {
@@ -307,6 +417,15 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 					rc := NewReviewCardsModel(m.knowledgeDir, m.id, m.detail.ProposedComments)
 					rc, _ = rc.Update(tea.WindowSizeMsg{Width: cw, Height: ch})
 					m.reviewCards = &rc
+
+					// Dispatch async merge-status fetch when PR coordinates are available.
+					owner := m.detail.ProposedComments.Owner
+					repo := m.detail.ProposedComments.Repo
+					pr := m.detail.ProposedComments.PR
+					if pr > 0 && owner != "" && repo != "" {
+						m.mergeStatusRequestSeq++
+						fetchCmd = m.fetchMergeStatusCmd(m.id, m.mergeStatusRequestSeq, owner, repo, pr)
+					}
 				} else {
 					m.reviewCards = nil
 				}
@@ -339,7 +458,7 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 				m.viewport.SetContent(m.renderFinding())
 			}
 		}
-		return m, nil
+		return m, fetchCmd
 
 	case tea.KeyMsg:
 		switch msg.String() {

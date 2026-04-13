@@ -30,6 +30,7 @@ Commands:
   resolve      Resolve repo path or [[backlink]] references
   prefetch     Prefetch knowledge for agent prompts
   init         Initialize a knowledge store
+  init-work    Initialize the work item system
   index        Show dynamic knowledge index (category + entry list)
   heal         Detect and repair structural issues
   stats        Show knowledge index statistics
@@ -130,13 +131,14 @@ lore followup — follow-up artifact management
 Usage: lore followup <subcommand> [args...]
 
 Subcommands:
-  create    Create a new follow-up artifact
-  list      List follow-ups (default: pending only)
-  view      View a single follow-up's content and metadata
-  update    Update a follow-up's status or add resolution notes
-  promote   Promote a follow-up to a work item
-  dismiss   Dismiss a follow-up with an optional reason
-  delete    Permanently delete a follow-up
+  create       Create a new follow-up artifact
+  list         List follow-ups (default: pending only)
+  view         View a single follow-up's content and metadata
+  update       Update a follow-up's status or add resolution notes
+  promote      Promote a follow-up to a work item
+  dismiss      Dismiss a follow-up with an optional reason
+  delete       Permanently delete a follow-up
+  post-review  Post a proposed review comment to GitHub
 
 Options:
   --help, -h    Show this help
@@ -680,6 +682,9 @@ cmd_followup() {
     delete)
       "$SCRIPTS_DIR/delete-followup.sh" "$@"
       ;;
+    post-review)
+      "$SCRIPTS_DIR/post-proposed-review.sh" "$@"
+      ;;
     *)
       echo "Error: unknown followup subcommand '$subcmd'" >&2
       echo "" >&2
@@ -749,6 +754,10 @@ case "$1" in
   init)
     shift
     "$SCRIPTS_DIR/init-repo.sh" "$@"
+    ;;
+  init-work)
+    shift
+    "$SCRIPTS_DIR/init-work.sh" "$@"
     ;;
   heal)
     shift

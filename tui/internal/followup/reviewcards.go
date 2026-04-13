@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/anticorrelator/lore/tui/internal/gh"
 	"github.com/anticorrelator/lore/tui/internal/render"
 )
 
@@ -40,6 +41,16 @@ type PostReviewCompleteMsg struct {
 	ID          string
 	PostedCount int
 	Err         error
+}
+
+// MergeStatusLoadedMsg is sent when an async merge-status fetch completes.
+// FollowupID lets the parent discard cross-item responses.
+// RequestSeq lets the parent discard stale same-item responses.
+type MergeStatusLoadedMsg struct {
+	FollowupID string
+	RequestSeq uint64
+	Status     gh.MergeStatus
+	Err        error
 }
 
 // SeverityFilter controls which comments are visible in the ReviewCardsModel.
@@ -71,20 +82,23 @@ func WriteSidecarCmd(knowledgeDir, followupID string, review *ProposedReview) te
 // It renders comment cards with cursor navigation and selection toggling,
 // following the budget-based windowing pattern from TasksModel.
 type ReviewCardsModel struct {
-	review            *ProposedReview
-	comments          []ProposedComment
-	cursor            int
-	width             int
-	height            int
-	knowledgeDir      string
-	followupID        string
-	writeErr          error
-	flashMsg          string               // transient feedback rendered in Comments tab view, cleared on next keypress
-	clipboardWriteFn  func(string) error   // injectable clipboard seam (D17)
-	externalEditing   bool                 // true while ExternalEditRequestMsg is pending (prevents re-entrant E press)
-	editing           bool                 // true while inline textarea edit is active (lowercase e)
-	editInput         textarea.Model       // textarea for inline body editing
-	editIdx           int                  // backing index of the comment being edited inline
+	review              *ProposedReview
+	comments            []ProposedComment
+	cursor              int
+	width               int
+	height              int
+	knowledgeDir        string
+	followupID          string
+	writeErr            error
+	flashMsg            string               // transient feedback rendered in Comments tab view, cleared on next keypress
+	clipboardWriteFn    func(string) error   // injectable clipboard seam (D17)
+	externalEditing     bool                 // true while ExternalEditRequestMsg is pending (prevents re-entrant E press)
+	editing             bool                 // true while inline textarea edit is active (lowercase e)
+	editInput           textarea.Model       // textarea for inline body editing
+	editIdx             int                  // backing index of the comment being edited inline
+	mergeStatus         *gh.MergeStatus      // nil until fetch completes
+	mergeStatusLoading  bool                 // true while fetch is in flight
+	mergeStatusErr      error                // set if fetch failed
 }
 
 // NewReviewCardsModel creates a ReviewCardsModel from a loaded ProposedReview.
@@ -100,6 +114,9 @@ func NewReviewCardsModel(knowledgeDir, followupID string, review *ProposedReview
 		m.comments = review.Comments
 		if review.ReviewEvent == "" {
 			review.ReviewEvent = "COMMENT"
+		}
+		if review.PR > 0 && review.Owner != "" && review.Repo != "" {
+			m.mergeStatusLoading = true
 		}
 	}
 	return m
@@ -184,6 +201,15 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 				w = 20
 			}
 			m.editInput.SetWidth(w)
+		}
+
+	case MergeStatusLoadedMsg:
+		m.mergeStatusLoading = false
+		if msg.Err != nil {
+			m.mergeStatusErr = msg.Err
+		} else {
+			s := msg.Status
+			m.mergeStatus = &s
 		}
 
 	case WriteSidecarMsg:
@@ -379,9 +405,24 @@ func (m ReviewCardsModel) View() string {
 
 	var b strings.Builder
 
-	// Header: selection count
-	header := fmt.Sprintf("  %d/%d selected", m.SelectedCount(), m.TotalCount())
-	b.WriteString(dimStyle.Render(header))
+	// Header: selection count + optional merge badge
+	b.WriteString(dimStyle.Render(fmt.Sprintf("  %d/%d selected", m.SelectedCount(), m.TotalCount())))
+	if m.mergeStatusLoading {
+		b.WriteString(dimStyle.Render(" · merge: checking…"))
+	} else if m.mergeStatusErr != nil {
+		b.WriteString(dimStyle.Render(" · merge: unavailable"))
+	} else if m.mergeStatus != nil {
+		switch m.mergeStatus.Classification() {
+		case gh.MergeOK:
+			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(" · merge: " + m.mergeStatus.Label()))
+		case gh.MergeBlocked:
+			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(" · merge: " + m.mergeStatus.Label()))
+		case gh.MergeWarn:
+			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(" · merge: " + m.mergeStatus.Label()))
+		default:
+			b.WriteString(dimStyle.Render(" · merge: " + m.mergeStatus.Label()))
+		}
+	}
 	b.WriteString("\n\n")
 
 	// PR Review box — groups event type radio buttons and general comment card

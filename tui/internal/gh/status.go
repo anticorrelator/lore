@@ -57,3 +57,71 @@ func LoadPRStatus(ctx context.Context) (map[string]PRStatus, error) {
 func prNumberToKey(n int) string {
 	return fmt.Sprintf("%d", n)
 }
+
+// MergeClassification is the normalized merge-readiness category derived from
+// the joint (mergeable, mergeStateStatus) fields.
+type MergeClassification int
+
+const (
+	MergeOK      MergeClassification = iota // MERGEABLE + CLEAN
+	MergeWarn                               // BEHIND
+	MergeBlocked                            // CONFLICTING or DIRTY
+	MergeUnknown                            // UNKNOWN or unrecognized
+)
+
+// MergeStatus holds the merge-readiness fields returned by `gh pr view --json mergeable,mergeStateStatus`.
+// Both fields are plain strings matching the GraphQL enum values.
+type MergeStatus struct {
+	Mergeable       string `json:"mergeable"`
+	MergeStateStatus string `json:"mergeStateStatus"`
+}
+
+// Classification returns the normalized MergeClassification derived from the
+// joint (Mergeable, MergeStateStatus) pair.
+func (s MergeStatus) Classification() MergeClassification {
+	if s.Mergeable == "CONFLICTING" || s.MergeStateStatus == "DIRTY" {
+		return MergeBlocked
+	}
+	if s.MergeStateStatus == "BEHIND" {
+		return MergeWarn
+	}
+	if s.Mergeable == "MERGEABLE" && s.MergeStateStatus == "CLEAN" {
+		return MergeOK
+	}
+	return MergeUnknown
+}
+
+// Label returns a short human-readable string describing the merge status.
+func (s MergeStatus) Label() string {
+	switch s.Classification() {
+	case MergeOK:
+		return "mergeable"
+	case MergeWarn:
+		return "behind"
+	case MergeBlocked:
+		return "conflicts"
+	default:
+		return "unknown"
+	}
+}
+
+// LoadMergeStatus runs `gh pr view <pr> --repo <owner>/<repo> --json mergeable,mergeStateStatus`
+// and returns the parsed MergeStatus. Follows the LoadPRStatus convention.
+func LoadMergeStatus(ctx context.Context, owner, repo string, pr int) (MergeStatus, error) {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", fmt.Sprintf("%d", pr),
+		"--repo", fmt.Sprintf("%s/%s", owner, repo),
+		"--json", "mergeable,mergeStateStatus",
+	)
+
+	out, err := cmd.Output()
+	if err != nil {
+		return MergeStatus{}, err
+	}
+
+	var status MergeStatus
+	if err := json.Unmarshal(out, &status); err != nil {
+		return MergeStatus{}, err
+	}
+
+	return status, nil
+}

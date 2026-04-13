@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -26,14 +25,14 @@ type initFinishedMsg struct {
 // Both scripts are idempotent; if init-repo fails, init-work is skipped.
 func runInit(projectDir string) tea.Cmd {
 	return func() tea.Msg {
-		repoCmd := exec.Command("bash", os.ExpandEnv("$HOME/.lore/scripts/init-repo.sh"))
+		repoCmd := exec.Command("lore", "init")
 		repoCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		repoCmd.Dir = projectDir
 		if err := repoCmd.Run(); err != nil {
 			return initFinishedMsg{Err: err}
 		}
 
-		workCmd := exec.Command("bash", os.ExpandEnv("$HOME/.lore/scripts/init-work.sh"))
+		workCmd := exec.Command("lore", "init-work")
 		workCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		workCmd.Dir = projectDir
 		if err := workCmd.Run(); err != nil {
@@ -149,6 +148,16 @@ func runDismissFollowUp(id string) tea.Cmd {
 	}
 }
 
+// runMarkFollowUpReviewed sets a followup's status to "reviewed" and returns ActionCompleteMsg when done.
+func runMarkFollowUpReviewed(id string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("lore", "followup", "update", id, "--status", "reviewed")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		err := cmd.Run()
+		return followup.ActionCompleteMsg{ID: id, Action: "mark-reviewed", Err: err}
+	}
+}
+
 // runDeleteFollowUp runs lore followup delete and returns ActionCompleteMsg when done.
 func runDeleteFollowUp(id string) tea.Cmd {
 	return func() tea.Msg {
@@ -163,7 +172,7 @@ func runDeleteFollowUp(id string) tea.Cmd {
 // postedCount is captured from the caller (SelectedCount at dispatch time).
 func runPostReview(knowledgeDir, followupID string, postedCount int) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("bash", os.ExpandEnv("$HOME/.lore/scripts/post-proposed-review.sh"), followupID, "--force")
+		cmd := exec.Command("lore", "followup", "post-review", followupID, "--force")
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		err := cmd.Run()
 		return followup.PostReviewCompleteMsg{ID: followupID, PostedCount: postedCount, Err: err}

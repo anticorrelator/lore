@@ -1,12 +1,15 @@
 package followup
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/anticorrelator/lore/tui/internal/gh"
 )
 
 func TestLoadFollowUpDetailValid(t *testing.T) {
@@ -1106,6 +1109,121 @@ func TestLoadFollowUpDetailD19BareArrayZeroCommentsDropped(t *testing.T) {
 	}
 }
 
+// --- Flexible "pr" field decoding tests ---
+
+func TestProposedReviewUnmarshalIntPR(t *testing.T) {
+	raw := `{"pr":42,"owner":"anticorrelator","repo":"lore","head_sha":"abc","comments":[]}`
+	var r ProposedReview
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.PR != 42 {
+		t.Errorf("PR = %d, want 42", r.PR)
+	}
+}
+
+func TestProposedReviewUnmarshalStringPR(t *testing.T) {
+	raw := `{"pr":"42","owner":"anticorrelator","repo":"lore","head_sha":"abc","comments":[]}`
+	var r ProposedReview
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.PR != 42 {
+		t.Errorf("PR = %d, want 42", r.PR)
+	}
+}
+
+func TestProposedReviewUnmarshalStringPRWithMetaAndEmptyComments(t *testing.T) {
+	// D19 Case 1 compatibility: wrapper with string pr, valid metadata, and comments:[].
+	// ProposedComments must remain populated (tab persists).
+	knowledgeDir := t.TempDir()
+	id := "string-pr-d19"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"string-pr-d19","title":"String PR D19","status":"open","source":"test","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+
+	sidecar := `{"pr":"42","owner":"anticorrelator","repo":"lore","head_sha":"abc123","comments":[]}`
+	os.WriteFile(filepath.Join(itemDir, "proposed-comments.json"), []byte(sidecar), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.ProposedComments == nil {
+		t.Fatal("D19 Case 1: ProposedComments should be preserved (string pr, valid metadata, zero comments)")
+	}
+	if detail.ProposedComments.PR != 42 {
+		t.Errorf("PR = %d, want 42", detail.ProposedComments.PR)
+	}
+}
+
+func TestProposedReviewUnmarshalNonNumericStringPRReturnsError(t *testing.T) {
+	raw := `{"pr":"not-a-number","owner":"anticorrelator","repo":"lore","head_sha":"abc","comments":[]}`
+	var r ProposedReview
+	err := json.Unmarshal([]byte(raw), &r)
+	if err == nil {
+		t.Fatal("expected error for non-numeric string pr, got nil")
+	}
+	if r.PR != 0 {
+		t.Errorf("PR = %d on error, want 0 (no silent population)", r.PR)
+	}
+}
+
+func TestLensReviewUnmarshalStringPR(t *testing.T) {
+	raw := `{"pr":"42","work_item":"wi","findings":[{"severity":"blocking","title":"T","file":"a.go","line":1,"body":"B","lens":"l","disposition":"action","rationale":""}]}`
+	var r LensReview
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.PR != 42 {
+		t.Errorf("PR = %d, want 42", r.PR)
+	}
+	if len(r.Findings) != 1 {
+		t.Errorf("Findings len = %d, want 1", len(r.Findings))
+	}
+}
+
+func TestLensReviewUnmarshalIntPR(t *testing.T) {
+	raw := `{"pr":42,"work_item":"wi","findings":[{"severity":"blocking","title":"T","file":"a.go","line":1,"body":"B","lens":"l","disposition":"action","rationale":""}]}`
+	var r LensReview
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.PR != 42 {
+		t.Errorf("PR = %d, want 42", r.PR)
+	}
+}
+
+func TestLensReviewUnmarshalNonNumericStringPRReturnsError(t *testing.T) {
+	raw := `{"pr":"bad","work_item":"wi","findings":[]}`
+	var r LensReview
+	err := json.Unmarshal([]byte(raw), &r)
+	if err == nil {
+		t.Fatal("expected error for non-numeric string pr, got nil")
+	}
+}
+
+func TestProposedReviewStringPRCallSiteSeesCorrectInt(t *testing.T) {
+	// Verify the .PR accessor returns the normalized int regardless of JSON shape.
+	// Simulates what merge-status dispatch reads.
+	raw := `{"pr":"123","owner":"anticorrelator","repo":"lore","head_sha":"abc","comments":[]}`
+	var r ProposedReview
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Call site reads .PR — must see 123, not 0.
+	if r.PR != 123 {
+		t.Errorf("call site .PR = %d, want 123", r.PR)
+	}
+	// Simulate the HasPRMetadata guard that downstream dispatch uses.
+	hasValidMeta := r.Owner != "" && r.Repo != "" && r.PR > 0 && r.HeadSHA != ""
+	if !hasValidMeta {
+		t.Error("hasValidMeta should be true when pr is a valid numeric string")
+	}
+}
+
 func TestLoadFollowUpDetailAuthorField(t *testing.T) {
 	knowledgeDir := t.TempDir()
 	id := "author-test"
@@ -1454,6 +1572,112 @@ func TestLoadFollowUpDetailLensFindingsMalformed(t *testing.T) {
 	}
 }
 
+// --- SidecarErrors diagnostic tests ---
+
+func TestLoadFollowUpDetailSidecarErrorsAbsentSidecarNotRecorded(t *testing.T) {
+	// Missing sidecar must NOT add an entry to SidecarErrors.
+	knowledgeDir := t.TempDir()
+	id := "absent-sidecar-no-error"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"absent-sidecar-no-error","title":"T","status":"open","source":"test","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+	// No sidecar files written.
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(detail.SidecarErrors) != 0 {
+		t.Errorf("SidecarErrors should be empty for absent sidecars, got %v", detail.SidecarErrors)
+	}
+}
+
+func TestLoadFollowUpDetailMalformedProposedCommentsSidecarRecorded(t *testing.T) {
+	// Truly malformed proposed-comments.json (neither wrapper nor bare-array) must:
+	//   - leave ProposedComments nil
+	//   - populate SidecarErrors["proposed-comments.json"]
+	knowledgeDir := t.TempDir()
+	id := "malformed-proposed"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"malformed-proposed","title":"T","status":"open","source":"test","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+	os.WriteFile(filepath.Join(itemDir, "proposed-comments.json"), []byte("{not valid json!!!}"), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("LoadFollowUpDetail must not return error for malformed sidecar, got: %v", err)
+	}
+	if detail.ProposedComments != nil {
+		t.Errorf("ProposedComments should be nil for malformed sidecar, got %+v", detail.ProposedComments)
+	}
+	if detail.SidecarErrors == nil {
+		t.Fatal("SidecarErrors should be non-nil for malformed proposed-comments.json")
+	}
+	if _, ok := detail.SidecarErrors["proposed-comments.json"]; !ok {
+		t.Errorf("SidecarErrors should contain 'proposed-comments.json' key, got %v", detail.SidecarErrors)
+	}
+	if detail.SidecarErrors["proposed-comments.json"] == "" {
+		t.Error("SidecarErrors['proposed-comments.json'] should contain a non-empty error message")
+	}
+}
+
+func TestLoadFollowUpDetailMalformedLensFindingsSidecarRecorded(t *testing.T) {
+	// Truly malformed lens-findings.json must:
+	//   - leave LensFindings nil
+	//   - populate SidecarErrors["lens-findings.json"]
+	knowledgeDir := t.TempDir()
+	id := "malformed-lens"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"malformed-lens","title":"T","status":"open","source":"test","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+	os.WriteFile(filepath.Join(itemDir, "lens-findings.json"), []byte("{not valid json!!!}"), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("LoadFollowUpDetail must not return error for malformed sidecar, got: %v", err)
+	}
+	if detail.LensFindings != nil {
+		t.Errorf("LensFindings should be nil for malformed sidecar, got %+v", detail.LensFindings)
+	}
+	if detail.SidecarErrors == nil {
+		t.Fatal("SidecarErrors should be non-nil for malformed lens-findings.json")
+	}
+	if _, ok := detail.SidecarErrors["lens-findings.json"]; !ok {
+		t.Errorf("SidecarErrors should contain 'lens-findings.json' key, got %v", detail.SidecarErrors)
+	}
+	if detail.SidecarErrors["lens-findings.json"] == "" {
+		t.Error("SidecarErrors['lens-findings.json'] should contain a non-empty error message")
+	}
+}
+
+func TestLoadFollowUpDetailValidSidecarsNoSidecarErrors(t *testing.T) {
+	// Valid sidecars must not populate SidecarErrors.
+	knowledgeDir := t.TempDir()
+	id := "valid-sidecars-no-errors"
+	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"id":"valid-sidecars-no-errors","title":"T","status":"open","source":"test","attachments":[],"suggested_actions":[],"created":"2026-03-01T00:00:00Z","updated":"2026-03-01T00:00:00Z"}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+
+	os.WriteFile(filepath.Join(itemDir, "proposed-comments.json"), []byte(`{"pr":1,"owner":"o","repo":"r","head_sha":"s","comments":[]}`), 0644)
+	os.WriteFile(filepath.Join(itemDir, "lens-findings.json"), []byte(`{"pr":1,"work_item":"wi","findings":[{"severity":"low","title":"T","file":"f.go","line":1,"body":"B","lens":"l","disposition":"open","rationale":""}]}`), 0644)
+
+	detail, err := LoadFollowUpDetail(knowledgeDir, id)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(detail.SidecarErrors) != 0 {
+		t.Errorf("SidecarErrors should be empty for valid sidecars, got %v", detail.SidecarErrors)
+	}
+}
+
 // --- DetailModel IsEditing and tab suppression tests ---
 
 func testDetailWithReviewCards(t *testing.T) DetailModel {
@@ -1531,5 +1755,230 @@ func TestDetailModelTabSuppressedDuringEditing(t *testing.T) {
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	if m.activeTab != tabBefore {
 		t.Errorf("shift+tab during editing changed activeTab from %d to %d", tabBefore, m.activeTab)
+	}
+}
+
+// --- Merge status dispatch + stale-response filter tests ---
+
+// testDetailWithPRSidecar returns a DetailModel loaded with a FollowUpDetail
+// that has a valid ProposedReview (PR=123, owner=anticorrelator, repo=lore).
+// The fetchMergeStatusCmd field is replaced by the provided stub.
+func testDetailWithPRSidecar(t *testing.T, stub func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd) (DetailModel, string) {
+	t.Helper()
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+
+	id := "merge-status-dispatch-test"
+	m.SetID(id)
+	m.fetchMergeStatusCmd = stub
+
+	detail := &FollowUpDetail{
+		ID:               id,
+		Title:            "Merge Status Test",
+		Status:           "open",
+		Source:           "pr-review",
+		FindingContent:   "# Finding",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		ProposedComments: &ProposedReview{
+			PR:      123,
+			Owner:   "anticorrelator",
+			Repo:    "lore",
+			HeadSHA: "deadbeef",
+			Comments: []ProposedComment{
+				{ID: "c1", Path: "main.go", Line: 10, Body: "Fix this.", Severity: "high", Selected: true},
+			},
+		},
+	}
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+	return updated, id
+}
+
+func TestDetailModelDispatchesMergeFetchOnDetailLoaded(t *testing.T) {
+	// Verify that loading a FollowUpDetail with PR>0 calls fetchMergeStatusCmd.
+	var capturedFollowupID string
+	var capturedSeq uint64
+	var capturedOwner, capturedRepo string
+	var capturedPR int
+
+	stub := func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd {
+		capturedFollowupID = followupID
+		capturedSeq = requestSeq
+		capturedOwner = owner
+		capturedRepo = repo
+		capturedPR = pr
+		return func() tea.Msg {
+			return MergeStatusLoadedMsg{FollowupID: followupID, RequestSeq: requestSeq}
+		}
+	}
+
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+	id := "dispatch-test"
+	m.SetID(id)
+	m.fetchMergeStatusCmd = stub
+
+	detail := &FollowUpDetail{
+		ID:               id,
+		Title:            "Dispatch Test",
+		Status:           "open",
+		Source:           "pr-review",
+		FindingContent:   "# Finding",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		ProposedComments: &ProposedReview{
+			PR: 123, Owner: "anticorrelator", Repo: "lore", HeadSHA: "abc",
+			Comments: []ProposedComment{{ID: "c1", Path: "x.go", Line: 1, Body: "B.", Severity: "low"}},
+		},
+	}
+
+	_, cmd := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+
+	// The stub must have been called.
+	if capturedFollowupID != id {
+		t.Errorf("stub followupID = %q, want %q", capturedFollowupID, id)
+	}
+	if capturedSeq != 1 {
+		t.Errorf("stub requestSeq = %d, want 1 (incremented from 0)", capturedSeq)
+	}
+	if capturedOwner != "anticorrelator" {
+		t.Errorf("stub owner = %q, want %q", capturedOwner, "anticorrelator")
+	}
+	if capturedRepo != "lore" {
+		t.Errorf("stub repo = %q, want %q", capturedRepo, "lore")
+	}
+	if capturedPR != 123 {
+		t.Errorf("stub pr = %d, want 123", capturedPR)
+	}
+	// The returned Cmd must be non-nil.
+	if cmd == nil {
+		t.Error("returned tea.Cmd should be non-nil when PR>0 and valid coordinates")
+	}
+}
+
+func TestDetailModelNoPRNoMergeFetch(t *testing.T) {
+	// Verify that PR==0 does not trigger a merge fetch.
+	stubCalled := false
+	stub := func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd {
+		stubCalled = true
+		return nil
+	}
+
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+	id := "no-pr-test"
+	m.SetID(id)
+	m.fetchMergeStatusCmd = stub
+
+	detail := &FollowUpDetail{
+		ID:               id,
+		Title:            "No PR Test",
+		Status:           "open",
+		Source:           "test",
+		FindingContent:   "# Finding",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		// PR==0 — no valid coordinates.
+		ProposedComments: &ProposedReview{
+			PR: 0, Owner: "anticorrelator", Repo: "lore", HeadSHA: "abc",
+			Comments: []ProposedComment{{ID: "c1", Path: "x.go", Line: 1, Body: "B.", Severity: "low"}},
+		},
+	}
+
+	_, cmd := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+
+	if stubCalled {
+		t.Error("fetchMergeStatusCmd should not be called when PR==0")
+	}
+	if cmd != nil {
+		t.Error("returned tea.Cmd should be nil when PR==0")
+	}
+}
+
+func TestDetailModelDiscardsMergeStatusWrongFollowupID(t *testing.T) {
+	// A MergeStatusLoadedMsg with a FollowupID that doesn't match m.id is discarded.
+	stub := func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd {
+		return nil
+	}
+	m, id := testDetailWithPRSidecar(t, stub)
+
+	// Send a MergeStatusLoadedMsg for a different followup.
+	staleMsg := MergeStatusLoadedMsg{
+		FollowupID: "some-other-followup",
+		RequestSeq: m.mergeStatusRequestSeq,
+		Status:     gh.MergeStatus{Mergeable: "MERGEABLE", MergeStateStatus: "CLEAN"},
+	}
+	updated, _ := m.Update(staleMsg)
+
+	// reviewCards.mergeStatus should remain nil — message was discarded.
+	if updated.reviewCards == nil {
+		t.Fatal("reviewCards should be non-nil after DetailLoadedMsg")
+	}
+	if updated.reviewCards.mergeStatus != nil {
+		t.Errorf("mergeStatus = %+v, want nil (stale followupID should be discarded)", updated.reviewCards.mergeStatus)
+	}
+	_ = id
+}
+
+func TestDetailModelDiscardsMergeStatusStaleRequestSeq(t *testing.T) {
+	// A MergeStatusLoadedMsg with a stale RequestSeq (lower than m.mergeStatusRequestSeq) is discarded.
+	stub := func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd {
+		return nil
+	}
+	m, id := testDetailWithPRSidecar(t, stub)
+
+	currentSeq := m.mergeStatusRequestSeq
+	if currentSeq == 0 {
+		t.Fatal("mergeStatusRequestSeq should be >0 after dispatch")
+	}
+
+	// Send a MergeStatusLoadedMsg with an old (stale) requestSeq.
+	staleMsg := MergeStatusLoadedMsg{
+		FollowupID: id,
+		RequestSeq: currentSeq - 1, // stale
+		Status:     gh.MergeStatus{Mergeable: "MERGEABLE", MergeStateStatus: "CLEAN"},
+	}
+	updated, _ := m.Update(staleMsg)
+
+	// reviewCards.mergeStatus should remain nil — stale response discarded.
+	if updated.reviewCards == nil {
+		t.Fatal("reviewCards should be non-nil after DetailLoadedMsg")
+	}
+	if updated.reviewCards.mergeStatus != nil {
+		t.Errorf("mergeStatus = %+v, want nil (stale requestSeq should be discarded)", updated.reviewCards.mergeStatus)
+	}
+}
+
+func TestDetailModelForwardsMergeStatusWhenCurrent(t *testing.T) {
+	// A MergeStatusLoadedMsg with matching FollowupID and RequestSeq is forwarded to reviewCards.
+	stub := func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd {
+		return nil
+	}
+	m, id := testDetailWithPRSidecar(t, stub)
+
+	currentSeq := m.mergeStatusRequestSeq
+
+	status := gh.MergeStatus{Mergeable: "MERGEABLE", MergeStateStatus: "CLEAN"}
+	msg := MergeStatusLoadedMsg{
+		FollowupID: id,
+		RequestSeq: currentSeq,
+		Status:     status,
+	}
+	updated, _ := m.Update(msg)
+
+	if updated.reviewCards == nil {
+		t.Fatal("reviewCards should be non-nil")
+	}
+	if updated.reviewCards.mergeStatus == nil {
+		t.Fatal("mergeStatus should be non-nil after forwarding current message")
+	}
+	if updated.reviewCards.mergeStatus.Mergeable != "MERGEABLE" {
+		t.Errorf("mergeStatus.Mergeable = %q, want %q", updated.reviewCards.mergeStatus.Mergeable, "MERGEABLE")
+	}
+	if updated.reviewCards.mergeStatusLoading {
+		t.Error("mergeStatusLoading should be false after receiving loaded message")
 	}
 }

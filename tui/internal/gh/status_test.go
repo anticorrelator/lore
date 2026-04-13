@@ -60,3 +60,68 @@ func TestPRNumberToKey(t *testing.T) {
 		t.Errorf("prNumberToKey(0) = %q, want %q", got, "0")
 	}
 }
+
+func TestMergeStatusJSONParsing(t *testing.T) {
+	tests := []struct {
+		raw              string
+		wantMergeable    string
+		wantMergeState   string
+	}{
+		{
+			raw:            `{"mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"}`,
+			wantMergeable:  "MERGEABLE",
+			wantMergeState: "CLEAN",
+		},
+		{
+			raw:            `{"mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"}`,
+			wantMergeable:  "UNKNOWN",
+			wantMergeState: "UNKNOWN",
+		},
+		{
+			raw:            `{"mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"}`,
+			wantMergeable:  "CONFLICTING",
+			wantMergeState: "DIRTY",
+		},
+	}
+
+	for _, tt := range tests {
+		var s MergeStatus
+		if err := json.Unmarshal([]byte(tt.raw), &s); err != nil {
+			t.Fatalf("Unmarshal(%q) failed: %v", tt.raw, err)
+		}
+		if s.Mergeable != tt.wantMergeable {
+			t.Errorf("Mergeable = %q, want %q", s.Mergeable, tt.wantMergeable)
+		}
+		if s.MergeStateStatus != tt.wantMergeState {
+			t.Errorf("MergeStateStatus = %q, want %q", s.MergeStateStatus, tt.wantMergeState)
+		}
+	}
+}
+
+func TestMergeStatusClassification(t *testing.T) {
+	tests := []struct {
+		mergeable       string
+		mergeStateStatus string
+		wantClass       MergeClassification
+		wantLabel       string
+	}{
+		{"MERGEABLE", "CLEAN", MergeOK, "mergeable"},
+		{"MERGEABLE", "BEHIND", MergeWarn, "behind"},
+		{"CONFLICTING", "DIRTY", MergeBlocked, "conflicts"},
+		{"CONFLICTING", "CLEAN", MergeBlocked, "conflicts"},
+		{"MERGEABLE", "DIRTY", MergeBlocked, "conflicts"},
+		{"UNKNOWN", "UNKNOWN", MergeUnknown, "unknown"},
+		{"MERGEABLE", "BLOCKED", MergeUnknown, "unknown"},
+		{"MERGEABLE", "UNSTABLE", MergeUnknown, "unknown"},
+	}
+
+	for _, tt := range tests {
+		s := MergeStatus{Mergeable: tt.mergeable, MergeStateStatus: tt.mergeStateStatus}
+		if got := s.Classification(); got != tt.wantClass {
+			t.Errorf("Classification(%q, %q) = %v, want %v", tt.mergeable, tt.mergeStateStatus, got, tt.wantClass)
+		}
+		if got := s.Label(); got != tt.wantLabel {
+			t.Errorf("Label(%q, %q) = %q, want %q", tt.mergeable, tt.mergeStateStatus, got, tt.wantLabel)
+		}
+	}
+}
