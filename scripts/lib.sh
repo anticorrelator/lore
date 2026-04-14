@@ -191,6 +191,26 @@ json_array_field() {
   ' "$file"
 }
 
+# --- lore_agent_enabled ---
+# Returns 0 (success) if lore agent integration is enabled, non-zero if disabled.
+# Checks in priority order:
+#   1. LORE_AGENT_DISABLED=1 env var → disabled (returns 1)
+#   2. ~/.lore/config/agent.json enabled field → false means disabled (returns 1)
+#   3. File absent or enabled=true → enabled (returns 0)
+# Usage: lore_agent_enabled || exit 0
+lore_agent_enabled() {
+  if [[ "${LORE_AGENT_DISABLED:-}" == "1" ]]; then
+    return 1
+  fi
+  local config_file="${LORE_DATA_DIR:-$HOME/.lore}/config/agent.json"
+  if [[ -f "$config_file" ]]; then
+    if grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$config_file"; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
 # --- resolve_ceremony_config_path ---
 # Resolve the path to the global ceremony config file (ceremonies.json)
 # at $LORE_DATA_DIR/ceremonies.json (defaults to ~/.lore/ceremonies.json).
@@ -779,6 +799,227 @@ render_table() {
     done
     printf "${fmt}\n" "${row_vals[@]}"
   done
+}
+
+# --- remap_line_through_diff ---
+# Map an old line number through a git diff to its new position.
+# Usage: remap_line_through_diff <path> <line> <old_sha> <new_sha> [repo_dir]
+# Output (stdout, single line):
+#   anchored                  — line unchanged
+#   shifted:<NEW_LINE>        — line moved, content semantically identical
+#   renamed:<NEW_PATH>:<LINE> — file renamed, line tracked through rename
+#   lost                      — line deleted or rewritten
+# Exit 1 if diff cannot be computed (caller should bail).
+remap_line_through_diff() {
+  local file_path="$1"
+  local target_line="$2"
+  local old_sha="$3"
+  local new_sha="$4"
+  local repo_dir="${5:-.}"
+
+  # Compute unified diff with rename detection
+  local diff_output
+  if ! diff_output=$(git -C "$repo_dir" diff -M "${old_sha}..${new_sha}" -- "$file_path" 2>/dev/null); then
+    return 1
+  fi
+
+  # Empty diff: file is identical — line is anchored
+  if [[ -z "$diff_output" ]]; then
+    echo "anchored"
+    return 0
+  fi
+
+  # Detect rename: path-filtered diff suppresses rename headers (git treats renamed-away file as
+  # a pure deletion). Re-run without path filter when a rename from this path exists.
+  local new_path=""
+  local full_diff
+  full_diff=$(git -C "$repo_dir" diff -M "${old_sha}..${new_sha}" 2>/dev/null) || true
+  new_path=$(printf '%s\n' "$full_diff" | awk -v src="$file_path" '
+    found_src { if (/^rename to /) { sub(/^rename to /, ""); print; exit } }
+    /^rename from / { path = $0; sub(/^rename from /, "", path); if (path == src) found_src = 1 }
+  ')
+
+  # If renamed, use the rename-aware diff for hunk walking
+  if [[ -n "$new_path" ]]; then
+    diff_output=$(printf '%s\n' "$full_diff" | awk -v src="$file_path" -v dst="$new_path" '
+      in_block { print }
+      /^diff --git/ {
+        in_block = 0
+        # Check if this block is the rename of our file
+        if ($0 ~ ("a/" src " b/" dst)) in_block = 1
+      }
+    ')
+  fi
+
+  # Walk the diff to determine outcome for target_line.
+  #
+  # Algorithm:
+  #   - Track cumulative_delta = (new lines added) - (old lines deleted) across all hunks seen so far.
+  #   - For each hunk header, if target_line < old_start → it's between/before hunks:
+  #       new_line = target_line + cumulative_delta → anchored (or shifted if delta!=0, or renamed)
+  #   - Inside a hunk body, walk line by line tracking old_pos / new_pos:
+  #       ' ' context: advance both; if old_pos==target → anchored/renamed
+  #       '-' deletion: if old_pos==target → save content for comparison; advance old_pos
+  #       '+' addition: if we have a saved deletion at target → compare content:
+  #                       same → shifted/renamed; different → lost
+  #   - After processing all hunks, if not found → target is after last hunk:
+  #       new_line = target_line + cumulative_delta → anchored/renamed
+  local result
+  result=$(printf '%s\n' "$diff_output" | awk \
+    -v target="$target_line" \
+    -v new_path="$new_path" \
+    '
+    BEGIN {
+      found = 0
+      outcome = ""
+      in_hunk = 0
+      old_pos = 0
+      new_pos = 0
+      cumulative_delta = 0
+      # For deleted-line lookahead
+      pending_delete = 0
+      pending_delete_content = ""
+      pending_new_pos = 0
+    }
+
+    /^@@ / {
+      # Flush any pending delete that was not followed by "+"
+      if (pending_delete && !found) {
+        outcome = "lost"
+        found = 1
+        pending_delete = 0
+      }
+
+      # Parse: @@ -old_start[,old_count] +new_start[,new_count] @@
+      # Portable BSD awk: extract numbers using sub/split on the header
+      hdr = $0
+      sub(/^@@ -/, "", hdr)
+      split(hdr, a, " ")
+      old_part = a[1]; sub(/,.*/, "", old_part); old_start = old_part + 0
+      new_part = a[2]; sub(/^\+/, "", new_part); sub(/,.*/, "", new_part); new_start = new_part + 0
+
+      # If target is before this hunk, it lives in the context between/before hunks
+      if (target < old_start && !found) {
+        # new_line = target + cumulative_delta (delta from all prior hunks)
+        new_line = target + cumulative_delta
+        if (new_path != "") {
+          outcome = "renamed:" new_path ":" new_line
+        } else if (new_line == target) {
+          outcome = "anchored"
+        } else {
+          outcome = "shifted:" new_line
+        }
+        found = 1
+      }
+
+      # cumulative_delta from prior hunks: (new_start - old_start) reflects prior hunk edits
+      # We update cumulative_delta AFTER we check the target relative to old_start,
+      # but we need cumulative_delta to reflect all prior (already-finished) hunks.
+      # Track it via old/new position advancement below; reset here to hunk start.
+      old_pos = old_start
+      new_pos = new_start
+      in_hunk = 1
+      next
+    }
+
+    in_hunk && /^([-+ ])/ {
+      ch = substr($0, 1, 1)
+
+      if (ch == "+") {
+        # Addition line
+        if (pending_delete && !found) {
+          # Compare content of deleted line with this added line
+          add_content = substr($0, 2)
+          if (add_content == pending_delete_content) {
+            # Same content — shifted (or renamed)
+            if (new_path != "") {
+              outcome = "renamed:" new_path ":" pending_new_pos
+            } else {
+              outcome = "shifted:" pending_new_pos
+            }
+          } else {
+            outcome = "lost"
+          }
+          found = 1
+          pending_delete = 0
+        }
+        cumulative_delta++
+        new_pos++
+        next
+      }
+
+      # For "-" or " " lines: flush any open pending_delete (deletion not followed by "+")
+      if (pending_delete && !found) {
+        outcome = "lost"
+        found = 1
+        pending_delete = 0
+      }
+
+      if (ch == " ") {
+        # Context line: in both old and new
+        if (old_pos == target && !found) {
+          new_line = new_pos
+          if (new_path != "") {
+            outcome = "renamed:" new_path ":" new_line
+          } else if (new_line == target) {
+            outcome = "anchored"
+          } else {
+            outcome = "shifted:" new_line
+          }
+          found = 1
+        }
+        old_pos++
+        new_pos++
+      } else if (ch == "-") {
+        # Deletion line: only in old
+        if (old_pos == target && !found) {
+          # Save for comparison with next "+" line
+          pending_delete = 1
+          pending_delete_content = substr($0, 2)
+          pending_new_pos = new_pos
+        }
+        cumulative_delta--
+        old_pos++
+      }
+      next
+    }
+
+    # Non-diff-body lines inside a hunk (e.g. "\ No newline at end of file")
+    in_hunk && /^\\ / {
+      next
+    }
+
+    # Any other line ends the hunk
+    in_hunk {
+      if (pending_delete && !found) {
+        outcome = "lost"
+        found = 1
+        pending_delete = 0
+      }
+      in_hunk = 0
+    }
+
+    END {
+      if (pending_delete && !found) {
+        outcome = "lost"
+        found = 1
+      }
+      if (!found) {
+        # Target is after all hunks
+        new_line = target + cumulative_delta
+        if (new_path != "") {
+          outcome = "renamed:" new_path ":" new_line
+        } else if (new_line == target) {
+          outcome = "anchored"
+        } else {
+          outcome = "shifted:" new_line
+        }
+      }
+      print outcome
+    }
+  ')
+
+  echo "$result"
 }
 
 # --- init_followups_dir ---

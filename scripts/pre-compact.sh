@@ -5,6 +5,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+lore_agent_enabled || exit 0
+
 cat << 'EOF'
 [Knowledge Store — Pre-Compaction Reminder]
 Before context is compacted, consider whether you've discovered any reusable insights during this session that should be preserved. If so, append them to `_inbox.md` now using the standard inbox entry format. Only capture insights that are:

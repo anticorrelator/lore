@@ -1435,3 +1435,112 @@ func TestCommentsHeaderWithMergeStatusError(t *testing.T) {
 		t.Error("mergeStatusErr should be set after error message")
 	}
 }
+
+// TestPostOutcomeAndLastPostRoundTrip verifies that post_outcome and last_post
+// fields survive a WriteSidecarCmd write followed by JSON unmarshal — no field stripping.
+func TestPostOutcomeAndLastPostRoundTrip(t *testing.T) {
+	knowledgeDir := t.TempDir()
+	followupID := "outcome-roundtrip"
+	itemDir := filepath.Join(knowledgeDir, "_followups", followupID)
+	os.MkdirAll(itemDir, 0755)
+
+	postedLine := 15
+	postedPath := "lib/helper.go"
+	review := &ProposedReview{
+		PR:      7,
+		Owner:   "anticorrelator",
+		Repo:    "lore",
+		HeadSHA: "deadbeef",
+		Comments: []ProposedComment{
+			{
+				ID:       "c1",
+				Path:     "main.go",
+				Line:     10,
+				Body:     "Fix this.",
+				Selected: true,
+				Severity: "high",
+				PostOutcome: &PostOutcome{
+					RemapStatus:  "shifted",
+					FinalStatus:  "posted",
+					OriginalLine: 10,
+					PostedLine:   &postedLine,
+					PostedPath:   &postedPath,
+					Message:      "line shifted by 5",
+					PostedAt:     "2026-04-13T00:00:00Z",
+				},
+			},
+		},
+		LastPost: &LastPost{
+			At:          "2026-04-13T00:00:00Z",
+			CurrentHead: "cafebabe",
+			Posted:      1,
+			Dropped:     0,
+			Shifted:     1,
+			Renamed:     0,
+		},
+	}
+
+	m := NewReviewCardsModel(knowledgeDir, followupID, review)
+	cmd := WriteSidecarCmd(knowledgeDir, followupID, m.review)
+	msg := cmd()
+	writeMsg, ok := msg.(WriteSidecarMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want WriteSidecarMsg", msg)
+	}
+	if writeMsg.Err != nil {
+		t.Fatalf("WriteSidecarCmd error: %v", writeMsg.Err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(itemDir, "proposed-comments.json"))
+	if err != nil {
+		t.Fatalf("reading sidecar: %v", err)
+	}
+
+	var reloaded ProposedReview
+	if err := json.Unmarshal(data, &reloaded); err != nil {
+		t.Fatalf("unmarshaling sidecar: %v", err)
+	}
+
+	if reloaded.LastPost == nil {
+		t.Fatal("last_post should be present after round-trip")
+	}
+	if reloaded.LastPost.CurrentHead != "cafebabe" {
+		t.Errorf("last_post.current_head = %q, want cafebabe", reloaded.LastPost.CurrentHead)
+	}
+	if reloaded.LastPost.Shifted != 1 {
+		t.Errorf("last_post.shifted = %d, want 1", reloaded.LastPost.Shifted)
+	}
+	if reloaded.LastPost.Dropped != 0 {
+		t.Errorf("last_post.dropped = %d, want 0", reloaded.LastPost.Dropped)
+	}
+
+	if len(reloaded.Comments) != 1 {
+		t.Fatalf("comments count = %d, want 1", len(reloaded.Comments))
+	}
+	po := reloaded.Comments[0].PostOutcome
+	if po == nil {
+		t.Fatal("post_outcome should be present on comment after round-trip")
+	}
+	if po.RemapStatus != "shifted" {
+		t.Errorf("post_outcome.remap_status = %q, want shifted", po.RemapStatus)
+	}
+	if po.FinalStatus != "posted" {
+		t.Errorf("post_outcome.final_status = %q, want posted", po.FinalStatus)
+	}
+	if po.OriginalLine != 10 {
+		t.Errorf("post_outcome.original_line = %d, want 10", po.OriginalLine)
+	}
+	if po.PostedLine == nil || *po.PostedLine != 15 {
+		t.Errorf("post_outcome.posted_line = %v, want 15", po.PostedLine)
+	}
+	if po.PostedPath == nil || *po.PostedPath != "lib/helper.go" {
+		t.Errorf("post_outcome.posted_path = %v, want lib/helper.go", po.PostedPath)
+	}
+	// Verify original anchor fields are not mutated by write.
+	if reloaded.Comments[0].Path != "main.go" {
+		t.Errorf("original path mutated: got %q, want main.go", reloaded.Comments[0].Path)
+	}
+	if reloaded.Comments[0].Line != 10 {
+		t.Errorf("original line mutated: got %d, want 10", reloaded.Comments[0].Line)
+	}
+}

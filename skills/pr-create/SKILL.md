@@ -11,20 +11,58 @@ Create a GitHub pull request from the current branch. Derives the PR body from t
 
 ## Steps
 
-### 1. Gather git context
+### 1. Determine base branch
+
+Override precedence:
+1. If `--base <branch>` is in `$ARGUMENTS`, use that and skip detection.
+2. Otherwise, detect by walking the branch graph.
+
+**Detection:** for each local and remote branch ≠ current, compute the merge-base with HEAD; pick the branch whose merge-base is the newest commit — that is where HEAD was forked from.
+
+```bash
+CURRENT=$(git branch --show-current)
+CURRENT_TIP=$(git rev-parse HEAD)
+BEST_REF=""
+BEST_TIME=0
+
+while IFS= read -r ref; do
+  [[ "$ref" == "$CURRENT" || "$ref" == */HEAD ]] && continue
+  mb=$(git merge-base HEAD "$ref" 2>/dev/null) || continue
+  [[ -z "$mb" || "$mb" == "$CURRENT_TIP" ]] && continue
+  t=$(git show -s --format=%ct "$mb" 2>/dev/null) || continue
+  if (( t > BEST_TIME )); then
+    BEST_TIME=$t
+    BEST_REF=$ref
+  fi
+done < <(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes)
+
+# Normalize remote-tracking refs: origin/foo → foo (what gh --base expects)
+BASE="${BEST_REF#origin/}"
+MB=$(git merge-base HEAD "$BEST_REF" 2>/dev/null)
+echo "detected: $BASE"
+echo "fork point: $(git log -1 --format='%h %s' "$MB" 2>/dev/null)"
+```
+
+**Confirm with the user** before proceeding — show the detected base and fork-point commit, and ask whether to use it or supply a different branch. Do not fall back silently.
+
+If detection yields nothing (e.g., first commit, no other branches), ask the user directly for the base branch.
+
+Substitute the confirmed branch as `<base>` in all subsequent git/`gh` commands.
+
+### 2. Gather git context
 
 Run in parallel:
 ```bash
 git status
 git diff --stat
-git log main..HEAD --oneline
-git diff main...HEAD --name-only
+git log <base>..HEAD --oneline
+git diff <base>...HEAD --name-only
 git branch --show-current
 ```
 
 If there are uncommitted changes, ask whether to commit first before proceeding.
 
-### 2. Resolve the work item
+### 3. Resolve the work item
 
 **If a work item slug was passed as `$ARGUMENTS`:** use it directly.
 ```bash
@@ -43,7 +81,7 @@ lore work view <slug>
 
 If `lore` is unavailable or no match found, skip silently and fall back to commit-log-only body (same as global `/pr`).
 
-### 3. Read the work item
+### 4. Read the work item
 
 Once the slug is known, read all of:
 ```bash
@@ -58,10 +96,6 @@ Extract:
 - **Summary** — `notes.md` most recent session entry's **Summary** line and **Key points** bullets (last 1–2 entries)
 - **Architecture diagram** — `plan.md` `## Architecture Diagram` section (fenced code block), if present
 - **Design decisions** — `plan.md` `## Design Decisions` section bullets (titles only, not full rationale)
-
-### 4. Determine base branch
-
-Default: `main`. Use `--base <branch>` if provided in `$ARGUMENTS`.
 
 ### 5. Push the branch
 
@@ -91,18 +125,18 @@ Write a clean, reviewer-facing PR description. No internal process details — n
 <Bulleted checklist of what was tested or needs manual verification>
 ```
 
-If no work item was found, fall back to deriving all sections from `git log main..HEAD` and the full diff.
+If no work item was found, fall back to deriving all sections from `git log <base>..HEAD` and the full diff.
 
 ### 7. Create the PR
 
 ```bash
-gh pr create --title "<title>" --body "$(cat <<'EOF'
+gh pr create --title "<title>" --base "<base>" --body "$(cat <<'EOF'
 <body>
 EOF
-)" [--draft] [--base <branch>]
+)" [--draft]
 ```
 
-Pass `--draft` and `--base` if provided in `$ARGUMENTS`.
+Always pass `--base "<base>"` using the branch confirmed in Step 1. Pass `--draft` if provided in `$ARGUMENTS`.
 
 ### 8. Update the work item
 

@@ -36,10 +36,34 @@ type ExternalEditDoneMsg struct {
 	Err        error
 }
 
+// PostOutcome records the remap result for a single comment after posting.
+type PostOutcome struct {
+	RemapStatus  string  `json:"remap_status"`
+	FinalStatus  string  `json:"final_status"`
+	OriginalLine int     `json:"original_line"`
+	PostedLine   *int    `json:"posted_line,omitempty"`
+	PostedPath   *string `json:"posted_path,omitempty"`
+	Message      string  `json:"message,omitempty"`
+	PostedAt     string  `json:"posted_at,omitempty"`
+}
+
+// LastPost summarises the most recent post-proposed-review.sh run.
+type LastPost struct {
+	At          string `json:"at"`
+	CurrentHead string `json:"current_head"`
+	Posted      int    `json:"posted"`
+	Dropped     int    `json:"dropped"`
+	Shifted     int    `json:"shifted"`
+	Renamed     int    `json:"renamed"`
+}
+
 // PostReviewCompleteMsg is sent after post-proposed-review.sh finishes.
 type PostReviewCompleteMsg struct {
 	ID          string
 	PostedCount int
+	Dropped     int
+	Shifted     int
+	Renamed     int
 	Err         error
 }
 

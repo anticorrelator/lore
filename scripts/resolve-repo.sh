@@ -5,6 +5,19 @@
 
 set -euo pipefail
 
+# Gate: if lore agent integration is disabled, exit non-zero with empty output.
+# This triggers the `|| exit 0` pattern in all SessionStart hook scripts, making them no-op.
+# Check order: LORE_AGENT_DISABLED env var (session override) then agent.json.enabled field.
+_LORE_DATA_DIR="${LORE_DATA_DIR:-$HOME/.lore}"
+if [[ "${LORE_AGENT_DISABLED:-}" == "1" ]]; then
+  exit 1
+fi
+_AGENT_JSON="${_LORE_DATA_DIR}/config/agent.json"
+if [[ -f "$_AGENT_JSON" ]] && grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$_AGENT_JSON"; then
+  exit 1
+fi
+unset _LORE_DATA_DIR _AGENT_JSON
+
 # Short-circuit: if LORE_KNOWLEDGE_DIR is set, use it directly.
 # This allows tests to override resolution without mutating this file.
 if [[ -n "${LORE_KNOWLEDGE_DIR:-}" ]]; then

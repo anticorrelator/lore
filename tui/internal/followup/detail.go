@@ -17,15 +17,16 @@ import (
 
 // ProposedComment represents a single review comment from the proposed-comments.json sidecar.
 type ProposedComment struct {
-	ID         string   `json:"id"`
-	Path       string   `json:"path"`
-	Line       int      `json:"line"`
-	Side       string   `json:"side"`
-	Body       string   `json:"body"`
-	Selected   bool     `json:"selected"`
-	Severity   string   `json:"severity"`
-	Lenses     []string `json:"lenses"`
-	Confidence float64  `json:"confidence"`
+	ID          string       `json:"id"`
+	Path        string       `json:"path"`
+	Line        int          `json:"line"`
+	Side        string       `json:"side"`
+	Body        string       `json:"body"`
+	Selected    bool         `json:"selected"`
+	Severity    string       `json:"severity"`
+	Lenses      []string     `json:"lenses"`
+	Confidence  float64      `json:"confidence"`
+	PostOutcome *PostOutcome `json:"post_outcome,omitempty"`
 }
 
 // ProposedReview is the top-level wrapper for the proposed-comments.json sidecar.
@@ -40,6 +41,7 @@ type ProposedReview struct {
 	ReviewBody         string            `json:"review_body"`
 	ReviewBodySelected bool              `json:"review_body_selected"`
 	ReviewEvent        string            `json:"review_event"`
+	LastPost           *LastPost         `json:"last_post,omitempty"`
 }
 
 // UnmarshalJSON widens the accepted JSON shape for the "pr" field so that
@@ -55,6 +57,7 @@ func (r *ProposedReview) UnmarshalJSON(data []byte) error {
 		ReviewBody         string            `json:"review_body"`
 		ReviewBodySelected bool              `json:"review_body_selected"`
 		ReviewEvent        string            `json:"review_event"`
+		LastPost           *LastPost         `json:"last_post,omitempty"`
 	}
 	var a alias
 	if err := json.Unmarshal(data, &a); err != nil {
@@ -72,6 +75,7 @@ func (r *ProposedReview) UnmarshalJSON(data []byte) error {
 	r.ReviewBody = a.ReviewBody
 	r.ReviewBodySelected = a.ReviewBodySelected
 	r.ReviewEvent = a.ReviewEvent
+	r.LastPost = a.LastPost
 	return nil
 }
 

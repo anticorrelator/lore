@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -169,13 +172,34 @@ func runDeleteFollowUp(id string) tea.Cmd {
 }
 
 // runPostReview runs post-proposed-review.sh and returns PostReviewCompleteMsg when done.
-// postedCount is captured from the caller (SelectedCount at dispatch time).
-func runPostReview(knowledgeDir, followupID string, postedCount int) tea.Cmd {
+// Counts are read from the sidecar's last_post after a successful run — never trusted
+// from the caller — because Phase 2 always writes last_post on successful POST.
+func runPostReview(knowledgeDir, followupID string) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("lore", "followup", "post-review", followupID, "--force")
+		cmd := exec.Command("lore", "followup", "post-review", followupID)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		err := cmd.Run()
-		return followup.PostReviewCompleteMsg{ID: followupID, PostedCount: postedCount, Err: err}
+		if err := cmd.Run(); err != nil {
+			return followup.PostReviewCompleteMsg{ID: followupID, Err: err}
+		}
+		sidecarPath := filepath.Join(knowledgeDir, "_followups", followupID, "proposed-comments.json")
+		data, err := os.ReadFile(sidecarPath)
+		if err != nil {
+			return followup.PostReviewCompleteMsg{ID: followupID, Err: fmt.Errorf("review posted, but failed to persist outcomes locally: %w", err)}
+		}
+		var review followup.ProposedReview
+		if err := json.Unmarshal(data, &review); err != nil {
+			return followup.PostReviewCompleteMsg{ID: followupID, Err: fmt.Errorf("review posted, but failed to persist outcomes locally: %w", err)}
+		}
+		if review.LastPost == nil {
+			return followup.PostReviewCompleteMsg{ID: followupID, Err: fmt.Errorf("review posted, but last_post missing from sidecar — re-review to confirm counts")}
+		}
+		return followup.PostReviewCompleteMsg{
+			ID:          followupID,
+			PostedCount: review.LastPost.Posted,
+			Dropped:     review.LastPost.Dropped,
+			Shifted:     review.LastPost.Shifted,
+			Renamed:     review.LastPost.Renamed,
+		}
 	}
 }
 

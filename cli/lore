@@ -54,6 +54,7 @@ Commands:
   analyze      Knowledge store analysis (see: lore analyze --help)
   bootstrap    Bootstrap knowledge store (see: lore bootstrap --help)
   ceremony     Ceremony config management (see: lore ceremony --help)
+  agent        Agent integration toggle (see: lore agent --help)
 
 Options:
   --help, -h       Show this help
@@ -118,6 +119,22 @@ Subcommands:
   list       List threads (regenerate _threads/_index.json)
   migrate    Migrate monolithic thread files to directory-per-entry format
   reindex    Regenerate _threads/_index.json from thread metadata
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+agent_usage() {
+  cat >&2 <<EOF
+lore agent — agent integration toggle
+
+Usage: lore agent <subcommand> [args...]
+
+Subcommands:
+  enable     Enable lore agent integration (restores symlinks and CLAUDE.md content)
+  disable    Disable lore agent integration (removes symlinks, clears CLAUDE.md lore region)
+  status     Show current enabled/disabled state
 
 Options:
   --help, -h    Show this help
@@ -435,6 +452,39 @@ cmd_thread() {
       echo "Error: unknown thread subcommand '$subcmd'" >&2
       echo "" >&2
       thread_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Agent subgroup ---
+cmd_agent() {
+  if [[ $# -eq 0 ]]; then
+    "$SCRIPTS_DIR/agent-toggle/status.sh"
+    return $?
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      agent_usage
+      return 0
+      ;;
+    enable)
+      "$SCRIPTS_DIR/agent-toggle/enable.sh" "$@"
+      ;;
+    disable)
+      "$SCRIPTS_DIR/agent-toggle/disable.sh" "$@"
+      ;;
+    status)
+      "$SCRIPTS_DIR/agent-toggle/status.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown agent subcommand '$subcmd'" >&2
+      echo "" >&2
+      agent_usage
       return 1
       ;;
   esac
@@ -825,6 +875,10 @@ case "$1" in
   ceremony)
     shift
     cmd_ceremony "$@"
+    ;;
+  agent)
+    shift
+    cmd_agent "$@"
     ;;
   batch-spec)
     shift

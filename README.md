@@ -174,9 +174,58 @@ lore rebuild                     # Rebuild and reinstall the TUI binary
 # Batch operations
 lore batch-spec                  # Batch-run /spec short on eligible work items
 lore batch-implement             # Batch-run /implement on ready work items
+
+# Agent toggle
+lore agent status                # Show enabled/disabled state and last-changed time
+lore agent enable                # Enable lore agent integration (default)
+lore agent disable               # Disable lore agent integration across all surfaces
 ```
 
 Run `lore --help` or `lore <command> --help` for full details.
+
+## Agent toggle (opencode coexistence)
+
+`lore agent enable/disable` gives you a first-class way to turn lore's agent-facing activation on and off without uninstalling. This is especially useful when running opencode alongside Claude Code — lore's hooks are invisible to opencode, but skill symlinks and `CLAUDE.md` content are shared.
+
+### What `lore agent disable` does
+
+- Clears the lore region in `~/.claude/CLAUDE.md` (preserves any surrounding user content via `<!-- LORE:BEGIN -->`/`<!-- LORE:END -->` sentinels)
+- Removes lore-owned skill symlinks from `~/.claude/skills/` and agent symlinks from `~/.claude/agents/` (saves a manifest for clean restore)
+- Adds an early-exit gate in runtime hooks so lore no-ops in Claude Code sessions
+- State is persisted in `~/.lore/config/agent.json`
+
+### What `lore agent enable` does
+
+The symmetric inverse: restores symlinks from the saved manifest, re-assembles `CLAUDE.md` with lore content, and removes the runtime gate.
+
+### Per-session override
+
+For a single shell session without changing global state:
+
+```bash
+LORE_AGENT_DISABLED=1 lore agent status   # shows "disabled (env override)"
+```
+
+This is useful for running opencode in a terminal while keeping lore active for Claude Code in another session.
+
+### Worked example: opencode coexistence
+
+```bash
+# Disable lore for all frameworks (opencode sessions will no longer see lore)
+lore agent disable
+
+# Verify
+lore agent status    # → disabled (config)
+lore doctor          # → agent: disabled (config), all checks healthy
+
+# Use opencode — no lore content in CLAUDE.md, no lore skills visible
+
+# Re-enable for Claude Code
+lore agent enable
+lore agent status    # → enabled
+```
+
+> **Note:** The `lore` CLI itself is always available after disabling — you can always run `lore agent enable` to restore.
 
 ## Skills
 

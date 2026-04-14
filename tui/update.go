@@ -143,7 +143,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			case "y", "enter":
 				action := m.confirmAction
 				slug := m.confirmSlug
-				count := m.confirmCount
 				m.confirmAction = ""
 				m.confirmSlug = ""
 				m.confirmTitle = ""
@@ -158,7 +157,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					return m, runDeleteFollowUp(slug)
 				}
 				if action == "post_review" {
-					return m, runPostReview(m.config.KnowledgeDir, slug, count)
+					return m, runPostReview(m.config.KnowledgeDir, slug)
 				}
 				return m, runArchive(slug, action == "unarchive")
 			default:
@@ -1133,7 +1132,21 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			m.followupDetail.ClearID()
 			return m, m.followupDetail.SetID(msg.ID)
 		}
-		m.flashErr = fmt.Sprintf("Posted %d comments — marked reviewed", msg.PostedCount)
+		if msg.Dropped+msg.Shifted+msg.Renamed > 0 {
+			var clauses []string
+			if msg.Dropped > 0 {
+				clauses = append(clauses, fmt.Sprintf("%d dropped", msg.Dropped))
+			}
+			if msg.Shifted > 0 {
+				clauses = append(clauses, fmt.Sprintf("%d shifted", msg.Shifted))
+			}
+			if msg.Renamed > 0 {
+				clauses = append(clauses, fmt.Sprintf("%d renamed", msg.Renamed))
+			}
+			m.flashErr = fmt.Sprintf("Posted %d (%s) — marked reviewed", msg.PostedCount, strings.Join(clauses, ", "))
+		} else {
+			m.flashErr = fmt.Sprintf("Posted %d comments — marked reviewed", msg.PostedCount)
+		}
 		// Mark the followup reviewed so it moves out of the pending filter;
 		// the resulting ActionCompleteMsg triggers an index reload which refreshes the detail.
 		return m, runMarkFollowUpReviewed(msg.ID)

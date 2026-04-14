@@ -135,10 +135,30 @@ _check_symlink "$LORE_CLAUDE_MD_LINK" "$LORE_REPO_DIR/claude-md" "symlinks" "~/.
 _check_symlink "$HOME/.local/bin/lore" "$LORE_REPO_DIR/cli/lore" "cli" "~/.local/bin/lore"
 
 # ---------------------------------------------------------------------------
-# Check 4: Skills symlinks
+# Determine agent state
+# AGENT_CONFIG_DISABLED=1 only when config explicitly disables (not env override);
+# this gates whether missing symlinks and empty CLAUDE.md are drift or healthy.
+# ---------------------------------------------------------------------------
+AGENT_STATE="enabled"
+AGENT_CONFIG_DISABLED=0
+if [[ "${LORE_AGENT_DISABLED:-}" == "1" ]]; then
+  AGENT_STATE="disabled (env override)"
+else
+  _AGENT_JSON="${LORE_DATA_DIR}/config/agent.json"
+  if [[ -f "$_AGENT_JSON" ]]; then
+    _ENABLED=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('enabled', True))" "$_AGENT_JSON" 2>/dev/null || echo "True")
+    if [[ "$_ENABLED" == "False" ]]; then
+      AGENT_STATE="disabled (config)"
+      AGENT_CONFIG_DISABLED=1
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Check 4: Skills symlinks (skipped when config-disabled — absence is healthy)
 # ---------------------------------------------------------------------------
 CHECKED+=("skills")
-if [[ -d "$LORE_REPO_DIR/skills" ]]; then
+if [[ "$AGENT_CONFIG_DISABLED" -eq 0 && -d "$LORE_REPO_DIR/skills" ]]; then
   for skill_dir in "$LORE_REPO_DIR"/skills/*/; do
     [[ -d "$skill_dir" ]] || continue
     skill_name="$(basename "$skill_dir")"
@@ -166,10 +186,10 @@ if [[ -d "$LORE_REPO_DIR/skills" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Check 5: Agents symlinks (only lore-managed repo agents/*.md)
+# Check 5: Agents symlinks (skipped when config-disabled — absence is healthy)
 # ---------------------------------------------------------------------------
 CHECKED+=("agents")
-if [[ -d "$LORE_REPO_DIR/agents" ]]; then
+if [[ "$AGENT_CONFIG_DISABLED" -eq 0 && -d "$LORE_REPO_DIR/agents" ]]; then
   for agent_file in "$LORE_REPO_DIR"/agents/*.md; do
     [[ -f "$agent_file" ]] || continue
     agent_name="$(basename "$agent_file")"
@@ -196,10 +216,10 @@ if [[ -d "$LORE_REPO_DIR/agents" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Check 6: CLAUDE.md freshness via assemble-claude-md.sh --check
+# Check 6: CLAUDE.md freshness (skipped when config-disabled — empty region is healthy)
 # ---------------------------------------------------------------------------
 CHECKED+=("claude_md")
-if [[ -f "$LORE_REPO_DIR/scripts/assemble-claude-md.sh" ]]; then
+if [[ "$AGENT_CONFIG_DISABLED" -eq 0 && -f "$LORE_REPO_DIR/scripts/assemble-claude-md.sh" ]]; then
   if ! bash "$LORE_REPO_DIR/scripts/assemble-claude-md.sh" --check > /dev/null 2>&1; then
     add_issue "claude_md" "stale" "~/.claude/CLAUDE.md" \
       "assembled CLAUDE.md is out of date; run: lore assemble"
@@ -306,11 +326,12 @@ for c in checked:
 
 output = {
     'status': status,
+    'agent_state': sys.argv[4],
     'issues': issues,
     'checked': checked_deduped,
 }
 print(json.dumps(output, indent=2))
-" "$STATUS" "$(printf '%s\n' "${ISSUES[@]+"${ISSUES[@]}"}")" "$(IFS=','; echo "${CHECKED[*]}")"
+" "$STATUS" "$(printf '%s\n' "${ISSUES[@]+"${ISSUES[@]}"}")" "$(IFS=','; echo "${CHECKED[*]}")" "$AGENT_STATE"
   exit $(( ISSUE_COUNT > 0 ? 1 : 0 ))
 fi
 
@@ -319,6 +340,7 @@ if [[ "$MODE_QUIET" -eq 1 ]]; then
     exit 0
   else
     echo "lore doctor: $ISSUE_COUNT issue(s) detected — run 'lore doctor' for details"
+    echo "  agent: $AGENT_STATE"
     exit 1
   fi
 fi
@@ -327,6 +349,8 @@ fi
 # Verbose (default) output
 # ---------------------------------------------------------------------------
 draw_separator "lore doctor"
+echo ""
+echo "  agent: $AGENT_STATE"
 echo ""
 
 if [[ "$STATUS" == "clean" ]]; then

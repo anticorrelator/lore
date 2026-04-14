@@ -11,7 +11,6 @@ Used by: stop-novelty-check.py, check-plan-persistence.py, extract-session-diges
 
 import json
 import os
-import re
 import subprocess
 import sys
 
@@ -148,6 +147,33 @@ def has_recent_capture(messages):
 
 
 # ---------------------------------------------------------------------------
+# Agent enabled check
+# ---------------------------------------------------------------------------
+
+def lore_agent_enabled():
+    """Return True if lore agent integration is enabled, False if disabled.
+
+    Checks in priority order:
+        1. LORE_AGENT_DISABLED=1 env var -> disabled
+        2. ~/.lore/config/agent.json enabled field -> false means disabled
+        3. File absent or enabled=true -> enabled
+    """
+    if os.environ.get("LORE_AGENT_DISABLED", "") == "1":
+        return False
+    data_dir = os.environ.get("LORE_DATA_DIR", os.path.join(os.path.expanduser("~"), ".lore"))
+    config_file = os.path.join(data_dir, "config", "agent.json")
+    if os.path.isfile(config_file):
+        try:
+            with open(config_file) as f:
+                data = json.load(f)
+            if data.get("enabled") is False:
+                return False
+        except Exception:
+            pass
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Knowledge directory resolution (Python-native)
 # ---------------------------------------------------------------------------
 
@@ -197,6 +223,10 @@ def resolve_knowledge_dir(cwd=None):
         3. Git repo without remote -> ~/.lore/repos/local/<repo-name>/
         4. Non-git directory -> ~/.lore/repos/local/<dir-name>/
     """
+    # Gate: disabled state -> return None so callers exit 0 via fail_open
+    if not lore_agent_enabled():
+        return None
+
     # Short-circuit: env var override
     env_dir = os.environ.get("LORE_KNOWLEDGE_DIR", "")
     if env_dir:

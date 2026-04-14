@@ -1096,6 +1096,54 @@ func TestPostReviewCompleteMsgWithErrorSetsFlashErr(t *testing.T) {
 	}
 }
 
+func TestPostReviewCompleteFlashVariants(t *testing.T) {
+	cases := []struct {
+		name    string
+		msg     followup.PostReviewCompleteMsg
+		want    string
+	}{
+		{
+			name: "plain posted count",
+			msg:  followup.PostReviewCompleteMsg{ID: "fu-1", PostedCount: 5},
+			want: "Posted 5 comments — marked reviewed",
+		},
+		{
+			name: "dropped only",
+			msg:  followup.PostReviewCompleteMsg{ID: "fu-1", PostedCount: 4, Dropped: 1},
+			want: "Posted 4 (1 dropped) — marked reviewed",
+		},
+		{
+			name: "dropped and shifted",
+			msg:  followup.PostReviewCompleteMsg{ID: "fu-1", PostedCount: 3, Dropped: 1, Shifted: 2},
+			want: "Posted 3 (1 dropped, 2 shifted) — marked reviewed",
+		},
+		{
+			name: "renamed only",
+			msg:  followup.PostReviewCompleteMsg{ID: "fu-1", PostedCount: 2, Renamed: 1},
+			want: "Posted 2 (1 renamed) — marked reviewed",
+		},
+		{
+			name: "all non-zero",
+			msg:  followup.PostReviewCompleteMsg{ID: "fu-1", PostedCount: 1, Dropped: 1, Shifted: 1, Renamed: 1},
+			want: "Posted 1 (1 dropped, 1 shifted, 1 renamed) — marked reviewed",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := minimalModel(stateFollowUps, nil, nil)
+			m.config.KnowledgeDir = t.TempDir()
+
+			next, _ := m.Update(tc.msg)
+			nm := next.(model)
+
+			if nm.flashErr != tc.want {
+				t.Errorf("flashErr = %q, want %q", nm.flashErr, tc.want)
+			}
+		})
+	}
+}
+
 // --- terminalMode sync integration tests ---
 //
 // Each test below covers one of the 6 followup selection paths and verifies

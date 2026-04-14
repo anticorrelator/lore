@@ -9,6 +9,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+lore_agent_enabled || exit 0
+
 INPUT=$(cat)
 
 # Extract fields from hook input
