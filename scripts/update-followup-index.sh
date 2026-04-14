@@ -45,17 +45,11 @@ def list_field(meta, key, default=None):
         return val
     return [val]
 
-for meta_path in sorted(glob.glob(os.path.join(followups_dir, "*", "_meta.json"))):
-    followup_id = os.path.basename(os.path.dirname(meta_path))
+TERMINAL_STATUSES = {"reviewed", "promoted", "dismissed"}
+NON_TERMINAL_STATUSES = {"open", "pending"}
 
-    try:
-        with open(meta_path) as f:
-            meta = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"[warn] Skipping {followup_id}: {e}", file=sys.stderr)
-        continue
-
-    entry = {
+def build_entry(meta, followup_id, meta_path):
+    return {
         "id": meta.get("id", followup_id),
         "title": str_field(meta, "title", followup_id),
         "status": str_field(meta, "status", "pending"),
@@ -68,6 +62,7 @@ for meta_path in sorted(glob.glob(os.path.join(followups_dir, "*", "_meta.json")
         "has_finding": os.path.exists(os.path.join(os.path.dirname(meta_path), "finding.md")),
     }
 
+def append_by_status(entry):
     status = entry["status"]
     if status == "reviewed":
         reviewed.append(entry)
@@ -77,6 +72,40 @@ for meta_path in sorted(glob.glob(os.path.join(followups_dir, "*", "_meta.json")
         dismissed.append(entry)
     else:
         pending.append(entry)
+
+for meta_path in sorted(glob.glob(os.path.join(followups_dir, "*", "_meta.json"))):
+    followup_id = os.path.basename(os.path.dirname(meta_path))
+    if followup_id == "_archive":
+        continue
+
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[warn] Skipping {followup_id}: {e}", file=sys.stderr)
+        continue
+
+    entry = build_entry(meta, followup_id, meta_path)
+    # Active-dir partition: keep non-terminal only; terminal statuses
+    # living in the active dir are mismatched and dropped silently.
+    if entry["status"] in TERMINAL_STATUSES:
+        continue
+    append_by_status(entry)
+
+for meta_path in sorted(glob.glob(os.path.join(followups_dir, "_archive", "*", "_meta.json"))):
+    followup_id = os.path.basename(os.path.dirname(meta_path))
+
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[warn] Skipping archived {followup_id}: {e}", file=sys.stderr)
+        continue
+
+    entry = build_entry(meta, followup_id, meta_path)
+    if entry["status"] not in TERMINAL_STATUSES:
+        continue
+    append_by_status(entry)
 
 index = {
     "version": 1,

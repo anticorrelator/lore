@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -103,24 +104,29 @@ func LoadIndex(knowledgeDir string, filter StatusFilter) ([]FollowUpItem, error)
 		return nil, err
 	}
 
+	var result []FollowUpItem
 	switch filter {
 	case StatusAll:
-		result := make([]FollowUpItem, 0,
+		result = make([]FollowUpItem, 0,
 			len(idx.Pending)+len(idx.Reviewed)+len(idx.Promoted)+len(idx.Dismissed))
 		result = append(result, idx.Pending...)
 		result = append(result, idx.Reviewed...)
 		result = append(result, idx.Promoted...)
 		result = append(result, idx.Dismissed...)
-		return result, nil
 	case StatusReviewed:
-		return idx.Reviewed, nil
+		result = idx.Reviewed
 	case StatusPromoted:
-		return idx.Promoted, nil
+		result = idx.Promoted
 	case StatusDismissed:
-		return idx.Dismissed, nil
+		result = idx.Dismissed
 	default: // StatusPending
-		return idx.Pending, nil
+		result = idx.Pending
 	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Updated > result[j].Updated
+	})
+	return result, nil
 }
 
 // IndexMtime returns the modification time (Unix epoch nanoseconds) of

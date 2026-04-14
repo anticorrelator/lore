@@ -55,13 +55,10 @@ if ! command -v gh &>/dev/null; then
   die "gh CLI not found. Install it: https://cli.github.com/"
 fi
 
-# --- Resolve followup directory ---
+# --- Resolve followup directory (checks active then _archive for idempotent retry) ---
 KNOWLEDGE_DIR=$(resolve_knowledge_dir) || die "Could not resolve knowledge directory"
-FOLLOWUP_DIR="$KNOWLEDGE_DIR/_followups/$FOLLOWUP_ID"
-
-if [[ ! -d "$FOLLOWUP_DIR" ]]; then
-  die "Follow-up not found: $FOLLOWUP_ID"
-fi
+FOLLOWUPS_DIR="$KNOWLEDGE_DIR/_followups"
+FOLLOWUP_DIR=$(resolve_followup_dir "$FOLLOWUP_ID") || exit 1
 
 SIDECAR="$FOLLOWUP_DIR/proposed-comments.json"
 

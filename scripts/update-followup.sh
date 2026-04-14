@@ -81,14 +81,33 @@ fi
 
 KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 FOLLOWUPS_DIR="$KNOWLEDGE_DIR/_followups"
-ITEM_DIR="$FOLLOWUPS_DIR/$ID"
 
-if [[ ! -d "$ITEM_DIR" ]]; then
-  if [[ "$JSON_OUTPUT" == true ]]; then
+if [[ "$JSON_OUTPUT" == true ]]; then
+  if ! ITEM_DIR=$(resolve_followup_dir "$ID" 2>/dev/null); then
     json_error "Follow-up not found: $ID"
   fi
-  echo "[followup] Error: Follow-up not found: $ID" >&2
-  exit 1
+else
+  ITEM_DIR=$(resolve_followup_dir "$ID") || exit 1
+fi
+
+# A non-terminal status cannot be applied to an archived item — enforces
+# the location/status invariant (archived items always hold a terminal status).
+IS_ARCHIVED=false
+if [[ "$ITEM_DIR" == "$FOLLOWUPS_DIR/_archive/"* ]]; then
+  IS_ARCHIVED=true
+fi
+
+if [[ "$IS_ARCHIVED" == true && -n "$NEW_STATUS" ]]; then
+  case "$NEW_STATUS" in
+    reviewed|promoted|dismissed) ;;
+    *)
+      if [[ "$JSON_OUTPUT" == true ]]; then
+        json_error "Follow-up '$ID' is archived; unarchive first before setting non-terminal status '$NEW_STATUS'"
+      fi
+      echo "[followup] Error: Follow-up '$ID' is archived; unarchive first before setting non-terminal status '$NEW_STATUS'." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 META="$ITEM_DIR/_meta.json"
@@ -137,8 +156,28 @@ if changed:
         f.write('\n')
 " "$META" "$NEW_STATUS" "$PROMOTED_TO" "$RESOLUTION" "$(timestamp_iso)"
 
-# Update the followup index
-if [[ -x "$SCRIPT_DIR/update-followup-index.sh" ]]; then
+# Auto-archive when a terminal status is written to an item still in the active dir.
+# archive-followup.sh bumps `updated` and rebuilds the index itself, so skip the
+# manual index rebuild below when archiving.
+SHOULD_ARCHIVE=false
+if [[ "$IS_ARCHIVED" == false && -n "$NEW_STATUS" ]]; then
+  case "$NEW_STATUS" in
+    reviewed|promoted|dismissed) SHOULD_ARCHIVE=true ;;
+  esac
+fi
+
+if [[ "$SHOULD_ARCHIVE" == true ]]; then
+  ARCHIVED_META="$FOLLOWUPS_DIR/_archive/$ID/_meta.json"
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    bash "$SCRIPT_DIR/archive-followup.sh" "$ID" >/dev/null 2>&1 || true
+    if [[ -f "$ARCHIVED_META" ]]; then
+      json_output "$(cat "$ARCHIVED_META")"
+    else
+      json_output "$(cat "$META")"
+    fi
+  fi
+  bash "$SCRIPT_DIR/archive-followup.sh" "$ID" >/dev/null 2>&1 || true
+elif [[ -x "$SCRIPT_DIR/update-followup-index.sh" ]]; then
   if [[ "$JSON_OUTPUT" == true ]]; then
     bash "$SCRIPT_DIR/update-followup-index.sh" > /dev/null 2>&1 || true
     json_output "$(cat "$META")"

@@ -47,6 +47,35 @@ func TestListModelItemsMatchesVisibleItems(t *testing.T) {
 	}
 }
 
+func TestListModelClosedFilterOrdersByUpdatedDescending(t *testing.T) {
+	items := []FollowUpItem{
+		{ID: "reviewed-old", Title: "Reviewed Old", Status: "reviewed", Source: "review", Updated: "2026-03-01T00:00:00Z"},
+		{ID: "promoted-new", Title: "Promoted New", Status: "promoted", Source: "manual", Updated: "2026-03-10T00:00:00Z"},
+		{ID: "dismissed-mid", Title: "Dismissed Mid", Status: "dismissed", Source: "bot", Updated: "2026-03-05T00:00:00Z"},
+		{ID: "reviewed-newest", Title: "Reviewed Newest", Status: "reviewed", Source: "review", Updated: "2026-03-15T00:00:00Z"},
+	}
+	// Pre-sort as LoadIndex would deliver them (newest first).
+	sorted := []FollowUpItem{items[3], items[1], items[2], items[0]}
+	m := NewListModel(sorted)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	visible := m.visibleItems()
+	if len(visible) != 4 {
+		t.Fatalf("closed filter: got %d items, want 4", len(visible))
+	}
+	for i := 1; i < len(visible); i++ {
+		if visible[i-1].Updated < visible[i].Updated {
+			t.Errorf("closed-filter visible order not descending by Updated: [%d]=%q < [%d]=%q",
+				i-1, visible[i-1].Updated, i, visible[i].Updated)
+		}
+	}
+	wantOrder := []string{"reviewed-newest", "promoted-new", "dismissed-mid", "reviewed-old"}
+	for i, want := range wantOrder {
+		if visible[i].ID != want {
+			t.Errorf("closed-filter visible[%d].ID = %q, want %q", i, visible[i].ID, want)
+		}
+	}
+}
+
 // --- CurrentID / CurrentItem ---
 
 func TestListModelCurrentIDAtStart(t *testing.T) {

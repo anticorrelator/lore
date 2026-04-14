@@ -47,16 +47,15 @@ fi
 # --- Resolve paths ---
 KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 FOLLOWUPS_DIR="$KNOWLEDGE_DIR/_followups"
-FOLLOWUP_DIR="$FOLLOWUPS_DIR/$FOLLOWUP_ID"
-META_FILE="$FOLLOWUP_DIR/_meta.json"
 
-if [[ ! -d "$FOLLOWUP_DIR" ]]; then
-  if [[ $JSON_MODE -eq 1 ]]; then
+if [[ $JSON_MODE -eq 1 ]]; then
+  if ! FOLLOWUP_DIR=$(resolve_followup_dir "$FOLLOWUP_ID" 2>/dev/null); then
     json_error "Follow-up not found: $FOLLOWUP_ID"
   fi
-  echo "[followup] Error: Follow-up not found: $FOLLOWUP_ID" >&2
-  exit 1
+else
+  FOLLOWUP_DIR=$(resolve_followup_dir "$FOLLOWUP_ID") || exit 1
 fi
+META_FILE="$FOLLOWUP_DIR/_meta.json"
 
 if [[ ! -f "$META_FILE" ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
@@ -117,6 +116,15 @@ with open(meta_path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 PYEOF
+
+  # Auto-archive only if followup is still in the active directory
+  # (canonical update-followup.sh path handles archive itself; this branch doesn't).
+  if [[ -d "$FOLLOWUPS_DIR/$FOLLOWUP_ID" ]]; then
+    "$SCRIPT_DIR/archive-followup.sh" "$FOLLOWUP_ID" >/dev/null 2>/dev/null || true
+    # Re-resolve: followup may have moved to _archive/
+    FOLLOWUP_DIR=$(resolve_followup_dir "$FOLLOWUP_ID" 2>/dev/null) || FOLLOWUP_DIR="$FOLLOWUPS_DIR/_archive/$FOLLOWUP_ID"
+    META_FILE="$FOLLOWUP_DIR/_meta.json"
+  fi
 fi
 
 # --- Rebuild follow-up index ---

@@ -82,6 +82,33 @@ resolve_knowledge_dir() {
   "$LORE_LIB_DIR/resolve-repo.sh"
 }
 
+# --- resolve_followup_dir ---
+# Resolve the on-disk directory for a followup id, checking active then archive.
+# Requires FOLLOWUPS_DIR to be set by the caller (typically "$KNOWLEDGE_DIR/_followups").
+# Echoes the absolute path on stdout; on miss, writes a diagnostic to stderr and returns non-zero.
+# Usage: dir=$(resolve_followup_dir "$id") || exit 1
+resolve_followup_dir() {
+  local id="$1"
+  if [[ -z "$id" ]]; then
+    echo "[followup] Error: resolve_followup_dir requires an id" >&2
+    return 1
+  fi
+  if [[ -z "${FOLLOWUPS_DIR:-}" ]]; then
+    echo "[followup] Error: FOLLOWUPS_DIR is not set" >&2
+    return 1
+  fi
+  if [[ -d "$FOLLOWUPS_DIR/$id" ]]; then
+    echo "$FOLLOWUPS_DIR/$id"
+    return 0
+  fi
+  if [[ -d "$FOLLOWUPS_DIR/_archive/$id" ]]; then
+    echo "$FOLLOWUPS_DIR/_archive/$id"
+    return 0
+  fi
+  echo "[followup] Error: followup '$id' not found in $FOLLOWUPS_DIR or $FOLLOWUPS_DIR/_archive" >&2
+  return 1
+}
+
 # --- get_git_branch ---
 # Get the current git branch name, or empty string if not in a git repo.
 # Usage: branch=$(get_git_branch)

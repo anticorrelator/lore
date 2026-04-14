@@ -42,14 +42,13 @@ fi
 # --- Resolve paths ---
 KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 FOLLOWUPS_DIR="$KNOWLEDGE_DIR/_followups"
-FOLLOWUP_DIR="$FOLLOWUPS_DIR/$FOLLOWUP_ID"
 
-if [[ ! -d "$FOLLOWUP_DIR" ]]; then
-  if [[ $JSON_MODE -eq 1 ]]; then
+if [[ $JSON_MODE -eq 1 ]]; then
+  if ! FOLLOWUP_DIR=$(resolve_followup_dir "$FOLLOWUP_ID" 2>/dev/null); then
     json_error "Follow-up not found: $FOLLOWUP_ID"
   fi
-  echo "[followup] Error: Follow-up not found: $FOLLOWUP_ID" >&2
-  exit 1
+else
+  FOLLOWUP_DIR=$(resolve_followup_dir "$FOLLOWUP_ID") || exit 1
 fi
 
 # Get title before deletion (for output)

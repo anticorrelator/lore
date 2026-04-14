@@ -46,14 +46,13 @@ KNOWLEDGE_DIR=$(resolve_knowledge_dir) || {
 }
 
 FOLLOWUPS_DIR="$KNOWLEDGE_DIR/_followups"
-ITEM_DIR="$FOLLOWUPS_DIR/$ID"
 
-if [[ ! -d "$ITEM_DIR" ]]; then
-  if [[ "$JSON_OUTPUT" == true ]]; then
+if [[ "$JSON_OUTPUT" == true ]]; then
+  if ! ITEM_DIR=$(resolve_followup_dir "$ID" 2>/dev/null); then
     json_error "Follow-up not found: $ID"
   fi
-  echo "[followup] Error: Follow-up not found: $ID" >&2
-  exit 1
+else
+  ITEM_DIR=$(resolve_followup_dir "$ID") || exit 1
 fi
 
 META="$ITEM_DIR/_meta.json"

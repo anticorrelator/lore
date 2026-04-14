@@ -154,6 +154,8 @@ Subcommands:
   update       Update a follow-up's status or add resolution notes
   promote      Promote a follow-up to a work item
   dismiss      Dismiss a follow-up with an optional reason
+  archive      Archive a terminal-status follow-up to _archive/
+  unarchive    Restore an archived follow-up to the active set
   delete       Permanently delete a follow-up
   post-review  Post a proposed review comment to GitHub
 
@@ -728,6 +730,12 @@ cmd_followup() {
       ;;
     dismiss)
       "$SCRIPTS_DIR/dismiss-followup.sh" "$@"
+      ;;
+    archive)
+      "$SCRIPTS_DIR/archive-followup.sh" "$@"
+      ;;
+    unarchive)
+      "$SCRIPTS_DIR/unarchive-followup.sh" "$@"
       ;;
     delete)
       "$SCRIPTS_DIR/delete-followup.sh" "$@"
