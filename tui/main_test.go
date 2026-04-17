@@ -438,8 +438,8 @@ func TestBuildPaneConfigStateFollowUpsEmptyList(t *testing.T) {
 	if cfg.state != stateFollowUps {
 		t.Errorf("state = %v, want stateFollowUps", cfg.state)
 	}
-	if cfg.listTitle != "Follow-ups" {
-		t.Errorf("listTitle = %q, want %q", cfg.listTitle, "Follow-ups")
+	if cfg.listTitle != "Open" {
+		t.Errorf("listTitle = %q, want %q", cfg.listTitle, "Open")
 	}
 	if cfg.detailTitle != "Detail" {
 		t.Errorf("detailTitle = %q, want %q", cfg.detailTitle, "Detail")
@@ -1424,6 +1424,15 @@ func followupModelWithEditingActive(t *testing.T) model {
 	next, _ := m.Update(followup.DetailLoadedMsg{ID: "test-fu", Detail: detail})
 	m = next.(model)
 
+	// Activate the Comments tab so 'e' routes to the review card editor.
+	for i := 0; i < 10; i++ {
+		if m.followupDetail.ActiveTab() == followup.TabComments {
+			break
+		}
+		fd, _ := m.followupDetail.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m.followupDetail = fd
+	}
+
 	// Send 'e' to enter edit mode on the first inline comment.
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	m = next.(model)
@@ -1497,6 +1506,14 @@ func followupModelWithReview(t *testing.T, eventType string, selectedCount int) 
 	next, _ := m.Update(followup.DetailLoadedMsg{ID: "fu-1", Detail: detail})
 	m = next.(model)
 
+	// Activate the Comments tab (TabFinding is the default now).
+	for i := 0; i < 10; i++ {
+		if m.followupDetail.ActiveTab() == followup.TabComments {
+			break
+		}
+		fd, _ := m.followupDetail.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m.followupDetail = fd
+	}
 	if m.followupDetail.ActiveTab() != followup.TabComments {
 		t.Fatalf("setup: expected TabComments to be active, got %v", m.followupDetail.ActiveTab())
 	}
@@ -1632,6 +1649,15 @@ func followupModelWithLensFindings(t *testing.T, selectAll bool) model {
 	m.followupDetail.SetID("fu-lens")
 	next, _ := m.Update(followup.DetailLoadedMsg{ID: "fu-lens", Detail: detail})
 	m = next.(model)
+
+	// Activate the Triage tab (TabFinding is the default now).
+	for i := 0; i < 10; i++ {
+		if m.followupDetail.ActiveTab() == followup.TabTriage {
+			break
+		}
+		fd, _ := m.followupDetail.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m.followupDetail = fd
+	}
 	if m.followupDetail.ActiveTab() != followup.TabTriage {
 		t.Fatalf("setup: expected TabTriage to be active, got %v", m.followupDetail.ActiveTab())
 	}

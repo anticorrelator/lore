@@ -18,6 +18,21 @@ import (
 	"github.com/creack/pty"
 )
 
+// resolveFollowupDir mirrors followup.ResolveDir / scripts/lib.sh::resolve_followup_dir,
+// preferring the active tier and falling back to _followups/_archive/. Inlined here to
+// avoid an import cycle between work and followup.
+func resolveFollowupDir(knowledgeDir, id string) (string, bool) {
+	active := filepath.Join(knowledgeDir, "_followups", id)
+	if info, err := os.Stat(active); err == nil && info.IsDir() {
+		return active, true
+	}
+	archived := filepath.Join(knowledgeDir, "_followups", "_archive", id)
+	if info, err := os.Stat(archived); err == nil && info.IsDir() {
+		return archived, true
+	}
+	return "", false
+}
+
 // NeedsInputChangedMsg is sent when a spec panel's needsInput state changes.
 type NeedsInputChangedMsg struct {
 	Slug       string
@@ -770,13 +785,15 @@ func loadFollowupContext(id, knowledgeDir string, findingIndex int) string {
 
 	// Finding-scoped context: load lens-findings.json and append the specific finding.
 	if findingIndex >= 0 {
-		sidecarPath := filepath.Join(knowledgeDir, "_followups", id, "lens-findings.json")
-		sidecarBytes, err := os.ReadFile(sidecarPath)
-		if err == nil {
-			if scoped := appendFindingContext(b.String(), sidecarBytes, findingIndex); scoped != "" {
-				return scoped
+		if itemDir, ok := resolveFollowupDir(knowledgeDir, id); ok {
+			sidecarPath := filepath.Join(itemDir, "lens-findings.json")
+			sidecarBytes, err := os.ReadFile(sidecarPath)
+			if err == nil {
+				if scoped := appendFindingContext(b.String(), sidecarBytes, findingIndex); scoped != "" {
+					return scoped
+				}
+				// findingIndex out of range or JSON error — fall through to full-followup context.
 			}
-			// findingIndex out of range or JSON error — fall through to full-followup context.
 		}
 	}
 

@@ -100,28 +100,36 @@ func TestMergeStatusJSONParsing(t *testing.T) {
 
 func TestMergeStatusClassification(t *testing.T) {
 	tests := []struct {
-		mergeable       string
+		state            string
+		mergeable        string
 		mergeStateStatus string
-		wantClass       MergeClassification
-		wantLabel       string
+		wantClass        MergeClassification
+		wantLabel        string
 	}{
-		{"MERGEABLE", "CLEAN", MergeOK, "mergeable"},
-		{"MERGEABLE", "BEHIND", MergeWarn, "behind"},
-		{"CONFLICTING", "DIRTY", MergeBlocked, "conflicts"},
-		{"CONFLICTING", "CLEAN", MergeBlocked, "conflicts"},
-		{"MERGEABLE", "DIRTY", MergeBlocked, "conflicts"},
-		{"UNKNOWN", "UNKNOWN", MergeUnknown, "unknown"},
-		{"MERGEABLE", "BLOCKED", MergeUnknown, "unknown"},
-		{"MERGEABLE", "UNSTABLE", MergeUnknown, "unknown"},
+		// Open PRs collapse into two buckets: operative ("open") or blocked ("conflicts").
+		// BEHIND/BLOCKED/UNSTABLE/UNKNOWN all present as "open" because the review is still
+		// actionable — the check state is not the reviewer's concern.
+		{"OPEN", "MERGEABLE", "CLEAN", MergeOK, "open"},
+		{"OPEN", "MERGEABLE", "BEHIND", MergeOK, "open"},
+		{"OPEN", "MERGEABLE", "UNSTABLE", MergeOK, "open"},
+		{"OPEN", "MERGEABLE", "BLOCKED", MergeOK, "open"},
+		{"OPEN", "UNKNOWN", "UNKNOWN", MergeOK, "open"},
+		{"OPEN", "CONFLICTING", "DIRTY", MergeBlocked, "conflicts"},
+		{"OPEN", "CONFLICTING", "CLEAN", MergeBlocked, "conflicts"},
+		{"OPEN", "MERGEABLE", "DIRTY", MergeBlocked, "conflicts"},
+
+		// Terminal PR states — review no longer operative; rendered dim via MergeUnknown.
+		{"MERGED", "UNKNOWN", "UNKNOWN", MergeUnknown, "merged"},
+		{"CLOSED", "UNKNOWN", "UNKNOWN", MergeUnknown, "closed"},
 	}
 
 	for _, tt := range tests {
-		s := MergeStatus{Mergeable: tt.mergeable, MergeStateStatus: tt.mergeStateStatus}
+		s := MergeStatus{State: tt.state, Mergeable: tt.mergeable, MergeStateStatus: tt.mergeStateStatus}
 		if got := s.Classification(); got != tt.wantClass {
-			t.Errorf("Classification(%q, %q) = %v, want %v", tt.mergeable, tt.mergeStateStatus, got, tt.wantClass)
+			t.Errorf("Classification(%q, %q, %q) = %v, want %v", tt.state, tt.mergeable, tt.mergeStateStatus, got, tt.wantClass)
 		}
 		if got := s.Label(); got != tt.wantLabel {
-			t.Errorf("Label(%q, %q) = %q, want %q", tt.mergeable, tt.mergeStateStatus, got, tt.wantLabel)
+			t.Errorf("Label(%q, %q, %q) = %q, want %q", tt.state, tt.mergeable, tt.mergeStateStatus, got, tt.wantLabel)
 		}
 	}
 }

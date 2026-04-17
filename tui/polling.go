@@ -120,7 +120,10 @@ func checkFollowupIndexMtime(knowledgeDir string) tea.Cmd {
 // and sends followupDetailMtimeCheckedMsg with the most recent mtime.
 func checkFollowupDetailMtime(knowledgeDir, id string) tea.Cmd {
 	return func() tea.Msg {
-		dir := filepath.Join(knowledgeDir, "_followups", id)
+		dir, err := followup.ResolveDir(knowledgeDir, id)
+		if err != nil {
+			return followupDetailMtimeCheckedMsg{id: id, err: err}
+		}
 		files := []string{"_meta.json", "finding.md", "lens-findings.json"}
 		var maxMtime time.Time
 		for _, f := range files {

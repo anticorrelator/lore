@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/anticorrelator/lore/tui/internal/gh"
 	"github.com/anticorrelator/lore/tui/internal/render"
 )
 
@@ -194,7 +195,10 @@ type followUpMeta struct {
 // LoadFollowUpDetail reads a single follow-up's _meta.json and finding.md
 // from disk and returns a FollowUpDetail.
 func LoadFollowUpDetail(knowledgeDir, id string) (*FollowUpDetail, error) {
-	itemDir := filepath.Join(knowledgeDir, "_followups", id)
+	itemDir, err := ResolveDir(knowledgeDir, id)
+	if err != nil {
+		return nil, fmt.Errorf("reading _meta.json for %s: %w", id, err)
+	}
 	metaPath := filepath.Join(itemDir, "_meta.json")
 
 	metaBytes, err := os.ReadFile(metaPath)
@@ -335,6 +339,9 @@ type DetailModel struct {
 	height                int
 	mergeStatusRequestSeq uint64                                                                   // incremented on each dispatch; used to discard stale responses
 	fetchMergeStatusCmd   func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd // injectable for tests
+	mergeStatus           *gh.MergeStatus
+	mergeStatusLoading    bool
+	mergeStatusErr        error
 }
 
 // NewDetailModel creates a DetailModel. Call LoadDetail to populate it.
@@ -403,10 +410,14 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		if msg.FollowupID != m.id || msg.RequestSeq != m.mergeStatusRequestSeq {
 			return m, nil
 		}
-		if m.reviewCards != nil {
-			rc := *m.reviewCards
-			rc, _ = rc.Update(msg)
-			m.reviewCards = &rc
+		m.mergeStatusLoading = false
+		if msg.Err != nil {
+			m.mergeStatusErr = msg.Err
+			m.mergeStatus = nil
+		} else {
+			s := msg.Status
+			m.mergeStatus = &s
+			m.mergeStatusErr = nil
 		}
 		return m, nil
 
@@ -421,6 +432,11 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 				cw := m.contentWidth()
 				ch := m.contentHeight()
 
+				// Reset merge-status state on reload; re-dispatched below when PR coords exist.
+				m.mergeStatus = nil
+				m.mergeStatusErr = nil
+				m.mergeStatusLoading = false
+
 				// Initialize ReviewCardsModel when sidecar is present.
 				if m.detail.ProposedComments != nil {
 					rc := NewReviewCardsModel(m.knowledgeDir, m.id, m.detail.ProposedComments)
@@ -433,6 +449,7 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 					pr := m.detail.ProposedComments.PR
 					if pr > 0 && owner != "" && repo != "" {
 						m.mergeStatusRequestSeq++
+						m.mergeStatusLoading = true
 						fetchCmd = m.fetchMergeStatusCmd(m.id, m.mergeStatusRequestSeq, owner, repo, pr)
 					}
 				} else {
@@ -852,7 +869,36 @@ func (m DetailModel) renderTabBar() string {
 		}
 	}
 
-	return "  " + strings.Join(parts, " ")
+	bar := "  " + strings.Join(parts, " ")
+	if badge := m.renderMergeBadge(); badge != "" {
+		bar += "   " + badge
+	}
+	return bar
+}
+
+// renderMergeBadge returns the merge-status badge shown next to the tab bar
+// when PR coordinates drove a fetch. Empty when no fetch was dispatched.
+func (m DetailModel) renderMergeBadge() string {
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	switch {
+	case m.mergeStatusLoading:
+		return dimStyle.Render("merge: checking…")
+	case m.mergeStatusErr != nil:
+		return dimStyle.Render("merge: unavailable")
+	case m.mergeStatus != nil:
+		label := "merge: " + m.mergeStatus.Label()
+		switch m.mergeStatus.Classification() {
+		case gh.MergeOK:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(label)
+		case gh.MergeBlocked:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(label)
+		case gh.MergeWarn:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(label)
+		default:
+			return dimStyle.Render(label)
+		}
+	}
+	return ""
 }
 
 func (m DetailModel) renderFinding() string {

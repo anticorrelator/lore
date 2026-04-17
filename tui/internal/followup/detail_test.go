@@ -2,6 +2,7 @@ package followup
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1874,7 +1875,7 @@ func TestDetailModelDispatchesMergeFetchOnDetailLoaded(t *testing.T) {
 		},
 	}
 
-	_, cmd := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+	updated, cmd := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
 	// The stub must have been called.
 	if capturedFollowupID != id {
@@ -1895,6 +1896,118 @@ func TestDetailModelDispatchesMergeFetchOnDetailLoaded(t *testing.T) {
 	// The returned Cmd must be non-nil.
 	if cmd == nil {
 		t.Error("returned tea.Cmd should be non-nil when PR>0 and valid coordinates")
+	}
+	if !updated.mergeStatusLoading {
+		t.Error("mergeStatusLoading should be true after dispatching fetch")
+	}
+}
+
+// TestRenderTabBarShowsMergeBadgeWhileLoading verifies the tab bar shows the
+// "checking…" badge while the fetch is in flight — visible from any tab.
+func TestRenderTabBarShowsMergeBadgeWhileLoading(t *testing.T) {
+	stub := func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd {
+		return func() tea.Msg { return nil }
+	}
+	m, _ := testDetailWithPRSidecar(t, stub)
+
+	bar := m.renderTabBar()
+	if !strings.Contains(bar, "merge:") {
+		t.Errorf("tab bar should contain 'merge:' while loading, got: %q", bar)
+	}
+	if !strings.Contains(bar, "checking") {
+		t.Errorf("tab bar should contain 'checking' while loading, got: %q", bar)
+	}
+}
+
+// TestRenderTabBarShowsLoadedMergeBadge verifies the tab bar shows the
+// classification label once a MergeStatusLoadedMsg arrives.
+func TestRenderTabBarShowsLoadedMergeBadge(t *testing.T) {
+	cases := []struct {
+		state            string
+		mergeable        string
+		mergeStateStatus string
+		wantLabel        string
+	}{
+		{"OPEN", "MERGEABLE", "CLEAN", "open"},
+		{"OPEN", "MERGEABLE", "BEHIND", "open"},
+		{"OPEN", "CONFLICTING", "DIRTY", "conflicts"},
+		{"MERGED", "UNKNOWN", "UNKNOWN", "merged"},
+		{"CLOSED", "UNKNOWN", "UNKNOWN", "closed"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.state+"/"+tc.mergeable+"/"+tc.mergeStateStatus, func(t *testing.T) {
+			stub := func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd {
+				return nil
+			}
+			m, id := testDetailWithPRSidecar(t, stub)
+
+			m, _ = m.Update(MergeStatusLoadedMsg{
+				FollowupID: id,
+				RequestSeq: m.mergeStatusRequestSeq,
+				Status:     gh.MergeStatus{State: tc.state, Mergeable: tc.mergeable, MergeStateStatus: tc.mergeStateStatus},
+			})
+
+			bar := m.renderTabBar()
+			if !strings.Contains(bar, "merge:") {
+				t.Errorf("tab bar should contain 'merge:', got: %q", bar)
+			}
+			if !strings.Contains(bar, tc.wantLabel) {
+				t.Errorf("tab bar should contain label %q, got: %q", tc.wantLabel, bar)
+			}
+			if strings.Contains(bar, "checking") {
+				t.Errorf("tab bar should not contain 'checking' after load, got: %q", bar)
+			}
+		})
+	}
+}
+
+// TestRenderTabBarShowsMergeBadgeOnError verifies the tab bar shows the
+// "unavailable" badge when the fetch errors out.
+func TestRenderTabBarShowsMergeBadgeOnError(t *testing.T) {
+	stub := func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd {
+		return nil
+	}
+	m, id := testDetailWithPRSidecar(t, stub)
+
+	m, _ = m.Update(MergeStatusLoadedMsg{
+		FollowupID: id,
+		RequestSeq: m.mergeStatusRequestSeq,
+		Err:        fmt.Errorf("gh: network error"),
+	})
+
+	bar := m.renderTabBar()
+	if !strings.Contains(bar, "merge:") {
+		t.Errorf("tab bar should contain 'merge:' on error, got: %q", bar)
+	}
+	if !strings.Contains(bar, "unavailable") {
+		t.Errorf("tab bar should contain 'unavailable' on error, got: %q", bar)
+	}
+}
+
+// TestRenderTabBarNoMergeBadgeWithoutPR verifies the tab bar omits the badge
+// when no PR coordinates were provided (fetch never dispatched).
+func TestRenderTabBarNoMergeBadgeWithoutPR(t *testing.T) {
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+	id := "no-pr"
+	m.SetID(id)
+	m.fetchMergeStatusCmd = func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd {
+		return nil
+	}
+
+	detail := &FollowUpDetail{
+		ID: id, Title: "No PR", Status: "open", Source: "test",
+		FindingContent:   "# Finding",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+	}
+	m, _ = m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+
+	bar := m.renderTabBar()
+	if strings.Contains(bar, "merge:") {
+		t.Errorf("tab bar should not contain 'merge:' without PR coords, got: %q", bar)
 	}
 }
 
@@ -1953,12 +2066,8 @@ func TestDetailModelDiscardsMergeStatusWrongFollowupID(t *testing.T) {
 	}
 	updated, _ := m.Update(staleMsg)
 
-	// reviewCards.mergeStatus should remain nil — message was discarded.
-	if updated.reviewCards == nil {
-		t.Fatal("reviewCards should be non-nil after DetailLoadedMsg")
-	}
-	if updated.reviewCards.mergeStatus != nil {
-		t.Errorf("mergeStatus = %+v, want nil (stale followupID should be discarded)", updated.reviewCards.mergeStatus)
+	if updated.mergeStatus != nil {
+		t.Errorf("mergeStatus = %+v, want nil (stale followupID should be discarded)", updated.mergeStatus)
 	}
 	_ = id
 }
@@ -1983,17 +2092,13 @@ func TestDetailModelDiscardsMergeStatusStaleRequestSeq(t *testing.T) {
 	}
 	updated, _ := m.Update(staleMsg)
 
-	// reviewCards.mergeStatus should remain nil — stale response discarded.
-	if updated.reviewCards == nil {
-		t.Fatal("reviewCards should be non-nil after DetailLoadedMsg")
-	}
-	if updated.reviewCards.mergeStatus != nil {
-		t.Errorf("mergeStatus = %+v, want nil (stale requestSeq should be discarded)", updated.reviewCards.mergeStatus)
+	if updated.mergeStatus != nil {
+		t.Errorf("mergeStatus = %+v, want nil (stale requestSeq should be discarded)", updated.mergeStatus)
 	}
 }
 
-func TestDetailModelForwardsMergeStatusWhenCurrent(t *testing.T) {
-	// A MergeStatusLoadedMsg with matching FollowupID and RequestSeq is forwarded to reviewCards.
+func TestDetailModelAppliesMergeStatusWhenCurrent(t *testing.T) {
+	// A MergeStatusLoadedMsg with matching FollowupID and RequestSeq updates DetailModel.
 	stub := func(followupID string, requestSeq uint64, owner, repo string, pr int) tea.Cmd {
 		return nil
 	}
@@ -2009,16 +2114,13 @@ func TestDetailModelForwardsMergeStatusWhenCurrent(t *testing.T) {
 	}
 	updated, _ := m.Update(msg)
 
-	if updated.reviewCards == nil {
-		t.Fatal("reviewCards should be non-nil")
+	if updated.mergeStatus == nil {
+		t.Fatal("mergeStatus should be non-nil after receiving current message")
 	}
-	if updated.reviewCards.mergeStatus == nil {
-		t.Fatal("mergeStatus should be non-nil after forwarding current message")
+	if updated.mergeStatus.Mergeable != "MERGEABLE" {
+		t.Errorf("mergeStatus.Mergeable = %q, want %q", updated.mergeStatus.Mergeable, "MERGEABLE")
 	}
-	if updated.reviewCards.mergeStatus.Mergeable != "MERGEABLE" {
-		t.Errorf("mergeStatus.Mergeable = %q, want %q", updated.reviewCards.mergeStatus.Mergeable, "MERGEABLE")
-	}
-	if updated.reviewCards.mergeStatusLoading {
+	if updated.mergeStatusLoading {
 		t.Error("mergeStatusLoading should be false after receiving loaded message")
 	}
 }

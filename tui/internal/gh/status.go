@@ -69,48 +69,52 @@ const (
 	MergeUnknown                            // UNKNOWN or unrecognized
 )
 
-// MergeStatus holds the merge-readiness fields returned by `gh pr view --json mergeable,mergeStateStatus`.
-// Both fields are plain strings matching the GraphQL enum values.
+// MergeStatus holds the merge-readiness fields returned by `gh pr view
+// --json state,mergeable,mergeStateStatus`. All fields are plain strings
+// matching the GraphQL enum values. State is consulted first so that merged
+// and closed PRs do not fall into the unknown bucket (GitHub reports
+// mergeable=UNKNOWN/mergeStateStatus=UNKNOWN once a PR is no longer open).
 type MergeStatus struct {
-	Mergeable       string `json:"mergeable"`
+	State            string `json:"state"`
+	Mergeable        string `json:"mergeable"`
 	MergeStateStatus string `json:"mergeStateStatus"`
 }
 
 // Classification returns the normalized MergeClassification derived from the
-// joint (Mergeable, MergeStateStatus) pair.
+// (State, Mergeable, MergeStateStatus) triple. The model collapses to three
+// operatively-meaningful buckets: OK for an open PR a reviewer can act on,
+// Blocked for an open PR whose conflicts prevent review progress, and Unknown
+// (rendered dim) for terminal states where the review is no longer operative.
 func (s MergeStatus) Classification() MergeClassification {
+	if s.State == "MERGED" || s.State == "CLOSED" {
+		return MergeUnknown
+	}
 	if s.Mergeable == "CONFLICTING" || s.MergeStateStatus == "DIRTY" {
 		return MergeBlocked
 	}
-	if s.MergeStateStatus == "BEHIND" {
-		return MergeWarn
-	}
-	if s.Mergeable == "MERGEABLE" && s.MergeStateStatus == "CLEAN" {
-		return MergeOK
-	}
-	return MergeUnknown
+	return MergeOK
 }
 
 // Label returns a short human-readable string describing the merge status.
 func (s MergeStatus) Label() string {
-	switch s.Classification() {
-	case MergeOK:
-		return "mergeable"
-	case MergeWarn:
-		return "behind"
-	case MergeBlocked:
-		return "conflicts"
-	default:
-		return "unknown"
+	switch s.State {
+	case "MERGED":
+		return "merged"
+	case "CLOSED":
+		return "closed"
 	}
+	if s.Mergeable == "CONFLICTING" || s.MergeStateStatus == "DIRTY" {
+		return "conflicts"
+	}
+	return "open"
 }
 
-// LoadMergeStatus runs `gh pr view <pr> --repo <owner>/<repo> --json mergeable,mergeStateStatus`
+// LoadMergeStatus runs `gh pr view <pr> --repo <owner>/<repo> --json state,mergeable,mergeStateStatus`
 // and returns the parsed MergeStatus. Follows the LoadPRStatus convention.
 func LoadMergeStatus(ctx context.Context, owner, repo string, pr int) (MergeStatus, error) {
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view", fmt.Sprintf("%d", pr),
 		"--repo", fmt.Sprintf("%s/%s", owner, repo),
-		"--json", "mergeable,mergeStateStatus",
+		"--json", "state,mergeable,mergeStateStatus",
 	)
 
 	out, err := cmd.Output()

@@ -2,7 +2,7 @@
 name: spec
 description: "Create a technical specification — `/spec short` for single-pass plans, `/spec` for full team-based investigation"
 user_invocable: true
-argument_description: "[short] [--yes] [--without-verification] [name or description] — existing work item name, or a freeform description to start from"
+argument_description: "[short] [--yes] [--without-verification] [--model opus|sonnet] [name or description] — existing work item name, or a freeform description to start from"
 ---
 
 # /spec Skill
@@ -24,7 +24,7 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
 ## Step 1: Parse and resolve (both modes)
 
-1. Parse arguments: if first arg after `/spec` is `short`, use **Short Flow**; otherwise **Full Flow**. If `--yes` is present, skip all interactive confirmation gates (auto-proceed through investigation plan confirmation, strategy gates, confirm understanding, and task review). If `--without-verification` is present, skip Step 4b (assertion verification). The remaining text is the **input**.
+1. Parse arguments: if first arg after `/spec` is `short`, use **Short Flow**; otherwise **Full Flow**. If `--yes` is present, skip all interactive confirmation gates (auto-proceed through investigation plan confirmation, strategy gates, confirm understanding, and task review). If `--without-verification` is present, skip Step 4b (assertion verification). If `--model` is present (accepts `opus` or `sonnet`, default `sonnet`), use it as `<selected-model>` for every agent spawn in this flow; otherwise `<selected-model>` is `sonnet`. The remaining text is the **input**.
 2. Try to resolve input as an existing work item (fuzzy match or branch inference, same algorithm as `/work`, including archive fallback)
    - **If resolved item is tagged `[archived]`:** Warn the user: "This work item is archived. Proceed anyway?" Wait for explicit confirmation before continuing.
 3. **If resolved** → load the work item:
@@ -393,7 +393,7 @@ Proceed, or adjust? (You can request changes — e.g., split a question, drop an
          ```
          Task:
            subagent_type: "general-purpose"
-           model: "sonnet"
+           model: "<selected-model>"
            team_name: "spec-<slug>"
            name: "<skill-name>-advisor"
            mode: "bypassPermissions"
@@ -421,7 +421,7 @@ Proceed, or adjust? (You can request changes — e.g., split a question, drop an
    ```
    Task:
      subagent_type: "Explore"
-     model: "sonnet"
+     model: "<selected-model>"
      team_name: "spec-<slug>"
      name: "researcher-N"
      prompt: |
@@ -458,7 +458,7 @@ After all investigations are complete, verify the assertions researchers reporte
    ```
    Task:
      subagent_type: "Explore"
-     model: "sonnet"
+     model: "<selected-model>"
      prompt: |
        <contents of scripts/agent-protocols/verifier-verdict.md>
 

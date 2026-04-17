@@ -2,7 +2,7 @@
 name: bootstrap
 description: "Bootstrap a knowledge store by exploring codebase architecture — use when starting with a new or empty project, seeding knowledge, or running /bootstrap"
 user_invocable: true
-argument_description: "Optional: directory paths to scope (e.g., src/auth src/api). Without args, scopes entire repo."
+argument_description: "[--model opus|sonnet] [directory paths] — optional directory paths to scope (e.g., src/auth src/api); without paths, scopes entire repo"
 ---
 
 # /bootstrap Skill
@@ -20,7 +20,7 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
 Run the scoping script to identify domains for exploration.
 
-1. Parse arguments: if directory paths were provided (e.g., `/bootstrap src/auth src/api`), pass them to the script. Otherwise, scope the entire repo.
+1. Parse arguments: extract optional `--model` flag (accepts `opus` or `sonnet`, default `sonnet`) and use it as `<selected-model>` for every agent spawn below. If directory paths were provided (e.g., `/bootstrap src/auth src/api`), pass them to the script. Otherwise, scope the entire repo.
 2. Run scoping:
    ```bash
    lore bootstrap scope [optional dir args...]
@@ -111,7 +111,7 @@ Spawn Explore agents to investigate each domain in parallel.
    ```
    Task:
      subagent_type: "general-purpose"
-     model: "sonnet"
+     model: "<selected-model>"
      team_name: "bootstrap-<SLUG>"
      name: "explorer-N"
      mode: "bypassPermissions"

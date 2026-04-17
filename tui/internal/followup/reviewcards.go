@@ -109,7 +109,10 @@ const (
 // WriteSidecarCmd writes the full ProposedReview back to proposed-comments.json.
 func WriteSidecarCmd(knowledgeDir, followupID string, review *ProposedReview) tea.Cmd {
 	return func() tea.Msg {
-		itemDir := filepath.Join(knowledgeDir, "_followups", followupID)
+		itemDir, err := ResolveDir(knowledgeDir, followupID)
+		if err != nil {
+			return WriteSidecarMsg{Err: fmt.Errorf("resolving followup dir: %w", err)}
+		}
 		data, err := json.MarshalIndent(review, "", "  ")
 		if err != nil {
 			return WriteSidecarMsg{Err: fmt.Errorf("marshaling sidecar: %w", err)}
@@ -139,9 +142,6 @@ type ReviewCardsModel struct {
 	editing             bool                 // true while inline textarea edit is active (lowercase e)
 	editInput           textarea.Model       // textarea for inline body editing
 	editIdx             int                  // backing index of the comment being edited inline
-	mergeStatus         *gh.MergeStatus      // nil until fetch completes
-	mergeStatusLoading  bool                 // true while fetch is in flight
-	mergeStatusErr      error                // set if fetch failed
 	generatingSummary   bool                 // true while `lore followup summarize` is in flight
 }
 
@@ -158,9 +158,6 @@ func NewReviewCardsModel(knowledgeDir, followupID string, review *ProposedReview
 		m.comments = review.Comments
 		if review.ReviewEvent == "" {
 			review.ReviewEvent = "COMMENT"
-		}
-		if review.PR > 0 && review.Owner != "" && review.Repo != "" {
-			m.mergeStatusLoading = true
 		}
 	}
 	return m
@@ -245,15 +242,6 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 				w = 20
 			}
 			m.editInput.SetWidth(w)
-		}
-
-	case MergeStatusLoadedMsg:
-		m.mergeStatusLoading = false
-		if msg.Err != nil {
-			m.mergeStatusErr = msg.Err
-		} else {
-			s := msg.Status
-			m.mergeStatus = &s
 		}
 
 	case WriteSidecarMsg:
@@ -477,24 +465,9 @@ func (m ReviewCardsModel) View() string {
 
 	var b strings.Builder
 
-	// Header: selection count + optional merge badge
+	// Header: selection count. Merge-status badge is rendered by DetailModel
+	// next to the tab bar so it is visible from any tab.
 	b.WriteString(dimStyle.Render(fmt.Sprintf("  %d/%d selected", m.SelectedCount(), m.TotalCount())))
-	if m.mergeStatusLoading {
-		b.WriteString(dimStyle.Render(" · merge: checking…"))
-	} else if m.mergeStatusErr != nil {
-		b.WriteString(dimStyle.Render(" · merge: unavailable"))
-	} else if m.mergeStatus != nil {
-		switch m.mergeStatus.Classification() {
-		case gh.MergeOK:
-			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(" · merge: " + m.mergeStatus.Label()))
-		case gh.MergeBlocked:
-			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(" · merge: " + m.mergeStatus.Label()))
-		case gh.MergeWarn:
-			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(" · merge: " + m.mergeStatus.Label()))
-		default:
-			b.WriteString(dimStyle.Render(" · merge: " + m.mergeStatus.Label()))
-		}
-	}
 	b.WriteString("\n\n")
 
 	// PR Review box — groups event type radio buttons and general comment card

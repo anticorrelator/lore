@@ -9,8 +9,6 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-
-	"github.com/anticorrelator/lore/tui/internal/gh"
 )
 
 func testReview() *ProposedReview {
@@ -1297,142 +1295,22 @@ func TestReviewCardsViewShowsLensAndConfidence(t *testing.T) {
 	}
 }
 
-// TestCommentsHeaderWithoutMergeStatus verifies that when the review has no
-// PR metadata (PR == 0) or when review is nil, the header renders exactly the
-// selection count with no merge segment.
-func TestCommentsHeaderWithoutMergeStatus(t *testing.T) {
-	// PR == 0 — no fetch should be dispatched and no badge shown.
-	reviewNoPR := &ProposedReview{
-		PR:    0,
-		Owner: "anticorrelator",
-		Repo:  "lore",
-		Comments: []ProposedComment{
-			{ID: "c1", Path: "a.go", Line: 1, Body: "x", Selected: true, Severity: "low"},
-		},
-	}
-	m := NewReviewCardsModel("", "fid", reviewNoPR)
-	m.width = 80
-	m.height = 40
-
-	out := m.View()
-
-	if !strings.Contains(out, "1/1 selected") {
-		t.Errorf("header should contain '1/1 selected', got: %q", out)
-	}
-	if strings.Contains(out, "merge:") {
-		t.Errorf("header should not contain merge segment when PR == 0, got: %q", out)
-	}
-	if m.mergeStatusLoading {
-		t.Error("mergeStatusLoading should be false when PR == 0")
-	}
-}
-
-// TestCommentsHeaderLoadingMergeStatus verifies that while the fetch is in
-// flight (mergeStatusLoading == true), the header appends "checking…".
-func TestCommentsHeaderLoadingMergeStatus(t *testing.T) {
+// TestCommentsHeaderHasNoMergeBadge verifies that the Comments tab header no
+// longer renders a merge segment — that badge now lives on the tab bar (see
+// TestRenderTabBarShowsLoadedMergeBadge in detail_test.go).
+func TestCommentsHeaderHasNoMergeBadge(t *testing.T) {
 	review := testReview() // PR == 42, Owner and Repo set
 	m := NewReviewCardsModel("", "fid", review)
 	m.width = 80
 	m.height = 40
-
-	// NewReviewCardsModel sets mergeStatusLoading = true when PR > 0.
-	if !m.mergeStatusLoading {
-		t.Fatal("mergeStatusLoading should be true after NewReviewCardsModel with valid PR metadata")
-	}
 
 	out := m.View()
 
 	if !strings.Contains(out, "selected") {
 		t.Errorf("header should contain 'selected', got: %q", out)
 	}
-	if !strings.Contains(out, "checking") {
-		t.Errorf("header should contain 'checking…' while loading, got: %q", out)
-	}
-	if !strings.Contains(out, "merge:") {
-		t.Errorf("header should contain 'merge:' while loading, got: %q", out)
-	}
-}
-
-// TestCommentsHeaderWithLoadedMergeStatus verifies that after a
-// MergeStatusLoadedMsg arrives, the header renders the correct label for each
-// classification.
-func TestCommentsHeaderWithLoadedMergeStatus(t *testing.T) {
-	cases := []struct {
-		mergeable       string
-		mergeStateStatus string
-		wantLabel       string
-	}{
-		{"MERGEABLE", "CLEAN", "mergeable"},
-		{"CONFLICTING", "DIRTY", "conflicts"},
-		{"MERGEABLE", "BEHIND", "behind"},
-		{"UNKNOWN", "UNKNOWN", "unknown"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.mergeable+"/"+tc.mergeStateStatus, func(t *testing.T) {
-			review := testReview()
-			m := NewReviewCardsModel("", "fid", review)
-			m.width = 80
-			m.height = 40
-
-			// Deliver the loaded message.
-			m, _ = m.Update(MergeStatusLoadedMsg{
-				FollowupID: "fid",
-				RequestSeq: 1,
-				Status: gh.MergeStatus{
-					Mergeable:        tc.mergeable,
-					MergeStateStatus: tc.mergeStateStatus,
-				},
-			})
-
-			out := m.View()
-
-			if !strings.Contains(out, "merge:") {
-				t.Errorf("header should contain 'merge:', got: %q", out)
-			}
-			if !strings.Contains(out, tc.wantLabel) {
-				t.Errorf("header should contain label %q, got: %q", tc.wantLabel, out)
-			}
-			if strings.Contains(out, "checking") {
-				t.Errorf("header should not contain 'checking' after load, got: %q", out)
-			}
-			if m.mergeStatusLoading {
-				t.Error("mergeStatusLoading should be false after MergeStatusLoadedMsg")
-			}
-		})
-	}
-}
-
-// TestCommentsHeaderWithMergeStatusError verifies that when the fetch returns
-// an error, the header renders "unavailable".
-func TestCommentsHeaderWithMergeStatusError(t *testing.T) {
-	review := testReview()
-	m := NewReviewCardsModel("", "fid", review)
-	m.width = 80
-	m.height = 40
-
-	m, _ = m.Update(MergeStatusLoadedMsg{
-		FollowupID: "fid",
-		RequestSeq: 1,
-		Err:        fmt.Errorf("gh: network error"),
-	})
-
-	out := m.View()
-
-	if !strings.Contains(out, "merge:") {
-		t.Errorf("header should contain 'merge:', got: %q", out)
-	}
-	if !strings.Contains(out, "unavailable") {
-		t.Errorf("header should contain 'unavailable' on error, got: %q", out)
-	}
-	if strings.Contains(out, "checking") {
-		t.Errorf("header should not contain 'checking' after error, got: %q", out)
-	}
-	if m.mergeStatusLoading {
-		t.Error("mergeStatusLoading should be false after error message")
-	}
-	if m.mergeStatusErr == nil {
-		t.Error("mergeStatusErr should be set after error message")
+	if strings.Contains(out, "merge:") {
+		t.Errorf("Comments header should not contain merge badge (moved to tab bar), got: %q", out)
 	}
 }
 

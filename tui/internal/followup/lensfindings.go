@@ -21,7 +21,10 @@ type WriteLensSidecarMsg struct {
 // WriteLensSidecarCmd writes the full LensReview back to lens-findings.json.
 func WriteLensSidecarCmd(knowledgeDir, followupID string, review *LensReview) tea.Cmd {
 	return func() tea.Msg {
-		itemDir := filepath.Join(knowledgeDir, "_followups", followupID)
+		itemDir, err := ResolveDir(knowledgeDir, followupID)
+		if err != nil {
+			return WriteLensSidecarMsg{Err: fmt.Errorf("resolving followup dir: %w", err)}
+		}
 		data, err := json.MarshalIndent(review, "", "  ")
 		if err != nil {
 			return WriteLensSidecarMsg{Err: fmt.Errorf("marshaling lens sidecar: %w", err)}

@@ -181,7 +181,11 @@ func runPostReview(knowledgeDir, followupID string) tea.Cmd {
 		if err := cmd.Run(); err != nil {
 			return followup.PostReviewCompleteMsg{ID: followupID, Err: err}
 		}
-		sidecarPath := filepath.Join(knowledgeDir, "_followups", followupID, "proposed-comments.json")
+		itemDir, err := followup.ResolveDir(knowledgeDir, followupID)
+		if err != nil {
+			return followup.PostReviewCompleteMsg{ID: followupID, Err: fmt.Errorf("review posted, but failed to persist outcomes locally: %w", err)}
+		}
+		sidecarPath := filepath.Join(itemDir, "proposed-comments.json")
 		data, err := os.ReadFile(sidecarPath)
 		if err != nil {
 			return followup.PostReviewCompleteMsg{ID: followupID, Err: fmt.Errorf("review posted, but failed to persist outcomes locally: %w", err)}
