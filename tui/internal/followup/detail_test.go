@@ -1224,6 +1224,46 @@ func TestProposedReviewStringPRCallSiteSeesCorrectInt(t *testing.T) {
 	}
 }
 
+func TestProposedReviewSummaryFieldsRoundTrip(t *testing.T) {
+	original := ProposedReview{
+		PR:                   42,
+		Owner:                "anticorrelator",
+		Repo:                 "lore",
+		HeadSHA:              "abc123",
+		Comments:             []ProposedComment{},
+		SummaryGeneratedAt:   "2026-04-14T12:00:00Z",
+		SummarySelectionHash: "deadbeef",
+	}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var decoded ProposedReview
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if decoded.SummaryGeneratedAt != original.SummaryGeneratedAt {
+		t.Errorf("SummaryGeneratedAt = %q, want %q", decoded.SummaryGeneratedAt, original.SummaryGeneratedAt)
+	}
+	if decoded.SummarySelectionHash != original.SummarySelectionHash {
+		t.Errorf("SummarySelectionHash = %q, want %q", decoded.SummarySelectionHash, original.SummarySelectionHash)
+	}
+}
+
+func TestProposedReviewSummaryFieldsOmittedYieldsZeroValues(t *testing.T) {
+	raw := `{"pr":42,"owner":"anticorrelator","repo":"lore","head_sha":"abc","comments":[]}`
+	var r ProposedReview
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.SummaryGeneratedAt != "" {
+		t.Errorf("SummaryGeneratedAt = %q, want empty string for legacy sidecar", r.SummaryGeneratedAt)
+	}
+	if r.SummarySelectionHash != "" {
+		t.Errorf("SummarySelectionHash = %q, want empty string for legacy sidecar", r.SummarySelectionHash)
+	}
+}
+
 func TestLoadFollowUpDetailAuthorField(t *testing.T) {
 	knowledgeDir := t.TempDir()
 	id := "author-test"
@@ -1282,7 +1322,7 @@ func testDetailWithLensFindings() *FollowUpDetail {
 		LensFindings: &LensReview{
 			PR: 42, WorkItem: "wi",
 			Findings: []LensFinding{
-				{Severity: "blocking", File: "b.go", Line: 5, Body: "Critical.", Lens: "security", Disposition: "action"},
+				{Severity: "blocking", File: "b.go", Line: 5, Body: "Critical.", Lens: "security"},
 			},
 		},
 	}
@@ -1415,8 +1455,8 @@ func TestDetailModelKeyDelegationToLensFindings(t *testing.T) {
 	review := &LensReview{
 		PR: 1, WorkItem: "wi",
 		Findings: []LensFinding{
-			{Severity: "blocking", File: "a.go", Line: 1, Body: "First.", Lens: "x", Disposition: "action"},
-			{Severity: "suggestion", File: "b.go", Line: 2, Body: "Second.", Lens: "y", Disposition: "open"},
+			{Severity: "blocking", File: "a.go", Line: 1, Body: "First.", Lens: "x"},
+			{Severity: "suggestion", File: "b.go", Line: 2, Body: "Second.", Lens: "y"},
 		},
 	}
 	detail := &FollowUpDetail{

@@ -211,7 +211,7 @@ for f in findings:
     file_path = f.get("file", "")
     line_no = f.get("line", 0)
     body = f.get("body", "")
-    rationale = f.get("rationale", "")
+    grounding = f.get("grounding", "")
 
     loc = file_path
     if line_no:
@@ -221,13 +221,81 @@ for f in findings:
     lines.append(header)
     if body:
         lines.append(f"  {body}")
-    if rationale:
-        lines.append(f"  *Rationale: {rationale}*")
+    if grounding:
+        lines.append(f"  *Grounding: {grounding}*")
 
 with open(notes_path, "a") as f:
     f.write("\n".join(lines) + "\n")
 PYEOF
   fi
+fi
+
+# --- Seed plan.md from selected lens findings when provided ---
+if [[ -n "$FINDINGS_JSON" ]]; then
+  WORK_PLAN="$KNOWLEDGE_DIR/_work/$WORK_SLUG/plan.md"
+  PR_REF=$(python3 -c "
+import json, sys
+try:
+    meta = json.load(open(sys.argv[1]))
+    attachments = meta.get('attachments', [])
+    pr = next((a.get('ref','') for a in attachments if a.get('type') == 'pr'), '')
+    print(pr)
+except Exception:
+    print('')
+" "$META_FILE" 2>/dev/null || echo "")
+  python3 - "$WORK_PLAN" "$FINDINGS_JSON" "$FOLLOWUP_TITLE" "$PR_REF" << 'PYEOF'
+import json, sys
+
+plan_path = sys.argv[1]
+findings_raw = sys.argv[2]
+followup_title = sys.argv[3]
+pr_ref = sys.argv[4]
+
+try:
+    findings = json.loads(findings_raw)
+except json.JSONDecodeError:
+    sys.exit(0)  # Malformed input — skip silently
+
+selected = [f for f in findings if f.get("selected")]
+
+source_line = f"Promoted from PR self-review followup"
+if pr_ref:
+    source_line = f"Promoted from PR self-review followup for PR {pr_ref}: {followup_title}"
+
+lines = [f"# {followup_title}", "", "## Source", source_line, ""]
+
+if selected:
+    lines.append("## Findings")
+    lines.append("")
+    for f in selected:
+        title = f.get("title", "")
+        file_path = f.get("file", "")
+        line_no = f.get("line", 0)
+        lens = f.get("lens", "")
+        body = f.get("body", "")
+        grounding = f.get("grounding", "")
+
+        loc = f"{file_path}:{line_no}" if line_no else file_path
+
+        lines.append(f"### {title}")
+        if loc:
+            lines.append(f"**File:** {loc}")
+        if lens:
+            lines.append(f"**Lens:** {lens}")
+        lines.append("")
+        if body:
+            lines.append(body)
+            lines.append("")
+        if grounding:
+            lines.append(f"**Grounding:** {grounding}")
+            lines.append("")
+
+content = "\n".join(lines)
+if not content.endswith("\n"):
+    content += "\n"
+with open(plan_path, "w") as f:
+    f.write(content)
+PYEOF
 fi
 
 # --- Rebuild follow-up index ---

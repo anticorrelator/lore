@@ -158,6 +158,7 @@ Subcommands:
   unarchive    Restore an archived follow-up to the active set
   delete       Permanently delete a follow-up
   post-review  Post a proposed review comment to GitHub
+  summarize    Generate a thematic summary of selected review comments
 
 Options:
   --help, -h    Show this help
@@ -742,6 +743,9 @@ cmd_followup() {
       ;;
     post-review)
       "$SCRIPTS_DIR/post-proposed-review.sh" "$@"
+      ;;
+    summarize)
+      "$SCRIPTS_DIR/generate-review-summary.sh" "$@"
       ;;
     *)
       echo "Error: unknown followup subcommand '$subcmd'" >&2

@@ -38,10 +38,12 @@ type ProposedReview struct {
 	Repo               string            `json:"repo"`
 	HeadSHA            string            `json:"head_sha"`
 	Comments           []ProposedComment `json:"comments"`
-	ReviewBody         string            `json:"review_body"`
-	ReviewBodySelected bool              `json:"review_body_selected"`
-	ReviewEvent        string            `json:"review_event"`
-	LastPost           *LastPost         `json:"last_post,omitempty"`
+	ReviewBody           string            `json:"review_body"`
+	ReviewBodySelected   bool              `json:"review_body_selected"`
+	ReviewEvent          string            `json:"review_event"`
+	LastPost             *LastPost         `json:"last_post,omitempty"`
+	SummaryGeneratedAt   string            `json:"summary_generated_at,omitempty"`
+	SummarySelectionHash string            `json:"summary_selection_hash,omitempty"`
 }
 
 // UnmarshalJSON widens the accepted JSON shape for the "pr" field so that
@@ -49,15 +51,17 @@ type ProposedReview struct {
 // same int value. Non-numeric strings return a clear error, never a silent zero.
 func (r *ProposedReview) UnmarshalJSON(data []byte) error {
 	type alias struct {
-		PR                 json.RawMessage   `json:"pr"`
-		Owner              string            `json:"owner"`
-		Repo               string            `json:"repo"`
-		HeadSHA            string            `json:"head_sha"`
-		Comments           []ProposedComment `json:"comments"`
-		ReviewBody         string            `json:"review_body"`
-		ReviewBodySelected bool              `json:"review_body_selected"`
-		ReviewEvent        string            `json:"review_event"`
-		LastPost           *LastPost         `json:"last_post,omitempty"`
+		PR                   json.RawMessage   `json:"pr"`
+		Owner                string            `json:"owner"`
+		Repo                 string            `json:"repo"`
+		HeadSHA              string            `json:"head_sha"`
+		Comments             []ProposedComment `json:"comments"`
+		ReviewBody           string            `json:"review_body"`
+		ReviewBodySelected   bool              `json:"review_body_selected"`
+		ReviewEvent          string            `json:"review_event"`
+		LastPost             *LastPost         `json:"last_post,omitempty"`
+		SummaryGeneratedAt   string            `json:"summary_generated_at,omitempty"`
+		SummarySelectionHash string            `json:"summary_selection_hash,omitempty"`
 	}
 	var a alias
 	if err := json.Unmarshal(data, &a); err != nil {
@@ -76,20 +80,21 @@ func (r *ProposedReview) UnmarshalJSON(data []byte) error {
 	r.ReviewBodySelected = a.ReviewBodySelected
 	r.ReviewEvent = a.ReviewEvent
 	r.LastPost = a.LastPost
+	r.SummaryGeneratedAt = a.SummaryGeneratedAt
+	r.SummarySelectionHash = a.SummarySelectionHash
 	return nil
 }
 
 // LensFinding represents a single finding from a PR review lens.
 type LensFinding struct {
-	Severity    string `json:"severity"`
-	Title       string `json:"title"`
-	File        string `json:"file"`
-	Line        int    `json:"line"`
-	Body        string `json:"body"`
-	Lens        string `json:"lens"`
-	Disposition string `json:"disposition"`
-	Rationale   string `json:"rationale"`
-	Selected    bool   `json:"selected,omitempty"`
+	Severity  string `json:"severity"`
+	Title     string `json:"title"`
+	File      string `json:"file"`
+	Line      int    `json:"line"`
+	Body      string `json:"body"`
+	Lens      string `json:"lens"`
+	Grounding string `json:"grounding"`
+	Selected  bool   `json:"selected"`
 }
 
 // LensReview is the top-level wrapper for the lens-findings.json sidecar.

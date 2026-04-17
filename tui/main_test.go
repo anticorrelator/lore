@@ -1607,13 +1607,13 @@ func followupModelWithLensFindings(t *testing.T, selectAll bool) model {
 	findings := []followup.LensFinding{
 		{
 			Severity: "blocking", Title: "Missing check", File: "main.go", Line: 10,
-			Body: "Error ignored.", Lens: "correctness", Disposition: "action",
-			Rationale: "Could cause data loss.", Selected: selectAll,
+			Body: "Error ignored.", Lens: "correctness",
+			Grounding: "Could cause data loss.", Selected: selectAll,
 		},
 		{
 			Severity: "suggestion", Title: "Extract helper", File: "util.go", Line: 55,
-			Body: "Refactor opportunity.", Lens: "clarity", Disposition: "action",
-			Rationale: "", Selected: selectAll,
+			Body: "Refactor opportunity.", Lens: "clarity",
+			Grounding: "", Selected: selectAll,
 		},
 	}
 	lensReview := &followup.LensReview{PR: 7, WorkItem: "test-wi", Findings: findings}

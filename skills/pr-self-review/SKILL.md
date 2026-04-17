@@ -1,13 +1,13 @@
 ---
 name: pr-self-review
-description: "Author-calibrated self-review: parallel lens pre-scan (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) then auto-disposition findings into a followup sidecar for TUI triage"
+description: "Author-calibrated self-review: parallel lens pre-scan (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) then grounding evaluation, persisting findings into a followup sidecar for TUI triage"
 user_invocable: true
-argument_description: "[PR_number_or_URL] [--skip-pre-scan] [focus context] — PR to self-review (or auto-detect from branch). --skip-pre-scan skips the lens team and uses heuristic auto-disposition instead. Optional focus context steers finding priority (e.g., '42 focus on error handling')"
+argument_description: "[PR_number_or_URL] [--skip-pre-scan] [focus context] — PR to self-review (or auto-detect from branch). --skip-pre-scan skips the lens team and uses heuristic findings instead. Optional focus context steers finding priority (e.g., '42 focus on error handling')"
 ---
 
 # /pr-self-review Skill
 
-Author-calibrated self-review combining structured lens analysis with automatic disposition. A parallel lens team (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) runs a pre-scan, then findings are auto-dispositioned and persisted as a followup sidecar (`lens-findings.json`) for interactive TUI triage via the per-finding action menu.
+Author-calibrated self-review combining structured lens analysis with grounding evaluation. A parallel lens team (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) runs a pre-scan, then findings are evaluated for grounding quality and persisted as a followup sidecar (`lens-findings.json`) for interactive TUI triage.
 
 Since this is your own work, locally-scoped action items can be implement-ready. Findings with cross-boundary implications (especially from Blast Radius) get verification directives instead.
 
@@ -193,8 +193,8 @@ Collect findings from lens agents as they complete. If a lens agent fails or tim
 
 **Ceremony lens two-tier classification:** For each ceremony lens result, check whether the output conforms to the Findings Output Format (`lens`, `pr`, `repo`, `findings[]` with each finding having `severity`, `title`, `file`, `line`, `body`):
 
-- **Conforming:** Include findings in the synthesis pipeline below alongside built-in lens findings. These participate in compound detection, severity grouping, and deduplication. Conforming ceremony findings appear in the dialog findings list (Step 3).
-- **Non-conforming:** Store the raw output separately as a supplementary report. Tag it with the ceremony lens name. Non-conforming output does **not** enter synthesis or the dialog — it is presented in the summary (Step 4).
+- **Conforming:** Include findings in the synthesis pipeline below alongside built-in lens findings. These participate in compound detection, severity grouping, and deduplication. Conforming ceremony findings enter grounding evaluation (Step 3).
+- **Non-conforming:** Store the raw output separately as a supplementary report. Tag it with the ceremony lens name. Non-conforming output does **not** enter synthesis or grounding evaluation — it is presented in the followup summary (Step 4).
 - **Malformed JSON:** Treat as non-conforming with an additional `[malformed]` tag. Store the raw text for supplementary presentation.
 - **Failure/timeout:** Note the coverage gap in the summary. The review continues with available findings.
 
@@ -214,207 +214,81 @@ Display summary:
 [pr-self-review] Lens scan complete: <N> findings (<K> blocking, <J> suggestions, <Q> questions) across <L> lenses
 ```
 
-### 2d. Persist findings for resume
+## Step 3: Grounding Evaluation
 
-```
-/work create pr-self-review-<PR_NUMBER> --pr <PR_NUMBER>
-```
-
-Write the synthesized findings to `notes.md` under a `## Lens Scan` heading:
-
-```markdown
-## Lens Scan
-<timestamp> | Lenses: <list> | Findings: <count>
-
-| # | Severity | Title | Lens | File:Line | Disposition |
-|---|----------|-------|------|-----------|-------------|
-| 1 | blocking | <title> | <lens> | <file:line> | — |
-| 2 | suggestion | <title> | <lens> | <file:line> | — |
-```
-
-The `Disposition` column starts as `—` and is filled during Step 3 auto-disposition.
-
-## Step 3: Auto-Disposition
-
-Read protocol sections:
+Load the grounding rubric:
 ```bash
-cat ~/.lore/claude-md/review-protocol/cross-lens-synthesis.md
-cat ~/.lore/claude-md/review-protocol/enrichment.md
-cat ~/.lore/claude-md/review-protocol/checklist.md
+cat ~/.lore/claude-md/review-protocol/severity.md
 ```
 
-### 3a. Disposition all findings automatically
+### 3a. Evaluate grounding for all findings
 
-Apply dispositions to every finding using your best judgment as the PR author:
+Spawn one agent with:
+- The PR's stated intent (title, body, and commit messages from Step 1b)
+- All lens findings with their `**Grounding:**` lines from Step 2c
+- The Sound/Weak/Unsound rubric from `severity.md`
 
-**Disposition rules:**
-- `blocking` findings → `action` (these need fixes)
-- Compound findings (multiple lenses converging) → `action`
-- Suggestions with cross-boundary implications (Blast Radius, public API changes) → `action`
-- `question` findings where you can answer from diff and codebase context → `accepted`
-- Locally scoped, low-risk suggestions with obvious answers:
-  - Clear style/convention nits → `accepted`
-  - Missing test coverage for trivial branches → `action`
-  - Naming suggestions with no semantic impact → `accepted`
-- Ambiguous findings where the correct call is genuinely uncertain → `open` (the user will triage these in the TUI)
+Agent task:
 
-**When in doubt, use `open`.** The TUI Triage tab's per-finding action menu lets the user change dispositions, launch scoped chats, and customize responses — uncertain findings are better left for interactive triage than auto-resolved incorrectly.
+```
+# Grounding Evaluation — PR #<number>
 
-For each finding, record a one-line rationale explaining the disposition choice.
+You are a grounding evaluation agent. Apply the Grounding Quality Rubric from severity.md to every `blocking` and `suggestion` finding from the lens scan.
+
+## PR Intent
+**Title:** <title>
+**Body:** <body>
+**Commits:** <commit messages>
+
+## severity.md Rubric (loaded above)
+
+## Findings to Evaluate
+
+<all lens findings with their Grounding lines>
+
+## Instructions
+
+For each finding with severity `blocking` or `suggestion`:
+1. Classify the `**Grounding:**` line as Sound, Weak, or Unsound per the rubric.
+2. Apply the outcome:
+   - **Sound** → pass through unchanged, set `selected: true`
+   - **Weak** → rewrite the `**Grounding:**` line to complete the mechanism → consequence chain; keep severity intact, set `selected: true`
+   - **Unsound** → drop the finding (do not include it in output)
+   - **Missing grounding** → treat as Unsound; drop the finding
+
+For `question` findings: pass through unchanged, set `selected: false`.
+
+Output the evaluated findings list. For each finding include: severity, title, file, line, body (with grounding rewritten if weak), lens, grounding (the final grounding text only, without the `**Grounding:**` label), selected.
+```
+
+### 3b. Present evaluation summary
+
+Display the summary (no confirmation gate — proceed immediately to Step 4):
+
+```
+[pr-self-review] Grounding evaluation complete: <N> findings retained (<K> blocking, <J> suggestions, <Q> questions), <D> dropped (unsound/missing grounding)
+→ Selected for TUI triage: <S> findings
+```
 
 **Heuristic fallback:** If the pre-scan produced zero findings or `--skip-pre-scan` was set, scan the diff for risk concentration, complexity, and architectural decisions. Generate findings using perspective lenses:
 1. "What would a reviewer unfamiliar with this codebase question?"
 2. "What are the weakest assumptions in this change?"
 3. "What invariants in other files does this change depend on?"
 
-Enrich heuristic observations via `lore search` before generating findings.
+Enrich heuristic observations via `lore search` before generating findings. For heuristic findings, set `selected: true` for all `blocking` and `suggestion` findings; set `selected: false` for `question` findings.
 
-### 3b. Present disposition summary
+## Step 4: Create Followup
 
-Display the full disposition table (no confirmation gate — proceed immediately to Step 4):
-
-```
-## Self-Review: #<N> — <title>
-
-**Branch:** <head> → <base>
-**Scope:** <N files, brief characterization>
-
-| # | Severity | Title | Lens | File:Line | Disposition | Rationale |
-|---|----------|-------|------|-----------|-------------|-----------|
-| 1 | blocking | <title> | <lens> | <file:line> | action | <one-line reason> |
-| 2 | suggestion | <title> | <lens> | <file:line> | accepted | <one-line reason> |
-| 3 | suggestion | <title> | <lens> | <file:line> | open | <one-line reason> |
-...
-
-Dispositions: <A> action, <C> accepted, <D> deferred, <O> open
-→ Creating followup for TUI triage
-```
-
-**Ceremony lens findings:** Conforming ceremony lens findings are included in the table above. If any ceremony lenses produced non-conforming output, append:
-
-```
-Supplementary reports: <skill-name>, <skill-name> (non-standard format — see Step 4 summary)
-```
-
-## Step 4: Work Item and Summary
-
-Collect all auto-dispositioned findings from Step 3.
-
-### No action items path
-
-If all findings were dispositioned as `accepted` or `deferred` (zero `action` items), skip work item creation. Report:
-
-```
-Reviewed and confirmed: <N> findings examined, no changes needed (<K> accepted, <L> deferred)
-```
-
-Proceed to Step 4.5 (followup creation is unconditional — all review outcomes produce a followup record).
-
-### Create plan
-
-```
-/work create pr-self-review-<PR_NUMBER> --pr <PR_NUMBER>
-```
-
-Write `plan.md` structured for `/implement`:
-
-```markdown
-# Self-Review: <PR Title>
-
-> **Review-level analysis.** These findings came from a multi-lens pre-scan and confirmatory dialog. Investigation agents should verify assumptions against the full codebase.
-
-## Goal
-Address findings from self-review dialog before requesting external review.
-
-## Design Decisions
-<non-obvious choices surfaced during discussion — only if any emerged>
-
-## Phases
-
-### Phase 1: Blocking / Correctness
-**Objective:** Fix issues that affect correctness or violate cross-boundary invariants
-**Files:** <affected files>
-- [ ] <finding title> [<lens>] — <file:line> — <one-line action>
-
-### Phase 2: Convention Alignment
-**Objective:** Align with project conventions
-**Files:** <affected files>
-- [ ] <finding title> [<lens>] — <file:line> — <one-line action>
-
-### Phase 3: Improvements
-**Objective:** Address remaining suggestions
-**Files:** <affected files>
-- [ ] <finding title> [<lens>] — <file:line> — <one-line action>
-
-### Phase 4: Reviewed and Confirmed
-- <finding title> [<lens>] — Confirmed fine because: <rationale>
-
-### Deferred / Open
-- <finding title> [<lens>] — Deferred: <reason> | Open: <what needs resolution>
-```
-
-**Phase mapping:**
-- Phase 1: disposition=`action` AND (blocking OR compound)
-- Phase 2: disposition=`action` AND suggestion AND convention signal
-- Phase 3: disposition=`action` AND remaining
-- Phase 4: disposition=`accepted`
-- Deferred/Open: disposition=`deferred` or `open`
-
-Omit empty phases.
-
-**Verification directives** for cross-boundary items:
-```
-- [ ] **[verify]** <hypothesis> — Verify whether <assumption> holds in `<file:function>` before implementing
-```
-
-Assess readiness: `implement-ready` if all items are locally scoped, `spec-needed` if any have verification directives.
-
-Generate tasks:
-```
-/work tasks pr-self-review-<PR_NUMBER>
-```
-
-### Present summary
-
-```
-## Self-Review Complete
-
-**PR:** #<number> — <title>
-**Lens coverage:** <L> lenses, <N> findings (<K> blocking, <J> suggestions, <Q> questions)
-**Dispositions:** <A> action, <C> accepted, <D> deferred, <O> open
-
-### Auto-disposition highlights:
-- <key insight or notable finding from the scan>
-
-### Supplementary Reports
-<skill-name> [ceremony] — non-standard format, presented verbatim
-
-### Work item: <slug if created, or "none — reviewed and confirmed"> (<readiness>)
-  Phase 1 (Blocking): <count> tasks
-  Phase 2 (Convention): <count> tasks
-  Phase 3 (Improvements): <count> tasks
-```
-
-If ceremony lenses ran, include them in the lens coverage count. Show: `**Lens coverage:** <L> lenses (<M> ceremony), <N> findings (<K> blocking, <J> suggestions, <Q> questions)`
-
-If lenses ran in degraded mode, show: `**Lens coverage:** <L>/<T> lenses (<degraded names> degraded), <N> findings`
-
-The `### Supplementary Reports` section appears **only** when non-conforming ceremony lens output exists. Omit entirely when all ceremony lenses were conforming or no ceremony lenses ran.
-
-Omit zero counts. Omit work item section if no-action-items path was taken.
-
-## Step 4.5: Create Followup Record
-
-**This step runs unconditionally** — both the action-items path and the no-action-items path produce a followup record. The followup persists the review outcome for TUI browsing regardless of whether a work item was created.
+The followup is the sole artifact this skill produces. Work-item creation is deferred to TUI triage: the user promotes selected findings to a work item via the Triage tab's `p` action, which invokes `promote-followup.sh --findings-json <selected>`. This keeps pr-self-review a read-only review producer — the follow-up scope (what becomes actionable work) is chosen by a human after seeing the evaluated findings.
 
 ### Assemble lens-findings.json
 
-Build the `lens-findings.json` payload from the in-memory dispositioned findings (do NOT re-parse notes.md):
+Build the `lens-findings.json` payload from the evaluated findings produced by Step 3:
 
 ```json
 {
   "pr": <PR_NUMBER>,
-  "work_item": "pr-self-review-<PR_NUMBER>",
+  "work_item": "",
   "findings": [
     {
       "severity": "<blocking|suggestion|question>",
@@ -423,18 +297,18 @@ Build the `lens-findings.json` payload from the in-memory dispositioned findings
       "line": <1-indexed, 0 for file-level>,
       "body": "<finding body, may contain markdown>",
       "lens": "<lens id>",
-      "disposition": "<action|accepted|deferred|open>",
-      "rationale": "<disposition rationale from dialog>"
+      "grounding": "<grounding text — mechanism → consequence chain, no label prefix>",
+      "selected": <true|false>
     }
   ]
 }
 ```
 
-**Selection contract — producers omit `selected`:** The `selected` field is intentionally absent from the schema above. The TUI owns selection state: on first load it pre-seeds `selected = true` for `accepted` and `deferred` findings, leaving `action`, `open`, and unknown dispositions unselected. Do not set `selected` in the JSON you produce — the field uses `omitempty` and a pre-set value would suppress the TUI's first-load pre-seeding logic.
+**Selection contract:** The grounding evaluation step (Step 3) owns `selected`. Set `selected: true` for every finding with sound or rewritten-weak grounding (`blocking` and `suggestion`). Set `selected: false` for `question` findings. Do not include findings with unsound or missing grounding — they are dropped during evaluation.
 
-Include ALL findings (action, accepted, deferred, open). If `--skip-pre-scan` was set and no findings were generated, use an empty findings array `[]`.
+Include only findings that survived grounding evaluation. If `--skip-pre-scan` was set and no findings were generated, use an empty findings array `[]`.
 
-If no work item was created (no-action-items path), set `"work_item": ""`.
+`work_item` is always `""` at this stage — it gets populated by the TUI when the user promotes the followup.
 
 ### Build --content summary
 
@@ -443,7 +317,7 @@ Assemble the `--content` value with all sections below. Every section is mandato
 **First line:** One-line diagnostic summary for TUI excerpt compatibility (FindingExcerpt skips `#` heading lines and blank lines, returning the first 3 non-heading non-empty lines — this summary must be first):
 
 ```
-Self-review of PR #<N>: <A> action, <C> accepted, <D> deferred, <O> open across <L> lenses
+Self-review of PR #<N>: <N> findings retained (<K> blocking, <J> suggestions, <Q> questions) across <L> lenses
 ```
 
 **Section 1 — PR Narrative** (from Step 2a review context and PR metadata):
@@ -518,22 +392,22 @@ If non-conforming ceremony lens output exists, append after the structured findi
 
 Omit the `### Supplementary Reports` heading entirely when all ceremony lenses were conforming or no ceremony lenses ran.
 
-**Section 4 — Disposition Summary:**
+**Section 4 — Findings Summary:**
 
-A table summarizing all findings with their dispositions. Self-review replaces `## Proposed Comments` (which posts to GitHub) with this table — `create-followup.sh` does not post review comments.
+A table summarizing all retained findings with their selection state. Self-review replaces `## Proposed Comments` (which posts to GitHub) with this table — `create-followup.sh` does not post review comments.
 
 ```markdown
-## Disposition Summary
+## Findings Summary
 
-| # | Severity | Title | Lens | File:Line | Disposition | Rationale |
-|---|----------|-------|------|-----------|-------------|-----------|
-| 1 | blocking | <title> | <lens> | <file:line> | action | <one-line reason> |
-| 2 | suggestion | <title> | <lens> | <file:line> | accepted | <one-line reason> |
-| 3 | suggestion | <title> | <lens> | <file:line> | open | <one-line reason> |
+| # | Severity | Title | Lens | File:Line | Selected |
+|---|----------|-------|------|-----------|----------|
+| 1 | blocking | <title> | <lens> | <file:line> | true |
+| 2 | suggestion | <title> | <lens> | <file:line> | true |
+| 3 | question | <title> | <lens> | <file:line> | false |
 ...
 ```
 
-Include all findings (action, accepted, deferred, open). If zero findings, emit `## Disposition Summary` with `None.` as the body rather than omitting the section.
+Include all retained findings (those that survived grounding evaluation). If zero findings, emit `## Findings Summary` with `None.` as the body rather than omitting the section.
 
 ### Create followup
 
@@ -550,27 +424,43 @@ bash ~/.lore/scripts/create-followup.sh \
   --head-sha <headRefOid>
 ```
 
-## Step 5: Capture Insights
-
-**Gate:** Do not execute this step until Step 4.5 (followup creation) has completed. When Step 4 creates a plan, `plan.md` must also be written before proceeding.
+### Present summary
 
 ```
-/remember Self-review of PR #<N> (lens pre-scan + auto-disposition) — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered or clarified (why the architecture is this way, what constraints drove decisions), convention drift patterns found by lenses, cross-boundary invariants identified (especially from Blast Radius). Use confidence: medium. Skip: obvious fixes, style issues, findings specific to this PR that don't generalize.
+## Self-Review Complete
+
+**PR:** #<number> — <title>
+**Lens coverage:** <L> lenses, <N> findings retained (<K> blocking, <J> suggestions, <Q> questions)
+**Selected for triage:** <S> findings
+
+### Notable findings:
+- <key insight or notable finding from the scan>
+
+### Followup: <followup-id>
+Open the TUI Triage tab to review findings. Press `p` on the followup to promote selected findings to a work item.
+```
+
+If ceremony lenses ran, include them in the lens coverage count: `**Lens coverage:** <L> lenses (<M> ceremony), <N> findings retained (<K> blocking, <J> suggestions, <Q> questions)`.
+
+If lenses ran in degraded mode, show: `**Lens coverage:** <L>/<T> lenses (<degraded names> degraded), <N> findings retained`.
+
+If non-conforming ceremony lens output exists, append a `### Supplementary Reports` section naming each skill. Omit when all ceremony lenses were conforming or none ran.
+
+Omit zero counts.
+
+## Step 5: Capture Insights
+
+**Gate:** Do not execute this step until the followup has been created (`create-followup.sh` returned successfully).
+
+```
+/remember Self-review of PR #<N> (lens scan + grounding evaluation) — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered or clarified (why the architecture is this way, what constraints drove decisions), convention drift patterns found by lenses, cross-boundary invariants identified (especially from Blast Radius). Use confidence: medium. Skip: obvious fixes, style issues, findings specific to this PR that don't generalize.
 ```
 
 This step is automatic — do not ask whether to run it.
 
-## Resuming
+## Re-invocation
 
-If re-invoked on the same PR, check for an existing work item (`pr-self-review-<PR_NUMBER>` in `/work list`). If found:
-
-1. **Load lens scan findings** — read the `## Lens Scan` section from `notes.md`.
-2. **Skip the lens team** — do not re-run Step 2. Display: `[pr-self-review] Resuming: using cached lens scan`
-3. **Re-run auto-disposition** — skip to Step 3 with cached findings.
-4. **If no lens scan section** — re-run the full lens team (Step 2).
-5. **If `plan.md` already exists** — load the plan and check for new findings.
-
-Append new findings to existing phases rather than creating a duplicate work item.
+Each invocation produces an independent followup — the skill does not resume or merge with prior runs. If the user re-runs pr-self-review on a PR that already has a followup, mention the existing followup and ask whether to proceed (creating a second followup) or stop. The prior followup is not modified.
 
 ## Error Handling
 

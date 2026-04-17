@@ -70,6 +70,25 @@ func (m model) topPanelWidth() int {
 	return m.width - 2
 }
 
+// listPanelHeight returns the height of the rendered list area in the current
+// layout. The views reserve 1 line for the tab indicator above the top panel,
+// so the list's scroll window must match rendered rows exactly or the cursor
+// can advance past the last visible row.
+func (m model) listPanelHeight() int {
+	if m.layoutMode == config.LayoutTopBottom {
+		h := m.topPanelHeight() - 1
+		if h < 1 {
+			h = 1
+		}
+		return h
+	}
+	h := m.innerHeight() - 1
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
 // detailPanelHeight returns the inner content height available for the detail panel,
 // accounting for layout mode. In left/right mode the detail gets the full innerHeight;
 // in top/bottom mode it gets the remaining space below the top panel and separator.

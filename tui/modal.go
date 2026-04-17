@@ -193,6 +193,7 @@ func (m model) renderHelpModal() string {
 		row("E", "edit body in $EDITOR") + "\n" +
 		row("D", "delete comment (confirm)") + "\n" +
 		row("P", "post selected comments to PR") + "\n" +
+		row("g", "generate thematic summary (LLM)") + "\n" +
 		"\n" +
 		sectionS.Render("Work List") + "\n" +
 		row("j / k", "navigate") + "\n" +

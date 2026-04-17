@@ -1544,3 +1544,215 @@ func TestPostOutcomeAndLastPostRoundTrip(t *testing.T) {
 		t.Errorf("original line mutated: got %d, want 10", reloaded.Comments[0].Line)
 	}
 }
+
+// --- Summary generation tests ---
+
+func TestGKeyZeroSelectedSetsFlashNoSummaryRequest(t *testing.T) {
+	review := testReview()
+	// Deselect all.
+	for i := range review.Comments {
+		review.Comments[i].Selected = false
+	}
+	m := NewReviewCardsModel("", "test-id", review)
+	m.width = 80
+	m.height = 40
+
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+
+	if m2.flashMsg == "" {
+		t.Error("g with 0 selected should set flashMsg")
+	}
+	if !strings.Contains(m2.flashMsg, "nothing to summarize") &&
+		!strings.Contains(m2.flashMsg, "No comments selected") {
+		t.Errorf("flashMsg = %q, want message about nothing to summarize", m2.flashMsg)
+	}
+	if cmd == nil {
+		return // no cmd is acceptable — no SummaryRequestMsg should be produced
+	}
+	msg := cmd()
+	if _, ok := msg.(SummaryRequestMsg); ok {
+		t.Error("g with 0 selected must not emit SummaryRequestMsg")
+	}
+}
+
+func TestGKeyWithSelectedEmitsSummaryRequestMsg(t *testing.T) {
+	review := testReview() // comment 0 is selected by default
+	m := NewReviewCardsModel("", "test-followup", review)
+	m.width = 80
+	m.height = 40
+
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+
+	if !m2.generatingSummary {
+		t.Error("generatingSummary should be true after g with selected comments")
+	}
+	if cmd == nil {
+		t.Fatal("g with selected comments must return a tea.Cmd")
+	}
+	msg := cmd()
+	req, ok := msg.(SummaryRequestMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want SummaryRequestMsg", msg)
+	}
+	if req.FollowupID != "test-followup" {
+		t.Errorf("SummaryRequestMsg.FollowupID = %q, want test-followup", req.FollowupID)
+	}
+	if req.SelectionHash == "" {
+		t.Error("SummaryRequestMsg.SelectionHash must not be empty")
+	}
+}
+
+func TestSummaryGeneratedMsgSplicesToEmptyBody(t *testing.T) {
+	review := testReview()
+	review.ReviewBody = ""
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	m2, cmd := m.Update(SummaryGeneratedMsg{Text: "abc", SelectionHash: "hash-xyz"})
+
+	if !strings.Contains(m2.review.ReviewBody, "<!-- lore-summary -->") {
+		t.Errorf("ReviewBody should contain opening sentinel, got: %q", m2.review.ReviewBody)
+	}
+	if !strings.Contains(m2.review.ReviewBody, "<!-- /lore-summary -->") {
+		t.Errorf("ReviewBody should contain closing sentinel, got: %q", m2.review.ReviewBody)
+	}
+	if !strings.Contains(m2.review.ReviewBody, "abc") {
+		t.Errorf("ReviewBody should contain the generated text, got: %q", m2.review.ReviewBody)
+	}
+	// Should only contain the sentinels once each.
+	if strings.Count(m2.review.ReviewBody, "<!-- lore-summary -->") != 1 {
+		t.Error("ReviewBody should contain exactly one opening sentinel")
+	}
+	if m2.review.SummarySelectionHash != "hash-xyz" {
+		t.Errorf("SummarySelectionHash = %q, want hash-xyz", m2.review.SummarySelectionHash)
+	}
+	if m2.review.SummaryGeneratedAt == "" {
+		t.Error("SummaryGeneratedAt should be set after generation")
+	}
+	if cmd == nil {
+		t.Error("SummaryGeneratedMsg success should return WriteSidecarCmd")
+	}
+}
+
+func TestSummaryGeneratedMsgReplacesExistingRegion(t *testing.T) {
+	review := testReview()
+	review.ReviewBody = "User prose above\n<!-- lore-summary -->\nold\n<!-- /lore-summary -->\nUser prose below"
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	m2, _ := m.Update(SummaryGeneratedMsg{Text: "new", SelectionHash: "h2"})
+
+	body := m2.review.ReviewBody
+	if !strings.Contains(body, "User prose above") {
+		t.Errorf("prose above sentinel should be preserved, got: %q", body)
+	}
+	if !strings.Contains(body, "User prose below") {
+		t.Errorf("prose below sentinel should be preserved, got: %q", body)
+	}
+	if strings.Contains(body, "old") {
+		t.Errorf("old summary text should be replaced, got: %q", body)
+	}
+	if !strings.Contains(body, "new") {
+		t.Errorf("new summary text should appear, got: %q", body)
+	}
+	// Exactly one sentinel pair.
+	if strings.Count(body, "<!-- lore-summary -->") != 1 {
+		t.Errorf("expected exactly one opening sentinel, got body: %q", body)
+	}
+}
+
+func TestSummaryGeneratedMsgErrorSetsFlashNoMutation(t *testing.T) {
+	review := testReview()
+	review.ReviewBody = "untouched"
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+	m.generatingSummary = true
+
+	m2, cmd := m.Update(SummaryGeneratedMsg{Err: fmt.Errorf("claude failed"), SelectionHash: "h1"})
+
+	if m2.generatingSummary {
+		t.Error("generatingSummary should be cleared on error")
+	}
+	if !strings.Contains(m2.flashMsg, "claude failed") {
+		t.Errorf("flashMsg should contain error text, got: %q", m2.flashMsg)
+	}
+	if m2.review.ReviewBody != "untouched" {
+		t.Errorf("ReviewBody must not be mutated on error, got: %q", m2.review.ReviewBody)
+	}
+	if cmd != nil {
+		t.Error("error path must not return a WriteSidecarCmd")
+	}
+}
+
+func TestStaleMarkerAppearsAfterSelectionChange(t *testing.T) {
+	review := testReview()
+	review.ReviewBody = "<!-- lore-summary -->\nsome summary\n<!-- /lore-summary -->"
+	// Hash computed after generation — matches current selection (only c1 selected).
+	review.SummarySelectionHash = currentSelectionHash(review.Comments)
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	// Verify no stale marker before toggle.
+	outBefore := m.View()
+	if strings.Contains(outBefore, "(stale)") {
+		t.Error("no stale marker expected when hash matches")
+	}
+
+	// Toggle comment 0 (currently selected → deselected), which changes the hash.
+	m.cursor = 0
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+
+	outAfter := m.View()
+	if !strings.Contains(outAfter, "(stale)") {
+		t.Errorf("stale marker expected after selection change, got:\n%s", outAfter)
+	}
+}
+
+func TestStaleMarkerClearedAfterRegeneration(t *testing.T) {
+	review := testReview()
+	review.ReviewBody = "<!-- lore-summary -->\nold summary\n<!-- /lore-summary -->"
+	// Start with stale hash (all-zeros string != real hash).
+	review.SummarySelectionHash = "stale-hash"
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	// Confirm stale marker is showing.
+	outBefore := m.View()
+	if !strings.Contains(outBefore, "(stale)") {
+		t.Errorf("test setup: expected (stale) marker, got:\n%s", outBefore)
+	}
+
+	// Send a regeneration result with the correct hash.
+	newHash := currentSelectionHash(m.comments)
+	m, _ = m.Update(SummaryGeneratedMsg{Text: "fresh summary", SelectionHash: newHash})
+
+	outAfter := m.View()
+	if strings.Contains(outAfter, "(stale)") {
+		t.Errorf("stale marker should be gone after regeneration, got:\n%s", outAfter)
+	}
+}
+
+func TestReviewBodySelectedPreservedByGAndSummaryMsg(t *testing.T) {
+	review := testReview()
+	review.ReviewBodySelected = true
+	m := NewReviewCardsModel("", "fp", review)
+	m.width = 80
+	m.height = 40
+
+	// Press g to start generation.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if !m.review.ReviewBodySelected {
+		t.Error("ReviewBodySelected must be preserved after pressing g")
+	}
+
+	// Receive a successful summary.
+	m, _ = m.Update(SummaryGeneratedMsg{Text: "summary text", SelectionHash: currentSelectionHash(m.comments)})
+	if !m.review.ReviewBodySelected {
+		t.Error("ReviewBodySelected must be preserved after SummaryGeneratedMsg")
+	}
+}

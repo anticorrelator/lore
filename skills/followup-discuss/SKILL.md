@@ -48,8 +48,7 @@ Extract these fields from the structured block:
 | Finding Index | `**Finding Index:**` (e.g. `2 of 5`) |
 | Finding Title | `**Finding Title:**` |
 | Severity | `**Severity:**` |
-| Disposition | `**Disposition:**` |
-| Rationale | `**Rationale:**` |
+| Grounding | `**Grounding:**` |
 | File | `**File:**` |
 | Lens | `**Lens:**` |
 | Finding Content | `## Finding Content` section body |
@@ -82,7 +81,7 @@ lore followup view --json "$FOLLOWUP_ID"
 
 Parse the JSON to get `title`, `source`, `status` fields. Then locate `lens-findings.json` in the followup directory (use the `directory` field from the JSON response, or derive it as `$(lore resolve)/_followups/$FOLLOWUP_ID/lens-findings.json`).
 
-Read `lens-findings.json` and index into the `findings` array at position `FINDING_INDEX` (0-based). Extract the finding's `title`, `severity`, `disposition`, `rationale`, `file`, `lens`, and body fields.
+Read `lens-findings.json` and index into the `findings` array at position `FINDING_INDEX` (0-based). Extract the finding's `title`, `severity`, `grounding`, `file`, `lens`, and body fields.
 
 **Guard:** If `FINDING_INDEX` is out of range (>= number of findings), warn the user: `Note: finding index $FINDING_INDEX is out of range — showing full followup instead.` Then set `FINDING_INDEX = -1` and `SCOPED_MODE = false` and proceed in whole-followup mode.
 
@@ -116,8 +115,7 @@ If either command fails, report the error to the user and stop.
 **Context:** This is finding #<N+1> of <total> in followup <followup-id>
 **Source:** <source>
 **Severity:** <severity>
-**Disposition:** <disposition>
-**Rationale:** <rationale>
+**Grounding:** <grounding>
 **File:** <file>
 **Lens:** <lens>
 ```
@@ -167,7 +165,6 @@ If extra context was provided via `--`:
 | Source value | Route | Branch |
 |---|---|---|
 | `pr-review` | PR review | [PR review branch](#pr-review-branch) |
-| `pr-self-review` | PR review | [PR review branch](#pr-review-branch) |
 | `pr-revise` | PR revision | [PR revision branch](#pr-revision-branch) |
 | `implement` | Implementation | [Implementation branch](#implementation-branch) |
 | `worker-*` (prefix match) | Implementation | [Implementation branch](#implementation-branch) |
@@ -182,21 +179,13 @@ Present:
 ```
 **Available actions:**
 1. Implement fix — discuss and draft code changes for this finding
-2. Change disposition — update this finding's disposition in lens-findings.json
-3. Explore context — read the referenced file and surrounding code
+2. Explore context — read the referenced file and surrounding code
 ```
 
 After presenting actions, enter interactive discussion focused on this specific finding. When the user selects an action:
 
 - **Implement fix:**
   Discuss the finding in depth, then help draft the code changes needed. Reference the file and line number from the finding context. Do not write to disk without user confirmation.
-
-- **Change disposition:**
-  Ask the user for the new disposition value (e.g. `action`, `accepted`, `deferred`, `dismissed`). Then:
-  1. Locate `lens-findings.json`: use the `directory` field from the loaded context, or derive the path as `$(lore resolve)/_followups/$FOLLOWUP_ID/lens-findings.json`
-  2. Read the file, update `findings[$FINDING_INDEX].disposition` to the new value
-  3. Write the file back (direct JSON manipulation — do not use an external CLI)
-  4. Confirm: `Disposition updated to "<new-value>" for finding #<N+1>.`
 
 - **Explore context:**
   Read the file referenced in the finding (`**File:**` field) and display the relevant lines around the reported line number. Provide a brief summary of the surrounding code context.

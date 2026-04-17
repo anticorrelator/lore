@@ -455,9 +455,9 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 // followupListDims returns the width and height to pass to followupList based on layoutMode.
 func followupListDims(m model) (int, int) {
 	if m.layoutMode == config.LayoutTopBottom {
-		return m.topPanelWidth(), m.topPanelHeight()
+		return m.topPanelWidth(), m.listPanelHeight()
 	}
-	return leftPanelWidth, m.innerHeight()
+	return leftPanelWidth, m.listPanelHeight()
 }
 
 // renderStatusBar renders a single-line context-sensitive keybinding hint bar.
@@ -563,6 +563,7 @@ func (m model) renderStatusBar(width int) string {
 				hint("y", "copy"),
 				hint("E", "editor"),
 				hint("P", "post"),
+				hint("g", "summarize"),
 				hint("Tab/Shift-Tab", "cycle tabs"),
 				hint("h/Esc", "back to list"),
 				hint("?", "help"),

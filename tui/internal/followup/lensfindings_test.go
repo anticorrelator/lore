@@ -13,44 +13,40 @@ func testLensReview() *LensReview {
 		WorkItem: "test-work-item",
 		Findings: []LensFinding{
 			{
-				Severity:    "blocking",
-				Title:       "Missing error check",
-				File:        "main.go",
-				Line:        10,
-				Body:        "This function call ignores the error return value.",
-				Lens:        "correctness",
-				Disposition: "action",
-				Rationale:   "Error could cause silent data loss.",
+				Severity:  "blocking",
+				Title:     "Missing error check",
+				File:      "main.go",
+				Line:      10,
+				Body:      "This function call ignores the error return value.",
+				Lens:      "correctness",
+				Grounding: "Error could cause silent data loss.",
 			},
 			{
-				Severity:    "suggestion",
-				Title:       "Consider extracting helper",
-				File:        "utils/helper.go",
-				Line:        55,
-				Body:        "This block could be simplified into a helper function.",
-				Lens:        "clarity",
-				Disposition: "accepted",
-				Rationale:   "",
+				Severity: "suggestion",
+				Title:    "Consider extracting helper",
+				File:     "utils/helper.go",
+				Line:     55,
+				Body:     "This block could be simplified into a helper function.",
+				Lens:     "clarity",
+				Selected: true,
 			},
 			{
-				Severity:    "question",
-				Title:       "Is this intentional?",
-				File:        "config.go",
-				Line:        0,
-				Body:        "The default timeout is very high.",
-				Lens:        "security",
-				Disposition: "open",
-				Rationale:   "Might be intentional for batch processing.",
+				Severity:  "question",
+				Title:     "Is this intentional?",
+				File:      "config.go",
+				Line:      0,
+				Body:      "The default timeout is very high.",
+				Lens:      "security",
+				Grounding: "Might be intentional for batch processing.",
 			},
 			{
-				Severity:    "suggestion",
-				Title:       "Deferred nit",
-				File:        "api.go",
-				Line:        20,
-				Body:        "Minor naming nit.",
-				Lens:        "interface-clarity",
-				Disposition: "deferred",
-				Rationale:   "",
+				Severity: "suggestion",
+				Title:    "Deferred nit",
+				File:     "api.go",
+				Line:     20,
+				Body:     "Minor naming nit.",
+				Lens:     "interface-clarity",
+				Selected: true,
 			},
 		},
 	}
@@ -97,22 +93,15 @@ func TestLensFindingsViewOmitsZeroLine(t *testing.T) {
 	}
 }
 
-func TestLensFindingsViewShowsDispositionIndicators(t *testing.T) {
+func TestLensFindingsViewNoDispositionIndicators(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
 	out := m.View()
-	if !strings.Contains(out, "[act]") {
-		t.Error("View should contain [act] disposition indicator")
-	}
-	if !strings.Contains(out, "[ok]") {
-		t.Error("View should contain [ok] disposition indicator")
-	}
-	if !strings.Contains(out, "[?]") {
-		t.Error("View should contain [?] disposition indicator")
-	}
-	if !strings.Contains(out, "[def]") {
-		t.Error("View should contain [def] disposition indicator")
+	for _, indicator := range []string{"[act]", "[ok]", "[def]"} {
+		if strings.Contains(out, indicator) {
+			t.Errorf("View should not contain removed disposition indicator %q", indicator)
+		}
 	}
 }
 
@@ -129,16 +118,16 @@ func TestLensFindingsViewShowsLens(t *testing.T) {
 	}
 }
 
-func TestLensFindingsViewShowsRationale(t *testing.T) {
+func TestLensFindingsViewShowsGrounding(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
 	out := m.View()
-	if !strings.Contains(out, "rationale:") {
-		t.Error("View should contain rationale line when non-empty")
+	if !strings.Contains(out, "grounding:") {
+		t.Error("View should contain grounding line when non-empty")
 	}
 	if !strings.Contains(out, "silent data loss") {
-		t.Error("View should contain rationale text")
+		t.Error("View should contain grounding text")
 	}
 }
 
@@ -147,7 +136,7 @@ func TestLensFindingsViewShowsHeader(t *testing.T) {
 	m.SetSize(80, 40)
 
 	out := m.View()
-	// accepted and deferred are pre-seeded, so 2/4 start selected.
+	// testLensReview has findings[1] and [3] pre-selected.
 	if !strings.Contains(out, "2/4 selected") {
 		t.Errorf("View header should show '2/4 selected', got: %q", out)
 	}
@@ -251,20 +240,31 @@ func TestLensFindingsXTogglesSelection(t *testing.T) {
 	}
 }
 
-func TestLensFindingsEnterOpensActionMenu(t *testing.T) {
+func TestLensFindingsEnterTogglesSelection(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.actionMenuOpen {
-		t.Error("enter should open the action menu")
-	}
-	if m.actionMenu != actionMenuMain {
-		t.Errorf("enter should set actionMenu=actionMenuMain, got %v", m.actionMenu)
-	}
-	// Selection should NOT be toggled.
+	// finding[0] starts unselected
 	if m.findings[0].Selected {
-		t.Error("enter should not toggle finding selection")
+		t.Fatal("finding 0 should start unselected")
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.findings[0].Selected {
+		t.Error("enter should toggle finding 0 to selected")
+	}
+	if !m.review.Findings[0].Selected {
+		t.Error("review.Findings[0].Selected should be synced")
+	}
+	// Menu should NOT open on enter.
+	if m.actionMenuOpen {
+		t.Error("enter should not open action menu")
+	}
+
+	// Second enter deselects.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.findings[0].Selected {
+		t.Error("second enter should deselect finding 0")
 	}
 }
 
@@ -272,19 +272,13 @@ func TestLensFindingsEscClosesActionMenu(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
-	// Open menu
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.actionMenuOpen {
-		t.Fatal("expected menu to be open after enter")
-	}
+	// Open menu directly
+	m.actionMenuOpen = true
 
 	// Esc should close it
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if m.actionMenuOpen {
 		t.Error("esc should close the action menu")
-	}
-	if m.actionMenu != actionMenuNone {
-		t.Errorf("esc should set actionMenu=actionMenuNone, got %v", m.actionMenu)
 	}
 }
 
@@ -292,10 +286,7 @@ func TestLensFindingsJDismissesMenuAndNavigates(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.actionMenuOpen {
-		t.Fatal("expected menu to be open")
-	}
+	m.actionMenuOpen = true
 
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	if m.actionMenuOpen {
@@ -310,10 +301,7 @@ func TestLensFindingsKDismissesMenuAtTop(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.actionMenuOpen {
-		t.Fatal("expected menu to be open")
-	}
+	m.actionMenuOpen = true
 
 	// k at top: dismisses menu, cursor stays at 0
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
@@ -329,10 +317,7 @@ func TestLensFindingsMenuSwallowsOtherKeys(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.actionMenuOpen {
-		t.Fatal("expected menu to be open")
-	}
+	m.actionMenuOpen = true
 	selBefore := m.findings[0].Selected
 
 	// space should be swallowed (no selection toggle)
@@ -345,151 +330,20 @@ func TestLensFindingsMenuSwallowsOtherKeys(t *testing.T) {
 	}
 }
 
-func TestLensFindingsDKeyOpensDispositionSubMenu(t *testing.T) {
+func TestLensFindingsDKeySwallowedInMenu(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
-	// Open main menu
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.actionMenu != actionMenuMain {
-		t.Fatal("expected actionMenuMain after enter")
-	}
+	m.actionMenuOpen = true
+	selBefore := m.findings[0].Selected
 
-	// Press d to open disposition sub-menu
+	// 'd' no longer opens a disposition sub-menu; it is swallowed
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if m.actionMenu != actionMenuDisposition {
-		t.Errorf("d should transition to actionMenuDisposition, got %v", m.actionMenu)
-	}
 	if !m.actionMenuOpen {
-		t.Error("menu should remain open after d")
+		t.Error("d should be swallowed (menu should remain open)")
 	}
-}
-
-func TestLensFindingsDispositionSubMenuAction(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-	// cursor is at finding[0] (action disposition, unselected)
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if m.actionMenu != actionMenuDisposition {
-		t.Fatal("expected disposition sub-menu")
-	}
-
-	// a → action, selected=false
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
-	if m.actionMenuOpen {
-		t.Error("menu should close after disposition set")
-	}
-	if m.findings[0].Disposition != "action" {
-		t.Errorf("disposition should be 'action', got %q", m.findings[0].Disposition)
-	}
-	if m.findings[0].Selected {
-		t.Error("selected should be false for action disposition")
-	}
-	if m.review.Findings[0].Disposition != "action" {
-		t.Error("review.Findings[0].Disposition should be synced")
-	}
-	if m.review.Findings[0].Selected {
-		t.Error("review.Findings[0].Selected should be synced (false for action)")
-	}
-}
-
-func TestLensFindingsDispositionSubMenuDeferred(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-
-	// d → deferred, selected=true
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if m.actionMenuOpen {
-		t.Error("menu should close after disposition set")
-	}
-	if m.findings[0].Disposition != "deferred" {
-		t.Errorf("disposition should be 'deferred', got %q", m.findings[0].Disposition)
-	}
-	if !m.findings[0].Selected {
-		t.Error("selected should be true for deferred disposition")
-	}
-}
-
-func TestLensFindingsDispositionSubMenuAccepted(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-
-	// enter → accepted (ok/confirm), selected=true
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.actionMenuOpen {
-		t.Error("menu should close after disposition set")
-	}
-	if m.findings[0].Disposition != "accepted" {
-		t.Errorf("enter should set disposition to 'accepted', got %q", m.findings[0].Disposition)
-	}
-	if !m.findings[0].Selected {
-		t.Error("selected should be true for accepted disposition")
-	}
-}
-
-func TestLensFindingsDispositionSubMenuQuestionMark(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-
-	// ? → open, selected=false
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
-	if m.actionMenuOpen {
-		t.Error("menu should close after disposition set")
-	}
-	if m.findings[0].Disposition != "open" {
-		t.Errorf("? should set disposition to 'open', got %q", m.findings[0].Disposition)
-	}
-	if m.findings[0].Selected {
-		t.Error("selected should be false for open disposition")
-	}
-}
-
-func TestLensFindingsDispositionSubMenuEscBackToMain(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if m.actionMenu != actionMenuDisposition {
-		t.Fatal("expected disposition sub-menu")
-	}
-
-	// esc should go back to main menu, not close entirely
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if m.actionMenu != actionMenuMain {
-		t.Errorf("esc from disposition sub-menu should return to main, got %v", m.actionMenu)
-	}
-	if !m.actionMenuOpen {
-		t.Error("menu should still be open after esc from disposition sub-menu")
-	}
-}
-
-func TestLensFindingsDispositionSubMenuSwallowsUnknownKeys(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-	origDisp := m.findings[0].Disposition
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-
-	// Unknown key — should be swallowed, menu stays open
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
-	if !m.actionMenuOpen {
-		t.Error("unknown key should be swallowed, menu should remain open")
-	}
-	if m.findings[0].Disposition != origDisp {
-		t.Error("unknown key should not change disposition")
+	if m.findings[0].Selected != selBefore {
+		t.Error("d should not change selection")
 	}
 }
 
@@ -497,52 +351,21 @@ func TestLensFindingsViewMainMenuRow(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
-	// Open action menu
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.actionMenuOpen {
-		t.Fatal("expected menu to be open")
-	}
+	m.actionMenuOpen = true
 
 	out := m.View()
 	if !strings.Contains(out, "(c)hat") {
 		t.Error("main menu row should contain '(c)hat'")
 	}
-	if !strings.Contains(out, "(d)isposition") {
-		t.Error("main menu row should contain '(d)isposition'")
-	}
 	if !strings.Contains(out, "(e)dit") {
 		t.Error("main menu row should contain '(e)dit'")
 	}
-	// Disposition sub-menu labels should NOT appear
+	// Disposition option should NOT appear
+	if strings.Contains(out, "(d)isposition") {
+		t.Error("main menu should not show '(d)isposition'")
+	}
 	if strings.Contains(out, "(a)ction") {
 		t.Error("main menu should not show disposition sub-menu options")
-	}
-}
-
-func TestLensFindingsViewDispositionMenuRow(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-	m.SetSize(80, 40)
-
-	// Open main menu then disposition sub-menu
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	if m.actionMenu != actionMenuDisposition {
-		t.Fatal("expected disposition sub-menu")
-	}
-
-	out := m.View()
-	if !strings.Contains(out, "(a)ction") {
-		t.Error("disposition menu row should contain '(a)ction'")
-	}
-	if !strings.Contains(out, "(d)efer") {
-		t.Error("disposition menu row should contain '(d)efer'")
-	}
-	if !strings.Contains(out, "(?)open") {
-		t.Error("disposition menu row should contain '(?)open'")
-	}
-	// Main menu labels should NOT appear
-	if strings.Contains(out, "(c)hat") {
-		t.Error("disposition sub-menu should not show main menu options")
 	}
 }
 
@@ -565,8 +388,8 @@ func TestLensFindingsCardHeightIncludesMenuRow(t *testing.T) {
 
 	heightClosed := m.cardHeight(0)
 
-	// Open the menu
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	// Open the menu directly
+	m.actionMenuOpen = true
 	heightOpen := m.cardHeight(0)
 
 	if heightOpen != heightClosed+1 {
@@ -593,14 +416,14 @@ func TestLensFindingsSelectedCount(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
-	// accepted (idx 1) and deferred (idx 3) are pre-seeded; action (idx 0) and open (idx 2) are not.
+	// testLensReview has findings[1] and [3] pre-selected via Selected: true in fixture.
 	if m.selectedCount() != 2 {
-		t.Errorf("initial selectedCount = %d, want 2 (pre-seeded accepted+deferred)", m.selectedCount())
+		t.Errorf("initial selectedCount = %d, want 2", m.selectedCount())
 	}
 
-	// Toggle action (idx 0): select it → 3 selected.
+	// Toggle idx 0: select it → 3 selected.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
-	// Move to accepted (idx 1) and toggle: deselect it → back to 2 selected.
+	// Move to idx 1 and toggle: deselect it → back to 2 selected.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
 
@@ -653,13 +476,13 @@ func TestLensFindingsViewShowsCheckboxes(t *testing.T) {
 	m.SetSize(80, 40)
 
 	out := m.View()
-	// action and open findings start unselected.
+	// findings[0] and [2] start unselected.
 	if !strings.Contains(out, "[ ]") {
 		t.Error("View should show unchecked checkbox '[ ]' for unselected findings")
 	}
-	// accepted and deferred are pre-seeded selected.
+	// findings[1] and [3] start selected per fixture.
 	if !strings.Contains(out, "[x]") {
-		t.Error("View should show '[x]' for pre-seeded accepted/deferred findings")
+		t.Error("View should show '[x]' for selected findings")
 	}
 }
 
@@ -680,6 +503,10 @@ func TestLensFindingsViewShowsCheckedAfterSelect(t *testing.T) {
 
 func TestLensFindingsViewSelectionHeaderCount(t *testing.T) {
 	review := testLensReview()
+	// Clear the pre-selected state from the fixture, then select exactly [0] and [2].
+	for i := range review.Findings {
+		review.Findings[i].Selected = false
+	}
 	review.Findings[0].Selected = true
 	review.Findings[2].Selected = true
 	m := NewLensFindingsModel("", "", review)
@@ -691,68 +518,16 @@ func TestLensFindingsViewSelectionHeaderCount(t *testing.T) {
 	}
 }
 
-// --- pre-seeding behavior ---
-
-// TestLensFindingsPreSeedFreshReview verifies that accepted and deferred
-// findings start selected, while action and open findings start unselected,
-// when no prior user selections exist.
-func TestLensFindingsPreSeedFreshReview(t *testing.T) {
-	m := NewLensFindingsModel("", "", testLensReview())
-
-	// testLensReview fixture: [0]=action, [1]=accepted, [2]=open, [3]=deferred
-	for _, f := range m.findings {
-		switch f.Disposition {
-		case "accepted", "deferred":
-			if !f.Selected {
-				t.Errorf("finding with disposition %q should be pre-selected, got Selected=false", f.Disposition)
-			}
-		case "action", "open":
-			if f.Selected {
-				t.Errorf("finding with disposition %q should not be pre-selected, got Selected=true", f.Disposition)
-			}
-		}
-	}
-}
-
-// TestLensFindingsPreSeedSkippedWhenSelectionsExist verifies that when at
-// least one finding is already selected, pre-seeding is skipped and all
-// selections are preserved as-is.
-func TestLensFindingsPreSeedSkippedWhenSelectionsExist(t *testing.T) {
-	review := testLensReview()
-	// Pre-set only the action finding (not a disposition that would be pre-seeded).
-	review.Findings[0].Selected = true // action
-
-	m := NewLensFindingsModel("", "", review)
-
-	// action finding should remain selected (it was pre-set).
-	if !m.findings[0].Selected {
-		t.Error("pre-set action finding should remain selected")
-	}
-	// accepted finding should NOT be pre-seeded (existing selections present).
-	if m.findings[1].Selected {
-		t.Error("accepted finding should not be auto-selected when existing selections present")
-	}
-	// deferred finding should NOT be pre-seeded.
-	if m.findings[3].Selected {
-		t.Error("deferred finding should not be auto-selected when existing selections present")
-	}
-}
-
-// TestLensFindingsPreSeedFlowsToSelectedLensFindings verifies that pre-seeded
-// selections are visible to SelectedLensFindings() without any user interaction,
-// confirming the pre-seeding flows through to the promotion payload.
-func TestLensFindingsPreSeedFlowsToSelectedLensFindings(t *testing.T) {
+// TestLensFindingsSelectedLensFindingsReadsFromSidecar verifies that
+// SelectedLensFindings returns findings whose Selected field was set in the
+// sidecar (no pre-seeding logic).
+func TestLensFindingsSelectedLensFindingsReadsFromSidecar(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 
 	selected := m.SelectedLensFindings()
 
-	// Should contain exactly the accepted and deferred findings.
+	// testLensReview fixture has findings[1] and [3] pre-selected.
 	if len(selected) != 2 {
-		t.Fatalf("SelectedLensFindings() returned %d findings, want 2 (accepted + deferred)", len(selected))
-	}
-	for _, f := range selected {
-		if f.Disposition != "accepted" && f.Disposition != "deferred" {
-			t.Errorf("SelectedLensFindings() returned unexpected disposition %q", f.Disposition)
-		}
+		t.Fatalf("SelectedLensFindings() returned %d findings, want 2", len(selected))
 	}
 }

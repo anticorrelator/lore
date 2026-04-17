@@ -33,15 +33,6 @@ func WriteLensSidecarCmd(knowledgeDir, followupID string, review *LensReview) te
 	}
 }
 
-// actionMenuMode tracks which layer of the inline action menu is active.
-type actionMenuMode int
-
-const (
-	actionMenuNone        actionMenuMode = iota
-	actionMenuMain                       // top-level menu (chat / disposition)
-	actionMenuDisposition                // disposition sub-menu
-)
-
 // LensFindingsModel is the Bubble Tea model for lens review findings.
 // It renders finding cards with cursor navigation,
 // following the budget-based windowing pattern from ReviewCardsModel.
@@ -54,43 +45,18 @@ type LensFindingsModel struct {
 	knowledgeDir   string
 	followupID     string
 	actionMenuOpen bool
-	actionMenu     actionMenuMode
 }
 
 // NewLensFindingsModel creates a LensFindingsModel from a loaded LensReview.
 // knowledgeDir and followupID are required for write-back via WriteLensSidecarCmd.
 // Caller ensures review is non-nil.
-//
-// Pre-seeding: when no finding is already selected (fresh review), accepted
-// and deferred findings are pre-selected so they appear ready-to-promote by
-// default. action, open, and unknown dispositions start unselected.
 func NewLensFindingsModel(knowledgeDir, followupID string, review *LensReview) LensFindingsModel {
-	if !hasExistingSelections(review.Findings) {
-		for i := range review.Findings {
-			switch review.Findings[i].Disposition {
-			case "accepted", "deferred":
-				review.Findings[i].Selected = true
-			}
-		}
-	}
-	m := LensFindingsModel{
+	return LensFindingsModel{
 		review:       review,
 		findings:     review.Findings,
 		knowledgeDir: knowledgeDir,
 		followupID:   followupID,
 	}
-	return m
-}
-
-// hasExistingSelections reports whether any finding has Selected == true.
-// Used to determine whether pre-seeding should be applied.
-func hasExistingSelections(findings []LensFinding) bool {
-	for _, f := range findings {
-		if f.Selected {
-			return true
-		}
-	}
-	return false
 }
 
 // SetSize updates the available rendering dimensions.
@@ -123,65 +89,15 @@ func (m LensFindingsModel) Update(msg tea.Msg) (LensFindingsModel, tea.Cmd) {
 
 		// Action menu is open: intercept keys before normal navigation.
 		if m.actionMenuOpen {
-			if m.actionMenu == actionMenuDisposition {
-				// Disposition sub-menu: set disposition and sync selection per state table.
-				// State table: action→selected=false, accepted→selected=true,
-				//              deferred→selected=true, open→selected=false.
-				var newDisp string
-				switch msg.String() {
-				case "a":
-					newDisp = "action"
-				case "enter":
-					// Enter confirms/accepts the current finding (ok).
-					newDisp = "accepted"
-				case "d":
-					newDisp = "deferred"
-				case "?":
-					newDisp = "open"
-				case "esc":
-					// Back to main menu.
-					m.actionMenu = actionMenuMain
-					return m, nil
-				default:
-					// Swallow.
-					return m, nil
-				}
-				if newDisp != "" && m.cursor >= 0 && m.cursor < len(visible) {
-					backingIdx := visible[m.cursor]
-					m.findings[backingIdx].Disposition = newDisp
-					switch newDisp {
-					case "accepted", "deferred":
-						m.findings[backingIdx].Selected = true
-					default:
-						m.findings[backingIdx].Selected = false
-					}
-					if m.review != nil && backingIdx < len(m.review.Findings) {
-						m.review.Findings[backingIdx].Disposition = newDisp
-						m.review.Findings[backingIdx].Selected = m.findings[backingIdx].Selected
-					}
-					m.actionMenuOpen = false
-					m.actionMenu = actionMenuNone
-					return m, WriteLensSidecarCmd(m.knowledgeDir, m.followupID, m.review)
-				}
-				m.actionMenuOpen = false
-				m.actionMenu = actionMenuNone
-				return m, nil
-			}
-
 			// actionMenuMain layer.
 			switch msg.String() {
 			case "esc", "enter":
 				m.actionMenuOpen = false
-				m.actionMenu = actionMenuNone
-			case "d":
-				// Open disposition sub-menu.
-				m.actionMenu = actionMenuDisposition
 			case "c":
 				// Chat about this finding (no pre-filled prompt).
 				if m.cursor >= 0 && m.cursor < len(visible) {
 					backingIdx := visible[m.cursor]
 					m.actionMenuOpen = false
-					m.actionMenu = actionMenuNone
 					chatMsg := FollowupChatRequestMsg{
 						ID:           m.followupID,
 						FindingIndex: backingIdx,
@@ -196,7 +112,6 @@ func (m LensFindingsModel) Update(msg tea.Msg) (LensFindingsModel, tea.Cmd) {
 					f := m.findings[backingIdx]
 					editPrompt := buildFindingEditPrompt(f)
 					m.actionMenuOpen = false
-					m.actionMenu = actionMenuNone
 					chatMsg := FollowupChatRequestMsg{
 						ID:           m.followupID,
 						FindingIndex: backingIdx,
@@ -206,13 +121,11 @@ func (m LensFindingsModel) Update(msg tea.Msg) (LensFindingsModel, tea.Cmd) {
 				}
 			case "j", "down":
 				m.actionMenuOpen = false
-				m.actionMenu = actionMenuNone
 				if m.cursor < len(visible)-1 {
 					m.cursor++
 				}
 			case "k", "up":
 				m.actionMenuOpen = false
-				m.actionMenu = actionMenuNone
 				if m.cursor > 0 {
 					m.cursor--
 				}
@@ -223,10 +136,14 @@ func (m LensFindingsModel) Update(msg tea.Msg) (LensFindingsModel, tea.Cmd) {
 
 		switch msg.String() {
 		case "enter":
-			// Open the action menu at the main layer.
+			// Toggle selection on the current finding.
 			if m.cursor >= 0 && m.cursor < len(visible) {
-				m.actionMenuOpen = true
-				m.actionMenu = actionMenuMain
+				backingIdx := visible[m.cursor]
+				m.findings[backingIdx].Selected = !m.findings[backingIdx].Selected
+				if m.review != nil && backingIdx < len(m.review.Findings) {
+					m.review.Findings[backingIdx].Selected = m.findings[backingIdx].Selected
+				}
+				return m, WriteLensSidecarCmd(m.knowledgeDir, m.followupID, m.review)
 			}
 		case "j", "down":
 			if m.cursor < len(visible)-1 {
@@ -347,12 +264,6 @@ func (m LensFindingsModel) View() string {
 	sevSuggestion := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	sevQuestion := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
-	// Disposition styles
-	dispAction := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))   // yellow
-	dispAccepted := lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
-	dispDeferred := lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // dim
-	dispOpen := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))     // cyan
-
 	visible := m.visibleFindings()
 
 	var b strings.Builder
@@ -405,21 +316,6 @@ func (m LensFindingsModel) View() string {
 			backingIdx := visible[visPos]
 			f := m.findings[backingIdx]
 
-			// Disposition indicator
-			var dispStr string
-			switch f.Disposition {
-			case "action":
-				dispStr = dispAction.Render("[act]")
-			case "accepted":
-				dispStr = dispAccepted.Render("[ok]")
-			case "deferred":
-				dispStr = dispDeferred.Render("[def]")
-			case "open":
-				dispStr = dispOpen.Render("[?]")
-			default:
-				dispStr = dimStyle.Render("[" + f.Disposition + "]")
-			}
-
 			// Severity coloring
 			var sevStr string
 			switch f.Severity {
@@ -448,17 +344,17 @@ func (m LensFindingsModel) View() string {
 				check = "[x]"
 			}
 
-			// Header line: checkbox [disp] file:line  severity  [lens]
-			line1 := fmt.Sprintf("  %s %s %s  %s  %s", check, dispStr, filePart, sevStr, lensStr)
+			// Header line: checkbox file:line  severity  [lens]
+			line1 := fmt.Sprintf("  %s %s  %s  %s", check, filePart, sevStr, lensStr)
 
 			// Body: word-wrap
 			bodyW := m.width - 8
 			bodyLines := m.wrapBody(f.Body, bodyW)
 
-			// Rationale (optional)
-			var rationaleLines []string
-			if f.Rationale != "" {
-				rationaleLines = m.wrapBody("rationale: "+f.Rationale, bodyW)
+			// Grounding (optional)
+			var groundingLines []string
+			if f.Grounding != "" {
+				groundingLines = m.wrapBody("grounding: "+f.Grounding, bodyW)
 			}
 
 			var card strings.Builder
@@ -469,28 +365,16 @@ func (m LensFindingsModel) View() string {
 					card.WriteString(selectedBg.Render(dimStyle.Render("      " + bl)))
 					card.WriteByte('\n')
 				}
-				for _, rl := range rationaleLines {
-					card.WriteString(selectedBg.Render(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true).Render("      " + rl)))
+				for _, gl := range groundingLines {
+					card.WriteString(selectedBg.Render(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true).Render("      " + gl)))
 					card.WriteByte('\n')
 				}
 				if m.actionMenuOpen {
 					accentStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
-					var menuRow string
-					switch m.actionMenu {
-					case actionMenuDisposition:
-						menuRow = fmt.Sprintf("  ↳ %s  %s  %s  %s",
-							accentStyle.Render("(a)ction"),
-							accentStyle.Render("ok"),
-							accentStyle.Render("(d)efer"),
-							accentStyle.Render("(?)open"),
-						)
-					default: // actionMenuMain
-						menuRow = fmt.Sprintf("  ↳ %s  %s  %s",
-							accentStyle.Render("(c)hat"),
-							accentStyle.Render("(d)isposition"),
-							accentStyle.Render("(e)dit & chat"),
-						)
-					}
+					menuRow := fmt.Sprintf("  ↳ %s  %s",
+						accentStyle.Render("(c)hat"),
+						accentStyle.Render("(e)dit & chat"),
+					)
 					card.WriteString(menuRow)
 					card.WriteByte('\n')
 				}
@@ -501,8 +385,8 @@ func (m LensFindingsModel) View() string {
 					card.WriteString(dimStyle.Render("      " + bl))
 					card.WriteByte('\n')
 				}
-				for _, rl := range rationaleLines {
-					card.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true).Render("      " + rl))
+				for _, gl := range groundingLines {
+					card.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true).Render("      " + gl))
 					card.WriteByte('\n')
 				}
 			}
@@ -520,8 +404,8 @@ func (m LensFindingsModel) cardHeight(idx int) int {
 	bodyW := m.width - 8
 	bodyLines := m.wrapBody(m.findings[idx].Body, bodyW)
 	h := 1 + len(bodyLines) // header + body
-	if m.findings[idx].Rationale != "" {
-		h += len(m.wrapBody("rationale: "+m.findings[idx].Rationale, bodyW))
+	if m.findings[idx].Grounding != "" {
+		h += len(m.wrapBody("grounding: "+m.findings[idx].Grounding, bodyW))
 	}
 	if m.actionMenuOpen && idx == m.cursor {
 		h++ // action menu row

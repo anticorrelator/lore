@@ -626,11 +626,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 					// Re-apply dimensions to list
 					listW := leftPanelWidth
-					listH := m.innerHeight()
 					if m.layoutMode == config.LayoutTopBottom {
 						listW = m.topPanelWidth()
-						listH = m.topPanelHeight()
 					}
+					listH := m.listPanelHeight()
 					m.list, _ = m.list.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
 
 					// Re-apply dimensions to detail and all open spec panels.
@@ -859,14 +858,13 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-		// Send constrained sizes to sub-models (inner height excludes borders + status bar).
-		// In top/bottom layout, list gets full width and topPanelHeight.
+		// Send constrained sizes to sub-models. List height matches the rendered
+		// area (listPanelHeight); width spans the full panel in top/bottom layout.
 		listW := leftPanelWidth
-		listH := m.innerHeight()
 		if m.layoutMode == config.LayoutTopBottom {
 			listW = m.topPanelWidth()
-			listH = m.topPanelHeight()
 		}
+		listH := m.listPanelHeight()
 		lm, lcmd := m.list.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
 		m.list = lm
 
@@ -915,11 +913,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// Re-apply current window dimensions — the new model starts with height=0
 		// and any previously received WindowSizeMsg was dispatched to the old model.
 		listW := leftPanelWidth
-		listH := m.innerHeight()
 		if m.layoutMode == config.LayoutTopBottom {
 			listW = m.topPanelWidth()
-			listH = m.topPanelHeight()
 		}
+		listH := m.listPanelHeight()
 		m.list, _ = m.list.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
 		// Restore cursor to the previously selected item after rebuild.
 		m.list.SetCursorBySlug(prevSlug)
@@ -1112,6 +1109,31 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m, cmd
 
 	case followup.ExternalEditDoneMsg:
+		fd, cmd := m.followupDetail.Update(msg)
+		m.followupDetail = fd
+		return m, cmd
+
+	case followup.SummaryRequestMsg:
+		followupID := msg.FollowupID
+		selectionHash := msg.SelectionHash
+		return m, func() tea.Msg {
+			cmd := exec.Command("lore", "followup", "summarize", followupID) //nolint:gosec
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			if err != nil {
+				return followup.SummaryGeneratedMsg{
+					SelectionHash: selectionHash,
+					Err:           fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String())),
+				}
+			}
+			return followup.SummaryGeneratedMsg{
+				Text:          strings.TrimSpace(string(out)),
+				SelectionHash: selectionHash,
+			}
+		}
+
+	case followup.SummaryGeneratedMsg:
 		fd, cmd := m.followupDetail.Update(msg)
 		m.followupDetail = fd
 		return m, cmd

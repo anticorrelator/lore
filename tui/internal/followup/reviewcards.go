@@ -1,11 +1,15 @@
 package followup
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -77,6 +81,21 @@ type MergeStatusLoadedMsg struct {
 	Err        error
 }
 
+// SummaryRequestMsg is emitted when the user presses `g` to generate a thematic summary.
+// FollowupID and SelectionHash are forwarded to tui/update.go which spawns the CLI command.
+type SummaryRequestMsg struct {
+	FollowupID    string
+	SelectionHash string
+}
+
+// SummaryGeneratedMsg is returned after `lore followup summarize` completes.
+// On error, Err is set and Text is empty; on success, Text is the markdown output.
+type SummaryGeneratedMsg struct {
+	Text          string
+	SelectionHash string
+	Err           error
+}
+
 // SeverityFilter controls which comments are visible in the ReviewCardsModel.
 type SeverityFilter int
 
@@ -123,6 +142,7 @@ type ReviewCardsModel struct {
 	mergeStatus         *gh.MergeStatus      // nil until fetch completes
 	mergeStatusLoading  bool                 // true while fetch is in flight
 	mergeStatusErr      error                // set if fetch failed
+	generatingSummary   bool                 // true while `lore followup summarize` is in flight
 }
 
 // NewReviewCardsModel creates a ReviewCardsModel from a loaded ProposedReview.
@@ -238,6 +258,19 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 
 	case WriteSidecarMsg:
 		m.writeErr = msg.Err
+
+	case SummaryGeneratedMsg:
+		m.generatingSummary = false
+		if msg.Err != nil {
+			m.flashMsg = fmt.Sprintf("Summary error: %v", msg.Err)
+			return m, nil
+		}
+		if m.review != nil {
+			m.review.ReviewBody = spliceSummary(m.review.ReviewBody, msg.Text)
+			m.review.SummaryGeneratedAt = time.Now().UTC().Format(time.RFC3339)
+			m.review.SummarySelectionHash = msg.SelectionHash
+		}
+		return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
 
 	case ExternalEditDoneMsg:
 		m.externalEditing = false
@@ -407,6 +440,21 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 			return m, func() tea.Msg {
 				return ExternalEditRequestMsg{BackingIdx: backingIdx, Body: m.comments[backingIdx].Body}
 			}
+		case "g":
+			if m.generatingSummary {
+				m.flashMsg = "summary already generating"
+				break
+			}
+			if m.SelectedCount() == 0 {
+				m.flashMsg = "No comments selected — nothing to summarize."
+				break
+			}
+			m.generatingSummary = true
+			hash := currentSelectionHash(m.comments)
+			followupID := m.followupID
+			return m, func() tea.Msg {
+				return SummaryRequestMsg{FollowupID: followupID, SelectionHash: hash}
+			}
 		}
 	}
 	return m, nil
@@ -486,6 +534,12 @@ func (m ReviewCardsModel) View() string {
 		}
 		editingGeneral := m.editing && m.editIdx == -1
 		label := generalLabelStyle.Render("General Comment")
+		summaryPresent := strings.Contains(m.review.ReviewBody, "<!-- lore-summary -->") &&
+			strings.Contains(m.review.ReviewBody, "<!-- /lore-summary -->")
+		if summaryPresent && m.review.SummarySelectionHash != "" &&
+			currentSelectionHash(m.comments) != m.review.SummarySelectionHash {
+			label += dimStyle.Render(" (stale)")
+		}
 		if editingGeneral {
 			label = generalLabelStyle.Render("General Comment") + dimStyle.Render(" [editing — Enter to save, Esc to cancel]")
 		}
@@ -496,6 +550,16 @@ func (m ReviewCardsModel) View() string {
 			box.WriteByte('\n')
 		} else {
 			box.WriteString(line1)
+			box.WriteByte('\n')
+		}
+
+		if m.generatingSummary {
+			genLine := dimStyle.Render("    generating summary…")
+			if m.cursor == -1 {
+				box.WriteString(selectedBg.Render(genLine))
+			} else {
+				box.WriteString(genLine)
+			}
 			box.WriteByte('\n')
 		}
 
@@ -707,6 +771,37 @@ func newInlineTextarea(width int) textarea.Model {
 	ta.SetWidth(w)
 	ta.SetHeight(6)
 	return ta
+}
+
+// currentSelectionHash returns a stable hex digest of the selected comment set.
+// Hashes path:line:body for each selected comment (sorted) so the hash is
+// independent of ordering and insensitive to severity/confidence changes.
+func currentSelectionHash(cs []ProposedComment) string {
+	var parts []string
+	for _, c := range cs {
+		if c.Selected {
+			parts = append(parts, fmt.Sprintf("%s:%d:%s", c.Path, c.Line, c.Body))
+		}
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
+// spliceSummary replaces the content between <!-- lore-summary --> and
+// <!-- /lore-summary --> sentinels in body with newSummary. If the sentinel
+// pair is absent, the block is appended. Prose outside the sentinels is preserved.
+func spliceSummary(body, newSummary string) string {
+	const open = "<!-- lore-summary -->"
+	const close = "<!-- /lore-summary -->"
+	block := "\n" + open + "\n" + newSummary + "\n" + close + "\n"
+	if lo := strings.Index(body, open); lo >= 0 {
+		if hi := strings.Index(body[lo:], close); hi >= 0 {
+			hi += lo + len(close)
+			return body[:lo] + block + body[hi:]
+		}
+	}
+	return body + block
 }
 
 // wrapBody splits the comment body into word-wrapped lines.

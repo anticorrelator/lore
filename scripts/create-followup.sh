@@ -254,11 +254,9 @@ fi
 # Write lens-findings.json sidecar (accepts filepath or inline JSON)
 if [[ -n "$LENS_FINDINGS" ]]; then
   if [[ -f "$LENS_FINDINGS" ]]; then
-    # It's a file path — copy it
-    cp "$LENS_FINDINGS" "$ITEM_DIR/lens-findings.json"
+    _lf_raw=$(cat "$LENS_FINDINGS")
   elif printf '%s' "$LENS_FINDINGS" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
-    # It's inline JSON — write it directly
-    printf '%s\n' "$LENS_FINDINGS" > "$ITEM_DIR/lens-findings.json"
+    _lf_raw="$LENS_FINDINGS"
   else
     if [[ $JSON_MODE -eq 1 ]]; then
       json_error "Lens findings: not a valid file path or JSON"
@@ -266,6 +264,50 @@ if [[ -n "$LENS_FINDINGS" ]]; then
     echo "[followup] Error: --lens-findings is neither a valid file path nor valid JSON" >&2
     exit 1
   fi
+
+  # Validate lens-findings contract: no disposition, grounding required for
+  # blocking/suggestion, selected boolean required on every finding.
+  _lf_err_file=$(mktemp)
+  _lf_ok=0
+  printf '%s' "$_lf_raw" | python3 -c '
+import json, sys
+
+data = json.load(sys.stdin)
+findings = data.get("findings", [])
+errors = []
+
+for i, f in enumerate(findings):
+    label = "finding[{}] ({})".format(i, f.get("title", "(no title)"))
+    if "disposition" in f:
+        errors.append("{}: contains retired \"disposition\" field — update producer to use grounding+selected".format(label))
+    sev = f.get("severity", "")
+    if sev in ("blocking", "suggestion"):
+        grounding = f.get("grounding", "")
+        if not grounding or not grounding.strip():
+            errors.append("{}: severity \"{}\" requires a non-empty \"grounding\" field".format(label, sev))
+    if "selected" not in f:
+        errors.append("{}: missing required \"selected\" boolean field".format(label))
+    elif not isinstance(f["selected"], bool):
+        errors.append("{}: \"selected\" must be a boolean (true/false), got {}".format(label, type(f["selected"]).__name__))
+
+if errors:
+    for e in errors:
+        print(e)
+    sys.exit(1)
+' > "$_lf_err_file" 2>&1 || _lf_ok=$?
+  if [[ $_lf_ok -ne 0 ]]; then
+    _lf_errors=$(cat "$_lf_err_file")
+    rm -f "$_lf_err_file"
+    if [[ $JSON_MODE -eq 1 ]]; then
+      json_error "Lens findings validation failed: $_lf_errors"
+    fi
+    echo "[followup] Error: lens-findings validation failed:" >&2
+    printf '%s\n' "$_lf_errors" >&2
+    exit 1
+  fi
+  rm -f "$_lf_err_file"
+
+  printf '%s\n' "$_lf_raw" > "$ITEM_DIR/lens-findings.json"
 fi
 
 # Update the followup index
