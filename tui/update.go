@@ -1154,7 +1154,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			m.followupDetail.ClearID()
 			return m, m.followupDetail.SetID(msg.ID)
 		}
-		if msg.Dropped+msg.Shifted+msg.Renamed > 0 {
+		if msg.Dropped+msg.Shifted+msg.Renamed+msg.Appended > 0 {
 			var clauses []string
 			if msg.Dropped > 0 {
 				clauses = append(clauses, fmt.Sprintf("%d dropped", msg.Dropped))
@@ -1164,6 +1164,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			if msg.Renamed > 0 {
 				clauses = append(clauses, fmt.Sprintf("%d renamed", msg.Renamed))
+			}
+			if msg.Appended > 0 {
+				clauses = append(clauses, fmt.Sprintf("%d moved to body", msg.Appended))
 			}
 			m.flashErr = fmt.Sprintf("Posted %d (%s) — marked reviewed", msg.PostedCount, strings.Join(clauses, ", "))
 		} else {

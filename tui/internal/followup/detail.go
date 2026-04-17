@@ -18,16 +18,18 @@ import (
 
 // ProposedComment represents a single review comment from the proposed-comments.json sidecar.
 type ProposedComment struct {
-	ID          string       `json:"id"`
-	Path        string       `json:"path"`
-	Line        int          `json:"line"`
-	Side        string       `json:"side"`
-	Body        string       `json:"body"`
-	Selected    bool         `json:"selected"`
-	Severity    string       `json:"severity"`
-	Lenses      []string     `json:"lenses"`
-	Confidence  float64      `json:"confidence"`
-	PostOutcome *PostOutcome `json:"post_outcome,omitempty"`
+	ID             string       `json:"id"`
+	Path           string       `json:"path"`
+	Line           int          `json:"line"`
+	Side           string       `json:"side"`
+	Body           string       `json:"body"`
+	Selected       bool         `json:"selected"`
+	Severity       string       `json:"severity"`
+	Lenses         []string     `json:"lenses"`
+	Confidence     float64      `json:"confidence"`
+	Title          string       `json:"title,omitempty"`
+	FindingOrdinal int          `json:"finding_ordinal,omitempty"`
+	PostOutcome    *PostOutcome `json:"post_outcome,omitempty"`
 }
 
 // ProposedReview is the top-level wrapper for the proposed-comments.json sidecar.
@@ -395,6 +397,16 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		return m, nil
 
 	case ExternalEditDoneMsg:
+		if m.reviewCards != nil {
+			rc := *m.reviewCards
+			var cmd tea.Cmd
+			rc, cmd = rc.Update(msg)
+			m.reviewCards = &rc
+			return m, cmd
+		}
+		return m, nil
+
+	case SummaryGeneratedMsg:
 		if m.reviewCards != nil {
 			rc := *m.reviewCards
 			var cmd tea.Cmd

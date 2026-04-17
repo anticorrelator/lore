@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func testReview() *ProposedReview {
@@ -380,7 +381,9 @@ func TestReviewCardsViewBudgetWindowingLimitsCards(t *testing.T) {
 	review := &ProposedReview{Comments: comments}
 	m := NewReviewCardsModel("", "", review)
 	m.width = 80
-	m.height = 9 // header (2 lines) + budget for ~3 cards (6 lines) = 8
+	// Selection header + general-comment box consumes ~9 lines; leave room for
+	// a handful of inline cards (each 2 lines) but not all 20.
+	m.height = 16
 
 	out := m.View()
 
@@ -391,6 +394,126 @@ func TestReviewCardsViewBudgetWindowingLimitsCards(t *testing.T) {
 	}
 	if count == 0 {
 		t.Error("At least one card should be visible")
+	}
+}
+
+// TestReviewCardsViewBudgetAccountsForGeneralCardHeight verifies that a large
+// general-comment body (e.g., after `g` splices a thematic summary) does not
+// push inline cards off-screen. The total rendered height must stay within
+// m.height so the outer tab frame can scroll the whole view as one unit.
+func TestReviewCardsViewBudgetAccountsForGeneralCardHeight(t *testing.T) {
+	var comments []ProposedComment
+	for i := 0; i < 10; i++ {
+		comments = append(comments, ProposedComment{
+			ID:       "c" + string(rune('a'+i)),
+			Path:     "file.go",
+			Line:     i + 1,
+			Body:     "Comment body",
+			Severity: "low",
+		})
+	}
+	// Large general body simulating a post-`g` thematic summary.
+	var bodyLines []string
+	for i := 0; i < 20; i++ {
+		bodyLines = append(bodyLines, fmt.Sprintf("summary paragraph line %d", i))
+	}
+	review := &ProposedReview{
+		Comments:   comments,
+		ReviewBody: strings.Join(bodyLines, "\n"),
+	}
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 24
+
+	out := m.View()
+	gotHeight := lipgloss.Height(out)
+	if gotHeight > m.height {
+		t.Errorf("rendered height %d exceeds m.height %d — inline cards pushed off screen", gotHeight, m.height)
+	}
+}
+
+func TestReviewCardsCapitalEOnGeneralEmitsRequestWithBackingIdxNegOne(t *testing.T) {
+	t.Setenv("EDITOR", "true")
+	review := &ProposedReview{
+		Comments:   []ProposedComment{{Path: "a.go", Line: 1, Body: "inline"}},
+		ReviewBody: "general body content",
+	}
+	m := NewReviewCardsModel("", "test-followup", review)
+	m.width = 80
+	m.height = 24
+	m.cursor = -1 // focus general card
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	if cmd == nil {
+		t.Fatal("Capital E on general card should emit ExternalEditRequestMsg")
+	}
+	msg := cmd()
+	req, ok := msg.(ExternalEditRequestMsg)
+	if !ok {
+		t.Fatalf("cmd() returned %T, want ExternalEditRequestMsg", msg)
+	}
+	if req.BackingIdx != -1 {
+		t.Errorf("BackingIdx = %d, want -1 (general card)", req.BackingIdx)
+	}
+	if req.Body != "general body content" {
+		t.Errorf("Body = %q, want general body", req.Body)
+	}
+	if !updated.externalEditing {
+		t.Error("externalEditing flag should be set after E press")
+	}
+}
+
+func TestReviewCardsExternalEditDoneMsgUpdatesGeneralBodyWhenBackingIdxIsNegOne(t *testing.T) {
+	knowledgeDir := t.TempDir()
+	followupID := "external-edit-general"
+	itemDir := filepath.Join(knowledgeDir, "_followups", followupID)
+	if err := os.MkdirAll(itemDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	review := &ProposedReview{ReviewBody: "old body"}
+	m := NewReviewCardsModel(knowledgeDir, followupID, review)
+
+	updated, cmd := m.Update(ExternalEditDoneMsg{BackingIdx: -1, NewBody: "new general body"})
+	if updated.review.ReviewBody != "new general body" {
+		t.Errorf("ReviewBody = %q, want %q", updated.review.ReviewBody, "new general body")
+	}
+	if cmd == nil {
+		t.Fatal("ExternalEditDoneMsg with new content should return WriteSidecarCmd")
+	}
+	if msg, ok := cmd().(WriteSidecarMsg); !ok || msg.Err != nil {
+		t.Errorf("WriteSidecarCmd should succeed, got %v", msg)
+	}
+}
+
+func TestReviewCardsGeneralBodyCollapsesWhenNotFocused(t *testing.T) {
+	var bodyLines []string
+	for i := 0; i < 30; i++ {
+		bodyLines = append(bodyLines, fmt.Sprintf("summary line %d of the long thematic summary", i))
+	}
+	review := &ProposedReview{
+		Comments:   []ProposedComment{{Path: "a.go", Line: 1, Body: "inline"}},
+		ReviewBody: strings.Join(bodyLines, "\n"),
+	}
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 30
+
+	// Focus an inline card so the general card is unfocused.
+	m.cursor = 0
+	out := m.View()
+	if !strings.Contains(out, "general comment written") {
+		t.Error("unfocused general card with long body should show collapsed indicator")
+	}
+	if strings.Contains(out, "summary line 5") {
+		t.Error("unfocused general card should not render mid-body content")
+	}
+
+	// Focus the general card; expanded view should show some body content.
+	m.cursor = -1
+	out = m.View()
+	if !strings.Contains(out, "summary line 0") {
+		t.Error("focused general card should render body content from the top")
 	}
 }
 
@@ -1632,5 +1755,66 @@ func TestReviewBodySelectedPreservedByGAndSummaryMsg(t *testing.T) {
 	m, _ = m.Update(SummaryGeneratedMsg{Text: "summary text", SelectionHash: currentSelectionHash(m.comments)})
 	if !m.review.ReviewBodySelected {
 		t.Error("ReviewBodySelected must be preserved after SummaryGeneratedMsg")
+	}
+}
+
+// --- Title + FindingOrdinal rendering tests ---
+
+func TestReviewCardsViewShowsTitleAndOrdinal(t *testing.T) {
+	review := &ProposedReview{
+		Comments: []ProposedComment{
+			{
+				ID:             "c1",
+				Path:           "main.go",
+				Line:           10,
+				Body:           "Fix this.",
+				Severity:       "high",
+				Title:          "Some Title",
+				FindingOrdinal: 3,
+			},
+		},
+	}
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	out := m.View()
+
+	if !strings.Contains(out, "#3") {
+		t.Errorf("View should contain ordinal '#3', got:\n%s", out)
+	}
+	if !strings.Contains(out, "Some Title") {
+		t.Errorf("View should contain title 'Some Title', got:\n%s", out)
+	}
+}
+
+func TestReviewCardsCardHeightIncludesTitleRow(t *testing.T) {
+	withTitle := ProposedComment{
+		ID:             "c1",
+		Path:           "main.go",
+		Line:           10,
+		Body:           "Fix this.",
+		Severity:       "high",
+		Title:          "Some Title",
+		FindingOrdinal: 3,
+	}
+	withoutTitle := ProposedComment{
+		ID:       "c2",
+		Path:     "main.go",
+		Line:     10,
+		Body:     "Fix this.",
+		Severity: "high",
+	}
+
+	review := &ProposedReview{Comments: []ProposedComment{withTitle, withoutTitle}}
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	heightWith := m.cardHeight(0)
+	heightWithout := m.cardHeight(1)
+
+	if heightWith != heightWithout+1 {
+		t.Errorf("cardHeight with Title should be +1 over without: with=%d without=%d", heightWith, heightWithout)
 	}
 }

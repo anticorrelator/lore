@@ -130,6 +130,40 @@ else
   echo "  Current PR head:   $CURRENT_HEAD"
 fi
 
+# --- Pre-flight: build the set of postable (path:line) anchors from the PR diff ---
+# GitHub PR review comments only resolve to lines visible in the unified diff
+# (added or context lines on the new side). Lines outside any hunk get rejected
+# with "Line could not be resolved", which fails the entire batched review.
+# We pre-compute the postable set so unresolvable comments can be redirected to
+# the review body's "Additional comments" section instead of blocking the post.
+PR_FILES_DATA=$(gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/files" --paginate 2>/dev/null) || \
+  die "Failed to fetch PR file list for diff pre-flight"
+
+# Use a temp file (sorted) for membership checks — portable to bash 3.2 (no
+# associative arrays) and faster than re-scanning a string per comment.
+POSTABLE_FILE=$(mktemp /tmp/lore-postable-XXXXXX)
+trap 'rm -f "$POSTABLE_FILE"' EXIT
+echo "$PR_FILES_DATA" | jq -r '.[] | select(.patch != null) | "FILE:" + .filename + "\n" + .patch' | awk '
+  BEGIN { file = ""; in_hunk = 0 }
+  /^FILE:/ { file = substr($0, 6); in_hunk = 0; next }
+  /^@@/ {
+    if (match($0, /\+[0-9]+/)) {
+      new_line = substr($0, RSTART+1, RLENGTH-1) + 0
+      in_hunk = 1
+    }
+    next
+  }
+  in_hunk == 0 { next }
+  /^\\/ { next }
+  /^\+/ { print file ":" new_line; new_line++; next }
+  /^-/ { next }
+  /^ / { print file ":" new_line; new_line++; next }
+' | sort -u > "$POSTABLE_FILE"
+
+is_postable() {
+  grep -Fxq "$1" "$POSTABLE_FILE"
+}
+
 # --- Read review event from sidecar ---
 review_event=$(jq -r '.review_event // "COMMENT"' "$SIDECAR")
 case "$review_event" in
@@ -155,11 +189,15 @@ fi
 OUTCOMES_JSON='[]'
 # INLINE_COMMENTS: array of GitHub API comment objects (path/line/body)
 INLINE_COMMENTS='[]'
+# APPENDED_ENTRIES: bullets for the "Additional comments" body section
+# (comments that couldn't anchor to a postable line in the PR diff).
+APPENDED_ENTRIES=()
 
 POSTED_COUNT=0
 DROPPED_COUNT=0
 SHIFTED_COUNT=0
 RENAMED_COUNT=0
+APPENDED_COUNT=0
 
 # Collect report lines for stdout (printed below)
 REPORT_LINES=()
@@ -236,9 +274,19 @@ for i in $(seq 0 $((COMMENT_COUNT - 1))); do
       ;;
   esac
 
-  # Determine actual post disposition (may upgrade lost→posted under --force)
+  # Determine actual post disposition. The cascade:
+  #   1. Remap succeeded AND line is postable in the PR diff → inline post.
+  #   2. Remap succeeded but line is OUTSIDE the diff (e.g., unchanged region)
+  #      → redirect to the "Additional comments" section so the feedback survives.
+  #   3. Remap = lost AND --force → post inline at original line (legacy escape hatch).
+  #   4. Remap = lost (no --force) → redirect to "Additional comments".
   outcome_message=""
-  if [[ "$final_status" == "post" ]]; then
+  postable=0
+  if [[ "$final_status" == "post" ]] && is_postable "${final_path}:${final_line}"; then
+    postable=1
+  fi
+
+  if [[ "$postable" -eq 1 ]]; then
     INLINE_COMMENTS=$(echo "$INLINE_COMMENTS" | jq \
       --arg path "$final_path" \
       --argjson line "$final_line" \
@@ -246,8 +294,8 @@ for i in $(seq 0 $((COMMENT_COUNT - 1))); do
       '. + [{path: $path, line: $line, body: $body}]')
     POSTED_COUNT=$((POSTED_COUNT + 1))
     REPORT_LINES+=("  ${report_icon} ${report_anchor}")
-  elif [[ "$FORCE" -eq 1 ]]; then
-    # --force: post lost-anchor comments at original line
+  elif [[ "$final_status" == "lost" && "$FORCE" -eq 1 ]]; then
+    # --force: post lost-anchor comments at original line (legacy)
     final_path="$orig_path"
     final_line="$orig_line"
     final_status="posted"
@@ -260,9 +308,16 @@ for i in $(seq 0 $((COMMENT_COUNT - 1))); do
     POSTED_COUNT=$((POSTED_COUNT + 1))
     REPORT_LINES+=("  ${report_icon} ${report_anchor} [force-posted at original line]")
   else
-    final_status="dropped"
-    DROPPED_COUNT=$((DROPPED_COUNT + 1))
-    REPORT_LINES+=("  ${report_icon} ${report_anchor}")
+    # Redirect: keep the feedback in the review body's Additional comments section.
+    if [[ "$final_status" == "lost" ]]; then
+      outcome_message="line not in diff (original hunk deleted) — moved to Additional comments"
+    else
+      outcome_message="line not in PR diff — moved to Additional comments"
+    fi
+    final_status="appended"
+    APPENDED_COUNT=$((APPENDED_COUNT + 1))
+    APPENDED_ENTRIES+=("- **${final_path}:${final_line}** — ${body}")
+    REPORT_LINES+=("  → ${report_anchor} → moved to Additional comments")
   fi
 
   # Build post_outcome object after final disposition is resolved
@@ -281,10 +336,52 @@ for i in $(seq 0 $((COMMENT_COUNT - 1))); do
     '. + [{"idx": $idx, "outcome": $outcome}]')
 done
 
+# --- Splice the "Additional comments" block into the review body ---
+# Sentinels make re-runs idempotent: an existing block is replaced rather than stacked.
+# When there are no appended entries, any prior block is stripped so the body
+# stays clean once all comments find anchors.
+ADDITIONAL_BLOCK=""
+if [[ "${#APPENDED_ENTRIES[@]}" -gt 0 ]]; then
+  ADDITIONAL_BLOCK="<!-- lore-additional-comments -->
+# Additional comments
+
+$(printf '%s\n' "${APPENDED_ENTRIES[@]}")
+<!-- /lore-additional-comments -->"
+fi
+
+REVIEW_BODY=$(BODY="$REVIEW_BODY" BLOCK="$ADDITIONAL_BLOCK" python3 -c '
+import os, re
+body = os.environ.get("BODY", "")
+block = os.environ.get("BLOCK", "")
+body = re.sub(r"\n*<!-- lore-additional-comments -->.*?<!-- /lore-additional-comments -->\n*",
+              "\n", body, flags=re.DOTALL)
+body = body.rstrip("\n")
+if block:
+    if body:
+        print(body + "\n\n" + block)
+    else:
+        print(block)
+else:
+    print(body)
+') || die "Failed to splice Additional comments block"
+
+# Force the body into the payload when there are appended comments — otherwise
+# the relocated feedback would be silently dropped.
+if [[ "$APPENDED_COUNT" -gt 0 ]]; then
+  REVIEW_BODY_SOURCE="custom+additional"
+fi
+
 # Print per-comment disposition report
 echo ""
+HEADER_SUFFIX=""
 if [[ "$DROPPED_COUNT" -gt 0 ]]; then
-  echo "[post-proposed-review] Posting ${POSTED_COUNT} of ${SELECTED_COUNT} selected comments (${DROPPED_COUNT} dropped — see report)"
+  HEADER_SUFFIX="${HEADER_SUFFIX} ${DROPPED_COUNT} dropped"
+fi
+if [[ "$APPENDED_COUNT" -gt 0 ]]; then
+  HEADER_SUFFIX="${HEADER_SUFFIX} ${APPENDED_COUNT} moved to body"
+fi
+if [[ -n "$HEADER_SUFFIX" ]]; then
+  echo "[post-proposed-review] Posting ${POSTED_COUNT} of ${SELECTED_COUNT} selected comments (${HEADER_SUFFIX# } — see report)"
 else
   echo "[post-proposed-review] Posting ${POSTED_COUNT} of ${SELECTED_COUNT} selected comments"
 fi
@@ -319,9 +416,22 @@ if ! gh auth status &>/dev/null; then
   die "gh CLI not authenticated. Run: gh auth login"
 fi
 
-RESPONSE=$(echo "$PAYLOAD" | gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/reviews" \
+if ! RESPONSE=$(echo "$PAYLOAD" | gh api "repos/${OWNER}/${REPO}/pulls/${PR_NUMBER}/reviews" \
   --method POST \
-  --input - 2>&1) || die "Failed to post review: ${RESPONSE}"
+  --input - 2>&1); then
+  # Extract the clean GitHub API error if the response contained JSON; otherwise
+  # fall back to the raw stderr. `|| true` keeps a jq parse failure (set -e + pipefail)
+  # from exiting the script before die() can format a useful message.
+  GH_MESSAGE=$(printf '%s' "$RESPONSE" | jq -r '.message // empty' 2>/dev/null || true)
+  GH_ERRORS=$(printf '%s' "$RESPONSE" | jq -r 'if .errors then (.errors | map(tostring) | join("; ")) else empty end' 2>/dev/null || true)
+  if [[ -n "$GH_MESSAGE" || -n "$GH_ERRORS" ]]; then
+    if [[ -n "$GH_ERRORS" ]]; then
+      die "GitHub rejected review: ${GH_MESSAGE:-error} — ${GH_ERRORS}"
+    fi
+    die "GitHub rejected review: ${GH_MESSAGE}"
+  fi
+  die "Failed to post review: ${RESPONSE}"
+fi
 
 REVIEW_URL=$(echo "$RESPONSE" | jq -r '.html_url // empty')
 if [[ -n "$REVIEW_URL" ]]; then
@@ -341,15 +451,19 @@ LAST_POST=$(jq -n \
   --argjson dropped "$DROPPED_COUNT" \
   --argjson shifted "$SHIFTED_COUNT" \
   --argjson renamed "$RENAMED_COUNT" \
-  '{at: $at, current_head: $current_head, posted: $posted, dropped: $dropped, shifted: $shifted, renamed: $renamed}')
+  --argjson appended "$APPENDED_COUNT" \
+  '{at: $at, current_head: $current_head, posted: $posted, dropped: $dropped, shifted: $shifted, renamed: $renamed, appended: $appended}')
 
-# Merge post_outcome into each comment by sidecar index, and add last_post top-level
+# Merge post_outcome into each comment by sidecar index, persist the spliced
+# review_body (so the TUI shows the Additional comments block on next reload),
+# and write last_post top-level.
 SIDECAR_TMP="${SIDECAR}.tmp.$$"
 if ! jq \
   --argjson outcomes "$OUTCOMES_JSON" \
   --argjson last_post "$LAST_POST" \
+  --arg review_body "$REVIEW_BODY" \
   '
-  . + {last_post: $last_post} |
+  . + {last_post: $last_post, review_body: $review_body} |
   .comments = [
     .comments | to_entries[] |
     . as $entry |

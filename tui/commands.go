@@ -178,8 +178,14 @@ func runPostReview(knowledgeDir, followupID string) tea.Cmd {
 	return func() tea.Msg {
 		cmd := exec.Command("lore", "followup", "post-review", followupID)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
-			return followup.PostReviewCompleteMsg{ID: followupID, Err: err}
+			msg := strings.TrimSpace(stderr.String())
+			if msg == "" {
+				msg = err.Error()
+			}
+			return followup.PostReviewCompleteMsg{ID: followupID, Err: fmt.Errorf("%s", msg)}
 		}
 		itemDir, err := followup.ResolveDir(knowledgeDir, followupID)
 		if err != nil {
@@ -203,6 +209,7 @@ func runPostReview(knowledgeDir, followupID string) tea.Cmd {
 			Dropped:     review.LastPost.Dropped,
 			Shifted:     review.LastPost.Shifted,
 			Renamed:     review.LastPost.Renamed,
+			Appended:    review.LastPost.Appended,
 		}
 	}
 }

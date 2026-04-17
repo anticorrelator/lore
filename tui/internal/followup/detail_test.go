@@ -145,7 +145,7 @@ func TestLoadFollowUpDetailSidecarPresent(t *testing.T) {
 		"repo": "lore",
 		"head_sha": "abc123",
 		"comments": [
-			{"id":"c1","path":"main.go","line":10,"body":"Fix this.","selected":true,"severity":"high","lenses":["correctness"],"confidence":0.9}
+			{"id":"c1","path":"main.go","line":10,"body":"Fix this.","selected":true,"severity":"high","lenses":["correctness"],"confidence":0.9,"title":"Null pointer dereference","finding_ordinal":3}
 		]
 	}`
 	os.WriteFile(filepath.Join(itemDir, "proposed-comments.json"), []byte(sidecar), 0644)
@@ -175,6 +175,12 @@ func TestLoadFollowUpDetailSidecarPresent(t *testing.T) {
 	}
 	if !c.Selected {
 		t.Error("Comment should be selected")
+	}
+	if c.Title != "Null pointer dereference" {
+		t.Errorf("Title = %q, want %q", c.Title, "Null pointer dereference")
+	}
+	if c.FindingOrdinal != 3 {
+		t.Errorf("FindingOrdinal = %d, want 3", c.FindingOrdinal)
 	}
 }
 
@@ -741,6 +747,51 @@ func TestDetailModelWriteSidecarMsgReachesInactiveComments(t *testing.T) {
 	// reviewCards should still be non-nil (not lost by the write message).
 	if updated.reviewCards == nil {
 		t.Error("reviewCards should remain non-nil after WriteSidecarMsg while on Finding tab")
+	}
+}
+
+func TestDetailModelSummaryGeneratedMsgReachesInactiveComments(t *testing.T) {
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+
+	id := "summary-msg-test"
+	m.SetID(id)
+
+	detail := &FollowUpDetail{
+		ID:               id,
+		Title:            "Summary Msg Test",
+		Status:           "open",
+		Source:           "review",
+		FindingContent:   "# Finding",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+		ProposedComments: &ProposedReview{
+			Comments: []ProposedComment{
+				{ID: "c1", Path: "a.go", Line: 1, Body: "One.", Severity: "low", Selected: true},
+			},
+		},
+	}
+
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+
+	// Put reviewCards into the generating state, then switch away from Comments
+	// to verify SummaryGeneratedMsg still unblocks it.
+	updated.reviewCards.generatingSummary = true
+	updated.activeTab = updated.tabIndexFor(TabFinding)
+	if updated.ActiveTab() != TabFinding {
+		t.Fatalf("active tab = %v, want TabFinding", updated.ActiveTab())
+	}
+
+	updated, cmd := updated.Update(SummaryGeneratedMsg{Text: "summary body", SelectionHash: "hash-1"})
+	if updated.reviewCards == nil {
+		t.Fatal("reviewCards should remain non-nil after SummaryGeneratedMsg")
+	}
+	if updated.reviewCards.generatingSummary {
+		t.Error("generatingSummary should be reset to false after SummaryGeneratedMsg")
+	}
+	if cmd == nil {
+		t.Error("successful SummaryGeneratedMsg should return a follow-up WriteSidecarCmd")
 	}
 }
 

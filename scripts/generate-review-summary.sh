@@ -109,37 +109,31 @@ SYS_FILE=$(mktemp /tmp/review-summary-sys-XXXXXX.txt)
 trap 'rm -f "$SYS_FILE"' EXIT
 
 cat > "$SYS_FILE" <<'SYSTEM_EOF'
-You are summarizing a set of code review comments into a thematic markdown summary.
+Group the given code review comments into thematic markdown sections.
 
-Your output is a structured markdown document that groups findings by theme. Each theme
-should have an H3 heading (###) that captures the concern category (e.g., "Auth Boundary",
-"Test Quality", "Error Handling", "Regressions", "Performance", "Interface Clarity").
+Format:
+- H3 (###) per theme, naming the concern (e.g., "Error Handling", "Test Coverage", "Interface Clarity").
+- Under each heading, bullets only — no prose intro, no closing remarks.
+- Each bullet: `[severity] path:line — <impact statement> (≤20 words)`. Drop `[severity]` when absent.
 
-For each theme:
-- Write 1-2 sentences summarizing the pattern across the comments in that theme
-- List each comment as a bullet with a `path:line` backlink (e.g., `src/auth.go:42`)
-- Include the severity if present (e.g., [critical], [warning], [info])
+Bullet content — impact framing (this is the hard rule):
+- Lead with the *observable consequence*, not the code description. A reader should be able to judge severity from the bullet alone.
+- Name what breaks, who is affected, or what invariant is violated — e.g., "users see stale data after refresh", "panics on empty input", "silent data loss when N > 1000", "future callers will misuse X because Y is not enforced".
+- Ground the impact in the comment body. Do not speculate beyond what the comment states. If the comment only flags a style issue with no stated impact, say so briefly ("minor: naming inconsistency, no runtime effect") rather than inventing one.
+- Avoid vague verbs ("improve", "clean up", "refactor", "consider"). Avoid restating what the code does. Avoid starting with "the code" / "this function".
 
 Rules:
-- Output ONLY the markdown — no preamble, no explanation, no trailing remarks
-- Group related findings together even if they span different files
-- Use the `lenses` field to inform theme assignment, but name themes by concern not lens
-- Omit themes that would have only one bullet if it naturally fits another theme
-- If a comment body is very short, expand it into a full sentence in context
+- Output only the markdown. No preamble, no summary at the end.
+- Prefer fewer, broader themes; merge singletons into a related theme.
+- Use `lenses` to inform grouping but name themes by concern, not by lens.
 
-Output format example:
-### Auth Boundary
+Example:
+### Error Handling
+- [critical] src/auth/session.go:88 — privilege-escalation path keeps old session token, letting a demoted user act as admin
+- [warning] src/middleware/auth.go:34 — expired OAuth tokens are accepted, extending sessions past their grant window
 
-Session token handling is inconsistent across the auth layer.
-
-- [critical] `src/auth/session.go:88` — token validated but not rotated on privilege escalation
-- [warning] `src/middleware/auth.go:34` — missing expiry check on OAuth tokens
-
-### Test Quality
-
-Unit tests lack coverage of error paths.
-
-- [warning] `tests/auth_test.go:12` — no test for expired token rejection
+### Test Coverage
+- [warning] tests/auth_test.go:12 — expired-token rejection untested, regressions in that branch will ship unnoticed
 SYSTEM_EOF
 
 # --- Dry-run: print assembled prompts, never call claude ---

@@ -59,6 +59,7 @@ type LastPost struct {
 	Dropped     int    `json:"dropped"`
 	Shifted     int    `json:"shifted"`
 	Renamed     int    `json:"renamed"`
+	Appended    int    `json:"appended,omitempty"`
 }
 
 // PostReviewCompleteMsg is sent after post-proposed-review.sh finishes.
@@ -68,6 +69,7 @@ type PostReviewCompleteMsg struct {
 	Dropped     int
 	Shifted     int
 	Renamed     int
+	Appended    int
 	Err         error
 }
 
@@ -266,6 +268,14 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 			m.flashMsg = fmt.Sprintf("Editor error: %v", msg.Err)
 			return m, nil
 		}
+		if msg.BackingIdx == -1 {
+			// General comment card: write to ReviewBody.
+			if m.review == nil || msg.NewBody == m.review.ReviewBody {
+				return m, nil
+			}
+			m.review.ReviewBody = msg.NewBody
+			return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
+		}
 		if msg.BackingIdx >= len(m.comments) {
 			m.flashMsg = "Comment was deleted during editing"
 			return m, nil
@@ -414,13 +424,24 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 				return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
 			}
 		case "E":
-			// Open current comment body in external editor.
-			if m.externalEditing || m.editing || m.IsEmpty() || m.cursor < 0 || m.cursor >= len(visible) {
+			// Open current comment body in external editor. cursor == -1 edits the
+			// general review body (the same target as inline `e` on the general card).
+			if m.externalEditing || m.editing {
 				break
 			}
 			editor := os.Getenv("EDITOR")
 			if editor == "" {
 				m.flashMsg = "EDITOR not set"
+				break
+			}
+			if m.cursor == -1 && m.hasGeneralCard() {
+				m.externalEditing = true
+				body := m.review.ReviewBody
+				return m, func() tea.Msg {
+					return ExternalEditRequestMsg{BackingIdx: -1, Body: body}
+				}
+			}
+			if m.IsEmpty() || m.cursor < 0 || m.cursor >= len(visible) {
 				break
 			}
 			backingIdx := visible[m.cursor]
@@ -550,6 +571,31 @@ func (m ReviewCardsModel) View() string {
 					bodyLines = append(bodyLines, dimStyle.Render("      "+bl))
 				}
 			}
+			// Cap the general body: when focused, show up to half the tab height;
+			// when unfocused, collapse to a single indicator so inline cards stay
+			// visible during navigation. Full content is always accessible via E
+			// (external edit) or e (inline edit) once the card is focused.
+			if len(bodyLines) > 0 {
+				var maxBody int
+				if m.cursor == -1 {
+					maxBody = m.height / 2
+					if maxBody < 3 {
+						maxBody = 3
+					}
+				} else {
+					maxBody = 1
+				}
+				if len(bodyLines) > maxBody {
+					if maxBody == 1 {
+						bodyLines = []string{dimStyle.Render(
+							fmt.Sprintf("      … general comment written (%d lines) — ↑ to focus, E to view", len(bodyLines)))}
+					} else {
+						hidden := len(bodyLines) - (maxBody - 1)
+						bodyLines = append(bodyLines[:maxBody-1],
+							dimStyle.Render(fmt.Sprintf("      … %d more line(s) — press E to view full summary", hidden)))
+					}
+				}
+			}
 			if m.cursor == -1 {
 				for _, bl := range bodyLines {
 					box.WriteString(selectedBg.Render(bl))
@@ -581,10 +627,16 @@ func (m ReviewCardsModel) View() string {
 		b.WriteString(dimStyle.Render("  No comments match filter."))
 		b.WriteString("\n")
 	} else {
-		// Budget-based windowing: compute how many cards fit in the available height.
-		budget := m.height - 3 // account for header lines
+		// Budget-based windowing: subtract the height of everything already rendered
+		// (selection header + general-comment box) so a large general body — e.g.,
+		// after `g` splices a thematic summary in — does not push inline cards off
+		// the bottom without scrolling. When the general card has already claimed
+		// the full height, still reserve enough for the cursor card so navigation
+		// stays visible.
+		headerHeight := lipgloss.Height(b.String())
+		budget := m.height - headerHeight
 		if budget < 1 {
-			budget = 1<<31 - 1
+			budget = 1
 		}
 
 		// Pre-compute card heights for visible comments only.
@@ -645,7 +697,13 @@ func (m ReviewCardsModel) View() string {
 				sevStr = sevLow.Render(c.Severity)
 			}
 
-			// First line: checkbox + path:line + severity [lenses] confidence%
+			// Optional title line: [x] <severity> #<ordinal> — <title>
+			var titleLine string
+			if c.Title != "" {
+				titleLine = fmt.Sprintf("  %s %s #%d \u2014 %s", check, sevStr, c.FindingOrdinal, c.Title)
+			}
+
+			// Location line: checkbox + path:line + severity [lenses] confidence%
 			var lensToken, confToken string
 			if len(c.Lenses) > 0 {
 				lensToken = "  " + dimStyle.Render("["+strings.Join(c.Lenses, ",")+"]")
@@ -662,8 +720,18 @@ func (m ReviewCardsModel) View() string {
 
 			editingThis := m.editing && m.editIdx == backingIdx
 
+			focused := m.cursor >= 0 && visPos == m.cursor
+
 			var card strings.Builder
-			if m.cursor >= 0 && visPos == m.cursor {
+			if c.Title != "" {
+				if focused {
+					card.WriteString(selectedBg.Render(titleLine))
+				} else {
+					card.WriteString(titleLine)
+				}
+				card.WriteByte('\n')
+			}
+			if focused {
 				headerLine := line1
 				if editingThis {
 					headerLine = line1 + dimStyle.Render(" [editing — Enter to save, Esc to cancel]")
@@ -684,7 +752,7 @@ func (m ReviewCardsModel) View() string {
 				// Body: word-wrap the full text to the available width.
 				bodyW := m.width - 8 // 6 indent + 2 margin
 				bodyLines := m.wrapBody(c.Body, bodyW)
-				if m.cursor >= 0 && visPos == m.cursor {
+				if focused {
 					for _, bl := range bodyLines {
 						card.WriteString(selectedBg.Render(dimStyle.Render("      " + bl)))
 						card.WriteByte('\n')
@@ -722,12 +790,16 @@ func (m ReviewCardsModel) View() string {
 // cardHeight returns the number of terminal lines a single card renders.
 // When the card is being edited inline, returns header(1) + textarea height.
 func (m ReviewCardsModel) cardHeight(idx int) int {
+	titleLineCount := 0
+	if m.comments[idx].Title != "" {
+		titleLineCount = 1
+	}
 	if m.editing && m.editIdx == idx {
-		return 1 + m.editInput.Height()
+		return titleLineCount + 1 + m.editInput.Height()
 	}
 	bodyW := m.width - 8
 	bodyLines := m.wrapBody(m.comments[idx].Body, bodyW)
-	return 1 + len(bodyLines) // header + wrapped body lines
+	return titleLineCount + 1 + len(bodyLines) // title (optional) + header + wrapped body lines
 }
 
 // newInlineTextarea creates a textarea pre-configured for inline comment body editing.
