@@ -463,6 +463,13 @@ Apply the voice guide when writing external bodies:
 cat ~/.lore/claude-md/review-protocol/review-voice.md
 ```
 
+After stripping and shaping, produce two variants of each finding body:
+
+- **Section 3 variant** (used verbatim under `#### N. <title>` in `## Review Findings`): the stripped+shaped prose as-is. Do **not** prepend a bolded title — the `####` heading already carries the title, and duplicating it would produce a visual stutter.
+- **Comment-body variant** (used in `## Proposed Comments` preview blocks and in the `body` field emitted by Step 6f): prepend `**<title>**\n\n` as the first line of the prose, where `<title>` is the finding's title text. This is a plain bolded title, not a labeled header like `**Impact:**`.
+
+Step 6f is serialization-only — it emits the already-constructed comment-body variant without reformatting.
+
 ### 6e. Assemble the full report body
 
 Assemble the `--content` value with **all** of the following sections. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
@@ -531,7 +538,7 @@ line: <N>
 
 ### 6f. Persist the report
 
-Build the proposed comments JSON array: for each finding that has both `file` and `line` fields, produce `{"path": "<file>", "line": <line>, "body": "<finding body>"}`. The body must have internal protocol headers stripped per Step 6d-ii and grounding content preserved.
+Build the proposed comments JSON array by walking findings in severity-group order (`blocking` → `suggestion` → `question`), matching the order they appear in the markdown report. Within each group, maintain a 1-based ordinal counter that increments for every finding encountered — including findings that lack `file` or `line`. For each finding that has both `file` and `line` fields, emit `{"path": "<file>", "line": <line>, "body": "<finding body>", "title": "<finding title>", "finding_ordinal": <N>}` where `<N>` is the current ordinal for that severity group and `<finding title>` is the title text from the finding's `#### N. <title>` header. If a finding lacks `file` or `line`, skip emission but still increment the ordinal so that later findings in the same group preserve their markdown `#### N.` position. The body must have internal protocol headers stripped per Step 6d-ii and grounding content preserved. The ordinal counter resets to 1 at the start of each severity group.
 
 Pass the **complete report body from 6e** as `--content`:
 
@@ -542,7 +549,7 @@ bash ~/.lore/scripts/create-followup.sh \
   --author "@<author>" \
   --attachments '[{"type":"pr","ref":"#<N>"}]' \
   --suggested-actions '[{"type": "<type>", "label": "<label>"}]' \
-  --proposed-comments '<json array of {path, line, body} objects>' \
+  --proposed-comments '<json array of {path, line, body, title, finding_ordinal} objects>' \
   --pr <N> \
   --owner <owner> \
   --repo <repo> \

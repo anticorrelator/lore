@@ -106,6 +106,45 @@ After:
 
 ---
 
+#### Body Construction
+
+A finding body has three parts: an impact lead, evidence, and an optional fix suggestion.
+
+**Impact lead — open with the observable consequence.**
+
+The first sentence establishes why the finding matters. It names the failure scenario or the cost, not the code location. When a finding is produced via pr-review, the bolded title prefix (prepended by the review step) serves as the impact lead — the body then opens directly with evidence. When authoring findings manually, lead with the consequence.
+
+Before (opens with location, buries impact):
+> In `verifyToken()`, the `exp` field is not validated.
+
+After (opens with consequence):
+> Any token without an `exp` claim authenticates indefinitely — the expiry check is only reached when the field is present.
+
+**Evidence — name the specific mechanism the author can check.**
+
+Evidence is a short prose statement pointing to the code that makes the claim verifiable. It describes what the diff shows: a function, a path, a missing check. The author can confirm it directly against the diff without running the code.
+
+Before (asserts the impact without grounding it):
+> Token expiry is not enforced, which is a security issue.
+
+After (names the mechanism):
+> The `exp` claim is not validated in `verifyToken()` — the check at line 34 is only reached when `exp` is present, so absent-field tokens skip expiry entirely.
+
+**Fix suggestion — include only when the fix is non-obvious.**
+
+The default posture is to identify the issue and stop. Fix suggestions foreclose author judgment and inflate body length when the fix is evident from the finding. Include a suggestion only when one of these conditions holds: the fix is non-local (requires changes outside the immediate diff), the problem is hard to characterize without showing a resolution, or there are unusual constraints the author may not see.
+
+Before (prescribes the obvious fix):
+> Add a nil check before dereferencing `user`.
+
+After (identifies the issue, stops — fix is self-evident):
+> `session.user` is dereferenced at line 58 without a nil check — if this handler is reachable before authentication completes, the nil dereference panics.
+
+When a suggestion is warranted, frame it as an option, not a directive:
+> One approach: validate `exp` presence before signature verification, so the failure is an explicit rejection rather than a silent skip.
+
+---
+
 #### Addressing the Author
 
 Use impersonal constructions that describe the code, not the author's choices.
