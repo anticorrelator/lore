@@ -437,13 +437,13 @@ func TestBuildInitialPrompt(t *testing.T) {
 			wantContains: []string{"my-followup", ": extra info"},
 		},
 		{
-			name:         "regular chat mode uses Let's talk about prefix",
+			name:         "regular chat mode uses /work slash command with slug",
 			slug:         "some-slug",
 			title:        "Some Title",
 			chatMode:     true,
 			followupMode: false,
-			wantPrefix:   "Let's talk about ",
-			wantContains: []string{"Some Title"},
+			wantPrefix:   "/work ",
+			wantContains: []string{"some-slug"},
 		},
 		{
 			name:         "regular chat mode with extraContext appends it",
@@ -452,8 +452,8 @@ func TestBuildInitialPrompt(t *testing.T) {
 			extraContext: "more context",
 			chatMode:     true,
 			followupMode: false,
-			wantPrefix:   "Let's talk about ",
-			wantContains: []string{"Some Title", ": more context"},
+			wantPrefix:   "/work ",
+			wantContains: []string{"some-slug", ": more context"},
 		},
 		{
 			name:         "spec mode uses /spec prefix",

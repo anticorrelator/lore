@@ -845,7 +845,14 @@ func appendFindingContext(base string, sidecarBytes []byte, findingIndex int) st
 // buildInitialPrompt constructs the prompt string passed to claude at startup.
 // It encodes four modes: followup chat, regular chat, short spec, and full spec.
 // findingIndex, when >= 0 and followupMode is true, inserts "--finding <N>" after the followup ID.
+//
+// Chat prompts always start with a slash command at position 0 so the Claude
+// Code harness auto-invokes the matching skill. The skill name declares the
+// entity type; the slug identifies the specific item. This gives the agent an
+// unambiguous loading pattern (via the skill's documented CLI path) rather
+// than forcing it to infer identity from prose and fall back to file search.
 func buildInitialPrompt(slug, title, extraContext string, shortMode, chatMode, skipConfirm, followupMode bool, findingIndex int) string {
+	_ = title
 	var p string
 	if chatMode {
 		if followupMode {
@@ -854,7 +861,7 @@ func buildInitialPrompt(slug, title, extraContext string, shortMode, chatMode, s
 				p += fmt.Sprintf(" --finding %d", findingIndex)
 			}
 		} else {
-			p = "Let's talk about " + title
+			p = "/work " + slug
 		}
 		if extraContext != "" {
 			p += ": " + extraContext
