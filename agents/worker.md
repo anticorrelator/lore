@@ -99,6 +99,19 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        or surprising behaviors encountered during this task. Use the format:
        what you expected → what you found → what you did about it. Omit if
        the task completed straightforwardly.>
+     **Advisor consultations:** <Optional. When you consulted an advisor
+       agent (codex-plan-review, codex-pr-review, or other advisors), emit
+       one YAML-list entry per consultation. Each entry:
+       - advisor_template_version: <12-char hash from the advisor's template>
+         query_summary: <one-sentence what you asked>
+         advice_summary: <one-sentence what the advisor said>
+         was_followed: <true | false>
+         rationale_if_not_followed: <required when was_followed=false; omit otherwise>
+       Omit the section entirely if you did not consult an advisor. This is
+       a *calibration channel* for advisor templates — consultation_rate
+       and advice_followed_rate feed the advisor template scorecard per
+       Phase 8 task-51. Fabricated entries pollute the advisor's scorecard;
+       emit only real consultations.>
      **Blockers:** <none, or description of what's blocking>
    ```
 7. **Update task description** with your full completion report:
@@ -162,4 +175,18 @@ For tasks with subjects starting with "Update stale knowledge entry":
   - Structured observations capture load-bearing claims; narrative captures judgment, context, and emergent observations that don't fit the schema. Both are valuable — neither supersedes the other.
 - **Surfaced concerns** is a REQUIRED always-present field. Use it to surface architectural or cross-cutting concerns you spotted while working on this task but that you should NOT own or act on within the task — items that belong with a lead, advisor, or a follow-up work item. The worker-scope × architectural-scope gap lives here. `None` is a correct and common answer; always include the section even when empty. The *rate* at which this field is non-None is a calibration signal — do NOT conditionally emit based on whether you found anything. Always include it; the rate is the signal. Trigger-based conditional emission was explicitly considered and rejected in Phase 5.
 - **Investigation** is optional — use it when the task involved unexpected friction. Format: what you expected → what you found → what you did about it. Skip entirely for straightforward tasks.
+- **Advisor consultations** is optional — emit only when you actually consulted an advisor agent during the task (e.g., codex-plan-review, codex-pr-review, or any future ceremony-advisor registered as consultable). Each entry has five fields:
+  - `advisor_template_version` — 12-char hash identifying the advisor's template at the time of consultation. Required; without it the consultation cannot be attributed to a scorecard row.
+  - `query_summary` — one-sentence description of what you asked. Keep it concrete and evidence-anchored; vague summaries inflate consultation_rate without informing advice_followed_rate.
+  - `advice_summary` — one-sentence description of what the advisor said. Paraphrase — don't copy-paste the full advisor output.
+  - `was_followed` — boolean. `true` = you implemented the advice as-given or with minor adaptation. `false` = you deliberately did not follow the advice.
+  - `rationale_if_not_followed` — required when `was_followed=false`, omitted otherwise. One sentence explaining why. This field is the *teaching signal* for the advisor template: `/evolve` reads these rationales alongside `advice_followed_rate` to tune advisor templates that systematically produce advice workers reject.
+
+  Rolled-up metrics (written by `scripts/advisor-impact-rollup.sh` after the worker report is processed):
+  - `consultation_rate` — fraction of worker reports in a window that carry at least one consultation. Measures how often the advisor is used when available.
+  - `advice_followed_rate` — fraction of consultations where `was_followed=true`. Measures advisor accuracy from the worker's perspective.
+
+  Both metrics land as scorecard rows with `template_id = <advisor_template_version>` and `kind=scored`, attributing to the advisor (not the worker's or producer's template). This is the Phase 8 advisor-impact path; codex-plan-review / codex-pr-review verdicts against the *reviewed artifact's producer* template are a separate settlement channel (task-52, `codex-verdict-capture.sh`). Conflating the two would let advisor-reliability noise drive producer-template mutations.
+
+  **Do not fabricate** consultation entries. Workers who synthesize consultations to inflate consultation_rate corrupt the advisor scorecard with noise; the advisor template receives tuning pressure from work that didn't happen.
 - Keep the full report concise but complete — facts over opinions

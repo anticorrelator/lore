@@ -421,6 +421,53 @@ else
 fi
 
 # =============================================
+# Test 17: Grounded-or-nothing enforcement for reverse-auditor scored rows (task-21)
+# =============================================
+echo ""
+echo "Test 17: Grounded-or-nothing for reverse-auditor scored rows"
+setup_store
+
+# Case A: reverse-auditor + scored + no claim_anchor -> rejected
+EXIT_CODE=0
+ERR_OUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","verdict_source":"reverse-auditor","template_id":"worker","template_version":"aaaaaaaaaaaa","metric":"omission_rate","value":0.1,"sample_size":10}' \
+  2>&1 >/dev/null) || EXIT_CODE=$?
+assert_eq "reverse-auditor scored without anchor exits non-zero" "$EXIT_CODE" "1"
+assert_contains "rejection cites grounded-or-nothing" "$ERR_OUT" "grounded-or-nothing"
+
+# Case B: reverse-auditor + scored + complete claim_anchor -> accepted
+OUTPUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","verdict_source":"reverse-auditor","template_id":"worker","template_version":"aaaaaaaaaaaa","metric":"omission_rate","value":0.1,"sample_size":10,"claim_anchor":{"file":"/x/y.py","line_range":"10-12","exact_snippet":"def foo()"}}')
+assert_contains "reverse-auditor scored with anchor accepted" "$OUTPUT" "[scorecard] Appended row"
+
+# Case C: reverse-auditor + telemetry + no anchor -> accepted (exempt)
+OUTPUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","verdict_source":"reverse-auditor","template_id":"reverse-auditor","template_version":"aaaaaaaaaaaa","metric":"grounding_failure_rate","value":0.3,"sample_size":10}')
+assert_contains "reverse-auditor telemetry without anchor accepted" "$OUTPUT" "[scorecard] Appended row"
+
+# Case D: non-reverse-auditor scored without anchor -> accepted (not targeted)
+OUTPUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","verdict_source":"correctness-gate","template_id":"worker","template_version":"aaaaaaaaaaaa","metric":"factual_precision","value":0.9,"sample_size":10}')
+assert_contains "correctness-gate scored without anchor accepted" "$OUTPUT" "[scorecard] Appended row"
+
+# Case E: reverse-auditor + scored + anchor with empty file -> rejected
+EXIT_CODE=0
+ERR_OUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","verdict_source":"reverse-auditor","template_id":"worker","template_version":"aaaaaaaaaaaa","metric":"omission_rate","value":0.1,"sample_size":10,"claim_anchor":{"file":"","line_range":"10-12","exact_snippet":"def foo()"}}' \
+  2>&1 >/dev/null) || EXIT_CODE=$?
+assert_eq "reverse-auditor scored with empty file exits non-zero" "$EXIT_CODE" "1"
+
+# Case F: no verdict_source -> enforcement not triggered (accepted)
+OUTPUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","template_id":"worker","template_version":"aaaaaaaaaaaa","metric":"audit_pass_rate","value":0.8,"sample_size":10}')
+assert_contains "row without verdict_source accepted" "$OUTPUT" "[scorecard] Appended row"
+
+# Rejected rows never reached rows.jsonl: only the one accepted omission_rate row should be present
+ROWS_FILE="$KNOWLEDGE_DIR/_scorecards/rows.jsonl"
+ACCEPTED_OMISSION_COUNT=$(grep -c '"omission_rate"' "$ROWS_FILE" 2>/dev/null || echo "0")
+assert_eq "only the one accepted omission_rate row landed" "$ACCEPTED_OMISSION_COUNT" "1"
+
+# =============================================
 # Summary
 # =============================================
 echo ""

@@ -30,6 +30,20 @@
 #   window_start, window_end, source_artifact_ids, granularity
 # These are not hard-validated at append time (Phase 2 is substrate-only;
 # downstream consumers encode stricter checks).
+#
+# Grounded-or-nothing enforcement (task-21, Phase 4):
+#   When verdict_source == "reverse-auditor" AND kind == "scored", the row
+#   must carry a non-empty claim_anchor object with file, line_range, and
+#   exact_snippet fields all present and non-empty. Scored reverse-auditor
+#   rows without grounded anchors are rejected. Telemetry-kind rows
+#   (e.g., grounding_failure_rate) do not require the anchor — ungrounded
+#   diagnostic telemetry is explicit and permitted.
+#   Rationale: the reverse-auditor's scorecard weight is "grounded-or-
+#   nothing" per the settlement plan — ungrounded concerns may surface in
+#   /retro narrative but cannot drive producer-evaluation scoring. This is
+#   enforced at the writer (not the agent prompt) because the writer is
+#   the last line of defense: any path that reaches rows.jsonl without
+#   this check corrupts the signal irreversibly.
 
 set -euo pipefail
 
@@ -122,6 +136,25 @@ case "$CAL_STATE" in
     fail "invalid calibration_state: '$CAL_STATE' (must be 'calibrated', 'pre-calibration', or 'unknown')"
     ;;
 esac
+
+# --- Grounded-or-nothing enforcement for reverse-auditor scored rows (task-21) ---
+# If the row declares verdict_source == "reverse-auditor" AND kind == "scored",
+# require claim_anchor.{file, line_range, exact_snippet} all non-empty.
+# Telemetry rows (e.g., grounding_failure_rate) are exempt — ungrounded
+# diagnostic signal is explicit and permitted under the kind discriminator.
+VERDICT_SOURCE=$(printf '%s' "$ROW" | jq -r '.verdict_source // ""')
+if [[ "$VERDICT_SOURCE" == "reverse-auditor" && "$KIND" == "scored" ]]; then
+  ANCHOR_OK=$(printf '%s' "$ROW" | jq -e '
+    (.claim_anchor // null) as $a
+    | ($a != null)
+      and (($a.file // "") != "")
+      and (($a.line_range // "") != "")
+      and (($a.exact_snippet // "") != "")
+  ' >/dev/null 2>&1 && echo "true" || echo "false")
+  if [[ "$ANCHOR_OK" != "true" ]]; then
+    fail "reverse-auditor scored row rejected: grounded-or-nothing enforced — claim_anchor.{file, line_range, exact_snippet} all required and non-empty (kind=scored, verdict_source=reverse-auditor). Telemetry-kind rows are exempt; surface ungrounded concerns in /retro narrative instead."
+  fi
+fi
 
 # --- Resolve knowledge directory ---
 if [[ -n "$KDIR_OVERRIDE" ]]; then

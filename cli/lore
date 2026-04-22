@@ -15,6 +15,41 @@ resolve_kdir() {
   "$SCRIPTS_DIR/resolve-repo.sh"
 }
 
+# --- Role gate (Phase 9) ---
+# Maintainer-only verbs route through this guard. If the resolved role (see
+# resolve_role in scripts/lib.sh) is not "maintainer", emit a clear error and
+# exit 2. Exit 2 is distinct from usage-error (1) and script-error (3+) so
+# callers and tests can distinguish "you lack permission" from "your argv is
+# wrong". The error message names the escape hatches: per-repo config.json,
+# user-level settings.json, and the LORE_ROLE env override for one-off use.
+#
+# Usage: require_maintainer <verb-for-error-message>
+require_maintainer() {
+  local verb="${1:-command}"
+  local role
+  role=$(resolve_role)
+  if [[ "$role" != "maintainer" ]]; then
+    cat >&2 <<EOF
+Error: 'lore $verb' requires role=maintainer (current role: $role).
+
+Maintainer verbs mutate shared templates and the evaluation pool. Contributors
+submit evidence via 'lore retro export' (and any distribution channel the
+project uses) and let the maintainer merge it. See
+_research/multi-user-evolution-design.md for the full federation model.
+
+To become a maintainer for this repo, add one of:
+  • \$LORE_DATA_DIR/repos/<repo>/config.json  (preferred, per-repo opt-in)
+      {"role": "maintainer"}
+  • \$LORE_DATA_DIR/config/settings.json     (user-level default)
+      {"role": "maintainer"}
+
+One-off override (current invocation only):
+  LORE_ROLE=maintainer lore $verb ...
+EOF
+    exit 2
+  fi
+}
+
 # --- Usage ---
 usage() {
   cat >&2 <<EOF
@@ -27,6 +62,7 @@ Commands:
   search       Search knowledge and/or work items
   capture      Capture an insight to the knowledge store
   annotate     Record a retrieval friction annotation
+  audit        Route a producer artifact through the settlement judges
   resolve      Resolve repo path or [[backlink]] references
   prefetch     Prefetch knowledge for agent prompts
   init         Initialize a knowledge store
@@ -57,6 +93,7 @@ Commands:
   agent        Agent integration toggle (see: lore agent --help)
   scale        Capture-scale helpers (see: lore scale --help)
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
+  retro        Federated retro pooling (see: lore retro --help)
 
 Options:
   --help, -h       Show this help
@@ -161,6 +198,7 @@ Subcommands:
   delete       Permanently delete a follow-up
   post-review  Post a proposed review comment to GitHub
   summarize    Generate a thematic summary of selected review comments
+  reconcile    Tournament reconciliation between /pr-review and /pr-self-review
 
 Options:
   --help, -h    Show this help
@@ -278,6 +316,39 @@ Notes:
 EOF
 }
 
+retro_usage() {
+  # Role-aware help: maintainer verbs are omitted from the contributor view
+  # (task-54) so the contributor surface stays minimal and discovery-safe.
+  # Maintainers see the full surface.
+  local role
+  role=$(resolve_role)
+  cat >&2 <<EOF
+lore retro — federated retro pooling (Phase 9 of the settlement architecture)
+
+Usage: lore retro <subcommand> [args...]
+
+Subcommands:
+  export      Export a redacted retro bundle for submission to a maintainer
+EOF
+  if [[ "$role" == "maintainer" ]]; then
+    cat >&2 <<EOF
+  import      Ingest a contributor bundle into the maintainer's private pool [maintainer]
+  aggregate   Compute convergence tags over the imported pool              [maintainer]
+EOF
+  fi
+  cat >&2 <<EOF
+
+Options:
+  --help, -h    Show this help
+
+Notes:
+  'export' is contributor-facing and requires no role. 'import' and
+  'aggregate' require role=maintainer in ~/.lore/config/settings.json
+  (or per-repo ~/.lore/repos/<repo>/config.json). Current role: $role.
+  See _research/multi-user-evolution-design.md for the full federation design.
+EOF
+}
+
 # --- Scale subgroup ---
 cmd_scale() {
   if [[ $# -eq 0 ]]; then
@@ -350,6 +421,41 @@ cmd_scorecard() {
       echo "Error: unknown scorecard subcommand '$subcmd'" >&2
       echo "" >&2
       scorecard_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Retro subgroup (Phase 9 federated retro pooling) ---
+cmd_retro() {
+  if [[ $# -eq 0 ]]; then
+    retro_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      retro_usage
+      return 0
+      ;;
+    export)
+      "$SCRIPTS_DIR/retro-export.sh" "$@"
+      ;;
+    import)
+      require_maintainer "retro import"
+      "$SCRIPTS_DIR/retro-import.sh" "$@"
+      ;;
+    aggregate)
+      require_maintainer "retro aggregate"
+      "$SCRIPTS_DIR/retro-aggregate.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown retro subcommand '$subcmd'" >&2
+      echo "" >&2
+      retro_usage
       return 1
       ;;
   esac
@@ -862,6 +968,9 @@ cmd_followup() {
     summarize)
       "$SCRIPTS_DIR/generate-review-summary.sh" "$@"
       ;;
+    reconcile)
+      "$SCRIPTS_DIR/reconcile-reviews.sh" "$@"
+      ;;
     *)
       echo "Error: unknown followup subcommand '$subcmd'" >&2
       echo "" >&2
@@ -900,6 +1009,10 @@ case "$1" in
   annotate)
     shift
     "$SCRIPTS_DIR/annotate.sh" "$@"
+    ;;
+  audit)
+    shift
+    "$SCRIPTS_DIR/audit-artifact.sh" "$@"
     ;;
   resolve)
     shift
@@ -1014,6 +1127,10 @@ case "$1" in
   scorecard)
     shift
     cmd_scorecard "$@"
+    ;;
+  retro)
+    shift
+    cmd_retro "$@"
     ;;
   batch-spec)
     shift

@@ -4,7 +4,7 @@
 #        [--captured-at-branch <name>] [--captured-at-sha <sha>] [--captured-at-merge-base-sha <sha>]
 #        Entry body is read from stdin.
 # Creates execution-log.md if missing (with header).
-# Sources: implement-lead | spec-lead | remember | manual
+# Sources: implement-lead | spec-lead | remember | manual | audit
 #
 # Optional flags:
 #   --template-version   Template-version hash of the producing agent template (see scripts/template-version.sh).
@@ -82,9 +82,9 @@ if [[ -z "$SOURCE" ]]; then
 fi
 
 case "$SOURCE" in
-  implement-lead|spec-lead|remember|manual) ;;
+  implement-lead|spec-lead|remember|manual|audit) ;;
   *)
-    echo "[execution-log] Error: --source must be one of: implement-lead, spec-lead, remember, manual" >&2
+    echo "[execution-log] Error: --source must be one of: implement-lead, spec-lead, remember, manual, audit" >&2
     exit 1
     ;;
 esac
