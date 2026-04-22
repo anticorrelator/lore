@@ -55,6 +55,8 @@ Commands:
   bootstrap    Bootstrap knowledge store (see: lore bootstrap --help)
   ceremony     Ceremony config management (see: lore ceremony --help)
   agent        Agent integration toggle (see: lore agent --help)
+  scale        Capture-scale helpers (see: lore scale --help)
+  scorecard    Scorecard sidecar management (see: lore scorecard --help)
 
 Options:
   --help, -h       Show this help
@@ -72,7 +74,7 @@ Subcommands:
   create    Create a new work item
   list      List active work items
   show      Show a work item's full context
-  set       Set metadata fields (issue, pr) on a work item
+  set       Set metadata fields (issue, pr, scope) on a work item
   archive   Archive a completed work item
   delete    Permanently delete a work item
   unarchive Restore an archived work item
@@ -238,6 +240,119 @@ Subcommands:
 Options:
   --help, -h    Show this help
 EOF
+}
+
+scale_usage() {
+  cat >&2 <<EOF
+lore scale — capture-scale helpers
+
+Usage: lore scale <subcommand> [args...]
+
+Subcommands:
+  compute   Compute clamped absolute capture scale from work-scope + role × slot
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+scorecard_usage() {
+  cat >&2 <<EOF
+lore scorecard — append-only scorecard sidecar for template-level evaluation signal
+
+Usage: lore scorecard <subcommand> [args...]
+
+Subcommands:
+  append    Append a validated JSON row to _scorecards/rows.jsonl (from --row or stdin)
+  rollup    Aggregate rows.jsonl into _scorecards/_current.json
+  current   Print _scorecards/_current.json
+  rows      Print _scorecards/rows.jsonl
+
+Options:
+  --help, -h    Show this help
+
+Notes:
+  Scorecard rows are NEVER loaded into agent prompt context. Only /retro,
+  /evolve, scorecard-rollup, and CLI views consume them. 'append' is the
+  sole sanctioned writer of rows.jsonl — see _scorecards/README.md.
+EOF
+}
+
+# --- Scale subgroup ---
+cmd_scale() {
+  if [[ $# -eq 0 ]]; then
+    scale_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      scale_usage
+      return 0
+      ;;
+    compute)
+      "$SCRIPTS_DIR/scale-compute.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown scale subcommand '$subcmd'" >&2
+      echo "" >&2
+      scale_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Scorecard subgroup ---
+cmd_scorecard() {
+  if [[ $# -eq 0 ]]; then
+    scorecard_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      scorecard_usage
+      return 0
+      ;;
+    append)
+      "$SCRIPTS_DIR/scorecard-append.sh" "$@"
+      ;;
+    rollup)
+      "$SCRIPTS_DIR/scorecard-rollup.sh" "$@"
+      ;;
+    current)
+      local kdir current_file
+      kdir="$(resolve_kdir)"
+      current_file="$kdir/_scorecards/_current.json"
+      if [[ ! -f "$current_file" ]]; then
+        echo "Error: $current_file does not exist. Run 'lore scorecard rollup' first." >&2
+        return 1
+      fi
+      cat "$current_file"
+      ;;
+    rows)
+      local kdir rows_file
+      kdir="$(resolve_kdir)"
+      rows_file="$kdir/_scorecards/rows.jsonl"
+      if [[ ! -f "$rows_file" ]]; then
+        echo "Error: $rows_file does not exist. Run 'lore scorecard append' to create it." >&2
+        return 1
+      fi
+      cat "$rows_file"
+      ;;
+    *)
+      echo "Error: unknown scorecard subcommand '$subcmd'" >&2
+      echo "" >&2
+      scorecard_usage
+      return 1
+      ;;
+  esac
 }
 
 # --- Analyze subgroup ---
@@ -891,6 +1006,14 @@ case "$1" in
   agent)
     shift
     cmd_agent "$@"
+    ;;
+  scale)
+    shift
+    cmd_scale "$@"
+    ;;
+  scorecard)
+    shift
+    cmd_scorecard "$@"
     ;;
   batch-spec)
     shift

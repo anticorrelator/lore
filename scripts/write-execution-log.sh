@@ -1,9 +1,23 @@
 #!/usr/bin/env bash
 # write-execution-log.sh — Append an entry to a work item's execution-log.md
-# Usage: write-execution-log.sh --slug <slug> --source <source> [--phase <phase>]
+# Usage: write-execution-log.sh --slug <slug> --source <source> [--phase <phase>] [--template-version <hash>]
+#        [--captured-at-branch <name>] [--captured-at-sha <sha>] [--captured-at-merge-base-sha <sha>]
 #        Entry body is read from stdin.
 # Creates execution-log.md if missing (with header).
 # Sources: implement-lead | spec-lead | remember | manual
+#
+# Optional flags:
+#   --template-version   Template-version hash of the producing agent template (see scripts/template-version.sh).
+#                        When supplied, emitted as a `Template-version: <hash>` header line immediately after the
+#                        entry's `##` header. When omitted, the header line is omitted entirely — legacy callers
+#                        that do not pass the flag produce byte-identical output to pre-Phase-1.
+#
+# Branch-provenance flags (task 7 — always emitted when any is resolvable):
+#   --captured-at-branch          Branch at log-write time. Defaults to local git resolution; falls back to "null".
+#   --captured-at-sha             HEAD commit SHA at log-write time. Defaults to local git resolution; falls back to "null".
+#   --captured-at-merge-base-sha  Merge-base against origin/main. Defaults to local git resolution; falls back to "null".
+#   Emitted as a single `Captured-at: branch=<b> sha=<s> merge-base-sha=<mb>` header line below the `##` line,
+#   so each entry records *where* the logging agent was operating from. No network access.
 
 set -euo pipefail
 
@@ -14,6 +28,10 @@ source "$SCRIPT_DIR/lib.sh"
 SLUG=""
 SOURCE=""
 PHASE=""
+TEMPLATE_VERSION=""
+CAPTURED_AT_BRANCH=""
+CAPTURED_AT_SHA=""
+CAPTURED_AT_MERGE_BASE_SHA=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -29,9 +47,25 @@ while [[ $# -gt 0 ]]; do
       PHASE="$2"
       shift 2
       ;;
+    --template-version)
+      TEMPLATE_VERSION="$2"
+      shift 2
+      ;;
+    --captured-at-branch)
+      CAPTURED_AT_BRANCH="$2"
+      shift 2
+      ;;
+    --captured-at-sha)
+      CAPTURED_AT_SHA="$2"
+      shift 2
+      ;;
+    --captured-at-merge-base-sha)
+      CAPTURED_AT_MERGE_BASE_SHA="$2"
+      shift 2
+      ;;
     *)
       echo "[execution-log] Error: Unknown flag '$1'" >&2
-      echo "Usage: write-execution-log.sh --slug <slug> --source <source> [--phase <phase>]" >&2
+      echo "Usage: write-execution-log.sh --slug <slug> --source <source> [--phase <phase>] [--template-version <hash>] [--captured-at-branch <name>] [--captured-at-sha <sha>] [--captured-at-merge-base-sha <sha>]" >&2
       exit 1
       ;;
   esac
@@ -88,12 +122,120 @@ if [[ -n "$PHASE" ]]; then
   PHASE_LABEL=" | phase: $PHASE"
 fi
 
+# --- Resolve branch-provenance defaults ---
+if [[ -z "$CAPTURED_AT_BRANCH" ]]; then
+  CAPTURED_AT_BRANCH=$(captured_at_branch)
+fi
+if [[ -z "$CAPTURED_AT_SHA" ]]; then
+  CAPTURED_AT_SHA=$(captured_at_sha)
+fi
+if [[ -z "$CAPTURED_AT_MERGE_BASE_SHA" ]]; then
+  CAPTURED_AT_MERGE_BASE_SHA=$(captured_at_merge_base_sha)
+fi
+
 # --- Append entry ---
 {
   echo "## $TIMESTAMP | source: $SOURCE$PHASE_LABEL"
+  if [[ -n "$TEMPLATE_VERSION" ]]; then
+    echo "Template-version: $TEMPLATE_VERSION"
+  fi
+  echo "Captured-at: branch=$CAPTURED_AT_BRANCH sha=$CAPTURED_AT_SHA merge-base-sha=$CAPTURED_AT_MERGE_BASE_SHA"
   echo ""
   echo "$ENTRY_BODY"
   echo ""
 } >> "$LOG_FILE"
 
 echo "[execution-log] Entry written to $LOG_FILE"
+
+# --- Off-scale routing ingestion (task 29) ---
+# Parse the entry body for `Surfaced concerns:` / `Worker leads:` fields
+# (task 27/28 producer surfaces) and forward non-None payloads to the
+# off-scale sidecar via scripts/off-scale-append.sh.
+#
+# Parsing is line-anchored:
+#   * A line whose first word is `Surfaced concerns:` or `Worker leads:` starts
+#     a route payload. The remainder of the line is the first payload line.
+#   * Subsequent non-empty lines that are indented OR start with `- ` continue
+#     the payload. A blank line or a new top-level field ends it.
+#   * A payload that is exactly `None` (case-sensitive, whitespace-trimmed) is
+#     the acknowledged honest-negative signal and produces no sidecar row.
+#
+# Dedupe within the work item is the off-scale-append.sh responsibility.
+# Cycle id derives from the slug + entry timestamp — a stable proxy that
+# groups all routes emitted during a single write-execution-log.sh invocation.
+CYCLE_ID="${SLUG}-${TIMESTAMP}"
+
+# Pass the entry body via an env var so the python heredoc does not compete
+# with its own stdin. `_LORE_ENTRY_BODY` is an implementation detail — not a
+# public interface.
+_LORE_ENTRY_BODY="$ENTRY_BODY" python3 - "$SCRIPT_DIR/off-scale-append.sh" "$SLUG" "$CYCLE_ID" "$TEMPLATE_VERSION" << 'PYEOF'
+import os
+import subprocess
+import sys
+
+helper, slug, cycle_id, template_version = sys.argv[1:5]
+body = os.environ.get("_LORE_ENTRY_BODY", "")
+
+FIELD_MAP = {
+    "Surfaced concerns:": {"source": "worker",     "producer_role": "worker",     "protocol_slot": "Surfaced-concerns"},
+    "Worker leads:":      {"source": "researcher", "producer_role": "researcher", "protocol_slot": "Worker-leads"},
+}
+
+def iter_routes(text):
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.lstrip()
+        matched_prefix = None
+        for prefix in FIELD_MAP:
+            if stripped.startswith(prefix):
+                matched_prefix = prefix
+                break
+        if not matched_prefix:
+            i += 1
+            continue
+
+        first_rest = stripped[len(matched_prefix):].strip()
+        payload_lines = [first_rest] if first_rest else []
+
+        # Continuation: subsequent lines that are indented OR begin with "- ",
+        # and are not themselves a new field.
+        j = i + 1
+        while j < len(lines):
+            cont = lines[j]
+            if not cont.strip():
+                break
+            cont_stripped = cont.lstrip()
+            if any(cont_stripped.startswith(p) for p in FIELD_MAP):
+                break
+            is_indented = cont.startswith((" ", "\t"))
+            is_bullet = cont_stripped.startswith(("- ", "* "))
+            if not (is_indented or is_bullet):
+                break
+            payload_lines.append(cont_stripped)
+            j += 1
+
+        payload = "\n".join(payload_lines).strip()
+        if payload and payload != "None":
+            yield matched_prefix, payload
+        i = j if j > i else i + 1
+
+for prefix, payload in iter_routes(body):
+    meta = FIELD_MAP[prefix]
+    argv = [
+        helper,
+        "--work-item", slug,
+        "--source", meta["source"],
+        "--producer-role", meta["producer_role"],
+        "--protocol-slot", meta["protocol_slot"],
+        "--cycle-id", cycle_id,
+        "--payload", payload,
+    ]
+    if template_version:
+        argv.extend(["--template-version", template_version])
+    try:
+        subprocess.run(argv, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"[execution-log] Warning: off-scale-append.sh exited {e.returncode} for {prefix!r} payload (skipped)", file=sys.stderr)
+PYEOF

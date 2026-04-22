@@ -17,6 +17,16 @@ lore resolve
 
 Set `KNOWLEDGE_DIR` to the result. Set `THREADS_DIR` to `$KNOWLEDGE_DIR/_threads`.
 
+## Resolve Template Version
+
+Compute the content-hash of the `/remember` skill template itself. This is the `template_version` that accompanies every `lore capture` call in Step 5 and every `write-execution-log.sh` call:
+
+```bash
+REMEMBER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/skills/remember/SKILL.md)
+```
+
+When `/remember` is invoked by another skill (e.g., `/implement` or `/spec` post-work extraction), that caller passes its own template-version context via the delegation prompt — see Step 5's provenance rules for the lead-synthesis path. For interactive invocations, use `$REMEMBER_TEMPLATE_VERSION` directly. If the hash command fails, fall through with an empty string; downstream scripts treat that as "no template version" and the task #23 gate warns + passes.
+
 ## Step 1: Parse capture constraints
 
 If an argument was provided, interpret it as **capture constraints** that adjust the 4-condition gate for this invocation. Constraints narrow what gets captured — they never expand it (the base gate always applies).
@@ -105,7 +115,7 @@ Review the conversation for thread-worthy content:
    **Not preferences:** One-off requests ("make this function shorter"), task-specific instructions, or transient choices that won't apply next session.
 
    **Scoped vs. global routing:** For each detected preference signal, classify before acting:
-   - **Scoped** — the preference names a skill (`/pr-review`, `/implement`), a specific file or directory (`tui/model.go`, `scripts/`), or only applies when a particular workflow or tool is active → route to `lore capture --category preferences --related-files <paths>`. Use the skill's SKILL.md path (e.g., `skills/pr-review/SKILL.md`) or the relevant source file(s) as `related_files`. Do NOT also write it to thread `accumulated_preferences`.
+   - **Scoped** — the preference names a skill (`/pr-review`, `/implement`), a specific file or directory (`tui/model.go`, `scripts/`), or only applies when a particular workflow or tool is active → route to `lore capture --category preferences --related-files <paths> --producer-role interactive --protocol-slot Reflection`. Use the skill's SKILL.md path (e.g., `skills/pr-review/SKILL.md`) or the relevant source file(s) as `related_files`. Do NOT also write it to thread `accumulated_preferences`.
    - **Global** — the preference has no detectable scope and applies regardless of context ("be terse", "use active voice") → skip `lore capture` and continue to Step 5 thread accumulation as usual.
 
    When scope is ambiguous, ask: "would this preference be irrelevant or wrong in a different skill or file context?" If yes → scoped. If it applies equally everywhere → global.
@@ -150,9 +160,23 @@ Review the conversation for thread-worthy content:
 
 - Capture all insights that pass the gate — `lore capture` files directly to the correct category file:
   ```bash
-  lore capture --insight "..." --context "..." --category "..." --confidence "..." --related-files "..."
+  lore capture --insight "..." --context "..." --category "..." --confidence "..." --related-files "..." \
+    --producer-role <role> --protocol-slot <slot> --template-version <hash> [--work-item <slug>]
   ```
   **Always populate `--related-files`** with concrete file paths the insight describes or depends on (e.g., `scripts/pk_search.py`, `skills/remember/SKILL.md`). This is the strongest staleness signal — when those files change, the entry gets flagged for review. Scan the conversation context for which files were involved. Err on the side of including files: a false positive (file changed but entry still valid) is cheap to dismiss; a missing reference means silent drift.
+
+  **Always populate `--producer-role`, `--protocol-slot`, and `--template-version`**:
+  - When `/remember` is invoked directly by the user (interactive session), use `--producer-role interactive --protocol-slot Reflection --template-version $REMEMBER_TEMPLATE_VERSION`.
+  - When `/remember` is invoked by another skill (e.g., `/implement` post-implementation extraction, `/spec` research synthesis), use the role passed in by that skill — typically `implement-lead` or `spec-lead` with `--protocol-slot Synthesis`, AND use the `--template-version` the caller passes (the lead's `$LEAD_TEMPLATE_VERSION` for lead-original insights, or the original producer's hash for promoted observations). The invoking skill should include both the role/slot context AND the template-version hash in its delegation prompt.
+  - When a work item is active (branch matches an item in `_work/`, or the caller passes one), also add `--work-item <slug>`. The capture script resolves the work item's scope + the role × slot matrix offset into an absolute `scale` field; missing work-item or off-scale role×slot pairs simply omit the scale with no error.
+
+  **Lead-synthesis attribution (promoting worker/researcher observations into the commons):** when `/remember` is delegated by `/implement` or `/spec` to promote a specific worker or researcher observation from `execution-log.md` or `plan.md` **Observations:**/**Investigation:** entries, the capture must preserve the **original producer's role** — not the lead's. Emit:
+  - `--producer-role <worker|researcher>` — the role of whoever produced the observation.
+  - `--capturer-role <implement-lead|spec-lead>` — the lead doing the synthesis write.
+  - `--source-artifact-ids "<task-id or report-id>[,<id2>,...]"` — IDs pointing back to the producer's task or report artifact so the claim is auditable.
+  - `--template-version <original-producer-template-hash>` — the template hash of the *original* producer, not the lead. This is how scorecard rollups attribute learning signal to the correct template version. The caller is responsible for resolving the right hash when it computes `$WORKER_TEMPLATE_VERSION` / `$RESEARCHER_TEMPLATE_VERSION` in its own preamble and passing that value through.
+
+  **Split on multi-producer synthesis.** When a single synthesized claim draws on observations from multiple distinct producers, file **one capture call per distinct producer** — do NOT merge into a single call with a multi-role `--producer-role`. Each call keeps its own `--source-artifact-ids` pointing to that producer's artifact. Rationale: the scale matrix and downstream scorecard attribution both key on a single `producer_role`; merging would erase the hierarchy the matrix exists to preserve. This closes the attribution-erasure risk surfaced in the 2026-04-21 audit.
 - Write all thread updates (new entry files to `_threads/<slug>/<date>.md`, update `_meta.json`)
 - Create new threads if warranted (create directory, `_meta.json`, first entry file, update `_index.json`)
 - Update plans as needed
@@ -163,7 +187,7 @@ printf 'Captures: %s\nThreads updated: %s\nSummary: %s\n' \
   "<N entries captured: title1, title2, ...>" \
   "<thread slugs updated or created>" \
   "<one-sentence summary of what was done this session>" \
-  | bash ~/.lore/scripts/write-execution-log.sh --slug "$RESOLVED_SLUG" --source remember
+  | bash ~/.lore/scripts/write-execution-log.sh --slug "$RESOLVED_SLUG" --source remember --template-version "$REMEMBER_TEMPLATE_VERSION"
 ```
 Derive the summary from the captures and thread updates just made. If no captures were made and no threads updated, omit the write.
 

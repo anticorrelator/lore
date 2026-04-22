@@ -116,6 +116,50 @@ get_git_branch() {
   git rev-parse --abbrev-ref HEAD 2>/dev/null || echo ""
 }
 
+# --- captured_at_branch ---
+# Resolve the current branch name for capture-provenance. Returns the literal
+# string "null" when outside a git repo or on detached HEAD — capture must
+# always succeed regardless of repo state.
+# Usage: branch=$(captured_at_branch)
+captured_at_branch() {
+  local b
+  b=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  if [[ -z "$b" || "$b" == "HEAD" ]]; then
+    echo "null"
+  else
+    echo "$b"
+  fi
+}
+
+# --- captured_at_sha ---
+# Resolve the current HEAD commit SHA for capture-provenance. Returns "null"
+# when outside a git repo.
+# Usage: sha=$(captured_at_sha)
+captured_at_sha() {
+  local s
+  s=$(git rev-parse HEAD 2>/dev/null || true)
+  if [[ -z "$s" ]]; then
+    echo "null"
+  else
+    echo "$s"
+  fi
+}
+
+# --- captured_at_merge_base_sha ---
+# Resolve the merge-base of HEAD against origin/main for capture-provenance.
+# Returns "null" when outside a repo, when origin/main doesn't exist, or when
+# the merge-base cannot be computed. No network access.
+# Usage: mb=$(captured_at_merge_base_sha)
+captured_at_merge_base_sha() {
+  local mb
+  mb=$(git merge-base origin/main HEAD 2>/dev/null || true)
+  if [[ -z "$mb" ]]; then
+    echo "null"
+  else
+    echo "$mb"
+  fi
+}
+
 # --- timestamp_iso ---
 # Generate an ISO 8601 UTC timestamp.
 # Usage: ts=$(timestamp_iso)

@@ -37,6 +37,20 @@ Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). D
 
 **MANDATORY:** You MUST read the actual template files from `~/.claude/agents/` when spawning agents. Do NOT skip this step. Do NOT generate inline agent prompts as a substitute. If the directory or files are missing, stop and report the error — never fall back to improvised prompts.
 
+## Resolve Template Versions
+
+Compute content-hashes of the agent templates you'll spawn and the skill template itself. These feed the `template_version` provenance field on every `lore capture`, `create-followup.sh`, and `write-execution-log.sh` call downstream, plus the `{{template_version}}` injection into each agent's resolved prompt (enabling the backwards-compat gate in task #23):
+
+```bash
+LEAD_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/skills/implement/SKILL.md)
+WORKER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/agents/worker.md)
+ADVISOR_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/agents/advisor.md)
+```
+
+Use these variables throughout the rest of the skill. If `template-version.sh` fails for any template, log a warning and continue with an empty string — downstream scripts accept the omitted flag as "no template version", which the backwards-compat gate (task #23) treats as a legacy report and warns + passes.
+
+Registration into `$KDIR/_scorecards/template-registry.json` is handled automatically on first use by `scripts/scorecard-append.sh` — you do not need a separate registration step here (task #34/#35).
+
 ## Step 1: Load work item and validate
 
 1. Parse arguments: extract work item name and optional `--model` flag (default: `sonnet`, accept `opus`)
@@ -154,7 +168,7 @@ Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). D
       ```bash
       printf 'Config-injected advisor: %s\nSource: ceremony config\nMode: on-demand\n' \
         "<skill-name>-advisor" \
-        | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
+        | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
       ```
 
 5. **Spawn advisor agents (if advisors present)** — if Step 3.2, Step 3.3, or Step 3.4 found advisor declarations, spawn each unique advisor as a persistent team member before spawning workers.
@@ -181,17 +195,18 @@ Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). D
 
    Advisors are persistent — they remain active for the entire implementation session and are shut down alongside workers in Step 4.
 
-   c. **Write execution log entries** — after all advisors are spawned, log each advisor's lifecycle event:
+   c. **Write execution log entries** — after all advisors are spawned, log each advisor's lifecycle event. Pass `--template-version "$ADVISOR_TEMPLATE_VERSION"` because the content we're logging is sourced from the advisor template that was just resolved:
       ```bash
       printf 'Advisor spawned: %s\nDomain: %s\nMode: %s\n' \
         "<advisor-name>" "<domain scope>" "<must-consult|on-demand>" \
-        | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
+        | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$ADVISOR_TEMPLATE_VERSION"
       ```
 
 6. **Spawn worker agents** — launch `min(recommended_workers, 4)` workers in a single message, where `recommended_workers` is the top-level field from `tasks.json` (fallback: `min(task_count, 4)` if the field is absent, for backward compatibility with old `tasks.json` files). Use the **worker** agent definition (`~/.claude/agents/worker.md`) as the base prompt, with these template injections:
    - `{{team_name}}` → `impl-<slug>`
    - `{{team_lead}}` → the lead name read from team config in Step 2
    - `{{prior_knowledge}}` → the `$PRIOR_KNOWLEDGE` block from Step 3.1 (or empty if tasks have pre-resolved knowledge)
+   - `{{template_version}}` → `$WORKER_TEMPLATE_VERSION` from the "Resolve Template Versions" preamble. The worker echoes this in the `Template-version:` header of its completion report so the TaskCompleted-hook validator (task #22) can apply the backwards-compat gate (task #23) — pre-F0 reports without this hash warn + pass; F0-version reports hard-validate structured observations.
 
    **If `$ADVISORY_MIXIN` is non-empty:** append the resolved mixin content after the fully resolved `worker.md` content, separated by a blank line. The worker prompt becomes: `<resolved worker.md>\n\n<resolved advisory-consultation.md>`.
 
@@ -217,12 +232,12 @@ As worker messages arrive (delivered automatically):
    ```
    If this fails or is missed, Step 7 reconciles from the task system.
 
-   **Write execution log entry** — immediately after `lore work check`, append to `execution-log.md`:
+   **Write execution log entry** — immediately after `lore work check`, append to `execution-log.md`. Pass `--template-version "$WORKER_TEMPLATE_VERSION"` because the body we're logging is the worker's report — the template version on the entry should reflect the producing template, not the lead's:
    ```bash
    printf 'Task: %s\nChanges: %s\nSkills: %s\nObservations: %s\nInvestigation: %s\nBlockers: %s\nAdvisor input: %s\nTest result: %s\n' \
      "<task-subject>" "<worker Changes field>" "<worker Skills used field>" "<worker Observations field>" \
      "<worker Investigation field>" "<worker Blockers field>" "<worker Advisor input field>" "<passed|failed|skipped>" \
-     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
+     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$WORKER_TEMPLATE_VERSION"
    ```
    Use the worker's reported **Changes:**, **Skills used:**, **Observations:**, **Investigation:**, **Blockers:**, and **Advisor input:** fields verbatim. If the worker did not report a test result, use `skipped`. If the worker did not report a Skills used field, use `None`. If the worker omitted Investigation, Blockers, or Advisor input, use `None`. `execution-log.md` is created on first write.
 
@@ -245,16 +260,25 @@ When a batch of workers has all reported completion:
       ```bash
       printf 'Advisor shutdown: %s\nDomain: %s\n' \
         "<advisor-name>" "<domain scope>" \
-        | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead
+        | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$ADVISOR_TEMPLATE_VERSION"
       ```
    c. Run `TeamDelete`
 
 ## Step 5: Post-implementation extraction
 
-Invoke `/remember` with capture constraints scoped to the implementation:
+Invoke `/remember` with capture constraints scoped to the implementation. Every `lore capture` call must carry provenance flags; for captures promoted from specific worker observations, preserve the original producer's attribution instead of the lead's:
+
+- **Lead-original insights** (cross-task patterns visible only from the lead's vantage): pass `--producer-role implement-lead --protocol-slot Synthesis --work-item <slug>`.
+- **Worker-sourced observations** (promoted from `execution-log.md` **Observations:**/**Investigation:** entries): pass `--producer-role worker` (the original producer), `--capturer-role implement-lead` (the lead doing the synthesis write), and `--source-artifact-ids <worker-task-ids>` (comma-separated). Keep `--protocol-slot Synthesis --work-item <slug>`.
+- **Multi-producer synthesis**: split into one capture call per distinct producer — never merge into a single call. Each call carries that producer's `--source-artifact-ids`. Merging would erase the role × slot hierarchy the scale matrix depends on.
 
 ```
 /remember Implementation findings from <work item title> — Read all **Observations:** and **Investigation:** entries from execution-log.md and evaluate each against the capture gate. Two valid capture targets: (1) mechanism-level patterns — how the system accomplishes X broadly, evaluate for novelty against existing knowledge; (2) structural footprint — module roles, integration points, what connects to/through a file, what constrains changes — evaluate against existing architectural knowledge for what isn't yet recorded. Function-level details do not qualify. Also capture: cross-task patterns visible only from the lead's vantage. Investigation entries (debugging detours, design pivots) qualify when the root cause or resolution reveals something non-obvious about the system.
+
+Provenance on every `lore capture`:
+  - Lead-original insight: `--producer-role implement-lead --protocol-slot Synthesis --work-item <slug> --template-version $LEAD_TEMPLATE_VERSION`.
+  - Promoted worker observation: `--producer-role worker --capturer-role implement-lead --source-artifact-ids <worker-task-id[,id2,...]> --protocol-slot Synthesis --work-item <slug> --template-version $WORKER_TEMPLATE_VERSION`. The `--template-version` reflects the original producer's template — promoted observations carry the worker template hash, not the lead's, so scorecard rollups attribute learning signal to the correct template (see `architecture/scorecards/row-schema.md`).
+  - Multi-producer synthesis: split per distinct producer; one capture call per producer, each with its own --source-artifact-ids and its own producer's --template-version. Never merge.
 ```
 
 ## Step 6: Followup Creation Gate

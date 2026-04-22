@@ -22,6 +22,18 @@ lore resolve
 ```
 Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
+## Resolve Template Versions
+
+Compute content-hashes of the skill template and any agent templates you'll spawn. These feed the `template_version` provenance field on every `lore capture`, `create-followup.sh`, and `write-execution-log.sh` call downstream, plus the `{{template_version}}` injection into each researcher's resolved prompt (enabling the backwards-compat gate in task #23):
+
+```bash
+LEAD_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/skills/spec/SKILL.md)
+RESEARCHER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/agents/researcher.md)
+ADVISOR_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/agents/advisor.md)
+```
+
+If any `template-version.sh` call fails, fall through with an empty string — downstream scripts accept the omitted flag as "no template version" and the task #23 gate treats such reports as legacy (warn + pass). Registration into `$KDIR/_scorecards/template-registry.json` is handled by `scorecard-append.sh` on first use (tasks #34/#35).
+
 ## Step 1: Parse and resolve (both modes)
 
 1. Parse arguments: if first arg after `/spec` is `short`, use **Short Flow**; otherwise **Full Flow**. If `--yes` is present, skip all interactive confirmation gates (auto-proceed through investigation plan confirmation, strategy gates, confirm understanding, and task review). If `--without-verification` is present, skip Step 4b (assertion verification). If `--model` is present (accepts `opus` or `sonnet`, default `sonnet`), use it as `<selected-model>` for every agent spawn in this flow; otherwise `<selected-model>` is `sonnet`. The remaining text is the **input**.
@@ -415,6 +427,7 @@ Proceed, or adjust? (You can request changes — e.g., split a question, drop an
    - `{{team_name}}` → `spec-<slug>`
    - `{{team_lead}}` → the lead name read from team config in Step 3.2
    - `{{prior_knowledge}}` → the `$PRIOR_KNOWLEDGE` block from Step 3.4
+   - `{{template_version}}` → `$RESEARCHER_TEMPLATE_VERSION` from the "Resolve Template Versions" preamble. The researcher echoes this in the `Template-version:` header of its investigation report so the TaskCompleted-hook validator (task #22) can apply the backwards-compat gate (task #23).
 
    **If `$ADVISORY_MIXIN` is non-empty:** append the resolved mixin content after the fully resolved `researcher.md` content, separated by a blank line. The researcher prompt becomes: `<resolved researcher.md>\n\n<resolved advisory-consultation.md>`.
 
@@ -508,8 +521,9 @@ printf 'Investigations: %d\nTopics: %s\nVerification: confirmed=%d, refuted=%d, 
   "<comma-separated investigation topics>" \
   "<confirmed count>" "<refuted count>" "<unverifiable count>" \
   "<list of refuted assertions that shaped synthesis, or 'none'>" \
-  | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source spec-lead
+  | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source spec-lead --template-version "$RESEARCHER_TEMPLATE_VERSION"
 ```
+The `--template-version` here reflects the researcher template whose output this entry synthesizes — the log line is about the investigation work, not the lead's own template.
 
 - **Investigation count:** number of researcher agents that reported back
 - **Topics:** the investigation topics from Step 2 (not the full questions — short labels)
@@ -761,10 +775,19 @@ Before finalizing, present the plan's phases as a structured summary for the use
 
 ### Step 5.4: Post-research extraction
 
-Invoke `/remember` scoped to the spec investigation:
+Invoke `/remember` scoped to the spec investigation. Every `lore capture` call must carry provenance flags; for captures promoted from specific researcher observations, preserve the original producer's attribution instead of the lead's:
+
+- **Lead-original insights** (cross-investigation synthesis patterns not surfaced individually): pass `--producer-role spec-lead --protocol-slot Synthesis --work-item <slug>`.
+- **Researcher-sourced observations** (promoted from `plan.md` investigation **Observations:** entries): pass `--producer-role researcher` (the original producer), `--capturer-role spec-lead` (the lead doing the synthesis write), and `--source-artifact-ids <researcher-report-ids>`. Keep `--protocol-slot Synthesis --work-item <slug>`.
+- **Multi-producer synthesis**: split into one capture call per distinct producer — never merge. Each call carries that producer's `--source-artifact-ids`. Merging would erase the role × slot hierarchy the scale matrix depends on.
 
 ```
 /remember Research findings from <work item title> — Read all **Observations:** entries from investigation reports in plan.md and evaluate each — mechanism-level patterns (how the system accomplishes X broadly), design rationale ("this was chosen because X"), and structural footprint signals (module roles, integration points, what constrains changes) all qualify; implementation facts already expressed in Assertions do not. Also capture: cross-investigation synthesis patterns not surfaced individually. Skip: findings already documented in plan.md Assertions (they're persisted there).
+
+Provenance on every `lore capture`:
+  - Lead-original insight: `--producer-role spec-lead --protocol-slot Synthesis --work-item <slug> --template-version $LEAD_TEMPLATE_VERSION`.
+  - Promoted researcher observation: `--producer-role researcher --capturer-role spec-lead --source-artifact-ids <researcher-report-id[,id2,...]> --protocol-slot Synthesis --work-item <slug> --template-version $RESEARCHER_TEMPLATE_VERSION`. The `--template-version` reflects the original producer's template — promoted observations carry the researcher template hash, not the lead's, so scorecard rollups attribute signal to the correct template.
+  - Multi-producer synthesis: split per distinct producer; one capture call per producer, each with its own --source-artifact-ids and its own producer's --template-version. Never merge.
 ```
 
 ### Step 5.5: Generate tasks.json

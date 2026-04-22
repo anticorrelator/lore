@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # set-work-meta.sh — Set metadata fields on an existing work item
-# Usage: bash set-work-meta.sh <slug> [--issue <value>] [--pr <value>]
+# Usage: bash set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>]
 # Updates the specified fields in _meta.json, touches the timestamp, and rebuilds the index.
+#
+# --scope (Phase 2 — work item 02-durable-signal-foundation):
+#   Refines the work-item scope (capture-scale absolute anchor) after creation.
+#   Valid values: architectural | subsystem | implementation | granular-fix | cross-cycle-meta
+#   Unknown values are rejected. Missing fields are inserted; existing fields are overwritten.
 
 set -euo pipefail
 
@@ -12,14 +17,29 @@ source "$SCRIPT_DIR/lib.sh"
 SLUG=""
 ISSUE=""
 PR=""
+SCOPE=""
 HAS_ISSUE=0
 HAS_PR=0
+HAS_SCOPE=0
 DETECT_PR=0
 JSON_MODE=0
 
+# Valid work-item scope values (Phase 2 capture-scale anchor).
+VALID_SCOPES=(architectural subsystem implementation granular-fix cross-cycle-meta)
+is_valid_scope() {
+  local candidate="$1"
+  local s
+  for s in "${VALID_SCOPES[@]}"; do
+    if [[ "$s" == "$candidate" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [[ $# -lt 1 ]]; then
   echo "[work] Error: Missing required argument: slug" >&2
-  echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--detect-pr] [--json]" >&2
+  echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--detect-pr] [--json]" >&2
   exit 1
 fi
 
@@ -38,6 +58,11 @@ while [[ $# -gt 0 ]]; do
       HAS_PR=1
       shift 2
       ;;
+    --scope)
+      SCOPE="$2"
+      HAS_SCOPE=1
+      shift 2
+      ;;
     --detect-pr)
       DETECT_PR=1
       shift
@@ -48,17 +73,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "[work] Error: Unknown flag '$1'" >&2
-      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--detect-pr] [--json]" >&2
+      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--detect-pr] [--json]" >&2
       exit 1
       ;;
   esac
 done
 
-if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 && "$DETECT_PR" -eq 0 ]]; then
+if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 && "$HAS_SCOPE" -eq 0 && "$DETECT_PR" -eq 0 ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
-    json_error "No fields to set. Provide --issue, --pr, and/or --detect-pr."
+    json_error "No fields to set. Provide --issue, --pr, --scope, and/or --detect-pr."
   fi
-  echo "[work] Error: No fields to set. Provide --issue, --pr, and/or --detect-pr." >&2
+  echo "[work] Error: No fields to set. Provide --issue, --pr, --scope, and/or --detect-pr." >&2
+  exit 1
+fi
+
+# Validate --scope against the enum (rejects unknown values).
+if [[ "$HAS_SCOPE" -eq 1 ]] && ! is_valid_scope "$SCOPE"; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "Invalid --scope '$SCOPE'. Valid values: ${VALID_SCOPES[*]}"
+  fi
+  echo "[work] Error: Invalid --scope '$SCOPE'. Valid values: ${VALID_SCOPES[*]}" >&2
   exit 1
 fi
 
@@ -143,6 +177,21 @@ if [[ "$HAS_PR" -eq 1 ]]; then
     sed -i '' "s|\"created\"[[:space:]]*:|\"pr\": \"$PR\",\n  \"created\":|" "$META_FILE"
   fi
   CHANGES+=("pr=$PR")
+fi
+
+if [[ "$HAS_SCOPE" -eq 1 ]]; then
+  # Use python3 for robust JSON-aware update (preserves formatting; inserts or overwrites).
+  python3 - "$META_FILE" "$SCOPE" << 'PYEOF'
+import json, sys
+path, scope = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    data = json.load(f)
+data["scope"] = scope
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+  CHANGES+=("scope=$SCOPE")
 fi
 
 # --- Check if any changes were actually made ---

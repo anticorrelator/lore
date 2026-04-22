@@ -104,6 +104,37 @@ Track: `approved = []`, `rejected = []`, `skipped = []`.
 
 If the user approves multiple suggestions for the same section of the same file, note that they may conflict — present a brief warning before applying.
 
+## Step 5.5: Scorecard citations (forward guidance)
+
+`/evolve` consumes `$KDIR/_scorecards/_current.json` when suggestions cite
+metrics (F1 harmonic-mean template ranking and later). This step captures
+the load-bearing invariants ahead of that integration.
+
+**Filter by `kind == "scored"` for citations.** Scored rows capture
+deliberate, outcome-linked evaluation by the settlement pipeline.
+`kind: "telemetry"` rows are passive corpus observations — appropriate for
+drift monitoring but NOT for producer-scoring or `/evolve` citations. When
+drawing metric evidence into a suggestion body, filter first.
+
+**Filter by `calibration_state`.** Rows with `calibration_state: "calibrated"`
+are trustworthy for citation. `pre-calibration` rows may be displayed for
+transparency but should be flagged as such; `unknown` rows are excluded from
+any aggregate that implies a quality judgment.
+
+**Unregistered-hash exclusion.** When a row's `template_version` is not
+present in `$KDIR/_scorecards/template-registry.json`, render it as
+`unregistered:<hash>` and assign **no scorecard weight**: exclude it from
+harmonic-mean rankings, from any "top N templates" view, and from any
+suggestion that proposes a protocol change on the basis of its metric.
+Unregistered rows are retained in storage (they may become registered
+later and thereafter count), but they never influence `/evolve`'s
+citation pool in isolation.
+
+**Sole-writer invariant.** `/evolve` does not write to `rows.jsonl`.
+`scripts/scorecard-append.sh` is the only sanctioned writer. If this skill's
+suggestions would result in a row being recorded (e.g., a post-application
+telemetry ping), route through that script — do not append directly.
+
 ## Step 6: Apply Approved Suggestions
 
 For each approved suggestion, apply the change as a direct file edit.

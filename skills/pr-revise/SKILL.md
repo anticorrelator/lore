@@ -326,7 +326,9 @@ bash ~/.lore/scripts/create-followup.sh \
   --owner <owner> \
   --repo <repo> \
   --head-sha <headRefOid> \
-  --content '<complete report body from 7b — all 3 sections>'
+  --content '<complete report body from 7b — all 3 sections>' \
+  --producer-role "pr-revise" \
+  --protocol-slot "Observations"
 ```
 
 ## Step 8: Capture Insights
@@ -334,7 +336,7 @@ bash ~/.lore/scripts/create-followup.sh \
 **Gate:** Do not execute this step until Step 7 (Generate Followup Report) has completed and `create-followup.sh` has been called. If Step 7 was not executed, go back and execute it now before proceeding.
 
 ```
-/remember PR review feedback from PR #<N> — capture: architectural insights, corrected misconceptions about how the codebase works, non-obvious patterns or invariants the reviewer identified, genuine bugs or correctness issues that reveal something about the system. Skip: style preferences, naming opinions, formatting nits, nitpicking, subjective code taste, "I would have done it differently" suggestions, anything that amounts to an outside contributor's personal conventions vs the project's own patterns. PR reviewers bring valuable fresh eyes but also stylistic baggage — be highly discerning. Use confidence: medium for reviewer-sourced insights (not verified against codebase internals).
+/remember PR review feedback from PR #<N> — capture: architectural insights, corrected misconceptions about how the codebase works, non-obvious patterns or invariants the reviewer identified, genuine bugs or correctness issues that reveal something about the system. Skip: style preferences, naming opinions, formatting nits, nitpicking, subjective code taste, "I would have done it differently" suggestions, anything that amounts to an outside contributor's personal conventions vs the project's own patterns. PR reviewers bring valuable fresh eyes but also stylistic baggage — be highly discerning. Use confidence: medium for reviewer-sourced insights (not verified against codebase internals). For every `lore capture` call, pass `--producer-role pr-revise --protocol-slot Synthesis --work-item <slug>` (when a work item matches the PR).
 ```
 
 This step is automatic — do not ask whether to run it.

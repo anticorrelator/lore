@@ -141,6 +141,41 @@ Evidence: escalations, out-of-scope file reads, divergent choices, unexpected di
 
 Scoring: 5 = spec-guided, 0 escalations | 4 = minor exploration, ≤1 escalation | 3 = several reads, 2-3 escalations | 2 = frequent exploration, multiple divergences | 1 = no meaningful guidance
 
+## Step 3.6: Scorecard data (forward guidance)
+
+`/retro` is a primary reader of `$KDIR/_scorecards/_current.json` when scorecard
+data becomes a downstream input (F1 settlement pipeline and onward). This step
+captures the load-bearing invariants ahead of that integration so future edits
+don't drift.
+
+**Sole-writer invariant.** `scripts/scorecard-append.sh` (surfaced as
+`lore scorecard append`) is the only sanctioned writer of `rows.jsonl`. Never
+append to that file directly from this skill, from agents it spawns, or from
+edits it proposes.
+
+**Corrupt-row handling.** Any row failing schema validation
+(`schema_version` absent, `kind ∉ {scored, telemetry}`, or
+`calibration_state ∉ {calibrated, pre-calibration, unknown}`) is treated as
+corrupt. The rollup emits a `[scorecard] warning: rows.jsonl:<N> corrupt —
+<reason>` stderr line and EXCLUDES the row from aggregation. Do not manually
+count corrupt rows into any dimension score.
+
+**Unregistered-hash rendering.** When `_current.json` references a
+`template_version` hash that is not present in
+`$KDIR/_scorecards/template-registry.json`, render the hash as
+`unregistered:<hash>` in any summary shown to the user and **assign it no
+scorecard weight** (exclude from D1–D5 evidence and from any trend
+comparison). This isolates the registry-write path from the scorecard-write
+path: rows can be accepted even when the corresponding template was
+mid-edited or never registered, but those rows do not contribute to
+settlement signal until the template is registered with a non-null
+description.
+
+**Prompt-context invariant.** Scorecard rows are never loaded into an agent
+prompt. `/retro` consumes `_current.json` in this skill's own runtime; it
+does not inject raw rows into spawned subagents or into the journal entry.
+Summaries into aggregate statistics are fine; raw row content is not.
+
 ## Step 4: Write Journal Entry
 
 **Mandatory.**

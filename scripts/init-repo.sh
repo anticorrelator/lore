@@ -48,6 +48,11 @@ for category in principles architecture conventions abstractions workflows gotch
   mkdir -p "$KNOWLEDGE_DIR/$category"
 done
 
+# Seed _scorecards/ sidecar with README documenting the sole-writer invariant.
+# scorecard-append.sh is the only sanctioned writer of rows.jsonl — see
+# $KDIR/_scorecards/README.md for the full reader contract.
+"$SCRIPT_DIR/seed-scorecards-readme.sh" "$KNOWLEDGE_DIR/_scorecards"
+
 # Create manifest (format v2)
 TIMESTAMP=$(timestamp_iso)
 cat > "$KNOWLEDGE_DIR/_manifest.json" << MANIFESTEOF
