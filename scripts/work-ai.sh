@@ -148,9 +148,10 @@ echo "[work-ai] Model: $MODEL | Budget cap: \$$MAX_BUDGET"
 echo "[work-ai] Request: $PROMPT"
 echo ""
 
+mapfile -t CLAUDE_ARGS < <(load_claude_args)
 claude -p "$PROMPT" \
+  "${CLAUDE_ARGS[@]}" \
   --model "$MODEL" \
   --append-system-prompt "$(cat "$GUARDRAIL_FILE")" \
-  --permission-mode bypassPermissions \
   --max-budget-usd "$MAX_BUDGET" \
   --output-format text

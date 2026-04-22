@@ -147,10 +147,11 @@ if [[ "$DRY_RUN" == true ]]; then
 fi
 
 # --- Invoke claude -p ---
+mapfile -t CLAUDE_ARGS < <(load_claude_args)
 if ! claude -p "$USER_PROMPT" \
+  "${CLAUDE_ARGS[@]}" \
   --append-system-prompt "$(cat "$SYS_FILE")" \
   --model sonnet \
-  --permission-mode bypassPermissions \
   --max-budget-usd 0.5 \
   --output-format text \
   --disallowed-tools "Bash,Edit,Write,Read,Grep,Glob,Agent,Task"; then

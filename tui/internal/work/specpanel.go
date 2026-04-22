@@ -16,6 +16,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 // resolveFollowupDir mirrors followup.ResolveDir / scripts/lib.sh::resolve_followup_dir,
@@ -900,9 +902,10 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 		// immediately — no PTY-write timing hack needed.
 		initialPrompt := buildInitialPrompt(slug, title, extraContext, shortMode, chatMode, skipConfirm, followupMode, findingIndex)
 
-		// Build args: optionally inject --append-system-prompt before the
-		// positional initialPrompt when followupMode is active.
-		args := []string{"--dangerously-skip-permissions"}
+		// Build args: start with user-configured claude flags
+		// (~/.lore/config/claude.json), optionally inject --append-system-prompt
+		// before the positional initialPrompt when followupMode is active.
+		args := append([]string(nil), config.LoadClaudeConfig().Args...)
 		if followupMode && slug != "" {
 			if sysPrompt := loadFollowupContext(slug, knowledgeDir, findingIndex); sysPrompt != "" {
 				args = append(args, "--append-system-prompt", sysPrompt)

@@ -238,6 +238,33 @@ lore_agent_enabled() {
   return 0
 }
 
+# --- load_claude_args ---
+# Print the args to prepend to every `claude` CLI invocation, one per line.
+# Callers: mapfile -t CLAUDE_ARGS < <(load_claude_args)
+# Resolution order:
+#   1. LORE_CLAUDE_ARGS env var (JSON array, requires jq)
+#   2. $LORE_DATA_DIR/config/claude.json `.args` (requires jq)
+#   3. built-in default: --dangerously-skip-permissions
+# Mirrors config.LoadClaudeConfig() in tui/internal/config/config.go.
+load_claude_args() {
+  local config_file="${LORE_DATA_DIR:-$HOME/.lore}/config/claude.json"
+  if command -v jq &>/dev/null; then
+    if [[ -n "${LORE_CLAUDE_ARGS:-}" ]]; then
+      if printf '%s' "$LORE_CLAUDE_ARGS" | jq -e 'type == "array"' &>/dev/null; then
+        printf '%s' "$LORE_CLAUDE_ARGS" | jq -r '.[]'
+        return
+      fi
+    fi
+    if [[ -f "$config_file" ]]; then
+      if jq -e '.args | type == "array"' "$config_file" &>/dev/null; then
+        jq -r '.args[]' "$config_file"
+        return
+      fi
+    fi
+  fi
+  echo "--dangerously-skip-permissions"
+}
+
 # --- resolve_ceremony_config_path ---
 # Resolve the path to the global ceremony config file (ceremonies.json)
 # at $LORE_DATA_DIR/ceremonies.json (defaults to ~/.lore/ceremonies.json).

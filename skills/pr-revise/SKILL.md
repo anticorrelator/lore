@@ -11,6 +11,16 @@ Read all comments and reviews on a GitHub Pull Request, categorize feedback with
 
 This skill is analysis-only — it creates work items with notes and tasks but does not modify source code.
 
+## Epistemic Stance
+
+Reviewer findings are external hypotheses. The skill's job is to **substantiate or dismiss** each one against code behavior — not to dispatch it as "a comment to address." Three disciplines apply throughout:
+
+- **Symmetric scrutiny.** Apply the same skepticism to the code's current behavior as to the reviewer's claim. If you find yourself writing a defense of the existing code, subject that defense to the same questions you'd ask the reviewer. Asymmetric scrutiny is how a verification item quietly becomes a confirmation of a conclusion you've already written.
+- **Trivial reduction check.** Before writing a paragraph of analysis for any item, read the referenced code. If it reduces to a one-liner that makes the reviewer's point obvious, the item belongs in Agreed Changes — move it and stop. Length is not rigor. A correct one-sentence answer beats a thorough-looking audit that misses the structural point.
+- **Don't pre-write conclusions.** Verification Needed items state the open question, not the expected outcome. If you already know the answer ("expected: fetch callbacks are stable"), the item is not a verification — it is Agreed or Disagreed. Pre-writing the conclusion turns downstream investigation into defense.
+
+The failure mode this prevents: optimizing for closing the review rather than correctness. A thread is resolved by fixing the code, not only by defending it.
+
 ## Step 1: Identify PR and Focus Context
 
 Argument provided: `$ARGUMENTS`
@@ -91,7 +101,14 @@ Assign a Conventional Comments label to each item: `suggestion`, `issue`, `quest
 - `issue`: `**Grounding:** <mechanism — what may break, for whom, when> → <consequence — what the user experiences or what operational impact follows>.`
 - `suggestion`: `**Grounding:** <situation — when a real person encounters the problem> → <improvement — what changes for them>.`
 
-Items without grounding are demoted to `thought` (tracked but not actionable). Grounding that stops at the technical mechanism without landing on a human/operational consequence is treated as weak and will be rewritten. This prevents reviewer style preferences from being elevated to action items.
+For reviewer-sourced findings specifically, grounding comes from the **code's actual behavior**, not the reviewer's framing. Read the referenced function before writing the grounding line. If the code does not support the reviewer's implied consequence, that is a signal the finding is unsound — not a signal to rewrite the reviewer into something defensible.
+
+**Apply the Grounding Quality Rubric** from `~/.lore/claude-md/review-protocol/severity.md` (Sound / Weak / Unsound) to each grounded item:
+- **Sound** — grounding completes the mechanism → consequence chain against observable code behavior. Keep as-is.
+- **Weak** — grounding stops at the mechanism, or names an abstract benefit without a scenario. Rewrite the line to complete the chain; keep the label intact.
+- **Unsound** — no realistic failure scenario or concrete benefit exists in the code. Downgrade `issue` to `thought`; drop `suggestion` entirely.
+
+Items without a grounding line are treated the same as unsound: demote `issue` to `thought`, drop `suggestion`. This prevents reviewer style preferences from being elevated to action items.
 
 **Apply the 8-point review checklist** from `~/.lore/claude-md/review-protocol/checklist.md` as an additional analysis lens when categorizing. Read the checklist at invocation time — do not duplicate it here. The checklist helps distinguish substantive feedback from style preferences.
 
@@ -128,25 +145,24 @@ Create a work item from the categorized, enriched feedback:
 
 Where `<short-slug>` is 2-3 words from the PR title, slugified (e.g., `pr-42-fix-auth-flow`).
 
-Write `notes.md` (not `plan.md`) with feedback organized by actionability:
+Write `notes.md` (not `plan.md`) with feedback organized by actionability. Each item leads with the **substantiated impact claim** (mechanism → consequence derived from reading the code), not a restatement of the reviewer's phrasing. Reviewer quote goes second as evidence.
 
 ```markdown
 # PR #<NUMBER>: <Title>
 
-> **Review-level analysis.** These findings came from a code review (diff-level analysis). Investigation agents should verify assumptions against the full codebase, not accept them as validated.
+> **Review-level analysis.** These findings came from a code review (diff-level analysis). Investigation agents should verify assumptions against the full codebase, not accept them as validated. Verification items state open questions, not expected outcomes.
 
 ## Goal
-Address reviewer feedback from @<reviewer>'s review on PR #<NUMBER>.
+Substantiate or dismiss reviewer feedback from @<reviewer>'s review on PR #<NUMBER> against code behavior.
 
 ## Agreed Changes
-Trivially obvious fixes only — typos, naming corrections, clear style fixes. Each must be verifiable from the diff alone without reading surrounding code.
-- [ ] <"Clear fix" item with file:line reference and quoted reviewer feedback>
+Items where reading the referenced code confirms the reviewer's point — typos, naming corrections, clear style fixes, or claims that reduce to a one-liner once the code is read. Each is actionable without further investigation.
+- [ ] **<Impact claim — mechanism → consequence>** — `<file:line>`. Reviewer: "<quote>".
 - [ ] ...
 
 ## Verification Needed
-Reviewer claims requiring `/spec` investigation before implementation. Each item includes an explicit verification directive.
-- [ ] <"Needs context" item> — **Verify:** <what to check> in `<file:function>` [knowledge: <citation>]
-- [ ] <"Ambiguous" item> — **Verify:** <which approach is correct> given <constraint> [knowledge: <citation>]
+Reviewer claims where grounding is plausible but evidence requires multi-file or cross-boundary investigation. **State the open question, not the expected outcome** — pre-writing the answer turns downstream investigation into confirmation.
+- [ ] **<Impact claim if the reviewer is correct>** — `<file:function>`. Reviewer: "<quote>". **Verify:** <open question, e.g., "whether callers depend on the prior nil-return path"> [knowledge: <citation>]
 - [ ] ...
 
 ## Deferred
@@ -155,7 +171,9 @@ Out of scope for this revision pass, or blocked on user input.
 - [ ] ...
 ```
 
-Group related feedback into single items when they touch the same file/function. Include quoted feedback and file:line references in each item. Include knowledge citations so `/spec` investigators have context. Omit empty sections.
+Group related feedback into single items when they touch the same file/function. Include knowledge citations so `/spec` investigators have context. Omit empty sections.
+
+**Before finalizing each Verification Needed item, run the trivial reduction check:** re-read the referenced function. If it reduces to a one-liner that makes the reviewer's point obvious, move the item to Agreed Changes. This is where asymmetric scrutiny gets caught before it reaches the output — a verification item that you can already answer is not a verification item.
 
 > **Next step:** To generate implementation tasks, run `/spec pr-<NUMBER>-<short-slug>` on this work item after investigation validates the findings. The pipeline is: review findings (notes.md) -> `/spec` investigation (plan.md) -> `/implement` execution. Do not skip the `/spec` step — review findings are diff-level hypotheses, not validated implementation plans.
 
@@ -240,6 +258,8 @@ Produce a suggested-actions JSON array, omitting types for empty categories:
 
 Assemble the `--content` value with **all** of the following sections. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
 
+**Grounding re-check before assembly.** Re-verify that every `issue` and `suggestion` item still has a specific mechanism → consequence chain per the Sound/Weak/Unsound rubric applied in Step 3. The test: if the PR author asks "why does this matter?", the Summary column must answer with a specific scenario, not a vague assertion. Any item that lacks grounding at this point: demote `issue` to `thought`, drop `suggestion`. Grounding can be lost during grouping or categorization — this pass catches it before the external artifact is written.
+
 **First line:** One-line diagnostic summary (e.g., "agreed 3, verification 2, deferred 1 findings from @reviewer's review"). This must be the first non-heading line — it appears as the excerpt in the TUI.
 
 **Section 1 — PR Narrative**
@@ -290,7 +310,7 @@ List all categorized feedback items from Step 3. Include every item regardless o
 - **Category** column: `Agreed Changes`, `Verification Needed`, or `Deferred`.
 - **Knowledge** column: the `[knowledge: entry-title]` citation from Step 4 enrichment, or `—` if no citation applies.
 - **Reviewer Quote** column: the verbatim reviewer comment (truncated to ~80 chars if long; use `...` to indicate truncation).
-- **Summary** column: impact-grounded uncertain framing derived from the analysis in Step 3. Follow the hedged phrasing patterns in `~/.lore/claude-md/review-protocol/review-voice.md` — key forms: "This may cause..." for issues, "This could benefit..." for suggestions, or the reviewer's open question for question-labeled items. Do not restate the observed code fact — summarize the inferred impact. Do not include internal analysis headers (`**Grounding:**`, `**Severity:**`, etc.) — these are internal protocol language and must not appear in the report.
+- **Summary** column: the mechanism → consequence chain from the item's grounding, expressed in hedged voice. Must name the specific code behavior (mechanism) AND the observable impact that follows (consequence). The Reviewer Quote column already carries the reviewer's phrasing — do not restate it here. Follow `~/.lore/claude-md/review-protocol/review-voice.md`: hedge the inference, not the observed code fact. Key forms: "`<function>` does X — if <condition>, <consequence>" for issues, "the <situation> means <person> has to <friction>; <change> removes it" for suggestions, the reviewer's open question verbatim for question-labeled items. Do not include internal analysis headers (`**Grounding:**`, `**Severity:**`, etc.) — they are internal protocol language and must not appear in the report.
 
 ### 7c. Persist the report
 

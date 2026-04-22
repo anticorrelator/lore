@@ -144,3 +144,49 @@ func SavePrefs(p Prefs) error {
 	}
 	return os.WriteFile(path, append(data, '\n'), 0644)
 }
+
+// ClaudeConfig holds flags applied to every `claude` CLI invocation spawned
+// by lore (TUI spec panel and batch scripts). Persisted to
+// ~/.lore/config/claude.json and shared with the shell scripts via
+// load_claude_args in lib.sh.
+type ClaudeConfig struct {
+	Args []string `json:"args"`
+}
+
+// DefaultClaudeArgs is returned when no config file or env override exists.
+// Keeping this as a function (not a var) prevents callers from mutating the
+// shared slice.
+func DefaultClaudeArgs() []string {
+	return []string{"--dangerously-skip-permissions"}
+}
+
+func claudeConfigPath() string {
+	dataRoot := os.Getenv("LORE_DATA_DIR")
+	if dataRoot == "" {
+		home, _ := os.UserHomeDir()
+		dataRoot = filepath.Join(home, ".lore")
+	}
+	return filepath.Join(dataRoot, "config", "claude.json")
+}
+
+// LoadClaudeConfig returns the args to prepend to every `claude` invocation.
+// Resolution order: LORE_CLAUDE_ARGS env var (JSON array) → claude.json file →
+// built-in default. Malformed sources fall through to the next source.
+func LoadClaudeConfig() ClaudeConfig {
+	if env := os.Getenv("LORE_CLAUDE_ARGS"); env != "" {
+		var args []string
+		if err := json.Unmarshal([]byte(env), &args); err == nil {
+			return ClaudeConfig{Args: args}
+		}
+	}
+
+	data, err := os.ReadFile(claudeConfigPath())
+	if err == nil {
+		var c ClaudeConfig
+		if err := json.Unmarshal(data, &c); err == nil && c.Args != nil {
+			return c
+		}
+	}
+
+	return ClaudeConfig{Args: DefaultClaudeArgs()}
+}

@@ -753,9 +753,11 @@ execute_spec() {
 
   # Invoke claude in print mode with JSON output
   local exit_code=0
+  local -a claude_args
+  mapfile -t claude_args < <(load_claude_args)
   claude -p "/spec short $slug" \
+    "${claude_args[@]}" \
     --output-format json \
-    --permission-mode bypassPermissions \
     --max-budget-usd "$MAX_BUDGET" \
     --model "$MODEL" \
     --append-system-prompt "$system_prompt" \

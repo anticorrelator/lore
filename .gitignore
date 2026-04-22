@@ -30,3 +30,6 @@ Thumbs.db
 # Local TUI build artifacts
 /tui/tui
 /tui/*.test
+
+# Local Claude settings
+/.claude/
