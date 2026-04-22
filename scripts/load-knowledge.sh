@@ -31,7 +31,7 @@ FILES_SUMMARY=0
 FILES_SKIPPED=0
 
 # Category priority order
-PRIORITY_CATEGORIES=(principles workflows conventions gotchas abstractions architecture team)
+PRIORITY_CATEGORIES=(principles workflows conventions gotchas abstractions architecture team preferences)
 
 # --- Extract context signal from git branch + matched work item ---
 # Used to bias which knowledge sections load first (when signal exists)

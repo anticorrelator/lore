@@ -26,6 +26,7 @@ CATEGORY_PRIORITIES="principles=100
 workflows=90
 conventions=80
 architecture=70
+preferences=75
 gotchas=60
 abstractions=50
 domains=40

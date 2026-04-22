@@ -104,13 +104,19 @@ Review the conversation for thread-worthy content:
 
    **Not preferences:** One-off requests ("make this function shorter"), task-specific instructions, or transient choices that won't apply next session.
 
+   **Scoped vs. global routing:** For each detected preference signal, classify before acting:
+   - **Scoped** — the preference names a skill (`/pr-review`, `/implement`), a specific file or directory (`tui/model.go`, `scripts/`), or only applies when a particular workflow or tool is active → route to `lore capture --category preferences --related-files <paths>`. Use the skill's SKILL.md path (e.g., `skills/pr-review/SKILL.md`) or the relevant source file(s) as `related_files`. Do NOT also write it to thread `accumulated_preferences`.
+   - **Global** — the preference has no detectable scope and applies regardless of context ("be terse", "use active voice") → skip `lore capture` and continue to Step 5 thread accumulation as usual.
+
+   When scope is ambiguous, ask: "would this preference be irrelevant or wrong in a different skill or file context?" If yes → scoped. If it applies equally everywhere → global.
+
 4. If the thread was discussed, write a new entry file at `$THREADS_DIR/<slug>/<date>.md` (e.g., `how-we-work/2026-02-08.md`). If a file for today already exists, disambiguate with session suffix: `2026-02-08-s2.md`. Entry files do NOT contain the `## ` heading — it is reconstructed from the filename at load time. Entry content starts with `**Summary:**`:
    ```markdown
    **Summary:** One-sentence overview of what was discussed
    **Key points:**
    - Specific decisions, shifts, or ideas
    **Shifts:** Change from previous entries (optional)
-   **Preferences:** User preferences or working-style signals observed this session (optional — only include when a clear, reusable preference was expressed or demonstrated)
+   **Preferences:** User preferences or working-style signals observed this session (optional — **include only global preferences here**; scoped preferences were already routed to `lore capture` in step 3 above)
    **Related:** [[work:name]], [[knowledge:file#heading]]
    ```
 5. Check for new topics that don't match existing threads and had >2 substantive exchanges — these become new thread candidates. Create the directory `$THREADS_DIR/<slug>/` with a `_meta.json` file:
@@ -162,6 +168,8 @@ printf 'Captures: %s\nThreads updated: %s\nSummary: %s\n' \
 Derive the summary from the captures and thread updates just made. If no captures were made and no threads updated, omit the write.
 
 ### Preference accumulation
+
+**Scope gate:** Only accumulate preferences that were NOT routed to `lore capture` in Step 3. Scoped preferences are stored in the knowledge store (`preferences/` category) and must not also be written to `accumulated_preferences` — that is the double-capture scenario to avoid.
 
 After writing thread entries that contain a `**Preferences:**` field, update the thread's `_meta.json` `accumulated_preferences` array:
 

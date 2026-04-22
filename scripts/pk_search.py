@@ -27,9 +27,9 @@ from pathlib import Path
 DB_FILENAME = ".pk_search.db"
 SKIP_FILES = {"_inbox.md", "_index.md", "_meta.md", "_meta.json", "_index.json", "_self_test_results.md", "_manifest.json"}
 SKIP_DIRS = {"_archive", "__pycache__", ".git", "_meta", "_meta_bak", "_inbox"}
-CATEGORY_DIRS = {"abstractions", "architecture", "conventions", "gotchas", "principles", "workflows", "domains"}
+CATEGORY_DIRS = {"abstractions", "architecture", "conventions", "gotchas", "principles", "workflows", "domains", "preferences"}
 # Category priority order for tiebreaking: higher index = higher priority
-CATEGORY_PRIORITY = ["domains", "architecture", "abstractions", "gotchas", "conventions", "workflows", "principles"]
+CATEGORY_PRIORITY = ["domains", "architecture", "abstractions", "gotchas", "conventions", "workflows", "principles", "preferences"]
 CATEGORY_PRIORITY_MAP = {cat: i for i, cat in enumerate(CATEGORY_PRIORITY)}
 CATEGORY_TIEBREAK_MAX = 0.04  # max bonus for highest-priority category (within 0.05 tiebreak range)
 SNIPPET_MAX_CHARS = 500

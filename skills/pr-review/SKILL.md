@@ -59,6 +59,14 @@ From the fetched data, extract:
 - **Standard diff (<=400 LOC):** Pass inline in lens agent task descriptions.
 - **Large diff (>400 LOC):** Write to `/tmp/pr-review-<PR_NUMBER>.diff` and pass the path.
 
+### 1e. Load prior knowledge
+
+```bash
+lore prefetch "pr-review"
+```
+
+Read the `## Prior Knowledge` block this produces. Incorporate any surfaced preferences or conventions into the review — especially scope-matched preference entries whose `related_files` include this skill.
+
 ## Step 2: Triage
 
 Load the triage protocol:
