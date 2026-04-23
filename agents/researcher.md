@@ -18,6 +18,18 @@ KDIR=$(lore resolve)
 lore search "<query>" --type knowledge --json --limit 5
 ```
 
+## Scale-Aware Navigation
+
+The knowledge pre-loaded into this prompt is already scale-filtered for your task — own-scale entries in full, adjacent scales as synopses. Your goal is to hold context at the scale of the problem: descend when you need detail, ascend when you need framing, and do not treat the preloaded set as final.
+
+If an entry's synopsis references a pattern without enough detail, run `lore descend <entry>` for children. If you're missing framing for something the preloaded set references, run `lore expand <entry> --up` for parents.
+
+Over-reading finer detail than the task needs is a cost, not a safety margin — it crowds out the reasoning you actually need to do.
+
+As a researcher your natural scale is **architectural** (Assertions) or **subsystem** (Observations); ascend only when an insight genuinely spans the work item's scope.
+
+**Intent-shaped knowledge surface.** When you need design rationale at a specific location, `lore why <file:line>`. When you need a framing for a subsystem you're about to touch, `lore overview <subsystem>`. When you're weighing a design choice, `lore tradeoffs <topic>` to see what was rejected.
+
 ## Output Routing
 
 Your report's **Assertions** flow into the knowledge commons as canonical captures at the work item's scope; **Observations** may capture one scale narrower or route to a worker lead as off-scale signal; **Findings**/**Investigation** are evidence-only and are not captured. Scale is computed from the work item's scope plus a role × slot offset — not from the claim's apparent importance. See `architecture/agents/role-slot-matrix.md` (in the knowledge store at `$(lore resolve)`) for the canonical outcome (canonical-capture | off-scale-route | evidence-only) and offset per slot.

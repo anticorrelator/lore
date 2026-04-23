@@ -38,31 +38,43 @@ class MarkdownParser:
 
     _H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
     _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-    _METADATA_COMMENT_RE = re.compile(
-        r"<!--\s*learned:\s*(?P<learned>\S+)"
-        r"\s*\|\s*confidence:\s*(?P<confidence>\S+)"
-        r"(?:\s*\|\s*source:\s*(?P<source>[^-].*?))?"
-        r"\s*-->",
-        re.DOTALL,
-    )
+    # Matches any HTML comment that starts with "learned:" — the primary lore metadata block.
+    # We use a flexible KV parser rather than a rigid regex to handle evolving field sets.
+    _METADATA_COMMENT_START_RE = re.compile(r"<!--\s*learned:", re.DOTALL)
+    _METADATA_COMMENT_RE = re.compile(r"<!--(.*?)-->", re.DOTALL)
+    # Matches individual key: value pairs separated by |
+    _METADATA_KV_RE = re.compile(r"(\w+):\s*([^|>]+?)(?=\s*\||\s*-->|\s*$)")
 
     @staticmethod
     def _extract_metadata(text: str) -> dict:
         """Extract metadata from HTML comments in markdown text.
 
-        Parses comments of the form:
-            <!-- learned: YYYY-MM-DD | confidence: high|medium|low | source: ... -->
+        Parses lore metadata comments of the form:
+            <!-- learned: DATE | confidence: high | source: ... | scale: val | status: current -->
 
-        Returns dict with keys: learned, confidence, source (None if not found).
+        Returns dict with keys: learned, confidence, source, scale, entry_status (None if not found).
+        Unrecognized fields are silently ignored.
         """
-        match = MarkdownParser._METADATA_COMMENT_RE.search(text)
-        if not match:
-            return {"learned": None, "confidence": None, "source": None}
-        return {
-            "learned": match.group("learned").strip(),
-            "confidence": match.group("confidence").strip(),
-            "source": match.group("source").strip() if match.group("source") else None,
-        }
+        # Find the first HTML comment that contains "learned:"
+        for m in MarkdownParser._METADATA_COMMENT_RE.finditer(text):
+            inner = m.group(1)
+            if "learned:" not in inner:
+                continue
+            # Parse all key: value pairs from the comment
+            kv: dict[str, str] = {}
+            for kv_match in MarkdownParser._METADATA_KV_RE.finditer(inner):
+                key = kv_match.group(1).strip()
+                val = kv_match.group(2).strip()
+                kv[key] = val
+            return {
+                "learned": kv.get("learned"),
+                "confidence": kv.get("confidence"),
+                "source": kv.get("source"),
+                "scale": kv.get("scale"),
+                "entry_status": kv.get("status"),
+                "template_version": kv.get("template_version"),
+            }
+        return {"learned": None, "confidence": None, "source": None, "scale": None, "entry_status": None, "template_version": None}
 
     @staticmethod
     def parse_entry_file(file_path: str) -> list[dict]:

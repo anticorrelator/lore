@@ -74,7 +74,7 @@ From the fetched data, extract:
 ### 1e. Load prior knowledge
 
 ```bash
-lore prefetch "pr-review"
+lore prefetch "pr-review" --scale-context advisor
 ```
 
 Read the `## Prior Knowledge` block this produces. Incorporate any surfaced preferences or conventions into the review — especially scope-matched preference entries whose `related_files` include this skill.

@@ -71,6 +71,23 @@ When both exist: execution-log for task-level decisions; notes.md for session-le
 6. **Annotation completeness:** For annotation-only phases, count entries with vs without annotation text. >40% empty caps D1 at 3. Subtract `## Related`-sourced bare entries and `_work/` paths from denominator (see `failure-modes.md` for details)
 7. **Prefetch hit rate (spec-only):** Useful vs empty results. <40% → disambiguate coverage gap vs query recall failure
 
+### 2b.5: Surfaced concerns (off-scale routing)
+
+Check for worker-surfaced concerns that were routed during implementation:
+
+```bash
+KDIR=$(lore resolve)
+SC_FILE="$KDIR/_work/<slug>/surfaced_concerns.jsonl"
+[ -f "$SC_FILE" ] && cat "$SC_FILE"
+```
+
+If `surfaced_concerns.jsonl` is non-empty, read each entry. These are worker observations that exceeded their execution scope — concerns about design, architecture, or scope they surfaced but couldn't resolve within their task. For each concern:
+
+- **Count them** in the evidence summary (see format below)
+- **Assess disposition:** Were the concerns addressed in the work? Check plan.md Design Decisions and Open Questions for matching content.
+- **Feed D3 scoring** (Knowledge Capture & Propagation): unaddressed concerns that reveal genuine gaps in the plan's scope inform D3 — workers shouldn't need to route off-scale for concerns that a well-scoped plan would have anticipated.
+- **Do not re-resolve them here.** Report their presence and disposition as evidence; resolution is a spec-lead or follow-on spec decision.
+
 ### 2c–2e: Logs
 
 - **Session entries:** Read `notes.md` `## YYYY-MM-DD` entries. Empty = degraded evidence.
@@ -85,6 +102,7 @@ Report:
 ```
 [retro] Evidence gathered:
   Worker observations: N tasks | Context blocks: N phases (M/K resolved)
+  Surfaced concerns: N entries (M addressed / K pending)
   Sessions: N entries | Retrieval: N events | Friction: N events
   Token savings: ~Nk estimate
 ```

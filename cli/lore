@@ -74,6 +74,12 @@ Commands:
   check-links  Scan for broken [[backlink]] references
   status       Show knowledge store health summary
   assemble     Assemble CLAUDE.md from fragments
+  expand           Walk one hop along parent/child edges (--up default, --down for children)
+  descend          Show children filtered to exactly one scale step narrower
+  neighbors        Find same-scale entries with high concordance similarity
+  tradeoffs        Surface design alternatives considered and rejected for a topic
+  why              Reverse-lookup design rationale entries for a code location (file:line)
+  overview         Architectural-scale framing for a subsystem + descent affordances
   knowledge-tree   Render the parent/child subtree rooted at an entry
   batch-spec       Batch-run /spec short on eligible work items
   batch-implement  Batch-run /implement on ready work items
@@ -95,6 +101,7 @@ Commands:
   scale        Capture-scale helpers (see: lore scale --help)
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
   retro        Federated retro pooling (see: lore retro --help)
+  off-scale    Off-scale route management (see: lore off-scale --help)
 
 Options:
   --help, -h       Show this help
@@ -985,6 +992,56 @@ cmd_followup() {
   esac
 }
 
+off_scale_usage() {
+  cat >&2 <<EOF
+lore off-scale — off-scale route management
+
+Usage: lore off-scale <subcommand> [args...]
+
+Subcommands:
+  resolve   Transition a pending route to accepted or declined
+  route     Route pending off-scale rows into scope_pointers.jsonl
+
+Options:
+  --help, -h    Show this help
+
+Notes:
+  Routes live in _work/<slug>/off_scale_routes.jsonl. Status transitions are
+  write-once: pending → accepted | declined (terminal). Re-resolution is rejected
+  with exit code 2. Do NOT edit the sidecar files directly — that breaks the
+  scorecard emission pipeline.
+EOF
+}
+
+cmd_off_scale() {
+  if [[ $# -eq 0 ]]; then
+    off_scale_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      off_scale_usage
+      return 0
+      ;;
+    resolve)
+      "$SCRIPTS_DIR/off-scale-resolve.sh" "$@"
+      ;;
+    route)
+      "$SCRIPTS_DIR/route-off-scale.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown off-scale subcommand '$subcmd'" >&2
+      echo "" >&2
+      off_scale_usage
+      return 1
+      ;;
+  esac
+}
+
 # --- Top-level dispatch ---
 if [[ $# -eq 0 ]]; then
   exec lore-tui
@@ -1136,6 +1193,34 @@ case "$1" in
   retro)
     shift
     cmd_retro "$@"
+    ;;
+  off-scale)
+    shift
+    cmd_off_scale "$@"
+    ;;
+  expand)
+    shift
+    "$SCRIPTS_DIR/expand-entry.sh" "$@"
+    ;;
+  descend)
+    shift
+    "$SCRIPTS_DIR/descend-entry.sh" "$@"
+    ;;
+  neighbors)
+    shift
+    "$SCRIPTS_DIR/neighbors-entry.sh" "$@"
+    ;;
+  tradeoffs)
+    shift
+    "$SCRIPTS_DIR/tradeoffs-topic.sh" "$@"
+    ;;
+  why)
+    shift
+    "$SCRIPTS_DIR/why-at-location.sh" "$@"
+    ;;
+  overview)
+    shift
+    "$SCRIPTS_DIR/overview-subsystem.sh" "$@"
     ;;
   knowledge-tree)
     shift

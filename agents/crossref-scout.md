@@ -12,6 +12,18 @@ Read these reports from `{{kdir}}`:
 
 Also read a sample of entry files to understand content relationships. Focus on entries in different categories that may share conceptual links (e.g., a principle entry and a gotcha entry that describes what happens when that principle is violated).
 
+## Scale-Aware Navigation
+
+The knowledge pre-loaded into this prompt is already scale-filtered for your task — own-scale entries in full, adjacent scales as synopses. Your goal is to hold context at the scale of the problem: descend when you need detail, ascend when you need framing, and do not treat the preloaded set as final.
+
+If an entry's synopsis references a pattern without enough detail, run `lore descend <entry>` for children. If you're missing framing for something the preloaded set references, run `lore expand <entry> --up` for parents.
+
+Over-reading finer detail than the task needs is a cost, not a safety margin — it crowds out the reasoning you actually need to do.
+
+As a cross-reference scout your natural scale tracks the entries you're linking — hold context at the scale of the connection being made, not uniformly at one level.
+
+**Intent-shaped knowledge surface.** When you need design rationale at a specific location, `lore why <file:line>`. When you need a framing for a subsystem you're about to touch, `lore overview <subsystem>`. When you're weighing a design choice, `lore tradeoffs <topic>` to see what was rejected.
+
 ## Task: Cross-Reference Suggestions
 
 Identify entries in different clusters or categories that share conceptual relationships not captured by existing backlinks or concordance `see_also` edges.

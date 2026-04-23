@@ -30,6 +30,7 @@ from pk_search import (  # noqa: E402
     DEFAULT_LIMIT,
     DEFAULT_THRESHOLD,
     SOURCE_TYPES,
+    render_trust_stamp,
 )
 from pk_resolve import Resolver, resolve_read_path, build_backlink_from_result  # noqa: E402
 
@@ -64,6 +65,9 @@ def cmd_search(args: argparse.Namespace) -> None:
     exclude_category = getattr(args, "exclude_category", None)
     caller = getattr(args, "caller", None)
     include_archived = getattr(args, "include_archived", False)
+    min_scale = getattr(args, "min_scale", None)
+    max_scale = getattr(args, "max_scale", None)
+    include_status = getattr(args, "include_status", None)
 
     # --budget: budget-aware search with two-tier JSON output
     budget = getattr(args, "budget", None)
@@ -78,6 +82,9 @@ def cmd_search(args: argparse.Namespace) -> None:
             exclude_category=exclude_category,
             caller=caller,
             include_archived=include_archived,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            include_status=include_status,
         )
         # Normalize full entries for JSON output
         full_out = []
@@ -115,6 +122,9 @@ def cmd_search(args: argparse.Namespace) -> None:
             exclude_category=exclude_category,
             caller=caller,
             include_archived=include_archived,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            include_status=include_status,
         )
     elif mode == "bm25":
         results = searcher.search(
@@ -126,6 +136,9 @@ def cmd_search(args: argparse.Namespace) -> None:
             exclude_category=exclude_category,
             caller=caller,
             include_archived=include_archived,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            include_status=include_status,
         )
     else:
         # Semantic or hybrid mode — requires pk_semantic
@@ -235,6 +248,9 @@ def cmd_search(args: argparse.Namespace) -> None:
             print(f"  Confidence: {r['confidence']}")
         if r.get("learned_date"):
             print(f"  Learned: {r['learned_date']}")
+        if r.get("scale"):
+            print(f"  Scale: {r['scale']}")
+        print(f"  {render_trust_stamp(r)}")
         print(f"  Snippet: {r['snippet']}")
         if r.get("similar_entries"):
             print("  See also:")
@@ -844,6 +860,9 @@ def main() -> None:
     p_search.add_argument("--include-archived", action="store_true", help="Include archived work items in results (excluded by default)")
     p_search.add_argument("--expand", action="store_true", help="Expand results with similar entries from TF-IDF concordance (See also)")
     p_search.add_argument("--budget", type=int, default=None, help="Budget in chars: return two-tier JSON (full + titles_only) within budget")
+    p_search.add_argument("--min-scale", default=None, metavar="SCALE", help="Include only entries with scale >= SCALE (e.g. subsystem). Skips unknown-scale entries.")
+    p_search.add_argument("--max-scale", default=None, metavar="SCALE", help="Include only entries with scale <= SCALE (e.g. subsystem). Skips unknown-scale entries.")
+    p_search.add_argument("--include-status", nargs="+", default=None, metavar="STATUS", help="Status values to include (current, superseded, historical). Default: current only.")
     p_search.set_defaults(func=cmd_search)
 
     # resolve

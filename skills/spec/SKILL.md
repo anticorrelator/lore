@@ -185,7 +185,7 @@ Before drafting, offer the user a chance to shape the plan with high-level strat
 
 7. **Annotate phases with knowledge context** — after drafting phases with objectives and tasks, run a concordance query per phase to surface relevant knowledge entries beyond what you encountered in Step 2s:
    ```bash
-   lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5
+   lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5 --scale-context spec-lead
    ```
    Review the suggestions for each phase. Add relevant entries as `[[knowledge:file#heading]] — why relevant` lines in the phase's `**Knowledge context:**` block. Your direct findings from Step 2s are the primary source — concordance is a *widener*, not a replacement. Skip entries that don't add actionable context for a worker implementing that phase.
 
@@ -373,7 +373,7 @@ Proceed, or adjust? (You can request changes — e.g., split a question, drop an
 
 4. **Pre-fetch knowledge for each investigation** — before constructing prompts, run:
    ```bash
-   PRIOR_KNOWLEDGE=$(lore prefetch "<investigation topic>" --format prompt --limit 5)
+   PRIOR_KNOWLEDGE=$(lore prefetch "<investigation topic>" --format prompt --limit 5 --scale-context researcher)
    ```
    This produces a "## Prior Knowledge" block with pre-resolved content from the knowledge store.
 
@@ -567,6 +567,23 @@ Before synthesizing, offer the user a chance to shape the plan with high-level s
 
 **Activation note:** This step is a concrete prompt-and-respond interaction, not an evaluation condition. Always present the compressed summary and prompt — do not assess whether strategy "seems needed" and skip. The user's Enter-to-skip response is the only gate. **Exception: if `--yes` was passed, skip this step entirely (no strategy).**
 
+### Step 4.9: Read surfaced_concerns (if present)
+
+Before synthesizing, check whether workers on this work item surfaced concerns via the off-scale routing pipeline:
+
+```bash
+KDIR=$(lore resolve)
+SC_FILE="$KDIR/_work/<slug>/surfaced_concerns.jsonl"
+[ -f "$SC_FILE" ] && cat "$SC_FILE"
+```
+
+If `surfaced_concerns.jsonl` exists and is non-empty, read each pending entry (status field absent means unresolved). For each concern:
+- If it describes a scope boundary or unresolved question → add to `## Open Questions`
+- If it describes a design assumption workers found dubious → add to `## Design Decisions` open question or refine the relevant decision
+- If it describes an architectural observation → treat as an additional research finding for Step 5
+
+This step is **read-only** — do not modify `surfaced_concerns.jsonl`. Routing of worker rows is handled by `lore off-scale route --work-item <slug> --source worker`.
+
 ### Step 5: Synthesize
 
 From the documented findings, draft the remaining plan sections:
@@ -620,7 +637,7 @@ From the documented findings, draft the remaining plan sections:
 
 6. **Concordance-assisted annotation** — after drafting phases, widen each phase's `**Knowledge context:**` block beyond what investigations explicitly mentioned. For each phase, run:
    ```bash
-   lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5
+   lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5 --scale-context spec-lead
    ```
    Review the suggestions against what is already listed. Add relevant entries as `[[knowledge:...]]` backlinks with a brief "— why relevant" annotation. Skip entries that duplicate what investigations already covered. Investigation findings are the primary source of knowledge references — concordance is a *widener*, not a replacement.
 

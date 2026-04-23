@@ -40,6 +40,41 @@ SOURCE_TYPES = ("knowledge", "work", "plan", "thread", "source")
 SOURCE_FILE_EXTENSIONS = {".py", ".sh"}
 SOURCE_SKIP_DIRS = {"__pycache__", ".git", "node_modules", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", "dist", "build", ".egg-info"}
 
+# Scale registry path (same directory as this script)
+_SCALE_REGISTRY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scale-registry.json")
+
+# Valid status values; entries without a status field are treated as "current"
+VALID_STATUS_VALUES = {"current", "superseded", "historical"}
+DEFAULT_STATUS_FILTER = ("current",)
+
+
+def _load_scale_ordinals() -> dict[str, int]:
+    """Load scale id -> ordinal mapping from scale-registry.json.
+
+    Returns empty dict if the registry is missing or unreadable.
+    """
+    try:
+        with open(_SCALE_REGISTRY_PATH, "r", encoding="utf-8") as f:
+            registry = json.load(f)
+        return {entry["id"]: entry["ordinal"] for entry in registry.get("scales", [])}
+    except (OSError, json.JSONDecodeError, KeyError):
+        return {}
+
+
+def render_trust_stamp(result: dict) -> str:
+    """Render a compact trust-stamp header line for a search result.
+
+    Format:
+        [trust: template=abc123 | status=current | learned=2026-04-14 | confidence=high | retention=null]
+
+    Fields render as 'unknown' when absent (except retention which renders as 'null').
+    """
+    tv = result.get("template_version") or "unknown"
+    status = result.get("entry_status") or "unknown"
+    learned = result.get("learned_date") or "unknown"
+    confidence = result.get("confidence") or "unknown"
+    return f"[trust: template={tv} | status={status} | learned={learned} | confidence={confidence} | retention=null]"
+
 
 # ---------------------------------------------------------------------------
 # Markdown Parser (extracted to pk_markdown.py, re-exported here)
@@ -56,7 +91,7 @@ from pk_resolve import Resolver, BACKLINK_RE as _BACKLINK_RE, resolve_read_path 
 class Indexer:
     """Builds and maintains the FTS5 index."""
 
-    SCHEMA_VERSION = 8  # v8: structural_importance column for backlink/concordance in-degree ranking
+    SCHEMA_VERSION = 10  # v10: template_version column for trust-stamp support
 
     def __init__(self, knowledge_dir: str, repo_root: str | None = None):
         self.knowledge_dir = os.path.abspath(knowledge_dir)
@@ -80,6 +115,9 @@ class Indexer:
                 confidence UNINDEXED,
                 learned_date UNINDEXED,
                 structural_importance UNINDEXED,
+                scale UNINDEXED,
+                entry_status UNINDEXED,
+                template_version UNINDEXED,
                 tokenize='porter unicode61'
             );
 
@@ -405,20 +443,23 @@ class Indexer:
 
         # Extract metadata for knowledge entries
         category = self._extract_category(file_path) if source_type == "knowledge" else None
-        metadata = {"learned": None, "confidence": None}
+        metadata = {"learned": None, "confidence": None, "scale": None, "entry_status": None, "template_version": None}
         if source_type == "knowledge":
             try:
                 raw_text = Path(file_path).read_text(encoding="utf-8")
                 meta = MarkdownParser._extract_metadata(raw_text)
                 metadata["learned"] = meta.get("learned")
                 metadata["confidence"] = meta.get("confidence")
+                metadata["scale"] = meta.get("scale")
+                metadata["entry_status"] = meta.get("entry_status")
+                metadata["template_version"] = meta.get("template_version")
             except (OSError, UnicodeDecodeError):
                 pass
 
         for entry in entries:
             conn.execute(
-                "INSERT INTO entries (file_path, heading, content, source_type, category, confidence, learned_date, structural_importance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (entry["file_path"], entry["heading"], entry["content"], source_type, category, metadata["confidence"], metadata["learned"], 0.0),
+                "INSERT INTO entries (file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (entry["file_path"], entry["heading"], entry["content"], source_type, category, metadata["confidence"], metadata["learned"], 0.0, metadata["scale"], metadata["entry_status"], metadata["template_version"]),
             )
 
         # Update file_meta
@@ -916,6 +957,9 @@ class Searcher:
         exclude_category: str | list[str] | None = None,
         caller: str | None = None,
         include_archived: bool = False,
+        min_scale: str | None = None,
+        max_scale: str | None = None,
+        include_status: tuple[str, ...] | list[str] | None = None,
     ) -> list[dict]:
         """Search entries by query. Returns list of result dicts.
 
@@ -925,6 +969,10 @@ class Searcher:
             exclude_category: Exclude entries in these categories (e.g. "domains"). None = no exclusion.
             caller: Identifier for the caller (e.g. "lead", "worker", "prefetch"). Logged to retrieval log.
             include_archived: If False (default), exclude entries from _archive/ paths.
+            min_scale: Include only entries with scale ordinal >= this scale id. None = no lower bound.
+            max_scale: Include only entries with scale ordinal <= this scale id. None = no upper bound.
+            include_status: Status values to include (e.g. ["current", "superseded"]). None = only "current".
+                            Entries without a status field are treated as "current".
         """
         search_start = time.time()
         self._ensure_index()
@@ -957,12 +1005,24 @@ class Searcher:
         if not include_archived:
             extra_filters += " AND file_path NOT LIKE '%\\_archive/%' ESCAPE '\\'"
 
+        # Resolve scale ordinals for min/max_scale filtering (post-retrieval)
+        scale_ordinals = _load_scale_ordinals() if (min_scale or max_scale) else {}
+        min_scale_ord = scale_ordinals.get(min_scale) if min_scale else None
+        max_scale_ord = scale_ordinals.get(max_scale) if max_scale else None
+
+        # Resolve status filter: default is current-only; None include_status means same default
+        effective_statuses: set[str] | None = None
+        if include_status is not None:
+            effective_statuses = set(include_status)
+        else:
+            effective_statuses = {"current"}
+
         params: list = [prepared] + filter_params + [limit * 3]
 
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
 
-        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, rank"
+        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, rank"
         order_expr = f"rank * CASE WHEN source_type = 'knowledge' THEN {KNOWLEDGE_BOOST} ELSE 1.0 END"
 
         try:
@@ -1029,6 +1089,28 @@ class Searcher:
             # weak matches (scores closer to 0 than the threshold).
             if threshold < 0 and score > threshold:
                 continue
+
+            entry_scale = row["scale"]  # may be None or "unknown"
+            entry_status_val = row["entry_status"]  # may be None (treat as "current")
+
+            # Status filter: entries without a status field are treated as "current"
+            effective_entry_status = entry_status_val if entry_status_val else "current"
+            if effective_statuses and effective_entry_status not in effective_statuses:
+                continue
+
+            # Scale filter: skip entries with unknown/missing scale when bounds are set
+            if min_scale_ord is not None or max_scale_ord is not None:
+                if not entry_scale or entry_scale == "unknown":
+                    # Skip entries with unknown scale when a range filter is active
+                    continue
+                entry_ord = scale_ordinals.get(entry_scale)
+                if entry_ord is None:
+                    continue
+                if min_scale_ord is not None and entry_ord < min_scale_ord:
+                    continue
+                if max_scale_ord is not None and entry_ord > max_scale_ord:
+                    continue
+
             content = row["content"]
             snippet = content[:SNIPPET_MAX_CHARS]
             if len(content) > SNIPPET_MAX_CHARS:
@@ -1049,6 +1131,9 @@ class Searcher:
                 "confidence": row["confidence"],
                 "learned_date": row["learned_date"],
                 "structural_importance": row["structural_importance"] or 0.0,
+                "scale": entry_scale,
+                "entry_status": effective_entry_status,
+                "template_version": row["template_version"],
                 "score": round(score, 4),
                 "snippet": snippet,
             }
@@ -1080,6 +1165,9 @@ class Searcher:
         recency_weight: float = 0.25,
         tfidf_weight: float = 0.15,
         importance_weight: float = 0.1,
+        min_scale: str | None = None,
+        max_scale: str | None = None,
+        include_status: tuple[str, ...] | list[str] | None = None,
     ) -> list[dict]:
         """Search with composite scoring: BM25 + recency + TF-IDF similarity + structural importance.
 
@@ -1101,6 +1189,9 @@ class Searcher:
             exclude_category=exclude_category,
             caller=caller,
             include_archived=include_archived,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            include_status=include_status,
         )
 
         # Build query TF-IDF vector using precomputed corpus stats
@@ -1227,6 +1318,9 @@ class Searcher:
         recency_weight: float = 0.25,
         tfidf_weight: float = 0.15,
         importance_weight: float = 0.1,
+        min_scale: str | None = None,
+        max_scale: str | None = None,
+        include_status: tuple[str, ...] | list[str] | None = None,
     ) -> dict:
         """Search with composite scoring and budget-aware result partitioning.
 
@@ -1253,6 +1347,9 @@ class Searcher:
             recency_weight=recency_weight,
             tfidf_weight=tfidf_weight,
             importance_weight=importance_weight,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            include_status=include_status,
         )
 
         full: list[dict] = []
