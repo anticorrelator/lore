@@ -449,6 +449,76 @@ Counts label changes per scale_id in the last 5 registry versions (N=5). Emits:
 
 **Guardrail interpretation:** repeated relabels across consecutive audits indicate the scale boundaries themselves are ill-defined, not just individual entries. Flag surfaces in `/retro` only — must NOT feed `/evolve` citations or primary scoring.
 
+### Emit retention_after_renormalize rows
+
+Emit one `retention_after_renormalize` telemetry row per living entry, tracking how many prior renormalize cycles each entry survived without being pruned:
+
+```bash
+bash ~/.lore/scripts/renormalize-emit-retention.sh \
+  --kdir "$KDIR" \
+  --run-id "renorm-<timestamp>"
+```
+
+Reads `$KDIR/_renormalize/prune-history.jsonl` (one line per run: `{"run_id":"...","pruned":[...]}`) and `_manifest.json`. Emits one row per entry:
+```json
+{"schema_version": "1", "kind": "telemetry", "metric": "retention_after_renormalize",
+ "calibration_state": "pre-calibration", "template_id": "<template_version or 'unknown'>",
+ "entry_id": "<path>", "cycles_survived": <int>,
+ "ts": "<ISO-8601>", "renormalize_run_id": "<run-id>"}
+```
+
+**First-run behavior:** if `prune-history.jsonl` does not exist, all entries emit `cycles_survived: 0` — expected; the metric becomes meaningful after multiple renormalize runs accumulate history.
+
+**Interpretation:** entries with consistently low `cycles_survived` relative to their peers are candidates for pruning review. Stratify by `template_id` to detect whether specific producer templates generate less durable knowledge. Diagnostic telemetry only — must NOT feed `/evolve` citations or primary scoring.
+
+### Emit downstream_adoption_rate rows
+
+Emit one `downstream_adoption_rate` telemetry row per entry, measuring how often each entry was loaded to agents in the rolling window:
+
+```bash
+bash ~/.lore/scripts/emit-downstream-adoption.sh \
+  --kdir "$KDIR" \
+  --run-id "renorm-<timestamp>" \
+  --window 30
+```
+
+Reads `$KDIR/_meta/retrieval-log.jsonl` (loaded_paths from prefetch + session-start events) and `_manifest.json`. Stratifies by entry status read from the entry file's META block (`current | superseded | historical`; defaults to `current` when absent). Emits one row per entry:
+```json
+{"schema_version": "1", "kind": "telemetry", "metric": "downstream_adoption_rate",
+ "calibration_state": "pre-calibration", "entry_id": "<path>",
+ "status": "current|superseded|historical", "citations": <int>, "opportunities": <int>,
+ "value": <float>, "window_days": 30, "ts": "<ISO-8601>", "renormalize_run_id": "<run-id>"}
+```
+
+**Interpretation:** low `value` on `status: current` entries indicates knowledge that agents rarely retrieve — candidates for consolidation or better keyword tagging. Equal or higher `value` on `status: superseded` entries vs `current` peers indicates trust signals aren't influencing retrieval behavior — feeds the trust-stamping feedback loop (Pass 2 task-21). Diagnostic telemetry only — must NOT feed `/evolve` citations or primary scoring.
+
+### Emit correction_rate and precedent_rate rows
+
+Emit `correction_rate` (per scale) and `precedent_rate` (per registry group) telemetry rows:
+
+```bash
+bash ~/.lore/scripts/emit-correction-metrics.sh \
+  --kdir "$KDIR" \
+  --run-id "renorm-<timestamp>" \
+  --window-days 30
+```
+
+Reads `_manifest.json` and `scripts/scale-registry.json`. Walks all entries, reading `corrections[]`, `precedent_note:`, and `scale:` from each entry's HTML META block. Emits one `correction_rate` row per scale and one `precedent_rate` row per registry group (scale_id):
+
+```json
+{"schema_version": "1", "kind": "telemetry", "metric": "correction_rate",
+ "calibration_state": "pre-calibration", "scale": "<scale>",
+ "corrections_in_window": <int>, "entries_at_scale": <int>, "value": <float>,
+ "window_days": 30, "ts": "<ISO-8601>", "renormalize_run_id": "<run-id>"}
+
+{"schema_version": "1", "kind": "telemetry", "metric": "precedent_rate",
+ "calibration_state": "pre-calibration", "scale_id": "<id>",
+ "l3_corrections_in_window": <int>, "corrections_in_window": <int>, "value": <float>,
+ "window_days": 30, "ts": "<ISO-8601>", "renormalize_run_id": "<run-id>"}
+```
+
+`corrections_in_window` counts entries with ≥1 correction[] item dated within the window. L3 corrections (for `precedent_rate`) are entries that have both `corrections[]` AND `precedent_note:` in the META block — indicating the correction escalated to a supersedes edge. Diagnostic telemetry only — must NOT feed `/evolve` citations or primary scoring.
+
 ### Run post-execution maintenance
 
 ```bash

@@ -101,9 +101,11 @@ Commands:
   scale        Capture-scale helpers (see: lore scale --help)
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
   retro        Federated retro pooling (see: lore retro --help)
+  correction   Verdict-driven correction management (see: lore correction --help)
   off-scale    Off-scale route management (see: lore off-scale --help)
   synopsis     Edge-keyed synopsis sidecar management (see: lore synopsis --help)
   resynth      Invalidate and re-synthesize edge synopses for a knowledge entry
+  history      Show correction history and supersession chain for a knowledge entry
 
 Options:
   --help, -h       Show this help
@@ -470,6 +472,60 @@ cmd_retro() {
       echo "Error: unknown retro subcommand '$subcmd'" >&2
       echo "" >&2
       retro_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Correction subgroup (Phase 10 L2 correction write path) ---
+correction_usage() {
+  cat >&2 <<EOF
+lore correction — verdict-driven correction write path (Phase 10)
+
+Usage: lore correction <subcommand> [args...]
+
+Subcommands:
+  find    Map a contradicted claim to candidate knowledge entry paths
+  apply   Apply a correction from a contradicted verdict to a knowledge entry
+
+lore correction find --claim-text TEXT [--file-line FILE:LINE] [--limit N] [--threshold F]
+lore correction apply --entry PATH --verdict-id ID --verdict-source SOURCE
+                      --evidence TEXT --superseded-text TEXT --replacement-text TEXT
+                      [--date YYYY-MM-DD] [--dry-run]
+
+  find: Given the text of a contradicted claim, returns ranked entry paths
+        that likely contain the claim (related_files overlap + TF-IDF similarity).
+
+  apply: Replaces the superseded snippet in the entry body and appends a
+         corrections[] item to the entry's META block. Attribution is to
+         the evidence anchor, not the producer agent (blame-free per work-03).
+EOF
+}
+
+cmd_correction() {
+  if [[ $# -eq 0 ]]; then
+    correction_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      correction_usage
+      return 0
+      ;;
+    find)
+      "$SCRIPTS_DIR/find-correction-targets.sh" "$@"
+      ;;
+    apply)
+      KDIR="$(resolve_kdir)" "$SCRIPTS_DIR/apply-correction.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown correction subcommand '$subcmd'" >&2
+      echo "" >&2
+      correction_usage
       return 1
       ;;
   esac
@@ -1246,6 +1302,10 @@ case "$1" in
     shift
     cmd_retro "$@"
     ;;
+  correction)
+    shift
+    cmd_correction "$@"
+    ;;
   off-scale)
     shift
     cmd_off_scale "$@"
@@ -1268,6 +1328,15 @@ case "$1" in
     ENTRY_ARG="${ENTRY_ARG%.md}"
     COUNT=$("$SCRIPTS_DIR/edge-synopsis.sh" invalidate "$ENTRY_ARG")
     echo "[resynth] Invalidated $COUNT synopsis cache file(s) for '$ENTRY_ARG'. Re-synthesis will occur on next cross-scale read."
+    ;;
+  history)
+    shift
+    if [[ $# -eq 0 ]]; then
+      echo "Usage: lore history <entry_id>" >&2
+      echo "  Show correction history and supersession chain for a knowledge entry." >&2
+      exit 1
+    fi
+    "$SCRIPTS_DIR/show-history.sh" "$@"
     ;;
   expand)
     shift

@@ -127,7 +127,11 @@ for it in items:
 
 # ---------------------------------------------------------------------------
 # Action: status-update
-# Reads plan["status_updates"] array; each item: {entry_id, from_status, to_status, [successor_entry_id], reason}
+# Reads plan["status_updates"] array; each item:
+#   {entry_id, from_status, to_status, [successor_entry_id], [quality], [rationale], reason}
+# When transitioning to "superseded" AND successor_entry_id is present, emits a
+# supersession_quality telemetry row via scorecard-append.sh.
+# quality defaults to "improved" if omitted; rationale defaults to reason field.
 # ---------------------------------------------------------------------------
 do_status_update() {
   python3 -c "
@@ -136,8 +140,12 @@ plan = json.load(open('$PLAN'))
 items = plan.get('status_updates', [])
 for it in items:
     succ = it.get('successor_entry_id', '')
-    print(it['entry_id'] + '\t' + it.get('from_status','current') + '\t' + it['to_status'] + '\t' + succ + '\t' + it.get('reason',''))
-" | while IFS=$'\t' read -r entry_id from_status to_status successor reason; do
+    quality = it.get('quality', 'improved')
+    rationale = it.get('rationale', it.get('reason', ''))
+    # Escape tabs in rationale to avoid IFS split corruption
+    rationale = rationale.replace('\t', ' ')
+    print(it['entry_id'] + '\t' + it.get('from_status','current') + '\t' + it['to_status'] + '\t' + succ + '\t' + it.get('reason','') + '\t' + quality + '\t' + rationale)
+" | while IFS=$'\t' read -r entry_id from_status to_status successor reason quality rationale; do
     file="$KDIR/$entry_id"
     if edit_meta_field "$file" "status" "$from_status" "$to_status"; then
       msg="  status-updated: $entry_id  ($from_status -> $to_status)"
@@ -145,6 +153,25 @@ for it in items:
         msg="$msg  [successor: $successor]"
       fi
       echo "$msg"
+
+      # Emit supersession_quality telemetry when transitioning to superseded with a successor
+      if [[ "$to_status" == "superseded" && -n "$successor" ]]; then
+        ts=$(timestamp_iso)
+        row=$(python3 -c "
+import json, sys
+print(json.dumps({
+    'schema_version': '1',
+    'kind': 'telemetry',
+    'calibration_state': 'pre-calibration',
+    'metric': 'supersession_quality',
+    'superseded_entry_id': sys.argv[1],
+    'successor_entry_id': sys.argv[2],
+    'quality': sys.argv[3],
+    'rationale': sys.argv[4],
+    'ts': sys.argv[5],
+}))" "$entry_id" "$successor" "$quality" "$rationale" "$ts")
+        "$SCRIPT_DIR/scorecard-append.sh" --row "$row"
+      fi
     fi
   done
 

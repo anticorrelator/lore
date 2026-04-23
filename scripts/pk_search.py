@@ -61,19 +61,59 @@ def _load_scale_ordinals() -> dict[str, int]:
         return {}
 
 
-def render_trust_stamp(result: dict) -> str:
+_CORRECTIONS_FIELD_RE = re.compile(r"\|\s*corrections:\s*(\[.*?\])\s*(?:-->|\|)", re.DOTALL)
+
+
+def _parse_correction_recency(abs_path: str) -> str | None:
+    """Return the most recent correction date from an entry's corrections[] META field, or None.
+
+    Reads the file at abs_path, extracts the corrections JSON array from the HTML META
+    block, and returns the maximum date string found. Returns None if the field is absent,
+    the file is unreadable, or the array is empty.
+    """
+    try:
+        text = open(abs_path, encoding="utf-8").read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = _CORRECTIONS_FIELD_RE.search(text)
+    if not m:
+        return None
+    try:
+        items = json.loads(m.group(1))
+        dates = [item["date"] for item in items if isinstance(item, dict) and item.get("date")]
+        return max(dates) if dates else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def render_trust_stamp(result: dict, knowledge_dir: str | None = None) -> str:
     """Render a compact trust-stamp header line for a search result.
 
     Format:
-        [trust: template=abc123 | status=current | learned=2026-04-14 | confidence=high | retention=null]
+        [trust: template=abc123 | status=current | learned=2026-04-14 | confidence=high | retention=null | correction_recency=2026-04-23]
 
-    Fields render as 'unknown' when absent (except retention which renders as 'null').
+    Fields render as 'unknown' when absent (except retention which renders as 'null'
+    and correction_recency which renders as 'null' when never corrected).
+
+    When knowledge_dir is provided, the entry file is read to extract correction_recency
+    from the corrections[] META field (Phase 10 task-65). Omitted when knowledge_dir
+    is not provided for backwards-compatible callers.
     """
     tv = result.get("template_version") or "unknown"
     status = result.get("entry_status") or "unknown"
     learned = result.get("learned_date") or "unknown"
     confidence = result.get("confidence") or "unknown"
-    return f"[trust: template={tv} | status={status} | learned={learned} | confidence={confidence} | retention=null]"
+    base = f"[trust: template={tv} | status={status} | learned={learned} | confidence={confidence} | retention=null"
+    if knowledge_dir is not None:
+        rel_path = result.get("file_path", "")
+        if rel_path:
+            abs_path = os.path.join(os.path.abspath(knowledge_dir), rel_path)
+            recency = _parse_correction_recency(abs_path)
+            recency_val = recency if recency else "null"
+        else:
+            recency_val = "null"
+        return base + f" | correction_recency={recency_val}]"
+    return base + "]"
 
 
 # ---------------------------------------------------------------------------

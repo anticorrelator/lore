@@ -190,7 +190,38 @@ script_dir = os.environ.get("_PK_SCRIPT_DIR", "")
 if script_dir:
     sys.path.insert(0, script_dir)
 from pk_resolve import build_backlink_from_result
-from pk_search import render_trust_stamp
+from pk_search import render_trust_stamp, _CORRECTIONS_FIELD_RE
+
+
+def _last_corrected_line(file_path_rel: str) -> str:
+    """Return 'Last corrected: <date> — <evidence>' for most recent correction, or ''."""
+    abs_path = os.path.join(knowledge_dir, file_path_rel)
+    try:
+        text = open(abs_path, encoding="utf-8").read()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    m = _CORRECTIONS_FIELD_RE.search(text)
+    if not m:
+        return ""
+    try:
+        items = json.loads(m.group(1))
+        if not items:
+            return ""
+        # Most recent by date
+        latest = max(
+            (it for it in items if isinstance(it, dict) and it.get("date")),
+            key=lambda it: it["date"],
+            default=None,
+        )
+        if not latest:
+            return ""
+        date = latest.get("date", "")
+        evidence = latest.get("evidence", "").strip()
+        if evidence:
+            return f"Last corrected: {date} — {evidence}"
+        return f"Last corrected: {date}"
+    except (json.JSONDecodeError, TypeError):
+        return ""
 
 knowledge_dir = sys.argv[1]
 fmt = sys.argv[2]
@@ -544,12 +575,16 @@ if scale_context:
         sa_key = (abs_fp, r["heading"])
         sa_entries = see_also_map.get(sa_key, [])
         sa_line = ("See also: " + ", ".join(sa_entries[:3])) if sa_entries else ""
-        trust_line = render_trust_stamp(r)
+        trust_line = render_trust_stamp(r, knowledge_dir)
+        corrected_line = _last_corrected_line(r["file_path"]) if r.get("source_type") == "knowledge" else ""
 
         content = _resolve_content(backlink)
         if not content:
             content = r.get("snippet", "")
-        block = f'\n### {r["heading"]} (from {r["file_path"]}){stale_tag}\n{trust_line}\n{content}'
+        block = f'\n### {r["heading"]} (from {r["file_path"]}){stale_tag}\n{trust_line}'
+        if corrected_line:
+            block += f'\n{corrected_line}'
+        block += f'\n{content}'
         if sa_line:
             block += f'\n{sa_line}'
         print(block)
@@ -560,7 +595,8 @@ if scale_context:
         if budget_remaining <= 0:
             break
         stale_tag = get_staleness_annotation(r["file_path"]) if r.get("source_type") == "knowledge" else ""
-        trust_line = render_trust_stamp(r)
+        trust_line = render_trust_stamp(r, knowledge_dir)
+        corrected_line = _last_corrected_line(r["file_path"]) if r.get("source_type") == "knowledge" else ""
         # Derive entry_id from file_path (strip .md suffix)
         entry_id = r.get("file_path", "")
         if entry_id.endswith(".md"):
@@ -568,7 +604,10 @@ if scale_context:
         synopsis = _get_or_synthesize_synopsis(entry_id, own_scale, r.get("snippet", ""), script_dir)
         if not synopsis:
             continue
-        block = f'\n### {r["heading"]} (from {r["file_path"]}, adjacent-scale){stale_tag}\n{trust_line}\n{synopsis}'
+        block = f'\n### {r["heading"]} (from {r["file_path"]}, adjacent-scale){stale_tag}\n{trust_line}'
+        if corrected_line:
+            block += f'\n{corrected_line}'
+        block += f'\n{synopsis}'
         print(block)
         budget_remaining -= len(block)
 
@@ -587,13 +626,16 @@ else:
             if sa_entries:
                 sa_line = "See also: " + ", ".join(sa_entries[:3])
 
-        trust_line = render_trust_stamp(r)
+        trust_line = render_trust_stamp(r, knowledge_dir)
+        corrected_line = _last_corrected_line(r["file_path"]) if r.get("source_type") == "knowledge" else ""
 
         content = _resolve_content(backlink)
         if content:
             print()
             print(f'### {r["heading"]} (from {r["file_path"]}){stale_tag}')
             print(trust_line)
+            if corrected_line:
+                print(corrected_line)
             print(content)
             if sa_line:
                 print(sa_line)
@@ -604,6 +646,8 @@ else:
             print()
             print(f'### {r["heading"]} (from {r["file_path"]}){stale_tag}')
             print(trust_line)
+            if corrected_line:
+                print(corrected_line)
             print(snippet)
             if sa_line:
                 print(sa_line)

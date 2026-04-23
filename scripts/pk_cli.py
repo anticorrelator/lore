@@ -250,7 +250,7 @@ def cmd_search(args: argparse.Namespace) -> None:
             print(f"  Learned: {r['learned_date']}")
         if r.get("scale"):
             print(f"  Scale: {r['scale']}")
-        print(f"  {render_trust_stamp(r)}")
+        print(f"  {render_trust_stamp(r, knowledge_dir=args.knowledge_dir)}")
         print(f"  Snippet: {r['snippet']}")
         if r.get("similar_entries"):
             print("  See also:")

@@ -25,12 +25,14 @@ The step numbering is not alphabetical padding — it encodes a dependency order
 
 1. **Steps 1–2.7**: setup, evidence gathering, batch audit backfill. These run unconditionally. The backfill (Step 2.7) must complete before any scorecard read so Step 3.8's audit-coverage check sees a representative `rows.jsonl`.
 2. **Step 2.8**: escalation telemetry. Non-scored, feeds retro prose only.
-3. **Step 3.8** (Phase 7b — settlement pipeline health checks): **runs before** any scorecard-consumption step. Sets `window_state = "pipeline-degraded" | normal`. If degraded, Steps 3.0/3.9 skip.
-4. **Step 3.0** (Phase 7 — scorecard delta surface, *primary*): runs only on normal windows. Skipped on `pipeline-degraded`.
-5. **Step 3** (dimension scores): demoted to narrative coda. Always scored for longitudinal trend, never the headline.
-6. **Step 3.6–3.7**: scorecard forward guidance + behavioral health — coda/diagnostic.
-7. **Step 3.9** (Phase 7 — non-compensatory headline): runs only on normal windows. Skipped on `pipeline-degraded`.
-8. **Steps 4–6**: journal persistence, evolution suggestions, operator-facing report. Branch on `window_state` so `pipeline-degraded` never surfaces a pass/weak/fail headline.
+3. **Step 2.9**: scale access appropriateness. Qualitative cycle-level field — two graded sub-questions emitted as sidecar row to `retro-scale-access.jsonl`. Runs unconditionally alongside Step 2.8; never affects `pipeline-degraded` state.
+4. **Step 3.8** (Phase 7b — settlement pipeline health checks): **runs before** any scorecard-consumption step. Sets `window_state = "pipeline-degraded" | normal`. If degraded, Steps 3.0/3.9 skip.
+5. **Step 3.0** (Phase 7 — scorecard delta surface, *primary*): runs only on normal windows. Skipped on `pipeline-degraded`.
+6. **Step 3** (dimension scores): demoted to narrative coda. Always scored for longitudinal trend, never the headline.
+7. **Step 3.5** (Phase 8 — memory system telemetry): reads `kind: telemetry` rows + sidecars; observability only, never feeds `/evolve`. Runs on all windows (not gated by `pipeline-degraded`).
+8. **Step 3.6–3.7**: scorecard forward guidance + behavioral health — coda/diagnostic.
+9. **Step 3.9** (Phase 7 — non-compensatory headline): runs only on normal windows. Skipped on `pipeline-degraded`.
+10. **Steps 4–6**: journal persistence, evolution suggestions, operator-facing report. Branch on `window_state` so `pipeline-degraded` never surfaces a pass/weak/fail headline.
 
 **Phase 7b (health checks at Step 3.8) ships alongside Phase 7 (scorecard consumption at 3.0/3.9)** — they share no schema but interlock: 3.8 gates the evidentiary status of the window; 3.0 and 3.9 refuse to read a degraded window. Editing either section must preserve the `pipeline-degraded` short-circuit in the three downstream consumers (Steps 3.0, 3.9, 4, 6).
 
@@ -87,6 +89,87 @@ If `surfaced_concerns.jsonl` is non-empty, read each entry. These are worker obs
 - **Assess disposition:** Were the concerns addressed in the work? Check plan.md Design Decisions and Open Questions for matching content.
 - **Feed D3 scoring** (Knowledge Capture & Propagation): unaddressed concerns that reveal genuine gaps in the plan's scope inform D3 — workers shouldn't need to route off-scale for concerns that a well-scoped plan would have anticipated.
 - **Do not re-resolve them here.** Report their presence and disposition as evidence; resolution is a spec-lead or follow-on spec decision.
+
+### 2b.6: Channel-contract review loop
+
+Aggregate channel-shopping signals per role × slot over the last 5 retro cycles (or
+all available cycles if fewer than 5 exist). Three signal types are tracked:
+
+- **`under_routing`** — off-scale concerns that were routed by workers but, in
+  retrospect, should have been emitted as captures at the time. Inferred from
+  `surfaced_concerns.jsonl` entries that were later addressed inline (disposition:
+  `accepted-one-shot`) rather than resolved via a follow-on spec or knowledge
+  promotion. A high rate means workers are routing things off-scale that the
+  channel contract should have told them to capture directly.
+
+- **`over_capture`** — captures that, in retrospect, should have been off-scale
+  routes. Inferred from knowledge entries later corrected (have a `corrections[]`
+  entry written within 2 cycles of the original capture) or from off-scale routes
+  that were resolved as `declined` by the lead. A high rate means workers are
+  capturing things that were actually too speculative or architectural to store
+  as settled knowledge.
+
+- **`evidence_only_durable`** — worker reports where the Investigation or Tests
+  sections contain durable architectural claims that were never promoted to the
+  knowledge store. Heuristic: execution-log entries with declarative architectural
+  language ("X always does Y", "the invariant is", "every Z must") in
+  Investigation/Tests that have no corresponding `lore capture` in the session.
+
+**Computation (per role × slot, over last N cycles up to 5):**
+```
+For each signal_type in {under_routing, over_capture, evidence_only_durable}:
+  numerator   = count of outputs in that role×slot matching the signal heuristic
+  denominator = total outputs in that role×slot in the window
+  rate        = numerator / denominator  (skip if denominator == 0)
+```
+
+**Threshold:** Rate > 0.30 over at least 3 cycles for that role × slot fires a flag.
+Below 3 cycles, the signal is too noisy to attribute to systematic drift vs.
+one-cycle variance.
+
+**When a flag fires**, emit a sidecar row:
+```bash
+KDIR=$(lore resolve)
+bash ~/.lore/scripts/retro-channel-flag-append.sh \
+  --cycle-id "<slug>" \
+  --role "<role>" \
+  --slot "<slot>" \
+  --signal-type "<under_routing|over_capture|evidence_only_durable>" \
+  --rate "<observed rate as decimal>" \
+  --window-cycles "<N cycles in window>" \
+  --remedy-hint "<optional one-line remedy suggestion>"
+```
+
+The script writes to `$KDIR/_scorecards/retro-channel-flags.jsonl` (created on
+first use). One row per flagged role × slot per retro cycle.
+
+**Remedy narrative (when flags fire):**
+
+For each fired flag, add a prose paragraph to the retro narrative (Step 6) naming
+the role × slot, signal type, rate, and a proposed remedy. Remedies target the
+**workflow contract**, not the individual producer — they adjust schema wording,
+add a route/capture example, tune the matrix offset, or add an ingestion warning.
+Do NOT suggest that a specific worker performed poorly.
+
+Remedy heuristics by signal type:
+- `under_routing`: consider adding a worked example of this slot's capture
+  threshold to the channel-contract matrix, or lowering the capture bar for
+  this role × slot.
+- `over_capture`: consider adding an ingestion warning that speculative claims
+  in this slot should be routed off-scale rather than captured; or raise the
+  capture confidence threshold for this role × slot.
+- `evidence_only_durable`: consider adding a protocol step that requires
+  workers to explicitly decide capture-vs-route for declarative claims in
+  Investigation sections before closing a task.
+
+**When no flags fire: no prose.** Per the healthy-case silence invariant (same
+rationale as Step 3.8 health checks). Channel-contract drift is only notable when
+it crosses the threshold — routine absence is not worth reporting.
+
+**Invariant.** This step never calls `scorecard-append`. The `retro_flag` sidecar
+rows are NOT settlement signal — they are qualitative drift indicators for the
+workflow contract. Routing them through `rows.jsonl` would expose them to `/evolve`
+consumption and create a scoring incentive to suppress flags.
 
 ### 2c–2e: Logs
 
@@ -290,6 +373,80 @@ persistence layer for this signal; the journal is. Mixing the two
 opens a back-door through which /evolve could eventually start
 consuming escalation data even though this step explicitly declares
 it off-limits. Journal-only storage structurally rules that out.
+
+## Step 2.9: Scale access appropriateness (qualitative cycle-level field)
+
+**Qualitative, not scored.** Ask the spec-lead (or the agent running `/retro`) two
+sub-questions about how retrieval scale was managed during the cycle. This step
+produces **one sidecar row per cycle** in `$KDIR/_scorecards/retro-scale-access.jsonl`
+— separate from `rows.jsonl` to keep it out of the settlement pipeline.
+
+This is a cycle-level observation, NOT a producer scoring metric. It feeds
+longitudinal trend tracking only — never `/evolve` template mutations, never the
+pass|weak|fail headline. See Step 2.8d's incentive-hazard rationale for why
+qualitative cycle-level signal stays off `kind == "scored"`.
+
+### Sub-question (a): Abstraction level
+
+> "Did agents get context at the right level of abstraction — enough to reason at
+> the scale of the problem, without fine detail crowding out the framing or forcing
+> descent to reconstruct it?"
+
+Grade: `right-sized | too-coarse | too-fine`
+
+One-line rationale citing specific retrieval calls observed in evidence (Step 2b's
+delivery audit, Step 2c's retrieval log). The rationale must name at least one
+concrete retrieval event or cite "no retrieval log — evidence absent" if the log is
+missing.
+
+**Directionality** (for longitudinal interpretation):
+- `too-coarse` → missing or under-linked child entries; the knowledge store has
+  the concept but not the implementation-level detail workers needed.
+- `too-fine` → missing bridging parent entries; workers were handed implementation
+  detail without the framing context that makes the detail meaningful.
+- `right-sized` → no structural gap surfaced; entries matched the scale of the
+  problem as the cycle unfolded.
+
+### Sub-question (b): Scale-agnostic recall utility
+
+> "Was scale-agnostic recall useful in this cycle — did choosing the abstraction
+> level substitute for reading code or drilling into finer-scale entries, or was
+> the capability redundant given how the work actually went?"
+
+Grade: `useful | neutral | not-useful`
+
+One-line rationale. Cite whether workers bypassed code reads due to knowledge
+delivery, or whether the store entries were consulted but didn't reduce
+exploration.
+
+### Emission
+
+After grading both sub-questions, emit the sidecar row:
+
+```bash
+KDIR=$(lore resolve)
+bash ~/.lore/scripts/retro-scale-access-append.sh \
+  --cycle-id "<slug>" \
+  --abstraction-grade "<right-sized|too-coarse|too-fine>" \
+  --abstraction-rationale "<one-line citing retrieval calls>" \
+  --recall-grade "<useful|neutral|not-useful>" \
+  --recall-rationale "<one-line>"
+```
+
+The script writes to `$KDIR/_scorecards/retro-scale-access.jsonl` (created on
+first use). It validates grades against the closed enum before appending.
+
+**Report shape:**
+```
+[retro] Scale access: abstraction=<grade> | recall=<grade>
+  abstraction: <one-line rationale>
+  recall: <one-line rationale>
+```
+
+**Invariant.** This step never calls `scorecard-append`. The sidecar is not a
+scorecard row — it has no `calibration_state`, no `template_version`, no
+`kind: scored`. Mixing it into `rows.jsonl` would expose it to `/evolve`
+consumption; the separate file structurally prevents that.
 
 ## Step 3.0: Scorecard delta surface (primary)
 
@@ -530,6 +687,191 @@ Evidence: escalations, out-of-scope file reads, divergent choices, unexpected di
 - **Intent tasks:** Out-of-scope reads for discovery are by-design, not gaps.
 
 Scoring: 5 = spec-guided, 0 escalations | 4 = minor exploration, ≤1 escalation | 3 = several reads, 2-3 escalations | 2 = frequent exploration, multiple divergences | 1 = no meaningful guidance
+
+## Step 3.5: Memory System Telemetry
+
+**Observability only — MUST NOT feed `/evolve` or the F1 harmonic-mean template ranking.**
+These metrics describe how the knowledge store is behaving as a system. They are NOT
+verdict-level scores on individual producer templates; surfacing them here is for the
+operator's situational awareness, not for driving template mutations. Any `/evolve`
+citation that references a metric from this section is invalid and must be rejected.
+
+Read `$KDIR/_scorecards/rows.jsonl` filtered to rows with `kind: telemetry` in the
+retro window. For each metric below, compute a one-line summary and select the top-3
+highlights (entries/roles/scales with the highest or most notable values).
+
+When a metric has zero rows in `rows.jsonl` for the window, emit:
+`<metric>: no data in window` and continue. Do not treat absence as a failure.
+
+---
+
+### Retention after renormalize
+
+**Source:** rows where `metric == "retention_after_renormalize"`.
+Key fields: `entry_id`, `cycles_survived`, `template_id` (producer template), `run_id`.
+
+**Summary:** median `cycles_survived` across all entries in window; count of entries
+with `cycles_survived >= 3` (signal of durable high-quality output).
+
+**Top-3 highlights:** entries with the highest `cycles_survived` values.
+
+```
+retention_after_renormalize:
+  median cycles_survived: <N>  |  entries with ≥3 cycles: <K>/<total>
+  top survivors:
+    <entry_id>  cycles=<N>  producer=<template_id>
+    <entry_id>  cycles=<N>  producer=<template_id>
+    <entry_id>  cycles=<N>  producer=<template_id>
+```
+
+---
+
+### Downstream adoption rate
+
+**Source:** rows where `metric == "downstream_adoption_rate"`.
+Key fields: `entry_id`, `value` (adoption rate 0.0–1.0), `status` (entry status at
+measurement time), `window_days`.
+
+**Summary:** mean adoption rate across entries in window; fraction with `value > 0.5`
+(adopted in >50% of retrieval windows).
+
+**Top-3 highlights:** entries with the highest adoption rate, with their `status`.
+
+```
+downstream_adoption_rate:
+  mean rate: <val>  |  entries >50%: <K>/<total>
+  top adopters:
+    <entry_id>  rate=<val>  status=<status>
+    <entry_id>  rate=<val>  status=<status>
+    <entry_id>  rate=<val>  status=<status>
+```
+
+---
+
+### Route precision
+
+**Source:** rows where `metric == "route_precision"`.
+Key fields: `role`, `outcome` (accepted/declined), `route_id`, `template_id`.
+
+**Summary:** acceptance rate per role (accepted / total routes for that role) in window.
+
+**Top-3 highlights:** roles with the lowest acceptance rate (most likely to benefit from
+channel-contract adjustment).
+
+```
+route_precision:
+  <role>: <accepted>/<total> routes accepted (<pct>%)
+  <role>: <accepted>/<total> routes accepted (<pct>%)
+  <role>: <accepted>/<total> routes accepted (<pct>%)
+```
+
+---
+
+### Supersession quality
+
+**Source:** rows where `metric == "supersession_quality"`.
+Key fields: `superseded_entry_id`, `successor_entry_id`, `quality` (improved/neutral/regressed).
+
+**Summary:** fraction of supersessions marked `improved` in window.
+
+**Top-3 highlights:** any `neutral` or `regressed` supersessions (these are the ones worth
+inspecting — improved supersessions are healthy and don't need attention).
+
+```
+supersession_quality:
+  improved: <K>/<total> (<pct>%)  |  neutral: <N>  |  regressed: <M>
+  notable (non-improved):
+    <superseded_entry_id> → <successor_entry_id>  quality=<neutral|regressed>
+    ...
+```
+
+When all supersessions are `improved` and count ≥ 1: emit `supersession_quality: all improved (<K> total)` with no highlights needed.
+
+---
+
+### Scale drift rate
+
+**Source:** rows where `metric == "scale_drift_rate"`.
+Key fields: `producer_role`, `value` (drift rate 0.0–1.0), `run_id`.
+
+**Summary:** drift rate per role; flag any role where `value > 0.20` (guardrail threshold
+per `renormalize-emit-drift-guardrails.sh`).
+
+**Top-3 highlights:** roles with highest drift rate.
+
+```
+scale_drift_rate:
+  <producer_role>: drift=<val>  [ABOVE-THRESHOLD]
+  <producer_role>: drift=<val>
+  <producer_role>: drift=<val>
+```
+
+When no role exceeds 0.20: emit `scale_drift_rate: all roles within guardrail` with no highlights.
+
+---
+
+### Label revision rate
+
+**Source:** rows where `metric == "label_revision_rate"`.
+Key fields: `scale_id`, `value` (revision rate 0.0–1.0), `run_id`.
+
+**Summary:** label revision rate per scale_id; flag `registry_design_flag` rows if present
+(these indicate a scale_id whose labels are too volatile to be reliable navigation anchors).
+
+**Top-3 highlights:** scale_ids with highest revision rate.
+
+```
+label_revision_rate:
+  <scale_id>: rate=<val>  [DESIGN-FLAG]
+  <scale_id>: rate=<val>
+  <scale_id>: rate=<val>
+```
+
+---
+
+### Scale access appropriateness (sidecar)
+
+**Source:** `$KDIR/_scorecards/retro-scale-access.jsonl` — read the row whose
+`cycle_id` matches the current retro slug. If multiple rows exist (re-runs),
+use the most recent by `ts`.
+
+**Display the two grades directly** — no aggregation needed since this is already
+a per-cycle qualitative assessment:
+
+```
+scale_access_appropriateness:
+  abstraction: <right-sized|too-coarse|too-fine>  — <one-line rationale>
+  recall:      <useful|neutral|not-useful>         — <one-line rationale>
+```
+
+When no row exists for this cycle: `scale_access_appropriateness: not assessed this cycle`.
+
+---
+
+### Channel-contract flags (sidecar)
+
+**Source:** `$KDIR/_scorecards/retro-channel-flags.jsonl` — read all rows whose
+`cycle_id` matches the current retro slug.
+
+**Display each flag:**
+
+```
+channel-contract flags:
+  <role>/<slot>  signal=<signal_type>  rate=<pct>  over <N> cycles
+    remedy: <remedy_hint or "see Step 2b.6 guidance">
+```
+
+When no flags fired for this cycle: `channel-contract flags: none`.
+
+---
+
+**Step 3.5 invariant — no `/evolve` coupling.** The metrics in this section describe
+memory-system health, not producer-template quality. They inform the operator's
+understanding of how the knowledge store is aging, routing, and self-correcting —
+they do not adjudicate whether any template produced correct output. `/evolve`
+MUST NOT cite any metric from this section as evidence for a template mutation.
+If `/evolve` sees a "retention_after_renormalize" or "downstream_adoption_rate"
+citation in its input, it must skip that citation as non-evidentiary.
 
 ## Step 3.6: Scorecard data (forward guidance)
 
@@ -1657,6 +1999,46 @@ relegated to narrative coda.
     Delivery: X/5 | Quality: X/5 | Gaps: X/5 | Alignment: X/5 | Spec Utility: X/5
     Key finding: <one sentence on the knowledge-system behavior this cycle>
     Disagreement with scorecard headline? <none | brief note>
+
+  ## Memory System Telemetry (Step 3.5 — observability only, does not feed /evolve)
+
+  retention_after_renormalize:
+    median cycles_survived: <N>  |  entries with ≥3 cycles: <K>/<total>
+    top survivors: <entry_id> cycles=<N> | <entry_id> cycles=<N> | <entry_id> cycles=<N>
+
+  downstream_adoption_rate:
+    mean rate: <val>  |  entries >50%: <K>/<total>
+    top adopters: <entry_id> rate=<val> status=<status> | ...
+
+  route_precision:
+    <role>: <accepted>/<total> (<pct>%)  |  <role>: <pct>%  |  <role>: <pct>%
+
+  supersession_quality:
+    improved: <K>/<total>  |  neutral: <N>  |  regressed: <M>
+    notable (non-improved): <superseded> → <successor>  quality=<grade>  (or "all improved")
+
+  scale_drift_rate:
+    <role>: drift=<val> [ABOVE-THRESHOLD if >0.20]  |  <role>: drift=<val>  |  ...
+
+  label_revision_rate:
+    <scale_id>: rate=<val> [DESIGN-FLAG if flagged]  |  <scale_id>: rate=<val>  |  ...
+
+  scale_access_appropriateness:
+    abstraction: <right-sized|too-coarse|too-fine>  — <one-line rationale>
+    recall:      <useful|neutral|not-useful>         — <one-line rationale>
+
+  channel-contract flags: <none | one line per flag: role/slot signal=X rate=Y%>
+
+  # Scale access (Step 2.9)
+  Scale access: abstraction=<grade> | recall=<grade>
+    abstraction: <one-line rationale>
+    recall: <one-line rationale>
+
+  # Channel-contract flags (Step 2b.6) — omit when no flags fired
+  Channel-contract drift detected:
+    <role>/<slot>  signal=<signal_type>  rate=<pct> over <N> cycles
+      Remedy: <one-line targeting workflow contract, not individual producers>
+    ...
 
   # Behavioral-health coda (Step 3.7)
   <4 selected checks + answers — 1-3 sentences each>

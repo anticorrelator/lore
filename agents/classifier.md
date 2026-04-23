@@ -20,6 +20,16 @@ Read these resources from `{{kdir}}`:
 
 For each entry in `{{audit_set}}`, compare the entry's captured `scale:` against what the current content warrants. Emit a DISAGREEMENT only when captured scale ≠ inferred scale. Skip agreements entirely.
 
+**Pre-check: corrections[] freshness gate (run before the signal chain).**
+
+Before running the inferred-scale signal chain, read the entry file and parse its HTML META block for a `corrections:` field. The field, when present, is a JSON array of correction items with a `date` field (ISO `YYYY-MM-DD`).
+
+- If any correction item has `date >= (today - 30 days)`, the entry has been recently verified by the correctness-gate or reverse-auditor verdict pipeline. Treat it as FRESH: skip the disagreement check for this entry entirely.
+- Emit `correction_recent: true` in a `skipped_entries` list in the report (see Output section) so the audit trail is preserved.
+- Rationale: a corrections[] entry means a settlement judge has inspected this entry's claims against current evidence within the last 30 days. That is stronger evidence of freshness than any file-drift or neighbor-drift heuristic.
+
+If no `corrections:` field is present, or all correction dates are older than 30 days, proceed normally with the signal chain below.
+
 **Inferred scale signals (apply in order; first strong signal wins):**
 
 1. **Related-file existence.** For each path in the entry's `related_files`: check whether the file exists in the repo. If >50% of related files are missing, the entry likely describes a superseded or removed component — inferred scale drops one level (architectural → subsystem, subsystem → implementation).
@@ -108,12 +118,21 @@ Write the report to `{{kdir}}/_meta/classification-report.json`:
       "evidence": "related_files span 3 subsystems; in-degree 2"
     }
   ],
+  "skipped_entries": [
+    {
+      "entry": "category/entry.md",
+      "reason": "correction_recent",
+      "correction_date": "2026-04-20",
+      "verdict_source": "correctness-gate"
+    }
+  ],
   "summary": {
     "entries_audited": 0,
     "disagreements_found": 0,
     "demotions_proposed": 0,
     "relabels_proposed": 0,
     "primary_assignments_made": 0,
+    "entries_skipped_correction_recent": 0,
     "entries_read_in_full": 0
   }
 }
