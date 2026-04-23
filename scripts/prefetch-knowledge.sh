@@ -375,6 +375,39 @@ def _synopsis(snippet: str) -> str:
     return "\n".join(lines[:2])
 
 
+def _get_or_synthesize_synopsis(entry_id: str, scale: str, snippet: str, script_dir: str) -> str:
+    """Return a synopsis for entry_id at scale, using cache or synthesis."""
+    synopsis_script = os.path.join(script_dir, "edge-synopsis.sh")
+    synth_script = os.path.join(script_dir, "synthesize-synopsis.sh")
+
+    # Try cache first
+    if os.path.isfile(synopsis_script):
+        try:
+            proc = subprocess.run(
+                [synopsis_script, "get", entry_id, scale],
+                capture_output=True, text=True, timeout=5
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    # Cache miss: attempt synthesis (includes fallback internally; budget=2s curl + overhead)
+    if os.path.isfile(synth_script):
+        try:
+            proc = subprocess.run(
+                [synth_script, entry_id, scale],
+                capture_output=True, text=True, timeout=10
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    # Final fallback: 2-line truncation
+    return _synopsis(snippet)
+
+
 # --- Status-aware filtering ---
 _STATUS_META_RE = re.compile(r"\|\s*status:\s*(?P<status>[^\s|>]+)", re.IGNORECASE)
 
@@ -528,7 +561,11 @@ if scale_context:
             break
         stale_tag = get_staleness_annotation(r["file_path"]) if r.get("source_type") == "knowledge" else ""
         trust_line = render_trust_stamp(r)
-        synopsis = _synopsis(r.get("snippet", ""))
+        # Derive entry_id from file_path (strip .md suffix)
+        entry_id = r.get("file_path", "")
+        if entry_id.endswith(".md"):
+            entry_id = entry_id[:-3]
+        synopsis = _get_or_synthesize_synopsis(entry_id, own_scale, r.get("snippet", ""), script_dir)
         if not synopsis:
             continue
         block = f'\n### {r["heading"]} (from {r["file_path"]}, adjacent-scale){stale_tag}\n{trust_line}\n{synopsis}'

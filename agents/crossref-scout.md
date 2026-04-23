@@ -34,7 +34,9 @@ For each suggestion, provide:
 - **relationship**: One of `cross-domain` (entries in different categories addressing the same concern), `hierarchical` (one entry is a specific case of the other's general principle), `causal` (one entry describes a cause, the other describes its effect or mitigation), `complementary` (entries that together form a more complete picture than either alone)
 - **rationale**: One sentence explaining why this connection is valuable
 
-Focus on high-value connections: prioritize links between architectural/subsystem entries over implementation-detail links. Skip connections that concordance `see_also` already captures (check the merge-candidates report for existing similarity scores). Target: 5-15 suggestions for a store of 50-100 entries, scaling roughly linearly.
+**Cross-scale weighting:** when ranking and filtering suggestions, apply a 1.5x bonus to the conceptual similarity score for pairs where source and target have different `scale:` values (cross-scale links). Cross-scale connections are highest-value because they bridge levels of abstraction (principle → mechanism, architecture → implementation). Within-scale pairs that score similarly should rank lower. Include a `cross_scale: true` flag and the scale pair in the suggestion when the bonus applies.
+
+Focus on high-value connections: prioritize cross-scale links first, then same-scale links between architectural/subsystem entries. Skip connections that concordance `see_also` already captures (check the merge-candidates report for existing similarity scores). Target: 5-15 suggestions for a store of 50-100 entries, scaling roughly linearly.
 
 ## Output
 
@@ -44,7 +46,7 @@ Write the report to `{{kdir}}/_meta/crossref-report.json`:
 {
   "generated": "<ISO timestamp>",
   "suggested_backlinks": [
-    {"source": "category/source-entry.md", "target": "category/target-entry.md", "relationship_type": "cross-domain|hierarchical|causal|complementary", "rationale": "One sentence."}
+    {"source": "category/source-entry.md", "target": "category/target-entry.md", "relationship_type": "cross-domain|hierarchical|causal|complementary", "rationale": "One sentence.", "cross_scale": true, "source_scale": "architectural", "target_scale": "implementation"}
   ],
   "summary": {
     "suggested_backlinks_count": 0

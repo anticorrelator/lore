@@ -26,6 +26,8 @@ Subcommands:
                            Print current label for id, or historical label at version N
   get-ids                  Print ordered scale ids (one per line)
   get-adjacency <id>       Print id-below and id-above (empty line when no neighbor)
+  relabel <id> --new-label <label>
+                           Rename a scale's label; bumps version and appends to label_history
 EOF
 }
 
@@ -139,6 +141,66 @@ below = ids[idx - 1] if idx > 0 else ""
 above = ids[idx + 1] if idx < len(ids) - 1 else ""
 print(below)
 print(above)
+EOF
+    ;;
+
+  relabel)
+    ID=""
+    NEW_LABEL=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --new-label) NEW_LABEL="$2"; shift 2 ;;
+        *) ID="$1"; shift ;;
+      esac
+    done
+    if [[ -z "$ID" || -z "$NEW_LABEL" ]]; then
+      echo "Error: relabel requires <id> --new-label <label>" >&2
+      usage
+      exit 1
+    fi
+    python3 - "$REGISTRY" "$ID" "$NEW_LABEL" <<'EOF'
+import json, sys
+from datetime import datetime, timezone
+
+reg_path = sys.argv[1]
+id_arg   = sys.argv[2]
+new_label = sys.argv[3]
+
+with open(reg_path) as f:
+    reg = json.load(f)
+
+labels = reg.get("labels", {})
+if id_arg not in labels:
+    print(f"Error: id '{id_arg}' not found in registry", file=sys.stderr)
+    sys.exit(1)
+
+old_label = labels[id_arg]
+if old_label == new_label:
+    print(f"No-op: '{id_arg}' label is already '{new_label}'")
+    sys.exit(0)
+
+old_version = reg["version"]
+new_version = old_version + 1
+
+history_entry = {
+    "version": new_version,
+    "relabeled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "labels": dict(labels)
+}
+reg.setdefault("label_history", []).append(history_entry)
+
+reg["labels"][id_arg] = new_label
+reg["version"] = new_version
+
+import os, tempfile
+dir_ = os.path.dirname(reg_path)
+with tempfile.NamedTemporaryFile("w", dir=dir_, delete=False, suffix=".tmp") as tf:
+    json.dump(reg, tf, indent=2)
+    tf.write("\n")
+    tmp_path = tf.name
+os.replace(tmp_path, reg_path)
+
+print(f"Relabeled '{id_arg}': '{old_label}' -> '{new_label}' (version {old_version} -> {new_version})")
 EOF
     ;;
 

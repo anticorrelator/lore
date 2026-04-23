@@ -102,6 +102,8 @@ Commands:
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
   retro        Federated retro pooling (see: lore retro --help)
   off-scale    Off-scale route management (see: lore off-scale --help)
+  synopsis     Edge-keyed synopsis sidecar management (see: lore synopsis --help)
+  resynth      Invalidate and re-synthesize edge synopses for a knowledge entry
 
 Options:
   --help, -h       Show this help
@@ -992,6 +994,56 @@ cmd_followup() {
   esac
 }
 
+synopsis_usage() {
+  cat >&2 <<EOF
+lore synopsis — edge-keyed synopsis sidecar management
+
+Usage: lore synopsis <subcommand> [args...]
+
+Subcommands:
+  get <entry_id> <requesting_scale>
+                           Output cached synopsis (exit 0), exit 1 if not found,
+                           exit 2 if stale (parent hash or template_version changed)
+  put <entry_id> <requesting_scale> --content-file <path> --parent-hash <hex> --parent-template-version <ver> --status <cached|generated|fallback>
+                           Write synopsis sidecar, print path on stdout
+  invalidate <entry_id>
+                           Delete all synopsis cache files for entry_id (all scales);
+                           prints deleted count on stdout
+
+Storage: \$KDIR/_edge_synopses/<sanitized_entry_id>__<requesting_scale>.md
+The sanitized_entry_id is the entry's relative path with '/' → '__'.
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+cmd_synopsis() {
+  if [[ $# -eq 0 ]]; then
+    synopsis_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      synopsis_usage
+      return 0
+      ;;
+    get|put|invalidate)
+      "$SCRIPTS_DIR/edge-synopsis.sh" "$subcmd" "$@"
+      ;;
+    *)
+      echo "Error: unknown synopsis subcommand '$subcmd'" >&2
+      echo "" >&2
+      synopsis_usage
+      return 1
+      ;;
+  esac
+}
+
 off_scale_usage() {
   cat >&2 <<EOF
 lore off-scale — off-scale route management
@@ -1197,6 +1249,25 @@ case "$1" in
   off-scale)
     shift
     cmd_off_scale "$@"
+    ;;
+  synopsis)
+    shift
+    cmd_synopsis "$@"
+    ;;
+  resynth)
+    shift
+    if [[ $# -eq 0 ]]; then
+      echo "Usage: lore resynth <entry_id>" >&2
+      echo "  Invalidate all cached synopses for entry_id. They will be re-synthesized on next cross-scale read." >&2
+      exit 1
+    fi
+    ENTRY_ARG="$1"
+    # Normalize: strip leading KDIR prefix and trailing .md
+    KDIR_FOR_RESYNTH="$(resolve_kdir)"
+    ENTRY_ARG="${ENTRY_ARG#"$KDIR_FOR_RESYNTH/"}"
+    ENTRY_ARG="${ENTRY_ARG%.md}"
+    COUNT=$("$SCRIPTS_DIR/edge-synopsis.sh" invalidate "$ENTRY_ARG")
+    echo "[resynth] Invalidated $COUNT synopsis cache file(s) for '$ENTRY_ARG'. Re-synthesis will occur on next cross-scale read."
     ;;
   expand)
     shift

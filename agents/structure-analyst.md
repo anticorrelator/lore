@@ -30,7 +30,11 @@ Identify groups of 2+ entries that describe the same concept at different granul
 
 ## Task 2: Structural Imbalance Report
 
-Flag categories or subcategories where depth or entry count suggests restructuring (e.g., flat category with 50+ entries, subcategory with only 1 entry, inconsistent nesting depth).
+Flag categories or subcategories where depth or entry count suggests restructuring. Check two dimensions:
+
+**Depth/count imbalances (existing check):** flat category with 50+ entries, subcategory with only 1 entry, inconsistent nesting depth.
+
+**Scale-skew imbalances (new check):** for each category with >20 entries, compute scale distribution from `_manifest.json`. If >80% of entries share a single scale, propose a split into scale-keyed subcategories (e.g., `conventions/implementation/`, `conventions/subsystem/`). Include `split_by_scale: true` in the restructure proposal so the orchestrator can route it to the correct agent. Only propose scale-splits for categories with >20 entries to avoid fragmentation of small categories.
 
 ## Output
 
@@ -48,19 +52,30 @@ Write the report to `{{kdir}}/_meta/structure-report.json`:
     }
   ],
   "imbalances": [
-    {"category": "category/subcategory", "issue": "What's wrong", "recommendation": "Specific action"}
+    {
+      "category": "category/subcategory",
+      "issue": "What's wrong",
+      "recommendation": "Specific action",
+      "split_by_scale": false,
+      "scale_distribution": {"implementation": 0, "subsystem": 0, "architectural": 0}
+    }
   ],
   "summary": {
     "clusters_found": 0,
-    "imbalances_found": 0
+    "imbalances_found": 0,
+    "scale_split_proposals": 0
   }
 }
 ```
+
+For scale-skew imbalances, set `split_by_scale: true` and populate `scale_distribution` with actual counts. The `recommendation` field should name the proposed subcategory paths (e.g., `"Split into conventions/implementation/ and conventions/subsystem/"`).
+
+For non-scale imbalances, `split_by_scale` may be omitted or set to false.
 
 ## Reporting
 
 Send the summary back to "{{team_lead}}" via `SendMessage`:
 - `type`: `"message"`
 - `recipient`: `"{{team_lead}}"`
-- `summary`: `"Structure analysis: N clusters, M imbalances"`
+- `summary`: `"Structure analysis: N clusters, M imbalances (P scale-split proposals)"`
 - `content`: the JSON summary object
