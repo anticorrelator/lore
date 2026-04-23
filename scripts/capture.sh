@@ -149,6 +149,13 @@ if [[ -z "$INSIGHT" ]]; then
   die "--insight is required"
 fi
 
+# --- Provenance validator ---
+if [[ -z "$PRODUCER_ROLE" || -z "$PROTOCOL_SLOT" ]]; then
+  echo "[capture] WARNING: Missing provenance — --producer-role=${PRODUCER_ROLE}, --protocol-slot=${PROTOCOL_SLOT}." >&2
+  echo "[capture] Captures without provenance cannot be scale-typed and degrade renormalize drift detection." >&2
+  echo "[capture] If this is a manual /remember, pass --producer-role and --protocol-slot explicitly." >&2
+fi
+
 # --- Resolve knowledge directory ---
 KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 
@@ -210,6 +217,31 @@ fi
 # are all provided AND the (role, slot) pair is a canonical-capture per the matrix.
 # On any failure (missing scope file, unknown role, off-scale pair), omit the
 # field silently — capture never aborts on scale resolution.
+# When --work-item is absent but role+slot are present, default scope to 'subsystem'
+# and warn — the caller should pass --work-item for accurate scale.
+if [[ -z "$WORK_ITEM" && -n "$PRODUCER_ROLE" && -n "$PROTOCOL_SLOT" ]]; then
+  echo "[capture] Warning: --work-item not provided; defaulting work-item scope to 'subsystem'. Long-term, pass --work-item or --work-scope explicitly." >&2
+  _work_scope="subsystem"
+  if SCALE=$("$SCRIPT_DIR/scale-compute.sh" \
+      --work-scope "$_work_scope" \
+      --role "$PRODUCER_ROLE" \
+      --slot "$PROTOCOL_SLOT" 2>/dev/null); then
+    META="$META | scale: $SCALE"
+    _registry="$SCRIPT_DIR/scale-registry.json"
+    if [[ -f "$_registry" ]]; then
+      _scale_registry_version=$(python3 -c "
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get('version', '1'))
+except Exception:
+    print('1')
+" "$_registry" 2>/dev/null || echo "1")
+    else
+      _scale_registry_version="1"
+    fi
+    META="$META | scale_registry_version: $_scale_registry_version"
+  fi
+fi
 if [[ -n "$WORK_ITEM" && -n "$PRODUCER_ROLE" && -n "$PROTOCOL_SLOT" ]]; then
   _scope_file="$KNOWLEDGE_DIR/_work/$WORK_ITEM/_meta.json"
   if [[ -f "$_scope_file" ]]; then
@@ -229,6 +261,21 @@ except Exception:
       --role "$PRODUCER_ROLE" \
       --slot "$PROTOCOL_SLOT" 2>/dev/null); then
     META="$META | scale: $SCALE"
+    # Read version from scale registry (task-5 creates scripts/scale-registry.json).
+    # Default to "1" until the registry file exists.
+    _registry="$SCRIPT_DIR/scale-registry.json"
+    if [[ -f "$_registry" ]]; then
+      _scale_registry_version=$(python3 -c "
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get('version', '1'))
+except Exception:
+    print('1')
+" "$_registry" 2>/dev/null || echo "1")
+    else
+      _scale_registry_version="1"
+    fi
+    META="$META | scale_registry_version: $_scale_registry_version"
   fi
 fi
 
@@ -247,6 +294,7 @@ fi
 META="$META | captured_at_branch: $CAPTURED_AT_BRANCH"
 META="$META | captured_at_sha: $CAPTURED_AT_SHA"
 META="$META | captured_at_merge_base_sha: $CAPTURED_AT_MERGE_BASE_SHA"
+META="$META | status: current"
 META="$META -->"
 
 # --- Write individual entry file ---
@@ -279,6 +327,11 @@ fi
 } > "$TARGET_FILE"
 
 RELPATH="${TARGET_FILE#$KNOWLEDGE_DIR/}"
+
+# --- Infer parent edges from /spec researcher assertions ---
+if [[ -n "$WORK_ITEM" ]]; then
+  "$SCRIPT_DIR/infer-parent-edges.sh" --entry "$TARGET_FILE" --work-item "$WORK_ITEM" 2>/dev/null || true
+fi
 
 # --- Append to capture log ---
 # Schema: timestamp,source,category,confidence,template_version

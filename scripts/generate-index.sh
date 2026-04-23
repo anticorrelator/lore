@@ -93,6 +93,19 @@ for category in "${CATEGORIES[@]}"; do
     else
       echo "- **$title**"
     fi
+
+    # Extract and render parent edges distinctly (explicit vs inferred)
+    meta_comment=$(grep -o '<!--.*-->' "$filepath" 2>/dev/null | head -1 || true)
+    if [[ -n "$meta_comment" ]]; then
+      explicit_parents=$(echo "$meta_comment" | grep -o '[^_]parents: [^|>]*' 2>/dev/null | grep -v 'inferred' | sed 's/[^ ]*parents: //' | tr -d ' ' || true)
+      inferred_parents=$(echo "$meta_comment" | grep -o 'inferred_parents: [^|]*' 2>/dev/null | sed 's/inferred_parents: //' | sed 's/[[:space:]]*-->$//' | xargs 2>/dev/null || true)
+      if [[ -n "$explicit_parents" && "$explicit_parents" != "none" ]]; then
+        echo "  - Parents (explicit): $explicit_parents"
+      fi
+      if [[ -n "$inferred_parents" && "$inferred_parents" != "none" ]]; then
+        echo "  - Parents (inferred): $inferred_parents"
+      fi
+    fi
   done
 
   echo ""

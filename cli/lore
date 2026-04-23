@@ -74,6 +74,7 @@ Commands:
   check-links  Scan for broken [[backlink]] references
   status       Show knowledge store health summary
   assemble     Assemble CLAUDE.md from fragments
+  knowledge-tree   Render the parent/child subtree rooted at an entry
   batch-spec       Batch-run /spec short on eligible work items
   batch-implement  Batch-run /implement on ready work items
   batch-capture    Capture multiple insights from a JSON array
@@ -288,6 +289,7 @@ Usage: lore scale <subcommand> [args...]
 
 Subcommands:
   compute   Compute clamped absolute capture scale from work-scope + role × slot
+  registry  Query the scale registry (ids, labels, adjacency, version)
 
 Options:
   --help, -h    Show this help
@@ -366,6 +368,9 @@ cmd_scale() {
       ;;
     compute)
       "$SCRIPTS_DIR/scale-compute.sh" "$@"
+      ;;
+    registry)
+      "$SCRIPTS_DIR/scale-registry.sh" "$@"
       ;;
     *)
       echo "Error: unknown scale subcommand '$subcmd'" >&2
@@ -1131,6 +1136,10 @@ case "$1" in
   retro)
     shift
     cmd_retro "$@"
+    ;;
+  knowledge-tree)
+    shift
+    "$SCRIPTS_DIR/knowledge-tree.sh" "$@"
     ;;
   batch-spec)
     shift

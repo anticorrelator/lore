@@ -134,6 +134,8 @@ for category in categories:
         captured_at_branch = None
         captured_at_sha = None
         captured_at_merge_base_sha = None
+        parents = []
+        inferred_parents = []
         meta_match = re.search(r'<!--\s*(.*?)\s*-->', content)
         if meta_match:
             meta_text = meta_match.group(1)
@@ -163,6 +165,12 @@ for category in categories:
                     captured_at_sha = part.split(':', 1)[1].strip() or None
                 elif part.startswith('captured_at_merge_base_sha:'):
                     captured_at_merge_base_sha = part.split(':', 1)[1].strip() or None
+                elif part.startswith('parents:'):
+                    p_text = part.split(':', 1)[1].strip()
+                    parents = [p.strip() for p in p_text.split(',') if p.strip() and p.strip() != 'none']
+                elif part.startswith('inferred_parents:'):
+                    ip_text = part.split(':', 1)[1].strip()
+                    inferred_parents = [p.strip() for p in ip_text.split(',') if p.strip() and p.strip() != 'none']
 
         priority_score = priority_map.get(category, 30)
 
@@ -191,6 +199,8 @@ for category in categories:
             "captured_at_branch": captured_at_branch,
             "captured_at_sha": captured_at_sha,
             "captured_at_merge_base_sha": captured_at_merge_base_sha,
+            "parents": parents,
+            "inferred_parents": inferred_parents,
         }
         entries.append(entry)
         cat_entry_count += 1
