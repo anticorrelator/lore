@@ -230,6 +230,7 @@ for advisor, entries in by_advisor.items():
         "source_artifact_ids": [work_item] if work_item else [],
         "granularity": "set-level",
         "kind": "scored",
+        "tier": "reusable",
         "calibration_state": "pre-calibration",
         "consultations_in_report": n,
     })
@@ -247,6 +248,7 @@ for advisor, entries in by_advisor.items():
         "source_artifact_ids": [work_item] if work_item else [],
         "granularity": "set-level",
         "kind": "scored",
+        "tier": "reusable",
         "calibration_state": "pre-calibration",
         "followed_count": followed_count,
         "total_consultations": n,

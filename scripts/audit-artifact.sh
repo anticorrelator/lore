@@ -62,6 +62,7 @@ GATE_OUTPUT_FILE=""
 CURATOR_OUTPUT_FILE=""
 REVERSE_AUDITOR_OUTPUT_FILE=""
 SKIP_SCORECARD=0
+PRIORITY_CLAIMS_FILE=""
 
 usage() {
   cat >&2 <<EOF
@@ -72,6 +73,7 @@ Usage: lore audit <artifact-id> [--kdir <path>] [--json] [--dry-run]
                                 [--curator-output-file <path>]
                                 [--reverse-auditor-output-file <path>]
                                 [--skip-scorecard]
+                                [--priority-claims <path>]
 
 Arguments:
   <artifact-id>    Work-item slug or absolute path to a supported artifact
@@ -98,6 +100,10 @@ Options:
   --skip-scorecard           Persist verdicts but do not append scorecard rows.
                              Used by tests to exercise shape validation
                              without polluting the scorecard substrate.
+  --priority-claims P        Read a JSON array of claim_id strings from P and
+                             pre-filter claim_payload to that subset before
+                             judge 1. When absent, behavior is unchanged.
+                             Validation and filtering are wired in later phases.
   -h, --help                 Show this help.
 
 Contract: see \$KDIR/architecture/audit-pipeline/contract.md for the canonical
@@ -140,6 +146,10 @@ while [[ $# -gt 0 ]]; do
       SKIP_SCORECARD=1
       shift
       ;;
+    --priority-claims)
+      PRIORITY_CLAIMS_FILE="$2"
+      shift 2
+      ;;
     -*)
       echo "[audit] Error: unknown flag '$1'" >&2
       usage
@@ -176,14 +186,37 @@ if [[ ! -d "$KDIR" ]]; then
   exit 1
 fi
 
+# --- Validate --priority-claims file (D3 pre-filter gate) ---
+# When --priority-claims <path> is supplied, the file must:
+#   1. exist on disk
+#   2. parse as a JSON array of strings (claim_id values)
+#   3. contain at least one entry
+# When the flag is absent ($PRIORITY_CLAIMS_FILE empty), this block is a no-op
+# and behavior is bit-for-bit identical to pre-flag runs. Filtering itself is
+# wired in a subsequent task — this is the validation gate only.
+if [[ -n "$PRIORITY_CLAIMS_FILE" ]]; then
+  if [[ ! -f "$PRIORITY_CLAIMS_FILE" ]]; then
+    echo "[audit] priority-claims file not found: $PRIORITY_CLAIMS_FILE" >&2
+    exit 1
+  fi
+  if ! jq -e 'type == "array" and all(.[]; type == "string")' "$PRIORITY_CLAIMS_FILE" >/dev/null 2>&1; then
+    echo "[audit] priority-claims must be a JSON array of claim_id strings" >&2
+    exit 1
+  fi
+  if ! jq -e 'length > 0' "$PRIORITY_CLAIMS_FILE" >/dev/null 2>&1; then
+    echo "[audit] priority-claims array is empty; supply at least one claim_id" >&2
+    exit 1
+  fi
+fi
+
 # --- Resolve artifact path ---
 # Precedence:
 #   1. absolute path that exists
 #   2. $KDIR/_work/<slug>/ directory
 #   3. $KDIR/_followups/<slug>/ directory
-# (Full artifact-type discrimination — lens-findings, worker-observations,
-# plan-assertions, spec-investigation — is resolved by the wiring tasks;
-# this stub only normalizes the artifact-id to a resolvable path.)
+# Wired artifact types: lens-findings, worker-observations, plan-assertions.
+# spec-investigation is deferred (D7). Type refinement runs after path resolution
+# and sets LENS_FINDINGS_PATH / WORKER_OBSERVATIONS_PATH / PLAN_ASSERTIONS_PATH.
 
 ARTIFACT_PATH=""
 ARTIFACT_TYPE=""
@@ -203,15 +236,14 @@ else
   exit 1
 fi
 
-# --- Artifact-type refinement: lens-findings pilot (task-10) ---
-# When the resolved artifact is a followup directory with a lens-findings.json
-# sidecar, refine the type and surface the sidecar path so the dry-run output
-# and (eventually) the three-judge pipeline can ingest it directly. This is the
-# Phase 1 pilot surface per the plan: lens-findings.json is already structured
-# and already validated at scripts/create-followup.sh:268, so it is the safest
-# wedge before worker-observations (which require F0 Phase 4's falsifiable
-# schema).
+# --- Artifact-type refinement ---
+# Explicit file paths (path-provided) select their matching artifact type
+# unconditionally. Directory detection order: lens-findings, worker-observations,
+# plan-assertions; first match wins (latest-evidence wins for dirs with multiple
+# files — execution-log.md beats plan.md). spec-investigation is deferred (D7).
 LENS_FINDINGS_PATH=""
+WORKER_OBSERVATIONS_PATH=""
+PLAN_ASSERTIONS_PATH=""
 if [[ "$ARTIFACT_TYPE" == "followup" && -f "$ARTIFACT_PATH/lens-findings.json" ]]; then
   LENS_FINDINGS_PATH="$ARTIFACT_PATH/lens-findings.json"
   ARTIFACT_TYPE="lens-findings"
@@ -219,9 +251,29 @@ elif [[ "$ARTIFACT_TYPE" == "path-provided" ]]; then
   if [[ "$ARTIFACT_PATH" == *"/lens-findings.json" && -f "$ARTIFACT_PATH" ]]; then
     LENS_FINDINGS_PATH="$ARTIFACT_PATH"
     ARTIFACT_TYPE="lens-findings"
+  elif [[ "$ARTIFACT_PATH" == *"/execution-log.md" && -f "$ARTIFACT_PATH" ]]; then
+    WORKER_OBSERVATIONS_PATH="$ARTIFACT_PATH"
+    ARTIFACT_TYPE="worker-observations"
+  elif [[ "$ARTIFACT_PATH" == *"/plan.md" && -f "$ARTIFACT_PATH" ]]; then
+    PLAN_ASSERTIONS_PATH="$ARTIFACT_PATH"
+    ARTIFACT_TYPE="plan-assertions"
   elif [[ -d "$ARTIFACT_PATH" && -f "$ARTIFACT_PATH/lens-findings.json" ]]; then
     LENS_FINDINGS_PATH="$ARTIFACT_PATH/lens-findings.json"
     ARTIFACT_TYPE="lens-findings"
+  elif [[ -d "$ARTIFACT_PATH" && -f "$ARTIFACT_PATH/execution-log.md" ]]; then
+    WORKER_OBSERVATIONS_PATH="$ARTIFACT_PATH/execution-log.md"
+    ARTIFACT_TYPE="worker-observations"
+  elif [[ -d "$ARTIFACT_PATH" && -f "$ARTIFACT_PATH/plan.md" ]]; then
+    PLAN_ASSERTIONS_PATH="$ARTIFACT_PATH/plan.md"
+    ARTIFACT_TYPE="plan-assertions"
+  fi
+elif [[ "$ARTIFACT_TYPE" == "work-item" ]]; then
+  if [[ -f "$ARTIFACT_PATH/execution-log.md" ]]; then
+    WORKER_OBSERVATIONS_PATH="$ARTIFACT_PATH/execution-log.md"
+    ARTIFACT_TYPE="worker-observations"
+  elif [[ -f "$ARTIFACT_PATH/plan.md" ]]; then
+    PLAN_ASSERTIONS_PATH="$ARTIFACT_PATH/plan.md"
+    ARTIFACT_TYPE="plan-assertions"
   fi
 fi
 
@@ -236,9 +288,9 @@ fi
 # plan is future work).
 build_resolved_input() {
   local dry_run_flag="$1"  # "true" or "false"
-  python3 - "$ARTIFACT_ID" "$ARTIFACT_PATH" "$ARTIFACT_TYPE" "$KDIR" "$LENS_FINDINGS_PATH" "$dry_run_flag" << 'PYEOF'
-import json, sys
-artifact_id, artifact_path, artifact_type, kdir, lens_findings_path, dry_run_flag = sys.argv[1:7]
+  python3 - "$ARTIFACT_ID" "$ARTIFACT_PATH" "$ARTIFACT_TYPE" "$KDIR" "$LENS_FINDINGS_PATH" "$PLAN_ASSERTIONS_PATH" "$WORKER_OBSERVATIONS_PATH" "$dry_run_flag" << 'PYEOF'
+import json, re, sys
+artifact_id, artifact_path, artifact_type, kdir, lens_findings_path, plan_assertions_path, worker_observations_path, dry_run_flag = sys.argv[1:9]
 
 out = {
     "artifact_id": artifact_id,
@@ -249,6 +301,12 @@ out = {
 if dry_run_flag == "true":
     out["dry_run"] = True
     out["note"] = "See architecture/audit-pipeline/contract.md for the full resolved-input object shape."
+
+# Populate work_item from path when artifact lives under $KDIR/_work/<slug>/.
+# Required for audit-queue-route.sh canonical routing (vs. direct-write fallback).
+_work_match = re.search(r'/_work/([^/]+)(?:/|$)', artifact_path)
+if _work_match:
+    out["work_item"] = _work_match.group(1)
 
 # Lens-findings pilot: parse findings into claim_payload per the contract.
 # Per-finding fields follow the resolved-input shape in
@@ -285,7 +343,180 @@ if lens_findings_path:
         out["claim_payload"] = claims
         out["claim_count"] = len(claims)
         out["pr"] = raw.get("pr")
-        out["work_item"] = raw.get("work_item") or None
+        # sidecar work_item takes precedence over path-derived value; path-derived
+        # value is the fallback when the JSON omits it.
+        if raw.get("work_item"):
+            out["work_item"] = raw["work_item"]
+
+elif plan_assertions_path:
+    V1_REQUIRED = ("claim", "file", "line_range", "exact_snippet", "normalized_snippet_hash", "falsifier", "significance")
+
+    def _extract_field(entry_text, field):
+        # Match field at line start with optional leading whitespace or '- ' prefix.
+        m = re.search(rf'(?m)^(?:[ \t]*-\s*|[ \t]+){re.escape(field)}\s*:\s*(.*)', entry_text)
+        return m.group(1).strip().strip('"\'') or None if m else None
+
+    def _has_field(entry_text, field):
+        return bool(re.search(rf'(?m)^(?:[ \t]*-\s*|[ \t]+){re.escape(field)}\s*:', entry_text))
+
+    try:
+        with open(plan_assertions_path) as fh:
+            text = fh.read()
+    except OSError as e:
+        print(f"[audit] extractor: could not read plan.md — {e}", file=sys.stderr)
+        sys.exit(1)
+
+    inv_m = re.search(r'(?m)^##\s+Investigations\b', text)
+    if not inv_m:
+        print("[audit] extractor: no ## Investigations section found in plan.md", file=sys.stderr)
+        sys.exit(1)
+
+    # Bound ## Investigations region at the next ## heading.
+    inv_start = inv_m.end()
+    next_h2 = re.search(r'(?m)^##\s+(?!#)', text[inv_start:])
+    inv_region = text[inv_start: inv_start + next_h2.start()] if next_h2 else text[inv_start:]
+
+    # Producer provenance from first Template-version: line in the region.
+    tv_m = re.search(r'(?m)^Template-version:\s*(\S+)', inv_region)
+    producer_template_version = tv_m.group(1).strip() if tv_m else "unknown"
+
+    claims = []
+    skipped = []
+    claim_index = 0
+
+    topic_starts = [m.start() for m in re.finditer(r'(?m)^###\s+', inv_region)]
+    for t_idx, t_start in enumerate(topic_starts):
+        t_end = topic_starts[t_idx + 1] if t_idx + 1 < len(topic_starts) else len(inv_region)
+        topic_block = inv_region[t_start:t_end]
+
+        assertions_m = re.search(r'\*\*Assertions:\*\*', topic_block)
+        if not assertions_m:
+            continue
+        assertions_region = topic_block[assertions_m.end():]
+        next_bold = re.search(r'\n\*\*[A-Z][a-zA-Z ]+:\*\*', assertions_region)
+        if next_bold:
+            assertions_region = assertions_region[:next_bold.start()]
+
+        entry_starts = [m.start() for m in re.finditer(r'(?m)^\s*-\s*claim\s*:', assertions_region)]
+        for e_idx, e_start in enumerate(entry_starts):
+            e_end = entry_starts[e_idx + 1] if e_idx + 1 < len(entry_starts) else len(assertions_region)
+            entry_text = assertions_region[e_start:e_end]
+
+            missing = [f for f in V1_REQUIRED if not _has_field(entry_text, f)]
+            if missing:
+                skipped.append(f"assertion-{claim_index} missing: {', '.join(missing)}")
+                claim_index += 1
+                continue
+
+            claim = {
+                "claim_id": f"assertion-{claim_index}",
+                "claim_text": _extract_field(entry_text, "claim"),
+                "file": _extract_field(entry_text, "file"),
+                "line_range": _extract_field(entry_text, "line_range"),
+                "exact_snippet": _extract_field(entry_text, "exact_snippet"),
+                "normalized_snippet_hash": _extract_field(entry_text, "normalized_snippet_hash"),
+                "falsifier": _extract_field(entry_text, "falsifier"),
+                "severity_hint": _extract_field(entry_text, "significance"),
+            }
+            for opt in ("context_before", "context_after", "symbol_anchor", "extends_observation"):
+                v = _extract_field(entry_text, opt)
+                if v is not None:
+                    claim[opt] = v
+            claims.append(claim)
+            claim_index += 1
+
+    if not claims:
+        reason = "; ".join(skipped) if skipped else "no **Assertions:** entries found in ## Investigations"
+        print(f"[audit] extractor: {reason}", file=sys.stderr)
+        sys.exit(1)
+
+    out["plan_assertions_path"] = plan_assertions_path
+    out["claim_payload"] = claims
+    out["claim_count"] = len(claims)
+    out["producer_role"] = "researcher"
+    out["producer_template_version"] = producer_template_version
+    if skipped:
+        out["plan_assertions_skipped"] = skipped
+
+elif worker_observations_path:
+    V1_REQUIRED = ("claim", "file", "line_range", "exact_snippet", "normalized_snippet_hash", "falsifier", "significance")
+
+    def _extract_field(entry_text, field):
+        m = re.search(rf'(?m)^(?:[ \t]*-\s*|[ \t]+){re.escape(field)}\s*:\s*(.*)', entry_text)
+        return m.group(1).strip().strip('"\'') or None if m else None
+
+    def _has_field(entry_text, field):
+        return bool(re.search(rf'(?m)^(?:[ \t]*-\s*|[ \t]+){re.escape(field)}\s*:', entry_text))
+
+    try:
+        with open(worker_observations_path) as fh:
+            text = fh.read()
+    except OSError as e:
+        print(f"[audit] extractor: could not read execution-log.md — {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Producer provenance: first Template-version: line in the file.
+    tv_m = re.search(r'(?m)^Template-version:\s*(\S+)', text)
+    producer_template_version = tv_m.group(1).strip() if tv_m else "unknown"
+
+    claims = []
+    skipped = []
+    claim_index = 0
+
+    # Collect all **Observations:** blocks — may be fenced (```yaml...```) or plain.
+    # Strategy: find each **Observations:** marker, then consume until the next
+    # ## section heading or end of file. Within each block, handle both a leading
+    # ```yaml fence and raw YAML.
+    for obs_m in re.finditer(r'\*\*Observations:\*\*[ \t]*\n', text):
+        region_start = obs_m.end()
+        next_h2 = re.search(r'(?m)^##\s+', text[region_start:])
+        region = text[region_start: region_start + next_h2.start()] if next_h2 else text[region_start:]
+
+        # Strip optional leading yaml code fence.
+        fence_m = re.match(r'[ \t]*```ya?ml\n(.*?)```', region, re.DOTALL)
+        if fence_m:
+            region = fence_m.group(1)
+
+        entry_starts = [m.start() for m in re.finditer(r'(?m)^\s*-\s*claim\s*:', region)]
+        for e_idx, e_start in enumerate(entry_starts):
+            e_end = entry_starts[e_idx + 1] if e_idx + 1 < len(entry_starts) else len(region)
+            entry_text = region[e_start:e_end]
+
+            missing = [f for f in V1_REQUIRED if not _has_field(entry_text, f)]
+            if missing:
+                skipped.append(f"observation-{claim_index} missing: {', '.join(missing)}")
+                claim_index += 1
+                continue
+
+            claim = {
+                "claim_id": f"observation-{claim_index}",
+                "claim_text": _extract_field(entry_text, "claim"),
+                "file": _extract_field(entry_text, "file"),
+                "line_range": _extract_field(entry_text, "line_range"),
+                "exact_snippet": _extract_field(entry_text, "exact_snippet"),
+                "normalized_snippet_hash": _extract_field(entry_text, "normalized_snippet_hash"),
+                "falsifier": _extract_field(entry_text, "falsifier"),
+                "severity_hint": _extract_field(entry_text, "significance"),
+            }
+            for opt in ("context_before", "context_after", "symbol_anchor"):
+                v = _extract_field(entry_text, opt)
+                if v is not None:
+                    claim[opt] = v
+            claims.append(claim)
+            claim_index += 1
+
+    if not claims:
+        reason = "; ".join(skipped) if skipped else "no **Observations:** entries found in execution-log.md"
+        print(f"[audit] extractor: {reason}", file=sys.stderr)
+        sys.exit(1)
+
+    out["worker_observations_path"] = worker_observations_path
+    out["claim_payload"] = claims
+    out["claim_count"] = len(claims)
+    out["producer_role"] = "worker"
+    out["producer_template_version"] = producer_template_version
+    if skipped:
+        out["worker_observations_skipped"] = skipped
 
 print(json.dumps(out, indent=2))
 PYEOF
@@ -305,6 +536,31 @@ if [[ $DRY_RUN -eq 1 ]]; then
       echo "[audit]   lens_findings: $LENS_FINDINGS_PATH"
       _claim_count=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get("findings",[]) or []))' "$LENS_FINDINGS_PATH" 2>/dev/null || echo "?")
       echo "[audit]   claim_count:   $_claim_count (per-finding → claim_id=finding-<i>)"
+    fi
+    if [[ -n "$PLAN_ASSERTIONS_PATH" ]]; then
+      echo "[audit]   plan_assertions: $PLAN_ASSERTIONS_PATH"
+      _claim_count=$(python3 -c '
+import re, sys
+text = open(sys.argv[1]).read()
+m = re.search(r"\*\*Assertions:\*\*\s*\n```ya?ml\n(.*?)```", text, re.DOTALL)
+if m:
+    block = m.group(1)
+    print(len([l for l in block.splitlines() if l.strip().startswith("- claim:")]))
+else:
+    print("?")
+' "$PLAN_ASSERTIONS_PATH" 2>/dev/null || echo "?")
+      echo "[audit]   claim_count:   $_claim_count (per-assertion → claim_id=assertion-<i>)"
+    fi
+    if [[ -n "$WORKER_OBSERVATIONS_PATH" ]]; then
+      echo "[audit]   worker_observations: $WORKER_OBSERVATIONS_PATH"
+      _claim_count=$(python3 -c '
+import re, sys
+text = open(sys.argv[1]).read()
+blocks = re.findall(r"```ya?ml\n(.*?)```", text, re.DOTALL)
+total = sum(len([l for l in b.splitlines() if l.strip().startswith("- claim:")]) for b in blocks)
+print(total if total > 0 else "?")
+' "$WORKER_OBSERVATIONS_PATH" 2>/dev/null || echo "?")
+      echo "[audit]   claim_count:   $_claim_count (per-observation → claim_id=observation-<i>)"
     fi
     echo "[audit] Stub implementation — no judges spawned."
     echo "[audit] See $KDIR/architecture/audit-pipeline/contract.md for the full pipeline."
@@ -351,7 +607,39 @@ cleanup_tmp() {
   fi
 }
 trap cleanup_tmp EXIT
-build_resolved_input "false" > "$RESOLVED_INPUT_FILE"
+if ! build_resolved_input "false" > "$RESOLVED_INPUT_FILE"; then
+  # Extractor printed [audit] extractor: diagnostic to stderr; propagate exit.
+  exit 1
+fi
+
+# --- Apply --priority-claims pre-filter (D3) ---
+# When --priority-claims <path> was supplied and validated above, narrow
+# claim_payload to only entries whose claim_id is in the priority list. The
+# filter is transparent to downstream stages — judges receive the same
+# resolved-input shape, just with a narrower claim_payload. claim_count is
+# updated in place so scorecard/rollup math stays consistent. The priority
+# list was already validated (non-empty JSON array of strings) in the
+# validation gate above.
+if [[ -n "$PRIORITY_CLAIMS_FILE" ]]; then
+  _priority_narrowed=$(mktemp "${TMPDIR:-/tmp}/audit-input-narrowed-XXXXXX.json")
+  if ! jq --slurpfile priority "$PRIORITY_CLAIMS_FILE" '
+    ($priority[0]) as $ids
+    | (.claim_payload // []) as $orig
+    | .claim_payload = [ $orig[] | select(.claim_id as $cid | $ids | index($cid)) ]
+    | .claim_count = (.claim_payload | length)
+  ' "$RESOLVED_INPUT_FILE" > "$_priority_narrowed"; then
+    rm -f "$_priority_narrowed"
+    echo "[audit] Error: priority-claims filter failed (jq error)" >&2
+    exit 1
+  fi
+  mv "$_priority_narrowed" "$RESOLVED_INPUT_FILE"
+  _kept=$(jq -r '.claim_count' "$RESOLVED_INPUT_FILE")
+  if [[ "$_kept" -eq 0 ]]; then
+    echo "[audit] Error: priority-claims filter yielded 0 claims; no claim_id in $PRIORITY_CLAIMS_FILE matched the resolved claim_payload" >&2
+    exit 1
+  fi
+  echo "[audit] priority-claims: narrowed claim_payload to $_kept claim(s) per $PRIORITY_CLAIMS_FILE" >&2
+fi
 
 # Short-circuit if the lens-findings parse failed — no point invoking judges.
 if jq -e 'has("lens_findings_error")' "$RESOLVED_INPUT_FILE" >/dev/null 2>&1; then
@@ -579,6 +867,7 @@ calibration_state = "pre-calibration"
 row_base = {
     "schema_version": "1",
     "kind": "scored",
+    "tier": "reusable",
     "calibration_state": calibration_state,
     "template_id": producer_template_id,
     "template_version": producer_template_version,
@@ -830,6 +1119,7 @@ now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"
 row_base = {
     "schema_version": "1",
     "kind": "scored",
+    "tier": "reusable",
     "calibration_state": "pre-calibration",
     "template_id": producer_template_id,
     "template_version": producer_template_version,
@@ -1220,6 +1510,7 @@ row_common = {
     "granularity": "portfolio-level",
     "verdict_source": "reverse-auditor",
     "judge_template_version": ra_tv,
+    "tier": "reusable",
 }
 
 rows = []
@@ -1274,6 +1565,7 @@ if verdict == "omission-claim":
 rows.append({
     **row_common,
     "kind": "telemetry",
+    "tier": "telemetry",
     "template_id": "reverse-auditor",
     "template_version": ra_tv,
     "metric": "grounding_failure_rate",

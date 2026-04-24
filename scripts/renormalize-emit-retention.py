@@ -104,6 +104,7 @@ def main() -> None:
         row = {
             "schema_version": "1",
             "kind": "telemetry",
+            "tier": "telemetry",
             "metric": "retention_after_renormalize",
             "calibration_state": "pre-calibration",
             "template_id": template_id,

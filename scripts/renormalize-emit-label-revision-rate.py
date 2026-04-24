@@ -53,6 +53,7 @@ def main() -> None:
         rate_row = {
             "schema_version": "1",
             "kind": "telemetry",
+            "tier": "telemetry",
             "metric": "label_revision_rate",
             "calibration_state": "pre-calibration",
             "scale_id": scale_id,
@@ -67,6 +68,7 @@ def main() -> None:
             flag_row = {
                 "schema_version": "1",
                 "kind": "telemetry",
+                "tier": "telemetry",
                 "metric": "registry_design_flag",
                 "calibration_state": "pre-calibration",
                 "scale_id": scale_id,

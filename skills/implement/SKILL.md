@@ -24,7 +24,7 @@ allowed-tools:
 
 # /implement Skill
 
-Executes a work item's `plan.md` with a team of knowledge-aware agents. Agents read existing knowledge before working, report architectural findings, and the lead captures reusable insights afterward.
+Executes a work item's `plan.md` with a team of knowledge-aware agents. Agents produce Tier 2 task evidence during work and optionally surface Tier 3 candidates for commons promotion. The lead verifies, promotes accepted candidates via `lore promote`, and writes a retro-prep bundle for the next-step `/retro` ceremony.
 
 ## Resolve Paths
 
@@ -35,11 +35,11 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
 Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). Do NOT use `git rev-parse --show-toplevel` for agent paths — the current repo is the target project, not the lore repo.
 
-**MANDATORY:** You MUST read the actual template files from `~/.claude/agents/` when spawning agents. Do NOT skip this step. Do NOT generate inline agent prompts as a substitute. If the directory or files are missing, stop and report the error — never fall back to improvised prompts.
+**MANDATORY:** You MUST read the actual template files from `~/.claude/agents/worker.md` and `~/.claude/agents/advisor.md` when spawning agents. Do NOT skip this step. Do NOT generate inline agent prompts as a substitute. If the directory or files are missing, stop and report the error — never fall back to improvised prompts.
 
 ## Resolve Template Versions
 
-Compute content-hashes of the agent templates you'll spawn and the skill template itself. These feed the `template_version` provenance field on every `lore capture`, `create-followup.sh`, and `write-execution-log.sh` call downstream, plus the `{{template_version}}` injection into each agent's resolved prompt (enabling the backwards-compat gate in task #23):
+Compute content-hashes of the agent templates you'll spawn and the skill template itself. These feed the `template_version` provenance field on every downstream emission site (`evidence-append.sh` via worker prompt, `lore promote`, `write-execution-log.sh`, scorecard rows), plus the `{{template_version}}` injection into each agent's resolved prompt:
 
 ```bash
 LEAD_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/skills/implement/SKILL.md)
@@ -47,11 +47,28 @@ WORKER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/age
 ADVISOR_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/agents/advisor.md)
 ```
 
-Use these variables throughout the rest of the skill. If `template-version.sh` fails for any template, log a warning and continue with an empty string — downstream scripts accept the omitted flag as "no template version", which the backwards-compat gate (task #23) treats as a legacy report and warns + passes.
+Use these variables throughout the rest of the skill. The three are NOT interchangeable — each tags emissions produced by its matching template. If `template-version.sh` fails for any template, log a warning and continue with an empty string; downstream scripts treat the omitted flag as "no template version" (CC-01 legacy warn+pass).
 
-Registration into `$KDIR/_scorecards/template-registry.json` is handled automatically on first use by `scripts/scorecard-append.sh` — you do not need a separate registration step here (task #34/#35).
+Registration into `$KDIR/_scorecards/template-registry.json` is handled automatically on first use by `scripts/scorecard-append.sh` — no separate registration step.
 
-## Step 1: Load work item and validate
+## Protocol-to-Skill Projection (10 → 7)
+
+Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents them as seven top-level `### Step N` sections — a compatibility-preserving projection that keeps related concerns (load vs. verify vs. promote) on clean section boundaries. The mapping:
+
+| §9.2 Logical Step | SKILL.md Step |
+|---|---|
+| 1 Load tasks.json + Tier 2 evidence + prefetched commons | Step 1 |
+| 2 Dispatch workers with scope, files, acceptance checks, evidence requirements | Step 2 + Step 3 |
+| 3 Workers produce code + tests + Tier 2 + optional Tier 3 | Step 3 |
+| 4 Lead verifies work output + Tier 2 evidence | Step 4 |
+| 5 Lead separates accepted work from remembered doctrine | Step 4 |
+| 6 Lead writes/updates execution evidence | Step 4 |
+| 7 Lead runs `lore promote` on accepted Tier 3 | Step 5 |
+| 8 Stop hook lazily triggers audit; completion non-blocking | Step 6 (reference only; no explicit call) |
+| 9 If PR exists or review requested, branch to `/pr-review` | Step 7 sub-step |
+| 10 Prepare `/retro` inputs | Step 7 |
+
+### Step 1: Load work item and validate
 
 1. Parse arguments: extract work item name and optional `--model` flag (default: `sonnet`, accept `opus`)
 2. Resolve work item using the same fuzzy matching algorithm as `/work`:
@@ -64,15 +81,17 @@ Registration into `$KDIR/_scorecards/template-registry.json` is handled automati
    ```bash
    lore work cache-branch --write <slug>
    ```
-   If the command fails, log `[implement] Warning: branch cache write failed` and continue — this is non-fatal.
-7. Present a brief summary and proceed immediately:
+   If the command fails, log `[implement] Warning: branch cache write failed` and continue — non-fatal.
+7. **Load prior Tier 2 evidence** — read `$KDIR/_work/<slug>/task-claims.jsonl` if it exists. This is the canonical log of Tier 2 claims written by prior workers on this work item (via `evidence-append.sh`). Parse each line as JSON and build an in-memory map keyed by `task_id` and by files touched (from the row's `files` field if present, or fall back to the row's claim text). This map feeds Step 3's worker `{{prior_knowledge}}` injection — each worker receives only the Tier 2 rows whose `task_id` matches its assigned task or whose files overlap with the task's `**Files:**` block. If the file is absent or empty, skip silently (first `/implement` run on this item).
+8. Present a brief summary and proceed immediately:
    ```
    [implement] <Title>
    Model: sonnet (override with --model opus)
    Phases: N with M unchecked tasks
+   Prior Tier 2 claims: K rows loaded from task-claims.jsonl (or "none — first run")
    ```
 
-## Step 2: Create team and generate tasks
+### Step 2: Create team and generate tasks
 
 **IMPORTANT: Create the team BEFORE creating tasks.** TaskCreate calls go into whichever task list is active. If you create tasks before TeamCreate, they land in the session's default list — invisible to workers who see the team's list. This produces orphaned stale tasks that persist for the rest of the session.
 
@@ -99,20 +118,18 @@ Registration into `$KDIR/_scorecards/template-registry.json` is handled automati
 
 5. **Create tasks from the output:** Read the `lore work load-tasks` output once. For each `=== task-N ===` block, execute one `TaskCreate` call using the `subject`, `activeForm`, and `description` fields. Track the mapping of `task-N` IDs to actual TaskCreate return IDs, then call `TaskUpdate(addBlockedBy=[...])` for any task with a non-empty `blockedBy` field.
 
-## Step 3: Spawn agents
+### Step 3: Spawn agents
 
-**All tasks are executed by fresh worker agents.** The lead does not implement tasks directly — even if the task seems small or the lead already has relevant context. Fresh agents with injected knowledge context produce cleaner results than the lead's accumulated orchestration context. If a task is too small for a worker, it should have been consolidated at spec time.
+**All tasks are executed by fresh worker agents.** The lead does not implement tasks directly — even if the task seems small or the lead already has relevant context. Fresh agents with injected knowledge context produce cleaner results than the lead's accumulated orchestration context.
 
 1. **Pre-fetch knowledge for worker prompts** — determine whether prefetch is needed:
 
    **If tasks lack knowledge context** (manually created tasks or plans without `**Knowledge context:**` blocks — no `## Prior Knowledge` section in task descriptions): run complementary prefetch using the task's file paths and phase objective:
    ```bash
-   # Use file paths + objective as query terms for targeted retrieval
    PRIOR_KNOWLEDGE=$(lore prefetch "<phase objective> <file paths from task>" --format prompt --limit 3 --scale-context worker)
    ```
-   For example, if a task has `**Files:** scripts/pk_search.py` and `**Phase objective:** Fix hyphenated-term quoting`, the prefetch query would be `"Fix hyphenated-term quoting pk_search.py"`.
 
-   **If tasks have knowledge context** (task descriptions contain `## Prior Knowledge`): **skip prefetch.** This section contains either annotation-only summaries (default) or fully resolved content (when the phase specifies `**Knowledge delivery:** full`). In both cases, `generate-tasks.py` has already embedded the relevant knowledge — prefetching would duplicate or conflict with it.
+   **If tasks have knowledge context** (task descriptions contain `## Prior Knowledge`): **skip prefetch.** The phase already embeds resolved knowledge — prefetching would duplicate or conflict with it.
 
 2. **Prepare advisory mixin (if advisors present)** — scan all phases in `plan.md` for `**Advisors:**` blocks. If any phase declares advisors:
 
@@ -141,11 +158,11 @@ Registration into `$KDIR/_scorecards/template-registry.json` is handled automati
       **Advisors:**
       - <skill-name>-advisor — <skill domain scope>. on-demand
       ```
-      Use `on-demand` mode for late-declared advisors (workers have already started context accumulation; must-consult would block them unnecessarily).
+      Use `on-demand` mode for late-declared advisors.
 
-   d. **If no `**Related skills:**` block exists** or all matched skills are already declared as advisors, skip silently — proceed to Step 3.4.
+   d. **If no `**Related skills:**` block exists** or all matched skills are already declared, skip silently.
 
-   e. **If new advisors were declared**, re-collect all advisor declarations from plan.md phases and rebuild `$ADVISORY_MIXIN` (repeat Steps 3.2a–3.2d) before proceeding.
+   e. **If new advisors were declared**, re-collect all advisor declarations and rebuild `$ADVISORY_MIXIN` before proceeding.
 
 4. **Ceremony config injection** — read ceremony-level advisor overrides and merge them into the advisor pipeline:
 
@@ -153,34 +170,32 @@ Registration into `$KDIR/_scorecards/template-registry.json` is handled automati
       ```bash
       lore ceremony get implement
       ```
-      This returns a JSON array of skill names (e.g., `["my-custom-skill"]`), or `[]` if no ceremony overrides are configured. **If the result is `[]`, skip to Step 3.5.**
+      Returns a JSON array of skill names, or `[]` if none. **If `[]`, skip to Step 3.5.**
 
-   b. **Declare config-injected advisors** — for each skill in the returned array, check whether it is already declared as an advisor in any phase's `**Advisors:**` block. For each skill not already declared, add an `**Advisors:**` entry to the first uncompleted phase in plan.md:
+   b. **Declare config-injected advisors** — for each skill not already declared in a phase `**Advisors:**` block, add an entry to the first uncompleted phase:
       ```
       **Advisors:**
       - <skill-name>-advisor — <skill-name> domain (ceremony config). on-demand
       ```
-      Use `on-demand` mode for config-injected advisors. If the phase already has an `**Advisors:**` block, append to it rather than creating a duplicate block.
 
-   c. **Rebuild advisory mixin** — if any new advisors were declared in (b), re-collect all advisor declarations from all plan.md phases and rebuild `$ADVISORY_MIXIN` (repeat Steps 3.2a–3.2d).
+   c. **Rebuild advisory mixin** if any new advisors were declared.
 
-   d. **Log config-injected advisors** — for each advisor added from ceremony config, write an execution log entry:
+   d. **Log config-injected advisors** — for each advisor added from ceremony config:
       ```bash
       printf 'Config-injected advisor: %s\nSource: ceremony config\nMode: on-demand\n' \
         "<skill-name>-advisor" \
         | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
       ```
 
-5. **Spawn advisor agents (if advisors present)** — if Step 3.2, Step 3.3, or Step 3.4 found advisor declarations, spawn each unique advisor as a persistent team member before spawning workers.
-
-   For each unique advisor name collected from Step 3.2a, Step 3.3c, and Step 3.4b:
+5. **Spawn advisor agents (if advisors present)** — for each unique advisor name collected from Steps 3.2a, 3.3c, and 3.4b:
 
    a. **Build domain context** — find the `## Investigations` section(s) in `plan.md` whose topic relates to the advisor's domain scope. Extract the relevant investigation entry (findings, verified assertions, key files, implications) and format it as the advisor's domain baseline.
 
-   b. **Spawn the advisor** using the **advisor** agent definition (`~/.claude/agents/advisor.md`) with these template injections:
+   b. **Spawn the advisor** using the advisor agent definition at `~/.claude/agents/advisor.md` with these template injections:
       - `{{team_name}}` → `impl-<slug>`
-      - `{{advisor_domain}}` → the advisor's domain scope from the plan annotation
+      - `{{advisor_domain}}` → the advisor's domain scope
       - `{{domain_context}}` → the investigation excerpt from Step 3.5a
+      - `{{template_version}}` → `$ADVISOR_TEMPLATE_VERSION`
 
       ```
       Task:
@@ -195,54 +210,95 @@ Registration into `$KDIR/_scorecards/template-registry.json` is handled automati
 
    Advisors are persistent — they remain active for the entire implementation session and are shut down alongside workers in Step 4.
 
-   c. **Write execution log entries** — after all advisors are spawned, log each advisor's lifecycle event. Pass `--template-version "$ADVISOR_TEMPLATE_VERSION"` because the content we're logging is sourced from the advisor template that was just resolved:
+   c. **Write execution log entries** — after all advisors are spawned, log each lifecycle event. Pass `--template-version "$ADVISOR_TEMPLATE_VERSION"` because the content logged is sourced from the advisor template:
       ```bash
       printf 'Advisor spawned: %s\nDomain: %s\nMode: %s\n' \
         "<advisor-name>" "<domain scope>" "<must-consult|on-demand>" \
         | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$ADVISOR_TEMPLATE_VERSION"
       ```
 
-6. **Spawn worker agents** — launch `min(recommended_workers, 4)` workers in a single message, where `recommended_workers` is the top-level field from `tasks.json` (fallback: `min(task_count, 4)` if the field is absent, for backward compatibility with old `tasks.json` files). Use the **worker** agent definition (`~/.claude/agents/worker.md`) as the base prompt, with these template injections:
+6. **Surface Tier 2 evidence per worker** — before spawning workers, assemble each worker's per-task Tier 2 extract from the map built in Step 1.7. For each assigned task, collect the matching rows (task_id or file overlap) and render them as a YAML block that will be appended to that worker's `{{prior_knowledge}}`:
+
+   ```yaml
+   Prior Tier 2 evidence (from task-claims.jsonl):
+     - claim_id: <id>
+       claim: <one-line claim text>
+       task_id: <task-id>
+       captured_at_sha: <sha>
+   ```
+
+   If no rows match, omit the block (do NOT emit an empty section).
+
+7. **Spawn worker agents with tier-aware emission instructions** — launch `min(recommended_workers, 4)` workers in a single message. Use the worker agent definition at `~/.claude/agents/worker.md` as the base prompt, with these template injections:
+
    - `{{team_name}}` → `impl-<slug>`
    - `{{team_lead}}` → the lead name read from team config in Step 2
-   - `{{prior_knowledge}}` → the `$PRIOR_KNOWLEDGE` block from Step 3.1 (or empty if tasks have pre-resolved knowledge)
-   - `{{template_version}}` → `$WORKER_TEMPLATE_VERSION` from the "Resolve Template Versions" preamble. The worker echoes this in the `Template-version:` header of its completion report so the TaskCompleted-hook validator (task #22) can apply the backwards-compat gate (task #23) — pre-F0 reports without this hash warn + pass; F0-version reports hard-validate structured observations.
+   - `{{prior_knowledge}}` → the `$PRIOR_KNOWLEDGE` block from Step 3.1, followed by the per-worker Tier 2 evidence block from Step 3.6 (concatenated with a blank-line separator)
+   - `{{template_version}}` → `$WORKER_TEMPLATE_VERSION`
+
+   The worker template itself documents the tier-aware emission contract. In summary, workers are required to:
+
+   - **During task:** write each structured Tier 2 claim by piping a JSON row through `echo '<json>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>` before sending the completion report. One call per claim. `evidence-append.sh` is the sole-writer for `$KDIR/_work/<slug>/task-claims.jsonl`.
+   - **Post task:** send a completion report to the lead that contains the traditional prose fields (**Task**, **Changes**, **Tests**, **Blockers**, **Surfaced concerns**, **Advisor consultations**), a new **Tier 2 evidence:** field listing the `claim_id` values written during the task, and an optional **Tier 3 candidates:** YAML block with one entry per reusable observation (producer_role + 13-field Tier 3 shape minus `confidence`).
+   - **Naming standard:** the optional Tier 3 section MUST be labeled exactly **Tier 3 candidates:** — not "Tier 3 claims" or "Tier 3 observations". The TaskCompleted hook validates literal-prefix-match.
 
    **If `$ADVISORY_MIXIN` is non-empty:** append the resolved mixin content after the fully resolved `worker.md` content, separated by a blank line. The worker prompt becomes: `<resolved worker.md>\n\n<resolved advisory-consultation.md>`.
 
-   ```
-   Task:
-     subagent_type: "general-purpose"
-     model: "<selected-model>"
-     team_name: "impl-<slug>"
-     name: "worker-N"
-     mode: "bypassPermissions"
-     prompt: |
-       <contents of ~/.claude/agents/worker.md with {{template}} variables resolved>
-       <if advisors: contents of advisory-consultation.md with {{advisors}} resolved>
-   ```
+```
+Task:
+  subagent_type: "general-purpose"
+  model: "<selected-model>"
+  team_name: "impl-<slug>"
+  name: "worker-N"
+  mode: "bypassPermissions"
+  prompt: |
+    <contents of ~/.claude/agents/worker.md with {{template}} variables resolved>
+    <if advisors: contents of advisory-consultation.md with {{advisors}} resolved>
+```
 
-## Step 4: Collect progress
+### Step 4: Collect progress
 
 As worker messages arrive (delivered automatically):
 
-1. **Update plan.md** (best-effort) — check off completed items as they arrive:
+1. **Check off completed items in plan.md** (best-effort):
    ```bash
    lore work check <slug> "<task-subject>"
    ```
    If this fails or is missed, Step 7 reconciles from the task system.
 
-   **Write execution log entry** — immediately after `lore work check`, append to `execution-log.md`. Pass `--template-version "$WORKER_TEMPLATE_VERSION"` because the body we're logging is the worker's report — the template version on the entry should reflect the producing template, not the lead's:
+2. **Verify Tier 2 evidence before accepting the task** — do NOT re-parse Tier 2 rows from the `SendMessage` body. Instead:
+
+   a. Read the canonical `$KDIR/_work/<slug>/task-claims.jsonl` directly.
+
+   b. Cross-reference against the worker's reported `Tier 2 evidence:` claim_id list. Every reported id MUST exist as a row in the file; any missing id means the worker misreported, and the task is rejected back to the worker for correction.
+
+   c. Rows in the file have already been validated by `evidence-append.sh` against the Tier 2 schema — no additional per-row validation is performed at this step.
+
+3. **Write execution log entry** — immediately after task acceptance, append to `execution-log.md`. Pass `--template-version "$WORKER_TEMPLATE_VERSION"` because the body logged is the worker's report:
    ```bash
-   printf 'Task: %s\nChanges: %s\nSkills: %s\nObservations: %s\nInvestigation: %s\nBlockers: %s\nAdvisor input: %s\nTest result: %s\n' \
-     "<task-subject>" "<worker Changes field>" "<worker Skills used field>" "<worker Observations field>" \
-     "<worker Investigation field>" "<worker Blockers field>" "<worker Advisor input field>" "<passed|failed|skipped>" \
+   printf 'Task: %s\nChanges: %s\nSkills: %s\nTier2-claims: %s\nObservations: %s\nInvestigation: %s\nBlockers: %s\nAdvisor input: %s\nTest result: %s\n' \
+     "<task-subject>" "<worker Changes field>" "<worker Skills used field>" \
+     "<comma-separated claim_ids from Tier 2 evidence>" \
+     "<worker Observations field or Tier 3 candidates summary>" \
+     "<worker Investigation field>" "<worker Blockers field>" "<worker Advisor input field>" \
+     "<passed|failed|skipped>" \
      | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$WORKER_TEMPLATE_VERSION"
    ```
-   Use the worker's reported **Changes:**, **Skills used:**, **Observations:**, **Investigation:**, **Blockers:**, and **Advisor input:** fields verbatim. If the worker did not report a test result, use `skipped`. If the worker did not report a Skills used field, use `None`. If the worker omitted Investigation, Blockers, or Advisor input, use `None`. `execution-log.md` is created on first write.
+   If the worker omitted a field, use `None`. `execution-log.md` is created on first write.
 
-2. **Log architectural findings** — note interesting patterns reported by workers for Step 5
-3. **Handle blockers** — if a worker reports blockers:
+4. **Advisor-impact rollup** — if the worker's report includes a non-empty `Advisor consultations:` field, invoke the scorecard rollup immediately:
+   ```bash
+   bash ~/.lore/scripts/advisor-impact-rollup.sh \
+     --work-item <slug> \
+     --task-id <task-id> \
+     --consultations "<Advisor consultations field verbatim>" \
+     --template-version "$ADVISOR_TEMPLATE_VERSION"
+   ```
+   This emits `consultation_rate` and `advice_followed_rate` scorecard rows attributed to `template_id=advisor`. Skip the call when `Advisor consultations:` is empty or `none`.
+
+5. **Set aside Tier 3 candidates for Step 5** — if the worker report contains a `Tier 3 candidates:` YAML block, stash each entry (preserving producer_role and source_artifact_ids) for Step 5 promotion. Do NOT promote here — Step 5 is the sole promotion site.
+
+6. **Handle blockers** — if a worker reports blockers:
    - Read the relevant code/context
    - Send guidance via `SendMessage` to the blocked worker
    - If unresolvable, note in `notes.md` and move on
@@ -250,38 +306,61 @@ As worker messages arrive (delivered automatically):
 Do NOT gate on reviewing diffs — workers proceed autonomously. The user reviews at the end.
 
 When a batch of workers has all reported completion:
+
 1. Call `TaskList` to count remaining tasks with status `pending` and no `blockedBy` dependencies (unblocked tasks).
-2. **If unblocked tasks remain:** spawn `min(unblocked_count, max_workers)` fresh workers (same worker template and injections as Step 3.6, incrementing worker names as `worker-N` continuing from the last worker index used). Then continue collecting progress from the new batch.
-   - `max_workers` is the same cap used in Step 3.6: `min(recommended_workers, 4)`
-   - Repeat this respawn cycle after each batch completes until no unblocked tasks remain.
+2. **If unblocked tasks remain:** spawn `min(unblocked_count, max_workers)` fresh workers (same worker template and injections as Step 3.7, incrementing worker names as `worker-N`). Rebuild each worker's per-task Tier 2 extract from the latest `task-claims.jsonl` — prior batches may have added new rows. Continue collecting from the new batch.
+   - `max_workers` is the same cap used in Step 3.7: `min(recommended_workers, 4)`.
+   - Repeat until no unblocked tasks remain.
 3. **If no unblocked tasks remain** (all tasks are complete or all remaining are blocked):
-   a. Send `shutdown_request` to all active workers and all advisor agents (if any were spawned in Step 3.5)
+   a. Send `shutdown_request` to all active workers and all advisor agents (if any were spawned in Step 3.5).
    b. **Write advisor shutdown log entries** — for each advisor that was spawned, log the shutdown:
       ```bash
       printf 'Advisor shutdown: %s\nDomain: %s\n' \
         "<advisor-name>" "<domain scope>" \
         | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$ADVISOR_TEMPLATE_VERSION"
       ```
-   c. Run `TeamDelete`
+   c. Run `TeamDelete`.
 
-## Step 5: Post-implementation extraction
+### Step 5: Promote accepted Tier 3 candidates
 
-Invoke `/remember` with capture constraints scoped to the implementation. Every `lore capture` call must carry provenance flags; for captures promoted from specific worker observations, preserve the original producer's attribution instead of the lead's:
+Step 5 is the sole Tier 3 promotion site for `/implement`. Do NOT delegate to `/remember`. Do NOT call `lore capture` directly for work-item-scoped observations — `lore promote` is the canonical path because it forces `confidence=unaudited` and enforces Tier 3 schema via `validate-tier3.sh` before writing.
 
-- **Lead-original insights** (cross-task patterns visible only from the lead's vantage): pass `--producer-role implement-lead --protocol-slot Synthesis --work-item <slug>`.
-- **Worker-sourced observations** (promoted from `execution-log.md` **Observations:**/**Investigation:** entries): pass `--producer-role worker` (the original producer), `--capturer-role implement-lead` (the lead doing the synthesis write), and `--source-artifact-ids <worker-task-ids>` (comma-separated). Keep `--protocol-slot Synthesis --work-item <slug>`.
-- **Multi-producer synthesis**: split into one capture call per distinct producer — never merge into a single call. Each call carries that producer's `--source-artifact-ids`. Merging would erase the role × slot hierarchy the scale matrix depends on.
+Inputs: the Tier 3 candidate list stashed in Step 4.5, plus any lead-originated cross-task candidates the lead produces by reading the complete `execution-log.md` after the last batch.
 
-```
-/remember Implementation findings from <work item title> — Read all **Observations:** and **Investigation:** entries from execution-log.md and evaluate each against the capture gate. Two valid capture targets: (1) mechanism-level patterns — how the system accomplishes X broadly, evaluate for novelty against existing knowledge; (2) structural footprint — module roles, integration points, what connects to/through a file, what constrains changes — evaluate against existing architectural knowledge for what isn't yet recorded. Function-level details do not qualify. Also capture: cross-task patterns visible only from the lead's vantage. Investigation entries (debugging detours, design pivots) qualify when the root cause or resolution reveals something non-obvious about the system.
+For each accepted Tier 3 candidate, emit one `lore promote` call. Multi-producer synthesis is NEVER merged — one call per distinct producer so that scorecard rows retain the role × template attribution.
 
-Provenance on every `lore capture`:
-  - Lead-original insight: `--producer-role implement-lead --protocol-slot Synthesis --work-item <slug> --template-version $LEAD_TEMPLATE_VERSION`.
-  - Promoted worker observation: `--producer-role worker --capturer-role implement-lead --source-artifact-ids <worker-task-id[,id2,...]> --protocol-slot Synthesis --work-item <slug> --template-version $WORKER_TEMPLATE_VERSION`. The `--template-version` reflects the original producer's template — promoted observations carry the worker template hash, not the lead's, so scorecard rollups attribute learning signal to the correct template (see `architecture/scorecards/row-schema.md`).
-  - Multi-producer synthesis: split per distinct producer; one capture call per producer, each with its own --source-artifact-ids and its own producer's --template-version. Never merge.
-```
+1. **Source-artifact verification (reject candidates with missing or stale source_artifact_ids).** Before promotion, read `$KDIR/_work/<slug>/task-claims.jsonl` and confirm that EVERY id listed in the candidate's `source_artifact_ids` array exists as a `claim_id` of some row in that file. Scope is this work item only — cross-work-item references are always rejected. Candidates referencing missing or stale ids are rejected (not promoted). Note each rejection in `execution-log.md`:
+   ```bash
+   printf 'Rejected Tier 3 candidate: %s\nReason: source_artifact_ids refer to missing claim_ids: %s\n' \
+     "<candidate-summary>" "<missing-ids>" \
+     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
+   ```
 
-## Step 6: Followup Creation Gate
+2. **Attribution rule (producer_role → template-version mapping).** Pick the `--template-version` based on the candidate's `producer_role` field so that commons-side scorecard rollups attribute to the correct producing template:
+   - `producer_role: worker` → `--template-version "$WORKER_TEMPLATE_VERSION"`
+   - `producer_role: advisor` → `--template-version "$ADVISOR_TEMPLATE_VERSION"`
+   - `producer_role: implement-lead` → `--template-version "$LEAD_TEMPLATE_VERSION"`
+
+   If `producer_role` is absent from the candidate, default to `implement-lead` and note the defaulting in the execution log.
+
+3. **Invoke `lore promote` per candidate.** One call per accepted candidate; the row JSON is piped on stdin:
+   ```bash
+   echo '<tier3-row-json>' | lore promote \
+     --work-item <slug> \
+     --source-artifact-ids "<comma-separated tier2-claim-ids>" \
+     --producer-role "<worker|advisor|implement-lead>" \
+     --template-version "<TV-per-attribution-rule>"
+   ```
+   The script forces `confidence=unaudited`, validates via `validate-tier3.sh`, and delegates the actual commons write to `capture.sh`. A non-zero exit means the row was rejected — log the failure and move on to the next candidate.
+
+4. **Log promotion summary to execution-log.md** after the batch completes:
+   ```bash
+   printf 'Tier 3 promotion summary: %d accepted, %d rejected\nAccepted ids: %s\nRejected reasons: %s\n' \
+     "$ACCEPTED" "$REJECTED" "<accepted-claim-id-list>" "<rejection-reasons>" \
+     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
+   ```
+
+### Step 6: Followup Creation Gate
 
 Check for incomplete tasks or explicit blockers. Skip silently if everything completed cleanly.
 
@@ -296,37 +375,88 @@ Check for incomplete tasks or explicit blockers. Skip silently if everything com
 
 ```bash
 bash ~/.lore/scripts/create-followup.sh \
-  --title "Deferred work: <work item title>" \  # ≤70 chars
+  --title "Deferred work: <work item title>" \
   --source "implement" \
   --attachments '[{"type":"work_item","slug":"<slug>"}]' \
   --suggested-actions '[{"type":"create_work_item"}]' \
   --content "<one-line summary of what didn't finish and why, followed by a checklist of remaining items>"
 ```
 
-## Step 7: Cleanup and report
+**Lazy audit note:** per §9.2 Step 8, the Stop hook lazily triggers audit of this session's promotions; `/implement` does not invoke the audit explicitly here. Completion of `/implement` is non-blocking — the audit runs opportunistically after session end.
 
-1. Append a session entry to `notes.md`:
+### Step 7: Cleanup and report
+
+1. **Append a session entry to `notes.md`:**
    ```markdown
    ## YYYY-MM-DDTHH:MM
    **Focus:** Implementation via /implement
    **Progress:** Completed N/M tasks across K phases
-   **Findings:** <key architectural patterns captured>
+   **Tier 2 claims:** <count> written; **Tier 3 promoted:** <count> accepted, <count> rejected
    **Next:** <remaining tasks if partial, or "Implementation complete">
    ```
-2. **Reconcile plan.md from task system** — the task system is the source of truth for completion. For each completed task, ensure the corresponding plan.md checkbox is checked:
+
+2. **Reconcile plan.md from task system** — the task system is the source of truth for completion:
    ```bash
    lore work check <slug> "<task-subject>"
    ```
-   Run this for every completed task whose checkbox is still unchecked. This catches any checkboxes missed during Step 4.
+   Run for every completed task whose checkbox is still unchecked.
+
 3. **Archival decision** — based on the task system, not plan.md:
-   - **All tasks completed:** Archive the work item: `lore work archive "<slug>"`
-   - **Some tasks incomplete or blocked:** Leave the work item active for later `/implement` resumption
-4. Run `lore work heal`
-5. Report to user:
+   - **All tasks completed:** `lore work archive "<slug>"`
+   - **Some tasks incomplete or blocked:** leave the work item active for later `/implement` resumption
+
+4. Run `lore work heal`.
+
+5. **Optional `/pr-review` branch (per §9.2 Step 9, D7).** Query GitHub for a PR open against the current branch and route one of three ways:
+
+   ```bash
+   BRANCH=$(git rev-parse --abbrev-ref HEAD)
+   PR_JSON=$(gh pr list --head "$BRANCH" --json number --limit 1 2>&1)
+   PR_EXIT=$?
+   ```
+
+   - **PR exists** (`$PR_EXIT` is 0 AND `$PR_JSON` is a non-empty array, e.g. `[{"number":123}]`): extract the PR number and invoke `/pr-review` via the Skill tool. After invocation, report one line to the user: `[implement] Optional /pr-review invoked for PR #<num>`.
+   - **No PR** (`$PR_EXIT` is 0 AND `$PR_JSON` is `[]`): skip silently. Do NOT write an execution-log entry. Do NOT write to `notes.md`.
+   - **`gh` unavailable or errored** (`$PR_EXIT` is non-zero): skip the gate and append exactly one line to `$KDIR/_work/<slug>/notes.md`:
+     ```
+     - pr-review skipped: gh pr list failed (<exit-code>: <first 80 chars of stderr>)
+     ```
+     Do NOT write to `execution-log.md` — that file is reserved for task events, not environment skips.
+
+   The gate is optional by design: any of the three outcomes lets Step 7 continue. `/pr-review` is purely diagnostic and never blocks `/implement` completion.
+
+6. **Retro-prep bundle (per §9.2 Step 10, D8).** Write a snapshot of this run's producer facts to `$KDIR/_work/<slug>/retro-bundle.json` so `/retro` has a single, stable input artifact. One write per `/implement` run; overwrite on re-run (snapshot semantics — not append, not merge). `/implement` is the sole writer; `/retro` is a read-only consumer.
+
+   The bundle has exactly these nine required fields:
+
+   | Field | Type | Source |
+   |---|---|---|
+   | `work_item` | string | `<slug>` |
+   | `tasks_completed` | integer | count of tasks in `TaskList` with `status: "completed"` for this work item |
+   | `tier2_claim_ids` | array of strings | every `claim_id` in `$KDIR/_work/<slug>/task-claims.jsonl` produced this run |
+   | `tier3_promoted_ids` | array of strings | commons entry ids emitted by the `lore promote` calls in Step 5 (accepted only; rejects excluded) |
+   | `advisor_consultations_count` | integer | total `Advisor consultations:` entries counted across this run's `execution-log.md` worker-report bodies |
+   | `blockers` | array of strings | verbatim `Blockers:` text from worker reports where the value was anything other than `none` (case-insensitive) |
+   | `template_versions` | object `{lead, worker, advisor}` | `$LEAD_TEMPLATE_VERSION`, `$WORKER_TEMPLATE_VERSION`, `$ADVISOR_TEMPLATE_VERSION` from the "Resolve Template Versions" preamble |
+   | `captured_at_sha` | string | `git rev-parse HEAD` at emission time |
+   | `run_started_at` | string | ISO-8601 timestamp captured at Step 1 and carried through the run |
+
+   Write the file with:
+   ```bash
+   python3 -c 'import json, sys; json.dump(<fields>, sys.stdout, indent=2)' \
+     > "$KDIR/_work/<slug>/retro-bundle.json"
+   ```
+
+   **Scope:** producer-only. This rewrite ships the emitter; it does NOT ship a schema validator. `/retro` treats the bundle as a convenience summary — the canonical artifacts (`task-claims.jsonl`, `observations.jsonl`, `execution-log.md`, `notes.md`) remain the historical truth. If `retro-bundle.json` is missing or malformed, `/retro` falls back to the canonical artifacts rather than failing.
+
+   **Overwrite semantics:** on re-run of `/implement` against the same work item, replace the file unconditionally. No append, no merge, no rotation — each run reflects only that run's producer facts. The canonical log files already carry historical data.
+
+7. **Report to user:**
    ```
    [implement] Done.
    Completed: N/M tasks
-   Knowledge captured: K entries to knowledge store
+   Tier 2 claims written: <count>
+   Tier 3 promoted: <count> (rejected: <count>)
    Remaining: <list if any, or "none — work item archived">
    Followup: <"<title>" if created, omit line if not>
    Consider `/retro <slug>` to evaluate knowledge system effectiveness for this work.
@@ -345,4 +475,5 @@ If workers hit blockers or the team can't finish all tasks:
 When `/implement` is called on a work item with partially-checked `plan.md`:
 - Only generate tasks for unchecked `- [ ]` items
 - Skip phases where all items are checked
+- Step 1.7 re-reads `task-claims.jsonl` so resumed workers still see prior Tier 2 evidence
 - Report: "Resuming — N remaining tasks across M phases"

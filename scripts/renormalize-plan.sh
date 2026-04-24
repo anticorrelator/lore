@@ -162,6 +162,7 @@ import json, sys
 print(json.dumps({
     'schema_version': '1',
     'kind': 'telemetry',
+    'tier': 'telemetry',
     'calibration_state': 'pre-calibration',
     'metric': 'supersession_quality',
     'superseded_entry_id': sys.argv[1],

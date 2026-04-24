@@ -102,7 +102,7 @@ echo ""
 echo "Test 1: Round-trip scored row"
 setup_store
 
-ROW='{"schema_version":"1","kind":"scored","calibration_state":"calibrated","template_id":"worker","template_version":"abc123","metric":"accuracy","value":0.8,"sample_size":10}'
+ROW='{"schema_version":"1","kind":"scored","tier":"telemetry","calibration_state":"calibrated","template_id":"worker","template_version":"abc123","metric":"accuracy","value":0.8,"sample_size":10}'
 OUTPUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$ROW" 2>&1)
 assert_contains "append confirmation printed" "$OUTPUT" "[scorecard] Appended row"
 assert_contains "kind reported in confirmation" "$OUTPUT" "kind=scored"
@@ -126,7 +126,7 @@ echo ""
 echo "Test 2: Round-trip telemetry row"
 setup_store
 
-ROW='{"schema_version":"1","kind":"telemetry","calibration_state":"pre-calibration","template_id":"researcher","template_version":"xyz789","metric":"coverage","value":0.95}'
+ROW='{"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"pre-calibration","template_id":"researcher","template_version":"xyz789","metric":"coverage","value":0.95}'
 bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$ROW" > /dev/null 2>&1
 ROW_BACK=$(cat "$KNOWLEDGE_DIR/_scorecards/rows.jsonl")
 assert_eq "kind telemetry round-tripped" "$(echo "$ROW_BACK" | jq -r '.kind')" "telemetry"
@@ -140,13 +140,13 @@ echo ""
 echo "Test 3: Append reads row from stdin"
 setup_store
 
-ROW='{"schema_version":"1","kind":"scored","calibration_state":"unknown","template_id":"lead","template_version":"deadbeef","metric":"precision"}'
+ROW='{"schema_version":"1","kind":"scored","tier":"telemetry","calibration_state":"unknown","template_id":"lead","template_version":"deadbeef","metric":"precision"}'
 OUTPUT=$(echo "$ROW" | bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" 2>&1)
 assert_contains "stdin append succeeded" "$OUTPUT" "[scorecard] Appended row"
 assert_file_exists "rows.jsonl created via stdin" "$KNOWLEDGE_DIR/_scorecards/rows.jsonl"
 
 # =============================================
-# Test 4: Reject invalid kind
+# Test 4: Reject invalid kind (error message lists all three valid kinds — D4)
 # =============================================
 echo ""
 echo "Test 4: Reject invalid kind"
@@ -157,6 +157,10 @@ STDERR=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
   --row '{"schema_version":"1","kind":"bogus","calibration_state":"calibrated"}' 2>&1) || EXIT_CODE=$?
 assert_eq "invalid kind exits non-zero" "$EXIT_CODE" "1"
 assert_contains "stderr names 'invalid kind'" "$STDERR" "invalid kind"
+# Error message MUST enumerate all three valid kinds (D4: three-kind enum is public contract).
+assert_contains "stderr lists 'scored'" "$STDERR" "scored"
+assert_contains "stderr lists 'telemetry'" "$STDERR" "telemetry"
+assert_contains "stderr lists 'consumption-contradiction'" "$STDERR" "consumption-contradiction"
 
 # File must not exist (first-use rejection leaves no partial state)
 if [[ ! -f "$KNOWLEDGE_DIR/_scorecards/rows.jsonl" ]]; then
@@ -166,6 +170,29 @@ else
   echo "  FAIL: rows.jsonl was created despite rejection"
   FAIL=$((FAIL + 1))
 fi
+
+# =============================================
+# Test 4a: Round-trip a `kind: consumption-contradiction` row (D4)
+# =============================================
+# Positive append-side test for the third kind. Mirrors Test 1/Test 2 shape.
+# Includes `tier: telemetry` because the tier validator requires it for all rows.
+echo ""
+echo "Test 4a: Round-trip consumption-contradiction row"
+setup_store
+
+ROW='{"schema_version":"1","kind":"consumption-contradiction","tier":"telemetry","calibration_state":"pre-calibration","template_id":"consumer-channel","template_version":"ccc111222333","metric":"remediation_rate","value":0.42,"sample_size":7}'
+OUTPUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$ROW" 2>&1)
+assert_contains "consumption-contradiction append confirmation" "$OUTPUT" "[scorecard] Appended row"
+assert_contains "kind reported as consumption-contradiction" "$OUTPUT" "kind=consumption-contradiction"
+assert_contains "calibration_state reported" "$OUTPUT" "calibration_state=pre-calibration"
+assert_file_exists "rows.jsonl created for new kind" "$KNOWLEDGE_DIR/_scorecards/rows.jsonl"
+
+ROW_BACK=$(cat "$KNOWLEDGE_DIR/_scorecards/rows.jsonl")
+assert_eq "kind consumption-contradiction round-tripped" "$(echo "$ROW_BACK" | jq -r '.kind')" "consumption-contradiction"
+assert_eq "calibration_state round-tripped" "$(echo "$ROW_BACK" | jq -r '.calibration_state')" "pre-calibration"
+assert_eq "metric round-tripped" "$(echo "$ROW_BACK" | jq -r '.metric')" "remediation_rate"
+assert_eq "value round-tripped" "$(echo "$ROW_BACK" | jq -r '.value')" "0.42"
+assert_eq "tier round-tripped" "$(echo "$ROW_BACK" | jq -r '.tier')" "telemetry"
 
 # =============================================
 # Test 5: Reject missing schema_version
@@ -242,7 +269,7 @@ echo "Test 10: Rollup on one row"
 setup_store
 
 bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","template_id":"w","template_version":"v1","metric":"accuracy","value":0.75,"sample_size":4}' > /dev/null
+  --row '{"schema_version":"1","kind":"scored","tier":"telemetry","calibration_state":"calibrated","template_id":"w","template_version":"v1","metric":"accuracy","value":0.75,"sample_size":4}' > /dev/null
 
 bash "$SCRIPT_DIR/scorecard-rollup.sh" --kdir "$KNOWLEDGE_DIR" > /dev/null 2>&1
 CURRENT=$(cat "$KNOWLEDGE_DIR/_scorecards/_current.json")
@@ -265,14 +292,14 @@ setup_store
 # Group A: (w, v1, accuracy) — 3 rows, values 0.5, 0.7, 0.9
 for v in 0.5 0.7 0.9; do
   bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-    --row "{\"schema_version\":\"1\",\"kind\":\"scored\",\"calibration_state\":\"calibrated\",\"template_id\":\"w\",\"template_version\":\"v1\",\"metric\":\"accuracy\",\"value\":$v,\"sample_size\":2}" > /dev/null
+    --row "{\"schema_version\":\"1\",\"kind\":\"scored\",\"tier\":\"telemetry\",\"calibration_state\":\"calibrated\",\"template_id\":\"w\",\"template_version\":\"v1\",\"metric\":\"accuracy\",\"value\":$v,\"sample_size\":2}" > /dev/null
 done
 # Group B: (w, v1, precision) — 1 row
 bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","template_id":"w","template_version":"v1","metric":"precision","value":0.6,"sample_size":10}' > /dev/null
+  --row '{"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"unknown","template_id":"w","template_version":"v1","metric":"precision","value":0.6,"sample_size":10}' > /dev/null
 # Group C: (r, v2, accuracy) — 1 row
 bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","template_id":"r","template_version":"v2","metric":"accuracy","value":0.4,"sample_size":3}' > /dev/null
+  --row '{"schema_version":"1","kind":"scored","tier":"telemetry","calibration_state":"calibrated","template_id":"r","template_version":"v2","metric":"accuracy","value":0.4,"sample_size":3}' > /dev/null
 
 bash "$SCRIPT_DIR/scorecard-rollup.sh" --kdir "$KNOWLEDGE_DIR" > /dev/null 2>&1
 CURRENT=$(cat "$KNOWLEDGE_DIR/_scorecards/_current.json")
@@ -310,15 +337,65 @@ echo "Test 12: Mixed-kind group labelled 'mixed'"
 setup_store
 
 bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","template_id":"w","template_version":"v1","metric":"m","value":1.0}' > /dev/null
+  --row '{"schema_version":"1","kind":"scored","tier":"telemetry","calibration_state":"calibrated","template_id":"w","template_version":"v1","metric":"m","value":1.0}' > /dev/null
 bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","template_id":"w","template_version":"v1","metric":"m","value":2.0}' > /dev/null
+  --row '{"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"unknown","template_id":"w","template_version":"v1","metric":"m","value":2.0}' > /dev/null
 
 bash "$SCRIPT_DIR/scorecard-rollup.sh" --kdir "$KNOWLEDGE_DIR" > /dev/null 2>&1
 CURRENT=$(cat "$KNOWLEDGE_DIR/_scorecards/_current.json")
 GROUP=$(echo "$CURRENT" | jq '.summaries[0]')
 assert_eq "mixed kind labelled" "$(echo "$GROUP" | jq -r '.kind')" "mixed"
 assert_eq "calibration_states unique count" "$(echo "$GROUP" | jq -r '.calibration_states | length')" "2"
+
+# =============================================
+# Test 12a: consumption-contradiction single-kind group rolls up correctly (D4)
+# =============================================
+echo ""
+echo "Test 12a: consumption-contradiction single-kind group rolls up correctly"
+setup_store
+
+# Two rows sharing (template_id, template_version, metric) — must aggregate into ONE summary
+# with kind=consumption-contradiction (not silently excluded, not relabelled as 'mixed').
+for v in 0.4 0.8; do
+  bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+    --row "{\"schema_version\":\"1\",\"kind\":\"consumption-contradiction\",\"calibration_state\":\"pre-calibration\",\"tier\":\"telemetry\",\"template_id\":\"cc\",\"template_version\":\"v1\",\"metric\":\"remediation_rate\",\"value\":$v,\"sample_size\":5}" > /dev/null
+done
+
+bash "$SCRIPT_DIR/scorecard-rollup.sh" --kdir "$KNOWLEDGE_DIR" > /dev/null 2>&1
+CURRENT=$(cat "$KNOWLEDGE_DIR/_scorecards/_current.json")
+assert_eq "cc rollup row_count is 2" "$(echo "$CURRENT" | jq -r '.row_count')" "2"
+assert_eq "cc rollup corrupt_row_count is 0" "$(echo "$CURRENT" | jq -r '.corrupt_row_count')" "0"
+assert_eq "cc rollup summary count is 1" "$(echo "$CURRENT" | jq -r '.summaries | length')" "1"
+CC_GROUP=$(echo "$CURRENT" | jq '.summaries[0]')
+assert_eq "cc group kind label" "$(echo "$CC_GROUP" | jq -r '.kind')" "consumption-contradiction"
+assert_eq "cc group sample_count" "$(echo "$CC_GROUP" | jq -r '.sample_count')" "2"
+assert_eq "cc group sample_size_total" "$(echo "$CC_GROUP" | jq -r '.sample_size_total')" "10"
+MEAN_CC=$(echo "$CC_GROUP" | jq -r '.value_mean')
+MEAN_CC_OK=$(jq -rn --argjson m "$MEAN_CC" 'if (($m - 0.6) | fabs) < 0.0001 then "yes" else "no" end')
+assert_eq "cc group value_mean ≈ 0.6" "$MEAN_CC_OK" "yes"
+assert_eq "cc group calibration_states = [pre-calibration]" "$(echo "$CC_GROUP" | jq -rc '.calibration_states')" '["pre-calibration"]'
+
+# =============================================
+# Test 12b: Mixed group including consumption-contradiction still labelled 'mixed' (D4 regression)
+# =============================================
+echo ""
+echo "Test 12b: Mixed-kind group including consumption-contradiction labelled 'mixed'"
+setup_store
+
+# Same grouping key; two different kinds including consumption-contradiction.
+# Rollup MUST still emit kind=mixed (existing unique-then-length==1-else-mixed logic
+# handles the third kind without modification — regression check for D4).
+bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","tier":"telemetry","template_id":"mix","template_version":"v1","metric":"m","value":1.0}' > /dev/null
+bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"consumption-contradiction","calibration_state":"pre-calibration","tier":"telemetry","template_id":"mix","template_version":"v1","metric":"m","value":2.0}' > /dev/null
+
+bash "$SCRIPT_DIR/scorecard-rollup.sh" --kdir "$KNOWLEDGE_DIR" > /dev/null 2>&1
+CURRENT=$(cat "$KNOWLEDGE_DIR/_scorecards/_current.json")
+MIX_GROUP=$(echo "$CURRENT" | jq '.summaries[0]')
+assert_eq "mix group kind labelled 'mixed'" "$(echo "$MIX_GROUP" | jq -r '.kind')" "mixed"
+assert_eq "mix group sample_count" "$(echo "$MIX_GROUP" | jq -r '.sample_count')" "2"
+assert_eq "mix group calibration_states length" "$(echo "$MIX_GROUP" | jq -r '.calibration_states | length')" "2"
 
 # =============================================
 # Test 13: Rollup warns on corrupt rows (parse fail, missing kind, missing schema_version)
@@ -364,7 +441,7 @@ echo ""
 echo "Test 14: Rollup is silent on clean input"
 setup_store
 bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","template_id":"w","template_version":"v1","metric":"m","value":0.5}' > /dev/null
+  --row '{"schema_version":"1","kind":"scored","tier":"telemetry","calibration_state":"calibrated","template_id":"w","template_version":"v1","metric":"m","value":0.5}' > /dev/null
 
 STDERR=$(bash "$SCRIPT_DIR/scorecard-rollup.sh" --kdir "$KNOWLEDGE_DIR" 2>&1 >/dev/null)
 assert_not_contains "no warning emitted on clean input" "$STDERR" "warning"
@@ -378,7 +455,7 @@ echo "Test 15: --json mode"
 setup_store
 
 JSON_OUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --json \
-  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated"}')
+  --row '{"schema_version":"1","kind":"scored","tier":"telemetry","calibration_state":"calibrated"}')
 assert_eq "append json.appended" "$(echo "$JSON_OUT" | jq -r '.appended')" "true"
 assert_eq "append json.kind" "$(echo "$JSON_OUT" | jq -r '.kind')" "scored"
 
@@ -401,7 +478,7 @@ echo "Test 16: README documents sole-writer invariant"
 setup_store
 
 bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated"}' > /dev/null
+  --row '{"schema_version":"1","kind":"scored","tier":"telemetry","calibration_state":"calibrated"}' > /dev/null
 
 README="$KNOWLEDGE_DIR/_scorecards/README.md"
 assert_file_exists "README seeded" "$README"
@@ -437,17 +514,17 @@ assert_contains "rejection cites grounded-or-nothing" "$ERR_OUT" "grounded-or-no
 
 # Case B: reverse-auditor + scored + complete claim_anchor -> accepted
 OUTPUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","verdict_source":"reverse-auditor","template_id":"worker","template_version":"aaaaaaaaaaaa","metric":"omission_rate","value":0.1,"sample_size":10,"claim_anchor":{"file":"/x/y.py","line_range":"10-12","exact_snippet":"def foo()"}}')
+  --row '{"schema_version":"1","kind":"scored","tier":"telemetry","calibration_state":"calibrated","verdict_source":"reverse-auditor","template_id":"worker","template_version":"aaaaaaaaaaaa","metric":"omission_rate","value":0.1,"sample_size":10,"claim_anchor":{"file":"/x/y.py","line_range":"10-12","exact_snippet":"def foo()"}}')
 assert_contains "reverse-auditor scored with anchor accepted" "$OUTPUT" "[scorecard] Appended row"
 
 # Case C: reverse-auditor + telemetry + no anchor -> accepted (exempt)
 OUTPUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","verdict_source":"reverse-auditor","template_id":"reverse-auditor","template_version":"aaaaaaaaaaaa","metric":"grounding_failure_rate","value":0.3,"sample_size":10}')
+  --row '{"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"unknown","verdict_source":"reverse-auditor","template_id":"reverse-auditor","template_version":"aaaaaaaaaaaa","metric":"grounding_failure_rate","value":0.3,"sample_size":10}')
 assert_contains "reverse-auditor telemetry without anchor accepted" "$OUTPUT" "[scorecard] Appended row"
 
 # Case D: non-reverse-auditor scored without anchor -> accepted (not targeted)
 OUTPUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","verdict_source":"correctness-gate","template_id":"worker","template_version":"aaaaaaaaaaaa","metric":"factual_precision","value":0.9,"sample_size":10}')
+  --row '{"schema_version":"1","kind":"scored","tier":"telemetry","calibration_state":"calibrated","verdict_source":"correctness-gate","template_id":"worker","template_version":"aaaaaaaaaaaa","metric":"factual_precision","value":0.9,"sample_size":10}')
 assert_contains "correctness-gate scored without anchor accepted" "$OUTPUT" "[scorecard] Appended row"
 
 # Case E: reverse-auditor + scored + anchor with empty file -> rejected
@@ -459,7 +536,7 @@ assert_eq "reverse-auditor scored with empty file exits non-zero" "$EXIT_CODE" "
 
 # Case F: no verdict_source -> enforcement not triggered (accepted)
 OUTPUT=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
-  --row '{"schema_version":"1","kind":"scored","calibration_state":"calibrated","template_id":"worker","template_version":"aaaaaaaaaaaa","metric":"audit_pass_rate","value":0.8,"sample_size":10}')
+  --row '{"schema_version":"1","kind":"scored","tier":"telemetry","calibration_state":"calibrated","template_id":"worker","template_version":"aaaaaaaaaaaa","metric":"audit_pass_rate","value":0.8,"sample_size":10}')
 assert_contains "row without verdict_source accepted" "$OUTPUT" "[scorecard] Appended row"
 
 # Rejected rows never reached rows.jsonl: only the one accepted omission_rate row should be present

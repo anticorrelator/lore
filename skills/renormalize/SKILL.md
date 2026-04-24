@@ -9,7 +9,7 @@ argument_description: "(no arguments) — runs full renormalization pipeline wit
 
 Full knowledge store renormalization — prunes stale entries, merges redundancies, and rebalances category structure. This is an orchestrated multi-agent flow.
 
-## Step 1: Pre-flight check
+### Step 1: Pre-flight check
 
 ```bash
 KDIR=$(lore resolve)
@@ -26,7 +26,7 @@ Ensure `$KDIR/_meta/` exists:
 mkdir -p "$KDIR/_meta"
 ```
 
-## Step 2: Analysis (parallel agents)
+### Step 2: Analysis (parallel agents)
 
 Create a team named `renorm-<YYYYMMDD-HHMMSS>` with 2 Explore agents running in parallel:
 
@@ -44,7 +44,7 @@ Report the summary back via SendMessage: total entries, hot/warm/cold counts, co
 
 Wait for both agents to complete and acknowledge their reports.
 
-## Step 2b: Audit Union + Holistic Assessment
+### Step 2b: Audit Union + Holistic Assessment
 
 ### Compute audit union
 
@@ -179,7 +179,7 @@ Assemble them into the final `$KDIR/_meta/assessment-report.json` — this is a 
 
 Step 3 consumes `assessment-report.json` — `primary_assignments` feeds the `rescale` action list when in hybrid mode.
 
-## Step 3: Planning (lead synthesizes)
+### Step 3: Planning (lead synthesizes)
 
 Read the three reports:
 - `$KDIR/_meta/staleness-report.json`
@@ -304,7 +304,7 @@ Approve? (yes / yes with changes / no)
 
 **Wait for user approval before proceeding.** If the user requests changes, update the plan and re-present. If rejected, delete `$KDIR/_meta/renormalize-plan.json` and stop.
 
-## Step 4: Execution (sequenced + parallel agents)
+### Step 4: Execution (sequenced + parallel agents)
 
 After approval, execute in two waves. **Wave 1 MUST complete before Wave 2 starts** — this ensures consolidation and merge operate on freshly verified content, not stale prose recombined.
 
@@ -411,7 +411,7 @@ Report: links written (with source → target pairs), links skipped (already pre
 
 Wait for all agents to complete and review their reports for any errors.
 
-## Step 5: Cleanup and verification
+### Step 5: Cleanup and verification
 
 ### Emit scale_drift_rate guardrail rows
 

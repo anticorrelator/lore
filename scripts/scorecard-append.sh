@@ -24,6 +24,16 @@
 #   kind               enum: scored | telemetry
 #   calibration_state  enum: calibrated | pre-calibration | unknown
 #   schema_version     any non-null scalar (readers enforce upgrade policy)
+#   tier               enum: reusable | task-evidence | telemetry | template | correction
+#
+# Tier conditional rules:
+#   reusable      rows REQUIRE non-empty source_artifact_ids
+#   task-evidence rows REQUIRE task_id and phase_id
+#   telemetry     rows have no conditional extras
+#   template      rows REQUIRE template_id, template_version (12-char hash),
+#                 metric, sample_size (integer > 0), calibration_state
+#   correction    rows REQUIRE corrected_entry_path, correction_target
+#                 (claim|observation|doctrine), calibrated_by_verdict_id
 #
 # The row schema (see architecture/scorecards/row-schema.md) also defines:
 #   template_id, template_version, metric, value, sample_size,
@@ -117,12 +127,12 @@ fi
 
 KIND=$(printf '%s' "$ROW" | jq -r '.kind // ""')
 case "$KIND" in
-  scored|telemetry) ;;
+  scored|telemetry|consumption-contradiction) ;;
   "")
-    fail "missing required field: kind (must be 'scored' or 'telemetry')"
+    fail "missing required field: kind (must be 'scored', 'telemetry', or 'consumption-contradiction')"
     ;;
   *)
-    fail "invalid kind: '$KIND' (must be 'scored' or 'telemetry')"
+    fail "invalid kind: '$KIND' (must be 'scored', 'telemetry', or 'consumption-contradiction')"
     ;;
 esac
 
@@ -153,6 +163,84 @@ if [[ "$VERDICT_SOURCE" == "reverse-auditor" && "$KIND" == "scored" ]]; then
   ' >/dev/null 2>&1 && echo "true" || echo "false")
   if [[ "$ANCHOR_OK" != "true" ]]; then
     fail "reverse-auditor scored row rejected: grounded-or-nothing enforced — claim_anchor.{file, line_range, exact_snippet} all required and non-empty (kind=scored, verdict_source=reverse-auditor). Telemetry-kind rows are exempt; surface ungrounded concerns in /retro narrative instead."
+  fi
+fi
+
+# --- Tier validation (task-15, extended in task-1 Phase 1) ---
+# Mirror the grounded-or-nothing jq pattern above.
+# Allowed values: reusable | task-evidence | telemetry | template | correction
+# Conditional rules:
+#   reusable      rows REQUIRE non-empty source_artifact_ids
+#   task-evidence rows REQUIRE task_id and phase_id
+#   telemetry     rows have no conditional extras
+#   template      rows REQUIRE template_id, template_version, metric, sample_size, calibration_state
+#   correction    rows REQUIRE corrected_entry_path, correction_target, calibrated_by_verdict_id
+# Legacy missing-tier policy: rows without a tier field are accepted and treated as
+# tier:telemetry by readers (backwards-compatible; not enforced here at write time).
+TIER=$(printf '%s' "$ROW" | jq -r '.tier // ""')
+case "$TIER" in
+  reusable|task-evidence|telemetry|template|correction) ;;
+  "")
+    fail "missing required field: tier (must be 'reusable', 'task-evidence', 'telemetry', 'template', or 'correction')"
+    ;;
+  *)
+    fail "invalid tier: '$TIER' (must be 'reusable', 'task-evidence', 'telemetry', 'template', or 'correction')"
+    ;;
+esac
+
+if [[ "$TIER" == "reusable" ]]; then
+  REUSABLE_OK=$(printf '%s' "$ROW" | jq -e '
+    (.source_artifact_ids // null) as $ids
+    | ($ids != null)
+      and ($ids | type == "array")
+      and (($ids | length) > 0)
+      and (($ids[0] // "") != "")
+  ' >/dev/null 2>&1 && echo "true" || echo "false")
+  if [[ "$REUSABLE_OK" != "true" ]]; then
+    fail "reusable row rejected: source_artifact_ids must be a non-empty array with at least one non-empty element (tier=reusable). Unattributed reusable claims cannot drive producer-evaluation scoring."
+  fi
+fi
+
+if [[ "$TIER" == "task-evidence" ]]; then
+  TASK_EVIDENCE_OK=$(printf '%s' "$ROW" | jq -e '
+    ((.task_id // "") != "") and ((.phase_id // "") != "")
+  ' >/dev/null 2>&1 && echo "true" || echo "false")
+  if [[ "$TASK_EVIDENCE_OK" != "true" ]]; then
+    fail "task-evidence row rejected: task_id and phase_id are both required and non-empty (tier=task-evidence). Task-local evidence must be anchored to a specific task and phase."
+  fi
+fi
+
+if [[ "$TIER" == "template" ]]; then
+  TEMPLATE_OK=$(printf '%s' "$ROW" | jq -e '
+    ((.template_id // "") != "")
+      and ((.template_version // "") | test("^[0-9a-f]{12}$"))
+      and ((.metric // "") != "")
+      and ((.sample_size // null) | (type == "number") and (. > 0))
+      and ((.calibration_state // "") | test("^(calibrated|pre-calibration|unknown)$"))
+  ' >/dev/null 2>&1 && echo "true" || echo "false")
+  if [[ "$TEMPLATE_OK" != "true" ]]; then
+    MISSING_FIELDS=""
+    printf '%s' "$ROW" | jq -e '((.template_id // "") != "")' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS template_id"
+    printf '%s' "$ROW" | jq -e '((.template_version // "") | test("^[0-9a-f]{12}$"))' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS template_version(12-char-hex)"
+    printf '%s' "$ROW" | jq -e '((.metric // "") != "")' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS metric"
+    printf '%s' "$ROW" | jq -e '((.sample_size // null) | (type == "number") and (. > 0))' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS sample_size(int>0)"
+    printf '%s' "$ROW" | jq -e '((.calibration_state // "") | test("^(calibrated|pre-calibration|unknown)$"))' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS calibration_state"
+    fail "template row rejected: missing or invalid required fields:$MISSING_FIELDS (tier=template requires template_id, template_version[12-char hex], metric, sample_size[int>0], calibration_state)"
+  fi
+fi
+
+if [[ "$TIER" == "correction" ]]; then
+  CORRECTION_OK=$(printf '%s' "$ROW" | jq -e '
+    ((.corrected_entry_path // "") != "")
+      and ((.correction_target // "") | test("^(claim|observation|doctrine)$"))
+      and ((.calibrated_by_verdict_id // "") != "")
+  ' >/dev/null 2>&1 && echo "true" || echo "false")
+  if [[ "$CORRECTION_OK" != "true" ]]; then
+    MISSING_FIELDS=""
+    printf '%s' "$ROW" | jq -e '((.corrected_entry_path // "") != "")' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS corrected_entry_path"
+    printf '%s' "$ROW" | jq -e '((.correction_target // "") | test("^(claim|observation|doctrine)$"))' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS correction_target(claim|observation|doctrine)"
+    printf '%s' "$ROW" | jq -e '((.calibrated_by_verdict_id // "") != "")' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS calibrated_by_verdict_id"
+    fail "correction row rejected: missing or invalid required fields:$MISSING_FIELDS (tier=correction requires corrected_entry_path, correction_target[claim|observation|doctrine], calibrated_by_verdict_id)"
   fi
 fi
 
@@ -187,8 +275,9 @@ if [[ $JSON_MODE -eq 1 ]]; then
     --arg path "$RELPATH" \
     --arg kind "$KIND" \
     --arg calibration_state "$CAL_STATE" \
-    '{path: $path, kind: $kind, calibration_state: $calibration_state, appended: true}')
+    --arg tier "$TIER" \
+    '{path: $path, kind: $kind, tier: $tier, calibration_state: $calibration_state, appended: true}')
   json_output "$RESULT"
 fi
 
-echo "[scorecard] Appended row to $RELPATH (kind=$KIND, calibration_state=$CAL_STATE)"
+echo "[scorecard] Appended row to $RELPATH (kind=$KIND, tier=$TIER, calibration_state=$CAL_STATE)"

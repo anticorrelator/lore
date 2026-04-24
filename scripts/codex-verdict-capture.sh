@@ -252,6 +252,7 @@ for criterion_name, rating in ratings.items():
         "source_artifact_ids": [work_item] if work_item else [],
         "granularity": "set-level",
         "kind": "scored",
+        "tier": "reusable",
         "calibration_state": "pre-calibration",
         "rating_label": rating_upper,
         "criterion_name": criterion_name,
@@ -276,6 +277,7 @@ if gate is not None:
             "source_artifact_ids": [work_item] if work_item else [],
             "granularity": "set-level",
             "kind": "scored",
+            "tier": "reusable",
             "calibration_state": "pre-calibration",
             "gate_label": gate_key,
         })

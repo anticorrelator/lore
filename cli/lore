@@ -61,6 +61,8 @@ Commands:
   read         Read a file with optional query filtering
   search       Search knowledge and/or work items
   capture      Capture an insight to the knowledge store
+  promote      Promote a Tier 3 observation row to the knowledge commons
+  test         Run lore test suites (see: lore test protocols)
   annotate     Record a retrieval friction annotation
   audit        Route a producer artifact through the settlement judges
   resolve      Resolve repo path or [[backlink]] references
@@ -103,6 +105,8 @@ Commands:
   retro        Federated retro pooling (see: lore retro --help)
   correction   Verdict-driven correction management (see: lore correction --help)
   off-scale    Off-scale route management (see: lore off-scale --help)
+  consumption-contradiction
+               Append a consumption-contradiction signal-capture row
   synopsis     Edge-keyed synopsis sidecar management (see: lore synopsis --help)
   resynth      Invalidate and re-synthesize edge synopses for a knowledge entry
   history      Show correction history and supersession chain for a knowledge entry
@@ -1176,6 +1180,14 @@ case "$1" in
     shift
     "$SCRIPTS_DIR/capture.sh" "$@"
     ;;
+  promote)
+    shift
+    "$SCRIPTS_DIR/lore-promote.sh" "$@"
+    ;;
+  test)
+    shift
+    "$SCRIPTS_DIR/lore-test.sh" "$@"
+    ;;
   annotate)
     shift
     "$SCRIPTS_DIR/annotate.sh" "$@"
@@ -1309,6 +1321,10 @@ case "$1" in
   off-scale)
     shift
     cmd_off_scale "$@"
+    ;;
+  consumption-contradiction)
+    shift
+    "$SCRIPTS_DIR/consumption-contradiction-append.sh" "$@"
     ;;
   synopsis)
     shift

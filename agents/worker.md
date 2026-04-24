@@ -36,10 +36,18 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
 2. Claim one: TaskUpdate with owner=your name, status=in_progress
 3. Read the full task with TaskGet
 4. Implement the change — read existing code first, follow codebase conventions
-5. Look for and run relevant tests:
+5. **During the task, emit Tier 2 evidence as you go.** Each time you form a
+   claim anchored to a specific `file:line_range` that grounds the work in
+   this task, emit it immediately via `evidence-append.sh` — one call per
+   claim. See the "Tier 2 Evidence Emission" section below for the 13-field
+   JSON shape and the `echo '<json>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>`
+   call pattern. Do not batch Tier 2 rows into the completion report — they
+   go into `task-claims.jsonl` at emission time; the report only references
+   their `claim_id` values.
+6. Look for and run relevant tests:
    - Check for package.json scripts, Makefile targets, pytest, etc.
    - Run tests if found; skip silently if no test command exists
-6. Send completion report to "{{team_lead}}" via SendMessage:
+7. Send completion report to "{{team_lead}}" via SendMessage:
    ```
    summary: "Done: <task subject>"
    content: |
@@ -94,6 +102,51 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        ordering / guard mechanisms). (3) Operational procedures — "to
        debug X, do Y then Z". (4) Error signatures — "error X means Y,
        verify with Z". (5) Implicit constraints — non-code-visible rules.
+     **Tier 2 evidence:** REQUIRED — list every `claim_id` you wrote to
+       `task-claims.jsonl` during this task via
+       `echo '<json>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>`.
+       One claim_id per line, no surrounding prose. These are *references
+       only* — the canonical JSONL rows already live in the file; the lead
+       cross-checks each id against `$KDIR/_work/<slug>/task-claims.jsonl`
+       and rejects the report if any id is missing. Emit `none` (lowercase)
+       on a single line only when the task legitimately produced no
+       file/line-anchored evidence (rare — documentation-only tasks). Do
+       NOT paste the full JSON row bodies here; see the "Tier 2 Evidence
+       Emission" section below for the 13-field shape and CLI contract.
+       Format:
+       - <claim_id_1>
+       - <claim_id_2>
+       or simply: none
+     **Tier 3 candidates:** <Optional. Emit this section ONLY when you
+       have one or more reusable observations that (a) extend beyond the
+       current task's local scope, (b) reference at least one of your
+       Tier 2 `claim_id`s via `source_artifact_ids`, and (c) you want the
+       lead to promote to the knowledge commons via `lore promote`. You do
+       NOT promote directly — the lead validates, maps producer_role to a
+       template-version, and calls `lore promote` per candidate. "Tier 3
+       candidates" is the sole accepted label; the TaskCompleted hook
+       validates literal-prefix-match on this string and silently drops
+       the section under any alias ("Tier 3 claims", "Tier 3
+       observations", "Tier 3 promotion" are all wrong). Shape — one YAML
+       list entry per candidate, 12 fields (full Tier 3 shape minus
+       `confidence`, which `lore promote` forces to "unaudited"):
+       - claim_id: <slug form, unique within this work item>
+         tier: reusable
+         claim: <short declarative reusable claim>
+         producer_role: worker
+         protocol_slot: <protocol slot id — e.g. implement-step-3>
+         scale: implementation
+         why_future_agent_cares: <one-sentence future-agent utility>
+         falsifier: <what would disprove the claim in the codebase>
+         related_files: [<absolute path>, ...]
+         source_artifact_ids: [<tier2 claim_id from your Tier 2 evidence above>, ...]
+         work_item: <work item slug — same as --work-item>
+         captured_at_sha: <git rev-parse HEAD at emission>
+       Omit the section entirely when nothing reusable surfaced. Do NOT
+       fabricate Tier 3 candidates to satisfy a perceived quota — an empty
+       section is the common case. `source_artifact_ids` MUST be non-empty
+       and every id MUST appear in your **Tier 2 evidence:** list above;
+       otherwise the lead rejects the candidate.>
      **Narrative:** Optional prose slot for judgment, synthesis, cross-
        observation connections, and context that doesn't fit the structured
        fields. Keep brief. Use when the captured signal is stronger than
@@ -126,11 +179,102 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        emit only real consultations.>
      **Blockers:** <none, or description of what's blocking>
    ```
-7. **Update task description** with your full completion report:
-   TaskUpdate with description set to the same content from step 6
-   (including the **Observations:** section). This is required
-   for the TaskCompleted hook to verify your report.
-8. Mark task completed: TaskUpdate with status=completed
+8. **Update task description** with your full completion report:
+   TaskUpdate with description set to the same content from step 7
+   (including the **Observations:**, **Tier 2 evidence:**, and — when
+   present — **Tier 3 candidates:** sections). This is required for the
+   TaskCompleted hook to verify your report.
+9. Mark task completed: TaskUpdate with status=completed
+
+## Tier 2 Evidence Emission
+
+Tier 2 rows are the *work-local evidence trail* for this task — file/line-
+anchored claims that ground what you did. They live in
+`$KDIR/_work/<slug>/task-claims.jsonl` and die with the work item; they are
+NOT the knowledge commons (Tier 3 is, and only the lead promotes).
+
+**When to emit:** every time you form a claim anchored to a specific
+`file:line_range` during Workflow step 4. Each claim gets its own
+`evidence-append.sh` invocation — one call per claim, no batching. Emit
+immediately when the evidence is fresh; do not defer to the completion
+report.
+
+**How to emit — sole-writer CLI:**
+
+```bash
+echo '{
+  "claim_id": "<slug form — unique within this work item>",
+  "tier": "task-evidence",
+  "claim": "<short declarative claim grounded in file:line_range>",
+  "producer_role": "worker",
+  "protocol_slot": "<protocol slot id — e.g. implement-step-3>",
+  "task_id": "<from TaskGet — the id of the task you claimed>",
+  "phase_id": "<from the task description metadata — phase the task belongs to>",
+  "scale": "implementation",
+  "file": "<absolute path>",
+  "line_range": "<N-M>",
+  "falsifier": "<what evidence in the code would disprove this claim>",
+  "why_this_work_needs_it": "<one-sentence — why this Tier 2 row grounds THIS task>",
+  "captured_at_sha": "<git rev-parse HEAD at emission time>"
+}' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>
+```
+
+**Required fields (13, all non-null):** `claim_id`, `tier`, `claim`,
+`producer_role`, `protocol_slot`, `task_id`, `phase_id`, `scale`, `file`,
+`line_range`, `falsifier`, `why_this_work_needs_it`, `captured_at_sha`.
+`tier` MUST be the literal string `"task-evidence"`; `producer_role` MUST
+be `"worker"` when you are the emitter; `line_range` MUST match `N-M` with
+`N ≤ M`. `evidence-append.sh` delegates to `validate-tier2.sh`, which
+rejects rows with any missing/empty required field — a failed write means
+no row was appended.
+
+**One-call-per-claim rule:** do NOT pipe multiple JSON objects into a
+single `evidence-append.sh` invocation. The sole-writer gate validates one
+row per call and appends one line to `task-claims.jsonl`. Batching breaks
+validation and produces corrupt JSONL.
+
+**After emission — reference-only in the report:** list the `claim_id`
+values you wrote in the completion report's **Tier 2 evidence:** field
+(Workflow step 7). The lead cross-references those ids against the
+canonical `task-claims.jsonl`; the report does not re-embed row contents.
+If you mention a `claim_id` in the report that was never written to the
+file, the lead rejects the entire report.
+
+**Failure handling:** if `evidence-append.sh` exits non-zero (schema
+violation, missing work-item dir, unresolvable `$KDIR`), fix the row and
+re-emit — do NOT proceed to the completion report with a claim that
+failed to write. The canonical JSONL is the evidence of record; the
+report is the acceptance index.
+
+## Tier 3 Candidates — Naming Standard
+
+The optional post-task YAML block in the completion report is named
+**Tier 3 candidates:** — exactly that string, with that casing, that
+spelling, that trailing colon. This is a *protocol constant*:
+
+- The TaskCompleted hook (`~/.lore/scripts/task-completed-capture-check.sh`)
+  validates literal-prefix-match on `**Tier 3 candidates:**` and silently
+  drops any other label.
+- `/implement` SKILL.md Step 5 reads the same literal to find the
+  candidates block before calling `lore promote`.
+- Tests in `~/.lore/tests/protocols/` assert this exact label appears in
+  worker.md, the hook, and SKILL.md.
+
+**Do NOT use any alias.** The following are all wrong and silently lose
+your candidates from the promotion path:
+
+- "Tier 3 claims"
+- "Tier 3 observations"
+- "Tier 3 promotion"
+- "Tier 3 promotions"
+- "Tier-3 candidates" (hyphen)
+- "tier 3 candidates" (lowercase)
+
+If the section is absent or empty, no candidates are promoted — that is
+the common case and the correct outcome when nothing reusable surfaced.
+Emission-time classification (Tier 2 during the task, Tier 3 candidates
+at report time) is what keeps the commons from drifting; promoting
+every worker observation would silently pollute it.
 
 ## Specialized Task Types
 

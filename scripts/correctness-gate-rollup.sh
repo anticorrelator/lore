@@ -197,6 +197,7 @@ import json, os
 print(json.dumps({
     "schema_version":      "1",
     "kind":                "scored",
+    "tier":                "template",
     "calibration_state":   os.environ["CALIBRATION_STATE_ENV"],
     "template_id":         os.environ["TEMPLATE_ID_ENV"],
     "template_version":    os.environ["TEMPLATE_VERSION_ENV"],

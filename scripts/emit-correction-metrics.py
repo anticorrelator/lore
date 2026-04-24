@@ -140,6 +140,7 @@ def main() -> None:
         row = {
             "schema_version": "1",
             "kind": "telemetry",
+            "tier": "telemetry",
             "calibration_state": "pre-calibration",
             "metric": "correction_rate",
             "scale": scale,
@@ -160,6 +161,7 @@ def main() -> None:
         row = {
             "schema_version": "1",
             "kind": "telemetry",
+            "tier": "telemetry",
             "calibration_state": "pre-calibration",
             "metric": "precedent_rate",
             "scale_id": scale,

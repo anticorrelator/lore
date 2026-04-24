@@ -50,6 +50,7 @@ def main() -> None:
         row = {
             "schema_version": "1",
             "kind": "telemetry",
+            "tier": "telemetry",
             "metric": "scale_drift_rate",
             "calibration_state": "pre-calibration",
             "role": role,

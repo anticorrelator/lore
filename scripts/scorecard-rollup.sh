@@ -18,7 +18,7 @@
 #       "template_version": "<hash|null>",
 #       "template_id": "<id|null>",
 #       "metric": "<name|null>",
-#       "kind": "scored|telemetry|mixed",
+#       "kind": "scored|telemetry|consumption-contradiction|mixed",
 #       "calibration_states": ["calibrated", ...],
 #       "sample_count": N,             # number of rows aggregated
 #       "sample_size_total": N,        # sum of row.sample_size (0 if absent)
@@ -136,7 +136,7 @@ validate_row() {
   jq -r '
     if (type != "object") then "row is not a JSON object"
     elif (has("schema_version") | not) or (.schema_version == null) then "missing required field: schema_version"
-    elif (.kind != "scored" and .kind != "telemetry") then "invalid or missing kind (must be scored|telemetry)"
+    elif (.kind != "scored" and .kind != "telemetry" and .kind != "consumption-contradiction") then "invalid or missing kind (must be scored|telemetry|consumption-contradiction)"
     elif (.calibration_state != "calibrated" and .calibration_state != "pre-calibration" and .calibration_state != "unknown") then "invalid or missing calibration_state"
     else "ok"
     end
@@ -168,7 +168,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done < "$ROWS_FILE"
 
 # --- Aggregate with jq over parseable-only rows ---
-# Valid rows: require schema_version + kind ∈ {scored,telemetry} + calibration_state ∈ {calibrated,pre-calibration,unknown}
+# Valid rows: require schema_version + kind ∈ {scored,telemetry,consumption-contradiction} + calibration_state ∈ {calibrated,pre-calibration,unknown}
 # Grouping key: (template_version, template_id, metric)
 # For each group: sample_count, sample_size_total (sum of row.sample_size|0), value stats (only numeric .value),
 #                 window min/max (string compare on ISO-8601 is correct), calibration_states set, kind or "mixed".
@@ -177,7 +177,7 @@ SUMMARIES_JSON=$(jq -s '
     (type == "object")
     and has("schema_version")
     and (.schema_version != null)
-    and (.kind == "scored" or .kind == "telemetry")
+    and (.kind == "scored" or .kind == "telemetry" or .kind == "consumption-contradiction")
     and (.calibration_state == "calibrated" or .calibration_state == "pre-calibration" or .calibration_state == "unknown");
 
   def numeric_or_null:

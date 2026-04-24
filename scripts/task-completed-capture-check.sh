@@ -15,6 +15,18 @@
 #   silently let empty observations through — the hard-check converts that failure mode into
 #   an explicit blocked-exit with a lead-visible verdict path.
 #
+# Tier 2 / Tier 3 section shape-check (implement-rewrite, task #4):
+#   Worker reports MAY carry additional sections produced by the extended worker.md:
+#     **Tier 2 evidence:**      list of claim_id strings — already validated at write-time
+#                                by evidence-append.sh; hook only checks list-shape
+#     **Tier 3 candidates:**    optional YAML list of promotion candidates; each entry must
+#                                carry claim, why_future_agent_cares, falsifier, and a
+#                                non-empty source_artifact_ids array
+#   Hook is a gate, not a sole-writer: validates section SHAPE only. Claim content is
+#   sole-writer-validated by evidence-append.sh (Tier 2) and lore-promote.sh (Tier 3).
+#   The researcher **Assertions:** path is unchanged — tier-section checks apply to
+#   worker (general-purpose) reports only.
+#
 # Backwards-compat gate (task #23):
 #   Hard-validation only FIRES when the report carries a `template_version` line —
 #   a marker that the producing agent template has been rebuilt against F0 Phase 6 and
@@ -135,6 +147,23 @@ validate_structured_report() {
   return 1
 }
 
+# validate_tier_sections — shape-check optional **Tier 2 evidence:** and
+# **Tier 3 candidates:** sections (implement-rewrite task #4). Sole-writer
+# discipline: the hook verifies section structure only; claim content is
+# validated at write-time by evidence-append.sh (Tier 2) and lore-promote.sh
+# (Tier 3). Both sections absent → pass. If a section is present but malformed,
+# sets FAIL_REASON and returns 1.
+validate_tier_sections() {
+  local verdict
+  verdict=$(printf '%s' "$TASK_DESC" | python3 "$SCRIPT_DIR/validate-tier-sections.py" 2>&1) || true
+
+  if [[ "${verdict}" == "PASS" ]]; then
+    return 0
+  fi
+  FAIL_REASON="${verdict#FAIL: }"
+  return 1
+}
+
 # Enforce required sections based on agent type
 # Explore → researcher: require **Assertions:** with ≥1 structured entry OR escalation
 # general-purpose → worker: require **Observations:** with ≥1 structured entry OR escalation
@@ -165,14 +194,20 @@ case "$AGENT_TYPE" in
     exit 2
     ;;
   general-purpose)
-    # Worker agents: hard-validate Observations.
-    if validate_structured_report "Observations"; then
-      exit 0
+    # Worker agents: hard-validate Observations, then shape-check optional
+    # Tier 2 evidence / Tier 3 candidates sections when present.
+    if ! validate_structured_report "Observations"; then
+      echo "Update the task description before marking complete." >&2
+      echo "Required: ≥1 structured observation under **Observations:** with all of {claim, file, line_range, falsifier, significance} (significance ∈ {low, medium, high}), OR a well-formed escalation verdict {escalation: \"task-too-trivial-for-solo-decomposition\", rationale: \"<one-sentence reason>\"}." >&2
+      echo "Validation failure: $FAIL_REASON" >&2
+      exit 2
     fi
-    echo "Update the task description before marking complete." >&2
-    echo "Required: ≥1 structured observation under **Observations:** with all of {claim, file, line_range, falsifier, significance} (significance ∈ {low, medium, high}), OR a well-formed escalation verdict {escalation: \"task-too-trivial-for-solo-decomposition\", rationale: \"<one-sentence reason>\"}." >&2
-    echo "Validation failure: $FAIL_REASON" >&2
-    exit 2
+    if ! validate_tier_sections; then
+      echo "Update the task description before marking complete." >&2
+      echo "Tier section shape-check failed: $FAIL_REASON" >&2
+      exit 2
+    fi
+    exit 0
     ;;
   team-lead)
     # Team leads have no structural requirements.
@@ -180,12 +215,17 @@ case "$AGENT_TYPE" in
     ;;
   *)
     # Unknown or empty agent type — apply worker-style hard-validation as default.
-    if validate_structured_report "Observations"; then
-      exit 0
+    if ! validate_structured_report "Observations"; then
+      echo "Update the task description before marking complete." >&2
+      echo "Required: ≥1 structured observation under **Observations:** with all of {claim, file, line_range, falsifier, significance} (significance ∈ {low, medium, high}), OR a well-formed escalation verdict {escalation: \"task-too-trivial-for-solo-decomposition\", rationale: \"<one-sentence reason>\"}." >&2
+      echo "Validation failure: $FAIL_REASON" >&2
+      exit 2
     fi
-    echo "Update the task description before marking complete." >&2
-    echo "Required: ≥1 structured observation under **Observations:** with all of {claim, file, line_range, falsifier, significance} (significance ∈ {low, medium, high}), OR a well-formed escalation verdict {escalation: \"task-too-trivial-for-solo-decomposition\", rationale: \"<one-sentence reason>\"}." >&2
-    echo "Validation failure: $FAIL_REASON" >&2
-    exit 2
+    if ! validate_tier_sections; then
+      echo "Update the task description before marking complete." >&2
+      echo "Tier section shape-check failed: $FAIL_REASON" >&2
+      exit 2
+    fi
+    exit 0
     ;;
 esac

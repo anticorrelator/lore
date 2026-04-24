@@ -220,6 +220,7 @@ route_id, template_version, role, outcome, work_item, ts = sys.argv[1:7]
 row = {
     "schema_version": "1",
     "kind": "telemetry",
+    "tier": "telemetry",
     "calibration_state": "pre-calibration",
     "metric": "route_precision",
     "template_id": template_version if template_version else None,

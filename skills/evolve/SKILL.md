@@ -38,7 +38,7 @@ role=$(bash -c 'source ~/.lore/scripts/lib.sh; resolve_role')
 
 Task-54 moves hard rejection of maintainer-only verbs up to the `cli/lore` dispatch layer, so by the time a non-maintainer reaches this skill, the flow is already contributor-only. This section documents the intent; the CLI is the enforcement.
 
-## Step 1: Resolve Knowledge Directory
+### Step 1: Resolve Knowledge Directory
 
 ```bash
 lore resolve
@@ -67,7 +67,7 @@ bash ~/.lore/scripts/maintainer-preflight.sh \
 
 Surface any warning to the operator before proceeding. Do not proceed to Step 2 if a push-path warning appears; confirm the operator wants to continue despite the warning.
 
-## Step 2: Find the Last /evolve Run
+### Step 2: Find the Last /evolve Run
 
 Determine the cutoff date for suggestions to review. Only suggestions logged *after* the last `/evolve` run are shown — earlier suggestions have already been reviewed.
 
@@ -86,7 +86,7 @@ Report:
 [evolve] Checking for suggestions since: <SINCE or "all time">
 ```
 
-## Step 3: Load Pending Suggestions
+### Step 3: Load Pending Suggestions
 
 Read all staged evolution suggestions:
 
@@ -112,7 +112,7 @@ Report the count:
 [evolve] Found N suggestions (M from retro, K from self-test)
 ```
 
-## Step 4: Parse and Group Suggestions
+### Step 4: Parse and Group Suggestions
 
 Parse each observation string using the structured fields:
 - **Target** — the file to edit (e.g., `skills/retro/SKILL.md`, `skills/retro/failure-modes.md`, `skills/self-test/SKILL.md`)
@@ -125,11 +125,11 @@ Group suggestions by **Target**, then by **Change type** within each target.
 
 Also extract metadata from the journal entry itself: timestamp, work-item (if any), source role.
 
-## Step 5: Scorecard citation gate (evidence filter)
+### Step 5: Scorecard citation gate (evidence filter)
 
-Template-mutating edits require a **scored** row citation. Apply this gate
-*before* presenting any suggestion in Step 6. Suggestions that fail the gate
-are recorded as no-ops, not shown to the user.
+Template-mutating edits require evidence that clears the gate. Apply this step
+*before* presenting any suggestion in Step 6. Suggestions that fail all gate
+paths are recorded as no-ops, not shown to the user.
 
 **Scope — which suggestions the gate applies to.** Any suggestion whose
 target file governs a template (skill bodies, worker prompts, agent files,
@@ -150,46 +150,81 @@ template edits applied`.
 and later carry this field; older entries without it are treated as
 **not** degraded. This set is used in the per-suggestion gate below.
 
-**Per-suggestion gate.** For each candidate suggestion:
+**Load consumption-contradiction evidence.** For each work item in the
+recent window (matching `SINCE`), read
+`$KDIR/_work/<slug>/consumption-contradictions.jsonl` and collect rows with
+`status: verified`. These are the claim-retraction gate inputs.
 
-1. **Resolve supporting rows.** The suggestion's `Evidence` field (or
-   linked retro/self-test finding) must identify at least one concrete row.
-   A supporting row is one where:
-   - `kind == "scored"` (telemetry rows do not support template edits)
-   - `calibration_state == "calibrated"` (pre-calibration rows may be
-     *displayed* in the evidence block for transparency but do not satisfy
-     the gate; `unknown` is always excluded)
-   - `template_version` is present in `template-registry.json`
-     (unregistered hashes render as `unregistered:<hash>` and carry no
-     weight; exclude from gate-satisfaction)
-   - A specific `metric` name and `sample_size` are cited in the
-     suggestion body — generic "the scorecard showed X" is insufficient
-   - The row's retro window (identified by its `window_start`/`window_end`
-     and/or associated retro entry) is **not** in the set of
-     pipeline-degraded windows loaded above. Rows from a
-     `pipeline-degraded` window are non-evidentiary and do not support
-     template mutation regardless of their cell values.
-2. **If no row satisfies (1), no-op.** Record the suggestion in `no_op`
-   with reason `no_scored_row` (or `telemetry_only` if supporting evidence
-   exists but is all `kind == "telemetry"`, `pre_calibration_only`,
-   `unregistered_template_only`, `pipeline_degraded_window_only`, as
-   applicable). Do **not** present it to the user for approval.
-   Telemetry-only evidence produces a no-op for template mutation — it
-   never becomes a suggestion. Evidence from a pipeline-degraded window
-   likewise produces a no-op; the retro window's settlement pipeline was
-   not healthy enough for its cells to drive template evolution.
-3. **If at least one row satisfies (1),** attach the citation (row's
-   `template_id`, `template_version`, `metric`, `value`, `sample_size`,
-   `window_start`/`window_end`) to the suggestion and carry it forward to
-   Step 6.
+**Never-eligible rows (excluded from all gate paths).** Before evaluating
+any gate path, partition `rows.jsonl` and exclude:
+- `tier: task-evidence` — task-local claim quality, not template behavior
+- `tier: reusable` — promotion quality, not template behavior
+- `tier: telemetry` — P2.3-16 anti-coupling invariant; includes missing-tier legacy rows (rows without a `tier` field treated as `tier: telemetry`)
+- Any row from a `pipeline-degraded` window
+
+**Evidence-class matrix.** Three gate paths exist. Route each suggestion to
+the path matching its `change_type`:
+
+| `change_type` | Gate path | Required evidence |
+|---|---|---|
+| Any template-behavior change (default) | Primary | `tier: template + kind: scored + calibrated + non-degraded` |
+| `doctrine-correction` | Secondary | `tier: correction + kind: scored + calibrated + non-degraded` |
+| `claim-retraction` / `falsified-doctrine` | Claim-retraction | `kind: consumption-contradiction + status: verified + non-degraded` |
+
+**Primary gate** (`change_type` not `doctrine-correction`/`claim-retraction`/`falsified-doctrine`):
+
+A supporting row must satisfy ALL:
+1. `tier == "template"` (rows from rollup scripts post-migration)
+2. `kind == "scored"`
+3. `calibration_state == "calibrated"` (pre-calibration rows may be *displayed* in the evidence block for transparency but do not satisfy the gate; `unknown` is always excluded)
+4. `template_version` is present in `template-registry.json` (unregistered hashes render as `unregistered:<hash>` and carry no weight)
+5. A specific `metric` name and `sample_size` are cited in the suggestion body
+6. Row's retro window is **not** pipeline-degraded
+
+If no row satisfies (1)–(6) → `no_op` with reason `no_eligible_template_row`
+(or `telemetry_only`, `pre_calibration_only`, `unregistered_template_only`,
+`pipeline_degraded_window_only`, `wrong_tier` as applicable).
+
+**Secondary gate** (`change_type: "doctrine-correction"`):
+
+A supporting row must satisfy ALL:
+1. `tier == "correction"`
+2. `kind == "scored"`
+3. `calibration_state == "calibrated"` (or `pre-calibration` with explicit caveat noted in citation)
+4. Row's retro window is **not** pipeline-degraded
+5. Sample-size minimum is half the primary gate minimum (correction rows reflect targeted interventions)
+
+If no row satisfies → `no_op` with reason `no_eligible_correction_row`.
+
+**Claim-retraction gate** (`change_type: "claim-retraction"` or `"falsified-doctrine"`):
+
+1. At least one `consumption-contradictions.jsonl` row exists with `status: verified` for the relevant commons entry
+2. The row's originating window is **not** pipeline-degraded
+3. No sample-size minimum — a single verified contradiction is sufficient
+
+If no verified contradiction row exists → `no_op` with reason `no_verified_contradiction`.
+
+**Attach citation.** For suggestions that clear the primary or secondary gate:
+
+```
+Citation: kind=scored | tier=<tier> | template=<template_id>@<template_version>
+          metric=<metric> | value=<value> | sample_size=<n>
+          window=<window_start>..<window_end>
+```
+
+For claim-retraction, attach the contradiction ID:
+```
+Citation: kind=consumption-contradiction | contradiction_id=<id>
+          knowledge_path=<path> | status=verified
+```
 
 Report the gate outcome before Step 6:
 
 ```
-[evolve] Gate: N suggestions — K cleared (scored-row cited), J no-op (reasons: <breakdown>)
+[evolve] Gate: N suggestions — K cleared (M primary, C correction, R retraction), J no-op (reasons: <breakdown>)
 ```
 
-**Sole-writer invariant.** `/evolve` does not write to `rows.jsonl`.
+**Sole-writer invariant (CC-04).** `/evolve` does not write to `rows.jsonl`.
 `scripts/scorecard-append.sh` is the only sanctioned writer. If this skill's
 suggestions would result in a row being recorded (e.g., a post-application
 telemetry ping), route through that script — do not append directly.
@@ -223,11 +258,20 @@ Report:
 [evolve] Sunset check: K approved (R removals exempt, A additions with sunset, M modifications clarifying), J no-op (missing_sunset: J)
 ```
 
+**Immediate sunset trigger (consumption-contradiction).** A verified consumption-contradiction against a claim that was *added* via a prior `/evolve` run triggers immediate sunset review for that addition, regardless of its sunset window horizon. Specifically:
+
+1. When loading consumption-contradiction evidence in Step 5 (claim-retraction gate), cross-reference each `contradiction_id` against the current file's `/evolve`-applied additions by matching `knowledge_path` to the addition's target.
+2. If any gate-cleared claim-retraction row targets an existing `/evolve` addition, mark that addition for immediate sunset review — do not wait for the stated metric threshold or time horizon to lapse.
+3. Present the addition and its contradiction citation to the maintainer in Step 6 under a dedicated section: `[sunset-triggered] <addition summary> — contradicted by <contradiction_id>`.
+4. If the maintainer approves removal in Step 6, process as a removal in Step 7 (no sunset clause required for the removal itself — see asymmetric evidence rule above).
+
+This rule closes the feedback loop between the claim-retraction gate and the subtraction affordance: a contradiction that clears the gate should not wait a full measurement window before the addition it falsifies is reviewed.
+
 **Why this lives on the maintainer default path rather than just `--pooled`.** Task-56's plan bullet places the sunset-clause requirement on the *default* maintainer path — not only on pooled aggregate runs — so a single-contributor edit still carries the same subtraction affordance. The maintainer working from local scorecards bears the same bloat risk as the maintainer working from pooled evidence; the sunset clause is evidence-coupled irrespective of input source.
 
 **Cross-reference.** The `--pooled` mode in the "Maintainer path" section restates this requirement in its step-4 rules (see `Mode: /evolve --pooled <aggregate-path>` → "Asymmetric evidence rules"). That restatement stays aligned with Step 5a; any edit here must also update the pooled-mode rules.
 
-## Step 6: Present for Review
+### Step 6: Present for Review
 
 For each target file, present gate-cleared suggestions grouped by change
 type. One at a time, ask the user to approve or reject each suggestion.
@@ -262,7 +306,22 @@ Track: `approved = []`, `rejected = []`, `skipped = []`, `no_op = []`
 
 If the user approves multiple suggestions for the same section of the same file, note that they may conflict — present a brief warning before applying.
 
-## Step 7: Apply Approved Suggestions
+**Sunset-triggered additions.** If Step 5a marked any existing `/evolve` addition for immediate sunset review (consumption-contradiction immediate trigger), present these in a dedicated block before the regular suggestion queue:
+
+```
+═══════════════════════════════════════════════
+SUNSET-TRIGGERED REVIEW
+═══════════════════════════════════════════════
+[sunset-triggered] <addition summary>
+Contradicted by: contradiction_id=<id> | knowledge_path=<path>
+Original addition from: <evolve run date>
+
+Remove this addition? [y/n/skip]
+```
+
+Approved removals enter `approved` with `change_type: "removal"`. Skipped sunset items enter `skipped`. These are processed in Step 7 alongside normal approved suggestions.
+
+### Step 7: Apply Approved Suggestions
 
 For each approved suggestion, apply the change as a direct file edit.
 
@@ -291,7 +350,7 @@ Store these as `pre_versions[<target>] = <hash>`. The Step 7.5 bump step
 needs the pre-edit hash for the before→after pair, and this is the last
 moment the pre-edit file contents are on disk.
 
-## Step 7.5: Bump Template Versions and Register
+### Step 7.5: Bump Template Versions and Register
 
 Template-mutating edits must bump the producer's `template_version` and
 register the new pair so next-cycle scorecard rows against this template
@@ -345,7 +404,7 @@ suggest → apply → measure loop.
 *versions*; it does not write to `rows.jsonl`. `scripts/scorecard-append.sh`
 remains the sole writer of scorecard rows.
 
-## Step 8: Write Outcome Journal Entry
+### Step 8: Write Outcome Journal Entry
 
 After all approved suggestions have been applied (or if the user quit early), write a summary entry to the journal:
 
@@ -366,7 +425,7 @@ This entry establishes the cutoff for the next `/evolve` run.
 
 If zero suggestions were approved, still write the entry — it records that the review happened and advances the cutoff.
 
-## Step 9: Report
+### Step 9: Report
 
 ```
 [evolve] Done
@@ -417,10 +476,22 @@ and report — runs identically.
 2. **Load the aggregate.** Argument is a path produced by
    `lore retro aggregate` (JSON shape: `{generated_at, source_bundles,
    contributors, groups: [{template_id, template_version, metric, tag,
-   total_n, contributor_count, row_weighted_mean,
+   tier, total_n, contributor_count, row_weighted_mean,
    contributor_balanced_mean, by_contributor}, ...]}`).
-3. **Filter groups by tag.** Only `tag == "convergent"` groups drive
-   template edits. `idiosyncratic` groups are listed separately under an
+   The `tier` field is required in the aggregate output — `lore retro aggregate`
+   must propagate `tier` from its source `rows.jsonl` rows so that `--pooled`
+   filtering is tier-aware. Aggregate files without a `tier` field on each group
+   are treated as `tier: telemetry` (missing-tier legacy policy) and are
+   excluded from both pools below.
+3. **Filter groups by tag and tier.** Only `tag == "convergent"` groups drive
+   template edits. Within convergent groups, apply tier-based routing:
+   - **Primary pool:** `tier == "template"` — these drive template-behavior mutations
+     (same evidence class as the Step 5 primary gate).
+   - **Correction pool:** `tier == "correction"` — these drive doctrine-correction edits
+     (same evidence class as the Step 5 secondary gate; half sample-size minimum).
+   - **Excluded tiers:** `tier: task-evidence`, `tier: reusable`, `tier: telemetry`,
+     and missing-tier groups are never eligible — not even under convergent tag.
+   `idiosyncratic` groups (regardless of tier) are listed separately under an
    "ideas queue" — the maintainer may investigate via deferred canary
    but they do not auto-generate suggestions. `mixed` and `insufficient`
    are reported as informational only.
@@ -463,7 +534,7 @@ and report — runs identically.
    edits; it's the substitute for peer-visible retros in the
    maintainer-private-pool topology.
 
-Report line adds: `Pooled: <aggregate-path> (N convergent / M idiosyncratic / K mixed / J insufficient)`.
+Report line adds: `Pooled: <aggregate-path> (N convergent [P primary/C correction] / M idiosyncratic / K mixed / J insufficient)`.
 
 ### Mode: `/evolve --shrink`
 

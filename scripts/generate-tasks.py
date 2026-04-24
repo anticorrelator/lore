@@ -702,6 +702,14 @@ def generate_tasks_from_plan(
     strategy = extract_strategy(plan_content)
 
     # Parse design decisions for propagation to workers
+    _dd_section_re = re.compile(r"^## Design Decisions\s*$", re.MULTILINE)
+    design_decisions_present = bool(_dd_section_re.search(plan_content))
+    if not design_decisions_present:
+        print(
+            "[generate-tasks] warning: plan.md missing ## Design Decisions"
+            " — worker tasks will not receive design-decision context",
+            file=sys.stderr,
+        )
     all_design_decisions = parse_design_decisions(plan_content)
 
     # Parse phases
@@ -969,6 +977,7 @@ def generate_tasks_from_plan(
         "plan_checksum": plan_checksum,
         "generated_at": generated_at,
         "recommended_workers": recommended_workers,
+        "design_decisions_present": design_decisions_present,
         "phases": phases,
     }
 

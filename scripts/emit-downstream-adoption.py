@@ -156,6 +156,7 @@ def main() -> None:
         row = {
             "schema_version": "1",
             "kind": "telemetry",
+            "tier": "telemetry",
             "calibration_state": "pre-calibration",
             "metric": "downstream_adoption_rate",
             "entry_id": path,

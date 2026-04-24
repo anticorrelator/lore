@@ -225,6 +225,7 @@ emit_row() {
   local template_id="$4"
   local template_version="$5"
   local kind="$6"
+  local tier="$7"
   local row
   row=$(ARTIFACT_ID_ENV="$ARTIFACT_ID" \
         TEMPLATE_ID_ENV="$template_id" \
@@ -236,11 +237,13 @@ emit_row() {
         WINDOW_END_ENV="$WINDOW_END" \
         CALIBRATION_STATE_ENV="$CALIBRATION_STATE" \
         KIND_ENV="$kind" \
+        TIER_ENV="$tier" \
         python3 -c '
 import json, os
 print(json.dumps({
     "schema_version":      "1",
     "kind":                os.environ["KIND_ENV"],
+    "tier":                os.environ["TIER_ENV"],
     "calibration_state":   os.environ["CALIBRATION_STATE_ENV"],
     "template_id":         os.environ["TEMPLATE_ID_ENV"],
     "template_version":    os.environ["TEMPLATE_VERSION_ENV"],
@@ -260,17 +263,17 @@ OMISSION_RATE=$(printf '%s' "$METRICS" | python3 -c 'import json,sys; print(json
 COVERAGE_QUALITY=$(printf '%s' "$METRICS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["coverage_quality"])')
 GROUNDING_FAILURE_RATE=$(printf '%s' "$METRICS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["grounding_failure_rate"])')
 
-# omission_rate → producer template, kind=scored
+# omission_rate → producer template, kind=scored, tier=template
 emit_row "omission_rate"          "$OMISSION_RATE"          "$TOTAL" \
-         "$PRODUCER_TEMPLATE_ID"  "$PRODUCER_TEMPLATE_VERSION" "scored"
+         "$PRODUCER_TEMPLATE_ID"  "$PRODUCER_TEMPLATE_VERSION" "scored" "template"
 
-# coverage_quality → curator template, kind=scored
+# coverage_quality → curator template, kind=scored, tier=template
 emit_row "coverage_quality"       "$COVERAGE_QUALITY"       "$TOTAL" \
-         "$CURATOR_TEMPLATE_ID"   "$CURATOR_TEMPLATE_VERSION" "scored"
+         "$CURATOR_TEMPLATE_ID"   "$CURATOR_TEMPLATE_VERSION" "scored" "template"
 
-# grounding_failure_rate → reverse-auditor template, kind=telemetry
+# grounding_failure_rate → reverse-auditor template, kind=telemetry, tier=telemetry
 emit_row "grounding_failure_rate" "$GROUNDING_FAILURE_RATE" "$TOTAL" \
-         "$REVERSE_AUDITOR_TEMPLATE_ID" "$REVERSE_AUDITOR_TEMPLATE_VERSION" "telemetry"
+         "$REVERSE_AUDITOR_TEMPLATE_ID" "$REVERSE_AUDITOR_TEMPLATE_VERSION" "telemetry" "telemetry"
 
 echo "[rollup] Appended 3 rows: omission_rate=$OMISSION_RATE coverage_quality=$COVERAGE_QUALITY grounding_failure_rate=$GROUNDING_FAILURE_RATE (n=$TOTAL)"
 printf '%s\n' "$METRICS"
