@@ -68,7 +68,11 @@ When `_pending_captures/` directory exists in the knowledge store at session sta
    **Low-context candidates:** If the candidate excerpt is too sparse to evaluate the gate confidently, read the **Related files:** field and skim those files before deciding. Do not reject a candidate solely because the excerpt is thin — the stop hook pre-filter has already established baseline relevance. Rejection requires a positive reason (fails Reusable, Non-obvious, Stable, or High confidence), not an absence of evidence.
 
    **Staleness branch:** when the "non-obvious" check reveals a similar entry may already exist, run `lore search "<key terms>" --type knowledge --limit 3`, read the top match, and branch: (a) same claim — skip the candidate, (b) divergent (contradicts or supersedes) — edit the existing entry file in-place to reflect the new insight, update its `learned` date to today, then skip the new capture. Note: `[staleness] Updated "<existing title>" — superseded by new finding`.
-3. For qualifying insights, run `lore capture` with appropriate parameters. **Pass `--related-files`** using the `**Related files:**` field from the candidate file (skip if the field is `none`):
+3. For qualifying insights, determine the emission path before running the capture command:
+   - **Tier 3 path (`lore promote`):** use when ALL four predicates are true: (a) the candidate is backed by a Tier 2 evidence artifact (worker/researcher observation from `execution-log.md` or `plan.md`), (b) it can be expressed as a `validate-tier3.sh`-accepted row with `claim`, `why_future_agent_cares`, `falsifier`, and `source_artifact_ids`, (c) `source_artifact_ids` is non-empty, and (d) the claim is reusable outside the current work item.
+   - **Tier 1 path (`lore capture`):** everything else — interactive candidates, candidates without Tier 2 backing, and any candidate that fails any of the four Tier 3 predicates.
+
+   **Pass `--related-files`** using the `**Related files:**` field from the candidate file (skip if the field is `none`):
    ```bash
    lore capture --insight "..." --context "..." --category "..." --confidence "high" --related-files "<value from Related files field>"
    ```
