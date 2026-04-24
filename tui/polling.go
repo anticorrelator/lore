@@ -162,9 +162,11 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 		cmds = append(cmds, checkPlanMtime(m.config.WorkDir, slug))
 		cmds = append(cmds, checkDetailMtime(m.config.WorkDir, slug))
 	}
-	// Poll follow-up index and current follow-up detail when in stateFollowUps to detect CLI mutations.
+	// Always poll the follow-up index so the tab indicator reflects external
+	// mutations even while the user is on the work tab.
+	cmds = append(cmds, checkFollowupIndexMtime(m.config.KnowledgeDir))
+	// Poll the current follow-up detail only while viewing it.
 	if m.state == stateFollowUps {
-		cmds = append(cmds, checkFollowupIndexMtime(m.config.KnowledgeDir))
 		if id := m.followupList.CurrentID(); id != "" {
 			cmds = append(cmds, checkFollowupDetailMtime(m.config.KnowledgeDir, id))
 		}
