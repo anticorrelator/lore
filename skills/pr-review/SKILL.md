@@ -246,10 +246,22 @@ Query the knowledge store for each finding:
 lore search "<topic>" --type knowledge --json --limit 3
 ```
 
-Apply the voice guide when writing finding bodies:
-```bash
-cat ~/.lore/claude-md/review-protocol/review-voice.md
-```
+**Voice — hedge the inference, not the observed code fact.** Every finding is a hypothesis formed from incomplete information; frame it that way. A hedged observation that names the code precisely is more useful than a confident assertion that names nothing.
+
+- **State observed code facts directly** — the reviewer can see the code.
+  - Weak: "This might be storing the session token where it's readable."
+  - Strong: "`logRequest` writes `session.token` to the access log."
+- **Hedge impact claims with an explicit condition** — the reviewer cannot know whether the scenario applies.
+  - Weak: "This will cause a nil dereference and crash the server."
+  - Strong: "`session.user` is dereferenced here without a nil check — if this handler is reachable before authentication completes, the nil dereference panics."
+- **Lead with the observation, not the hedge.** Put the code fact first, the uncertainty qualifier second.
+- **Use impersonal constructions.** Describe the code, not the author ("The handler dereferences…", not "You forgot to check…").
+- **Fix suggestions are secondary and optional.** The default posture is to surface the issue and stop — the author chooses between a small local fix, a broader refactor, or a deeper redesign. Include a fix only when non-obvious (non-local change, hard to characterize without showing a resolution, or unusual constraints). When included: place it **after** impact and evidence (never lead with it), frame it as one option ("One approach: …"), and keep the scope open so the finding can still motivate a broader change.
+- **Vocabulary to avoid:**
+  - Overstatement of reviewer confidence: "this will crash" / "this is wrong" / "this is a bug" / "definitely" → name the specific condition ("this panics if `x` is nil", "this deviates from the contract in…").
+  - Hollow hedges on observations: "seems like" / "might be" / "I think" / "could potentially" → state the code fact; hedge the *impact*, not the observation.
+
+Full voice guide (optional deeper reference): `~/.lore/claude-md/review-protocol/review-voice.md`.
 
 Report back with your findings JSON when complete.
 ```
@@ -480,10 +492,16 @@ The test: if the PR author asks "why does this matter?", the finding must answer
 
 **6d-ii. Strip internal protocol language for external output.** Remove `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, and compound markers from finding bodies. These are internal analytical scaffolding — the author should see the grounding *content* (the concrete impact claim) woven into the finding body, not protocol headers.
 
-Apply the voice guide when writing external bodies:
-```bash
-cat ~/.lore/claude-md/review-protocol/review-voice.md
-```
+**Voice — hedge the inference, not the observed code fact.** Reviewers cannot know the full system context; every external body should read as a grounded hypothesis, not a verdict.
+
+- **State observed code facts directly.** Weak: "This might be storing the token insecurely." Strong: "`logRequest` writes `session.token` to the access log."
+- **Hedge impact claims with an explicit condition.** Weak: "This will crash the server." Strong: "`session.user` is dereferenced without a nil check — if this handler is reachable before auth completes, it panics."
+- **Lead with the observation**, not the hedge. Code fact first, uncertainty qualifier second.
+- **Use impersonal constructions.** "The handler dereferences…", not "You forgot to check…".
+- **Fix suggestions are secondary.** Default to surfacing the issue and stopping. When a fix is included (non-obvious only), place it **after** impact and evidence, frame it as one option ("One approach: …"), and keep the scope open so the finding can motivate a broader redesign if appropriate. Never lead a comment body with a fix.
+- **Avoid overstated vocabulary** ("this will crash" / "this is wrong" / "this is a bug" / "definitely") — name the condition instead. **Avoid hollow hedges on observations** ("seems like" / "might be" / "I think" / "could potentially") — state the code fact; hedge the *impact*, not the observation.
+
+Full voice guide (optional deeper reference): `~/.lore/claude-md/review-protocol/review-voice.md`.
 
 After stripping and shaping, produce two variants of each finding body:
 

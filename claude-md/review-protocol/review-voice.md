@@ -130,9 +130,9 @@ Before (asserts the impact without grounding it):
 After (names the mechanism):
 > The `exp` claim is not validated in `verifyToken()` — the check at line 34 is only reached when `exp` is present, so absent-field tokens skip expiry entirely.
 
-**Fix suggestion — include only when the fix is non-obvious.**
+**Fix suggestion — include only when the fix is non-obvious, and keep it secondary.**
 
-The default posture is to identify the issue and stop. Fix suggestions foreclose author judgment and inflate body length when the fix is evident from the finding. Include a suggestion only when one of these conditions holds: the fix is non-local (requires changes outside the immediate diff), the problem is hard to characterize without showing a resolution, or there are unusual constraints the author may not see.
+The default posture is to identify the issue and stop. The role of the review is to surface the problem with enough precision that the author can choose the response — a small local fix, a broader refactor, or a deeper redesign. Fix suggestions foreclose that judgment and inflate body length when the fix is evident. Include a suggestion only when one of these conditions holds: the fix is non-local (requires changes outside the immediate diff), the problem is hard to characterize without showing a resolution, or there are unusual constraints the author may not see.
 
 Before (prescribes the obvious fix):
 > Add a nil check before dereferencing `user`.
@@ -140,7 +140,11 @@ Before (prescribes the obvious fix):
 After (identifies the issue, stops — fix is self-evident):
 > `session.user` is dereferenced at line 58 without a nil check — if this handler is reachable before authentication completes, the nil dereference panics.
 
-When a suggestion is warranted, frame it as an option, not a directive:
+When a suggestion is warranted:
+- **Place it last** — after impact and evidence. Never lead a finding with a fix.
+- **Frame it as one option** ("One approach: …"), not a directive.
+- **Keep the scope open** — avoid language that commits the author to the smallest local patch if the finding could motivate a broader change.
+
 > One approach: validate `exp` presence before signature verification, so the failure is an explicit rejection rather than a silent skip.
 
 ---
