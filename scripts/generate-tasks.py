@@ -819,6 +819,47 @@ def generate_tasks_from_plan(
                     if not (text.startswith("<") and text.endswith(">")):
                         verif_lines.append(stripped)
 
+        # Extract Retrieval directive block (key: value bullets after **Retrieval directive:**)
+        ret_dir_match = re.search(
+            r"^\*\*Retrieval directive:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
+            phase_content, re.MULTILINE
+        )
+        retrieval_directive: dict | None = None
+        if ret_dir_match:
+            seeds: list[str] = []
+            scale_set: list[str] = []
+            hop_budget: int = 1
+            filters: dict = {}
+            for line in ret_dir_match.group(1).splitlines():
+                stripped = line.strip()
+                if not stripped.startswith("- "):
+                    continue
+                text = stripped[2:].strip()
+                if ":" not in text:
+                    continue
+                raw_key, _, raw_val = text.partition(":")
+                key = raw_key.strip().lower().replace("-", "_")
+                val = raw_val.strip()
+                if key == "seeds":
+                    seeds = [s.strip() for s in val.split(",") if s.strip()]
+                elif key == "scale_set":
+                    scale_set = [s.strip() for s in val.split(",") if s.strip()]
+                elif key == "hop_budget":
+                    try:
+                        hop_budget = int(val)
+                    except ValueError:
+                        hop_budget = 1
+                elif key == "type":
+                    filters["type"] = val
+                elif key == "exclude_category":
+                    filters["exclude_category"] = val
+            retrieval_directive = {
+                "seeds": seeds,
+                "scale_set": scale_set,
+                "hop_budget": hop_budget,
+                "filters": filters,
+            }
+
         # Annotation quality warning: intent-based + annotation-only delivery
         annotation_warning = (
             not is_prescriptive
@@ -967,6 +1008,7 @@ def generate_tasks_from_plan(
             "files": files,
             "tasks": phase_tasks,
             "phase_cost_summary": phase_cost_summary,
+            "retrieval_directive": retrieval_directive,
         })
 
     # Compute recommended worker count from the assembled DAG

@@ -118,18 +118,44 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
 
 5. **Create tasks from the output:** Read the `lore work load-tasks` output once. For each `=== task-N ===` block, execute one `TaskCreate` call using the `subject`, `activeForm`, and `description` fields. Track the mapping of `task-N` IDs to actual TaskCreate return IDs, then call `TaskUpdate(addBlockedBy=[...])` for any task with a non-empty `blockedBy` field.
 
+6. **Build phase map** — after `lore work load-tasks` succeeds, read `tasks.json` directly to build an in-memory phase map indexed by 1-based phase number:
+   ```bash
+   python3 -c "
+   import json, sys
+   with open('$WORK_DIR/<slug>/tasks.json') as f:
+       data = json.load(f)
+   for p in data['phases']:
+       print(p['phase_number'], json.dumps(p.get('retrieval_directive')))
+   "
+   ```
+   Store the result as `$PHASE_MAP`: a mapping of `phase_number → {objective, files, retrieval_directive}`. This map is the authoritative source for per-phase retrieval directives consumed by Step 3.1.
+
+   If `tasks.json` is missing (fallback path from Step 2.4), run this step after the fallback generation completes.
+
 ### Step 3: Spawn agents
 
 **All tasks are executed by fresh worker agents.** The lead does not implement tasks directly — even if the task seems small or the lead already has relevant context. Fresh agents with injected knowledge context produce cleaner results than the lead's accumulated orchestration context.
 
-1. **Pre-fetch knowledge for worker prompts** — determine whether prefetch is needed:
+1. **Pre-fetch knowledge for worker prompts** — build `$PRIOR_KNOWLEDGE` by iterating over each phase in `$PHASE_MAP`. For every phase, apply the three-branch gate in priority order:
 
-   **If tasks lack knowledge context** (manually created tasks or plans without `**Knowledge context:**` blocks — no `## Prior Knowledge` section in task descriptions): run complementary prefetch using the task's file paths and phase objective:
+   **(a) Directive branch — retrieval_directive is non-null for this phase:**
+   Resolve the directive via `resolve-manifest.sh` before spawning any workers:
    ```bash
-   PRIOR_KNOWLEDGE=$(lore prefetch "<phase objective> <file paths from task>" --format prompt --limit 3 --scale-context worker)
+   PHASE_PK=$(bash ~/.lore/scripts/resolve-manifest.sh "<slug>" "<phase_number>" 2>/dev/null || true)
    ```
+   Append non-empty output under a `### Phase N: <phase_name>` heading into `$PRIOR_KNOWLEDGE`. A retrieval directive is authoritative over the other branches for its phase — do not also run prefetch or skip-check for that phase.
 
-   **If tasks have knowledge context** (task descriptions contain `## Prior Knowledge`): **skip prefetch.** The phase already embeds resolved knowledge — prefetching would duplicate or conflict with it.
+   **(b) Task-description branch — no directive, but task descriptions contain `## Prior Knowledge`:**
+   **Skip prefetch for this phase.** The phase already embeds resolved knowledge from annotation. Appending would duplicate or conflict.
+
+   **(c) Fallback branch — no directive AND no `## Prior Knowledge` in task descriptions:**
+   Run complementary prefetch using the phase's file paths and objective:
+   ```bash
+   PHASE_PK=$(lore prefetch "<phase objective> <file paths from task>" --format prompt --limit 3 --scale-context worker)
+   ```
+   Append non-empty output under a `### Phase N: <phase_name>` heading into `$PRIOR_KNOWLEDGE`.
+
+   **Concatenation rule:** accumulate the per-phase outputs (heading + content) into a single `$PRIOR_KNOWLEDGE` string separated by blank lines. Phases that produce no output (branch b skip, or branch a/c with zero results) contribute no heading. The final `$PRIOR_KNOWLEDGE` is injected into the `{{prior_knowledge}}` slot in `agents/worker.md` at spawn time (Step 3.6). Do not inject a partial-phase bundle — resolve all phases before spawning any worker.
 
 2. **Prepare advisory mixin (if advisors present)** — scan all phases in `plan.md` for `**Advisors:**` blocks. If any phase declares advisors:
 

@@ -99,6 +99,11 @@ def parse_retrieval_log(
                 for path in loaded:
                     if path:
                         citations_by_path[path] = citations_by_path.get(path, 0) + 1
+            elif event == "manifest_load":
+                opportunities += 1
+                for path in loaded:
+                    if path:
+                        citations_by_path[path] = citations_by_path.get(path, 0) + 1
             elif event == "search":
                 # Search events don't load entries directly — skip for opportunity count
                 pass

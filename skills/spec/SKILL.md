@@ -276,7 +276,7 @@ This evaluates the abstract plan. If WEAK or MISSING areas are identified, revis
 
 Draft concrete implementation sections on top of the approved abstract plan:
 
-1. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include `**Knowledge context:**`, optional `**Advisors:**`, optional `**Verification:**`, and optional `**Scope:**` blocks.
+1. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include `**Knowledge context:**`, optional `**Retrieval directive:**`, optional `**Advisors:**`, optional `**Verification:**`, and optional `**Scope:**` blocks.
 
    **Task consolidation rule:** Each checkbox = one meaningful unit of work. Consolidate sequential same-file edits. Tasks sharing a file target within a phase are chained sequentially by `generate-tasks.py` and can only use 1 worker. Cross-phase dependencies are file-based. After drafting phases, run `lore work regen-tasks <slug>` and review `phase_cost_summary` in `tasks.json`. Tasks >2x the phase `avg_per_task` should be split; tasks <0.5x can be merged with adjacent same-file tasks.
 
@@ -288,9 +288,26 @@ Draft concrete implementation sections on top of the approved abstract plan:
    ```
    Add relevant entries as `[[knowledge:...]]` backlinks with "— why relevant" annotations. Investigation findings are the primary source; concordance is a widener.
 
-3. **Open Questions** — anything investigations couldn't resolve.
+3. **Retrieval directive derivation** — after concordance widening, populate a `**Retrieval directive:**` block for each phase. The directive must be derivable from content already in the phase; no additional user input is required.
 
-4. Present the synthesized plan to the user for review.
+   **Seeds derivation (mandatory):** collect seeds from two sources — (a) each `[[knowledge:...]]` backlink in the phase's `**Knowledge context:**` block becomes a seed verbatim; (b) each file path in the phase's `**Files:**` line or list becomes a seed verbatim. Deduplicate. If the union is empty, emit `seeds:` as an empty bullet and note why (e.g., no backlinks and no file paths present).
+
+   **Defaults:** `hop_budget: 1`. Leave `scale_set:` empty (omit the bullet when no scale restriction is warranted). Omit `filters:` unless the phase has a narrow domain where type or category filtering adds value.
+
+   **Format:**
+   ```markdown
+   **Retrieval directive:**
+   - seeds: [[knowledge:path#heading]], path/to/file.py, ...
+   - hop_budget: 1
+   ```
+
+   **Omission rule:** if a phase has neither `**Knowledge context:**` backlinks nor `**Files:**` entries, omit the `**Retrieval directive:**` block and add a comment: `<!-- no directive: no backlinks or files to derive seeds from -->`.
+
+   **Position:** place `**Retrieval directive:**` immediately after `**Knowledge delivery:**` (or after `**Files:**` / `**Objective:**` when `**Knowledge delivery:**` is absent) and before `**Knowledge context:**`.
+
+4. **Open Questions** — anything investigations couldn't resolve.
+
+5. Present the synthesized plan to the user for review.
 
 ---
 
@@ -509,6 +526,16 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 - Output contract: <what the phase must produce without changing>
 **Task format:** prescriptive  <!-- optional — omit for default intent+constraints format -->
 **Knowledge delivery:** full  <!-- optional — omit for default annotation-only delivery -->
+**Retrieval directive:**
+<!-- Optional — omit when phase has no Knowledge context backlinks and no Files entries.
+     Seeds are derived from (a) [[knowledge:...]] backlinks in Knowledge context, and
+     (b) file paths in Files. Deduplication applied. hop_budget defaults to 1.
+     scale_set: leave empty unless phase has a narrow scale domain.
+     Consumed by /implement Step 3.1 branch (a) via resolve-manifest.sh → {{prior_knowledge}}. -->
+- seeds: [[knowledge:file#heading]], path/to/file.py
+- hop_budget: 1
+<!-- - scale_set: architectural, implementation  (optional; omit when not narrowing) -->
+<!-- - filters: type=knowledge, exclude_category=... (optional; omit when not filtering) -->
 **Knowledge context:**
 <!-- Each entry MUST include a "— why relevant" annotation after the backlink.
      Annotations are implementation-facing: tell the worker what to DO with the entry.
