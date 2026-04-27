@@ -13,18 +13,6 @@ For focused single-concern analysis, use individual lens skills directly (`/pr-c
 
 This skill does not modify source code. Findings are structured and can be posted to GitHub via `post-review.sh`.
 
-## Independence Gate — Do Not Read Self-Review Findings Before Step 8
-
-`/pr-review` is the **external** half of a tournament with `/pr-self-review`. The reconciliation in Step 8 treats this run as ground truth against which the self-review's `lens-findings.json` is scored (see `external_confirm_rate`, `external_contradict_rate`, `coverage_miss_rate` under Step 8's downstream notes).
-
-For that scoring to be meaningful, this run must enumerate findings **independently** — without anchoring on what the self-review already flagged. Reading the self-review `lens-findings.json` sidecar before synthesis collapses the tournament: the external pass will disproportionately confirm what it already saw and under-surface omissions, and the reconciliation metrics lose their information value.
-
-**Rule:** Do NOT read `$KDIR/_followups/*pr-self-review*/lens-findings.json` (or any self-review findings file for this PR) during Steps 1–5. That file is reserved for Step 8 tournament reconciliation, and `scripts/reconcile-reviews.sh` is the only sanctioned reader during a `/pr-review` run.
-
-Permitted in Steps 1–5: existing GitHub review comments from `fetch-pr-data.sh` (these are human-authored threads, not self-review output) and prior `/pr-review` work items for the same PR (Step 1c / Resuming section).
-
-The lens agents spawned in Step 3 inherit this rule. Do not include self-review findings — as prior knowledge, design signals, review-context notes, or hints — in any lens agent's task prompt.
-
 ## Step 1: Setup
 
 Argument provided: `$ARGUMENTS`
@@ -63,7 +51,7 @@ gh pr view <PR_NUMBER> --json files,title,body,author,commits,headRefOid
 From the fetched data, extract:
 - **Changed files** — full list with additions/deletions per file
 - **PR intent** — title, body, and commit messages
-- **Existing reviews** — from `fetch-pr-data.sh` grouped output. Filter out outdated threads (`isOutdated: true`). Note existing review concerns to avoid duplicate findings. "Existing reviews" here means **GitHub review comments authored by humans** — it does NOT include any `/pr-self-review` sidecar `lens-findings.json` for this PR. See the Independence Gate above: that sidecar is off-limits until Step 8.
+- **Existing reviews** — from `fetch-pr-data.sh` grouped output. Filter out outdated threads (`isOutdated: true`). Note existing review concerns to avoid duplicate findings.
 - **Diff stats** — total LOC changed (additions + deletions)
 
 ### 1d. Diff delivery for lens agents
@@ -153,8 +141,6 @@ Consider splitting the PR if feasible. Proceeding with full review.
 ## Step 3: Lens Review
 
 This step builds context for lens agents, spawns them, and collects results.
-
-**Independence reminder.** The review context (3a), lens prompts (3b), and ceremony dispatches (3b-ceremony) must be constructed from the diff, PR metadata, changed-file analysis, and knowledge store entries only. Do NOT include any content from `/pr-self-review` lens-findings sidecars in any lens agent's prompt — that data is tournament-reserved for Step 8. See the Independence Gate near the top of this skill.
 
 ### 3a. Build review brief
 
@@ -606,65 +592,6 @@ bash ~/.lore/scripts/create-followup.sh \
 ```
 /remember Holistic review of PR #<N> — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered (why the architecture is this way, what constraints drove decisions), cross-lens convergence patterns (areas where multiple lenses flagged the same concern), convention patterns observed across the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR, style opinions, lens-specific methodology notes. For every `lore capture` call, pass `--producer-role pr-review --protocol-slot Synthesis --work-item <slug>` (when a work item matches the PR).
 ```
-
-## Step 8: Tournament Reconciliation (automatic)
-
-**This step runs unconditionally after Step 7. It is part of the `/pr-review` skill contract, not a manual follow-up.** Reconciliation is the Phase 6 settlement primitive — external review and self-review are the two halves of a tournament, and the reconciliation stage programmatically tags their agreement/disagreement so `/retro` and `/evolve` can score the self-review template against ground truth supplied by this external pass.
-
-**Independence-gate release.** This is the first step in the skill where reading the `/pr-self-review` `lens-findings.json` sidecar is sanctioned. Steps 1–7 have deliberately avoided that file to preserve the tournament's independence — see the Independence Gate near the top of this skill. The `lore followup reconcile` / `reconcile-reviews.sh` scripts below are the only sanctioned reader during a `/pr-review` run; do not open the sidecar manually before they execute.
-
-Every `/pr-review` invocation MUST execute this step. The step is self-gating: if no `/pr-self-review` sidecar exists for this PR, it exits cleanly with a one-line status and writes nothing. Skipping the invocation (rather than skipping internally) is a protocol violation — it means the tournament-completion health check (`/retro` Step 3.8) cannot distinguish "no self-review was run" from "the /pr-review agent forgot to reconcile".
-
-**Invocation:**
-
-```bash
-lore followup reconcile --pr <PR_NUMBER>
-```
-
-Where `<PR_NUMBER>` is the `pr_number` resolved in Step 1a.
-
-**Expected outcomes and how to read the exit:**
-
-| Exit | Meaning | Action |
-|---|---|---|
-| 0 + `reconciliation.json` written | Both sidecars found, reconciliation produced | Include one-line summary in final report (see below) |
-| 0 + "no self-review sidecar found" | Self-review was not run for this PR | Note in final report: `Tournament reconciliation: skipped — no self-review sidecar`. Do NOT treat as a failure. |
-| Non-zero | Script error (missing files, malformed JSON, etc.) | Surface the stderr message to the user; do not block the rest of the review |
-
-**Underlying script (for debugging only, not manual invocation):**
-
-```bash
-bash ~/.lore/scripts/reconcile-reviews.sh \
-  --self-review <path-to-pr-self-review/lens-findings.json> \
-  --external-review <path-to-pr-review/lens-findings.json>
-```
-
-The `lore followup reconcile --pr <number>` form auto-discovers both sidecars in `$KDIR/_followups/` by `pr_number`; prefer it.
-
-**What the script produces:** `reconciliation.json` inside the self-review followup directory with fields: `generated_at`, `self_source`, `external_source`, `self_finding_count`, `external_finding_count`, `reconciled[]` (one entry per self-review finding with `tag`, `matched_external_index`, `match_score`, `match_reason`, per-side summaries), and `coverage_miss[]` (external findings with no matching self finding).
-
-**Programmatic, no agent.** Matching is deterministic: `(file, line ±5)` + lens alignment + severity/body-length comparison. The strict `contradict` tag only fires when severity differs by ≥2 ranks AND textual opposite markers appear (e.g., "correctly handles" in one, "fails to handle" in the other). See `scripts/reconcile-reviews-compute.py` for the exact rules.
-
-**Final-report inclusion.** Add one line to the operator-facing verdict summary:
-
-- When a reconciliation was produced:
-  `Tournament reconciliation: confirmed=<N> extended=<N> contradicted=<N> orthogonal=<N> coverage-misses=<N>`
-- When skipped:
-  `Tournament reconciliation: skipped — no /pr-self-review sidecar for PR #<number>`
-
-**Downstream (task-33).** Reconciliation deltas feed scorecard rows for the `pr-self-review` template: `external_confirm_rate`, `external_contradict_rate`, `coverage_miss_rate`. These are the settlement metrics by which self-review template versions are evaluated. Run `reconciliation-rollup.sh` after `reconcile-reviews.sh` to append the three rows via `scorecard-append.sh`:
-
-```bash
-bash ~/.lore/scripts/reconciliation-rollup.sh \
-  --reconciliation <path-to-reconciliation.json> \
-  --artifact-id <pr-artifact-id> \
-  --template-version <pr-self-review template hash> \
-  --window-start <ISO> --window-end <ISO>
-```
-
-Denominators are asymmetric on purpose: confirm/contradict rates use `reconciled_total` (self findings) as denominator because they score the self-review's verdict accuracy; `coverage_miss_rate` uses `external_total` (external findings) because it measures what the self-review missed relative to what was actually there to find. If either denominator is zero, that metric is silently skipped (no row written) rather than recorded as `0.0` — a missing row is honest; a `0.0` would Goodhart to "perfect".
-
-**Why unconditional invocation matters.** The Phase 7b tournament-completion health check (`skills/retro/SKILL.md` Step 3.8 "Tournament completion") counts PRs that produced BOTH reviews AND completed reconciliation. A `/pr-review` run that silently skips reconciliation (even when no self-review exists) is indistinguishable at telemetry time from a run that crashed at Step 8 — both show as "reconciliation missing" in the health check. Running `lore followup reconcile --pr <N>` on every invocation, and letting the script no-op cleanly when it's not applicable, keeps the invocation-count semantics intact for downstream observation.
 
 ## Error Handling
 

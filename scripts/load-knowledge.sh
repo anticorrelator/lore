@@ -59,6 +59,8 @@ fi
 # --- Job B: Load knowledge ---
 echo "=== Project Knowledge ==="
 echo ""
+echo "IMPORTANT: Run \`lore search \"<topic>\"\` BEFORE Grep/Glob/Explore. The knowledge store already documents most conventions, architecture, and past decisions. Raw exploration duplicates work that's already captured."
+echo ""
 
 # --- Dynamic index: build full and compact versions ---
   # Full index: category names + per-entry titles
@@ -408,8 +410,6 @@ echo "[Budget] ${CHARS_USED}/${BUDGET} chars | ${FILES_FULL} full, ${FILES_SUMMA
 if [[ $TOTAL_ENTRIES -gt 0 ]]; then
   echo "[knowledge] ${TOTAL_ENTRIES} entries across ${TOTAL_CATEGORIES} categories"
 fi
-echo ""
-echo "IMPORTANT: Run \`lore search \"<topic>\"\` BEFORE Grep/Glob/Explore. The knowledge store already documents most conventions, architecture, and past decisions. Raw exploration duplicates work that's already captured."
 echo ""
 echo "=== End Project Knowledge ==="
 

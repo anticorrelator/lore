@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lore.local/scripts/schemas/fidelity.json",
+  "$comment": "W06_FIDELITY_SCHEMA_READY — sentinel string used by scripts/validate-fidelity-artifact.sh feature-gate (Phase 2). Do not remove.",
+  "title": "Fidelity Artifact",
+  "description": "Fidelity artifact emitted by /implement Step 4.1 for every worker task — either a judge verdict (kind: verdict) or an explicit exempt record for unsampled tasks (kind: exempt). Keyed by artifact_key = sha256(slug + ':' + task_subject)[:12]; the TaskCompleted hook validator (scripts/validate-fidelity-artifact.sh) reconstructs the same key independently. See _work/06-worker-output-fidelity-attestation/plan.md Phase 1 and decisions D3/D5/D11.",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/verdictArtifact" },
+    { "$ref": "#/$defs/exemptArtifact" }
+  ],
+  "$defs": {
+    "iso8601Timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
+      "description": "ISO8601 / RFC 3339 timestamp. Example: 2026-04-24T18:00:00Z"
+    },
+    "artifactKey": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{12}$",
+      "description": "Deterministic 12-hex-char prefix of sha256(slug + ':' + task_subject). MUST match the key the TaskCompleted hook derives independently."
+    },
+    "verdictEnum": {
+      "type": "string",
+      "enum": ["aligned", "drifted", "contradicts", "unjudgeable"]
+    },
+    "missingInputEnum": {
+      "type": "string",
+      "enum": [
+        "task_spec",
+        "worker_report",
+        "task_claims_jsonl",
+        "diff",
+        "prior_knowledge",
+        "file_context"
+      ]
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "supersedesEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "verdict"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/iso8601Timestamp" },
+        "verdict":   { "$ref": "#/$defs/verdictEnum" }
+      }
+    },
+    "evidenceBase": {
+      "type": "object",
+      "required": ["rationale", "claim_ids_used"],
+      "properties": {
+        "rationale": { "$ref": "#/$defs/nonEmptyString" },
+        "claim_ids_used": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "description": "Tier-2 claim_id values the judge actually consulted when producing this verdict. May be empty when the judge did not rely on task-claims.jsonl rows. Phase 4's fidelity-verdict-capture.sh reads this field to populate scorecard row source_artifact_ids."
+        },
+        "diff_quote": { "$ref": "#/$defs/nonEmptyString" },
+        "plan_quote": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "verdictArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "artifact_key",
+        "phase",
+        "worker_template_version",
+        "judge_template_version",
+        "verdict",
+        "evidence",
+        "trigger",
+        "timestamp"
+      ],
+      "properties": {
+        "kind":                    { "const": "verdict" },
+        "artifact_key":            { "$ref": "#/$defs/artifactKey" },
+        "phase":                   { "$ref": "#/$defs/nonEmptyString" },
+        "worker_template_version": { "$ref": "#/$defs/nonEmptyString" },
+        "judge_template_version":  { "$ref": "#/$defs/nonEmptyString" },
+        "verdict":                 { "$ref": "#/$defs/verdictEnum" },
+        "evidence":                { "$ref": "#/$defs/evidenceBase" },
+        "trigger":                 { "$ref": "#/$defs/nonEmptyString" },
+        "timestamp":               { "$ref": "#/$defs/iso8601Timestamp" },
+        "supersedes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/supersedesEntry" },
+          "description": "Prior superseded verdicts on the same artifact_key, oldest first. Absent or empty on first-judgment artifacts."
+        },
+        "respawn_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Starts at 0; incremented each time the lead respawns the worker and reruns the judge on the same artifact_key."
+        },
+        "correction": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Required for drifted/contradicts verdicts: instructions that would realign the worker output with the plan. Forbidden for aligned/unjudgeable."
+        },
+        "unjudgeable_reason": {
+          "$ref": "#/$defs/nonEmptyString",
+          "description": "Required for unjudgeable verdicts. Forbidden for other verdicts."
+        },
+        "missing_inputs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/missingInputEnum" },
+          "uniqueItems": true,
+          "description": "Required for unjudgeable verdicts. Names which of the five judge inputs were unusable."
+        },
+        "available_evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "description": "Required for unjudgeable verdicts. Citations the judge was able to consult despite the missing_inputs."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "verdict": { "const": "aligned" } },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "required": ["rationale", "claim_ids_used", "diff_quote", "plan_quote"]
+              }
+            },
+            "not": {
+              "anyOf": [
+                { "required": ["correction"] },
+                { "required": ["unjudgeable_reason"] },
+                { "required": ["missing_inputs"] },
+                { "required": ["available_evidence"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "verdict": { "const": "drifted" } },
+            "required": ["verdict"]
+          },
+          "then": {
+            "required": ["correction"],
+            "properties": {
+              "evidence": {
+                "required": ["rationale", "claim_ids_used", "diff_quote", "plan_quote"]
+              }
+            },
+            "not": {
+              "anyOf": [
+                { "required": ["unjudgeable_reason"] },
+                { "required": ["missing_inputs"] },
+                { "required": ["available_evidence"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "verdict": { "const": "contradicts" } },
+            "required": ["verdict"]
+          },
+          "then": {
+            "required": ["correction"],
+            "properties": {
+              "evidence": {
+                "required": ["rationale", "claim_ids_used", "diff_quote", "plan_quote"]
+              }
+            },
+            "not": {
+              "anyOf": [
+                { "required": ["unjudgeable_reason"] },
+                { "required": ["missing_inputs"] },
+                { "required": ["available_evidence"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "verdict": { "const": "unjudgeable" } },
+            "required": ["verdict"]
+          },
+          "then": {
+            "required": ["unjudgeable_reason", "missing_inputs", "available_evidence"],
+            "not": {
+              "required": ["correction"]
+            }
+          }
+        }
+      ]
+    },
+    "exemptArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "artifact_key",
+        "phase",
+        "exempt_reason",
+        "sampling_trigger",
+        "timestamp"
+      ],
+      "properties": {
+        "kind":             { "const": "exempt" },
+        "artifact_key":     { "$ref": "#/$defs/artifactKey" },
+        "phase":            { "$ref": "#/$defs/nonEmptyString" },
+        "exempt_reason":    { "$ref": "#/$defs/nonEmptyString" },
+        "sampling_trigger": { "$ref": "#/$defs/nonEmptyString" },
+        "timestamp":        { "$ref": "#/$defs/iso8601Timestamp" }
+      },
+      "not": {
+        "anyOf": [
+          { "required": ["verdict"] },
+          { "required": ["evidence"] },
+          { "required": ["worker_template_version"] },
+          { "required": ["judge_template_version"] },
+          { "required": ["correction"] },
+          { "required": ["unjudgeable_reason"] },
+          { "required": ["missing_inputs"] },
+          { "required": ["available_evidence"] },
+          { "required": ["supersedes"] },
+          { "required": ["respawn_count"] },
+          { "required": ["trigger"] }
+        ]
+      }
+    }
+  }
+}

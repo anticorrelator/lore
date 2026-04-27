@@ -179,6 +179,24 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        emit only real consultations.>
      **Blockers:** <none, or description of what's blocking>
    ```
+7.5. **Wait for lead acknowledgment before marking task completed.**
+   <!-- W06_FIDELITY_ACK_WAIT -->
+
+   **Bootstrap guard:** if the file `~/.lore/scripts/validate-fidelity-artifact.sh`
+   does NOT exist yet, skip this step entirely (pass through to Step 8
+   immediately). This is a one-time bootstrap accommodation for the
+   implementation that ships W06 itself. The lead will remove this guard
+   in a follow-up once W06 is fully deployed and all three sentinels
+   (`W06_FIDELITY_JUDGE_TEMPLATE_READY`, `W06_FIDELITY_STEP4_INTEGRATED`,
+   `W06_FIDELITY_ACK_WAIT`) are stable.
+
+   When the validator script is present, the lead will reply via
+   SendMessage with either `fidelity: ack` (task accepted; proceed to
+   Step 8-9) or `fidelity: respawn: <reason>` (task rejected; return to
+   Step 4 with the reason). Do NOT emit TaskUpdate status=completed
+   until the ack is received — the TaskCompleted hook requires a
+   fidelity artifact on disk, which the lead writes during its judgment
+   window.
 8. **Update task description** with your full completion report:
    TaskUpdate with description set to the same content from step 7
    (including the **Observations:**, **Tier 2 evidence:**, and — when
