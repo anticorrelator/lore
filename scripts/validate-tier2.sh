@@ -17,6 +17,7 @@
 #
 # tier must equal the literal string "task-evidence".
 # producer_role must be one of: researcher, worker, advisor, spec-lead, implement-lead
+# scale must be one of the IDs from scale-registry.sh get-ids; "unknown" is rejected.
 # claim, falsifier, why_this_work_needs_it must be non-empty strings.
 # line_range must match N-M with N <= M.
 
@@ -151,6 +152,25 @@ fi
 FILE_VAL=$(printf '%s' "$ROW" | jq -r '.file // ""')
 if [[ -z "${FILE_VAL// }" ]]; then
   fail_field "file must not be empty"
+fi
+
+# --- scale must be a valid registry ID ---
+SCALE_VAL=$(printf '%s' "$ROW" | jq -r '.scale // ""')
+if [[ -z "${SCALE_VAL// }" ]]; then
+  fail_field "scale must not be empty (must be one of the values from scale-registry.sh get-ids)"
+else
+  VALID_SCALES=$(bash "$SCRIPT_DIR/scale-registry.sh" get-ids 2>/dev/null)
+  SCALE_VALID=0
+  while IFS= read -r valid_id; do
+    if [[ "$SCALE_VAL" == "$valid_id" ]]; then
+      SCALE_VALID=1
+      break
+    fi
+  done <<< "$VALID_SCALES"
+  if [[ $SCALE_VALID -eq 0 ]]; then
+    ENUM_LIST=$(printf '%s' "$VALID_SCALES" | tr '\n' ',' | sed 's/,$//')
+    fail_field "invalid scale: \"$SCALE_VAL\" (must be one of: $ENUM_LIST)"
+  fi
 fi
 
 # --- Final result ---

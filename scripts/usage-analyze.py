@@ -175,6 +175,12 @@ def analyze_usage(
         if e.get("context_signal", "").strip()
     )
 
+    # Sessions with an explicit scale declaration
+    sessions_with_scale_declared = sum(
+        1 for e in session_events
+        if e.get("scale_declared") is True
+    )
+
     # Budget utilization across sessions
     budget_utilizations = []
     for e in session_events:
@@ -266,6 +272,11 @@ def analyze_usage(
         if stats["retrieval_count"] <= cold_threshold
     ]
 
+    declaration_coverage = (
+        round(sessions_with_scale_declared / total_sessions, 4)
+        if total_sessions > 0 else 0.0
+    )
+
     # --- Build report ---
     report = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -275,6 +286,8 @@ def analyze_usage(
             "total_sessions": total_sessions,
             "total_searches": total_searches,
             "sessions_with_context_signal": sessions_with_context,
+            "sessions_with_scale_declared": sessions_with_scale_declared,
+            "declaration_coverage": declaration_coverage,
             "avg_budget_utilization": avg_budget_util,
             "avg_search_latency_ms": avg_search_latency,
             "zero_result_searches": zero_result_searches,
@@ -355,6 +368,7 @@ def main() -> None:
     print(f"Entries:          {s['total_entries']}")
     print(f"Sessions logged:  {s['total_sessions']}")
     print(f"  With context:   {s['sessions_with_context_signal']}")
+    print(f"  Scale declared: {s['sessions_with_scale_declared']}")
     print(f"  Avg budget use: {s['avg_budget_utilization']:.0%}")
     print(f"Searches logged:  {s['total_searches']}")
     print(f"  Zero results:   {s['zero_result_searches']}")

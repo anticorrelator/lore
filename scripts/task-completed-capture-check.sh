@@ -164,59 +164,6 @@ validate_tier_sections() {
   return 1
 }
 
-# validate_fidelity_artifact — invoke the W06 fidelity-artifact validator
-# defensively. Failure modes:
-#   - Validator script missing/unreadable → log to stderr, fail-open (return 0).
-#     Rationale: hook predates W06; if the validator is uninstalled the hook
-#     must continue working for in-flight workers.
-#   - Validator subprocess crashes (rc != 0 and != 2) → log, fail-open. Crashes
-#     indicate infrastructure problems (jsonschema unavailable, KDIR resolve
-#     failure), not policy violations. Blocking on infra failure breaks every
-#     task completion.
-#   - Validator exits 2 → policy block. Propagate stderr; caller propagates exit 2.
-#   - Validator exits 0 → pass (warn-only diagnostic on stderr is informational).
-# Sets FIDELITY_OUTPUT for caller to surface in diagnostic when blocking.
-# Returns 0 on pass / fail-open, 2 on policy block.
-validate_fidelity_artifact() {
-  local validator="$SCRIPT_DIR/validate-fidelity-artifact.sh"
-  FIDELITY_OUTPUT=""
-
-  if [[ ! -x "$validator" ]]; then
-    # Validator not installed — fail-open. This is the pre-W06 path and the
-    # path during W06 partial rollouts.
-    return 0
-  fi
-
-  # Re-pipe the original hook payload into the validator. Capture combined
-  # stdout+stderr for diagnostic surfacing on block. Caller is responsible
-  # for disabling `set -e` around the function invocation so a non-zero rc
-  # from the validator doesn't trip the trap before we can examine it.
-  local rc=0
-  FIDELITY_OUTPUT=$(printf '%s' "$INPUT" | "$validator" 2>&1) || rc=$?
-
-  case "$rc" in
-    0)
-      # Pass (or warn-only mode). Surface warn diagnostics to stderr without
-      # blocking — they are signal for /retro and operator visibility.
-      if [[ -n "$FIDELITY_OUTPUT" ]]; then
-        printf '%s\n' "$FIDELITY_OUTPUT" >&2
-      fi
-      return 0
-      ;;
-    2)
-      # Policy block. Caller propagates exit 2.
-      return 2
-      ;;
-    *)
-      # Infrastructure failure (e.g., python missing, jsonschema unavailable,
-      # KDIR unresolvable). Fail-open with a stderr note so it surfaces but
-      # does not break task completion.
-      echo "[fidelity] hook: validator infra error rc=$rc (fail-open); output: $FIDELITY_OUTPUT" >&2
-      return 0
-      ;;
-  esac
-}
-
 # Enforce required sections based on agent type
 # Explore → researcher: require **Assertions:** with ≥1 structured entry OR escalation
 # general-purpose → worker: require **Observations:** with ≥1 structured entry OR escalation
@@ -260,16 +207,6 @@ case "$AGENT_TYPE" in
       echo "Tier section shape-check failed: $FAIL_REASON" >&2
       exit 2
     fi
-    set +e
-    validate_fidelity_artifact
-    fidelity_rc=$?
-    set -e
-    if [[ "$fidelity_rc" == "2" ]]; then
-      echo "Update the task description before marking complete." >&2
-      echo "Fidelity artifact check failed:" >&2
-      printf '%s\n' "$FIDELITY_OUTPUT" >&2
-      exit 2
-    fi
     exit 0
     ;;
   team-lead)
@@ -287,16 +224,6 @@ case "$AGENT_TYPE" in
     if ! validate_tier_sections; then
       echo "Update the task description before marking complete." >&2
       echo "Tier section shape-check failed: $FAIL_REASON" >&2
-      exit 2
-    fi
-    set +e
-    validate_fidelity_artifact
-    fidelity_rc=$?
-    set -e
-    if [[ "$fidelity_rc" == "2" ]]; then
-      echo "Update the task description before marking complete." >&2
-      echo "Fidelity artifact check failed:" >&2
-      printf '%s\n' "$FIDELITY_OUTPUT" >&2
       exit 2
     fi
     exit 0

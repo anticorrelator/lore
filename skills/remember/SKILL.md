@@ -154,7 +154,9 @@ Review the conversation for thread-worthy content:
 
 ### Step 5: Act
 
-**Default behavior: auto-capture.** Everything that passes the gate gets captured immediately. The gate is the quality filter — no additional confirmation needed.
+Capture every qualifying candidate now. This step is mandatory and must not be skipped. /implement Step 5 and /spec Step 5.4 both delegate capture invocation to /remember — a missed capture here propagates silently to every upstream caller with no recovery path. Do NOT defer with "I'll capture later." Do NOT skip because the insight seems obvious. Do NOT skip because the session was short. None of these are valid rationales.
+
+Before capturing, confirm all 4 gate conditions hold for each candidate: (1) Reusable — applicable beyond this task, (2) Non-obvious — not already in existing docs, (3) Stable — unlikely to change soon, (4) High confidence — verified through code or conversation, not speculative. All four must be true. If any condition fails, drop the candidate silently and move on.
 
 #### Tier routing decision
 
@@ -187,7 +189,18 @@ lore capture --insight "..." --context "..." --category "..." --confidence "..."
 - When `/remember` is invoked directly by the user: `--producer-role interactive --protocol-slot Reflection --template-version $REMEMBER_TEMPLATE_VERSION`
 - When `/remember` is invoked by another skill: use the role passed in by that skill — typically `implement-lead` or `spec-lead` with `--protocol-slot Synthesis`, AND use the `--template-version` the caller passes
 
-**Work item association:** When `RESOLVED_SLUG` is set, add `--work-item $RESOLVED_SLUG`. Absence of a work item never errors — scale resolution is fail-safe.
+**Work item association:** When `RESOLVED_SLUG` is set, add `--work-item $RESOLVED_SLUG`. Absence of a work item never errors. Scale declaration (`--scale`) is always required — missing declaration is an error, not a default.
+
+**Scale rubric — declare explicitly at every retrieval surface:**
+
+- **application** — lore-the-product as a whole: philosophy, top-level constraints, decisions that shape how major components compose. Answers "what is lore?" or "what's true across the whole product?"
+- **architectural** — a single major component (knowledge base, skills layer, CLI, work-item system) considered as a whole: internal organization, contract with other components, why it's shaped this way.
+- **subsystem** — a specific named module within a major component (the capture pipeline, /implement, the work tab): how that named thing works, why it's built that way, what its quirks are.
+- **implementation** — a specific function, fix, behavior, configuration value, or change. Below the level of "named module." Local gotchas, bug-fix rationale, constants whose values matter.
+
+**Boundary tests:** application vs architectural — does it span multiple major components or just one? architectural vs subsystem — whole component or specific module? subsystem vs implementation — can you state it without naming a specific function/file/line?
+
+**±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architectural,subsystem`; designing a feature → `application,architectural`.
 
 #### Lead-synthesis attribution
 
@@ -278,9 +291,9 @@ The user can say "don't keep that" or "drop the X entry" after seeing the summar
 ### Step 7: Update metadata
 
 After capturing:
-- Update thread `_meta.json` (`updated` timestamp, increment `sessions` count)
-- Run `lore heal`
-- If a plan was updated, run `lore work heal`
+- Update each modified thread's `_meta.json`: set `updated` to now and increment `sessions`.
+- Run `lore heal`.
+- If a plan was updated, run `lore work heal`.
 
 ### Renormalize check
 

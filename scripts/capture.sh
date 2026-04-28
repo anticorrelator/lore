@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # capture.sh — Capture an insight to the knowledge store
-# Usage: lore capture --insight "..." [--context "..."] [--category "..."] [--confidence "..."] [--related-files "..."] [--source "..."] [--example "..."]
+# Usage: lore capture --insight "..." --scale "<bucket>" [--context "..."] [--category "..."] [--confidence "..."] [--related-files "..."] [--source "..."] [--example "..."]
 #        [--producer-role "..."] [--protocol-slot "..."] [--template-version "..."] [--capturer-role "..."] [--source-artifact-ids "..."]
 #        [--captured-at-branch "..."] [--captured-at-sha "..."] [--captured-at-merge-base-sha "..."] [--work-item "..."]
 #
@@ -20,15 +20,9 @@
 #                                 falls back to "null" when the repo, origin/main, or merge-base is unavailable.
 #   All three fields are emitted on every capture — with their resolved value OR the literal string "null". No network access.
 #
-# Scale resolution (Phase 2 — task #17):
-#   --work-item <slug>  Associates the capture with a work item for absolute scale computation.
-#     When `--work-item`, `--producer-role`, and `--protocol-slot` are all provided AND the (role, slot)
-#     pair is a canonical capture per `architecture/agents/role-slot-matrix.md`, the script reads the
-#     work item's `scope` from `$KDIR/_work/<slug>/_meta.json` (defaulting to `subsystem` when missing)
-#     and runs `scripts/scale-compute.sh` to resolve the absolute scale. The resolved scale is emitted
-#     as `scale: <value>` in the metadata comment block. When any input is missing or the role×slot
-#     pair is evidence-only / off-scale, `scale` is omitted silently — capture never aborts on scale
-#     resolution failure.
+# Scale:
+#   --scale <bucket>  Required. One of: application, architectural, subsystem, implementation.
+#     The caller declares scale explicitly; no formula derivation at capture time.
 #
 # Convention: when a provenance flag is omitted OR passed an empty string, the corresponding field is OMITTED from the
 # HTML metadata comment block (rather than emitted with an empty value). This keeps legacy captures visually identical
@@ -57,6 +51,7 @@ CAPTURED_AT_BRANCH=""
 CAPTURED_AT_SHA=""
 CAPTURED_AT_MERGE_BASE_SHA=""
 WORK_ITEM=""
+SCALE=""
 JSON_MODE=0
 SKIP_MANIFEST=0
 
@@ -126,6 +121,14 @@ while [[ $# -gt 0 ]]; do
       WORK_ITEM="$2"
       shift 2
       ;;
+    --scale)
+      SCALE="$2"
+      shift 2
+      ;;
+    --scale=*)
+      SCALE="${1#--scale=}"
+      shift
+      ;;
     --json)
       JSON_MODE=1
       shift
@@ -147,6 +150,30 @@ if [[ -z "$INSIGHT" ]]; then
     json_error "--insight is required"
   fi
   die "--insight is required"
+fi
+
+if [[ -z "$SCALE" ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "--scale is required; use one of: application, architectural, subsystem, implementation"
+  fi
+  die "--scale is required; use one of: application, architectural, subsystem, implementation"
+fi
+
+_VALID_SCALES=$("$SCRIPT_DIR/scale-registry.sh" get-ids 2>/dev/null || echo "implementation subsystem architectural application")
+_scale_valid=0
+for _s in $_VALID_SCALES; do
+  if [[ "$SCALE" == "$_s" ]]; then
+    _scale_valid=1
+    break
+  fi
+done
+if [[ $_scale_valid -eq 0 ]]; then
+  _enum_list=$(echo "$_VALID_SCALES" | tail -r 2>/dev/null || echo "$_VALID_SCALES" | awk '{lines[NR]=$0} END{for(i=NR;i>=1;i--) print lines[i]}')
+  _enum_list=$(echo "$_enum_list" | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "scale must be one of: $_enum_list"
+  fi
+  die "scale must be one of: $_enum_list"
 fi
 
 # --- Provenance validator ---
@@ -213,71 +240,21 @@ if [[ -n "$WORK_ITEM" ]]; then
   META="$META | work_item: $WORK_ITEM"
 fi
 
-# Scale resolution (Phase 2): compute absolute scale when work-item + role + slot
-# are all provided AND the (role, slot) pair is a canonical-capture per the matrix.
-# On any failure (missing scope file, unknown role, off-scale pair), omit the
-# field silently — capture never aborts on scale resolution.
-# When --work-item is absent but role+slot are present, default scope to 'subsystem'
-# and warn — the caller should pass --work-item for accurate scale.
-if [[ -z "$WORK_ITEM" && -n "$PRODUCER_ROLE" && -n "$PROTOCOL_SLOT" ]]; then
-  echo "[capture] Warning: --work-item not provided; defaulting work-item scope to 'subsystem'. Long-term, pass --work-item or --work-scope explicitly." >&2
-  _work_scope="subsystem"
-  if SCALE=$("$SCRIPT_DIR/scale-compute.sh" \
-      --work-scope "$_work_scope" \
-      --role "$PRODUCER_ROLE" \
-      --slot "$PROTOCOL_SLOT" 2>/dev/null); then
-    META="$META | scale: $SCALE"
-    _registry="$SCRIPT_DIR/scale-registry.json"
-    if [[ -f "$_registry" ]]; then
-      _scale_registry_version=$(python3 -c "
+# Scale is always declared by the caller — emit directly.
+META="$META | scale: $SCALE"
+_registry="$SCRIPT_DIR/scale-registry.json"
+if [[ -f "$_registry" ]]; then
+  _scale_registry_version=$(python3 -c "
 import json, sys
 try:
     print(json.load(open(sys.argv[1])).get('version', '1'))
 except Exception:
     print('1')
 " "$_registry" 2>/dev/null || echo "1")
-    else
-      _scale_registry_version="1"
-    fi
-    META="$META | scale_registry_version: $_scale_registry_version"
-  fi
+else
+  _scale_registry_version="1"
 fi
-if [[ -n "$WORK_ITEM" && -n "$PRODUCER_ROLE" && -n "$PROTOCOL_SLOT" ]]; then
-  _scope_file="$KNOWLEDGE_DIR/_work/$WORK_ITEM/_meta.json"
-  if [[ -f "$_scope_file" ]]; then
-    _work_scope=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    print(d.get('scope', 'subsystem'))
-except Exception:
-    print('subsystem')
-" "$_scope_file" 2>/dev/null || echo "subsystem")
-  else
-    _work_scope="subsystem"
-  fi
-  if SCALE=$("$SCRIPT_DIR/scale-compute.sh" \
-      --work-scope "$_work_scope" \
-      --role "$PRODUCER_ROLE" \
-      --slot "$PROTOCOL_SLOT" 2>/dev/null); then
-    META="$META | scale: $SCALE"
-    # Read version from scale registry (task-5 creates scripts/scale-registry.json).
-    # Default to "1" until the registry file exists.
-    _registry="$SCRIPT_DIR/scale-registry.json"
-    if [[ -f "$_registry" ]]; then
-      _scale_registry_version=$(python3 -c "
-import json, sys
-try:
-    print(json.load(open(sys.argv[1])).get('version', '1'))
-except Exception:
-    print('1')
-" "$_registry" 2>/dev/null || echo "1")
-    else
-      _scale_registry_version="1"
-    fi
-    META="$META | scale_registry_version: $_scale_registry_version"
-  fi
-fi
+META="$META | scale_registry_version: $_scale_registry_version"
 
 # Branch-provenance trio (always emitted). Fill from git when the caller did
 # not pass an explicit value; fall back to "null" on any git failure so capture

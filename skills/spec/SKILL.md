@@ -120,7 +120,7 @@ If the user's description is already specific enough (clear scope, stated constr
    - For the mandatory "Skill and agent applicability" investigation: include instructions to evaluate implementation-phase applicability (not the investigation phase), read actual SKILL.md files, and report `**Matched skills:**` / `**Matched agents:**` blocks after `**Implications:**`.
 10. Pre-fetch knowledge for each investigation:
     ```bash
-    PRIOR_KNOWLEDGE=$(lore prefetch "<investigation topic>" --format prompt --limit 5 --scale-context researcher)
+    PRIOR_KNOWLEDGE=$(lore prefetch "<investigation topic>" --format prompt --limit 5 --scale-set=<bucket>)
     ```
 11. **Skill-applicability scan and advisor provisioning:**
     a. Scan the skill list in your system prompt. Emit a skill discovery block (mandatory):
@@ -276,23 +276,36 @@ This evaluates the abstract plan. If WEAK or MISSING areas are identified, revis
 
 Draft concrete implementation sections on top of the approved abstract plan:
 
-1. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include `**Knowledge context:**`, optional `**Retrieval directive:**`, optional `**Advisors:**`, optional `**Verification:**`, and optional `**Scope:**` blocks.
+1. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include `**Knowledge context:**`, `**Tasks:**` (checkbox lines), optional `**Retrieval directive:**`, optional `**Advisors:**`, optional `**Verification:**`, and optional `**Scope:**` blocks.
 
-   **Task consolidation rule:** Each checkbox = one meaningful unit of work. Consolidate sequential same-file edits. Tasks sharing a file target within a phase are chained sequentially by `generate-tasks.py` and can only use 1 worker. Cross-phase dependencies are file-based. After drafting phases, run `lore work regen-tasks <slug>` and review `phase_cost_summary` in `tasks.json`. Tasks >2x the phase `avg_per_task` should be split; tasks <0.5x can be merged with adjacent same-file tasks.
+   **Task consolidation rule:** Each `- [ ]` checkbox in `**Tasks:**` = one meaningful unit of work. Consolidate sequential same-file edits. Tasks sharing a file target within a phase are chained sequentially by `generate-tasks.py` and can only use 1 worker. Cross-phase dependencies are file-based. After drafting phases, run `lore work regen-tasks <slug>` and review `phase_cost_summary` in `tasks.json`. Tasks >2x the phase `avg_per_task` should be split; tasks <0.5x can be merged with adjacent same-file tasks. **Same-mechanism floor:** uniform same-mechanism edits across files (e.g., identical-shape line additions, uniform deletes) consolidate into one task when a worker would do them in one read-modify-write pass — even when each individual edit falls within the outlier band. **Phase-level soft cap:** 3–6 tasks per phase is normal; >7 is a smell flag (two phases conflated, or tasks sliced below meaningful-unit threshold).
 
    **Task format (default — intent+constraints):** State what the change accomplishes, what not to do, and how to verify correctness. Opt into prescriptive format with `**Task format:** prescriptive` for mechanical work.
 
 2. **Concordance-assisted annotation** — after drafting phases, widen each phase's `**Knowledge context:**` block:
    ```bash
-   lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5 --scale-context spec-lead
+   lore prefetch "<phase objective> <key file paths>" --type knowledge --limit 5 --scale-set=<bucket>
    ```
+   Declare `--scale-set` explicitly for every prefetch call. Missing declaration is an error.
+
+   **Scale rubric — declare explicitly at every retrieval surface:**
+
+   - **application** — lore-the-product as a whole: philosophy, top-level constraints, decisions that shape how major components compose. Answers "what is lore?" or "what's true across the whole product?"
+   - **architectural** — a single major component (knowledge base, skills layer, CLI, work-item system) considered as a whole: internal organization, contract with other components, why it's shaped this way.
+   - **subsystem** — a specific named module within a major component (the capture pipeline, /implement, the work tab): how that named thing works, why it's built that way, what its quirks are.
+   - **implementation** — a specific function, fix, behavior, configuration value, or change. Below the level of "named module." Local gotchas, bug-fix rationale, constants whose values matter.
+
+   **Boundary tests:** application vs architectural — does it span multiple major components or just one? architectural vs subsystem — whole component or specific module? subsystem vs implementation — can you state it without naming a specific function/file/line?
+
+   **±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architectural,subsystem`; designing a feature → `application,architectural`.
+
    Add relevant entries as `[[knowledge:...]]` backlinks with "— why relevant" annotations. Investigation findings are the primary source; concordance is a widener.
 
 3. **Retrieval directive derivation** — after concordance widening, populate a `**Retrieval directive:**` block for each phase. The directive must be derivable from content already in the phase; no additional user input is required.
 
    **Seeds derivation (mandatory):** collect seeds from two sources — (a) each `[[knowledge:...]]` backlink in the phase's `**Knowledge context:**` block becomes a seed verbatim; (b) each file path in the phase's `**Files:**` line or list becomes a seed verbatim. Deduplicate. If the union is empty, emit `seeds:` as an empty bullet and note why (e.g., no backlinks and no file paths present).
 
-   **Defaults:** `hop_budget: 1`. Leave `scale_set:` empty (omit the bullet when no scale restriction is warranted). Omit `filters:` unless the phase has a narrow domain where type or category filtering adds value.
+   **Defaults:** `hop_budget: 1`. `scale_set:` is **mandatory** — declaration is required; omitting it is an error. Pick the appropriate bucket (`application`, `architectural`, `subsystem`, `implementation`). Omit `filters:` unless the phase has a narrow domain where type or category filtering adds value.
 
    **Format:**
    ```markdown
@@ -530,11 +543,11 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 <!-- Optional — omit when phase has no Knowledge context backlinks and no Files entries.
      Seeds are derived from (a) [[knowledge:...]] backlinks in Knowledge context, and
      (b) file paths in Files. Deduplication applied. hop_budget defaults to 1.
-     scale_set: leave empty unless phase has a narrow scale domain.
+     scale_set: REQUIRED — declare the appropriate bucket (application | architectural | subsystem | implementation). Omitting is an error.
      Consumed by /implement Step 3.1 branch (a) via resolve-manifest.sh → {{prior_knowledge}}. -->
 - seeds: [[knowledge:file#heading]], path/to/file.py
 - hop_budget: 1
-<!-- - scale_set: architectural, implementation  (optional; omit when not narrowing) -->
+<!-- scale_set: REQUIRED — declare one bucket: application | architectural | subsystem | implementation -->
 <!-- - filters: type=knowledge, exclude_category=... (optional; omit when not filtering) -->
 **Knowledge context:**
 <!-- Each entry MUST include a "— why relevant" annotation after the backlink.
@@ -546,8 +559,17 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 <!-- Optional — declare domain-expert advisors. /implement spawns these as persistent team members. -->
 - advisor-name — domain scope. [must-consult|on-demand]
 **Verification:**
-<!-- Optional — concrete pass/fail criteria workers check after implementation. -->
-- <criterion 1 — e.g., "existing tests pass unchanged">
+<!-- Optional — 0–3 observable-behavior criteria. Empty is valid when task descriptions are self-verifying.
+     Each bullet names a behavior of the changed system a worker can check without reading the diff.
+     Anti-patterns — never use:
+       "X no longer exists" — recoverable from ls/diff, not a behavior
+       grep-for-absence-as-audit — acceptable only when prose is the contract being verified
+       task restatement — "refactored Y" is the task, not a verification criterion
+     Good example: "`lore prefetch` with no `--scale-set` exits non-zero with a usable error" -->
+- <observable behavior — e.g., "`lore search foo` returns ranked results from the updated index">
+**Tasks:**
+<!-- Canonical home for - [ ] checkbox lines. One checkbox = one meaningful worker task.
+     Verification holds plain bullets only; Tasks holds checkboxes only. -->
 - [ ] Task 1
 - [ ] Task 2
 

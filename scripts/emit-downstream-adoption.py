@@ -63,19 +63,21 @@ def parse_timestamp(ts: str) -> datetime | None:
 def parse_retrieval_log(
     log_path: str,
     window_start: datetime,
-) -> tuple[int, dict[str, int]]:
+) -> tuple[int, dict[str, int], int]:
     """Parse retrieval-log.jsonl within [window_start, now].
 
     Returns:
-        (opportunities, citations_by_path) where:
+        (opportunities, citations_by_path, declared_count) where:
         - opportunities = total sessions + prefetch events in window
         - citations_by_path = {entry_path: count of times loaded in window}
+        - declared_count = events with a non-empty scale_declared field
     """
     opportunities = 0
     citations_by_path: dict[str, int] = {}
+    declared_count = 0
 
     if not os.path.isfile(log_path):
-        return 0, {}
+        return 0, {}, 0
 
     with open(log_path, encoding="utf-8") as f:
         for line in f:
@@ -93,6 +95,9 @@ def parse_retrieval_log(
 
             event = record.get("event")
             loaded = record.get("loaded_paths", [])
+
+            if record.get("scale_declared") is True:
+                declared_count += 1
 
             if event == "prefetch":
                 opportunities += 1
@@ -114,7 +119,7 @@ def parse_retrieval_log(
                     if path:
                         citations_by_path[path] = citations_by_path.get(path, 0) + 1
 
-    return opportunities, citations_by_path
+    return opportunities, citations_by_path, declared_count
 
 
 def main() -> None:
@@ -145,9 +150,10 @@ def main() -> None:
         manifest = json.load(f)
     entries_list = manifest.get("entries", [])
 
-    opportunities, citations_by_path = parse_retrieval_log(
+    opportunities, citations_by_path, declared_count = parse_retrieval_log(
         args.retrieval_log_path, window_start
     )
+    declaration_coverage = round(declared_count / max(opportunities, 1), 4)
 
     for entry in entries_list:
         path = entry.get("path", "")
@@ -168,6 +174,8 @@ def main() -> None:
             "status": status,
             "citations": citations,
             "opportunities": opportunities,
+            "declared_count": declared_count,
+            "declaration_coverage": declaration_coverage,
             "value": value,
             "window_days": args.window_days,
             "ts": now_str,

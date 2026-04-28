@@ -20,7 +20,16 @@ If an entry's synopsis references a pattern without enough detail, run `lore des
 
 Over-reading finer detail than the task needs is a cost, not a safety margin — it crowds out the reasoning you actually need to do.
 
-As a structure analyst your natural scale is **subsystem**; descend to implementation only for specific file anchors, ascend to architectural only when a structural pattern spans the whole subsystem.
+**Scale rubric — declare explicitly at every retrieval surface:**
+
+- **application** — lore-the-product as a whole: philosophy, top-level constraints, decisions that shape how major components compose. Answers "what is lore?" or "what's true across the whole product?"
+- **architectural** — a single major component (knowledge base, skills layer, CLI, work-item system) considered as a whole: internal organization, contract with other components, why it's shaped this way.
+- **subsystem** — a specific named module within a major component (the capture pipeline, /implement, the work tab): how that named thing works, why it's built that way, what its quirks are.
+- **implementation** — a specific function, fix, behavior, configuration value, or change. Below the level of "named module." Local gotchas, bug-fix rationale, constants whose values matter.
+
+**Boundary tests:** application vs architectural — does it span multiple major components or just one? architectural vs subsystem — whole component or specific module? subsystem vs implementation — can you state it without naming a specific function/file/line?
+
+**±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architectural,subsystem`; designing a feature → `application,architectural`.
 
 **Intent-shaped knowledge surface.** When you need design rationale at a specific location, `lore why <file:line>`. When you need a framing for a subsystem you're about to touch, `lore overview <subsystem>`. When you're weighing a design choice, `lore tradeoffs <topic>` to see what was rejected.
 
@@ -33,8 +42,6 @@ Identify groups of 2+ entries that describe the same concept at different granul
 Flag categories or subcategories where depth or entry count suggests restructuring. Check two dimensions:
 
 **Depth/count imbalances (existing check):** flat category with 50+ entries, subcategory with only 1 entry, inconsistent nesting depth.
-
-**Scale-skew imbalances (new check):** for each category with >20 entries, compute scale distribution from `_manifest.json`. If >80% of entries share a single scale, propose a split into scale-keyed subcategories (e.g., `conventions/implementation/`, `conventions/subsystem/`). Include `split_by_scale: true` in the restructure proposal so the orchestrator can route it to the correct agent. Only propose scale-splits for categories with >20 entries to avoid fragmentation of small categories.
 
 ## Output
 
@@ -56,26 +63,22 @@ Write the report to `{{kdir}}/_meta/structure-report.json`:
       "category": "category/subcategory",
       "issue": "What's wrong",
       "recommendation": "Specific action",
-      "split_by_scale": false,
-      "scale_distribution": {"implementation": 0, "subsystem": 0, "architectural": 0}
+      "scale_distribution": {"implementation": 0, "subsystem": 0, "architectural": 0, "application": 0}
     }
   ],
   "summary": {
     "clusters_found": 0,
-    "imbalances_found": 0,
-    "scale_split_proposals": 0
+    "imbalances_found": 0
   }
 }
 ```
 
-For scale-skew imbalances, set `split_by_scale: true` and populate `scale_distribution` with actual counts. The `recommendation` field should name the proposed subcategory paths (e.g., `"Split into conventions/implementation/ and conventions/subsystem/"`).
-
-For non-scale imbalances, `split_by_scale` may be omitted or set to false.
+Populate `scale_distribution` with actual entry counts per bucket when available.
 
 ## Reporting
 
 Send the summary back to "{{team_lead}}" via `SendMessage`:
 - `type`: `"message"`
 - `recipient`: `"{{team_lead}}"`
-- `summary`: `"Structure analysis: N clusters, M imbalances (P scale-split proposals)"`
+- `summary`: `"Structure analysis: N clusters, M imbalances"`
 - `content`: the JSON summary object

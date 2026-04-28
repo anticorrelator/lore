@@ -25,7 +25,7 @@ The step numbering encodes a dependency order that downstream `/evolve` and tren
 
 1. **Steps 1–2.7**: setup, evidence gathering, selective batch audit. Steps 1–2.6 run unconditionally. Step 2.7 is **signal-triggered** (runs only when promoted Tier 3 claims are uncovered and not already in the priority-audit queue) — advisory for observational windows. Step 2.7 must complete before any scorecard read so Step 3.8's routing-realization check sees current `rows.jsonl`.
 2. **Step 2.8**: escalation telemetry. Non-scored, feeds retro prose only.
-3. **Step 2.9**: scale access appropriateness. Qualitative cycle-level field — two graded sub-questions emitted as sidecar row to `retro-scale-access.jsonl`. Runs unconditionally alongside Step 2.8; never affects `pipeline-degraded` state.
+3. **Step 2.9**: scale signal block. Six factual + eval signals (declaration_coverage, redeclare_rate, off_scale_routes_emitted, verifier_disagreements, off_altitude_skipped, counterfactual_better) emitted as sidecar row to `retro-scale-access.jsonl` plus three "better than no scale" derivations. Runs unconditionally alongside Step 2.8; never affects `pipeline-degraded` state.
 4. **Step 3.8** (settlement pipeline health checks): **runs before** any scorecard-consumption step. Sets `window_state = "pipeline-degraded" | "warmup" | normal`. If degraded, Steps 3.0/3.9 skip.
 5. **Step 3.0** (scorecard delta surface, *primary*): tier-partitioned. Runs only on normal windows. Skipped on `pipeline-degraded`.
 6. **Step 3** (dimension scores): demoted to narrative coda. Always scored for longitudinal trend, never the headline.
@@ -334,13 +334,89 @@ lore journal write \
 
 **Invariant.** This step never calls `scorecard-append`. There is no scorecard row written for an escalation — not `kind="scored"`, not `kind="telemetry"`. Journal-only storage structurally rules out any back-door through which /evolve could eventually consume escalation data.
 
-### Step 2.9: Scale access appropriateness (qualitative cycle-level field)
+### Step 2.9: Scale signal block (six factual + eval signals)
 
-**Qualitative, not scored.** Ask the spec-lead (or the agent running `/retro`) two sub-questions about how retrieval scale was managed during the cycle. This step produces **one sidecar row per cycle** in `$KDIR/_scorecards/retro-scale-access.jsonl` — separate from `rows.jsonl` to keep it out of the settlement pipeline.
+**Observational, not scored.** This step surfaces six per-cycle scale signals — four factual (read from existing telemetry) and two eval (agent self-report at reflection time). It produces **one sidecar row per cycle** in `$KDIR/_scorecards/retro-scale-access.jsonl` plus three “better than no scale” derivations. Runs unconditionally alongside Step 2.8; never affects `pipeline-degraded` state; never feeds `/evolve` or the pass|weak|fail headline.
 
-This is a cycle-level observation, NOT a producer scoring metric. It feeds longitudinal trend tracking only — never `/evolve` template mutations, never the pass|weak|fail headline.
+### Four factual signals (read from telemetry)
 
-### Sub-question (a): Abstraction level
+**1. `declaration_coverage`** — fraction of retrieval opportunities in this cycle where `scale_declared=true` in `retrieval-log.jsonl`.
+
+```bash
+KDIR=$(lore resolve)
+python3 -c "
+import json, sys
+rows = [json.loads(l) for l in open('$KDIR/_meta/retrieval-log.jsonl') if l.strip()]
+total = len(rows)
+declared = sum(1 for r in rows if r.get('scale_declared') is True)
+print(f'declaration_coverage: {declared}/{total} ({declared/total:.0%})' if total else 'declaration_coverage: no retrieval events')
+"
+```
+
+If `retrieval-log.jsonl` is absent: emit `declaration_coverage: no retrieval log this cycle`.
+
+**2. `redeclare_rate`** — fraction of session retrievals that re-issued at a different scale set from the previous call in the same session. Measures rubric ↔ agent reality drift: a climbing rate means agents are correcting scale mid-session, indicating the rubric isn’t landing on first read.
+
+```bash
+python3 -c "
+import json
+rows = [json.loads(l) for l in open('$KDIR/_meta/retrieval-log.jsonl') if l.strip()]
+session_rows = [r for r in rows if r.get('scale_declared') is True]
+redeclares = sum(
+    1 for i in range(1, len(session_rows))
+    if session_rows[i].get('scale_set') != session_rows[i-1].get('scale_set')
+       and session_rows[i].get('session_id') == session_rows[i-1].get('session_id')
+)
+total = max(len(session_rows) - 1, 0)
+print(f'redeclare_rate: {redeclares}/{total} ({redeclares/total:.0%})' if total else 'redeclare_rate: insufficient data')
+"
+```
+
+**3. `off_scale_routes_emitted`** — count of worker-surfaced concerns routed off-scale this cycle. Read from `_work/<slug>/off_scale_routes.jsonl`.
+
+```bash
+SLUG="<current work item slug>"
+ROUTES="$KDIR/_work/$SLUG/off_scale_routes.jsonl"
+COUNT=0
+[ -f "$ROUTES" ] && COUNT=$(wc -l < "$ROUTES" | tr -d ' ')
+echo "off_scale_routes_emitted: $COUNT"
+```
+
+**4. `verifier_disagreements`** — count of classifier disagreements from the most recent `/renormalize` run. Read from `$KDIR/_meta/classification-report.json`'s `disagreements` array (or from telemetry rows where `metric == "scale_drift_rate"`).
+
+```bash
+REPORT="$KDIR/_meta/classification-report.json"
+if [ -f "$REPORT" ]; then
+  python3 -c "import json; d=json.load(open('$REPORT')); print(f'verifier_disagreements: {len(d.get(\"disagreements\", []))}\')"
+else
+  # Fall back to telemetry rows
+  python3 -c "
+import json
+rows = [json.loads(l) for l in open('$KDIR/_scorecards/rows.jsonl') if l.strip()]
+drift_rows = [r for r in rows if r.get('metric') == 'scale_drift_rate']
+total_disagreements = sum(int(r.get('disagreements', 0)) for r in drift_rows[-1:])
+print(f'verifier_disagreements: {total_disagreements} (from scale_drift_rate telemetry)')
+  " 2>/dev/null || echo 'verifier_disagreements: no data'
+fi
+```
+
+### Two eval signals (agent self-report)
+
+**5. `off_altitude_skipped`** — how many retrieved entries did you (the agent) judge as wrong-altitude and skip during this cycle?
+
+> "During this cycle, did you receive any retrieved knowledge entries that were at the wrong altitude for your task and consciously skip them rather than read them in full? Estimate the count."
+
+Record the count. Zero is a valid answer.
+
+**6. `counterfactual_better`** — would retrieval without declared scale have produced better, the same, or worse results?
+
+> "If you had retrieved without declaring a scale set — pulling from the full knowledge store without altitude filtering — do you think the results would have been: better (more relevant context delivered), same (no meaningful difference), or worse (more noise, less signal)?"
+
+Grade: `better | same | worse`
+
+One-line rationale.
+
+### Sub-question: Abstraction level (retained)
 
 > "Did agents get context at the right level of abstraction — enough to reason at the scale of the problem, without fine detail crowding out the framing or forcing descent to reconstruct it?"
 
@@ -353,14 +429,6 @@ One-line rationale citing specific retrieval calls observed in evidence (Step 2b
 - `too-fine` → missing bridging parent entries; workers were handed implementation detail without the framing context.
 - `right-sized` → no structural gap surfaced.
 
-### Sub-question (b): Scale-agnostic recall utility
-
-> "Was scale-agnostic recall useful in this cycle — did choosing the abstraction level substitute for reading code or drilling into finer-scale entries, or was the capability redundant?"
-
-Grade: `useful | neutral | not-useful`
-
-One-line rationale. Cite whether workers bypassed code reads due to knowledge delivery, or whether store entries were consulted but didn't reduce exploration.
-
 ### Emission
 
 ```bash
@@ -369,21 +437,38 @@ bash ~/.lore/scripts/retro-scale-access-append.sh \
   --cycle-id "<slug>" \
   --abstraction-grade "<right-sized|too-coarse|too-fine>" \
   --abstraction-rationale "<one-line citing retrieval calls>" \
-  --recall-grade "<useful|neutral|not-useful>" \
-  --recall-rationale "<one-line>"
+  --counterfactual-better "<better|same|worse>" \
+  --counterfactual-rationale "<one-line>"
 ```
 
-The script writes to `$KDIR/_scorecards/retro-scale-access.jsonl` (created on first use). It validates grades against the closed enum before appending.
+The script writes to `$KDIR/_scorecards/retro-scale-access.jsonl` (schema_version: 2, created on first use). It validates grades against the closed enum before appending.
+
+### Three "better than no scale" derivations
+
+After computing the six signals, evaluate the three derivation tests:
+
+1. **`off_scale_routes_emitted > 0`** — at least one worker coupled capture-or-route during the cycle. This shows the scale system is active and influencing agent routing decisions.
+2. **`counterfactual_better` dominantly `same` or `worse`** — declared scale is at least as good as no-scale baseline. A majority `better` result would indicate the scale system is actively harmful and warrants investigation (but never automatic disablement).
+3. **`redeclare_rate` stable or decreasing** — rubric ↔ agent reality alignment is stable. An increasing trend across cycles indicates rubric drift requiring attention.
 
 **Report shape:**
 ```
-[retro] Scale access: abstraction=<grade> | recall=<grade>
-  abstraction: <one-line rationale>
-  recall: <one-line rationale>
+[retro] Scale signals (Step 2.9):
+  declaration_coverage:     <N>/<total> (<PCT>)
+  redeclare_rate:           <N>/<total> (<PCT>)
+  off_scale_routes_emitted: <N>
+  verifier_disagreements:   <N>
+  off_altitude_skipped:     <N>  [agent self-report]
+  counterfactual_better:    <better|same|worse>  — <one-line rationale>
+  abstraction:              <right-sized|too-coarse|too-fine>  — <one-line rationale>
+
+  Better-than-no-scale derivations:
+    off_scale_routes_emitted > 0:                yes|no
+    counterfactual_better dominantly same/worse: yes|no
+    redeclare_rate stable/decreasing:            yes|no
 ```
 
-**Invariant.** This step never calls `scorecard-append`. The sidecar is not a scorecard row — it has no `calibration_state`, no `template_version`, no `kind: scored`, no `tier`. Mixing it into `rows.jsonl` would expose it to `/evolve` consumption; the separate file structurally prevents that.
-
+**Invariant.** This step never calls `scorecard-append`. The sidecar is not a scorecard row — it has no `calibration_state`, no `template_version`, no `kind: scored`, no `tier`. Mixing it into `rows.jsonl` would expose it to `/evolve` consumption; the separate file structurally prevents that. /retro is observational-only — it emits the signals and derivations but never auto-suggests disabling the scale system based on its own evaluation.
 ### Step 3.0: Scorecard delta surface (primary, tier-partitioned)
 
 **This step is primary.** The scorecard delta surface leads the /retro output (Step 6 report). Dimension scoring (Step 3) is the qualitative coda — useful for describing knowledge-system behavior in prose, but **not** the operator-facing headline. Step 3.9's non-compensatory `pass|weak|fail` per template-version is the primary headline; Step 3.0 shows what *changed* since the last window to explain why the headline moved (or didn't).
@@ -711,17 +796,27 @@ label_revision_rate:
 
 ---
 
-### Scale access appropriateness (sidecar)
+### Scale signals (sidecar)
 
 **Source:** `$KDIR/_scorecards/retro-scale-access.jsonl` — the row whose `cycle_id` matches the current retro slug (most recent by `ts` if multiple).
 
 ```
-scale_access_appropriateness:
-  abstraction: <right-sized|too-coarse|too-fine>  — <one-line rationale>
-  recall:      <useful|neutral|not-useful>         — <one-line rationale>
+scale signals (Step 2.9):
+  declaration_coverage:     <N>/<total> (<PCT>)
+  redeclare_rate:           <N>/<total> (<PCT>)
+  off_scale_routes_emitted: <N>
+  verifier_disagreements:   <N>
+  off_altitude_skipped:     <N>  [agent self-report]
+  counterfactual_better:    <better|same|worse>  — <one-line rationale>
+  abstraction:              <right-sized|too-coarse|too-fine>  — <one-line rationale>
+
+  Better-than-no-scale derivations:
+    off_scale_routes_emitted > 0:                yes|no
+    counterfactual_better dominantly same/worse: yes|no
+    redeclare_rate stable/decreasing:            yes|no
 ```
 
-When no row exists for this cycle: `scale_access_appropriateness: not assessed this cycle`.
+When no row exists for this cycle: `scale signals: not assessed this cycle`.
 
 ---
 
@@ -1144,7 +1239,7 @@ Complementary to Step 3's dimension scores (subjective, about knowledge delivery
 - `template_version` is present in `$KDIR/_scorecards/template-registry.json` — unregistered rows render as `unregistered:<hash>` and are excluded.
 - The row's retro window is NOT in the set of `pipeline-degraded` windows (reuses the same filter as `/evolve` Step 5).
 
-**The seven MVP metric families.**
+**The six MVP metric families.**
 
 | Metric | Granularity | Template scored | Direction |
 |---|---|---|---|
@@ -1154,11 +1249,8 @@ Complementary to Step 3's dimension scores (subjective, about knowledge delivery
 | `omission_rate` | portfolio-level | producer | **lower = better** |
 | `external_confirm_rate` | claim-local | pr-self-review | higher = better |
 | `observation_promotion_rate` | claim-local | producer | higher = better |
-| `fidelity_verdict_*` (family: `_aligned`, `_drifted`, `_contradicts`, `_unjudgeable`) | portfolio-level | `worker` (producer) | `_aligned` higher = better; `_drifted`, `_contradicts`, `_unjudgeable` **lower = better** |
 
-Three of the seven families are **inverted** — high values are bad: `triviality_rate`, `omission_rate`, and the `_drifted | _contradicts | _unjudgeable` members of the `fidelity_verdict_*` family.
-
-**Attribution note (`fidelity_verdict_*`).** The `tier: template` filter is the gate; the row's `template_id` is the **worker** (the producer of the artifact being judged), not the fidelity-judge. Judge provenance rides in sidecar `verdict_source: "fidelity-judge"` and `judge_template_version` fields (per D12) — these do not affect headline aggregation.
+Two of the six families are **inverted** — high values are bad: `triviality_rate` and `omission_rate`.
 
 **Per-metric thresholds (MVP — subject to tuning after early data).**
 
@@ -1170,14 +1262,8 @@ Three of the seven families are **inverted** — high values are bad: `trivialit
 | `omission_rate` (inverted) | ≤ 0.20 | ≥ 0.45 | portfolio-level miss rate |
 | `external_confirm_rate` | 0.60 | 0.35 | self-review agrees with external |
 | `observation_promotion_rate` | 0.25 | 0.10 | `/remember` capture rate |
-| `fidelity_verdict_contradicts` (inverted) | ≤ 0.0 | > 0.0 | any worker→plan contradiction is a `fail`; non-compensatory floor |
-| `fidelity_verdict_drifted` (inverted) | ≤ 0.15 | ≥ 0.40 | scope drift rate above 40% indicates structural intent-loss |
-| `fidelity_verdict_unjudgeable` (inverted) | ≤ 0.15 | ≥ 0.40 | high `unjudgeable` clusters indicate spec-quality upstream issue |
-| `fidelity_verdict_aligned` | derived | derived | sum-to-one across the family on `kind: "verdict"` rows; no independent threshold |
 
 Rows between pass and fail thresholds are `weak`. Thresholds are policy — `/evolve` should not mutate them.
-
-**`fidelity_verdict_*` family aggregation.** Filter to `tier: template` AND `metric` matching the family. Per `(template_id, template_version)` window, sum each metric's `value` and divide by the window's row count for that metric (each row's `value ∈ {0.0, 1.0}` per Phase 4 emission contract — the four metrics sum to `sample_size` for `kind: "verdict"` rows; `kind: "exempt"` artifacts emit zero rows and do not contribute). The four resulting fractions feed the per-metric classification independently — the family participates in worst-dimension-wins as four columns, not one combined column. `fidelity_verdict_aligned` is informational (sum-to-one with the other three) and is not classified independently.
 
 **Minimum sample for headline computation.** A metric with fewer than 10 rows aggregated over the retro window is rendered as `insufficient:<N>` and treated as `weak` for headline purposes — not `fail`, because signal is absent rather than negative. Below-sample metrics are listed separately.
 
@@ -1185,16 +1271,12 @@ Rows between pass and fail thresholds are `weak`. Thresholds are policy — `/ev
 
 **Worst-dimension-wins combination per template_version.**
 ```
-per_metric_classification = {pass | weak | fail | insufficient:<N>} for each of the 9 classified metrics
-                            (6 original + fidelity_verdict_contradicts + _drifted + _unjudgeable;
-                             fidelity_verdict_aligned is derived/informational and excluded from classification)
+per_metric_classification = {pass | weak | fail | insufficient:<N>} for each of the 6 classified metrics
 headline_per_template = worst(per_metric_classification)
 ```
 - any `fail` → `fail`
 - no `fail` but any `weak` (including insufficient:<N>) → `weak`
 - all `pass` → `pass`
-
-The `fidelity_verdict_*` family composes naturally — its three classified members participate as additional columns under the same worst-dimension-wins rule with no bespoke branching.
 
 **Never a weighted average.** Load-bearing: a weighted average would let high scores on one metric compensate for low scores on another, exactly the failure mode the non-compensatory headline exists to prevent. A template with perfect factual_precision (0.95) and terrible omission_rate (0.60) is `fail`, not `weak-but-close-to-pass`.
 
@@ -1209,10 +1291,6 @@ The `fidelity_verdict_*` family composes naturally — its three classified memb
     omission_rate:                <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
     external_confirm_rate:        <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
     observation_promotion_rate:   <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
-    fidelity_verdict_contradicts: <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
-    fidelity_verdict_drifted:     <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
-    fidelity_verdict_unjudgeable: <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
-    fidelity_verdict_aligned:     <val>    [derived]                            n=<N>
     worst: <metric-that-set-headline>
     unregistered/pre-calibration/degraded-window/wrong-tier rows excluded: <count>
 ```
@@ -1239,106 +1317,6 @@ If the `tier: template` row count is below the 10-sample floor on every metric, 
 So `/evolve` can read per-template state without re-running Step 3.9. `/evolve` ranks templates by harmonic mean for mutation prioritization (per plan). Headline and harmonic-mean ranking are distinct — headline is the pass/weak/fail gate; harmonic mean orders within a failing set.
 
 **Invariant.** `/evolve` reads `scorecard_headline` to gate template mutations: a `fail` template can be edited from evidence in the current window (if it also passes the Step 5 citation gate); a `pass` template should not be edited from this window absent a specific failing-metric citation; a `weak` template is editable but deprioritized. `/evolve` does not re-derive these verdicts.
-
-### Step 3.95: Fidelity Response Behavior (telemetry-only)
-
-**Observability only — `kind: telemetry` rows; MUST NOT feed `/evolve` and MUST NOT contribute to the Step 3.9 non-compensatory headline.** This section consumes the four `fidelity_*` telemetry families W06 emits from `/implement` Step 4.1 branch handlers. They describe how the lead is *responding* to fidelity verdicts (which branches they pick, whether respawned workers converge, how often the override budget trips, how `unjudgeable` verdicts resolve) — not whether the worker output was correct. The `/evolve` `tier: template` filter (Step 5) excludes these rows structurally; this is the same anti-coupling invariant as Step 3.5 (P2.3-16), and it applies for the same reason: response observability informs operator situational awareness about whether the forced-branch mechanism (D1 + D5 + D6) is doing real work, but mixing response telemetry into producer-template scoring would Goodhart the headline.
-
-**Source.** Read `$KDIR/_scorecards/rows.jsonl` filtered to rows where ALL of:
-- `kind == "telemetry"`, `tier == "telemetry"` (legacy missing-tier rows are also telemetry per the canonical Tier Contract)
-- `metric` matches one of the four `fidelity_*` telemetry families below
-- The row's `source_artifact_ids` reference fidelity artifacts within the current work item (cross-work-item aggregation is forbidden — response patterns are work-item-local)
-
-When a metric has zero rows in the window, emit `<metric>: no data in window` and continue. Do not treat absence as a failure.
-
-#### Render order — warning-pattern flags FIRST, distributions AFTER
-
-Three warning-pattern flags surface at the top of the section, before any distribution detail. Each is a single line citing the phase, the value that tripped the threshold, and a short rationale tag. Thresholds are policy constants — Phase 5 eval may tune them, but `/evolve` MUST NOT mutate them.
-
-| Flag | Threshold | Why this fires |
-|---|---|---|
-| `HIGH_AMEND_RATE` | Per phase: `count(fidelity_branch_choice == "amend" AND verdict ∈ {drifted, contradicts}) / count(verdict ∈ {drifted, contradicts}) > 0.60` | Lead is rationalizing drift via amendment instead of correcting via respawn — D6's override-budget mechanism is being soft-bypassed. |
-| `LOW_RESPAWN_EFFECTIVENESS` | Per phase: `count(fidelity_respawn_outcome == "resolved_aligned") / (count("resolved_aligned") + count("persistent_drift")) < 0.50` | Correction feedback loop is broken; respawned workers aren't converging on the corrected intent. |
-| `UNJUDGEABLE_CLUSTER` | ≥ 2 `unjudgeable` fidelity artifacts in the work item that share a task shape — file-path prefix overlap OR phase-objective token overlap ≥ 40%. | `/spec` task-contract quality is systematically insufficient — D3's upstream surface is firing. |
-
-Render the warnings as one-liners:
-
-```
-[fidelity-response] warning flags
-  [HIGH_AMEND_RATE] Phase 3: amend-rate 73% on drifted verdicts (8/11)
-  [LOW_RESPAWN_EFFECTIVENESS] Phase 4: 2/5 respawns resolved aligned (40%)
-  [UNJUDGEABLE_CLUSTER] 3 unjudgeable verdicts share `agents/*` file-path prefix
-```
-
-If no warnings fire, emit a single confirmation line:
-
-```
-[fidelity-response] warning flags: no response-pattern anomalies detected
-```
-
-After warnings, render the five distributions in the order below. Each distribution is its own block; missing data renders as `no data in window`.
-
-##### (a) Verdict distribution by trigger source
-
-**Source:** read `_fidelity/<artifact-key>.json` artifacts within the work item; group by the artifact's `trigger` field (per W06 D7 sampling policy — set in `/implement` Step 4.1).
-
-```
-verdict_distribution_by_trigger:
-  mandatory:phase_deliverable        aligned=<N>  drifted=<N>  contradicts=<N>  unjudgeable=<N>
-  mandatory:architectural            aligned=<N>  drifted=<N>  contradicts=<N>  unjudgeable=<N>
-  mandatory:retried                  aligned=<N>  drifted=<N>  contradicts=<N>  unjudgeable=<N>
-  mandatory:risk_keyword             aligned=<N>  drifted=<N>  contradicts=<N>  unjudgeable=<N>
-  mandatory:overlapping_file         aligned=<N>  drifted=<N>  contradicts=<N>  unjudgeable=<N>
-  sampled:within_phase_random        aligned=<N>  drifted=<N>  contradicts=<N>  unjudgeable=<N>
-```
-
-##### (b) Branch-choice distribution
-
-**Source:** rows where `metric == "fidelity_branch_choice"`. Each row's `value_label ∈ {"respawn", "amend", "escalate", "clarify_rerun"}`. Group by the originating verdict (carried in the row's sidecar fields per Phase 6 emission contract).
-
-```
-fidelity_branch_choice:
-  drifted:        respawn=<N> (<pct>%)  amend=<N> (<pct>%)  escalate=<N> (<pct>%)
-  contradicts:    respawn=<N> (<pct>%)  amend=<N> (<pct>%)  escalate=<N> (<pct>%)
-  unjudgeable:    clarify_rerun=<N> (<pct>%)  escalate=<N> (<pct>%)
-```
-
-##### (c) Respawn effectiveness
-
-**Source:** rows where `metric == "fidelity_respawn_outcome"`. Each row's `value_label ∈ {"resolved_aligned", "persistent_drift", "respawn_failed"}`. Group by phase.
-
-```
-fidelity_respawn_outcome:
-  Phase <N>: effectiveness=<pct>% (resolved=<R>/<R+P>; respawn_failed=<F> separately)
-  Phase <N>: ...
-```
-
-Effectiveness is `resolved_aligned / (resolved_aligned + persistent_drift)`. `respawn_failed` is reported as a separate count, not folded into the effectiveness denominator (a failed respawn is a control-flow event, not a correction outcome).
-
-##### (d) Override-budget activations
-
-**Source:** rows where `metric == "fidelity_override_count"`. Each row's `value_label ∈ {"second_opinion", "user_escalation"}` and fires only when D6's per-phase budget (≥3 amendments) is hit. Group by phase.
-
-```
-fidelity_override_count:
-  Phase <N>: budget tripped <K> times — second_opinion=<X>  user_escalation=<Y>
-  Phase <N>: budget not tripped (amendments=<M> < 3 threshold)
-```
-
-##### (e) Unjudgeable resolution mode
-
-**Source:** rows where `metric == "fidelity_unjudgeable_resolution_mode"`. Each row's `value_label ∈ {"spec_clarified_resolved", "spec_clarified_persistent", "user_escalated"}`. This complements (and is the resolution-side counterpart to) the `UNJUDGEABLE_CLUSTER` warning above.
-
-```
-fidelity_unjudgeable_resolution_mode:
-  spec_clarified_resolved:    <N> (<pct>%)
-  spec_clarified_persistent:  <N> (<pct>%)
-  user_escalated:             <N> (<pct>%)
-```
-
-A high `spec_clarified_persistent` rate alongside `UNJUDGEABLE_CLUSTER` flags is the strong signal that `/spec` template quality — not the worker — is the upstream cause.
-
-**Step 3.95 invariant — telemetry-only.** Every row this section reads carries `kind: telemetry` AND `tier: telemetry`. Such rows MUST NOT inject into producer prompts and MUST NOT feed `/evolve`'s template-mutation citation gate. The `/evolve` Step 5 `tier: template` filter is what enforces the anti-coupling structurally; this section's renderings are operator-facing only. Cross-phase aggregation is within the current work item only — never mix response patterns across work items.
 
 ### Step 4: Write Journal Entry (retro dimension scores)
 
@@ -1492,16 +1470,17 @@ Scorecard-first shape: delta surface + headline first, dimension scores relegate
 
   label_revision_rate: <scale_id>: rate=<val> [DESIGN-FLAG if flagged]  |  ...
 
-  scale_access_appropriateness:
-    abstraction: <grade>  — <rationale>
-    recall: <grade>  — <rationale>
+  scale signals (Step 2.9):
+    declaration_coverage: <N>/<total> (<PCT>)
+    redeclare_rate: <N>/<total> (<PCT>)
+    off_scale_routes_emitted: <N>
+    verifier_disagreements: <N>
+    off_altitude_skipped: <N>  [agent self-report]
+    counterfactual_better: <better|same|worse>  — <one-line rationale>
+    abstraction: <right-sized|too-coarse|too-fine>  — <one-line rationale>
+    better-than-no-scale: routes>0=<yes|no> | counterfactual=<yes|no> | redeclare=<yes|no>
 
   channel-contract flags: <none | one line per flag>
-
-  # Scale access (Step 2.9)
-  Scale access: abstraction=<grade> | recall=<grade>
-    abstraction: <one-line rationale>
-    recall: <one-line rationale>
 
   # Channel-contract flags (Step 2b.6) — omit when no flags fired
   Channel-contract drift detected:

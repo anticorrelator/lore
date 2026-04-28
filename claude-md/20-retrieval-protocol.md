@@ -2,6 +2,17 @@
 
 **Skills are your primary tools — prefer invoking a matching skill over manual exploration.** When the user asks about status, progress, remaining work, or context that might be tracked, check the skill list first.
 
+### Scale Declaration (lore search and prefetch)
+
+`lore search` and `lore prefetch` require `--scale-set <bucket>` — one of `application`, `architectural`, `subsystem`, `implementation`. Missing it is an error, not a default. Four claims to guide declaration:
+
+1. **Trust your declaration.** Once you've declared a scale set, the retrieved content matches it. You don't need to widen unless your declaration was wrong for the task.
+2. **Off-altitude content is harmful, not just useless.** Implementation details when designing architecture push toward over-specification; architectural philosophy when fixing a bug makes you over-think a one-line change.
+3. **Re-declare with intent, not habit.** Reaching to broaden a scale set means your initial declaration was wrong for the task. Articulate why. "Just in case" is recall-bias asking.
+4. **Narrow results aren't a failure mode.** If your declared scope returns little, either no knowledge exists at this altitude, or your scale was mis-declared. Think about which before broadening.
+
+The full scale rubric (4 definitions + boundary tests + ±1 query pattern) lives in `/spec`, `/implement`, and `/memory` SKILL.md files.
+
 ### Knowledge Retrieval (Before Grep/Glob/Explore)
 Before searching the codebase with Grep, Glob, or Explore agents, run `lore search "<topic>"` first. The knowledge store documents conventions, architecture, past decisions, and gotchas that raw code exploration cannot surface. If the knowledge store has a relevant entry, use it — don't re-derive the same insight from source files.
 - Knowledge is auto-loaded on session start (index + priority files within budget)

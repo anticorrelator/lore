@@ -153,6 +153,9 @@ PRODUCER_ROLE="${PRODUCER_ROLE_OVERRIDE:-$_row_producer_role}"
 _row_protocol_slot=$(printf '%s' "$ROW" | jq -r '.protocol_slot // ""')
 PROTOCOL_SLOT="${PROTOCOL_SLOT_OVERRIDE:-$_row_protocol_slot}"
 SCALE=$(printf '%s' "$ROW" | jq -r '.scale // ""')
+if [[ -z "$SCALE" ]]; then
+  die "row missing required field: scale (must be one of: application, architectural, subsystem, implementation)"
+fi
 CAPTURED_AT_SHA=$(printf '%s' "$ROW" | jq -r '.captured_at_sha // ""')
 
 # related_files: array → comma-separated string for capture.sh --related-files
@@ -187,6 +190,7 @@ CAPTURE_ARGS=(
   --insight "$INSIGHT"
   --context "$CONTEXT"
   --confidence "unaudited"
+  --scale "$SCALE"
   --work-item "$WORK_ITEM"
   --source "lore-promote"
 )

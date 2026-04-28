@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # prefetch-knowledge.sh — Search knowledge store and output formatted context for agent prompts
-# Usage: bash prefetch-knowledge.sh <query> [--format prompt|summary] [--limit N] [--type knowledge|work|all] [--exclude-backlinks <paths>] [--scale-context <role>] [--work-item <slug>]
+# Usage: bash prefetch-knowledge.sh <query> [--format prompt|summary] [--limit N] [--type knowledge|work|all] [--exclude-backlinks <paths>] [--scale-set <bucket>] [--work-item <slug>]
 #
 # --format prompt   (default) Full resolved sections for embedding in agent prompts
 # --format summary  Headings + snippets for display
@@ -8,16 +8,10 @@
 # --type            Filter by source type: knowledge, work, or all (default: all)
 # --exclude-backlinks  Comma-separated backlink paths to exclude from results (deduplication
 #                      with pre-resolved knowledge already in task descriptions)
-# --scale-context <role>   Role name (worker|researcher|advisor|spec-lead|implement-lead|retro).
-#                          When provided, returns own-scale entries in full and adjacent-scale
-#                          entries as synopses. Entries without scale field default to own-scale.
-#                          Also applies per-role status filtering:
-#                            worker     → status=current only
-#                            spec-lead  → status=current; notes suppressed historical count
-#                            retro      → all statuses (current, historical, superseded)
-#                            others     → all statuses
-# --work-item <slug>       Work item slug (from _work/<slug>/_meta.json). Used to resolve
-#                          the work-item scope for scale computation. Defaults to subsystem.
+# --scale-set <bucket>     Required. Declared retrieval scale bucket: one of application,
+#                          architectural, subsystem, implementation. No default; missing = error.
+# --work-item <slug>       Work item slug (from _work/<slug>/_meta.json). Used only for
+#                          scope_pointers injection; no longer used for scale computation.
 #
 # Output: Clean markdown block (## Prior Knowledge) or empty string on zero results.
 
@@ -32,7 +26,7 @@ LIMIT=5
 TYPE="knowledge"
 QUERY=""
 EXCLUDE_BACKLINKS=""
-SCALE_CONTEXT=""
+SCALE_SET=""
 WORK_ITEM=""
 
 # --- Parse args ---
@@ -55,7 +49,11 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --scale-context)
-      SCALE_CONTEXT="$2"
+      echo "Warning: --scale-context is deprecated; use --scale-set <bucket> instead." >&2
+      shift 2
+      ;;
+    --scale-set)
+      SCALE_SET="$2"
       shift 2
       ;;
     --work-item)
@@ -79,7 +77,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$QUERY" ]]; then
-  echo "Usage: prefetch-knowledge.sh <query> [--format prompt|summary] [--limit N] [--type knowledge|work|all] [--scale-context <role>] [--work-item <slug>]" >&2
+  echo "Usage: prefetch-knowledge.sh <query> [--format prompt|summary] [--limit N] [--type knowledge|work|all] [--scale-context <role>] [--scale-set <set>] [--work-item <slug>]" >&2
+  exit 1
+fi
+
+if [[ -z "$SCALE_SET" ]]; then
+  echo "Error: --scale-set <bucket> is required. Declare your retrieval scale before fetching." >&2
+  echo "  Use: prefetch-knowledge.sh <query> --scale-set <bucket>" >&2
+  echo "  Buckets: application, architectural, subsystem, implementation" >&2
   exit 1
 fi
 
@@ -99,48 +104,11 @@ OWN_SCALE=""
 ADJ_SCALE_BELOW=""
 ADJ_SCALE_ABOVE=""
 
-if [[ -n "$SCALE_CONTEXT" ]]; then
-  # Map role → default slot (canonical capture slot per role × slot matrix)
-  case "$SCALE_CONTEXT" in
-    worker)         DEFAULT_SLOT="Observations" ;;
-    researcher)     DEFAULT_SLOT="Assertions" ;;
-    advisor)        DEFAULT_SLOT="Guidance" ;;
-    spec-lead)      DEFAULT_SLOT="Synthesis" ;;
-    implement-lead) DEFAULT_SLOT="Synthesis" ;;
-    retro)          DEFAULT_SLOT="Reflection" ;;
-    *)
-      echo "Warning: unknown role '$SCALE_CONTEXT' for --scale-context; ignoring scale-context" >&2
-      SCALE_CONTEXT=""
-      ;;
-  esac
-
-  if [[ -n "$SCALE_CONTEXT" ]]; then
-    # Resolve work-item scope
-    WORK_SCOPE="subsystem"
-    if [[ -n "$WORK_ITEM" ]]; then
-      META_PATH="$KNOWLEDGE_DIR/_work/$WORK_ITEM/_meta.json"
-      if [[ -f "$META_PATH" ]]; then
-        ITEM_SCOPE=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('scope',''))" "$META_PATH" 2>/dev/null || true)
-        if [[ -n "$ITEM_SCOPE" ]]; then
-          WORK_SCOPE="$ITEM_SCOPE"
-        fi
-      fi
-    fi
-
-    # Compute absolute scale via scale-compute.sh
-    COMPUTE_OUT=$(bash "$SCRIPT_DIR/scale-compute.sh" --work-scope "$WORK_SCOPE" --role "$SCALE_CONTEXT" --slot "$DEFAULT_SLOT" 2>/dev/null || true)
-    if [[ -n "$COMPUTE_OUT" ]]; then
-      OWN_SCALE="$COMPUTE_OUT"
-
-      # Get adjacent scale ids
-      ADJ_OUT=$(bash "$SCRIPT_DIR/scale-registry.sh" get-adjacency "$OWN_SCALE" 2>/dev/null || true)
-      ADJ_SCALE_BELOW=$(echo "$ADJ_OUT" | sed -n '1p')
-      ADJ_SCALE_ABOVE=$(echo "$ADJ_OUT" | sed -n '2p')
-    else
-      echo "Warning: scale-compute.sh failed for role '$SCALE_CONTEXT', slot '$DEFAULT_SLOT', scope '$WORK_SCOPE'; ignoring scale-context" >&2
-      SCALE_CONTEXT=""
-    fi
-  fi
+if [[ -n "$SCALE_SET" ]]; then
+  OWN_SCALE="$SCALE_SET"
+  ADJ_OUT=$(bash "$SCRIPT_DIR/scale-registry.sh" get-adjacency "$OWN_SCALE" 2>/dev/null || true)
+  ADJ_SCALE_BELOW=$(echo "$ADJ_OUT" | sed -n '1p')
+  ADJ_SCALE_ABOVE=$(echo "$ADJ_OUT" | sed -n '2p')
 fi
 
 LORE_SEARCH="$SCRIPT_DIR/pk_cli.py"
@@ -174,7 +142,7 @@ export _PK_SCRIPT_DIR="$SCRIPT_DIR"
 export _PK_OWN_SCALE="$OWN_SCALE"
 export _PK_ADJ_SCALE_BELOW="$ADJ_SCALE_BELOW"
 export _PK_ADJ_SCALE_ABOVE="$ADJ_SCALE_ABOVE"
-export _PK_SCALE_CONTEXT="$SCALE_CONTEXT"
+export _PK_SCALE_CONTEXT="$SCALE_SET"
 python3 - "$KNOWLEDGE_DIR" "$FORMAT" "$QUERY" "$LORE_SEARCH" <<'PYEOF'
 import datetime
 import importlib.util
@@ -538,119 +506,77 @@ def _resolve_content(backlink: str) -> str:
 
 suppressed_historical = 0
 
-if scale_context:
-    # Two-pass budget-aware rendering:
-    # Pass 1: accumulate own-scale entries up to budget.
-    # Pass 2: add adjacent-scale synopses if budget remains.
-    own_entries = []
-    adj_entries = []
+# Two-pass budget-aware rendering:
+# Pass 1: accumulate own-scale entries up to budget.
+# Pass 2: add adjacent-scale synopses if budget remains.
+own_entries = []
+adj_entries = []
 
-    for r in results:
-        if r.get("source_type") == "knowledge":
-            entry_scale = _parse_entry_scale(r["file_path"])
-            tier = _scale_tier(entry_scale)
-        else:
-            tier = "own"
-        if tier == "other":
+for r in results:
+    if r.get("source_type") == "knowledge":
+        entry_scale = _parse_entry_scale(r["file_path"])
+        tier = _scale_tier(entry_scale)
+    else:
+        tier = "own"
+    if tier == "other":
+        continue
+    # Status filter
+    if r.get("source_type") == "knowledge":
+        entry_status = _parse_entry_status(r["file_path"])
+        if not _status_visible(entry_status, scale_context):
+            if entry_status in ("historical", "superseded"):
+                suppressed_historical += 1
             continue
-        # Status filter
-        if r.get("source_type") == "knowledge":
-            entry_status = _parse_entry_status(r["file_path"])
-            if not _status_visible(entry_status, scale_context):
-                if entry_status in ("historical", "superseded"):
-                    suppressed_historical += 1
-                continue
-        if tier == "adjacent":
-            adj_entries.append(r)
-        else:
-            own_entries.append(r)
+    if tier == "adjacent":
+        adj_entries.append(r)
+    else:
+        own_entries.append(r)
 
-    budget_remaining = PREFETCH_BUDGET
+budget_remaining = PREFETCH_BUDGET
 
-    # Emit own-scale entries first, tracking char budget
-    for r in own_entries:
-        backlink = build_backlink_from_result(r)
-        stale_tag = get_staleness_annotation(r["file_path"]) if r.get("source_type") == "knowledge" else ""
-        abs_fp = os.path.join(knowledge_dir, r.get("file_path", ""))
-        sa_key = (abs_fp, r["heading"])
-        sa_entries = see_also_map.get(sa_key, [])
-        sa_line = ("See also: " + ", ".join(sa_entries[:3])) if sa_entries else ""
-        trust_line = render_trust_stamp(r, knowledge_dir)
-        corrected_line = _last_corrected_line(r["file_path"]) if r.get("source_type") == "knowledge" else ""
+# Emit own-scale entries first, tracking char budget
+for r in own_entries:
+    backlink = build_backlink_from_result(r)
+    stale_tag = get_staleness_annotation(r["file_path"]) if r.get("source_type") == "knowledge" else ""
+    abs_fp = os.path.join(knowledge_dir, r.get("file_path", ""))
+    sa_key = (abs_fp, r["heading"])
+    sa_entries = see_also_map.get(sa_key, [])
+    sa_line = ("See also: " + ", ".join(sa_entries[:3])) if sa_entries else ""
+    trust_line = render_trust_stamp(r, knowledge_dir)
+    corrected_line = _last_corrected_line(r["file_path"]) if r.get("source_type") == "knowledge" else ""
 
-        content = _resolve_content(backlink)
-        if not content:
-            content = r.get("snippet", "")
-        block = f'\n### {r["heading"]} (from {r["file_path"]}){stale_tag}\n{trust_line}'
-        if corrected_line:
-            block += f'\n{corrected_line}'
-        block += f'\n{content}'
-        if sa_line:
-            block += f'\n{sa_line}'
-        print(block)
-        budget_remaining -= len(block)
+    content = _resolve_content(backlink)
+    if not content:
+        content = r.get("snippet", "")
+    block = f'\n### {r["heading"]} (from {r["file_path"]}){stale_tag}\n{trust_line}'
+    if corrected_line:
+        block += f'\n{corrected_line}'
+    block += f'\n{content}'
+    if sa_line:
+        block += f'\n{sa_line}'
+    print(block)
+    budget_remaining -= len(block)
 
-    # Emit adjacent-scale synopses only if budget remains
-    for r in adj_entries:
-        if budget_remaining <= 0:
-            break
-        stale_tag = get_staleness_annotation(r["file_path"]) if r.get("source_type") == "knowledge" else ""
-        trust_line = render_trust_stamp(r, knowledge_dir)
-        corrected_line = _last_corrected_line(r["file_path"]) if r.get("source_type") == "knowledge" else ""
-        # Derive entry_id from file_path (strip .md suffix)
-        entry_id = r.get("file_path", "")
-        if entry_id.endswith(".md"):
-            entry_id = entry_id[:-3]
-        synopsis = _get_or_synthesize_synopsis(entry_id, own_scale, r.get("snippet", ""), script_dir)
-        if not synopsis:
-            continue
-        block = f'\n### {r["heading"]} (from {r["file_path"]}, adjacent-scale){stale_tag}\n{trust_line}'
-        if corrected_line:
-            block += f'\n{corrected_line}'
-        block += f'\n{synopsis}'
-        print(block)
-        budget_remaining -= len(block)
-
-else:
-    # Non-scale-context path: unchanged flat rendering
-    for r in results:
-        backlink = build_backlink_from_result(r)
-        stale_tag = ""
-        if r.get("source_type") == "knowledge":
-            stale_tag = get_staleness_annotation(r["file_path"])
-        sa_line = ""
-        if r.get("source_type") == "knowledge":
-            abs_fp = os.path.join(knowledge_dir, r["file_path"])
-            sa_key = (abs_fp, r["heading"])
-            sa_entries = see_also_map.get(sa_key, [])
-            if sa_entries:
-                sa_line = "See also: " + ", ".join(sa_entries[:3])
-
-        trust_line = render_trust_stamp(r, knowledge_dir)
-        corrected_line = _last_corrected_line(r["file_path"]) if r.get("source_type") == "knowledge" else ""
-
-        content = _resolve_content(backlink)
-        if content:
-            print()
-            print(f'### {r["heading"]} (from {r["file_path"]}){stale_tag}')
-            print(trust_line)
-            if corrected_line:
-                print(corrected_line)
-            print(content)
-            if sa_line:
-                print(sa_line)
-            continue
-
-        snippet = r.get("snippet", "")
-        if snippet:
-            print()
-            print(f'### {r["heading"]} (from {r["file_path"]}){stale_tag}')
-            print(trust_line)
-            if corrected_line:
-                print(corrected_line)
-            print(snippet)
-            if sa_line:
-                print(sa_line)
+# Emit adjacent-scale synopses only if budget remains
+for r in adj_entries:
+    if budget_remaining <= 0:
+        break
+    stale_tag = get_staleness_annotation(r["file_path"]) if r.get("source_type") == "knowledge" else ""
+    trust_line = render_trust_stamp(r, knowledge_dir)
+    corrected_line = _last_corrected_line(r["file_path"]) if r.get("source_type") == "knowledge" else ""
+    # Derive entry_id from file_path (strip .md suffix)
+    entry_id = r.get("file_path", "")
+    if entry_id.endswith(".md"):
+        entry_id = entry_id[:-3]
+    synopsis = _get_or_synthesize_synopsis(entry_id, own_scale, r.get("snippet", ""), script_dir)
+    if not synopsis:
+        continue
+    block = f'\n### {r["heading"]} (from {r["file_path"]}, adjacent-scale){stale_tag}\n{trust_line}'
+    if corrected_line:
+        block += f'\n{corrected_line}'
+    block += f'\n{synopsis}'
+    print(block)
+    budget_remaining -= len(block)
 
 if suppressed_historical > 0 and scale_context == "spec-lead":
     print(f'\n_{suppressed_historical} historical/superseded {"entry" if suppressed_historical == 1 else "entries"} suppressed — add --include-status=historical to expand._')

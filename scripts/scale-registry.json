@@ -3,12 +3,14 @@
   "scales": [
     {"id": "implementation", "label": "implementation", "ordinal": 1, "aliases": []},
     {"id": "subsystem",      "label": "subsystem",      "ordinal": 2, "aliases": []},
-    {"id": "architectural",  "label": "architectural",  "ordinal": 3, "aliases": []}
+    {"id": "architectural",  "label": "architectural",  "ordinal": 3, "aliases": []},
+    {"id": "application",    "label": "application",    "ordinal": 4, "aliases": []}
   ],
   "labels": {
     "implementation": "implementation",
     "subsystem": "subsystem",
-    "architectural": "architectural"
+    "architectural": "architectural",
+    "application": "application"
   },
   "label_history": []
 }

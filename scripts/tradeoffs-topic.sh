@@ -10,7 +10,7 @@
 # Falls back to standard search with a note when no rationale entries found.
 #
 # Usage:
-#   tradeoffs-topic.sh <topic> [--limit N] [--json]
+#   tradeoffs-topic.sh <topic> --scale-set <bucket> [--limit N] [--json]
 #
 # Exit codes:
 #   0 — success
@@ -23,26 +23,30 @@ source "$SCRIPT_DIR/lib.sh"
 
 usage() {
   cat >&2 <<EOF
-Usage: tradeoffs-topic.sh <topic> [--limit N] [--json]
+Usage: tradeoffs-topic.sh <topic> --scale-set <bucket> [--limit N] [--json]
 
 Surface design alternatives considered and rejected for a topic.
 Searches design-rationale/ entries first, then falls back to general search.
 
 Options:
-  --limit N    Max results to show (default: 5)
-  --json       Output raw JSON instead of formatted text
-  --help, -h   Show this help
+  --scale-set S  Required: retrieval scale bucket (application|architectural|subsystem|implementation)
+  --limit N      Max results to show (default: 5)
+  --json         Output raw JSON instead of formatted text
+  --help, -h     Show this help
 EOF
 }
 
 TOPIC=""
 LIMIT=5
 JSON_MODE=0
+SCALE_SET=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --limit)   LIMIT="$2"; shift 2 ;;
-    --json)    JSON_MODE=1; shift ;;
+    --limit)      LIMIT="$2"; shift 2 ;;
+    --json)       JSON_MODE=1; shift ;;
+    --scale-set)  SCALE_SET="$2"; shift 2 ;;
+    --scale-set=*) SCALE_SET="${1#--scale-set=}"; shift ;;
     --help|-h) usage; exit 0 ;;
     -*)
       echo "Error: unknown flag '$1'" >&2
@@ -67,6 +71,12 @@ if [[ -z "$TOPIC" ]]; then
   exit 1
 fi
 
+if [[ -z "$SCALE_SET" ]]; then
+  echo "Error: --scale-set is required; declare your retrieval scale, e.g. --scale-set architectural" >&2
+  echo "  Buckets: application, architectural, subsystem, implementation" >&2
+  exit 1
+fi
+
 KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 PK_CLI="$SCRIPT_DIR/pk_cli.py"
 
@@ -81,13 +91,13 @@ if [[ $USE_FTS -eq 0 ]]; then
   exit 1
 fi
 
-python3 - "$KNOWLEDGE_DIR" "$TOPIC" "$LIMIT" "$JSON_MODE" "$PK_CLI" "$SCRIPT_DIR" <<'PYEOF'
+python3 - "$KNOWLEDGE_DIR" "$TOPIC" "$LIMIT" "$JSON_MODE" "$PK_CLI" "$SCRIPT_DIR" "$SCALE_SET" <<'PYEOF'
 import json
 import os
 import subprocess
 import sys
 
-kdir, topic, limit_s, json_mode_s, pk_cli, script_dir = sys.argv[1:7]
+kdir, topic, limit_s, json_mode_s, pk_cli, script_dir, scale_set = sys.argv[1:8]
 limit = int(limit_s)
 json_mode = json_mode_s == "1"
 
@@ -99,6 +109,7 @@ RATIONALE_KEYWORDS = {"rejected", "alternative", "tradeoff", "considered", "rati
 
 def run_search(query, extra_args=None):
     args = ["python3", pk_cli, "search", kdir, query,
+            "--scale-set", scale_set,
             "--limit", str(limit * 3), "--json", "--caller", "tradeoffs"]
     if extra_args:
         args += extra_args

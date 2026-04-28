@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # overview-subsystem.sh — Return architectural-scale framing for a subsystem + descent affordances.
 #
-# Usage: overview-subsystem.sh <subsystem> [--limit N] [--json]
+# Usage: overview-subsystem.sh <subsystem> --scale-set <bucket> [--limit N] [--json]
 #
 # Finds architectural-scale entries matching <subsystem>. Falls back to subsystem-scale
 # if no architectural entries exist. Renders with trust stamp + lists direct children.
@@ -18,13 +18,16 @@ source "$SCRIPT_DIR/lib.sh"
 LIMIT=3
 JSON_OUTPUT=false
 SUBSYSTEM=""
+SCALE_SET=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --limit)  LIMIT="$2"; shift 2 ;;
     --json)   JSON_OUTPUT=true; shift ;;
+    --scale-set) SCALE_SET="$2"; shift 2 ;;
+    --scale-set=*) SCALE_SET="${1#--scale-set=}"; shift ;;
     --help|-h)
-      echo "Usage: overview-subsystem.sh <subsystem> [--limit N] [--json]" >&2
+      echo "Usage: overview-subsystem.sh <subsystem> --scale-set <bucket> [--limit N] [--json]" >&2
       exit 0
       ;;
     -*)
@@ -44,7 +47,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$SUBSYSTEM" ]]; then
-  echo "Usage: overview-subsystem.sh <subsystem> [--limit N] [--json]" >&2
+  echo "Usage: overview-subsystem.sh <subsystem> --scale-set <bucket> [--limit N] [--json]" >&2
+  exit 1
+fi
+
+if [[ -z "$SCALE_SET" ]]; then
+  echo "Error: --scale-set is required; declare your retrieval scale, e.g. --scale-set architectural" >&2
+  echo "  Buckets: application, architectural, subsystem, implementation" >&2
   exit 1
 fi
 
@@ -68,21 +77,21 @@ fi
 
 # Search for architectural-scale entries first
 ARCH_JSON=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$SUBSYSTEM" \
-  --min-scale architectural --limit "$LIMIT" --json --caller overview 2>/dev/null || echo "[]")
+  --scale-set "$SCALE_SET" --min-scale architectural --limit "$LIMIT" --json --caller overview 2>/dev/null || echo "[]")
 
 # If no architectural entries, fall back to subsystem-scale
 FALLBACK_USED=false
 if [[ "$ARCH_JSON" == "[]" || -z "$ARCH_JSON" ]]; then
   FALLBACK_USED=true
   ARCH_JSON=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$SUBSYSTEM" \
-    --min-scale subsystem --limit "$LIMIT" --json --caller overview 2>/dev/null || echo "[]")
+    --scale-set "$SCALE_SET" --min-scale subsystem --limit "$LIMIT" --json --caller overview 2>/dev/null || echo "[]")
 fi
 
 # If still no results, try plain search
 if [[ "$ARCH_JSON" == "[]" || -z "$ARCH_JSON" ]]; then
   FALLBACK_USED=true
   ARCH_JSON=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$SUBSYSTEM" \
-    --limit "$LIMIT" --json --caller overview 2>/dev/null || echo "[]")
+    --scale-set "$SCALE_SET" --limit "$LIMIT" --json --caller overview 2>/dev/null || echo "[]")
 fi
 
 export _OV_RESULTS="$ARCH_JSON"

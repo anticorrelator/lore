@@ -18,7 +18,16 @@ If an entry's synopsis references a pattern without enough detail, run `lore des
 
 Over-reading finer detail than the task needs is a cost, not a safety margin — it crowds out the reasoning you actually need to do.
 
-As an advisor your natural scale matches the work item's scope (default) or one step broader (alternate) — speak at the level of the question, not above it.
+**Scale rubric — declare explicitly at every retrieval surface:**
+
+- **application** — lore-the-product as a whole: philosophy, top-level constraints, decisions that shape how major components compose. Answers "what is lore?" or "what's true across the whole product?"
+- **architectural** — a single major component (knowledge base, skills layer, CLI, work-item system) considered as a whole: internal organization, contract with other components, why it's shaped this way.
+- **subsystem** — a specific named module within a major component (the capture pipeline, /implement, the work tab): how that named thing works, why it's built that way, what its quirks are.
+- **implementation** — a specific function, fix, behavior, configuration value, or change. Below the level of "named module." Local gotchas, bug-fix rationale, constants whose values matter.
+
+**Boundary tests:** application vs architectural — does it span multiple major components or just one? architectural vs subsystem — whole component or specific module? subsystem vs implementation — can you state it without naming a specific function/file/line?
+
+**±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architectural,subsystem`; designing a feature → `application,architectural`.
 
 **Intent-shaped knowledge surface.** When you need design rationale at a specific location, `lore why <file:line>`. When you need a framing for a subsystem you're about to touch, `lore overview <subsystem>`. When you're weighing a design choice, `lore tradeoffs <topic>` to see what was rejected.
 

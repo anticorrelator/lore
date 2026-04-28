@@ -1,23 +1,33 @@
 #!/usr/bin/env bash
 # search-knowledge.sh — Search knowledge files by keyword
-# Usage: bash search-knowledge.sh [--concise] <query> [directory]
+# Usage: bash search-knowledge.sh [--concise] [--scale-set <bucket>] <query> [directory]
 # Uses pk_search.py (FTS5) as primary backend, falls back to grep
 # --concise: output only file paths + ### section headings that match (no content)
+# --scale-set: required when FTS5 backend is used; declare retrieval scale
 
 set -euo pipefail
 
 CONCISE=0
+SCALE_SET=""
 ARGS=()
-for arg in "$@"; do
+i=0
+while [[ $i -lt $# ]]; do
+  arg="${@:$((i+1)):1}"
   if [[ "$arg" == "--concise" ]]; then
     CONCISE=1
+  elif [[ "$arg" == "--scale-set" ]]; then
+    i=$((i+1))
+    SCALE_SET="${@:$((i+1)):1}"
+  elif [[ "$arg" == --scale-set=* ]]; then
+    SCALE_SET="${arg#--scale-set=}"
   else
     ARGS+=("$arg")
   fi
+  i=$((i+1))
 done
 
 if [[ ${#ARGS[@]} -lt 1 ]]; then
-  echo "Usage: search-knowledge.sh [--concise] <query> [directory]"
+  echo "Usage: search-knowledge.sh [--concise] [--scale-set <bucket>] <query> [directory]"
   exit 1
 fi
 
@@ -46,10 +56,15 @@ if [[ -f "$LORE_SEARCH" ]]; then
 fi
 
 if [[ $USE_FTS -eq 1 ]]; then
+  if [[ -z "$SCALE_SET" ]]; then
+    echo "Error: --scale-set is required for FTS search; declare your retrieval scale, e.g. --scale-set implementation" >&2
+    echo "  Buckets: application, architectural, subsystem, implementation" >&2
+    exit 1
+  fi
   echo "--- Ranked results (FTS5) ---"
   if [[ $CONCISE -eq 1 ]]; then
     # Concise mode: show file path + heading only
-    FTS_RESULTS=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --limit 20 --json 2>/dev/null || true)
+    FTS_RESULTS=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --scale-set "$SCALE_SET" --limit 20 --json 2>/dev/null || true)
     if [[ -n "$FTS_RESULTS" && "$FTS_RESULTS" != "[]" ]]; then
       # Parse JSON results and display concisely
       python3 -c "
@@ -74,7 +89,7 @@ for r in results:
     fi
   else
     # Full mode: show ranked results with snippets
-    FTS_OUTPUT=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --limit 10 2>/dev/null || true)
+    FTS_OUTPUT=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$QUERY" --scale-set "$SCALE_SET" --limit 10 2>/dev/null || true)
     if [[ -n "$FTS_OUTPUT" ]]; then
       echo "$FTS_OUTPUT"
     else

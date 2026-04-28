@@ -99,7 +99,7 @@ Spawn Explore agents to investigate each domain in parallel.
 
 1. **Pre-fetch knowledge per domain** — before constructing prompts:
    ```bash
-   PRIOR_KNOWLEDGE=$(lore prefetch "<domain path>" --format prompt --limit 5 --scale-context researcher)
+   PRIOR_KNOWLEDGE=$(lore prefetch "<domain path>" --format prompt --limit 5 --scale-set=<bucket>)
    ```
 
 2. **Get directory tree for each domain:**

@@ -3,11 +3,12 @@
 # Usage: lore batch-capture --file captures.json [--json]
 #
 # Input JSON format: array of objects with the same fields as `lore capture`:
-#   [{"insight": "...", "context": "...", "category": "...", "confidence": "high",
-#     "related_files": "...", "source": "...", "example": "..."}, ...]
+#   [{"insight": "...", "scale": "implementation", "context": "...", "category": "...",
+#     "confidence": "high", "related_files": "...", "source": "...", "example": "..."}, ...]
 #
-# Required fields per entry: insight
+# Required fields per entry: insight, scale
 # Optional fields: context, category, confidence, related_files, source, example
+#   scale must be one of: application, architectural, subsystem, implementation
 #
 # Calls capture.sh --skip-manifest for each entry, then runs update-manifest.sh once.
 
@@ -41,10 +42,11 @@ Options:
   -h, --help      Show this help message
 
 Input JSON format:
-  [{"insight": "...", "category": "...", "confidence": "high", ...}, ...]
+  [{"insight": "...", "scale": "implementation", "category": "...", "confidence": "high", ...}, ...]
 
-Required per entry: insight
+Required per entry: insight, scale
 Optional per entry: context, category, confidence, related_files, source, example
+scale must be one of: application, architectural, subsystem, implementation
 EOF
       exit 0
       ;;
@@ -114,7 +116,11 @@ if 'insight' not in entry or not str(entry.get('insight', '')).strip():
     print('missing required field: insight', file=sys.stderr)
     sys.exit(1)
 
-args = ['--insight', entry['insight']]
+if 'scale' not in entry or not str(entry.get('scale', '')).strip():
+    print('missing required field: scale', file=sys.stderr)
+    sys.exit(1)
+
+args = ['--insight', entry['insight'], '--scale', entry['scale']]
 if entry.get('context'):
     args += ['--context', entry['context']]
 if entry.get('category'):

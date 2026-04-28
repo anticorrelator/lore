@@ -5,12 +5,12 @@
 # <slug>          Work item slug (must have a tasks.json in $KDIR/_work/<slug>/)
 # <phase_number>  1-based phase index (must correspond to a phase in tasks.json)
 #
-# Stdout: A ## Prior Knowledge markdown block (--format prompt output from lore query),
-#         or empty string when retrieval_directive is null or resolves no entries.
+# Stdout: A ## Prior Knowledge markdown block (--format prompt output from lore query).
 #
 # Stderr: Diagnostic messages on error conditions.
-# Exit 0: success (including null directive or zero results — those are not errors).
-# Exit non-zero: missing tasks.json, invalid JSON, bad phase number, lore query failure.
+# Exit 0: success (non-null directive, non-empty seeds, lore query succeeded).
+# Exit non-zero: missing tasks.json, invalid JSON, bad phase number, null directive,
+#                empty seeds, missing scale_set, lore query failure.
 #
 # On each successful resolve (non-null directive, non-empty seeds), appends a manifest_load
 # event to $KDIR/_meta/retrieval-log.jsonl. Fail-open: log write errors do not block stdout.
@@ -75,9 +75,10 @@ else:
 EXTRACT_PY
 ) || exit 1
 
-# --- Null directive: clean exit with empty stdout ---
+# --- Null directive: error — scale declaration is required ---
 if [[ "$DIRECTIVE_JSON" == "null" ]]; then
-  exit 0
+  echo "Error: phase $PHASE_NUMBER of '$SLUG' has no retrieval_directive; a scale-declared directive is required." >&2
+  exit 1
 fi
 
 # --- Parse directive fields ---
@@ -115,17 +116,20 @@ f = d.get('filters', {})
 print(f.get('exclude_category', '') if isinstance(f, dict) else '')
 " "$DIRECTIVE_JSON" 2>/dev/null || true)
 
-# --- Empty seeds after parsing: treat as null directive ---
+# --- Empty seeds after parsing: error — seeds are required ---
 if [[ -z "$SEEDS" ]]; then
-  exit 0
+  echo "Error: phase $PHASE_NUMBER of '$SLUG' has a retrieval_directive with no seeds; seeds are required." >&2
+  exit 1
+fi
+
+# --- Missing scale_set: error — scale declaration is required ---
+if [[ -z "$SCALE_SET" ]]; then
+  echo "Error: phase $PHASE_NUMBER of '$SLUG' has a retrieval_directive with no scale_set; declare a scale before fetching." >&2
+  exit 1
 fi
 
 # --- Build lore query args ---
-QUERY_ARGS=("query" "--seeds" "$SEEDS" "--hop-budget" "$HOP_BUDGET")
-
-if [[ -n "$SCALE_SET" ]]; then
-  QUERY_ARGS+=("--scale-set" "$SCALE_SET")
-fi
+QUERY_ARGS=("query" "--seeds" "$SEEDS" "--hop-budget" "$HOP_BUDGET" "--scale-set" "$SCALE_SET")
 if [[ -n "$FILTER_TYPE" ]]; then
   QUERY_ARGS+=("--type" "$FILTER_TYPE")
 fi

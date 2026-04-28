@@ -73,33 +73,6 @@ Also run the merge-candidates analysis:
 lore analyze merge-candidates
 ```
 
-### Coverage check (classifier mode gate)
-
-Before spawning assessment agents, compute scale coverage and determine classifier mode:
-
-```bash
-COVERAGE_JSON=$(bash ~/.lore/scripts/scale-coverage.sh --kdir "$KDIR" --json)
-COVERAGE_PCT=$(echo "$COVERAGE_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(f\"{d['coverage']:.1%}\")")
-CLASSIFIER_MODE=$(echo "$COVERAGE_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['mode'])")
-UNSCALED_ENTRIES=$(echo "$COVERAGE_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d['unknown_paths']))")
-```
-
-Emit the coverage in the summary output:
-```
-[renormalize] Scale coverage: <N>/<total> (<PCT>) — classifier mode: <drift-detector|hybrid>
-```
-
-**Threshold crossing detection:** If coverage just crossed ≥80% (check `$KDIR/_renormalize/activation-log.md` — if the file doesn't exist or its last entry shows mode was `hybrid`, and current mode is `drift-detector`), log the crossing:
-```bash
-mkdir -p "$KDIR/_renormalize"
-cat >> "$KDIR/_renormalize/activation-log.md" << EOF
-
-## <ISO timestamp>
-Coverage crossed 80% threshold: <N>/<total> (<PCT>) scaled entries.
-Classifier switching from hybrid to drift-detector mode.
-EOF
-```
-
 Spawn three Explore agents in parallel, each using a Tier 1 agent definition. This is advisory — agents do NOT modify knowledge files.
 
 Template injections for all three agents:
@@ -111,8 +84,6 @@ Template injections for all three agents:
 
 Inject additional variables before spawning:
 - `{{audit_set}}`: the `entries` array from `$KDIR/_meta/audit-set.json` (JSON array of paths)
-- `{{classifier_mode}}`: `"drift-detector"` or `"hybrid"` (from coverage check above)
-- `{{unscaled_entries}}`: JSON array of entry paths with `scale: unknown` (from coverage check); used only in hybrid mode
 
 The classifier audits only entries in the audit set, not the full store.
 ```
@@ -120,7 +91,7 @@ Task tool params:
   subagent_type: "Explore"
   team_name: "renorm-<timestamp>"
   name: "classifier"
-  prompt: <contents of ~/.claude/agents/classifier.md with {{template}} variables resolved, including {{audit_set}}, {{classifier_mode}}, {{unscaled_entries}}>
+  prompt: <contents of ~/.claude/agents/classifier.md with {{template}} variables resolved, including {{audit_set}}>
 ```
 
 **Agent 3b — Structure Analyst:** Use `~/.claude/agents/structure-analyst.md`
@@ -155,13 +126,11 @@ Assemble them into the final `$KDIR/_meta/assessment-report.json` — this is a 
 ```json
 {
   "generated": "<ISO timestamp>",
-  "classifier_mode": "[from classification-report]",
   "classifications": [from classification-report],
   "clusters": [from structure-report],
   "imbalances": [from structure-report],
   "demotions": [from classification-report],
   "suggested_backlinks": [from crossref-report],
-  "primary_assignments": [from classification-report — empty array in drift-detector mode],
   "summary": {
     "total_classified": [from classification-report],
     "architectural": [from classification-report],
@@ -171,13 +140,12 @@ Assemble them into the final `$KDIR/_meta/assessment-report.json` — this is a 
     "clusters_found": [from structure-report],
     "demotions_recommended": [from classification-report],
     "suggested_backlinks_count": [from crossref-report],
-    "primary_assignments_made": [from classification-report — 0 in drift-detector mode],
     "entries_read_in_full": [from classification-report]
   }
 }
 ```
 
-Step 3 consumes `assessment-report.json` — `primary_assignments` feeds the `rescale` action list when in hybrid mode.
+Step 3 consumes `assessment-report.json`.
 
 ### Step 3: Planning (lead synthesizes)
 
@@ -198,7 +166,7 @@ Synthesize a renormalization plan with these actions:
 5. **Consolidate list:** Entry clusters identified by the assessment — multiple entries describing the same concept at different granularities. Different from merge (which is dedup of near-identical content). **Scale-aware:** same-scale clusters → standard consolidate (parent + delete originals). Cross-scale clusters → `consolidate-bridge` action (bridging parent at highest scale, lower-scale children preserved with `parent:` pointer, not deleted).
 6. **Restructure list:** Categories with structural imbalances flagged by the assessment (>20 flat entries, inconsistent nesting depth, or scale-skew >80% at one scale). For scale-skew proposals, the `split_by_scale: true` flag drives Agent 7 to create scale-keyed subdirectories instead of topic-keyed ones.
 7. **Backlink list:** Cross-reference suggestions from the assessment's `suggested_backlinks` array. These are LLM-identified conceptual relationships not captured by existing backlinks or concordance edges. Present each with source, target, relationship type, and rationale for user review before writing.
-8. **Rescale list:** Entries whose `scale:` field in the META block disagrees with the classifier's current assignment. Change only the `scale:` field — path and content are unchanged. Schema per entry: `entry_id`, `from_scale`, `to_scale`, `reason`. The classifier may co-propose a batch rescale set when a relabel would leave outliers stranded at a now-misnamed scale. **In hybrid mode:** also include `primary_assignments` from `assessment-report.json` as additional rescale entries (from `unknown` to assigned scale).
+8. **Rescale list:** Entries whose `scale:` field in the META block disagrees with the classifier's current assignment. Change only the `scale:` field — path and content are unchanged. Schema per entry: `entry_id`, `from_scale`, `to_scale`, `reason`. The classifier may co-propose a batch rescale set when a relabel would leave outliers stranded at a now-misnamed scale.
 9. **Status-update list:** Entries whose `status:` field should transition from `current` to `superseded` or `historical` — typically because a newer entry covers the same ground. Schema per entry: `entry_id`, `from_status`, `to_status`, optional `successor_entry_id`, `reason`.
 10. **Relabel list:** Proposed renames of a scale's human-readable label in `scripts/scale-registry.json`. Does NOT touch any entry files — only edits the registry's `labels` map and bumps `scale_registry_version`. Schema per entry: `scale_id`, `current_label`, `new_label`, `reason`.
 
@@ -254,7 +222,6 @@ Write the plan to `$KDIR/_meta/renormalize-plan.json` with structure:
 
 Present the plan to the user in a readable format:
 ```
-[renormalize] Scale coverage: <N>/<total> (<PCT>) — classifier mode: <drift-detector|hybrid>
 [renormalize] Proposed plan:
   Fix: N entries (stale + actively used — content rewrite needed)
   Prune: N entries (stale + unused)
@@ -264,7 +231,7 @@ Present the plan to the user in a readable format:
   Consolidate-bridge: N cross-scale clusters (bridging parent + preserved children)
   Restructure: N categories
   Backlinks: N cross-references to write
-  Rescale: N entries (scale field update only; includes N primary assignments in hybrid mode)
+  Rescale: N entries (scale field update only)
   Status updates: N entries (status field transition)
   Relabels: N scale label renames (registry only)
 

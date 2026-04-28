@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """retro-aggregate-compute.py — aggregate the retro pool into convergence-tagged groups.
 
-Usage: retro-aggregate-compute.py <pool_dir>
+Usage: retro-aggregate-compute.py <pool_dir> [--kdir <kdir> --cycle-id <slug>]
 
 Reads every bundle in <pool_dir>/<contributor_id>/*.json, groups cells by
 (template_id, template_version, metric), and tags each group with:
@@ -22,7 +22,13 @@ Emits a single JSON object on stdout:
     groups: [{template_id, template_version, metric, tag,
               total_n, contributor_count,
               row_weighted_mean, contributor_balanced_mean,
-              by_contributor: [{contributor_id, n, mean}]}, ...]
+              by_contributor: [{contributor_id, n, mean}]}, ...],
+    scale_signals: {  # present only when --kdir and --cycle-id are provided
+      declaration_coverage: {declared, total, fraction},
+      redeclare_rate: {redeclares, opportunities, fraction},
+      off_scale_routes_emitted: {count},
+      verifier_disagreements: {count, source}
+    }
   }
 """
 import glob
@@ -38,12 +44,146 @@ DIRECTION_TOLERANCE = 0.25
 IDIO_CONCENTRATION_THRESHOLD = 0.80
 
 
+def compute_scale_signals(kdir: str, cycle_id: str) -> dict:
+    """Compute the four factual scale signals for a given retro cycle.
+
+    Args:
+        kdir: Path to the knowledge store root directory.
+        cycle_id: The work-item slug identifying this retro cycle.
+
+    Returns:
+        Dict with keys: declaration_coverage, redeclare_rate,
+        off_scale_routes_emitted, verifier_disagreements.
+    """
+    # --- declaration_coverage and redeclare_rate from retrieval-log.jsonl ---
+    log_path = os.path.join(kdir, "_meta", "retrieval-log.jsonl")
+    declared_count = 0
+    total_count = 0
+    redeclares = 0
+    redeclare_opportunities = 0
+
+    if os.path.isfile(log_path):
+        rows = []
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+        total_count = len(rows)
+        for r in rows:
+            if r.get("scale_declared") is not None:
+                declared_count += 1
+
+        # redeclare_rate: consecutive rows in the same session with different scale_set
+        prev_session = None
+        prev_scale = None
+        for r in rows:
+            session = r.get("session_id")
+            scale = r.get("scale_set")
+            if session is not None and scale is not None:
+                if session == prev_session and prev_scale is not None:
+                    redeclare_opportunities += 1
+                    if scale != prev_scale:
+                        redeclares += 1
+                prev_session = session
+                prev_scale = scale
+
+    decl_fraction = round(declared_count / total_count, 4) if total_count > 0 else None
+    redeclare_fraction = round(redeclares / redeclare_opportunities, 4) if redeclare_opportunities > 0 else None
+
+    # --- off_scale_routes_emitted from _work/<slug>/off_scale_routes.jsonl ---
+    routes_path = os.path.join(kdir, "_work", cycle_id, "off_scale_routes.jsonl")
+    route_count = 0
+    if os.path.isfile(routes_path):
+        with open(routes_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    route_count += 1
+
+    # --- verifier_disagreements from classification-report.json or scale_drift_rate rows ---
+    disagreement_count = 0
+    disagreement_source = "none"
+
+    report_path = os.path.join(kdir, "_meta", "classification-report.json")
+    if os.path.isfile(report_path):
+        try:
+            with open(report_path, "r", encoding="utf-8") as f:
+                report = json.load(f)
+            disagreement_count = len(report.get("disagreements", []))
+            disagreement_source = "classification-report.json"
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if disagreement_source == "none":
+        # Fall back to scale_drift_rate telemetry rows
+        scorecards_path = os.path.join(kdir, "_scorecards", "rows.jsonl")
+        if os.path.isfile(scorecards_path):
+            try:
+                with open(scorecards_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if row.get("metric") == "scale_drift_rate":
+                            disagreement_count += int(row.get("disagreements", 0))
+                            disagreement_source = "scale_drift_rate telemetry"
+            except OSError:
+                pass
+
+    return {
+        "declaration_coverage": {
+            "declared": declared_count,
+            "total": total_count,
+            "fraction": decl_fraction,
+        },
+        "redeclare_rate": {
+            "redeclares": redeclares,
+            "opportunities": redeclare_opportunities,
+            "fraction": redeclare_fraction,
+        },
+        "off_scale_routes_emitted": {
+            "count": route_count,
+        },
+        "verifier_disagreements": {
+            "count": disagreement_count,
+            "source": disagreement_source,
+        },
+    }
+
+
 def main():
-    if len(sys.argv) != 2:
-        print(json.dumps({"error": "usage: retro-aggregate-compute.py <pool_dir>"}))
+    # Parse args: pool_dir is required; --kdir and --cycle-id are optional
+    args = sys.argv[1:]
+    pool_dir = None
+    kdir = None
+    cycle_id = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--kdir" and i + 1 < len(args):
+            kdir = args[i + 1]
+            i += 2
+        elif args[i] == "--cycle-id" and i + 1 < len(args):
+            cycle_id = args[i + 1]
+            i += 2
+        elif pool_dir is None:
+            pool_dir = args[i]
+            i += 1
+        else:
+            i += 1
+
+    if pool_dir is None:
+        print(json.dumps({"error": "usage: retro-aggregate-compute.py <pool_dir> [--kdir <kdir> --cycle-id <slug>]"}))
         sys.exit(2)
 
-    pool_dir = sys.argv[1]
     bundles = sorted(glob.glob(os.path.join(pool_dir, "*", "*.json")))
 
     contributors = set()
@@ -160,6 +300,10 @@ def main():
         "contributors": sorted(contributors),
         "groups": out_groups,
     }
+
+    if kdir and cycle_id:
+        out["scale_signals"] = compute_scale_signals(kdir, cycle_id)
+
     print(json.dumps(out))
 
 

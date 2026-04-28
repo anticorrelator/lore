@@ -27,9 +27,9 @@ from pathlib import Path
 DB_FILENAME = ".pk_search.db"
 SKIP_FILES = {"_inbox.md", "_index.md", "_meta.md", "_meta.json", "_index.json", "_self_test_results.md", "_manifest.json"}
 SKIP_DIRS = {"_archive", "__pycache__", ".git", "_meta", "_meta_bak", "_inbox"}
-CATEGORY_DIRS = {"abstractions", "architecture", "conventions", "gotchas", "principles", "workflows", "domains", "preferences"}
+CATEGORY_DIRS = {"abstractions", "architecture", "conventions", "design-rationale", "gotchas", "principles", "workflows", "domains", "preferences"}
 # Category priority order for tiebreaking: higher index = higher priority
-CATEGORY_PRIORITY = ["domains", "architecture", "abstractions", "gotchas", "conventions", "workflows", "principles", "preferences"]
+CATEGORY_PRIORITY = ["domains", "architecture", "design-rationale", "abstractions", "gotchas", "conventions", "workflows", "principles", "preferences"]
 CATEGORY_PRIORITY_MAP = {cat: i for i, cat in enumerate(CATEGORY_PRIORITY)}
 CATEGORY_TIEBREAK_MAX = 0.04  # max bonus for highest-priority category (within 0.05 tiebreak range)
 SNIPPET_MAX_CHARS = 500
@@ -964,7 +964,7 @@ class Searcher:
                     parts.append('"' + st.replace('"', '""') + '"')
         return " OR ".join(parts)
 
-    def _log_search(self, query: str, source_type: str | None, result_count: int, elapsed_ms: float, caller: str | None = None, or_fallback: bool = False) -> None:
+    def _log_search(self, query: str, source_type: str | None, result_count: int, elapsed_ms: float, caller: str | None = None, or_fallback: bool = False, scale_set: list[str] | None = None) -> None:
         """Append a JSONL record to _meta/retrieval-log.jsonl."""
         meta_dir = os.path.join(self.knowledge_dir, "_meta")
         log_path = os.path.join(meta_dir, "retrieval-log.jsonl")
@@ -980,6 +980,8 @@ class Searcher:
             record["caller"] = caller
         if or_fallback:
             record["or_fallback"] = True
+        if scale_set is not None:
+            record["scale_declared"] = ",".join(scale_set)
         try:
             os.makedirs(meta_dir, exist_ok=True)
             with open(log_path, "a", encoding="utf-8") as f:
@@ -1000,6 +1002,7 @@ class Searcher:
         min_scale: str | None = None,
         max_scale: str | None = None,
         include_status: tuple[str, ...] | list[str] | None = None,
+        scale_set: list[str] | None = None,
     ) -> list[dict]:
         """Search entries by query. Returns list of result dicts.
 
@@ -1187,7 +1190,7 @@ class Searcher:
         conn.close()
 
         elapsed_ms = (time.time() - search_start) * 1000
-        self._log_search(query, source_type, len(results), elapsed_ms, caller=caller, or_fallback=or_fallback)
+        self._log_search(query, source_type, len(results), elapsed_ms, caller=caller, or_fallback=or_fallback, scale_set=scale_set)
 
         return results
 
@@ -1208,6 +1211,7 @@ class Searcher:
         min_scale: str | None = None,
         max_scale: str | None = None,
         include_status: tuple[str, ...] | list[str] | None = None,
+        scale_set: list[str] | None = None,
     ) -> list[dict]:
         """Search with composite scoring: BM25 + recency + TF-IDF similarity + structural importance.
 
@@ -1232,6 +1236,7 @@ class Searcher:
             min_scale=min_scale,
             max_scale=max_scale,
             include_status=include_status,
+            scale_set=scale_set,
         )
 
         # Build query TF-IDF vector using precomputed corpus stats
@@ -1361,6 +1366,7 @@ class Searcher:
         min_scale: str | None = None,
         max_scale: str | None = None,
         include_status: tuple[str, ...] | list[str] | None = None,
+        scale_set: list[str] | None = None,
     ) -> dict:
         """Search with composite scoring and budget-aware result partitioning.
 
@@ -1390,6 +1396,7 @@ class Searcher:
             min_scale=min_scale,
             max_scale=max_scale,
             include_status=include_status,
+            scale_set=scale_set,
         )
 
         full: list[dict] = []

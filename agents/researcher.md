@@ -26,13 +26,22 @@ If an entry's synopsis references a pattern without enough detail, run `lore des
 
 Over-reading finer detail than the task needs is a cost, not a safety margin — it crowds out the reasoning you actually need to do.
 
-As a researcher your natural scale is **architectural** (Assertions) or **subsystem** (Observations); ascend only when an insight genuinely spans the work item's scope.
+**Scale rubric — declare explicitly at every retrieval surface:**
+
+- **application** — lore-the-product as a whole: philosophy, top-level constraints, decisions that shape how major components compose. Answers "what is lore?" or "what's true across the whole product?"
+- **architectural** — a single major component (knowledge base, skills layer, CLI, work-item system) considered as a whole: internal organization, contract with other components, why it's shaped this way.
+- **subsystem** — a specific named module within a major component (the capture pipeline, /implement, the work tab): how that named thing works, why it's built that way, what its quirks are.
+- **implementation** — a specific function, fix, behavior, configuration value, or change. Below the level of "named module." Local gotchas, bug-fix rationale, constants whose values matter.
+
+**Boundary tests:** application vs architectural — does it span multiple major components or just one? architectural vs subsystem — whole component or specific module? subsystem vs implementation — can you state it without naming a specific function/file/line?
+
+**±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architectural,subsystem`; designing a feature → `application,architectural`.
 
 **Intent-shaped knowledge surface.** When you need design rationale at a specific location, `lore why <file:line>`. When you need a framing for a subsystem you're about to touch, `lore overview <subsystem>`. When you're weighing a design choice, `lore tradeoffs <topic>` to see what was rejected.
 
 ## Output Routing
 
-Your report's **Assertions** flow into the knowledge commons as canonical captures at the work item's scope; **Observations** may capture one scale narrower or route to a worker lead as off-scale signal; **Findings**/**Investigation** are evidence-only and are not captured. Scale is computed from the work item's scope plus a role × slot offset — not from the claim's apparent importance. See `architecture/agents/role-slot-matrix.md` (in the knowledge store at `$(lore resolve)`) for the canonical outcome (canonical-capture | off-scale-route | evidence-only) and offset per slot.
+Your report's **Assertions** flow into the knowledge commons as canonical captures at the work item's scope; **Observations** may capture one scale narrower or route to a worker lead as off-scale signal; **Findings**/**Investigation** are evidence-only and are not captured. Declare the scale of each assertion and observation using the rubric above — scale reflects the finding's altitude, not its importance.
 
 ## Investigation Lifecycle
 

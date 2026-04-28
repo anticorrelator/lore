@@ -22,13 +22,22 @@ If an entry's synopsis references a pattern without enough detail, run `lore des
 
 Over-reading finer detail than the task needs is a cost, not a safety margin — it crowds out the reasoning you actually need to do.
 
-As a worker your natural scale is **implementation**; ascend to subsystem framing only when changes cross file boundaries.
+**Scale rubric — declare explicitly at every retrieval surface:**
+
+- **application** — lore-the-product as a whole: philosophy, top-level constraints, decisions that shape how major components compose. Answers "what is lore?" or "what's true across the whole product?"
+- **architectural** — a single major component (knowledge base, skills layer, CLI, work-item system) considered as a whole: internal organization, contract with other components, why it's shaped this way.
+- **subsystem** — a specific named module within a major component (the capture pipeline, /implement, the work tab): how that named thing works, why it's built that way, what its quirks are.
+- **implementation** — a specific function, fix, behavior, configuration value, or change. Below the level of "named module." Local gotchas, bug-fix rationale, constants whose values matter.
+
+**Boundary tests:** application vs architectural — does it span multiple major components or just one? architectural vs subsystem — whole component or specific module? subsystem vs implementation — can you state it without naming a specific function/file/line?
+
+**±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architectural,subsystem`; designing a feature → `application,architectural`.
 
 **Intent-shaped knowledge surface.** When you need design rationale at a specific location, `lore why <file:line>`. When you need a framing for a subsystem you're about to touch, `lore overview <subsystem>`. When you're weighing a design choice, `lore tradeoffs <topic>` to see what was rejected.
 
 ## Output Routing
 
-Your report's **Observations** flow into the knowledge commons as canonical captures; **Tests** are evidence-only and are not captured. Scale is computed from the work item's scope plus a role × slot offset — not from the insight's apparent importance. See `architecture/agents/role-slot-matrix.md` (in the knowledge store at `$(lore resolve)`) for the canonical outcome (canonical-capture | off-scale-route | evidence-only) and offset per slot.
+Your report's **Observations** flow into the knowledge commons as canonical captures; **Tests** are evidence-only and are not captured. Declare the scale of each observation using the rubric above — scale reflects the finding's altitude, not its importance.
 
 ## Workflow
 
@@ -179,24 +188,6 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        emit only real consultations.>
      **Blockers:** <none, or description of what's blocking>
    ```
-7.5. **Wait for lead acknowledgment before marking task completed.**
-   <!-- W06_FIDELITY_ACK_WAIT -->
-
-   **Bootstrap guard:** if the file `~/.lore/scripts/validate-fidelity-artifact.sh`
-   does NOT exist yet, skip this step entirely (pass through to Step 8
-   immediately). This is a one-time bootstrap accommodation for the
-   implementation that ships W06 itself. The lead will remove this guard
-   in a follow-up once W06 is fully deployed and all three sentinels
-   (`W06_FIDELITY_JUDGE_TEMPLATE_READY`, `W06_FIDELITY_STEP4_INTEGRATED`,
-   `W06_FIDELITY_ACK_WAIT`) are stable.
-
-   When the validator script is present, the lead will reply via
-   SendMessage with either `fidelity: ack` (task accepted; proceed to
-   Step 8-9) or `fidelity: respawn: <reason>` (task rejected; return to
-   Step 4 with the reason). Do NOT emit TaskUpdate status=completed
-   until the ack is received — the TaskCompleted hook requires a
-   fidelity artifact on disk, which the lead writes during its judgment
-   window.
 8. **Update task description** with your full completion report:
    TaskUpdate with description set to the same content from step 7
    (including the **Observations:**, **Tier 2 evidence:**, and — when

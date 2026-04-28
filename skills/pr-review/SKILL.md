@@ -62,7 +62,7 @@ From the fetched data, extract:
 ### 1e. Load prior knowledge
 
 ```bash
-lore prefetch "pr-review" --scale-context advisor
+lore prefetch "pr-review" --scale-set=<bucket>
 ```
 
 Read the `## Prior Knowledge` block this produces. Incorporate any surfaced preferences or conventions into the review — especially scope-matched preference entries whose `related_files` include this skill.
@@ -105,6 +105,8 @@ If the result is non-empty (not `[]`), append each returned skill to the selecte
 - Are tagged `[ceremony]` in the triage table with reason "Ceremony config"
 - Are **not** subject to adaptive skip conditions — they always run when configured
 - Can be removed by the user at the triage gate (Step 2c) like any other lens
+
+**Agency constraint:** The user — and only the user — can remove a ceremony lens at Step 2c. The agent MUST NOT self-remove a ceremony lens on the basis of latency, PR size, perceived low signal, or any other judgment call. Invalid skip rationales — do not act on any of these: the PR is small, the review is low-signal, the run will take too long, or the user did not explicitly ask for ceremony lenses this session. The user configured them; only the user can unconfigure them.
 
 ### 2c. Present triage
 
@@ -256,7 +258,7 @@ Spawn one agent per selected lens in parallel. Maximum 6 concurrent agents.
 
 ### 3b-ceremony. Dispatch ceremony lenses
 
-After built-in lens agents are spawned, dispatch any ceremony lenses from the selected set. Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b.
+**This step is mandatory and must not be skipped.** After built-in lens agents are spawned, dispatch every ceremony lens in the selected set. Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b.
 
 For each ceremony lens in the selected set, invoke it via the Skill tool with the PR number as the sole argument:
 
@@ -265,6 +267,10 @@ For each ceremony lens in the selected set, invoke it via the Skill tool with th
 ```
 
 Ceremony lenses fetch their own PR data — do **not** pass diff content, review context, or metadata. Run all ceremony lens invocations in parallel.
+
+**Why unconditional dispatch matters.** A downstream telemetry consumer — tournament reconciliation, coverage dashboards, session observability — cannot distinguish "ceremony not configured" from "agent chose not to run it" when the dispatch is silently skipped. Silent omission corrupts the signal: configured lenses appear as absent lenses, and the consumer has no way to recover the distinction after the fact.
+
+Do NOT skip this step. Do NOT omit a ceremony lens because the PR is small. Do NOT omit because the run seems low-signal. Do NOT omit because the user did not explicitly re-request ceremony lenses this session. Do NOT omit because of perceived latency cost. None of these are valid rationales — the user configured the ceremony; only the user can remove it. If a ceremony lens is genuinely inapplicable, stop and ask the user whether to remove it at Step 2c rather than self-removing.
 
 Ceremony lens results are collected alongside built-in lens results in Step 3d. If a ceremony lens does not produce findings in the standard Findings Output Format, its output is handled as non-conforming (see Step 3d).
 

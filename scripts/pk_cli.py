@@ -65,6 +65,7 @@ def cmd_search(args: argparse.Namespace) -> None:
     exclude_category = getattr(args, "exclude_category", None)
     caller = getattr(args, "caller", None)
     include_archived = getattr(args, "include_archived", False)
+    scale_set = getattr(args, "scale_set", None)  # wired into Searcher.search by task-25
     min_scale = getattr(args, "min_scale", None)
     max_scale = getattr(args, "max_scale", None)
     include_status = getattr(args, "include_status", None)
@@ -860,6 +861,7 @@ def main() -> None:
     p_search.add_argument("--include-archived", action="store_true", help="Include archived work items in results (excluded by default)")
     p_search.add_argument("--expand", action="store_true", help="Expand results with similar entries from TF-IDF concordance (See also)")
     p_search.add_argument("--budget", type=int, default=None, help="Budget in chars: return two-tier JSON (full + titles_only) within budget")
+    p_search.add_argument("--scale-set", default=None, metavar="BUCKET", help="Declared retrieval scale bucket (e.g. implementation). Required; wired into Searcher in task-25.")
     p_search.add_argument("--min-scale", default=None, metavar="SCALE", help="Include only entries with scale >= SCALE (e.g. subsystem). Skips unknown-scale entries.")
     p_search.add_argument("--max-scale", default=None, metavar="SCALE", help="Include only entries with scale <= SCALE (e.g. subsystem). Skips unknown-scale entries.")
     p_search.add_argument("--include-status", nargs="+", default=None, metavar="STATUS", help="Status values to include (current, superseded, historical). Default: current only.")
