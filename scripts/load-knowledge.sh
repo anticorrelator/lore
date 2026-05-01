@@ -65,6 +65,16 @@ if [[ "$INBOX_COUNT" -gt 0 ]]; then
   echo ""
 fi
 
+# --- Pending captures signal ---
+PENDING_CAPTURES_DIR="$KNOWLEDGE_DIR/_pending_captures"
+if [[ -d "$PENDING_CAPTURES_DIR" ]]; then
+  PENDING_COUNT=$(find "$PENDING_CAPTURES_DIR" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
+  if [[ "${PENDING_COUNT:-0}" -gt 0 ]]; then
+    echo "[capture] $PENDING_COUNT pending candidates — process via /remember first-turn"
+    echo ""
+  fi
+fi
+
 # --- Job B: Load knowledge ---
 echo "=== Project Knowledge ==="
 echo ""

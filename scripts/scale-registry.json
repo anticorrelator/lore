@@ -1,16 +1,27 @@
 {
-  "version": 1,
+  "version": 2,
   "scales": [
     {"id": "implementation", "label": "implementation", "ordinal": 1, "aliases": []},
     {"id": "subsystem",      "label": "subsystem",      "ordinal": 2, "aliases": []},
-    {"id": "architectural",  "label": "architectural",  "ordinal": 3, "aliases": []},
-    {"id": "application",    "label": "application",    "ordinal": 4, "aliases": []}
+    {"id": "architecture",   "label": "architecture",   "ordinal": 3, "aliases": []},
+    {"id": "abstract",       "label": "abstract",       "ordinal": 4, "aliases": []}
   ],
   "labels": {
     "implementation": "implementation",
     "subsystem": "subsystem",
-    "architectural": "architectural",
-    "application": "application"
+    "architecture": "architecture",
+    "abstract": "abstract"
   },
-  "label_history": []
+  "label_history": [
+    {
+      "version": 2,
+      "relabeled_at": "2026-04-29T06:55:01Z",
+      "labels": {
+        "implementation": "implementation",
+        "subsystem": "subsystem",
+        "architectural": "architectural",
+        "application": "application"
+      }
+    }
+  ]
 }

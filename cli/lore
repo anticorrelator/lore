@@ -383,7 +383,7 @@ cmd_scale() {
       return 0
       ;;
     compute)
-      echo "Error: 'lore scale compute' has been removed. Scale is now declared by the author using the 4-bucket rubric (application, architectural, subsystem, implementation). See the scale rubric in your agent template or SKILL.md for guidance." >&2
+      echo "Error: 'lore scale compute' has been removed. Scale is now declared by the author using the 4-bucket rubric (abstract, architecture, subsystem, implementation). See the scale rubric in your agent template or SKILL.md for guidance." >&2
       return 1
       ;;
     registry)
@@ -853,8 +853,6 @@ cmd_query() {
   local hop_budget=0
   local budget=""
   local scale_set=""
-  local min_scale=""
-  local max_scale=""
   local type_filter="knowledge"
   local exclude_category=""
   local format="json"
@@ -865,7 +863,7 @@ cmd_query() {
       --help|-h)
         cat >&2 <<'EOF'
 Usage: lore query [<seed>] [--seeds <csv>] [--hop-budget N] [--budget N]
-                  [--scale-set <csv>] [--min-scale S] [--max-scale S]
+                  [--scale-set <csv>]
                   [--type knowledge|work|all]
                   [--exclude-category <cat>] [--format json|prompt]
 
@@ -877,9 +875,9 @@ Flags:
   --seeds <csv>          Comma-separated seed list (backlinks or query text)
   --hop-budget N         0=no expand (default), >=1=TF-IDF concordance widening
   --budget N             Budget-aware search (mutually exclusive with --hop-budget >=1)
-  --scale-set <csv>      Required scale filter; entries without a declared scale are excluded
-  --min-scale S          Hard min-scale filter (skips unknown-scale entries)
-  --max-scale S          Hard max-scale filter (skips unknown-scale entries)
+  --scale-set <csv>      Required scale filter; entries pass when their label set
+                         intersects the requested set (multi-label aware).
+                         Entries without a declared scale are excluded.
   --type <t>             Source type: knowledge, work, or all (default: knowledge)
   --exclude-category <c> Exclude entries in this category
   --format json|prompt   Output format (default: json)
@@ -902,13 +900,11 @@ EOF
         scale_set="$2"
         shift 2
         ;;
-      --min-scale)
-        min_scale="$2"
-        shift 2
-        ;;
-      --max-scale)
-        max_scale="$2"
-        shift 2
+      --min-scale|--min-scale=*|--max-scale|--max-scale=*)
+        echo "Error: --min-scale and --max-scale were retired in the multi-label scale migration." >&2
+        echo "  Use --scale-set <csv> instead — entries pass when their label set intersects the requested set." >&2
+        echo "  Example: lore query --seeds <seed> --scale-set subsystem,implementation" >&2
+        return 2
         ;;
       --type)
         type_filter="$2"
@@ -952,7 +948,7 @@ EOF
   if [[ -z "$scale_set" ]]; then
     echo "Error: --scale-set is required. Declare your retrieval scale to proceed." >&2
     echo "  Use: lore query --seeds <seed> --scale-set <bucket>" >&2
-    echo "  Buckets: application, architectural, subsystem, implementation" >&2
+    echo "  Buckets: abstract, architecture, subsystem, implementation" >&2
     return 1
   fi
 
@@ -1058,11 +1054,12 @@ RESOLVE_PY
   fi
 
   # --- Build pk_cli.py search args ---
-  local search_args=("search" "$kdir" "$query" "--json" "--caller" "lore-query")
+  # Scale filtering is delegated to Searcher (single authority — D4 consolidation).
+  # category=preferences and scale=abstract entries bypass the scale filter inside
+  # Searcher.search; no duplicate post-filter is applied here.
+  local search_args=("search" "$kdir" "$query" "--json" "--caller" "lore-query" "--scale-set" "$scale_set")
   [[ "$type_filter" != "all" ]] && search_args+=("--type" "$type_filter")
   [[ -n "$exclude_category" ]] && search_args+=("--exclude-category" "$exclude_category")
-  [[ -n "$min_scale" ]] && search_args+=("--min-scale" "$min_scale")
-  [[ -n "$max_scale" ]] && search_args+=("--max-scale" "$max_scale")
 
   if [[ -n "$budget" ]]; then
     search_args+=("--budget" "$budget")
@@ -1077,18 +1074,14 @@ RESOLVE_PY
     raw_results="[]"
   fi
 
-  # --- Post-process: inject path field + apply scale-set strict filter ---
+  # --- Post-process: inject path field only; scale filter already applied by Searcher ---
   local processed
-  processed=$(python3 - "$raw_results" "$kdir" "$scale_set" <<'POST_PY'
-import json, sys, os
+  processed=$(python3 - "$raw_results" "$kdir" <<'POST_PY'
+import json, sys
 
 raw = sys.argv[1]
-kdir = sys.argv[2]
-scale_set_csv = sys.argv[3]
-
 data = json.loads(raw)
 
-# Handle budget shape: {full, titles_only, budget_used, budget_total}
 is_budget = isinstance(data, dict) and "full" in data
 
 def inject_path(entries):
@@ -1096,31 +1089,18 @@ def inject_path(entries):
     for r in entries:
         entry = dict(r)
         if "path" not in entry:
-            fp = entry.get("file_path", "")
-            entry["path"] = fp
-        # Propagate path into similar_entries too
+            entry["path"] = entry.get("file_path", "")
         for s in entry.get("similar_entries", []):
             if "path" not in s:
                 s["path"] = s.get("file_path", "")
         out.append(entry)
     return out
 
-def scale_filter(entries, scale_set):
-    if not scale_set:
-        return entries
-    scales = {s.strip().lower() for s in scale_set.split(",") if s.strip()}
-    out = []
-    for r in entries:
-        entry_scale = (r.get("scale") or "").lower().strip()
-        if entry_scale in scales:
-            out.append(r)
-    return out
-
 if is_budget:
-    data["full"] = scale_filter(inject_path(data["full"]), scale_set_csv)
-    data["titles_only"] = scale_filter(inject_path(data["titles_only"]), scale_set_csv)
+    data["full"] = inject_path(data["full"])
+    data["titles_only"] = inject_path(data["titles_only"])
 else:
-    data = scale_filter(inject_path(data), scale_set_csv)
+    data = inject_path(data)
 
 print(json.dumps(data, indent=2))
 POST_PY
@@ -1178,12 +1158,13 @@ cmd_search() {
   local type="all"
   local json_flag=""
   local scale_set=""
+  local caller="cli"
   local args=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --help|-h)
-        echo "Usage: lore search <query> [--scale-set <bucket>] [--type knowledge|work|all] [--json]" >&2
+        echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json]" >&2
         return 0
         ;;
       --type)
@@ -1202,6 +1183,14 @@ cmd_search() {
         scale_set="${1#--scale-set=}"
         shift
         ;;
+      --caller)
+        caller="$2"
+        shift 2
+        ;;
+      --caller=*)
+        caller="${1#--caller=}"
+        shift
+        ;;
       *)
         args+=("$1")
         shift
@@ -1210,7 +1199,7 @@ cmd_search() {
   done
 
   if [[ ${#args[@]} -eq 0 ]]; then
-    echo "Usage: lore search <query> [--scale-set <bucket>] [--type knowledge|work|all] [--json]" >&2
+    echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json]" >&2
     return 1
   fi
 
@@ -1221,7 +1210,7 @@ cmd_search() {
     fi
     echo "Scale declaration required: add --scale-set <bucket> to your search." >&2
     echo "  Example: lore search \"${args[0]:-<query>}\" --scale-set implementation" >&2
-    echo "  Buckets: application, architectural, subsystem, implementation" >&2
+    echo "  Buckets: abstract, architecture, subsystem, implementation" >&2
     return 1
   fi
 
@@ -1232,15 +1221,15 @@ cmd_search() {
   if [[ -n "$json_flag" ]]; then
     case "$type" in
       knowledge)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --json "${args[@]:1}"
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json "${args[@]:1}"
         ;;
       work)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --json --type work "${args[@]:1}"
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json --type work "${args[@]:1}"
         ;;
       all)
         local k_json w_json
-        k_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --json "${args[@]:1}")"
-        w_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --json --type work "${args[@]:1}")"
+        k_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json "${args[@]:1}")"
+        w_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json --type work "${args[@]:1}")"
         python3 -c "import json,sys; a=json.loads(sys.argv[1]); b=json.loads(sys.argv[2]); print(json.dumps(a+b,indent=2))" "$k_json" "$w_json"
         ;;
       *)
@@ -1251,13 +1240,13 @@ cmd_search() {
   else
     case "$type" in
       knowledge)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" "${args[@]:1}"
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" "${args[@]:1}"
         ;;
       work)
         "$SCRIPTS_DIR/search-work.sh" "$query"
         ;;
       all)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" "${args[@]:1}"
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" "${args[@]:1}"
         echo ""
         "$SCRIPTS_DIR/search-work.sh" "$query"
         ;;
@@ -1318,6 +1307,9 @@ cmd_work() {
       ;;
     regen-tasks)
       "$SCRIPTS_DIR/regen-tasks.sh" "$@"
+      ;;
+    phase-context)
+      "$SCRIPTS_DIR/phase-context.sh" "$@"
       ;;
     check)
       "$SCRIPTS_DIR/update-plan-checkbox.sh" "$@"

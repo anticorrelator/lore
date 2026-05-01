@@ -2,7 +2,7 @@
 name: implement
 description: "Execute a spec's plan with a knowledge-aware agent team — spawns workers, tracks progress, captures architectural findings"
 user_invocable: true
-argument_description: "[work item name] [--model opus|sonnet]"
+argument_description: "[work item name] [--model sonnet|opus]"
 allowed-tools:
   - Bash
   - Read
@@ -72,9 +72,11 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
 | 9 If PR exists or review requested, branch to `/pr-review` | Step 7 sub-step |
 | 10 Prepare `/retro` inputs | Step 7 |
 
+**Lead-inline route variant.** Step 3.0 introduces a pre-dispatch short-circuit. When the plan satisfies the lead-inline conditions (single prescriptive task, ≤3 files, no advisors), §9.2 steps 2–6 collapse into direct lead execution: the lead applies edits using its own tools, emits Tier 2 evidence with `LEAD_TEMPLATE_VERSION`, then jumps to Step 5 (promote) → Step 6 (followup gate) → Step 7 (cleanup). No team is created and no workers spawn.
+
 ### Step 1: Load work item and validate
 
-1. Parse arguments: extract work item name and optional `--model` flag (default: `sonnet`, accept `opus`)
+1. Parse arguments: extract work item name and optional `--model` flag (default: `opus`, accept `sonnet`)
 2. Resolve work item using the same fuzzy matching algorithm as `/work`:
    - Exact slug match → substring match on title → substring on slug → branch match → recency → archive fallback
    - **If resolved item is tagged `[archived]`:** Warn the user: "This work item is archived. Proceed anyway?" Wait for explicit confirmation before continuing. If the user confirms, load from `$WORK_DIR/_archive/<slug>/`.
@@ -90,7 +92,7 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
 8. Present a brief summary and proceed immediately:
    ```
    [implement] <Title>
-   Model: sonnet (override with --model opus)
+   Model: opus (override with --model sonnet)
    Phases: N with M unchecked tasks
    Prior Tier 2 claims: K rows loaded from task-claims.jsonl (or "none — first run")
    ```
@@ -124,6 +126,10 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
 
 5. **Create tasks from the output:** Read the `lore work load-tasks` output once. For each `=== task-N ===` block, execute one `TaskCreate` call using the `subject`, `activeForm`, and `description` fields. Track the mapping of `task-N` IDs to actual TaskCreate return IDs, then call `TaskUpdate(addBlockedBy=[...])` for any task with a non-empty `blockedBy` field.
 
+   **Per-task descriptions are lean by design** — each description begins with a `**Phase:** N` line (the authoritative phase-number source per D6) followed only by the task-specific assignment (objective, files, scope). Phase-level context (Design Decisions, Verification, Strategy, Reference files, Knowledge backlinks) lives in `tasks.json → phases[N-1].phase_context` and is fetched lazily by the worker via `lore work phase-context <slug> <phase-number>` after `TaskGet`. The lead does NOT need to embed phase context into `TaskCreate` description fields.
+
+   **Backward-compatibility:** legacy `tasks.json` files (generated before this change) do not carry a `phase_context` field. `lore work phase-context` exits 0 with empty stdout for those files; workers that receive empty output proceed using the inline phase context already present in their description (the old behavior). No regen is required before resuming implementation on a legacy work item.
+
 6. **Build phase map** — after `lore work load-tasks` succeeds, read `tasks.json` directly to build an in-memory phase map indexed by 1-based phase number:
    ```bash
    python3 -c "
@@ -138,9 +144,50 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
 
    If `tasks.json` is missing (fallback path from Step 2.4), run this step after the fallback generation completes.
 
+### Step 3.0: Lead-inline gate (pre-dispatch short-circuit)
+
+Before spawning anything, evaluate whether the plan qualifies for **lead-inline execution**. Worker dispatch's value is parallelism across independent tasks plus discretion-bearing context for intent+constraints work; both vanish when the plan reduces to a single fully-determined edit. The ~22KB context tax per spawn plus TeamCreate + TaskCreate + completion round-trip is then pure overhead.
+
+The gate fires when **all four** conditions hold:
+
+1. **Single task** — `tasks.json` contains exactly one task across all phases (count unchecked `- [ ]` entries on `plan.md`'s `**Tasks:**` blocks; cross-check against `tasks.json` task array length).
+2. **Prescriptive format** — the task's containing phase declares `**Task format:** prescriptive` in `plan.md`. Intent+constraints tasks involve worker discretion shaping the outcome; lead-inline removes that discretion channel and is unsafe for them.
+3. **Small surface** — the task's `**Files:**` block lists ≤3 files.
+4. **No advisor declaration** — no phase declares an `**Advisors:**` block, and `lore ceremony get implement` returns `[]`. Advisors are persistent team members tied to the team lifecycle; lead-inline has no team.
+
+**If any condition fails:** skip Step 3.0 entirely and proceed to Step 3 (worker dispatch). Do not log a skip — the worker pipeline is the default.
+
+**If all conditions hold:** apply edits inline.
+
+1. **Log the gate firing** — append one line to `execution-log.md` so retro can attribute the route taken:
+   ```bash
+   printf 'Lead-inline execution: gate fired\nConditions: single task, prescriptive, %d files, no advisors\nTask: %s\n' \
+     "<file-count>" "<task-subject>" \
+     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
+   ```
+
+2. **Apply the edits directly** using the lead's `Read` / `Edit` / `Write` / `Bash` tools, honoring the phase's `**Verification:**` objectives implicitly. The task description still loads via `lore work load-tasks <slug>` — read it the same way a worker would, then execute the prescriptive instructions yourself.
+
+3. **Emit Tier 2 evidence** for any falsifiable claims the edits depend on. Use `LEAD_TEMPLATE_VERSION` — the lead is the producer in this route:
+   ```bash
+   echo '<tier2-row-json>' \
+     | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>
+   ```
+
+4. **Stash any Tier 3 candidates** the lead notices for Step 5 promotion. Promotion still goes through `lore promote` with `--producer-role implement-lead --template-version "$LEAD_TEMPLATE_VERSION"`.
+
+5. **Mark the task complete** on the plan checkbox:
+   ```bash
+   lore work check <slug> "<task-subject>"
+   ```
+
+6. **Skip Steps 3, 4, and Step 7's TeamDelete** — there is no team to shut down. Proceed directly to **Step 5 (Promote accepted Tier 3 candidates)**, then **Step 6 (Followup creation gate)**, then **Step 7 (Cleanup and report)** with `Tier 2 claims written: <count>` reflecting the lead's emissions.
+
+**Sanctioned pause:** if the lead is unsure whether the prescriptive task is fully determined enough to execute without discretion, fall through to Step 3 worker dispatch. Lead-inline is a short-circuit, not a forced route.
+
 ### Step 3: Spawn agents
 
-**You MUST spawn workers immediately after Step 3.6 completes.** Do not pause to confirm scope. Do not echo plan-resolved open questions back to the user (the plan already encodes scope guards in task descriptions). Do not surface "this is large" or "this will take many rounds" as a decision request. Do not request approval to modify a skill because the skill being modified is the running skill (your prompt is loaded; file edits do not affect the current run). The only sanctioned pre-dispatch pauses are: (a) the work item resolved to an `[archived]` item without explicit confirmation (Step 1.2), (b) `tasks.json` checksum mismatch (Step 2.3), or (c) `~/.claude/agents/worker.md` is missing (Step 1, MANDATORY clause). Pausing for any other reason is a faster-path bypass — the cost is borne by the user as session-spanning delay; the lead pays nothing. **Why immediate dispatch matters:** one bad spawn is caught in Step 4 review; pre-dispatch confirmation does not buy safety the system already provides.
+**You MUST spawn workers immediately after Step 3.6 completes.** Do not pause to confirm scope. Do not echo plan-resolved open questions back to the user (the plan already encodes scope guards in task descriptions). Do not surface "this is large" or "this will take many rounds" as a decision request. Do not request approval to modify a skill because the skill being modified is the running skill (your prompt is loaded; file edits do not affect the current run). The only sanctioned pre-dispatch pauses are: (a) the work item resolved to an `[archived]` item without explicit confirmation (Step 1.2), (b) `tasks.json` checksum mismatch (Step 2.3), (c) `~/.claude/agents/worker.md` is missing (Step 1, MANDATORY clause), or (d) the Step 3.0 Lead-inline gate fired and execution already completed inline (skip Step 3 entirely). Pausing for any other reason is a faster-path bypass — the cost is borne by the user as session-spanning delay; the lead pays nothing. **Why immediate dispatch matters:** one bad spawn is caught in Step 4 review; pre-dispatch confirmation does not buy safety the system already provides.
 
 1. **Pre-fetch knowledge for worker prompts** — build `$PRIOR_KNOWLEDGE` by iterating over each phase in `$PHASE_MAP`. For every phase, apply the three-branch gate in priority order:
 
@@ -150,6 +197,10 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
    PHASE_PK=$(bash ~/.lore/scripts/resolve-manifest.sh "<slug>" "<phase_number>" 2>/dev/null || true)
    ```
    Append non-empty output under a `### Phase N: <phase_name>` heading into `$PRIOR_KNOWLEDGE`. A retrieval directive is authoritative over the other branches for its phase — do not also run prefetch or skip-check for that phase.
+
+   **Sectioned output for v2 directives.** When the phase's directive is `version: 2` (per-topic decomposition — see `/spec` Step 5b), `resolve-manifest.sh` emits a multi-section block under the phase heading: one `### Focal: <topic>` section followed by zero or more `### Adjacent: <topic>` sections. Each section is independently top-K-bounded (focal=8, adjacent=4 default; D3 budget) and dedup'd by file_path with focal precedence. The dispatcher passes this resolved block through to workers verbatim — no per-section re-ranking, no merge into a single ranking. Activity-vocab hits (when the focal topic carries `activity_vocab`) appear *inside* the focal section's served entries (no separate `### Activity:` section); the second BM25 OR query is logged as `query_kind=activity` for telemetry.
+   
+   **Legacy flat directives** (no `version` field, single `scale_set`, single seed list) continue to resolve to a single-section block at the declared scale via the same `resolve-manifest.sh` call — the dispatcher does not need to branch on directive shape. Notational change only at this step; the script handles the shape.
 
    **(b) Task-description branch — no directive, but task descriptions contain `## Prior Knowledge`:**
    **Skip prefetch for this phase.** The phase already embeds resolved knowledge from annotation. Appending would duplicate or conflict.
@@ -161,7 +212,7 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
    ```
    Append non-empty output under a `### Phase N: <phase_name>` heading into `$PRIOR_KNOWLEDGE`.
 
-   **Concatenation rule:** accumulate the per-phase outputs (heading + content) into a single `$PRIOR_KNOWLEDGE` string separated by blank lines. Phases that produce no output (branch b skip, or branch a/c with zero results) contribute no heading. The final `$PRIOR_KNOWLEDGE` is injected into the `{{prior_knowledge}}` slot in `agents/worker.md` at spawn time (Step 3.6). Do not inject a partial-phase bundle — resolve all phases before spawning any worker.
+   **Concatenation rule:** accumulate the per-phase outputs (heading + content) into a single `$PRIOR_KNOWLEDGE` string separated by blank lines. Phases that produce no output (branch b skip, or branch a/c with zero results) contribute no heading. The final `$PRIOR_KNOWLEDGE` is injected into the `{{prior_knowledge}}` slot in `agents/worker.md` at spawn time (Step 3.6). Do not inject a partial-phase bundle — resolve all phases before spawning any worker. For v2 directives, the injected block is the multi-section shape (`### Focal:` / `### Adjacent:`) described above; workers consume it as candidates-to-curate per `agents/worker.md`'s `## Knowledge Context` directive, not as authoritative pre-resolved context.
 
 2. **Prepare advisory mixin (if advisors present)** — scan all phases in `plan.md` for `**Advisors:**` blocks. If any phase declares advisors:
 
@@ -267,14 +318,16 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
 
    **Scale rubric — declare explicitly at every retrieval surface:**
 
-   - **application** — lore-the-product as a whole: philosophy, top-level constraints, decisions that shape how major components compose. Answers "what is lore?" or "what's true across the whole product?"
-   - **architectural** — a single major component (knowledge base, skills layer, CLI, work-item system) considered as a whole: internal organization, contract with other components, why it's shaped this way.
-   - **subsystem** — a specific named module within a major component (the capture pipeline, /implement, the work tab): how that named thing works, why it's built that way, what its quirks are.
-   - **implementation** — a specific function, fix, behavior, configuration value, or change. Below the level of "named module." Local gotchas, bug-fix rationale, constants whose values matter.
+   - **abstract** — portable principle, behavioral law, or design maxim. The claim survives generic-noun substitution: replace project-specific proper nouns with placeholders and the lesson still holds. Abstract entries make a *law*.
+   - **architecture** — project-level structure: decomposition, lifecycle, contracts, data model, invariants, cross-component flows, or major platform choices. Architecture entries make a *map*: "A does B, C does D, and E connects them."
+   - **subsystem** — local rule about one named area, feature, module, team, command family, integration, or workflow within a larger system. Concrete terms appear as participants in a local workflow rather than as the whole claim.
+   - **implementation** — concrete artifact fact: file, function, script, command, limit, field, test, line-level behavior. If removing the artifact name destroys the claim, classify here.
 
-   **Boundary tests:** application vs architectural — does it span multiple major components or just one? architectural vs subsystem — whole component or specific module? subsystem vs implementation — can you state it without naming a specific function/file/line?
+   **Boundary tests:** abstract vs architecture — substitution test (does the claim survive replacing concrete proper nouns with generic placeholders, or does it become "A does B, C does D"?); architecture vs subsystem — whole-project structure or one bounded area?; subsystem vs implementation — can you state the rule without naming a specific function/file/line?
 
-   **±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architectural,subsystem`; designing a feature → `application,architectural`.
+   **Multi-label encoding (retrieval implication):** entries may carry one label or an *adjacent* pair (`abstract,architecture`, `architecture,subsystem`, `subsystem,implementation`); a `--scale-set` query matches an entry if any requested label is in the entry's set. The full decision tree (four tier tests + substitution test + multi-label rules) lives in `~/.claude/agents/classifier.md`.
+
+   **±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architecture,subsystem`; designing a feature → `abstract,architecture`.
 
    - `{{team_name}}` → `impl-<slug>`
    - `{{team_lead}}` → the lead name read from team config in Step 2
@@ -371,6 +424,8 @@ When a batch of workers has all reported completion:
 Step 5 is the sole Tier 3 promotion site for `/implement`. Do NOT delegate to `/remember`. Do NOT call `lore capture` directly for work-item-scoped observations — `lore promote` is the canonical path because it forces `confidence=unaudited` and enforces Tier 3 schema via `validate-tier3.sh` before writing.
 
 Inputs: the Tier 3 candidate list stashed in Step 4.4, plus any lead-originated cross-task candidates the lead produces by reading the complete `execution-log.md` after the last batch.
+
+**Empty input is a valid input — Step 5 always runs through to the sub-step 4 summary log.** The terminal state when no candidates were stashed is `Tier 3 promotion summary: 0 accepted, 0 rejected` written to `execution-log.md`; that log line is the committed reasoning a later auditor reads. Skipping Step 5 on the rationalization "no candidates → no-op → nothing to do" is the bypass shape named in the commitment protocol — the commitment is to evaluate and emit the summary, not to produce non-zero promotions.
 
 For each accepted Tier 3 candidate, emit one `lore promote` call. Multi-producer synthesis is NEVER merged — one call per distinct producer so that scorecard rows retain the role × template attribution.
 

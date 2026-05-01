@@ -263,6 +263,8 @@ Produce the conceptual frame first before committing to phase breakdown.
 
 ### Step 5a: Design ceremony evaluation
 
+**Ceremonies always run.** No flag skips this step; no flag is required to run it. Don't ask whether to invoke them — invoke. Judgment applies to acting on the output, not to running the step.
+
 ```bash
 EVALUATORS=$(lore ceremony get spec-design)
 ```
@@ -278,9 +280,44 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
 1. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include `**Knowledge context:**`, `**Tasks:**` (checkbox lines), optional `**Retrieval directive:**`, optional `**Advisors:**`, optional `**Verification:**`, and optional `**Scope:**` blocks.
 
-   **Task consolidation rule:** Each `- [ ]` checkbox in `**Tasks:**` = one meaningful unit of work. Consolidate sequential same-file edits. Tasks sharing a file target within a phase are chained sequentially by `generate-tasks.py` and can only use 1 worker. Cross-phase dependencies are file-based. After drafting phases, run `lore work regen-tasks <slug>` and review `phase_cost_summary` in `tasks.json`. Tasks >2x the phase `avg_per_task` should be split; tasks <0.5x can be merged with adjacent same-file tasks. **Same-mechanism floor:** uniform same-mechanism edits across files (e.g., identical-shape line additions, uniform deletes) consolidate into one task when a worker would do them in one read-modify-write pass — even when each individual edit falls within the outlier band. **Phase-level soft cap:** 3–6 tasks per phase is normal; >7 is a smell flag (two phases conflated, or tasks sliced below meaningful-unit threshold).
+   **Plan-as-unit rule.** A plan is **one** phase by default. Each additional phase is a separate `/implement` worker batch with its own dispatch ceremony — write one phase per plan unless the split earns its keep across the entire run.
 
-   **Task format (default — intent+constraints):** State what the change accomplishes, what not to do, and how to verify correctness. Opt into prescriptive format with `**Task format:** prescriptive` for mechanical work.
+   Split a plan into multiple phases **only when all three** conditions hold:
+
+   1. **Cross-phase parallelism** — at least one later phase has tasks with file targets disjoint from all earlier phases, so `/implement` can dispatch the phases concurrently. If every later phase is forced-sequential behind earlier phases by file overlap, `generate-tasks.py` chains them onto one worker anyway and merging into one phase produces the same execution shape with less ceremony.
+   2. **Independent deliverable boundary** — each phase produces a coherent artifact a reviewer could accept, capture, or roll back on its own — not a sub-step of the next phase's work.
+   3. **Architectural checkpoint** — an interface, contract, schema, or substrate finalizes at the phase boundary that later phases consume as a stable input. Pure file-overlap-induced sequencing is not a checkpoint; visual organization is not a checkpoint.
+
+   If any condition fails, merge into one phase. The Phase-as-unit rule below still applies *within* the merged phase: most consolidated plans land at one phase, one task.
+
+   **Phase-as-unit rule.** A phase is the default delegation unit. Write **one** `- [ ]` checkbox per phase by default — deliver the phase objective across the listed files while honoring the phase design decisions. Each task spawns a fresh worker that loads ~22KB of fixed context plus the phase brief; a phase split has to earn that overhead.
+
+   Split a phase into multiple tasks **only when all four** conditions hold:
+
+   1. **Disjoint file ownership** — the tasks edit non-overlapping file sets. Tasks sharing a file are chained sequentially by `generate-tasks.py` and run on one worker anyway, so the split buys nothing.
+   2. **Independently reviewable deliverables** — each task produces a coherent artifact a reviewer could accept or reject on its own.
+   3. **Real parallel execution** — the split enables concurrent work, not serialized hand-off.
+   4. **No residue** — neither side is solely verification, capture, cleanup, single-CLI invocation, or a sub-edit of the other.
+
+   If any condition fails, keep one task. Cross-phase dependencies are file-based. Uniform same-mechanism edits across many files stay one task: a single worker doing one read-modify-write pass is cheaper than N fresh agents repeating identical edits.
+
+   **Deliverable contract gate.** Every task line names a durable artifact outcome — what gets built, refactored, authored, migrated, wired, or added. The valid primary verbs are:
+
+   `Implement / Refactor / Author / Migrate / Add support for / Wire`
+
+   A valid task line states: the **deliverable**, the **owned file or surface**, and at least one **design or integration constraint** that scopes the worker's choices.
+
+   The following primary verbs are **never tasks** — they belong elsewhere:
+
+   `Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only`
+
+   Route invalid units:
+
+   - **"Verify X" / "Check Y"** → phase-level `**Verification:**` objective the worker is implicitly held to. Do not duplicate the same verification block into each task description.
+   - **"Capture Z" / "Append session note"** → lead-side post-phase step. The lead runs `lore capture` or appends to `notes.md` after the phase completes; this is not worker work.
+   - **Single-line edits, single CLI invocations, sub-edits of a larger piece** → fold into the adjacent implementation task.
+
+   **Task format (intent+constraints).** Default. State what the change accomplishes, what not to do, and what success looks like at the deliverable level. Opt into prescriptive format with `**Task format:** prescriptive` for mechanical work where step-by-step instructions are required.
 
 2. **Concordance-assisted annotation** — after drafting phases, widen each phase's `**Knowledge context:**` block:
    ```bash
@@ -288,31 +325,65 @@ Draft concrete implementation sections on top of the approved abstract plan:
    ```
    Declare `--scale-set` explicitly for every prefetch call. Missing declaration is an error.
 
-   **Scale rubric — declare explicitly at every retrieval surface:**
+   **Scale rubric — declare explicitly at every retrieval surface.** Four tiers in canonical top-to-bottom order: `abstract > architecture > subsystem > implementation`.
 
-   - **application** — lore-the-product as a whole: philosophy, top-level constraints, decisions that shape how major components compose. Answers "what is lore?" or "what's true across the whole product?"
-   - **architectural** — a single major component (knowledge base, skills layer, CLI, work-item system) considered as a whole: internal organization, contract with other components, why it's shaped this way.
-   - **subsystem** — a specific named module within a major component (the capture pipeline, /implement, the work tab): how that named thing works, why it's built that way, what its quirks are.
-   - **implementation** — a specific function, fix, behavior, configuration value, or change. Below the level of "named module." Local gotchas, bug-fix rationale, constants whose values matter.
+   - **abstract** — portable principle, behavioral law, or design maxim. The claim survives translation to a different project: it still teaches the same lesson when concrete project nouns are replaced with generic placeholders. Abstract entries make a *law*.
+   - **architecture** — project-level structure: decomposition, lifecycle, contracts, data model, invariants, cross-component flows, promoted abstractions, or major platform choices. Architecture entries make a *map*: "A does B, C does D, and E connects them."
+   - **subsystem** — local rule about one named area, feature, module, team, command family, integration, or workflow within a larger system. Concrete terms may appear as participants in a local workflow rather than as the whole claim.
+   - **implementation** — concrete artifact fact: file, function, script, command, limit, field, test, bug, line-level behavior. If removing the artifact name destroys the claim, classify here.
 
-   **Boundary tests:** application vs architectural — does it span multiple major components or just one? architectural vs subsystem — whole component or specific module? subsystem vs implementation — can you state it without naming a specific function/file/line?
+   **Multi-label encoding:** an entry's scale may be a single id or a comma-delimited pair of adjacent ids (allowed pairs: `abstract,architecture`, `architecture,subsystem`, `subsystem,implementation`); for the full decision tree (four linguistic tests + substitution test) see `~/.claude/agents/classifier.md`.
 
-   **±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architectural,subsystem`; designing a feature → `application,architectural`.
+   **Boundary tests:** abstract vs architecture — does the claim survive generic-noun substitution (abstract) or does it become "A does B, C does D, E connects them" (architecture)? architecture vs subsystem — whole project structure (architecture) or one named bounded area (subsystem)? subsystem vs implementation — can you state the rule without naming a specific function/file/line (subsystem) or does the claim depend on the artifact (implementation)?
+
+   **±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architecture,subsystem`; designing a feature → `abstract,architecture`.
 
    Add relevant entries as `[[knowledge:...]]` backlinks with "— why relevant" annotations. Investigation findings are the primary source; concordance is a widener.
 
 3. **Retrieval directive derivation** — after concordance widening, populate a `**Retrieval directive:**` block for each phase. The directive must be derivable from content already in the phase; no additional user input is required.
 
-   **Seeds derivation (mandatory):** collect seeds from two sources — (a) each `[[knowledge:...]]` backlink in the phase's `**Knowledge context:**` block becomes a seed verbatim; (b) each file path in the phase's `**Files:**` line or list becomes a seed verbatim. Deduplicate. If the union is empty, emit `seeds:` as an empty bullet and note why (e.g., no backlinks and no file paths present).
+   **Per-topic decomposition (v2 — default):** every directive is a list of `(topic, scale_set, [activity_vocab])` entries — **exactly one focal topic** plus **up to five adjacent topics**. Each topic fires its own BM25 OR query at its own declared scale_set; the worker prompt's `## Prior Knowledge` block ends up sectioned (`### Focal: <topic>` / `### Adjacent: <topic>`) per D3.
 
-   **Defaults:** `hop_budget: 1`. `scale_set:` is **mandatory** — declaration is required; omitting it is an error. Pick the appropriate bucket (`application`, `architectural`, `subsystem`, `implementation`). Omit `filters:` unless the phase has a narrow domain where type or category filtering adds value.
+   - **Focal topic.** The phase's primary subject. Default `scale_set` is `subsystem,implementation`. Seeds: the phase's owned files (from `**Files:**`) plus `[[knowledge:...]]` entries in `**Knowledge context:**` directly about that subsystem. When seeding from canonical entries, prefer **title-vocabulary terms** (the entry's title tokens) over the topic label alone — title-vocabulary seeds resolve to entries the index can actually rank, while raw `knowledge:...` strings tokenize as a single literal and miss the index.
+   - **Adjacent topics (≤5).** Subsystems or themes the phase touches but does not own. Default `scale_set` is one tier higher than the focal's bottom — typically `architecture,subsystem`. Seeds: title-vocabulary terms drawn from canonical entries about *that adjacent subsystem*, not the topic label and not the focal seeds. Weak seeds (right scale, wrong entries) are the dominant failure mode here — re-derive the seeds from the adjacent entries' titles and resolved paths.
+   - **Activity vocabulary (optional, per topic).** Attach when files in the topic imply a recurring practice (writing tests, emitting telemetry, capturing). Look up the token list from `$KDIR/_meta/activity-vocab.yaml` by matching its file-path globs against the topic's owned file set; **do not invent activity tokens inline**. The activity-vocab file is the single authority for the practice → tokens mapping. When present, the topic fires one extra BM25 OR query at the same `scale_set` with these tokens (logged as `query_kind=activity`).
+   - **Strict v2 invariant.** A v2 directive MUST have exactly one entry with `role: focal`. Zero-focal or multi-focal v2 directives are a hard parse error in `generate-tasks.py` — they are NOT silently accepted, and they are NOT normalized to the legacy flat form. If after seed derivation no genuine focal candidate emerges (e.g., a purely cross-cutting refactor across many subsystems), emit the legacy flat directive instead — that path remains valid for rollout compatibility.
 
-   **Format:**
+   **Seeds derivation (mandatory):** for each topic, collect seeds from two sources — (a) `[[knowledge:...]]` backlinks in the phase's `**Knowledge context:**` block whose subject matches the topic become seeds (resolve to entry title and path-vocabulary terms before emitting — raw `knowledge:` strings won't tokenize); (b) file paths in the phase's `**Files:**` block that the topic owns become seeds verbatim. Deduplicate per topic. If a topic's seed union is empty, the topic itself is suspect — drop it rather than emit an empty `seeds:` bullet.
+
+   **Defaults:** `hop_budget: 1`. Per-section limits: focal `limit: 8`, adjacent `limit: 4` (tunable). `scale_set:` is **mandatory per topic** — declaration is required at every topic; omitting it is an error. Pick the appropriate bucket (`abstract`, `architecture`, `subsystem`, `implementation`); multi-label form (e.g., `architecture,subsystem`) is allowed for adjacent pairs. Omit `filters:` unless the topic has a narrow domain where type or category filtering adds value.
+
+   **Format (v2 — default):**
+   ```yaml
+   retrieval_directive:
+     version: 2
+     topics:
+       - role: focal
+         topic: "<short label>"
+         seeds:
+           - "[[knowledge:path#heading]]"
+           - "path/to/owned/file.py"
+         scale_set: [subsystem, implementation]
+         activity_vocab: [pytest, fixture, assertion, mock]   # optional; from _meta/activity-vocab.yaml
+         limit: 8
+       - role: adjacent
+         topic: "<adjacent subsystem label>"
+         seeds:
+           - "<title-vocabulary terms from a canonical entry about the adjacent subsystem>"
+         scale_set: [architecture, subsystem]
+         limit: 4
+       # ...up to 5 adjacent total
+     hop_budget: 1
+   ```
+
+   **Format (legacy flat — rollout compatibility):**
    ```markdown
    **Retrieval directive:**
    - seeds: [[knowledge:path#heading]], path/to/file.py, ...
    - hop_budget: 1
+   - scale_set: <bucket>
    ```
+   The legacy form continues to resolve to a single focal topic at the declared `scale_set` so existing plans don't break.
 
    **Omission rule:** if a phase has neither `**Knowledge context:**` backlinks nor `**Files:**` entries, omit the `**Retrieval directive:**` block and add a comment: `<!-- no directive: no backlinks or files to derive seeds from -->`.
 
@@ -324,13 +395,13 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
 ---
 
-### Step 5.0: Review context cost estimates
+### Step 5.0: Review context cost estimates (advisory)
 
 ```bash
 lore work regen-tasks <slug>
 ```
 
-Check `phase_cost_summary` for each phase. Tasks >2x `avg_per_task`: split. Tasks <0.5x `avg_per_task`: consider merging. Update `plan.md` and re-run until no outliers.
+Inspect `phase_cost_summary` as a sanity check — a single task far larger than its peers may signal an under-decomposed deliverable worth a closer read. Cost diagnostics are **advisory only**; the *Plan-as-unit rule*, *Phase-as-unit rule*, and *Deliverable contract gate* in Step 5b are the binding gates. Do not split tasks merely because they fall above an avg-comparison threshold, and do not merge tasks merely because they fall below one. The avg-comparison heuristic is post-hoc and uniform-thinness blind; trust the intrinsic gates instead.
 
 ### Step 5.0a: Verify backlinks
 
@@ -410,7 +481,9 @@ Before finalizing, present the plan phases as structured summaries. This is a se
 
 ### Step 5.4: Post-research extraction
 
-Invoke `/remember` scoped to the spec investigation. Every `lore capture` call must carry provenance flags; for captures promoted from specific researcher observations, preserve the original producer's attribution:
+Invoke `/remember` scoped to the spec investigation. **Always invoke it — even when no observation appears to meet the gate.** The gate lives in `/remember`; rejecting candidates is `/remember`'s job, not the lead's. Pre-filtering observations on the rationalization "nothing qualifies, so `/remember` would be a no-op" is the bypass shape named in the commitment protocol — the lead's commitment is to invoke the gate and surface the result, not to short-circuit it. A run that captures zero entries is a valid terminal so long as `/remember` actually evaluated the observations.
+
+Every `lore capture` call must carry provenance flags; for captures promoted from specific researcher observations, preserve the original producer's attribution:
 
 - **Lead-original insights:** `--producer-role spec-lead --protocol-slot Synthesis --work-item <slug> --template-version $LEAD_TEMPLATE_VERSION`
 - **Researcher-sourced observations:** `--producer-role researcher --capturer-role spec-lead --source-artifact-ids <researcher-report-ids> --protocol-slot Synthesis --work-item <slug> --template-version $RESEARCHER_TEMPLATE_VERSION`
@@ -438,6 +511,8 @@ Run `lore work heal`.
 ---
 
 ### Step 5.6: Post-plan ceremony evaluation
+
+**Ceremonies always run.** No flag skips this step; no flag is required to run it. Don't ask whether to invoke them — invoke. Judgment applies to acting on the output, not to running the step.
 
 ```bash
 EVALUATORS=$(lore ceremony get spec-post-plan)
@@ -529,6 +604,9 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
      Label components with actual file/module names. -->
 
 ## Phases
+<!-- One phase per plan by default. Add a second phase only when all three Plan-as-unit conditions
+     hold (Step 5b): cross-phase parallelism, independent deliverable boundary, architectural
+     checkpoint. File-overlap-forced sequencing is not a checkpoint — merge into one phase. -->
 
 ### Phase 1: <Name>
 **Objective:** What this phase accomplishes
@@ -543,11 +621,11 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 <!-- Optional — omit when phase has no Knowledge context backlinks and no Files entries.
      Seeds are derived from (a) [[knowledge:...]] backlinks in Knowledge context, and
      (b) file paths in Files. Deduplication applied. hop_budget defaults to 1.
-     scale_set: REQUIRED — declare the appropriate bucket (application | architectural | subsystem | implementation). Omitting is an error.
+     scale_set: REQUIRED — declare the appropriate bucket (abstract | architecture | subsystem | implementation); multi-label form (e.g., architecture,subsystem) is allowed for adjacent pairs. Omitting is an error.
      Consumed by /implement Step 3.1 branch (a) via resolve-manifest.sh → {{prior_knowledge}}. -->
 - seeds: [[knowledge:file#heading]], path/to/file.py
 - hop_budget: 1
-<!-- scale_set: REQUIRED — declare one bucket: application | architectural | subsystem | implementation -->
+<!-- scale_set: REQUIRED — declare one bucket: abstract | architecture | subsystem | implementation (multi-label form architecture,subsystem etc. allowed for adjacent pairs) -->
 <!-- - filters: type=knowledge, exclude_category=... (optional; omit when not filtering) -->
 **Knowledge context:**
 <!-- Each entry MUST include a "— why relevant" annotation after the backlink.
@@ -559,7 +637,8 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 <!-- Optional — declare domain-expert advisors. /implement spawns these as persistent team members. -->
 - advisor-name — domain scope. [must-consult|on-demand]
 **Verification:**
-<!-- Optional — 0–3 observable-behavior criteria. Empty is valid when task descriptions are self-verifying.
+<!-- 0–3 observable-behavior criteria. Lives at phase level only — never duplicated into per-task descriptions.
+     The phase worker(s) are implicitly held to these objectives; "Verify X" is never its own task.
      Each bullet names a behavior of the changed system a worker can check without reading the diff.
      Anti-patterns — never use:
        "X no longer exists" — recoverable from ls/diff, not a behavior
@@ -568,10 +647,12 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
      Good example: "`lore prefetch` with no `--scale-set` exits non-zero with a usable error" -->
 - <observable behavior — e.g., "`lore search foo` returns ranked results from the updated index">
 **Tasks:**
-<!-- Canonical home for - [ ] checkbox lines. One checkbox = one meaningful worker task.
-     Verification holds plain bullets only; Tasks holds checkboxes only. -->
-- [ ] Task 1
-- [ ] Task 2
+<!-- One - [ ] checkbox per phase by default. Multiple only when the four conditions in Step 5b hold:
+     disjoint file ownership, independently reviewable deliverables, real parallel execution, no residue.
+     Valid primary verbs: Implement / Refactor / Author / Migrate / Add support for / Wire.
+     Banned as primary verb: Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only.
+     See Step 5b "Deliverable contract gate" for routing of invalid units. -->
+- [ ] <Verb> <deliverable> in <owned file/surface> — <design or integration constraint>
 
 ## Open Questions
 - Unresolved decisions or items needing follow-up

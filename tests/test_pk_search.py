@@ -2473,20 +2473,19 @@ class TestCombinedBoostAndExclusion:
 
 
 # ---------------------------------------------------------------------------
-# OR-Fallback Tests
+# OR-Default Tests (D2: OR-default ranking; AND available via and_mode=True)
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def or_fallback_dir(tmp_path):
+def or_default_dir(tmp_path):
     """Knowledge directory where 6 unique terms exist in separate entries,
     so no single entry contains all 6 terms simultaneously."""
-    kd = tmp_path / "or_fallback_knowledge"
+    kd = tmp_path / "or_default_knowledge"
     kd.mkdir()
 
     arch_dir = kd / "architecture"
     arch_dir.mkdir()
 
-    # Entry 1: contains "alpha" and "beta"
     (arch_dir / "alpha-entry.md").write_text(
         "# Alpha Entry\n"
         "This entry discusses alpha and beta concepts in system design.\n"
@@ -2494,7 +2493,6 @@ def or_fallback_dir(tmp_path):
         encoding="utf-8",
     )
 
-    # Entry 2: contains "gamma" and "delta"
     (arch_dir / "gamma-entry.md").write_text(
         "# Gamma Entry\n"
         "This entry covers gamma and delta behavior in pipelines.\n"
@@ -2502,7 +2500,6 @@ def or_fallback_dir(tmp_path):
         encoding="utf-8",
     )
 
-    # Entry 3: contains "epsilon" and "zeta"
     (arch_dir / "epsilon-entry.md").write_text(
         "# Epsilon Entry\n"
         "This entry explains epsilon and zeta patterns.\n"
@@ -2513,51 +2510,153 @@ def or_fallback_dir(tmp_path):
     return kd
 
 
-class TestOrFallback:
-    def test_six_word_query_and_returns_zero_or_returns_results(self, or_fallback_dir):
-        """6-word query where individual terms exist in separate entries:
-        AND returns zero, OR fallback returns ranked results."""
-        searcher = Searcher(str(or_fallback_dir))
-        # Each pair of terms exists in one entry, but no entry has all 6
+class TestOrDefault:
+    def test_six_word_query_or_default_returns_results(self, or_default_dir):
+        """6-word query: OR default surfaces all three entries (each matches at least one token)."""
+        searcher = Searcher(str(or_default_dir))
         results = searcher.search("alpha beta gamma delta epsilon zeta")
-        assert len(results) > 0, "OR fallback should return results when AND returns zero"
-        for r in results:
-            assert r.get("or_fallback") is True, (
-                f"Each result should carry or_fallback=True, got: {r}"
-            )
-
-    def test_two_word_query_and_succeeds_no_fallback(self, or_fallback_dir):
-        """2-word query where both terms co-exist in one entry:
-        AND succeeds, OR fallback does NOT fire."""
-        searcher = Searcher(str(or_fallback_dir))
-        # "alpha" and "beta" both exist in alpha-entry.md
-        results = searcher.search("alpha beta")
-        assert len(results) > 0, "AND query should return results when both terms co-exist"
+        assert len(results) > 0, "OR-default should return results when individual terms match"
         for r in results:
             assert "or_fallback" not in r, (
-                f"or_fallback should not be set when AND query succeeds, got: {r}"
+                f"or_fallback annotation must not be set in OR-default mode, got: {r}"
             )
 
-    def test_single_word_query_no_fallback(self, or_fallback_dir):
-        """Single-word query: no fallback triggered, results returned normally."""
-        searcher = Searcher(str(or_fallback_dir))
+    def test_six_word_query_and_mode_returns_zero(self, or_default_dir):
+        """Same 6-word query under and_mode=True returns zero (no entry has all 6 terms)."""
+        searcher = Searcher(str(or_default_dir))
+        results = searcher.search("alpha beta gamma delta epsilon zeta", and_mode=True)
+        assert len(results) == 0, "AND mode should return zero when no entry contains all terms"
+
+    def test_two_word_query_or_default_returns_results(self, or_default_dir):
+        """2-word query under OR-default returns the matching entry; no annotation."""
+        searcher = Searcher(str(or_default_dir))
+        results = searcher.search("alpha beta")
+        assert len(results) > 0, "OR-default should return results"
+        for r in results:
+            assert "or_fallback" not in r, (
+                f"or_fallback annotation must not be set in OR-default mode, got: {r}"
+            )
+
+    def test_single_word_query_returns_results(self, or_default_dir):
+        searcher = Searcher(str(or_default_dir))
         results = searcher.search("gamma")
         assert len(results) > 0, "Single-word query should return results"
         for r in results:
             assert "or_fallback" not in r, (
-                f"or_fallback should not be set for single-word query, got: {r}"
+                f"or_fallback must not be set for single-word query, got: {r}"
             )
 
-    def test_or_fallback_field_in_retrieval_log(self, or_fallback_dir):
-        """When OR fallback fires, or_fallback=True should appear in retrieval log."""
-        searcher = Searcher(str(or_fallback_dir))
-        # Trigger OR fallback with a 6-word query that can't be satisfied by AND
+    def test_or_fallback_field_absent_in_retrieval_log(self, or_default_dir):
+        """OR is the named primary path; no or_fallback annotation appears in the log."""
+        searcher = Searcher(str(or_default_dir))
         searcher.search("alpha beta gamma delta epsilon zeta")
 
-        log_path = os.path.join(str(or_fallback_dir), "_meta", "retrieval-log.jsonl")
+        log_path = os.path.join(str(or_default_dir), "_meta", "retrieval-log.jsonl")
         assert os.path.exists(log_path), "Retrieval log should exist after search"
         with open(log_path, encoding="utf-8") as f:
             record = json.loads(f.readline())
-        assert record.get("or_fallback") is True, (
-            f"Log record should have or_fallback=True when fallback fires, got: {record}"
+        assert "or_fallback" not in record, (
+            f"or_fallback must be absent under OR-default; log: {record}"
+        )
+        assert record.get("query_kind") == "topic", (
+            f"query_kind defaults to 'topic' on plain search, got: {record}"
+        )
+
+    def test_and_mode_records_and_mode_flag_in_log(self, or_default_dir):
+        searcher = Searcher(str(or_default_dir))
+        searcher.search("alpha beta", and_mode=True)
+        log_path = os.path.join(str(or_default_dir), "_meta", "retrieval-log.jsonl")
+        with open(log_path, encoding="utf-8") as f:
+            record = json.loads(f.readline())
+        assert record.get("and_mode") is True, (
+            f"and_mode=True must be reflected in the retrieval log, got: {record}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# D4: Scale-bypass tests (category=preferences and scale=abstract)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def scale_bypass_dir(tmp_path):
+    """Fixture: one entry per scale value plus one preferences entry,
+    all sharing a unique token for query targeting."""
+    kd = tmp_path / "scale_bypass_knowledge"
+    kd.mkdir()
+
+    arch_dir = kd / "architecture"
+    arch_dir.mkdir()
+    (arch_dir / "subsystem-entry.md").write_text(
+        "# Subsystem Aurora\n"
+        "Entry about aurora at the subsystem altitude.\n"
+        "<!-- learned: 2025-01-01 | confidence: high | scale: subsystem -->\n",
+        encoding="utf-8",
+    )
+    (arch_dir / "implementation-entry.md").write_text(
+        "# Implementation Aurora\n"
+        "Aurora details at implementation altitude.\n"
+        "<!-- learned: 2025-01-02 | confidence: high | scale: implementation -->\n",
+        encoding="utf-8",
+    )
+    (arch_dir / "abstract-entry.md").write_text(
+        "# Abstract Aurora\n"
+        "Universal aurora principle declared abstract by author.\n"
+        "<!-- learned: 2025-01-03 | confidence: high | scale: abstract -->\n",
+        encoding="utf-8",
+    )
+
+    pref_dir = kd / "preferences"
+    pref_dir.mkdir()
+    (pref_dir / "aurora-preference.md").write_text(
+        "# Aurora Preference\n"
+        "Author preference about aurora; declared scale=subsystem.\n"
+        "<!-- learned: 2025-01-04 | confidence: high | scale: subsystem -->\n",
+        encoding="utf-8",
+    )
+
+    return kd
+
+
+class TestScaleBypass:
+    def test_preferences_bypass_scale_filter(self, scale_bypass_dir):
+        """A preferences entry surfaces under any scale-set, even when its declared
+        scale (subsystem) does not intersect the query's scale-set (implementation)."""
+        searcher = Searcher(str(scale_bypass_dir))
+        results = searcher.search("aurora", scale_set=["implementation"])
+        categories = {r.get("category") for r in results}
+        assert "preferences" in categories, (
+            f"preferences entry must bypass scale filter; got categories={categories}"
+        )
+
+    def test_abstract_scale_bypass(self, scale_bypass_dir):
+        """A scale=abstract entry surfaces under any scale-set."""
+        searcher = Searcher(str(scale_bypass_dir))
+        results = searcher.search("aurora", scale_set=["implementation"])
+        scales = [r.get("scale") for r in results]
+        assert "abstract" in scales, (
+            f"scale=abstract entry must bypass scale filter; got scales={scales}"
+        )
+
+    def test_non_bypass_entries_filtered(self, scale_bypass_dir):
+        """A scale=subsystem architecture entry must NOT surface when the query
+        scale-set is implementation only — only the bypass entries do."""
+        searcher = Searcher(str(scale_bypass_dir))
+        results = searcher.search("aurora", scale_set=["implementation"])
+        # The "Subsystem Aurora" entry has scale=subsystem, category=architecture —
+        # neither bypass condition; it must be filtered out.
+        headings = {r.get("heading") for r in results}
+        assert "Subsystem Aurora" not in headings, (
+            f"non-bypass subsystem entry must be filtered; got headings={headings}"
+        )
+        # The "Implementation Aurora" entry should be present (matches scale-set).
+        assert "Implementation Aurora" in headings, (
+            f"matching scale entry must surface; got headings={headings}"
+        )
+
+    def test_bypass_only_when_scale_set_active(self, scale_bypass_dir):
+        """When scale_set is None (no filter active), all 4 entries surface."""
+        searcher = Searcher(str(scale_bypass_dir))
+        results = searcher.search("aurora")
+        assert len(results) == 4, (
+            f"with no scale filter, all 4 entries surface; got {len(results)}"
         )

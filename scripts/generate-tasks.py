@@ -445,7 +445,7 @@ def build_context_section(
     resolve_full_content: bool = False,
     strategy: str | None = None,
 ) -> str:
-    """Build the context section for a task description.
+    """Build the context section for a task description or phase brief.
 
     Backlink lists accept either plain strings (``"knowledge:foo"``) or
     tuples (``("knowledge:foo", "annotation text")``).  Annotations are
@@ -606,6 +606,77 @@ def build_context_section(
 
 
 # ---------------------------------------------------------------------------
+# Phase context builder
+# ---------------------------------------------------------------------------
+
+def _build_phase_context(
+    phase_num: int,
+    objective: str,
+    files: list[str],
+    phase_backlinks: list,
+    cross_cutting_backlinks: list,
+    phase_decisions: list[dict],
+    verif_lines: list[str],
+    resolve_full_content: bool,
+    strategy: str | None,
+    knowledge_dir: str,
+    script_dir: str,
+    annotation_warning: bool = False,
+) -> str:
+    """Render the phase-level brief for `phases[N].phase_context`.
+
+    Contains all phase-shared content that is lifted out of per-task descriptions:
+    Strategy, Design Decisions, Verification, Reference files (full phase **Files:** list),
+    phase Knowledge context backlinks, and the resolved ## Prior Knowledge block.
+
+    Returns an empty string if the phase has no shareable context.
+    """
+    parts: list[str] = []
+
+    if objective:
+        parts.append(f"**Phase {phase_num} objective:** {objective}")
+        parts.append("")
+
+    if files:
+        parts.append("**Files:**")
+        for f in files:
+            parts.append(f"- `{f}`")
+        parts.append("")
+
+    if verif_lines:
+        parts.append("**Verification:**")
+        parts.extend(verif_lines)
+        parts.append("")
+
+    if annotation_warning:
+        parts.append(
+            "> **Note:** This phase uses intent+constraints task format with annotation-only "
+            "knowledge delivery. Workers interpret design patterns from knowledge context — "
+            "consider using `**Knowledge delivery:** full` so workers receive resolved content, "
+            "not just backlink labels."
+        )
+        parts.append("")
+
+    # Build the context section (Strategy + Design Decisions + backlinks + Prior Knowledge)
+    # for phase-level use: no task_backlinks, no per-task reference files.
+    context = build_context_section(
+        phase_backlinks=phase_backlinks,
+        cross_cutting_backlinks=cross_cutting_backlinks,
+        knowledge_dir=knowledge_dir,
+        script_dir=script_dir,
+        task_backlinks=None,
+        reference_files=None,
+        design_decisions=phase_decisions,
+        resolve_full_content=resolve_full_content,
+        strategy=strategy,
+    )
+    if context.strip():
+        parts.append(context)
+
+    return "\n".join(parts).strip()
+
+
+# ---------------------------------------------------------------------------
 # DAG width: compute_recommended_workers
 # ---------------------------------------------------------------------------
 
@@ -666,6 +737,254 @@ def compute_recommended_workers(all_tasks: list[dict]) -> int:
 # ---------------------------------------------------------------------------
 # Core: generate_tasks_from_plan
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Retrieval directive parsing (legacy flat + v2 grouped)
+# ---------------------------------------------------------------------------
+
+_V2_VERSION_RE = re.compile(r"^\s*-\s*version\s*:\s*2\s*$", re.MULTILINE)
+
+
+def _is_v2_directive(block: str) -> bool:
+    """Return True if the directive block declares ``version: 2``."""
+    return bool(_V2_VERSION_RE.search(block))
+
+
+def _split_csv_list(val: str) -> list[str]:
+    """Parse a value as either YAML inline list ``[a, b, c]``, ``a, b, c``, or ``a``.
+
+    Strips a *single* outer ``[...]`` pair only when the contents don't themselves
+    begin with another ``[`` — this preserves lists of ``[[knowledge:...]]`` backlinks.
+    """
+    s = val.strip()
+    if s.startswith("[") and s.endswith("]") and not s.startswith("[["):
+        s = s[1:-1]
+    return [tok.strip().strip('"').strip("'") for tok in s.split(",") if tok.strip()]
+
+
+def _parse_legacy_directive(block: str) -> dict:
+    """Parse a flat ``key: value`` bullet directive."""
+    seeds: list[str] = []
+    scale_set: list[str] = []
+    hop_budget: int = 1
+    filters: dict = {}
+    for line in block.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        text = stripped[2:].strip()
+        if ":" not in text:
+            continue
+        raw_key, _, raw_val = text.partition(":")
+        key = raw_key.strip().lower().replace("-", "_")
+        val = raw_val.strip()
+        if key == "seeds":
+            seeds = _split_csv_list(val)
+        elif key == "scale_set":
+            scale_set = _split_csv_list(val)
+        elif key == "hop_budget":
+            try:
+                hop_budget = int(val)
+            except ValueError:
+                hop_budget = 1
+        elif key == "type":
+            filters["type"] = val
+        elif key == "exclude_category":
+            filters["exclude_category"] = val
+    return {
+        "seeds": seeds,
+        "scale_set": scale_set,
+        "hop_budget": hop_budget,
+        "filters": filters,
+    }
+
+
+def _parse_v2_directive(block: str, phase_num: int) -> dict:
+    """Parse a ``version: 2`` grouped directive block.
+
+    Recognized shape::
+
+        - version: 2
+        - topics:
+            - role: focal
+              topic: <label>
+              seeds: [a, b]              (or comma-separated)
+              query: "<literal query>"   (optional; overrides topic+seeds at search)
+              scale_set: [subsystem, implementation]
+              activity_vocab: [pytest, fixture]
+              limit: 8
+            - role: adjacent
+              ...
+
+    Enforces exactly one ``role: focal``; zero/multi-focal v2 is a hard error
+    that names ``phase_num``. Also tolerates a literal YAML code-fenced
+    ``retrieval_directive:`` block embedded in the directive text.
+    """
+    # Strip a fenced YAML block if the lead pasted one verbatim.
+    fence_match = re.search(
+        r"```(?:yaml|yml)?\s*\n(.*?)\n```", block, re.DOTALL
+    )
+    if fence_match:
+        body = fence_match.group(1)
+    else:
+        body = block
+        # Strip leading "- " on bullet lines so YAML-ish indentation stands alone.
+        cleaned: list[str] = []
+        for raw in body.splitlines():
+            line = raw.rstrip()
+            if not line.strip():
+                cleaned.append("")
+                continue
+            stripped = line.lstrip()
+            indent = line[: len(line) - len(stripped)]
+            if stripped.startswith("- "):
+                inner = stripped[2:]
+                if ":" in inner and not inner.startswith("role:"):
+                    cleaned.append(f"{indent}{inner}")
+                    continue
+            cleaned.append(line)
+        body = "\n".join(cleaned)
+
+    topics_raw = _extract_topics_from_yaml_ish(body)
+    if not topics_raw:
+        raise ValueError(
+            f"[generate-tasks] phase {phase_num}: retrieval_directive declares "
+            f"version: 2 but no topics were parsed; v2 requires a non-empty topics list."
+        )
+
+    topics: list[dict] = []
+    focal_count = 0
+    for raw_topic in topics_raw:
+        topic = _normalize_v2_topic(raw_topic)
+        if topic["role"] == "focal":
+            focal_count += 1
+        topics.append(topic)
+
+    if focal_count != 1:
+        raise ValueError(
+            f"[generate-tasks] phase {phase_num}: v2 retrieval_directive must "
+            f"declare exactly one role: focal topic (found {focal_count}). "
+            f"If no focal candidate exists, emit a legacy flat directive instead."
+        )
+
+    return {
+        "version": 2,
+        "topics": topics,
+    }
+
+
+def _extract_topics_from_yaml_ish(body: str) -> list[dict]:
+    """Extract topics list entries from a minimally-YAML directive body.
+
+    Returns a list of raw-key dicts (string keys, string-or-list values) one
+    per ``- role: ...`` block under a top-level ``topics:`` key.
+    """
+    lines = body.splitlines()
+    in_topics = False
+    topics_indent = -1
+    topic_blocks: list[list[str]] = []
+    current: list[str] = []
+
+    for raw in lines:
+        line = raw.rstrip()
+        if not line.strip():
+            if in_topics and current:
+                current.append("")
+            continue
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+
+        if not in_topics:
+            m = re.match(r"topics\s*:\s*$", stripped)
+            if m:
+                in_topics = True
+                topics_indent = indent
+            continue
+
+        # End-of-topics: a key at <= topics_indent that isn't a list item.
+        if indent <= topics_indent and not stripped.startswith("- "):
+            in_topics = False
+            if current:
+                topic_blocks.append(current)
+                current = []
+            continue
+
+        if stripped.startswith("- "):
+            if current:
+                topic_blocks.append(current)
+            current = [line]
+        else:
+            if current:
+                current.append(line)
+
+    if current:
+        topic_blocks.append(current)
+
+    parsed: list[dict] = []
+    for blk in topic_blocks:
+        topic_dict = _parse_topic_block(blk)
+        if topic_dict:
+            parsed.append(topic_dict)
+    return parsed
+
+
+def _parse_topic_block(block_lines: list[str]) -> dict:
+    """Parse one ``- key: value`` topic entry into a raw dict."""
+    out: dict = {}
+    if not block_lines:
+        return out
+    # First line: "- key: value"
+    first = block_lines[0].lstrip()
+    if first.startswith("- "):
+        first = first[2:].strip()
+    # Track base indent (continuation keys live at +2 of "- ")
+    base_indent = len(block_lines[0]) - len(block_lines[0].lstrip())
+    # Parse first key
+    if ":" in first:
+        k, _, v = first.partition(":")
+        out[k.strip()] = v.strip()
+    for raw in block_lines[1:]:
+        if not raw.strip():
+            continue
+        stripped = raw.lstrip()
+        if ":" not in stripped:
+            continue
+        k, _, v = stripped.partition(":")
+        out[k.strip()] = v.strip()
+    return out
+
+
+def _normalize_v2_topic(raw: dict) -> dict:
+    """Coerce a raw-string topic dict into typed v2 fields with defaults."""
+    role = (raw.get("role") or "").strip().lower()
+    if role not in ("focal", "adjacent"):
+        raise ValueError(
+            f"v2 topic role must be 'focal' or 'adjacent', got: {role!r}"
+        )
+    topic = (raw.get("topic") or "").strip().strip('"').strip("'")
+    seeds = _split_csv_list(raw.get("seeds", ""))
+    scale_set = _split_csv_list(raw.get("scale_set", ""))
+    activity_vocab = _split_csv_list(raw.get("activity_vocab", ""))
+    query_raw = (raw.get("query") or "").strip()
+    if query_raw.startswith('"') and query_raw.endswith('"'):
+        query_raw = query_raw[1:-1]
+    elif query_raw.startswith("'") and query_raw.endswith("'"):
+        query_raw = query_raw[1:-1]
+    limit_raw = (raw.get("limit") or "").strip()
+    try:
+        limit = int(limit_raw) if limit_raw else (8 if role == "focal" else 4)
+    except ValueError:
+        limit = 8 if role == "focal" else 4
+    return {
+        "role": role,
+        "topic": topic,
+        "seeds": seeds,
+        "scale_set": scale_set,
+        "activity_vocab": activity_vocab,
+        "query": query_raw,
+        "limit": limit,
+    }
+
 
 def generate_tasks_from_plan(
     plan_content: str,
@@ -819,46 +1138,21 @@ def generate_tasks_from_plan(
                     if not (text.startswith("<") and text.endswith(">")):
                         verif_lines.append(stripped)
 
-        # Extract Retrieval directive block (key: value bullets after **Retrieval directive:**)
+        # Extract Retrieval directive block. Two shapes are recognized:
+        #   (legacy/flat) bullets:  "- seeds: ...", "- scale_set: ...", ...
+        #   (v2 grouped)  bullets:  "- version: 2" plus a "- topics:" tree of
+        #                           role/topic/seeds/scale_set/limit/activity_vocab/query.
         ret_dir_match = re.search(
-            r"^\*\*Retrieval directive:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
+            r"^\*\*Retrieval directive:\*\*\s*\n((?:(?!^\*\*|\n##).*\n?)*)",
             phase_content, re.MULTILINE
         )
         retrieval_directive: dict | None = None
         if ret_dir_match:
-            seeds: list[str] = []
-            scale_set: list[str] = []
-            hop_budget: int = 1
-            filters: dict = {}
-            for line in ret_dir_match.group(1).splitlines():
-                stripped = line.strip()
-                if not stripped.startswith("- "):
-                    continue
-                text = stripped[2:].strip()
-                if ":" not in text:
-                    continue
-                raw_key, _, raw_val = text.partition(":")
-                key = raw_key.strip().lower().replace("-", "_")
-                val = raw_val.strip()
-                if key == "seeds":
-                    seeds = [s.strip() for s in val.split(",") if s.strip()]
-                elif key == "scale_set":
-                    scale_set = [s.strip() for s in val.split(",") if s.strip()]
-                elif key == "hop_budget":
-                    try:
-                        hop_budget = int(val)
-                    except ValueError:
-                        hop_budget = 1
-                elif key == "type":
-                    filters["type"] = val
-                elif key == "exclude_category":
-                    filters["exclude_category"] = val
-            retrieval_directive = {
-                "seeds": seeds,
-                "scale_set": scale_set,
-                "hop_budget": hop_budget,
-                "filters": filters,
-            }
+            block = ret_dir_match.group(1)
+            if _is_v2_directive(block):
+                retrieval_directive = _parse_v2_directive(block, phase_num)
+            else:
+                retrieval_directive = _parse_legacy_directive(block)
 
         # Annotation quality warning: intent-based + annotation-only delivery
         annotation_warning = (
@@ -896,7 +1190,36 @@ def generate_tasks_from_plan(
             all_design_decisions, phase_num
         )
 
-        # Second pass: build context and descriptions with per-task reference files
+        # Build phase_context once — carries all phase-shared content lifted out of task descriptions:
+        # Strategy, Design Decisions, Verification, Reference files (full phase files list),
+        # phase Knowledge context backlinks, and the resolved ## Prior Knowledge block.
+        phase_context = _build_phase_context(
+            phase_num=phase_num,
+            objective=objective,
+            files=files,
+            phase_backlinks=phase_backlinks,
+            cross_cutting_backlinks=cross_cutting_backlinks,
+            phase_decisions=phase_decisions,
+            verif_lines=verif_lines,
+            resolve_full_content=resolve_full_content,
+            strategy=strategy or None,
+            knowledge_dir=knowledge_dir,
+            script_dir=script_dir,
+            annotation_warning=annotation_warning,
+        )
+
+        # D5 invariant: if the plan had any phase-level context to lift, phase_context must be non-empty.
+        _has_phase_level_context = bool(
+            phase_decisions or verif_lines or files or phase_backlinks or strategy
+        )
+        if _has_phase_level_context and not phase_context.strip():
+            raise RuntimeError(
+                f"[generate-tasks] D5 violation: phase {phase_num} had phase-level context "
+                f"(design decisions, verification, files, knowledge context, or strategy) "
+                f"but phase_context is empty — this is a generator bug."
+            )
+
+        # Second pass: build per-task descriptions (unique assignment only — no phase-shared blocks)
         for item in parsed_items:
             task_id = item["task_id"]
             subject = item["subject"]
@@ -904,21 +1227,11 @@ def generate_tasks_from_plan(
             file_targets = item["file_targets"]
             task_backlinks = item["task_backlinks"]
 
-            # Per-task reference files: phase files minus this task's targets
-            reference_files = detect_reference_files(files, file_targets)
-
-            context = build_context_section(
-                phase_backlinks, cross_cutting_backlinks,
-                knowledge_dir, script_dir,
-                task_backlinks=task_backlinks,
-                reference_files=reference_files,
-                design_decisions=phase_decisions,
-                resolve_full_content=resolve_full_content,
-                strategy=strategy or None,
-            )
-
-            # Build description
+            # Build stripped description: Phase line (D6), objective hint, target files,
+            # task line, task-specific Scope, task-specific backlinks (annotation-only), plan reference.
             desc_parts = []
+            # D6: stable first line for worker phase-number extraction
+            desc_parts.append(f"**Phase:** {phase_num}")
             if objective:
                 desc_parts.append(
                     f"**Phase {phase_num} objective:** {objective}"
@@ -936,21 +1249,18 @@ def generate_tasks_from_plan(
                 desc_parts.append("")
                 desc_parts.append("**Scope:**")
                 desc_parts.extend(scope_lines)
-            if verif_lines:
+            # Task-specific backlinks: annotation-only compact list (no resolution)
+            if task_backlinks:
                 desc_parts.append("")
-                desc_parts.append("**Verification:**")
-                desc_parts.extend(verif_lines)
-            if annotation_warning:
-                desc_parts.append("")
-                desc_parts.append(
-                    "> **Note:** This phase uses intent+constraints task format with annotation-only "
-                    "knowledge delivery. Workers interpret design patterns from knowledge context — "
-                    "consider using `**Knowledge delivery:** full` so workers receive resolved content, "
-                    "not just backlink labels."
-                )
-            desc_parts.append("")
-            desc_parts.append(context)
+                desc_parts.append("**Task context:**")
+                for bl in task_backlinks:
+                    target, annotation = _unpack_backlink(bl)
+                    if annotation:
+                        desc_parts.append(f"- [[{target}]] — {annotation}")
+                    else:
+                        desc_parts.append(f"- [[{target}]]")
             if slug:
+                desc_parts.append("")
                 desc_parts.append(f"**Plan reference:** [[work:{slug}]]")
             description = "\n".join(desc_parts)
 
@@ -980,18 +1290,22 @@ def generate_tasks_from_plan(
                         task["blockedBy"].append(prev_id)
                 file_last_task[ft] = task["id"]
 
-        # Compute phase-level cost summary from per-task estimates
+        # Compute phase-level cost summary from per-task estimates.
+        # phase_context_chars is included for attribution but not added to per-task totals
+        # (phase_context is fetched once per task claim, not per task execution).
         task_totals = [
             t["context_cost_estimate"]["total_chars"]
             for t in phase_tasks
             if "context_cost_estimate" in t
         ]
+        phase_context_chars = len(phase_context)
         if task_totals:
             phase_cost_summary = {
                 "total_chars": sum(task_totals),
                 "avg_per_task": int(sum(task_totals) / len(task_totals)),
                 "max_task": max(task_totals),
                 "min_task": min(task_totals),
+                "phase_context_chars": phase_context_chars,
             }
         else:
             phase_cost_summary = {
@@ -999,6 +1313,7 @@ def generate_tasks_from_plan(
                 "avg_per_task": 0,
                 "max_task": 0,
                 "min_task": 0,
+                "phase_context_chars": phase_context_chars,
             }
 
         phases.append({
@@ -1007,6 +1322,7 @@ def generate_tasks_from_plan(
             "objective": objective,
             "files": files,
             "tasks": phase_tasks,
+            "phase_context": phase_context,
             "phase_cost_summary": phase_cost_summary,
             "retrieval_directive": retrieval_directive,
         })

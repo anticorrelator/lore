@@ -97,14 +97,14 @@ Show the script output. For the top matches, briefly summarize the relevant cont
 
 **Scale rubric — declare explicitly at every retrieval surface:**
 
-- **application** — lore-the-product as a whole: philosophy, top-level constraints, decisions that shape how major components compose. Answers "what is lore?" or "what's true across the whole product?"
-- **architectural** — a single major component (knowledge base, skills layer, CLI, work-item system) considered as a whole: internal organization, contract with other components, why it's shaped this way.
-- **subsystem** — a specific named module within a major component (the capture pipeline, /implement, the work tab): how that named thing works, why it's built that way, what its quirks are.
-- **implementation** — a specific function, fix, behavior, configuration value, or change. Below the level of "named module." Local gotchas, bug-fix rationale, constants whose values matter.
+- **abstract** — portable principle, behavioral law, or design maxim. The claim survives generic-noun substitution: replace project-specific proper nouns with placeholders and the lesson still holds. Abstract entries make a *law*.
+- **architecture** — project-level structure: decomposition, lifecycle, contracts, data model, invariants, cross-component flows, or major platform choices. Architecture entries make a *map*: "A does B, C does D, and E connects them."
+- **subsystem** — local rule about one named area, feature, module, team, command family, integration, or workflow within a larger system. Concrete terms appear as participants in a local workflow rather than as the whole claim.
+- **implementation** — concrete artifact fact: file, function, script, command, limit, field, test, line-level behavior. If removing the artifact name destroys the claim, classify here.
 
-**Boundary tests:** application vs architectural — does it span multiple major components or just one? architectural vs subsystem — whole component or specific module? subsystem vs implementation — can you state it without naming a specific function/file/line?
+**Boundary tests:** abstract vs architecture — substitution test (does the claim survive replacing concrete proper nouns with generic placeholders, or does it become "A does B, C does D"?); architecture vs subsystem — whole-project structure or one bounded area?; subsystem vs implementation — can you state the rule without naming a specific function/file/line?
 
-**±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architectural,subsystem`; designing a feature → `application,architectural`.
+**±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architecture,subsystem`; designing a feature → `abstract,architecture`.
 
 ---
 

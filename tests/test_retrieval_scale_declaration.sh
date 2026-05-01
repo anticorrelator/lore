@@ -122,7 +122,9 @@ assert_contains "interactive output mentions scale-set" "$OUT" "--scale-set"
 
 echo ""
 echo "Test 4.3: lore search interactive output lists valid buckets"
-assert_contains "interactive output lists application" "$OUT" "application"
+assert_contains "interactive output lists abstract" "$OUT" "abstract"
+assert_contains "interactive output lists architecture" "$OUT" "architecture"
+assert_contains "interactive output lists subsystem" "$OUT" "subsystem"
 assert_contains "interactive output lists implementation" "$OUT" "implementation"
 
 echo ""

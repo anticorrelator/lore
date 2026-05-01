@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# overview-subsystem.sh — Return architectural-scale framing for a subsystem + descent affordances.
+# overview-subsystem.sh — Return architecture-scale framing for a subsystem + descent affordances.
 #
 # Usage: overview-subsystem.sh <subsystem> --scale-set <bucket> [--limit N] [--json]
 #
-# Finds architectural-scale entries matching <subsystem>. Falls back to subsystem-scale
-# if no architectural entries exist. Renders with trust stamp + lists direct children.
+# Finds architecture-scale entries matching <subsystem>. Falls back to subsystem-scale
+# if no architecture entries exist. Renders with trust stamp + lists direct children.
 #
 # Exit codes:
 #   0 — success
@@ -52,8 +52,8 @@ if [[ -z "$SUBSYSTEM" ]]; then
 fi
 
 if [[ -z "$SCALE_SET" ]]; then
-  echo "Error: --scale-set is required; declare your retrieval scale, e.g. --scale-set architectural" >&2
-  echo "  Buckets: application, architectural, subsystem, implementation" >&2
+  echo "Error: --scale-set is required; declare your retrieval scale, e.g. --scale-set architecture" >&2
+  echo "  Buckets: abstract, architecture, subsystem, implementation" >&2
   exit 1
 fi
 
@@ -75,11 +75,11 @@ if [[ ! -f "$LORE_SEARCH" ]]; then
   exit 0
 fi
 
-# Search for architectural-scale entries first
+# Search for architecture-scale entries first
 ARCH_JSON=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$SUBSYSTEM" \
   --scale-set "$SCALE_SET" --min-scale architectural --limit "$LIMIT" --json --caller overview 2>/dev/null || echo "[]")
 
-# If no architectural entries, fall back to subsystem-scale
+# If no architecture entries, fall back to subsystem-scale
 FALLBACK_USED=false
 if [[ "$ARCH_JSON" == "[]" || -z "$ARCH_JSON" ]]; then
   FALLBACK_USED=true
@@ -203,7 +203,7 @@ if not results:
     sys.exit(0)
 
 scale_label = results[0].get("scale") or "unknown"
-fallback_note = f" (no architectural entries found; showing {scale_label}-scale)" if fallback_used and results else ""
+fallback_note = f" (no architecture entries found; showing {scale_label}-scale)" if fallback_used and results else ""
 print(f'## Overview: {subsystem}{fallback_note}')
 print()
 

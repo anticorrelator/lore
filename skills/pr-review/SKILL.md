@@ -254,23 +254,35 @@ Full voice guide (optional deeper reference): `~/.lore/claude-md/review-protocol
 Report back with your findings JSON when complete.
 ```
 
-Spawn one agent per selected lens in parallel. Maximum 6 concurrent agents.
+Construct one Agent task per built-in lens, but **do not dispatch yet** — ceremony lens tasks must launch together with built-in lens tasks in the same parallel batch (see Step 3b-ceremony, then Step 3b-launch).
 
-### 3b-ceremony. Dispatch ceremony lenses
+### 3b-ceremony. Construct ceremony lens tasks
 
-**This step is mandatory and must not be skipped.** After built-in lens agents are spawned, dispatch every ceremony lens in the selected set. Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b.
-
-For each ceremony lens in the selected set, invoke it via the Skill tool with the PR number as the sole argument:
+**This step is mandatory and must not be skipped.** Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b. For each ceremony lens in the selected set, construct an `Agent` task — *not* a `Skill` invocation — using the `general-purpose` subagent type with this prompt structure:
 
 ```
-/<skill-name> <PR_NUMBER>
+# <Ceremony Lens Name> — PR #<PR_NUMBER>
+
+Invoke the `/<skill-name>` skill on PR #<PR_NUMBER> in <owner>/<repo>:
+
+    /<skill-name> <PR_NUMBER>
+
+The skill fetches its own PR data — do not pre-fetch diff content, review context, or metadata.
+
+When the skill completes, return its output verbatim. If it produced findings JSON in the standard Findings Output Format, return that JSON. If it produced a different output shape (narrative report, table, raw scanner output, etc.), return the raw text so it can be classified as supplementary in Step 3d.
 ```
 
-Ceremony lenses fetch their own PR data — do **not** pass diff content, review context, or metadata. Run all ceremony lens invocations in parallel.
+The `Agent`-wrapped invocation — rather than a direct `Skill` call from the main conversation — is what makes parallel execution with built-in lens agents possible. `Skill` invocations run synchronously in the main thread; `Agent` invocations issued in a single message run concurrently.
 
-**Why unconditional dispatch matters.** A downstream telemetry consumer — tournament reconciliation, coverage dashboards, session observability — cannot distinguish "ceremony not configured" from "agent chose not to run it" when the dispatch is silently skipped. Silent omission corrupts the signal: configured lenses appear as absent lenses, and the consumer has no way to recover the distinction after the fact.
+### 3b-launch. Spawn all lens agents in a single parallel batch
 
-Do NOT skip this step. Do NOT omit a ceremony lens because the PR is small. Do NOT omit because the run seems low-signal. Do NOT omit because the user did not explicitly re-request ceremony lenses this session. Do NOT omit because of perceived latency cost. None of these are valid rationales — the user configured the ceremony; only the user can remove it. If a ceremony lens is genuinely inapplicable, stop and ask the user whether to remove it at Step 2c rather than self-removing.
+Issue every `Agent` tool call — one per selected lens, both built-in and ceremony — in a **single message**. Spawning built-in lens agents first and then dispatching ceremony lens agents in a follow-up message serializes ceremony work behind built-in completion and erases the latency gain the parallel design is meant to capture.
+
+There is no fixed concurrent-agent cap; spawn the full selected set together. Typical batches run 5–8 agents (defaults plus 0–3 ceremony lenses).
+
+**Why unconditional parallel dispatch matters.** A downstream telemetry consumer — tournament reconciliation, coverage dashboards, session observability — cannot distinguish "ceremony not configured" from "agent chose not to run it" when the dispatch is silently skipped. Silent omission corrupts the signal: configured lenses appear as absent lenses, and the consumer has no way to recover the distinction after the fact.
+
+Do NOT skip this step. Do NOT omit a ceremony lens because the PR is small. Do NOT omit because the run seems low-signal. Do NOT omit because the user did not explicitly re-request ceremony lenses this session. Do NOT omit because of perceived latency cost. Do NOT defer ceremony dispatch to a follow-up message under any of these rationales — deferral is functionally a skip from the parallelism perspective. None of these are valid rationales — the user configured the ceremony; only the user can remove it. If a ceremony lens is genuinely inapplicable, stop and ask the user whether to remove it at Step 2c rather than self-removing.
 
 Ceremony lens results are collected alongside built-in lens results in Step 3d. If a ceremony lens does not produce findings in the standard Findings Output Format, its output is handled as non-conforming (see Step 3d).
 

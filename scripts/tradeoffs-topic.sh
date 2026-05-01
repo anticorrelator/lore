@@ -29,7 +29,7 @@ Surface design alternatives considered and rejected for a topic.
 Searches design-rationale/ entries first, then falls back to general search.
 
 Options:
-  --scale-set S  Required: retrieval scale bucket (application|architectural|subsystem|implementation)
+  --scale-set S  Required: retrieval scale bucket (abstract|architecture|subsystem|implementation)
   --limit N      Max results to show (default: 5)
   --json         Output raw JSON instead of formatted text
   --help, -h     Show this help
@@ -72,8 +72,8 @@ if [[ -z "$TOPIC" ]]; then
 fi
 
 if [[ -z "$SCALE_SET" ]]; then
-  echo "Error: --scale-set is required; declare your retrieval scale, e.g. --scale-set architectural" >&2
-  echo "  Buckets: application, architectural, subsystem, implementation" >&2
+  echo "Error: --scale-set is required; declare your retrieval scale, e.g. --scale-set architecture" >&2
+  echo "  Buckets: abstract, architecture, subsystem, implementation" >&2
   exit 1
 fi
 

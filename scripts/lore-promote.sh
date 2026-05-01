@@ -154,7 +154,7 @@ _row_protocol_slot=$(printf '%s' "$ROW" | jq -r '.protocol_slot // ""')
 PROTOCOL_SLOT="${PROTOCOL_SLOT_OVERRIDE:-$_row_protocol_slot}"
 SCALE=$(printf '%s' "$ROW" | jq -r '.scale // ""')
 if [[ -z "$SCALE" ]]; then
-  die "row missing required field: scale (must be one of: application, architectural, subsystem, implementation)"
+  die "row missing required field: scale (must be one of: abstract, architecture, subsystem, implementation)"
 fi
 CAPTURED_AT_SHA=$(printf '%s' "$ROW" | jq -r '.captured_at_sha // ""')
 

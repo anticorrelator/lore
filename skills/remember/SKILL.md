@@ -9,7 +9,13 @@ argument_description: "[optional: focus area or capture constraints]"
 
 Pause and review the current session for uncaptured knowledge and unupdated threads. Combines knowledge capture with thread updates.
 
-**Session-start first-turn handlers** (`_pending_captures/` review and `_pending_digest.md` intake) live in CLAUDE.md fragments and run automatically before any skill is invoked. This skill handles the **interactive invocation path** — the same 4-condition gate applied to conversation context rather than stop-hook candidate files.
+**Session-start first-turn handlers** are triggered by two hook output lines from the SessionStart hook:
+- `[capture] N pending candidates — process via /remember first-turn` (emitted by `load-knowledge.sh` when `_pending_captures/` exists)
+- `[threads] Pending session digest — process via /remember first-turn` (emitted by `load-threads.sh` when `_pending_digest.md` exists)
+
+When either line appears, execute **Step 0a** (pending captures intake) or **Step 0b** (pending digest intake) before any other step. This skill also handles the **interactive invocation path** — the same 4-condition gate applied to conversation context rather than stop-hook candidate files.
+
+**D3 trigger contract:** the bracket prefix, pending-state description, and owning-skill name (`/remember`) in both trigger lines must remain stable across future edits to load-knowledge.sh and load-threads.sh.
 
 ## Resolve Paths
 
@@ -26,6 +32,50 @@ REMEMBER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/s
 ```
 
 When `/remember` is invoked by another skill (e.g., `/implement` or `/spec` post-work extraction), the caller passes its own template-version context via the delegation prompt — see Step 5's provenance rules for the lead-synthesis path. For interactive invocations, use `$REMEMBER_TEMPLATE_VERSION` directly. If the hash command fails, fall through with an empty string; downstream scripts treat that as "no template version."
+
+### Step 0a: Pending Captures Intake
+
+When `_pending_captures/` directory exists in the knowledge store at session start (triggered by `[capture] N pending candidates — process via /remember first-turn`):
+
+1. Glob `_pending_captures/*.md` — each file contains one candidate segment extracted by the stop hook's novelty detection
+2. For each file, read it and evaluate the candidate against the capture gate (reusable, non-obvious, stable, high-confidence) and assess synthesis level for tier placement. **Trigger-type guidance:**
+   - **`debug-root-cause` and `debug-narrative` candidates:** apply the debugging narrative lens — the insight is most valuable when it captures what you expected → what you found → what it means for the system. Evaluate whether the root cause reveals something non-obvious about how the system works. Format the insight using that narrative structure if qualifying. (`debug-narrative` is the expanded form emitted by stop-novelty-check.py when debug context is included; treat both as the same trigger family.)
+   - **`structural-*` candidates** (e.g., `structural-footprint`, `structural-signal`): evaluate as architectural observations — module roles, integration points, what constrains changes. These often qualify for the Architectural models or Cross-cutting conventions categories.
+   - **`preference-signal` candidates:** evaluate as scoped working-style preferences. If `related_files` names a skill, file, or directory (non-`none`), route to `lore capture --category preferences --related-files <paths>` via Step 3 branch. If `related_files: none`, route to thread `accumulated_preferences` instead — not to a knowledge entry.
+   - **Other trigger types** (`design-decision`, `gotcha`, `self-correction`): evaluate normally against capture gate.
+
+   **Low-context candidates:** If the candidate excerpt is too sparse to evaluate the gate confidently, read the **Related files:** field and skim those files before deciding. Do not reject a candidate solely because the excerpt is thin — the stop hook pre-filter has already established baseline relevance. Rejection requires a positive reason (fails Reusable, Non-obvious, Stable, or High confidence), not an absence of evidence.
+
+   **Staleness branch:** when the "non-obvious" check reveals a similar entry may already exist, run `lore search "<key terms>" --type knowledge --limit 3`, read the top match, and branch: (a) same claim — skip the candidate, (b) divergent (contradicts or supersedes) — edit the existing entry file in-place to reflect the new insight, update its `learned` date to today, then skip the new capture. Note: `[staleness] Updated "<existing title>" — superseded by new finding`.
+
+3. For qualifying insights, determine the emission path before running the capture command:
+   - **Tier 3 path (`lore promote`):** use when ALL four predicates are true: (a) the candidate is backed by a Tier 2 evidence artifact (worker/researcher observation from `execution-log.md` or `plan.md`), (b) it can be expressed as a `validate-tier3.sh`-accepted row with `claim`, `why_future_agent_cares`, `falsifier`, and `source_artifact_ids`, (c) `source_artifact_ids` is non-empty, and (d) the claim is reusable outside the current work item.
+   - **Tier 1 path (`lore capture`):** everything else — interactive candidates, candidates without Tier 2 backing, and any candidate that fails any of the four Tier 3 predicates.
+
+   **Pass `--related-files`** using the `**Related files:**` field from the candidate file (skip if the field is `none`):
+   ```bash
+   lore capture --insight "..." --context "..." --category "..." --confidence "high" --related-files "<value from Related files field>"
+   ```
+
+4. Delete each file after evaluation (regardless of whether the candidate qualified)
+5. Remove the `_pending_captures/` directory once empty
+6. Brief feedback: `[capture] Reviewed N candidates from previous session, captured M insights`
+
+If no candidates qualify, delete all files, remove the directory, and note: `[capture] Reviewed N candidates, none met capture gate`
+
+### Step 0b: Pending Digest Intake
+
+When `_threads/_pending_digest.md` exists at session start:
+1. Read the pending digest (previous session's extracted highlights).
+2. Decide which existing thread(s) to update — or if a new thread is needed.
+3. Write thread entries with format: `## YYYY-MM-DD` + Summary, Key points, Shifts (optional), Preferences (optional), Related.
+4. Extract preference signals from the digest and thread entries written in step 3. For each clear, reusable preference found, update the relevant thread's `_meta.json` `accumulated_preferences` array:
+   - **Existing preference:** update `last_reinforced` date and append the new entry filename to `source_entries`
+   - **New preference:** add a new object with `preference`, `first_seen`, `last_reinforced` (both today), and `source_entries`
+5. Delete the `_pending_digest.md` file.
+6. Brief feedback: `[thread: topic-name] Updated with previous session discussion` (or `[thread: new] Created "..."` if new).
+
+If no pending digest, skip silently.
 
 ### Step 1: Parse capture constraints
 
@@ -82,21 +132,53 @@ Review the full conversation context (filtered by any Step 1 constraints) and id
 - **Root cause:** the actual underlying reason
 - **Fix:** what resolved it
 
+**Target:** 2-5 captures per substantial session. Err on the side of capturing — it's cheap to drop an entry later, expensive to lose an insight.
+
+**After capturing:** Briefly mention what you captured (e.g., "Captured to knowledge store: evaluators use template-method pattern"). The user can immediately say "don't keep that" to remove it.
+
+**Do NOT capture:** task-specific details, info already in docs, speculation, transient state.
+
 For each candidate, assess against the capture gate — all 4 conditions must be true:
-1. Reusable (beyond this task)?
-2. Non-obvious (not in existing docs)?
-3. Stable (won't change soon)?
-4. High confidence (verified)?
+1. **Reusable** — applicable beyond the current task
+2. **Non-obvious** — not already in README, CLAUDE.md, or docs
+3. **Stable** — unlikely to change soon
+4. **High confidence** — verified through code exploration, not speculative
 
 If capture constraints were provided in Step 1, apply them as an additional filter: candidates that pass the base gate but fall into the "skip" category for the current context are dropped silently.
+
+**High-value capture categories (entries in these categories often involve synthesis and load at startup):**
+1. **Design rationale** — why the architecture is this way, what was rejected, what constraints drove decisions. *Example: "Script-first because mechanical subcommands are faster than improvisation."*
+2. **Architectural models** — how components connect, what the layers are, where data flows. *Example: "Lore separates logic (repo) from data (~/.lore/). The symlink at ~/.lore/scripts/ is the portability layer."*
+3. **Cross-cutting conventions** — patterns that span many files and can't be seen from one. *Example: "All scripts source lib.sh; defensive tr -d sanitization throughout."*
+4. **Behavioral directives** — observed mistakes crystallized into rules. *Example: "Don't bypass /work for CRUD ops."*
+5. **Mental models** — frameworks for recognizing categories of situations. *Example: "Bypass taxonomy: instruction fade, faster-path, abstract activation threshold."*
+6. **Directional intent** — aspirations and implementer context not yet realized in code. *Example: "The knowledge store should eventually support multi-framework delivery, but the CLI and data format are the shared layer."*
+7. **Operational procedures** — when you encounter X in context Y, the effective path is steps 1→2→3. *Example: "To debug FTS5 query failures: (1) check if the search term contains hyphens or special chars — these need quoting, (2) verify the FTS index is fresh with `SELECT count(*) FROM fts_entries`, (3) check tokenizer config in the CREATE VIRTUAL TABLE statement."*
+8. **Error signatures** — symptom: X / likely cause: Y / verify: Z. *Example: "Symptom: `lore search` returns 0 results for a term you know exists. Likely cause: hyphenated term not being quoted in FTS5 query. Verify: run the query manually in sqlite3 with explicit quoting."*
+9. **Implicit constraints** — rules from external factors, not code. *Example: "The stop hook must complete in <500ms — it runs on every session exit and blocking the user is unacceptable."*
+
+**Calibration examples:**
+- ✓ *High-priority capture (synthesis):* "All scripts source lib.sh for slugify(), resolve_knowledge_dir(), get_git_branch(), and timestamp_iso() — this is the portability contract for the entire scripts layer." Requires reading multiple scripts across the directory to confirm the pattern; not visible from any single file.
+- ✓ *Lower-priority capture (single-source, still valuable):* "The stop hook must complete in <500ms — enforced by the ceremony-config.sh timeout setting." Directly readable from one config file, but saves token cost for any agent that would otherwise re-read that file to confirm the constraint.
+- ✗ *Anti-pattern — existence ≠ recoverability:* "lib.sh defines slugify() as tr + sed." This is a factual description of a function signature readable directly from lib.sh — it fails Non-obvious and fails the recoverability test: the "what" is in the code. Capture the *why* (slugify uses this approach because scripts must run in restricted shell environments without external tools) not the *what*.
 
 **Staleness branch:** when the "non-obvious" check reveals a similar entry may already exist, run `lore search "<key terms>" --type knowledge --limit 3`, read the top match, and branch: (a) same claim — skip the candidate; (b) divergent (contradicts or supersedes) — edit the existing entry file in-place to reflect the new insight, update its `learned` date to today, then skip the new capture. Note: `[staleness] Updated "<existing title>" — superseded by new finding`.
 
 **Synthesis as a loading signal:** After an entry qualifies, assess whether it required combining information from multiple files, sessions, or components. Synthesis entries load at startup; single-source entries are still captured — they provide real token savings when retrieved on demand — but rank lower in auto-loading naturally. Strong positive indicators of synthesis: architectural models, design rationale, cross-cutting conventions, behavioral directives, mental models, and directional intent.
 
-**Anti-pattern — existence ≠ recoverability:** Information existing in a file is not the same as understanding being recoverable from that file. A rationale comment buried in code is not a captured insight — it will be missed in future sessions. When in doubt: could a future session reconstruct this understanding from the code alone, in the time available? If not, capture it.
+**The existence ≠ recoverability anti-pattern:** Information existing in a file is not the same as understanding being recoverable from that file. An agent reading lib.sh can find what slugify does in seconds. What cannot be recovered from a single read is: why that approach was chosen, what alternatives were rejected, or how this function's behavior constrains callers across the codebase. Captures of the latter are reusable; captures of the former are not.
 
 **Why > what:** A statement explaining *why* a choice was made is more valuable than a statement describing *what* was chosen. When both a rationale statement and a factual observation pass the gate, prefer the rationale.
+
+#### Manual Capture
+
+When capturing interactively (outside Step 5's automated flow), use the CLI directly. The `--scale` flag is required — missing it is an error, not a default:
+
+```bash
+lore capture --insight "..." --scale "<bucket>" --context "..." --category "..." --confidence "high" --related-files "..."
+```
+
+Scale values: `abstract`, `architecture`, `subsystem`, `implementation` (single label or two adjacent labels comma-delimited, e.g. `subsystem,implementation`). See Step 5 for `--producer-role`, `--protocol-slot`, and `--template-version` provenance flags.
 
 ### Step 3: Scan for thread updates and preference signals
 
@@ -130,16 +212,29 @@ Review the conversation for thread-worthy content:
 5. Check for new topics that don't match existing threads and had >2 substantive exchanges — these become new thread candidates. Create the directory `$THREADS_DIR/<slug>/` with a `_meta.json` file:
    ```json
    {
-     "slug": "<slug>",
-     "topic": "<topic description>",
-     "tier": "active",
-     "created": "<ISO timestamp>",
-     "updated": "<ISO timestamp>",
-     "sessions": 1,
-     "accumulated_preferences": []
+     "topic": "Human-readable thread name",
+     "tier": "pinned | active | dormant",
+     "created": "ISO-8601 timestamp",
+     "updated": "ISO-8601 timestamp",
+     "sessions": 0,
+     "accumulated_preferences": [
+       {
+         "preference": "Short description of the preference",
+         "first_seen": "YYYY-MM-DD",
+         "last_reinforced": "YYYY-MM-DD",
+         "source_entries": ["2026-02-06.md", "2026-02-07-s18.md"]
+       }
+     ]
    }
    ```
+   The `accumulated_preferences` array tracks user preferences distilled from thread entries. Each entry records when the preference was first observed, when it was most recently reinforced, and which thread entry files provide evidence. Preferences are added during `/remember` and pending digest evaluation. The array may be empty but should always be present for new threads.
+
    Then write the first entry file as in step 4. Update `$THREADS_DIR/_index.json` to include the new thread.
+
+**Mid-session thread awareness:** After significant topic shifts or decisions, consider whether a thread update is warranted. Do NOT force updates — only note when genuinely useful. Look for:
+- A recurring topic from a pinned/active thread being revisited
+- A clear shift in thinking from what a thread previously recorded
+- A new topic emerging that will likely span multiple sessions
 
 ### Step 4: Check plan status
 
@@ -193,14 +288,14 @@ lore capture --insight "..." --context "..." --category "..." --confidence "..."
 
 **Scale rubric — declare explicitly at every retrieval surface:**
 
-- **application** — lore-the-product as a whole: philosophy, top-level constraints, decisions that shape how major components compose. Answers "what is lore?" or "what's true across the whole product?"
-- **architectural** — a single major component (knowledge base, skills layer, CLI, work-item system) considered as a whole: internal organization, contract with other components, why it's shaped this way.
-- **subsystem** — a specific named module within a major component (the capture pipeline, /implement, the work tab): how that named thing works, why it's built that way, what its quirks are.
-- **implementation** — a specific function, fix, behavior, configuration value, or change. Below the level of "named module." Local gotchas, bug-fix rationale, constants whose values matter.
+- **abstract** — portable principle, behavioral law, or design maxim. The claim survives generic-noun substitution: replace project-specific proper nouns with placeholders and the lesson still holds. Abstract entries make a *law*.
+- **architecture** — project-level structure: decomposition, lifecycle, contracts, data model, invariants, cross-component flows, or major platform choices. Architecture entries make a *map*: "A does B, C does D, and E connects them."
+- **subsystem** — local rule about one named area, feature, module, team, command family, integration, or workflow within a larger system. Concrete terms appear as participants in a local workflow rather than as the whole claim.
+- **implementation** — concrete artifact fact: file, function, script, command, limit, field, test, line-level behavior. If removing the artifact name destroys the claim, classify here.
 
-**Boundary tests:** application vs architectural — does it span multiple major components or just one? architectural vs subsystem — whole component or specific module? subsystem vs implementation — can you state it without naming a specific function/file/line?
+**Boundary tests:** abstract vs architecture — substitution test (does the claim survive replacing concrete proper nouns with generic placeholders, or does it become "A does B, C does D"?); architecture vs subsystem — whole-project structure or one bounded area?; subsystem vs implementation — can you state the rule without naming a specific function/file/line?
 
-**±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architectural,subsystem`; designing a feature → `application,architectural`.
+**±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architecture,subsystem`; designing a feature → `abstract,architecture`.
 
 #### Lead-synthesis attribution
 

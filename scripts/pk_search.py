@@ -61,6 +61,20 @@ def _load_scale_ordinals() -> dict[str, int]:
         return {}
 
 
+def _parse_scale_set(value: str | None) -> set[str]:
+    """Parse a META scale field value into a set of scale labels.
+
+    Splits on `,`, lowercases, strips whitespace, returns a set.
+    None, "", and "unknown" all map to the empty set.
+    """
+    if value is None:
+        return set()
+    stripped = value.strip().lower()
+    if stripped == "" or stripped == "unknown":
+        return set()
+    return {part.strip() for part in stripped.split(",") if part.strip()}
+
+
 _CORRECTIONS_FIELD_RE = re.compile(r"\|\s*corrections:\s*(\[.*?\])\s*(?:-->|\|)", re.DOTALL)
 
 
@@ -918,53 +932,51 @@ class Searcher:
             self.indexer.incremental_index()
 
     @classmethod
-    def _prepare_query(cls, query: str) -> str:
-        """Prepare a user query for FTS5.
+    def _tokenize_query(cls, query: str) -> list[str]:
+        """Whitespace-split + hyphen-expand + quote each surviving token."""
+        parts: list[str] = []
+        for token in query.split():
+            for st in token.split("-"):
+                if st:
+                    parts.append('"' + st.replace('"', '""') + '"')
+        return parts
 
-        If the query looks like plain words (no FTS5 operators), quote each
-        token individually so that column names like 'content' or 'heading'
-        are not misinterpreted as column filters.
+    @classmethod
+    def _prepare_query(cls, query: str) -> str:
+        """Prepare a user query for FTS5 with AND-joined tokens (explicit AND mode).
+
+        FTS5's default join is AND when tokens are space-separated, so we emit
+        tokens space-separated. Hyphenated terms are expanded because the
+        unicode61 tokenizer treats hyphens as separators.
         """
         query = query.strip()
         if not query:
             return query
         if cls._FTS5_OPERATORS.search(query):
             return query
-        # Plain words — split on whitespace, then expand hyphens, quote each.
-        # FTS5's porter unicode61 tokenizer treats hyphens as separators, so
-        # a quoted phrase like "file-mutation" would never match.
-        tokens = query.split()
-        parts: list[str] = []
-        for token in tokens:
-            sub_tokens = token.split("-")
-            for st in sub_tokens:
-                if st:  # skip empty from leading/trailing hyphens
-                    parts.append('"' + st.replace('"', '""') + '"')
-        return " ".join(parts)
+        return " ".join(cls._tokenize_query(query))
 
     @classmethod
     def _prepare_or_query(cls, query: str) -> str:
-        """Prepare a user query for FTS5 with OR-joined tokens.
-
-        Same hyphen-expansion and quoting as _prepare_query, but tokens are
-        joined with OR so any single matching term produces a result. Used for
-        fallback when an AND query returns zero results.
-        """
+        """Prepare a user query for FTS5 with OR-joined tokens (default mode)."""
         query = query.strip()
         if not query:
             return query
         if cls._FTS5_OPERATORS.search(query):
             return query
-        tokens = query.split()
-        parts: list[str] = []
-        for token in tokens:
-            sub_tokens = token.split("-")
-            for st in sub_tokens:
-                if st:  # skip empty from leading/trailing hyphens
-                    parts.append('"' + st.replace('"', '""') + '"')
-        return " OR ".join(parts)
+        return " OR ".join(cls._tokenize_query(query))
 
-    def _log_search(self, query: str, source_type: str | None, result_count: int, elapsed_ms: float, caller: str | None = None, or_fallback: bool = False, scale_set: list[str] | None = None) -> None:
+    def _log_search(
+        self,
+        query: str,
+        source_type: str | None,
+        result_count: int,
+        elapsed_ms: float,
+        caller: str | None = None,
+        scale_set: list[str] | None = None,
+        query_kind: str = "topic",
+        and_mode: bool = False,
+    ) -> None:
         """Append a JSONL record to _meta/retrieval-log.jsonl."""
         meta_dir = os.path.join(self.knowledge_dir, "_meta")
         log_path = os.path.join(meta_dir, "retrieval-log.jsonl")
@@ -975,11 +987,12 @@ class Searcher:
             "source_type": source_type,
             "result_count": result_count,
             "elapsed_ms": round(elapsed_ms, 1),
+            "query_kind": query_kind,
         }
         if caller:
             record["caller"] = caller
-        if or_fallback:
-            record["or_fallback"] = True
+        if and_mode:
+            record["and_mode"] = True
         if scale_set is not None:
             record["scale_declared"] = ",".join(scale_set)
         try:
@@ -999,10 +1012,10 @@ class Searcher:
         exclude_category: str | list[str] | None = None,
         caller: str | None = None,
         include_archived: bool = False,
-        min_scale: str | None = None,
-        max_scale: str | None = None,
         include_status: tuple[str, ...] | list[str] | None = None,
         scale_set: list[str] | None = None,
+        and_mode: bool = False,
+        query_kind: str = "topic",
     ) -> list[dict]:
         """Search entries by query. Returns list of result dicts.
 
@@ -1012,15 +1025,21 @@ class Searcher:
             exclude_category: Exclude entries in these categories (e.g. "domains"). None = no exclusion.
             caller: Identifier for the caller (e.g. "lead", "worker", "prefetch"). Logged to retrieval log.
             include_archived: If False (default), exclude entries from _archive/ paths.
-            min_scale: Include only entries with scale ordinal >= this scale id. None = no lower bound.
-            max_scale: Include only entries with scale ordinal <= this scale id. None = no upper bound.
+            scale_set: Set-membership scale filter. Entries pass when their parsed scale set
+                       intersects this set. None = no scale filter. Entries with
+                       category=preferences or scale=abstract bypass this filter.
             include_status: Status values to include (e.g. ["current", "superseded"]). None = only "current".
                             Entries without a status field are treated as "current".
+            and_mode: When True, multi-token queries are AND-joined (legacy behavior).
+                      When False (default), multi-token queries are OR-joined (D2 default).
+            query_kind: Logged to retrieval log ("topic" | "activity"). Reserved for v2 dispatch.
         """
         search_start = time.time()
         self._ensure_index()
 
-        prepared = self._prepare_query(query)
+        prepared = (
+            self._prepare_query(query) if and_mode else self._prepare_or_query(query)
+        )
 
         # Use WHERE clause for filtering (not FTS5 column syntax)
         # to avoid syntax errors with OR queries
@@ -1048,10 +1067,12 @@ class Searcher:
         if not include_archived:
             extra_filters += " AND file_path NOT LIKE '%\\_archive/%' ESCAPE '\\'"
 
-        # Resolve scale ordinals for min/max_scale filtering (post-retrieval)
-        scale_ordinals = _load_scale_ordinals() if (min_scale or max_scale) else {}
-        min_scale_ord = scale_ordinals.get(min_scale) if min_scale else None
-        max_scale_ord = scale_ordinals.get(max_scale) if max_scale else None
+        # Resolve scale_set into a set for set-membership filtering (post-retrieval).
+        # An entry passes if its parsed scale set intersects query_scale_set; entries
+        # with empty parsed sets fail when the filter is active.
+        query_scale_set: set[str] = (
+            {s.strip().lower() for s in scale_set if s and s.strip()} if scale_set else set()
+        )
 
         # Resolve status filter: default is current-only; None include_status means same default
         effective_statuses: set[str] | None = None
@@ -1100,31 +1121,6 @@ class Searcher:
             else:
                 raise
 
-        # OR-fallback: if AND query returned nothing and query has 2+ tokens,
-        # retry with OR-joined tokens so partial matches surface.
-        or_fallback = False
-        if not rows and len(query.split()) >= 2:
-            or_prepared = self._prepare_or_query(query)
-            or_params: list = [or_prepared] + filter_params + [limit * 3]
-            conn2 = sqlite3.connect(self.db_path)
-            conn2.row_factory = sqlite3.Row
-            try:
-                rows = conn2.execute(
-                    f"""
-                    SELECT {select_cols}
-                    FROM entries
-                    WHERE entries MATCH ?{extra_filters}
-                    ORDER BY {order_expr}
-                    LIMIT ?
-                    """,
-                    or_params,
-                ).fetchall()
-                or_fallback = True
-            except sqlite3.OperationalError:
-                rows = []
-            finally:
-                conn2.close()
-
         results = []
         for row in rows:
             score = row["rank"]
@@ -1135,24 +1131,27 @@ class Searcher:
 
             entry_scale = row["scale"]  # may be None or "unknown"
             entry_status_val = row["entry_status"]  # may be None (treat as "current")
+            entry_category = row["category"]  # may be None
 
             # Status filter: entries without a status field are treated as "current"
             effective_entry_status = entry_status_val if entry_status_val else "current"
             if effective_statuses and effective_entry_status not in effective_statuses:
                 continue
 
-            # Scale filter: skip entries with unknown/missing scale when bounds are set
-            if min_scale_ord is not None or max_scale_ord is not None:
-                if not entry_scale or entry_scale == "unknown":
-                    # Skip entries with unknown scale when a range filter is active
-                    continue
-                entry_ord = scale_ordinals.get(entry_scale)
-                if entry_ord is None:
-                    continue
-                if min_scale_ord is not None and entry_ord < min_scale_ord:
-                    continue
-                if max_scale_ord is not None and entry_ord > max_scale_ord:
-                    continue
+            # Scale filter: set-membership matching with bypass for horizontal entries.
+            # An entry bypasses the scale filter when category=preferences (horizontal
+            # commitment surfaces at any declared scale) or when scale=abstract (the
+            # author's explicit declaration of universality). Otherwise, the entry's
+            # parsed scale set must intersect query_scale_set; entries with empty
+            # parsed sets (None / "" / "unknown") fail.
+            if query_scale_set:
+                entry_scale_set = _parse_scale_set(entry_scale)
+                bypass = (entry_category == "preferences") or ("abstract" in entry_scale_set)
+                if not bypass:
+                    if not entry_scale_set:
+                        continue
+                    if not (entry_scale_set & query_scale_set):
+                        continue
 
             content = row["content"]
             snippet = content[:SNIPPET_MAX_CHARS]
@@ -1180,8 +1179,6 @@ class Searcher:
                 "score": round(score, 4),
                 "snippet": snippet,
             }
-            if or_fallback:
-                result["or_fallback"] = True
             results.append(result)
 
             if len(results) >= limit:
@@ -1190,7 +1187,16 @@ class Searcher:
         conn.close()
 
         elapsed_ms = (time.time() - search_start) * 1000
-        self._log_search(query, source_type, len(results), elapsed_ms, caller=caller, or_fallback=or_fallback, scale_set=scale_set)
+        self._log_search(
+            query,
+            source_type,
+            len(results),
+            elapsed_ms,
+            caller=caller,
+            scale_set=scale_set,
+            query_kind=query_kind,
+            and_mode=and_mode,
+        )
 
         return results
 
@@ -1208,8 +1214,6 @@ class Searcher:
         recency_weight: float = 0.25,
         tfidf_weight: float = 0.15,
         importance_weight: float = 0.1,
-        min_scale: str | None = None,
-        max_scale: str | None = None,
         include_status: tuple[str, ...] | list[str] | None = None,
         scale_set: list[str] | None = None,
     ) -> list[dict]:
@@ -1233,8 +1237,6 @@ class Searcher:
             exclude_category=exclude_category,
             caller=caller,
             include_archived=include_archived,
-            min_scale=min_scale,
-            max_scale=max_scale,
             include_status=include_status,
             scale_set=scale_set,
         )
@@ -1363,8 +1365,6 @@ class Searcher:
         recency_weight: float = 0.25,
         tfidf_weight: float = 0.15,
         importance_weight: float = 0.1,
-        min_scale: str | None = None,
-        max_scale: str | None = None,
         include_status: tuple[str, ...] | list[str] | None = None,
         scale_set: list[str] | None = None,
     ) -> dict:
@@ -1393,8 +1393,6 @@ class Searcher:
             recency_weight=recency_weight,
             tfidf_weight=tfidf_weight,
             importance_weight=importance_weight,
-            min_scale=min_scale,
-            max_scale=max_scale,
             include_status=include_status,
             scale_set=scale_set,
         )

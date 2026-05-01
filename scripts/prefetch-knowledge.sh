@@ -8,8 +8,8 @@
 # --type            Filter by source type: knowledge, work, or all (default: all)
 # --exclude-backlinks  Comma-separated backlink paths to exclude from results (deduplication
 #                      with pre-resolved knowledge already in task descriptions)
-# --scale-set <bucket>     Required. Declared retrieval scale bucket: one of application,
-#                          architectural, subsystem, implementation. No default; missing = error.
+# --scale-set <bucket>     Required. Declared retrieval scale bucket: one of abstract,
+#                          architecture, subsystem, implementation. No default; missing = error.
 # --work-item <slug>       Work item slug (from _work/<slug>/_meta.json). Used only for
 #                          scope_pointers injection; no longer used for scale computation.
 #
@@ -84,7 +84,7 @@ fi
 if [[ -z "$SCALE_SET" ]]; then
   echo "Error: --scale-set <bucket> is required. Declare your retrieval scale before fetching." >&2
   echo "  Use: prefetch-knowledge.sh <query> --scale-set <bucket>" >&2
-  echo "  Buckets: application, architectural, subsystem, implementation" >&2
+  echo "  Buckets: abstract, architecture, subsystem, implementation" >&2
   exit 1
 fi
 
@@ -96,21 +96,10 @@ if [[ ! -d "$KNOWLEDGE_DIR" ]]; then
 fi
 
 # --- Scale-context resolution ---
-# Resolved values exported as env vars for the Python block.
-# OWN_SCALE: the role's absolute scale id (e.g. "implementation")
-# ADJ_SCALE_BELOW: scale id one step narrower (may be empty)
-# ADJ_SCALE_ABOVE: scale id one step broader (may be empty)
-OWN_SCALE=""
-ADJ_SCALE_BELOW=""
-ADJ_SCALE_ABOVE=""
-
-if [[ -n "$SCALE_SET" ]]; then
-  OWN_SCALE="$SCALE_SET"
-  ADJ_OUT=$(bash "$SCRIPT_DIR/scale-registry.sh" get-adjacency "$OWN_SCALE" 2>/dev/null || true)
-  ADJ_SCALE_BELOW=$(echo "$ADJ_OUT" | sed -n '1p')
-  ADJ_SCALE_ABOVE=$(echo "$ADJ_OUT" | sed -n '2p')
-fi
-
+# SCALE_SET is a comma-delimited requested-label set (e.g. "subsystem" or
+# "subsystem,implementation"). The set is passed verbatim to pk_cli.py for
+# in-search filtering and exported to the Python block for own/other tier
+# classification (set-intersection semantics; no adjacent tier).
 LORE_SEARCH="$SCRIPT_DIR/pk_cli.py"
 
 if [[ ! -f "$LORE_SEARCH" ]]; then
@@ -126,6 +115,7 @@ SEARCH_ARGS=("search" "$KNOWLEDGE_DIR" "$QUERY" "--limit" "$LIMIT" "--json" "--c
 if [[ "$TYPE" != "all" ]]; then
   SEARCH_ARGS+=("--type" "$TYPE")
 fi
+SEARCH_ARGS+=("--scale-set" "$SCALE_SET")
 
 # --- Run search ---
 RESULTS=$(python3 "$LORE_SEARCH" "${SEARCH_ARGS[@]}" 2>/dev/null || true)
@@ -139,9 +129,7 @@ fi
 export _PK_RESULTS="$RESULTS"
 export _PK_EXCLUDE_BACKLINKS="$EXCLUDE_BACKLINKS"
 export _PK_SCRIPT_DIR="$SCRIPT_DIR"
-export _PK_OWN_SCALE="$OWN_SCALE"
-export _PK_ADJ_SCALE_BELOW="$ADJ_SCALE_BELOW"
-export _PK_ADJ_SCALE_ABOVE="$ADJ_SCALE_ABOVE"
+export _PK_REQUESTED_SCALES="$SCALE_SET"
 export _PK_SCALE_CONTEXT="$SCALE_SET"
 python3 - "$KNOWLEDGE_DIR" "$FORMAT" "$QUERY" "$LORE_SEARCH" <<'PYEOF'
 import datetime
@@ -334,77 +322,52 @@ if exclude_raw:
 
 
 # --- Scale-context classification ---
-own_scale = os.environ.get("_PK_OWN_SCALE", "")
-adj_below = os.environ.get("_PK_ADJ_SCALE_BELOW", "")
-adj_above = os.environ.get("_PK_ADJ_SCALE_ABOVE", "")
+# Requested scales: a set parsed from the comma-delimited --scale-set argument.
+# An entry is classified `own` when its parsed scale set intersects this set;
+# everything else (including empty/unknown entry scales when a filter is active)
+# is `other`. There is no `adjacent` tier under set-membership semantics.
+def _csv_to_set(value: str) -> set:
+    return {part.strip().lower() for part in value.split(",") if part.strip()} if value else set()
+
+
+requested_scales = _csv_to_set(os.environ.get("_PK_REQUESTED_SCALES", ""))
 scale_context = os.environ.get("_PK_SCALE_CONTEXT", "")
 
-_SCALE_META_RE = re.compile(r"\|\s*scale:\s*(?P<scale>[^\s|]+)", re.IGNORECASE)
+_SCALE_META_RE = re.compile(r"\|\s*scale:\s*(?P<scale>[^|]+?)\s*(?:\||-->)", re.IGNORECASE)
 
-def _parse_entry_scale(file_path_rel: str) -> str:
-    """Read the scale field from an entry's HTML comment metadata. Returns '' if not present."""
+def _parse_entry_scale(file_path_rel: str) -> set:
+    """Read the scale field from an entry's HTML comment metadata as a set of labels.
+
+    Splits on ',', lowercases, strips whitespace. Returns the empty set when the field
+    is missing, empty, or 'unknown'.
+    """
     abs_path = os.path.join(knowledge_dir, file_path_rel)
     try:
         text = open(abs_path, encoding="utf-8").read()
     except (OSError, UnicodeDecodeError):
-        return ""
+        return set()
     m = _SCALE_META_RE.search(text)
-    if m:
-        return m.group("scale").strip().lower()
-    return ""
+    if not m:
+        return set()
+    raw = m.group("scale").strip().lower()
+    if raw == "" or raw == "unknown":
+        return set()
+    return {part.strip() for part in raw.split(",") if part.strip()}
 
 
-def _scale_tier(entry_scale: str) -> str:
-    """Classify an entry relative to own_scale. Returns 'own', 'adjacent', or 'other'."""
-    if not own_scale:
+def _scale_tier(entry_scale_set: set) -> str:
+    """Classify an entry relative to requested_scales. Returns 'own' or 'other'.
+
+    `own` when the entry's parsed scale set intersects `requested_scales`;
+    `other` otherwise. Entries with empty parsed sets fail when a filter is active.
+    """
+    if not requested_scales:
         return "own"
-    if not entry_scale or entry_scale == "unknown":
-        # Unclassified entries surface at own-scale by default
+    if not entry_scale_set:
+        return "other"
+    if entry_scale_set & requested_scales:
         return "own"
-    if entry_scale == own_scale:
-        return "own"
-    if entry_scale in (adj_below, adj_above):
-        return "adjacent"
     return "other"
-
-
-def _synopsis(snippet: str) -> str:
-    """Return first 2 non-empty lines of snippet as a synopsis."""
-    lines = [l for l in snippet.splitlines() if l.strip()]
-    return "\n".join(lines[:2])
-
-
-def _get_or_synthesize_synopsis(entry_id: str, scale: str, snippet: str, script_dir: str) -> str:
-    """Return a synopsis for entry_id at scale, using cache or synthesis."""
-    synopsis_script = os.path.join(script_dir, "edge-synopsis.sh")
-    synth_script = os.path.join(script_dir, "synthesize-synopsis.sh")
-
-    # Try cache first
-    if os.path.isfile(synopsis_script):
-        try:
-            proc = subprocess.run(
-                [synopsis_script, "get", entry_id, scale],
-                capture_output=True, text=True, timeout=5
-            )
-            if proc.returncode == 0 and proc.stdout.strip():
-                return proc.stdout.strip()
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-
-    # Cache miss: attempt synthesis (includes fallback internally; budget=2s curl + overhead)
-    if os.path.isfile(synth_script):
-        try:
-            proc = subprocess.run(
-                [synth_script, entry_id, scale],
-                capture_output=True, text=True, timeout=10
-            )
-            if proc.returncode == 0 and proc.stdout.strip():
-                return proc.stdout.strip()
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-
-    # Final fallback: 2-line truncation
-    return _synopsis(snippet)
 
 
 # --- Status-aware filtering ---
@@ -444,10 +407,12 @@ def _status_visible(entry_status: str, role: str) -> bool:
     return True
 
 
+_requested_label = ",".join(sorted(requested_scales)) if requested_scales else ""
+
 if fmt == "summary":
     print(f'## Prior Knowledge')
     if scale_context:
-        print(f'Results from knowledge store for: "{query}" (scale-context: {scale_context}, own-scale: {own_scale})')
+        print(f'Results from knowledge store for: "{query}" (scale-set: {_requested_label})')
     else:
         print(f'Results from knowledge store for: "{query}"')
     print()
@@ -455,8 +420,8 @@ if fmt == "summary":
     for r in results:
         tier = "own"
         if scale_context and r.get("source_type") == "knowledge":
-            entry_scale = _parse_entry_scale(r["file_path"])
-            tier = _scale_tier(entry_scale)
+            entry_scale_set = _parse_entry_scale(r["file_path"])
+            tier = _scale_tier(entry_scale_set)
         if tier == "other":
             continue
         # Status filter
@@ -470,8 +435,7 @@ if fmt == "summary":
         if len(r.get("snippet", "")) > 200:
             snippet += "..."
         score = r.get("score", 0)
-        tier_tag = f" [{tier}-scale]" if scale_context and tier == "adjacent" else ""
-        print(f'- **{r["heading"]}**{tier_tag} ({r["file_path"]}, score: {score}): {snippet}')
+        print(f'- **{r["heading"]}** ({r["file_path"]}, score: {score}): {snippet}')
     if suppressed_historical > 0 and scale_context == "spec-lead":
         print(f'\n_{suppressed_historical} historical/superseded {"entry" if suppressed_historical == 1 else "entries"} suppressed — add --include-status=historical to expand._')
     _log_prefetch(results)
@@ -480,13 +444,15 @@ if fmt == "summary":
 # prompt format — resolve each result to full content
 print(f'## Prior Knowledge')
 if scale_context:
-    print(f'Results from knowledge store for: "{query}" (scale-context: {scale_context}, own-scale: {own_scale})')
+    print(f'Results from knowledge store for: "{query}" (scale-set: {_requested_label})')
 else:
     print(f'Results from knowledge store for: "{query}"')
 
-# Budget: own-scale entries consume first; adjacent-scale synopses fill remaining.
-# Default 8000 chars; only enforced in the scale-context path.
-PREFETCH_BUDGET = 8000
+# Budget: own-scale entries consume up to PREFETCH_BUDGET chars.
+# Default 12000 chars (v1 ceiling per wider-net-phase-retrieval design D3).
+# Per-section enforcement lives in resolve-manifest.sh's v2 path; this single-pass
+# global budget applies to the legacy/non-manifest prefetch caller.
+PREFETCH_BUDGET = 12000
 
 def _resolve_content(backlink: str) -> str:
     """Return full resolved content for backlink, or '' on failure."""
@@ -506,16 +472,15 @@ def _resolve_content(backlink: str) -> str:
 
 suppressed_historical = 0
 
-# Two-pass budget-aware rendering:
-# Pass 1: accumulate own-scale entries up to budget.
-# Pass 2: add adjacent-scale synopses if budget remains.
+# Single-pass rendering: keep entries whose parsed scale set intersects
+# requested_scales (own); drop the rest. Set-membership semantics retire the
+# adjacent-tier render path along with the synopsis-cache fallback it used.
 own_entries = []
-adj_entries = []
 
 for r in results:
     if r.get("source_type") == "knowledge":
-        entry_scale = _parse_entry_scale(r["file_path"])
-        tier = _scale_tier(entry_scale)
+        entry_scale_set = _parse_entry_scale(r["file_path"])
+        tier = _scale_tier(entry_scale_set)
     else:
         tier = "own"
     if tier == "other":
@@ -527,14 +492,31 @@ for r in results:
             if entry_status in ("historical", "superseded"):
                 suppressed_historical += 1
             continue
-    if tier == "adjacent":
-        adj_entries.append(r)
-    else:
-        own_entries.append(r)
+    own_entries.append(r)
 
 budget_remaining = PREFETCH_BUDGET
 
-# Emit own-scale entries first, tracking char budget
+# Emit own-scale entries with full → snippet → backlink degradation to fit the budget.
+SNIPPET_LIMIT = 600
+
+def _full_block(r, content, stale_tag, trust_line, corrected_line, sa_line):
+    block = f'\n### {r["heading"]} (from {r["file_path"]}){stale_tag}\n{trust_line}'
+    if corrected_line:
+        block += f'\n{corrected_line}'
+    block += f'\n{content}'
+    if sa_line:
+        block += f'\n{sa_line}'
+    return block
+
+def _snippet_block(r, snippet, stale_tag):
+    return f'\n### {r["heading"]} (from {r["file_path"]}){stale_tag}\n{snippet[:SNIPPET_LIMIT]}'
+
+def _backlink_block(r):
+    target = r["file_path"]
+    if target.endswith(".md"):
+        target = target[:-3]
+    return f'\n- [[knowledge:{target}#{r["heading"]}]]'
+
 for r in own_entries:
     backlink = build_backlink_from_result(r)
     stale_tag = get_staleness_annotation(r["file_path"]) if r.get("source_type") == "knowledge" else ""
@@ -548,33 +530,19 @@ for r in own_entries:
     content = _resolve_content(backlink)
     if not content:
         content = r.get("snippet", "")
-    block = f'\n### {r["heading"]} (from {r["file_path"]}){stale_tag}\n{trust_line}'
-    if corrected_line:
-        block += f'\n{corrected_line}'
-    block += f'\n{content}'
-    if sa_line:
-        block += f'\n{sa_line}'
-    print(block)
-    budget_remaining -= len(block)
-
-# Emit adjacent-scale synopses only if budget remains
-for r in adj_entries:
-    if budget_remaining <= 0:
-        break
-    stale_tag = get_staleness_annotation(r["file_path"]) if r.get("source_type") == "knowledge" else ""
-    trust_line = render_trust_stamp(r, knowledge_dir)
-    corrected_line = _last_corrected_line(r["file_path"]) if r.get("source_type") == "knowledge" else ""
-    # Derive entry_id from file_path (strip .md suffix)
-    entry_id = r.get("file_path", "")
-    if entry_id.endswith(".md"):
-        entry_id = entry_id[:-3]
-    synopsis = _get_or_synthesize_synopsis(entry_id, own_scale, r.get("snippet", ""), script_dir)
-    if not synopsis:
+    block = _full_block(r, content, stale_tag, trust_line, corrected_line, sa_line)
+    if len(block) > budget_remaining:
+        snippet_block = _snippet_block(r, r.get("snippet", "") or content, stale_tag)
+        if len(snippet_block) > budget_remaining:
+            backlink_block = _backlink_block(r)
+            if len(backlink_block) > budget_remaining:
+                break
+            print(backlink_block)
+            budget_remaining -= len(backlink_block)
+            continue
+        print(snippet_block)
+        budget_remaining -= len(snippet_block)
         continue
-    block = f'\n### {r["heading"]} (from {r["file_path"]}, adjacent-scale){stale_tag}\n{trust_line}'
-    if corrected_line:
-        block += f'\n{corrected_line}'
-    block += f'\n{synopsis}'
     print(block)
     budget_remaining -= len(block)
 

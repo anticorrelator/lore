@@ -58,7 +58,7 @@ fi
 if [[ $USE_FTS -eq 1 ]]; then
   if [[ -z "$SCALE_SET" ]]; then
     echo "Error: --scale-set is required for FTS search; declare your retrieval scale, e.g. --scale-set implementation" >&2
-    echo "  Buckets: application, architectural, subsystem, implementation" >&2
+    echo "  Buckets: abstract, architecture, subsystem, implementation" >&2
     exit 1
   fi
   echo "--- Ranked results (FTS5) ---"

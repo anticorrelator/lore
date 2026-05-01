@@ -21,7 +21,8 @@
 #   All three fields are emitted on every capture — with their resolved value OR the literal string "null". No network access.
 #
 # Scale:
-#   --scale <bucket>  Required. One of: application, architectural, subsystem, implementation.
+#   --scale <bucket>  Required. One of: abstract, architecture, subsystem, implementation (single label),
+#     or two adjacent labels comma-delimited (e.g. "subsystem,implementation").
 #     The caller declares scale explicitly; no formula derivation at capture time.
 #
 # Convention: when a provenance flag is omitted OR passed an empty string, the corresponding field is OMITTED from the
@@ -152,28 +153,86 @@ if [[ -z "$INSIGHT" ]]; then
   die "--insight is required"
 fi
 
+_VALID_SCALES=$("$SCRIPT_DIR/scale-registry.sh" get-ids 2>/dev/null || echo "implementation subsystem architecture abstract")
+_enum_list=$(echo "$_VALID_SCALES" | tail -r 2>/dev/null || echo "$_VALID_SCALES" | awk '{lines[NR]=$0} END{for(i=NR;i>=1;i--) print lines[i]}')
+_enum_list=$(echo "$_enum_list" | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')
+
 if [[ -z "$SCALE" ]]; then
+  _msg="--scale is required; one of: $_enum_list (single label) or two adjacent labels comma-delimited (e.g. \"subsystem,implementation\")"
   if [[ $JSON_MODE -eq 1 ]]; then
-    json_error "--scale is required; use one of: application, architectural, subsystem, implementation"
+    json_error "$_msg"
   fi
-  die "--scale is required; use one of: application, architectural, subsystem, implementation"
+  die "$_msg"
 fi
 
-_VALID_SCALES=$("$SCRIPT_DIR/scale-registry.sh" get-ids 2>/dev/null || echo "implementation subsystem architectural application")
-_scale_valid=0
-for _s in $_VALID_SCALES; do
-  if [[ "$SCALE" == "$_s" ]]; then
-    _scale_valid=1
-    break
+# Split SCALE on comma into elements, trim whitespace.
+_scale_elements=()
+_IFS_orig="$IFS"
+IFS=','
+for _piece in $SCALE; do
+  # trim leading/trailing whitespace
+  _piece="${_piece#"${_piece%%[![:space:]]*}"}"
+  _piece="${_piece%"${_piece##*[![:space:]]}"}"
+  _scale_elements+=("$_piece")
+done
+IFS="$_IFS_orig"
+
+_scale_count=${#_scale_elements[@]}
+if [[ $_scale_count -lt 1 || $_scale_count -gt 2 ]]; then
+  _msg="--scale accepts 1 or 2 labels (max two labels); got $_scale_count from \"$SCALE\". Use one of: $_enum_list, or two adjacent labels comma-delimited."
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "$_msg"
+  fi
+  die "$_msg"
+fi
+
+# Validate each element is a known registry id.
+for _el in "${_scale_elements[@]}"; do
+  _scale_valid=0
+  for _s in $_VALID_SCALES; do
+    if [[ "$_el" == "$_s" ]]; then
+      _scale_valid=1
+      break
+    fi
+  done
+  if [[ $_scale_valid -eq 0 ]]; then
+    _msg="scale label \"$_el\" is not a registered scale id; one of: $_enum_list (single label) or two adjacent labels comma-delimited (e.g. \"subsystem,implementation\")"
+    if [[ $JSON_MODE -eq 1 ]]; then
+      json_error "$_msg"
+    fi
+    die "$_msg"
   fi
 done
-if [[ $_scale_valid -eq 0 ]]; then
-  _enum_list=$(echo "$_VALID_SCALES" | tail -r 2>/dev/null || echo "$_VALID_SCALES" | awk '{lines[NR]=$0} END{for(i=NR;i>=1;i--) print lines[i]}')
-  _enum_list=$(echo "$_enum_list" | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')
-  if [[ $JSON_MODE -eq 1 ]]; then
-    json_error "scale must be one of: $_enum_list"
+
+# For two-label form, enforce adjacency by consulting scale-registry.sh get-adjacency.
+if [[ $_scale_count -eq 2 ]]; then
+  _first="${_scale_elements[0]}"
+  _second="${_scale_elements[1]}"
+  if [[ "$_first" == "$_second" ]]; then
+    _msg="--scale pair must be two distinct labels; got \"$_first,$_second\""
+    if [[ $JSON_MODE -eq 1 ]]; then
+      json_error "$_msg"
+    fi
+    die "$_msg"
   fi
-  die "scale must be one of: $_enum_list"
+  _adj_output=$("$SCRIPT_DIR/scale-registry.sh" get-adjacency "$_first" 2>/dev/null || echo "")
+  _below=$(echo "$_adj_output" | sed -n '1p')
+  _above=$(echo "$_adj_output" | sed -n '2p')
+  if [[ "$_second" != "$_below" && "$_second" != "$_above" ]]; then
+    _msg="--scale pair \"$_first,$_second\" is not adjacent; valid neighbors of \"$_first\" are: ${_below:-(none)} (below), ${_above:-(none)} (above). Allowed adjacent pairs follow the ordinal order $_enum_list."
+    if [[ $JSON_MODE -eq 1 ]]; then
+      json_error "$_msg"
+    fi
+    die "$_msg"
+  fi
+  # Normalize to canonical top-to-bottom ordinal order (D5).
+  # If _second == _above, _second has higher ordinal — swap so top is first.
+  # If _second == _below, _first already has higher ordinal — order is canonical.
+  if [[ "$_second" == "$_above" ]]; then
+    SCALE="$_second,$_first"
+  else
+    SCALE="$_first,$_second"
+  fi
 fi
 
 # --- Provenance validator ---

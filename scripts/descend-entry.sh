@@ -3,7 +3,7 @@
 #
 # Like `expand-entry.sh --down`, but only returns children whose scale is
 # exactly one step narrower than the parent entry's scale (per the registry
-# ordinal: architectural > subsystem > implementation).
+# ordinal: architecture > subsystem > implementation).
 #
 # Children without a scale field, or children at the same/higher scale, are
 # excluded. When the parent has no scale field, all children are returned

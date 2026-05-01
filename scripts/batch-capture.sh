@@ -8,7 +8,7 @@
 #
 # Required fields per entry: insight, scale
 # Optional fields: context, category, confidence, related_files, source, example
-#   scale must be one of: application, architectural, subsystem, implementation
+#   scale must be one of: abstract, architecture, subsystem, implementation
 #
 # Calls capture.sh --skip-manifest for each entry, then runs update-manifest.sh once.
 
@@ -46,7 +46,7 @@ Input JSON format:
 
 Required per entry: insight, scale
 Optional per entry: context, category, confidence, related_files, source, example
-scale must be one of: application, architectural, subsystem, implementation
+scale must be one of: abstract, architecture, subsystem, implementation
 EOF
       exit 0
       ;;
