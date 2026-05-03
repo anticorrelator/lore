@@ -70,6 +70,18 @@ if [[ ! -d "$KNOWLEDGE_DIR/domains" ]]; then
   fi
 fi
 
+# --- (c3) Missing preferences/ directory ---
+if [[ ! -d "$KNOWLEDGE_DIR/preferences" ]]; then
+  if [[ $FIX -eq 1 ]]; then
+    mkdir -p "$KNOWLEDGE_DIR/preferences"
+    echo "[heal] Created missing preferences/ directory"
+    ISSUES=$((ISSUES + 1))
+  else
+    echo "[heal] Missing preferences/ directory — run with --fix to create"
+    ISSUES=$((ISSUES + 1))
+  fi
+fi
+
 # --- (c2) Missing _meta/ directory ---
 if [[ ! -d "$KNOWLEDGE_DIR/_meta" ]]; then
   if [[ $FIX -eq 1 ]]; then

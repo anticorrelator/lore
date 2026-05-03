@@ -514,7 +514,7 @@ fi
 echo "[threads] Budget: ${CHARS_USED}/${BUDGET} chars | ${PINNED_COUNT} pinned, ${ACTIVE_COUNT} active, ${DORMANT_COUNT} dormant | ${FULL_ENTRY_COUNT} full, ${SUMMARY_ENTRY_COUNT} summary, ${OMITTED_ENTRY_COUNT} omitted"
 
 if [[ -n "$HAS_PENDING" ]]; then
-  echo "[threads] Pending session digest — process on first turn"
+  echo "[threads] Pending session digest — process via /remember first-turn"
 fi
 
 echo ""

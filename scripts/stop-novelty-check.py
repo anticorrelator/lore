@@ -280,6 +280,18 @@ GOTCHA_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Trigger 6: Contextual preference signal — two-pass detection
+# Imperative phrasing and context signal may be a sentence apart, so a single
+# regex would be either too narrow or too broad. Two-pass: find imperative word,
+# then check a ±300-char window for a context signal.
+PREFERENCE_IMPERATIVE_RE = re.compile(
+    r"\b(?:don'?t|do not|never|avoid|stop|prefer|always|please\s+(?:don'?t|avoid|always))\b",
+    re.IGNORECASE,
+)
+PREFERENCE_CONTEXT_RE = re.compile(
+    r"(?:/[\w-]+|skills?/[\w-]+|[\w-]+/SKILL\.md|\b[\w-]+\.(?:py|sh|md)\b)",
+)
+
 # Tools that indicate agent team coordination
 TEAM_TOOLS = frozenset({"Agent", "SendMessage"})
 TEAM_COOLDOWN = 5  # messages after last team tool use to still exclude
@@ -294,6 +306,8 @@ HEURISTIC_PATTERNS = [
 ]
 
 # User-role patterns (only checked in user messages)
+# Note: preference-signal uses a two-pass helper (_is_preference_signal) and is
+# handled separately in scan_heuristics — it is not a simple regex in this list.
 USER_PATTERNS = [
     ("user-correction", USER_CORRECTION_RE),
 ]
@@ -330,6 +344,30 @@ def _is_structured_output(text_blocks):
         if "<!-- " in block:
             return True
     return False
+
+
+def _is_preference_signal(text, window=300):
+    """Two-pass preference-signal detection.
+
+    Pass 1: find an imperative preference word (don't, never, avoid, prefer, etc.).
+    Pass 2: check a ±window-char region around the match for a context signal
+    (skill name like /pr-review, file path, or directory reference).
+
+    Returns (matched: bool, region: str|None). If matched, region is the ±window
+    text around the imperative word — used as matched_text for the candidate.
+
+    Two-pass is used instead of a single regex because imperative word and context
+    signal may be a sentence apart; a single regex would be too narrow or too broad.
+    """
+    m = PREFERENCE_IMPERATIVE_RE.search(text)
+    if not m:
+        return False, None
+    start = max(0, m.start() - window)
+    end = min(len(text), m.end() + window)
+    region = text[start:end]
+    if not PREFERENCE_CONTEXT_RE.search(region):
+        return False, None
+    return True, region.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +494,16 @@ def scan_heuristics(messages, team_exclusions=None):
                         "trigger": label,
                         "matched_text": context,
                     })
+            # preference-signal uses two-pass detection (imperative word + context
+            # signal in ±300-char window) — not in USER_PATTERNS loop above
+            matched, region = _is_preference_signal(full_text)
+            if matched:
+                hits.append({
+                    "index": msg["index"],
+                    "role": msg["role"],
+                    "trigger": "preference-signal",
+                    "matched_text": region,
+                })
 
     return hits
 
@@ -793,6 +841,33 @@ def and_gate(heuristic_hits, novelty_results, config=None):
 # Related file extraction
 # ---------------------------------------------------------------------------
 
+_SKILL_MENTION_RE = re.compile(r"/(?P<skill>[\w-]+)", re.IGNORECASE)
+
+
+def extract_skill_paths_from_text(text):
+    """Extract skills/<name>/SKILL.md paths for skill names mentioned in text.
+
+    Matches /skill-name patterns (e.g. /pr-review, /remember) and maps them
+    to their canonical SKILL.md path for pre-filling related_files. Only
+    includes paths that actually exist in the repo (repo root inferred from
+    this script's location) so missing skills don't produce spurious hash churn.
+
+    Returns a list of unique skill paths in order of first appearance.
+    """
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    seen = set()
+    paths = []
+    for m in _SKILL_MENTION_RE.finditer(text):
+        skill = m.group("skill")
+        rel_path = f"skills/{skill}/SKILL.md"
+        if rel_path in seen:
+            continue
+        seen.add(rel_path)
+        if os.path.isfile(os.path.join(repo_root, rel_path)):
+            paths.append(rel_path)
+    return paths
+
+
 def extract_related_files(transcript_path, heuristic_index, config=None):
     """Extract file paths from tool_use blocks near a heuristic hit.
 
@@ -937,18 +1012,21 @@ def extract_debug_context(messages, heuristic_index, config=None):
 # ---------------------------------------------------------------------------
 
 def candidate_hash(candidate):
-    """Return a 12-char hex hash for a candidate, based on trigger + matched_text."""
-    key = candidate["trigger"] + candidate["matched_text"]
+    """Return a 12-char hex hash for a candidate, based on trigger + matched_text + related_files."""
+    related = candidate.get("related_files") or []
+    key = candidate["trigger"] + candidate["matched_text"] + ",".join(sorted(related))
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
 
 def write_pending_captures(knowledge_dir, candidates, transcript_path="", messages=None, config=None):
     """Write individual candidate files into _pending_captures/ directory.
 
-    Each candidate gets its own file named {sha256(trigger+matched_text)[:12]}.md.
+    Each candidate gets its own file named {sha256(trigger+matched_text+related_files)[:12]}.md.
     This makes writes idempotent: the same candidate always produces the same
     filename, so re-running the hook with identical candidates is a harmless
-    overwrite. The agent processes and deletes files individually at first turn.
+    overwrite. Candidates with identical content but different related_files
+    (different scope) produce distinct filenames. The agent processes and deletes
+    files individually at first turn.
 
     When transcript_path is provided, each candidate file includes a
     **Related files:** field listing file paths from tool_use blocks
@@ -966,13 +1044,29 @@ def write_pending_captures(knowledge_dir, candidates, transcript_path="", messag
         return  # best-effort
 
     for c in candidates:
-        filename = f"{candidate_hash(c)}.md"
-        filepath = os.path.join(pending_dir, filename)
-
-        # Extract related files from transcript if path is available
+        # Extract related files and attach to candidate before hashing so scope
+        # differences produce distinct filenames (candidate dict is self-contained)
         related_files = []
         if transcript_path:
             related_files = extract_related_files(transcript_path, c["heuristic_index"], config=config)
+
+        # For preference-signal, augment related_files with skill paths extracted from
+        # the matched text (e.g. "/pr-review" → "skills/pr-review/SKILL.md"). Skill paths
+        # are prepended so they appear first — they are the primary context signal.
+        if c["trigger"] == "preference-signal":
+            skill_paths = extract_skill_paths_from_text(c["matched_text"])
+            # Merge: skill paths first, then tool-use paths, deduplicating
+            merged = []
+            seen = set()
+            for p in skill_paths + related_files:
+                if p not in seen:
+                    seen.add(p)
+                    merged.append(p)
+            related_files = merged
+
+        c["related_files"] = related_files
+        filename = f"{candidate_hash(c)}.md"
+        filepath = os.path.join(pending_dir, filename)
 
         # For debug-root-cause with messages, emit expanded debug-narrative format
         is_debug = c["trigger"] == "debug-root-cause" and messages
@@ -1015,6 +1109,18 @@ def write_pending_captures(knowledge_dir, candidates, transcript_path="", messag
                 "A statement explaining why a choice was made is more valuable than describing what "
                 "was chosen; the 'what' is recoverable from code, the 'why' is not. If both a "
                 "rationale and a factual observation are present, prefer the rationale.",
+                "",
+            ])
+
+        if c["trigger"] == "preference-signal":
+            lines.extend([
+                "**Preference routing:** This candidate was flagged as a contextual preference. "
+                "Before capturing, decide scope: if the preference applies only in a specific skill, "
+                "directory, or workflow (e.g. 'in /pr-review, don\\'t X'), capture to "
+                "`preferences/` via `lore capture --category preferences` and set related_files "
+                "to the skill or directory files listed above. If the preference is truly global "
+                "('always be terse'), route to the thread `accumulated_preferences` via /remember "
+                "Step 5 instead — do not capture to the knowledge store.",
                 "",
             ])
 

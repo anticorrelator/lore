@@ -4,6 +4,42 @@
 # their completion reports before marking tasks done.
 # Agent type is read from team config to determine requirements.
 #
+# Hard-validation contract (task #22):
+#   Worker (general-purpose) and Researcher (Explore) reports must carry either
+#     (a) ≥1 structured observation/assertion matching the shape
+#         { claim: …, file: …, line_range: N-M, falsifier: …, significance: low|medium|high }
+#     OR
+#     (b) a well-formed escalation verdict of the shape
+#         { escalation: "task-too-trivial-for-solo-decomposition", rationale: "<one-sentence reason>" }
+#   Nothing else passes. Soft-matching on heading presence alone (the pre-Phase-2 behavior)
+#   silently let empty observations through — the hard-check converts that failure mode into
+#   an explicit blocked-exit with a lead-visible verdict path.
+#
+# Tier 2 / Tier 3 section shape-check (implement-rewrite, task #4):
+#   Worker reports MAY carry additional sections produced by the extended worker.md:
+#     **Tier 2 evidence:**      list of claim_id strings — already validated at write-time
+#                                by evidence-append.sh; hook only checks list-shape
+#     **Tier 3 candidates:**    optional YAML list of promotion candidates; each entry must
+#                                carry claim, why_future_agent_cares, falsifier, and a
+#                                non-empty source_artifact_ids array
+#   Hook is a gate, not a sole-writer: validates section SHAPE only. Claim content is
+#   sole-writer-validated by evidence-append.sh (Tier 2) and lore-promote.sh (Tier 3).
+#   The researcher **Assertions:** path is unchanged — tier-section checks apply to
+#   worker (general-purpose) reports only.
+#
+# Backwards-compat gate (task #23):
+#   Hard-validation only FIRES when the report carries a `template_version` line —
+#   a marker that the producing agent template has been rebuilt against F0 Phase 6 and
+#   is expected to emit structured observations. Reports WITHOUT `template_version`
+#   (legacy / pre-F0 templates) emit a single-line warning to the work item's
+#   execution-log and exit 0 (allow). This preserves Exit Criterion #6 during the
+#   transition window: operators can roll Phase 6 template updates without their
+#   in-flight teams silently breaking.
+#
+#   The warning line is a migration signal. `/retro` reads execution-log and can
+#   surface accumulated legacy-report counts as an evolution suggestion (raise the
+#   gate to always-fire once legacy counts trend to zero).
+#
 # Input: JSON on stdin (TaskCompleted hook format)
 # Output: exit 0 to allow, exit 2 + stderr to block
 
@@ -48,53 +84,148 @@ print('')
 " 2>/dev/null || true)
 fi
 
+# report_has_template_version — look for a `Template-version:` line or a
+# `template_version:` yaml-style field anywhere in $TASK_DESC.
+# Returns 0 if present, 1 if absent.
+report_has_template_version() {
+  # Both the Template-version: execution-log header style and the yaml-style
+  # template_version: field used in YAML front-matter / scorecard row bodies
+  # are accepted. Case-insensitive on the key to tolerate minor authoring drift.
+  printf '%s' "$TASK_DESC" | grep -qiE '^[[:space:]]*template[_-]version[[:space:]]*:[[:space:]]*[A-Za-z0-9_-]+'
+}
+
+# derive_work_slug — derive the work-item slug from the team name.
+# team_name convention is "impl-<slug>" or "spec-<slug>"; strip the prefix.
+derive_work_slug() {
+  case "$TEAM_NAME" in
+    impl-*) echo "${TEAM_NAME#impl-}" ;;
+    spec-*) echo "${TEAM_NAME#spec-}" ;;
+    *) echo "" ;;
+  esac
+}
+
+# emit_legacy_warning — append a one-line migration-signal entry to the work
+# item's execution-log. Best-effort: if write-execution-log.sh is not callable
+# or the slug can't be derived, fall back to a stderr warning so the signal is
+# still visible to the operator. Never blocks — this is the backwards-compat
+# path, so returning a non-zero from here would defeat the gate's purpose.
+emit_legacy_warning() {
+  local slug reason
+  slug=$(derive_work_slug)
+  reason="$1"
+  local warning="LEGACY REPORT: $AGENT_NAME ($AGENT_TYPE) completed task without template_version. Reason: $reason. Migration signal for /retro."
+
+  if [[ -n "$slug" && -x "$SCRIPT_DIR/write-execution-log.sh" ]]; then
+    printf '%s\n' "$warning" \
+      | "$SCRIPT_DIR/write-execution-log.sh" \
+          --slug "$slug" \
+          --source "manual" \
+          --phase "legacy-compat-warning" \
+          >/dev/null 2>&1 \
+      || echo "[task-completed] warning: $warning" >&2
+  else
+    echo "[task-completed] warning: $warning" >&2
+  fi
+}
+
+# validate_structured_report — hard-validate that $TASK_DESC contains either
+# ≥1 structured observation/assertion OR a well-formed escalation verdict.
+# Prints a human-readable diagnostic to stderr when it fails.
+# Accepts one arg: the heading name to look under ("Observations" or "Assertions").
+#
+# Returns 0 on pass, 1 on fail (sets FAIL_REASON in the caller for use in error message).
+validate_structured_report() {
+  local section_heading="$1"
+  local verdict
+  verdict=$(printf '%s' "$TASK_DESC" | python3 "$SCRIPT_DIR/validate-structured-report.py" "$section_heading" 2>&1) || true
+
+  if [[ "${verdict}" == PASS_* ]]; then
+    return 0
+  fi
+  # Strip leading "FAIL: " for the reason string
+  FAIL_REASON="${verdict#FAIL: }"
+  return 1
+}
+
+# validate_tier_sections — shape-check optional **Tier 2 evidence:** and
+# **Tier 3 candidates:** sections (implement-rewrite task #4). Sole-writer
+# discipline: the hook verifies section structure only; claim content is
+# validated at write-time by evidence-append.sh (Tier 2) and lore-promote.sh
+# (Tier 3). Both sections absent → pass. If a section is present but malformed,
+# sets FAIL_REASON and returns 1.
+validate_tier_sections() {
+  local verdict
+  verdict=$(printf '%s' "$TASK_DESC" | python3 "$SCRIPT_DIR/validate-tier-sections.py" 2>&1) || true
+
+  if [[ "${verdict}" == "PASS" ]]; then
+    return 0
+  fi
+  FAIL_REASON="${verdict#FAIL: }"
+  return 1
+}
+
 # Enforce required sections based on agent type
-# Explore → researcher: require **Assertions:** + **Observations:**
-# general-purpose → worker: require **Observations:**
+# Explore → researcher: require **Assertions:** with ≥1 structured entry OR escalation
+# general-purpose → worker: require **Observations:** with ≥1 structured entry OR escalation
 # Other types (team-lead, unknown) → no structural requirements
 
+# Backwards-compat gate (task #23): only enforce for reports that carry a
+# template_version marker. Legacy/pre-F0 reports emit a migration warning and
+# pass. Team-leads always pass (no structural requirements); they do not need
+# to trip the legacy-warning path, so we skip the gate for them below.
+if [[ "$AGENT_TYPE" != "team-lead" ]]; then
+  if ! report_has_template_version; then
+    emit_legacy_warning "no template_version line in report; enforcement skipped"
+    exit 0
+  fi
+fi
+
+FAIL_REASON=""
 case "$AGENT_TYPE" in
   Explore)
-    # Researcher agents must include both Assertions and Observations
-    HAS_ASSERTIONS=false
-    HAS_OBSERVATIONS=false
-    if echo "$TASK_DESC" | grep -qE '\*\*Assertions:\*\*'; then
-      HAS_ASSERTIONS=true
-    fi
-    if echo "$TASK_DESC" | grep -qE '\*\*Observations:\*\*|\*\*Architectural patterns:\*\*'; then
-      HAS_OBSERVATIONS=true
-    fi
-    if $HAS_ASSERTIONS && $HAS_OBSERVATIONS; then
+    # Researcher agents: hard-validate Assertions. Observations (prose) is no longer
+    # separately required — the structured Assertions schema carries the primary signal.
+    if validate_structured_report "Assertions"; then
       exit 0
     fi
-    MISSING=""
-    if ! $HAS_ASSERTIONS; then MISSING="**Assertions:**"; fi
-    if ! $HAS_OBSERVATIONS; then
-      if [[ -n "$MISSING" ]]; then MISSING="$MISSING and "; fi
-      MISSING="${MISSING}**Observations:**"
-    fi
-    echo "Update the task description with your full findings report (including $MISSING section(s)) before marking complete." >&2
+    echo "Update the task description before marking complete." >&2
+    echo "Required: ≥1 structured assertion under **Assertions:** with all of {claim, file, line_range, falsifier, significance} (significance ∈ {low, medium, high}), OR a well-formed escalation verdict {escalation: \"task-too-trivial-for-solo-decomposition\", rationale: \"<one-sentence reason>\"}." >&2
+    echo "Validation failure: $FAIL_REASON" >&2
     exit 2
     ;;
   general-purpose)
-    # Worker agents must include Observations
-    if echo "$TASK_DESC" | grep -qE '\*\*Observations:\*\*|\*\*Architectural patterns:\*\*'; then
-      exit 0
+    # Worker agents: hard-validate Observations, then shape-check optional
+    # Tier 2 evidence / Tier 3 candidates sections when present.
+    if ! validate_structured_report "Observations"; then
+      echo "Update the task description before marking complete." >&2
+      echo "Required: ≥1 structured observation under **Observations:** with all of {claim, file, line_range, falsifier, significance} (significance ∈ {low, medium, high}), OR a well-formed escalation verdict {escalation: \"task-too-trivial-for-solo-decomposition\", rationale: \"<one-sentence reason>\"}." >&2
+      echo "Validation failure: $FAIL_REASON" >&2
+      exit 2
     fi
-    echo "Update the task description with your full completion report (including **Observations:** section) before marking complete." >&2
-    exit 2
+    if ! validate_tier_sections; then
+      echo "Update the task description before marking complete." >&2
+      echo "Tier section shape-check failed: $FAIL_REASON" >&2
+      exit 2
+    fi
+    exit 0
     ;;
   team-lead)
-    # Team leads have no structural requirements
+    # Team leads have no structural requirements.
     exit 0
     ;;
   *)
-    # Unknown or empty agent type — fall back to original behavior:
-    # require **Observations:** for any agent in impl-*/spec-* teams
-    if echo "$TASK_DESC" | grep -qE '\*\*Observations:\*\*|\*\*Architectural patterns:\*\*'; then
-      exit 0
+    # Unknown or empty agent type — apply worker-style hard-validation as default.
+    if ! validate_structured_report "Observations"; then
+      echo "Update the task description before marking complete." >&2
+      echo "Required: ≥1 structured observation under **Observations:** with all of {claim, file, line_range, falsifier, significance} (significance ∈ {low, medium, high}), OR a well-formed escalation verdict {escalation: \"task-too-trivial-for-solo-decomposition\", rationale: \"<one-sentence reason>\"}." >&2
+      echo "Validation failure: $FAIL_REASON" >&2
+      exit 2
     fi
-    echo "Update the task description with your full completion report (including **Observations:** section) before marking complete." >&2
-    exit 2
+    if ! validate_tier_sections; then
+      echo "Update the task description before marking complete." >&2
+      echo "Tier section shape-check failed: $FAIL_REASON" >&2
+      exit 2
+    fi
+    exit 0
     ;;
 esac

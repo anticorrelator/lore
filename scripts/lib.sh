@@ -56,6 +56,9 @@ json_field() {
 MAX_SLUG_LENGTH=50
 slugify() {
   local input="$1"
+  # Flatten newlines/tabs to spaces before the line-oriented sed pipeline below;
+  # otherwise embedded newlines survive into the slug and produce invalid filenames.
+  input=$(printf '%s' "$input" | tr '\n\t' '  ' | tr -s ' ')
   local lower
   lower=$(echo "$input" | tr '[:upper:]' '[:lower:]')
   local stripped
@@ -72,7 +75,8 @@ slugify() {
     | sed 's/[^a-z0-9]/-/g' \
     | sed 's/--*/-/g' \
     | sed 's/^-//;s/-$//' \
-    | cut -c1-$MAX_SLUG_LENGTH
+    | cut -c1-$MAX_SLUG_LENGTH \
+    | sed 's/-*$//'
 }
 
 # --- resolve_knowledge_dir ---
@@ -109,11 +113,143 @@ resolve_followup_dir() {
   return 1
 }
 
+# --- resolve_role ---
+# Resolve the operator role for the current repo: "maintainer" or "contributor".
+# Precedence (first match wins):
+#   1. $LORE_ROLE env var (session override — accepts "maintainer" or "contributor")
+#   2. Per-repo config: $KDIR/config.json → .role
+#      (where $KDIR = resolve_knowledge_dir(), i.e.
+#       ${LORE_DATA_DIR:-$HOME/.lore}/repos/<normalized-repo>/config.json)
+#   3. User-level fallback: ${LORE_DATA_DIR:-$HOME/.lore}/config/settings.json → .role
+#   4. Default: "contributor"
+#
+# Why contributor-default: Phase 9 role gating (task-54) restricts /evolve mutation,
+# pool import/aggregate, and other maintainer verbs to the maintainer role. Any
+# operator whose environment is not explicitly configured should see the safer
+# contributor path — the one that produces exportable retro bundles but never
+# mutates shared templates. Opting in to maintainer is an explicit act (task-59
+# bootstrap writes {role: maintainer} into the repo's config.json when the
+# operator is indeed the maintainer of this checkout).
+#
+# Malformed config: if a config file exists but cannot be parsed or contains a
+# role value outside {"maintainer","contributor"}, the function falls through
+# to the next precedence level rather than failing. Rationale: role resolution
+# is called on every /evolve and /retro invocation; a single malformed config
+# should not lock the operator out of their workflow. Surfacing the bad config
+# is the responsibility of a dedicated `lore doctor` check, not this hot-path
+# resolver.
+#
+# Usage: role=$(resolve_role)
+# Output: "maintainer" | "contributor" on stdout (always exactly one of the two).
+# Returns: 0 always.
+resolve_role() {
+  # 1. Env var override.
+  if [[ "${LORE_ROLE:-}" == "maintainer" || "${LORE_ROLE:-}" == "contributor" ]]; then
+    echo "$LORE_ROLE"
+    return 0
+  fi
+
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+
+  # 2. Per-repo config.json. Use resolve_knowledge_dir for the path so the
+  #    per-repo config sits alongside _work/, _scorecards/, etc. — same
+  #    normalization (including the local/ fallback for unpublished repos).
+  local kdir role
+  if kdir=$("$LORE_LIB_DIR/resolve-repo.sh" 2>/dev/null) && [[ -n "$kdir" ]]; then
+    local repo_config="$kdir/config.json"
+    if [[ -f "$repo_config" ]]; then
+      role=$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+    r = d.get("role")
+    if r in ("maintainer", "contributor"):
+        print(r)
+except Exception:
+    pass
+' "$repo_config" 2>/dev/null)
+      if [[ -n "$role" ]]; then
+        echo "$role"
+        return 0
+      fi
+    fi
+  fi
+
+  # 3. User-level fallback: ~/.lore/config/settings.json.
+  local settings="$data_dir/config/settings.json"
+  if [[ -f "$settings" ]]; then
+    role=$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+    r = d.get("role")
+    if r in ("maintainer", "contributor"):
+        print(r)
+except Exception:
+    pass
+' "$settings" 2>/dev/null)
+    if [[ -n "$role" ]]; then
+      echo "$role"
+      return 0
+    fi
+  fi
+
+  # 4. Default.
+  echo "contributor"
+  return 0
+}
+
 # --- get_git_branch ---
 # Get the current git branch name, or empty string if not in a git repo.
 # Usage: branch=$(get_git_branch)
 get_git_branch() {
   git rev-parse --abbrev-ref HEAD 2>/dev/null || echo ""
+}
+
+# --- captured_at_branch ---
+# Resolve the current branch name for capture-provenance. Returns the literal
+# string "null" when outside a git repo or on detached HEAD — capture must
+# always succeed regardless of repo state.
+# Usage: branch=$(captured_at_branch)
+captured_at_branch() {
+  local b
+  b=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  if [[ -z "$b" || "$b" == "HEAD" ]]; then
+    echo "null"
+  else
+    echo "$b"
+  fi
+}
+
+# --- captured_at_sha ---
+# Resolve the current HEAD commit SHA for capture-provenance. Returns "null"
+# when outside a git repo.
+# Usage: sha=$(captured_at_sha)
+captured_at_sha() {
+  local s
+  s=$(git rev-parse HEAD 2>/dev/null || true)
+  if [[ -z "$s" ]]; then
+    echo "null"
+  else
+    echo "$s"
+  fi
+}
+
+# --- captured_at_merge_base_sha ---
+# Resolve the merge-base of HEAD against origin/main for capture-provenance.
+# Returns "null" when outside a repo, when origin/main doesn't exist, or when
+# the merge-base cannot be computed. No network access.
+# Usage: mb=$(captured_at_merge_base_sha)
+captured_at_merge_base_sha() {
+  local mb
+  mb=$(git merge-base origin/main HEAD 2>/dev/null || true)
+  if [[ -z "$mb" ]]; then
+    echo "null"
+  else
+    echo "$mb"
+  fi
 }
 
 # --- timestamp_iso ---

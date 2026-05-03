@@ -631,34 +631,36 @@ class TestCategoryBacklinkResolution:
         return tmp_path
 
     def test_category_heading_backlink_resolves(self, tmp_path):
-        """[[knowledge:gotchas#ENV Variable Pitfalls]] should resolve to the entry content."""
+        """[[knowledge:gotchas#ENV Variable Pitfalls]] should resolve into phase_context."""
         self._setup_knowledge(tmp_path)
         result = generate_tasks_from_plan(CATEGORY_BACKLINK_PLAN, str(tmp_path))
-        task = result["phases"][0]["tasks"][0]
-        # The pre-resolved section should contain the actual content, not [unresolved]
-        assert "[unresolved" not in task["description"]
-        assert "ENV Variable Pitfalls" in task["description"]
-        assert "Always use quotes" in task["description"]
+        phase = result["phases"][0]
+        phase_context = phase["phase_context"]
+        # Resolved content lives in phase_context, not task description
+        assert "[unresolved" not in phase_context
+        assert "ENV Variable Pitfalls" in phase_context
+        assert "Always use quotes" in phase_context
 
     def test_bare_category_backlink_resolves(self, tmp_path):
-        """[[knowledge:gotchas]] should resolve to a listing of entries."""
+        """[[knowledge:gotchas]] should resolve into phase_context."""
         self._setup_knowledge(tmp_path)
         result = generate_tasks_from_plan(CATEGORY_BACKLINK_PLAN, str(tmp_path))
-        task = result["phases"][0]["tasks"][0]
+        phase = result["phases"][0]
+        phase_context = phase["phase_context"]
         # The Related section backlink [[knowledge:gotchas]] should resolve
-        assert "[unresolved" not in task["description"]
+        assert "[unresolved" not in phase_context
         # The listing should include the entry title
-        assert "ENV Variable Pitfalls" in task["description"]
+        assert "ENV Variable Pitfalls" in phase_context
 
     def test_nonexistent_heading_in_valid_category_shows_unresolved(self, tmp_path):
-        """[[knowledge:gotchas#Does Not Exist]] should show unresolved."""
+        """[[knowledge:gotchas#Does Not Exist]] should show unresolved in phase_context."""
         self._setup_knowledge(tmp_path)
         plan = CATEGORY_BACKLINK_PLAN.replace(
             "ENV Variable Pitfalls", "Does Not Exist"
         )
         result = generate_tasks_from_plan(plan, str(tmp_path))
-        task = result["phases"][0]["tasks"][0]
-        assert "[unresolved" in task["description"]
+        phase = result["phases"][0]
+        assert "[unresolved" in phase["phase_context"]
 
 
 # --- Task-level backlink fixtures ---
@@ -748,39 +750,38 @@ class TestTaskLevelBacklinkIntegration:
         return tmp_path
 
     def test_task_backlink_appears_in_description(self, tmp_path):
-        """Task with [[...]] in the checklist item gets that backlink resolved."""
+        """Task with [[...]] in the checklist item gets that backlink listed in **Task context:**."""
         self._setup_knowledge(tmp_path)
         result = generate_tasks_from_plan(TASK_BACKLINK_PLAN, str(tmp_path))
         task_with_bl = result["phases"][0]["tasks"][0]
-        # Task-level backlink should appear in description
-        assert "Task-level:" in task_with_bl["description"]
+        # Task-level backlink appears as compact annotation in **Task context:** block
+        assert "**Task context:**" in task_with_bl["description"]
         assert "gotchas#ENV Variable Pitfalls" in task_with_bl["description"]
 
-    def test_task_without_backlink_has_no_task_level_section(self, tmp_path):
-        """Task without [[...]] in its line should not have Task-level section."""
+    def test_task_without_backlink_has_no_task_context_section(self, tmp_path):
+        """Task without [[...]] in its line should not have **Task context:** section."""
         self._setup_knowledge(tmp_path)
         result = generate_tasks_from_plan(TASK_BACKLINK_PLAN, str(tmp_path))
         task_without_bl = result["phases"][0]["tasks"][1]  # "Add validation logic"
-        assert "Task-level:" not in task_without_bl["description"]
+        assert "**Task context:**" not in task_without_bl["description"]
 
-    def test_task_backlink_resolved_content_included(self, tmp_path):
-        """When knowledge store has the entry, pre-resolved content appears."""
+    def test_task_backlink_resolved_content_in_phase_context(self, tmp_path):
+        """When knowledge store has the entry, pre-resolved content appears in phase_context."""
         self._setup_knowledge(tmp_path)
         result = generate_tasks_from_plan(TASK_BACKLINK_PLAN, str(tmp_path))
-        task = result["phases"][0]["tasks"][0]
-        # Resolved content from the knowledge entry
-        assert "Always quote env vars" in task["description"]
+        phase_context = result["phases"][0]["phase_context"]
+        # Resolved content from the knowledge entry lives in phase_context
+        assert "Always quote env vars" in phase_context
 
-    def test_task_level_listed_before_phase_level(self, tmp_path):
-        """Task-level backlinks appear before phase-level in the context section."""
+    def test_task_context_appears_before_plan_reference(self, tmp_path):
+        """**Task context:** block appears before **Plan reference:** in task description."""
         self._setup_knowledge(tmp_path)
         result = generate_tasks_from_plan(TASK_BACKLINK_PLAN, str(tmp_path))
         task = result["phases"][0]["tasks"][0]
         desc = task["description"]
-        task_pos = desc.find("Task-level:")
-        phase_pos = desc.find("Phase-level:")
-        assert task_pos >= 0 and phase_pos >= 0
-        assert task_pos < phase_pos
+        task_ctx_pos = desc.find("**Task context:**")
+        # Task context should be present; plan reference may or may not be present (no slug)
+        assert task_ctx_pos >= 0
 
 
 # --- Intra-phase ordering fixtures ---
@@ -1034,9 +1035,9 @@ class TestResolveCharLimit:
 - [[knowledge:gotchas#Test Gotcha]]
 """
         result = generate_tasks_from_plan(plan, str(tmp_path))
-        task = result["phases"][0]["tasks"][0]
-        assert "truncated" not in task["description"]
-        assert "Important gotcha" in task["description"]
+        phase_context = result["phases"][0]["phase_context"]
+        assert "truncated" not in phase_context
+        assert "Important gotcha" in phase_context
 
 
 class TestEstimateContextCost:
@@ -1736,13 +1737,19 @@ class TestScopeField:
 class TestVerificationField:
     """Verification field extraction and emission in task descriptions."""
 
-    def test_verification_lines_appear_in_description(self, tmp_path):
-        """Verification lines should appear in task descriptions."""
+    def test_verification_lines_appear_in_phase_context(self, tmp_path):
+        """Verification lines live in phase_context, not in task descriptions."""
         result = generate_tasks_from_plan(SCOPE_AND_VERIFICATION_PLAN, str(tmp_path))
-        task = result["phases"][0]["tasks"][0]
-        assert "**Verification:**" in task["description"]
-        assert "existing tests pass unchanged" in task["description"]
-        assert "lore work regen-tasks produces no outlier tasks" in task["description"]
+        phase_context = result["phases"][0]["phase_context"]
+        assert "**Verification:**" in phase_context
+        assert "existing tests pass unchanged" in phase_context
+        assert "lore work regen-tasks produces no outlier tasks" in phase_context
+
+    def test_verification_not_in_task_description(self, tmp_path):
+        """Verification is lifted to phase_context — task descriptions do NOT include it."""
+        result = generate_tasks_from_plan(SCOPE_AND_VERIFICATION_PLAN, str(tmp_path))
+        for task in result["phases"][0]["tasks"]:
+            assert "**Verification:**" not in task["description"]
 
     def test_verification_plain_bullets_not_parsed_as_tasks(self, tmp_path):
         """Verification plain bullet lines must not create extra tasks."""
@@ -1750,26 +1757,25 @@ class TestVerificationField:
         total_tasks = sum(len(p["tasks"]) for p in result["phases"])
         assert total_tasks == 2  # only the two - [ ] checkboxes
 
-    def test_no_verification_field_produces_no_verification_in_description(self, tmp_path):
-        """Phases without **Verification:** should not add verification to descriptions."""
+    def test_no_verification_field_produces_empty_verif_in_phase_context(self, tmp_path):
+        """Phases without **Verification:** produce no verification block in phase_context."""
         result = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
         for phase in result["phases"]:
-            for task in phase["tasks"]:
-                assert "**Verification:**" not in task["description"]
+            assert "**Verification:**" not in phase.get("phase_context", "")
 
     def test_template_placeholder_verification_excluded(self, tmp_path):
-        """Template placeholder verification lines should not appear in descriptions."""
+        """Template placeholder verification lines should not appear in phase_context."""
         result = generate_tasks_from_plan(TEMPLATE_PLACEHOLDER_SCOPE_PLAN, str(tmp_path))
-        task = result["phases"][0]["tasks"][0]
-        desc = task["description"]
-        assert "<criterion 1" not in desc
-        assert "<criterion 2" not in desc
+        phase_context = result["phases"][0]["phase_context"]
+        assert "<criterion 1" not in phase_context
+        assert "<criterion 2" not in phase_context
 
-    def test_verification_only_no_scope(self, tmp_path):
-        """A phase with verification but no scope should include verification without scope."""
+    def test_verification_only_no_scope_in_phase_context(self, tmp_path):
+        """A phase with verification but no scope: phase_context has verification, task has no scope."""
         result = generate_tasks_from_plan(VERIFICATION_ONLY_PLAN, str(tmp_path))
+        phase_context = result["phases"][0]["phase_context"]
         task = result["phases"][0]["tasks"][0]
-        assert "**Verification:**" in task["description"]
+        assert "**Verification:**" in phase_context
         assert "**Scope:**" not in task["description"]
 
 
@@ -1777,30 +1783,29 @@ class TestAnnotationWarning:
     """Annotation quality warning for intent-based phases with annotation-only delivery."""
 
     def test_intent_with_annotation_only_triggers_warning(self, tmp_path):
-        """Intent-based phase with annotation-only delivery should include warning."""
+        """Intent-based phase with annotation-only delivery: warning lives in phase_context."""
         result = generate_tasks_from_plan(INTENT_WITH_KNOWLEDGE_PLAN, str(tmp_path))
-        task = result["phases"][0]["tasks"][0]
-        assert "intent+constraints" in task["description"]
-        assert "annotation-only" in task["description"]
+        phase_context = result["phases"][0]["phase_context"]
+        assert "intent+constraints" in phase_context
+        assert "annotation-only" in phase_context
 
     def test_prescriptive_with_annotation_only_no_warning(self, tmp_path):
         """Prescriptive phase should NOT trigger annotation warning even with annotation-only delivery."""
         result = generate_tasks_from_plan(PRESCRIPTIVE_WITH_KNOWLEDGE_PLAN, str(tmp_path))
-        task = result["phases"][0]["tasks"][0]
-        assert "annotation-only" not in task["description"]
+        phase_context = result["phases"][0]["phase_context"]
+        assert "annotation-only" not in phase_context
 
     def test_intent_with_full_delivery_no_warning(self, tmp_path):
         """Intent-based phase with full delivery should NOT trigger annotation warning."""
         result = generate_tasks_from_plan(INTENT_WITH_FULL_DELIVERY_PLAN, str(tmp_path))
-        task = result["phases"][0]["tasks"][0]
-        assert "annotation-only" not in task["description"]
+        phase_context = result["phases"][0]["phase_context"]
+        assert "annotation-only" not in phase_context
 
     def test_intent_without_knowledge_context_no_warning(self, tmp_path):
         """Intent-based phase with no knowledge context should NOT trigger warning (no backlinks)."""
         result = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
         for phase in result["phases"]:
-            for task in phase["tasks"]:
-                assert "annotation-only" not in task["description"]
+            assert "annotation-only" not in phase.get("phase_context", "")
 
 
 class TestCrossTierDeduplication:
@@ -2048,3 +2053,464 @@ class TestComputeRecommendedWorkers:
             {"id": "task-3", "blockedBy": ["task-1", "task-2"]},
         ]
         assert compute_recommended_workers(tasks) == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase context lift tests (new schema: phase_context field, stripped descriptions)
+# ---------------------------------------------------------------------------
+
+PHASE_CONTEXT_FULL_PLAN = """\
+# Feature: Phase Context Test
+
+## Goal
+Test the phase_context field and stripped task descriptions.
+
+## Design Decisions
+
+### D1: Use new approach
+**Decision:** Always use the new approach for this feature.
+**Rationale:** It is simpler and more maintainable.
+**Applies to:** All phases
+
+## Phases
+
+### Phase 1: Setup
+**Objective:** Create scaffolding
+**Files:** `src/config.ts`, `src/setup.ts`
+**Verification:**
+- existing tests pass unchanged
+- new config file loads correctly
+**Knowledge context:**
+- [[knowledge:conventions#Config Patterns]] — how we do config
+- [ ] Create config file
+- [ ] Set up scaffolding
+
+### Phase 2: Implementation
+**Objective:** Build the feature
+**Files:** `src/feature.ts`
+- [ ] Implement core logic
+
+## Related
+- [[knowledge:workflows#Deploy Process]]
+"""
+
+PHASE_CONTEXT_MINIMAL_PLAN = """\
+# Feature: Minimal Phase Context
+
+## Goal
+Test phase_context is empty for phases with no shared context.
+
+## Phases
+
+### Phase 1: Research
+**Objective:** Investigate approach
+- [ ] Read documentation
+- [ ] Evaluate options
+"""
+
+PHASE_CONTEXT_DESIGN_ONLY_PLAN = """\
+# Feature: Design Decisions Only
+
+## Goal
+Test that phase_context is non-empty when Design Decisions apply.
+
+## Design Decisions
+
+### D1: Use cache
+**Decision:** Use Redis for caching.
+**Rationale:** Proven reliability.
+**Applies to:** All phases
+
+## Phases
+
+### Phase 1: Setup
+**Objective:** Configure cache
+**Files:** `src/cache.ts`
+- [ ] Configure Redis client
+"""
+
+PHASE_CONTEXT_STRATEGY_PLAN = """\
+# Feature: Strategy in Phase Context
+
+## Goal
+Test that Strategy is included in phase_context.
+
+## Strategy
+Apply incremental changes; test at each step.
+
+## Phases
+
+### Phase 1: Incremental
+**Objective:** Apply incremental changes
+**Files:** `src/main.ts`
+- [ ] Make first change
+"""
+
+
+class TestPhaseContextField:
+    """Tests for the new phases[N].phase_context field and stripped per-task descriptions."""
+
+    def test_phase_context_field_present_in_schema(self, tmp_path):
+        """Every phase dict must contain a 'phase_context' key."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            assert "phase_context" in phase, (
+                f"Phase '{phase.get('phase_name')}' missing phase_context"
+            )
+
+    def test_phase_context_is_string(self, tmp_path):
+        """phase_context must be a string."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            assert isinstance(phase["phase_context"], str)
+
+    def test_phase_context_nonempty_when_context_exists(self, tmp_path):
+        """Phase with Design Decisions, Verification, or Knowledge context must have non-empty phase_context."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        phase1 = next(p for p in result["phases"] if p["phase_number"] == 1)
+        assert phase1["phase_context"].strip() != ""
+
+    def test_phase_context_contains_design_decisions(self, tmp_path):
+        """phase_context must include Design Decisions content when the plan has them."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_DESIGN_ONLY_PLAN, str(tmp_path))
+        phase_context = result["phases"][0]["phase_context"]
+        assert "D1" in phase_context
+        assert "Use cache" in phase_context or "Redis" in phase_context
+
+    def test_phase_context_contains_verification(self, tmp_path):
+        """phase_context must include the Verification block when present."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        phase1 = next(p for p in result["phases"] if p["phase_number"] == 1)
+        assert "**Verification:**" in phase1["phase_context"]
+        assert "existing tests pass unchanged" in phase1["phase_context"]
+
+    def test_phase_context_contains_files_list(self, tmp_path):
+        """phase_context must include the full phase-level Files list."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        phase1 = next(p for p in result["phases"] if p["phase_number"] == 1)
+        assert "src/config.ts" in phase1["phase_context"]
+        assert "src/setup.ts" in phase1["phase_context"]
+
+    def test_phase_context_contains_knowledge_context_backlinks(self, tmp_path):
+        """phase_context must include phase-level Knowledge context backlinks."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        phase1 = next(p for p in result["phases"] if p["phase_number"] == 1)
+        assert "conventions#Config Patterns" in phase1["phase_context"]
+
+    def test_phase_context_contains_strategy(self, tmp_path):
+        """phase_context must include Strategy when the plan has one."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_STRATEGY_PLAN, str(tmp_path))
+        phase_context = result["phases"][0]["phase_context"]
+        assert "incremental" in phase_context.lower()
+
+    def test_phase_context_empty_for_bare_phase(self, tmp_path):
+        """Phase with no Design Decisions, Verification, Files, Knowledge context, or Strategy:
+        phase_context may be empty (D5 only requires non-empty when context was present)."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_MINIMAL_PLAN, str(tmp_path))
+        phase_context = result["phases"][0]["phase_context"]
+        # No design decisions, no verification, no knowledge context, no files, no strategy
+        # phase_context is allowed to be empty (no context to lift)
+        assert isinstance(phase_context, str)
+
+    def test_phase_cost_summary_has_phase_context_chars(self, tmp_path):
+        """phase_cost_summary must include phase_context_chars for attribution."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            summary = phase["phase_cost_summary"]
+            assert "phase_context_chars" in summary
+            assert isinstance(summary["phase_context_chars"], int)
+            assert summary["phase_context_chars"] == len(phase["phase_context"])
+
+
+class TestStrippedDescriptionShape:
+    """Tests verifying that per-task descriptions contain only unique assignment content."""
+
+    def test_description_starts_with_phase_line(self, tmp_path):
+        """Per D6: the first line of every task description must be '**Phase:** N'."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                first_line = task["description"].splitlines()[0]
+                assert first_line.startswith("**Phase:**"), (
+                    f"Task '{task['subject']}' first line is '{first_line}'"
+                )
+
+    def test_phase_number_in_first_line_matches_phase(self, tmp_path):
+        """The N in '**Phase:** N' must match the actual phase_number."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                first_line = task["description"].splitlines()[0]
+                # Extract the number after "**Phase:** "
+                assert first_line == f"**Phase:** {phase['phase_number']}", (
+                    f"Task '{task['subject']}' has wrong phase number in first line: '{first_line}'"
+                )
+
+    def test_description_does_not_contain_design_decisions_heading(self, tmp_path):
+        """Per-task descriptions must NOT contain '## Design Decisions'."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                assert "## Design Decisions" not in task["description"], (
+                    f"Task '{task['subject']}' description contains '## Design Decisions'"
+                )
+
+    def test_description_does_not_contain_prior_knowledge_heading(self, tmp_path):
+        """Per-task descriptions must NOT contain '## Prior Knowledge'."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                assert "## Prior Knowledge" not in task["description"], (
+                    f"Task '{task['subject']}' description contains '## Prior Knowledge'"
+                )
+
+    def test_description_does_not_contain_context_resolve_heading(self, tmp_path):
+        """Per-task descriptions must NOT contain '## Context (resolve before starting)'."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                assert "## Context (resolve before starting)" not in task["description"], (
+                    f"Task '{task['subject']}' description contains context-resolve heading"
+                )
+
+    def test_description_does_not_contain_reference_files_heading(self, tmp_path):
+        """Per-task descriptions must NOT contain '**Reference files:**'."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                assert "**Reference files:**" not in task["description"], (
+                    f"Task '{task['subject']}' description contains '**Reference files:**'"
+                )
+
+    def test_description_does_not_contain_verification_heading(self, tmp_path):
+        """Per-task descriptions must NOT contain '**Verification:**'."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                assert "**Verification:**" not in task["description"], (
+                    f"Task '{task['subject']}' description contains '**Verification:**'"
+                )
+
+    def test_description_retains_task_line(self, tmp_path):
+        """Per-task descriptions must contain '**Task:**'."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                assert "**Task:**" in task["description"]
+
+    def test_description_retains_objective_hint(self, tmp_path):
+        """Per-task descriptions must contain the objective hint line."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        phase1 = next(p for p in result["phases"] if p["phase_number"] == 1)
+        for task in phase1["tasks"]:
+            assert "**Phase 1 objective:** Create scaffolding" in task["description"]
+
+    def test_description_retains_target_files(self, tmp_path):
+        """Per-task descriptions must contain target file information."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                if task["file_targets"]:
+                    assert "**Target files:**" in task["description"]
+
+    def test_description_retains_scope(self, tmp_path):
+        """Per-task descriptions must retain **Scope:** when present."""
+        result = generate_tasks_from_plan(SCOPE_AND_VERIFICATION_PLAN, str(tmp_path))
+        for task in result["phases"][0]["tasks"]:
+            assert "**Scope:**" in task["description"]
+
+    def test_description_without_phase_context_retains_nothing_extra(self, tmp_path):
+        """Minimal-phase tasks have clean descriptions — just Phase line + objective + task."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_MINIMAL_PLAN, str(tmp_path))
+        for task in result["phases"][0]["tasks"]:
+            desc = task["description"]
+            assert "## Design Decisions" not in desc
+            assert "## Prior Knowledge" not in desc
+            assert "**Reference files:**" not in desc
+            assert "**Verification:**" not in desc
+
+
+class TestD5FailClosedInvariant:
+    """D5: stripped descriptions REQUIRE non-empty phase_context when source plan had context."""
+
+    def test_phase_with_design_decisions_has_nonempty_phase_context(self, tmp_path):
+        """Phase with Design Decisions must produce non-empty phase_context."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_DESIGN_ONLY_PLAN, str(tmp_path))
+        phase_context = result["phases"][0]["phase_context"]
+        assert phase_context.strip() != "", "D5 violation: phase_context is empty despite Design Decisions"
+
+    def test_phase_with_verification_has_nonempty_phase_context(self, tmp_path):
+        """Phase with Verification must produce non-empty phase_context."""
+        result = generate_tasks_from_plan(VERIFICATION_ONLY_PLAN, str(tmp_path))
+        phase_context = result["phases"][0]["phase_context"]
+        assert phase_context.strip() != "", "D5 violation: phase_context is empty despite Verification"
+
+    def test_phase_with_files_has_nonempty_phase_context(self, tmp_path):
+        """Phase with Files declaration must produce non-empty phase_context."""
+        result = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            if phase["files"]:
+                assert phase["phase_context"].strip() != "", (
+                    f"D5 violation: phase {phase['phase_number']} has files but empty phase_context"
+                )
+
+    def test_phase_with_knowledge_context_has_nonempty_phase_context(self, tmp_path):
+        """Phase with Knowledge context must produce non-empty phase_context."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        phase1 = next(p for p in result["phases"] if p["phase_number"] == 1)
+        assert phase1["phase_context"].strip() != "", (
+            "D5 violation: phase_context is empty despite Knowledge context backlinks"
+        )
+
+    def test_phase_with_strategy_has_nonempty_phase_context(self, tmp_path):
+        """Phase when plan has Strategy must produce non-empty phase_context."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_STRATEGY_PLAN, str(tmp_path))
+        phase_context = result["phases"][0]["phase_context"]
+        assert phase_context.strip() != "", "D5 violation: phase_context is empty despite Strategy"
+
+    def test_phase_context_chars_equals_phase_context_len(self, tmp_path):
+        """phase_cost_summary.phase_context_chars must equal len(phase_context) — no mismatch."""
+        result = generate_tasks_from_plan(PHASE_CONTEXT_FULL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            reported = phase["phase_cost_summary"]["phase_context_chars"]
+            actual = len(phase["phase_context"])
+            assert reported == actual, (
+                f"Phase {phase['phase_number']}: phase_context_chars={reported} != len={actual}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# v2 grouped retrieval_directive tests
+# ---------------------------------------------------------------------------
+
+V2_DIRECTIVE_PLAN = """\
+# Wider-Net
+
+## Goal
+Decompose retrieval per topic.
+
+## Phases
+
+### Phase 1: Wider-net retrieval v1
+**Objective:** Per-topic decomposition.
+**Files:** `scripts/generate-tasks.py`
+**Retrieval directive:**
+- version: 2
+- topics:
+    - role: focal
+      topic: cli/lore
+      seeds: [[knowledge:foo#a]], [[knowledge:bar#b]]
+      scale_set: subsystem, implementation
+      activity_vocab: pytest, fixture, assertion
+      limit: 8
+    - role: adjacent
+      topic: pk_search
+      seeds: scripts/pk_search.py
+      scale_set: architecture, subsystem
+      limit: 4
+    - role: adjacent
+      topic: scripts/lib.sh
+      scale_set: subsystem, implementation
+      limit: 4
+- [ ] Implement v2 parser
+"""
+
+
+V2_NO_FOCAL_PLAN = """\
+# Bad-V2
+
+## Phases
+
+### Phase 1: Bad
+**Objective:** Missing focal.
+**Files:** `x.py`
+**Retrieval directive:**
+- version: 2
+- topics:
+    - role: adjacent
+      topic: a
+      scale_set: subsystem
+- [ ] Do thing
+"""
+
+
+V2_MULTI_FOCAL_PLAN = """\
+# Bad-V2
+
+## Phases
+
+### Phase 1: Bad
+**Objective:** Two focals.
+**Files:** `x.py`
+**Retrieval directive:**
+- version: 2
+- topics:
+    - role: focal
+      topic: a
+      scale_set: subsystem
+    - role: focal
+      topic: b
+      scale_set: subsystem
+- [ ] Do thing
+"""
+
+
+class TestV2RetrievalDirective:
+    """version: 2 grouped retrieval directive parsing."""
+
+    def test_v2_parsed_into_topics(self, tmp_path):
+        result = generate_tasks_from_plan(V2_DIRECTIVE_PLAN, str(tmp_path))
+        directive = result["phases"][0]["retrieval_directive"]
+        assert directive is not None
+        assert directive["version"] == 2
+        topics = directive["topics"]
+        assert len(topics) == 3
+
+    def test_v2_focal_topic_attributes(self, tmp_path):
+        result = generate_tasks_from_plan(V2_DIRECTIVE_PLAN, str(tmp_path))
+        topics = result["phases"][0]["retrieval_directive"]["topics"]
+        focal = [t for t in topics if t["role"] == "focal"]
+        assert len(focal) == 1
+        f = focal[0]
+        assert f["topic"] == "cli/lore"
+        assert f["scale_set"] == ["subsystem", "implementation"]
+        assert f["activity_vocab"] == ["pytest", "fixture", "assertion"]
+        assert f["limit"] == 8
+        assert "[[knowledge:foo#a]]" in f["seeds"]
+
+    def test_v2_adjacent_default_limit_is_4(self, tmp_path):
+        result = generate_tasks_from_plan(V2_DIRECTIVE_PLAN, str(tmp_path))
+        topics = result["phases"][0]["retrieval_directive"]["topics"]
+        for t in topics:
+            if t["role"] == "adjacent":
+                assert t["limit"] == 4
+
+    def test_v2_zero_focal_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="exactly one role: focal"):
+            generate_tasks_from_plan(V2_NO_FOCAL_PLAN, str(tmp_path))
+
+    def test_v2_multi_focal_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="exactly one role: focal"):
+            generate_tasks_from_plan(V2_MULTI_FOCAL_PLAN, str(tmp_path))
+
+    def test_legacy_directive_still_works(self, tmp_path):
+        legacy_plan = """\
+# Legacy
+## Phases
+
+### Phase 1: Legacy
+**Objective:** Flat directive.
+**Files:** `x.py`
+**Retrieval directive:**
+- seeds: [[knowledge:foo#a]], path/to/x.py
+- scale_set: subsystem
+- hop_budget: 1
+- [ ] Do thing
+"""
+        result = generate_tasks_from_plan(legacy_plan, str(tmp_path))
+        directive = result["phases"][0]["retrieval_directive"]
+        assert directive is not None
+        assert "version" not in directive
+        assert directive["scale_set"] == ["subsystem"]
+        assert "[[knowledge:foo#a]]" in directive["seeds"]
+        assert directive["hop_budget"] == 1

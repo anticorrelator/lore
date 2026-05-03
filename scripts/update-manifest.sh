@@ -26,6 +26,7 @@ CATEGORY_PRIORITIES="principles=100
 workflows=90
 conventions=80
 architecture=70
+preferences=75
 gotchas=60
 abstractions=50
 domains=40
@@ -120,9 +121,21 @@ for category in categories:
             backlinks.add(bl_match.group(1))
 
         # Extract HTML comment metadata: <!-- learned: ... | confidence: ... | source: ... -->
+        # Provenance fields (capture.sh, task #1) are surfaced best-effort; legacy entries
+        # that lack them emit null/empty consistently rather than being dropped.
         learned = ""
         confidence = ""
         related_files = []
+        producer_role = None
+        protocol_slot = None
+        template_version = None
+        capturer_role = None
+        source_artifact_ids = []
+        captured_at_branch = None
+        captured_at_sha = None
+        captured_at_merge_base_sha = None
+        parents = []
+        inferred_parents = []
         meta_match = re.search(r'<!--\s*(.*?)\s*-->', content)
         if meta_match:
             meta_text = meta_match.group(1)
@@ -135,6 +148,29 @@ for category in categories:
                 elif part.startswith('related-files:') or part.startswith('related_files:'):
                     rf_text = part.split(':', 1)[1].strip()
                     related_files = [r.strip() for r in rf_text.split(',') if r.strip()]
+                elif part.startswith('producer_role:'):
+                    producer_role = part.split(':', 1)[1].strip() or None
+                elif part.startswith('protocol_slot:'):
+                    protocol_slot = part.split(':', 1)[1].strip() or None
+                elif part.startswith('template_version:'):
+                    template_version = part.split(':', 1)[1].strip() or None
+                elif part.startswith('capturer_role:'):
+                    capturer_role = part.split(':', 1)[1].strip() or None
+                elif part.startswith('source_artifact_ids:'):
+                    ids_text = part.split(':', 1)[1].strip()
+                    source_artifact_ids = [r.strip() for r in ids_text.split(',') if r.strip()]
+                elif part.startswith('captured_at_branch:'):
+                    captured_at_branch = part.split(':', 1)[1].strip() or None
+                elif part.startswith('captured_at_sha:'):
+                    captured_at_sha = part.split(':', 1)[1].strip() or None
+                elif part.startswith('captured_at_merge_base_sha:'):
+                    captured_at_merge_base_sha = part.split(':', 1)[1].strip() or None
+                elif part.startswith('parents:'):
+                    p_text = part.split(':', 1)[1].strip()
+                    parents = [p.strip() for p in p_text.split(',') if p.strip() and p.strip() != 'none']
+                elif part.startswith('inferred_parents:'):
+                    ip_text = part.split(':', 1)[1].strip()
+                    inferred_parents = [p.strip() for p in ip_text.split(',') if p.strip() and p.strip() != 'none']
 
         priority_score = priority_map.get(category, 30)
 
@@ -155,6 +191,16 @@ for category in categories:
             "related_files": related_files,
             "see_also": see_also,
             "priority_score": priority_score,
+            "producer_role": producer_role,
+            "protocol_slot": protocol_slot,
+            "template_version": template_version,
+            "capturer_role": capturer_role,
+            "source_artifact_ids": source_artifact_ids,
+            "captured_at_branch": captured_at_branch,
+            "captured_at_sha": captured_at_sha,
+            "captured_at_merge_base_sha": captured_at_merge_base_sha,
+            "parents": parents,
+            "inferred_parents": inferred_parents,
         }
         entries.append(entry)
         cat_entry_count += 1

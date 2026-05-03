@@ -703,7 +703,9 @@ func (m ReviewCardsModel) View() string {
 				titleLine = fmt.Sprintf("  %s %s #%d \u2014 %s", check, sevStr, c.FindingOrdinal, c.Title)
 			}
 
-			// Location line: checkbox + path:line + severity [lenses] confidence%
+			// Location line: checkbox + path:line + severity [lenses] confidence%.
+			// When a title line is present it already owns the checkbox, so align
+			// with blanks here to avoid rendering two checkboxes per card.
 			var lensToken, confToken string
 			if len(c.Lenses) > 0 {
 				lensToken = "  " + dimStyle.Render("["+strings.Join(c.Lenses, ",")+"]")
@@ -711,8 +713,12 @@ func (m ReviewCardsModel) View() string {
 			if c.Confidence > 0 {
 				confToken = "  " + dimStyle.Render(fmt.Sprintf("%d%%", int(c.Confidence*100)))
 			}
+			locCheck := check
+			if c.Title != "" {
+				locCheck = "   "
+			}
 			line1 := fmt.Sprintf("  %s %s:%d  %s",
-				check,
+				locCheck,
 				pathStyle.Render(c.Path),
 				c.Line,
 				sevStr,

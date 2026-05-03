@@ -110,6 +110,7 @@ func (m model) Init() tea.Cmd {
 		loadWorkItems(m.config.WorkDir),
 		loadPRStatus(),
 		indexPollTick(),
+		followup.LoadIndexCmd(m.config.KnowledgeDir),
 	)
 }
 
@@ -719,7 +720,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		case "f":
 			if m.state == stateWork && !m.terminalMode {
 				m.state = stateFollowUps
-				m.followupList = followup.NewListModel(nil)
+				// Preserve items already loaded by the background poll so the
+				// counter and list don't flicker to 0 while the reload is in flight.
+				if len(m.followupList.Items()) == 0 {
+					m.followupList = followup.NewListModel(nil)
+				}
 				m.followupList.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
 				fuListW, fuListH := followupListDims(m)
 				m.followupList, _ = m.followupList.Update(tea.WindowSizeMsg{Width: fuListW, Height: fuListH})

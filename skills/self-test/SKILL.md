@@ -54,7 +54,7 @@ When `HAS_CLI` is false, use these fallbacks for CLI commands referenced through
 
 Throughout the test steps below, use the CLI command when `HAS_CLI` is true; otherwise use the fallback.
 
-## Step 1: Resolve Paths and Detect Infrastructure
+### Step 1: Resolve Paths and Detect Infrastructure
 
 ### Path Resolution
 
@@ -106,7 +106,7 @@ If parsing fails (malformed results file), note this in the output and treat as 
 
 If the argument is "quick", only run Tests 1, 2, and 7. Skip the rest and mark them as "Skipped (quick mode)" in results.
 
-## Step 2: Initialize Tracking
+### Step 2: Initialize Tracking
 
 Set up tracking counters for the entire run:
 - `TOOL_CALLS` = 0 (increment each time you use Read, Glob, Grep, Bash, or any tool)
@@ -360,7 +360,7 @@ This test replaced the previous "Honest Assessment" (Runs 1-2) which asked hypot
 
 **Record:** For each spot-checked entry, note what was verified, what was stale, and what was updated. Stale entries should be corrected as part of the test (fix-as-you-go), with the staleness still recorded in the score.
 
-## Step 3: Apply Mechanical Fixes
+### Step 3: Apply Mechanical Fixes
 
 **This step is mandatory.** For every entry scored as **aging** or **stale** in Test 8, attempt a mechanical fix before proceeding. The goal: leave the knowledge store more accurate than you found it, without blocking the self-test on rewrites that require deep investigation.
 
@@ -381,7 +381,7 @@ If a fix requires reading **more than 2 source files** to verify correctness, or
 
 **Record:** List each fix applied (entry, what changed) and each deferral (entry, why deferred). This feeds into Step 4's results.
 
-## Step 4: Compile and Write Results
+### Step 4: Compile and Write Results
 
 Compile all test scores into the structured results format. Write to `$RESULTS_FILE`.
 
@@ -481,7 +481,7 @@ Evolution suggestions logged to journal this run:
 Rationale: <1-2 sentences on what this run taught about self-diagnosis>
 ```
 
-## Step 4b: Write Effectiveness Journal Entry
+### Step 4b: Write Effectiveness Journal Entry
 
 **This step is mandatory.** After writing the results file, record the run in the effectiveness journal so it appears in aggregated timeline views alongside retrieval and friction data.
 
@@ -495,7 +495,7 @@ lore journal write \
 
 The observation should be 3-5 sentences containing: all 8 scores, any regressions or improvements compared to the previous run, and the single most actionable finding from this run.
 
-## Step 5: Report
+### Step 5: Report
 
 After writing results, report to the user:
 
@@ -507,7 +507,7 @@ After writing results, report to the user:
   [If previous: vs Run N-1: X improved, X regressed, X unchanged, X new]
 ```
 
-## Step 6: Log Evolution Suggestions
+### Step 6: Log Evolution Suggestions
 
 **This step is mandatory.** Every run should produce at least one protocol improvement suggestion. A self-test that doesn't evolve calcifies — it starts confirming what's already known instead of surfacing what's actually wrong. Log suggestions to the journal — do **not** edit `skills/self-test/SKILL.md` directly. The `/evolve` skill applies batched journal suggestions on demand.
 
@@ -573,7 +573,7 @@ Rationale: <1-2 sentences on what this run taught about self-diagnosis>
   Rationale: <one sentence>
 ```
 
-## Step 7: Create Work Items from Findings
+### Step 7: Create Work Items from Findings
 
 **This step is mandatory.** The self-test's purpose is to surface actionable findings — but findings without follow-through are just documentation. This step closes the loop by converting persistent or significant recommendations into tracked work items.
 

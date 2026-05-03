@@ -33,22 +33,23 @@ CATEGORY_DIRS = {"abstractions", "architecture", "conventions", "gotchas",
 
 def parse_retrieval_log(
     log_path: str,
-) -> tuple[list[dict], list[dict], dict[str, int]]:
+) -> tuple[list[dict], list[dict], dict[str, int], list[dict]]:
     """Parse retrieval-log.jsonl into session-start events, search events,
-    and per-entry load counts.
+    per-entry load counts, and manifest_load events.
 
     Returns:
-        Tuple of (session_events, search_events, per_entry_counts).
+        Tuple of (session_events, search_events, per_entry_counts, manifest_load_events).
         per_entry_counts maps relative entry path → total appearances across
-        all session-load and prefetch events that include a `loaded_paths`
-        array.
+        all session-load, prefetch, and manifest_load events that include a
+        `loaded_paths` array.
     """
     session_events: list[dict] = []
     search_events: list[dict] = []
     per_entry_counts: dict[str, int] = defaultdict(int)
+    manifest_load_events: list[dict] = []
 
     if not os.path.isfile(log_path):
-        return session_events, search_events, dict(per_entry_counts)
+        return session_events, search_events, dict(per_entry_counts), manifest_load_events
 
     with open(log_path, "r", encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
@@ -68,6 +69,12 @@ def parse_retrieval_log(
                 for path in record.get("loaded_paths", []):
                     if path:
                         per_entry_counts[path] += 1
+            elif event_type == "manifest_load":
+                # Manifest bundle loaded by resolve-manifest.sh (Phase 5)
+                manifest_load_events.append(record)
+                for path in record.get("loaded_paths", []):
+                    if path:
+                        per_entry_counts[path] += 1
             elif "budget_used" in record:
                 # Session-start load event (no explicit "event" field)
                 session_events.append(record)
@@ -75,7 +82,7 @@ def parse_retrieval_log(
                     if path:
                         per_entry_counts[path] += 1
 
-    return session_events, search_events, dict(per_entry_counts)
+    return session_events, search_events, dict(per_entry_counts), manifest_load_events
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +143,7 @@ def analyze_usage(
         Usage report dict.
     """
     log_path = os.path.join(knowledge_dir, "_meta", "retrieval-log.jsonl")
-    session_events, search_events, per_entry_counts = parse_retrieval_log(log_path)
+    session_events, search_events, per_entry_counts, manifest_load_events = parse_retrieval_log(log_path)
 
     # Collect all known entries from manifest
     manifest_entries = collect_manifest_entries(knowledge_dir)
@@ -166,6 +173,12 @@ def analyze_usage(
     sessions_with_context = sum(
         1 for e in session_events
         if e.get("context_signal", "").strip()
+    )
+
+    # Sessions with an explicit scale declaration
+    sessions_with_scale_declared = sum(
+        1 for e in session_events
+        if e.get("scale_declared") is True
     )
 
     # Budget utilization across sessions
@@ -259,6 +272,11 @@ def analyze_usage(
         if stats["retrieval_count"] <= cold_threshold
     ]
 
+    declaration_coverage = (
+        round(sessions_with_scale_declared / total_sessions, 4)
+        if total_sessions > 0 else 0.0
+    )
+
     # --- Build report ---
     report = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -268,6 +286,8 @@ def analyze_usage(
             "total_sessions": total_sessions,
             "total_searches": total_searches,
             "sessions_with_context_signal": sessions_with_context,
+            "sessions_with_scale_declared": sessions_with_scale_declared,
+            "declaration_coverage": declaration_coverage,
             "avg_budget_utilization": avg_budget_util,
             "avg_search_latency_ms": avg_search_latency,
             "zero_result_searches": zero_result_searches,
@@ -348,6 +368,7 @@ def main() -> None:
     print(f"Entries:          {s['total_entries']}")
     print(f"Sessions logged:  {s['total_sessions']}")
     print(f"  With context:   {s['sessions_with_context_signal']}")
+    print(f"  Scale declared: {s['sessions_with_scale_declared']}")
     print(f"  Avg budget use: {s['avg_budget_utilization']:.0%}")
     print(f"Searches logged:  {s['total_searches']}")
     print(f"  Zero results:   {s['zero_result_searches']}")

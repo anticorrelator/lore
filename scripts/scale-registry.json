@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "scales": [
+    {"id": "implementation", "label": "implementation", "ordinal": 1, "aliases": []},
+    {"id": "subsystem",      "label": "subsystem",      "ordinal": 2, "aliases": []},
+    {"id": "architecture",   "label": "architecture",   "ordinal": 3, "aliases": []},
+    {"id": "abstract",       "label": "abstract",       "ordinal": 4, "aliases": []}
+  ],
+  "labels": {
+    "implementation": "implementation",
+    "subsystem": "subsystem",
+    "architecture": "architecture",
+    "abstract": "abstract"
+  }
+}

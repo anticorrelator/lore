@@ -30,6 +30,7 @@ from pk_search import (  # noqa: E402
     DEFAULT_LIMIT,
     DEFAULT_THRESHOLD,
     SOURCE_TYPES,
+    render_trust_stamp,
 )
 from pk_resolve import Resolver, resolve_read_path, build_backlink_from_result  # noqa: E402
 
@@ -64,6 +65,13 @@ def cmd_search(args: argparse.Namespace) -> None:
     exclude_category = getattr(args, "exclude_category", None)
     caller = getattr(args, "caller", None)
     include_archived = getattr(args, "include_archived", False)
+    scale_set_arg = getattr(args, "scale_set", None)
+    # Argparse may provide --scale-set as a single comma-delimited string; normalize to a list.
+    if isinstance(scale_set_arg, str):
+        scale_set = [s.strip() for s in scale_set_arg.split(",") if s.strip()] or None
+    else:
+        scale_set = scale_set_arg
+    include_status = getattr(args, "include_status", None)
 
     # --budget: budget-aware search with two-tier JSON output
     budget = getattr(args, "budget", None)
@@ -78,6 +86,8 @@ def cmd_search(args: argparse.Namespace) -> None:
             exclude_category=exclude_category,
             caller=caller,
             include_archived=include_archived,
+            include_status=include_status,
+            scale_set=scale_set,
         )
         # Normalize full entries for JSON output
         full_out = []
@@ -115,6 +125,8 @@ def cmd_search(args: argparse.Namespace) -> None:
             exclude_category=exclude_category,
             caller=caller,
             include_archived=include_archived,
+            include_status=include_status,
+            scale_set=scale_set,
         )
     elif mode == "bm25":
         results = searcher.search(
@@ -126,6 +138,8 @@ def cmd_search(args: argparse.Namespace) -> None:
             exclude_category=exclude_category,
             caller=caller,
             include_archived=include_archived,
+            include_status=include_status,
+            scale_set=scale_set,
         )
     else:
         # Semantic or hybrid mode — requires pk_semantic
@@ -235,11 +249,49 @@ def cmd_search(args: argparse.Namespace) -> None:
             print(f"  Confidence: {r['confidence']}")
         if r.get("learned_date"):
             print(f"  Learned: {r['learned_date']}")
+        if r.get("scale"):
+            print(f"  Scale: {r['scale']}")
+        print(f"  {render_trust_stamp(r, knowledge_dir=args.knowledge_dir)}")
         print(f"  Snippet: {r['snippet']}")
         if r.get("similar_entries"):
             print("  See also:")
             for s in r["similar_entries"]:
                 print(f"    - {s['heading']} ({s['file_path']}, sim: {s['similarity']})")
+
+
+def cmd_search_preferences(args: argparse.Namespace) -> None:
+    """Side-channel BM25 search restricted to category=preferences.
+
+    Returns a flat JSON list (same shape as `lore search --json`) when --json
+    is set; otherwise renders human-readable result blocks. Composes with the
+    main search pool at the wrapper layer.
+    """
+    searcher = Searcher(args.knowledge_dir)
+    caller = getattr(args, "caller", None)
+    include_status = getattr(args, "include_status", None)
+
+    results = searcher.search_preferences(
+        query=args.query,
+        caller=caller,
+        include_status=include_status,
+    )
+
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return
+
+    if not results:
+        print(f'No preference results for "{args.query}"')
+        return
+
+    for i, r in enumerate(results, 1):
+        print(f"\n--- Preference {i} (score: {r['score']}) ---")
+        print(f"  File: {r['file_path']}")
+        print(f"  Heading: {r['heading']}")
+        if r.get("learned_date"):
+            print(f"  Learned: {r['learned_date']}")
+        print(f"  {render_trust_stamp(r, knowledge_dir=args.knowledge_dir)}")
+        print(f"  Snippet: {r['snippet']}")
 
 
 def cmd_stats(args: argparse.Namespace) -> None:
@@ -844,7 +896,21 @@ def main() -> None:
     p_search.add_argument("--include-archived", action="store_true", help="Include archived work items in results (excluded by default)")
     p_search.add_argument("--expand", action="store_true", help="Expand results with similar entries from TF-IDF concordance (See also)")
     p_search.add_argument("--budget", type=int, default=None, help="Budget in chars: return two-tier JSON (full + titles_only) within budget")
+    p_search.add_argument("--scale-set", default=None, metavar="BUCKETS", help="Declared retrieval scale bucket(s), comma-separated (e.g. 'implementation' or 'subsystem,implementation'). Set-membership filter against entry META scale field.")
+    p_search.add_argument("--include-status", nargs="+", default=None, metavar="STATUS", help="Status values to include (current, superseded, historical). Default: current only.")
     p_search.set_defaults(func=cmd_search)
+
+    # search-preferences
+    p_pref = subparsers.add_parser(
+        "search-preferences",
+        help="Side-channel BM25 search restricted to category=preferences (always-on forward guidance).",
+    )
+    p_pref.add_argument("knowledge_dir", help="Path to knowledge directory")
+    p_pref.add_argument("query", help="Search query")
+    p_pref.add_argument("--json", action="store_true", help="Output as JSON (flat list, same shape as `search --json`)")
+    p_pref.add_argument("--caller", default=None, help="Caller identifier logged to retrieval log")
+    p_pref.add_argument("--include-status", nargs="+", default=None, metavar="STATUS", help="Status values to include. Default: current only.")
+    p_pref.set_defaults(func=cmd_search_preferences)
 
     # resolve
     p_resolve = subparsers.add_parser("resolve", help="Resolve [[backlink]] references to content")

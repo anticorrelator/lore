@@ -1378,7 +1378,7 @@ class TestCategoryTiebreaker:
     def test_category_priority_constants_defined(self):
         """CATEGORY_PRIORITY and related constants should be importable."""
         from pk_search import CATEGORY_PRIORITY, CATEGORY_PRIORITY_MAP, CATEGORY_TIEBREAK_MAX
-        assert len(CATEGORY_PRIORITY) == 7
+        assert len(CATEGORY_PRIORITY) == 9
         assert "principles" in CATEGORY_PRIORITY_MAP
         assert "domains" in CATEGORY_PRIORITY_MAP
         assert CATEGORY_TIEBREAK_MAX > 0

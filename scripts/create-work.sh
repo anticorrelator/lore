@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # create-work.sh — Create a new work item in _work/
-# Usage: bash create-work.sh --title <name> [--slug <slug>] [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--json] [--detect-pr]
+# Usage: bash create-work.sh --title <name> [--slug <slug>] [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--json] [--detect-pr]
 # Creates _work/<slug>/ with _meta.json and notes.md, then updates the index.
+#
+# --scope (Phase 2 — work item 02-durable-signal-foundation):
+#   The work-item scope is the *absolute anchor* for any capture produced during the cycle.
+#   Downstream, `lore scale compute` combines this scope with the role×slot matrix offset
+#   to determine the absolute capture scale.
+#   Valid values: architectural | subsystem | implementation | granular-fix | cross-cycle-meta
+#   Default: subsystem.
+#   Unknown values are rejected at the CLI level. Legacy work items without the field
+#   continue to work — readers treat a missing scope as `subsystem`.
 
 set -euo pipefail
 
@@ -16,8 +25,22 @@ TARGET_DIR=""
 ISSUE=""
 PR=""
 TAGS=""
+SCOPE="subsystem"
 JSON_MODE=0
 DETECT_PR=0
+
+# Valid work-item scope values (Phase 2 capture-scale anchor).
+VALID_SCOPES=(architectural subsystem implementation granular-fix cross-cycle-meta)
+is_valid_scope() {
+  local candidate="$1"
+  local s
+  for s in "${VALID_SCOPES[@]}"; do
+    if [[ "$s" == "$candidate" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 if [[ $# -ge 1 && "$1" == --* ]]; then
   # Flag mode
@@ -51,6 +74,10 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
         TAGS="$2"
         shift 2
         ;;
+      --scope)
+        SCOPE="$2"
+        shift 2
+        ;;
       --json)
         JSON_MODE=1
         shift
@@ -61,7 +88,7 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
         ;;
       *)
         echo "[work] Error: Unknown flag '$1'" >&2
-        echo "Usage: create-work.sh --title <name> [--slug <slug>] [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--json] [--detect-pr]" >&2
+        echo "Usage: create-work.sh --title <name> [--slug <slug>] [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--json] [--detect-pr]" >&2
         exit 1
         ;;
     esac
@@ -78,7 +105,16 @@ if [[ -z "$NAME" ]]; then
     json_error "Missing work item name"
   fi
   echo "[work] Error: Missing work item name." >&2
-  echo "Usage: create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--json]" >&2
+  echo "Usage: create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--json]" >&2
+  exit 1
+fi
+
+# Validate --scope against the enum (rejects unknown values).
+if ! is_valid_scope "$SCOPE"; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "Invalid --scope '$SCOPE'. Valid values: ${VALID_SCOPES[*]}"
+  fi
+  echo "[work] Error: Invalid --scope '$SCOPE'. Valid values: ${VALID_SCOPES[*]}" >&2
   exit 1
 fi
 # Warn on long titles (>70 chars, git convention)
@@ -185,6 +221,7 @@ cat > "$WORK_DIR/$SLUG/_meta.json" << METAEOF
   "slug": "$SLUG",
   "title": "$TITLE",
   "status": "active",
+  "scope": "$SCOPE",
   "branches": $BRANCHES_JSON,
   "tags": $TAGS_JSON,
   "issue": "$ISSUE",

@@ -5,9 +5,35 @@
 #   [--proposed-comments <filepath>] [--lens-findings <filepath>]
 #   [--content <body>] [--json]
 #   [--pr <number>] [--owner <owner>] [--repo <repo>] [--head-sha <sha>]
+#   [--producer-role <role>] [--protocol-slot <slot>] [--template-version <hash>]
+#   [--capturer-role <role>] [--source-artifact-ids <csv>]
+#   [--captured-at-branch <name>] [--captured-at-sha <sha>] [--captured-at-merge-base-sha <sha>]
 # Creates $KNOWLEDGE_DIR/_followups/<id>/ with _meta.json and finding.md
 # When --pr/--owner/--repo/--head-sha are all provided with --proposed-comments,
 # the sidecar is written in ProposedReview wrapper format.
+#
+# Provenance flags (Phase 2 — work item 02-durable-signal-foundation):
+#   --producer-role         Role of the agent that produced the followup (e.g., researcher, worker, lead).
+#   --protocol-slot         Protocol slot in which the followup emerged (e.g., review, capture, synthesis).
+#   --template-version      Template-version hash of the producing agent template (see scripts/template-version.sh).
+#   --capturer-role         Role of the agent writing this followup (set only when different from producer — lead-synthesis path).
+#   --source-artifact-ids   Comma-separated artifact IDs the followup synthesizes from (lead-synthesis path).
+#
+# Branch-provenance flags (task 7 — always emitted):
+#   --captured-at-branch          Branch at capture time. Defaults to local git resolution; falls back to JSON null.
+#   --captured-at-sha             HEAD commit SHA at capture time. Defaults to local git resolution; falls back to JSON null.
+#   --captured-at-merge-base-sha  Merge-base against origin/main. Defaults to local git resolution; falls back to JSON null.
+#
+# Propagation rules:
+#   * Non-empty provenance flags are emitted as top-level fields in _meta.json.
+#     Omitted or empty flags are OMITTED entirely — legacy followups remain field-identical.
+#   * When --lens-findings is provided, each finding is enriched with any CLI-provided
+#     provenance field that the finding does not already carry. Per-finding values win
+#     over CLI defaults to support lead-synthesis followups where individual findings
+#     retain their original producer's attribution.
+#   * The branch-provenance trio is always emitted in _meta.json (JSON string or null).
+#     It is NOT propagated into per-finding enrichment — findings inherit their branch
+#     context from the followup itself.
 
 set -euo pipefail
 
@@ -28,6 +54,14 @@ PR_NUMBER=""
 PR_OWNER=""
 PR_REPO=""
 PR_HEAD_SHA=""
+PRODUCER_ROLE=""
+PROTOCOL_SLOT=""
+TEMPLATE_VERSION=""
+CAPTURER_ROLE=""
+SOURCE_ARTIFACT_IDS=""
+CAPTURED_AT_BRANCH=""
+CAPTURED_AT_SHA=""
+CAPTURED_AT_MERGE_BASE_SHA=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -83,9 +117,41 @@ while [[ $# -gt 0 ]]; do
       PR_HEAD_SHA="$2"
       shift 2
       ;;
+    --producer-role)
+      PRODUCER_ROLE="$2"
+      shift 2
+      ;;
+    --protocol-slot)
+      PROTOCOL_SLOT="$2"
+      shift 2
+      ;;
+    --template-version)
+      TEMPLATE_VERSION="$2"
+      shift 2
+      ;;
+    --capturer-role)
+      CAPTURER_ROLE="$2"
+      shift 2
+      ;;
+    --source-artifact-ids)
+      SOURCE_ARTIFACT_IDS="$2"
+      shift 2
+      ;;
+    --captured-at-branch)
+      CAPTURED_AT_BRANCH="$2"
+      shift 2
+      ;;
+    --captured-at-sha)
+      CAPTURED_AT_SHA="$2"
+      shift 2
+      ;;
+    --captured-at-merge-base-sha)
+      CAPTURED_AT_MERGE_BASE_SHA="$2"
+      shift 2
+      ;;
     *)
       echo "[followup] Error: Unknown flag '$1'" >&2
-      echo "Usage: create-followup.sh --title <name> --source <agent> [--attachments <json>] [--suggested-actions <json>] [--proposed-comments <filepath>] [--lens-findings <filepath>] [--content <body>] [--json] [--pr <number> --owner <owner> --repo <repo> --head-sha <sha>]" >&2
+      echo "Usage: create-followup.sh --title <name> --source <agent> [--attachments <json>] [--suggested-actions <json>] [--proposed-comments <filepath>] [--lens-findings <filepath>] [--content <body>] [--json] [--pr <number> --owner <owner> --repo <repo> --head-sha <sha>] [--producer-role <role>] [--protocol-slot <slot>] [--template-version <hash>] [--capturer-role <role>] [--source-artifact-ids <csv>] [--captured-at-branch <name>] [--captured-at-sha <sha>] [--captured-at-merge-base-sha <sha>]" >&2
       exit 1
       ;;
   esac
@@ -172,6 +238,59 @@ TITLE_JSON=$(escape_json "$TITLE")
 SOURCE_JSON=$(escape_json "$SOURCE")
 AUTHOR_JSON=$(escape_json "$AUTHOR")
 
+# Build provenance field fragment for _meta.json (omitted-field convention: only
+# non-empty flags produce JSON keys; legacy callers that omit all flags get a
+# byte-identical _meta.json to pre-Phase-2 output).
+PROVENANCE_META=$(python3 -c '
+import json, sys
+fields = [
+    ("producer_role", sys.argv[1]),
+    ("protocol_slot", sys.argv[2]),
+    ("template_version", sys.argv[3]),
+    ("capturer_role", sys.argv[4]),
+    ("source_artifact_ids", sys.argv[5]),
+]
+out = []
+for key, val in fields:
+    if val:
+        out.append(",\n  {}: {}".format(json.dumps(key), json.dumps(val)))
+sys.stdout.write("".join(out))
+' "$PRODUCER_ROLE" "$PROTOCOL_SLOT" "$TEMPLATE_VERSION" "$CAPTURER_ROLE" "$SOURCE_ARTIFACT_IDS")
+
+# Branch-provenance trio (always emitted — resolve from git when caller did not
+# pass an explicit value; fall back to JSON null on any git failure).
+if [[ -z "$CAPTURED_AT_BRANCH" ]]; then
+  _resolved_branch=$(captured_at_branch)
+  if [[ "$_resolved_branch" != "null" ]]; then
+    CAPTURED_AT_BRANCH="$_resolved_branch"
+  fi
+fi
+if [[ -z "$CAPTURED_AT_SHA" ]]; then
+  _resolved_sha=$(captured_at_sha)
+  if [[ "$_resolved_sha" != "null" ]]; then
+    CAPTURED_AT_SHA="$_resolved_sha"
+  fi
+fi
+if [[ -z "$CAPTURED_AT_MERGE_BASE_SHA" ]]; then
+  _resolved_mb=$(captured_at_merge_base_sha)
+  if [[ "$_resolved_mb" != "null" ]]; then
+    CAPTURED_AT_MERGE_BASE_SHA="$_resolved_mb"
+  fi
+fi
+
+BRANCH_META=$(python3 -c '
+import json, sys
+fields = [
+    ("captured_at_branch", sys.argv[1]),
+    ("captured_at_sha", sys.argv[2]),
+    ("captured_at_merge_base_sha", sys.argv[3]),
+]
+out = []
+for key, val in fields:
+    out.append(",\n  {}: {}".format(json.dumps(key), json.dumps(val) if val else "null"))
+sys.stdout.write("".join(out))
+' "$CAPTURED_AT_BRANCH" "$CAPTURED_AT_SHA" "$CAPTURED_AT_MERGE_BASE_SHA")
+
 # Write _meta.json
 cat > "$ITEM_DIR/_meta.json" << METAEOF
 {
@@ -183,7 +302,7 @@ cat > "$ITEM_DIR/_meta.json" << METAEOF
   "attachments": $ATTACHMENTS,
   "suggested_actions": $SUGGESTED_ACTIONS,
   "created": "$TIMESTAMP",
-  "updated": "$TIMESTAMP"
+  "updated": "$TIMESTAMP"$PROVENANCE_META$BRANCH_META
 }
 METAEOF
 
@@ -307,7 +426,41 @@ if errors:
   fi
   rm -f "$_lf_err_file"
 
-  printf '%s\n' "$_lf_raw" > "$ITEM_DIR/lens-findings.json"
+  # When any provenance flag is non-empty, enrich each finding with the CLI-provided
+  # fields it does not already carry. Per-finding values win over CLI defaults so
+  # lead-synthesis followups can preserve each finding's original producer attribution.
+  # When no provenance flags are set, pass through the raw payload byte-identically to
+  # keep legacy callers' output unchanged.
+  if [[ -n "$PRODUCER_ROLE" || -n "$PROTOCOL_SLOT" || -n "$TEMPLATE_VERSION" \
+        || -n "$CAPTURER_ROLE" || -n "$SOURCE_ARTIFACT_IDS" ]]; then
+    _lf_tmp=$(mktemp)
+    printf '%s' "$_lf_raw" > "$_lf_tmp"
+    python3 - "$_lf_tmp" "$ITEM_DIR/lens-findings.json" \
+      "$PRODUCER_ROLE" "$PROTOCOL_SLOT" "$TEMPLATE_VERSION" \
+      "$CAPTURER_ROLE" "$SOURCE_ARTIFACT_IDS" << 'PYEOF'
+import json, sys
+raw_path, out_path, producer, slot, template, capturer, artifacts = sys.argv[1:]
+with open(raw_path) as f:
+    data = json.load(f)
+defaults = [
+    ("producer_role", producer),
+    ("protocol_slot", slot),
+    ("template_version", template),
+    ("capturer_role", capturer),
+    ("source_artifact_ids", artifacts),
+]
+for finding in data.get("findings", []):
+    for key, val in defaults:
+        if val and key not in finding:
+            finding[key] = val
+with open(out_path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+    rm -f "$_lf_tmp"
+  else
+    printf '%s\n' "$_lf_raw" > "$ITEM_DIR/lens-findings.json"
+  fi
 fi
 
 # Update the followup index

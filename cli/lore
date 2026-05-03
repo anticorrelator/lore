@@ -15,6 +15,41 @@ resolve_kdir() {
   "$SCRIPTS_DIR/resolve-repo.sh"
 }
 
+# --- Role gate (Phase 9) ---
+# Maintainer-only verbs route through this guard. If the resolved role (see
+# resolve_role in scripts/lib.sh) is not "maintainer", emit a clear error and
+# exit 2. Exit 2 is distinct from usage-error (1) and script-error (3+) so
+# callers and tests can distinguish "you lack permission" from "your argv is
+# wrong". The error message names the escape hatches: per-repo config.json,
+# user-level settings.json, and the LORE_ROLE env override for one-off use.
+#
+# Usage: require_maintainer <verb-for-error-message>
+require_maintainer() {
+  local verb="${1:-command}"
+  local role
+  role=$(resolve_role)
+  if [[ "$role" != "maintainer" ]]; then
+    cat >&2 <<EOF
+Error: 'lore $verb' requires role=maintainer (current role: $role).
+
+Maintainer verbs mutate shared templates and the evaluation pool. Contributors
+submit evidence via 'lore retro export' (and any distribution channel the
+project uses) and let the maintainer merge it. See
+_research/multi-user-evolution-design.md for the full federation model.
+
+To become a maintainer for this repo, add one of:
+  • \$LORE_DATA_DIR/repos/<repo>/config.json  (preferred, per-repo opt-in)
+      {"role": "maintainer"}
+  • \$LORE_DATA_DIR/config/settings.json     (user-level default)
+      {"role": "maintainer"}
+
+One-off override (current invocation only):
+  LORE_ROLE=maintainer lore $verb ...
+EOF
+    exit 2
+  fi
+}
+
 # --- Usage ---
 usage() {
   cat >&2 <<EOF
@@ -24,9 +59,13 @@ Usage: lore <command> [args...]
 
 Commands:
   read         Read a file with optional query filtering
+  query        Seeds-keyed compositional retrieval (backlinks or query text)
   search       Search knowledge and/or work items
   capture      Capture an insight to the knowledge store
+  promote      Promote a Tier 3 observation row to the knowledge commons
+  test         Run lore test suites (see: lore test protocols)
   annotate     Record a retrieval friction annotation
+  audit        Route a producer artifact through the settlement judges
   resolve      Resolve repo path or [[backlink]] references
   prefetch     Prefetch knowledge for agent prompts
   init         Initialize a knowledge store
@@ -38,6 +77,13 @@ Commands:
   check-links  Scan for broken [[backlink]] references
   status       Show knowledge store health summary
   assemble     Assemble CLAUDE.md from fragments
+  expand           Walk one hop along parent/child edges (--up default, --down for children)
+  descend          Show children filtered to exactly one scale step narrower
+  neighbors        Find same-scale entries with high concordance similarity
+  tradeoffs        Surface design alternatives considered and rejected for a topic
+  why              Reverse-lookup design rationale entries for a code location (file:line)
+  overview         Architectural-scale framing for a subsystem + descent affordances
+  knowledge-tree   Render the parent/child subtree rooted at an entry
   batch-spec       Batch-run /spec short on eligible work items
   batch-implement  Batch-run /implement on ready work items
   batch-capture    Capture multiple insights from a JSON array
@@ -55,6 +101,16 @@ Commands:
   bootstrap    Bootstrap knowledge store (see: lore bootstrap --help)
   ceremony     Ceremony config management (see: lore ceremony --help)
   agent        Agent integration toggle (see: lore agent --help)
+  scale        Capture-scale helpers (see: lore scale --help)
+  scorecard    Scorecard sidecar management (see: lore scorecard --help)
+  retro        Federated retro pooling (see: lore retro --help)
+  correction   Verdict-driven correction management (see: lore correction --help)
+  off-scale    Off-scale route management (see: lore off-scale --help)
+  consumption-contradiction
+               Append a consumption-contradiction signal-capture row
+  synopsis     Edge-keyed synopsis sidecar management (see: lore synopsis --help)
+  resynth      Invalidate and re-synthesize edge synopses for a knowledge entry
+  history      Show correction history and supersession chain for a knowledge entry
 
 Options:
   --help, -h       Show this help
@@ -72,7 +128,7 @@ Subcommands:
   create    Create a new work item
   list      List active work items
   show      Show a work item's full context
-  set       Set metadata fields (issue, pr) on a work item
+  set       Set metadata fields (issue, pr, scope) on a work item
   archive   Archive a completed work item
   delete    Permanently delete a work item
   unarchive Restore an archived work item
@@ -159,6 +215,7 @@ Subcommands:
   delete       Permanently delete a follow-up
   post-review  Post a proposed review comment to GitHub
   summarize    Generate a thematic summary of selected review comments
+  reconcile    Tournament reconciliation between /pr-review and /pr-self-review
 
 Options:
   --help, -h    Show this help
@@ -238,6 +295,247 @@ Subcommands:
 Options:
   --help, -h    Show this help
 EOF
+}
+
+scale_usage() {
+  cat >&2 <<EOF
+lore scale — capture-scale helpers
+
+Usage: lore scale <subcommand> [args...]
+
+Subcommands:
+  compute   Compute clamped absolute capture scale from work-scope + role × slot
+  registry  Query the scale registry (ids, labels, adjacency, version)
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+scorecard_usage() {
+  cat >&2 <<EOF
+lore scorecard — append-only scorecard sidecar for template-level evaluation signal
+
+Usage: lore scorecard <subcommand> [args...]
+
+Subcommands:
+  append    Append a validated JSON row to _scorecards/rows.jsonl (from --row or stdin)
+  rollup    Aggregate rows.jsonl into _scorecards/_current.json
+  current   Print _scorecards/_current.json
+  rows      Print _scorecards/rows.jsonl
+
+Options:
+  --help, -h    Show this help
+
+Notes:
+  Scorecard rows are NEVER loaded into agent prompt context. Only /retro,
+  /evolve, scorecard-rollup, and CLI views consume them. 'append' is the
+  sole sanctioned writer of rows.jsonl — see _scorecards/README.md.
+EOF
+}
+
+retro_usage() {
+  # Role-aware help: maintainer verbs are omitted from the contributor view
+  # (task-54) so the contributor surface stays minimal and discovery-safe.
+  # Maintainers see the full surface.
+  local role
+  role=$(resolve_role)
+  cat >&2 <<EOF
+lore retro — federated retro pooling (Phase 9 of the settlement architecture)
+
+Usage: lore retro <subcommand> [args...]
+
+Subcommands:
+  export      Export a redacted retro bundle for submission to a maintainer
+EOF
+  if [[ "$role" == "maintainer" ]]; then
+    cat >&2 <<EOF
+  import      Ingest a contributor bundle into the maintainer's private pool [maintainer]
+  aggregate   Compute convergence tags over the imported pool              [maintainer]
+EOF
+  fi
+  cat >&2 <<EOF
+
+Options:
+  --help, -h    Show this help
+
+Notes:
+  'export' is contributor-facing and requires no role. 'import' and
+  'aggregate' require role=maintainer in ~/.lore/config/settings.json
+  (or per-repo ~/.lore/repos/<repo>/config.json). Current role: $role.
+  See _research/multi-user-evolution-design.md for the full federation design.
+EOF
+}
+
+# --- Scale subgroup ---
+cmd_scale() {
+  if [[ $# -eq 0 ]]; then
+    scale_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      scale_usage
+      return 0
+      ;;
+    compute)
+      echo "Error: 'lore scale compute' has been removed. Scale is now declared by the author using the 4-bucket rubric (abstract, architecture, subsystem, implementation). See the scale rubric in your agent template or SKILL.md for guidance." >&2
+      return 1
+      ;;
+    registry)
+      "$SCRIPTS_DIR/scale-registry.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown scale subcommand '$subcmd'" >&2
+      echo "" >&2
+      scale_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Scorecard subgroup ---
+cmd_scorecard() {
+  if [[ $# -eq 0 ]]; then
+    scorecard_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      scorecard_usage
+      return 0
+      ;;
+    append)
+      "$SCRIPTS_DIR/scorecard-append.sh" "$@"
+      ;;
+    rollup)
+      "$SCRIPTS_DIR/scorecard-rollup.sh" "$@"
+      ;;
+    current)
+      local kdir current_file
+      kdir="$(resolve_kdir)"
+      current_file="$kdir/_scorecards/_current.json"
+      if [[ ! -f "$current_file" ]]; then
+        echo "Error: $current_file does not exist. Run 'lore scorecard rollup' first." >&2
+        return 1
+      fi
+      cat "$current_file"
+      ;;
+    rows)
+      local kdir rows_file
+      kdir="$(resolve_kdir)"
+      rows_file="$kdir/_scorecards/rows.jsonl"
+      if [[ ! -f "$rows_file" ]]; then
+        echo "Error: $rows_file does not exist. Run 'lore scorecard append' to create it." >&2
+        return 1
+      fi
+      cat "$rows_file"
+      ;;
+    *)
+      echo "Error: unknown scorecard subcommand '$subcmd'" >&2
+      echo "" >&2
+      scorecard_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Retro subgroup (Phase 9 federated retro pooling) ---
+cmd_retro() {
+  if [[ $# -eq 0 ]]; then
+    retro_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      retro_usage
+      return 0
+      ;;
+    export)
+      "$SCRIPTS_DIR/retro-export.sh" "$@"
+      ;;
+    import)
+      require_maintainer "retro import"
+      "$SCRIPTS_DIR/retro-import.sh" "$@"
+      ;;
+    aggregate)
+      require_maintainer "retro aggregate"
+      "$SCRIPTS_DIR/maintainer-preflight.sh" --repo-dir "$(pwd)"
+      "$SCRIPTS_DIR/retro-aggregate.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown retro subcommand '$subcmd'" >&2
+      echo "" >&2
+      retro_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Correction subgroup (Phase 10 L2 correction write path) ---
+correction_usage() {
+  cat >&2 <<EOF
+lore correction — verdict-driven correction write path (Phase 10)
+
+Usage: lore correction <subcommand> [args...]
+
+Subcommands:
+  find    Map a contradicted claim to candidate knowledge entry paths
+  apply   Apply a correction from a contradicted verdict to a knowledge entry
+
+lore correction find --claim-text TEXT [--file-line FILE:LINE] [--limit N] [--threshold F]
+lore correction apply --entry PATH --verdict-id ID --verdict-source SOURCE
+                      --evidence TEXT --superseded-text TEXT --replacement-text TEXT
+                      [--date YYYY-MM-DD] [--dry-run]
+
+  find: Given the text of a contradicted claim, returns ranked entry paths
+        that likely contain the claim (related_files overlap + TF-IDF similarity).
+
+  apply: Replaces the superseded snippet in the entry body and appends a
+         corrections[] item to the entry's META block. Attribution is to
+         the evidence anchor, not the producer agent (blame-free per work-03).
+EOF
+}
+
+cmd_correction() {
+  if [[ $# -eq 0 ]]; then
+    correction_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      correction_usage
+      return 0
+      ;;
+    find)
+      "$SCRIPTS_DIR/find-correction-targets.sh" "$@"
+      ;;
+    apply)
+      KDIR="$(resolve_kdir)" "$SCRIPTS_DIR/apply-correction.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown correction subcommand '$subcmd'" >&2
+      echo "" >&2
+      correction_usage
+      return 1
+      ;;
+  esac
 }
 
 # --- Analyze subgroup ---
@@ -550,16 +848,324 @@ cmd_manifest() {
   esac
 }
 
+# --- Query (seeds-keyed compositional retrieval) ---
+cmd_query() {
+  local seeds=""
+  local hop_budget=0
+  local budget=""
+  local scale_set=""
+  local type_filter="knowledge"
+  local exclude_category=""
+  local format="json"
+  local positional_args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        cat >&2 <<'EOF'
+Usage: lore query [<seed>] [--seeds <csv>] [--hop-budget N] [--budget N]
+                  [--scale-set <csv>]
+                  [--type knowledge|work|all]
+                  [--exclude-category <cat>] [--format json|prompt]
+
+Seeds-keyed compositional retrieval. Seeds may be backlink references
+(knowledge:<path> or work:<slug>, with or without [[...]]) or query text.
+A single positional argument is treated as --seeds <arg>.
+
+Flags:
+  --seeds <csv>          Comma-separated seed list (backlinks or query text)
+  --hop-budget N         0=no expand (default), >=1=TF-IDF concordance widening
+  --budget N             Budget-aware search (mutually exclusive with --hop-budget >=1)
+  --scale-set <csv>      Required scale filter; entries pass when their label set
+                         intersects the requested set (multi-label aware).
+                         Entries without a declared scale are excluded.
+  --type <t>             Source type: knowledge, work, or all (default: knowledge)
+  --exclude-category <c> Exclude entries in this category
+  --format json|prompt   Output format (default: json)
+EOF
+        return 0
+        ;;
+      --seeds)
+        seeds="$2"
+        shift 2
+        ;;
+      --hop-budget)
+        hop_budget="$2"
+        shift 2
+        ;;
+      --budget)
+        budget="$2"
+        shift 2
+        ;;
+      --scale-set)
+        scale_set="$2"
+        shift 2
+        ;;
+      --min-scale|--min-scale=*|--max-scale|--max-scale=*)
+        echo "Error: --min-scale and --max-scale were retired in the multi-label scale migration." >&2
+        echo "  Use --scale-set <csv> instead — entries pass when their label set intersects the requested set." >&2
+        echo "  Example: lore query --seeds <seed> --scale-set subsystem,implementation" >&2
+        return 2
+        ;;
+      --type)
+        type_filter="$2"
+        shift 2
+        ;;
+      --exclude-category)
+        exclude_category="$2"
+        shift 2
+        ;;
+      --format)
+        format="$2"
+        shift 2
+        ;;
+      -*)
+        echo "Error: unknown flag '$1'" >&2
+        return 1
+        ;;
+      *)
+        positional_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  # A single positional arg is shorthand for --seeds
+  if [[ ${#positional_args[@]} -gt 0 && -z "$seeds" ]]; then
+    seeds="${positional_args[0]}"
+  elif [[ ${#positional_args[@]} -gt 0 ]]; then
+    echo "Error: unexpected positional argument '${positional_args[0]}' when --seeds already set" >&2
+    return 1
+  fi
+
+  # Empty seed list is a caller error
+  if [[ -z "$seeds" ]]; then
+    echo "Usage: lore query [<seed>] [--seeds <csv>] [--hop-budget N] [--budget N] [--format json|prompt]" >&2
+    echo "Error: seed list is empty — provide at least one seed via positional arg or --seeds" >&2
+    return 1
+  fi
+
+  # --scale-set is required for programmatic retrieval
+  if [[ -z "$scale_set" ]]; then
+    echo "Error: --scale-set is required. Declare your retrieval scale to proceed." >&2
+    echo "  Use: lore query --seeds <seed> --scale-set <bucket>" >&2
+    echo "  Buckets: abstract, architecture, subsystem, implementation" >&2
+    return 1
+  fi
+
+  # Mutual exclusion: --budget and --hop-budget >=1 cannot be combined
+  if [[ -n "$budget" && "$hop_budget" -ge 1 ]]; then
+    echo "Error: --budget and --hop-budget >=1 are mutually exclusive. Use --hop-budget 0 for budget-only search." >&2
+    return 1
+  fi
+
+  # Warn when hop-budget > 1 (capped to one-hop)
+  if [[ "$hop_budget" -gt 1 ]]; then
+    echo "Notice: --hop-budget $hop_budget capped to one-hop expansion (multi-hop not yet implemented)" >&2
+  fi
+
+  local kdir
+  kdir="$(resolve_kdir)"
+
+  # --- Partition seeds into backlinks vs query-text ---
+  local backlink_seeds=()
+  local query_parts=()
+
+  IFS=',' read -ra SEED_ARR <<< "$seeds"
+  for raw_seed in "${SEED_ARR[@]}"; do
+    # Trim whitespace
+    local seed="${raw_seed#"${raw_seed%%[![:space:]]*}"}"
+    seed="${seed%"${seed##*[![:space:]]}"}"
+    # Strip surrounding [[ ]] if present
+    local inner="${seed#[[}"
+    inner="${inner%]]}"
+    if [[ "$inner" == knowledge:* || "$inner" == work:* ]]; then
+      backlink_seeds+=("$inner")
+    else
+      query_parts+=("$seed")
+    fi
+  done
+
+  # --- Resolve backlink seeds ---
+  local resolved_paths=()
+  if [[ ${#backlink_seeds[@]} -gt 0 ]]; then
+    # Wrap bare seeds (without [[ ]]) to full [[type:target]] form expected by pk_resolve.py
+    local wrapped_seeds=()
+    for bs in "${backlink_seeds[@]}"; do
+      wrapped_seeds+=("[[$bs]]")
+    done
+    local resolve_json
+    resolve_json=$(python3 "$SCRIPTS_DIR/pk_cli.py" resolve "$kdir" "${wrapped_seeds[@]}" --json 2>/dev/null || true)
+    if [[ -n "$resolve_json" ]]; then
+      # Extract file_path from resolved entries; log unresolved to stderr
+      while IFS= read -r line; do
+        resolved_paths+=("$line")
+      done < <(python3 - "$resolve_json" "$kdir" <<'RESOLVE_PY'
+import json, sys, os
+data = json.loads(sys.argv[1])
+kdir = sys.argv[2]
+for r in data:
+    if r.get("resolved"):
+        # Build relative path from kdir
+        abs_path = r.get("file_path", "")
+        if not abs_path:
+            # Reconstruct from source_type + target
+            st = r.get("source_type", "")
+            tgt = r.get("target", "")
+            if st == "knowledge":
+                abs_path = os.path.join(kdir, tgt + ".md")
+            elif st == "work":
+                abs_path = os.path.join(kdir, "_work", tgt, "_meta.json")
+        if abs_path:
+            try:
+                rel = os.path.relpath(abs_path, kdir)
+                print(rel)
+            except ValueError:
+                pass
+    else:
+        print(f"Warning: unresolved backlink '{r.get('backlink', '')}': {r.get('error', 'not found')}", file=sys.stderr)
+RESOLVE_PY
+      )
+    fi
+    # If all backlinks resolved to empty and no query_parts, it's a success with empty result
+  fi
+
+  # --- Build query string ---
+  local query=""
+  if [[ ${#query_parts[@]} -gt 0 ]]; then
+    query="${query_parts[*]}"
+  elif [[ ${#backlink_seeds[@]} -gt 0 ]]; then
+    # Use the first backlink target as a query fallback
+    query="${backlink_seeds[0]#knowledge:}"
+    query="${query#work:}"
+    # Use last path component for search readability
+    query="${query##*/}"
+    # Strip heading fragment
+    query="${query%%#*}"
+  fi
+
+  # If no usable query (all-backlinks resolved, no text), emit empty result
+  if [[ -z "$query" ]]; then
+    if [[ "$format" == "prompt" ]]; then
+      : # empty output for prompt format
+    else
+      echo "[]"
+    fi
+    return 0
+  fi
+
+  # --- Build pk_cli.py search args ---
+  # Scale filtering is delegated to Searcher (single authority — D4 consolidation).
+  # category=preferences and scale=abstract entries bypass the scale filter inside
+  # Searcher.search; no duplicate post-filter is applied here.
+  local search_args=("search" "$kdir" "$query" "--json" "--caller" "lore-query" "--scale-set" "$scale_set")
+  [[ "$type_filter" != "all" ]] && search_args+=("--type" "$type_filter")
+  [[ -n "$exclude_category" ]] && search_args+=("--exclude-category" "$exclude_category")
+
+  if [[ -n "$budget" ]]; then
+    search_args+=("--budget" "$budget")
+  elif [[ "$hop_budget" -ge 1 ]]; then
+    search_args+=("--expand")
+  fi
+
+  # --- Execute search ---
+  local raw_results
+  raw_results=$(python3 "$SCRIPTS_DIR/pk_cli.py" "${search_args[@]}" 2>/dev/null || true)
+  if [[ -z "$raw_results" ]]; then
+    raw_results="[]"
+  fi
+
+  # --- Post-process: inject path field only; scale filter already applied by Searcher ---
+  local processed
+  processed=$(python3 - "$raw_results" "$kdir" <<'POST_PY'
+import json, sys
+
+raw = sys.argv[1]
+data = json.loads(raw)
+
+is_budget = isinstance(data, dict) and "full" in data
+
+def inject_path(entries):
+    out = []
+    for r in entries:
+        entry = dict(r)
+        if "path" not in entry:
+            entry["path"] = entry.get("file_path", "")
+        for s in entry.get("similar_entries", []):
+            if "path" not in s:
+                s["path"] = s.get("file_path", "")
+        out.append(entry)
+    return out
+
+if is_budget:
+    data["full"] = inject_path(data["full"])
+    data["titles_only"] = inject_path(data["titles_only"])
+else:
+    data = inject_path(data)
+
+print(json.dumps(data, indent=2))
+POST_PY
+  )
+
+  # --- Format output ---
+  if [[ "$format" == "prompt" ]]; then
+    # Emit ## Prior Knowledge markdown block from results
+    python3 - "$processed" "$kdir" <<'PROMPT_PY'
+import json, sys, os
+
+data = json.loads(sys.argv[1])
+kdir = sys.argv[2]
+
+# Flatten budget or flat shape
+if isinstance(data, dict) and "full" in data:
+    entries = data["full"]
+else:
+    entries = data
+
+if not entries:
+    sys.exit(0)
+
+lines = ["## Prior Knowledge"]
+for r in entries:
+    heading = r.get("heading", "")
+    fp = r.get("file_path", r.get("path", ""))
+    if fp.endswith(".md"):
+        fp = fp[:-3]
+    snippet = r.get("snippet", r.get("content", ""))
+    if len(snippet) > 300:
+        snippet = snippet[:300].rsplit(" ", 1)[0] + "..."
+    # Build backlink
+    backlink = f"[[knowledge:{fp}#{heading}]]" if heading else f"[[knowledge:{fp}]]"
+    lines.append(f"- {backlink}")
+    if snippet:
+        lines.append(f"  {snippet.splitlines()[0][:200]}")
+    for s in r.get("similar_entries", []):
+        sfp = s.get("file_path", s.get("path", ""))
+        if sfp.endswith(".md"):
+            sfp = sfp[:-3]
+        sh = s.get("heading", "")
+        sbl = f"[[knowledge:{sfp}#{sh}]]" if sh else f"[[knowledge:{sfp}]]"
+        lines.append(f"  - See also: {sbl}")
+
+print("\n".join(lines))
+PROMPT_PY
+  else
+    echo "$processed"
+  fi
+}
+
 # --- Search ---
 cmd_search() {
   local type="all"
   local json_flag=""
+  local scale_set=""
+  local caller="cli"
   local args=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --help|-h)
-        echo "Usage: lore search <query> [--type knowledge|work|all] [--json]" >&2
+        echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json]" >&2
         return 0
         ;;
       --type)
@@ -570,6 +1176,22 @@ cmd_search() {
         json_flag="--json"
         shift
         ;;
+      --scale-set)
+        scale_set="$2"
+        shift 2
+        ;;
+      --scale-set=*)
+        scale_set="${1#--scale-set=}"
+        shift
+        ;;
+      --caller)
+        caller="$2"
+        shift 2
+        ;;
+      --caller=*)
+        caller="${1#--caller=}"
+        shift
+        ;;
       *)
         args+=("$1")
         shift
@@ -578,7 +1200,18 @@ cmd_search() {
   done
 
   if [[ ${#args[@]} -eq 0 ]]; then
-    echo "Usage: lore search <query> [--type knowledge|work|all] [--json]" >&2
+    echo "Usage: lore search <query> [--scale-set <bucket>] [--caller <id>] [--type knowledge|work|all] [--json]" >&2
+    return 1
+  fi
+
+  if [[ -z "$scale_set" ]]; then
+    if [[ -n "$json_flag" ]]; then
+      echo '{"error":"--scale-set is required for lore search; declare your retrieval scale, e.g. --scale-set implementation"}' >&2
+      return 1
+    fi
+    echo "Scale declaration required: add --scale-set <bucket> to your search." >&2
+    echo "  Example: lore search \"${args[0]:-<query>}\" --scale-set implementation" >&2
+    echo "  Buckets: abstract, architecture, subsystem, implementation" >&2
     return 1
   fi
 
@@ -589,15 +1222,15 @@ cmd_search() {
   if [[ -n "$json_flag" ]]; then
     case "$type" in
       knowledge)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --json "${args[@]:1}"
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json "${args[@]:1}"
         ;;
       work)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --json --type work "${args[@]:1}"
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json --type work "${args[@]:1}"
         ;;
       all)
         local k_json w_json
-        k_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --json "${args[@]:1}")"
-        w_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --json --type work "${args[@]:1}")"
+        k_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json "${args[@]:1}")"
+        w_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json --type work "${args[@]:1}")"
         python3 -c "import json,sys; a=json.loads(sys.argv[1]); b=json.loads(sys.argv[2]); print(json.dumps(a+b,indent=2))" "$k_json" "$w_json"
         ;;
       *)
@@ -608,13 +1241,13 @@ cmd_search() {
   else
     case "$type" in
       knowledge)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" "${args[@]:1}"
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" "${args[@]:1}"
         ;;
       work)
         "$SCRIPTS_DIR/search-work.sh" "$query"
         ;;
       all)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" "${args[@]:1}"
+        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" "${args[@]:1}"
         echo ""
         "$SCRIPTS_DIR/search-work.sh" "$query"
         ;;
@@ -675,6 +1308,9 @@ cmd_work() {
       ;;
     regen-tasks)
       "$SCRIPTS_DIR/regen-tasks.sh" "$@"
+      ;;
+    phase-context)
+      "$SCRIPTS_DIR/phase-context.sh" "$@"
       ;;
     check)
       "$SCRIPTS_DIR/update-plan-checkbox.sh" "$@"
@@ -747,10 +1383,113 @@ cmd_followup() {
     summarize)
       "$SCRIPTS_DIR/generate-review-summary.sh" "$@"
       ;;
+    reconcile)
+      "$SCRIPTS_DIR/reconcile-reviews.sh" "$@"
+      ;;
     *)
       echo "Error: unknown followup subcommand '$subcmd'" >&2
       echo "" >&2
       followup_usage
+      return 1
+      ;;
+  esac
+}
+
+synopsis_usage() {
+  cat >&2 <<EOF
+lore synopsis — edge-keyed synopsis sidecar management
+
+Usage: lore synopsis <subcommand> [args...]
+
+Subcommands:
+  get <entry_id> <requesting_scale>
+                           Output cached synopsis (exit 0), exit 1 if not found,
+                           exit 2 if stale (parent hash or template_version changed)
+  put <entry_id> <requesting_scale> --content-file <path> --parent-hash <hex> --parent-template-version <ver> --status <cached|generated|fallback>
+                           Write synopsis sidecar, print path on stdout
+  invalidate <entry_id>
+                           Delete all synopsis cache files for entry_id (all scales);
+                           prints deleted count on stdout
+
+Storage: \$KDIR/_edge_synopses/<sanitized_entry_id>__<requesting_scale>.md
+The sanitized_entry_id is the entry's relative path with '/' → '__'.
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+cmd_synopsis() {
+  if [[ $# -eq 0 ]]; then
+    synopsis_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      synopsis_usage
+      return 0
+      ;;
+    get|put|invalidate)
+      "$SCRIPTS_DIR/edge-synopsis.sh" "$subcmd" "$@"
+      ;;
+    *)
+      echo "Error: unknown synopsis subcommand '$subcmd'" >&2
+      echo "" >&2
+      synopsis_usage
+      return 1
+      ;;
+  esac
+}
+
+off_scale_usage() {
+  cat >&2 <<EOF
+lore off-scale — off-scale route management
+
+Usage: lore off-scale <subcommand> [args...]
+
+Subcommands:
+  resolve   Transition a pending route to accepted or declined
+  route     Route pending off-scale rows into scope_pointers.jsonl
+
+Options:
+  --help, -h    Show this help
+
+Notes:
+  Routes live in _work/<slug>/off_scale_routes.jsonl. Status transitions are
+  write-once: pending → accepted | declined (terminal). Re-resolution is rejected
+  with exit code 2. Do NOT edit the sidecar files directly — that breaks the
+  scorecard emission pipeline.
+EOF
+}
+
+cmd_off_scale() {
+  if [[ $# -eq 0 ]]; then
+    off_scale_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      off_scale_usage
+      return 0
+      ;;
+    resolve)
+      "$SCRIPTS_DIR/off-scale-resolve.sh" "$@"
+      ;;
+    route)
+      "$SCRIPTS_DIR/route-off-scale.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown off-scale subcommand '$subcmd'" >&2
+      echo "" >&2
+      off_scale_usage
       return 1
       ;;
   esac
@@ -774,6 +1513,10 @@ case "$1" in
     shift
     "$SCRIPTS_DIR/filtered-read.sh" "$@"
     ;;
+  query)
+    shift
+    cmd_query "$@"
+    ;;
   search)
     shift
     cmd_search "$@"
@@ -782,9 +1525,21 @@ case "$1" in
     shift
     "$SCRIPTS_DIR/capture.sh" "$@"
     ;;
+  promote)
+    shift
+    "$SCRIPTS_DIR/lore-promote.sh" "$@"
+    ;;
+  test)
+    shift
+    "$SCRIPTS_DIR/lore-test.sh" "$@"
+    ;;
   annotate)
     shift
     "$SCRIPTS_DIR/annotate.sh" "$@"
+    ;;
+  audit)
+    shift
+    "$SCRIPTS_DIR/audit-artifact.sh" "$@"
     ;;
   resolve)
     shift
@@ -891,6 +1646,86 @@ case "$1" in
   agent)
     shift
     cmd_agent "$@"
+    ;;
+  scale)
+    shift
+    cmd_scale "$@"
+    ;;
+  scorecard)
+    shift
+    cmd_scorecard "$@"
+    ;;
+  retro)
+    shift
+    cmd_retro "$@"
+    ;;
+  correction)
+    shift
+    cmd_correction "$@"
+    ;;
+  off-scale)
+    shift
+    cmd_off_scale "$@"
+    ;;
+  consumption-contradiction)
+    shift
+    "$SCRIPTS_DIR/consumption-contradiction-append.sh" "$@"
+    ;;
+  synopsis)
+    shift
+    cmd_synopsis "$@"
+    ;;
+  resynth)
+    shift
+    if [[ $# -eq 0 ]]; then
+      echo "Usage: lore resynth <entry_id>" >&2
+      echo "  Invalidate all cached synopses for entry_id. They will be re-synthesized on next cross-scale read." >&2
+      exit 1
+    fi
+    ENTRY_ARG="$1"
+    # Normalize: strip leading KDIR prefix and trailing .md
+    KDIR_FOR_RESYNTH="$(resolve_kdir)"
+    ENTRY_ARG="${ENTRY_ARG#"$KDIR_FOR_RESYNTH/"}"
+    ENTRY_ARG="${ENTRY_ARG%.md}"
+    COUNT=$("$SCRIPTS_DIR/edge-synopsis.sh" invalidate "$ENTRY_ARG")
+    echo "[resynth] Invalidated $COUNT synopsis cache file(s) for '$ENTRY_ARG'. Re-synthesis will occur on next cross-scale read."
+    ;;
+  history)
+    shift
+    if [[ $# -eq 0 ]]; then
+      echo "Usage: lore history <entry_id>" >&2
+      echo "  Show correction history and supersession chain for a knowledge entry." >&2
+      exit 1
+    fi
+    "$SCRIPTS_DIR/show-history.sh" "$@"
+    ;;
+  expand)
+    shift
+    "$SCRIPTS_DIR/expand-entry.sh" "$@"
+    ;;
+  descend)
+    shift
+    "$SCRIPTS_DIR/descend-entry.sh" "$@"
+    ;;
+  neighbors)
+    shift
+    "$SCRIPTS_DIR/neighbors-entry.sh" "$@"
+    ;;
+  tradeoffs)
+    shift
+    "$SCRIPTS_DIR/tradeoffs-topic.sh" "$@"
+    ;;
+  why)
+    shift
+    "$SCRIPTS_DIR/why-at-location.sh" "$@"
+    ;;
+  overview)
+    shift
+    "$SCRIPTS_DIR/overview-subsystem.sh" "$@"
+    ;;
+  knowledge-tree)
+    shift
+    "$SCRIPTS_DIR/knowledge-tree.sh" "$@"
     ;;
   batch-spec)
     shift

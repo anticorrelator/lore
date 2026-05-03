@@ -43,10 +43,47 @@ mkdir -p "$KNOWLEDGE_DIR/_inbox"
 mkdir -p "$KNOWLEDGE_DIR/_meta"
 touch "$KNOWLEDGE_DIR/_meta/.gitkeep"
 
+# Seed default activity-vocab.yaml — only when it does not already exist, so
+# a hand-authored project file is never overwritten on re-run.
+if [[ ! -f "$KNOWLEDGE_DIR/_meta/activity-vocab.yaml" ]]; then
+  cat > "$KNOWLEDGE_DIR/_meta/activity-vocab.yaml" << 'ACTIVITYVOCABEOF'
+# Activity vocabulary config — path-glob -> activity-token list mapping
+# consumed by /spec retrieval-directive activity-pass lookups (see
+# `skills/spec/SKILL.md` §Per-topic decomposition / activity_vocab).
+#
+# Per-project map: file-path glob -> list of BM25 query tokens that name a
+# recurring practice on files matching that glob (e.g. writing tests, emitting
+# telemetry, mocking, capturing). Loader semantics:
+#
+#   - Caller (resolve-manifest.sh / pk_search.py) supplies the phase's owned
+#     file set.
+#   - Loader returns the union of token lists whose glob matches at least one
+#     file in that set, deduplicated.
+#   - Patterns matching zero files contribute nothing.
+#   - Missing config (this file absent), an unmatched path, or an empty token
+#     list is a no-op, not an error.
+#   - Activity vocab is *attached to a topic* in a v2 retrieval directive; the
+#     topic fires one extra BM25 OR query at the topic's declared scale_set
+#     using these tokens (logged as `query_kind=activity`).
+#
+# Project-overridable: a downstream knowledge store may replace this file in
+# its own `$KDIR/_meta/activity-vocab.yaml` to encode that project's testing
+# stack, telemetry conventions, etc. The seed below is the lore default;
+# `lore init` only writes this file when it does not already exist.
+
+tests/*: [pytest, fixture, assertion, mock]
+ACTIVITYVOCABEOF
+fi
+
 # Create category directories
 for category in principles architecture conventions abstractions workflows gotchas domains team; do
   mkdir -p "$KNOWLEDGE_DIR/$category"
 done
+
+# Seed _scorecards/ sidecar with README documenting the sole-writer invariant.
+# scorecard-append.sh is the only sanctioned writer of rows.jsonl — see
+# $KDIR/_scorecards/README.md for the full reader contract.
+"$SCRIPT_DIR/seed-scorecards-readme.sh" "$KNOWLEDGE_DIR/_scorecards"
 
 # Create manifest (format v2)
 TIMESTAMP=$(timestamp_iso)

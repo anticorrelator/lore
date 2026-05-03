@@ -27,9 +27,9 @@ from pathlib import Path
 DB_FILENAME = ".pk_search.db"
 SKIP_FILES = {"_inbox.md", "_index.md", "_meta.md", "_meta.json", "_index.json", "_self_test_results.md", "_manifest.json"}
 SKIP_DIRS = {"_archive", "__pycache__", ".git", "_meta", "_meta_bak", "_inbox"}
-CATEGORY_DIRS = {"abstractions", "architecture", "conventions", "gotchas", "principles", "workflows", "domains"}
+CATEGORY_DIRS = {"abstractions", "architecture", "conventions", "design-rationale", "gotchas", "principles", "workflows", "domains", "preferences"}
 # Category priority order for tiebreaking: higher index = higher priority
-CATEGORY_PRIORITY = ["domains", "architecture", "abstractions", "gotchas", "conventions", "workflows", "principles"]
+CATEGORY_PRIORITY = ["domains", "architecture", "design-rationale", "abstractions", "gotchas", "conventions", "workflows", "principles", "preferences"]
 CATEGORY_PRIORITY_MAP = {cat: i for i, cat in enumerate(CATEGORY_PRIORITY)}
 CATEGORY_TIEBREAK_MAX = 0.04  # max bonus for highest-priority category (within 0.05 tiebreak range)
 SNIPPET_MAX_CHARS = 500
@@ -39,6 +39,95 @@ KNOWLEDGE_BOOST = 2.0  # BM25 rank multiplier for knowledge entries in ORDER BY 
 SOURCE_TYPES = ("knowledge", "work", "plan", "thread", "source")
 SOURCE_FILE_EXTENSIONS = {".py", ".sh"}
 SOURCE_SKIP_DIRS = {"__pycache__", ".git", "node_modules", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", "dist", "build", ".egg-info"}
+
+# Scale registry path (same directory as this script)
+_SCALE_REGISTRY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scale-registry.json")
+
+# Valid status values; entries without a status field are treated as "current"
+VALID_STATUS_VALUES = {"current", "superseded", "historical"}
+DEFAULT_STATUS_FILTER = ("current",)
+
+
+def _load_scale_ordinals() -> dict[str, int]:
+    """Load scale id -> ordinal mapping from scale-registry.json.
+
+    Returns empty dict if the registry is missing or unreadable.
+    """
+    try:
+        with open(_SCALE_REGISTRY_PATH, "r", encoding="utf-8") as f:
+            registry = json.load(f)
+        return {entry["id"]: entry["ordinal"] for entry in registry.get("scales", [])}
+    except (OSError, json.JSONDecodeError, KeyError):
+        return {}
+
+
+def _parse_scale_set(value: str | None) -> set[str]:
+    """Parse a META scale field value into a set of scale labels.
+
+    Splits on `,`, lowercases, strips whitespace, returns a set.
+    None, "", and "unknown" all map to the empty set.
+    """
+    if value is None:
+        return set()
+    stripped = value.strip().lower()
+    if stripped == "" or stripped == "unknown":
+        return set()
+    return {part.strip() for part in stripped.split(",") if part.strip()}
+
+
+_CORRECTIONS_FIELD_RE = re.compile(r"\|\s*corrections:\s*(\[.*?\])\s*(?:-->|\|)", re.DOTALL)
+
+
+def _parse_correction_recency(abs_path: str) -> str | None:
+    """Return the most recent correction date from an entry's corrections[] META field, or None.
+
+    Reads the file at abs_path, extracts the corrections JSON array from the HTML META
+    block, and returns the maximum date string found. Returns None if the field is absent,
+    the file is unreadable, or the array is empty.
+    """
+    try:
+        text = open(abs_path, encoding="utf-8").read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = _CORRECTIONS_FIELD_RE.search(text)
+    if not m:
+        return None
+    try:
+        items = json.loads(m.group(1))
+        dates = [item["date"] for item in items if isinstance(item, dict) and item.get("date")]
+        return max(dates) if dates else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def render_trust_stamp(result: dict, knowledge_dir: str | None = None) -> str:
+    """Render a compact trust-stamp header line for a search result.
+
+    Format:
+        [trust: template=abc123 | status=current | learned=2026-04-14 | confidence=high | retention=null | correction_recency=2026-04-23]
+
+    Fields render as 'unknown' when absent (except retention which renders as 'null'
+    and correction_recency which renders as 'null' when never corrected).
+
+    When knowledge_dir is provided, the entry file is read to extract correction_recency
+    from the corrections[] META field (Phase 10 task-65). Omitted when knowledge_dir
+    is not provided for backwards-compatible callers.
+    """
+    tv = result.get("template_version") or "unknown"
+    status = result.get("entry_status") or "unknown"
+    learned = result.get("learned_date") or "unknown"
+    confidence = result.get("confidence") or "unknown"
+    base = f"[trust: template={tv} | status={status} | learned={learned} | confidence={confidence} | retention=null"
+    if knowledge_dir is not None:
+        rel_path = result.get("file_path", "")
+        if rel_path:
+            abs_path = os.path.join(os.path.abspath(knowledge_dir), rel_path)
+            recency = _parse_correction_recency(abs_path)
+            recency_val = recency if recency else "null"
+        else:
+            recency_val = "null"
+        return base + f" | correction_recency={recency_val}]"
+    return base + "]"
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +145,7 @@ from pk_resolve import Resolver, BACKLINK_RE as _BACKLINK_RE, resolve_read_path 
 class Indexer:
     """Builds and maintains the FTS5 index."""
 
-    SCHEMA_VERSION = 8  # v8: structural_importance column for backlink/concordance in-degree ranking
+    SCHEMA_VERSION = 10  # v10: template_version column for trust-stamp support
 
     def __init__(self, knowledge_dir: str, repo_root: str | None = None):
         self.knowledge_dir = os.path.abspath(knowledge_dir)
@@ -80,6 +169,9 @@ class Indexer:
                 confidence UNINDEXED,
                 learned_date UNINDEXED,
                 structural_importance UNINDEXED,
+                scale UNINDEXED,
+                entry_status UNINDEXED,
+                template_version UNINDEXED,
                 tokenize='porter unicode61'
             );
 
@@ -405,20 +497,23 @@ class Indexer:
 
         # Extract metadata for knowledge entries
         category = self._extract_category(file_path) if source_type == "knowledge" else None
-        metadata = {"learned": None, "confidence": None}
+        metadata = {"learned": None, "confidence": None, "scale": None, "entry_status": None, "template_version": None}
         if source_type == "knowledge":
             try:
                 raw_text = Path(file_path).read_text(encoding="utf-8")
                 meta = MarkdownParser._extract_metadata(raw_text)
                 metadata["learned"] = meta.get("learned")
                 metadata["confidence"] = meta.get("confidence")
+                metadata["scale"] = meta.get("scale")
+                metadata["entry_status"] = meta.get("entry_status")
+                metadata["template_version"] = meta.get("template_version")
             except (OSError, UnicodeDecodeError):
                 pass
 
         for entry in entries:
             conn.execute(
-                "INSERT INTO entries (file_path, heading, content, source_type, category, confidence, learned_date, structural_importance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (entry["file_path"], entry["heading"], entry["content"], source_type, category, metadata["confidence"], metadata["learned"], 0.0),
+                "INSERT INTO entries (file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (entry["file_path"], entry["heading"], entry["content"], source_type, category, metadata["confidence"], metadata["learned"], 0.0, metadata["scale"], metadata["entry_status"], metadata["template_version"]),
             )
 
         # Update file_meta
@@ -837,53 +932,51 @@ class Searcher:
             self.indexer.incremental_index()
 
     @classmethod
-    def _prepare_query(cls, query: str) -> str:
-        """Prepare a user query for FTS5.
+    def _tokenize_query(cls, query: str) -> list[str]:
+        """Whitespace-split + hyphen-expand + quote each surviving token."""
+        parts: list[str] = []
+        for token in query.split():
+            for st in token.split("-"):
+                if st:
+                    parts.append('"' + st.replace('"', '""') + '"')
+        return parts
 
-        If the query looks like plain words (no FTS5 operators), quote each
-        token individually so that column names like 'content' or 'heading'
-        are not misinterpreted as column filters.
+    @classmethod
+    def _prepare_query(cls, query: str) -> str:
+        """Prepare a user query for FTS5 with AND-joined tokens (explicit AND mode).
+
+        FTS5's default join is AND when tokens are space-separated, so we emit
+        tokens space-separated. Hyphenated terms are expanded because the
+        unicode61 tokenizer treats hyphens as separators.
         """
         query = query.strip()
         if not query:
             return query
         if cls._FTS5_OPERATORS.search(query):
             return query
-        # Plain words — split on whitespace, then expand hyphens, quote each.
-        # FTS5's porter unicode61 tokenizer treats hyphens as separators, so
-        # a quoted phrase like "file-mutation" would never match.
-        tokens = query.split()
-        parts: list[str] = []
-        for token in tokens:
-            sub_tokens = token.split("-")
-            for st in sub_tokens:
-                if st:  # skip empty from leading/trailing hyphens
-                    parts.append('"' + st.replace('"', '""') + '"')
-        return " ".join(parts)
+        return " ".join(cls._tokenize_query(query))
 
     @classmethod
     def _prepare_or_query(cls, query: str) -> str:
-        """Prepare a user query for FTS5 with OR-joined tokens.
-
-        Same hyphen-expansion and quoting as _prepare_query, but tokens are
-        joined with OR so any single matching term produces a result. Used for
-        fallback when an AND query returns zero results.
-        """
+        """Prepare a user query for FTS5 with OR-joined tokens (default mode)."""
         query = query.strip()
         if not query:
             return query
         if cls._FTS5_OPERATORS.search(query):
             return query
-        tokens = query.split()
-        parts: list[str] = []
-        for token in tokens:
-            sub_tokens = token.split("-")
-            for st in sub_tokens:
-                if st:  # skip empty from leading/trailing hyphens
-                    parts.append('"' + st.replace('"', '""') + '"')
-        return " OR ".join(parts)
+        return " OR ".join(cls._tokenize_query(query))
 
-    def _log_search(self, query: str, source_type: str | None, result_count: int, elapsed_ms: float, caller: str | None = None, or_fallback: bool = False) -> None:
+    def _log_search(
+        self,
+        query: str,
+        source_type: str | None,
+        result_count: int,
+        elapsed_ms: float,
+        caller: str | None = None,
+        scale_set: list[str] | None = None,
+        query_kind: str = "topic",
+        and_mode: bool = False,
+    ) -> None:
         """Append a JSONL record to _meta/retrieval-log.jsonl."""
         meta_dir = os.path.join(self.knowledge_dir, "_meta")
         log_path = os.path.join(meta_dir, "retrieval-log.jsonl")
@@ -894,11 +987,14 @@ class Searcher:
             "source_type": source_type,
             "result_count": result_count,
             "elapsed_ms": round(elapsed_ms, 1),
+            "query_kind": query_kind,
         }
         if caller:
             record["caller"] = caller
-        if or_fallback:
-            record["or_fallback"] = True
+        if and_mode:
+            record["and_mode"] = True
+        if scale_set is not None:
+            record["scale_declared"] = ",".join(scale_set)
         try:
             os.makedirs(meta_dir, exist_ok=True)
             with open(log_path, "a", encoding="utf-8") as f:
@@ -916,6 +1012,10 @@ class Searcher:
         exclude_category: str | list[str] | None = None,
         caller: str | None = None,
         include_archived: bool = False,
+        include_status: tuple[str, ...] | list[str] | None = None,
+        scale_set: list[str] | None = None,
+        and_mode: bool = False,
+        query_kind: str = "topic",
     ) -> list[dict]:
         """Search entries by query. Returns list of result dicts.
 
@@ -925,11 +1025,21 @@ class Searcher:
             exclude_category: Exclude entries in these categories (e.g. "domains"). None = no exclusion.
             caller: Identifier for the caller (e.g. "lead", "worker", "prefetch"). Logged to retrieval log.
             include_archived: If False (default), exclude entries from _archive/ paths.
+            scale_set: Set-membership scale filter. Entries pass when their parsed scale set
+                       intersects this set. None = no scale filter. Entries with
+                       category=preferences or scale=abstract bypass this filter.
+            include_status: Status values to include (e.g. ["current", "superseded"]). None = only "current".
+                            Entries without a status field are treated as "current".
+            and_mode: When True, multi-token queries are AND-joined (legacy behavior).
+                      When False (default), multi-token queries are OR-joined (D2 default).
+            query_kind: Logged to retrieval log ("topic" | "activity"). Reserved for v2 dispatch.
         """
         search_start = time.time()
         self._ensure_index()
 
-        prepared = self._prepare_query(query)
+        prepared = (
+            self._prepare_query(query) if and_mode else self._prepare_or_query(query)
+        )
 
         # Use WHERE clause for filtering (not FTS5 column syntax)
         # to avoid syntax errors with OR queries
@@ -957,12 +1067,26 @@ class Searcher:
         if not include_archived:
             extra_filters += " AND file_path NOT LIKE '%\\_archive/%' ESCAPE '\\'"
 
+        # Resolve scale_set into a set for set-membership filtering (post-retrieval).
+        # An entry passes if its parsed scale set intersects query_scale_set; entries
+        # with empty parsed sets fail when the filter is active.
+        query_scale_set: set[str] = (
+            {s.strip().lower() for s in scale_set if s and s.strip()} if scale_set else set()
+        )
+
+        # Resolve status filter: default is current-only; None include_status means same default
+        effective_statuses: set[str] | None = None
+        if include_status is not None:
+            effective_statuses = set(include_status)
+        else:
+            effective_statuses = {"current"}
+
         params: list = [prepared] + filter_params + [limit * 3]
 
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
 
-        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, rank"
+        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, rank"
         order_expr = f"rank * CASE WHEN source_type = 'knowledge' THEN {KNOWLEDGE_BOOST} ELSE 1.0 END"
 
         try:
@@ -997,31 +1121,6 @@ class Searcher:
             else:
                 raise
 
-        # OR-fallback: if AND query returned nothing and query has 2+ tokens,
-        # retry with OR-joined tokens so partial matches surface.
-        or_fallback = False
-        if not rows and len(query.split()) >= 2:
-            or_prepared = self._prepare_or_query(query)
-            or_params: list = [or_prepared] + filter_params + [limit * 3]
-            conn2 = sqlite3.connect(self.db_path)
-            conn2.row_factory = sqlite3.Row
-            try:
-                rows = conn2.execute(
-                    f"""
-                    SELECT {select_cols}
-                    FROM entries
-                    WHERE entries MATCH ?{extra_filters}
-                    ORDER BY {order_expr}
-                    LIMIT ?
-                    """,
-                    or_params,
-                ).fetchall()
-                or_fallback = True
-            except sqlite3.OperationalError:
-                rows = []
-            finally:
-                conn2.close()
-
         results = []
         for row in rows:
             score = row["rank"]
@@ -1029,6 +1128,31 @@ class Searcher:
             # weak matches (scores closer to 0 than the threshold).
             if threshold < 0 and score > threshold:
                 continue
+
+            entry_scale = row["scale"]  # may be None or "unknown"
+            entry_status_val = row["entry_status"]  # may be None (treat as "current")
+            entry_category = row["category"]  # may be None
+
+            # Status filter: entries without a status field are treated as "current"
+            effective_entry_status = entry_status_val if entry_status_val else "current"
+            if effective_statuses and effective_entry_status not in effective_statuses:
+                continue
+
+            # Scale filter: set-membership matching with bypass for horizontal entries.
+            # An entry bypasses the scale filter when category=preferences (horizontal
+            # commitment surfaces at any declared scale) or when scale=abstract (the
+            # author's explicit declaration of universality). Otherwise, the entry's
+            # parsed scale set must intersect query_scale_set; entries with empty
+            # parsed sets (None / "" / "unknown") fail.
+            if query_scale_set:
+                entry_scale_set = _parse_scale_set(entry_scale)
+                bypass = (entry_category == "preferences") or ("abstract" in entry_scale_set)
+                if not bypass:
+                    if not entry_scale_set:
+                        continue
+                    if not (entry_scale_set & query_scale_set):
+                        continue
+
             content = row["content"]
             snippet = content[:SNIPPET_MAX_CHARS]
             if len(content) > SNIPPET_MAX_CHARS:
@@ -1049,11 +1173,12 @@ class Searcher:
                 "confidence": row["confidence"],
                 "learned_date": row["learned_date"],
                 "structural_importance": row["structural_importance"] or 0.0,
+                "scale": entry_scale,
+                "entry_status": effective_entry_status,
+                "template_version": row["template_version"],
                 "score": round(score, 4),
                 "snippet": snippet,
             }
-            if or_fallback:
-                result["or_fallback"] = True
             results.append(result)
 
             if len(results) >= limit:
@@ -1062,7 +1187,165 @@ class Searcher:
         conn.close()
 
         elapsed_ms = (time.time() - search_start) * 1000
-        self._log_search(query, source_type, len(results), elapsed_ms, caller=caller, or_fallback=or_fallback)
+        self._log_search(
+            query,
+            source_type,
+            len(results),
+            elapsed_ms,
+            caller=caller,
+            scale_set=scale_set,
+            query_kind=query_kind,
+            and_mode=and_mode,
+        )
+
+        return results
+
+    def search_preferences(
+        self,
+        query: str,
+        caller: str | None = None,
+        include_status: tuple[str, ...] | list[str] | None = None,
+    ) -> list[dict]:
+        """Side-channel BM25 search restricted to category=preferences.
+
+        Forward guidance and descriptive knowledge need different retrieval
+        semantics: this method runs an isolated BM25 query over preferences
+        with a fixed-shape filter chain that bypasses the main pool's scale
+        and caller filters. Wrappers compose the side-channel with the main
+        pool at render time.
+
+        Filters applied (D6):
+            - category fixed to 'preferences'
+            - basename == 'README.md' is dropped (D3)
+            - score floor of -0.5 (D2)
+            - Searcher.include_status (default: current only)
+
+        Filters NOT applied:
+            - scale_set
+            - exclude_category
+            - source_type
+            - include_archived (preferences live outside _archive/)
+
+        Args:
+            query: User query string (FTS5 OR-mode by default).
+            caller: Identifier logged to retrieval log (e.g. "lead", "worker").
+            include_status: Status values to include. None = current only.
+
+        Returns:
+            Up to 3 result dicts in the same shape as Searcher.search().
+            Empty list when no FTS5 matches survive the filters.
+        """
+        SIDE_CHANNEL_LIMIT = 3
+        SIDE_CHANNEL_THRESHOLD = -0.5
+        search_start = time.time()
+        self._ensure_index()
+
+        prepared = self._prepare_or_query(query)
+
+        # Resolve status filter: default is current-only
+        if include_status is not None:
+            effective_statuses = set(include_status)
+        else:
+            effective_statuses = {"current"}
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+
+        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, rank"
+
+        # Pull a generous batch so README skip + threshold drop + status filter
+        # still leaves SIDE_CHANNEL_LIMIT survivors when matches exist.
+        fetch_limit = SIDE_CHANNEL_LIMIT * 5
+        params: list = [prepared, "preferences", fetch_limit]
+
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT {select_cols}
+                FROM entries
+                WHERE entries MATCH ? AND category = ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        except sqlite3.OperationalError as e:
+            conn.close()
+            if "fts5: syntax error" in str(e).lower():
+                escaped = '"' + query.replace('"', '""') + '"'
+                conn = sqlite3.connect(self.db_path)
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    f"""
+                    SELECT {select_cols}
+                    FROM entries
+                    WHERE entries MATCH ? AND category = ?
+                    ORDER BY rank
+                    LIMIT ?
+                    """,
+                    [escaped, "preferences", fetch_limit],
+                ).fetchall()
+            else:
+                raise
+
+        results: list[dict] = []
+        for row in rows:
+            score = row["rank"]
+            # D2: absolute floor — drop weak matches (closer to 0 than -0.5)
+            if score > SIDE_CHANNEL_THRESHOLD:
+                continue
+
+            # D3: structural README skip
+            if os.path.basename(row["file_path"]) == "README.md":
+                continue
+
+            # Status filter (D6: applied inside the primitive)
+            entry_status_val = row["entry_status"]
+            effective_entry_status = entry_status_val if entry_status_val else "current"
+            if effective_statuses and effective_entry_status not in effective_statuses:
+                continue
+
+            content = row["content"]
+            snippet = content[:SNIPPET_MAX_CHARS]
+            if len(content) > SNIPPET_MAX_CHARS:
+                snippet += "..."
+
+            abs_path = row["file_path"]
+            try:
+                rel_path = os.path.relpath(abs_path, self.knowledge_dir)
+            except ValueError:
+                rel_path = abs_path
+
+            results.append({
+                "heading": row["heading"],
+                "file_path": rel_path,
+                "source_type": row["source_type"],
+                "category": row["category"],
+                "confidence": row["confidence"],
+                "learned_date": row["learned_date"],
+                "structural_importance": row["structural_importance"] or 0.0,
+                "scale": row["scale"],
+                "entry_status": effective_entry_status,
+                "template_version": row["template_version"],
+                "score": round(score, 4),
+                "snippet": snippet,
+            })
+
+            if len(results) >= SIDE_CHANNEL_LIMIT:
+                break
+
+        conn.close()
+
+        elapsed_ms = (time.time() - search_start) * 1000
+        self._log_search(
+            query,
+            None,
+            len(results),
+            elapsed_ms,
+            caller=caller,
+            scale_set=None,
+            query_kind="preference_side_channel",
+        )
 
         return results
 
@@ -1080,6 +1363,8 @@ class Searcher:
         recency_weight: float = 0.25,
         tfidf_weight: float = 0.15,
         importance_weight: float = 0.1,
+        include_status: tuple[str, ...] | list[str] | None = None,
+        scale_set: list[str] | None = None,
     ) -> list[dict]:
         """Search with composite scoring: BM25 + recency + TF-IDF similarity + structural importance.
 
@@ -1101,6 +1386,8 @@ class Searcher:
             exclude_category=exclude_category,
             caller=caller,
             include_archived=include_archived,
+            include_status=include_status,
+            scale_set=scale_set,
         )
 
         # Build query TF-IDF vector using precomputed corpus stats
@@ -1227,6 +1514,8 @@ class Searcher:
         recency_weight: float = 0.25,
         tfidf_weight: float = 0.15,
         importance_weight: float = 0.1,
+        include_status: tuple[str, ...] | list[str] | None = None,
+        scale_set: list[str] | None = None,
     ) -> dict:
         """Search with composite scoring and budget-aware result partitioning.
 
@@ -1253,6 +1542,8 @@ class Searcher:
             recency_weight=recency_weight,
             tfidf_weight=tfidf_weight,
             importance_weight=importance_weight,
+            include_status=include_status,
+            scale_set=scale_set,
         )
 
         full: list[dict] = []

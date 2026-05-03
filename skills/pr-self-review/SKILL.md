@@ -9,6 +9,18 @@ argument_description: "[PR_number_or_URL] [--skip-pre-scan] [focus context] — 
 
 Author-calibrated self-review combining structured lens analysis with grounding evaluation. A parallel lens team (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) runs a pre-scan, then findings are evaluated for grounding quality and persisted as a followup sidecar (`lens-findings.json`) for interactive TUI triage.
 
+## Resolve Template Version
+
+Compute the content-hash of the `/pr-self-review` skill template itself. This is the `template_version` that accompanies the `create-followup.sh` call in Step 4 and every `lore capture` call in Step 5:
+
+```bash
+SELF_REVIEW_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/skills/pr-self-review/SKILL.md)
+```
+
+Per-lens methodology files (`claude-md/review-protocol/*-methodology.md`) are embedded verbatim into each lens agent's prompt — they are content-equivalent to the skill template from the scorecard's perspective, so the skill's hash is the canonical `template_version` for this skill's outputs. Individual lens findings carry their own `producer_role` of `lens-<name>` but inherit the skill's `template_version`.
+
+If the `template-version.sh` call fails, fall through with an empty string — downstream scripts accept the omitted flag.
+
 Since this is your own work, locally-scoped action items can be implement-ready. Findings with cross-boundary implications (especially from Blast Radius) get verification directives instead.
 
 This skill does not modify source code. Interactive finding review happens in the TUI Triage tab, not in this skill's dialog.
@@ -421,8 +433,13 @@ bash ~/.lore/scripts/create-followup.sh \
   --pr <N> \
   --owner <owner> \
   --repo <repo> \
-  --head-sha <headRefOid>
+  --head-sha <headRefOid> \
+  --producer-role "lens-<lens-name>" \
+  --protocol-slot "Observations" \
+  --template-version "$SELF_REVIEW_TEMPLATE_VERSION"
 ```
+
+Per-finding provenance: `create-followup.sh` enriches each finding in `lens-findings.json` with any CLI-provided provenance field the finding does not already carry. If individual lens findings already carry their own `producer_role` (e.g., `lens-security`, `lens-correctness`), those are preserved; CLI defaults fill only unattributed findings. Leaving `--producer-role` as a generic `lens-<lens-name>` sentinel at the wrapper level is fine when per-finding attribution is already present.
 
 ### Present summary
 
@@ -453,7 +470,7 @@ Omit zero counts.
 **Gate:** Do not execute this step until the followup has been created (`create-followup.sh` returned successfully).
 
 ```
-/remember Self-review of PR #<N> (lens scan + grounding evaluation) — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered or clarified (why the architecture is this way, what constraints drove decisions), convention drift patterns found by lenses, cross-boundary invariants identified (especially from Blast Radius). Use confidence: medium. Skip: obvious fixes, style issues, findings specific to this PR that don't generalize.
+/remember Self-review of PR #<N> (lens scan + grounding evaluation) — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered or clarified (why the architecture is this way, what constraints drove decisions), convention drift patterns found by lenses, cross-boundary invariants identified (especially from Blast Radius). Use confidence: medium. Skip: obvious fixes, style issues, findings specific to this PR that don't generalize. For every `lore capture` call, pass `--producer-role pr-self-review --protocol-slot Synthesis --work-item <slug> --template-version $SELF_REVIEW_TEMPLATE_VERSION` (when a work item matches the PR).
 ```
 
 This step is automatic — do not ask whether to run it.

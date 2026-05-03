@@ -30,8 +30,10 @@ FILES_FULL=0
 FILES_SUMMARY=0
 FILES_SKIPPED=0
 
-# Category priority order
-PRIORITY_CATEGORIES=(principles workflows conventions gotchas abstractions architecture team)
+# Rubric categories: always loaded at SessionStart
+RUBRIC_CATEGORIES=(principles workflows conventions team preferences)
+# Scale-bearing categories: loaded only when a session scope declaration is present
+SCALE_BEARING_CATEGORIES=(architecture abstractions gotchas domains)
 
 # --- Extract context signal from git branch + matched work item ---
 # Used to bias which knowledge sections load first (when signal exists)
@@ -41,6 +43,13 @@ CONTEXT_SIGNAL=$(echo "$_SIGNAL_OUTPUT" | head -1)
 CONTEXT_BACKLINKS=$(echo "$_SIGNAL_OUTPUT" | sed -n '/^---BACKLINKS---$/,/^---SIGNAL_SOURCES---$/{ /^---/d; p; }')
 CONTEXT_SIGNAL_SOURCES=$(echo "$_SIGNAL_OUTPUT" | sed '1,/^---SIGNAL_SOURCES---$/d')
 CURRENT_BRANCH=$(get_git_branch)
+
+# Compose active category list: rubric always; scale-bearing only when work-item scope is present
+if [[ -n "$CONTEXT_SIGNAL" ]]; then
+  ACTIVE_CATEGORIES=("${RUBRIC_CATEGORIES[@]}" "${SCALE_BEARING_CATEGORIES[@]}")
+else
+  ACTIVE_CATEGORIES=("${RUBRIC_CATEGORIES[@]}")
+fi
 
 # --- Job A: Detect inbox entries ---
 INBOX_COUNT=0
@@ -56,8 +65,21 @@ if [[ "$INBOX_COUNT" -gt 0 ]]; then
   echo ""
 fi
 
+# --- Pending captures signal ---
+PENDING_CAPTURES_DIR="$KNOWLEDGE_DIR/_pending_captures"
+if [[ -d "$PENDING_CAPTURES_DIR" ]]; then
+  PENDING_COUNT=$(find "$PENDING_CAPTURES_DIR" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
+  if [[ "${PENDING_COUNT:-0}" -gt 0 ]]; then
+    echo "[capture] $PENDING_COUNT pending candidates — process via /remember first-turn"
+    echo ""
+  fi
+fi
+
 # --- Job B: Load knowledge ---
 echo "=== Project Knowledge ==="
+echo ""
+echo "IMPORTANT: Run \`lore search \"<topic>\"\` BEFORE Grep/Glob/Explore. The knowledge store already documents most conventions, architecture, and past decisions. Raw exploration duplicates work that's already captured."
+echo "Scale declaration required for \`lore search\` and \`lore prefetch\` — use \`--scale-set <bucket>\`. Rubric in \`/spec\`, \`/implement\`, or \`/memory\`."
 echo ""
 
 # --- Dynamic index: build full and compact versions ---
@@ -66,7 +88,7 @@ echo ""
   INDEX_FULL=""
   INDEX_COMPACT=""
 
-  for category in "${PRIORITY_CATEGORIES[@]}"; do
+  for category in "${ACTIVE_CATEGORIES[@]}"; do
     CAT_DIR="$KNOWLEDGE_DIR/$category"
     [[ -d "$CAT_DIR" ]] || continue
 
@@ -318,7 +340,7 @@ for e in data.get('titles_only', []):
   fi
   # Check that at least one category directory exists
   HAS_CATEGORY=0
-  for chk_cat in "${PRIORITY_CATEGORIES[@]}"; do
+  for chk_cat in "${ACTIVE_CATEGORIES[@]}"; do
     if [[ -d "$KNOWLEDGE_DIR/$chk_cat" ]]; then
       HAS_CATEGORY=1
       break
@@ -340,7 +362,7 @@ for e in data.get('titles_only', []):
   NOW=$(date +%s)
   NINETY_DAYS=$((90 * 86400))
 
-  for category in "${PRIORITY_CATEGORIES[@]}"; do
+  for category in "${ACTIVE_CATEGORIES[@]}"; do
     CAT_DIR="$KNOWLEDGE_DIR/$category"
     [[ -d "$CAT_DIR" ]] || continue
 
@@ -386,7 +408,7 @@ for e in data.get('titles_only', []):
   # --- Stats (v2): count entry files per category ---
   TOTAL_ENTRIES=0
   TOTAL_CATEGORIES=0
-  for category in "${PRIORITY_CATEGORIES[@]}"; do
+  for category in "${ACTIVE_CATEGORIES[@]}"; do
     CAT_DIR="$KNOWLEDGE_DIR/$category"
     [[ -d "$CAT_DIR" ]] || continue
     COUNT=$(find "$CAT_DIR" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
@@ -408,8 +430,6 @@ echo "[Budget] ${CHARS_USED}/${BUDGET} chars | ${FILES_FULL} full, ${FILES_SUMMA
 if [[ $TOTAL_ENTRIES -gt 0 ]]; then
   echo "[knowledge] ${TOTAL_ENTRIES} entries across ${TOTAL_CATEGORIES} categories"
 fi
-echo ""
-echo "IMPORTANT: Run \`lore search \"<topic>\"\` BEFORE Grep/Glob/Explore. The knowledge store already documents most conventions, architecture, and past decisions. Raw exploration duplicates work that's already captured."
 echo ""
 echo "=== End Project Knowledge ==="
 
@@ -440,7 +460,13 @@ print(json.dumps(sources))
 " 2>/dev/null) || SIGNAL_SOURCES_JSON="[]"
 fi
 
-printf '{"timestamp":"%s","format_version":%d,"budget_used":%d,"budget_total":%d,"files_full":%d,"files_summary":%d,"files_skipped":%d,"context_signal":"%s","context_sections":%d,"direct_resolved":%d,"relevance_search":%d,"signal_sources":%s,"git_branch":"%s","loaded_paths":%s}\n' \
+# scale_declared: true when a work-item scope was detected (scale-bearing categories loaded)
+SCALE_DECLARED="false"
+if [[ -n "$CONTEXT_SIGNAL" ]]; then
+  SCALE_DECLARED="true"
+fi
+
+printf '{"timestamp":"%s","format_version":%d,"budget_used":%d,"budget_total":%d,"files_full":%d,"files_summary":%d,"files_skipped":%d,"context_signal":"%s","context_sections":%d,"direct_resolved":%d,"relevance_search":%d,"signal_sources":%s,"git_branch":"%s","loaded_paths":%s,"scale_declared":%s}\n' \
   "$LOG_TIMESTAMP" \
   4 \
   "$CHARS_USED" \
@@ -455,4 +481,5 @@ printf '{"timestamp":"%s","format_version":%d,"budget_used":%d,"budget_total":%d
   "$SIGNAL_SOURCES_JSON" \
   "$(echo "$CURRENT_BRANCH" | tr '"\\' '__')" \
   "$LOADED_PATHS_JSON" \
+  "$SCALE_DECLARED" \
   >> "$META_DIR/retrieval-log.jsonl" 2>/dev/null || true

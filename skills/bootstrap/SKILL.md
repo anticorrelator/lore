@@ -16,7 +16,7 @@ lore resolve
 ```
 Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
-## Step 1: Scope
+### Step 1: Scope
 
 Run the scoping script to identify domains for exploration.
 
@@ -38,7 +38,7 @@ Run the scoping script to identify domains for exploration.
    ```
 4. Allow the user to adjust: add new paths, remove irrelevant ones (e.g., `vendor/`, `dist/`), or merge related directories into a single domain. Wait for confirmation before proceeding.
 
-## Step 2: Team Setup
+### Step 2: Team Setup
 
 Create the agent team and one task per domain.
 
@@ -93,13 +93,13 @@ Create the agent team and one task per domain.
 
 5. **Set up phase dependencies:** Domains are independent — no cross-domain blocking. All tasks can run in parallel.
 
-## Step 3: Explorer Prompts
+### Step 3: Explorer Prompts
 
 Spawn Explore agents to investigate each domain in parallel.
 
 1. **Pre-fetch knowledge per domain** — before constructing prompts:
    ```bash
-   PRIOR_KNOWLEDGE=$(lore prefetch "<domain path>" --format prompt --limit 5)
+   PRIOR_KNOWLEDGE=$(lore prefetch "<domain path>" --format prompt --limit 5 --scale-set=<bucket>)
    ```
 
 2. **Get directory tree for each domain:**
@@ -165,7 +165,7 @@ Spawn Explore agents to investigate each domain in parallel.
 
 4. If more domains than agents, agents pick up additional tasks after completing their first (self-service model).
 
-## Step 4: Collection
+### Step 4: Collection
 
 Persist findings as they arrive for synthesis.
 
@@ -186,7 +186,7 @@ Persist findings as they arrive for synthesis.
    - Run `TeamDelete` to clean up the team
    - Proceed to Step 5
 
-## Step 5: Synthesis
+### Step 5: Synthesis
 
 Group findings by theme, flag contradictions, and draft knowledge entries.
 
@@ -232,7 +232,7 @@ Group findings by theme, flag contradictions, and draft knowledge entries.
 
 5. **Deduplicate:** If multiple agents reported the same pattern, merge into a single entry with the best description. Do not create duplicate entries.
 
-## Step 6: Filing
+### Step 6: Filing
 
 Present entries to the user, then file approved ones via a single batch-capture call.
 
@@ -285,7 +285,7 @@ Present entries to the user, then file approved ones via a single batch-capture 
    lore heal
    ```
 
-## Step 7: Spot-Check
+### Step 7: Spot-Check
 
 Verify a random sample of filed entries against actual code.
 
@@ -301,7 +301,7 @@ Verify a random sample of filed entries against actual code.
    ```
 5. If any entry is inaccurate, offer to correct or remove it. This step is advisory — it does not block completion.
 
-## Step 8: Cleanup
+### Step 8: Cleanup
 
 Wrap up the bootstrap session.
 

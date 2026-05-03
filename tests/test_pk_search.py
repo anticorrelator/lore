@@ -2473,20 +2473,19 @@ class TestCombinedBoostAndExclusion:
 
 
 # ---------------------------------------------------------------------------
-# OR-Fallback Tests
+# OR-Default Tests (D2: OR-default ranking; AND available via and_mode=True)
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def or_fallback_dir(tmp_path):
+def or_default_dir(tmp_path):
     """Knowledge directory where 6 unique terms exist in separate entries,
     so no single entry contains all 6 terms simultaneously."""
-    kd = tmp_path / "or_fallback_knowledge"
+    kd = tmp_path / "or_default_knowledge"
     kd.mkdir()
 
     arch_dir = kd / "architecture"
     arch_dir.mkdir()
 
-    # Entry 1: contains "alpha" and "beta"
     (arch_dir / "alpha-entry.md").write_text(
         "# Alpha Entry\n"
         "This entry discusses alpha and beta concepts in system design.\n"
@@ -2494,7 +2493,6 @@ def or_fallback_dir(tmp_path):
         encoding="utf-8",
     )
 
-    # Entry 2: contains "gamma" and "delta"
     (arch_dir / "gamma-entry.md").write_text(
         "# Gamma Entry\n"
         "This entry covers gamma and delta behavior in pipelines.\n"
@@ -2502,7 +2500,6 @@ def or_fallback_dir(tmp_path):
         encoding="utf-8",
     )
 
-    # Entry 3: contains "epsilon" and "zeta"
     (arch_dir / "epsilon-entry.md").write_text(
         "# Epsilon Entry\n"
         "This entry explains epsilon and zeta patterns.\n"
@@ -2513,51 +2510,433 @@ def or_fallback_dir(tmp_path):
     return kd
 
 
-class TestOrFallback:
-    def test_six_word_query_and_returns_zero_or_returns_results(self, or_fallback_dir):
-        """6-word query where individual terms exist in separate entries:
-        AND returns zero, OR fallback returns ranked results."""
-        searcher = Searcher(str(or_fallback_dir))
-        # Each pair of terms exists in one entry, but no entry has all 6
+class TestOrDefault:
+    def test_six_word_query_or_default_returns_results(self, or_default_dir):
+        """6-word query: OR default surfaces all three entries (each matches at least one token)."""
+        searcher = Searcher(str(or_default_dir))
         results = searcher.search("alpha beta gamma delta epsilon zeta")
-        assert len(results) > 0, "OR fallback should return results when AND returns zero"
-        for r in results:
-            assert r.get("or_fallback") is True, (
-                f"Each result should carry or_fallback=True, got: {r}"
-            )
-
-    def test_two_word_query_and_succeeds_no_fallback(self, or_fallback_dir):
-        """2-word query where both terms co-exist in one entry:
-        AND succeeds, OR fallback does NOT fire."""
-        searcher = Searcher(str(or_fallback_dir))
-        # "alpha" and "beta" both exist in alpha-entry.md
-        results = searcher.search("alpha beta")
-        assert len(results) > 0, "AND query should return results when both terms co-exist"
+        assert len(results) > 0, "OR-default should return results when individual terms match"
         for r in results:
             assert "or_fallback" not in r, (
-                f"or_fallback should not be set when AND query succeeds, got: {r}"
+                f"or_fallback annotation must not be set in OR-default mode, got: {r}"
             )
 
-    def test_single_word_query_no_fallback(self, or_fallback_dir):
-        """Single-word query: no fallback triggered, results returned normally."""
-        searcher = Searcher(str(or_fallback_dir))
+    def test_six_word_query_and_mode_returns_zero(self, or_default_dir):
+        """Same 6-word query under and_mode=True returns zero (no entry has all 6 terms)."""
+        searcher = Searcher(str(or_default_dir))
+        results = searcher.search("alpha beta gamma delta epsilon zeta", and_mode=True)
+        assert len(results) == 0, "AND mode should return zero when no entry contains all terms"
+
+    def test_two_word_query_or_default_returns_results(self, or_default_dir):
+        """2-word query under OR-default returns the matching entry; no annotation."""
+        searcher = Searcher(str(or_default_dir))
+        results = searcher.search("alpha beta")
+        assert len(results) > 0, "OR-default should return results"
+        for r in results:
+            assert "or_fallback" not in r, (
+                f"or_fallback annotation must not be set in OR-default mode, got: {r}"
+            )
+
+    def test_single_word_query_returns_results(self, or_default_dir):
+        searcher = Searcher(str(or_default_dir))
         results = searcher.search("gamma")
         assert len(results) > 0, "Single-word query should return results"
         for r in results:
             assert "or_fallback" not in r, (
-                f"or_fallback should not be set for single-word query, got: {r}"
+                f"or_fallback must not be set for single-word query, got: {r}"
             )
 
-    def test_or_fallback_field_in_retrieval_log(self, or_fallback_dir):
-        """When OR fallback fires, or_fallback=True should appear in retrieval log."""
-        searcher = Searcher(str(or_fallback_dir))
-        # Trigger OR fallback with a 6-word query that can't be satisfied by AND
+    def test_or_fallback_field_absent_in_retrieval_log(self, or_default_dir):
+        """OR is the named primary path; no or_fallback annotation appears in the log."""
+        searcher = Searcher(str(or_default_dir))
         searcher.search("alpha beta gamma delta epsilon zeta")
 
-        log_path = os.path.join(str(or_fallback_dir), "_meta", "retrieval-log.jsonl")
+        log_path = os.path.join(str(or_default_dir), "_meta", "retrieval-log.jsonl")
         assert os.path.exists(log_path), "Retrieval log should exist after search"
         with open(log_path, encoding="utf-8") as f:
             record = json.loads(f.readline())
-        assert record.get("or_fallback") is True, (
-            f"Log record should have or_fallback=True when fallback fires, got: {record}"
+        assert "or_fallback" not in record, (
+            f"or_fallback must be absent under OR-default; log: {record}"
+        )
+        assert record.get("query_kind") == "topic", (
+            f"query_kind defaults to 'topic' on plain search, got: {record}"
+        )
+
+    def test_and_mode_records_and_mode_flag_in_log(self, or_default_dir):
+        searcher = Searcher(str(or_default_dir))
+        searcher.search("alpha beta", and_mode=True)
+        log_path = os.path.join(str(or_default_dir), "_meta", "retrieval-log.jsonl")
+        with open(log_path, encoding="utf-8") as f:
+            record = json.loads(f.readline())
+        assert record.get("and_mode") is True, (
+            f"and_mode=True must be reflected in the retrieval log, got: {record}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# D4: Scale-bypass tests (category=preferences and scale=abstract)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def scale_bypass_dir(tmp_path):
+    """Fixture: one entry per scale value plus one preferences entry,
+    all sharing a unique token for query targeting."""
+    kd = tmp_path / "scale_bypass_knowledge"
+    kd.mkdir()
+
+    arch_dir = kd / "architecture"
+    arch_dir.mkdir()
+    (arch_dir / "subsystem-entry.md").write_text(
+        "# Subsystem Aurora\n"
+        "Entry about aurora at the subsystem altitude.\n"
+        "<!-- learned: 2025-01-01 | confidence: high | scale: subsystem -->\n",
+        encoding="utf-8",
+    )
+    (arch_dir / "implementation-entry.md").write_text(
+        "# Implementation Aurora\n"
+        "Aurora details at implementation altitude.\n"
+        "<!-- learned: 2025-01-02 | confidence: high | scale: implementation -->\n",
+        encoding="utf-8",
+    )
+    (arch_dir / "abstract-entry.md").write_text(
+        "# Abstract Aurora\n"
+        "Universal aurora principle declared abstract by author.\n"
+        "<!-- learned: 2025-01-03 | confidence: high | scale: abstract -->\n",
+        encoding="utf-8",
+    )
+
+    pref_dir = kd / "preferences"
+    pref_dir.mkdir()
+    (pref_dir / "aurora-preference.md").write_text(
+        "# Aurora Preference\n"
+        "Author preference about aurora; declared scale=subsystem.\n"
+        "<!-- learned: 2025-01-04 | confidence: high | scale: subsystem -->\n",
+        encoding="utf-8",
+    )
+
+    return kd
+
+
+class TestScaleBypass:
+    def test_preferences_bypass_scale_filter(self, scale_bypass_dir):
+        """A preferences entry surfaces under any scale-set, even when its declared
+        scale (subsystem) does not intersect the query's scale-set (implementation)."""
+        searcher = Searcher(str(scale_bypass_dir))
+        results = searcher.search("aurora", scale_set=["implementation"])
+        categories = {r.get("category") for r in results}
+        assert "preferences" in categories, (
+            f"preferences entry must bypass scale filter; got categories={categories}"
+        )
+
+    def test_abstract_scale_bypass(self, scale_bypass_dir):
+        """A scale=abstract entry surfaces under any scale-set."""
+        searcher = Searcher(str(scale_bypass_dir))
+        results = searcher.search("aurora", scale_set=["implementation"])
+        scales = [r.get("scale") for r in results]
+        assert "abstract" in scales, (
+            f"scale=abstract entry must bypass scale filter; got scales={scales}"
+        )
+
+    def test_non_bypass_entries_filtered(self, scale_bypass_dir):
+        """A scale=subsystem architecture entry must NOT surface when the query
+        scale-set is implementation only — only the bypass entries do."""
+        searcher = Searcher(str(scale_bypass_dir))
+        results = searcher.search("aurora", scale_set=["implementation"])
+        # The "Subsystem Aurora" entry has scale=subsystem, category=architecture —
+        # neither bypass condition; it must be filtered out.
+        headings = {r.get("heading") for r in results}
+        assert "Subsystem Aurora" not in headings, (
+            f"non-bypass subsystem entry must be filtered; got headings={headings}"
+        )
+        # The "Implementation Aurora" entry should be present (matches scale-set).
+        assert "Implementation Aurora" in headings, (
+            f"matching scale entry must surface; got headings={headings}"
+        )
+
+    def test_bypass_only_when_scale_set_active(self, scale_bypass_dir):
+        """When scale_set is None (no filter active), all 4 entries surface."""
+        searcher = Searcher(str(scale_bypass_dir))
+        results = searcher.search("aurora")
+        assert len(results) == 4, (
+            f"with no scale filter, all 4 entries surface; got {len(results)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Searcher.search_preferences() — preferences side-channel
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def preferences_dir(tmp_path):
+    """Knowledge directory with a preferences/ category, README.md noise file,
+    a status=superseded entry, and a non-preference architecture entry sharing
+    the query token. Padded with corpus filler so BM25 scoring is realistic
+    (real-store thresholds expect scores ≤ -0.5 for true matches)."""
+    kd = tmp_path / "preferences_knowledge"
+    kd.mkdir()
+
+    pref_dir = kd / "preferences"
+    pref_dir.mkdir()
+
+    # Strong-match preference (load-bearing real entry).
+    # Repetition of the matching tokens drives BM25 below the -0.5 floor
+    # in this small fixture; the real store achieves the same naturally.
+    (pref_dir / "in-pr-review-lead-with-impact.md").write_text(
+        "# In /pr-review, Lead With Impact\n"
+        "In /pr-review, lead with impact not mechanism. Reviewers should "
+        "surface the user-visible effect first, then explain why.\n"
+        "Reviewers running pr-review prioritize impact over mechanism. "
+        "When reviewing pr changes, surface impact first; pr-review impact "
+        "matters more than pr-review mechanism. The pr review impact rule "
+        "applies in /pr-review.\n"
+        "<!-- learned: 2026-04-22 | confidence: high | scale: subsystem -->\n",
+        encoding="utf-8",
+    )
+
+    # README.md inside preferences/ — must be skipped at the side-channel layer
+    (pref_dir / "README.md").write_text(
+        "# preferences/\n"
+        "Catalogues working-style guidance: pr-review, implement, "
+        "spec, and other skills. Lists every preference entry and "
+        "describes the routing rule for impact and mechanism.\n",
+        encoding="utf-8",
+    )
+
+    # Superseded preference — must be filtered by default include_status
+    (pref_dir / "in-pr-review-superseded.md").write_text(
+        "# In /pr-review, Old Approach (superseded)\n"
+        "Older guidance about pr-review impact assessment in /pr-review. "
+        "Surface impact first when running pr review on changes; impact "
+        "wins over mechanism in pr-review impact analysis.\n"
+        "<!-- learned: 2025-09-01 | confidence: high | scale: subsystem | status: superseded -->\n",
+        encoding="utf-8",
+    )
+
+    # Architecture entry sharing the query token but NOT in preferences/
+    arch_dir = kd / "architecture"
+    arch_dir.mkdir()
+    (arch_dir / "review-pipeline.md").write_text(
+        "# PR Review Pipeline\n"
+        "The review pipeline ingests PRs, runs lenses, and emits findings.\n"
+        "<!-- learned: 2025-08-01 | confidence: high | scale: architecture -->\n",
+        encoding="utf-8",
+    )
+
+    # Corpus filler — gives BM25 enough document-frequency contrast to
+    # produce meaningfully negative scores on the real matches.
+    conv_dir = kd / "conventions"
+    conv_dir.mkdir()
+    for i in range(20):
+        (conv_dir / f"convention-{i}.md").write_text(
+            f"# Convention {i}\n"
+            f"This convention discusses unrelated topic alpha-{i}, beta-{i}, "
+            f"gamma-{i}. The codebase uses convention {i} for routine task "
+            f"workflow #{i}, applying the standard pattern across files.\n"
+            f"<!-- learned: 2025-01-{(i % 28) + 1:02d} | confidence: medium | scale: subsystem -->\n",
+            encoding="utf-8",
+        )
+
+    return kd
+
+
+@pytest.fixture
+def empty_preferences_dir(tmp_path):
+    """Knowledge directory with a preferences/ category but no entries
+    matching the test query, plus a README in preferences/."""
+    kd = tmp_path / "empty_preferences_knowledge"
+    kd.mkdir()
+
+    pref_dir = kd / "preferences"
+    pref_dir.mkdir()
+
+    # README only — must be skipped
+    (pref_dir / "README.md").write_text(
+        "# preferences/\n"
+        "Catalogues working-style guidance for pr-review and other skills.\n",
+        encoding="utf-8",
+    )
+
+    # An unrelated preference entry
+    (pref_dir / "in-implement-task-sizing.md").write_text(
+        "# In /implement, Size Tasks Carefully\n"
+        "Tasks should be 15-30 minutes apiece.\n"
+        "<!-- learned: 2026-04-22 | confidence: high | scale: subsystem -->\n",
+        encoding="utf-8",
+    )
+    return kd
+
+
+class TestSearchPreferences:
+    def test_lexical_match_surfaces_preference(self, preferences_dir):
+        """A query whose tokens overlap a preferences entry returns that entry
+        as a top side-channel hit."""
+        searcher = Searcher(str(preferences_dir))
+        results = searcher.search_preferences("pr review impact")
+        assert len(results) >= 1, f"expected ≥1 preference result, got {len(results)}"
+        headings = {r["heading"] for r in results}
+        assert "In /pr-review, Lead With Impact" in headings, (
+            f"expected the matching preference; got headings={headings}"
+        )
+
+    def test_no_match_returns_empty(self, preferences_dir):
+        """A query with no FTS5 token match returns an empty list."""
+        searcher = Searcher(str(preferences_dir))
+        results = searcher.search_preferences("zzzqqqxxx_no_match_here")
+        assert results == [], f"expected empty list for no-match query; got {results}"
+
+    def test_threshold_drops_weak_matches(self, preferences_dir):
+        """Side-channel results with score > -0.5 (closer to 0) are dropped.
+
+        We arrange a query whose preference entry would score weakly by
+        forcing a single high-frequency token. The README skip handles the
+        usual README tangent; we verify that any remaining tangential match
+        is pruned by the absolute floor.
+        """
+        searcher = Searcher(str(preferences_dir))
+        # Sanity: every returned result satisfies the threshold (score ≤ -0.5).
+        results = searcher.search_preferences("pr review impact")
+        for r in results:
+            assert r["score"] <= -0.5, (
+                f"side-channel must drop scores > -0.5; got {r['score']} for "
+                f"{r['heading']}"
+            )
+
+    def test_readme_is_skipped(self, preferences_dir):
+        """The preferences/README.md file is dropped from side-channel results
+        even when its tokens match the query."""
+        searcher = Searcher(str(preferences_dir))
+        # 'pr-review' tokens appear in README; verify it's filtered out.
+        results = searcher.search_preferences("pr review impact mechanism")
+        for r in results:
+            assert os.path.basename(r["file_path"]) != "README.md", (
+                f"README.md must not appear in side-channel results; got {r}"
+            )
+
+    def test_scale_filter_bypassed(self, preferences_dir):
+        """search_preferences takes no scale_set parameter — preferences with
+        any declared scale surface regardless of any caller scale context.
+
+        This is enforced by the method signature (no scale_set arg). We
+        additionally assert the result includes the preference whose scale
+        does not match an arbitrary external context.
+        """
+        import inspect
+        sig = inspect.signature(Searcher.search_preferences)
+        assert "scale_set" not in sig.parameters, (
+            f"search_preferences must not accept scale_set; got params="
+            f"{list(sig.parameters.keys())}"
+        )
+        searcher = Searcher(str(preferences_dir))
+        results = searcher.search_preferences("pr review impact")
+        # The matching preference declares scale=subsystem; since the side-
+        # channel applies no scale filter, it surfaces unconditionally.
+        headings = {r["heading"] for r in results}
+        assert "In /pr-review, Lead With Impact" in headings
+
+    def test_status_filter_default_current_only(self, preferences_dir):
+        """By default, side-channel results include only entry_status=current."""
+        searcher = Searcher(str(preferences_dir))
+        results = searcher.search_preferences("pr review")
+        statuses = {r.get("entry_status") for r in results}
+        assert "superseded" not in statuses, (
+            f"superseded preference must be filtered by default; got {statuses}"
+        )
+        # The current preference still appears.
+        headings = {r["heading"] for r in results}
+        assert "In /pr-review, Lead With Impact" in headings
+
+    def test_status_filter_explicit_includes_superseded(self, preferences_dir):
+        """An explicit include_status=['current', 'superseded'] surfaces the
+        superseded preference too."""
+        searcher = Searcher(str(preferences_dir))
+        results = searcher.search_preferences(
+            "pr review", include_status=["current", "superseded"]
+        )
+        statuses = {r.get("entry_status") for r in results}
+        assert "superseded" in statuses, (
+            f"explicit include_status must surface superseded; got {statuses}"
+        )
+
+    def test_results_only_from_preferences_category(self, preferences_dir):
+        """Side-channel returns ONLY entries from category=preferences,
+        even when a non-preference entry shares query tokens."""
+        searcher = Searcher(str(preferences_dir))
+        results = searcher.search_preferences("review pipeline impact")
+        for r in results:
+            assert r["category"] == "preferences", (
+                f"side-channel must only return preferences; got {r}"
+            )
+
+    def test_limit_capped_at_three(self, tmp_path):
+        """search_preferences returns at most 3 results (D2 limit)."""
+        kd = tmp_path / "many_preferences"
+        kd.mkdir()
+        pref_dir = kd / "preferences"
+        pref_dir.mkdir()
+        # Six preferences, all sharing the unique token 'glimmerwave'
+        for i in range(6):
+            (pref_dir / f"pref-{i}.md").write_text(
+                f"# Preference {i}\n"
+                f"A glimmerwave preference about topic {i}.\n"
+                f"<!-- learned: 2026-04-{i+10:02d} | confidence: high | scale: subsystem -->\n",
+                encoding="utf-8",
+            )
+        searcher = Searcher(str(kd))
+        results = searcher.search_preferences("glimmerwave")
+        assert len(results) <= 3, (
+            f"side-channel must cap at 3 results; got {len(results)}"
+        )
+
+    def test_logs_preference_side_channel_query_kind(self, preferences_dir):
+        """search_preferences writes a retrieval-log entry with
+        query_kind='preference_side_channel'."""
+        searcher = Searcher(str(preferences_dir))
+        searcher.search_preferences("pr review impact", caller="test-caller")
+        log_path = os.path.join(str(preferences_dir), "_meta", "retrieval-log.jsonl")
+        assert os.path.exists(log_path), "retrieval log must be created"
+        with open(log_path) as f:
+            lines = [json.loads(line) for line in f if line.strip()]
+        # Find the side-channel entry
+        side_channel_entries = [
+            e for e in lines if e.get("query_kind") == "preference_side_channel"
+        ]
+        assert len(side_channel_entries) >= 1, (
+            f"expected ≥1 entry with query_kind=preference_side_channel; "
+            f"got log entries={lines}"
+        )
+        latest = side_channel_entries[-1]
+        assert latest["caller"] == "test-caller"
+        assert latest["query"] == "pr review impact"
+
+    def test_returns_same_shape_as_search(self, preferences_dir):
+        """Each side-channel result has the same key set as Searcher.search()
+        results — wrappers can render either via the same code path."""
+        searcher = Searcher(str(preferences_dir))
+        side_channel = searcher.search_preferences("pr review impact")
+        main_pool = searcher.search("pr review impact")
+        if not side_channel or not main_pool:
+            pytest.skip("both pools must be non-empty for shape comparison")
+        assert set(side_channel[0].keys()) == set(main_pool[0].keys()), (
+            f"shape mismatch: side-channel={set(side_channel[0].keys())} vs "
+            f"main={set(main_pool[0].keys())}"
+        )
+
+    def test_dedupe_key_shape_for_wrappers(self, preferences_dir):
+        """The (file_path, heading) tuple is the canonical dedupe key for
+        wrapper-level dedupe between side-channel and main pool. Each result
+        must expose both fields with non-empty values."""
+        searcher = Searcher(str(preferences_dir))
+        results = searcher.search_preferences("pr review impact")
+        for r in results:
+            assert r.get("file_path"), f"file_path required for dedupe; got {r}"
+            assert r.get("heading"), f"heading required for dedupe; got {r}"
+
+    def test_no_match_with_only_unrelated_preferences(self, empty_preferences_dir):
+        """When preferences/ contains only unrelated entries plus a README,
+        the side-channel returns an empty list (README skip + threshold drop
+        + no-match)."""
+        searcher = Searcher(str(empty_preferences_dir))
+        results = searcher.search_preferences("totally-unrelated-token-xyz")
+        assert results == [], (
+            f"unrelated query must yield empty side-channel; got {results}"
         )

@@ -59,6 +59,14 @@ From the fetched data, extract:
 - **Standard diff (<=400 LOC):** Pass inline in lens agent task descriptions.
 - **Large diff (>400 LOC):** Write to `/tmp/pr-review-<PR_NUMBER>.diff` and pass the path.
 
+### 1e. Load prior knowledge
+
+```bash
+lore prefetch "pr-review" --scale-set=<bucket>
+```
+
+Read the `## Prior Knowledge` block this produces. Incorporate any surfaced preferences or conventions into the review — especially scope-matched preference entries whose `related_files` include this skill.
+
 ## Step 2: Triage
 
 Load the triage protocol:
@@ -97,6 +105,8 @@ If the result is non-empty (not `[]`), append each returned skill to the selecte
 - Are tagged `[ceremony]` in the triage table with reason "Ceremony config"
 - Are **not** subject to adaptive skip conditions — they always run when configured
 - Can be removed by the user at the triage gate (Step 2c) like any other lens
+
+**Agency constraint:** The user — and only the user — can remove a ceremony lens at Step 2c. The agent MUST NOT self-remove a ceremony lens on the basis of latency, PR size, perceived low signal, or any other judgment call. Invalid skip rationales — do not act on any of these: the PR is small, the review is low-signal, the run will take too long, or the user did not explicitly ask for ceremony lenses this session. The user configured them; only the user can unconfigure them.
 
 ### 2c. Present triage
 
@@ -224,27 +234,55 @@ Query the knowledge store for each finding:
 lore search "<topic>" --type knowledge --json --limit 3
 ```
 
-Apply the voice guide when writing finding bodies:
-```bash
-cat ~/.lore/claude-md/review-protocol/review-voice.md
-```
+**Voice — hedge the inference, not the observed code fact.** Every finding is a hypothesis formed from incomplete information; frame it that way. A hedged observation that names the code precisely is more useful than a confident assertion that names nothing.
+
+- **State observed code facts directly** — the reviewer can see the code.
+  - Weak: "This might be storing the session token where it's readable."
+  - Strong: "`logRequest` writes `session.token` to the access log."
+- **Hedge impact claims with an explicit condition** — the reviewer cannot know whether the scenario applies.
+  - Weak: "This will cause a nil dereference and crash the server."
+  - Strong: "`session.user` is dereferenced here without a nil check — if this handler is reachable before authentication completes, the nil dereference panics."
+- **Lead with the observation, not the hedge.** Put the code fact first, the uncertainty qualifier second.
+- **Use impersonal constructions.** Describe the code, not the author ("The handler dereferences…", not "You forgot to check…").
+- **Fix suggestions are secondary and optional.** The default posture is to surface the issue and stop — the author chooses between a small local fix, a broader refactor, or a deeper redesign. Include a fix only when non-obvious (non-local change, hard to characterize without showing a resolution, or unusual constraints). When included: place it **after** impact and evidence (never lead with it), frame it as one option ("One approach: …"), and keep the scope open so the finding can still motivate a broader change.
+- **Vocabulary to avoid:**
+  - Overstatement of reviewer confidence: "this will crash" / "this is wrong" / "this is a bug" / "definitely" → name the specific condition ("this panics if `x` is nil", "this deviates from the contract in…").
+  - Hollow hedges on observations: "seems like" / "might be" / "I think" / "could potentially" → state the code fact; hedge the *impact*, not the observation.
+
+Full voice guide (optional deeper reference): `~/.lore/claude-md/review-protocol/review-voice.md`.
 
 Report back with your findings JSON when complete.
 ```
 
-Spawn one agent per selected lens in parallel. Maximum 6 concurrent agents.
+Construct one Agent task per built-in lens, but **do not dispatch yet** — ceremony lens tasks must launch together with built-in lens tasks in the same parallel batch (see Step 3b-ceremony, then Step 3b-launch).
 
-### 3b-ceremony. Dispatch ceremony lenses
+### 3b-ceremony. Construct ceremony lens tasks
 
-After built-in lens agents are spawned, dispatch any ceremony lenses from the selected set. Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b.
-
-For each ceremony lens in the selected set, invoke it via the Skill tool with the PR number as the sole argument:
+**This step is mandatory and must not be skipped.** Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b. For each ceremony lens in the selected set, construct an `Agent` task — *not* a `Skill` invocation — using the `general-purpose` subagent type with this prompt structure:
 
 ```
-/<skill-name> <PR_NUMBER>
+# <Ceremony Lens Name> — PR #<PR_NUMBER>
+
+Invoke the `/<skill-name>` skill on PR #<PR_NUMBER> in <owner>/<repo>:
+
+    /<skill-name> <PR_NUMBER>
+
+The skill fetches its own PR data — do not pre-fetch diff content, review context, or metadata.
+
+When the skill completes, return its output verbatim. If it produced findings JSON in the standard Findings Output Format, return that JSON. If it produced a different output shape (narrative report, table, raw scanner output, etc.), return the raw text so it can be classified as supplementary in Step 3d.
 ```
 
-Ceremony lenses fetch their own PR data — do **not** pass diff content, review context, or metadata. Run all ceremony lens invocations in parallel.
+The `Agent`-wrapped invocation — rather than a direct `Skill` call from the main conversation — is what makes parallel execution with built-in lens agents possible. `Skill` invocations run synchronously in the main thread; `Agent` invocations issued in a single message run concurrently.
+
+### 3b-launch. Spawn all lens agents in a single parallel batch
+
+Issue every `Agent` tool call — one per selected lens, both built-in and ceremony — in a **single message**. Spawning built-in lens agents first and then dispatching ceremony lens agents in a follow-up message serializes ceremony work behind built-in completion and erases the latency gain the parallel design is meant to capture.
+
+There is no fixed concurrent-agent cap; spawn the full selected set together. Typical batches run 5–8 agents (defaults plus 0–3 ceremony lenses).
+
+**Why unconditional parallel dispatch matters.** A downstream telemetry consumer — tournament reconciliation, coverage dashboards, session observability — cannot distinguish "ceremony not configured" from "agent chose not to run it" when the dispatch is silently skipped. Silent omission corrupts the signal: configured lenses appear as absent lenses, and the consumer has no way to recover the distinction after the fact.
+
+Do NOT skip this step. Do NOT omit a ceremony lens because the PR is small. Do NOT omit because the run seems low-signal. Do NOT omit because the user did not explicitly re-request ceremony lenses this session. Do NOT omit because of perceived latency cost. Do NOT defer ceremony dispatch to a follow-up message under any of these rationales — deferral is functionally a skip from the parallelism perspective. None of these are valid rationales — the user configured the ceremony; only the user can remove it. If a ceremony lens is genuinely inapplicable, stop and ask the user whether to remove it at Step 2c rather than self-removing.
 
 Ceremony lens results are collected alongside built-in lens results in Step 3d. If a ceremony lens does not produce findings in the standard Findings Output Format, its output is handled as non-conforming (see Step 3d).
 
@@ -458,10 +496,16 @@ The test: if the PR author asks "why does this matter?", the finding must answer
 
 **6d-ii. Strip internal protocol language for external output.** Remove `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, and compound markers from finding bodies. These are internal analytical scaffolding — the author should see the grounding *content* (the concrete impact claim) woven into the finding body, not protocol headers.
 
-Apply the voice guide when writing external bodies:
-```bash
-cat ~/.lore/claude-md/review-protocol/review-voice.md
-```
+**Voice — hedge the inference, not the observed code fact.** Reviewers cannot know the full system context; every external body should read as a grounded hypothesis, not a verdict.
+
+- **State observed code facts directly.** Weak: "This might be storing the token insecurely." Strong: "`logRequest` writes `session.token` to the access log."
+- **Hedge impact claims with an explicit condition.** Weak: "This will crash the server." Strong: "`session.user` is dereferenced without a nil check — if this handler is reachable before auth completes, it panics."
+- **Lead with the observation**, not the hedge. Code fact first, uncertainty qualifier second.
+- **Use impersonal constructions.** "The handler dereferences…", not "You forgot to check…".
+- **Fix suggestions are secondary.** Default to surfacing the issue and stopping. When a fix is included (non-obvious only), place it **after** impact and evidence, frame it as one option ("One approach: …"), and keep the scope open so the finding can motivate a broader redesign if appropriate. Never lead a comment body with a fix.
+- **Avoid overstated vocabulary** ("this will crash" / "this is wrong" / "this is a bug" / "definitely") — name the condition instead. **Avoid hollow hedges on observations** ("seems like" / "might be" / "I think" / "could potentially") — state the code fact; hedge the *impact*, not the observation.
+
+Full voice guide (optional deeper reference): `~/.lore/claude-md/review-protocol/review-voice.md`.
 
 After stripping and shaping, produce two variants of each finding body:
 
@@ -554,7 +598,9 @@ bash ~/.lore/scripts/create-followup.sh \
   --owner <owner> \
   --repo <repo> \
   --head-sha <headRefOid> \
-  --content "<complete report body from 6e — all 4 sections>"
+  --content "<complete report body from 6e — all 4 sections>" \
+  --producer-role "pr-review" \
+  --protocol-slot "Observations"
 ```
 
 ## Step 7: Capture Insights
@@ -562,7 +608,7 @@ bash ~/.lore/scripts/create-followup.sh \
 **Gate:** Do not execute this step until Step 6 has completed and `create-followup.sh` has been called. If Step 6 was not executed, go back and execute it now before proceeding.
 
 ```
-/remember Holistic review of PR #<N> — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered (why the architecture is this way, what constraints drove decisions), cross-lens convergence patterns (areas where multiple lenses flagged the same concern), convention patterns observed across the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR, style opinions, lens-specific methodology notes.
+/remember Holistic review of PR #<N> — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered (why the architecture is this way, what constraints drove decisions), cross-lens convergence patterns (areas where multiple lenses flagged the same concern), convention patterns observed across the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR, style opinions, lens-specific methodology notes. For every `lore capture` call, pass `--producer-role pr-review --protocol-slot Synthesis --work-item <slug>` (when a work item matches the PR).
 ```
 
 ## Error Handling

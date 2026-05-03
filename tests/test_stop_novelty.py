@@ -185,8 +185,9 @@ class TestWritePendingCaptures:
     ]
 
     def _expected_hash(self, candidate):
-        """Compute expected hash for a candidate."""
-        key = candidate["trigger"] + candidate["matched_text"]
+        """Compute expected hash for a candidate (mirrors candidate_hash())."""
+        related = candidate.get("related_files") or []
+        key = candidate["trigger"] + candidate["matched_text"] + ",".join(sorted(related))
         return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
     def test_creates_directory_and_files(self, knowledge_dir):
@@ -201,7 +202,7 @@ class TestWritePendingCaptures:
         assert all(f.endswith(".md") for f in files)
 
     def test_filenames_are_content_hashes(self, knowledge_dir):
-        """File names match sha256(trigger + matched_text)[:12].md."""
+        """File names match sha256(trigger + matched_text + related_files)[:12].md."""
         snc.write_pending_captures(str(knowledge_dir), self.SAMPLE_CANDIDATES)
 
         pending_dir = knowledge_dir / "_pending_captures"
@@ -600,6 +601,54 @@ class TestNormalMessagesStillTrigger:
         assert "user-correction" in triggers
         assert "debug-root-cause" in triggers
         assert "gotcha" in triggers
+
+    def test_preference_signal_triggers_on_user_message(self):
+        """preference-signal fires when user states a scoped preference."""
+        messages = [self._make_msg(
+            "user",
+            "don't auto-disposition above severity M in /pr-review",
+            index=0,
+        )]
+        hits = snc.scan_heuristics(messages)
+        triggers = [h["trigger"] for h in hits]
+        assert "preference-signal" in triggers
+        pref_hit = next(h for h in hits if h["trigger"] == "preference-signal")
+        assert pref_hit["role"] == "user"
+        assert "/pr-review" in pref_hit["matched_text"]
+
+    def test_preference_signal_not_on_global_preference(self):
+        """preference-signal does not fire when there is no context signal."""
+        messages = [self._make_msg(
+            "user",
+            "always be terse and avoid long explanations",
+            index=0,
+        )]
+        hits = snc.scan_heuristics(messages)
+        triggers = [h["trigger"] for h in hits]
+        assert "preference-signal" not in triggers
+
+    def test_preference_signal_not_on_assistant_message(self):
+        """preference-signal only fires on user messages, not assistant."""
+        messages = [self._make_msg(
+            "assistant",
+            "I'll remember to never auto-close findings in /pr-review.",
+            index=0,
+        )]
+        hits = snc.scan_heuristics(messages)
+        triggers = [h["trigger"] for h in hits]
+        assert "preference-signal" not in triggers
+
+    def test_preference_signal_sentence_apart(self):
+        """preference-signal fires when imperative and context signal are a sentence apart."""
+        messages = [self._make_msg(
+            "user",
+            "When using /pr-review for code reviews. There are many things to consider. "
+            "Don't auto-close findings without checking severity.",
+            index=0,
+        )]
+        hits = snc.scan_heuristics(messages)
+        triggers = [h["trigger"] for h in hits]
+        assert "preference-signal" in triggers
 
     def test_bland_messages_produce_no_hits(self):
         """Messages without trigger patterns should not produce false positives."""
