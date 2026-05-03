@@ -497,10 +497,17 @@ Generate concordance-based backlinks — writes `See also:` links for high-simil
 python3 ~/.lore/scripts/pk_cli.py generate-backlinks "$KDIR"
 ```
 
-Rebuild FTS5 search index:
+Rebuild FTS5 search index — **must be `--force`**, not incremental:
 ```bash
-python3 ~/.lore/scripts/pk_cli.py incremental-index "$KDIR"
+python3 ~/.lore/scripts/pk_cli.py index "$KDIR" --force
 ```
+
+Renormalize mutates META blocks in place (rescale, relabel, status flips). The
+incremental indexer keys on file create/delete/mtime, not META content
+diffs, so in-place META mutations on existing files can leave the SQLite
+index pointing at stale `scale` values. Any operation that rewrites META
+across the corpus must follow the same protocol: corpus-wide META mutation →
+`pk_cli.py index --force`.
 
 Update manifest:
 ```bash

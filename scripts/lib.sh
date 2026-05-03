@@ -56,6 +56,9 @@ json_field() {
 MAX_SLUG_LENGTH=50
 slugify() {
   local input="$1"
+  # Flatten newlines/tabs to spaces before the line-oriented sed pipeline below;
+  # otherwise embedded newlines survive into the slug and produce invalid filenames.
+  input=$(printf '%s' "$input" | tr '\n\t' '  ' | tr -s ' ')
   local lower
   lower=$(echo "$input" | tr '[:upper:]' '[:lower:]')
   local stripped
@@ -72,7 +75,8 @@ slugify() {
     | sed 's/[^a-z0-9]/-/g' \
     | sed 's/--*/-/g' \
     | sed 's/^-//;s/-$//' \
-    | cut -c1-$MAX_SLUG_LENGTH
+    | cut -c1-$MAX_SLUG_LENGTH \
+    | sed 's/-*$//'
 }
 
 # --- resolve_knowledge_dir ---

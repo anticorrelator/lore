@@ -142,7 +142,7 @@ echo ""
 echo "Test 7: Per-repo config.json with role=maintainer passes the gate"
 echo '{"role":"maintainer"}' > "$LORE_KNOWLEDGE_DIR/config.json"
 EXIT=0
-"$LORE_CLI" retro aggregate >/dev/null 2>&1 || EXIT=$?
+ERR=$("$LORE_CLI" retro aggregate 2>&1 >/dev/null) || EXIT=$?
 if [[ "$EXIT" == "2" ]]; then
   echo "  FAIL: per-repo maintainer config did not pass the gate"
   FAIL=$((FAIL + 1))
@@ -150,6 +150,10 @@ else
   echo "  PASS: per-repo maintainer config passed the gate (exit=$EXIT from underlying script)"
   PASS=$((PASS + 1))
 fi
+# Preflight must run after require_maintainer, before retro-aggregate.sh.
+# Maintainer role -> preflight always emits a [preflight] line on stderr
+# (warning or clean), which proves wire-in fired before aggregate dispatch.
+assert_contains "preflight stderr emitted before aggregate" "$ERR" "[preflight]"
 rm -f "$LORE_KNOWLEDGE_DIR/config.json"
 
 echo ""

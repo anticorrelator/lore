@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# overview-subsystem.sh — Return architecture-scale framing for a subsystem + descent affordances.
+# overview-subsystem.sh — Return scale-set-scoped framing for a subsystem + descent affordances.
 #
 # Usage: overview-subsystem.sh <subsystem> --scale-set <bucket> [--limit N] [--json]
 #
-# Finds architecture-scale entries matching <subsystem>. Falls back to subsystem-scale
-# if no architecture entries exist. Renders with trust stamp + lists direct children.
+# Runs a single broad search at the declared scale-set against <subsystem>. Renders with
+# trust stamp + lists direct children. Cascade narrowing was removed under D6 of the
+# scale-registry rename work item (the prior cascade routed through a flag the search
+# CLI does not define, and silently fell through to broad search).
 #
 # Exit codes:
 #   0 — success
@@ -75,30 +77,14 @@ if [[ ! -f "$LORE_SEARCH" ]]; then
   exit 0
 fi
 
-# Search for architecture-scale entries first
+# Single broad-search pass (cascade removed — see D6 in the scale-registry rename plan).
 ARCH_JSON=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$SUBSYSTEM" \
-  --scale-set "$SCALE_SET" --min-scale architectural --limit "$LIMIT" --json --caller overview 2>/dev/null || echo "[]")
-
-# If no architecture entries, fall back to subsystem-scale
-FALLBACK_USED=false
-if [[ "$ARCH_JSON" == "[]" || -z "$ARCH_JSON" ]]; then
-  FALLBACK_USED=true
-  ARCH_JSON=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$SUBSYSTEM" \
-    --scale-set "$SCALE_SET" --min-scale subsystem --limit "$LIMIT" --json --caller overview 2>/dev/null || echo "[]")
-fi
-
-# If still no results, try plain search
-if [[ "$ARCH_JSON" == "[]" || -z "$ARCH_JSON" ]]; then
-  FALLBACK_USED=true
-  ARCH_JSON=$(python3 "$LORE_SEARCH" search "$KNOWLEDGE_DIR" "$SUBSYSTEM" \
-    --scale-set "$SCALE_SET" --limit "$LIMIT" --json --caller overview 2>/dev/null || echo "[]")
-fi
+  --scale-set "$SCALE_SET" --limit "$LIMIT" --json --caller overview 2>/dev/null || echo "[]")
 
 export _OV_RESULTS="$ARCH_JSON"
 export _OV_SCRIPT_DIR="$SCRIPT_DIR"
 export _OV_KNOWLEDGE_DIR="$KNOWLEDGE_DIR"
 export _OV_SUBSYSTEM="$SUBSYSTEM"
-export _OV_FALLBACK="$(if "$FALLBACK_USED"; then echo 1; else echo 0; fi)"
 export _OV_JSON="$(if "$JSON_OUTPUT"; then echo 1; else echo 0; fi)"
 export _OV_LORE_SEARCH="$LORE_SEARCH"
 
@@ -117,7 +103,6 @@ from pk_search import render_trust_stamp
 
 knowledge_dir = os.environ["_OV_KNOWLEDGE_DIR"]
 subsystem = os.environ["_OV_SUBSYSTEM"]
-fallback_used = os.environ.get("_OV_FALLBACK", "0") == "1"
 json_mode = os.environ.get("_OV_JSON", "0") == "1"
 lore_search = os.environ.get("_OV_LORE_SEARCH", "")
 
@@ -190,7 +175,6 @@ if json_mode:
             "template_version": r.get("template_version"),
             "score": r.get("score", 0),
             "snippet": r.get("snippet", ""),
-            "fallback": fallback_used,
         }
         children = _find_children_of(r["file_path"], knowledge_dir)
         entry["children"] = [{"heading": c["heading"], "file_path": c["file_path"]} for c in children]
@@ -202,9 +186,7 @@ if not results:
     print(f'No entries found for subsystem "{subsystem}"')
     sys.exit(0)
 
-scale_label = results[0].get("scale") or "unknown"
-fallback_note = f" (no architecture entries found; showing {scale_label}-scale)" if fallback_used and results else ""
-print(f'## Overview: {subsystem}{fallback_note}')
+print(f'## Overview: {subsystem}')
 print()
 
 for r in results:

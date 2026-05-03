@@ -85,19 +85,22 @@ if ver_arg:
     if target_ver == current_ver:
         labels = reg["labels"]
     else:
-        # Find the label_history entry where the version transition covers target_ver.
         # label_history entries record labels that were active *before* that version bump.
-        # Entry with version=N holds labels that were active at version N-1 (just before relabel).
-        # We walk history in reverse to find the earliest entry whose version > target_ver.
-        history = sorted(reg.get("label_history", []), key=lambda e: e["version"])
-        labels = None
-        for entry in history:
-            if entry["version"] > target_ver:
-                labels = entry["labels"]
-                break
+        # Entry with version=N holds labels that were active at version N-1 only.
+        # To answer "what were the labels at target_ver?", look for the entry with
+        # version == target_ver + 1 (the relabel that superseded target_ver).
+        history = {e["version"]: e["labels"] for e in reg.get("label_history", [])}
+        labels = history.get(target_ver + 1)
         if labels is None:
-            # target_ver >= current version, use current labels
-            labels = reg["labels"]
+            # Only fall back to current labels when target_ver >= current version.
+            # For target_ver < current version with no covering label_history entry,
+            # the version is not represented in registry history — error out rather
+            # than silently masking the gap with current labels.
+            if target_ver >= current_ver:
+                labels = reg["labels"]
+            else:
+                print(f"Error: version {target_ver} not represented in registry history", file=sys.stderr)
+                sys.exit(1)
     if id_arg not in labels:
         print(f"Error: id '{id_arg}' not found in registry at version {target_ver}", file=sys.stderr)
         sys.exit(1)

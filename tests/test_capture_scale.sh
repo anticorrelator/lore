@@ -112,7 +112,7 @@ setup_knowledge_store
 
 RESULT=$(run_capture --insight "test insight" --context "test context" --confidence high --scale=foo)
 assert_exit_nonzero "exits non-zero when scale=foo" "$(get_exit "$RESULT")"
-assert_contains "error mentions valid values" "$(get_output "$RESULT")" "scale must be one of:"
+assert_contains "error mentions valid values" "$(get_output "$RESULT")" "is not a registered scale id"
 
 # =============================================
 # Test 3: unknown is rejected (not in registry)
@@ -123,7 +123,7 @@ setup_knowledge_store
 
 RESULT=$(run_capture --insight "test insight" --context "test context" --confidence high --scale=unknown)
 assert_exit_nonzero "exits non-zero when scale=unknown" "$(get_exit "$RESULT")"
-assert_contains "error mentions valid values for unknown rejection" "$(get_output "$RESULT")" "scale must be one of:"
+assert_contains "error mentions valid values for unknown rejection" "$(get_output "$RESULT")" "is not a registered scale id"
 
 # =============================================
 # Test 4: Valid 4-bucket set — all 4 values succeed
@@ -131,7 +131,7 @@ assert_contains "error mentions valid values for unknown rejection" "$(get_outpu
 echo ""
 echo "Test 4: Valid 4-bucket set — all 4 scale values succeed"
 
-for BUCKET in implementation subsystem architectural application; do
+for BUCKET in implementation subsystem architecture abstract; do
   setup_knowledge_store
   RESULT=$(run_capture \
     --insight "scale bucket $BUCKET test" \
@@ -156,8 +156,8 @@ setup_knowledge_store
 RESULT=$(run_capture --insight "test" --context "x" --confidence high --scale=notavalidscale)
 assert_contains "error lists implementation" "$(get_output "$RESULT")" "implementation"
 assert_contains "error lists subsystem" "$(get_output "$RESULT")" "subsystem"
-assert_contains "error lists architectural" "$(get_output "$RESULT")" "architectural"
-assert_contains "error lists application" "$(get_output "$RESULT")" "application"
+assert_contains "error lists architecture" "$(get_output "$RESULT")" "architecture"
+assert_contains "error lists abstract" "$(get_output "$RESULT")" "abstract"
 
 # =============================================
 # Summary

@@ -472,6 +472,7 @@ cmd_retro() {
       ;;
     aggregate)
       require_maintainer "retro aggregate"
+      "$SCRIPTS_DIR/maintainer-preflight.sh" --repo-dir "$(pwd)"
       "$SCRIPTS_DIR/retro-aggregate.sh" "$@"
       ;;
     *)

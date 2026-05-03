@@ -259,6 +259,41 @@ def cmd_search(args: argparse.Namespace) -> None:
                 print(f"    - {s['heading']} ({s['file_path']}, sim: {s['similarity']})")
 
 
+def cmd_search_preferences(args: argparse.Namespace) -> None:
+    """Side-channel BM25 search restricted to category=preferences.
+
+    Returns a flat JSON list (same shape as `lore search --json`) when --json
+    is set; otherwise renders human-readable result blocks. Composes with the
+    main search pool at the wrapper layer.
+    """
+    searcher = Searcher(args.knowledge_dir)
+    caller = getattr(args, "caller", None)
+    include_status = getattr(args, "include_status", None)
+
+    results = searcher.search_preferences(
+        query=args.query,
+        caller=caller,
+        include_status=include_status,
+    )
+
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return
+
+    if not results:
+        print(f'No preference results for "{args.query}"')
+        return
+
+    for i, r in enumerate(results, 1):
+        print(f"\n--- Preference {i} (score: {r['score']}) ---")
+        print(f"  File: {r['file_path']}")
+        print(f"  Heading: {r['heading']}")
+        if r.get("learned_date"):
+            print(f"  Learned: {r['learned_date']}")
+        print(f"  {render_trust_stamp(r, knowledge_dir=args.knowledge_dir)}")
+        print(f"  Snippet: {r['snippet']}")
+
+
 def cmd_stats(args: argparse.Namespace) -> None:
     stats = Stats(args.knowledge_dir)
     result = stats.get_stats()
@@ -864,6 +899,18 @@ def main() -> None:
     p_search.add_argument("--scale-set", default=None, metavar="BUCKETS", help="Declared retrieval scale bucket(s), comma-separated (e.g. 'implementation' or 'subsystem,implementation'). Set-membership filter against entry META scale field.")
     p_search.add_argument("--include-status", nargs="+", default=None, metavar="STATUS", help="Status values to include (current, superseded, historical). Default: current only.")
     p_search.set_defaults(func=cmd_search)
+
+    # search-preferences
+    p_pref = subparsers.add_parser(
+        "search-preferences",
+        help="Side-channel BM25 search restricted to category=preferences (always-on forward guidance).",
+    )
+    p_pref.add_argument("knowledge_dir", help="Path to knowledge directory")
+    p_pref.add_argument("query", help="Search query")
+    p_pref.add_argument("--json", action="store_true", help="Output as JSON (flat list, same shape as `search --json`)")
+    p_pref.add_argument("--caller", default=None, help="Caller identifier logged to retrieval log")
+    p_pref.add_argument("--include-status", nargs="+", default=None, metavar="STATUS", help="Status values to include. Default: current only.")
+    p_pref.set_defaults(func=cmd_search_preferences)
 
     # resolve
     p_resolve = subparsers.add_parser("resolve", help="Resolve [[backlink]] references to content")

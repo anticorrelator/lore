@@ -25,6 +25,7 @@ import sys
 import uuid
 from collections import defaultdict
 from datetime import datetime
+from typing import Any, Dict
 
 
 def parse_iso(s):
@@ -37,15 +38,8 @@ def parse_iso(s):
         return None
 
 
-def main():
-    if len(sys.argv) != 4:
-        print("Usage: retro-export-aggregate-cells.py <rows.jsonl> <since_iso> <contributor_id>", file=sys.stderr)
-        sys.exit(2)
-
-    rows_path, since_iso, contributor_id = sys.argv[1], sys.argv[2], sys.argv[3]
-    since_dt = parse_iso(since_iso)
-
-    groups = defaultdict(lambda: {
+def _make_group() -> Dict[str, Any]:
+    return {
         "n": 0,
         "sample_size_total": 0,
         "value_sum": 0.0,
@@ -59,7 +53,18 @@ def main():
         "template_version": None,
         "metric": None,
         "kind": None,
-    })
+    }
+
+
+def main():
+    if len(sys.argv) != 4:
+        print("Usage: retro-export-aggregate-cells.py <rows.jsonl> <since_iso> <contributor_id>", file=sys.stderr)
+        sys.exit(2)
+
+    rows_path, since_iso, contributor_id = sys.argv[1], sys.argv[2], sys.argv[3]
+    since_dt = parse_iso(since_iso)
+
+    groups = defaultdict(_make_group)
 
     try:
         with open(rows_path, "r", encoding="utf-8") as f:

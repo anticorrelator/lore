@@ -87,7 +87,7 @@ Write the report to `{{kdir}}/_meta/structure-report.json`:
       "category": "category/subcategory",
       "issue": "What's wrong",
       "recommendation": "Specific action",
-      "scale_distribution": {"implementation": 0, "subsystem": 0, "architectural": 0, "application": 0}
+      "scale_distribution": {"implementation": 0, "subsystem": 0, "architecture": 0, "abstract": 0}
     }
   ],
   "summary": {

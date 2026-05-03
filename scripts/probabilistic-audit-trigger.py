@@ -352,6 +352,7 @@ def main():
     append_trigger_log(kdir, row)
 
     if fired and not dry_run:
+        assert artifact_id is not None
         dispatch_status = dispatch_audit(artifact_id, config)
         print(
             f"[lore-trigger] {ceremony} fired (p={configured_p}, "

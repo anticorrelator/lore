@@ -1200,6 +1200,155 @@ class Searcher:
 
         return results
 
+    def search_preferences(
+        self,
+        query: str,
+        caller: str | None = None,
+        include_status: tuple[str, ...] | list[str] | None = None,
+    ) -> list[dict]:
+        """Side-channel BM25 search restricted to category=preferences.
+
+        Forward guidance and descriptive knowledge need different retrieval
+        semantics: this method runs an isolated BM25 query over preferences
+        with a fixed-shape filter chain that bypasses the main pool's scale
+        and caller filters. Wrappers compose the side-channel with the main
+        pool at render time.
+
+        Filters applied (D6):
+            - category fixed to 'preferences'
+            - basename == 'README.md' is dropped (D3)
+            - score floor of -0.5 (D2)
+            - Searcher.include_status (default: current only)
+
+        Filters NOT applied:
+            - scale_set
+            - exclude_category
+            - source_type
+            - include_archived (preferences live outside _archive/)
+
+        Args:
+            query: User query string (FTS5 OR-mode by default).
+            caller: Identifier logged to retrieval log (e.g. "lead", "worker").
+            include_status: Status values to include. None = current only.
+
+        Returns:
+            Up to 3 result dicts in the same shape as Searcher.search().
+            Empty list when no FTS5 matches survive the filters.
+        """
+        SIDE_CHANNEL_LIMIT = 3
+        SIDE_CHANNEL_THRESHOLD = -0.5
+        search_start = time.time()
+        self._ensure_index()
+
+        prepared = self._prepare_or_query(query)
+
+        # Resolve status filter: default is current-only
+        if include_status is not None:
+            effective_statuses = set(include_status)
+        else:
+            effective_statuses = {"current"}
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+
+        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, rank"
+
+        # Pull a generous batch so README skip + threshold drop + status filter
+        # still leaves SIDE_CHANNEL_LIMIT survivors when matches exist.
+        fetch_limit = SIDE_CHANNEL_LIMIT * 5
+        params: list = [prepared, "preferences", fetch_limit]
+
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT {select_cols}
+                FROM entries
+                WHERE entries MATCH ? AND category = ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        except sqlite3.OperationalError as e:
+            conn.close()
+            if "fts5: syntax error" in str(e).lower():
+                escaped = '"' + query.replace('"', '""') + '"'
+                conn = sqlite3.connect(self.db_path)
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    f"""
+                    SELECT {select_cols}
+                    FROM entries
+                    WHERE entries MATCH ? AND category = ?
+                    ORDER BY rank
+                    LIMIT ?
+                    """,
+                    [escaped, "preferences", fetch_limit],
+                ).fetchall()
+            else:
+                raise
+
+        results: list[dict] = []
+        for row in rows:
+            score = row["rank"]
+            # D2: absolute floor — drop weak matches (closer to 0 than -0.5)
+            if score > SIDE_CHANNEL_THRESHOLD:
+                continue
+
+            # D3: structural README skip
+            if os.path.basename(row["file_path"]) == "README.md":
+                continue
+
+            # Status filter (D6: applied inside the primitive)
+            entry_status_val = row["entry_status"]
+            effective_entry_status = entry_status_val if entry_status_val else "current"
+            if effective_statuses and effective_entry_status not in effective_statuses:
+                continue
+
+            content = row["content"]
+            snippet = content[:SNIPPET_MAX_CHARS]
+            if len(content) > SNIPPET_MAX_CHARS:
+                snippet += "..."
+
+            abs_path = row["file_path"]
+            try:
+                rel_path = os.path.relpath(abs_path, self.knowledge_dir)
+            except ValueError:
+                rel_path = abs_path
+
+            results.append({
+                "heading": row["heading"],
+                "file_path": rel_path,
+                "source_type": row["source_type"],
+                "category": row["category"],
+                "confidence": row["confidence"],
+                "learned_date": row["learned_date"],
+                "structural_importance": row["structural_importance"] or 0.0,
+                "scale": row["scale"],
+                "entry_status": effective_entry_status,
+                "template_version": row["template_version"],
+                "score": round(score, 4),
+                "snippet": snippet,
+            })
+
+            if len(results) >= SIDE_CHANNEL_LIMIT:
+                break
+
+        conn.close()
+
+        elapsed_ms = (time.time() - search_start) * 1000
+        self._log_search(
+            query,
+            None,
+            len(results),
+            elapsed_ms,
+            caller=caller,
+            scale_set=None,
+            query_kind="preference_side_channel",
+        )
+
+        return results
+
     def composite_search(
         self,
         query: str,

@@ -92,7 +92,11 @@ def main() -> None:
     entries_list = manifest.get("entries", [])
     scale_ids = [s["id"] for s in registry.get("scales", [])]
     if not scale_ids:
-        scale_ids = ["implementation", "subsystem", "architectural"]
+        print(
+            "Error: scale-registry.json missing or empty 'scales'; cannot emit per-scale metrics",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Per-scale accumulators
     # corrections_in_window: entries that have ≥1 correction within window

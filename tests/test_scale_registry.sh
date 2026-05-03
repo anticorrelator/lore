@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test_scale_registry.sh — Smoke tests for scale-registry.sh relabel and get-adjacency
-# Covers the 4-bucket configuration: implementation, subsystem, architectural, application
+# Covers the 4-bucket configuration: implementation, subsystem, architecture, abstract
 
 set -euo pipefail
 
@@ -75,8 +75,8 @@ IDS_OUTPUT=$("$REGISTRY_SH" get-ids)
 assert_equal "get-ids returns 4 entries" "$(echo "$IDS_OUTPUT" | wc -l | tr -d ' ')" "4"
 assert_equal "get-ids[1] = implementation" "$(echo "$IDS_OUTPUT" | sed -n '1p')" "implementation"
 assert_equal "get-ids[2] = subsystem"      "$(echo "$IDS_OUTPUT" | sed -n '2p')" "subsystem"
-assert_equal "get-ids[3] = architectural"  "$(echo "$IDS_OUTPUT" | sed -n '3p')" "architectural"
-assert_equal "get-ids[4] = application"    "$(echo "$IDS_OUTPUT" | sed -n '4p')" "application"
+assert_equal "get-ids[3] = architecture"   "$(echo "$IDS_OUTPUT" | sed -n '3p')" "architecture"
+assert_equal "get-ids[4] = abstract"       "$(echo "$IDS_OUTPUT" | sed -n '4p')" "abstract"
 
 echo ""
 echo "=== get-adjacency: boundary tests ==="
@@ -86,20 +86,20 @@ ADJ_IMPL=$("$REGISTRY_SH" get-adjacency implementation)
 assert_equal "implementation: no below (empty first line)" "$(echo "$ADJ_IMPL" | sed -n '1p')" ""
 assert_equal "implementation: subsystem above"             "$(echo "$ADJ_IMPL" | sed -n '2p')" "subsystem"
 
-# subsystem (ordinal 2): implementation below, architectural above
+# subsystem (ordinal 2): implementation below, architecture above
 ADJ_SUB=$("$REGISTRY_SH" get-adjacency subsystem)
 assert_equal "subsystem: implementation below"  "$(echo "$ADJ_SUB" | sed -n '1p')" "implementation"
-assert_equal "subsystem: architectural above"   "$(echo "$ADJ_SUB" | sed -n '2p')" "architectural"
+assert_equal "subsystem: architecture above"    "$(echo "$ADJ_SUB" | sed -n '2p')" "architecture"
 
-# architectural (ordinal 3): subsystem below, application above
-ADJ_ARCH=$("$REGISTRY_SH" get-adjacency architectural)
-assert_equal "architectural: subsystem below"   "$(echo "$ADJ_ARCH" | sed -n '1p')" "subsystem"
-assert_equal "architectural: application above" "$(echo "$ADJ_ARCH" | sed -n '2p')" "application"
+# architecture (ordinal 3): subsystem below, abstract above
+ADJ_ARCH=$("$REGISTRY_SH" get-adjacency architecture)
+assert_equal "architecture: subsystem below"   "$(echo "$ADJ_ARCH" | sed -n '1p')" "subsystem"
+assert_equal "architecture: abstract above"    "$(echo "$ADJ_ARCH" | sed -n '2p')" "abstract"
 
-# application (ordinal 4): architectural below, no above
-ADJ_APP=$("$REGISTRY_SH" get-adjacency application)
-assert_equal "application: architectural below" "$(echo "$ADJ_APP" | sed -n '1p')" "architectural"
-assert_equal "application: no above (empty second line)" "$(echo "$ADJ_APP" | sed -n '2p')" ""
+# abstract (ordinal 4): architecture below, no above
+ADJ_ABS=$("$REGISTRY_SH" get-adjacency abstract)
+assert_equal "abstract: architecture below" "$(echo "$ADJ_ABS" | sed -n '1p')" "architecture"
+assert_equal "abstract: no above (empty second line)" "$(echo "$ADJ_ABS" | sed -n '2p')" ""
 
 # invalid id
 ADJ_ERR=$("$REGISTRY_SH" get-adjacency unknown 2>&1 || true)
@@ -108,25 +108,33 @@ assert_contains "get-adjacency unknown: error message" "$ADJ_ERR" "not found"
 echo ""
 echo "=== relabel: round-trip (modifies real registry, restored by trap) ==="
 
-RELABEL_OUT=$("$REGISTRY_SH" relabel application --new-label system 2>&1)
-assert_contains "relabel application->system: success message" "$RELABEL_OUT" "Relabeled"
-assert_contains "relabel application->system: shows old label"  "$RELABEL_OUT" "application"
-assert_contains "relabel application->system: shows new label"  "$RELABEL_OUT" "system"
+RELABEL_OUT=$("$REGISTRY_SH" relabel architecture --new-label architecture-renamed 2>&1)
+assert_contains "relabel architecture->architecture-renamed: success message" "$RELABEL_OUT" "Relabeled"
+assert_contains "relabel architecture->architecture-renamed: shows old label"  "$RELABEL_OUT" "architecture"
+assert_contains "relabel architecture->architecture-renamed: shows new label"  "$RELABEL_OUT" "architecture-renamed"
 
-# Version should have bumped
+# Version should have bumped from 2 to 3
 NEW_VERSION=$("$REGISTRY_SH" get-version)
-assert_equal "relabel bumps version to 2" "$NEW_VERSION" "2"
+assert_equal "relabel bumps version to 3" "$NEW_VERSION" "3"
 
 # get-label at current version returns new label
-NEW_LABEL=$("$REGISTRY_SH" get-label application)
-assert_equal "get-label application = system after relabel" "$NEW_LABEL" "system"
+NEW_LABEL=$("$REGISTRY_SH" get-label architecture)
+assert_equal "get-label architecture = architecture-renamed after relabel" "$NEW_LABEL" "architecture-renamed"
 
-# get-label at version 1 returns old label (historical)
-OLD_LABEL=$("$REGISTRY_SH" get-label --version 1 application)
-assert_equal "get-label --version 1 application = application (historical)" "$OLD_LABEL" "application"
+# get-label at version 2 returns old label (historical) — D2 cleared label_history,
+# so v1 is intentionally unrepresented; v2 is the version the relabel just superseded
+# and is recoverable through the freshly-written history entry.
+OLD_LABEL=$("$REGISTRY_SH" get-label --version 2 architecture)
+assert_equal "get-label --version 2 architecture = architecture (historical)" "$OLD_LABEL" "architecture"
+
+# D7 negative: --version 1 is not represented in registry history (D2 cleared it).
+# get-label must error rather than silently fall through to current labels.
+V1_ERR=$("$REGISTRY_SH" get-label --version 1 architecture 2>&1 || true)
+assert_contains "get-label --version 1 architecture: not represented in registry history" \
+  "$V1_ERR" "not represented in registry history"
 
 # Relabeling to same name is a no-op (exit 0, message says no-op)
-NOOP_OUT=$("$REGISTRY_SH" relabel application --new-label system 2>&1)
+NOOP_OUT=$("$REGISTRY_SH" relabel architecture --new-label architecture-renamed 2>&1)
 assert_contains "relabel no-op message" "$NOOP_OUT" "No-op"
 
 # Restore for error-case tests (cleanup trap also restores on exit)

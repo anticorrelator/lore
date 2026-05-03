@@ -11,17 +11,42 @@ prompts consume.
 
 ## 1. Purpose: immutable ids, mutable labels
 
-Scale **ids** (`implementation`, `subsystem`, `architectural`) are opaque and
-permanent once issued. Captured entries record the id at capture time — this
-reference never changes.
+Scale **ids** (`implementation`, `subsystem`, `architecture`, `abstract`) are
+opaque and permanent once issued. Captured entries record the id at capture
+time — this reference never changes.
 
 Scale **labels** are what CLIs, prompts, and UI surfaces render. Labels are
 mutable: when the vocabulary evolves (e.g., a new scale is added above
-`architectural`, making its scope narrower relative to the new top), the label
+`architecture`, making its scope narrower relative to the new top), the label
 can be updated without touching any entry file. The `label_history` array
 preserves prior label vocabularies so entries stamped with an older
 `scale_registry_version` can render under the vocabulary that was active when
 they were captured.
+
+### 1.1 Capture-time pinning convention
+
+The `scale_registry_version` field in an entry's META block records the
+**registry version active when the entry was captured** — it is a historical
+record, not a mirror of the current registry. It is written once at capture
+and never bulk-rewritten when the registry bumps. This is the same shape as
+the sibling `captured_at_branch` / `captured_at_sha` / `captured_at_merge_base_sha`
+fields.
+
+Implication: after a registry bump, the corpus will hold a mix of versions
+(e.g., older entries stamped `1`, newer entries stamped `2`). This is correct.
+A "drift" between the stamp on existing entries and the live registry version
+is intended — the stamp is the lookup key into `label_history`, which is what
+allows old entries to render under the vocabulary that existed when they were
+captured.
+
+If you need to surface the live registry version, read it from
+`scripts/scale-registry.json` directly. Do not infer it from entry stamps.
+
+> **Schema-example caveat:** the JSON snippets below illustrate the registry
+> *shape* using the original v1 vocabulary (`implementation`, `subsystem`,
+> `architectural`). The live registry has since advanced — see
+> `scripts/scale-registry.json` for the current state. The worked examples
+> remain as the documented record of the v1→v2 migration shape.
 
 ---
 

@@ -28,6 +28,7 @@ QUERY=""
 EXCLUDE_BACKLINKS=""
 SCALE_SET=""
 WORK_ITEM=""
+NO_PREFERENCES=0
 
 # --- Parse args ---
 while [[ $# -gt 0 ]]; do
@@ -59,6 +60,10 @@ while [[ $# -gt 0 ]]; do
     --work-item)
       WORK_ITEM="$2"
       shift 2
+      ;;
+    --no-preferences)
+      NO_PREFERENCES=1
+      shift
       ;;
     -*)
       echo "Unknown option: $1" >&2
@@ -110,6 +115,15 @@ if [[ $USE_FTS -eq 0 ]]; then
   exit 0
 fi
 
+# --- Preferences side-channel (always-on; --no-preferences opts out) ---
+PREF_RESULTS="[]"
+if [[ $NO_PREFERENCES -eq 0 ]]; then
+  PREF_RESULTS=$(python3 "$LORE_SEARCH" search-preferences "$KNOWLEDGE_DIR" "$QUERY" --json --caller prefetch 2>/dev/null || true)
+  if [[ -z "$PREF_RESULTS" ]]; then
+    PREF_RESULTS="[]"
+  fi
+fi
+
 # --- Build search command ---
 SEARCH_ARGS=("search" "$KNOWLEDGE_DIR" "$QUERY" "--limit" "$LIMIT" "--json" "--caller" "prefetch")
 if [[ "$TYPE" != "all" ]]; then
@@ -120,13 +134,18 @@ SEARCH_ARGS+=("--scale-set" "$SCALE_SET")
 # --- Run search ---
 RESULTS=$(python3 "$LORE_SEARCH" "${SEARCH_ARGS[@]}" 2>/dev/null || true)
 
-if [[ -z "$RESULTS" || "$RESULTS" == "[]" ]]; then
-  # Zero results — output nothing
+if [[ -z "$RESULTS" ]]; then
+  RESULTS="[]"
+fi
+
+# Exit early only when BOTH pools are empty
+if [[ "$RESULTS" == "[]" && "$PREF_RESULTS" == "[]" ]]; then
   exit 0
 fi
 
 # --- Format output ---
 export _PK_RESULTS="$RESULTS"
+export _PK_PREF_RESULTS="$PREF_RESULTS"
 export _PK_EXCLUDE_BACKLINKS="$EXCLUDE_BACKLINKS"
 export _PK_SCRIPT_DIR="$SCRIPT_DIR"
 export _PK_REQUESTED_SCALES="$SCALE_SET"
@@ -185,8 +204,14 @@ query = sys.argv[3]
 pk_search_path = sys.argv[4]
 
 results = json.loads(os.environ["_PK_RESULTS"])
+pref_results = json.loads(os.environ.get("_PK_PREF_RESULTS", "[]"))
 
-if not results:
+# D5: dedupe preferences out of main pool by (file_path, heading)
+if pref_results:
+    pref_keys = {(r["file_path"], r["heading"]) for r in pref_results}
+    results = [r for r in results if (r.get("file_path"), r.get("heading")) not in pref_keys]
+
+if not results and not pref_results:
     sys.exit(0)
 
 
@@ -409,7 +434,57 @@ def _status_visible(entry_status: str, role: str) -> bool:
 
 _requested_label = ",".join(sorted(requested_scales)) if requested_scales else ""
 
+
+def _render_preferences_block_summary(prefs):
+    """Render the Preferences block for summary format. Bypasses scale/status filters."""
+    if not prefs:
+        return
+    print(f'## Preferences')
+    print(f'Scoped working-style guidance matching: "{query}"')
+    print()
+    for r in prefs:
+        snippet = r.get("snippet", "")[:200]
+        if len(r.get("snippet", "")) > 200:
+            snippet += "..."
+        score = r.get("score", 0)
+        print(f'- **{r["heading"]}** ({r["file_path"]}, score: {score}): {snippet}')
+    print()
+
+
+def _render_preferences_block_prompt(prefs):
+    """Render the Preferences block for prompt format. Bypasses scale/status filters."""
+    if not prefs:
+        return
+    print(f'## Preferences')
+    print(f'Scoped working-style guidance matching: "{query}"')
+    for r in prefs:
+        backlink = build_backlink_from_result(r)
+        trust_line = render_trust_stamp(r, knowledge_dir)
+        content = _resolve_content_pref(backlink) or r.get("snippet", "")
+        print(f'\n### {r["heading"]} (from {r["file_path"]})')
+        print(trust_line)
+        print(content)
+    print()
+
+
+def _resolve_content_pref(backlink: str) -> str:
+    """Return full resolved content for a preferences backlink, or '' on failure."""
+    try:
+        proc = subprocess.run(
+            ["python3", pk_search_path, "resolve", knowledge_dir, backlink, "--json"],
+            capture_output=True, text=True, timeout=10
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            resolved = json.loads(proc.stdout.strip())
+            if resolved and isinstance(resolved, list) and resolved[0].get("resolved"):
+                return resolved[0]["content"]
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, IndexError):
+        pass
+    return ""
+
+
 if fmt == "summary":
+    _render_preferences_block_summary(pref_results)
     print(f'## Prior Knowledge')
     if scale_context:
         print(f'Results from knowledge store for: "{query}" (scale-set: {_requested_label})')
@@ -442,6 +517,7 @@ if fmt == "summary":
     sys.exit(0)
 
 # prompt format — resolve each result to full content
+_render_preferences_block_prompt(pref_results)
 print(f'## Prior Knowledge')
 if scale_context:
     print(f'Results from knowledge store for: "{query}" (scale-set: {_requested_label})')

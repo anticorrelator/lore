@@ -143,8 +143,8 @@ EC=$?
 assert_exit_nonzero "capture exits non-zero for invalid enum" "$EC"
 assert_contains "error lists implementation" "$OUT" "implementation"
 assert_contains "error lists subsystem"      "$OUT" "subsystem"
-assert_contains "error lists architectural"  "$OUT" "architectural"
-assert_contains "error lists application"    "$OUT" "application"
+assert_contains "error lists architecture"   "$OUT" "architecture"
+assert_contains "error lists abstract"        "$OUT" "abstract"
 
 echo ""
 echo "Test 1.3: capture --scale=unknown rejected (not in registry)"
@@ -152,7 +152,7 @@ setup_knowledge_store
 OUT=$(bash "$CAPTURE_SH" --insight "test" --context "ctx" --confidence high --scale=unknown 2>&1)
 EC=$?
 assert_exit_nonzero "capture exits non-zero for scale=unknown" "$EC"
-assert_contains "unknown rejection mentions valid values" "$OUT" "scale must be one of:"
+assert_contains "unknown rejection mentions valid values" "$OUT" "is not a registered scale id"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section 2: Capture success — all 4 buckets + META written
@@ -161,7 +161,7 @@ echo ""
 echo "--- Section 2: Capture success — all 4 buckets + META written ---"
 echo ""
 
-for BUCKET in implementation subsystem architectural application; do
+for BUCKET in implementation subsystem architecture abstract; do
   setup_knowledge_store
   OUT=$(bash "$CAPTURE_SH" \
     --insight "e2e bucket $BUCKET test" \
@@ -442,7 +442,7 @@ if [[ ! -f "$REGISTRY" ]]; then
   echo "  FAIL: scale-registry.json not found at $REGISTRY"; FAIL=$((FAIL + 1))
 else
   echo "Test 9.1: all 4 scale buckets registered"
-  for BUCKET in implementation subsystem architectural application; do
+  for BUCKET in implementation subsystem architecture abstract; do
     python3 -c "
 import json, sys
 reg = json.load(open(sys.argv[1]))

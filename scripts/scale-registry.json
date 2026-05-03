@@ -12,16 +12,5 @@
     "architecture": "architecture",
     "abstract": "abstract"
   },
-  "label_history": [
-    {
-      "version": 2,
-      "relabeled_at": "2026-04-29T06:55:01Z",
-      "labels": {
-        "implementation": "implementation",
-        "subsystem": "subsystem",
-        "architectural": "architectural",
-        "application": "application"
-      }
-    }
-  ]
+  "label_history": []
 }

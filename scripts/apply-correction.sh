@@ -19,7 +19,7 @@
 #
 # With --check-escalation, also evaluates L3 conditions:
 #   (a) entry has >= N inbound backlinks (default 3) in _manifest.json
-#   (b) entry's scale: field in META == 'architectural'
+#   (b) entry's scale: field in META == 'architecture'
 #   (c) entry's META has safety-relevant: true or evaluation-rule-relevant: true
 #   (d) --evidence text contains prior-doctrine language ("prior", "supersedes", or a quoted phrase)
 #   If any condition holds (L3 escalation):
@@ -240,9 +240,9 @@ except (OSError, UnicodeDecodeError):
 meta_blocks = list(re.finditer(r"<!--(.*?)-->", content, re.DOTALL))
 meta_inner = meta_blocks[-1].group(1) if meta_blocks else ""
 
-# (b) scale: architectural
-if re.search(r"\|\s*scale:\s*architectural\b", meta_inner):
-    reasons.append("architectural-scale")
+# (b) scale: architecture
+if re.search(r"\|\s*scale:\s*architecture\b", meta_inner):
+    reasons.append("architecture-scale")
 
 # (c) safety or evaluation-rule tags
 if re.search(r"\|\s*safety-relevant:\s*true\b", meta_inner):

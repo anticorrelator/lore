@@ -54,6 +54,14 @@ if [[ "$MODE_QUIET" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Snapshot caller's LORE_DATA_DIR before the installation-layout block below
+# clobbers it. The role-config check (Check 8) must mirror lib.sh::resolve_role,
+# which honors ${LORE_DATA_DIR:-$HOME/.lore}; using the post-clobber value would
+# diverge from resolve_role's actual lookup path.
+# ---------------------------------------------------------------------------
+ROLE_CONFIG_DATA_DIR="${LORE_DATA_DIR:-$HOME/.lore}"
+
+# ---------------------------------------------------------------------------
 # Resolve repo directory from the ~/.lore/scripts symlink
 # ---------------------------------------------------------------------------
 LORE_SCRIPTS_LINK="$HOME/.lore/scripts"
@@ -272,6 +280,59 @@ for hook_type, entries in hooks.items():
     fi
   done
 fi
+
+# ---------------------------------------------------------------------------
+# Check 8: Role config files parse and contain a valid role value
+# Mirrors lib.sh::resolve_role precedence (per-repo, then user-level), but
+# surfaces malformed configs that resolve_role silently falls through on.
+# Path resolution uses ROLE_CONFIG_DATA_DIR (snapshot of caller's
+# LORE_DATA_DIR before this script's installation-layout block clobbered it).
+# ---------------------------------------------------------------------------
+CHECKED+=("role_config")
+
+_check_role_config() {
+  local config_file="$1"
+  local artifact_label="$2"
+  [[ -f "$config_file" ]] || return 0
+  local result
+  result=$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+except Exception:
+    print("unparseable")
+    sys.exit(0)
+r = d.get("role")
+if r in ("maintainer", "contributor"):
+    print("ok")
+elif r is None:
+    print("ok")
+else:
+    print("invalid:" + str(r))
+' "$config_file" 2>/dev/null) || result="unparseable"
+  case "$result" in
+    ok) return 0 ;;
+    unparseable)
+      add_issue "role_config" "malformed" "$artifact_label" \
+        "config file is not valid JSON: $config_file" ;;
+    invalid:*)
+      local bad_role="${result#invalid:}"
+      add_issue "role_config" "malformed" "$artifact_label" \
+        "role value '$bad_role' not in {maintainer, contributor}: $config_file" ;;
+  esac
+}
+
+# Per-repo config: $KDIR/config.json (resolve-repo.sh may exit non-zero when
+# agent is disabled or outside a repo — both cases are silent skips).
+_REPO_KDIR=$("$SCRIPT_DIR/resolve-repo.sh" 2>/dev/null) || _REPO_KDIR=""
+if [[ -n "$_REPO_KDIR" ]]; then
+  _check_role_config "$_REPO_KDIR/config.json" "$_REPO_KDIR/config.json"
+fi
+
+# User-level fallback: $ROLE_CONFIG_DATA_DIR/config/settings.json
+_check_role_config "$ROLE_CONFIG_DATA_DIR/config/settings.json" \
+  "$ROLE_CONFIG_DATA_DIR/config/settings.json"
 
 # ---------------------------------------------------------------------------
 # Determine overall status
