@@ -69,6 +69,23 @@ assert_file_contains() {
   fi
 }
 
+assert_file_not_contains() {
+  local label="$1" filepath="$2" unexpected="$3"
+  if [[ ! -f "$filepath" ]]; then
+    echo "  FAIL: $label (file does not exist: $filepath)"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if grep -qF -- "$unexpected" "$filepath"; then
+    echo "  FAIL: $label"
+    echo "    Did not expect file to contain: $unexpected"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS: $label"
+    PASS=$((PASS + 1))
+  fi
+}
+
 run_capture() {
   bash "$CAPTURE_SH" "$@" 2>&1
   echo "EXIT:$?"
@@ -144,6 +161,10 @@ for BUCKET in implementation subsystem architecture abstract; do
   assert_file_contains "scale=$BUCKET written to entry metadata" \
     "$ENTRY" \
     "scale: $BUCKET"
+  # Verify the obsolete scale_registry_version field is not emitted
+  assert_file_not_contains "scale=$BUCKET META omits scale_registry_version" \
+    "$ENTRY" \
+    "scale_registry_version"
 done
 
 # =============================================

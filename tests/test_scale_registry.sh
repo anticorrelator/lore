@@ -58,6 +58,19 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local label="$1" output="$2" unexpected="$3"
+  if echo "$output" | grep -qF -- "$unexpected"; then
+    echo "  FAIL: $label"
+    echo "    Did not expect to find: $unexpected"
+    echo "    Got: $(echo "$output" | head -5)"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS: $label"
+    PASS=$((PASS + 1))
+  fi
+}
+
 # --- Setup: save/restore the real registry around relabel tests ---
 TMP_DIR=$(mktemp -d)
 REAL_REGISTRY="$SCRIPT_DIR/scale-registry.json"
@@ -108,30 +121,29 @@ assert_contains "get-adjacency unknown: error message" "$ADJ_ERR" "not found"
 echo ""
 echo "=== relabel: round-trip (modifies real registry, restored by trap) ==="
 
+OLD_VERSION=$("$REGISTRY_SH" get-version)
+
 RELABEL_OUT=$("$REGISTRY_SH" relabel architecture --new-label architecture-renamed 2>&1)
 assert_contains "relabel architecture->architecture-renamed: success message" "$RELABEL_OUT" "Relabeled"
 assert_contains "relabel architecture->architecture-renamed: shows old label"  "$RELABEL_OUT" "architecture"
 assert_contains "relabel architecture->architecture-renamed: shows new label"  "$RELABEL_OUT" "architecture-renamed"
 
-# Version should have bumped from 2 to 3
+# Version should have bumped by 1
 NEW_VERSION=$("$REGISTRY_SH" get-version)
-assert_equal "relabel bumps version to 3" "$NEW_VERSION" "3"
+assert_equal "relabel bumps version by 1" "$NEW_VERSION" "$((OLD_VERSION + 1))"
 
-# get-label at current version returns new label
+# get-label returns new label after relabel
 NEW_LABEL=$("$REGISTRY_SH" get-label architecture)
 assert_equal "get-label architecture = architecture-renamed after relabel" "$NEW_LABEL" "architecture-renamed"
 
-# get-label at version 2 returns old label (historical) — D2 cleared label_history,
-# so v1 is intentionally unrepresented; v2 is the version the relabel just superseded
-# and is recoverable through the freshly-written history entry.
-OLD_LABEL=$("$REGISTRY_SH" get-label --version 2 architecture)
-assert_equal "get-label --version 2 architecture = architecture (historical)" "$OLD_LABEL" "architecture"
+# 'labels' was updated in the registry JSON
+REGISTRY_AFTER=$(cat "$REAL_REGISTRY")
+assert_contains "registry.labels.architecture updated to new label" \
+  "$REGISTRY_AFTER" "\"architecture\": \"architecture-renamed\""
 
-# D7 negative: --version 1 is not represented in registry history (D2 cleared it).
-# get-label must error rather than silently fall through to current labels.
-V1_ERR=$("$REGISTRY_SH" get-label --version 1 architecture 2>&1 || true)
-assert_contains "get-label --version 1 architecture: not represented in registry history" \
-  "$V1_ERR" "not represented in registry history"
+# No label_history field is created by relabel
+assert_not_contains "registry has no label_history field after relabel" \
+  "$REGISTRY_AFTER" "label_history"
 
 # Relabeling to same name is a no-op (exit 0, message says no-op)
 NOOP_OUT=$("$REGISTRY_SH" relabel architecture --new-label architecture-renamed 2>&1)

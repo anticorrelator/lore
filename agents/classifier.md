@@ -16,7 +16,7 @@ If you cannot honestly declare `confidence: high` (see "Confidence self-check" b
 
 Read these resources from `{{kdir}}`:
 - Entry index: `{{kdir}}/_manifest.json` (full entry list with titles, categories, scale, status, parents, inferred_parents, metadata)
-- Scale registry: `~/.lore/scripts/scale-registry.json` (canonical scale ids, labels, label_history)
+- Scale registry: `~/.lore/scripts/scale-registry.json` (canonical scale ids and labels)
 - Audit set: `{{kdir}}/_meta/audit-set.json` — the union of flagged, top-central, and rotating-bucket entries for this cycle. Tasks 1 and 2 operate only on entries in this set.
 
 ## Classification Decision Tree

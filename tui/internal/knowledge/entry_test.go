@@ -10,7 +10,7 @@ import (
 const (
 	legacyComment = `<!-- learned: 2026-04-01 | confidence: high | source: manual | related_files: a.md,b.md -->`
 
-	newCaptureComment = `<!-- learned: 2026-04-29 | confidence: unaudited | source: lore-promote | related_files: scripts/load-knowledge.sh,scripts/load-threads.sh | producer_role: worker | protocol_slot: implement-step-3 | template_version: 68bb71c2a0b1 | source_artifact_ids: load-knowledge-pending-captures-signal-p1-1 | work_item: condense-oversized-claude-md-fragments | scale: subsystem | scale_registry_version: 2 | captured_at_branch: memory-refactor | captured_at_sha: 813696ee72f0303f617f1715222df2ed8ea59cef | captured_at_merge_base_sha: 91b82fdf0da6802003dd2d66a7de25f61d91fc8a | status: current -->`
+	newCaptureComment = `<!-- learned: 2026-04-29 | confidence: unaudited | source: lore-promote | related_files: scripts/load-knowledge.sh,scripts/load-threads.sh | producer_role: worker | protocol_slot: implement-step-3 | template_version: 68bb71c2a0b1 | source_artifact_ids: load-knowledge-pending-captures-signal-p1-1 | work_item: condense-oversized-claude-md-fragments | scale: subsystem | captured_at_branch: memory-refactor | captured_at_sha: 813696ee72f0303f617f1715222df2ed8ea59cef | captured_at_merge_base_sha: 91b82fdf0da6802003dd2d66a7de25f61d91fc8a | status: current -->`
 
 	edgeSynopsisComment = `<!-- entry_id: architecture/harness/persistence-architecture | requesting_scale: subsystem | synthesized_at: 2026-04-28T17:46:50Z | parent_content_hash: 3414be116c86c664245cc346e1de855dd86af7cd805bffe48dfec82ac9684b20 | parent_template_version: unknown | synopsis_status: fallback -->`
 )

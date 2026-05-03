@@ -778,24 +778,6 @@ When no role exceeds 0.20: emit `scale_drift_rate: all roles within guardrail` w
 
 ---
 
-### Label revision rate
-
-**Source:** rows where `metric == "label_revision_rate"`.
-Key fields: `scale_id`, `value`, `run_id`.
-
-**Summary:** label revision rate per scale_id; flag `registry_design_flag` rows if present.
-
-**Top-3 highlights:** scale_ids with highest revision rate.
-
-```
-label_revision_rate:
-  <scale_id>: rate=<val>  [DESIGN-FLAG]
-  <scale_id>: rate=<val>
-  <scale_id>: rate=<val>
-```
-
----
-
 ### Scale signals (sidecar)
 
 **Source:** `$KDIR/_scorecards/retro-scale-access.jsonl` — the row whose `cycle_id` matches the current retro slug (most recent by `ts` if multiple).
@@ -1467,8 +1449,6 @@ Scorecard-first shape: delta surface + headline first, dimension scores relegate
     notable (non-improved): ...  (or "all improved")
 
   scale_drift_rate: <role>: drift=<val> [ABOVE-THRESHOLD if >0.20]  |  ...
-
-  label_revision_rate: <scale_id>: rate=<val> [DESIGN-FLAG if flagged]  |  ...
 
   scale signals (Step 2.9):
     declaration_coverage: <N>/<total> (<PCT>)

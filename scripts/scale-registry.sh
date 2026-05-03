@@ -3,7 +3,7 @@
 #
 # Usage:
 #   scale-registry.sh get-version
-#   scale-registry.sh get-label [--version N] <id>
+#   scale-registry.sh get-label <id>
 #   scale-registry.sh get-ids
 #   scale-registry.sh get-adjacency <id>
 #
@@ -21,13 +21,12 @@ usage() {
 Usage: scale-registry.sh <subcommand> [args...]
 
 Subcommands:
-  get-version              Print registry version integer
-  get-label [--version N] <id>
-                           Print current label for id, or historical label at version N
+  get-version              Print registry revision counter (integer)
+  get-label <id>           Print current label for id
   get-ids                  Print ordered scale ids (one per line)
   get-adjacency <id>       Print id-below and id-above (empty line when no neighbor)
   relabel <id> --new-label <label>
-                           Rename a scale's label; bumps version and appends to label_history
+                           Rename a scale's label; bumps the registry revision counter
 EOF
 }
 
@@ -59,58 +58,21 @@ EOF
     ;;
 
   get-label)
-    VERSION=""
-    ID=""
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --version) VERSION="$2"; shift 2 ;;
-        *) ID="$1"; shift ;;
-      esac
-    done
-    if [[ -z "$ID" ]]; then
+    if [[ $# -eq 0 ]]; then
       echo "Error: get-label requires <id>" >&2
       usage
       exit 1
     fi
-    python3 - "$REGISTRY" "$ID" "$VERSION" <<'EOF'
+    ID="$1"
+    python3 - "$REGISTRY" "$ID" <<'EOF'
 import json, sys
 reg = json.load(open(sys.argv[1]))
 id_arg = sys.argv[2]
-ver_arg = sys.argv[3]  # empty string if not provided
-
-if ver_arg:
-    target_ver = int(ver_arg)
-    current_ver = reg["version"]
-    # If asking for current version, fall through to labels map
-    if target_ver == current_ver:
-        labels = reg["labels"]
-    else:
-        # label_history entries record labels that were active *before* that version bump.
-        # Entry with version=N holds labels that were active at version N-1 only.
-        # To answer "what were the labels at target_ver?", look for the entry with
-        # version == target_ver + 1 (the relabel that superseded target_ver).
-        history = {e["version"]: e["labels"] for e in reg.get("label_history", [])}
-        labels = history.get(target_ver + 1)
-        if labels is None:
-            # Only fall back to current labels when target_ver >= current version.
-            # For target_ver < current version with no covering label_history entry,
-            # the version is not represented in registry history — error out rather
-            # than silently masking the gap with current labels.
-            if target_ver >= current_ver:
-                labels = reg["labels"]
-            else:
-                print(f"Error: version {target_ver} not represented in registry history", file=sys.stderr)
-                sys.exit(1)
-    if id_arg not in labels:
-        print(f"Error: id '{id_arg}' not found in registry at version {target_ver}", file=sys.stderr)
-        sys.exit(1)
-    print(labels[id_arg])
-else:
-    labels = reg["labels"]
-    if id_arg not in labels:
-        print(f"Error: id '{id_arg}' not found in registry", file=sys.stderr)
-        sys.exit(1)
-    print(labels[id_arg])
+labels = reg["labels"]
+if id_arg not in labels:
+    print(f"Error: id '{id_arg}' not found in registry", file=sys.stderr)
+    sys.exit(1)
+print(labels[id_arg])
 EOF
     ;;
 
@@ -163,7 +125,6 @@ EOF
     fi
     python3 - "$REGISTRY" "$ID" "$NEW_LABEL" <<'EOF'
 import json, sys
-from datetime import datetime, timezone
 
 reg_path = sys.argv[1]
 id_arg   = sys.argv[2]
@@ -184,13 +145,6 @@ if old_label == new_label:
 
 old_version = reg["version"]
 new_version = old_version + 1
-
-history_entry = {
-    "version": new_version,
-    "relabeled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "labels": dict(labels)
-}
-reg.setdefault("label_history", []).append(history_entry)
 
 reg["labels"][id_arg] = new_label
 reg["version"] = new_version

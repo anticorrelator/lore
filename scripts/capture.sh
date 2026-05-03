@@ -301,19 +301,6 @@ fi
 
 # Scale is always declared by the caller — emit directly.
 META="$META | scale: $SCALE"
-_registry="$SCRIPT_DIR/scale-registry.json"
-if [[ -f "$_registry" ]]; then
-  _scale_registry_version=$(python3 -c "
-import json, sys
-try:
-    print(json.load(open(sys.argv[1])).get('version', '1'))
-except Exception:
-    print('1')
-" "$_registry" 2>/dev/null || echo "1")
-else
-  _scale_registry_version="1"
-fi
-META="$META | scale_registry_version: $_scale_registry_version"
 
 # Branch-provenance trio (always emitted). Fill from git when the caller did
 # not pass an explicit value; fall back to "null" on any git failure so capture

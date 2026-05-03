@@ -168,7 +168,7 @@ Synthesize a renormalization plan with these actions:
 7. **Backlink list:** Cross-reference suggestions from the assessment's `suggested_backlinks` array. These are LLM-identified conceptual relationships not captured by existing backlinks or concordance edges. Present each with source, target, relationship type, and rationale for user review before writing.
 8. **Rescale list:** Entries whose `scale:` field in the META block disagrees with the classifier's current assignment. Change only the `scale:` field — path and content are unchanged. Schema per entry: `entry_id`, `from_scale`, `to_scale`, `reason`. The classifier may co-propose a batch rescale set when a relabel would leave outliers stranded at a now-misnamed scale.
 9. **Status-update list:** Entries whose `status:` field should transition from `current` to `superseded` or `historical` — typically because a newer entry covers the same ground. Schema per entry: `entry_id`, `from_status`, `to_status`, optional `successor_entry_id`, `reason`.
-10. **Relabel list:** Proposed renames of a scale's human-readable label in `scripts/scale-registry.json`. Does NOT touch any entry files — only edits the registry's `labels` map and bumps `scale_registry_version`. Schema per entry: `scale_id`, `current_label`, `new_label`, `reason`.
+10. **Relabel list:** Proposed renames of a scale's human-readable label in `scripts/scale-registry.json`. Does NOT touch any entry files — only edits the registry's `labels` map and bumps `version`. Schema per entry: `scale_id`, `current_label`, `new_label`, `reason`.
 
 Write the plan to `$KDIR/_meta/renormalize-plan.json` with structure:
 ```json
@@ -399,22 +399,6 @@ This reads the classifier's `disagreements` array, joins with `_manifest.json` f
 ```
 
 **Guardrail interpretation:** high `value` (disagreements / entries_audited) indicates the role is capturing entries at the wrong scale OR the scale matrix needs adjustment. This is diagnostic telemetry only — it must NOT feed `/evolve` citations or primary scoring.
-
-### Emit label_revision_rate guardrail rows
-
-Emit one `label_revision_rate` telemetry row per scale_id based on `scripts/scale-registry.json` label_history:
-
-```bash
-bash ~/.lore/scripts/renormalize-emit-label-revision-rate.sh \
-  --kdir "$KDIR" \
-  --run-id "renorm-<timestamp>"
-```
-
-Counts label changes per scale_id in the last 5 registry versions (N=5). Emits:
-- `label_revision_rate` row per scale_id (always)
-- `registry_design_flag` row per scale_id when `revisions_in_last_N_runs >= 2` — signals registry SHAPE misalignment for `/retro` narrative review
-
-**Guardrail interpretation:** repeated relabels across consecutive audits indicate the scale boundaries themselves are ill-defined, not just individual entries. Flag surfaces in `/retro` only — must NOT feed `/evolve` citations or primary scoring.
 
 ### Emit retention_after_renormalize rows
 
