@@ -369,6 +369,7 @@ echo "$(timestamp_iso),$SOURCE,$CATEGORY,$CONFIDENCE,$TEMPLATE_VERSION" >> "$LOG
 # --- Run manifest update ---
 if [[ $SKIP_MANIFEST -eq 0 ]]; then
   "$SCRIPT_DIR/update-manifest.sh" > /dev/null 2>&1 || true
+  bash "$SCRIPT_DIR/export-obsidian.sh" --file "$TARGET_FILE" > /dev/null 2>&1 || true
 fi
 
 # --- Output ---

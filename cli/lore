@@ -90,6 +90,9 @@ Commands:
   backlinks    Backlink management (see: lore backlinks --help)
   rebuild      Rebuild and reinstall the lore-tui binary
   doctor       Check installation health and detect stale components
+  export-obsidian
+               Export the knowledge store as an Obsidian-flavor vault
+               (see: lore export-obsidian --help)
 
   work         Work item management (see: lore work --help)
   followup     Follow-up artifact management (see: lore followup --help)
@@ -1742,6 +1745,10 @@ case "$1" in
   doctor)
     shift
     "$SCRIPTS_DIR/doctor.sh" "$@"
+    ;;
+  export-obsidian)
+    shift
+    "$SCRIPTS_DIR/export-obsidian.sh" "$@"
     ;;
   rebuild)
     if ! command -v go >/dev/null 2>&1; then

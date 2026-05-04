@@ -498,6 +498,13 @@ Update manifest:
 bash ~/.lore/scripts/update-manifest.sh
 ```
 
+Mirror the post-renormalize source state to the Obsidian vault (no-op when
+`~/.lore/config/obsidian.json` is absent; full re-export propagates file
+moves, deletes, and inbound-link rewrites):
+```bash
+bash ~/.lore/scripts/export-obsidian.sh --full
+```
+
 Clean up intermediate reports from `$KDIR/_meta/` — delete:
 - `staleness-report.json`
 - `usage-report.json`

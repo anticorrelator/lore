@@ -277,9 +277,11 @@ fi
 # Update the work index
 if [[ $JSON_MODE -eq 1 ]]; then
   bash "$SCRIPT_DIR/update-work-index.sh" "$TARGET_DIR" > /dev/null 2>&1 || true
+  bash "$SCRIPT_DIR/export-obsidian.sh" --work-hubs > /dev/null 2>&1 || true
   json_output "$(cat "$WORK_DIR/$SLUG/_meta.json")"
 fi
 
 bash "$SCRIPT_DIR/update-work-index.sh" "$TARGET_DIR"
+bash "$SCRIPT_DIR/export-obsidian.sh" --work-hubs > /dev/null 2>&1 || true
 
 echo "Created work item '$TITLE' at $WORK_DIR/$SLUG"
