@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # agent-toggle/disable.sh — Disable lore agent integration globally
 # Atomically writes agent.json enabled=false (write-temp-then-rename).
-# Surface removal (symlinks, CLAUDE.md) delegated to helpers — stubs for Phases 3-4.
+# Removes per-harness skill/agent symlinks (resolve_harness_install_path
+# {skills,agents}) and clears the active harness's instruction file via
+# scripts/assemble-instructions.sh --framework <active> --disable.
 # Usage: bash disable.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../config.sh"
+source "$SCRIPT_DIR/../lib.sh"
 
 AGENT_JSON="${LORE_DATA_DIR}/config/agent.json"
 AGENT_JSON_TMP="${AGENT_JSON}.tmp.$$"
-CLAUDE_DIR="${HOME}/.claude"
 
 # Detect lore repo path from ~/.lore/scripts symlink
 LORE_SCRIPTS_LINK="${LORE_DATA_DIR}/scripts"
@@ -29,7 +31,17 @@ remove_symlinks() {
 
   local manifest_entries=()
 
-  for dir in "$CLAUDE_DIR/skills" "$CLAUDE_DIR/agents"; do
+  # Per-harness install dirs via harness_path_or_empty (T71). The helper
+  # collapses unsupported sentinel + lookup error into an empty string;
+  # both cases mean "no symlinks to remove for this kind".
+  local dirs=()
+  for kind in skills agents; do
+    local resolved
+    resolved=$(harness_path_or_empty "$kind")
+    [[ -n "$resolved" ]] && dirs+=("$resolved")
+  done
+
+  for dir in "${dirs[@]}"; do
     [[ -d "$dir" ]] || continue
     for link in "$dir"/*; do
       [[ -L "$link" ]] || continue
@@ -57,13 +69,15 @@ remove_symlinks() {
   fi
 }
 
-# --- Phase 4: clear lore content from CLAUDE.md via sentinel ---
+# --- Phase 4: clear lore content from the active harness's instruction file ---
 clear_claude_md() {
-  local assembler="${LORE_DATA_DIR}/scripts/assemble-claude-md.sh"
+  local assembler="${LORE_DATA_DIR}/scripts/assemble-instructions.sh"
+  local active
+  active=$(resolve_active_framework 2>/dev/null) || active="claude-code"
   if [[ -x "$assembler" ]]; then
-    "$assembler" --disable
+    "$assembler" --framework "$active" --disable
   else
-    echo "  [warn] assemble-claude-md.sh not found — CLAUDE.md not updated" >&2
+    echo "  [warn] assemble-instructions.sh not found — instruction file not updated" >&2
   fi
 }
 

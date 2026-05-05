@@ -1,0 +1,418 @@
+{
+  "version": 1,
+  "description": "Capability registry for lore harness adapters. Each framework profile names the support level (`full`, `partial`, `fallback`, `none`) for every capability lore depends on. Every non-`none` cell points to an evidence id defined in adapters/capabilities-evidence.md so callers can audit when the claim was last verified. Lore code branches on capability support, not framework name (D1, D6, D8 in the multi-framework-agent-support plan).",
+  "support_levels": {
+    "full": "Native support that matches lore's protocol semantics with no degradation.",
+    "partial": "Native surface exists but does not cover every semantic lore requires; degraded notes describe the gap.",
+    "fallback": "No native surface; lore implements the capability through a wrapper, MCP shim, or lead-side post-hoc check. Behavior is best-effort and not equivalent to native.",
+    "none": "Capability is unavailable on this harness; callers must degrade explicitly and surface the unsupported state in `lore status`."
+  },
+  "capabilities": {
+    "instructions": "Loads framework-agnostic protocol text (CLAUDE.md/AGENTS.md style) into every session.",
+    "skills": "Discovers and loads SKILL.md files at session start so user-invoked /<skill> commands route to lore protocols.",
+    "mcp": "Registers Model Context Protocol servers with the harness so lore-provided tools are reachable from agents.",
+    "session_start_hook": "Fires a lore-controlled hook at session start; used to load knowledge, work, threads, and pending capture queues.",
+    "stop_hook": "Fires a lore-controlled hook at agent stop / end-of-turn; used to detect novelty candidates and persist plans.",
+    "pre_compact_hook": "Fires a lore-controlled hook before context compaction; used to prompt thread/work updates before context is dropped.",
+    "tool_hooks": "Fires lore-controlled hooks before/after tool calls; used by guard-work-writes and similar invariant enforcers.",
+    "permission_hooks": "Allows lore-installed policy to approve or deny tool invocations (PreToolUse-style block decisions).",
+    "task_completed_hook": "Fires a lore-controlled hook at worker task completion that can block on a missing/invalid completion report.",
+    "subagents": "Spawns fresh subagent contexts for fanout (worker, researcher, reviewer) so each receives a clean context window.",
+    "team_messaging": "Inter-agent messaging primitive (TeamCreate / SendMessage / shared team-state) so a lead can coordinate workers in flight.",
+    "transcript_provider": "Exposes a parseable session/transcript artifact that capture, digest, novelty, and ceremony-detection scripts can consume.",
+    "headless_runner": "Non-interactive `<harness> -p <prompt>` mode used by audit-artifact.sh (correctness-gate, curator, reverse-auditor) and other batch judges.",
+    "plugin_runtime": "Native plugin/extension runtime where lore can register code (TypeScript, shell, etc.) that participates in lifecycle events.",
+    "model_routing": "Whether the harness exposes a single model/provider per session or can route per-spawn to multiple providers; values: `single` or `multi`."
+  },
+  "tools": {
+    "gh_cli": "GitHub CLI (`gh`) on PATH for PR/issue read+write workflows. Sourced from the host environment, not the harness — no harness exposes it. Skills that consume PR diffs/comments/reviews require it; degradation is a hard `unsupported` rather than `partial` because the data is unreachable without it."
+  },
+  "skills": {
+    "_description": "Per-skill capability + tool requirements (T21). The `requires` array names capability ids from `capabilities` above and tool ids from `tools` above. T41 reads this manifest to gate skill availability per active harness: a skill is `full` when every requirement has support level `full` on the active framework, `partial` when at least one requirement is `partial` or `fallback`, and `unavailable` when any requirement is `none`. Skills with an empty `requires` array are framework-agnostic. The set is closed: adding a new skill requires adding a row here; adding a new capability or tool requires adding it to the `capabilities` or `tools` map first.",
+    "bootstrap": {
+      "summary": "Bootstrap a knowledge store by exploring codebase architecture with a worker fanout team.",
+      "requires": ["subagents", "team_messaging", "task_completed_hook"],
+      "notes": "Spawns a worker team via TeamCreate + TaskCreate; lead synthesizes returns. Without team_messaging, falls back to lead-orchestrated single-agent exploration (slower; no parallel workers)."
+    },
+    "evolve": {
+      "summary": "Review and apply accumulated protocol evolution suggestions from retro and self-test.",
+      "requires": [],
+      "notes": "Reads/writes knowledge store files inline; no subagent fanout, no PR I/O."
+    },
+    "followup-discuss": {
+      "summary": "Structured discussion of followup findings with source-aware routing.",
+      "requires": [],
+      "notes": "Interactive conversation; reads knowledge store + work-item state."
+    },
+    "implement": {
+      "summary": "Execute a spec's plan with a knowledge-aware worker team and capture observations.",
+      "requires": ["subagents", "team_messaging", "task_completed_hook"],
+      "notes": "Lead spawns worker team via TeamCreate; workers emit Tier 2 evidence + completion reports validated by task_completed_hook. Without task_completed_hook, lead falls back to post-collection validation (D9 fallback mode)."
+    },
+    "memory": {
+      "summary": "Manage the per-project knowledge store (search, view, curate, heal, init).",
+      "requires": [],
+      "notes": "Operates on the knowledge store via the lore CLI; no subagent fanout."
+    },
+    "pr-blast-radius": {
+      "summary": "Focused lens review: trace PR change impact on code outside the diff.",
+      "requires": ["gh_cli"],
+      "notes": "Reads PR diff via `gh pr diff` and `gh pr view`."
+    },
+    "pr-correctness": {
+      "summary": "Focused lens review: trace logic paths for correctness bugs in a PR.",
+      "requires": ["gh_cli"]
+    },
+    "pr-create": {
+      "summary": "Create a GitHub pull request from the current branch.",
+      "requires": ["gh_cli"],
+      "notes": "Calls `gh pr create`."
+    },
+    "pr-interface-clarity": {
+      "summary": "Focused lens review: evaluate interface clarity, naming, and abstraction coherence.",
+      "requires": ["gh_cli"]
+    },
+    "pr-pair-review": {
+      "summary": "Interactive pair-review with knowledge-enriched turn protocol.",
+      "requires": ["gh_cli"]
+    },
+    "pr-regressions": {
+      "summary": "Focused lens review: detect capability loss from deletions and modifications.",
+      "requires": ["gh_cli"]
+    },
+    "pr-review": {
+      "summary": "Holistic multi-lens PR review with adaptive lens selection and cross-lens synthesis.",
+      "requires": ["gh_cli", "subagents"],
+      "notes": "Fans out per-lens Agent tasks in parallel; without subagents, falls back to sequential lens execution (slower; same coverage)."
+    },
+    "pr-revise": {
+      "summary": "Read all PR review feedback and create a work item with categorized findings.",
+      "requires": ["gh_cli"]
+    },
+    "pr-security": {
+      "summary": "Focused lens review: evaluate security vulnerabilities, edge cases, adversarial paths.",
+      "requires": ["gh_cli"]
+    },
+    "pr-self-review": {
+      "summary": "Author-calibrated self-review: parallel lens pre-scan then grounding evaluation.",
+      "requires": ["gh_cli", "subagents"],
+      "notes": "Fans out per-lens Skill invocations in parallel; without subagents, falls back to sequential lens execution."
+    },
+    "pr-test-quality": {
+      "summary": "Focused lens review: evaluate test coverage, quality, and assertion rigor.",
+      "requires": ["gh_cli"]
+    },
+    "pr-thematic": {
+      "summary": "Focused lens review: evaluate thematic coherence and scope.",
+      "requires": ["gh_cli"]
+    },
+    "pr-user-impact": {
+      "summary": "Focused lens review: evaluate user-facing impact of PR changes.",
+      "requires": ["gh_cli"]
+    },
+    "remember": {
+      "summary": "Capture insights to knowledge store and update conversational threads.",
+      "requires": [],
+      "notes": "Reads pending-captures queue (set up by stop_hook); the queue surface itself is a stop_hook concern, but `/remember` runs even when the queue is empty so it does not require stop_hook to invoke."
+    },
+    "renormalize": {
+      "summary": "Full knowledge store renormalization via orchestrated multi-agent flow.",
+      "requires": ["subagents"],
+      "notes": "Spawns Explore subagents for parallel category analysis; without subagents, falls back to lead-only sequential renormalization."
+    },
+    "retro": {
+      "summary": "Evaluate knowledge system effectiveness after a work cycle.",
+      "requires": [],
+      "notes": "Reads execution-log.md, worker SendMessage history, and knowledge store; emits a journal entry. No fanout."
+    },
+    "self-test": {
+      "summary": "Evaluate the lore memory system across 8 dimensions via subagent evaluators.",
+      "requires": ["subagents"],
+      "notes": "Each dimension runs in a subagent for clean-context evaluation; without subagents, falls back to sequential same-context evaluation (degraded — context contamination affects scores)."
+    },
+    "spec": {
+      "summary": "Create a technical specification via team-based investigation and synthesis.",
+      "requires": ["subagents", "team_messaging", "task_completed_hook"],
+      "notes": "Spec-short flow uses single-pass synthesis (subagents only); full /spec spawns researcher fanout via TeamCreate. Without team_messaging, full /spec degrades to spec-short shape."
+    },
+    "work": {
+      "summary": "Check project status, manage work items, search remaining tasks.",
+      "requires": [],
+      "notes": "Operates via the `lore work` CLI; no harness-side primitives required."
+    }
+  },
+  "frameworks": {
+    "claude-code": {
+      "id": "claude-code",
+      "display_name": "Claude Code",
+      "binary": "claude",
+      "description": "Reference baseline. Supports the full lore protocol surface: SessionStart/Stop/PreCompact/PreToolUse/SessionEnd/TaskCompleted hooks, ~/.claude/skills + ~/.claude/agents + ~/.claude/CLAUDE.md packaging, TeamCreate/SendMessage team messaging, and JSONL transcripts under ~/.claude/projects/.",
+      "model_routing": {
+        "shape": "single",
+        "evidence": "claude-code-model-routing",
+        "notes": "Single Anthropic provider per session; the role->model map collapses to one binding without affecting call sites."
+      },
+      "install_paths": {
+        "instructions":     "$HOME/.claude/CLAUDE.md",
+        "skills":           "$HOME/.claude/skills",
+        "agents":           "$HOME/.claude/agents",
+        "settings":         "$HOME/.claude/settings.json",
+        "teams":            "$HOME/.claude/teams",
+        "ephemeral_plans":  "$HOME/.claude/plans",
+        "mcp_servers":      "$HOME/.claude/settings.json"
+      },
+      "capabilities": {
+        "instructions": {
+          "support": "full",
+          "evidence": "claude-code-instructions",
+          "notes": "~/.claude/CLAUDE.md assembled from claude-md/* fragments by scripts/assemble-claude-md.sh."
+        },
+        "skills": {
+          "support": "full",
+          "evidence": "claude-code-skills",
+          "notes": "~/.claude/skills/<name> symlinks to repo skills/<name>/."
+        },
+        "mcp": {
+          "support": "full",
+          "evidence": "claude-code-mcp",
+          "notes": "MCP servers registered in ~/.claude/settings.json under `mcpServers`."
+        },
+        "session_start_hook": {
+          "support": "full",
+          "evidence": "claude-code-session-start-hook",
+          "notes": "SessionStart hook chain runs auto-reindex -> load-knowledge -> load-work -> load-threads -> extract-session-digest."
+        },
+        "stop_hook": {
+          "support": "full",
+          "evidence": "claude-code-stop-hook",
+          "notes": "Stop hook runs stop-novelty-check.py + check-plan-persistence.py with JSON stdout decision protocol."
+        },
+        "pre_compact_hook": {
+          "support": "full",
+          "evidence": "claude-code-pre-compact-hook",
+          "notes": "PreCompact hook runs scripts/pre-compact.sh; SessionEnd reuses the same script for /clear."
+        },
+        "tool_hooks": {
+          "support": "full",
+          "evidence": "claude-code-tool-hooks",
+          "notes": "PreToolUse with matcher=`Write` runs guard-work-writes.sh."
+        },
+        "permission_hooks": {
+          "support": "full",
+          "evidence": "claude-code-permission-hooks",
+          "notes": "PreToolUse JSON-stdout `{decision: block|approve}` controls tool invocations."
+        },
+        "task_completed_hook": {
+          "support": "full",
+          "evidence": "claude-code-task-completed-hook",
+          "notes": "TaskCompleted hook runs task-completed-capture-check.sh; exit 2 + stderr blocks the worker report."
+        },
+        "subagents": {
+          "support": "full",
+          "evidence": "claude-code-subagents",
+          "notes": "Fresh subagent contexts via Task / TeamCreate spawn paths."
+        },
+        "team_messaging": {
+          "support": "full",
+          "evidence": "claude-code-team-messaging",
+          "notes": "TeamCreate / SendMessage / shutdown_request with persistent team state under ~/.claude/teams/<name>/."
+        },
+        "transcript_provider": {
+          "support": "full",
+          "evidence": "claude-code-transcript-provider",
+          "notes": "JSONL transcripts under ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl consumed by extract-session-digest, stop-novelty-check, probabilistic-audit-trigger."
+        },
+        "headless_runner": {
+          "support": "full",
+          "evidence": "claude-code-headless-runner",
+          "notes": "`claude -p <prompt>` non-interactive mode used by audit-artifact.sh judges."
+        },
+        "plugin_runtime": {
+          "support": "none",
+          "notes": "Hooks are shell/python commands invoked by Claude Code; there is no in-process plugin runtime. Scripts handle every extension need."
+        }
+      }
+    },
+    "opencode": {
+      "id": "opencode",
+      "display_name": "OpenCode",
+      "binary": "opencode",
+      "description": "Multi-provider harness with native Claude-compatible discovery for skills and instruction files. Plugins are JavaScript/TypeScript modules under .opencode/plugins or ~/.config/opencode/plugins. Native team messaging is absent; team workflows degrade to lead-orchestrated fanout/aggregation.",
+      "model_routing": {
+        "shape": "multi",
+        "evidence": "opencode-model-routing",
+        "notes": "Per-spawn provider/model selection; the role->model map honors per-role bindings (e.g., Opus for lead, Haiku for worker fanout)."
+      },
+      "install_paths": {
+        "instructions":     "$HOME/.claude/CLAUDE.md",
+        "skills":           "$HOME/.claude/skills",
+        "agents":           "$HOME/.claude/agents",
+        "settings":         "$HOME/.config/opencode/config.json",
+        "teams":            "unsupported",
+        "ephemeral_plans":  "unsupported",
+        "mcp_servers":      "$HOME/.config/opencode/opencode.json"
+      },
+      "capabilities": {
+        "instructions": {
+          "support": "full",
+          "evidence": "opencode-instructions",
+          "notes": "OpenCode reads ~/.claude/CLAUDE.md natively; the existing assembled file works without adaptation. AGENTS.md is also accepted for OpenCode-native projects."
+        },
+        "skills": {
+          "support": "full",
+          "evidence": "opencode-skills",
+          "notes": "OpenCode discovers SKILL.md from .opencode/skills, ~/.config/opencode/skills, .claude/skills, ~/.claude/skills, .agents/skills, ~/.agents/skills. Existing ~/.claude/skills symlinks are picked up as-is."
+        },
+        "mcp": {
+          "support": "partial",
+          "evidence": "opencode-mcp",
+          "notes": "MCP servers configured in OpenCode config (.opencode/config.json); requires per-harness packaging because the path is not ~/.claude/settings.json."
+        },
+        "session_start_hook": {
+          "support": "partial",
+          "evidence": "opencode-session-start-hook",
+          "notes": "Plugin event dispatched at session start; lore-side mapping translates to load-knowledge / load-work / load-threads. Coverage of Lore's pending-capture and pending-digest first-turn pipelines depends on plugin runtime guarantees."
+        },
+        "stop_hook": {
+          "support": "partial",
+          "evidence": "opencode-stop-hook",
+          "notes": "Plugin event for end-of-turn / agent stop; novelty-check fallback may run in degraded mode if the harness does not surface full context for heuristic detection."
+        },
+        "pre_compact_hook": {
+          "support": "fallback",
+          "evidence": "opencode-pre-compact-hook",
+          "notes": "Native compaction event semantics not confirmed; fallback path runs the persistence reminder on last-known signal (long session, /clear-equivalent) rather than a true PreCompact event."
+        },
+        "tool_hooks": {
+          "support": "partial",
+          "evidence": "opencode-tool-hooks",
+          "notes": "Plugin runtime exposes pre/post tool events; matcher coverage and blocking semantics may differ from PreToolUse."
+        },
+        "permission_hooks": {
+          "support": "partial",
+          "evidence": "opencode-permission-hooks",
+          "notes": "Permission decision protocol via plugin events; specific accept/deny shape needs adapter translation."
+        },
+        "task_completed_hook": {
+          "support": "fallback",
+          "evidence": "opencode-task-completed-hook",
+          "notes": "No native subagent-completion blocking event. Lead-side validator checks worker reports after collection and rejects on missing structure (D9 fallback mode: lead-side validator)."
+        },
+        "subagents": {
+          "support": "partial",
+          "evidence": "opencode-subagents",
+          "notes": "Primary agent + General/Explore subagents for fanout; fresh-context guarantees match Claude's Task spawn but team-state semantics do not."
+        },
+        "team_messaging": {
+          "support": "none",
+          "notes": "No native TeamCreate / SendMessage equivalent. Skills requiring inter-agent messaging must run in lead-orchestrated mode (no in-flight worker-to-worker communication)."
+        },
+        "transcript_provider": {
+          "support": "partial",
+          "evidence": "opencode-transcript-provider",
+          "notes": "Session artifacts exist but format differs from Claude JSONL; provider stub translates available fields and reports degraded for missing ones."
+        },
+        "headless_runner": {
+          "support": "partial",
+          "evidence": "opencode-headless-runner",
+          "notes": "Non-interactive run mode exists; flag spelling differs from `claude -p` so audit-artifact.sh routes through the headless_runner adapter."
+        },
+        "plugin_runtime": {
+          "support": "full",
+          "evidence": "opencode-plugin-runtime",
+          "notes": "TypeScript/JavaScript plugin runtime under .opencode/plugins or ~/.config/opencode/plugins; lore ships adapters/opencode/lore-hooks.ts."
+        }
+      }
+    },
+    "codex": {
+      "id": "codex",
+      "display_name": "Codex",
+      "binary": "codex",
+      "description": "Codex CLI with native hooks (SessionStart, PreToolUse, PermissionRequest, PostToolUse, Stop) and subagent workflows enabled by default. Native team messaging is absent; PreCompact and TaskCompleted blocking semantics are not covered by the native hook surface and require lead-side fallbacks. The February 2026 'notify-only' premise is stale and superseded by docs/codex-migration.md and the gotchas update in T16.",
+      "model_routing": {
+        "shape": "single",
+        "evidence": "codex-model-routing",
+        "notes": "Single provider per session; the role->model map collapses to one binding without affecting call sites."
+      },
+      "install_paths": {
+        "instructions":     "$HOME/.codex/AGENTS.md",
+        "skills":           "$HOME/.codex/skills",
+        "agents":           "$HOME/.codex/agents",
+        "settings":         "$HOME/.codex/config.toml",
+        "teams":            "unsupported",
+        "ephemeral_plans":  "unsupported",
+        "mcp_servers":      "$HOME/.codex/config.toml"
+      },
+      "capabilities": {
+        "instructions": {
+          "support": "full",
+          "evidence": "codex-instructions",
+          "notes": "Codex reads AGENTS.md-style project instructions and layered configuration; assemble-instructions.sh --framework codex emits AGENTS.md instead of CLAUDE.md."
+        },
+        "skills": {
+          "support": "partial",
+          "evidence": "codex-skills",
+          "notes": "Codex documents a native skills surface; lore packages SKILL.md to the documented Codex skills location. Per-skill discovery semantics may differ from Claude's eager session-start load."
+        },
+        "mcp": {
+          "support": "full",
+          "evidence": "codex-mcp",
+          "notes": "Codex supports MCP server registration via its config; lore registers servers through the per-harness MCP packaging path."
+        },
+        "session_start_hook": {
+          "support": "full",
+          "evidence": "codex-session-start-hook",
+          "notes": "Native SessionStart hook documented in current Codex releases; supersedes the stale February assumption that Codex has only `notify`."
+        },
+        "stop_hook": {
+          "support": "full",
+          "evidence": "codex-stop-hook",
+          "notes": "Native Stop hook documented in current Codex releases."
+        },
+        "pre_compact_hook": {
+          "support": "fallback",
+          "evidence": "codex-pre-compact-hook",
+          "notes": "No native PreCompact event documented. Fallback uses Stop/SessionStart bookends to remind the user to persist plans before compaction events that lore cannot intercept."
+        },
+        "tool_hooks": {
+          "support": "full",
+          "evidence": "codex-tool-hooks",
+          "notes": "Native PreToolUse and PostToolUse hooks documented in current Codex releases."
+        },
+        "permission_hooks": {
+          "support": "full",
+          "evidence": "codex-permission-hooks",
+          "notes": "Native PermissionRequest hook documented in current Codex releases."
+        },
+        "task_completed_hook": {
+          "support": "fallback",
+          "evidence": "codex-task-completed-hook",
+          "notes": "No native subagent-completion blocking event. Lead-side validator checks worker reports after collection (D9 fallback mode: lead-side validator)."
+        },
+        "subagents": {
+          "support": "partial",
+          "evidence": "codex-subagents",
+          "notes": "Subagent workflows enabled by default per current docs; Codex orchestrates spawn/follow-up/wait/consolidate when explicitly asked. Fresh-context guarantees match Claude's Task spawn but team-state semantics do not."
+        },
+        "team_messaging": {
+          "support": "none",
+          "notes": "No native TeamCreate / SendMessage equivalent. Skills requiring inter-agent messaging must run in lead-orchestrated mode."
+        },
+        "transcript_provider": {
+          "support": "partial",
+          "evidence": "codex-transcript-provider",
+          "notes": "Codex exposes session artifacts; format differs from Claude JSONL so the provider stub translates available fields and reports degraded for missing ones."
+        },
+        "headless_runner": {
+          "support": "full",
+          "evidence": "codex-headless-runner",
+          "notes": "Codex supports non-interactive prompt invocation; audit-artifact.sh routes correctness-gate / curator / reverse-auditor through the headless_runner adapter."
+        },
+        "plugin_runtime": {
+          "support": "none",
+          "notes": "Codex hooks are shell commands; there is no in-process plugin runtime. Hook scripts handle every extension need."
+        }
+      }
+    }
+  }
+}

@@ -28,7 +28,9 @@ Set `KNOWLEDGE_DIR` to the result. Set `THREADS_DIR` to `$KNOWLEDGE_DIR/_threads
 ## Resolve Template Version
 
 ```bash
-REMEMBER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/skills/remember/SKILL.md)
+source ~/.lore/scripts/lib.sh
+SKILLS_DIR=$(resolve_harness_install_path skills)
+REMEMBER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$SKILLS_DIR/remember/SKILL.md")
 ```
 
 When `/remember` is invoked by another skill (e.g., `/implement` or `/spec` post-work extraction), the caller passes its own template-version context via the delegation prompt — see Step 5's provenance rules for the lead-synthesis path. For interactive invocations, use `$REMEMBER_TEMPLATE_VERSION` directly. If the hash command fails, fall through with an empty string; downstream scripts treat that as "no template version."

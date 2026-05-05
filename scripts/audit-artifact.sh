@@ -40,14 +40,23 @@
 #      appends scorecard rows. This is the primary path in automated
 #      pipelines and the only path exercised by tests.
 #
-#   2. **`claude -p` fallback** (no flag): if `claude` is on PATH and no
-#      `--gate-output-file` is supplied, the script shells out to
-#      `claude -p` with the agent body appended as the system prompt and
-#      the resolved input object as the user prompt (consistent with
+#   2. **headless_runner fallback** (no flag): if the active harness's
+#      `headless_runner` capability is `full|partial|fallback` (i.e.,
+#      anything but `none`) and `claude` is on PATH (T39/T40 will route
+#      this through the per-harness adapter binary), the script shells
+#      out to the harness's headless single-turn surface with the agent
+#      body appended as the system prompt and the resolved input object
+#      as the user prompt (consistent with
 #      `scripts/judge-batch-candidates.sh` conventions). Output is
 #      captured to a tmp file and processed identically to mode 1.
-#      Without `claude` on PATH and without `--gate-output-file`, the
-#      script fails with exit 1 and a clear error.
+#      Without a working headless surface and without
+#      `--gate-output-file`, the script fails with exit 1 (or a clear
+#      error from `headless_runner_invoke`) and refuses to proceed.
+#      The model is resolved from role `judge` via
+#      `resolve_model_for_role` — `--model <name>` overrides for one
+#      invocation. The agent template is resolved via
+#      `resolve_agent_template <name>` rather than hardcoding
+#      `~/.claude/agents/<name>.md`.
 
 set -euo pipefail
 
@@ -63,6 +72,57 @@ CURATOR_OUTPUT_FILE=""
 REVERSE_AUDITOR_OUTPUT_FILE=""
 SKIP_SCORECARD=0
 PRIORITY_CLAIMS_FILE=""
+# JUDGE_MODEL stays empty until after arg parsing; resolution from the
+# `judge` role runs after we know whether all three judges might be
+# spawned via the headless runner. The --model flag (added in T38) lets
+# the operator override the role binding for one invocation.
+JUDGE_MODEL=""
+
+# headless_runner_invoke <system_prompt_file> <user_prompt_string> <output_file>
+#
+# Spawn the active harness's headless single-turn agent and capture its
+# stdout into <output_file>. Today only claude-code is wired; codex and
+# opencode currently route through the same `claude` binary when their
+# `headless_runner` cell is `full` AND the operator has `claude` on
+# PATH (opencode/codex headless surfaces with provider-native binaries
+# land in T39/T40 along with adapters/agents/{opencode,codex}.sh).
+#
+# Returns 0 on success, non-zero on subprocess failure. Stderr is
+# silenced because callers pattern-match warning/error strings on it.
+headless_runner_invoke() {
+  local system_prompt_file="$1"
+  local user_prompt="$2"
+  local output_file="$3"
+
+  # Capability gate. The capability cells are the source of truth — if
+  # the active harness reports `none`, we refuse rather than silently
+  # falling through to claude.
+  local cap
+  cap=$(framework_capability headless_runner 2>/dev/null) || cap="none"
+  if [[ "$cap" == "none" ]]; then
+    echo "[audit] Error: active framework reports headless_runner=none — cannot spawn judges via direct invocation." >&2
+    echo "[audit]   Supply --gate-output-file / --curator-output-file / --reverse-auditor-output-file to inject pre-computed judge outputs." >&2
+    return 64
+  fi
+
+  # claude-code, codex, and opencode all expose a `claude`-compatible
+  # headless surface today (claude-code natively; opencode reads
+  # ~/.claude/skills natively; codex is the gap that T40 closes). The
+  # claude binary is the load-bearing dispatch primitive until the
+  # orchestration adapters in T39/T40 land — at that point this helper
+  # routes through adapters/agents/<framework>.sh runner subcommand.
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "[audit] Error: claude CLI not found on PATH — cannot spawn judges." >&2
+    return 64
+  fi
+
+  printf '%s' "$user_prompt" | claude -p \
+    --append-system-prompt "$(cat "$system_prompt_file")" \
+    --model "$JUDGE_MODEL" \
+    --output-format text \
+    --max-turns 1 \
+    > "$output_file" 2>/dev/null
+}
 
 usage() {
   cat >&2 <<EOF
@@ -104,6 +164,12 @@ Options:
                              pre-filter claim_payload to that subset before
                              judge 1. When absent, behavior is unchanged.
                              Validation and filtering are wired in later phases.
+  --model <model>            Override resolve_model_for_role judge for this
+                             invocation. All three judges share the same model
+                             unless they are injected via the --*-output-file
+                             flags above. When absent and no role binding is
+                             set, the script attempts the role lookup and
+                             refuses to spawn judges if neither resolves.
   -h, --help                 Show this help.
 
 Contract: see \$KDIR/architecture/audit-pipeline/contract.md for the canonical
@@ -150,6 +216,11 @@ while [[ $# -gt 0 ]]; do
       PRIORITY_CLAIMS_FILE="$2"
       shift 2
       ;;
+    --model)
+      [[ $# -lt 2 ]] && { echo "[audit] Error: --model requires a value" >&2; exit 1; }
+      JUDGE_MODEL="$2"
+      shift 2
+      ;;
     -*)
       echo "[audit] Error: unknown flag '$1'" >&2
       usage
@@ -172,6 +243,27 @@ if [[ -z "$ARTIFACT_ID" ]]; then
   echo "[audit] Error: <artifact-id> is required" >&2
   usage
   exit 1
+fi
+
+# --- Resolve judge model from role ---
+# All three judges (correctness-gate, curator, reverse-auditor) run as
+# role `judge`. The single resolution applies to every judge invocation
+# unless --model overrode it. Resolution is deferred from script load
+# (so --help and --dry-run paths that never spawn judges don't require
+# a binding) only inasmuch as we resolve it after positional argument
+# validation; the resolved value is required by the time any judge
+# runs. When --gate-output-file (and curator/reverse-auditor variants)
+# inject pre-computed outputs, the resolved JUDGE_MODEL is unused — the
+# script does not error, since the test-injection path bypasses the
+# runner entirely.
+if [[ -z "$JUDGE_MODEL" ]] && [[ -z "$GATE_OUTPUT_FILE" || -z "$CURATOR_OUTPUT_FILE" || -z "$REVERSE_AUDITOR_OUTPUT_FILE" ]]; then
+  if ! JUDGE_MODEL=$(resolve_model_for_role judge 2>/dev/null) || [[ -z "$JUDGE_MODEL" ]]; then
+    # Soft-fail: only error if the judge actually needs to run. The
+    # gate/curator/reverse-auditor blocks below check JUDGE_MODEL
+    # before invoking the runner; when all three are injected via
+    # --*-output-file, the role binding is unnecessary.
+    JUDGE_MODEL=""
+  fi
 fi
 
 # --- Resolve knowledge directory ---
@@ -573,10 +665,9 @@ fi
 # and Judge 3 (reverse-auditor, task #22) land with their own wiring tasks
 # and replace the placeholders below.
 
-CORRECTNESS_GATE_TEMPLATE="$HOME/.claude/agents/correctness-gate.md"
-if [[ ! -f "$CORRECTNESS_GATE_TEMPLATE" ]]; then
-  echo "[audit] Error: correctness-gate agent template not found: $CORRECTNESS_GATE_TEMPLATE" >&2
-  echo "[audit]   Install lore or ensure ~/.claude/agents/correctness-gate.md is symlinked." >&2
+if ! CORRECTNESS_GATE_TEMPLATE=$(resolve_agent_template correctness-gate 2>/dev/null); then
+  echo "[audit] Error: correctness-gate agent template not resolvable via resolve_agent_template." >&2
+  echo "[audit]   Run install.sh to populate the canonical agents/ directory and the active harness's agent install path." >&2
   exit 1
 fi
 
@@ -659,28 +750,34 @@ if [[ -n "$GATE_OUTPUT_FILE" ]]; then
   GATE_RAW_FILE="$GATE_OUTPUT_FILE"
   echo "[audit] correctness-gate: reading pre-computed output from $GATE_OUTPUT_FILE" >&2
 else
-  # Mode 2: claude -p direct invocation.
-  if ! command -v claude >/dev/null 2>&1; then
-    echo "[audit] Error: neither --gate-output-file nor \`claude\` CLI available." >&2
-    echo "[audit]   Supply --gate-output-file <path> (orchestrator-injected judge output)" >&2
-    echo "[audit]   or install the \`claude\` CLI to use the direct-invocation fallback." >&2
+  # Mode 2: headless_runner direct invocation (T38 — formerly hardcoded
+  # `claude -p`). Routed through the active harness's headless_runner
+  # capability so codex/opencode-targeted runs honor capability
+  # degradation. JUDGE_MODEL is supplied via resolve_model_for_role
+  # judge unless the operator overrode with --model.
+  if [[ -z "$JUDGE_MODEL" ]]; then
+    # No role binding AND no --gate-output-file means the operator
+    # has not chosen either integration mode. Name both so the error
+    # is actionable: pass --gate-output-file (orchestrator/test
+    # injection), or set a model binding so the headless runner
+    # (today: `claude` on PATH) can spawn the correctness-gate judge.
+    echo "[audit] Error: no model binding for role 'judge' and no --gate-output-file supplied." >&2
+    echo "[audit]   Either pass --gate-output-file <path> (orchestrator-injected judge output)," >&2
+    echo "[audit]   or set roles.judge in ~/.lore/config/framework.json (or pass --model <model>)" >&2
+    echo "[audit]   to use the \`claude\` headless runner direct-invocation fallback." >&2
     exit 1
   fi
   GATE_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-gate-output-XXXXXX.json")
   GATE_RAW_FILE="$GATE_RAW_TMP"
-  GATE_SYSTEM_PROMPT=$(cat "$CORRECTNESS_GATE_TEMPLATE")
+  GATE_SYSTEM_PROMPT_FILE="$CORRECTNESS_GATE_TEMPLATE"
   GATE_USER_PROMPT="Resolved input object (per architecture/audit-pipeline/contract.md):
 
 $(cat "$RESOLVED_INPUT_FILE")
 
 Emit exactly one JSON object matching the Correctness-gate output shape. No markdown fences. No prose outside the JSON."
-  echo "[audit] correctness-gate: invoking claude -p (template-version: $GATE_TEMPLATE_VERSION)" >&2
-  if ! printf '%s' "$GATE_USER_PROMPT" | claude -p \
-      --append-system-prompt "$GATE_SYSTEM_PROMPT" \
-      --output-format text \
-      --max-turns 1 \
-      > "$GATE_RAW_FILE" 2>/dev/null; then
-    echo "[audit] Error: claude -p invocation failed for correctness-gate" >&2
+  echo "[audit] correctness-gate: invoking headless runner (template-version: $GATE_TEMPLATE_VERSION, model: $JUDGE_MODEL)" >&2
+  if ! headless_runner_invoke "$GATE_SYSTEM_PROMPT_FILE" "$GATE_USER_PROMPT" "$GATE_RAW_FILE"; then
+    echo "[audit] Error: headless runner invocation failed for correctness-gate" >&2
     exit 64
   fi
 fi
@@ -928,14 +1025,13 @@ if [[ "$N_VERIFIED_COUNT" -gt 0 ]]; then
   if [[ -z "$CURATOR_OUTPUT_FILE" && -n "$GATE_OUTPUT_FILE" ]]; then
     echo "[audit] curator: skipped (gate was injected but no --curator-output-file supplied)" >&2
     CURATOR_TEMPLATE=""
-  else
-    CURATOR_TEMPLATE="$HOME/.claude/agents/curator.md"
+  elif ! CURATOR_TEMPLATE=$(resolve_agent_template curator 2>/dev/null); then
+    echo "[audit] warning: curator agent template not resolvable via resolve_agent_template — skipping curator stage" >&2
+    CURATOR_TEMPLATE=""
   fi
 
   if [[ -z "$CURATOR_TEMPLATE" ]]; then
     :  # curator skipped, fall through to report
-  elif [[ ! -f "$CURATOR_TEMPLATE" ]]; then
-    echo "[audit] warning: curator agent template not found — skipping curator stage: $CURATOR_TEMPLATE" >&2
   else
     CURATOR_TEMPLATE_VERSION=$(bash "$SCRIPT_DIR/template-version.sh" "$CURATOR_TEMPLATE")
 
@@ -947,12 +1043,11 @@ if [[ "$N_VERIFIED_COUNT" -gt 0 ]]; then
       CURATOR_RAW_FILE="$CURATOR_OUTPUT_FILE"
       echo "[audit] curator: reading pre-computed output from $CURATOR_OUTPUT_FILE" >&2
     else
-      if ! command -v claude >/dev/null 2>&1; then
-        echo "[audit] warning: neither --curator-output-file nor \`claude\` CLI available — skipping curator stage" >&2
+      if [[ -z "$JUDGE_MODEL" ]]; then
+        echo "[audit] warning: neither --curator-output-file nor 'judge' role binding available — skipping curator stage" >&2
       else
         CURATOR_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-curator-output-XXXXXX.json")
         CURATOR_RAW_FILE="$CURATOR_RAW_TMP"
-        CURATOR_SYSTEM_PROMPT=$(cat "$CURATOR_TEMPLATE")
         # Compose curator input: verified survivors + the original resolved input.
         CURATOR_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-curator-input-XXXXXX.json")
         python3 - "$GATE_RAW_FILE" "$RESOLVED_INPUT_FILE" "$CURATOR_INPUT_FILE" << 'PYEOF'
@@ -979,20 +1074,14 @@ PYEOF
 $(cat "$CURATOR_INPUT_FILE")
 
 Emit exactly one JSON object matching the Curator output shape. No markdown fences. No prose outside the JSON."
-        echo "[audit] curator: invoking claude -p (template-version: $CURATOR_TEMPLATE_VERSION)" >&2
-        if ! printf '%s' "$CURATOR_USER_PROMPT" | claude -p \
-            --append-system-prompt "$CURATOR_SYSTEM_PROMPT" \
-            --output-format text \
-            --max-turns 1 \
-            > "$CURATOR_RAW_FILE" 2>/dev/null; then
-          echo "[audit] warning: claude -p invocation failed for curator — skipping curator stage" >&2
+        echo "[audit] curator: invoking headless runner (template-version: $CURATOR_TEMPLATE_VERSION, model: $JUDGE_MODEL)" >&2
+        if ! headless_runner_invoke "$CURATOR_TEMPLATE" "$CURATOR_USER_PROMPT" "$CURATOR_RAW_FILE"; then
+          echo "[audit] warning: headless runner invocation failed for curator — skipping curator stage" >&2
           CURATOR_RAW_FILE=""
         elif [[ ! -s "$CURATOR_RAW_FILE" ]]; then
-          # claude -p returned exit 0 but produced no output — fail soft.
-          echo "[audit] warning: claude -p produced no curator output — skipping curator stage" >&2
+          echo "[audit] warning: headless runner produced no curator output — skipping curator stage" >&2
           CURATOR_RAW_FILE=""
         elif ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$CURATOR_RAW_FILE" 2>/dev/null; then
-          # claude returned text that isn't valid JSON — fail soft, don't hard-fail the audit.
           echo "[audit] warning: curator output is not valid JSON — skipping curator stage" >&2
           CURATOR_RAW_FILE=""
         fi
@@ -1184,14 +1273,13 @@ if [[ "$CURATOR_STAGE_RAN" -eq 1 && "$N_SELECTED" -gt 0 ]]; then
   if [[ -z "$REVERSE_AUDITOR_OUTPUT_FILE" && -n "$CURATOR_OUTPUT_FILE" ]]; then
     echo "[audit] reverse-auditor: skipped (curator was injected but no --reverse-auditor-output-file supplied)" >&2
     REVERSE_AUDITOR_TEMPLATE=""
-  else
-    REVERSE_AUDITOR_TEMPLATE="$HOME/.claude/agents/reverse-auditor.md"
+  elif ! REVERSE_AUDITOR_TEMPLATE=$(resolve_agent_template reverse-auditor 2>/dev/null); then
+    echo "[audit] warning: reverse-auditor agent template not resolvable via resolve_agent_template — skipping reverse-auditor stage" >&2
+    REVERSE_AUDITOR_TEMPLATE=""
   fi
 
   if [[ -z "$REVERSE_AUDITOR_TEMPLATE" ]]; then
     :  # reverse-auditor skipped, fall through to report
-  elif [[ ! -f "$REVERSE_AUDITOR_TEMPLATE" ]]; then
-    echo "[audit] warning: reverse-auditor agent template not found — skipping reverse-auditor stage: $REVERSE_AUDITOR_TEMPLATE" >&2
   else
     REVERSE_AUDITOR_TEMPLATE_VERSION=$(bash "$SCRIPT_DIR/template-version.sh" "$REVERSE_AUDITOR_TEMPLATE")
 
@@ -1203,12 +1291,11 @@ if [[ "$CURATOR_STAGE_RAN" -eq 1 && "$N_SELECTED" -gt 0 ]]; then
       REVERSE_AUDITOR_RAW_FILE="$REVERSE_AUDITOR_OUTPUT_FILE"
       echo "[audit] reverse-auditor: reading pre-computed output from $REVERSE_AUDITOR_OUTPUT_FILE" >&2
     else
-      if ! command -v claude >/dev/null 2>&1; then
-        echo "[audit] warning: neither --reverse-auditor-output-file nor \`claude\` CLI available — skipping reverse-auditor stage" >&2
+      if [[ -z "$JUDGE_MODEL" ]]; then
+        echo "[audit] warning: neither --reverse-auditor-output-file nor 'judge' role binding available — skipping reverse-auditor stage" >&2
       else
         REVERSE_AUDITOR_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-output-XXXXXX.json")
         REVERSE_AUDITOR_RAW_FILE="$REVERSE_AUDITOR_RAW_TMP"
-        REVERSE_AUDITOR_SYSTEM_PROMPT=$(cat "$REVERSE_AUDITOR_TEMPLATE")
         # Compose reverse-auditor input: curator's selected claims + the
         # original resolved input (artifact_id, work_item, change_context,
         # referenced_files). Per contract.md, reverse-auditor input is the
@@ -1240,16 +1327,12 @@ PYEOF
 $(cat "$REVERSE_AUDITOR_INPUT_FILE")
 
 Emit exactly one JSON object matching the Reverse-auditor output shape (omission_claim object or null). No markdown fences. No prose outside the JSON."
-        echo "[audit] reverse-auditor: invoking claude -p (template-version: $REVERSE_AUDITOR_TEMPLATE_VERSION)" >&2
-        if ! printf '%s' "$REVERSE_AUDITOR_USER_PROMPT" | claude -p \
-            --append-system-prompt "$REVERSE_AUDITOR_SYSTEM_PROMPT" \
-            --output-format text \
-            --max-turns 1 \
-            > "$REVERSE_AUDITOR_RAW_FILE" 2>/dev/null; then
-          echo "[audit] warning: claude -p invocation failed for reverse-auditor — skipping reverse-auditor stage" >&2
+        echo "[audit] reverse-auditor: invoking headless runner (template-version: $REVERSE_AUDITOR_TEMPLATE_VERSION, model: $JUDGE_MODEL)" >&2
+        if ! headless_runner_invoke "$REVERSE_AUDITOR_TEMPLATE" "$REVERSE_AUDITOR_USER_PROMPT" "$REVERSE_AUDITOR_RAW_FILE"; then
+          echo "[audit] warning: headless runner invocation failed for reverse-auditor — skipping reverse-auditor stage" >&2
           REVERSE_AUDITOR_RAW_FILE=""
         elif [[ ! -s "$REVERSE_AUDITOR_RAW_FILE" ]]; then
-          echo "[audit] warning: claude -p produced no reverse-auditor output — skipping reverse-auditor stage" >&2
+          echo "[audit] warning: headless runner produced no reverse-auditor output — skipping reverse-auditor stage" >&2
           REVERSE_AUDITOR_RAW_FILE=""
         elif ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$REVERSE_AUDITOR_RAW_FILE" 2>/dev/null; then
           echo "[audit] warning: reverse-auditor output is not valid JSON — skipping reverse-auditor stage" >&2

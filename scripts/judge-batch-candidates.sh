@@ -16,19 +16,31 @@ WORK_DIR="$KNOWLEDGE_DIR/_work"
 
 # --- Defaults ---
 JUDGE_TYPE="both"
-MODEL="sonnet"
+# MODEL stays empty until after arg parsing so an explicit --model flag
+# wins over the role binding. The judge agent runs as role `judge` per
+# adapters/roles.json; resolve_model_for_role honors per-repo and
+# user-level overrides.
+MODEL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --type)  JUDGE_TYPE="$2"; shift 2 ;;
     --model) MODEL="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: judge-batch-candidates.sh [--type spec|implement|both] [--model sonnet|opus]"
+      echo "Usage: judge-batch-candidates.sh [--type spec|implement|both] [--model <model>]"
+      echo "  --model overrides resolve_model_for_role judge for this invocation."
       exit 0
       ;;
     *) die "Unknown argument: $1" ;;
   esac
 done
+
+# Resolve the judge model from role 'judge' unless --model overrode it.
+if [[ -z "$MODEL" ]]; then
+  if ! MODEL=$(resolve_model_for_role judge 2>/dev/null) || [[ -z "$MODEL" ]]; then
+    die "No model binding for role 'judge'. Pass --model <model> or set roles.judge in ~/.lore/config/framework.json."
+  fi
+fi
 
 # --- Build the system context that seeds the judge ---
 # This is the expensive part to get right: the judge needs to understand

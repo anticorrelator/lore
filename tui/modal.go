@@ -5,6 +5,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 // modalInnerW is the visible content width inside all modals.
@@ -94,7 +96,7 @@ func (m model) renderSpecConfirmModal() string {
 			"\n " + s.key.Render(skipCheck) + " " + s.dim.Render("Skip confirmations") +
 			"  " + s.sep.Render("(") + s.key.Render("Alt+2") + s.sep.Render(")")
 		body = "\n" + checkboxes + "\n\n" +
-			s.dim.Render(" additional context for claude (optional):") +
+			s.dim.Render(fmt.Sprintf(" additional context for %s (optional):", config.HarnessDisplayName(""))) +
 			"\n" + inputBox + "\n\n " + hints + "\n"
 	}
 	return m.placeModal(buildModalBox(s, title, body))

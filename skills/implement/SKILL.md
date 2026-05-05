@@ -2,7 +2,7 @@
 name: implement
 description: "Execute a spec's plan with a knowledge-aware agent team — spawns workers, tracks progress, captures architectural findings"
 user_invocable: true
-argument_description: "[work item name] [--model sonnet|opus]"
+argument_description: "[work item name]"
 allowed-tools:
   - Bash
   - Read
@@ -37,18 +37,20 @@ lore resolve
 ```
 Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
-Agent template files live at `~/.claude/agents/` (symlinked to the lore repo). Do NOT use `git rev-parse --show-toplevel` for agent paths — the current repo is the target project, not the lore repo.
+Agent template files live in the lore repo under `agents/<name>.md` and are surfaced to the active harness via `resolve_agent_template <name>` (or, equivalently, the harness's `resolve_harness_install_path agents` directory, which is symlinked to the lore repo `agents/` by `install.sh`). On Claude Code that resolves to `~/.claude/agents/<name>.md`. Do NOT use `git rev-parse --show-toplevel` for agent paths — the current repo is the target project, not the lore repo.
 
-**MANDATORY:** You MUST read the actual template files from `~/.claude/agents/worker.md` and `~/.claude/agents/advisor.md` when spawning agents. Do NOT skip this step. Do NOT generate inline agent prompts as a substitute. If the directory or files are missing, stop and report the error — never fall back to improvised prompts.
+**MANDATORY:** You MUST read the actual template files for `worker` and `advisor` when spawning agents — resolve each via `resolve_agent_template worker` and `resolve_agent_template advisor` (or read directly from the active harness's agents install path on Claude Code: `~/.claude/agents/worker.md` and `~/.claude/agents/advisor.md`). Do NOT skip this step. Do NOT generate inline agent prompts as a substitute. If the resolver fails or the files are missing, stop and report the error — never fall back to improvised prompts.
 
 ## Resolve Template Versions
 
 Compute content-hashes of the agent templates you'll spawn and the skill template itself. These feed the `template_version` provenance field on every downstream emission site (`evidence-append.sh` via worker prompt, `lore promote`, `write-execution-log.sh`, scorecard rows), plus the `{{template_version}}` injection into each agent's resolved prompt:
 
 ```bash
-LEAD_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/skills/implement/SKILL.md)
-WORKER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/agents/worker.md)
-ADVISOR_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/agents/advisor.md)
+source ~/.lore/scripts/lib.sh
+SKILLS_DIR=$(resolve_harness_install_path skills)
+LEAD_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$SKILLS_DIR/implement/SKILL.md")
+WORKER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$(resolve_agent_template worker)")
+ADVISOR_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$(resolve_agent_template advisor)")
 ```
 
 Use these variables throughout the rest of the skill. The three are NOT interchangeable — each tags emissions produced by its matching template. If `template-version.sh` fails for any template, log a warning and continue with an empty string; downstream scripts treat the omitted flag as "no template version" (CC-01 legacy warn+pass).
@@ -76,7 +78,7 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
 
 ### Step 1: Load work item and validate
 
-1. Parse arguments: extract work item name and optional `--model` flag (default: `opus`, accept `sonnet`)
+1. Parse arguments: extract work item name. The `--model <id>` flag is an undocumented per-invocation override that, when present, exports `LORE_MODEL_LEAD=<id>` for the duration of this skill — it stamps only the lead role for this run and does NOT touch worker/advisor/researcher bindings. Per-role models for spawned agents always come from `resolve_model_for_role <role>` against the active framework's role map; the override is a one-shot escape hatch, not a documented user-facing API. (Per-role overrides via `LORE_MODEL_<ROLE>` env vars are honored independently.)
 2. Resolve work item using the same fuzzy matching algorithm as `/work`:
    - Exact slug match → substring match on title → substring on slug → branch match → recency → archive fallback
    - **If resolved item is tagged `[archived]`:** Warn the user: "This work item is archived. Proceed anyway?" Wait for explicit confirmation before continuing. If the user confirms, load from `$WORK_DIR/_archive/<slug>/`.
@@ -89,26 +91,43 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
    ```
    If the command fails, log `[implement] Warning: branch cache write failed` and continue — non-fatal.
 7. **Load prior Tier 2 evidence** — read `$KDIR/_work/<slug>/task-claims.jsonl` if it exists. This is the canonical log of Tier 2 claims written by prior workers on this work item (via `evidence-append.sh`). Parse each line as JSON and build an in-memory map keyed by `task_id` and by files touched (from the row's `files` field if present, or fall back to the row's claim text). This map feeds Step 3's worker `{{prior_knowledge}}` injection — each worker receives only the Tier 2 rows whose `task_id` matches its assigned task or whose files overlap with the task's `**Files:**` block. If the file is absent or empty, skip silently (first `/implement` run on this item).
-8. Present a brief summary and proceed immediately:
+8. Present a brief summary and proceed immediately. Resolve the role→model bindings for the roles this skill spawns (`lead`, `worker`, `advisor`) by calling `resolve_model_for_role <role>` for each, then render them as a status line so the operator sees what models the active framework's role map will produce:
+   ```bash
+   LEAD_MODEL=$(resolve_model_for_role lead)
+   WORKER_MODEL=$(resolve_model_for_role worker)
+   ADVISOR_MODEL=$(resolve_model_for_role advisor)
+   ```
+   Output:
    ```
    [implement] <Title>
-   Model: opus (override with --model sonnet)
+   Models: lead=$LEAD_MODEL  worker=$WORKER_MODEL  advisor=$ADVISOR_MODEL
    Phases: N with M unchecked tasks
    Prior Tier 2 claims: K rows loaded from task-claims.jsonl (or "none — first run")
    ```
+   On a default install all three resolve to the role-map default (typically `sonnet`); per-repo `.lore.config` or user `framework.json` `roles.<role>` overrides flow through automatically. If `--model <id>` was passed in Step 1.1, `$LEAD_MODEL` reflects that override; worker/advisor lines remain at the configured map values.
 
 ### Step 2: Create team and generate tasks
 
 **IMPORTANT: Create the team BEFORE creating tasks.** TaskCreate calls go into whichever task list is active. If you create tasks before TeamCreate, they land in the session's default list — invisible to workers who see the team's list. This produces orphaned stale tasks that persist for the rest of the session.
 
+0. **Resolve the orchestration adapter and query its capability gates.** Every team operation in this skill (spawn, send_message, collect_result, shutdown) routes through the active framework's orchestration adapter at `adapters/agents/<framework>.sh`. The adapter emits `delegate:<tool> ...` directives that the skill body translates into harness-native tool calls — on Claude Code that means `TeamCreate` / `TaskCreate` / `SendMessage` / `TaskList` / `TaskGet`; on opencode/codex the same directives map to plugin-runtime / subagent spawn APIs.
+   ```bash
+   ADAPTER="$LORE_REPO_DIR/adapters/agents/$(resolve_active_framework).sh"
+   ENFORCEMENT=$(bash "$ADAPTER" completion_enforcement)  # native_blocking | lead_validator | self_attestation | unavailable
+   TEAM_MESSAGING=$(framework_capability team_messaging)  # full | partial | fallback | none
+   ```
+   - `ENFORCEMENT` shapes the per-task verification fork in Step 4.1 (per `adapters/agents/README.md` §"Completion Enforcement Degradation Modes"). On `native_blocking` (Claude Code) the harness rejects malformed worker reports synchronously; on `lead_validator` the lead must run the post-hoc validator described in the README; on `self_attestation` and `unavailable` the lead degrades further per the same doc.
+   - `TEAM_MESSAGING=none` collapses this skill to lead-inline execution (Step 3.0): no TeamCreate, no worker spawns. The skill is gated to harnesses whose `team_messaging=full` per `adapters/capabilities.json.skills.implement.requires`; the gate fires here.
+
 1. **Create team first:**
    ```
    TeamCreate: team_name="impl-<slug>", description="Implementing <work item title>"
    ```
+   On Claude Code this is the realized output of the adapter's team-init contract. On opencode/codex the adapter emits `delegate:plugin_team_init` / `delegate:codex_subagent_init` (see `adapters/agents/README.md` §"Per-Harness Mapping"); the skill body invokes the documented translation when running under those frameworks.
 
    **`team_name` MUST be exactly `impl-<work-item-slug>`** — the slug suffix has to match the work item directory name in `$KDIR/_work/` byte-for-byte. The TaskCompleted hook (`scripts/task-completed-capture-check.sh`) derives the work-item slug by stripping the `impl-` prefix from `team_name`. The `lore work check` and Tier 2 evidence reads are all affected by the same convention. Use the exact slug.
 
-2. **Read your team lead name** from `~/.claude/teams/impl-<slug>/config.json`.
+2. **Read your team lead name** from the active harness's teams install path (resolved via `resolve_harness_install_path teams`; typically `~/.claude/teams/` on Claude Code), at `<teams_dir>/impl-<slug>/config.json`. Frameworks whose `install_paths.teams=unsupported` (codex today) cannot persist team config — the adapter returns a lead-side handle map instead, and the skill reads the lead name from the map.
 
 3. **Load tasks** — run a single command that validates the checksum and outputs all tasks as structured text:
    ```bash
@@ -187,7 +206,7 @@ The gate fires when **all four** conditions hold:
 
 ### Step 3: Spawn agents
 
-**You MUST spawn workers immediately after Step 3.6 completes.** Do not pause to confirm scope. Do not echo plan-resolved open questions back to the user (the plan already encodes scope guards in task descriptions). Do not surface "this is large" or "this will take many rounds" as a decision request. Do not request approval to modify a skill because the skill being modified is the running skill (your prompt is loaded; file edits do not affect the current run). The only sanctioned pre-dispatch pauses are: (a) the work item resolved to an `[archived]` item without explicit confirmation (Step 1.2), (b) `tasks.json` checksum mismatch (Step 2.3), (c) `~/.claude/agents/worker.md` is missing (Step 1, MANDATORY clause), or (d) the Step 3.0 Lead-inline gate fired and execution already completed inline (skip Step 3 entirely). Pausing for any other reason is a faster-path bypass — the cost is borne by the user as session-spanning delay; the lead pays nothing. **Why immediate dispatch matters:** one bad spawn is caught in Step 4 review; pre-dispatch confirmation does not buy safety the system already provides.
+**You MUST spawn workers immediately after Step 3.6 completes.** Do not pause to confirm scope. Do not echo plan-resolved open questions back to the user (the plan already encodes scope guards in task descriptions). Do not surface "this is large" or "this will take many rounds" as a decision request. Do not request approval to modify a skill because the skill being modified is the running skill (your prompt is loaded; file edits do not affect the current run). The only sanctioned pre-dispatch pauses are: (a) the work item resolved to an `[archived]` item without explicit confirmation (Step 1.2), (b) `tasks.json` checksum mismatch (Step 2.3), (c) the `worker` agent template is missing (i.e., `resolve_agent_template worker` errors per Step 1's MANDATORY clause), or (d) the Step 3.0 Lead-inline gate fired and execution already completed inline (skip Step 3 entirely). Pausing for any other reason is a faster-path bypass — the cost is borne by the user as session-spanning delay; the lead pays nothing. **Why immediate dispatch matters:** one bad spawn is caught in Step 4 review; pre-dispatch confirmation does not buy safety the system already provides.
 
 1. **Pre-fetch knowledge for worker prompts** — build `$PRIOR_KNOWLEDGE` by iterating over each phase in `$PHASE_MAP`. For every phase, apply the three-branch gate in priority order:
 
@@ -274,21 +293,25 @@ The gate fires when **all four** conditions hold:
 
    a. **Build domain context** — find the `## Investigations` section(s) in `plan.md` whose topic relates to the advisor's domain scope. Extract the relevant investigation entry (findings, verified assertions, key files, implications) and format it as the advisor's domain baseline.
 
-   b. **Spawn the advisor** using the advisor agent definition at `~/.claude/agents/advisor.md` with these template injections:
+   b. **Spawn the advisor** using the `advisor` agent template (resolve via `resolve_agent_template advisor`; on Claude Code that path is `~/.claude/agents/advisor.md`) with these template injections:
       - `{{team_name}}` → `impl-<slug>`
       - `{{advisor_domain}}` → the advisor's domain scope
       - `{{domain_context}}` → the investigation excerpt from Step 3.5a
       - `{{template_version}}` → `$ADVISOR_TEMPLATE_VERSION`
 
+      Per-spawn model selection for advisors routes through `bash "$ADAPTER" resolve_model_for_role advisor`. The Claude Code path produces a `delegate:TaskCreate` directive with the resolved model id; opencode honors `provider/model` syntax for advisor bindings independently of worker bindings.
+
       ```
+      ADVISOR_MODEL=$(bash "$ADAPTER" resolve_model_for_role advisor)
+
       Task:
         subagent_type: "general-purpose"
-        model: "<selected-model>"
+        model: "$ADVISOR_MODEL"
         team_name: "impl-<slug>"
         name: "<advisor-name>"
         mode: "bypassPermissions"
         prompt: |
-          <contents of ~/.claude/agents/advisor.md with {{template}} variables resolved>
+          <contents of the advisor agent template with {{template}} variables resolved>
       ```
 
    Advisors are persistent — they remain active for the entire implementation session and are shut down alongside workers in Step 4.
@@ -312,7 +335,7 @@ The gate fires when **all four** conditions hold:
 
    If no rows match, omit the block (do NOT emit an empty section).
 
-7. **Spawn worker agents with tier-aware emission instructions** — launch `min(recommended_workers, 4)` workers in a single message. Use the worker agent definition at `~/.claude/agents/worker.md` as the base prompt, with these template injections:
+7. **Spawn worker agents with tier-aware emission instructions** — launch `min(recommended_workers, 4)` workers in a single message. Use the `worker` agent template (resolve via `resolve_agent_template worker`; on Claude Code that path is `~/.claude/agents/worker.md`) as the base prompt, with these template injections:
 
    Workers declare `--scale-set` at every `lore prefetch` and `lore search` call. The rubric they apply:
 
@@ -325,7 +348,7 @@ The gate fires when **all four** conditions hold:
 
    **Boundary tests:** abstract vs architecture — substitution test (does the claim survive replacing concrete proper nouns with generic placeholders, or does it become "A does B, C does D"?); architecture vs subsystem — whole-project structure or one bounded area?; subsystem vs implementation — can you state the rule without naming a specific function/file/line?
 
-   **Multi-label encoding (retrieval implication):** entries may carry one label or an *adjacent* pair (`abstract,architecture`, `architecture,subsystem`, `subsystem,implementation`); a `--scale-set` query matches an entry if any requested label is in the entry's set. The full decision tree (four tier tests + substitution test + multi-label rules) lives in `~/.claude/agents/classifier.md`.
+   **Multi-label encoding (retrieval implication):** entries may carry one label or an *adjacent* pair (`abstract,architecture`, `architecture,subsystem`, `subsystem,implementation`); a `--scale-set` query matches an entry if any requested label is in the entry's set. The full decision tree (four tier tests + substitution test + multi-label rules) lives in the canonical `classifier` agent template (resolved via `resolve_agent_template classifier`; lore repo `agents/classifier.md`).
 
    **±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architecture,subsystem`; designing a feature → `abstract,architecture`.
 
@@ -340,17 +363,21 @@ The gate fires when **all four** conditions hold:
    - **Post task:** send a completion report to the lead that contains the traditional prose fields (**Task**, **Changes**, **Tests**, **Blockers**, **Surfaced concerns**, **Advisor consultations**), a new **Tier 2 evidence:** field listing the `claim_id` values written during the task, and an optional **Tier 3 candidates:** YAML block with one entry per reusable observation (producer_role + 13-field Tier 3 shape minus `confidence`).
    - **Naming standard:** the optional Tier 3 section MUST be labeled exactly **Tier 3 candidates:** — not "Tier 3 claims" or "Tier 3 observations". The TaskCompleted hook validates literal-prefix-match.
 
-   **If `$ADVISORY_MIXIN` is non-empty:** append the resolved mixin content after the fully resolved `worker.md` content, separated by a blank line. The worker prompt becomes: `<resolved worker.md>\n\n<resolved advisory-consultation.md>`.
+   **If `$ADVISORY_MIXIN` is non-empty:** append the resolved mixin content after the fully resolved worker template content, separated by a blank line. The worker prompt becomes: `<resolved worker template>\n\n<resolved advisory-consultation.md>`.
+
+Per-spawn model selection routes through the adapter's `resolve_model_for_role worker` operation, which on Claude Code returns the model id the lead passes to `TaskCreate`. The adapter validates the binding against the active framework's `model_routing.shape` and rejects mismatches without silent fallback.
 
 ```
+WORKER_MODEL=$(bash "$ADAPTER" resolve_model_for_role worker)
+
 Task:
   subagent_type: "general-purpose"
-  model: "<selected-model>"
+  model: "$WORKER_MODEL"
   team_name: "impl-<slug>"
   name: "worker-N"
   mode: "bypassPermissions"
   prompt: |
-    <contents of ~/.claude/agents/worker.md with {{template}} variables resolved>
+    <contents of the worker agent template with {{template}} variables resolved>
     <if advisors: contents of advisory-consultation.md with {{advisors}} resolved>
 ```
 
@@ -392,7 +419,7 @@ As worker messages arrive (delivered automatically):
 
 5. **Handle blockers** — if a worker reports blockers:
    - Read the relevant code/context
-   - Send guidance via `SendMessage` to the blocked worker
+   - Send guidance via the adapter's `send_message` operation: `bash "$ADAPTER" send_message <handle> "<body>"`. On Claude Code this expands to `delegate:SendMessage handle=<id>` which the lead invokes as the native `SendMessage` tool. On harnesses where the adapter returns `unsupported`, fall back to lead-only orchestration (the worker cannot receive mid-flight guidance — re-spawn with corrected prompt instead).
    - If unresolvable, note in `notes.md` and move on
 
 6. **Check off completed items in plan.md** (best-effort):
@@ -410,14 +437,14 @@ When a batch of workers has all reported completion:
    - `max_workers` is the same cap used in Step 3.7: `min(recommended_workers, 4)`.
    - Repeat until no unblocked tasks remain.
 3. **If no unblocked tasks remain** (all tasks are complete or all remaining are blocked):
-   a. Send `shutdown_request` to all active workers and all advisor agents (if any were spawned in Step 3.5).
+   a. Send `shutdown_request` to all active workers and all advisor agents via the adapter: `bash "$ADAPTER" shutdown <handle> true` per worker/advisor handle. On Claude Code this expands to `delegate:SendMessage handle=<id> type=shutdown_request approve=true`. On opencode/codex the adapter routes to the harness's native subagent-stop / plugin-runtime kill API.
    b. **Write advisor shutdown log entries** — for each advisor that was spawned, log the shutdown:
       ```bash
       printf 'Advisor shutdown: %s\nDomain: %s\n' \
         "<advisor-name>" "<domain scope>" \
         | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$ADVISOR_TEMPLATE_VERSION"
       ```
-   c. Run `TeamDelete`.
+   c. Run `TeamDelete` (Claude Code only; opencode/codex's runtime owns team teardown).
 
 ### Step 5: Promote accepted Tier 3 candidates
 

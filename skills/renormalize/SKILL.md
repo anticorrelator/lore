@@ -80,7 +80,7 @@ Template injections for all three agents:
 - `{{team_lead}}`: <your name from team config>
 - `{{kdir}}`: <resolved knowledge directory>
 
-**Agent 3a — Classifier:** Use `~/.claude/agents/classifier.md`
+**Agent 3a — Classifier:** Use the `classifier` agent template (resolve via `resolve_agent_template classifier`; on Claude Code that path is `~/.claude/agents/classifier.md`).
 
 Inject additional variables before spawning:
 - `{{audit_set}}`: the `entries` array from `$KDIR/_meta/audit-set.json` (JSON array of paths)
@@ -91,25 +91,25 @@ Task tool params:
   subagent_type: "Explore"
   team_name: "renorm-<timestamp>"
   name: "classifier"
-  prompt: <contents of ~/.claude/agents/classifier.md with {{template}} variables resolved, including {{audit_set}}>
+  prompt: <contents of the classifier agent template with {{template}} variables resolved, including {{audit_set}}>
 ```
 
-**Agent 3b — Structure Analyst:** Use `~/.claude/agents/structure-analyst.md`
+**Agent 3b — Structure Analyst:** Use the `structure-analyst` agent template (resolve via `resolve_agent_template structure-analyst`).
 ```
 Task tool params:
   subagent_type: "Explore"
   team_name: "renorm-<timestamp>"
   name: "structure-analyst"
-  prompt: <contents of ~/.claude/agents/structure-analyst.md with {{template}} variables resolved>
+  prompt: <contents of the structure-analyst agent template with {{template}} variables resolved>
 ```
 
-**Agent 3c — Cross-Reference Scout:** Use `~/.claude/agents/crossref-scout.md`
+**Agent 3c — Cross-Reference Scout:** Use the `crossref-scout` agent template (resolve via `resolve_agent_template crossref-scout`).
 ```
 Task tool params:
   subagent_type: "Explore"
   team_name: "renorm-<timestamp>"
   name: "crossref-scout"
-  prompt: <contents of ~/.claude/agents/crossref-scout.md with {{template}} variables resolved>
+  prompt: <contents of the crossref-scout agent template with {{template}} variables resolved>
 ```
 
 Wait for all three assessment agents to complete and acknowledge their reports.

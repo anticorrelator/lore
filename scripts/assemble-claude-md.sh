@@ -14,7 +14,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 AGENT_DIR="$(dirname "$SCRIPT_DIR")"
 FRAGMENTS_DIR="$AGENT_DIR/claude-md"
-TARGET="$HOME/.claude/CLAUDE.md"
+# TARGET defaults to Claude Code's canonical path, but assemble-instructions.sh
+# (T18) overrides via LORE_INSTRUCTIONS_TARGET so per-harness packaging
+# (e.g., codex's $HOME/.codex/AGENTS.md) can reuse the same fragment-assembly
+# + sentinel-splice + pre-lore-backup logic without duplication.
+TARGET="${LORE_INSTRUCTIONS_TARGET:-$HOME/.claude/CLAUDE.md}"
 
 source "$SCRIPT_DIR/lib.sh"
 
@@ -115,15 +119,15 @@ m = re.search(re.escape(sys.argv[2]) + r'(.*?)' + re.escape(sys.argv[3]), conten
 print(m.group(0) if m else '', end='')
 " "$TARGET" "$LORE_BEGIN" "$LORE_END")
     if [[ "$current_region" == "$wrapped_block" ]]; then
-      echo "CLAUDE.md is up to date."
+      echo "$TARGET is up to date."
       exit 0
     else
-      echo "CLAUDE.md is out of date. Run: lore assemble" >&2
+      echo "$TARGET is out of date. Run: lore assemble" >&2
       diff <(printf '%s' "$wrapped_block") <(printf '%s' "$current_region") >&2 || true
       exit 1
     fi
   else
-    echo "CLAUDE.md does not exist or has no lore sentinels. Run: lore assemble" >&2
+    echo "$TARGET does not exist or has no lore sentinels. Run: lore assemble" >&2
     exit 1
   fi
 fi

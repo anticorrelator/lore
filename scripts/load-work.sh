@@ -131,12 +131,17 @@ if [[ -n "$STALE_WORK" ]]; then
   echo "$STALE_WORK"
 fi
 
-# Check for orphaned ephemeral plan files
-EPHEMERAL_DIR="$HOME/.claude/plans"
-if [[ -d "$EPHEMERAL_DIR" ]]; then
+# Check for orphaned ephemeral plan files. The path is harness-specific —
+# Claude Code keeps them at ~/.claude/plans/, other harnesses may have a
+# different surface or none at all. harness_path_or_empty returns the
+# absolute path on supported harnesses or an empty string on unsupported /
+# config error — both silent skips so a session-start hook never fails
+# loudly on a missing capability.
+EPHEMERAL_DIR=$(harness_path_or_empty ephemeral_plans)
+if [[ -n "$EPHEMERAL_DIR" && -d "$EPHEMERAL_DIR" ]]; then
   ORPHAN_COUNT=$(find "$EPHEMERAL_DIR" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
   if [[ "$ORPHAN_COUNT" -gt 0 ]]; then
-    echo "[work] $ORPHAN_COUNT ephemeral plan file(s) in ~/.claude/plans/ may not be persisted"
+    echo "[work] $ORPHAN_COUNT ephemeral plan file(s) in $EPHEMERAL_DIR may not be persisted"
     echo "[work] Use /work list to review — persist with /work create or delete if stale"
     echo ""
   fi

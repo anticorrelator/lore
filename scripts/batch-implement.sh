@@ -14,7 +14,12 @@ WORK_DIR="$KNOWLEDGE_DIR/_work"
 
 # --- Defaults ---
 MAX_BUDGET="5.0"
-MODEL="sonnet"
+# MODEL is empty by default; per-role resolution runs after arg parsing
+# so an explicit --model flag takes precedence over the role map. The
+# orchestrator agent runs as `lead` (drives /implement); the
+# judge_candidates step runs as `judge`. Each is resolved independently
+# via resolve_model_for_role unless --model overrides both.
+MODEL=""
 DRY_RUN=false
 USE_JUDGE=true
 INCLUDE_SLUGS=()
@@ -29,7 +34,10 @@ Discover work items with ready plans and batch-run /implement on them.
 
 Options:
   --max-budget N       Per-item cost cap in USD (default: 5.0)
-  --model <model>      Model to use for implementation (default: sonnet)
+  --model <model>      Override the model used for both the implement orchestrator
+                       and the suitability judge. When omitted, the orchestrator
+                       is resolved from role 'lead' and the judge from role 'judge'
+                       via resolve_model_for_role (see adapters/roles.json).
   --dry-run            Show candidates without executing
   --without-judge      Skip LLM suitability judge (on by default)
   --include <slug>     Only process these slugs (repeatable)
@@ -85,6 +93,23 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# --- Resolve model from role unless --model overrode it ---
+# Per the role->model contract, when the operator does not pass --model
+# the orchestrator and judge each resolve from their named role. The
+# judge resolution is deferred to judge_candidates() so a job that
+# disables the judge (--without-judge) does not require a binding for
+# the judge role. JUDGE_MODEL_OVERRIDE captures the user's explicit
+# override so both call sites honor it.
+JUDGE_MODEL_OVERRIDE=""
+if [[ -n "$MODEL" ]]; then
+  JUDGE_MODEL_OVERRIDE="$MODEL"
+fi
+if [[ -z "$MODEL" ]]; then
+  if ! MODEL=$(resolve_model_for_role lead 2>/dev/null) || [[ -z "$MODEL" ]]; then
+    die "No model binding for role 'lead'. Pass --model <model> or set roles.lead in ~/.lore/config/framework.json."
+  fi
+fi
 
 # --- Validate work directory ---
 if [[ ! -d "$WORK_DIR" ]]; then
@@ -432,9 +457,24 @@ PROMPT
   local output_file
   output_file=$(mktemp /tmp/batch-impl-judge-result-XXXXXX.txt)
 
+  # Resolve the judge's model. The user's --model override (if any)
+  # wins; otherwise the judge resolves from its own role binding so
+  # operators can run a heavier orchestrator with a cheaper judge.
+  local judge_model="$JUDGE_MODEL_OVERRIDE"
+  if [[ -z "$judge_model" ]]; then
+    if ! judge_model=$(resolve_model_for_role judge 2>/dev/null) || [[ -z "$judge_model" ]]; then
+      echo "[batch-implement] Warning: no model binding for role 'judge', skipping judge"
+      for i in "${!CANDIDATE_SLUGS[@]}"; do
+        CANDIDATE_VERDICT+=("—")
+        CANDIDATE_JUDGE_REASON+=("")
+      done
+      return 0
+    fi
+  fi
+
   local judge_ok=true
   claude -p "$(cat "$prompt_file")" \
-    --model "$MODEL" \
+    --model "$judge_model" \
     --append-system-prompt "$system_prompt" \
     --output-format text \
     --max-turns 1 \
@@ -798,7 +838,7 @@ execute_item() {
   # Invoke claude in print mode with JSON output
   local exit_code=0
   local -a claude_args
-  mapfile -t claude_args < <(load_claude_args)
+  mapfile -t claude_args < <(load_harness_args)
   claude -p "/implement $slug" \
     "${claude_args[@]}" \
     --output-format json \

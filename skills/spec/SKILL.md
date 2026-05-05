@@ -2,7 +2,7 @@
 name: spec
 description: "Create a technical specification — `/spec short` for single-pass plans, `/spec` for full team-based investigation"
 user_invocable: true
-argument_description: "[short] [--yes] [--model opus|sonnet] [name or description] — existing work item name, or a freeform description to start from"
+argument_description: "[short] [--yes] [--model <id>] [name or description] — existing work item name, or a freeform description to start from. `--model` overrides every per-role binding (lead/researcher/advisor) for this invocation only; otherwise per-role models come from `resolve_model_for_role`."
 ---
 
 # /spec Skill
@@ -28,7 +28,7 @@ Team-based divide-and-conquer: the spec-lead composes an investigation plan tabl
 1. Parse arguments:
    - If first arg after `/spec` is `short`, the investigation step (Step 2) uses the **short** branch.
    - If `--yes` is present, skip all interactive confirmation gates (auto-proceed through investigation plan confirmation, strategy gate, confirm understanding, and task review).
-   - If `--model` is present (accepts `opus` or `sonnet`, default `sonnet`), use it as `<selected-model>` for every agent spawn; otherwise `<selected-model>` is `sonnet`.
+   - If `--model <id>` is present, export per-role overrides for the duration of this skill: `export LORE_MODEL_LEAD=<id> LORE_MODEL_RESEARCHER=<id> LORE_MODEL_ADVISOR=<id>` (one shot — no env mutation outside the skill). Otherwise let `resolve_model_for_role` (lib.sh) pick the per-role binding from the active framework's role map. Per-role resolution honors the precedence: env override → per-repo `.lore.config` → user `framework.json` roles → `roles.default`. Multi-provider harnesses (opencode) honor `provider/model` syntax; single-provider harnesses (claude-code, codex) accept bare model ids only — `validate_role_model_binding` rejects mismatches.
    - The remaining text is the **input**.
 
 2. Resolve the work path:
@@ -37,11 +37,13 @@ Team-based divide-and-conquer: the spec-lead composes an investigation plan tabl
    ```
    Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
-3. Compute template versions for provenance:
+3. Compute template versions for provenance. Resolve agent template paths via `resolve_agent_template` (lib.sh helper) so the canonical lore-repo `agents/<name>.md` is hashed regardless of which harness is active. The skill template path uses the active harness's skills install path — on Claude Code that's `~/.claude/skills/`, on Codex it's `~/.codex/skills/` (per `resolve_harness_install_path skills`):
    ```bash
-   LEAD_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/skills/spec/SKILL.md)
-   RESEARCHER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/agents/researcher.md)
-   ADVISOR_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/agents/advisor.md)
+   source ~/.lore/scripts/lib.sh
+   SKILLS_DIR=$(resolve_harness_install_path skills)
+   LEAD_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$SKILLS_DIR/spec/SKILL.md")
+   RESEARCHER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$(resolve_agent_template researcher)")
+   ADVISOR_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$(resolve_agent_template advisor)")
    ```
    If any call fails, fall through with an empty string. Registration into `$KDIR/_scorecards/template-registry.json` is handled by `scorecard-append.sh` on first use. Reports without a `Template-version:` field warn+pass rather than fail — the CC-01 backwards-compat gate enables incremental template migration without blocking legacy emitters.
 
@@ -80,8 +82,8 @@ If the user's description is already specific enough (clear scope, stated constr
 4. Read the files yourself — do NOT spawn subagents.
 5. Note key findings as you go.
 6. **Skill and agent discovery** — after reading key files, scan for relevant skills and agents:
-   - Glob `~/.claude/skills/*/SKILL.md` — read the YAML frontmatter (`name`, `description`) and first section of each.
-   - Glob `~/.claude/agents/*.md` — read each agent template name and opening description.
+   - Glob `<skills_dir>/*/SKILL.md` — read the YAML frontmatter (`name`, `description`) and first section of each. Resolve `<skills_dir>` via `resolve_harness_install_path skills` (typically `~/.claude/skills` on Claude Code; differs on Codex).
+   - Glob `<agents_dir>/*.md` — read each agent template name and opening description. Resolve `<agents_dir>` via `resolve_harness_install_path agents` (typically `~/.claude/agents` on Claude Code).
    - Match the work item title, description, and key findings against skill/agent names using keyword overlap.
    - Deep-read any SKILL.md or agent template that shows strong overlap with the work item domain.
    - Emit a skill discovery block (mandatory):
@@ -95,7 +97,7 @@ If the user's description is already specific enough (clear scope, stated constr
 ### Step 2b: Full branch (default, no `--short` flag)
 
 1. From the feature description, identify 3-7 focused investigation questions. Each should target a specific codebase concern, be answerable by exploring files, and be independent enough to run in parallel.
-2. **Always include** one mandatory fixed investigation: **Skill and agent applicability** — which installed skills and agent templates should be invoked during **implementation** of this work item. Key files: `~/.claude/skills/*/SKILL.md`, `~/.claude/agents/*.md`. This counts toward the 3-7 total.
+2. **Always include** one mandatory fixed investigation: **Skill and agent applicability** — which installed skills and agent templates should be invoked during **implementation** of this work item. Key files: `<skills_dir>/*/SKILL.md`, `<agents_dir>/*.md` (resolve via `resolve_harness_install_path skills` / `resolve_harness_install_path agents`). This counts toward the 3-7 total.
 3. Check the knowledge store index for file hints per investigation.
 4. Assess complexity for each investigation: **simple** (1-2 files), **moderate** (3-5 files), **complex** (6+ files or cross-cutting).
 5. Present the Investigation Plan to the user:
@@ -104,19 +106,35 @@ If the user's description is already specific enough (clear scope, stated constr
 
    | # | Area / Topic | Key Files | Complexity |
    |---|-------------|-----------|------------|
-   | 1 | Skill and agent applicability *(mandatory — do not remove)* | `~/.claude/skills/*/SKILL.md`, `~/.claude/agents/*.md` | simple |
+   | 1 | Skill and agent applicability *(mandatory — do not remove)* | `<skills_dir>/*/SKILL.md`, `<agents_dir>/*.md` | simple |
    | 2 | <topic>     | `file1`, `file2` | simple |
    ...
 
    Proceed, or adjust?
    ```
 6. Wait for user confirmation. If the user requests adjustments, revise and re-present. **If `--yes`, dispatch immediately without confirmation.**
-7. **Create team:**
+7. **Create team via orchestration adapter.** Resolve the active framework's orchestration adapter at `adapters/agents/<framework>.sh` and treat its `spawn` / `wait` / `send_message` / `collect_result` / `shutdown` subcommands as the dispatch contract for every team operation in this skill. The adapter emits `delegate:<tool> ...` directives that the skill body translates into the harness's native tool calls — on Claude Code that means `TeamCreate` / `TaskCreate` / `SendMessage` / `TaskList` / `TaskGet`; on opencode/codex the same directives map to plugin runtime / subagent spawn APIs. Before creating the team, query the adapter's capability gates:
+   ```bash
+   ADAPTER="$LORE_REPO_DIR/adapters/agents/$(resolve_active_framework).sh"
+   ENFORCEMENT=$(bash "$ADAPTER" completion_enforcement)  # native_blocking | lead_validator | self_attestation | unavailable
+   TEAM_MESSAGING=$(framework_capability team_messaging)  # full | partial | fallback | none
+   ```
+   - `ENFORCEMENT` shapes the retry/abandon decision in Step 3 (per `adapters/agents/README.md` §"Completion Enforcement Degradation Modes").
+   - `TEAM_MESSAGING=none` collapses the skill to lead-only orchestration: skip team creation, do not spawn researchers, fall back to the `--short` branch path. The skill requires `team_messaging=full` per `adapters/capabilities.json.skills.spec.requires`; the gate fires here.
+
+   For Claude Code (the default path), team creation is the native `TeamCreate` tool:
    ```
    TeamCreate: team_name="spec-<slug>", description="Investigating <work item title>"
    ```
-8. Read your team lead name from `~/.claude/teams/spec-<slug>/config.json`.
-9. Create investigation tasks — one `TaskCreate` per question with full question, context, file hints, and expected report format.
+   The opencode/codex adapters emit `delegate:plugin_team_init` / `delegate:codex_subagent_init` respectively (see `adapters/agents/README.md` §"Per-Harness Mapping"); the skill body calls the documented translation when running under those frameworks.
+8. Read your team lead name from the active harness's teams install path (resolved via `resolve_harness_install_path teams`; typically `~/.claude/teams/` on Claude Code), at `<teams_dir>/spec-<slug>/config.json`. Frameworks where `install_paths.teams=unsupported` (e.g. codex today) cannot persist team config — the skill reads `team_messaging=fallback` and proceeds with a lead-side handle map instead of the on-disk config.
+9. Create investigation tasks — for each question, route through the adapter's `spawn` operation:
+   ```bash
+   RESEARCHER_MODEL=$(bash "$ADAPTER" resolve_model_for_role researcher)
+   bash "$ADAPTER" spawn researcher "<task_prompt>" "$RESEARCHER_MODEL"
+   # → delegate:TaskCreate role=researcher model=<id>  (claude-code)
+   ```
+   On Claude Code, the lead model invokes `TaskCreate` with the directive's role/model; the spawn directive carries one `TaskCreate` per question with full question, context, file hints, and expected report format.
    - For the mandatory "Skill and agent applicability" investigation: include instructions to evaluate implementation-phase applicability (not the investigation phase), read actual SKILL.md files, and report `**Matched skills:**` / `**Matched agents:**` blocks after `**Implications:**`.
 10. Pre-fetch knowledge for each investigation:
     ```bash
@@ -134,7 +152,7 @@ If the user's description is already specific enough (clear scope, stated constr
        - Spawn an advisor using `agents/advisor.md` with template injections: `{{team_name}}` → `spec-<slug>`, `{{advisor_domain}}` → skill name + scope, `{{domain_context}}` → SKILL.md content.
        - Build `$ADVISORY_MIXIN` from `scripts/agent-protocols/advisory-consultation.md` with `{{advisors}}` resolved. All skill-backed advisors use `on-demand` mode.
     c. If no applicable skills: set `$ADVISORY_MIXIN` to empty.
-12. Spawn researcher agents — `min(investigation_count, 4)` in a single message. Use `~/.claude/agents/researcher.md` with template injections: `{{team_name}}` → `spec-<slug>`, `{{team_lead}}` → lead name, `{{prior_knowledge}}` → `$PRIOR_KNOWLEDGE`, `{{template_version}}` → `$RESEARCHER_TEMPLATE_VERSION`. If `$ADVISORY_MIXIN` is non-empty, append it after resolved researcher.md content with a blank line separator.
+12. Spawn researcher agents — `min(investigation_count, 4)` in a single message via the orchestration adapter's `spawn` operation. Use the `researcher` agent template (resolve via `resolve_agent_template researcher`; on Claude Code that path is `~/.claude/agents/researcher.md`) with template injections: `{{team_name}}` → `spec-<slug>`, `{{team_lead}}` → lead name, `{{prior_knowledge}}` → `$PRIOR_KNOWLEDGE`, `{{template_version}}` → `$RESEARCHER_TEMPLATE_VERSION`. If `$ADVISORY_MIXIN` is non-empty, append it after the resolved researcher template content with a blank line separator. Per-spawn model selection routes through `resolve_model_for_role researcher` (or the explicit override set in Step 1.1 from `--model`); the adapter validates the role→model binding against the active framework's `model_routing.shape` and rejects mismatches without silent fallback.
 
 ---
 
@@ -157,8 +175,8 @@ As researcher messages arrive (or after direct file reading in short branch):
    - **Absence semantics:** if no assertions or lead-observed task claims exist, both `task-claims.jsonl` and `evidence.md` may be absent — absence means "no Tier-2 claims captured this session," not "work was fully verified."
 
 5. **Full branch only:** When all investigation tasks are complete:
-   - Send shutdown requests to all researchers and advisor agents via `SendMessage` (type: `shutdown_request`).
-   - Run `TeamDelete` to clean up the team.
+   - Send shutdown requests via the orchestration adapter's `shutdown` operation: `bash "$ADAPTER" shutdown <handle> true` for each researcher and advisor handle. On Claude Code this expands to `delegate:SendMessage handle=<id> type=shutdown_request approve=true` which the lead invokes as the native `SendMessage` tool. On harnesses where `team_messaging=none`, the adapter returns `unsupported` and the skill body relies on harness-native session cleanup (Codex subagent-stop, OpenCode plugin-runtime kill).
+   - Run `TeamDelete` to clean up the team (Claude Code only; opencode/codex's adapter does not require an explicit teardown — the runtime owns lifecycle).
 
 6. Append an investigation summary to `execution-log.md`:
    ```bash
@@ -332,7 +350,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
    - **subsystem** — local rule about one named area, feature, module, team, command family, integration, or workflow within a larger system. Concrete terms may appear as participants in a local workflow rather than as the whole claim.
    - **implementation** — concrete artifact fact: file, function, script, command, limit, field, test, bug, line-level behavior. If removing the artifact name destroys the claim, classify here.
 
-   **Multi-label encoding:** an entry's scale may be a single id or a comma-delimited pair of adjacent ids (allowed pairs: `abstract,architecture`, `architecture,subsystem`, `subsystem,implementation`); for the full decision tree (four linguistic tests + substitution test) see `~/.claude/agents/classifier.md`.
+   **Multi-label encoding:** an entry's scale may be a single id or a comma-delimited pair of adjacent ids (allowed pairs: `abstract,architecture`, `architecture,subsystem`, `subsystem,implementation`); for the full decision tree (four linguistic tests + substitution test) see the `classifier` agent template (lore repo `agents/classifier.md`).
 
    **Boundary tests:** abstract vs architecture — does the claim survive generic-noun substitution (abstract) or does it become "A does B, C does D, E connects them" (architecture)? architecture vs subsystem — whole project structure (architecture) or one named bounded area (subsystem)? subsystem vs implementation — can you state the rule without naming a specific function/file/line (subsystem) or does the claim depend on the artifact (implementation)?
 

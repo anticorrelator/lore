@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "description": "Closed agent role registry for lore. resolve_model_for_role(<role>) consults this list before consulting the per-repo and user role->model bindings. Adding a role requires updating this file, scripts/lib.sh resolve_model_for_role, tui/internal/config/config.go ResolveModelForRole, and tests/frameworks/roles.bats.",
+  "default_role": "default",
+  "roles": [
+    {
+      "id": "lead",
+      "description": "Coordinator agent that plans phases, spawns workers, and gates phase transitions on returned reports.",
+      "call_sites": [
+        "skills/spec/SKILL.md",
+        "skills/implement/SKILL.md"
+      ]
+    },
+    {
+      "id": "worker",
+      "description": "Task-iterating implementation agent that claims tasks from a queue and emits Tier 2 evidence anchored to file:line ranges.",
+      "call_sites": [
+        "agents/worker.md",
+        "skills/implement/SKILL.md",
+        "scripts/batch-implement.sh"
+      ]
+    },
+    {
+      "id": "researcher",
+      "description": "Task-iterating investigation agent that explores design space and produces synthesis reports without modifying source files.",
+      "call_sites": [
+        "agents/researcher.md",
+        "skills/spec/SKILL.md",
+        "scripts/batch-spec.sh"
+      ]
+    },
+    {
+      "id": "reviewer",
+      "description": "Single-batch evaluator that consumes a finished artifact (PR, plan, capture) and returns a verdict against a rubric.",
+      "call_sites": [
+        "skills/pr-review/SKILL.md",
+        "scripts/generate-review-summary.sh"
+      ]
+    },
+    {
+      "id": "judge",
+      "description": "Single-batch verdict agent that scores candidates against a closed rubric and emits a structured pass/fail decision (correctness gate, batch suitability).",
+      "call_sites": [
+        "scripts/judge-batch-candidates.sh",
+        "scripts/audit-artifact.sh"
+      ]
+    },
+    {
+      "id": "summarizer",
+      "description": "Lightweight synthesis agent that compresses transcripts, capture queues, or review threads into thematic prose.",
+      "call_sites": [
+        "scripts/work-ai.sh",
+        "scripts/extract-session-digest.py"
+      ]
+    },
+    {
+      "id": "default",
+      "description": "Resolution fallback consulted when a role binding is unset; never named directly by a call site.",
+      "call_sites": []
+    }
+  ]
+}

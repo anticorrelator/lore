@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # agent-toggle/enable.sh — Enable lore agent integration globally
 # Atomically writes agent.json enabled=true (write-temp-then-rename).
-# Surface restoration (symlinks, CLAUDE.md) delegated to helpers — stubs for Phases 3-4.
+# Restores per-harness skill/agent symlinks and re-assembles the active
+# harness's instruction file (CLAUDE.md / AGENTS.md) via
+# scripts/assemble-instructions.sh --framework <active>.
 # Usage: bash enable.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../config.sh"
+source "$SCRIPT_DIR/../lib.sh"
 
 AGENT_JSON="${LORE_DATA_DIR}/config/agent.json"
 AGENT_JSON_TMP="${AGENT_JSON}.tmp.$$"
@@ -33,23 +36,39 @@ print(json.dumps(d.get('symlink_manifest', [])))
   count=$(python3 -c "import json,sys; print(len(json.loads(sys.argv[1])))" "$manifest")
 
   if [[ "$count" -eq 0 ]]; then
-    # Fallback: reconstruct from install.sh symlink logic
+    # Fallback: reconstruct from install.sh symlink logic, but route per-
+    # harness to the active framework's skills/agents install dirs via
+    # harness_path_or_empty (T71). Empty string covers both "no surface
+    # for this kind" and "config not yet present" — both skip silently.
     if [[ -z "$LORE_REPO_DIR" ]]; then
       echo "  [warn] No symlink manifest and cannot detect lore repo — run install.sh to restore skills" >&2
       return 0
     fi
-    for skill_dir in "$LORE_REPO_DIR"/skills/*/; do
-      [[ -d "$skill_dir" ]] || continue
-      skill_name="$(basename "$skill_dir")"
-      link="${HOME}/.claude/skills/${skill_name}"
-      [[ -L "$link" ]] || ln -sfn "$skill_dir" "$link"
-    done
-    for agent_file in "$LORE_REPO_DIR"/agents/*.md; do
-      [[ -f "$agent_file" ]] || continue
-      agent_name="$(basename "$agent_file")"
-      link="${HOME}/.claude/agents/${agent_name}"
-      [[ -L "$link" ]] || ln -sf "$agent_file" "$link"
-    done
+
+    local skills_dir agents_dir
+    skills_dir=$(harness_path_or_empty skills)
+    agents_dir=$(harness_path_or_empty agents)
+
+    if [[ -n "$skills_dir" ]]; then
+      mkdir -p "$skills_dir"
+      for skill_dir in "$LORE_REPO_DIR"/skills/*/; do
+        [[ -d "$skill_dir" ]] || continue
+        skill_name="$(basename "$skill_dir")"
+        link="${skills_dir}/${skill_name}"
+        [[ -L "$link" ]] || ln -sfn "$skill_dir" "$link"
+      done
+    fi
+
+    if [[ -n "$agents_dir" ]]; then
+      mkdir -p "$agents_dir"
+      for agent_file in "$LORE_REPO_DIR"/agents/*.md; do
+        [[ -f "$agent_file" ]] || continue
+        agent_name="$(basename "$agent_file")"
+        link="${agents_dir}/${agent_name}"
+        [[ -L "$link" ]] || ln -sf "$agent_file" "$link"
+      done
+    fi
+
     return 0
   fi
 
@@ -67,13 +86,15 @@ for entry in manifest:
 " "$manifest"
 }
 
-# --- Phase 4: re-assemble CLAUDE.md with lore content ---
+# --- Phase 4: re-assemble the active harness's instruction file ---
 restore_claude_md() {
-  local assembler="${LORE_DATA_DIR}/scripts/assemble-claude-md.sh"
+  local assembler="${LORE_DATA_DIR}/scripts/assemble-instructions.sh"
+  local active
+  active=$(resolve_active_framework 2>/dev/null) || active="claude-code"
   if [[ -x "$assembler" ]]; then
-    "$assembler"
+    "$assembler" --framework "$active"
   else
-    echo "  [warn] assemble-claude-md.sh not found — CLAUDE.md not updated" >&2
+    echo "  [warn] assemble-instructions.sh not found — instruction file not updated" >&2
   fi
 }
 

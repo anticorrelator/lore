@@ -160,33 +160,14 @@ func DefaultClaudeArgs() []string {
 	return []string{"--dangerously-skip-permissions"}
 }
 
-func claudeConfigPath() string {
-	dataRoot := os.Getenv("LORE_DATA_DIR")
-	if dataRoot == "" {
-		home, _ := os.UserHomeDir()
-		dataRoot = filepath.Join(home, ".lore")
-	}
-	return filepath.Join(dataRoot, "config", "claude.json")
-}
-
-// LoadClaudeConfig returns the args to prepend to every `claude` invocation.
-// Resolution order: LORE_CLAUDE_ARGS env var (JSON array) → claude.json file →
-// built-in default. Malformed sources fall through to the next source.
+// LoadClaudeConfig is a deprecated alias for LoadHarnessArgs("claude-code").
+// Kept for one release so unmigrated callers continue to work; new callers
+// should use LoadHarnessArgs(framework) or LoadHarnessConfig(framework) so
+// they resolve args for the active framework rather than always reading the
+// claude-code slot. See scripts/lib.sh load_claude_args for the bash-side
+// equivalent deprecation shim.
+//
+// Deprecated: Use LoadHarnessArgs or LoadHarnessConfig.
 func LoadClaudeConfig() ClaudeConfig {
-	if env := os.Getenv("LORE_CLAUDE_ARGS"); env != "" {
-		var args []string
-		if err := json.Unmarshal([]byte(env), &args); err == nil {
-			return ClaudeConfig{Args: args}
-		}
-	}
-
-	data, err := os.ReadFile(claudeConfigPath())
-	if err == nil {
-		var c ClaudeConfig
-		if err := json.Unmarshal(data, &c); err == nil && c.Args != nil {
-			return c
-		}
-	}
-
-	return ClaudeConfig{Args: DefaultClaudeArgs()}
+	return ClaudeConfig{Args: LoadHarnessArgs("claude-code")}
 }

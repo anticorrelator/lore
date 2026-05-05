@@ -53,7 +53,7 @@ Create the agent team and one task per domain.
    TeamCreate: team_name="bootstrap-<SLUG>", description="Bootstrapping knowledge for <repo-name>"
    ```
 
-3. **Read your team lead name** from `~/.claude/teams/bootstrap-<SLUG>/config.json`.
+3. **Read your team lead name** from the active harness's teams install path (resolved via `resolve_harness_install_path teams`; typically `~/.claude/teams/` on Claude Code), at `<teams_dir>/bootstrap-<SLUG>/config.json`. This skill requires `team_messaging=full` per `adapters/capabilities.json.skills.bootstrap.requires`.
 
 4. **Create one task per domain** using the scoping JSON:
    ```

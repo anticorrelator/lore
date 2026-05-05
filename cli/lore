@@ -103,6 +103,7 @@ Commands:
   analyze      Knowledge store analysis (see: lore analyze --help)
   bootstrap    Bootstrap knowledge store (see: lore bootstrap --help)
   ceremony     Ceremony config management (see: lore ceremony --help)
+  config       Read framework/role/capability config (see: lore config --help)
   agent        Agent integration toggle (see: lore agent --help)
   scale        Capture-scale helpers (see: lore scale --help)
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
@@ -283,6 +284,29 @@ Subcommands:
 
 Options:
   --help, -h    Show this help
+EOF
+}
+
+config_usage() {
+  cat >&2 <<EOF
+lore config — read persisted framework/role/capability configuration
+
+Usage: lore config <subcommand> [args...]
+
+Subcommands:
+  framework                  Print the active framework name (e.g. claude-code)
+  role <role>                Print the model bound to <role>; falls back to "default"
+  roles                      Print the role->model map as JSON
+  capability-overrides       Print capability_overrides as JSON
+  show                       Print the entire framework.json as JSON
+  path                       Print the absolute path to framework.json
+
+Options:
+  --help, -h    Show this help
+
+The reader reflects what install.sh persisted to \$LORE_DATA_DIR/config/framework.json.
+For env-aware role resolution (env > per-repo > user > harness default), use the
+lib.sh helper resolve_model_for_role from a script context.
 EOF
 }
 
@@ -723,6 +747,33 @@ cmd_ceremony() {
       echo "Error: unknown ceremony subcommand '$subcmd'" >&2
       echo "" >&2
       ceremony_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Framework/role/capability config reader ---
+cmd_config() {
+  if [[ $# -eq 0 ]]; then
+    config_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      config_usage
+      return 0
+      ;;
+    framework|role|roles|capability-overrides|show|path)
+      "$SCRIPTS_DIR/framework-config.sh" "$subcmd" "$@"
+      ;;
+    *)
+      echo "Error: unknown config subcommand '$subcmd'" >&2
+      echo "" >&2
+      config_usage
       return 1
       ;;
   esac
@@ -1645,6 +1696,10 @@ case "$1" in
   ceremony)
     shift
     cmd_ceremony "$@"
+    ;;
+  config)
+    shift
+    cmd_config "$@"
     ;;
   agent)
     shift
