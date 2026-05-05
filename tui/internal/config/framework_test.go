@@ -166,6 +166,126 @@ func TestResolveHarnessInstallPath_RejectsUnknownKind(t *testing.T) {
 	}
 }
 
+func TestHarnessBinary(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	cases := []struct {
+		framework string
+		want      string
+	}{
+		{"claude-code", "claude"},
+		{"opencode", "opencode"},
+		{"codex", "codex"},
+	}
+	for _, c := range cases {
+		got, err := HarnessBinary(c.framework)
+		if err != nil {
+			t.Errorf("HarnessBinary(%q): %v", c.framework, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("HarnessBinary(%q) = %q, want %q", c.framework, got, c.want)
+		}
+	}
+}
+
+func TestHarnessBinary_ResolvesActiveWhenEmpty(t *testing.T) {
+	setupFakeLoreData(t, "opencode", nil)
+	got, err := HarnessBinary("")
+	if err != nil {
+		t.Fatalf("HarnessBinary(\"\"): %v", err)
+	}
+	if got != "opencode" {
+		t.Errorf("HarnessBinary(\"\") on opencode = %q, want %q", got, "opencode")
+	}
+}
+
+func TestHarnessBinary_RejectsUnknown(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	_, err := HarnessBinary("bogus")
+	if err == nil {
+		t.Fatal("expected error for unknown framework, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown framework") {
+		t.Errorf("error = %v, want substring %q", err, "unknown framework")
+	}
+}
+
+func TestHarnessSystemPromptFlag(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	cases := []struct {
+		framework     string
+		wantFlag      string
+		wantSupported bool
+	}{
+		{"claude-code", "--append-system-prompt", true},
+		{"opencode", "", false},
+		{"codex", "", false},
+	}
+	for _, c := range cases {
+		gotFlag, gotSupported, err := HarnessSystemPromptFlag(c.framework)
+		if err != nil {
+			t.Errorf("HarnessSystemPromptFlag(%q): %v", c.framework, err)
+			continue
+		}
+		if gotFlag != c.wantFlag || gotSupported != c.wantSupported {
+			t.Errorf("HarnessSystemPromptFlag(%q) = (%q, %v), want (%q, %v)", c.framework, gotFlag, gotSupported, c.wantFlag, c.wantSupported)
+		}
+	}
+}
+
+func TestHarnessSystemPromptFlag_ResolvesActiveWhenEmpty(t *testing.T) {
+	setupFakeLoreData(t, "opencode", nil)
+	gotFlag, gotSupported, err := HarnessSystemPromptFlag("")
+	if err != nil {
+		t.Fatalf("HarnessSystemPromptFlag(\"\"): %v", err)
+	}
+	if gotFlag != "" || gotSupported {
+		t.Errorf("HarnessSystemPromptFlag(\"\") on opencode = (%q, %v), want (\"\", false)", gotFlag, gotSupported)
+	}
+}
+
+func TestHarnessSystemPromptFlag_RejectsUnknown(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	_, _, err := HarnessSystemPromptFlag("bogus")
+	if err == nil {
+		t.Fatal("expected error for unknown framework, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown framework") {
+		t.Errorf("error = %v, want substring %q", err, "unknown framework")
+	}
+}
+
+func TestHarnessSettingsOverrideFlag(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	cases := []struct {
+		framework     string
+		wantFlag      string
+		wantSupported bool
+	}{
+		{"claude-code", "--settings", true},
+		{"opencode", "", false},
+		{"codex", "", false},
+	}
+	for _, c := range cases {
+		gotFlag, gotSupported, err := HarnessSettingsOverrideFlag(c.framework)
+		if err != nil {
+			t.Errorf("HarnessSettingsOverrideFlag(%q): %v", c.framework, err)
+			continue
+		}
+		if gotFlag != c.wantFlag || gotSupported != c.wantSupported {
+			t.Errorf("HarnessSettingsOverrideFlag(%q) = (%q, %v), want (%q, %v)", c.framework, gotFlag, gotSupported, c.wantFlag, c.wantSupported)
+		}
+	}
+}
+
+func TestHarnessSettingsOverrideFlag_RejectsUnknown(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	_, _, err := HarnessSettingsOverrideFlag("bogus")
+	if err == nil {
+		t.Fatal("expected error for unknown framework, got nil")
+	}
+}
+
 func TestResolveAgentTemplate(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", nil)
 

@@ -597,8 +597,20 @@ T70 / `lore doctor` can distinguish a gap from a missing-evidence error.
 - **`scripts/claude-billing.sh` (Claude Pro/Max keychain wrapper) is
   harness-specific by design.** It is not migrated to other harnesses
   because it wraps Anthropic Pro/Max subscription billing, which only
-  applies under Claude Code. T70 tags it; `lore doctor` does not flag
-  its absence on non-Claude harnesses.
+  applies under Claude Code. Task-28 tags it; `lore doctor` does not flag
+  its absence on non-Claude harnesses. See
+  [`docs/framework-compatibility.md` § Harness-specific scripts](../docs/framework-compatibility.md#harness-specific-scripts)
+  for the operator-facing entry.
+
+**Tag: `claude-billing-harness-specific`** — harness-specific by design (not a capability cell; excluded from capability profile).
+
+- **Script:** `scripts/claude-billing.sh`
+- **Harness:** Claude Code only
+- **Purpose:** Lease-based billing mode wrapper for the `claude` CLI binary. Manages a lease file (`~/.claude/api-billing-lease`) that switches Claude Code between Pro/Max subscription auth (default) and Anthropic API-key billing. Exposes `status`, `doctor`, `api <duration>`, `max`, and `run` subcommands.
+- **Why harness-specific:** The script calls the `claude` binary directly and relies on Anthropic-specific auth (`claude auth login`) and the `ANTHROPIC_API_KEY` env var injection that only Claude Code honors. OpenCode and Codex manage billing through their own vendor surfaces; this lease mechanism does not apply there.
+- **Harness guard:** The script exits with an explanatory error if `LORE_FRAMEWORK` is set to a non-`claude-code` value, preventing silent misuse under other harnesses.
+- **`lore doctor` behavior:** Does NOT flag the absence of this script on non-Claude-Code harnesses. It is intentionally not part of the capability profile for OpenCode or Codex.
+- **Cross-reference:** [`docs/framework-compatibility.md` § Harness-specific scripts](../docs/framework-compatibility.md#harness-specific-scripts)
 
 ---
 

@@ -142,7 +142,7 @@ Review the full conversation context (filtered by any Step 1 constraints) and id
 
 For each candidate, assess against the capture gate — all 4 conditions must be true:
 1. **Reusable** — applicable beyond the current task
-2. **Non-obvious** — not already in README, CLAUDE.md, or docs
+2. **Non-obvious** — not already in README, the harness instructions file (CLAUDE.md/AGENTS.md), or docs
 3. **Stable** — unlikely to change soon
 4. **High confidence** — verified through code exploration, not speculative
 

@@ -6,11 +6,11 @@ Lightweight injectable protocol fragments for agent output formats and behaviora
 
 Lore uses three tiers of agent definition, from most to least formal:
 
-### Tier 1: Explicit Protocol Agents (`agents/` → `~/.claude/agents/`)
+### Tier 1: Explicit Protocol Agents (`agents/` → harness's agents install path)
 
 Durable, named agent definitions for roles with complex protocols that are prone to instruction fade. These define the full behavioral contract: report format, tool usage, knowledge retrieval expectations, and completion workflow.
 
-Canonical source lives in the repo's `agents/` directory. `install.sh` symlinks each `.md` file to `~/.claude/agents/` for global availability across all projects. Skills reference agents via the global path (`~/.claude/agents/X.md`).
+Canonical source lives in the repo's `agents/` directory. `install.sh` symlinks each `.md` file to the active harness's agents install path (resolved via `resolve_harness_install_path agents`; on Claude Code that's `~/.claude/agents/`). Skills reference agents via `resolve_agent_template <name>` rather than hardcoding the global path.
 
 **When to use:** The role has a multi-step protocol that agents frequently drift from when instructions are inlined in a spawn prompt. Creating an explicit definition anchors the protocol in a stable file that skills reference by name.
 

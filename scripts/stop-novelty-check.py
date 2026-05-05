@@ -23,9 +23,18 @@ import re
 import sys
 from collections import defaultdict
 
+# Add the repo root to sys.path so `adapters` package is importable.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from adapters.transcripts import get_provider, UnsupportedFrameworkError, count_tool_uses, has_recent_capture
+
 # Shared transcript infrastructure
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from transcript import parse_transcript, extract_file_paths, count_tool_uses, has_recent_capture, resolve_knowledge_dir, fail_open
+_SCRIPTS_DIR = os.path.dirname(os.path.realpath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from transcript import resolve_knowledge_dir, fail_open
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +517,7 @@ def scan_heuristics(messages, team_exclusions=None):
     return hits
 
 
-def scan_structural_signals(messages, transcript_path="", config=None):
+def scan_structural_signals(messages, transcript_path="", config=None, extract_file_paths=None):
     """Detect structural patterns that signal debugging or investigation sessions.
 
     Detects four signal types based on tool_use sequences rather than phrasing:
@@ -524,6 +533,7 @@ def scan_structural_signals(messages, transcript_path="", config=None):
         messages: list of parsed message dicts from parse_transcript()
         transcript_path: path to transcript file (needed for file-path signals)
         config: configuration dict (uses DEFAULTS if None)
+        extract_file_paths: callable(transcript_path) -> list[(path, msg_idx)]; provider-supplied
     """
     if config is None:
         config = DEFAULTS
@@ -566,7 +576,7 @@ def scan_structural_signals(messages, transcript_path="", config=None):
             })
 
     # --- Signal 2: Iterative debugging — same file in ≥2 Reads within iterative_debug_window messages ---
-    if transcript_path:
+    if transcript_path and extract_file_paths is not None:
         file_reads = extract_file_paths(transcript_path)
         # Group by file path, collect (path, msg_idx) pairs for Read-type tools only
         # extract_file_paths returns all FILE_PATH_TOOLS; filter to Read only
@@ -739,7 +749,7 @@ def score_novelty(knowledge_dir, phrases, config=None):
         return []
 
     # Import Searcher from pk_search.py in the same directory
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = os.path.dirname(os.path.realpath(__file__))
     sys.path.insert(0, script_dir)
     try:
         from pk_search import Searcher
@@ -854,7 +864,7 @@ def extract_skill_paths_from_text(text):
 
     Returns a list of unique skill paths in order of first appearance.
     """
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     seen = set()
     paths = []
     for m in _SKILL_MENTION_RE.finditer(text):
@@ -868,7 +878,7 @@ def extract_skill_paths_from_text(text):
     return paths
 
 
-def extract_related_files(transcript_path, heuristic_index, config=None):
+def extract_related_files(transcript_path, heuristic_index, config=None, extract_file_paths=None):
     """Extract file paths from tool_use blocks near a heuristic hit.
 
     Collects file paths from tool_use blocks within +/- file_context_window
@@ -879,12 +889,15 @@ def extract_related_files(transcript_path, heuristic_index, config=None):
         transcript_path: path to the JSONL transcript file
         heuristic_index: message index of the heuristic match
         config: configuration dict (uses DEFAULTS if None)
+        extract_file_paths: callable(transcript_path) -> list[(path, msg_idx)]; provider-supplied
 
     Returns:
         list of unique file path strings, in order of first appearance
     """
     if config is None:
         config = DEFAULTS
+    if extract_file_paths is None:
+        return []
     file_context_window = config["file_context_window"]
 
     all_paths = extract_file_paths(transcript_path)
@@ -1018,7 +1031,7 @@ def candidate_hash(candidate):
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
 
-def write_pending_captures(knowledge_dir, candidates, transcript_path="", messages=None, config=None):
+def write_pending_captures(knowledge_dir, candidates, transcript_path="", messages=None, config=None, extract_file_paths=None):
     """Write individual candidate files into _pending_captures/ directory.
 
     Each candidate gets its own file named {sha256(trigger+matched_text+related_files)[:12]}.md.
@@ -1048,7 +1061,7 @@ def write_pending_captures(knowledge_dir, candidates, transcript_path="", messag
         # differences produce distinct filenames (candidate dict is self-contained)
         related_files = []
         if transcript_path:
-            related_files = extract_related_files(transcript_path, c["heuristic_index"], config=config)
+            related_files = extract_related_files(transcript_path, c["heuristic_index"], config=config, extract_file_paths=extract_file_paths)
 
         # For preference-signal, augment related_files with skill paths extracted from
         # the matched text (e.g. "/pr-review" → "skills/pr-review/SKILL.md"). Skill paths
@@ -1136,6 +1149,14 @@ def write_pending_captures(knowledge_dir, candidates, transcript_path="", messag
 # ---------------------------------------------------------------------------
 
 def main():
+    import argparse
+
+    # --framework is for testing/cross-harness validation; in production the hook
+    # reads from stdin (Stop hook format) and the framework is auto-resolved.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--framework", default=None)
+    args, _ = parser.parse_known_args()
+
     try:
         hook_input = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, Exception) as e:
@@ -1150,11 +1171,37 @@ def main():
     if not transcript_path or not os.path.exists(transcript_path):
         sys.exit(0)
 
+    # Resolve transcript provider for the active framework
+    try:
+        provider = get_provider(args.framework or None)
+    except UnsupportedFrameworkError:
+        print(
+            "[lore] degraded: stop-novelty-check via transcript_provider=unavailable; skipping",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+
+    # Gate on provider support level; partial → proceed with degraded notice
+    support_level, degraded_reason = provider.provider_status()
+    if support_level == "unavailable":
+        print(
+            "[lore] degraded: stop-novelty-check via transcript_provider=unavailable; skipping",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+    if support_level == "partial":
+        print(
+            f"[lore] degraded: stop-novelty-check via transcript_provider=partial ({degraded_reason})",
+            file=sys.stderr,
+        )
+        # Partial providers surface available text but may miss role-filtered
+        # heuristic signals — detection proceeds on available content.
+
     # Load configuration with fallback to defaults
     config = load_config()
 
-    # Parse transcript
-    messages = parse_transcript(transcript_path)
+    # Parse transcript via provider
+    messages = provider.parse_transcript(transcript_path)
     if not messages:
         sys.exit(0)
 
@@ -1200,6 +1247,9 @@ def main():
                 file=sys.stderr,
             )
 
+    # Bind provider's extract_file_paths for threading into file-path consumers
+    provider_extract_file_paths = provider.extract_file_paths
+
     # Heuristic pattern scan — in team sessions, exclude agent coordination window
     team_exclusions = _build_team_exclusion_set(messages) if is_team else None
     heuristic_hits = scan_heuristics(messages, team_exclusions=team_exclusions)
@@ -1208,7 +1258,12 @@ def main():
     # routinely produce investigation-then-fix, test-fix, and synthesis patterns
     # that are normal coordination, not debugging discoveries.
     if not is_team:
-        structural_hits = scan_structural_signals(messages, transcript_path=transcript_path, config=config)
+        structural_hits = scan_structural_signals(
+            messages,
+            transcript_path=transcript_path,
+            config=config,
+            extract_file_paths=provider_extract_file_paths,
+        )
         heuristic_hits = heuristic_hits + structural_hits
     if not heuristic_hits:
         sys.exit(0)
@@ -1259,7 +1314,14 @@ def main():
         pass  # best-effort
 
     # Write individual candidate files for agent evaluation at next session start
-    write_pending_captures(knowledge_dir, candidates, transcript_path=transcript_path, messages=messages, config=config)
+    write_pending_captures(
+        knowledge_dir,
+        candidates,
+        transcript_path=transcript_path,
+        messages=messages,
+        config=config,
+        extract_file_paths=provider_extract_file_paths,
+    )
 
     # Decision: block only if session is substantial (>max_tool_uses tool uses)
     # For team sessions, use effective (lead-only) tool count

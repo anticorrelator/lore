@@ -230,6 +230,27 @@ cmd_resolve_model_for_role() {
   resolve_model_for_role "$role"
 }
 
+# --- cmd_system_prompt_flag ---
+# Print the OpenCode flag spelling for the `append_system_prompt`
+# TUI-launch concern (T11). OpenCode has no equivalent CLI flag today
+# (per adapters/agents/README.md §TUI Launch Concerns) so the
+# tui_launch_flags cell is `unsupported`. Mirrors the Go helper
+# config.HarnessSystemPromptFlag.
+cmd_system_prompt_flag() {
+  require_opencode
+  framework_tui_launch_flag append_system_prompt
+}
+
+# --- cmd_settings_override_flag ---
+# Print the OpenCode flag spelling for the `inline_settings_override`
+# TUI-launch concern (T11). OpenCode has no equivalent CLI flag today
+# (file-based session config) so the cell is `unsupported`. Callers
+# MUST skip the injection rather than substitute a different flag.
+cmd_settings_override_flag() {
+  require_opencode
+  framework_tui_launch_flag inline_settings_override
+}
+
 # --- cmd_smoke ---
 # Print the operation x support-level matrix for OpenCode. Same shape
 # as claude-code.sh smoke but rows reflect OpenCode's actual capability
@@ -277,6 +298,8 @@ case "$cmd" in
   shutdown)                 shift; cmd_shutdown                 "$@" ;;
   completion_enforcement)   shift; cmd_completion_enforcement   "$@" ;;
   resolve_model_for_role)   shift; cmd_resolve_model_for_role   "$@" ;;
+  system_prompt_flag)       shift; cmd_system_prompt_flag       "$@" ;;
+  settings_override_flag)   shift; cmd_settings_override_flag   "$@" ;;
   smoke|--smoke)            shift; cmd_smoke                    "$@" ;;
   -h|--help|"")
     cat <<EOF >&2
@@ -300,6 +323,11 @@ Subcommands (mirroring adapters/agents/README.md §Operation Surface):
   resolve_model_for_role <role>
                             Print resolved role binding (raw, possibly
                             'provider/model' form).
+  system_prompt_flag        Returns 'unsupported' (opencode has no
+                            --append-system-prompt equivalent).
+  settings_override_flag    Returns 'unsupported' (opencode has no
+                            --settings equivalent; session config is
+                            file-based).
   smoke | --smoke           Print operation x support-level matrix for
                             the active framework (opencode only).
 
@@ -309,7 +337,7 @@ EOF
     [[ -z "$cmd" ]] && exit 1 || exit 0
     ;;
   *)
-    echo "Error: unknown subcommand '$cmd' (allowed: spawn, wait, send_message, collect_result, shutdown, completion_enforcement, resolve_model_for_role, smoke)" >&2
+    echo "Error: unknown subcommand '$cmd' (allowed: spawn, wait, send_message, collect_result, shutdown, completion_enforcement, resolve_model_for_role, system_prompt_flag, settings_override_flag, smoke)" >&2
     exit 1
     ;;
 esac

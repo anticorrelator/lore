@@ -208,6 +208,31 @@ cmd_resolve_model_for_role() {
   resolve_model_for_role "$role"
 }
 
+# --- cmd_system_prompt_flag ---
+# Print the harness-native CLI flag spelling for the
+# `append_system_prompt` TUI-launch concern (T11). Mirrors the Go
+# helper config.HarnessSystemPromptFlag in tui/internal/config/framework.go.
+# Output is either the flag spelling (e.g., `--append-system-prompt`) or
+# the literal `unsupported` per the install_paths sentinel convention.
+# Callers (the TUI today, future shell launchers) MUST skip the
+# injection on `unsupported` rather than substitute a different flag —
+# opencode/codex error on an unknown flag.
+cmd_system_prompt_flag() {
+  require_claude_code
+  framework_tui_launch_flag append_system_prompt
+}
+
+# --- cmd_settings_override_flag ---
+# Print the harness-native CLI flag spelling for the
+# `inline_settings_override` TUI-launch concern (T11). Mirrors the Go
+# helper config.HarnessSettingsOverrideFlag. Same `unsupported` contract
+# as cmd_system_prompt_flag — callers MUST skip the injection on
+# `unsupported`.
+cmd_settings_override_flag() {
+  require_claude_code
+  framework_tui_launch_flag inline_settings_override
+}
+
 # --- cmd_smoke ---
 # Print the operation x support-level matrix for Claude Code. Mirrors
 # the smoke contract in adapters/hooks/claude-code.sh; the operation
@@ -253,6 +278,8 @@ case "$cmd" in
   shutdown)                 shift; cmd_shutdown                 "$@" ;;
   completion_enforcement)   shift; cmd_completion_enforcement   "$@" ;;
   resolve_model_for_role)   shift; cmd_resolve_model_for_role   "$@" ;;
+  system_prompt_flag)       shift; cmd_system_prompt_flag       "$@" ;;
+  settings_override_flag)   shift; cmd_settings_override_flag   "$@" ;;
   smoke|--smoke)            shift; cmd_smoke                    "$@" ;;
   -h|--help|"")
     cat <<EOF >&2
@@ -271,6 +298,12 @@ Subcommands (mirroring adapters/agents/README.md §Operation Surface):
   completion_enforcement    Print resolved enforcement mode.
   resolve_model_for_role <role>
                             Print resolved model id.
+  system_prompt_flag        Print harness-native --append-system-prompt
+                            spelling (or 'unsupported'). T11/T44 TUI-launch
+                            flag-injection contract.
+  settings_override_flag    Print harness-native --settings spelling (or
+                            'unsupported'). T11/T44 TUI-launch flag-injection
+                            contract.
   smoke | --smoke           Print operation x support-level matrix for
                             the active framework (claude-code only).
 
@@ -279,7 +312,7 @@ EOF
     [[ -z "$cmd" ]] && exit 1 || exit 0
     ;;
   *)
-    echo "Error: unknown subcommand '$cmd' (allowed: spawn, wait, send_message, collect_result, shutdown, completion_enforcement, resolve_model_for_role, smoke)" >&2
+    echo "Error: unknown subcommand '$cmd' (allowed: spawn, wait, send_message, collect_result, shutdown, completion_enforcement, resolve_model_for_role, system_prompt_flag, settings_override_flag, smoke)" >&2
     exit 1
     ;;
 esac

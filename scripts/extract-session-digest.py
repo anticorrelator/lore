@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Extract a lightweight digest from the last Claude Code session's JSONL transcript.
+Extract a lightweight digest from the last session's transcript.
 Runs during SessionStart hook and writes _pending_digest.md for LLM processing.
 """
 
@@ -12,9 +12,18 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-# Shared transcript infrastructure
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from transcript import resolve_knowledge_dir as _resolve_knowledge_dir, extract_file_paths as _extract_file_paths
+# Add the repo root to sys.path so `adapters` package is importable.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from adapters.transcripts import get_provider, UnsupportedFrameworkError
+
+# Shared transcript infrastructure (still used for knowledge-dir resolution)
+_SCRIPTS_DIR = os.path.dirname(os.path.realpath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from transcript import resolve_knowledge_dir as _resolve_knowledge_dir
 
 # Reuse debugging detection patterns from stop-novelty-check
 try:
@@ -24,7 +33,7 @@ except ImportError:
     import importlib.util as _ilu
     _spec = _ilu.spec_from_file_location(
         "stop_novelty_check",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "stop-novelty-check.py"),
+        os.path.join(os.path.dirname(os.path.realpath(__file__)), "stop-novelty-check.py"),
     )
     _mod = _ilu.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
@@ -47,82 +56,31 @@ STOPWORDS = {
 }
 
 
-def extract_text_from_content(content):
-    """Extract text from message content (handles both string and array formats)."""
-    if isinstance(content, str):
-        return content
-    elif isinstance(content, list):
-        texts = []
-        for item in content:
-            if isinstance(item, dict) and item.get('type') == 'text':
-                texts.append(item.get('text', ''))
-        return ' '.join(texts)
-    return ''
+def extract_messages_from_normalized(messages):
+    """Extract user messages and assistant highlights from provider-normalized dicts.
 
-
-def parse_jsonl_file(jsonl_path, max_lines=300):
-    """Parse JSONL file and extract user and assistant messages."""
+    Returns (user_messages, assistant_texts) from the normalized message-dict
+    schema (role, text_blocks) rather than parsing Claude-specific JSONL.
+    """
     user_messages = []
     assistant_texts = []
-    session_id = None
-    session_date = None
 
-    try:
-        with open(jsonl_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
+    for msg in messages:
+        role = msg.get('role', '')
+        text_blocks = msg.get('text_blocks', [])
 
-        # If file is large, only process last N lines for performance
-        if len(lines) > 500:
-            lines = lines[-max_lines:]
+        if role == 'user':
+            text = ' '.join(text_blocks).strip()
+            if text:
+                user_messages.append(text)
+        elif role == 'assistant':
+            for text in text_blocks:
+                text = text.strip()
+                if text:
+                    # Take first 200 chars as highlight
+                    assistant_texts.append(text[:200])
 
-        for line in lines:
-            try:
-                data = json.loads(line.strip())
-
-                # Extract session metadata from first message
-                if session_id is None:
-                    session_id = data.get('sessionId', 'unknown')
-                    timestamp = data.get('timestamp')
-                    if timestamp:
-                        try:
-                            session_date = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                        except:
-                            pass
-
-                msg_type = data.get('type')
-                message = data.get('message', {})
-                content = message.get('content')
-
-                if msg_type == 'human':
-                    # Extract user message text
-                    text = extract_text_from_content(content)
-                    if text.strip():
-                        user_messages.append(text.strip())
-
-                elif msg_type == 'assistant':
-                    # Extract assistant text blocks (skip tool_use, tool_result, thinking)
-                    if isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, dict) and block.get('type') == 'text':
-                                text = block.get('text', '').strip()
-                                if text:
-                                    # Take first 200 chars as highlight
-                                    assistant_texts.append(text[:200])
-
-            except json.JSONDecodeError:
-                continue
-            except Exception:
-                continue
-
-        # Fallback to file mtime if no timestamp in data
-        if session_date is None:
-            session_date = datetime.fromtimestamp(os.path.getmtime(jsonl_path))
-
-        return user_messages, assistant_texts, session_id, session_date
-
-    except Exception as e:
-        print(f"Error parsing JSONL: {e}", file=sys.stderr)
-        return [], [], None, None
+    return user_messages, assistant_texts
 
 
 def extract_debug_evidence(lines, debug_match_indices, window=3):
@@ -134,7 +92,7 @@ def extract_debug_evidence(lines, debug_match_indices, window=3):
       debug matches (max 5 total across the session)
 
     Args:
-        lines: raw JSONL lines from the transcript file (list of str)
+        lines: raw lines from the transcript file (list of str)
         debug_match_indices: set/list of line indices where debugging patterns matched
         window: how many lines before/after a match to consider "adjacent"
 
@@ -207,7 +165,7 @@ def extract_debug_evidence(lines, debug_match_indices, window=3):
 
 
 def scan_for_debugging(lines):
-    """Scan raw JSONL lines for debugging pattern matches.
+    """Scan raw lines for debugging pattern matches.
 
     Returns a list of line indices where DEBUG_ROOT_CAUSE_RE or
     SELF_CORRECTION_RE matched in assistant text blocks. These indices are
@@ -260,34 +218,6 @@ def extract_topics(user_messages, top_n=8):
     return word_counts.most_common(top_n)
 
 
-def find_project_dir(cwd):
-    """Convert CWD to project-id format and find project directory."""
-    # Replace / with -
-    project_id = cwd.replace('/', '-')
-    claude_projects_dir = Path.home() / '.claude' / 'projects'
-    project_dir = claude_projects_dir / project_id
-
-    if not project_dir.exists():
-        return None
-
-    return project_dir
-
-
-def find_previous_session_file(project_dir):
-    """Find the second most recent JSONL file (previous session)."""
-    jsonl_files = list(project_dir.glob('*.jsonl'))
-
-    if len(jsonl_files) <= 1:
-        # Only 1 or 0 files means no previous session
-        return None
-
-    # Sort by mtime, most recent first
-    jsonl_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-
-    # Return second most recent (index 1)
-    return jsonl_files[1]
-
-
 def write_digest(knowledge_dir, user_messages, assistant_texts, session_id, session_date, topics,
                  debug_assistant_texts=None, debug_tool_results=None,
                  files_touched=None):
@@ -326,7 +256,7 @@ def write_digest(knowledge_dir, user_messages, assistant_texts, session_id, sess
 
     lines.append("## Assistant Highlights")
     for text in assistant_texts:
-        # Already trimmed to 200 chars in parsing
+        # Already trimmed to 200 chars in extraction
         summary = text.replace('\n', ' ')
         if len(text) == 200:
             summary += '...'
@@ -371,6 +301,44 @@ def write_digest(knowledge_dir, user_messages, assistant_texts, session_id, sess
     return digest_path
 
 
+def find_project_dir(cwd):
+    """Convert CWD to project-id format and find Claude Code project directory.
+
+    Kept for use by adapters/transcripts/claude_code.py which wraps this function
+    via _load_digest_module(). Not called from main() — provider.previous_session_path
+    handles session discovery in a harness-agnostic way.
+    """
+    # Replace / with -
+    project_id = cwd.replace('/', '-')
+    claude_projects_dir = Path.home() / '.claude' / 'projects'
+    project_dir = claude_projects_dir / project_id
+
+    if not project_dir.exists():
+        return None
+
+    return project_dir
+
+
+def find_previous_session_file(project_dir):
+    """Find the second most recent JSONL file (previous session).
+
+    Kept for use by adapters/transcripts/claude_code.py which wraps this function
+    via _load_digest_module(). Not called from main() — provider.previous_session_path
+    handles session discovery in a harness-agnostic way.
+    """
+    jsonl_files = list(project_dir.glob('*.jsonl'))
+
+    if len(jsonl_files) <= 1:
+        # Only 1 or 0 files means no previous session
+        return None
+
+    # Sort by mtime, most recent first
+    jsonl_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+
+    # Return second most recent (index 1)
+    return jsonl_files[1]
+
+
 def resolve_knowledge_dir_for_cwd(cwd):
     """Resolve knowledge directory using shared resolver."""
     return _resolve_knowledge_dir(cwd=cwd)
@@ -378,10 +346,11 @@ def resolve_knowledge_dir_for_cwd(cwd):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Extract session digest from previous Claude Code session'
+        description='Extract session digest from the previous session transcript'
     )
     parser.add_argument('--knowledge-dir', help='Path to knowledge directory')
     parser.add_argument('--cwd', help='Current working directory', default=os.getcwd())
+    parser.add_argument('--framework', help='Override active framework (for testing)')
 
     args = parser.parse_args()
 
@@ -399,38 +368,63 @@ def main():
         if not os.path.isfile(os.path.join(knowledge_dir, '_manifest.json')):
             sys.exit(0)
 
-        # Find project directory
-        project_dir = find_project_dir(args.cwd)
-        if not project_dir:
-            # Silently exit if no project dir
+        # Get transcript provider for the active framework
+        try:
+            provider = get_provider(args.framework or None)
+        except UnsupportedFrameworkError as e:
+            print(
+                f"[lore] degraded: extract-session-digest via transcript_provider=unavailable; skipping",
+                file=sys.stderr,
+            )
             sys.exit(0)
 
-        # Find previous session file
-        prev_session_file = find_previous_session_file(project_dir)
-        if not prev_session_file:
-            # No previous session
+        # Check provider status; unavailable → skip, partial → proceed with notice
+        support_level, degraded_reason = provider.provider_status()
+        if support_level == 'unavailable':
+            print(
+                f"[lore] degraded: extract-session-digest via transcript_provider=unavailable; skipping",
+                file=sys.stderr,
+            )
+            sys.exit(0)
+        if support_level == 'partial':
+            print(
+                f"[lore] degraded: extract-session-digest via transcript_provider=partial ({degraded_reason})",
+                file=sys.stderr,
+            )
+            # Digest identity depends on cwd-scoped session selection. Partial
+            # providers (opencode, codex) cannot guarantee this — opencode returns
+            # None and codex does a global mtime scan that may cross project
+            # boundaries. Skip rather than risk digesting the wrong session.
+            sys.exit(0)
+
+        # Find the previous session via provider (replaces find_project_dir + find_previous_session_file)
+        prev_session_path = provider.previous_session_path(args.cwd)
+        if not prev_session_path:
+            # No previous session available
             sys.exit(0)
 
         # Check if already processed
         digest_path = Path(knowledge_dir) / '_threads' / '_pending_digest.md'
         if digest_path.exists():
             digest_mtime = digest_path.stat().st_mtime
-            session_mtime = prev_session_file.stat().st_mtime
+            session_mtime = os.path.getmtime(prev_session_path)
             if digest_mtime > session_mtime:
                 # Already processed this session
                 sys.exit(0)
 
-        # Read raw lines for debugging detection and evidence extraction
-        try:
-            with open(prev_session_file, 'r', encoding='utf-8') as _f:
-                raw_lines = _f.readlines()
-        except Exception:
-            raw_lines = []
+        # Get raw lines for debugging detection (windowed adjacency requires raw lines)
+        raw_lines = provider.read_raw_lines(prev_session_path)
 
-        # Parse the JSONL file
-        user_messages, assistant_texts, session_id, session_date = parse_jsonl_file(
-            prev_session_file
-        )
+        # Parse the transcript via provider (replaces parse_jsonl_file)
+        messages = provider.parse_transcript(prev_session_path)
+
+        # Get session metadata via provider (replaces parse_jsonl_file session_id/date extraction)
+        meta = provider.session_metadata(prev_session_path)
+        session_id = meta.get('session_id', 'unknown')
+        session_date = meta.get('session_date')
+
+        # Extract user messages and assistant texts from normalized schema
+        user_messages, assistant_texts = extract_messages_from_normalized(messages)
 
         # Check if session is too short
         if len(user_messages) < 3:
@@ -446,8 +440,8 @@ def main():
                     raw_lines, debug_match_indices
                 )
 
-        # Extract unique file paths from tool_use blocks
-        file_path_tuples = _extract_file_paths(str(prev_session_file))
+        # Extract unique file paths from tool_use blocks via provider
+        file_path_tuples = provider.extract_file_paths(prev_session_path)
         files_touched = list(dict.fromkeys(p for p, _ in file_path_tuples)) if file_path_tuples else None
 
         # Extract topics

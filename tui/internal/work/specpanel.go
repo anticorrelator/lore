@@ -898,23 +898,57 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 			}
 		}()
 		// Build the initial prompt to auto-submit. Passing it as a positional
-		// argument to claude starts an interactive session and submits it
-		// immediately — no PTY-write timing hack needed.
+		// argument to the harness binary starts an interactive session and
+		// submits it immediately — no PTY-write timing hack needed.
 		initialPrompt := buildInitialPrompt(slug, title, extraContext, shortMode, chatMode, skipConfirm, followupMode, findingIndex)
 
-		// Build args: start with user-configured claude flags
-		// (~/.lore/config/claude.json), optionally inject --append-system-prompt
-		// before the positional initialPrompt when followupMode is active.
-		args := append([]string(nil), config.LoadClaudeConfig().Args...)
+		// Resolve the active framework once and use it for both the binary
+		// lookup and the harness-specific prepended args. Surfaces a clear
+		// StreamErrorMsg on misconfiguration rather than silently spawning
+		// the wrong (or missing) binary.
+		activeFramework, err := config.ResolveActiveFramework()
+		if err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve active framework: %w", err)}
+		}
+		harnessBinary, err := config.HarnessBinary(activeFramework)
+		if err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve harness binary: %w", err)}
+		}
+
+		// Build args: start with user-configured harness flags
+		// (~/.lore/config/harness-args.json `[<framework>].args`), then
+		// adapter-mediated flag injection for the two TUI-injected concerns
+		// (append_system_prompt, inline_settings_override). Each concern's
+		// flag spelling is resolved against the active harness; on
+		// `unsupported` the TUI skips the injection entirely rather than
+		// substituting a different flag (opencode/codex would error on an
+		// unknown flag). See adapters/agents/README.md §"TUI Launch Concerns".
+		args := append([]string(nil), config.LoadHarnessConfig(activeFramework).Args...)
 		if followupMode && slug != "" {
 			if sysPrompt := loadFollowupContext(slug, knowledgeDir, findingIndex); sysPrompt != "" {
-				args = append(args, "--append-system-prompt", sysPrompt)
+				flag, supported, err := config.HarnessSystemPromptFlag(activeFramework)
+				if err != nil {
+					return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve append_system_prompt flag: %w", err)}
+				}
+				if supported {
+					args = append(args, flag, sysPrompt)
+				} else {
+					fmt.Fprintf(os.Stderr, "[lore] degraded: append_system_prompt skipped (capability=none on framework=%s); followup-discuss context not pre-loaded\n", activeFramework)
+				}
 			}
 		}
-		args = append(args, "--settings", `{}`)
+		settingsFlag, settingsSupported, err := config.HarnessSettingsOverrideFlag(activeFramework)
+		if err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve inline_settings_override flag: %w", err)}
+		}
+		if settingsSupported {
+			args = append(args, settingsFlag, `{}`)
+		} else {
+			fmt.Fprintf(os.Stderr, "[lore] degraded: inline_settings_override skipped (capability=none on framework=%s); session-scoped settings overrides unavailable\n", activeFramework)
+		}
 		args = append(args, initialPrompt)
 
-		cmd := exec.Command("claude", args...)
+		cmd := exec.Command(harnessBinary, args...)
 		cmd.Dir = projectDir
 		// Do NOT set cmd.Stderr = io.Discard here: with a PTY the subprocess's
 		// stdin/stdout/stderr are all wired to the PTY slave, so claude's full

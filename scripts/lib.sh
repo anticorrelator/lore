@@ -597,6 +597,160 @@ framework_capability() {
   echo "none"
 }
 
+# --- framework_capability_evidence ---
+# Print the evidence id for a capability on the active framework, or empty
+# string if the cell has no evidence pointer (D8 evidence-gating: a non-`none`
+# cell missing this field SHOULD be reported as `degraded:no-evidence` by
+# the caller). Reads adapters/capabilities.json
+# `.frameworks.<active>.capabilities.<cap>.evidence`.
+# Used by install.sh and assemble-instructions.sh to compose operator log
+# lines that read the capability triple
+# (install_paths.<kind>, capabilities.<kind>.support, capabilities.<kind>.evidence)
+# in the shared `degraded:partial|fallback|none|no-evidence|unverified-support(<level>)`
+# vocabulary defined in conventions/capability-cells-in-adapters-capabilities-json-sho.md.
+framework_capability_evidence() {
+  local cap="$1"
+  [[ -z "$cap" ]] && { echo "Error: framework_capability_evidence requires a capability name" >&2; return 1; }
+
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  if ! command -v jq &>/dev/null || [[ ! -f "$capabilities_file" ]]; then
+    echo ""
+    return 0
+  fi
+
+  local active
+  active=$(resolve_active_framework) || return 1
+  jq -r --arg fw "$active" --arg c "$cap" \
+    '.frameworks[$fw].capabilities[$c].evidence // ""' "$capabilities_file" 2>/dev/null
+}
+
+# --- framework_tui_launch_flag ---
+# Print the harness-native CLI flag spelling for one of the TUI-injected
+# concerns (T11). Mirrors the Go helpers
+# config.HarnessSystemPromptFlag / config.HarnessSettingsOverrideFlag in
+# tui/internal/config/framework.go.
+#
+# Args: $1 = kind, one of: append_system_prompt | inline_settings_override
+#       $2 = framework id (optional; defaults to active framework)
+#
+# Output: a single line on stdout, exit 0:
+#   - The flag spelling (e.g., `--append-system-prompt`) when the active
+#     framework's tui_launch_flags.<kind> names a flag.
+#   - The literal `unsupported` when the cell is the install_paths-style
+#     sentinel. Callers MUST skip the injection rather than substitute a
+#     different flag — opencode/codex error on an unknown CLI flag.
+#
+# Exit codes:
+#   0  flag spelling or `unsupported` printed.
+#   1  unknown kind, unknown framework, missing capabilities.json, or
+#      jq unavailable. Callers MUST handle the error rather than fall back
+#      to a Claude Code default — both concerns are load-bearing
+#      (settings: would inject wrong flag; system prompt: would crash
+#      followup-mode on non-claude-code harnesses).
+framework_tui_launch_flag() {
+  local kind="$1"
+  local framework="${2:-}"
+  [[ -z "$kind" ]] && { echo "Error: framework_tui_launch_flag requires a kind" >&2; return 1; }
+  case "$kind" in
+    append_system_prompt|inline_settings_override) ;;
+    *) echo "Error: unknown tui_launch_flag kind '$kind' (allowed: append_system_prompt, inline_settings_override)" >&2; return 1 ;;
+  esac
+
+  if ! command -v jq &>/dev/null; then
+    echo "Error: framework_tui_launch_flag requires jq" >&2
+    return 1
+  fi
+
+  if [[ -z "$framework" ]]; then
+    framework=$(resolve_active_framework) || return 1
+  fi
+
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  if [[ ! -f "$capabilities_file" ]]; then
+    echo "Error: framework_tui_launch_flag cannot read $capabilities_file" >&2
+    return 1
+  fi
+
+  if ! jq -e --arg fw "$framework" '.frameworks | has($fw)' "$capabilities_file" &>/dev/null; then
+    echo "Error: unknown framework '$framework' (not present in $capabilities_file)" >&2
+    return 1
+  fi
+
+  local raw
+  raw=$(jq -r --arg fw "$framework" --arg k "$kind" \
+    '.frameworks[$fw].tui_launch_flags[$k] // ""' "$capabilities_file" 2>/dev/null)
+  if [[ -z "$raw" ]]; then
+    echo "Error: no tui_launch_flags.$kind defined for framework '$framework'" >&2
+    return 1
+  fi
+  echo "$raw"
+}
+
+# --- resolve_permission_adapter ---
+# Resolve the per-harness permission/settings policy installer for a
+# framework. The single source of truth for which adapter owns each
+# harness's settings file (and which merge strategy the adapter applies)
+# lives here, so install.sh and uninstall paths consult one helper rather
+# than re-deriving the dispatch via case "$FRAMEWORK" branches scattered
+# across callers.
+#
+# Args: $1 = framework id (closed set per resolve_active_framework). When
+#       omitted, the active framework is used.
+#
+# Output: a single line on stdout, exit 0. The line is a
+# colon-delimited record describing the adapter's shape:
+#
+#   cli:<absolute-adapter-path>
+#       Adapter is a bash CLI exposing `install`/`uninstall`/`smoke`
+#       subcommands per the contract in adapters/hooks/README.md.
+#       Today: claude-code -> adapters/hooks/claude-code.sh,
+#       codex      -> adapters/codex/hooks.sh.
+#
+#   plugin-symlink:<src-path>:<dst-path>
+#       Adapter is install-time file placement (no CLI). Caller links
+#       <src-path> at <dst-path>; uninstall removes <dst-path>. Today:
+#       opencode -> adapters/opencode/lore-hooks.ts symlinked into
+#       $HOME/.config/opencode/plugins/lore-hooks.ts.
+#
+#   unsupported
+#       Framework has no permission-adapter wired. Caller MUST emit a
+#       documented `degraded:none` notice and skip; this is the explicit
+#       degradation path required by D6 (degradation is explicit and
+#       testable) and the capability triple convention.
+#
+# Closed framework set; an unknown framework id is an error (exit 1)
+# rather than a routed-to-`unsupported` case, mirroring the closed-set
+# rejection pattern already used by resolve_model_for_role (T6) and the
+# `case` validation in install.sh.
+resolve_permission_adapter() {
+  local fw="${1:-}"
+  if [[ -z "$fw" ]]; then
+    fw=$(resolve_active_framework) || return 1
+  fi
+
+  # LORE_LIB_DIR resolves to scripts/; repo_root is one level up. Strip
+  # the trailing /scripts segment so adapter paths render as
+  # "<repo>/adapters/..." rather than "<repo>/scripts/../adapters/...".
+  local repo_root="${LORE_LIB_DIR%/scripts}"
+  case "$fw" in
+    claude-code)
+      printf 'cli:%s\n' "$repo_root/adapters/hooks/claude-code.sh"
+      ;;
+    codex)
+      printf 'cli:%s\n' "$repo_root/adapters/codex/hooks.sh"
+      ;;
+    opencode)
+      printf 'plugin-symlink:%s:%s\n' \
+        "$repo_root/adapters/opencode/lore-hooks.ts" \
+        "$HOME/.config/opencode/plugins/lore-hooks.ts"
+      ;;
+    *)
+      echo "Error: unknown framework '$fw' (allowed: claude-code, codex, opencode)" >&2
+      return 1
+      ;;
+  esac
+}
+
 # --- framework_model_routing_shape ---
 # Print the model_routing shape for the active framework: "single" or "multi".
 # Reads adapters/capabilities.json `.frameworks.<active>.model_routing.shape`.

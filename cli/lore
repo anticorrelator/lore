@@ -104,6 +104,7 @@ Commands:
   bootstrap    Bootstrap knowledge store (see: lore bootstrap --help)
   ceremony     Ceremony config management (see: lore ceremony --help)
   config       Read framework/role/capability config (see: lore config --help)
+  framework    Diagnose the active harness profile (see: lore framework --help)
   agent        Agent integration toggle (see: lore agent --help)
   scale        Capture-scale helpers (see: lore scale --help)
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
@@ -307,6 +308,51 @@ Options:
 The reader reflects what install.sh persisted to \$LORE_DATA_DIR/config/framework.json.
 For env-aware role resolution (env > per-repo > user > harness default), use the
 lib.sh helper resolve_model_for_role from a script context.
+EOF
+}
+
+framework_usage() {
+  cat >&2 <<EOF
+lore framework — diagnose the active harness profile
+
+Usage: lore framework <subcommand> [args...]
+
+Subcommands:
+  status [--json]               Resolved framework, capabilities by support
+                                level, role bindings, and pointers to
+                                evidence/compatibility artifacts
+  doctor [--json]               Doctor + actionable remediation: config check,
+                                resolved role bindings (full env->per-repo->
+                                user->default chain), conflict diagnostics
+                                with set-model hints, per-repo .lore.config
+                                cwd-vs-user diff, capability override + ceiling
+                                check
+  capability-overrides [--json] Inspect active capability_overrides — what
+                                they shadow, evidence pointer, and ceiling-
+                                violation flag (D8: overrides cannot promote
+                                past evidence-supported level)
+  set-model <role> <model> [--json] [--dry-run]
+                                Bind a role to a model in framework.json
+                                (validates against roles registry + active
+                                harness model_routing.shape). Writes
+                                atomically; reflected on next status/doctor
+                                run without restart.
+  unset-model <role> [--json] [--dry-run]
+                                Remove the roles.<role> binding so resolution
+                                falls through to roles.default.
+
+Options:
+  --help, -h    Show this help
+
+Notes:
+  'lore config show' prints the raw framework.json. 'lore framework status'
+  is opinionated: it joins framework.json against adapters/capabilities.json
+  and adapters/roles.json so the operator sees the resolved view (with
+  capability overrides applied and role-source attribution per binding).
+  'lore framework doctor' goes further — it walks the cwd resolution chain
+  (.lore.config + env) and emits remediation hints for conflicts. set-model
+  and unset-model are the write side: edit the persisted role->model map
+  without hand-editing framework.json.
 EOF
 }
 
@@ -747,6 +793,42 @@ cmd_ceremony() {
       echo "Error: unknown ceremony subcommand '$subcmd'" >&2
       echo "" >&2
       ceremony_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Framework subgroup (status / doctor / set-model — task-21/22 add the rest) ---
+cmd_framework() {
+  if [[ $# -eq 0 ]]; then
+    framework_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      framework_usage
+      return 0
+      ;;
+    status)
+      "$SCRIPTS_DIR/framework-status.sh" "$@"
+      ;;
+    doctor)
+      "$SCRIPTS_DIR/framework-doctor.sh" "$@"
+      ;;
+    capability-overrides)
+      "$SCRIPTS_DIR/framework-doctor.sh" capability-overrides "$@"
+      ;;
+    set-model|unset-model)
+      "$SCRIPTS_DIR/framework-set-model.sh" "$subcmd" "$@"
+      ;;
+    *)
+      echo "Error: unknown framework subcommand '$subcmd'" >&2
+      echo "" >&2
+      framework_usage
       return 1
       ;;
   esac
@@ -1700,6 +1782,10 @@ case "$1" in
   config)
     shift
     cmd_config "$@"
+    ;;
+  framework)
+    shift
+    cmd_framework "$@"
     ;;
   agent)
     shift

@@ -280,11 +280,99 @@ drift). The capability manifest in
 encodes this as `task_completed_hook` membership in the `requires`
 array. As of T32 the manifest already lists `task_completed_hook` for
 `bootstrap`, `implement`, and `spec` — matching the "refuse on
-unavailable" rows above. T41 is the task that audits whether any
-other skill's `requires` array should tighten (e.g., `pr-revise`
-currently requires only `gh_cli` despite materially depending on
-work-item index integrity); the matrix above is the input to that
-audit, not a contradiction of today's manifest.
+unavailable" rows above. T41 (this task) sharpens the gate: the
+flat-string requirement form (`"task_completed_hook"` ≡ "must be
+`full`") is preserved as a legacy short-hand, and the team-heavy
+skills now use the object form to declare a `partial_below` floor
+that splits "downgrade to partial-mode" from "refuse outright". See
+the next section for the resolution rule and degradation vocabulary.
+
+### Skill requirement schema (T41 partial-mode gating)
+
+`adapters/capabilities.json:.skills.<name>.requires` accepts two
+forms; both resolve through the same rule documented in the JSON file's
+`skills._description`:
+
+- **Legacy string form** — `"team_messaging"` is shorthand for
+  `{"id": "team_messaging", "min_level": "full", "partial_below": "full"}`.
+  The cell must reach `full` or the skill is `unavailable` for that
+  framework.
+- **Object form** — `{"id": "<cap-or-tool>", "min_level": "<level>",
+  "partial_below": "<level>", "notes": "<...>"}`. `min_level` is the
+  threshold below which the skill enters partial-mode; `partial_below`
+  is the threshold below which the skill MUST refuse. Both levels are
+  drawn from `support_levels` (`full|partial|fallback|none`), ordered
+  most→least capable in `skills._levels_order`.
+
+**Resolution rule (consumed by adapter helpers + `lore framework
+doctor`):** for each requirement, look up the active framework's cell
+support (or, for tool ids in `tools`, the tool availability). Compare
+against `min_level` and `partial_below`:
+
+| Cell support relative to thresholds                | Skill state for that requirement |
+|----------------------------------------------------|----------------------------------|
+| `cell >= min_level`                                | `full`                           |
+| `partial_below <= cell < min_level`                | `partial-mode`                   |
+| `cell < partial_below`                             | `unavailable`                    |
+
+Aggregate across the whole `requires` array by taking the worst state
+(`unavailable` > `partial-mode` > `full`). A skill is `full` only when
+every requirement reads `full`; one `partial-mode` requirement makes
+the skill `partial-mode`; one `unavailable` requirement makes the
+skill `unavailable` (refuse).
+
+#### Degradation vocabulary
+
+`adapters/capabilities.json:.skills._degradation_vocab` enumerates the
+closed set of tokens the orchestration adapter MAY emit on its
+`[lore] degraded:` stderr notices and that `lore framework doctor`
+SHOULD use in its skill-availability column. Adapter strings outside
+this set are a contract violation:
+
+- `partial` — at least one requirement is below `min_level` but at or
+  above `partial_below`. Skill ran in partial-mode; adapter emits a
+  one-line stderr notice naming the requirement and observed level.
+- `fallback` — operation routed through a fallback path declared by
+  the requirement (e.g., `lead_validator` instead of
+  `native_blocking`). User-visible behavior matches `partial` but the
+  underlying cell is named at `fallback` support, not `partial`.
+- `none` — at least one requirement is below `partial_below`. Skill
+  is `unavailable`; the adapter MUST refuse and emit a stderr notice
+  naming the missing requirement.
+- `no-evidence` — a depended-on cell has support `> none` but no
+  `evidence` pointer. Treat as a soft block: proceed in partial-mode
+  with the missing-evidence notice until evidence is refreshed.
+- `unverified-support(<level>)` — scoped form for stderr notices when
+  a cell has been overridden in `framework.json` without a refreshed
+  evidence pointer. The parenthetical level is the original cell's
+  level so the operator sees both the override and its source.
+
+#### Today's team-heavy gating (matches the matrix above)
+
+The three team-heavy skills' `requires` arrays now express partial-mode
+tolerance. Resolution against today's per-harness profile lands in the
+same buckets the skill-behavior matrix calls out:
+
+| Skill       | Requirement              | claude-code (`full`) | opencode profile         | codex profile            |
+|-------------|--------------------------|----------------------|--------------------------|--------------------------|
+| `bootstrap` | `team_messaging`         | `full`               | `partial-mode` (none)    | `partial-mode` (none)    |
+| `bootstrap` | `task_completed_hook`    | `full`               | `partial-mode` (fallback)| `partial-mode` (fallback)|
+| `implement` | `team_messaging`         | `full`               | `partial-mode` (none)    | `partial-mode` (none)    |
+| `implement` | `task_completed_hook`    | `full`               | `partial-mode` (fallback)| `partial-mode` (fallback)|
+| `spec`      | `team_messaging`         | `full`               | `partial-mode` (none)    | `partial-mode` (none)    |
+| `spec`      | `task_completed_hook`    | `full`               | `partial-mode` (fallback)| `partial-mode` (fallback)|
+
+For `bootstrap` and `implement` the aggregate state on opencode/codex
+is `partial-mode` — the skills proceed but emit the one-shot stderr
+degradation notice and route through the lead-orchestrated /
+post-hoc-validator paths the SKILL bodies already document. For `spec`
+the same `partial-mode` state collapses the team-mode flow to the
+spec-short branch (single-pass synthesis, no researcher fanout). None
+of the three skills resolve to `unavailable` against today's three
+profiles; `unavailable` would require a future harness with
+`team_messaging=none` AND `partial_below=full` (i.e., a future
+schema regression that lifted the `partial_below` knob back to `full`)
+or with `subagents=none` outright.
 
 ## Adapter Responsibilities
 
@@ -325,14 +413,98 @@ Operation Surface table; they do not error.
 
 ## TUI Launch Concerns (T44)
 
-The TUI's primary-agent launch path (currently
-`tui/internal/work/specpanel.go:917` exec.Command("claude")) is a
-peer consumer of the orchestration adapter — it spawns the active
-harness's binary with adapter-mediated guaranteed args + system-prompt
-injection. T42 wires the binary lookup; T43 wires the flag injection;
-T44 documents which TUI-injected concerns each harness supports
-natively (`skip_permissions`, `inline_settings_override`,
-`append_system_prompt`).
+The TUI's primary-agent launch path (`tui/internal/work/specpanel.go`
+`StartTerminalCmd`) is a peer consumer of the orchestration adapter —
+it spawns the active harness's binary (resolved via `config.HarnessBinary`)
+with adapter-mediated args and optional system-prompt injection.
+T42 wired the binary lookup; T43 wires the flag injection; T44
+(this section) documents which TUI-injected concerns each harness
+supports natively and the per-harness CLI flag spelling.
+
+The three concerns follow the same "harness-native or degraded" model
+as the subagent operation surface above: when a concern is
+`unsupported`, the TUI skips the injection and the `doctor` surface
+(T21) reports `degraded:none` for that concern.
+
+### Concern: `skip_permissions`
+
+Bypasses the harness's interactive permission gate so the TUI-launched
+agent does not pause waiting for user approval of tool calls.
+
+Routing: the TUI reads this from `config.LoadHarnessConfig(activeFramework).Args`
+(Go) / `load_harness_args` (bash). The flag is **not injected by the
+TUI directly** — it must appear in the user-configured harness args
+(harness-args.json) or the harness's built-in default. The built-in
+default for claude-code is `--dangerously-skip-permissions`; other
+harnesses have no built-in default and the operator must configure it.
+
+| Harness      | Flag spelling                         | Support    | Notes                                                                        |
+|--------------|---------------------------------------|------------|------------------------------------------------------------------------------|
+| `claude-code` | `--dangerously-skip-permissions`     | `full`     | Built-in harness-args default; injected via `LoadHarnessConfig().Args`.     |
+| `opencode`   | _(none documented)_                   | `none`     | No equivalent flag in OpenCode CLI surface as of T44; operator configures via harness settings file. |
+| `codex`      | `--approve-all-tool-calls` _(approx)_ | `partial`  | Codex approves tool calls via `--approval-policy allow-all`; not a CLI flag — must be set via environment or settings. Operator configures harness-args if needed. |
+
+### Concern: `inline_settings_override`
+
+Injects a JSON settings fragment into the harness session at launch,
+overriding per-session configuration without modifying the user's
+settings file. Used by the TUI to pin settings for the session scope.
+
+Routing (T11): the TUI resolves the flag spelling via
+`config.HarnessSettingsOverrideFlag(activeFramework)` and either appends
+`<flag> {}` to args (when the active harness names a flag) or skips
+the injection entirely with a one-line `[lore] degraded:` stderr
+notice (when the cell is `unsupported`). The flag spelling lives at
+`adapters/capabilities.json:.frameworks[<fw>].tui_launch_flags.inline_settings_override`.
+
+| Harness      | Flag spelling       | Support    | Notes                                                                        |
+|--------------|---------------------|------------|------------------------------------------------------------------------------|
+| `claude-code` | `--settings <json>` | `full`     | Documented Claude Code CLI flag; accepts JSON object. TUI passes `{}` to establish an in-session override anchor. |
+| `opencode`   | _(none)_            | `none`     | No inline-settings CLI flag in OpenCode; session config is file-based. T11 skips the injection on opencode. |
+| `codex`      | _(none)_            | `none`     | No inline-settings CLI flag in Codex; config is file-based. T11 skips the injection on codex. |
+
+When `inline_settings_override=unsupported` for a harness, the doctor
+surface reports `degraded:none` for this concern. The agent still
+launches; it just cannot receive an in-flight settings override.
+
+### Concern: `append_system_prompt`
+
+Appends a text block to the harness's system prompt for the session,
+used in followup-discuss mode to inject prior-finding context without
+editing the user's CLAUDE.md / instructions file.
+
+Routing (T11): the TUI injects this only when `followupMode=true` and
+a followup context string is available; the flag spelling is resolved
+via `config.HarnessSystemPromptFlag(activeFramework)` and either
+prepends `<flag> <sysPrompt>` to args (supported) or skips the
+injection with a one-line `[lore] degraded:` stderr notice
+(unsupported). Flag spelling lives at
+`adapters/capabilities.json:.frameworks[<fw>].tui_launch_flags.append_system_prompt`.
+
+| Harness      | Flag spelling                   | Support    | Notes                                                                        |
+|--------------|---------------------------------|------------|------------------------------------------------------------------------------|
+| `claude-code` | `--append-system-prompt <text>` | `full`     | Documented Claude Code CLI flag; appended immediately before the positional prompt arg. |
+| `opencode`   | _(none)_                        | `none`     | OpenCode has no CLI flag for appending to the system prompt. Adapter-equivalent would require a plugin-runtime injection path (T44 follow-up). |
+| `codex`      | _(none)_                        | `none`     | Codex has no equivalent CLI flag. System prompt is configured statically via instructions file or session init. |
+
+When `append_system_prompt=unsupported` for a harness, the TUI skips
+the injection and followup-discuss mode launches without the prior
+finding context pre-loaded. The user can still invoke
+`/followup-discuss` manually; the skill will load context from the
+knowledge store on its own.
+
+### Cross-reference
+
+The binary lookup (`config.HarnessBinary`, T42) and harness-args
+loading (`config.LoadHarnessConfig`, T10) are the Go-side entry points.
+Their bash counterparts (`framework_binary`, `load_harness_args` in
+`scripts/lib.sh`) are the parity implementations used by non-TUI
+callers. The flag-injection gating (T11) introduced per-concern
+capability checks so the TUI does not pass unsupported flags to
+opencode or codex; Go-side helpers
+`config.HarnessSystemPromptFlag` / `config.HarnessSettingsOverrideFlag`
+mirror the bash helper `framework_tui_launch_flag` and the per-adapter
+subcommands `system_prompt_flag` / `settings_override_flag`.
 
 ## Implementation Targets
 

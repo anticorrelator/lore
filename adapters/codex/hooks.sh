@@ -158,6 +158,7 @@ cmd_install() {
       echo
       echo "$lore_block"
     } > "$settings_path"
+    emit_degraded_notices
     return 0
   fi
 
@@ -201,6 +202,18 @@ else:
 with open(settings_path, "w") as f:
     f.write(new_text)
 PYEOF
+
+  emit_degraded_notices
+}
+
+# Surface degraded status (adapters/hooks/README.md checklist item 4).
+# Codex has no native PreCompact event and no native subagent-completion
+# blocking event; lore covers them via SessionStart bookend and the
+# orchestration adapter's lead-side validator respectively. Emit one
+# line per fallback event so operators see exactly what is degraded.
+emit_degraded_notices() {
+  echo "[lore] degraded: pre_compact via SessionStart bookend (~/.lore/scripts/pre-compact.sh) (capability=fallback)" >&2
+  echo "[lore] degraded: task_completed via lead-side validator in orchestration adapter (capability=fallback)" >&2
 }
 
 # --- Subcommand: uninstall ---

@@ -108,8 +108,10 @@ func loadUserFrameworkConfig() userFrameworkConfig {
 // install_paths and resolver helpers touch. Other framework fields are
 // ignored here.
 type capabilitiesProfile struct {
-	DisplayName  string            `json:"display_name"`
-	InstallPaths map[string]string `json:"install_paths"`
+	DisplayName    string            `json:"display_name"`
+	Binary         string            `json:"binary"`
+	InstallPaths   map[string]string `json:"install_paths"`
+	TUILaunchFlags map[string]string `json:"tui_launch_flags"`
 }
 
 // capabilitiesFile is the top-level shape of adapters/capabilities.json.
@@ -277,6 +279,166 @@ func HarnessDisplayName(id string) string {
 		return prof.DisplayName
 	}
 	return id
+}
+
+// HarnessBinary returns the executable name to spawn for a framework id
+// (e.g. "claude", "opencode", "codex"). Looks up
+// adapters/capabilities.json `.frameworks[<id>].binary`.
+//
+// Pass an empty string to resolve the active framework's binary
+// (delegates to ResolveActiveFramework).
+//
+// Errors when the framework id is unknown, capabilities.json is unreadable,
+// or the resolved profile has no `binary` field. Unlike HarnessDisplayName,
+// this does NOT silently fall back to the framework id — the binary is
+// load-bearing for exec.Command and a wrong value would spawn the wrong
+// (or no) process. Callers MUST handle the error.
+//
+// Bash counterpart: framework-status.sh / framework-doctor.sh both inline
+// `jq -r '.frameworks[<fw>].binary // ""' adapters/capabilities.json`;
+// there is no shared lib.sh helper as of T10.
+func HarnessBinary(id string) (string, error) {
+	if id == "" {
+		active, err := ResolveActiveFramework()
+		if err != nil {
+			return "", fmt.Errorf("resolve active framework: %w", err)
+		}
+		id = active
+	}
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return "", err
+	}
+	prof, ok := caps.Frameworks[id]
+	if !ok {
+		return "", fmt.Errorf("unknown framework %q (not present in adapters/capabilities.json)", id)
+	}
+	if prof.Binary == "" {
+		return "", fmt.Errorf("framework %q has no binary field in adapters/capabilities.json", id)
+	}
+	return prof.Binary, nil
+}
+
+// TUILaunchFlagKinds enumerates the closed set of TUI-injected concerns that
+// the orchestration adapter resolves to a per-harness CLI flag spelling. New
+// kinds MUST be added here and to every framework's tui_launch_flags block in
+// adapters/capabilities.json together. The kind set is read by both the Go
+// helpers below and adapters/agents/<harness>.sh `system_prompt_flag` /
+// `settings_override_flag` subcommands; parity is asserted in
+// tests/frameworks/adapters.bats (T63 coverage).
+//
+// Note: skip_permissions is NOT in this set — it routes through
+// LoadHarnessConfig().Args (~/.lore/config/harness-args.json), not through the
+// per-concern capability gate. See adapters/agents/README.md
+// §"TUI Launch Concerns" for the routing-contract rationale (the three
+// concerns are deliberately not treated uniformly).
+var TUILaunchFlagKinds = []string{
+	"append_system_prompt",
+	"inline_settings_override",
+}
+
+// resolveTUILaunchFlag is the shared lookup used by HarnessSystemPromptFlag and
+// HarnessSettingsOverrideFlag. Returns:
+//   - (flag, true, nil) when the framework profile names a flag spelling for
+//     the kind (e.g., "--append-system-prompt").
+//   - ("", false, nil) when the framework explicitly marks the kind
+//     unsupported (capabilities.json tui_launch_flags.<kind> == "unsupported"),
+//     mirroring ResolveHarnessInstallPath's tri-state contract. Callers MUST
+//     skip the flag injection entirely on this signal — substituting a
+//     different flag would cause the harness to error on an unknown flag.
+//   - ("", false, error) when the kind is not in TUILaunchFlagKinds, the
+//     framework id is unknown, or capabilities.json is unreadable. Both
+//     concerns are load-bearing — silent fallback to a default would either
+//     inject the wrong flag (settings) or crash followup-mode (system
+//     prompt) — so unknown framework MUST error rather than route to a
+//     default. See conventions:dual-impl-load-bearing-vs-display-fallback.
+func resolveTUILaunchFlag(framework, kind string) (string, bool, error) {
+	if kind == "" {
+		return "", false, fmt.Errorf("resolve_tui_launch_flag requires a kind")
+	}
+	allowed := false
+	for _, k := range TUILaunchFlagKinds {
+		if k == kind {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return "", false, fmt.Errorf("unknown tui_launch_flag kind %q (allowed: %s)", kind, strings.Join(TUILaunchFlagKinds, ", "))
+	}
+
+	if framework == "" {
+		active, err := ResolveActiveFramework()
+		if err != nil {
+			return "", false, fmt.Errorf("resolve active framework: %w", err)
+		}
+		framework = active
+	}
+
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return "", false, err
+	}
+	prof, ok := caps.Frameworks[framework]
+	if !ok {
+		return "", false, fmt.Errorf("unknown framework %q (not present in adapters/capabilities.json)", framework)
+	}
+	if prof.TUILaunchFlags == nil {
+		return "", false, fmt.Errorf("framework %q has no tui_launch_flags block in adapters/capabilities.json", framework)
+	}
+	raw, ok := prof.TUILaunchFlags[kind]
+	if !ok || raw == "" {
+		return "", false, fmt.Errorf("no tui_launch_flags.%s defined for framework %q", kind, framework)
+	}
+	if raw == UnsupportedSentinel {
+		return "", false, nil
+	}
+	return raw, true, nil
+}
+
+// HarnessSystemPromptFlag returns the harness-native CLI flag spelling for
+// appending text to the session system prompt (Claude Code's
+// `--append-system-prompt`). Used by the TUI's followup-discuss launch path
+// at tui/internal/work/specpanel.go to inject prior-finding context.
+//
+// Pass "" to resolve the active framework's flag.
+//
+// Returns:
+//   - (flag, true, nil): inject `<flag> <text>` before the positional prompt.
+//   - ("", false, nil): the harness has no equivalent flag; the TUI MUST skip
+//     the entire append_system_prompt injection block — substituting a
+//     different flag would crash the harness on an unknown CLI argument.
+//   - ("", false, error): unknown framework or unreadable capabilities.json.
+//     Load-bearing: callers MUST handle the error, NOT silently fall back to
+//     a Claude Code default (which would crash opencode/codex).
+//
+// Bash counterpart: adapters/agents/<harness>.sh `system_prompt_flag`
+// subcommand. See adapters/agents/README.md §"TUI Launch Concerns" for the
+// per-harness flag spelling and degraded-mode contract.
+func HarnessSystemPromptFlag(framework string) (string, bool, error) {
+	return resolveTUILaunchFlag(framework, "append_system_prompt")
+}
+
+// HarnessSettingsOverrideFlag returns the harness-native CLI flag spelling
+// for inline session-scoped settings overrides (Claude Code's
+// `--settings <json>`). Used by the TUI launch path at
+// tui/internal/work/specpanel.go to pin per-session settings without
+// modifying the user's settings file.
+//
+// Pass "" to resolve the active framework's flag.
+//
+// Returns:
+//   - (flag, true, nil): inject `<flag> <json>` into args.
+//   - ("", false, nil): the harness has no equivalent flag; the TUI MUST skip
+//     the injection entirely (NOT pass an empty/dummy flag — opencode and
+//     codex error on unknown CLI flags).
+//   - ("", false, error): unknown framework or unreadable capabilities.json.
+//     Load-bearing — see HarnessSystemPromptFlag for the rationale.
+//
+// Bash counterpart: adapters/agents/<harness>.sh `settings_override_flag`
+// subcommand.
+func HarnessSettingsOverrideFlag(framework string) (string, bool, error) {
+	return resolveTUILaunchFlag(framework, "inline_settings_override")
 }
 
 // ResolveAgentTemplate mirrors scripts/lib.sh resolve_agent_template. Returns

@@ -1,5 +1,5 @@
 /**
- * lore-hooks.ts — OpenCode plugin adapter for Lore lifecycle events.
+ * lore-hooks.ts — OpenCode plugin adapter for Lore lifecycle events (T26).
  *
  * Maps OpenCode native plugin events onto the nine Lore lifecycle event
  * names defined in adapters/hooks/README.md (T24's dispatch contract):
@@ -7,45 +7,52 @@
  *   session_start  user_prompt  pre_tool  post_tool  permission_request
  *   pre_compact    stop         session_end          task_completed
  *
- * For every lifecycle event the plugin either invokes the matching Lore
+ * For every lifecycle event the plugin (a) invokes the matching Lore
  * handler script in ~/.lore/scripts/<name> (per T24 checklist item 6,
  * stable script paths) and translates the script's exit code / stdout
- * into the OpenCode plugin runtime's return shape, or — when no native
- * OpenCode event maps cleanly — emits the `unsupported` sentinel and
- * defers to the orchestration adapter (adapters/agents/README.md, T31)
- * for fallback handling.
+ * into the OpenCode plugin runtime's return shape, AND (b) appends a
+ * single JSON event row to the per-session accumulator at
+ * ~/.lore/sessions/opencode/<session-id>.jsonl. The accumulator is the
+ * agreed contract surface with adapters/transcripts/opencode.py (T51) —
+ * one event per line, append-only, no rewrites; opencode.py walks the
+ * file in arrival order to synthesize the transcript view that other
+ * Lore consumers (extract-session-digest, stop-novelty-check, etc.)
+ * normally read from Claude Code's JSONL transcript.
  *
- * Capability levels for each Lore event come from
- * adapters/capabilities.json frameworks.opencode.capabilities.<cap>.support
- * (worker-2's T2 cells, all `partial` or `fallback` until T30's bats
- * smoke proves no adapter-introduced divergence). The plugin reads them
- * at boot via resolveSupport() and surfaces a `[lore] degraded:` stderr
- * line on every dispatch when the cell is `partial` or `fallback`, per
- * T24 checklist item 4.
+ * Per-event evidence-gated classification (Phase 3 D8 rule). Each row
+ * names the capabilities.json cell consumed and the evidence anchor in
+ * adapters/capabilities-evidence.md that grounds the support level.
+ * Workers MUST NOT promote a cell beyond what the evidence supports;
+ * uncertain or experimental vendor behavior stays at `partial` /
+ * `fallback` with explicit degraded status (Phase 3 objective).
  *
- * Native event sources (per adapters/capabilities-evidence.md):
- *   session.created / session.updated   — opencode-session-start-hook
- *   session.idle    / session.status    — opencode-stop-hook
- *   message.updated                     — opencode-stop-hook
- *   tool.execute.before / .after        — opencode-tool-hooks
- *   permission.asked / .replied         — opencode-permission-hooks
+ *   event              support     native source(s)                evidence
+ *   ---------------    --------    ----------------------------    -------------------------------
+ *   session_start      partial     session.created                 opencode-session-start-hook
+ *   user_prompt        partial     message.updated (role=user)     opencode-tool-hooks (proxy)
+ *   pre_tool           partial     tool.execute.before             opencode-tool-hooks
+ *   post_tool          partial     tool.execute.after              opencode-tool-hooks
+ *   permission_request partial     permission.asked                opencode-permission-hooks
+ *   pre_compact        fallback    experimental.session.compacting opencode-pre-compact-hook
+ *                                  (experimental — explicit downgrade per evidence)
+ *   stop               partial     session.idle                    opencode-stop-hook
+ *   session_end        partial     session.status (ended/cleared)  opencode-stop-hook
+ *   task_completed     fallback    (no native event)               opencode-task-completed-hook
+ *                                  (lead-side validator per adapters/agents/README.md T31)
  *
- * Lore events without a native equivalent (returned as `unsupported`):
- *   pre_compact     — no PreCompact in OpenCode plugin event list;
- *                     fallback uses SessionStart bookend per T24 mapping
- *   task_completed  — no subagent-completion blocking event; fallback
- *                     to lead-side validator per adapters/agents/README.md
- *
- * Smoke output: invoking the bundled CLI entrypoint (`node lore-hooks.ts
- * --smoke`) prints, for the active framework, every Lore lifecycle event
- * paired with its support level and (if applicable) the OpenCode native
- * event name it routes through. Required by T24 checklist item 5.
+ * Smoke output: invoking the bundled CLI entrypoint (`tsx lore-hooks.ts
+ * --smoke` or equivalent) prints, for the active framework, every Lore
+ * lifecycle event paired with its support level and (if applicable) the
+ * OpenCode native event name it routes through. Required by T24
+ * checklist item 5; verified by tests/frameworks/hooks.bats.
  *
  * Cross-references:
  *   adapters/hooks/README.md  — dispatch contract, blocking matrix,
  *                               per-harness signaling protocols
- *   adapters/agents/README.md — orchestration adapter contract, T31
+ *   adapters/agents/README.md — orchestration adapter contract (T31)
  *   adapters/capabilities.json — frameworks.opencode.capabilities cells
+ *   adapters/capabilities-evidence.md — opencode-* anchor block
+ *   adapters/transcripts/opencode.py — accumulator file consumer (T51)
  *   gotchas/hooks/hook-system-gotchas.md — exit-code-vs-JSON footgun
  *                                          (Claude Code-specific; OpenCode
  *                                          plugins don't have the same
@@ -144,6 +151,11 @@ const CAPABILITY_KEY: Record<LoreEvent, string> = {
 /**
  * Native OpenCode event name(s) that fire each Lore event. Empty array
  * means no native equivalent — plugin returns `unsupported`.
+ *
+ * `experimental.session.compacting` is the OpenCode pre-compaction event
+ * but carries the `experimental.` prefix — per opencode-pre-compact-hook
+ * evidence anchor, the cell stays `fallback` because the event is
+ * explicitly not stable per the docs. Adapter wires it but logs degraded.
  */
 const NATIVE_EVENT_SOURCES: Record<LoreEvent, readonly string[]> = {
   session_start: ["session.created"],
@@ -151,7 +163,7 @@ const NATIVE_EVENT_SOURCES: Record<LoreEvent, readonly string[]> = {
   pre_tool: ["tool.execute.before"],
   post_tool: ["tool.execute.after"],
   permission_request: ["permission.asked"],
-  pre_compact: [], // no native — fallback path documented in T24
+  pre_compact: ["experimental.session.compacting"],
   stop: ["session.idle"],
   session_end: ["session.status"],
   task_completed: [], // no native — orchestration-adapter fallback (T31)
@@ -187,6 +199,83 @@ const DENY_ALLOWED: ReadonlySet<LoreEvent> = new Set<LoreEvent>([
   "permission_request",
   "task_completed",
 ]);
+
+// ---------------------------------------------------------------------------
+// Session accumulator — contract surface with adapters/transcripts/opencode.py
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the per-session accumulator path. The directory is created
+ * lazily on first write. Mirrors `_accumulator_path` in
+ * adapters/transcripts/opencode.py — the two MUST agree on the path
+ * shape `<LORE_DATA_DIR>/sessions/opencode/<session-id>.jsonl` or the
+ * provider stub silently sees an empty transcript.
+ */
+function accumulatorPath(sessionId: string): string {
+  const dataRoot = process.env.LORE_DATA_DIR || path.join(os.homedir(), ".lore");
+  return path.join(dataRoot, "sessions", "opencode", `${sessionId}.jsonl`);
+}
+
+/**
+ * Append one event row to the per-session accumulator. The row is the
+ * raw OpenCode event payload with `type`, `session_id`, and `timestamp`
+ * promoted to top-level fields so the transcript provider can index
+ * them without parsing nested structures.
+ *
+ * Append-only invariant: one event = one line, no rewriting. The
+ * provider stub depends on this for `read_raw_lines` index alignment
+ * (see adapters/transcripts/opencode.py docstring).
+ *
+ * Errors are logged to stderr and swallowed — accumulator failure must
+ * not break the harness's own event-bus delivery, since the transcript
+ * is informational rather than authoritative for opencode runs.
+ */
+function appendAccumulatorEvent(
+  sessionId: string,
+  type: string,
+  payload: Record<string, unknown>,
+): void {
+  if (!sessionId) {
+    return;
+  }
+  const file = accumulatorPath(sessionId);
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const row = {
+      type,
+      session_id: sessionId,
+      timestamp: new Date().toISOString(),
+      ...payload,
+    };
+    fs.appendFileSync(file, JSON.stringify(row) + "\n", { encoding: "utf-8" });
+  } catch (err) {
+    process.stderr.write(`[lore] accumulator write failed for ${type}: ${String(err)}\n`);
+  }
+}
+
+/**
+ * Best-effort session-id extraction from the raw OpenCode event payload.
+ * Different events surface the id under different keys (top-level
+ * `sessionID`, nested `session.id`, `message.sessionID`, etc.); we
+ * try the documented shapes in order and return the empty string when
+ * none of them match — `appendAccumulatorEvent` then no-ops.
+ */
+function extractSessionId(payload: Record<string, unknown>): string {
+  const candidates: unknown[] = [
+    (payload as { sessionID?: unknown }).sessionID,
+    (payload as { session_id?: unknown }).session_id,
+    (payload as { sessionId?: unknown }).sessionId,
+    (payload as { session?: { id?: unknown } }).session?.id,
+    (payload as { message?: { sessionID?: unknown } }).message?.sessionID,
+    (payload as { message?: { session_id?: unknown } }).message?.session_id,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.length > 0) {
+      return c;
+    }
+  }
+  return "";
+}
 
 // ---------------------------------------------------------------------------
 // Capability resolution
@@ -334,13 +423,34 @@ function spawnHandler(scriptName: string, env: NodeJS.ProcessEnv): Promise<Dispa
 /**
  * Dispatch a single Lore lifecycle event. The OpenCode plugin handlers
  * call this from their event callbacks. On `unsupported` the function
- * is a no-op; on `partial` / `fallback` it logs a degraded-status line
- * to stderr per T24 checklist item 4.
+ * is a no-op (other than the accumulator write); on `partial` /
+ * `fallback` it logs a degraded-status line to stderr per T24
+ * checklist item 4.
+ *
+ * The accumulator write to ~/.lore/sessions/opencode/<sid>.jsonl
+ * happens regardless of capability gating — the transcript provider
+ * needs every event the harness fires, even ones with no Lore handler
+ * (post_tool, message.updated for tool_result, etc.). Capability gating
+ * controls whether a Lore handler script runs, not whether the event
+ * is captured for downstream consumers.
+ *
+ * `rawEventName` is the native OpenCode event type (e.g.
+ * "session.created"). When omitted, the accumulator records the Lore
+ * event name instead — useful for synthetic dispatches but loses the
+ * harness-native shape that opencode.py expects.
  */
 export async function dispatch(
   event: LoreEvent,
   payload: Record<string, unknown> = {},
+  rawEventName?: string,
 ): Promise<DispatchResult> {
+  // Capture to the accumulator first so transcript consumers see the
+  // event even when the lore handler is gated off.
+  const sessionId = extractSessionId(payload);
+  if (sessionId) {
+    appendAccumulatorEvent(sessionId, rawEventName ?? event, payload);
+  }
+
   const support = resolveSupport()[event];
 
   // Honor capability gate (T24 item 2): "none" → unsupported immediately.
@@ -422,35 +532,54 @@ export function toPluginReturn(result: DispatchResult): PluginReturn | undefined
  * as named functions so the plugin shell can wire them however the SDK
  * expects (default-export object, named exports, or class-based).
  *
+ * Every handler passes the raw OpenCode event name as the third
+ * dispatch argument so the per-session accumulator records the
+ * harness-native event type — adapters/transcripts/opencode.py reads
+ * this back as event["type"] to decide which schema branch to apply.
+ *
  * If the OpenCode SDK shape changes, the field names below are the
  * single point of update — the dispatch logic above is SDK-agnostic.
  */
 export const plugin = {
   "session.created": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("session_start", payload)),
+    toPluginReturn(await dispatch("session_start", payload, "session.created")),
 
   "session.idle": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("stop", payload)),
+    toPluginReturn(await dispatch("stop", payload, "session.idle")),
 
   "session.status": async (payload: Record<string, unknown>) => {
     const status = (payload as { status?: string }).status;
     if (status === "ended" || status === "cleared") {
-      return toPluginReturn(await dispatch("session_end", payload));
+      return toPluginReturn(await dispatch("session_end", payload, "session.status"));
+    }
+    // Status changes that aren't session terminations still get captured
+    // for the transcript provider but skip the lore dispatch path.
+    const sessionId = extractSessionId(payload);
+    if (sessionId) {
+      appendAccumulatorEvent(sessionId, "session.status", payload);
     }
     return undefined;
   },
 
   "message.updated": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("user_prompt", payload)),
+    toPluginReturn(await dispatch("user_prompt", payload, "message.updated")),
 
   "tool.execute.before": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("pre_tool", payload)),
+    toPluginReturn(await dispatch("pre_tool", payload, "tool.execute.before")),
 
   "tool.execute.after": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("post_tool", payload)),
+    toPluginReturn(await dispatch("post_tool", payload, "tool.execute.after")),
 
   "permission.asked": async (payload: Record<string, unknown>) =>
-    toPluginReturn(await dispatch("permission_request", payload)),
+    toPluginReturn(await dispatch("permission_request", payload, "permission.asked")),
+
+  // pre_compact uses OpenCode's experimental.session.compacting event; the
+  // experimental prefix downgrades the cell to `fallback` (see capability
+  // evidence opencode-pre-compact-hook). The adapter still wires the
+  // handler so plan-persistence reminders fire when the event does
+  // arrive — degraded log on every dispatch flags the unstable surface.
+  "experimental.session.compacting": async (payload: Record<string, unknown>) =>
+    toPluginReturn(await dispatch("pre_compact", payload, "experimental.session.compacting")),
 };
 
 export default plugin;
@@ -464,18 +593,32 @@ export default plugin;
  * the OpenCode native event(s) each one routes through. Required by
  * T24 checklist item 5: "Each adapter MUST expose a smoke subcommand".
  *
- * Invoke as: `node lore-hooks.ts --smoke` (after a TS->JS compilation
- * step) or via `tsx` / `ts-node` in development.
+ * Output format is parsed by tests/frameworks/hooks.bats — each event
+ * row begins with two leading spaces, the event name padded to 20,
+ * then the support level token (full|partial|fallback|none). The bats
+ * test asserts `<event>[whitespace]+<expected_support>` matches per
+ * row. Do not change the column shape without updating the regex in
+ * `opencode smoke support levels match capabilities.json` (currently
+ * skipped pending TS runtime, but the contract is real).
+ *
+ * Invoke as: `tsx adapters/opencode/lore-hooks.ts --smoke` or
+ * `bun run adapters/opencode/lore-hooks.ts --smoke`.
  */
 export function smoke(): void {
   const support = resolveSupport();
   const rows: string[] = [];
-  rows.push("opencode hook adapter — Lore lifecycle support matrix");
+  rows.push("[opencode hook adapter smoke]");
+  rows.push("  active framework: opencode");
+  rows.push(`  accumulator dir:  ${path.dirname(accumulatorPath("<session-id>"))}`);
   rows.push("");
+  rows.push("  Lore event           Support   Native OpenCode event");
+  rows.push("  -------------------- --------- ----------------------------------------");
   for (const event of Object.keys(CAPABILITY_KEY) as LoreEvent[]) {
     const sources = NATIVE_EVENT_SOURCES[event];
-    const native = sources.length === 0 ? "(unsupported — orchestration fallback)" : sources.join(", ");
-    rows.push(`  ${event.padEnd(20)} ${support[event].padEnd(10)} ${native}`);
+    const native = sources.length === 0
+      ? "(no native — orchestration adapter fallback)"
+      : sources.join(", ");
+    rows.push(`  ${event.padEnd(20)} ${support[event].padEnd(9)} ${native}`);
   }
   process.stdout.write(rows.join("\n") + "\n");
 }

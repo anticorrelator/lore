@@ -317,3 +317,122 @@ if bad:
     return 1
   fi
 }
+
+# ============================================================
+# T41: skills.requires partial-mode gating schema
+# ============================================================
+
+@test "skills block exposes the closed degradation_vocab" {
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+vocab = d["skills"].get("_degradation_vocab")
+if not isinstance(vocab, dict):
+    print("missing skills._degradation_vocab"); sys.exit(1)
+required = {"partial", "fallback", "none", "no-evidence", "unverified-support"}
+have = set(vocab.keys()) - {"_description"}
+missing = required - have
+extra = have - required
+if missing or extra:
+    print("missing tokens:", sorted(missing))
+    print("unexpected tokens:", sorted(extra))
+    sys.exit(1)
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
+@test "skills._levels_order matches the support_levels closed set ordering" {
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+order = d["skills"].get("_levels_order")
+if order != ["full", "partial", "fallback", "none"]:
+    print("expected [full, partial, fallback, none], got", order); sys.exit(1)
+declared = set(d["support_levels"].keys())
+if set(order) != declared:
+    print("levels_order set", set(order), "does not match support_levels", declared); sys.exit(1)
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
+@test "every skills.<name>.requires entry references a known capability or tool id" {
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+caps = set(d["capabilities"].keys())
+tools = set(d.get("tools", {}).keys())
+known = caps | tools
+bad = []
+for name, spec in d["skills"].items():
+    if name.startswith("_"): continue
+    for entry in spec.get("requires", []):
+        rid = entry if isinstance(entry, str) else entry.get("id")
+        if rid not in known:
+            bad.append(f"skills.{name}.requires references unknown id {rid!r}")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
+@test "object-form skills.requires entries name min_level/partial_below from the closed level set" {
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+allowed = set(d["support_levels"].keys())
+bad = []
+for name, spec in d["skills"].items():
+    if name.startswith("_"): continue
+    for entry in spec.get("requires", []):
+        if isinstance(entry, str): continue  # legacy form is fine
+        if not isinstance(entry, dict):
+            bad.append(f"skills.{name}.requires entry is neither string nor object: {entry!r}")
+            continue
+        rid = entry.get("id")
+        if not isinstance(rid, str):
+            bad.append(f"skills.{name}.requires entry missing string id: {entry!r}")
+        ml = entry.get("min_level", "full")
+        if ml not in allowed:
+            bad.append(f"skills.{name}.requires id={rid!r} has min_level={ml!r} outside {sorted(allowed)}")
+        pb = entry.get("partial_below", "full")
+        if pb not in allowed:
+            bad.append(f"skills.{name}.requires id={rid!r} has partial_below={pb!r} outside {sorted(allowed)}")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
+@test "team-heavy skills declare object-form requires with partial-mode tolerance" {
+  # Resolution rule sanity: bootstrap, implement, spec MUST express their gating
+  # in object form so partial-mode is reachable. A regression to flat-string form
+  # would silently drop the partial-mode contract documented in
+  # adapters/agents/README.md § Skill behavior expectations per mode.
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+TEAM_HEAVY = {"bootstrap", "implement", "spec"}
+bad = []
+for name in TEAM_HEAVY:
+    spec = d["skills"].get(name)
+    if not spec:
+        bad.append(f"skills.{name} missing"); continue
+    requires = spec.get("requires", [])
+    object_entries = [e for e in requires if isinstance(e, dict)]
+    if not object_entries:
+        bad.append(f"skills.{name}.requires has no object-form entries — partial-mode unreachable")
+        continue
+    # team_messaging and task_completed_hook MUST be expressed as objects
+    needed = {"team_messaging", "task_completed_hook"}
+    object_ids = {e["id"] for e in object_entries}
+    missing = needed - object_ids
+    if missing:
+        bad.append(f"skills.{name}.requires missing object-form entries for {sorted(missing)}")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}

@@ -10,7 +10,13 @@
 #
 # Capability profile (capabilities.json frameworks.codex.capabilities):
 #   subagents=partial — opt-in subagent workflows; Codex orchestrates
-#                       spawn via its native subagent surface.
+#                       spawn via its native subagent surface ONLY when
+#                       the lead explicitly requests one. Codex does not
+#                       auto-fanout; every subagent is one explicit lead-
+#                       initiated TaskCreate. The one-directive-per-spawn
+#                       wire shape encodes this — callers iterate the
+#                       lead's intentional spawn list, never a heuristic
+#                       fanout count.
 #   team_messaging=none — no native TeamCreate/SendMessage primitive;
 #                         send_message returns `unsupported`.
 #   task_completed_hook=fallback — no native subagent-completion
@@ -63,9 +69,16 @@ cap() {
 }
 
 # --- cmd_spawn ---
-# Spawn a subagent. Codex is single-provider (model_routing.shape=single)
-# so role bindings are bare model ids — no provider/model split. The
-# directive carries `model=<m>` only.
+# Spawn a subagent. Codex's distinguishing constraint vs claude-code:
+# subagents are spawned on-demand only — Codex does not auto-fanout, so
+# every directive emitted here MUST correspond to one explicit lead-
+# initiated request. The wire grammar already encodes this (one directive
+# per spawn, no batch keys, no fanout-count parameter); callers MUST NOT
+# iterate this subcommand from a heuristic worker count.
+#
+# Codex is single-provider (model_routing.shape=single) so role bindings
+# are bare model ids — no provider/model split. The directive carries
+# `model=<m>` only.
 #
 # Output: `delegate:TaskCreate role=<r> model=<m>` on stdout.
 cmd_spawn() {
@@ -200,6 +213,27 @@ cmd_resolve_model_for_role() {
   resolve_model_for_role "$role"
 }
 
+# --- cmd_system_prompt_flag ---
+# Print the Codex flag spelling for the `append_system_prompt`
+# TUI-launch concern (T11). Codex has no equivalent CLI flag — system
+# prompt is configured via instructions file or session init — so the
+# tui_launch_flags cell is `unsupported`. Mirrors the Go helper
+# config.HarnessSystemPromptFlag.
+cmd_system_prompt_flag() {
+  require_codex
+  framework_tui_launch_flag append_system_prompt
+}
+
+# --- cmd_settings_override_flag ---
+# Print the Codex flag spelling for the `inline_settings_override`
+# TUI-launch concern (T11). Codex has no equivalent CLI flag (config is
+# file-based) so the cell is `unsupported`. Callers MUST skip the
+# injection rather than substitute a different flag.
+cmd_settings_override_flag() {
+  require_codex
+  framework_tui_launch_flag inline_settings_override
+}
+
 # --- cmd_smoke ---
 # Print the operation x support-level matrix for Codex. Same shape
 # as claude-code.sh and opencode.sh smoke; rows reflect Codex's actual
@@ -228,7 +262,7 @@ cmd_smoke() {
   echo
   echo "  Operation                Support       Native API"
   echo "  ------------------------ ------------- ---------------------------------------"
-  printf '  %-24s %-13s %s\n' spawn                  "$subagents"      "codex subagent spawn (delegate:TaskCreate)"
+  printf '  %-24s %-13s %s\n' spawn                  "$subagents"      "codex subagent spawn (delegate:TaskCreate; explicit-only, no auto-fanout)"
   printf '  %-24s %-13s %s\n' wait                   "$subagents"      "codex task poll (delegate:TaskList)"
   printf '  %-24s %-13s %s\n' send_message           "$team_messaging" "unsupported (no native TeamCreate/SendMessage; lead-orchestrated)"
   printf '  %-24s %-13s %s\n' collect_result         "$subagents/$transcript" "codex TaskGet + transcript stub"
@@ -247,6 +281,8 @@ case "$cmd" in
   shutdown)                 shift; cmd_shutdown                 "$@" ;;
   completion_enforcement)   shift; cmd_completion_enforcement   "$@" ;;
   resolve_model_for_role)   shift; cmd_resolve_model_for_role   "$@" ;;
+  system_prompt_flag)       shift; cmd_system_prompt_flag       "$@" ;;
+  settings_override_flag)   shift; cmd_settings_override_flag   "$@" ;;
   smoke|--smoke)            shift; cmd_smoke                    "$@" ;;
   -h|--help|"")
     cat <<EOF >&2
@@ -268,6 +304,11 @@ Subcommands (mirroring adapters/agents/README.md §Operation Surface):
                             (lead_validator on codex today).
   resolve_model_for_role <role>
                             Print resolved bare model id.
+  system_prompt_flag        Returns 'unsupported' (codex has no
+                            --append-system-prompt equivalent; system
+                            prompt is statically configured).
+  settings_override_flag    Returns 'unsupported' (codex has no
+                            --settings equivalent; config is file-based).
   smoke | --smoke           Print operation x support-level matrix for
                             the active framework (codex only).
 
@@ -277,7 +318,7 @@ EOF
     [[ -z "$cmd" ]] && exit 1 || exit 0
     ;;
   *)
-    echo "Error: unknown subcommand '$cmd' (allowed: spawn, wait, send_message, collect_result, shutdown, completion_enforcement, resolve_model_for_role, smoke)" >&2
+    echo "Error: unknown subcommand '$cmd' (allowed: spawn, wait, send_message, collect_result, shutdown, completion_enforcement, resolve_model_for_role, system_prompt_flag, settings_override_flag, smoke)" >&2
     exit 1
     ;;
 esac

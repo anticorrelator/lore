@@ -255,14 +255,40 @@ print('OK')
   [[ "$output" == *"OK"* ]]
 }
 
-@test "get_provider raises UnsupportedFrameworkError for opencode (T51 stub not landed)" {
+@test "get_provider returns partial provider for opencode (T51 stub landed)" {
+  run provider_py "
+from adapters.transcripts import get_provider
+provider = get_provider('opencode')
+support, reason = provider.provider_status()
+assert support == 'partial', f'expected partial, got {support!r}'
+assert reason, 'expected non-empty degraded reason on partial provider'
+print('OK')
+"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+}
+
+@test "get_provider returns partial provider for codex (T51 stub landed)" {
+  run provider_py "
+from adapters.transcripts import get_provider
+provider = get_provider('codex')
+support, reason = provider.provider_status()
+assert support == 'partial', f'expected partial, got {support!r}'
+assert reason, 'expected non-empty degraded reason on partial provider'
+print('OK')
+"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+}
+
+@test "get_provider raises UnsupportedFrameworkError for unknown framework" {
   run provider_py "
 from adapters.transcripts import get_provider, UnsupportedFrameworkError
 try:
-    get_provider('opencode')
+    get_provider('unknown-harness')
     assert False, 'expected UnsupportedFrameworkError'
 except UnsupportedFrameworkError as e:
-    assert 'opencode' in str(e), f'unexpected error: {e}'
+    assert 'unknown-harness' in str(e), f'unexpected error: {e}'
 print('OK')
 "
   [ "$status" -eq 0 ]

@@ -119,9 +119,8 @@ class UnsupportedFrameworkError(RuntimeError):
 # frameworks.<fw>.transcript_provider cells.
 _PROVIDER_MODULES = {
     "claude-code": "adapters.transcripts.claude_code",
-    # T51 will register:
-    # "opencode": "adapters.transcripts.opencode",
-    # "codex": "adapters.transcripts.codex",
+    "opencode": "adapters.transcripts.opencode",
+    "codex": "adapters.transcripts.codex",
 }
 
 

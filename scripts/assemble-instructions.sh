@@ -108,8 +108,15 @@ fi
 #    The MCP target line (T20) reports where Lore-shipped MCP servers WOULD
 #    be packaged for the active harness even when the registry is empty,
 #    so operators auditing the per-harness install can see the surface
-#    without needing to run install.sh. Empty registry / unsupported
-#    surface emits a "would package: N servers" or "mcp=none" notice.
+#    without needing to run install.sh. The cell's support level
+#    (full|partial|fallback|none) and evidence id are surfaced alongside
+#    the path so the dry-run is self-auditing: a `partial`/`fallback` cell
+#    is reported as degraded with its evidence pointer, and an
+#    `unsupported` install path emits `mcp=none`. capabilities.json's
+#    install_paths.mcp_servers (path) and capabilities.<fw>.mcp.support +
+#    .evidence (classification) are read together so a future harness
+#    that wires a path without an evidence pointer is reported degraded
+#    instead of silently treated as `full`.
 if [[ "$DRY_RUN" -eq 1 ]]; then
   if [[ -n "$DEGRADED" ]]; then
     echo "[assemble-instructions] framework=$FRAMEWORK degraded: $DEGRADED" >&2
@@ -120,9 +127,22 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   fi
   MCP_TARGET=""
   MCP_REGISTRY="$SCRIPT_DIR/../adapters/mcp-servers.json"
+  # Read the mcp capability cell's support level + evidence id so the
+  # dry-run can label the per-harness MCP surface honestly. Missing
+  # evidence on a non-`none` cell is reported as `degraded:no-evidence`
+  # rather than treated as a stable surface — this is the Phase 2
+  # verification rule applied to mcp_servers (D8: capability profiles
+  # are evidence-gated; an unverified target degrades instead of
+  # guessing).
+  MCP_SUPPORT="unknown"
+  MCP_EVIDENCE=""
+  if [[ -f "$CAPABILITIES_FILE" ]] && command -v jq &>/dev/null; then
+    MCP_SUPPORT=$(jq -r --arg fw "$FRAMEWORK" '.frameworks[$fw].capabilities.mcp.support // "unknown"' "$CAPABILITIES_FILE" 2>/dev/null)
+    MCP_EVIDENCE=$(jq -r --arg fw "$FRAMEWORK" '.frameworks[$fw].capabilities.mcp.evidence // ""' "$CAPABILITIES_FILE" 2>/dev/null)
+  fi
   if mcp_raw=$(LORE_FRAMEWORK="$FRAMEWORK" resolve_harness_install_path mcp_servers 2>/dev/null); then
     if [[ "$mcp_raw" == "unsupported" ]]; then
-      echo "[assemble-instructions] framework=$FRAMEWORK mcp=none (no MCP install path)"
+      echo "[assemble-instructions] framework=$FRAMEWORK mcp=none (no MCP install path; capability cell support=$MCP_SUPPORT)"
     else
       MCP_TARGET="$mcp_raw"
       MCP_COUNT=0
@@ -137,7 +157,16 @@ except Exception:
     print(0)
 " "$MCP_REGISTRY" 2>/dev/null || echo 0)
       fi
-      echo "[assemble-instructions] framework=$FRAMEWORK mcp_target=$MCP_TARGET servers=$MCP_COUNT"
+      DEGRADE_TAG=""
+      if [[ "$MCP_SUPPORT" == "partial" || "$MCP_SUPPORT" == "fallback" ]]; then
+        DEGRADE_TAG=" degraded:$MCP_SUPPORT"
+      elif [[ "$MCP_SUPPORT" != "full" ]]; then
+        DEGRADE_TAG=" degraded:unverified-support($MCP_SUPPORT)"
+      fi
+      if [[ -z "$MCP_EVIDENCE" && "$MCP_SUPPORT" != "none" ]]; then
+        DEGRADE_TAG="$DEGRADE_TAG degraded:no-evidence"
+      fi
+      echo "[assemble-instructions] framework=$FRAMEWORK mcp_target=$MCP_TARGET servers=$MCP_COUNT support=$MCP_SUPPORT evidence=${MCP_EVIDENCE:-none}${DEGRADE_TAG}"
     fi
   else
     echo "[assemble-instructions] framework=$FRAMEWORK mcp_target=unresolvable" >&2

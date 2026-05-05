@@ -54,6 +54,15 @@
       ]
     },
     {
+      "id": "advisor",
+      "description": "Persistent domain-consultant agent that workers query mid-task via SendMessage for guidance on a declared scope; spawned by /implement when phases declare an Advisors block.",
+      "call_sites": [
+        "agents/advisor.md",
+        "skills/implement/SKILL.md",
+        "scripts/agent-protocols/advisory-consultation.md"
+      ]
+    },
+    {
       "id": "default",
       "description": "Resolution fallback consulted when a role binding is unset; never named directly by a call site.",
       "call_sites": []

@@ -929,9 +929,10 @@ class TestLoadConfig:
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
-# Import transcript parser
+# Import transcript parser and provider for behavioral equivalence tests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from transcript import parse_transcript
+from adapters.transcripts import get_provider
 
 
 class TestBehavioralEquivalence:
@@ -965,7 +966,12 @@ class TestBehavioralEquivalence:
     def test_structural_hits_match_golden(self, golden_transcript, golden_expected):
         """scan_structural_signals produces the same hits as the golden fixture."""
         messages = parse_transcript(golden_transcript)
-        actual = snc.scan_structural_signals(messages, transcript_path=golden_transcript)
+        provider = get_provider("claude-code")
+        actual = snc.scan_structural_signals(
+            messages,
+            transcript_path=golden_transcript,
+            extract_file_paths=provider.extract_file_paths,
+        )
         expected = golden_expected["structural_hits"]
 
         assert self._normalize_hits(actual) == self._normalize_hits(expected)
@@ -973,8 +979,13 @@ class TestBehavioralEquivalence:
     def test_combined_hits_match_golden(self, golden_transcript, golden_expected):
         """Combined heuristic + structural hits match golden fixture exactly."""
         messages = parse_transcript(golden_transcript)
+        provider = get_provider("claude-code")
         heuristic = snc.scan_heuristics(messages)
-        structural = snc.scan_structural_signals(messages, transcript_path=golden_transcript)
+        structural = snc.scan_structural_signals(
+            messages,
+            transcript_path=golden_transcript,
+            extract_file_paths=provider.extract_file_paths,
+        )
         actual_combined = heuristic + structural
 
         expected_combined = (

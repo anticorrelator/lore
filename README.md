@@ -1,6 +1,8 @@
 # lore
 
-A per-project knowledge store for [Claude Code](https://claude.ai/claude-code). Captures, organizes, and retrieves reusable insights across sessions.
+A per-project knowledge store and multi-agent protocol layer for AI coding harnesses — currently [Claude Code](https://claude.ai/claude-code) (reference baseline), [OpenCode](https://opencode.ai), and [Codex CLI](https://developers.openai.com/codex/). Captures, organizes, and retrieves reusable insights across sessions; coordinates worker fanouts for spec and implementation work.
+
+Lore branches on **capability** (does this harness expose hooks? subagents? team messaging?) rather than on framework name. The capability profile and per-harness degradation modes live in [`adapters/capabilities.json`](adapters/capabilities.json); the operator-facing matrix lives in [`docs/framework-compatibility.md`](docs/framework-compatibility.md).
 
 ## What it does
 
@@ -51,6 +53,23 @@ Lore separates **logic** (this repo) from **data** (`~/.lore/`):
 
 The `~/.lore/scripts/` symlink is the portability layer — hooks reference it directly, while skills and agents use the `lore` CLI. If the logic repo moves, re-run `install.sh` to update the symlink and CLI.
 
+### Multi-harness adapters
+
+```
+adapters/
+├── capabilities.json           # Closed capability profile per harness (D1, D6, D8)
+├── capabilities-evidence.md    # Dated vendor evidence backing every non-`none` cell
+├── roles.json                  # Closed agent-role registry (lead/worker/researcher/...)
+├── README.md                   # Dual-impl contract (bash lib.sh ↔ Go config.go)
+├── agents/                     # Orchestration adapters (spawn/wait/send/collect/...)
+├── hooks/                      # Lifecycle hook installers per harness
+├── transcripts/                # Session/transcript providers (digest, novelty, ceremony)
+├── opencode/                   # OpenCode-specific plugin (lore-hooks.ts)
+└── codex/                      # Codex-specific hooks (hooks.sh)
+```
+
+Lore code branches on **capability cells** (`full | partial | fallback | none`), not on framework name. When a capability is below the threshold a skill needs, the skill either runs in degraded mode with a `[lore] degraded:` stderr notice or refuses with a documented status. See [`adapters/agents/README.md`](adapters/agents/README.md) for the orchestration contract and [`docs/framework-compatibility.md`](docs/framework-compatibility.md) for the per-skill × per-harness matrix.
+
 ## Prerequisites
 
 - **Python 3** — required for search, indexing, analysis, and hooks
@@ -63,20 +82,36 @@ The `~/.lore/scripts/` symlink is the portability layer — hooks reference it d
 ```bash
 git clone git@github.com:anticorrelator/lore.git
 cd lore
-bash install.sh
+bash install.sh                          # defaults to --framework claude-code
+bash install.sh --framework opencode     # OpenCode harness
+bash install.sh --framework codex        # Codex CLI harness
 ```
 
-This will:
-1. Create `~/.lore/` data directory
-2. Symlink `scripts/` and `claude-md/` into `~/.lore/`
-3. Install the `lore` CLI to `~/.local/bin/`
-4. Build and install the TUI (`lore-tui`) if Go is available
-5. Symlink skills into `~/.claude/skills/`
-6. Symlink agents into `~/.claude/agents/`
-7. Configure hooks in `~/.claude/settings.json`
-8. Assemble `~/.claude/CLAUDE.md` from protocol fragments
+The selected framework is persisted to `$LORE_DATA_DIR/config/framework.json`; subsequent commands resolve it via `lore config framework`. Re-run `install.sh --framework <name>` to switch active harness — role bindings and capability overrides are preserved.
+
+The installer:
+
+1. Creates `~/.lore/` data directory and persists framework selection to `$LORE_DATA_DIR/config/framework.json`.
+2. Symlinks `scripts/` and `claude-md/` into `~/.lore/`.
+3. Installs the `lore` CLI to `~/.local/bin/`.
+4. Builds and installs the TUI (`lore-tui`) if Go is available.
+5. Symlinks skills/agents into the active harness's install path (resolved via `adapters/capabilities.json::frameworks.<id>.install_paths`).
+6. Installs the harness's hook adapter (`adapters/hooks/<id>.sh` or `adapters/<id>/lore-hooks.ts`).
+7. Assembles the harness's instruction file (`CLAUDE.md` for claude-code/opencode, `AGENTS.md` for codex) from `claude-md/` fragments.
 
 If `~/.local/bin` is not on your PATH, the installer will print instructions to add it.
+
+### Per-harness install paths
+
+Each harness's destination directories come from [`adapters/capabilities.json`](adapters/capabilities.json) — Lore never hardcodes them. Run `lore framework status` to see resolved paths.
+
+| Harness     | Instructions file        | Skills dir            | Settings/permissions               |
+|-------------|--------------------------|-----------------------|-------------------------------------|
+| claude-code | `~/.claude/CLAUDE.md`    | `~/.claude/skills`    | `~/.claude/settings.json`           |
+| opencode    | `~/.claude/CLAUDE.md`    | `~/.claude/skills`    | `~/.config/opencode/config.json`    |
+| codex       | `~/.codex/AGENTS.md`     | `~/.codex/skills`     | `~/.codex/config.toml`              |
+
+OpenCode reads `~/.claude/CLAUDE.md` and `~/.claude/skills/` natively, so the assembled Claude file works for OpenCode without re-rendering. See [`docs/framework-compatibility.md`](docs/framework-compatibility.md) for full per-harness capability and degradation tables.
 
 ### Dry run
 
@@ -84,6 +119,7 @@ Preview what the installer would do without making changes:
 
 ```bash
 bash install.sh --dry-run
+bash install.sh --dry-run --framework opencode
 ```
 
 ### Configuration
@@ -95,13 +131,15 @@ export LORE_DATA_DIR=/path/to/data
 bash install.sh
 ```
 
+`LORE_FRAMEWORK=<id>` is honored as a per-shell override of the persisted framework selection (validated against the closed set in `adapters/capabilities.json`). Per-role model overrides use `LORE_MODEL_<ROLE>` (e.g., `LORE_MODEL_LEAD=anthropic/opus`). See [`docs/framework-compatibility.md`](docs/framework-compatibility.md) §Role Registry for the precedence chain.
+
 ### Uninstall
 
 ```bash
 bash install.sh --uninstall
 ```
 
-Removes symlinks, hooks, CLI, and TUI binary. Data at `~/.lore/` is preserved.
+Removes symlinks, hooks, CLI, and TUI binary across every supported harness's install paths. Data at `~/.lore/` is preserved.
 
 ## TUI
 
@@ -179,6 +217,19 @@ lore batch-implement             # Batch-run /implement on ready work items
 lore agent status                # Show enabled/disabled state and last-changed time
 lore agent enable                # Enable lore agent integration (default)
 lore agent disable               # Disable lore agent integration across all surfaces
+
+# Framework / harness diagnostics
+lore framework status            # Resolved harness, capabilities by support level,
+                                 #   role bindings, evidence/compat doc pointers
+lore framework doctor            # Doctor: cwd resolution chain, conflict diagnostics,
+                                 #   per-repo .lore.config diff, override ceiling check
+lore framework capability-overrides
+                                 # Inspect capability_overrides — what they shadow,
+                                 #   evidence pointer, ceiling-violation flag
+lore config framework            # Print active framework name (e.g., "opencode")
+lore config role <role>          # Print model bound to <role>
+lore config roles                # Print role->model map as JSON
+lore config show                 # Print entire framework.json as JSON
 ```
 
 Run `lore --help` or `lore <command> --help` for full details.

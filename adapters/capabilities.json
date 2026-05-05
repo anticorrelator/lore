@@ -28,11 +28,27 @@
     "gh_cli": "GitHub CLI (`gh`) on PATH for PR/issue read+write workflows. Sourced from the host environment, not the harness — no harness exposes it. Skills that consume PR diffs/comments/reviews require it; degradation is a hard `unsupported` rather than `partial` because the data is unreachable without it."
   },
   "skills": {
-    "_description": "Per-skill capability + tool requirements (T21). The `requires` array names capability ids from `capabilities` above and tool ids from `tools` above. T41 reads this manifest to gate skill availability per active harness: a skill is `full` when every requirement has support level `full` on the active framework, `partial` when at least one requirement is `partial` or `fallback`, and `unavailable` when any requirement is `none`. Skills with an empty `requires` array are framework-agnostic. The set is closed: adding a new skill requires adding a row here; adding a new capability or tool requires adding it to the `capabilities` or `tools` map first.",
+    "_description": "Per-skill capability + tool requirements (T21/T41). Each entry in `requires` is either a string (capability or tool id; treated as `{id, min_level: 'full', partial_below: 'full'}` — i.e., the cell must reach `full` or the skill is `unavailable`) or an object `{id, min_level, partial_below?, notes?}` declaring the threshold below which the skill must refuse and the threshold below which it merely degrades to partial-mode. Resolution rule (consumed by adapter helpers and `lore framework doctor`): for each requirement, look up the active framework's cell support level (or the tool availability for tool ids); if any cell is below `partial_below`, the skill is `unavailable`; if any cell is below `min_level` but at or above `partial_below`, the skill is `partial-mode`; otherwise `full`. The `partial_below` knob is what lets team-heavy skills (bootstrap, implement, spec) run in partial-mode on harnesses where fresh subagents exist but `team_messaging` or `task_completed_hook` are below `full` — without it the skill would have to refuse outright. Skills with an empty `requires` array are framework-agnostic. The set is closed: adding a new skill requires adding a row here; adding a new capability or tool requires adding it to the `capabilities` or `tools` map first.",
+    "_levels_order": ["full", "partial", "fallback", "none"],
+    "_degradation_vocab": {
+      "_description": "Closed degradation-status vocabulary surfaced by `lore framework doctor` and the orchestration adapter's `[lore] degraded:` stderr notices. T41 mandates these tokens — adapter-emitted strings outside this set are a contract violation.",
+      "partial": "Skill ran in partial mode: at least one requirement was below its `min_level` but at or above its `partial_below`. Behavior is degraded but functional; the adapter MUST emit a one-line stderr notice naming the specific requirement and its observed level.",
+      "fallback": "Skill operation routed through a fallback path declared by the requirement (e.g., lead-side validator instead of native blocking hook). Functionality matches `partial` from the user's perspective but the underlying gap is named at the cell level (`fallback` support) rather than the skill level.",
+      "none": "Skill is `unavailable` because at least one requirement was below `partial_below`. The skill MUST refuse to run; calling it is a no-op + stderr notice naming the missing requirement.",
+      "no-evidence": "A capability cell the skill depends on has support `> none` but no `evidence` pointer (i.e., the cell exists but has not been verified). Skills SHOULD treat `no-evidence` as a soft block — proceed in partial-mode and surface the missing-evidence notice — until T70 / `lore doctor` is wired to refresh evidence.",
+      "unverified-support": "Reserved scoped form `unverified-support(<level>)` for stderr notices when a capability cell has been overridden in `framework.json` (per-user override) without a refreshed evidence pointer. Adapter notices use the parenthetical level so the operator sees both the override and the original cell's level."
+    },
     "bootstrap": {
       "summary": "Bootstrap a knowledge store by exploring codebase architecture with a worker fanout team.",
-      "requires": ["subagents", "team_messaging", "task_completed_hook"],
-      "notes": "Spawns a worker team via TeamCreate + TaskCreate; lead synthesizes returns. Without team_messaging, falls back to lead-orchestrated single-agent exploration (slower; no parallel workers)."
+      "requires": [
+        {"id": "subagents", "min_level": "full", "partial_below": "fallback",
+         "notes": "Subagents at `partial`/`fallback` (opencode/codex) downgrade bootstrap to partial-mode (lead-driven exploration with fewer parallel spawns). `none` means refuse — bootstrap cannot work without isolated worker contexts."},
+        {"id": "team_messaging", "min_level": "full", "partial_below": "none",
+         "notes": "team_messaging at any sub-`full` level (including `none` on opencode/codex today) downgrades to lead-orchestrated single-agent exploration (no SendMessage between workers; lead aggregates serially). The skill never refuses on team_messaging alone — see the README skill-behavior matrix; only `task_completed_hook=none` or `subagents=none` triggers refuse."},
+        {"id": "task_completed_hook", "min_level": "full", "partial_below": "fallback",
+         "notes": "Hook at `fallback` collapses to `lead_validator` enforcement; bootstrap proceeds with a one-shot stderr degradation notice (per `adapters/agents/README.md` § Skill behavior expectations per mode). `none` means refuse — silent commons corruption otherwise."}
+      ],
+      "notes": "Team-heavy skill. partial-mode contract: bootstrap runs with reduced parallelism + lead-side validation when team_messaging or task_completed_hook are below `full`. Hard-refuses on `subagents=none` or `task_completed_hook=none`; `team_messaging=none` is tolerated (lead-only fanout)."
     },
     "evolve": {
       "summary": "Review and apply accumulated protocol evolution suggestions from retro and self-test.",
@@ -46,8 +62,15 @@
     },
     "implement": {
       "summary": "Execute a spec's plan with a knowledge-aware worker team and capture observations.",
-      "requires": ["subagents", "team_messaging", "task_completed_hook"],
-      "notes": "Lead spawns worker team via TeamCreate; workers emit Tier 2 evidence + completion reports validated by task_completed_hook. Without task_completed_hook, lead falls back to post-collection validation (D9 fallback mode)."
+      "requires": [
+        {"id": "subagents", "min_level": "full", "partial_below": "fallback",
+         "notes": "Subagents at `partial`/`fallback` (opencode/codex) downgrade implement to partial-mode — workers still spawn fresh contexts but team-state semantics differ. `none` refuses outright (no spawn surface = no fanout = no implement)."},
+        {"id": "team_messaging", "min_level": "full", "partial_below": "none",
+         "notes": "team_messaging below `full` (including `none` on opencode/codex today) collapses to lead-inline execution per Step 3.0 of the SKILL.md (no TeamCreate, no worker spawns); the skill body proceeds with a one-shot stderr degradation notice. The skill does NOT refuse on team_messaging alone — refuse comes from `subagents=none` or `task_completed_hook=none`."},
+        {"id": "task_completed_hook", "min_level": "full", "partial_below": "fallback",
+         "notes": "Hook at `fallback` collapses to `lead_validator` enforcement (D9 fallback). Implement proceeds in partial-mode with the post-hoc validator. `none` refuses — without enforcement the Tier 2 evidence trail and Tier 3 promotion pipeline corrupt silently."}
+      ],
+      "notes": "Team-heavy skill. partial-mode contract: implement runs lead-inline + post-hoc validation when team_messaging or task_completed_hook are below `full`, but still hard-refuses on `subagents=none` or `task_completed_hook=none`. Resolution mirrors `resolve_completion_enforcement_mode` in scripts/lib.sh — when ENFORCEMENT == `unavailable` the skill MUST refuse."
     },
     "memory": {
       "summary": "Manage the per-project knowledge store (search, view, curate, heal, init).",
@@ -132,8 +155,15 @@
     },
     "spec": {
       "summary": "Create a technical specification via team-based investigation and synthesis.",
-      "requires": ["subagents", "team_messaging", "task_completed_hook"],
-      "notes": "Spec-short flow uses single-pass synthesis (subagents only); full /spec spawns researcher fanout via TeamCreate. Without team_messaging, full /spec degrades to spec-short shape."
+      "requires": [
+        {"id": "subagents", "min_level": "full", "partial_below": "fallback",
+         "notes": "Subagents at `partial`/`fallback` downgrade /spec to partial-mode (lead-orchestrated researcher fanout with serial collection). `none` collapses to spec-short single-pass."},
+        {"id": "team_messaging", "min_level": "full", "partial_below": "none",
+         "notes": "/spec is the most permissive of the three team-heavy skills — team_messaging at `partial`/`fallback`/`none` all collapse to the spec-short branch (single-pass synthesis, no researcher fanout). The skill body honors this collapse when `TEAM_MESSAGING != full`. `partial_below: none` means there is no level at which /spec hard-refuses on team_messaging alone — it always has the spec-short fallback."},
+        {"id": "task_completed_hook", "min_level": "full", "partial_below": "fallback",
+         "notes": "Hook at `fallback` collapses to `lead_validator`; full /spec proceeds with post-hoc validation per the README skill-behavior matrix. `none` refuses team-mode but spec-short still proceeds (spec-short does not require enforcement because it does not spawn researcher reports)."}
+      ],
+      "notes": "Team-heavy skill, but the spec-short branch is always available as the partial-mode fallback. When team_messaging or subagents are below `full`, the skill body collapses to spec-short shape; when task_completed_hook drops to `none`, full /spec refuses but spec-short proceeds. SKILL.md Step 2.0 (line ~120) is the gate point."
     },
     "work": {
       "summary": "Check project status, manage work items, search remaining tasks.",
@@ -146,6 +176,8 @@
       "id": "claude-code",
       "display_name": "Claude Code",
       "binary": "claude",
+      "builtin_plan_mode_tool": "ExitPlanMode",
+      "slash_command_tool": "SlashCommand",
       "description": "Reference baseline. Supports the full lore protocol surface: SessionStart/Stop/PreCompact/PreToolUse/SessionEnd/TaskCompleted hooks, ~/.claude/skills + ~/.claude/agents + ~/.claude/CLAUDE.md packaging, TeamCreate/SendMessage team messaging, and JSONL transcripts under ~/.claude/projects/.",
       "model_routing": {
         "shape": "single",
@@ -160,6 +192,11 @@
         "teams":            "$HOME/.claude/teams",
         "ephemeral_plans":  "$HOME/.claude/plans",
         "mcp_servers":      "$HOME/.claude/settings.json"
+      },
+      "tui_launch_flags": {
+        "_description": "TUI-injected concern -> harness-native CLI flag spelling. Consumed by tui/internal/work/specpanel.go via config.HarnessSystemPromptFlag / HarnessSettingsOverrideFlag and by adapters/agents/<harness>.sh subcommands `system_prompt_flag` / `settings_override_flag`. The literal `unsupported` is the contract token (see install_paths) — callers MUST skip the flag injection rather than substitute a different flag. See adapters/agents/README.md §TUI Launch Concerns for the per-harness rationale.",
+        "append_system_prompt":      "--append-system-prompt",
+        "inline_settings_override":  "--settings"
       },
       "capabilities": {
         "instructions": {
@@ -237,6 +274,8 @@
       "id": "opencode",
       "display_name": "OpenCode",
       "binary": "opencode",
+      "builtin_plan_mode_tool": null,
+      "slash_command_tool": null,
       "description": "Multi-provider harness with native Claude-compatible discovery for skills and instruction files. Plugins are JavaScript/TypeScript modules under .opencode/plugins or ~/.config/opencode/plugins. Native team messaging is absent; team workflows degrade to lead-orchestrated fanout/aggregation.",
       "model_routing": {
         "shape": "multi",
@@ -252,6 +291,10 @@
         "ephemeral_plans":  "unsupported",
         "mcp_servers":      "$HOME/.config/opencode/opencode.json"
       },
+      "tui_launch_flags": {
+        "append_system_prompt":      "unsupported",
+        "inline_settings_override":  "unsupported"
+      },
       "capabilities": {
         "instructions": {
           "support": "full",
@@ -266,7 +309,7 @@
         "mcp": {
           "support": "partial",
           "evidence": "opencode-mcp",
-          "notes": "MCP servers configured in OpenCode config (.opencode/config.json); requires per-harness packaging because the path is not ~/.claude/settings.json."
+          "notes": "MCP servers configured in OpenCode config ($HOME/.config/opencode/opencode.json or .opencode/opencode.json); requires per-harness packaging because the path is not ~/.claude/settings.json. Cell is `partial` only because lore's cross-harness writer is not yet wired — the OpenCode surface itself is full."
         },
         "session_start_hook": {
           "support": "partial",
@@ -328,6 +371,8 @@
       "id": "codex",
       "display_name": "Codex",
       "binary": "codex",
+      "builtin_plan_mode_tool": null,
+      "slash_command_tool": null,
       "description": "Codex CLI with native hooks (SessionStart, PreToolUse, PermissionRequest, PostToolUse, Stop) and subagent workflows enabled by default. Native team messaging is absent; PreCompact and TaskCompleted blocking semantics are not covered by the native hook surface and require lead-side fallbacks. The February 2026 'notify-only' premise is stale and superseded by docs/codex-migration.md and the gotchas update in T16.",
       "model_routing": {
         "shape": "single",
@@ -342,6 +387,10 @@
         "teams":            "unsupported",
         "ephemeral_plans":  "unsupported",
         "mcp_servers":      "$HOME/.codex/config.toml"
+      },
+      "tui_launch_flags": {
+        "append_system_prompt":      "unsupported",
+        "inline_settings_override":  "unsupported"
       },
       "capabilities": {
         "instructions": {

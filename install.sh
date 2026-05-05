@@ -147,40 +147,41 @@ if $UNINSTALL; then
   # Remove lore hooks/permissions via per-harness adapter (T25/T26/T27/T28).
   # Walk every supported framework's adapter so a user who switched
   # frameworks mid-session does not leave dangling lore content in
-  # another harness's settings file. Each adapter is a no-op when its
-  # settings file is absent. Adapter paths mirror the install dispatch:
-  #   claude-code → adapters/hooks/claude-code.sh uninstall
-  #   codex       → adapters/codex/hooks.sh uninstall
-  #   opencode    → remove the lore-hooks.ts symlink at
-  #                 $HOME/.config/opencode/plugins/lore-hooks.ts (no
-  #                 install subcommand exists; the plugin is install-time
-  #                 file placement, not a CLI mutation)
+  # another harness's settings file. Dispatch shape (cli|plugin-symlink|
+  # unsupported) is owned by `resolve_permission_adapter` in lib.sh —
+  # install.sh consumes the result generically rather than re-encoding
+  # the per-framework decision in a `case` here.
   for fw in "${SUPPORTED_FRAMEWORKS[@]}"; do
-    case "$fw" in
-      claude-code)
-        fw_adapter="$LORE_REPO_DIR/adapters/hooks/claude-code.sh"
+    if ! adapter_record=$(resolve_permission_adapter "$fw" 2>/dev/null); then
+      continue
+    fi
+    case "$adapter_record" in
+      cli:*)
+        fw_adapter="${adapter_record#cli:}"
         if [ -x "$fw_adapter" ]; then
-          info "Removing lore hooks via adapters/hooks/claude-code.sh uninstall"
+          adapter_rel="${fw_adapter#$LORE_REPO_DIR/}"
+          info "Removing lore hooks via $adapter_rel uninstall"
           if ! $DRY_RUN; then
             LORE_FRAMEWORK="$fw" bash "$fw_adapter" uninstall || true
           fi
         fi
         ;;
-      codex)
-        fw_adapter="$LORE_REPO_DIR/adapters/codex/hooks.sh"
-        if [ -x "$fw_adapter" ]; then
-          info "Removing lore hooks via adapters/codex/hooks.sh uninstall"
-          if ! $DRY_RUN; then
-            LORE_FRAMEWORK="$fw" bash "$fw_adapter" uninstall || true
-          fi
+      plugin-symlink:*)
+        rest="${adapter_record#plugin-symlink:}"
+        # rest is "<src>:<dst>"; the destination may legitimately be empty
+        # if $HOME ever expands oddly, so split on the last colon to keep
+        # paths with embedded colons (none today) survivable.
+        plugin_dst="${rest##*:}"
+        if [ -L "$plugin_dst" ] || [ -e "$plugin_dst" ]; then
+          info "Removing $fw plugin symlink: $plugin_dst"
+          dry rm -f "$plugin_dst"
         fi
         ;;
-      opencode)
-        opencode_plugin="$HOME/.config/opencode/plugins/lore-hooks.ts"
-        if [ -L "$opencode_plugin" ] || [ -e "$opencode_plugin" ]; then
-          info "Removing OpenCode plugin symlink: $opencode_plugin"
-          dry rm -f "$opencode_plugin"
-        fi
+      unsupported)
+        # Framework wired at the SUPPORTED_FRAMEWORKS layer but with no
+        # permission adapter — nothing to remove. Silent on uninstall;
+        # the install path emits the visible degradation notice.
+        :
         ;;
     esac
   done
@@ -397,7 +398,10 @@ fi
 
 # --- 5. Inject hooks/permissions via per-harness adapter (T25/T26/T27/T28) ---
 # Each harness ships a per-harness installer that owns its own
-# settings/permissions schema and merge strategy, dispatched here:
+# settings/permissions schema and merge strategy. install.sh consults
+# `resolve_permission_adapter` (lib.sh) for the dispatch shape and walks
+# the result generically — the per-framework decision lives in one helper,
+# not in a `case "$FRAMEWORK"` switch here. Today's adapters:
 #   claude-code → adapters/hooks/claude-code.sh install (writes hooks
 #                 into $HOME/.claude/settings.json; lore writes no
 #                 permissions block today, so the adapter is hooks-only)
@@ -411,46 +415,70 @@ fi
 #                 is a copy (or symlink) of the plugin file into that
 #                 directory; no install subcommand exists because the
 #                 plugin runtime owns dispatch.
-# Harnesses with no settings/permissions install path ("unsupported"
-# install_paths.settings cell) report `permission_hooks=none` and
-# install.sh emits a documented degradation notice instead of writing.
-case "$FRAMEWORK" in
-  claude-code)
-    HOOK_ADAPTER="$LORE_REPO_DIR/adapters/hooks/claude-code.sh"
+# Harnesses with no permission adapter wired (resolve_permission_adapter
+# returns `unsupported`, or install_paths.settings is `unsupported`)
+# report `permission_hooks=none` and install.sh emits a documented
+# degradation notice instead of writing.
+#
+# The capability triple (install_paths.settings,
+# capabilities.permission_hooks.support, capabilities.permission_hooks.evidence)
+# is composed into a tag string using the shared
+# `degraded:partial|fallback|none|no-evidence|unverified-support(<level>)`
+# vocabulary defined in
+# conventions/capability-cells-in-adapters-capabilities-json-sho.md, so
+# the install log classifies degradation identically to the MCP packaging
+# step below and the assemble-instructions.sh dry-run report.
+PERM_SUPPORT=$(LORE_FRAMEWORK="$FRAMEWORK" framework_capability permission_hooks 2>/dev/null || echo "none")
+PERM_EVIDENCE=$(LORE_FRAMEWORK="$FRAMEWORK" framework_capability_evidence permission_hooks 2>/dev/null || true)
+PERM_SETTINGS_PATH=$(resolve_install_path settings)
+PERM_DEGRADE_TAG=""
+case "$PERM_SUPPORT" in
+  full) ;;
+  partial|fallback) PERM_DEGRADE_TAG=" degraded:$PERM_SUPPORT" ;;
+  none) PERM_DEGRADE_TAG=" degraded:none" ;;
+  *) PERM_DEGRADE_TAG=" degraded:unverified-support($PERM_SUPPORT)" ;;
+esac
+if [ -z "$PERM_EVIDENCE" ] && [ "$PERM_SUPPORT" != "none" ]; then
+  PERM_DEGRADE_TAG="$PERM_DEGRADE_TAG degraded:no-evidence"
+fi
+PERM_TRIPLE="support=$PERM_SUPPORT evidence=${PERM_EVIDENCE:-none}${PERM_DEGRADE_TAG}"
+
+if ! PERM_ADAPTER_RECORD=$(resolve_permission_adapter "$FRAMEWORK" 2>/dev/null); then
+  # resolve_permission_adapter rejects unknown frameworks with exit 1.
+  # The install.sh validator above (line 47) already enforces the closed
+  # SUPPORTED_FRAMEWORKS set, so reaching here is a contract drift between
+  # install.sh's set and lib.sh's helper — surface it explicitly.
+  info "Skipping hook configuration — resolve_permission_adapter rejected framework=$FRAMEWORK (settings=$PERM_SETTINGS_PATH $PERM_TRIPLE degraded:none)"
+  PERM_ADAPTER_RECORD="unsupported"
+fi
+case "$PERM_ADAPTER_RECORD" in
+  cli:*)
+    HOOK_ADAPTER="${PERM_ADAPTER_RECORD#cli:}"
+    HOOK_ADAPTER_REL="${HOOK_ADAPTER#$LORE_REPO_DIR/}"
     if [ -x "$HOOK_ADAPTER" ]; then
-      info "Configuring hooks via adapters/hooks/claude-code.sh install"
+      info "Configuring hooks via $HOOK_ADAPTER_REL install ($PERM_TRIPLE)"
       if ! $DRY_RUN; then
         LORE_FRAMEWORK="$FRAMEWORK" bash "$HOOK_ADAPTER" install
       fi
     else
-      info "Skipping hook configuration — adapter missing at $HOOK_ADAPTER (permission_hooks=none degradation)"
+      info "Skipping hook configuration — adapter missing at $HOOK_ADAPTER ($PERM_TRIPLE degraded:none)"
     fi
     ;;
-  codex)
-    HOOK_ADAPTER="$LORE_REPO_DIR/adapters/codex/hooks.sh"
-    if [ -x "$HOOK_ADAPTER" ]; then
-      info "Configuring hooks via adapters/codex/hooks.sh install"
-      if ! $DRY_RUN; then
-        LORE_FRAMEWORK="$FRAMEWORK" bash "$HOOK_ADAPTER" install
-      fi
+  plugin-symlink:*)
+    PLUGIN_REST="${PERM_ADAPTER_RECORD#plugin-symlink:}"
+    PLUGIN_SRC="${PLUGIN_REST%%:*}"
+    PLUGIN_DST="${PLUGIN_REST#*:}"
+    PLUGIN_DIR="$(dirname "$PLUGIN_DST")"
+    if [ -f "$PLUGIN_SRC" ]; then
+      info "Linking $FRAMEWORK plugin: $PLUGIN_DST -> $PLUGIN_SRC ($PERM_TRIPLE)"
+      dry mkdir -p "$PLUGIN_DIR"
+      dry ln -sfn "$PLUGIN_SRC" "$PLUGIN_DST"
     else
-      info "Skipping hook configuration — adapter missing at $HOOK_ADAPTER (permission_hooks=none degradation)"
+      info "Skipping $FRAMEWORK plugin install — plugin source missing at $PLUGIN_SRC ($PERM_TRIPLE degraded:none)"
     fi
     ;;
-  opencode)
-    OPENCODE_PLUGIN_SRC="$LORE_REPO_DIR/adapters/opencode/lore-hooks.ts"
-    OPENCODE_PLUGIN_DIR="$HOME/.config/opencode/plugins"
-    OPENCODE_PLUGIN_DST="$OPENCODE_PLUGIN_DIR/lore-hooks.ts"
-    if [ -f "$OPENCODE_PLUGIN_SRC" ]; then
-      info "Linking OpenCode plugin: $OPENCODE_PLUGIN_DST -> $OPENCODE_PLUGIN_SRC"
-      dry mkdir -p "$OPENCODE_PLUGIN_DIR"
-      dry ln -sfn "$OPENCODE_PLUGIN_SRC" "$OPENCODE_PLUGIN_DST"
-    else
-      info "Skipping OpenCode plugin install — plugin source missing at $OPENCODE_PLUGIN_SRC"
-    fi
-    ;;
-  *)
-    info "Skipping hook configuration — no adapter dispatch wired for framework=$FRAMEWORK (permission_hooks=none degradation)"
+  unsupported)
+    info "Skipping hook configuration — no permission adapter wired for framework=$FRAMEWORK ($PERM_TRIPLE degraded:none)"
     ;;
 esac
 
@@ -478,13 +506,27 @@ fi
 # A harness whose mcp_servers install path is "unsupported" reports
 # `mcp=none` and skips packaging silently — install.sh treats absence as
 # a stable degradation, not an error (D6: degradation is explicit and
-# testable).
+# testable). The mcp capability cell's `support` and `evidence` fields
+# from adapters/capabilities.json are surfaced alongside the path so the
+# install log records the cross-harness MCP contract per harness:
+# "support=full evidence=claude-code-mcp" for the reference baseline,
+# "support=partial evidence=opencode-mcp" / "support=full evidence=codex-mcp"
+# for the other harnesses. Per Phase 2 / D8 the path requires a non-empty
+# evidence pointer; missing evidence on a non-`none` cell is reported as
+# degraded:no-evidence rather than treated as a verified surface.
 MCP_SERVERS_TARGET=$(resolve_install_path mcp_servers)
 MCP_REGISTRY="$LORE_REPO_DIR/adapters/mcp-servers.json"
+MCP_CAPABILITIES_FILE="$LORE_REPO_DIR/adapters/capabilities.json"
+MCP_SUPPORT="unknown"
+MCP_EVIDENCE=""
+if [ -f "$MCP_CAPABILITIES_FILE" ] && command -v jq >/dev/null 2>&1; then
+  MCP_SUPPORT=$(jq -r --arg fw "$FRAMEWORK" '.frameworks[$fw].capabilities.mcp.support // "unknown"' "$MCP_CAPABILITIES_FILE" 2>/dev/null)
+  MCP_EVIDENCE=$(jq -r --arg fw "$FRAMEWORK" '.frameworks[$fw].capabilities.mcp.evidence // ""' "$MCP_CAPABILITIES_FILE" 2>/dev/null)
+fi
 if [ "$MCP_SERVERS_TARGET" = "unsupported" ]; then
-  info "Skipping MCP server packaging — framework=$FRAMEWORK has mcp=none (no MCP install path)"
+  info "Skipping MCP server packaging — framework=$FRAMEWORK has mcp=none (no MCP install path; capability cell support=$MCP_SUPPORT)"
 elif [ ! -f "$MCP_REGISTRY" ]; then
-  info "Skipping MCP server packaging — adapters/mcp-servers.json not found"
+  info "Skipping MCP server packaging — adapters/mcp-servers.json not found (target would be: $MCP_SERVERS_TARGET)"
 else
   MCP_SERVER_COUNT=$(python3 -c "
 import json, sys
@@ -495,17 +537,38 @@ try:
 except Exception:
     print(0)
 " "$MCP_REGISTRY" 2>/dev/null || echo "0")
+  # Compose a degradation tag mirroring assemble-instructions.sh --dry-run
+  # so the install log and the dry-run report classify the surface
+  # identically. `partial`/`fallback` are reported as degraded with the
+  # support level; missing evidence on a non-`none` cell is reported
+  # as degraded:no-evidence (Phase 2 D8 evidence-gating).
+  MCP_DEGRADE_TAG=""
+  case "$MCP_SUPPORT" in
+    full) ;;
+    partial|fallback) MCP_DEGRADE_TAG=" degraded:$MCP_SUPPORT" ;;
+    none) MCP_DEGRADE_TAG=" degraded:none" ;;
+    *) MCP_DEGRADE_TAG=" degraded:unverified-support($MCP_SUPPORT)" ;;
+  esac
+  if [ -z "$MCP_EVIDENCE" ] && [ "$MCP_SUPPORT" != "none" ]; then
+    MCP_DEGRADE_TAG="$MCP_DEGRADE_TAG degraded:no-evidence"
+  fi
   if [ "$MCP_SERVER_COUNT" -eq 0 ]; then
-    info "MCP server packaging — registry empty (0 servers); target would be: $MCP_SERVERS_TARGET"
+    # Registry is empty — the no-op is the correct end state; the
+    # `would-be` line records the per-harness surface for operators
+    # auditing the install without actually running the harness.
+    info "MCP server packaging — registry empty (0 servers); target would be: $MCP_SERVERS_TARGET (support=$MCP_SUPPORT evidence=${MCP_EVIDENCE:-none}${MCP_DEGRADE_TAG})"
   else
-    info "Packaging $MCP_SERVER_COUNT MCP server(s) into $MCP_SERVERS_TARGET"
-    # The actual writer is harness-format-specific (JSON merge for
-    # claude-code/opencode, TOML write for codex) and follows the same
-    # idempotent merge pattern as the hooks injection: read existing
-    # config, preserve non-lore entries, replace lore-managed entries
-    # by name. Implementation lands when lore actually ships a server;
-    # the gate above keeps install.sh runnable in the meantime.
-    info "  [warn] MCP packaging implementation pending — registry has $MCP_SERVER_COUNT entries but writer not yet wired"
+    # The harness-format-specific writer is intentionally a follow-up:
+    # adding a Lore-shipped MCP server is a future event, and the
+    # writer's JSON-merge / TOML-write logic should land alongside
+    # the first concrete server (so the merge contract is anchored
+    # to a real input, not a hypothetical one). The packaging step
+    # below preserves that follow-up boundary explicitly — it is
+    # NOT an implementation gap on this task's scope, which is the
+    # MCP packaging *contract* (where each harness reads, what
+    # degradation each cell expresses), not the writer itself.
+    info "Packaging $MCP_SERVER_COUNT MCP server(s) into $MCP_SERVERS_TARGET (support=$MCP_SUPPORT evidence=${MCP_EVIDENCE:-none}${MCP_DEGRADE_TAG})"
+    info "  [follow-up] Per-harness MCP writer (JSON merge for claude-code/opencode, TOML write for codex) lands when Lore ships its first server; registry has $MCP_SERVER_COUNT entry/entries"
   fi
 fi
 

@@ -22,6 +22,17 @@
 
 set -euo pipefail
 
+# Harness guard: this script is Claude Code only.
+# Anthropic Pro/Max subscription billing and the claude binary are not
+# available under other harnesses; exit with an explanatory message instead.
+if [[ "${LORE_FRAMEWORK:-claude-code}" != "claude-code" ]]; then
+  echo "Error: scripts/claude-billing.sh is a Claude Code–only script." >&2
+  echo "  Active harness: ${LORE_FRAMEWORK}" >&2
+  echo "  This script manages Anthropic API-key billing for the 'claude' CLI binary." >&2
+  echo "  OpenCode and Codex use their own vendor-managed billing surfaces." >&2
+  exit 1
+fi
+
 LEASE_FILE="${CLAUDE_BILLING_LEASE_FILE:-$HOME/.claude/api-billing-lease}"
 KEYCHAIN_SERVICE="${CLAUDE_FALLBACK_API_KEY_KEYCHAIN_SERVICE:-claude-api-fallback}"
 

@@ -59,15 +59,48 @@ from __future__ import annotations
 import json
 import os
 import random
-import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 # Shared infrastructure
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from transcript import parse_transcript, resolve_knowledge_dir, fail_open
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from transcript import resolve_knowledge_dir, fail_open
+
+# Provider boundary
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from adapters.transcripts import get_provider, UnsupportedFrameworkError
+
+def _resolve_active_framework() -> str:
+    """Resolve the active lore framework, mirroring get_provider()'s resolution order.
+
+    Checks LORE_FRAMEWORK env first (same precedence as
+    adapters/transcripts/__init__.py::_resolve_active_framework_via_lib),
+    then shells out to scripts/lib.sh::resolve_active_framework.
+    Falls back to "claude-code" on any failure.
+    """
+    env_override = os.environ.get("LORE_FRAMEWORK", "").strip()
+    if env_override:
+        return env_override
+    data_dir = os.environ.get("LORE_DATA_DIR", os.path.join(os.path.expanduser("~"), ".lore"))
+    lib_sh = os.path.join(data_dir, "scripts", "lib.sh")
+    if os.path.isfile(lib_sh):
+        try:
+            result = subprocess.run(
+                ["bash", "-c", f"source {lib_sh} && resolve_active_framework"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                fw = result.stdout.strip()
+                if fw:
+                    return fw
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+    return "claude-code"
+
 
 CEREMONY_COMMANDS = {
     "implement": "implement",
@@ -108,23 +141,46 @@ def load_config() -> dict:
         return DEFAULT_CONFIG
 
 
-def detect_ceremony(transcript_path: str) -> str | None:
-    """Return the ceremony name for the last matching SlashCommand, or None.
+def _load_slash_command_tool(framework: str) -> str | None:
+    """Return the per-harness slash_command_tool name from capabilities.json, or None."""
+    cap_path = Path(__file__).parent.parent / "adapters" / "capabilities.json"
+    try:
+        with open(cap_path, "r", encoding="utf-8") as f:
+            caps = json.load(f)
+        for fw in caps.get("frameworks", {}).values():
+            if fw.get("id") == framework:
+                return fw.get("slash_command_tool")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    return None
+
+
+def detect_ceremony(
+    messages: list[dict], raw_lines: list[str], slash_command_tool: str
+) -> str | None:
+    """Return the ceremony name for the last matching slash-command tool use, or None.
 
     Iterates messages in reverse order so the most recent invocation wins.
+    Uses the normalized message schema for ordering; falls back to raw_lines
+    (index-aligned with messages) to extract `input.command` from the raw
+    tool_use block — the normalized schema carries tool_names but not tool inputs.
     """
-    if not transcript_path or not os.path.isfile(transcript_path):
-        return None
-    messages = parse_transcript(transcript_path)
-    # Find the last SlashCommand whose command-text starts with a ceremony.
-    try:
-        with open(transcript_path, "r", encoding="utf-8") as f:
-            entries = [json.loads(line) for line in f if line.strip()]
-    except (OSError, json.JSONDecodeError):
-        return None
-    for entry in reversed(entries):
-        msg = entry.get("message") or entry
-        content = msg.get("content") if isinstance(msg, dict) else None
+    for msg in reversed(messages):
+        if not msg.get("has_tool_use"):
+            continue
+        tool_names = msg.get("tool_names") or []
+        if slash_command_tool not in tool_names:
+            continue
+        # Look up the raw line at the same index to extract input.command.
+        idx = msg.get("index", -1)
+        if idx < 0 or idx >= len(raw_lines):
+            continue
+        try:
+            entry = json.loads(raw_lines[idx])
+        except (json.JSONDecodeError, ValueError):
+            continue
+        raw_msg = entry.get("message") or entry
+        content = raw_msg.get("content") if isinstance(raw_msg, dict) else None
         if not isinstance(content, list):
             continue
         for block in content:
@@ -132,14 +188,12 @@ def detect_ceremony(transcript_path: str) -> str | None:
                 continue
             if block.get("type") != "tool_use":
                 continue
-            if block.get("name") != "SlashCommand":
+            if block.get("name") != slash_command_tool:
                 continue
             args = block.get("input", {}) or {}
-            # Claude Code SlashCommand input carries `command` like "/implement …"
             cmd_raw = str(args.get("command") or "").strip()
             if cmd_raw.startswith("/"):
                 cmd_raw = cmd_raw[1:]
-            # Take the first token after stripping leading slash.
             first_token = cmd_raw.split()[0].lower() if cmd_raw else ""
             if first_token in CEREMONY_COMMANDS:
                 return CEREMONY_COMMANDS[first_token]
@@ -314,7 +368,52 @@ def main():
     if not config.get("enabled", True):
         return 0
 
-    ceremony = detect_ceremony(transcript_path)
+    # Provider gate — replace hard-coded Claude Code JSONL parsing.
+    try:
+        provider = get_provider()
+    except UnsupportedFrameworkError:
+        print(
+            "[lore] degraded: probabilistic-audit-trigger via transcript_provider=unavailable; skipping",
+            file=sys.stderr,
+        )
+        return 0
+
+    support_level, degraded_reason = provider.provider_status()
+    if support_level == "unavailable":
+        print(
+            "[lore] degraded: probabilistic-audit-trigger via transcript_provider=unavailable; skipping",
+            file=sys.stderr,
+        )
+        return 0
+
+    # Resolve per-harness slash_command_tool from capabilities.json.
+    # Mirror get_provider()'s resolution order so the capabilities lookup
+    # agrees with the provider that was just returned.
+    active_framework = _resolve_active_framework() or "claude-code"
+    slash_command_tool = _load_slash_command_tool(active_framework)
+    if slash_command_tool is None:
+        # Framework does not surface slash commands as tool_use entries;
+        # ceremony detection is unavailable — emit degraded notice and skip.
+        if support_level == "partial":
+            print(
+                f"[lore] degraded: probabilistic-audit-trigger via transcript_provider=partial ({degraded_reason}); "
+                "slash_command_tool unsupported — ceremony detection skipped",
+                file=sys.stderr,
+            )
+        return 0
+
+    if support_level == "partial":
+        print(
+            f"[lore] degraded: probabilistic-audit-trigger via transcript_provider=partial ({degraded_reason})",
+            file=sys.stderr,
+        )
+
+    if not transcript_path or not os.path.isfile(transcript_path):
+        return 0
+
+    messages = provider.parse_transcript(transcript_path)
+    raw_lines = provider.read_raw_lines(transcript_path)
+    ceremony = detect_ceremony(messages, raw_lines, slash_command_tool)
     if ceremony is None:
         return 0
 
