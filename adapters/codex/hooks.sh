@@ -91,6 +91,15 @@ resolve_settings_path() {
 # falls back to a SessionStart bookend (pre-compact.sh on every session
 # start) and SessionEnd is derived from Stop (skipped here — Stop hook
 # already runs the same work).
+#
+# Every command is prefixed with `LORE_FRAMEWORK=codex` so spawned
+# scripts resolve the active framework at runtime independently of
+# `~/.lore/config/framework.json`. The static framework.json default
+# is single-valued (last install.sh run wins); without this prefix,
+# codex sessions would resolve to whichever framework happened to be
+# installed last and misroute through claude-code's capability profile
+# (lib.sh::resolve_active_framework consults LORE_FRAMEWORK before
+# framework.json — see scripts/lib.sh:528-530).
 render_lore_block() {
   cat <<'TOML'
 # >>> lore hooks (managed) — do not edit between markers
@@ -101,38 +110,44 @@ render_lore_block() {
 # uninstall` (or re-run install.sh with --framework=<other>).
 
 [[hooks.SessionStart]]
-command = "bash ~/.lore/scripts/doctor.sh --quiet"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/doctor.sh --quiet"
 
 [[hooks.SessionStart]]
-command = "bash ~/.lore/scripts/auto-reindex.sh"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/auto-reindex.sh"
 
 [[hooks.SessionStart]]
-command = "bash ~/.lore/scripts/load-knowledge.sh"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-knowledge.sh"
 
 [[hooks.SessionStart]]
-command = "bash ~/.lore/scripts/load-work.sh"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-work.sh"
 
 [[hooks.SessionStart]]
-command = "bash ~/.lore/scripts/load-threads.sh"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-threads.sh"
 
 [[hooks.SessionStart]]
-command = "python3 ~/.lore/scripts/extract-session-digest.py"
+command = "LORE_FRAMEWORK=codex python3 ~/.lore/scripts/extract-session-digest.py"
 
 # pre_compact fallback: Codex has no native PreCompact event, so the
 # pre-compact reminder runs at SessionStart as a bookend. See
 # adapters/hooks/README.md "Per-Harness Mapping" for the fallback.
 [[hooks.SessionStart]]
-command = "bash ~/.lore/scripts/pre-compact.sh"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/pre-compact.sh"
 
 [[hooks.Stop]]
-command = "python3 ~/.lore/scripts/stop-novelty-check.py"
+command = "LORE_FRAMEWORK=codex python3 ~/.lore/scripts/stop-novelty-check.py"
 
 [[hooks.Stop]]
-command = "python3 ~/.lore/scripts/check-plan-persistence.py"
+command = "LORE_FRAMEWORK=codex python3 ~/.lore/scripts/check-plan-persistence.py"
 
 [[hooks.PreToolUse]]
-matcher = { tool = "Write" }
-command = "bash ~/.lore/scripts/guard-work-writes.sh"
+# Codex 0.124+ requires `matcher` to be a TOML string (the tool name),
+# not an inline table. The previous `{ tool = "Write" }` form parsed
+# under earlier codex versions but fails config load on 0.124 with
+# "invalid type: map, expected a string in hooks.PreToolUse.matcher"
+# (verified empirically against the installed binary). The bare-string
+# form below is the schema codex actually expects.
+matcher = "Write"
+command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/guard-work-writes.sh"
 # <<< lore hooks (managed)
 TOML
 }

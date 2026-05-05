@@ -377,8 +377,17 @@ function spawnHandler(scriptName: string, env: NodeJS.ProcessEnv): Promise<Dispa
     const scriptPath = path.join(dataRoot, "scripts", scriptName);
     const interpreter = scriptName.endsWith(".py") ? "python3" : "bash";
 
+    // Pin the spawned script to the opencode capability profile via
+    // LORE_FRAMEWORK. lib.sh::resolve_active_framework consults this env
+    // var before ~/.lore/config/framework.json (scripts/lib.sh:528-530);
+    // without it, an opencode session would resolve via the static
+    // single-valued framework.json default — which only matches whichever
+    // harness was installed last by install.sh — and misroute through
+    // that harness's capability cells. Caller-provided `env` still wins
+    // (rightmost spread) so callers that need a different framework for
+    // a single dispatch can override.
     const child = spawn(interpreter, [scriptPath], {
-      env: { ...process.env, ...env },
+      env: { ...process.env, LORE_FRAMEWORK: "opencode", ...env },
       stdio: ["ignore", "pipe", "pipe"],
     });
 

@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Manage the per-project knowledge store — USE FIRST when searching for past decisions, patterns, conventions, or architecture before Grep or Explore agents. Commands: add, search, view, curate, heal, init
+description: "Manage the per-project knowledge store — USE FIRST when searching for past decisions, patterns, conventions, or architecture before Grep or Explore agents. Commands: add, search, view, curate, heal, init"
 user_invocable: true
 argument_description: "[command] [args] — add <category> <title> | search <query> | view [category] [query] | curate | heal | init"
 ---

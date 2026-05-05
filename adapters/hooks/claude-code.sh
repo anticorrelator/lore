@@ -89,19 +89,27 @@ else:
 # hook_kind is "command" or "agent"; payload is the shell command or
 # the agent prompt text. Identical to the list that previously lived
 # in install.sh:416-429.
+# Every command is prefixed with `LORE_FRAMEWORK=claude-code` so spawned
+# scripts resolve the active framework at runtime independently of
+# ~/.lore/config/framework.json. The static framework.json default is
+# single-valued (last install.sh run wins); without this prefix, claude-code
+# sessions would silently misroute if a later install flipped the static
+# default to another harness. lib.sh::resolve_active_framework consults
+# LORE_FRAMEWORK before framework.json (scripts/lib.sh:528-530), so this
+# pins each harness's hook chain to its own capability profile.
 lore_hooks = [
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/doctor.sh --quiet", 5),
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/auto-reindex.sh", 5),
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-knowledge.sh", 5),
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-work.sh", 5),
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-threads.sh", 5),
-    ("SessionStart", None, "command", "python3 ~/.lore/scripts/extract-session-digest.py", 5),
-    ("PreCompact",   None, "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
-    ("Stop",         None, "command", "python3 ~/.lore/scripts/stop-novelty-check.py", 10),
-    ("Stop",         None, "command", "python3 ~/.lore/scripts/check-plan-persistence.py", 10),
-    ("TaskCompleted", None, "command", "bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
-    ("PreToolUse",   "Write", "command", "bash ~/.lore/scripts/guard-work-writes.sh", 5),
-    ("SessionEnd",   "clear", "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/doctor.sh --quiet", 5),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/auto-reindex.sh", 5),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/load-knowledge.sh", 5),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/load-work.sh", 5),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/load-threads.sh", 5),
+    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code python3 ~/.lore/scripts/extract-session-digest.py", 5),
+    ("PreCompact",   None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/pre-compact.sh", 5),
+    ("Stop",         None, "command", "LORE_FRAMEWORK=claude-code python3 ~/.lore/scripts/stop-novelty-check.py", 10),
+    ("Stop",         None, "command", "LORE_FRAMEWORK=claude-code python3 ~/.lore/scripts/check-plan-persistence.py", 10),
+    ("TaskCompleted", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
+    ("PreToolUse",   "Write", "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/guard-work-writes.sh", 5),
+    ("SessionEnd",   "clear", "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/pre-compact.sh", 5),
 ]
 
 def is_lore_hook(entry):
