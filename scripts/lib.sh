@@ -7,6 +7,15 @@
 # Callers set their own shell options.
 
 LORE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# LORE_REPO_DIR is the physical lore-repo root (one level up from scripts/),
+# resolved through any symlinks. Skills and scripts that build adapter paths
+# via string concatenation (e.g. "$LORE_REPO_DIR/adapters/agents/...") need
+# the realpath — stripping "/scripts" from LORE_LIB_DIR fails on the typical
+# install where ~/.lore/scripts is a symlink to the actual repo's scripts/.
+# `cd -P ..` resolves the symlink physically before going up, which a plain
+# `cd "$LIB/.."; pwd -P` does not (bash collapses ".." logically in the path
+# argument before chdir, landing at ~/.lore which has no adapters/ dir).
+LORE_REPO_DIR="$(cd "$LORE_LIB_DIR" && cd -P .. && pwd)"
 
 # --- die ---
 # Print an error message to stderr and exit with status 1.
@@ -728,10 +737,11 @@ resolve_permission_adapter() {
     fw=$(resolve_active_framework) || return 1
   fi
 
-  # LORE_LIB_DIR resolves to scripts/; repo_root is one level up. Strip
-  # the trailing /scripts segment so adapter paths render as
-  # "<repo>/adapters/..." rather than "<repo>/scripts/../adapters/...".
-  local repo_root="${LORE_LIB_DIR%/scripts}"
+  # LORE_REPO_DIR is the physical lore-repo root (resolved through symlinks
+  # at lib.sh source time). Renders adapter paths as "<repo>/adapters/..."
+  # without the "<repo>/scripts/../adapters/..." round-trip and without
+  # tripping on symlinked installs (e.g. ~/.lore/scripts -> /path/to/repo/scripts).
+  local repo_root="$LORE_REPO_DIR"
   case "$fw" in
     claude-code)
       printf 'cli:%s\n' "$repo_root/adapters/hooks/claude-code.sh"
