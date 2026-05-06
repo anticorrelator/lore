@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # agent-toggle/disable.sh — Disable lore agent integration globally
 # Atomically writes agent.json enabled=false (write-temp-then-rename).
-# Removes per-harness skill/agent symlinks (resolve_harness_install_path
-# {skills,agents}) and clears the active harness's instruction file via
-# scripts/assemble-instructions.sh --framework <active> --disable.
+# Removes per-harness skill/agent symlinks across all registered frameworks
+# (resolve_harness_install_path {skills,agents}) and clears every framework's
+# instruction file via scripts/assemble-instructions.sh --framework <fw> --disable.
 # Usage: bash disable.sh
 
 set -euo pipefail
@@ -15,47 +15,60 @@ source "$SCRIPT_DIR/../lib.sh"
 AGENT_JSON="${LORE_DATA_DIR}/config/agent.json"
 AGENT_JSON_TMP="${AGENT_JSON}.tmp.$$"
 
+ASSEMBLE="${LORE_DATA_DIR}/scripts/assemble-instructions.sh"
+
 # Detect lore repo path from ~/.lore/scripts symlink
 LORE_SCRIPTS_LINK="${LORE_DATA_DIR}/scripts"
-LORE_REPO_DIR=""
+LORE_REPO_DIR_TOGGLE=""
 if [[ -L "$LORE_SCRIPTS_LINK" ]]; then
-  LORE_REPO_DIR="$(cd "$(dirname "$(readlink "$LORE_SCRIPTS_LINK")")" && pwd)"
+  LORE_REPO_DIR_TOGGLE="$(cd "$(dirname "$(readlink "$LORE_SCRIPTS_LINK")")" && pwd)"
 fi
+
+# Enumerate registered frameworks early — abort before any state mutation if this fails.
+# Capture output explicitly so a die() inside list_supported_frameworks propagates to the
+# outer shell (process substitution <(...) swallows exit codes in bash 3.2+).
+_fw_list=$(list_supported_frameworks) || exit 1
+FRAMEWORKS=()
+while IFS= read -r fw; do FRAMEWORKS+=("$fw"); done <<<"$_fw_list"
+unset _fw_list
 
 # --- Phase 3: remove skill/agent symlinks pointing into lore repo; record manifest ---
 remove_symlinks() {
-  if [[ -z "$LORE_REPO_DIR" ]]; then
+  if [[ -z "$LORE_REPO_DIR_TOGGLE" ]]; then
     echo "  [warn] Cannot detect lore repo path — skipping symlink removal" >&2
+    MANIFEST="[]"
     return 0
   fi
 
   local manifest_entries=()
 
-  # Per-harness install dirs via harness_path_or_empty (T71). The helper
-  # collapses unsupported sentinel + lookup error into an empty string;
-  # both cases mean "no symlinks to remove for this kind".
-  local dirs=()
-  for kind in skills agents; do
-    local resolved
-    resolved=$(harness_path_or_empty "$kind")
-    [[ -n "$resolved" ]] && dirs+=("$resolved")
-  done
+  for fw in "${FRAMEWORKS[@]}"; do
+    for kind in skills agents; do
+      local resolved
+      if ! resolved=$(LORE_FRAMEWORK="$fw" resolve_harness_install_path "$kind" 2>/dev/null); then
+        echo "  [warn] [$fw] resolve $kind path failed — skipping" >&2
+        continue
+      fi
+      [[ "$resolved" == "unsupported" || -z "$resolved" ]] && continue
+      [[ -d "$resolved" ]] || continue
 
-  for dir in "${dirs[@]}"; do
-    [[ -d "$dir" ]] || continue
-    for link in "$dir"/*; do
-      [[ -L "$link" ]] || continue
-      local target
-      target="$(readlink "$link")"
-      # Resolve to absolute path for comparison
-      if [[ "$target" != /* ]]; then
-        target="$(cd "$(dirname "$link")" && pwd)/$(basename "$target")"
-      fi
-      # Only remove symlinks targeting paths under the lore repo
-      if [[ "$target" == "$LORE_REPO_DIR"/* || "$target" == "$LORE_REPO_DIR" ]]; then
-        manifest_entries+=("{\"name\":\"$(basename "$link")\",\"link_path\":\"$link\",\"target_path\":\"$target\"}")
-        rm "$link"
-      fi
+      for link in "$resolved"/*; do
+        [[ -L "$link" ]] || continue
+        local target
+        if ! target="$(readlink "$link" 2>/dev/null)"; then
+          echo "  [warn] [$fw] readlink failed for $link — skipping" >&2
+          continue
+        fi
+        # Resolve to absolute path for comparison
+        if [[ "$target" != /* ]]; then
+          target="$(cd "$(dirname "$link")" && pwd)/$(basename "$target")"
+        fi
+        # Only remove symlinks targeting paths under the lore repo
+        if [[ "$target" == "$LORE_REPO_DIR_TOGGLE"/* || "$target" == "$LORE_REPO_DIR_TOGGLE" ]]; then
+          manifest_entries+=("{\"name\":\"$(basename "$link")\",\"link_path\":\"$link\",\"target_path\":\"$target\"}")
+          rm "$link" || echo "  [warn] [$fw] failed to remove $link" >&2
+        fi
+      done
     done
   done
 
@@ -69,34 +82,25 @@ remove_symlinks() {
   fi
 }
 
-# --- Phase 4: clear lore content from the active harness's instruction file ---
+# --- Phase 4: clear lore content from every registered framework's instruction file ---
 clear_claude_md() {
-  local assembler="${LORE_DATA_DIR}/scripts/assemble-instructions.sh"
-  local active
-  active=$(resolve_active_framework 2>/dev/null) || active="claude-code"
-  if [[ -x "$assembler" ]]; then
-    "$assembler" --framework "$active" --disable
-  else
+  if [[ ! -x "$ASSEMBLE" ]]; then
     echo "  [warn] assemble-instructions.sh not found — instruction file not updated" >&2
+    return 0
   fi
-}
 
-# Read existing manifest so we don't lose it when flipping disabled
-MANIFEST="[]"
-if [[ -f "$AGENT_JSON" ]]; then
-  MANIFEST=$(python3 -c "
-import json, sys
-with open(sys.argv[1]) as f:
-    d = json.load(f)
-print(json.dumps(d.get('symlink_manifest', [])))
-" "$AGENT_JSON" 2>/dev/null || echo "[]")
-fi
+  for fw in "${FRAMEWORKS[@]}"; do
+    LORE_FRAMEWORK="$fw" bash "$ASSEMBLE" --framework "$fw" --disable \
+      || echo "  [warn] [$fw] assemble-instructions.sh --disable failed (non-fatal)" >&2
+  done
+}
 
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 mkdir -p "$(dirname "$AGENT_JSON")"
 
-# Remove symlinks first — they populate the manifest before we write the JSON
+# Remove symlinks first — they populate MANIFEST before we write the JSON
+MANIFEST="[]"
 remove_symlinks
 
 python3 -c "
