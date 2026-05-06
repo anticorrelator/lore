@@ -12,8 +12,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../config.sh"
 source "$SCRIPT_DIR/../lib.sh"
 
+SETTINGS_SH="$SCRIPT_DIR/../settings.sh"
 AGENT_JSON="${LORE_DATA_DIR}/config/agent.json"
 AGENT_JSON_TMP="${AGENT_JSON}.tmp.$$"
+
+# D6: symlink_manifest lives in install-state, separate from user-editable
+# config. Co-owned with install.sh (install reads-and-merges; agent-toggle
+# overwrites with the disable snapshot).
+SYMLINKS_STATE="${LORE_DATA_DIR}/.install-state/symlinks.json"
+SYMLINKS_STATE_TMP="${SYMLINKS_STATE}.tmp.$$"
 
 ASSEMBLE="${LORE_DATA_DIR}/scripts/assemble-instructions.sh"
 
@@ -98,22 +105,44 @@ clear_claude_md() {
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 mkdir -p "$(dirname "$AGENT_JSON")"
+mkdir -p "$(dirname "$SYMLINKS_STATE")"
 
 # Remove symlinks first — they populate MANIFEST before we write the JSON
 MANIFEST="[]"
 remove_symlinks
 
+# Write the disable-state symlink manifest to install-state/symlinks.json
+# (D6 owns this path; install.sh reads-and-merges, never clobbers).
+python3 -c "
+import json, sys
+data = {
+    'schema_version': 1,
+    'symlink_manifest': json.loads(sys.argv[1]),
+}
+print(json.dumps(data, indent=2))
+" "$MANIFEST" > "$SYMLINKS_STATE_TMP"
+mv "$SYMLINKS_STATE_TMP" "$SYMLINKS_STATE"
+
+# Write the user-facing enable/disable state to agent.json (legacy path
+# during the deprecation window) AND to the unified settings.json so the
+# new loader sees the change immediately.
 python3 -c "
 import json, sys
 data = {
     'enabled': False,
     'last_changed': sys.argv[1],
-    'symlink_manifest': json.loads(sys.argv[2]),
 }
 print(json.dumps(data, indent=2))
-" "$TIMESTAMP" "$MANIFEST" > "$AGENT_JSON_TMP"
+" "$TIMESTAMP" > "$AGENT_JSON_TMP"
 
 mv "$AGENT_JSON_TMP" "$AGENT_JSON"
+
+# Mirror to settings.json::agent.{enabled,last_changed} via the locked
+# patch helper so concurrent writers (e.g., a TUI SavePrefs in parallel)
+# don't lose the disable mutation. Section-scoped: unrelated sections of
+# settings.json are preserved by the patch contract.
+LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" patch agent.enabled 'false'
+LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" patch agent.last_changed "$(printf '%s' "$TIMESTAMP" | jq -R .)"
 
 clear_claude_md
 

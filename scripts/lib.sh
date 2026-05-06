@@ -409,18 +409,37 @@ json_array_field() {
 
 # --- lore_agent_enabled ---
 # Returns 0 (success) if lore agent integration is enabled, non-zero if disabled.
-# Checks in priority order:
-#   1. LORE_AGENT_DISABLED=1 env var → disabled (returns 1)
-#   2. ~/.lore/config/agent.json enabled field → false means disabled (returns 1)
-#   3. File absent or enabled=true → enabled (returns 0)
+# Resolution order:
+#   1. LORE_AGENT_DISABLED=1 env var → disabled (returns 1).
+#   2. Unified ~/.lore/config/settings.json `.agent.enabled`. When the key is
+#      explicitly `false`, return 1; any other present value is enabled.
+#   3. Legacy ~/.lore/config/agent.json `.enabled` (deprecation-window
+#      fallback). Only consulted when step 2 returns absence.
+#   4. File absent on both layers → enabled (returns 0). This default-on
+#      semantic preserves the pre-T2 contract where missing config = enabled.
 # Usage: lore_agent_enabled || exit 0
 lore_agent_enabled() {
   if [[ "${LORE_AGENT_DISABLED:-}" == "1" ]]; then
     return 1
   fi
-  local config_file="${LORE_DATA_DIR:-$HOME/.lore}/config/agent.json"
-  if [[ -f "$config_file" ]]; then
-    if grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$config_file"; then
+
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
+
+  # Unified file (primary)
+  if [[ -x "$settings_sh" || -r "$settings_sh" ]] && command -v jq &>/dev/null; then
+    local unified_value
+    unified_value=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get agent.enabled 2>/dev/null || true)
+    if [[ -n "$unified_value" ]]; then
+      [[ "$unified_value" == "false" ]] && return 1
+      return 0
+    fi
+  fi
+
+  # Legacy fragmented file (fallback)
+  local legacy_file="$data_dir/config/agent.json"
+  if [[ -f "$legacy_file" ]]; then
+    if grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$legacy_file"; then
       return 1
     fi
   fi
@@ -486,6 +505,7 @@ load_harness_args() {
   local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
   local new_file="$data_dir/config/harness-args.json"
   local legacy_file="$data_dir/config/claude.json"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
 
   if [[ -z "$harness" ]]; then
     harness=$(resolve_active_framework) || return 1
@@ -507,9 +527,24 @@ load_harness_args() {
       fi
     fi
 
-    # Migrate legacy file to new shape on first read (idempotent).
+    # Unified file (primary): harnesses.<harness>.args
+    local unified_args_raw
+    unified_args_raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$harness.args" 2>/dev/null || true)
+    if [[ -n "$unified_args_raw" ]]; then
+      if printf '%s' "$unified_args_raw" | jq -e 'type == "array"' &>/dev/null; then
+        printf '%s' "$unified_args_raw" | jq -r '.[]'
+        return
+      fi
+    fi
+
+    # Migrate legacy claude.json → harness-args.json on first read (idempotent).
+    # Preserved verbatim from pre-T2: this migration was already in place and
+    # the unified-file consolidation does not subsume it (claude.json's args
+    # have a one-step migration path through harness-args.json that survives
+    # this work item).
     migrate_claude_args_to_harness_args
 
+    # Legacy harness-args.json (deprecation-window fallback)
     if [[ -f "$new_file" ]]; then
       if jq -e --arg fw "$harness" '.[$fw].args | type == "array"' "$new_file" &>/dev/null; then
         jq -r --arg fw "$harness" '.[$fw].args[]' "$new_file"
@@ -517,6 +552,7 @@ load_harness_args() {
       fi
     fi
 
+    # Legacy claude.json (claude-code only, deeper-fallback)
     if [[ "$harness" == "claude-code" && -f "$legacy_file" ]]; then
       if jq -e '.args | type == "array"' "$legacy_file" &>/dev/null; then
         jq -r '.args[]' "$legacy_file"
@@ -567,13 +603,19 @@ _lore_warn_load_claude_env_once() {
 # Resolution order:
 #   1. LORE_FRAMEWORK env var (any non-empty value, validated against the
 #      shipped capabilities.json frameworks set).
-#   2. $LORE_DATA_DIR/config/framework.json `.framework` (written by install.sh).
-#   3. Built-in default: "claude-code".
+#   2. Unified $LORE_DATA_DIR/config/settings.json `.active_framework`
+#      (written by install.sh during the migration; T2 of the unified-file
+#      consolidation).
+#   3. Legacy $LORE_DATA_DIR/config/framework.json `.framework`
+#      (deprecation-window fallback during one release per D4).
+#   4. Built-in default: "claude-code".
 # Unknown framework names are rejected with a non-zero exit and stderr message;
 # resolution never silently routes to a default for an explicit-but-bogus value.
 # Mirrors config.ResolveActiveFramework() in tui/internal/config/config.go (T10).
 resolve_active_framework() {
-  local config_file="${LORE_DATA_DIR:-$HOME/.lore}/config/framework.json"
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local legacy_file="$data_dir/config/framework.json"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
   local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
   local candidate=""
   local source=""
@@ -581,9 +623,20 @@ resolve_active_framework() {
   if [[ -n "${LORE_FRAMEWORK:-}" ]]; then
     candidate="$LORE_FRAMEWORK"
     source="env LORE_FRAMEWORK"
-  elif [[ -f "$config_file" ]] && command -v jq &>/dev/null; then
-    candidate=$(jq -r '.framework // empty' "$config_file" 2>/dev/null)
-    source="$config_file"
+  elif command -v jq &>/dev/null; then
+    # Unified file (primary)
+    local unified_raw
+    unified_raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get active_framework 2>/dev/null || true)
+    if [[ -n "$unified_raw" ]]; then
+      candidate=$(printf '%s' "$unified_raw" | jq -r '. // empty' 2>/dev/null || true)
+      source="${data_dir}/config/settings.json"
+    fi
+
+    # Legacy file (fallback)
+    if [[ -z "$candidate" && -f "$legacy_file" ]]; then
+      candidate=$(jq -r '.framework // empty' "$legacy_file" 2>/dev/null)
+      source="$legacy_file"
+    fi
   fi
 
   if [[ -z "$candidate" ]]; then
@@ -617,7 +670,9 @@ framework_capability() {
   local cap="$1"
   [[ -z "$cap" ]] && { echo "Error: framework_capability requires a capability name" >&2; return 1; }
 
-  local config_file="${LORE_DATA_DIR:-$HOME/.lore}/config/framework.json"
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local legacy_file="$data_dir/config/framework.json"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
   local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
   local active level
 
@@ -626,9 +681,20 @@ framework_capability() {
     return 0
   fi
 
-  # 1. User override
-  if [[ -f "$config_file" ]]; then
-    level=$(jq -r --arg c "$cap" '.capability_overrides[$c] // empty' "$config_file" 2>/dev/null)
+  # 1a. User override — unified file (primary)
+  local unified_raw
+  unified_raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "capability_overrides.$cap" 2>/dev/null || true)
+  if [[ -n "$unified_raw" ]]; then
+    level=$(printf '%s' "$unified_raw" | jq -r '. // empty' 2>/dev/null)
+    if [[ -n "$level" ]]; then
+      echo "$level"
+      return 0
+    fi
+  fi
+
+  # 1b. User override — legacy file (fallback)
+  if [[ -f "$legacy_file" ]]; then
+    level=$(jq -r --arg c "$cap" '.capability_overrides[$c] // empty' "$legacy_file" 2>/dev/null)
     if [[ -n "$level" ]]; then
       echo "$level"
       return 0
@@ -830,24 +896,31 @@ framework_model_routing_shape() {
 # --- resolve_model_for_role ---
 # Print the resolved model id for a role on stdout.
 # Role MUST be one of the closed set in adapters/roles.json (see T3); unknown
-# roles are rejected with a non-zero exit. The "default" role is the
-# resolution fallback consumed internally by this helper and is also a valid
-# explicit role id.
+# roles are rejected with a non-zero exit at the top level AND the harness
+# overlay layer (D3b closed-set rejection: an unknown id in
+# `harnesses.<active>.roles` is the same error class as in `roles.<id>`).
+# The "default" role is the resolution fallback consumed internally by this
+# helper and is also a valid explicit role id.
 # Resolution order (first match wins):
 #   1. Env var LORE_MODEL_<ROLE_UPPER> (e.g., LORE_MODEL_LEAD=opus).
 #   2. Per-repo .lore.config `model_for_<role>=<model>` (walk-up search from
 #      cwd; same lookup mechanism as resolve_knowledge_dir).
-#   3. User config $LORE_DATA_DIR/config/framework.json `.roles.<role>`.
-#   4. Fallback: same file's `.roles.default` (seeded to "sonnet" by install.sh).
-# Documented and tested per Phase 1 verification (plan.md line 231):
-# precedence is env -> per-repo -> user -> harness default.
-# Mirrors config.ResolveModelForRole() in tui/internal/config/config.go (T10).
+#   3. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay
+#      — applies to the active harness only; absent overlay falls through).
+#   4. Unified settings.json `.roles.<role>` (top-level default).
+#   5. Legacy framework.json `.roles.<role>` (deprecation-window fallback).
+#   6. Unified `.roles.default` (resolution-fallback role; same overlay
+#      precedence applied if the active harness's roles.default is set).
+#   7. Legacy framework.json `.roles.default` (deepest fallback).
+# Mirrors config.ResolveModelForRole() in tui/internal/config/settings.go.
 resolve_model_for_role() {
   local role="$1"
   [[ -z "$role" ]] && { echo "Error: resolve_model_for_role requires a role name" >&2; return 1; }
 
   local roles_file="$LORE_LIB_DIR/../adapters/roles.json"
-  local config_file="${LORE_DATA_DIR:-$HOME/.lore}/config/framework.json"
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local legacy_file="$data_dir/config/framework.json"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
 
   # Validate role against the closed registry.
   if [[ -f "$roles_file" ]] && command -v jq &>/dev/null; then
@@ -879,23 +952,109 @@ resolve_model_for_role() {
     fi
   fi
 
-  # 3 + 4. User config (.roles.<role>, then .roles.default).
-  if [[ -f "$config_file" ]] && command -v jq &>/dev/null; then
-    local user_value
-    user_value=$(jq -r --arg r "$role" '.roles[$r] // empty' "$config_file" 2>/dev/null)
-    if [[ -n "$user_value" ]]; then
-      echo "$user_value"
-      return 0
+  command -v jq &>/dev/null || {
+    echo "Error: resolve_model_for_role requires jq" >&2
+    return 1
+  }
+
+  # Resolve active harness once for the overlay layer.
+  local active=""
+  active=$(resolve_active_framework 2>/dev/null) || active=""
+
+  # D3b closed-set rejection at the overlay layer: any unknown role id
+  # (anything not in adapters/roles.json) found under
+  # `harnesses.<active>.roles` is rejected immediately. The role validation
+  # above already rejects an unknown role in the *query*; this guard rejects
+  # an unknown id stored in the overlay block itself, which would otherwise
+  # silently never be consulted (a misconfiguration the user should see).
+  if [[ -n "$active" && -f "$roles_file" ]]; then
+    local overlay_keys
+    overlay_keys=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.roles" 2>/dev/null || true)
+    if [[ -n "$overlay_keys" ]]; then
+      local valid_role_ids
+      valid_role_ids=$(jq -c '[.roles[].id]' "$roles_file" 2>/dev/null)
+      [[ -z "$valid_role_ids" || "$valid_role_ids" == "null" ]] && valid_role_ids="[]"
+      local bad
+      bad=$(printf '%s' "$overlay_keys" | jq -r --argjson valid "$valid_role_ids" \
+        '(keys) - $valid | .[]' 2>/dev/null | head -1)
+      if [[ -n "$bad" ]]; then
+        echo "Error: unknown role '$bad' in harnesses.$active.roles (not in $roles_file)" >&2
+        return 1
+      fi
     fi
-    # Fallback to .roles.default
-    user_value=$(jq -r '.roles.default // empty' "$config_file" 2>/dev/null)
+  fi
+
+  # 3. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay)
+  local overlay_value=""
+  if [[ -n "$active" ]]; then
+    local raw
+    raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.roles.$role" 2>/dev/null || true)
+    if [[ -n "$raw" ]]; then
+      overlay_value=$(printf '%s' "$raw" | jq -r '. // empty' 2>/dev/null)
+      if [[ -n "$overlay_value" ]]; then
+        echo "$overlay_value"
+        return 0
+      fi
+    fi
+  fi
+
+  # 4. Unified settings.json `.roles.<role>` (top-level default)
+  local raw_top
+  raw_top=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "roles.$role" 2>/dev/null || true)
+  if [[ -n "$raw_top" ]]; then
+    local user_value
+    user_value=$(printf '%s' "$raw_top" | jq -r '. // empty' 2>/dev/null)
     if [[ -n "$user_value" ]]; then
       echo "$user_value"
       return 0
     fi
   fi
 
-  echo "Error: no model binding for role '$role' (no env var, no per-repo .lore.config entry, no $config_file roles.<role> or roles.default)" >&2
+  # 5. Legacy framework.json `.roles.<role>` (deprecation-window fallback)
+  if [[ -f "$legacy_file" ]]; then
+    local user_value
+    user_value=$(jq -r --arg r "$role" '.roles[$r] // empty' "$legacy_file" 2>/dev/null)
+    if [[ -n "$user_value" ]]; then
+      echo "$user_value"
+      return 0
+    fi
+  fi
+
+  # 6. Unified `.harnesses.<active>.roles.default` (overlay's own default)
+  if [[ -n "$active" ]]; then
+    local raw_default
+    raw_default=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.roles.default" 2>/dev/null || true)
+    if [[ -n "$raw_default" ]]; then
+      local default_value
+      default_value=$(printf '%s' "$raw_default" | jq -r '. // empty' 2>/dev/null)
+      if [[ -n "$default_value" ]]; then
+        echo "$default_value"
+        return 0
+      fi
+    fi
+  fi
+
+  # 7. Unified `.roles.default` and legacy `.roles.default`
+  local raw_default
+  raw_default=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "roles.default" 2>/dev/null || true)
+  if [[ -n "$raw_default" ]]; then
+    local default_value
+    default_value=$(printf '%s' "$raw_default" | jq -r '. // empty' 2>/dev/null)
+    if [[ -n "$default_value" ]]; then
+      echo "$default_value"
+      return 0
+    fi
+  fi
+  if [[ -f "$legacy_file" ]]; then
+    local default_value
+    default_value=$(jq -r '.roles.default // empty' "$legacy_file" 2>/dev/null)
+    if [[ -n "$default_value" ]]; then
+      echo "$default_value"
+      return 0
+    fi
+  fi
+
+  echo "Error: no model binding for role '$role' (no env var, no per-repo .lore.config entry, no roles.$role or roles.default in settings.json or $legacy_file)" >&2
   return 1
 }
 
@@ -1158,13 +1317,124 @@ resolve_completion_enforcement_mode() {
 }
 
 # --- resolve_ceremony_config_path ---
-# Resolve the path to the global ceremony config file (ceremonies.json)
+# Resolve the path to the legacy global ceremony config file (ceremonies.json)
 # at $LORE_DATA_DIR/ceremonies.json (defaults to ~/.lore/ceremonies.json).
+# Path location is unchanged by the unified-file consolidation — callers that
+# need the resolved advisor list should use `resolve_ceremony_advisors`
+# instead, which reads the unified file (with overlay) and falls back to
+# this path during the deprecation window.
 # Usage: config_path=$(resolve_ceremony_config_path)
 # Output: Absolute path to ceremonies.json (file may not exist yet)
 resolve_ceremony_config_path() {
   source "$LORE_LIB_DIR/config.sh"
   echo "${LORE_DATA_DIR}/ceremonies.json"
+}
+
+# --- resolve_ceremony_advisors ---
+# Print the resolved advisor list for a ceremony as a JSON array on stdout.
+# Implements the D3b ceremony-overlay resolution:
+#   1. Unified settings.json `.harnesses.<active>.ceremonies.<skill>` —
+#      when the key is *present* (including explicit empty `[]`), this is
+#      the resolved value and resolution stops. Absence (key not present)
+#      falls through; this absent-vs-empty distinction is the design point
+#      that lets a user suppress all advisors on one harness while keeping
+#      the global default for others.
+#   2. Unified settings.json `.ceremonies.<skill>` (top-level default).
+#   3. Legacy $LORE_DATA_DIR/ceremonies.json `.<skill>` (deprecation-window
+#      fallback).
+#   4. Empty array `[]` (no advisors configured).
+# Closed-set rejection: an unknown advisor name in either the overlay or
+# top-level layer exits non-zero with an actionable message — applied
+# identically against both layers per D3b.
+# Closed advisor set: the union of (a) skill names registered under
+# scripts/agent-protocols/ and (b) /skills/<name> directories. The set is
+# resolved at call time from the on-disk skill registry, so no hardcoded
+# list is maintained here.
+# Mirrors no Go counterpart in v1 (TUI does not read ceremonies — bash-only
+# parity surface per D5).
+resolve_ceremony_advisors() {
+  local skill="$1"
+  [[ -z "$skill" ]] && { echo "Error: resolve_ceremony_advisors requires a skill name" >&2; return 1; }
+
+  command -v jq &>/dev/null || { echo "Error: resolve_ceremony_advisors requires jq" >&2; return 1; }
+
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
+  local legacy_file="$data_dir/ceremonies.json"
+  local active
+
+  # Validate advisor names against the union of (a) agent-protocols/ in the
+  # repo, (b) skills/ in the repo, and (c) skills installed at the active
+  # harness's skills install path (covers ceremonies whose advisor skills
+  # ship via a separate distribution and only land in ~/.claude/skills/ at
+  # install time, e.g., codex-design-review). The validator is reused below
+  # at both layers so closed-set rejection is applied identically (D3b).
+  # Uses jq array subtraction (`-`) which behaves consistently across jq
+  # versions; the equivalent `select(... | index(.))` form silently drops
+  # matches in some 1.6/1.7 builds.
+  _validate_ceremony_advisors() {
+    local layer="$1"     # human-readable layer label for the error message
+    local list_json="$2" # JSON array of advisor names to check
+    local repo_root="$LORE_REPO_DIR"
+    local installed_skills_dir=""
+    installed_skills_dir=$(harness_path_or_empty skills 2>/dev/null || true)
+    local valid_set
+    valid_set=$( {
+      [[ -d "$repo_root/skills" ]] && find "$repo_root/skills" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null
+      [[ -d "$repo_root/scripts/agent-protocols" ]] && find "$repo_root/scripts/agent-protocols" -mindepth 1 -maxdepth 1 -type f -name '*.md' -exec basename {} .md \; 2>/dev/null
+      [[ -n "$installed_skills_dir" && -d "$installed_skills_dir" ]] && find "$installed_skills_dir" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -exec basename {} \; 2>/dev/null
+    } | sort -u | jq -R . | jq -sc .)
+    [[ -z "$valid_set" || "$valid_set" == "null" ]] && valid_set="[]"
+    local bad
+    bad=$(printf '%s' "$list_json" | jq -r --argjson valid "$valid_set" \
+      '. - $valid | .[]' 2>/dev/null | head -1)
+    if [[ -n "$bad" ]]; then
+      echo "Error: unknown ceremony advisor '$bad' in $layer (not a registered skill)" >&2
+      return 1
+    fi
+    return 0
+  }
+
+  active=$(resolve_active_framework 2>/dev/null) || active=""
+
+  # 1. Harness overlay — present-with-empty-is-an-override per D3b.
+  if [[ -n "$active" ]]; then
+    local raw_overlay
+    raw_overlay=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.ceremonies.$skill" 2>/dev/null || true)
+    if [[ -n "$raw_overlay" ]]; then
+      # The key is present (settings.sh get returns empty only when absent).
+      if printf '%s' "$raw_overlay" | jq -e 'type == "array"' &>/dev/null; then
+        _validate_ceremony_advisors "harnesses.$active.ceremonies.$skill" "$raw_overlay" || return 1
+        printf '%s\n' "$raw_overlay"
+        return 0
+      fi
+    fi
+  fi
+
+  # 2. Top-level unified
+  local raw_top
+  raw_top=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "ceremonies.$skill" 2>/dev/null || true)
+  if [[ -n "$raw_top" ]]; then
+    if printf '%s' "$raw_top" | jq -e 'type == "array"' &>/dev/null; then
+      _validate_ceremony_advisors "ceremonies.$skill" "$raw_top" || return 1
+      printf '%s\n' "$raw_top"
+      return 0
+    fi
+  fi
+
+  # 3. Legacy fragmented file (no overlay layer in the legacy file shape)
+  if [[ -f "$legacy_file" ]]; then
+    local legacy_value
+    legacy_value=$(jq -c --arg s "$skill" '.[$s] // empty' "$legacy_file" 2>/dev/null)
+    if [[ -n "$legacy_value" ]]; then
+      _validate_ceremony_advisors "ceremonies.json::$skill" "$legacy_value" || return 1
+      printf '%s\n' "$legacy_value"
+      return 0
+    fi
+  fi
+
+  # 4. No advisors configured
+  echo "[]"
 }
 
 # --- check_fts_available ---

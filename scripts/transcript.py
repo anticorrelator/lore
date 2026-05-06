@@ -6,7 +6,8 @@ Provides:
     resolve_knowledge_dir(cwd) — Python-native repo resolution (no subprocess)
     fail_open(func) — decorator: catch all exceptions, exit 0
 
-Used by: stop-novelty-check.py, check-plan-persistence.py, extract-session-digest.py
+Used by: check-plan-persistence.py, extract-session-digest.py
+(stop-novelty-check.py was a consumer until retired 2026-05-06.)
 """
 
 import json

@@ -283,7 +283,6 @@ EXPECTED_HOOK_COMMANDS=(
   "bash ~/.lore/scripts/load-threads.sh"
   "python3 ~/.lore/scripts/extract-session-digest.py"
   "bash ~/.lore/scripts/pre-compact.sh"
-  "python3 ~/.lore/scripts/stop-novelty-check.py"
   "python3 ~/.lore/scripts/check-plan-persistence.py"
   "bash ~/.lore/scripts/task-completed-capture-check.sh"
   "bash ~/.lore/scripts/guard-work-writes.sh"
@@ -373,6 +372,119 @@ fi
 # User-level fallback: $ROLE_CONFIG_DATA_DIR/config/settings.json
 _check_role_config "$ROLE_CONFIG_DATA_DIR/config/settings.json" \
   "$ROLE_CONFIG_DATA_DIR/config/settings.json"
+
+# ---------------------------------------------------------------------------
+# Check 9: Unified settings.json validates against adapters/settings.schema.json
+# Strict full-document validation via Python jsonschema (D7). jsonschema is a
+# doctor-only dependency: when missing, doctor surfaces an actionable install
+# message rather than a Python traceback.
+# ---------------------------------------------------------------------------
+CHECKED+=("settings_schema")
+doctor_validate_settings_schema() {
+  local settings_file="$ROLE_CONFIG_DATA_DIR/config/settings.json"
+  local schema_file="$LORE_REPO_DIR/adapters/settings.schema.json"
+
+  if [[ ! -f "$settings_file" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$schema_file" ]]; then
+    add_issue "settings_schema" "missing" "$schema_file" \
+      "schema file not found: $schema_file"
+    return 0
+  fi
+
+  if ! python3 -c "import jsonschema" >/dev/null 2>&1; then
+    add_issue "settings_schema" "missing_dep" "jsonschema" \
+      "Python jsonschema package missing — install with: pip install jsonschema"
+    return 0
+  fi
+
+  # Capture stdout under `set -e`: || true ensures the validator's non-zero
+  # exit (on schema violation) doesn't abort the script.
+  local validation_output rc=0
+  validation_output=$(SETTINGS="$settings_file" SCHEMA="$schema_file" python3 - <<'PYEOF' 2>&1
+import json, os, sys
+import jsonschema
+
+settings_path = os.environ["SETTINGS"]
+schema_path = os.environ["SCHEMA"]
+
+with open(settings_path) as f:
+    instance = json.load(f)
+with open(schema_path) as f:
+    schema = json.load(f)
+
+try:
+    jsonschema.validate(instance, schema)
+except jsonschema.ValidationError as e:
+    path = "/".join(str(p) for p in e.absolute_path) or "<root>"
+    print(f"validation failed at {path}: {e.message}")
+    sys.exit(1)
+PYEOF
+  ) || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    add_issue "settings_schema" "schema_violation" "$settings_file" \
+      "$validation_output"
+  fi
+  return 0
+}
+doctor_validate_settings_schema
+
+# ---------------------------------------------------------------------------
+# Check 10: Aggregate fallback snapshots across stacks (D7)
+# Each stack reports its deterministic snapshot of "<file>::<key>" pairs the
+# loader would currently fall back to read because the unified key is absent.
+# Empty across all stacks means cleanup (D4 phase 3) is unblocked.
+# ---------------------------------------------------------------------------
+CHECKED+=("settings_fallbacks")
+doctor_aggregate_fallbacks() {
+  local settings_sh="$LORE_REPO_DIR/scripts/settings.sh"
+  local pairs=""
+
+  if [[ -x "$settings_sh" ]]; then
+    local bash_pairs
+    bash_pairs=$(LORE_DATA_DIR="$ROLE_CONFIG_DATA_DIR" bash "$settings_sh" fallbacks 2>/dev/null || true)
+    if [[ -n "$bash_pairs" ]]; then
+      pairs="$bash_pairs"
+    fi
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    local py_pairs
+    py_pairs=$(LORE_DATA_DIR="$ROLE_CONFIG_DATA_DIR" \
+      PYTHONPATH="$LORE_REPO_DIR/scripts" \
+      python3 -c "
+import lore_settings
+for f, k in lore_settings.fallbacks():
+    print(f'{f}::{k}')
+" 2>/dev/null || true)
+    if [[ -n "$py_pairs" ]]; then
+      if [[ -n "$pairs" ]]; then
+        pairs="$pairs
+$py_pairs"
+      else
+        pairs="$py_pairs"
+      fi
+    fi
+  fi
+
+  # T4: Go fallback snapshot. When tui/internal/config/settings.go exposes a
+  # `Fallbacks()` accessor wired through lore-tui or a sibling CLI, aggregate
+  # it here. Until then, skip gracefully.
+  # TODO(T4): plumb the Go snapshot once the loader lands.
+
+  if [[ -n "$pairs" ]]; then
+    while IFS= read -r pair; do
+      [[ -z "$pair" ]] && continue
+      local legacy_file="${pair%%::*}"
+      local key="${pair#*::}"
+      add_issue "settings_fallbacks" "fallback" "$pair" \
+        "settings.json is missing key $key — re-run install or hand-merge from $legacy_file"
+    done < <(printf '%s\n' "$pairs" | sort -u)
+  fi
+  return 0
+}
+doctor_aggregate_fallbacks
 
 # ---------------------------------------------------------------------------
 # Determine overall status

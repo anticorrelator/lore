@@ -30,6 +30,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -127,6 +128,68 @@ func main() {
 		// remain Go-side TODOs; the harness keeps a stable sentinel so bats
 		// can skip the parity row without failing the suite.
 		fmt.Println("T10-pending")
+
+	case "settings_get":
+		// Mirror scripts/settings.sh cmd_get's stdout contract:
+		//   - absent key → empty stdout, exit 0.
+		//   - present non-null → compact JSON literal on stdout, exit 0.
+		//   - present null → "null" on stdout, exit 0.
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "Error: settings_get requires <path>")
+			os.Exit(1)
+		}
+		raw, present, err := config.SettingsGet(args[0])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		if !present {
+			return
+		}
+		fmt.Println(raw)
+
+	case "settings_section":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "Error: settings_section requires <name>")
+			os.Exit(1)
+		}
+		raw, err := config.SettingsSection(args[0])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(raw))
+
+	case "settings_path":
+		fmt.Println(config.SettingsPath())
+
+	case "settings_patch":
+		// settings_patch <path> <json-encoded-value>.
+		// The value arg is JSON, matching the bash CLI contract; we pass it
+		// to SettingsPatch as a json.RawMessage so it lands verbatim.
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "Error: settings_patch requires <path> <value>")
+			os.Exit(1)
+		}
+		var v any
+		if err := json.Unmarshal([]byte(args[1]), &v); err != nil {
+			fmt.Fprintln(os.Stderr, "Error: settings_patch value is not valid JSON:", err)
+			os.Exit(1)
+		}
+		if err := config.SettingsPatch(args[0], v); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+
+	case "settings_fallbacks":
+		rows, err := config.SettingsFallbacks()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		for _, r := range rows {
+			fmt.Println(r)
+		}
 
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown helper %q\n", helper)

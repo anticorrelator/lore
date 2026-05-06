@@ -113,9 +113,8 @@ def _load_digest_module() -> Any:
     scripts_dir = _resolve_scripts_dir()
     # Make sure transcript is loaded first so the digest's import works.
     _load_transcript_module()
-    # Add scripts_dir to sys.path so `from transcript import ...` and
-    # the dynamic stop-novelty-check import inside the digest both
-    # resolve. This mirrors how the digest script is run today.
+    # Add scripts_dir to sys.path so `from transcript import ...`
+    # resolves the same way the digest script's runtime does.
     scripts_str = str(scripts_dir)
     if scripts_str not in sys.path:
         sys.path.insert(0, scripts_str)

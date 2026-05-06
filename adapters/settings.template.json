@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "active_framework": "claude-code",
+  "harnesses": {
+    "claude-code": {
+      "args": ["--dangerously-skip-permissions"]
+    },
+    "opencode": {
+      "args": []
+    },
+    "codex": {
+      "args": []
+    }
+  },
+  "capability_overrides": {},
+  "roles": {
+    "lead": "opus",
+    "worker": "opus",
+    "researcher": "sonnet",
+    "reviewer": "sonnet",
+    "judge": "sonnet",
+    "summarizer": "sonnet",
+    "advisor": "opus",
+    "default": "sonnet"
+  },
+  "ceremonies": {
+    "spec-design": ["codex-design-review"],
+    "spec-post-plan": ["codex-plan-review"],
+    "pr-review": ["codex-pr-review"]
+  },
+  "capture": {
+    "core": {
+      "novelty_threshold": -1.0,
+      "region_window": 5,
+      "max_candidates": 5,
+      "max_phrases": 15,
+      "min_tool_uses": 5,
+      "max_tool_uses": 10
+    },
+    "structural_signals": {
+      "investigation_window": 10,
+      "iterative_debug_window": 15,
+      "test_fix_window": 10,
+      "synthesis_char_threshold": 1000,
+      "synthesis_tool_threshold": 8,
+      "file_context_window": 10,
+      "debug_context_window": 10,
+      "debug_context_chars": 800
+    },
+    "adaptive": false
+  },
+  "settlement": {
+    "probabilistic_triggers": {
+      "implement": 0.3,
+      "pr-self-review": 0.3,
+      "pr-review": 0.2,
+      "spec": 0.2
+    },
+    "background_queue": {
+      "enabled": true,
+      "description": "Task-28: route fired audit triggers through $KDIR/_work-queue/audit/ for asynchronous dispatch. When false or when background-queue-enqueue.sh is missing, trigger falls back to task-29's detached-child Popen path."
+    },
+    "enabled": true,
+    "dry_run": false
+  },
+  "tui": {
+    "layout": "left-right"
+  },
+  "obsidian": {
+    "vault_path": "",
+    "repo_path": ""
+  },
+  "agent": {
+    "enabled": true,
+    "last_changed": ""
+  }
+}

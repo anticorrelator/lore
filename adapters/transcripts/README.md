@@ -5,6 +5,19 @@ novelty, and ceremony-detection scripts read session artifacts across
 harnesses. Every adapter under `adapters/transcripts/` consumes this
 contract.
 
+> **Historical note (2026-05-06):** `stop-novelty-check.py` is referenced
+> throughout this document as the largest transcript consumer (T56,
+> Phase 6). That script was retired on 2026-05-06 — it produced 5
+> captures lifetime across the multi-project store and zero in the
+> prior three months, classifying it as an inert heuristic-condition
+> hook (see `_meta/effectiveness-journal.jsonl` and
+> `conventions/heuristic-vs-definite-condition-hooks.md`). The
+> provider-API requirements documented below remain valid for the
+> remaining consumers (`extract-session-digest`,
+> `check-plan-persistence`, `probabilistic-audit-trigger`) and for any
+> future transcript consumer; the call-site references to
+> `stop-novelty-check.py` are preserved for design lineage.
+
 > **Status:** Phase 5 contract — per-harness session artifact
 > enumeration (T46), digest field requirements (T47), plan-
 > persistence + TaskCompleted requirements (T48), and ceremony-

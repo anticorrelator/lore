@@ -338,8 +338,7 @@ Lore installs Claude Code hooks that run automatically:
 - `load-threads.sh` — load pinned/active thread summaries
 - `extract-session-digest.py` — extract highlights from previous session for thread updates
 
-**Stop** — capture and persist at session end:
-- `stop-novelty-check.py` — detect novel insights, populate `_pending_captures/`
+**Stop** — gate session end on persistence:
 - `check-plan-persistence.py` — warn if ephemeral plans weren't persisted to `_work/`
 
 **PreCompact / SessionEnd** — prepare for context compression:

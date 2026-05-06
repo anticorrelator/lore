@@ -49,17 +49,20 @@ for k in sorted(d['frameworks'].keys()):
 "
 }
 
-# Parse SUPPORTED_FRAMEWORKS=(...) from install.sh and print each entry on its own line.
+# Resolve install.sh's effective SUPPORTED_FRAMEWORKS allowlist by exercising
+# its closed-set rejection: the error message names every supported framework.
+# After T5/D3a, install.sh sources the keyset from capabilities.json at runtime
+# (no hardcoded array to grep), so the assertion runs against the live behavior.
 parse_install_sh_frameworks() {
-  python3 - "$INSTALL_SH" <<'PYEOF'
-import re, sys
-src = open(sys.argv[1]).read()
-m = re.search(r'SUPPORTED_FRAMEWORKS=\((.*?)\)', src, re.S)
-if not m:
-    sys.exit(1)
-vals = re.findall(r'"([^"]+)"|\'([^\']+)\'|(\S+)', m.group(1))
-for v in vals:
-    print(next(x for x in v if x))
+  local error_msg
+  error_msg=$(bash "$INSTALL_SH" --framework __no_such_fw__ --dry-run 2>&1) || true
+  python3 - "$CAPS" "$error_msg" <<'PYEOF'
+import json, sys
+caps = json.load(open(sys.argv[1]))
+msg = sys.argv[2]
+for fw in sorted(caps.get("frameworks", {}).keys()):
+    if fw in msg:
+        print(fw)
 PYEOF
 }
 
@@ -219,23 +222,33 @@ teardown() {
   [ "$(cat "$cc_agents/non-lore-file.md")" = "preserved" ]
 }
 
-@test "(a) agent.json has exactly the three-key shape after disable" {
+@test "(a) agent.json has exactly the two-key shape after disable; manifest split to install-state (D6)" {
   run bash "$DISABLE_SH"
   [ "$status" -eq 0 ]
   [ -f "$AGENT_JSON" ]
   python3 - "$AGENT_JSON" <<'PYEOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
-expected = {"enabled", "last_changed", "symlink_manifest"}
+# D6: symlink_manifest split out to ~/.lore/.install-state/symlinks.json.
+expected = {"enabled", "last_changed"}
 got = set(d.keys())
 if got != expected:
     print(f"agent.json keys: {got}, expected: {expected}")
     sys.exit(1)
 assert isinstance(d["enabled"], bool)
 assert isinstance(d["last_changed"], str)
-assert isinstance(d["symlink_manifest"], list)
 PYEOF
   [ "$?" -eq 0 ]
+
+  # Manifest now lives in install-state/symlinks.json with schema_version envelope.
+  local manifest_path="$LORE_DATA_DIR/.install-state/symlinks.json"
+  [ -f "$manifest_path" ]
+  python3 - "$manifest_path" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d.get("schema_version") == 1, f"schema_version: {d}"
+assert isinstance(d.get("symlink_manifest"), list), f"symlink_manifest type: {type(d.get('symlink_manifest'))}"
+PYEOF
 }
 
 # ============================================================
@@ -492,8 +505,12 @@ PYEOF
 # ============================================================
 
 @test "(g) manifest replay: one bad entry does not skip subsequent good entries" {
-  # Run disable first to get a valid agent.json with symlink_manifest.
+  # Run disable first to populate install-state/symlinks.json with a valid
+  # manifest (D6: manifest moved out of agent.json).
   bash "$DISABLE_SH" >/dev/null 2>&1
+
+  local manifest_path="$LORE_DATA_DIR/.install-state/symlinks.json"
+  [ -f "$manifest_path" ] || skip "install-state/symlinks.json not produced by disable"
 
   # Construct a manifest with one unreachable entry followed by one good entry.
   local cc_skills
@@ -510,7 +527,7 @@ PYEOF
   chmod 000 "$bad_parent"
   local bad_target="$bad_parent/nonexistent"
 
-  python3 - "$AGENT_JSON" "$bad_link" "$bad_target" "$good_link" "$good_target" <<'PYEOF'
+  python3 - "$manifest_path" "$bad_link" "$bad_target" "$good_link" "$good_target" <<'PYEOF'
 import json, sys
 with open(sys.argv[1]) as f:
     d = json.load(f)

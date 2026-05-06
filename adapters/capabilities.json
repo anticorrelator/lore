@@ -12,7 +12,7 @@
     "skills": "Discovers and loads SKILL.md files at session start so user-invoked /<skill> commands route to lore protocols.",
     "mcp": "Registers Model Context Protocol servers with the harness so lore-provided tools are reachable from agents.",
     "session_start_hook": "Fires a lore-controlled hook at session start; used to load knowledge, work, threads, and pending capture queues.",
-    "stop_hook": "Fires a lore-controlled hook at agent stop / end-of-turn; used to detect novelty candidates and persist plans.",
+    "stop_hook": "Fires a lore-controlled hook at agent stop / end-of-turn; used to gate session-end on plan persistence.",
     "pre_compact_hook": "Fires a lore-controlled hook before context compaction; used to prompt thread/work updates before context is dropped.",
     "tool_hooks": "Fires lore-controlled hooks before/after tool calls; used by guard-work-writes and similar invariant enforcers.",
     "permission_hooks": "Allows lore-installed policy to approve or deny tool invocations (PreToolUse-style block decisions).",
@@ -222,7 +222,7 @@
         "stop_hook": {
           "support": "full",
           "evidence": "claude-code-stop-hook",
-          "notes": "Stop hook runs stop-novelty-check.py + check-plan-persistence.py with JSON stdout decision protocol."
+          "notes": "Stop hook runs check-plan-persistence.py with JSON stdout decision protocol. (stop-novelty-check.py was retired 2026-05-06 as a low-yield heuristic capture-suggester — 5 captures lifetime across the multi-project store, 0 in the prior 3 months. See _meta/effectiveness-journal.jsonl and conventions/heuristic-vs-definite-condition-hooks.md.)"
         },
         "pre_compact_hook": {
           "support": "full",
@@ -257,7 +257,7 @@
         "transcript_provider": {
           "support": "full",
           "evidence": "claude-code-transcript-provider",
-          "notes": "JSONL transcripts under ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl consumed by extract-session-digest, stop-novelty-check, probabilistic-audit-trigger."
+          "notes": "JSONL transcripts under ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl consumed by extract-session-digest, probabilistic-audit-trigger. (stop-novelty-check.py was a consumer until retired 2026-05-06.)"
         },
         "headless_runner": {
           "support": "full",

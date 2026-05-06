@@ -79,7 +79,6 @@ lore_hooks = [
     ("SessionStart", None, "command", "bash ~/.lore/scripts/load-threads.sh", 5),
     ("SessionStart", None, "command", "python3 ~/.lore/scripts/extract-session-digest.py", 5),
     ("PreCompact",   None, "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
-    ("Stop",         None, "command", "python3 ~/.lore/scripts/stop-novelty-check.py", 10),
     ("Stop",         None, "command", "python3 ~/.lore/scripts/check-plan-persistence.py", 10),
     ("TaskCompleted", None, "command", "bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
     ("SessionEnd",   "clear", "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
@@ -145,17 +144,11 @@ STOP_COUNT=$(echo "$STOP_HOOKS" | sed -n '1p')
 FIRST_TYPE=$(echo "$STOP_HOOKS" | sed -n '2p')
 FIRST_TIMEOUT=$(echo "$STOP_HOOKS" | sed -n '3p')
 FIRST_CMD=$(echo "$STOP_HOOKS" | sed -n '4p')
-SECOND_TYPE=$(echo "$STOP_HOOKS" | sed -n '5p')
-SECOND_TIMEOUT=$(echo "$STOP_HOOKS" | sed -n '6p')
-SECOND_CMD=$(echo "$STOP_HOOKS" | sed -n '7p')
 
-assert_equals "two Stop hooks" "$STOP_COUNT" "2"
-assert_equals "first Stop hook is command type" "$FIRST_TYPE" "command"
-assert_equals "first Stop hook timeout is 10" "$FIRST_TIMEOUT" "10"
-assert_contains "first Stop hook runs stop-novelty-check" "$FIRST_CMD" "stop-novelty-check.py"
-assert_equals "second Stop hook is command type" "$SECOND_TYPE" "command"
-assert_equals "second Stop hook timeout is 10" "$SECOND_TIMEOUT" "10"
-assert_contains "second Stop hook runs check-plan-persistence" "$SECOND_CMD" "check-plan-persistence.py"
+assert_equals "one Stop hook" "$STOP_COUNT" "1"
+assert_equals "Stop hook is command type" "$FIRST_TYPE" "command"
+assert_equals "Stop hook timeout is 10" "$FIRST_TIMEOUT" "10"
+assert_contains "Stop hook runs check-plan-persistence" "$FIRST_CMD" "check-plan-persistence.py"
 
 # =============================================
 # Test 2: Idempotent install — running twice produces same result
@@ -186,7 +179,6 @@ lore_hooks = [
     ("SessionStart", None, "command", "bash ~/.lore/scripts/load-threads.sh", 5),
     ("SessionStart", None, "command", "python3 ~/.lore/scripts/extract-session-digest.py", 5),
     ("PreCompact",   None, "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
-    ("Stop",         None, "command", "python3 ~/.lore/scripts/stop-novelty-check.py", 10),
     ("Stop",         None, "command", "python3 ~/.lore/scripts/check-plan-persistence.py", 10),
     ("TaskCompleted", None, "command", "bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
     ("SessionEnd",   "clear", "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
@@ -261,13 +253,13 @@ with open('$SETTINGS_FILE', 'w') as f:
     f.write('\n')
 "
 
-# Verify 3 Stop hooks before re-install
+# Verify 2 Stop hooks before re-install (1 custom + 1 lore)
 BEFORE_COUNT=$(python3 -c "
 import json
 with open('$SETTINGS_FILE') as f:
     print(len(json.load(f)['hooks']['Stop']))
 ")
-assert_equals "3 Stop hooks before re-install" "$BEFORE_COUNT" "3"
+assert_equals "2 Stop hooks before re-install" "$BEFORE_COUNT" "2"
 
 # Re-run install
 python3 - "$SETTINGS_FILE" "$FAKE_LORE_DIR/scripts" <<'PYEOF'
@@ -290,7 +282,6 @@ lore_hooks = [
     ("SessionStart", None, "command", "bash ~/.lore/scripts/load-threads.sh", 5),
     ("SessionStart", None, "command", "python3 ~/.lore/scripts/extract-session-digest.py", 5),
     ("PreCompact",   None, "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
-    ("Stop",         None, "command", "python3 ~/.lore/scripts/stop-novelty-check.py", 10),
     ("Stop",         None, "command", "python3 ~/.lore/scripts/check-plan-persistence.py", 10),
     ("TaskCompleted", None, "command", "bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
     ("SessionEnd",   "clear", "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
@@ -338,13 +329,13 @@ with open(settings_path, "w") as f:
     f.write("\n")
 PYEOF
 
-# After re-install: should have 3 Stop hooks (1 custom + 2 lore)
+# After re-install: should have 2 Stop hooks (1 custom + 1 lore)
 AFTER_COUNT=$(python3 -c "
 import json
 with open('$SETTINGS_FILE') as f:
     print(len(json.load(f)['hooks']['Stop']))
 ")
-assert_equals "3 Stop hooks after re-install (custom preserved)" "$AFTER_COUNT" "3"
+assert_equals "2 Stop hooks after re-install (custom preserved)" "$AFTER_COUNT" "2"
 
 # The custom hook should be first (preserved hooks come before lore hooks)
 FIRST_CMD=$(python3 -c "
@@ -382,9 +373,12 @@ else:
 
 lore_hooks = [
     ("SessionStart", None, "command", "bash ~/.lore/scripts/auto-reindex.sh", 5),
-    ("Stop",         None, "command", "python3 ~/.lore/scripts/stop-novelty-check.py", 10),
     ("Stop",         None, "command", "python3 ~/.lore/scripts/check-plan-persistence.py", 10),
 ]
+# (test_stop_hook.sh smoke list intentionally minimal; full install set is
+# exercised by Tests 1–3 above. Tests 4 verifies uninstall preserves a
+# non-lore Stop hook while removing the lore-installed check-plan-persistence
+# entry — the prior stop-novelty-check.py was retired 2026-05-06.)
 
 def make_entry(matcher, hook_kind, payload, timeout):
     entry = {}

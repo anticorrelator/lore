@@ -35,6 +35,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 LORE_DATA_DIR="${LORE_DATA_DIR:-$HOME/.lore}"
 CONFIG_FILE="$LORE_DATA_DIR/config/obsidian.json"
+SETTINGS_SH="$SCRIPT_DIR/settings.sh"
 MARKER_BASENAME=".lore-obsidian-mirror.json"
 SCHEMA_VERSION=1
 
@@ -156,6 +157,13 @@ case "$MODE" in
     REPO_ABS="$KDIR"
     mkdir -p "$(dirname "$CONFIG_FILE")"
     NOW="$(timestamp_iso)"
+    # Write the unified settings.json::obsidian section first via the locked
+    # patch helper; this is the canonical home post-T2. The legacy
+    # obsidian.json is also written for the deprecation window so operators
+    # rolling back to a pre-T2 release retain a working vault config.
+    LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" patch obsidian.schema_version "$SCHEMA_VERSION"
+    LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" patch obsidian.vault_path "$(printf '%s' "$VAULT_ABS" | jq -R .)"
+    LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" patch obsidian.repo_path "$(printf '%s' "$REPO_ABS" | jq -R .)"
     python3 - "$CONFIG_FILE" "$VAULT_ABS" "$REPO_ABS" "$SCHEMA_VERSION" <<'PY'
 import json, sys
 config_file, vault_path, repo_path, schema_version = sys.argv[1:5]
@@ -211,11 +219,26 @@ esac
 
 # --- Resolve vault for non-init modes ---
 # Returns: empty string when no config and no explicit; else absolute vault path.
+# Resolution order:
+#   1. EXPLICIT_VAULT positional argument
+#   2. Unified settings.json::obsidian.vault_path (primary post-T2)
+#   3. Legacy obsidian.json::vault_path (deprecation-window fallback)
 resolve_vault() {
   if [[ -n "$EXPLICIT_VAULT" ]]; then
     echo "$EXPLICIT_VAULT"
     return 0
   fi
+  # Unified file
+  local unified_raw vault_path
+  unified_raw=$(LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" get obsidian.vault_path 2>/dev/null || true)
+  if [[ -n "$unified_raw" ]]; then
+    vault_path=$(printf '%s' "$unified_raw" | jq -r '. // empty' 2>/dev/null)
+    if [[ -n "$vault_path" ]]; then
+      echo "$vault_path"
+      return 0
+    fi
+  fi
+  # Legacy file
   if [[ -f "$CONFIG_FILE" ]]; then
     python3 - "$CONFIG_FILE" <<'PY' || true
 import json, sys

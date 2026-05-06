@@ -7,6 +7,7 @@ Runs during SessionStart hook and writes _pending_digest.md for LLM processing.
 import argparse
 import json
 import os
+import re
 import sys
 from collections import Counter
 from datetime import datetime
@@ -25,20 +26,42 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 from transcript import resolve_knowledge_dir as _resolve_knowledge_dir
 
-# Reuse debugging detection patterns from stop-novelty-check
-try:
-    from stop_novelty_check import DEBUG_ROOT_CAUSE_RE, SELF_CORRECTION_RE
-except ImportError:
-    # Fallback: import by file path (module name has hyphens)
-    import importlib.util as _ilu
-    _spec = _ilu.spec_from_file_location(
-        "stop_novelty_check",
-        os.path.join(os.path.dirname(os.path.realpath(__file__)), "stop-novelty-check.py"),
-    )
-    _mod = _ilu.module_from_spec(_spec)
-    _spec.loader.exec_module(_mod)
-    DEBUG_ROOT_CAUSE_RE = _mod.DEBUG_ROOT_CAUSE_RE
-    SELF_CORRECTION_RE = _mod.SELF_CORRECTION_RE
+# Debugging detection patterns. These were originally defined in
+# stop-novelty-check.py and imported here; that script was retired
+# 2026-05-06 (see _meta/effectiveness-journal.jsonl) so the patterns are
+# inlined now. Used by find_breakthrough_indices() to detect
+# self-correction and root-cause moments worth surfacing in the digest.
+SELF_CORRECTION_RE = re.compile(
+    r"\b(?:"
+    r"I was wrong|"
+    r"it turns out|"
+    r"unexpectedly|"
+    r"contrary to (?:what )?(?:I |we )?expected|"
+    r"I (?:initially )?(?:assumed|thought|expected) .{0,60}(?:but|however|instead)|"
+    r"(?:this|that) (?:actually|really) (?:is|was|does|did)|"
+    r"correction:|"
+    r"my mistake|"
+    r"I stand corrected|"
+    r"not what I expected"
+    r")\b",
+    re.IGNORECASE,
+)
+
+DEBUG_ROOT_CAUSE_RE = re.compile(
+    r"\b(?:"
+    r"root cause|"
+    r"the (?:real|actual|underlying) (?:issue|problem|cause|reason)|"
+    r"traced (?:it |this )?(?:back )?to|"
+    r"the bug (?:is|was) (?:actually |really )?(?:in|caused|due)|"
+    r"(?:found|discovered|identified) the (?:source|origin|cause)|"
+    r"turns out the (?:error|issue|problem|bug)|"
+    r"(?:failure|error|crash|bug) (?:is |was )?caused by|"
+    r"(?:issue|problem|bug) stems from|"
+    r"(?:error|bug|failure|crash|issue|problem).{0,50}caused by (?:a|an|the)\b|"
+    r"due to a bug in"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 # Common stopwords to filter out from topic detection

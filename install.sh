@@ -16,11 +16,41 @@ LORE_REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 LORE_DATA_DIR="${LORE_DATA_DIR:-$HOME/.lore}"
 CLAUDE_DIR="$HOME/.claude"
 
+# D4 phase-3 cleanup gate: install.sh deletes the eight legacy fragmented
+# files only when settings.json's `version` is at-or-above this constant AND
+# the deterministic fallback audit (lore doctor's aggregator) is empty. Bump
+# this in lockstep with adapters/settings.schema.json's `version` field when a
+# breaking shape change ships — see plan D4 phase 3.
+LORE_SETTINGS_CLEANUP_VERSION=1
+
 # --- Parse flags ---
 UNINSTALL=false
 DRY_RUN=false
 FRAMEWORK="claude-code"
-SUPPORTED_FRAMEWORKS=("claude-code" "opencode" "codex")
+
+# Supported framework allowlist is sourced from adapters/capabilities.json
+# (single source of truth per D3a). Hardcoding the keyset here would let
+# install.sh accept a framework that capabilities.json rejects (or vice
+# versa); reading once prevents that drift class.
+_caps_file="$LORE_REPO_DIR/adapters/capabilities.json"
+if ! command -v jq >/dev/null 2>&1; then
+  echo "Error: install.sh requires jq on PATH (used to read $_caps_file)" >&2
+  exit 1
+fi
+if [ ! -f "$_caps_file" ]; then
+  echo "Error: capabilities file not found: $_caps_file" >&2
+  exit 1
+fi
+SUPPORTED_FRAMEWORKS=()
+while IFS= read -r _fw; do
+  [ -n "$_fw" ] && SUPPORTED_FRAMEWORKS+=("$_fw")
+done < <(jq -r '.frameworks | keys[]' "$_caps_file" 2>/dev/null | sort)
+if [ ${#SUPPORTED_FRAMEWORKS[@]} -eq 0 ]; then
+  echo "Error: no frameworks registered in $_caps_file" >&2
+  exit 1
+fi
+unset _fw _caps_file
+
 i=0
 args=("$@")
 while [ $i -lt ${#args[@]} ]; do
@@ -206,8 +236,312 @@ echo ""
 # --- 1. Create data directory ---
 info "Creating data directory"
 dry mkdir -p "$LORE_DATA_DIR/repos"
+dry mkdir -p "$LORE_DATA_DIR/.install-state"
 
-# --- 1b. Create default capture-config.json (idempotent) ---
+# --- 1a. Migrate fragmented config -> unified settings.json (D4 phase 1) ---
+# Create-only: this block runs only when ~/.lore/config/settings.json is
+# absent. The unified file ships from adapters/settings.template.json; values
+# read from each of the eight legacy fragmented files overlay onto the
+# template, then a single atomic write produces settings.json. Migration
+# provenance lives in ~/.lore/.install-state/migration.json — settings.json
+# itself stays clean against the strict doctor schema (additionalProperties:
+# false at root rejects _deprecated_legacy_source).
+#
+# `agent.json::symlink_manifest` is NOT migrated here — D6 splits it out to
+# ~/.lore/.install-state/symlinks.json (handled in step 1b).
+SETTINGS_TEMPLATE="$LORE_REPO_DIR/adapters/settings.template.json"
+SETTINGS_FILE="$LORE_DATA_DIR/config/settings.json"
+MIGRATION_PROVENANCE="$LORE_DATA_DIR/.install-state/migration.json"
+dry mkdir -p "$LORE_DATA_DIR/config"
+if [ ! -f "$SETTINGS_TEMPLATE" ]; then
+  info "Skipping settings migration — template missing at $SETTINGS_TEMPLATE"
+elif [ -f "$SETTINGS_FILE" ]; then
+  info "settings.json already exists, skipping create-only migration"
+else
+  info "Migrating fragmented config -> $SETTINGS_FILE"
+  if ! $DRY_RUN; then
+    LORE_DATA_DIR="$LORE_DATA_DIR" \
+    SETTINGS_TEMPLATE="$SETTINGS_TEMPLATE" \
+    SETTINGS_FILE="$SETTINGS_FILE" \
+    MIGRATION_PROVENANCE="$MIGRATION_PROVENANCE" \
+    python3 - <<'PYEOF'
+import datetime
+import json
+import os
+import sys
+import tempfile
+
+data_dir = os.environ["LORE_DATA_DIR"]
+template_path = os.environ["SETTINGS_TEMPLATE"]
+settings_path = os.environ["SETTINGS_FILE"]
+provenance_path = os.environ["MIGRATION_PROVENANCE"]
+
+config_dir = os.path.join(data_dir, "config")
+
+# (legacy_filename_relative_to_data_dir, overlay_function)
+# Each overlay reads its legacy file (when present and parseable) and mutates
+# the document in place. Skip on absence (template defaults stand). Surface
+# errors and skip on malformed JSON without aborting the whole install.
+legacy_specs = [
+    "ceremonies.json",
+    "config/agent.json",
+    "config/capture-config.json",
+    "config/framework.json",
+    "config/harness-args.json",
+    "config/obsidian.json",
+    "config/settlement-config.json",
+    "config/tui.json",
+]
+
+
+def load_legacy(rel_path):
+    abs_path = os.path.join(data_dir, rel_path)
+    if not os.path.exists(abs_path):
+        return None
+    try:
+        with open(abs_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(
+            f"  [warn] failed to read {abs_path}: {exc} — skipping",
+            file=sys.stderr,
+        )
+        return None
+
+
+with open(template_path, "r", encoding="utf-8") as f:
+    doc = json.load(f)
+
+sources = []
+
+
+def mark(rel_path):
+    if rel_path not in sources:
+        sources.append(rel_path)
+
+
+# ceremonies.json -> top-level ceremonies.<skill>
+ceremonies = load_legacy("ceremonies.json")
+if isinstance(ceremonies, dict):
+    merged = dict(doc.get("ceremonies", {}))
+    for skill, advisors in ceremonies.items():
+        if isinstance(advisors, list):
+            merged[skill] = advisors
+    doc["ceremonies"] = merged
+    mark("ceremonies.json")
+
+# agent.json -> agent.{enabled, last_changed} (NOT symlink_manifest — D6)
+agent_doc = load_legacy("config/agent.json")
+if isinstance(agent_doc, dict):
+    agent_block = dict(doc.get("agent", {}))
+    if "enabled" in agent_doc:
+        agent_block["enabled"] = bool(agent_doc["enabled"])
+    if "last_changed" in agent_doc and isinstance(agent_doc["last_changed"], str):
+        agent_block["last_changed"] = agent_doc["last_changed"]
+    doc["agent"] = agent_block
+    mark("config/agent.json")
+
+# capture-config.json -> capture.{core, structural_signals, adaptive}
+capture_doc = load_legacy("config/capture-config.json")
+if isinstance(capture_doc, dict):
+    capture_block = dict(doc.get("capture", {}))
+    for key in ("core", "structural_signals"):
+        if isinstance(capture_doc.get(key), dict):
+            capture_block[key] = capture_doc[key]
+    if "adaptive" in capture_doc:
+        capture_block["adaptive"] = bool(capture_doc["adaptive"])
+    doc["capture"] = capture_block
+    mark("config/capture-config.json")
+
+# framework.json -> {active_framework, roles, capability_overrides}
+framework_doc = load_legacy("config/framework.json")
+if isinstance(framework_doc, dict):
+    if isinstance(framework_doc.get("framework"), str):
+        doc["active_framework"] = framework_doc["framework"]
+    if isinstance(framework_doc.get("roles"), dict):
+        doc["roles"] = framework_doc["roles"]
+    if isinstance(framework_doc.get("capability_overrides"), dict):
+        doc["capability_overrides"] = framework_doc["capability_overrides"]
+    mark("config/framework.json")
+
+# harness-args.json -> harnesses.<name>.args (preserve other harness keys)
+harness_args_doc = load_legacy("config/harness-args.json")
+if isinstance(harness_args_doc, dict):
+    harnesses = dict(doc.get("harnesses", {}))
+    for fw, fw_block in harness_args_doc.items():
+        # Skip provenance/version metadata fields from the legacy shape.
+        if fw in ("version", "_deprecated_legacy_source"):
+            continue
+        if isinstance(fw_block, dict) and isinstance(fw_block.get("args"), list):
+            existing = dict(harnesses.get(fw, {}))
+            existing["args"] = list(fw_block["args"])
+            harnesses[fw] = existing
+    doc["harnesses"] = harnesses
+    mark("config/harness-args.json")
+
+# obsidian.json -> obsidian.{vault_path, repo_path}
+obsidian_doc = load_legacy("config/obsidian.json")
+if isinstance(obsidian_doc, dict):
+    obsidian_block = dict(doc.get("obsidian", {}))
+    for key in ("vault_path", "repo_path"):
+        val = obsidian_doc.get(key)
+        if isinstance(val, str):
+            obsidian_block[key] = val
+    doc["obsidian"] = obsidian_block
+    mark("config/obsidian.json")
+
+# settlement-config.json -> full settlement subtree (drop schema_version /
+# description metadata; the unified shape uses the top-level `version`).
+settlement_doc = load_legacy("config/settlement-config.json")
+if isinstance(settlement_doc, dict):
+    settlement_block = dict(doc.get("settlement", {}))
+    for key in ("probabilistic_triggers", "background_queue", "enabled", "dry_run"):
+        if key in settlement_doc:
+            settlement_block[key] = settlement_doc[key]
+    doc["settlement"] = settlement_block
+    mark("config/settlement-config.json")
+
+# tui.json -> tui.layout
+tui_doc = load_legacy("config/tui.json")
+if isinstance(tui_doc, dict):
+    tui_block = dict(doc.get("tui", {}))
+    if isinstance(tui_doc.get("layout"), str):
+        tui_block["layout"] = tui_doc["layout"]
+    doc["tui"] = tui_block
+    mark("config/tui.json")
+
+# Atomic write: tmp file in same dir, then rename.
+fd, tmp_path = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=config_dir)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2, sort_keys=False)
+        f.write("\n")
+    os.replace(tmp_path, settings_path)
+except OSError:
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+    raise
+
+# Provenance lives outside settings.json (D7 strict-schema invariant —
+# additionalProperties:false at root would reject _deprecated_legacy_source).
+provenance_dir = os.path.dirname(provenance_path)
+os.makedirs(provenance_dir, exist_ok=True)
+provenance = {
+    "schema_version": 1,
+    "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    ),
+    "sources": sources,
+}
+fd, tmp_path = tempfile.mkstemp(
+    prefix=".migration.", suffix=".tmp", dir=provenance_dir
+)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(provenance, f, indent=2)
+        f.write("\n")
+    os.replace(tmp_path, provenance_path)
+except OSError:
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+    raise
+
+print(f"  [lore] migration sources: {sources}", file=sys.stderr)
+PYEOF
+  fi
+fi
+
+# --- 1b. Split agent.json::symlink_manifest -> .install-state/symlinks.json (D6) ---
+# Co-ownership: install reads-and-merges into the install-state file; it must
+# never blindly overwrite a non-empty manifest (agent-toggle disable writes
+# its own snapshot, which install must preserve verbatim). The split runs
+# only when the legacy agent.json still carries a symlink_manifest (the
+# pre-D6 shape); after agent-toggle has been run on the new path this block
+# is a no-op.
+SYMLINKS_STATE="$LORE_DATA_DIR/.install-state/symlinks.json"
+LEGACY_AGENT_JSON="$LORE_DATA_DIR/config/agent.json"
+if [ -f "$LEGACY_AGENT_JSON" ] && jq -e '.symlink_manifest | type == "array"' "$LEGACY_AGENT_JSON" >/dev/null 2>&1; then
+  info "Splitting agent.json::symlink_manifest -> $SYMLINKS_STATE"
+  if ! $DRY_RUN; then
+    LEGACY_AGENT_JSON="$LEGACY_AGENT_JSON" \
+    SYMLINKS_STATE="$SYMLINKS_STATE" \
+    python3 - <<'PYEOF'
+import json
+import os
+import sys
+import tempfile
+
+legacy = os.environ["LEGACY_AGENT_JSON"]
+state_path = os.environ["SYMLINKS_STATE"]
+state_dir = os.path.dirname(state_path)
+
+# Read the legacy manifest, if present.
+legacy_manifest = []
+try:
+    with open(legacy, "r", encoding="utf-8") as f:
+        legacy_doc = json.load(f)
+    if isinstance(legacy_doc.get("symlink_manifest"), list):
+        legacy_manifest = legacy_doc["symlink_manifest"]
+except (OSError, json.JSONDecodeError, ValueError) as exc:
+    print(f"  [warn] failed to read {legacy}: {exc} — skipping split", file=sys.stderr)
+    sys.exit(0)
+
+if not legacy_manifest:
+    sys.exit(0)
+
+# Read existing state file, if any. Co-ownership rule: install merges,
+# never clobbers — entries already present (typically agent-toggle's
+# disable-state snapshots) are preserved by `link_path`.
+existing = []
+if os.path.exists(state_path):
+    try:
+        with open(state_path, "r", encoding="utf-8") as f:
+            existing_doc = json.load(f)
+        if isinstance(existing_doc.get("symlink_manifest"), list):
+            existing = existing_doc["symlink_manifest"]
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(
+            f"  [warn] failed to read {state_path}: {exc} — overwriting",
+            file=sys.stderr,
+        )
+        existing = []
+
+if existing:
+    print(
+        f"  [lore] {state_path} already populated ({len(existing)} entries) — preserving",
+        file=sys.stderr,
+    )
+    sys.exit(0)
+
+os.makedirs(state_dir, exist_ok=True)
+fd, tmp_path = tempfile.mkstemp(prefix=".symlinks.", suffix=".tmp", dir=state_dir)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump({"schema_version": 1, "symlink_manifest": legacy_manifest}, f, indent=2)
+        f.write("\n")
+    os.replace(tmp_path, state_path)
+except OSError:
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+    raise
+PYEOF
+  fi
+fi
+
+# --- 1c. Delete vestigial settings.json.smoke-bak (D4 prep) ---
+SMOKE_BAK="$LORE_DATA_DIR/config/settings.json.smoke-bak"
+if [ -f "$SMOKE_BAK" ]; then
+  info "Removing vestigial $SMOKE_BAK"
+  dry rm -f "$SMOKE_BAK"
+fi
+
+# --- 1d. Create default capture-config.json (idempotent) ---
 dry mkdir -p "$LORE_DATA_DIR/config"
 if [ ! -f "$LORE_DATA_DIR/config/capture-config.json" ]; then
   info "Creating default capture-config.json"
@@ -580,6 +914,83 @@ if [ -d "$OLD_DATA_DIR" ] && [ -d "$LORE_DATA_DIR/repos" ]; then
     info "Migrating data from $OLD_DATA_DIR"
     dry cp -a "$OLD_DATA_DIR/." "$LORE_DATA_DIR/repos/"
   fi
+fi
+
+# --- 7b. Cleanup deletion of legacy fragmented files (D4 phase 3) ---
+# Conditional + idempotent. The eight legacy files are deleted ONLY when
+# all three gates pass:
+#   1. ~/.lore/config/settings.json exists
+#   2. its `.version` field is at-or-above $LORE_SETTINGS_CLEANUP_VERSION
+#   3. the deterministic fallback audit (settings.sh fallbacks +
+#      lore_settings.fallbacks() + Go snapshot) is empty across all stacks
+# When any gate is open, leave the legacy files intact and emit an
+# actionable warning naming the keys still falling back. Re-runs against
+# already-cleaned state are silent no-ops.
+if [ -f "$SETTINGS_FILE" ] && ! $DRY_RUN; then
+  CLEANUP_VERSION_OK=false
+  _settings_version=$(jq -r '.version // empty' "$SETTINGS_FILE" 2>/dev/null || echo "")
+  if [ -n "$_settings_version" ] && [ "$_settings_version" -ge "$LORE_SETTINGS_CLEANUP_VERSION" ] 2>/dev/null; then
+    CLEANUP_VERSION_OK=true
+  fi
+
+  # Aggregate fallback snapshots across stacks. Bash + Python today; Go
+  # snapshot lands when T4's tui/internal/config/settings.go ships its
+  # `Fallbacks()` accessor. Each pair is reported as "<file>::<key>".
+  FALLBACK_PAIRS=""
+  if [ -x "$LORE_REPO_DIR/scripts/settings.sh" ]; then
+    _bash_pairs=$(LORE_DATA_DIR="$LORE_DATA_DIR" bash "$LORE_REPO_DIR/scripts/settings.sh" fallbacks 2>/dev/null || true)
+    if [ -n "$_bash_pairs" ]; then
+      FALLBACK_PAIRS="$_bash_pairs"
+    fi
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    _py_pairs=$(LORE_DATA_DIR="$LORE_DATA_DIR" PYTHONPATH="$LORE_REPO_DIR/scripts" python3 -c "
+import lore_settings
+for f, k in lore_settings.fallbacks():
+    print(f'{f}::{k}')
+" 2>/dev/null || true)
+    if [ -n "$_py_pairs" ]; then
+      if [ -n "$FALLBACK_PAIRS" ]; then
+        FALLBACK_PAIRS="$FALLBACK_PAIRS
+$_py_pairs"
+      else
+        FALLBACK_PAIRS="$_py_pairs"
+      fi
+    fi
+  fi
+  # T4 Go snapshot: when tui/internal/config/settings.go exposes a fallbacks
+  # accessor wired through lore-tui or a sibling CLI, aggregate it here.
+  # TODO(T4): plumb the Go snapshot once the loader lands.
+
+  if $CLEANUP_VERSION_OK && [ -z "$FALLBACK_PAIRS" ]; then
+    info "Cleanup: deleting legacy fragmented files (settings.json.version=$_settings_version >= $LORE_SETTINGS_CLEANUP_VERSION, fallback audit empty)"
+    for legacy in \
+      "$LORE_DATA_DIR/ceremonies.json" \
+      "$LORE_DATA_DIR/config/agent.json" \
+      "$LORE_DATA_DIR/config/capture-config.json" \
+      "$LORE_DATA_DIR/config/framework.json" \
+      "$LORE_DATA_DIR/config/harness-args.json" \
+      "$LORE_DATA_DIR/config/obsidian.json" \
+      "$LORE_DATA_DIR/config/settlement-config.json" \
+      "$LORE_DATA_DIR/config/tui.json"; do
+      if [ -f "$legacy" ]; then
+        info "  removing $legacy"
+        rm -f "$legacy"
+      fi
+    done
+  else
+    if ! $CLEANUP_VERSION_OK; then
+      info "Cleanup deferred: settings.json.version='${_settings_version:-unset}' < $LORE_SETTINGS_CLEANUP_VERSION (legacy files left intact)"
+    fi
+    if [ -n "$FALLBACK_PAIRS" ]; then
+      info "Cleanup deferred: fallback audit non-empty — keys still falling back to legacy files:"
+      printf '%s\n' "$FALLBACK_PAIRS" | sort -u | while IFS= read -r pair; do
+        [ -n "$pair" ] && info "  $pair"
+      done
+      info "  Action: copy these values into $SETTINGS_FILE (or re-run install) to enable cleanup."
+    fi
+  fi
+  unset _settings_version _bash_pairs _py_pairs FALLBACK_PAIRS CLEANUP_VERSION_OK
 fi
 
 # --- 8. Summary ---

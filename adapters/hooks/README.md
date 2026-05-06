@@ -61,7 +61,7 @@ payload         = harness-native event payload (JSON), unmodified
 
 The adapter MUST NOT mutate `payload` before dispatch — Lore handlers
 may need the raw harness shape (e.g. for transcript path resolution
-on stop-novelty-check.py, or matcher fields on guard-work-writes.sh).
+on check-plan-persistence.py, or matcher fields on guard-work-writes.sh).
 
 #### Per-event payload schema
 
@@ -218,8 +218,7 @@ land-time and pinned by Tier 2 evidence rows on the implementing PR.
       which (if any) of the nine Lore events it represents, and invoke
       the matching Lore handler script (`scripts/load-knowledge.sh`,
       `scripts/load-work.sh`, `scripts/load-threads.sh`,
-      `scripts/pre-compact.sh`, `scripts/stop-novelty-check.py`,
-      `scripts/check-plan-persistence.py`,
+      `scripts/pre-compact.sh`, `scripts/check-plan-persistence.py`,
       `scripts/task-completed-capture-check.sh`, plus any
       adapter-specific shims).
 - [ ] **2. Honor capability gates.** Read

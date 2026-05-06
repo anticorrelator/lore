@@ -139,8 +139,10 @@ func loadCapabilitiesFile() (capabilitiesFile, error) {
 // ResolveActiveFramework returns the active harness framework name, mirroring
 // resolve_active_framework in scripts/lib.sh. Precedence:
 //  1. LORE_FRAMEWORK env var (validated against capabilities.json frameworks).
-//  2. ~/.lore/config/framework.json `.framework`.
-//  3. Built-in default "claude-code".
+//  2. Unified ~/.lore/config/settings.json `.active_framework` (T2/T4).
+//  3. Legacy ~/.lore/config/framework.json `.framework` (deprecation-window
+//     fallback per D4 phase 2; one release).
+//  4. Built-in default "claude-code".
 //
 // Unknown framework names from any source are rejected with an error rather
 // than silently routing to a default.
@@ -150,7 +152,14 @@ func ResolveActiveFramework() (string, error) {
 	if env := os.Getenv("LORE_FRAMEWORK"); env != "" {
 		candidate = env
 		source = "env LORE_FRAMEWORK"
-	} else {
+	} else if raw, present, _ := SettingsGet("active_framework"); present {
+		var v string
+		if err := json.Unmarshal([]byte(raw), &v); err == nil && v != "" {
+			candidate = v
+			source = SettingsPath()
+		}
+	}
+	if candidate == "" {
 		cfg := loadUserFrameworkConfig()
 		if cfg.Framework != "" {
 			candidate = cfg.Framework
@@ -575,10 +584,12 @@ func MigrateClaudeArgsToHarnessArgs() error {
 //  1. LORE_HARNESS_ARGS env var (JSON array, applies to whichever harness).
 //  2. LORE_CLAUDE_ARGS env var (legacy alias, only honored when harness is
 //     claude-code).
-//  3. $LORE_DATA_DIR/config/harness-args.json `[<harness>].args`.
-//  4. $LORE_DATA_DIR/config/claude.json `.args` (legacy, only honored when
+//  3. Unified settings.json `.harnesses.<harness>.args` (T2/T4 primary).
+//  4. $LORE_DATA_DIR/config/harness-args.json `[<harness>].args` (legacy
+//     deprecation-window fallback per D4 phase 2).
+//  5. $LORE_DATA_DIR/config/claude.json `.args` (legacy, only honored when
 //     harness is claude-code; on-the-fly migration runs first).
-//  5. Built-in default: --dangerously-skip-permissions for claude-code,
+//  6. Built-in default: --dangerously-skip-permissions for claude-code,
 //     empty for any other harness.
 func LoadHarnessArgs(harness string) []string {
 	if harness == "" {
@@ -601,6 +612,14 @@ func LoadHarnessArgs(harness string) []string {
 			if err := json.Unmarshal([]byte(env), &args); err == nil {
 				return args
 			}
+		}
+	}
+
+	// Unified settings.json (primary): harnesses.<harness>.args.
+	if raw, present, _ := SettingsGet("harnesses." + harness + ".args"); present {
+		var args []string
+		if err := json.Unmarshal([]byte(raw), &args); err == nil && args != nil {
+			return args
 		}
 	}
 
@@ -702,14 +721,23 @@ func loadRoleIDs() (map[string]struct{}, error) {
 // closed role set in adapters/roles.json; rejects unknown roles with an
 // error.
 //
-// Resolution order:
+// Resolution order (mirrors the bash side byte-for-byte; D3b overlay
+// inserted between env+per-repo and the top-level user config):
 //  1. Env var LORE_MODEL_<ROLE_UPPER> (e.g., LORE_MODEL_LEAD=opus).
 //  2. Per-repo .lore.config `model_for_<role>=<model>` (walk-up from cwd).
-//  3. User config $LORE_DATA_DIR/config/framework.json `.roles.<role>`.
-//  4. Same file's `.roles.default` (seeded to "sonnet" by install.sh).
+//  3. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay
+//     — applies to the active harness only; absent overlay falls through).
+//  4. Unified settings.json `.roles.<role>` (top-level default).
+//  5. Legacy framework.json `.roles.<role>` (deprecation-window fallback).
+//  6. Unified `.harnesses.<active>.roles.default` (overlay's own default).
+//  7. Unified `.roles.default` and legacy framework.json `.roles.default`.
 //
-// Errors when no binding resolves at any level OR when role is not in the
-// closed set in adapters/roles.json.
+// Closed-set rejection applies identically to the overlay layer and the
+// top-level layer: an unknown role id stored under
+// `harnesses.<active>.roles` is the same error class as an unknown role in
+// the query (bash D3b parity per scripts/lib.sh:964-985). Errors when no
+// binding resolves at any level OR when role is not in the closed set in
+// adapters/roles.json.
 func ResolveModelForRole(role string) (string, error) {
 	if role == "" {
 		return "", fmt.Errorf("resolve_model_for_role requires a role name")
@@ -717,8 +745,9 @@ func ResolveModelForRole(role string) (string, error) {
 
 	// Closed-set validation. Soft-fails when adapters/roles.json is unreadable
 	// (matches bash behavior when jq is unavailable / file missing).
-	if ids, err := loadRoleIDs(); err == nil {
-		if _, ok := ids[role]; !ok {
+	validRoles, validRolesErr := loadRoleIDs()
+	if validRolesErr == nil {
+		if _, ok := validRoles[role]; !ok {
 			return "", fmt.Errorf("unknown role %q (not in adapters/roles.json)", role)
 		}
 	}
@@ -734,14 +763,79 @@ func ResolveModelForRole(role string) (string, error) {
 		return v, nil
 	}
 
-	// 3 + 4. User framework.json: roles.<role>, then roles.default.
+	// Resolve active harness once for the overlay layer.
+	active, _ := ResolveActiveFramework()
+
+	// D3b closed-set rejection at the overlay layer: any unknown role id
+	// stored under `harnesses.<active>.roles` is rejected immediately, same
+	// error class as an unknown role in the *query* above. Without this guard
+	// a misconfigured overlay would silently never be consulted (per
+	// scripts/lib.sh:964-985).
+	if active != "" && validRolesErr == nil {
+		raw, present, _ := SettingsGet("harnesses." + active + ".roles")
+		if present {
+			var overlay map[string]any
+			if err := json.Unmarshal([]byte(raw), &overlay); err == nil {
+				for k := range overlay {
+					if _, ok := validRoles[k]; !ok {
+						return "", fmt.Errorf("unknown role %q in harnesses.%s.roles (not in adapters/roles.json)", k, active)
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay).
+	if active != "" {
+		if v := readSettingsRoleString("harnesses." + active + ".roles." + role); v != "" {
+			return v, nil
+		}
+	}
+
+	// 4. Unified settings.json `.roles.<role>` (top-level).
+	if v := readSettingsRoleString("roles." + role); v != "" {
+		return v, nil
+	}
+
+	// 5. Legacy framework.json `.roles.<role>` (deprecation-window fallback).
 	cfg := loadUserFrameworkConfig()
 	if v, ok := cfg.Roles[role]; ok && v != "" {
+		return v, nil
+	}
+
+	// 6. Unified `.harnesses.<active>.roles.default`.
+	if active != "" {
+		if v := readSettingsRoleString("harnesses." + active + ".roles.default"); v != "" {
+			return v, nil
+		}
+	}
+
+	// 7. Unified `.roles.default` and legacy `.roles.default`.
+	if v := readSettingsRoleString("roles.default"); v != "" {
 		return v, nil
 	}
 	if v, ok := cfg.Roles["default"]; ok && v != "" {
 		return v, nil
 	}
 
-	return "", fmt.Errorf("no model binding for role %q (no env var, no per-repo .lore.config, no framework.json roles.%s or roles.default)", role, role)
+	return "", fmt.Errorf("no model binding for role %q (no env var, no per-repo .lore.config, no settings.json or framework.json roles.%s or roles.default)", role, role)
+}
+
+// readSettingsRoleString reads a string-valued role binding from the unified
+// settings file. Returns "" when the path is absent OR the value is not a
+// non-empty JSON string. The empty-string-is-absence collapse mirrors the
+// bash side's `// empty` jq filter (scripts/lib.sh:993-1010): an explicit
+// empty string is treated as fall-through, not as a binding, because its
+// semantics are ambiguous (suppress vs. use-default) and the schema's
+// $defs/role_value rejects empty strings at validation time.
+func readSettingsRoleString(dotPath string) string {
+	raw, present, err := SettingsGet(dotPath)
+	if err != nil || !present {
+		return ""
+	}
+	var v string
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return ""
+	}
+	return v
 }

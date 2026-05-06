@@ -105,7 +105,6 @@ lore_hooks = [
     ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/load-threads.sh", 5),
     ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code python3 ~/.lore/scripts/extract-session-digest.py", 5),
     ("PreCompact",   None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/pre-compact.sh", 5),
-    ("Stop",         None, "command", "LORE_FRAMEWORK=claude-code python3 ~/.lore/scripts/stop-novelty-check.py", 10),
     ("Stop",         None, "command", "LORE_FRAMEWORK=claude-code python3 ~/.lore/scripts/check-plan-persistence.py", 10),
     ("TaskCompleted", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
     ("PreToolUse",   "Write", "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/guard-work-writes.sh", 5),
@@ -236,7 +235,7 @@ cmd_smoke() {
   printf '  %-20s %-9s %s\n' post_tool          full      "(currently unused by lore; PostToolUse hook surface available)"
   printf '  %-20s %-9s %s\n' permission_request full      "PreToolUse JSON-stdout decision protocol (no separate lore handler)"
   printf '  %-20s %-9s %s\n' pre_compact        full      "PreCompact hook (~/.lore/scripts/pre-compact.sh)"
-  printf '  %-20s %-9s %s\n' stop               full      "Stop hook (stop-novelty-check.py + check-plan-persistence.py)"
+  printf '  %-20s %-9s %s\n' stop               full      "Stop hook (check-plan-persistence.py)"
   printf '  %-20s %-9s %s\n' session_end        full      "SessionEnd hook (matcher=clear -> pre-compact.sh)"
   printf '  %-20s %-9s %s\n' task_completed     full      "TaskCompleted hook (task-completed-capture-check.sh, exit-2 blocking)"
 }

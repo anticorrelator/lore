@@ -123,22 +123,92 @@ DEFAULT_CONFIG = {
 
 
 def load_config() -> dict:
-    """Load ~/.lore/config/settlement-config.json with defaults fallback."""
-    path = Path.home() / ".lore" / "config" / "settlement-config.json"
-    if not path.is_file():
-        return DEFAULT_CONFIG
+    """Load settlement configuration with unified-first, fragmented-fallback.
+
+    Resolution order (per D5 read contract, deprecation window):
+    1. `~/.lore/config/settings.json` settlement.* via lore_settings.
+       Each top-level settlement key (`probabilistic_triggers`,
+       `background_queue`, `enabled`, `dry_run`) is consulted independently;
+       absence of one key falls back to the corresponding fragmented-file
+       key, NOT directly to defaults.
+    2. `~/.lore/config/settlement-config.json` (legacy fragmented file)
+    3. Hardcoded DEFAULT_CONFIG
+
+    Missing both files → DEFAULT_CONFIG. Malformed legacy file → defaults
+    silently (preserving the pre-unification failure semantics). Malformed
+    unified file → fall through to legacy + defaults with a stderr notice.
+    """
+    legacy_path = Path.home() / ".lore" / "config" / "settlement-config.json"
+    data_dir_env = os.environ.get("LORE_DATA_DIR")
+    if data_dir_env:
+        legacy_path = Path(data_dir_env) / "config" / "settlement-config.json"
+
+    legacy: dict | None = None
+    if legacy_path.is_file():
+        try:
+            with open(legacy_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                legacy = loaded
+        except (OSError, json.JSONDecodeError):
+            legacy = None
+
+    # Try the unified loader; failures are surfaced once and we proceed.
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            loaded = json.load(f)
-        # Shallow merge over defaults so missing keys still resolve.
-        merged = dict(DEFAULT_CONFIG)
-        merged.update(loaded)
-        triggers = dict(DEFAULT_CONFIG["probabilistic_triggers"])
-        triggers.update(loaded.get("probabilistic_triggers", {}))
-        merged["probabilistic_triggers"] = triggers
-        return merged
-    except (OSError, json.JSONDecodeError):
-        return DEFAULT_CONFIG
+        import lore_settings
+    except ImportError:
+        lore_settings = None  # type: ignore[assignment]
+
+    unified_triggers = None
+    unified_queue = None
+    unified_enabled = None
+    unified_dry_run = None
+    if lore_settings is not None:
+        try:
+            unified_triggers = lore_settings.get("settlement.probabilistic_triggers")
+            unified_queue = lore_settings.get("settlement.background_queue")
+            unified_enabled = lore_settings.get("settlement.enabled")
+            unified_dry_run = lore_settings.get("settlement.dry_run")
+        except Exception as e:  # SettingsError or unexpected errors
+            print(
+                f"[lore-trigger] unified settings unreadable, falling back to "
+                f"settlement-config.json: {e}",
+                file=sys.stderr,
+            )
+
+    merged = dict(DEFAULT_CONFIG)
+
+    triggers = dict(DEFAULT_CONFIG["probabilistic_triggers"])
+    if isinstance(unified_triggers, dict):
+        triggers.update(unified_triggers)
+    elif legacy is not None and isinstance(legacy.get("probabilistic_triggers"), dict):
+        triggers.update(legacy["probabilistic_triggers"])
+    merged["probabilistic_triggers"] = triggers
+
+    if isinstance(unified_queue, dict):
+        merged["background_queue"] = unified_queue
+    elif legacy is not None and isinstance(legacy.get("background_queue"), dict):
+        merged["background_queue"] = legacy["background_queue"]
+
+    if isinstance(unified_enabled, bool):
+        merged["enabled"] = unified_enabled
+    elif legacy is not None and isinstance(legacy.get("enabled"), bool):
+        merged["enabled"] = legacy["enabled"]
+
+    if isinstance(unified_dry_run, bool):
+        merged["dry_run"] = unified_dry_run
+    elif legacy is not None and isinstance(legacy.get("dry_run"), bool):
+        merged["dry_run"] = legacy["dry_run"]
+
+    # Preserve any other top-level keys the legacy file carried (e.g.,
+    # schema_version, description) without changing precedence.
+    if legacy is not None:
+        for key, val in legacy.items():
+            if key not in merged:
+                merged[key] = val
+
+    return merged
 
 
 def _load_slash_command_tool(framework: str) -> str | None:

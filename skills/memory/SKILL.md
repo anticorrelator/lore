@@ -81,20 +81,15 @@ This lists inbox remnants, medium-confidence entries, and entries missing backli
 4. **Backlinks:** Add missing `[[backlinks]]` cross-references between related entries.
 5. **Title quality:** Improve vague or generic titles to be specific and scannable.
 6. **Stale entries:** Flag or remove entries that contradict current code.
-7. **Confidence calibration:** If `$KDIR/_capture_log.csv` exists, count entries with `source=stop-hook`. Compare against the number of stop-hook medium-confidence entries that passed the quality gate (upgraded) vs failed (dropped). Report the pass rate:
-   - `>70%` pass rate: "Stop hook evaluator is well-calibrated"
-   - `40-70%` pass rate: "Stop hook evaluator calibration is acceptable"
-   - `<40%` pass rate: "Stop hook evaluator needs tightening — consider refining triggers in scripts/stop-capture-prompt.txt"
-8. Report what was found and fixed:
+7. Report what was found and fixed:
    ```
    [curate] Done.
      Dropped: N entries (reasons)
      Merged: N duplicates
      Upgraded: N to high confidence
      Backlinks added: N
-     Stop hook calibration: X/Y passed (Z%) — <assessment>
    ```
-9. Run `lore heal`
+8. Run `lore heal`
 
 **Drop authority:** Curate has explicit authority to remove entries without user confirmation when they fail the 4-condition gate. Report what was dropped in the summary so the user can object.
 

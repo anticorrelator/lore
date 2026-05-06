@@ -12,8 +12,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../config.sh"
 source "$SCRIPT_DIR/../lib.sh"
 
+SETTINGS_SH="$SCRIPT_DIR/../settings.sh"
 AGENT_JSON="${LORE_DATA_DIR}/config/agent.json"
 AGENT_JSON_TMP="${AGENT_JSON}.tmp.$$"
+
+# D6: symlink_manifest moved to install-state. Read from the new path and
+# fall back to the legacy agent.json::symlink_manifest one release for
+# operators upgrading mid-cycle.
+SYMLINKS_STATE="${LORE_DATA_DIR}/.install-state/symlinks.json"
+SYMLINKS_STATE_TMP="${SYMLINKS_STATE}.tmp.$$"
 
 ASSEMBLE="${LORE_DATA_DIR}/scripts/assemble-instructions.sh"
 
@@ -34,13 +41,24 @@ unset _fw_list
 
 # --- Phase 3: restore skill/agent symlinks from manifest; fallback to per-framework install logic ---
 restore_symlinks() {
-  local manifest
-  manifest=$(python3 -c "
+  local manifest="[]"
+  # D6: prefer install-state/symlinks.json; fall back to legacy
+  # agent.json::symlink_manifest for operators upgrading mid-cycle.
+  if [[ -f "$SYMLINKS_STATE" ]]; then
+    manifest=$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+print(json.dumps(d.get('symlink_manifest', [])))
+" "$SYMLINKS_STATE" 2>/dev/null || echo "[]")
+  elif [[ -f "$AGENT_JSON" ]]; then
+    manifest=$(python3 -c "
 import json, sys
 with open(sys.argv[1]) as f:
     d = json.load(f)
 print(json.dumps(d.get('symlink_manifest', [])))
 " "$AGENT_JSON" 2>/dev/null || echo "[]")
+  fi
 
   local count
   count=$(python3 -c "import json,sys; print(len(json.loads(sys.argv[1])))" "$manifest")
@@ -123,9 +141,19 @@ restore_claude_md() {
   done
 }
 
-# Read existing manifest so we don't lose it when flipping enabled
+# Read existing manifest from the install-state path; fall back to legacy
+# agent.json::symlink_manifest one release. Once enable completes, the
+# manifest stays authoritative in install-state/symlinks.json (the next
+# disable will overwrite it; install.sh merges, never clobbers).
 MANIFEST="[]"
-if [[ -f "$AGENT_JSON" ]]; then
+if [[ -f "$SYMLINKS_STATE" ]]; then
+  MANIFEST=$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+print(json.dumps(d.get('symlink_manifest', [])))
+" "$SYMLINKS_STATE" 2>/dev/null || echo "[]")
+elif [[ -f "$AGENT_JSON" ]]; then
   MANIFEST=$(python3 -c "
 import json, sys
 with open(sys.argv[1]) as f:
@@ -137,18 +165,39 @@ fi
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 mkdir -p "$(dirname "$AGENT_JSON")"
+mkdir -p "$(dirname "$SYMLINKS_STATE")"
 
+# Persist the manifest to install-state/symlinks.json so install.sh's
+# co-ownership read-and-merge sees a populated file going forward.
+python3 -c "
+import json, sys
+data = {
+    'schema_version': 1,
+    'symlink_manifest': json.loads(sys.argv[1]),
+}
+print(json.dumps(data, indent=2))
+" "$MANIFEST" > "$SYMLINKS_STATE_TMP"
+mv "$SYMLINKS_STATE_TMP" "$SYMLINKS_STATE"
+
+# Write the user-facing enable/disable state to agent.json (legacy path
+# during the deprecation window) AND to settings.json so the unified loader
+# sees the change.
 python3 -c "
 import json, sys
 data = {
     'enabled': True,
     'last_changed': sys.argv[1],
-    'symlink_manifest': json.loads(sys.argv[2]),
 }
 print(json.dumps(data, indent=2))
-" "$TIMESTAMP" "$MANIFEST" > "$AGENT_JSON_TMP"
+" "$TIMESTAMP" > "$AGENT_JSON_TMP"
 
 mv "$AGENT_JSON_TMP" "$AGENT_JSON"
+
+# Mirror to settings.json::agent.{enabled,last_changed} via the locked patch
+# helper. Section-scoped: unrelated sections of settings.json are preserved
+# byte-for-byte by the patch contract (D5a).
+LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" patch agent.enabled 'true'
+LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" patch agent.last_changed "$(printf '%s' "$TIMESTAMP" | jq -R .)"
 
 restore_symlinks
 restore_claude_md

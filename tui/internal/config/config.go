@@ -98,51 +98,72 @@ type Prefs struct {
 	Layout LayoutMode `json:"layout"`
 }
 
-// prefsPath returns the absolute path to the TUI preferences file.
+// prefsPath returns the absolute path to the legacy TUI preferences file
+// (~/.lore/config/tui.json). Read-only fallback during the D4 deprecation
+// window — new writes route through SettingsPatch into the unified
+// settings.json under `tui.layout`.
 func prefsPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".lore", "config", "tui.json")
 }
 
-// LoadPrefs reads TUI preferences from ~/.lore/config/tui.json, then checks
-// the LORE_TUI_LAYOUT env var for an override. Returns LayoutLeftRight default
-// when the file is missing or unreadable.
+// LoadPrefs reads TUI preferences. Resolution order (mirrors the unified-file
+// pattern at scripts/lib.sh:615-655):
+//  1. LORE_TUI_LAYOUT env var.
+//  2. Unified settings.json `tui.layout`.
+//  3. Legacy ~/.lore/config/tui.json (deprecation-window fallback per D4).
+//  4. Built-in default LayoutLeftRight.
+//
+// Bash counterpart: there is no bash reader for tui.layout (the TUI is the
+// only consumer); the unified loader is the cross-stack contract this
+// reader composes against.
 func LoadPrefs() Prefs {
-	p := Prefs{Layout: LayoutLeftRight}
+	var layout LayoutMode
 
-	data, err := os.ReadFile(prefsPath())
-	if err == nil {
-		_ = json.Unmarshal(data, &p)
-	}
-
-	// Env var override
-	if env := os.Getenv("LORE_TUI_LAYOUT"); env != "" {
-		switch LayoutMode(env) {
-		case LayoutLeftRight, LayoutTopBottom:
-			p.Layout = LayoutMode(env)
+	// Unified settings.json (primary).
+	if raw, present, _ := SettingsGet("tui.layout"); present {
+		var v string
+		if err := json.Unmarshal([]byte(raw), &v); err == nil {
+			layout = LayoutMode(v)
 		}
 	}
 
-	// Normalize unknown values to default
-	if p.Layout != LayoutLeftRight && p.Layout != LayoutTopBottom {
-		p.Layout = LayoutLeftRight
+	// Legacy tui.json (fallback when unified is absent or returned empty).
+	if layout == "" {
+		if data, err := os.ReadFile(prefsPath()); err == nil {
+			var legacy Prefs
+			if err := json.Unmarshal(data, &legacy); err == nil {
+				layout = legacy.Layout
+			}
+		}
 	}
 
-	return p
+	// Env var override (highest precedence).
+	if env := os.Getenv("LORE_TUI_LAYOUT"); env != "" {
+		switch LayoutMode(env) {
+		case LayoutLeftRight, LayoutTopBottom:
+			layout = LayoutMode(env)
+		}
+	}
+
+	// Normalize unknown / empty values to default.
+	if layout != LayoutLeftRight && layout != LayoutTopBottom {
+		layout = LayoutLeftRight
+	}
+
+	return Prefs{Layout: layout}
 }
 
-// SavePrefs writes TUI preferences to ~/.lore/config/tui.json, creating the
-// directory if needed.
+// SavePrefs writes TUI preferences via the unified settings loader
+// (SettingsPatch on `tui.layout`). The legacy ~/.lore/config/tui.json file is
+// no longer written; LoadPrefs continues to read it as a deprecation-window
+// fallback for one release. Routing through SettingsPatch ensures the write
+// composes with concurrent bash/Python writers via the shared flock contract.
 func SavePrefs(p Prefs) error {
-	path := prefsPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
+	if err := SettingsPatch("tui.layout", string(p.Layout)); err != nil {
+		return fmt.Errorf("save tui prefs: %w", err)
 	}
-	data, err := json.MarshalIndent(p, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal prefs: %w", err)
-	}
-	return os.WriteFile(path, append(data, '\n'), 0644)
+	return nil
 }
 
 // ClaudeConfig holds flags applied to every `claude` CLI invocation spawned
