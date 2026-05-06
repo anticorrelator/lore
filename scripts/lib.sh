@@ -5,8 +5,40 @@
 #
 # NOTE: This is a library file. Do NOT add set -euo pipefail here.
 # Callers set their own shell options.
+#
+# Shell support: bash 3.2+ and zsh 5+. The Claude Code Bash tool on macOS
+# inherits the user's login shell (typically zsh), and skill setup blocks
+# routinely `source` this file directly — so the path-detection and the
+# few helpers using indirect expansion below MUST work in both shells.
+# See gotchas/scripts-lib-sh-assumes-bash-is-routinely-sourced.md.
 
-LORE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve this library's own path in a shell-portable way.
+#   - bash: ${BASH_SOURCE[0]} is the sourced file path.
+#   - zsh:  ${(%):-%x} prompt-expands to the file currently being sourced.
+#   - other shells: best-effort fallback to $0 (will trip the sanity
+#     check below if it lands somewhere bogus).
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+  _lore_lib_self="${BASH_SOURCE[0]}"
+elif [[ -n "${ZSH_VERSION:-}" ]]; then
+  _lore_lib_self="${(%):-%x}"
+else
+  _lore_lib_self="${0}"
+fi
+LORE_LIB_DIR="$(cd "$(dirname "$_lore_lib_self")" && pwd)"
+unset _lore_lib_self
+
+# Sanity check: a correct $LORE_LIB_DIR contains lib.sh itself. If the
+# detection fell through to the cwd (e.g. an unsupported shell where
+# neither BASH_SOURCE nor ZSH_VERSION is populated), every downstream
+# `$LORE_LIB_DIR/../adapters/...` lookup would silently target the wrong
+# directory. Refuse loudly here instead.
+if [[ ! -f "$LORE_LIB_DIR/lib.sh" ]]; then
+  echo "Error: scripts/lib.sh self-detection failed (LORE_LIB_DIR='$LORE_LIB_DIR' has no lib.sh)." >&2
+  echo "       lib.sh supports bash and zsh; if you're sourcing it from a different shell," >&2
+  echo "       wrap the invocation in 'bash -c \"...\"' or report a bug." >&2
+  return 1 2>/dev/null || exit 1
+fi
+
 # LORE_REPO_DIR is the physical lore-repo root (one level up from scripts/),
 # resolved through any symlinks. Skills and scripts that build adapter paths
 # via string concatenation (e.g. "$LORE_REPO_DIR/adapters/agents/...") need
@@ -16,6 +48,18 @@ LORE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # `cd "$LIB/.."; pwd -P` does not (bash collapses ".." logically in the path
 # argument before chdir, landing at ~/.lore which has no adapters/ dir).
 LORE_REPO_DIR="$(cd "$LORE_LIB_DIR" && cd -P .. && pwd)"
+
+# --- Path-derivation convention ---
+# When a helper here needs the lore-repo root, use "$LORE_REPO_DIR"
+# (already physically resolved above), NEVER "$LORE_LIB_DIR/.." chained
+# into a `cd`. Both bash and zsh logically collapse ".." against the
+# string before chdir, so on the typical symlinked install
+# (~/.lore/scripts -> <repo>/scripts) the resulting path lands at ~/.lore
+# instead of <repo>/. Filesystem syscalls (`[[ -f ... ]]`, `cat`, `jq`)
+# resolve ".." physically and tolerate the legacy form, but anything
+# routed through `cd` does not. tests/frameworks/lib_shell_portability.bats
+# guards this convention with a grep-based lint so future helpers can't
+# silently re-introduce the trap.
 
 # --- die ---
 # Print an error message to stderr and exit with status 1.
@@ -813,10 +857,15 @@ resolve_model_for_role() {
     fi
   fi
 
-  # 1. Env var override: LORE_MODEL_<ROLE_UPPER>
+  # 1. Env var override: LORE_MODEL_<ROLE_UPPER>.
+  # Indirect expansion via eval rather than ${!var} — the latter is bash-only
+  # and trips zsh with "bad substitution" when this library is sourced from
+  # the harness shell (see lib.sh top-of-file comment on shell support).
   local env_var="LORE_MODEL_$(echo "$role" | tr '[:lower:]' '[:upper:]')"
-  if [[ -n "${!env_var:-}" ]]; then
-    echo "${!env_var}"
+  local env_value=""
+  eval "env_value=\${$env_var:-}"
+  if [[ -n "$env_value" ]]; then
+    echo "$env_value"
     return 0
   fi
 
@@ -946,6 +995,23 @@ harness_path_or_empty() {
   return 0
 }
 
+# --- list_supported_frameworks ---
+# Print the registered framework keys from adapters/capabilities.json, one per
+# line, sorted lexicographically. Fatal (die) if jq is unavailable or the file
+# cannot be read. Both enable.sh and disable.sh use this as the authoritative
+# source for multi-harness fanout.
+list_supported_frameworks() {
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  if ! command -v jq &>/dev/null; then
+    die "list_supported_frameworks: jq is required but not found on PATH"
+  fi
+  if [[ ! -f "$capabilities_file" ]]; then
+    die "list_supported_frameworks: capabilities file not found: $capabilities_file"
+  fi
+  jq -r '.frameworks | keys[]' "$capabilities_file" 2>/dev/null | sort \
+    || die "list_supported_frameworks: failed to read frameworks from $capabilities_file"
+}
+
 # --- resolve_agent_template ---
 # Print the absolute path to an agent template (.md file) shipped with the
 # lore repo. Templates live under <lore-repo>/agents/<name>.md and are
@@ -964,7 +1030,13 @@ resolve_agent_template() {
   local name="$1"
   [[ -z "$name" ]] && { echo "Error: resolve_agent_template requires a template name" >&2; return 1; }
 
-  local repo_root="$LORE_LIB_DIR/.."
+  # Use $LORE_REPO_DIR (already resolved through symlinks at lib.sh source
+  # time) rather than $LORE_LIB_DIR/.. — zsh's cd collapses ".." logically
+  # before chdir, which on the typical symlinked install
+  # (~/.lore/scripts -> /path/to/repo/scripts) lands at ~/.lore (no agents/)
+  # instead of physically traversing the symlink. See d29208b for the same
+  # fix in resolve_permission_adapter().
+  local repo_root="$LORE_REPO_DIR"
   local template_path="$repo_root/agents/$name.md"
 
   if [[ ! -f "$template_path" ]]; then
