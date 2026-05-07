@@ -32,11 +32,11 @@
     },
     "roles": {
       "$ref": "#/$defs/roles_map_top",
-      "description": "Top-level role -> model bindings. Resolution falls through here when an active harness's `harnesses.<name>.roles` overlay does not bind the role. `default` is required so resolve_model_for_role never returns undefined."
+      "description": "Legacy top-level role -> model fallback. New settings should store role bindings under `harnesses.<name>.roles` because model defaults are harness-specific; this field remains valid for migration/deprecation only and is hidden from the TUI."
     },
     "ceremonies": {
       "$ref": "#/$defs/ceremonies_map",
-      "description": "Top-level skill -> [advisor, ...] bindings. Resolution falls through here when an active harness's `harnesses.<name>.ceremonies` overlay omits the skill key. Empty array means \"explicit suppression — run with no advisors\". Skill keyset is open at the schema layer (kebab-case pattern); doctor cross-references against adapters/capabilities.json `skills` map for closed-set rejection."
+      "description": "Legacy top-level skill -> [advisor, ...] fallback. New settings should store ceremony advisor bindings under `harnesses.<name>.ceremonies` because ceremony skill defaults are harness-specific; this field remains valid for migration/deprecation only and is hidden from the TUI."
     },
     "capture": {
       "type": "object",
@@ -110,19 +110,21 @@
     "obsidian": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Obsidian vault mirror configuration. Sourced from the legacy ~/.lore/config/obsidian.json shape — schema_version is dropped in favor of the unified top-level `version`.",
+      "description": "Obsidian vault mirror configuration. Multi-vault keyed shape: each entry under `vaults` binds one knowledge base to one vault. The map key is the relative path under `$LORE_DATA_DIR/repos/` (i.e. `resolve-repo.sh` output minus the prefix), so the same identifier the install-base enumeration uses is what addresses a vault binding here. Per D-multi-vault: `enabled: false` retains `vault_path` so re-enable is a single toggle (mirrors `agent.enabled`); a missing `obsidian.vaults.<kb-key>` entry is the canonical 'sync disabled for this KB' state. The legacy single-vault shape (`obsidian.{vault_path,repo_path}`) was retired in favor of this map; readers fall back to the legacy `~/.lore/config/obsidian.json` only when its `repo_path` matches the current KDIR.",
       "properties": {
-        "vault_path": {"type": "string"},
-        "repo_path":  {"type": "string"}
-      }
-    },
-    "agent": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Agent enable/disable state. Per D6 the 151-line symlink_manifest is split out to ~/.lore/.install-state/symlinks.json — only `enabled` and `last_changed` migrate here.",
-      "properties": {
-        "enabled":      {"type": "boolean"},
-        "last_changed": {"type": "string", "description": "ISO-8601 UTC timestamp of the last enable/disable mutation (e.g. \"2026-04-13T20:16:20Z\")."}
+        "vaults": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["vault_path"],
+            "properties": {
+              "enabled":    {"type": "boolean", "description": "Per-KB sync toggle. Absence is treated as `true` for forward-compat — adding `enabled` to an entry is opt-in disable, not opt-in enable."},
+              "vault_path": {"type": "string",  "description": "Absolute filesystem path to the Obsidian vault directory. Empty string is REJECTED — its semantics are ambiguous (suppress vs. inherit) and doctor flags it as malformed.", "minLength": 1}
+            }
+          },
+          "description": "Map of knowledge-base key → vault binding. Keyset is open at the schema layer (key shape matches the KB-relative-path produced by `resolve-repo.sh`); doctor cross-references against the install-base."
+        }
       }
     }
   },
@@ -180,7 +182,7 @@
     "roles_map_overlay": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Per-harness role overlay. Closed-keyset against $defs/role_id. All keys optional (absence = fall through to top-level `roles`). Same key/value $defs as the top-level map (D3b).",
+      "description": "Per-harness role -> model bindings. Closed-keyset against $defs/role_id. All keys optional except where callers need a concrete default; absence falls through to legacy top-level `roles` during the deprecation window.",
       "properties": {
         "lead":       {"$ref": "#/$defs/role_value"},
         "worker":     {"$ref": "#/$defs/role_value"},
@@ -195,7 +197,7 @@
 
     "ceremonies_map": {
       "type": "object",
-      "description": "Skill -> advisor list. Property keys are kebab-case skill ids; values are arrays of kebab-case advisor ids. Empty array IS valid and IS the explicit suppression override (\"run with no advisors\"). Absent key means \"fall through\" — for the harness overlay this means \"defer to top-level\"; for the top-level map this means \"no ceremony configured for this skill\". Keyset is OPEN at the schema layer (additionalProperties is the array shape) — closed-set rejection against the skills registry lives in the loaders and doctor.",
+      "description": "Skill -> advisor list. Property keys are kebab-case skill ids; values are arrays of kebab-case advisor ids. Empty array is valid and means \"run with no advisors\". Absent key means no ceremony configured at that layer; runtime may still consult legacy fallback data during the deprecation window. Keyset is open at the schema layer; closed-set rejection against the skills registry lives in the loaders and doctor.",
       "additionalProperties": {
         "type": "array",
         "items": {"$ref": "#/$defs/advisor_id"},
@@ -209,12 +211,16 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["args"],
-      "description": "Per-harness configuration block. `args` is required (every harness has a CLI arg list, possibly empty). `roles` and `ceremonies` overlays are optional — when absent, resolution falls through to the top-level map for that concern.",
+      "description": "Per-harness configuration block. `args` is required (every harness has a CLI arg list, possibly empty). `enabled`, `roles`, and `ceremonies` are optional for migration compatibility. New settings should include `roles` and `ceremonies` here because agent defaults and ceremony skills vary by harness. Absent `enabled` is default-on (matches the legacy global `agent.enabled` semantic); explicit `false` disables this harness's integration.",
       "properties": {
         "args": {
           "type": "array",
           "items": {"type": "string"},
           "description": "CLI args prepended to every harness invocation. Empty array is valid (no flags). For claude-code the legacy default was [\"--dangerously-skip-permissions\"]; other harnesses default to []."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Per-harness integration toggle. When false, scripts/harness-toggle/disable.sh has removed this harness's skill/agent symlinks and cleared its instruction-file lore region. Absent = enabled (default-on, matches the legacy `agent.enabled` semantic). Mutated only via `lore harness {enable,disable}`; direct settings.json patches that bypass the toggle scripts are rejected by the unified loaders to keep symlink/instruction-file state in sync with the flag."
         },
         "roles":      {"$ref": "#/$defs/roles_map_overlay"},
         "ceremonies": {"$ref": "#/$defs/ceremonies_map"}

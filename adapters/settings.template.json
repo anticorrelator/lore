@@ -3,31 +3,61 @@
   "active_framework": "claude-code",
   "harnesses": {
     "claude-code": {
-      "args": ["--dangerously-skip-permissions"]
+      "args": ["--dangerously-skip-permissions"],
+      "roles": {
+        "lead": "opus",
+        "worker": "opus",
+        "researcher": "sonnet",
+        "reviewer": "sonnet",
+        "judge": "sonnet",
+        "summarizer": "sonnet",
+        "advisor": "opus",
+        "default": "sonnet"
+      },
+      "ceremonies": {
+        "spec-design": ["codex-design-review"],
+        "spec-post-plan": ["codex-plan-review"],
+        "pr-review": ["codex-pr-review"]
+      }
     },
     "opencode": {
-      "args": []
+      "args": [],
+      "roles": {
+        "lead": "opus",
+        "worker": "opus",
+        "researcher": "sonnet",
+        "reviewer": "sonnet",
+        "judge": "sonnet",
+        "summarizer": "sonnet",
+        "advisor": "opus",
+        "default": "sonnet"
+      },
+      "ceremonies": {
+        "spec-design": ["codex-design-review"],
+        "spec-post-plan": ["codex-plan-review"],
+        "pr-review": ["codex-pr-review"]
+      }
     },
     "codex": {
-      "args": []
+      "args": [],
+      "roles": {
+        "lead": "opus",
+        "worker": "opus",
+        "researcher": "sonnet",
+        "reviewer": "sonnet",
+        "judge": "sonnet",
+        "summarizer": "sonnet",
+        "advisor": "opus",
+        "default": "sonnet"
+      },
+      "ceremonies": {
+        "spec-design": ["codex-design-review"],
+        "spec-post-plan": ["codex-plan-review"],
+        "pr-review": ["codex-pr-review"]
+      }
     }
   },
   "capability_overrides": {},
-  "roles": {
-    "lead": "opus",
-    "worker": "opus",
-    "researcher": "sonnet",
-    "reviewer": "sonnet",
-    "judge": "sonnet",
-    "summarizer": "sonnet",
-    "advisor": "opus",
-    "default": "sonnet"
-  },
-  "ceremonies": {
-    "spec-design": ["codex-design-review"],
-    "spec-post-plan": ["codex-plan-review"],
-    "pr-review": ["codex-pr-review"]
-  },
   "capture": {
     "core": {
       "novelty_threshold": -1.0,
@@ -67,11 +97,6 @@
     "layout": "left-right"
   },
   "obsidian": {
-    "vault_path": "",
-    "repo_path": ""
-  },
-  "agent": {
-    "enabled": true,
-    "last_changed": ""
+    "vaults": {}
   }
 }

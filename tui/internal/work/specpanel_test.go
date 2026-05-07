@@ -2,6 +2,7 @@ package work
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -624,6 +625,113 @@ func TestAppendFindingContext(t *testing.T) {
 			t.Errorf("expected empty string for negative index, got %q", out)
 		}
 	})
+}
+
+// --- Esc gesture tests ----------------------------------------------------
+//
+// The terminal panel forwards a single Esc to the PTY (so harnesses like
+// Claude Code can use it to interrupt running work) and detaches focus only
+// on a second Esc within escDetachWindow with no intervening non-Esc key.
+// See SpecPanelModel.handleEscKey.
+
+// firstCmdMsg runs cmd and returns the first message it emits, unwrapping a
+// tea.BatchMsg if present. Returns nil for a nil cmd.
+func firstCmdMsg(cmd tea.Cmd) tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok && len(batch) > 0 {
+		return batch[0]()
+	}
+	return msg
+}
+
+func TestSpecPanelSingleEscForwardsAndDoesNotDetach(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	m := NewSpecPanelModel("test")
+	m.ptmx = w
+
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+
+	if msg := firstCmdMsg(cmd); msg != nil {
+		if _, ok := msg.(TerminalDetachMsg); ok {
+			t.Fatal("single Esc emitted TerminalDetachMsg; expected forward without detach")
+		}
+	}
+	if m.lastEscTime.IsZero() {
+		t.Errorf("lastEscTime should be armed after first Esc")
+	}
+
+	// Verify \x1b reached the PTY.
+	if err := r.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1)
+	n, err := r.Read(buf)
+	if err != nil || n != 1 || buf[0] != 0x1b {
+		t.Fatalf("expected 0x1b forwarded to PTY; got n=%d err=%v buf=%v", n, err, buf)
+	}
+}
+
+func TestSpecPanelDoubleEscDetaches(t *testing.T) {
+	m := NewSpecPanelModel("test")
+	// Leave m.ptmx nil — handleEscKey skips the write but still arms/fires.
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+
+	msg := firstCmdMsg(cmd)
+	detach, ok := msg.(TerminalDetachMsg)
+	if !ok {
+		t.Fatalf("expected TerminalDetachMsg from second Esc; got %T", msg)
+	}
+	if detach.Slug != "test" {
+		t.Errorf("detach slug: expected %q, got %q", "test", detach.Slug)
+	}
+	if !m.lastEscTime.IsZero() {
+		t.Errorf("lastEscTime should be cleared after detach fires")
+	}
+}
+
+func TestSpecPanelEscOutsideWindowForwardsAgain(t *testing.T) {
+	m := NewSpecPanelModel("test")
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	// Backdate the arm so the next Esc falls outside the window.
+	m.lastEscTime = m.lastEscTime.Add(-2 * escDetachWindow)
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if msg := firstCmdMsg(cmd); msg != nil {
+		if _, ok := msg.(TerminalDetachMsg); ok {
+			t.Fatal("Esc after window expired produced detach; expected re-arm and forward")
+		}
+	}
+}
+
+func TestSpecPanelInterveningKeyClearsEscArm(t *testing.T) {
+	m := NewSpecPanelModel("test")
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	// A non-Esc key arriving between the two Escs should clear the arm so the
+	// follow-up Esc is treated as a fresh single press, not a detach.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if !m.lastEscTime.IsZero() {
+		t.Errorf("non-Esc key should clear lastEscTime; got %v", m.lastEscTime)
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if msg := firstCmdMsg(cmd); msg != nil {
+		if _, ok := msg.(TerminalDetachMsg); ok {
+			t.Fatal("Esc after intervening key produced detach; expected forward")
+		}
+	}
 }
 
 // extractBatchCmds extracts individual commands from a tea.Batch result.

@@ -350,6 +350,283 @@ func TestSettingsPatch_ArrayValueRoundtrips(t *testing.T) {
 	_ = p
 }
 
+// SettingsDelete round-trip: patch a key, delete it, observe absent.
+// The D9 unset gesture round-trips set → unset → absent so an explicitly
+// unset overlay restores inheritance. Uses `claude-code` to exercise the
+// kebab-case path the bash side handles via the path-array form (avoiding
+// jq's `claude` minus `code` parse).
+func TestSettingsDelete_RoundTripPatchDeleteAbsent(t *testing.T) {
+	settingsTestEnv(t)
+
+	if err := SettingsPatch("harnesses.claude-code.roles.lead", "opus"); err != nil {
+		t.Fatalf("SettingsPatch: %v", err)
+	}
+	raw, present, err := SettingsGet("harnesses.claude-code.roles.lead")
+	if err != nil || !present || raw != `"opus"` {
+		t.Fatalf("after patch: present=%v raw=%q err=%v", present, raw, err)
+	}
+
+	if err := SettingsDelete("harnesses.claude-code.roles.lead"); err != nil {
+		t.Fatalf("SettingsDelete: %v", err)
+	}
+	raw, present, err = SettingsGet("harnesses.claude-code.roles.lead")
+	if err != nil {
+		t.Fatalf("SettingsGet after delete: %v", err)
+	}
+	if present || raw != "" {
+		t.Errorf("after delete: got (%q, %v), want (\"\", false)", raw, present)
+	}
+}
+
+// No parent pruning: deleting a leaf must leave the parent object present
+// (even if empty) so the configurator can distinguish absent from
+// explicit-empty per D9. Three-pronged assertion:
+//
+//  1. Parent stays present and empty after the only child is deleted.
+//  2. Sibling under the same parent survives a peer delete (catches a
+//     bug where delete inadvertently rewrites the parent map).
+//  3. Grandparent's other child (here: harnesses.claude-code.args) is
+//     unchanged in value (catches a bug where the rewrite rewrote a
+//     larger subtree than just the leaf parent).
+func TestSettingsDelete_NoParentPruning(t *testing.T) {
+	_, p := settingsTestEnv(t)
+
+	// Stage two siblings under harnesses.claude-code.roles plus a peer
+	// (.args) under the grandparent harnesses.claude-code.
+	if err := SettingsPatch("harnesses.claude-code.args", []string{"--flag"}); err != nil {
+		t.Fatalf("SettingsPatch args: %v", err)
+	}
+	if err := SettingsPatch("harnesses.claude-code.roles.lead", "opus"); err != nil {
+		t.Fatalf("SettingsPatch lead: %v", err)
+	}
+	if err := SettingsPatch("harnesses.claude-code.roles.worker", "sonnet"); err != nil {
+		t.Fatalf("SettingsPatch worker: %v", err)
+	}
+
+	if err := SettingsDelete("harnesses.claude-code.roles.lead"); err != nil {
+		t.Fatalf("SettingsDelete: %v", err)
+	}
+
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read %s: %v", p, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	harnesses, ok := doc["harnesses"].(map[string]any)
+	if !ok {
+		t.Fatalf("harnesses missing or not an object: %v", doc["harnesses"])
+	}
+	cc, ok := harnesses["claude-code"].(map[string]any)
+	if !ok {
+		t.Fatalf("harnesses.claude-code missing or not an object: %v", harnesses["claude-code"])
+	}
+
+	// Assertion 1: parent stays present.
+	roles, ok := cc["roles"].(map[string]any)
+	if !ok {
+		t.Fatalf("harnesses.claude-code.roles missing or not an object: %v", cc["roles"])
+	}
+	// Assertion 2: sibling under same parent survives.
+	if roles["worker"] != "sonnet" {
+		t.Errorf("sibling roles.worker should survive peer delete, got %v", roles["worker"])
+	}
+	if _, present := roles["lead"]; present {
+		t.Errorf("roles.lead should be absent after delete")
+	}
+	// Assertion 3: grandparent's other child unchanged.
+	args, ok := cc["args"].([]any)
+	if !ok {
+		t.Fatalf("harnesses.claude-code.args missing or not an array: %v", cc["args"])
+	}
+	if len(args) != 1 || args[0] != "--flag" {
+		t.Errorf("grandparent's peer .args mutated unexpectedly: got %v, want [--flag]", args)
+	}
+
+	// Round-trip absent: a second delete on the now-absent path must be
+	// a strict no-op — no write, no mtime bump.
+	beforeStat, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("stat before second delete: %v", err)
+	}
+	if err := SettingsDelete("harnesses.claude-code.roles.lead"); err != nil {
+		t.Fatalf("second SettingsDelete (idempotent): %v", err)
+	}
+	afterStat, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("stat after second delete: %v", err)
+	}
+	if !afterStat.ModTime().Equal(beforeStat.ModTime()) {
+		t.Errorf("mtime bumped on absent-path second delete: before=%v after=%v",
+			beforeStat.ModTime(), afterStat.ModTime())
+	}
+}
+
+// Absent-path delete is byte-identical: no rename, no reformatting, no
+// whitespace change. The contract says "an absent delete writes nothing"
+// — verified by capturing the file's bytes before and after the call.
+// This is what makes SettingsDelete safe to invoke speculatively when
+// the configurator's tab navigation lands on an absent overlay field.
+func TestSettingsDelete_AbsentIsByteIdentical(t *testing.T) {
+	_, p := settingsTestEnv(t)
+
+	// Stage a file with deliberately non-canonical formatting (a foreign
+	// writer's whitespace) — if SettingsDelete on an absent key
+	// re-marshals via MarshalIndent it will trample this layout.
+	original := "{\n\"version\": 1,\n  \"active_framework\":\"opencode\"\n}\n"
+	writeSettings(t, p, original)
+
+	if err := SettingsDelete("nonexistent.path"); err != nil {
+		t.Fatalf("SettingsDelete absent: %v", err)
+	}
+
+	after, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	if string(after) != original {
+		t.Errorf("file mutated on absent-delete: got %q, want %q", string(after), original)
+	}
+}
+
+// Missing settings.json → SettingsDelete is a no-op (does not create the
+// file). Mirrors the bash side's `[[ -f $SETTINGS_FILE ]] || return 0`.
+func TestSettingsDelete_MissingFileIsNoOp(t *testing.T) {
+	_, p := settingsTestEnv(t)
+	if _, err := os.Stat(p); err == nil {
+		t.Fatal("settings.json should not exist before Delete")
+	}
+
+	if err := SettingsDelete("anything.at.all"); err != nil {
+		t.Fatalf("SettingsDelete on missing file: %v", err)
+	}
+	if _, err := os.Stat(p); err == nil {
+		t.Errorf("SettingsDelete on missing file must not create %s", p)
+	}
+}
+
+// Idempotent repeated delete: a second delete of the same path is a no-op.
+func TestSettingsDelete_IdempotentRepeated(t *testing.T) {
+	settingsTestEnv(t)
+
+	if err := SettingsPatch("roles.lead", "opus"); err != nil {
+		t.Fatalf("SettingsPatch: %v", err)
+	}
+	if err := SettingsDelete("roles.lead"); err != nil {
+		t.Fatalf("first SettingsDelete: %v", err)
+	}
+	if err := SettingsDelete("roles.lead"); err != nil {
+		t.Fatalf("second SettingsDelete (idempotent no-op): %v", err)
+	}
+	raw, present, err := SettingsGet("roles.lead")
+	if err != nil || present || raw != "" {
+		t.Errorf("after two deletes: got (%q, %v) err=%v, want (\"\", false, nil)", raw, present, err)
+	}
+}
+
+func TestSettingsDelete_RejectsEmptyPath(t *testing.T) {
+	settingsTestEnv(t)
+	if err := SettingsDelete(""); err == nil {
+		t.Fatal("expected error for empty path, got nil")
+	}
+}
+
+// Malformed JSON on disk → SettingsError; file untouched. The configurator
+// must surface the parse error rather than overwrite the user's file.
+func TestSettingsDelete_MalformedJSON_ReturnsSettingsError(t *testing.T) {
+	_, p := settingsTestEnv(t)
+	const malformed = `not even close to JSON`
+	writeSettings(t, p, malformed)
+
+	err := SettingsDelete("roles.lead")
+	if err == nil {
+		t.Fatal("expected SettingsError for malformed JSON, got nil")
+	}
+	if _, ok := err.(*SettingsError); !ok {
+		t.Errorf("error type = %T, want *SettingsError; err = %v", err, err)
+	}
+	after, _ := os.ReadFile(p)
+	if string(after) != malformed {
+		t.Errorf("file mutated on parse failure: got %q, want %q", string(after), malformed)
+	}
+}
+
+// Non-object intermediate must error rather than silently destroy the
+// scalar — mirrors SettingsPatch's safety on the same path shape.
+func TestSettingsDelete_RejectsNonObjectIntermediate(t *testing.T) {
+	_, p := settingsTestEnv(t)
+	writeSettings(t, p, `{"version":1,"roles":"not-an-object"}`)
+
+	err := SettingsDelete("roles.lead")
+	if err == nil {
+		t.Fatal("expected error deleting through non-object intermediate, got nil")
+	}
+	data, _ := os.ReadFile(p)
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if doc["roles"] != "not-an-object" {
+		t.Errorf("roles mutated unexpectedly: %v", doc["roles"])
+	}
+}
+
+// Delete of a key whose value is explicit JSON null still removes the key.
+// SettingsDelete treats present-key uniformly regardless of leaf value.
+func TestSettingsDelete_ExplicitNullValue(t *testing.T) {
+	_, p := settingsTestEnv(t)
+	writeSettings(t, p, `{"version":1,"roles":{"lead":null,"default":"sonnet"}}`)
+
+	if err := SettingsDelete("roles.lead"); err != nil {
+		t.Fatalf("SettingsDelete: %v", err)
+	}
+	raw, present, err := SettingsGet("roles.lead")
+	if err != nil || present || raw != "" {
+		t.Errorf("after delete of null: got (%q, %v) err=%v, want (\"\", false, nil)", raw, present, err)
+	}
+	raw, present, err = SettingsGet("roles.default")
+	if err != nil || !present || raw != `"sonnet"` {
+		t.Errorf("sibling roles.default lost: got (%q, %v) err=%v", raw, present, err)
+	}
+}
+
+// Delete on one path preserves unrelated keys verbatim.
+func TestSettingsDelete_PreservesUnrelatedKeys(t *testing.T) {
+	_, p := settingsTestEnv(t)
+	writeSettings(t, p, `{
+		"version": 1,
+		"active_framework": "claude-code",
+		"capability_overrides": {"stop_hook": "full"},
+		"roles": {"lead": "opus", "default": "sonnet"}
+	}`)
+
+	if err := SettingsDelete("roles.lead"); err != nil {
+		t.Fatalf("SettingsDelete: %v", err)
+	}
+
+	data, _ := os.ReadFile(p)
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if doc["active_framework"] != "claude-code" {
+		t.Errorf("active_framework mutated: %v", doc["active_framework"])
+	}
+	roles := doc["roles"].(map[string]any)
+	if _, present := roles["lead"]; present {
+		t.Errorf("roles.lead should be absent")
+	}
+	if roles["default"] != "sonnet" {
+		t.Errorf("roles.default mutated: %v", roles["default"])
+	}
+	caps := doc["capability_overrides"].(map[string]any)
+	if caps["stop_hook"] != "full" {
+		t.Errorf("capability_overrides.stop_hook mutated: %v", caps["stop_hook"])
+	}
+}
+
 func TestSettingsFallbacks_ListsLegacyFilesWhenUnifiedAbsent(t *testing.T) {
 	dataDir, _ := settingsTestEnv(t)
 	configDir := filepath.Join(dataDir, "config")
@@ -374,12 +651,15 @@ func TestSettingsFallbacks_ListsLegacyFilesWhenUnifiedAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SettingsFallbacks: %v", err)
 	}
+	// Multi-vault keyed shape: the obsidian fallback collapses from two
+	// per-key entries (vault_path, repo_path) to a single whole-file entry
+	// (`<all>`) — the legacy file is consulted as a unit during fallback
+	// synthesis, mirroring how ceremonies.json reports.
 	want := map[string]bool{
 		"framework.json::framework":            true,
 		"framework.json::capability_overrides": true,
 		"framework.json::roles":                true,
-		"obsidian.json::vault_path":            true,
-		"obsidian.json::repo_path":             true,
+		"obsidian.json::<all>":                 true,
 	}
 	for _, row := range got {
 		if !want[row] {

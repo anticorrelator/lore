@@ -5,18 +5,18 @@
 
 set -euo pipefail
 
-# Gate: if lore agent integration is disabled, exit non-zero with empty output.
-# This triggers the `|| exit 0` pattern in all SessionStart hook scripts, making them no-op.
-# Check order: LORE_AGENT_DISABLED env var (session override) then agent.json.enabled field.
-_LORE_DATA_DIR="${LORE_DATA_DIR:-$HOME/.lore}"
-if [[ "${LORE_AGENT_DISABLED:-}" == "1" ]]; then
-  exit 1
-fi
-_AGENT_JSON="${_LORE_DATA_DIR}/config/agent.json"
-if [[ -f "$_AGENT_JSON" ]] && grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$_AGENT_JSON"; then
-  exit 1
-fi
-unset _LORE_DATA_DIR _AGENT_JSON
+# resolve-repo.sh is a PURE path resolver — it never gates on the agent
+# integration toggle. The previous "exit 1 when lore agent is disabled" gate
+# here was load-bearing for hook scripts (load-knowledge.sh / load-work.sh /
+# load-threads.sh use the `... || exit 0` pattern to no-op on disable), but
+# it ALSO disabled every other consumer of `lore resolve` — the TUI, manual
+# `lore work`/`lore search`/`lore capture` calls, and any user shell-script
+# that asked "where is my knowledge dir?". Disabling the agent integration
+# should only quiet the harness hooks, not the CLI.
+#
+# The disable check now lives in `lore_agent_enabled` (scripts/lib.sh) and
+# the three SessionStart hook scripts call it explicitly before invoking
+# this resolver. See load-knowledge.sh / load-work.sh / load-threads.sh.
 
 # Short-circuit: if LORE_KNOWLEDGE_DIR is set, use it directly.
 # This allows tests to override resolution without mutating this file.

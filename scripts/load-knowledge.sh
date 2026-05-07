@@ -11,6 +11,14 @@ SCRIPT_NAME="load-knowledge"
 trap 'echo "[hook] $SCRIPT_NAME: Failed at line $LINENO with exit code $?" >&2' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Hook no-op when the lore agent integration is disabled. This used to be
+# enforced inside resolve-repo.sh, but that ALSO blocked the CLI / TUI from
+# resolving the knowledge dir. The gate now lives at the hook entrypoints
+# where it actually belongs.
+source "$SCRIPT_DIR/lib.sh"
+lore_agent_enabled || exit 0
+
 KNOWLEDGE_DIR=$("$SCRIPT_DIR/resolve-repo.sh" 2>/dev/null) || exit 0
 
 # If no knowledge store exists, show cold-start message
@@ -21,8 +29,6 @@ Run `/memory init` to initialize one. Non-git directories require `/memory init 
 EOF
   exit 0
 fi
-
-source "$SCRIPT_DIR/lib.sh"
 
 BUDGET=8000
 CHARS_USED=0

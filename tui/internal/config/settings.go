@@ -77,9 +77,7 @@ var settingsFallbackTable = []settingsFallbackPair{
 	{"capability_overrides", "framework.json", "capability_overrides", false},
 	{"roles", "framework.json", "roles", false},
 	{"harnesses", "harness-args.json", "harnesses", false},
-	{"agent.enabled", "agent.json", "enabled", false},
-	{"obsidian.vault_path", "obsidian.json", "vault_path", false},
-	{"obsidian.repo_path", "obsidian.json", "repo_path", false},
+	{"obsidian.vaults", "obsidian.json", "<all>", false},
 	{"ceremonies", "ceremonies.json", "<all>", true},
 }
 
@@ -106,6 +104,13 @@ func SettingsPath() string {
 
 func settingsLockPath() string {
 	return filepath.Join(settingsConfigDir(), ".settings.lock")
+}
+
+// LoadSettingsDocument is the exported alias for loadSettingsDocument.
+// Exposed so the host TUI can implement the settings.SettingsStore interface
+// without duplicating the missing-file / malformed-JSON contract.
+func LoadSettingsDocument() (map[string]any, error) {
+	return loadSettingsDocument()
 }
 
 // loadSettingsDocument reads settings.json into a generic map. Missing file →
@@ -372,6 +377,182 @@ func SettingsPatch(dotPath string, value any) error {
 	}
 	if err := setSettingsDotPath(doc, dotPath, roundtrip); err != nil {
 		return err
+	}
+
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal settings doc: %w", err)
+	}
+	out = append(out, '\n')
+
+	tmp, err := os.CreateTemp(configDir, ".settings.*.tmp")
+	if err != nil {
+		return fmt.Errorf("create tempfile in %s: %w", configDir, err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = os.Remove(tmpPath)
+	}
+	if _, err := io.WriteString(tmp, string(out)); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("write tempfile %s: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("close tempfile %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, settingsPath); err != nil {
+		cleanup()
+		return fmt.Errorf("rename %s -> %s: %w", tmpPath, settingsPath, err)
+	}
+	return nil
+}
+
+// deleteSettingsDotPath removes the leaf at dot_path inside doc. Returns
+// (mutated, nil) when a key was removed, (false, nil) when the path was
+// absent at any segment (idempotent no-op), or (false, err) when an
+// intermediate segment exists but is not a map. Mirrors the bash side's
+// jq `delpaths([$path])` semantics: absent paths are silent no-ops; only
+// the leaf is removed (no parent pruning).
+func deleteSettingsDotPath(doc map[string]any, dotPath string) (mutated bool, err error) {
+	if dotPath == "" {
+		return false, fmt.Errorf("SettingsDelete: empty path")
+	}
+	segments := strings.Split(dotPath, ".")
+	node := doc
+	for i, segment := range segments[:len(segments)-1] {
+		next, exists := node[segment]
+		if !exists {
+			return false, nil
+		}
+		child, ok := next.(map[string]any)
+		if !ok {
+			return false, fmt.Errorf(
+				"SettingsDelete: cannot descend into non-object at %q (path: %s, segment %d)",
+				segment, dotPath, i,
+			)
+		}
+		node = child
+	}
+	leaf := segments[len(segments)-1]
+	if _, present := node[leaf]; !present {
+		return false, nil
+	}
+	delete(node, leaf)
+	return true, nil
+}
+
+// SettingsDelete removes the leaf at the dot-separated path under the same
+// D5a flock+atomic-rename contract as SettingsPatch. The Delete boundary
+// contract (D9):
+//
+//   - Idempotent on absent paths: deleting a path that is not present
+//     returns nil and writes nothing — settings.json is byte-identical
+//     before and after the call. Tab-through navigation in the TUI
+//     configurator must not materialize an overlay; this contract is what
+//     makes SettingsDelete safe to call speculatively.
+//
+//   - No parent pruning: removing the leaf leaves emptied parent objects
+//     in place (e.g., deleting `harnesses.claude-code.roles.lead` leaves
+//     `harnesses.claude-code.roles == {}`). The configurator surfaces
+//     "explicit-empty" as a distinct state from "absent" per D9.
+//
+//   - No whole-doc validation: this is a structural delete, not a schema
+//     check. Closed-set validation lives one layer up.
+//
+//   - Errors leave settings.json intact: lock-acquire, JSON parse, or
+//     atomic-rename failure returns an error without touching the on-disk
+//     file. A non-object intermediate (e.g. `roles == "string"`, then
+//     `SettingsDelete("roles.lead")`) errors rather than silently
+//     destroying the scalar.
+//
+// Asymmetry with SettingsPatch (load-bearing per D9, do not "fix"):
+// SettingsPatch auto-creates intermediate objects (`setSettingsDotPath`
+// above); SettingsDelete deliberately does NOT. An absent intermediate
+// short-circuits to nil without writing — this is what makes tab-through
+// navigation in the configurator safe. A future "auto-create on Delete
+// for symmetry with Patch" change is a bug, not a cleanup.
+//
+// Foreign-writer ordering preservation: SettingsPatch re-marshals via
+// json.MarshalIndent which sorts keys alphabetically, so a Patch already
+// drifts key order from whatever a foreign writer produced. The
+// absent-path branch of SettingsDelete is the ONLY write-path op that
+// preserves on-disk ordering verbatim — a future "consolidate the
+// absent-path branch into the always-write path for consistency" change
+// is a regression, not a cleanup.
+//
+// Caller boundary (configurator scope): keys whose mutation must route
+// through purpose-built paths — `harnesses.<fw>.enabled` (must go via
+// scripts/harness-toggle/{enable,disable}.sh, which fans skill+agent
+// symlinks and the instruction file alongside the bool flip) and
+// `active_framework` (closed-set validated, written via SettingsPatch
+// per D8) — MUST NEVER be passed to SettingsDelete. The Delete primitive
+// itself cannot enforce this without coupling to the schema; the widget
+// layer (D4 WidgetRegistry / D8 PrimaryRadio / per-harness toggle widget
+// inside HarnessBlockPanel) owns the constraint. Documented here so the
+// contract is visible at the API boundary, not just at the call sites.
+//
+// Bash counterpart: scripts/settings.sh cmd_delete (uses `jq
+// 'delpaths([$path])'` with the path-array form to handle kebab-case keys
+// like `claude-code` that would parse as subtraction in jq's
+// string-interpolated property syntax).
+func SettingsDelete(dotPath string) error {
+	if dotPath == "" {
+		return fmt.Errorf("SettingsDelete requires a path")
+	}
+	configDir := settingsConfigDir()
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return fmt.Errorf("create %s: %w", configDir, err)
+	}
+
+	settingsLockMutex.Lock()
+	defer settingsLockMutex.Unlock()
+
+	lockPath := settingsLockPath()
+	lockFD, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		return fmt.Errorf("open lock %s: %w", lockPath, err)
+	}
+	defer lockFD.Close()
+
+	if err := syscall.Flock(int(lockFD.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("acquire flock on %s: %w", lockPath, err)
+	}
+	defer syscall.Flock(int(lockFD.Fd()), syscall.LOCK_UN)
+
+	settingsPath := SettingsPath()
+	data, readErr := os.ReadFile(settingsPath)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			// Missing file → nothing to delete; idempotent no-op.
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", settingsPath, readErr)
+	}
+
+	var parsed any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return &SettingsError{
+			msg: fmt.Sprintf("invalid JSON in %s: %v — run `lore doctor` to diagnose", settingsPath, err),
+		}
+	}
+	doc, ok := parsed.(map[string]any)
+	if !ok {
+		return &SettingsError{
+			msg: fmt.Sprintf("invalid JSON in %s: top-level value is not an object", settingsPath),
+		}
+	}
+
+	mutated, err := deleteSettingsDotPath(doc, dotPath)
+	if err != nil {
+		return err
+	}
+	if !mutated {
+		// Absent path: contract requires byte-identical settings.json.
+		// Skip the write entirely so any whitespace/ordering produced by
+		// a foreign writer is preserved verbatim.
+		return nil
 	}
 
 	out, err := json.MarshalIndent(doc, "", "  ")

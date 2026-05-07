@@ -12,7 +12,15 @@
 #   --work-hubs                   Regenerate hub notes only into the configured vault
 #   --help, -h                    Print usage
 #
-# Vault config:    ~/.lore/config/obsidian.json (`schema_version`, `vault_path`, `repo_path`)
+# Vault config:    ~/.lore/config/settings.json::obsidian.vaults["<kb-key>"]
+#                  where <kb-key> = $KDIR with `$LORE_DATA_DIR/repos/` stripped
+#                  (i.e. `resolve-repo.sh` output minus the LORE_DATA_DIR prefix).
+#                  Each entry: `{"enabled": bool, "vault_path": "<abs>"}`.
+#                  Multiple KBs may have entries simultaneously — sync is
+#                  per-KB, never global.
+# Legacy fallbacks (deprecation window, both gated on repo_path == $KDIR):
+#   ~/.lore/config/settings.json::obsidian.{vault_path,repo_path}  (pre-multi-vault)
+#   ~/.lore/config/obsidian.json                                    (pre-T2 file)
 # Vault marker:    <vault>/.lore-obsidian-mirror.json
 #                  (`schema_version`, `initialized_at`, `repo_path`, `mirror_ignore`)
 #
@@ -39,13 +47,26 @@ SETTINGS_SH="$SCRIPT_DIR/settings.sh"
 MARKER_BASENAME=".lore-obsidian-mirror.json"
 SCHEMA_VERSION=1
 
+# Canonical graph-view exclusion filter. Work and thread items cross-link into
+# every knowledge category, which tangles the graph view into a hairball; this
+# filter keeps them mirrored (so [[_work/<slug>]] links still resolve when
+# clicked) but suppresses them as graph nodes.
+#
+# Field ownership: graph.json::search is LORE-MANAGED (re-asserted on every
+# --full); every other field in graph.json is OBSIDIAN-MANAGED (zoom, repel,
+# color groups, etc.). The split is structural — the exclusion filter is
+# load-bearing for graph legibility and must be drift-free; UI prefs are
+# interactive state we have no business owning. See reseed_graph_search_filter.
+CANONICAL_GRAPH_SEARCH='-path:"_work/" -path:"_threads/"'
+
 usage() {
   cat >&2 <<EOF
 export-obsidian.sh — mirror lore knowledge store into an Obsidian vault
 
 Usage:
   export-obsidian.sh --init <vault-path>
-      Write ~/.lore/config/obsidian.json and the vault marker, then run --full.
+      Bind the current knowledge base to <vault-path> in
+      settings.json::obsidian.vaults, write the vault marker, then run --full.
 
   export-obsidian.sh [<vault-path>] --full [--allow-collisions]
       Authoritative whole-tree reconciliation. <vault-path> overrides the
@@ -72,6 +93,61 @@ EOF
 die_user() {
   echo "Error: $*" >&2
   exit 1
+}
+
+# kb_key_for_kdir <abs-kdir> — strip `$LORE_DATA_DIR/repos/` prefix to yield
+# the per-KB identifier used as a key under settings.json::obsidian.vaults.
+# Falls through to the absolute KDIR when the prefix doesn't match (degenerate
+# LORE_KNOWLEDGE_DIR-override cases used in tests). The lookup is a plain
+# string key, so any non-empty value works — but a stable
+# `<host>/<owner>/<repo>` shape is what `resolve-repo.sh` produces and what
+# the install-base enumeration uses, so prefer the prefix-stripped form
+# whenever the path layout permits.
+kb_key_for_kdir() {
+  local kdir="$1"
+  local prefix="$LORE_DATA_DIR/repos/"
+  if [[ "$kdir" == "$prefix"* ]]; then
+    printf '%s' "${kdir#$prefix}"
+  else
+    printf '%s' "$kdir"
+  fi
+}
+
+# reseed_graph_search_filter <vault-abs-path>
+#
+# Re-asserts the canonical graph-view exclusion filter into
+# `<vault>/.obsidian/graph.json::search`, leaving every other field alone.
+# Called from --full so the exclusion is self-healing across exports — Obsidian
+# rewrites graph.json on every graph-view interaction (clearing the search box,
+# adjusting zoom/repel, editing color groups), and an unprotected `search`
+# field drifts to "" within minutes of normal use, at which point work/thread
+# items reappear as graph nodes and the user sees the hairball this filter
+# was added to prevent.
+#
+# Bails when graph.json doesn't exist (only --init creates it, by design — we
+# don't presume to materialize a .obsidian/ tree from a non-init mode). Bails
+# also when the search field already matches, so unchanged content preserves
+# mtime and doesn't churn Obsidian's file-watcher.
+#
+# Implementation note: jq path-array form is overkill here (the key is plain
+# `search`, no kebab-case hazards), so the dot-path mutation is safe.
+reseed_graph_search_filter() {
+  local vault="$1"
+  local graph_file="$vault/.obsidian/graph.json"
+  [[ -f "$graph_file" ]] || return 0
+  local current
+  current=$(jq -r '.search // ""' "$graph_file" 2>/dev/null || true)
+  if [[ "$current" == "$CANONICAL_GRAPH_SEARCH" ]]; then
+    return 0
+  fi
+  local tmp="$graph_file.tmp.$$"
+  if jq --arg s "$CANONICAL_GRAPH_SEARCH" '.search = $s' "$graph_file" > "$tmp"; then
+    mv "$tmp" "$graph_file"
+    echo "[export-obsidian] re-asserted graph search filter: $graph_file" >&2
+  else
+    rm -f "$tmp"
+    echo "[export-obsidian] warn: failed to re-assert graph search filter at $graph_file" >&2
+  fi
 }
 
 # --- arg parse ---
@@ -155,15 +231,30 @@ case "$MODE" in
     fi
     VAULT_ABS="$(cd "$INIT_PATH" && pwd)"
     REPO_ABS="$KDIR"
+    KB_KEY="$(kb_key_for_kdir "$REPO_ABS")"
     mkdir -p "$(dirname "$CONFIG_FILE")"
     NOW="$(timestamp_iso)"
-    # Write the unified settings.json::obsidian section first via the locked
-    # patch helper; this is the canonical home post-T2. The legacy
-    # obsidian.json is also written for the deprecation window so operators
-    # rolling back to a pre-T2 release retain a working vault config.
-    LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" patch obsidian.schema_version "$SCHEMA_VERSION"
-    LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" patch obsidian.vault_path "$(printf '%s' "$VAULT_ABS" | jq -R .)"
-    LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" patch obsidian.repo_path "$(printf '%s' "$REPO_ABS" | jq -R .)"
+    # Write the unified settings.json::obsidian.vaults["<kb-key>"] entry via
+    # cmd_section + jq mutation + cmd_patch on the whole `obsidian` section.
+    # Patching the section in one shot avoids dot-path splitting on kb-keys
+    # that contain '.' or '/' (e.g. github.com/anticorrelator/lore would be
+    # mangled by `cmd_patch obsidian.vaults.github.com/...`). The legacy
+    # ~/.lore/config/obsidian.json is also written for the deprecation window
+    # so operators rolling back to pre-multi-vault retain a working vault
+    # config (single-slot; clobbered on subsequent --init for a different
+    # KDIR — pre-multi-vault could only honor one vault anyway).
+    CURRENT_OBSIDIAN=$(LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" section obsidian)
+    NEW_OBSIDIAN=$(printf '%s' "$CURRENT_OBSIDIAN" | jq \
+      --arg kb "$KB_KEY" \
+      --arg vault "$VAULT_ABS" \
+      '
+      # Drop legacy single-vault keys when promoting to the keyed shape.
+      del(.vault_path) | del(.repo_path) | del(.schema_version)
+      # Initialize vaults map if missing, then upsert this entry.
+      | (.vaults //= {})
+      | .vaults[$kb] = ((.vaults[$kb] // {}) + {enabled: true, vault_path: $vault})
+      ')
+    LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" patch obsidian "$NEW_OBSIDIAN"
     python3 - "$CONFIG_FILE" "$VAULT_ABS" "$REPO_ABS" "$SCHEMA_VERSION" <<'PY'
 import json, sys
 config_file, vault_path, repo_path, schema_version = sys.argv[1:5]
@@ -191,23 +282,18 @@ with open(marker_file, "w") as fh:
     fh.write("\n")
 PY
     # Seed .obsidian/graph.json on first init only (D3) — never touch an
-    # existing graph.json so user customizations made inside Obsidian persist.
+    # existing graph.json's non-search fields so user customizations made
+    # inside Obsidian (zoom, repel, color groups) persist. The `search` field
+    # is the sole exception per the field-ownership split documented at
+    # CANONICAL_GRAPH_SEARCH; --full re-asserts it every run.
     OBSIDIAN_DIR="$VAULT_ABS/.obsidian"
     GRAPH_FILE="$OBSIDIAN_DIR/graph.json"
     if [[ ! -e "$GRAPH_FILE" ]]; then
       mkdir -p "$OBSIDIAN_DIR"
-      python3 - "$GRAPH_FILE" <<'PY'
-import json, sys
-graph_file = sys.argv[1]
-data = {
-    "search": "-path:\"_work/\" -path:\"_threads/\"",
-}
-with open(graph_file, "w") as fh:
-    json.dump(data, fh, indent=2)
-    fh.write("\n")
-PY
+      printf '%s\n' '{}' > "$GRAPH_FILE"
       echo "[export-obsidian] seeded:           $GRAPH_FILE"
     fi
+    reseed_graph_search_filter "$VAULT_ABS"
     echo "[export-obsidian] initialized vault: $VAULT_ABS"
     echo "[export-obsidian] config:           $CONFIG_FILE"
     echo "[export-obsidian] marker:           $MARKER_FILE"
@@ -219,35 +305,74 @@ esac
 
 # --- Resolve vault for non-init modes ---
 # Returns: empty string when no config and no explicit; else absolute vault path.
-# Resolution order:
+# Resolution order (multi-vault aware):
 #   1. EXPLICIT_VAULT positional argument
-#   2. Unified settings.json::obsidian.vault_path (primary post-T2)
-#   3. Legacy obsidian.json::vault_path (deprecation-window fallback)
+#   2. settings.json::obsidian.vaults["<kb-key>"] when enabled (or `enabled`
+#      absent — absence treated as `true` per schema doc) AND vault_path
+#      non-empty
+#   3. Legacy unified flat: settings.json::obsidian.vault_path, gated on
+#      obsidian.repo_path == $KDIR (so a stale flat config for a different
+#      KB doesn't redirect this one's sync)
+#   4. Legacy file: ~/.lore/config/obsidian.json, gated on its repo_path == $KDIR
 resolve_vault() {
   if [[ -n "$EXPLICIT_VAULT" ]]; then
     echo "$EXPLICIT_VAULT"
     return 0
   fi
-  # Unified file
-  local unified_raw vault_path
-  unified_raw=$(LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" get obsidian.vault_path 2>/dev/null || true)
-  if [[ -n "$unified_raw" ]]; then
-    vault_path=$(printf '%s' "$unified_raw" | jq -r '. // empty' 2>/dev/null)
+
+  local kb_key
+  kb_key="$(kb_key_for_kdir "$KDIR")"
+
+  # (2) Multi-vault keyed entry. Pull the obsidian section as JSON and run a
+  # single jq query that honors the kb-key as a literal string (avoids the
+  # dot-path mangling that `cmd_get obsidian.vaults.<kb>...` would suffer when
+  # kb contains '.' or '/').
+  local section vault_path
+  section=$(LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" section obsidian 2>/dev/null || echo '{}')
+  if [[ -n "$section" && "$section" != "{}" ]]; then
+    vault_path=$(printf '%s' "$section" | jq -r --arg kb "$kb_key" '
+      (.vaults[$kb] // null) as $e
+      | if ($e | type) == "object"
+          and (($e.enabled // true) == true)
+          and (($e.vault_path // "") != "")
+        then $e.vault_path
+        else empty
+        end
+    ' 2>/dev/null)
+    if [[ -n "$vault_path" ]]; then
+      echo "$vault_path"
+      return 0
+    fi
+
+    # (3) Legacy unified flat shape — only when its repo_path matches the
+    # current KDIR. Without this guard a stale single-vault binding would
+    # redirect every KB's sync to one vault.
+    vault_path=$(printf '%s' "$section" | jq -r --arg kdir "$KDIR" '
+      if ((.repo_path // "") == $kdir)
+         and (((.vault_path // "") | type) == "string")
+         and ((.vault_path // "") != "")
+        then .vault_path
+        else empty
+        end
+    ' 2>/dev/null)
     if [[ -n "$vault_path" ]]; then
       echo "$vault_path"
       return 0
     fi
   fi
-  # Legacy file
+
+  # (4) Legacy file fallback — gated on repo_path == $KDIR for the same reason.
   if [[ -f "$CONFIG_FILE" ]]; then
-    python3 - "$CONFIG_FILE" <<'PY' || true
+    python3 - "$CONFIG_FILE" "$KDIR" <<'PY' || true
 import json, sys
 try:
     with open(sys.argv[1]) as fh:
         d = json.load(fh)
-    p = d.get("vault_path")
-    if isinstance(p, str) and p:
-        print(p)
+    repo = d.get("repo_path")
+    vault = d.get("vault_path")
+    if isinstance(repo, str) and repo == sys.argv[2] \
+       and isinstance(vault, str) and vault:
+        print(vault)
 except Exception:
     pass
 PY
@@ -305,6 +430,17 @@ case "$MODE" in
     require_marker "$VAULT"
     ;;
 esac
+
+# Lore-managed graph filter: re-assert on --full only. Skipped for --file and
+# --work-hubs because those run on every capture/work-hook fire (re-asserting
+# on every keystroke would churn the file Obsidian's watcher polls). --full
+# runs at user-visible checkpoints, which is the right cadence — trades "your
+# ad-hoc graph search box gets cleared on full export" for "your graph
+# exclusion never silently rots." See CANONICAL_GRAPH_SEARCH for the
+# field-ownership rationale.
+if [[ "$MODE" == "full" ]]; then
+  reseed_graph_search_filter "$VAULT"
+fi
 
 # --- Run the engine ---
 # All translation, synthesis, deletion reconciliation, and collision detection

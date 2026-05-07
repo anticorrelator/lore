@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -54,10 +55,16 @@ var HarnessInstallKinds = []string{
 // resolve_harness_install_path.
 const UnsupportedSentinel = "unsupported"
 
-// loreRepoDir resolves the lore repo root by following the
+// LoreRepoDir resolves the lore repo root by following the
 // ~/.lore/scripts -> <repo>/scripts symlink that install.sh creates. This
 // matches the bash convention where lib.sh treats $LORE_LIB_DIR/.. as the
-// repo root.
+// repo root. Exposed so the host TUI can locate adapters/* files
+// (settings.schema.json, capabilities.json) and scripts/agent-toggle/* for
+// the settings configurator.
+func LoreRepoDir() (string, error) {
+	return loreRepoDir()
+}
+
 func loreRepoDir() (string, error) {
 	dataRoot := os.Getenv("LORE_DATA_DIR")
 	if dataRoot == "" {
@@ -117,6 +124,27 @@ type capabilitiesProfile struct {
 // capabilitiesFile is the top-level shape of adapters/capabilities.json.
 type capabilitiesFile struct {
 	Frameworks map[string]capabilitiesProfile `json:"frameworks"`
+}
+
+// LoadCapabilitiesFrameworks returns the sorted list of framework ids declared
+// in adapters/capabilities.json at the supplied path. Exposed so the host TUI
+// can enumerate the active_framework closed-set for the settings configurator
+// without duplicating the parse logic.
+func LoadCapabilitiesFrameworks(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var c capabilitiesFile
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	out := make([]string, 0, len(c.Frameworks))
+	for k := range c.Frameworks {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func loadCapabilitiesFile() (capabilitiesFile, error) {

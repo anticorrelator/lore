@@ -11,6 +11,13 @@ SCRIPT_NAME="load-threads"
 trap 'echo "[hook] $SCRIPT_NAME: Failed at line $LINENO with exit code $?" >&2' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# No-op the hook when the lore agent integration is disabled. The disable
+# check used to live in resolve-repo.sh; moved here so the CLI / TUI can
+# still resolve the knowledge dir while harness hooks stay quiet.
+source "$SCRIPT_DIR/lib.sh"
+lore_agent_enabled || exit 0
+
 KNOWLEDGE_DIR=$("$SCRIPT_DIR/resolve-repo.sh" 2>/dev/null) || exit 0
 
 THREADS_DIR="$KNOWLEDGE_DIR/_threads"

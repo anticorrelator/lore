@@ -74,7 +74,7 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
 | 9 If PR exists or review requested, branch to `/pr-review` | Step 7 sub-step |
 | 10 Prepare `/retro` inputs | Step 7 |
 
-**Lead-inline route variant.** Step 3.0 introduces a pre-dispatch short-circuit. When the plan satisfies the lead-inline conditions (single prescriptive task, ≤3 files, no advisors), §9.2 steps 2–6 collapse into direct lead execution: the lead applies edits using its own tools, emits Tier 2 evidence with `LEAD_TEMPLATE_VERSION`, then jumps to Step 5 (promote) → Step 6 (followup gate) → Step 7 (cleanup). No team is created and no workers spawn.
+**Lead-inline route variant.** Step 3.0 introduces a pre-dispatch short-circuit. When the plan satisfies the lead-inline conditions (single prescriptive task, no advisors — file count is no longer gated), §9.2 steps 2–6 collapse into direct lead execution: the lead applies edits using its own tools, emits Tier 2 evidence with `LEAD_TEMPLATE_VERSION`, then jumps to Step 5 (promote) → Step 6 (followup gate) → Step 7 (cleanup). No team is created and no workers spawn.
 
 ### Step 1: Load work item and validate
 
@@ -167,12 +167,13 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
 
 Before spawning anything, evaluate whether the plan qualifies for **lead-inline execution**. Worker dispatch's value is parallelism across independent tasks plus discretion-bearing context for intent+constraints work; both vanish when the plan reduces to a single fully-determined edit. The ~22KB context tax per spawn plus TeamCreate + TaskCreate + completion round-trip is then pure overhead.
 
-The gate fires when **all four** conditions hold:
+The gate fires when **all three** conditions hold:
 
 1. **Single task** — `tasks.json` contains exactly one task across all phases (count unchecked `- [ ]` entries on `plan.md`'s `**Tasks:**` blocks; cross-check against `tasks.json` task array length).
 2. **Prescriptive format** — the task's containing phase declares `**Task format:** prescriptive` in `plan.md`. Intent+constraints tasks involve worker discretion shaping the outcome; lead-inline removes that discretion channel and is unsafe for them.
-3. **Small surface** — the task's `**Files:**` block lists ≤3 files.
-4. **No advisor declaration** — no phase declares an `**Advisors:**` block, and `lore ceremony get implement` returns `[]`. Advisors are persistent team members tied to the team lifecycle; lead-inline has no team.
+3. **No advisor declaration** — no phase declares an `**Advisors:**` block, and `lore ceremony get implement` returns `[]`. Advisors are persistent team members tied to the team lifecycle; lead-inline has no team.
+
+**No file-count cap.** An earlier version of this gate required ≤3 files. Evidence from the scale-registry-rename cycle (single prescriptive task, 10 verbatim file edits, no discretion) showed the cap was a proxy for "discretion required" that the other three conditions already cover better. Single-task + prescriptive + no-advisors collapses both worker-dispatch values — parallelism across independent tasks, and discretion-bearing context — regardless of file count. A 50-file prescriptive rename is still 50 file edits with no discretion; splitting across workers pays N × ~22KB context tax for no shaping gain. File count is logged below as diagnostic telemetry but does not gate.
 
 **If any condition fails:** skip Step 3.0 entirely and proceed to Step 3 (worker dispatch). Do not log a skip — the worker pipeline is the default.
 
@@ -180,7 +181,7 @@ The gate fires when **all four** conditions hold:
 
 1. **Log the gate firing** — append one line to `execution-log.md` so retro can attribute the route taken:
    ```bash
-   printf 'Lead-inline execution: gate fired\nConditions: single task, prescriptive, %d files, no advisors\nTask: %s\n' \
+   printf 'Lead-inline execution: gate fired\nConditions: single task, prescriptive, no advisors\nFile count (diagnostic): %d\nTask: %s\n' \
      "<file-count>" "<task-subject>" \
      | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
    ```
@@ -528,13 +529,9 @@ bash ~/.lore/scripts/create-followup.sh \
    ```
    Run for every completed task whose checkbox is still unchecked.
 
-3. **Archival decision** — based on the task system, not plan.md:
-   - **All tasks completed:** `lore work archive "<slug>"`
-   - **Some tasks incomplete or blocked:** leave the work item active for later `/implement` resumption
+3. Run `lore work heal`.
 
-4. Run `lore work heal`.
-
-5. **Optional `/pr-review` branch (per §9.2 Step 9, D7).** Query GitHub for a PR open against the current branch and route one of three ways:
+4. **Optional `/pr-review` branch (per §9.2 Step 9, D7).** Query GitHub for a PR open against the current branch and route one of three ways:
 
    ```bash
    BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -552,7 +549,7 @@ bash ~/.lore/scripts/create-followup.sh \
 
    The gate is optional by design: any of the three outcomes lets Step 7 continue. `/pr-review` is purely diagnostic and never blocks `/implement` completion.
 
-6. **Retro-prep bundle (per §9.2 Step 10, D8).** Write a snapshot of this run's producer facts to `$KDIR/_work/<slug>/retro-bundle.json` so `/retro` has a single, stable input artifact. One write per `/implement` run; overwrite on re-run (snapshot semantics — not append, not merge). `/implement` is the sole writer; `/retro` is a read-only consumer.
+5. **Retro-prep bundle (per §9.2 Step 10, D8).** Write a snapshot of this run's producer facts to `$KDIR/_work/<slug>/retro-bundle.json` so `/retro` has a single, stable input artifact. One write per `/implement` run; overwrite on re-run (snapshot semantics — not append, not merge). `/implement` is the sole writer; `/retro` is a read-only consumer.
 
    The bundle has exactly these nine required fields:
 
@@ -578,7 +575,32 @@ bash ~/.lore/scripts/create-followup.sh \
 
    **Overwrite semantics:** on re-run of `/implement` against the same work item, replace the file unconditionally. No append, no merge, no rotation — each run reflects only that run's producer facts. The canonical log files already carry historical data.
 
-7. **Report to user:**
+6. **Archive the completed work item.** This step is mandatory when all tasks are done — it is the structural close of the implement cycle, not a discretionary cleanup. Branch on the task-system completion state (not on plan.md):
+
+   - **All tasks completed:** archive and verify the move:
+     ```bash
+     lore work archive "<slug>"
+     test -d "$KDIR/_work/_archive/<slug>" \
+       || { echo "[implement] FATAL: archive did not move work item to _archive/"; exit 1; }
+     test ! -d "$KDIR/_work/<slug>" \
+       || { echo "[implement] FATAL: archive left work item in active _work/ path"; exit 1; }
+     ```
+     If verification fails, do not proceed to Step 7. Diagnose and re-run archive before rendering the report. Silently skipping archive corrupts the active-vs-archived distinction the work system depends on.
+   - **Some tasks incomplete or blocked:** do not archive. Leave the work item active so a later `/implement` invocation can resume it.
+
+   **Why this is the last step before the report.** The user-facing "Done" report is the natural exit point of `/implement`; once it renders, the operator typically transitions to `/retro` or moves on. Coupling archive to the report (rather than treating it as an earlier optional step) ensures the work item's active/archived state is committed before the cycle visibly closes. Prior versions of this skill placed archive earlier in Step 7 — observed live, the archive call got silently skipped roughly half the time because the report's "consider /retro" line created a perceived clean handoff before archive ran. Placing archive here, with verification, removes that gap.
+
+7. **Report to user.** Before rendering, check that archive ran if it should have:
+
+   ```bash
+   if [ "$REMAINING_COUNT" = "0" ] && [ -d "$KDIR/_work/<slug>" ]; then
+     echo "[implement] FATAL: all tasks completed but work item not archived. Run Step 6 archive before this report."
+     exit 1
+   fi
+   ```
+
+   The report MUST NOT render with a completed-but-unarchived work item. If the precondition fires, return to Step 6 and archive.
+
    ```
    [implement] Done.
    Completed: N/M tasks

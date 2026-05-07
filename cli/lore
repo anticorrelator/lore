@@ -105,7 +105,7 @@ Commands:
   ceremony     Ceremony config management (see: lore ceremony --help)
   config       Read framework/role/capability config (see: lore config --help)
   framework    Diagnose the active harness profile (see: lore framework --help)
-  agent        Agent integration toggle (see: lore agent --help)
+  harness      Per-harness integration toggle (see: lore harness --help)
   scale        Capture-scale helpers (see: lore scale --help)
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
   retro        Federated retro pooling (see: lore retro --help)
@@ -186,16 +186,25 @@ Options:
 EOF
 }
 
-agent_usage() {
+harness_usage() {
   cat >&2 <<EOF
-lore agent — agent integration toggle
+lore harness — per-harness integration toggle
 
-Usage: lore agent <subcommand> [args...]
+Usage: lore harness <subcommand> [<framework>] [args...]
 
 Subcommands:
-  enable     Enable lore agent integration (restores symlinks and CLAUDE.md content)
-  disable    Disable lore agent integration (removes symlinks, clears CLAUDE.md lore region)
-  status     Show current enabled/disabled state
+  enable     Enable lore integration for a harness (restores symlinks + instruction file).
+             Without <framework>, enables every registered harness.
+  disable    Disable lore integration for a harness (removes symlinks, clears instruction file).
+             Without <framework>, disables every registered harness.
+  status     Show enabled/disabled state per harness. Without <framework>, prints all.
+
+Examples:
+  lore harness enable                  # enable all registered harnesses
+  lore harness enable claude-code      # enable just claude-code
+  lore harness disable codex           # disable just codex
+  lore harness status                  # one line per registered harness
+  lore harness status --json           # machine-readable
 
 Options:
   --help, -h    Show this help
@@ -894,10 +903,10 @@ cmd_thread() {
   esac
 }
 
-# --- Agent subgroup ---
-cmd_agent() {
+# --- Harness subgroup ---
+cmd_harness() {
   if [[ $# -eq 0 ]]; then
-    "$SCRIPTS_DIR/agent-toggle/status.sh"
+    "$SCRIPTS_DIR/harness-toggle/status.sh"
     return $?
   fi
 
@@ -906,22 +915,22 @@ cmd_agent() {
 
   case "$subcmd" in
     --help|-h)
-      agent_usage
+      harness_usage
       return 0
       ;;
     enable)
-      "$SCRIPTS_DIR/agent-toggle/enable.sh" "$@"
+      "$SCRIPTS_DIR/harness-toggle/enable.sh" "$@"
       ;;
     disable)
-      "$SCRIPTS_DIR/agent-toggle/disable.sh" "$@"
+      "$SCRIPTS_DIR/harness-toggle/disable.sh" "$@"
       ;;
     status)
-      "$SCRIPTS_DIR/agent-toggle/status.sh" "$@"
+      "$SCRIPTS_DIR/harness-toggle/status.sh" "$@"
       ;;
     *)
-      echo "Error: unknown agent subcommand '$subcmd'" >&2
+      echo "Error: unknown harness subcommand '$subcmd'" >&2
       echo "" >&2
-      agent_usage
+      harness_usage
       return 1
       ;;
   esac
@@ -1787,9 +1796,9 @@ case "$1" in
     shift
     cmd_framework "$@"
     ;;
-  agent)
+  harness)
     shift
-    cmd_agent "$@"
+    cmd_harness "$@"
     ;;
   scale)
     shift

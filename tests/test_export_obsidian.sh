@@ -266,6 +266,21 @@ assert_file_contains "  config has vault_path" "$DATA/config/obsidian.json" "$VA
 assert_file_contains "  config has repo_path" "$DATA/config/obsidian.json" "$KDIR"
 assert_file_contains "  marker has repo_path" "$VAULT/.lore-obsidian-mirror.json" "$KDIR"
 assert_file_contains "  marker has schema_version" "$VAULT/.lore-obsidian-mirror.json" '"schema_version": 1'
+
+# Multi-vault keyed shape: settings.json::obsidian.vaults["<kb-key>"] entry.
+# In tests, LORE_KNOWLEDGE_DIR is set to a path outside $LORE_DATA_DIR/repos/,
+# so kb_key_for_kdir falls through to the absolute KDIR (the prefix-strip is
+# a no-op). Production sets LORE_DATA_DIR/repos/<host>/<owner>/<repo> and the
+# strip yields the relative kb-key.
+assert_file_exists "  unified settings.json created" "$DATA/config/settings.json"
+KB_VAULT=$(jq -r --arg kb "$KDIR" '.obsidian.vaults[$kb].vault_path // empty' "$DATA/config/settings.json")
+assert_eq "  settings.json has obsidian.vaults[<kb>].vault_path" "$KB_VAULT" "$VAULT"
+KB_ENABLED=$(jq -r --arg kb "$KDIR" '.obsidian.vaults[$kb].enabled // empty' "$DATA/config/settings.json")
+assert_eq "  settings.json has obsidian.vaults[<kb>].enabled=true" "$KB_ENABLED" "true"
+# The schema-violating obsidian.schema_version key from the previous shape
+# must not be patched into settings.json — additionalProperties:false on
+# `obsidian` would flag it as a doctor violation.
+assert_file_not_contains "  settings.json has no obsidian.schema_version" "$DATA/config/settings.json" '"schema_version"'
 # --init falls through to a full export
 assert_file_exists "  --init triggered full export (knowledge entry)" "$VAULT/conventions/single-scale.md"
 assert_file_exists "  --init triggered full export (work hub)" "$VAULT/_work.md"
@@ -276,14 +291,28 @@ assert_file_exists "  --init seeded .obsidian/graph.json" "$VAULT/.obsidian/grap
 assert_file_contains "  graph.json contains _work/ filter" "$VAULT/.obsidian/graph.json" "_work/"
 assert_file_contains "  graph.json contains _threads/ filter" "$VAULT/.obsidian/graph.json" "_threads/"
 
-# D3: re-running --init on a vault with a hand-modified graph.json does NOT
-# overwrite the user-customized file.
-echo '{"theme":"custom","search":"user-edit"}' > "$VAULT/.obsidian/graph.json"
-PRE_BYTES=$(shasum "$VAULT/.obsidian/graph.json" | awk '{print $1}')
+# Field-ownership split for graph.json:
+#   * `search` is LORE-MANAGED — re-asserted to the canonical work/thread
+#     exclusion filter on every --full (and --init, which falls through to
+#     --full). The exclusion is structurally load-bearing for graph legibility
+#     and would otherwise rot whenever Obsidian rewrites the file (clearing
+#     the search box, adjusting any graph-view control). User customizations
+#     to `search` do NOT survive — that's the deliberate trade-off.
+#   * Every other field is OBSIDIAN-MANAGED — preserved byte-stable across
+#     re-runs. Zoom, repel, color groups, theme, etc. are interactive UI
+#     state we have no business owning.
+#
+# The test exercises both halves: write a graph.json with a non-canonical
+# search AND a custom non-search field, re-run --init, then assert search
+# was reset to canonical AND the custom field round-tripped untouched.
+echo '{"theme":"custom","search":"user-edit","customZoom":4.2}' > "$VAULT/.obsidian/graph.json"
 run_export --init "$VAULT" >/dev/null 2>&1
-POST_BYTES=$(shasum "$VAULT/.obsidian/graph.json" | awk '{print $1}')
-assert_eq "  --init re-run preserves modified graph.json" "$POST_BYTES" "$PRE_BYTES"
-assert_file_contains "  modified graph.json kept user search" "$VAULT/.obsidian/graph.json" "user-edit"
+POST_SEARCH=$(jq -r '.search' "$VAULT/.obsidian/graph.json")
+assert_eq "  --init re-run re-asserts canonical search filter" "$POST_SEARCH" '-path:"_work/" -path:"_threads/"'
+POST_THEME=$(jq -r '.theme' "$VAULT/.obsidian/graph.json")
+assert_eq "  --init re-run preserves user-managed theme field" "$POST_THEME" "custom"
+POST_ZOOM=$(jq -r '.customZoom' "$VAULT/.obsidian/graph.json")
+assert_eq "  --init re-run preserves user-managed customZoom field" "$POST_ZOOM" "4.2"
 
 # =======================================================================
 # Test group 3: knowledge entry conversion (D8 variance)
@@ -554,6 +583,73 @@ OUT=$(run_export "$VAULT" --full --allow-collisions 2>&1) ; RC=$?
 assert_exit_zero "  --full --allow-collisions exits 0 (no-op)" "$RC"
 [[ "$OUT" == *"--allow-collisions is now a no-op"* ]] && assert_pass "  --allow-collisions emits deprecation notice" || assert_fail "  --allow-collisions emits deprecation notice" "got: $OUT"
 [[ "$OUT" == *"will be removed in a future release"* ]] && assert_pass "  deprecation notice mentions future removal" || assert_fail "  deprecation notice mentions future removal" "got: $OUT"
+
+# =======================================================================
+# Test group 13b: legacy-shape fallback (multi-vault deprecation window)
+#
+# The reader honors two pre-multi-vault config shapes during the deprecation
+# window, both gated on `repo_path == $KDIR` so a stale single-vault binding
+# can't redirect a different KB's sync. Without this guard, every KB on the
+# host would inherit the most-recently-written legacy vault.
+# =======================================================================
+echo ""
+echo "Test 13b: legacy-shape fallback (deprecation window)"
+setup_kdir
+# Initialize the marker (so require_marker passes); manually overwrite
+# settings.json afterward to exercise just the reader.
+run_export --init "$VAULT" >/dev/null 2>&1
+
+# (a) Legacy flat shape inside settings.json with repo_path matching $KDIR:
+# reader must honor it.
+SETTINGS_FILE="$DATA/config/settings.json"
+LEGACY_VAULT="$TEST_DIR/legacy-vault"
+mkdir -p "$LEGACY_VAULT"
+cp "$VAULT/.lore-obsidian-mirror.json" "$LEGACY_VAULT/.lore-obsidian-mirror.json"
+jq --arg v "$LEGACY_VAULT" --arg r "$KDIR" \
+   '.obsidian = {"vault_path": $v, "repo_path": $r}' \
+   "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+rm -f "$DATA/config/obsidian.json"
+OUT=$(run_export --file "$KDIR/conventions/single-scale.md" 2>&1) ; RC=$?
+assert_exit_zero "  legacy flat shape (repo_path match): --file exits 0" "$RC"
+assert_file_exists "  legacy flat shape: vault projection landed" \
+  "$LEGACY_VAULT/conventions/single-scale.md"
+
+# (b) Legacy flat shape with repo_path MISMATCHING $KDIR: reader must reject
+# (silent no-op for --file).
+jq --arg v "$LEGACY_VAULT" --arg r "/nonexistent/other-kdir" \
+   '.obsidian = {"vault_path": $v, "repo_path": $r}' \
+   "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+rm -f "$LEGACY_VAULT/architecture/multi-scale.md" 2>/dev/null
+OUT=$(run_export --file "$KDIR/architecture/multi-scale.md" 2>&1) ; RC=$?
+assert_exit_zero "  legacy flat shape (repo_path mismatch): --file silent no-op" "$RC"
+assert_file_missing "  legacy flat shape mismatch: nothing written" \
+  "$LEGACY_VAULT/architecture/multi-scale.md"
+
+# (c) Keyed shape takes precedence over legacy flat shape when both are
+# present and both would resolve.
+KEYED_VAULT="$TEST_DIR/keyed-vault"
+mkdir -p "$KEYED_VAULT"
+cp "$VAULT/.lore-obsidian-mirror.json" "$KEYED_VAULT/.lore-obsidian-mirror.json"
+jq --arg kb "$KDIR" --arg keyed "$KEYED_VAULT" --arg flat "$LEGACY_VAULT" --arg r "$KDIR" \
+   '.obsidian = {"vaults": {($kb): {"enabled": true, "vault_path": $keyed}}, "vault_path": $flat, "repo_path": $r}' \
+   "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+rm -f "$KEYED_VAULT/architecture/multi-scale.md" "$LEGACY_VAULT/architecture/multi-scale.md" 2>/dev/null
+OUT=$(run_export --file "$KDIR/architecture/multi-scale.md" 2>&1) ; RC=$?
+assert_exit_zero "  keyed-over-flat: --file exits 0" "$RC"
+assert_file_exists "  keyed-shape preferred over flat shape" \
+  "$KEYED_VAULT/architecture/multi-scale.md"
+assert_file_missing "  flat-shape NOT used when keyed entry resolves" \
+  "$LEGACY_VAULT/architecture/multi-scale.md"
+
+# (d) enabled=false on a keyed entry → silent no-op (no flat-shape leak).
+jq --arg kb "$KDIR" --arg keyed "$KEYED_VAULT" \
+   '.obsidian = {"vaults": {($kb): {"enabled": false, "vault_path": $keyed}}}' \
+   "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+rm -f "$KEYED_VAULT/principles.md" 2>/dev/null
+OUT=$(run_export --file "$KDIR/principles/index.md" 2>&1) ; RC=$?
+assert_exit_zero "  keyed entry enabled=false: --file silent no-op" "$RC"
+assert_file_missing "  keyed entry enabled=false: nothing written" \
+  "$KEYED_VAULT/principles.md"
 
 # =======================================================================
 # Test group 14: CLI integration (cli/lore export-obsidian)

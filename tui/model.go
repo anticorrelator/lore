@@ -14,6 +14,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/search"
+	"github.com/anticorrelator/lore/tui/internal/settings"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -154,6 +155,14 @@ type model struct {
 	sessionLaunchedFromModal    bool
 
 	showHelp bool
+
+	// settingsActive flips the configurator modal on top of the current
+	// view. settingsPanel is the schema-driven sub-model that owns the
+	// modal body (D2 body-vs-chrome split). settingsPriorFocus snapshots
+	// the panel focus at modal-open time so Esc-close can restore it.
+	settingsActive      bool
+	settingsPanel       *settings.SettingsModel
+	settingsPriorFocus  panelFocus
 
 	// Confirm modal for archive/delete actions.
 	confirmAction string // "archive", "unarchive", "delete", "post_review", etc.; empty = inactive

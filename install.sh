@@ -320,26 +320,76 @@ def mark(rel_path):
         sources.append(rel_path)
 
 
-# ceremonies.json -> top-level ceremonies.<skill>
+def fan_to_harnesses(doc, key, value):
+    """Set harnesses.<fw>.<key> = value for every existing harness block."""
+    harnesses = dict(doc.get("harnesses", {}))
+    for fw, block in list(harnesses.items()):
+        if not isinstance(block, dict):
+            continue
+        new_block = dict(block)
+        new_block[key] = value
+        harnesses[fw] = new_block
+    doc["harnesses"] = harnesses
+
+
+# ceremonies.json -> harnesses.<fw>.ceremonies for every registered harness.
+# Older unified files used top-level ceremonies as a global default; new
+# settings make ceremony skills harness-local because the available skill
+# surfaces differ by ecosystem.
 ceremonies = load_legacy("ceremonies.json")
 if isinstance(ceremonies, dict):
-    merged = dict(doc.get("ceremonies", {}))
+    merged = {}
+    for fw_block in (doc.get("harnesses") or {}).values():
+        if isinstance(fw_block, dict) and isinstance(fw_block.get("ceremonies"), dict):
+            merged.update(fw_block["ceremonies"])
     for skill, advisors in ceremonies.items():
         if isinstance(advisors, list):
             merged[skill] = advisors
-    doc["ceremonies"] = merged
+    fan_to_harnesses(doc, "ceremonies", merged)
+    doc.pop("ceremonies", None)
     mark("ceremonies.json")
 
-# agent.json -> agent.{enabled, last_changed} (NOT symlink_manifest — D6)
+# agent.json -> per-harness `harnesses.<fw>.enabled`. The legacy global
+# `agent.enabled` flag is fanned uniformly across every framework declared
+# in the (already-migrated) `harnesses` block. `agent.last_changed` is
+# dropped — no consumer beyond a status-display string, and filesystem
+# mtimes serve the same role.
+#
+# Two sources can carry the legacy value: the fragmented `config/agent.json`
+# file, or a stale `agent.enabled` key in the unified document from a prior
+# install that ran the now-retired migration. Read both; the unified-doc
+# value wins on conflict (it represents the most recent toggle).
+legacy_agent_enabled = None
 agent_doc = load_legacy("config/agent.json")
-if isinstance(agent_doc, dict):
-    agent_block = dict(doc.get("agent", {}))
-    if "enabled" in agent_doc:
-        agent_block["enabled"] = bool(agent_doc["enabled"])
-    if "last_changed" in agent_doc and isinstance(agent_doc["last_changed"], str):
-        agent_block["last_changed"] = agent_doc["last_changed"]
-    doc["agent"] = agent_block
+if isinstance(agent_doc, dict) and "enabled" in agent_doc:
+    legacy_agent_enabled = bool(agent_doc["enabled"])
     mark("config/agent.json")
+
+stale_unified_agent = doc.get("agent")
+if isinstance(stale_unified_agent, dict) and "enabled" in stale_unified_agent:
+    legacy_agent_enabled = bool(stale_unified_agent["enabled"])
+# Always strip the deprecated top-level `agent` block — the schema no
+# longer accepts it and the unified loaders reject unknown keys.
+if "agent" in doc:
+    del doc["agent"]
+
+if legacy_agent_enabled is not None:
+    harnesses = dict(doc.get("harnesses", {}))
+    # Fan to every framework that already has a block (post-harness-args
+    # migration). For frameworks not yet in the doc, install.sh's later
+    # template merge will fill in defaults; we don't synthesize an empty
+    # block here just to attach `enabled`.
+    for fw, block in list(harnesses.items()):
+        if not isinstance(block, dict):
+            continue
+        # Only set when absent to avoid clobbering a per-harness override
+        # that may already have been written by harness-toggle in a
+        # previous run.
+        if "enabled" not in block:
+            new_block = dict(block)
+            new_block["enabled"] = legacy_agent_enabled
+            harnesses[fw] = new_block
+    doc["harnesses"] = harnesses
 
 # capture-config.json -> capture.{core, structural_signals, adaptive}
 capture_doc = load_legacy("config/capture-config.json")
@@ -353,13 +403,14 @@ if isinstance(capture_doc, dict):
     doc["capture"] = capture_block
     mark("config/capture-config.json")
 
-# framework.json -> {active_framework, roles, capability_overrides}
+# framework.json -> {active_framework, harnesses.<fw>.roles, capability_overrides}
 framework_doc = load_legacy("config/framework.json")
 if isinstance(framework_doc, dict):
     if isinstance(framework_doc.get("framework"), str):
         doc["active_framework"] = framework_doc["framework"]
     if isinstance(framework_doc.get("roles"), dict):
-        doc["roles"] = framework_doc["roles"]
+        fan_to_harnesses(doc, "roles", framework_doc["roles"])
+        doc.pop("roles", None)
     if isinstance(framework_doc.get("capability_overrides"), dict):
         doc["capability_overrides"] = framework_doc["capability_overrides"]
     mark("config/framework.json")
@@ -379,16 +430,35 @@ if isinstance(harness_args_doc, dict):
     doc["harnesses"] = harnesses
     mark("config/harness-args.json")
 
-# obsidian.json -> obsidian.{vault_path, repo_path}
+# obsidian.json -> obsidian.vaults["<kb-key>"] = { enabled, vault_path }
+#
+# kb-key is the legacy `repo_path` with the `<data_dir>/repos/` prefix stripped
+# (i.e. `resolve-repo.sh` output without the LORE_DATA_DIR-anchored prefix).
+# This matches the identifier the install-base enumeration uses and survives
+# LORE_DATA_DIR moves. A legacy file lacking either `vault_path` or `repo_path`
+# is dropped on the floor — the legacy shape couldn't address a KB without
+# both, and the keyed shape can't either.
 obsidian_doc = load_legacy("config/obsidian.json")
 if isinstance(obsidian_doc, dict):
-    obsidian_block = dict(doc.get("obsidian", {}))
-    for key in ("vault_path", "repo_path"):
-        val = obsidian_doc.get(key)
-        if isinstance(val, str):
-            obsidian_block[key] = val
-    doc["obsidian"] = obsidian_block
-    mark("config/obsidian.json")
+    legacy_vault = obsidian_doc.get("vault_path")
+    legacy_repo  = obsidian_doc.get("repo_path")
+    if (
+        isinstance(legacy_vault, str) and legacy_vault
+        and isinstance(legacy_repo, str) and legacy_repo
+    ):
+        repos_prefix = os.path.join(data_dir, "repos") + os.sep
+        if legacy_repo.startswith(repos_prefix):
+            kb_key = legacy_repo[len(repos_prefix):]
+            if kb_key:
+                obsidian_block = dict(doc.get("obsidian", {}))
+                vaults = dict(obsidian_block.get("vaults", {}))
+                entry = dict(vaults.get(kb_key, {}))
+                entry.setdefault("enabled", True)
+                entry["vault_path"] = legacy_vault
+                vaults[kb_key] = entry
+                obsidian_block["vaults"] = vaults
+                doc["obsidian"] = obsidian_block
+                mark("config/obsidian.json")
 
 # settlement-config.json -> full settlement subtree (drop schema_version /
 # description metadata; the unified shape uses the top-level `version`).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# agent_toggle.bats — Multi-harness fanout coverage for agent-toggle/{enable,disable}.sh
+# agent_toggle.bats — Multi-harness fanout coverage for harness-toggle/{enable,disable}.sh
 #
 # Assertions (per Phase 1 Verification plan):
 #   (a) disable removes lore symlinks from every framework's skills/ and agents/ dirs,
@@ -20,8 +20,8 @@
 REPO_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/../.." && pwd)"
 CAPS="$REPO_DIR/adapters/capabilities.json"
 INSTALL_SH="$REPO_DIR/install.sh"
-DISABLE_SH="$REPO_DIR/scripts/agent-toggle/disable.sh"
-ENABLE_SH="$REPO_DIR/scripts/agent-toggle/enable.sh"
+DISABLE_SH="$REPO_DIR/scripts/harness-toggle/disable.sh"
+ENABLE_SH="$REPO_DIR/scripts/harness-toggle/enable.sh"
 
 # ============================================================
 # Helpers
@@ -75,8 +75,8 @@ seed_lore_region() {
 
 setup() {
   [ -f "$CAPS" ]       || skip "adapters/capabilities.json missing"
-  [ -f "$DISABLE_SH" ] || skip "scripts/agent-toggle/disable.sh missing"
-  [ -f "$ENABLE_SH" ]  || skip "scripts/agent-toggle/enable.sh missing"
+  [ -f "$DISABLE_SH" ] || skip "scripts/harness-toggle/disable.sh missing"
+  [ -f "$ENABLE_SH" ]  || skip "scripts/harness-toggle/enable.sh missing"
   [ -f "$INSTALL_SH" ] || skip "install.sh missing"
   command -v python3 >/dev/null 2>&1 || skip "python3 required"
   command -v jq >/dev/null 2>&1 || skip "jq required (list_supported_frameworks dependency)"
@@ -93,6 +93,7 @@ setup() {
   unset LORE_FRAMEWORK
 
   AGENT_JSON="$TEST_LORE_DATA_DIR/config/agent.json"
+  SETTINGS_JSON="$TEST_LORE_DATA_DIR/config/settings.json"
 
   # Stage per-framework skill/agent install dirs under TEST_HOME so symlinks
   # land in our temp tree, not the user's real ~/.claude or ~/.codex.
@@ -137,12 +138,22 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
-@test "(a) disable writes agent.json with enabled=false" {
+@test "(a) disable writes harnesses.<fw>.enabled=false in settings.json (every registered fw)" {
   run bash "$DISABLE_SH"
   [ "$status" -eq 0 ]
-  [ -f "$AGENT_JSON" ]
-  result=$(python3 -c "import json; d=json.load(open('$AGENT_JSON')); print(d['enabled'])")
-  [ "$result" = "False" ]
+  [ -f "$SETTINGS_JSON" ]
+  while IFS= read -r fw; do
+    [ -n "$fw" ] || continue
+    result=$(SETTINGS_JSON="$SETTINGS_JSON" FW="$fw" python3 -c "
+import json, os
+d = json.load(open(os.environ['SETTINGS_JSON']))
+print(d['harnesses'][os.environ['FW']]['enabled'])
+")
+    [ "$result" = "False" ] || {
+      echo "harnesses.${fw}.enabled = ${result}, expected False"
+      return 1
+    }
+  done < <(list_frameworks)
 }
 
 @test "(a) disable removes lore symlinks from each framework's skills dir" {
@@ -222,21 +233,22 @@ teardown() {
   [ "$(cat "$cc_agents/non-lore-file.md")" = "preserved" ]
 }
 
-@test "(a) agent.json has exactly the two-key shape after disable; manifest split to install-state (D6)" {
+@test "(a) settings.json carries harnesses.<fw>.enabled after disable; manifest split to install-state (D6)" {
   run bash "$DISABLE_SH"
   [ "$status" -eq 0 ]
-  [ -f "$AGENT_JSON" ]
-  python3 - "$AGENT_JSON" <<'PYEOF'
+  [ -f "$SETTINGS_JSON" ]
+  # Per-harness: each registered framework's block has exactly enabled=false
+  # (plus whatever args/roles/ceremonies were already there). The retired
+  # `agent` top-level block must not be (re-)introduced.
+  python3 - "$SETTINGS_JSON" <<'PYEOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
-# D6: symlink_manifest split out to ~/.lore/.install-state/symlinks.json.
-expected = {"enabled", "last_changed"}
-got = set(d.keys())
-if got != expected:
-    print(f"agent.json keys: {got}, expected: {expected}")
-    sys.exit(1)
-assert isinstance(d["enabled"], bool)
-assert isinstance(d["last_changed"], str)
+assert "agent" not in d, "retired top-level 'agent' block leaked back into settings.json"
+harnesses = d.get("harnesses", {})
+assert harnesses, "harnesses block missing"
+for fw, block in harnesses.items():
+    assert isinstance(block, dict), f"harnesses.{fw} not an object: {block}"
+    assert block.get("enabled") is False, f"harnesses.{fw}.enabled = {block.get('enabled')}, expected False"
 PYEOF
   [ "$?" -eq 0 ]
 
@@ -261,13 +273,23 @@ PYEOF
   [ "$status" -eq 0 ]
 }
 
-@test "(b) enable writes agent.json with enabled=true" {
+@test "(b) enable writes harnesses.<fw>.enabled=true in settings.json (every registered fw)" {
   bash "$DISABLE_SH" >/dev/null 2>&1
   run bash "$ENABLE_SH"
   [ "$status" -eq 0 ]
-  [ -f "$AGENT_JSON" ]
-  result=$(python3 -c "import json; d=json.load(open('$AGENT_JSON')); print(d['enabled'])")
-  [ "$result" = "True" ]
+  [ -f "$SETTINGS_JSON" ]
+  while IFS= read -r fw; do
+    [ -n "$fw" ] || continue
+    result=$(SETTINGS_JSON="$SETTINGS_JSON" FW="$fw" python3 -c "
+import json, os
+d = json.load(open(os.environ['SETTINGS_JSON']))
+print(d['harnesses'][os.environ['FW']]['enabled'])
+")
+    [ "$result" = "True" ] || {
+      echo "harnesses.${fw}.enabled = ${result}, expected True"
+      return 1
+    }
+  done < <(list_frameworks)
 }
 
 @test "(b) enable restores lore symlinks in every framework's skills dir" {
@@ -384,10 +406,21 @@ PYEOF
   # Script should still exit 0 (best-effort).
   [ "$status" -eq 0 ]
 
-  # agent.json must be written with enabled=false despite the failure.
-  [ -f "$AGENT_JSON" ]
-  result=$(python3 -c "import json; d=json.load(open('$AGENT_JSON')); print(d['enabled'])")
-  [ "$result" = "False" ]
+  # settings.json must carry harnesses.<fw>.enabled=false despite the failure.
+  [ -f "$SETTINGS_JSON" ]
+  while IFS= read -r fw; do
+    [ -n "$fw" ] || continue
+    result=$(SETTINGS_JSON="$SETTINGS_JSON" FW="$fw" python3 -c "
+import json, os
+d = json.load(open(os.environ['SETTINGS_JSON']))
+print(d['harnesses'][os.environ['FW']]['enabled'])
+")
+    [ "$result" = "False" ] || {
+      echo "harnesses.${fw}.enabled = ${result}, expected False"
+      chmod 755 "$codex_skills"
+      return 1
+    }
+  done < <(list_frameworks)
 
   chmod 755 "$codex_skills"
 }

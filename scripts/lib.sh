@@ -407,18 +407,37 @@ json_array_field() {
   ' "$file"
 }
 
-# --- lore_agent_enabled ---
-# Returns 0 (success) if lore agent integration is enabled, non-zero if disabled.
+# --- lore_harness_enabled ---
+# Returns 0 (success) if lore integration is enabled for the named harness,
+# non-zero if disabled. The framework arg is REQUIRED — callers know which
+# harness they're acting on (toggle scripts pass the loop variable; the TUI
+# passes the focused panel's framework). No implicit default — passing the
+# wrong harness would silently pick a different toggle, which is the bug
+# class this function exists to prevent.
+#
 # Resolution order:
-#   1. LORE_AGENT_DISABLED=1 env var → disabled (returns 1).
-#   2. Unified ~/.lore/config/settings.json `.agent.enabled`. When the key is
-#      explicitly `false`, return 1; any other present value is enabled.
+#   1. LORE_AGENT_DISABLED=1 env var → disabled (returns 1). Session-wide
+#      kill switch, applies to every harness. Name kept for back-compat with
+#      shell rc files; semantically still "lore disabled this session".
+#   2. Unified ~/.lore/config/settings.json `.harnesses.<fw>.enabled`. When
+#      the key is explicitly `false`, return 1; any other present value is
+#      enabled.
 #   3. Legacy ~/.lore/config/agent.json `.enabled` (deprecation-window
-#      fallback). Only consulted when step 2 returns absence.
-#   4. File absent on both layers → enabled (returns 0). This default-on
-#      semantic preserves the pre-T2 contract where missing config = enabled.
-# Usage: lore_agent_enabled || exit 0
-lore_agent_enabled() {
+#      fallback for users who haven't run install.sh post-rename). Read once
+#      and applied uniformly across harnesses, since the legacy file was
+#      global. Only consulted when step 2 returns absence.
+#   4. Key absent everywhere → enabled (returns 0). Default-on semantic
+#      preserves the pre-rename contract where missing config = enabled.
+#
+# Usage:
+#   lore_harness_enabled claude-code || exit 0
+lore_harness_enabled() {
+  local framework="${1:-}"
+  if [[ -z "$framework" ]]; then
+    echo "lore_harness_enabled: framework arg is required" >&2
+    return 2
+  fi
+
   if [[ "${LORE_AGENT_DISABLED:-}" == "1" ]]; then
     return 1
   fi
@@ -429,10 +448,74 @@ lore_agent_enabled() {
   # Unified file (primary)
   if [[ -x "$settings_sh" || -r "$settings_sh" ]] && command -v jq &>/dev/null; then
     local unified_value
-    unified_value=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get agent.enabled 2>/dev/null || true)
+    unified_value=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.${framework}.enabled" 2>/dev/null || true)
     if [[ -n "$unified_value" ]]; then
       [[ "$unified_value" == "false" ]] && return 1
       return 0
+    fi
+  fi
+
+  # Legacy fragmented file (fallback). agent.json was global; treat its
+  # value as a uniform default across all harnesses for the deprecation
+  # window. install.sh fans it into per-harness on first run.
+  local legacy_file="$data_dir/config/agent.json"
+  if [[ -f "$legacy_file" ]]; then
+    if grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$legacy_file"; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# --- lore_agent_enabled ---
+# Returns 0 if lore integration is enabled for ANY registered harness, non-zero
+# only when every harness is explicitly disabled (or LORE_AGENT_DISABLED=1 is
+# in the env). This is the gate hooks call to decide whether to do any work
+# at all — the per-harness disabled state is enforced by uninstalling that
+# harness's symlinks and clearing its instruction file, so a disabled
+# harness shouldn't fire its hooks at all. This gate is belt-and-suspenders
+# against partial disable states.
+#
+# Resolution order:
+#   1. LORE_AGENT_DISABLED=1 env var → disabled (returns 1).
+#   2. For each registered framework, check `harnesses.<fw>.enabled`. If at
+#      least one is true (or absent — default-on), return 0.
+#   3. Legacy ~/.lore/config/agent.json `.enabled` fallback (deprecation
+#      window). Read once; the legacy file was global so its value applies
+#      uniformly.
+#   4. Nothing on disk → enabled (returns 0).
+#
+# Usage: lore_agent_enabled || exit 0
+lore_agent_enabled() {
+  if [[ "${LORE_AGENT_DISABLED:-}" == "1" ]]; then
+    return 1
+  fi
+
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
+
+  # Per-harness check: if ANY registered framework is enabled (or absent →
+  # default-on), the gate passes. We enumerate via list_supported_frameworks
+  # so newly-added harnesses are picked up automatically.
+  if [[ -x "$settings_sh" || -r "$settings_sh" ]] && command -v jq &>/dev/null; then
+    local _fw_list
+    _fw_list=$(list_supported_frameworks 2>/dev/null || true)
+    if [[ -n "$_fw_list" ]]; then
+      local fw any_present=0
+      while IFS= read -r fw; do
+        [[ -z "$fw" ]] && continue
+        local v
+        v=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.${fw}.enabled" 2>/dev/null || true)
+        if [[ -n "$v" ]]; then
+          any_present=1
+          [[ "$v" == "true" ]] && return 0
+        else
+          # Absent → default-on. Lore is enabled.
+          return 0
+        fi
+      done <<<"$_fw_list"
+      # Every registered framework had an explicit value and none were true.
+      [[ "$any_present" -eq 1 ]] && return 1
     fi
   fi
 

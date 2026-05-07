@@ -15,6 +15,14 @@ import (
 // The returned Config will have ProjectDir set but KnowledgeDir and WorkDir empty.
 var ErrNoRepo = errors.New("not inside a git repository")
 
+// ErrLoreDisabled is returned by Load() when the current directory IS inside a
+// git repository but `lore resolve` failed because the lore agent integration
+// is disabled (`~/.lore/config/agent.json` has `"enabled": false`). The
+// onboarding view distinguishes this from ErrNoRepo so users get actionable
+// guidance ("run `lore agent enable`") instead of the misleading
+// "navigate to a git repo" message.
+var ErrLoreDisabled = errors.New("lore agent integration is disabled")
+
 // Config holds application-wide configuration resolved at startup.
 type Config struct {
 	KnowledgeDir   string // absolute path from `lore resolve`
@@ -27,6 +35,35 @@ type Config struct {
 func insideGitRepo() bool {
 	err := exec.Command("git", "rev-parse", "--is-inside-work-tree").Run()
 	return err == nil
+}
+
+// loreDisabled returns true when the lore agent integration has been turned
+// off via `lore agent disable` (or the equivalent settings-modal toggle). Used
+// by Load() to distinguish "lore disabled" from "not in a git repo" so the
+// onboarding view can show the right guidance. The check is filesystem-only
+// (no shell-out) — looks for `"enabled": false` in `$LORE_DATA_DIR/config/
+// agent.json` (default `~/.lore/config/agent.json`). Missing/unreadable file
+// → false (treat as not-disabled; the original ErrNoRepo path applies).
+func loreDisabled() bool {
+	dataDir := os.Getenv("LORE_DATA_DIR")
+	if dataDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		dataDir = filepath.Join(home, ".lore")
+	}
+	raw, err := os.ReadFile(filepath.Join(dataDir, "config", "agent.json"))
+	if err != nil {
+		return false
+	}
+	var doc struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return false
+	}
+	return doc.Enabled != nil && !*doc.Enabled
 }
 
 // Load runs `lore resolve` to discover the knowledge directory and returns
@@ -46,7 +83,16 @@ func Load() (Config, error) {
 
 	out, err := exec.Command("lore", "resolve").Output()
 	if err != nil {
-		// lore resolve failed — treat as no-repo regardless of git status.
+		// `lore resolve` failed. Two distinct causes the onboarding flow
+		// must distinguish:
+		//   * lore agent integration disabled — actionable: run
+		//     `lore agent enable`. The user IS in a usable git repo;
+		//     the previous "navigate to a git repo" message was wrong.
+		//   * not inside a git repo (or any other reason resolve failed) —
+		//     keep the existing onboarding behavior.
+		if gitOK && loreDisabled() {
+			return Config{ProjectDir: projectDir}, ErrLoreDisabled
+		}
 		return Config{ProjectDir: projectDir}, ErrNoRepo
 	}
 

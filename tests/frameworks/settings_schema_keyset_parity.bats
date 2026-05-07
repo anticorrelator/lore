@@ -166,7 +166,7 @@ PY
   diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$caps_set")
 }
 
-@test "harness_block requires args + permits roles, ceremonies + rejects unknown keys" {
+@test "harness_block requires args + permits enabled, roles, ceremonies + rejects unknown keys" {
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os
 with open(os.environ["SCHEMA"]) as f:
@@ -175,7 +175,13 @@ hb = s["$defs"]["harness_block"]
 assert hb["additionalProperties"] is False, "harness_block must close additionalProperties"
 assert "args" in hb["required"], "harness_block must require args"
 props = set(hb["properties"].keys())
-assert props == {"args", "roles", "ceremonies"}, f"unexpected harness_block props: {props}"
+# `enabled` is the per-harness toggle (default-on; absence ≡ enabled).
+# `roles` and `ceremonies` are optional overlay maps.
+assert props == {"args", "enabled", "roles", "ceremonies"}, f"unexpected harness_block props: {props}"
+# enabled must be a plain boolean (no enum, no minLength) so absence ≡ enabled
+# is a clean default-on semantic.
+en = hb["properties"]["enabled"]
+assert en.get("type") == "boolean", f"harness_block.enabled type: {en}"
 PY
 }
 

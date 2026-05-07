@@ -81,23 +81,59 @@ If the user's description is already specific enough (clear scope, stated constr
 3. Check the knowledge store index for relevant domain files.
 4. Read the files yourself — do NOT spawn subagents.
 5. Note key findings as you go.
-6. **Skill and agent discovery** — after reading key files, scan for relevant skills and agents:
-   - Glob `<skills_dir>/*/SKILL.md` — read the YAML frontmatter (`name`, `description`) and first section of each. Resolve `<skills_dir>` via `resolve_harness_install_path skills` (typically `~/.claude/skills` on Claude Code; differs on Codex).
-   - Glob `<agents_dir>/*.md` — read each agent template name and opening description. Resolve `<agents_dir>` via `resolve_harness_install_path agents` (typically `~/.claude/agents` on Claude Code).
-   - Match the work item title, description, and key findings against skill/agent names using keyword overlap.
+6. **External skill and agent discovery (strict — exclude lore protocol toolchain)** — after reading key files, scan for relevant *external* skills and agents:
+   - Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** from discovery — they are the protocol toolchain, not advisors. Discovery targets purely external skills (e.g., security review, language-specific tooling, harness configuration helpers, domain-specific reviewers).
+   - Build the exclusion list from the canonical lore repo:
+     ```bash
+     LORE_REPO=$(bash ~/.lore/scripts/resolve-repo.sh)
+     LORE_SKILL_NAMES=$(ls "$LORE_REPO/skills/" 2>/dev/null | grep -v '\.md$')
+     LORE_AGENT_NAMES=$(ls "$LORE_REPO/agents/"*.md 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.md$//')
+     ```
+   - Glob `<skills_dir>/*/SKILL.md` — for each, take the parent directory name; if it appears in `$LORE_SKILL_NAMES`, skip. Otherwise read the YAML frontmatter (`name`, `description`) and first section. Resolve `<skills_dir>` via `resolve_harness_install_path skills` (typically `~/.claude/skills` on Claude Code; differs on Codex).
+   - Glob `<agents_dir>/*.md` — apply the same name filter against `$LORE_AGENT_NAMES`. Read each remaining agent template name and opening description. Resolve `<agents_dir>` via `resolve_harness_install_path agents` (typically `~/.claude/agents` on Claude Code).
+   - Match the work item title, description, and key findings against the surviving (external) skill/agent names using keyword overlap. **Skill match criterion is strict:** include only when the skill's stated domain plausibly contributes to *this* work item's implementation, not "could in theory be invoked someday."
    - Deep-read any SKILL.md or agent template that shows strong overlap with the work item domain.
    - Emit a skill discovery block (mandatory):
      ```
-     **Skill discovery:**
-     Considered: <comma-separated list of all skills checked>
+     **External skill discovery:**
+     Considered: <comma-separated list of external skill names checked, after lore-toolchain filter>
      Matched: <skill-name — rationale> (or "none")
      ```
-7. Present a context summary and offer the strategy gate (Step 4 below). **If `--yes`, skip the strategy prompt.**
+
+7. **Preferences and conventions discovery (permissive — include if possibly relevant)** — after skill discovery, surface every preference or convention that *might* apply, even tangentially:
+   - **Inclusion criterion is the inverse of skill discovery.** The test is "is it *possible* the work might need this preference or convention" — not "will we definitely apply it." If an entry covers a topic, file pattern, ceremony, surface, or activity that overlaps with the work item even loosely, include it. Err on the side of over-inclusion; synthesis culls. Missing an applicable preference is worse than carrying an inapplicable one through review.
+   - Enumerate canonical directories so nothing is missed by ranking:
+     ```bash
+     KDIR=$(lore resolve)
+     ls "$KDIR/preferences/" "$KDIR/conventions/" "$KDIR/cross-cutting-conventions/" 2>/dev/null
+     ```
+   - Run BM25 queries at both altitudes to catch entries the directory walk wouldn't surface by topic affinity:
+     ```bash
+     lore search "<work item topic>" --type knowledge --scale-set subsystem,implementation --limit 10
+     lore search "<work item topic>" --type knowledge --scale-set abstract,architecture --limit 5
+     ```
+     From each result set, retain entries whose path is under `preferences/`, `conventions/`, or `cross-cutting-conventions/`.
+   - Read each candidate's title and lead paragraph; deep-read any with surface-level overlap.
+   - Emit a discovery block (mandatory):
+     ```
+     **Preference and convention discovery:**
+     Scanned: <count> entries across preferences/, conventions/, cross-cutting-conventions/ + <count> BM25 hits
+     Surfaced:
+       - [[knowledge:preferences/<entry>]] — why it might apply (1 line)
+       - [[knowledge:conventions/<entry>]] — why it might apply (1 line)
+     ```
+     If nothing surfaced after permissive review, write `Surfaced: none`.
+
+8. Present a context summary and offer the strategy gate (Step 4 below). **If `--yes`, skip the strategy prompt.**
 
 ### Step 2b: Full branch (default, no `--short` flag)
 
 1. From the feature description, identify 3-7 focused investigation questions. Each should target a specific codebase concern, be answerable by exploring files, and be independent enough to run in parallel.
-2. **Always include** one mandatory fixed investigation: **Skill and agent applicability** — which installed skills and agent templates should be invoked during **implementation** of this work item. Key files: `<skills_dir>/*/SKILL.md`, `<agents_dir>/*.md` (resolve via `resolve_harness_install_path skills` / `resolve_harness_install_path agents`). This counts toward the 3-7 total.
+2. **Always include** two mandatory fixed investigations (both count toward the 3-7 total):
+
+   a. **External skill and agent applicability (strict)** — which installed *external* (non-lore) skills and agent templates should be invoked during **implementation** of this work item. Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** — they are the protocol toolchain, not advisors. The researcher must filter them out before reporting matches. Key files: `<skills_dir>/*/SKILL.md`, `<agents_dir>/*.md` (resolve via `resolve_harness_install_path skills` / `resolve_harness_install_path agents`); exclusion list comes from `$(bash ~/.lore/scripts/resolve-repo.sh)/skills/` and `/agents/`. Match criterion is **strict** — include only skills whose stated domain plausibly contributes to *this* work item's implementation.
+
+   b. **Preferences and conventions applicability (permissive)** — which entries from the knowledge store's `preferences/`, `conventions/`, and `cross-cutting-conventions/` directories the work might need to honor. **Inclusion criterion is permissive — the inverse of skill discovery.** The test is "is it *possible* the work might need this" — not "will we definitely apply it." Err on the side of over-inclusion; synthesis culls. Missing an applicable preference is worse than carrying an inapplicable one through review. Key files: `$KDIR/preferences/`, `$KDIR/conventions/`, `$KDIR/cross-cutting-conventions/` (full directory enumeration) plus BM25 results from `lore search "<topic>" --type knowledge --scale-set subsystem,implementation --limit 10` and `--scale-set abstract,architecture --limit 5`.
 3. Check the knowledge store index for file hints per investigation.
 4. Assess complexity for each investigation: **simple** (1-2 files), **moderate** (3-5 files), **complex** (6+ files or cross-cutting).
 5. Present the Investigation Plan to the user:
@@ -106,8 +142,9 @@ If the user's description is already specific enough (clear scope, stated constr
 
    | # | Area / Topic | Key Files | Complexity |
    |---|-------------|-----------|------------|
-   | 1 | Skill and agent applicability *(mandatory — do not remove)* | `<skills_dir>/*/SKILL.md`, `<agents_dir>/*.md` | simple |
-   | 2 | <topic>     | `file1`, `file2` | simple |
+   | 1 | External skill and agent applicability — strict, lore toolchain excluded *(mandatory — do not remove)* | `<skills_dir>/*/SKILL.md`, `<agents_dir>/*.md` | simple |
+   | 2 | Preferences and conventions applicability — permissive *(mandatory — do not remove)* | `$KDIR/preferences/`, `$KDIR/conventions/`, `$KDIR/cross-cutting-conventions/` | simple |
+   | 3 | <topic>     | `file1`, `file2` | simple |
    ...
 
    Proceed, or adjust?
@@ -135,23 +172,24 @@ If the user's description is already specific enough (clear scope, stated constr
    # → delegate:TaskCreate role=researcher model=<id>  (claude-code)
    ```
    On Claude Code, the lead model invokes `TaskCreate` with the directive's role/model; the spawn directive carries one `TaskCreate` per question with full question, context, file hints, and expected report format.
-   - For the mandatory "Skill and agent applicability" investigation: include instructions to evaluate implementation-phase applicability (not the investigation phase), read actual SKILL.md files, and report `**Matched skills:**` / `**Matched agents:**` blocks after `**Implications:**`.
+   - For the mandatory **External skill and agent applicability** investigation: include instructions to (a) evaluate implementation-phase applicability (not the investigation phase), (b) read actual SKILL.md files, (c) **exclude lore-managed skills and agents** before matching — build the exclusion list from `$(bash ~/.lore/scripts/resolve-repo.sh)/skills/` and `/agents/`, applied by parent-directory name, (d) apply a strict match criterion (skill's domain must plausibly contribute to *this* work item, not "could in theory be invoked"), and (e) report `**Matched skills:**` / `**Matched agents:**` blocks after `**Implications:**`. If every candidate gets filtered out, the report is `**Matched skills:** none` — that is a valid terminal.
+   - For the mandatory **Preferences and conventions applicability** investigation: include instructions to (a) enumerate `$KDIR/preferences/`, `$KDIR/conventions/`, and `$KDIR/cross-cutting-conventions/` directly via `ls`, plus BM25 queries at both `subsystem,implementation` and `abstract,architecture` scale-sets retaining hits whose path is under those three directories, (b) apply a **permissive** inclusion criterion — include if it is *possible* the work might need to honor the entry, not "will we definitely apply it," (c) read each candidate's title and lead paragraph, deep-reading any with surface-level overlap, and (d) report a `**Surfaced preferences/conventions:**` block after `**Implications:**` listing each surfaced entry as `[[knowledge:<path>]] — 1-line "why it might apply"`. Err on the side of over-inclusion; synthesis culls. If no entries surface after permissive review, report `**Surfaced preferences/conventions:** none`.
 10. Pre-fetch knowledge for each investigation:
     ```bash
     PRIOR_KNOWLEDGE=$(lore prefetch "<investigation topic>" --format prompt --limit 5 --scale-set=<bucket>)
     ```
-11. **Skill-applicability scan and advisor provisioning:**
-    a. Scan the skill list in your system prompt. Emit a skill discovery block (mandatory):
+11. **External skill-applicability scan and advisor provisioning (strict — exclude lore protocol toolchain):**
+    a. Scan the skill list in your system prompt. **Filter out lore-managed skills** (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) before matching — they are the protocol toolchain, not advisors. Apply a strict match criterion: include only when the skill's domain plausibly contributes to *this* work item's implementation. Emit a skill discovery block (mandatory):
        ```
-       **Skill discovery:**
-       Considered: <comma-separated list of all skills checked>
+       **External skill discovery:**
+       Considered: <comma-separated list of external skills checked, after lore-toolchain filter>
        Matched: <skill-name — rationale> (or "none")
        ```
-    b. If applicable skills are found:
+    b. If applicable external skills are found:
        - For each skill, read its SKILL.md file.
        - Spawn an advisor using `agents/advisor.md` with template injections: `{{team_name}}` → `spec-<slug>`, `{{advisor_domain}}` → skill name + scope, `{{domain_context}}` → SKILL.md content.
        - Build `$ADVISORY_MIXIN` from `scripts/agent-protocols/advisory-consultation.md` with `{{advisors}}` resolved. All skill-backed advisors use `on-demand` mode.
-    c. If no applicable skills: set `$ADVISORY_MIXIN` to empty.
+    c. If no applicable external skills: set `$ADVISORY_MIXIN` to empty.
 12. Spawn researcher agents — `min(investigation_count, 4)` in a single message via the orchestration adapter's `spawn` operation. Use the `researcher` agent template (resolve via `resolve_agent_template researcher`; on Claude Code that path is `~/.claude/agents/researcher.md`) with template injections: `{{team_name}}` → `spec-<slug>`, `{{team_lead}}` → lead name, `{{prior_knowledge}}` → `$PRIOR_KNOWLEDGE`, `{{template_version}}` → `$RESEARCHER_TEMPLATE_VERSION`. If `$ADVISORY_MIXIN` is non-empty, append it after the resolved researcher template content with a blank line separator. Per-spawn model selection routes through `resolve_model_for_role researcher` (or the explicit override set in Step 1.1 from `--model`); the adapter validates the role→model binding against the active framework's `model_routing.shape` and rejects mismatches without silent fallback.
 
 ---
@@ -272,11 +310,18 @@ Produce the conceptual frame first before committing to phase breakdown.
 6. Present the abstract plan (Goal, Design Decisions, Narrative, Architecture Diagram) to the user for review.
 
 **Discovery findings integration:**
-- **Related skills block:** If the discovery researcher (full branch) or Step 2 skill scan (short branch) reported matched skills, add a `**Related skills:**` block to the `## Context` or `## Investigations` section:
+- **Related skills block (strict):** If the discovery researcher (full branch) or Step 2 skill scan (short branch) reported matched *external* skills, add a `**Related skills:**` block to the `## Context` or `## Investigations` section. Lore-toolchain skills are not eligible for this block — they're protocol, not advisors:
   ```
   **Related skills:**
-  - /skill-name — why this skill is relevant to this work item
+  - /external-skill-name — why this skill is relevant to this work item
   ```
+- **Related preferences/conventions block (permissive — audit manifest):** If the discovery surfaced any entries from `preferences/`, `conventions/`, or `cross-cutting-conventions/`, add a `**Related preferences/conventions:**` block to the same section. Include every entry the discovery surfaced under the permissive criterion — workers can dismiss inapplicable ones at implement time; missing applicable ones is the worse failure:
+  ```
+  **Related preferences/conventions:**
+  - [[knowledge:preferences/<entry>]] — what to honor at implement time (1 line)
+  - [[knowledge:conventions/<entry>]] — what to honor at implement time (1 line)
+  ```
+  **This block is the audit manifest, not the worker delivery channel.** It exists so a reviewer (and the post-plan ceremony) can see every preference/convention discovery surfaced. Workers do not read top-level plan.md sections — `/implement` consumes per-phase `**Knowledge context:**` backlinks (Step 3.1 directive branch resolves them via `resolve-manifest.sh` into worker `{{prior_knowledge}}`). Distribution into per-phase Knowledge context happens in Step 5b #2 (concordance-assisted annotation) — see that step for the per-phase placement rule. Entries that don't bind to any specific phase still appear here; the manifest also catches them during review even when they have no per-phase home.
 - **Advisor declarations:** For each matched skill whose domain overlaps with a phase's scope, consider adding an `**Advisors:**` entry. Set mode based on phase complexity — `must-consult` if the skill defines invariants workers must respect, `on-demand` otherwise.
 
 ### Step 5a: Design ceremony evaluation
@@ -357,6 +402,14 @@ Draft concrete implementation sections on top of the approved abstract plan:
    **±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architecture,subsystem`; designing a feature → `abstract,architecture`.
 
    Add relevant entries as `[[knowledge:...]]` backlinks with "— why relevant" annotations. Investigation findings are the primary source; concordance is a widener.
+
+   **Distribute surfaced preferences/conventions into per-phase Knowledge context (mandatory).** The top-level `**Related preferences/conventions:**` block from Step 5's Discovery findings integration is an audit manifest — it does not reach workers on its own. To wire it into worker `{{prior_knowledge}}`, distribute each surfaced entry into the `**Knowledge context:**` block of every phase whose scope plausibly overlaps:
+
+   - **Scope-overlap test:** an entry overlaps a phase when the entry's `related_files`, file-path globs, ceremony scope, or activity domain intersects the phase's `**Files:**` list, the phase's objective, or the phase's owned subsystem. Apply this permissively — the same gate that surfaced the entry in Step 2 carries through to distribution. If a reviewer would expect the worker to be aware of the entry while editing this phase's files, distribute it.
+   - **Format:** add the entry as a `[[knowledge:preferences/<entry>]]` (or `conventions/`, or `cross-cutting-conventions/`) backlink in the phase's `**Knowledge context:**` block, with a "— what to honor at implement time" annotation oriented to the worker (not the reviewer). Implementation-facing annotations: tell the worker what to *do* with the entry, not just what it says.
+   - **Distribute to multiple phases when warranted.** A cross-cutting convention that touches every phase's files belongs in every phase's Knowledge context — duplication here is correct, because each phase becomes its own `/implement` worker batch and each batch needs its own seeds. Do not consolidate across phases.
+   - **Entries with no overlap stay in the top-level manifest only.** If after permissive review an entry binds to no phase, leave it solely in `**Related preferences/conventions:**` — the manifest preserves the audit trail.
+   - **Why distribution at this step:** `/implement` Step 3.1 (directive branch) resolves seeds via `resolve-manifest.sh` from the phase's `**Knowledge context:**` backlinks plus `**Files:**` paths. Distributing here means the entries flow through the existing seeds → directive → worker `{{prior_knowledge}}` pipeline without new protocol surface in `/implement`.
 
 3. **Retrieval directive derivation** — after concordance widening, populate a `**Retrieval directive:**` block for each phase. The directive must be derivable from content already in the phase; no additional user input is required.
 

@@ -33,6 +33,16 @@
 #                     (`true`, `42`), arrays/objects as JSON literals
 #                     (`'[]'`, `'{"a":1}'`). Unrelated keys are preserved.
 #                     Creates the file from `{}` if absent.
+#   delete <path>     Section-scoped read-modify-write under flock per the
+#                     D5a write contract: removes the leaf at the
+#                     dot-separated path. Implements the D9 Delete boundary
+#                     contract — idempotent on absent paths (no-op, file
+#                     byte-identical), no parent pruning (emptied parent
+#                     objects stay), no whole-doc validation. Uses jq's
+#                     `delpaths([$path])` with a path-array form so
+#                     kebab-case keys like `claude-code` are not parsed as
+#                     subtraction. On lock/parse/rename failure leaves the
+#                     prior settings.json intact.
 #   fallbacks         Deterministic snapshot of `<file>::<key>` pairs whose
 #                     unified key is absent and whose legacy fragmented file
 #                     exists on disk (i.e., the keys lib.sh helpers would
@@ -58,6 +68,7 @@ Subcommands:
   section <name>        Print JSON for the named top-level section, '{}' if absent.
   path                  Print the resolved settings.json absolute path.
   patch <path> <value>  Section-scoped read-modify-write under flock; <value> is JSON-encoded.
+  delete <path>         Remove the leaf at <path> under flock (idempotent on absent paths; no parent pruning).
   fallbacks             List <file>::<key> pairs whose unified key is absent and would fall back.
 
 Path syntax is dot-separated (roles.lead, harnesses.claude-code.args).
@@ -232,6 +243,91 @@ cmd_patch() {
   return "$rc"
 }
 
+# Internal: read-modify-delete body. Caller holds the flock when concurrent
+# safety is required. Returns 0 on success (including absent-path no-op),
+# non-zero on parse / mutation / rename failure. Mirrors the Go-side
+# SettingsDelete idempotence contract: an absent path leaves the file
+# byte-identical (no rename) so foreign-writer formatting is preserved.
+_delete_unlocked() {
+  local path="$1"
+
+  local path_array
+  path_array=$(_path_to_array "$path")
+
+  # Missing file → nothing to delete; idempotent no-op.
+  [[ -f "$SETTINGS_FILE" ]] || return 0
+
+  if ! jq -e . "$SETTINGS_FILE" &>/dev/null; then
+    echo "Error: invalid JSON in $SETTINGS_FILE — refusing to delete (run \`lore doctor\`)" >&2
+    return 1
+  fi
+
+  # Recursive `has` walk preserves the absent-vs-null distinction the same
+  # way cmd_get does. delpaths is silently a no-op on an absent path, but
+  # we still want to skip the rename so the file is byte-identical when
+  # nothing changed (D9 absent-delete contract).
+  local exists
+  exists=$(jq -r --argjson p "$path_array" '
+    def has_path(p):
+      if (p | length) == 0 then true
+      elif type != "object" then false
+      elif has(p[0]) | not then false
+      else (.[p[0]] | has_path(p[1:]))
+      end;
+    has_path($p)
+  ' "$SETTINGS_FILE")
+
+  if [[ "$exists" != "true" ]]; then
+    return 0
+  fi
+
+  local tmp="$SETTINGS_FILE.tmp.$$"
+  # Path-array form is load-bearing: `delpaths` takes an array of paths,
+  # each path being an array of segments. String-interpolated jq source
+  # like `del(.harnesses.claude-code)` would parse `claude-code` as
+  # subtraction (`claude` minus `code`).
+  jq --argjson p "$path_array" 'delpaths([$p])' "$SETTINGS_FILE" \
+    > "$tmp" \
+    || { rm -f "$tmp"; echo "Error: settings.sh delete failed for $path" >&2; return 1; }
+
+  mv "$tmp" "$SETTINGS_FILE"
+}
+
+cmd_delete() {
+  local path="${1:-}"
+  [[ -z "$path" ]] && { echo "Error: settings.sh delete requires a path" >&2; return 2; }
+  command -v jq &>/dev/null || { echo "Error: settings.sh requires jq" >&2; return 2; }
+
+  # Asymmetry with cmd_patch (load-bearing per D9, do not "fix"):
+  # cmd_patch auto-creates intermediate objects via setpath; cmd_delete
+  # deliberately does NOT — an absent intermediate is a no-op short-circuit
+  # (see _delete_unlocked above). This is what makes tab-through
+  # navigation safe in the configurator. harnesses.<fw>.enabled and
+  # active_framework MUST NEVER reach this function — the widget layer
+  # routes those through harness-toggle scripts and SettingsPatch
+  # respectively.
+  mkdir -p "$(dirname "$SETTINGS_FILE")"
+
+  # D5a write contract: lock-protected read-modify-write with atomic mv.
+  # flock when present (Linux); mkdir-based locking otherwise (macOS).
+  if command -v flock &>/dev/null; then
+    : >>"$SETTINGS_LOCK"
+    (
+      flock -x 9 || { echo "Error: settings.sh delete could not acquire $SETTINGS_LOCK" >&2; exit 1; }
+      _delete_unlocked "$path"
+    ) 9>>"$SETTINGS_LOCK"
+    return $?
+  fi
+
+  _acquire_settings_lock_mkdir || return 1
+  trap _release_settings_lock_mkdir EXIT INT TERM
+  _delete_unlocked "$path"
+  local rc=$?
+  _release_settings_lock_mkdir
+  trap - EXIT INT TERM
+  return "$rc"
+}
+
 # fallbacks: deterministic snapshot of legacy file/key pairs whose unified
 # key is absent and whose legacy fragmented file is present on disk (i.e.,
 # what lib.sh helpers would actually fall back to read). Order is stable
@@ -248,9 +344,7 @@ cmd_fallbacks() {
     "capability_overrides|framework.json::capability_overrides"
     "roles|framework.json::roles"
     "harnesses|harness-args.json::harnesses"
-    "agent.enabled|agent.json::enabled"
-    "obsidian.vault_path|obsidian.json::vault_path"
-    "obsidian.repo_path|obsidian.json::repo_path"
+    "obsidian.vaults|obsidian.json::<all>"
     "ceremonies|ceremonies.json::<all>"
   )
 
@@ -306,6 +400,9 @@ case "$subcmd" in
     ;;
   patch)
     cmd_patch "${1:-}" "${2:-}"
+    ;;
+  delete)
+    cmd_delete "${1:-}"
     ;;
   fallbacks)
     cmd_fallbacks

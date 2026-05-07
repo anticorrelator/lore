@@ -213,10 +213,10 @@ lore rebuild                     # Rebuild and reinstall the TUI binary
 lore batch-spec                  # Batch-run /spec short on eligible work items
 lore batch-implement             # Batch-run /implement on ready work items
 
-# Agent toggle
-lore agent status                # Show enabled/disabled state and last-changed time
-lore agent enable                # Enable lore agent integration (default)
-lore agent disable               # Disable lore agent integration across all surfaces
+# Per-harness integration toggle
+lore harness status              # Show enabled/disabled per registered harness
+lore harness enable [<fw>]       # Enable lore integration for one harness, or all if no arg
+lore harness disable [<fw>]      # Disable lore integration for one harness, or all if no arg
 
 # Framework / harness diagnostics
 lore framework status            # Resolved harness, capabilities by support level,
@@ -234,49 +234,61 @@ lore config show                 # Print entire framework.json as JSON
 
 Run `lore --help` or `lore <command> --help` for full details.
 
-## Agent toggle (opencode coexistence)
+## Per-harness integration toggle
 
-`lore agent enable/disable` gives you a first-class way to turn lore's agent-facing activation on and off without uninstalling. This is especially useful when running opencode alongside Claude Code — lore's hooks are invisible to opencode, but skill symlinks and `CLAUDE.md` content are shared.
+`lore harness enable/disable` gives you a first-class way to turn lore's integration on or off, scoped to a single harness or fanned across all of them. State is per-harness (`harnesses.<fw>.enabled` in `~/.lore/config/settings.json`); each harness can be on or off independently. Absent ≡ enabled — a fresh install lights up every registered harness.
 
-### What `lore agent disable` does
+### Per-harness scope
 
-- Clears the lore region in `~/.claude/CLAUDE.md` (preserves any surrounding user content via `<!-- LORE:BEGIN -->`/`<!-- LORE:END -->` sentinels)
-- Removes lore-owned skill symlinks from `~/.claude/skills/` and agent symlinks from `~/.claude/agents/` (saves a manifest for clean restore)
-- Adds an early-exit gate in runtime hooks so lore no-ops in Claude Code sessions
-- State is persisted in `~/.lore/config/agent.json`
+```bash
+lore harness disable claude-code   # disable just claude-code; codex/opencode untouched
+lore harness enable claude-code    # re-enable just claude-code
+lore harness status                # one line per registered harness
+```
 
-### What `lore agent enable` does
+Without a positional `<framework>` arg, `enable`/`disable` fan across every registered harness — the same gesture that the global `lore agent` command used to perform.
 
-The symmetric inverse: restores symlinks from the saved manifest, re-assembles `CLAUDE.md` with lore content, and removes the runtime gate.
+### What `lore harness disable <fw>` does
+
+For the named framework only:
+
+- Clears the lore region in the framework's instruction file (`~/.claude/CLAUDE.md` for claude-code, `AGENTS.md` for opencode/codex). Surrounding user content is preserved via `<!-- LORE:BEGIN -->`/`<!-- LORE:END -->` sentinels.
+- Removes lore-owned skill symlinks from the harness's skills dir and agent symlinks from its agents dir. The removal manifest is appended to `~/.lore/.install-state/symlinks.json` so a later `enable` can restore the same set without touching unrelated entries from other harnesses.
+- Sets `harnesses.<fw>.enabled = false` in `~/.lore/config/settings.json`. Other harnesses' state is preserved byte-for-byte.
+
+### What `lore harness enable <fw>` does
+
+The symmetric inverse: restores skill+agent symlinks for that framework only, re-assembles its instruction file with lore content, sets `harnesses.<fw>.enabled = true`.
 
 ### Per-session override
 
-For a single shell session without changing global state:
+For a single shell session without changing on-disk state, the legacy session kill switch still applies — and is global, not per-harness:
 
 ```bash
-LORE_AGENT_DISABLED=1 lore agent status   # shows "disabled (env override)"
+LORE_AGENT_DISABLED=1 lore harness status   # shows "disabled (env override)" for every harness
 ```
 
-This is useful for running opencode in a terminal while keeping lore active for Claude Code in another session.
+This is useful for one-off opencode invocations from a Claude-Code-active session, or vice versa.
 
-### Worked example: opencode coexistence
+### Worked example: enable claude-code only
 
 ```bash
-# Disable lore for all frameworks (opencode sessions will no longer see lore)
-lore agent disable
+# Disable everything
+lore harness disable
+lore harness status
+# → Lore harness 'claude-code': disabled
+# → Lore harness 'opencode':    disabled
+# → Lore harness 'codex':       disabled
 
-# Verify
-lore agent status    # → disabled (config)
-lore doctor          # → agent: disabled (config), all checks healthy
-
-# Use opencode — no lore content in CLAUDE.md, no lore skills visible
-
-# Re-enable for Claude Code
-lore agent enable
-lore agent status    # → enabled
+# Bring up just claude-code
+lore harness enable claude-code
+lore harness status
+# → Lore harness 'claude-code': enabled
+# → Lore harness 'opencode':    disabled
+# → Lore harness 'codex':       disabled
 ```
 
-> **Note:** The `lore` CLI itself is always available after disabling — you can always run `lore agent enable` to restore.
+> **Note:** The `lore` CLI itself is always available regardless of harness state — you can always run `lore harness enable` to restore.
 
 ## Skills
 
