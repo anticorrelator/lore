@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "description": "Lore-shipped MCP servers. install.sh and scripts/assemble-instructions.sh read this file to decide what to write into each harness's mcp_servers install path. Today this list is empty: lore ships zero MCP servers, so the per-harness packaging step is a no-op. Adding a server here automatically routes it into the right per-harness location via resolve_harness_install_path mcp_servers (claude-code/opencode JSON config, codex TOML config). The schema is harness-agnostic; the packaging step formats each server according to the active harness's config syntax.",
+  "servers": {}
+}

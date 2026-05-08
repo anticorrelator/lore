@@ -6,7 +6,8 @@ Provides:
     resolve_knowledge_dir(cwd) — Python-native repo resolution (no subprocess)
     fail_open(func) — decorator: catch all exceptions, exit 0
 
-Used by: stop-novelty-check.py, check-plan-persistence.py, extract-session-digest.py
+Used by: check-plan-persistence.py, extract-session-digest.py
+(stop-novelty-check.py was a consumer until retired 2026-05-06.)
 """
 
 import json
@@ -151,20 +152,91 @@ def has_recent_capture(messages):
 # ---------------------------------------------------------------------------
 
 def lore_agent_enabled():
-    """Return True if lore agent integration is enabled, False if disabled.
+    """Return True if lore integration is enabled for ANY registered harness.
+
+    This is the gate hooks call to decide whether to do any work. Per-harness
+    disabled state is enforced by uninstalling that harness's symlinks and
+    clearing its instruction file, so disabled harnesses don't fire their
+    hooks at all — this gate is a belt-and-suspenders check against partial
+    disable states.
 
     Checks in priority order:
         1. LORE_AGENT_DISABLED=1 env var -> disabled
-        2. ~/.lore/config/agent.json enabled field -> false means disabled
-        3. File absent or enabled=true -> enabled
+        2. ~/.lore/config/settings.json `harnesses.<fw>.enabled`: if any
+           registered harness is true (or absent → default-on) -> enabled
+        3. ~/.lore/config/agent.json `enabled` (legacy fallback) -> false means disabled
+        4. Nothing on disk -> enabled
     """
     if os.environ.get("LORE_AGENT_DISABLED", "") == "1":
         return False
     data_dir = os.environ.get("LORE_DATA_DIR", os.path.join(os.path.expanduser("~"), ".lore"))
-    config_file = os.path.join(data_dir, "config", "agent.json")
-    if os.path.isfile(config_file):
+
+    # Unified settings.json (primary). We only read the harnesses block; if
+    # any harness is enabled (or absent → default-on) the gate passes.
+    settings_file = os.path.join(data_dir, "config", "settings.json")
+    if os.path.isfile(settings_file):
         try:
-            with open(config_file) as f:
+            with open(settings_file) as f:
+                data = json.load(f)
+            harnesses = data.get("harnesses")
+            if isinstance(harnesses, dict) and harnesses:
+                # If at least one harness has enabled != False, return True.
+                # Absence within a present block is default-on (matches bash
+                # `lore_harness_enabled`).
+                for fw_block in harnesses.values():
+                    if not isinstance(fw_block, dict):
+                        continue
+                    enabled = fw_block.get("enabled", True)
+                    if enabled is not False:
+                        return True
+                # Every harness explicitly disabled.
+                return False
+        except Exception:
+            pass
+
+    # Legacy fragmented file (fallback)
+    legacy_file = os.path.join(data_dir, "config", "agent.json")
+    if os.path.isfile(legacy_file):
+        try:
+            with open(legacy_file) as f:
+                data = json.load(f)
+            if data.get("enabled") is False:
+                return False
+        except Exception:
+            pass
+    return True
+
+
+def lore_harness_enabled(framework):
+    """Return True if lore integration is enabled for the named harness.
+
+    Mirrors scripts/lib.sh::lore_harness_enabled. The framework arg is
+    required — callers that don't know which harness they're acting on
+    should use lore_agent_enabled() instead.
+    """
+    if not framework:
+        raise ValueError("lore_harness_enabled: framework arg is required")
+    if os.environ.get("LORE_AGENT_DISABLED", "") == "1":
+        return False
+    data_dir = os.environ.get("LORE_DATA_DIR", os.path.join(os.path.expanduser("~"), ".lore"))
+
+    settings_file = os.path.join(data_dir, "config", "settings.json")
+    if os.path.isfile(settings_file):
+        try:
+            with open(settings_file) as f:
+                data = json.load(f)
+            harnesses = data.get("harnesses") or {}
+            block = harnesses.get(framework)
+            if isinstance(block, dict) and "enabled" in block:
+                return block.get("enabled") is not False
+        except Exception:
+            pass
+
+    # Legacy fallback (global). agent.json was uniform across harnesses.
+    legacy_file = os.path.join(data_dir, "config", "agent.json")
+    if os.path.isfile(legacy_file):
+        try:
+            with open(legacy_file) as f:
                 data = json.load(f)
             if data.get("enabled") is False:
                 return False

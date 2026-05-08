@@ -68,9 +68,26 @@ esac
 TASK_DESC=$(echo "$INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('task_description') or '')")
 AGENT_NAME=$(echo "$INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('agent_name') or d.get('owner') or '')")
 
+# Resolve the active harness's teams install path. Codex (and any future
+# harness with no native team-messaging surface) declares teams="unsupported";
+# without a teams directory there is no team-config file to read, no agentType
+# to enforce, and the hook contract is moot. Exit 0 with a degraded-capability
+# stderr notice so operators see the gap without the hook failing loudly —
+# TaskCompleted MUST NOT exit non-zero on capability gaps (worker-12's
+# evidence-append.sh provider-independence pattern).
+TEAMS_DIR=$(resolve_harness_install_path teams 2>/dev/null || echo "")
+if [[ -z "$TEAMS_DIR" ]]; then
+  echo "[lore] degraded: task-completed-capture-check via install_paths.teams=no-evidence; allowing (capabilities.json unreadable)" >&2
+  exit 0
+fi
+if [[ "$TEAMS_DIR" == "unsupported" ]]; then
+  echo "[lore] degraded: task-completed-capture-check via team_messaging=none; allowing (no team-config surface on active harness)" >&2
+  exit 0
+fi
+
 # Resolve agent type from team config
 AGENT_TYPE=""
-TEAM_CONFIG="$HOME/.claude/teams/$TEAM_NAME/config.json"
+TEAM_CONFIG="$TEAMS_DIR/$TEAM_NAME/config.json"
 if [[ -f "$TEAM_CONFIG" && -n "$AGENT_NAME" ]]; then
   AGENT_TYPE=$(python3 -c "
 import json, sys

@@ -16,6 +16,11 @@ source "$SCRIPT_DIR/lib.sh"
 # --- Parse arguments ---
 FOLLOWUP_ID=""
 DRY_RUN=false
+# MODEL is empty by default; resolution from role 'summarizer' runs
+# after arg parsing so an explicit --model flag wins. The agent here
+# compresses review threads into thematic prose, which is the
+# `summarizer` role per adapters/roles.json.
+MODEL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -23,9 +28,14 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=true
       shift
       ;;
+    --model)
+      [[ $# -lt 2 ]] && { echo "[generate-review-summary] Error: --model requires a value" >&2; exit 1; }
+      MODEL="$2"
+      shift 2
+      ;;
     -*)
       echo "[generate-review-summary] Unknown option: $1" >&2
-      echo "Usage: generate-review-summary.sh <followup-id> [--dry-run]" >&2
+      echo "Usage: generate-review-summary.sh <followup-id> [--dry-run] [--model <model>]" >&2
       exit 1
       ;;
     *)
@@ -42,8 +52,16 @@ done
 
 if [[ -z "$FOLLOWUP_ID" ]]; then
   echo "[generate-review-summary] Error: followup-id is required" >&2
-  echo "Usage: generate-review-summary.sh <followup-id> [--dry-run]" >&2
+  echo "Usage: generate-review-summary.sh <followup-id> [--dry-run] [--model <model>]" >&2
   exit 1
+fi
+
+# Resolve the model from role 'summarizer' unless --model overrode it.
+if [[ -z "$MODEL" ]]; then
+  if ! MODEL=$(resolve_model_for_role summarizer 2>/dev/null) || [[ -z "$MODEL" ]]; then
+    echo "[generate-review-summary] Error: No model binding for role 'summarizer'. Pass --model <model> or set roles.summarizer in ~/.lore/config/framework.json." >&2
+    exit 1
+  fi
 fi
 
 # --- Check dependencies ---
@@ -147,11 +165,11 @@ if [[ "$DRY_RUN" == true ]]; then
 fi
 
 # --- Invoke claude -p ---
-mapfile -t CLAUDE_ARGS < <(load_claude_args)
+mapfile -t CLAUDE_ARGS < <(load_harness_args)
 if ! claude -p "$USER_PROMPT" \
   "${CLAUDE_ARGS[@]}" \
   --append-system-prompt "$(cat "$SYS_FILE")" \
-  --model sonnet \
+  --model "$MODEL" \
   --max-budget-usd 0.5 \
   --output-format text \
   --disallowed-tools "Bash,Edit,Write,Read,Grep,Glob,Agent,Task"; then

@@ -9,7 +9,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
-MODEL="sonnet"
+# MODEL stays empty until after arg parsing so an explicit --model flag
+# wins over the role binding. work-ai is a general-purpose entrypoint
+# without a specialized role, so it resolves from the `default` role
+# (resolve_model_for_role's catch-all binding) per adapters/roles.json.
+MODEL=""
 MAX_BUDGET="2.0"
 DRY_RUN=false
 PROMPT=""
@@ -22,7 +26,7 @@ Run Claude headlessly to create work items from a natural-language prompt.
 Claude is restricted to read-only information gathering and work item creation only.
 
 Options:
-  --model <model>        Model to use (default: sonnet)
+  --model <model>        Override resolve_model_for_role default for this invocation.
   --max-budget <usd>     Cost cap in USD (default: 2.0)
   --dry-run              Show what would run without executing
   -h, --help             Show this help
@@ -61,6 +65,14 @@ if [[ -z "$PROMPT" ]]; then
   echo "Error: prompt is required" >&2
   usage
   exit 1
+fi
+
+# Resolve the model from role 'default' unless --model overrode it.
+if [[ -z "$MODEL" ]]; then
+  if ! MODEL=$(resolve_model_for_role default 2>/dev/null) || [[ -z "$MODEL" ]]; then
+    echo "Error: No model binding for role 'default'. Pass --model <model> or set roles.default in ~/.lore/config/framework.json." >&2
+    exit 1
+  fi
 fi
 
 if ! command -v claude &>/dev/null; then
@@ -148,7 +160,7 @@ echo "[work-ai] Model: $MODEL | Budget cap: \$$MAX_BUDGET"
 echo "[work-ai] Request: $PROMPT"
 echo ""
 
-mapfile -t CLAUDE_ARGS < <(load_claude_args)
+mapfile -t CLAUDE_ARGS < <(load_harness_args)
 claude -p "$PROMPT" \
   "${CLAUDE_ARGS[@]}" \
   --model "$MODEL" \

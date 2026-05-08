@@ -5,6 +5,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/anticorrelator/lore/tui/internal/config"
 )
 
 // modalInnerW is the visible content width inside all modals.
@@ -31,10 +33,17 @@ func newModalStyles() modalStyleSet {
 
 // buildModalBox wraps title+body in a rounded blue border box at modalInnerW width.
 func buildModalBox(s modalStyleSet, title, body string) string {
+	return buildModalBoxWidth(s, title, body, modalInnerW)
+}
+
+// buildModalBoxWidth is the variable-width variant. The settings configurator
+// uses this to span more of the terminal so long harness blocks don't wrap;
+// other modals stick with the buildModalBox default at modalInnerW.
+func buildModalBoxWidth(s modalStyleSet, title, body string, width int) string {
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(s.border.GetForeground()).
-		Width(modalInnerW).
+		Width(width).
 		Render(s.title.Render(title) + "\n" + body)
 }
 
@@ -94,7 +103,7 @@ func (m model) renderSpecConfirmModal() string {
 			"\n " + s.key.Render(skipCheck) + " " + s.dim.Render("Skip confirmations") +
 			"  " + s.sep.Render("(") + s.key.Render("Alt+2") + s.sep.Render(")")
 		body = "\n" + checkboxes + "\n\n" +
-			s.dim.Render(" additional context for claude (optional):") +
+			s.dim.Render(fmt.Sprintf(" additional context for %s (optional):", config.HarnessDisplayName(""))) +
 			"\n" + inputBox + "\n\n " + hints + "\n"
 	}
 	return m.placeModal(buildModalBox(s, title, body))
@@ -215,13 +224,15 @@ func (m model) renderHelpModal() string {
 		sectionS.Render("Spec Panel (terminal mode)") + "\n" +
 		row("scroll wheel", "scroll output") + "\n" +
 		row("ctrl+t", "switch to detail view") + "\n" +
-		row("Esc", "back to list") + "\n" +
+		row("Esc", "forward to subprocess (e.g. interrupt)") + "\n" +
+		row("Esc Esc", "detach focus, back to list") + "\n" +
 		row("Ctrl+c", "terminate subprocess") + "\n" +
 		row("Ctrl+\\", "terminate subprocess") + "\n" +
 		row("(all other keys)", "forwarded to subprocess") + "\n" +
 		"\n" +
 		sectionS.Render("Global") + "\n" +
 		row("?", "this help") + "\n" +
+		row("S / Ctrl+,", "settings configurator") + "\n" +
 		row("q / Ctrl+C / Ctrl+D", "quit")
 
 	box := lipgloss.NewStyle().

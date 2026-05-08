@@ -66,7 +66,6 @@ ROLE_CONFIG_DATA_DIR="${LORE_DATA_DIR:-$HOME/.lore}"
 # ---------------------------------------------------------------------------
 LORE_SCRIPTS_LINK="$HOME/.lore/scripts"
 LORE_DATA_DIR="$HOME/.lore"
-CLAUDE_DIR="$HOME/.claude"
 
 if [[ -L "$LORE_SCRIPTS_LINK" ]]; then
   LORE_REPO_DIR="$(cd "$(dirname "$(readlink "$LORE_SCRIPTS_LINK")")" && pwd)"
@@ -74,6 +73,19 @@ else
   # Fallback: assume we're running from within the repo
   LORE_REPO_DIR="$(cd "$(dirname "$SCRIPT_DIR")" && pwd)"
 fi
+
+# ---------------------------------------------------------------------------
+# Resolve harness install paths for the active framework via T71's
+# harness_path_or_empty helper. The helper returns the absolute path on
+# supported kinds and an empty string on either unsupported or lookup failure
+# (missing config, missing jq, missing capabilities.json) — both states are
+# equivalent for doctor: emit "n/a" rather than "missing" because emitting
+# claude-shaped warnings on a non-claude harness would be a false alarm.
+# ---------------------------------------------------------------------------
+HARNESS_SKILLS_DIR=$(harness_path_or_empty skills)
+HARNESS_AGENTS_DIR=$(harness_path_or_empty agents)
+HARNESS_INSTRUCTIONS_FILE=$(harness_path_or_empty instructions)
+HARNESS_SETTINGS_FILE=$(harness_path_or_empty settings)
 
 # ---------------------------------------------------------------------------
 # Issue collection
@@ -164,81 +176,104 @@ fi
 
 # ---------------------------------------------------------------------------
 # Check 4: Skills symlinks (skipped when config-disabled — absence is healthy)
+# Skipped on harnesses with no skills surface; surfaces n/a so JSON
+# consumers can distinguish "not applicable here" from "missing".
 # ---------------------------------------------------------------------------
 CHECKED+=("skills")
 if [[ "$AGENT_CONFIG_DISABLED" -eq 0 && -d "$LORE_REPO_DIR/skills" ]]; then
-  for skill_dir in "$LORE_REPO_DIR"/skills/*/; do
-    [[ -d "$skill_dir" ]] || continue
-    skill_name="$(basename "$skill_dir")"
-    link="$CLAUDE_DIR/skills/$skill_name"
-    if [[ ! -e "$link" && ! -L "$link" ]]; then
-      add_issue "skills" "missing" "$skill_name" "symlink missing: $link"
-    elif [[ ! -L "$link" ]]; then
-      add_issue "skills" "wrong_target" "$skill_name" "exists but is not a symlink: $link"
-    else
-      actual_target="$(readlink "$link")"
-      expected_target="$skill_dir"
-      # Resolve to canonical for comparison
-      if [[ -e "$actual_target" ]]; then
-        actual_resolved="$(_resolve_path "$actual_target")"
+  if [[ -z "$HARNESS_SKILLS_DIR" ]]; then
+    add_issue "skills" "n/a" "skills" "active harness exposes no skills install path"
+  else
+    for skill_dir in "$LORE_REPO_DIR"/skills/*/; do
+      [[ -d "$skill_dir" ]] || continue
+      skill_name="$(basename "$skill_dir")"
+      link="$HARNESS_SKILLS_DIR/$skill_name"
+      if [[ ! -e "$link" && ! -L "$link" ]]; then
+        add_issue "skills" "missing" "$skill_name" "symlink missing: $link"
+      elif [[ ! -L "$link" ]]; then
+        add_issue "skills" "wrong_target" "$skill_name" "exists but is not a symlink: $link"
       else
-        actual_resolved="$actual_target"
+        actual_target="$(readlink "$link")"
+        expected_target="$skill_dir"
+        if [[ -e "$actual_target" ]]; then
+          actual_resolved="$(_resolve_path "$actual_target")"
+        else
+          actual_resolved="$actual_target"
+        fi
+        expected_resolved="$(_resolve_path "$expected_target")"
+        if [[ "$actual_resolved" != "$expected_resolved" ]]; then
+          add_issue "skills" "wrong_target" "$skill_name" \
+            "points to $actual_target, expected $expected_target"
+        fi
       fi
-      expected_resolved="$(_resolve_path "$expected_target")"
-      if [[ "$actual_resolved" != "$expected_resolved" ]]; then
-        add_issue "skills" "wrong_target" "$skill_name" \
-          "points to $actual_target, expected $expected_target"
-      fi
-    fi
-  done
-fi
-
-# ---------------------------------------------------------------------------
-# Check 5: Agents symlinks (skipped when config-disabled — absence is healthy)
-# ---------------------------------------------------------------------------
-CHECKED+=("agents")
-if [[ "$AGENT_CONFIG_DISABLED" -eq 0 && -d "$LORE_REPO_DIR/agents" ]]; then
-  for agent_file in "$LORE_REPO_DIR"/agents/*.md; do
-    [[ -f "$agent_file" ]] || continue
-    agent_name="$(basename "$agent_file")"
-    link="$CLAUDE_DIR/agents/$agent_name"
-    if [[ ! -e "$link" && ! -L "$link" ]]; then
-      add_issue "agents" "missing" "$agent_name" "symlink missing: $link"
-    elif [[ ! -L "$link" ]]; then
-      add_issue "agents" "wrong_target" "$agent_name" "exists but is not a symlink: $link"
-    else
-      actual_target="$(readlink "$link")"
-      expected_target="$agent_file"
-      if [[ -e "$actual_target" ]]; then
-        actual_resolved="$(_resolve_path "$actual_target")"
-      else
-        actual_resolved="$actual_target"
-      fi
-      expected_resolved="$(_resolve_path "$expected_target")"
-      if [[ "$actual_resolved" != "$expected_resolved" ]]; then
-        add_issue "agents" "wrong_target" "$agent_name" \
-          "points to $actual_target, expected $expected_target"
-      fi
-    fi
-  done
-fi
-
-# ---------------------------------------------------------------------------
-# Check 6: CLAUDE.md freshness (skipped when config-disabled — empty region is healthy)
-# ---------------------------------------------------------------------------
-CHECKED+=("claude_md")
-if [[ "$AGENT_CONFIG_DISABLED" -eq 0 && -f "$LORE_REPO_DIR/scripts/assemble-claude-md.sh" ]]; then
-  if ! bash "$LORE_REPO_DIR/scripts/assemble-claude-md.sh" --check > /dev/null 2>&1; then
-    add_issue "claude_md" "stale" "~/.claude/CLAUDE.md" \
-      "assembled CLAUDE.md is out of date; run: lore assemble"
+    done
   fi
 fi
 
 # ---------------------------------------------------------------------------
-# Check 7: Expected lore hook commands in settings.json (D4)
+# Check 5: Agents symlinks (skipped when config-disabled — absence is healthy)
+# Skipped on harnesses with no agents surface; surfaces n/a so JSON
+# consumers can distinguish "not applicable here" from "missing".
+# ---------------------------------------------------------------------------
+CHECKED+=("agents")
+if [[ "$AGENT_CONFIG_DISABLED" -eq 0 && -d "$LORE_REPO_DIR/agents" ]]; then
+  if [[ -z "$HARNESS_AGENTS_DIR" ]]; then
+    add_issue "agents" "n/a" "agents" "active harness exposes no agents install path"
+  else
+    for agent_file in "$LORE_REPO_DIR"/agents/*.md; do
+      [[ -f "$agent_file" ]] || continue
+      agent_name="$(basename "$agent_file")"
+      link="$HARNESS_AGENTS_DIR/$agent_name"
+      if [[ ! -e "$link" && ! -L "$link" ]]; then
+        add_issue "agents" "missing" "$agent_name" "symlink missing: $link"
+      elif [[ ! -L "$link" ]]; then
+        add_issue "agents" "wrong_target" "$agent_name" "exists but is not a symlink: $link"
+      else
+        actual_target="$(readlink "$link")"
+        expected_target="$agent_file"
+        if [[ -e "$actual_target" ]]; then
+          actual_resolved="$(_resolve_path "$actual_target")"
+        else
+          actual_resolved="$actual_target"
+        fi
+        expected_resolved="$(_resolve_path "$expected_target")"
+        if [[ "$actual_resolved" != "$expected_resolved" ]]; then
+          add_issue "agents" "wrong_target" "$agent_name" \
+            "points to $actual_target, expected $expected_target"
+        fi
+      fi
+    done
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Check 6: Instructions file freshness (CLAUDE.md/AGENTS.md, harness-specific)
+# Skipped when agent config-disabled (empty region is healthy) and on
+# harnesses with no instructions surface (n/a). The component name
+# remains "claude_md" for backward compatibility with JSON consumers; the
+# artifact label echoes the resolved instructions path so opencode/codex
+# operators see the right file name.
+# ---------------------------------------------------------------------------
+CHECKED+=("claude_md")
+if [[ "$AGENT_CONFIG_DISABLED" -eq 0 && -f "$LORE_REPO_DIR/scripts/assemble-claude-md.sh" ]]; then
+  if [[ -z "$HARNESS_INSTRUCTIONS_FILE" ]]; then
+    add_issue "claude_md" "n/a" "instructions" "active harness exposes no instructions file"
+  elif ! bash "$LORE_REPO_DIR/scripts/assemble-claude-md.sh" --check > /dev/null 2>&1; then
+    add_issue "claude_md" "stale" "$HARNESS_INSTRUCTIONS_FILE" \
+      "assembled instructions file is out of date; run: lore assemble"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Check 7: Expected lore hook commands in the harness's settings file (D4)
+# Settings shape is harness-specific: claude-code uses ~/.claude/settings.json
+# (JSON), codex uses ~/.codex/config.toml (TOML — different parser needed).
+# Today the JSON path covers claude-code and opencode; codex (and any other
+# harness whose settings file is non-JSON or unsupported) yields n/a until
+# T28 wires the per-harness settings/permissions installer. Doctor surfaces
+# n/a in that case rather than emitting "missing" against every expected hook.
 # ---------------------------------------------------------------------------
 CHECKED+=("hooks")
-SETTINGS_JSON="$CLAUDE_DIR/settings.json"
 
 # The canonical list of expected lore hook commands (mirrors install.sh)
 EXPECTED_HOOK_COMMANDS=(
@@ -248,19 +283,23 @@ EXPECTED_HOOK_COMMANDS=(
   "bash ~/.lore/scripts/load-threads.sh"
   "python3 ~/.lore/scripts/extract-session-digest.py"
   "bash ~/.lore/scripts/pre-compact.sh"
-  "python3 ~/.lore/scripts/stop-novelty-check.py"
   "python3 ~/.lore/scripts/check-plan-persistence.py"
   "bash ~/.lore/scripts/task-completed-capture-check.sh"
   "bash ~/.lore/scripts/guard-work-writes.sh"
 )
 
-if [[ ! -f "$SETTINGS_JSON" ]]; then
-  # If settings.json doesn't exist, all hooks are missing
+# Harnesses without a settings surface (or with a non-JSON settings file
+# that the JSON parser cannot read) yield a single n/a issue. Operators on
+# those harnesses should consult `lore framework status` / `lore framework
+# doctor` for the per-harness installer's verdict.
+if [[ -z "$HARNESS_SETTINGS_FILE" || "$HARNESS_SETTINGS_FILE" != *.json ]]; then
+  add_issue "hooks" "n/a" "settings" \
+    "active harness has no JSON settings file (was: ${HARNESS_SETTINGS_FILE:-unsupported})"
+elif [[ ! -f "$HARNESS_SETTINGS_FILE" ]]; then
   for cmd in "${EXPECTED_HOOK_COMMANDS[@]}"; do
-    add_issue "hooks" "missing" "$cmd" "settings.json not found"
+    add_issue "hooks" "missing" "$cmd" "$HARNESS_SETTINGS_FILE not found"
   done
 else
-  # Extract all command values from settings.json hooks
   installed_commands="$(python3 -c "
 import json, sys
 with open(sys.argv[1]) as f:
@@ -272,11 +311,11 @@ for hook_type, entries in hooks.items():
             cmd = h.get('command', '')
             if cmd:
                 print(cmd)
-" "$SETTINGS_JSON" 2>/dev/null || echo "")"
+" "$HARNESS_SETTINGS_FILE" 2>/dev/null || echo "")"
 
   for cmd in "${EXPECTED_HOOK_COMMANDS[@]}"; do
     if ! echo "$installed_commands" | grep -qxF "$cmd"; then
-      add_issue "hooks" "missing" "$cmd" "hook command not found in settings.json"
+      add_issue "hooks" "missing" "$cmd" "hook command not found in $HARNESS_SETTINGS_FILE"
     fi
   done
 fi
@@ -333,6 +372,119 @@ fi
 # User-level fallback: $ROLE_CONFIG_DATA_DIR/config/settings.json
 _check_role_config "$ROLE_CONFIG_DATA_DIR/config/settings.json" \
   "$ROLE_CONFIG_DATA_DIR/config/settings.json"
+
+# ---------------------------------------------------------------------------
+# Check 9: Unified settings.json validates against adapters/settings.schema.json
+# Strict full-document validation via Python jsonschema (D7). jsonschema is a
+# doctor-only dependency: when missing, doctor surfaces an actionable install
+# message rather than a Python traceback.
+# ---------------------------------------------------------------------------
+CHECKED+=("settings_schema")
+doctor_validate_settings_schema() {
+  local settings_file="$ROLE_CONFIG_DATA_DIR/config/settings.json"
+  local schema_file="$LORE_REPO_DIR/adapters/settings.schema.json"
+
+  if [[ ! -f "$settings_file" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$schema_file" ]]; then
+    add_issue "settings_schema" "missing" "$schema_file" \
+      "schema file not found: $schema_file"
+    return 0
+  fi
+
+  if ! python3 -c "import jsonschema" >/dev/null 2>&1; then
+    add_issue "settings_schema" "missing_dep" "jsonschema" \
+      "Python jsonschema package missing — install with: pip install jsonschema"
+    return 0
+  fi
+
+  # Capture stdout under `set -e`: || true ensures the validator's non-zero
+  # exit (on schema violation) doesn't abort the script.
+  local validation_output rc=0
+  validation_output=$(SETTINGS="$settings_file" SCHEMA="$schema_file" python3 - <<'PYEOF' 2>&1
+import json, os, sys
+import jsonschema
+
+settings_path = os.environ["SETTINGS"]
+schema_path = os.environ["SCHEMA"]
+
+with open(settings_path) as f:
+    instance = json.load(f)
+with open(schema_path) as f:
+    schema = json.load(f)
+
+try:
+    jsonschema.validate(instance, schema)
+except jsonschema.ValidationError as e:
+    path = "/".join(str(p) for p in e.absolute_path) or "<root>"
+    print(f"validation failed at {path}: {e.message}")
+    sys.exit(1)
+PYEOF
+  ) || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    add_issue "settings_schema" "schema_violation" "$settings_file" \
+      "$validation_output"
+  fi
+  return 0
+}
+doctor_validate_settings_schema
+
+# ---------------------------------------------------------------------------
+# Check 10: Aggregate fallback snapshots across stacks (D7)
+# Each stack reports its deterministic snapshot of "<file>::<key>" pairs the
+# loader would currently fall back to read because the unified key is absent.
+# Empty across all stacks means cleanup (D4 phase 3) is unblocked.
+# ---------------------------------------------------------------------------
+CHECKED+=("settings_fallbacks")
+doctor_aggregate_fallbacks() {
+  local settings_sh="$LORE_REPO_DIR/scripts/settings.sh"
+  local pairs=""
+
+  if [[ -x "$settings_sh" ]]; then
+    local bash_pairs
+    bash_pairs=$(LORE_DATA_DIR="$ROLE_CONFIG_DATA_DIR" bash "$settings_sh" fallbacks 2>/dev/null || true)
+    if [[ -n "$bash_pairs" ]]; then
+      pairs="$bash_pairs"
+    fi
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    local py_pairs
+    py_pairs=$(LORE_DATA_DIR="$ROLE_CONFIG_DATA_DIR" \
+      PYTHONPATH="$LORE_REPO_DIR/scripts" \
+      python3 -c "
+import lore_settings
+for f, k in lore_settings.fallbacks():
+    print(f'{f}::{k}')
+" 2>/dev/null || true)
+    if [[ -n "$py_pairs" ]]; then
+      if [[ -n "$pairs" ]]; then
+        pairs="$pairs
+$py_pairs"
+      else
+        pairs="$py_pairs"
+      fi
+    fi
+  fi
+
+  # T4: Go fallback snapshot. When tui/internal/config/settings.go exposes a
+  # `Fallbacks()` accessor wired through lore-tui or a sibling CLI, aggregate
+  # it here. Until then, skip gracefully.
+  # TODO(T4): plumb the Go snapshot once the loader lands.
+
+  if [[ -n "$pairs" ]]; then
+    while IFS= read -r pair; do
+      [[ -z "$pair" ]] && continue
+      local legacy_file="${pair%%::*}"
+      local key="${pair#*::}"
+      add_issue "settings_fallbacks" "fallback" "$pair" \
+        "settings.json is missing key $key — re-run install or hand-merge from $legacy_file"
+    done < <(printf '%s\n' "$pairs" | sort -u)
+  fi
+  return 0
+}
+doctor_aggregate_fallbacks
 
 # ---------------------------------------------------------------------------
 # Determine overall status

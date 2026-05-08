@@ -14,7 +14,9 @@ Author-calibrated self-review combining structured lens analysis with grounding 
 Compute the content-hash of the `/pr-self-review` skill template itself. This is the `template_version` that accompanies the `create-followup.sh` call in Step 4 and every `lore capture` call in Step 5:
 
 ```bash
-SELF_REVIEW_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/skills/pr-self-review/SKILL.md)
+source ~/.lore/scripts/lib.sh
+SKILLS_DIR=$(resolve_harness_install_path skills)
+SELF_REVIEW_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$SKILLS_DIR/pr-self-review/SKILL.md")
 ```
 
 Per-lens methodology files (`claude-md/review-protocol/*-methodology.md`) are embedded verbatim into each lens agent's prompt — they are content-equivalent to the skill template from the scorecard's perspective, so the skill's hash is the canonical `template_version` for this skill's outputs. Individual lens findings carry their own `producer_role` of `lens-<name>` but inherit the skill's `template_version`.

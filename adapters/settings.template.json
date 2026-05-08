@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "active_framework": "claude-code",
+  "harnesses": {
+    "claude-code": {
+      "args": ["--dangerously-skip-permissions"],
+      "roles": {
+        "lead": "opus",
+        "worker": "opus",
+        "researcher": "opus",
+        "reviewer": "opus",
+        "judge": "opus",
+        "summarizer": "opus",
+        "advisor": "opus",
+        "default": "opus"
+      },
+      "ceremonies": {
+        "spec-design": ["codex-design-review"],
+        "spec-post-plan": ["codex-plan-review"],
+        "pr-review": ["codex-pr-review"]
+      }
+    },
+    "opencode": {
+      "args": [],
+      "roles": {
+        "lead": "anthropic/opus",
+        "worker": "openai/gpt-5.5",
+        "researcher": "anthropic/opus",
+        "reviewer": "openai/gpt-5.5",
+        "judge": "anthropic/opus",
+        "summarizer": "anthropic/opus",
+        "advisor": "anthropic/opus",
+        "default": "anthropic/opus"
+      },
+      "ceremonies": {
+        "spec-design": ["codex-design-review"],
+        "spec-post-plan": ["codex-plan-review"],
+        "pr-review": ["codex-pr-review"]
+      }
+    },
+    "codex": {
+      "args": [],
+      "roles": {
+        "lead": "gpt-5.5-high",
+        "worker": "gpt-5.5-high",
+        "researcher": "gpt-5.5-high",
+        "reviewer": "gpt-5.5-high",
+        "judge": "gpt-5.5-high",
+        "summarizer": "gpt-5.5-high",
+        "advisor": "gpt-5.5-high",
+        "default": "gpt-5.5-high"
+      },
+      "ceremonies": {
+        "spec-design": ["codex-design-review"],
+        "spec-post-plan": ["codex-plan-review"],
+        "pr-review": ["codex-pr-review"]
+      }
+    }
+  },
+  "capability_overrides": {},
+  "capture": {
+    "core": {
+      "novelty_threshold": -1.0,
+      "region_window": 5,
+      "max_candidates": 5,
+      "max_phrases": 15,
+      "min_tool_uses": 5,
+      "max_tool_uses": 10
+    },
+    "structural_signals": {
+      "investigation_window": 10,
+      "iterative_debug_window": 15,
+      "test_fix_window": 10,
+      "synthesis_char_threshold": 1000,
+      "synthesis_tool_threshold": 8,
+      "file_context_window": 10,
+      "debug_context_window": 10,
+      "debug_context_chars": 800
+    },
+    "adaptive": false
+  },
+  "tui": {
+    "layout": "left-right"
+  },
+  "obsidian": {
+    "vaults": {}
+  }
+}

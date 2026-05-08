@@ -1,0 +1,258 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/anticorrelator/lore/adapters/settings.schema.json",
+  "title": "Lore Unified Settings",
+  "description": "User-config schema for ~/.lore/config/settings.json. Authoritative shape for valid keys, types, and value constraints across the bash/Python/Go loaders. Closed-set rejection at the boundary: unknown frameworks, role ids, capability ids, and tui layouts must be rejected — never silently routed to a default. Migration provenance lives in ~/.lore/.install-state/migration.json (D4) and MUST NOT appear inside settings.json — additionalProperties:false on every object enforces this implicitly. Cross-field invariants (e.g. active_framework value must be present in harnesses) live in the loaders and `lore doctor`, not here. The active_framework enum and harnesses keyset MUST stay in lockstep with adapters/capabilities.json frameworks (covered by tests/frameworks/settings_schema_keyset_parity.bats); $defs/role_id MUST stay in lockstep with adapters/roles.json (same test).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "active_framework", "harnesses"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Schema/file version. Increment when a breaking shape change ships. install.sh consults this against its cleanup-version constant before deleting the legacy fragmented files (D4 phase 3)."
+    },
+    "active_framework": {
+      "$ref": "#/$defs/framework_id",
+      "description": "Active harness id. The named framework must also have a populated `harnesses.<name>` block — this cross-field invariant is enforced by the loaders and `lore doctor`, not by this schema."
+    },
+    "harnesses": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-harness configuration. Keyset is closed against adapters/capabilities.json frameworks — adding a new harness requires schema bump + capabilities.json entry + install.sh allowlist update (no defaults, no fall-through).",
+      "properties": {
+        "claude-code": {"$ref": "#/$defs/harness_block"},
+        "opencode":    {"$ref": "#/$defs/harness_block"},
+        "codex":       {"$ref": "#/$defs/harness_block"}
+      }
+    },
+    "capability_overrides": {
+      "$ref": "#/$defs/capability_overrides_map",
+      "description": "Operator overrides for capability support levels (D8). Keyset is closed against adapters/capabilities.json `capabilities` map — values must be one of full|partial|fallback|none. The runtime semantics (override applies to the active framework) are preserved from the legacy framework.json shape; the documented defect that overrides silently re-apply across active_framework changes is intentionally NOT fixed in this consolidation — see plan D3."
+    },
+    "roles": {
+      "$ref": "#/$defs/roles_map_top",
+      "description": "Legacy top-level role -> model fallback. New settings should store role bindings under `harnesses.<name>.roles` because model defaults are harness-specific; this field remains valid for migration/deprecation only and is hidden from the TUI."
+    },
+    "ceremonies": {
+      "$ref": "#/$defs/ceremonies_map",
+      "description": "Legacy top-level skill -> [advisor, ...] fallback. New settings should store ceremony advisor bindings under `harnesses.<name>.ceremonies` because ceremony skill defaults are harness-specific; this field remains valid for migration/deprecation only and is hidden from the TUI."
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Probabilistic capture / structural-signal thresholds — historical schema from stop-novelty-check.py (retired 2026-05-06). Kept for backward compat with operators who still have ~/.lore/config/capture-config.json on disk; no live consumer reads these fields after retirement.",
+      "properties": {
+        "core": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "novelty_threshold":   {"type": "number"},
+            "region_window":       {"type": "integer", "minimum": 0},
+            "max_candidates":      {"type": "integer", "minimum": 0},
+            "max_phrases":         {"type": "integer", "minimum": 0},
+            "min_tool_uses":       {"type": "integer", "minimum": 0},
+            "max_tool_uses":       {"type": "integer", "minimum": 0}
+          }
+        },
+        "structural_signals": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "investigation_window":     {"type": "integer", "minimum": 0},
+            "iterative_debug_window":   {"type": "integer", "minimum": 0},
+            "test_fix_window":          {"type": "integer", "minimum": 0},
+            "synthesis_char_threshold": {"type": "integer", "minimum": 0},
+            "synthesis_tool_threshold": {"type": "integer", "minimum": 0},
+            "file_context_window":      {"type": "integer", "minimum": 0},
+            "debug_context_window":     {"type": "integer", "minimum": 0},
+            "debug_context_chars":      {"type": "integer", "minimum": 0}
+          }
+        },
+        "adaptive": {"type": "boolean"}
+      }
+    },
+    "tui": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "TUI preferences. Sourced from the legacy ~/.lore/config/tui.json shape.",
+      "properties": {
+        "layout": {
+          "type": "string",
+          "enum": ["left-right", "top-bottom"],
+          "description": "Pane layout. Closed-set against tui/internal/config/config.go LayoutMode (LayoutLeftRight/LayoutTopBottom)."
+        }
+      }
+    },
+    "obsidian": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Obsidian vault mirror configuration. Multi-vault keyed shape: each entry under `vaults` binds one knowledge base to one vault. The map key is the relative path under `$LORE_DATA_DIR/repos/` (i.e. `resolve-repo.sh` output minus the prefix), so the same identifier the install-base enumeration uses is what addresses a vault binding here. Per D-multi-vault: `enabled: false` retains `vault_path` so re-enable is a single toggle (mirrors `agent.enabled`); a missing `obsidian.vaults.<kb-key>` entry is the canonical 'sync disabled for this KB' state. The legacy single-vault shape (`obsidian.{vault_path,repo_path}`) was retired in favor of this map; readers fall back to the legacy `~/.lore/config/obsidian.json` only when its `repo_path` matches the current KDIR.",
+      "properties": {
+        "vaults": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["vault_path"],
+            "properties": {
+              "enabled":    {"type": "boolean", "description": "Per-KB sync toggle. Absence is treated as `true` for forward-compat — adding `enabled` to an entry is opt-in disable, not opt-in enable."},
+              "vault_path": {"type": "string",  "description": "Absolute filesystem path to the Obsidian vault directory. Empty string is REJECTED — its semantics are ambiguous (suppress vs. inherit) and doctor flags it as malformed.", "minLength": 1}
+            }
+          },
+          "description": "Map of knowledge-base key → vault binding. Keyset is open at the schema layer (key shape matches the KB-relative-path produced by `resolve-repo.sh`); doctor cross-references against the install-base."
+        }
+      }
+    }
+  },
+
+  "$defs": {
+    "framework_id": {
+      "type": "string",
+      "enum": ["claude-code", "opencode", "codex"],
+      "description": "Closed framework registry. MUST stay in lockstep with adapters/capabilities.json `frameworks` keyset — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats."
+    },
+
+    "role_id": {
+      "type": "string",
+      "enum": ["lead", "worker", "researcher", "reviewer", "judge", "summarizer", "advisor", "default"],
+      "description": "Closed role registry. MUST stay in lockstep with adapters/roles.json `roles[].id` — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats. Adding a role requires updating roles.json AND this enum AND scripts/lib.sh resolve_model_for_role AND tui/internal/config/config.go ResolveModelForRole AND tests/frameworks/roles.bats."
+    },
+
+    "role_value": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Model id bound to a role (e.g. \"opus\", \"sonnet\", \"haiku\", or a fully-qualified provider/model like \"anthropic/sonnet\"). Codex also accepts a reasoning-effort suffix such as \"gpt-5.5-high\", split by the Codex adapter into model \"gpt-5.5\" plus reasoning_effort \"high\". Empty string is REJECTED — its semantics are ambiguous (suppress vs. use-default) and it would route through resolve_model_for_role as a non-empty truthy value in jq. The schema forbids it; doctor surfaces violations."
+    },
+
+    "skill_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "minLength": 1,
+      "description": "Kebab-case skill id (e.g. \"spec-design\", \"pr-review\", \"codex-plan-review\"). Open at the schema layer — closed-set rejection against adapters/capabilities.json `skills` map happens in the loaders and doctor, not here. Pattern blocks obvious typos and uppercase/whitespace mistakes."
+    },
+
+    "advisor_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "minLength": 1,
+      "description": "Kebab-case advisor id (e.g. \"codex-design-review\", \"codex-plan-review\", \"codex-pr-review\"). Open at the schema layer — closed-set rejection against the skills registry happens in the loaders and doctor. Today the open shape matches scripts/ceremony-config.sh which performs no closed-set validation."
+    },
+
+    "roles_map_top": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default"],
+      "description": "Top-level role bindings. Closed-keyset against $defs/role_id. `default` is required so resolve_model_for_role's terminal fallback never returns undefined. Other roles are optional (absence falls through to `default`).",
+      "properties": {
+        "lead":       {"$ref": "#/$defs/role_value"},
+        "worker":     {"$ref": "#/$defs/role_value"},
+        "researcher": {"$ref": "#/$defs/role_value"},
+        "reviewer":   {"$ref": "#/$defs/role_value"},
+        "judge":      {"$ref": "#/$defs/role_value"},
+        "summarizer": {"$ref": "#/$defs/role_value"},
+        "advisor":    {"$ref": "#/$defs/role_value"},
+        "default":    {"$ref": "#/$defs/role_value"}
+      }
+    },
+
+    "roles_map_overlay": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-harness role -> model bindings. Closed-keyset against $defs/role_id. All keys optional except where callers need a concrete default; absence falls through to legacy top-level `roles` during the deprecation window.",
+      "properties": {
+        "lead":       {"$ref": "#/$defs/role_value"},
+        "worker":     {"$ref": "#/$defs/role_value"},
+        "researcher": {"$ref": "#/$defs/role_value"},
+        "reviewer":   {"$ref": "#/$defs/role_value"},
+        "judge":      {"$ref": "#/$defs/role_value"},
+        "summarizer": {"$ref": "#/$defs/role_value"},
+        "advisor":    {"$ref": "#/$defs/role_value"},
+        "default":    {"$ref": "#/$defs/role_value"}
+      }
+    },
+
+    "ceremonies_map": {
+      "type": "object",
+      "description": "Skill -> advisor list. Property keys are kebab-case skill ids; values are arrays of kebab-case advisor ids. Empty array is valid and means \"run with no advisors\". Absent key means no ceremony configured at that layer; runtime may still consult legacy fallback data during the deprecation window. Keyset is open at the schema layer; closed-set rejection against the skills registry lives in the loaders and doctor.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {"$ref": "#/$defs/advisor_id"},
+        "minItems": 0,
+        "uniqueItems": true,
+        "description": "Empty array = explicit suppression override (stops fall-through). Non-empty = explicit advisor list. Absent key = fall-through to the next layer."
+      }
+    },
+
+    "harness_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["args"],
+      "description": "Per-harness configuration block. `args` is required (every harness has a CLI arg list, possibly empty). `enabled`, `roles`, and `ceremonies` are optional for migration compatibility. New settings should include `roles` and `ceremonies` here because agent defaults and ceremony skills vary by harness. Absent `enabled` is default-on (matches the legacy global `agent.enabled` semantic); explicit `false` disables this harness's integration.",
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "CLI args prepended to every harness invocation. Empty array is valid (no flags). For claude-code the legacy default was [\"--dangerously-skip-permissions\"]; other harnesses default to []."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Per-harness integration toggle. When false, scripts/harness-toggle/disable.sh has removed this harness's skill/agent symlinks and cleared its instruction-file lore region. Absent = enabled (default-on, matches the legacy `agent.enabled` semantic). Mutated only via `lore harness {enable,disable}`; direct settings.json patches that bypass the toggle scripts are rejected by the unified loaders to keep symlink/instruction-file state in sync with the flag."
+        },
+        "roles":      {"$ref": "#/$defs/roles_map_overlay"},
+        "ceremonies": {"$ref": "#/$defs/ceremonies_map"}
+      }
+    },
+
+    "capability_id": {
+      "type": "string",
+      "enum": [
+        "instructions",
+        "skills",
+        "mcp",
+        "session_start_hook",
+        "stop_hook",
+        "pre_compact_hook",
+        "tool_hooks",
+        "permission_hooks",
+        "task_completed_hook",
+        "subagents",
+        "team_messaging",
+        "transcript_provider",
+        "headless_runner",
+        "plugin_runtime",
+        "model_routing"
+      ],
+      "description": "Closed capability registry. MUST stay in lockstep with adapters/capabilities.json `capabilities` map — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats."
+    },
+
+    "support_level": {
+      "type": "string",
+      "enum": ["full", "partial", "fallback", "none"],
+      "description": "Closed support-level vocabulary. Mirrors adapters/capabilities.json `support_levels`."
+    },
+
+    "capability_overrides_map": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Capability -> support-level overrides. Closed-keyset against $defs/capability_id. Empty object is the default (no overrides).",
+      "properties": {
+        "instructions":         {"$ref": "#/$defs/support_level"},
+        "skills":               {"$ref": "#/$defs/support_level"},
+        "mcp":                  {"$ref": "#/$defs/support_level"},
+        "session_start_hook":   {"$ref": "#/$defs/support_level"},
+        "stop_hook":            {"$ref": "#/$defs/support_level"},
+        "pre_compact_hook":     {"$ref": "#/$defs/support_level"},
+        "tool_hooks":           {"$ref": "#/$defs/support_level"},
+        "permission_hooks":     {"$ref": "#/$defs/support_level"},
+        "task_completed_hook":  {"$ref": "#/$defs/support_level"},
+        "subagents":            {"$ref": "#/$defs/support_level"},
+        "team_messaging":       {"$ref": "#/$defs/support_level"},
+        "transcript_provider":  {"$ref": "#/$defs/support_level"},
+        "headless_runner":      {"$ref": "#/$defs/support_level"},
+        "plugin_runtime":       {"$ref": "#/$defs/support_level"},
+        "model_routing":        {"$ref": "#/$defs/support_level"}
+      }
+    }
+  }
+}

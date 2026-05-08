@@ -51,6 +51,9 @@ func (m model) View() string {
 	if m.showHelp {
 		return m.renderHelpModal()
 	}
+	if m.settingsActive && m.settingsPanel != nil {
+		return m.renderSettingsModal()
+	}
 	return base
 }
 
@@ -472,6 +475,25 @@ func (m model) renderStatusBar(width int) string {
 	}
 
 	var hints []string
+	// Modal overlays steal hint context from the underlying state. The
+	// settings configurator renders its hints here (below the modal box,
+	// same slot as the work/follow-up views) instead of inlining them in
+	// the modal body.
+	if m.settingsActive && m.settingsPanel != nil {
+		hints = []string{
+			hint("j/k", "navigate"),
+			hint("Enter/Space", "commit"),
+			hint("u", "unset"),
+			hint("PgUp/PgDn", "scroll"),
+			hint("Esc", "close"),
+		}
+		bar := "  " + strings.Join(hints, sep)
+		barW := lipgloss.Width(bar)
+		if barW < width {
+			bar += strings.Repeat(" ", width-barW)
+		}
+		return dimS.Render(bar)
+	}
 	switch m.state {
 	case stateOnboarding:
 		if m.initLoading {
@@ -489,9 +511,8 @@ func (m model) renderStatusBar(width int) string {
 				hint("Enter", "open"),
 				hint("s", "spec"),
 				hint("c", "chat"),
-				hint("N", "AI add"),
-				hint("L", "layout"),
 				hint("K", "knowledge"),
+				hint("S", "settings"),
 				hint("q", "quit"),
 				hint("?", "help"),
 			}

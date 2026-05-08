@@ -7,7 +7,7 @@ argument_description: "[--model opus|sonnet] [directory paths] — optional dire
 
 # /bootstrap Skill
 
-Seeds a knowledge store by fan-out exploration of a codebase's architecture. Identifies domains (directories/modules), dispatches Explore agents to investigate each one in parallel, then synthesizes and files findings via `lore capture` at the lead level. All entries are filed at `confidence: medium` with `source: bootstrap`. Supports incremental execution — bootstrap specific directories now, others later — using plan.md checkboxes for progress tracking.
+Seeds a knowledge store with the **map and seams** of a codebase: what subsystems exist, what each owns, and what crosses between them. The lead first builds a project sketch (kind, paradigm, vocabulary, candidate seams), then dispatches Explore agents per subsystem with a project-aware brief targeting architecture and subsystem scale — not implementation, not gotchas. Findings file via `lore batch-capture` at `confidence: medium`, `source: bootstrap`. Incremental: bootstrap some subsystems now, others later, tracked via `plan.md` checkboxes.
 
 ## Resolve Work Path
 
@@ -18,96 +18,99 @@ Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
 ### Step 1: Scope
 
-Run the scoping script to identify domains for exploration.
+Identify candidate domains.
 
-1. Parse arguments: extract optional `--model` flag (accepts `opus` or `sonnet`, default `sonnet`) and use it as `<selected-model>` for every agent spawn below. If directory paths were provided (e.g., `/bootstrap src/auth src/api`), pass them to the script. Otherwise, scope the entire repo.
+1. Parse arguments: extract optional `--model` flag (`opus` or `sonnet`, default `sonnet`) — use it as `<selected-model>` for every agent spawn below. If directory paths were provided (e.g., `/bootstrap src/auth src/api`), pass them through; otherwise scope the entire repo.
 2. Run scoping:
    ```bash
    lore bootstrap scope [optional dir args...]
    ```
-   Stdout: JSON array of domain objects `[{"path": "src/auth", "description": "...", "languages": ["Python"]}]`.
-   Stderr: tree output for each scoped directory (useful context but not parsed).
-3. Parse the JSON output. Present the domain list to the user:
+   Stdout: JSON array `[{"path": "src/auth", "description": "...", "languages": ["Python"]}]`. Stderr: tree output (context, not parsed).
+3. Present the domain list:
    ```
    [bootstrap] Scoped N domains:
      1. src/auth — Authentication module (Python)
      2. src/api — API layer (Node.js)
-     3. lib/ — Library modules
      ...
-   Add, remove, or merge domains? (Enter to proceed)
+   Add, remove, or merge? (Enter to proceed)
    ```
-4. Allow the user to adjust: add new paths, remove irrelevant ones (e.g., `vendor/`, `dist/`), or merge related directories into a single domain. Wait for confirmation before proceeding.
+4. Wait for confirmation. The comprehension pass in Step 2 may reshape this list further.
 
-### Step 2: Team Setup
+### Step 2: Comprehend
 
-Create the agent team and one task per domain.
+Build a project sketch before fan-out. The sketch shapes every agent's brief.
 
-1. **Check for existing work item:** Look for a `bootstrap-*` work item in `$WORK_DIR/`. If found, load it for resume (see "Resuming a Bootstrap" below). If not found, create one:
+1. **Find or create the work item.** Look for a `bootstrap-*` work item in `$WORK_DIR/`. If present, load for resume (see "Resuming"). Otherwise:
    ```bash
    lore work create --title "Bootstrap <repo-name>" --tags bootstrap
    ```
-   Set `SLUG` to the resulting slug.
+   Set `SLUG` to the result.
 
-2. **Create the team** (MUST precede TaskCreate):
+2. **Read the top-level shape** — pick from what exists, don't grep deep:
+   - README and top-level docs (`README*`, `ARCHITECTURE*`, `docs/README*`)
+   - Top-level entry points (`main.*`, `index.*`, `cmd/`, `bin/`)
+   - Manifest (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, etc.)
+   - Top-level interface definitions (proto files, OpenAPI specs, public type packages)
+
+3. **Write the sketch** to `$WORK_DIR/<SLUG>/findings.md`:
+   ```markdown
+   ## Project Sketch
+   **Kind:** <CLI tool / web service / library / framework / monorepo / data pipeline / ...>
+   **Paradigm:** <event-driven / request-response / pipeline / state machine / plugin host / ...>
+   **Stated purpose:** <one sentence, ideally from the README>
+   **Project vocabulary:** <terms the project uses for its own concepts — agents should reuse these, not import generic terms>
+   **Candidate seams:** <where subsystems meet — public APIs, schemas, message formats, hook/plugin registries, data stores>
+   ```
+
+4. **Reshape the domain list if the sketch suggests it.** Subsystems may cross or merge directory boundaries — e.g., an HTTP surface spanning `src/api` + `src/handlers`, a settings subsystem split across `config/` + `src/settings`. Present any reshape with rationale:
+   ```
+   [bootstrap] Sketch suggests subsystems differ from directory scoping:
+     · "HTTP surface" merges src/api + src/handlers (shared route + middleware contracts)
+     · "Auth" matches src/auth as-is
+   Confirm? (Enter to proceed, or specify edits)
+   ```
+   The confirmed list defines the **subsystems** for the rest of the run.
+
+### Step 3: Team Setup
+
+Create the team and one task per subsystem.
+
+1. **Create the team** (MUST precede TaskCreate):
    ```
    TeamCreate: team_name="bootstrap-<SLUG>", description="Bootstrapping knowledge for <repo-name>"
    ```
 
-3. **Read your team lead name** from `~/.claude/teams/bootstrap-<SLUG>/config.json`.
+2. **Read your team lead name** from the active harness's teams install path (`resolve_harness_install_path teams`; typically `~/.claude/teams/bootstrap-<SLUG>/config.json`). This skill requires `team_messaging=full` per `adapters/capabilities.json.skills.bootstrap.requires`.
 
-4. **Create one task per domain** using the scoping JSON:
+3. **Create one task per subsystem:**
    ```
    TaskCreate:
-     subject: "Explore: <domain path>"
+     subject: "Explore: <subsystem name>"
      description: |
-       Explore the <domain path> directory and report architectural findings.
-
-       **Scope:** <domain path>
-       **Languages:** <languages array from scoping, e.g., ["Python", "Node.js"]>
-       **Description:** <description from scoping JSON>
-
-       Investigate and report:
-       - Architecture: how is this module/directory structured? What are the layers?
-       - Key patterns: design patterns, conventions, idioms used
-       - Design rationale: why is this module structured this way? What constraints or decisions shaped it?
-       - Behavioral pitfalls: non-obvious behaviors, gotchas, or rules that would bite a developer new to this area
-       - Entry points: main files, exports, public API surface
-       - Data flow: how data moves through this module
-       - Dependencies: internal (what other parts of the codebase does this depend on) and external (third-party packages)
-       - Key files: the most important files with brief descriptions
-
-       **Report format:** Send findings to "<team-lead-name>" via SendMessage with:
-       **Domain:** <path>
-       **Architecture:** (bullets)
-       **Key patterns:** (bullets)
-       **Design rationale:** why is this module structured this way? What constraints shaped it? (bullets)
-       **Behavioral directives:** non-obvious behaviors, pitfalls, or rules that would bite a developer new to this area (bullets)
-       **Entry points:** (bullets)
-       **Data flow:** (1-2 sentences)
-       **Dependencies:** internal: ..., external: ...
-       **Key files:** (paths with descriptions)
-
-       **IMPORTANT:** Do NOT call `lore capture`. Report findings only — the lead handles all filing.
-     activeForm: "Exploring <domain path>"
+       Investigate <subsystem name> (paths: <paths>, languages: <langs>) and report at
+       architecture/subsystem scale per the worker brief in Step 4. Map boundaries,
+       contracts, and shapes. Do NOT report gotchas, line-level behavior, or
+       implementation details. Do NOT call `lore capture` — the lead files everything.
+     activeForm: "Exploring <subsystem name>"
    ```
 
-5. **Set up phase dependencies:** Domains are independent — no cross-domain blocking. All tasks can run in parallel.
+4. Subsystems are independent — all tasks run in parallel.
 
-### Step 3: Explorer Prompts
+### Step 4: Explore
 
-Spawn Explore agents to investigate each domain in parallel.
+Spawn agents and collect findings.
 
-1. **Pre-fetch knowledge per domain** — before constructing prompts:
+1. **Per subsystem, prefetch knowledge:**
    ```bash
-   PRIOR_KNOWLEDGE=$(lore prefetch "<domain path>" --format prompt --limit 5 --scale-set=<bucket>)
+   PRIOR_KNOWLEDGE=$(lore prefetch "<subsystem name>" --format prompt --limit 5 --scale-set=architecture,subsystem)
    ```
 
-2. **Get directory tree for each domain:**
+2. **Per subsystem, get a directory tree:**
    ```bash
-   DOMAIN_TREE=$(tree -L 3 --dirsfirst -I 'node_modules|.git|vendor|__pycache__|dist|build|.next|target|coverage' <domain-path>)
+   DOMAIN_TREE=$(tree -L 3 --dirsfirst -I 'node_modules|.git|vendor|__pycache__|dist|build|.next|target|coverage' <paths>)
    ```
 
-3. **Spawn agents** — launch `min(domain_count, 4)` agents in a single message:
+3. **Spawn `min(subsystem_count, 4)` agents in a single message:**
    ```
    Task:
      subagent_type: "general-purpose"
@@ -118,237 +121,182 @@ Spawn Explore agents to investigate each domain in parallel.
      prompt: |
        You are explorer-N on the bootstrap-<SLUG> team.
 
-       <embed $PRIOR_KNOWLEDGE here>
+       ## Project Sketch
+       <embed the sketch from findings.md>
 
-       ## Directory Structure
-       <embed $DOMAIN_TREE here>
+       ## Prior Knowledge
+       <embed $PRIOR_KNOWLEDGE>
+
+       ## Subsystem Structure
+       <embed $DOMAIN_TREE>
+
+       ## Mission
+       Map this subsystem's **boundaries, contracts, and shapes** at architecture/subsystem scale. Use the project's own vocabulary from the sketch.
+
+       Report on:
+       - **Boundaries** — what does this subsystem own? what's outside it?
+       - **Contracts at the seams** — signatures of public functions, REST/CLI/IPC surfaces, schemas, message formats, file formats, env-var/config contracts, hook/plugin registries
+       - **Shapes** — core data structures, types, schemas that flow through or persist
+       - **Lifecycle and ownership** — who creates/mutates/destroys state; ordering constraints; init/teardown paths
+       - **Internal layering** — if the subsystem decomposes further, name the layers and what each owns
+       - **Integration points** — how this subsystem talks to others (function call, event, queue, file, socket, shared store)
+       - **Entry points** — top-of-stack files/symbols that anchor the map (use sparingly; prefer subsystem names over paths)
+
+       Out of scope — do NOT report:
+       - Function bodies, algorithm choices, line-level behavior
+       - Style/formatting conventions
+       - Gotchas, sharp edges, "things that would bite a developer" (these accrue through use, not bootstrap)
+       - Test details unless tests *are* the contract
 
        ## Workflow
-       1. Call TaskList to see available exploration tasks
-       2. Claim one: TaskUpdate with owner=your name, status=in_progress
-       3. Read the full task with TaskGet
-       4. Explore the domain using Glob, Grep, Read:
-          - Start with entry points and key files
-          - Read enough code to understand architecture, not every line
-          - Focus on: structure, patterns, conventions, data flow, dependencies, design rationale, behavioral pitfalls
-       5. Send findings to "<team-lead-name>" via SendMessage:
-          summary: "Findings: <domain path>"
+       1. TaskList → claim one (TaskUpdate owner=you, status=in_progress)
+       2. TaskGet for full context
+       3. Explore: README and top-level first; then entry points; then contract definitions (types, schemas, interfaces, registries). Read enough to map the shape — not every line.
+       4. SendMessage to "<team-lead-name>":
+          summary: "Findings: <subsystem name>"
           content: |
-            **Domain:** <path>
-            **Architecture:**
-            - <structural observations>
-            **Key patterns:**
-            - <design patterns, conventions, idioms>
-            **Design rationale:**
-            - <why is this module structured this way? what constraints or decisions shaped it?>
-            **Behavioral directives:**
-            - <non-obvious behaviors, pitfalls, or rules that would bite a developer new to this area>
-            **Entry points:**
-            - <main files, exports, public API>
-            **Data flow:** <how data moves>
-            **Dependencies:**
-            - Internal: <other modules this depends on>
-            - External: <third-party packages>
-            **Key files:**
-            - <path>: <description>
-            **Observations:**
-            - <patterns that span beyond this domain, anything surprising or non-obvious>
+            **Subsystem:** <name>
+            **Boundaries:** <what it owns, what's outside>
+            **Contracts at the seams:** <bullets>
+            **Shapes:** <bullets>
+            **Lifecycle and ownership:** <bullets>
+            **Internal layering:** <bullets, or "flat">
+            **Integration points:** <bullets>
+            **Entry points:** <minimal anchor list>
+            **Observations:** <claims you're unsure of; contradictions across files; patterns that span beyond this subsystem>
 
-          **IMPORTANT:** Do NOT call `lore capture` — report findings only.
-       6. Mark task completed: TaskUpdate with status=completed
-       7. Call TaskList — claim next unclaimed task if available
-       8. When no tasks remain, you're done
+          Do NOT call `lore capture`.
+       5. TaskUpdate status=completed
+       6. TaskList → claim next if available; done when none remain
 
-       Keep findings to 500-1500 characters. Facts over opinions.
-       Focus on what a developer new to this codebase would need to know.
+       800–2000 chars. Architecture and subsystem scale only. Facts over opinions.
    ```
 
-4. If more domains than agents, agents pick up additional tasks after completing their first (self-service model).
-
-### Step 4: Collection
-
-Persist findings as they arrive for synthesis.
-
-1. As explorer messages arrive (delivered automatically), **write each to `findings.md`** in the work item directory (`$WORK_DIR/<SLUG>/findings.md`):
+4. **As messages arrive, append to `$WORK_DIR/<SLUG>/findings.md`:**
    ```markdown
-   ## <Domain Path>
-   **Explored by:** explorer-N
-   **Timestamp:** <ISO timestamp>
+   ## <Subsystem name>
+   **Explored by:** explorer-N  
+   **Timestamp:** <ISO>
 
-   <paste the full findings report from the agent>
+   <full report>
 
    ---
    ```
-   Append each finding — `findings.md` is the durable record that survives compaction.
+   `findings.md` is the durable record that survives compaction.
 
-2. When all exploration tasks are complete:
-   - Send `shutdown_request` to all explorer agents via SendMessage
-   - Run `TeamDelete` to clean up the team
-   - Proceed to Step 5
+5. When all tasks complete: `shutdown_request` to all explorers, then `TeamDelete`. Proceed to Step 5.
 
-### Step 5: Synthesis
+### Step 5: Synthesize
 
-Group findings by theme, flag contradictions, and draft knowledge entries.
+Group findings by theme, flag contradictions, draft entries.
 
-1. **Read `findings.md`** from the work item directory.
+1. Read `findings.md` (including the sketch).
 
-2. **Group by theme, not just domain.** Findings often reveal cross-cutting patterns:
-   - Domain-specific architecture → files to `domains/<area>` category
-   - Cross-cutting conventions (error handling, logging, testing patterns) → files to `conventions/` category
-   - Architectural patterns (data flow, layering, service boundaries) → files to `architecture/` category
-   - Gotchas and non-obvious behaviors → files to `gotchas/` category
+2. **Group by theme** — cross-cuts often emerge:
+   - Subsystem-internal map → `domains/<area>` or `architecture/`
+   - Cross-subsystem contracts (data shapes, message formats, error protocols shared across subsystems) → `architecture/` or `architectural-models/`
+   - Project-wide conventions (layering pattern, dependency direction, naming of seams) → `cross-cutting-conventions/`
 
-3. **Flag contradictions:** Check for cases where two agents describe the same file, pattern, or module differently. List contradictions explicitly:
+3. **Flag contradictions** between explorer reports. Resolve by reading the file at issue before filing.
+
+4. **Draft entries** — bootstrap drafts eagerly; Step 6 prunes.
+
+   **Gate (all must hold):**
+   - **Reusable** — claim survives beyond a single task.
+   - **Stable** — not mid-refactor.
+   - **Scale-fit** — passes the architecture substitution test (drop concrete proper nouns and the claim still reads as "A does B, C does D"), OR names a bounded subsystem and describes its internal shape. If the claim dies when you remove a function/file/line name, it's implementation-scale and does NOT belong here.
+
+   "Non-obvious" is **not** a bootstrap condition. Architectural facts that read as obvious-once-stated are still valuable — they compress many files into one claim, survive implementation rewrites, and prime search before code reading.
+
+   Each entry:
    ```
-   [contradiction] explorer-1 says auth uses middleware pattern, explorer-3 says auth uses decorator pattern
-   → Verify: read src/auth/index.ts to resolve
-   ```
-   Resolve contradictions by reading the relevant files before filing.
-
-4. **Draft entry list.** Bootstrap drafts eagerly — Step 6 is the pruning pass, not this step. When in doubt, draft the entry.
-
-   **Baseline conditions** (all three must hold):
-   - **Reusable** beyond a single task? (yes — bootstrap targets architectural knowledge)
-   - **Non-obvious** to someone new? (the whole point of bootstrap)
-   - **Stable** enough to be worth filing? (skip anything that looks mid-refactor)
-
-   **High-value categories** — draft any finding that fits one or more:
-   - **Design rationale** — why the architecture is this way, what was rejected, what constraints drove decisions
-   - **Architectural models** — how components connect, what the layers are, where data flows
-   - **Cross-cutting conventions** — patterns that span many files and can't be seen from one
-   - **Behavioral directives** — non-obvious behaviors, pitfalls, or rules that would bite someone new
-   - **Mental models** — frameworks for recognizing categories of situations
-   - **Directional intent** — aspirations and context not yet realized in code
-
-   The Synthesis condition from the main capture gate (requiring cross-source combination) is satisfied structurally here: the lead synthesizes across multiple explorer reports, so cross-domain entries qualify by construction.
-
-   Draft each entry with:
-   ```
-   Title: <concise insight title>
-   Insight: <1-3 sentence description>
-   Category: <domains/<area> | conventions | architecture | gotchas>
-   Related files: <key file paths>
+   Title: <concise, scannable>
+   Insight: <1-3 sentences>
+   Category: <domains/<area> | architecture | architectural-models | cross-cutting-conventions>
+   Related files: <entry points and contract definitions only>
    ```
 
-5. **Deduplicate:** If multiple agents reported the same pattern, merge into a single entry with the best description. Do not create duplicate entries.
+5. **Deduplicate** — merge multi-explorer overlaps into single entries.
 
-### Step 6: Filing
+### Step 6: File
 
-Present entries to the user, then file approved ones via a single batch-capture call.
-
-1. **Present the entry list** to the user for review:
+1. Present the entry list:
    ```
-   [bootstrap] Synthesized N entries from M domains:
-
-   1. [domains/auth] "Auth uses middleware chain pattern"
-      → src/auth/middleware.ts, src/auth/index.ts
-   2. [conventions] "All API routes follow controller-service-repo layering"
-      → src/api/users/controller.ts, src/api/users/service.ts
-   3. [gotchas] "Database migrations must run before seed scripts"
-      → scripts/migrate.sh, scripts/seed.sh
-   ...
-
-   Prune freely — entries are drafted with high eagerness. Drop anything that seems obvious, unstable, or better expressed in code. (e.g., "drop 3, edit 2")
-   ```
-
-2. **Process user feedback:** Remove rejected entries, apply edits.
-
-3. **Write approved entries to a JSON file** at `$WORK_DIR/<SLUG>/_batch_entries.json`:
-   ```json
-   [
-     {
-       "insight": "<insight text>",
-       "context": "Discovered during bootstrap of <repo>",
-       "category": "<category>",
-       "confidence": "medium",
-       "related_files": "<comma-separated paths>"
-     },
+   [bootstrap] Synthesized N entries from M subsystems:
+     1. [architecture] "<title>" → <files>
      ...
-   ]
+   Prune freely. (e.g., "drop 3, edit 2")
    ```
-   One object per approved entry. Fields match `lore capture` flags.
 
-4. **File all entries in one call:**
+2. Apply user feedback. Write approved entries to `$WORK_DIR/<SLUG>/_batch_entries.json`:
+   ```json
+   [{"insight": "...", "context": "Discovered during bootstrap of <repo>", "category": "<cat>", "confidence": "medium", "related_files": "<csv>"}]
+   ```
+   One object per entry. Fields match `lore capture` flags.
+
+3. File:
    ```bash
    lore batch-capture --file "$WORK_DIR/<SLUG>/_batch_entries.json"
    ```
-   - On success: delete `_batch_entries.json`.
-   - On failure: retain `_batch_entries.json` and prompt the user:
-     ```
-     [bootstrap] batch-capture failed for N entries — _batch_entries.json retained.
-     Retry with `lore batch-capture --file <path>`, or fix entries and re-run.
-     ```
-     Do not proceed to heal until the user resolves the failure.
+   - Success: delete `_batch_entries.json`.
+   - Failure: retain the file; prompt the user to retry with the same command. Do not proceed to heal until resolved.
 
-5. **Run heal once** regardless of partial failure:
-   ```bash
-   lore heal
-   ```
+4. Run `lore heal` regardless of partial failure.
 
 ### Step 7: Spot-Check
 
-Verify a random sample of filed entries against actual code.
+Verify the **map matches the territory** — sample architectural claims, not file/line claims.
 
 1. Pick 3 random entries from the set just filed.
-2. For each entry, read the `related_files` listed in the entry.
-3. Verify the claims are accurate — does the code actually do what the entry says?
-4. Report results:
+2. Read the related files. Verify the claimed boundaries hold, the claimed contracts exist, the claimed shapes flow as described.
+3. Report:
    ```
    [bootstrap] Spot-check (3/N entries):
-     "Auth middleware chain" — verified, src/auth/middleware.ts exports chain at L45
-     "Controller-service layering" — verified, pattern holds in 4/4 sampled routes
-     "DB migrations before seeds" — INACCURATE: seed.sh actually checks migration status first
+     "HTTP surface owns route + middleware contracts" — verified
+     "Settings flow through SettingsRegistry" — INACCURATE: two paths bypass the registry
+     ...
    ```
-5. If any entry is inaccurate, offer to correct or remove it. This step is advisory — it does not block completion.
+4. Offer to correct or remove inaccurate entries. Advisory — does not block completion.
 
 ### Step 8: Cleanup
 
-Wrap up the bootstrap session.
-
-1. **Update work item notes** with a session summary:
-   ```bash
-   # Append to notes.md
-   ```
+1. Append to `notes.md`:
    ```markdown
    ## YYYY-MM-DDTHH:MM
    **Focus:** Bootstrap via /bootstrap
-   **Domains explored:** <list>
-   **Entries filed:** N entries across M categories
-   **Contradictions found:** <count and brief descriptions, or "none">
+   **Subsystems explored:** <list>
+   **Entries filed:** N across M categories
+   **Contradictions:** <count or "none">
    **Spot-check:** <pass/fail summary>
-   **Next:** <remaining domains if partial, or "Bootstrap complete">
+   **Next:** <remaining subsystems, or "Bootstrap complete">
    ```
 
-2. **Check off completed phases** in `plan.md` — each bootstrapped domain's scope task gets marked `[x]`.
+2. Check off completed phases in `plan.md`.
 
-3. **If all domains are bootstrapped:**
-   - Archive the work item: `lore work archive "<SLUG>"`
+3. **All subsystems done** → `lore work archive "<SLUG>"`.
+   **Partial completion** → leave active; run `lore work heal`.
 
-4. **If partial completion** (some domains remain):
-   - Leave the work item active for later `/bootstrap` resumption
-   - Run `lore work heal`
-
-5. **Report to user:**
+4. Report:
    ```
    [bootstrap] Done.
-   Domains explored: N
+   Subsystems explored: N
    Entries filed: M (confidence: medium, source: bootstrap)
    Spot-check: K/3 verified
-   Remaining: <list if any, or "none — bootstrap complete">
+   Remaining: <list, or "none">
    ```
 
 ## Resuming a Bootstrap
 
-When `/bootstrap` is called and an existing `bootstrap-*` work item is found:
+When `/bootstrap` is called and a `bootstrap-*` work item exists:
 
-1. Read `findings.md` and `plan.md` to determine which domains are already bootstrapped (checked phases).
-2. Re-run scoping (`bootstrap-scope.sh`) to detect any new directories since the last run.
-3. Present the current state:
+1. Read `findings.md` (including the project sketch) and `plan.md` to determine completed subsystems.
+2. Re-run `lore bootstrap scope` to detect new directories.
+3. Present current state:
    ```
-   [bootstrap] Resuming — found existing bootstrap work item.
-   Already explored: src/auth, src/api, lib/
-   New/remaining: src/workers, tests/
-   Proceed with remaining domains? (or specify different scope)
+   [bootstrap] Resuming.
+   Sketch: <kind>, <paradigm>
+   Already explored: <list>
+   New/remaining: <list>
+   Proceed? (or specify edits)
    ```
-4. User confirms scope. Proceed from Step 2 with only the unchecked/new domains.
-5. New findings append to existing `findings.md`. New entries go through the same synthesis/filing/spot-check flow.
+4. User confirms. Proceed from Step 3 (Team Setup) with remaining subsystems. New findings append to existing `findings.md`; the existing sketch is preserved unless the user explicitly updates it.

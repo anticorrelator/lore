@@ -137,6 +137,49 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// Non-key messages (e.g. window resize) fall through.
 	}
 
+	// Settings configurator modal: intercept all keys, route to sub-model.
+	// Per D2 the sub-model owns navigation; the host only catches the
+	// close signal it raises (Closed() flips true on top-level Esc with no
+	// active draft). Per D10, drafts are discarded at modal close — the
+	// next open rebuilds the panel from disk state below.
+	if m.settingsActive && m.settingsPanel != nil {
+		if km, ok := msg.(tea.KeyMsg); ok {
+			// Global quit shortcuts must escape the modal so the TUI
+			// behaves consistently with every other view (the main
+			// key-block at line ~534 below). 'q' is letter input for
+			// text-entry widgets, so we only quit when the focused
+			// widget does not consume runes; ctrl+c / ctrl+d are
+			// control codes that no widget claims, so they always quit.
+			switch km.String() {
+			case "ctrl+c", "ctrl+d":
+				m.cleanupAllSubprocesses()
+				return m, tea.Quit
+			case "q":
+				if !m.settingsPanel.FocusConsumesRunes() {
+					m.cleanupAllSubprocesses()
+					return m, tea.Quit
+				}
+			}
+			panel, cmd := m.settingsPanel.Update(msg)
+			m.settingsPanel = panel
+			if m.settingsPanel.Closed() {
+				m.settingsActive = false
+				m.focusedPanel = m.settingsPriorFocus
+				// Mark the panel for rebuild on next open. Keeping the
+				// pointer alive lets any in-flight tea.Cmd (e.g. an
+				// agent-toggle shell-out result) still find a target;
+				// the rebuild on next open honors D10's discard rule.
+				m.settingsPanel = nil
+			}
+			return m, cmd
+		}
+		// Non-key messages still route through the panel so async results
+		// (agentToggleResultMsg from ToggleAgent) reach Update.
+		panel, cmd := m.settingsPanel.Update(msg)
+		m.settingsPanel = panel
+		return m, cmd
+	}
+
 	// Confirm modal for archive/delete: intercept all keys.
 	if m.confirmAction != "" {
 		if km, ok := msg.(tea.KeyMsg); ok {
@@ -717,6 +760,30 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.browser, _ = m.browser.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
 				return m, knowledge.LoadManifestCmd(m.config.KnowledgeDir)
 			}
+		case "ctrl+,", "S":
+			// Open the settings configurator modal. Two openers are bound:
+			// `Ctrl+,` (idiomatic on terminals that deliver it) and capital
+			// `S` (universally reliable fallback — `s` lowercase is /spec).
+			// Available from any non-terminal split-pane state. Per D10 we
+			// rebuild a fresh panel each open so previously-discarded
+			// drafts cannot leak across sessions; if init fails, surface a
+			// flash error so the user sees something instead of silence.
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateKnowledge) && !m.terminalMode {
+				panel, err := initSettingsPanel()
+				if panel != nil {
+					m.settingsPanel = panel
+					m.settingsActive = true
+					m.settingsPriorFocus = m.focusedPanel
+					m.sizeSettingsPanel()
+					return m, m.settingsPanel.Init()
+				}
+				if err != nil {
+					m.flashErr = fmt.Sprintf("settings: %v", err)
+				} else {
+					m.flashErr = "settings: panel unavailable"
+				}
+				return m, nil
+			}
 		case "f":
 			if m.state == stateWork && !m.terminalMode {
 				m.state = stateFollowUps
@@ -741,7 +808,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 		case "esc":
 			// Esc from right panel (detail mode only): back to list.
-			// In terminal mode, esc falls through to spec panel which sends TerminalDetachMsg.
+			// In terminal mode, esc falls through to the spec panel, which forwards
+			// a single Esc to the PTY (so e.g. Claude Code's "esc to interrupt"
+			// works) and emits TerminalDetachMsg only on a double-Esc gesture.
 			if (m.state == stateWork || m.state == stateFollowUps) && m.focusedPanel == panelRight && !m.terminalMode {
 				m.focusedPanel = panelLeft
 				return m, nil
@@ -862,6 +931,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+
+		// Re-size the settings modal viewport on terminal resize so long
+		// content scrolls correctly when the user grows/shrinks the window.
+		if m.settingsActive {
+			m.sizeSettingsPanel()
+		}
 
 		// Send constrained sizes to sub-models. List height matches the rendered
 		// area (listPanelHeight); width spans the full panel in top/bottom layout.

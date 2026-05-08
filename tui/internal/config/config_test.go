@@ -103,12 +103,40 @@ func TestLoadPrefs_MissingFile(t *testing.T) {
 	}
 }
 
-func TestLoadPrefs_ReadsFile(t *testing.T) {
+func TestLoadPrefs_ReadsUnifiedSettings(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("LORE_DATA_DIR", filepath.Join(tmp, ".lore"))
 	t.Setenv("LORE_TUI_LAYOUT", "")
 
-	// Write a tui.json with top-bottom layout.
+	// Write the unified settings.json with top-bottom layout.
+	dir := filepath.Join(tmp, ".lore", "config")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(dir, "settings.json"),
+		[]byte(`{"version":1,"tui":{"layout":"top-bottom"}}`),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	p := LoadPrefs()
+	if p.Layout != LayoutTopBottom {
+		t.Errorf("Layout = %q, want %q", p.Layout, LayoutTopBottom)
+	}
+}
+
+func TestLoadPrefs_LegacyTuiJsonFallback(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("LORE_DATA_DIR", filepath.Join(tmp, ".lore"))
+	t.Setenv("LORE_TUI_LAYOUT", "")
+
+	// Only the legacy tui.json exists (no settings.json) — D4 deprecation
+	// window: LoadPrefs must fall through to the fragmented file for one
+	// release.
 	dir := filepath.Join(tmp, ".lore", "config")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
@@ -119,20 +147,53 @@ func TestLoadPrefs_ReadsFile(t *testing.T) {
 
 	p := LoadPrefs()
 	if p.Layout != LayoutTopBottom {
-		t.Errorf("Layout = %q, want %q", p.Layout, LayoutTopBottom)
+		t.Errorf("Layout = %q, want %q (legacy tui.json fallback)", p.Layout, LayoutTopBottom)
+	}
+}
+
+func TestLoadPrefs_UnifiedBeatsLegacy(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("LORE_DATA_DIR", filepath.Join(tmp, ".lore"))
+	t.Setenv("LORE_TUI_LAYOUT", "")
+
+	dir := filepath.Join(tmp, ".lore", "config")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy says left-right, unified says top-bottom — unified must win.
+	if err := os.WriteFile(filepath.Join(dir, "tui.json"), []byte(`{"layout":"left-right"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(dir, "settings.json"),
+		[]byte(`{"version":1,"tui":{"layout":"top-bottom"}}`),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	p := LoadPrefs()
+	if p.Layout != LayoutTopBottom {
+		t.Errorf("Layout = %q, want %q (unified must beat legacy)", p.Layout, LayoutTopBottom)
 	}
 }
 
 func TestLoadPrefs_EnvOverridesFile(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("LORE_DATA_DIR", filepath.Join(tmp, ".lore"))
 
 	// File says left-right.
 	dir := filepath.Join(tmp, ".lore", "config")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "tui.json"), []byte(`{"layout":"left-right"}`), 0644); err != nil {
+	if err := os.WriteFile(
+		filepath.Join(dir, "settings.json"),
+		[]byte(`{"version":1,"tui":{"layout":"left-right"}}`),
+		0644,
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -148,6 +209,7 @@ func TestLoadPrefs_EnvOverridesFile(t *testing.T) {
 func TestSavePrefs_Roundtrip(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("LORE_DATA_DIR", filepath.Join(tmp, ".lore"))
 	t.Setenv("LORE_TUI_LAYOUT", "")
 
 	// Save top-bottom preference.
@@ -156,10 +218,10 @@ func TestSavePrefs_Roundtrip(t *testing.T) {
 		t.Fatalf("SavePrefs: %v", err)
 	}
 
-	// Verify the file was created.
-	path := filepath.Join(tmp, ".lore", "config", "tui.json")
+	// Verify the unified settings.json was created (not the legacy tui.json).
+	path := filepath.Join(tmp, ".lore", "config", "settings.json")
 	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("tui.json not created: %v", err)
+		t.Fatalf("settings.json not created: %v", err)
 	}
 
 	// Load it back and verify.

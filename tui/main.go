@@ -57,6 +57,17 @@ func main() {
 		layoutMode: prefs.Layout,
 		indexPath:  filepath.Join(cfg.WorkDir, "_index.json"),
 	}
+
+	// Best-effort settings panel initialization. A nil panel disables the
+	// configurator open key but does not block startup — the modal is a
+	// non-load-bearing affordance (the underlying CLI surfaces are still
+	// reachable). Schema errors are intentionally non-fatal here per D1:
+	// SettingsModel.View renders an inline error banner.
+	if startState != stateNoRepo {
+		if panel, _ := initSettingsPanel(); panel != nil {
+			m.settingsPanel = panel
+		}
+	}
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

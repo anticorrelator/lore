@@ -109,6 +109,7 @@ mv "$ITEM_DIR" "$ARCHIVE_DIR/$SLUG"
 
 # Rebuild index
 "$SCRIPT_DIR/update-work-index.sh" >/dev/null 2>/dev/null || true
+bash "$SCRIPT_DIR/export-obsidian.sh" --work-hubs > /dev/null 2>&1 || true
 
 # Get title for confirmation
 TITLE=$(json_field "title" "$ARCHIVE_DIR/$SLUG/_meta.json")

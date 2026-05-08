@@ -82,11 +82,20 @@ type SpecProcessStartedMsg struct {
 	Output <-chan []byte // byte chunks from the PTY reader goroutine
 }
 
-// TerminalDetachMsg is sent when user presses Ctrl+] to detach from terminal
-// focus without killing the subprocess (panel stays open, subprocess keeps running).
+// TerminalDetachMsg is sent when the user double-presses Esc within
+// escDetachWindow to detach from terminal focus without killing the subprocess
+// (panel stays open, subprocess keeps running). A single Esc is forwarded to
+// the PTY so harnesses like Claude Code can use it to interrupt running work.
 type TerminalDetachMsg struct {
 	Slug string
 }
+
+// escDetachWindow is the maximum interval between two Esc presses for the
+// gesture to be interpreted as "detach" rather than two independent Esc
+// forwards to the PTY. Tuned to comfortably exceed a deliberate double-tap
+// (~150–300 ms) while staying below the gap between two reflective single
+// presses.
+const escDetachWindow = 500 * time.Millisecond
 
 // TerminalTerminateMsg is sent when user presses Ctrl+\ to kill the subprocess
 // and close the spec panel entirely.
@@ -234,6 +243,11 @@ type SpecPanelModel struct {
 	stopDrain chan struct{}
 	// ptmxCh sends the PTY master to the drain goroutine for response forwarding.
 	ptmxCh chan *os.File
+
+	// lastEscTime records when an Esc was last forwarded to the PTY. A second
+	// Esc arriving within escDetachWindow with no intervening non-Esc KeyMsg
+	// is interpreted as the detach gesture instead of being forwarded.
+	lastEscTime time.Time
 }
 
 // NewSpecPanelModel creates a spec panel model for the given work item slug.
@@ -549,10 +563,15 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 		// This handler is only reached when focusedPanel == panelSpec, meaning
 		// the terminal has keyboard focus. Intercept escape chords and scroll keys;
 		// forward all other keys to the PTY subprocess.
+		//
+		// Any non-Esc key arrives here clears the pending double-Esc gesture so
+		// that an accidentally-paired Esc-letter-Esc sequence does not detach.
+		if msg.Type != tea.KeyEscape {
+			m.lastEscTime = time.Time{}
+		}
 		switch msg.Type {
-		case tea.KeyEscape: // Esc — detach, return focus to detail panel
-			slug := m.slug
-			return m, func() tea.Msg { return TerminalDetachMsg{Slug: slug} }
+		case tea.KeyEscape: // single Esc forwards; double Esc within window detaches
+			return m.handleEscKey()
 		case tea.KeyCtrlBackslash: // Ctrl+\ — terminate subprocess
 			slug := m.slug
 			return m, func() tea.Msg { return TerminalTerminateMsg{Slug: slug} }
@@ -616,20 +635,45 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 		v := reflect.ValueOf(msg)
 		if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.Uint8 {
 			b := v.Bytes()
-			// Intercept kitty-encoded Escape (\x1b[27u) — same semantic as tea.KeyEscape
+			// Kitty-encoded Escape (\x1b[27u) — route through the same double-Esc
+			// gesture handler as tea.KeyEscape so behavior is uniform across
+			// terminals with and without the kitty keyboard protocol.
 			if bytes.Equal(b, []byte{0x1b, '[', '2', '7', 'u'}) {
-				slug := m.slug
-				return m, func() tea.Msg { return TerminalDetachMsg{Slug: slug} }
+				return m.handleEscKey()
 			}
 			// Intercept kitty-encoded Ctrl+\ (\x1b[92;5u) — same semantic as tea.KeyCtrlBackslash
 			if bytes.Equal(b, []byte{0x1b, '[', '9', '2', ';', '5', 'u'}) {
 				slug := m.slug
 				return m, func() tea.Msg { return TerminalTerminateMsg{Slug: slug} }
 			}
+			// Any other byte input clears the pending double-Esc gesture.
+			m.lastEscTime = time.Time{}
 			m.ptmx.Write(b) //nolint:errcheck
 		}
 	}
 
+	return m, nil
+}
+
+// handleEscKey implements the single-Esc-forwards / double-Esc-detaches gesture.
+//
+// First Esc: forward \x1b to the PTY (so harnesses like Claude Code can use
+// Esc to interrupt) and arm the double-Esc timer. Second Esc within
+// escDetachWindow: detach focus back to the detail panel without forwarding,
+// without killing the subprocess. The arm is cleared by any non-Esc key
+// reaching the panel; PTY output does not clear it (so a streaming subprocess
+// does not block the detach gesture).
+func (m SpecPanelModel) handleEscKey() (SpecPanelModel, tea.Cmd) {
+	now := time.Now()
+	if !m.lastEscTime.IsZero() && now.Sub(m.lastEscTime) < escDetachWindow {
+		m.lastEscTime = time.Time{}
+		slug := m.slug
+		return m, func() tea.Msg { return TerminalDetachMsg{Slug: slug} }
+	}
+	m.lastEscTime = now
+	if m.ptmx != nil {
+		m.ptmx.Write([]byte{0x1b}) //nolint:errcheck
+	}
 	return m, nil
 }
 
@@ -898,23 +942,57 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 			}
 		}()
 		// Build the initial prompt to auto-submit. Passing it as a positional
-		// argument to claude starts an interactive session and submits it
-		// immediately — no PTY-write timing hack needed.
+		// argument to the harness binary starts an interactive session and
+		// submits it immediately — no PTY-write timing hack needed.
 		initialPrompt := buildInitialPrompt(slug, title, extraContext, shortMode, chatMode, skipConfirm, followupMode, findingIndex)
 
-		// Build args: start with user-configured claude flags
-		// (~/.lore/config/claude.json), optionally inject --append-system-prompt
-		// before the positional initialPrompt when followupMode is active.
-		args := append([]string(nil), config.LoadClaudeConfig().Args...)
+		// Resolve the active framework once and use it for both the binary
+		// lookup and the harness-specific prepended args. Surfaces a clear
+		// StreamErrorMsg on misconfiguration rather than silently spawning
+		// the wrong (or missing) binary.
+		activeFramework, err := config.ResolveActiveFramework()
+		if err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve active framework: %w", err)}
+		}
+		harnessBinary, err := config.HarnessBinary(activeFramework)
+		if err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve harness binary: %w", err)}
+		}
+
+		// Build args: start with user-configured harness flags
+		// (~/.lore/config/harness-args.json `[<framework>].args`), then
+		// adapter-mediated flag injection for the two TUI-injected concerns
+		// (append_system_prompt, inline_settings_override). Each concern's
+		// flag spelling is resolved against the active harness; on
+		// `unsupported` the TUI skips the injection entirely rather than
+		// substituting a different flag (opencode/codex would error on an
+		// unknown flag). See adapters/agents/README.md §"TUI Launch Concerns".
+		args := append([]string(nil), config.LoadHarnessConfig(activeFramework).Args...)
 		if followupMode && slug != "" {
 			if sysPrompt := loadFollowupContext(slug, knowledgeDir, findingIndex); sysPrompt != "" {
-				args = append(args, "--append-system-prompt", sysPrompt)
+				flag, supported, err := config.HarnessSystemPromptFlag(activeFramework)
+				if err != nil {
+					return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve append_system_prompt flag: %w", err)}
+				}
+				if supported {
+					args = append(args, flag, sysPrompt)
+				} else {
+					fmt.Fprintf(os.Stderr, "[lore] degraded: append_system_prompt skipped (capability=none on framework=%s); followup-discuss context not pre-loaded\n", activeFramework)
+				}
 			}
 		}
-		args = append(args, "--settings", `{}`)
+		settingsFlag, settingsSupported, err := config.HarnessSettingsOverrideFlag(activeFramework)
+		if err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve inline_settings_override flag: %w", err)}
+		}
+		if settingsSupported {
+			args = append(args, settingsFlag, `{}`)
+		} else {
+			fmt.Fprintf(os.Stderr, "[lore] degraded: inline_settings_override skipped (capability=none on framework=%s); session-scoped settings overrides unavailable\n", activeFramework)
+		}
 		args = append(args, initialPrompt)
 
-		cmd := exec.Command("claude", args...)
+		cmd := exec.Command(harnessBinary, args...)
 		cmd.Dir = projectDir
 		// Do NOT set cmd.Stderr = io.Discard here: with a PTY the subprocess's
 		// stdin/stdout/stderr are all wired to the PTY slave, so claude's full

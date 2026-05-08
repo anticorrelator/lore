@@ -28,7 +28,9 @@ Set `KNOWLEDGE_DIR` to the result. Set `THREADS_DIR` to `$KNOWLEDGE_DIR/_threads
 ## Resolve Template Version
 
 ```bash
-REMEMBER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh ~/.claude/skills/remember/SKILL.md)
+source ~/.lore/scripts/lib.sh
+SKILLS_DIR=$(resolve_harness_install_path skills)
+REMEMBER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$SKILLS_DIR/remember/SKILL.md")
 ```
 
 When `/remember` is invoked by another skill (e.g., `/implement` or `/spec` post-work extraction), the caller passes its own template-version context via the delegation prompt — see Step 5's provenance rules for the lead-synthesis path. For interactive invocations, use `$REMEMBER_TEMPLATE_VERSION` directly. If the hash command fails, fall through with an empty string; downstream scripts treat that as "no template version."
@@ -140,7 +142,7 @@ Review the full conversation context (filtered by any Step 1 constraints) and id
 
 For each candidate, assess against the capture gate — all 4 conditions must be true:
 1. **Reusable** — applicable beyond the current task
-2. **Non-obvious** — not already in README, CLAUDE.md, or docs
+2. **Non-obvious** — not already in README, the harness instructions file (CLAUDE.md/AGENTS.md), or docs
 3. **Stable** — unlikely to change soon
 4. **High confidence** — verified through code exploration, not speculative
 

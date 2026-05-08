@@ -5,8 +5,61 @@
 #
 # NOTE: This is a library file. Do NOT add set -euo pipefail here.
 # Callers set their own shell options.
+#
+# Shell support: bash 3.2+ and zsh 5+. The Claude Code Bash tool on macOS
+# inherits the user's login shell (typically zsh), and skill setup blocks
+# routinely `source` this file directly — so the path-detection and the
+# few helpers using indirect expansion below MUST work in both shells.
+# See gotchas/scripts-lib-sh-assumes-bash-is-routinely-sourced.md.
 
-LORE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve this library's own path in a shell-portable way.
+#   - bash: ${BASH_SOURCE[0]} is the sourced file path.
+#   - zsh:  ${(%):-%x} prompt-expands to the file currently being sourced.
+#   - other shells: best-effort fallback to $0 (will trip the sanity
+#     check below if it lands somewhere bogus).
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+  _lore_lib_self="${BASH_SOURCE[0]}"
+elif [[ -n "${ZSH_VERSION:-}" ]]; then
+  _lore_lib_self="${(%):-%x}"
+else
+  _lore_lib_self="${0}"
+fi
+LORE_LIB_DIR="$(cd "$(dirname "$_lore_lib_self")" && pwd)"
+unset _lore_lib_self
+
+# Sanity check: a correct $LORE_LIB_DIR contains lib.sh itself. If the
+# detection fell through to the cwd (e.g. an unsupported shell where
+# neither BASH_SOURCE nor ZSH_VERSION is populated), every downstream
+# `$LORE_LIB_DIR/../adapters/...` lookup would silently target the wrong
+# directory. Refuse loudly here instead.
+if [[ ! -f "$LORE_LIB_DIR/lib.sh" ]]; then
+  echo "Error: scripts/lib.sh self-detection failed (LORE_LIB_DIR='$LORE_LIB_DIR' has no lib.sh)." >&2
+  echo "       lib.sh supports bash and zsh; if you're sourcing it from a different shell," >&2
+  echo "       wrap the invocation in 'bash -c \"...\"' or report a bug." >&2
+  return 1 2>/dev/null || exit 1
+fi
+
+# LORE_REPO_DIR is the physical lore-repo root (one level up from scripts/),
+# resolved through any symlinks. Skills and scripts that build adapter paths
+# via string concatenation (e.g. "$LORE_REPO_DIR/adapters/agents/...") need
+# the realpath — stripping "/scripts" from LORE_LIB_DIR fails on the typical
+# install where ~/.lore/scripts is a symlink to the actual repo's scripts/.
+# `cd -P ..` resolves the symlink physically before going up, which a plain
+# `cd "$LIB/.."; pwd -P` does not (bash collapses ".." logically in the path
+# argument before chdir, landing at ~/.lore which has no adapters/ dir).
+LORE_REPO_DIR="$(cd "$LORE_LIB_DIR" && cd -P .. && pwd)"
+
+# --- Path-derivation convention ---
+# When a helper here needs the lore-repo root, use "$LORE_REPO_DIR"
+# (already physically resolved above), NEVER "$LORE_LIB_DIR/.." chained
+# into a `cd`. Both bash and zsh logically collapse ".." against the
+# string before chdir, so on the typical symlinked install
+# (~/.lore/scripts -> <repo>/scripts) the resulting path lands at ~/.lore
+# instead of <repo>/. Filesystem syscalls (`[[ -f ... ]]`, `cat`, `jq`)
+# resolve ".." physically and tolerate the legacy form, but anything
+# routed through `cd` does not. tests/frameworks/lib_shell_portability.bats
+# guards this convention with a grep-based lint so future helpers can't
+# silently re-introduce the trap.
 
 # --- die ---
 # Print an error message to stderr and exit with status 1.
@@ -354,61 +407,1117 @@ json_array_field() {
   ' "$file"
 }
 
-# --- lore_agent_enabled ---
-# Returns 0 (success) if lore agent integration is enabled, non-zero if disabled.
-# Checks in priority order:
-#   1. LORE_AGENT_DISABLED=1 env var → disabled (returns 1)
-#   2. ~/.lore/config/agent.json enabled field → false means disabled (returns 1)
-#   3. File absent or enabled=true → enabled (returns 0)
-# Usage: lore_agent_enabled || exit 0
-lore_agent_enabled() {
+# --- lore_harness_enabled ---
+# Returns 0 (success) if lore integration is enabled for the named harness,
+# non-zero if disabled. The framework arg is REQUIRED — callers know which
+# harness they're acting on (toggle scripts pass the loop variable; the TUI
+# passes the focused panel's framework). No implicit default — passing the
+# wrong harness would silently pick a different toggle, which is the bug
+# class this function exists to prevent.
+#
+# Resolution order:
+#   1. LORE_AGENT_DISABLED=1 env var → disabled (returns 1). Session-wide
+#      kill switch, applies to every harness. Name kept for back-compat with
+#      shell rc files; semantically still "lore disabled this session".
+#   2. Unified ~/.lore/config/settings.json `.harnesses.<fw>.enabled`. When
+#      the key is explicitly `false`, return 1; any other present value is
+#      enabled.
+#   3. Legacy ~/.lore/config/agent.json `.enabled` (deprecation-window
+#      fallback for users who haven't run install.sh post-rename). Read once
+#      and applied uniformly across harnesses, since the legacy file was
+#      global. Only consulted when step 2 returns absence.
+#   4. Key absent everywhere → enabled (returns 0). Default-on semantic
+#      preserves the pre-rename contract where missing config = enabled.
+#
+# Usage:
+#   lore_harness_enabled claude-code || exit 0
+lore_harness_enabled() {
+  local framework="${1:-}"
+  if [[ -z "$framework" ]]; then
+    echo "lore_harness_enabled: framework arg is required" >&2
+    return 2
+  fi
+
   if [[ "${LORE_AGENT_DISABLED:-}" == "1" ]]; then
     return 1
   fi
-  local config_file="${LORE_DATA_DIR:-$HOME/.lore}/config/agent.json"
-  if [[ -f "$config_file" ]]; then
-    if grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$config_file"; then
+
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
+
+  # Unified file (primary)
+  if [[ -x "$settings_sh" || -r "$settings_sh" ]] && command -v jq &>/dev/null; then
+    local unified_value
+    unified_value=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.${framework}.enabled" 2>/dev/null || true)
+    if [[ -n "$unified_value" ]]; then
+      [[ "$unified_value" == "false" ]] && return 1
+      return 0
+    fi
+  fi
+
+  # Legacy fragmented file (fallback). agent.json was global; treat its
+  # value as a uniform default across all harnesses for the deprecation
+  # window. install.sh fans it into per-harness on first run.
+  local legacy_file="$data_dir/config/agent.json"
+  if [[ -f "$legacy_file" ]]; then
+    if grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$legacy_file"; then
       return 1
     fi
   fi
   return 0
 }
 
-# --- load_claude_args ---
-# Print the args to prepend to every `claude` CLI invocation, one per line.
-# Callers: mapfile -t CLAUDE_ARGS < <(load_claude_args)
+# --- lore_agent_enabled ---
+# Returns 0 if lore integration is enabled for ANY registered harness, non-zero
+# only when every harness is explicitly disabled (or LORE_AGENT_DISABLED=1 is
+# in the env). This is the gate hooks call to decide whether to do any work
+# at all — the per-harness disabled state is enforced by uninstalling that
+# harness's symlinks and clearing its instruction file, so a disabled
+# harness shouldn't fire its hooks at all. This gate is belt-and-suspenders
+# against partial disable states.
+#
 # Resolution order:
-#   1. LORE_CLAUDE_ARGS env var (JSON array, requires jq)
-#   2. $LORE_DATA_DIR/config/claude.json `.args` (requires jq)
-#   3. built-in default: --dangerously-skip-permissions
-# Mirrors config.LoadClaudeConfig() in tui/internal/config/config.go.
-load_claude_args() {
-  local config_file="${LORE_DATA_DIR:-$HOME/.lore}/config/claude.json"
+#   1. LORE_AGENT_DISABLED=1 env var → disabled (returns 1).
+#   2. For each registered framework, check `harnesses.<fw>.enabled`. If at
+#      least one is true (or absent — default-on), return 0.
+#   3. Legacy ~/.lore/config/agent.json `.enabled` fallback (deprecation
+#      window). Read once; the legacy file was global so its value applies
+#      uniformly.
+#   4. Nothing on disk → enabled (returns 0).
+#
+# Usage: lore_agent_enabled || exit 0
+lore_agent_enabled() {
+  if [[ "${LORE_AGENT_DISABLED:-}" == "1" ]]; then
+    return 1
+  fi
+
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
+
+  # Per-harness check: if ANY registered framework is enabled (or absent →
+  # default-on), the gate passes. We enumerate via list_supported_frameworks
+  # so newly-added harnesses are picked up automatically.
+  if [[ -x "$settings_sh" || -r "$settings_sh" ]] && command -v jq &>/dev/null; then
+    local _fw_list
+    _fw_list=$(list_supported_frameworks 2>/dev/null || true)
+    if [[ -n "$_fw_list" ]]; then
+      local fw any_present=0
+      while IFS= read -r fw; do
+        [[ -z "$fw" ]] && continue
+        local v
+        v=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.${fw}.enabled" 2>/dev/null || true)
+        if [[ -n "$v" ]]; then
+          any_present=1
+          [[ "$v" == "true" ]] && return 0
+        else
+          # Absent → default-on. Lore is enabled.
+          return 0
+        fi
+      done <<<"$_fw_list"
+      # Every registered framework had an explicit value and none were true.
+      [[ "$any_present" -eq 1 ]] && return 1
+    fi
+  fi
+
+  # Legacy fragmented file (fallback)
+  local legacy_file="$data_dir/config/agent.json"
+  if [[ -f "$legacy_file" ]]; then
+    if grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$legacy_file"; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# --- migrate_claude_args_to_harness_args ---
+# One-shot migration helper: if $LORE_DATA_DIR/config/harness-args.json is
+# absent and the legacy $LORE_DATA_DIR/config/claude.json exists with a
+# valid `.args` array, write a new harness-args.json with the legacy args
+# under the `claude-code` key. Records the migration source in the new
+# file's `_deprecated_legacy_source` field so callers can detect that the
+# legacy file is the upstream and surface the deprecation in `lore status`.
+# The legacy claude.json is left in place untouched per Phase 1's
+# "deprecation note for one release" contract.
+# Idempotent: returns early if harness-args.json already exists or jq is
+# unavailable. Silent on missing legacy file (no migration needed).
+# Mirrors config.MigrateClaudeArgsToHarnessArgs() in
+# tui/internal/config/config.go (T10).
+migrate_claude_args_to_harness_args() {
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local legacy_file="$data_dir/config/claude.json"
+  local new_file="$data_dir/config/harness-args.json"
+
+  [[ -f "$new_file" ]] && return 0
+  [[ -f "$legacy_file" ]] || return 0
+  command -v jq &>/dev/null || return 0
+  jq -e '.args | type == "array"' "$legacy_file" &>/dev/null || return 0
+
+  mkdir -p "$(dirname "$new_file")"
+  jq --arg src "$legacy_file" \
+     '{
+        "version": 1,
+        "_deprecated_legacy_source": $src,
+        "claude-code": { "args": .args }
+      }' "$legacy_file" > "$new_file.tmp" && mv "$new_file.tmp" "$new_file"
+}
+
+# --- load_harness_args ---
+# Print the args to prepend to every harness CLI invocation, one per line.
+# Callers: mapfile -t HARNESS_ARGS < <(load_harness_args)
+# Optional positional arg: explicit harness key (e.g. `claude-code`,
+# `opencode`, `codex`). If omitted, the active framework is resolved via
+# resolve_active_framework so the same call site picks up whichever
+# harness install.sh persisted.
+# Resolution order:
+#   1. LORE_HARNESS_ARGS env var (JSON array, requires jq) — applies to
+#      whichever harness the caller is reading; preferred for new code.
+#   2. LORE_CLAUDE_ARGS env var (legacy alias, only honored when the
+#      resolved harness is `claude-code`; logs a one-shot deprecation
+#      notice to stderr).
+#   3. $LORE_DATA_DIR/config/harness-args.json `[<harness>].args`
+#      (canonical multi-harness shape, T8).
+#   4. $LORE_DATA_DIR/config/claude.json `.args` (legacy, only honored
+#      when the resolved harness is `claude-code`. On-the-fly migration
+#      runs via migrate_claude_args_to_harness_args before step 3.)
+#   5. built-in default: `--dangerously-skip-permissions` for
+#      `claude-code`; nothing (no args) for any other harness, since the
+#      flag is Anthropic-specific.
+# Mirrors config.LoadHarnessArgs() in tui/internal/config/config.go (T10).
+load_harness_args() {
+  local harness="${1:-}"
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local new_file="$data_dir/config/harness-args.json"
+  local legacy_file="$data_dir/config/claude.json"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
+
+  if [[ -z "$harness" ]]; then
+    harness=$(resolve_active_framework) || return 1
+  fi
+
   if command -v jq &>/dev/null; then
-    if [[ -n "${LORE_CLAUDE_ARGS:-}" ]]; then
+    if [[ -n "${LORE_HARNESS_ARGS:-}" ]]; then
+      if printf '%s' "$LORE_HARNESS_ARGS" | jq -e 'type == "array"' &>/dev/null; then
+        printf '%s' "$LORE_HARNESS_ARGS" | jq -r '.[]'
+        return
+      fi
+    fi
+
+    if [[ "$harness" == "claude-code" && -n "${LORE_CLAUDE_ARGS:-}" ]]; then
       if printf '%s' "$LORE_CLAUDE_ARGS" | jq -e 'type == "array"' &>/dev/null; then
+        _lore_warn_load_claude_env_once
         printf '%s' "$LORE_CLAUDE_ARGS" | jq -r '.[]'
         return
       fi
     fi
-    if [[ -f "$config_file" ]]; then
-      if jq -e '.args | type == "array"' "$config_file" &>/dev/null; then
-        jq -r '.args[]' "$config_file"
+
+    # Unified file (primary): harnesses.<harness>.args
+    local unified_args_raw
+    unified_args_raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$harness.args" 2>/dev/null || true)
+    if [[ -n "$unified_args_raw" ]]; then
+      if printf '%s' "$unified_args_raw" | jq -e 'type == "array"' &>/dev/null; then
+        printf '%s' "$unified_args_raw" | jq -r '.[]'
+        return
+      fi
+    fi
+
+    # Migrate legacy claude.json → harness-args.json on first read (idempotent).
+    # Preserved verbatim from pre-T2: this migration was already in place and
+    # the unified-file consolidation does not subsume it (claude.json's args
+    # have a one-step migration path through harness-args.json that survives
+    # this work item).
+    migrate_claude_args_to_harness_args
+
+    # Legacy harness-args.json (deprecation-window fallback)
+    if [[ -f "$new_file" ]]; then
+      if jq -e --arg fw "$harness" '.[$fw].args | type == "array"' "$new_file" &>/dev/null; then
+        jq -r --arg fw "$harness" '.[$fw].args[]' "$new_file"
+        return
+      fi
+    fi
+
+    # Legacy claude.json (claude-code only, deeper-fallback)
+    if [[ "$harness" == "claude-code" && -f "$legacy_file" ]]; then
+      if jq -e '.args | type == "array"' "$legacy_file" &>/dev/null; then
+        jq -r '.args[]' "$legacy_file"
         return
       fi
     fi
   fi
-  echo "--dangerously-skip-permissions"
+
+  if [[ "$harness" == "claude-code" ]]; then
+    echo "--dangerously-skip-permissions"
+  fi
+}
+
+# --- load_claude_args (deprecated alias) ---
+# Backwards-compatible shim for callers not yet migrated to
+# load_harness_args. Always reads the `claude-code` slot regardless of
+# the active framework, matching the pre-T9 behavior. Emits a one-shot
+# deprecation notice to stderr per shell so noisy migrations stay quiet.
+# Remove one release after every caller has been migrated.
+load_claude_args() {
+  _lore_warn_load_claude_args_once
+  load_harness_args "claude-code"
+}
+
+# --- _lore_warn_load_claude_args_once ---
+# Emit the load_claude_args deprecation notice to stderr at most once per
+# shell. The guard variable is exported so subshells inherit the latched
+# state and a single shell session produces a single line.
+_lore_warn_load_claude_args_once() {
+  if [[ -z "${_LORE_LOAD_CLAUDE_ARGS_WARNED:-}" ]]; then
+    echo "lib.sh: load_claude_args is deprecated; call load_harness_args instead (T9)." >&2
+    export _LORE_LOAD_CLAUDE_ARGS_WARNED=1
+  fi
+}
+
+# --- _lore_warn_load_claude_env_once ---
+# Emit the LORE_CLAUDE_ARGS deprecation notice to stderr at most once per
+# shell. LORE_HARNESS_ARGS is the supported replacement.
+_lore_warn_load_claude_env_once() {
+  if [[ -z "${_LORE_LOAD_CLAUDE_ENV_WARNED:-}" ]]; then
+    echo "lib.sh: LORE_CLAUDE_ARGS is deprecated; set LORE_HARNESS_ARGS instead (T9)." >&2
+    export _LORE_LOAD_CLAUDE_ENV_WARNED=1
+  fi
+}
+
+# --- resolve_active_framework ---
+# Print the active harness framework name on stdout.
+# Resolution order:
+#   1. LORE_FRAMEWORK env var (any non-empty value, validated against the
+#      shipped capabilities.json frameworks set).
+#   2. Unified $LORE_DATA_DIR/config/settings.json `.active_framework`
+#      (written by install.sh during the migration; T2 of the unified-file
+#      consolidation).
+#   3. Legacy $LORE_DATA_DIR/config/framework.json `.framework`
+#      (deprecation-window fallback during one release per D4).
+#   4. Built-in default: "claude-code".
+# Unknown framework names are rejected with a non-zero exit and stderr message;
+# resolution never silently routes to a default for an explicit-but-bogus value.
+# Mirrors config.ResolveActiveFramework() in tui/internal/config/config.go (T10).
+resolve_active_framework() {
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local legacy_file="$data_dir/config/framework.json"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  local candidate=""
+  local source=""
+
+  if [[ -n "${LORE_FRAMEWORK:-}" ]]; then
+    candidate="$LORE_FRAMEWORK"
+    source="env LORE_FRAMEWORK"
+  elif command -v jq &>/dev/null; then
+    # Unified file (primary)
+    local unified_raw
+    unified_raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get active_framework 2>/dev/null || true)
+    if [[ -n "$unified_raw" ]]; then
+      candidate=$(printf '%s' "$unified_raw" | jq -r '. // empty' 2>/dev/null || true)
+      source="${data_dir}/config/settings.json"
+    fi
+
+    # Legacy file (fallback)
+    if [[ -z "$candidate" && -f "$legacy_file" ]]; then
+      candidate=$(jq -r '.framework // empty' "$legacy_file" 2>/dev/null)
+      source="$legacy_file"
+    fi
+  fi
+
+  if [[ -z "$candidate" ]]; then
+    candidate="claude-code"
+    source="built-in default"
+  fi
+
+  if [[ -f "$capabilities_file" ]] && command -v jq &>/dev/null; then
+    if ! jq -e --arg fw "$candidate" '.frameworks | has($fw)' "$capabilities_file" &>/dev/null; then
+      echo "Error: unknown framework '$candidate' (from $source); not present in $capabilities_file" >&2
+      return 1
+    fi
+  fi
+
+  echo "$candidate"
+}
+
+# --- framework_capability ---
+# Print the support level for a capability on the active framework.
+# Output is one of: full | partial | fallback | none.
+# Resolution order (first match wins):
+#   1. $LORE_DATA_DIR/config/framework.json `.capability_overrides.<cap>`
+#      (user/admin override seeded by install.sh).
+#   2. adapters/capabilities.json `.frameworks.<active>.capabilities.<cap>.support`
+#      (static profile shipped with the repo).
+#   3. Fallback: "none".
+# Usage: level=$(framework_capability stop_hook)
+#        if [[ "$(framework_capability mcp)" == "full" ]]; then ...
+# Mirrors config.FrameworkCapability() in tui/internal/config/config.go (T10).
+framework_capability() {
+  local cap="$1"
+  [[ -z "$cap" ]] && { echo "Error: framework_capability requires a capability name" >&2; return 1; }
+
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local legacy_file="$data_dir/config/framework.json"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  local active level
+
+  if ! command -v jq &>/dev/null; then
+    echo "none"
+    return 0
+  fi
+
+  # 1a. User override — unified file (primary)
+  local unified_raw
+  unified_raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "capability_overrides.$cap" 2>/dev/null || true)
+  if [[ -n "$unified_raw" ]]; then
+    level=$(printf '%s' "$unified_raw" | jq -r '. // empty' 2>/dev/null)
+    if [[ -n "$level" ]]; then
+      echo "$level"
+      return 0
+    fi
+  fi
+
+  # 1b. User override — legacy file (fallback)
+  if [[ -f "$legacy_file" ]]; then
+    level=$(jq -r --arg c "$cap" '.capability_overrides[$c] // empty' "$legacy_file" 2>/dev/null)
+    if [[ -n "$level" ]]; then
+      echo "$level"
+      return 0
+    fi
+  fi
+
+  # 2. Static profile lookup, keyed by active framework.
+  active=$(resolve_active_framework) || return 1
+  if [[ -f "$capabilities_file" ]]; then
+    level=$(jq -r --arg fw "$active" --arg c "$cap" \
+      '.frameworks[$fw].capabilities[$c].support // empty' "$capabilities_file" 2>/dev/null)
+    if [[ -n "$level" ]]; then
+      echo "$level"
+      return 0
+    fi
+  fi
+
+  # 3. Fallback.
+  echo "none"
+}
+
+# --- framework_capability_evidence ---
+# Print the evidence id for a capability on the active framework, or empty
+# string if the cell has no evidence pointer (D8 evidence-gating: a non-`none`
+# cell missing this field SHOULD be reported as `degraded:no-evidence` by
+# the caller). Reads adapters/capabilities.json
+# `.frameworks.<active>.capabilities.<cap>.evidence`.
+# Used by install.sh and assemble-instructions.sh to compose operator log
+# lines that read the capability triple
+# (install_paths.<kind>, capabilities.<kind>.support, capabilities.<kind>.evidence)
+# in the shared `degraded:partial|fallback|none|no-evidence|unverified-support(<level>)`
+# vocabulary defined in conventions/capability-cells-in-adapters-capabilities-json-sho.md.
+framework_capability_evidence() {
+  local cap="$1"
+  [[ -z "$cap" ]] && { echo "Error: framework_capability_evidence requires a capability name" >&2; return 1; }
+
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  if ! command -v jq &>/dev/null || [[ ! -f "$capabilities_file" ]]; then
+    echo ""
+    return 0
+  fi
+
+  local active
+  active=$(resolve_active_framework) || return 1
+  jq -r --arg fw "$active" --arg c "$cap" \
+    '.frameworks[$fw].capabilities[$c].evidence // ""' "$capabilities_file" 2>/dev/null
+}
+
+# --- framework_tui_launch_flag ---
+# Print the harness-native CLI flag spelling for one of the TUI-injected
+# concerns (T11). Mirrors the Go helpers
+# config.HarnessSystemPromptFlag / config.HarnessSettingsOverrideFlag in
+# tui/internal/config/framework.go.
+#
+# Args: $1 = kind, one of: append_system_prompt | inline_settings_override
+#       $2 = framework id (optional; defaults to active framework)
+#
+# Output: a single line on stdout, exit 0:
+#   - The flag spelling (e.g., `--append-system-prompt`) when the active
+#     framework's tui_launch_flags.<kind> names a flag.
+#   - The literal `unsupported` when the cell is the install_paths-style
+#     sentinel. Callers MUST skip the injection rather than substitute a
+#     different flag — opencode/codex error on an unknown CLI flag.
+#
+# Exit codes:
+#   0  flag spelling or `unsupported` printed.
+#   1  unknown kind, unknown framework, missing capabilities.json, or
+#      jq unavailable. Callers MUST handle the error rather than fall back
+#      to a Claude Code default — both concerns are load-bearing
+#      (settings: would inject wrong flag; system prompt: would crash
+#      followup-mode on non-claude-code harnesses).
+framework_tui_launch_flag() {
+  local kind="$1"
+  local framework="${2:-}"
+  [[ -z "$kind" ]] && { echo "Error: framework_tui_launch_flag requires a kind" >&2; return 1; }
+  case "$kind" in
+    append_system_prompt|inline_settings_override) ;;
+    *) echo "Error: unknown tui_launch_flag kind '$kind' (allowed: append_system_prompt, inline_settings_override)" >&2; return 1 ;;
+  esac
+
+  if ! command -v jq &>/dev/null; then
+    echo "Error: framework_tui_launch_flag requires jq" >&2
+    return 1
+  fi
+
+  if [[ -z "$framework" ]]; then
+    framework=$(resolve_active_framework) || return 1
+  fi
+
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  if [[ ! -f "$capabilities_file" ]]; then
+    echo "Error: framework_tui_launch_flag cannot read $capabilities_file" >&2
+    return 1
+  fi
+
+  if ! jq -e --arg fw "$framework" '.frameworks | has($fw)' "$capabilities_file" &>/dev/null; then
+    echo "Error: unknown framework '$framework' (not present in $capabilities_file)" >&2
+    return 1
+  fi
+
+  local raw
+  raw=$(jq -r --arg fw "$framework" --arg k "$kind" \
+    '.frameworks[$fw].tui_launch_flags[$k] // ""' "$capabilities_file" 2>/dev/null)
+  if [[ -z "$raw" ]]; then
+    echo "Error: no tui_launch_flags.$kind defined for framework '$framework'" >&2
+    return 1
+  fi
+  echo "$raw"
+}
+
+# --- resolve_permission_adapter ---
+# Resolve the per-harness permission/settings policy installer for a
+# framework. The single source of truth for which adapter owns each
+# harness's settings file (and which merge strategy the adapter applies)
+# lives here, so install.sh and uninstall paths consult one helper rather
+# than re-deriving the dispatch via case "$FRAMEWORK" branches scattered
+# across callers.
+#
+# Args: $1 = framework id (closed set per resolve_active_framework). When
+#       omitted, the active framework is used.
+#
+# Output: a single line on stdout, exit 0. The line is a
+# colon-delimited record describing the adapter's shape:
+#
+#   cli:<absolute-adapter-path>
+#       Adapter is a bash CLI exposing `install`/`uninstall`/`smoke`
+#       subcommands per the contract in adapters/hooks/README.md.
+#       Today: claude-code -> adapters/hooks/claude-code.sh,
+#       codex      -> adapters/codex/hooks.sh.
+#
+#   plugin-symlink:<src-path>:<dst-path>
+#       Adapter is install-time file placement (no CLI). Caller links
+#       <src-path> at <dst-path>; uninstall removes <dst-path>. Today:
+#       opencode -> adapters/opencode/lore-hooks.ts symlinked into
+#       $HOME/.config/opencode/plugins/lore-hooks.ts.
+#
+#   unsupported
+#       Framework has no permission-adapter wired. Caller MUST emit a
+#       documented `degraded:none` notice and skip; this is the explicit
+#       degradation path required by D6 (degradation is explicit and
+#       testable) and the capability triple convention.
+#
+# Closed framework set; an unknown framework id is an error (exit 1)
+# rather than a routed-to-`unsupported` case, mirroring the closed-set
+# rejection pattern already used by resolve_model_for_role (T6) and the
+# `case` validation in install.sh.
+resolve_permission_adapter() {
+  local fw="${1:-}"
+  if [[ -z "$fw" ]]; then
+    fw=$(resolve_active_framework) || return 1
+  fi
+
+  # LORE_REPO_DIR is the physical lore-repo root (resolved through symlinks
+  # at lib.sh source time). Renders adapter paths as "<repo>/adapters/..."
+  # without the "<repo>/scripts/../adapters/..." round-trip and without
+  # tripping on symlinked installs (e.g. ~/.lore/scripts -> /path/to/repo/scripts).
+  local repo_root="$LORE_REPO_DIR"
+  case "$fw" in
+    claude-code)
+      printf 'cli:%s\n' "$repo_root/adapters/hooks/claude-code.sh"
+      ;;
+    codex)
+      printf 'cli:%s\n' "$repo_root/adapters/codex/hooks.sh"
+      ;;
+    opencode)
+      printf 'plugin-symlink:%s:%s\n' \
+        "$repo_root/adapters/opencode/lore-hooks.ts" \
+        "$HOME/.config/opencode/plugins/lore-hooks.ts"
+      ;;
+    *)
+      echo "Error: unknown framework '$fw' (allowed: claude-code, codex, opencode)" >&2
+      return 1
+      ;;
+  esac
+}
+
+# --- framework_model_routing_shape ---
+# Print the model_routing shape for the active framework: "single" or "multi".
+# Reads adapters/capabilities.json `.frameworks.<active>.model_routing.shape`.
+# Single-provider harnesses (claude-code, codex) collapse the role->model map
+# to one binding; multi-provider harnesses (opencode) honor per-role bindings.
+# Returns "single" as a safe degraded fallback when capabilities.json is
+# unreadable, since the role map under "single" still produces a working
+# (collapsed) routing.
+# Mirrors config.FrameworkModelRoutingShape() in tui/internal/config/config.go.
+framework_model_routing_shape() {
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  local active shape
+
+  if ! command -v jq &>/dev/null || [[ ! -f "$capabilities_file" ]]; then
+    echo "single"
+    return 0
+  fi
+  active=$(resolve_active_framework) || return 1
+  shape=$(jq -r --arg fw "$active" '.frameworks[$fw].model_routing.shape // "single"' "$capabilities_file" 2>/dev/null)
+  echo "${shape:-single}"
+}
+
+# --- resolve_model_for_role ---
+# Print the resolved model id for a role on stdout.
+# Role MUST be one of the closed set in adapters/roles.json (see T3); unknown
+# roles are rejected with a non-zero exit at the top level AND the harness
+# overlay layer (D3b closed-set rejection: an unknown id in
+# `harnesses.<active>.roles` is the same error class as in `roles.<id>`).
+# The "default" role is the resolution fallback consumed internally by this
+# helper and is also a valid explicit role id.
+# Resolution order (first match wins):
+#   1. Env var LORE_MODEL_<ROLE_UPPER> (e.g., LORE_MODEL_LEAD=opus).
+#   2. Per-repo .lore.config `model_for_<role>=<model>` (walk-up search from
+#      cwd; same lookup mechanism as resolve_knowledge_dir).
+#   3. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay
+#      — applies to the active harness only; absent overlay falls through).
+#   4. Unified settings.json `.roles.<role>` (top-level default).
+#   5. Legacy framework.json `.roles.<role>` (deprecation-window fallback).
+#   6. Unified `.roles.default` (resolution-fallback role; same overlay
+#      precedence applied if the active harness's roles.default is set).
+#   7. Legacy framework.json `.roles.default` (deepest fallback).
+# Mirrors config.ResolveModelForRole() in tui/internal/config/settings.go.
+resolve_model_for_role() {
+  local role="$1"
+  [[ -z "$role" ]] && { echo "Error: resolve_model_for_role requires a role name" >&2; return 1; }
+
+  local roles_file="$LORE_LIB_DIR/../adapters/roles.json"
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local legacy_file="$data_dir/config/framework.json"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
+
+  # Validate role against the closed registry.
+  if [[ -f "$roles_file" ]] && command -v jq &>/dev/null; then
+    if ! jq -e --arg r "$role" '.roles[] | select(.id == $r)' "$roles_file" &>/dev/null; then
+      echo "Error: unknown role '$role' (not in $roles_file)" >&2
+      return 1
+    fi
+  fi
+
+  # 1. Env var override: LORE_MODEL_<ROLE_UPPER>.
+  # Indirect expansion via eval rather than ${!var} — the latter is bash-only
+  # and trips zsh with "bad substitution" when this library is sourced from
+  # the harness shell (see lib.sh top-of-file comment on shell support).
+  local env_var="LORE_MODEL_$(echo "$role" | tr '[:lower:]' '[:upper:]')"
+  local env_value=""
+  eval "env_value=\${$env_var:-}"
+  if [[ -n "$env_value" ]]; then
+    echo "$env_value"
+    return 0
+  fi
+
+  # 2. Per-repo .lore.config (walk-up from cwd)
+  local lore_config
+  if lore_config=$(find_lore_config 2>/dev/null) && [[ -n "$lore_config" ]]; then
+    local repo_value
+    if repo_value=$(parse_lore_config "model_for_$role" "$lore_config") && [[ -n "$repo_value" ]]; then
+      echo "$repo_value"
+      return 0
+    fi
+  fi
+
+  command -v jq &>/dev/null || {
+    echo "Error: resolve_model_for_role requires jq" >&2
+    return 1
+  }
+
+  # Resolve active harness once for the overlay layer.
+  local active=""
+  active=$(resolve_active_framework 2>/dev/null) || active=""
+
+  # D3b closed-set rejection at the overlay layer: any unknown role id
+  # (anything not in adapters/roles.json) found under
+  # `harnesses.<active>.roles` is rejected immediately. The role validation
+  # above already rejects an unknown role in the *query*; this guard rejects
+  # an unknown id stored in the overlay block itself, which would otherwise
+  # silently never be consulted (a misconfiguration the user should see).
+  if [[ -n "$active" && -f "$roles_file" ]]; then
+    local overlay_keys
+    overlay_keys=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.roles" 2>/dev/null || true)
+    if [[ -n "$overlay_keys" ]]; then
+      local valid_role_ids
+      valid_role_ids=$(jq -c '[.roles[].id]' "$roles_file" 2>/dev/null)
+      [[ -z "$valid_role_ids" || "$valid_role_ids" == "null" ]] && valid_role_ids="[]"
+      local bad
+      bad=$(printf '%s' "$overlay_keys" | jq -r --argjson valid "$valid_role_ids" \
+        '(keys) - $valid | .[]' 2>/dev/null | head -1)
+      if [[ -n "$bad" ]]; then
+        echo "Error: unknown role '$bad' in harnesses.$active.roles (not in $roles_file)" >&2
+        return 1
+      fi
+    fi
+  fi
+
+  # 3. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay)
+  local overlay_value=""
+  if [[ -n "$active" ]]; then
+    local raw
+    raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.roles.$role" 2>/dev/null || true)
+    if [[ -n "$raw" ]]; then
+      overlay_value=$(printf '%s' "$raw" | jq -r '. // empty' 2>/dev/null)
+      if [[ -n "$overlay_value" ]]; then
+        echo "$overlay_value"
+        return 0
+      fi
+    fi
+  fi
+
+  # 4. Unified settings.json `.roles.<role>` (top-level default)
+  local raw_top
+  raw_top=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "roles.$role" 2>/dev/null || true)
+  if [[ -n "$raw_top" ]]; then
+    local user_value
+    user_value=$(printf '%s' "$raw_top" | jq -r '. // empty' 2>/dev/null)
+    if [[ -n "$user_value" ]]; then
+      echo "$user_value"
+      return 0
+    fi
+  fi
+
+  # 5. Legacy framework.json `.roles.<role>` (deprecation-window fallback)
+  if [[ -f "$legacy_file" ]]; then
+    local user_value
+    user_value=$(jq -r --arg r "$role" '.roles[$r] // empty' "$legacy_file" 2>/dev/null)
+    if [[ -n "$user_value" ]]; then
+      echo "$user_value"
+      return 0
+    fi
+  fi
+
+  # 6. Unified `.harnesses.<active>.roles.default` (overlay's own default)
+  if [[ -n "$active" ]]; then
+    local raw_default
+    raw_default=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.roles.default" 2>/dev/null || true)
+    if [[ -n "$raw_default" ]]; then
+      local default_value
+      default_value=$(printf '%s' "$raw_default" | jq -r '. // empty' 2>/dev/null)
+      if [[ -n "$default_value" ]]; then
+        echo "$default_value"
+        return 0
+      fi
+    fi
+  fi
+
+  # 7. Unified `.roles.default` and legacy `.roles.default`
+  local raw_default
+  raw_default=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "roles.default" 2>/dev/null || true)
+  if [[ -n "$raw_default" ]]; then
+    local default_value
+    default_value=$(printf '%s' "$raw_default" | jq -r '. // empty' 2>/dev/null)
+    if [[ -n "$default_value" ]]; then
+      echo "$default_value"
+      return 0
+    fi
+  fi
+  if [[ -f "$legacy_file" ]]; then
+    local default_value
+    default_value=$(jq -r '.roles.default // empty' "$legacy_file" 2>/dev/null)
+    if [[ -n "$default_value" ]]; then
+      echo "$default_value"
+      return 0
+    fi
+  fi
+
+  echo "Error: no model binding for role '$role' (no env var, no per-repo .lore.config entry, no roles.$role or roles.default in settings.json or $legacy_file)" >&2
+  return 1
+}
+
+# --- resolve_harness_install_path ---
+# Print the install path for a kind on the active framework, with $HOME and
+# similar shell-style references expanded.
+# Closed kind set: instructions | skills | agents | settings | teams |
+#                  ephemeral_plans | mcp_servers
+# Output:
+#   - On supported kinds: an absolute path on stdout, exit 0.
+#   - On the literal string "unsupported" stored in install_paths (e.g., codex
+#     teams): the literal "unsupported" on stdout, exit 0. Callers branch on
+#     this sentinel rather than treating it as a path.
+#   - On unknown kinds (not in the closed set) or when the active framework
+#     has no install_paths block: an Error on stderr, exit 1.
+# Used by audit-artifact.sh, agent-toggle/{enable,disable}.sh, doctor.sh,
+# status.sh, load-work.sh, task-completed-capture-check.sh after T19/T29/T53/
+# T68/T69 migrate them off hardcoded ~/.claude/* paths. mcp_servers added
+# by T20 names the per-harness MCP-server config file (claude-code/opencode
+# JSON, codex TOML); the value identifies the file lore writes into when
+# packaging a Lore-shipped MCP server.
+# Mirrors config.ResolveHarnessInstallPath() in tui/internal/config/config.go.
+resolve_harness_install_path() {
+  local kind="$1"
+  [[ -z "$kind" ]] && { echo "Error: resolve_harness_install_path requires a kind" >&2; return 1; }
+
+  case "$kind" in
+    instructions|skills|agents|settings|teams|ephemeral_plans|mcp_servers) ;;
+    *)
+      echo "Error: unknown kind '$kind' (allowed: instructions, skills, agents, settings, teams, ephemeral_plans, mcp_servers)" >&2
+      return 1
+      ;;
+  esac
+
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  if [[ ! -f "$capabilities_file" ]] || ! command -v jq &>/dev/null; then
+    echo "Error: cannot read $capabilities_file (or jq unavailable)" >&2
+    return 1
+  fi
+
+  local active raw
+  active=$(resolve_active_framework) || return 1
+  raw=$(jq -r --arg fw "$active" --arg k "$kind" '.frameworks[$fw].install_paths[$k] // empty' "$capabilities_file" 2>/dev/null)
+
+  if [[ -z "$raw" ]]; then
+    echo "Error: no install_paths.$kind defined for framework '$active' in $capabilities_file" >&2
+    return 1
+  fi
+
+  if [[ "$raw" == "unsupported" ]]; then
+    echo "unsupported"
+    return 0
+  fi
+
+  # Expand $HOME / ${HOME}; install paths are restricted to absolute paths
+  # rooted in known env vars to keep substitution explainable.
+  local expanded="$raw"
+  expanded="${expanded//\$HOME/$HOME}"
+  expanded="${expanded//\$\{HOME\}/$HOME}"
+  echo "$expanded"
+}
+
+# --- harness_path_or_empty ---
+# Convenience wrapper around resolve_harness_install_path that collapses the
+# dominant call shape — "give me the path, or an empty string if this harness
+# has no surface for X" — into a single command-substitution-friendly form.
+# Args: $1 = kind (same closed set as resolve_harness_install_path)
+# Output:
+#   - On supported kinds with a real path: the absolute path on stdout, exit 0.
+#   - On the "unsupported" sentinel (codex teams, codex ephemeral_plans, etc.):
+#     empty string on stdout, exit 0.
+#   - On any error from resolve_harness_install_path (unknown kind, missing
+#     capabilities.json, missing install_paths block): empty string on stdout,
+#     exit 0. Errors are silenced because callers of this form treat both
+#     "unsupported" and "config not yet present" as the same "no path here"
+#     signal — and the helper is designed to be safe inside `set -e` shells
+#     used by SessionStart hooks (load-work.sh, status.sh) where a non-zero
+#     exit would abort the whole hook on a transient config issue.
+# Usage:
+#   VAR=$(harness_path_or_empty <kind>)
+#   if [[ -n "$VAR" ]]; then ... fi
+# Callers that need to distinguish "unsupported" from "config error" must use
+# resolve_harness_install_path directly and inspect its exit code; this helper
+# deliberately conflates them. T29/T68/T69 surfaced the pattern in 4 callers
+# (load-work.sh, status.sh, doctor.sh, agent-toggle/{enable,disable}.sh)
+# before this helper was introduced.
+# Mirrors config.HarnessPathOrEmpty() in tui/internal/config/framework.go.
+harness_path_or_empty() {
+  local kind="$1"
+  local res
+  if res=$(resolve_harness_install_path "$kind" 2>/dev/null); then
+    if [[ "$res" == "unsupported" ]]; then
+      return 0
+    fi
+    echo "$res"
+  fi
+  return 0
+}
+
+# --- list_supported_frameworks ---
+# Print the registered framework keys from adapters/capabilities.json, one per
+# line, sorted lexicographically. Fatal (die) if jq is unavailable or the file
+# cannot be read. Both enable.sh and disable.sh use this as the authoritative
+# source for multi-harness fanout.
+list_supported_frameworks() {
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  if ! command -v jq &>/dev/null; then
+    die "list_supported_frameworks: jq is required but not found on PATH"
+  fi
+  if [[ ! -f "$capabilities_file" ]]; then
+    die "list_supported_frameworks: capabilities file not found: $capabilities_file"
+  fi
+  jq -r '.frameworks | keys[]' "$capabilities_file" 2>/dev/null | sort \
+    || die "list_supported_frameworks: failed to read frameworks from $capabilities_file"
+}
+
+# --- resolve_agent_template ---
+# Print the absolute path to an agent template (.md file) shipped with the
+# lore repo. Templates live under <lore-repo>/agents/<name>.md and are
+# framework-independent — install.sh symlinks them into per-harness install
+# dirs (resolve_harness_install_path agents) but the canonical content
+# always reads from the repo path so version drift between repo and
+# harness-side symlink cannot mask itself.
+# Args: $1 = template name (e.g., "worker", "researcher", "correctness-gate")
+# Output:
+#   - Absolute path on stdout, exit 0 when the template file exists.
+#   - Error on stderr, exit 1 when the file is missing or the name is empty.
+# Used by audit-artifact.sh (correctness-gate, curator, reverse-auditor) and
+# any future caller that previously hardcoded $HOME/.claude/agents/<name>.md.
+# Mirrors config.ResolveAgentTemplate() in tui/internal/config/config.go.
+resolve_agent_template() {
+  local name="$1"
+  [[ -z "$name" ]] && { echo "Error: resolve_agent_template requires a template name" >&2; return 1; }
+
+  # Use $LORE_REPO_DIR (already resolved through symlinks at lib.sh source
+  # time) rather than $LORE_LIB_DIR/.. — zsh's cd collapses ".." logically
+  # before chdir, which on the typical symlinked install
+  # (~/.lore/scripts -> /path/to/repo/scripts) lands at ~/.lore (no agents/)
+  # instead of physically traversing the symlink. See d29208b for the same
+  # fix in resolve_permission_adapter().
+  local repo_root="$LORE_REPO_DIR"
+  local template_path="$repo_root/agents/$name.md"
+
+  if [[ ! -f "$template_path" ]]; then
+    echo "Error: agent template '$name' not found at $template_path" >&2
+    return 1
+  fi
+
+  # Print canonical absolute path (resolve any symlinks in the prefix).
+  ( cd "$(dirname "$template_path")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$template_path")" )
+}
+
+# --- validate_role_model_binding ---
+# Validate a role->model binding against the closed role registry and the
+# active harness's model_routing shape. T14 ownership (the verification
+# rule lives in tests/frameworks/roles.bats; this helper is what the test
+# exercises and what install/doctor surfaces will call once T15+T60 wire
+# them up).
+#
+# Usage: validate_role_model_binding <role> <model>
+# Returns 0 on success; non-zero on rejection with a stderr explanation.
+#
+# Rules:
+#   1. role MUST appear in adapters/roles.json's closed set.
+#   2. If model contains a slash (provider/model syntax) — e.g.
+#      "anthropic/sonnet" or "openai/gpt-4o" — the active harness's
+#      model_routing.shape MUST be "multi". Single-shape harnesses
+#      (claude-code, codex) cannot serve cross-provider bindings.
+#   3. Empty model strings are rejected.
+#
+# Bare model names (no slash) are always accepted regardless of shape;
+# single-provider harnesses interpret the bare name against their native
+# provider, multi-provider harnesses interpret it against their default
+# provider.
+validate_role_model_binding() {
+  local role="$1"
+  local model="$2"
+
+  if [[ -z "$role" ]]; then
+    echo "Error: validate_role_model_binding requires a role name" >&2
+    return 1
+  fi
+  if [[ -z "$model" ]]; then
+    echo "Error: role '$role' has empty model binding" >&2
+    return 1
+  fi
+
+  # Rule 1: role must be in the closed registry.
+  local roles_file="$LORE_LIB_DIR/../adapters/roles.json"
+  if [[ -f "$roles_file" ]] && command -v jq &>/dev/null; then
+    if ! jq -e --arg r "$role" '.roles[] | select(.id == $r)' "$roles_file" &>/dev/null; then
+      echo "Error: unknown role '$role' (not in $roles_file)" >&2
+      return 1
+    fi
+  fi
+
+  # Rule 2: provider/model syntax requires multi-shape harness.
+  if [[ "$model" == */* ]]; then
+    local shape
+    shape=$(framework_model_routing_shape) || return 1
+    if [[ "$shape" != "multi" ]]; then
+      local active
+      active=$(resolve_active_framework 2>/dev/null) || active="<unknown>"
+      echo "Error: role '$role' binding '$model' names a provider but the active harness '$active' has model_routing.shape=$shape (single-provider harnesses cannot serve cross-provider bindings)." >&2
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
+# --- resolve_completion_enforcement_mode ---
+# Print the resolved completion-enforcement mode for the active framework
+# on stdout. One of: native_blocking | lead_validator | self_attestation |
+# unavailable. The orchestration adapter contract (adapters/agents/README.md
+# §"Mode resolution rule") defines the closed table this helper implements.
+#
+# The function never fails — even when capability lookup degrades to "none",
+# the result is a valid mode string ("unavailable"), so callers can branch
+# on the mode value without an additional error path.
+#
+# Mirrors config.ResolveCompletionEnforcementMode() in
+# tui/internal/config/framework.go (T42-T43 lands the Go mirror).
+resolve_completion_enforcement_mode() {
+  local hook subagents
+  hook=$(framework_capability task_completed_hook 2>/dev/null) || hook="none"
+  subagents=$(framework_capability subagents 2>/dev/null) || subagents="none"
+
+  if [[ "$subagents" == "none" || "$hook" == "none" ]]; then
+    echo "unavailable"
+    return 0
+  fi
+
+  case "$hook" in
+    full)
+      # full hook + subagents in {full,partial} -> native_blocking;
+      # subagents=fallback is not a documented combination but downgrades
+      # safely to lead_validator since the hook still fires.
+      if [[ "$subagents" == "fallback" ]]; then
+        echo "lead_validator"
+      else
+        echo "native_blocking"
+      fi
+      ;;
+    partial)
+      echo "lead_validator"
+      ;;
+    fallback)
+      if [[ "$subagents" == "fallback" ]]; then
+        echo "self_attestation"
+      else
+        echo "lead_validator"
+      fi
+      ;;
+    *)
+      # Unknown level — treat as missing.
+      echo "unavailable"
+      ;;
+  esac
 }
 
 # --- resolve_ceremony_config_path ---
-# Resolve the path to the global ceremony config file (ceremonies.json)
+# Resolve the path to the legacy global ceremony config file (ceremonies.json)
 # at $LORE_DATA_DIR/ceremonies.json (defaults to ~/.lore/ceremonies.json).
+# Path location is unchanged by the unified-file consolidation — callers that
+# need the resolved advisor list should use `resolve_ceremony_advisors`
+# instead, which reads the unified file (with overlay) and falls back to
+# this path during the deprecation window.
 # Usage: config_path=$(resolve_ceremony_config_path)
 # Output: Absolute path to ceremonies.json (file may not exist yet)
 resolve_ceremony_config_path() {
   source "$LORE_LIB_DIR/config.sh"
   echo "${LORE_DATA_DIR}/ceremonies.json"
+}
+
+# --- resolve_ceremony_advisors ---
+# Print the resolved advisor list for a ceremony as a JSON array on stdout.
+# Implements the D3b ceremony-overlay resolution:
+#   1. Unified settings.json `.harnesses.<active>.ceremonies.<skill>` —
+#      when the key is *present* (including explicit empty `[]`), this is
+#      the resolved value and resolution stops. Absence (key not present)
+#      falls through; this absent-vs-empty distinction is the design point
+#      that lets a user suppress all advisors on one harness while keeping
+#      the global default for others.
+#   2. Unified settings.json `.ceremonies.<skill>` (top-level default).
+#   3. Legacy $LORE_DATA_DIR/ceremonies.json `.<skill>` (deprecation-window
+#      fallback).
+#   4. Empty array `[]` (no advisors configured).
+# Closed-set rejection: an unknown advisor name in either the overlay or
+# top-level layer exits non-zero with an actionable message — applied
+# identically against both layers per D3b.
+# Closed advisor set: the union of (a) skill names registered under
+# scripts/agent-protocols/ and (b) /skills/<name> directories. The set is
+# resolved at call time from the on-disk skill registry, so no hardcoded
+# list is maintained here.
+# Mirrors no Go counterpart in v1 (TUI does not read ceremonies — bash-only
+# parity surface per D5).
+resolve_ceremony_advisors() {
+  local skill="$1"
+  [[ -z "$skill" ]] && { echo "Error: resolve_ceremony_advisors requires a skill name" >&2; return 1; }
+
+  command -v jq &>/dev/null || { echo "Error: resolve_ceremony_advisors requires jq" >&2; return 1; }
+
+  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
+  local settings_sh="$LORE_LIB_DIR/settings.sh"
+  local legacy_file="$data_dir/ceremonies.json"
+  local active
+
+  # Validate advisor names against the union of (a) agent-protocols/ in the
+  # repo, (b) skills/ in the repo, and (c) skills installed at the active
+  # harness's skills install path (covers ceremonies whose advisor skills
+  # ship via a separate distribution and only land in ~/.claude/skills/ at
+  # install time, e.g., codex-design-review). The validator is reused below
+  # at both layers so closed-set rejection is applied identically (D3b).
+  # Uses jq array subtraction (`-`) which behaves consistently across jq
+  # versions; the equivalent `select(... | index(.))` form silently drops
+  # matches in some 1.6/1.7 builds.
+  _validate_ceremony_advisors() {
+    local layer="$1"     # human-readable layer label for the error message
+    local list_json="$2" # JSON array of advisor names to check
+    local repo_root="$LORE_REPO_DIR"
+    local installed_skills_dir=""
+    installed_skills_dir=$(harness_path_or_empty skills 2>/dev/null || true)
+    local valid_set
+    valid_set=$( {
+      [[ -d "$repo_root/skills" ]] && find "$repo_root/skills" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null
+      [[ -d "$repo_root/scripts/agent-protocols" ]] && find "$repo_root/scripts/agent-protocols" -mindepth 1 -maxdepth 1 -type f -name '*.md' -exec basename {} .md \; 2>/dev/null
+      [[ -n "$installed_skills_dir" && -d "$installed_skills_dir" ]] && find "$installed_skills_dir" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -exec basename {} \; 2>/dev/null
+    } | sort -u | jq -R . | jq -sc .)
+    [[ -z "$valid_set" || "$valid_set" == "null" ]] && valid_set="[]"
+    local bad
+    bad=$(printf '%s' "$list_json" | jq -r --argjson valid "$valid_set" \
+      '. - $valid | .[]' 2>/dev/null | head -1)
+    if [[ -n "$bad" ]]; then
+      echo "Error: unknown ceremony advisor '$bad' in $layer (not a registered skill)" >&2
+      return 1
+    fi
+    return 0
+  }
+
+  active=$(resolve_active_framework 2>/dev/null) || active=""
+
+  # 1. Harness overlay — present-with-empty-is-an-override per D3b.
+  if [[ -n "$active" ]]; then
+    local raw_overlay
+    raw_overlay=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.ceremonies.$skill" 2>/dev/null || true)
+    if [[ -n "$raw_overlay" ]]; then
+      # The key is present (settings.sh get returns empty only when absent).
+      if printf '%s' "$raw_overlay" | jq -e 'type == "array"' &>/dev/null; then
+        _validate_ceremony_advisors "harnesses.$active.ceremonies.$skill" "$raw_overlay" || return 1
+        printf '%s\n' "$raw_overlay"
+        return 0
+      fi
+    fi
+  fi
+
+  # 2. Top-level unified
+  local raw_top
+  raw_top=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "ceremonies.$skill" 2>/dev/null || true)
+  if [[ -n "$raw_top" ]]; then
+    if printf '%s' "$raw_top" | jq -e 'type == "array"' &>/dev/null; then
+      _validate_ceremony_advisors "ceremonies.$skill" "$raw_top" || return 1
+      printf '%s\n' "$raw_top"
+      return 0
+    fi
+  fi
+
+  # 3. Legacy fragmented file (no overlay layer in the legacy file shape)
+  if [[ -f "$legacy_file" ]]; then
+    local legacy_value
+    legacy_value=$(jq -c --arg s "$skill" '.[$s] // empty' "$legacy_file" 2>/dev/null)
+    if [[ -n "$legacy_value" ]]; then
+      _validate_ceremony_advisors "ceremonies.json::$skill" "$legacy_value" || return 1
+      printf '%s\n' "$legacy_value"
+      return 0
+    fi
+  fi
+
+  # 4. No advisors configured
+  echo "[]"
 }
 
 # --- check_fts_available ---
