@@ -22,8 +22,7 @@
 //     first child; that widget routes through ToggleHarness (which shells
 //     out to scripts/harness-toggle/{enable,disable}.sh) instead of a
 //     plain Patch. It also hides schema-valid but non-user-facing metadata
-//     paths (`version`, retired `capture`, and
-//     `settlement.background_queue.description`, and the legacy top-level
+//     paths (`version`, retired `capture`, and the legacy top-level
 //     `roles` / `ceremonies` fallbacks) so the generic renderer stays a
 //     settings editor rather than a raw JSON inspector.
 //
@@ -389,6 +388,9 @@ func (m *SettingsModel) rebuildWidgets() {
 		child := m.schema.Root.Properties[name]
 		w := m.buildWidget("", name, child)
 		if w != nil {
+			if name == "capability_overrides" {
+				w = NewAdvancedSection("advanced", "capability_overrides", w)
+			}
 			m.widgets = append(m.widgets, w)
 		}
 	}
@@ -443,10 +445,6 @@ func isHiddenSettingsPath(dotPath string) bool {
 		// Legacy global defaults. New editable defaults live under each
 		// harness block because model routing and ceremony skills are
 		// harness-specific.
-		return true
-	case "settlement.background_queue.description":
-		// Legacy explanatory text permitted in the old config file. The
-		// actionable setting is settlement.background_queue.enabled.
 		return true
 	default:
 		return false
@@ -1113,15 +1111,11 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 				m.viewport = vp
 				return m, cmd
 			}
-		// j/k row-by-row navigation. Mirrors tab/shift+tab semantics: try
-		// the focused container's NavStep first so the inner cursor advances
-		// before the top-level focus moves; on boundary, focusOffset hops
-		// to the next/prev top-level slot. The only carve-out is when a
-		// widget is actively consuming runes (TextInput typing, ListEditor
-		// in append mode, OpenKeysetKVEditor in edit mode) — in those cases
-		// j/k must reach the widget as literal input, so we forward the
-		// keystroke instead. Arrow-key alternates (down/up) handle intra-
-		// list cursors when the user wants those.
+		// j/k hierarchical navigation. At the outer boundary these move
+		// between top-level sections. Once Enter has opened a container,
+		// the focused container's NavStep moves within that level. When a
+		// leaf editor is in edit mode, j/k are forwarded as literal/editor
+		// input instead.
 		case "j", "k":
 			if !m.focusConsumesNavRunes() {
 				delta := +1
@@ -1227,22 +1221,15 @@ func (m *SettingsModel) replaceFocused(w FieldWidget) {
 	}
 }
 
-// stepRowNavigation advances focus by delta (+1 / -1) using NavStepper-aware
-// row-by-row semantics:
+// stepRowNavigation advances focus by delta (+1 / -1) using hierarchical
+// semantics:
 //
-//  1. If the focused widget implements NavStepper and its NavStep advances
-//     the inner cursor, we surface any IntentDiscard the just-blurred child
-//     emits and re-anchor the viewport on the new inner row. focusIdx (the
-//     top-level slot index) does NOT change, so the containing section frame
-//     keeps its bright rail — the section the user is editing stays visually
-//     distinguished.
-//  2. Otherwise (not a NavStepper, or NavStep at boundary), focusOffset
-//     advances the top-level focus to the next/prev slot. The new slot's
-//     section frame becomes bright; the old slot's child is blurred (per D10
-//     this emits IntentDiscard when a draft was in flight, which we route).
-//
-// Used by tab/shift+tab (always) and j/k (when the focused widget is not
-// actively consuming runes for typing).
+//  1. At the outer boundary, j/k or tab move between top-level sections.
+//  2. If the selected section has been entered with Enter, NavStep advances
+//     within that container level. Nested containers only receive NavStep after
+//     they have also been entered, so every Enter descends exactly one level.
+//  3. If the focused leaf is actively editing, j/k are not intercepted here;
+//     they are forwarded to the leaf as input.
 func (m *SettingsModel) stepRowNavigation(delta int) {
 	if stepper, ok := m.focusedWidget().(NavStepper); ok {
 		if moved, intent := stepper.NavStep(delta); moved {
@@ -1572,7 +1559,7 @@ func (m *SettingsModel) harnessEnabledFromEffective(framework string) bool {
 // Leaf widgets that toggle between an editing mode and a navigating mode
 // (ListEditor, OpenKeysetKVEditor) also implement this — they consume runes
 // only while a draft is being typed; in nav mode they let j/k pass through
-// for row-by-row focus navigation.
+// for settings-level navigation.
 type NavRuneConsumer interface {
 	ConsumesNavRunes() bool
 }
@@ -1591,11 +1578,17 @@ type NavRuneConsumer interface {
 //     top-level slot via focusOffset.
 //
 // HarnessBlockPanel and ClosedObjectSubPanel both implement NavStepper so
-// tab/shift+tab and j/k traverse every navigable row — not just top-level
-// sections — while the user's keystrokes always affect a single visible
-// row at a time.
+// opened containers can traverse their current child level while unopened
+// containers remain a single top-level stop.
 type NavStepper interface {
 	NavStep(delta int) (moved bool, intent *FieldIntent)
+}
+
+// NestedNavigator is implemented by container widgets whose children are only
+// active after the user explicitly enters the container with Enter. It lets
+// parent containers avoid recursive descent until each level has been opened.
+type NestedNavigator interface {
+	Entered() bool
 }
 
 // InnerFocusRanger is implemented by container widgets that render multiple
@@ -1616,24 +1609,20 @@ type InnerFocusRanger interface {
 }
 
 // focusConsumesNavRunes reports whether the focused widget is currently
-// interpreting j/k as widget-internal input (typing). When true, j/k must
-// NOT be intercepted for row navigation — the keystrokes belong to the
+// interpreting j/k as widget-internal input (typing or editor navigation).
+// When true, j/k must NOT be intercepted for settings navigation — the
+// keystrokes belong to the
 // widget. The taxonomy:
 //
 //   - TextInput / NumericInput: consume only in edit mode. Focus alone is
 //     row selection for navigation.
 //   - ListEditor / OpenKeysetKVEditor: implement NavRuneConsumer with mode-
-//     aware logic — consume only while a draft is being typed (append mode
-//     or value-edit mode). In nav mode they release j/k so the model can
-//     run row navigation (intra-list/intra-kv movement uses arrow keys).
+//     aware logic — consume only after Enter opens their editor mode. While
+//     merely selected, they release j/k to settings navigation.
 //   - Container widgets (HarnessBlockPanel, ClosedObjectSubPanel) implement
 //     NavRuneConsumer by delegating to their currently-focused child, so
 //     a TextInput nested inside a panel still gets its 'j' keystrokes once
 //     it is in edit mode.
-//
-// Arrow-key alternates (up/down) always reach the widget regardless, so
-// users keep a navigation path inside the consuming widgets when they need
-// it.
 func (m *SettingsModel) focusConsumesNavRunes() bool {
 	w := m.focusedWidget()
 	if w == nil {

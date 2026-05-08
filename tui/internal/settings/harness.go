@@ -195,8 +195,9 @@ type HarnessBlockPanel struct {
 	ceremonies FieldWidget // production: non-nil harness-local defaults editor
 	effective  HarnessEffective
 
-	cursor  int // 0=enabled, 1=args, 2=roles (skipped if nil), 3=ceremonies (skipped if nil)
+	cursor  int // 0=enabled, 1=args, 2=roles (skipped if nil), 3=ceremonies (if non-nil)
 	focused bool
+	entered bool
 
 	headerStyle    lipgloss.Style
 	overrideStyle  lipgloss.Style
@@ -266,12 +267,13 @@ func (h *HarnessBlockPanel) Framework() string { return h.name }
 func (h *HarnessBlockPanel) Init() tea.Cmd   { return nil }
 func (h *HarnessBlockPanel) DotPath() string { return h.dotPath }
 func (h *HarnessBlockPanel) Focused() bool   { return h.focused }
+func (h *HarnessBlockPanel) Entered() bool   { return h.entered }
 
 // ConsumesNavRunes (NavRuneConsumer) — delegate to the currently-focused
 // child so the model's j/k routing reflects the *effective* focused widget
-// rather than the container. The model's row-by-row navigation uses
-// NavStep (below) to advance the panel's internal cursor; this method
-// only governs the typing-vs-navigating decision for j/k. When the cursor
+// rather than the container. The model's hierarchical navigation uses
+// NavStep (below) only after the panel has been entered; this method
+// governs the typing-vs-navigating decision for j/k. When the cursor
 // child is in active edit/typing mode, j/k must reach the child as literal
 // input, so we report `true`. In every other case (toggle child, scalar row
 // selected but not editing, list/kv editor in nav mode), we report `false`
@@ -281,6 +283,9 @@ func (h *HarnessBlockPanel) Focused() bool   { return h.focused }
 // interface fall through to the model-side type switch
 // (TextInput/NumericInput).
 func (h *HarnessBlockPanel) ConsumesNavRunes() bool {
+	if !h.entered {
+		return false
+	}
 	c, _ := h.childAt(h.cursor)
 	if c == nil {
 		return false
@@ -313,7 +318,7 @@ func (h *HarnessBlockPanel) ConsumesNavRunes() bool {
 // future nested panel under a harness block can't reintroduce the
 // "fields-are-not-reachable" failure mode we just fixed there.
 func (h *HarnessBlockPanel) NavStep(delta int) (bool, *FieldIntent) {
-	if !h.focused {
+	if !h.focused || !h.entered {
 		return false, nil
 	}
 	children := h.children()
@@ -322,8 +327,10 @@ func (h *HarnessBlockPanel) NavStep(delta int) (bool, *FieldIntent) {
 	}
 	if h.cursor >= 0 && h.cursor < len(children) {
 		if cs, ok := children[h.cursor].(NavStepper); ok {
-			if moved, intent := cs.NavStep(delta); moved {
-				return true, intent
+			if nn, ok := children[h.cursor].(NestedNavigator); ok && nn.Entered() {
+				if moved, intent := cs.NavStep(delta); moved {
+					return true, intent
+				}
 			}
 		}
 	}
@@ -373,9 +380,7 @@ func (h *HarnessBlockPanel) children() []FieldWidget {
 
 func (h *HarnessBlockPanel) Focus() tea.Cmd {
 	h.focused = true
-	if c, _ := h.childAt(h.cursor); c != nil {
-		return c.Focus()
-	}
+	h.entered = false
 	return nil
 }
 
@@ -384,7 +389,8 @@ func (h *HarnessBlockPanel) Focus() tea.Cmd {
 // overlay this is a no-op — there is no child to blur.
 func (h *HarnessBlockPanel) Blur() *FieldIntent {
 	h.focused = false
-	if c, _ := h.childAt(h.cursor); c != nil {
+	h.entered = false
+	if c, _ := h.childAt(h.cursor); c != nil && c.Focused() {
 		return c.Blur()
 	}
 	return nil
@@ -400,7 +406,18 @@ func (h *HarnessBlockPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldInt
 	}
 	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.String() {
+		case "enter":
+			if !h.entered {
+				h.entered = true
+				if c, _ := h.childAt(h.cursor); c != nil {
+					return h, c.Focus(), nil
+				}
+				return h, nil, nil
+			}
 		case "tab":
+			if !h.entered {
+				return h, nil, nil
+			}
 			// Tab = discard the focused child's draft, advance cursor.
 			// Per D9: this is the load-bearing path that must NOT
 			// emit IntentCommit on an absent overlay. Because absent
@@ -413,13 +430,37 @@ func (h *HarnessBlockPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldInt
 			}
 			return h, nil, intent
 		case "shift+tab":
+			if !h.entered {
+				return h, nil, nil
+			}
 			intent := children[h.cursor].Blur()
 			if h.cursor > 0 {
 				h.cursor--
 				_ = children[h.cursor].Focus()
 			}
 			return h, nil, intent
+		case "esc":
+			if !h.entered {
+				return h, nil, nil
+			}
+			child, cmd, intent := children[h.cursor].Update(msg)
+			h.replaceChildAt(h.cursor, child)
+			if intent != nil {
+				return h, cmd, intent
+			}
+			if nested, ok := child.(NestedNavigator); ok && nested.Entered() {
+				return h, cmd, nil
+			}
+			if blurIntent := child.Blur(); blurIntent != nil {
+				h.entered = false
+				return h, cmd, blurIntent
+			}
+			h.entered = false
+			return h, cmd, &FieldIntent{DotPath: h.dotPath, Status: IntentDiscard}
 		}
+	}
+	if !h.entered {
+		return h, nil, nil
 	}
 	child, cmd, intent := children[h.cursor].Update(msg)
 	// Re-anchor the child slot the children() list was built from. This is
@@ -517,7 +558,7 @@ func (h *HarnessBlockPanel) viewBuilder() *strings.Builder {
 // The +1 form would shift every range down by 1, dropping the first line
 // of the focused slot off the visible window.
 func (h *HarnessBlockPanel) InnerFocusYRange() (int, int) {
-	if !h.focused {
+	if !h.focused || !h.entered {
 		return -1, -1
 	}
 	children := h.children()

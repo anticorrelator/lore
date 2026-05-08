@@ -7,12 +7,12 @@
       "roles": {
         "lead": "opus",
         "worker": "opus",
-        "researcher": "sonnet",
-        "reviewer": "sonnet",
-        "judge": "sonnet",
-        "summarizer": "sonnet",
+        "researcher": "opus",
+        "reviewer": "opus",
+        "judge": "opus",
+        "summarizer": "opus",
         "advisor": "opus",
-        "default": "sonnet"
+        "default": "opus"
       },
       "ceremonies": {
         "spec-design": ["codex-design-review"],
@@ -23,14 +23,14 @@
     "opencode": {
       "args": [],
       "roles": {
-        "lead": "opus",
-        "worker": "opus",
-        "researcher": "sonnet",
-        "reviewer": "sonnet",
-        "judge": "sonnet",
-        "summarizer": "sonnet",
-        "advisor": "opus",
-        "default": "sonnet"
+        "lead": "anthropic/opus",
+        "worker": "openai/gpt-5.5",
+        "researcher": "anthropic/opus",
+        "reviewer": "openai/gpt-5.5",
+        "judge": "anthropic/opus",
+        "summarizer": "anthropic/opus",
+        "advisor": "anthropic/opus",
+        "default": "anthropic/opus"
       },
       "ceremonies": {
         "spec-design": ["codex-design-review"],
@@ -41,14 +41,14 @@
     "codex": {
       "args": [],
       "roles": {
-        "lead": "opus",
-        "worker": "opus",
-        "researcher": "sonnet",
-        "reviewer": "sonnet",
-        "judge": "sonnet",
-        "summarizer": "sonnet",
-        "advisor": "opus",
-        "default": "sonnet"
+        "lead": "gpt-5.5-high",
+        "worker": "gpt-5.5-high",
+        "researcher": "gpt-5.5-high",
+        "reviewer": "gpt-5.5-high",
+        "judge": "gpt-5.5-high",
+        "summarizer": "gpt-5.5-high",
+        "advisor": "gpt-5.5-high",
+        "default": "gpt-5.5-high"
       },
       "ceremonies": {
         "spec-design": ["codex-design-review"],
@@ -78,20 +78,6 @@
       "debug_context_chars": 800
     },
     "adaptive": false
-  },
-  "settlement": {
-    "probabilistic_triggers": {
-      "implement": 0.3,
-      "pr-self-review": 0.3,
-      "pr-review": 0.2,
-      "spec": 0.2
-    },
-    "background_queue": {
-      "enabled": true,
-      "description": "Task-28: route fired audit triggers through $KDIR/_work-queue/audit/ for asynchronous dispatch. When false or when background-queue-enqueue.sh is missing, trigger falls back to task-29's detached-child Popen path."
-    },
-    "enabled": true,
-    "dry_run": false
   },
   "tui": {
     "layout": "left-right"

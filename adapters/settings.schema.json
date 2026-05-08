@@ -72,29 +72,6 @@
         "adaptive": {"type": "boolean"}
       }
     },
-    "settlement": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Probabilistic post-ceremony audit-trigger configuration. Sourced from the legacy ~/.lore/config/settlement-config.json shape — the schema_version field is dropped here in favor of the unified top-level `version`.",
-      "properties": {
-        "probabilistic_triggers": {
-          "type": "object",
-          "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1},
-          "description": "Per-skill audit-fire probability. Keyset is open: any skill id from adapters/capabilities.json `skills` map is valid. Keys not listed default to 0 (never fire). Property keys are kebab-case skill ids."
-        },
-        "background_queue": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": {"type": "boolean"},
-            "description": {"type": "string"}
-          },
-          "description": "When enabled and ~/.lore/scripts/background-queue-enqueue.sh exists, fired triggers route through $KDIR/_work-queue/audit/ for asynchronous dispatch (task-28). Otherwise falls back to detached-child Popen (task-29). The `description` string is permitted because settlement-config.json shipped with one."
-        },
-        "enabled": {"type": "boolean"},
-        "dry_run": {"type": "boolean"}
-      }
-    },
     "tui": {
       "type": "object",
       "additionalProperties": false,
@@ -145,7 +122,7 @@
     "role_value": {
       "type": "string",
       "minLength": 1,
-      "description": "Model id bound to a role (e.g. \"opus\", \"sonnet\", \"haiku\", or a fully-qualified provider/model like \"anthropic/sonnet\"). Empty string is REJECTED — its semantics are ambiguous (suppress vs. use-default) and it would route through resolve_model_for_role as a non-empty truthy value in jq. The schema forbids it; doctor surfaces violations."
+      "description": "Model id bound to a role (e.g. \"opus\", \"sonnet\", \"haiku\", or a fully-qualified provider/model like \"anthropic/sonnet\"). Codex also accepts a reasoning-effort suffix such as \"gpt-5.5-high\", split by the Codex adapter into model \"gpt-5.5\" plus reasoning_effort \"high\". Empty string is REJECTED — its semantics are ambiguous (suppress vs. use-default) and it would route through resolve_model_for_role as a non-empty truthy value in jq. The schema forbids it; doctor surfaces violations."
     },
 
     "skill_id": {

@@ -229,7 +229,6 @@ Subcommands:
   delete       Permanently delete a follow-up
   post-review  Post a proposed review comment to GitHub
   summarize    Generate a thematic summary of selected review comments
-  reconcile    Tournament reconciliation between /pr-review and /pr-self-review
 
 Options:
   --help, -h    Show this help
@@ -1527,9 +1526,6 @@ cmd_followup() {
       ;;
     summarize)
       "$SCRIPTS_DIR/generate-review-summary.sh" "$@"
-      ;;
-    reconcile)
-      "$SCRIPTS_DIR/reconcile-reviews.sh" "$@"
       ;;
     *)
       echo "Error: unknown followup subcommand '$subcmd'" >&2

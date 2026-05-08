@@ -14,7 +14,7 @@
 #   - --framework bogus exits non-zero with a closed-set error
 #
 # Default role seeding:
-#   - A real install (non-dry) seeds roles.lead=opus and roles.worker=sonnet in
+#   - A real install (non-dry) seeds framework-aware role defaults in
 #     framework.json; dry-run skips the python3 write, so role-seeding assertions
 #     are made against the python3 block source text in install.sh directly.
 #
@@ -380,25 +380,27 @@ PYEOF
 }
 
 # ============================================================
-# Default role seeding: lead=opus, all others=sonnet
+# Default role seeding: claude-code=opus, codex=gpt-5.5-high, opencode by role class
 # ============================================================
 
-@test "install.sh source seeds lead role as opus in DEFAULT_BY_ROLE" {
-  # The role-seeding python block in install.sh must map lead->opus.
-  # This is the byte-equivalence invariant: default claude-code install
-  # preserves the legacy lead=opus behavior.
-  run grep -n 'DEFAULT_BY_ROLE\|"lead".*"opus"\|lead.*opus' "$INSTALL_SH"
+@test "install.sh source seeds claude-code roles as opus" {
+  run grep -n 'framework == "claude-code"\|"opus"' "$INSTALL_SH"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "lead" ]]
   [[ "$output" =~ "opus" ]]
 }
 
-@test "install.sh source seeds non-lead roles as sonnet fallback" {
-  # The DEFAULT_BY_ROLE dict has only lead overridden; all other roles
-  # default to "sonnet". Verify the fallback string appears near the dict.
-  run grep -n '"sonnet"' "$INSTALL_SH"
+@test "install.sh source seeds codex roles as gpt-5.5-high" {
+  run grep -n 'framework == "codex"\|gpt-5.5-high' "$INSTALL_SH"
   [ "$status" -eq 0 ]
-  [ "${#lines[@]}" -gt 0 ]
+  [[ "$output" =~ "gpt-5.5-high" ]]
+}
+
+@test "install.sh source seeds opencode reasoning and technical role defaults" {
+  run grep -n 'reasoning_roles\|anthropic/opus\|openai/gpt-5.5' "$INSTALL_SH"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "reasoning_roles" ]]
+  [[ "$output" =~ "anthropic/opus" ]]
+  [[ "$output" =~ "openai/gpt-5.5" ]]
 }
 
 @test "install.sh derives role keyset from adapters/roles.json (closed registry)" {

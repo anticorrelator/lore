@@ -27,7 +27,6 @@ func TestVisualDumpForManualInspection(t *testing.T) {
 		},
 		"capability_overrides": map[string]any{"instructions": "full", "skills": "partial"},
 		"roles":                map[string]any{"default": "sonnet", "lead": "opus"},
-		"settlement":           map[string]any{"enabled": true, "dry_run": false},
 	})
 	runner := &fakeRunner{}
 	m, err := NewSettingsModel(SettingsModelOptions{

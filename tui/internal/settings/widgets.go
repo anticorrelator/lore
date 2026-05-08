@@ -112,7 +112,7 @@ type widgetStyles struct {
 	checkOff lipgloss.Style
 	desc     lipgloss.Style // dimmed inline description
 	// subLabel renders the bold header for inner panels (e.g.,
-	// capture > core, settlement > background_queue). It's parallel to
+	// capture > core). It's parallel to
 	// themeStyles.subsectionTitle but lives here so widgets can render their
 	// own subsection labels without reaching into the themeStyles bag —
 	// preserves the cached-style discipline (no per-frame allocation).
@@ -215,6 +215,195 @@ type BodyViewer interface {
 	ViewBody() string
 }
 
+// AdvancedSection is a collapsed-by-default disclosure wrapper for settings
+// that are valid but rarely touched. It keeps the wrapped widget's own dot
+// paths and intents intact; only the top-level presentation changes.
+type AdvancedSection struct {
+	dotPath  string
+	label    string
+	child    FieldWidget
+	focused  bool
+	expanded bool
+	entered  bool
+	styles   widgetStyles
+
+	wrapWidth int
+}
+
+func NewAdvancedSection(dotPath, label string, child FieldWidget) *AdvancedSection {
+	return &AdvancedSection{
+		dotPath: dotPath,
+		label:   label,
+		child:   child,
+		styles:  defaultStyles(),
+	}
+}
+
+func (a *AdvancedSection) Init() tea.Cmd   { return nil }
+func (a *AdvancedSection) DotPath() string { return a.dotPath }
+func (a *AdvancedSection) Focused() bool   { return a.focused }
+func (a *AdvancedSection) Focus() tea.Cmd {
+	a.focused = true
+	return nil
+}
+
+func (a *AdvancedSection) Blur() *FieldIntent {
+	a.focused = false
+	a.entered = false
+	if a.child != nil && a.child.Focused() {
+		return a.child.Blur()
+	}
+	return nil
+}
+
+func (a *AdvancedSection) SetWrapWidth(w int) {
+	a.wrapWidth = w
+	if ws, ok := a.child.(WidthSetter); ok {
+		ws.SetWrapWidth(w)
+	}
+}
+
+func (a *AdvancedSection) Entered() bool { return a.entered }
+
+func (a *AdvancedSection) ConsumesNavRunes() bool {
+	if !a.expanded || !a.entered || a.child == nil {
+		return false
+	}
+	if c, ok := a.child.(NavRuneConsumer); ok {
+		return c.ConsumesNavRunes()
+	}
+	switch a.child.(type) {
+	case *TextInput, *NumericInput:
+		return false
+	}
+	return false
+}
+
+func (a *AdvancedSection) InnerFocusYRange() (int, int) {
+	if !a.focused {
+		return -1, -1
+	}
+	if !a.expanded || !a.entered || a.child == nil {
+		return 0, 0
+	}
+	if r, ok := a.child.(InnerFocusRanger); ok {
+		if top, bottom := r.InnerFocusYRange(); top >= 0 {
+			return top + 1, bottom + 1
+		}
+	}
+	return 1, lineCountLocal(a.childViewBody())
+}
+
+func (a *AdvancedSection) NavStep(delta int) (bool, *FieldIntent) {
+	if !a.focused || !a.expanded || !a.entered || a.child == nil {
+		return false, nil
+	}
+	if stepper, ok := a.child.(NavStepper); ok {
+		return stepper.NavStep(delta)
+	}
+	return false, nil
+}
+
+func (a *AdvancedSection) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
+	if !a.focused {
+		return a, nil, nil
+	}
+	if key, ok := msg.(tea.KeyMsg); ok {
+		switch key.String() {
+		case "enter", " ":
+			if !a.expanded {
+				a.expanded = true
+				a.entered = true
+				if a.child == nil {
+					return a, nil, nil
+				}
+				cmd := a.child.Focus()
+				child, childCmd, intent := a.child.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				a.child = child
+				return a, teaBatchLocal(cmd, childCmd), intent
+			}
+		case "esc":
+			if !a.expanded {
+				return a, nil, nil
+			}
+			if a.entered && a.child != nil {
+				child, cmd, intent := a.child.Update(msg)
+				a.child = child
+				if intent != nil {
+					return a, cmd, intent
+				}
+				if nested, ok := child.(NestedNavigator); ok && nested.Entered() {
+					return a, cmd, nil
+				}
+				if blurIntent := a.child.Blur(); blurIntent != nil {
+					a.entered = false
+					return a, cmd, blurIntent
+				}
+				a.entered = false
+				return a, cmd, &FieldIntent{DotPath: a.dotPath, Status: IntentDiscard}
+			}
+			a.expanded = false
+			return a, nil, &FieldIntent{DotPath: a.dotPath, Status: IntentDiscard}
+		}
+	}
+	if !a.expanded || !a.entered || a.child == nil {
+		return a, nil, nil
+	}
+	child, cmd, intent := a.child.Update(msg)
+	a.child = child
+	return a, cmd, intent
+}
+
+func (a *AdvancedSection) View() string { return a.ViewBody() }
+
+func (a *AdvancedSection) ViewBody() string {
+	state := "[+]"
+	if a.expanded {
+		state = "[-]"
+	}
+	summary := fmt.Sprintf("%s %s", state, a.label)
+	if a.focused && !a.entered {
+		summary = a.styles.cursor.Render(summary)
+	} else {
+		summary = a.styles.label.Render(summary)
+	}
+	if !a.expanded || a.child == nil {
+		return summary
+	}
+	body := a.childViewBody()
+	if body == "" {
+		return summary
+	}
+	return summary + "\n" + body
+}
+
+func (a *AdvancedSection) childViewBody() string {
+	if a.child == nil {
+		return ""
+	}
+	if bv, ok := a.child.(BodyViewer); ok {
+		return bv.ViewBody()
+	}
+	return a.child.View()
+}
+
+func teaBatchLocal(a, b tea.Cmd) tea.Cmd {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	return tea.Batch(a, b)
+}
+
+func lineCountLocal(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
 // indentEachLine prepends `prefix` to every line of `s`. Used by container
 // widgets (ClosedObjectSubPanel) to indent rendered children, and by per-row
 // widgets to indent descriptions under a field label.
@@ -252,7 +441,7 @@ func renderDescription(styles widgetStyles, description string, indent, wrap int
 // EnumSelector — closed-set picker. Immediate-commit (D10).
 // ----------------------------------------------------------------------------
 
-// EnumSelector renders a horizontal list of enum candidates with j/k or arrow
+// EnumSelector renders a horizontal list of enum candidates with h/l or arrow
 // navigation and Enter/space to commit. Any unlisted candidate is rejected at
 // the boundary (D6) — typing a free-form value is impossible by construction.
 //
@@ -686,7 +875,12 @@ func (t *TextInput) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 		}
 	case "esc":
 		if t.draft == t.committed && t.errors == nil {
-			return t, nil, nil
+			t.editing = false
+			return t, nil, &FieldIntent{
+				DotPath: t.dotPath,
+				Value:   t.committed,
+				Status:  IntentDiscard,
+			}
 		}
 		t.draft = t.committed
 		t.errors = nil
@@ -812,8 +1006,8 @@ func (n *NumericInput) Focused() bool   { return n.focused }
 func (n *NumericInput) Focus() tea.Cmd  { n.focused = true; return nil }
 
 // ConsumesNavRunes (NavRuneConsumer) reports whether this scalar row is in
-// edit mode. Focus alone is navigation selection, so j/k remain row movement
-// keys until the user enters edit mode with Enter/i/e.
+// edit mode. Focus alone is navigation selection, so j/k remain settings
+// navigation keys until the user enters edit mode with Enter/i/e.
 func (n *NumericInput) ConsumesNavRunes() bool { return n.editing }
 
 // SetDisplayHints attaches the description for this numeric row. The label
@@ -925,7 +1119,12 @@ func (n *NumericInput) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) 
 		}
 	case "esc":
 		if n.draft == n.committed && n.errors == nil {
-			return n, nil, nil
+			n.editing = false
+			return n, nil, &FieldIntent{
+				DotPath: n.dotPath,
+				Value:   n.committed,
+				Status:  IntentDiscard,
+			}
 		}
 		n.draft = n.committed
 		n.errors = nil
@@ -1034,6 +1233,7 @@ type ListEditor struct {
 	allowUnset  bool
 	present     bool
 	cursor      int
+	editing     bool
 	appending   bool
 	appendBuf   string
 	errors      []string
@@ -1063,13 +1263,10 @@ func (l *ListEditor) DotPath() string { return l.dotPath }
 func (l *ListEditor) Focused() bool   { return l.focused }
 func (l *ListEditor) Focus() tea.Cmd  { l.focused = true; return nil }
 
-// ConsumesNavRunes (NavRuneConsumer) — claim j/k only while a draft is
-// being typed into the append buffer. In nav mode the user expects j/k to
-// step row-by-row through the modal (matching tab/shift+tab semantics);
-// intra-list cursor movement uses arrow-key alternates (down/up) instead.
-// Without this, j/k would be hijacked any time the list editor was focused,
-// stranding users inside the list with no way out short of tab.
-func (l *ListEditor) ConsumesNavRunes() bool { return l.appending }
+// ConsumesNavRunes (NavRuneConsumer) — claim j/k only after Enter has put the
+// list into edit/navigation mode. When the list row is merely selected, j/k
+// stay available for section/field navigation.
+func (l *ListEditor) ConsumesNavRunes() bool { return l.editing || l.appending }
 
 // SetDisplayHints attaches the description for this list row. The label
 // argument is ignored (set at construction).
@@ -1082,6 +1279,7 @@ func (l *ListEditor) SetWrapWidth(w int) { l.wrapWidth = w }
 
 func (l *ListEditor) Blur() *FieldIntent {
 	l.focused = false
+	l.editing = false
 	if stringSliceEqual(l.draft, l.committed) && !l.appending {
 		return nil
 	}
@@ -1164,6 +1362,24 @@ func (l *ListEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 		return l, nil, nil
 	}
 
+	if !l.editing {
+		switch key.String() {
+		case "enter", "i", "e":
+			l.editing = true
+			l.errors = nil
+		case "u", "backspace":
+			if !l.allowUnset || !l.present {
+				return l, nil, nil
+			}
+			l.present = false
+			return l, nil, &FieldIntent{
+				DotPath: l.dotPath,
+				Status:  IntentUnset,
+			}
+		}
+		return l, nil, nil
+	}
+
 	switch key.String() {
 	case "j", "down":
 		if l.cursor < len(l.draft)-1 {
@@ -1197,15 +1413,14 @@ func (l *ListEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 		l.errors = nil
 		l.committed = append([]string(nil), l.draft...)
 		l.present = true
+		l.editing = false
 		return l, nil, &FieldIntent{
 			DotPath: l.dotPath,
 			Value:   append([]string(nil), l.draft...),
 			Status:  IntentCommit,
 		}
 	case "esc":
-		if stringSliceEqual(l.draft, l.committed) && l.errors == nil {
-			return l, nil, nil
-		}
+		l.editing = false
 		l.draft = append([]string(nil), l.committed...)
 		l.errors = nil
 		return l, nil, &FieldIntent{
@@ -1236,6 +1451,9 @@ func (l *ListEditor) View() string {
 	if !l.present && l.allowUnset {
 		header += " " + l.styles.dim.Render("(inherited)")
 	}
+	if l.focused && !l.editing {
+		header = l.styles.cursor.Render(header) + " " + l.styles.dim.Render("[enter edit]")
+	}
 	b.WriteString(header)
 	b.WriteByte('\n')
 	if l.description != "" {
@@ -1245,7 +1463,7 @@ func (l *ListEditor) View() string {
 
 	for i, item := range l.draft {
 		row := fmt.Sprintf("    %s", item)
-		if l.focused && i == l.cursor && !l.appending {
+		if l.focused && l.editing && i == l.cursor && !l.appending {
 			b.WriteString(l.styles.cursor.Render(row))
 		} else {
 			b.WriteString(l.styles.value.Render(row))
@@ -1255,7 +1473,7 @@ func (l *ListEditor) View() string {
 	if l.appending {
 		cursor := "_"
 		b.WriteString(fmt.Sprintf("    %s%s\n", l.styles.pending.Render("+ "), l.appendBuf+cursor))
-	} else if l.focused {
+	} else if l.focused && l.editing {
 		b.WriteString(l.styles.dim.Render("    [a add  d delete  Enter commit  Esc discard]"))
 		b.WriteByte('\n')
 	}
@@ -1282,6 +1500,7 @@ type ClosedObjectSubPanel struct {
 	children []FieldWidget
 	cursor   int
 	focused  bool
+	entered  bool
 	styles   widgetStyles
 
 	description string
@@ -1330,20 +1549,21 @@ func (p *ClosedObjectSubPanel) SetWrapWidth(w int) {
 func (p *ClosedObjectSubPanel) Focused() bool { return p.focused }
 func (p *ClosedObjectSubPanel) Focus() tea.Cmd {
 	p.focused = true
+	p.entered = false
 	if p.cursor < 0 {
 		p.cursor = 0
 	}
-	if p.cursor < len(p.children) {
-		return p.children[p.cursor].Focus()
-	}
 	return nil
 }
+
+func (p *ClosedObjectSubPanel) Entered() bool { return p.entered }
 
 // Blur on the panel blurs the focused child and propagates any IntentDiscard
 // the child wants to emit (per D10's tab/focus = discard).
 func (p *ClosedObjectSubPanel) Blur() *FieldIntent {
 	p.focused = false
-	if p.cursor >= 0 && p.cursor < len(p.children) {
+	p.entered = false
+	if p.cursor >= 0 && p.cursor < len(p.children) && p.children[p.cursor].Focused() {
 		return p.children[p.cursor].Blur()
 	}
 	return nil
@@ -1355,6 +1575,9 @@ func (p *ClosedObjectSubPanel) Blur() *FieldIntent {
 // (or is a non-typing widget like ToggleRow), we report `false` so the model
 // can advance the panel's internal cursor via NavStep instead.
 func (p *ClosedObjectSubPanel) ConsumesNavRunes() bool {
+	if !p.entered {
+		return false
+	}
 	if p.cursor < 0 || p.cursor >= len(p.children) {
 		return false
 	}
@@ -1380,8 +1603,8 @@ func (p *ClosedObjectSubPanel) ConsumesNavRunes() bool {
 // child rows) would scroll the panel's *bottom* into view while the user's
 // actual cursor sits at the top, leaving the focused row off-screen with no
 // way to find it short of escaping the panel entirely. With this range,
-// j/k (and tab/shift+tab) row-stepping keeps the cursor row anchored as the
-// inner cursor moves through the panel's children.
+// entered-container navigation keeps the cursor row anchored as the inner
+// cursor moves through the panel's children.
 //
 // Implementation mirrors HarnessBlockPanel.InnerFocusYRange: re-emit the
 // ViewBody structure while tracking newline offsets at each child boundary.
@@ -1392,7 +1615,7 @@ func (p *ClosedObjectSubPanel) ConsumesNavRunes() bool {
 // InnerFocusRanger so a focused nested panel keeps its own inner cursor
 // anchored, not just the top of the nested block.
 func (p *ClosedObjectSubPanel) InnerFocusYRange() (int, int) {
-	if !p.focused || len(p.children) == 0 {
+	if !p.focused || !p.entered || len(p.children) == 0 {
 		return -1, -1
 	}
 	if p.cursor < 0 || p.cursor >= len(p.children) {
@@ -1446,26 +1669,25 @@ func (p *ClosedObjectSubPanel) InnerFocusYRange() (int, int) {
 // blurring the previously-focused child and focusing the new one. Returns
 // (false, nil) at the boundary so the model can hop to the next top-level
 // slot via focusOffset. Mirrors HarnessBlockPanel.NavStep — both containers
-// participate in the same row-by-row navigation contract so the user can
-// tab/j-k through every navigable row in the modal regardless of which
-// container shape it sits inside.
+// participate in the same explicit-enter navigation contract so the user can
+// move through one visible nesting level at a time.
 //
 // Recursive descent: when the currently-focused child is itself a NavStepper
 // (e.g. a nested ClosedObjectSubPanel), we delegate the step to the child
 // first. Only when the child reports it cannot move (boundary of its inner
 // cursor) do we advance our own cursor. Without this, panels nested inside
 // panels — `capture` containing `core`/`structural_signals`, etc. — would
-// be unreachable past their first child: tab/j would skip from the first
-// child of `core` straight to `structural_signals`, never visiting the 5
-// other numeric inputs in `core`.
+// be unreachable past their first child after the nested panel was opened.
 func (p *ClosedObjectSubPanel) NavStep(delta int) (bool, *FieldIntent) {
-	if !p.focused || len(p.children) == 0 {
+	if !p.focused || !p.entered || len(p.children) == 0 {
 		return false, nil
 	}
 	if p.cursor >= 0 && p.cursor < len(p.children) {
 		if cs, ok := p.children[p.cursor].(NavStepper); ok {
-			if moved, intent := cs.NavStep(delta); moved {
-				return true, intent
+			if nn, ok := p.children[p.cursor].(NestedNavigator); ok && nn.Entered() {
+				if moved, intent := cs.NavStep(delta); moved {
+					return true, intent
+				}
 			}
 		}
 	}
@@ -1485,7 +1707,21 @@ func (p *ClosedObjectSubPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *Field
 	}
 	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.String() {
+		case "enter":
+			if !p.entered {
+				p.entered = true
+				if p.cursor < 0 {
+					p.cursor = 0
+				}
+				if p.cursor < len(p.children) {
+					return p, p.children[p.cursor].Focus(), nil
+				}
+				return p, nil, nil
+			}
 		case "tab":
+			if !p.entered {
+				return p, nil, nil
+			}
 			// Tab = discard the focused child's draft, advance cursor.
 			intent := p.children[p.cursor].Blur()
 			if p.cursor < len(p.children)-1 {
@@ -1494,13 +1730,37 @@ func (p *ClosedObjectSubPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *Field
 			}
 			return p, nil, intent
 		case "shift+tab":
+			if !p.entered {
+				return p, nil, nil
+			}
 			intent := p.children[p.cursor].Blur()
 			if p.cursor > 0 {
 				p.cursor--
 				_ = p.children[p.cursor].Focus()
 			}
 			return p, nil, intent
+		case "esc":
+			if !p.entered {
+				return p, nil, nil
+			}
+			child, cmd, intent := p.children[p.cursor].Update(msg)
+			p.children[p.cursor] = child
+			if intent != nil {
+				return p, cmd, intent
+			}
+			if nested, ok := child.(NestedNavigator); ok && nested.Entered() {
+				return p, cmd, nil
+			}
+			if blurIntent := p.children[p.cursor].Blur(); blurIntent != nil {
+				p.entered = false
+				return p, cmd, blurIntent
+			}
+			p.entered = false
+			return p, cmd, &FieldIntent{DotPath: p.dotPath, Status: IntentDiscard}
 		}
+	}
+	if !p.entered {
+		return p, nil, nil
 	}
 	child, cmd, intent := p.children[p.cursor].Update(msg)
 	p.children[p.cursor] = child
@@ -1580,6 +1840,7 @@ type OpenKeysetKVEditor struct {
 	focused     bool
 	allowUnset  bool
 	present     bool
+	editing     bool
 	mode        kvEditorMode
 	keyBuf      string
 	valBuf      string
@@ -1665,13 +1926,11 @@ func (kv *OpenKeysetKVEditor) DotPath() string { return kv.dotPath }
 func (kv *OpenKeysetKVEditor) Focused() bool   { return kv.focused }
 func (kv *OpenKeysetKVEditor) Focus() tea.Cmd  { kv.focused = true; return nil }
 
-// ConsumesNavRunes (NavRuneConsumer) — claim j/k only while a draft is
-// being typed (key entry, value entry, or value editing). In kvNavigating
-// mode the user expects j/k to step row-by-row through the modal (matching
-// tab/shift+tab semantics); intra-kv cursor movement uses arrow-key
-// alternates (down/up). Same rationale as ListEditor.ConsumesNavRunes.
+// ConsumesNavRunes (NavRuneConsumer) — claim j/k after Enter has opened the
+// kv editor, including its key/value typing modes. While the row is merely
+// selected, j/k remain available for settings navigation.
 func (kv *OpenKeysetKVEditor) ConsumesNavRunes() bool {
-	return kv.mode != kvNavigating
+	return kv.editing || kv.mode != kvNavigating
 }
 
 // SetDisplayHints attaches the description for this KV section. The label
@@ -1685,6 +1944,7 @@ func (kv *OpenKeysetKVEditor) SetWrapWidth(w int) { kv.wrapWidth = w }
 
 func (kv *OpenKeysetKVEditor) Blur() *FieldIntent {
 	kv.focused = false
+	kv.editing = false
 	if kv.mode == kvNavigating && stringMapEqual(kv.draft, kv.committed) {
 		return nil
 	}
@@ -1798,6 +2058,24 @@ func (kv *OpenKeysetKVEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldI
 		return kv, nil, nil
 	}
 
+	if !kv.editing {
+		switch key.String() {
+		case "enter", "i", "e":
+			kv.editing = true
+			kv.errors = nil
+		case "u", "backspace":
+			if !kv.allowUnset || !kv.present {
+				return kv, nil, nil
+			}
+			kv.present = false
+			return kv, nil, &FieldIntent{
+				DotPath: kv.dotPath,
+				Status:  IntentUnset,
+			}
+		}
+		return kv, nil, nil
+	}
+
 	// kvNavigating mode
 	switch key.String() {
 	case "j", "down":
@@ -1840,15 +2118,14 @@ func (kv *OpenKeysetKVEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldI
 		kv.errors = nil
 		kv.committed = copyStringMap(kv.draft)
 		kv.present = true
+		kv.editing = false
 		return kv, nil, &FieldIntent{
 			DotPath: kv.dotPath,
 			Value:   typed,
 			Status:  IntentCommit,
 		}
 	case "esc":
-		if stringMapEqual(kv.draft, kv.committed) && kv.errors == nil {
-			return kv, nil, nil
-		}
+		kv.editing = false
 		kv.draft = copyStringMap(kv.committed)
 		kv.keyOrder = sortedKeys(kv.committed)
 		kv.errors = nil
@@ -1880,6 +2157,9 @@ func (kv *OpenKeysetKVEditor) View() string {
 	if !kv.present && kv.allowUnset {
 		header += " " + kv.styles.dim.Render("(inherited)")
 	}
+	if kv.focused && !kv.editing {
+		header = kv.styles.cursor.Render(header) + " " + kv.styles.dim.Render("[enter edit]")
+	}
 	b.WriteString(header)
 	body := kv.viewBodyRows()
 	if body != "" {
@@ -1902,6 +2182,9 @@ func (kv *OpenKeysetKVEditor) ViewBody() string {
 	if !kv.present && kv.allowUnset {
 		header += " " + kv.styles.dim.Render("(inherited)")
 	}
+	if kv.focused && !kv.editing {
+		header = kv.styles.cursor.Render(header) + " " + kv.styles.dim.Render("[enter edit]")
+	}
 	body := kv.viewBodyRows()
 	if body == "" {
 		return header
@@ -1921,7 +2204,7 @@ func (kv *OpenKeysetKVEditor) viewBodyRows() string {
 	for i, k := range kv.keyOrder {
 		v := kv.draft[k]
 		row := fmt.Sprintf("    %s = %s", k, v)
-		if kv.focused && i == kv.cursor && kv.mode == kvNavigating {
+		if kv.focused && kv.editing && i == kv.cursor && kv.mode == kvNavigating {
 			b.WriteString(kv.styles.cursor.Render(row))
 		} else {
 			b.WriteString(kv.styles.value.Render(row))
@@ -1937,7 +2220,7 @@ func (kv *OpenKeysetKVEditor) viewBodyRows() string {
 	case kvEditingValue:
 		b.WriteString(fmt.Sprintf("    %s%s = %s_\n", kv.styles.pending.Render("~ "), kv.editingKey, kv.valBuf))
 	default:
-		if kv.focused {
+		if kv.focused && kv.editing {
 			b.WriteString(kv.styles.dim.Render("    [a add  e edit  d delete  Enter commit  Esc discard]"))
 			b.WriteByte('\n')
 		}

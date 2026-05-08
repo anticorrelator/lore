@@ -1,7 +1,7 @@
 # Lore Transcript Provider Contract
 
 This file is the canonical reference for how Lore's capture, digest,
-novelty, and ceremony-detection scripts read session artifacts across
+plan-persistence, and future transcript consumers read session artifacts across
 harnesses. Every adapter under `adapters/transcripts/` consumes this
 contract.
 
@@ -14,7 +14,7 @@ contract.
 > `conventions/heuristic-vs-definite-condition-hooks.md`). The
 > provider-API requirements documented below remain valid for the
 > remaining consumers (`extract-session-digest`,
-> `check-plan-persistence`, `probabilistic-audit-trigger`) and for any
+> `check-plan-persistence`) and for any
 > future transcript consumer; the call-site references to
 > `stop-novelty-check.py` are preserved for design lineage.
 
@@ -25,11 +25,11 @@ contract.
 > review provider requirements (T56) — is also settled and reuses
 > the Phase 5 surface without new provider operations. Per-harness
 > provider implementations land in T50 (claude-code), T51 (opencode
-> + codex stubs), with consumer migrations T52-T54, T57. Until those
+> + codex stubs), with consumer migrations T52-T53, T57. Until those
 > land, the only fully-wired transcript path is the legacy in-tree
 > `scripts/transcript.py` JSONL parser used by
 > `extract-session-digest.py`, `check-plan-persistence.py`,
-> `stop-novelty-check.py`, and `probabilistic-audit-trigger.py` —
+> and the retired `stop-novelty-check.py` —
 > which is hardcoded to Claude Code's transcript format and is the
 > baseline this provider abstraction supersedes.
 
@@ -138,7 +138,7 @@ extended operation set (T47)" below.
 `parse_transcript` and `extract_file_paths` MUST return the same
 normalized shape regardless of harness — the consumer scripts
 (`extract-session-digest.py`, `check-plan-persistence.py`,
-`stop-novelty-check.py`, `probabilistic-audit-trigger.py`) read this
+and historical `stop-novelty-check.py`) read this
 shape directly.
 
 ### Normalized message dict schema
@@ -184,7 +184,7 @@ informational-feedback-style convention (degraded ≠ failed).
 
 ## Per-Consumer Field Requirements
 
-The four consumer scripts have different field requirements. The
+The consumer scripts have different field requirements. The
 table below names the *minimum* fields each consumer reads from the
 normalized message dict; any provider that cannot supply the listed
 fields for a given consumer MUST report `partial` with that consumer
@@ -196,7 +196,6 @@ consumer land in the follow-up tasks listed.
 | `extract-session-digest.py`         | full normalized schema + raw-line scan + session metadata + `previous_session_path` (see T47 below) | §"Digest provider requirements" below (T47) |
 | `check-plan-persistence.py`         | `tool_use_timestamps` for builtin-plan-mode tool name + a per-harness `builtin_plan_mode_tool` config value (see T48 below) | §"Plan-persistence provider requirements" below (T48) |
 | `task-completed-capture-check.sh`   | _no transcript read_ — operates on its own stdin payload; T53 migration is a teams-path migration only | §"TaskCompleted provider requirements" below (T48) |
-| `probabilistic-audit-trigger.py`    | reverse iteration over `parse_transcript` + SlashCommand tool-use shape + per-harness `slash_command_tool` config (see T49 below) | §"Ceremony-detection provider requirements" below (T49) |
 | `stop-novelty-check.py`             | full schema + `extract_file_paths` for related-files; uses no new provider operations beyond Phase 5 (see T56 below) | §"Novelty-review provider requirements" below (T56) |
 
 ### Digest provider requirements (T47)
@@ -521,19 +520,17 @@ operation table — there isn't one and there shouldn't be.
   for that hook is the `~/.claude/teams/...` → `resolve_harness_install_path
   teams` migration plus the unsupported-teams exit-0 contract.
 
-### Ceremony-detection provider requirements (T49)
+### Future audit-trigger provider requirements (T49, deferred)
 
-`scripts/probabilistic-audit-trigger.py` is a Stop hook that detects
-recently-completed ceremony commands (`/implement`, `/spec`,
-`/pr-review`, `/pr-self-review`) by scanning the transcript for the
-**last** `SlashCommand` tool use whose `input.command` field begins
-with one of the ceremony-name tokens
-([`probabilistic-audit-trigger.py:111-146`](https://github.com/anticorrelator/lore/blob/main/scripts/probabilistic-audit-trigger.py#L111)).
-When detected, the hook rolls a probability gate against
-`~/.lore/config/settlement-config.json` and may dispatch
-`lore audit <artifact-id>`.
+Probabilistic audit triggering is not currently wired into any hook adapter.
+The retired `probabilistic-audit-trigger.py` implementation was removed because
+its settings surface still listed `/pr-review` and `/pr-self-review` as active
+settlement participants even though the hook was no longer installed. When the
+open audit/scorecard follow-up reintroduces probabilistic audits, implement the
+trigger against the current hook adapter and flow-event substrates rather than
+reviving the old per-ceremony settings shape.
 
-The detector imposes three requirements on the transcript provider:
+A future detector will still need three provider guarantees:
 
 #### 1. Reverse iteration over messages
 
@@ -560,8 +557,8 @@ on-disk order.
 #### 2. SlashCommand tool-use shape
 
 Claude Code's `SlashCommand` tool surfaces the user's slash-prefixed
-command via `input.command`
-([`probabilistic-audit-trigger.py:135-145`](https://github.com/anticorrelator/lore/blob/main/scripts/probabilistic-audit-trigger.py#L135)):
+command via `input.command`. A future audit trigger should preserve this
+normalization pattern without depending on a particular retired script:
 
 ```python
 if block.get("name") != "SlashCommand":
@@ -575,9 +572,9 @@ first_token = cmd_raw.split()[0].lower() if cmd_raw else ""
 
 OpenCode and Codex do not use a tool called `SlashCommand` — they
 either fire slash-commands as native UI gestures (no tool_use entry)
-or surface them through different tool names. The detector's current
-hardcoded `"SlashCommand"` string is Claude-specific and MUST move to
-a per-harness config value:
+or surface them through different tool names. A future detector must
+avoid hardcoding `"SlashCommand"` and instead use a per-harness config
+value:
 
 | Harness     | `slash_command_tool`                                                                              |
 |-------------|---------------------------------------------------------------------------------------------------|
@@ -598,11 +595,10 @@ the resolved skill name (e.g., already-stripped of `/` and arguments),
 it MUST report `partial` for `slash_command_tool` and the hook
 degrades gracefully (no roll, no dispatch).
 
-The `CEREMONY_COMMANDS` token set
-(`{"implement", "pr-self-review", "pr-review", "spec"}`) is closed
-and lives in the consumer script — it is **not** a per-harness config.
-Lore's ceremonies are protocol-level, not harness-level; the same
-token set applies regardless of active framework.
+The trigger-source token set should live in the future consumer script
+or flow-event schema — it is **not** a per-harness config. Lore's
+trigger sources are protocol-level, not harness-level; the same token
+set applies regardless of active framework.
 
 #### Summary: ceremony-detection requirements
 
@@ -616,9 +612,9 @@ token set applies regardless of active framework.
 - Command-text fidelity — providers MUST surface the user's raw
   slash-command string, not a pre-normalized form.
 
-T54 is the consumer migration that wires both the
-`slash_command_tool` config lookup and the transcript-provider
-routing; T49 names the contract those wires implement. The
+The open probabilistic-audit work item is the future consumer migration
+that wires both the `slash_command_tool` config lookup and the
+transcript-provider routing; T49 names the contract those wires implement. The
 `builtin_plan_mode_tool` (T48) and `slash_command_tool` (T49) keys
 are the only two per-harness tool-name lookups documented in this
 contract — neither is a provider operation; both are
@@ -785,7 +781,6 @@ the following items before it is considered Phase 5 complete.
 | `scripts/extract-session-digest.py`           | T52        | Route through provider instead of importing `scripts/transcript.py` directly. |
 | `scripts/check-plan-persistence.py`           | T53        | Route through provider; respect `provider_status=unavailable` exit-0 contract. |
 | `scripts/task-completed-capture-check.sh`    | T53        | Route through provider for any transcript-derived field (T48 confirms scope). |
-| `scripts/probabilistic-audit-trigger.py`     | T54        | Route ceremony detection through provider; degrade to no-roll on `unavailable`. |
 | `scripts/evidence-append.sh`                  | T55        | Continue functioning when the provider is degraded (does not depend on transcript fields today; verified). |
 | `scripts/stop-novelty-check.py`              | T57        | Phase-6 migration; provider extension for novelty review fields.     |
 

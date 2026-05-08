@@ -77,10 +77,33 @@ cap() {
 # iterate this subcommand from a heuristic worker count.
 #
 # Codex is single-provider (model_routing.shape=single) so role bindings
-# are bare model ids — no provider/model split. The directive carries
-# `model=<m>` only.
+# are bare model ids — no provider/model split. A binding may append a
+# reasoning-effort suffix (`<model>-high`, `<model>-xhigh`, etc.); the
+# adapter splits that into `model=<m> reasoning_effort=<effort>` at the
+# directive boundary.
 #
-# Output: `delegate:TaskCreate role=<r> model=<m>` on stdout.
+# Output: `delegate:TaskCreate role=<r> model=<m> [reasoning_effort=<effort>]`
+# on stdout.
+split_codex_model_variant() {
+  local binding="$1"
+  local model="$binding"
+  local effort=""
+
+  case "$binding" in
+    *-minimal) model="${binding%-minimal}"; effort="minimal" ;;
+    *-low)     model="${binding%-low}";     effort="low" ;;
+    *-medium)  model="${binding%-medium}";  effort="medium" ;;
+    *-high)    model="${binding%-high}";    effort="high" ;;
+    *-xhigh)   model="${binding%-xhigh}";   effort="xhigh" ;;
+  esac
+
+  if [[ -n "$effort" && -n "$model" ]]; then
+    printf 'model=%s reasoning_effort=%s' "$model" "$effort"
+  else
+    printf 'model=%s' "$binding"
+  fi
+}
+
 cmd_spawn() {
   require_codex
   local role="${1:-}" task_prompt="${2:-}" override_model="${3:-}"
@@ -110,7 +133,9 @@ cmd_spawn() {
     return 1
   fi
 
-  echo "delegate:TaskCreate role=$role model=$model"
+  local routing_keys
+  routing_keys=$(split_codex_model_variant "$model")
+  echo "delegate:TaskCreate role=$role $routing_keys"
 }
 
 # --- cmd_wait ---
@@ -291,7 +316,8 @@ Usage: $(basename "$0") <subcommand> [args]
 Subcommands (mirroring adapters/agents/README.md §Operation Surface):
   spawn <role> <task_prompt> [model_override]
                             Emit delegate:TaskCreate directive (single-
-                            provider; bare model id only).
+                            provider; bare model id only; optional
+                            reasoning suffix like gpt-5.5-high is split).
   wait <spawn_handle>       Emit delegate:TaskList polling directive.
   send_message <handle> <body>
                             Returns 'unsupported' (codex has no native

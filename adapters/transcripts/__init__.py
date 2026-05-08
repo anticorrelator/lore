@@ -89,7 +89,7 @@ def extract_text_blocks(messages: Iterable[dict]) -> list[tuple[int, str]]:
     Consolidates the `for m in messages: for text in m["text_blocks"]:`
     pattern that historically appeared across consumers including the
     retired `stop-novelty-check.py` (T56 observation). Still useful for
-    `extract-session-digest`, `probabilistic-audit-trigger`, and any
+    `extract-session-digest`, `check-plan-persistence`, and any
     future transcript consumer. Iteration order matches the message
     order returned by `parse_transcript`.
     """

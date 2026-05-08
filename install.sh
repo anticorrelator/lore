@@ -289,7 +289,6 @@ legacy_specs = [
     "config/framework.json",
     "config/harness-args.json",
     "config/obsidian.json",
-    "config/settlement-config.json",
     "config/tui.json",
 ]
 
@@ -460,17 +459,6 @@ if isinstance(obsidian_doc, dict):
                 doc["obsidian"] = obsidian_block
                 mark("config/obsidian.json")
 
-# settlement-config.json -> full settlement subtree (drop schema_version /
-# description metadata; the unified shape uses the top-level `version`).
-settlement_doc = load_legacy("config/settlement-config.json")
-if isinstance(settlement_doc, dict):
-    settlement_block = dict(doc.get("settlement", {}))
-    for key in ("probabilistic_triggers", "background_queue", "enabled", "dry_run"):
-        if key in settlement_doc:
-            settlement_block[key] = settlement_doc[key]
-    doc["settlement"] = settlement_block
-    mark("config/settlement-config.json")
-
 # tui.json -> tui.layout
 tui_doc = load_legacy("config/tui.json")
 if isinstance(tui_doc, dict):
@@ -521,6 +509,41 @@ except OSError:
     raise
 
 print(f"  [lore] migration sources: {sources}", file=sys.stderr)
+PYEOF
+  fi
+fi
+
+# Retired 2026-05: the old probabilistic settlement settings were no longer
+# wired into hook adapters. Keep the open audit work item as the source for any
+# future trigger config, and prune the stale user-facing section from existing
+# unified settings files.
+if [ -f "$SETTINGS_FILE" ]; then
+  info "Pruning retired settlement settings from $SETTINGS_FILE"
+  if ! $DRY_RUN; then
+    SETTINGS_FILE="$SETTINGS_FILE" python3 - <<'PYEOF'
+import json
+import os
+import tempfile
+
+settings_path = os.environ["SETTINGS_FILE"]
+with open(settings_path, "r", encoding="utf-8") as f:
+    doc = json.load(f)
+
+if isinstance(doc, dict) and "settlement" in doc:
+    doc.pop("settlement", None)
+    config_dir = os.path.dirname(settings_path)
+    fd, tmp_path = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=config_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp_path, settings_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 PYEOF
   fi
 fi
@@ -656,14 +679,13 @@ fi
 # - `framework` is rewritten on every install so re-running with a different
 #   --framework value updates the active harness.
 # - `capability_overrides` and `roles` are seeded only when missing; user edits
-#   are preserved. Per-role bindings default to "sonnet" to match the legacy
-#   default-model behavior in batch-spec.sh, batch-implement.sh, work-ai.sh,
-#   and generate-review-summary.sh. resolve_model_for_role (T6) reads this map.
+#   are preserved. Per-role bindings are harness-aware: claude-code defaults
+#   every role to "opus", codex defaults every role to "gpt-5.5-high", and
+#   opencode splits reasoning roles to "anthropic/opus" and technical roles
+#   to "openai/gpt-5.5".
 # - The role-id keyset is derived from `adapters/roles.json` (T3's closed
 #   registry) rather than hardcoded here, so adding a role to the registry
-#   automatically seeds it on the next install. Each new role defaults to
-#   "sonnet" for backward compat; a future schema field
-#   `capabilities.json frameworks.<active>.default_model` may override.
+#   automatically seeds it on the next install.
 # - Capability profiles ship as static data in adapters/capabilities.json;
 #   capability_overrides here are ad-hoc per-install opt-ins that downstream
 #   readers layer on top of the static profile.
@@ -684,16 +706,16 @@ repo_dir = os.environ["LORE_REPO_DIR"]
 roles_path = os.path.join(repo_dir, "adapters", "roles.json")
 with open(roles_path) as f:
     roles_data = json.load(f)
-# Per-role model defaults preserve the legacy claude-code behavior:
-# `lead` defaulted to `opus` (matched skills/implement/SKILL.md's pre-T35
-# hardcoded `--model opus (override with --model sonnet)` status line).
-# Every other role defaulted to `sonnet`. After T35 the SKILL.md status
-# line is sourced from this seed via resolve_model_for_role, so seeding
-# `lead → opus` here preserves byte-equivalent observable behavior on a
-# default claude-code install — operators who relied on opus-for-lead
-# get the same model without editing framework.json.
-DEFAULT_BY_ROLE = {"lead": "opus"}
-default_roles = {r["id"]: DEFAULT_BY_ROLE.get(r["id"], "sonnet") for r in roles_data["roles"]}
+if framework == "claude-code":
+    default_roles = {r["id"]: "opus" for r in roles_data["roles"]}
+elif framework == "codex":
+    default_roles = {r["id"]: "gpt-5.5-high" for r in roles_data["roles"]}
+else:
+    reasoning_roles = {"lead", "researcher", "judge", "summarizer", "advisor", "default"}
+    default_roles = {
+        r["id"]: ("anthropic/opus" if r["id"] in reasoning_roles else "openai/gpt-5.5")
+        for r in roles_data["roles"]
+    }
 
 if os.path.exists(path):
     with open(path, "r") as f:

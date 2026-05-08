@@ -78,7 +78,7 @@ AGENT_OPS=(
 # Closed seven-operation set per adapters/transcripts/README.md
 # §"Provider interface — extended operation set". This is the schematic
 # the consumer scripts (extract-session-digest.py, check-plan-persistence.py,
-# stop-novelty-check.py, probabilistic-audit-trigger.py) rely on.
+# and historical stop-novelty-check.py) rely on.
 TRANSCRIPT_OPS=(
   parse_transcript
   extract_file_paths

@@ -227,7 +227,7 @@ Under the lazy-audit model, `lore audit` is **decorative, not a publication prec
   1. **Primary:** entry-internal `learned:` timestamp in commons markdown YAML frontmatter — the canonical field written by `capture.sh` / `lore-promote.sh`. Use this when present; stable across filesystem operations, restores, and syncs.
   2. **Secondary:** filesystem *birthtime* (`stat -f %SB` macOS, `stat -c %W` Linux) when the filesystem supports it. Stable for the file's lifetime but unavailable on some filesystems.
   3. **Tertiary (degraded):** filesystem `ctime` only as a last resort. Under ctime-only conditions, Step 3.8 Audit-coverage lag sub-check runs in **advisory mode** (see Step 3.8 below) — this step still enumerates candidates but reports reduced-confidence in the output.
-- **Audit-triggered proxy:** rows in `$KDIR/_scorecards/audit-attempts.jsonl` + `$KDIR/_scorecards/audit-trigger-log.jsonl` (written by `probabilistic-audit-trigger.py`) = "audit dispatched for artifact." Stands in for the future `audit_triggered` event rows.
+- **Audit-triggered proxy:** rows in `$KDIR/_scorecards/audit-attempts.jsonl` plus future `audit_triggered` flow-event rows = "audit dispatched for artifact." The old `probabilistic-audit-trigger.py` / `trigger-log.jsonl` path was retired; do not treat missing trigger logs as a live pipeline failure.
 - **Verdict rows:** `kind==scored` entries in `rows.jsonl` with `template_id in {correctness-gate, curator, reverse-auditor}` = "audit completed + produced verdict."
 
 **Signal for eligibility.**
@@ -529,7 +529,6 @@ The delta surface is **not** a per-cell dump. It surfaces only deltas that carry
    - `curated_rate`: |delta| ≥ 0.05
    - `triviality_rate`: |delta| ≥ 0.05
    - `omission_rate`: |delta| ≥ 0.03 (more sensitive; small changes in portfolio-level miss rate are load-bearing)
-   - `external_confirm_rate`: |delta| ≥ 0.05
    - `observation_promotion_rate`: |delta| ≥ 0.03
    - `contradiction_verification_rate`: |delta| ≥ 0.10 (observational signal is coarser than adjudicative)
 2. **Sufficient sample size.** Both windows must have n ≥ 10 rows for that metric. Below-sample deltas are noise.
@@ -943,7 +942,7 @@ Median time from promotion-time proxy to audit-triggered-proxy for promoted Tier
 2. Secondary: filesystem birthtime (`stat -f %SB` macOS, `stat -c %W` Linux).
 3. Tertiary (degraded): filesystem `ctime`. When only `ctime` is available, the lag sub-check runs in **advisory mode**: the sub-check reports its observation in the output but does NOT trigger `pipeline-degraded` state (ctime is noisy and would wrongly gate /evolve on filesystem quirks). The routing sub-check remains authoritative even under ctime-only conditions.
 
-**Audit-triggered proxy:** rows in `$KDIR/_scorecards/audit-attempts.jsonl` + `$KDIR/_scorecards/audit-trigger-log.jsonl`.
+**Audit-triggered proxy:** rows in `$KDIR/_scorecards/audit-attempts.jsonl` plus future `audit_triggered` flow-event rows. Until probabilistic audit work lands, absence of trigger telemetry is not a pipeline failure by itself.
 
 **Sub-check 2: Routing realization.**
 
@@ -961,7 +960,7 @@ Below threshold → routing partially failed (triggers fired, verdicts aren't la
 
 **Why both sub-checks.** Routing realization catches the case where triggers fire but downstream judges don't produce verdicts (earlier Round 1 design tested only "at least one verdict" which missed partial routing failure — 100 triggered, 1 verdict would pass). Lag catches slow pipelines even when routing is complete. Both together catch the main failure modes under lazy-audit.
 
-**Alignment with Trigger realization rate check.** The routing realization sub-check is **distinct** from the existing Trigger realization rate check, which measures "did probabilistic triggers fire at the configured rate?". Routing realization measures the downstream half: "of triggers that fired, did verdicts land?" Both are preserved and measure different failure surfaces.
+**Alignment with future trigger realization.** The routing realization sub-check is **distinct** from trigger realization, which will measure "did probabilistic triggers fire at the configured rate?" once that trigger source exists. Routing realization measures the downstream half: "of triggers that fired, did verdicts land?"
 
 **When green: no prose.**
 
@@ -981,18 +980,20 @@ If only one sub-check tripped, omit the healthy sub-check's detail line.
 
 ### Check: Trigger realization rate
 
-**What it measures.** For each ceremony with a configured probability `p > 0` in `~/.lore/config/settlement-config.json`, compute the observed firing rate over the retro window and compare to the configured `p`. Flag any ceremony whose observed rate falls outside a **±50% relative tolerance band** around `p`, computed over **≥10 ceremonies**. Below 10 samples the check abstains — too noisy to distinguish drift from Bernoulli variance.
+**Status.** Deferred until the open probabilistic-audit work item reintroduces a live trigger source. The previous `settlement-config.json` / `trigger-log.jsonl` implementation was removed after the hook adapters stopped installing it.
 
-**Why it matters.** The probabilistic trigger hook writes a `trigger-log.jsonl` row for **every** ceremony roll — fired and not-fired alike. If the hook is broken, if the queue is stalled, or if the config has drifted, the observed rate diverges from `p`. Three failure modes that look identical to downstream scorecard aggregates but have different fixes.
+**What it will measure.** For each future audit-trigger source with a configured probability `p > 0`, compute the observed firing rate over the retro window and compare to the configured `p`. Flag any source whose observed rate falls outside a **±50% relative tolerance band** around `p`, computed over **≥10 rolls**. Below 10 samples the check abstains — too noisy to distinguish drift from Bernoulli variance.
+
+**Why it matters.** The future trigger must write a row for **every** roll — fired and not-fired alike. If the hook is broken, if the queue is stalled, or if the config has drifted, the observed rate diverges from `p`. Three failure modes that look identical to downstream scorecard aggregates but have different fixes.
 
 **Inputs.**
-- `$KDIR/_scorecards/trigger-log.jsonl` — filter to rows whose `triggered_at` falls inside the retro window; group by `ceremony`.
-- `~/.lore/config/settlement-config.json` — read configured `p` per ceremony.
+- Future trigger-roll telemetry — filter to rows whose trigger timestamp falls inside the retro window; group by trigger source.
+- Future probabilistic-audit configuration — read configured `p` per trigger source.
 
 **Computation.**
 ```
-For each ceremony c with configured_p[c] > 0:
-  total_c   = |{rows where ceremony == c and triggered_at ∈ window}|
+For each trigger source c with configured_p[c] > 0:
+  total_c   = |{rows where source == c and triggered_at ∈ window}|
   fires_c   = |{rows above where fired == true}|
   if total_c < 10: skip c (abstain on low sample)
   observed_rate[c] = fires_c / total_c
@@ -1009,9 +1010,9 @@ For each ceremony c with configured_p[c] > 0:
 **When tripped, output (one block per tripped ceremony):**
 ```
 [retro] pipeline-degraded: trigger realization rate
-  ceremony=<type> observed=<rate> configured=<p> (band ±50%, min 10 samples)
+  source=<type> observed=<rate> configured=<p> (band ±50%, min 10 samples)
   rolls=<total> fires=<fires> divergence=<pct>
-  see: $KDIR/_scorecards/trigger-log.jsonl and ~/.lore/config/settlement-config.json
+  see: future trigger-roll telemetry and probabilistic-audit config
 ```
 
 **Distinguished from.** Audit coverage measures whether triggered audits produced *verdicts*; trigger realization measures whether ceremonies produced *triggers*. A window can have healthy verdict flow but broken trigger rates and vice versa.
@@ -1121,7 +1122,7 @@ unknown_rate = |{verdict == "provenance-unknown"}| / total
 
 1. **Gate broken** — `correctness-gate` emitting `unverified` on >80% of candidate claims.
 2. **Auditor degraded** — `reverse-auditor` emitting `∅` (explicit silence) on >90% of portfolios.
-3. **Zero-rows-despite-triggers** — any judge (`correctness-gate`, `curator`, `reverse-auditor`) with **zero** rows in `rows.jsonl` for the retro window *while* `trigger-log.jsonl` shows triggers firing for its role.
+3. **Zero-rows-despite-triggers** — any judge (`correctness-gate`, `curator`, `reverse-auditor`) with **zero** rows in `rows.jsonl` for the retro window *while* future trigger telemetry shows audits firing for its role.
 
 **Thresholds.**
 - `gate_unverified_rate > 0.80` → gate-broken
@@ -1135,7 +1136,7 @@ unknown_rate = |{verdict == "provenance-unknown"}| / total
 [retro] pipeline-degraded: judge liveness (<signature>)
   judge=<name> <metric>=<value> (threshold <pct>)
   sample=<N> window=<start>..<end>
-  see: $KDIR/_scorecards/rows.jsonl (and trigger-log.jsonl for zero-rows case)
+  see: $KDIR/_scorecards/rows.jsonl (and future trigger telemetry for zero-rows case)
 ```
 
 ### Check: Calibration state surface
@@ -1229,10 +1230,9 @@ Complementary to Step 3's dimension scores (subjective, about knowledge delivery
 | `curated_rate` | set-level | producer | higher = better |
 | `triviality_rate` | set-level | producer | **lower = better** |
 | `omission_rate` | portfolio-level | producer | **lower = better** |
-| `external_confirm_rate` | claim-local | pr-self-review | higher = better |
 | `observation_promotion_rate` | claim-local | producer | higher = better |
 
-Two of the six families are **inverted** — high values are bad: `triviality_rate` and `omission_rate`.
+Two of the five families are **inverted** — high values are bad: `triviality_rate` and `omission_rate`.
 
 **Per-metric thresholds (MVP — subject to tuning after early data).**
 
@@ -1242,7 +1242,6 @@ Two of the six families are **inverted** — high values are bad: `triviality_ra
 | `curated_rate` | 0.40 | 0.20 | curator keeps ≥40% of verified candidates |
 | `triviality_rate` (inverted) | ≤ 0.30 | ≥ 0.55 | curator drops <55% as trivial |
 | `omission_rate` (inverted) | ≤ 0.20 | ≥ 0.45 | portfolio-level miss rate |
-| `external_confirm_rate` | 0.60 | 0.35 | self-review agrees with external |
 | `observation_promotion_rate` | 0.25 | 0.10 | `/remember` capture rate |
 
 Rows between pass and fail thresholds are `weak`. Thresholds are policy — `/evolve` should not mutate them.
@@ -1271,7 +1270,6 @@ headline_per_template = worst(per_metric_classification)
     curated_rate:                 <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
     triviality_rate:              <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
     omission_rate:                <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
-    external_confirm_rate:        <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
     observation_promotion_rate:   <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
     worst: <metric-that-set-headline>
     unregistered/pre-calibration/degraded-window/wrong-tier rows excluded: <count>

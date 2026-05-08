@@ -95,7 +95,9 @@ Every adapter operation that spawns a process MUST go through it:
      (multi-provider; honors `provider/model` syntax like
      `anthropic/sonnet` or `openai/gpt-4o`).
    - Codex: model selector at session start (single-provider; bare
-     model id only).
+     model id only). Codex bindings may append a reasoning-effort suffix
+     such as `gpt-5.5-high`; the adapter splits this into
+     `model=gpt-5.5 reasoning_effort=high` in the spawn directive.
 4. If `validate_role_model_binding` rejects the resolved binding
    (e.g. multi-provider syntax on a single-shape harness), the adapter
    surfaces the error to the caller — no silent fallback to the

@@ -100,19 +100,33 @@ func TestLiveRender_CapabilityOverridesMatrixHasLabelsAndDescriptions(t *testing
 	}
 	m.SetSize(96, 40)
 
-	// Find the capability_overrides closed-object panel and render it in
-	// isolation so the assertions see only that section's bytes.
-	var panel *ClosedObjectSubPanel
+	// Find the advanced wrapper. It should stay folded by default so the
+	// capability matrix no longer dominates the settings landing surface.
+	var advanced *AdvancedSection
 	for _, w := range m.widgets {
-		if p, ok := w.(*ClosedObjectSubPanel); ok && p.DotPath() == "capability_overrides" {
-			panel = p
+		if p, ok := w.(*AdvancedSection); ok && p.DotPath() == "advanced" {
+			advanced = p
 			break
 		}
 	}
-	if panel == nil {
-		t.Fatalf("capability_overrides panel not found in walker output")
+	if advanced == nil {
+		t.Fatalf("advanced capability_overrides wrapper not found in walker output")
 	}
-	rendered := stripANSI(panel.View())
+	collapsed := stripANSI(advanced.View())
+	if !strings.Contains(collapsed, "[+] capability_overrides") {
+		t.Fatalf("advanced section should render collapsed summary, got:\n%s", collapsed)
+	}
+	if strings.Contains(collapsed, "team_messaging") {
+		t.Fatalf("collapsed advanced section should hide capability rows, got:\n%s", collapsed)
+	}
+
+	advanced.Focus()
+	updated, _, intent := advanced.Update(keyMsg("enter"))
+	if intent != nil {
+		t.Fatalf("expanding advanced section should not emit intent: %#v", intent)
+	}
+	advanced = updated.(*AdvancedSection)
+	rendered := stripANSI(advanced.View())
 
 	// Each capability id from capabilities.json must appear as a labeled row
 	// AND the same id's description must appear (or a recognizable prefix of
@@ -153,7 +167,7 @@ func TestLiveRender_CapabilityOverridesMatrixHasLabelsAndDescriptions(t *testing
 
 	// Surface the rendered panel under -v so visual inspection of the layout
 	// is easy when iterating on the configurator design.
-	t.Logf("\n--- live capability_overrides render (96-col body) ---\n%s\n--- end ---", rendered)
+	t.Logf("\n--- live advanced capability_overrides render (96-col body) ---\n%s\n--- end ---", rendered)
 }
 
 // TestLiveRender_LegacyTopLevelRolesPanelHidden confirms that legacy

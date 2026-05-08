@@ -257,7 +257,7 @@
         "transcript_provider": {
           "support": "full",
           "evidence": "claude-code-transcript-provider",
-          "notes": "JSONL transcripts under ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl consumed by extract-session-digest, probabilistic-audit-trigger. (stop-novelty-check.py was a consumer until retired 2026-05-06.)"
+          "notes": "JSONL transcripts under ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl consumed by extract-session-digest and check-plan-persistence. (stop-novelty-check.py was a consumer until retired 2026-05-06.)"
         },
         "headless_runner": {
           "support": "full",

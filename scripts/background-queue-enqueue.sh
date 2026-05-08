@@ -24,8 +24,8 @@
 #
 # The `--job` string is what the dispatcher will execute. `--role` is a
 # sub-directory tag under `_work-queue/` so the dispatcher and retention
-# policies can filter by role without parsing commands. For the Phase 5
-# audit-trigger path, `probabilistic-audit-trigger.py` calls this with:
+# policies can filter by role without parsing commands. Future probabilistic
+# audit work should enqueue audit jobs with:
 #     --job "lore audit <artifact-id>" --role audit
 #
 # Request file shape:

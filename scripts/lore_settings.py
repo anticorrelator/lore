@@ -62,10 +62,6 @@ _FALLBACK_PAIRS: list[tuple[str, str]] = [
     ("capture-config.json", "capture.core"),
     ("capture-config.json", "capture.structural_signals"),
     ("capture-config.json", "capture.adaptive"),
-    ("settlement-config.json", "settlement.probabilistic_triggers"),
-    ("settlement-config.json", "settlement.background_queue"),
-    ("settlement-config.json", "settlement.enabled"),
-    ("settlement-config.json", "settlement.dry_run"),
 ]
 
 

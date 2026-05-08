@@ -321,6 +321,7 @@ func TestHarnessBlockPanel_UnsetGestureOnExplicitOverrideEmitsIntentUnset(t *tes
 	roles := NewOpenKeysetKVEditor("harnesses.claude-code.roles", "roles", map[string]string{"lead": "sonnet"}, nil, nil, true, true)
 	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, nil, HarnessEffective{})
 	panel.Focus()
+	_, _ = dispatch(panel, "enter")
 
 	// Tab order is enabled → args → roles. Two tabs land on roles.
 	_, _ = dispatch(panel, "tab")
@@ -459,21 +460,26 @@ func TestHarnessBlockPanel_TabThroughAbsentOverlayDoesNotMaterializeWidget(t *te
 // ----------------------------------------------------------------------------
 // NavRuneConsumer delegates to the active inner child so the panel only
 // claims j/k while a child is *actively typing* (TextInput, or list/kv
-// editors mid-draft). In every other state — including cursor on a
-// ListEditor or OpenKeysetKVEditor in nav mode — the panel releases j/k so
-// the model can run row-by-row navigation across the panel's children.
+// editors mid-draft). In every other state — including an unopened panel or
+// a selected ListEditor/OpenKeysetKVEditor — the panel releases j/k so the
+// model can run settings navigation.
 // ----------------------------------------------------------------------------
 
 // TestHarnessBlockPanel_ConsumesNavRunes_DelegatesToActiveChild proves the
 // container delegates to its current child and that the delegation respects
 // the child's editing-vs-navigating mode. Cursor on enabled toggle → no
-// claim. Cursor on args ListEditor in nav mode → no claim (j/k steps to the
-// next panel row). Cursor on args ListEditor mid-append → claim (j/k typed
-// into the buffer).
+// claim. Cursor on selected args ListEditor → no claim. Cursor on args
+// ListEditor mid-append → claim (j/k typed into the buffer).
 func TestHarnessBlockPanel_ConsumesNavRunes_DelegatesToActiveChild(t *testing.T) {
 	args := makeArgsWidget("harnesses.claude-code.args", []string{"a", "b"})
 	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
 	panel.Focus()
+
+	// The selected but unopened panel releases nav runes to top-level movement.
+	if panel.ConsumesNavRunes() {
+		t.Fatalf("unentered panel must not claim nav runes")
+	}
+	_, _ = dispatch(panel, "enter")
 
 	// Cursor 0 = enabled toggle — never claims nav runes.
 	if panel.ConsumesNavRunes() {
@@ -481,11 +487,12 @@ func TestHarnessBlockPanel_ConsumesNavRunes_DelegatesToActiveChild(t *testing.T)
 	}
 	_, _ = dispatch(panel, "tab") // advance to args (ListEditor in nav mode)
 	if panel.ConsumesNavRunes() {
-		t.Fatalf("with cursor on args ListEditor in nav mode, panel must not claim nav runes (j/k steps to next panel row; arrow keys move within the list)")
+		t.Fatalf("with cursor on selected args ListEditor, panel must not claim nav runes")
 	}
 
 	// Enter append mode on the ListEditor — now the child is typing, so the
 	// panel must claim nav runes so j/k get typed into the buffer.
+	_, _ = dispatch(panel, "enter")
 	_, _ = dispatch(panel, "a")
 	if !panel.ConsumesNavRunes() {
 		t.Fatalf("with cursor on args ListEditor mid-append, panel must claim nav runes (j/k must reach the append buffer)")
@@ -517,6 +524,7 @@ func TestHarnessBlockPanel_InnerFocusYRange_TracksCursor(t *testing.T) {
 	roles := NewOpenKeysetKVEditor("harnesses.claude-code.roles", "roles", map[string]string{"lead": "opus"}, nil, nil, true, true)
 	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, nil, HarnessEffective{})
 	panel.Focus()
+	_, _ = dispatch(panel, "enter")
 
 	top0, bot0 := panel.InnerFocusYRange()
 	if top0 < 0 || bot0 < top0 {
@@ -564,6 +572,7 @@ func TestHarnessBlockPanel_InnerFocusYRange_OffsetsAlignWithViewLines(t *testing
 	args := makeArgsWidget("harnesses.claude-code.args", []string{"--alpha"})
 	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
 	panel.Focus()
+	_, _ = dispatch(panel, "enter")
 	_, _ = dispatch(panel, "tab") // advance to args slot
 
 	top, bot := panel.InnerFocusYRange()

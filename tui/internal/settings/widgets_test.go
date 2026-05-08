@@ -285,7 +285,7 @@ func TestTextInput_BlurNoIntentWhenDraftMatchesCommitted(t *testing.T) {
 func TestNumericInput_BelowMinimumRejects(t *testing.T) {
 	min := 0.0
 	max := 1.0
-	w := NewNumericInput("settlement.probabilistic_triggers.x", "trigger", "", false, &min, &max, false, false)
+	w := NewNumericInput("thresholds.audit_probability", "audit_probability", "", false, &min, &max, false, false)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
 	_, _ = dispatch(w, "-")
@@ -301,7 +301,7 @@ func TestNumericInput_BelowMinimumRejects(t *testing.T) {
 func TestNumericInput_AboveMaximumRejects(t *testing.T) {
 	min := 0.0
 	max := 1.0
-	w := NewNumericInput("settlement.probabilistic_triggers.x", "trigger", "", false, &min, &max, false, false)
+	w := NewNumericInput("thresholds.audit_probability", "audit_probability", "", false, &min, &max, false, false)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
 	_, _ = dispatch(w, "1")
@@ -316,7 +316,7 @@ func TestNumericInput_AboveMaximumRejects(t *testing.T) {
 func TestNumericInput_ValidCommitsAsTypedFloat(t *testing.T) {
 	min := 0.0
 	max := 1.0
-	w := NewNumericInput("settlement.probabilistic_triggers.x", "trigger", "", false, &min, &max, false, false)
+	w := NewNumericInput("thresholds.audit_probability", "audit_probability", "", false, &min, &max, false, false)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
 	_, _ = dispatch(w, "0")
@@ -363,6 +363,7 @@ func TestNumericInput_IntegerMode(t *testing.T) {
 func TestListEditor_MinItemsRejection(t *testing.T) {
 	w := NewListEditor("ceremonies.foo", "advisors", []string{}, nil, 1, true, false, false)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 	_, intent := dispatch(w, "enter")
 	if intent == nil || intent.Status != IntentReject {
 		t.Fatalf("expected reject (empty list violates minItems=1), got %+v", intent)
@@ -381,6 +382,7 @@ func TestListEditor_MinItemsRejection(t *testing.T) {
 func TestListEditor_UniqueItemsRejection(t *testing.T) {
 	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha", "alpha"}, nil, 0, true, false, false)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 	_, intent := dispatch(w, "enter")
 	if intent == nil || intent.Status != IntentReject {
 		t.Fatalf("expected reject (adjacent duplicate items), got %+v", intent)
@@ -392,6 +394,7 @@ func TestListEditor_UniqueItemsRejectsNonAdjacentDuplicate(t *testing.T) {
 	// has the duplicates separated by one element.
 	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha", "beta", "alpha"}, nil, 0, true, false, false)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 	_, intent := dispatch(w, "enter")
 	if intent == nil || intent.Status != IntentReject {
 		t.Fatalf("expected reject (non-adjacent duplicate items), got %+v", intent)
@@ -401,6 +404,7 @@ func TestListEditor_UniqueItemsRejectsNonAdjacentDuplicate(t *testing.T) {
 func TestListEditor_AddAndCommit(t *testing.T) {
 	w := NewListEditor("ceremonies.foo", "advisors", []string{}, nil, 0, true, false, false)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 	// Press 'a' to enter append mode, type "alpha", press enter to add.
 	_, _ = dispatch(w, "a")
 	_, _ = dispatch(w, "a")
@@ -423,6 +427,7 @@ func TestListEditor_AddAndCommit(t *testing.T) {
 func TestListEditor_DiscardOnEsc(t *testing.T) {
 	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha"}, nil, 0, true, false, false)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 	// Add a second item to dirty the draft.
 	_, _ = dispatch(w, "a")
 	_, _ = dispatch(w, "b")
@@ -443,6 +448,7 @@ func TestListEditor_DiscardOnEsc(t *testing.T) {
 func TestListEditor_DiscardOnBlur(t *testing.T) {
 	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha"}, nil, 0, true, false, false)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 	_, _ = dispatch(w, "a")
 	_, _ = dispatch(w, "b")
 	_, _ = dispatch(w, "enter")
@@ -462,8 +468,8 @@ func TestOpenKeysetKVEditor_NumberMapCommitsTypedFloat(t *testing.T) {
 	max := 1.0
 	valueSchema := &SchemaNode{Kind: KindNumber, minimum: &min, maximum: &max}
 	w := NewTypedOpenKeysetKVEditor(
-		"settlement.probabilistic_triggers",
-		"probabilistic_triggers",
+		"thresholds.probabilities",
+		"probabilities",
 		map[string]string{},
 		nil,
 		openMapValueParser(valueSchema),
@@ -471,6 +477,7 @@ func TestOpenKeysetKVEditor_NumberMapCommitsTypedFloat(t *testing.T) {
 		true,
 	)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 
 	_, _ = dispatch(w, "a")
 	for _, k := range []string{"p", "l", "a", "n", "-", "r", "e", "v", "i", "e", "w"} {
@@ -498,8 +505,9 @@ func TestOpenKeysetKVEditor_NumberMapRejectsOutOfBounds(t *testing.T) {
 	min := 0.0
 	max := 1.0
 	valueSchema := &SchemaNode{Kind: KindNumber, minimum: &min, maximum: &max}
-	w := NewTypedOpenKeysetKVEditor("settlement.probabilistic_triggers", "probabilistic_triggers", map[string]string{"plan-review": "1.5"}, nil, openMapValueParser(valueSchema), true, true)
+	w := NewTypedOpenKeysetKVEditor("thresholds.probabilities", "probabilities", map[string]string{"plan-review": "1.5"}, nil, openMapValueParser(valueSchema), true, true)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 
 	_, intent := dispatch(w, "enter")
 	if intent == nil || intent.Status != IntentReject {
@@ -513,6 +521,7 @@ func TestOpenKeysetKVEditor_NumberMapRejectsOutOfBounds(t *testing.T) {
 func TestOpenKeysetKVEditor_StringArrayMapCommitsTypedSlice(t *testing.T) {
 	w := NewStringArrayOpenKeysetKVEditor("ceremonies", "ceremonies", map[string]string{"plan-review": "sharp-edges,codex-pr-review"}, true, true)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 
 	_, intent := dispatch(w, "enter")
 	if intent == nil || intent.Status != IntentCommit {
@@ -540,6 +549,7 @@ func TestClosedObjectSubPanel_TabDiscardsFocusedDraft(t *testing.T) {
 
 	// Type into 'a' (the focused child).
 	_, _ = dispatch(panel, "enter")
+	_, _ = dispatch(panel, "enter")
 	_, _ = dispatch(panel, "z")
 	if a.draft != "z" {
 		t.Fatalf("expected child draft 'z', got %q", a.draft)
@@ -555,6 +565,33 @@ func TestClosedObjectSubPanel_TabDiscardsFocusedDraft(t *testing.T) {
 	}
 	if panel.cursor != 1 {
 		t.Fatalf("expected cursor advanced to 1, got %d", panel.cursor)
+	}
+}
+
+func TestClosedObjectSubPanel_EscExitsCleanScalarEditBeforePanel(t *testing.T) {
+	a := NewTextInput("a.x", "x", "stable", nil, 0, false, false)
+	panel := NewClosedObjectSubPanel("a", "section", []FieldWidget{a})
+	panel.Focus()
+	_, _ = dispatch(panel, "enter")
+	_, _ = dispatch(panel, "enter")
+	if !panel.entered || !a.editing {
+		t.Fatalf("setup expected entered panel and editing text input; panel.entered=%v editing=%v", panel.entered, a.editing)
+	}
+
+	_, intent := dispatch(panel, "esc")
+	if intent == nil || intent.Status != IntentDiscard {
+		t.Fatalf("first esc should be consumed by the clean leaf edit, got %+v", intent)
+	}
+	if !panel.entered || a.editing {
+		t.Fatalf("first esc should exit edit mode only; panel.entered=%v editing=%v", panel.entered, a.editing)
+	}
+
+	_, intent = dispatch(panel, "esc")
+	if intent == nil || intent.Status != IntentDiscard {
+		t.Fatalf("second esc should be consumed by backing out of the panel, got %+v", intent)
+	}
+	if panel.entered {
+		t.Fatalf("second esc should leave the panel navigation level")
 	}
 }
 
@@ -671,6 +708,7 @@ func TestClosedObjectSubPanel_InnerFocusYRange_TracksCursor(t *testing.T) {
 	c.SetDisplayHints("gamma", "")
 	panel := NewClosedObjectSubPanel("section", "section", []FieldWidget{a, b, c})
 	panel.Focus()
+	_, _ = dispatch(panel, "enter")
 
 	top0, bot0 := panel.InnerFocusYRange()
 	if top0 < 0 || bot0 < top0 {
@@ -735,11 +773,11 @@ func TestClosedObjectSubPanel_InnerFocusYRange_NotFocused(t *testing.T) {
 // TestToggleRow_RendersDescription verifies that ToggleRow emits its
 // description block under the toggle when SetDisplayHints supplies one.
 func TestToggleRow_RendersDescription(t *testing.T) {
-	w := NewToggleRow("settlement.enabled", "enabled", true, true, false)
-	w.SetDisplayHints("enabled", "When true, post-ceremony audits fire on configured triggers.")
+	w := NewToggleRow("features.enabled", "enabled", true, true, false)
+	w.SetDisplayHints("enabled", "When true, this feature is active.")
 	w.SetWrapWidth(60)
 	out := w.View()
-	if !strings.Contains(out, "When true, post-ceremony audits") {
+	if !strings.Contains(out, "When true, this feature is active.") {
 		t.Errorf("expected description in toggle render, got:\n%s", out)
 	}
 	if !strings.Contains(out, "[x] enabled") {
@@ -785,6 +823,7 @@ func TestWrapWords_RespectsWidth(t *testing.T) {
 func TestListEditor_EscDuringAppendEmitsIntentDiscard(t *testing.T) {
 	w := NewListEditor("harnesses.claude-code.args", "args", []string{"--existing"}, nil, 0, false, true, false)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 
 	// Start appending and type a few chars.
 	_, _ = dispatch(w, "a")
@@ -815,6 +854,7 @@ func TestListEditor_EscDuringAppendEmitsIntentDiscard(t *testing.T) {
 func TestKVEditor_EscDuringAddKeyEmitsIntentDiscard(t *testing.T) {
 	w := NewOpenKeysetKVEditor("ceremonies", "ceremonies", map[string]string{}, nil, nil, false, true)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 
 	// Start adding a key, type some chars, then esc.
 	_, _ = dispatch(w, "a")
@@ -844,6 +884,7 @@ func TestKVEditor_EscDuringAddKeyEmitsIntentDiscard(t *testing.T) {
 func TestKVEditor_EscDuringAddValueEmitsIntentDiscard(t *testing.T) {
 	w := NewOpenKeysetKVEditor("ceremonies", "ceremonies", map[string]string{}, nil, nil, false, true)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 
 	// Add a key (commit it via enter), then start adding the value.
 	_, _ = dispatch(w, "a")
@@ -882,6 +923,7 @@ func TestKVEditor_EscDuringAddValueEmitsIntentDiscard(t *testing.T) {
 func TestKVEditor_EscDuringEditValueEmitsIntentDiscard(t *testing.T) {
 	w := NewOpenKeysetKVEditor("ceremonies", "ceremonies", map[string]string{"plan-review": "sharp-edges"}, nil, nil, true, true)
 	w.Focus()
+	_, _ = dispatch(w, "enter")
 
 	// Press 'e' to start editing the existing entry's value.
 	_, _ = dispatch(w, "e")

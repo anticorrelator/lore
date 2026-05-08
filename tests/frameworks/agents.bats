@@ -372,6 +372,21 @@ PYEOF
   fi
 }
 
+@test "codex agent spawn splits reasoning-effort model suffix" {
+  [ -f "$CODEX_AGENT_ADAPTER" ] || skip "adapters/agents/codex.sh missing (T40 not landed yet)"
+  set_framework codex
+  run bash "$CODEX_AGENT_ADAPTER" spawn worker "task" "gpt-5.5-high"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ delegate:TaskCreate ]]
+  [[ "$output" =~ role=worker ]]
+  [[ "$output" =~ "model=gpt-5.5" ]]
+  [[ "$output" =~ "reasoning_effort=high" ]]
+  if [[ "$output" =~ provider= ]]; then
+    echo "codex spawn leaked provider= key on single-provider harness: $output"
+    return 1
+  fi
+}
+
 @test "codex agent spawn rejects provider/model override (validates binding)" {
   [ -f "$CODEX_AGENT_ADAPTER" ] || skip "adapters/agents/codex.sh missing (T40 not landed yet)"
   set_framework codex
