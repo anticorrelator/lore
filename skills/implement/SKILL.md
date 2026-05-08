@@ -406,24 +406,65 @@ As worker messages arrive (delivered automatically):
    ```
    If the worker omitted a field, use `None`. `execution-log.md` is created on first write.
 
-3. **Advisor-impact rollup** — if the worker's report includes a non-empty `Advisor consultations:` field, invoke the scorecard rollup immediately:
+3. **Verdict-fabrication guard** — before invoking the advisor-impact rollup, verify each consultation in the worker's `Advisor consultations:` field against the transcript's actual advisor spawn events. The guard withholds attribution for unverifiable consultations so the advisor scorecard does not absorb fabricated worker reports as real consultation events. Skip the entire guard (and §4 below) when `Advisor consultations:` is empty or `none` — there is nothing to verify.
+
+   The guard consumes the active framework's transcript provider per the canonical consumer pattern (`get_provider()` → catch `UnsupportedFrameworkError` → `provider_status()` gate → operation calls). Run a small Python helper inline:
+
+   ```python
+   from adapters.transcripts import get_provider, UnsupportedFrameworkError
+
+   try:
+       provider = get_provider()
+       status, _reason = provider.provider_status()
+   except UnsupportedFrameworkError:
+       status = "unavailable"
+   # Branch on `status` ∈ {"full", "partial", "unavailable"}; on full|partial-with-spawn-surface
+   # call provider.parse_transcript() + provider.read_raw_lines() (two-pass) to extract the set of
+   # advisor names actually spawned this session, then intersect with the worker's reported entries.
+   ```
+
+   Branch on the result:
+
+   **(a) Provider OK and every claimed advisor is verified in the transcript** — proceed to §4 (`advisor-impact-rollup.sh`) with the worker's `Advisor consultations:` field forwarded verbatim. The rollup runs exactly as today.
+
+   **(b) Mismatch** — provider returns `full` (or `partial` with the spawn surface intact), but one or more claimed advisor identifiers do NOT appear in the transcript's advisor spawn events. For each unverified entry: log a `fabrication-guard: skipped <advisor_template_version_or_name>` line to `execution-log.md`, then strip THAT entry from the consultations payload. Forward the remaining (verified) entries to §4 — verified consultations still flow through to the rollup. The guard is a per-entry filter, not an all-or-nothing reject.
+
+   **(c) Provider returns `unavailable` or `partial` with the spawn surface degraded** — log `fabrication-guard: provider-<status>; rollup skipped` to `execution-log.md` and skip §4 entirely for this worker's consultations. **Do NOT fall through to today's verbatim-trust behavior.** The guard exists to withhold unsupported attribution; treating absent verification as license to attribute would preserve the exact fabrication path the guard closes. The cost on harnesses without a transcript provider is zero advisor-impact rows for those harnesses; `/retro` interprets zero rows as "no signal" the same way it does for never-invoked judges, and the absence is observable in `execution-log.md`.
+
+   Use `write-execution-log.sh` for both log paths so the entry carries the lead's template-version provenance:
+
+   ```bash
+   printf 'fabrication-guard: skipped %s\n' "<unverified-identifier>" \
+     | bash ~/.lore/scripts/write-execution-log.sh \
+         --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
+
+   printf 'fabrication-guard: provider-%s; rollup skipped\n' "<unavailable|partial>" \
+     | bash ~/.lore/scripts/write-execution-log.sh \
+         --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
+   ```
+
+   The guard is metadata-only: worker task acceptance (verified in §1, logged in §2) is unaffected in all three branches. Fabrication is a metadata fault, not a code fault — the worker's code changes still ship, the Tier 2 evidence still grounds them, only the advisor scorecard attribution is withheld.
+
+   **Identifier semantics.** Worker reports list `advisor_template_version` per consultation. The lead already knows which advisor names it spawned and what `--template-version` flag it passed for each (Step 3.5b). The intersection is "did the lead spawn an advisor whose template-version matches this consultation's `advisor_template_version`?" The transcript provides the corroborating spawn event (TaskCreate with `name: <advisor-name>`) per Step 3.5c's logged `Advisor spawned: <name>` line; consumers that need raw tool inputs follow the two-pass pattern (`parse_transcript()` for ordering and tool_names filter, then `read_raw_lines()[msg.index]` for input extraction). When the lead's spawned-advisor map already records every active advisor, the guard MAY satisfy verification from that map alone without the second pass — the transcript is the corroborator, not the sole source of truth. The lead-side spawn map is only canonical when `provider_status()` is `full`; partial/unavailable returns flow to branch (c) regardless.
+
+4. **Advisor-impact rollup** — if the verdict-fabrication guard's branch (a) or branch (b) selected at least one verified consultation, invoke the scorecard rollup with the filtered payload:
    ```bash
    bash ~/.lore/scripts/advisor-impact-rollup.sh \
      --work-item <slug> \
      --task-id <task-id> \
-     --consultations "<Advisor consultations field verbatim>" \
+     --consultations "<verified consultations subset, verbatim YAML/JSON>" \
      --template-version "$ADVISOR_TEMPLATE_VERSION"
    ```
-   This emits `consultation_rate` and `advice_followed_rate` scorecard rows attributed to `template_id=advisor`. Skip the call when `Advisor consultations:` is empty or `none`.
+   This emits `consultation_rate` and `advice_followed_rate` scorecard rows attributed to `template_id=advisor`. Skip the call entirely when (i) the original `Advisor consultations:` field was empty or `none`, (ii) §3 branch (b) filtered every entry as fabricated, or (iii) §3 branch (c) fired (provider unavailable/partial — log already written, no rollup invocation).
 
-4. **Set aside Tier 3 candidates for Step 5** — if the worker report contains a `Tier 3 candidates:` YAML block, stash each entry (preserving producer_role and source_artifact_ids) for Step 5 promotion. Do NOT promote here — Step 5 is the sole promotion site.
+5. **Set aside Tier 3 candidates for Step 5** — if the worker report contains a `Tier 3 candidates:` YAML block, stash each entry (preserving producer_role and source_artifact_ids) for Step 5 promotion. Do NOT promote here — Step 5 is the sole promotion site.
 
-5. **Handle blockers** — if a worker reports blockers:
+6. **Handle blockers** — if a worker reports blockers:
    - Read the relevant code/context
    - Send guidance via the adapter's `send_message` operation: `bash "$ADAPTER" send_message <handle> "<body>"`. On Claude Code this expands to `delegate:SendMessage handle=<id>` which the lead invokes as the native `SendMessage` tool. On harnesses where the adapter returns `unsupported`, fall back to lead-only orchestration (the worker cannot receive mid-flight guidance — re-spawn with corrected prompt instead).
    - If unresolvable, note in `notes.md` and move on
 
-6. **Check off completed items in plan.md** (best-effort):
+7. **Check off completed items in plan.md** (best-effort):
    ```bash
    lore work check <slug> "<task-subject>"
    ```
