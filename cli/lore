@@ -402,6 +402,8 @@ Usage: lore scorecard <subcommand> [args...]
 Subcommands:
   append    Append a validated JSON row to _scorecards/rows.jsonl (from --row or stdin)
   rollup    Aggregate rows.jsonl into _scorecards/_current.json
+  calibrate Run a calibration fixture-set against a judge; flip marker on pass,
+            append to history on every run (passing or failing).
   current   Print _scorecards/_current.json
   rows      Print _scorecards/rows.jsonl
 
@@ -499,6 +501,9 @@ cmd_scorecard() {
       ;;
     rollup)
       "$SCRIPTS_DIR/scorecard-rollup.sh" "$@"
+      ;;
+    calibrate)
+      "$SCRIPTS_DIR/scorecards-calibrate.sh" "$@"
       ;;
     current)
       local kdir current_file

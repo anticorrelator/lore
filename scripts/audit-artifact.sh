@@ -278,6 +278,46 @@ if [[ ! -d "$KDIR" ]]; then
   exit 1
 fi
 
+# read_calibration_state — resolve the judge's calibration_state from the
+# marker file at $KDIR/_scorecards/calibration-state.json keyed by
+# (judge_template_id, judge_template_version). Defaults to "pre-calibration"
+# on missing file, missing keyed entry, or unreadable JSON. audit-artifact.sh
+# is a marker reader only — it never writes either the marker or the history
+# sidecar (calibration-history.jsonl). See scripts/scorecards-calibrate.sh
+# for the sole-writer contract on those files.
+read_calibration_state() {
+  local judge_id="$1"
+  local judge_version="$2"
+  local marker_file="$KDIR/_scorecards/calibration-state.json"
+  if [[ ! -f "$marker_file" ]]; then
+    echo "pre-calibration"
+    return 0
+  fi
+  JUDGE_ID="$judge_id" JUDGE_VERSION="$judge_version" MARKER_FILE="$marker_file" \
+    python3 -c '
+import json, os, sys
+try:
+    with open(os.environ["MARKER_FILE"]) as fh:
+        data = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    print("pre-calibration")
+    sys.exit(0)
+if not isinstance(data, dict):
+    print("pre-calibration")
+    sys.exit(0)
+key = f"{os.environ[\"JUDGE_ID\"]}:{os.environ[\"JUDGE_VERSION\"]}"
+entry = data.get(key)
+if not isinstance(entry, dict):
+    print("pre-calibration")
+    sys.exit(0)
+state = entry.get("calibration_state")
+if state in ("calibrated", "pre-calibration", "unknown"):
+    print(state)
+else:
+    print("pre-calibration")
+'
+}
+
 # --- Validate --priority-claims file (D3 pre-filter gate) ---
 # When --priority-claims <path> is supplied, the file must:
 #   1. exist on disk
@@ -922,10 +962,11 @@ PYEOF
 # pre-calibration, which /retro can surface but /evolve's gate rejects.
 
 if [[ $SKIP_SCORECARD -eq 0 ]]; then
-  ROWS_JSON=$(python3 - "$GATE_RAW_FILE" "$RESOLVED_INPUT_FILE" "$GATE_TEMPLATE_VERSION" << 'PYEOF'
+  GATE_CALIBRATION_STATE=$(read_calibration_state "correctness-gate" "$GATE_TEMPLATE_VERSION")
+  ROWS_JSON=$(python3 - "$GATE_RAW_FILE" "$RESOLVED_INPUT_FILE" "$GATE_TEMPLATE_VERSION" "$GATE_CALIBRATION_STATE" << 'PYEOF'
 import json, sys, datetime
 
-gate_file, input_file, gate_template_version = sys.argv[1:4]
+gate_file, input_file, gate_template_version, calibration_state = sys.argv[1:5]
 with open(gate_file) as fh:
     gate = json.load(fh)
 with open(input_file) as fh:
@@ -958,8 +999,11 @@ producer_template_version = resolved.get("producer_template_version") or "unknow
 artifact_id = resolved.get("artifact_id")
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-# calibration_state: pre-calibration until task-15 marks the gate calibrated.
-calibration_state = "pre-calibration"
+# calibration_state: read from $KDIR/_scorecards/calibration-state.json
+# keyed by (correctness-gate, gate_template_version) by the bash caller and
+# passed in as argv[4]. Defaults to "pre-calibration" on missing file or
+# missing keyed entry. audit-artifact.sh is a marker reader only — it never
+# writes the marker or the history sidecar.
 
 row_base = {
     "schema_version": "1",
@@ -1180,10 +1224,11 @@ PYEOF
       #   curated_rate    (producer, scored, set-level) = selected / verified
       #   triviality_rate (producer, scored, set-level) = dropped  / verified
       if [[ $SKIP_SCORECARD -eq 0 ]]; then
-        CUR_ROWS_JSON=$(python3 - "$CURATOR_RAW_FILE" "$RESOLVED_INPUT_FILE" "$CURATOR_TEMPLATE_VERSION" "$N_VERIFIED_COUNT" << 'PYEOF'
+        CURATOR_CALIBRATION_STATE=$(read_calibration_state "curator" "$CURATOR_TEMPLATE_VERSION")
+        CUR_ROWS_JSON=$(python3 - "$CURATOR_RAW_FILE" "$RESOLVED_INPUT_FILE" "$CURATOR_TEMPLATE_VERSION" "$N_VERIFIED_COUNT" "$CURATOR_CALIBRATION_STATE" << 'PYEOF'
 import json, sys, datetime
 
-cur_file, input_file, curator_tv, n_verified = sys.argv[1:5]
+cur_file, input_file, curator_tv, n_verified, calibration_state = sys.argv[1:6]
 n_verified = int(n_verified)
 with open(cur_file) as fh:
     cur = json.load(fh)
@@ -1209,7 +1254,7 @@ row_base = {
     "schema_version": "1",
     "kind": "scored",
     "tier": "reusable",
-    "calibration_state": "pre-calibration",
+    "calibration_state": calibration_state,
     "template_id": producer_template_id,
     "template_version": producer_template_version,
     "sample_size": n_verified,
@@ -1550,12 +1595,13 @@ PYEOF
       # (nothing to score) but emit coverage_quality against the curator and
       # grounding_failure_rate as telemetry.
       if [[ $SKIP_SCORECARD -eq 0 ]]; then
+        RA_CALIBRATION_STATE=$(read_calibration_state "reverse-auditor" "$REVERSE_AUDITOR_TEMPLATE_VERSION")
         RA_ROWS_JSON=$(python3 - "$REVERSE_AUDITOR_RAW_FILE" "$RESOLVED_INPUT_FILE" \
                                 "$REVERSE_AUDITOR_TEMPLATE_VERSION" "$CURATOR_TEMPLATE_VERSION" \
-                                "$REVERSE_AUDITOR_VERDICT" << 'PYEOF'
+                                "$REVERSE_AUDITOR_VERDICT" "$RA_CALIBRATION_STATE" << 'PYEOF'
 import json, sys, datetime
 
-ra_file, resolved_file, ra_tv, curator_tv, verdict = sys.argv[1:6]
+ra_file, resolved_file, ra_tv, curator_tv, verdict, calibration_state = sys.argv[1:7]
 with open(ra_file) as fh:
     ra = json.load(fh)
 with open(resolved_file) as fh:
@@ -1585,7 +1631,7 @@ else:  # preflight-failed
 
 row_common = {
     "schema_version": "1",
-    "calibration_state": "pre-calibration",
+    "calibration_state": calibration_state,
     "sample_size": 1,
     "window_start": now,
     "window_end": now,
