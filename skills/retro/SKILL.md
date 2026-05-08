@@ -483,7 +483,11 @@ After computing the six signals, evaluate the three derivation tests:
 ### 3.0a: Inputs
 
 - `$KDIR/_scorecards/_current.json` — the rollup produced by `scorecard-rollup.sh` for the current retro window.
-- Previous window's rollup — the rollup snapshot whose `window_end` is the most recent value **strictly earlier than** the current retro window's start. If no prior eligible window exists, report "first eligible window — no delta baseline" and emit no delta rows; downstream readers treat this as informational, not a degradation signal.
+- Previous window's rollup — selected from `$KDIR/_scorecards/snapshots/*.json`, the per-rollup snapshots written alongside `_current.json`. Each snapshot is the same JSON content as the `_current.json` produced by that rollup; its filename matches its top-level `window_end` field. To pick the previous window:
+  1. List candidates from `$KDIR/_scorecards/snapshots/*.json`. **Do not** include `$KDIR/_scorecards/_current.json` — `_current.json` lives in the parent directory and is not a snapshot.
+  2. For each candidate, parse the top-level `window_end` field. Exclude any candidate whose `window_end` is missing, empty, or otherwise invalid (do **not** fall back to filename parsing — the field is the selection key per D5).
+  3. Select the snapshot whose `window_end` is the **max value strictly earlier than** the current retro window's start. Equal-to-start is **not** eligible (strict inequality), and at-or-after-start is excluded.
+  4. If no candidate satisfies (3), report "first eligible window — no delta baseline" and emit no delta rows; downstream readers treat this as informational, not a degradation signal.
 - `$KDIR/_scorecards/template-registry.json` — unregistered rows render as `unregistered:<hash>` and are excluded from delta surfaces (same rule as Step 3.9).
 - `$KDIR/_work/*/consumption-contradictions.jsonl` — for the `contradiction_verification_rate` metric added below.
 - The set of `pipeline-degraded` windows (from Step 4's journal) — if either the current or previous window is degraded, the delta for that template-version is **skipped**, not zeroed.

@@ -10,6 +10,7 @@
 # Output shape (_current.json):
 # {
 #   "generated_at": "<ISO-8601 UTC>",
+#   "window_end": "<ISO-8601 UTC — max(summaries[].window_end), or generated_at when no summaries>",
 #   "source": "_scorecards/rows.jsonl",
 #   "row_count": N,
 #   "corrupt_row_count": N,
@@ -32,6 +33,12 @@
 #     }, ...
 #   ]
 # }
+#
+# In addition to writing _current.json, every rollup also writes the same JSON
+# content to $KDIR/_scorecards/snapshots/<window_end>.json. The filename is the
+# top-level `window_end` field; file-naming key and selection key match so
+# downstream readers (e.g. /retro Step 3.0) can locate prior windows by
+# parsing the top-level field rather than re-deriving from filename.
 #
 # Rows missing required fields (schema_version, kind, or calibration_state)
 # are counted in `corrupt_row_count`, excluded from aggregation, and emit a
@@ -94,18 +101,24 @@ if [[ ! -d "$KNOWLEDGE_DIR" ]]; then
 fi
 
 SCORECARDS_DIR="$KNOWLEDGE_DIR/_scorecards"
+SNAPSHOTS_DIR="$SCORECARDS_DIR/snapshots"
 ROWS_FILE="$SCORECARDS_DIR/rows.jsonl"
 CURRENT_FILE="$SCORECARDS_DIR/_current.json"
-mkdir -p "$SCORECARDS_DIR"
+mkdir -p "$SCORECARDS_DIR" "$SNAPSHOTS_DIR"
 
 GENERATED_AT=$(timestamp_iso)
 
 # --- Empty / missing rows.jsonl ---
 if [[ ! -s "$ROWS_FILE" ]]; then
+  # No summaries → window_end falls back to generated_at so the snapshot
+  # filename is always non-null (per D5: file-naming key === selection key).
+  WINDOW_END="$GENERATED_AT"
   jq -n \
     --arg generated_at "$GENERATED_AT" \
-    '{generated_at: $generated_at, source: "_scorecards/rows.jsonl", row_count: 0, corrupt_row_count: 0, summaries: []}' \
+    --arg window_end "$WINDOW_END" \
+    '{generated_at: $generated_at, window_end: $window_end, source: "_scorecards/rows.jsonl", row_count: 0, corrupt_row_count: 0, summaries: []}' \
     > "$CURRENT_FILE"
+  cp "$CURRENT_FILE" "$SNAPSHOTS_DIR/${WINDOW_END}.json"
   RELPATH="${CURRENT_FILE#$KNOWLEDGE_DIR/}"
   if [[ $JSON_MODE -eq 1 ]]; then
     jq -n --arg path "$RELPATH" --argjson row_count 0 --argjson corrupt_row_count 0 \
@@ -244,13 +257,28 @@ fi
 
 CORRUPT_COUNT=$((PARSE_FAILS + VALIDATION_FAILS))
 
+# Top-level window_end = max(summaries[].window_end). Falls back to
+# GENERATED_AT when no summary carries a window_end (e.g. all summaries had
+# rows missing window_end). Snapshot filename uses this same field — D5
+# requires file-naming key and selection key to match.
+WINDOW_END=$(printf '%s' "$SUMMARIES_JSON" | jq -r --arg fallback "$GENERATED_AT" '
+  ([.[] | .window_end // empty] | map(select(. != null and . != ""))) as $ends
+  | if ($ends | length) > 0 then ($ends | max) else $fallback end
+')
+if [[ -z "$WINDOW_END" || "$WINDOW_END" == "null" ]]; then
+  WINDOW_END="$GENERATED_AT"
+fi
+
 jq -n \
   --arg generated_at "$GENERATED_AT" \
+  --arg window_end "$WINDOW_END" \
   --argjson row_count "$ROW_COUNT" \
   --argjson corrupt_row_count "$CORRUPT_COUNT" \
   --argjson summaries "$SUMMARIES_JSON" \
-  '{generated_at: $generated_at, source: "_scorecards/rows.jsonl", row_count: $row_count, corrupt_row_count: $corrupt_row_count, summaries: $summaries}' \
+  '{generated_at: $generated_at, window_end: $window_end, source: "_scorecards/rows.jsonl", row_count: $row_count, corrupt_row_count: $corrupt_row_count, summaries: $summaries}' \
   > "$CURRENT_FILE"
+
+cp "$CURRENT_FILE" "$SNAPSHOTS_DIR/${WINDOW_END}.json"
 
 RELPATH="${CURRENT_FILE#$KNOWLEDGE_DIR/}"
 SUMMARY_COUNT=$(printf '%s' "$SUMMARIES_JSON" | jq 'length')
