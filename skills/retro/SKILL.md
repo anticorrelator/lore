@@ -159,19 +159,19 @@ New evidence class introduced by the consumer-contradiction-channel substrate. C
 - `claim_id` — the commons-entry claim being contradicted
 - `corrected_entry_path` — the commons entry the contradiction targets
 - `template_id`, `template_version` — the template that produced the contradicted entry (for attribution)
-- `status` — `routed | verified | rejected` (lifecycle state from correctness-gate audit)
-- `verified_by_verdict_id` — present when `status=verified`; the settlement record id
+- `status` — `pending | accepted | declined | remediated` (live lifecycle state from the contradiction resolver)
+- `accepted_by_verdict_id` — present when `status=accepted`; the settlement record id that accepted the contradiction
 - `dispatch_status` — `routed` when `consumption-contradiction-append.sh` priority-dispatched to `lore audit`
 - `captured_at_sha`, `observed_at`
 
-Count rows by status: `routed`, `verified`, `rejected`. Report:
+Count rows by status: `pending`, `accepted`, `declined`, `remediated`. Report:
 
 ```
-Consumption contradictions: N total (R routed to audit, V verified, J rejected)
-  pending verdict (routed, no verdict yet): <P>
+Consumption contradictions: N total (P pending, A accepted, D declined, M remediated)
+  priority-routed pending verdict: <R> (pending rows with dispatch_status=routed)
 ```
 
-The `verified` count feeds Step 3.0 `contradiction_verification_rate` and Step 3.8 consumer-contradiction routing health. The `routed` set is excluded from Step 2.7 batch audit (already priority-dispatched).
+The `accepted` count feeds Step 3.0 `contradiction_acceptance_rate` and Step 3.8 consumer-contradiction routing health. Pending rows with `dispatch_status: routed` are excluded from Step 2.7 batch audit (already priority-dispatched).
 
 ### 2c–2e: Logs
 
@@ -188,7 +188,7 @@ Report:
 [retro] Evidence gathered:
   Worker observations: N tasks | Context blocks: N phases (M/K resolved)
   Surfaced concerns: N entries (M addressed / K pending)
-  Consumption contradictions: N total (R routed, V verified, J rejected)
+  Consumption contradictions: N total (P pending, A accepted, D declined, M remediated)
   Sessions: N entries | Retrieval: N events | Friction: N events
   Token savings: ~Nk estimate
 ```
@@ -489,7 +489,7 @@ After computing the six signals, evaluate the three derivation tests:
   3. Select the snapshot whose `window_end` is the **max value strictly earlier than** the current retro window's start. Equal-to-start is **not** eligible (strict inequality), and at-or-after-start is excluded.
   4. If no candidate satisfies (3), report "first eligible window — no delta baseline" and emit no delta rows; downstream readers treat this as informational, not a degradation signal.
 - `$KDIR/_scorecards/template-registry.json` — unregistered rows render as `unregistered:<hash>` and are excluded from delta surfaces (same rule as Step 3.9).
-- `$KDIR/_work/*/consumption-contradictions.jsonl` — for the `contradiction_verification_rate` metric added below.
+- `$KDIR/_work/*/consumption-contradictions.jsonl` — for the `contradiction_acceptance_rate` metric added below.
 - The set of `pipeline-degraded` windows (from Step 4's journal) — if either the current or previous window is degraded, the delta for that template-version is **skipped**, not zeroed.
 
 ### 3.0b: Tier partitioning
@@ -513,13 +513,13 @@ For each registered `(template_id, template_version)` that has `kind==scored, ca
 delta_{metric} = current_{metric} - previous_{metric}
 ```
 
-Compute a delta per metric in the six-MVP-metric vector from Step 3.9, plus the new `contradiction_verification_rate` metric (see below). Two of the MVP metrics are inverted (`triviality_rate`, `omission_rate`) — *improvement* means the delta is **negative**. The surface notation uses an explicit direction indicator (↑ improving, ↓ regressing) so readers don't track direction per metric.
+Compute a delta per metric in the six-MVP-metric vector from Step 3.9, plus the new `contradiction_acceptance_rate` metric (see below). Two of the MVP metrics are inverted (`triviality_rate`, `omission_rate`) — *improvement* means the delta is **negative**. The surface notation uses an explicit direction indicator (↑ improving, ↓ regressing) so readers don't track direction per metric.
 
-**New metric: `contradiction_verification_rate`.** For `tier: template` surfaces only:
+**New metric: `contradiction_acceptance_rate`.** For `tier: template` surfaces only:
 
 ```
-contradiction_verification_rate = |{consumption-contradictions with status=verified against this template in window}|
-                                / |{consumption-contradictions with status ∈ {verified, rejected} against this template in window}|
+contradiction_acceptance_rate = |{consumption-contradictions with status=accepted against this template in window}|
+                              / |{consumption-contradictions with status ∈ {accepted, declined} against this template in window}|
 ```
 
 A high rate indicates the template is producing claims that field observers repeatedly find false — a strong signal for template mutation. The rate is **inverted**: lower is better.
@@ -534,7 +534,7 @@ The delta surface is **not** a per-cell dump. It surfaces only deltas that carry
    - `triviality_rate`: |delta| ≥ 0.05
    - `omission_rate`: |delta| ≥ 0.03 (more sensitive; small changes in portfolio-level miss rate are load-bearing)
    - `observation_promotion_rate`: |delta| ≥ 0.03
-   - `contradiction_verification_rate`: |delta| ≥ 0.10 (observational signal is coarser than adjudicative)
+   - `contradiction_acceptance_rate`: |delta| ≥ 0.10 (observational signal is coarser than adjudicative)
 2. **Sufficient sample size.** Both windows must have n ≥ 10 rows for that metric. Below-sample deltas are noise.
 3. **Registered template_version in both windows.** If either current or previous `template_version` is unregistered, skip — we can't attribute the delta to a known template lineage.
 
@@ -556,7 +556,7 @@ The delta surface is the first block of the Step 6 report output. Structure:
     factual_precision:             0.72 → 0.81  (↑ +0.09, n=24)     [delta-pass → regressing]
     curated_rate:                  0.48 → 0.41  (↓ -0.07, n=18)     [regressing]
     omission_rate:                 0.22 → 0.14  (↓ -0.08, n=32)     [inverted: ↓ is improving]
-    contradiction_verification_rate: 0.08 → 0.17 (↑ +0.09, n=12)     [inverted: ↑ is regressing]
+    contradiction_acceptance_rate: 0.08 → 0.17 (↑ +0.09, n=12)       [inverted: ↑ is regressing]
     (other metrics: unchanged or below threshold)
 
   Suppressed: 12 (7 below-sample, 3 unregistered, 2 below-magnitude)
@@ -598,7 +598,7 @@ Deltas are derived signal, not source data. They are NOT written to `rows.jsonl`
     "template": {
       "<template_id>@<version>": {
         "factual_precision": {"prev": 0.72, "curr": 0.81, "delta": 0.09, "n_curr": 24, "surfaced": true},
-        "contradiction_verification_rate": {"prev": 0.08, "curr": 0.17, "delta": 0.09, "n_curr": 12, "surfaced": true},
+        "contradiction_acceptance_rate": {"prev": 0.08, "curr": 0.17, "delta": 0.09, "n_curr": 12, "surfaced": true},
         ...
       }
     },
@@ -1182,7 +1182,7 @@ for each judge J:
 
 **NEW check** introduced by the consumer-contradiction-channel substrate. Verifies priority-routing is actually producing verdicts.
 
-**What it measures.** Of the consumption-contradiction rows in the retro window with `dispatch_status: routed`, the fraction with a verdict landed in `rows.jsonl` (kind == "consumption-contradiction" with `status: verified` or `status: rejected`).
+**What it measures.** Of the consumption-contradiction rows in the retro window with `dispatch_status: routed`, the fraction with a resolver verdict landed in `rows.jsonl` (kind == "consumption-contradiction" with `status: accepted` or `status: declined`).
 
 **Why it matters.** `consumption-contradiction-append.sh` priority-dispatches rows to `lore audit` bypassing probabilistic sampling. If routed rows never produce verdicts, the priority-routing path is broken (analogous to the zero-rows-despite-triggers Judge liveness signature).
 
@@ -1193,7 +1193,7 @@ for each judge J:
 **Computation.**
 ```
 routed = |{contradictions in window with dispatch_status: routed}|
-verdicts = |{kind==consumption-contradiction rows with status ∈ {verified, rejected} in window}|
+verdicts = |{kind==consumption-contradiction rows with status ∈ {accepted, declined} in window}|
 
 if routed ≥ 10 and verdicts == 0:
     check trips — priority routing appears broken

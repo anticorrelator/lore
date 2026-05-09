@@ -178,6 +178,22 @@ if [[ -n "$KDIR_OVERRIDE" ]]; then
   KDIR_ARG=(--kdir "$KDIR_OVERRIDE")
 fi
 
+register_template_version_if_possible() {
+  local template_id="$1"
+  local template_version="$2"
+  local template_path=""
+  [[ "$template_version" =~ ^[0-9a-f]{12}$ ]] || return 0
+  if template_path=$(resolve_agent_template "$template_id" 2>/dev/null); then
+    bash "$SCRIPT_DIR/template-registry-register.sh" "${KDIR_ARG[@]}" \
+      --template-id "$template_id" \
+      --template-version "$template_version" \
+      --template-path "$template_path" \
+      --description "correctness-gate rollup producer template" >/dev/null 2>&1 || true
+  fi
+}
+
+register_template_version_if_possible "$PRODUCER_TEMPLATE_ID" "$PRODUCER_TEMPLATE_VERSION"
+
 emit_row() {
   local metric="$1"
   local value="$2"
@@ -213,6 +229,69 @@ print(json.dumps({
   "$SCRIPT_DIR/scorecard-append.sh" "${KDIR_ARG[@]}" --row "$row" >/dev/null
 }
 
+emit_correction_authorizations() {
+  if [[ "$CALIBRATION_STATE" != "calibrated" ]]; then
+    return 0
+  fi
+  printf '%s' "$VERDICTS_INPUT" | ARTIFACT_ID_ENV="$ARTIFACT_ID" \
+    TEMPLATE_ID_ENV="$PRODUCER_TEMPLATE_ID" \
+    TEMPLATE_VERSION_ENV="$PRODUCER_TEMPLATE_VERSION" \
+    WINDOW_START_ENV="$WINDOW_START" \
+    WINDOW_END_ENV="$WINDOW_END" \
+    python3 -c '
+import hashlib, json, os, re, sys
+template_version = os.environ["TEMPLATE_VERSION_ENV"]
+template_id = os.environ["TEMPLATE_ID_ENV"]
+if not template_id or not re.match(r"^[0-9a-f]{12}$", template_version or ""):
+    sys.exit(0)
+artifact_id = os.environ["ARTIFACT_ID_ENV"]
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        verdict = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if verdict.get("judge") != "correctness-gate":
+        continue
+    if verdict.get("verdict") != "contradicted" or not (verdict.get("correction") or "").strip():
+        continue
+    identity = {
+        "artifact_id": artifact_id,
+        "judge": verdict.get("judge") or "correctness-gate",
+        "judge_template_version": verdict.get("judge_template_version") or "",
+        "claim_id": verdict.get("claim_id"),
+        "verdict": verdict.get("verdict"),
+        "correction": verdict.get("correction") or "",
+    }
+    verdict_id = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:16]
+    print(json.dumps({
+        "schema_version": "1",
+        "kind": "telemetry",
+        "tier": "telemetry",
+        "calibration_state": "calibrated",
+        "template_id": template_id,
+        "template_version": template_version,
+        "metric": "correction_authorization",
+        "value": 1,
+        "sample_size": 1,
+        "window_start": os.environ["WINDOW_START_ENV"],
+        "window_end": os.environ["WINDOW_END_ENV"],
+        "source_artifact_ids": [artifact_id],
+        "granularity": "claim-local",
+        "verdict_source": "correctness-gate",
+        "claim_id": verdict.get("claim_id"),
+        "verdict_id": verdict_id,
+    }))
+' | while IFS= read -r auth_row; do
+    [[ -n "$auth_row" ]] || continue
+    "$SCRIPT_DIR/scorecard-append.sh" "${KDIR_ARG[@]}" --row "$auth_row" >/dev/null
+  done
+}
+
 FACTUAL_PRECISION=$(printf '%s' "$METRICS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["factual_precision"])')
 FALSIFIER_QUALITY=$(printf '%s' "$METRICS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["falsifier_quality"])')
 CONTRADICTION_RATE=$(printf '%s' "$METRICS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["audit_contradiction_rate"])')
@@ -220,6 +299,7 @@ CONTRADICTION_RATE=$(printf '%s' "$METRICS" | python3 -c 'import json,sys; print
 emit_row "factual_precision"        "$FACTUAL_PRECISION"  "$TOTAL"
 emit_row "falsifier_quality"        "$FALSIFIER_QUALITY"  "$TOTAL"
 emit_row "audit_contradiction_rate" "$CONTRADICTION_RATE" "$TOTAL"
+emit_correction_authorizations
 
 echo "[rollup] Appended 3 rows: factual_precision=$FACTUAL_PRECISION falsifier_quality=$FALSIFIER_QUALITY audit_contradiction_rate=$CONTRADICTION_RATE (n=$TOTAL)"
 printf '%s\n' "$METRICS"

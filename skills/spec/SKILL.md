@@ -563,6 +563,12 @@ Every `lore capture` call must carry provenance flags; for captures promoted fro
 ```
 /remember Research findings from <work item title> — Read all **Observations:** entries from investigation reports in plan.md and evaluate each — mechanism-level patterns, design rationale, and structural footprint signals all qualify; implementation facts already expressed in assertions routed to Tier-2 do not. Also capture: cross-investigation synthesis patterns not surfaced individually.
 
+Producer-delta routing:
+  - Classify each candidate as `covered | absent | extends | contradicts` against the closest commons entry before writing.
+  - Keep `delta` orthogonal from routing: `covered` means already covered, `absent` means new, `extends` means updates an existing entry, and `contradicts` means conflicts with an existing entry.
+  - Require `closest_entry` only for `extends` and `contradicts`.
+  - After classification, route `covered` to drop, `absent` to new capture/promotion, `extends` through calibrated edit/update, and `contradicts` through contradiction/correction.
+
 Provenance on every `lore capture`:
   - Lead-original insight: `--producer-role spec-lead --protocol-slot Synthesis --work-item <slug> --template-version $LEAD_TEMPLATE_VERSION`.
   - Promoted researcher observation: `--producer-role researcher --capturer-role spec-lead --source-artifact-ids <researcher-report-id[,id2,...]> --protocol-slot Synthesis --work-item <slug> --template-version $RESEARCHER_TEMPLATE_VERSION`.

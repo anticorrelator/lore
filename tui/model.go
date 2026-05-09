@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textarea"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
@@ -143,16 +143,16 @@ type model struct {
 	specPanels   map[string]work.SpecPanelModel
 	terminalMode bool
 
-	sessionConfirmActive        bool
-	sessionConfirmSlug          string
-	sessionConfirmTitle         string
-	sessionConfirmInput         textarea.Model
-	sessionConfirmShortMode     bool
-	sessionConfirmSkipConfirm   bool
-	sessionConfirmChatMode      bool
-	sessionConfirmFollowupMode  bool
-	sessionConfirmFindingIndex  int
-	sessionLaunchedFromModal    bool
+	sessionConfirmActive       bool
+	sessionConfirmSlug         string
+	sessionConfirmTitle        string
+	sessionConfirmInput        textarea.Model
+	sessionConfirmShortMode    bool
+	sessionConfirmSkipConfirm  bool
+	sessionConfirmChatMode     bool
+	sessionConfirmFollowupMode bool
+	sessionConfirmFindingIndex int
+	sessionLaunchedFromModal   bool
 
 	showHelp bool
 
@@ -160,9 +160,9 @@ type model struct {
 	// view. settingsPanel is the schema-driven sub-model that owns the
 	// modal body (D2 body-vs-chrome split). settingsPriorFocus snapshots
 	// the panel focus at modal-open time so Esc-close can restore it.
-	settingsActive      bool
-	settingsPanel       *settings.SettingsModel
-	settingsPriorFocus  panelFocus
+	settingsActive     bool
+	settingsPanel      *settings.SettingsModel
+	settingsPriorFocus panelFocus
 
 	// Confirm modal for archive/delete actions.
 	confirmAction string // "archive", "unarchive", "delete", "post_review", etc.; empty = inactive
@@ -193,6 +193,10 @@ type model struct {
 	// flashErr holds a transient error message shown in the status bar.
 	// It is cleared on the next key press.
 	flashErr string
+
+	settlementQueue           settlementQueueStatus
+	settlementQueueLoaded     bool
+	settlementProcessInFlight bool
 
 	// initLoading is true while the background initialization command is running
 	// during the onboarding flow.

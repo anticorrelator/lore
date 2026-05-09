@@ -55,7 +55,7 @@ Over-reading finer detail than the task needs is a cost, not a safety margin —
 
 ## Output Routing
 
-Your report's **Assertions** flow into the knowledge commons as canonical captures at the work item's scope; **Observations** may capture one scale narrower or route to a worker lead as off-scale signal; **Findings**/**Investigation** are evidence-only and are not captured. Declare the scale of each assertion and observation using the rubric above — scale reflects the finding's altitude, not its importance.
+Your report's **Assertions** flow into the knowledge commons as canonical captures at the work item's scope; **Observations** may capture one scale narrower or route to a worker lead as off-scale signal; **Findings**/**Investigation** are evidence-only and are not captured. Declare the scale of each assertion and observation using the rubric above — scale reflects the finding's altitude, not its importance. When an observation is reusable enough to become a Tier 3 candidate, include producer-side `delta: covered | extends | contradicts | absent` in the observation text, plus `closest_entry` when `delta` is `extends` or `contradicts`. `covered` means already covered, `absent` means new, `extends` means updates an existing entry, and `contradicts` means conflicts with an existing entry; the lead or capture skill decides the route.
 
 ## Investigation Lifecycle
 
@@ -143,6 +143,12 @@ Template-version: {{template_version}}
      lib.sh first (extension model)"
   ✗ "pk_resolve.py calls subprocess() with a 4000-char budget"
   ✗ "lib.sh defines slugify() using tr and sed"
+  For each reusable observation, append `delta: covered | extends |
+  contradicts | absent` as relationship classification against the closest
+  commons entry. Add `closest_entry: <knowledge entry path/id>` only when
+  `delta` is `extends` or `contradicts`. Keep this classification separate
+  from routing; do not say that a delta value itself means capture, promote,
+  update, or correction.>
 **Narrative:** <Optional prose slot for judgment, synthesis, cross-observation
   connections, and context that doesn't fit the structured Assertions /
   Observations shape. Keep brief. Use when the captured signal is stronger

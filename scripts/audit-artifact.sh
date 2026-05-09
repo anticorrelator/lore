@@ -137,7 +137,8 @@ Usage: lore audit <artifact-id> [--kdir <path>] [--json] [--dry-run]
 
 Arguments:
   <artifact-id>    Work-item slug or absolute path to a supported artifact
-                   (lens-findings.json, plan-assertions, worker-observations).
+                   (lens-findings.json, task-claims.jsonl, plan-assertions,
+                   worker-observations).
 
 Options:
   --kdir <path>              Override resolved knowledge directory.
@@ -305,7 +306,7 @@ except (OSError, json.JSONDecodeError):
 if not isinstance(data, dict):
     print("pre-calibration")
     sys.exit(0)
-key = f"{os.environ[\"JUDGE_ID\"]}:{os.environ[\"JUDGE_VERSION\"]}"
+key = "{}:{}".format(os.environ["JUDGE_ID"], os.environ["JUDGE_VERSION"])
 entry = data.get(key)
 if not isinstance(entry, dict):
     print("pre-calibration")
@@ -316,6 +317,53 @@ if state in ("calibrated", "pre-calibration", "unknown"):
 else:
     print("pre-calibration")
 '
+}
+
+is_12_char_template_version() {
+  [[ "$1" =~ ^[0-9a-f]{12}$ ]]
+}
+
+register_template_version_if_possible() {
+  local template_id="$1"
+  local template_version="$2"
+  local description="$3"
+  local template_path=""
+
+  if [[ -z "$template_id" || -z "$template_version" ]]; then
+    return 0
+  fi
+  if ! is_12_char_template_version "$template_version"; then
+    return 0
+  fi
+
+  if template_path=$(resolve_agent_template "$template_id" 2>/dev/null); then
+    :
+  elif [[ "$template_id" == "pr-self-review" && -f "$SCRIPT_DIR/../skills/pr-self-review/SKILL.md" ]]; then
+    template_path="$SCRIPT_DIR/../skills/pr-self-review/SKILL.md"
+  elif [[ "$template_id" == "pr-review" && -f "$SCRIPT_DIR/../skills/pr-review/SKILL.md" ]]; then
+    template_path="$SCRIPT_DIR/../skills/pr-review/SKILL.md"
+  else
+    return 0
+  fi
+
+  if ! bash "$SCRIPT_DIR/template-registry-register.sh" \
+      --kdir "$KDIR" \
+      --template-id "$template_id" \
+      --template-version "$template_version" \
+      --template-path "$template_path" \
+      --description "$description" >/dev/null 2>&1; then
+    echo "[audit] warning: failed to register template $template_id@$template_version" >&2
+  fi
+}
+
+register_resolved_producer_template() {
+  local resolved_file="$1"
+  local producer_template_id
+  local producer_template_version
+
+  producer_template_id=$(jq -r '.producer_role // ""' "$resolved_file" 2>/dev/null || true)
+  producer_template_version=$(jq -r '.producer_template_version // ""' "$resolved_file" 2>/dev/null || true)
+  register_template_version_if_possible "$producer_template_id" "$producer_template_version" "audit producer template"
 }
 
 # --- Validate --priority-claims file (D3 pre-filter gate) ---
@@ -346,9 +394,11 @@ fi
 #   1. absolute path that exists
 #   2. $KDIR/_work/<slug>/ directory
 #   3. $KDIR/_followups/<slug>/ directory
-# Wired artifact types: lens-findings, worker-observations, plan-assertions.
+# Wired artifact types: lens-findings, task-claims, worker-observations,
+# plan-assertions.
 # spec-investigation is deferred (D7). Type refinement runs after path resolution
-# and sets LENS_FINDINGS_PATH / WORKER_OBSERVATIONS_PATH / PLAN_ASSERTIONS_PATH.
+# and sets LENS_FINDINGS_PATH / TASK_CLAIMS_PATH / WORKER_OBSERVATIONS_PATH /
+# PLAN_ASSERTIONS_PATH.
 
 ARTIFACT_PATH=""
 ARTIFACT_TYPE=""
@@ -371,9 +421,10 @@ fi
 # --- Artifact-type refinement ---
 # Explicit file paths (path-provided) select their matching artifact type
 # unconditionally. Directory detection order: lens-findings, worker-observations,
-# plan-assertions; first match wins (latest-evidence wins for dirs with multiple
+# task-claims, plan-assertions; first match wins (latest-evidence wins for dirs with multiple
 # files — execution-log.md beats plan.md). spec-investigation is deferred (D7).
 LENS_FINDINGS_PATH=""
+TASK_CLAIMS_PATH=""
 WORKER_OBSERVATIONS_PATH=""
 PLAN_ASSERTIONS_PATH=""
 if [[ "$ARTIFACT_TYPE" == "followup" && -f "$ARTIFACT_PATH/lens-findings.json" ]]; then
@@ -386,6 +437,9 @@ elif [[ "$ARTIFACT_TYPE" == "path-provided" ]]; then
   elif [[ "$ARTIFACT_PATH" == *"/execution-log.md" && -f "$ARTIFACT_PATH" ]]; then
     WORKER_OBSERVATIONS_PATH="$ARTIFACT_PATH"
     ARTIFACT_TYPE="worker-observations"
+  elif [[ "$ARTIFACT_PATH" == *"/task-claims.jsonl" && -f "$ARTIFACT_PATH" ]]; then
+    TASK_CLAIMS_PATH="$ARTIFACT_PATH"
+    ARTIFACT_TYPE="task-claims"
   elif [[ "$ARTIFACT_PATH" == *"/plan.md" && -f "$ARTIFACT_PATH" ]]; then
     PLAN_ASSERTIONS_PATH="$ARTIFACT_PATH"
     ARTIFACT_TYPE="plan-assertions"
@@ -395,6 +449,9 @@ elif [[ "$ARTIFACT_TYPE" == "path-provided" ]]; then
   elif [[ -d "$ARTIFACT_PATH" && -f "$ARTIFACT_PATH/execution-log.md" ]]; then
     WORKER_OBSERVATIONS_PATH="$ARTIFACT_PATH/execution-log.md"
     ARTIFACT_TYPE="worker-observations"
+  elif [[ -d "$ARTIFACT_PATH" && -f "$ARTIFACT_PATH/task-claims.jsonl" ]]; then
+    TASK_CLAIMS_PATH="$ARTIFACT_PATH/task-claims.jsonl"
+    ARTIFACT_TYPE="task-claims"
   elif [[ -d "$ARTIFACT_PATH" && -f "$ARTIFACT_PATH/plan.md" ]]; then
     PLAN_ASSERTIONS_PATH="$ARTIFACT_PATH/plan.md"
     ARTIFACT_TYPE="plan-assertions"
@@ -420,9 +477,9 @@ fi
 # plan is future work).
 build_resolved_input() {
   local dry_run_flag="$1"  # "true" or "false"
-  python3 - "$ARTIFACT_ID" "$ARTIFACT_PATH" "$ARTIFACT_TYPE" "$KDIR" "$LENS_FINDINGS_PATH" "$PLAN_ASSERTIONS_PATH" "$WORKER_OBSERVATIONS_PATH" "$dry_run_flag" << 'PYEOF'
-import json, re, sys
-artifact_id, artifact_path, artifact_type, kdir, lens_findings_path, plan_assertions_path, worker_observations_path, dry_run_flag = sys.argv[1:9]
+  python3 - "$ARTIFACT_ID" "$ARTIFACT_PATH" "$ARTIFACT_TYPE" "$KDIR" "$LENS_FINDINGS_PATH" "$TASK_CLAIMS_PATH" "$PLAN_ASSERTIONS_PATH" "$WORKER_OBSERVATIONS_PATH" "$dry_run_flag" << 'PYEOF'
+import hashlib, json, re, sys
+artifact_id, artifact_path, artifact_type, kdir, lens_findings_path, task_claims_path, plan_assertions_path, worker_observations_path, dry_run_flag = sys.argv[1:10]
 
 out = {
     "artifact_id": artifact_id,
@@ -456,7 +513,15 @@ if lens_findings_path:
     else:
         findings = raw.get("findings", []) or []
         claims = []
+        producer_roles = set()
+        template_versions = set()
         for i, f in enumerate(findings):
+            producer_role = f.get("producer_role") or raw.get("producer_role")
+            template_version = f.get("template_version") or raw.get("template_version")
+            if producer_role:
+                producer_roles.add(str(producer_role))
+            if template_version:
+                template_versions.add(str(template_version))
             claim = {
                 "claim_id": f"finding-{i}",
                 "claim_text": f.get("title", "") + (": " + f.get("body", "") if f.get("body") else ""),
@@ -469,16 +534,77 @@ if lens_findings_path:
                 "grounding": f.get("grounding") or None,
                 "lens": f.get("lens"),
                 "selected": f.get("selected"),
+                "producer_role": producer_role,
+                "template_version": template_version,
             }
             claims.append(claim)
         out["lens_findings_path"] = lens_findings_path
         out["claim_payload"] = claims
         out["claim_count"] = len(claims)
         out["pr"] = raw.get("pr")
+        out["producer_role"] = next(iter(producer_roles)) if len(producer_roles) == 1 else ("mixed" if producer_roles else "unknown")
+        out["producer_template_version"] = next(iter(template_versions)) if len(template_versions) == 1 else ("mixed" if template_versions else "unknown")
         # sidecar work_item takes precedence over path-derived value; path-derived
         # value is the fallback when the JSON omits it.
         if raw.get("work_item"):
             out["work_item"] = raw["work_item"]
+
+elif task_claims_path:
+    claims = []
+    producer_roles = set()
+    template_versions = set()
+    try:
+        with open(task_claims_path) as fh:
+            for line_no, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as e:
+                    print(f"[audit] extractor: corrupt JSONL in task-claims.jsonl:{line_no} — {e}", file=sys.stderr)
+                    sys.exit(1)
+                claim_id = row.get("claim_id")
+                if not isinstance(claim_id, str) or not claim_id:
+                    print(f"[audit] extractor: task-claims.jsonl:{line_no} missing claim_id", file=sys.stderr)
+                    sys.exit(1)
+                producer_role = row.get("producer_role")
+                if producer_role:
+                    producer_roles.add(str(producer_role))
+                template_version = row.get("template_version")
+                if template_version:
+                    template_versions.add(str(template_version))
+                canonical = json.dumps(row, sort_keys=True, separators=(",", ":"))
+                claims.append({
+                    "claim_id": claim_id,
+                    "claim_text": row.get("claim"),
+                    "file": row.get("file"),
+                    "line_range": row.get("line_range"),
+                    "exact_snippet": row.get("exact_snippet"),
+                    "normalized_snippet_hash": row.get("normalized_snippet_hash"),
+                    "falsifier": row.get("falsifier"),
+                    "severity_hint": row.get("significance") or row.get("scale"),
+                    "why_it_matters": row.get("why_this_work_needs_it"),
+                    "task_id": row.get("task_id"),
+                    "phase_id": row.get("phase_id"),
+                    "protocol_slot": row.get("protocol_slot"),
+                    "producer_role": producer_role,
+                    "template_version": template_version,
+                    "tier2_row_number": line_no,
+                    "tier2_row_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+                })
+    except OSError as e:
+        print(f"[audit] extractor: could not read task-claims.jsonl — {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not claims:
+        print("[audit] extractor: task-claims.jsonl contains no claims", file=sys.stderr)
+        sys.exit(1)
+
+    out["task_claims_path"] = task_claims_path
+    out["claim_payload"] = claims
+    out["claim_count"] = len(claims)
+    out["producer_role"] = next(iter(producer_roles)) if len(producer_roles) == 1 else ("mixed" if producer_roles else "unknown")
+    out["producer_template_version"] = next(iter(template_versions)) if len(template_versions) == 1 else ("mixed" if template_versions else "unknown")
 
 elif plan_assertions_path:
     V1_REQUIRED = ("claim", "file", "line_range", "exact_snippet", "normalized_snippet_hash", "falsifier", "significance")
@@ -549,6 +675,8 @@ elif plan_assertions_path:
                 "normalized_snippet_hash": _extract_field(entry_text, "normalized_snippet_hash"),
                 "falsifier": _extract_field(entry_text, "falsifier"),
                 "severity_hint": _extract_field(entry_text, "significance"),
+                "producer_role": "researcher",
+                "template_version": producer_template_version,
             }
             for opt in ("context_before", "context_after", "symbol_anchor", "extends_observation"):
                 v = _extract_field(entry_text, opt)
@@ -629,6 +757,8 @@ elif worker_observations_path:
                 "normalized_snippet_hash": _extract_field(entry_text, "normalized_snippet_hash"),
                 "falsifier": _extract_field(entry_text, "falsifier"),
                 "severity_hint": _extract_field(entry_text, "significance"),
+                "producer_role": "worker",
+                "template_version": producer_template_version,
             }
             for opt in ("context_before", "context_after", "symbol_anchor"):
                 v = _extract_field(entry_text, opt)
@@ -714,7 +844,7 @@ fi
 GATE_TEMPLATE_VERSION=$(bash "$SCRIPT_DIR/template-version.sh" "$CORRECTNESS_GATE_TEMPLATE")
 
 # Build the resolved input object and stash it in a tmp file.
-RESOLVED_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-input-XXXXXX.json")
+RESOLVED_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-input-XXXXXX")
 GATE_RAW_TMP=""
 CURATOR_RAW_TMP=""
 REVERSE_AUDITOR_RAW_TMP=""
@@ -752,7 +882,7 @@ fi
 # list was already validated (non-empty JSON array of strings) in the
 # validation gate above.
 if [[ -n "$PRIORITY_CLAIMS_FILE" ]]; then
-  _priority_narrowed=$(mktemp "${TMPDIR:-/tmp}/audit-input-narrowed-XXXXXX.json")
+  _priority_narrowed=$(mktemp "${TMPDIR:-/tmp}/audit-input-narrowed-XXXXXX")
   if ! jq --slurpfile priority "$PRIORITY_CLAIMS_FILE" '
     ($priority[0]) as $ids
     | (.claim_payload // []) as $orig
@@ -764,6 +894,29 @@ if [[ -n "$PRIORITY_CLAIMS_FILE" ]]; then
     exit 1
   fi
   mv "$_priority_narrowed" "$RESOLVED_INPUT_FILE"
+  _priority_reprovenanced=$(mktemp "${TMPDIR:-/tmp}/audit-input-reprovenanced-XXXXXX")
+  if ! python3 - "$RESOLVED_INPUT_FILE" "$_priority_reprovenanced" << 'PYEOF'
+import json, sys
+in_path, out_path = sys.argv[1:3]
+with open(in_path) as fh:
+    data = json.load(fh)
+claims = data.get("claim_payload") or []
+roles = {str(c.get("producer_role")) for c in claims if c.get("producer_role")}
+versions = {str(c.get("template_version")) for c in claims if c.get("template_version")}
+if roles:
+    data["producer_role"] = next(iter(roles)) if len(roles) == 1 else "mixed"
+if versions:
+    data["producer_template_version"] = next(iter(versions)) if len(versions) == 1 else "mixed"
+with open(out_path, "w") as fh:
+    json.dump(data, fh, indent=2)
+    fh.write("\n")
+PYEOF
+  then
+    rm -f "$_priority_reprovenanced"
+    echo "[audit] Error: priority-claims provenance recompute failed" >&2
+    exit 1
+  fi
+  mv "$_priority_reprovenanced" "$RESOLVED_INPUT_FILE"
   _kept=$(jq -r '.claim_count' "$RESOLVED_INPUT_FILE")
   if [[ "$_kept" -eq 0 ]]; then
     echo "[audit] Error: priority-claims filter yielded 0 claims; no claim_id in $PRIORITY_CLAIMS_FILE matched the resolved claim_payload" >&2
@@ -778,6 +931,9 @@ if jq -e 'has("lens_findings_error")' "$RESOLVED_INPUT_FILE" >/dev/null 2>&1; th
   echo "[audit] Error: could not parse lens-findings.json — $LENS_ERR" >&2
   exit 1
 fi
+
+register_resolved_producer_template "$RESOLVED_INPUT_FILE"
+register_template_version_if_possible "correctness-gate" "$GATE_TEMPLATE_VERSION" "audit judge template"
 
 # Obtain correctness-gate output JSON.
 GATE_RAW_FILE=""
@@ -807,7 +963,7 @@ else
     echo "[audit]   to use the \`claude\` headless runner direct-invocation fallback." >&2
     exit 1
   fi
-  GATE_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-gate-output-XXXXXX.json")
+  GATE_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-gate-output-XXXXXX")
   GATE_RAW_FILE="$GATE_RAW_TMP"
   GATE_SYSTEM_PROMPT_FILE="$CORRECTNESS_GATE_TEMPLATE"
   GATE_USER_PROMPT="Resolved input object (per architecture/audit-pipeline/contract.md):
@@ -928,10 +1084,24 @@ VERDICTS_FILE="$VERDICTS_DIR/${_base}.jsonl"
 
 # One JSONL line per judge run: the full judge output with a wrapper header.
 python3 - "$GATE_RAW_FILE" "$ARTIFACT_ID" "$VERDICTS_FILE" << 'PYEOF'
-import json, sys, datetime
+import hashlib, json, sys, datetime
 gate_file, artifact_id, verdicts_file = sys.argv[1:4]
 with open(gate_file) as fh:
     obj = json.load(fh)
+judge = obj.get("judge") or "correctness-gate"
+judge_template_version = obj.get("judge_template_version") or ""
+for verdict in obj.get("verdicts", []) or []:
+    identity = {
+        "artifact_id": artifact_id,
+        "judge": judge,
+        "judge_template_version": judge_template_version,
+        "claim_id": verdict.get("claim_id"),
+        "verdict": verdict.get("verdict"),
+        "correction": verdict.get("correction") or "",
+    }
+    verdict["verdict_id"] = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:16]
 wrapped = {
     "artifact_id": artifact_id,
     "judge_run_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -964,7 +1134,7 @@ PYEOF
 if [[ $SKIP_SCORECARD -eq 0 ]]; then
   GATE_CALIBRATION_STATE=$(read_calibration_state "correctness-gate" "$GATE_TEMPLATE_VERSION")
   ROWS_JSON=$(python3 - "$GATE_RAW_FILE" "$RESOLVED_INPUT_FILE" "$GATE_TEMPLATE_VERSION" "$GATE_CALIBRATION_STATE" << 'PYEOF'
-import json, sys, datetime
+import hashlib, json, re, sys, datetime
 
 gate_file, input_file, gate_template_version, calibration_state = sys.argv[1:5]
 with open(gate_file) as fh:
@@ -984,6 +1154,18 @@ n_contradicted_with_correction = sum(
     1 for v in verdicts
     if v.get("verdict") == "contradicted" and (v.get("correction") or "").strip()
 )
+def stable_verdict_id(v):
+    identity = {
+        "artifact_id": artifact_id,
+        "judge": gate.get("judge") or "correctness-gate",
+        "judge_template_version": gate.get("judge_template_version") or "",
+        "claim_id": v.get("claim_id"),
+        "verdict": v.get("verdict"),
+        "correction": v.get("correction") or "",
+    }
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:16]
 
 factual_precision = n_verified / total
 audit_contradiction_rate = n_contradicted / total
@@ -999,6 +1181,10 @@ producer_template_version = resolved.get("producer_template_version") or "unknow
 artifact_id = resolved.get("artifact_id")
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+if producer_template_id in ("unknown", "mixed") or not re.match(r"^[0-9a-f]{12}$", producer_template_version):
+    print("[]")
+    sys.exit(0)
+
 # calibration_state: read from $KDIR/_scorecards/calibration-state.json
 # keyed by (correctness-gate, gate_template_version) by the bash caller and
 # passed in as argv[4]. Defaults to "pre-calibration" on missing file or
@@ -1008,7 +1194,7 @@ now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"
 row_base = {
     "schema_version": "1",
     "kind": "scored",
-    "tier": "reusable",
+    "tier": "template",
     "calibration_state": calibration_state,
     "template_id": producer_template_id,
     "template_version": producer_template_version,
@@ -1026,6 +1212,34 @@ rows = [
     {**row_base, "metric": "falsifier_quality", "value": falsifier_quality},
     {**row_base, "metric": "audit_contradiction_rate", "value": audit_contradiction_rate},
 ]
+contradicted_ids = [stable_verdict_id(v) for v in verdicts if v.get("verdict") == "contradicted"]
+if len(contradicted_ids) == 1:
+    rows[-1]["verdict_id"] = contradicted_ids[0]
+if contradicted_ids:
+    rows[-1]["verdict_ids"] = contradicted_ids
+if calibration_state == "calibrated":
+    for v in verdicts:
+        if v.get("verdict") == "contradicted" and (v.get("correction") or "").strip():
+            vid = stable_verdict_id(v)
+            rows.append({
+                "schema_version": "1",
+                "kind": "telemetry",
+                "tier": "telemetry",
+                "calibration_state": calibration_state,
+                "template_id": producer_template_id,
+                "template_version": producer_template_version,
+                "metric": "correction_authorization",
+                "value": 1,
+                "sample_size": 1,
+                "window_start": now,
+                "window_end": now,
+                "source_artifact_ids": [artifact_id] if artifact_id else [],
+                "granularity": "claim-local",
+                "verdict_source": "correctness-gate",
+                "judge_template_version": gate_template_version,
+                "claim_id": v.get("claim_id"),
+                "verdict_id": vid,
+            })
 print(json.dumps(rows))
 PYEOF
   )
@@ -1033,10 +1247,10 @@ PYEOF
   APPENDED_COUNT=0
   while IFS= read -r row; do
     if [[ -n "$row" ]]; then
-      if bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KDIR" --row "$row" >/dev/null 2>&1; then
+      if append_err=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KDIR" --row "$row" 2>&1 >/dev/null); then
         APPENDED_COUNT=$((APPENDED_COUNT + 1))
       else
-        echo "[audit] warning: scorecard-append rejected a row (see stderr above)" >&2
+        echo "[audit] warning: scorecard-append rejected a row: $append_err" >&2
       fi
     fi
   done < <(printf '%s' "$ROWS_JSON" | jq -c '.[]?')
@@ -1078,6 +1292,7 @@ if [[ "$N_VERIFIED_COUNT" -gt 0 ]]; then
     :  # curator skipped, fall through to report
   else
     CURATOR_TEMPLATE_VERSION=$(bash "$SCRIPT_DIR/template-version.sh" "$CURATOR_TEMPLATE")
+    register_template_version_if_possible "curator" "$CURATOR_TEMPLATE_VERSION" "audit judge template"
 
     if [[ -n "$CURATOR_OUTPUT_FILE" ]]; then
       if [[ ! -f "$CURATOR_OUTPUT_FILE" ]]; then
@@ -1090,10 +1305,10 @@ if [[ "$N_VERIFIED_COUNT" -gt 0 ]]; then
       if [[ -z "$JUDGE_MODEL" ]]; then
         echo "[audit] warning: neither --curator-output-file nor 'judge' role binding available — skipping curator stage" >&2
       else
-        CURATOR_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-curator-output-XXXXXX.json")
+        CURATOR_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-curator-output-XXXXXX")
         CURATOR_RAW_FILE="$CURATOR_RAW_TMP"
         # Compose curator input: verified survivors + the original resolved input.
-        CURATOR_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-curator-input-XXXXXX.json")
+        CURATOR_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-curator-input-XXXXXX")
         python3 - "$GATE_RAW_FILE" "$RESOLVED_INPUT_FILE" "$CURATOR_INPUT_FILE" << 'PYEOF'
 import json, sys
 gate_file, resolved_file, out_file = sys.argv[1:4]
@@ -1226,7 +1441,7 @@ PYEOF
       if [[ $SKIP_SCORECARD -eq 0 ]]; then
         CURATOR_CALIBRATION_STATE=$(read_calibration_state "curator" "$CURATOR_TEMPLATE_VERSION")
         CUR_ROWS_JSON=$(python3 - "$CURATOR_RAW_FILE" "$RESOLVED_INPUT_FILE" "$CURATOR_TEMPLATE_VERSION" "$N_VERIFIED_COUNT" "$CURATOR_CALIBRATION_STATE" << 'PYEOF'
-import json, sys, datetime
+import json, re, sys, datetime
 
 cur_file, input_file, curator_tv, n_verified, calibration_state = sys.argv[1:6]
 n_verified = int(n_verified)
@@ -1250,10 +1465,14 @@ producer_template_version = resolved.get("producer_template_version") or "unknow
 artifact_id = resolved.get("artifact_id")
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+if producer_template_id in ("unknown", "mixed") or not re.match(r"^[0-9a-f]{12}$", producer_template_version):
+    print("[]")
+    sys.exit(0)
+
 row_base = {
     "schema_version": "1",
     "kind": "scored",
-    "tier": "reusable",
+    "tier": "template",
     "calibration_state": calibration_state,
     "template_id": producer_template_id,
     "template_version": producer_template_version,
@@ -1276,10 +1495,10 @@ PYEOF
 
         while IFS= read -r row; do
           if [[ -n "$row" ]]; then
-            if bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KDIR" --row "$row" >/dev/null 2>&1; then
+            if append_err=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KDIR" --row "$row" 2>&1 >/dev/null); then
               CURATOR_APPENDED_COUNT=$((CURATOR_APPENDED_COUNT + 1))
             else
-              echo "[audit] warning: scorecard-append rejected a curator row" >&2
+              echo "[audit] warning: scorecard-append rejected a curator row: $append_err" >&2
             fi
           fi
         done < <(printf '%s' "$CUR_ROWS_JSON" | jq -c '.[]?')
@@ -1327,6 +1546,7 @@ if [[ "$CURATOR_STAGE_RAN" -eq 1 && "$N_SELECTED" -gt 0 ]]; then
     :  # reverse-auditor skipped, fall through to report
   else
     REVERSE_AUDITOR_TEMPLATE_VERSION=$(bash "$SCRIPT_DIR/template-version.sh" "$REVERSE_AUDITOR_TEMPLATE")
+    register_template_version_if_possible "reverse-auditor" "$REVERSE_AUDITOR_TEMPLATE_VERSION" "audit judge template"
 
     if [[ -n "$REVERSE_AUDITOR_OUTPUT_FILE" ]]; then
       if [[ ! -f "$REVERSE_AUDITOR_OUTPUT_FILE" ]]; then
@@ -1339,13 +1559,13 @@ if [[ "$CURATOR_STAGE_RAN" -eq 1 && "$N_SELECTED" -gt 0 ]]; then
       if [[ -z "$JUDGE_MODEL" ]]; then
         echo "[audit] warning: neither --reverse-auditor-output-file nor 'judge' role binding available — skipping reverse-auditor stage" >&2
       else
-        REVERSE_AUDITOR_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-output-XXXXXX.json")
+        REVERSE_AUDITOR_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-output-XXXXXX")
         REVERSE_AUDITOR_RAW_FILE="$REVERSE_AUDITOR_RAW_TMP"
         # Compose reverse-auditor input: curator's selected claims + the
         # original resolved input (artifact_id, work_item, change_context,
         # referenced_files). Per contract.md, reverse-auditor input is the
         # curator-surviving portfolio + original change.
-        REVERSE_AUDITOR_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-input-XXXXXX.json")
+        REVERSE_AUDITOR_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-input-XXXXXX")
         python3 - "$CURATOR_RAW_FILE" "$RESOLVED_INPUT_FILE" "$REVERSE_AUDITOR_INPUT_FILE" << 'PYEOF'
 import json, sys
 cur_file, resolved_file, out_file = sys.argv[1:4]
@@ -1449,10 +1669,26 @@ PYEOF
       # Persist the reverse-auditor emission to the artifact settlement
       # record (append-only), mirroring the gate/curator pattern.
       python3 - "$REVERSE_AUDITOR_RAW_FILE" "$ARTIFACT_ID" "$VERDICTS_FILE" << 'PYEOF'
-import json, sys, datetime
+import hashlib, json, sys, datetime
 ra_file, artifact_id, verdicts_file = sys.argv[1:4]
 with open(ra_file) as fh:
     obj = json.load(fh)
+claim = obj.get("omission_claim")
+verdict = "silence" if claim is None else "omission-claim"
+identity = {
+    "artifact_id": artifact_id,
+    "judge": obj.get("judge") or "reverse-auditor",
+    "judge_template_version": obj.get("judge_template_version") or "",
+    "claim_id": "omission",
+    "verdict": verdict,
+    "claim": claim or {},
+}
+verdict_id = hashlib.sha256(
+    json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()[:16]
+obj["verdict_id"] = verdict_id
+if isinstance(claim, dict):
+    claim["verdict_id"] = verdict_id
 wrapped = {
     "artifact_id": artifact_id,
     "judge_run_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1464,7 +1700,7 @@ PYEOF
 
       # Run grounding preflight on the emission. Silence short-circuits
       # with reason=silence (preflight treats it as a no-op pass).
-      REVERSE_AUDITOR_PREFLIGHT_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-preflight-XXXXXX.json")
+      REVERSE_AUDITOR_PREFLIGHT_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-preflight-XXXXXX")
       # --repo-root should point at the repo whose files the claim anchors
       # reference. For the audit pipeline that's the lore checkout (where
       # the source files live), not $KDIR. Default preflight to $PWD.
@@ -1599,7 +1835,7 @@ PYEOF
         RA_ROWS_JSON=$(python3 - "$REVERSE_AUDITOR_RAW_FILE" "$RESOLVED_INPUT_FILE" \
                                 "$REVERSE_AUDITOR_TEMPLATE_VERSION" "$CURATOR_TEMPLATE_VERSION" \
                                 "$REVERSE_AUDITOR_VERDICT" "$RA_CALIBRATION_STATE" << 'PYEOF'
-import json, sys, datetime
+import hashlib, json, re, sys, datetime
 
 ra_file, resolved_file, ra_tv, curator_tv, verdict, calibration_state = sys.argv[1:7]
 with open(ra_file) as fh:
@@ -1614,6 +1850,19 @@ artifact_id = resolved.get("artifact_id")
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 claim = ra.get("omission_claim") or {}
+verdict_id = None
+if verdict == "omission-claim":
+    identity = {
+        "artifact_id": artifact_id,
+        "judge": ra.get("judge") or "reverse-auditor",
+        "judge_template_version": ra.get("judge_template_version") or "",
+        "claim_id": "omission",
+        "verdict": "omission-claim",
+        "claim": claim,
+    }
+    verdict_id = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:16]
 
 # Classify value contributions per verdict.
 if verdict == "omission-claim":
@@ -1639,7 +1888,6 @@ row_common = {
     "granularity": "portfolio-level",
     "verdict_source": "reverse-auditor",
     "judge_template_version": ra_tv,
-    "tier": "reusable",
 }
 
 rows = []
@@ -1648,20 +1896,23 @@ rows = []
 # grounded-or-nothing gate REQUIRES a non-empty claim_anchor on scored
 # reverse-auditor rows. Only emit this row when we have a real claim.
 if verdict == "omission-claim":
-    rows.append({
-        **row_common,
-        "kind": "scored",
-        "template_id": producer_template_id,
-        "template_version": producer_template_version,
-        "metric": "omission_rate",
-        "value": omission_value,
-        "claim_anchor": {
-            "file": claim.get("file"),
-            "line_range": claim.get("line_range"),
-            "exact_snippet": claim.get("exact_snippet"),
-            "normalized_snippet_hash": claim.get("normalized_snippet_hash"),
-        },
-    })
+    if producer_template_id not in ("unknown", "mixed") and re.match(r"^[0-9a-f]{12}$", producer_template_version):
+        rows.append({
+            **row_common,
+            "kind": "scored",
+            "tier": "template",
+            "template_id": producer_template_id,
+            "template_version": producer_template_version,
+            "metric": "omission_rate",
+            "value": omission_value,
+            "verdict_id": verdict_id,
+            "claim_anchor": {
+                "file": claim.get("file"),
+                "line_range": claim.get("line_range"),
+                "exact_snippet": claim.get("exact_snippet"),
+                "normalized_snippet_hash": claim.get("normalized_snippet_hash"),
+            },
+        })
 
 # coverage_quality — curator template, scored. Only ships when curator
 # template_version is known. The grounded-or-nothing gate also applies
@@ -1673,20 +1924,23 @@ if verdict == "omission-claim":
 # skip it in the silence/failed cases. Silence → no surfaced coverage gap
 # so no row is informative; the absence itself is the signal.
 if verdict == "omission-claim":
-    rows.append({
-        **row_common,
-        "kind": "scored",
-        "template_id": curator_template_id,
-        "template_version": curator_tv or "unknown",
-        "metric": "coverage_quality",
-        "value": coverage_value,
-        "claim_anchor": {
-            "file": claim.get("file"),
-            "line_range": claim.get("line_range"),
-            "exact_snippet": claim.get("exact_snippet"),
-            "normalized_snippet_hash": claim.get("normalized_snippet_hash"),
-        },
-    })
+    if re.match(r"^[0-9a-f]{12}$", curator_tv or ""):
+        rows.append({
+            **row_common,
+            "kind": "scored",
+            "tier": "template",
+            "template_id": curator_template_id,
+            "template_version": curator_tv,
+            "metric": "coverage_quality",
+            "value": coverage_value,
+            "verdict_id": verdict_id,
+            "claim_anchor": {
+                "file": claim.get("file"),
+                "line_range": claim.get("line_range"),
+                "exact_snippet": claim.get("exact_snippet"),
+                "normalized_snippet_hash": claim.get("normalized_snippet_hash"),
+            },
+        })
 
 # grounding_failure_rate — reverse-auditor template, telemetry. Always
 # emit (even on silence) so /retro can track the rate. Telemetry rows
@@ -1707,10 +1961,10 @@ PYEOF
 
         while IFS= read -r row; do
           if [[ -n "$row" ]]; then
-            if bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KDIR" --row "$row" >/dev/null 2>&1; then
+            if append_err=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KDIR" --row "$row" 2>&1 >/dev/null); then
               REVERSE_AUDITOR_APPENDED_COUNT=$((REVERSE_AUDITOR_APPENDED_COUNT + 1))
             else
-              echo "[audit] warning: scorecard-append rejected a reverse-auditor row" >&2
+              echo "[audit] warning: scorecard-append rejected a reverse-auditor row: $append_err" >&2
             fi
           fi
         done < <(printf '%s' "$RA_ROWS_JSON" | jq -c '.[]?')

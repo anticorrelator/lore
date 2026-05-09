@@ -7,6 +7,7 @@
 #                        --superseded-text "<snippet>"
 #                        --replacement-text "<snippet>"
 #                        [--date <YYYY-MM-DD>]
+#                        [--kdir <path>]
 #                        [--check-escalation]
 #                        [--backlink-threshold N]
 #                        [--dry-run]
@@ -60,6 +61,7 @@ DATE_TODAY=$(date +"%Y-%m-%d")
 CHECK_ESCALATION=0
 BACKLINK_THRESHOLD=3
 DRY_RUN=0
+KDIR_OVERRIDE=""
 
 usage() {
   cat >&2 <<EOF
@@ -68,6 +70,7 @@ Usage: apply-correction.sh --entry <path> --verdict-id <id> --verdict-source <so
                             --superseded-text "<snippet>"
                             --replacement-text "<snippet>"
                             [--date <YYYY-MM-DD>]
+                            [--kdir <path>]
                             [--check-escalation]
                             [--backlink-threshold N]
                             [--dry-run]
@@ -84,6 +87,7 @@ Required:
 
 Optional:
   --date YYYY-MM-DD         Override the correction date (default: today)
+  --kdir PATH               Knowledge directory override (used by tests/resolvers)
   --check-escalation        Evaluate L3 escalation conditions and create supersedes edge if triggered
   --backlink-threshold N    Backlink in-degree >= N triggers escalation (default: 3)
   --dry-run                 Print what would change without writing
@@ -118,6 +122,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --date)
       DATE_TODAY="$2"
+      shift 2
+      ;;
+    --kdir)
+      KDIR_OVERRIDE="$2"
       shift 2
       ;;
     --check-escalation)
@@ -170,13 +178,18 @@ fi
 # --- Write gate: reject pre-calibration verdicts (task-62) ---
 # Look up the verdict in rows.jsonl by verdict_id and check calibration_state.
 # Pre-calibration verdicts are logged but must not reach the commons.
-KDIR=$(resolve_knowledge_dir)
+if [[ -n "$KDIR_OVERRIDE" ]]; then
+  KDIR="$KDIR_OVERRIDE"
+else
+  KDIR=$(resolve_knowledge_dir)
+fi
 ROWS_FILE="$KDIR/_scorecards/rows.jsonl"
 
 if [[ -f "$ROWS_FILE" ]]; then
   CAL_STATE=$(python3 -c '
 import json, sys
 rows_file, verdict_id = sys.argv[1], sys.argv[2]
+seen = False
 with open(rows_file, encoding="utf-8") as f:
     for line in f:
         line = line.strip()
@@ -186,9 +199,16 @@ with open(rows_file, encoding="utf-8") as f:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if row.get("verdict_id") == verdict_id:
-            print(row.get("calibration_state", "unknown"))
-            sys.exit(0)
+        ids = {row.get("verdict_id"), row.get("calibrated_by_verdict_id")}
+        ids.update(row.get("verdict_ids") or [])
+        if verdict_id in ids:
+            seen = True
+            if row.get("calibration_state") == "calibrated":
+                print("calibrated")
+                sys.exit(0)
+if seen:
+    print("pre-calibration")
+    sys.exit(0)
 # Not found — treat as unknown
 print("unknown")
 ' "$ROWS_FILE" "$VERDICT_ID" 2>/dev/null || echo "unknown")

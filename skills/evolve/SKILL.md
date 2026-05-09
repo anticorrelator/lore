@@ -153,7 +153,7 @@ and later carry this field; older entries without it are treated as
 **Load consumption-contradiction evidence.** For each work item in the
 recent window (matching `SINCE`), read
 `$KDIR/_work/<slug>/consumption-contradictions.jsonl` and collect rows with
-`status: verified`. These are the claim-retraction gate inputs.
+`status: accepted`. These are the claim-retraction gate inputs.
 
 **Never-eligible rows (excluded from all gate paths).** Before evaluating
 any gate path, partition `rows.jsonl` and exclude:
@@ -169,7 +169,7 @@ the path matching its `change_type`:
 |---|---|---|
 | Any template-behavior change (default) | Primary | `tier: template + kind: scored + calibrated + non-degraded` |
 | `doctrine-correction` | Secondary | `tier: correction + kind: scored + calibrated + non-degraded` |
-| `claim-retraction` / `falsified-doctrine` | Claim-retraction | `kind: consumption-contradiction + status: verified + non-degraded` |
+| `claim-retraction` / `falsified-doctrine` | Claim-retraction | `kind: consumption-contradiction + status: accepted + non-degraded` |
 
 **Primary gate** (`change_type` not `doctrine-correction`/`claim-retraction`/`falsified-doctrine`):
 
@@ -198,11 +198,11 @@ If no row satisfies → `no_op` with reason `no_eligible_correction_row`.
 
 **Claim-retraction gate** (`change_type: "claim-retraction"` or `"falsified-doctrine"`):
 
-1. At least one `consumption-contradictions.jsonl` row exists with `status: verified` for the relevant commons entry
+1. At least one `consumption-contradictions.jsonl` row exists with `status: accepted` for the relevant commons entry
 2. The row's originating window is **not** pipeline-degraded
-3. No sample-size minimum — a single verified contradiction is sufficient
+3. No sample-size minimum — a single accepted contradiction is sufficient
 
-If no verified contradiction row exists → `no_op` with reason `no_verified_contradiction`.
+If no accepted contradiction row exists → `no_op` with reason `no_accepted_contradiction`.
 
 **Attach citation.** For suggestions that clear the primary or secondary gate:
 
@@ -215,7 +215,7 @@ Citation: kind=scored | tier=<tier> | template=<template_id>@<template_version>
 For claim-retraction, attach the contradiction ID:
 ```
 Citation: kind=consumption-contradiction | contradiction_id=<id>
-          knowledge_path=<path> | status=verified
+          knowledge_path=<path> | status=accepted
 ```
 
 Report the gate outcome before Step 6:
@@ -258,7 +258,7 @@ Report:
 [evolve] Sunset check: K approved (R removals exempt, A additions with sunset, M modifications clarifying), J no-op (missing_sunset: J)
 ```
 
-**Immediate sunset trigger (consumption-contradiction).** A verified consumption-contradiction against a claim that was *added* via a prior `/evolve` run triggers immediate sunset review for that addition, regardless of its sunset window horizon. Specifically:
+**Immediate sunset trigger (consumption-contradiction).** An accepted consumption-contradiction against a claim that was *added* via a prior `/evolve` run triggers immediate sunset review for that addition, regardless of its sunset window horizon. Specifically:
 
 1. When loading consumption-contradiction evidence in Step 5 (claim-retraction gate), cross-reference each `contradiction_id` against the current file's `/evolve`-applied additions by matching `knowledge_path` to the addition's target.
 2. If any gate-cleared claim-retraction row targets an existing `/evolve` addition, mark that addition for immediate sunset review — do not wait for the stated metric threshold or time horizon to lapse.

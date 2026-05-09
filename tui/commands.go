@@ -75,6 +75,32 @@ type prStatusLoadedMsg struct {
 	err      error
 }
 
+type settlementQueueCounts struct {
+	Pending   int `json:"pending"`
+	Running   int `json:"running"`
+	Completed int `json:"completed"`
+	Failed    int `json:"failed"`
+	Corrupt   int `json:"corrupt"`
+	Total     int `json:"total"`
+}
+
+type settlementQueueStatus struct {
+	Role         string                `json:"role"`
+	Counts       settlementQueueCounts `json:"counts"`
+	ActiveLeases int                   `json:"active_leases"`
+	Capacity     int                   `json:"capacity"`
+	Concurrency  int                   `json:"concurrency"`
+}
+
+type settlementQueueStatusMsg struct {
+	status settlementQueueStatus
+	err    error
+}
+
+type settlementQueueProcessMsg struct {
+	err error
+}
+
 // activeSessionsCheckedMsg carries all non-stale sessions discovered on disk.
 type activeSessionsCheckedMsg struct {
 	sessions map[string]work.SessionInfo
@@ -98,6 +124,30 @@ func loadPRStatus() tea.Cmd {
 	return func() tea.Msg {
 		statuses, err := gh.LoadPRStatus(context.Background())
 		return prStatusLoadedMsg{statuses: statuses, err: err}
+	}
+}
+
+func loadSettlementQueueStatus() tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("lore", "settlement", "queue", "status", "--json")
+		out, err := cmd.Output()
+		if err != nil {
+			return settlementQueueStatusMsg{err: err}
+		}
+		var status settlementQueueStatus
+		if err := json.Unmarshal(out, &status); err != nil {
+			return settlementQueueStatusMsg{err: err}
+		}
+		return settlementQueueStatusMsg{status: status}
+	}
+}
+
+func runSettlementQueueProcess() tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("lore", "settlement", "queue", "process", "--once", "--json")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		err := cmd.Run()
+		return settlementQueueProcessMsg{err: err}
 	}
 }
 

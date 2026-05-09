@@ -172,7 +172,8 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        validates literal-prefix-match on this string and silently drops
        the section under any alias ("Tier 3 claims", "Tier 3
        observations", "Tier 3 promotion" are all wrong). Shape — one YAML
-       list entry per candidate, 12 fields (full Tier 3 shape minus
+       list entry per candidate, 13 required fields plus optional
+       `closest_entry` (full Tier 3 shape minus
        `confidence`, which `lore promote` forces to "unaudited"):
        - claim_id: <slug form, unique within this work item>
          tier: reusable
@@ -180,6 +181,9 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
          producer_role: worker
          protocol_slot: <protocol slot id — e.g. implement-step-3>
          scale: implementation
+         delta: <covered | extends | contradicts | absent>
+         closest_entry: <required only when delta is extends or contradicts;
+           knowledge entry path/id of the closest commons entry>
          why_future_agent_cares: <one-sentence future-agent utility>
          falsifier: <what would disprove the claim in the codebase>
          related_files: [<absolute path>, ...]
@@ -190,7 +194,13 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        fabricate Tier 3 candidates to satisfy a perceived quota — an empty
        section is the common case. `source_artifact_ids` MUST be non-empty
        and every id MUST appear in your **Tier 2 evidence:** list above;
-       otherwise the lead rejects the candidate.>
+       otherwise the lead rejects the candidate. `delta` is producer-side
+       relationship classification only, not a routing instruction:
+       `covered` means an existing commons entry already covers the claim;
+       `absent` means the claim is new to the commons; `extends` means the
+       claim updates or refines an existing entry; `contradicts` means the
+       claim conflicts with an existing entry. Emit `closest_entry` only when
+       needed to identify the existing entry for `extends` or `contradicts`.>
      **Narrative:** Optional prose slot for judgment, synthesis, cross-
        observation connections, and context that doesn't fit the structured
        fields. Keep brief. Use when the captured signal is stronger than
@@ -318,7 +328,12 @@ If the section is absent or empty, no candidates are promoted — that is
 the common case and the correct outcome when nothing reusable surfaced.
 Emission-time classification (Tier 2 during the task, Tier 3 candidates
 at report time) is what keeps the commons from drifting; promoting
-every worker observation would silently pollute it.
+every worker observation would silently pollute it. For every Tier 3
+candidate, classify its relationship to the closest commons entry with
+`delta: covered | extends | contradicts | absent`. This classification is
+orthogonal to routing: the producer reports the relationship, and the lead
+decides whether the candidate is dropped, promoted, updated, or sent through
+correction handling.
 
 ## Specialized Task Types
 

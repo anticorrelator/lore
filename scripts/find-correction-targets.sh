@@ -2,7 +2,7 @@
 # find-correction-targets.sh — Map a contradicted claim to candidate commons entries
 #
 # Usage:
-#   find-correction-targets.sh --claim-text "<text>" [--file-line "<file:line_range>"] [--limit N] [--threshold F]
+#   find-correction-targets.sh --claim-text "<text>" [--file-line "<file:line_range>"] [--limit N] [--threshold F] [--kdir PATH] [--json]
 #
 # Given the text of a contradicted claim (from a correctness-gate or reverse-auditor
 # verdict) and optionally the file:line_range anchor from the verdict, returns a ranked
@@ -14,7 +14,7 @@
 #   2. TF-IDF similarity >= threshold (default 0.4) between claim_text and entry body.
 #   Entries matching either pass are ranked by overlap + similarity descending.
 #
-# Output (one path per line, ranked):
+# Output (one path per line, ranked; or JSON array with --json):
 #   <entry_path> [overlap=yes] [sim=0.NNNN]
 #
 # Exit codes:
@@ -31,10 +31,12 @@ CLAIM_TEXT=""
 FILE_LINE=""
 LIMIT=10
 THRESHOLD=0.4
+KDIR_OVERRIDE=""
+JSON_MODE=0
 
 usage() {
   cat >&2 <<EOF
-Usage: find-correction-targets.sh --claim-text "<text>" [--file-line "<file:line_range>"] [--limit N] [--threshold F]
+Usage: find-correction-targets.sh --claim-text "<text>" [--file-line "<file:line_range>"] [--limit N] [--threshold F] [--kdir PATH] [--json]
 
 Map a contradicted claim to candidate knowledge entry paths.
 
@@ -43,6 +45,8 @@ Options:
   --file-line FILE:LINE The file:line_range anchor from the verdict (optional)
   --limit N             Maximum results to return (default: 10)
   --threshold F         Minimum TF-IDF cosine similarity (default: 0.4)
+  --kdir PATH           Knowledge directory override
+  --json                Emit a JSON array of result objects
 EOF
 }
 
@@ -64,6 +68,14 @@ while [[ $# -gt 0 ]]; do
       THRESHOLD="$2"
       shift 2
       ;;
+    --kdir)
+      KDIR_OVERRIDE="$2"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -82,7 +94,11 @@ if [[ -z "$CLAIM_TEXT" ]]; then
   exit 1
 fi
 
-KDIR=$(resolve_knowledge_dir)
+if [[ -n "$KDIR_OVERRIDE" ]]; then
+  KDIR="$KDIR_OVERRIDE"
+else
+  KDIR=$(resolve_knowledge_dir)
+fi
 
 if [[ ! -f "$KDIR/_manifest.json" ]]; then
   echo "Error: knowledge store not found at: $KDIR" >&2
@@ -95,10 +111,11 @@ if [[ ! -f "$DB_PATH" ]]; then
   exit 2
 fi
 
-python3 - "$KDIR" "$DB_PATH" "$CLAIM_TEXT" "$FILE_LINE" "$LIMIT" "$THRESHOLD" "$SCRIPT_DIR" <<'PYEOF'
+python3 - "$KDIR" "$DB_PATH" "$CLAIM_TEXT" "$FILE_LINE" "$LIMIT" "$THRESHOLD" "$SCRIPT_DIR" "$JSON_MODE" <<'PYEOF'
 import sys
 import os
 import re
+import json
 
 kdir = sys.argv[1]
 db_path = sys.argv[2]
@@ -107,6 +124,7 @@ file_line = sys.argv[4]   # may be empty
 limit = int(sys.argv[5])
 threshold = float(sys.argv[6])
 script_dir = sys.argv[7]
+json_mode = sys.argv[8] == "1"
 
 sys.path.insert(0, script_dir)
 
@@ -152,8 +170,24 @@ concordance = Concordance(db_path)
 # Build TF-IDF vector for the claim text
 claim_vec = concordance.build_query_vector(claim_text)
 
-# Get all knowledge entry vectors
+# Get all knowledge entry vectors. Also include raw markdown files so related_files
+# overlap still works in tiny fixture stores whose concordance vector table is empty
+# or has no useful rows yet.
 all_vecs = concordance.get_all_vectors(source_type='knowledge')
+seen_paths = {
+    os.path.abspath(entry.get('file_path') if os.path.isabs(entry.get('file_path', '')) else os.path.join(kdir, entry.get('file_path', '')))
+    for entry in all_vecs
+}
+for root, dirs, files in os.walk(kdir):
+    dirs[:] = [d for d in dirs if not d.startswith('_') and d not in {'.git', '__pycache__'}]
+    for fname in files:
+        if not fname.endswith('.md') or fname.startswith('_'):
+            continue
+        fp = os.path.abspath(os.path.join(root, fname))
+        if fp in seen_paths:
+            continue
+        all_vecs.append({'file_path': fp, 'heading': os.path.splitext(fname)[0], 'vector': {}})
+        seen_paths.add(fp)
 
 results = []
 
@@ -200,7 +234,11 @@ results.sort(key=lambda x: (-int(x['overlap']), -x['sim']))
 results = results[:limit]
 
 if not results:
-    print("No matching entries found")
+    print("[]" if json_mode else "No matching entries found")
+    sys.exit(0)
+
+if json_mode:
+    print(json.dumps(results, ensure_ascii=False, indent=2))
     sys.exit(0)
 
 for r in results:

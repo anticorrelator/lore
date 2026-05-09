@@ -13,12 +13,14 @@
 #
 # Required fields:
 #   claim_id, tier, claim, producer_role, protocol_slot, scale,
-#   why_future_agent_cares, falsifier, related_files, source_artifact_ids,
+#   delta, why_future_agent_cares, falsifier, related_files, source_artifact_ids,
 #   work_item, confidence, captured_at_sha
 #
 # tier must equal the literal string "reusable".
 # confidence must equal the literal string "unaudited" on new entries.
 # producer_role must be one of: researcher, worker, advisor, spec-lead, implement-lead
+# delta must be one of: covered, extends, contradicts, absent.
+# closest_entry is required when delta is extends or contradicts.
 # claim, why_future_agent_cares, falsifier must be non-empty strings.
 # source_artifact_ids must be a non-empty array.
 # related_files must be an array (may be empty).
@@ -90,6 +92,7 @@ REQUIRED_FIELDS=(
   producer_role
   protocol_slot
   scale
+  delta
   why_future_agent_cares
   falsifier
   related_files
@@ -152,6 +155,26 @@ else
   if [[ $SCALE_VALID -eq 0 ]]; then
     ENUM_LIST=$(printf '%s' "$VALID_SCALES" | tr '\n' ',' | sed 's/,$//')
     fail_field "invalid scale: \"$SCALE_VAL\" (must be one of: $ENUM_LIST)"
+  fi
+fi
+
+# --- delta classification must be well-formed but does not route by itself ---
+DELTA=$(printf '%s' "$ROW" | jq -r '.delta // ""')
+case "$DELTA" in
+  covered|extends|contradicts|absent) ;;
+  "")
+    fail_field "delta is empty (must be one of: covered, extends, contradicts, absent)"
+    ;;
+  *)
+    fail_field "invalid delta: \"$DELTA\" (must be one of: covered, extends, contradicts, absent)"
+    ;;
+esac
+
+# --- closest_entry required only for deltas that target an existing commons entry ---
+if [[ "$DELTA" == "extends" || "$DELTA" == "contradicts" ]]; then
+  CLOSEST_ENTRY=$(printf '%s' "$ROW" | jq -r '.closest_entry // ""')
+  if [[ -z "${CLOSEST_ENTRY// }" ]]; then
+    fail_field "closest_entry must not be empty when delta is \"$DELTA\""
   fi
 fi
 

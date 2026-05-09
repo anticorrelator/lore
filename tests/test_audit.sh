@@ -66,7 +66,16 @@ setup_fixture() {
   if [[ -z "$findings" ]]; then
     findings='{"pr":42,"findings":[{"title":"off-by-one","file":"app.py","line":10,"severity":"blocking","grounding":"loop bound","selected":true},{"title":"nit","severity":"info","selected":false}]}'
   fi
-  printf '%s\n' "$findings" > "$kdir/_followups/$slug/lens-findings.json"
+  printf '%s\n' "$findings" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+data.setdefault("producer_role", "worker")
+data.setdefault("template_version", "abc123def456")
+for finding in data.get("findings", []) or []:
+    finding.setdefault("producer_role", data["producer_role"])
+    finding.setdefault("template_version", data["template_version"])
+print(json.dumps(data))
+' > "$kdir/_followups/$slug/lens-findings.json"
 }
 
 gate_fixture() {
@@ -108,7 +117,7 @@ Synthetic fixture for plan-assertions audit tests.
 
 ### Core logic
 **Question:** Does the implementation handle edge cases correctly?
-Template-version: test-plan-v1
+Template-version: 111111111111
 **Findings:**
 - The implementation handles edge cases.
 
@@ -147,7 +156,7 @@ setup_worker_observations_fixture() {
 
 ## 2026-01-01T00:00:00Z | source: worker-2
 
-Template-version: test-worker-v1
+Template-version: 222222222222
 
 Task: Synthetic fixture for worker-observations audit tests.
 
@@ -189,6 +198,40 @@ assert_contains "audit_contradiction_rate metric row present" "$METRICS" '"metri
 assert_contains "falsifier_quality reflects all contradictions have corrections" "$METRICS" '"metric":"falsifier_quality","value":1'
 assert_contains "rows attribute verdict_source=correctness-gate" "$METRICS" '"verdict_source":"correctness-gate"'
 assert_contains "rows are kind=scored" "$METRICS" '"kind":"scored"'
+TIER1=$(jq -r 'select(.kind=="scored") | .tier' < "$KDIR/_scorecards/rows.jsonl" | sort -u)
+assert_eq "producer-scoring rows are tier=template" "$TIER1" "template"
+
+# =============================================
+# Test 1b: Calibrated gate rows register template and expose durable verdict id
+# =============================================
+echo ""
+echo "Test 1b: calibrated template-tier rows + durable correction verdict_id"
+KDIR="$TEST_DIR/kdir1b"
+setup_fixture "$KDIR" "pr-cal"
+GATE_TV=$(bash "$SCRIPT_DIR/template-version.sh" "$SCRIPT_DIR/../agents/correctness-gate.md")
+mkdir -p "$KDIR/_scorecards"
+printf '{"correctness-gate:%s":{"calibration_state":"calibrated"}}\n' "$GATE_TV" > "$KDIR/_scorecards/calibration-state.json"
+gate_fixture "$TEST_DIR/gate1b.json" '{
+  "judge":"correctness-gate",
+  "judge_template_version":"abc123def456",
+  "verdicts":[
+    {"claim_id":"finding-0","verdict":"contradicted","evidence":"no match found","correction":"actual grounded fact"}
+  ]
+}'
+
+OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-cal" --kdir "$KDIR" --gate-output-file "$TEST_DIR/gate1b.json")
+assert_contains "calibrated run reports four rows including auth telemetry" "$OUT" "scorecard rows appended: 4"
+AUTH_ROW=$(jq -c 'select(.metric=="correction_authorization")' < "$KDIR/_scorecards/rows.jsonl")
+assert_contains "authorization telemetry row carries verdict_id" "$AUTH_ROW" '"verdict_id":"'
+assert_contains "authorization row is calibrated" "$AUTH_ROW" '"calibration_state":"calibrated"'
+TEMPLATE_ROW=$(jq -c 'select(.metric=="audit_contradiction_rate")' < "$KDIR/_scorecards/rows.jsonl")
+assert_contains "audit contradiction row is tier template" "$TEMPLATE_ROW" '"tier":"template"'
+assert_contains "audit contradiction row also carries verdict_id" "$TEMPLATE_ROW" '"verdict_id":"'
+REGISTRY_ROW=$(jq -c '.entries[] | select(.template_id=="worker" and .template_version=="abc123def456")' "$KDIR/_scorecards/template-registry.json")
+assert_contains "producer template version registered" "$REGISTRY_ROW" '"template_id":"worker"'
+SETTLEMENT_VERDICT_ID=$(jq -r '.verdicts[0].verdict_id' "$KDIR/_followups/pr-cal/verdicts/pr-cal.jsonl")
+SCORECARD_VERDICT_ID=$(printf '%s' "$AUTH_ROW" | jq -r '.verdict_id')
+assert_eq "settlement record and scorecard share verdict_id" "$SCORECARD_VERDICT_ID" "$SETTLEMENT_VERDICT_ID"
 
 # =============================================
 # Test 2: User-supplied --gate-output-file is preserved across runs
@@ -811,7 +854,7 @@ assert_eq "work_item derived from _work/<slug>/ for worker-observations path" "$
 # =============================================
 # Test 21: Plan-assertions happy-path
 # setup_plan_assertions_fixture → gate-plan-1.json with 1 verified + 1 contradicted
-# Asserts: 3 scorecard rows, template_id=researcher, tier=reusable,
+# Asserts: 3 scorecard rows, template_id=researcher, tier=template,
 # factual_precision=0.5, audit_contradiction_rate=0.5, falsifier_quality=1.0
 # =============================================
 echo ""
@@ -839,7 +882,7 @@ assert_contains "plan-assertions: factual_precision=0.5" "$PLAN_METRICS21" '"met
 assert_contains "plan-assertions: audit_contradiction_rate=0.5" "$PLAN_METRICS21" '"metric":"audit_contradiction_rate","value":0.5'
 assert_contains "plan-assertions: falsifier_quality=1 (correction present)" "$PLAN_METRICS21" '"metric":"falsifier_quality","value":1'
 assert_contains "plan-assertions: template_id=researcher" "$PLAN_METRICS21" '"template_id":"researcher"'
-assert_contains "plan-assertions: tier=reusable" "$PLAN_METRICS21" '"tier":"reusable"'
+assert_contains "plan-assertions: tier=template" "$PLAN_METRICS21" '"tier":"template"'
 assert_contains "plan-assertions: verdict_source=correctness-gate" "$PLAN_METRICS21" '"verdict_source":"correctness-gate"'
 
 # =============================================

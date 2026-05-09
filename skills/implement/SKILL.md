@@ -70,7 +70,7 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
 | 5 Lead separates accepted work from remembered doctrine | Step 4 |
 | 6 Lead writes/updates execution evidence | Step 4 |
 | 7 Lead runs `lore promote` on accepted Tier 3 | Step 5 |
-| 8 Stop hook lazily triggers audit; completion non-blocking | Step 6 (reference only; no explicit call) |
+| 8 Settlement audit attaches to durable claim production; Stop-hook/ceremony dispatch is non-primary | Step 6 (reference only; no explicit call) |
 | 9 If PR exists or review requested, branch to `/pr-review` | Step 7 sub-step |
 | 10 Prepare `/retro` inputs | Step 7 |
 
@@ -496,7 +496,18 @@ Inputs: the Tier 3 candidate list stashed in Step 4.4, plus any lead-originated 
 
 **Empty input is a valid input — Step 5 always runs through to the sub-step 4 summary log.** The terminal state when no candidates were stashed is `Tier 3 promotion summary: 0 accepted, 0 rejected` written to `execution-log.md`; that log line is the committed reasoning a later auditor reads. Skipping Step 5 on the rationalization "no candidates → no-op → nothing to do" is the bypass shape named in the commitment protocol — the commitment is to evaluate and emit the summary, not to produce non-zero promotions.
 
-For each accepted Tier 3 candidate, emit one `lore promote` call. Multi-producer synthesis is NEVER merged — one call per distinct producer so that scorecard rows retain the role × template attribution.
+Before promotion, read each candidate's producer `delta` classification, or reconstruct it when older reports omitted it. `delta` describes the candidate's relationship to the closest commons entry; it is not itself the routing action:
+
+| `delta` | Meaning | Routing input |
+|---|---|---|
+| `covered` | Existing commons entry already covers the claim. | `closest_entry` optional. |
+| `absent` | Claim is new to the commons. | `closest_entry` optional. |
+| `extends` | Claim updates or refines an existing commons entry. | `closest_entry` required. |
+| `contradicts` | Claim conflicts with an existing commons entry. | `closest_entry` required. |
+
+After classification, Step 5 routes `covered` to drop, `absent` to the normal new-entry promotion path, `extends` to calibrated edit/update followup, and `contradicts` to contradiction/correction followup. If a worker reports `extends` or `contradicts` without `closest_entry`, reject the candidate as missing routing input. Do not silently downgrade it to `absent`; that recreates duplicate or stale doctrine.
+
+For each accepted `absent` Tier 3 candidate, emit one `lore promote` call. Multi-producer synthesis is NEVER merged — one call per distinct producer so that scorecard rows retain the role × template attribution.
 
 1. **Source-artifact verification (reject candidates with missing or stale source_artifact_ids).** Before promotion, read `$KDIR/_work/<slug>/task-claims.jsonl` and confirm that EVERY id listed in the candidate's `source_artifact_ids` array exists as a `claim_id` of some row in that file. Scope is this work item only — cross-work-item references are always rejected. Candidates referencing missing or stale ids are rejected (not promoted). Note each rejection in `execution-log.md`:
    ```bash
@@ -551,7 +562,7 @@ bash ~/.lore/scripts/create-followup.sh \
   --content "<one-line summary of what didn't finish and why, followed by a checklist of remaining items>"
 ```
 
-**Lazy audit note:** per §9.2 Step 8, the Stop hook lazily triggers audit of this session's promotions; `/implement` does not invoke the audit explicitly here. Completion of `/implement` is non-blocking — the audit runs opportunistically after session end.
+**Settlement audit note:** `/implement` does not dispatch settlement from Stop hooks, PR review, or ceremony teardown. Settlement must attach to durable claim production (the validated Tier 2 write path, plus scanner repair where implemented), so Step 6 records followups only; completion remains non-blocking and does not depend on a terminal/process lifetime.
 
 ### Step 7: Cleanup and report
 

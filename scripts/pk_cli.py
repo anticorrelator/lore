@@ -252,6 +252,8 @@ def cmd_search(args: argparse.Namespace) -> None:
         if r.get("scale"):
             print(f"  Scale: {r['scale']}")
         print(f"  {render_trust_stamp(r, knowledge_dir=args.knowledge_dir)}")
+        if r.get("correction_recency"):
+            print(f"  Correction recency: {r['correction_recency']}")
         print(f"  Snippet: {r['snippet']}")
         if r.get("similar_entries"):
             print("  See also:")
@@ -291,6 +293,8 @@ def cmd_search_preferences(args: argparse.Namespace) -> None:
         if r.get("learned_date"):
             print(f"  Learned: {r['learned_date']}")
         print(f"  {render_trust_stamp(r, knowledge_dir=args.knowledge_dir)}")
+        if r.get("correction_recency"):
+            print(f"  Correction recency: {r['correction_recency']}")
         print(f"  Snippet: {r['snippet']}")
 
 

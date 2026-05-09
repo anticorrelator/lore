@@ -66,6 +66,7 @@ Commands:
   test         Run lore test suites (see: lore test protocols)
   annotate     Record a retrieval friction annotation
   audit        Route a producer artifact through the settlement judges
+  settlement   Settlement audit queue management (see: lore settlement --help)
   resolve      Resolve repo path or [[backlink]] references
   prefetch     Prefetch knowledge for agent prompts
   init         Initialize a knowledge store
@@ -112,7 +113,7 @@ Commands:
   correction   Verdict-driven correction management (see: lore correction --help)
   off-scale    Off-scale route management (see: lore off-scale --help)
   consumption-contradiction
-               Append a consumption-contradiction signal-capture row
+               Append or resolve consumption-contradiction rows
   synopsis     Edge-keyed synopsis sidecar management (see: lore synopsis --help)
   resynth      Invalidate and re-synthesize edge synopses for a knowledge entry
   history      Show correction history and supersession chain for a knowledge entry
@@ -1641,6 +1642,96 @@ cmd_off_scale() {
   esac
 }
 
+consumption_contradiction_usage() {
+  cat >&2 <<EOF
+lore consumption-contradiction — consumption-contradiction sidecar management
+
+Usage:
+  lore consumption-contradiction [append flags...]
+  lore consumption-contradiction resolve <contradiction_id> --status accepted|declined|remediated --resolved-by WHO [args...]
+
+Subcommands:
+  resolve   Transition a contradiction row through pending|accepted|declined|remediated
+
+Without a subcommand, arguments are passed to the append writer for backward
+compatibility.
+EOF
+}
+
+cmd_consumption_contradiction() {
+  if [[ $# -eq 0 ]]; then
+    consumption_contradiction_usage
+    return 1
+  fi
+
+  case "$1" in
+    --help|-h)
+      consumption_contradiction_usage
+      return 0
+      ;;
+    resolve)
+      shift
+      "$SCRIPTS_DIR/consumption-contradiction-resolve.sh" "$@"
+      ;;
+    append)
+      shift
+      "$SCRIPTS_DIR/consumption-contradiction-append.sh" "$@"
+      ;;
+    *)
+      "$SCRIPTS_DIR/consumption-contradiction-append.sh" "$@"
+      ;;
+  esac
+}
+
+settlement_usage() {
+  cat >&2 <<EOF
+lore settlement — settlement audit queue management
+
+Usage: lore settlement queue <subcommand> [args...]
+
+Subcommands:
+  queue enqueue --work-item <slug> --claim-id <id> [--json]
+  queue scan [--json]
+  queue status [--json]
+  queue process [--limit N] [--json] [--dry-run] [-- <audit args...>]
+
+Notes:
+  Queue items are typed settlement-audit.v1 requests under
+  _work-queue/settlement-audit/. They point at task-claims.jsonl plus explicit
+  claim_ids; they are not generic "lore audit <slug>" job strings.
+EOF
+}
+
+cmd_settlement() {
+  if [[ $# -eq 0 ]]; then
+    settlement_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      settlement_usage
+      return 0
+      ;;
+    queue)
+      if [[ $# -eq 0 ]]; then
+        settlement_usage
+        return 1
+      fi
+      "$SCRIPTS_DIR/settlement-queue.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown settlement subcommand '$subcmd'" >&2
+      echo "" >&2
+      settlement_usage
+      return 1
+      ;;
+  esac
+}
+
 # --- Top-level dispatch ---
 if [[ $# -eq 0 ]]; then
   exec lore-tui
@@ -1686,6 +1777,10 @@ case "$1" in
   audit)
     shift
     "$SCRIPTS_DIR/audit-artifact.sh" "$@"
+    ;;
+  settlement)
+    shift
+    cmd_settlement "$@"
     ;;
   resolve)
     shift
@@ -1823,7 +1918,7 @@ case "$1" in
     ;;
   consumption-contradiction)
     shift
-    "$SCRIPTS_DIR/consumption-contradiction-append.sh" "$@"
+    cmd_consumption_contradiction "$@"
     ;;
   synopsis)
     shift

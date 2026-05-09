@@ -504,6 +504,25 @@ func TestBuildPaneConfigStatesDontCrossContaminate(t *testing.T) {
 	}
 }
 
+func TestSettlementQueueLabelRendersOperationalCounts(t *testing.T) {
+	m := minimalModel(stateWork, nil, nil)
+	m.settlementQueueLoaded = true
+	m.settlementQueue = settlementQueueStatus{
+		Counts: settlementQueueCounts{
+			Pending: 2,
+			Corrupt: 1,
+		},
+		ActiveLeases: 1,
+	}
+
+	label := m.settlementQueueLabel()
+	for _, want := range []string{"settlement", "2 queued", "1 running", "1 corrupt"} {
+		if !strings.Contains(label, want) {
+			t.Fatalf("settlement queue label %q missing %q", label, want)
+		}
+	}
+}
+
 // --- handlePanelRouting tests ---
 
 // noopCallbacks returns a panelCallbacks where every field is a no-op.
@@ -1098,9 +1117,9 @@ func TestPostReviewCompleteMsgWithErrorSetsFlashErr(t *testing.T) {
 
 func TestPostReviewCompleteFlashVariants(t *testing.T) {
 	cases := []struct {
-		name    string
-		msg     followup.PostReviewCompleteMsg
-		want    string
+		name string
+		msg  followup.PostReviewCompleteMsg
+		want string
 	}{
 		{
 			name: "plain posted count",

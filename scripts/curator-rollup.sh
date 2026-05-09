@@ -177,6 +177,22 @@ if [[ -n "$KDIR_OVERRIDE" ]]; then
   KDIR_ARG=(--kdir "$KDIR_OVERRIDE")
 fi
 
+register_template_version_if_possible() {
+  local template_id="$1"
+  local template_version="$2"
+  local template_path=""
+  [[ "$template_version" =~ ^[0-9a-f]{12}$ ]] || return 0
+  if template_path=$(resolve_agent_template "$template_id" 2>/dev/null); then
+    bash "$SCRIPT_DIR/template-registry-register.sh" "${KDIR_ARG[@]}" \
+      --template-id "$template_id" \
+      --template-version "$template_version" \
+      --template-path "$template_path" \
+      --description "curator rollup producer template" >/dev/null 2>&1 || true
+  fi
+}
+
+register_template_version_if_possible "$PRODUCER_TEMPLATE_ID" "$PRODUCER_TEMPLATE_VERSION"
+
 emit_row() {
   local metric="$1"
   local value="$2"

@@ -447,7 +447,9 @@ def _render_preferences_block_summary(prefs):
         if len(r.get("snippet", "")) > 200:
             snippet += "..."
         score = r.get("score", 0)
-        print(f'- **{r["heading"]}** ({r["file_path"]}, score: {score}): {snippet}')
+        corrected_line = _last_corrected_line(r["file_path"]) if r.get("source_type") == "knowledge" else ""
+        suffix = f" — {corrected_line}" if corrected_line else ""
+        print(f'- **{r["heading"]}** ({r["file_path"]}, score: {score}): {snippet}{suffix}')
     print()
 
 
@@ -510,7 +512,9 @@ if fmt == "summary":
         if len(r.get("snippet", "")) > 200:
             snippet += "..."
         score = r.get("score", 0)
-        print(f'- **{r["heading"]}** ({r["file_path"]}, score: {score}): {snippet}')
+        corrected_line = _last_corrected_line(r["file_path"]) if r.get("source_type") == "knowledge" else ""
+        suffix = f" — {corrected_line}" if corrected_line else ""
+        print(f'- **{r["heading"]}** ({r["file_path"]}, score: {score}): {snippet}{suffix}')
     if suppressed_historical > 0 and scale_context == "spec-lead":
         print(f'\n_{suppressed_historical} historical/superseded {"entry" if suppressed_historical == 1 else "entries"} suppressed — add --include-status=historical to expand._')
     _log_prefetch(results)

@@ -20,8 +20,11 @@ sole-writer responsibilities of evidence-append.sh and lore-promote.sh):
     - Empty list (no entries) is accepted.
 
   **Tier 3 candidates:**  (optional heading)
-    - Each YAML-style list entry starts with `- claim:` and must carry ALL of:
-        claim, why_future_agent_cares, falsifier, source_artifact_ids
+    - Each YAML-style list entry starts with `- claim_id:` (preferred) or
+      legacy `- claim:` and must carry ALL of:
+        claim, delta, why_future_agent_cares, falsifier, source_artifact_ids
+    - `delta` must be one of: covered, extends, contradicts, absent.
+    - `closest_entry` is required when `delta` is `extends` or `contradicts`.
     - `source_artifact_ids` must be an array literal with at least one element —
       accepted forms:  source_artifact_ids: [a, b]   or   source_artifact_ids: ["a"]
       An empty array (`source_artifact_ids: []`) or a missing value fails.
@@ -34,7 +37,8 @@ import re
 import sys
 
 
-TIER3_REQUIRED_FIELDS = ("claim", "why_future_agent_cares", "falsifier", "source_artifact_ids")
+TIER3_REQUIRED_FIELDS = ("claim", "delta", "why_future_agent_cares", "falsifier", "source_artifact_ids")
+TIER3_ALLOWED_DELTAS = ("covered", "extends", "contradicts", "absent")
 
 
 def _extract_section(text: str, heading: str) -> str | None:
@@ -69,8 +73,11 @@ def check_tier2(text: str) -> tuple[bool, str | None]:
 
 
 def _split_tier3_entries(section: str) -> list[str]:
-    """Split the Tier 3 candidates section into per-entry substrings by top-level `- claim:` lines."""
-    claim_starts = [m.start() for m in re.finditer(r'(?m)^\s*-\s*claim\s*[:=]', section)]
+    """Split Tier 3 candidates into entries by top-level `- claim_id:` or legacy `- claim:` lines."""
+    claim_starts = [
+        m.start()
+        for m in re.finditer(r'(?m)^\s*-\s*(?:claim_id|claim)\s*[:=]', section)
+    ]
     entries: list[str] = []
     for i, pos in enumerate(claim_starts):
         end = claim_starts[i + 1] if i + 1 < len(claim_starts) else len(section)
@@ -95,6 +102,13 @@ def _source_artifact_ids_nonempty_array(entry: str) -> bool:
     return any(item for item in items)
 
 
+def _field_value(entry: str, field: str) -> str | None:
+    m = re.search(rf'(?im)^\s*(?:-\s*)?{re.escape(field)}\s*[:=]\s*(.+?)\s*$', entry)
+    if not m:
+        return None
+    return m.group(1).strip().strip('"\'')
+
+
 def check_tier3(text: str) -> tuple[bool, str | None]:
     body = _extract_section(text, "Tier 3 candidates")
     if body is None:
@@ -114,6 +128,18 @@ def check_tier3(text: str) -> tuple[bool, str | None]:
             return False, (
                 f"Tier 3 candidate entry {idx} is missing required field(s): "
                 f"{', '.join(missing)} — required: {', '.join(TIER3_REQUIRED_FIELDS)}"
+            )
+        delta = (_field_value(entry, "delta") or "").lower()
+        if delta not in TIER3_ALLOWED_DELTAS:
+            return False, (
+                f"Tier 3 candidate entry {idx} has invalid delta: {delta!r} — "
+                f"must be one of: {', '.join(TIER3_ALLOWED_DELTAS)}"
+            )
+        closest_entry = _field_value(entry, "closest_entry")
+        if delta in {"extends", "contradicts"} and not closest_entry:
+            return False, (
+                f"Tier 3 candidate entry {idx} with delta={delta} is missing closest_entry — "
+                "closest_entry is required for extends and contradicts"
             )
         if not _source_artifact_ids_nonempty_array(entry):
             return False, (

@@ -48,10 +48,10 @@ When `_pending_captures/` directory exists in the knowledge store at session sta
 
    **Low-context candidates:** If the candidate excerpt is too sparse to evaluate the gate confidently, read the **Related files:** field and skim those files before deciding. Do not reject a candidate solely because the excerpt is thin — the stop hook pre-filter has already established baseline relevance. Rejection requires a positive reason (fails Reusable, Non-obvious, Stable, or High confidence), not an absence of evidence.
 
-   **Staleness branch:** when the "non-obvious" check reveals a similar entry may already exist, run `lore search "<key terms>" --type knowledge --limit 3`, read the top match, and branch: (a) same claim — skip the candidate, (b) divergent (contradicts or supersedes) — edit the existing entry file in-place to reflect the new insight, update its `learned` date to today, then skip the new capture. Note: `[staleness] Updated "<existing title>" — superseded by new finding`.
+   **Producer delta branch:** when the "non-obvious" check reveals a similar entry may already exist, classify the candidate's relationship to the closest commons entry as `covered | absent | extends | contradicts`. `covered` means already covered, `absent` means new, `extends` means updates an existing entry, and `contradicts` means conflicts with an existing entry. Require `closest_entry` only for `extends` and `contradicts`; then let the routing step decide whether to drop, capture/promote, edit/update, or run contradiction handling.
 
 3. For qualifying insights, determine the emission path before running the capture command:
-   - **Tier 3 path (`lore promote`):** use when ALL four predicates are true: (a) the candidate is backed by a Tier 2 evidence artifact (worker/researcher observation from `execution-log.md` or `plan.md`), (b) it can be expressed as a `validate-tier3.sh`-accepted row with `claim`, `why_future_agent_cares`, `falsifier`, and `source_artifact_ids`, (c) `source_artifact_ids` is non-empty, and (d) the claim is reusable outside the current work item.
+   - **Tier 3 path (`lore promote`):** use when ALL four predicates are true: (a) the candidate is backed by a Tier 2 evidence artifact (worker/researcher observation from `execution-log.md` or `plan.md`), (b) it can be expressed as a `validate-tier3.sh`-accepted row with `claim`, `delta`, `why_future_agent_cares`, `falsifier`, and `source_artifact_ids`, (c) `source_artifact_ids` is non-empty, and (d) the claim is reusable outside the current work item.
    - **Tier 1 path (`lore capture`):** everything else — interactive candidates, candidates without Tier 2 backing, and any candidate that fails any of the four Tier 3 predicates.
 
    **Pass `--related-files`** using the `**Related files:**` field from the candidate file (skip if the field is `none`):
@@ -259,11 +259,25 @@ Before capturing, confirm all 4 gate conditions hold for each candidate: (1) Reu
 
 Before invoking `lore capture`, evaluate whether each qualifying candidate is a **Tier 3 commons promotion** or a **Tier 1 work-scoped / interactive capture**:
 
+#### Producer delta routing
+
+Before either Tier path, classify the candidate's relationship to the closest existing commons entry. Keep `delta` classification separate from the routing action:
+
+| `delta` | Meaning | Routing input |
+|---|---|---|
+| `covered` | Existing commons entry already covers the claim. | `closest_entry` optional. |
+| `absent` | Claim is new to the commons. | `closest_entry` optional. |
+| `extends` | Claim updates or refines an existing commons entry. | `closest_entry` required. |
+| `contradicts` | Claim conflicts with an existing commons entry. | `closest_entry` required. |
+
+`delta` is classification, not the routing action. After classification, route `covered` to drop, `absent` through the new-entry Tier routing below, `extends` through calibrated edit/update, and `contradicts` through the contradiction/correction path. If a producer supplied `extends` or `contradicts` without `closest_entry`, reject the candidate and log the missing routing input in the execution summary rather than guessing a target. If no explicit producer delta is present, reconstruct the same classification from the candidate text and retrieval context before writing.
+
 **Use `lore promote` (Tier 3 path)** when ALL four predicates are true:
 1. The candidate is backed by a Tier 2 evidence artifact (worker/researcher observation from `execution-log.md` or `plan.md` Observations)
-2. It can be expressed as a `validate-tier3.sh`-accepted Tier 3 row (with `claim`, `why_future_agent_cares`, `falsifier`, `source_artifact_ids`)
+2. It can be expressed as a `validate-tier3.sh`-accepted Tier 3 row (with `claim`, `delta`, `why_future_agent_cares`, `falsifier`, `source_artifact_ids`, and `closest_entry` when `delta` is `extends` or `contradicts`)
 3. `source_artifact_ids` is non-empty (traceability back to Tier 2 source is required)
 4. The claim is reusable **outside** the current work item — future agents in different contexts should care
+5. `delta` is `absent` (or has been reconstructed as absent). `covered`, `extends`, and `contradicts` never take the new-entry promotion route.
 
 ```bash
 echo '<tier3-json-row>' | lore promote --work-item "$RESOLVED_SLUG" \
@@ -272,12 +286,14 @@ echo '<tier3-json-row>' | lore promote --work-item "$RESOLVED_SLUG" \
   --template-version <hash>
 ```
 
-**Use `lore capture` (Tier 1 path)** for everything else — interactive sessions, work-scoped insights, scoped preference captures, and any candidate that fails any of the four Tier 3 predicates:
+**Use `lore capture` (Tier 1 path)** for new-entry candidates that fail the Tier 3 predicates — interactive sessions, work-scoped insights, scoped preference captures, and absent candidates without Tier 2 backing:
 
 ```bash
 lore capture --insight "..." --context "..." --category "..." --confidence "..." --related-files "..." \
   --producer-role <role> --protocol-slot <slot> --template-version <hash> [--work-item <slug>]
 ```
+
+Do not use the Tier 1 path as a fallback for `covered`, `extends`, or `contradicts`. `covered` is a drop; `extends` needs an existing-entry edit/update; `contradicts` needs the contradiction/correction path.
 
 **Always populate `--related-files`** with concrete file paths the insight describes or depends on. This is the strongest staleness signal — when those files change, the entry gets flagged for review. Err on the side of including files.
 

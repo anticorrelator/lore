@@ -6,8 +6,9 @@
 #   evidence-append.sh --file <row.json> --work-item <slug>
 #
 # Reads a single JSON object (via stdin or --file), validates it against the
-# Tier 2 evidence schema via validate-tier2.sh, and appends one JSONL line to
-# $KDIR/_work/<slug>/task-claims.jsonl. Creates the file on first use.
+# Tier 2 evidence schema via validate-tier2.sh, appends one JSONL line to
+# $KDIR/_work/<slug>/task-claims.jsonl, then best-effort enqueues a typed
+# settlement-audit.v1 request for that claim. Creates the file on first use.
 #
 # SOLE-WRITER INVARIANT: `evidence-append.sh` is the only sanctioned writer of
 # `$KDIR/_work/<slug>/task-claims.jsonl`. No other script, skill, agent prompt,
@@ -116,3 +117,15 @@ printf '%s\n' "$COMPACT" >> "$TARGET"
 
 CLAIM_ID=$(printf '%s' "$ROW" | jq -r '.claim_id // "(unknown)"')
 echo "[evidence-append] Appended claim '$CLAIM_ID' to _work/$WORK_ITEM/task-claims.jsonl"
+
+# Settlement enqueue is intentionally fail-open: the Tier 2 append is the
+# canonical write. Queue creation is asynchronous follow-up machinery and must
+# never make a validated evidence append look unsuccessful.
+if ! "$SCRIPT_DIR/settlement-queue.sh" enqueue \
+    --work-item "$WORK_ITEM" \
+    --claim-id "$CLAIM_ID" \
+    --kdir "$KNOWLEDGE_DIR" \
+    --source evidence-append \
+    >/dev/null; then
+  echo "[evidence-append] warning: settlement enqueue failed for claim '$CLAIM_ID' (append kept)" >&2
+fi

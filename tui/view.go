@@ -57,7 +57,6 @@ func (m model) View() string {
 	return base
 }
 
-
 // viewOnboarding renders a full-screen centered welcome view for first-time initialization.
 func (m model) viewOnboarding() string {
 	titleS := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
@@ -165,7 +164,6 @@ func renderBorderTitleWithAnnot(title string, width int, titleS, borderS lipglos
 	}
 	return prefix + rendered + borderS.Render(strings.Repeat("─", middle)) + borderS.Render(" ") + annot + borderS.Render(" ─")
 }
-
 
 // viewSideBySide renders a side-by-side split pane using the entity-neutral paneConfig.
 // It replaces viewSplitPane (stateWork) and viewFollowUpsSideBySide (stateFollowUps).
@@ -463,6 +461,34 @@ func followupListDims(m model) (int, int) {
 	return leftPanelWidth, m.listPanelHeight()
 }
 
+func (m model) settlementQueueLabel() string {
+	if !m.settlementQueueLoaded {
+		return ""
+	}
+	counts := m.settlementQueue.Counts
+	running := m.settlementQueue.ActiveLeases
+	if running == 0 {
+		running = counts.Running
+	}
+	if counts.Pending == 0 && running == 0 && counts.Failed == 0 && counts.Corrupt == 0 {
+		return ""
+	}
+	parts := []string{}
+	if counts.Pending > 0 {
+		parts = append(parts, fmt.Sprintf("%d queued", counts.Pending))
+	}
+	if running > 0 {
+		parts = append(parts, fmt.Sprintf("%d running", running))
+	}
+	if counts.Failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", counts.Failed))
+	}
+	if counts.Corrupt > 0 {
+		parts = append(parts, fmt.Sprintf("%d corrupt", counts.Corrupt))
+	}
+	return "settlement " + strings.Join(parts, " · ")
+}
+
 // renderStatusBar renders a single-line context-sensitive keybinding hint bar.
 func (m model) renderStatusBar(width int) string {
 	dimS := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
@@ -623,6 +649,15 @@ func (m model) renderStatusBar(width int) string {
 	}
 
 	bar := "  " + strings.Join(hints, sep)
+	if queueLabel := m.settlementQueueLabel(); queueLabel != "" {
+		queueS := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+		label := queueS.Render(queueLabel)
+		barW := lipgloss.Width(bar)
+		labelW := lipgloss.Width(label)
+		if barW+labelW+3 < width {
+			bar += strings.Repeat(" ", width-barW-labelW-1) + label
+		}
+	}
 	barW := lipgloss.Width(bar)
 	if barW < width {
 		bar += strings.Repeat(" ", width-barW)

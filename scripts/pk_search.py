@@ -1164,6 +1164,11 @@ class Searcher:
                 rel_path = os.path.relpath(abs_path, self.knowledge_dir)
             except ValueError:
                 rel_path = abs_path
+            correction_recency = (
+                _parse_correction_recency(abs_path)
+                if row["source_type"] == "knowledge"
+                else None
+            )
 
             result = {
                 "heading": row["heading"],
@@ -1176,6 +1181,7 @@ class Searcher:
                 "scale": entry_scale,
                 "entry_status": effective_entry_status,
                 "template_version": row["template_version"],
+                "correction_recency": correction_recency,
                 "score": round(score, 4),
                 "snippet": snippet,
             }
@@ -1315,6 +1321,11 @@ class Searcher:
                 rel_path = os.path.relpath(abs_path, self.knowledge_dir)
             except ValueError:
                 rel_path = abs_path
+            correction_recency = (
+                _parse_correction_recency(abs_path)
+                if row["source_type"] == "knowledge"
+                else None
+            )
 
             results.append({
                 "heading": row["heading"],
@@ -1327,6 +1338,7 @@ class Searcher:
                 "scale": row["scale"],
                 "entry_status": effective_entry_status,
                 "template_version": row["template_version"],
+                "correction_recency": correction_recency,
                 "score": round(score, 4),
                 "snippet": snippet,
             })
@@ -1834,4 +1846,3 @@ class LinkChecker:
 if __name__ == "__main__":
     from pk_cli import main  # noqa: E402
     main()
-

@@ -20,8 +20,10 @@
 #     **Tier 2 evidence:**      list of claim_id strings — already validated at write-time
 #                                by evidence-append.sh; hook only checks list-shape
 #     **Tier 3 candidates:**    optional YAML list of promotion candidates; each entry must
-#                                carry claim, why_future_agent_cares, falsifier, and a
-#                                non-empty source_artifact_ids array
+#                                carry claim, delta, why_future_agent_cares, falsifier,
+#                                and a non-empty source_artifact_ids array. `delta` is
+#                                one of covered|extends|contradicts|absent; closest_entry
+#                                is required only for extends/contradicts.
 #   Hook is a gate, not a sole-writer: validates section SHAPE only. Claim content is
 #   sole-writer-validated by evidence-append.sh (Tier 2) and lore-promote.sh (Tier 3).
 #   The researcher **Assertions:** path is unchanged — tier-section checks apply to

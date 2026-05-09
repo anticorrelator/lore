@@ -111,6 +111,7 @@ func (m model) Init() tea.Cmd {
 		loadPRStatus(),
 		indexPollTick(),
 		followup.LoadIndexCmd(m.config.KnowledgeDir),
+		loadSettlementQueueStatus(),
 	)
 }
 
@@ -346,6 +347,8 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			loadWorkItems(m.config.WorkDir),
 			loadPRStatus(),
 			indexPollTick(),
+			followup.LoadIndexCmd(m.config.KnowledgeDir),
+			loadSettlementQueueStatus(),
 		)
 
 	case workAIFinishedMsg:
@@ -1048,6 +1051,21 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		})
 		m.list = lm
 		return m, cmd
+
+	case settlementQueueStatusMsg:
+		if msg.err == nil {
+			m.settlementQueue = msg.status
+			m.settlementQueueLoaded = true
+		}
+		return m, nil
+
+	case settlementQueueProcessMsg:
+		m.settlementProcessInFlight = false
+		if msg.err != nil {
+			m.flashErr = fmt.Sprintf("settlement queue failed: %v", msg.err)
+			return m, nil
+		}
+		return m, loadSettlementQueueStatus()
 
 	case work.SpecRequestMsg:
 		return m.handleSpecRequest(msg)
