@@ -604,7 +604,7 @@ func TestSettlementRootNavigationIgnoredInTerminalMode(t *testing.T) {
 func TestSettlementEnableActionRefreshesInlineSettingsPanel(t *testing.T) {
 	setupFakeLoreData(t, `{
 		"version": 1,
-		"active_framework": "claude-code",
+		"tui_launch_framework": "claude-code",
 		"settlement": {"enabled": false}
 	}`)
 

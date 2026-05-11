@@ -46,7 +46,7 @@ setup() {
   ln -s "$REPO_DIR/scripts" "$TEST_LORE_DATA_DIR/scripts"
   # Default unified settings.json — individual tests rewrite as needed.
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":1,"active_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--dangerously-skip-permissions"]},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--dangerously-skip-permissions"]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   export LORE_DATA_DIR="$TEST_LORE_DATA_DIR"
   unset LORE_FRAMEWORK
@@ -114,20 +114,18 @@ write_settings() {
   [ "$bash_out" = "opencode" ]
 }
 
-@test "parity: resolve_active_framework — file-side override (settings.json codex)" {
+@test "parity: resolve_active_framework — ignores TUI launch preference" {
   write_settings <<EOF
-{"version":1,"active_framework":"codex","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":1,"tui_launch_framework":"codex","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   go_out=$(go_helper resolve_active_framework)
   bash_out=$(bash_helper "resolve_active_framework")
-  [ "$go_out" = "codex" ]
-  [ "$bash_out" = "codex" ]
+  [ "$go_out" = "claude-code" ]
+  [ "$bash_out" = "claude-code" ]
 }
 
 @test "parity: resolve_active_framework — unknown framework rejected on both sides" {
-  write_settings <<EOF
-{"version":1,"active_framework":"bogus-harness","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
-EOF
+  export LORE_FRAMEWORK=bogus-harness
   go_status=0
   go_out=$(go_helper resolve_active_framework) || go_status=$?
   bash_status=0
@@ -151,8 +149,9 @@ EOF
 
 @test "parity: resolve_harness_install_path — unsupported sentinel matches" {
   # codex teams is the canonical 'unsupported' cell per capabilities.json.
+  export LORE_FRAMEWORK=codex
   write_settings <<EOF
-{"version":1,"active_framework":"codex","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":1,"tui_launch_framework":"codex","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   go_out=$(go_helper resolve_harness_install_path teams)
   bash_out=$(bash_helper "resolve_harness_install_path teams")
@@ -184,8 +183,9 @@ EOF
 }
 
 @test "parity: harness_path_or_empty — unsupported sentinel collapses to empty" {
+  export LORE_FRAMEWORK=codex
   write_settings <<EOF
-{"version":1,"active_framework":"codex","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":1,"tui_launch_framework":"codex","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   go_out=$(go_helper harness_path_or_empty teams)
   bash_out=$(bash_helper "harness_path_or_empty teams")
@@ -251,7 +251,7 @@ EOF
 
 @test "parity: load_harness_args — settings.json claude-code slot" {
   write_settings <<EOF
-{"version":1,"active_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--foo","--bar"]},"opencode":{"args":["--qux"]},"codex":{"args":[]}}}
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--foo","--bar"]},"opencode":{"args":["--qux"]},"codex":{"args":[]}}}
 EOF
   go_out=$(go_helper load_harness_args claude-code)
   if [ "$go_out" = "T10-pending" ]; then
@@ -265,7 +265,7 @@ EOF
 
 @test "parity: load_harness_args — settings.json opencode slot reads opencode args (not claude-code's)" {
   write_settings <<EOF
-{"version":1,"active_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--CC"]},"opencode":{"args":["--OC"]},"codex":{"args":[]}}}
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--CC"]},"opencode":{"args":["--OC"]},"codex":{"args":[]}}}
 EOF
   go_out=$(go_helper load_harness_args opencode)
   if [ "$go_out" = "T10-pending" ]; then
@@ -346,8 +346,9 @@ EOF
 }
 
 @test "parity: resolve_model_for_role — env-aware role binding" {
+  export LORE_FRAMEWORK=claude-code
   write_settings <<EOF
-{"version":1,"active_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"lead":"opus","default":"sonnet"}},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"lead":"opus","default":"sonnet"}},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   go_out=$(go_helper resolve_model_for_role lead)
   if [ "$go_out" = "T10-pending" ]; then
@@ -381,7 +382,7 @@ EOF
 
 @test "bash: load_harness_args — reads claude-code slot from settings.json" {
   write_settings <<EOF
-{"version":1,"active_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--alpha","--beta"]},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--alpha","--beta"]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   out=$(bash_helper "load_harness_args claude-code" | tr '\n' ' ')
   [ "$out" = "--alpha --beta " ]
@@ -389,7 +390,7 @@ EOF
 
 @test "bash: load_harness_args — LORE_HARNESS_ARGS env wins over file" {
   write_settings <<EOF
-{"version":1,"active_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--from-file"]},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--from-file"]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   export LORE_HARNESS_ARGS='["--from-env"]'
   out=$(bash_helper "load_harness_args claude-code")
@@ -425,7 +426,7 @@ EOF
 
 @test "bash: load_claude_args (deprecated alias) emits one-shot stderr deprecation and delegates to claude-code slot" {
   write_settings <<EOF
-{"version":1,"active_framework":"opencode","capability_overrides":{},"harnesses":{"claude-code":{"args":["--deprecated-path"]},"opencode":{"args":["--should-not-leak"]},"codex":{"args":[]}}}
+{"version":1,"tui_launch_framework":"opencode","capability_overrides":{},"harnesses":{"claude-code":{"args":["--deprecated-path"]},"opencode":{"args":["--should-not-leak"]},"codex":{"args":[]}}}
 EOF
   combined=$(bash -c "source '$LIB_SH' && load_claude_args" 2>&1)
   printf '%s\n' "$combined" | grep -q "deprecated"

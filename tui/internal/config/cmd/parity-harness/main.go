@@ -11,7 +11,7 @@
 // helpers added in T7 are wired now, helpers added in T10 print
 // "T10-pending" until that task lands):
 //
-//	resolve_active_framework        — print active framework id
+//	resolve_active_framework        — print process framework id
 //	framework_capability <cap>      — print support level (T10-pending)
 //	framework_model_routing_shape   — print "single" | "multi" (T10-pending)
 //	resolve_harness_install_path <kind>

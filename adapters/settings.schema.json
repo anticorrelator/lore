@@ -2,19 +2,19 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/anticorrelator/lore/adapters/settings.schema.json",
   "title": "Lore Unified Settings",
-  "description": "User-config schema for ~/.lore/config/settings.json. Authoritative shape for valid keys, types, and value constraints across the bash/Python/Go loaders. Closed-set rejection at the boundary: unknown frameworks, role ids, capability ids, and tui layouts must be rejected — never silently routed to a default. Migration provenance lives in ~/.lore/.install-state/migration.json (D4) and MUST NOT appear inside settings.json — additionalProperties:false on every object enforces this implicitly. Cross-field invariants (e.g. active_framework value must be present in harnesses) live in the loaders and `lore doctor`, not here. The active_framework enum and harnesses keyset MUST stay in lockstep with adapters/capabilities.json frameworks (covered by tests/frameworks/settings_schema_keyset_parity.bats); $defs/role_id MUST stay in lockstep with adapters/roles.json (same test).",
+  "description": "User-config schema for ~/.lore/config/settings.json. Authoritative shape for valid keys, types, and value constraints across the bash/Python/Go loaders. Closed-set rejection at the boundary: unknown frameworks, role ids, capability ids, and tui layouts must be rejected — never silently routed to a default. Migration provenance lives in ~/.lore/.install-state/migration.json (D4) and MUST NOT appear inside settings.json — additionalProperties:false on every object enforces this implicitly. Cross-field invariants (e.g. tui_launch_framework value must be present in harnesses) live in the loaders and `lore doctor`, not here. The tui_launch_framework enum and harnesses keyset MUST stay in lockstep with adapters/capabilities.json frameworks (covered by tests/frameworks/settings_schema_keyset_parity.bats); $defs/role_id MUST stay in lockstep with adapters/roles.json (same test).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "active_framework", "harnesses"],
+  "required": ["version", "tui_launch_framework", "harnesses"],
   "properties": {
     "version": {
       "type": "integer",
       "minimum": 1,
       "description": "Schema/file version. Increment when a breaking shape change ships. install.sh consults this against its cleanup-version constant before deleting the legacy fragmented files (D4 phase 3)."
     },
-    "active_framework": {
+    "tui_launch_framework": {
       "$ref": "#/$defs/framework_id",
-      "description": "Active harness id. The named framework must also have a populated `harnesses.<name>` block — this cross-field invariant is enforced by the loaders and `lore doctor`, not by this schema."
+      "description": "Framework the TUI launches for chat/spec/followup sessions. This is a TUI-only preference; shell helpers must not treat it as the current process framework."
     },
     "harnesses": {
       "type": "object",
@@ -28,7 +28,7 @@
     },
     "capability_overrides": {
       "$ref": "#/$defs/capability_overrides_map",
-      "description": "Operator overrides for capability support levels (D8). Keyset is closed against adapters/capabilities.json `capabilities` map — values must be one of full|partial|fallback|none. The runtime semantics (override applies to the active framework) are preserved from the legacy framework.json shape; the documented defect that overrides silently re-apply across active_framework changes is intentionally NOT fixed in this consolidation — see plan D3."
+      "description": "Operator overrides for capability support levels (D8). Keyset is closed against adapters/capabilities.json `capabilities` map — values must be one of full|partial|fallback|none. Runtime resolution applies overrides to the process-local framework selected by LORE_FRAMEWORK or harness runtime markers; the TUI launch preference does not participate in shell routing."
     },
     "tui": {
       "type": "object",
@@ -64,7 +64,7 @@
     },
     "settlement": {
       "$ref": "#/$defs/settlement_config",
-      "description": "Durable settlement queue/processor controls. Defaults are fail-closed in readers when absent: enabled=false, max_concurrency=1, finite daily job/runtime caps. Harness selection is per job via LORE_FRAMEWORK and must not mutate active_framework."
+      "description": "Durable settlement queue/processor controls. Defaults are fail-closed in readers when absent: enabled=false, max_concurrency=1, finite daily job/runtime caps. Harness selection is per job via LORE_FRAMEWORK and must not mutate tui_launch_framework."
     }
   },
 
@@ -296,7 +296,7 @@
               "type": "string",
               "enum": ["first_eligible", "random", "active"],
               "default": "first_eligible",
-              "description": "Per-job harness selection. random samples only from eligible frameworks; active rejects when active_framework is ineligible."
+              "description": "Per-job harness selection. random samples only from eligible frameworks; active uses the process-local LORE_FRAMEWORK value (defaulting to claude-code) and rejects when that framework is ineligible."
             },
             "eligible_frameworks": {
               "type": "array",

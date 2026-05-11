@@ -300,7 +300,7 @@ cmd_delete() {
   # deliberately does NOT — an absent intermediate is a no-op short-circuit
   # (see _delete_unlocked above). This is what makes tab-through
   # navigation safe in the configurator. harnesses.<fw>.enabled and
-  # active_framework MUST NEVER reach this function — the widget layer
+  # tui_launch_framework MUST NEVER reach this function — the widget layer
   # routes those through harness-toggle scripts and SettingsPatch
   # respectively.
   mkdir -p "$(dirname "$SETTINGS_FILE")"

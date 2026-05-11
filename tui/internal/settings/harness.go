@@ -3,7 +3,7 @@
 // schema kind alone:
 //
 //   - PrimaryRadio (D8): single-select radio at the top of the modal backed
-//     by `active_framework`. The closed set is enumerated from
+//     by `tui_launch_framework`. The closed set is enumerated from
 //     adapters/capabilities.json `.frameworks` at construction time and
 //     passed in as primitive `[]string` options — the widget itself does no
 //     schema or capabilities I/O. Selection is structurally bounded by
@@ -33,7 +33,7 @@ import (
 )
 
 // ----------------------------------------------------------------------------
-// PrimaryRadio — single-select radio for active_framework. Immediate-commit.
+// PrimaryRadio — single-select radio for tui_launch_framework. Immediate-commit.
 // ----------------------------------------------------------------------------
 
 // PrimaryRadio renders a horizontal radio group whose options are the
@@ -63,7 +63,7 @@ type PrimaryRadio struct {
 // NewPrimaryRadio constructs a radio over the given options. labels is
 // parallel to options; pass nil to use options as their own display strings.
 // current is the currently-committed option (e.g. read from
-// settings.active_framework); pass "" to start with no selection.
+// settings.tui_launch_framework); pass "" to start with no selection.
 func NewPrimaryRadio(dotPath string, options, labels []string, current string) *PrimaryRadio {
 	if labels == nil {
 		labels = options

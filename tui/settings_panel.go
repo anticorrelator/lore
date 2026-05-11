@@ -94,11 +94,11 @@ func initSettingsPanel() (*settings.SettingsModel, error) {
 		return nil, err
 	}
 
-	// Top section: PrimaryRadio for active_framework.
+	// Top section: PrimaryRadio for the TUI-only launch framework.
 	frameworks := readFrameworksList(capsPath)
-	currentFramework := readActiveFrameworkOr("")
-	radio := settings.NewPrimaryRadio("active_framework", frameworks, nil, currentFramework)
-	m.RegisterTopSection("primary harness", radio)
+	currentFramework := readTUILaunchFrameworkOr("")
+	radio := settings.NewPrimaryRadio("tui_launch_framework", frameworks, nil, currentFramework)
+	m.RegisterTopSection("TUI launch harness", radio)
 
 	// Top sections: one HarnessBlockPanel per registered framework. The
 	// panel's enabled toggle (first child in tab order) routes through
@@ -182,11 +182,11 @@ func readFrameworksList(capsPath string) []string {
 	return caps
 }
 
-// readActiveFrameworkOr reads the active_framework value from settings.json,
-// falling back to the supplied default on absence or read error. Used to
-// seed PrimaryRadio's `current` field at modal open.
-func readActiveFrameworkOr(fallback string) string {
-	raw, present, err := config.SettingsGet("active_framework")
+// readTUILaunchFrameworkOr reads the TUI launch framework preference from
+// settings.json, falling back to the supplied default. Used to seed
+// PrimaryRadio at modal open.
+func readTUILaunchFrameworkOr(fallback string) string {
+	raw, present, err := config.SettingsGet("tui_launch_framework")
 	if err != nil || !present {
 		return fallback
 	}

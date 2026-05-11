@@ -13,8 +13,8 @@
 #
 # Resolution order for --framework value:
 #   1. Explicit --framework <name> CLI flag.
-#   2. resolve_active_framework (normally $LORE_DATA_DIR/config/settings.json
-#      `.active_framework`; LORE_FRAMEWORK remains only a diagnostic override).
+#   2. resolve_active_framework (explicit LORE_FRAMEWORK, then runtime harness
+#      markers when available).
 #   3. Built-in default: claude-code.
 #
 # Usage:

@@ -13,10 +13,10 @@ setup() {
   mkdir -p "$TEST_HOME/.lore" "$TEST_LORE_DATA_DIR/config"
   ln -s "$REPO_DIR/scripts" "$TEST_HOME/.lore/scripts"
   export LORE_DATA_DIR="$TEST_LORE_DATA_DIR"
-  unset LORE_FRAMEWORK
+  export LORE_FRAMEWORK=codex
 
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":1,"active_framework":"codex","harnesses":{"codex":{"args":[],"ceremonies":{"spec-design":["pr-review"]}}}}
+{"version":1,"tui_launch_framework":"codex","harnesses":{"codex":{"args":[],"ceremonies":{"spec-design":["pr-review"]}}}}
 EOF
 }
 

@@ -122,6 +122,92 @@ setup() {
   [ "$output" = "OK" ]
 }
 
+@test "lib.sh: Claude Code runtime marker wins over last-installed codex settings" {
+  # Regression for a split-brain multi-harness install: the user is running a
+  # Claude Code Bash tool, but ~/.lore/config/settings.json still says codex
+  # because Codex was installed later. The skill setup block must resolve the
+  # Claude adapter/capabilities in that shell.
+  local home_dir="$BATS_TEST_TMPDIR/claude-runtime-home"
+  mkdir -p "$home_dir/.lore/config"
+  ln -s "$REPO_DIR/scripts" "$home_dir/.lore/scripts"
+  cat >"$home_dir/.lore/config/settings.json" <<'EOF'
+{"version":1,"tui_launch_framework":"codex","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}},"codex":{"args":[],"roles":{"default":"gpt-5.5","lead":"gpt-5.5","worker":"gpt-5.5"}}}}
+EOF
+
+  run zsh -c "
+    set -e
+    export HOME='$home_dir'
+    export CLAUDECODE=1
+    unset LORE_DATA_DIR LORE_FRAMEWORK
+    source '$home_dir/.lore/scripts/lib.sh'
+    fw=\$(resolve_active_framework)
+    echo \"framework=\$fw\"
+    echo \"team_messaging=\$(framework_capability team_messaging)\"
+    adapter=\"\$LORE_REPO_DIR/adapters/agents/\$fw.sh\"
+    [ -x \"\$adapter\" ]
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"framework=claude-code"* ]]
+  [[ "$output" == *"team_messaging=full"* ]]
+}
+
+@test "lib.sh: Codex runtime marker wins over last-installed claude-code settings" {
+  # Symmetric guard for Codex sessions: if the user last installed Claude Code,
+  # Codex shell commands should still resolve Codex's capability profile.
+  local home_dir="$BATS_TEST_TMPDIR/codex-runtime-home"
+  mkdir -p "$home_dir/.lore/config"
+  ln -s "$REPO_DIR/scripts" "$home_dir/.lore/scripts"
+  cat >"$home_dir/.lore/config/settings.json" <<'EOF'
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}},"codex":{"args":[],"roles":{"default":"gpt-5.5","lead":"gpt-5.5","worker":"gpt-5.5"}}}}
+EOF
+
+  run zsh -c "
+    set -e
+    export HOME='$home_dir'
+    export CODEX_SHELL=1
+    unset CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_TEAM_NAME LORE_DATA_DIR LORE_FRAMEWORK
+    source '$home_dir/.lore/scripts/lib.sh'
+    fw=\$(resolve_active_framework)
+    echo \"framework=\$fw\"
+    echo \"team_messaging=\$(framework_capability team_messaging)\"
+    adapter=\"\$LORE_REPO_DIR/adapters/agents/\$fw.sh\"
+    [ -x \"\$adapter\" ]
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"framework=codex"* ]]
+  [[ "$output" == *"team_messaging=none"* ]]
+}
+
+@test "lib.sh: OpenCode runtime marker wins over last-installed codex settings" {
+  # OpenCode shares Claude-compatible skill locations, so path-based inference
+  # cannot distinguish it from Claude Code. OPENCODE_CLIENT is the runtime hint
+  # that keeps skill shell snippets on the opencode capability profile.
+  local home_dir="$BATS_TEST_TMPDIR/opencode-runtime-home"
+  mkdir -p "$home_dir/.lore/config"
+  ln -s "$REPO_DIR/scripts" "$home_dir/.lore/scripts"
+  cat >"$home_dir/.lore/config/settings.json" <<'EOF'
+{"version":1,"tui_launch_framework":"codex","capability_overrides":{},"harnesses":{"opencode":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}},"codex":{"args":[],"roles":{"default":"gpt-5.5","lead":"gpt-5.5","worker":"gpt-5.5"}}}}
+EOF
+
+  run zsh -c "
+    set -e
+    export HOME='$home_dir'
+    export OPENCODE_CLIENT=cli
+    unset CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_TEAM_NAME CODEX_SHELL CODEX_THREAD_ID LORE_DATA_DIR LORE_FRAMEWORK
+    source '$home_dir/.lore/scripts/lib.sh'
+    fw=\$(resolve_active_framework)
+    echo \"framework=\$fw\"
+    echo \"team_messaging=\$(framework_capability team_messaging)\"
+    echo \"routing=\$(framework_model_routing_shape)\"
+    adapter=\"\$LORE_REPO_DIR/adapters/agents/\$fw.sh\"
+    [ -x \"\$adapter\" ]
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"framework=opencode"* ]]
+  [[ "$output" == *"team_messaging=none"* ]]
+  [[ "$output" == *"routing=multi"* ]]
+}
+
 @test "lib.sh: no helper uses '\$LORE_LIB_DIR/..' chained into cd" {
   # Codifies the convention documented at the top of lib.sh: helpers that
   # need the repo root must use \$LORE_REPO_DIR, never \$LORE_LIB_DIR/..

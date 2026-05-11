@@ -3,14 +3,14 @@
 # adapters/settings.schema.json and the upstream registries
 # (adapters/capabilities.json, adapters/roles.json) per Phase 1, T1.
 #
-# The unified settings schema's `active_framework` enum, `harnesses` keyset,
+# The unified settings schema's `tui_launch_framework` enum, `harnesses` keyset,
 # `$defs/role_id` enum, and `$defs/capability_id` enum are derived from
 # upstream registries. Hand-maintaining the same list in two places is a
 # drift surface (a new framework added to capabilities.json without a
 # matching schema update would silently route through the schema's stale
 # enum). This suite asserts the four parity invariants:
 #
-#   1. schema.active_framework.enum == capabilities.json frameworks keyset
+#   1. schema.tui_launch_framework.enum == capabilities.json frameworks keyset
 #   2. schema.harnesses.properties keyset == capabilities.json frameworks keyset
 #   3. schema.$defs.role_id.enum == roles.json roles[].id list
 #   4. schema.$defs.capability_id.enum == capabilities.json capabilities keyset
@@ -71,13 +71,13 @@ for r in d.get("roles", []):
 PY
 }
 
-schema_active_framework_enum() {
+schema_tui_launch_framework_enum() {
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os
 with open(os.environ["SCHEMA"]) as f:
     s = json.load(f)
-# Resolve $ref to $defs/framework_id for active_framework.
-node = s["properties"]["active_framework"]
+# Resolve $ref to $defs/framework_id for tui_launch_framework.
+node = s["properties"]["tui_launch_framework"]
 if "$ref" in node:
     ref = node["$ref"]
     assert ref.startswith("#/$defs/"), ref
@@ -119,8 +119,8 @@ PY
 
 # --- Tests -------------------------------------------------------------------
 
-@test "schema active_framework enum matches capabilities.json frameworks keyset" {
-  schema_set=$(schema_active_framework_enum | sorted_lines)
+@test "schema tui_launch_framework enum matches capabilities.json frameworks keyset" {
+  schema_set=$(schema_tui_launch_framework_enum | sorted_lines)
   caps_set=$(frameworks_from_caps | sorted_lines)
   [ -n "$schema_set" ]
   [ -n "$caps_set" ]
@@ -326,7 +326,7 @@ with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
     "version": 1,
-    "active_framework": "claude-code",
+    "tui_launch_framework": "claude-code",
     "harnesses": {"claude-code": {"args": []}, "opencode": {"args": []}, "codex": {"args": []}},
     "_deprecated_legacy_source": "/Users/x/.lore/config/framework.json"
 }
@@ -347,7 +347,7 @@ with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
     "version": 1,
-    "active_framework": "claude-code",
+    "tui_launch_framework": "claude-code",
     "harnesses": {
         "claude-code": {"args": [], "roles": {"lead": ""}},
         "opencode": {"args": []},
@@ -371,7 +371,7 @@ with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
     "version": 1,
-    "active_framework": "codex",
+    "tui_launch_framework": "codex",
     "harnesses": {
         "claude-code": {"args": []},
         "opencode":    {"args": []},
@@ -398,7 +398,7 @@ with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
     "version": 1,
-    "active_framework": "codex",
+    "tui_launch_framework": "codex",
     "harnesses": {
         "claude-code": {"args": []},
         "opencode": {"args": []},
@@ -423,7 +423,7 @@ with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
     "version": 1,
-    "active_framework": "claude-code",
+    "tui_launch_framework": "claude-code",
     "harnesses": {
         "claude-code": {"args": [], "roles": {"unknown_role": "opus"}},
         "opencode": {"args": []},
@@ -468,7 +468,7 @@ with open(os.environ["SCHEMA"]) as f:
     schema = json.load(f)
 instance = {
     "version": 1,
-    "active_framework": "claude-code",
+    "tui_launch_framework": "claude-code",
     "harnesses": {
         "claude-code": {"args": []},
         "opencode": {"args": []},

@@ -35,7 +35,11 @@ from transcript import resolve_knowledge_dir, fail_open
 _REPO_ROOT = os.path.dirname(_SCRIPTS_DIR)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-from adapters.transcripts import get_provider, UnsupportedFrameworkError
+from adapters.transcripts import (
+    get_provider,
+    UnsupportedFrameworkError,
+    _resolve_active_framework_via_lib,
+)
 
 
 def _resolve_builtin_plan_mode_tool():
@@ -65,24 +69,9 @@ def _resolve_builtin_plan_mode_tool():
     except (OSError, json.JSONDecodeError):
         return "__missing__"
 
-    # Resolve active framework from unified settings; LORE_FRAMEWORK remains a
-    # process-local diagnostic override, not something installed hooks require.
-    fw = os.environ.get("LORE_FRAMEWORK", "").strip()
-    if not fw:
-        # Honor user config when the env var is absent.
-        data_dir = os.environ.get(
-            "LORE_DATA_DIR",
-            os.path.join(os.path.expanduser("~"), ".lore"),
-        )
-        config_file = os.path.join(data_dir, "config", "settings.json")
-        if os.path.isfile(config_file):
-            try:
-                with open(config_file, "r") as cf:
-                    fw = (json.load(cf).get("active_framework") or "").strip()
-            except (OSError, json.JSONDecodeError):
-                fw = ""
-    if not fw:
-        fw = "claude-code"
+    # Resolve through lib.sh so runtime harness markers (e.g. Claude Code Bash
+    # subprocesses) agree with the transcript provider and shell helpers.
+    fw = _resolve_active_framework_via_lib()
 
     framework_block = (caps.get("frameworks") or {}).get(fw) or {}
     # Missing key => assume the legacy claude-code default (ExitPlanMode) only

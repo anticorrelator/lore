@@ -28,19 +28,19 @@ func TestLoadSchema_LiveAdaptersSchema(t *testing.T) {
 	if s.Root.Kind != KindObjectClosed {
 		t.Fatalf("live schema root kind = %v, want closed object", s.Root.Kind)
 	}
-	// Spot-check: active_framework must resolve to KindEnum via $defs/framework_id.
-	af, ok := s.Root.Properties["active_framework"]
+	// Spot-check: tui_launch_framework must resolve to KindEnum via $defs/framework_id.
+	af, ok := s.Root.Properties["tui_launch_framework"]
 	if !ok {
-		t.Fatal("active_framework missing from live schema")
+		t.Fatal("tui_launch_framework missing from live schema")
 	}
 	if af.Kind != KindEnum {
-		t.Fatalf("active_framework kind = %v, want enum", af.Kind)
+		t.Fatalf("tui_launch_framework kind = %v, want enum", af.Kind)
 	}
 	if len(af.Enum) == 0 {
-		t.Fatal("active_framework enum is empty")
+		t.Fatal("tui_launch_framework enum is empty")
 	}
 	if af.SourceRef != "#/$defs/framework_id" {
-		t.Fatalf("active_framework SourceRef = %q, want #/$defs/framework_id", af.SourceRef)
+		t.Fatalf("tui_launch_framework SourceRef = %q, want #/$defs/framework_id", af.SourceRef)
 	}
 	// Spot-check: harnesses is closed-keyset with at least one entry.
 	h, ok := s.Root.Properties["harnesses"]
@@ -81,7 +81,7 @@ func TestLiveRender_CapabilityOverridesMatrixHasLabelsAndDescriptions(t *testing
 
 	store := newFakeStore(map[string]any{
 		"version":              float64(1),
-		"active_framework":     "claude-code",
+		"tui_launch_framework": "claude-code",
 		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
 		"capability_overrides": map[string]any{},
 	})
@@ -180,9 +180,9 @@ func TestLiveRender_SettlementEligibleFrameworksSelectableFromSchemaEnum(t *test
 	capsPath := filepath.Join(repoRoot, "adapters", "capabilities.json")
 
 	store := newFakeStore(map[string]any{
-		"version":          float64(1),
-		"active_framework": "claude-code",
-		"harnesses":        map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"version":              float64(1),
+		"tui_launch_framework": "claude-code",
+		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
 		"settlement": map[string]any{
 			"active_hours": map[string]any{
 				"ranges": []any{
@@ -245,10 +245,10 @@ func TestLiveRender_TopLevelRolesIgnored(t *testing.T) {
 	capsPath := filepath.Join(repoRoot, "adapters", "capabilities.json")
 
 	store := newFakeStore(map[string]any{
-		"version":          float64(1),
-		"active_framework": "claude-code",
-		"harnesses":        map[string]any{"claude-code": map[string]any{"args": []any{}}},
-		"roles":            map[string]any{"default": "sonnet", "lead": "opus"},
+		"version":              float64(1),
+		"tui_launch_framework": "claude-code",
+		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"roles":                map[string]any{"default": "sonnet", "lead": "opus"},
 	})
 	m, err := NewSettingsModel(SettingsModelOptions{
 		SchemaPath:            schemaPath,

@@ -43,7 +43,7 @@ require_claude_code() {
   active=$(resolve_active_framework 2>/dev/null) || active=""
   if [[ "$active" != "claude-code" ]]; then
     echo "Error: adapters/agents/claude-code.sh requires active framework=claude-code (got '$active')" >&2
-    echo "       run install.sh --framework claude-code or set settings.json active_framework=claude-code" >&2
+    echo "       run from Claude Code or set LORE_FRAMEWORK=claude-code for this process" >&2
     return 1
   fi
 }

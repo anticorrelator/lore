@@ -213,21 +213,21 @@ func TestLoadSchema_ClosedKeysetAccessors(t *testing.T) {
 
 func TestLoadSchema_UnsupportedConstructs(t *testing.T) {
 	cases := map[string]string{
-		"oneOf":                 `{"type":"object","additionalProperties":false,"oneOf":[{"type":"object","additionalProperties":false}]}`,
-		"anyOf":                 `{"type":"object","additionalProperties":false,"anyOf":[{"type":"object","additionalProperties":false}]}`,
-		"allOf":                 `{"type":"object","additionalProperties":false,"allOf":[{"type":"object","additionalProperties":false}]}`,
-		"if":                    `{"type":"object","additionalProperties":false,"if":{"type":"object","additionalProperties":false}}`,
-		"not":                   `{"type":"object","additionalProperties":false,"not":{"type":"object","additionalProperties":false}}`,
-		"unevaluatedProperties": `{"type":"object","additionalProperties":false,"unevaluatedProperties":false}`,
-		"propertyNames":         `{"type":"object","additionalProperties":false,"propertyNames":{"type":"string"}}`,
-		"patternProperties":     `{"type":"object","additionalProperties":false,"patternProperties":{"^x$":{"type":"string"}}}`,
-		"contains":              `{"type":"array","items":{"type":"string"},"contains":{"type":"string"}}`,
-		"prefixItems":           `{"type":"array","items":{"type":"string"},"prefixItems":[{"type":"string"}]}`,
-		"dependentSchemas":      `{"type":"object","additionalProperties":false,"dependentSchemas":{"a":{"type":"object","additionalProperties":false}}}`,
-		"dependentRequired":     `{"type":"object","additionalProperties":false,"dependentRequired":{"a":["b"]}}`,
-		"additionalProperties:true": `{"type":"object","additionalProperties":true}`,
+		"oneOf":                       `{"type":"object","additionalProperties":false,"oneOf":[{"type":"object","additionalProperties":false}]}`,
+		"anyOf":                       `{"type":"object","additionalProperties":false,"anyOf":[{"type":"object","additionalProperties":false}]}`,
+		"allOf":                       `{"type":"object","additionalProperties":false,"allOf":[{"type":"object","additionalProperties":false}]}`,
+		"if":                          `{"type":"object","additionalProperties":false,"if":{"type":"object","additionalProperties":false}}`,
+		"not":                         `{"type":"object","additionalProperties":false,"not":{"type":"object","additionalProperties":false}}`,
+		"unevaluatedProperties":       `{"type":"object","additionalProperties":false,"unevaluatedProperties":false}`,
+		"propertyNames":               `{"type":"object","additionalProperties":false,"propertyNames":{"type":"string"}}`,
+		"patternProperties":           `{"type":"object","additionalProperties":false,"patternProperties":{"^x$":{"type":"string"}}}`,
+		"contains":                    `{"type":"array","items":{"type":"string"},"contains":{"type":"string"}}`,
+		"prefixItems":                 `{"type":"array","items":{"type":"string"},"prefixItems":[{"type":"string"}]}`,
+		"dependentSchemas":            `{"type":"object","additionalProperties":false,"dependentSchemas":{"a":{"type":"object","additionalProperties":false}}}`,
+		"dependentRequired":           `{"type":"object","additionalProperties":false,"dependentRequired":{"a":["b"]}}`,
+		"additionalProperties:true":   `{"type":"object","additionalProperties":true}`,
 		"additionalProperties:absent": `{"type":"object","properties":{"x":{"type":"string"}}}`,
-		"additionalProperties:mixed": `{"type":"object","additionalProperties":{"type":"string"},"properties":{"x":{"type":"string"}}}`,
+		"additionalProperties:mixed":  `{"type":"object","additionalProperties":{"type":"string"},"properties":{"x":{"type":"string"}}}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

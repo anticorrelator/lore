@@ -14,10 +14,10 @@
 //     paths via SettingsModelOptions; tests pass temp fixtures and a fake
 //     CommandRunner. The injection seam is structural, not optional.
 //
-//   - The schema-driven walker EXCLUDES `active_framework` and the entire
+//   - The schema-driven walker EXCLUDES `tui_launch_framework` and the entire
 //     `harnesses` subtree (D8 boundary). Those dot-paths are owned by
 //     dedicated top-sections registered via RegisterTopSection —
-//     PrimaryRadio (active_framework) and HarnessBlockPanel (harnesses.*).
+//     PrimaryRadio (tui_launch_framework) and HarnessBlockPanel (harnesses.*).
 //     Each HarnessBlockPanel embeds a per-harness enabled toggle as its
 //     first child; that widget routes through ToggleHarness (which shells
 //     out to scripts/harness-toggle/{enable,disable}.sh) instead of a
@@ -30,7 +30,7 @@
 //   - IntentCommit on a generic field → SettingsStore.Patch(path, value),
 //     after closed-set re-validation (D6) when the target is enum-typed.
 //
-//   - IntentCommit on `active_framework` → Patch after closed-set check
+//   - IntentCommit on `tui_launch_framework` → Patch after closed-set check
 //     against the loaded capabilities frameworks list (D8).
 //
 //   - IntentCommit on `harnesses.<fw>.enabled` is FORBIDDEN as a plain
@@ -133,7 +133,7 @@ type SettingsModelOptions struct {
 // ----------------------------------------------------------------------------
 
 // topSection is a dedicated widget registered above the schema-driven walker
-// for D8-excluded paths (active_framework, agent.enabled, harnesses subtree).
+// for D8-excluded paths (tui_launch_framework, harnesses subtree).
 // Task 5's HarnessBlockPanel / PrimaryRadio plug in via RegisterTopSection.
 type topSection struct {
 	name   string
@@ -149,7 +149,7 @@ type topSection struct {
 // SettingsModel.View() with buildModalBox + placeModal chrome.
 type SettingsModel struct {
 	schema        *Schema
-	frameworks    []string // capabilities.json frameworks (closed set for active_framework)
+	frameworks    []string // capabilities.json frameworks (closed set for tui_launch_framework)
 	registry      *WidgetRegistry
 	store         SettingsStore
 	runner        CommandRunner
@@ -272,8 +272,8 @@ func (m *SettingsModel) propagateWrapWidth() {
 //     can route the error to logs while still rendering the modal.
 //
 //   - capabilities.json read/parse failure: returned as a hard error and
-//     the model is nil. active_framework's closed-set is load-bearing for
-//     D8; rendering the modal without it is a downgrade we refuse.
+//     the model is nil. tui_launch_framework's closed-set is load-bearing
+//     for D8; rendering the modal without it is a downgrade we refuse.
 func NewSettingsModel(opts SettingsModelOptions) (*SettingsModel, error) {
 	if opts.Store == nil {
 		return nil, fmt.Errorf("settings.NewSettingsModel: Store is required")
@@ -418,7 +418,7 @@ func (m *SettingsModel) rebuildWidgets() {
 
 // isExcludedTopLevel reports whether a top-level schema property is owned
 // by a dedicated top-section (D8 boundary). Owned paths:
-//   - active_framework: PrimaryRadio (closed-set radio, immediate-commit Patch)
+//   - tui_launch_framework: PrimaryRadio (closed-set radio, immediate-commit Patch)
 //   - harnesses.*:      HarnessBlockPanel (per-harness panel; the embedded
 //     enabled toggle routes through ToggleHarness, not Patch)
 //
@@ -429,7 +429,7 @@ func (m *SettingsModel) rebuildWidgets() {
 // reject the unknown property.
 func isExcludedTopLevel(name string) bool {
 	switch name {
-	case "active_framework", "harnesses":
+	case "tui_launch_framework", "harnesses":
 		return true
 	}
 	return false
@@ -1602,7 +1602,7 @@ func (m *SettingsModel) routeIntent(intent *FieldIntent) tea.Cmd {
 }
 
 // routeCommit handles the IntentCommit branch of routeIntent. Split out for
-// readability — the active_framework / per-harness-enabled special cases
+// readability — the tui_launch_framework / per-harness-enabled special cases
 // are dense.
 func (m *SettingsModel) routeCommit(intent *FieldIntent) tea.Cmd {
 	// harnesses.<fw>.enabled — must route through the harness-toggle script,
@@ -1618,20 +1618,20 @@ func (m *SettingsModel) routeCommit(intent *FieldIntent) tea.Cmd {
 	}
 
 	switch intent.DotPath {
-	case "active_framework":
+	case "tui_launch_framework":
 		chosen, ok := intent.Value.(string)
 		if !ok {
-			m.statusMsg = fmt.Sprintf("active_framework: expected string, got %T", intent.Value)
+			m.statusMsg = fmt.Sprintf("tui_launch_framework: expected string, got %T", intent.Value)
 			m.statusIsError = true
 			return nil
 		}
 		if !contains(m.frameworks, chosen) {
-			m.statusMsg = fmt.Sprintf("active_framework: %q is not a registered framework", chosen)
+			m.statusMsg = fmt.Sprintf("tui_launch_framework: %q is not a registered framework", chosen)
 			m.statusIsError = true
 			return nil
 		}
-		if err := m.store.Patch("active_framework", chosen); err != nil {
-			m.statusMsg = fmt.Sprintf("write active_framework: %v", err)
+		if err := m.store.Patch("tui_launch_framework", chosen); err != nil {
+			m.statusMsg = fmt.Sprintf("write tui_launch_framework: %v", err)
 			m.statusIsError = true
 			return nil
 		}

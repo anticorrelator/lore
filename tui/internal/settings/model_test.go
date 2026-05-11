@@ -158,10 +158,10 @@ const everyKindSchema = `{
 	"$schema": "https://json-schema.org/draft/2020-12/schema",
 	"type": "object",
 	"additionalProperties": false,
-	"required": ["version", "active_framework", "harnesses"],
+	"required": ["version", "tui_launch_framework", "harnesses"],
 	"properties": {
 		"version": {"type": "integer", "minimum": 1},
-		"active_framework": {"type": "string", "enum": ["claude-code", "opencode", "codex"]},
+		"tui_launch_framework": {"type": "string", "enum": ["claude-code", "opencode", "codex"]},
 		"harnesses": {
 			"type": "object",
 			"additionalProperties": false,
@@ -259,7 +259,7 @@ func newTestModel(t *testing.T, seed map[string]any) (*SettingsModel, *fakeStore
 // TestEmptyRegistry_DefaultByTypeForEveryVisibleKind verifies that with an
 // empty WidgetRegistry, the schema walker chooses a default-by-type widget for
 // every visible NodeKind in the verified-current taxonomy. The walker excludes
-// active_framework and the harnesses subtree (D8 boundary), plus metadata /
+// tui_launch_framework and the harnesses subtree (D8 boundary), plus metadata /
 // retired-compat fields that are schema-valid but not user-editable.
 func TestEmptyRegistry_DefaultByTypeForEveryVisibleKind(t *testing.T) {
 	m, _, _ := newTestModel(t, nil)
@@ -290,7 +290,7 @@ func TestEmptyRegistry_DefaultByTypeForEveryVisibleKind(t *testing.T) {
 		}
 	}
 
-	// active_framework and the entire harnesses subtree must NOT be in the
+	// tui_launch_framework and the entire harnesses subtree must NOT be in the
 	// schema-driven walker's output (D8 boundary). Dedicated top-sections
 	// (PrimaryRadio, HarnessBlockPanel — the latter embedding its own
 	// per-harness enabled toggle) own those paths.
@@ -298,8 +298,8 @@ func TestEmptyRegistry_DefaultByTypeForEveryVisibleKind(t *testing.T) {
 	// version is valid settings.json metadata, but it is owned by migration
 	// code rather than users, so it is hidden from the editor.
 	for _, w := range m.widgets {
-		if w.DotPath() == "active_framework" {
-			t.Errorf("active_framework leaked into schema-driven walker (D8 boundary)")
+		if w.DotPath() == "tui_launch_framework" {
+			t.Errorf("tui_launch_framework leaked into schema-driven walker (D8 boundary)")
 		}
 		if strings.HasPrefix(w.DotPath(), "harnesses") {
 			t.Errorf("harnesses subtree leaked into schema-driven walker: %s (D8 boundary)", w.DotPath())
@@ -315,10 +315,10 @@ func TestHiddenSettingsPaths_NotRendered(t *testing.T) {
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"type": "object",
 		"additionalProperties": false,
-		"required": ["version", "active_framework", "harnesses"],
+		"required": ["version", "tui_launch_framework", "harnesses"],
 		"properties": {
 			"version": {"type": "integer", "minimum": 1},
-			"active_framework": {"type": "string", "enum": ["claude-code"]},
+			"tui_launch_framework": {"type": "string", "enum": ["claude-code"]},
 			"harnesses": {
 				"type": "object",
 				"additionalProperties": false,
@@ -328,9 +328,9 @@ func TestHiddenSettingsPaths_NotRendered(t *testing.T) {
 	}`)
 	capsPath := writeMinimalCapabilities(t, []string{"claude-code"})
 	store := newFakeStore(map[string]any{
-		"version":          float64(1),
-		"active_framework": "claude-code",
-		"harnesses":        map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"version":              float64(1),
+		"tui_launch_framework": "claude-code",
+		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
 	})
 	m, err := NewSettingsModel(SettingsModelOptions{
 		SchemaPath:       schemaPath,
@@ -404,14 +404,14 @@ func TestEnumReject_ValueNotInSet(t *testing.T) {
 	}
 }
 
-// TestActiveFrameworkReject_NotInCapabilities verifies the active_framework
+// TestActiveFrameworkReject_NotInCapabilities verifies the tui_launch_framework
 // closed-set check against capabilities.json frameworks (D8). A value
 // outside the registered set must be rejected without a Patch call.
 func TestActiveFrameworkReject_NotInCapabilities(t *testing.T) {
 	m, store, _ := newTestModel(t, nil)
 
 	intent := &FieldIntent{
-		DotPath: "active_framework",
+		DotPath: "tui_launch_framework",
 		Status:  IntentCommit,
 		Value:   "rogue-framework",
 	}
@@ -434,7 +434,7 @@ func TestActiveFrameworkAccept_InCapabilities(t *testing.T) {
 	m, store, _ := newTestModel(t, nil)
 
 	intent := &FieldIntent{
-		DotPath: "active_framework",
+		DotPath: "tui_launch_framework",
 		Status:  IntentCommit,
 		Value:   "opencode",
 	}
@@ -443,7 +443,7 @@ func TestActiveFrameworkAccept_InCapabilities(t *testing.T) {
 	if len(store.patches) != 1 {
 		t.Fatalf("expected 1 patch, got %d: %v", len(store.patches), store.patches)
 	}
-	if store.patches[0].dotPath != "active_framework" || store.patches[0].value != "opencode" {
+	if store.patches[0].dotPath != "tui_launch_framework" || store.patches[0].value != "opencode" {
 		t.Errorf("unexpected patch: %+v", store.patches[0])
 	}
 	if m.statusIsError {
@@ -708,7 +708,7 @@ func TestRegistryOverrideTakesPrecedence(t *testing.T) {
 func TestRegisterTopSection_RendersBeforeWidgets(t *testing.T) {
 	m, _, _ := newTestModel(t, nil)
 
-	radio := NewPrimaryRadio("active_framework", []string{"claude-code", "opencode"}, nil, "claude-code")
+	radio := NewPrimaryRadio("tui_launch_framework", []string{"claude-code", "opencode"}, nil, "claude-code")
 	m.RegisterTopSection("primary harness", radio)
 
 	view := m.View()
@@ -795,9 +795,9 @@ func TestLimitToDotPath_CompactEmbedGridsSimpleLeavesAndSuppressesDescriptions(t
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"type": "object",
 		"additionalProperties": false,
-		"required": ["active_framework", "harnesses"],
+		"required": ["tui_launch_framework", "harnesses"],
 		"properties": {
-			"active_framework": {"type": "string", "enum": ["claude-code"]},
+			"tui_launch_framework": {"type": "string", "enum": ["claude-code"]},
 			"harnesses": {"type": "object", "additionalProperties": false, "properties": {"claude-code": {"type": "object", "additionalProperties": false, "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}},
 			"settlement": {
 				"type": "object",
@@ -812,8 +812,8 @@ func TestLimitToDotPath_CompactEmbedGridsSimpleLeavesAndSuppressesDescriptions(t
 	}`)
 	capsPath := writeMinimalCapabilities(t, []string{"claude-code"})
 	store := newFakeStore(map[string]any{
-		"active_framework": "claude-code",
-		"harnesses":        map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"tui_launch_framework": "claude-code",
+		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
 		"settlement": map[string]any{
 			"enabled":         true,
 			"max_concurrency": float64(20),
@@ -858,9 +858,9 @@ func TestLimitToDotPath_CompactEmbedFlattensNestedSettlementGroups(t *testing.T)
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"type": "object",
 		"additionalProperties": false,
-		"required": ["active_framework", "harnesses"],
+		"required": ["tui_launch_framework", "harnesses"],
 		"properties": {
-			"active_framework": {"type": "string", "enum": ["claude-code", "codex"]},
+			"tui_launch_framework": {"type": "string", "enum": ["claude-code", "codex"]},
 			"harnesses": {"type": "object", "additionalProperties": false, "properties": {"claude-code": {"type": "object", "additionalProperties": false, "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}},
 			"settlement": {
 				"type": "object",
@@ -903,8 +903,8 @@ func TestLimitToDotPath_CompactEmbedFlattensNestedSettlementGroups(t *testing.T)
 	}`)
 	capsPath := writeMinimalCapabilities(t, []string{"claude-code", "codex"})
 	store := newFakeStore(map[string]any{
-		"active_framework": "claude-code",
-		"harnesses":        map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"tui_launch_framework": "claude-code",
+		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
 		"settlement": map[string]any{
 			"enabled":         true,
 			"max_concurrency": float64(1),
@@ -1054,9 +1054,9 @@ func TestLimitToDotPath_CompactEmbedUnsetWindowsRenderAllTime(t *testing.T) {
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"type": "object",
 		"additionalProperties": false,
-		"required": ["active_framework", "harnesses"],
+		"required": ["tui_launch_framework", "harnesses"],
 		"properties": {
-			"active_framework": {"type": "string", "enum": ["claude-code"]},
+			"tui_launch_framework": {"type": "string", "enum": ["claude-code"]},
 			"harnesses": {"type": "object", "additionalProperties": false, "properties": {"claude-code": {"type": "object", "additionalProperties": false, "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}},
 			"settlement": {
 				"type": "object",
@@ -1088,8 +1088,8 @@ func TestLimitToDotPath_CompactEmbedUnsetWindowsRenderAllTime(t *testing.T) {
 	}`)
 	capsPath := writeMinimalCapabilities(t, []string{"claude-code"})
 	store := newFakeStore(map[string]any{
-		"active_framework": "claude-code",
-		"harnesses":        map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"tui_launch_framework": "claude-code",
+		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
 		"settlement": map[string]any{
 			"active_hours": map[string]any{
 				"enabled":  true,
@@ -1221,10 +1221,10 @@ func TestDescriptionsByDotPath_AppliedToWidgets(t *testing.T) {
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"type": "object",
 		"additionalProperties": false,
-		"required": ["version", "active_framework", "harnesses"],
+		"required": ["version", "tui_launch_framework", "harnesses"],
 		"properties": {
 			"version": {"type": "integer", "minimum": 1},
-			"active_framework": {"type": "string", "enum": ["claude-code"]},
+			"tui_launch_framework": {"type": "string", "enum": ["claude-code"]},
 			"harnesses": {
 				"type": "object",
 				"additionalProperties": false,
@@ -1375,10 +1375,10 @@ func TestHierarchicalNavigation_NestedClosedObjectRequiresRepeatedEnter(t *testi
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"type": "object",
 		"additionalProperties": false,
-		"required": ["version", "active_framework", "harnesses"],
+		"required": ["version", "tui_launch_framework", "harnesses"],
 		"properties": {
 			"version": {"type": "integer", "minimum": 1},
-			"active_framework": {"type": "string", "enum": ["claude-code"]},
+			"tui_launch_framework": {"type": "string", "enum": ["claude-code"]},
 			"harnesses": {
 				"type": "object",
 				"additionalProperties": false,
@@ -1561,10 +1561,10 @@ func TestHierarchicalNavigation_StringFieldsUseNavModeUntilEditing(t *testing.T)
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"type": "object",
 		"additionalProperties": false,
-		"required": ["version", "active_framework", "harnesses"],
+		"required": ["version", "tui_launch_framework", "harnesses"],
 		"properties": {
 			"version": {"type": "integer", "minimum": 1},
-			"active_framework": {"type": "string", "enum": ["claude-code"]},
+			"tui_launch_framework": {"type": "string", "enum": ["claude-code"]},
 			"harnesses": {
 				"type": "object",
 				"additionalProperties": false,
@@ -1585,10 +1585,10 @@ func TestHierarchicalNavigation_StringFieldsUseNavModeUntilEditing(t *testing.T)
 		SchemaPath:       schemaPath,
 		CapabilitiesPath: capsPath,
 		Store: newFakeStore(map[string]any{
-			"version":          float64(1),
-			"active_framework": "claude-code",
-			"harnesses":        map[string]any{"claude-code": map[string]any{"args": []any{}}},
-			"models":           map[string]any{"lead": "opus", "worker": "sonnet"},
+			"version":              float64(1),
+			"tui_launch_framework": "claude-code",
+			"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
+			"models":               map[string]any{"lead": "opus", "worker": "sonnet"},
 		}),
 		Runner:        &fakeRunner{},
 		EnableScript:  "/fake/enable.sh",

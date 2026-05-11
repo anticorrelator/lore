@@ -3,7 +3,7 @@
 # Usage: framework-config.sh <subcommand> [args...]
 #
 # Subcommands:
-#   framework                    Print the active framework name (e.g. claude-code).
+#   framework                    Print the TUI launch framework name (e.g. claude-code).
 #   role <role>                  Print the model bound to <role>. Returns the
 #                                explicit binding if present; otherwise the
 #                                "default" role; otherwise exits non-zero.
@@ -36,7 +36,7 @@ framework-config.sh — read persisted lore settings configuration
 Usage: framework-config.sh <subcommand> [args...]
 
 Subcommands:
-  framework                  Print the active framework name
+  framework                  Print the TUI launch framework name
   role <role>                Print the model bound to <role>; falls back to "default"
   roles                      Print the role->model map as JSON
   capability-overrides       Print capability_overrides as JSON
@@ -68,7 +68,7 @@ try:
         json.load(f)
 except json.JSONDecodeError as e:
     print(f"Error: settings config at {sys.argv[1]} is not valid JSON: {e}", file=sys.stderr)
-    print(f"Inspect the file or re-run install.sh to rewrite active_framework.", file=sys.stderr)
+    print(f"Inspect the file or re-run install.sh to rewrite tui_launch_framework.", file=sys.stderr)
     sys.exit(3)
 PYEOF
 }
@@ -92,9 +92,9 @@ case "$1" in
 import json, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
-fw = cfg.get("active_framework")
+fw = cfg.get("tui_launch_framework")
 if not isinstance(fw, str) or not fw:
-    print("Error: active_framework field missing or invalid in settings", file=sys.stderr)
+    print("Error: tui_launch_framework field missing or invalid in settings", file=sys.stderr)
     sys.exit(2)
 print(fw)
 PYEOF
@@ -109,7 +109,7 @@ PYEOF
 import json, os, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
-fw = cfg.get("active_framework") or ""
+fw = cfg.get("tui_launch_framework") or ""
 roles = (((cfg.get("harnesses") or {}).get(fw) or {}).get("roles") or {})
 role = os.environ["ROLE"]
 # Explicit binding wins; otherwise fall back to "default"; otherwise no answer.
@@ -128,7 +128,7 @@ PYEOF
 import json, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
-fw = cfg.get("active_framework") or ""
+fw = cfg.get("tui_launch_framework") or ""
 roles = (((cfg.get("harnesses") or {}).get(fw) or {}).get("roles") or {})
 print(json.dumps(roles, indent=2))
 PYEOF

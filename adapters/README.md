@@ -49,7 +49,7 @@ files in the same precedence order.
 
 | File | Writer | Schema |
 |---|---|---|
-| `$LORE_DATA_DIR/config/settings.json` | `install.sh`, edited via the settings TUI / `scripts/settings.sh` | `{"version": 1, "active_framework": "<id>", "capability_overrides": {<cap>: <support_level>, ...}, "harnesses": {<id>: {"args": [...], "roles": {<role>: <model>}}}}` |
+| `$LORE_DATA_DIR/config/settings.json` | `install.sh`, edited via the settings TUI / `scripts/settings.sh` | `{"version": 1, "tui_launch_framework": "<id>", "capability_overrides": {<cap>: <support_level>, ...}, "harnesses": {<id>: {"args": [...], "roles": {<role>: <model>}}}}` |
 | `$LORE_DATA_DIR/config/harness-args.json` | `install.sh` (T4) and `migrate_claude_args_to_harness_args` (T8) | `{"version": 1, "_deprecated_legacy_source"?: "<path>", "<framework-id>": {"args": ["..."]}, ...}` |
 | `$LORE_DATA_DIR/config/claude.json` | (legacy; left in place as historical record) | `{"args": ["..."]}`. Read on first run, migrated into `harness-args.json["claude-code"].args`, then never read again. |
 | `adapters/capabilities.json` | committed in repo (T2) | See file header for full schema. |
@@ -134,9 +134,15 @@ parity restoration.
 
 **Precedence ladder:**
 
-1. `LORE_FRAMEWORK` env var (diagnostic/process override; ordinary install and hook paths must not require it).
-2. `$LORE_DATA_DIR/config/settings.json` `.active_framework`.
+1. `LORE_FRAMEWORK` env var (explicit process override).
+2. Runtime harness environment markers when `LORE_DATA_DIR` is not redirected
+   (for example Claude Code's Bash-tool marker, Codex shell markers, or
+   OpenCode's client marker).
 3. Built-in default: `"claude-code"`.
+
+The persisted `tui_launch_framework` key is intentionally not part of this
+ladder. It selects which harness the TUI spawns for chat/spec/followup
+sessions; it is not ambient process truth.
 
 **Validation:** the resolved id MUST appear as a key under `adapters/capabilities.json[.frameworks]`. An unknown framework name is rejected with a non-zero exit / non-nil error and a stderr / wrapped-error message naming the source. Resolution NEVER silently routes to a default for an explicit-but-bogus value (per "don't reintroduce defaults" feedback).
 
@@ -262,7 +268,7 @@ The parity test in T12 is the safety net: it catches drift before it ships rathe
 
 ## Failure modes the contract guards against
 
-- **Bash and Go disagree on the active framework.** Result: TUI launches `claude` while the spec/implement scripts write to `harness-args.json[opencode].args` — silent split-brain. Guard: `resolve_active_framework` parity test.
+- **Bash and Go disagree on the process framework.** Result: hook and skill shell helpers read the wrong capability profile for the harness that actually spawned them. Guard: `resolve_active_framework` parity test.
 - **Bash and Go disagree on the harness-args precedence.** Result: `LORE_HARNESS_ARGS` env var works in bash callers but not from the TUI. Guard: `load_harness_args` parity test with each ladder row.
 - **Bash and Go disagree on whether a capability is `full`, `partial`, `fallback`, or `none`.** Result: a skill that requires `full` task_completed_hook gates differently in shell-launched vs TUI-launched runs. Guard: `framework_capability` parity test.
 - **One side silently invents a path that the other side does not.** Result: writes go to a directory the other side can't see. Guard: `resolve_harness_install_path` returns `"unsupported"` for missing kinds, never a guessed path.

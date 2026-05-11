@@ -77,8 +77,8 @@ type TerminalOutputMsg struct {
 // SpecProcessStartedMsg is sent after the subprocess is launched via PTY.
 type SpecProcessStartedMsg struct {
 	Slug   string
-	Ptmx   *os.File     // PTY master — read/write interface to subprocess
-	Cmd    *exec.Cmd    // for cmd.Wait() in cleanup
+	Ptmx   *os.File      // PTY master — read/write interface to subprocess
+	Cmd    *exec.Cmd     // for cmd.Wait() in cleanup
 	Output <-chan []byte // byte chunks from the PTY reader goroutine
 }
 
@@ -946,13 +946,14 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 		// submits it immediately — no PTY-write timing hack needed.
 		initialPrompt := buildInitialPrompt(slug, title, extraContext, shortMode, chatMode, skipConfirm, followupMode, findingIndex)
 
-		// Resolve the active framework once and use it for both the binary
-		// lookup and the harness-specific prepended args. Surfaces a clear
-		// StreamErrorMsg on misconfiguration rather than silently spawning
-		// the wrong (or missing) binary.
-		activeFramework, err := config.ResolveActiveFramework()
+		// Resolve the TUI launch framework once and use it for the binary,
+		// harness-specific prepended args, and child-process environment. This
+		// preference is intentionally TUI-scoped; shell helpers inside the
+		// spawned session see it via LORE_FRAMEWORK rather than by reading
+		// settings.json as global process truth.
+		activeFramework, err := config.ResolveTUILaunchFramework()
 		if err != nil {
-			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve active framework: %w", err)}
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve TUI launch framework: %w", err)}
 		}
 		harnessBinary, err := config.HarnessBinary(activeFramework)
 		if err != nil {
@@ -994,6 +995,7 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 
 		cmd := exec.Command(harnessBinary, args...)
 		cmd.Dir = projectDir
+		cmd.Env = append(os.Environ(), "LORE_FRAMEWORK="+activeFramework)
 		// Do NOT set cmd.Stderr = io.Discard here: with a PTY the subprocess's
 		// stdin/stdout/stderr are all wired to the PTY slave, so claude's full
 		// TUI output (including stderr) is captured by the emulator. Discarding

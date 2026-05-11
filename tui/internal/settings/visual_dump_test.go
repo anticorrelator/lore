@@ -18,8 +18,8 @@ func TestVisualDumpForManualInspection(t *testing.T) {
 	capsPath := filepath.Join(repoDir, "adapters", "capabilities.json")
 
 	store := newFakeStore(map[string]any{
-		"version":          1,
-		"active_framework": "claude-code",
+		"version":              1,
+		"tui_launch_framework": "claude-code",
 		"harnesses": map[string]any{
 			"claude-code": map[string]any{"args": []any{"--dangerously-skip-permissions"}},
 			"opencode":    map[string]any{"args": []any{}},
@@ -48,7 +48,7 @@ func TestVisualDumpForManualInspection(t *testing.T) {
 	// Register a primary harness radio + one harness block so we can also
 	// inspect the top-section render path (these go through the same
 	// renderSection helper as schema-driven sections).
-	radio := NewPrimaryRadio("active_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code")
+	radio := NewPrimaryRadio("tui_launch_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code")
 	m.RegisterTopSection("primary harness", radio)
 	args := NewListEditor("harnesses.claude-code.args", "args", []string{"--dangerously-skip-permissions"}, nil, 0, false, true, false)
 	hp := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{Roles: map[string]string{"lead": "opus", "default": "sonnet"}})

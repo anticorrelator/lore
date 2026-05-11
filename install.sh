@@ -4,11 +4,12 @@
 #
 # --framework selects the harness whose install paths and capability profile
 # Lore should target. Supported values: claude-code (default), opencode, codex.
-# The selection is persisted to $LORE_DATA_DIR/config/settings.json so that
-# `cli/lore` and downstream scripts can resolve the active harness without
-# requiring an environment variable. Re-running install with a different
-# --framework rewrites active_framework while preserving harness-local role
-# bindings and capability overrides previously edited by the user.
+# The selection is persisted as the TUI launch preference at
+# $LORE_DATA_DIR/config/settings.json::tui_launch_framework. Runtime shell
+# helpers do not read this value; they use process-local harness markers or
+# LORE_FRAMEWORK. Re-running install with a different --framework rewrites the
+# TUI preference while preserving harness-local role bindings and capability
+# overrides previously edited by the user.
 set -euo pipefail
 
 # --- Resolve paths ---
@@ -98,7 +99,7 @@ source "$LORE_REPO_DIR/scripts/lib.sh"
 
 # resolve_install_path <kind> [framework]
 # Wrap resolve_harness_install_path so that it (a) honors the install-time
-# --framework flag without depending on persisted active_framework already
+# --framework flag without depending on a persisted TUI launch preference
 # being updated, (b) prints a degraded notice and returns "unsupported"
 # rather than failing when a kind is not wired for the active harness,
 # and (c) shells out cleanly under set -e (the bare resolve_*
@@ -383,11 +384,11 @@ if isinstance(capture_doc, dict):
     doc["capture"] = capture_block
     mark("config/capture-config.json")
 
-# framework.json -> {active_framework, harnesses.<fw>.roles, capability_overrides}
+# framework.json -> {tui_launch_framework, harnesses.<fw>.roles, capability_overrides}
 framework_doc = load_legacy("config/framework.json")
 if isinstance(framework_doc, dict):
     if isinstance(framework_doc.get("framework"), str):
-        doc["active_framework"] = framework_doc["framework"]
+        doc["tui_launch_framework"] = framework_doc["framework"]
     if isinstance(framework_doc.get("roles"), dict):
         fan_to_harnesses(doc, "roles", framework_doc["roles"])
         doc.pop("roles", None)
@@ -648,14 +649,15 @@ else
   info "capture-config.json already exists, skipping"
 fi
 
-# --- 1c. Persist framework selection + harness-local role defaults ---
+# --- 1c. Persist TUI launch framework + harness-local role defaults ---
 # settings.json is the authoritative user config. Re-running install with a
-# different --framework value updates `active_framework` in settings.json and
-# seeds only that harness's missing role bindings; capability/model readers must
-# not require a LORE_FRAMEWORK env shim to find the configured harness block.
+# different --framework value updates the TUI launch preference in settings.json
+# and seeds only that harness's missing role bindings. Runtime shell commands
+# spawned by a harness resolve that harness from process-local markers or
+# LORE_FRAMEWORK; they must not read the TUI preference as global process truth.
 #
-# - `active_framework` is rewritten on every install so re-running with a
-#   different --framework value updates the active harness.
+# - `tui_launch_framework` is rewritten on every install so re-running with a
+#   different --framework value updates the TUI-launched harness.
 # - `capability_overrides` and harness-local `roles` are seeded only when
 #   missing; user edits are preserved. Per-role bindings are harness-aware:
 #   claude-code defaults every role to "opus", codex defaults every role to
@@ -667,7 +669,7 @@ fi
 # - Capability profiles ship as static data in adapters/capabilities.json;
 #   capability_overrides in settings.json are ad-hoc opt-ins that downstream
 #   readers layer on top of the static profile.
-info "Persisting unified settings config (active_framework=$FRAMEWORK)"
+info "Persisting unified settings config (tui_launch_framework=$FRAMEWORK)"
 if ! $DRY_RUN; then
   FRAMEWORK="$FRAMEWORK" LORE_REPO_DIR="$LORE_REPO_DIR" \
     python3 - "$LORE_DATA_DIR/config/settings.json" <<'PYEOF'
@@ -702,7 +704,7 @@ else:
     cfg = {}
 
 cfg["version"] = 1
-cfg["active_framework"] = framework
+cfg["tui_launch_framework"] = framework
 
 # Preserve user-edited overrides; only seed when key is absent.
 if "capability_overrides" not in cfg or not isinstance(cfg.get("capability_overrides"), dict):
@@ -718,6 +720,9 @@ if "args" not in harness_block:
     harness_block["args"] = ["--dangerously-skip-permissions"] if framework == "claude-code" else []
 harnesses[framework] = harness_block
 cfg["harnesses"] = harnesses
+if isinstance(cfg.get("tui"), dict):
+    cfg["tui"].pop("launch_framework", None)
+cfg.pop("active_framework", None)
 cfg.pop("framework", None)
 cfg.pop("roles", None)
 

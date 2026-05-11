@@ -108,7 +108,7 @@ echo "Test 0: status reports without creating settlement state"
 KDIR0="$TEST_DIR/kdir0"
 SETTINGS0="$TEST_DIR/settings0.json"
 mkdir -p "$KDIR0"
-write_settings "$SETTINGS0" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}'
+write_settings "$SETTINGS0" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}'
 STATUS0=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS0" bash "$QUEUE" status --kdir "$KDIR0" --json)
 assert_json_eq "status returns ok on empty state" "$STATUS0" '.ok' "true"
 if [[ ! -e "$KDIR0/_settlement" ]]; then
@@ -124,7 +124,7 @@ echo "Test 1: evidence append enqueue is fail-open/idempotent and scan conserves
 KDIR="$TEST_DIR/kdir1"
 SETTINGS="$TEST_DIR/settings1.json"
 setup_kdir "$KDIR" "wi"
-write_settings "$SETTINGS" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}'
+write_settings "$SETTINGS" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}'
 
 ROW=$(row_json "claim-a")
 printf '%s' "$ROW" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS" bash "$EVIDENCE" --work-item wi --kdir "$KDIR" >/dev/null
@@ -142,7 +142,7 @@ echo "Test 1b: invalid task-claim rows are not queued and bypass executor"
 KDIR_INVALID="$TEST_DIR/kdir-invalid"
 SETTINGS_INVALID="$TEST_DIR/settings-invalid.json"
 setup_kdir "$KDIR_INVALID" "wi"
-write_settings "$SETTINGS_INVALID" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS_INVALID" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 jq -nc '{
   claim_id: "claim-invalid",
   tier: "task-evidence",
@@ -186,7 +186,7 @@ DISABLED_TOGGLE=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS" bash "$QUEUE" disabl
 assert_json_eq "disable command toggles setting" "$DISABLED_TOGGLE" '.enabled' "false"
 assert_json_eq "disable command returns disabled status" "$DISABLED_TOGGLE" '.status.enabled' "false"
 
-write_settings "$SETTINGS" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 READY_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS" bash "$QUEUE" status --kdir "$KDIR" --json)
 assert_json_eq "status uses built-in executor path" "$READY_STATUS" '.blocked_reason' ""
 
@@ -212,7 +212,7 @@ echo "Test 4: status is read-only and process reclaims expired lease"
 KDIR2="$TEST_DIR/kdir2"
 SETTINGS2="$TEST_DIR/settings2.json"
 setup_kdir "$KDIR2" "wi"
-write_settings "$SETTINGS2" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS2" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 printf '%s' "$(row_json "claim-stale")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS2" bash "$QUEUE" enqueue --work-item wi --kdir "$KDIR2" --json >/dev/null
 python3 - "$KDIR2" <<'PY'
 import json, pathlib, time
@@ -239,7 +239,7 @@ echo "Test 5: active lease remains visible while executor runs"
 KDIR3="$TEST_DIR/kdir3"
 SETTINGS3="$TEST_DIR/settings3.json"
 setup_kdir "$KDIR3" "wi"
-write_settings "$SETTINGS3" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"executor_timeout_seconds":5,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS3" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"executor_timeout_seconds":5,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 printf '%s' "$(row_json "claim-visible-lease")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS3" bash "$QUEUE" enqueue --work-item wi --kdir "$KDIR3" --json >/dev/null
 VISIBLE_EXEC="$TEST_DIR/visible-exec.sh"
 printf '#!/usr/bin/env bash\ncat >/dev/null\nsleep 2\nexit 0\n' > "$VISIBLE_EXEC"
@@ -260,7 +260,7 @@ echo "Test 6: settlement has no daily job/runtime caps"
 KDIR3B="$TEST_DIR/kdir3b"
 SETTINGS3B="$TEST_DIR/settings3b.json"
 setup_kdir "$KDIR3B" "wi"
-write_settings "$SETTINGS3B" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS3B" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 for i in 1 2 3; do
   printf '%s' "$(row_json "claim-uncapped-$i")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS3B" bash "$QUEUE" enqueue --work-item wi --kdir "$KDIR3B" --json >/dev/null
   LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS3B" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" bash "$QUEUE" process --kdir "$KDIR3B" --once --json >/dev/null
@@ -275,7 +275,7 @@ echo "Test 7: random mode rejects unknown/disabled harnesses without active fall
 KDIR4="$TEST_DIR/kdir4"
 SETTINGS4="$TEST_DIR/settings4.json"
 setup_kdir "$KDIR4" "wi"
-write_settings "$SETTINGS4" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[],"enabled":false},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"random","eligible_frameworks":["phantom","claude-code"]}}}'
+write_settings "$SETTINGS4" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[],"enabled":false},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"random","eligible_frameworks":["phantom","claude-code"]}}}'
 printf '%s' "$(row_json "claim-random")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS4" bash "$QUEUE" enqueue --work-item wi --kdir "$KDIR4" --json >/dev/null
 NO_HARNESS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS4" bash "$QUEUE" process --kdir "$KDIR4" --once --json)
 assert_json_eq "random mode does not fall back to active framework" "$NO_HARNESS" '.reason' "no_eligible_harnesses"
@@ -287,7 +287,7 @@ echo "Test 8: failed and blocked terminal items are visible with durable refs"
 KDIR5="$TEST_DIR/kdir5"
 SETTINGS5="$TEST_DIR/settings5.json"
 setup_kdir "$KDIR5" "wi"
-write_settings "$SETTINGS5" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"executor_timeout_seconds":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS5" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"executor_timeout_seconds":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 printf '%s' "$(row_json "claim-failed")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS5" bash "$QUEUE" enqueue --work-item wi --kdir "$KDIR5" --json >/dev/null
 printf '%s' "$(row_json "claim-blocked")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS5" bash "$QUEUE" enqueue --work-item wi --kdir "$KDIR5" --json >/dev/null
 FAIL_EXEC="$TEST_DIR/fail-exec.sh"
@@ -311,7 +311,7 @@ echo "Test 9: active hours block outside the configured window"
 KDIR6="$TEST_DIR/kdir6"
 SETTINGS6="$TEST_DIR/settings6.json"
 setup_kdir "$KDIR6" "wi"
-write_settings "$SETTINGS6" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"active_hours":{"enabled":true,"timezone":"UTC","ranges":[{"days":["mon"],"start":"09:00","end":"10:00"},{"days":["mon"],"start":"13:00","end":"14:00"}]},"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS6" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"active_hours":{"enabled":true,"timezone":"UTC","ranges":[{"days":["mon"],"start":"09:00","end":"10:00"},{"days":["mon"],"start":"13:00","end":"14:00"}]},"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 printf '%s' "$(row_json "claim-hours")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS6" bash "$QUEUE" enqueue --work-item wi --kdir "$KDIR6" --json >/dev/null
 OUTSIDE=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS6" LORE_SETTLEMENT_NOW="2026-05-11T08:30:00Z" bash "$QUEUE" process --kdir "$KDIR6" --once --json)
 assert_json_eq "outside active hours does not dispatch" "$OUTSIDE" '.dispatched' "false"
@@ -324,7 +324,7 @@ echo "Test 10: enabled active hours without ranges means all time"
 KDIR7="$TEST_DIR/kdir7"
 SETTINGS7="$TEST_DIR/settings7.json"
 setup_kdir "$KDIR7" "wi"
-write_settings "$SETTINGS7" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"active_hours":{"enabled":true,"timezone":"UTC"},"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS7" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"active_hours":{"enabled":true,"timezone":"UTC"},"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 printf '%s' "$(row_json "claim-all-time")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS7" bash "$QUEUE" enqueue --work-item wi --kdir "$KDIR7" --json >/dev/null
 ALL_TIME=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS7" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" LORE_SETTLEMENT_NOW="2026-05-11T03:30:00Z" bash "$QUEUE" process --kdir "$KDIR7" --once --json)
 assert_json_eq "unset active-hours ranges dispatch all time" "$ALL_TIME" '.dispatched' "true"
@@ -340,7 +340,7 @@ setup_plan_assertions_fixture "$KDIR8" "$SMOKE_SLUG"
 printf '%s' "$(row_json "assertion-0")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS8" bash "$QUEUE" enqueue --work-item "$SMOKE_SLUG" --kdir "$KDIR8" --json >/dev/null
 write_settings "$SETTINGS8" "$(jq -nc '{
   version: 1,
-  active_framework: "claude-code",
+  tui_launch_framework: "claude-code",
   harnesses: {"claude-code": {args: []}, opencode: {args: []}, codex: {args: []}},
   settlement: {
     enabled: true,
@@ -376,7 +376,7 @@ KDIR8B="$TEST_DIR/kdir8b"
 SETTINGS8B="$TEST_DIR/settings8b.json"
 ERROR_EXEC="$TEST_DIR/error-envelope-exec.sh"
 setup_kdir "$KDIR8B" "wi"
-write_settings "$SETTINGS8B" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":4,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS8B" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":4,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 printf '%s\n' "$(row_json "claim-error-envelope")" >> "$KDIR8B/_work/wi/task-claims.jsonl"
 cat > "$ERROR_EXEC" <<'EXEC'
 #!/usr/bin/env bash
@@ -404,7 +404,7 @@ KDIR8C="$TEST_DIR/kdir8c"
 SETTINGS8C="$TEST_DIR/settings8c.json"
 SLOW8C="$TEST_DIR/slow8c.sh"
 setup_kdir "$KDIR8C" "wi"
-write_settings "$SETTINGS8C" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"executor_timeout_seconds":1,"batch_size":4,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS8C" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"executor_timeout_seconds":1,"batch_size":4,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 printf '%s\n' "$(row_json "claim-timeout-envelope")" >> "$KDIR8C/_work/wi/task-claims.jsonl"
 printf '#!/usr/bin/env bash\ncat >/dev/null\nsleep 3\n' > "$SLOW8C"
 chmod +x "$SLOW8C"
@@ -424,7 +424,7 @@ SETTINGS9="$TEST_DIR/settings9.json"
 COUNT9="$TEST_DIR/score-count9"
 SCORE9="$TEST_DIR/score9.sh"
 setup_kdir "$KDIR9" "wi"
-write_settings "$SETTINGS9" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":3,"batch_recompute_min_interval_seconds":0,"concordance_window_size":7,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS9" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":3,"batch_recompute_min_interval_seconds":0,"concordance_window_size":7,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 printf '#!/usr/bin/env bash\ncat >/dev/null\nn=0; [[ -f "$LORE_SCORE_COUNT" ]] && n=$(cat "$LORE_SCORE_COUNT"); n=$((n+1)); printf "%%s" "$n" > "$LORE_SCORE_COUNT"; printf '"'"'{"score": 1}\n'"'"'\n' > "$SCORE9"
 chmod +x "$SCORE9"
 for i in 1 2 3 4 5 6 7; do
@@ -442,7 +442,7 @@ echo "Test 14: recompute preserves active leases byte-identical for lease/select
 KDIR10="$TEST_DIR/kdir10"
 SETTINGS10="$TEST_DIR/settings10.json"
 setup_kdir "$KDIR10" "wi"
-write_settings "$SETTINGS10" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":2,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS10" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":2,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 for i in 1 2 3; do printf '%s\n' "$(row_json "claim-lease-$i")" >> "$KDIR10/_work/wi/task-claims.jsonl"; done
 LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS10" bash "$QUEUE" queue recompute --kdir "$KDIR10" --json >/dev/null
 LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS10" LORE_SETTLEMENT_EXECUTOR="$VISIBLE_EXEC" bash "$QUEUE" process --kdir "$KDIR10" --once --json > "$TEST_DIR/lease-process.json" &
@@ -459,7 +459,7 @@ echo "Test 15: terminal drain leaves queue terminal-free and run records keep se
 KDIR11="$TEST_DIR/kdir11"
 SETTINGS11="$TEST_DIR/settings11.json"
 setup_kdir "$KDIR11" "wi"
-write_settings "$SETTINGS11" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":2,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS11" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":2,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 printf '%s\n' "$(row_json "claim-drain")" >> "$KDIR11/_work/wi/task-claims.jsonl"
 DRAIN=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS11" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" bash "$QUEUE" process --kdir "$KDIR11" --once --json)
 STATUS11=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS11" bash "$QUEUE" status --kdir "$KDIR11" --json)
@@ -472,7 +472,7 @@ echo "Test 16: partial crash heal prunes queue item when run record already exis
 KDIR12="$TEST_DIR/kdir12"
 SETTINGS12="$TEST_DIR/settings12.json"
 setup_kdir "$KDIR12" "wi"
-write_settings "$SETTINGS12" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":2,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS12" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":2,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 printf '%s\n' "$(row_json "claim-crash")" >> "$KDIR12/_work/wi/task-claims.jsonl"
 LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS12" bash "$QUEUE" queue recompute --kdir "$KDIR12" --json >/dev/null
 python3 - "$KDIR12" <<'PY'
@@ -495,7 +495,7 @@ echo "Test 17: status is read-only and does not trigger throttled recompute"
 KDIR13="$TEST_DIR/kdir13"
 SETTINGS13="$TEST_DIR/settings13.json"
 setup_kdir "$KDIR13" "wi"
-write_settings "$SETTINGS13" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":1,"batch_recompute_min_interval_seconds":9999,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS13" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":1,"batch_recompute_min_interval_seconds":9999,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 printf '%s\n' "$(row_json "claim-readonly")" >> "$KDIR13/_work/wi/task-claims.jsonl"
 LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS13" bash "$QUEUE" queue recompute --kdir "$KDIR13" --json >/dev/null
 SUM_BEFORE=$(find "$KDIR13/_settlement" -type f -print0 | sort -z | xargs -0 shasum | shasum | awk '{print $1}')
@@ -513,7 +513,7 @@ SETTINGS14B="$TEST_DIR/settings14b.json"
 SCORE14="$TEST_DIR/score14.sh"
 ERR14="$TEST_DIR/score-error14.sh"
 setup_kdir "$KDIR14" "wi"
-write_settings "$SETTINGS14" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS14" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 for cid in claim-tie-a claim-tie-b claim-tie-c; do printf '%s\n' "$(row_json "$cid")" >> "$KDIR14/_work/wi/task-claims.jsonl"; done
 printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf '"'"'{"score": 2}\n'"'"'\n' > "$SCORE14"
 printf '#!/usr/bin/env bash\ncat >/dev/null\nexit 22\n' > "$ERR14"
@@ -523,7 +523,7 @@ ORDER_A=$(jq -r '[.items[].claim_id] | join(",")' "$KDIR14/_settlement/queue.jso
 LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS14" LORE_SETTLEMENT_SCORE_HOOK="$SCORE14" bash "$QUEUE" queue recompute --kdir "$KDIR14" --json >/dev/null
 ORDER_B=$(jq -r '[.items[].claim_id] | join(",")' "$KDIR14/_settlement/queue.json")
 assert_eq "equal relevance scores keep durable FIFO order" "$ORDER_B" "$ORDER_A"
-write_settings "$SETTINGS14B" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS14B" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS14B" LORE_SETTLEMENT_SCORE_HOOK="$ERR14" bash "$QUEUE" queue recompute --kdir "$KDIR14" --json >/dev/null
 assert_json_eq "score hook errors degrade to fallback_error" "$(cat "$KDIR14/_settlement/queue.json")" '[.items[].selection_reason] | unique | .[0]' "fallback_error"
 LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS14B" LORE_SETTLEMENT_RELEVANCE_DISABLED=1 bash "$QUEUE" queue recompute --kdir "$KDIR14" --json >/dev/null
@@ -534,7 +534,7 @@ echo "Test 19: legacy pending is normalized before selection"
 KDIR15="$TEST_DIR/kdir15"
 SETTINGS15="$TEST_DIR/settings15.json"
 setup_kdir "$KDIR15" "wi"
-write_settings "$SETTINGS15" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":1,"batch_recompute_min_interval_seconds":9999,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS15" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":1,"batch_recompute_min_interval_seconds":9999,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 printf '%s\n' "$(row_json "claim-legacy-normalized")" >> "$KDIR15/_work/wi/task-claims.jsonl"
 printf '%s' "$(row_json "claim-legacy-normalized")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS15" bash "$QUEUE" enqueue --work-item wi --kdir "$KDIR15" --json >/dev/null
 LEGACY_RUN=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS15" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" bash "$QUEUE" process --kdir "$KDIR15" --once --json)
@@ -546,7 +546,7 @@ echo "Test 20: status path bounds JSON parsing to the K most recent run files"
 KDIR16="$TEST_DIR/kdir16"
 SETTINGS16="$TEST_DIR/settings16.json"
 setup_kdir "$KDIR16" "wi"
-write_settings "$SETTINGS16" '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+write_settings "$SETTINGS16" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
 python3 - "$KDIR16" <<'PY'
 import json, os, pathlib, sys, time
 kdir = pathlib.Path(sys.argv[1])

@@ -79,8 +79,9 @@ teardown() {
 # --- Helpers ---
 
 set_framework() {
+  export LORE_FRAMEWORK="$1"
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":1,"active_framework":"$1","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
+{"version":1,"tui_launch_framework":"$1","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
 }
 
@@ -289,6 +290,12 @@ PYEOF
   run grep -cE '(LORE_DATA_DIR|\.lore[/"\047]scripts)' "$OC_ADAPTER"
   [ "$status" -eq 0 ]
   [ "$output" -gt 0 ]
+}
+
+@test "opencode adapter pins spawned handler scripts to LORE_FRAMEWORK=opencode" {
+  [ -f "$OC_ADAPTER" ] || skip "adapters/opencode/lore-hooks.ts missing"
+  run grep -q 'LORE_FRAMEWORK: "opencode"' "$OC_ADAPTER"
+  [ "$status" -eq 0 ]
 }
 
 @test "opencode adapter declares the same closed event set as the README" {

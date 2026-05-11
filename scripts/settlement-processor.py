@@ -1092,11 +1092,11 @@ class Settlement:
             rng = random.Random(int(settings["harness_selection"].get("random_seed", 0)))
             return rng.choice(eligible)
         if mode == "active":
-            active = read_settings_doc().get("active_framework", "claude-code")
+            active = os.environ.get("LORE_FRAMEWORK") or "claude-code"
             for fw in eligible:
                 if fw["framework"] == active:
                     return fw
-            raise NoDispatch("active_framework_ineligible")
+            raise NoDispatch("process_framework_ineligible")
         raise NoDispatch(f"invalid_harness_selection_mode:{mode}")
 
     def reserve_budget(self, settings: dict[str, Any], usage: dict[str, Any]) -> None:

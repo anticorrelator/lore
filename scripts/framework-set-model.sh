@@ -207,7 +207,7 @@ fi
 
 ACTIVE_FRAMEWORK=$(resolve_active_framework 2>/dev/null || true)
 if [[ -z "$ACTIVE_FRAMEWORK" ]]; then
-  msg="active_framework is not configured in $CONFIG_PATH"
+  msg="process framework could not be resolved; set LORE_FRAMEWORK to a registered harness"
   if [[ "$JSON_OUTPUT" -eq 1 ]]; then
     emit_json "$SUBCOMMAND" "$ROLE" "$MODEL" "config-malformed" "$msg"
   else

@@ -221,7 +221,7 @@ except Exception as e:
     print("FRAMEWORK_STATUS=malformed", file=sys.stdout)
     sys.exit(0)
 
-framework = cfg.get("active_framework") or ""
+framework = cfg.get("tui_launch_framework") or ""
 roles = (((cfg.get("harnesses") or {}).get(framework) or {}).get("roles") or {})
 overrides = cfg.get("capability_overrides") or {}
 

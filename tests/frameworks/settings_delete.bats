@@ -125,7 +125,7 @@ bash_delete() {
   # on the absent-key branch it would trample this layout.
   printf '%s' '{
 "version": 1,
-  "active_framework":"opencode"
+  "tui_launch_framework":"opencode"
 }
 ' > "$SETTINGS_FILE"
   before_md5=$(md5sum "$SETTINGS_FILE" 2>/dev/null | awk '{print $1}' \
@@ -182,14 +182,14 @@ bash_delete() {
 @test "settings.sh delete: preserves unrelated keys" {
   write_settings '{
     "version": 1,
-    "active_framework": "claude-code",
+    "tui_launch_framework": "claude-code",
     "capability_overrides": {"stop_hook": "full"},
     "roles": {"lead": "opus", "default": "sonnet"}
   }'
 
   bash_delete "roles.lead"
 
-  [ "$(bash_get active_framework)" = '"claude-code"' ]
+  [ "$(bash_get tui_launch_framework)" = '"claude-code"' ]
   [ "$(bash_get capability_overrides.stop_hook)" = '"full"' ]
   [ "$(bash_get roles.default)" = '"sonnet"' ]
   [ -z "$(bash_get roles.lead)" ]

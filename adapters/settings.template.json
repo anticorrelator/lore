@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "active_framework": "claude-code",
+  "tui_launch_framework": "claude-code",
   "harnesses": {
     "claude-code": {
       "args": ["--dangerously-skip-permissions"],

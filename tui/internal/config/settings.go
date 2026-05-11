@@ -434,7 +434,7 @@ func deleteSettingsDotPath(doc map[string]any, dotPath string) (mutated bool, er
 // through purpose-built paths — `harnesses.<fw>.enabled` (must go via
 // scripts/harness-toggle/{enable,disable}.sh, which fans skill+agent
 // symlinks and the instruction file alongside the bool flip) and
-// `active_framework` (closed-set validated, written via SettingsPatch
+// `tui_launch_framework` (closed-set validated, written via SettingsPatch
 // per D8) — MUST NEVER be passed to SettingsDelete. The Delete primitive
 // itself cannot enforce this without coupling to the schema; the widget
 // layer (D4 WidgetRegistry / D8 PrimaryRadio / per-harness toggle widget

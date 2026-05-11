@@ -98,7 +98,7 @@ func stageFakeLoreData(t *testing.T, framework string, extraArgs []string) strin
 	}
 	cfg := map[string]any{
 		"version":              1,
-		"active_framework":     framework,
+		"tui_launch_framework": framework,
 		"capability_overrides": map[string]string{},
 		"harnesses":            harnesses,
 	}
@@ -152,6 +152,9 @@ func TestStartTerminalCmd_SpawnsClaudeBinaryWithDefaultFlags(t *testing.T) {
 
 	if !strings.HasSuffix(started.Cmd.Path, "/claude") {
 		t.Errorf("Cmd.Path = %q, want suffix /claude", started.Cmd.Path)
+	}
+	if !envContains(started.Cmd.Env, "LORE_FRAMEWORK=claude-code") {
+		t.Errorf("Cmd.Env missing LORE_FRAMEWORK=claude-code: %v", started.Cmd.Env)
 	}
 	// claude-code routes inline_settings_override through the adapter →
 	// `--settings {}` should be in args. append_system_prompt is gated on
@@ -220,6 +223,9 @@ func TestStartTerminalCmd_OpenCodeSkipsUnsupportedConcerns(t *testing.T) {
 	if !strings.HasSuffix(started.Cmd.Path, "/opencode") {
 		t.Errorf("Cmd.Path = %q, want suffix /opencode", started.Cmd.Path)
 	}
+	if !envContains(started.Cmd.Env, "LORE_FRAMEWORK=opencode") {
+		t.Errorf("Cmd.Env missing LORE_FRAMEWORK=opencode: %v", started.Cmd.Env)
+	}
 	// Both TUI-injected concerns should be skipped — substituting any
 	// claude-specific flag would crash opencode on an unknown CLI argument.
 	if argsContains(started.Cmd.Args, "--append-system-prompt") {
@@ -245,6 +251,9 @@ func TestStartTerminalCmd_CodexSkipsUnsupportedConcerns(t *testing.T) {
 	if !strings.HasSuffix(started.Cmd.Path, "/codex") {
 		t.Errorf("Cmd.Path = %q, want suffix /codex", started.Cmd.Path)
 	}
+	if !envContains(started.Cmd.Env, "LORE_FRAMEWORK=codex") {
+		t.Errorf("Cmd.Env missing LORE_FRAMEWORK=codex: %v", started.Cmd.Env)
+	}
 	if argsContains(started.Cmd.Args, "--append-system-prompt") {
 		t.Errorf("Cmd.Args contains --append-system-prompt on codex (should be skipped per `unsupported`): %v",
 			started.Cmd.Args)
@@ -257,29 +266,54 @@ func TestStartTerminalCmd_CodexSkipsUnsupportedConcerns(t *testing.T) {
 
 func TestStartTerminalCmd_UnknownFrameworkReturnsStreamError(t *testing.T) {
 	stageFakeBinaries(t)
-	stageFakeLoreData(t, "claude-code", nil)
-	// LORE_FRAMEWORK env beats the file and is validated against the closed
-	// set in adapters/capabilities.json — closed-set rejection must surface
-	// as a StreamErrorMsg, NOT silently route to the claude-code default.
-	t.Setenv("LORE_FRAMEWORK", "definitely-not-a-real-harness")
+	t.Setenv("LORE_DATA_DIR", stageFakeLoreDataWithLaunchFramework(t, "definitely-not-a-real-harness"))
 
 	msg := runStartTerminal(t, "smoke-slug", t.TempDir(), false)
 	streamErr, ok := msg.(StreamErrorMsg)
 	if !ok {
 		t.Fatalf("expected StreamErrorMsg for unknown framework, got %T (%+v)", msg, msg)
 	}
-	if streamErr.Err == nil || !strings.Contains(streamErr.Err.Error(), "unknown framework") {
-		t.Errorf("StreamErrorMsg.Err = %v, want substring %q", streamErr.Err, "unknown framework")
+	if streamErr.Err == nil || !strings.Contains(streamErr.Err.Error(), "unknown TUI launch framework") {
+		t.Errorf("StreamErrorMsg.Err = %v, want substring %q", streamErr.Err, "unknown TUI launch framework")
 	}
 	if streamErr.Slug != "smoke-slug" {
 		t.Errorf("StreamErrorMsg.Slug = %q, want %q", streamErr.Slug, "smoke-slug")
 	}
 }
 
+func stageFakeLoreDataWithLaunchFramework(t *testing.T, framework string) string {
+	t.Helper()
+	dataDir := stageFakeLoreData(t, "claude-code", nil)
+	path := filepath.Join(dataDir, "config", "settings.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["tui_launch_framework"] = framework
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return dataDir
+}
+
 // argsContains reports whether `needle` appears anywhere in args.
 func argsContains(args []string, needle string) bool {
 	for _, a := range args {
 		if a == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func envContains(env []string, needle string) bool {
+	for _, value := range env {
+		if value == needle {
 			return true
 		}
 	}

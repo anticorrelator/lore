@@ -10,8 +10,8 @@
 //
 // Parity rules:
 //  1. Resolution precedence MUST match byte-for-byte (env → per-repo →
-//     user → harness default for resolve_model_for_role; env → user →
-//     built-in default for resolve_active_framework).
+//     user → harness default for resolve_model_for_role; env → runtime
+//     harness markers → built-in default for resolve_active_framework).
 //  2. Closed-set rejection MUST match: an unknown framework, role, or kind
 //     errors out, never routes to a default. Silent defaults are an explicit
 //     anti-pattern (see feedback_dont_reintroduce_defaults in lore memory).
@@ -128,7 +128,7 @@ type capabilitiesFile struct {
 
 // LoadCapabilitiesFrameworks returns the sorted list of framework ids declared
 // in adapters/capabilities.json at the supplied path. Exposed so the host TUI
-// can enumerate the active_framework closed-set for the settings configurator
+// can enumerate the tui_launch_framework closed-set for the settings configurator
 // without duplicating the parse logic.
 func LoadCapabilitiesFrameworks(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
@@ -164,11 +164,31 @@ func loadCapabilitiesFile() (capabilitiesFile, error) {
 	return c, nil
 }
 
-// ResolveActiveFramework returns the active harness framework name, mirroring
-// resolve_active_framework in scripts/lib.sh. Precedence:
+func runtimeFrameworkHint() string {
+	if os.Getenv("LORE_DATA_DIR") != "" {
+		return ""
+	}
+	if os.Getenv("CLAUDECODE") == "1" || os.Getenv("CLAUDE_CODE_SESSION_ID") != "" || os.Getenv("CLAUDE_CODE_TEAM_NAME") != "" {
+		return "claude-code"
+	}
+	if os.Getenv("CODEX_SHELL") == "1" || os.Getenv("CODEX_THREAD_ID") != "" {
+		return "codex"
+	}
+	if os.Getenv("OPENCODE_CLIENT") != "" || os.Getenv("OPENCODE_SESSION_ID") != "" {
+		return "opencode"
+	}
+	return ""
+}
+
+// ResolveActiveFramework returns the current process harness framework name,
+// mirroring resolve_active_framework in scripts/lib.sh. Precedence:
 //  1. LORE_FRAMEWORK env var (validated against capabilities.json frameworks).
-//  2. Unified ~/.lore/config/settings.json `.active_framework`.
+//  2. Runtime harness environment markers (when LORE_DATA_DIR is not redirected).
 //  3. Built-in default "claude-code".
+//
+// Deliberately does NOT read settings.json. The stored TUI launch preference
+// lives at `tui_launch_framework` and is consumed by ResolveTUILaunchFramework
+// for TUI-spawned sessions only.
 //
 // Unknown framework names from any source are rejected with an error rather
 // than silently routing to a default.
@@ -178,12 +198,9 @@ func ResolveActiveFramework() (string, error) {
 	if env := os.Getenv("LORE_FRAMEWORK"); env != "" {
 		candidate = env
 		source = "env LORE_FRAMEWORK"
-	} else if raw, present, _ := SettingsGet("active_framework"); present {
-		var v string
-		if err := json.Unmarshal([]byte(raw), &v); err == nil && v != "" {
-			candidate = v
-			source = SettingsPath()
-		}
+	} else if runtime := runtimeFrameworkHint(); runtime != "" {
+		candidate = runtime
+		source = "runtime harness environment"
 	}
 	if candidate == "" {
 		candidate = "claude-code"
@@ -199,6 +216,36 @@ func ResolveActiveFramework() (string, error) {
 	}
 	if _, ok := caps.Frameworks[candidate]; !ok {
 		return "", fmt.Errorf("unknown framework %q (from %s); not present in adapters/capabilities.json", candidate, source)
+	}
+	return candidate, nil
+}
+
+// ResolveTUILaunchFramework returns the framework the TUI should spawn for
+// chat/spec/followup sessions. This is a TUI-only preference; shell helpers
+// must use ResolveActiveFramework instead.
+//
+// Reads settings.json `tui_launch_framework`, then defaults to "claude-code".
+// Unknown configured values are rejected.
+func ResolveTUILaunchFramework() (string, error) {
+	candidate := ""
+	source := ""
+	if raw, present, _ := SettingsGet("tui_launch_framework"); present {
+		var v string
+		if err := json.Unmarshal([]byte(raw), &v); err == nil && v != "" {
+			candidate = v
+			source = SettingsPath() + "::tui_launch_framework"
+		}
+	}
+	if candidate == "" {
+		candidate = "claude-code"
+		source = "built-in default"
+	}
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return candidate, nil
+	}
+	if _, ok := caps.Frameworks[candidate]; !ok {
+		return "", fmt.Errorf("unknown TUI launch framework %q (from %s); not present in adapters/capabilities.json", candidate, source)
 	}
 	return candidate, nil
 }

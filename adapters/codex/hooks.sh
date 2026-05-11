@@ -73,8 +73,8 @@ parse_adapter_args() {
 LORE_BEGIN_MARKER="# >>> lore hooks (managed) — do not edit between markers"
 LORE_END_MARKER="# <<< lore hooks (managed)"
 
-# Ensure the active framework is codex; install.sh updates settings.json before
-# invoking us, so this guard is a contract check, not a routing decision.
+# Ensure the active framework is codex; install callers pass --framework and
+# runtime callers resolve from Codex markers or LORE_FRAMEWORK.
 require_codex() {
   local active
   active="${TARGET_FRAMEWORK:-}"
@@ -83,7 +83,7 @@ require_codex() {
   fi
   if [[ "$active" != "codex" ]]; then
     echo "Error: adapters/codex/hooks.sh requires active framework=codex (got '$active')" >&2
-    echo "       run install.sh --framework codex or set settings.json active_framework=codex" >&2
+    echo "       pass --framework codex or set LORE_FRAMEWORK=codex for this process" >&2
     return 1
   fi
 }
@@ -115,9 +115,9 @@ resolve_settings_path() {
 # start) and SessionEnd is derived from Stop (skipped here — Stop hook
 # already runs the same work).
 #
-# Hook commands read the active harness from unified settings.json. install.sh
-# updates settings.json before invoking this adapter, so the generated hooks do
-# not require a LORE_FRAMEWORK env shim to resolve their capability profile.
+# Hook commands resolve codex from Codex's runtime shell markers when present.
+# TUI launch preference is not process truth, so later installs for another
+# harness cannot redirect these hook commands.
 render_lore_block() {
   cat <<'TOML'
 # >>> lore hooks (managed) — do not edit between markers

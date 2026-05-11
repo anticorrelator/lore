@@ -52,9 +52,9 @@ parse_adapter_args() {
 }
 
 # --- Resolve settings.json target ---
-# Active framework MUST be claude-code for this adapter; callers set
-# settings.json active_framework before invoking it so hook installation and
-# runtime resolution share the same settings source.
+# Active framework MUST be claude-code for this adapter; install callers pass
+# --framework and runtime callers resolve from Claude Code markers or
+# LORE_FRAMEWORK.
 require_claude_code() {
   local active
   active="${TARGET_FRAMEWORK:-}"
@@ -63,7 +63,7 @@ require_claude_code() {
   fi
   if [[ "$active" != "claude-code" ]]; then
     echo "Error: adapters/hooks/claude-code.sh requires active framework=claude-code (got '$active')" >&2
-    echo "       run install.sh --framework claude-code or set settings.json active_framework=claude-code" >&2
+    echo "       pass --framework claude-code or set LORE_FRAMEWORK=claude-code for this process" >&2
     return 1
   fi
 }
@@ -109,9 +109,10 @@ else:
 # hook_kind is "command" or "agent"; payload is the shell command or
 # the agent prompt text. Identical to the list that previously lived
 # in install.sh:416-429.
-# Hook commands read the active harness from unified settings.json. install.sh
-# updates settings.json before invoking this adapter, so the generated hooks do
-# not require a LORE_FRAMEWORK env shim to resolve their capability profile.
+# Hook commands resolve claude-code from Claude's runtime shell markers when
+# present, falling back to the built-in default. TUI launch preference is not
+# process truth, so later installs for other harnesses cannot redirect these
+# hook commands.
 lore_hooks = [
     ("SessionStart", None, "command", "bash ~/.lore/scripts/doctor.sh --quiet", 5),
     ("SessionStart", None, "command", "bash ~/.lore/scripts/auto-reindex.sh", 5),

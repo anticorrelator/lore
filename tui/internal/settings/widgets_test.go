@@ -65,7 +65,7 @@ func dispatchAll(w FieldWidget, keys ...string) (FieldWidget, *FieldIntent) {
 // ----------------------------------------------------------------------------
 
 func TestEnumSelector_CommitOnEnter(t *testing.T) {
-	w := NewEnumSelector("active_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code", false)
+	w := NewEnumSelector("tui_launch_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code", false)
 	w.Focus()
 
 	// Move cursor right twice → "codex".
@@ -120,7 +120,7 @@ func TestEnumSelector_UnsetGesture(t *testing.T) {
 }
 
 func TestEnumSelector_UnsetSuppressedWhenNotAllowed(t *testing.T) {
-	w := NewEnumSelector("active_framework", []string{"claude-code", "opencode"}, nil, "claude-code", false)
+	w := NewEnumSelector("tui_launch_framework", []string{"claude-code", "opencode"}, nil, "claude-code", false)
 	w.Focus()
 
 	_, intent := dispatch(w, "u")
@@ -748,7 +748,7 @@ func TestClosedObjectSubPanel_RendersFocusedAndEnteredState(t *testing.T) {
 // caller using the bare candidate-list shape) depends on this — the legacy
 // render is one line of `○ option` tokens with no header or description block.
 func TestEnumSelector_LegacyRenderWithoutLabel(t *testing.T) {
-	w := NewEnumSelector("active_framework", []string{"claude-code", "codex"}, nil, "claude-code", false)
+	w := NewEnumSelector("tui_launch_framework", []string{"claude-code", "codex"}, nil, "claude-code", false)
 	out := w.View()
 	if strings.Contains(out, "\n") {
 		t.Fatalf("expected single-line render without label, got:\n%s", out)

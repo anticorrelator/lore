@@ -595,21 +595,59 @@ _lore_warn_load_claude_env_once() {
   fi
 }
 
+# --- _lore_runtime_framework_hint ---
+# Print the harness implied by the process environment, when a harness exposes
+# a stable shell marker. This catches multi-harness installs where a stored
+# TUI launch preference reflects a different harness than the tool that spawned
+# this shell.
+#
+# Keep this deliberately narrow:
+#   - LORE_FRAMEWORK remains the explicit override and is handled by
+#     resolve_active_framework before this helper.
+#   - A caller-provided LORE_DATA_DIR usually means a hermetic test or scripted
+#     config inspection; in that case do not infer from the parent app's
+#     environment. The resolver will fall through to the built-in default
+#     unless LORE_FRAMEWORK is explicit.
+#   - OpenCode exposes OPENCODE_CLIENT as the CLI/client identity knob; treat it
+#     as a runtime hint only when the caller has not redirected LORE_DATA_DIR.
+_lore_runtime_framework_hint() {
+  if [[ -n "${LORE_DATA_DIR:-}" ]]; then
+    return 0
+  fi
+
+  if [[ "${CLAUDECODE:-}" == "1" || -n "${CLAUDE_CODE_SESSION_ID:-}" || -n "${CLAUDE_CODE_TEAM_NAME:-}" ]]; then
+    echo "claude-code"
+    return 0
+  fi
+
+  if [[ "${CODEX_SHELL:-}" == "1" || -n "${CODEX_THREAD_ID:-}" ]]; then
+    echo "codex"
+    return 0
+  fi
+
+  if [[ -n "${OPENCODE_CLIENT:-}" || -n "${OPENCODE_SESSION_ID:-}" ]]; then
+    echo "opencode"
+    return 0
+  fi
+}
+
 # --- resolve_active_framework ---
 # Print the active harness framework name on stdout.
 # Resolution order:
 #   1. LORE_FRAMEWORK env var (any non-empty value, validated against the
 #      shipped capabilities.json frameworks set).
-#   2. Unified $LORE_DATA_DIR/config/settings.json `.active_framework`
-#      (written by install.sh during the migration; T2 of the unified-file
-#      consolidation).
+#   2. Runtime harness environment markers (Claude Code / Codex shell
+#      subprocesses) when LORE_DATA_DIR is not explicitly redirected.
 #   3. Built-in default: "claude-code".
+#
+# Deliberately does NOT read settings.json. The stored TUI launch preference
+# lives at `tui_launch_framework` and is consumed by the TUI when it spawns chat
+# / spec sessions; shell helpers resolve the *current process* harness from
+# process-local evidence only.
 # Unknown framework names are rejected with a non-zero exit and stderr message;
 # resolution never silently routes to a default for an explicit-but-bogus value.
 # Mirrors config.ResolveActiveFramework() in tui/internal/config/config.go (T10).
 resolve_active_framework() {
-  local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
-  local settings_sh="$LORE_LIB_DIR/settings.sh"
   local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
   local candidate=""
   local source=""
@@ -617,15 +655,13 @@ resolve_active_framework() {
   if [[ -n "${LORE_FRAMEWORK:-}" ]]; then
     candidate="$LORE_FRAMEWORK"
     source="env LORE_FRAMEWORK"
-  elif command -v jq &>/dev/null; then
-    # Unified file (primary)
-    local unified_raw
-    unified_raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get active_framework 2>/dev/null || true)
-    if [[ -n "$unified_raw" ]]; then
-      candidate=$(printf '%s' "$unified_raw" | jq -r '. // empty' 2>/dev/null || true)
-      source="${data_dir}/config/settings.json"
+  else
+    local runtime_hint
+    runtime_hint=$(_lore_runtime_framework_hint 2>/dev/null || true)
+    if [[ -n "$runtime_hint" ]]; then
+      candidate="$runtime_hint"
+      source="runtime harness environment"
     fi
-
   fi
 
   if [[ -z "$candidate" ]]; then

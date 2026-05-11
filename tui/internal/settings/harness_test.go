@@ -88,7 +88,7 @@ func TestPrimaryRadio_EnumeratesFromInjectedCapabilities(t *testing.T) {
 	path := writeCapabilitiesFixture(t, fixture)
 	enumerated := loadCapabilitiesFrameworks(t, path)
 
-	w := NewPrimaryRadio("active_framework", enumerated, nil, "alpha")
+	w := NewPrimaryRadio("tui_launch_framework", enumerated, nil, "alpha")
 
 	got := w.Options()
 	if len(got) != len(fixture) {
@@ -109,7 +109,7 @@ func TestPrimaryRadio_EnumeratesFromInjectedCapabilities(t *testing.T) {
 }
 
 func TestPrimaryRadio_CommitOnEnter(t *testing.T) {
-	w := NewPrimaryRadio("active_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code")
+	w := NewPrimaryRadio("tui_launch_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code")
 	w.Focus()
 
 	_, _ = dispatch(w, "right")
@@ -124,15 +124,15 @@ func TestPrimaryRadio_CommitOnEnter(t *testing.T) {
 	if intent.Value != "codex" {
 		t.Fatalf("expected codex, got %v", intent.Value)
 	}
-	if intent.DotPath != "active_framework" {
-		t.Fatalf("expected dotpath active_framework, got %q", intent.DotPath)
+	if intent.DotPath != "tui_launch_framework" {
+		t.Fatalf("expected dotpath tui_launch_framework, got %q", intent.DotPath)
 	}
 }
 
 // PrimaryRadio's closed-set rejection is structural: cursor cannot exceed
 // len(options)-1, so no keystroke sequence can emit a value outside the set.
 func TestPrimaryRadio_CursorBoundedToOptions(t *testing.T) {
-	w := NewPrimaryRadio("active_framework", []string{"a", "b"}, nil, "a")
+	w := NewPrimaryRadio("tui_launch_framework", []string{"a", "b"}, nil, "a")
 	w.Focus()
 
 	for i := 0; i < 50; i++ {
@@ -159,7 +159,7 @@ func TestPrimaryRadio_CursorBoundedToOptions(t *testing.T) {
 // emit any intent — closed-set is enforced both at the boundary and the
 // keystroke surface.
 func TestPrimaryRadio_RejectsNonNavigationKeys(t *testing.T) {
-	w := NewPrimaryRadio("active_framework", []string{"claude-code", "opencode"}, nil, "claude-code")
+	w := NewPrimaryRadio("tui_launch_framework", []string{"claude-code", "opencode"}, nil, "claude-code")
 	w.Focus()
 
 	for _, k := range []string{"x", "z", "1", "/"} {
@@ -174,7 +174,7 @@ func TestPrimaryRadio_RejectsNonNavigationKeys(t *testing.T) {
 }
 
 func TestPrimaryRadio_RendersCurrentSelectionMarker(t *testing.T) {
-	w := NewPrimaryRadio("active_framework", []string{"claude-code", "opencode", "codex"}, nil, "opencode")
+	w := NewPrimaryRadio("tui_launch_framework", []string{"claude-code", "opencode", "codex"}, nil, "opencode")
 	view := w.View()
 	if !strings.Contains(view, "(•) opencode") {
 		t.Fatalf("expected selection marker on opencode, got: %s", view)

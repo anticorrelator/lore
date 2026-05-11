@@ -48,7 +48,7 @@ func setupFakeLoreData(t *testing.T, framework string, roles map[string]string) 
 	}
 	cfg := map[string]any{
 		"version":              1,
-		"active_framework":     framework,
+		"tui_launch_framework": framework,
 		"capability_overrides": map[string]string{},
 		"harnesses":            harnesses,
 	}
@@ -64,14 +64,26 @@ func setupFakeLoreData(t *testing.T, framework string, roles map[string]string) 
 }
 
 func TestResolveActiveFramework(t *testing.T) {
-	setupFakeLoreData(t, "claude-code", nil)
+	setupFakeLoreData(t, "opencode", nil)
 
 	got, err := ResolveActiveFramework()
 	if err != nil {
 		t.Fatalf("ResolveActiveFramework: %v", err)
 	}
 	if got != "claude-code" {
-		t.Errorf("got %q, want claude-code", got)
+		t.Errorf("got %q, want claude-code default despite TUI preference", got)
+	}
+}
+
+func TestResolveTUILaunchFramework(t *testing.T) {
+	setupFakeLoreData(t, "opencode", nil)
+
+	got, err := ResolveTUILaunchFramework()
+	if err != nil {
+		t.Fatalf("ResolveTUILaunchFramework: %v", err)
+	}
+	if got != "opencode" {
+		t.Errorf("got %q, want opencode", got)
 	}
 }
 
@@ -133,6 +145,7 @@ func TestResolveHarnessInstallPath_ClaudeCode(t *testing.T) {
 
 func TestResolveHarnessInstallPath_Unsupported(t *testing.T) {
 	setupFakeLoreData(t, "opencode", nil)
+	t.Setenv("LORE_FRAMEWORK", "opencode")
 
 	for _, kind := range []string{"teams", "ephemeral_plans"} {
 		path, supported, err := ResolveHarnessInstallPath(kind)
@@ -151,6 +164,7 @@ func TestResolveHarnessInstallPath_Unsupported(t *testing.T) {
 
 func TestResolveHarnessInstallPath_Codex(t *testing.T) {
 	setupFakeLoreData(t, "codex", nil)
+	t.Setenv("LORE_FRAMEWORK", "codex")
 	home, _ := os.UserHomeDir()
 
 	path, supported, err := ResolveHarnessInstallPath("instructions")
@@ -198,6 +212,7 @@ func TestHarnessBinary(t *testing.T) {
 
 func TestHarnessBinary_ResolvesActiveWhenEmpty(t *testing.T) {
 	setupFakeLoreData(t, "opencode", nil)
+	t.Setenv("LORE_FRAMEWORK", "opencode")
 	got, err := HarnessBinary("")
 	if err != nil {
 		t.Fatalf("HarnessBinary(\"\"): %v", err)
@@ -243,6 +258,7 @@ func TestHarnessSystemPromptFlag(t *testing.T) {
 
 func TestHarnessSystemPromptFlag_ResolvesActiveWhenEmpty(t *testing.T) {
 	setupFakeLoreData(t, "opencode", nil)
+	t.Setenv("LORE_FRAMEWORK", "opencode")
 	gotFlag, gotSupported, err := HarnessSystemPromptFlag("")
 	if err != nil {
 		t.Fatalf("HarnessSystemPromptFlag(\"\"): %v", err)
@@ -384,6 +400,7 @@ func TestLoadHarnessArgs_PerFrameworkArgs(t *testing.T) {
 
 func TestLoadHarnessArgs_ResolvesActiveWhenEmpty(t *testing.T) {
 	setupFakeLoreData(t, "opencode", nil)
+	t.Setenv("LORE_FRAMEWORK", "opencode")
 	writeHarnessArgs(t, map[string][]string{
 		"opencode": {"--from-active"},
 	})
@@ -578,6 +595,7 @@ func TestHarnessDisplayName(t *testing.T) {
 
 func TestHarnessDisplayName_EmptyResolvesActive(t *testing.T) {
 	setupFakeLoreData(t, "opencode", nil)
+	t.Setenv("LORE_FRAMEWORK", "opencode")
 	got := HarnessDisplayName("")
 	if got != "OpenCode" {
 		t.Errorf("HarnessDisplayName(\"\") under opencode = %q, want OpenCode", got)

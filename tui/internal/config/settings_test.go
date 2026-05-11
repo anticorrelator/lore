@@ -39,7 +39,7 @@ func TestSettingsPath_HonorsLoreDataDir(t *testing.T) {
 func TestSettingsGet_Absent_ReturnsEmptyAndFalse(t *testing.T) {
 	settingsTestEnv(t)
 	// No settings.json on disk.
-	raw, present, err := SettingsGet("active_framework")
+	raw, present, err := SettingsGet("tui_launch_framework")
 	if err != nil {
 		t.Fatalf("SettingsGet: %v", err)
 	}
@@ -53,9 +53,9 @@ func TestSettingsGet_Absent_ReturnsEmptyAndFalse(t *testing.T) {
 
 func TestSettingsGet_Present_NonNullValue(t *testing.T) {
 	_, p := settingsTestEnv(t)
-	writeSettings(t, p, `{"version":1,"active_framework":"opencode"}`)
+	writeSettings(t, p, `{"version":1,"tui_launch_framework":"opencode"}`)
 
-	raw, present, err := SettingsGet("active_framework")
+	raw, present, err := SettingsGet("tui_launch_framework")
 	if err != nil {
 		t.Fatalf("SettingsGet: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestSettingsGet_MalformedJSON_ReturnsSettingsError(t *testing.T) {
 	_, p := settingsTestEnv(t)
 	writeSettings(t, p, `not even close to JSON`)
 
-	_, _, err := SettingsGet("active_framework")
+	_, _, err := SettingsGet("tui_launch_framework")
 	if err == nil {
 		t.Fatal("expected SettingsError for malformed JSON, got nil")
 	}
@@ -179,7 +179,7 @@ func TestSettingsPatch_CreatesFileIfAbsent(t *testing.T) {
 		t.Fatal("settings.json should not exist before Patch")
 	}
 
-	if err := SettingsPatch("active_framework", "opencode"); err != nil {
+	if err := SettingsPatch("tui_launch_framework", "opencode"); err != nil {
 		t.Fatalf("SettingsPatch: %v", err)
 	}
 
@@ -191,8 +191,8 @@ func TestSettingsPatch_CreatesFileIfAbsent(t *testing.T) {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if doc["active_framework"] != "opencode" {
-		t.Errorf("active_framework = %v, want opencode", doc["active_framework"])
+	if doc["tui_launch_framework"] != "opencode" {
+		t.Errorf("tui_launch_framework = %v, want opencode", doc["tui_launch_framework"])
 	}
 }
 
@@ -204,7 +204,7 @@ func TestSettingsPatch_AtomicWriteLeavesNoTempFiles(t *testing.T) {
 	configDir := filepath.Join(dataDir, "config")
 
 	for i := 0; i < 5; i++ {
-		if err := SettingsPatch("active_framework", "claude-code"); err != nil {
+		if err := SettingsPatch("tui_launch_framework", "claude-code"); err != nil {
 			t.Fatalf("SettingsPatch %d: %v", i, err)
 		}
 	}
@@ -239,7 +239,7 @@ func TestSettingsPatch_PreservesUnrelatedKeys(t *testing.T) {
 	_, p := settingsTestEnv(t)
 	writeSettings(t, p, `{
 		"version": 1,
-		"active_framework": "claude-code",
+		"tui_launch_framework": "claude-code",
 		"capability_overrides": {"stop_hook": "full"},
 		"roles": {"lead": "opus", "default": "sonnet"}
 	}`)
@@ -262,8 +262,8 @@ func TestSettingsPatch_PreservesUnrelatedKeys(t *testing.T) {
 	if roles["default"] != "sonnet" {
 		t.Errorf("roles.default mutated unexpectedly: %v", roles["default"])
 	}
-	if doc["active_framework"] != "claude-code" {
-		t.Errorf("active_framework mutated unexpectedly: %v", doc["active_framework"])
+	if doc["tui_launch_framework"] != "claude-code" {
+		t.Errorf("tui_launch_framework mutated unexpectedly: %v", doc["tui_launch_framework"])
 	}
 	caps := doc["capability_overrides"].(map[string]any)
 	if caps["stop_hook"] != "full" {
@@ -290,7 +290,7 @@ func TestSettingsPatch_ConcurrentDifferentPaths(t *testing.T) {
 	_, p := settingsTestEnv(t)
 
 	var wg sync.WaitGroup
-	keys := []string{"active_framework", "capability_overrides.stop_hook", "roles.lead", "tui.layout"}
+	keys := []string{"tui_launch_framework", "capability_overrides.stop_hook", "roles.lead", "tui.layout"}
 	values := []string{"opencode", "full", "opus", "top-bottom"}
 	wg.Add(len(keys))
 	for i := range keys {
@@ -311,8 +311,8 @@ func TestSettingsPatch_ConcurrentDifferentPaths(t *testing.T) {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if doc["active_framework"] != "opencode" {
-		t.Errorf("active_framework = %v, want opencode", doc["active_framework"])
+	if doc["tui_launch_framework"] != "opencode" {
+		t.Errorf("tui_launch_framework = %v, want opencode", doc["tui_launch_framework"])
 	}
 	caps := doc["capability_overrides"].(map[string]any)
 	if caps["stop_hook"] != "full" {
@@ -475,7 +475,7 @@ func TestSettingsDelete_AbsentIsByteIdentical(t *testing.T) {
 	// Stage a file with deliberately non-canonical formatting (a foreign
 	// writer's whitespace) — if SettingsDelete on an absent key
 	// re-marshals via MarshalIndent it will trample this layout.
-	original := "{\n\"version\": 1,\n  \"active_framework\":\"opencode\"\n}\n"
+	original := "{\n\"version\": 1,\n  \"tui_launch_framework\":\"opencode\"\n}\n"
 	writeSettings(t, p, original)
 
 	if err := SettingsDelete("nonexistent.path"); err != nil {
@@ -597,7 +597,7 @@ func TestSettingsDelete_PreservesUnrelatedKeys(t *testing.T) {
 	_, p := settingsTestEnv(t)
 	writeSettings(t, p, `{
 		"version": 1,
-		"active_framework": "claude-code",
+		"tui_launch_framework": "claude-code",
 		"capability_overrides": {"stop_hook": "full"},
 		"roles": {"lead": "opus", "default": "sonnet"}
 	}`)
@@ -611,8 +611,8 @@ func TestSettingsDelete_PreservesUnrelatedKeys(t *testing.T) {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if doc["active_framework"] != "claude-code" {
-		t.Errorf("active_framework mutated: %v", doc["active_framework"])
+	if doc["tui_launch_framework"] != "claude-code" {
+		t.Errorf("tui_launch_framework mutated: %v", doc["tui_launch_framework"])
 	}
 	roles := doc["roles"].(map[string]any)
 	if _, present := roles["lead"]; present {
@@ -659,8 +659,8 @@ func TestSettingsFallbacks_IgnoresLegacyFilesWhenUnifiedAbsent(t *testing.T) {
 func TestSettingsFallbacks_OmitsRowsCoveredByUnified(t *testing.T) {
 	dataDir, p := settingsTestEnv(t)
 	configDir := filepath.Join(dataDir, "config")
-	// Stage settings.json that covers active_framework.
-	writeSettings(t, p, `{"version":1,"active_framework":"opencode"}`)
+	// Stage settings.json that covers tui_launch_framework.
+	writeSettings(t, p, `{"version":1,"tui_launch_framework":"opencode"}`)
 	// Stage a legacy framework.json that would otherwise be a fallback source.
 	if err := os.WriteFile(
 		filepath.Join(configDir, "framework.json"),

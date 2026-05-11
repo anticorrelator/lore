@@ -56,8 +56,9 @@ teardown() {
 }
 
 set_framework() {
+  export LORE_FRAMEWORK="$1"
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":1,"active_framework":"$1","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}},"opencode":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}},"codex":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}}}}
+{"version":1,"tui_launch_framework":"$1","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}},"opencode":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}},"codex":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}}}}
 EOF
 }
 
@@ -65,8 +66,9 @@ EOF
 # syntax so the opencode adapter can exercise its split_provider_model
 # helper. Only meaningful when the framework's model_routing.shape=multi.
 set_framework_multi() {
+  export LORE_FRAMEWORK="$1"
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":1,"active_framework":"$1","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}},"opencode":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}},"codex":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}}}}
+{"version":1,"tui_launch_framework":"$1","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}},"opencode":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}},"codex":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}}}}
 EOF
 }
 

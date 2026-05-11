@@ -91,10 +91,11 @@ teardown() {
 # split_provider_model path.
 setup_framework() {
   local framework="$1"
+  export LORE_FRAMEWORK="$framework"
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
 {
   "version": 2,
-  "active_framework": "$framework",
+  "tui_launch_framework": "$framework",
   "capability_overrides": {},
   "harnesses": {
     "$framework": {
@@ -111,10 +112,11 @@ EOF
 
 setup_framework_multi() {
   local framework="$1"
+  export LORE_FRAMEWORK="$framework"
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
 {
   "version": 2,
-  "active_framework": "$framework",
+  "tui_launch_framework": "$framework",
   "capability_overrides": {},
   "harnesses": {
     "$framework": {

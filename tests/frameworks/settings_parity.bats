@@ -10,7 +10,7 @@
 # identically across both stacks.
 #
 # Parity surface (D5 table — the four bash↔Go rows lifted from plan.md):
-#   1. active_framework         — top-level scalar
+#   1. tui_launch_framework     — top-level scalar
 #   2. harnesses.<n>.args       — per-harness array
 #   3. harnesses.<n>.roles.<id> — per-harness role scalar
 #   4. capability_overrides.<k> — top-level scalar (read-only on the Go side; bash
@@ -94,30 +94,30 @@ go_helper() {
 }
 
 # ============================================================
-# D5 row 1: active_framework
+# D5 row 1: tui_launch_framework
 # ============================================================
 
-@test "parity: settings get active_framework — value present" {
-  write_settings '{"version":1,"active_framework":"opencode"}'
-  bash_out=$(bash_get active_framework)
-  go_out=$(go_helper settings_get active_framework)
+@test "parity: settings get tui_launch_framework — value present" {
+  write_settings '{"version":1,"tui_launch_framework":"opencode"}'
+  bash_out=$(bash_get tui_launch_framework)
+  go_out=$(go_helper settings_get tui_launch_framework)
   [ "$bash_out" = '"opencode"' ]
   [ "$go_out" = '"opencode"' ]
 }
 
-@test "parity: settings get active_framework — absent key" {
+@test "parity: settings get tui_launch_framework — absent key" {
   write_settings '{"version":1}'
-  bash_out=$(bash_get active_framework)
-  go_out=$(go_helper settings_get active_framework)
+  bash_out=$(bash_get tui_launch_framework)
+  go_out=$(go_helper settings_get tui_launch_framework)
   # Both sides emit empty stdout on absence.
   [ -z "$bash_out" ]
   [ -z "$go_out" ]
 }
 
-@test "parity: settings get active_framework — explicit null" {
-  write_settings '{"version":1,"active_framework":null}'
-  bash_out=$(bash_get active_framework)
-  go_out=$(go_helper settings_get active_framework)
+@test "parity: settings get tui_launch_framework — explicit null" {
+  write_settings '{"version":1,"tui_launch_framework":null}'
+  bash_out=$(bash_get tui_launch_framework)
+  go_out=$(go_helper settings_get tui_launch_framework)
   # Both sides emit literal "null" (distinguishes from absence).
   [ "$bash_out" = "null" ]
   [ "$go_out" = "null" ]
@@ -213,8 +213,8 @@ go_helper() {
     skip "Go parity harness not available"
   fi
   # Go writes; bash reads.
-  "$HARNESS_BIN" settings_patch active_framework '"opencode"'
-  bash_out=$(bash_get active_framework)
+  "$HARNESS_BIN" settings_patch tui_launch_framework '"opencode"'
+  bash_out=$(bash_get tui_launch_framework)
   [ "$bash_out" = '"opencode"' ]
 }
 
@@ -223,8 +223,8 @@ go_helper() {
     skip "Go parity harness not available"
   fi
   # Bash writes; Go reads.
-  bash "$SETTINGS_SH" patch active_framework '"codex"' >/dev/null
-  go_out=$(go_helper settings_get active_framework)
+  bash "$SETTINGS_SH" patch tui_launch_framework '"codex"' >/dev/null
+  go_out=$(go_helper settings_get tui_launch_framework)
   [ "$go_out" = '"codex"' ]
 }
 
@@ -235,10 +235,10 @@ go_helper() {
     skip "Go parity harness not available"
   fi
   "$HARNESS_BIN" settings_patch tui.layout '"top-bottom"'
-  bash "$SETTINGS_SH" patch active_framework '"claude-code"' >/dev/null
+  bash "$SETTINGS_SH" patch tui_launch_framework '"claude-code"' >/dev/null
   [ -f "$TEST_LORE_DATA_DIR/config/.settings.lock" ]
   # And both writes landed.
-  bash_active=$(bash_get active_framework)
+  bash_active=$(bash_get tui_launch_framework)
   bash_layout=$(bash_get tui.layout)
   [ "$bash_active" = '"claude-code"' ]
   [ "$bash_layout" = '"top-bottom"' ]
@@ -248,38 +248,38 @@ go_helper() {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
-  write_settings '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[],"roles":{"lead":"opus","default":"sonnet"}}},"capability_overrides":{"stop_hook":"full"}}'
+  write_settings '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[],"roles":{"lead":"opus","default":"sonnet"}}},"capability_overrides":{"stop_hook":"full"}}'
   # Go-side patch.
   "$HARNESS_BIN" settings_patch harnesses.claude-code.roles.lead '"haiku"'
   # Unrelated keys must survive.
   default_after=$(bash_get harnesses.claude-code.roles.default)
   cap_after=$(bash_get capability_overrides.stop_hook)
-  active_after=$(bash_get active_framework)
+  active_after=$(bash_get tui_launch_framework)
   [ "$default_after" = '"sonnet"' ]
   [ "$cap_after" = '"full"' ]
   [ "$active_after" = '"claude-code"' ]
 }
 
 # ============================================================
-# resolve_active_framework parity (unified-file-driven)
+# resolve_active_framework parity (process-local)
 # ============================================================
 
-@test "parity: resolve_active_framework reads unified settings.json on both stacks" {
+@test "parity: resolve_active_framework ignores TUI launch preference on both stacks" {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
-  write_settings '{"version":1,"active_framework":"opencode","harnesses":{"opencode":{"args":[]}}}'
+  write_settings '{"version":1,"tui_launch_framework":"opencode","harnesses":{"opencode":{"args":[]}}}'
   bash_out=$(bash -c "source '$LIB_SH' && resolve_active_framework" 2>/dev/null)
   go_out=$("$HARNESS_BIN" resolve_active_framework 2>/dev/null)
-  [ "$bash_out" = "opencode" ]
-  [ "$go_out" = "opencode" ]
+  [ "$bash_out" = "claude-code" ]
+  [ "$go_out" = "claude-code" ]
 }
 
-@test "parity: resolve_active_framework rejects unknown framework on both stacks" {
+@test "parity: resolve_active_framework rejects unknown env framework on both stacks" {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
-  write_settings '{"version":1,"active_framework":"phantom-harness"}'
+  export LORE_FRAMEWORK=phantom-harness
   run bash -c "source '$LIB_SH' && resolve_active_framework"
   [ "$status" -ne 0 ]
   [[ "$output" == *"unknown framework"* ]] || [[ "$output" == *"phantom-harness"* ]]
@@ -296,9 +296,10 @@ go_helper() {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
+  export LORE_FRAMEWORK=claude-code
   write_settings '{
     "version": 1,
-    "active_framework": "claude-code",
+    "tui_launch_framework": "claude-code",
     "harnesses": {
       "claude-code": {"args": [], "roles": {"lead": "opus", "default": "sonnet"}},
       "opencode": {"args": [], "roles": {"lead": "anthropic/opus", "default": "anthropic/opus"}}
@@ -314,9 +315,10 @@ go_helper() {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
+  export LORE_FRAMEWORK=opencode
   write_settings '{
     "version": 1,
-    "active_framework": "opencode",
+    "tui_launch_framework": "opencode",
     "harnesses": {
       "claude-code": {"args": [], "roles": {"lead": "opus", "default": "sonnet"}},
       "opencode": {"args": [], "roles": {"default": "anthropic/opus"}}
@@ -332,9 +334,10 @@ go_helper() {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
+  export LORE_FRAMEWORK=claude-code
   write_settings '{
     "version": 1,
-    "active_framework": "claude-code",
+    "tui_launch_framework": "claude-code",
     "harnesses": {"claude-code": {"args": [], "roles": {"default": "sonnet"}}}
   }'
   run bash -c "source '$LIB_SH' && resolve_model_for_role unknown_role_xyz"
@@ -353,9 +356,10 @@ go_helper() {
   # *query* of any role (the closed-set rejection fires at overlay-validation
   # time, before any specific role lookup). Bash D3b parity at
   # scripts/lib.sh:964-985.
+  export LORE_FRAMEWORK=claude-code
   write_settings '{
     "version": 1,
-    "active_framework": "claude-code",
+    "tui_launch_framework": "claude-code",
     "harnesses": {
       "claude-code": {"args": [], "roles": {"unknown_role_xyz": "opus"}}
     }
@@ -381,7 +385,7 @@ go_helper() {
   fi
   write_settings '{
     "version": 1,
-    "active_framework": "claude-code",
+    "tui_launch_framework": "claude-code",
     "harnesses": {
       "claude-code": {"args": ["--from-unified", "--second"]},
       "opencode": {"args": ["--opencode-only"]}
@@ -415,9 +419,10 @@ EOF
 # ============================================================
 
 @test "ceremony: resolve_ceremony_advisors reads active harness only" {
+  export LORE_FRAMEWORK=codex
   write_settings '{
     "version": 1,
-    "active_framework": "codex",
+    "tui_launch_framework": "codex",
     "harnesses": {
       "claude-code": {"args": [], "ceremonies": {"spec-design": ["pr-review"]}},
       "codex": {"args": [], "ceremonies": {"spec-design": ["pr-self-review"]}}
@@ -432,9 +437,10 @@ EOF
   cat > "$TEST_LORE_DATA_DIR/ceremonies.json" <<'EOF'
 {"spec-design":["pr-review"]}
 EOF
+  export LORE_FRAMEWORK=codex
   write_settings '{
     "version": 1,
-    "active_framework": "codex",
+    "tui_launch_framework": "codex",
     "harnesses": {
       "codex": {"args": []}
     },

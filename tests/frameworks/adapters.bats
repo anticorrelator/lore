@@ -122,16 +122,18 @@ teardown() {
 
 set_framework() {
   local fw="$1"
+  export LORE_FRAMEWORK="$fw"
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":2,"active_framework":"$fw","capability_overrides":{},"harnesses":{"$fw":{"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}}}}
+{"version":2,"tui_launch_framework":"$fw","capability_overrides":{},"harnesses":{"$fw":{"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}}}}
 EOF
 }
 
 set_framework_with_roles() {
   # $1 = framework, $2 = inline JSON for the .roles object body.
   local fw="$1" roles="$2"
+  export LORE_FRAMEWORK="$fw"
   cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
-{"version":2,"active_framework":"$fw","capability_overrides":{},"harnesses":{"$fw":{"roles":$roles}}}
+{"version":2,"tui_launch_framework":"$fw","capability_overrides":{},"harnesses":{"$fw":{"roles":$roles}}}
 EOF
 }
 

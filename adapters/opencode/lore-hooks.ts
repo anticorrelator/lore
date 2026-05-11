@@ -122,7 +122,6 @@ interface CapabilitiesShape {
  * scripts/lib.sh.
  */
 interface LoreSettingsConfig {
-  active_framework?: string;
   capability_overrides?: Record<string, SupportLevel>;
 }
 
@@ -376,13 +375,11 @@ function spawnHandler(scriptName: string, env: NodeJS.ProcessEnv): Promise<Dispa
     const scriptPath = path.join(dataRoot, "scripts", scriptName);
     const interpreter = scriptName.endsWith(".py") ? "python3" : "bash";
 
-    // Handler scripts read the active harness from unified settings.json.
-    // install.sh updates settings.json before installing this plugin, so
-    // spawned handlers do not require a LORE_FRAMEWORK env shim to resolve
-    // their capability profile. Caller-provided env still flows through for
-    // unrelated script settings.
+    // This plugin is itself the OpenCode runtime boundary. Pin child scripts to
+    // opencode so a later install for another harness does not make OpenCode
+    // handlers read the wrong capability profile from settings.json.
     const child = spawn(interpreter, [scriptPath], {
-      env: { ...process.env, ...env },
+      env: { ...process.env, ...env, LORE_FRAMEWORK: "opencode" },
       stdio: ["ignore", "pipe", "pipe"],
     });
 
