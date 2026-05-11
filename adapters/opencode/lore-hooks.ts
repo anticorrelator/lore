@@ -117,13 +117,12 @@ interface CapabilitiesShape {
 }
 
 /**
- * Shape of `~/.lore/config/framework.json` for the fields the adapter
- * consumes. Mirrors `userFrameworkConfig` in tui/internal/config/framework.go
- * and the resolution order documented on `framework_capability` in
+ * Shape of `~/.lore/config/settings.json` for the fields the adapter consumes.
+ * Mirrors the resolution order documented on `framework_capability` in
  * scripts/lib.sh.
  */
-interface FrameworkUserConfig {
-  framework?: string;
+interface LoreSettingsConfig {
+  active_framework?: string;
   capability_overrides?: Record<string, SupportLevel>;
 }
 
@@ -302,10 +301,10 @@ let cachedSupport: Record<LoreEvent, SupportLevel> | null = null;
 
 function loadUserOverrides(): Record<string, SupportLevel> {
   const dataRoot = process.env.LORE_DATA_DIR || path.join(os.homedir(), ".lore");
-  const configFile = path.join(dataRoot, "config", "framework.json");
+  const configFile = path.join(dataRoot, "config", "settings.json");
   try {
     const raw = fs.readFileSync(configFile, "utf-8");
-    const cfg = JSON.parse(raw) as FrameworkUserConfig;
+    const cfg = JSON.parse(raw) as LoreSettingsConfig;
     return cfg.capability_overrides ?? {};
   } catch {
     return {};
@@ -315,7 +314,7 @@ function loadUserOverrides(): Record<string, SupportLevel> {
 /**
  * Resolve the per-event support level using the contract documented on
  * `framework_capability` in scripts/lib.sh: user overrides at
- * `~/.lore/config/framework.json:.capability_overrides.<cap>` win over
+ * `~/.lore/config/settings.json:.capability_overrides.<cap>` win over
  * the static profile in `adapters/capabilities.json`. Cells that fail to
  * load fall back to "none" so the dispatch path emits `unsupported`
  * rather than silently invoking handlers that may not be wired.
@@ -377,17 +376,13 @@ function spawnHandler(scriptName: string, env: NodeJS.ProcessEnv): Promise<Dispa
     const scriptPath = path.join(dataRoot, "scripts", scriptName);
     const interpreter = scriptName.endsWith(".py") ? "python3" : "bash";
 
-    // Pin the spawned script to the opencode capability profile via
-    // LORE_FRAMEWORK. lib.sh::resolve_active_framework consults this env
-    // var before ~/.lore/config/framework.json (scripts/lib.sh:528-530);
-    // without it, an opencode session would resolve via the static
-    // single-valued framework.json default — which only matches whichever
-    // harness was installed last by install.sh — and misroute through
-    // that harness's capability cells. Caller-provided `env` still wins
-    // (rightmost spread) so callers that need a different framework for
-    // a single dispatch can override.
+    // Handler scripts read the active harness from unified settings.json.
+    // install.sh updates settings.json before installing this plugin, so
+    // spawned handlers do not require a LORE_FRAMEWORK env shim to resolve
+    // their capability profile. Caller-provided env still flows through for
+    // unrelated script settings.
     const child = spawn(interpreter, [scriptPath], {
-      env: { ...process.env, LORE_FRAMEWORK: "opencode", ...env },
+      env: { ...process.env, ...env },
       stdio: ["ignore", "pipe", "pipe"],
     });
 

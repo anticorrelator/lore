@@ -59,7 +59,7 @@ fi
 # Resolve the model from role 'summarizer' unless --model overrode it.
 if [[ -z "$MODEL" ]]; then
   if ! MODEL=$(resolve_model_for_role summarizer 2>/dev/null) || [[ -z "$MODEL" ]]; then
-    echo "[generate-review-summary] Error: No model binding for role 'summarizer'. Pass --model <model> or set roles.summarizer in ~/.lore/config/framework.json." >&2
+    echo "[generate-review-summary] Error: No model binding for role 'summarizer'. Pass --model <model> or set harnesses.<active>.roles.summarizer in ~/.lore/config/settings.json." >&2
     exit 1
   fi
 fi

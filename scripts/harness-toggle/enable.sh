@@ -107,8 +107,8 @@ print(json.dumps(d.get('symlink_manifest', [])))
   # target framework's install dirs. install.sh and disable.sh now record
   # entries scoped per-framework so this filter is precise.
   local skills_dir agents_dir filtered="[]"
-  skills_dir=$(LORE_FRAMEWORK="$target_fw" resolve_harness_install_path skills 2>/dev/null || true)
-  agents_dir=$(LORE_FRAMEWORK="$target_fw" resolve_harness_install_path agents 2>/dev/null || true)
+  skills_dir=$(resolve_harness_install_path skills "$target_fw" 2>/dev/null || true)
+  agents_dir=$(resolve_harness_install_path agents "$target_fw" 2>/dev/null || true)
   [[ "$skills_dir" == "unsupported" ]] && skills_dir=""
   [[ "$agents_dir" == "unsupported" ]] && agents_dir=""
 
@@ -187,7 +187,7 @@ restore_claude_md_for() {
     return 0
   fi
 
-  LORE_FRAMEWORK="$target_fw" bash "$ASSEMBLE" --framework "$target_fw" \
+  bash "$ASSEMBLE" --framework "$target_fw" \
     || echo "  [warn] [$target_fw] assemble-instructions.sh failed (non-fatal)" >&2
 }
 

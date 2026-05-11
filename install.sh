@@ -4,11 +4,11 @@
 #
 # --framework selects the harness whose install paths and capability profile
 # Lore should target. Supported values: claude-code (default), opencode, codex.
-# The selection is persisted to $LORE_DATA_DIR/config/framework.json so that
+# The selection is persisted to $LORE_DATA_DIR/config/settings.json so that
 # `cli/lore` and downstream scripts can resolve the active harness without
-# re-passing the flag. Re-running install with a different --framework
-# rewrites the persisted framework field while preserving role bindings and
-# capability overrides previously edited by the user.
+# requiring an environment variable. Re-running install with a different
+# --framework rewrites active_framework while preserving harness-local role
+# bindings and capability overrides previously edited by the user.
 set -euo pipefail
 
 # --- Resolve paths ---
@@ -90,17 +90,16 @@ info()  { echo "  [lore] $*"; }
 dry()   { if $DRY_RUN; then echo "  [dry-run] $*"; else "$@"; fi; }
 
 # Source lib.sh so install.sh can call resolve_harness_install_path and
-# friends. lib.sh is in the repo's scripts/ dir; LORE_DATA_DIR is honored
-# by resolve_active_framework but install.sh sets LORE_FRAMEWORK on every
-# resolve so the active value comes from --framework, not the persisted
-# config (which is rewritten at the end of this script).
+# friends. lib.sh is in the repo's scripts/ dir; install-time calls pass the
+# target framework explicitly so path/capability reads do not depend on an
+# ambient LORE_FRAMEWORK override.
 # shellcheck source=scripts/lib.sh
 source "$LORE_REPO_DIR/scripts/lib.sh"
 
 # resolve_install_path <kind> [framework]
-# Wrap resolve_harness_install_path so that it (a) honors the
-# install-time --framework flag without depending on framework.json
-# being present yet, (b) prints a degraded notice and returns "unsupported"
+# Wrap resolve_harness_install_path so that it (a) honors the install-time
+# --framework flag without depending on persisted active_framework already
+# being updated, (b) prints a degraded notice and returns "unsupported"
 # rather than failing when a kind is not wired for the active harness,
 # and (c) shells out cleanly under set -e (the bare resolve_*
 # helper exits non-zero on unknown kinds, which would abort the install).
@@ -108,7 +107,7 @@ resolve_install_path() {
   local kind="$1"
   local fw="${2:-$FRAMEWORK}"
   local path
-  if path=$(LORE_FRAMEWORK="$fw" resolve_harness_install_path "$kind" 2>/dev/null); then
+  if path=$(resolve_harness_install_path "$kind" "$fw" 2>/dev/null); then
     printf '%s\n' "$path"
   else
     printf '%s\n' "unsupported"
@@ -192,7 +191,7 @@ if $UNINSTALL; then
           adapter_rel="${fw_adapter#$LORE_REPO_DIR/}"
           info "Removing lore hooks via $adapter_rel uninstall"
           if ! $DRY_RUN; then
-            LORE_FRAMEWORK="$fw" bash "$fw_adapter" uninstall || true
+            bash "$fw_adapter" uninstall --framework "$fw" || true
           fi
         fi
         ;;
@@ -649,32 +648,29 @@ else
   info "capture-config.json already exists, skipping"
 fi
 
-# --- 1c. Persist framework selection + role/capability override config ---
-# Schema (version 1):
-#   {
-#     "version": 1,
-#     "framework": "claude-code" | "opencode" | "codex",
-#     "capability_overrides": { "<capability>": "full|partial|fallback|none", ... },
-#     "roles": { "default": "<model>", "lead": ..., "worker": ..., ... }
-#   }
+# --- 1c. Persist framework selection + harness-local role defaults ---
+# settings.json is the authoritative user config. Re-running install with a
+# different --framework value updates `active_framework` in settings.json and
+# seeds only that harness's missing role bindings; capability/model readers must
+# not require a LORE_FRAMEWORK env shim to find the configured harness block.
 #
-# - `framework` is rewritten on every install so re-running with a different
-#   --framework value updates the active harness.
-# - `capability_overrides` and `roles` are seeded only when missing; user edits
-#   are preserved. Per-role bindings are harness-aware: claude-code defaults
-#   every role to "opus", codex defaults every role to "gpt-5.5-high", and
-#   opencode splits reasoning roles to "anthropic/opus" and technical roles
-#   to "openai/gpt-5.5".
+# - `active_framework` is rewritten on every install so re-running with a
+#   different --framework value updates the active harness.
+# - `capability_overrides` and harness-local `roles` are seeded only when
+#   missing; user edits are preserved. Per-role bindings are harness-aware:
+#   claude-code defaults every role to "opus", codex defaults every role to
+#   "gpt-5.5-high", and opencode splits reasoning roles to "anthropic/opus"
+#   and technical roles to "openai/gpt-5.5".
 # - The role-id keyset is derived from `adapters/roles.json` (T3's closed
 #   registry) rather than hardcoded here, so adding a role to the registry
 #   automatically seeds it on the next install.
 # - Capability profiles ship as static data in adapters/capabilities.json;
-#   capability_overrides here are ad-hoc per-install opt-ins that downstream
+#   capability_overrides in settings.json are ad-hoc opt-ins that downstream
 #   readers layer on top of the static profile.
-info "Persisting framework config (framework=$FRAMEWORK)"
+info "Persisting unified settings config (active_framework=$FRAMEWORK)"
 if ! $DRY_RUN; then
   FRAMEWORK="$FRAMEWORK" LORE_REPO_DIR="$LORE_REPO_DIR" \
-    python3 - "$LORE_DATA_DIR/config/framework.json" <<'PYEOF'
+    python3 - "$LORE_DATA_DIR/config/settings.json" <<'PYEOF'
 import json, os, sys
 
 path = sys.argv[1]
@@ -706,16 +702,24 @@ else:
     cfg = {}
 
 cfg["version"] = 1
-cfg["framework"] = framework
+cfg["active_framework"] = framework
 
 # Preserve user-edited overrides; only seed when key is absent.
 if "capability_overrides" not in cfg or not isinstance(cfg.get("capability_overrides"), dict):
     cfg["capability_overrides"] = {}
 
-existing_roles = cfg.get("roles") if isinstance(cfg.get("roles"), dict) else {}
+harnesses = cfg.get("harnesses") if isinstance(cfg.get("harnesses"), dict) else {}
+harness_block = harnesses.get(framework) if isinstance(harnesses.get(framework), dict) else {}
+existing_roles = harness_block.get("roles") if isinstance(harness_block.get("roles"), dict) else {}
 merged_roles = dict(default_roles)
 merged_roles.update(existing_roles)  # user values win for keys that exist
-cfg["roles"] = merged_roles
+harness_block["roles"] = merged_roles
+if "args" not in harness_block:
+    harness_block["args"] = ["--dangerously-skip-permissions"] if framework == "claude-code" else []
+harnesses[framework] = harness_block
+cfg["harnesses"] = harnesses
+cfg.pop("framework", None)
+cfg.pop("roles", None)
 
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
@@ -836,8 +840,8 @@ fi
 # conventions/capability-cells-in-adapters-capabilities-json-sho.md, so
 # the install log classifies degradation identically to the MCP packaging
 # step below and the assemble-instructions.sh dry-run report.
-PERM_SUPPORT=$(LORE_FRAMEWORK="$FRAMEWORK" framework_capability permission_hooks 2>/dev/null || echo "none")
-PERM_EVIDENCE=$(LORE_FRAMEWORK="$FRAMEWORK" framework_capability_evidence permission_hooks 2>/dev/null || true)
+PERM_SUPPORT=$(framework_capability permission_hooks "$FRAMEWORK" 2>/dev/null || echo "none")
+PERM_EVIDENCE=$(framework_capability_evidence permission_hooks "$FRAMEWORK" 2>/dev/null || true)
 PERM_SETTINGS_PATH=$(resolve_install_path settings)
 PERM_DEGRADE_TAG=""
 case "$PERM_SUPPORT" in
@@ -866,7 +870,7 @@ case "$PERM_ADAPTER_RECORD" in
     if [ -x "$HOOK_ADAPTER" ]; then
       info "Configuring hooks via $HOOK_ADAPTER_REL install ($PERM_TRIPLE)"
       if ! $DRY_RUN; then
-        LORE_FRAMEWORK="$FRAMEWORK" bash "$HOOK_ADAPTER" install
+        bash "$HOOK_ADAPTER" install
       fi
     else
       info "Skipping hook configuration — adapter missing at $HOOK_ADAPTER ($PERM_TRIPLE degraded:none)"
@@ -900,7 +904,7 @@ if [ "$INSTRUCTIONS_TARGET" = "unsupported" ]; then
 else
   info "Assembling instruction file: $INSTRUCTIONS_TARGET"
   if ! $DRY_RUN; then
-    LORE_FRAMEWORK="$FRAMEWORK" bash "$LORE_REPO_DIR/scripts/assemble-instructions.sh"
+    bash "$LORE_REPO_DIR/scripts/assemble-instructions.sh" --framework "$FRAMEWORK"
   fi
 fi
 

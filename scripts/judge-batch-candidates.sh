@@ -38,7 +38,7 @@ done
 # Resolve the judge model from role 'judge' unless --model overrode it.
 if [[ -z "$MODEL" ]]; then
   if ! MODEL=$(resolve_model_for_role judge 2>/dev/null) || [[ -z "$MODEL" ]]; then
-    die "No model binding for role 'judge'. Pass --model <model> or set roles.judge in ~/.lore/config/framework.json."
+    die "No model binding for role 'judge'. Pass --model <model> or set harnesses.<active>.roles.judge in ~/.lore/config/settings.json."
   fi
 fi
 

@@ -173,7 +173,7 @@ EOF
 # The wrapper collapses (path | unsupported | error) into (path | empty); both
 # sides must agree on every cell of that mapping. The four parity rows below
 # cover supported (path), unsupported sentinel, lookup error (unknown kind),
-# and missing config (no framework.json — falls through to default claude-code).
+# and missing config (no settings.json — falls through to default claude-code).
 
 @test "parity: harness_path_or_empty — supported path on claude-code" {
   go_out=$(go_helper harness_path_or_empty agents)

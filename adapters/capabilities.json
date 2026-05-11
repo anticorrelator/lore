@@ -36,7 +36,7 @@
       "fallback": "Skill operation routed through a fallback path declared by the requirement (e.g., lead-side validator instead of native blocking hook). Functionality matches `partial` from the user's perspective but the underlying gap is named at the cell level (`fallback` support) rather than the skill level.",
       "none": "Skill is `unavailable` because at least one requirement was below `partial_below`. The skill MUST refuse to run; calling it is a no-op + stderr notice naming the missing requirement.",
       "no-evidence": "A capability cell the skill depends on has support `> none` but no `evidence` pointer (i.e., the cell exists but has not been verified). Skills SHOULD treat `no-evidence` as a soft block — proceed in partial-mode and surface the missing-evidence notice — until T70 / `lore doctor` is wired to refresh evidence.",
-      "unverified-support": "Reserved scoped form `unverified-support(<level>)` for stderr notices when a capability cell has been overridden in `framework.json` (per-user override) without a refreshed evidence pointer. Adapter notices use the parenthetical level so the operator sees both the override and the original cell's level."
+      "unverified-support": "Reserved scoped form `unverified-support(<level>)` for stderr notices when a capability cell has been overridden in `settings.json` (per-user override) without a refreshed evidence pointer. Adapter notices use the parenthetical level so the operator sees both the override and the original cell's level."
     },
     "bootstrap": {
       "summary": "Bootstrap a knowledge store by exploring codebase architecture with a worker fanout team.",

@@ -104,7 +104,7 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
    Phases: N with M unchecked tasks
    Prior Tier 2 claims: K rows loaded from task-claims.jsonl (or "none — first run")
    ```
-   On a default install all three resolve to the role-map default (typically `sonnet`); per-repo `.lore.config` or user `framework.json` `roles.<role>` overrides flow through automatically. If `--model <id>` was passed in Step 1.1, `$LEAD_MODEL` reflects that override; worker/advisor lines remain at the configured map values.
+   On a default install all three resolve to the active harness's role-map default; per-repo `.lore.config` or user `settings.json` `harnesses.<active>.roles.<role>` overrides flow through automatically. If `--model <id>` was passed in Step 1.1, `$LEAD_MODEL` reflects that override; worker/advisor lines remain at the configured map values.
 
 ### Step 2: Create team and generate tasks
 

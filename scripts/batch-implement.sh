@@ -107,7 +107,7 @@ if [[ -n "$MODEL" ]]; then
 fi
 if [[ -z "$MODEL" ]]; then
   if ! MODEL=$(resolve_model_for_role lead 2>/dev/null) || [[ -z "$MODEL" ]]; then
-    die "No model binding for role 'lead'. Pass --model <model> or set roles.lead in ~/.lore/config/framework.json."
+    die "No model binding for role 'lead'. Pass --model <model> or set harnesses.<active>.roles.lead in ~/.lore/config/settings.json."
   fi
 fi
 

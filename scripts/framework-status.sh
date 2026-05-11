@@ -4,8 +4,8 @@
 # Surfaces the resolved framework, capability levels grouped by status, the
 # active role->model bindings (collapsed one line per role), and pointers to
 # the evidence + compatibility artifacts. This is the operator-facing
-# counterpart to `lore config show` (which prints the raw framework.json):
-# this command cross-references the persisted config against
+# counterpart to the settings TUI / settings.json:
+# this command cross-references the persisted settings against
 # adapters/capabilities.json and adapters/roles.json so the operator sees the
 # resolved view, not the raw file.
 #
@@ -17,7 +17,7 @@
 # Exit codes:
 #   0  success (report rendered)
 #   1  usage error
-#   2  framework config absent or malformed (report still printed; non-zero
+#   2  settings config absent or malformed (report still printed; non-zero
 #      so scripts can detect "needs install")
 set -euo pipefail
 
@@ -66,7 +66,7 @@ EOF
 done
 
 DATA_DIR="${LORE_DATA_DIR:-$HOME/.lore}"
-CONFIG_PATH="$DATA_DIR/config/framework.json"
+CONFIG_PATH="$DATA_DIR/config/settings.json"
 CAPABILITIES_FILE="$LORE_LIB_DIR/../adapters/capabilities.json"
 ROLES_FILE="$LORE_LIB_DIR/../adapters/roles.json"
 EVIDENCE_FILE="$LORE_LIB_DIR/../adapters/capabilities-evidence.md"
@@ -191,8 +191,8 @@ fi
 # Resolution sources:
 #   env       — LORE_MODEL_<ROLE_UPPER> set
 #   per-repo  — .lore.config model_for_<role>= matched
-#   user      — framework.json roles.<role> matched
-#   default   — framework.json roles.default fallback
+#   user      — settings.json harnesses.<active>.roles.<role> matched
+#   default   — settings.json harnesses.<active>.roles.default fallback
 #   unset     — no binding anywhere (resolve_model_for_role exits non-zero)
 # The user-config branch additionally reports "user-default" when the bound
 # value came from .roles.default rather than .roles.<role> (so the operator
@@ -202,11 +202,13 @@ if [[ -f "$ROLES_FILE" ]]; then
   ROLES_JSON=$(
     ROLES_FILE="$ROLES_FILE" \
     CONFIG_PATH="$CONFIG_PATH" \
+    ACTIVE_FRAMEWORK="$ACTIVE_FRAMEWORK" \
     python3 - <<'PYEOF'
 import json, os, sys, subprocess
 
 roles_file = os.environ["ROLES_FILE"]
 cfg_path = os.environ["CONFIG_PATH"]
+fw = os.environ["ACTIVE_FRAMEWORK"]
 
 with open(roles_file) as f:
     roles_data = json.load(f)
@@ -217,7 +219,7 @@ if os.path.exists(cfg_path):
     try:
         with open(cfg_path) as f:
             cfg = json.load(f)
-        user_roles = cfg.get("roles") or {}
+        user_roles = ((cfg.get("harnesses") or {}).get(fw) or {}).get("roles") or {}
     except Exception:
         user_roles = {}
 

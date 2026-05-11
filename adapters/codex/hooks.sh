@@ -48,6 +48,24 @@ LORE_REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 # shellcheck source=/dev/null
 source "$LORE_REPO_DIR/scripts/lib.sh"
 
+TARGET_FRAMEWORK=""
+
+parse_adapter_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --framework)
+        [[ $# -lt 2 ]] && { echo "Error: --framework requires a value" >&2; return 1; }
+        TARGET_FRAMEWORK="$2"
+        shift 2
+        ;;
+      *)
+        echo "Error: unexpected argument '$1'" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
 # Sentinel markers bracketing the lore-managed block inside config.toml.
 # Idempotent install/uninstall keys on these literals: any text between
 # them (inclusive) is rewritten as a unit, anything outside is preserved
@@ -55,22 +73,24 @@ source "$LORE_REPO_DIR/scripts/lib.sh"
 LORE_BEGIN_MARKER="# >>> lore hooks (managed) — do not edit between markers"
 LORE_END_MARKER="# <<< lore hooks (managed)"
 
-# Ensure the active framework is codex; install.sh sets LORE_FRAMEWORK
-# before invoking us, so this guard is a contract check, not a routing
-# decision.
+# Ensure the active framework is codex; install.sh updates settings.json before
+# invoking us, so this guard is a contract check, not a routing decision.
 require_codex() {
   local active
-  active=$(resolve_active_framework 2>/dev/null) || active=""
+  active="${TARGET_FRAMEWORK:-}"
+  if [[ -z "$active" ]]; then
+    active=$(resolve_active_framework 2>/dev/null) || active=""
+  fi
   if [[ "$active" != "codex" ]]; then
     echo "Error: adapters/codex/hooks.sh requires active framework=codex (got '$active')" >&2
-    echo "       set LORE_FRAMEWORK=codex or run install.sh --framework codex" >&2
+    echo "       run install.sh --framework codex or set settings.json active_framework=codex" >&2
     return 1
   fi
 }
 
 resolve_settings_path() {
   local settings_path
-  if ! settings_path=$(resolve_harness_install_path settings 2>/dev/null); then
+  if ! settings_path=$(resolve_harness_install_path settings "${TARGET_FRAMEWORK:-}" 2>/dev/null); then
     echo "Error: resolve_harness_install_path settings failed for codex" >&2
     return 1
   fi
@@ -95,14 +115,9 @@ resolve_settings_path() {
 # start) and SessionEnd is derived from Stop (skipped here — Stop hook
 # already runs the same work).
 #
-# Every command is prefixed with `LORE_FRAMEWORK=codex` so spawned
-# scripts resolve the active framework at runtime independently of
-# `~/.lore/config/framework.json`. The static framework.json default
-# is single-valued (last install.sh run wins); without this prefix,
-# codex sessions would resolve to whichever framework happened to be
-# installed last and misroute through claude-code's capability profile
-# (lib.sh::resolve_active_framework consults LORE_FRAMEWORK before
-# framework.json — see scripts/lib.sh:528-530).
+# Hook commands read the active harness from unified settings.json. install.sh
+# updates settings.json before invoking this adapter, so the generated hooks do
+# not require a LORE_FRAMEWORK env shim to resolve their capability profile.
 render_lore_block() {
   cat <<'TOML'
 # >>> lore hooks (managed) — do not edit between markers
@@ -113,31 +128,31 @@ render_lore_block() {
 # uninstall` (or re-run install.sh with --framework=<other>).
 
 [[hooks.SessionStart]]
-command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/doctor.sh --quiet"
+command = "bash ~/.lore/scripts/doctor.sh --quiet"
 
 [[hooks.SessionStart]]
-command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/auto-reindex.sh"
+command = "bash ~/.lore/scripts/auto-reindex.sh"
 
 [[hooks.SessionStart]]
-command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-knowledge.sh"
+command = "bash ~/.lore/scripts/load-knowledge.sh"
 
 [[hooks.SessionStart]]
-command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-work.sh"
+command = "bash ~/.lore/scripts/load-work.sh"
 
 [[hooks.SessionStart]]
-command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/load-threads.sh"
+command = "bash ~/.lore/scripts/load-threads.sh"
 
 [[hooks.SessionStart]]
-command = "LORE_FRAMEWORK=codex python3 ~/.lore/scripts/extract-session-digest.py"
+command = "python3 ~/.lore/scripts/extract-session-digest.py"
 
 # pre_compact fallback: Codex has no native PreCompact event, so the
 # pre-compact reminder runs at SessionStart as a bookend. See
 # adapters/hooks/README.md "Per-Harness Mapping" for the fallback.
 [[hooks.SessionStart]]
-command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/pre-compact.sh"
+command = "bash ~/.lore/scripts/pre-compact.sh"
 
 [[hooks.Stop]]
-command = "LORE_FRAMEWORK=codex python3 ~/.lore/scripts/check-plan-persistence.py"
+command = "python3 ~/.lore/scripts/check-plan-persistence.py"
 
 [[hooks.PreToolUse]]
 # Codex 0.124+ requires `matcher` to be a TOML string (the tool name),
@@ -147,7 +162,7 @@ command = "LORE_FRAMEWORK=codex python3 ~/.lore/scripts/check-plan-persistence.p
 # (verified empirically against the installed binary). The bare-string
 # form below is the schema codex actually expects.
 matcher = "Write"
-command = "LORE_FRAMEWORK=codex bash ~/.lore/scripts/guard-work-writes.sh"
+command = "bash ~/.lore/scripts/guard-work-writes.sh"
 # <<< lore hooks (managed)
 TOML
 }
@@ -303,12 +318,12 @@ cmd_smoke() {
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
-  install)   shift; cmd_install   "$@" ;;
-  uninstall) shift; cmd_uninstall "$@" ;;
-  smoke)     shift; cmd_smoke     "$@" ;;
+  install)   shift; parse_adapter_args "$@"; cmd_install ;;
+  uninstall) shift; parse_adapter_args "$@"; cmd_uninstall ;;
+  smoke)     shift; parse_adapter_args "$@"; cmd_smoke ;;
   -h|--help|"")
     cat <<EOF >&2
-Usage: $(basename "$0") <subcommand>
+Usage: $(basename "$0") <subcommand> [--framework codex]
 
 Subcommands:
   install    Inject lore hooks into the active framework's config.toml.

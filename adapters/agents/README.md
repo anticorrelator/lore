@@ -86,8 +86,8 @@ Every adapter operation that spawns a process MUST go through it:
 1. The skill or script calls `resolve_model_for_role <role>`
    (bash → `scripts/lib.sh`, Go → `tui/internal/config/framework.go`).
 2. The resolver returns a model id that respects the precedence
-   (env override → per-repo `.lore.config` → user `framework.json` →
-   roles default).
+   (env override → per-repo `.lore.config` → user `settings.json`
+   `harnesses.<active>.roles.<role>` → `harnesses.<active>.roles.default`).
 3. The adapter translates the resolved id into the harness-native
    spawn flag:
    - Claude Code: `--model <id>` argument.
@@ -345,7 +345,7 @@ this set are a contract violation:
   `evidence` pointer. Treat as a soft block: proceed in partial-mode
   with the missing-evidence notice until evidence is refreshed.
 - `unverified-support(<level>)` — scoped form for stderr notices when
-  a cell has been overridden in `framework.json` without a refreshed
+  a cell has been overridden in `settings.json` without a refreshed
   evidence pointer. The parenthetical level is the original cell's
   level so the operator sees both the override and its source.
 

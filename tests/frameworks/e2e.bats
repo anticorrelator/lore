@@ -25,7 +25,7 @@
 #      schema, same field set, same validator.
 #
 # Coverage matrix (per-framework setup_framework helper sets up
-# framework.json + roles + LORE_DATA_DIR):
+# settings.json harness roles + LORE_DATA_DIR):
 #   - claude-code: native_blocking + spawn-with-bare-model + send_message=full
 #   - opencode:    lead_validator + spawn-with-provider/model split + send_message=unsupported
 #   - codex:       lead_validator + spawn-with-bare-model + send_message=unsupported
@@ -49,7 +49,7 @@ setup() {
   [ -f "$ROLES_JSON" ]   || skip "adapters/roles.json missing"
   [ -f "$CREATE_WORK_SH" ]    || skip "scripts/create-work.sh missing"
   [ -f "$EVIDENCE_APPEND_SH" ] || skip "scripts/evidence-append.sh missing"
-  command -v jq      >/dev/null 2>&1 || skip "jq required for framework.json mutation"
+  command -v jq      >/dev/null 2>&1 || skip "jq required for settings.json mutation"
   command -v python3 >/dev/null 2>&1 || skip "python3 required for JSON inspection"
 
   # Isolated LORE_DATA_DIR + KNOWLEDGE_DIR so create-work + evidence-append
@@ -69,7 +69,7 @@ setup() {
   export HOME="$TEST_HOME"
   unset LORE_FRAMEWORK
   # Clear any LORE_MODEL_<ROLE> overrides leaking in from the parent shell —
-  # tests assert the framework.json roles map is the resolution source.
+  # tests assert the settings.json harness roles map is the resolution source.
   unset LORE_MODEL_LEAD LORE_MODEL_WORKER LORE_MODEL_RESEARCHER \
         LORE_MODEL_REVIEWER LORE_MODEL_JUDGE LORE_MODEL_SUMMARIZER \
         LORE_MODEL_DEFAULT
@@ -85,21 +85,25 @@ teardown() {
 
 # --- helpers ---
 
-# Stage framework.json with a closed roles map. Single-provider harnesses
+# Stage settings.json with a closed harness roles map. Single-provider harnesses
 # get bare model ids; the multi-provider opencode_multi variant uses
 # provider/model bindings so the spawn directive exercises the
 # split_provider_model path.
 setup_framework() {
   local framework="$1"
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
+  cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
 {
-  "version": 1,
-  "framework": "$framework",
+  "version": 2,
+  "active_framework": "$framework",
   "capability_overrides": {},
-  "roles": {
-    "default": "sonnet",
-    "lead":    "opus",
-    "worker":  "sonnet"
+  "harnesses": {
+    "$framework": {
+      "roles": {
+        "default": "sonnet",
+        "lead":    "opus",
+        "worker":  "sonnet"
+      }
+    }
   }
 }
 EOF
@@ -107,15 +111,19 @@ EOF
 
 setup_framework_multi() {
   local framework="$1"
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
+  cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
 {
-  "version": 1,
-  "framework": "$framework",
+  "version": 2,
+  "active_framework": "$framework",
   "capability_overrides": {},
-  "roles": {
-    "default": "anthropic/sonnet",
-    "lead":    "anthropic/opus",
-    "worker":  "openai/gpt-4o"
+  "harnesses": {
+    "$framework": {
+      "roles": {
+        "default": "anthropic/sonnet",
+        "lead":    "anthropic/opus",
+        "worker":  "openai/gpt-4o"
+      }
+    }
   }
 }
 EOF
@@ -166,7 +174,7 @@ PYEOF
 
 # ============================================================
 # Per-framework smoke: spawn produces canonical artifacts +
-# honors the worker role binding from framework.json
+# honors the worker role binding from settings.json
 # ============================================================
 
 @test "claude-code: /implement smoke produces work item + task-claims row + worker spawn honors role binding" {
@@ -185,7 +193,7 @@ PYEOF
   [ -f "$TEST_KNOWLEDGE_DIR/_work/$SLUG/_meta.json" ]
   [ -f "$TEST_KNOWLEDGE_DIR/_work/$SLUG/notes.md" ]
 
-  # Worker spawn directive must reflect roles.worker=sonnet from framework.json.
+  # Worker spawn directive must reflect harness roles.worker=sonnet from settings.json.
   run bash "$CC_AGENT_ADAPTER" spawn worker "implement task-1"
   [ "$status" -eq 0 ]
   [[ "$output" =~ delegate:TaskCreate ]]
@@ -341,7 +349,7 @@ print(d['frameworks']['codex']['capabilities']['task_completed_hook']['support']
     [ -f "$adapter" ] || skip "$fw adapter missing"
   done
 
-  # Per-framework: stage framework.json, create work item, append one
+  # Per-framework: stage settings.json, create work item, append one
   # synthetic Tier 2 row, capture the row keys.
   declare -a KEYSETS=()
   for fw in claude-code opencode codex; do

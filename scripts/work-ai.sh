@@ -70,7 +70,7 @@ fi
 # Resolve the model from role 'default' unless --model overrode it.
 if [[ -z "$MODEL" ]]; then
   if ! MODEL=$(resolve_model_for_role default 2>/dev/null) || [[ -z "$MODEL" ]]; then
-    echo "Error: No model binding for role 'default'. Pass --model <model> or set roles.default in ~/.lore/config/framework.json." >&2
+    echo "Error: No model binding for role 'default'. Pass --model <model> or set harnesses.<active>.roles.default in ~/.lore/config/settings.json." >&2
     exit 1
   fi
 fi

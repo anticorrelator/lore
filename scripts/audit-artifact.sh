@@ -1029,7 +1029,7 @@ else
     # (today: `claude` on PATH) can spawn the correctness-gate judge.
     echo "[audit] Error: no model binding for role 'judge' and no --gate-output-file supplied." >&2
     echo "[audit]   Either pass --gate-output-file <path> (orchestrator-injected judge output)," >&2
-    echo "[audit]   or set roles.judge in ~/.lore/config/framework.json (or pass --model <model>)" >&2
+    echo "[audit]   or set harnesses.<active>.roles.judge in ~/.lore/config/settings.json (or pass --model <model>)" >&2
     echo "[audit]   to use the \`claude\` headless runner direct-invocation fallback." >&2
     exit 1
   fi

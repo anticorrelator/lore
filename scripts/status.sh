@@ -177,7 +177,7 @@ fi
 AGENT_LINKED=$((AGENT_TOTAL - ${#MISSING_AGENTS[@]}))
 
 # --- Framework / role / capability profile ---
-# Reads $LORE_DATA_DIR/config/framework.json (written by install.sh, T4) and
+# Reads $LORE_DATA_DIR/config/settings.json (written by install.sh) and
 # adapters/capabilities.json (T2) to surface what harness Lore is targeting,
 # which capabilities are degraded for that harness, and the active role->model
 # bindings. The block is best-effort: a missing config or missing adapters
@@ -195,7 +195,7 @@ ROLES_HUMAN=""            # compact "default=sonnet, lead=opus, ..."
 ROLES_JSON="{}"           # JSON object {role: model}
 EVIDENCE_PATH=""          # absolute path to capabilities-evidence.md when present
 
-FRAMEWORK_CONFIG_PATH="${LORE_DATA_DIR:-$HOME/.lore}/config/framework.json"
+FRAMEWORK_CONFIG_PATH="${LORE_DATA_DIR:-$HOME/.lore}/config/settings.json"
 ADAPTERS_CAPS=""
 ADAPTERS_EVIDENCE=""
 if [[ -n "$LORE_REPO_DIR" ]]; then
@@ -221,8 +221,8 @@ except Exception as e:
     print("FRAMEWORK_STATUS=malformed", file=sys.stdout)
     sys.exit(0)
 
-framework = cfg.get("framework") or ""
-roles = cfg.get("roles") or {}
+framework = cfg.get("active_framework") or ""
+roles = (((cfg.get("harnesses") or {}).get(framework) or {}).get("roles") or {})
 overrides = cfg.get("capability_overrides") or {}
 
 # Static profile lookup (display name, binary, model_routing.shape, degraded caps)

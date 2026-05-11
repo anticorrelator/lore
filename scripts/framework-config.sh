@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# framework-config.sh — Read the persisted lore framework configuration
+# framework-config.sh — Read the persisted lore settings configuration
 # Usage: framework-config.sh <subcommand> [args...]
 #
 # Subcommands:
@@ -10,16 +10,16 @@
 #   roles                        Print the full role->model map as JSON.
 #   capability-overrides         Print the capability_overrides object as JSON.
 #   show                         Print the entire config as JSON (machine-readable).
-#   path                         Print the absolute path to framework.json.
+#   path                         Print the absolute path to settings.json.
 #
-# Reads $LORE_DATA_DIR/config/framework.json. T6 owns the lib.sh-side
+# Reads $LORE_DATA_DIR/config/settings.json. T6 owns the lib.sh-side
 # resolve_model_for_role helper with full env/per-repo precedence; this script
 # is the cli/lore-side reader and intentionally surfaces the persisted file
 # directly without consulting env overrides — operators inspecting "what is
 # configured?" should see the configured value, not whatever transient env
 # vars are in effect.
 #
-# Exits non-zero with an actionable message when framework.json is missing
+# Exits non-zero with an actionable message when settings.json is missing
 # (operator should run `bash install.sh`) or malformed (operator should
 # inspect and re-run install).
 set -euo pipefail
@@ -27,11 +27,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
 
-CONFIG_PATH="${LORE_DATA_DIR}/config/framework.json"
+CONFIG_PATH="${LORE_DATA_DIR}/config/settings.json"
 
 usage() {
   cat >&2 <<EOF
-framework-config.sh — read persisted lore framework configuration
+framework-config.sh — read persisted lore settings configuration
 
 Usage: framework-config.sh <subcommand> [args...]
 
@@ -41,19 +41,19 @@ Subcommands:
   roles                      Print the role->model map as JSON
   capability-overrides       Print capability_overrides as JSON
   show                       Print the entire config as JSON
-  path                       Print the absolute path to framework.json
+  path                       Print the absolute path to settings.json
 
 Options:
   --help, -h    Show this help
 
-Config path: \$LORE_DATA_DIR/config/framework.json
+Config path: \$LORE_DATA_DIR/config/settings.json
 EOF
 }
 
 require_config() {
   if [[ ! -f "$CONFIG_PATH" ]]; then
     cat >&2 <<EOF
-Error: framework config not found at $CONFIG_PATH
+Error: settings config not found at $CONFIG_PATH
 
 Run \`bash install.sh\` (optionally with --framework <name>) to create it.
 EOF
@@ -67,8 +67,8 @@ try:
     with open(sys.argv[1]) as f:
         json.load(f)
 except json.JSONDecodeError as e:
-    print(f"Error: framework config at {sys.argv[1]} is not valid JSON: {e}", file=sys.stderr)
-    print(f"Inspect the file or re-run install.sh to overwrite the framework field.", file=sys.stderr)
+    print(f"Error: settings config at {sys.argv[1]} is not valid JSON: {e}", file=sys.stderr)
+    print(f"Inspect the file or re-run install.sh to rewrite active_framework.", file=sys.stderr)
     sys.exit(3)
 PYEOF
 }
@@ -92,9 +92,9 @@ case "$1" in
 import json, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
-fw = cfg.get("framework")
+fw = cfg.get("active_framework")
 if not isinstance(fw, str) or not fw:
-    print("Error: framework field missing or invalid in config", file=sys.stderr)
+    print("Error: active_framework field missing or invalid in settings", file=sys.stderr)
     sys.exit(2)
 print(fw)
 PYEOF
@@ -109,7 +109,8 @@ PYEOF
 import json, os, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
-roles = cfg.get("roles") or {}
+fw = cfg.get("active_framework") or ""
+roles = (((cfg.get("harnesses") or {}).get(fw) or {}).get("roles") or {})
 role = os.environ["ROLE"]
 # Explicit binding wins; otherwise fall back to "default"; otherwise no answer.
 if role in roles:
@@ -127,7 +128,9 @@ PYEOF
 import json, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
-print(json.dumps(cfg.get("roles") or {}, indent=2))
+fw = cfg.get("active_framework") or ""
+roles = (((cfg.get("harnesses") or {}).get(fw) or {}).get("roles") or {})
+print(json.dumps(roles, indent=2))
 PYEOF
     ;;
   capability-overrides)

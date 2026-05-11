@@ -97,7 +97,7 @@ remove_symlinks_for() {
 
   for kind in skills agents; do
     local resolved
-    if ! resolved=$(LORE_FRAMEWORK="$target_fw" resolve_harness_install_path "$kind" 2>/dev/null); then
+    if ! resolved=$(resolve_harness_install_path "$kind" "$target_fw" 2>/dev/null); then
       echo "  [warn] [$target_fw] resolve $kind path failed — skipping" >&2
       continue
     fi
@@ -132,7 +132,7 @@ clear_claude_md_for() {
     return 0
   fi
 
-  LORE_FRAMEWORK="$target_fw" bash "$ASSEMBLE" --framework "$target_fw" --disable \
+  bash "$ASSEMBLE" --framework "$target_fw" --disable \
     || echo "  [warn] [$target_fw] assemble-instructions.sh --disable failed (non-fatal)" >&2
 }
 

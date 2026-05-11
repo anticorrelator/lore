@@ -33,24 +33,44 @@ LORE_REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 # shellcheck source=/dev/null
 source "$LORE_REPO_DIR/scripts/lib.sh"
 
+TARGET_FRAMEWORK=""
+
+parse_adapter_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --framework)
+        [[ $# -lt 2 ]] && { echo "Error: --framework requires a value" >&2; return 1; }
+        TARGET_FRAMEWORK="$2"
+        shift 2
+        ;;
+      *)
+        echo "Error: unexpected argument '$1'" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
 # --- Resolve settings.json target ---
-# Active framework MUST be claude-code for this adapter; the caller
-# (install.sh, smoke harnesses) is responsible for setting LORE_FRAMEWORK
-# correctly. We honor the active framework so a future caller can install
-# claude-code's settings.json without flipping framework.json globally.
+# Active framework MUST be claude-code for this adapter; callers set
+# settings.json active_framework before invoking it so hook installation and
+# runtime resolution share the same settings source.
 require_claude_code() {
   local active
-  active=$(resolve_active_framework 2>/dev/null) || active=""
+  active="${TARGET_FRAMEWORK:-}"
+  if [[ -z "$active" ]]; then
+    active=$(resolve_active_framework 2>/dev/null) || active=""
+  fi
   if [[ "$active" != "claude-code" ]]; then
     echo "Error: adapters/hooks/claude-code.sh requires active framework=claude-code (got '$active')" >&2
-    echo "       set LORE_FRAMEWORK=claude-code or run install.sh --framework claude-code" >&2
+    echo "       run install.sh --framework claude-code or set settings.json active_framework=claude-code" >&2
     return 1
   fi
 }
 
 resolve_settings_path() {
   local settings_path
-  if ! settings_path=$(resolve_harness_install_path settings 2>/dev/null); then
+  if ! settings_path=$(resolve_harness_install_path settings "${TARGET_FRAMEWORK:-}" 2>/dev/null); then
     echo "Error: resolve_harness_install_path settings failed for claude-code" >&2
     return 1
   fi
@@ -89,26 +109,21 @@ else:
 # hook_kind is "command" or "agent"; payload is the shell command or
 # the agent prompt text. Identical to the list that previously lived
 # in install.sh:416-429.
-# Every command is prefixed with `LORE_FRAMEWORK=claude-code` so spawned
-# scripts resolve the active framework at runtime independently of
-# ~/.lore/config/framework.json. The static framework.json default is
-# single-valued (last install.sh run wins); without this prefix, claude-code
-# sessions would silently misroute if a later install flipped the static
-# default to another harness. lib.sh::resolve_active_framework consults
-# LORE_FRAMEWORK before framework.json (scripts/lib.sh:528-530), so this
-# pins each harness's hook chain to its own capability profile.
+# Hook commands read the active harness from unified settings.json. install.sh
+# updates settings.json before invoking this adapter, so the generated hooks do
+# not require a LORE_FRAMEWORK env shim to resolve their capability profile.
 lore_hooks = [
-    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/doctor.sh --quiet", 5),
-    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/auto-reindex.sh", 5),
-    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/load-knowledge.sh", 5),
-    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/load-work.sh", 5),
-    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/load-threads.sh", 5),
-    ("SessionStart", None, "command", "LORE_FRAMEWORK=claude-code python3 ~/.lore/scripts/extract-session-digest.py", 5),
-    ("PreCompact",   None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/pre-compact.sh", 5),
-    ("Stop",         None, "command", "LORE_FRAMEWORK=claude-code python3 ~/.lore/scripts/check-plan-persistence.py", 10),
-    ("TaskCompleted", None, "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
-    ("PreToolUse",   "Write", "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/guard-work-writes.sh", 5),
-    ("SessionEnd",   "clear", "command", "LORE_FRAMEWORK=claude-code bash ~/.lore/scripts/pre-compact.sh", 5),
+    ("SessionStart", None, "command", "bash ~/.lore/scripts/doctor.sh --quiet", 5),
+    ("SessionStart", None, "command", "bash ~/.lore/scripts/auto-reindex.sh", 5),
+    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-knowledge.sh", 5),
+    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-work.sh", 5),
+    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-threads.sh", 5),
+    ("SessionStart", None, "command", "python3 ~/.lore/scripts/extract-session-digest.py", 5),
+    ("PreCompact",   None, "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
+    ("Stop",         None, "command", "python3 ~/.lore/scripts/check-plan-persistence.py", 10),
+    ("TaskCompleted", None, "command", "bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
+    ("PreToolUse",   "Write", "command", "bash ~/.lore/scripts/guard-work-writes.sh", 5),
+    ("SessionEnd",   "clear", "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
 ]
 
 def is_lore_hook(entry):
@@ -243,12 +258,12 @@ cmd_smoke() {
 # --- Dispatch ---
 cmd="${1:-}"
 case "$cmd" in
-  install)   shift; cmd_install   "$@" ;;
-  uninstall) shift; cmd_uninstall "$@" ;;
-  smoke)     shift; cmd_smoke     "$@" ;;
+  install)   shift; parse_adapter_args "$@"; cmd_install ;;
+  uninstall) shift; parse_adapter_args "$@"; cmd_uninstall ;;
+  smoke)     shift; parse_adapter_args "$@"; cmd_smoke ;;
   -h|--help|"")
     cat <<EOF >&2
-Usage: $(basename "$0") <subcommand>
+Usage: $(basename "$0") <subcommand> [--framework claude-code]
 
 Subcommands:
   install    Inject lore hooks into the active framework's settings file.

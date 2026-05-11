@@ -15,7 +15,7 @@
 #
 # Default role seeding:
 #   - A real install (non-dry) seeds framework-aware role defaults in
-#     framework.json; dry-run skips the python3 write, so role-seeding assertions
+#     settings.json; dry-run skips the python3 write, so role-seeding assertions
 #     are made against the python3 block source text in install.sh directly.
 #
 # Style: pure bats. The setup() / teardown() pattern isolates LORE_DATA_DIR so

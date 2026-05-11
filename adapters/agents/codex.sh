@@ -46,7 +46,7 @@ require_codex() {
   active=$(resolve_active_framework 2>/dev/null) || active=""
   if [[ "$active" != "codex" ]]; then
     echo "Error: adapters/agents/codex.sh requires active framework=codex (got '$active')" >&2
-    echo "       set LORE_FRAMEWORK=codex or run install.sh --framework codex" >&2
+    echo "       run install.sh --framework codex or set settings.json active_framework=codex" >&2
     return 1
   fi
 }

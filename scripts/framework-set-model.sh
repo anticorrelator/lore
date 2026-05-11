@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# framework-set-model.sh — Mutate the persisted role->model map in framework.json.
+# framework-set-model.sh — Mutate the active harness role->model map in settings.json.
 #
 # This is the write-side counterpart to framework-status.sh (read) and
 # framework-doctor.sh (diagnose). It is the single source of truth for the
@@ -18,19 +18,17 @@
 #      model_routing.shape=multi; single-shape harnesses reject cross-provider
 #      bindings. Remediation language matches framework-doctor.sh's role
 #      conflict diagnostic so operators see the same string from both surfaces.
-#   3. framework.json MUST exist; absent config emits a `[remediation]` line
+#   3. settings.json MUST exist; absent config emits a `[remediation]` line
 #      directing the operator at install.sh and exits 2 (no implicit creation).
 #
 # Persistence:
-#   Atomic write — read existing JSON → mutate `roles.<role>` → serialize to
-#   temp via jq (preserving sibling keys, pretty-printed) → rename. No
-#   in-place edit. Other top-level keys (framework, capability_overrides,
-#   version) are preserved verbatim.
+#   Atomic write via scripts/settings.sh — mutate
+#   `harnesses.<active>.roles.<role>` under the unified settings lock.
 #
 # Exit codes:
 #   0  success (mutation written; dry-run print succeeded; idempotent no-op)
 #   1  usage error (missing args, unknown flag)
-#   2  framework.json absent or malformed (operator must run install.sh)
+#   2  settings.json absent or malformed (operator must run install.sh)
 #   3  validation error (unknown role, role/model conflict with shape)
 set -euo pipefail
 
@@ -46,13 +44,13 @@ Usage:
   lore framework unset-model <role>         [--json] [--dry-run]
 
 Subcommands:
-  set-model     Bind <role> to <model> in framework.json roles.<role>
-  unset-model   Remove the roles.<role> key (resolution falls through to
-                roles.default per resolve_model_for_role precedence)
+  set-model     Bind <role> to <model> in settings.json harnesses.<active>.roles.<role>
+  unset-model   Remove that role key (resolution falls through to
+                harnesses.<active>.roles.default per resolve_model_for_role precedence)
 
 Options:
   --json        Emit a machine-readable JSON confirmation to stdout
-  --dry-run     Print the planned mutation without writing framework.json
+  --dry-run     Print the planned mutation without writing settings.json
   --help, -h    Show this help
 
 Validation:
@@ -65,7 +63,7 @@ Validation:
 Exit codes:
   0  success (mutation written, dry-run printed, or unset no-op)
   1  usage error
-  2  framework.json absent/malformed (run install.sh)
+  2  settings.json absent/malformed (run install.sh)
   3  validation error (unknown role or shape conflict)
 EOF
 }
@@ -157,7 +155,8 @@ if ! command -v jq &>/dev/null; then
 fi
 
 DATA_DIR="${LORE_DATA_DIR:-$HOME/.lore}"
-CONFIG_PATH="$DATA_DIR/config/framework.json"
+CONFIG_PATH="$DATA_DIR/config/settings.json"
+SETTINGS_SH="$SCRIPT_DIR/settings.sh"
 ROLES_FILE="$LORE_LIB_DIR/../adapters/roles.json"
 
 # emit_json_then_exit <action> <role> [model] <status> <exit_code> [extra_message]
@@ -182,9 +181,9 @@ print(json.dumps(out, indent=2))
 PYEOF
 }
 
-# --- Pre-flight: framework.json must exist + parse ---------------------------
+# --- Pre-flight: settings.json must exist + parse ----------------------------
 if [[ ! -f "$CONFIG_PATH" ]]; then
-  msg="framework config not found at $CONFIG_PATH"
+  msg="settings config not found at $CONFIG_PATH"
   if [[ "$JSON_OUTPUT" -eq 1 ]]; then
     emit_json "$SUBCOMMAND" "$ROLE" "$MODEL" "config-absent" "$msg"
   else
@@ -195,7 +194,7 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
   exit 2
 fi
 if ! jq -e . "$CONFIG_PATH" &>/dev/null; then
-  msg="framework config at $CONFIG_PATH is malformed JSON"
+  msg="settings config at $CONFIG_PATH is malformed JSON"
   if [[ "$JSON_OUTPUT" -eq 1 ]]; then
     emit_json "$SUBCOMMAND" "$ROLE" "$MODEL" "config-malformed" "$msg"
   else
@@ -205,6 +204,20 @@ if ! jq -e . "$CONFIG_PATH" &>/dev/null; then
   fi
   exit 2
 fi
+
+ACTIVE_FRAMEWORK=$(resolve_active_framework 2>/dev/null || true)
+if [[ -z "$ACTIVE_FRAMEWORK" ]]; then
+  msg="active_framework is not configured in $CONFIG_PATH"
+  if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+    emit_json "$SUBCOMMAND" "$ROLE" "$MODEL" "config-malformed" "$msg"
+  else
+    echo "Error: $msg" >&2
+    echo "" >&2
+    echo "[remediation] Run: bash install.sh --framework <name>" >&2
+  fi
+  exit 2
+fi
+ROLE_PATH="harnesses.$ACTIVE_FRAMEWORK.roles.$ROLE"
 
 # --- Validate role against the closed registry ------------------------------
 # Done here (rather than relying solely on validate_role_model_binding) so the
@@ -271,12 +284,16 @@ fi
 # idempotent no-op (role wasn't bound) and set-model can flag "no change"
 # for clarity. Both still exit 0 in the no-op case — the operator's intent
 # is satisfied either way.
-existing=$(jq -r --arg r "$ROLE" '.roles[$r] // ""' "$CONFIG_PATH")
+existing_raw=$(LORE_DATA_DIR="$DATA_DIR" bash "$SETTINGS_SH" get "$ROLE_PATH" 2>/dev/null || true)
+existing=""
+if [[ -n "$existing_raw" ]]; then
+  existing=$(printf '%s' "$existing_raw" | jq -r '. // empty' 2>/dev/null || true)
+fi
 
 case "$SUBCOMMAND" in
   set-model)
     if [[ "$existing" == "$MODEL" ]]; then
-      msg="roles.$ROLE already bound to $MODEL — no change"
+      msg="$ROLE_PATH already bound to $MODEL — no change"
       if [[ "$JSON_OUTPUT" -eq 1 ]]; then
         emit_json "set-model" "$ROLE" "$MODEL" "no-change" "$msg"
       else
@@ -287,7 +304,7 @@ case "$SUBCOMMAND" in
     ;;
   unset-model)
     if [[ -z "$existing" ]]; then
-      msg="roles.$ROLE was already unset — no change"
+      msg="$ROLE_PATH was already unset — no change"
       if [[ "$JSON_OUTPUT" -eq 1 ]]; then
         emit_json "unset-model" "$ROLE" "" "no-change" "$msg"
       else
@@ -302,10 +319,10 @@ esac
 if [[ "$DRY_RUN" -eq 1 ]]; then
   case "$SUBCOMMAND" in
     set-model)
-      msg="would set roles.$ROLE=$MODEL in $CONFIG_PATH (was: ${existing:-<unset>})"
+      msg="would set $ROLE_PATH=$MODEL in $CONFIG_PATH (was: ${existing:-<unset>})"
       ;;
     unset-model)
-      msg="would remove roles.$ROLE from $CONFIG_PATH (was: $existing)"
+      msg="would remove $ROLE_PATH from $CONFIG_PATH (was: $existing)"
       ;;
   esac
   if [[ "$JSON_OUTPUT" -eq 1 ]]; then
@@ -317,32 +334,19 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 # --- Atomic write -----------------------------------------------------------
-# Write to a temp file in the same directory so the rename is on the same
-# filesystem (no cross-device hop). On any failure between read and rename,
-# the original framework.json is untouched.
-tmp_file=$(mktemp "${CONFIG_PATH}.XXXXXX.tmp")
-trap 'rm -f "$tmp_file"' EXIT
-
 case "$SUBCOMMAND" in
   set-model)
-    jq --arg r "$ROLE" --arg m "$MODEL" '.roles[$r] = $m' "$CONFIG_PATH" > "$tmp_file"
+    LORE_DATA_DIR="$DATA_DIR" bash "$SETTINGS_SH" patch "$ROLE_PATH" "$(jq -cn --arg v "$MODEL" '$v')"
     ;;
   unset-model)
-    jq --arg r "$ROLE" 'del(.roles[$r])' "$CONFIG_PATH" > "$tmp_file"
+    LORE_DATA_DIR="$DATA_DIR" bash "$SETTINGS_SH" delete "$ROLE_PATH"
     ;;
 esac
-
-# Final newline for POSIX text-file friendliness — matches install.sh's
-# `f.write("\n")` after json.dump.
-printf '\n' >> "$tmp_file"
-
-mv "$tmp_file" "$CONFIG_PATH"
-trap - EXIT
 
 # --- Confirmation -----------------------------------------------------------
 case "$SUBCOMMAND" in
   set-model)
-    msg="roles.$ROLE=$MODEL"
+    msg="$ROLE_PATH=$MODEL"
     if [[ "$JSON_OUTPUT" -eq 1 ]]; then
       emit_json "set-model" "$ROLE" "$MODEL" "ok" "$msg"
     else
@@ -350,7 +354,7 @@ case "$SUBCOMMAND" in
     fi
     ;;
   unset-model)
-    msg="removed roles.$ROLE (was: $existing); resolution will fall through to roles.default"
+    msg="removed $ROLE_PATH (was: $existing); resolution will fall through to harnesses.$ACTIVE_FRAMEWORK.roles.default"
     if [[ "$JSON_OUTPUT" -eq 1 ]]; then
       emit_json "unset-model" "$ROLE" "" "ok" "$msg"
     else

@@ -26,8 +26,8 @@
 #                                             framework raises
 #                                             UnsupportedFrameworkError
 #   6. resolve_model_for_role precedence    — env > per-repo .lore.config
-#                                             > user framework.json >
-#                                             roles.default; closed-set
+#                                             > user settings.json harness roles >
+#                                             harness roles.default; closed-set
 #                                             rejection for unknown role
 #
 # Per-harness divergence on the orchestration directive grammar (e.g.,
@@ -122,16 +122,16 @@ teardown() {
 
 set_framework() {
   local fw="$1"
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
-{"version":1,"framework":"$fw","capability_overrides":{},"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}}
+  cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
+{"version":2,"active_framework":"$fw","capability_overrides":{},"harnesses":{"$fw":{"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}}}}
 EOF
 }
 
 set_framework_with_roles() {
   # $1 = framework, $2 = inline JSON for the .roles object body.
   local fw="$1" roles="$2"
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
-{"version":1,"framework":"$fw","capability_overrides":{},"roles":$roles}
+  cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
+{"version":2,"active_framework":"$fw","capability_overrides":{},"harnesses":{"$fw":{"roles":$roles}}}
 EOF
 }
 
@@ -786,8 +786,8 @@ PYEOF
 # scripts/lib.sh::resolve_model_for_role documents the precedence:
 #   1. env LORE_MODEL_<ROLE>
 #   2. per-repo .lore.config `model_for_<role>=`
-#   3. user $LORE_DATA_DIR/config/framework.json `.roles.<role>`
-#   4. user framework.json `.roles.default`
+#   3. user $LORE_DATA_DIR/config/settings.json `.harnesses.<active>.roles.<role>`
+#   4. user settings.json `.harnesses.<active>.roles.default`
 # This block walks each precedence step and asserts the higher tier wins.
 
 @test "resolve_model_for_role: env override beats per-repo .lore.config" {
@@ -808,7 +808,7 @@ EOF
   rm -rf "$tmp_repo"
 }
 
-@test "resolve_model_for_role: per-repo .lore.config beats user framework.json roles" {
+@test "resolve_model_for_role: per-repo .lore.config beats user settings.json harness roles" {
   set_framework_with_roles claude-code '{"default":"user-default","lead":"user-lead"}'
   local tmp_repo
   tmp_repo="$(mktemp -d)"
@@ -816,7 +816,7 @@ EOF
 model_for_lead=repo-lead
 EOF
 
-  # No env var; per-repo wins over user framework.json's .roles.lead
+  # No env var; per-repo wins over user settings.json's harness roles.lead
   run bash -c "cd '$tmp_repo' && source '$LIB' && resolve_model_for_role lead"
   [ "$status" -eq 0 ]
   [ "$output" = "repo-lead" ]
@@ -824,9 +824,9 @@ EOF
   rm -rf "$tmp_repo"
 }
 
-@test "resolve_model_for_role: user framework.json roles.<role> beats roles.default" {
+@test "resolve_model_for_role: user settings.json roles.<role> beats roles.default" {
   set_framework_with_roles claude-code '{"default":"user-default","lead":"user-lead"}'
-  # No env, no per-repo — must hit user framework.json's .roles.lead, not default.
+  # No env, no per-repo — must hit user settings.json's harness roles.lead, not default.
   # cd to a dir that has no .lore.config in any ancestor (use mktemp).
   local tmp_dir
   tmp_dir="$(mktemp -d)"
@@ -837,7 +837,7 @@ EOF
 }
 
 @test "resolve_model_for_role: roles.default is the fallback when role binding is unset" {
-  # framework.json carries roles.default but no entry for `judge`.
+  # settings.json carries harness roles.default but no entry for `judge`.
   set_framework_with_roles claude-code '{"default":"user-default"}'
   local tmp_dir
   tmp_dir="$(mktemp -d)"

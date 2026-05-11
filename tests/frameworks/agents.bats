@@ -40,8 +40,8 @@ setup() {
   [ -f "$AGENTS_README" ] || skip "adapters/agents/README.md missing"
 
   # Stage an isolated LORE_DATA_DIR so adapter smoke commands resolve
-  # framework.json without touching the user's real config (mirrors
-  # hooks.bats setup; same symlink-to-scripts pattern).
+  # settings.json without touching the user's real config (mirrors hooks.bats
+  # setup; same symlink-to-scripts pattern).
   TEST_LORE_DATA_DIR="$(mktemp -d)"
   mkdir -p "$TEST_LORE_DATA_DIR/config"
   ln -s "$REPO_DIR/scripts" "$TEST_LORE_DATA_DIR/scripts"
@@ -56,8 +56,8 @@ teardown() {
 }
 
 set_framework() {
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
-{"version":1,"framework":"$1","capability_overrides":{},"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}}
+  cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
+{"version":1,"active_framework":"$1","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}},"opencode":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}},"codex":{"args":[],"roles":{"default":"sonnet","lead":"opus","worker":"sonnet"}}}}
 EOF
 }
 
@@ -65,8 +65,8 @@ EOF
 # syntax so the opencode adapter can exercise its split_provider_model
 # helper. Only meaningful when the framework's model_routing.shape=multi.
 set_framework_multi() {
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
-{"version":1,"framework":"$1","capability_overrides":{},"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}}
+  cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
+{"version":1,"active_framework":"$1","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}},"opencode":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}},"codex":{"args":[],"roles":{"default":"anthropic/sonnet","lead":"anthropic/opus","worker":"openai/gpt-4o"}}}}
 EOF
 }
 

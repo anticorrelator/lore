@@ -44,7 +44,7 @@ require_opencode() {
   active=$(resolve_active_framework 2>/dev/null) || active=""
   if [[ "$active" != "opencode" ]]; then
     echo "Error: adapters/agents/opencode.sh requires active framework=opencode (got '$active')" >&2
-    echo "       set LORE_FRAMEWORK=opencode or run install.sh --framework opencode" >&2
+    echo "       run install.sh --framework opencode or set settings.json active_framework=opencode" >&2
     return 1
   fi
 }

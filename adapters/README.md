@@ -49,7 +49,7 @@ files in the same precedence order.
 
 | File | Writer | Schema |
 |---|---|---|
-| `$LORE_DATA_DIR/config/framework.json` | `install.sh` (T4), edited via `cli/lore framework set-*` (T61) | `{"version": 1, "framework": "<id>", "capability_overrides": {<cap>: <support_level>, ...}, "role_bindings": {<role>: <model>, ...}}` |
+| `$LORE_DATA_DIR/config/settings.json` | `install.sh`, edited via the settings TUI / `scripts/settings.sh` | `{"version": 1, "active_framework": "<id>", "capability_overrides": {<cap>: <support_level>, ...}, "harnesses": {<id>: {"args": [...], "roles": {<role>: <model>}}}}` |
 | `$LORE_DATA_DIR/config/harness-args.json` | `install.sh` (T4) and `migrate_claude_args_to_harness_args` (T8) | `{"version": 1, "_deprecated_legacy_source"?: "<path>", "<framework-id>": {"args": ["..."]}, ...}` |
 | `$LORE_DATA_DIR/config/claude.json` | (legacy; left in place as historical record) | `{"args": ["..."]}`. Read on first run, migrated into `harness-args.json["claude-code"].args`, then never read again. |
 | `adapters/capabilities.json` | committed in repo (T2) | See file header for full schema. |
@@ -134,8 +134,8 @@ parity restoration.
 
 **Precedence ladder:**
 
-1. `LORE_FRAMEWORK` env var (any non-empty value, validated against the shipped `capabilities.json` frameworks set).
-2. `$LORE_DATA_DIR/config/framework.json` `.framework`.
+1. `LORE_FRAMEWORK` env var (diagnostic/process override; ordinary install and hook paths must not require it).
+2. `$LORE_DATA_DIR/config/settings.json` `.active_framework`.
 3. Built-in default: `"claude-code"`.
 
 **Validation:** the resolved id MUST appear as a key under `adapters/capabilities.json[.frameworks]`. An unknown framework name is rejected with a non-zero exit / non-nil error and a stderr / wrapped-error message naming the source. Resolution NEVER silently routes to a default for an explicit-but-bogus value (per "don't reintroduce defaults" feedback).
@@ -153,11 +153,11 @@ parity restoration.
 
 **Precedence ladder:**
 
-1. `$LORE_DATA_DIR/config/framework.json` `.capability_overrides.<cap>` (operator override seeded by install.sh).
+1. `$LORE_DATA_DIR/config/settings.json` `.capability_overrides.<cap>` (operator override seeded by install.sh).
 2. `adapters/capabilities.json` `.frameworks.<active>.capabilities.<cap>.support` (static profile, where `<active>` comes from `resolve_active_framework`).
 3. Fallback: `"none"`.
 
-**Parity test (T12):** For every (framework, capability) pair, both sides return the same support level. Override rows in `framework.json` apply on both sides identically.
+**Parity test (T12):** For every (framework, capability) pair, both sides return the same support level. Override rows in `settings.json` apply on both sides identically.
 
 ### framework_model_routing_shape / FrameworkModelRoutingShape
 
@@ -185,9 +185,8 @@ parity restoration.
 
 1. `LORE_MODEL_FOR_<ROLE>` env var (uppercased role name; e.g. `LORE_MODEL_FOR_LEAD`).
 2. `$KDIR/.lore.config` per-repo `[model.role]` table (when present; consumed by `parse_lore_config`).
-3. `$LORE_DATA_DIR/config/framework.json` `.role_bindings.<role>` (user-level binding).
-4. Harness default for `model_routing=single` harnesses (collapse the role map to one binding).
-5. `adapters/roles.json` `.default_role` fallback (typically `"default"`).
+3. `$LORE_DATA_DIR/config/settings.json` `.harnesses.<active>.roles.<role>` (harness-local binding).
+4. `$LORE_DATA_DIR/config/settings.json` `.harnesses.<active>.roles.default` (harness-local default).
 
 **Validation:** if `framework_model_routing_shape == "single"` and the resolved binding names a provider the harness cannot serve, both sides return non-zero / non-nil with a remediation message naming the conflict (`tests/frameworks/roles.bats` T14 verifies). Unknown role names are rejected at lookup time.
 

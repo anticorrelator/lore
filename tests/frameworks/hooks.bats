@@ -60,9 +60,9 @@ setup() {
   command -v python3 >/dev/null 2>&1 || skip "python3 required for capability cell lookup"
 
   # Stage an isolated LORE_DATA_DIR so adapter smoke commands resolve
-  # framework.json without touching the user's real config. The Go and
-  # bash sides both walk the LORE_DATA_DIR/scripts symlink to find the
-  # repo, so we replicate that here.
+  # settings.json without touching the user's real config. The Go and bash
+  # sides both walk the LORE_DATA_DIR/scripts symlink to find the repo, so we
+  # replicate that here.
   TEST_LORE_DATA_DIR="$(mktemp -d)"
   mkdir -p "$TEST_LORE_DATA_DIR/config"
   ln -s "$REPO_DIR/scripts" "$TEST_LORE_DATA_DIR/scripts"
@@ -79,8 +79,8 @@ teardown() {
 # --- Helpers ---
 
 set_framework() {
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
-{"version":1,"framework":"$1","capability_overrides":{},"roles":{}}
+  cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
+{"version":1,"active_framework":"$1","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
 }
 

@@ -65,7 +65,8 @@ def _resolve_builtin_plan_mode_tool():
     except (OSError, json.JSONDecodeError):
         return "__missing__"
 
-    # Resolve active framework via the same env override the rest of Lore uses.
+    # Resolve active framework from unified settings; LORE_FRAMEWORK remains a
+    # process-local diagnostic override, not something installed hooks require.
     fw = os.environ.get("LORE_FRAMEWORK", "").strip()
     if not fw:
         # Honor user config when the env var is absent.
@@ -73,11 +74,11 @@ def _resolve_builtin_plan_mode_tool():
             "LORE_DATA_DIR",
             os.path.join(os.path.expanduser("~"), ".lore"),
         )
-        config_file = os.path.join(data_dir, "config", "framework.json")
+        config_file = os.path.join(data_dir, "config", "settings.json")
         if os.path.isfile(config_file):
             try:
                 with open(config_file, "r") as cf:
-                    fw = (json.load(cf).get("framework") or "").strip()
+                    fw = (json.load(cf).get("active_framework") or "").strip()
             except (OSError, json.JSONDecodeError):
                 fw = ""
     if not fw:

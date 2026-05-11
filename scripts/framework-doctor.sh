@@ -87,7 +87,7 @@ EOF
 done
 
 DATA_DIR="${LORE_DATA_DIR:-$HOME/.lore}"
-CONFIG_PATH="$DATA_DIR/config/framework.json"
+CONFIG_PATH="$DATA_DIR/config/settings.json"
 CAPABILITIES_FILE="$LORE_LIB_DIR/../adapters/capabilities.json"
 ROLES_FILE="$LORE_LIB_DIR/../adapters/roles.json"
 EVIDENCE_FILE="$LORE_LIB_DIR/../adapters/capabilities-evidence.md"
@@ -146,7 +146,7 @@ CWD_PATH="$(pwd)"
 
 # --- Capability + override + role analysis ------------------------------------
 # A single python helper does the cross-file join: capabilities.json profile +
-# framework.json overrides + roles.json registry + .lore.config (if any) +
+# settings.json overrides + roles.json registry + .lore.config (if any) +
 # resolved env vars. The shell side calls resolve_model_for_role for the
 # user-config layer (so resolution drift between python and lib.sh is
 # impossible) and feeds those answers in via env.
@@ -167,6 +167,7 @@ if [[ -n "$ROLE_IDS" ]]; then
     LORE_LIB_DIR_FOR_PY="$SCRIPT_DIR" \
     LORE_CONFIG_PATH_FOR_PY="$LORE_CONFIG_PATH" \
     CONFIG_PATH_FOR_PY="$CONFIG_PATH" \
+    ACTIVE_FRAMEWORK_FOR_PY="$ACTIVE_FRAMEWORK" \
     ROLE_IDS_FOR_PY="$ROLE_IDS" \
     python3 - <<'PYEOF'
 import json, os, subprocess
@@ -174,6 +175,7 @@ import json, os, subprocess
 role_ids = os.environ["ROLE_IDS_FOR_PY"].split()
 lore_config = os.environ["LORE_CONFIG_PATH_FOR_PY"]
 cfg_path = os.environ["CONFIG_PATH_FOR_PY"]
+fw = os.environ["ACTIVE_FRAMEWORK_FOR_PY"]
 lib_dir = os.environ["LORE_LIB_DIR_FOR_PY"]
 out = {}
 
@@ -219,8 +221,9 @@ for rid in role_ids:
         try:
             with open(cfg_path) as f:
                 cfg = json.load(f)
-            user_value = (cfg.get("roles") or {}).get(rid, "") or ""
-            user_default = (cfg.get("roles") or {}).get("default", "") or ""
+            roles = ((cfg.get("harnesses") or {}).get(fw) or {}).get("roles") or {}
+            user_value = roles.get(rid, "") or ""
+            user_default = roles.get("default", "") or ""
         except Exception:
             pass
     entry["user_config"] = user_value

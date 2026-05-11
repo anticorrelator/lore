@@ -644,19 +644,22 @@ resolve_active_framework() {
 }
 
 # --- framework_capability ---
-# Print the support level for a capability on the active framework.
+# Print the support level for a capability on the active framework, or on an
+# explicitly supplied framework.
 # Output is one of: full | partial | fallback | none.
 # Resolution order (first match wins):
 #   1. Unified settings.json `capability_overrides.<cap>`.
-#   2. adapters/capabilities.json `.frameworks.<active>.capabilities.<cap>.support`
-#      (static profile shipped with the repo).
+#   2. adapters/capabilities.json `.frameworks.<framework>.capabilities.<cap>.support`
+#      (static profile shipped with the repo). The framework is the optional
+#      second arg, or resolve_active_framework when omitted.
 #   3. Fallback: "none".
-# Usage: level=$(framework_capability stop_hook)
+# Usage: level=$(framework_capability stop_hook [framework])
 #        if [[ "$(framework_capability mcp)" == "full" ]]; then ...
 # Mirrors config.FrameworkCapability() in tui/internal/config/config.go (T10).
 framework_capability() {
   local cap="$1"
   [[ -z "$cap" ]] && { echo "Error: framework_capability requires a capability name" >&2; return 1; }
+  local explicit_framework="${2:-}"
 
   local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
   local settings_sh="$LORE_LIB_DIR/settings.sh"
@@ -680,7 +683,10 @@ framework_capability() {
   fi
 
   # 2. Static profile lookup, keyed by active framework.
-  active=$(resolve_active_framework) || return 1
+  active="$explicit_framework"
+  if [[ -z "$active" ]]; then
+    active=$(resolve_active_framework) || return 1
+  fi
   if [[ -f "$capabilities_file" ]]; then
     level=$(jq -r --arg fw "$active" --arg c "$cap" \
       '.frameworks[$fw].capabilities[$c].support // empty' "$capabilities_file" 2>/dev/null)
@@ -699,7 +705,8 @@ framework_capability() {
 # string if the cell has no evidence pointer (D8 evidence-gating: a non-`none`
 # cell missing this field SHOULD be reported as `degraded:no-evidence` by
 # the caller). Reads adapters/capabilities.json
-# `.frameworks.<active>.capabilities.<cap>.evidence`.
+# `.frameworks.<framework>.capabilities.<cap>.evidence`. The framework is the
+# optional second arg, or resolve_active_framework when omitted.
 # Used by install.sh and assemble-instructions.sh to compose operator log
 # lines that read the capability triple
 # (install_paths.<kind>, capabilities.<kind>.support, capabilities.<kind>.evidence)
@@ -708,6 +715,7 @@ framework_capability() {
 framework_capability_evidence() {
   local cap="$1"
   [[ -z "$cap" ]] && { echo "Error: framework_capability_evidence requires a capability name" >&2; return 1; }
+  local explicit_framework="${2:-}"
 
   local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
   if ! command -v jq &>/dev/null || [[ ! -f "$capabilities_file" ]]; then
@@ -716,7 +724,10 @@ framework_capability_evidence() {
   fi
 
   local active
-  active=$(resolve_active_framework) || return 1
+  active="$explicit_framework"
+  if [[ -z "$active" ]]; then
+    active=$(resolve_active_framework) || return 1
+  fi
   jq -r --arg fw "$active" --arg c "$cap" \
     '.frameworks[$fw].capabilities[$c].evidence // ""' "$capabilities_file" 2>/dev/null
 }
@@ -859,6 +870,7 @@ resolve_permission_adapter() {
 # (collapsed) routing.
 # Mirrors config.FrameworkModelRoutingShape() in tui/internal/config/config.go.
 framework_model_routing_shape() {
+  local explicit_framework="${1:-}"
   local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
   local active shape
 
@@ -866,7 +878,10 @@ framework_model_routing_shape() {
     echo "single"
     return 0
   fi
-  active=$(resolve_active_framework) || return 1
+  active="$explicit_framework"
+  if [[ -z "$active" ]]; then
+    active=$(resolve_active_framework) || return 1
+  fi
   shape=$(jq -r --arg fw "$active" '.frameworks[$fw].model_routing.shape // "single"' "$capabilities_file" 2>/dev/null)
   echo "${shape:-single}"
 }
@@ -990,8 +1005,8 @@ resolve_model_for_role() {
 }
 
 # --- resolve_harness_install_path ---
-# Print the install path for a kind on the active framework, with $HOME and
-# similar shell-style references expanded.
+# Print the install path for a kind on the active framework (or optional
+# explicit framework), with $HOME and similar shell-style references expanded.
 # Closed kind set: instructions | skills | agents | settings | teams |
 #                  ephemeral_plans | mcp_servers
 # Output:
@@ -1011,6 +1026,7 @@ resolve_model_for_role() {
 resolve_harness_install_path() {
   local kind="$1"
   [[ -z "$kind" ]] && { echo "Error: resolve_harness_install_path requires a kind" >&2; return 1; }
+  local explicit_framework="${2:-}"
 
   case "$kind" in
     instructions|skills|agents|settings|teams|ephemeral_plans|mcp_servers) ;;
@@ -1027,7 +1043,10 @@ resolve_harness_install_path() {
   fi
 
   local active raw
-  active=$(resolve_active_framework) || return 1
+  active="$explicit_framework"
+  if [[ -z "$active" ]]; then
+    active=$(resolve_active_framework) || return 1
+  fi
   raw=$(jq -r --arg fw "$active" --arg k "$kind" '.frameworks[$fw].install_paths[$k] // empty' "$capabilities_file" 2>/dev/null)
 
   if [[ -z "$raw" ]]; then

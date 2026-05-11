@@ -13,8 +13,8 @@
 #
 # Resolution order for --framework value:
 #   1. Explicit --framework <name> CLI flag.
-#   2. resolve_active_framework (env LORE_FRAMEWORK or
-#      $LORE_DATA_DIR/config/framework.json `.framework`).
+#   2. resolve_active_framework (normally $LORE_DATA_DIR/config/settings.json
+#      `.active_framework`; LORE_FRAMEWORK remains only a diagnostic override).
 #   3. Built-in default: claude-code.
 #
 # Usage:
@@ -94,7 +94,7 @@ fi
 #    degraded and exit without writing.
 TARGET=""
 DEGRADED=""
-if TARGET=$(LORE_FRAMEWORK="$FRAMEWORK" resolve_harness_install_path instructions 2>&1); then
+if TARGET=$(resolve_harness_install_path instructions "$FRAMEWORK" 2>&1); then
   if [[ "$TARGET" == "unsupported" ]]; then
     DEGRADED="framework=$FRAMEWORK has no instructions install path (install_paths.instructions=unsupported); skipping instruction-file assembly"
     TARGET=""
@@ -140,7 +140,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     MCP_SUPPORT=$(jq -r --arg fw "$FRAMEWORK" '.frameworks[$fw].capabilities.mcp.support // "unknown"' "$CAPABILITIES_FILE" 2>/dev/null)
     MCP_EVIDENCE=$(jq -r --arg fw "$FRAMEWORK" '.frameworks[$fw].capabilities.mcp.evidence // ""' "$CAPABILITIES_FILE" 2>/dev/null)
   fi
-  if mcp_raw=$(LORE_FRAMEWORK="$FRAMEWORK" resolve_harness_install_path mcp_servers 2>/dev/null); then
+  if mcp_raw=$(resolve_harness_install_path mcp_servers "$FRAMEWORK" 2>/dev/null); then
     if [[ "$mcp_raw" == "unsupported" ]]; then
       echo "[assemble-instructions] framework=$FRAMEWORK mcp=none (no MCP install path; capability cell support=$MCP_SUPPORT)"
     else
