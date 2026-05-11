@@ -57,9 +57,9 @@ Use these variables throughout the rest of the skill. The three are NOT intercha
 
 Registration into `$KDIR/_scorecards/template-registry.json` is handled automatically on first use by `scripts/scorecard-append.sh` — no separate registration step.
 
-## Protocol-to-Skill Projection (10 → 7)
+## Protocol-to-Skill Projection (9 → 7)
 
-Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents them as seven top-level `### Step N` sections — a compatibility-preserving projection that keeps related concerns (load vs. verify vs. promote) on clean section boundaries. The mapping:
+Proposal §9.2 describes the flow as nine logical steps. This SKILL.md presents them as seven top-level `### Step N` sections — a compatibility-preserving projection that keeps related concerns (load vs. verify vs. promote) on clean section boundaries. The mapping:
 
 | §9.2 Logical Step | SKILL.md Step |
 |---|---|
@@ -71,8 +71,7 @@ Proposal §9.2 describes the flow as ten logical steps. This SKILL.md presents t
 | 6 Lead writes/updates execution evidence | Step 4 |
 | 7 Lead runs `lore promote` on accepted Tier 3 | Step 5 |
 | 8 Stop hook lazily triggers audit; completion non-blocking | Step 6 (reference only; no explicit call) |
-| 9 If PR exists or review requested, branch to `/pr-review` | Step 7 sub-step |
-| 10 Prepare `/retro` inputs | Step 7 |
+| 9 Prepare `/retro` inputs | Step 7 |
 
 **Lead-inline route variant.** Step 3.0 introduces a pre-dispatch short-circuit. When the plan satisfies the lead-inline conditions (single prescriptive task, no advisors — file count is no longer gated), §9.2 steps 2–6 collapse into direct lead execution: the lead applies edits using its own tools, emits Tier 2 evidence with `LEAD_TEMPLATE_VERSION`, then jumps to Step 5 (promote) → Step 6 (followup gate) → Step 7 (cleanup). No team is created and no workers spawn.
 
@@ -692,25 +691,7 @@ If `INTENT_ANCHOR` is empty/absent on `_meta.json`, run §6.3 exactly as today a
 
 3. Run `lore work heal`.
 
-4. **Optional `/pr-review` branch (per §9.2 Step 9, D7).** Query GitHub for a PR open against the current branch and route one of three ways:
-
-   ```bash
-   BRANCH=$(git rev-parse --abbrev-ref HEAD)
-   PR_JSON=$(gh pr list --head "$BRANCH" --json number --limit 1 2>&1)
-   PR_EXIT=$?
-   ```
-
-   - **PR exists** (`$PR_EXIT` is 0 AND `$PR_JSON` is a non-empty array, e.g. `[{"number":123}]`): extract the PR number and invoke `/pr-review` via the Skill tool. After invocation, report one line to the user: `[implement] Optional /pr-review invoked for PR #<num>`.
-   - **No PR** (`$PR_EXIT` is 0 AND `$PR_JSON` is `[]`): skip silently. Do NOT write an execution-log entry. Do NOT write to `notes.md`.
-   - **`gh` unavailable or errored** (`$PR_EXIT` is non-zero): skip the gate and append exactly one line to `$KDIR/_work/<slug>/notes.md`:
-     ```
-     - pr-review skipped: gh pr list failed (<exit-code>: <first 80 chars of stderr>)
-     ```
-     Do NOT write to `execution-log.md` — that file is reserved for task events, not environment skips.
-
-   The gate is optional by design: any of the three outcomes lets Step 7 continue. `/pr-review` is purely diagnostic and never blocks `/implement` completion.
-
-5. **Retro-prep bundle (per §9.2 Step 10, D8).** Write a snapshot of this run's producer facts to `$KDIR/_work/<slug>/retro-bundle.json` so `/retro` has a single, stable input artifact. One write per `/implement` run; overwrite on re-run (snapshot semantics — not append, not merge). `/implement` is the sole writer; `/retro` is a read-only consumer.
+4. **Retro-prep bundle (per §9.2 Step 9, D8).** Write a snapshot of this run's producer facts to `$KDIR/_work/<slug>/retro-bundle.json` so `/retro` has a single, stable input artifact. One write per `/implement` run; overwrite on re-run (snapshot semantics — not append, not merge). `/implement` is the sole writer; `/retro` is a read-only consumer.
 
    The bundle has exactly these nine required fields:
 
@@ -736,7 +717,7 @@ If `INTENT_ANCHOR` is empty/absent on `_meta.json`, run §6.3 exactly as today a
 
    **Overwrite semantics:** on re-run of `/implement` against the same work item, replace the file unconditionally. No append, no merge, no rotation — each run reflects only that run's producer facts. The canonical log files already carry historical data.
 
-6. **Archive the completed work item.** This step is mandatory when all tasks are done AND, on anchored items, the Step 6 closure verdict permits archive — it is the structural close of the implement cycle, not a discretionary cleanup. Branch on the task-system completion state (not on plan.md), then on the anchored closure precondition:
+5. **Archive the completed work item.** This step is mandatory when all tasks are done AND, on anchored items, the Step 6 closure verdict permits archive — it is the structural close of the implement cycle, not a discretionary cleanup. Branch on the task-system completion state (not on plan.md), then on the anchored closure precondition:
 
    - **All tasks completed AND (legacy item OR anchored item with a valid `closure` row):** archive and verify the move:
      ```bash
@@ -796,7 +777,7 @@ If `INTENT_ANCHOR` is empty/absent on `_meta.json`, run §6.3 exactly as today a
 
    **Why this is the last step before the report.** The user-facing "Done" report is the natural exit point of `/implement`; once it renders, the operator typically transitions to `/retro` or moves on. Coupling archive to the report (rather than treating it as an earlier optional step) ensures the work item's active/archived state is committed before the cycle visibly closes. Prior versions of this skill placed archive earlier in Step 7 — observed live, the archive call got silently skipped roughly half the time because the report's "consider /retro" line created a perceived clean handoff before archive ran. Placing archive here, with verification, removes that gap.
 
-7. **Report to user.** Before rendering, check that archive ran if it should have. The precondition has two forms — task-completion (existing) and anchored-closure (new):
+6. **Report to user.** Before rendering, check that archive ran if it should have. The precondition has two forms — task-completion (existing) and anchored-closure (new):
 
    ```bash
    if [ "$REMAINING_COUNT" = "0" ] && [ -d "$KDIR/_work/<slug>" ]; then
@@ -823,14 +804,14 @@ If `INTENT_ANCHOR` is empty/absent on `_meta.json`, run §6.3 exactly as today a
          echo "[implement] FATAL: tasks complete but anchored work item has no valid closure row. Re-run Step 6 to record the verdict, then archive."
          ;;
        *)
-         echo "[implement] FATAL: all tasks completed but work item not archived. Run Step 7.6 archive before this report."
+         echo "[implement] FATAL: all tasks completed but work item not archived. Run Step 7.5 archive before this report."
          ;;
      esac
      exit 1
    fi
    ```
 
-   The report MUST NOT render with a completed-but-unarchived work item. If the precondition fires, return to Step 6 (record the verdict if missing) and Step 7.6 (archive). For `none` verdicts, Step 6.2 already produced the user-facing exit message and skipped Step 7 — the report below does not render in that case.
+   The report MUST NOT render with a completed-but-unarchived work item. If the precondition fires, return to Step 6 (record the verdict if missing) and Step 7.5 (archive). For `none` verdicts, Step 6.2 already produced the user-facing exit message and skipped Step 7 — the report below does not render in that case.
 
    ```
    [implement] Done.
