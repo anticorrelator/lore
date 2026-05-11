@@ -215,6 +215,13 @@ func (m model) renderHelpModal() string {
 		row("D", "delete") + "\n" +
 		row("ctrl+a", "toggle archived") + "\n" +
 		row("K", "knowledge browser") + "\n" +
+		row("t", "settlement panel") + "\n" +
+		"\n" +
+		sectionS.Render("Settlement") + "\n" +
+		row("p", "process one batch") + "\n" +
+		row("e", "enable / disable") + "\n" +
+		row("v", "show config") + "\n" +
+		row("w / f", "work / follow-ups") + "\n" +
 		"\n" +
 		sectionS.Render("Work Detail") + "\n" +
 		row("Tab / Shift-Tab", "cycle tabs") + "\n" +
@@ -232,6 +239,7 @@ func (m model) renderHelpModal() string {
 		"\n" +
 		sectionS.Render("Global") + "\n" +
 		row("?", "this help") + "\n" +
+		row("t", "settlement panel") + "\n" +
 		row("S / Ctrl+,", "settings configurator") + "\n" +
 		row("q / Ctrl+C / Ctrl+D", "quit")
 

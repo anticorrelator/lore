@@ -436,3 +436,31 @@ if bad:
 ' "$CAPS"
   [ "$status" -eq 0 ]
 }
+
+@test "spec contract: team_messaging=none keeps lead-orchestrated researcher fanout when subagents exist" {
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+spec = d["skills"]["spec"]
+reqs = {entry["id"]: entry for entry in spec["requires"] if isinstance(entry, dict)}
+team = reqs.get("team_messaging")
+subagents = reqs.get("subagents")
+if not team or not subagents:
+    print("spec must declare object-form team_messaging and subagents requirements")
+    sys.exit(1)
+if team.get("partial_below") != "none":
+    print("team_messaging must not hard-refuse /spec when absent")
+    sys.exit(1)
+text = " ".join([team.get("notes", ""), spec.get("notes", "")]).lower()
+if "lead-orchestrated researcher fanout" not in text:
+    print("spec contract must name lead-orchestrated researcher fanout")
+    sys.exit(1)
+if "no researcher fanout" in text:
+    print("spec contract must not collapse team_messaging=none to no researcher fanout")
+    sys.exit(1)
+if "subagents=none" not in text or "spec-short" not in text:
+    print("spec contract must reserve spec-short collapse for subagents=none")
+    sys.exit(1)
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}

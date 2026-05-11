@@ -16,6 +16,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/gh"
 	"github.com/anticorrelator/lore/tui/internal/search"
+	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -75,6 +76,20 @@ type prStatusLoadedMsg struct {
 	err      error
 }
 
+type settlementStatusLoadedMsg struct {
+	status settlement.Status
+	err    error
+	output string
+}
+
+type settlementActionCompleteMsg struct {
+	action    string
+	automatic bool
+	result    settlement.ActionResult
+	err       error
+	output    string
+}
+
 // activeSessionsCheckedMsg carries all non-stale sessions discovered on disk.
 type activeSessionsCheckedMsg struct {
 	sessions map[string]work.SessionInfo
@@ -98,6 +113,44 @@ func loadPRStatus() tea.Cmd {
 	return func() tea.Msg {
 		statuses, err := gh.LoadPRStatus(context.Background())
 		return prStatusLoadedMsg{statuses: statuses, err: err}
+	}
+}
+
+func loadSettlementStatus() tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("lore", "settlement", "status", "--json")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return settlementStatusLoadedMsg{err: fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out))), output: string(out)}
+		}
+		status, err := settlement.ParseStatus(out)
+		return settlementStatusLoadedMsg{status: status, err: err, output: string(out)}
+	}
+}
+
+func runSettlementAction(action string) tea.Cmd {
+	return runSettlementActionWithMode(action, false)
+}
+
+func runAutomaticSettlementProcess() tea.Cmd {
+	return runSettlementActionWithMode("process", true)
+}
+
+func runSettlementActionWithMode(action string, automatic bool) tea.Cmd {
+	return func() tea.Msg {
+		args := []string{"settlement", action, "--json"}
+		if action == "process" {
+			args = []string{"settlement", "process", "--once", "--json"}
+		}
+		cmd := exec.Command("lore", args...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return settlementActionCompleteMsg{action: action, automatic: automatic, err: fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out))), output: string(out)}
+		}
+		result, parseErr := settlement.ParseActionResult(action, out)
+		return settlementActionCompleteMsg{action: action, automatic: automatic, result: result, err: parseErr, output: string(out)}
 	}
 }
 

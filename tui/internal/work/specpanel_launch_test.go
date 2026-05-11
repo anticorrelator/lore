@@ -63,11 +63,11 @@ exit 0
 	return dir
 }
 
-// stageFakeLoreData mirrors framework_test.go::setupFakeLoreData: stages a
-// LORE_DATA_DIR with a symlink to scripts/ (so loreRepoDir resolves
-// adapters/capabilities.json) and writes framework.json selecting the named
-// framework. Optional per-framework harness-args.json is written when extra
-// args are provided.
+// stageFakeLoreData mirrors config/framework_test.go::setupFakeLoreData:
+// stages a LORE_DATA_DIR with a symlink to scripts/ (so loreRepoDir resolves
+// adapters/capabilities.json) and writes unified settings.json selecting the
+// named framework. Optional per-framework harness args are written into
+// settings.json when extra args are provided.
 func stageFakeLoreData(t *testing.T, framework string, extraArgs []string) string {
 	t.Helper()
 
@@ -88,26 +88,23 @@ func stageFakeLoreData(t *testing.T, framework string, extraArgs []string) strin
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	harnesses := map[string]any{
+		"claude-code": map[string]any{"args": []string{}},
+		"opencode":    map[string]any{"args": []string{}},
+		"codex":       map[string]any{"args": []string{}},
+	}
+	if extraArgs != nil {
+		harnesses[framework].(map[string]any)["args"] = extraArgs
+	}
 	cfg := map[string]any{
 		"version":              1,
-		"framework":            framework,
+		"active_framework":     framework,
 		"capability_overrides": map[string]string{},
-		"roles":                map[string]string{},
+		"harnesses":            harnesses,
 	}
 	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(filepath.Join(configDir, "framework.json"), data, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), data, 0644); err != nil {
 		t.Fatal(err)
-	}
-
-	if extraArgs != nil {
-		hargs := map[string]any{
-			"version":  1,
-			framework: map[string]any{"args": extraArgs},
-		}
-		hd, _ := json.MarshalIndent(hargs, "", "  ")
-		if err := os.WriteFile(filepath.Join(configDir, "harness-args.json"), hd, 0644); err != nil {
-			t.Fatal(err)
-		}
 	}
 
 	t.Setenv("LORE_DATA_DIR", dataDir)
@@ -299,4 +296,3 @@ func argsContainPair(args []string, flag, value string) bool {
 	}
 	return false
 }
-

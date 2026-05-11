@@ -28,12 +28,16 @@ func (m model) View() string {
 		return m.browser.View()
 	}
 
-	cfg := m.buildPaneConfig()
 	var base string
-	if m.layoutMode == config.LayoutTopBottom {
-		base = m.viewTopBottom(cfg)
+	if m.state == stateSettlement {
+		base = m.viewSettlement()
 	} else {
-		base = m.viewSideBySide(cfg)
+		cfg := m.buildPaneConfig()
+		if m.layoutMode == config.LayoutTopBottom {
+			base = m.viewTopBottom(cfg)
+		} else {
+			base = m.viewSideBySide(cfg)
+		}
 	}
 
 	if m.popupActive {
@@ -56,7 +60,6 @@ func (m model) View() string {
 	}
 	return base
 }
-
 
 // viewOnboarding renders a full-screen centered welcome view for first-time initialization.
 func (m model) viewOnboarding() string {
@@ -111,32 +114,193 @@ func truncateLine(s string, maxW int) string {
 // renderTabIndicator renders a full-width tab row showing "work (N) · follow-ups (N)".
 // The active tab is highlighted; the inactive tab is dimmed. Width is the total line width.
 // Only the key to switch to the inactive view is shown (f when in work view, w when in follow-ups view).
-func renderTabIndicator(activeTab appState, workCount, followupCount, width int) string {
+func renderTabIndicator(activeTab appState, workCount, followupCount, settlementCount, width int) string {
 	activeS := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
 	inactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	hintS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
-	var workS, followupS lipgloss.Style
+	var workS, followupS, settlementS lipgloss.Style
 	var hint string
-	if activeTab == stateFollowUps {
-		workS, followupS = inactiveS, activeS
+	switch activeTab {
+	case stateFollowUps:
+		workS, followupS, settlementS = inactiveS, activeS, inactiveS
 		hint = "w  "
-	} else {
-		workS, followupS = activeS, inactiveS
+	case stateSettlement:
+		workS, followupS, settlementS = inactiveS, inactiveS, activeS
+		hint = "w/f"
+	default:
+		workS, followupS, settlementS = activeS, inactiveS, inactiveS
 		hint = "f  "
 	}
 
 	workLabel := fmt.Sprintf("work (%d)", workCount)
 	followupLabel := fmt.Sprintf("follow-ups (%d)", followupCount)
+	settlementLabel := fmt.Sprintf("settlement (%d)", settlementCount)
 	sep := sepS.Render(" · ")
 
-	line := "  " + hintS.Render(hint) + workS.Render(workLabel) + sep + followupS.Render(followupLabel)
-	lineW := 2 + 3 + len(workLabel) + 3 + len(followupLabel)
+	line := "  " + hintS.Render(hint+"  ") + workS.Render(workLabel) + sep + followupS.Render(followupLabel) + sep + settlementS.Render(settlementLabel)
+	lineW := lipgloss.Width(line)
 	if lineW < width {
 		line += strings.Repeat(" ", width-lineW)
 	}
 	return line
+}
+
+func (m model) viewSettlement() string {
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	contentH := m.innerHeight() - 1
+	if contentH < 1 {
+		contentH = 1
+	}
+	innerW := w - 2
+	if innerW < 24 {
+		innerW = 24
+	}
+	borderS := lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+	titleS := lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
+	bodyW := innerW - 1 // outer row renderer adds one leading space
+	if bodyW < 1 {
+		bodyW = 1
+	}
+	lines := m.renderSettlementBodyLines(bodyW, contentH)
+
+	var b strings.Builder
+	b.WriteString(renderTabIndicator(stateSettlement, len(m.list.Items()), m.followupList.FollowUpCount(), m.settlement.Count(), w))
+	b.WriteString("\n")
+	b.WriteString(borderS.Render("┌"))
+	b.WriteString(renderBorderTitle("Settlement", innerW, titleS, borderS))
+	b.WriteString(borderS.Render("┐"))
+	b.WriteString("\n")
+	for i := 0; i < contentH; i++ {
+		line := ""
+		if i < len(lines) {
+			line = " " + lines[i]
+		}
+		lineW := lipgloss.Width(line)
+		if lineW > innerW {
+			line = truncateLine(line, innerW)
+		} else if lineW < innerW {
+			line += strings.Repeat(" ", innerW-lineW)
+		}
+		b.WriteString(borderS.Render("│"))
+		b.WriteString(line)
+		b.WriteString(borderS.Render("│"))
+		b.WriteString("\n")
+	}
+	b.WriteString(borderS.Render("└"))
+	b.WriteString(borderS.Render(strings.Repeat("─", innerW)))
+	b.WriteString(borderS.Render("┘"))
+	b.WriteString("\n")
+	b.WriteString(m.renderStatusBar(w))
+	return b.String()
+}
+
+func (m model) renderSettlementBodyLines(width, height int) []string {
+	if height <= 0 {
+		return nil
+	}
+	settingsMaxH := settlementSettingsMaxHeight(height)
+	settingsLines := trimTrailingBlankLines(strings.Split(m.settlementSettingsInlineView(width, settingsMaxH), "\n"))
+	if len(settingsLines) > settingsMaxH {
+		settingsLines = settingsLines[:settingsMaxH]
+	}
+	settingsBlockH := 0
+	if len(settingsLines) > 0 {
+		settingsBlockH = len(settingsLines) + 1
+	}
+
+	statusH := height - settingsBlockH
+	if statusH < 1 {
+		statusH = 1
+	}
+	statusLines := strings.Split(m.settlement.SetSize(width, statusH).View(), "\n")
+	out := make([]string, 0, height)
+	for i := 0; i < len(statusLines) && i < statusH && len(out) < height; i++ {
+		out = append(out, fitLine(statusLines[i], width))
+	}
+	for len(out) < statusH && len(out) < height {
+		out = append(out, strings.Repeat(" ", width))
+	}
+	if len(settingsLines) > 0 && len(out) < height {
+		out = append(out, renderSettlementSeparator(width))
+		for i := 0; i < len(settingsLines) && len(out) < height; i++ {
+			out = append(out, fitLine(settingsLines[i], width))
+		}
+	}
+	return out
+}
+
+func settlementSettingsMaxHeight(height int) int {
+	if height < 8 {
+		return 2
+	}
+	maxH := height / 3
+	if maxH < 4 {
+		maxH = 4
+	}
+	if maxH > 10 {
+		maxH = 10
+	}
+	return maxH
+}
+
+func renderSettlementSeparator(width int) string {
+	label := " Settings "
+	if width <= lipgloss.Width(label)+2 {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", width))
+	}
+	left := "─"
+	right := strings.Repeat("─", width-lipgloss.Width(label)-1)
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(left) +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("7")).Bold(true).Render(label) +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(right)
+}
+
+func renderSettlementRule(width int) string {
+	if width < 1 {
+		return ""
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", width))
+}
+
+func (m model) settlementSettingsInlineView(width, height int) string {
+	if m.settlementSettingsPanel == nil {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("settlement settings unavailable")
+	}
+	if width < 24 {
+		width = 24
+	}
+	if height < 1 {
+		height = 1
+	}
+	m.settlementSettingsPanel.SetSize(width, height)
+	return m.settlementSettingsPanel.View()
+}
+
+func fitLine(line string, width int) string {
+	if width < 1 {
+		return ""
+	}
+	lineW := lipgloss.Width(line)
+	if lineW > width {
+		return truncateLine(line, width)
+	}
+	if lineW < width {
+		return line + strings.Repeat(" ", width-lineW)
+	}
+	return line
+}
+
+func trimTrailingBlankLines(lines []string) []string {
+	end := len(lines)
+	for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	return lines[:end]
 }
 
 // renderBorderTitle renders "─ Title ──────────" filling exactly width chars.
@@ -165,7 +329,6 @@ func renderBorderTitleWithAnnot(title string, width int, titleS, borderS lipglos
 	}
 	return prefix + rendered + borderS.Render(strings.Repeat("─", middle)) + borderS.Render(" ") + annot + borderS.Render(" ─")
 }
-
 
 // viewSideBySide renders a side-by-side split pane using the entity-neutral paneConfig.
 // It replaces viewSplitPane (stateWork) and viewFollowUpsSideBySide (stateFollowUps).
@@ -261,7 +424,7 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 	rightBorderChar := rightBS.Render("│")
 
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, m.width))
+	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, m.width))
 	b.WriteString("\n")
 	b.WriteString(topRow)
 	b.WriteString("\n")
@@ -402,7 +565,7 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, m.width))
+	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, m.width))
 	b.WriteString("\n")
 
 	// === Top panel (list) ===
@@ -542,6 +705,29 @@ func (m model) renderStatusBar(width int) string {
 			hint("/", "search"),
 			hint("Esc", "exit"),
 			hint("?", "help"),
+		}
+	case stateSettlement:
+		if m.focusedPanel == panelRight {
+			hints = []string{
+				hint("j/k", "settings"),
+				hint("Enter", "edit/commit"),
+				hint("h", "status"),
+				hint("S", "all settings"),
+				hint("?", "help"),
+			}
+		} else {
+			toggleLabel := "enable"
+			if m.settlement.Status().Enabled {
+				toggleLabel = "disable"
+			}
+			hints = []string{
+				hint("p", "process once"),
+				hint("e", toggleLabel),
+				hint("l", "settings"),
+				hint("w", "work"),
+				hint("f", "follow-ups"),
+				hint("?", "help"),
+			}
 		}
 	case stateFollowUps:
 		if m.focusedPanel == panelLeft {

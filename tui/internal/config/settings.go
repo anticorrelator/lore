@@ -1,9 +1,7 @@
 // Package config: settings.go is the Go mirror of the unified user-settings
 // loader at scripts/settings.sh and scripts/lore_settings.py (D5/D5a). The
 // three loaders share a parity contract so a value written by one is visible
-// to the others byte-for-byte (modulo JSON serializer formatting), and a key
-// missing from the unified file falls back to the legacy fragmented file in
-// every stack identically.
+// to the others byte-for-byte (modulo JSON serializer formatting).
 //
 // Read contract (D5):
 //   - Get(path) returns the raw JSON-encoded value at the dot-separated path,
@@ -14,9 +12,8 @@
 //     or ("{}", nil) when the section is absent. Always returns a JSON object
 //     literal so callers can json.Unmarshal into a struct without nil checks.
 //   - Path() returns the resolved settings.json absolute path.
-//   - Fallbacks() returns the deterministic snapshot of "<file>::<key>" pairs
-//     whose unified key is absent and whose legacy fragmented file is on disk.
-//     Order is stable so `lore doctor` can diff against prior runs.
+//   - Fallbacks() returns an empty list. Runtime settings no longer read
+//     legacy fragmented files.
 //
 // Write contract (D5a):
 //   - Patch(path, value) acquires an exclusive flock on the same lock file
@@ -29,8 +26,7 @@
 //
 // Failure handling:
 //   - Missing settings.json is NOT an error: Get returns ("", false, nil),
-//     Section returns ("{}", nil), Fallbacks reports every legacy pair as
-//     missing-from-unified. Mirrors the bash and Python loaders.
+//     Section returns ("{}", nil), Fallbacks returns [].
 //   - Malformed JSON is a hard error with an actionable message naming
 //     `lore doctor`.
 //
@@ -58,28 +54,6 @@ import (
 type SettingsError struct{ msg string }
 
 func (e *SettingsError) Error() string { return e.msg }
-
-// settingsFallbackPair lists "<legacy_file>::<unified_dot_path>" rows reported
-// by Fallbacks() when the unified key is absent and the fragmented file is on
-// disk. Mirrors the table in scripts/settings.sh cmd_fallbacks (the bash side
-// is the canonical list because lore doctor consumes settings.sh fallbacks
-// directly; the Go list exists so Go-only callers see the same snapshot).
-// Each row encodes (unified_dot_path, legacy_file_basename, legacy_jq_key).
-type settingsFallbackPair struct {
-	unifiedPath  string
-	legacyFile   string
-	legacyKey    string // "<all>" marks files read whole rather than by single key
-	legacyAtRoot bool   // true → legacy file lives at $LORE_DATA_DIR/, not $LORE_DATA_DIR/config/
-}
-
-var settingsFallbackTable = []settingsFallbackPair{
-	{"active_framework", "framework.json", "framework", false},
-	{"capability_overrides", "framework.json", "capability_overrides", false},
-	{"roles", "framework.json", "roles", false},
-	{"harnesses", "harness-args.json", "harnesses", false},
-	{"obsidian.vaults", "obsidian.json", "<all>", false},
-	{"ceremonies", "ceremonies.json", "<all>", true},
-}
 
 // settingsDataDir returns LORE_DATA_DIR or ~/.lore. Mirrors _data_dir in
 // scripts/lore_settings.py and the LORE_DATA_DIR resolution at the top of
@@ -201,9 +175,8 @@ func SettingsGet(dotPath string) (raw string, present bool, err error) {
 // SettingsSection returns the named top-level object as a json.RawMessage.
 // Always returns a JSON object literal: "{}" when the section is absent, or
 // the section's raw bytes when present. A non-object top-level value is
-// treated as absence (returns "{}") rather than an error so callers can
-// fall through to fragmented-file fallback during the deprecation window —
-// mirrors scripts/lore_settings.py section.
+// treated as absence (returns "{}") rather than an error. Mirrors
+// scripts/lore_settings.py section.
 //
 // Bash counterpart: scripts/settings.sh cmd_section.
 func SettingsSection(name string) (json.RawMessage, error) {
@@ -228,43 +201,18 @@ func SettingsSection(name string) (json.RawMessage, error) {
 	return json.RawMessage(out), nil
 }
 
-// SettingsFallbacks returns a deterministic snapshot of "<legacy_file>::<key>"
-// pairs whose unified key is absent at the documented dot-path AND whose
-// legacy fragmented file currently exists on disk. Order is stable so
-// `lore doctor` can diff against prior runs.
+// SettingsFallbacks returns legacy settings fallback rows.
 //
-// The return shape matches the bash cmd_fallbacks output (one
-// "<file>::<key>" string per legacy pair); callers that need the structured
-// pair can split on "::". Empty slice means every legacy reader has been
-// migrated.
+// Runtime settings now read only the unified settings document, so there are
+// no fallback rows to report.
 //
 // Bash counterpart: scripts/settings.sh cmd_fallbacks. Python counterpart:
 // scripts/lore_settings.py fallbacks.
 func SettingsFallbacks() ([]string, error) {
-	doc, err := loadSettingsDocument()
-	if err != nil {
+	if _, err := loadSettingsDocument(); err != nil {
 		return nil, err
 	}
-	dataDir := settingsDataDir()
-
-	var out []string
-	for _, row := range settingsFallbackTable {
-		// Skip if the unified key is present (no fallback needed).
-		if _, ok := resolveSettingsDotPath(doc, row.unifiedPath); ok {
-			continue
-		}
-		var legacyPath string
-		if row.legacyAtRoot {
-			legacyPath = filepath.Join(dataDir, row.legacyFile)
-		} else {
-			legacyPath = filepath.Join(dataDir, "config", row.legacyFile)
-		}
-		if _, statErr := os.Stat(legacyPath); statErr != nil {
-			continue
-		}
-		out = append(out, row.legacyFile+"::"+row.legacyKey)
-	}
-	return out, nil
+	return nil, nil
 }
 
 // setSettingsDotPath assigns value at dot_path inside doc, creating

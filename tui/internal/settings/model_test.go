@@ -323,19 +323,6 @@ func TestHiddenSettingsPaths_NotRendered(t *testing.T) {
 				"type": "object",
 				"additionalProperties": false,
 				"properties": {"claude-code": {"type": "object", "additionalProperties": false, "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}
-			},
-			"capture": {
-				"type": "object",
-				"additionalProperties": false,
-				"properties": {"adaptive": {"type": "boolean"}}
-			},
-			"roles": {
-				"type": "object",
-				"additionalProperties": {"type": "string"}
-			},
-			"ceremonies": {
-				"type": "object",
-				"additionalProperties": {"type": "array", "items": {"type": "string"}}
 			}
 		}
 	}`)
@@ -344,9 +331,6 @@ func TestHiddenSettingsPaths_NotRendered(t *testing.T) {
 		"version":          float64(1),
 		"active_framework": "claude-code",
 		"harnesses":        map[string]any{"claude-code": map[string]any{"args": []any{}}},
-		"capture":          map[string]any{"adaptive": true},
-		"roles":      map[string]any{"lead": "opus"},
-		"ceremonies": map[string]any{"spec-design": []any{"codex-design-review"}},
 	})
 	m, err := NewSettingsModel(SettingsModelOptions{
 		SchemaPath:       schemaPath,
@@ -360,13 +344,13 @@ func TestHiddenSettingsPaths_NotRendered(t *testing.T) {
 	}
 
 	for _, w := range m.widgets {
-		if w.DotPath() == "version" || w.DotPath() == "capture" || w.DotPath() == "roles" || w.DotPath() == "ceremonies" {
+		if w.DotPath() == "version" {
 			t.Fatalf("hidden path rendered as top-level widget: %s", w.DotPath())
 		}
 	}
 	view := stripANSI(m.View())
 	if strings.Contains(view, "lead") || strings.Contains(view, "spec-design") {
-		t.Fatalf("legacy top-level roles/ceremonies leaked into generic render:\n%s", view)
+		t.Fatalf("unknown top-level settings leaked into generic render:\n%s", view)
 	}
 }
 
@@ -601,6 +585,38 @@ func TestAbsentOverlayTabThroughDoesNotPatch(t *testing.T) {
 	}
 }
 
+func TestEscBacksOutOfParentWithoutClearingCommittedLeaf(t *testing.T) {
+	m, store, _ := newTestModel(t, map[string]any{
+		"closed_obj": map[string]any{"label": ""},
+	})
+	m.focusByDotPath("closed_obj")
+
+	_, _ = m.Update(keyMsg("enter")) // enter closed_obj
+	_, _ = m.Update(keyMsg("enter")) // edit label
+	_, _ = m.Update(keyMsg("f"))
+	_, _ = m.Update(keyMsg("o"))
+	_, _ = m.Update(keyMsg("o"))
+	_, _ = m.Update(keyMsg("enter")) // commit label
+
+	if len(store.patches) != 1 || store.patches[0].dotPath != "closed_obj.label" {
+		t.Fatalf("expected one committed leaf patch, got %+v", store.patches)
+	}
+	if got := store.doc["closed_obj"].(map[string]any)["label"]; got != "foo" {
+		t.Fatalf("expected committed label before Esc, got %v", got)
+	}
+
+	_, _ = m.Update(keyMsg("esc")) // back out of closed_obj
+	if got := store.doc["closed_obj"].(map[string]any)["label"]; got != "foo" {
+		t.Fatalf("Esc backing out of parent cleared committed label; got %v", got)
+	}
+	if len(store.patches) != 1 {
+		t.Fatalf("Esc backing out of parent should not write another patch, got %+v", store.patches)
+	}
+	if len(store.deletes) != 0 {
+		t.Fatalf("Esc backing out of parent should not unset leaves, got deletes=%v", store.deletes)
+	}
+}
+
 // TestEscClosesModalWhenNoFocus verifies the host's contract: Esc at top
 // level (no draft active) sets Closed() so the host can unwrap the modal.
 func TestEscClosesModalWhenNoFocus(t *testing.T) {
@@ -706,6 +722,402 @@ func TestRegisterTopSection_RendersBeforeWidgets(t *testing.T) {
 	}
 	if radioIdx > flagIdx {
 		t.Errorf("top section must render before schema-driven widgets; primary at %d, flag at %d", radioIdx, flagIdx)
+	}
+}
+
+func TestLimitToDotPath_RendersOnlyOneSubtreeAndDoesNotCloseOnEsc(t *testing.T) {
+	m, _, _ := newTestModel(t, map[string]any{
+		"closed_obj": map[string]any{"label": "alpha"},
+		"name":       "beta",
+	})
+	m.LimitToDotPath("closed_obj")
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "closed_obj") || !strings.Contains(out, "label") {
+		t.Fatalf("limited view should render closed_obj subtree, got:\n%s", out)
+	}
+	if strings.Contains(out, "name:") || strings.Contains(out, "flag:") {
+		t.Fatalf("limited view should not render sibling settings, got:\n%s", out)
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if m.Closed() {
+		t.Fatal("embedded limited settings should not close on top-level Esc")
+	}
+	out = stripANSI(m.View())
+	if strings.Contains(out, "name:") || strings.Contains(out, "flag:") {
+		t.Fatalf("limited view should remain constrained after navigation, got:\n%s", out)
+	}
+}
+
+func TestLimitToDotPath_CompactEmbedOmitsOuterFrame(t *testing.T) {
+	m, _, _ := newTestModel(t, map[string]any{
+		"closed_obj": map[string]any{"label": "alpha"},
+	})
+	m.LimitToDotPath("closed_obj")
+	m.SetCompactEmbed(true)
+
+	out := stripANSI(m.View())
+	if strings.Contains(out, "╭") || strings.Contains(out, "│") {
+		t.Fatalf("compact embedded view should omit the top-level section frame, got:\n%s", out)
+	}
+	if strings.Contains(out, "closed_obj") {
+		t.Fatalf("compact embedded view should rely on host title, got:\n%s", out)
+	}
+	if !strings.Contains(out, "label") {
+		t.Fatalf("compact embedded view should still render subtree fields, got:\n%s", out)
+	}
+}
+
+func TestLimitToDotPath_CompactEmbedNavigationStartsInsideSubtree(t *testing.T) {
+	m, _, _ := newTestModel(t, map[string]any{
+		"closed_obj": map[string]any{"label": "alpha"},
+	})
+	m.LimitToDotPath("closed_obj")
+	m.SetCompactEmbed(true)
+
+	panel, ok := m.limitedWidget().(*ClosedObjectSubPanel)
+	if !ok {
+		t.Fatalf("limited widget is %T, want ClosedObjectSubPanel", m.limitedWidget())
+	}
+	if !panel.entered || len(panel.children) == 0 || !panel.children[0].Focused() {
+		t.Fatalf("compact limited panel should start inside first child; entered=%v children=%d", panel.entered, len(panel.children))
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if panel.cursor == 0 && len(panel.children) > 1 {
+		t.Fatalf("j should navigate the embedded subtree, cursor=%d", panel.cursor)
+	}
+}
+
+func TestLimitToDotPath_CompactEmbedGridsSimpleLeavesAndSuppressesDescriptions(t *testing.T) {
+	schemaPath := writeFixture(t, `{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"type": "object",
+		"additionalProperties": false,
+		"required": ["active_framework", "harnesses"],
+		"properties": {
+			"active_framework": {"type": "string", "enum": ["claude-code"]},
+			"harnesses": {"type": "object", "additionalProperties": false, "properties": {"claude-code": {"type": "object", "additionalProperties": false, "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}},
+			"settlement": {
+				"type": "object",
+				"additionalProperties": false,
+				"description": "Long operational explanation should not appear inline.",
+					"properties": {
+						"enabled": {"type": "boolean", "description": "Enable explanation should not appear inline."},
+						"max_concurrency": {"type": "integer", "minimum": 1, "description": "Concurrency explanation should not appear inline."}
+					}
+			}
+		}
+	}`)
+	capsPath := writeMinimalCapabilities(t, []string{"claude-code"})
+	store := newFakeStore(map[string]any{
+		"active_framework": "claude-code",
+		"harnesses":        map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"settlement": map[string]any{
+			"enabled":         true,
+			"max_concurrency": float64(20),
+		},
+	})
+	m, err := NewSettingsModel(SettingsModelOptions{
+		SchemaPath:       schemaPath,
+		CapabilitiesPath: capsPath,
+		Store:            store,
+		Runner:           &fakeRunner{},
+		EnableScript:     "/fake/enable.sh",
+		DisableScript:    "/fake/disable.sh",
+		Registry:         NewWidgetRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("NewSettingsModel: %v", err)
+	}
+	m.LimitToDotPath("settlement")
+	m.SetCompactEmbed(true)
+	m.SetSize(90, 20)
+
+	out := stripANSI(m.View())
+	if strings.Contains(out, "explanation") || strings.Contains(out, "settlement") {
+		t.Fatalf("compact embedded view should suppress section/field descriptions and host-owned title, got:\n%s", out)
+	}
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("expected compact embed to keep three simple leaves on one row at width 90, got %d:\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[0], "enabled") || !strings.Contains(lines[0], "concurrency") {
+		t.Fatalf("expected simple leaves to share one compact row, got:\n%s", out)
+	}
+}
+
+func TestLimitToDotPath_CompactEmbedFlattensNestedSettlementGroups(t *testing.T) {
+	schemaPath := writeFixture(t, `{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"type": "object",
+		"additionalProperties": false,
+		"required": ["active_framework", "harnesses"],
+		"properties": {
+			"active_framework": {"type": "string", "enum": ["claude-code", "codex"]},
+			"harnesses": {"type": "object", "additionalProperties": false, "properties": {"claude-code": {"type": "object", "additionalProperties": false, "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}},
+			"settlement": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"enabled": {"type": "boolean"},
+					"max_concurrency": {"type": "integer", "minimum": 1},
+					"active_hours": {
+						"type": "object",
+						"additionalProperties": false,
+						"properties": {
+							"enabled": {"type": "boolean"},
+							"timezone": {"type": "string"},
+							"ranges": {
+								"type": "array",
+								"items": {
+									"type": "object",
+									"additionalProperties": false,
+									"properties": {
+										"days": {"type": "array", "items": {"type": "string", "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]}},
+										"start": {"type": "string"},
+										"end": {"type": "string"}
+									}
+								}
+							}
+						}
+					},
+					"harness_selection": {
+						"type": "object",
+						"additionalProperties": false,
+						"properties": {
+							"mode": {"type": "string", "enum": ["random", "round_robin"]},
+							"eligible_frameworks": {"type": "array", "items": {"type": "string", "enum": ["claude-code", "codex"]}, "uniqueItems": true},
+							"random_seed": {"type": "string"}
+						}
+					}
+				}
+			}
+		}
+	}`)
+	capsPath := writeMinimalCapabilities(t, []string{"claude-code", "codex"})
+	store := newFakeStore(map[string]any{
+		"active_framework": "claude-code",
+		"harnesses":        map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"settlement": map[string]any{
+			"enabled":         true,
+			"max_concurrency": float64(1),
+			"active_hours": map[string]any{
+				"enabled":  true,
+				"timezone": "local",
+				"ranges": []any{
+					map[string]any{"days": []any{"mon", "tue", "wed", "thu", "fri"}, "start": "09:00", "end": "17:00"},
+					map[string]any{"days": []any{"sat"}, "start": "10:00", "end": "14:00"},
+				},
+			},
+			"harness_selection": map[string]any{
+				"mode":                "random",
+				"eligible_frameworks": []any{"claude-code", "codex"},
+			},
+		},
+	})
+	m, err := NewSettingsModel(SettingsModelOptions{
+		SchemaPath:       schemaPath,
+		CapabilitiesPath: capsPath,
+		Store:            store,
+		Runner:           &fakeRunner{},
+		EnableScript:     "/fake/enable.sh",
+		DisableScript:    "/fake/disable.sh",
+		Registry:         NewWidgetRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("NewSettingsModel: %v", err)
+	}
+	m.LimitToDotPath("settlement")
+	m.SetCompactEmbed(true)
+	m.SetSize(140, 20)
+
+	out := stripANSI(m.View())
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) > 10 {
+		t.Fatalf("settlement compact embed should keep settings organized and bounded, got %d rows:\n%s", len(lines), out)
+	}
+	for _, want := range []string{"enabled", "active hours", "windows", "harness", "eligible"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("compact settlement settings missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(lines[len(lines)-2], "active hours:") || !strings.Contains(lines[len(lines)-2], "windows:") || !strings.Contains(lines[len(lines)-1], "sat 10:00-14:00") {
+		t.Fatalf("active-hour windows should render last and support multiple lines, got:\n%s", out)
+	}
+	if strings.Contains(lines[len(lines)-3], "windows") {
+		t.Fatalf("windows should be separated from the active-hours summary row, got:\n%s", out)
+	}
+	var activeHoursLine string
+	for _, line := range lines {
+		if strings.Contains(line, "active hours:") {
+			activeHoursLine = line
+		}
+	}
+	if !strings.Contains(activeHoursLine, "[x] enabled") || !strings.Contains(activeHoursLine, "timezone: local") || !strings.Contains(activeHoursLine, "windows:") {
+		t.Fatalf("active-hours controls should render as one grouped row, got:\n%s", activeHoursLine)
+	}
+	if strings.Index(activeHoursLine, "[x] enabled") > strings.Index(activeHoursLine, "windows:") {
+		t.Fatalf("active-hours enabled should precede window values on the active-hours row, got:\n%s", activeHoursLine)
+	}
+	eligibleIdx := -1
+	harnessIdx := -1
+	activeHoursIdx := -1
+	for i, line := range lines {
+		if strings.Contains(line, "harness:") {
+			harnessIdx = i
+		}
+		if strings.Contains(line, "eligible:") {
+			eligibleIdx = i
+		}
+		if strings.Contains(line, "active hours:") {
+			activeHoursIdx = i
+		}
+	}
+	if eligibleIdx <= harnessIdx {
+		t.Fatalf("eligible frameworks should render as a selector block beneath harness, got:\n%s", out)
+	}
+	if activeHoursIdx <= eligibleIdx {
+		t.Fatalf("active-hours settings should stay grouped with final windows block, got:\n%s", out)
+	}
+	if !strings.Contains(out, "[x] claude-code") || !strings.Contains(out, "[x] codex") {
+		t.Fatalf("eligible frameworks should use checkbox selector rows, got:\n%s", out)
+	}
+
+	panel, ok := m.limitedWidget().(*ClosedObjectSubPanel)
+	if !ok {
+		t.Fatalf("limited widget = %T, want settlement panel", m.limitedWidget())
+	}
+	var gotPaths []string
+	for _, control := range m.compactNavigationControls(panel) {
+		gotPaths = append(gotPaths, control.DotPath())
+	}
+	wantPaths := []string{
+		"settlement.enabled",
+		"settlement.max_concurrency",
+		"settlement.harness_selection.mode",
+		"settlement.harness_selection.random_seed",
+		"settlement.harness_selection.eligible_frameworks",
+		"settlement.active_hours.enabled",
+		"settlement.active_hours.timezone",
+		"settlement.active_hours.ranges",
+	}
+	if strings.Join(gotPaths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("compact settlement navigation should be flat leaf controls only\ngot:\n%s\nwant:\n%s", strings.Join(gotPaths, "\n"), strings.Join(wantPaths, "\n"))
+	}
+
+	for steps := 0; steps < len(wantPaths); steps++ {
+		focused := m.compactFocusedControl()
+		if focused != nil && focused.DotPath() == "settlement.active_hours.ranges" {
+			break
+		}
+		_, _ = m.Update(keyMsg("j"))
+	}
+	if focused := m.compactFocusedControl(); focused == nil || focused.DotPath() != "settlement.active_hours.ranges" {
+		t.Fatalf("expected focus to reach active-hour ranges, got %v", focused)
+	}
+	_, _ = m.Update(keyMsg("enter"))
+	for i := 0; i < 4; i++ {
+		_, _ = m.Update(keyMsg("a"))
+	}
+	out = stripANSI(m.View())
+	lines = lines[:0]
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) > 10 {
+		t.Fatalf("editing active-hour windows should stay bounded in compact settings, got %d rows:\n%s", len(lines), out)
+	}
+	if !strings.Contains(out, "[editing]") || !strings.Contains(out, "...") {
+		t.Fatalf("active-hour window editor should show a bounded editing viewport with overflow, got:\n%s", out)
+	}
+	if strings.Contains(out, "[x] claude-code") || strings.Contains(out, "[x] codex") {
+		t.Fatalf("unrelated harness selector should collapse while active-hour windows are editing, got:\n%s", out)
+	}
+}
+
+func TestLimitToDotPath_CompactEmbedUnsetWindowsRenderAllTime(t *testing.T) {
+	schemaPath := writeFixture(t, `{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"type": "object",
+		"additionalProperties": false,
+		"required": ["active_framework", "harnesses"],
+		"properties": {
+			"active_framework": {"type": "string", "enum": ["claude-code"]},
+			"harnesses": {"type": "object", "additionalProperties": false, "properties": {"claude-code": {"type": "object", "additionalProperties": false, "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}},
+			"settlement": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"active_hours": {
+						"type": "object",
+						"additionalProperties": false,
+						"properties": {
+							"enabled": {"type": "boolean"},
+							"timezone": {"type": "string"},
+							"ranges": {
+								"type": "array",
+								"items": {
+									"type": "object",
+									"additionalProperties": false,
+									"properties": {
+										"days": {"type": "array", "items": {"type": "string", "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]}},
+										"start": {"type": "string"},
+										"end": {"type": "string"}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}`)
+	capsPath := writeMinimalCapabilities(t, []string{"claude-code"})
+	store := newFakeStore(map[string]any{
+		"active_framework": "claude-code",
+		"harnesses":        map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"settlement": map[string]any{
+			"active_hours": map[string]any{
+				"enabled":  true,
+				"timezone": "local",
+			},
+		},
+	})
+	m, err := NewSettingsModel(SettingsModelOptions{
+		SchemaPath:       schemaPath,
+		CapabilitiesPath: capsPath,
+		Store:            store,
+		Runner:           &fakeRunner{},
+		EnableScript:     "/fake/enable.sh",
+		DisableScript:    "/fake/disable.sh",
+		Registry:         NewWidgetRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("NewSettingsModel: %v", err)
+	}
+	m.LimitToDotPath("settlement")
+	m.SetCompactEmbed(true)
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "windows:") || !strings.Contains(out, "(all time)") {
+		t.Fatalf("unset active-hour windows should render as all time, got:\n%s", out)
+	}
+	if strings.Contains(out, "09:00-17:00") {
+		t.Fatalf("unset active-hour windows should not invent a weekday window, got:\n%s", out)
 	}
 }
 

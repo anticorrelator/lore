@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # set-work-meta.sh — Set metadata fields on an existing work item
-# Usage: bash set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>]
+# Usage: bash set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--intent-anchor <text>]
 # Updates the specified fields in _meta.json, touches the timestamp, and rebuilds the index.
 #
 # --scope (Phase 2 — work item 02-durable-signal-foundation):
@@ -18,9 +18,11 @@ SLUG=""
 ISSUE=""
 PR=""
 SCOPE=""
+INTENT_ANCHOR=""
 HAS_ISSUE=0
 HAS_PR=0
 HAS_SCOPE=0
+HAS_INTENT_ANCHOR=0
 DETECT_PR=0
 JSON_MODE=0
 
@@ -39,7 +41,7 @@ is_valid_scope() {
 
 if [[ $# -lt 1 ]]; then
   echo "[work] Error: Missing required argument: slug" >&2
-  echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--detect-pr] [--json]" >&2
+  echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--intent-anchor <text>] [--detect-pr] [--json]" >&2
   exit 1
 fi
 
@@ -63,6 +65,11 @@ while [[ $# -gt 0 ]]; do
       HAS_SCOPE=1
       shift 2
       ;;
+    --intent-anchor)
+      INTENT_ANCHOR="$2"
+      HAS_INTENT_ANCHOR=1
+      shift 2
+      ;;
     --detect-pr)
       DETECT_PR=1
       shift
@@ -73,17 +80,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "[work] Error: Unknown flag '$1'" >&2
-      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--detect-pr] [--json]" >&2
+      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--intent-anchor <text>] [--detect-pr] [--json]" >&2
       exit 1
       ;;
   esac
 done
 
-if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 && "$HAS_SCOPE" -eq 0 && "$DETECT_PR" -eq 0 ]]; then
+if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 && "$HAS_SCOPE" -eq 0 && "$HAS_INTENT_ANCHOR" -eq 0 && "$DETECT_PR" -eq 0 ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
-    json_error "No fields to set. Provide --issue, --pr, --scope, and/or --detect-pr."
+    json_error "No fields to set. Provide --issue, --pr, --scope, --intent-anchor, and/or --detect-pr."
   fi
-  echo "[work] Error: No fields to set. Provide --issue, --pr, --scope, and/or --detect-pr." >&2
+  echo "[work] Error: No fields to set. Provide --issue, --pr, --scope, --intent-anchor, and/or --detect-pr." >&2
   exit 1
 fi
 
@@ -192,6 +199,23 @@ with open(path, "w") as f:
     f.write("\n")
 PYEOF
   CHANGES+=("scope=$SCOPE")
+fi
+
+if [[ "$HAS_INTENT_ANCHOR" -eq 1 ]]; then
+  python3 - "$META_FILE" "$INTENT_ANCHOR" << 'PYEOF'
+import json, sys
+path, intent_anchor = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+if intent_anchor:
+    data["intent_anchor"] = intent_anchor
+else:
+    data.pop("intent_anchor", None)
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+  CHANGES+=("intent_anchor=$INTENT_ANCHOR")
 fi
 
 # --- Check if any changes were actually made ---

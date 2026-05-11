@@ -17,7 +17,7 @@ var ErrNoRepo = errors.New("not inside a git repository")
 
 // ErrLoreDisabled is returned by Load() when the current directory IS inside a
 // git repository but `lore resolve` failed because the lore agent integration
-// is disabled (`~/.lore/config/agent.json` has `"enabled": false`). The
+// is disabled in unified settings. The
 // onboarding view distinguishes this from ErrNoRepo so users get actionable
 // guidance ("run `lore agent enable`") instead of the misleading
 // "navigate to a git repo" message.
@@ -41,29 +41,31 @@ func insideGitRepo() bool {
 // off via `lore agent disable` (or the equivalent settings-modal toggle). Used
 // by Load() to distinguish "lore disabled" from "not in a git repo" so the
 // onboarding view can show the right guidance. The check is filesystem-only
-// (no shell-out) — looks for `"enabled": false` in `$LORE_DATA_DIR/config/
-// agent.json` (default `~/.lore/config/agent.json`). Missing/unreadable file
-// → false (treat as not-disabled; the original ErrNoRepo path applies).
+// (no shell-out) and reads `$LORE_DATA_DIR/config/settings.json`.
+// Missing/unreadable file → false (treat as not-disabled; the original
+// ErrNoRepo path applies).
 func loreDisabled() bool {
-	dataDir := os.Getenv("LORE_DATA_DIR")
-	if dataDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return false
-		}
-		dataDir = filepath.Join(home, ".lore")
-	}
-	raw, err := os.ReadFile(filepath.Join(dataDir, "config", "agent.json"))
+	raw, err := os.ReadFile(SettingsPath())
 	if err != nil {
 		return false
 	}
 	var doc struct {
-		Enabled *bool `json:"enabled"`
+		Harnesses map[string]struct {
+			Enabled *bool `json:"enabled"`
+		} `json:"harnesses"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return false
 	}
-	return doc.Enabled != nil && !*doc.Enabled
+	if len(doc.Harnesses) == 0 {
+		return false
+	}
+	for _, block := range doc.Harnesses {
+		if block.Enabled == nil || *block.Enabled {
+			return false
+		}
+	}
+	return true
 }
 
 // Load runs `lore resolve` to discover the knowledge directory and returns
@@ -139,26 +141,22 @@ const (
 	LayoutTopBottom LayoutMode = "top-bottom"
 )
 
-// Prefs holds user preferences persisted to ~/.lore/config/tui.json.
+// Prefs holds user preferences persisted to unified settings.
 type Prefs struct {
 	Layout LayoutMode `json:"layout"`
 }
 
-// prefsPath returns the absolute path to the legacy TUI preferences file
-// (~/.lore/config/tui.json). Read-only fallback during the D4 deprecation
-// window — new writes route through SettingsPatch into the unified
-// settings.json under `tui.layout`.
+// prefsPath returns the old TUI preferences path. Kept only for callers/tests
+// that need to locate stale files; runtime reads do not consult it.
 func prefsPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".lore", "config", "tui.json")
 }
 
-// LoadPrefs reads TUI preferences. Resolution order (mirrors the unified-file
-// pattern at scripts/lib.sh:615-655):
+// LoadPrefs reads TUI preferences. Resolution order:
 //  1. LORE_TUI_LAYOUT env var.
 //  2. Unified settings.json `tui.layout`.
-//  3. Legacy ~/.lore/config/tui.json (deprecation-window fallback per D4).
-//  4. Built-in default LayoutLeftRight.
+//  3. Built-in default LayoutLeftRight.
 //
 // Bash counterpart: there is no bash reader for tui.layout (the TUI is the
 // only consumer); the unified loader is the cross-stack contract this
@@ -171,16 +169,6 @@ func LoadPrefs() Prefs {
 		var v string
 		if err := json.Unmarshal([]byte(raw), &v); err == nil {
 			layout = LayoutMode(v)
-		}
-	}
-
-	// Legacy tui.json (fallback when unified is absent or returned empty).
-	if layout == "" {
-		if data, err := os.ReadFile(prefsPath()); err == nil {
-			var legacy Prefs
-			if err := json.Unmarshal(data, &legacy); err == nil {
-				layout = legacy.Layout
-			}
 		}
 	}
 
@@ -201,9 +189,8 @@ func LoadPrefs() Prefs {
 }
 
 // SavePrefs writes TUI preferences via the unified settings loader
-// (SettingsPatch on `tui.layout`). The legacy ~/.lore/config/tui.json file is
-// no longer written; LoadPrefs continues to read it as a deprecation-window
-// fallback for one release. Routing through SettingsPatch ensures the write
+// (SettingsPatch on `tui.layout`). The old ~/.lore/config/tui.json file is no
+// longer written or read. Routing through SettingsPatch ensures the write
 // composes with concurrent bash/Python writers via the shared flock contract.
 func SavePrefs(p Prefs) error {
 	if err := SettingsPatch("tui.layout", string(p.Layout)); err != nil {
@@ -214,8 +201,7 @@ func SavePrefs(p Prefs) error {
 
 // ClaudeConfig holds flags applied to every `claude` CLI invocation spawned
 // by lore (TUI spec panel and batch scripts). Persisted to
-// ~/.lore/config/claude.json and shared with the shell scripts via
-// load_claude_args in lib.sh.
+// the claude-code harness slot in unified settings.
 type ClaudeConfig struct {
 	Args []string `json:"args"`
 }

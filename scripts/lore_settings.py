@@ -11,10 +11,8 @@ Read contract (D5):
     - section(name) returns the named top-level object as a dict, or {} if
       absent.
     - path() returns the resolved settings.json absolute path.
-    - fallbacks() returns the deterministic snapshot of (legacy_file, key)
-      pairs that would be consulted because the corresponding unified key is
-      missing. lore doctor consumes this directly; it is not a transient
-      runtime log of past reads.
+    - fallbacks() returns an empty list. Runtime settings no longer read
+      legacy fragmented files.
 
 Write contract (D5a):
     - set(path, value) acquires an exclusive flock on
@@ -27,7 +25,7 @@ Write contract (D5a):
 
 Failure handling:
     - Missing settings.json is NOT an error: get() returns None, section()
-      returns {}, fallbacks() reports every legacy pair as missing-from-unified.
+      returns {}, fallbacks() returns [].
     - Malformed JSON is a hard error (SettingsError) with an actionable
       message.
 
@@ -39,6 +37,12 @@ Parity vs the bash loader's missing-key surface:
 
 Environment:
     - LORE_DATA_DIR overrides ~/.lore (matches scripts/lib.sh).
+
+Settlement:
+    - The settlement processor reads the `settlement` section through this
+      unified file shape. Missing settlement keys fail closed in the processor:
+      enabled=False, max_concurrency=1, batch_size=12,
+      batch_recompute_min_interval_seconds=60, concordance_window_size=8.
 """
 
 from __future__ import annotations
@@ -55,14 +59,13 @@ class SettingsError(Exception):
     """Raised when settings.json is unreadable or malformed."""
 
 
-# Deterministic snapshot of (legacy_file, unified_dot_path) pairs.
-# fallbacks() reports the subset whose unified key is absent at the given
-# dot-path. Order is stable so doctor reports are diff-friendly.
-_FALLBACK_PAIRS: list[tuple[str, str]] = [
-    ("capture-config.json", "capture.core"),
-    ("capture-config.json", "capture.structural_signals"),
-    ("capture-config.json", "capture.adaptive"),
-]
+SETTLEMENT_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "max_concurrency": 1,
+    "batch_size": 12,
+    "batch_recompute_min_interval_seconds": 60,
+    "concordance_window_size": 8,
+}
 
 
 def _data_dir() -> str:
@@ -126,9 +129,7 @@ def get(dot_path: str) -> Any:
 def section(name: str) -> dict:
     """Return the named top-level object, or {} if absent.
 
-    A non-dict top-level value is treated as absence rather than an error
-    so callers fall through to fragmented-file fallback during the
-    deprecation window.
+    A non-dict top-level value is treated as absence rather than an error.
     """
     doc = _load_document()
     val = doc.get(name)
@@ -138,19 +139,13 @@ def section(name: str) -> dict:
 
 
 def fallbacks() -> list[tuple[str, str]]:
-    """Return the deterministic snapshot of legacy fallback pairs.
+    """Return legacy settings fallback rows.
 
-    Each tuple (legacy_file, unified_dot_path) marks a pair where the
-    consumer would currently fall back to the fragmented file because the
-    corresponding unified key is absent at that dot-path. lore doctor
-    consumes this directly — it is not a record of past reads.
+    Runtime settings now read only the unified settings document, so there
+    are no fallback rows to report.
     """
-    doc = _load_document()
-    out: list[tuple[str, str]] = []
-    for legacy_file, dot_path in _FALLBACK_PAIRS:
-        if _resolve_dot_path(doc, dot_path) is None:
-            out.append((legacy_file, dot_path))
-    return out
+    _load_document()
+    return []
 
 
 def _set_dot_path(doc: dict, dot_path: str, value: Any) -> None:

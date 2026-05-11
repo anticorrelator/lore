@@ -44,9 +44,9 @@ setup() {
   # The Go side resolves adapters/ via a "scripts" symlink under
   # LORE_DATA_DIR (loreRepoDir() in framework.go); mirror that staging.
   ln -s "$REPO_DIR/scripts" "$TEST_LORE_DATA_DIR/scripts"
-  # Default framework.json — individual tests rewrite as needed.
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
-{"version":1,"framework":"claude-code","capability_overrides":{},"roles":{}}
+  # Default unified settings.json — individual tests rewrite as needed.
+  cat > "$TEST_LORE_DATA_DIR/config/settings.json" <<EOF
+{"version":1,"active_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--dangerously-skip-permissions"]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   export LORE_DATA_DIR="$TEST_LORE_DATA_DIR"
   unset LORE_FRAMEWORK
@@ -91,6 +91,10 @@ go_helper() {
   "$HARNESS_BIN" "$@" 2>/dev/null
 }
 
+write_settings() {
+  cat > "$TEST_LORE_DATA_DIR/config/settings.json"
+}
+
 # ============================================================
 # Live dual-impl helpers — assert bash ↔ Go byte-equality
 # ============================================================
@@ -110,9 +114,9 @@ go_helper() {
   [ "$bash_out" = "opencode" ]
 }
 
-@test "parity: resolve_active_framework — file-side override (framework.json codex)" {
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
-{"version":1,"framework":"codex","capability_overrides":{},"roles":{}}
+@test "parity: resolve_active_framework — file-side override (settings.json codex)" {
+  write_settings <<EOF
+{"version":1,"active_framework":"codex","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   go_out=$(go_helper resolve_active_framework)
   bash_out=$(bash_helper "resolve_active_framework")
@@ -121,8 +125,8 @@ EOF
 }
 
 @test "parity: resolve_active_framework — unknown framework rejected on both sides" {
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
-{"version":1,"framework":"bogus-harness","capability_overrides":{},"roles":{}}
+  write_settings <<EOF
+{"version":1,"active_framework":"bogus-harness","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   go_status=0
   go_out=$(go_helper resolve_active_framework) || go_status=$?
@@ -147,8 +151,8 @@ EOF
 
 @test "parity: resolve_harness_install_path — unsupported sentinel matches" {
   # codex teams is the canonical 'unsupported' cell per capabilities.json.
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
-{"version":1,"framework":"codex","capability_overrides":{},"roles":{}}
+  write_settings <<EOF
+{"version":1,"active_framework":"codex","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   go_out=$(go_helper resolve_harness_install_path teams)
   bash_out=$(bash_helper "resolve_harness_install_path teams")
@@ -180,8 +184,8 @@ EOF
 }
 
 @test "parity: harness_path_or_empty — unsupported sentinel collapses to empty" {
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
-{"version":1,"framework":"codex","capability_overrides":{},"roles":{}}
+  write_settings <<EOF
+{"version":1,"active_framework":"codex","capability_overrides":{},"harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   go_out=$(go_helper harness_path_or_empty teams)
   bash_out=$(bash_helper "harness_path_or_empty teams")
@@ -245,9 +249,9 @@ EOF
   [ -z "$bash_out" ]
 }
 
-@test "parity: load_harness_args — harness-args.json claude-code slot" {
-  cat > "$TEST_LORE_DATA_DIR/config/harness-args.json" <<EOF
-{"version":1,"claude-code":{"args":["--foo","--bar"]},"opencode":{"args":["--qux"]}}
+@test "parity: load_harness_args — settings.json claude-code slot" {
+  write_settings <<EOF
+{"version":1,"active_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--foo","--bar"]},"opencode":{"args":["--qux"]},"codex":{"args":[]}}}
 EOF
   go_out=$(go_helper load_harness_args claude-code)
   if [ "$go_out" = "T10-pending" ]; then
@@ -259,9 +263,9 @@ EOF
   printf '%s\n' "$go_out" | grep -q -- "--bar"
 }
 
-@test "parity: load_harness_args — harness-args.json opencode slot reads opencode args (not claude-code's)" {
-  cat > "$TEST_LORE_DATA_DIR/config/harness-args.json" <<EOF
-{"version":1,"claude-code":{"args":["--CC"]},"opencode":{"args":["--OC"]}}
+@test "parity: load_harness_args — settings.json opencode slot reads opencode args (not claude-code's)" {
+  write_settings <<EOF
+{"version":1,"active_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--CC"]},"opencode":{"args":["--OC"]},"codex":{"args":[]}}}
 EOF
   go_out=$(go_helper load_harness_args opencode)
   if [ "$go_out" = "T10-pending" ]; then
@@ -342,8 +346,8 @@ EOF
 }
 
 @test "parity: resolve_model_for_role — env-aware role binding" {
-  cat > "$TEST_LORE_DATA_DIR/config/framework.json" <<EOF
-{"version":1,"framework":"claude-code","capability_overrides":{},"roles":{"lead":"opus","default":"sonnet"}}
+  write_settings <<EOF
+{"version":1,"active_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"lead":"opus","default":"sonnet"}},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   go_out=$(go_helper resolve_model_for_role lead)
   if [ "$go_out" = "T10-pending" ]; then
@@ -375,40 +379,38 @@ EOF
   [ -z "$out" ]
 }
 
-@test "bash: load_harness_args — reads claude-code slot from harness-args.json" {
-  cat > "$TEST_LORE_DATA_DIR/config/harness-args.json" <<EOF
-{"version":1,"claude-code":{"args":["--alpha","--beta"]}}
+@test "bash: load_harness_args — reads claude-code slot from settings.json" {
+  write_settings <<EOF
+{"version":1,"active_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--alpha","--beta"]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   out=$(bash_helper "load_harness_args claude-code" | tr '\n' ' ')
   [ "$out" = "--alpha --beta " ]
 }
 
 @test "bash: load_harness_args — LORE_HARNESS_ARGS env wins over file" {
-  cat > "$TEST_LORE_DATA_DIR/config/harness-args.json" <<EOF
-{"version":1,"claude-code":{"args":["--from-file"]}}
+  write_settings <<EOF
+{"version":1,"active_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":["--from-file"]},"opencode":{"args":[]},"codex":{"args":[]}}}
 EOF
   export LORE_HARNESS_ARGS='["--from-env"]'
   out=$(bash_helper "load_harness_args claude-code")
   [ "$out" = "--from-env" ]
 }
 
-@test "bash: load_harness_args — LORE_CLAUDE_ARGS legacy env honored only for claude-code" {
+@test "bash: load_harness_args — ignores LORE_CLAUDE_ARGS legacy env" {
   export LORE_CLAUDE_ARGS='["--legacy"]'
   cc_out=$(bash_helper "load_harness_args claude-code")
-  [ "$cc_out" = "--legacy" ]
+  [ "$cc_out" = "--dangerously-skip-permissions" ]
   oc_out=$(bash_helper "load_harness_args opencode")
-  [ -z "$oc_out" ]  # opencode does NOT honor LORE_CLAUDE_ARGS
+  [ -z "$oc_out" ]
 }
 
-@test "bash: migrate_claude_args_to_harness_args — first read populates harness-args.json" {
+@test "bash: migrate_claude_args_to_harness_args — no-op compatibility shim" {
   cat > "$TEST_LORE_DATA_DIR/config/claude.json" <<EOF
 {"args":["--legacy-1","--legacy-2"]}
 EOF
   out=$(bash_helper "load_harness_args claude-code" | tr '\n' ' ')
-  [ "$out" = "--legacy-1 --legacy-2 " ]
-  [ -f "$TEST_LORE_DATA_DIR/config/harness-args.json" ]
-  # Migration must record the legacy source path for deprecation surfacing.
-  grep -q "_deprecated_legacy_source" "$TEST_LORE_DATA_DIR/config/harness-args.json"
+  [ "$out" = "--dangerously-skip-permissions " ]
+  [ ! -f "$TEST_LORE_DATA_DIR/config/harness-args.json" ]
 }
 
 @test "bash: migrate_claude_args_to_harness_args — idempotent (second run is a no-op)" {
@@ -416,15 +418,14 @@ EOF
 {"args":["--once"]}
 EOF
   bash_helper "load_harness_args claude-code" >/dev/null
-  sha1=$(shasum -a 256 "$TEST_LORE_DATA_DIR/config/harness-args.json" | cut -d' ' -f1)
+  [ ! -f "$TEST_LORE_DATA_DIR/config/harness-args.json" ]
   bash_helper "load_harness_args claude-code" >/dev/null
-  sha2=$(shasum -a 256 "$TEST_LORE_DATA_DIR/config/harness-args.json" | cut -d' ' -f1)
-  [ "$sha1" = "$sha2" ]
+  [ ! -f "$TEST_LORE_DATA_DIR/config/harness-args.json" ]
 }
 
 @test "bash: load_claude_args (deprecated alias) emits one-shot stderr deprecation and delegates to claude-code slot" {
-  cat > "$TEST_LORE_DATA_DIR/config/harness-args.json" <<EOF
-{"version":1,"claude-code":{"args":["--deprecated-path"]},"opencode":{"args":["--should-not-leak"]}}
+  write_settings <<EOF
+{"version":1,"active_framework":"opencode","capability_overrides":{},"harnesses":{"claude-code":{"args":["--deprecated-path"]},"opencode":{"args":["--should-not-leak"]},"codex":{"args":[]}}}
 EOF
   combined=$(bash -c "source '$LIB_SH' && load_claude_args" 2>&1)
   printf '%s\n' "$combined" | grep -q "deprecated"

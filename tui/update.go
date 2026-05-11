@@ -19,8 +19,18 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/search"
+	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
+
+func compactErr(prefix string, err error) string {
+	msg := fmt.Sprintf("%s: %v", prefix, err)
+	msg = strings.TrimSpace(msg)
+	if len(msg) > 100 {
+		msg = msg[:100]
+	}
+	return msg
+}
 
 // handlePanelRouting handles shared mouse-focus routing and tab/esc/ctrl+t key
 // handling for split-pane states (stateWork and stateFollowUps). It mutates m
@@ -109,6 +119,7 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		loadWorkItems(m.config.WorkDir),
 		loadPRStatus(),
+		loadSettlementStatus(),
 		indexPollTick(),
 		followup.LoadIndexCmd(m.config.KnowledgeDir),
 	)
@@ -170,6 +181,8 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				// agent-toggle shell-out result) still find a target;
 				// the rebuild on next open honors D10's discard rule.
 				m.settingsPanel = nil
+				m.settlementSettingsPanel = nil
+				m.ensureSettlementSettingsPanel()
 			}
 			return m, cmd
 		}
@@ -345,6 +358,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m, tea.Batch(
 			loadWorkItems(m.config.WorkDir),
 			loadPRStatus(),
+			loadSettlementStatus(),
 			indexPollTick(),
 		)
 
@@ -547,7 +561,49 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 		}
 
+		if m.state == stateSettlement && !m.terminalMode {
+			key := msg.String()
+			if m.focusedPanel == panelLeft && (key == "l" || key == "tab") {
+				m.ensureSettlementSettingsPanel()
+				m.focusedPanel = panelRight
+				return m, nil
+			}
+			if m.focusedPanel == panelRight {
+				m.ensureSettlementSettingsPanel()
+				consumesRunes := m.settlementSettingsPanel != nil && m.settlementSettingsPanel.FocusConsumesRunes()
+				switch key {
+				case "esc":
+					if consumesRunes {
+						return m.updateInlineSettlementSettings(msg)
+					}
+					m.focusedPanel = panelLeft
+					return m, nil
+				case "h":
+					if !consumesRunes {
+						m.focusedPanel = panelLeft
+						return m, nil
+					}
+				case "q", "?", "K", "S", "ctrl+,":
+					if !consumesRunes {
+						break
+					}
+					return m.updateInlineSettlementSettings(msg)
+				case "ctrl+c", "ctrl+d":
+					break
+				default:
+					return m.updateInlineSettlementSettings(msg)
+				}
+			}
+		}
+
 		switch msg.String() {
+		case "t":
+			if (m.state == stateWork || m.state == stateFollowUps) && !m.terminalMode {
+				m.state = stateSettlement
+				m.focusedPanel = panelLeft
+				m.ensureSettlementSettingsPanel()
+				return m, loadSettlementStatus()
+			}
 		case "ctrl+c":
 			// In terminal mode, ctrl+c terminates the terminal panel only,
 			// but still cancel any background AI subprocess.
@@ -575,7 +631,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, nil
 			}
 		case "q":
-			if (m.state == stateWork || m.state == stateFollowUps) && !m.terminalMode {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSettlement) && !m.terminalMode {
 				m.cleanupAllSubprocesses()
 				return m, tea.Quit
 			}
@@ -753,7 +809,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			// stateKnowledge / no match: no-op.
 		case "K":
-			if (m.state == stateWork || m.state == stateFollowUps) && !m.terminalMode {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSettlement) && !m.terminalMode {
 				m.prevState = m.state
 				m.state = stateKnowledge
 				m.browser = knowledge.NewBrowserModel(m.config.KnowledgeDir)
@@ -768,24 +824,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// rebuild a fresh panel each open so previously-discarded
 			// drafts cannot leak across sessions; if init fails, surface a
 			// flash error so the user sees something instead of silence.
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateKnowledge) && !m.terminalMode {
-				panel, err := initSettingsPanel()
-				if panel != nil {
-					m.settingsPanel = panel
-					m.settingsActive = true
-					m.settingsPriorFocus = m.focusedPanel
-					m.sizeSettingsPanel()
-					return m, m.settingsPanel.Init()
-				}
-				if err != nil {
-					m.flashErr = fmt.Sprintf("settings: %v", err)
-				} else {
-					m.flashErr = "settings: panel unavailable"
-				}
-				return m, nil
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateKnowledge || m.state == stateSettlement) && !m.terminalMode {
+				return m.openSettingsModal("")
 			}
 		case "f":
-			if m.state == stateWork && !m.terminalMode {
+			if (m.state == stateWork || m.state == stateSettlement) && !m.terminalMode {
 				m.state = stateFollowUps
 				// Preserve items already loaded by the background poll so the
 				// counter and list don't flicker to 0 while the reload is in flight.
@@ -805,6 +848,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			if m.state == stateFollowUps && !m.terminalMode {
 				cmd := m.leaveFollowups()
 				return m, cmd
+			}
+			if m.state == stateSettlement {
+				m.state = stateWork
+				return m, loadWorkItems(m.config.WorkDir)
 			}
 		case "esc":
 			// Esc from right panel (detail mode only): back to list.
@@ -873,6 +920,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				}
 			}
 		case "p":
+			if m.state == stateSettlement {
+				m.settlementProcessInFlight = true
+				return m, runSettlementAction("process")
+			}
 			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
 				id := m.followupDetail.CurrentID()
 				status := m.followupDetail.Status()
@@ -902,6 +953,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				default:
 					m.flashErr = fmt.Sprintf("cannot dismiss: follow-up is already %s", status)
 				}
+			}
+		case "e":
+			if m.state == stateSettlement {
+				action := "enable"
+				if m.settlement.Status().Enabled {
+					action = "disable"
+				}
+				return m, runSettlementAction(action)
 			}
 		case "P":
 			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
@@ -971,6 +1030,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.followupList = fl
 		fd, _ := m.followupDetail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
 		m.followupDetail = fd
+		m.settlement = m.settlement.SetSize(msg.Width-2, msg.Height-4)
+		if m.settlementSettingsPanel != nil {
+			m.settlementSettingsPanel.SetSize(msg.Width/2, msg.Height-4)
+		}
 		m.popup.SetSize(msg.Width, msg.Height)
 
 		return m, tea.Batch(lcmd, dcmd, bcmd)
@@ -1048,6 +1111,45 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		})
 		m.list = lm
 		return m, cmd
+
+	case settlementStatusLoadedMsg:
+		if msg.err != nil {
+			m.settlement = m.settlement.ReplaceStatus(settlement.Unavailable(compactErr("settlement status", msg.err)))
+			return m, nil
+		}
+		m.settlement = m.settlement.ReplaceStatus(msg.status)
+		if m.shouldAutoProcessSettlement(msg.status) {
+			m.settlementProcessInFlight = true
+			return m, runAutomaticSettlementProcess()
+		}
+		return m, nil
+
+	case settlementActionCompleteMsg:
+		if msg.action == "process" {
+			m.settlementProcessInFlight = false
+		}
+		if msg.err != nil {
+			if !msg.automatic {
+				m.flashErr = compactErr("settlement "+msg.action, msg.err)
+				return m, loadSettlementStatus()
+			}
+			return m, nil
+		}
+		if msg.result.Status != nil {
+			m.settlement = m.settlement.ReplaceStatus(*msg.result.Status)
+		}
+		if msg.action == "enable" || msg.action == "disable" {
+			m.refreshSettlementSettingsPanel()
+		}
+		if msg.automatic {
+			return m, nil
+		}
+		message := msg.result.Message
+		if message == "" {
+			message = msg.action + " complete"
+		}
+		m.flashErr = "[settlement] " + message
+		return m, loadSettlementStatus()
 
 	case work.SpecRequestMsg:
 		return m.handleSpecRequest(msg)
@@ -1133,7 +1235,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	case knowledge.BrowserDismissedMsg:
 		m.state = m.prevState
-		if m.state != stateWork && m.state != stateFollowUps {
+		if m.state != stateWork && m.state != stateFollowUps && m.state != stateSettlement {
 			m.state = stateWork
 		}
 		return m, nil
@@ -1371,8 +1473,101 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		fd, cmd := m.followupDetail.Update(msg)
 		m.followupDetail = fd
 		return m, cmd
+	case stateSettlement:
+		sm, cmd := m.settlement.Update(msg)
+		m.settlement = sm
+		return m, cmd
 	}
 
+	return m, nil
+}
+
+func (m *model) ensureSettlementSettingsPanel() {
+	if m.settlementSettingsPanel != nil {
+		return
+	}
+	panel, err := initSettlementSettingsPanel()
+	if panel != nil {
+		m.settlementSettingsPanel = panel
+		return
+	}
+	if err != nil {
+		m.flashErr = fmt.Sprintf("settings: %v", err)
+	} else {
+		m.flashErr = "settings: panel unavailable"
+	}
+}
+
+func (m *model) refreshSettlementSettingsPanel() {
+	m.settlementSettingsPanel = nil
+	m.ensureSettlementSettingsPanel()
+}
+
+func (m model) updateInlineSettlementSettings(msg tea.KeyMsg) (model, tea.Cmd) {
+	m.ensureSettlementSettingsPanel()
+	if m.settlementSettingsPanel == nil {
+		return m, nil
+	}
+	panel, cmd := m.settlementSettingsPanel.Update(msg)
+	m.settlementSettingsPanel = panel
+	switch msg.String() {
+	case "enter", " ", "u":
+		cmd = batchCmd(cmd, loadSettlementStatus())
+	}
+	return m, cmd
+}
+
+func (m model) shouldAutoProcessSettlement(st settlement.Status) bool {
+	if m.settlementProcessInFlight {
+		return false
+	}
+	if !st.Available || !st.Enabled {
+		return false
+	}
+	if st.BlockedReason != "" || st.Harness.BlockedReason != "" {
+		return false
+	}
+	if st.Queue.Ready+st.Queue.Pending <= 0 && !(st.Queue.Running == 0 && st.Batch.BacklogSize > 0) {
+		return false
+	}
+	concurrency := st.Harness.Concurrency
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	active := st.Harness.ActiveLeases
+	if active == 0 {
+		active = len(st.Leases)
+	}
+	return active < concurrency
+}
+
+func batchCmd(a, b tea.Cmd) tea.Cmd {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	return tea.Batch(a, b)
+}
+
+func (m model) openSettingsModal(focusDotPath string) (model, tea.Cmd) {
+	panel, err := initSettingsPanel()
+	if panel != nil {
+		if focusDotPath != "" {
+			panel.FocusDotPath(focusDotPath)
+		}
+		m.settingsPanel = panel
+		m.settingsActive = true
+		m.settingsPriorFocus = m.focusedPanel
+		m.sizeSettingsPanel()
+		return m, m.settingsPanel.Init()
+	}
+	if err != nil {
+		m.flashErr = fmt.Sprintf("settings: %v", err)
+	} else {
+		m.flashErr = "settings: panel unavailable"
+	}
 	return m, nil
 }
 

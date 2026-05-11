@@ -66,6 +66,7 @@ Commands:
   test         Run lore test suites (see: lore test protocols)
   annotate     Record a retrieval friction annotation
   audit        Route a producer artifact through the settlement judges
+  settlement   Durable settlement queue, processor, and status
   resolve      Resolve repo path or [[backlink]] references
   prefetch     Prefetch knowledge for agent prompts
   init         Initialize a knowledge store
@@ -133,7 +134,7 @@ Subcommands:
   create    Create a new work item
   list      List active work items
   show      Show a work item's full context
-  set       Set metadata fields (issue, pr, scope) on a work item
+  set       Set metadata fields (issue, pr, scope, intent anchor) on a work item
   archive   Archive a completed work item
   delete    Permanently delete a work item
   unarchive Restore an archived work item
@@ -283,15 +284,16 @@ ceremony_usage() {
   cat >&2 <<EOF
 lore ceremony — ceremony config management
 
-Usage: lore ceremony <subcommand> [args...]
+Usage: lore ceremony [--harness <name>] <subcommand> [args...]
 
 Subcommands:
-  get <ceremony>             Get advisor list for a ceremony
-  add <ceremony> <advisor>   Add an advisor to a ceremony
-  remove <ceremony> <advisor> Remove an advisor from a ceremony
-  list                       List all ceremony overrides
+  get <ceremony>              Get advisor list for a ceremony on the target harness
+  add <ceremony> <advisor>    Add an advisor to a ceremony on the target harness
+  remove <ceremony> <advisor> Remove an advisor from a ceremony on the target harness
+  list                        List ceremony bindings for the target harness
 
 Options:
+  --harness <name>  Target a harness explicitly. Defaults to active harness.
   --help, -h    Show this help
 EOF
 }
@@ -415,6 +417,49 @@ Notes:
   /evolve, scorecard-rollup, and CLI views consume them. 'append' is the
   sole sanctioned writer of rows.jsonl — see _scorecards/README.md.
 EOF
+}
+
+settlement_usage() {
+  cat >&2 <<EOF
+lore settlement — durable settlement queue and processor
+
+Usage: lore settlement <subcommand> [args...]
+
+Subcommands:
+  status --json          Show queue, lease, terminal item, and budget state
+  scan --json            Idempotently enqueue validated Tier 2 task claims
+  enqueue --work-item S  Enqueue one Tier 2 row from stdin
+  process --once --json  Process one pending item
+  enable --json          Set settlement.enabled=true
+  disable --json         Set settlement.enabled=false
+  retry-errors --json    Requeue audit errors and timeout-blocked attempts
+
+Options:
+  --help, -h             Show this help
+EOF
+}
+
+cmd_settlement() {
+  if [[ $# -eq 0 ]]; then
+    settlement_usage
+    return 1
+  fi
+
+  case "$1" in
+    --help|-h)
+      settlement_usage
+      return 0
+      ;;
+    status|scan|enqueue|process|enable|disable|retry-errors|queue)
+      "$SCRIPTS_DIR/settlement-queue.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown settlement subcommand '$1'" >&2
+      echo "" >&2
+      settlement_usage
+      return 1
+      ;;
+  esac
 }
 
 retro_usage() {
@@ -791,16 +836,35 @@ cmd_ceremony() {
     return 1
   fi
 
+  local harness_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --harness)
+        [[ -n "${2:-}" ]] || { echo "Error: --harness requires a name" >&2; return 1; }
+        harness_args+=(--harness "$2")
+        shift 2
+        ;;
+      --help|-h)
+        ceremony_usage
+        return 0
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  if [[ $# -eq 0 ]]; then
+    ceremony_usage
+    return 1
+  fi
+
   local subcmd="$1"
   shift
 
   case "$subcmd" in
-    --help|-h)
-      ceremony_usage
-      return 0
-      ;;
     get|add|remove|list)
-      "$SCRIPTS_DIR/ceremony-config.sh" "$subcmd" "$@"
+      "$SCRIPTS_DIR/ceremony-config.sh" ${harness_args[@]+"${harness_args[@]}"} "$subcmd" "$@"
       ;;
     *)
       echo "Error: unknown ceremony subcommand '$subcmd'" >&2
@@ -1686,6 +1750,10 @@ case "$1" in
   audit)
     shift
     "$SCRIPTS_DIR/audit-artifact.sh" "$@"
+    ;;
+  settlement)
+    shift
+    cmd_settlement "$@"
     ;;
   resolve)
     shift

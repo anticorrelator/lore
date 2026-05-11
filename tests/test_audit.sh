@@ -156,6 +156,15 @@ $yaml
 LOGEOF
 }
 
+setup_task_claims_fixture() {
+  # setup_task_claims_fixture <kdir> <slug>
+  mkdir -p "$1/_work/$2"
+  cat > "$1/_work/$2/task-claims.jsonl" <<'JSONLEOF'
+{"claim_id":"task-claim-a","tier":"task-evidence","claim":"task claim A is auditable directly from task-claims.jsonl","producer_role":"worker","protocol_slot":"implementation","task_id":"task-1","phase_id":"1","scale":"implementation","source":{"file":"scripts/audit-artifact.sh","line_range":"1-20"},"falsifier":"Run lore audit against task-claims.jsonl with a matching priority claim"}
+{"claim_id":"task-claim-b","tier":"task-evidence","claim":"task claim B remains available for priority filtering","producer_role":"worker","protocol_slot":"implementation","task_id":"task-1","phase_id":"1","scale":"implementation","source":{"file":"scripts/audit-artifact.sh","line_range":"21-40"},"falsifier":"Run lore audit against task-claims.jsonl without a matching priority claim"}
+JSONLEOF
+}
+
 echo "=== Audit-artifact.sh Tests ==="
 echo ""
 
@@ -189,6 +198,34 @@ assert_contains "audit_contradiction_rate metric row present" "$METRICS" '"metri
 assert_contains "falsifier_quality reflects all contradictions have corrections" "$METRICS" '"metric":"falsifier_quality","value":1'
 assert_contains "rows attribute verdict_source=correctness-gate" "$METRICS" '"verdict_source":"correctness-gate"'
 assert_contains "rows are kind=scored" "$METRICS" '"kind":"scored"'
+
+echo ""
+echo "Test 1b: task-claims.jsonl artifact supports priority claim audit"
+KDIR1B="$TEST_DIR/kdir1b"
+setup_task_claims_fixture "$KDIR1B" "wi-task-claims"
+gate_fixture "$TEST_DIR/gate1b.json" '{
+  "judge":"correctness-gate",
+  "judge_template_version":"taskclaims111",
+  "verdicts":[
+    {"claim_id":"task-claim-a","verdict":"unverified","evidence":"fixture leaves claim unresolved"}
+  ]
+}'
+printf '%s\n' '["task-claim-a"]' > "$TEST_DIR/priority1b.json"
+
+OUT1B=$(bash "$AUDIT" "$KDIR1B/_work/wi-task-claims/task-claims.jsonl" --kdir "$KDIR1B" \
+  --gate-output-file "$TEST_DIR/gate1b.json" \
+  --priority-claims "$TEST_DIR/priority1b.json" 2>&1)
+assert_contains "task-claims: priority narrowed to one row" "$OUT1B" "priority-claims: narrowed claim_payload to 1 claim(s)"
+assert_contains "task-claims: correctness-gate completes" "$OUT1B" "correctness-gate complete"
+assert_contains "task-claims: verdict totals reflect one unverified claim" "$OUT1B" "total=1 verified=0 unverified=1 contradicted=0"
+assert_file_exists "task-claims verdict file landed under work item" "$KDIR1B/_work/wi-task-claims/verdicts/task-claims.jsonl"
+
+DRY1B=$(bash "$AUDIT" "$KDIR1B/_work/wi-task-claims/task-claims.jsonl" --kdir "$KDIR1B" \
+  --dry-run --json --priority-claims "$TEST_DIR/priority1b.json")
+DRY1B_FILE=$(printf '%s' "$DRY1B" | jq -r '.change_context.changed_files[0]')
+DRY1B_SUMMARY=$(printf '%s' "$DRY1B" | jq -r '.change_context.summary | length > 0')
+assert_eq "task-claims: dry-run synthesizes change_context changed file" "$DRY1B_FILE" "scripts/audit-artifact.sh"
+assert_eq "task-claims: dry-run synthesizes non-empty change_context summary" "$DRY1B_SUMMARY" "true"
 
 # =============================================
 # Test 2: User-supplied --gate-output-file is preserved across runs

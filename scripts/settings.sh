@@ -2,14 +2,10 @@
 # settings.sh — jq-backed loader/writer for the unified user settings file
 # (~/.lore/config/settings.json).
 #
-# The unified file is the single source of truth for user preferences during
-# Phase 1 of the consolidate-user-config-unified-settings-file work item; the
-# eight legacy fragmented files in ~/.lore/config/ remain on-disk during the
-# deprecation window and are read as fallback by `lib.sh` helpers when a key
-# is absent from the unified file. This loader is the canonical entry point
-# from bash; `lib.sh` helpers route through it. Mirrors the Python loader at
-# scripts/lore_settings.py and the Go loader at tui/internal/config/settings.go
-# (D5 parity surface).
+# The unified file is the single source of truth for user preferences. This
+# loader is the canonical entry point from bash; `lib.sh` helpers route through
+# it. Mirrors the Python loader at scripts/lore_settings.py and the Go loader
+# at tui/internal/config/settings.go (D5 parity surface).
 #
 # Subcommands:
 #   get <path>        Print JSON-decoded value at the dot-separated path.
@@ -43,11 +39,12 @@
 #                     kebab-case keys like `claude-code` are not parsed as
 #                     subtraction. On lock/parse/rename failure leaves the
 #                     prior settings.json intact.
-#   fallbacks         Deterministic snapshot of `<file>::<key>` pairs whose
-#                     unified key is absent and whose legacy fragmented file
-#                     exists on disk (i.e., the keys lib.sh helpers would
-#                     fall back to read). Empty output means every legacy
-#                     reader has been migrated. Consumed by `lore doctor`.
+#   fallbacks         Compatibility subcommand. Always emits nothing because
+#                     runtime settings no longer read legacy fragmented files.
+#
+# Settlement readers use `get settlement.*` / `section settlement` directly.
+# Missing keys intentionally fail closed in scripts/settlement-processor.py
+# (enabled=false, max_concurrency=1).
 
 set -euo pipefail
 
@@ -69,7 +66,7 @@ Subcommands:
   path                  Print the resolved settings.json absolute path.
   patch <path> <value>  Section-scoped read-modify-write under flock; <value> is JSON-encoded.
   delete <path>         Remove the leaf at <path> under flock (idempotent on absent paths; no parent pruning).
-  fallbacks             List <file>::<key> pairs whose unified key is absent and would fall back.
+  fallbacks             Emit nothing; legacy settings fallback reads are disabled.
 
 Path syntax is dot-separated (roles.lead, harnesses.claude-code.args).
 patch values are JSON-encoded (strings quoted: '"opus"', arrays: '[]', booleans: true).
@@ -328,48 +325,9 @@ cmd_delete() {
   return "$rc"
 }
 
-# fallbacks: deterministic snapshot of legacy file/key pairs whose unified
-# key is absent and whose legacy fragmented file is present on disk (i.e.,
-# what lib.sh helpers would actually fall back to read). Order is stable
-# so `lore doctor` can diff against prior runs. Only legacy keys consulted
-# from bash are listed; Python and Go loaders maintain their own snapshots
-# when their fragmented-file readers diverge.
 cmd_fallbacks() {
-  command -v jq &>/dev/null || { echo "Error: settings.sh requires jq" >&2; return 2; }
-
-  # "<unified-path>|<file>::<key>" — `<all>` marks files read whole rather
-  # than by single key (e.g., ceremonies.json's whole map).
-  local table=(
-    "active_framework|framework.json::framework"
-    "capability_overrides|framework.json::capability_overrides"
-    "roles|framework.json::roles"
-    "harnesses|harness-args.json::harnesses"
-    "obsidian.vaults|obsidian.json::<all>"
-    "ceremonies|ceremonies.json::<all>"
-  )
-
-  local entry unified_path locator legacy_file legacy_path unified_value
-  for entry in "${table[@]}"; do
-    unified_path="${entry%%|*}"
-    locator="${entry#*|}"
-    legacy_file="${locator%%::*}"
-
-    if [[ -f "$SETTINGS_FILE" ]]; then
-      unified_value=$(cmd_get "$unified_path" 2>/dev/null || true)
-      [[ -n "$unified_value" ]] && continue
-    fi
-
-    # ceremonies.json lives at $LORE_DATA_DIR/ceremonies.json (no /config/
-    # prefix per resolve_ceremony_config_path).
-    if [[ "$legacy_file" == "ceremonies.json" ]]; then
-      legacy_path="$LORE_DATA_DIR/ceremonies.json"
-    else
-      legacy_path="$LORE_DATA_DIR/config/$legacy_file"
-    fi
-    [[ -f "$legacy_path" ]] || continue
-
-    printf '%s\n' "$locator"
-  done
+  _validate_settings_file || return 1
+  return 0
 }
 
 # ============================================================

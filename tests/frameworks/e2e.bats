@@ -133,7 +133,7 @@ adapter_for() {
 }
 
 # Build a Tier 2 evidence row JSON object as the worker would emit during
-# /implement Step 4. Captures the canonical 13-field shape so the
+# /implement Step 4. Captures the canonical 14-field shape so the
 # cross-framework equivalence test can compare row keys directly.
 make_tier2_row() {
   local task_id="$1" slug="$2" framework="$3"
@@ -154,6 +154,11 @@ row = {
     "falsifier":             "synthetic file does not exist",
     "why_this_work_needs_it": "smoke test asserts canonical Tier 2 shape",
     "captured_at_sha":       "0000000000000000000000000000000000000000",
+    "change_context": {
+        "diff_ref":          "0000000000000000000000000000000000000000",
+        "changed_files":     ["/tmp/synthetic.txt"],
+        "summary":           f"cross-framework Tier 2 append smoke for {framework}/{slug}",
+    },
 }
 print(json.dumps(row))
 PYEOF
@@ -367,8 +372,8 @@ print(','.join(sorted(row.keys())))
     return 1
   fi
 
-  # Sanity check: the canonical 13-field set names every required field.
-  expected="captured_at_sha,claim,claim_id,falsifier,file,line_range,phase_id,producer_role,protocol_slot,scale,task_id,tier,why_this_work_needs_it"
+  # Sanity check: the canonical 14-field set names every required field.
+  expected="captured_at_sha,change_context,claim,claim_id,falsifier,file,line_range,phase_id,producer_role,protocol_slot,scale,task_id,tier,why_this_work_needs_it"
   [ "${KEYSETS[0]}" = "$expected" ]
 }
 

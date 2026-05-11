@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textarea"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
@@ -15,6 +15,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/search"
 	"github.com/anticorrelator/lore/tui/internal/settings"
+	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -25,6 +26,7 @@ const (
 	stateWork appState = iota
 	stateKnowledge
 	stateFollowUps
+	stateSettlement
 	stateOnboarding
 	stateNoRepo
 )
@@ -124,6 +126,7 @@ type model struct {
 	browser        knowledge.BrowserModel
 	followupList   followup.ListModel
 	followupDetail followup.DetailModel
+	settlement     settlement.Model
 	config         config.Config
 	width          int
 	height         int
@@ -143,16 +146,16 @@ type model struct {
 	specPanels   map[string]work.SpecPanelModel
 	terminalMode bool
 
-	sessionConfirmActive        bool
-	sessionConfirmSlug          string
-	sessionConfirmTitle         string
-	sessionConfirmInput         textarea.Model
-	sessionConfirmShortMode     bool
-	sessionConfirmSkipConfirm   bool
-	sessionConfirmChatMode      bool
-	sessionConfirmFollowupMode  bool
-	sessionConfirmFindingIndex  int
-	sessionLaunchedFromModal    bool
+	sessionConfirmActive       bool
+	sessionConfirmSlug         string
+	sessionConfirmTitle        string
+	sessionConfirmInput        textarea.Model
+	sessionConfirmShortMode    bool
+	sessionConfirmSkipConfirm  bool
+	sessionConfirmChatMode     bool
+	sessionConfirmFollowupMode bool
+	sessionConfirmFindingIndex int
+	sessionLaunchedFromModal   bool
 
 	showHelp bool
 
@@ -160,9 +163,14 @@ type model struct {
 	// view. settingsPanel is the schema-driven sub-model that owns the
 	// modal body (D2 body-vs-chrome split). settingsPriorFocus snapshots
 	// the panel focus at modal-open time so Esc-close can restore it.
-	settingsActive      bool
-	settingsPanel       *settings.SettingsModel
-	settingsPriorFocus  panelFocus
+	settingsActive     bool
+	settingsPanel      *settings.SettingsModel
+	settingsPriorFocus panelFocus
+
+	// settlementSettingsPanel is the schema-backed settlement subtree editor
+	// embedded directly in the settlement view.
+	settlementSettingsPanel   *settings.SettingsModel
+	settlementProcessInFlight bool
 
 	// Confirm modal for archive/delete actions.
 	confirmAction string // "archive", "unarchive", "delete", "post_review", etc.; empty = inactive
@@ -311,6 +319,8 @@ type paneConfig struct {
 	listItemCount int
 	// fuItemCount is the count passed to renderTabIndicator for the follow-ups tab.
 	fuItemCount int
+	// settlementCount is the pending/ready count passed to renderTabIndicator.
+	settlementCount int
 }
 
 // buildPaneConfig constructs a paneConfig from the current model state.
@@ -322,6 +332,7 @@ func (m model) buildPaneConfig() paneConfig {
 
 	listItemCount := len(m.list.Items())
 	fuItemCount := m.followupList.FollowUpCount()
+	settlementCount := m.settlement.Count()
 
 	switch m.state {
 	case stateFollowUps:
@@ -349,17 +360,18 @@ func (m model) buildPaneConfig() paneConfig {
 
 		specPanel, hasSpecPanel := m.currentFollowupPanel()
 		return paneConfig{
-			listView:      m.followupList.View(),
-			detailView:    m.followupDetail.View(),
-			specPanel:     specPanel,
-			hasSpecPanel:  hasSpecPanel,
-			listTitle:     listTitle,
-			detailTitle:   detailTitle,
-			filterAnnot:   filterAnnot,
-			filterAnnotW:  filterAnnotW,
-			state:         stateFollowUps,
-			listItemCount: listItemCount,
-			fuItemCount:   fuItemCount,
+			listView:        m.followupList.View(),
+			detailView:      m.followupDetail.View(),
+			specPanel:       specPanel,
+			hasSpecPanel:    hasSpecPanel,
+			listTitle:       listTitle,
+			detailTitle:     detailTitle,
+			filterAnnot:     filterAnnot,
+			filterAnnotW:    filterAnnotW,
+			state:           stateFollowUps,
+			listItemCount:   listItemCount,
+			fuItemCount:     fuItemCount,
+			settlementCount: settlementCount,
 		}
 	default: // stateWork
 		modeLabel := "Active"
@@ -389,17 +401,18 @@ func (m model) buildPaneConfig() paneConfig {
 
 		specPanel, hasSpecPanel := m.currentSpecPanel()
 		return paneConfig{
-			listView:      m.list.View(),
-			detailView:    m.detail.View(),
-			specPanel:     specPanel,
-			hasSpecPanel:  hasSpecPanel,
-			listTitle:     listTitle,
-			detailTitle:   detailTitle,
-			filterAnnot:   filterAnnot,
-			filterAnnotW:  filterAnnotW,
-			state:         stateWork,
-			listItemCount: listItemCount,
-			fuItemCount:   fuItemCount,
+			listView:        m.list.View(),
+			detailView:      m.detail.View(),
+			specPanel:       specPanel,
+			hasSpecPanel:    hasSpecPanel,
+			listTitle:       listTitle,
+			detailTitle:     detailTitle,
+			filterAnnot:     filterAnnot,
+			filterAnnotW:    filterAnnotW,
+			state:           stateWork,
+			listItemCount:   listItemCount,
+			fuItemCount:     fuItemCount,
+			settlementCount: settlementCount,
 		}
 	}
 }

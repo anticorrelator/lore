@@ -114,5 +114,15 @@ TARGET="$WORK_DIR/task-claims.jsonl"
 COMPACT=$(printf '%s' "$ROW" | jq -c '.')
 printf '%s\n' "$COMPACT" >> "$TARGET"
 
+# Fail-open settlement trigger: validated Tier 2 evidence is the durable
+# enqueue point, but settlement availability must never make evidence append
+# provider-specific or lossy. Queue failures warn and preserve exit 0.
+if [[ -x "$SCRIPT_DIR/settlement-queue.sh" ]]; then
+  if ! printf '%s' "$COMPACT" \
+    | "$SCRIPT_DIR/settlement-queue.sh" enqueue --work-item "$WORK_ITEM" --kdir "$KNOWLEDGE_DIR" --json >/dev/null; then
+    echo "[evidence-append] warning: settlement enqueue failed; evidence append preserved" >&2
+  fi
+fi
+
 CLAIM_ID=$(printf '%s' "$ROW" | jq -r '.claim_id // "(unknown)"')
 echo "[evidence-append] Appended claim '$CLAIM_ID' to _work/$WORK_ITEM/task-claims.jsonl"

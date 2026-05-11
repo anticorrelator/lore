@@ -29,10 +29,6 @@ SETTINGS_SH="$SCRIPT_DIR/../settings.sh"
 SYMLINKS_STATE="${LORE_DATA_DIR}/.install-state/symlinks.json"
 SYMLINKS_STATE_TMP="${SYMLINKS_STATE}.tmp.$$"
 
-# Legacy fragmented file — read for symlink_manifest fallback during the
-# deprecation window. Never written.
-LEGACY_AGENT_JSON="${LORE_DATA_DIR}/config/agent.json"
-
 ASSEMBLE="${LORE_DATA_DIR}/scripts/assemble-instructions.sh"
 
 # Detect lore repo path from ~/.lore/scripts symlink (for install.sh fallback)
@@ -105,13 +101,6 @@ with open(sys.argv[1]) as f:
     d = json.load(f)
 print(json.dumps(d.get('symlink_manifest', [])))
 " "$SYMLINKS_STATE" 2>/dev/null || echo "[]")
-  elif [[ -f "$LEGACY_AGENT_JSON" ]]; then
-    manifest=$(python3 -c "
-import json, sys
-with open(sys.argv[1]) as f:
-    d = json.load(f)
-print(json.dumps(d.get('symlink_manifest', [])))
-" "$LEGACY_AGENT_JSON" 2>/dev/null || echo "[]")
   fi
 
   # Filter manifest entries to those whose link_path is under one of the

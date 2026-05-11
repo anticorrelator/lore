@@ -6,24 +6,24 @@
 # T3 ships scripts/lore_settings.py (Python parity covered there);
 # T4 (this suite) asserts the Go-side mirror at tui/internal/config/settings.go
 # produces byte-equivalent output to scripts/settings.sh against the same
-# on-disk state, and that resolve_model_for_role's D3b overlay is wired
+# on-disk state, and that harness-local role/ceremony settings are wired
 # identically across both stacks.
 #
 # Parity surface (D5 table — the four bash↔Go rows lifted from plan.md):
-#   1. active_framework         — top-level scalar, env > unified > legacy fallback
+#   1. active_framework         — top-level scalar
 #   2. harnesses.<n>.args       — per-harness array
-#   3. roles.<id>               — top-level scalar
+#   3. harnesses.<n>.roles.<id> — per-harness role scalar
 #   4. capability_overrides.<k> — top-level scalar (read-only on the Go side; bash
 #                                  framework_capability composes against this)
 #
-# D3b overlay coverage (overlay-present + overlay-absent):
-#   - With harnesses.claude-code.roles.lead = "opus" and roles.lead = "sonnet",
-#     resolve_model_for_role("lead") returns "opus" when active=claude-code
-#     (overlay wins) and "sonnet" when active=opencode (overlay absent for
-#     opencode, falls through to top-level).
+# Harness-local role coverage:
+#   - With harnesses.<active>.roles.lead set, resolve_model_for_role("lead")
+#     returns that binding.
+#   - With harnesses.<active>.roles.default set and the requested role absent,
+#     resolve_model_for_role falls through to that harness-local default.
 #
 # Closed-set rejection at BOTH layers:
-#   - Top-level: roles."unknown_role" → reject in query.
+#   - Query:     unknown role id → reject.
 #   - Overlay:   harnesses.<n>.roles."unknown_role" → reject when overlay block
 #     names an unknown role id.
 #
@@ -156,13 +156,13 @@ go_helper() {
 }
 
 # ============================================================
-# D5 row 3: roles.<id>
+# D5 row 3: harnesses.<n>.roles.<id>
 # ============================================================
 
-@test "parity: settings get roles.lead — top-level scalar" {
-  write_settings '{"version":1,"roles":{"lead":"opus","default":"sonnet"}}'
-  bash_out=$(bash_get roles.lead)
-  go_out=$(go_helper settings_get roles.lead)
+@test "parity: settings get harnesses.claude-code.roles.lead — harness-local scalar" {
+  write_settings '{"version":1,"harnesses":{"claude-code":{"args":[],"roles":{"lead":"opus","default":"sonnet"}}}}'
+  bash_out=$(bash_get harnesses.claude-code.roles.lead)
+  go_out=$(go_helper settings_get harnesses.claude-code.roles.lead)
   [ "$bash_out" = '"opus"' ]
   [ "$go_out" = '"opus"' ]
 }
@@ -248,11 +248,11 @@ go_helper() {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
-  write_settings '{"version":1,"active_framework":"claude-code","roles":{"lead":"opus","default":"sonnet"},"capability_overrides":{"stop_hook":"full"}}'
+  write_settings '{"version":1,"active_framework":"claude-code","harnesses":{"claude-code":{"args":[],"roles":{"lead":"opus","default":"sonnet"}}},"capability_overrides":{"stop_hook":"full"}}'
   # Go-side patch.
-  "$HARNESS_BIN" settings_patch roles.lead '"haiku"'
+  "$HARNESS_BIN" settings_patch harnesses.claude-code.roles.lead '"haiku"'
   # Unrelated keys must survive.
-  default_after=$(bash_get roles.default)
+  default_after=$(bash_get harnesses.claude-code.roles.default)
   cap_after=$(bash_get capability_overrides.stop_hook)
   active_after=$(bash_get active_framework)
   [ "$default_after" = '"sonnet"' ]
@@ -261,7 +261,7 @@ go_helper() {
 }
 
 # ============================================================
-# resolve_active_framework parity (unified-file-driven and legacy-fallback)
+# resolve_active_framework parity (unified-file-driven)
 # ============================================================
 
 @test "parity: resolve_active_framework reads unified settings.json on both stacks" {
@@ -289,10 +289,10 @@ go_helper() {
 }
 
 # ============================================================
-# D3b overlay: resolve_model_for_role
+# Harness-local resolve_model_for_role
 # ============================================================
 
-@test "parity: D3b overlay-present — harness override wins for active harness" {
+@test "parity: harness-local role binding wins for active harness" {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
@@ -300,10 +300,9 @@ go_helper() {
     "version": 1,
     "active_framework": "claude-code",
     "harnesses": {
-      "claude-code": {"args": [], "roles": {"lead": "opus"}},
-      "opencode": {"args": []}
-    },
-    "roles": {"lead": "sonnet", "default": "sonnet"}
+      "claude-code": {"args": [], "roles": {"lead": "opus", "default": "sonnet"}},
+      "opencode": {"args": [], "roles": {"lead": "anthropic/opus", "default": "anthropic/opus"}}
+    }
   }'
   bash_out=$(bash -c "source '$LIB_SH' && resolve_model_for_role lead" 2>/dev/null)
   go_out=$("$HARNESS_BIN" resolve_model_for_role lead 2>/dev/null)
@@ -311,36 +310,32 @@ go_helper() {
   [ "$go_out" = "opus" ]
 }
 
-@test "parity: D3b overlay-absent — falls through to top-level for non-overridden harness" {
+@test "parity: harness-local role default handles absent role binding" {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
-  # Same data shape as above; switch active harness to opencode, which has no
-  # roles overlay → must fall through to top-level roles.lead = "sonnet".
   write_settings '{
     "version": 1,
     "active_framework": "opencode",
     "harnesses": {
-      "claude-code": {"args": [], "roles": {"lead": "opus"}},
-      "opencode": {"args": []}
-    },
-    "roles": {"lead": "sonnet", "default": "sonnet"}
+      "claude-code": {"args": [], "roles": {"lead": "opus", "default": "sonnet"}},
+      "opencode": {"args": [], "roles": {"default": "anthropic/opus"}}
+    }
   }'
   bash_out=$(bash -c "source '$LIB_SH' && resolve_model_for_role lead" 2>/dev/null)
   go_out=$("$HARNESS_BIN" resolve_model_for_role lead 2>/dev/null)
-  [ "$bash_out" = "sonnet" ]
-  [ "$go_out" = "sonnet" ]
+  [ "$bash_out" = "anthropic/opus" ]
+  [ "$go_out" = "anthropic/opus" ]
 }
 
-@test "parity: D3b closed-set rejection — unknown role in top-level rejected on both stacks" {
+@test "parity: closed-set rejection — unknown role query rejected on both stacks" {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
   write_settings '{
     "version": 1,
     "active_framework": "claude-code",
-    "harnesses": {"claude-code": {"args": []}},
-    "roles": {"default": "sonnet"}
+    "harnesses": {"claude-code": {"args": [], "roles": {"default": "sonnet"}}}
   }'
   run bash -c "source '$LIB_SH' && resolve_model_for_role unknown_role_xyz"
   [ "$status" -ne 0 ]
@@ -350,7 +345,7 @@ go_helper() {
   [[ "$output" == *"unknown role"* ]]
 }
 
-@test "parity: D3b closed-set rejection — unknown role in overlay rejected on both stacks" {
+@test "parity: closed-set rejection — unknown role in harness-local map rejected on both stacks" {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
@@ -363,8 +358,7 @@ go_helper() {
     "active_framework": "claude-code",
     "harnesses": {
       "claude-code": {"args": [], "roles": {"unknown_role_xyz": "opus"}}
-    },
-    "roles": {"lead": "sonnet", "default": "sonnet"}
+    }
   }'
   # Querying "lead" should still error because the overlay block contains
   # an unknown role id (misconfigured overlay must surface, not be silently
@@ -399,7 +393,7 @@ go_helper() {
   [ "$go_out"   = "$(printf '%s\n%s' --from-unified --second)" ]
 }
 
-@test "parity: load_harness_args falls through to harness-args.json when unified absent" {
+@test "parity: load_harness_args ignores legacy harness-args.json when unified absent" {
   if [ -z "${HARNESS_BIN:-}" ]; then
     skip "Go parity harness not available"
   fi
@@ -412,8 +406,42 @@ go_helper() {
 EOF
   bash_out=$(bash -c "source '$LIB_SH' && load_harness_args claude-code" 2>/dev/null)
   go_out=$("$HARNESS_BIN" load_harness_args claude-code 2>/dev/null)
-  [ "$bash_out" = "--from-legacy" ]
-  [ "$go_out"   = "--from-legacy" ]
+  [ "$bash_out" = "--dangerously-skip-permissions" ]
+  [ "$go_out"   = "--dangerously-skip-permissions" ]
+}
+
+# ============================================================
+# Ceremony advisor resolution (harness-local only)
+# ============================================================
+
+@test "ceremony: resolve_ceremony_advisors reads active harness only" {
+  write_settings '{
+    "version": 1,
+    "active_framework": "codex",
+    "harnesses": {
+      "claude-code": {"args": [], "ceremonies": {"spec-design": ["pr-review"]}},
+      "codex": {"args": [], "ceremonies": {"spec-design": ["pr-self-review"]}}
+    },
+    "ceremonies": {"spec-design": ["pr-create"]}
+  }'
+  out=$(bash -c "source '$LIB_SH' && resolve_ceremony_advisors spec-design" 2>/dev/null)
+  [ "$out" = '["pr-self-review"]' ]
+}
+
+@test "ceremony: top-level and ceremonies.json are ignored" {
+  cat > "$TEST_LORE_DATA_DIR/ceremonies.json" <<'EOF'
+{"spec-design":["pr-review"]}
+EOF
+  write_settings '{
+    "version": 1,
+    "active_framework": "codex",
+    "harnesses": {
+      "codex": {"args": []}
+    },
+    "ceremonies": {"spec-design": ["pr-create"]}
+  }'
+  out=$(bash -c "source '$LIB_SH' && resolve_ceremony_advisors spec-design" 2>/dev/null)
+  [ "$out" = '[]' ]
 }
 
 # ============================================================

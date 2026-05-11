@@ -456,7 +456,7 @@ func (h *HarnessBlockPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldInt
 				return h, cmd, blurIntent
 			}
 			h.entered = false
-			return h, cmd, &FieldIntent{DotPath: h.dotPath, Status: IntentDiscard}
+			return h, cmd, &FieldIntent{DotPath: h.dotPath, Status: IntentNavigate}
 		}
 	}
 	if !h.entered {

@@ -12,9 +12,9 @@ You receive:
 
 1. **The original change context** — the artifact under audit (worker observations, lens-findings.json, spec assertions, etc.), plus the underlying diff / file set the artifact was reporting on.
 2. **The curated top-k** (`k=1-3`) — the survivors of correctness-gate + curator. This is the claim set the producer *did* make and that *did* survive.
-3. **Work-item metadata** — `{work_item, artifact_id, verdict_source: "reverse-auditor", created_at}`.
+3. **Work-item metadata** — `{work_item, artifact_id, judge: "reverse-auditor", judge_template_version, created_at}`.
 
-You will find these in the invocation payload handed to you by `audit-artifact.sh`. If any input is missing, stop and return `{verdict: "input-incomplete", missing: [...]}` rather than fabricating.
+You will find these in the invocation payload handed to you by `audit-artifact.sh`. If any input is missing, emit the silence shape with `omission_claim: null` rather than fabricating a claim. Do not emit an alternate diagnostic shape.
 
 ## Core Contract: Grounded-or-Nothing
 
@@ -32,11 +32,11 @@ Emit exactly one of the two shapes below. Emit as JSON on stdout.
 
 ```json
 {
-  "verdict_source": "reverse-auditor",
+  "judge": "reverse-auditor",
+  "judge_template_version": "<12-char hash supplied by the wrapper>",
   "work_item": "<slug>",
   "artifact_id": "<id>",
-  "verdict": "omission",
-  "claim": {
+  "omission_claim": {
     "file": "<absolute path, resolvable at current head or captured ref>",
     "line_range": "<N-M>",
     "exact_snippet": "<verbatim content at file:line_range>",
@@ -54,15 +54,18 @@ Emit **only the single strongest** such claim. Do not emit multiple. If you see 
 
 ```json
 {
-  "verdict_source": "reverse-auditor",
+  "judge": "reverse-auditor",
+  "judge_template_version": "<12-char hash supplied by the wrapper>",
   "work_item": "<slug>",
   "artifact_id": "<id>",
-  "verdict": "no-omission",
+  "omission_claim": null,
   "created_at": "<ISO-8601 UTC>"
 }
 ```
 
-Silence is emitted when either (a) the curated top-k already covers the substantive surface area of the change, or (b) plausible omissions exist but none can be anchored to file + line + falsifier without fabrication. Both cases resolve to `no-omission` — downstream consumers do not distinguish.
+Silence is emitted when either (a) the curated top-k already covers the substantive surface area of the change, or (b) plausible omissions exist but none can be anchored to file + line + falsifier without fabrication. Both cases resolve to `omission_claim: null` — downstream consumers do not distinguish.
+
+`judge` must be exactly `"reverse-auditor"`. `judge_template_version` must echo the value supplied in the invocation payload; do not recompute it. Do not emit legacy fields such as `verdict_source`, `verdict`, `claim`, or `no-omission`; those are contract violations.
 
 ## Content-Anchor Normalization (v1) — for `normalized_snippet_hash`
 

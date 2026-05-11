@@ -112,6 +112,7 @@ result = {
     'tags': meta.get('tags', []),
     'issue': meta.get('issue', ''),
     'pr': meta.get('pr', ''),
+    'intent_anchor': meta.get('intent_anchor', ''),
     'created': meta.get('created', ''),
     'updated': meta.get('updated', ''),
     'related_work': meta.get('related_work', []),
@@ -146,6 +147,7 @@ CREATED=$(json_field "created" "$META")
 UPDATED=$(json_field "updated" "$META")
 ISSUE=$(json_field "issue" "$META" || true)
 PR=$(json_field "pr" "$META" || true)
+INTENT_ANCHOR=$(json_field "intent_anchor" "$META" || true)
 
 # Extract branches, tags, and related_work as comma-separated display strings
 BRANCHES=$(json_array_field "branches" "$META" | sed 's/"//g; s/,/, /g')
@@ -169,6 +171,9 @@ if [[ -n "$RELATED_WORK" ]]; then
 fi
 echo "Issue: ${ISSUE:-none}"
 echo "PR: ${PR:-none}"
+if [[ -n "$INTENT_ANCHOR" ]]; then
+  echo "Intent anchor: $INTENT_ANCHOR"
+fi
 echo "Created: $CREATED"
 echo "Updated: $UPDATED"
 echo ""

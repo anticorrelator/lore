@@ -30,52 +30,10 @@
       "$ref": "#/$defs/capability_overrides_map",
       "description": "Operator overrides for capability support levels (D8). Keyset is closed against adapters/capabilities.json `capabilities` map — values must be one of full|partial|fallback|none. The runtime semantics (override applies to the active framework) are preserved from the legacy framework.json shape; the documented defect that overrides silently re-apply across active_framework changes is intentionally NOT fixed in this consolidation — see plan D3."
     },
-    "roles": {
-      "$ref": "#/$defs/roles_map_top",
-      "description": "Legacy top-level role -> model fallback. New settings should store role bindings under `harnesses.<name>.roles` because model defaults are harness-specific; this field remains valid for migration/deprecation only and is hidden from the TUI."
-    },
-    "ceremonies": {
-      "$ref": "#/$defs/ceremonies_map",
-      "description": "Legacy top-level skill -> [advisor, ...] fallback. New settings should store ceremony advisor bindings under `harnesses.<name>.ceremonies` because ceremony skill defaults are harness-specific; this field remains valid for migration/deprecation only and is hidden from the TUI."
-    },
-    "capture": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Probabilistic capture / structural-signal thresholds — historical schema from stop-novelty-check.py (retired 2026-05-06). Kept for backward compat with operators who still have ~/.lore/config/capture-config.json on disk; no live consumer reads these fields after retirement.",
-      "properties": {
-        "core": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "novelty_threshold":   {"type": "number"},
-            "region_window":       {"type": "integer", "minimum": 0},
-            "max_candidates":      {"type": "integer", "minimum": 0},
-            "max_phrases":         {"type": "integer", "minimum": 0},
-            "min_tool_uses":       {"type": "integer", "minimum": 0},
-            "max_tool_uses":       {"type": "integer", "minimum": 0}
-          }
-        },
-        "structural_signals": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "investigation_window":     {"type": "integer", "minimum": 0},
-            "iterative_debug_window":   {"type": "integer", "minimum": 0},
-            "test_fix_window":          {"type": "integer", "minimum": 0},
-            "synthesis_char_threshold": {"type": "integer", "minimum": 0},
-            "synthesis_tool_threshold": {"type": "integer", "minimum": 0},
-            "file_context_window":      {"type": "integer", "minimum": 0},
-            "debug_context_window":     {"type": "integer", "minimum": 0},
-            "debug_context_chars":      {"type": "integer", "minimum": 0}
-          }
-        },
-        "adaptive": {"type": "boolean"}
-      }
-    },
     "tui": {
       "type": "object",
       "additionalProperties": false,
-      "description": "TUI preferences. Sourced from the legacy ~/.lore/config/tui.json shape.",
+      "description": "TUI preferences. Persisted only in unified settings.",
       "properties": {
         "layout": {
           "type": "string",
@@ -87,7 +45,7 @@
     "obsidian": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Obsidian vault mirror configuration. Multi-vault keyed shape: each entry under `vaults` binds one knowledge base to one vault. The map key is the relative path under `$LORE_DATA_DIR/repos/` (i.e. `resolve-repo.sh` output minus the prefix), so the same identifier the install-base enumeration uses is what addresses a vault binding here. Per D-multi-vault: `enabled: false` retains `vault_path` so re-enable is a single toggle (mirrors `agent.enabled`); a missing `obsidian.vaults.<kb-key>` entry is the canonical 'sync disabled for this KB' state. The legacy single-vault shape (`obsidian.{vault_path,repo_path}`) was retired in favor of this map; readers fall back to the legacy `~/.lore/config/obsidian.json` only when its `repo_path` matches the current KDIR.",
+      "description": "Obsidian vault mirror configuration. Multi-vault keyed shape: each entry under `vaults` binds one knowledge base to one vault. The map key is the relative path under `$LORE_DATA_DIR/repos/` (i.e. `resolve-repo.sh` output minus the prefix), so the same identifier the install-base enumeration uses is what addresses a vault binding here. Per D-multi-vault: `enabled: false` retains `vault_path` so re-enable is a single toggle (mirrors `agent.enabled`); a missing `obsidian.vaults.<kb-key>` entry is the canonical 'sync disabled for this KB' state.",
       "properties": {
         "vaults": {
           "type": "object",
@@ -103,6 +61,10 @@
           "description": "Map of knowledge-base key → vault binding. Keyset is open at the schema layer (key shape matches the KB-relative-path produced by `resolve-repo.sh`); doctor cross-references against the install-base."
         }
       }
+    },
+    "settlement": {
+      "$ref": "#/$defs/settlement_config",
+      "description": "Durable settlement queue/processor controls. Defaults are fail-closed in readers when absent: enabled=false, max_concurrency=1, finite daily job/runtime caps. Harness selection is per job via LORE_FRAMEWORK and must not mutate active_framework."
     }
   },
 
@@ -136,30 +98,13 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]*$",
       "minLength": 1,
-      "description": "Kebab-case advisor id (e.g. \"codex-design-review\", \"codex-plan-review\", \"codex-pr-review\"). Open at the schema layer — closed-set rejection against the skills registry happens in the loaders and doctor. Today the open shape matches scripts/ceremony-config.sh which performs no closed-set validation."
-    },
-
-    "roles_map_top": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["default"],
-      "description": "Top-level role bindings. Closed-keyset against $defs/role_id. `default` is required so resolve_model_for_role's terminal fallback never returns undefined. Other roles are optional (absence falls through to `default`).",
-      "properties": {
-        "lead":       {"$ref": "#/$defs/role_value"},
-        "worker":     {"$ref": "#/$defs/role_value"},
-        "researcher": {"$ref": "#/$defs/role_value"},
-        "reviewer":   {"$ref": "#/$defs/role_value"},
-        "judge":      {"$ref": "#/$defs/role_value"},
-        "summarizer": {"$ref": "#/$defs/role_value"},
-        "advisor":    {"$ref": "#/$defs/role_value"},
-        "default":    {"$ref": "#/$defs/role_value"}
-      }
+      "description": "Kebab-case advisor id (e.g. \"codex-design-review\", \"codex-plan-review\", \"codex-pr-review\"). Open at the schema layer — closed-set rejection against the skills registry happens in the loaders and doctor."
     },
 
     "roles_map_overlay": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Per-harness role -> model bindings. Closed-keyset against $defs/role_id. All keys optional except where callers need a concrete default; absence falls through to legacy top-level `roles` during the deprecation window.",
+      "description": "Per-harness role -> model bindings. Closed-keyset against $defs/role_id. All keys optional except where callers need a concrete default.",
       "properties": {
         "lead":       {"$ref": "#/$defs/role_value"},
         "worker":     {"$ref": "#/$defs/role_value"},
@@ -174,13 +119,13 @@
 
     "ceremonies_map": {
       "type": "object",
-      "description": "Skill -> advisor list. Property keys are kebab-case skill ids; values are arrays of kebab-case advisor ids. Empty array is valid and means \"run with no advisors\". Absent key means no ceremony configured at that layer; runtime may still consult legacy fallback data during the deprecation window. Keyset is open at the schema layer; closed-set rejection against the skills registry lives in the loaders and doctor.",
+      "description": "Skill -> advisor list. Property keys are kebab-case skill ids; values are arrays of kebab-case advisor ids. Empty array is valid and means \"run with no advisors\". Absent key means no ceremony configured for this harness. Keyset is open at the schema layer; closed-set rejection against the skills registry lives in the loaders and doctor.",
       "additionalProperties": {
         "type": "array",
         "items": {"$ref": "#/$defs/advisor_id"},
         "minItems": 0,
         "uniqueItems": true,
-        "description": "Empty array = explicit suppression override (stops fall-through). Non-empty = explicit advisor list. Absent key = fall-through to the next layer."
+        "description": "Empty array = explicit no-advisors binding. Non-empty = explicit advisor list. Absent key = no ceremony configured for this harness."
       }
     },
 
@@ -188,7 +133,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["args"],
-      "description": "Per-harness configuration block. `args` is required (every harness has a CLI arg list, possibly empty). `enabled`, `roles`, and `ceremonies` are optional for migration compatibility. New settings should include `roles` and `ceremonies` here because agent defaults and ceremony skills vary by harness. Absent `enabled` is default-on (matches the legacy global `agent.enabled` semantic); explicit `false` disables this harness's integration.",
+      "description": "Per-harness configuration block. `args` is required (every harness has a CLI arg list, possibly empty). New settings should include `roles` and `ceremonies` here because agent defaults and ceremony skills vary by harness. Absent `enabled` is default-on; explicit `false` disables this harness's integration.",
       "properties": {
         "args": {
           "type": "array",
@@ -197,7 +142,7 @@
         },
         "enabled": {
           "type": "boolean",
-          "description": "Per-harness integration toggle. When false, scripts/harness-toggle/disable.sh has removed this harness's skill/agent symlinks and cleared its instruction-file lore region. Absent = enabled (default-on, matches the legacy `agent.enabled` semantic). Mutated only via `lore harness {enable,disable}`; direct settings.json patches that bypass the toggle scripts are rejected by the unified loaders to keep symlink/instruction-file state in sync with the flag."
+          "description": "Per-harness integration toggle. When false, scripts/harness-toggle/disable.sh has removed this harness's skill/agent symlinks and cleared its instruction-file lore region. Absent = enabled. Mutated only via `lore harness {enable,disable}`; direct settings.json patches that bypass the toggle scripts are rejected by the unified loaders to keep symlink/instruction-file state in sync with the flag."
         },
         "roles":      {"$ref": "#/$defs/roles_map_overlay"},
         "ceremonies": {"$ref": "#/$defs/ceremonies_map"}
@@ -252,6 +197,120 @@
         "headless_runner":      {"$ref": "#/$defs/support_level"},
         "plugin_runtime":       {"$ref": "#/$defs/support_level"},
         "model_routing":        {"$ref": "#/$defs/support_level"}
+      }
+    },
+
+    "settlement_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Global dispatch gate. Readers default to false when absent."
+        },
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "Repository-global active lease cap."
+        },
+        "batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 12,
+          "description": "Maximum pending items in the recomputed active batch, and the maximum number of backlog rows scored per recompute."
+        },
+        "batch_recompute_min_interval_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 60,
+          "description": "Minimum seconds between automatic process-once/manual queue recomputes; zero disables throttling."
+        },
+        "concordance_window_size": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 8,
+          "description": "Requested relevance concordance window. Readers cap the effective window to the active batch size."
+        },
+        "lease_ttl_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 900,
+          "description": "Expired active leases are reclaimed to pending once under the settlement lock."
+        },
+        "executor_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 300,
+          "description": "Maximum duration for an external settlement executor."
+        },
+        "active_hours": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "When enabled, settlement dispatches only during the configured local time window."
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1,
+              "default": "local",
+              "description": "IANA timezone name such as America/New_York, or local for the machine timezone."
+            },
+            "ranges": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["days", "start", "end"],
+                "properties": {
+                  "days": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]},
+                    "minItems": 1,
+                    "uniqueItems": true
+                  },
+                  "start": {
+                    "type": "string",
+                    "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                  },
+                  "end": {
+                    "type": "string",
+                    "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                  }
+                }
+              },
+              "minItems": 1,
+              "description": "Active dispatch windows. Each range has selected days plus local start/end times; overnight ranges are allowed. When unset, settlement may dispatch at all times."
+            }
+          }
+        },
+        "harness_selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["first_eligible", "random", "active"],
+              "default": "first_eligible",
+              "description": "Per-job harness selection. random samples only from eligible frameworks; active rejects when active_framework is ineligible."
+            },
+            "eligible_frameworks": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/framework_id"},
+              "uniqueItems": true,
+              "default": [],
+              "description": "Empty means all registered frameworks are candidates before global harness enablement, support, and evidence gates."
+            },
+            "random_seed": {
+              "type": "integer",
+              "default": 0
+            }
+          }
+        }
       }
     }
   }

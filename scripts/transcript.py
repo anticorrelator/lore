@@ -163,9 +163,8 @@ def lore_agent_enabled():
     Checks in priority order:
         1. LORE_AGENT_DISABLED=1 env var -> disabled
         2. ~/.lore/config/settings.json `harnesses.<fw>.enabled`: if any
-           registered harness is true (or absent → default-on) -> enabled
-        3. ~/.lore/config/agent.json `enabled` (legacy fallback) -> false means disabled
-        4. Nothing on disk -> enabled
+           registered harness is true (or absent -> default-on) -> enabled
+        3. Nothing on disk -> enabled
     """
     if os.environ.get("LORE_AGENT_DISABLED", "") == "1":
         return False
@@ -194,16 +193,6 @@ def lore_agent_enabled():
         except Exception:
             pass
 
-    # Legacy fragmented file (fallback)
-    legacy_file = os.path.join(data_dir, "config", "agent.json")
-    if os.path.isfile(legacy_file):
-        try:
-            with open(legacy_file) as f:
-                data = json.load(f)
-            if data.get("enabled") is False:
-                return False
-        except Exception:
-            pass
     return True
 
 
@@ -232,16 +221,6 @@ def lore_harness_enabled(framework):
         except Exception:
             pass
 
-    # Legacy fallback (global). agent.json was uniform across harnesses.
-    legacy_file = os.path.join(data_dir, "config", "agent.json")
-    if os.path.isfile(legacy_file):
-        try:
-            with open(legacy_file) as f:
-                data = json.load(f)
-            if data.get("enabled") is False:
-                return False
-        except Exception:
-            pass
     return True
 
 

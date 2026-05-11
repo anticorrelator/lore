@@ -159,11 +159,11 @@
         {"id": "subagents", "min_level": "full", "partial_below": "fallback",
          "notes": "Subagents at `partial`/`fallback` downgrade /spec to partial-mode (lead-orchestrated researcher fanout with serial collection). `none` collapses to spec-short single-pass."},
         {"id": "team_messaging", "min_level": "full", "partial_below": "none",
-         "notes": "/spec is the most permissive of the three team-heavy skills — team_messaging at `partial`/`fallback`/`none` all collapse to the spec-short branch (single-pass synthesis, no researcher fanout). The skill body honors this collapse when `TEAM_MESSAGING != full`. `partial_below: none` means there is no level at which /spec hard-refuses on team_messaging alone — it always has the spec-short fallback."},
+         "notes": "/spec is the most permissive of the three team-heavy skills — team_messaging below `full` skips TeamCreate/SendMessage/shared team-state but still permits lead-orchestrated researcher fanout when `subagents` is available. `partial_below: none` means there is no level at which /spec hard-refuses on team_messaging alone; only `subagents=none` collapses to spec-short single-pass."},
         {"id": "task_completed_hook", "min_level": "full", "partial_below": "fallback",
          "notes": "Hook at `fallback` collapses to `lead_validator`; full /spec proceeds with post-hoc validation per the README skill-behavior matrix. `none` refuses team-mode but spec-short still proceeds (spec-short does not require enforcement because it does not spawn researcher reports)."}
       ],
-      "notes": "Team-heavy skill, but the spec-short branch is always available as the partial-mode fallback. When team_messaging or subagents are below `full`, the skill body collapses to spec-short shape; when task_completed_hook drops to `none`, full /spec refuses but spec-short proceeds. SKILL.md Step 2.0 (line ~120) is the gate point."
+      "notes": "Team-heavy skill with two degraded shapes: if `subagents` is `partial`/`fallback`, /spec uses lead-orchestrated researcher fanout with serial collection; if `team_messaging` is below `full`, /spec skips TeamCreate/SendMessage and uses a lead-side handle map without suppressing researcher fanout. Only `subagents=none` collapses to spec-short; when `task_completed_hook` drops to `none`, full fanout refuses but spec-short proceeds."
     },
     "work": {
       "summary": "Check project status, manage work items, search remaining tasks.",

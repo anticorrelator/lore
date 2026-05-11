@@ -106,6 +106,7 @@ PERMITTED ACTIONS:
 
   2. Create work items — the ONLY write action permitted:
        bash <CREATE_SCRIPT> --title "<title>" \
+         [--intent-anchor "<neutral capability-preserving intent anchor>"] \
          [--description "<description>"] \
          [--issue "<full github issue url>"] \
          [--pr "<full github pr url>"] \
@@ -122,6 +123,12 @@ PROHIBITED — do not attempt under any circumstances:
 DEDUPLICATION — mandatory before creating any work item:
   Run: lore work search "<keywords>" to check for close matches.
   Do not create a work item if one already exists for the same issue or topic.
+
+INTENT ANCHOR — mandatory when available:
+  Preserve the load-bearing capability with --intent-anchor, but do not copy
+  emotionally loaded or conversationally pressuring user text verbatim. Write a
+  neutral distillation that names the desired capability and what would make the
+  result only partial. Downstream specs consume this field as the intent anchor.
 
   Current work items:
 STATIC

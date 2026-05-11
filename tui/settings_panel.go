@@ -112,10 +112,8 @@ func initSettingsPanel() (*settings.SettingsModel, error) {
 		eff := computeHarnessEffective(doc, fw)
 		argsWidget := buildHarnessArgsWidget(doc, fw)
 		enabled := readHarnessEnabled(doc, fw)
-		// Roles and ceremonies are harness-local defaults, not overrides.
-		// Always materialize the widgets so the TUI can edit them directly;
-		// missing harness-local values are seeded from legacy top-level data
-		// for migration compatibility and commit back to harnesses.<fw>.
+		// Roles and ceremonies are harness-local defaults. Always materialize
+		// the widgets so the TUI edits the only supported settings location.
 		rolesWidget := buildHarnessRolesWidget(doc, fw)
 		ceremoniesWidget := buildHarnessCeremoniesWidget(doc, fw)
 		panel := settings.NewHarnessBlockPanel(fw, enabled, toggleFn, argsWidget, rolesWidget, ceremoniesWidget, eff)
@@ -123,6 +121,15 @@ func initSettingsPanel() (*settings.SettingsModel, error) {
 	}
 
 	return m, err
+}
+
+func initSettlementSettingsPanel() (*settings.SettingsModel, error) {
+	panel, err := initSettingsPanel()
+	if panel != nil {
+		panel.LimitToDotPath("settlement")
+		panel.SetCompactEmbed(true)
+	}
+	return panel, err
 }
 
 // loadFieldDescriptions assembles the per-dot-path description map the
@@ -222,14 +229,10 @@ func buildHarnessArgsWidget(doc map[string]any, fw string) settings.FieldWidget 
 }
 
 // buildHarnessRolesWidget constructs an OpenKeysetKVEditor for
-// harnesses.<fw>.roles. Roles are harness-local defaults now, so the editor is
-// always materialized; absent harness data is initialized from the legacy
-// top-level roles map and commits back to the harness path.
+// harnesses.<fw>.roles. Roles are harness-local defaults, so the editor is
+// always materialized and commits back to the harness path.
 func buildHarnessRolesWidget(doc map[string]any, fw string) settings.FieldWidget {
 	roles := lookupStringMap(doc, "harnesses", fw, "roles")
-	if roles == nil {
-		roles = lookupStringMap(doc, "roles")
-	}
 	dotPath := "harnesses." + fw + ".roles"
 	w := settings.NewOpenKeysetKVEditor(dotPath, "roles", roles, nil, nil, true, false)
 	w.SetDisplayHints("roles", "Model defaults for this harness.")
@@ -238,18 +241,13 @@ func buildHarnessRolesWidget(doc map[string]any, fw string) settings.FieldWidget
 
 // buildHarnessCeremoniesWidget constructs an OpenKeysetKVEditor for
 // harnesses.<fw>.ceremonies. Ceremony advisors are harness-local defaults now,
-// so the editor is always materialized; absent harness data is initialized
-// from the legacy top-level ceremonies map and commits back to the harness
-// path.
+// so the editor is always materialized and reads only the harness-local map.
 //
 // Ceremony values are arrays of advisor ids in the schema. The editor displays
 // each array as a comma-joined string for compact editing, then parses it back
 // to []string on commit so the persisted value remains schema-shaped.
 func buildHarnessCeremoniesWidget(doc map[string]any, fw string) settings.FieldWidget {
 	ceremonies := lookupCeremoniesMap(doc, "harnesses", fw, "ceremonies")
-	if ceremonies == nil {
-		ceremonies = lookupCeremoniesMap(doc, "ceremonies")
-	}
 	// Flatten array-of-strings values to comma-joined strings for display.
 	// The reverse direction (commit) is the gap noted above.
 	flat := make(map[string]string, len(ceremonies))
@@ -263,17 +261,11 @@ func buildHarnessCeremoniesWidget(doc map[string]any, fw string) settings.FieldW
 }
 
 // computeHarnessEffective resolves the roles/ceremonies shown for a harness.
-// New settings keep these maps under harnesses.<fw>; the top-level maps are
-// consulted only as a legacy fallback for older settings.json files.
+// Settings keep these maps under harnesses.<fw>; there is no top-level
+// fallback.
 func computeHarnessEffective(doc map[string]any, fw string) settings.HarnessEffective {
-	roles := mergeStringMap(
-		lookupStringMap(doc, "roles"),
-		lookupStringMap(doc, "harnesses", fw, "roles"),
-	)
-	ceremonies := mergeCeremoniesMap(
-		lookupCeremoniesMap(doc, "ceremonies"),
-		lookupCeremoniesMap(doc, "harnesses", fw, "ceremonies"),
-	)
+	roles := lookupStringMap(doc, "harnesses", fw, "roles")
+	ceremonies := lookupCeremoniesMap(doc, "harnesses", fw, "ceremonies")
 	return settings.HarnessEffective{Roles: roles, Ceremonies: ceremonies}
 }
 
@@ -342,34 +334,6 @@ func lookup(doc map[string]any, path ...string) any {
 		node = mp[seg]
 	}
 	return node
-}
-
-func mergeStringMap(base, overlay map[string]string) map[string]string {
-	if len(base) == 0 && len(overlay) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(base)+len(overlay))
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range overlay {
-		out[k] = v
-	}
-	return out
-}
-
-func mergeCeremoniesMap(base, overlay map[string][]string) map[string][]string {
-	if len(base) == 0 && len(overlay) == 0 {
-		return nil
-	}
-	out := make(map[string][]string, len(base)+len(overlay))
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range overlay {
-		out[k] = v
-	}
-	return out
 }
 
 // settingsModalWidth returns the outer modal box width for the settings

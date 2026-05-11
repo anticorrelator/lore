@@ -259,16 +259,22 @@ echo '{
   "line_range": "<N-M>",
   "falsifier": "<what evidence in the code would disprove this claim>",
   "why_this_work_needs_it": "<one-sentence — why this Tier 2 row grounds THIS task>",
-  "captured_at_sha": "<git rev-parse HEAD at emission time>"
+  "captured_at_sha": "<git rev-parse HEAD at emission time>",
+  "change_context": {
+    "diff_ref": "<git rev-parse HEAD at emission time, or null when unavailable>",
+    "changed_files": ["<absolute path>"],
+    "summary": "<one sentence naming the task-local change or investigation context that made this claim relevant>"
+  }
 }' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>
 ```
 
-**Required fields (13, all non-null):** `claim_id`, `tier`, `claim`,
+**Required fields (14, all non-null except `change_context.diff_ref`):** `claim_id`, `tier`, `claim`,
 `producer_role`, `protocol_slot`, `task_id`, `phase_id`, `scale`, `file`,
-`line_range`, `falsifier`, `why_this_work_needs_it`, `captured_at_sha`.
+`line_range`, `falsifier`, `why_this_work_needs_it`, `captured_at_sha`,
+`change_context`.
 `tier` MUST be the literal string `"task-evidence"`; `producer_role` MUST
 be `"worker"` when you are the emitter; `line_range` MUST match `N-M` with
-`N ≤ M`. `evidence-append.sh` delegates to `validate-tier2.sh`, which
+`N ≤ M`; `change_context.changed_files` MUST include `file`. `evidence-append.sh` delegates to `validate-tier2.sh`, which
 rejects rows with any missing/empty required field — a failed write means
 no row was appended.
 

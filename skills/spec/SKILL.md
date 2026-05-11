@@ -50,6 +50,7 @@ Team-based divide-and-conquer: the spec-lead composes an investigation plan tabl
 4. Try to resolve input as an existing work item (fuzzy match or branch inference, same algorithm as `/work`, including archive fallback):
    - **If resolved item is tagged `[archived]`:** Warn the user and wait for explicit confirmation before continuing.
    - **If resolved** → load the work item:
+    - Read `_meta.json.intent_anchor` when present. Treat it as the neutral capability anchor from work-item intake. The spec may refine implementation shape, but it must not silently narrow or remove the capability implied by this statement; any such change is a user-visible scope delta.
      - If `plan.md` exists with synthesis already complete (Design Decisions + Phases present), skip to Step 5.1 (Confirm understanding). If a `## Strategy` section exists, load it silently as shaping context.
      - If `plan.md` exists with `## Investigations` and completed findings but no synthesis yet, skip to synthesis (Step 5). If a `## Strategy` section exists, load it silently and use it as shaping context — do not re-prompt.
      - If it has investigations but `## Open Questions` needing follow-up, dispatch targeted follow-ups.
@@ -65,7 +66,7 @@ When the input is a freeform description rather than an existing work item:
 1. Restate your understanding in 1-2 sentences.
 2. Ask 2-4 clarifying questions using `AskUserQuestion`. Target scope boundaries, constraints, and approach preferences. Do NOT ask questions answerable by reading the codebase.
 3. Incorporate answers into a refined goal statement.
-4. Create the work item: derive a slug from the description, run the `/work create` flow.
+4. Create the work item: derive a slug from the description, run the `/work create` flow and pass `--intent-anchor` with a neutral capability-preserving distillation of the user's request. Do not copy conversational pressure verbatim, and do not remove load-bearing intent.
 5. Continue to Step 2.
 
 If the user's description is already specific enough (clear scope, stated constraints, obvious approach), skip to step 4 — don't ask questions for the sake of asking.
@@ -157,14 +158,15 @@ If the user's description is already specific enough (clear scope, stated constr
    TEAM_MESSAGING=$(framework_capability team_messaging)  # full | partial | fallback | none
    ```
    - `ENFORCEMENT` shapes the retry/abandon decision in Step 3 (per `adapters/agents/README.md` §"Completion Enforcement Degradation Modes").
-   - `TEAM_MESSAGING=none` collapses the skill to lead-only orchestration: skip team creation, do not spawn researchers, fall back to the `--short` branch path. The skill requires `team_messaging=full` per `adapters/capabilities.json.skills.spec.requires`; the gate fires here.
+   - `TEAM_MESSAGING != full` collapses only the shared-team layer: skip `TeamCreate`, `SendMessage`, and on-disk team config, then use a lead-side handle map. Do **not** collapse to `--short` while `subagents` remains available; continue with lead-orchestrated researcher fanout and serial collection.
+   - `subagents=none` is the collapse point for `--short`: if the adapter cannot spawn isolated researcher contexts, fall back to the Step 2a short branch.
 
    For Claude Code (the default path), team creation is the native `TeamCreate` tool:
    ```
    TeamCreate: team_name="spec-<slug>", description="Investigating <work item title>"
    ```
-   The opencode/codex adapters emit `delegate:plugin_team_init` / `delegate:codex_subagent_init` respectively (see `adapters/agents/README.md` §"Per-Harness Mapping"); the skill body calls the documented translation when running under those frameworks.
-8. Read your team lead name from the active harness's teams install path (resolved via `resolve_harness_install_path teams`; typically `~/.claude/teams/` on Claude Code), at `<teams_dir>/spec-<slug>/config.json`. Frameworks where `install_paths.teams=unsupported` (e.g. codex today) cannot persist team config — the skill reads `team_messaging=fallback` and proceeds with a lead-side handle map instead of the on-disk config.
+   On harnesses with `TEAM_MESSAGING != full` (opencode/codex today), skip team creation entirely and initialize an in-memory handle map keyed by investigation number.
+8. Read your team lead name from the active harness's teams install path (resolved via `resolve_harness_install_path teams`; typically `~/.claude/teams/` on Claude Code), at `<teams_dir>/spec-<slug>/config.json`. Frameworks where `install_paths.teams=unsupported` (e.g. codex today) cannot persist team config — use the lead-side handle map instead of on-disk config.
 9. Create investigation tasks — for each question, route through the adapter's `spawn` operation:
    ```bash
    RESEARCHER_MODEL=$(bash "$ADAPTER" resolve_model_for_role researcher)
@@ -202,7 +204,7 @@ As researcher messages arrive (or after direct file reading in short branch):
 2. **Preserve `**Findings:**` verbatim** — copy findings exactly as reported.
 3. **Preserve `**Observations:**` verbatim** — copy researcher observations exactly as reported. Do not rephrase, merge, or summarize. These are mechanism-level patterns, design rationale, and structural footprint signals that feed the Step 5.4 capture step.
 4. **Emit Tier-2 artifacts** — for each researcher assertion (full branch) or lead-observed task-scoped grounding claim (short branch):
-   - Format the claim as a JSON row with the 7-field schema (`claim`, `file`, `line_range`, `exact_snippet`, `normalized_snippet_hash`, `falsifier`, `significance`) plus producer/template provenance. See `architecture/artifacts/tier2-evidence-schema.md` for the full schema.
+   - Format the claim as a JSON row with the evidence fields (`claim`, `file`, `line_range`, `exact_snippet`, `normalized_snippet_hash`, `falsifier`, `significance`) plus producer/template provenance and `change_context` (`diff_ref`, `changed_files[]`, `summary`). `changed_files[]` must include the row's `file`; `summary` should name why the current investigation/change made the claim relevant. See `architecture/artifacts/tier2-evidence-schema.md` for the full schema.
    - Append the row via the sole-writer:
      ```bash
      echo '<json-row>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>
@@ -340,6 +342,8 @@ This evaluates the abstract plan. If WEAK or MISSING areas are identified, revis
 ### Step 5b: Synthesize — concrete plan
 
 Draft concrete implementation sections on top of the approved abstract plan:
+
+0. **Intent anchor** — if the work item has an `intent_anchor`, preserve it in the plan near the Goal or Narrative. Before decomposing, name the tempting narrower implementation that would appear successful while violating that anchor; ensure Exit Criteria and Verification cover the load-bearing promise or explicitly label the scope delta.
 
 1. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include `**Knowledge context:**`, `**Tasks:**` (checkbox lines), optional `**Retrieval directive:**`, optional `**Advisors:**`, optional `**Verification:**`, and optional `**Scope:**` blocks.
 
@@ -656,7 +660,7 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 **Observations:**
 - <mechanism-level pattern, design rationale, or structural footprint signal, preserved verbatim from researcher report>
 
-<!-- Note: researcher assertions (7-field YAML shape) are emitted to task-claims.jsonl (Tier 2)
+<!-- Note: researcher assertions are emitted to task-claims.jsonl (Tier 2)
      via evidence-append.sh — they do not appear in plan.md. See architecture/artifacts/tier2-evidence-schema.md. -->
 
 ## Design Decisions

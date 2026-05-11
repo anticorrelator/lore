@@ -1,23 +1,18 @@
 #!/usr/bin/env bash
-# ceremony-config.sh — Manage ceremony advisor overrides
+# ceremony-config.sh — Manage harness-local ceremony advisor bindings
 # Usage: ceremony-config.sh [--harness <name>] <subcommand> [args...]
 #
 # Subcommands:
-#   get <ceremony>                Get advisor list for a ceremony (JSON array, [] if absent)
-#                                 Reads via resolve_ceremony_advisors so callers see the
-#                                 D3b-resolved value (overlay > top-level > legacy).
+#   get <ceremony>                Get advisor list for a ceremony on the target harness
+#                                 (JSON array, [] if absent)
 #   add <ceremony> <skill>        Add an advisor to a ceremony (idempotent)
 #   remove <ceremony> <skill>     Remove an advisor from a ceremony (no-op if absent)
 #   list                          List all configured ceremonies (JSON object)
 #
-# Without --harness: writes to top-level `ceremonies.<skill>` in
-# ~/.lore/config/settings.json (preserves pre-T2 semantics).
-# With --harness <name>: writes to `harnesses.<name>.ceremonies.<skill>` —
-# the D3b harness overlay. The empty-list-as-override semantics mean
-# `add ... && remove ...` round-trips on the harness layer leave an
-# explicit `[]` (which suppresses all advisors on that harness) rather than
-# falling back to the top-level default; pass `remove <ceremony> --no-leave-empty`
-# to force deletion of the harness overlay key entirely.
+# Without --harness: writes to the active harness resolved by
+# resolve_active_framework. With --harness <name>: writes to
+# `harnesses.<name>.ceremonies.<skill>`. There is no top-level ceremonies
+# map and no legacy ceremonies.json fallback.
 #
 # Mutations write through `settings.sh patch` so the D5a write contract
 # (flock-protected read-modify-write + atomic mv) is preserved across all
@@ -32,20 +27,19 @@ SETTINGS_SH="$SCRIPT_DIR/settings.sh"
 
 usage() {
   cat >&2 <<EOF
-ceremony-config.sh — manage ceremony advisor overrides
+ceremony-config.sh — manage harness-local ceremony advisor bindings
 
 Usage: ceremony-config.sh [--harness <name>] <subcommand> [args...]
 
 Subcommands:
-  get <ceremony>                    Get resolved advisor list (JSON array)
+  get <ceremony>                    Get advisor list for target harness (JSON array)
   add <ceremony> <skill>            Add an advisor (idempotent)
   remove <ceremony> <skill>         Remove an advisor (no-op if absent)
-  list                              List all configured ceremonies (JSON)
+  list                              List configured ceremonies for target harness (JSON)
 
 Options:
-  --harness <name>  Operate on harnesses.<name>.ceremonies.<skill> (D3b overlay)
-                    instead of top-level ceremonies.<skill>. Empty-list override
-                    on the harness layer is meaningful — see header comment.
+  --harness <name>  Operate on harnesses.<name>.ceremonies.<skill>.
+                    Defaults to the active harness.
   --help, -h        Show this help
 EOF
 }
@@ -75,20 +69,16 @@ if [[ ${#ARGS[@]} -eq 0 ]]; then
   exit 1
 fi
 
-# Build the settings.sh path for the targeted layer. With --harness, paths
-# are scoped under harnesses.<name>.ceremonies; otherwise top-level.
+TARGET_HARNESS="$HARNESS"
+if [[ -z "$TARGET_HARNESS" ]]; then
+  TARGET_HARNESS=$(resolve_active_framework)
+fi
+
 _ceremony_path() {
   local skill="$1"
-  if [[ -n "$HARNESS" ]]; then
-    printf '%s\n' "harnesses.$HARNESS.ceremonies.$skill"
-  else
-    printf '%s\n' "ceremonies.$skill"
-  fi
+  printf '%s\n' "harnesses.$TARGET_HARNESS.ceremonies.$skill"
 }
 
-# Read the current advisor list at the targeted layer (NOT resolved across
-# layers — `add`/`remove` operate on the actual stored array, not the
-# resolved view). Returns `[]` when absent.
 _read_layer() {
   local skill="$1"
   local raw
@@ -112,12 +102,7 @@ case "$subcmd" in
       exit 1
     fi
     CEREMONY="${ARGS[1]}"
-    # `get` returns the *resolved* value (overlay > top-level > legacy) so
-    # consumers see what the runtime actually picks. Use the lib helper so
-    # the resolution is centralized.
     if [[ -n "$HARNESS" ]]; then
-      # Layer-scoped get: read the stored array, not the resolved view —
-      # callers using --harness usually want to confirm what they wrote.
       _read_layer "$CEREMONY"
     else
       resolve_ceremony_advisors "$CEREMONY"
@@ -149,12 +134,8 @@ case "$subcmd" in
     printf '%s\n' "$updated"
     ;;
   list)
-    if [[ -n "$HARNESS" ]]; then
-      bash "$SETTINGS_SH" section "harnesses" \
-        | jq -c --arg h "$HARNESS" '.[$h].ceremonies // {}'
-    else
-      bash "$SETTINGS_SH" section "ceremonies"
-    fi
+    bash "$SETTINGS_SH" section "harnesses" \
+      | jq -c --arg h "$TARGET_HARNESS" '.[$h].ceremonies // {}'
     ;;
   *)
     echo "Error: unknown subcommand '$subcmd'" >&2

@@ -16,7 +16,7 @@ LORE_REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 LORE_DATA_DIR="${LORE_DATA_DIR:-$HOME/.lore}"
 CLAUDE_DIR="$HOME/.claude"
 
-# D4 phase-3 cleanup gate: install.sh deletes the eight legacy fragmented
+# D4 phase-3 cleanup gate: install.sh deletes legacy fragmented
 # files only when settings.json's `version` is at-or-above this constant AND
 # the deterministic fallback audit (lore doctor's aggregator) is empty. Bump
 # this in lockstep with adapters/settings.schema.json's `version` field when a
@@ -241,7 +241,7 @@ dry mkdir -p "$LORE_DATA_DIR/.install-state"
 # --- 1a. Migrate fragmented config -> unified settings.json (D4 phase 1) ---
 # Create-only: this block runs only when ~/.lore/config/settings.json is
 # absent. The unified file ships from adapters/settings.template.json; values
-# read from each of the eight legacy fragmented files overlay onto the
+# read from legacy fragmented files overlay onto the
 # template, then a single atomic write produces settings.json. Migration
 # provenance lives in ~/.lore/.install-state/migration.json — settings.json
 # itself stays clean against the strict doctor schema (additionalProperties:
@@ -283,7 +283,6 @@ config_dir = os.path.join(data_dir, "config")
 # the document in place. Skip on absence (template defaults stand). Surface
 # errors and skip on malformed JSON without aborting the whole install.
 legacy_specs = [
-    "ceremonies.json",
     "config/agent.json",
     "config/capture-config.json",
     "config/framework.json",
@@ -330,23 +329,6 @@ def fan_to_harnesses(doc, key, value):
         harnesses[fw] = new_block
     doc["harnesses"] = harnesses
 
-
-# ceremonies.json -> harnesses.<fw>.ceremonies for every registered harness.
-# Older unified files used top-level ceremonies as a global default; new
-# settings make ceremony skills harness-local because the available skill
-# surfaces differ by ecosystem.
-ceremonies = load_legacy("ceremonies.json")
-if isinstance(ceremonies, dict):
-    merged = {}
-    for fw_block in (doc.get("harnesses") or {}).values():
-        if isinstance(fw_block, dict) and isinstance(fw_block.get("ceremonies"), dict):
-            merged.update(fw_block["ceremonies"])
-    for skill, advisors in ceremonies.items():
-        if isinstance(advisors, list):
-            merged[skill] = advisors
-    fan_to_harnesses(doc, "ceremonies", merged)
-    doc.pop("ceremonies", None)
-    mark("ceremonies.json")
 
 # agent.json -> per-harness `harnesses.<fw>.enabled`. The legacy global
 # `agent.enabled` flag is fanned uniformly across every framework declared
@@ -1009,7 +991,7 @@ if [ -d "$OLD_DATA_DIR" ] && [ -d "$LORE_DATA_DIR/repos" ]; then
 fi
 
 # --- 7b. Cleanup deletion of legacy fragmented files (D4 phase 3) ---
-# Conditional + idempotent. The eight legacy files are deleted ONLY when
+# Conditional + idempotent. Legacy files are deleted ONLY when
 # all three gates pass:
 #   1. ~/.lore/config/settings.json exists
 #   2. its `.version` field is at-or-above $LORE_SETTINGS_CLEANUP_VERSION

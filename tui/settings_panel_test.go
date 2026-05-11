@@ -12,7 +12,7 @@ func stripANSI(s string) string {
 	return settingsPanelANSIPattern.ReplaceAllString(s, "")
 }
 
-func TestBuildHarnessDefaultsWidgets_MaterializeFromLegacyTopLevel(t *testing.T) {
+func TestBuildHarnessDefaultsWidgets_IgnoreTopLevelCeremonies(t *testing.T) {
 	doc := map[string]any{
 		"roles": map[string]any{
 			"lead":    "opus",
@@ -36,8 +36,8 @@ func TestBuildHarnessDefaultsWidgets_MaterializeFromLegacyTopLevel(t *testing.T)
 		t.Fatalf("roles widget dot path = %q", roles.DotPath())
 	}
 	rolesView := stripANSI(roles.View())
-	if !strings.Contains(rolesView, "lead = opus") || !strings.Contains(rolesView, "default = sonnet") {
-		t.Fatalf("roles widget did not seed from legacy top-level roles:\n%s", rolesView)
+	if strings.Contains(rolesView, "lead = opus") || strings.Contains(rolesView, "default = sonnet") {
+		t.Fatalf("roles widget should ignore top-level roles:\n%s", rolesView)
 	}
 
 	ceremonies := buildHarnessCeremoniesWidget(doc, "codex")
@@ -48,8 +48,8 @@ func TestBuildHarnessDefaultsWidgets_MaterializeFromLegacyTopLevel(t *testing.T)
 		t.Fatalf("ceremonies widget dot path = %q", ceremonies.DotPath())
 	}
 	ceremoniesView := stripANSI(ceremonies.View())
-	if !strings.Contains(ceremoniesView, "spec-design = codex-design-review") {
-		t.Fatalf("ceremonies widget did not seed from legacy top-level ceremonies:\n%s", ceremoniesView)
+	if strings.Contains(ceremoniesView, "spec-design") || strings.Contains(ceremoniesView, "codex-design-review") {
+		t.Fatalf("ceremonies widget should ignore top-level ceremonies:\n%s", ceremoniesView)
 	}
 }
 
@@ -81,6 +81,6 @@ func TestBuildHarnessDefaultsWidgets_PreferHarnessLocalValues(t *testing.T) {
 
 	ceremoniesView := stripANSI(buildHarnessCeremoniesWidget(doc, "codex").View())
 	if !strings.Contains(ceremoniesView, "spec-design = codex-plan-review") || strings.Contains(ceremoniesView, "codex-design-review") {
-		t.Fatalf("ceremonies widget should prefer harness-local values:\n%s", ceremoniesView)
+		t.Fatalf("ceremonies widget should read only harness-local values:\n%s", ceremoniesView)
 	}
 }

@@ -10,7 +10,7 @@ import (
 
 // setupFakeLoreData stages a fake LORE_DATA_DIR with a symlink to the real
 // repo's scripts/ dir (so loreRepoDir() can find adapters/capabilities.json)
-// and an isolated framework.json so tests don't touch the user's config.
+// and an isolated settings.json so tests don't touch the user's config.
 func setupFakeLoreData(t *testing.T, framework string, roles map[string]string) string {
 	t.Helper()
 
@@ -38,14 +38,22 @@ func setupFakeLoreData(t *testing.T, framework string, roles map[string]string) 
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := userFrameworkConfig{
-		Version:             1,
-		Framework:           framework,
-		CapabilityOverrides: map[string]string{},
-		Roles:               roles,
+	harnesses := map[string]any{
+		"claude-code": map[string]any{"args": DefaultClaudeArgs()},
+		"opencode":    map[string]any{"args": []string{}},
+		"codex":       map[string]any{"args": []string{}},
+	}
+	if roles != nil {
+		harnesses[framework].(map[string]any)["roles"] = roles
+	}
+	cfg := map[string]any{
+		"version":              1,
+		"active_framework":     framework,
+		"capability_overrides": map[string]string{},
+		"harnesses":            harnesses,
 	}
 	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(filepath.Join(configDir, "framework.json"), data, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -317,20 +325,37 @@ func TestResolveAgentTemplate_RejectsEmpty(t *testing.T) {
 	}
 }
 
-// writeHarnessArgs helper writes a harness-args.json file under the staged
-// LORE_DATA_DIR. Used by tests that verify LoadHarnessArgs precedence.
+// writeHarnessArgs helper writes harness args into settings.json under the
+// staged LORE_DATA_DIR. Used by tests that verify LoadHarnessArgs precedence.
 func writeHarnessArgs(t *testing.T, perFramework map[string][]string) {
 	t.Helper()
 	dataDir := os.Getenv("LORE_DATA_DIR")
 	if dataDir == "" {
 		t.Fatal("LORE_DATA_DIR not set; call setupFakeLoreData first")
 	}
-	out := map[string]any{"version": 1}
+	path := filepath.Join(dataDir, "config", "settings.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	harnesses, _ := out["harnesses"].(map[string]any)
+	if harnesses == nil {
+		harnesses = map[string]any{}
+		out["harnesses"] = harnesses
+	}
 	for fw, args := range perFramework {
-		out[fw] = HarnessArgsConfig{Args: args}
+		block, _ := harnesses[fw].(map[string]any)
+		if block == nil {
+			block = map[string]any{}
+			harnesses[fw] = block
+		}
+		block["args"] = args
 	}
 	data, _ := json.MarshalIndent(out, "", "  ")
-	path := filepath.Join(dataDir, "config", "harness-args.json")
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -413,31 +438,12 @@ func TestMigrateClaudeArgsToHarnessArgs(t *testing.T) {
 	if _, err := os.Stat(newPath); err == nil {
 		t.Fatal("harness-args.json should not exist before migration")
 	}
-	// Run migration.
 	if err := MigrateClaudeArgsToHarnessArgs(); err != nil {
 		t.Fatalf("MigrateClaudeArgsToHarnessArgs: %v", err)
 	}
-	// Confirm new file written and legacy untouched.
-	got, err := os.ReadFile(newPath)
-	if err != nil {
-		t.Fatalf("reading %s: %v", newPath, err)
+	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
+		t.Fatalf("migration compatibility shim should not create harness-args.json, stat err=%v", err)
 	}
-	var parsed map[string]any
-	if err := json.Unmarshal(got, &parsed); err != nil {
-		t.Fatalf("parse harness-args.json: %v", err)
-	}
-	if parsed["_deprecated_legacy_source"] == nil {
-		t.Error("missing _deprecated_legacy_source after migration")
-	}
-	cc, ok := parsed["claude-code"].(map[string]any)
-	if !ok {
-		t.Fatalf("claude-code key missing/wrong shape: %v", parsed["claude-code"])
-	}
-	args, ok := cc["args"].([]any)
-	if !ok || len(args) != 2 {
-		t.Fatalf("args wrong shape/len: %v", cc["args"])
-	}
-	// Confirm idempotence: second call is no-op.
 	if err := MigrateClaudeArgsToHarnessArgs(); err != nil {
 		t.Fatalf("idempotent migration failed: %v", err)
 	}

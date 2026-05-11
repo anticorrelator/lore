@@ -424,6 +424,134 @@ func TestListEditor_AddAndCommit(t *testing.T) {
 	}
 }
 
+func TestEnumListEditor_TogglesSupportedValuesAndCommits(t *testing.T) {
+	w := NewEnumListEditor(
+		"settlement.harness_selection.eligible_frameworks",
+		"eligible_frameworks",
+		[]string{"claude-code", "opencode", "codex"},
+		[]string{"claude-code", "opencode", "codex"},
+		0,
+		true,
+		true,
+		true,
+	)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+	_, _ = dispatch(w, "down")
+	_, _ = dispatch(w, "down")
+	_, _ = dispatch(w, " ")
+	_, intent := dispatch(w, "enter")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("expected commit, got %+v", intent)
+	}
+	want := []string{"claude-code", "opencode"}
+	if got, ok := intent.Value.([]string); !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected %v, got %T %v", want, intent.Value, intent.Value)
+	}
+}
+
+func TestActiveHoursRangesEditor_EditsMultipleRanges(t *testing.T) {
+	w := NewActiveHoursRangesEditor("settlement.active_hours.ranges", "ranges", []ActiveHoursRange{
+		{Days: []string{"mon", "tue", "wed", "thu", "fri"}, Start: "09:00", End: "17:00"},
+	}, true)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+	_, _ = dispatch(w, "a")
+	_, _ = dispatch(w, "right")
+	_, _ = dispatch(w, "+")
+	_, _ = dispatch(w, "+")
+	_, _ = dispatch(w, "right")
+	_, _ = dispatch(w, "-")
+	_, intent := dispatch(w, "enter")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("expected commit, got %+v", intent)
+	}
+	got, ok := intent.Value.([]any)
+	if !ok || len(got) != 2 {
+		t.Fatalf("expected two typed ranges, got %T %v", intent.Value, intent.Value)
+	}
+	second, ok := got[1].(map[string]any)
+	if !ok {
+		t.Fatalf("expected range map, got %T", got[1])
+	}
+	if second["start"] != "10:00" || second["end"] != "16:30" {
+		t.Fatalf("expected adjusted second range 10:00-16:30, got %v", second)
+	}
+}
+
+func TestActiveHoursRangesEditor_EditingAllTimeSeedsDraftWindow(t *testing.T) {
+	w := NewActiveHoursRangesEditor("settlement.active_hours.ranges", "ranges", nil, false)
+	w.Focus()
+
+	_, intent := dispatch(w, "enter")
+	if intent != nil {
+		t.Fatalf("entering edit mode should not commit, got %+v", intent)
+	}
+	if !w.editing || len(w.draft) != 1 {
+		t.Fatalf("entering all-time windows should seed one editable draft window, editing=%v draft=%v", w.editing, w.draft)
+	}
+
+	_, intent = dispatch(w, "esc")
+	if intent == nil || intent.Status != IntentDiscard {
+		t.Fatalf("Esc should discard seeded all-time draft, got %+v", intent)
+	}
+	if len(w.draft) != 0 || len(w.committed) != 0 {
+		t.Fatalf("Esc should restore all-time empty windows, draft=%v committed=%v", w.draft, w.committed)
+	}
+}
+
+func TestActiveHoursRangesEditor_DeleteLastWindowCommitsAllTime(t *testing.T) {
+	w := NewActiveHoursRangesEditor("settlement.active_hours.ranges", "ranges", []ActiveHoursRange{
+		{Days: []string{"mon"}, Start: "09:00", End: "17:00"},
+	}, true)
+	w.Focus()
+
+	_, _ = dispatch(w, "enter")
+	_, _ = dispatch(w, "d")
+	_, intent := dispatch(w, "enter")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("expected deleting last window to commit all-time, got %+v", intent)
+	}
+	got, ok := intent.Value.([]any)
+	if !ok || len(got) != 0 {
+		t.Fatalf("expected empty ranges value after deleting last window, got %T %v", intent.Value, intent.Value)
+	}
+	if len(w.committed) != 0 || len(w.draft) != 0 {
+		t.Fatalf("expected editor state to stay all-time after commit, committed=%v draft=%v", w.committed, w.draft)
+	}
+}
+
+func TestActiveHoursRangesEditor_JKMovesThroughEditableFields(t *testing.T) {
+	w := NewActiveHoursRangesEditor("settlement.active_hours.ranges", "ranges", []ActiveHoursRange{
+		{Days: []string{"mon"}, Start: "09:00", End: "17:00"},
+		{Days: []string{"tue"}, Start: "10:00", End: "18:00"},
+	}, true)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+
+	_, _ = dispatch(w, "j")
+	if w.cursor != 0 || w.field != 1 {
+		t.Fatalf("first j should move to first window start field, cursor=%d field=%d", w.cursor, w.field)
+	}
+	_, _ = dispatch(w, "l")
+	if w.cursor != 0 || w.field != 2 {
+		t.Fatalf("l should move to the next field, cursor=%d field=%d", w.cursor, w.field)
+	}
+	_, _ = dispatch(w, "h")
+	if w.cursor != 0 || w.field != 1 {
+		t.Fatalf("h should move to the previous field, cursor=%d field=%d", w.cursor, w.field)
+	}
+	_, _ = dispatch(w, "j")
+	_, _ = dispatch(w, "j")
+	if w.cursor != 1 || w.field != 0 {
+		t.Fatalf("j should continue into the next window fields, cursor=%d field=%d", w.cursor, w.field)
+	}
+	_, _ = dispatch(w, "k")
+	if w.cursor != 0 || w.field != 2 {
+		t.Fatalf("k should move back to previous window end field, cursor=%d field=%d", w.cursor, w.field)
+	}
+}
+
 func TestListEditor_DiscardOnEsc(t *testing.T) {
 	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha"}, nil, 0, true, false, false)
 	w.Focus()
@@ -587,11 +715,27 @@ func TestClosedObjectSubPanel_EscExitsCleanScalarEditBeforePanel(t *testing.T) {
 	}
 
 	_, intent = dispatch(panel, "esc")
-	if intent == nil || intent.Status != IntentDiscard {
-		t.Fatalf("second esc should be consumed by backing out of the panel, got %+v", intent)
+	if intent == nil || intent.Status != IntentNavigate {
+		t.Fatalf("second esc should be consumed as navigation out of the panel, got %+v", intent)
 	}
 	if panel.entered {
 		t.Fatalf("second esc should leave the panel navigation level")
+	}
+}
+
+func TestClosedObjectSubPanel_RendersFocusedAndEnteredState(t *testing.T) {
+	a := NewToggleRow("a.enabled", "enabled", false, true, false)
+	panel := NewClosedObjectSubPanel("a", "harness_selection", []FieldWidget{a})
+	panel.Focus()
+	out := stripANSI(panel.View())
+	if !strings.Contains(out, "harness_selection") || !strings.Contains(out, "[enter]") {
+		t.Fatalf("focused panel should advertise enter affordance, got:\n%s", out)
+	}
+
+	_, _ = dispatch(panel, "enter")
+	out = stripANSI(panel.View())
+	if !strings.Contains(out, "harness_selection") || !strings.Contains(out, "[active]") {
+		t.Fatalf("entered panel should advertise active state, got:\n%s", out)
 	}
 }
 

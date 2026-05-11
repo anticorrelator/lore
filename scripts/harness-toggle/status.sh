@@ -6,9 +6,8 @@
 # With no positional arg: prints status for every registered framework.
 # With a framework arg: prints status for just that one.
 #
-# Reads `harnesses.<fw>.enabled` from unified settings.json (with legacy
-# agent.json fallback during the deprecation window). LORE_AGENT_DISABLED=1
-# overrides for the session.
+# Reads `harnesses.<fw>.enabled` from unified settings.json.
+# LORE_AGENT_DISABLED=1 overrides for the session.
 
 set -euo pipefail
 
@@ -17,7 +16,6 @@ source "$SCRIPT_DIR/../config.sh"
 source "$SCRIPT_DIR/../lib.sh"
 
 SETTINGS_SH="$SCRIPT_DIR/../settings.sh"
-LEGACY_AGENT_JSON="${LORE_DATA_DIR}/config/agent.json"
 SETTINGS_JSON=$(LORE_DATA_DIR="$LORE_DATA_DIR" bash "$SETTINGS_SH" path)
 
 JSON_OUTPUT=0
@@ -75,7 +73,7 @@ fi
 
 # Resolve a single framework's state. Sets:
 #   ENABLED=true|false
-#   SOURCE=settings|legacy|default
+#   SOURCE=settings|default
 resolve_state_for() {
   local fw="$1"
   ENABLED=true
@@ -93,23 +91,6 @@ resolve_state_for() {
     return 0
   fi
 
-  # Legacy fallback (global agent.json applies uniformly)
-  if [[ -f "$LEGACY_AGENT_JSON" ]]; then
-    local legacy
-    legacy=$(python3 -c "
-import json, sys
-with open(sys.argv[1]) as f:
-    d = json.load(f)
-print('true' if d.get('enabled', True) else 'false')
-" "$LEGACY_AGENT_JSON" 2>/dev/null || echo "true")
-    if [[ "$legacy" == "false" ]]; then
-      ENABLED=false
-    else
-      ENABLED=true
-    fi
-    SOURCE="legacy"
-    return 0
-  fi
 }
 
 if [[ "$JSON_OUTPUT" -eq 1 ]]; then
@@ -123,7 +104,6 @@ if [[ "$JSON_OUTPUT" -eq 1 ]]; then
       effective_source="env"
     fi
     [[ "$SOURCE" == "default" && "$SESSION_OVERRIDE" -eq 0 ]] && effective_source="default"
-    [[ "$SOURCE" == "legacy"  && "$SESSION_OVERRIDE" -eq 0 ]] && effective_source="legacy"
     rows+=("{\"framework\":\"$fw\",\"enabled\":$effective_enabled,\"source\":\"$effective_source\"}")
   done
   joined=$(printf ',%s' "${rows[@]}")
@@ -151,7 +131,6 @@ for fw in "${FRAMEWORKS[@]}"; do
   src_note=""
   case "$SOURCE" in
     default) src_note=" [default]" ;;
-    legacy)  src_note=" [legacy agent.json fallback]" ;;
   esac
   echo "Lore harness '$fw': ${eff}${note}${src_note}"
 done

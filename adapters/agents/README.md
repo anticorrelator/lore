@@ -367,10 +367,12 @@ same buckets the skill-behavior matrix calls out:
 For `bootstrap` and `implement` the aggregate state on opencode/codex
 is `partial-mode` — the skills proceed but emit the one-shot stderr
 degradation notice and route through the lead-orchestrated /
-post-hoc-validator paths the SKILL bodies already document. For `spec`
-the same `partial-mode` state collapses the team-mode flow to the
-spec-short branch (single-pass synthesis, no researcher fanout). None
-of the three skills resolve to `unavailable` against today's three
+post-hoc-validator paths the SKILL bodies already document. For `spec`,
+`team_messaging=none` removes only the shared-team layer: no TeamCreate,
+no SendMessage, no persisted team config. If `subagents` remains
+available, `spec` still uses lead-orchestrated researcher fanout with
+serial collection. It collapses to spec-short only when `subagents=none`.
+None of the three skills resolve to `unavailable` against today's three
 profiles; `unavailable` would require a future harness with
 `team_messaging=none` AND `partial_below=full` (i.e., a future
 schema regression that lifted the `partial_below` knob back to `full`)

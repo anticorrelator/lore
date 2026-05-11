@@ -12,6 +12,7 @@ import (
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/followup"
+	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -386,8 +387,37 @@ func minimalModel(state appState, workItems []work.WorkItem, fuItems []followup.
 		detail:         work.NewDetailModel("", ""),
 		followupList:   followup.NewListModel(fuItems),
 		followupDetail: followup.NewDetailModel(""),
+		settlement:     settlement.NewModel(),
 		specPanels:     make(map[string]work.SpecPanelModel),
 	}
+}
+
+func setupFakeLoreData(t *testing.T, settingsJSON string) string {
+	t.Helper()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoRoot := filepath.Clean(filepath.Join(wd, ".."))
+	if _, err := os.Stat(filepath.Join(repoRoot, "adapters", "settings.schema.json")); err != nil {
+		t.Fatalf("expected repo root at %s but settings.schema.json missing: %v", repoRoot, err)
+	}
+
+	dataDir := t.TempDir()
+	if err := os.Symlink(filepath.Join(repoRoot, "scripts"), filepath.Join(dataDir, "scripts")); err != nil {
+		t.Fatal(err)
+	}
+	configDir := filepath.Join(dataDir, "config")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(settingsJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LORE_DATA_DIR", dataDir)
+	t.Setenv("LORE_FRAMEWORK", "")
+	return dataDir
 }
 
 func TestBuildPaneConfigStateWorkEmptyList(t *testing.T) {
@@ -501,6 +531,304 @@ func TestBuildPaneConfigStatesDontCrossContaminate(t *testing.T) {
 	}
 	if cfgFU.fuItemCount != 2 {
 		t.Errorf("stateFollowUps: fuItemCount = %d, want 2", cfgFU.fuItemCount)
+	}
+}
+
+func TestBuildPaneConfigIncludesSettlementCount(t *testing.T) {
+	m := minimalModel(stateWork, nil, nil)
+	st, err := settlement.ParseStatus([]byte(`{
+		"enabled": true,
+		"queue": {"ready": 2, "pending": 3, "running": 1}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+	m.settlement = m.settlement.ReplaceStatus(st)
+
+	cfg := m.buildPaneConfig()
+	if cfg.settlementCount != 5 {
+		t.Errorf("settlementCount = %d, want 5", cfg.settlementCount)
+	}
+}
+
+func TestSettlementRootNavigationFromListViews(t *testing.T) {
+	tests := []struct {
+		name  string
+		state appState
+	}{
+		{name: "work", state: stateWork},
+		{name: "followups", state: stateFollowUps},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := minimalModel(tc.state, []work.WorkItem{{Slug: "work-1", Title: "Work 1"}}, nil)
+			m.focusedPanel = panelLeft
+
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+			nm := next.(model)
+			if nm.state != stateSettlement {
+				t.Fatalf("state = %v, want stateSettlement", nm.state)
+			}
+			if nm.terminalMode {
+				t.Fatal("terminalMode should remain disabled when entering settlement")
+			}
+			if nm.focusedPanel != panelLeft {
+				t.Fatalf("focusedPanel = %v, want panelLeft", nm.focusedPanel)
+			}
+			if cmd == nil {
+				t.Fatal("expected settlement status reload command")
+			}
+		})
+	}
+}
+
+func TestSettlementRootNavigationIgnoredInTerminalMode(t *testing.T) {
+	m := minimalModel(stateWork, []work.WorkItem{{Slug: "work-1", Title: "Work 1"}}, nil)
+	m.terminalMode = true
+	m.focusedPanel = panelRight
+	m.setSpecPanel("work-1", work.NewSpecPanelModel("work-1"))
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	nm := next.(model)
+	if nm.state != stateWork {
+		t.Fatalf("state = %v, want stateWork", nm.state)
+	}
+	if !nm.terminalMode {
+		t.Fatal("terminalMode should stay enabled so t can route to the terminal")
+	}
+	if nm.focusedPanel != panelRight {
+		t.Fatalf("focusedPanel = %v, want panelRight", nm.focusedPanel)
+	}
+}
+
+func TestSettlementEnableActionRefreshesInlineSettingsPanel(t *testing.T) {
+	setupFakeLoreData(t, `{
+		"version": 1,
+		"active_framework": "claude-code",
+		"settlement": {"enabled": false}
+	}`)
+
+	m := minimalModel(stateSettlement, nil, nil)
+	m.ensureSettlementSettingsPanel()
+	if m.settlementSettingsPanel == nil {
+		t.Fatal("expected settlement settings panel")
+	}
+	before := stripANSI(m.settlementSettingsPanel.View())
+	if !strings.Contains(before, "[ ] enabled") {
+		t.Fatalf("setup should render settlement disabled, got:\n%s", before)
+	}
+
+	if err := config.SettingsPatch("settlement.enabled", true); err != nil {
+		t.Fatalf("SettingsPatch: %v", err)
+	}
+	result, err := settlement.ParseActionResult("enable", []byte(`{"ok": true, "message": "enabled"}`))
+	if err != nil {
+		t.Fatalf("ParseActionResult: %v", err)
+	}
+
+	next, _ := m.Update(settlementActionCompleteMsg{action: "enable", result: result})
+	nm := next.(model)
+	if nm.settlementSettingsPanel == nil {
+		t.Fatal("expected settlement settings panel after refresh")
+	}
+	after := stripANSI(nm.settlementSettingsPanel.View())
+	if !strings.Contains(after, "[x] enabled") {
+		t.Fatalf("enable action should refresh inline settings view, got:\n%s", after)
+	}
+}
+
+func TestSettlementActionKeybindsReturnCommands(t *testing.T) {
+	tests := []struct {
+		key string
+	}{
+		{key: "p"},
+		{key: "e"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.key, func(t *testing.T) {
+			m := minimalModel(stateSettlement, nil, nil)
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.key)})
+			if next.(model).state != stateSettlement {
+				t.Fatalf("state changed unexpectedly")
+			}
+			if cmd == nil {
+				t.Fatalf("expected command for key %q", tc.key)
+			}
+		})
+	}
+}
+
+func TestSettlementVNoLongerOpensConfigModal(t *testing.T) {
+	m := minimalModel(stateSettlement, nil, nil)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	nm := next.(model)
+	if nm.settingsActive {
+		t.Fatalf("v should not open a settlement config overlay")
+	}
+	if cmd != nil {
+		t.Fatalf("v should not dispatch a command")
+	}
+}
+
+func TestSettlementEscLeavesInlineSettingsPanel(t *testing.T) {
+	m := minimalModel(stateSettlement, nil, nil)
+	m.focusedPanel = panelRight
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	nm := next.(model)
+	if cmd != nil {
+		t.Fatalf("esc leaving inline settings should not dispatch a command")
+	}
+	if nm.focusedPanel != panelLeft {
+		t.Fatalf("focusedPanel = %v, want panelLeft", nm.focusedPanel)
+	}
+}
+
+func TestSettlementBodyUsesHorizontalSplit(t *testing.T) {
+	m := minimalModel(stateSettlement, nil, nil)
+	m.width = 140
+	m.height = 36
+	st, err := settlement.ParseStatus([]byte(`{
+		"enabled": true,
+		"queue": {"pending": 5, "total": 5},
+		"items": [
+			{"id": "item-1", "status": "pending", "work_item": "settlement-operational-closure"},
+			{"id": "item-2", "status": "pending", "work_item": "settlement-operational-closure"},
+			{"id": "item-3", "status": "pending", "work_item": "settlement-operational-closure"},
+			{"id": "item-4", "status": "pending", "work_item": "settlement-operational-closure"},
+			{"id": "item-5", "status": "pending", "work_item": "settlement-operational-closure"}
+		],
+		"harness": {"mode": "random", "selected": "claude-code", "concurrency": 1}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+	m.settlement = m.settlement.ReplaceStatus(st)
+
+	lines := m.renderSettlementBodyLines(120, 24)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Settings") {
+		t.Fatalf("settlement body should include horizontal settings separator, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "│") {
+		t.Fatalf("settlement body should not use a vertical split, got:\n%s", joined)
+	}
+	settingsIdx := -1
+	for i, line := range lines {
+		if strings.Contains(line, "Settings") {
+			settingsIdx = i
+			break
+		}
+	}
+	if settingsIdx < 0 || settingsIdx < len(lines)/2 {
+		t.Fatalf("settings separator should be pinned near the bottom after the queue/status area, idx=%d:\n%s", settingsIdx, joined)
+	}
+	if len(lines) != 24 {
+		t.Fatalf("settlement body should fill the full panel height, len=%d:\n%s", len(lines), joined)
+	}
+	if strings.TrimSpace(lines[len(lines)-1]) == "" {
+		t.Fatalf("settings dock should end at the bottom of the settlement body:\n%s", joined)
+	}
+}
+
+func TestSettlementActionCompleteShowsNoDispatchReason(t *testing.T) {
+	m := minimalModel(stateSettlement, nil, nil)
+	result, err := settlement.ParseActionResult("process", []byte(`{"dispatched": false, "ok": true, "reason": "disabled"}`))
+	if err != nil {
+		t.Fatalf("ParseActionResult: %v", err)
+	}
+
+	next, cmd := m.Update(settlementActionCompleteMsg{action: "process", result: result})
+	nm := next.(model)
+
+	if nm.flashErr != "[settlement] not dispatched: disabled" {
+		t.Fatalf("flashErr = %q", nm.flashErr)
+	}
+	if cmd == nil {
+		t.Fatal("expected status reload command after settlement action")
+	}
+}
+
+func TestSettlementStatusLoadedAutoProcessesReadyQueue(t *testing.T) {
+	m := minimalModel(stateSettlement, nil, nil)
+	status := settlement.Status{
+		Available: true,
+		Enabled:   true,
+		Queue:     settlement.Queue{Pending: 3, Total: 3},
+		Harness:   settlement.Harness{Concurrency: 1, ActiveLeases: 0},
+	}
+
+	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
+	nm := next.(model)
+
+	if !nm.settlementProcessInFlight {
+		t.Fatal("ready settlement queue should start an automatic process command")
+	}
+	if cmd == nil {
+		t.Fatal("expected automatic process command")
+	}
+}
+
+func TestSettlementStatusLoadedAutoProcessesDrainedBatchBacklog(t *testing.T) {
+	m := minimalModel(stateSettlement, nil, nil)
+	status := settlement.Status{
+		Available: true,
+		Enabled:   true,
+		Queue:     settlement.Queue{Pending: 0, Running: 0, Total: 0},
+		Batch:     settlement.Batch{BacklogSize: 76},
+		Harness:   settlement.Harness{Concurrency: 1, ActiveLeases: 0},
+	}
+
+	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
+	nm := next.(model)
+
+	if !nm.settlementProcessInFlight {
+		t.Fatal("drained active batch with backlog should start an automatic process command")
+	}
+	if cmd == nil {
+		t.Fatal("expected automatic process command")
+	}
+}
+
+func TestSettlementStatusLoadedDoesNotAutoProcessWhileLeaseActive(t *testing.T) {
+	m := minimalModel(stateSettlement, nil, nil)
+	status := settlement.Status{
+		Available: true,
+		Enabled:   true,
+		Queue:     settlement.Queue{Pending: 3, Running: 1, Total: 4},
+		Harness:   settlement.Harness{Concurrency: 1, ActiveLeases: 1},
+	}
+
+	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
+	nm := next.(model)
+
+	if nm.settlementProcessInFlight {
+		t.Fatal("active lease at concurrency should not start another process command")
+	}
+	if cmd != nil {
+		t.Fatal("did not expect automatic process command")
+	}
+}
+
+func TestAutomaticSettlementProcessCompletionDoesNotTightLoop(t *testing.T) {
+	m := minimalModel(stateSettlement, nil, nil)
+	m.settlementProcessInFlight = true
+	result, err := settlement.ParseActionResult("process", []byte(`{"dispatched": true, "ok": true}`))
+	if err != nil {
+		t.Fatalf("ParseActionResult: %v", err)
+	}
+
+	next, cmd := m.Update(settlementActionCompleteMsg{action: "process", automatic: true, result: result})
+	nm := next.(model)
+
+	if nm.settlementProcessInFlight {
+		t.Fatal("automatic process completion should clear in-flight flag")
+	}
+	if cmd != nil {
+		t.Fatal("automatic completion should wait for the next status poll, not immediately reload and relaunch")
+	}
+	if nm.flashErr != "" {
+		t.Fatalf("automatic completion should not spam the status bar, got %q", nm.flashErr)
 	}
 }
 
@@ -1098,9 +1426,9 @@ func TestPostReviewCompleteMsgWithErrorSetsFlashErr(t *testing.T) {
 
 func TestPostReviewCompleteFlashVariants(t *testing.T) {
 	cases := []struct {
-		name    string
-		msg     followup.PostReviewCompleteMsg
-		want    string
+		name string
+		msg  followup.PostReviewCompleteMsg
+		want string
 	}{
 		{
 			name: "plain posted count",

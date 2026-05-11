@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/settlement"
 )
 
 // classifyStartupState returns stateOnboarding if the knowledge store is
@@ -56,6 +57,7 @@ func main() {
 		config:     cfg,
 		layoutMode: prefs.Layout,
 		indexPath:  filepath.Join(cfg.WorkDir, "_index.json"),
+		settlement: settlement.NewModel(),
 	}
 
 	// Best-effort settings panel initialization. A nil panel disables the
@@ -67,6 +69,9 @@ func main() {
 		if panel, _ := initSettingsPanel(); panel != nil {
 			m.settingsPanel = panel
 		}
+		if panel, _ := initSettlementSettingsPanel(); panel != nil {
+			m.settlementSettingsPanel = panel
+		}
 	}
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
@@ -74,4 +79,3 @@ func main() {
 		os.Exit(1)
 	}
 }
-

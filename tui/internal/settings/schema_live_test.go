@@ -170,11 +170,72 @@ func TestLiveRender_CapabilityOverridesMatrixHasLabelsAndDescriptions(t *testing
 	t.Logf("\n--- live advanced capability_overrides render (96-col body) ---\n%s\n--- end ---", rendered)
 }
 
-// TestLiveRender_LegacyTopLevelRolesPanelHidden confirms that legacy
-// top-level roles remain schema-valid data but no longer render as a generic
-// editable panel. Harness-local role editors are built by the host settings
-// panel instead.
-func TestLiveRender_LegacyTopLevelRolesPanelHidden(t *testing.T) {
+func TestLiveRender_SettlementEligibleFrameworksSelectableFromSchemaEnum(t *testing.T) {
+	_, here, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Skip("cannot resolve caller path")
+	}
+	repoRoot := filepath.Join(filepath.Dir(here), "..", "..", "..")
+	schemaPath := filepath.Join(repoRoot, "adapters", "settings.schema.json")
+	capsPath := filepath.Join(repoRoot, "adapters", "capabilities.json")
+
+	store := newFakeStore(map[string]any{
+		"version":          float64(1),
+		"active_framework": "claude-code",
+		"harnesses":        map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"settlement": map[string]any{
+			"active_hours": map[string]any{
+				"ranges": []any{
+					map[string]any{"start": "07:30", "end": "11:00", "days": []any{"tue", "thu"}},
+				},
+			},
+			"harness_selection": map[string]any{
+				"eligible_frameworks": []any{},
+			},
+		},
+	})
+	m, err := NewSettingsModel(SettingsModelOptions{
+		SchemaPath:       schemaPath,
+		CapabilitiesPath: capsPath,
+		Store:            store,
+		Runner:           &fakeRunner{},
+		EnableScript:     "/dev/null",
+		DisableScript:    "/dev/null",
+		Registry:         NewWidgetRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("NewSettingsModel: %v", err)
+	}
+
+	var settlement *ClosedObjectSubPanel
+	for _, w := range m.widgets {
+		if p, ok := w.(*ClosedObjectSubPanel); ok && p.DotPath() == "settlement" {
+			settlement = p
+			break
+		}
+	}
+	if settlement == nil {
+		t.Fatalf("settlement settings panel not found")
+	}
+	rendered := stripANSI(settlement.View())
+	for _, want := range []string{
+		"eligible_frameworks",
+		"[x] claude-code",
+		"[x] opencode",
+		"[x] codex",
+		"ranges",
+		"tue,thu  07:30-11:00",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("settlement eligible frameworks should render schema enum choices; missing %q in:\n%s", want, rendered)
+		}
+	}
+}
+
+// TestLiveRender_TopLevelRolesIgnored confirms that unknown top-level roles in
+// an existing settings document do not render as a generic editable panel.
+// Harness-local role editors are built by the host settings panel instead.
+func TestLiveRender_TopLevelRolesIgnored(t *testing.T) {
 	_, here, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Skip("cannot resolve caller path")
@@ -206,12 +267,12 @@ func TestLiveRender_LegacyTopLevelRolesPanelHidden(t *testing.T) {
 
 	for _, w := range m.widgets {
 		if w.DotPath() == "roles" {
-			t.Fatalf("legacy top-level roles panel should be hidden from generic walker")
+			t.Fatalf("top-level roles panel should not render from generic walker")
 		}
 	}
 	rendered := stripANSI(m.View())
 	if strings.Contains(rendered, "legacy role description") {
-		t.Fatalf("legacy top-level roles description leaked into render:\n%s", rendered)
+		t.Fatalf("top-level roles description leaked into render:\n%s", rendered)
 	}
 }
 

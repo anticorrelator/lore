@@ -83,6 +83,7 @@ for meta_path in sorted(glob.glob(os.path.join(work_dir, "*", "_meta.json"))):
         "updated": str_field(meta, "updated"),
         "issue": str_field(meta, "issue"),
         "pr": str_field(meta, "pr"),
+        "intent_anchor": str_field(meta, "intent_anchor"),
         "related_work": list_field(meta, "related_work"),
         "has_plan_doc": os.path.exists(os.path.join(parent, "plan.md")),
         "has_execution_log": os.path.exists(os.path.join(parent, "execution-log.md"))

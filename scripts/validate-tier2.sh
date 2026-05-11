@@ -13,7 +13,8 @@
 #
 # Required fields:
 #   claim_id, tier, claim, producer_role, protocol_slot, task_id, phase_id,
-#   scale, file, line_range, falsifier, why_this_work_needs_it, captured_at_sha
+#   scale, file, line_range, falsifier, why_this_work_needs_it,
+#   captured_at_sha, change_context
 #
 # tier must equal the literal string "task-evidence".
 # producer_role must be one of: researcher, worker, advisor, spec-lead, implement-lead
@@ -95,6 +96,7 @@ REQUIRED_FIELDS=(
   falsifier
   why_this_work_needs_it
   captured_at_sha
+  change_context
 )
 
 for FIELD in "${REQUIRED_FIELDS[@]}"; do
@@ -145,6 +147,24 @@ else
   LR_M=$(printf '%s' "$LINE_RANGE" | cut -d'-' -f2)
   if [[ "$LR_N" -gt "$LR_M" ]]; then
     fail_field "line_range start ($LR_N) must be <= end ($LR_M)"
+  fi
+fi
+
+# --- change_context must be sufficient for downstream settlement judges ---
+if ! printf '%s' "$ROW" | jq -e '.change_context | type == "object"' >/dev/null 2>&1; then
+  fail_field "change_context must be an object"
+else
+  if ! printf '%s' "$ROW" | jq -e '.change_context.summary | type == "string" and (length > 0)' >/dev/null 2>&1; then
+    fail_field "change_context.summary must be a non-empty string"
+  fi
+  if ! printf '%s' "$ROW" | jq -e '.change_context.changed_files | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' >/dev/null 2>&1; then
+    fail_field "change_context.changed_files must be a non-empty array of non-empty strings"
+  fi
+  if ! printf '%s' "$ROW" | jq -e '(.change_context.diff_ref == null) or (.change_context.diff_ref | type == "string")' >/dev/null 2>&1; then
+    fail_field "change_context.diff_ref must be null or a string"
+  fi
+  if ! printf '%s' "$ROW" | jq -e '.file as $file | .change_context.changed_files | index($file)' >/dev/null 2>&1; then
+    fail_field "change_context.changed_files must include file"
   fi
 fi
 

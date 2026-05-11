@@ -59,6 +59,19 @@ assert_file_not_contains() {
   fi
 }
 
+assert_contains() {
+  local label="$1" haystack="$2" expected="$3"
+  if [[ "$haystack" == *"$expected"* ]]; then
+    echo "  PASS: $label"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $label"
+    echo "    Expected output to contain: $expected"
+    echo "    Output: $haystack"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 assert_eq() {
   local label="$1" actual="$2" expected="$3"
   if [[ "$actual" == "$expected" ]]; then
@@ -104,6 +117,7 @@ echo "Test 1: capture.sh — all 5 provenance flags surface in entry metadata"
 bash "$SCRIPT_DIR/capture.sh" \
   --insight "All provenance round trip for capture" \
   --category "conventions" \
+  --scale "implementation" \
   --producer-role "worker" \
   --protocol-slot "capture" \
   --template-version "sha256:deadbeef" \
@@ -134,6 +148,7 @@ setup_knowledge_store
 bash "$SCRIPT_DIR/capture.sh" \
   --insight "Legacy capture without provenance" \
   --category "conventions" \
+  --scale "implementation" \
   --captured-at-branch "null" \
   --captured-at-sha "null" \
   --captured-at-merge-base-sha "null" \
@@ -155,12 +170,14 @@ setup_knowledge_store
 
 bash "$SCRIPT_DIR/capture.sh" \
   --insight "TV populated" --category "conventions" \
+  --scale "implementation" \
   --template-version "tv-one" \
   --captured-at-branch "null" --captured-at-sha "null" --captured-at-merge-base-sha "null" \
   --skip-manifest > /dev/null 2>&1
 
 bash "$SCRIPT_DIR/capture.sh" \
   --insight "TV omitted" --category "conventions" \
+  --scale "implementation" \
   --captured-at-branch "null" --captured-at-sha "null" --captured-at-merge-base-sha "null" \
   --skip-manifest > /dev/null 2>&1
 
@@ -297,6 +314,7 @@ setup_knowledge_store
 # Entry with full provenance
 bash "$SCRIPT_DIR/capture.sh" \
   --insight "Manifest entry with provenance" --category "conventions" \
+  --scale "implementation" \
   --producer-role "worker" --protocol-slot "capture" --template-version "tv-mf" \
   --captured-at-branch "main" --captured-at-sha "aaaa" --captured-at-merge-base-sha "bbbb" \
   --skip-manifest > /dev/null 2>&1
@@ -341,6 +359,18 @@ assert_eq "default scope is subsystem" "$SCOPE" "subsystem"
 bash "$SCRIPT_DIR/create-work.sh" --title "Arch item" --scope architectural > /dev/null 2>&1
 SCOPE=$(python3 -c "import json; print(json.load(open('$KNOWLEDGE_DIR/_work/arch-item/_meta.json'))['scope'])")
 assert_eq "create --scope architectural" "$SCOPE" "architectural"
+
+# Intent anchor preserves capability intent for downstream /spec without storing raw conversational pressure.
+ANCHOR="Capability: queued claims are actually judged by a real settlement executor; partial if only queue/status UI exists."
+bash "$SCRIPT_DIR/create-work.sh" --title "Intent anchor item" --intent-anchor "$ANCHOR" > /dev/null 2>&1
+ANCHOR_META=$(python3 -c "import json; print(json.load(open('$KNOWLEDGE_DIR/_work/intent-anchor-item/_meta.json'))['intent_anchor'])")
+assert_eq "create stores intent anchor" "$ANCHOR_META" "$ANCHOR"
+assert_file_contains "notes include intent anchor section" "$KNOWLEDGE_DIR/_work/intent-anchor-item/notes.md" "$ANCHOR"
+LOAD_OUTPUT=$(bash "$SCRIPT_DIR/load-work-item.sh" intent-anchor-item)
+assert_contains "load output shows intent anchor" "$LOAD_OUTPUT" "Intent anchor: $ANCHOR"
+LOAD_JSON=$(bash "$SCRIPT_DIR/load-work-item.sh" --json intent-anchor-item)
+LOAD_ANCHOR=$(python3 -c "import json,sys; print(json.load(sys.stdin)['intent_anchor'])" <<< "$LOAD_JSON")
+assert_eq "load json includes intent anchor" "$LOAD_ANCHOR" "$ANCHOR"
 
 # Invalid scope on create
 set +e
@@ -401,6 +431,7 @@ mkdir -p "$NONGIT_DIR"
   unset GIT_DIR GIT_WORK_TREE || true
   bash "$SCRIPT_DIR/capture.sh" \
     --insight "Capture outside repo" --category "conventions" \
+    --scale "implementation" \
     --skip-manifest > /dev/null 2>&1
 )
 

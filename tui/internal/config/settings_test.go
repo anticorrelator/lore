@@ -627,7 +627,7 @@ func TestSettingsDelete_PreservesUnrelatedKeys(t *testing.T) {
 	}
 }
 
-func TestSettingsFallbacks_ListsLegacyFilesWhenUnifiedAbsent(t *testing.T) {
+func TestSettingsFallbacks_IgnoresLegacyFilesWhenUnifiedAbsent(t *testing.T) {
 	dataDir, _ := settingsTestEnv(t)
 	configDir := filepath.Join(dataDir, "config")
 	// Stage a legacy framework.json (no settings.json).
@@ -651,30 +651,8 @@ func TestSettingsFallbacks_ListsLegacyFilesWhenUnifiedAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SettingsFallbacks: %v", err)
 	}
-	// Multi-vault keyed shape: the obsidian fallback collapses from two
-	// per-key entries (vault_path, repo_path) to a single whole-file entry
-	// (`<all>`) — the legacy file is consulted as a unit during fallback
-	// synthesis, mirroring how ceremonies.json reports.
-	want := map[string]bool{
-		"framework.json::framework":            true,
-		"framework.json::capability_overrides": true,
-		"framework.json::roles":                true,
-		"obsidian.json::<all>":                 true,
-	}
-	for _, row := range got {
-		if !want[row] {
-			t.Errorf("unexpected fallback row: %s", row)
-		}
-	}
-	// Spot-check at least the framework rows are listed.
-	gotSet := map[string]bool{}
-	for _, row := range got {
-		gotSet[row] = true
-	}
-	for w := range want {
-		if !gotSet[w] {
-			t.Errorf("missing expected fallback row: %s", w)
-		}
+	if len(got) != 0 {
+		t.Fatalf("legacy fallback rows should be disabled, got %v", got)
 	}
 }
 
@@ -696,10 +674,8 @@ func TestSettingsFallbacks_OmitsRowsCoveredByUnified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SettingsFallbacks: %v", err)
 	}
-	for _, row := range got {
-		if row == "framework.json::framework" {
-			t.Errorf("framework.json::framework should NOT be in fallbacks (active_framework is covered)")
-		}
+	if len(got) != 0 {
+		t.Fatalf("legacy fallback rows should be disabled, got %v", got)
 	}
 }
 

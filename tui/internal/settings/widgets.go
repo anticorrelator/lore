@@ -15,6 +15,8 @@
 //     ALL configured constraints), IntentReject on Enter with an invalid
 //     draft (draft + focus survive), and IntentDiscard on Esc / Tab /
 //     focus-out (the visible state reverts to the original committed value).
+//     Containers emit IntentNavigate when Esc only backs out of a nesting
+//     level and no leaf draft was reverted.
 //
 // Per D3 + the lipgloss O(n)-per-frame gotcha, every lipgloss.Style is cached
 // as a struct field at construction; View() never allocates styles.
@@ -47,6 +49,10 @@ const (
 	// (Tab / focus-out). The host writes nothing; the widget has already
 	// reverted its draft to the original committed value.
 	IntentDiscard
+	// IntentNavigate means a container consumed a navigation gesture such as
+	// Esc backing out of one nesting level. The host writes nothing, and no
+	// leaf value was reverted or cleared.
+	IntentNavigate
 	// IntentReject means the typed candidate failed at least one schema
 	// constraint at commit time. The host writes nothing and surfaces
 	// Errors via the status bar. The widget keeps the draft + focus.
@@ -340,10 +346,10 @@ func (a *AdvancedSection) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldInten
 					return a, cmd, blurIntent
 				}
 				a.entered = false
-				return a, cmd, &FieldIntent{DotPath: a.dotPath, Status: IntentDiscard}
+				return a, cmd, &FieldIntent{DotPath: a.dotPath, Status: IntentNavigate}
 			}
 			a.expanded = false
-			return a, nil, &FieldIntent{DotPath: a.dotPath, Status: IntentDiscard}
+			return a, nil, &FieldIntent{DotPath: a.dotPath, Status: IntentNavigate}
 		}
 	}
 	if !a.expanded || !a.entered || a.child == nil {
@@ -1226,6 +1232,7 @@ type ListEditor struct {
 	label       string
 	committed   []string
 	draft       []string
+	allowed     []string
 	itemPattern *regexp.Regexp
 	minItems    int
 	uniqueItems bool
@@ -1235,6 +1242,7 @@ type ListEditor struct {
 	cursor      int
 	editing     bool
 	appending   bool
+	selector    bool
 	appendBuf   string
 	errors      []string
 	styles      widgetStyles
@@ -1256,6 +1264,13 @@ func NewListEditor(dotPath, label string, current []string, itemPattern *regexp.
 		allowUnset:  allowUnset,
 		styles:      defaultStyles(),
 	}
+}
+
+func NewEnumListEditor(dotPath, label string, current, allowed []string, minItems int, uniqueItems, present, allowUnset bool) *ListEditor {
+	w := NewListEditor(dotPath, label, current, nil, minItems, uniqueItems, present, allowUnset)
+	w.allowed = append([]string(nil), allowed...)
+	w.selector = true
+	return w
 }
 
 func (l *ListEditor) Init() tea.Cmd   { return nil }
@@ -1316,7 +1331,38 @@ func (l *ListEditor) validate(items []string) []string {
 			}
 		}
 	}
+	if l.selector {
+		allowed := make(map[string]struct{}, len(l.allowed))
+		for _, it := range l.allowed {
+			allowed[it] = struct{}{}
+		}
+		for _, it := range items {
+			if _, ok := allowed[it]; !ok {
+				errs = append(errs, fmt.Sprintf("unsupported item: %q", it))
+			}
+		}
+	}
 	return errs
+}
+
+func (l *ListEditor) toggleSelectedOption(value string) {
+	selected := !stringSliceContains(l.draft, value)
+	current := make(map[string]bool, len(l.draft)+1)
+	for _, it := range l.draft {
+		current[it] = true
+	}
+	if selected {
+		current[value] = true
+	} else {
+		delete(current, value)
+	}
+	next := make([]string, 0, len(l.allowed))
+	for _, it := range l.allowed {
+		if current[it] {
+			next = append(next, it)
+		}
+	}
+	l.draft = next
 }
 
 func (l *ListEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
@@ -1382,7 +1428,11 @@ func (l *ListEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 
 	switch key.String() {
 	case "j", "down":
-		if l.cursor < len(l.draft)-1 {
+		maxCursor := len(l.draft) - 1
+		if l.selector {
+			maxCursor = len(l.allowed) - 1
+		}
+		if l.cursor < maxCursor {
 			l.cursor++
 		}
 	case "k", "up":
@@ -1390,14 +1440,24 @@ func (l *ListEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 			l.cursor--
 		}
 	case "a":
+		if l.selector {
+			return l, nil, nil
+		}
 		l.appending = true
 		l.appendBuf = ""
 	case "d":
+		if l.selector {
+			return l, nil, nil
+		}
 		if l.cursor >= 0 && l.cursor < len(l.draft) {
 			l.draft = append(l.draft[:l.cursor], l.draft[l.cursor+1:]...)
 			if l.cursor >= len(l.draft) && l.cursor > 0 {
 				l.cursor--
 			}
+		}
+	case " ", "x":
+		if l.selector && l.cursor >= 0 && l.cursor < len(l.allowed) {
+			l.toggleSelectedOption(l.allowed[l.cursor])
 		}
 	case "enter":
 		errs := l.validate(l.draft)
@@ -1447,12 +1507,20 @@ func (l *ListEditor) View() string {
 	if !stringSliceEqual(l.draft, l.committed) {
 		indicator = l.styles.pending.Render("*")
 	}
-	header := fmt.Sprintf("%s %s: (%d items)", indicator, l.styles.label.Render(l.label), len(l.draft))
+	countLabel := "items"
+	if l.selector {
+		countLabel = "selected"
+	}
+	header := fmt.Sprintf("%s %s: (%d %s)", indicator, l.styles.label.Render(l.label), len(l.draft), countLabel)
 	if !l.present && l.allowUnset {
 		header += " " + l.styles.dim.Render("(inherited)")
 	}
 	if l.focused && !l.editing {
-		header = l.styles.cursor.Render(header) + " " + l.styles.dim.Render("[enter edit]")
+		action := "[enter edit]"
+		if l.selector {
+			action = "[enter select]"
+		}
+		header = l.styles.cursor.Render(header) + " " + l.styles.dim.Render(action)
 	}
 	b.WriteString(header)
 	b.WriteByte('\n')
@@ -1461,18 +1529,37 @@ func (l *ListEditor) View() string {
 		b.WriteByte('\n')
 	}
 
-	for i, item := range l.draft {
-		row := fmt.Sprintf("    %s", item)
-		if l.focused && l.editing && i == l.cursor && !l.appending {
-			b.WriteString(l.styles.cursor.Render(row))
-		} else {
-			b.WriteString(l.styles.value.Render(row))
+	if l.selector {
+		for i, item := range l.allowed {
+			marker := "[ ]"
+			if stringSliceContains(l.draft, item) {
+				marker = "[x]"
+			}
+			row := fmt.Sprintf("    %s %s", marker, item)
+			if l.focused && l.editing && i == l.cursor {
+				b.WriteString(l.styles.cursor.Render(row))
+			} else {
+				b.WriteString(l.styles.value.Render(row))
+			}
+			b.WriteByte('\n')
 		}
-		b.WriteByte('\n')
+	} else {
+		for i, item := range l.draft {
+			row := fmt.Sprintf("    %s", item)
+			if l.focused && l.editing && i == l.cursor && !l.appending {
+				b.WriteString(l.styles.cursor.Render(row))
+			} else {
+				b.WriteString(l.styles.value.Render(row))
+			}
+			b.WriteByte('\n')
+		}
 	}
 	if l.appending {
 		cursor := "_"
 		b.WriteString(fmt.Sprintf("    %s%s\n", l.styles.pending.Render("+ "), l.appendBuf+cursor))
+	} else if l.focused && l.editing && l.selector {
+		b.WriteString(l.styles.dim.Render("    [Space toggle  Enter commit  Esc discard]"))
+		b.WriteByte('\n')
 	} else if l.focused && l.editing {
 		b.WriteString(l.styles.dim.Render("    [a add  d delete  Enter commit  Esc discard]"))
 		b.WriteByte('\n')
@@ -1483,6 +1570,371 @@ func (l *ListEditor) View() string {
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// ----------------------------------------------------------------------------
+// ActiveHoursRangesEditor — settlement active-hours range editor.
+// ----------------------------------------------------------------------------
+
+type ActiveHoursRange struct {
+	Days  []string
+	Start string
+	End   string
+}
+
+type ActiveHoursRangesEditor struct {
+	dotPath   string
+	label     string
+	committed []ActiveHoursRange
+	draft     []ActiveHoursRange
+	focused   bool
+	editing   bool
+	present   bool
+	cursor    int
+	field     int // 0=days, 1=start, 2=end
+	errors    []string
+	styles    widgetStyles
+
+	description string
+	wrapWidth   int
+}
+
+var activeHourDayIDs = []string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+
+func NewActiveHoursRangesEditor(dotPath, label string, current []ActiveHoursRange, present bool) *ActiveHoursRangesEditor {
+	return &ActiveHoursRangesEditor{
+		dotPath:   dotPath,
+		label:     label,
+		committed: cloneActiveHoursRanges(current),
+		draft:     cloneActiveHoursRanges(current),
+		present:   present,
+		styles:    defaultStyles(),
+	}
+}
+
+func defaultActiveHoursRange() ActiveHoursRange {
+	return ActiveHoursRange{Days: []string{"mon", "tue", "wed", "thu", "fri"}, Start: "09:00", End: "17:00"}
+}
+
+func (a *ActiveHoursRangesEditor) Init() tea.Cmd   { return nil }
+func (a *ActiveHoursRangesEditor) DotPath() string { return a.dotPath }
+func (a *ActiveHoursRangesEditor) Focused() bool   { return a.focused }
+func (a *ActiveHoursRangesEditor) Focus() tea.Cmd  { a.focused = true; return nil }
+func (a *ActiveHoursRangesEditor) ConsumesNavRunes() bool {
+	return a.editing
+}
+
+func (a *ActiveHoursRangesEditor) SetDisplayHints(_, description string) {
+	a.description = description
+}
+
+func (a *ActiveHoursRangesEditor) SetWrapWidth(w int) { a.wrapWidth = w }
+
+func (a *ActiveHoursRangesEditor) Blur() *FieldIntent {
+	a.focused = false
+	a.editing = false
+	if activeHoursRangesEqual(a.draft, a.committed) {
+		return nil
+	}
+	a.draft = cloneActiveHoursRanges(a.committed)
+	a.errors = nil
+	return &FieldIntent{DotPath: a.dotPath, Value: activeHoursRangesValue(a.committed), Status: IntentDiscard}
+}
+
+func (a *ActiveHoursRangesEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
+	if !a.focused {
+		return a, nil, nil
+	}
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return a, nil, nil
+	}
+	if !a.editing {
+		switch key.String() {
+		case "enter", "i", "e":
+			if len(a.draft) == 0 {
+				a.draft = []ActiveHoursRange{defaultActiveHoursRange()}
+				a.cursor = 0
+				a.field = 0
+			}
+			a.editing = true
+			a.errors = nil
+		}
+		return a, nil, nil
+	}
+
+	switch key.String() {
+	case "j", "down":
+		a.stepEditField(+1)
+	case "k", "up":
+		a.stepEditField(-1)
+	case "h", "left":
+		if a.field > 0 {
+			a.field--
+		}
+	case "l", "right":
+		if a.field < 2 {
+			a.field++
+		}
+	case "a":
+		a.draft = append(a.draft, defaultActiveHoursRange())
+		a.cursor = len(a.draft) - 1
+		a.field = 0
+	case "d":
+		if len(a.draft) > 0 && a.cursor >= 0 && a.cursor < len(a.draft) {
+			a.draft = append(a.draft[:a.cursor], a.draft[a.cursor+1:]...)
+			if a.cursor >= len(a.draft) {
+				a.cursor = len(a.draft) - 1
+			}
+			if a.cursor < 0 {
+				a.cursor = 0
+			}
+			if len(a.draft) == 0 {
+				a.field = 0
+			}
+		}
+	case "+", "=":
+		a.adjustTime(+30)
+	case "-":
+		a.adjustTime(-30)
+	case "enter":
+		errs := a.validate()
+		if len(errs) > 0 {
+			a.errors = errs
+			return a, nil, &FieldIntent{DotPath: a.dotPath, Value: activeHoursRangesValue(a.draft), Status: IntentReject, Errors: errs}
+		}
+		a.errors = nil
+		a.committed = cloneActiveHoursRanges(a.draft)
+		a.present = true
+		a.editing = false
+		return a, nil, &FieldIntent{DotPath: a.dotPath, Value: activeHoursRangesValue(a.draft), Status: IntentCommit}
+	case "esc":
+		a.editing = false
+		a.draft = cloneActiveHoursRanges(a.committed)
+		a.errors = nil
+		return a, nil, &FieldIntent{DotPath: a.dotPath, Value: activeHoursRangesValue(a.committed), Status: IntentDiscard}
+	default:
+		if len(key.String()) == 1 && key.String()[0] >= '1' && key.String()[0] <= '7' {
+			a.toggleDay(int(key.String()[0] - '1'))
+		}
+	}
+	return a, nil, nil
+}
+
+func (a *ActiveHoursRangesEditor) stepEditField(delta int) {
+	if len(a.draft) == 0 {
+		return
+	}
+	next := a.cursor*3 + a.field + delta
+	max := len(a.draft)*3 - 1
+	if next < 0 {
+		next = 0
+	}
+	if next > max {
+		next = max
+	}
+	a.cursor = next / 3
+	a.field = next % 3
+}
+
+func (a *ActiveHoursRangesEditor) adjustTime(delta int) {
+	if a.cursor < 0 || a.cursor >= len(a.draft) || a.field == 0 {
+		return
+	}
+	r := &a.draft[a.cursor]
+	if a.field == 1 {
+		r.Start = formatMinutes(parseHHMM(r.Start) + delta)
+	} else {
+		r.End = formatMinutes(parseHHMM(r.End) + delta)
+	}
+}
+
+func (a *ActiveHoursRangesEditor) toggleDay(dayIdx int) {
+	if a.cursor < 0 || a.cursor >= len(a.draft) || dayIdx < 0 || dayIdx >= len(activeHourDayIDs) {
+		return
+	}
+	day := activeHourDayIDs[dayIdx]
+	r := &a.draft[a.cursor]
+	if stringSliceContains(r.Days, day) {
+		if len(r.Days) == 1 {
+			return
+		}
+		next := r.Days[:0]
+		for _, d := range r.Days {
+			if d != day {
+				next = append(next, d)
+			}
+		}
+		r.Days = append([]string(nil), next...)
+		return
+	}
+	for _, d := range activeHourDayIDs {
+		if d == day || stringSliceContains(r.Days, d) {
+			if !stringSliceContains(r.Days, d) {
+				r.Days = append(r.Days, d)
+			}
+		}
+	}
+	r.Days = normalizeDays(r.Days)
+}
+
+func (a *ActiveHoursRangesEditor) validate() []string {
+	var errs []string
+	for i, r := range a.draft {
+		if len(normalizeDays(r.Days)) == 0 {
+			errs = append(errs, fmt.Sprintf("range %d must include at least one day", i+1))
+		}
+		if !validHHMM(r.Start) || !validHHMM(r.End) {
+			errs = append(errs, fmt.Sprintf("range %d times must be HH:MM", i+1))
+		}
+	}
+	return errs
+}
+
+func (a *ActiveHoursRangesEditor) View() string {
+	var b strings.Builder
+	indicator := " "
+	if !activeHoursRangesEqual(a.draft, a.committed) {
+		indicator = a.styles.pending.Render("*")
+	}
+	header := fmt.Sprintf("%s %s: (%d ranges)", indicator, a.styles.label.Render(a.label), len(a.draft))
+	if !a.present {
+		header += " " + a.styles.dim.Render("(default)")
+	}
+	if a.focused && !a.editing {
+		header = a.styles.cursor.Render(header) + " " + a.styles.dim.Render("[enter edit]")
+	}
+	b.WriteString(header)
+	b.WriteByte('\n')
+	if a.description != "" {
+		b.WriteString(renderDescription(a.styles, a.description, 4, a.wrapWidth))
+		b.WriteByte('\n')
+	}
+	for i, r := range a.draft {
+		row := fmt.Sprintf("    %s  %s-%s", daysLabel(r.Days), r.Start, r.End)
+		if a.focused && a.editing && i == a.cursor {
+			row += " " + a.styles.dim.Render(activeHoursFieldLabel(a.field))
+			b.WriteString(a.styles.cursor.Render(row))
+			b.WriteByte('\n')
+			b.WriteString(a.styles.dim.Render("      days: " + activeHoursDaySelector(r.Days)))
+		} else {
+			b.WriteString(a.styles.value.Render(row))
+		}
+		b.WriteByte('\n')
+	}
+	if a.focused && a.editing {
+		b.WriteString(a.styles.dim.Render("    [j/k field  h/l field  +/- time  1-7 days  a add  d delete  Enter commit  Esc discard]"))
+		b.WriteByte('\n')
+	}
+	if len(a.errors) > 0 {
+		b.WriteString("  ")
+		b.WriteString(a.styles.error.Render(strings.Join(a.errors, "; ")))
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func activeHoursFieldLabel(field int) string {
+	switch field {
+	case 0:
+		return "[days]"
+	case 1:
+		return "[start]"
+	case 2:
+		return "[end]"
+	default:
+		return ""
+	}
+}
+
+func activeHoursDaySelector(days []string) string {
+	parts := make([]string, 0, len(activeHourDayIDs))
+	for i, d := range activeHourDayIDs {
+		marker := "[ ]"
+		if stringSliceContains(days, d) {
+			marker = "[x]"
+		}
+		parts = append(parts, fmt.Sprintf("%d%s %s", i+1, marker, d))
+	}
+	return strings.Join(parts, " ")
+}
+
+func daysLabel(days []string) string {
+	days = normalizeDays(days)
+	if stringSliceEqual(days, []string{"mon", "tue", "wed", "thu", "fri"}) {
+		return "mon-fri"
+	}
+	if stringSliceEqual(days, activeHourDayIDs) {
+		return "daily"
+	}
+	return strings.Join(days, ",")
+}
+
+func activeHoursRangesValue(ranges []ActiveHoursRange) []any {
+	out := make([]any, 0, len(ranges))
+	for _, r := range ranges {
+		out = append(out, map[string]any{
+			"days":  append([]string(nil), normalizeDays(r.Days)...),
+			"start": r.Start,
+			"end":   r.End,
+		})
+	}
+	return out
+}
+
+func cloneActiveHoursRanges(in []ActiveHoursRange) []ActiveHoursRange {
+	out := make([]ActiveHoursRange, len(in))
+	for i, r := range in {
+		out[i] = ActiveHoursRange{Days: append([]string(nil), normalizeDays(r.Days)...), Start: r.Start, End: r.End}
+	}
+	return out
+}
+
+func activeHoursRangesEqual(a, b []ActiveHoursRange) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Start != b[i].Start || a[i].End != b[i].End || !stringSliceEqual(normalizeDays(a[i].Days), normalizeDays(b[i].Days)) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeDays(days []string) []string {
+	out := []string{}
+	for _, d := range activeHourDayIDs {
+		if stringSliceContains(days, d) {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+func validHHMM(s string) bool {
+	if len(s) != 5 || s[2] != ':' {
+		return false
+	}
+	return parseHHMM(s) >= 0
+}
+
+func parseHHMM(s string) int {
+	if len(s) != 5 || s[2] != ':' {
+		return -1
+	}
+	hh, err1 := strconv.Atoi(s[:2])
+	mm, err2 := strconv.Atoi(s[3:])
+	if err1 != nil || err2 != nil || hh < 0 || hh > 23 || mm < 0 || mm > 59 {
+		return -1
+	}
+	return hh*60 + mm
+}
+
+func formatMinutes(mins int) string {
+	const day = 24 * 60
+	mins = ((mins % day) + day) % day
+	return fmt.Sprintf("%02d:%02d", mins/60, mins%60)
 }
 
 // ----------------------------------------------------------------------------
@@ -1756,7 +2208,7 @@ func (p *ClosedObjectSubPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *Field
 				return p, cmd, blurIntent
 			}
 			p.entered = false
-			return p, cmd, &FieldIntent{DotPath: p.dotPath, Status: IntentDiscard}
+			return p, cmd, &FieldIntent{DotPath: p.dotPath, Status: IntentNavigate}
 		}
 	}
 	if !p.entered {
@@ -1770,7 +2222,15 @@ func (p *ClosedObjectSubPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *Field
 func (p *ClosedObjectSubPanel) View() string {
 	var b strings.Builder
 	if p.label != "" {
-		b.WriteString(p.styles.subLabel.Render(p.label))
+		label := p.styles.subLabel.Render(p.label)
+		if p.focused {
+			state := "[enter]"
+			if p.entered {
+				state = "[active]"
+			}
+			label = p.styles.cursor.Render(p.label) + " " + p.styles.dim.Render(state)
+		}
+		b.WriteString(label)
 		b.WriteByte('\n')
 	}
 	if p.description != "" {
@@ -2248,6 +2708,15 @@ func stringSliceEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func stringSliceContains(items []string, needle string) bool {
+	for _, item := range items {
+		if item == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func stringMapEqual(a, b map[string]string) bool {

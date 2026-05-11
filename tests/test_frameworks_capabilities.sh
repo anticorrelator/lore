@@ -391,6 +391,33 @@ if bad:
 ' "$CAPS"
 }
 
+check_spec_team_messaging_fanout_contract() {
+  python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+spec = d["skills"]["spec"]
+reqs = {entry["id"]: entry for entry in spec["requires"] if isinstance(entry, dict)}
+team = reqs.get("team_messaging")
+subagents = reqs.get("subagents")
+if not team or not subagents:
+    print("spec must declare object-form team_messaging and subagents requirements")
+    sys.exit(1)
+if team.get("partial_below") != "none":
+    print("team_messaging must not hard-refuse /spec when absent")
+    sys.exit(1)
+text = " ".join([team.get("notes", ""), spec.get("notes", "")]).lower()
+if "lead-orchestrated researcher fanout" not in text:
+    print("spec contract must name lead-orchestrated researcher fanout")
+    sys.exit(1)
+if "no researcher fanout" in text:
+    print("spec contract must not collapse team_messaging=none to no researcher fanout")
+    sys.exit(1)
+if "subagents=none" not in text or "spec-short" not in text:
+    print("spec contract must reserve spec-short collapse for subagents=none")
+    sys.exit(1)
+' "$CAPS"
+}
+
 # --- Run all ---
 
 echo "== Schema shape =="
@@ -418,6 +445,7 @@ assert_ok "skills._levels_order matches support_levels closed set"    check_leve
 assert_ok "every skills.<name>.requires id is known"                  check_skills_requires_known_ids
 assert_ok "object-form requires entries name valid levels"            check_skills_requires_levels
 assert_ok "team-heavy skills declare partial-mode tolerance"          check_team_heavy_partial_mode
+assert_ok "spec team_messaging=none preserves researcher fanout"      check_spec_team_messaging_fanout_contract
 
 echo ""
 echo "Total: $((PASS + FAIL)) | PASS: $PASS | FAIL: $FAIL"

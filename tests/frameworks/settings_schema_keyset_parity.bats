@@ -279,6 +279,44 @@ PY
   fi
 }
 
+@test "settlement schema defaults fail closed with built-in executor" {
+  SCHEMA="$SCHEMA" TEMPLATE="$REPO_DIR/adapters/settings.template.json" python3 - <<'PY'
+import json, os
+with open(os.environ["SCHEMA"]) as f:
+    s = json.load(f)
+with open(os.environ["TEMPLATE"]) as f:
+    t = json.load(f)
+cfg = t["settlement"]
+assert cfg["enabled"] is False
+assert cfg["max_concurrency"] == 1
+assert cfg["batch_size"] == 12
+assert cfg["batch_recompute_min_interval_seconds"] == 60
+assert cfg["concordance_window_size"] == 8
+assert cfg["concordance_window_size"] <= cfg["batch_size"]
+assert "budgets" not in cfg
+assert cfg["active_hours"]["enabled"] is False
+assert cfg["active_hours"]["timezone"] == "local"
+defs = s["$defs"]["settlement_config"]["properties"]
+assert defs["enabled"]["default"] is False
+assert "executor" not in defs
+assert "paused" not in defs
+assert defs["max_concurrency"]["minimum"] == 1
+assert defs["batch_size"]["minimum"] == 1
+assert defs["batch_size"]["default"] == 12
+assert defs["batch_recompute_min_interval_seconds"]["minimum"] == 0
+assert defs["batch_recompute_min_interval_seconds"]["default"] == 60
+assert defs["concordance_window_size"]["minimum"] == 0
+assert defs["concordance_window_size"]["default"] == 8
+assert "days" not in defs["active_hours"]["properties"]
+assert "start" not in defs["active_hours"]["properties"]
+assert "end" not in defs["active_hours"]["properties"]
+assert defs["active_hours"]["properties"]["ranges"]["items"]["properties"]["days"]["items"]["enum"] == ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+assert defs["active_hours"]["properties"]["ranges"]["minItems"] == 1
+assert defs["active_hours"]["properties"]["ranges"]["items"]["required"] == ["days", "start", "end"]
+assert defs["harness_selection"]["properties"]["mode"]["enum"] == ["first_eligible", "random", "active"]
+PY
+}
+
 @test "schema rejects _deprecated_legacy_source at root" {
   python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
@@ -300,7 +338,7 @@ sys.exit("schema FAILED to reject _deprecated_legacy_source at root")
 PY
 }
 
-@test "schema rejects empty-string role_value (roles.lead = \"\")" {
+@test "schema rejects empty-string role_value (harness role overlay)" {
   python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os, sys
@@ -310,8 +348,11 @@ with open(os.environ["SCHEMA"]) as f:
 instance = {
     "version": 1,
     "active_framework": "claude-code",
-    "harnesses": {"claude-code": {"args": []}, "opencode": {"args": []}, "codex": {"args": []}},
-    "roles": {"lead": "", "default": "sonnet"}
+    "harnesses": {
+        "claude-code": {"args": [], "roles": {"lead": ""}},
+        "opencode": {"args": []},
+        "codex": {"args": []}
+    }
 }
 try:
     jsonschema.validate(instance, schema)
@@ -342,10 +383,34 @@ instance = {
                 "pr-review":      []
             }
         }
-    },
-    "roles": {"default": "sonnet"}
+    }
 }
 jsonschema.validate(instance, schema)
+PY
+}
+
+@test "schema rejects top-level ceremonies" {
+  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
+  SCHEMA="$SCHEMA" python3 - <<'PY'
+import json, os, sys
+import jsonschema
+with open(os.environ["SCHEMA"]) as f:
+    schema = json.load(f)
+instance = {
+    "version": 1,
+    "active_framework": "codex",
+    "harnesses": {
+        "claude-code": {"args": []},
+        "opencode": {"args": []},
+        "codex": {"args": []}
+    },
+    "ceremonies": {"spec-design": ["codex-design-review"]}
+}
+try:
+    jsonschema.validate(instance, schema)
+except jsonschema.ValidationError:
+    sys.exit(0)
+sys.exit("schema FAILED to reject top-level ceremonies")
 PY
 }
 
@@ -363,8 +428,7 @@ instance = {
         "claude-code": {"args": [], "roles": {"unknown_role": "opus"}},
         "opencode": {"args": []},
         "codex": {"args": []}
-    },
-    "roles": {"default": "sonnet"}
+    }
 }
 try:
     jsonschema.validate(instance, schema)
@@ -410,8 +474,7 @@ instance = {
         "opencode": {"args": []},
         "codex": {"args": []},
         "phantom-harness": {"args": []}
-    },
-    "roles": {"default": "sonnet"}
+    }
 }
 try:
     jsonschema.validate(instance, schema)

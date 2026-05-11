@@ -167,10 +167,8 @@ func loadCapabilitiesFile() (capabilitiesFile, error) {
 // ResolveActiveFramework returns the active harness framework name, mirroring
 // resolve_active_framework in scripts/lib.sh. Precedence:
 //  1. LORE_FRAMEWORK env var (validated against capabilities.json frameworks).
-//  2. Unified ~/.lore/config/settings.json `.active_framework` (T2/T4).
-//  3. Legacy ~/.lore/config/framework.json `.framework` (deprecation-window
-//     fallback per D4 phase 2; one release).
-//  4. Built-in default "claude-code".
+//  2. Unified ~/.lore/config/settings.json `.active_framework`.
+//  3. Built-in default "claude-code".
 //
 // Unknown framework names from any source are rejected with an error rather
 // than silently routing to a default.
@@ -185,13 +183,6 @@ func ResolveActiveFramework() (string, error) {
 		if err := json.Unmarshal([]byte(raw), &v); err == nil && v != "" {
 			candidate = v
 			source = SettingsPath()
-		}
-	}
-	if candidate == "" {
-		cfg := loadUserFrameworkConfig()
-		if cfg.Framework != "" {
-			candidate = cfg.Framework
-			source = frameworkConfigPath()
 		}
 	}
 	if candidate == "" {
@@ -513,9 +504,9 @@ type HarnessArgsConfig struct {
 // The Frameworks map is keyed by framework name (claude-code, opencode, codex).
 // _deprecated_legacy_source records the migration source when present.
 type harnessArgsFile struct {
-	Version                 int                          `json:"version"`
-	DeprecatedLegacySource  string                       `json:"_deprecated_legacy_source,omitempty"`
-	Frameworks              map[string]HarnessArgsConfig `json:"-"`
+	Version                int                          `json:"version"`
+	DeprecatedLegacySource string                       `json:"_deprecated_legacy_source,omitempty"`
+	Frameworks             map[string]HarnessArgsConfig `json:"-"`
 }
 
 // UnmarshalJSON pulls the version + deprecation marker out and routes every
@@ -561,47 +552,12 @@ func legacyClaudeArgsPath() string {
 	return filepath.Join(dataRoot, "config", "claude.json")
 }
 
-// MigrateClaudeArgsToHarnessArgs mirrors scripts/lib.sh
-// migrate_claude_args_to_harness_args. One-shot: when harness-args.json is
-// absent and legacy claude.json has a valid `.args` array, write a new
-// harness-args.json with the legacy args under the `claude-code` key and
-// stamp the migration source into _deprecated_legacy_source. Idempotent —
-// returns nil silently when the new file already exists, the legacy file
-// is missing, or the legacy file has no array .args. The legacy file is
-// left in place per the "deprecation note for one release" contract.
+// MigrateClaudeArgsToHarnessArgs is retained as a compatibility no-op.
+// Runtime settings no longer migrate or read legacy claude.json /
+// harness-args.json files; harness args come from settings.json or
+// LORE_HARNESS_ARGS only.
 func MigrateClaudeArgsToHarnessArgs() error {
-	newFile := harnessArgsPath()
-	legacyFile := legacyClaudeArgsPath()
-
-	if _, err := os.Stat(newFile); err == nil {
-		return nil // already migrated
-	}
-	legacyData, err := os.ReadFile(legacyFile)
-	if err != nil {
-		return nil // no legacy file → nothing to migrate
-	}
-	var legacy ClaudeConfig
-	if err := json.Unmarshal(legacyData, &legacy); err != nil || legacy.Args == nil {
-		return nil // malformed → don't touch
-	}
-
-	if err := os.MkdirAll(filepath.Dir(newFile), 0755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(newFile), err)
-	}
-	out := map[string]any{
-		"version":                   1,
-		"_deprecated_legacy_source": legacyFile,
-		"claude-code":               HarnessArgsConfig{Args: legacy.Args},
-	}
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal harness-args: %w", err)
-	}
-	tmp := newFile + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0644); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
-	}
-	return os.Rename(tmp, newFile)
+	return nil
 }
 
 // LoadHarnessArgs mirrors scripts/lib.sh load_harness_args. Returns the args
@@ -610,14 +566,8 @@ func MigrateClaudeArgsToHarnessArgs() error {
 //
 // Resolution order matches the bash precedence:
 //  1. LORE_HARNESS_ARGS env var (JSON array, applies to whichever harness).
-//  2. LORE_CLAUDE_ARGS env var (legacy alias, only honored when harness is
-//     claude-code).
-//  3. Unified settings.json `.harnesses.<harness>.args` (T2/T4 primary).
-//  4. $LORE_DATA_DIR/config/harness-args.json `[<harness>].args` (legacy
-//     deprecation-window fallback per D4 phase 2).
-//  5. $LORE_DATA_DIR/config/claude.json `.args` (legacy, only honored when
-//     harness is claude-code; on-the-fly migration runs first).
-//  6. Built-in default: --dangerously-skip-permissions for claude-code,
+//  2. Unified settings.json `.harnesses.<harness>.args`.
+//  3. Built-in default: --dangerously-skip-permissions for claude-code,
 //     empty for any other harness.
 func LoadHarnessArgs(harness string) []string {
 	if harness == "" {
@@ -634,40 +584,11 @@ func LoadHarnessArgs(harness string) []string {
 			return args
 		}
 	}
-	if harness == "claude-code" {
-		if env := os.Getenv("LORE_CLAUDE_ARGS"); env != "" {
-			var args []string
-			if err := json.Unmarshal([]byte(env), &args); err == nil {
-				return args
-			}
-		}
-	}
-
 	// Unified settings.json (primary): harnesses.<harness>.args.
 	if raw, present, _ := SettingsGet("harnesses." + harness + ".args"); present {
 		var args []string
 		if err := json.Unmarshal([]byte(raw), &args); err == nil && args != nil {
 			return args
-		}
-	}
-
-	_ = MigrateClaudeArgsToHarnessArgs()
-
-	if data, err := os.ReadFile(harnessArgsPath()); err == nil {
-		var f harnessArgsFile
-		if err := json.Unmarshal(data, &f); err == nil {
-			if cfg, ok := f.Frameworks[harness]; ok && cfg.Args != nil {
-				return cfg.Args
-			}
-		}
-	}
-
-	if harness == "claude-code" {
-		if data, err := os.ReadFile(legacyClaudeArgsPath()); err == nil {
-			var c ClaudeConfig
-			if err := json.Unmarshal(data, &c); err == nil && c.Args != nil {
-				return c.Args
-			}
 		}
 	}
 
@@ -754,11 +675,8 @@ func loadRoleIDs() (map[string]struct{}, error) {
 //  1. Env var LORE_MODEL_<ROLE_UPPER> (e.g., LORE_MODEL_LEAD=opus).
 //  2. Per-repo .lore.config `model_for_<role>=<model>` (walk-up from cwd).
 //  3. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay
-//     — applies to the active harness only; absent overlay falls through).
-//  4. Unified settings.json `.roles.<role>` (top-level default).
-//  5. Legacy framework.json `.roles.<role>` (deprecation-window fallback).
-//  6. Unified `.harnesses.<active>.roles.default` (overlay's own default).
-//  7. Unified `.roles.default` and legacy framework.json `.roles.default`.
+//     — applies to the active harness only).
+//  4. Unified `.harnesses.<active>.roles.default` (overlay's own default).
 //
 // Closed-set rejection applies identically to the overlay layer and the
 // top-level layer: an unknown role id stored under
@@ -820,33 +738,14 @@ func ResolveModelForRole(role string) (string, error) {
 		}
 	}
 
-	// 4. Unified settings.json `.roles.<role>` (top-level).
-	if v := readSettingsRoleString("roles." + role); v != "" {
-		return v, nil
-	}
-
-	// 5. Legacy framework.json `.roles.<role>` (deprecation-window fallback).
-	cfg := loadUserFrameworkConfig()
-	if v, ok := cfg.Roles[role]; ok && v != "" {
-		return v, nil
-	}
-
-	// 6. Unified `.harnesses.<active>.roles.default`.
+	// 4. Unified `.harnesses.<active>.roles.default`.
 	if active != "" {
 		if v := readSettingsRoleString("harnesses." + active + ".roles.default"); v != "" {
 			return v, nil
 		}
 	}
 
-	// 7. Unified `.roles.default` and legacy `.roles.default`.
-	if v := readSettingsRoleString("roles.default"); v != "" {
-		return v, nil
-	}
-	if v, ok := cfg.Roles["default"]; ok && v != "" {
-		return v, nil
-	}
-
-	return "", fmt.Errorf("no model binding for role %q (no env var, no per-repo .lore.config, no settings.json or framework.json roles.%s or roles.default)", role, role)
+	return "", fmt.Errorf("no model binding for role %q (no env var, no per-repo .lore.config, no harnesses.<active>.roles.%s or harnesses.<active>.roles.default in settings.json)", role, role)
 }
 
 // readSettingsRoleString reads a string-valued role binding from the unified

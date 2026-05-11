@@ -128,15 +128,12 @@ func TestLoadPrefs_ReadsUnifiedSettings(t *testing.T) {
 	}
 }
 
-func TestLoadPrefs_LegacyTuiJsonFallback(t *testing.T) {
+func TestLoadPrefs_IgnoresLegacyTuiJson(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	t.Setenv("LORE_DATA_DIR", filepath.Join(tmp, ".lore"))
 	t.Setenv("LORE_TUI_LAYOUT", "")
 
-	// Only the legacy tui.json exists (no settings.json) — D4 deprecation
-	// window: LoadPrefs must fall through to the fragmented file for one
-	// release.
 	dir := filepath.Join(tmp, ".lore", "config")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
@@ -146,8 +143,8 @@ func TestLoadPrefs_LegacyTuiJsonFallback(t *testing.T) {
 	}
 
 	p := LoadPrefs()
-	if p.Layout != LayoutTopBottom {
-		t.Errorf("Layout = %q, want %q (legacy tui.json fallback)", p.Layout, LayoutTopBottom)
+	if p.Layout != LayoutLeftRight {
+		t.Errorf("Layout = %q, want default %q when only legacy tui.json exists", p.Layout, LayoutLeftRight)
 	}
 }
 

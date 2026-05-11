@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # create-work.sh — Create a new work item in _work/
-# Usage: bash create-work.sh --title <name> [--slug <slug>] [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--json] [--detect-pr]
+# Usage: bash create-work.sh --title <name> [--slug <slug>] [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--json] [--detect-pr]
 # Creates _work/<slug>/ with _meta.json and notes.md, then updates the index.
 #
 # --scope (Phase 2 — work item 02-durable-signal-foundation):
@@ -21,6 +21,7 @@ source "$SCRIPT_DIR/lib.sh"
 NAME=""
 SLUG_OVERRIDE=""
 DESCRIPTION=""
+INTENT_ANCHOR=""
 TARGET_DIR=""
 ISSUE=""
 PR=""
@@ -58,6 +59,10 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
         DESCRIPTION="$2"
         shift 2
         ;;
+      --intent-anchor)
+        INTENT_ANCHOR="$2"
+        shift 2
+        ;;
       --directory)
         TARGET_DIR="$2"
         shift 2
@@ -88,13 +93,13 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
         ;;
       *)
         echo "[work] Error: Unknown flag '$1'" >&2
-        echo "Usage: create-work.sh --title <name> [--slug <slug>] [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--json] [--detect-pr]" >&2
+        echo "Usage: create-work.sh --title <name> [--slug <slug>] [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--json] [--detect-pr]" >&2
         exit 1
         ;;
     esac
   done
 else
-  echo "[work] Error: Use flag mode: create-work.sh --title <name> [--description <text>] [--tags <tags>] [--json]" >&2
+  echo "[work] Error: Use flag mode: create-work.sh --title <name> [--description <text>] [--intent-anchor <text>] [--tags <tags>] [--json]" >&2
   exit 1
 fi
 
@@ -105,7 +110,7 @@ if [[ -z "$NAME" ]]; then
     json_error "Missing work item name"
   fi
   echo "[work] Error: Missing work item name." >&2
-  echo "Usage: create-work.sh --title <name> [--description <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--json]" >&2
+  echo "Usage: create-work.sh --title <name> [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--json]" >&2
   exit 1
 fi
 
@@ -216,22 +221,31 @@ fi
 mkdir -p "$WORK_DIR/$SLUG"
 
 # Write _meta.json
-cat > "$WORK_DIR/$SLUG/_meta.json" << METAEOF
-{
-  "slug": "$SLUG",
-  "title": "$TITLE",
-  "status": "active",
-  "scope": "$SCOPE",
-  "branches": $BRANCHES_JSON,
-  "tags": $TAGS_JSON,
-  "issue": "$ISSUE",
-  "pr": "$PR",
-  "created": "$TIMESTAMP",
-  "updated": "$TIMESTAMP",
-  "related_knowledge": [],
-  "related_work": []
+python3 - "$WORK_DIR/$SLUG/_meta.json" "$SLUG" "$TITLE" "$SCOPE" "$BRANCHES_JSON" "$TAGS_JSON" "$ISSUE" "$PR" "$TIMESTAMP" "$INTENT_ANCHOR" << 'PYEOF'
+import json
+import sys
+
+path, slug, title, scope, branches_json, tags_json, issue, pr, timestamp, intent_anchor = sys.argv[1:11]
+meta = {
+    "slug": slug,
+    "title": title,
+    "status": "active",
+    "scope": scope,
+    "branches": json.loads(branches_json),
+    "tags": json.loads(tags_json),
+    "issue": issue,
+    "pr": pr,
+    "created": timestamp,
+    "updated": timestamp,
+    "related_knowledge": [],
+    "related_work": [],
 }
-METAEOF
+if intent_anchor:
+    meta["intent_anchor"] = intent_anchor
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(meta, fh, indent=2)
+    fh.write("\n")
+PYEOF
 
 # Write notes.md
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M)"
@@ -240,6 +254,8 @@ cat > "$WORK_DIR/$SLUG/notes.md" << NOTESEOF
 # Session Notes: $TITLE
 
 <!-- Append session entries below. Entry format: ## YYYY-MM-DDTHH:MM followed by **Focus:**, **Progress:**, **Next:** fields. -->
+
+$(if [[ -n "$INTENT_ANCHOR" ]]; then printf '## Intent Anchor\n%s\n\n' "$INTENT_ANCHOR"; fi)
 
 ## $TIMESTAMP
 **Focus:** Initial scoping
@@ -250,6 +266,8 @@ cat > "$WORK_DIR/$SLUG/notes.md" << NOTESEOF
 # Session Notes: $TITLE
 
 <!-- Append session entries below. Entry format: ## YYYY-MM-DDTHH:MM followed by **Focus:**, **Progress:**, **Next:** fields. -->
+
+$(if [[ -n "$INTENT_ANCHOR" ]]; then printf '## Intent Anchor\n%s\n\n' "$INTENT_ANCHOR"; fi)
 
 ## $TIMESTAMP
 **Focus:** Initial scoping

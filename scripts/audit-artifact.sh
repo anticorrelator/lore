@@ -81,14 +81,27 @@ JUDGE_MODEL=""
 # headless_runner_invoke <system_prompt_file> <user_prompt_string> <output_file>
 #
 # Spawn the active harness's headless single-turn agent and capture its
-# stdout into <output_file>. Today only claude-code is wired; codex and
-# opencode currently route through the same `claude` binary when their
-# `headless_runner` cell is `full` AND the operator has `claude` on
-# PATH (opencode/codex headless surfaces with provider-native binaries
-# land in T39/T40 along with adapters/agents/{opencode,codex}.sh).
+# stdout into <output_file>. The active framework owns the executable surface:
+# claude-code uses `claude -p`, codex uses `codex exec`, and unsupported
+# frameworks must inject judge output files instead of silently falling through
+# to another harness.
 #
 # Returns 0 on success, non-zero on subprocess failure. Stderr is
-# silenced because callers pattern-match warning/error strings on it.
+# captured and summarized so settlement run records explain the real failure.
+split_codex_model_variant() {
+  local binding="$1"
+  local model="$binding"
+  local effort=""
+  case "$binding" in
+    *-minimal) model="${binding%-minimal}"; effort="minimal" ;;
+    *-low)     model="${binding%-low}";     effort="low" ;;
+    *-medium)  model="${binding%-medium}";  effort="medium" ;;
+    *-high)    model="${binding%-high}";    effort="high" ;;
+    *-xhigh)   model="${binding%-xhigh}";   effort="xhigh" ;;
+  esac
+  printf '%s\t%s\n' "$model" "$effort"
+}
+
 headless_runner_invoke() {
   local system_prompt_file="$1"
   local user_prompt="$2"
@@ -105,23 +118,81 @@ headless_runner_invoke() {
     return 64
   fi
 
-  # claude-code, codex, and opencode all expose a `claude`-compatible
-  # headless surface today (claude-code natively; opencode reads
-  # ~/.claude/skills natively; codex is the gap that T40 closes). The
-  # claude binary is the load-bearing dispatch primitive until the
-  # orchestration adapters in T39/T40 land — at that point this helper
-  # routes through adapters/agents/<framework>.sh runner subcommand.
-  if ! command -v claude >/dev/null 2>&1; then
-    echo "[audit] Error: claude CLI not found on PATH — cannot spawn judges." >&2
-    return 64
-  fi
+  local active
+  active=$(resolve_active_framework 2>/dev/null || echo "")
+  local harness_args=()
+  while IFS= read -r arg; do
+    harness_args+=("$arg")
+  done < <(load_harness_args "$active")
+  local err_file
+  err_file=$(mktemp "${TMPDIR:-/tmp}/audit-headless-stderr.XXXXXX")
+  local rc=0
+  case "$active" in
+    claude-code|opencode)
+      if ! command -v claude >/dev/null 2>&1; then
+        echo "[audit] Error: claude CLI not found on PATH — cannot spawn judges." >&2
+        rm -f "$err_file"
+        return 64
+      fi
+      printf '%s' "$user_prompt" | claude -p \
+        "${harness_args[@]}" \
+        --append-system-prompt "$(cat "$system_prompt_file")" \
+        --model "$JUDGE_MODEL" \
+        --output-format text \
+        --max-turns 1 \
+        > "$output_file" 2>"$err_file"
+      rc=$?
+      ;;
+    codex)
+      if ! command -v codex >/dev/null 2>&1; then
+        echo "[audit] Error: codex CLI not found on PATH — cannot spawn judges." >&2
+        rm -f "$err_file"
+        return 64
+      fi
+      local codex_model codex_effort
+      IFS=$'\t' read -r codex_model codex_effort < <(split_codex_model_variant "$JUDGE_MODEL")
+      local prompt
+      prompt="System instructions:
+$(cat "$system_prompt_file")
 
-  printf '%s' "$user_prompt" | claude -p \
-    --append-system-prompt "$(cat "$system_prompt_file")" \
-    --model "$JUDGE_MODEL" \
-    --output-format text \
-    --max-turns 1 \
-    > "$output_file" 2>/dev/null
+User prompt:
+$user_prompt"
+      local has_sandbox_arg=0
+      for arg in "${harness_args[@]}"; do
+        case "$arg" in
+          --sandbox|-s|--dangerously-bypass-approvals-and-sandbox)
+            has_sandbox_arg=1
+            ;;
+        esac
+      done
+      local cmd=(codex exec "${harness_args[@]}" --ephemeral --skip-git-repo-check -m "$codex_model" -o "$output_file")
+      if [[ "$has_sandbox_arg" -eq 0 ]]; then
+        cmd+=(--sandbox read-only)
+      fi
+      if [[ -n "$codex_effort" ]]; then
+        cmd+=(-c "model_reasoning_effort=\"$codex_effort\"")
+      fi
+      printf '%s' "$prompt" | "${cmd[@]}" - >/dev/null 2>"$err_file"
+      rc=$?
+      ;;
+    *)
+      echo "[audit] Error: active framework '$active' has no wired headless runner." >&2
+      echo "[audit]   Supply --gate-output-file / --curator-output-file / --reverse-auditor-output-file to inject pre-computed judge outputs." >&2
+      rm -f "$err_file"
+      return 64
+      ;;
+  esac
+
+  if [[ "$rc" -ne 0 ]]; then
+    if [[ -s "$err_file" ]]; then
+      echo "[audit] headless runner stderr tail:" >&2
+      tail -n 20 "$err_file" >&2
+    fi
+    rm -f "$err_file"
+    return "$rc"
+  fi
+  rm -f "$err_file"
+  [[ -s "$output_file" ]]
 }
 
 usage() {
@@ -137,7 +208,8 @@ Usage: lore audit <artifact-id> [--kdir <path>] [--json] [--dry-run]
 
 Arguments:
   <artifact-id>    Work-item slug or absolute path to a supported artifact
-                   (lens-findings.json, plan-assertions, worker-observations).
+                   (lens-findings.json, task-claims.jsonl,
+                   plan-assertions, worker-observations).
 
 Options:
   --kdir <path>              Override resolved knowledge directory.
@@ -346,7 +418,7 @@ fi
 #   1. absolute path that exists
 #   2. $KDIR/_work/<slug>/ directory
 #   3. $KDIR/_followups/<slug>/ directory
-# Wired artifact types: lens-findings, worker-observations, plan-assertions.
+# Wired artifact types: lens-findings, task-claims, worker-observations, plan-assertions.
 # spec-investigation is deferred (D7). Type refinement runs after path resolution
 # and sets LENS_FINDINGS_PATH / WORKER_OBSERVATIONS_PATH / PLAN_ASSERTIONS_PATH.
 
@@ -370,10 +442,11 @@ fi
 
 # --- Artifact-type refinement ---
 # Explicit file paths (path-provided) select their matching artifact type
-# unconditionally. Directory detection order: lens-findings, worker-observations,
-# plan-assertions; first match wins (latest-evidence wins for dirs with multiple
-# files — execution-log.md beats plan.md). spec-investigation is deferred (D7).
+# unconditionally. Directory detection order: lens-findings, task-claims,
+# worker-observations, plan-assertions; first match wins. spec-investigation is
+# deferred (D7).
 LENS_FINDINGS_PATH=""
+TASK_CLAIMS_PATH=""
 WORKER_OBSERVATIONS_PATH=""
 PLAN_ASSERTIONS_PATH=""
 if [[ "$ARTIFACT_TYPE" == "followup" && -f "$ARTIFACT_PATH/lens-findings.json" ]]; then
@@ -383,6 +456,9 @@ elif [[ "$ARTIFACT_TYPE" == "path-provided" ]]; then
   if [[ "$ARTIFACT_PATH" == *"/lens-findings.json" && -f "$ARTIFACT_PATH" ]]; then
     LENS_FINDINGS_PATH="$ARTIFACT_PATH"
     ARTIFACT_TYPE="lens-findings"
+  elif [[ "$ARTIFACT_PATH" == *"/task-claims.jsonl" && -f "$ARTIFACT_PATH" ]]; then
+    TASK_CLAIMS_PATH="$ARTIFACT_PATH"
+    ARTIFACT_TYPE="task-claims"
   elif [[ "$ARTIFACT_PATH" == *"/execution-log.md" && -f "$ARTIFACT_PATH" ]]; then
     WORKER_OBSERVATIONS_PATH="$ARTIFACT_PATH"
     ARTIFACT_TYPE="worker-observations"
@@ -392,6 +468,9 @@ elif [[ "$ARTIFACT_TYPE" == "path-provided" ]]; then
   elif [[ -d "$ARTIFACT_PATH" && -f "$ARTIFACT_PATH/lens-findings.json" ]]; then
     LENS_FINDINGS_PATH="$ARTIFACT_PATH/lens-findings.json"
     ARTIFACT_TYPE="lens-findings"
+  elif [[ -d "$ARTIFACT_PATH" && -f "$ARTIFACT_PATH/task-claims.jsonl" ]]; then
+    TASK_CLAIMS_PATH="$ARTIFACT_PATH/task-claims.jsonl"
+    ARTIFACT_TYPE="task-claims"
   elif [[ -d "$ARTIFACT_PATH" && -f "$ARTIFACT_PATH/execution-log.md" ]]; then
     WORKER_OBSERVATIONS_PATH="$ARTIFACT_PATH/execution-log.md"
     ARTIFACT_TYPE="worker-observations"
@@ -400,7 +479,10 @@ elif [[ "$ARTIFACT_TYPE" == "path-provided" ]]; then
     ARTIFACT_TYPE="plan-assertions"
   fi
 elif [[ "$ARTIFACT_TYPE" == "work-item" ]]; then
-  if [[ -f "$ARTIFACT_PATH/execution-log.md" ]]; then
+  if [[ -f "$ARTIFACT_PATH/task-claims.jsonl" ]]; then
+    TASK_CLAIMS_PATH="$ARTIFACT_PATH/task-claims.jsonl"
+    ARTIFACT_TYPE="task-claims"
+  elif [[ -f "$ARTIFACT_PATH/execution-log.md" ]]; then
     WORKER_OBSERVATIONS_PATH="$ARTIFACT_PATH/execution-log.md"
     ARTIFACT_TYPE="worker-observations"
   elif [[ -f "$ARTIFACT_PATH/plan.md" ]]; then
@@ -414,15 +496,15 @@ fi
 # architecture/audit-pipeline/contract.md the shape is:
 #   {artifact_id, artifact_type, artifact_path, kdir,
 #    claim_payload[], referenced_files[], change_context, ...}
-# Phase 1 populates claim_payload from lens-findings.json. referenced_files
-# and change_context are still stubbed (non-lens-findings artifact types
-# land with later pilots; branch-aware reconciliation per Appendix B of the
-# plan is future work).
+# Phase 1 populated claim_payload from lens-findings.json. Task-claims rows now
+# carry or synthesize change_context so the full settlement cycle can continue
+# through curator/reverse-auditor without invoking judges on incomplete input.
+# Branch-aware reconciliation per Appendix B of the plan is future work.
 build_resolved_input() {
   local dry_run_flag="$1"  # "true" or "false"
-  python3 - "$ARTIFACT_ID" "$ARTIFACT_PATH" "$ARTIFACT_TYPE" "$KDIR" "$LENS_FINDINGS_PATH" "$PLAN_ASSERTIONS_PATH" "$WORKER_OBSERVATIONS_PATH" "$dry_run_flag" << 'PYEOF'
+  python3 - "$ARTIFACT_ID" "$ARTIFACT_PATH" "$ARTIFACT_TYPE" "$KDIR" "$LENS_FINDINGS_PATH" "$TASK_CLAIMS_PATH" "$PLAN_ASSERTIONS_PATH" "$WORKER_OBSERVATIONS_PATH" "$dry_run_flag" << 'PYEOF'
 import json, re, sys
-artifact_id, artifact_path, artifact_type, kdir, lens_findings_path, plan_assertions_path, worker_observations_path, dry_run_flag = sys.argv[1:9]
+artifact_id, artifact_path, artifact_type, kdir, lens_findings_path, task_claims_path, plan_assertions_path, worker_observations_path, dry_run_flag = sys.argv[1:10]
 
 out = {
     "artifact_id": artifact_id,
@@ -430,6 +512,59 @@ out = {
     "artifact_type": artifact_type,
     "kdir": kdir,
 }
+
+def normalize_change_context(row, claim):
+    raw = row.get("change_context")
+    if isinstance(raw, dict):
+        changed_files = [
+            str(v)
+            for v in raw.get("changed_files", [])
+            if isinstance(v, str) and v.strip()
+        ] if isinstance(raw.get("changed_files"), list) else []
+        summary = raw.get("summary") if isinstance(raw.get("summary"), str) else ""
+        diff_ref = raw.get("diff_ref")
+        if diff_ref is not None and not isinstance(diff_ref, str):
+            diff_ref = None
+        if changed_files and summary.strip():
+            return {
+                "diff_ref": diff_ref,
+                "changed_files": list(dict.fromkeys(changed_files)),
+                "summary": summary.strip(),
+            }
+    file_path = claim.get("file")
+    summary = row.get("why_this_work_needs_it") or row.get("claim") or row.get("claim_text") or ""
+    if isinstance(file_path, str) and file_path.strip() and isinstance(summary, str) and summary.strip():
+        return {
+            "diff_ref": row.get("captured_at_sha") if isinstance(row.get("captured_at_sha"), str) else None,
+            "changed_files": [file_path],
+            "summary": summary.strip(),
+        }
+    return None
+
+def merge_change_context(claims):
+    changed_files = []
+    summaries = []
+    diff_ref = None
+    for claim in claims:
+        ctx = claim.get("change_context")
+        if not isinstance(ctx, dict):
+            continue
+        if diff_ref is None and isinstance(ctx.get("diff_ref"), str) and ctx.get("diff_ref"):
+            diff_ref = ctx.get("diff_ref")
+        for file_path in ctx.get("changed_files", []) if isinstance(ctx.get("changed_files"), list) else []:
+            if isinstance(file_path, str) and file_path.strip() and file_path not in changed_files:
+                changed_files.append(file_path)
+        summary = ctx.get("summary")
+        if isinstance(summary, str) and summary.strip() and summary.strip() not in summaries:
+            summaries.append(summary.strip())
+    if not changed_files or not summaries:
+        return None
+    return {
+        "diff_ref": diff_ref,
+        "changed_files": changed_files,
+        "summary": " | ".join(summaries),
+    }
+
 if dry_run_flag == "true":
     out["dry_run"] = True
     out["note"] = "See architecture/audit-pipeline/contract.md for the full resolved-input object shape."
@@ -479,6 +614,70 @@ if lens_findings_path:
         # value is the fallback when the JSON omits it.
         if raw.get("work_item"):
             out["work_item"] = raw["work_item"]
+
+elif task_claims_path:
+    claims = []
+    skipped = []
+    try:
+        with open(task_claims_path, encoding="utf-8") as fh:
+            for line_no, line in enumerate(fh, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as e:
+                    skipped.append(f"line {line_no}: JSONDecodeError: {e}")
+                    continue
+                if not isinstance(row, dict):
+                    skipped.append(f"line {line_no}: row is not an object")
+                    continue
+                claim_id = str(row.get("claim_id") or "")
+                claim_text = str(row.get("claim") or row.get("claim_text") or "")
+                if not claim_id:
+                    skipped.append(f"line {line_no}: missing claim_id")
+                    continue
+                if not claim_text:
+                    skipped.append(f"{claim_id}: missing claim")
+                    continue
+                source = row.get("source") if isinstance(row.get("source"), dict) else {}
+                file_path = row.get("file") or source.get("file")
+                line_range = row.get("line_range") or source.get("line_range")
+                claim = {
+                    "claim_id": claim_id,
+                    "claim_text": claim_text,
+                    "file": file_path or None,
+                    "line_range": line_range or None,
+                    "exact_snippet": row.get("exact_snippet") or None,
+                    "normalized_snippet_hash": row.get("normalized_snippet_hash") or None,
+                    "falsifier": row.get("falsifier") or row.get("why_this_work_needs_it") or None,
+                    "severity_hint": row.get("significance") or row.get("scale") or None,
+                    "producer_role": row.get("producer_role") or None,
+                    "protocol_slot": row.get("protocol_slot") or None,
+                    "task_id": row.get("task_id") or None,
+                    "phase_id": row.get("phase_id") or None,
+                    "scale": row.get("scale") or None,
+                    "evidence_ref": {"path": task_claims_path, "line": line_no},
+                }
+                claim["change_context"] = normalize_change_context(row, claim)
+                claims.append(claim)
+    except OSError as e:
+        print(f"[audit] extractor: could not read task-claims.jsonl — {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not claims:
+        reason = "; ".join(skipped) if skipped else "no task-claim rows found in task-claims.jsonl"
+        print(f"[audit] extractor: {reason}", file=sys.stderr)
+        sys.exit(1)
+
+    out["task_claims_path"] = task_claims_path
+    out["claim_payload"] = claims
+    out["claim_count"] = len(claims)
+    out["change_context"] = merge_change_context(claims)
+    out["producer_role"] = "worker"
+    out["producer_template_version"] = "task-claims-jsonl"
+    if skipped:
+        out["task_claims_skipped"] = skipped
 
 elif plan_assertions_path:
     V1_REQUIRED = ("claim", "file", "line_range", "exact_snippet", "normalized_snippet_hash", "falsifier", "significance")
@@ -669,6 +868,25 @@ if [[ $DRY_RUN -eq 1 ]]; then
       _claim_count=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get("findings",[]) or []))' "$LENS_FINDINGS_PATH" 2>/dev/null || echo "?")
       echo "[audit]   claim_count:   $_claim_count (per-finding → claim_id=finding-<i>)"
     fi
+    if [[ -n "$TASK_CLAIMS_PATH" ]]; then
+      echo "[audit]   task_claims: $TASK_CLAIMS_PATH"
+      _claim_count=$(python3 -c '
+import json, sys
+n = 0
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        row = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if isinstance(row, dict) and row.get("claim_id"):
+        n += 1
+print(n)
+' "$TASK_CLAIMS_PATH" 2>/dev/null || echo "?")
+      echo "[audit]   claim_count:   $_claim_count (per-task-claim → claim_id from row)"
+    fi
     if [[ -n "$PLAN_ASSERTIONS_PATH" ]]; then
       echo "[audit]   plan_assertions: $PLAN_ASSERTIONS_PATH"
       _claim_count=$(python3 -c '
@@ -714,7 +932,7 @@ fi
 GATE_TEMPLATE_VERSION=$(bash "$SCRIPT_DIR/template-version.sh" "$CORRECTNESS_GATE_TEMPLATE")
 
 # Build the resolved input object and stash it in a tmp file.
-RESOLVED_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-input-XXXXXX.json")
+RESOLVED_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-input.XXXXXX")
 GATE_RAW_TMP=""
 CURATOR_RAW_TMP=""
 REVERSE_AUDITOR_RAW_TMP=""
@@ -752,12 +970,20 @@ fi
 # list was already validated (non-empty JSON array of strings) in the
 # validation gate above.
 if [[ -n "$PRIORITY_CLAIMS_FILE" ]]; then
-  _priority_narrowed=$(mktemp "${TMPDIR:-/tmp}/audit-input-narrowed-XXXXXX.json")
+  _priority_narrowed=$(mktemp "${TMPDIR:-/tmp}/audit-input-narrowed.XXXXXX")
   if ! jq --slurpfile priority "$PRIORITY_CLAIMS_FILE" '
     ($priority[0]) as $ids
     | (.claim_payload // []) as $orig
     | .claim_payload = [ $orig[] | select(.claim_id as $cid | $ids | index($cid)) ]
     | .claim_count = (.claim_payload | length)
+    | .change_context = (
+        (.claim_payload // []) as $claims
+        | {
+            diff_ref: ([ $claims[] | .change_context.diff_ref? // empty | select(type == "string" and length > 0) ] | .[0] // null),
+            changed_files: ([ $claims[] | ((.change_context.changed_files[]? // .file? // empty) | select(type == "string" and length > 0)) ] | unique),
+            summary: ([ $claims[] | (.change_context.summary? // .claim_text? // empty | select(type == "string" and length > 0)) ] | unique | join(" | "))
+          }
+      )
   ' "$RESOLVED_INPUT_FILE" > "$_priority_narrowed"; then
     rm -f "$_priority_narrowed"
     echo "[audit] Error: priority-claims filter failed (jq error)" >&2
@@ -807,18 +1033,20 @@ else
     echo "[audit]   to use the \`claude\` headless runner direct-invocation fallback." >&2
     exit 1
   fi
-  GATE_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-gate-output-XXXXXX.json")
+  GATE_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-gate-output.XXXXXX")
   GATE_RAW_FILE="$GATE_RAW_TMP"
   GATE_SYSTEM_PROMPT_FILE="$CORRECTNESS_GATE_TEMPLATE"
   GATE_USER_PROMPT="Resolved input object (per architecture/audit-pipeline/contract.md):
 
 $(cat "$RESOLVED_INPUT_FILE")
 
+Use judge_template_version: $GATE_TEMPLATE_VERSION
+
 Emit exactly one JSON object matching the Correctness-gate output shape. No markdown fences. No prose outside the JSON."
   echo "[audit] correctness-gate: invoking headless runner (template-version: $GATE_TEMPLATE_VERSION, model: $JUDGE_MODEL)" >&2
   if ! headless_runner_invoke "$GATE_SYSTEM_PROMPT_FILE" "$GATE_USER_PROMPT" "$GATE_RAW_FILE"; then
     echo "[audit] Error: headless runner invocation failed for correctness-gate" >&2
-    exit 64
+    exit 1
   fi
 fi
 
@@ -1090,10 +1318,10 @@ if [[ "$N_VERIFIED_COUNT" -gt 0 ]]; then
       if [[ -z "$JUDGE_MODEL" ]]; then
         echo "[audit] warning: neither --curator-output-file nor 'judge' role binding available — skipping curator stage" >&2
       else
-        CURATOR_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-curator-output-XXXXXX.json")
+        CURATOR_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-curator-output.XXXXXX")
         CURATOR_RAW_FILE="$CURATOR_RAW_TMP"
         # Compose curator input: verified survivors + the original resolved input.
-        CURATOR_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-curator-input-XXXXXX.json")
+        CURATOR_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-curator-input.XXXXXX")
         python3 - "$GATE_RAW_FILE" "$RESOLVED_INPUT_FILE" "$CURATOR_INPUT_FILE" << 'PYEOF'
 import json, sys
 gate_file, resolved_file, out_file = sys.argv[1:4]
@@ -1116,6 +1344,8 @@ PYEOF
         CURATOR_USER_PROMPT="Curator input object (verified survivors + change context per contract.md):
 
 $(cat "$CURATOR_INPUT_FILE")
+
+Use judge_template_version: $CURATOR_TEMPLATE_VERSION
 
 Emit exactly one JSON object matching the Curator output shape. No markdown fences. No prose outside the JSON."
         echo "[audit] curator: invoking headless runner (template-version: $CURATOR_TEMPLATE_VERSION, model: $JUDGE_MODEL)" >&2
@@ -1339,13 +1569,13 @@ if [[ "$CURATOR_STAGE_RAN" -eq 1 && "$N_SELECTED" -gt 0 ]]; then
       if [[ -z "$JUDGE_MODEL" ]]; then
         echo "[audit] warning: neither --reverse-auditor-output-file nor 'judge' role binding available — skipping reverse-auditor stage" >&2
       else
-        REVERSE_AUDITOR_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-output-XXXXXX.json")
+        REVERSE_AUDITOR_RAW_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-output.XXXXXX")
         REVERSE_AUDITOR_RAW_FILE="$REVERSE_AUDITOR_RAW_TMP"
         # Compose reverse-auditor input: curator's selected claims + the
         # original resolved input (artifact_id, work_item, change_context,
         # referenced_files). Per contract.md, reverse-auditor input is the
         # curator-surviving portfolio + original change.
-        REVERSE_AUDITOR_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-input-XXXXXX.json")
+        REVERSE_AUDITOR_INPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-input.XXXXXX")
         python3 - "$CURATOR_RAW_FILE" "$RESOLVED_INPUT_FILE" "$REVERSE_AUDITOR_INPUT_FILE" << 'PYEOF'
 import json, sys
 cur_file, resolved_file, out_file = sys.argv[1:4]
@@ -1371,7 +1601,18 @@ PYEOF
 
 $(cat "$REVERSE_AUDITOR_INPUT_FILE")
 
-Emit exactly one JSON object matching the Reverse-auditor output shape (omission_claim object or null). No markdown fences. No prose outside the JSON."
+Use judge_template_version: $REVERSE_AUDITOR_TEMPLATE_VERSION
+
+Emit exactly one JSON object matching this Reverse-auditor output shape:
+{
+  \"judge\": \"reverse-auditor\",
+  \"judge_template_version\": \"$REVERSE_AUDITOR_TEMPLATE_VERSION\",
+  \"work_item\": \"<slug>\",
+  \"artifact_id\": \"<id>\",
+  \"omission_claim\": null,
+  \"created_at\": \"<ISO-8601 UTC>\"
+}
+If you emit an omission, replace null with the omission_claim object required by the template. Do not emit legacy fields such as verdict_source, verdict, or claim. No markdown fences. No prose outside the JSON."
         echo "[audit] reverse-auditor: invoking headless runner (template-version: $REVERSE_AUDITOR_TEMPLATE_VERSION, model: $JUDGE_MODEL)" >&2
         if ! headless_runner_invoke "$REVERSE_AUDITOR_TEMPLATE" "$REVERSE_AUDITOR_USER_PROMPT" "$REVERSE_AUDITOR_RAW_FILE"; then
           echo "[audit] warning: headless runner invocation failed for reverse-auditor — skipping reverse-auditor stage" >&2
@@ -1464,7 +1705,7 @@ PYEOF
 
       # Run grounding preflight on the emission. Silence short-circuits
       # with reason=silence (preflight treats it as a no-op pass).
-      REVERSE_AUDITOR_PREFLIGHT_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-preflight-XXXXXX.json")
+      REVERSE_AUDITOR_PREFLIGHT_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-preflight.XXXXXX")
       # --repo-root should point at the repo whose files the claim anchors
       # reference. For the audit pipeline that's the lore checkout (where
       # the source files live), not $KDIR. Default preflight to $PWD.
@@ -1762,7 +2003,7 @@ import json, sys
  curator_ran, curator_tv,
  n_selected, n_dropped, curator_appended,
  ra_ran, ra_tv, ra_verdict, ra_preflight_reason, ra_queue_dest, ra_appended,
- total_appended, pipeline_stage, next_stage) = sys.argv[1:24]
+ total_appended, pipeline_stage, next_stage) = sys.argv[1:25]
 
 out = {
     "artifact_id": artifact_id,

@@ -58,31 +58,28 @@
     }
   },
   "capability_overrides": {},
-  "capture": {
-    "core": {
-      "novelty_threshold": -1.0,
-      "region_window": 5,
-      "max_candidates": 5,
-      "max_phrases": 15,
-      "min_tool_uses": 5,
-      "max_tool_uses": 10
-    },
-    "structural_signals": {
-      "investigation_window": 10,
-      "iterative_debug_window": 15,
-      "test_fix_window": 10,
-      "synthesis_char_threshold": 1000,
-      "synthesis_tool_threshold": 8,
-      "file_context_window": 10,
-      "debug_context_window": 10,
-      "debug_context_chars": 800
-    },
-    "adaptive": false
-  },
   "tui": {
     "layout": "left-right"
   },
   "obsidian": {
     "vaults": {}
+  },
+  "settlement": {
+    "enabled": false,
+    "max_concurrency": 1,
+    "batch_size": 12,
+    "batch_recompute_min_interval_seconds": 60,
+    "concordance_window_size": 8,
+    "lease_ttl_seconds": 900,
+    "executor_timeout_seconds": 300,
+    "active_hours": {
+      "enabled": false,
+      "timezone": "local"
+    },
+    "harness_selection": {
+      "mode": "first_eligible",
+      "eligible_frameworks": [],
+      "random_seed": 0
+    }
   }
 }
