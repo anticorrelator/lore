@@ -29,6 +29,12 @@ TAGS=""
 SCOPE="subsystem"
 JSON_MODE=0
 DETECT_PR=0
+# --related-work: append-only references to other work items. May be passed
+# multiple times; values are accumulated into RELATED_WORK_SLUGS. Each entry
+# must be non-empty and kebab-case-shaped. The closure-acceptance partial-
+# residue path in /implement Step 6 invokes this with the parent slug so the
+# child's _meta.json.related_work points back at the parent.
+RELATED_WORK_SLUGS=()
 
 # Valid work-item scope values (Phase 2 capture-scale anchor).
 VALID_SCOPES=(architectural subsystem implementation granular-fix cross-cycle-meta)
@@ -91,9 +97,13 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
         DETECT_PR=1
         shift
         ;;
+      --related-work)
+        RELATED_WORK_SLUGS+=("$2")
+        shift 2
+        ;;
       *)
         echo "[work] Error: Unknown flag '$1'" >&2
-        echo "Usage: create-work.sh --title <name> [--slug <slug>] [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--json] [--detect-pr]" >&2
+        echo "Usage: create-work.sh --title <name> [--slug <slug>] [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--related-work <slug>] [--json] [--detect-pr]" >&2
         exit 1
         ;;
     esac
@@ -135,6 +145,37 @@ WORK_DIR="$KNOWLEDGE_DIR/_work"
 if [[ ! -d "$WORK_DIR" ]]; then
   bash "$SCRIPT_DIR/init-work.sh" "$TARGET_DIR"
 fi
+
+# --- Validate --related-work slugs ---
+# Per closure-acceptance-reconciliation D3: invalid slugs fail the create call
+# with a non-zero exit. The contract (shape + existence) is enforced before
+# any directory is created so a rejection leaves no half-created state.
+# Shape: lowercase kebab-case (matches what slugify() produces).
+# Existence: must resolve to either an active _work/<slug>/ or _work/_archive/<slug>/.
+RELATED_WORK_KEBAB_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+for related_slug in "${RELATED_WORK_SLUGS[@]+"${RELATED_WORK_SLUGS[@]}"}"; do
+  if [[ -z "$related_slug" ]]; then
+    if [[ $JSON_MODE -eq 1 ]]; then
+      json_error "--related-work value cannot be empty"
+    fi
+    echo "[work] Error: --related-work value cannot be empty." >&2
+    exit 1
+  fi
+  if ! [[ "$related_slug" =~ $RELATED_WORK_KEBAB_RE ]]; then
+    if [[ $JSON_MODE -eq 1 ]]; then
+      json_error "--related-work '$related_slug' is not a valid kebab-case slug"
+    fi
+    echo "[work] Error: --related-work '$related_slug' is not a valid kebab-case slug." >&2
+    exit 1
+  fi
+  if [[ ! -d "$WORK_DIR/$related_slug" && ! -d "$WORK_DIR/_archive/$related_slug" ]]; then
+    if [[ $JSON_MODE -eq 1 ]]; then
+      json_error "--related-work '$related_slug' does not refer to an existing work item"
+    fi
+    echo "[work] Error: --related-work '$related_slug' does not refer to an existing work item (checked $WORK_DIR and $WORK_DIR/_archive)." >&2
+    exit 1
+  fi
+done
 
 # Slugify the name (or use explicit --slug override)
 if [[ -n "$SLUG_OVERRIDE" ]]; then
@@ -220,12 +261,20 @@ fi
 # Create the work item directory
 mkdir -p "$WORK_DIR/$SLUG"
 
+# Build related_work JSON from validated slugs (append-only by construction
+# at create time; the partial-residue path in /implement Step 6 records the
+# parent slug here so the child links back).
+RELATED_WORK_JSON="[]"
+if [[ ${#RELATED_WORK_SLUGS[@]} -gt 0 ]]; then
+  RELATED_WORK_JSON=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${RELATED_WORK_SLUGS[@]}")
+fi
+
 # Write _meta.json
-python3 - "$WORK_DIR/$SLUG/_meta.json" "$SLUG" "$TITLE" "$SCOPE" "$BRANCHES_JSON" "$TAGS_JSON" "$ISSUE" "$PR" "$TIMESTAMP" "$INTENT_ANCHOR" << 'PYEOF'
+python3 - "$WORK_DIR/$SLUG/_meta.json" "$SLUG" "$TITLE" "$SCOPE" "$BRANCHES_JSON" "$TAGS_JSON" "$ISSUE" "$PR" "$TIMESTAMP" "$INTENT_ANCHOR" "$RELATED_WORK_JSON" << 'PYEOF'
 import json
 import sys
 
-path, slug, title, scope, branches_json, tags_json, issue, pr, timestamp, intent_anchor = sys.argv[1:11]
+path, slug, title, scope, branches_json, tags_json, issue, pr, timestamp, intent_anchor, related_work_json = sys.argv[1:12]
 meta = {
     "slug": slug,
     "title": title,
@@ -238,7 +287,7 @@ meta = {
     "created": timestamp,
     "updated": timestamp,
     "related_knowledge": [],
-    "related_work": [],
+    "related_work": json.loads(related_work_json),
 }
 if intent_anchor:
     meta["intent_anchor"] = intent_anchor

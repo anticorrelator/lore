@@ -529,9 +529,121 @@ For each accepted Tier 3 candidate, emit one `lore promote` call. Multi-producer
      | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
    ```
 
-### Step 6: Followup Creation Gate
+### Step 6: Closure Acceptance Reconciliation
 
-Check for incomplete tasks or explicit blockers. Skip silently if everything completed cleanly.
+Step 6 is the capability-anchor reconciliation gate. It compares the run against `_meta.json.intent_anchor`, records a single trichotomous verdict (`full | partial | none`) on the parent's `_meta.json`, and — for `partial` — routes the load-bearing residue into a child work item with its own intent anchor. The closure failure mode this gate catches is named in the [[knowledge:principles/workflow-design/closure-laundering-is-failure-mode-where-local|closure-laundering principle]]: substrate completion (Tier 2 evidence valid, every task checked) accepted as capability completion when a load-bearing step was mocked or deferred.
+
+The system has three distinct closure layers (D2 Precedence). They operate on disjoint signals; none can override another. **All three** must produce a permissive outcome for archive to proceed on an anchored item:
+
+1. **Task-system archive precondition** (existing Step 7 behavior): `REMAINING_COUNT=0`. Hard-blocks archive while any task is `pending`/`in_progress`. Unchanged.
+2. **Mechanical Followup Creation Gate** (this step's §6.4 fallback for legacy items + parallel sub-step for anchored items): when `TaskList` shows incompletion or `execution-log.md` Blocker fields carry non-`none` text, it creates a followup artifact in `_followups/`. **Non-blocking** — surfaces mechanical residue for review-loop pickup.
+3. **Anchor verdict** (§6.2 below, new): the semantic capability assertion against `intent_anchor`. `full` and `partial` permit archive; `none` hard-blocks it.
+
+**Run order is load-bearing.** Evaluate the task-system archive precondition (§6.1) *before* prompting for or writing the anchor verdict. If `REMAINING_COUNT != 0`, run §6.3 (mechanical gate) and stop — do NOT prompt for a verdict, do NOT write a closure row. The anchor verdict is recorded only against the final task-complete run; otherwise a stale closure row could attach to a state the system no longer matches.
+
+#### Step 6.1: Compute REMAINING_COUNT and read intent_anchor
+
+```bash
+REMAINING_COUNT=<count of TaskList tasks with status pending OR in_progress for this work item>
+INTENT_ANCHOR=$(python3 -c 'import json,sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+print((data.get("intent_anchor") or "").strip())
+' "$KDIR/_work/<slug>/_meta.json")
+```
+
+**Branch table:**
+
+| `REMAINING_COUNT` | `INTENT_ANCHOR` non-empty | Route |
+|---|---|---|
+| `> 0` | yes or no | §6.3 mechanical gate only; no verdict |
+| `0` | no (empty/absent) | §6.4 legacy fallback; no verdict, no closure row |
+| `0` | yes | §6.2 anchor verdict + §6.3 mechanical gate run alongside |
+
+#### Step 6.2: Anchor verdict (anchored + task-complete only)
+
+Display the `intent_anchor` text verbatim to the lead and prompt for exactly one trichotomous verdict, using the [[knowledge:principles/workflow-design/closure-laundering-is-failure-mode-where-local|closure-laundering vocabulary]] verbatim (load-bearing step, mocked, deferred):
+
+- **`full`** — the run delivers the load-bearing capability the anchor names. The lead writes a one-line `capability_loop_summary` naming the user-facing loop now operable. Archive proceeds.
+- **`partial`** — at least one load-bearing step the anchor depends on is mocked or deferred. The lead writes a `capability_loop_summary` that *names what shipped* (the delivered subset that justifies archiving the parent), then a one-line residue title and residue intent anchor naming what is mocked or deferred. The protocol creates a child work item, captures the child slug from the successful command result, and only then writes the parent's closure row.
+- **`none`** — the run does not deliver the capability. Archive is blocked. Either resume `/implement` with more workers or explicitly reframe via `/spec`. **Skip §6.3 and Step 7 entirely** and exit with a single user-facing line naming the verdict and the next-action choice.
+
+The verdict prompt is the lead's discretion-bearing read of what actually shipped — `notes.md`, `execution-log.md`, the run's worker reports, and any blocker context all inform it. The lead asks the user for the verdict via `AskUserQuestion` only if the lead cannot ground the call in the run's evidence; if the run record is unambiguous (e.g. all tasks checked off, no blockers, the anchor's load-bearing steps all have direct artifact evidence), the lead may decide and report rather than prompting.
+
+**On `full`:** write the closure row to `_meta.json` and proceed to §6.3 + Step 7.
+
+```bash
+TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+python3 - "$KDIR/_work/<slug>/_meta.json" "<capability_loop_summary>" "$INTENT_ANCHOR" "$TS" << 'PYEOF'
+import json, sys
+path, summary, anchor, ts = sys.argv[1:5]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+data["closure"] = {
+    "verdict": "full",
+    "capability_loop_summary": summary,
+    "partial_residue_followup": None,
+    "verdict_at": ts,
+    "intent_anchor_at_close": anchor,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+```
+
+**On `partial`:** create the child work item *before* writing the parent's closure row. The child's intent anchor must obey the [[knowledge:conventions/protocol/work-item-intake-should-store-neutral-intent-ancho|intake neutrality rule]] — describe the residue capability in neutral terms, do not smuggle the parent's framing or solution into the child. Capture the child slug from the command's output; if the create call fails (invalid slug, name collision, etc.), do NOT write the closure row and do NOT archive — exit with the failure message so the lead can re-attempt:
+
+```bash
+CHILD_OUTPUT=$(lore work create --json \
+  --title "<residue title>" \
+  --intent-anchor "<residue intent anchor>" \
+  --related-work "<parent-slug>" 2>&1) || {
+    echo "[implement] Closure FATAL: child work item creation failed for partial-residue path." >&2
+    echo "$CHILD_OUTPUT" >&2
+    echo "[implement] Parent closure row NOT written; parent NOT archived. Re-attempt after diagnosing the create failure." >&2
+    exit 1
+  }
+CHILD_SLUG=$(printf '%s' "$CHILD_OUTPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["slug"])')
+
+TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+python3 - "$KDIR/_work/<slug>/_meta.json" "<capability_loop_summary>" "$CHILD_SLUG" "$INTENT_ANCHOR" "$TS" << 'PYEOF'
+import json, sys
+path, summary, child_slug, anchor, ts = sys.argv[1:6]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+data["closure"] = {
+    "verdict": "partial",
+    "capability_loop_summary": summary,
+    "partial_residue_followup": child_slug,
+    "verdict_at": ts,
+    "intent_anchor_at_close": anchor,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+
+# Append a one-line note to parent notes.md naming the child slug.
+printf '\n## %s\n**Closure (partial):** see follow-up `%s`. Delivered subset: %s\n' \
+  "$(date -u +"%Y-%m-%dT%H:%M")" "$CHILD_SLUG" "<capability_loop_summary>" \
+  >> "$KDIR/_work/<slug>/notes.md"
+```
+
+**After archive on `partial`,** the parent is responsible only for the delivered subset named in `capability_loop_summary`; all remaining load-bearing capability residue is owned by the child via its own intent anchor and its own subsequent `/spec` + `/implement` cycle.
+
+**On `none`:** write nothing to `_meta.json`. Skip §6.3 and Step 7. Report:
+
+```
+[implement] Closure verdict: none — capability not delivered.
+Anchor: <intent_anchor verbatim>
+Next: resume `/implement <slug>` with additional scope, or reframe via `/spec <slug>`.
+Work item remains active in _work/.
+```
+
+#### Step 6.3: Mechanical Followup Creation Gate (runs alongside §6.2 for anchored items, and as the sole closure path on legacy items per §6.4)
+
+[[knowledge:principles/workflow-design/workflow-theater-anti-pattern-in-skill-design-steps-that|Workflow-theater guard:]] this gate's job is to surface *mechanical* residue (incomplete tasks, blocker fields). It does NOT consult `intent_anchor` — that is §6.2's job. Do NOT collapse the two layers; doing so recreates the closure-laundering gap in a new form by either reading the verdict off mechanical signals or laundering blockers as anchor compliance.
 
 **Signal detection** — check two sources:
 
@@ -550,6 +662,14 @@ bash ~/.lore/scripts/create-followup.sh \
   --suggested-actions '[{"type":"create_work_item"}]' \
   --content "<one-line summary of what didn't finish and why, followed by a checklist of remaining items>"
 ```
+
+This gate is non-blocking — its firing is not itself proof of archive-clear, and its silence is not itself proof of archive-clear either. Layer 1 (task-system precondition) and layer 3 (anchor verdict) are the gating layers; this layer is observability for the review loop.
+
+#### Step 6.4: Legacy fallback (no intent_anchor)
+
+If `INTENT_ANCHOR` is empty/absent on `_meta.json`, run §6.3 exactly as today and proceed to Step 7. No verdict is required, no closure row is written, no advisory fires in `archive-work.sh`. This preserves the cycle on pre-anchor work items without back-filling — closure-time anchor synthesis would be retroactive intake under conversational pressure, the exact failure mode the intake-side anchor moved capture to intake to avoid.
+
+[[knowledge:architecture/plan-task-models/lore-work-check-is-not-taskcompleted-acceptance|Acceptance-layer note:]] `lore work check` (the task-system layer) and the closure verdict (the capability-loop layer) sit at different altitudes. The task system answers "did this artifact get produced and pass per-task checks"; the closure verdict answers "did the run deliver the capability the anchor names." The closure verdict cannot override the task-system archive precondition (a `full` verdict on a task-incomplete item is not just non-archiving — §6.1's branch table refuses to record it at all), and the task-system precondition cannot substitute for the closure verdict (every task checked is the input to §6.2, not its conclusion).
 
 **Lazy audit note:** per §9.2 Step 8, the Stop hook lazily triggers audit of this session's promotions; `/implement` does not invoke the audit explicitly here. Completion of `/implement` is non-blocking — the audit runs opportunistically after session end.
 
@@ -616,35 +736,106 @@ bash ~/.lore/scripts/create-followup.sh \
 
    **Overwrite semantics:** on re-run of `/implement` against the same work item, replace the file unconditionally. No append, no merge, no rotation — each run reflects only that run's producer facts. The canonical log files already carry historical data.
 
-6. **Archive the completed work item.** This step is mandatory when all tasks are done — it is the structural close of the implement cycle, not a discretionary cleanup. Branch on the task-system completion state (not on plan.md):
+6. **Archive the completed work item.** This step is mandatory when all tasks are done AND, on anchored items, the Step 6 closure verdict permits archive — it is the structural close of the implement cycle, not a discretionary cleanup. Branch on the task-system completion state (not on plan.md), then on the anchored closure precondition:
 
-   - **All tasks completed:** archive and verify the move:
+   - **All tasks completed AND (legacy item OR anchored item with a valid `closure` row):** archive and verify the move:
      ```bash
-     lore work archive "<slug>"
-     test -d "$KDIR/_work/_archive/<slug>" \
-       || { echo "[implement] FATAL: archive did not move work item to _archive/"; exit 1; }
-     test ! -d "$KDIR/_work/<slug>" \
-       || { echo "[implement] FATAL: archive left work item in active _work/ path"; exit 1; }
+     # Anchored-item precondition: a valid closure row must exist on _meta.json
+     # before archive runs. Per Step 6.2, `none` verdicts skip Step 7 entirely,
+     # so reaching this branch on an anchored item implies verdict ∈ {full, partial}.
+     # Re-validate here as a defensive gate against a Step 6 implementation drift.
+     CLOSURE_VALID=$(python3 -c '
+     import json, sys
+     with open(sys.argv[1], encoding="utf-8") as f:
+         data = json.load(f)
+     anchor = (data.get("intent_anchor") or "").strip()
+     if not anchor:
+         print("legacy")
+         sys.exit(0)
+     closure = data.get("closure")
+     if not isinstance(closure, dict):
+         print("missing")
+         sys.exit(0)
+     verdict = closure.get("verdict")
+     summary = (closure.get("capability_loop_summary") or "").strip()
+     anchor_at_close = (closure.get("intent_anchor_at_close") or "").strip()
+     residue = closure.get("partial_residue_followup")
+     if verdict not in ("full", "partial"):
+         print("bad_verdict")
+         sys.exit(0)
+     if not summary:
+         print("missing_summary")
+         sys.exit(0)
+     if not anchor_at_close:
+         print("missing_anchor_at_close")
+         sys.exit(0)
+     if verdict == "partial" and not (isinstance(residue, str) and residue.strip()):
+         print("missing_residue_for_partial")
+         sys.exit(0)
+     print("ok")
+     ' "$KDIR/_work/<slug>/_meta.json")
+
+     case "$CLOSURE_VALID" in
+       legacy|ok)
+         lore work archive "<slug>"
+         test -d "$KDIR/_work/_archive/<slug>" \
+           || { echo "[implement] FATAL: archive did not move work item to _archive/"; exit 1; }
+         test ! -d "$KDIR/_work/<slug>" \
+           || { echo "[implement] FATAL: archive left work item in active _work/ path"; exit 1; }
+         ;;
+       *)
+         echo "[implement] FATAL: anchored work item lacks a valid _meta.json.closure block ($CLOSURE_VALID); refusing to archive." >&2
+         echo "[implement]        Re-run Step 6 to record the closure verdict before archive." >&2
+         exit 1
+         ;;
+     esac
      ```
-     If verification fails, do not proceed to Step 7. Diagnose and re-run archive before rendering the report. Silently skipping archive corrupts the active-vs-archived distinction the work system depends on.
+     If verification fails, do not proceed to Step 7. Diagnose and re-run archive before rendering the report. Silently skipping archive corrupts the active-vs-archived distinction the work system depends on. **Anchored items missing or malformed `_meta.json.closure` MUST NOT be archived from this step** — that path is exactly the closure-laundering failure mode Step 6 exists to prevent. The advisory in `scripts/archive-work.sh` is a *non-blocking* warning intended for manual / bulk-archive callers; this Step 7 precondition is the *blocking* gate on the `/implement` ceremony path.
    - **Some tasks incomplete or blocked:** do not archive. Leave the work item active so a later `/implement` invocation can resume it.
+   - **Anchored item with verdict `none`:** Step 6.2 already exited before reaching Step 7. This branch is unreachable here; do not add a path that silently re-routes around it.
 
    **Why this is the last step before the report.** The user-facing "Done" report is the natural exit point of `/implement`; once it renders, the operator typically transitions to `/retro` or moves on. Coupling archive to the report (rather than treating it as an earlier optional step) ensures the work item's active/archived state is committed before the cycle visibly closes. Prior versions of this skill placed archive earlier in Step 7 — observed live, the archive call got silently skipped roughly half the time because the report's "consider /retro" line created a perceived clean handoff before archive ran. Placing archive here, with verification, removes that gap.
 
-7. **Report to user.** Before rendering, check that archive ran if it should have:
+7. **Report to user.** Before rendering, check that archive ran if it should have. The precondition has two forms — task-completion (existing) and anchored-closure (new):
 
    ```bash
    if [ "$REMAINING_COUNT" = "0" ] && [ -d "$KDIR/_work/<slug>" ]; then
-     echo "[implement] FATAL: all tasks completed but work item not archived. Run Step 6 archive before this report."
+     # Distinguish "missing closure row" from "archive skipped for unrelated reason"
+     # so the operator gets a precise next-action.
+     CLOSURE_DIAG=$(python3 -c '
+     import json, sys
+     try:
+         with open(sys.argv[1], encoding="utf-8") as f:
+             data = json.load(f)
+         anchor = (data.get("intent_anchor") or "").strip()
+         closure = data.get("closure")
+         if anchor and not isinstance(closure, dict):
+             print("anchored_no_closure")
+         elif anchor and isinstance(closure, dict) and closure.get("verdict") not in ("full", "partial"):
+             print("anchored_invalid_verdict")
+         else:
+             print("other")
+     except Exception:
+         print("other")
+     ' "$KDIR/_work/<slug>/_meta.json")
+     case "$CLOSURE_DIAG" in
+       anchored_no_closure|anchored_invalid_verdict)
+         echo "[implement] FATAL: tasks complete but anchored work item has no valid closure row. Re-run Step 6 to record the verdict, then archive."
+         ;;
+       *)
+         echo "[implement] FATAL: all tasks completed but work item not archived. Run Step 7.6 archive before this report."
+         ;;
+     esac
      exit 1
    fi
    ```
 
-   The report MUST NOT render with a completed-but-unarchived work item. If the precondition fires, return to Step 6 and archive.
+   The report MUST NOT render with a completed-but-unarchived work item. If the precondition fires, return to Step 6 (record the verdict if missing) and Step 7.6 (archive). For `none` verdicts, Step 6.2 already produced the user-facing exit message and skipped Step 7 — the report below does not render in that case.
 
    ```
    [implement] Done.
    Completed: N/M tasks
+   Closure: <full|partial|legacy>  <("see follow-up <child-slug>" if partial, omit otherwise)>
    Tier 2 claims written: <count>
    Tier 3 promoted: <count> (rejected: <count>)
    Remaining: <list if any, or "none — work item archived">

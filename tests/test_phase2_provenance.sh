@@ -413,6 +413,122 @@ RC=$?
 set -e
 assert_exit_nonzero "set --scope banana rejected" "$RC"
 
+# --- verify-plan-intent-anchor.sh contract (D4) ---
+# Build hand-crafted fixtures under a scratch work-dir so we can exercise the
+# extraction-boundary, divergence, and skip shapes precisely. Pass --work-dir
+# to the verifier; do not touch the live knowledge store.
+VERIFIER="$SCRIPT_DIR/verify-plan-intent-anchor.sh"
+ANCHOR_WORK_DIR="$TEST_DIR/anchor-work"
+mkdir -p "$ANCHOR_WORK_DIR"
+
+# Multi-line anchor body (internal blank line + multiple non-blank lines)
+# exercises the extraction-boundary rule from D3.
+ANCHOR_MULTILINE=$'Capability: queued claims are actually judged by a real settlement executor.\n\nPartial: only queue or status UI exists without the judging step wired through.'
+
+write_anchor_fixture() {
+  local slug="$1" anchor="$2" plan_body="$3"
+  local dir="$ANCHOR_WORK_DIR/$slug"
+  mkdir -p "$dir"
+  python3 - "$dir/_meta.json" "$slug" "$anchor" <<'PYEOF'
+import json, sys
+path, slug, anchor = sys.argv[1], sys.argv[2], sys.argv[3]
+meta = {
+    "slug": slug,
+    "title": slug,
+    "status": "active",
+    "branches": [],
+    "tags": [],
+    "issue": "",
+    "pr": "",
+    "created": "2026-01-01T00:00:00Z",
+    "updated": "2026-01-01T00:00:00Z",
+    "related_knowledge": [],
+    "related_work": [],
+    "scope": "subsystem",
+    "intent_anchor": anchor,
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(meta, fh, indent=2)
+PYEOF
+  printf '%s' "$plan_body" > "$dir/plan.md"
+}
+
+# (a) Exit 0 on a multi-line anchor body — extraction boundary respects internal blank lines.
+PLAN_PASS=$'# Multi Anchor\n\n## Intent Anchor\nCapability: queued claims are actually judged by a real settlement executor.\n\nPartial: only queue or status UI exists without the judging step wired through.\n\n**Scope delta:** none — anchor preserved unchanged.\n\n## Strategy\nbody.\n'
+write_anchor_fixture "anchor-pass" "$ANCHOR_MULTILINE" "$PLAN_PASS"
+set +e
+bash "$VERIFIER" anchor-pass --work-dir "$ANCHOR_WORK_DIR" > /dev/null 2> "$TEST_DIR/verr.log"
+RC=$?
+set -e
+assert_eq "verifier (a) exit 0 on multi-line anchor" "$RC" "0"
+
+# (b) Exit 2 when `## Intent Anchor` section is absent.
+PLAN_NO_SECTION=$'# Missing Section\n\n## Narrative\nNo anchor section here.\n\n## Strategy\nbody.\n'
+write_anchor_fixture "anchor-missing-section" "$ANCHOR_MULTILINE" "$PLAN_NO_SECTION"
+set +e
+bash "$VERIFIER" anchor-missing-section --work-dir "$ANCHOR_WORK_DIR" > /dev/null 2> "$TEST_DIR/verr.log"
+RC=$?
+set -e
+assert_eq "verifier (b) exit 2 when section missing" "$RC" "2"
+
+# (c) Exit 3 when anchor body diverges by a single character.
+PLAN_DIVERGE=$'# Diverged\n\n## Intent Anchor\nCapability: queued claims are actually judged by a real settlement executor.\n\nPartial: only queue or status UI exists without the judging step wired throughX.\n\n**Scope delta:** none — anchor preserved unchanged.\n'
+write_anchor_fixture "anchor-diverge" "$ANCHOR_MULTILINE" "$PLAN_DIVERGE"
+set +e
+bash "$VERIFIER" anchor-diverge --work-dir "$ANCHOR_WORK_DIR" > /dev/null 2> "$TEST_DIR/verr.log"
+RC=$?
+set -e
+assert_eq "verifier (c) exit 3 on single-character body divergence" "$RC" "3"
+
+# (d) Exit 4 when `**Scope delta:**` line is absent (section + matching body, but no scope-delta before next heading / EOF).
+PLAN_NO_SCOPE=$'# Missing Scope Delta\n\n## Intent Anchor\nCapability: queued claims are actually judged by a real settlement executor.\n\nPartial: only queue or status UI exists without the judging step wired through.\n\n## Strategy\nNo scope-delta line preceded this next heading.\n'
+write_anchor_fixture "anchor-no-scope-delta" "$ANCHOR_MULTILINE" "$PLAN_NO_SCOPE"
+set +e
+bash "$VERIFIER" anchor-no-scope-delta --work-dir "$ANCHOR_WORK_DIR" > /dev/null 2> "$TEST_DIR/verr.log"
+RC=$?
+set -e
+assert_eq "verifier (d) exit 4 when scope-delta line missing" "$RC" "4"
+
+# (e) Exit 0 + documented stderr skip message when `_meta.json` lacks `intent_anchor`.
+NO_ANCHOR_DIR="$ANCHOR_WORK_DIR/anchor-skipped"
+mkdir -p "$NO_ANCHOR_DIR"
+cat > "$NO_ANCHOR_DIR/_meta.json" << 'METAEOF'
+{
+  "slug": "anchor-skipped",
+  "title": "anchor-skipped",
+  "status": "active",
+  "branches": [],
+  "tags": [],
+  "issue": "",
+  "pr": "",
+  "created": "2026-01-01T00:00:00Z",
+  "updated": "2026-01-01T00:00:00Z",
+  "related_knowledge": [],
+  "related_work": [],
+  "scope": "subsystem"
+}
+METAEOF
+cat > "$NO_ANCHOR_DIR/plan.md" << 'PLANEOF'
+# Plan with no anchor in meta
+## Narrative
+Legacy item — no intent_anchor in _meta.json.
+PLANEOF
+set +e
+STDERR_OUT=$(bash "$VERIFIER" anchor-skipped --work-dir "$ANCHOR_WORK_DIR" 2>&1 >/dev/null)
+RC=$?
+set -e
+assert_eq "verifier (e) exit 0 when meta has no intent_anchor" "$RC" "0"
+assert_contains "verifier (e) stderr documents the skip" "$STDERR_OUT" "[verify-plan-intent-anchor] anchor-skipped: no intent_anchor in _meta.json — skipping"
+
+# (f) Exit 0 when surrounding blank lines differ but internal content matches (trim rule).
+PLAN_EXTRA_BLANKS=$'# Extra Blanks\n\n## Intent Anchor\n\n\nCapability: queued claims are actually judged by a real settlement executor.\n\nPartial: only queue or status UI exists without the judging step wired through.\n\n\n**Scope delta:** none — anchor preserved unchanged.\n'
+write_anchor_fixture "anchor-blank-tolerant" "$ANCHOR_MULTILINE" "$PLAN_EXTRA_BLANKS"
+set +e
+bash "$VERIFIER" anchor-blank-tolerant --work-dir "$ANCHOR_WORK_DIR" > /dev/null 2> "$TEST_DIR/verr.log"
+RC=$?
+set -e
+assert_eq "verifier (f) exit 0 with extra surrounding blank lines (trim respected)" "$RC" "0"
+
 # =============================================
 # Test 9: capture.sh outside a git repo — branch/sha resolve to "null"
 # =============================================

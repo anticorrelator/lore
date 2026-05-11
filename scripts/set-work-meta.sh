@@ -25,6 +25,10 @@ HAS_SCOPE=0
 HAS_INTENT_ANCHOR=0
 DETECT_PR=0
 JSON_MODE=0
+# --related-work: append-only references to other work items. May be passed
+# multiple times. Per closure-acceptance-reconciliation D3, the flag MUST
+# append (not replace) and reject invalid slugs with a non-zero exit.
+RELATED_WORK_SLUGS=()
 
 # Valid work-item scope values (Phase 2 capture-scale anchor).
 VALID_SCOPES=(architectural subsystem implementation granular-fix cross-cycle-meta)
@@ -78,19 +82,23 @@ while [[ $# -gt 0 ]]; do
       JSON_MODE=1
       shift
       ;;
+    --related-work)
+      RELATED_WORK_SLUGS+=("$2")
+      shift 2
+      ;;
     *)
       echo "[work] Error: Unknown flag '$1'" >&2
-      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--intent-anchor <text>] [--detect-pr] [--json]" >&2
+      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--intent-anchor <text>] [--related-work <slug>] [--detect-pr] [--json]" >&2
       exit 1
       ;;
   esac
 done
 
-if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 && "$HAS_SCOPE" -eq 0 && "$HAS_INTENT_ANCHOR" -eq 0 && "$DETECT_PR" -eq 0 ]]; then
+if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 && "$HAS_SCOPE" -eq 0 && "$HAS_INTENT_ANCHOR" -eq 0 && "$DETECT_PR" -eq 0 && ${#RELATED_WORK_SLUGS[@]} -eq 0 ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
-    json_error "No fields to set. Provide --issue, --pr, --scope, --intent-anchor, and/or --detect-pr."
+    json_error "No fields to set. Provide --issue, --pr, --scope, --intent-anchor, --related-work, and/or --detect-pr."
   fi
-  echo "[work] Error: No fields to set. Provide --issue, --pr, --scope, --intent-anchor, and/or --detect-pr." >&2
+  echo "[work] Error: No fields to set. Provide --issue, --pr, --scope, --intent-anchor, --related-work, and/or --detect-pr." >&2
   exit 1
 fi
 
@@ -216,6 +224,57 @@ with open(path, "w", encoding="utf-8") as f:
     f.write("\n")
 PYEOF
   CHANGES+=("intent_anchor=$INTENT_ANCHOR")
+fi
+
+if [[ ${#RELATED_WORK_SLUGS[@]} -gt 0 ]]; then
+  # Per closure-acceptance-reconciliation D3: validate shape and existence
+  # before mutating; reject the entire call on any invalid slug. Append-only
+  # against existing related_work, deduplicated to keep the array stable
+  # under repeated invocations.
+  RELATED_WORK_KEBAB_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+  for related_slug in "${RELATED_WORK_SLUGS[@]}"; do
+    if [[ -z "$related_slug" ]]; then
+      if [[ $JSON_MODE -eq 1 ]]; then
+        json_error "--related-work value cannot be empty"
+      fi
+      echo "[work] Error: --related-work value cannot be empty." >&2
+      exit 1
+    fi
+    if ! [[ "$related_slug" =~ $RELATED_WORK_KEBAB_RE ]]; then
+      if [[ $JSON_MODE -eq 1 ]]; then
+        json_error "--related-work '$related_slug' is not a valid kebab-case slug"
+      fi
+      echo "[work] Error: --related-work '$related_slug' is not a valid kebab-case slug." >&2
+      exit 1
+    fi
+    if [[ ! -d "$WORK_DIR/$related_slug" && ! -d "$WORK_DIR/_archive/$related_slug" ]]; then
+      if [[ $JSON_MODE -eq 1 ]]; then
+        json_error "--related-work '$related_slug' does not refer to an existing work item"
+      fi
+      echo "[work] Error: --related-work '$related_slug' does not refer to an existing work item (checked $WORK_DIR and $WORK_DIR/_archive)." >&2
+      exit 1
+    fi
+  done
+
+  RELATED_WORK_JSON=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${RELATED_WORK_SLUGS[@]}")
+  python3 - "$META_FILE" "$RELATED_WORK_JSON" << 'PYEOF'
+import json, sys
+path, new_json = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+existing = data.get("related_work", []) or []
+new_slugs = json.loads(new_json)
+seen = set(existing)
+for slug in new_slugs:
+    if slug not in seen:
+        existing.append(slug)
+        seen.add(slug)
+data["related_work"] = existing
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+  CHANGES+=("related_work+=${RELATED_WORK_SLUGS[*]}")
 fi
 
 # --- Check if any changes were actually made ---

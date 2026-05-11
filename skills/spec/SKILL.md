@@ -347,7 +347,7 @@ This evaluates the abstract plan. If WEAK or MISSING areas are identified, revis
 
 Draft concrete implementation sections on top of the approved abstract plan:
 
-0. **Intent anchor** — if the work item has an `intent_anchor`, preserve it in the plan near the Goal or Narrative. Before decomposing, name the tempting narrower implementation that would appear successful while violating that anchor; ensure Exit Criteria and Verification cover the load-bearing promise or explicitly label the scope delta.
+0. **Intent anchor** — if the work item has an `intent_anchor` in `_meta.json`, render a `## Intent Anchor` section in `plan.md` immediately after `## Narrative` and before `## Strategy`/`## Context`. Write the anchor body **verbatim** from `_meta.json.intent_anchor` — no quoting, no prefix label, no paraphrase. Follow it with a `**Scope delta:**` line (default `none — anchor preserved unchanged`; if the spec narrows the capability, name the narrowing here) and a `**Tempting narrower implementation:**` heading the spec author fills in. The anchor body and the `**Scope delta:**` line are **verifier-enforced** (the Step 5.5 gate refuses to regenerate tasks if they are missing or divergent); the `**Tempting narrower implementation:**` body is **template-prescribed but not verifier-enforced** — its presence in the template forces the spec author to confront the failure mode, but its content is free-text reasoning that no parser can adjudicate. Before decomposing, name the tempting narrower implementation that would appear successful while violating the anchor; ensure Exit Criteria and Verification cover the load-bearing promise or explicitly label the scope delta. For work items without an `intent_anchor` field, omit the section entirely — the Step 5.5 verifier skips with a one-line stderr info message.
 
 1. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include `**Knowledge context:**`, `**Tasks:**` (checkbox lines), optional `**Retrieval directive:**`, optional `**Advisors:**`, optional `**Verification:**`, and optional `**Scope:**` blocks.
 
@@ -511,6 +511,7 @@ Before finalizing this plan, here is my understanding of the key assumptions:
 - [unverified] <claim> → Investigation: <topic>, Assertion #N
 - <decision statement> (over <rejected alternative>) → Design Decision: D1: <title>
 - <scope boundary> → Goal / user input
+- [intent anchor] <anchor body verbatim from `_meta.json.intent_anchor`> — **Scope delta:** <none — anchor preserved unchanged | named narrowing> → Step 5b.0 intent-anchor preservation (omit this bullet when the work item has no `intent_anchor`)
 - [broken backlink] [[knowledge:path]] could not be resolved → Step 5.0a backlink check
 ...
 
@@ -581,6 +582,14 @@ Provenance on every `lore capture`:
 
 ### Step 5.5: Generate tasks.json and finalize
 
+Before regenerating `tasks.json`, run the intent-anchor verifier:
+
+```bash
+bash scripts/verify-plan-intent-anchor.sh <slug>
+```
+
+This gate enforces **structural anchor preservation and scope-delta attestation, not semantic non-drift** — semantic alignment between the anchor and the rest of the plan remains a spec-author responsibility (and a downstream reviewer responsibility, e.g., `/codex-plan-review`). A free-text "preserve near Goal" instruction is rhetoric without an actionable required check — exactly the failure mode this gate exists to close. The verifier exits 0 when the plan's `## Intent Anchor` section body matches `_meta.json.intent_anchor` and the `**Scope delta:**` line is present; it exits 0 with a one-line stderr info message when the work item has no `intent_anchor` field (absence is legible, not silent); it exits non-zero (2 = section missing, 3 = body diverges, 4 = `**Scope delta:**` missing) otherwise. On any non-zero exit, **do not proceed** to `lore work regen-tasks` — surface the verifier's error, address the gap in `plan.md`, and re-run the verifier until it passes.
+
 ```bash
 lore work regen-tasks <slug>
 ```
@@ -633,6 +642,24 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
      Written for a reader who wants the "what, why, and how it fits together" without reading all sections.
      Draw from Goal (the what/why) and Design Decisions (trade-offs chosen).
      Omit file paths and task lists — those belong in Phases. -->
+
+## Intent Anchor
+<!-- Conditional — emit this section only when the work item's `_meta.json.intent_anchor` is present.
+     For legacy or no-anchor work items, omit the section entirely; the Step 5.5 verifier skips with a stderr info message.
+
+     Three fields, in this order:
+       1. The anchor body verbatim from `_meta.json.intent_anchor` (no quoting, no prefix label — just the raw text).
+       2. `**Scope delta:**` line — default "none — anchor preserved unchanged"; if the spec narrows the capability, name the narrowing here.
+       3. `**Tempting narrower implementation:**` heading — the spec author names the tempting narrower implementation that
+          would appear successful while violating the anchor.
+
+     Verifier-enforced fields (load-bearing for Step 5.5 gate): anchor body and `**Scope delta:**` line.
+     Template-only field (not verifier-enforced): `**Tempting narrower implementation:**` body. -->
+<anchor body verbatim from `_meta.json.intent_anchor`>
+
+**Scope delta:** none — anchor preserved unchanged
+
+**Tempting narrower implementation:** <name the tempting narrower implementation that would appear successful while violating the anchor>
 
 ## Strategy
 <!-- Optional. Written verbatim from user input at the strategy gate (Step 4).

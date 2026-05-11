@@ -84,6 +84,36 @@ if [[ "$CURRENT_STATUS" == "archived" ]]; then
   exit 1
 fi
 
+# --- Closure-acceptance advisory (non-blocking) ---
+# Per closure-acceptance-reconciliation D1: when an anchored work item is
+# archived without a `closure` block on _meta.json, emit a single advisory
+# warning to stderr but do NOT block. /implement Step 6 is the canonical
+# verdict path; this advisory exists to surface accidental bypass via the
+# manual `lore work archive` escape hatch (and any future bulk-archive
+# callers) without forcing every existing caller into the new ceremony.
+HAS_INTENT_ANCHOR=$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+    print("1" if (data.get("intent_anchor") or "").strip() else "0")
+except Exception:
+    print("0")
+' "$META_FILE")
+HAS_CLOSURE=$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+    print("1" if isinstance(data.get("closure"), dict) else "0")
+except Exception:
+    print("0")
+' "$META_FILE")
+if [[ "$HAS_INTENT_ANCHOR" == "1" && "$HAS_CLOSURE" == "0" ]]; then
+  echo "[work] Warning: archiving anchored work item '$SLUG' without a _meta.json.closure block." >&2
+  echo "[work]          /implement Step 6 records the closure verdict; archive proceeds without it." >&2
+fi
+
 # Update status in _meta.json
 sed -i '' 's/"status"[[:space:]]*:[[:space:]]*"[^"]*"/"status": "archived"/' "$META_FILE"
 
