@@ -78,7 +78,7 @@ If the user's description is already specific enough (clear scope, stated constr
 ### Step 2a: Short branch (`--short` flag present)
 
 1. From conversation context and the work item, identify 3-8 key files to read.
-2. Search the knowledge store: `lore search "<topic>" --type knowledge --json --limit 5`. Read relevant entries.
+2. Search the knowledge store: `lore search "<topic>" --type knowledge --scale-set subsystem,implementation --json --limit 5`. Read relevant entries.
 3. Check the knowledge store index for relevant domain files.
 4. Read the files yourself — do NOT spawn subagents.
 5. Note key findings as you go.
@@ -86,9 +86,10 @@ If the user's description is already specific enough (clear scope, stated constr
    - Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** from discovery — they are the protocol toolchain, not advisors. Discovery targets purely external skills (e.g., security review, language-specific tooling, harness configuration helpers, domain-specific reviewers).
    - Build the exclusion list from the canonical lore repo:
      ```bash
-     LORE_REPO=$(bash ~/.lore/scripts/resolve-repo.sh)
-     LORE_SKILL_NAMES=$(ls "$LORE_REPO/skills/" 2>/dev/null | grep -v '\.md$')
-     LORE_AGENT_NAMES=$(ls "$LORE_REPO/agents/"*.md 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.md$//')
+     source ~/.lore/scripts/lib.sh
+     LORE_SOURCE_REPO="$LORE_REPO_DIR"
+     LORE_SKILL_NAMES=$(ls "$LORE_SOURCE_REPO/skills/" 2>/dev/null | grep -v '\.md$')
+     LORE_AGENT_NAMES=$(ls "$LORE_SOURCE_REPO/agents/"*.md 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.md$//')
      ```
    - Glob `<skills_dir>/*/SKILL.md` — for each, take the parent directory name; if it appears in `$LORE_SKILL_NAMES`, skip. Otherwise read the YAML frontmatter (`name`, `description`) and first section. Resolve `<skills_dir>` via `resolve_harness_install_path skills` (typically `~/.claude/skills` on Claude Code; differs on Codex).
    - Glob `<agents_dir>/*.md` — apply the same name filter against `$LORE_AGENT_NAMES`. Read each remaining agent template name and opening description. Resolve `<agents_dir>` via `resolve_harness_install_path agents` (typically `~/.claude/agents` on Claude Code).
@@ -106,8 +107,11 @@ If the user's description is already specific enough (clear scope, stated constr
    - Enumerate canonical directories so nothing is missed by ranking:
      ```bash
      KDIR=$(lore resolve)
-     ls "$KDIR/preferences/" "$KDIR/conventions/" "$KDIR/cross-cutting-conventions/" 2>/dev/null
+     for dir in "$KDIR/preferences" "$KDIR/conventions" "$KDIR/cross-cutting-conventions"; do
+       [[ -d "$dir" ]] && ls "$dir"
+     done
      ```
+     Missing directories count as zero entries; do not let one absent category fail the whole scan.
    - Run BM25 queries at both altitudes to catch entries the directory walk wouldn't surface by topic affinity:
      ```bash
      lore search "<work item topic>" --type knowledge --scale-set subsystem,implementation --limit 10
@@ -132,9 +136,9 @@ If the user's description is already specific enough (clear scope, stated constr
 1. From the feature description, identify 3-7 focused investigation questions. Each should target a specific codebase concern, be answerable by exploring files, and be independent enough to run in parallel.
 2. **Always include** two mandatory fixed investigations (both count toward the 3-7 total):
 
-   a. **External skill and agent applicability (strict)** — which installed *external* (non-lore) skills and agent templates should be invoked during **implementation** of this work item. Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** — they are the protocol toolchain, not advisors. The researcher must filter them out before reporting matches. Key files: `<skills_dir>/*/SKILL.md`, `<agents_dir>/*.md` (resolve via `resolve_harness_install_path skills` / `resolve_harness_install_path agents`); exclusion list comes from `$(bash ~/.lore/scripts/resolve-repo.sh)/skills/` and `/agents/`. Match criterion is **strict** — include only skills whose stated domain plausibly contributes to *this* work item's implementation.
+   a. **External skill and agent applicability (strict)** — which installed *external* (non-lore) skills and agent templates should be invoked during **implementation** of this work item. Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** — they are the protocol toolchain, not advisors. The researcher must filter them out before reporting matches. Key files: `<skills_dir>/*/SKILL.md`, `<agents_dir>/*.md` (resolve via `resolve_harness_install_path skills` / `resolve_harness_install_path agents`); exclusion list comes from the canonical Lore source repo, `source ~/.lore/scripts/lib.sh && printf '%s\n' "$LORE_REPO_DIR"`, then `/skills/` and `/agents/`. Do not use `resolve-repo.sh` for this; it returns the target project's knowledge store, not the Lore source tree. Match criterion is **strict** — include only skills whose stated domain plausibly contributes to *this* work item's implementation.
 
-   b. **Preferences and conventions applicability (permissive)** — which entries from the knowledge store's `preferences/`, `conventions/`, and `cross-cutting-conventions/` directories the work might need to honor. **Inclusion criterion is permissive — the inverse of skill discovery.** The test is "is it *possible* the work might need this" — not "will we definitely apply it." Err on the side of over-inclusion; synthesis culls. Missing an applicable preference is worse than carrying an inapplicable one through review. Key files: `$KDIR/preferences/`, `$KDIR/conventions/`, `$KDIR/cross-cutting-conventions/` (full directory enumeration) plus BM25 results from `lore search "<topic>" --type knowledge --scale-set subsystem,implementation --limit 10` and `--scale-set abstract,architecture --limit 5`.
+   b. **Preferences and conventions applicability (permissive)** — which entries from the knowledge store's `preferences/`, `conventions/`, and `cross-cutting-conventions/` directories the work might need to honor. **Inclusion criterion is permissive — the inverse of skill discovery.** The test is "is it *possible* the work might need this" — not "will we definitely apply it." Err on the side of over-inclusion; synthesis culls. Missing an applicable preference is worse than carrying an inapplicable one through review. Key files: `$KDIR/preferences/`, `$KDIR/conventions/`, `$KDIR/cross-cutting-conventions/` (full directory enumeration; absent directories count as zero entries) plus BM25 results from `lore search "<topic>" --type knowledge --scale-set subsystem,implementation --limit 10` and `--scale-set abstract,architecture --limit 5`.
 3. Check the knowledge store index for file hints per investigation.
 4. Assess complexity for each investigation: **simple** (1-2 files), **moderate** (3-5 files), **complex** (6+ files or cross-cutting).
 5. Present the Investigation Plan to the user:
@@ -174,8 +178,8 @@ If the user's description is already specific enough (clear scope, stated constr
    # → delegate:TaskCreate role=researcher model=<id>  (claude-code)
    ```
    On Claude Code, the lead model invokes `TaskCreate` with the directive's role/model; the spawn directive carries one `TaskCreate` per question with full question, context, file hints, and expected report format.
-   - For the mandatory **External skill and agent applicability** investigation: include instructions to (a) evaluate implementation-phase applicability (not the investigation phase), (b) read actual SKILL.md files, (c) **exclude lore-managed skills and agents** before matching — build the exclusion list from `$(bash ~/.lore/scripts/resolve-repo.sh)/skills/` and `/agents/`, applied by parent-directory name, (d) apply a strict match criterion (skill's domain must plausibly contribute to *this* work item, not "could in theory be invoked"), and (e) report `**Matched skills:**` / `**Matched agents:**` blocks after `**Implications:**`. If every candidate gets filtered out, the report is `**Matched skills:** none` — that is a valid terminal.
-   - For the mandatory **Preferences and conventions applicability** investigation: include instructions to (a) enumerate `$KDIR/preferences/`, `$KDIR/conventions/`, and `$KDIR/cross-cutting-conventions/` directly via `ls`, plus BM25 queries at both `subsystem,implementation` and `abstract,architecture` scale-sets retaining hits whose path is under those three directories, (b) apply a **permissive** inclusion criterion — include if it is *possible* the work might need to honor the entry, not "will we definitely apply it," (c) read each candidate's title and lead paragraph, deep-reading any with surface-level overlap, and (d) report a `**Surfaced preferences/conventions:**` block after `**Implications:**` listing each surfaced entry as `[[knowledge:<path>]] — 1-line "why it might apply"`. Err on the side of over-inclusion; synthesis culls. If no entries surface after permissive review, report `**Surfaced preferences/conventions:** none`.
+   - For the mandatory **External skill and agent applicability** investigation: include instructions to (a) evaluate implementation-phase applicability (not the investigation phase), (b) read actual SKILL.md files, (c) **exclude lore-managed skills and agents** before matching — build the exclusion list from the Lore source repo resolved by `source ~/.lore/scripts/lib.sh; printf '%s\n' "$LORE_REPO_DIR"`, applied by parent-directory name, (d) apply a strict match criterion (skill's domain must plausibly contribute to *this* work item, not "could in theory be invoked"), and (e) report `**Matched skills:**` / `**Matched agents:**` blocks after `**Implications:**`. If every candidate gets filtered out, the report is `**Matched skills:** none` — that is a valid terminal.
+   - For the mandatory **Preferences and conventions applicability** investigation: include instructions to (a) enumerate existing `$KDIR/preferences/`, `$KDIR/conventions/`, and `$KDIR/cross-cutting-conventions/` directories directly, treating absent directories as zero entries instead of an error, plus BM25 queries at both `subsystem,implementation` and `abstract,architecture` scale-sets retaining hits whose path is under those three directories, (b) apply a **permissive** inclusion criterion — include if it is *possible* the work might need to honor the entry, not "will we definitely apply it," (c) read each candidate's title and lead paragraph, deep-reading any with surface-level overlap, and (d) report a `**Surfaced preferences/conventions:**` block after `**Implications:**` listing each surfaced entry as `[[knowledge:<path>]] — 1-line "why it might apply"`. Err on the side of over-inclusion; synthesis culls. If no entries surface after permissive review, report `**Surfaced preferences/conventions:** none`.
 10. Pre-fetch knowledge for each investigation:
     ```bash
     PRIOR_KNOWLEDGE=$(lore prefetch "<investigation topic>" --format prompt --limit 5 --scale-set=<bucket>)

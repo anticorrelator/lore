@@ -77,6 +77,19 @@ OUT=$(bash "$SCRIPTS_DIR/prefetch-knowledge.sh" "some topic" --scale-context wor
 assert_exit_nonzero "prefetch --scale-context alone exits non-zero" "$EC"
 
 echo ""
+echo "Test 1.3: prefetch-knowledge.sh accepts --scale-set=<csv> spelling"
+KDIR=$(setup_knowledge_dir)
+OUT=$(LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPTS_DIR/prefetch-knowledge.sh" "some topic" --scale-set=subsystem,implementation 2>&1); EC=$?
+assert_exit_zero "prefetch accepts equals-form csv scale set" "$EC"
+if echo "$OUT" | grep -qF -- "Unknown option"; then
+  echo "  FAIL: prefetch equals-form was parsed as an unknown option"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: prefetch equals-form is not parsed as an unknown option"
+  PASS=$((PASS + 1))
+fi
+
+echo ""
 
 # ================================================================
 # Section 2: lore query hard-fail

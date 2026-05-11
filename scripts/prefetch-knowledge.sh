@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # prefetch-knowledge.sh — Search knowledge store and output formatted context for agent prompts
-# Usage: bash prefetch-knowledge.sh <query> [--format prompt|summary] [--limit N] [--type knowledge|work|all] [--exclude-backlinks <paths>] [--scale-set <bucket>] [--work-item <slug>]
+# Usage: bash prefetch-knowledge.sh <query> [--format prompt|summary] [--limit N] [--type knowledge|work|all] [--exclude-backlinks <paths>] [--scale-set <csv>] [--work-item <slug>]
 #
 # --format prompt   (default) Full resolved sections for embedding in agent prompts
 # --format summary  Headings + snippets for display
@@ -8,8 +8,9 @@
 # --type            Filter by source type: knowledge, work, or all (default: all)
 # --exclude-backlinks  Comma-separated backlink paths to exclude from results (deduplication
 #                      with pre-resolved knowledge already in task descriptions)
-# --scale-set <bucket>     Required. Declared retrieval scale bucket: one of abstract,
-#                          architecture, subsystem, implementation. No default; missing = error.
+# --scale-set <csv>        Required. Declared retrieval scale set: comma-separated
+#                          abstract, architecture, subsystem, implementation labels.
+#                          No default; missing = error.
 # --work-item <slug>       Work item slug (from _work/<slug>/_meta.json). Used only for
 #                          scope_pointers injection; no longer used for scale computation.
 #
@@ -57,6 +58,10 @@ while [[ $# -gt 0 ]]; do
       SCALE_SET="$2"
       shift 2
       ;;
+    --scale-set=*)
+      SCALE_SET="${1#--scale-set=}"
+      shift
+      ;;
     --work-item)
       WORK_ITEM="$2"
       shift 2
@@ -87,8 +92,8 @@ if [[ -z "$QUERY" ]]; then
 fi
 
 if [[ -z "$SCALE_SET" ]]; then
-  echo "Error: --scale-set <bucket> is required. Declare your retrieval scale before fetching." >&2
-  echo "  Use: prefetch-knowledge.sh <query> --scale-set <bucket>" >&2
+  echo "Error: --scale-set <csv> is required. Declare your retrieval scale before fetching." >&2
+  echo "  Use: prefetch-knowledge.sh <query> --scale-set <bucket>[,<bucket>]" >&2
   echo "  Buckets: abstract, architecture, subsystem, implementation" >&2
   exit 1
 fi
