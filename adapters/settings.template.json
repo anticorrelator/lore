@@ -80,6 +80,11 @@
       "mode": "first_eligible",
       "eligible_frameworks": [],
       "random_seed": 0
+    },
+    "path_to_commons_filter": {
+      "enabled": true,
+      "exclude_reasons": ["templated-claim", "templated-falsifier"],
+      "predicate_budget_multiplier": 3
     }
   }
 }

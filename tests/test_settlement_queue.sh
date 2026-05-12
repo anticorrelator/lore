@@ -75,10 +75,15 @@ PLANEOF
 
 row_json() {
   local claim_id="$1" task_id="${2:-task-1}"
+  # Claim and falsifier are intentionally >= 40 chars so the path-to-commons
+  # pre-enqueue filter (D3) does not classify the row as templated-claim
+  # / templated-falsifier and exclude it from the candidate set. Tests that
+  # want to exercise the templated-detection path build a row inline with
+  # a short claim or falsifier.
   jq -nc --arg cid "$claim_id" --arg task "$task_id" '{
     claim_id: $cid,
     tier: "task-evidence",
-    claim: ("settlement test claim " + $cid),
+    claim: ("settlement processor durable trigger fixture row for claim " + $cid),
     producer_role: "worker",
     protocol_slot: "implementation",
     task_id: $task,
@@ -86,7 +91,7 @@ row_json() {
     scale: "implementation",
     file: "scripts/settlement-processor.py",
     line_range: "1-20",
-    falsifier: "Run settlement queue tests and inspect durable state",
+    falsifier: "Run settlement queue tests and inspect durable run records",
     why_this_work_needs_it: "The settlement processor depends on validated Tier 2 rows as durable triggers",
     captured_at_sha: "test-sha",
     change_context: {
@@ -605,6 +610,219 @@ else
   echo "  FAIL: status latency too high with bounded scan (${ELAPSED_MS}ms >= 1000ms)"
   FAIL=$((FAIL + 1))
 fi
+
+echo ""
+echo "Test 21: pre-enqueue filter excludes templated-claim rows"
+KDIR_PTCF1="$TEST_DIR/kdir-ptcf1"
+SETTINGS_PTCF1="$TEST_DIR/settings-ptcf1.json"
+setup_kdir "$KDIR_PTCF1" "wi"
+write_settings "$SETTINGS_PTCF1" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":4,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]},"path_to_commons_filter":{"enabled":true,"exclude_reasons":["templated-claim","templated-falsifier"],"predicate_budget_multiplier":3}}}'
+# Templated-claim row: short claim (< 40 chars) trips templated detection.
+jq -nc '{
+  claim_id: "claim-templated",
+  tier: "task-evidence",
+  claim: "TODO",
+  producer_role: "worker",
+  protocol_slot: "implementation",
+  task_id: "task-1",
+  phase_id: "1",
+  scale: "implementation",
+  file: "scripts/settlement-processor.py",
+  line_range: "1-1",
+  falsifier: "Run the settlement queue tests and inspect durable state",
+  why_this_work_needs_it: "Exercise templated-claim exclusion",
+  captured_at_sha: "test-sha",
+  change_context: {diff_ref:"test-sha",changed_files:["scripts/settlement-processor.py"],summary:"templated fixture exercising pre-enqueue exclusion"}
+}' > "$KDIR_PTCF1/_work/wi/task-claims.jsonl"
+# Append a non-templated row so we can verify selective exclusion.
+printf '%s\n' "$(row_json "claim-ok")" >> "$KDIR_PTCF1/_work/wi/task-claims.jsonl"
+LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_PTCF1" bash "$QUEUE" queue recompute --kdir "$KDIR_PTCF1" --json >/dev/null
+QUEUED_PTCF1=$(jq -r '[.items[].claim_id] | join(",")' "$KDIR_PTCF1/_settlement/queue.json")
+assert_eq "templated-claim row excluded from candidates" "$QUEUED_PTCF1" "claim-ok"
+FILTERED_PTCF1="$KDIR_PTCF1/_work/wi/filtered-claims.jsonl"
+if [[ -f "$FILTERED_PTCF1" ]]; then
+  TEMPLATED_LINE=$(jq -c 'select(.claim_id=="claim-templated" and .stage=="pre-enqueue" and .reason=="templated-claim")' "$FILTERED_PTCF1" | head -1)
+  assert_eq "templated exclusion records stage=pre-enqueue mode=exclude" "$(echo "$TEMPLATED_LINE" | jq -r '.mode')" "exclude"
+  assert_eq "templated exclusion records enqueued_anyway=false" "$(echo "$TEMPLATED_LINE" | jq -r '.enqueued_anyway')" "false"
+else
+  echo "  FAIL: filtered-claims.jsonl missing for templated-claim row"
+  FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "Test 22: pre-enqueue filter routes unknown rows to report-only"
+KDIR_PTCF2="$TEST_DIR/kdir-ptcf2"
+SETTINGS_PTCF2="$TEST_DIR/settings-ptcf2.json"
+setup_kdir "$KDIR_PTCF2" "wi"
+write_settings "$SETTINGS_PTCF2" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":4,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]},"path_to_commons_filter":{"enabled":true,"exclude_reasons":["templated-claim","templated-falsifier"],"predicate_budget_multiplier":3}}}'
+printf '%s\n' "$(row_json "claim-report")" > "$KDIR_PTCF2/_work/wi/task-claims.jsonl"
+LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_PTCF2" bash "$QUEUE" queue recompute --kdir "$KDIR_PTCF2" --json >/dev/null
+QUEUED_PTCF2=$(jq -r '[.items[].claim_id] | join(",")' "$KDIR_PTCF2/_settlement/queue.json")
+assert_eq "unknown row remains in candidate set" "$QUEUED_PTCF2" "claim-report"
+FILTERED_PTCF2="$KDIR_PTCF2/_work/wi/filtered-claims.jsonl"
+if [[ -f "$FILTERED_PTCF2" ]]; then
+  REPORT_LINE=$(jq -c 'select(.claim_id=="claim-report" and .stage=="pre-enqueue")' "$FILTERED_PTCF2" | head -1)
+  assert_eq "report-only row stage=pre-enqueue" "$(echo "$REPORT_LINE" | jq -r '.stage')" "pre-enqueue"
+  assert_eq "report-only row mode=report-only" "$(echo "$REPORT_LINE" | jq -r '.mode')" "report-only"
+  assert_eq "report-only row enqueued_anyway=true" "$(echo "$REPORT_LINE" | jq -r '.enqueued_anyway')" "true"
+else
+  echo "  FAIL: filtered-claims.jsonl missing for report-only row"
+  FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "Test 23: path_to_commons_filter.enabled=false suppresses predicate"
+KDIR_PTCF3="$TEST_DIR/kdir-ptcf3"
+SETTINGS_PTCF3="$TEST_DIR/settings-ptcf3.json"
+setup_kdir "$KDIR_PTCF3" "wi"
+write_settings "$SETTINGS_PTCF3" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":4,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]},"path_to_commons_filter":{"enabled":false}}}'
+jq -nc '{
+  claim_id: "claim-disabled",
+  tier: "task-evidence",
+  claim: "TODO",
+  producer_role: "worker",
+  protocol_slot: "implementation",
+  task_id: "task-1",
+  phase_id: "1",
+  scale: "implementation",
+  file: "scripts/settlement-processor.py",
+  line_range: "1-1",
+  falsifier: "Run the settlement queue tests and inspect durable state",
+  why_this_work_needs_it: "Exercise disabled predicate path",
+  captured_at_sha: "test-sha",
+  change_context: {diff_ref:"test-sha",changed_files:["scripts/settlement-processor.py"],summary:"disabled predicate fixture"}
+}' > "$KDIR_PTCF3/_work/wi/task-claims.jsonl"
+LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_PTCF3" bash "$QUEUE" queue recompute --kdir "$KDIR_PTCF3" --json >/dev/null
+QUEUED_PTCF3=$(jq -r '[.items[].claim_id] | join(",")' "$KDIR_PTCF3/_settlement/queue.json")
+assert_eq "disabled filter retains short-claim row" "$QUEUED_PTCF3" "claim-disabled"
+if [[ ! -f "$KDIR_PTCF3/_work/wi/filtered-claims.jsonl" ]]; then
+  echo "  PASS: disabled filter writes no filtered-claims.jsonl"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: disabled filter unexpectedly wrote filtered-claims.jsonl"
+  FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "Test 24: post-verdict hook fires only for contradicted verdicts"
+KDIR_HOOK1="$TEST_DIR/kdir-hook1"
+SETTINGS_HOOK1="$TEST_DIR/settings-hook1.json"
+HOOK_LOG="$TEST_DIR/hook-invocations.log"
+HOOK_SCRIPT="$TEST_DIR/post-hook-record.sh"
+setup_kdir "$KDIR_HOOK1" "wi"
+write_settings "$SETTINGS_HOOK1" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":4,"batch_recompute_min_interval_seconds":0,"executor_timeout_seconds":10,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]},"path_to_commons_filter":{"enabled":false}}}'
+cat > "$HOOK_SCRIPT" <<HOOK
+#!/usr/bin/env bash
+PAYLOAD=\$(cat)
+{
+  printf 'invocation\n'
+  printf '%s\n' "\$PAYLOAD"
+} >> "$HOOK_LOG"
+exit 0
+HOOK
+chmod +x "$HOOK_SCRIPT"
+: > "$HOOK_LOG"
+printf '%s\n' "$(row_json "claim-contradicted")" >> "$KDIR_HOOK1/_work/wi/task-claims.jsonl"
+CONTRADICT_EXEC="$TEST_DIR/contradict-exec.sh"
+cat > "$CONTRADICT_EXEC" <<'EXEC'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"verdict_envelope_version":1,"verdict":"contradicted","evidence":"contradiction evidence","correction":"replacement text for the entry"}\n'
+EXEC
+chmod +x "$CONTRADICT_EXEC"
+DONE_HOOK=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_HOOK1" LORE_SETTLEMENT_EXECUTOR="$CONTRADICT_EXEC" LORE_SETTLEMENT_POST_HOOK="$HOOK_SCRIPT" bash "$QUEUE" process --kdir "$KDIR_HOOK1" --once --json)
+assert_json_eq "contradicted run completed" "$DONE_HOOK" '.run.verdict.verdict' "contradicted"
+INVOCATIONS=0
+[[ -f "$HOOK_LOG" ]] && INVOCATIONS=$(grep -c '^invocation$' "$HOOK_LOG" || true)
+INVOCATIONS=$(printf '%s' "$INVOCATIONS" | tr -d '\n')
+assert_eq "post-hook invoked once for contradicted verdict" "$INVOCATIONS" "1"
+# Verify the payload shape — has run, item, task_claim.
+PAYLOAD_LINE=$(grep -v '^invocation$' "$HOOK_LOG" | head -1)
+assert_eq "hook payload has .run" "$(echo "$PAYLOAD_LINE" | jq -r '.run.run_id != null')" "true"
+assert_eq "hook payload has .item" "$(echo "$PAYLOAD_LINE" | jq -r '.item.claim_id == "claim-contradicted"')" "true"
+assert_eq "hook payload has .task_claim with claim text" "$(echo "$PAYLOAD_LINE" | jq -r '.task_claim.claim != null')" "true"
+
+echo ""
+echo "Test 25: post-verdict hook is SKIPPED for verified verdicts"
+KDIR_HOOK2="$TEST_DIR/kdir-hook2"
+SETTINGS_HOOK2="$TEST_DIR/settings-hook2.json"
+HOOK_LOG2="$TEST_DIR/hook2-invocations.log"
+setup_kdir "$KDIR_HOOK2" "wi"
+write_settings "$SETTINGS_HOOK2" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":4,"batch_recompute_min_interval_seconds":0,"executor_timeout_seconds":10,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]},"path_to_commons_filter":{"enabled":false}}}'
+HOOK_SCRIPT2="$TEST_DIR/post-hook-record2.sh"
+cat > "$HOOK_SCRIPT2" <<HOOK
+#!/usr/bin/env bash
+cat >> "$HOOK_LOG2"
+printf 'invocation\n' >> "$HOOK_LOG2"
+exit 0
+HOOK
+chmod +x "$HOOK_SCRIPT2"
+: > "$HOOK_LOG2"
+printf '%s\n' "$(row_json "claim-verified")" >> "$KDIR_HOOK2/_work/wi/task-claims.jsonl"
+VERIFIED_EXEC="$TEST_DIR/verified-exec.sh"
+cat > "$VERIFIED_EXEC" <<'EXEC'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"verdict_envelope_version":1,"verdict":"verified","evidence":"all good","correction":null}\n'
+EXEC
+chmod +x "$VERIFIED_EXEC"
+LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_HOOK2" LORE_SETTLEMENT_EXECUTOR="$VERIFIED_EXEC" LORE_SETTLEMENT_POST_HOOK="$HOOK_SCRIPT2" bash "$QUEUE" process --kdir "$KDIR_HOOK2" --once --json >/dev/null
+INVOCATIONS2=0
+[[ -f "$HOOK_LOG2" ]] && INVOCATIONS2=$(grep -c '^invocation$' "$HOOK_LOG2" || true)
+INVOCATIONS2=$(printf '%s' "$INVOCATIONS2" | tr -d '\n')
+assert_eq "post-hook NOT invoked for verified verdict" "$INVOCATIONS2" "0"
+
+echo ""
+echo "Test 26: post-verdict hook fail-open — non-zero exit does not poison loop"
+KDIR_HOOK3="$TEST_DIR/kdir-hook3"
+SETTINGS_HOOK3="$TEST_DIR/settings-hook3.json"
+setup_kdir "$KDIR_HOOK3" "wi"
+write_settings "$SETTINGS_HOOK3" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":4,"batch_recompute_min_interval_seconds":0,"executor_timeout_seconds":10,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]},"path_to_commons_filter":{"enabled":false}}}'
+HOOK_FAIL="$TEST_DIR/post-hook-fail.sh"
+cat > "$HOOK_FAIL" <<'HOOK'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "[hook] simulated failure" >&2
+exit 99
+HOOK
+chmod +x "$HOOK_FAIL"
+printf '%s\n' "$(row_json "claim-failopen")" >> "$KDIR_HOOK3/_work/wi/task-claims.jsonl"
+DONE_FAILOPEN=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_HOOK3" LORE_SETTLEMENT_EXECUTOR="$CONTRADICT_EXEC" LORE_SETTLEMENT_POST_HOOK="$HOOK_FAIL" bash "$QUEUE" process --kdir "$KDIR_HOOK3" --once --json)
+assert_json_eq "settlement loop completes despite hook failure" "$DONE_FAILOPEN" '.dispatched' "true"
+assert_json_eq "run record stores contradicted verdict despite hook fail" "$DONE_FAILOPEN" '.run.verdict.verdict' "contradicted"
+
+echo ""
+echo "Test 27: predicate cache reuses decision across recomputes"
+KDIR_CACHE="$TEST_DIR/kdir-cache"
+SETTINGS_CACHE="$TEST_DIR/settings-cache.json"
+setup_kdir "$KDIR_CACHE" "wi"
+write_settings "$SETTINGS_CACHE" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]},"path_to_commons_filter":{"enabled":true,"exclude_reasons":["templated-claim","templated-falsifier"],"predicate_budget_multiplier":3}}}'
+# Three templated-claim rows — predicate evaluation is templated-detection-only
+# (no subprocess call), and the resulting exclusion is cached.
+for i in 1 2 3; do
+  jq -nc --arg cid "claim-cache-$i" '{
+    claim_id: $cid,
+    tier: "task-evidence",
+    claim: "TODO",
+    producer_role: "worker",
+    protocol_slot: "implementation",
+    task_id: "task-1",
+    phase_id: "1",
+    scale: "implementation",
+    file: "scripts/settlement-processor.py",
+    line_range: "1-1",
+    falsifier: "Run the settlement queue tests and inspect durable state",
+    why_this_work_needs_it: "Exercise predicate cache reuse",
+    captured_at_sha: "test-sha",
+    change_context: {diff_ref:"test-sha",changed_files:["scripts/settlement-processor.py"],summary:"cache reuse fixture"}
+  }' >> "$KDIR_CACHE/_work/wi/task-claims.jsonl"
+done
+LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_CACHE" bash "$QUEUE" queue recompute --kdir "$KDIR_CACHE" --json >/dev/null
+QUEUED_CACHE_A=$(jq -r '[.items[].claim_id] | join(",")' "$KDIR_CACHE/_settlement/queue.json")
+LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_CACHE" bash "$QUEUE" queue recompute --kdir "$KDIR_CACHE" --json >/dev/null
+QUEUED_CACHE_B=$(jq -r '[.items[].claim_id] | join(",")' "$KDIR_CACHE/_settlement/queue.json")
+assert_eq "all templated rows excluded on first recompute" "$QUEUED_CACHE_A" ""
+assert_eq "second recompute reproduces exclusion deterministically" "$QUEUED_CACHE_B" "$QUEUED_CACHE_A"
 
 echo ""
 echo "=== Summary ==="

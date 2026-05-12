@@ -50,7 +50,7 @@ Team-based divide-and-conquer: the spec-lead composes an investigation plan tabl
 4. Try to resolve input as an existing work item (fuzzy match or branch inference, same algorithm as `/work`, including archive fallback):
    - **If resolved item is tagged `[archived]`:** Warn the user and wait for explicit confirmation before continuing.
    - **If resolved** → load the work item:
-    - Read `_meta.json.intent_anchor` when present. Treat it as the neutral capability anchor from work-item intake. The spec may refine implementation shape, but it must not silently narrow or remove the capability implied by this statement; any such change is a user-visible scope delta.
+    - Read `_meta.json.intent_anchor` when present. Treat it as the user's verbatim capability statement from intake. The spec may refine implementation shape, but it must not silently narrow or remove the capability implied by this statement; any such change is a user-visible scope delta. Anchors are stored verbatim from the user precisely so downstream specs cannot launder the intent through a paraphrase; preserve the wording (including any tonal markers) when restating it.
      - If `plan.md` exists with synthesis already complete (Design Decisions + Phases present), skip to Step 5.1 (Confirm understanding). If a `## Strategy` section exists, load it silently as shaping context.
      - If `plan.md` exists with `## Investigations` and completed findings but no synthesis yet, skip to synthesis (Step 5). If a `## Strategy` section exists, load it silently and use it as shaping context — do not re-prompt.
      - If it has investigations but `## Open Questions` needing follow-up, dispatch targeted follow-ups.
@@ -66,7 +66,7 @@ When the input is a freeform description rather than an existing work item:
 1. Restate your understanding in 1-2 sentences.
 2. Ask 2-4 clarifying questions using `AskUserQuestion`. Target scope boundaries, constraints, and approach preferences. Do NOT ask questions answerable by reading the codebase.
 3. Incorporate answers into a refined goal statement.
-4. Create the work item: derive a slug from the description, run the `/work create` flow and pass `--intent-anchor` with a neutral capability-preserving distillation of the user's request. Do not copy conversational pressure verbatim, and do not remove load-bearing intent.
+4. Create the work item: derive a slug from the description, run the `/work create` flow and pass `--intent-anchor` with the user's verbatim capability statement. Do NOT rephrase, neutralize, or distill — agent rephrasing at intake is a lossy compression that admits alternatives the user did not authorize, and the user cannot audit a translation they never see. Pick the user's actual sentence that names the user-visible outcome; pass it through unchanged. If the request spans multiple sentences, pick the one that names the capability; do not synthesize a new sentence.
 5. Continue to Step 2.
 
 If the user's description is already specific enough (clear scope, stated constraints, obvious approach), skip to step 4 — don't ask questions for the sake of asking.

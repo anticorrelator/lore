@@ -17,11 +17,11 @@ Match the first word of `$ARGUMENTS` to a command below. If no command matches b
 
 ### `create <name> [--issue <value>] [--pr <value>] [--intent-anchor <text>]`
 ```bash
-lore work create --title "<name>" [--intent-anchor "<neutral capability-preserving intent anchor>"] [--issue "<value>"] [--pr "<value>"]
+lore work create --title "<name>" [--intent-anchor "<user's verbatim capability statement>"] [--issue "<value>"] [--pr "<value>"]
 ```
 **Before running:** Titles must be ≤70 characters (same as git/PR title convention). Keep it concise — 3–6 words that identify the goal, not a sentence. The slug is generated from the title (stopwords stripped, kebab-cased, capped at 50 chars). Good: `"TUI Mouse Click Focus"`. Bad: `"Add Mouse Click To Focus Panel In TUI When User Clicks"`.
 
-**Intent anchor:** When the work item comes from the current conversation, pass `--intent-anchor` with a neutral intake-agent distillation of the capability the work must preserve. Do not copy emotionally loaded or conversationally pressuring user text verbatim; do not paraphrase away load-bearing intent. Good anchors describe the desired operational capability and what would make the result only partial. If the work item comes from an external issue, use a neutral distillation of the issue's load-bearing request.
+**Intent anchor:** Pass `--intent-anchor` with the user's verbatim capability statement — do NOT rephrase, neutralize, or "distill." Agent rephrasing at intake is a lossy compression: it admits alternatives ("OR"), softens load-bearing language, and the user never sees the translation, so anchor drift becomes invisible until a downstream cycle ships the weakened reading. The original wording (including emotional or conversational tone) is what downstream agents need to see; instruction-following models handle conversational noise reliably, but they cannot recover meaning that an intake paraphrase admitted out. If the user's request spans multiple sentences, pick the one sentence that names the user-visible capability — verbatim — and use that. If the work item comes from an external issue, use the issue's verbatim load-bearing sentence(s). Do not invent your own anchor wording.
 
 **Dedup:** The script rejects creation if the new slug overlaps with an existing slug (substring match). If this happens, use the existing item — do NOT retry with a different name for the same topic.
 

@@ -219,11 +219,12 @@ if [[ "$audit_exit" -ne 0 ]]; then
 fi
 
 derivation_file="$tmp_dir/derivation.json"
-if ! python3 - "$audit_stdout" >"$derivation_file" <<'PYEOF'
+if ! python3 - "$audit_stdout" "$claim_id" >"$derivation_file" <<'PYEOF'
 import json
 import sys
 
 path = sys.argv[1]
+priority_claim_id = sys.argv[2] if len(sys.argv) > 2 else ""
 try:
     with open(path, encoding="utf-8") as fh:
         audit = json.load(fh)
@@ -252,21 +253,43 @@ elif verified > 0 and contradicted == 0:
 else:
     verdict = "skipped"
 
+# Default to aggregate-summary evidence; overwritten by per-claim row below when found.
 evidence = f"correctness_gate: total={total} verified={verified} unverified={unverified} contradicted={contradicted}"
 correction = None
 verdicts_file = audit.get("verdicts_file") if isinstance(audit, dict) else None
 if verdict == "contradicted" and verdicts_file:
+    # Read all contradicted rows from the correctness-gate judge, then prefer the
+    # row whose claim_id matches the priority claim. Per-claim evidence is what
+    # downstream apply-correction needs — the aggregate summary string is too coarse
+    # to drive a body-replacement mutation. Fall back to the first contradicted row
+    # if no per-claim match exists (defensive — shouldn't happen given priority-claims).
     try:
+        contradicted_rows = []
         with open(verdicts_file, encoding="utf-8") as fh:
             for line in fh:
                 if not line.strip():
                     continue
-                row = json.loads(line)
-                if row.get("judge") == "correctness-gate" and row.get("verdict") == "contradicted" and row.get("correction"):
-                    correction = row["correction"]
-                    break
-    except (OSError, json.JSONDecodeError):
-        correction = None
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (row.get("judge") == "correctness-gate"
+                        and row.get("verdict") == "contradicted"):
+                    contradicted_rows.append(row)
+        target = None
+        for row in contradicted_rows:
+            if row.get("claim_id") == priority_claim_id:
+                target = row
+                break
+        if target is None and contradicted_rows:
+            target = contradicted_rows[0]
+        if target is not None:
+            if target.get("evidence"):
+                evidence = target["evidence"]
+            if target.get("correction"):
+                correction = target["correction"]
+    except OSError:
+        pass
 
 print(json.dumps({"ok": True, "verdict": verdict, "evidence": evidence, "correction": correction}))
 PYEOF

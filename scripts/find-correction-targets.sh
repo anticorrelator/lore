@@ -2,7 +2,8 @@
 # find-correction-targets.sh — Map a contradicted claim to candidate commons entries
 #
 # Usage:
-#   find-correction-targets.sh --claim-text "<text>" [--file-line "<file:line_range>"] [--limit N] [--threshold F]
+#   find-correction-targets.sh --claim-text "<text>" [--file-line "<file:line_range>"] \
+#                              [--limit N] [--threshold F] [--json]
 #
 # Given the text of a contradicted claim (from a correctness-gate or reverse-auditor
 # verdict) and optionally the file:line_range anchor from the verdict, returns a ranked
@@ -14,13 +15,44 @@
 #   2. TF-IDF similarity >= threshold (default 0.4) between claim_text and entry body.
 #   Entries matching either pass are ranked by overlap + similarity descending.
 #
-# Output (one path per line, ranked):
-#   <entry_path> [overlap=yes] [sim=0.NNNN]
+# Output modes:
+#   default (text): one path per line, ranked
+#     <entry_path>  [overlap=yes|no]  [sim=0.NNNN]
+#     Special line "No matching entries found" when results is empty.
+#   --json: a single parseable JSON object on stdout:
+#     {
+#       "targets": [{"path": <abs path>, "rank": 1, "overlap": <bool>, "sim": <float>}, ...],
+#       "index_state": "ready" | "stale" | "missing",
+#       "resolver_version": "<short-sha-or-v1>"
+#     }
+#
+# index_state trichotomy (per D4):
+#   missing  — the FTS concordance DB ($KDIR/.pk_search.db) does not exist.
+#   ready    — the DB exists and the query succeeded.
+#   stale    — RESERVED for a future hook (e.g. mtime-based freshness predicate). This
+#              script never emits "stale" today; the trichotomy is documented so
+#              downstream consumers (settlement filter, propagation reconcile backstop)
+#              can encode the three-way decision now and the producer can flip to
+#              "stale" without a consumer migration. Adding the stale predicate is
+#              explicitly out of scope for this PR.
+#
+# resolver_version:
+#   When invoked from inside a git working tree, the value is `git rev-parse --short HEAD`
+#   (the commit of the script's own checkout — used as the resolver identity for
+#   audit-trail purposes). If git is unavailable or the script is not in a git tree,
+#   the literal string "v1" is emitted. Document any future schema bump by incrementing
+#   the v-prefix fallback rather than overloading the sha.
 #
 # Exit codes:
-#   0 — success (0 or more results)
-#   1 — usage error
-#   2 — knowledge store not found or concordance index missing
+#   0 — success
+#       * In text mode: 0 or more results printed (or "No matching entries found").
+#       * In --json mode: ALWAYS exit 0 on a successful query — JSON consumers need a
+#         parseable response, not exit-code branching. Empty targets + index_state="ready"
+#         is a valid, well-formed answer ("no candidates"); index_state="missing" is the
+#         analogous well-formed answer for a not-yet-built index.
+#   1 — usage error (bad/missing flags) — applies to both modes
+#   2 — knowledge store or concordance index missing (TEXT MODE ONLY; --json folds
+#       the missing-index condition into index_state="missing" with exit 0)
 
 set -euo pipefail
 
@@ -31,10 +63,11 @@ CLAIM_TEXT=""
 FILE_LINE=""
 LIMIT=10
 THRESHOLD=0.4
+JSON_MODE=0
 
 usage() {
   cat >&2 <<EOF
-Usage: find-correction-targets.sh --claim-text "<text>" [--file-line "<file:line_range>"] [--limit N] [--threshold F]
+Usage: find-correction-targets.sh --claim-text "<text>" [--file-line "<file:line_range>"] [--limit N] [--threshold F] [--json]
 
 Map a contradicted claim to candidate knowledge entry paths.
 
@@ -43,6 +76,7 @@ Options:
   --file-line FILE:LINE The file:line_range anchor from the verdict (optional)
   --limit N             Maximum results to return (default: 10)
   --threshold F         Minimum TF-IDF cosine similarity (default: 0.4)
+  --json                Emit a single JSON object on stdout (see header for schema)
 EOF
 }
 
@@ -64,6 +98,10 @@ while [[ $# -gt 0 ]]; do
       THRESHOLD="$2"
       shift 2
       ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -82,23 +120,44 @@ if [[ -z "$CLAIM_TEXT" ]]; then
   exit 1
 fi
 
+# Resolve resolver_version: short-sha of the script's commit, or "v1" fallback.
+RESOLVER_VERSION="v1"
+if RESOLVER_SHA=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null); then
+  if [[ -n "$RESOLVER_SHA" ]]; then
+    RESOLVER_VERSION="$RESOLVER_SHA"
+  fi
+fi
+
 KDIR=$(resolve_knowledge_dir)
 
 if [[ ! -f "$KDIR/_manifest.json" ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    # Treat missing knowledge store like missing index for JSON consumers — they
+    # cannot do anything with an exit-2 either way; "missing" is the right signal.
+    python3 -c 'import json,sys; json.dump({"targets":[],"index_state":"missing","resolver_version":sys.argv[1]}, sys.stdout)' "$RESOLVER_VERSION"
+    echo
+    exit 0
+  fi
   echo "Error: knowledge store not found at: $KDIR" >&2
   exit 2
 fi
 
 DB_PATH="$KDIR/.pk_search.db"
 if [[ ! -f "$DB_PATH" ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    python3 -c 'import json,sys; json.dump({"targets":[],"index_state":"missing","resolver_version":sys.argv[1]}, sys.stdout)' "$RESOLVER_VERSION"
+    echo
+    exit 0
+  fi
   echo "Error: concordance index not found — run 'lore rebuild' to build it" >&2
   exit 2
 fi
 
-python3 - "$KDIR" "$DB_PATH" "$CLAIM_TEXT" "$FILE_LINE" "$LIMIT" "$THRESHOLD" "$SCRIPT_DIR" <<'PYEOF'
+python3 - "$KDIR" "$DB_PATH" "$CLAIM_TEXT" "$FILE_LINE" "$LIMIT" "$THRESHOLD" "$SCRIPT_DIR" "$JSON_MODE" "$RESOLVER_VERSION" <<'PYEOF'
 import sys
 import os
 import re
+import json
 
 kdir = sys.argv[1]
 db_path = sys.argv[2]
@@ -107,6 +166,8 @@ file_line = sys.argv[4]   # may be empty
 limit = int(sys.argv[5])
 threshold = float(sys.argv[6])
 script_dir = sys.argv[7]
+json_mode = sys.argv[8] == "1"
+resolver_version = sys.argv[9]
 
 sys.path.insert(0, script_dir)
 
@@ -199,6 +260,28 @@ for entry in all_vecs:
 results.sort(key=lambda x: (-int(x['overlap']), -x['sim']))
 results = results[:limit]
 
+if json_mode:
+    # JSON projection — emit `{targets, index_state, resolver_version}` per D4.
+    # Successful queries always return index_state="ready"; the "stale" branch
+    # is reserved for a future freshness predicate (see header comment).
+    payload = {
+        'targets': [
+            {
+                'path': r['path'],
+                'rank': i + 1,
+                'overlap': bool(r['overlap']),
+                'sim': float(r['sim']),
+            }
+            for i, r in enumerate(results)
+        ],
+        'index_state': 'ready',
+        'resolver_version': resolver_version,
+    }
+    json.dump(payload, sys.stdout)
+    sys.stdout.write('\n')
+    sys.exit(0)
+
+# Text mode (unchanged, byte-compatible with the pre-D4 contract).
 if not results:
     print("No matching entries found")
     sys.exit(0)

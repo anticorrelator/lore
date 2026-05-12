@@ -174,6 +174,11 @@ class Settlement:
         self.meta_path = self.state / "_meta.json"
         self.runs_dir = self.state / "runs"
         self.capabilities_path = Path(__file__).resolve().parent.parent / "adapters" / "capabilities.json"
+        # In-memory predicate cache for the path-to-commons filter (D3).
+        # Key: (item_id, predicate_input_hash, resolver_version) → state dict.
+        # Rebuilds on restart — this is bounded-cost-per-recompute caching,
+        # not durable state.
+        self._path_to_commons_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     def ensure(self) -> None:
         self.state.mkdir(parents=True, exist_ok=True)
@@ -804,6 +809,193 @@ class Settlement:
         except Exception as exc:
             return None, "fallback_error", {"error": str(exc)}
 
+    def _templated_text(self, text: Any) -> bool:
+        if not isinstance(text, str):
+            return True
+        s = text.strip()
+        if not s:
+            return True
+        if len(s) < 40:
+            return True
+        return s.startswith(("TODO", "<", "{{"))
+
+    def _predicate_input_hash(self, item: dict[str, Any]) -> str:
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+        parts = [
+            str(item.get("claim") or ""),
+            str(source.get("file") or ""),
+            str(source.get("line_range") or ""),
+            str(item.get("falsifier") or ""),
+        ]
+        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+    def _run_find_correction_targets(self, claim_text: str, file_line: str) -> dict[str, Any] | None:
+        """Invoke find-correction-targets.sh --json. Returns the parsed JSON
+        dict on success, or None on subprocess failure (logged to stderr)."""
+        script = Path(__file__).resolve().with_name("find-correction-targets.sh")
+        try:
+            proc = subprocess.run(
+                ["bash", str(script), "--json", "--claim-text", claim_text, "--file-line", file_line],
+                text=True,
+                capture_output=True,
+                timeout=15,
+                check=False,
+                env={**os.environ, "LORE_KNOWLEDGE_DIR": str(self.kdir)},
+            )
+        except Exception as exc:
+            sys.stderr.write(f"[settlement] path-to-commons predicate: subprocess failed: {exc}\n")
+            return None
+        if proc.returncode != 0:
+            sys.stderr.write(f"[settlement] path-to-commons predicate: find-correction-targets.sh exit {proc.returncode}: {proc.stderr[-500:]}\n")
+            return None
+        try:
+            return json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            sys.stderr.write(f"[settlement] path-to-commons predicate: malformed JSON: {exc}\n")
+            return None
+
+    def has_commons_path(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Three-state predicate for D3/D4. Returns a dict shape:
+            {"state": <has-path|no-path-definite|no-path-heuristic|unknown>,
+             "reason": <templated-claim|templated-falsifier|no-discoverable-target|concordance-stale|null>,
+             "resolver_version": <str>,
+             "predicate_called": <bool>}
+        Cached on (item_id, predicate_input_hash, resolver_version) — the
+        resolver_version is unknown until the subprocess runs, so cache
+        lookups use the wildcard sentinel until we've made one call.
+        """
+        # Templated detection runs first — it's free and a definite-invalid
+        # signal that doesn't need resolver state.
+        if self._templated_text(item.get("claim")):
+            return {"state": "no-path-definite", "reason": "templated-claim", "resolver_version": "n/a", "predicate_called": False}
+        if self._templated_text(item.get("falsifier")):
+            return {"state": "no-path-definite", "reason": "templated-falsifier", "resolver_version": "n/a", "predicate_called": False}
+
+        item_id = str(item.get("id") or "")
+        input_hash = self._predicate_input_hash(item)
+        # First-pass cache lookup: any resolver_version (the cache key
+        # third element is the value the subprocess returned previously).
+        for (cached_item_id, cached_hash, _ver), cached in self._path_to_commons_cache.items():
+            if cached_item_id == item_id and cached_hash == input_hash:
+                return cached
+
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+        claim_text = str(item.get("claim") or "")
+        file_line = f"{source.get('file') or ''}:{source.get('line_range') or ''}"
+        resolved = self._run_find_correction_targets(claim_text, file_line)
+        if resolved is None:
+            # Resolver failure — treat as unknown so the row passes through.
+            result = {"state": "unknown", "reason": "concordance-stale", "resolver_version": "v1", "predicate_called": True}
+            self._path_to_commons_cache[(item_id, input_hash, result["resolver_version"])] = result
+            return result
+
+        targets = resolved.get("targets") if isinstance(resolved.get("targets"), list) else []
+        index_state = resolved.get("index_state") or "missing"
+        resolver_version = str(resolved.get("resolver_version") or "v1")
+
+        if index_state == "missing":
+            result = {"state": "unknown", "reason": "concordance-stale", "resolver_version": resolver_version, "predicate_called": True}
+        elif index_state == "stale" and not targets:
+            result = {"state": "unknown", "reason": "concordance-stale", "resolver_version": resolver_version, "predicate_called": True}
+        elif targets:
+            result = {"state": "has-path", "reason": None, "resolver_version": resolver_version, "predicate_called": True}
+        else:
+            # index_state == "ready" with zero targets — heuristic no-path.
+            result = {"state": "no-path-heuristic", "reason": "no-discoverable-target", "resolver_version": resolver_version, "predicate_called": True}
+        self._path_to_commons_cache[(item_id, input_hash, resolver_version)] = result
+        return result
+
+    def _emit_filtered_claim(self, item: dict[str, Any], state: dict[str, Any], stage: str, mode: str, enqueued_anyway: bool) -> None:
+        """Shell out to filtered-claim-append.sh (sole-writer). Failures are
+        logged to stderr and swallowed — sidecar emission is best-effort and
+        must never poison the recompute path."""
+        work_item = str(item.get("work_item") or "")
+        claim_id = str(item.get("claim_id") or "")
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+        file_path = str(source.get("file") or "")
+        line_range = str(source.get("line_range") or "")
+        reason = state.get("reason") or ""
+        resolver_version = str(state.get("resolver_version") or "v1")
+        change_context = item.get("change_context")
+        if not isinstance(change_context, dict):
+            change_context = {"diff_ref": None, "changed_files": [file_path] if file_path else [], "summary": "synthesized for filtered-claim emission"}
+        if not work_item or not claim_id or not file_path or not line_range or not reason:
+            sys.stderr.write(f"[settlement] filtered-claim emission skipped: missing required field (work_item/claim_id/file/line_range/reason)\n")
+            return
+        script = Path(__file__).resolve().with_name("filtered-claim-append.sh")
+        cmd = [
+            "bash", str(script),
+            "--work-item", work_item,
+            "--claim-id", claim_id,
+            "--reason", reason,
+            "--mode", mode,
+            "--stage", stage,
+            "--file", file_path,
+            "--line-range", line_range,
+            "--change-context", json.dumps(change_context, separators=(",", ":")),
+            "--enqueued-anyway", "true" if enqueued_anyway else "false",
+            "--resolver-version", resolver_version,
+            "--kdir", str(self.kdir),
+        ]
+        try:
+            proc = subprocess.run(cmd, text=True, capture_output=True, timeout=10, check=False)
+            if proc.returncode != 0:
+                sys.stderr.write(f"[settlement] filtered-claim-append.sh exit {proc.returncode}: {proc.stderr[-500:]}\n")
+        except Exception as exc:
+            sys.stderr.write(f"[settlement] filtered-claim-append.sh failed: {exc}\n")
+
+    def apply_path_to_commons_filter(
+        self,
+        backlog: list[dict[str, Any]],
+        preserved_ids: set[str],
+        terminal_ids: set[str],
+        settings: dict[str, Any],
+    ) -> tuple[set[str], dict[str, dict[str, Any]]]:
+        """Lazy backlog scan per D3. Returns (no_path_ids, evaluations) where
+        no_path_ids is the third parallel exclusion set, and evaluations maps
+        item_id → state dict for every row we materialized a decision for.
+        """
+        ptcf = settings.get("path_to_commons_filter") or {}
+        if not ptcf.get("enabled", True):
+            return set(), {}
+        exclude_reasons = set(ptcf.get("exclude_reasons") or [])
+        batch_size = int(settings.get("batch_size", DEFAULT_BATCH_SIZE))
+        budget_multiplier = int(ptcf.get("predicate_budget_multiplier", 3) or 3)
+        budget = max(1, batch_size * budget_multiplier)
+
+        no_path_ids: set[str] = set()
+        evaluations: dict[str, dict[str, Any]] = {}
+        has_path_count = 0
+        calls = 0
+        for item in backlog:
+            item_id = str(item.get("id") or "")
+            if not item_id:
+                continue
+            if item_id in preserved_ids or item_id in terminal_ids:
+                continue
+            if has_path_count >= batch_size and calls >= budget:
+                break
+            state = self.has_commons_path(item)
+            if state.get("predicate_called"):
+                calls += 1
+            evaluations[item_id] = state
+            predicate_reason = state.get("reason") or ""
+            kind = state.get("state")
+            if kind == "has-path":
+                has_path_count += 1
+                continue
+            # Map the predicate state → sidecar emission (single emission
+            # per row). Exclude vs report-only is settings-driven via
+            # exclude_reasons (D5: only listed reasons promote to exclude).
+            if predicate_reason and predicate_reason in exclude_reasons:
+                no_path_ids.add(item_id)
+                self._emit_filtered_claim(item, state, stage="pre-enqueue", mode="exclude", enqueued_anyway=False)
+            else:
+                # Report-only — row remains in the candidate set.
+                if calls <= budget:
+                    self._emit_filtered_claim(item, state, stage="pre-enqueue", mode="report-only", enqueued_anyway=True)
+        return no_path_ids, evaluations
+
     def apply_recomputed_batch(self, queue: dict[str, Any], settings: dict[str, Any], reason: str) -> dict[str, Any]:
         active_leased = [item for item in queue.get("items", []) if item.get("status") == "leased"]
         legacy_pending = [item for item in queue.get("items", []) if item.get("status") == "pending"]
@@ -821,7 +1013,12 @@ class Settlement:
             clone.pop("batch_id", None)
             clone.pop("selected_at", None)
             backlog.append(clone)
-        candidates = [item for item in backlog if item.get("id") not in preserved_ids and item.get("id") not in terminal_ids]
+        # D3: path-to-commons filter — third parallel exclusion set
+        # alongside preserved_ids and terminal_ids. Lazy evaluation bounded
+        # by batch_size + predicate_budget_multiplier; emits filtered-claims
+        # sidecar rows via sole-writer for every non-has-path decision.
+        no_path_ids, _ptcf_evaluations = self.apply_path_to_commons_filter(backlog, preserved_ids, terminal_ids, settings)
+        candidates = [item for item in backlog if item.get("id") not in preserved_ids and item.get("id") not in terminal_ids and item.get("id") not in no_path_ids]
         batch_size = int(settings["batch_size"])
         score_window = candidates[:batch_size]
         scored: list[dict[str, Any]] = []
@@ -1262,7 +1459,172 @@ class Settlement:
             self._last_executor_audit = None
         if stderr:
             run["stderr_tail"] = stderr
-        return self.write_run_record_once(run)
+        written = self.write_run_record_once(run)
+        self._invoke_post_verdict_hook(written, item)
+        self._apply_correction_from_verdict(written, item)
+        return written
+
+    def _apply_correction_from_verdict(self, run: dict[str, Any], item: dict[str, Any]) -> None:
+        """Autonomous correction terminus. On contradicted verdicts, attempt to
+        mutate the commons entry directly via apply-correction.sh with
+        --allow-settlement-verdict. This replaces the previous post-verdict hook
+        indirection (correction-candidates.jsonl sidecar + deferred calibration
+        consumer) with a single-shot mutation gated on exact superseded_text match.
+
+        Failure modes are all silent terminal skips (logged to stderr only):
+          - find-correction-targets returns no targets   → no commons home
+          - find-correction-targets index_state==missing → concordance unavailable
+          - apply-correction exit 2 (text not in entry)  → not_mechanically_applicable
+          - apply-correction exit 4 (auth check failed)  → run record drift; shouldn't happen
+          - apply-correction other non-zero              → logged; continue
+
+        The audit trail lives in: (a) the settlement run record, (b) git commits
+        on the entry, (c) the entry's corrections[] META block. No supersedes
+        archive is created (--check-escalation is NOT passed): git history is
+        the authoritative version trail.
+        """
+        verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
+        if verdict.get("verdict") != "contradicted":
+            return
+        if os.environ.get("LORE_SETTLEMENT_DISABLE_AUTO_CORRECTION", "").strip():
+            return
+        run_id = str(run.get("run_id") or "")
+        if not run_id:
+            return
+        correction_text = verdict.get("correction")
+        if not (isinstance(correction_text, str) and correction_text.strip()):
+            sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: empty correction text\n")
+            return
+        evidence_text = verdict.get("evidence") or ""
+        claim_text = item.get("claim") or ""
+        if not claim_text.strip():
+            sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: empty claim text\n")
+            return
+        # Tier 2 row's file + line_range live under item["source"] per
+        # item_from_row (line 318). Top-level item.get("file") would always be None.
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+        item_file = str(source.get("file") or item.get("file") or "")
+        item_line_range = str(source.get("line_range") or item.get("line_range") or "")
+        file_line_arg = f"{item_file}:{item_line_range}" if item_file else ""
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        find_cmd = [
+            "bash",
+            os.path.join(scripts_dir, "find-correction-targets.sh"),
+            "--json",
+            "--claim-text", claim_text,
+            "--limit", "1",
+        ]
+        if file_line_arg:
+            find_cmd.extend(["--file-line", file_line_arg])
+        try:
+            find_proc = subprocess.run(
+                find_cmd, text=True, capture_output=True, timeout=30, check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: find-correction-targets failed: {exc}\n")
+            return
+        if find_proc.returncode != 0 or not find_proc.stdout.strip():
+            sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: find-correction-targets exit {find_proc.returncode}\n")
+            return
+        try:
+            find_result = json.loads(find_proc.stdout)
+        except json.JSONDecodeError as exc:
+            sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: find-correction-targets JSON parse: {exc}\n")
+            return
+        index_state = find_result.get("index_state")
+        targets = find_result.get("targets") or []
+        if index_state == "missing":
+            sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: concordance index missing\n")
+            return
+        if not targets:
+            sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: no commons target for claim\n")
+            return
+        target = targets[0]
+        target_path = str(target.get("path") or "")
+        if not target_path:
+            sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: target row missing path\n")
+            return
+        # find-correction-targets returns paths relative to KDIR; resolve absolute.
+        kdir = str(getattr(self, "kdir", "") or os.environ.get("LORE_KNOWLEDGE_DIR", ""))
+        if kdir and not os.path.isabs(target_path):
+            target_path = os.path.join(kdir, target_path)
+        evidence_for_apply = evidence_text if evidence_text else f"settlement_run_id={run_id}"
+        apply_cmd = [
+            "bash",
+            os.path.join(scripts_dir, "apply-correction.sh"),
+            "--entry", target_path,
+            "--verdict-id", run_id,
+            "--verdict-source", "correctness-gate",
+            "--evidence", evidence_for_apply,
+            "--superseded-text", claim_text,
+            "--replacement-text", correction_text,
+            "--allow-settlement-verdict",
+        ]
+        try:
+            apply_proc = subprocess.run(
+                apply_cmd, text=True, capture_output=True, timeout=30, check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            sys.stderr.write(f"[settlement] auto-correction failed run_id={run_id}: apply-correction subprocess: {exc}\n")
+            return
+        if apply_proc.returncode == 0:
+            sys.stderr.write(f"[settlement] auto-correction APPLIED run_id={run_id} entry={target_path}\n")
+            return
+        if apply_proc.returncode == 2:
+            sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: superseded_text not present in {target_path} (not_mechanically_applicable)\n")
+            return
+        sys.stderr.write(f"[settlement] auto-correction failed run_id={run_id}: apply-correction exit {apply_proc.returncode}: {apply_proc.stderr[-500:]}\n")
+
+    def _invoke_post_verdict_hook(self, run: dict[str, Any], item: dict[str, Any]) -> None:
+        """Post-verdict propagation hook (D2). Fires after write_run_record_once
+        ONLY when verdict.verdict == "contradicted". For verified/unverified/
+        skipped/error verdicts the hook is bypassed (only contradicted verdicts
+        produce candidates per plan Goal).
+
+        Payload on stdin: a single JSON object {run, item, task_claim} where
+        task_claim is the rehydrated Tier-2 row keyed by claim_id. The run
+        record alone is never the payload — Tier-2 fields like change_context
+        and scale are not represented in the run.
+
+        Fail-open: any hook failure logs a warning to stderr and is swallowed.
+        The reconciliation backstop discovers gaps on the next run."""
+        verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
+        if verdict.get("verdict") != "contradicted":
+            return
+        hook = os.environ.get("LORE_SETTLEMENT_POST_HOOK", "").strip()
+        if not hook:
+            return
+        work_item = str(run.get("work_item") or item.get("work_item") or "")
+        claim_id = str(run.get("claim_id") or item.get("claim_id") or "")
+        if not work_item or not claim_id:
+            sys.stderr.write(f"[settlement] post-hook: missing work_item/claim_id for run_id={run.get('run_id')}\n")
+            return
+        task_claim = self.find_task_claim_row(work_item, claim_id)
+        if task_claim is None:
+            sys.stderr.write(f"[settlement] post-hook: rehydration_failed for run_id={run.get('run_id')}\n")
+            return
+        # Normalize the rehydrated row: settlement.find_task_claim_row returns
+        # the original Tier-2 row; we project the fields the hook payload
+        # expects. Fall through to keys present on the row for forward-compat.
+        source = task_claim.get("source") if isinstance(task_claim.get("source"), dict) else {}
+        normalized = dict(task_claim)
+        normalized.setdefault("file", task_claim.get("file") or source.get("file"))
+        normalized.setdefault("line_range", task_claim.get("line_range") or source.get("line_range"))
+        normalized.setdefault("work_item", work_item)
+        payload = {"run": run, "item": item, "task_claim": normalized}
+        try:
+            proc = subprocess.run(
+                shlex.split(hook),
+                input=compact(payload),
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            if proc.returncode != 0:
+                sys.stderr.write(f"[settlement] post-hook: exit {proc.returncode} for run_id={run.get('run_id')}: {proc.stderr[-500:]}\n")
+        except Exception as exc:
+            sys.stderr.write(f"[settlement] post-hook: subprocess failed for run_id={run.get('run_id')}: {exc}\n")
 
     def parse_verdict_envelope(self, stdout: str) -> dict[str, Any] | None:
         self._last_executor_audit = None
@@ -1338,6 +1700,15 @@ def settlement_settings() -> dict[str, Any]:
     ranges = []
     if isinstance(active_hours.get("ranges"), list):
         ranges = [r for r in (parse_active_hours_range(x) for x in active_hours.get("ranges", [])) if r is not None]
+    ptcf_raw = raw.get("path_to_commons_filter") if isinstance(raw.get("path_to_commons_filter"), dict) else {}
+    ptcf_exclude_default = ["templated-claim", "templated-falsifier"]
+    ptcf_exclude = ptcf_raw.get("exclude_reasons")
+    if isinstance(ptcf_exclude, list):
+        ptcf_exclude = [r for r in ptcf_exclude if isinstance(r, str) and r in {
+            "templated-claim", "templated-falsifier", "no-discoverable-target", "concordance-stale",
+        }]
+    else:
+        ptcf_exclude = list(ptcf_exclude_default)
     return {
         "enabled": bool(raw.get("enabled", False)),
         "max_concurrency": parse_int(raw.get("max_concurrency"), 1, 1),
@@ -1355,6 +1726,11 @@ def settlement_settings() -> dict[str, Any]:
             "mode": hs.get("mode", "first_eligible"),
             "eligible_frameworks": hs.get("eligible_frameworks") if isinstance(hs.get("eligible_frameworks"), list) else [],
             "random_seed": int(hs.get("random_seed", 0)),
+        },
+        "path_to_commons_filter": {
+            "enabled": bool(ptcf_raw.get("enabled", True)),
+            "exclude_reasons": ptcf_exclude,
+            "predicate_budget_multiplier": parse_int(ptcf_raw.get("predicate_budget_multiplier"), 3, 1),
         },
     }
 
