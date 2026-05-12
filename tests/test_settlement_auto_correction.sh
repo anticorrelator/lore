@@ -133,8 +133,7 @@ write_settings_file() {
     "max_concurrency": 1,
     "batch_size": 4,
     "batch_recompute_min_interval_seconds": 0,
-    "harness_selection": {"mode": "first_eligible", "eligible_frameworks": ["claude-code"]},
-    "path_to_commons_filter": {"enabled": false}
+    "harness_selection": {"mode": "first_eligible", "eligible_frameworks": ["claude-code"]}
   }
 }
 EOF

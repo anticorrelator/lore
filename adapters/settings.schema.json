@@ -310,34 +310,6 @@
               "default": 0
             }
           }
-        },
-        "path_to_commons_filter": {
-          "type": "object",
-          "additionalProperties": false,
-          "description": "Pre-enqueue path-to-commons filter (D3/D5). Evaluates each backlog Tier-2 row via find-correction-targets.sh and excludes rows that can never reach a commons entry; routes heuristic/unknown rows to filtered-claims.jsonl in report-only mode.",
-          "properties": {
-            "enabled": {
-              "type": "boolean",
-              "default": true,
-              "description": "Global toggle for the predicate. When false the filter never runs (no predicate calls, no sidecar emission) and all backlog rows flow through unchanged."
-            },
-            "exclude_reasons": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "enum": ["templated-claim", "templated-falsifier", "no-discoverable-target", "concordance-stale"]
-              },
-              "uniqueItems": true,
-              "default": ["templated-claim", "templated-falsifier"],
-              "description": "Reasons that promote a row to the no_path_ids exclusion set. Defaults to definite-invalid signals only; heuristic and unknown reasons remain in report-only mode."
-            },
-            "predicate_budget_multiplier": {
-              "type": "integer",
-              "minimum": 1,
-              "default": 3,
-              "description": "Per-recompute predicate-call budget expressed as a multiple of batch_size. Bounds the cost of lazy backlog evaluation when many rows resolve to non-has-path states."
-            }
-          }
         }
       }
     }
