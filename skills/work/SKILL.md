@@ -17,11 +17,20 @@ Match the first word of `$ARGUMENTS` to a command below. If no command matches b
 
 ### `create <name> [--issue <value>] [--pr <value>] [--intent-anchor <text>]`
 ```bash
-lore work create --title "<name>" [--intent-anchor "<user's verbatim capability statement>"] [--issue "<value>"] [--pr "<value>"]
+lore work create --title "<name>" [--intent-anchor "<interpreted capability statement>"] [--issue "<value>"] [--pr "<value>"]
 ```
 **Before running:** Titles must be ≤70 characters (same as git/PR title convention). Keep it concise — 3–6 words that identify the goal, not a sentence. The slug is generated from the title (stopwords stripped, kebab-cased, capped at 50 chars). Good: `"TUI Mouse Click Focus"`. Bad: `"Add Mouse Click To Focus Panel In TUI When User Clicks"`.
 
-**Intent anchor:** Pass `--intent-anchor` with the user's verbatim capability statement — do NOT rephrase, neutralize, or "distill." Agent rephrasing at intake is a lossy compression: it admits alternatives ("OR"), softens load-bearing language, and the user never sees the translation, so anchor drift becomes invisible until a downstream cycle ships the weakened reading. The original wording (including emotional or conversational tone) is what downstream agents need to see; instruction-following models handle conversational noise reliably, but they cannot recover meaning that an intake paraphrase admitted out. If the user's request spans multiple sentences, pick the one sentence that names the user-visible capability — verbatim — and use that. If the work item comes from an external issue, use the issue's verbatim load-bearing sentence(s). Do not invent your own anchor wording.
+**Intent anchor:** Pass `--intent-anchor` with an **interpreted one-sentence capability statement** that names the user-visible outcome the work item must deliver. Then audit your candidate anchor for **looseness** — any property that would let `/spec` or `/implement` ship a narrower reading and call it done:
+
+- **Alternatives** ("X or Y" lets a downstream cycle ship only X or only Y). Pick the load-bearing one, or fold both into a single requirement.
+- **Comparatives without targets** ("better," "faster," "cleaner" with no acceptance bar). Name what counts as the bar.
+- **Vague verbs** ("support," "improve," "handle" without naming the input or the bar). Name what specifically gets supported/improved/handled to what bar.
+- **Meta-instruction degenerate case** — the user's input names *creating the work item* ("make a work item for that," "track this," "let's persist this") but no capability. Treat as 100% loose; the user has not stated the anchor yet.
+
+When the candidate anchor is loose, **stop and ask** via `AskUserQuestion` to close the gap (which alternative is load-bearing? what's the acceptance bar? what specifically counts as "support"? in the meta-instruction case, what capability should this deliver?). Do NOT commit a loose anchor "for now" and plan to clarify in `/spec` — once stored, the anchor flows through downstream preservation gates unchanged, and a loose reading downstream will ship. Restate the final anchor in the create confirmation so the user can audit the translation.
+
+Do not copy emotionally loaded or conversationally pressuring user text verbatim, and do not paraphrase away load-bearing intent. If the work item comes from an external issue, distill the issue's load-bearing request and run the same looseness audit. See `[[knowledge:conventions/protocol/work-item-intake-should-store-neutral-intent-ancho]]` for rationale and history of prior failed policies.
 
 **Dedup:** The script rejects creation if the new slug overlaps with an existing slug (substring match). If this happens, use the existing item — do NOT retry with a different name for the same topic.
 
