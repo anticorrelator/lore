@@ -259,6 +259,26 @@ assert_eq "no supersedes archive created" "$SUPERSEDED_FILES" "0"
 PROC_STDERR=$(cat "$TEST_DIR/proc-stderr.txt")
 assert_contains "stderr logs auto-correction APPLIED" "$PROC_STDERR" "auto-correction APPLIED"
 
+# correction_outcome durable field landed on the run record (applied path)
+RUN_OUTCOME_STATUS=$(python3 -c '
+import json,sys
+d = json.load(open(sys.argv[1]))
+print((d.get("correction_outcome") or {}).get("status",""))
+' "$RUN_FILES")
+assert_eq "applied: correction_outcome.status" "$RUN_OUTCOME_STATUS" "applied"
+RUN_OUTCOME_REASON=$(python3 -c '
+import json,sys
+d = json.load(open(sys.argv[1]))
+print((d.get("correction_outcome") or {}).get("reason",""))
+' "$RUN_FILES")
+assert_eq "applied: correction_outcome.reason" "$RUN_OUTCOME_REASON" "applied"
+RUN_OUTCOME_TARGET=$(python3 -c '
+import json,sys
+d = json.load(open(sys.argv[1]))
+print((d.get("correction_outcome") or {}).get("target_entry",""))
+' "$RUN_FILES")
+assert_contains "applied: correction_outcome.target_entry names mutated entry" "$RUN_OUTCOME_TARGET" "conventions/example-routing-rule.md"
+
 # =============================================
 # Test 2: Skip path — claim text not present in entry body
 # =============================================
@@ -304,6 +324,23 @@ assert_eq "entry unchanged when claim text absent" "$ENTRY_AFTER2" "$(cat "$KDIR
 PROC_STDERR2=$(cat "$TEST_DIR/proc-stderr2.txt")
 assert_contains "stderr logs not_mechanically_applicable skip" "$PROC_STDERR2" "not_mechanically_applicable"
 
+# correction_outcome durable field landed on the run record (skip path).
+# setup_kdir_with_indexed_entry rm -rf $KDIR at the top of Test 2 so the runs dir
+# is fresh — pick the only run file.
+RUN_FILES2=$(find "$KDIR/_settlement/runs" -name '*.json' 2>/dev/null | head -1)
+RUN_OUTCOME2_STATUS=$(python3 -c '
+import json,sys
+d = json.load(open(sys.argv[1]))
+print((d.get("correction_outcome") or {}).get("status",""))
+' "$RUN_FILES2")
+assert_eq "skipped: correction_outcome.status" "$RUN_OUTCOME2_STATUS" "skipped"
+RUN_OUTCOME2_REASON=$(python3 -c '
+import json,sys
+d = json.load(open(sys.argv[1]))
+print((d.get("correction_outcome") or {}).get("reason",""))
+' "$RUN_FILES2")
+assert_eq "skipped: correction_outcome.reason is not_mechanically_applicable" "$RUN_OUTCOME2_REASON" "not_mechanically_applicable"
+
 # =============================================
 # Test 3: Non-contradicted verdict → no correction attempted
 # =============================================
@@ -345,6 +382,16 @@ assert_eq "verified verdict does not mutate entry" "$ENTRY_AFTER3" "$ENTRY_BEFOR
 PROC_STDERR3=$(cat "$TEST_DIR/proc-stderr3.txt")
 assert_not_contains "no auto-correction log for verified" "$PROC_STDERR3" "auto-correction APPLIED"
 
+# correction_outcome field MUST be absent on a verified (non-contradicted) run record.
+# setup_kdir_with_indexed_entry rm -rf $KDIR at the top of Test 3 so the runs dir is fresh.
+RUN_FILES3=$(find "$KDIR/_settlement/runs" -name '*.json' 2>/dev/null | head -1)
+RUN_OUTCOME3_PRESENT=$(python3 -c '
+import json,sys
+d = json.load(open(sys.argv[1]))
+print("yes" if "correction_outcome" in d else "no")
+' "$RUN_FILES3")
+assert_eq "verified: correction_outcome field is absent" "$RUN_OUTCOME3_PRESENT" "no"
+
 # =============================================
 # Test 4: LORE_SETTLEMENT_DISABLE_AUTO_CORRECTION kill-switch
 # =============================================
@@ -362,6 +409,21 @@ LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS" \
   bash "$QUEUE" process --kdir "$KDIR" --once --json 2>"$TEST_DIR/proc-stderr4.txt" >/dev/null
 ENTRY_AFTER4=$(cat "$KDIR/conventions/example-routing-rule.md")
 assert_eq "kill-switch suppresses mutation" "$ENTRY_AFTER4" "$ENTRY_BEFORE4"
+
+# correction_outcome captures the kill-switch path on the run record.
+RUN_FILES4=$(find "$KDIR/_settlement/runs" -name '*.json' 2>/dev/null | head -1)
+RUN_OUTCOME4_STATUS=$(python3 -c '
+import json,sys
+d = json.load(open(sys.argv[1]))
+print((d.get("correction_outcome") or {}).get("status",""))
+' "$RUN_FILES4")
+assert_eq "kill-switch: correction_outcome.status" "$RUN_OUTCOME4_STATUS" "skipped"
+RUN_OUTCOME4_REASON=$(python3 -c '
+import json,sys
+d = json.load(open(sys.argv[1]))
+print((d.get("correction_outcome") or {}).get("reason",""))
+' "$RUN_FILES4")
+assert_eq "kill-switch: correction_outcome.reason is auto_correction_disabled" "$RUN_OUTCOME4_REASON" "auto_correction_disabled"
 
 echo ""
 echo "================================"

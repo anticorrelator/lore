@@ -134,6 +134,7 @@ Subcommands:
   create    Create a new work item
   list      List active work items
   show      Show a work item's full context
+  resolve   Resolve a fuzzy work-item reference to (slug, archived)
   set       Set metadata fields (issue, pr, scope, intent anchor) on a work item
   archive   Archive a completed work item
   delete    Permanently delete a work item
@@ -475,6 +476,7 @@ Usage: lore retro <subcommand> [args...]
 
 Subcommands:
   export      Export a redacted retro bundle for submission to a maintainer
+  backfill    Cluster historical retro-evolution journal entries by (target, change_type)
 EOF
   if [[ "$role" == "maintainer" ]]; then
     cat >&2 <<EOF
@@ -605,6 +607,9 @@ cmd_retro() {
       require_maintainer "retro aggregate"
       "$SCRIPTS_DIR/maintainer-preflight.sh" --repo-dir "$(pwd)"
       "$SCRIPTS_DIR/retro-aggregate.sh" "$@"
+      ;;
+    backfill)
+      "$SCRIPTS_DIR/retro-backfill.sh" "$@"
       ;;
     *)
       echo "Error: unknown retro subcommand '$subcmd'" >&2
@@ -1495,6 +1500,9 @@ cmd_work() {
       ;;
     show)
       "$SCRIPTS_DIR/load-work-item.sh" "$@"
+      ;;
+    resolve)
+      "$SCRIPTS_DIR/resolve-work-ref.sh" "$@"
       ;;
     set)
       "$SCRIPTS_DIR/set-work-meta.sh" "$@"

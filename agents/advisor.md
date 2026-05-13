@@ -57,6 +57,10 @@ Over-reading finer detail than the task needs is a cost, not a safety margin —
 
 ## Responding to Consultations
 
+**Role boundary — read first.** You are loaded only on the opt-in route (a phase declared `mode: persistent` on its `**Advisors:**` line, or ceremony config requested agent-mode). The worker-side `advisory-consultation.md` protocol — the mixin that tells the worker *when* and *how* to send a `## Consultation` request — is injected onto worker prompts by the lead. It is not material you need to read, reconstruct, or echo into your replies; the worker already has it. Your job is to respond to whatever the worker actually sends. Do not improvise inline mixin copies for "forward compatibility" with the worker's expected report structure: the worker template, the lead, and this advisor template each own their own surfaces, and conflating them is the role-drift the schema is designed to prevent.
+
+**Reply shape.** Every reply MUST carry the same `consultation-id` the worker sent in its `## Consultation` request, the literal field `handler: agent`, your own `advisor_template_version` (12-char content hash of this template at the time you reply), and the literal field `advisor-acknowledged: true` (parallel to the lead route's `lead-acknowledged: true` — this is the worker-side check the lead uses to verify a required consultation was actually answered). Then the answer body follows.
+
 When a worker messages you:
 
 1. **Read their question carefully** — understand what they need to proceed with their task
@@ -70,6 +74,10 @@ SendMessage:
   recipient: "<worker-name>"
   summary: "Advisory: <brief topic>"
   content: |
+    consultation-id: <verbatim id the worker sent in its ## Consultation request>
+    handler: agent
+    advisor_template_version: <12-char content hash of this advisor template>
+    advisor-acknowledged: true
     **Domain:** {{advisor_domain}}
     **Guidance:**
     <concrete, actionable guidance — reference specific files, functions,
@@ -80,6 +88,8 @@ SendMessage:
     <domain-specific pitfalls or invariants the worker must respect —
     omit if none apply>
 ```
+
+The four header lines (`consultation-id`, `handler`, `advisor_template_version`, `advisor-acknowledged`) are required: the worker copies `consultation-id`, `handler`, and `advisor_template_version` into the matching entry of its `**Consultations:**` report field, and the lead matches `advisor-acknowledged: true` against the worker's required-consultation set during worker-progress collection. Replies missing these fields cause the lead to reject the worker's report.
 
 ## Guidelines
 

@@ -1,5 +1,7 @@
 # Advisory Consultation Protocol
 
+> **Opt-in artifact.** This file is loaded onto worker/researcher prompts only when a phase declares `**Advisors:** ... mode: persistent` or when ceremony config requests agent-mode advisors. On the default route — lead-inline consultation handling — this file is unread and not concatenated onto worker prompts; the lead handles worker consultations itself (and invokes a skill via the `Skill` tool inline when the consultation domain is skill-backed). No behavioral change to the rest of this file; the contents below apply verbatim when the opt-in route loads it.
+
 You have access to domain-expert advisors on your team. Consult them for guidance in their areas of expertise before and during implementation.
 
 ## Available Advisors

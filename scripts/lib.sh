@@ -1387,6 +1387,37 @@ check_fts_available() {
   fi
 }
 
+# --- seed_meta_activity_vocab ---
+# Restore-if-absent seeder for $KNOWLEDGE_DIR/_meta/activity-vocab.yaml.
+# Usage: seed_meta_activity_vocab "$KNOWLEDGE_DIR"
+# Args: $1 = knowledge store root (the directory containing _meta/)
+# Contract:
+#   - mkdir -p the parent _meta/ directory (the helper owns this).
+#   - If $KDIR/_meta/activity-vocab.yaml exists (any content, including empty),
+#     return 0 silently — never overwrite a project-overridden file.
+#   - Otherwise verify $LORE_REPO_DIR/defaults/_meta/activity-vocab.yaml exists;
+#     if missing, print an error naming that canonical path and return non-zero.
+#   - Copy the canonical default into place and return 0.
+# Errors only on filesystem failures (canonical source missing, target unwritable).
+seed_meta_activity_vocab() {
+  local kdir="${1:-}"
+  if [[ -z "$kdir" ]]; then
+    echo "Error: seed_meta_activity_vocab requires a knowledge-store directory argument" >&2
+    return 1
+  fi
+  local target="$kdir/_meta/activity-vocab.yaml"
+  local source="$LORE_REPO_DIR/defaults/_meta/activity-vocab.yaml"
+  mkdir -p "$kdir/_meta"
+  if [[ -f "$target" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$source" ]]; then
+    echo "Error: canonical activity-vocab default missing at $source" >&2
+    return 1
+  fi
+  cp "$source" "$target"
+}
+
 # --- update_meta_timestamp ---
 # Update the "updated" field in a work item's _meta.json to the current UTC time.
 # Usage: update_meta_timestamp "$WORK_DIR/$slug"

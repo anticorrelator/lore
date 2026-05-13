@@ -1,0 +1,22 @@
+# Activity vocabulary config.
+#
+# Per-project map: file-path glob -> list of BM25 query tokens that name a
+# recurring practice on files matching that glob (e.g. writing tests, emitting
+# telemetry, mocking, capturing). Loader semantics:
+#
+#   - Caller (resolve-manifest.sh / pk_search.py) supplies the phase's owned
+#     file set.
+#   - Loader returns the union of token lists whose glob matches at least one
+#     file in that set, deduplicated.
+#   - Patterns matching zero files contribute nothing.
+#   - Missing config (this file absent) is a no-op, not an error.
+#   - Activity vocab is *attached to a topic* in a v2 retrieval directive; the
+#     topic fires one extra BM25 OR query at the topic's declared scale_set
+#     using these tokens. See spec D1 (per-topic decomposition) and D5
+#     (`query_kind=activity` telemetry).
+#
+# Project-overridable: a downstream knowledge store may replace this file in
+# its own `$KDIR/_meta/activity-vocab.yaml` to encode that project's testing
+# stack, telemetry conventions, etc. The seed below is the lore default.
+
+tests/*: [pytest, fixture, assertion, mock]

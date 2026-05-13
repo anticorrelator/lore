@@ -853,6 +853,81 @@ func TestLimitToDotPath_CompactEmbedGridsSimpleLeavesAndSuppressesDescriptions(t
 	}
 }
 
+func TestLimitToDotPath_CompactEmbedGroupsBatchControlsOnOwnLine(t *testing.T) {
+	schemaPath := writeFixture(t, `{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"type": "object",
+		"additionalProperties": false,
+		"required": ["tui_launch_framework", "harnesses"],
+		"properties": {
+			"tui_launch_framework": {"type": "string", "enum": ["claude-code"]},
+			"harnesses": {"type": "object", "additionalProperties": false, "properties": {"claude-code": {"type": "object", "additionalProperties": false, "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}},
+			"settlement": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"enabled": {"type": "boolean"},
+					"max_concurrency": {"type": "integer", "minimum": 1},
+					"batch_size": {"type": "integer", "minimum": 1},
+					"batch_recompute_min_interval_seconds": {"type": "integer", "minimum": 0},
+					"lease_ttl_seconds": {"type": "integer", "minimum": 1}
+				}
+			}
+		}
+	}`)
+	capsPath := writeMinimalCapabilities(t, []string{"claude-code"})
+	store := newFakeStore(map[string]any{
+		"tui_launch_framework": "claude-code",
+		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"settlement": map[string]any{
+			"enabled":                              true,
+			"max_concurrency":                      float64(2),
+			"batch_size":                           float64(12),
+			"batch_recompute_min_interval_seconds": float64(60),
+			"lease_ttl_seconds":                    float64(900),
+		},
+	})
+	m, err := NewSettingsModel(SettingsModelOptions{
+		SchemaPath:       schemaPath,
+		CapabilitiesPath: capsPath,
+		Store:            store,
+		Runner:           &fakeRunner{},
+		EnableScript:     "/fake/enable.sh",
+		DisableScript:    "/fake/disable.sh",
+		Registry:         NewWidgetRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("NewSettingsModel: %v", err)
+	}
+	m.LimitToDotPath("settlement")
+	m.SetCompactEmbed(true)
+	m.SetSize(120, 20)
+
+	out := stripANSI(m.View())
+	var generalLine, batchLine string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "general:"):
+			generalLine = line
+		case strings.HasPrefix(line, "batch:"):
+			batchLine = line
+		}
+	}
+	if batchLine == "" {
+		t.Fatalf("batch controls should render on their own line, got:\n%s", out)
+	}
+	if !strings.Contains(batchLine, "batch size: 12") || !strings.Contains(batchLine, "batch interval: 60") {
+		t.Fatalf("batch line should include size and interval, got:\n%s", out)
+	}
+	if strings.Contains(generalLine, "batch size") || strings.Contains(generalLine, "batch interval") {
+		t.Fatalf("batch controls should not be folded into the general line, got:\n%s", out)
+	}
+	if !strings.Contains(generalLine, "enabled") || !strings.Contains(generalLine, "concurrency") || !strings.Contains(generalLine, "lease ttl") {
+		t.Fatalf("non-batch simple controls should stay on the general line, got:\n%s", out)
+	}
+}
+
 func TestLimitToDotPath_CompactEmbedFlattensNestedSettlementGroups(t *testing.T) {
 	schemaPath := writeFixture(t, `{
 		"$schema": "https://json-schema.org/draft/2020-12/schema",

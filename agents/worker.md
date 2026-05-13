@@ -208,19 +208,33 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        or surprising behaviors encountered during this task. Use the format:
        what you expected → what you found → what you did about it. Omit if
        the task completed straightforwardly.>
-     **Advisor consultations:** <Optional. When you consulted an advisor
-       agent (codex-plan-review, codex-pr-review, or other advisors), emit
-       one YAML-list entry per consultation. Each entry:
-       - advisor_template_version: <12-char hash from the advisor's template>
+     **Consultations:** <Optional. Emit one YAML-list entry per consultation
+       you actually sent during this task (to the lead, to a skill the lead
+       invoked, or to a persistent advisor agent on the opt-in route). Each
+       entry:
+       - consultation_id: <verbatim opaque token you minted in your ## Consultation request>
+         handler: <lead | skill | agent>
+         domain: <one-word/short-phrase domain the consultation targeted>
+         advisor_template_version: <REQUIRED when handler=agent; 12-char hash from the advisor's template; OMIT otherwise>
+         skill_template_version: <REQUIRED when handler=skill; 12-char content hash of the invoked skill's SKILL.md; OMIT otherwise>
          query_summary: <one-sentence what you asked>
-         advice_summary: <one-sentence what the advisor said>
+         advice_summary: <one-sentence what was answered>
          was_followed: <true | false>
          rationale_if_not_followed: <required when was_followed=false; omit otherwise>
-       Omit the section entirely if you did not consult an advisor. This is
-       a *calibration channel* for advisor templates — consultation_rate
-       and advice_followed_rate feed the advisor template scorecard per
-       Phase 8 task-51. Fabricated entries pollute the advisor's scorecard;
-       emit only real consultations.>
+       Omit the section entirely if you sent no consultations. The
+       `handler` discriminator routes the entry: `handler: agent` entries
+       feed the advisor scorecard via `scripts/advisor-impact-rollup.sh`
+       (filtered before grouping by `advisor_template_version`);
+       `handler: skill` entries are visible in `execution-log.md` but do
+       not emit advisor scorecard rows (a future skill-impact rollup may
+       group on `skill_template_version`); `handler: lead` entries
+       attribute to the lead via `LEAD_TEMPLATE_VERSION` through existing
+       channels and do not emit advisor scorecard rows. `was_followed`,
+       `query_summary`, `advice_summary`, and `rationale_if_not_followed`
+       apply to every entry regardless of handler — they are the
+       calibration channel and remain comparable across routes.
+       Fabricated entries pollute the scorecard; emit only real
+       consultations.>
      **Blockers:** <none, or description of what's blocking>
    ```
 9. **Update task description** with your full completion report:
@@ -381,18 +395,50 @@ For tasks with subjects starting with "Update stale knowledge entry":
   - Structured observations capture load-bearing claims; narrative captures judgment, context, and emergent observations that don't fit the schema. Both are valuable — neither supersedes the other.
 - **Surfaced concerns** is a REQUIRED always-present field. Use it to surface architectural or cross-cutting concerns you spotted while working on this task but that you should NOT own or act on within the task — items that belong with a lead, advisor, or a follow-up work item. The worker-scope × architectural-scope gap lives here. `None` is a correct and common answer; always include the section even when empty. The *rate* at which this field is non-None is a calibration signal — do NOT conditionally emit based on whether you found anything. Always include it; the rate is the signal. Trigger-based conditional emission was explicitly considered and rejected in Phase 5.
 - **Investigation** is optional — use it when the task involved unexpected friction. Format: what you expected → what you found → what you did about it. Skip entirely for straightforward tasks.
-- **Advisor consultations** is optional — emit only when you actually consulted an advisor agent during the task (e.g., codex-plan-review, codex-pr-review, or any future ceremony-advisor registered as consultable). Each entry has five fields:
-  - `advisor_template_version` — 12-char hash identifying the advisor's template at the time of consultation. Required; without it the consultation cannot be attributed to a scorecard row.
-  - `query_summary` — one-sentence description of what you asked. Keep it concrete and evidence-anchored; vague summaries inflate consultation_rate without informing advice_followed_rate.
-  - `advice_summary` — one-sentence description of what the advisor said. Paraphrase — don't copy-paste the full advisor output.
-  - `was_followed` — boolean. `true` = you implemented the advice as-given or with minor adaptation. `false` = you deliberately did not follow the advice.
-  - `rationale_if_not_followed` — required when `was_followed=false`, omitted otherwise. One sentence explaining why. This field is the *teaching signal* for the advisor template: `/evolve` reads these rationales alongside `advice_followed_rate` to tune advisor templates that systematically produce advice workers reject.
+- **Consultations** is optional — emit only when you actually sent consultations during the task. A consultation is a `## Consultation` request you sent to the lead, to a skill the lead invoked, or to a persistent advisor agent on the opt-in route. Each entry has the following fields:
+  - `consultation_id` — REQUIRED. Verbatim opaque token you minted in the `## Consultation` request (see the §Sending a Consultation Request section below). The lead matches this id against its reply transcript to verify required consultations have been answered.
+  - `handler` — REQUIRED. One of `lead`, `skill`, `agent`. Routes the entry to the right downstream consumer:
+    - `lead` — the lead answered inline using its own investigation/plan/code-read tools. No template-version field is carried (attribution is to the lead via `LEAD_TEMPLATE_VERSION` through other channels).
+    - `skill` — the lead invoked a skill via the `Skill` tool and replied with its output. Carries `skill_template_version`.
+    - `agent` — a persistent advisor agent answered (opt-in route only). Carries `advisor_template_version`.
+  - `domain` — REQUIRED. One-word or short-phrase domain the consultation targeted (e.g. `auth-middleware`, `serialization`, `codex-plan-review`). Used by the lead's required-consultation matcher and by the rollup grouping.
+  - `advisor_template_version` — REQUIRED when `handler: agent`, OMITTED otherwise. 12-char hash identifying the advisor's template at the time of consultation. Without it the agent-handled consultation cannot be attributed to a scorecard row.
+  - `skill_template_version` — REQUIRED when `handler: skill`, OMITTED otherwise. 12-char content hash of the invoked skill's SKILL.md at the time the lead invoked it.
+  - `query_summary` — REQUIRED. One-sentence description of what you asked. Keep it concrete and evidence-anchored; vague summaries inflate consultation_rate without informing advice_followed_rate.
+  - `advice_summary` — REQUIRED. One-sentence description of what was answered. Paraphrase — don't copy-paste the full reply.
+  - `was_followed` — REQUIRED. Boolean. `true` = you implemented the advice as-given or with minor adaptation. `false` = you deliberately did not follow the advice.
+  - `rationale_if_not_followed` — REQUIRED when `was_followed=false`, omitted otherwise. One sentence explaining why. This field is the *teaching signal* for the answering template: `/evolve` reads these rationales alongside `advice_followed_rate` to tune templates that systematically produce advice workers reject.
 
   Rolled-up metrics (written by `scripts/advisor-impact-rollup.sh` after the worker report is processed):
   - `consultation_rate` — fraction of worker reports in a window that carry at least one consultation. Measures how often the advisor is used when available.
   - `advice_followed_rate` — fraction of consultations where `was_followed=true`. Measures advisor accuracy from the worker's perspective.
 
-  Both metrics land as scorecard rows with `template_id = <advisor_template_version>` and `kind=scored`, attributing to the advisor (not the worker's or producer's template). This is the Phase 8 advisor-impact path; codex-plan-review / codex-pr-review verdicts against the *reviewed artifact's producer* template are a separate settlement channel (task-52, `codex-verdict-capture.sh`). Conflating the two would let advisor-reliability noise drive producer-template mutations.
+  Both metrics land as scorecard rows with `template_id = <advisor_template_version>` and `kind=scored`, attributing to the advisor (not the worker's or producer's template). The rollup filters input entries to `handler: agent` only before grouping by `advisor_template_version`; `handler: lead` and `handler: skill` entries bypass the advisor scorecard path. This is the Phase 8 advisor-impact path; codex-plan-review / codex-pr-review verdicts against the *reviewed artifact's producer* template are a separate settlement channel (task-52, `codex-verdict-capture.sh`). Conflating the two would let advisor-reliability noise drive producer-template mutations.
 
   **Do not fabricate** consultation entries. Workers who synthesize consultations to inflate consultation_rate corrupt the advisor scorecard with noise; the advisor template receives tuning pressure from work that didn't happen.
+
+- **Consultations required** is a phase-level declaration (it lives in `phase_context`, not in your report). Your phase brief — surfaced via `lore work phase-context <slug> <phase-number>` — may include a `**Consultations required:**` block listing the consultation domains a worker on this phase MUST request before starting implementation. For each required domain:
+  1. Send a `## Consultation` request (see the next section) and end your turn without producing implementation work. The protocol contract is: the worker requests, the worker ends its turn, the lead (or skill, or agent) replies on the next turn boundary, the worker resumes on receipt. Workers that proceed to implementation in the same turn as the request never receive replies (the request never reaches a turn boundary the system can deliver across).
+  2. Your `**Consultations:**` report must contain a matching entry for each required domain — same `consultation_id` you sent, same `domain`, plus the `handler` value the answering side reported back. During worker-progress collection the lead cross-checks each required domain against (a) a `**Consultations:**` entry in your report and (b) a matching acknowledged reply in its transcript (lead replies carry `lead-acknowledged: true`; advisor replies carry `advisor-acknowledged: true`; skill-handled replies are recorded by the lead at invocation time). Required-domain entries without a matching acknowledged reply cause your task acceptance to be withheld — the gate's teeth are no weaker than today's must-consult failure surface.
+  
+  If your phase brief carries no `**Consultations required:**` block, no consultations are pre-required for your task and the **Consultations** report field is optional (emit only what you actually sent).
+
+- **Sending a `## Consultation` Request.** Send consultations as a SendMessage to your team lead (default route) — or, when your phase declared `mode: persistent` advisors, to the named persistent advisor agent for that domain (the lead will direct you in that case). The request shape is identical regardless of target:
+  ```
+  SendMessage:
+    type: "message"
+    recipient: "<team-lead-name | persistent-advisor-name>"
+    summary: "## Consultation: <one-word domain>"
+    content: |
+      ## Consultation
+      consultation-id: <opaque token unique within your session — short slug like "c1", "c2", or a UUID prefix is fine>
+      domain: <one-word/short-phrase domain — same value you will report in **Consultations:**>
+      reason: <one-sentence trigger — what about your task brought this up>
+      question: <concrete query the answering side can act on; reference specific files/symbols/line ranges when relevant>
+      task: <your current task id and subject — from TaskGet>
+      phase: <your current phase number and brief context — from the phase brief>
+  ```
+  After sending, **end your turn** — do not produce implementation work in the same turn as the consultation request. The answering side replies on the next turn boundary with a message echoing your `consultation-id`, a `handler` field (`lead`, `skill`, or `agent`), an acknowledgement field (`lead-acknowledged: true` from the lead, `advisor-acknowledged: true` from an opt-in advisor; skill-handled replies are recorded by the lead at invocation time), and — when `handler` is `skill` or `agent` — the corresponding template-version field. Copy `consultation_id`, `handler`, `domain`, and (when present) `advisor_template_version` / `skill_template_version` into the matching `**Consultations:**` report entry verbatim; add `query_summary`, `advice_summary`, `was_followed`, and (when `was_followed=false`) `rationale_if_not_followed`.
+
+  The request shape is the same for default-route consultations (target: lead) and opt-in-route consultations (target: persistent advisor agent). The reply shape is also the same; only `handler` and the carried template-version field differ. The `consultation_id` is opaque to anyone outside the worker that minted it — it just needs to be unique within your session.
 - Keep the full report concise but complete — facts over opinions

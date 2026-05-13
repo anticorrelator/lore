@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# advisor-impact-rollup.sh — Roll up advisor_consultations entries from a
-# worker report into scorecard rows attributing to the advisor template.
+# advisor-impact-rollup.sh — Roll up `handler: agent` consultation entries
+# from a worker report into scorecard rows attributing to the advisor
+# template.
 #
 # Invoked after a worker report is produced. The report's optional
-# "Advisor consultations:" section contains one YAML-list entry per
-# consultation; this script parses the entries, groups by
-# advisor_template_version, and emits two scorecard rows per advisor:
+# `**Consultations:**` section (formerly `**Advisor consultations:**`)
+# contains one YAML-list entry per consultation. Each entry carries a
+# `handler` discriminator (`lead | skill | agent`); only `handler: agent`
+# entries contribute to the advisor scorecard. `handler: lead` and
+# `handler: skill` entries are silently filtered out — they attribute via
+# other channels (LEAD_TEMPLATE_VERSION; a future skill-impact rollup).
+# After filtering, entries are grouped by `advisor_template_version`, and
+# two scorecard rows are emitted per advisor:
 #
 #   consultation_rate   = 1.0 per report-that-consulted-this-advisor
 #                         (the rate is computed at retro-window rollup
@@ -31,22 +37,31 @@
 # Usage (stdin):
 #   echo '<json array>' | lore advisor-impact rollup --work-item <slug>
 #
-# Consultation entry shape (accepts both YAML block and JSON array):
+# Consultation entry shape (JSON array; one object per consultation):
 #   [
 #     {
-#       "advisor_template_version": "<12-char hash>",
+#       "handler": "lead" | "skill" | "agent",
+#       "consultation_id": "<opaque token>",          (optional, not used by this filter)
+#       "domain": "<short label>",                    (optional, not used by this filter)
+#       "advisor_template_version": "<12-char hash>", (REQUIRED when handler=agent)
+#       "skill_template_version": "<12-char hash>",   (REQUIRED when handler=skill)
 #       "query_summary": "...",
 #       "advice_summary": "...",
 #       "was_followed": true | false,
-#       "rationale_if_not_followed": "..." (required iff was_followed=false)
+#       "rationale_if_not_followed": "..."            (required iff was_followed=false)
 #     }
 #   ]
 #
+# D6 backward-compat normalization: an entry that arrives missing `handler`
+# but carrying `advisor_template_version` is normalized to `handler: agent`
+# BEFORE the filter runs. An entry missing both `handler` and
+# `advisor_template_version` is invalid and remains rejected.
+#
 # Sole-writer invariant preserved: shells out to scripts/scorecard-append.sh
-# per row. Multiple consultations to the same advisor produce a single
-# rolled-up pair of rows for that advisor in this report (consultation_rate
-# stays at 1.0 per report-per-advisor; advice_followed_rate averages over
-# the consultations).
+# per row. Multiple `handler: agent` consultations to the same advisor
+# produce a single rolled-up pair of rows for that advisor in this report
+# (consultation_rate stays at 1.0 per report-per-advisor;
+# advice_followed_rate averages over the consultations).
 
 set -euo pipefail
 
@@ -180,14 +195,51 @@ if not consultations:
         print("[advisor-impact] no consultations to roll up")
     sys.exit(0)
 
-# Group by advisor_template_version + validate.
+# D6 normalize + handler filter, then group by advisor_template_version + validate.
+#
+# Normalization (D6 backward-compat): entries that arrive missing `handler` but
+# carrying `advisor_template_version` are normalized to `handler: agent`. This
+# preserves processing of pre-hoist worker reports authored against the older
+# schema. Entries missing both fields are invalid (advisor_template_version is
+# REQUIRED when handler=agent; the absence of both means the entry cannot be
+# attributed to any advisor and the existing validation rejects it below).
+#
+# Filter (D5/D6): only `handler: agent` entries reach the grouping/validation
+# loop. `handler: lead` and `handler: skill` entries are silently skipped —
+# they attribute via LEAD_TEMPLATE_VERSION / future skill-impact rollup, not
+# via this writer. The scorecard row shape downstream is unchanged.
 by_advisor: dict[str, list[dict]] = defaultdict(list)
 errors: list[str] = []
+VALID_HANDLERS = {"lead", "skill", "agent"}
 
 for i, entry in enumerate(consultations):
     if not isinstance(entry, dict):
         errors.append(f"entry {i}: not an object")
         continue
+
+    handler = entry.get("handler")
+    if handler is None and entry.get("advisor_template_version"):
+        # Backward-compat: pre-hoist entries carried advisor_template_version
+        # without a handler discriminator; treat them as agent-handled.
+        handler = "agent"
+        entry["handler"] = "agent"
+
+    if handler is None:
+        errors.append(
+            f"entry {i}: missing handler (and no advisor_template_version "
+            f"available for D6 backward-compat normalization)"
+        )
+        continue
+    if handler not in VALID_HANDLERS:
+        errors.append(
+            f"entry {i}: handler must be one of lead|skill|agent, got {handler!r}"
+        )
+        continue
+
+    # Skip non-agent handlers — they do not contribute to the advisor scorecard.
+    if handler != "agent":
+        continue
+
     advisor = entry.get("advisor_template_version")
     if not advisor or not isinstance(advisor, str):
         errors.append(f"entry {i}: missing or invalid advisor_template_version")
@@ -209,6 +261,16 @@ if errors:
     for e in errors:
         print(f"[advisor-impact] Validation error: {e}", file=sys.stderr)
     sys.exit(1)
+
+# Input was non-empty but every entry was lead- or skill-handled — nothing
+# attributes to the advisor scorecard. Exit clean; this is the default-route
+# steady state after the hoist.
+if not by_advisor:
+    if json_mode:
+        print(json.dumps({"status": "no-agent-consultations", "rows": []}, indent=2))
+    else:
+        print("[advisor-impact] no agent-handled consultations to roll up")
+    sys.exit(0)
 
 rows: list[dict] = []
 for advisor, entries in by_advisor.items():

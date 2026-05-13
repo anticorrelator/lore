@@ -145,6 +145,117 @@ assert_exit "non-array input exits 1" 1 "$ROLLUP" rollup --kdir "$TMP" --work-it
 assert_exit "malformed JSON exits 1" 1 "$ROLLUP" rollup --kdir "$TMP" --work-item s --consultations-json 'not json'
 assert_exit "missing --work-item exits 1" 1 "$ROLLUP" rollup --kdir "$TMP" --consultations-json '[]'
 
+# ---------------------------------------------------------------------------
+# D5/D6 handler-discriminator filtering tests (added with the hoist).
+# ---------------------------------------------------------------------------
+
+# B1. Mixed handler input filtering: lead + skill + agent → only the agent
+# entry produces rows; lead and skill entries are silently filtered out.
+TMP_MIX=$(mktemp -d)
+"$ROLLUP" rollup --kdir "$TMP_MIX" --work-item slug-mix \
+  --consultations-json '[
+    {"handler":"lead","domain":"design","query_summary":"qL","advice_summary":"aL","was_followed":true},
+    {"handler":"skill","domain":"codex-plan-review","skill_template_version":"skll00000000","query_summary":"qS","advice_summary":"aS","was_followed":true},
+    {"handler":"agent","advisor_template_version":"advMIX000000","domain":"security","query_summary":"qA","advice_summary":"aA","was_followed":true}
+  ]' >/dev/null
+ROWS_MIX="$TMP_MIX/_scorecards/rows.jsonl"
+LINES_MIX=$(wc -l < "$ROWS_MIX" | tr -d ' ')
+if [[ "$LINES_MIX" == "2" ]]; then
+  echo "  PASS: mixed-handler input → only handler:agent emits rows (2 metrics × 1 advisor)"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: mixed-handler — expected 2 rows for the agent entry, got $LINES_MIX"
+  FAIL=$((FAIL + 1))
+fi
+assert_contains "mixed-handler row attributes to advMIX advisor" "$(cat "$ROWS_MIX")" '"template_version":"advMIX000000"'
+# Negative: lead/skill entries leave no scorecard fingerprint.
+if ! grep -q '"template_version":"skll' "$ROWS_MIX" && \
+   ! grep -q '"template_id":"lead"' "$ROWS_MIX"; then
+  echo "  PASS: mixed-handler — lead and skill entries produce zero rows"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: mixed-handler — lead or skill entry leaked into rows"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$TMP_MIX"
+
+# B2a. Lead-only and skill-only inputs produce no scorecard rows at all
+# (default-route steady state after the hoist).
+TMP_LEADONLY=$(mktemp -d)
+OUT_LO=$("$ROLLUP" rollup --kdir "$TMP_LEADONLY" --work-item slug-lead \
+  --consultations-json '[{"handler":"lead","domain":"d","query_summary":"q","advice_summary":"a","was_followed":true}]' 2>&1)
+RC_LO=$?
+if [[ "$RC_LO" == "0" && ! -f "$TMP_LEADONLY/_scorecards/rows.jsonl" ]]; then
+  echo "  PASS: lead-only input → exit 0, no rows file created"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: lead-only — rc=$RC_LO, rows file exists=$([[ -f "$TMP_LEADONLY/_scorecards/rows.jsonl" ]] && echo yes || echo no)"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$TMP_LEADONLY"
+
+TMP_SKILLONLY=$(mktemp -d)
+OUT_SO=$("$ROLLUP" rollup --kdir "$TMP_SKILLONLY" --work-item slug-skill \
+  --consultations-json '[{"handler":"skill","skill_template_version":"skll00000000","domain":"codex-plan-review","query_summary":"q","advice_summary":"a","was_followed":true}]' 2>&1)
+RC_SO=$?
+if [[ "$RC_SO" == "0" && ! -f "$TMP_SKILLONLY/_scorecards/rows.jsonl" ]]; then
+  echo "  PASS: skill-only input → exit 0, no rows file created"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: skill-only — rc=$RC_SO, rows file exists=$([[ -f "$TMP_SKILLONLY/_scorecards/rows.jsonl" ]] && echo yes || echo no)"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$TMP_SKILLONLY"
+
+# B2. D6 backward-compat normalization: legacy entry with no `handler` but
+# carrying `advisor_template_version` is normalized to `handler: agent` and
+# emits rows attributing to its advisor_template_version.
+#
+# Note: the existing "Single advisor, single followed consultation" case at
+# the top of this file also exercises the D6 legacy shape (input omits
+# handler); this case adds a variant that mixes a legacy no-handler entry
+# with a fresh `handler: lead` entry in one payload, asserting the legacy
+# normalizes-to-agent while the lead is filtered out.
+TMP_LEGACY=$(mktemp -d)
+"$ROLLUP" rollup --kdir "$TMP_LEGACY" --work-item slug-legacy \
+  --consultations-json '[
+    {"advisor_template_version":"legacy123abc","query_summary":"qLG","advice_summary":"aLG","was_followed":true},
+    {"handler":"lead","domain":"design","query_summary":"qL","advice_summary":"aL","was_followed":true}
+  ]' >/dev/null
+ROWS_LG="$TMP_LEGACY/_scorecards/rows.jsonl"
+LINES_LG=$(wc -l < "$ROWS_LG" | tr -d ' ')
+if [[ "$LINES_LG" == "2" ]]; then
+  echo "  PASS: D6 backward-compat — legacy no-handler entry normalizes to agent, mixed with handler:lead, emits 2 rows"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: D6 backward-compat — expected 2 rows for the normalized agent entry, got $LINES_LG"
+  FAIL=$((FAIL + 1))
+fi
+assert_contains "D6 normalized entry attributes to legacy123abc" "$(cat "$ROWS_LG")" '"template_version":"legacy123abc"'
+rm -rf "$TMP_LEGACY"
+
+# B3. Invalid handler value (closed-set validation): handler=oracle should
+# be rejected because the discriminator must be one of lead|skill|agent.
+assert_exit "invalid handler value rejected" 1 "$ROLLUP" rollup --kdir "$TMP" --work-item s \
+  --consultations-json '[{"handler":"oracle","advisor_template_version":"x","query_summary":"q","advice_summary":"a","was_followed":true}]'
+
+# B4. Missing handler AND missing advisor_template_version → rejected. The
+# entry cannot be normalized (no advisor_template_version for D6 fallback)
+# and cannot be attributed. This guards the "missing-handler-no-tpl-version"
+# rejection branch in the rollup's validation block. (Distinct from
+# "missing advisor_template_version" above, which carries a handler-less
+# entry that lacks every attribution field.)
+assert_exit "missing handler + missing advisor_template_version rejected" 1 \
+  "$ROLLUP" rollup --kdir "$TMP" --work-item s \
+  --consultations-json '[{"domain":"d","query_summary":"q","advice_summary":"a","was_followed":true}]'
+
+# B5. handler:agent without advisor_template_version → rejected (the
+# discriminator REQUIRES advisor_template_version when handler=agent per
+# the script header).
+assert_exit "handler:agent without advisor_template_version rejected" 1 \
+  "$ROLLUP" rollup --kdir "$TMP" --work-item s \
+  --consultations-json '[{"handler":"agent","domain":"d","query_summary":"q","advice_summary":"a","was_followed":true}]'
+
 echo ""
 echo "=== Results ==="
 echo "Passed: $PASS"

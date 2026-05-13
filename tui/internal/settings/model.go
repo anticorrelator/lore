@@ -2240,6 +2240,7 @@ func (m *SettingsModel) compactTopLevelObjectView(p *ClosedObjectSubPanel) strin
 	var lines []string
 	var deferred []string
 	var cells []string
+	var batchCells []string
 	flushCells := func() {
 		if len(cells) == 0 {
 			return
@@ -2247,13 +2248,25 @@ func (m *SettingsModel) compactTopLevelObjectView(p *ClosedObjectSubPanel) strin
 		lines = append(lines, "general: "+strings.Join(compactTrimCells(cells), "  |  "))
 		cells = nil
 	}
+	flushBatchCells := func() {
+		if len(batchCells) == 0 {
+			return
+		}
+		lines = append(lines, "batch: "+strings.Join(compactTrimCells(batchCells), "  |  "))
+		batchCells = nil
+	}
 
 	for _, child := range p.children {
 		if cell, ok := m.compactLeafCell(child); ok {
+			if p.dotPath == "settlement" && compactSettlementBatchControl(child.DotPath()) {
+				batchCells = append(batchCells, cell)
+				continue
+			}
 			cells = append(cells, cell)
 			continue
 		}
 		flushCells()
+		flushBatchCells()
 		if panel, ok := child.(*ClosedObjectSubPanel); ok {
 			panelLine, panelDeferred := m.compactPanelSummaryWithDeferredWindows(panel)
 			if panelLine != "" {
@@ -2268,9 +2281,19 @@ func (m *SettingsModel) compactTopLevelObjectView(p *ClosedObjectSubPanel) strin
 		}
 	}
 	flushCells()
+	flushBatchCells()
 	lines = append(lines, deferred...)
 
 	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
+func compactSettlementBatchControl(dotPath string) bool {
+	switch dotPath {
+	case "settlement.batch_size", "settlement.batch_recompute_min_interval_seconds":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *SettingsModel) compactPanelSummary(p *ClosedObjectSubPanel) string {
@@ -2712,6 +2735,10 @@ func compactLabel(dotPath, fallback string) string {
 	switch dotPath {
 	case "settlement.max_concurrency":
 		return "concurrency"
+	case "settlement.batch_size":
+		return "batch size"
+	case "settlement.batch_recompute_min_interval_seconds":
+		return "batch interval"
 	case "settlement.lease_ttl_seconds":
 		return "lease ttl"
 	case "settlement.executor_timeout_seconds":

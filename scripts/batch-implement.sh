@@ -839,7 +839,7 @@ execute_item() {
   local exit_code=0
   local -a claude_args
   mapfile -t claude_args < <(load_harness_args)
-  claude -p "/implement $slug" \
+  claude -p "/implement --yes $slug" \
     "${claude_args[@]}" \
     --output-format json \
     --max-budget-usd "$MAX_BUDGET" \

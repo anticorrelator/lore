@@ -606,6 +606,73 @@ def build_context_section(
 
 
 # ---------------------------------------------------------------------------
+# Phase-level advisor + consultation parsing (D2, D4, D6a)
+# ---------------------------------------------------------------------------
+
+def _phase_has_persistent_advisor(phase_content: str) -> bool:
+    """Return True if the phase declares at least one ``mode: persistent`` advisor.
+
+    Under the post-hoist routing (D1, D2), only phase advisors tagged
+    ``mode: persistent`` opt into the advisor-agent pipeline that
+    concatenates ``advisory-consultation.md`` onto worker prompts.
+    Legacy advisor declarations (``[must-consult]``, ``[on-demand]``)
+    without a ``mode: persistent`` suffix route through the lead inline
+    and add no advisory-mixin overhead to per-task cost estimates.
+
+    Scans the ``**Advisors:**`` block (if present) for any line carrying
+    a ``mode: persistent`` token. The token may appear inline on the same
+    line as the advisor name, or as a continuation bullet under the advisor
+    entry.
+    """
+    adv_match = re.search(
+        r"^\*\*Advisors:\*\*\s*\n((?:(?!^\*\*|\n##).*\n?)*)",
+        phase_content,
+        re.MULTILINE,
+    )
+    if not adv_match:
+        return False
+    block = adv_match.group(1)
+    return bool(re.search(r"\bmode\s*:\s*persistent\b", block))
+
+
+def _parse_consultations_required(phase_content: str) -> list[str]:
+    """Parse phase-level ``**Consultations required:**`` domain labels.
+
+    The block format mirrors ``**Files:**`` — a ``-`` bulleted list of
+    domain labels a worker MUST consult before starting implementation.
+    Each bullet contributes one label; trailing annotation after ``—`` is
+    preserved as part of the rendered line in ``phase_context`` but the
+    parsed list contains only the label text up to the optional dash.
+
+    Returns an empty list when the phase declares no
+    ``**Consultations required:**`` block. Template placeholder bullets
+    (e.g. ``<domain-label>``) are skipped.
+    """
+    cr_match = re.search(
+        r"^\*\*Consultations required:\*\*\s*\n((?:(?!^\*\*|\n##)- .*\n?)*)",
+        phase_content,
+        re.MULTILINE,
+    )
+    if not cr_match:
+        return []
+    domains: list[str] = []
+    for line in cr_match.group(1).splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        if stripped.startswith("- [ ]") or stripped.startswith("- [x]"):
+            continue
+        text = stripped[2:].strip()
+        # Skip template placeholder bullets like "<domain-label>"
+        if text.startswith("<") and text.endswith(">"):
+            continue
+        if not text:
+            continue
+        domains.append(text)
+    return domains
+
+
+# ---------------------------------------------------------------------------
 # Phase context builder
 # ---------------------------------------------------------------------------
 
@@ -622,12 +689,14 @@ def _build_phase_context(
     knowledge_dir: str,
     script_dir: str,
     annotation_warning: bool = False,
+    consultations_required: list[str] | None = None,
 ) -> str:
     """Render the phase-level brief for `phases[N].phase_context`.
 
     Contains all phase-shared content that is lifted out of per-task descriptions:
     Strategy, Design Decisions, Verification, Reference files (full phase **Files:** list),
-    phase Knowledge context backlinks, and the resolved ## Prior Knowledge block.
+    phase Knowledge context backlinks, the resolved ## Prior Knowledge block, and
+    (when present) the phase's ``**Consultations required:**`` domain list.
 
     Returns an empty string if the phase has no shareable context.
     """
@@ -641,6 +710,12 @@ def _build_phase_context(
         parts.append("**Files:**")
         for f in files:
             parts.append(f"- `{f}`")
+        parts.append("")
+
+    if consultations_required:
+        parts.append("**Consultations required:**")
+        for domain in consultations_required:
+            parts.append(f"- {domain}")
         parts.append("")
 
     if verif_lines:
@@ -1096,8 +1171,26 @@ def generate_tasks_from_plan(
                     annotation = ann_match.group(1).strip()
                 phase_backlinks.append((target, annotation))
 
-        # Detect whether this phase declares advisors
-        has_advisory = bool(re.search(r"^\*\*Advisors:\*\*", phase_content, re.MULTILINE))
+        # Detect whether this phase declares persistent-mode advisors.
+        # Only phase advisors tagged ``mode: persistent`` add advisory prompt
+        # overhead to cost estimates — the opt-in advisor-agent route is the
+        # only path that concatenates ``advisory-consultation.md`` onto worker
+        # prompts. Default lead-handled consultations and non-persistent
+        # advisor declarations (e.g. ``[must-consult]``, ``[on-demand]``
+        # without a ``mode: persistent`` suffix) route through the lead
+        # inline and do NOT inflate per-task context estimates.
+        has_advisory = _phase_has_persistent_advisor(phase_content)
+
+        # Parse phase-level ``**Consultations required:**`` block — a
+        # ``-`` bulleted list of consultation domain labels a worker on
+        # this phase MUST request before starting implementation. The
+        # block is lifted into ``phase_context`` so workers receive it
+        # via ``lore work phase-context``; it is NOT duplicated into
+        # per-task descriptions (per-task descriptions stay lean).
+        # Required consultations are runtime SendMessage traffic, not
+        # pre-loaded prompt content, so the presence of this block does
+        # NOT add advisory-mixin overhead to cost estimates.
+        consultations_required = _parse_consultations_required(phase_content)
 
         # Detect task format: prescriptive vs intent+constraints (default)
         tf_match = re.search(r"\*\*Task format:\*\*\s*(.*)", phase_content)
@@ -1192,7 +1285,8 @@ def generate_tasks_from_plan(
 
         # Build phase_context once — carries all phase-shared content lifted out of task descriptions:
         # Strategy, Design Decisions, Verification, Reference files (full phase files list),
-        # phase Knowledge context backlinks, and the resolved ## Prior Knowledge block.
+        # phase Knowledge context backlinks, the resolved ## Prior Knowledge block, and
+        # (when declared) the **Consultations required:** domain list (D4/D6a).
         phase_context = _build_phase_context(
             phase_num=phase_num,
             objective=objective,
@@ -1206,11 +1300,17 @@ def generate_tasks_from_plan(
             knowledge_dir=knowledge_dir,
             script_dir=script_dir,
             annotation_warning=annotation_warning,
+            consultations_required=consultations_required,
         )
 
         # D5 invariant: if the plan had any phase-level context to lift, phase_context must be non-empty.
         _has_phase_level_context = bool(
-            phase_decisions or verif_lines or files or phase_backlinks or strategy
+            phase_decisions
+            or verif_lines
+            or files
+            or phase_backlinks
+            or strategy
+            or consultations_required
         )
         if _has_phase_level_context and not phase_context.strip():
             raise RuntimeError(

@@ -273,6 +273,88 @@ func TestModelUsesTallStatusSpaceForQueuePreview(t *testing.T) {
 	}
 }
 
+func TestParseStatusCarriesCorrectionOutcome(t *testing.T) {
+	data := []byte(`{
+		"enabled": true,
+		"terminal_items": [
+			{
+				"id": "terminal-applied",
+				"run_id": "run-1",
+				"claim_id": "claim-a",
+				"status": "completed",
+				"verdict": {"verdict": "contradicted", "evidence": "drift", "correction": "fix"},
+				"correction_outcome": {"status": "applied", "reason": "applied", "target_entry": "conventions/foo.md"}
+			},
+			{
+				"id": "terminal-skipped",
+				"run_id": "run-2",
+				"claim_id": "claim-b",
+				"status": "completed",
+				"verdict": {"verdict": "contradicted", "evidence": "drift", "correction": "fix"},
+				"correction_outcome": {"status": "skipped", "reason": "no_commons_target"}
+			},
+			{
+				"id": "terminal-legacy",
+				"run_id": "run-3",
+				"claim_id": "claim-c",
+				"status": "completed",
+				"verdict": {"verdict": "verified", "evidence": "matched"}
+			}
+		]
+	}`)
+
+	st, err := ParseStatus(data)
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+	if len(st.RecentSettled) != 3 {
+		t.Fatalf("RecentSettled len = %d, want 3", len(st.RecentSettled))
+	}
+	applied := st.RecentSettled[0]
+	if applied.CorrectionOutcome.Status != "applied" || applied.CorrectionOutcome.Reason != "applied" || applied.CorrectionOutcome.TargetEntry != "conventions/foo.md" {
+		t.Fatalf("applied row parsed incorrectly: %+v", applied.CorrectionOutcome)
+	}
+	skipped := st.RecentSettled[1]
+	if skipped.CorrectionOutcome.Status != "skipped" || skipped.CorrectionOutcome.Reason != "no_commons_target" {
+		t.Fatalf("skipped row parsed incorrectly: %+v", skipped.CorrectionOutcome)
+	}
+	legacy := st.RecentSettled[2]
+	if legacy.CorrectionOutcome != (CorrectionOutcome{}) {
+		t.Fatalf("legacy row should have zero-value CorrectionOutcome, got %+v", legacy.CorrectionOutcome)
+	}
+}
+
+func TestModelRendersCorrectionOutcomeSuffix(t *testing.T) {
+	data := []byte(`{
+		"enabled": true,
+		"queue": {"total": 0},
+		"terminal_items": [
+			{"id": "t1", "claim_id": "claim-a", "claim": "applied claim text", "status": "completed", "verdict": {"verdict": "contradicted", "evidence": "drift"}, "correction_outcome": {"status": "applied", "reason": "applied", "target_entry": "conventions/x.md"}},
+			{"id": "t2", "claim_id": "claim-b", "claim": "skipped claim text", "status": "completed", "verdict": {"verdict": "contradicted", "evidence": "drift"}, "correction_outcome": {"status": "skipped", "reason": "not_mechanically_applicable"}},
+			{"id": "t3", "claim_id": "claim-c", "claim": "failed claim text", "status": "completed", "verdict": {"verdict": "contradicted", "evidence": "drift"}, "correction_outcome": {"status": "failed", "reason": "apply_unexpected_exit"}},
+			{"id": "t4", "claim_id": "claim-d", "claim": "verified claim text", "status": "completed", "verdict": {"verdict": "verified", "evidence": "matched"}}
+		]
+	}`)
+	st, err := ParseStatus(data)
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+	view := NewModel().ReplaceStatus(st).SetSize(200, 30).View()
+	if !strings.Contains(view, "contradicted → applied  applied claim text") {
+		t.Fatalf("applied suffix missing, got:\n%s", view)
+	}
+	if !strings.Contains(view, "contradicted → skip:not_mechanically_applicable  skipped claim text") {
+		t.Fatalf("skip suffix missing, got:\n%s", view)
+	}
+	if !strings.Contains(view, "contradicted → fail:apply_unexpected_exit  failed claim text") {
+		t.Fatalf("fail suffix missing, got:\n%s", view)
+	}
+	// Legacy / non-contradicted lines must render without a suffix.
+	if !strings.Contains(view, "verified  verified claim text") {
+		t.Fatalf("legacy (no outcome) row should render without suffix, got:\n%s", view)
+	}
+}
+
 func TestModelRendersLastSettledBetweenQueueAndLeases(t *testing.T) {
 	st, err := ParseStatus([]byte(`{
 		"enabled": true,

@@ -472,9 +472,10 @@ class Settlement:
             verdict_label = verdict.get("verdict") if isinstance(verdict.get("verdict"), str) else ""
             verdict_summary = verdict.get("evidence") if isinstance(verdict.get("evidence"), str) else ""
             correction = verdict.get("correction") if isinstance(verdict.get("correction"), str) else None
+            correction_outcome = run.get("correction_outcome") if isinstance(run.get("correction_outcome"), dict) else None
             row = self.find_task_claim_row(str(run.get("work_item") or ""), str(run.get("claim_id") or "")) or {}
             source = row.get("source") if isinstance(row.get("source"), dict) else {}
-            out.append({
+            item: dict[str, Any] = {
                 "id": run.get("item_id"),
                 "kind": "task-claim",
                 "status": run.get("status"),
@@ -500,7 +501,10 @@ class Settlement:
                 },
                 "selection": run.get("selection"),
                 "completed_at": run.get("completed_at"),
-            })
+            }
+            if correction_outcome is not None:
+                item["correction_outcome"] = correction_outcome
+            out.append(item)
         out.sort(key=lambda item: str(item.get("completed_at") or ""), reverse=True)
         return out[:limit]
 
@@ -698,6 +702,25 @@ class Settlement:
             return existing if isinstance(existing, dict) else run
         json_dump(path, run)
         return run
+
+    def write_run_correction_outcome_once(self, run_id: str, outcome: dict[str, Any]) -> dict[str, Any]:
+        """Identity-verified read-modify-write of `correction_outcome` on the
+        existing run record. Idempotent: if the field is already present, the
+        existing value wins (matching `write_run_record_once` semantics).
+        """
+        path = self.run_path(str(run_id))
+        if not path.exists():
+            return outcome
+        existing = json_load(path, {})
+        if not isinstance(existing, dict):
+            return outcome
+        if existing.get("run_id") != run_id:
+            return outcome
+        if isinstance(existing.get("correction_outcome"), dict):
+            return existing["correction_outcome"]
+        existing["correction_outcome"] = outcome
+        json_dump(path, existing)
+        return outcome
 
     def selection_block(self, item: dict[str, Any]) -> dict[str, Any]:
         block = {
@@ -1263,44 +1286,127 @@ class Settlement:
         if stderr:
             run["stderr_tail"] = stderr
         written = self.write_run_record_once(run)
-        self._apply_correction_from_verdict(written, item)
+        outcome = self._apply_correction_from_verdict(written, item)
+        if isinstance(outcome, dict):
+            persisted = self.write_run_correction_outcome_once(str(written.get("run_id") or ""), outcome)
+            written["correction_outcome"] = persisted
+            if persisted.get("status") == "applied":
+                self._emit_correction_evidence(str(written.get("run_id") or ""), persisted)
         return written
 
-    def _apply_correction_from_verdict(self, run: dict[str, Any], item: dict[str, Any]) -> None:
+    def _emit_correction_evidence(self, run_id: str, outcome: dict[str, Any]) -> None:
+        """Bridge a settlement-applied correction into `_scorecards/rows.jsonl`
+        as a `tier:correction + kind:scored` row so /evolve's secondary gate
+        can re-acquire the recurring-failure signal (D2).
+
+        Sole-writer discipline: never write to rows.jsonl directly — shell out
+        to `scorecard-append.sh` which is the only sanctioned writer.
+
+        Idempotent: scans the existing `rows.jsonl` for a row matching
+        `tier == "correction" AND kind == "scored" AND
+        calibrated_by_verdict_id == run_id`; if found, skip emission silently
+        (covers settlement-processor retry on a previously-applied run, since
+        `write_run_correction_outcome_once` returns the existing outcome on
+        retry without signaling whether it was newly written).
+
+        Failures are logged to stderr but never raised — emission is best-
+        effort downstream telemetry, not part of the correction-application
+        critical path.
+        """
+        if not run_id:
+            return
+        target_entry = str(outcome.get("target_entry") or "")
+        if not target_entry:
+            sys.stderr.write(
+                f"[settlement] correction-evidence emission skipped run_id={run_id}: missing target_entry\n"
+            )
+            return
+        rows_path = self.kdir / "_scorecards" / "rows.jsonl"
+        if rows_path.exists():
+            try:
+                with rows_path.open(encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            existing = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if (
+                            isinstance(existing, dict)
+                            and existing.get("tier") == "correction"
+                            and existing.get("kind") == "scored"
+                            and existing.get("calibrated_by_verdict_id") == run_id
+                        ):
+                            return  # idempotent retry — row already emitted
+            except OSError as exc:
+                sys.stderr.write(
+                    f"[settlement] correction-evidence emission failed run_id={run_id}: read rows.jsonl: {exc}\n"
+                )
+                return
+        row = {
+            "tier": "correction",
+            "kind": "scored",
+            "calibration_state": "pre-calibration",
+            "calibrated_by_verdict_id": run_id,
+            "corrected_entry_path": target_entry,
+            "correction_target": "claim",
+            "schema_version": 1,
+        }
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        append_cmd = [
+            "bash",
+            os.path.join(scripts_dir, "scorecard-append.sh"),
+            "--kdir", str(self.kdir),
+        ]
+        try:
+            subprocess.run(
+                append_cmd,
+                input=compact(row),
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=True,
+                env={**os.environ, "LORE_KNOWLEDGE_DIR": str(self.kdir)},
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr_tail = (exc.stderr or "")[-500:]
+            sys.stderr.write(
+                f"[settlement] correction-evidence emission failed run_id={run_id}: scorecard-append exit {exc.returncode}: {stderr_tail}\n"
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            sys.stderr.write(
+                f"[settlement] correction-evidence emission failed run_id={run_id}: {exc}\n"
+            )
+
+    def _apply_correction_from_verdict(self, run: dict[str, Any], item: dict[str, Any]) -> dict[str, Any] | None:
         """Autonomous correction terminus. On contradicted verdicts, attempt to
         mutate the commons entry directly via apply-correction.sh with
         --allow-settlement-verdict. The mutation is single-shot and gated on
         exact superseded_text match.
 
-        Failure modes are all silent terminal skips (logged to stderr only):
-          - find-correction-targets returns no targets   → no commons home
-          - find-correction-targets index_state==missing → concordance unavailable
-          - apply-correction exit 2 (text not in entry)  → not_mechanically_applicable
-          - apply-correction exit 4 (auth check failed)  → run record drift; shouldn't happen
-          - apply-correction other non-zero              → logged; continue
-
-        The audit trail lives in: (a) the settlement run record, (b) git commits
-        on the entry, (c) the entry's corrections[] META block. No supersedes
-        archive is created (--check-escalation is NOT passed): git history is
-        the authoritative version trail.
+        Returns a `correction_outcome` dict for every branch reached after a
+        contradicted verdict (closed taxonomy in D2), or None for non-contradicted
+        verdicts. Stderr lines are preserved as the live-operator surface.
         """
         verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
         if verdict.get("verdict") != "contradicted":
-            return
-        if os.environ.get("LORE_SETTLEMENT_DISABLE_AUTO_CORRECTION", "").strip():
-            return
+            return None
         run_id = str(run.get("run_id") or "")
+        if os.environ.get("LORE_SETTLEMENT_DISABLE_AUTO_CORRECTION", "").strip():
+            return {"status": "skipped", "reason": "auto_correction_disabled"}
         if not run_id:
-            return
+            return {"status": "skipped", "reason": "auto_correction_disabled"}
         correction_text = verdict.get("correction")
         if not (isinstance(correction_text, str) and correction_text.strip()):
             sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: empty correction text\n")
-            return
+            return {"status": "skipped", "reason": "empty_correction_text"}
         evidence_text = verdict.get("evidence") or ""
         claim_text = item.get("claim") or ""
         if not claim_text.strip():
             sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: empty claim text\n")
-            return
+            return {"status": "skipped", "reason": "empty_claim_text"}
         # Tier 2 row's file + line_range live under item["source"] per
         # item_from_row (line 318). Top-level item.get("file") would always be None.
         source = item.get("source") if isinstance(item.get("source"), dict) else {}
@@ -1328,32 +1434,34 @@ class Settlement:
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
             sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: find-correction-targets failed: {exc}\n")
-            return
+            return {"status": "failed", "reason": "find_targets_subprocess_error", "detail": str(exc)[:200]}
         if find_proc.returncode != 0 or not find_proc.stdout.strip():
             sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: find-correction-targets exit {find_proc.returncode}\n")
-            return
+            return {"status": "failed", "reason": "find_targets_nonzero_exit", "detail": f"exit {find_proc.returncode}: {find_proc.stderr[-160:]}"}
         try:
             find_result = json.loads(find_proc.stdout)
         except json.JSONDecodeError as exc:
             sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: find-correction-targets JSON parse: {exc}\n")
-            return
+            return {"status": "failed", "reason": "find_targets_json_parse", "detail": str(exc)[:200]}
         index_state = find_result.get("index_state")
         targets = find_result.get("targets") or []
         if index_state == "missing":
             sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: concordance index missing\n")
-            return
+            return {"status": "skipped", "reason": "concordance_unavailable"}
         if not targets:
             sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: no commons target for claim\n")
-            return
+            return {"status": "skipped", "reason": "no_commons_target"}
         target = targets[0]
-        target_path = str(target.get("path") or "")
-        if not target_path:
+        target_path_relative = str(target.get("path") or "")
+        if not target_path_relative:
             sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: target row missing path\n")
-            return
+            return {"status": "skipped", "reason": "target_path_missing"}
         # find-correction-targets returns paths relative to KDIR; resolve absolute.
         kdir = str(getattr(self, "kdir", "") or os.environ.get("LORE_KNOWLEDGE_DIR", ""))
-        if kdir and not os.path.isabs(target_path):
-            target_path = os.path.join(kdir, target_path)
+        if kdir and not os.path.isabs(target_path_relative):
+            target_path = os.path.join(kdir, target_path_relative)
+        else:
+            target_path = target_path_relative
         evidence_for_apply = evidence_text if evidence_text else f"settlement_run_id={run_id}"
         apply_cmd = [
             "bash",
@@ -1377,14 +1485,15 @@ class Settlement:
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
             sys.stderr.write(f"[settlement] auto-correction failed run_id={run_id}: apply-correction subprocess: {exc}\n")
-            return
+            return {"status": "failed", "reason": "apply_subprocess_error", "target_entry": target_path_relative, "detail": str(exc)[:200]}
         if apply_proc.returncode == 0:
             sys.stderr.write(f"[settlement] auto-correction APPLIED run_id={run_id} entry={target_path}\n")
-            return
+            return {"status": "applied", "reason": "applied", "target_entry": target_path_relative}
         if apply_proc.returncode == 2:
             sys.stderr.write(f"[settlement] auto-correction skipped run_id={run_id}: superseded_text not present in {target_path} (not_mechanically_applicable)\n")
-            return
+            return {"status": "skipped", "reason": "not_mechanically_applicable", "target_entry": target_path_relative}
         sys.stderr.write(f"[settlement] auto-correction failed run_id={run_id}: apply-correction exit {apply_proc.returncode}: {apply_proc.stderr[-500:]}\n")
+        return {"status": "failed", "reason": "apply_unexpected_exit", "target_entry": target_path_relative, "detail": f"exit {apply_proc.returncode}: {apply_proc.stderr[-160:]}"}
 
     def parse_verdict_envelope(self, stdout: str) -> dict[str, Any] | None:
         self._last_executor_audit = None

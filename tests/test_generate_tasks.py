@@ -2514,3 +2514,208 @@ class TestV2RetrievalDirective:
         assert directive["scale_set"] == ["subsystem"]
         assert "[[knowledge:foo#a]]" in directive["seeds"]
         assert directive["hop_budget"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Hoist-advisory parser tests: **Consultations required:** lift into
+# phase_context (D4/D6a) and mode: persistent gate on advisory cost
+# accounting (D2/D5).
+# ---------------------------------------------------------------------------
+
+CONSULTATIONS_REQUIRED_PLAN = """\
+# Feature CR
+
+## Goal
+Phase declares **Consultations required:** with two domain labels.
+
+## Phases
+
+### Phase 1: Build
+**Objective:** Implement the feature
+**Files:** `src/feature.ts`
+**Consultations required:**
+- security-review
+- performance-tuning
+- [ ] Add the feature
+- [ ] Wire up endpoints
+"""
+
+PERSISTENT_ADVISOR_PLAN = """\
+# Feature Persistent
+
+## Goal
+Phase declares a `mode: persistent` advisor.
+
+## Phases
+
+### Phase 1: Build
+**Objective:** Implement the feature
+**Files:** `src/feature.ts`
+**Advisors:**
+- security [must-consult] mode: persistent
+- [ ] Add the feature
+"""
+
+MUST_CONSULT_NON_PERSISTENT_PLAN = """\
+# Feature Must-Consult Only
+
+## Goal
+Phase declares an advisor without `mode: persistent` — legacy must-consult
+declaration that under the hoist routes through the lead inline and does
+NOT add advisory-mixin overhead to cost estimates.
+
+## Phases
+
+### Phase 1: Build
+**Objective:** Implement the feature
+**Files:** `src/feature.ts`
+**Advisors:**
+- security [must-consult]
+- performance-tuning [on-demand]
+- [ ] Add the feature
+"""
+
+NO_ADVISORS_BLOCK_PLAN = """\
+# Feature No Advisors
+
+## Goal
+Phase has no **Advisors:** block at all.
+
+## Phases
+
+### Phase 1: Build
+**Objective:** Implement the feature
+**Files:** `src/feature.ts`
+- [ ] Add the feature
+"""
+
+CONSULTATIONS_REQUIRED_NO_ADVISORS_PLAN = """\
+# Feature CR No Advisors
+
+## Goal
+Phase has **Consultations required:** but no **Advisors:** block. Required
+consultations are runtime SendMessage traffic — they must not inflate the
+advisory cost estimate.
+
+## Phases
+
+### Phase 1: Build
+**Objective:** Implement the feature
+**Files:** `src/feature.ts`
+**Consultations required:**
+- security-review
+- [ ] Add the feature
+"""
+
+
+class TestConsultationsRequiredPhaseContext:
+    """C1: **Consultations required:** lifts into phase_context, NOT duplicated
+    into per-task descriptions (D4/D6a)."""
+
+    def test_consultations_required_appears_in_phase_context(self, tmp_path):
+        """Both domain labels render under a **Consultations required:** block
+        in phase_context."""
+        result = generate_tasks_from_plan(CONSULTATIONS_REQUIRED_PLAN, str(tmp_path))
+        phase_context = result["phases"][0]["phase_context"]
+        assert "**Consultations required:**" in phase_context
+        assert "security-review" in phase_context
+        assert "performance-tuning" in phase_context
+
+    def test_consultations_required_block_uses_bullet_format(self, tmp_path):
+        """The rendered block has a header line and one ``- <label>`` bullet
+        per domain — the same shape the worker phase brief surfaces via
+        ``lore work phase-context``."""
+        result = generate_tasks_from_plan(CONSULTATIONS_REQUIRED_PLAN, str(tmp_path))
+        phase_context = result["phases"][0]["phase_context"]
+        assert "- security-review" in phase_context
+        assert "- performance-tuning" in phase_context
+
+    def test_consultations_required_not_duplicated_into_task_descriptions(self, tmp_path):
+        """Per-task descriptions must NOT contain the rendered
+        **Consultations required:** block — it lives in phase_context only."""
+        result = generate_tasks_from_plan(CONSULTATIONS_REQUIRED_PLAN, str(tmp_path))
+        for task in result["phases"][0]["tasks"]:
+            assert "**Consultations required:**" not in task["description"], (
+                f"Task '{task['subject']}' description duplicates the "
+                f"**Consultations required:** block; it should live in phase_context only"
+            )
+
+    def test_consultations_required_domain_labels_not_in_task_descriptions(self, tmp_path):
+        """Domain labels under **Consultations required:** must not appear as
+        free-floating text in per-task descriptions either — the labels are
+        phase-shared content, not per-task assignment."""
+        result = generate_tasks_from_plan(CONSULTATIONS_REQUIRED_PLAN, str(tmp_path))
+        for task in result["phases"][0]["tasks"]:
+            assert "security-review" not in task["description"]
+            assert "performance-tuning" not in task["description"]
+
+    def test_no_consultations_required_block_absent_from_phase_context(self, tmp_path):
+        """A phase with no **Consultations required:** block must NOT have the
+        block in phase_context."""
+        result = generate_tasks_from_plan(NO_ADVISORS_BLOCK_PLAN, str(tmp_path))
+        phase_context = result["phases"][0]["phase_context"]
+        assert "**Consultations required:**" not in phase_context
+
+
+class TestAdvisoryCostGatedOnPersistentMode:
+    """C2: cost accounting `advisory_chars` is added only when the phase has
+    at least one `mode: persistent` advisor declaration (D2/D5). Default
+    lead-handled consultations and non-persistent advisor lines do NOT
+    inflate per-task context estimates."""
+
+    def test_persistent_advisor_adds_advisory_chars(self, tmp_path):
+        """A phase with at least one `mode: persistent` advisor line emits
+        advisory_chars > 0 on every task."""
+        result = generate_tasks_from_plan(PERSISTENT_ADVISOR_PLAN, str(tmp_path))
+        for task in result["phases"][0]["tasks"]:
+            assert task["context_cost_estimate"]["advisory_chars"] > 0, (
+                f"Task '{task['subject']}' should have advisory overhead "
+                f"because the phase declared a mode: persistent advisor"
+            )
+            assert task["context_cost_estimate"]["advisory_chars"] == _ADVISORY_OVERHEAD_CHARS
+
+    def test_non_persistent_advisor_block_zero_advisory_chars(self, tmp_path):
+        """A phase with **Advisors:** lines but NO `mode: persistent` token
+        (legacy `[must-consult]` / `[on-demand]` modes) must have
+        advisory_chars == 0 on every task."""
+        result = generate_tasks_from_plan(MUST_CONSULT_NON_PERSISTENT_PLAN, str(tmp_path))
+        for task in result["phases"][0]["tasks"]:
+            assert task["context_cost_estimate"]["advisory_chars"] == 0, (
+                f"Task '{task['subject']}' should have zero advisory overhead "
+                f"because no advisor line carries `mode: persistent`"
+            )
+
+    def test_no_advisors_block_zero_advisory_chars(self, tmp_path):
+        """A phase with no **Advisors:** block at all must have advisory_chars == 0."""
+        result = generate_tasks_from_plan(NO_ADVISORS_BLOCK_PLAN, str(tmp_path))
+        for task in result["phases"][0]["tasks"]:
+            assert task["context_cost_estimate"]["advisory_chars"] == 0
+
+
+class TestConsultationsRequiredDoesNotInflateCost:
+    """C3: **Consultations required:** is runtime SendMessage traffic, NOT
+    pre-loaded prompt content — its presence must not inflate per-task
+    advisory_chars cost (only `mode: persistent` advisors do)."""
+
+    def test_consultations_required_alone_zero_advisory_chars(self, tmp_path):
+        """A phase with **Consultations required:** but no **Advisors:** block
+        must produce advisory_chars == 0 on every task."""
+        result = generate_tasks_from_plan(
+            CONSULTATIONS_REQUIRED_NO_ADVISORS_PLAN, str(tmp_path)
+        )
+        for task in result["phases"][0]["tasks"]:
+            assert task["context_cost_estimate"]["advisory_chars"] == 0, (
+                f"Task '{task['subject']}' should have zero advisory overhead — "
+                f"required consultations are runtime traffic, not prompt overhead"
+            )
+
+    def test_consultations_required_phase_context_still_built(self, tmp_path):
+        """Even with zero advisory cost, the **Consultations required:** block
+        must still surface in phase_context (workers read it via
+        ``lore work phase-context``)."""
+        result = generate_tasks_from_plan(
+            CONSULTATIONS_REQUIRED_NO_ADVISORS_PLAN, str(tmp_path)
+        )
+        phase_context = result["phases"][0]["phase_context"]
+        assert "**Consultations required:**" in phase_context
+        assert "security-review" in phase_context

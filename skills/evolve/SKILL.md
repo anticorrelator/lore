@@ -162,7 +162,7 @@ any gate path, partition `rows.jsonl` and exclude:
 - `tier: telemetry` — P2.3-16 anti-coupling invariant; includes missing-tier legacy rows (rows without a `tier` field treated as `tier: telemetry`)
 - Any row from a `pipeline-degraded` window
 
-**Evidence-class matrix.** Three gate paths exist. Route each suggestion to
+**Evidence-class matrix.** Four gate paths exist. Route each suggestion to
 the path matching its `change_type`:
 
 | `change_type` | Gate path | Required evidence |
@@ -170,8 +170,9 @@ the path matching its `change_type`:
 | Any template-behavior change (default) | Primary | `tier: template + kind: scored + calibrated + non-degraded` |
 | `doctrine-correction` | Secondary | `tier: correction + kind: scored + calibrated + non-degraded` |
 | `claim-retraction` / `falsified-doctrine` | Claim-retraction | `kind: consumption-contradiction + status: verified + non-degraded` |
+| `recurring-failure` | Recurring-failure | candidate cluster of ≥3 distinct `work_items` over `(target, change_type)` AND maintainer-accepted in a prior /evolve run (artifact: `_evolve/accepted-clusters.jsonl`) |
 
-**Primary gate** (`change_type` not `doctrine-correction`/`claim-retraction`/`falsified-doctrine`):
+**Primary gate** (`change_type` not `doctrine-correction`/`claim-retraction`/`falsified-doctrine`/`recurring-failure`):
 
 A supporting row must satisfy ALL:
 1. `tier == "template"` (rows from rollup scripts post-migration)
@@ -204,6 +205,67 @@ If no row satisfies → `no_op` with reason `no_eligible_correction_row`.
 
 If no verified contradiction row exists → `no_op` with reason `no_verified_contradiction`.
 
+**Recurring-failure gate** (`change_type: "recurring-failure"`):
+
+The recurring-failure gate is a **two-state, two-run lifecycle** over retro-evolution journal rows. Acceptance in run N persists an `accepted_cluster` artifact; the gate in run N+1 reads that artifact to clear the suggestion. Same-run Step 5 re-entry is **NOT** permitted — newly accepted clusters never gate suggestions in the same /evolve invocation that accepted them (per D5e).
+
+This is a gate. The gate's required four routing properties (per the routing-gate convention):
+
+- **Inputs:** `_meta/effectiveness-journal.jsonl` rows with `role == "retro-evolution"` (raw clustering pass), `_evolve/accepted-clusters.jsonl` rows from prior runs (consumption pass), and the staged `recurring-failure` suggestion's `(target, change_type)` key.
+- **Success route:** suggestion clears the gate when its `(target, change_type)` matches an `accepted_cluster` row whose `consumed_at_run_id` is unset; the row is then marked consumed for this run.
+- **Conservative fallback:** if no accepted cluster matches, the suggestion is `no_op` with reason `no_accepted_cluster` — it does NOT silently re-route to the primary or secondary gate (those gates require different evidence classes; a recurring-failure suggestion has none of them by definition).
+- **Lifecycle constraints:** acceptance side effects (writing to `_evolve/accepted-clusters.jsonl`) happen only in Step 6's CLUSTER REVIEW block; the Step 5 gate path is read-only over that artifact.
+
+**K threshold (candidate-cluster formation, raw pass):**
+
+| K (distinct `work_items`) | Cluster status | /evolve action |
+|---|---|---|
+| K < 3 | sub-threshold | discard; no suggestion presented |
+| K == 3 | candidate cluster | present in Step 6 CLUSTER REVIEW for maintainer adjudication |
+| K > 3 | candidate cluster | present in Step 6 CLUSTER REVIEW (member list shows all) |
+
+K=3 is the smallest threshold deserving "recurring" — K=2 is anecdote; importing the scorecard primary-gate sample threshold (K=7) would inappropriately conflate evidence classes. K is the count of *distinct* `work_item` values in the cluster (not raw row count); a single work item generating 5 retro-evolution rows on the same target is K=1, not K=5.
+
+**Two-run lifecycle (state table):**
+
+| Run | Step 5 inputs | Step 6 action | Persisted artifact |
+|---|---|---|---|
+| Run N | retro-evolution rows scanned for K≥3 candidate clusters | maintainer accepts/edits/splits/rejects each candidate; accepted clusters written to `_evolve/accepted-clusters.jsonl` | `accepted_cluster` rows with `accepted_at_run_id` set, `consumed_at_run_id` unset |
+| Run N+1 | `_evolve/accepted-clusters.jsonl` rows with `consumed_at_run_id` unset | each consumed cluster gates exactly one staged `recurring-failure` suggestion | `consumed_at_run_id` populated on consumed rows |
+
+The two-run delay is load-bearing: it forces a human-in-loop pause between cluster identification and template mutation, so a same-session burst of similar retros cannot self-amplify into a binding edit.
+
+**Two-pass scan over retro-evolution rows:**
+
+1. **Raw clustering pass.** Scan retro-evolution rows whose `context` does **NOT** start with `retro-backfill:` (those are pre-clustered backfill payloads — see consumption pass). Bucket rows by `(Target, Change type)` extracted from the structured observation prose. For each bucket, compute the count of distinct `work_item` values. Emit a candidate cluster when K ≥ 3.
+2. **Pre-clustered consumption pass.** Scan retro-evolution rows whose `context` starts with `retro-backfill:` (Phase 5 backfill artifacts). Each backfill row already represents a cluster; treat its observation as a single candidate cluster without re-bucketing. The K threshold does not re-apply — backfill payloads carry their own provenance bundle.
+
+The two passes produce a unified candidate-cluster list for Step 6.
+
+**Accepted-cluster artifact format.** When the maintainer accepts a candidate in Step 6 CLUSTER REVIEW, append a row to `$KDIR/_evolve/accepted-clusters.jsonl`:
+
+```json
+{
+  "cluster_id": "<sha256[:16] of (target + change_types[] sorted + work_items[] sorted)>",
+  "target": "<file path>",
+  "change_types": ["<change_type>", ...],
+  "work_items": ["<work_item slug>", ...],
+  "journal_row_refs": [{"timestamp": "<iso>", "work_item": "<slug>"}, ...],
+  "accepted_at": "<iso8601 timestamp>",
+  "accepted_at_run_id": "<evolve run id from Step 8 journal cutoff>",
+  "accepted_by_maintainer_decision": "merge" | "edit" | "split",
+  "consumed_at_run_id": null
+}
+```
+
+`consumed_at_run_id` starts `null` and is updated to the consuming run's id when the gate fires in run N+1. The append is sole-writer through `bash ~/.lore/scripts/accepted-cluster-append.sh` (Phase 5 dependency) — `/evolve` does NOT write `_evolve/accepted-clusters.jsonl` directly outside of that script.
+
+**Do NOT:**
+- silently fall back to the primary or secondary gate when an accepted cluster is missing — emit `no_op` with reason `no_accepted_cluster` and surface the reason in Step 9 reporting.
+- re-enter Step 5 in the same invocation after Step 6 CLUSTER REVIEW writes accepted-cluster rows; the two-run lifecycle is the design.
+- treat raw-clustering pass rows whose `context` starts with `retro-backfill:` as raw — they belong to the consumption pass.
+- bucket on `target` alone; the bucketing key is `(target, change_type)`.
+
 **Attach citation.** For suggestions that clear the primary or secondary gate:
 
 ```
@@ -218,10 +280,17 @@ Citation: kind=consumption-contradiction | contradiction_id=<id>
           knowledge_path=<path> | status=verified
 ```
 
+For recurring-failure, attach the accepted-cluster reference:
+```
+Citation: kind=accepted-cluster | cluster_id=<id> | target=<file>
+          change_types=<comma-list> | work_items=<comma-list>
+          K=<distinct-work-item-count> | accepted_at_run_id=<run_id>
+```
+
 Report the gate outcome before Step 6:
 
 ```
-[evolve] Gate: N suggestions — K cleared (M primary, C correction, R retraction), J no-op (reasons: <breakdown>)
+[evolve] Gate: N suggestions — K cleared (M primary, C correction, R retraction, F recurring-failure), J no-op (reasons: <breakdown>)
 ```
 
 **Sole-writer invariant (CC-04).** `/evolve` does not write to `rows.jsonl`.
@@ -320,6 +389,44 @@ Remove this addition? [y/n/skip]
 ```
 
 Approved removals enter `approved` with `change_type: "removal"`. Skipped sunset items enter `skipped`. These are processed in Step 7 alongside normal approved suggestions.
+
+**CLUSTER REVIEW (recurring-failure candidates).** Present any candidate clusters formed in Step 5.x (raw-clustering pass produced K≥3 buckets, OR pre-clustered consumption pass surfaced backfill payloads) AFTER the regular per-suggestion review queue completes. This block is the sole human-in-loop adjudication surface for cluster identity — there is no separate `lore` CLI for cluster merging (per D8). One cluster at a time:
+
+```
+═══════════════════════════════════════════════
+CLUSTER REVIEW
+═══════════════════════════════════════════════
+Candidate cluster: target=<file> | change_type=<type> | K=<distinct-work-item-count>
+
+Members:
+  <timestamp> | <work_item slug> | <one-sentence excerpt from observation>
+  <timestamp> | <work_item slug> | <one-sentence excerpt from observation>
+  <timestamp> | <work_item slug> | <one-sentence excerpt from observation>
+  ...
+Representative Evidence: <Evidence line from one member, verbatim>
+
+Merge cluster as recurring-failure suggestion? [y/edit/split/n]
+```
+
+- **y** — accept the cluster verbatim; append an `accepted_cluster` row to `_evolve/accepted-clusters.jsonl` (decision: `merge`).
+- **edit** — accept a maintainer-edited member set (drop irrelevant members) before persisting (decision: `edit`).
+- **split** — accept the cluster as two or more sub-clusters; one `accepted_cluster` row per sub-cluster (decision: `split`).
+- **n** — reject; no row written. The candidate does not re-appear unless future retro-evolution rows push K back above threshold from a fresh distinct work_item.
+
+Acceptance side effects (writing `_evolve/accepted-clusters.jsonl`) happen in this block only. The Step 5 recurring-failure gate consumes those rows in **the next** /evolve run (run N+1) — same-run re-entry is NOT permitted. This is the two-run lifecycle from Step 5.x; do not collapse it into a same-session loop, even if the maintainer asks.
+
+Append rows via the sole-writer script:
+
+```bash
+bash ~/.lore/scripts/accepted-cluster-append.sh \
+  --target "<file>" \
+  --change-types "<comma-list>" \
+  --work-items "<comma-list>" \
+  --decision "merge|edit|split" \
+  --accepted-at-run-id "<run_id>"
+```
+
+(`accepted-cluster-append.sh` lands with Phase 5; until then, the CLUSTER REVIEW block reports candidates but the persistence step is a stub.)
 
 ### Step 7: Apply Approved Suggestions
 
@@ -433,7 +540,7 @@ If zero suggestions were approved, still write the entry — it records that the
   Applied:     N (to: <files>)
   Rejected:    N
   Skipped:     N (will appear in next run)
-  No-op(gate): N (telemetry-only / pre-calibration / unregistered / pipeline-degraded / no scored row)
+  No-op(gate): N (telemetry-only / pre-calibration / unregistered / pipeline-degraded / no scored row / no accepted cluster)
   Bumps:       N template versions registered (K no-change)
 ```
 

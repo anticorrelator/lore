@@ -50,7 +50,7 @@ Show the script output directly.
 ```bash
 lore work show "<slug>"
 ```
-**Before calling the script**, resolve the name to an exact slug using fuzzy matching (see below). Show the script output, then add a brief summary: current phase, next steps, and whether `/spec` is available.
+**Before calling the script**, resolve the name to an exact slug via `lore work resolve` (see "Resolving Names to Slugs" below). Show the script output, then add a brief summary: current phase, next steps, and whether `/spec` is available.
 
 ---
 
@@ -81,7 +81,7 @@ Capture session progress — this requires judgment (session summarization).
 ---
 
 ### `archive [name]`
-Resolve name to slug (fuzzy match), then confirm with user: "Archive '<title>'? This moves it to _archive/."
+Resolve name to slug via `lore work resolve` (see "Resolving Names to Slugs" below), then confirm with user: "Archive '<title>'? This moves it to _archive/."
 
 After confirmation:
 ```bash
@@ -92,7 +92,7 @@ Show the script output.
 ---
 
 ### `set <name> --issue <value> --pr <value>`
-Resolve name to slug (fuzzy match), then run:
+Resolve name to slug via `lore work resolve` (see "Resolving Names to Slugs" below), then run:
 ```bash
 lore work set "<slug>" --issue "<value>" --pr "<value>"
 ```
@@ -120,7 +120,7 @@ Show the script output. For the top matches, briefly summarize the relevant cont
 ---
 
 ### `tasks [name]`
-Resolve name to slug (fuzzy match). If no `plan.md` exists, tell the user to run `/spec` first.
+Resolve name to slug via `lore work resolve` (see "Resolving Names to Slugs" below). If no `plan.md` exists, tell the user to run `/spec` first.
 
 Run:
 ```bash
@@ -137,7 +137,7 @@ Report: "Loaded N tasks across M phases."
 ---
 
 ### `regen-tasks [name]`
-Resolve name to slug (fuzzy match). Regenerate `tasks.json` from the current `plan.md`.
+Resolve name to slug via `lore work resolve` (see "Resolving Names to Slugs" below). Regenerate `tasks.json` from the current `plan.md`.
 
 ```bash
 lore work regen-tasks "<slug>"
@@ -161,16 +161,25 @@ Run **list**. Show the script output directly — no additional processing or su
 
 ---
 
-## Fuzzy Matching (for load, set, archive, tasks, regen-tasks)
+## Resolving Names to Slugs (for load, set, archive, tasks, regen-tasks)
 
-When a subcommand needs a slug but the user provided a name, resolve it:
-1. **Exact slug** — exists in `_work/`
-2. **Substring on title** — case-insensitive unique match
-3. **Substring on slug** — unique match
-4. **Tag match** — matches a tag value
-5. **Branch match** — current git branch matches a work item's `branches`
-6. **Recency** — most recently updated active item
-7. **Archive fallback** — if all active steps above fail, check the `"archived"` array from `lore work list --json --all` and retry steps 1–3 against archived items; tag result as `[archived]` in output
-8. **Ambiguous** — list candidates, ask user to pick
+When a subcommand needs a slug but the user provided a name, delegate to `lore work resolve`:
 
-Read `_work/_index.json` for active resolution. Scripts accept exact slugs only.
+```bash
+if RESULT=$(lore work resolve "$REF" --branch "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"); then
+  SLUG=$(printf '%s' "$RESULT" | sed -n '1p')
+  ARCHIVED=$(printf '%s' "$RESULT" | sed -n '2p')
+else
+  case $? in
+    1) echo "No work item matches '$REF'." >&2; exit 1 ;;
+    2) echo "Multiple work items match '$REF':" >&2
+       # candidate list is already on stderr from the resolver
+       # ask the user to pick via AskUserQuestion using those candidates
+       exit 1 ;;
+  esac
+fi
+```
+
+`lore work resolve` exits 0 on a unique match (stdout: `<slug>\n<archived>\n`), 1 on no match, or 2 on ambiguity (candidates on stderr). For read-only loads, an `ARCHIVED=true` result can be surfaced silently with an `[archived]` tag in output; mutating subcommands (`archive`, `set`, `tasks`, `regen-tasks`) should treat archived items per their existing per-subcommand confirmation policy.
+
+Scripts beyond `resolve` accept exact slugs only — always pass `$SLUG` after resolution.

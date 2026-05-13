@@ -92,22 +92,29 @@ type Batch struct {
 }
 
 type LastSettled struct {
-	ID             string
-	RunID          string
-	WorkItem       string
-	ClaimID        string
-	Claim          string
-	SourceFile     string
-	LineRange      string
-	Falsifier      string
-	Status         string
-	VerdictLabel   string
-	VerdictSummary string
-	Correction     string
-	BlockedReason  string
-	SettledAt      string
-	RunRef         string
-	VerdictRef     string
+	ID                string
+	RunID             string
+	WorkItem          string
+	ClaimID           string
+	Claim             string
+	SourceFile        string
+	LineRange         string
+	Falsifier         string
+	Status            string
+	VerdictLabel      string
+	VerdictSummary    string
+	Correction        string
+	BlockedReason     string
+	SettledAt         string
+	RunRef            string
+	VerdictRef        string
+	CorrectionOutcome CorrectionOutcome
+}
+
+type CorrectionOutcome struct {
+	Status      string
+	Reason      string
+	TargetEntry string
 }
 
 type ActionResult struct {
@@ -453,22 +460,23 @@ func parseRecentSettled(root map[string]json.RawMessage) []LastSettled {
 func parseLastSettledRow(row map[string]json.RawMessage) *LastSettled {
 	source := nestedMap(row, "source")
 	settled := LastSettled{
-		ID:             stringField(row, "id", "item_id"),
-		RunID:          stringField(row, "run_id", "runId"),
-		WorkItem:       stringField(row, "work_item", "work_item_slug", "workItem"),
-		ClaimID:        stringField(row, "claim_id", "claimId"),
-		Claim:          stringField(row, "claim", "claim_text", "claimText"),
-		SourceFile:     firstNonEmpty(stringField(row, "file"), stringField(source, "file")),
-		LineRange:      firstNonEmpty(stringField(row, "line_range", "lineRange"), stringField(source, "line_range", "lineRange")),
-		Falsifier:      stringField(row, "falsifier", "why_this_work_needs_it"),
-		Status:         stringField(row, "status", "state"),
-		VerdictLabel:   stringField(row, "verdict_label", "label", "outcome"),
-		VerdictSummary: stringField(row, "verdict_summary", "summary", "message", "evidence"),
-		Correction:     stringField(row, "correction"),
-		BlockedReason:  stringField(row, "blocked_reason", "blockedReason", "reason"),
-		SettledAt:      stringField(row, "settled_at", "completed_at", "updated_at", "finished_at"),
-		RunRef:         stringField(row, "run_ref"),
-		VerdictRef:     stringField(row, "verdict_ref"),
+		ID:                stringField(row, "id", "item_id"),
+		RunID:             stringField(row, "run_id", "runId"),
+		WorkItem:          stringField(row, "work_item", "work_item_slug", "workItem"),
+		ClaimID:           stringField(row, "claim_id", "claimId"),
+		Claim:             stringField(row, "claim", "claim_text", "claimText"),
+		SourceFile:        firstNonEmpty(stringField(row, "file"), stringField(source, "file")),
+		LineRange:         firstNonEmpty(stringField(row, "line_range", "lineRange"), stringField(source, "line_range", "lineRange")),
+		Falsifier:         stringField(row, "falsifier", "why_this_work_needs_it"),
+		Status:            stringField(row, "status", "state"),
+		VerdictLabel:      stringField(row, "verdict_label", "label", "outcome"),
+		VerdictSummary:    stringField(row, "verdict_summary", "summary", "message", "evidence"),
+		Correction:        stringField(row, "correction"),
+		BlockedReason:     stringField(row, "blocked_reason", "blockedReason", "reason"),
+		SettledAt:         stringField(row, "settled_at", "completed_at", "updated_at", "finished_at"),
+		RunRef:            stringField(row, "run_ref"),
+		VerdictRef:        stringField(row, "verdict_ref"),
+		CorrectionOutcome: parseCorrectionOutcome(row),
 	}
 	if raw, ok := first(row, "result"); ok {
 		var result map[string]json.RawMessage
@@ -492,6 +500,22 @@ func parseLastSettledRow(row map[string]json.RawMessage) *LastSettled {
 		return nil
 	}
 	return &settled
+}
+
+func parseCorrectionOutcome(row map[string]json.RawMessage) CorrectionOutcome {
+	raw, ok := first(row, "correction_outcome", "correctionOutcome")
+	if !ok {
+		return CorrectionOutcome{}
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return CorrectionOutcome{}
+	}
+	return CorrectionOutcome{
+		Status:      stringField(m, "status"),
+		Reason:      stringField(m, "reason"),
+		TargetEntry: stringField(m, "target_entry", "targetEntry"),
+	}
 }
 
 func fillLastSettledFromMap(settled *LastSettled, m map[string]json.RawMessage) {

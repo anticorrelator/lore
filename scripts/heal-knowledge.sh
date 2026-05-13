@@ -95,6 +95,19 @@ if [[ ! -d "$KNOWLEDGE_DIR/_meta" ]]; then
   fi
 fi
 
+# --- (c2b) Missing _meta/activity-vocab.yaml ---
+# Restore-if-absent only; present files (any content) are left untouched.
+if [[ ! -f "$KNOWLEDGE_DIR/_meta/activity-vocab.yaml" ]]; then
+  if [[ $FIX -eq 1 ]]; then
+    seed_meta_activity_vocab "$KNOWLEDGE_DIR"
+    echo "[heal] Seeded missing _meta/activity-vocab.yaml from canonical default"
+    ISSUES=$((ISSUES + 1))
+  else
+    echo "[heal] Missing _meta/activity-vocab.yaml — run with --fix to seed from canonical default"
+    ISSUES=$((ISSUES + 1))
+  fi
+fi
+
 # --- (d) Empty category directories (no .md entries) ---
 for dir in "$KNOWLEDGE_DIR"/*/; do
   [[ -d "$dir" ]] || continue

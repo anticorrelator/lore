@@ -30,8 +30,14 @@
 #       [--normalized-snippet-hash <sha256>]
 #       [--symbol-anchor <anchor>]
 #       [--severity-hint low|medium|high]
-#       [--status pending|accepted|declined|remediated]
+#       [--status pending|accepted|declined|remediated|verified|rejected]
+#         # Note: pending|accepted|declined|remediated are legacy values
+#         # (still parsed identically). verified|rejected are the canonical
+#         # terminal states set via consumption-contradiction-update-status.sh
+#         # after a correctness-gate verdict (see D3 in
+#         # restore-evolve-gates-add-recurring-failure-path-se).
 #       [--contradiction-id <ctr-id>]
+#       [--settled-by-run-id <id>]
 #       [--created-at <iso8601>]
 #       [--kdir <path>]
 #       [--json]
@@ -74,8 +80,9 @@ Usage: consumption-contradiction-append.sh \
            [--normalized-snippet-hash <sha256>] \
            [--symbol-anchor <anchor>] \
            [--severity-hint low|medium|high] \
-           [--status pending|accepted|declined|remediated] \
+           [--status pending|accepted|declined|remediated|verified|rejected] \
            [--contradiction-id <ctr-id>] \
+           [--settled-by-run-id <id>] \
            [--created-at <iso8601>] \
            [--kdir <path>] \
            [--json]
@@ -109,6 +116,7 @@ SYMBOL_ANCHOR=""
 SEVERITY_HINT=""
 STATUS=""
 CONTRADICTION_ID=""
+SETTLED_BY_RUN_ID=""
 CREATED_AT=""
 KDIR_OVERRIDE=""
 JSON_MODE=0
@@ -135,6 +143,7 @@ while [[ $# -gt 0 ]]; do
     --severity-hint)            SEVERITY_HINT="$2";            shift 2 ;;
     --status)                   STATUS="$2";                   shift 2 ;;
     --contradiction-id)         CONTRADICTION_ID="$2";         shift 2 ;;
+    --settled-by-run-id)        SETTLED_BY_RUN_ID="$2";        shift 2 ;;
     --created-at)               CREATED_AT="$2";               shift 2 ;;
     --kdir)                     KDIR_OVERRIDE="$2";            shift 2 ;;
     --json)                     JSON_MODE=1;                   shift ;;
@@ -193,9 +202,14 @@ if [[ -z "$STATUS" ]]; then
   STATUS="pending"
 fi
 case "$STATUS" in
+  # Legacy values — kept for back-compat parsing of older rows.
   pending|accepted|declined|remediated) : ;;
+  # Canonical terminal values set by consumption-contradiction-update-status.sh
+  # after a correctness-gate verdict (D3 of
+  # restore-evolve-gates-add-recurring-failure-path-se).
+  verified|rejected) : ;;
   *)
-    fail "--status must be 'pending', 'accepted', 'declined', or 'remediated' (got '$STATUS')"
+    fail "--status must be 'pending', 'accepted', 'declined', 'remediated', 'verified', or 'rejected' (got '$STATUS')"
     ;;
 esac
 
@@ -315,7 +329,7 @@ export CONTRADICTION_ID WORK_ITEM SOURCE_KIND PRODUCER_ROLE PROTOCOL_SLOT \
        CLAIM_TEXT CLAIM_FILE LINE_RANGE EXACT_SNIPPET FALSIFIER STATUS \
        CREATED_AT DEDUPE_KEY CAPTURED_AT_BRANCH CAPTURED_AT_SHA \
        CAPTURED_AT_MERGE_BASE_SHA TEMPLATE_VERSION SYMBOL_ANCHOR \
-       SEVERITY_HINT NORMALIZED_SNIPPET_HASH
+       SEVERITY_HINT NORMALIZED_SNIPPET_HASH SETTLED_BY_RUN_ID
 
 ROW=$(python3 <<'PY_EOF'
 import json, os
@@ -372,6 +386,13 @@ if sh:
 nsh = env("NORMALIZED_SNIPPET_HASH")
 if nsh:
     row["claim_payload"]["normalized_snippet_hash"] = nsh
+
+# settled_by_run_id: omit-when-empty (audit-pipeline omit-when-empty convention).
+# Populated when an upstream caller — e.g. correctness-gate-rollup.sh — wants to
+# anchor a row to the run that produced its terminal verdict at create time.
+sbri = env("SETTLED_BY_RUN_ID")
+if sbri:
+    row["settled_by_run_id"] = sbri
 
 print(json.dumps(row, ensure_ascii=False))
 PY_EOF

@@ -393,7 +393,30 @@ func formatLastSettled(last *LastSettled, width int, s styleSet) []string {
 	}
 	label := verdictLabel(last)
 	claim := firstNonEmpty(last.Claim, last.ClaimID, last.ID, "claim")
-	return []string{truncate("- "+label+"  "+claim, width)}
+	line := "- " + label + correctionOutcomeSuffix(last.CorrectionOutcome) + "  " + claim
+	return []string{truncate(line, width)}
+}
+
+func correctionOutcomeSuffix(outcome CorrectionOutcome) string {
+	status := strings.TrimSpace(outcome.Status)
+	if status == "" {
+		return ""
+	}
+	switch status {
+	case "applied":
+		return " → applied"
+	case "skipped":
+		if reason := strings.TrimSpace(outcome.Reason); reason != "" {
+			return " → skip:" + reason
+		}
+		return " → skip"
+	case "failed":
+		if reason := strings.TrimSpace(outcome.Reason); reason != "" {
+			return " → fail:" + reason
+		}
+		return " → fail"
+	}
+	return " → " + status
 }
 
 func verdictLabel(last *LastSettled) string {

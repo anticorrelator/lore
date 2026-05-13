@@ -400,6 +400,157 @@ EOF
 # guards (same shape as the README-anchored asserts in transcripts.bats).
 # ============================================================
 
+# ============================================================
+# Default-route exclusion: when no consultation has handler: agent, the
+# downstream observable of the Step 4.3 guard short-circuiting is that
+# advisor-impact-rollup.sh emits zero rows. The guard's wired filter line
+# at SKILL.md:561 reads "Verdict-fabrication guard (handler: agent only)";
+# we exercise the downstream rollup with the same default-route payload
+# (handler: lead + handler: skill, no handler: agent) and assert no
+# scorecard rows land.
+# ============================================================
+
+@test "default-route exclusion: rollup invoked on a no-agent-handler payload emits zero rows" {
+  # No advisor agents spawned in the transcript (default route): the
+  # transcript fixture is empty of TaskCreate advisor events.
+  write_transcript_fixture ""
+
+  CONS=$(mktemp)
+  cat > "$CONS" <<'EOF'
+[
+  {"handler":"lead","domain":"design","query_summary":"qL","advice_summary":"aL","was_followed":true},
+  {"handler":"skill","domain":"codex-plan-review","skill_template_version":"skll00000000","query_summary":"qS","advice_summary":"aS","was_followed":true}
+]
+EOF
+
+  # Drive the rollup directly with this payload — the rollup is the
+  # observable end of the Step 4.3 short-circuit. The rollup itself filters
+  # to handler: agent (advisor-impact-rollup.sh:240-241), so the script
+  # produces no rows.jsonl when no entry carries handler: agent.
+  bash "$ROLLUP_SH" \
+    --consultations-json "$(cat "$CONS")" \
+    --work-item "$WORK_SLUG" \
+    --kdir "$KDIR" >/dev/null
+  rm -f "$CONS"
+
+  # rows.jsonl must not exist — zero rows emitted is the observable of
+  # default-route exclusion.
+  if [ -f "$KDIR/_scorecards/rows.jsonl" ]; then
+    rows=$(wc -l < "$KDIR/_scorecards/rows.jsonl" | tr -d ' ')
+    [ "$rows" = "0" ]
+  fi
+}
+
+# ============================================================
+# Opt-in path preservation: mixed handler payload with at least one
+# handler: agent entry still produces rollup rows for that agent entry.
+# Mirrors branch (a) of the guard: verified agent entries flow through;
+# this case just adds non-agent siblings to confirm they don't disrupt
+# the agent's row emission.
+# ============================================================
+
+@test "opt-in preservation: handler:agent entry alongside lead/skill still emits rollup rows" {
+  ADVISOR_TV="aaaaaaaaaaaa"
+  ADVISOR_NAME="opt-in-advisor"
+
+  write_transcript_fixture "$ADVISOR_NAME"
+
+  CONS=$(mktemp)
+  cat > "$CONS" <<EOF
+[
+  {"handler":"lead","domain":"design","query_summary":"qL","advice_summary":"aL","was_followed":true},
+  {"handler":"skill","domain":"codex-plan-review","skill_template_version":"skll00000000","query_summary":"qS","advice_summary":"aS","was_followed":true},
+  {"handler":"agent","advisor_template_version":"$ADVISOR_TV","spawned_as_name":"$ADVISOR_NAME","query_summary":"qA","advice_summary":"aA","was_followed":true}
+]
+EOF
+
+  # Run the test-side guard mirror first — it filters by spawned_as_name
+  # for the existing branch (a) verification. We pass only the handler: agent
+  # entry through to the guard (lead/skill are pre-filtered before the
+  # guard per SKILL.md:563 "Pre-filter by handler").
+  AGENT_CONS=$(mktemp)
+  jq '[.[] | select(.handler == "agent")]' "$CONS" > "$AGENT_CONS"
+
+  result=$(fabrication_guard "$AGENT_CONS" "$TRANSCRIPT_FIXTURE" "claude-code" "$WORK_SLUG")
+  rm -f "$AGENT_CONS"
+
+  branch=$(echo "$result" | jq -r '.branch')
+  [ "$branch" = "a" ]
+
+  # Forward verified payload to the real rollup.
+  payload=$(echo "$result" | jq -c '.rollup_payload')
+  run_rollup "$payload" "$WORK_SLUG"
+
+  # The agent entry's advisor template got the canonical two rows
+  # (consultation_rate + advice_followed_rate).
+  rows=$(rollup_rows_for "$ADVISOR_TV")
+  [ "$rows" = "2" ]
+
+  rm -f "$CONS"
+}
+
+# ============================================================
+# D1/A3 — Step 4.0 lead consultation handler documentation conformance.
+# This is a doc-anchored regression guard for the new Step 4.0 surface
+# (the runtime path is judgment-heavy SKILL.md prose, not a standalone
+# script — same pattern as the existing "SKILL.md Step 4 §3 names the
+# three branches" assert below).
+# ============================================================
+
+@test "SKILL.md Step 4.0 documents the lead consultation handler flow (parse → route → reply → log)" {
+  # Step 4.0 heading exists.
+  grep -q '#### Step 4.0: Lead consultation handler' "$SKILL_FILE"
+
+  # The four documented sub-steps are present in prose.
+  grep -q "Parse the request body" "$SKILL_FILE"
+  grep -q "Route by domain" "$SKILL_FILE"
+  grep -q "SKILL_INVOCATION_MAP" "$SKILL_FILE"
+  grep -q "Reply via SendMessage" "$SKILL_FILE"
+  grep -q "Append a transcript record" "$SKILL_FILE"
+
+  # The reply shape names consultation-id, handler, lead-acknowledged, and
+  # the conditional skill_template_version field (per D6 / D6a).
+  grep -q "consultation-id: <verbatim from request>" "$SKILL_FILE"
+  grep -q "handler: <skill|lead>" "$SKILL_FILE"
+  grep -q "lead-acknowledged: true" "$SKILL_FILE"
+  grep -q "skill_template_version:" "$SKILL_FILE"
+
+  # Skill-tool inline invocation path is named: lookup, Skill tool, capture
+  # output, set handler="skill".
+  grep -q 'Invoke the named skill via the `Skill` tool' "$SKILL_FILE"
+  grep -q 'handler="skill"' "$SKILL_FILE"
+
+  # Opt-in route opt-out is explicit: Step 4.0 is skipped on the persistent
+  # advisor route (worker SendMessages the advisor, not the lead).
+  grep -q 'Skip this sub-step entirely on the opt-in route' "$SKILL_FILE"
+}
+
+# ============================================================
+# D4 — Required-consultation rejection (Step 4.1.d) documentation conformance.
+# The acceptance check is inline lead logic in SKILL.md prose; we anchor a
+# regression guard that the documented rejection mode survives subsequent
+# edits.
+# ============================================================
+
+@test "SKILL.md Step 4.1.d documents required-consultation rejection on missing acknowledged reply" {
+  # Step 4.1.d heading / rule prose.
+  grep -q "Required-consultation acknowledgement check" "$SKILL_FILE"
+
+  # The cross-check names the canonical CONSULTATION_TRANSCRIPT structure
+  # and the lead-acknowledged: true reply field per D6a.
+  grep -q 'CONSULTATION_TRANSCRIPT' "$SKILL_FILE"
+  grep -q 'lead-acknowledged: true' "$SKILL_FILE"
+
+  # Rejection branch: if a required domain has no matching entry OR the
+  # consultation_id does not match an acknowledged reply, the task is
+  # rejected.
+  grep -q 'the task is \*\*rejected\*\*' "$SKILL_FILE"
+
+  # The mechanism's teeth are documented as the new lead-side lever the
+  # previous pipeline lacked.
+  grep -q 'lead-side tracking adds' "$SKILL_FILE"
+}
+
 @test "SKILL.md Step 4 §3 names the three branches and the verify-or-skip default" {
   # Branch labels appear in prose.
   grep -q "Provider OK and every claimed advisor is verified" "$SKILL_FILE"

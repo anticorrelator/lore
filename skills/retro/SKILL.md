@@ -60,9 +60,21 @@ lore resolve
 
 Set `KNOWLEDGE_DIR` to result, `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
-1. Parse argument as work item slug (exact → substring title → substring slug → branch → recency → archive fallback)
-2. Load `plan.md`, `notes.md`, `_meta.json` from `$WORK_DIR/<slug>/` (or `_archive/<slug>/` if archived)
-3. No argument → infer from current git branch
+1. Resolve the argument to a canonical slug via `lore work resolve`:
+   ```bash
+   if RESULT=$(lore work resolve "$ARG" --branch "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"); then
+     SLUG=$(printf '%s' "$RESULT" | sed -n '1p')
+     ARCHIVED=$(printf '%s' "$RESULT" | sed -n '2p')
+   else
+     case $? in
+       1) ;;  # no match → fall through to step 3 (branch inference) or step 4 (ask user)
+       2) echo "Multiple work items match '$ARG' (candidates on stderr above)." >&2; exit 1 ;;
+     esac
+   fi
+   ```
+   `/retro` is read-only — surface `ARCHIVED=true` items silently with an `[archived]` tag; no confirmation prompt.
+2. Load `plan.md`, `notes.md`, `_meta.json` from `$WORK_DIR/<slug>/` (or `_archive/<slug>/` if `ARCHIVED=true`)
+3. No argument → invoke `lore work resolve` with the current git branch (passing the branch as `--branch`); when only branch inference is needed, pass the literal ref `recent` to fall back to most-recent active item.
 4. No match → ask user
 
 Report: `[retro] Evaluating: <title> (<slug>) [archived]`
@@ -151,6 +163,13 @@ Remedy heuristics by signal type:
 **Invariant.** This step never calls `scorecard-append`. The `retro_flag` sidecar rows are NOT settlement signal — they are qualitative drift indicators. Routing them through `rows.jsonl` would expose them to `/evolve` consumption and create a scoring incentive to suppress flags.
 
 ### 2b.7: Consumption-contradiction evidence
+
+**Invariant — canonical contradiction vocabulary.** The canonical lifecycle trio is `routed | verified | rejected` and future edits to this section MUST preserve it verbatim:
+
+- The lifecycle `status` field for a consumption-contradiction row is exactly the trio `routed | verified | rejected` — no other value is canonical.
+- The `dispatch_status` field is orthogonal and takes only the literal `routed`, set when `consumption-contradiction-append.sh` priority-dispatches to `lore audit`. `status: routed` (lifecycle, "awaiting verdict") and `dispatch_status: routed` (dispatch, "priority-audit was triggered") are independent — do not collapse them.
+- Drift = any row whose `status` is not in the `routed | verified | rejected` trio (e.g. legacy producer enums like `pending`, `accepted`, `declined`, `remediated` leaking into the consumer side); detect with `jq -r '.status' $KDIR/_work/*/consumption-contradictions.jsonl | sort -u` and assert the output is a subset of `{routed, verified, rejected}`.
+- Any value outside `routed | verified | rejected` silently silences the Step 3.0 `contradiction_verification_rate` gate (numerator counts only `verified`; denominator counts only `verified | rejected`) even when producer enums are correct, so prose changes that paraphrase the trio's spelling or order break the read-side invariant the gate depends on.
 
 New evidence class introduced by the consumer-contradiction-channel substrate. Consumer contradictions are **observational** signals — a reader (worker, spec-lead, implement-lead) prefetched a commons entry and observed it is false in the context of their current work. They are a distinct evidence class from the adjudicative three-judge pipeline.
 

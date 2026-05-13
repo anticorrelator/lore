@@ -47,8 +47,24 @@ Team-based divide-and-conquer: the spec-lead composes an investigation plan tabl
    ```
    If any call fails, fall through with an empty string. Registration into `$KDIR/_scorecards/template-registry.json` is handled by `scorecard-append.sh` on first use. Reports without a `Template-version:` field warn+pass rather than fail — the CC-01 backwards-compat gate enables incremental template migration without blocking legacy emitters.
 
-4. Try to resolve input as an existing work item (fuzzy match or branch inference, same algorithm as `/work`, including archive fallback):
-   - **If resolved item is tagged `[archived]`:** Warn the user and wait for explicit confirmation before continuing.
+4. Try to resolve input as an existing work item via `lore work resolve` (delegated to the canonical resolver — handles exact-slug fast path, fuzzy match, branch matching, and archive fallback):
+
+   ```bash
+   if RESULT=$(lore work resolve "$INPUT" --branch "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"); then
+     SLUG=$(printf '%s' "$RESULT" | sed -n '1p')
+     ARCHIVED=$(printf '%s' "$RESULT" | sed -n '2p')
+     # resolved → continue to the per-state branches below
+   else
+     case $? in
+       1) ;;  # no match → treat input as freeform description (see "If NOT resolved" below)
+       2) echo "Multiple work items match '$INPUT' (candidates on stderr above)." >&2
+          # disambiguate via AskUserQuestion against the resolver's candidate list, then re-invoke
+          exit 1 ;;
+     esac
+   fi
+   ```
+
+   - **If resolved item has `ARCHIVED=true`:** Warn the user and wait for explicit confirmation before continuing.
    - **If resolved** → load the work item:
     - Read `_meta.json.intent_anchor` when present. Treat it as the capability anchor from work-item intake — an interpreted one-sentence statement of the user-visible capability the work must deliver, audited for looseness at intake (alternatives, comparatives without targets, vague verbs) and tightened via user clarification before commit. The spec may refine implementation shape, but it must not silently narrow or remove the capability implied by this statement; any such change is a user-visible scope delta. Preserve the wording verbatim when restating it — downstream gates (Step 5.5 verifier, `/implement` anchor prompts) detect drift by string comparison, so a paraphrase here breaks the audit chain even when intent is preserved.
      - If `plan.md` exists with synthesis already complete (Design Decisions + Phases present), skip to Step 5.1 (Confirm understanding). If a `## Strategy` section exists, load it silently as shaping context.
@@ -184,19 +200,32 @@ If the user's description is already specific enough (clear scope, stated constr
     ```bash
     PRIOR_KNOWLEDGE=$(lore prefetch "<investigation topic>" --format prompt --limit 5 --scale-set=<bucket>)
     ```
-11. **External skill-applicability scan and advisor provisioning (strict — exclude lore protocol toolchain):**
+11. **External skill-applicability scan (strict — exclude lore protocol toolchain):** the scan identifies skills relevant to this work item but does NOT spawn advisor agents in the default flow. Per D1/D3, default-route consultations are handled inline by the spec-lead (and by `/implement`'s lead at implementation time); skill-backed domains are invoked directly via the `Skill` tool when a researcher SendMessages a question. Applicable external skills are recorded in (a) an in-memory `$SKILL_INVOCATION_MAP` the spec-lead consults inline if a researcher routes a question to that domain, and (b) the eventual `**Related skills:**` block in `plan.md` (added in Step 5's Discovery findings integration).
     a. Scan the skill list in your system prompt. **Filter out lore-managed skills** (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) before matching — they are the protocol toolchain, not advisors. Apply a strict match criterion: include only when the skill's domain plausibly contributes to *this* work item's implementation. Emit a skill discovery block (mandatory):
        ```
        **External skill discovery:**
        Considered: <comma-separated list of external skills checked, after lore-toolchain filter>
        Matched: <skill-name — rationale> (or "none")
        ```
-    b. If applicable external skills are found:
-       - For each skill, read its SKILL.md file.
-       - Spawn an advisor using `agents/advisor.md` with template injections: `{{team_name}}` → `spec-<slug>`, `{{advisor_domain}}` → skill name + scope, `{{domain_context}}` → SKILL.md content.
-       - Build `$ADVISORY_MIXIN` from `scripts/agent-protocols/advisory-consultation.md` with `{{advisors}}` resolved. All skill-backed advisors use `on-demand` mode.
-    c. If no applicable external skills: set `$ADVISORY_MIXIN` to empty.
-12. Spawn researcher agents — `min(investigation_count, 4)` in a single message via the orchestration adapter's `spawn` operation. Use the `researcher` agent template (resolve via `resolve_agent_template researcher`; on Claude Code that path is `~/.claude/agents/researcher.md`) with template injections: `{{team_name}}` → `spec-<slug>`, `{{team_lead}}` → lead name, `{{prior_knowledge}}` → `$PRIOR_KNOWLEDGE`, `{{template_version}}` → `$RESEARCHER_TEMPLATE_VERSION`. If `$ADVISORY_MIXIN` is non-empty, append it after the resolved researcher template content with a blank line separator. Per-spawn model selection routes through `resolve_model_for_role researcher` (or the explicit override set in Step 1.1 from `--model`); the adapter validates the role→model binding against the active framework's `model_routing.shape` and rejects mismatches without silent fallback.
+    b. For each matched skill, read its SKILL.md and record an entry in the `$SKILL_INVOCATION_MAP` keyed by the skill's domain (skill name + scope). The lead consults this map inline if a researcher's SendMessage routes to that domain — the lead invokes the skill via the `Skill` tool and replies to the researcher with its output.
+    c. **`$ADVISORY_MIXIN` is empty on the default route.** Researcher prompts do not receive `scripts/agent-protocols/advisory-consultation.md` in the default flow. The mixin file is an opt-in artifact consumed by `/implement` when a phase declares `**Advisors:** ... mode: persistent` in `plan.md` (authored in Step 5b and consumed downstream — `/spec` itself does not author or consume `mode: persistent` declarations during investigation).
+
+    <!-- Opt-in surface: not exposed by /spec today; /implement consumes mode: persistent declarations from plan.md instead.
+         The legacy advisor-spawn / mixin-build path is preserved below for any future spec-time opt-in surface but is gated on
+         a condition that is always false today (no /spec mechanism authors a persistent advisor declaration during
+         investigation; only phase-level plan.md does, and that is read by /implement after /spec completes). Keep the code
+         path readable as a reference; do NOT execute it on the default route. -->
+    ```bash
+    SPEC_PERSISTENT_ADVISORS_OPT_IN=false  # always false today; no /spec surface flips this
+    if [ "$SPEC_PERSISTENT_ADVISORS_OPT_IN" = "true" ]; then
+      # Legacy opt-in path (preserved for reference only — unreachable on default route):
+      #   - For each matched skill, spawn an advisor using `agents/advisor.md` with template injections:
+      #     {{team_name}} → spec-<slug>, {{advisor_domain}} → skill name + scope, {{domain_context}} → SKILL.md content.
+      #   - Build $ADVISORY_MIXIN from scripts/agent-protocols/advisory-consultation.md with {{advisors}} resolved.
+      :
+    fi
+    ```
+12. Spawn researcher agents — `min(investigation_count, 4)` in a single message via the orchestration adapter's `spawn` operation. Use the `researcher` agent template (resolve via `resolve_agent_template researcher`; on Claude Code that path is `~/.claude/agents/researcher.md`) with template injections: `{{team_name}}` → `spec-<slug>`, `{{team_lead}}` → lead name, `{{prior_knowledge}}` → `$PRIOR_KNOWLEDGE`, `{{template_version}}` → `$RESEARCHER_TEMPLATE_VERSION`. On the default route, `$ADVISORY_MIXIN` is empty (per Step 2b.11.c) and the mixin concatenation is a no-op — researcher prompts end at the resolved researcher template content. The concatenation step is therefore conditional: append `$ADVISORY_MIXIN` after the resolved researcher template content with a blank line separator **only if `$ADVISORY_MIXIN` is non-empty** (i.e. an opt-in path populated it; the default `/spec` flow never does). Per-spawn model selection routes through `resolve_model_for_role researcher` (or the explicit override set in Step 1.1 from `--model`); the adapter validates the role→model binding against the active framework's `model_routing.shape` and rejects mismatches without silent fallback.
 
 ---
 
@@ -219,7 +248,7 @@ As researcher messages arrive (or after direct file reading in short branch):
    - **Absence semantics:** if no assertions or lead-observed task claims exist, both `task-claims.jsonl` and `evidence.md` may be absent — absence means "no Tier-2 claims captured this session," not "work was fully verified."
 
 5. **Full branch only:** When all investigation tasks are complete:
-   - Send shutdown requests via the orchestration adapter's `shutdown` operation: `bash "$ADAPTER" shutdown <handle> true` for each researcher and advisor handle. On Claude Code this expands to `delegate:SendMessage handle=<id> type=shutdown_request approve=true` which the lead invokes as the native `SendMessage` tool. On harnesses where `team_messaging=none`, the adapter returns `unsupported` and the skill body relies on harness-native session cleanup (Codex subagent-stop, OpenCode plugin-runtime kill).
+   - Send shutdown requests via the orchestration adapter's `shutdown` operation: `bash "$ADAPTER" shutdown <handle> true` for each researcher handle, **plus each advisor handle if any were created on the opt-in path.** On the default route Step 2b.11 does not spawn advisor agents (`$SPEC_PERSISTENT_ADVISORS_OPT_IN=false`), so there are no advisor handles to shut down — skip the advisor-shutdown block silently. The shutdown call for researcher handles always runs. On Claude Code each shutdown expands to `delegate:SendMessage handle=<id> type=shutdown_request approve=true` which the lead invokes as the native `SendMessage` tool. On harnesses where `team_messaging=none`, the adapter returns `unsupported` and the skill body relies on harness-native session cleanup (Codex subagent-stop, OpenCode plugin-runtime kill).
    - Run `TeamDelete` to clean up the team (Claude Code only; opencode/codex's adapter does not require an explicit teardown — the runtime owns lifecycle).
 
 6. Append an investigation summary to `execution-log.md`:
@@ -740,8 +769,32 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
      BAD:  "— provides context for this phase" -->
 - [[knowledge:file#heading]] — why this is relevant to this phase
 **Advisors:**
-<!-- Optional — declare domain-expert advisors. /implement spawns these as persistent team members. -->
+<!-- Optional — declare domain-expert advisors. By default (no `mode: persistent` suffix), advisor declarations are
+     lead-handled inline on the default `/implement` route: the lead replies to worker consultations using its own
+     investigation/plan/code-read tools (and may invoke a skill via the `Skill` tool if the domain is skill-backed) and
+     does NOT spawn a separate advisor agent.
+
+     Append `mode: persistent` to opt into the agent route — `/implement` then spawns a persistent advisor agent for the
+     domain, concatenates `scripts/agent-protocols/advisory-consultation.md` onto worker prompts, and emits advisor
+     scorecard rows on shutdown. Reserve `mode: persistent` for cases where calibration-attribution or parallel-
+     consultation throughput earns the ceremony cost. -->
 - advisor-name — domain scope. [must-consult|on-demand]
+- advisor-name — domain scope. [must-consult|on-demand] mode: persistent  <!-- opt into agent route; omit suffix for default lead-handled -->
+**Consultations required:**
+<!-- Optional — phase-level declaration listing consultation domains a worker on this phase MUST request before
+     starting implementation. Replaces the structural meaning of today's `must-consult` mode on a phase-declared
+     advisor: the worker sends a `## Consultation` request (with `consultation-id`, `domain`, `reason`, `question`,
+     and task/phase context), ends its turn without implementation work, and resumes when the answering side
+     (lead by default, persistent advisor on the opt-in route) replies on the next turn boundary.
+
+     `/implement` lifts this block into `phase_context` (via `lore work phase-context <slug> <phase-number>`) and
+     tracks per-worker which required consultations are outstanding. A worker report `**Consultations:**` entry that
+     references a required domain without a matching acknowledged lead-side reply is rejected during worker-progress
+     collection (the gate's teeth replace the legacy `[must-consult]` structural gate).
+
+     Absence = no consultations required for this phase. -->
+- <domain-label>  <!-- e.g. auth-middleware, serialization, security-review -->
+- <domain-label>
 **Verification:**
 <!-- 0–3 observable-behavior criteria. Lives at phase level only — never duplicated into per-task descriptions.
      The phase worker(s) are implicitly held to these objectives; "Verify X" is never its own task.

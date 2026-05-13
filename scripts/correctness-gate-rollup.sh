@@ -12,6 +12,10 @@
 #       --producer-template-version <hash> \
 #       --window-start <ISO-8601> \
 #       --window-end <ISO-8601> \
+#       [--artifact-type <type>]    # when "consumption-contradiction", the
+#                                   # rollup flips the matching sidecar row's
+#                                   # status via consumption-contradiction-
+#                                   # update-status.sh (D3 verdict mapping).
 #       [--calibration-state calibrated|pre-calibration|unknown] \
 #       [--kdir <path>] \
 #       [--verdicts <jsonl-path>]   # default: read JSONL on stdin
@@ -47,6 +51,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 ARTIFACT_ID=""
+ARTIFACT_TYPE=""
 PRODUCER_TEMPLATE_ID=""
 PRODUCER_TEMPLATE_VERSION=""
 WINDOW_START=""
@@ -62,6 +67,7 @@ usage() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --artifact-id)                 ARTIFACT_ID="$2";                shift 2 ;;
+    --artifact-type)               ARTIFACT_TYPE="$2";              shift 2 ;;
     --producer-template-id)        PRODUCER_TEMPLATE_ID="$2";       shift 2 ;;
     --producer-template-version)   PRODUCER_TEMPLATE_VERSION="$2";  shift 2 ;;
     --window-start)                WINDOW_START="$2";               shift 2 ;;
@@ -222,4 +228,75 @@ emit_row "falsifier_quality"        "$FALSIFIER_QUALITY"  "$TOTAL"
 emit_row "audit_contradiction_rate" "$CONTRADICTION_RATE" "$TOTAL"
 
 echo "[rollup] Appended 3 rows: factual_precision=$FACTUAL_PRECISION falsifier_quality=$FALSIFIER_QUALITY audit_contradiction_rate=$CONTRADICTION_RATE (n=$TOTAL)"
+
+# --- Post-rollup contradiction-status flip (Phase 2 wiring) ---
+# When the rolled-up artifact is a consumption-contradiction, derive a
+# terminal verdict from the aggregated counts and call the sole-update-writer
+# to flip the sidecar row's status. See D3 in
+# restore-evolve-gates-add-recurring-failure-path-se for the mapping table:
+#
+#   gate verdict   | sidecar status
+#   ---------------+----------------
+#   verified       | verified
+#   contradicted   | rejected
+#   unverified     | (no change — rollup skips the call)
+#
+# Wiring at the rollup (not the agent itself) keeps the agent's three-valued-
+# logic contract untouched. The agent emits per-claim verdicts as before; the
+# rollup is the existing extension point for downstream work that runs after
+# the verdict is final.
+#
+# Verdict-derivation rule for the aggregated batch (single-claim artifacts
+# produce a one-row batch; multi-row batches are folded by precedence):
+#
+#   1. If any verdict is `contradicted` → terminal=contradicted → sidecar=rejected.
+#      Rationale: a single contradicted finding overturns the claim. The
+#      contradiction is rejected.
+#   2. Else if every verdict is `verified` (no unverified) → terminal=verified →
+#      sidecar=verified. Rationale: the gate confirmed the claim end-to-end.
+#   3. Else (some unverified, no contradicted) → terminal=unverified → no
+#      sidecar change. /evolve treats absent-status as pending review.
+if [[ "$ARTIFACT_TYPE" == "consumption-contradiction" ]]; then
+  if [[ -z "$ARTIFACT_ID" ]]; then
+    # Should be unreachable — --artifact-id is required upstream — but D3
+    # explicitly forbids inferred matching, so we fail loudly here rather
+    # than guess.
+    echo "[rollup] Error: --artifact-id is required to flip contradiction status (D3 forbids inferring contradiction-id by path or claim text)" >&2
+    exit 1
+  fi
+
+  VERIFIED_N=$(printf '%s' "$METRICS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["verified"])')
+  UNVERIFIED_N=$(printf '%s' "$METRICS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["unverified"])')
+  CONTRADICTED_N=$(printf '%s' "$METRICS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["contradicted"])')
+
+  TERMINAL_VERDICT=""
+  TARGET_STATUS=""
+  if [[ "$CONTRADICTED_N" -ge 1 ]]; then
+    TERMINAL_VERDICT="contradicted"
+    TARGET_STATUS="rejected"
+  elif [[ "$VERIFIED_N" -ge 1 && "$UNVERIFIED_N" -eq 0 ]]; then
+    TERMINAL_VERDICT="verified"
+    TARGET_STATUS="verified"
+  else
+    TERMINAL_VERDICT="unverified"
+    TARGET_STATUS=""  # no-op
+  fi
+
+  if [[ -n "$TARGET_STATUS" ]]; then
+    UPDATE_CMD=("$SCRIPT_DIR/consumption-contradiction-update-status.sh"
+                "--contradiction-id" "$ARTIFACT_ID"
+                "--status" "$TARGET_STATUS")
+    if [[ -n "$KDIR_OVERRIDE" ]]; then
+      UPDATE_CMD+=("--kdir" "$KDIR_OVERRIDE")
+    fi
+    "${UPDATE_CMD[@]}" || {
+      echo "[rollup] Error: consumption-contradiction-update-status.sh failed for contradiction_id=$ARTIFACT_ID target=$TARGET_STATUS" >&2
+      exit 1
+    }
+    echo "[rollup] Flipped contradiction $ARTIFACT_ID → $TARGET_STATUS (terminal-verdict=$TERMINAL_VERDICT)"
+  else
+    echo "[rollup] No contradiction-status flip for $ARTIFACT_ID — terminal-verdict=$TERMINAL_VERDICT (unchanged)"
+  fi
+fi
+
 printf '%s\n' "$METRICS"

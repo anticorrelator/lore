@@ -601,6 +601,28 @@ func TestSettlementRootNavigationIgnoredInTerminalMode(t *testing.T) {
 	}
 }
 
+func TestSettlementRootNavigationAllowedWhenTerminalNotFocused(t *testing.T) {
+	m := minimalModel(stateWork, []work.WorkItem{{Slug: "work-1", Title: "Work 1"}}, nil)
+	m.terminalMode = true
+	m.focusedPanel = panelLeft
+	m.setSpecPanel("work-1", work.NewSpecPanelModel("work-1"))
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	nm := next.(model)
+	if nm.state != stateSettlement {
+		t.Fatalf("state = %v, want stateSettlement", nm.state)
+	}
+	if nm.terminalMode {
+		t.Fatal("terminalMode should be disabled after leaving the work view")
+	}
+	if nm.focusedPanel != panelLeft {
+		t.Fatalf("focusedPanel = %v, want panelLeft", nm.focusedPanel)
+	}
+	if cmd == nil {
+		t.Fatal("expected settlement status reload command")
+	}
+}
+
 func TestSettlementEnableActionRefreshesInlineSettingsPanel(t *testing.T) {
 	setupFakeLoreData(t, `{
 		"version": 1,

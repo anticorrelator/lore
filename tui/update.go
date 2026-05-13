@@ -598,8 +598,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 		switch msg.String() {
 		case "t":
-			if (m.state == stateWork || m.state == stateFollowUps) && !m.terminalMode {
+			if (m.state == stateWork || m.state == stateFollowUps) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateSettlement
+				m.terminalMode = false
 				m.focusedPanel = panelLeft
 				m.ensureSettlementSettingsPanel()
 				return m, loadSettlementStatus()
