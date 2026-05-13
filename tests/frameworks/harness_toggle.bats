@@ -73,6 +73,31 @@ seed_lore_region() {
   printf '# header\n<!-- LORE:BEGIN -->\nsome content\n<!-- LORE:END -->\n# footer\n' > "$file"
 }
 
+# Assert that no symlinks pointing into $REPO_DIR remain in any framework's
+# skills dir. Used by the post-disable assertion in test (a) D5 — claude-code
+# and opencode now resolve to *different* skills dirs (~/.claude/skills vs.
+# ~/.agents/skills), so the previous "shared surface" assumption no longer
+# holds; we iterate every framework's skills dir and verify each is clean.
+# Returns 0 if clean, 1 otherwise (printing the offending links to stdout).
+assert_no_repo_symlinks_in_all_skills_dirs() {
+  while IFS= read -r fw; do
+    local skills_dir
+    skills_dir=$(install_path_for "$fw" skills)
+    [[ "$skills_dir" == "unsupported" || -z "$skills_dir" ]] && continue
+    [[ -d "$skills_dir" ]] || continue
+    local remaining
+    remaining=$(find "$skills_dir" -maxdepth 1 -type l | while read -r link; do
+      target=$(readlink "$link")
+      [[ "$target" == "$REPO_DIR"/* || "$target" == "$REPO_DIR" ]] && echo "$link"
+    done)
+    if [[ -n "$remaining" ]]; then
+      echo "[$fw] lore symlinks remain after disable in $skills_dir:"
+      echo "$remaining"
+      return 1
+    fi
+  done < <(list_frameworks)
+}
+
 setup() {
   [ -f "$CAPS" ]       || skip "adapters/capabilities.json missing"
   [ -f "$DISABLE_SH" ] || skip "scripts/harness-toggle/disable.sh missing"
