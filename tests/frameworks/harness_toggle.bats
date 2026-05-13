@@ -190,28 +190,15 @@ print(d['harnesses'][os.environ['FW']]['enabled'])
   done < <(list_frameworks)
 }
 
-@test "(a) D5 shared surface: claude-code and opencode share skills dir; disable clears it once" {
-  # claude-code and opencode both resolve to $HOME/.claude/skills.
+@test "(a) D5 shared surface: claude-code and opencode skills dirs may diverge; disable still clears both" {
   local cc_skills oc_skills
   cc_skills=$(install_path_for claude-code skills)
   oc_skills=$(install_path_for opencode skills)
-  # These should be equal per capabilities.json (the D5 shared-target case).
-  [ "$cc_skills" = "$oc_skills" ] || skip "claude-code and opencode skills dirs differ — D5 assumption changed"
 
   run bash "$DISABLE_SH"
   [ "$status" -eq 0 ]
 
-  # Shared surface must be clean after disable.
-  local remaining
-  remaining=$(find "$cc_skills" -maxdepth 1 -type l 2>/dev/null | while read -r link; do
-    target=$(readlink "$link")
-    [[ "$target" == "$REPO_DIR"/* || "$target" == "$REPO_DIR" ]] && echo "$link"
-  done || true)
-  if [[ -n "$remaining" ]]; then
-    echo "D5 shared surface still has lore symlinks after disable:"
-    echo "$remaining"
-    return 1
-  fi
+  assert_no_repo_symlinks_in_all_skills_dirs
 }
 
 @test "(a) disable preserves non-lore files in agents dirs" {
@@ -391,7 +378,7 @@ print(d['harnesses'][os.environ['FW']]['enabled'])
 # ============================================================
 
 @test "(d) disable: one framework skills dir read-only; agent.json still written enabled=false" {
-  # Find codex's skills dir (distinct from claude-code/opencode shared dir).
+  # Find codex's skills dir (distinct from the claude-code/opencode dirs).
   local codex_skills
   codex_skills=$(install_path_for codex skills)
   if [[ "$codex_skills" == "unsupported" || -z "$codex_skills" ]]; then

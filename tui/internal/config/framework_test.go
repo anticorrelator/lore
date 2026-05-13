@@ -162,6 +162,36 @@ func TestResolveHarnessInstallPath_Unsupported(t *testing.T) {
 	}
 }
 
+func TestResolveHarnessInstallPath_OpenCode(t *testing.T) {
+	setupFakeLoreData(t, "opencode", nil)
+	t.Setenv("LORE_FRAMEWORK", "opencode")
+	home, _ := os.UserHomeDir()
+
+	cases := []struct {
+		kind string
+		want string
+	}{
+		{"instructions", filepath.Join(home, ".config", "opencode", "AGENTS.md")},
+		{"skills", filepath.Join(home, ".agents", "skills")},
+		{"agents", filepath.Join(home, ".claude", "agents")},
+		{"settings", filepath.Join(home, ".config", "opencode", "config.json")},
+		{"mcp_servers", filepath.Join(home, ".config", "opencode", "opencode.json")},
+	}
+	for _, c := range cases {
+		path, supported, err := ResolveHarnessInstallPath(c.kind)
+		if err != nil {
+			t.Errorf("kind=%s: unexpected error: %v", c.kind, err)
+			continue
+		}
+		if !supported {
+			t.Errorf("kind=%s: supported=false, want true", c.kind)
+		}
+		if path != c.want {
+			t.Errorf("kind=%s: path=%q, want %q", c.kind, path, c.want)
+		}
+	}
+}
+
 func TestResolveHarnessInstallPath_Codex(t *testing.T) {
 	setupFakeLoreData(t, "codex", nil)
 	t.Setenv("LORE_FRAMEWORK", "codex")

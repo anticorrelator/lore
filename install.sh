@@ -901,8 +901,8 @@ esac
 
 # --- 6. Assemble per-harness instruction file ---
 # assemble-instructions.sh dispatches to the right target per
-# resolve_harness_install_path: claude-code/opencode → ~/.claude/CLAUDE.md
-# (opencode reads it natively); codex → ~/.codex/AGENTS.md.
+# resolve_harness_install_path: claude-code → ~/.claude/CLAUDE.md;
+# opencode → ~/.config/opencode/AGENTS.md; codex → ~/.codex/AGENTS.md.
 INSTRUCTIONS_TARGET=$(resolve_install_path instructions)
 if [ "$INSTRUCTIONS_TARGET" = "unsupported" ]; then
   info "Skipping instruction-file assembly — framework=$FRAMEWORK has no instructions install path"

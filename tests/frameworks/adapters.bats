@@ -443,11 +443,11 @@ cap_support() {
   [[ "$output" =~ "framework=claude-code" ]]
   [[ "$output" =~ ".claude/CLAUDE.md" ]]
 
-  # opencode -> $HOME/.claude/CLAUDE.md (OpenCode reads CLAUDE.md natively)
+  # opencode -> $HOME/.config/opencode/AGENTS.md
   run bash "$ASSEMBLE_INSTR" --framework opencode --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" =~ "framework=opencode" ]]
-  [[ "$output" =~ ".claude/CLAUDE.md" ]]
+  [[ "$output" =~ ".config/opencode/AGENTS.md" ]]
 
   # codex -> $HOME/.codex/AGENTS.md
   run bash "$ASSEMBLE_INSTR" --framework codex --dry-run

@@ -283,8 +283,8 @@
         "notes": "Per-spawn provider/model selection; the role->model map honors per-role bindings (e.g., Opus for lead, Haiku for worker fanout)."
       },
       "install_paths": {
-        "instructions":     "$HOME/.claude/CLAUDE.md",
-        "skills":           "$HOME/.claude/skills",
+        "instructions":     "$HOME/.config/opencode/AGENTS.md",
+        "skills":           "$HOME/.agents/skills",
         "agents":           "$HOME/.claude/agents",
         "settings":         "$HOME/.config/opencode/config.json",
         "teams":            "unsupported",
@@ -299,12 +299,12 @@
         "instructions": {
           "support": "full",
           "evidence": "opencode-instructions",
-          "notes": "OpenCode reads ~/.claude/CLAUDE.md natively; the existing assembled file works without adaptation. AGENTS.md is also accepted for OpenCode-native projects."
+          "notes": "OpenCode reads ~/.config/opencode/AGENTS.md natively as its global instruction file. Claude-compatible ~/.claude/CLAUDE.md remains a fallback migration path, but lore installs to the OpenCode-native location."
         },
         "skills": {
           "support": "full",
           "evidence": "opencode-skills",
-          "notes": "OpenCode discovers SKILL.md from .opencode/skills, ~/.config/opencode/skills, .claude/skills, ~/.claude/skills, .agents/skills, ~/.agents/skills. Existing ~/.claude/skills symlinks are picked up as-is."
+          "notes": "OpenCode discovers SKILL.md from .opencode/skills, ~/.config/opencode/skills, .claude/skills, ~/.claude/skills, .agents/skills, ~/.agents/skills. lore installs to ~/.agents/skills, which OpenCode discovers natively without Claude-compat fallback."
         },
         "mcp": {
           "support": "partial",
