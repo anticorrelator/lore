@@ -2,14 +2,9 @@
 # assemble-instructions.sh — Framework-aware wrapper around assemble-claude-md.sh
 #
 # Dispatches instruction-file assembly to the right per-harness target based
-# on --framework <name>. Today every supported framework's instruction target
-# is the Claude-style ~/.claude/CLAUDE.md (Claude Code's canonical path,
-# which OpenCode also reads natively per [[knowledge:architecture/
-# infrastructure/opencode-reads-claude-skills-and-claude-md-natively-as-fallb]]).
-# Codex's AGENTS.md target lands in T18 (which owns per-harness packaging
-# targets); until then this wrapper reports a degraded-target notice for
-# codex on --dry-run and delegates to the existing CLAUDE.md path on a
-# real run.
+# on --framework <name>. claude-code resolves to ~/.claude/CLAUDE.md,
+# opencode resolves to ~/.config/opencode/AGENTS.md, and codex resolves to
+# ~/.codex/AGENTS.md.
 #
 # Resolution order for --framework value:
 #   1. Explicit --framework <name> CLI flag.
@@ -87,9 +82,9 @@ fi
 
 # 2. Resolve the target instruction-file path via the framework's
 #    install_paths.instructions cell (T18 wired this from the legacy
-#    case statement to resolve_harness_install_path). claude-code and
-#    opencode both resolve to ~/.claude/CLAUDE.md (OpenCode reads it
-#    natively); codex resolves to ~/.codex/AGENTS.md. Frameworks whose
+#    case statement to resolve_harness_install_path). claude-code resolves
+#    to ~/.claude/CLAUDE.md; opencode and codex resolve to AGENTS.md under
+#    their native global config dirs. Frameworks whose
 #    install_paths.instructions is "unsupported" (or unwired) report
 #    degraded and exit without writing.
 TARGET=""

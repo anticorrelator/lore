@@ -208,14 +208,14 @@ PYEOF
   [[ "$output" =~ "Framework: opencode" ]]
 }
 
-@test "opencode dry-run skills target matches capabilities.json install_paths.skills" {
+@test "opencode dry-run skills target is ~/.agents/skills" {
   run bash "$INSTALL_SH" --dry-run --framework opencode
   [ "$status" -eq 0 ]
   expected_skills=$(install_path_for opencode skills)
   [[ "$output" =~ "$expected_skills" ]]
 }
 
-@test "opencode dry-run instructions target matches capabilities.json install_paths.instructions" {
+@test "opencode dry-run instructions target is ~/.config/opencode/AGENTS.md" {
   run bash "$INSTALL_SH" --dry-run --framework opencode
   [ "$status" -eq 0 ]
   expected_instr=$(install_path_for opencode instructions)

@@ -34,10 +34,10 @@ Selection persists to `$LORE_DATA_DIR/config/framework.json`. Re-running `instal
 | Harness     | Binary    | Instructions file        | Skills dir            | Settings/permissions               | MCP servers                         |
 |-------------|-----------|--------------------------|-----------------------|-------------------------------------|--------------------------------------|
 | claude-code | `claude`  | `~/.claude/CLAUDE.md`    | `~/.claude/skills`    | `~/.claude/settings.json`           | `~/.claude/settings.json`            |
-| opencode    | `opencode`| `~/.claude/CLAUDE.md`    | `~/.claude/skills`    | `~/.config/opencode/config.json`    | `~/.config/opencode/opencode.json`   |
+| opencode    | `opencode`| `~/.config/opencode/AGENTS.md` | `~/.agents/skills`    | `~/.config/opencode/config.json`    | `~/.config/opencode/opencode.json`   |
 | codex       | `codex`   | `~/.codex/AGENTS.md`     | `~/.codex/skills`     | `~/.codex/config.toml`              | `~/.codex/config.toml`               |
 
-OpenCode reads `~/.claude/CLAUDE.md` and `~/.claude/skills/` natively, so the assembled Claude file works for OpenCode without re-rendering. Codex reads AGENTS.md-style instructions from `~/.codex/AGENTS.md`; `assemble-instructions.sh --framework codex` emits AGENTS.md instead of CLAUDE.md.
+OpenCode reads `~/.config/opencode/AGENTS.md` as its native global instruction file and discovers `~/.agents/skills/` natively. Claude-compatible fallback paths remain supported for migration, but lore now installs to OpenCode-native global locations. Codex reads AGENTS.md-style instructions from `~/.codex/AGENTS.md`; `assemble-instructions.sh --framework codex` emits AGENTS.md instead of CLAUDE.md.
 
 ## Support levels & degradation vocabulary
 

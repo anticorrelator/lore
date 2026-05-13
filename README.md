@@ -97,7 +97,7 @@ The installer:
 4. Builds and installs the TUI (`lore-tui`) if Go is available.
 5. Symlinks skills/agents into the active harness's install path (resolved via `adapters/capabilities.json::frameworks.<id>.install_paths`).
 6. Installs the harness's hook adapter (`adapters/hooks/<id>.sh` or `adapters/<id>/lore-hooks.ts`).
-7. Assembles the harness's instruction file (`CLAUDE.md` for claude-code/opencode, `AGENTS.md` for codex) from `claude-md/` fragments.
+7. Assembles the harness's instruction file (`CLAUDE.md` for claude-code, `AGENTS.md` for opencode/codex) from `claude-md/` fragments.
 
 If `~/.local/bin` is not on your PATH, the installer will print instructions to add it.
 
@@ -108,10 +108,10 @@ Each harness's destination directories come from [`adapters/capabilities.json`](
 | Harness     | Instructions file        | Skills dir            | Settings/permissions               |
 |-------------|--------------------------|-----------------------|-------------------------------------|
 | claude-code | `~/.claude/CLAUDE.md`    | `~/.claude/skills`    | `~/.claude/settings.json`           |
-| opencode    | `~/.claude/CLAUDE.md`    | `~/.claude/skills`    | `~/.config/opencode/config.json`    |
+| opencode    | `~/.config/opencode/AGENTS.md` | `~/.agents/skills`    | `~/.config/opencode/config.json`    |
 | codex       | `~/.codex/AGENTS.md`     | `~/.codex/skills`     | `~/.codex/config.toml`              |
 
-OpenCode reads `~/.claude/CLAUDE.md` and `~/.claude/skills/` natively, so the assembled Claude file works for OpenCode without re-rendering. See [`docs/framework-compatibility.md`](docs/framework-compatibility.md) for full per-harness capability and degradation tables.
+OpenCode still supports Claude-compatible fallback paths, but lore installs to OpenCode's native global instruction file and one of its documented native skill discovery paths. See [`docs/framework-compatibility.md`](docs/framework-compatibility.md) for full per-harness capability and degradation tables.
 
 ### Dry run
 
