@@ -170,8 +170,19 @@ if [[ -z "$audit_kdir" ]]; then
   audit_kdir=$(resolve_knowledge_dir 2>/dev/null || echo "")
 fi
 task_claims_path=""
-if [[ -n "$audit_kdir" && -d "$audit_kdir/_work/$work_item" ]]; then
-  work_dir="$audit_kdir/_work/$work_item"
+work_dir=""
+if [[ -n "$audit_kdir" ]]; then
+  if [[ -d "$audit_kdir/_work/$work_item" ]]; then
+    work_dir="$audit_kdir/_work/$work_item"
+  elif [[ -d "$audit_kdir/_work/_archive/$work_item" ]]; then
+    # Claim was enqueued before the work item was archived. The archive preserves
+    # task-claims.jsonl + supporting artifacts, so audit against the archived copy
+    # rather than emitting a spurious skip/error.
+    work_dir="$audit_kdir/_work/_archive/$work_item"
+    echo "[settlement-executor] Resolving work_item=$work_item from _archive (active dir absent)" >&2
+  fi
+fi
+if [[ -n "$work_dir" ]]; then
   if [[ -f "$work_dir/task-claims.jsonl" ]]; then
     task_claims_path="$work_dir/task-claims.jsonl"
   fi

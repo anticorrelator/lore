@@ -575,29 +575,46 @@ class Settlement:
             return ""
         if verdict.get("verdict_format") == "envelope" and verdict.get("verdict") == "error":
             return "previous_audit_error"
+        # Skips emitted because the executor couldn't find the work-item artifact
+        # (typical cause: the work item was archived between enqueue and process)
+        # are infrastructure failures, not real "nothing-to-audit" outcomes. The
+        # executor now falls back to _archive/, so a retry should succeed.
+        if (
+            verdict.get("verdict_format") == "envelope"
+            and verdict.get("verdict") == "skipped"
+            and str(verdict.get("evidence") or "").startswith("no auditable artifact")
+        ):
+            return "previous_artifact_unresolved"
         return ""
 
     def find_task_claim_row(self, work_item: str, claim_id: str) -> dict[str, Any] | None:
-        path = self.kdir / "_work" / work_item / "task-claims.jsonl"
-        if not path.exists():
-            return None
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return None
-        for line_no, line in enumerate(lines, 1):
-            if not line.strip():
+        # Try the active work directory first, then fall back to the archive.
+        # An archived work item retains task-claims.jsonl under _archive/<slug>/,
+        # so retries for queue items orphaned by archival can still resolve their row.
+        candidates = [
+            (self.kdir / "_work" / work_item / "task-claims.jsonl", f"_work/{work_item}/task-claims.jsonl"),
+            (self.kdir / "_work" / "_archive" / work_item / "task-claims.jsonl", f"_work/_archive/{work_item}/task-claims.jsonl"),
+        ]
+        for path, rel_path in candidates:
+            if not path.exists():
                 continue
             try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
                 continue
-            if not isinstance(row, dict):
-                continue
-            if str(row.get("claim_id") or "") == claim_id:
-                row = dict(row)
-                row.setdefault("evidence_ref", {"path": f"_work/{work_item}/task-claims.jsonl", "line": line_no})
-                return row
+            for line_no, line in enumerate(lines, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("claim_id") or "") == claim_id:
+                    row = dict(row)
+                    row.setdefault("evidence_ref", {"path": rel_path, "line": line_no})
+                    return row
         return None
 
     def retry_error_audits(self, work_item: str | None = None, claim_ids: list[str] | None = None, dry_run: bool = False) -> dict[str, Any]:

@@ -423,6 +423,37 @@ assert_json_eq "retry enqueued timeout replacement" "$TIMEOUT_RETRY" '.enqueued'
 assert_json_eq "retry timeout item records timeout reason" "$TIMEOUT_STATUS" '.items[0].retry_reason' "previous_executor_timeout"
 
 echo ""
+echo "Test 12c: retry-errors requeues 'no auditable artifact' skips and resolves task-claim row from _archive/"
+KDIR8D="$TEST_DIR/kdir8d"
+SETTINGS8D="$TEST_DIR/settings8d.json"
+SKIP_EXEC="$TEST_DIR/skip-envelope-exec.sh"
+setup_kdir "$KDIR8D" "wi"
+write_settings "$SETTINGS8D" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"batch_size":4,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+printf '%s\n' "$(row_json "claim-archived-skip")" >> "$KDIR8D/_work/wi/task-claims.jsonl"
+# Mock executor emits the same skip envelope the real executor produces when it
+# can't see the work-item artifact. Tests that the new retryable_infrastructure_failure_reason
+# branch recognizes this as infrastructure-induced.
+cat > "$SKIP_EXEC" <<'EXEC'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"verdict_envelope_version":1,"verdict":"skipped","evidence":"no auditable artifact for work_item=wi","correction":null}'
+EXEC
+chmod +x "$SKIP_EXEC"
+SKIP_RUN=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS8D" LORE_SETTLEMENT_EXECUTOR="$SKIP_EXEC" bash "$QUEUE" process --kdir "$KDIR8D" --once --json)
+# Archive the work item between process and retry to simulate the production scenario:
+# the executor produced a skip because the active dir went missing mid-flight.
+mkdir -p "$KDIR8D/_work/_archive"
+mv "$KDIR8D/_work/wi" "$KDIR8D/_work/_archive/wi"
+SKIP_RETRY=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS8D" bash "$QUEUE" retry-errors --kdir "$KDIR8D" --json)
+SKIP_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS8D" bash "$QUEUE" status --kdir "$KDIR8D" --json)
+assert_json_eq "skip envelope was originally terminal" "$SKIP_RUN" '.run.verdict.verdict' "skipped"
+assert_json_eq "skip envelope marks run completed" "$SKIP_RUN" '.run.status' "completed"
+assert_json_eq "retry invalidated one skip run" "$SKIP_RETRY" '.invalidated' "1"
+assert_json_eq "retry enqueued one replacement after archival" "$SKIP_RETRY" '.enqueued' "1"
+assert_json_eq "retry skip item carries retry selection reason" "$SKIP_STATUS" '.items[0].selection_reason' "retry_infrastructure_failure"
+assert_json_eq "retry skip item records artifact-unresolved reason" "$SKIP_STATUS" '.items[0].retry_reason' "previous_artifact_unresolved"
+
+echo ""
 echo "Test 13: recompute scores only batch_size rows and exposes bounds"
 KDIR9="$TEST_DIR/kdir9"
 SETTINGS9="$TEST_DIR/settings9.json"
