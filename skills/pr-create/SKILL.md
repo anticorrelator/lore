@@ -19,6 +19,13 @@ Override precedence:
 
 **Detection:** for each local and remote branch ≠ current, compute the merge-base with HEAD; pick the branch whose merge-base is the newest commit — that is where HEAD was forked from.
 
+**Pre-commit-base case (load-bearing).** When the current branch has no commits ahead of its natural base (work is staged or only in the working tree), `merge-base(HEAD, base) == HEAD`. The earlier version of this algorithm skipped *all* refs satisfying that condition — but that lumped together two distinct cases:
+
+- **Sibling at HEAD's exact commit** (e.g. `origin/version-sandboxes` when the user has branched off it but hasn't committed yet) — `ref_sha == HEAD`. This IS the natural base; the user is about to commit. Should be kept.
+- **Strict descendant of HEAD** (ref is ahead of HEAD) — `mb == HEAD` but `ref_sha != HEAD`. PRing into a descendant is invalid. Should be skipped.
+
+The fix is to narrow the skip rule from "mb == HEAD" to "mb == HEAD AND ref_sha != HEAD". A sibling-at-HEAD ref then competes in the normal time comparison — and wins naturally, because its merge-base time equals HEAD's commit time (newer than any older fork point).
+
 ```bash
 CURRENT=$(git branch --show-current)
 CURRENT_TIP=$(git rev-parse HEAD)
@@ -27,8 +34,16 @@ BEST_TIME=0
 
 while IFS= read -r ref; do
   [[ "$ref" == "$CURRENT" || "$ref" == */HEAD ]] && continue
+  ref_sha=$(git rev-parse "$ref" 2>/dev/null) || continue
   mb=$(git merge-base HEAD "$ref" 2>/dev/null) || continue
-  [[ -z "$mb" || "$mb" == "$CURRENT_TIP" ]] && continue
+  [[ -z "$mb" ]] && continue
+  # Skip strict descendants of HEAD only (ref is ahead of us — can't PR into it).
+  # Sibling refs at HEAD's exact commit (mb == HEAD AND ref_sha == HEAD)
+  # are KEPT — they are the natural base when the working tree has
+  # uncommitted changes that haven't moved HEAD past the fork point yet.
+  if [[ "$mb" == "$CURRENT_TIP" && "$ref_sha" != "$CURRENT_TIP" ]]; then
+    continue
+  fi
   t=$(git show -s --format=%ct "$mb" 2>/dev/null) || continue
   if (( t > BEST_TIME )); then
     BEST_TIME=$t
@@ -39,13 +54,21 @@ done < <(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes)
 # Normalize remote-tracking refs: origin/foo → foo (what gh --base expects)
 BASE="${BEST_REF#origin/}"
 MB=$(git merge-base HEAD "$BEST_REF" 2>/dev/null)
-echo "detected: $BASE"
-echo "fork point: $(git log -1 --format='%h %s' "$MB" 2>/dev/null)"
+echo "detected: ${BASE:-<none>}"
+if [[ -n "$BEST_REF" ]]; then
+  if [[ "$(git rev-parse "$BEST_REF" 2>/dev/null)" == "$CURRENT_TIP" ]]; then
+    echo "fork point: $(git log -1 --format='%h %s' "$MB" 2>/dev/null) — at HEAD; no commits on branch yet"
+  else
+    echo "fork point: $(git log -1 --format='%h %s' "$MB" 2>/dev/null)"
+  fi
+fi
 ```
 
 **Confirm with the user** before proceeding — show the detected base and fork-point commit, and ask whether to use it or supply a different branch. Do not fall back silently.
 
-If detection yields nothing (e.g., first commit, no other branches), ask the user directly for the base branch.
+**Why the same-tip case matters.** A common workflow is: branch off `version-sandboxes` (or any non-main parent), make the working-tree changes, run `/pr-create` before committing. Pre-fix, detection skipped `origin/version-sandboxes` (sibling at HEAD) and silently picked `main` (the next-older fork point) — the operator had to catch the mistake by recognizing the base in the confirmation prompt. Post-fix, the sibling ref wins on merge-base time (HEAD's commit time > main's fork-point time) and the correct base is proposed.
+
+If detection yields no candidate, ask the user directly for the base branch.
 
 Substitute the confirmed branch as `<base>` in all subsequent git/`gh` commands.
 
