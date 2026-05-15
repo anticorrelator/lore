@@ -275,6 +275,25 @@ The gate fires when **all four** conditions hold:
 
 3. **Apply the edits directly** using the lead's `Read` / `Edit` / `Write` / `Bash` tools, honoring the phase's `**Verification:**` objectives implicitly. The task description still loads via `lore work load-tasks <slug>` — read it the same way a worker would, then execute the prescriptive instructions yourself.
 
+   **Reviewer-facing comment discipline applies to the lead too.** Any
+   comment or docstring you write into committed source is read by
+   maintainers with no protocol context. Before saving:
+   - No `D1`/`D2`/`D3`/`D6` decision IDs, no `P1`/`P2` phase references, no
+     `[[knowledge:...]]` / `[[work:...]]` backlinks, no "per D3" / "see the
+     spec" / "see the plan" cross-refs.
+   - No protocol-speak as load-bearing vocabulary in comments: "harness",
+     "invariant" (in the "promise/contract" sense), "structural", "by-design",
+     "asymmetric-by-design", "load-bearing", "consumer downstream" — rewrite
+     from the maintainer's POV if a comment needs them to parse.
+   - No multi-paragraph architectural essays inline. Reasoning longer than
+     2-3 lines belongs in `plan.md`, the commit message, or the PR
+     description — never in inline source.
+   - Audit before commit: `grep -nE 'D[0-9]+|per P[0-9]|class invariant|load-bearing|by-design|consumer downstream' <touched-files>`.
+
+   See preference `never-leave-lore-internal-scaffolding-markers-in-c.md` for the
+   full rationale; this rule is the source-code analog of the existing
+   "PR descriptions must be reviewer-facing" preference.
+
 4. **Emit Tier 2 evidence** for any falsifiable claims the edits depend on. Use `LEAD_TEMPLATE_VERSION` — the lead is the producer in this route:
    ```bash
    echo '<tier2-row-json>' \

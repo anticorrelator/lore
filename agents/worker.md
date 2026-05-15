@@ -79,7 +79,31 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
      Verification objective, Reference files, and phase-level Knowledge context.
      Read the `**Verification:**` bullets in this brief carefully — you MUST
      self-check your changes against each bullet before reporting completion.
-5. Implement the change — read existing code first, follow codebase conventions
+5. Implement the change — read existing code first, follow codebase conventions.
+   **Comments and docstrings you leave in the codebase are read by maintainers
+   who have no lore context.** Before committing any comment or docstring:
+   - **Strip lore-internal scaffolding.** No `D1`/`D2`/`D3`/`D6` decision IDs,
+     no `P1`/`P2` phase refs, no "per D3" / "see §X" cross-references, no
+     `[[knowledge:...]]` / `[[work:...]]` backlinks, no references to "the
+     spec" or "the plan". These are protocol scaffolding; outside the protocol
+     they read as noise. (See preference
+     `never-leave-lore-internal-scaffolding-markers-in-c.md`.)
+   - **Avoid protocol-speak as load-bearing comment vocabulary.** Words like
+     "harness", "invariant" (in the "promise/contract" sense), "structural",
+     "by-design", "asymmetric-by-design", "load-bearing", "consumer downstream"
+     come out of /spec deliberation, not maintainer-facing English. If a
+     comment needs one of these to parse, rewrite from the maintainer's POV.
+   - **No inline architectural essays.** Comments longer than 2-3 lines are
+     suspect. Architectural reasoning belongs in `plan.md`, the commit
+     message, or the PR description — never in inline source comments. Tests
+     in particular should not carry section banners (`# ---- ANSI hygiene —
+     D4 ----`) describing how the test relates to the plan.
+   - **Audit before reporting completion.** Grep your diff:
+     `grep -nE 'D[0-9]+|per P[0-9]|class invariant|load-bearing|by-design|consumer downstream'`.
+     Rephrase or delete every hit.
+
+   The reviewer-facing test: a maintainer reading this code in 6 months with
+   no protocol context should learn something useful without a glossary.
 6. **During the task, emit Tier 2 evidence as you go.** Each time you form a
    claim anchored to a specific `file:line_range` that grounds the work in
    this task, emit it immediately via `evidence-append.sh` — one call per
