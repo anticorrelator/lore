@@ -40,7 +40,7 @@ When `/remember` is invoked by another skill (e.g., `/implement` or `/spec` post
 When `_pending_captures/` directory exists in the knowledge store at session start (triggered by `[capture] N pending candidates — process via /remember first-turn`):
 
 1. Glob `_pending_captures/*.md` — each file contains one candidate segment extracted by the stop hook's novelty detection
-2. For each file, read it and evaluate the candidate against the capture gate (reusable, non-obvious, stable, high-confidence) and assess synthesis level for tier placement. **Trigger-type guidance:**
+2. For each file, read it and evaluate the candidate against **the 4-condition gate (reusable, non-obvious, stable, high-confidence) OR the orientation gate** (see Step 2 canonical body for both gates' full criteria; a candidate qualifies if either gate passes) and assess synthesis level for tier placement. **Trigger-type guidance:**
    - **`debug-root-cause` and `debug-narrative` candidates:** apply the debugging narrative lens — the insight is most valuable when it captures what you expected → what you found → what it means for the system. Evaluate whether the root cause reveals something non-obvious about how the system works. Format the insight using that narrative structure if qualifying. (`debug-narrative` is the expanded form emitted by stop-novelty-check.py when debug context is included; treat both as the same trigger family.)
    - **`structural-*` candidates** (e.g., `structural-footprint`, `structural-signal`): evaluate as architectural observations — module roles, integration points, what constrains changes. These often qualify for the Architectural models or Cross-cutting conventions categories.
    - **`preference-signal` candidates:** evaluate as scoped working-style preferences. If `related_files` names a skill, file, or directory (non-`none`), route to `lore capture --category preferences --related-files <paths>` via Step 3 branch. If `related_files: none`, route to thread `accumulated_preferences` instead — not to a knowledge entry.
@@ -145,6 +145,21 @@ For each candidate, assess against the capture gate — all 4 conditions must be
 2. **Non-obvious** — not already in README, the harness instructions file (CLAUDE.md/AGENTS.md), or docs
 3. **Stable** — unlikely to change soon
 4. **High confidence** — verified through code exploration, not speculative
+
+**Capture when the candidate passes the 4-condition gate OR the orientation gate.** The two gates are parallel paths, not stacked filters — a candidate that passes either is captured. The 4-condition gate above governs facts (gotchas, rationale, conventions, directives). The orientation gate below governs *system maps* — content whose pieces are individually readable from source but whose assembly takes meaningful cross-boundary search.
+
+**Orientation gate** — all 5 conditions must be true:
+1. **Reusable** — likely needed by future agents on more than one task. (Recurrence is required, not "could be useful someday.")
+2. **Cross-boundary** — reconstructing the understanding requires tracing behavior across at least 2 boundaries from this set: routing layer, persistence, lifecycle phase, state index, external command, shared helper, or protocol layer. (One-file orientation isn't orientation — it's either obvious or a gotcha.)
+3. **Canonical** — states the system's intended shape, not one agent's casual paraphrase. Disagrees with code? Don't capture — fix the code or capture a gotcha.
+4. **Anchored** — names the specific files, commands, tests, or directories that verify the claim (`--related-files`). Unanchored orientation goes stale invisibly.
+5. **Stable at architecture or subsystem altitude** — tag the entry `architecture`, `subsystem`, or `architecture,subsystem`. Implementation-scale orientation is malformed — route to the 4-condition gate as a fact, or drop.
+
+**Routing-gate hygiene** (the parallel gates form a routing gate; name each leg explicitly):
+- **Input:** the candidate's text plus its tentative `--scale`.
+- **Success route:** if the 4-condition gate passes, capture via `lore capture` (Tier 1) or `lore promote` (Tier 3) per Step 5's tier routing; if the orientation gate passes, capture the same way with `--scale architecture`, `--scale subsystem`, or `--scale architecture,subsystem` and concrete `--related-files`.
+- **Fallback:** if neither gate passes, drop silently — do not write a half-state entry, do not file to `_inbox/`.
+- **Lifecycle:** if the orientation gate passes but the altitude turns out wrong (the claim is really implementation-scale, e.g. it dies when one function name is removed), fail closed — drop the capture. Do NOT silently downgrade the `--scale` to `implementation` to make it land; that defeats the altitude constraint.
 
 If capture constraints were provided in Step 1, apply them as an additional filter: candidates that pass the base gate but fall into the "skip" category for the current context are dropped silently.
 
@@ -253,7 +268,11 @@ Review the conversation for thread-worthy content:
 
 Capture every qualifying candidate now. This step is mandatory and must not be skipped. /implement Step 5 and /spec Step 5.4 both delegate capture invocation to /remember — a missed capture here propagates silently to every upstream caller with no recovery path. Do NOT defer with "I'll capture later." Do NOT skip because the insight seems obvious. Do NOT skip because the session was short. None of these are valid rationales.
 
-Before capturing, confirm all 4 gate conditions hold for each candidate: (1) Reusable — applicable beyond this task, (2) Non-obvious — not already in existing docs, (3) Stable — unlikely to change soon, (4) High confidence — verified through code or conversation, not speculative. All four must be true. If any condition fails, drop the candidate silently and move on.
+Before capturing, confirm the candidate passes **the 4-condition gate OR the orientation gate** (Step 2 canonical body has the full criteria for both):
+- **4-condition gate** (all four must be true): (1) Reusable, (2) Non-obvious, (3) Stable, (4) High confidence.
+- **Orientation gate** (all five must be true): (1) Reusable with recurrence, (2) Cross-boundary reconstruction across ≥2 boundaries, (3) Canonical, (4) Anchored to `--related-files`, (5) Stable at architecture or subsystem altitude only.
+
+If neither gate passes, drop the candidate silently and move on. Do NOT downgrade an orientation candidate's `--scale` to `implementation` to make it pass — fail closed and drop.
 
 #### Tier routing decision
 

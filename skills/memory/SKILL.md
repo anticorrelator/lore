@@ -71,12 +71,22 @@ lore curate
 This lists inbox remnants, medium-confidence entries, and entries missing backlinks. Then apply judgment:
 
 1. **Refile inbox remnants:** If `$KDIR/_inbox/` has `.md` files (from interrupted captures), review each and either file to the correct category or drop.
-2. **Quality gate for medium-confidence entries:** Scan entry files for `confidence: medium` in their HTML comment metadata (typically from agent captures). Re-evaluate each against the 4-condition gate:
+2. **Quality gate for medium-confidence entries:** Scan entry files for `confidence: medium` in their HTML comment metadata (typically from agent captures). Re-evaluate each against **the 4-condition gate OR the orientation gate** — keep the entry if either gate passes; drop only if both fail. The two gates mirror Step 2 of `/remember` exactly:
+
+   **4-condition gate** (all four must be true — for facts, gotchas, rationale, conventions, directives):
    - **Reusable** beyond the original task?
    - **Non-obvious** — not already covered by another entry or docs?
    - **Stable** — still accurate?
    - **High confidence** — can you verify it now?
-   Drop entries that fail the gate. Upgrade passing entries to `confidence: high`.
+
+   **Orientation gate** (all five must be true — for system maps, lifecycle overviews, cross-boundary assembly):
+   1. **Reusable** — likely needed by future agents on more than one task. (Recurrence is required, not "could be useful someday.")
+   2. **Cross-boundary** — reconstructing the understanding requires tracing behavior across at least 2 boundaries from this set: routing layer, persistence, lifecycle phase, state index, external command, shared helper, or protocol layer. (One-file orientation isn't orientation — it's either obvious or a gotcha.)
+   3. **Canonical** — states the system's intended shape, not one agent's casual paraphrase. Disagrees with code? Don't capture — fix the code or capture a gotcha.
+   4. **Anchored** — names the specific files, commands, tests, or directories that verify the claim (`--related-files`). Unanchored orientation goes stale invisibly.
+   5. **Stable at architecture or subsystem altitude** — tag the entry `architecture`, `subsystem`, or `architecture,subsystem`. Implementation-scale orientation is malformed — route to the 4-condition gate as a fact, or drop.
+
+   Drop entries that fail BOTH gates. Upgrade passing entries to `confidence: high`. If an orientation-shaped entry passes the orientation gate but its current `--scale` is `implementation`, fix the scale tag — do not silently downgrade by dropping it as a fact.
 3. **Deduplicate:** Merge entries that describe the same insight from different contexts.
 4. **Backlinks:** Add missing `[[backlinks]]` cross-references between related entries.
 5. **Title quality:** Improve vague or generic titles to be specific and scannable.
@@ -91,7 +101,7 @@ This lists inbox remnants, medium-confidence entries, and entries missing backli
    ```
 8. Run `lore heal`
 
-**Drop authority:** Curate has explicit authority to remove entries without user confirmation when they fail the 4-condition gate. Report what was dropped in the summary so the user can object.
+**Drop authority:** Curate has explicit authority to remove entries without user confirmation when they fail **both** the 4-condition gate and the orientation gate (i.e., neither gate passes). An entry that would pass the orientation gate but is mis-tagged at `implementation` scale is not a drop — fix the scale tag instead. Report what was dropped in the summary so the user can object.
 
 ---
 
