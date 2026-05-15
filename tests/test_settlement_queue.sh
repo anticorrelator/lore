@@ -454,6 +454,38 @@ assert_json_eq "retry skip item carries retry selection reason" "$SKIP_STATUS" '
 assert_json_eq "retry skip item records artifact-unresolved reason" "$SKIP_STATUS" '.items[0].retry_reason' "previous_artifact_unresolved"
 
 echo ""
+echo "Test 12d: audit executor falls back to _archive/<slug>/ when active dir is a stub"
+# Regression coverage for the v1 archive-fallback patch: a work item can be
+# archived and then partially recreated (e.g. _meta.json + notes.md only),
+# leaving _work/<slug>/ present but without an auditable artifact. The
+# original patch keyed off dir presence and would pin to the stub, then
+# emit a spurious "no auditable artifact" skip. The fix iterates active
+# then archive, choosing by ARTIFACT presence.
+KDIR8E="$TEST_DIR/kdir8e"
+mkdir -p "$KDIR8E/_work/wi" "$KDIR8E/_work/_archive/wi"
+printf '{"slug": "wi"}' > "$KDIR8E/_work/wi/_meta.json"
+printf '# wi stub\n' > "$KDIR8E/_work/wi/notes.md"
+printf '%s\n' "$(row_json "claim-stub-active")" > "$KDIR8E/_work/_archive/wi/task-claims.jsonl"
+# Stub `lore` so we don't depend on the real binary running real audits.
+FAKE_BIN_12D="$TEST_DIR/fake-bin-12d"
+mkdir -p "$FAKE_BIN_12D"
+cat > "$FAKE_BIN_12D/lore" <<'BIN'
+#!/usr/bin/env bash
+echo '{"correctness_gate":{"verified":1,"unverified":0,"contradicted":0,"verdicts_total":1}}'
+BIN
+chmod +x "$FAKE_BIN_12D/lore"
+EXECUTOR_BIN_12D="$SCRIPTS_DIR/settlement-audit-executor.sh"
+EXEC_STDERR_12D="$TEST_DIR/12d-stderr.txt"
+EXEC_STDOUT_12D=$(printf '%s' '{"item": {"work_item": "wi", "claim_id": "claim-stub-active"}}' | \
+  PATH="$FAKE_BIN_12D:$PATH" LORE_SETTLEMENT_AUDIT_ARGS="--kdir $KDIR8E" bash "$EXECUTOR_BIN_12D" 2>"$EXEC_STDERR_12D")
+EXEC_STDERR_12D_CONTENT=$(cat "$EXEC_STDERR_12D")
+ARCHIVE_HIT_COUNT=$(printf '%s\n' "$EXEC_STDERR_12D_CONTENT" | grep -c 'Resolving work_item=wi from _archive' || true)
+SKIP_LOG_COUNT=$(printf '%s\n' "$EXEC_STDERR_12D_CONTENT" | grep -c 'no auditable artifact' || true)
+assert_eq "executor logged archive fallback for stub active dir" "$ARCHIVE_HIT_COUNT" "1"
+assert_eq "executor did not emit spurious no-auditable-artifact skip" "$SKIP_LOG_COUNT" "0"
+assert_json_eq "executor produced non-skip verdict via fake audit" "$EXEC_STDOUT_12D" '.verdict' "verified"
+
+echo ""
 echo "Test 13: recompute scores only batch_size rows and exposes bounds"
 KDIR9="$TEST_DIR/kdir9"
 SETTINGS9="$TEST_DIR/settings9.json"

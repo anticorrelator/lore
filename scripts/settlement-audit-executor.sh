@@ -172,25 +172,39 @@ fi
 task_claims_path=""
 work_dir=""
 if [[ -n "$audit_kdir" ]]; then
-  if [[ -d "$audit_kdir/_work/$work_item" ]]; then
-    work_dir="$audit_kdir/_work/$work_item"
-  elif [[ -d "$audit_kdir/_work/_archive/$work_item" ]]; then
-    # Claim was enqueued before the work item was archived. The archive preserves
-    # task-claims.jsonl + supporting artifacts, so audit against the archived copy
-    # rather than emitting a spurious skip/error.
-    work_dir="$audit_kdir/_work/_archive/$work_item"
-    echo "[settlement-executor] Resolving work_item=$work_item from _archive (active dir absent)" >&2
+  # Walk the active path first, then _archive/. We pick by ARTIFACT presence,
+  # not directory presence: a work item can be archived and later partially
+  # recreated as a stub (_meta.json + notes.md only), leaving the audit
+  # artifacts in _archive/ even though _work/<slug>/ exists. Falling back on
+  # dir presence alone would pin the audit to the empty stub and emit a
+  # spurious skip — that was the v1 patch bug fixed here.
+  candidate_dirs=(
+    "$audit_kdir/_work/$work_item"
+    "$audit_kdir/_work/_archive/$work_item"
+  )
+  any_dir_present=0
+  for candidate in "${candidate_dirs[@]}"; do
+    [[ -d "$candidate" ]] || continue
+    any_dir_present=1
+    if [[ -f "$candidate/task-claims.jsonl" || -f "$candidate/lens-findings.json" || -f "$candidate/execution-log.md" || -f "$candidate/plan.md" ]]; then
+      work_dir="$candidate"
+      break
+    fi
+  done
+  if [[ -n "$work_dir" && "$work_dir" == *"/_archive/"* ]]; then
+    echo "[settlement-executor] Resolving work_item=$work_item from _archive (active dir absent or stub)" >&2
   fi
-fi
-if [[ -n "$work_dir" ]]; then
-  if [[ -f "$work_dir/task-claims.jsonl" ]]; then
-    task_claims_path="$work_dir/task-claims.jsonl"
-  fi
-  if [[ ! -f "$work_dir/task-claims.jsonl" && ! -f "$work_dir/lens-findings.json" && ! -f "$work_dir/execution-log.md" && ! -f "$work_dir/plan.md" ]]; then
+  if [[ -z "$work_dir" && "$any_dir_present" -eq 1 ]]; then
+    # At least one candidate dir existed but none held an auditable artifact —
+    # this is the same "no auditable artifact" condition the original guard
+    # detected. Skip rather than falling through to a hopeless `lore audit <slug>`.
     echo "[settlement-executor] Skipping work_item=$work_item: no auditable artifact" >&2
     emit_envelope "skipped" "no auditable artifact for work_item=$work_item" "" "0" ""
     exit 0
   fi
+fi
+if [[ -n "$work_dir" && -f "$work_dir/task-claims.jsonl" ]]; then
+  task_claims_path="$work_dir/task-claims.jsonl"
 fi
 
 echo "[settlement-executor] Auditing work_item=$work_item claim_id=$claim_id framework=$FRAMEWORK" >&2
