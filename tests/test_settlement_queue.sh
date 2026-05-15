@@ -376,6 +376,46 @@ assert_json_eq "status exposes actual verdict evidence" "$SMOKE_STATUS" '.termin
 assert_json_eq "status nests verdict for TUI parsing" "$SMOKE_STATUS" '.terminal_items[0].verdict.verdict' "verified"
 
 echo ""
+echo "Test 11b: shipped executor extracts per-claim correction from envelope-shaped verdicts file"
+# Regression for the verdicts-file parser: audit-artifact.sh writes one ENVELOPE
+# per judge run (wrapper around `verdicts: [...]`), but the executor's prior
+# extractor expected flat per-row shape. That mismatch caused every contradicted
+# run on every project to ship `correction: null`, which surfaced in the TUI as
+# `contradicted → skip:empty_correction_text` via apply-correction's gate.
+KDIR8F="$TEST_DIR/kdir8f"
+SETTINGS8F="$TEST_DIR/settings8f.json"
+GATE8F="$TEST_DIR/gate8f.json"
+SMOKE_SLUG_F="settlement-smoke-contradicted"
+setup_plan_assertions_fixture "$KDIR8F" "$SMOKE_SLUG_F"
+printf '%s' "$(row_json "assertion-0")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS8F" bash "$QUEUE" enqueue --work-item "$SMOKE_SLUG_F" --kdir "$KDIR8F" --json >/dev/null
+write_settings "$SETTINGS8F" "$(jq -nc '{
+  version: 1,
+  tui_launch_framework: "claude-code",
+  harnesses: {"claude-code": {args: []}, opencode: {args: []}, codex: {args: []}},
+  settlement: {
+    enabled: true,
+    max_concurrency: 1,
+    executor_timeout_seconds: 10,
+    harness_selection: {mode: "first_eligible", eligible_frameworks: ["claude-code"]}
+  }
+}')"
+printf '%s\n' '{
+  "judge": "correctness-gate",
+  "judge_template_version": "settlement-smoke-gate",
+  "verdicts": [
+    {"claim_id": "assertion-0", "verdict": "contradicted", "evidence": "per-claim contradicted evidence", "correction": "Replace with the corrected claim body"}
+  ]
+}' > "$GATE8F"
+# Suppress auto-correction so the test does not depend on commons mutation;
+# we only need to assert that verdict.correction flows through the envelope.
+SMOKE_ARGS_F=$(printf -- '--kdir %q --gate-output-file %q' "$KDIR8F" "$GATE8F")
+SMOKE_F=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS8F" LORE_SETTLEMENT_DISABLE_AUTO_CORRECTION=1 LORE_SETTLEMENT_AUDIT_ARGS="$SMOKE_ARGS_F" bash "$QUEUE" process --kdir "$KDIR8F" --once --json)
+assert_json_eq "contradicted shipped executor run completed" "$SMOKE_F" '.run.status' "completed"
+assert_json_eq "contradicted run carries envelope verdict" "$SMOKE_F" '.run.verdict.verdict' "contradicted"
+assert_json_eq "contradicted run extracts per-claim correction" "$SMOKE_F" '.run.verdict.correction' "Replace with the corrected claim body"
+assert_json_eq "contradicted run extracts per-claim evidence" "$SMOKE_F" '.run.verdict.evidence' "per-claim contradicted evidence"
+
+echo ""
 echo "Test 12: retry-errors requeues structured audit errors"
 KDIR8B="$TEST_DIR/kdir8b"
 SETTINGS8B="$TEST_DIR/settings8b.json"

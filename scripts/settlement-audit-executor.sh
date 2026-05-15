@@ -288,6 +288,12 @@ if verdict == "contradicted" and verdicts_file:
     # downstream apply-correction needs — the aggregate summary string is too coarse
     # to drive a body-replacement mutation. Fall back to the first contradicted row
     # if no per-claim match exists (defensive — shouldn't happen given priority-claims).
+    #
+    # The verdicts file is written by audit-artifact.sh as one ENVELOPE per judge
+    # run, each carrying a nested `verdicts: [...]` array of per-claim rows.
+    # `settlement-record-append.sh`'s contract documents a flat-row variant; we
+    # accept both for forward compatibility — descend into `verdicts[]` when
+    # present, otherwise treat the line itself as the row.
     try:
         contradicted_rows = []
         with open(verdicts_file, encoding="utf-8") as fh:
@@ -295,12 +301,21 @@ if verdict == "contradicted" and verdicts_file:
                 if not line.strip():
                     continue
                 try:
-                    row = json.loads(line)
+                    record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if (row.get("judge") == "correctness-gate"
-                        and row.get("verdict") == "contradicted"):
-                    contradicted_rows.append(row)
+                if not isinstance(record, dict):
+                    continue
+                if record.get("judge") != "correctness-gate":
+                    continue
+                inner = record.get("verdicts")
+                if isinstance(inner, list):
+                    candidate_rows = [r for r in inner if isinstance(r, dict)]
+                else:
+                    candidate_rows = [record]
+                for row in candidate_rows:
+                    if row.get("verdict") == "contradicted":
+                        contradicted_rows.append(row)
         target = None
         for row in contradicted_rows:
             if row.get("claim_id") == priority_claim_id:
