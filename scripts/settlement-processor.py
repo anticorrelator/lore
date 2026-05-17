@@ -39,6 +39,32 @@ DEFAULT_EXECUTOR_TIMEOUT_SECONDS = 300
 STATUS_RECENT_RUNS_LIMIT = 25
 STATUS_TERMINAL_PREVIEW_LIMIT = 5
 
+# Source-stream registry. Each kind maps to:
+#   filename: glob-relative name under _work/<slug>/
+#   id_field: field on the source row that uniquely identifies it within the file
+KIND_TASK_CLAIM = "task-claim"
+KIND_OMISSION = "omission"
+KIND_CONSUMPTION_CONTRADICTION = "consumption-contradiction"
+KINDS = (KIND_TASK_CLAIM, KIND_OMISSION, KIND_CONSUMPTION_CONTRADICTION)
+KIND_SOURCES = {
+    KIND_TASK_CLAIM: {"filename": "task-claims.jsonl", "id_field": "claim_id"},
+    KIND_OMISSION: {"filename": "audit-candidates.jsonl", "id_field": "candidate_id"},
+    KIND_CONSUMPTION_CONTRADICTION: {"filename": "consumption-contradictions.jsonl", "id_field": "contradiction_id"},
+}
+
+# Maps a queue item's kind to the kind-specialized correctness-gate it will
+# dispatch through. Only the hard-cal gates (assertion + contradiction) drive
+# mutation; the omission gate is soft-cal-with-discrimination and the
+# precondition logic explicitly skips it. The settlement processor consults
+# this table at the start of each process_once() invocation to decide whether
+# the dispatch needs a calibration self-precondition run for this kind.
+KIND_TO_GATE = {
+    KIND_TASK_CLAIM: "correctness-gate-assertion",
+    KIND_OMISSION: "correctness-gate-omission",
+    KIND_CONSUMPTION_CONTRADICTION: "correctness-gate-contradiction",
+}
+HARD_CAL_GATES = {"correctness-gate-assertion", "correctness-gate-contradiction"}
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -192,11 +218,11 @@ class Settlement:
             "state_dir": str(self.state),
             "shapes": {
                 "queue_item": {
-                    "id": "sha256(work_item:claim_id)",
-                    "kind": "task-claim",
+                    "id": "sha256(kind:work_item:source_id)",
+                    "kind": "task-claim|omission|consumption-contradiction",
                     "status": "pending|leased",
                     "work_item": "slug",
-                    "claim_id": "Tier 2 claim_id",
+                    "source_id": "source row's natural id (claim_id|candidate_id|contradiction_id)",
                     "source": {"file": "relative path", "line_range": "N-M"},
                     "selection": "pending items carry selection_score, selection_reason, batch_id; leased items also carry selected_at",
                 },
@@ -210,6 +236,8 @@ class Settlement:
                 "usage.json": ["settlement-processor.py"],
                 "runs/*.json": ["settlement-processor.py"],
                 "_work/*/task-claims.jsonl": ["evidence-append.sh"],
+                "_work/*/audit-candidates.jsonl": ["audit-queue-route.sh", "audit-artifact.sh"],
+                "_work/*/consumption-contradictions.jsonl": ["consumption-contradiction-append.sh", "consumption-contradiction-update-status.sh"],
                 "settings.json:settlement": ["settings.sh", "lore_settings.py", "operator"],
             },
         }
@@ -243,9 +271,12 @@ class Settlement:
         data.setdefault("version", VERSION)
         json_dump(self.usage_path, data)
 
-    def item_id(self, work_item: str, claim_id: str) -> str:
-        digest = hashlib.sha256(f"{work_item}:{claim_id}".encode()).hexdigest()[:20]
-        return f"task-claim-{digest}"
+    def item_id(self, work_item: str, source_id: str, kind: str = KIND_TASK_CLAIM) -> str:
+        # The hash spans kind:work_item:source_id so two different streams can carry the
+        # same natural id (e.g., a task-claim and an omission row each named "claim-0")
+        # without colliding in queue.json.
+        digest = hashlib.sha256(f"{kind}:{work_item}:{source_id}".encode()).hexdigest()[:20]
+        return f"{kind}-{digest}"
 
     def row_change_context(self, row: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
         source = row.get("source") if isinstance(row.get("source"), dict) else {}
@@ -296,47 +327,148 @@ class Settlement:
             reasons.append("missing change_context")
         return f"_work/{work_item}/task-claims.jsonl: " + "; ".join(reasons) if reasons else ""
 
-    def item_from_row(self, work_item: str, row: dict[str, Any], order: int) -> dict[str, Any]:
-        claim_id = str(row.get("claim_id") or "")
-        source = row.get("source") if isinstance(row.get("source"), dict) else {}
-        context, context_source = self.row_change_context(row)
-        return {
-            "id": self.item_id(work_item, claim_id),
-            "kind": "task-claim",
-            "status": "pending",
-            "work_item": work_item,
-            "claim_id": claim_id,
-            "task_id": row.get("task_id"),
-            "phase_id": row.get("phase_id"),
-            "scale": row.get("scale"),
-            "claim": row.get("claim") or row.get("claim_text"),
-            "source": {"file": row.get("file") or source.get("file"), "line_range": row.get("line_range") or source.get("line_range")},
-            "falsifier": row.get("falsifier") or row.get("why_this_work_needs_it"),
-            "exact_snippet": row.get("exact_snippet"),
-            "change_context": context,
-            "change_context_source": context_source,
-            "evidence_ref": {"path": f"_work/{work_item}/task-claims.jsonl", "claim_id": claim_id},
-            "attempts": 0,
-            "enqueued_at": row.get("captured_at") or row.get("created_at") or "",
-            "updated_at": utc_now(),
-            "_backlog_order": order,
-        }
+    def omission_invalid_reason(self, work_item: str, row: dict[str, Any]) -> str:
+        # audit-candidates.jsonl rows are written by audit-queue-route.sh after
+        # reverse-auditor + grounding-preflight; the producer already enforced
+        # presence of file/line_range/falsifier. Re-check defensively here so a
+        # malformed manual edit cannot drive the audit pipeline.
+        reasons: list[str] = []
+        for field in ("candidate_id", "file", "line_range", "falsifier"):
+            value = row.get(field)
+            if not isinstance(value, str) or not value.strip():
+                reasons.append(f"missing {field}")
+        return f"_work/{work_item}/audit-candidates.jsonl: " + "; ".join(reasons) if reasons else ""
 
-    def enqueue_row(self, work_item: str, row: dict[str, Any]) -> dict[str, Any]:
+    def consumption_contradiction_invalid_reason(self, work_item: str, row: dict[str, Any]) -> str:
+        # consumption-contradiction-append.sh validates the row at write time;
+        # this is a defensive re-check that follows the sole-writer schema.
+        reasons: list[str] = []
+        if not isinstance(row.get("contradiction_id"), str) or not row.get("contradiction_id").strip():
+            reasons.append("missing contradiction_id")
+        claim_payload = row.get("claim_payload") if isinstance(row.get("claim_payload"), dict) else None
+        if claim_payload is None:
+            reasons.append("missing claim_payload")
+        else:
+            for field in ("claim_id", "file", "line_range", "falsifier"):
+                value = claim_payload.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    reasons.append(f"missing claim_payload.{field}")
+        return f"_work/{work_item}/consumption-contradictions.jsonl: " + "; ".join(reasons) if reasons else ""
+
+    def kind_invalid_reason(self, kind: str, work_item: str, row: dict[str, Any]) -> str:
+        if kind == KIND_TASK_CLAIM:
+            return self.task_claim_invalid_reason(work_item, row)
+        if kind == KIND_OMISSION:
+            return self.omission_invalid_reason(work_item, row)
+        if kind == KIND_CONSUMPTION_CONTRADICTION:
+            return self.consumption_contradiction_invalid_reason(work_item, row)
+        return f"unknown kind: {kind}"
+
+    def source_id_for_row(self, kind: str, row: dict[str, Any]) -> str:
+        field = KIND_SOURCES.get(kind, {}).get("id_field", "")
+        if not field:
+            return ""
+        if kind == KIND_CONSUMPTION_CONTRADICTION:
+            # contradiction_id lives at the row top level; the actual file/line
+            # anchor sits inside claim_payload but the natural id is top-level.
+            return str(row.get(field) or "")
+        return str(row.get(field) or "")
+
+    def item_from_row(self, work_item: str, row: dict[str, Any], order: int, kind: str = KIND_TASK_CLAIM) -> dict[str, Any]:
+        if kind == KIND_TASK_CLAIM:
+            claim_id = str(row.get("claim_id") or "")
+            source = row.get("source") if isinstance(row.get("source"), dict) else {}
+            context, context_source = self.row_change_context(row)
+            item = {
+                "id": self.item_id(work_item, claim_id, KIND_TASK_CLAIM),
+                "kind": KIND_TASK_CLAIM,
+                "status": "pending",
+                "work_item": work_item,
+                "source_id": claim_id,
+                "claim_id": claim_id,
+                "task_id": row.get("task_id"),
+                "phase_id": row.get("phase_id"),
+                "scale": row.get("scale"),
+                "claim": row.get("claim") or row.get("claim_text"),
+                "source": {"file": row.get("file") or source.get("file"), "line_range": row.get("line_range") or source.get("line_range")},
+                "falsifier": row.get("falsifier") or row.get("why_this_work_needs_it"),
+                "exact_snippet": row.get("exact_snippet"),
+                "change_context": context,
+                "change_context_source": context_source,
+                "evidence_ref": {"path": f"_work/{work_item}/task-claims.jsonl", "claim_id": claim_id},
+                "attempts": 0,
+                "enqueued_at": row.get("captured_at") or row.get("created_at") or "",
+                "updated_at": utc_now(),
+                "_backlog_order": order,
+            }
+            return item
+        if kind == KIND_OMISSION:
+            candidate_id = str(row.get("candidate_id") or "")
+            return {
+                "id": self.item_id(work_item, candidate_id, KIND_OMISSION),
+                "kind": KIND_OMISSION,
+                "status": "pending",
+                "work_item": work_item,
+                "source_id": candidate_id,
+                "candidate_id": candidate_id,
+                "claim": row.get("rationale") or row.get("why_it_matters"),
+                "source": {"file": row.get("file"), "line_range": row.get("line_range")},
+                "falsifier": row.get("falsifier"),
+                "evidence_ref": {"path": f"_work/{work_item}/audit-candidates.jsonl", "candidate_id": candidate_id},
+                "attempts": 0,
+                "enqueued_at": row.get("created_at") or "",
+                "updated_at": utc_now(),
+                "_backlog_order": order,
+            }
+        if kind == KIND_CONSUMPTION_CONTRADICTION:
+            contradiction_id = str(row.get("contradiction_id") or "")
+            claim_payload = row.get("claim_payload") if isinstance(row.get("claim_payload"), dict) else {}
+            return {
+                "id": self.item_id(work_item, contradiction_id, KIND_CONSUMPTION_CONTRADICTION),
+                "kind": KIND_CONSUMPTION_CONTRADICTION,
+                "status": "pending",
+                "work_item": work_item,
+                "source_id": contradiction_id,
+                "contradiction_id": contradiction_id,
+                "claim_id": claim_payload.get("claim_id"),
+                "claim": claim_payload.get("claim_text"),
+                "source": {"file": claim_payload.get("file"), "line_range": claim_payload.get("line_range")},
+                "falsifier": claim_payload.get("falsifier"),
+                "exact_snippet": claim_payload.get("exact_snippet"),
+                "evidence_ref": {"path": f"_work/{work_item}/consumption-contradictions.jsonl", "contradiction_id": contradiction_id},
+                "attempts": 0,
+                "enqueued_at": row.get("created_at") or "",
+                "updated_at": utc_now(),
+                "_backlog_order": order,
+            }
+        raise ValueError(f"unknown kind: {kind}")
+
+    def enqueue_row(self, work_item: str, row: dict[str, Any], kind: str = KIND_TASK_CLAIM) -> dict[str, Any]:
         self.ensure()
-        claim_id = str(row.get("claim_id") or "")
-        if not claim_id:
-            raise SystemExit("[settlement] Error: Tier 2 row missing claim_id")
-        invalid_reason = self.task_claim_invalid_reason(work_item, row)
+        source_id = self.source_id_for_row(kind, row)
+        if not source_id:
+            id_field = KIND_SOURCES.get(kind, {}).get("id_field", "source_id")
+            raise SystemExit(f"[settlement] Error: {kind} row missing {id_field}")
+        invalid_reason = self.kind_invalid_reason(kind, work_item, row)
         if invalid_reason:
-            raise ValueError(f"invalid Tier 2 row: {invalid_reason}")
-        item_id = self.item_id(work_item, claim_id)
+            raise ValueError(f"invalid {kind} row: {invalid_reason}")
+        if kind == KIND_CONSUMPTION_CONTRADICTION:
+            # Only `pending` CC rows are enqueue candidates. `verified`/`rejected`
+            # are terminal states set by the update-status writer after a
+            # correctness-gate verdict landed — re-enqueuing them would drive
+            # duplicate adjudication. Legacy values (accepted/declined/remediated)
+            # are not in the canonical enum any longer and were never wired
+            # through any update path; skip defensively rather than fail.
+            status = row.get("status")
+            if status != "pending":
+                return {"ok": True, "action": "skipped", "reason": f"non-pending status: {status}", "queue_path": str(self.queue_path)}
+        item_id = self.item_id(work_item, source_id, kind)
         with repo_lock(self.state):
             queue = self.load_queue()
             for item in queue["items"]:
                 if item.get("id") == item_id:
                     return {"ok": True, "action": "duplicate", "item": item, "queue_path": str(self.queue_path)}
-            item = self.item_from_row(work_item, row, len(queue.get("items", [])))
+            item = self.item_from_row(work_item, row, len(queue.get("items", [])), kind)
             item["enqueued_at"] = utc_now()
             item.pop("_backlog_order", None)
             queue["items"].append(item)
@@ -352,23 +484,30 @@ class Settlement:
         work_root = self.kdir / "_work"
         if not work_root.exists():
             return {"ok": True, "scanned": 0, "enqueued": 0, "duplicates": 0, "errors": []}
-        for claims in sorted(work_root.glob("*/task-claims.jsonl")):
-            work_item = claims.parent.name
-            with claims.open(encoding="utf-8") as fh:
-                for line_no, line in enumerate(fh, 1):
-                    if not line.strip():
-                        continue
-                    scanned += 1
-                    try:
-                        row = json.loads(line)
-                        res = self.enqueue_row(work_item, row)
-                        if res["action"] == "enqueued":
-                            enqueued += 1
-                        else:
-                            duplicates += 1
-                    except Exception as exc:  # continue scanning other rows
-                        errors.append(f"{claims}:{line_no}: {exc}")
-        return {"ok": not errors, "scanned": scanned, "enqueued": enqueued, "duplicates": duplicates, "errors": errors}
+        # Walk all three source streams. enqueue_row dispatches per-kind; CC
+        # rows that are already terminal (verified|rejected) are quietly skipped.
+        skipped = 0
+        for kind in KINDS:
+            filename = KIND_SOURCES[kind]["filename"]
+            for source_file in sorted(work_root.glob(f"*/{filename}")):
+                work_item = source_file.parent.name
+                with source_file.open(encoding="utf-8") as fh:
+                    for line_no, line in enumerate(fh, 1):
+                        if not line.strip():
+                            continue
+                        scanned += 1
+                        try:
+                            row = json.loads(line)
+                            res = self.enqueue_row(work_item, row, kind)
+                            if res["action"] == "enqueued":
+                                enqueued += 1
+                            elif res["action"] == "skipped":
+                                skipped += 1
+                            else:
+                                duplicates += 1
+                        except Exception as exc:  # continue scanning other rows
+                            errors.append(f"{source_file}:{line_no}: {exc}")
+        return {"ok": not errors, "scanned": scanned, "enqueued": enqueued, "duplicates": duplicates, "skipped": skipped, "errors": errors}
 
     def iter_backlog_items(self) -> tuple[list[dict[str, Any]], list[str]]:
         errors: list[str] = []
@@ -378,33 +517,39 @@ class Settlement:
         if not work_root.exists():
             return items, errors
         order = 0
-        for claims in sorted(work_root.glob("*/task-claims.jsonl")):
-            work_item = claims.parent.name
-            try:
-                lines = claims.read_text(encoding="utf-8").splitlines()
-            except OSError as exc:
-                errors.append(f"{claims}: {exc}")
-                continue
-            for line_no, line in enumerate(lines, 1):
-                if not line.strip():
-                    continue
+        for kind in KINDS:
+            filename = KIND_SOURCES[kind]["filename"]
+            for source_file in sorted(work_root.glob(f"*/{filename}")):
+                work_item = source_file.parent.name
                 try:
-                    row = json.loads(line)
-                    claim_id = str(row.get("claim_id") or "")
-                    if not claim_id:
-                        raise ValueError("Tier 2 row missing claim_id")
-                    invalid_reason = self.task_claim_invalid_reason(work_item, row)
-                    if invalid_reason:
-                        raise ValueError(f"invalid Tier 2 row: {invalid_reason}")
-                    item = self.item_from_row(work_item, row, order)
-                    item["evidence_ref"]["line"] = line_no
-                    order += 1
-                    if item["id"] in seen:
+                    lines = source_file.read_text(encoding="utf-8").splitlines()
+                except OSError as exc:
+                    errors.append(f"{source_file}: {exc}")
+                    continue
+                for line_no, line in enumerate(lines, 1):
+                    if not line.strip():
                         continue
-                    seen.add(item["id"])
-                    items.append(item)
-                except Exception as exc:
-                    errors.append(f"{claims}:{line_no}: {exc}")
+                    try:
+                        row = json.loads(line)
+                        source_id = self.source_id_for_row(kind, row)
+                        if not source_id:
+                            id_field = KIND_SOURCES[kind]["id_field"]
+                            raise ValueError(f"{kind} row missing {id_field}")
+                        invalid_reason = self.kind_invalid_reason(kind, work_item, row)
+                        if invalid_reason:
+                            raise ValueError(f"invalid {kind} row: {invalid_reason}")
+                        if kind == KIND_CONSUMPTION_CONTRADICTION and row.get("status") != "pending":
+                            # Already-settled CC rows are not backlog candidates.
+                            continue
+                        item = self.item_from_row(work_item, row, order, kind)
+                        item["evidence_ref"]["line"] = line_no
+                        order += 1
+                        if item["id"] in seen:
+                            continue
+                        seen.add(item["id"])
+                        items.append(item)
+                    except Exception as exc:
+                        errors.append(f"{source_file}:{line_no}: {exc}")
         return items, errors
 
     def load_runs(self) -> list[dict[str, Any]]:
@@ -473,11 +618,13 @@ class Settlement:
             verdict_summary = verdict.get("evidence") if isinstance(verdict.get("evidence"), str) else ""
             correction = verdict.get("correction") if isinstance(verdict.get("correction"), str) else None
             correction_outcome = run.get("correction_outcome") if isinstance(run.get("correction_outcome"), dict) else None
-            row = self.find_task_claim_row(str(run.get("work_item") or ""), str(run.get("claim_id") or "")) or {}
+            run_kind = str(run.get("kind") or KIND_TASK_CLAIM)
+            run_source_id = str(run.get("source_id") or run.get("claim_id") or "")
+            row = self.find_source_row(run_kind, str(run.get("work_item") or ""), run_source_id) or {}
             source = row.get("source") if isinstance(row.get("source"), dict) else {}
             item: dict[str, Any] = {
                 "id": run.get("item_id"),
-                "kind": "task-claim",
+                "kind": run_kind,
                 "status": run.get("status"),
                 "work_item": run.get("work_item"),
                 "claim_id": run.get("claim_id"),
@@ -510,34 +657,43 @@ class Settlement:
 
     def item_invalid_reason(self, item: dict[str, Any]) -> str:
         work_item = str(item.get("work_item") or "")
-        claim_id = str(item.get("claim_id") or "")
-        if not work_item or not claim_id:
-            return "queue item missing work_item or claim_id"
-        row = self.find_task_claim_row(work_item, claim_id)
+        kind = str(item.get("kind") or KIND_TASK_CLAIM)
+        source_id = str(item.get("source_id") or item.get("claim_id") or item.get("candidate_id") or item.get("contradiction_id") or "")
+        if not work_item or not source_id:
+            return "queue item missing work_item or source_id"
+        row = self.find_source_row(kind, work_item, source_id)
         if row is None:
-            item_row = {
-                "claim_id": claim_id,
-                "claim": item.get("claim"),
-                "file": (item.get("source") or {}).get("file") if isinstance(item.get("source"), dict) else None,
-                "line_range": (item.get("source") or {}).get("line_range") if isinstance(item.get("source"), dict) else None,
-                "falsifier": item.get("falsifier"),
-                "change_context": item.get("change_context"),
-            }
-            item_reason = self.task_claim_invalid_reason(work_item, item_row)
-            if not item_reason:
-                return ""
-            return f"missing task-claims row for {work_item}/{claim_id}"
-        return self.task_claim_invalid_reason(work_item, row)
+            # The row went away after enqueue (work item archived between scan
+            # and process). For task-claim, fall back to validating the item's
+            # own embedded fields — otherwise mark the queue item invalid.
+            if kind == KIND_TASK_CLAIM:
+                item_row = {
+                    "claim_id": source_id,
+                    "claim": item.get("claim"),
+                    "file": (item.get("source") or {}).get("file") if isinstance(item.get("source"), dict) else None,
+                    "line_range": (item.get("source") or {}).get("line_range") if isinstance(item.get("source"), dict) else None,
+                    "falsifier": item.get("falsifier"),
+                    "change_context": item.get("change_context"),
+                }
+                item_reason = self.task_claim_invalid_reason(work_item, item_row)
+                if not item_reason:
+                    return ""
+            return f"missing source row for {kind} {work_item}/{source_id}"
+        return self.kind_invalid_reason(kind, work_item, row)
 
     def write_invalid_claim_run(self, item: dict[str, Any], reason: str) -> dict[str, Any]:
         run_id = f"run-{hashlib.sha256((str(item.get('id') or '') + utc_now()).encode()).hexdigest()[:20]}"
         evidence = f"invalid Tier 2 claim skipped before executor: {reason}"
         if len(evidence) > 240:
             evidence = evidence[:237] + "..."
+        item_kind = str(item.get("kind") or KIND_TASK_CLAIM)
+        item_source_id = str(item.get("source_id") or item.get("claim_id") or item.get("candidate_id") or item.get("contradiction_id") or "")
         run = {
             "version": VERSION,
             "run_id": run_id,
             "item_id": item.get("id"),
+            "kind": item_kind,
+            "source_id": item_source_id,
             "work_item": item.get("work_item"),
             "claim_id": item.get("claim_id"),
             "claim": item.get("claim"),
@@ -546,7 +702,7 @@ class Settlement:
             "framework": "",
             "framework_capability": {},
             "status": "completed",
-            "reason": "invalid_task_claim",
+            "reason": f"invalid_{item_kind.replace('-', '_')}",
             "started_at": utc_now(),
             "completed_at": utc_now(),
             "runtime_seconds_reserved": 0,
@@ -587,13 +743,17 @@ class Settlement:
             return "previous_artifact_unresolved"
         return ""
 
-    def find_task_claim_row(self, work_item: str, claim_id: str) -> dict[str, Any] | None:
+    def find_source_row(self, kind: str, work_item: str, source_id: str) -> dict[str, Any] | None:
         # Try the active work directory first, then fall back to the archive.
-        # An archived work item retains task-claims.jsonl under _archive/<slug>/,
-        # so retries for queue items orphaned by archival can still resolve their row.
+        # Archived work items retain their source JSONL under _archive/<slug>/,
+        # so retries for queue items orphaned by archival can still resolve.
+        filename = KIND_SOURCES.get(kind, {}).get("filename", "")
+        id_field = KIND_SOURCES.get(kind, {}).get("id_field", "")
+        if not filename or not id_field:
+            return None
         candidates = [
-            (self.kdir / "_work" / work_item / "task-claims.jsonl", f"_work/{work_item}/task-claims.jsonl"),
-            (self.kdir / "_work" / "_archive" / work_item / "task-claims.jsonl", f"_work/_archive/{work_item}/task-claims.jsonl"),
+            (self.kdir / "_work" / work_item / filename, f"_work/{work_item}/{filename}"),
+            (self.kdir / "_work" / "_archive" / work_item / filename, f"_work/_archive/{work_item}/{filename}"),
         ]
         for path, rel_path in candidates:
             if not path.exists():
@@ -611,11 +771,16 @@ class Settlement:
                     continue
                 if not isinstance(row, dict):
                     continue
-                if str(row.get("claim_id") or "") == claim_id:
+                if str(row.get(id_field) or "") == source_id:
                     row = dict(row)
                     row.setdefault("evidence_ref", {"path": rel_path, "line": line_no})
                     return row
         return None
+
+    def find_task_claim_row(self, work_item: str, claim_id: str) -> dict[str, Any] | None:
+        # Back-compat shim for code paths that still take a (work_item, claim_id)
+        # pair directly (the run-records path that always emits kind=task-claim).
+        return self.find_source_row(KIND_TASK_CLAIM, work_item, claim_id)
 
     def retry_error_audits(self, work_item: str | None = None, claim_ids: list[str] | None = None, dry_run: bool = False) -> dict[str, Any]:
         self.ensure()
@@ -633,18 +798,19 @@ class Settlement:
                     continue
                 latest_by_item[str(run.get("item_id"))] = run
 
-            targets: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+            targets: list[tuple[dict[str, Any], dict[str, Any], str, str]] = []
             skipped: list[dict[str, Any]] = []
             for run in latest_by_item.values():
                 retry_reason = self.retryable_infrastructure_failure_reason(run)
                 if not retry_reason:
                     continue
                 run_work_item = str(run.get("work_item") or "")
-                run_claim_id = str(run.get("claim_id") or "")
+                run_kind = str(run.get("kind") or KIND_TASK_CLAIM)
+                run_source_id = str(run.get("source_id") or run.get("claim_id") or "")
                 item_id = str(run.get("item_id") or "")
                 if work_item and run_work_item != work_item:
                     continue
-                if claim_filter and run_claim_id not in claim_filter:
+                if claim_filter and run_source_id not in claim_filter:
                     continue
                 if item_id in active_item_ids:
                     skipped.append({"run_id": run.get("run_id"), "item_id": item_id, "reason": "active_lease"})
@@ -652,17 +818,17 @@ class Settlement:
                 if item_id in queued_item_ids:
                     skipped.append({"run_id": run.get("run_id"), "item_id": item_id, "reason": "already_queued"})
                     continue
-                row = self.find_task_claim_row(run_work_item, run_claim_id)
+                row = self.find_source_row(run_kind, run_work_item, run_source_id)
                 if row is None:
-                    skipped.append({"run_id": run.get("run_id"), "item_id": item_id, "reason": "missing_task_claim"})
+                    skipped.append({"run_id": run.get("run_id"), "item_id": item_id, "reason": f"missing_{run_kind.replace('-', '_')}"})
                     continue
-                targets.append((run, row, retry_reason))
+                targets.append((run, row, retry_reason, run_kind))
 
             retry_items: list[dict[str, Any]] = []
             batch_id = f"retry-{hashlib.sha256((utc_now() + str(len(targets))).encode()).hexdigest()[:16]}"
             recomputed_at = utc_now()
-            for order, (run, row, retry_reason) in enumerate(targets):
-                item = self.item_from_row(str(run.get("work_item") or ""), row, order)
+            for order, (run, row, retry_reason, run_kind) in enumerate(targets):
+                item = self.item_from_row(str(run.get("work_item") or ""), row, order, run_kind)
                 item["enqueued_at"] = recomputed_at
                 item["updated_at"] = recomputed_at
                 item["selection_score"] = None
@@ -685,7 +851,7 @@ class Settlement:
                     "recompute_reason": "retry_error_audits",
                     "errors": [],
                 }
-                for run, _row, retry_reason in targets:
+                for run, _row, retry_reason, _kind in targets:
                     run["invalidated_at"] = recomputed_at
                     run["invalidated_reason"] = "retry_infrastructure_failure"
                     run["invalidated_detail"] = retry_reason
@@ -1143,6 +1309,147 @@ class Settlement:
         usage["jobs_started"] = int(usage.get("jobs_started", 0)) + 1
         usage["runtime_seconds_reserved"] = int(usage.get("runtime_seconds_reserved", 0)) + int(settings["executor_timeout_seconds"])
 
+    def calibration_marker_path(self) -> Path:
+        return self.kdir / "_scorecards" / "calibration-state.json"
+
+    def read_marker_state(self, judge_id: str, judge_version: str) -> str:
+        path = self.calibration_marker_path()
+        if not path.exists():
+            return "pre-calibration"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return "pre-calibration"
+        if not isinstance(data, dict):
+            return "pre-calibration"
+        entry = data.get(f"{judge_id}:{judge_version}")
+        if not isinstance(entry, dict):
+            return "pre-calibration"
+        state = entry.get("calibration_state")
+        if state in ("calibrated", "pre-calibration", "calibration-failed"):
+            return state
+        return "pre-calibration"
+
+    def gate_template_version(self, gate_name: str) -> str | None:
+        template_path = Path(__file__).resolve().parent.parent / "agents" / f"{gate_name}.md"
+        if not template_path.exists():
+            return None
+        version_script = Path(__file__).resolve().with_name("template-version.sh")
+        if not version_script.exists():
+            return None
+        try:
+            proc = subprocess.run(
+                [str(version_script), str(template_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        if proc.returncode != 0:
+            return None
+        version = (proc.stdout or "").strip()
+        return version or None
+
+    def invoke_calibration_runner(self, gate_name: str) -> tuple[bool, str]:
+        """Invoke `scorecards-calibrate.sh --judge <gate>` against the gate's
+        canonical fixture set. Returns (success, reason).
+        """
+        fixture_set = self.kdir / "_calibration" / gate_name
+        if not fixture_set.is_dir():
+            # Substrate not installed in this knowledge directory. Treat this
+            # as a "calibration not yet provisioned" signal rather than a
+            # hard fail-shut — without a fixture set the runner has nothing
+            # to discriminate against, and refusing dispatch on substrate
+            # absence would break every workspace that has not yet shipped
+            # the per-gate fixture trees. Production KDIRs ship the trees
+            # from `scripts/calibration-fixture-builder.py --gate all`.
+            return True, f"fixture_set_missing:{fixture_set} (substrate not provisioned; dispatch allowed)"
+        runner = Path(__file__).resolve().with_name("scorecards-calibrate.sh")
+        if not runner.exists():
+            return False, f"runner_missing:{runner}"
+        try:
+            proc = subprocess.run(
+                [
+                    "bash", str(runner),
+                    "--judge", gate_name,
+                    "--fixture-set", str(fixture_set),
+                    "--determinism-rerun",
+                    "--kdir", str(self.kdir),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            return False, f"runner_oserror:{exc}"
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").splitlines()[-1:] if (proc.stderr or proc.stdout) else []
+            tail_text = tail[0] if tail else ""
+            return False, f"calibration-failed:{tail_text[:160]}"
+        return True, "calibrated"
+
+    def calibration_precondition(self, item: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
+        """Calibration self-precondition for the queued item. Soft-cal gates
+        always allow dispatch; hard-cal gates require a `calibrated` marker
+        entry for the current template-version. Returns (ok, reason,
+        telemetry); ok=False carries reason="audit-error: hard-cal gate
+        uncalibrated (...)".
+        """
+        kind = str(item.get("kind") or KIND_TASK_CLAIM)
+        gate = KIND_TO_GATE.get(kind)
+        telemetry = {
+            "gate": gate,
+            "kind": kind,
+            "is_hard_cal": gate in HARD_CAL_GATES,
+        }
+        if not gate:
+            return True, "", telemetry  # unknown kinds are filtered earlier by item_invalid_reason
+        if gate not in HARD_CAL_GATES:
+            # Soft-cal gates (omission, curator, reverse-auditor) do not gate
+            # dispatch. Calibration may still be run out-of-band by a separate
+            # ceremony; the processor does not stop them.
+            telemetry["state"] = "soft-cal-skipped"
+            return True, "", telemetry
+        version = self.gate_template_version(gate)
+        if not version:
+            telemetry["state"] = "template-unresolvable"
+            return False, f"audit-error: hard-cal gate uncalibrated ({gate}: template unresolvable)", telemetry
+        telemetry["gate_template_version"] = version
+        state = self.read_marker_state(gate, version)
+        telemetry["initial_state"] = state
+        if state == "calibrated":
+            telemetry["state"] = "calibrated"
+            return True, "", telemetry
+        # pre-calibration: run the calibration runner once before the first
+        # dispatch on this template-version. calibration-failed: refuse to
+        # dispatch until the template version changes — there is no inline
+        # manual override.
+        if state == "calibration-failed":
+            telemetry["state"] = "calibration-failed"
+            return False, f"audit-error: hard-cal gate uncalibrated ({gate}: calibration-failed at template-version {version})", telemetry
+        ok, runner_reason = self.invoke_calibration_runner(gate)
+        telemetry["runner_invoked"] = True
+        telemetry["runner_reason"] = runner_reason
+        if not ok:
+            telemetry["state"] = "calibration-failed"
+            return False, f"audit-error: hard-cal gate uncalibrated ({gate}: {runner_reason})", telemetry
+        # Substrate-missing case: runner returned ok with a fixture_set_missing
+        # note. Treat as "calibration substrate not yet installed in this
+        # KDIR" and allow dispatch. Production KDIRs ship the fixture trees
+        # from `scripts/calibration-fixture-builder.py --gate all` so this
+        # branch is reached only in workspaces that have not yet provisioned
+        # the substrate (legacy KDIRs, isolated test KDIRs).
+        if runner_reason.startswith("fixture_set_missing:"):
+            telemetry["state"] = "substrate-not-provisioned"
+            return True, "", telemetry
+        # Re-check marker after a successful run.
+        post_state = self.read_marker_state(gate, version)
+        telemetry["state"] = post_state
+        if post_state == "calibrated":
+            return True, "", telemetry
+        return False, f"audit-error: hard-cal gate uncalibrated ({gate}: runner_ok but marker not flipped)", telemetry
+
     def process_once(self, settings: dict[str, Any]) -> dict[str, Any]:
         self.ensure()
         if not settings["enabled"]:
@@ -1188,6 +1495,23 @@ class Settlement:
                 self.save_queue(queue)
                 self.save_leases(leases)
                 return {"ok": True, "dispatched": False, "reason": "invalid_task_claim", "item_id": item.get("id"), "run": run}
+            # For hard-cal gates the marker for the current gate
+            # template-version must read `calibrated` before dispatch. On
+            # pre-calibration the runner runs once and the marker is
+            # re-checked; on calibration-failed dispatch is refused and an
+            # audit-error event is surfaced. The item stays at the head of
+            # the queue so a later template-version change can lift the gate.
+            ok_calibration, calibration_reason, calibration_telemetry = self.calibration_precondition(item)
+            if not ok_calibration:
+                self.save_queue(queue)
+                self.save_leases(leases)
+                return {
+                    "ok": True,
+                    "dispatched": False,
+                    "reason": calibration_reason,
+                    "item_id": item.get("id"),
+                    "calibration": calibration_telemetry,
+                }
             usage = self.load_usage()
             try:
                 self.reserve_budget(settings, usage)
@@ -1230,6 +1554,36 @@ class Settlement:
             self.save_queue(queue)
             self.save_leases(leases)
         return {"ok": True, "dispatched": True, "item_id": item["id"], "run": run}
+
+    def drain(self, settings: dict[str, Any], max_iterations: int = 200) -> dict[str, Any]:
+        iterations = 0
+        dispatched = 0
+        aborted = False
+        last_reason = ""
+        while iterations < max_iterations:
+            iterations += 1
+            result = self.process_once(settings)
+            reason = str(result.get("reason") or "")
+            last_reason = reason
+            if result.get("dispatched"):
+                dispatched += 1
+                continue
+            if reason == "empty_queue":
+                break
+            if reason == "pipeline-degraded" or reason.startswith("audit-error: hard-cal gate uncalibrated"):
+                aborted = True
+                break
+            break
+        queue = self.load_queue()
+        remaining = sum(1 for it in queue.get("items", []) if it.get("status") == "pending")
+        return {
+            "ok": True,
+            "aborted": aborted,
+            "iterations": iterations,
+            "dispatched": dispatched,
+            "remaining": remaining,
+            "last_reason": last_reason,
+        }
 
     def execute_item(self, item: dict[str, Any], run_id: str, chosen: dict[str, Any], settings: dict[str, Any], executor: list[str]) -> dict[str, Any]:
         env = os.environ.copy()
@@ -1275,10 +1629,14 @@ class Settlement:
             if verdict.get("verdict") == "error":
                 status = "failed"
                 reason = "executor_audit_error"
+        item_kind = str(item.get("kind") or KIND_TASK_CLAIM)
+        item_source_id = str(item.get("source_id") or item.get("claim_id") or item.get("candidate_id") or item.get("contradiction_id") or "")
         run = {
             "version": VERSION,
             "run_id": run_id,
             "item_id": item["id"],
+            "kind": item_kind,
+            "source_id": item_source_id,
             "work_item": item.get("work_item"),
             "claim_id": item.get("claim_id"),
             "claim": item.get("claim"),
@@ -1410,6 +1768,13 @@ class Settlement:
         verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
         if verdict.get("verdict") != "contradicted":
             return None
+        # Auto-correction (--mutate path) only applies to task-claim runs whose
+        # contradicted verdict carries a claim+correction pair that mutates an
+        # existing commons entry. omission and consumption-contradiction kinds
+        # do not produce direct mutations through this path (their commons
+        # interactions land via --add-entry in Phase 2/3 ceremony work).
+        if str(run.get("kind") or KIND_TASK_CLAIM) != KIND_TASK_CLAIM:
+            return {"status": "skipped", "reason": "non_task_claim_kind"}
         run_id = str(run.get("run_id") or "")
         if os.environ.get("LORE_SETTLEMENT_DISABLE_AUTO_CORRECTION", "").strip():
             return {"status": "skipped", "reason": "auto_correction_disabled"}
@@ -1619,15 +1984,17 @@ def resolve_kdir(arg: str | None) -> Path:
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="settlement-processor.py")
-    ap.add_argument("command", choices=["enqueue", "scan", "status", "process", "enable", "disable", "queue", "retry-errors"])
+    ap.add_argument("command", choices=["enqueue", "scan", "status", "process", "enable", "disable", "queue", "retry-errors", "drain"])
     ap.add_argument("subcommand", nargs="?")
     ap.add_argument("--kdir")
     ap.add_argument("--work-item")
+    ap.add_argument("--kind", choices=list(KINDS), default=KIND_TASK_CLAIM)
     ap.add_argument("--claim-id", action="append", default=[])
     ap.add_argument("--row-file")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--max-iterations", type=int, default=200)
     args = ap.parse_args()
 
     settlement = Settlement(resolve_kdir(args.kdir))
@@ -1637,7 +2004,7 @@ def main() -> int:
         if not args.work_item:
             raise SystemExit("[settlement] Error: enqueue requires --work-item")
         row_text = Path(args.row_file).read_text(encoding="utf-8") if args.row_file else sys.stdin.read()
-        out = settlement.enqueue_row(args.work_item, json.loads(row_text))
+        out = settlement.enqueue_row(args.work_item, json.loads(row_text), args.kind)
     elif args.command == "scan":
         out = settlement.scan()
     elif args.command == "status":
@@ -1656,6 +2023,10 @@ def main() -> int:
         out = settlement.recompute_queue(settings, reason="manual", force=False)
     elif args.command == "retry-errors":
         out = settlement.retry_error_audits(work_item=args.work_item, claim_ids=args.claim_id, dry_run=args.dry_run)
+    elif args.command == "drain":
+        if args.max_iterations <= 0:
+            raise SystemExit("[settlement] Error: --max-iterations must be > 0")
+        out = settlement.drain(settings, max_iterations=args.max_iterations)
     else:
         raise AssertionError(args.command)
 

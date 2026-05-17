@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# apply-correction.sh — Apply a correction to a knowledge entry from a contradicted verdict
+# apply-correction.sh — Apply a correction OR add a new entry to the knowledge commons
 #
-# Usage:
+# Two modes, keyed on the presence of --add-entry:
+#
+# Mutation mode (default):
 #   apply-correction.sh --entry <path> --verdict-id <id> --verdict-source <source>
 #                        --evidence "<file:line quote>"
 #                        --superseded-text "<snippet>"
@@ -12,13 +14,39 @@
 #                        [--allow-settlement-verdict]
 #                        [--dry-run]
 #
-# When a correctness-gate or reverse-auditor verdict produces a 'contradicted' result
-# and that verdict maps to an existing commons entry, this script:
-#   1. Checks the verdict's calibration_state in rows.jsonl — rejects if not 'calibrated'.
-#   2. Replaces the superseded_text snippet in the entry body with replacement_text.
-#   3. Appends a corrections[] YAML item to the entry's HTML META block.
+# Add-entry mode:
+#   apply-correction.sh --add-entry
+#                        --entry <new-path>
+#                        --title <title>
+#                        --body <body>
+#                        --scale <scale>
+#                        --verdict-id <id> --verdict-source <source>
+#                        --evidence "<file:line quote>"
+#                        --allow-settlement-verdict
+#                        [--meta-fields <key=val,...>]
+#                        [--date <YYYY-MM-DD>]
+#                        [--dry-run]
 #
-# With --check-escalation, also evaluates L3 conditions:
+# Mutation mode: replaces the superseded_text snippet in <entry> with
+# replacement_text and appends a corrections[] item to the META block.
+# Authorization (default scorecard path): requires the verdict's
+# calibration_state in rows.jsonl to be 'calibrated'.
+# Authorization with --allow-settlement-verdict: validates against
+# _settlement/runs/<verdict-id>.json — verdict.verdict must be 'contradicted'
+# from a calibrated hard-cal gate (correctness-gate-assertion or
+# correctness-gate-contradiction) with a non-empty correction.
+#
+# Add-entry mode: creates a NEW commons entry at <new-path> from <title>,
+# <body>, <scale>, and optional --meta-fields. Forbids --superseded-text and
+# --replacement-text. Authorization always requires --allow-settlement-verdict
+# and validates against _settlement/runs/<verdict-id>.json — verdict.verdict
+# must be 'verified' and the run must be either
+#   (a) kind=task-claim with curator-selected + capture-gate-passed markers, OR
+#   (b) kind=omission with capture-gate-passed marker.
+# The capture-gate / curator markers land on the run record in Phase 2; for
+# now the gate accepts a non-empty 'verified' verdict with matching kind.
+#
+# With --check-escalation (mutation mode only), also evaluates L3 conditions:
 #   (a) entry has >= N inbound backlinks (default 3) in _manifest.json
 #   (b) entry's scale: field in META == 'architecture'
 #   (c) entry's META has safety-relevant: true or evaluation-rule-relevant: true
@@ -42,9 +70,9 @@
 # Exit codes:
 #   0 — success
 #   1 — usage error
-#   2 — entry not found or superseded_text not found in body
+#   2 — entry not found or superseded_text not found in body, or add-entry path conflict
 #   3 — META block not found (unexpected entry format)
-#   4 — verdict not calibrated (write gate rejected)
+#   4 — verdict not authorized (write gate rejected)
 
 set -euo pipefail
 
@@ -62,21 +90,36 @@ CHECK_ESCALATION=0
 BACKLINK_THRESHOLD=3
 DRY_RUN=0
 ALLOW_SETTLEMENT_VERDICT=0
+ADD_ENTRY_MODE=0
+NEW_TITLE=""
+NEW_BODY=""
+NEW_SCALE=""
+META_FIELDS=""
 
 usage() {
   cat >&2 <<EOF
-Usage: apply-correction.sh --entry <path> --verdict-id <id> --verdict-source <source>
-                            --evidence "<file:line quote>"
-                            --superseded-text "<snippet>"
-                            --replacement-text "<snippet>"
-                            [--date <YYYY-MM-DD>]
-                            [--check-escalation]
-                            [--backlink-threshold N]
-                            [--dry-run]
+Mutation mode:
+  apply-correction.sh --entry <path> --verdict-id <id> --verdict-source <source>
+                       --evidence "<file:line quote>"
+                       --superseded-text "<snippet>"
+                       --replacement-text "<snippet>"
+                       [--date <YYYY-MM-DD>]
+                       [--check-escalation]
+                       [--backlink-threshold N]
+                       [--allow-settlement-verdict]
+                       [--dry-run]
 
-Apply a correction from a contradicted verdict to a knowledge entry.
+Add-entry mode:
+  apply-correction.sh --add-entry --entry <new-path>
+                       --title <title> --body <body> --scale <scale>
+                       --verdict-id <id> --verdict-source <source>
+                       --evidence "<file:line quote>"
+                       --allow-settlement-verdict
+                       [--meta-fields key=val,...]
+                       [--date <YYYY-MM-DD>]
+                       [--dry-run]
 
-Required:
+Required (mutation):
   --entry PATH              Absolute path to the target knowledge entry (.md file)
   --verdict-id ID           The verdict_id from the scorecard row
   --verdict-source SOURCE   'correctness-gate' or 'reverse-auditor'
@@ -84,13 +127,26 @@ Required:
   --superseded-text TEXT    The text snippet in the entry body to replace
   --replacement-text TEXT   The replacement text
 
+Required (add-entry):
+  --add-entry                  Switch to add-entry mode (creates NEW commons entry)
+  --entry PATH                 Absolute target path under \$KDIR/; MUST NOT exist
+  --title TEXT                 H1 title for the new entry
+  --body TEXT                  Prose body content
+  --scale SCALE                Scale bucket — abstract|architecture|subsystem|implementation
+  --verdict-id ID              Settlement run id
+  --verdict-source SOURCE      'correctness-gate' or 'reverse-auditor'
+  --evidence TEXT              file:line citation
+  --allow-settlement-verdict   Required in add-entry mode; validates the run
+
 Optional:
   --date YYYY-MM-DD            Override the correction date (default: today)
-  --check-escalation           Evaluate L3 escalation conditions and create supersedes edge if triggered
+  --check-escalation           [mutation mode only] Evaluate L3 escalation conditions
   --backlink-threshold N       Backlink in-degree >= N triggers escalation (default: 3)
+  --meta-fields key=val,...    [add-entry mode only] Additional META fields
   --allow-settlement-verdict   Bypass the scorecard calibration_state gate; validate
                                against _settlement/runs/<verdict-id>.json instead.
                                Used by the autonomous settlement->commons loop.
+                               Required in add-entry mode.
   --dry-run                    Print what would change without writing
 EOF
 }
@@ -145,6 +201,26 @@ while [[ $# -gt 0 ]]; do
       ALLOW_SETTLEMENT_VERDICT=1
       shift
       ;;
+    --add-entry)
+      ADD_ENTRY_MODE=1
+      shift
+      ;;
+    --title)
+      NEW_TITLE="$2"
+      shift 2
+      ;;
+    --body)
+      NEW_BODY="$2"
+      shift 2
+      ;;
+    --scale)
+      NEW_SCALE="$2"
+      shift 2
+      ;;
+    --meta-fields)
+      META_FIELDS="$2"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -157,15 +233,51 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --- Validate required args ---
-for flag_name in ENTRY_PATH VERDICT_ID VERDICT_SOURCE EVIDENCE SUPERSEDED_TEXT REPLACEMENT_TEXT; do
-  if [[ -z "${!flag_name}" ]]; then
-    flag_dashed="${flag_name//_/-}"
-    echo "Error: --${flag_dashed,,} is required" >&2
+# --- Validate required args (per mode) ---
+if [[ "$ADD_ENTRY_MODE" == "1" ]]; then
+  # Add-entry mode forbids the mutation-specific text flags and demands the
+  # new-entry-specific ones plus the settlement authorization. This branch
+  # creates a NEW commons entry rather than mutating an existing one.
+  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" ]]; then
+    echo "Error: --add-entry forbids --superseded-text and --replacement-text" >&2
     usage
     exit 1
   fi
-done
+  for flag_name in ENTRY_PATH VERDICT_ID VERDICT_SOURCE EVIDENCE NEW_TITLE NEW_BODY NEW_SCALE; do
+    if [[ -z "${!flag_name}" ]]; then
+      flag_dashed="${flag_name//_/-}"
+      case "$flag_name" in
+        NEW_TITLE) flag_label="--title" ;;
+        NEW_BODY)  flag_label="--body" ;;
+        NEW_SCALE) flag_label="--scale" ;;
+        *)         flag_label="--${flag_dashed,,}" ;;
+      esac
+      echo "Error: $flag_label is required in --add-entry mode" >&2
+      usage
+      exit 1
+    fi
+  done
+  if [[ "$ALLOW_SETTLEMENT_VERDICT" != "1" ]]; then
+    echo "Error: --add-entry requires --allow-settlement-verdict" >&2
+    exit 1
+  fi
+  case "$NEW_SCALE" in
+    abstract|architecture|subsystem|implementation) : ;;
+    *)
+      echo "Error: --scale must be 'abstract', 'architecture', 'subsystem', or 'implementation' (got '$NEW_SCALE')" >&2
+      exit 1
+      ;;
+  esac
+else
+  for flag_name in ENTRY_PATH VERDICT_ID VERDICT_SOURCE EVIDENCE SUPERSEDED_TEXT REPLACEMENT_TEXT; do
+    if [[ -z "${!flag_name}" ]]; then
+      flag_dashed="${flag_name//_/-}"
+      echo "Error: --${flag_dashed,,} is required" >&2
+      usage
+      exit 1
+    fi
+  done
+fi
 
 case "$VERDICT_SOURCE" in
   correctness-gate|reverse-auditor) ;;
@@ -175,7 +287,12 @@ case "$VERDICT_SOURCE" in
     ;;
 esac
 
-if [[ ! -f "$ENTRY_PATH" ]]; then
+if [[ "$ADD_ENTRY_MODE" == "1" ]]; then
+  if [[ -e "$ENTRY_PATH" ]]; then
+    echo "Error: --add-entry target already exists: $ENTRY_PATH" >&2
+    exit 2
+  fi
+elif [[ ! -f "$ENTRY_PATH" ]]; then
   echo "Error: entry not found: $ENTRY_PATH" >&2
   exit 2
 fi
@@ -198,7 +315,31 @@ if [[ "$ALLOW_SETTLEMENT_VERDICT" == "1" ]]; then
     echo "Correction rejected: --allow-settlement-verdict set but settlement run not found: $RUN_FILE" >&2
     exit 4
   fi
-  SETTLEMENT_OK=$(python3 -c '
+  # Two authorization branches keyed on mode:
+  #   mutate    → verdict.verdict == "contradicted" + non-empty correction
+  #   add-entry → verdict.verdict == "verified" + matching kind (task-claim
+  #               with curator-selected + capture-gate-passed, OR omission
+  #               with capture-gate-passed). The curator/capture markers are
+  #               written on the run record in Phase 2; for now we accept a
+  #               verified verdict with kind ∈ {task-claim, omission}.
+  if [[ "$ADD_ENTRY_MODE" == "1" ]]; then
+    SETTLEMENT_OK=$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        run = json.load(f)
+except (OSError, json.JSONDecodeError):
+    print("unreadable"); sys.exit(0)
+verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
+if verdict.get("verdict") != "verified":
+    print("not_verified"); sys.exit(0)
+kind = run.get("kind") or "task-claim"
+if kind not in ("task-claim", "omission"):
+    print(f"non_addable_kind:{kind}"); sys.exit(0)
+print("ok")
+' "$RUN_FILE" 2>/dev/null || echo "error")
+  else
+    SETTLEMENT_OK=$(python3 -c '
 import json, sys
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
@@ -213,6 +354,7 @@ if not (isinstance(correction, str) and correction.strip()):
     print("empty_correction"); sys.exit(0)
 print("ok")
 ' "$RUN_FILE" 2>/dev/null || echo "error")
+  fi
   if [[ "$SETTLEMENT_OK" != "ok" ]]; then
     echo "Correction rejected: settlement verdict $VERDICT_ID failed authorization check ($SETTLEMENT_OK)" >&2
     exit 4
@@ -247,6 +389,105 @@ print("unknown")
     echo "Correction rejected: verdict $VERDICT_ID is in calibration_state=$CAL_STATE. Only calibrated verdicts may modify the commons." >&2
     exit 4
   fi
+fi
+
+# --- Add-entry mode: write the new commons entry and exit. ---
+# The new entry layout is the canonical lore commons format:
+#   # <title>
+#   <body>
+#   <!-- learned: <date> | scale: <scale> | source: settlement-add-entry | verdict_id: <id> | verdict_source: <source> [| <meta-fields>] -->
+# The entry path was validated earlier (must not exist; must resolve under $KDIR).
+if [[ "$ADD_ENTRY_MODE" == "1" ]]; then
+  # Reject attempts to plant entries outside $KDIR.
+  abs_entry=$(python3 -c '
+import os, sys
+p = os.path.abspath(sys.argv[1])
+print(p)
+' "$ENTRY_PATH")
+  abs_kdir=$(python3 -c '
+import os, sys
+print(os.path.abspath(sys.argv[1]))
+' "$KDIR")
+  case "$abs_entry" in
+    "$abs_kdir"/*) : ;;
+    *)
+      echo "Error: --entry path must resolve under \$KDIR ($abs_kdir): $abs_entry" >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "[dry-run][add-entry] Would create: $abs_entry"
+    echo "[dry-run][add-entry]   title:  $NEW_TITLE"
+    echo "[dry-run][add-entry]   scale:  $NEW_SCALE"
+    echo "[dry-run][add-entry]   verdict_id: $VERDICT_ID  verdict_source: $VERDICT_SOURCE"
+    if [[ -n "$META_FIELDS" ]]; then
+      echo "[dry-run][add-entry]   meta:   $META_FIELDS"
+    fi
+    exit 0
+  fi
+
+  mkdir -p "$(dirname "$abs_entry")"
+  ADD_ENTRY_PATH="$abs_entry" \
+  ADD_ENTRY_TITLE="$NEW_TITLE" \
+  ADD_ENTRY_BODY="$NEW_BODY" \
+  ADD_ENTRY_SCALE="$NEW_SCALE" \
+  ADD_ENTRY_DATE="$DATE_TODAY" \
+  ADD_ENTRY_VERDICT_ID="$VERDICT_ID" \
+  ADD_ENTRY_VERDICT_SOURCE="$VERDICT_SOURCE" \
+  ADD_ENTRY_EVIDENCE="$EVIDENCE" \
+  ADD_ENTRY_META_FIELDS="$META_FIELDS" \
+  python3 <<'ADDENTRY_PY'
+import os, json
+
+path = os.environ["ADD_ENTRY_PATH"]
+title = os.environ["ADD_ENTRY_TITLE"].strip()
+body = os.environ["ADD_ENTRY_BODY"]
+scale = os.environ["ADD_ENTRY_SCALE"]
+date_today = os.environ["ADD_ENTRY_DATE"]
+verdict_id = os.environ["ADD_ENTRY_VERDICT_ID"]
+verdict_source = os.environ["ADD_ENTRY_VERDICT_SOURCE"]
+evidence = os.environ["ADD_ENTRY_EVIDENCE"]
+meta_fields = os.environ.get("ADD_ENTRY_META_FIELDS", "")
+
+meta_parts = [
+    f"learned: {date_today}",
+    f"scale: {scale}",
+    "source: settlement-add-entry",
+    f"verdict_source: {verdict_source}",
+    f"verdict_id: {verdict_id}",
+]
+if evidence:
+    meta_parts.append(f"evidence: {evidence}")
+if meta_fields:
+    for pair in meta_fields.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            continue
+        k, v = pair.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if not k:
+            continue
+        meta_parts.append(f"{k}: {v}")
+
+meta_block = "<!-- " + " | ".join(meta_parts) + " -->"
+content_parts = [f"# {title}", "", body.rstrip(), "", meta_block, ""]
+content = "\n".join(content_parts)
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write(content)
+ADDENTRY_PY
+
+  rel=$(python3 -c '
+import os, sys
+print(os.path.relpath(sys.argv[1], sys.argv[2]))
+' "$abs_entry" "$abs_kdir")
+  echo "[add-entry] Created $rel"
+  echo "  verdict_id=$VERDICT_ID  verdict_source=$VERDICT_SOURCE"
+  echo "  scale=$NEW_SCALE"
+  exit 0
 fi
 
 # --- L3 escalation check (task-61) ---

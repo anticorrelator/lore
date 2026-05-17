@@ -30,12 +30,12 @@
 #       [--normalized-snippet-hash <sha256>]
 #       [--symbol-anchor <anchor>]
 #       [--severity-hint low|medium|high]
-#       [--status pending|accepted|declined|remediated|verified|rejected]
-#         # Note: pending|accepted|declined|remediated are legacy values
-#         # (still parsed identically). verified|rejected are the canonical
-#         # terminal states set via consumption-contradiction-update-status.sh
-#         # after a correctness-gate verdict (see D3 in
-#         # restore-evolve-gates-add-recurring-failure-path-se).
+#       [--status pending|verified|rejected]
+#         # pending is the initial state at row append time.
+#         # verified|rejected are the canonical terminal states set via
+#         # consumption-contradiction-update-status.sh after a
+#         # correctness-gate verdict. Legacy values (accepted|declined|
+#         # remediated) are no longer accepted — the writer rejects them.
 #       [--contradiction-id <ctr-id>]
 #       [--settled-by-run-id <id>]
 #       [--created-at <iso8601>]
@@ -80,7 +80,7 @@ Usage: consumption-contradiction-append.sh \
            [--normalized-snippet-hash <sha256>] \
            [--symbol-anchor <anchor>] \
            [--severity-hint low|medium|high] \
-           [--status pending|accepted|declined|remediated|verified|rejected] \
+           [--status pending|verified|rejected] \
            [--contradiction-id <ctr-id>] \
            [--settled-by-run-id <id>] \
            [--created-at <iso8601>] \
@@ -198,18 +198,17 @@ case "$SOURCE_KIND" in
 esac
 
 # --- Enum validation: --status (default pending) ---
+# Canonical vocabulary only: pending (initial) | verified | rejected (terminal).
+# verified/rejected are set by consumption-contradiction-update-status.sh after
+# a correctness-gate verdict; the append writer should normally see pending.
+# Legacy values (accepted|declined|remediated) are no longer accepted.
 if [[ -z "$STATUS" ]]; then
   STATUS="pending"
 fi
 case "$STATUS" in
-  # Legacy values — kept for back-compat parsing of older rows.
-  pending|accepted|declined|remediated) : ;;
-  # Canonical terminal values set by consumption-contradiction-update-status.sh
-  # after a correctness-gate verdict (D3 of
-  # restore-evolve-gates-add-recurring-failure-path-se).
-  verified|rejected) : ;;
+  pending|verified|rejected) : ;;
   *)
-    fail "--status must be 'pending', 'accepted', 'declined', 'remediated', 'verified', or 'rejected' (got '$STATUS')"
+    fail "--status must be 'pending', 'verified', or 'rejected' (got '$STATUS')"
     ;;
 esac
 

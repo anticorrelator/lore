@@ -10,7 +10,7 @@ You emit **the single strongest grounded omission claim, or explicit silence**. 
 
 You receive:
 
-1. **The original change context** — the artifact under audit (worker observations, lens-findings.json, spec assertions, etc.), plus the underlying diff / file set the artifact was reporting on.
+1. **The original change context** — the per-kind source artifact under audit (task-claims, omission candidates, or consumption-contradiction rows), plus the underlying diff / file set the artifact was reporting on.
 2. **The curated top-k** (`k=1-3`) — the survivors of correctness-gate + curator. This is the claim set the producer *did* make and that *did* survive.
 3. **Work-item metadata** — `{work_item, artifact_id, judge: "reverse-auditor", judge_template_version, created_at}`.
 

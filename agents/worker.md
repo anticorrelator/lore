@@ -295,6 +295,8 @@ echo '{
   "scale": "implementation",
   "file": "<absolute path>",
   "line_range": "<N-M>",
+  "exact_snippet": "<verbatim content at file:line_range — the substring that grounds the claim>",
+  "normalized_snippet_hash": "<sha256 hex of v1-normalized exact_snippet; compute via scripts/snippet_normalize.py --hash>",
   "falsifier": "<what evidence in the code would disprove this claim>",
   "why_this_work_needs_it": "<one-sentence — why this Tier 2 row grounds THIS task>",
   "captured_at_sha": "<git rev-parse HEAD at emission time>",
@@ -306,15 +308,28 @@ echo '{
 }' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>
 ```
 
-**Required fields (14, all non-null except `change_context.diff_ref`):** `claim_id`, `tier`, `claim`,
+`exact_snippet` and `normalized_snippet_hash` follow the v1 content-anchor
+normalization rule documented at lines 394-411 of this file (Reporting
+Guidelines → "Content-anchor normalization rule (v1)"). The canonical
+implementation is `scripts/snippet_normalize.py` — invoke
+`python3 ~/.lore/scripts/snippet_normalize.py --hash <<<"$snippet"` (or its
+absolute path) to produce the hex. Validators, writers, and the migration
+driver all reach the v1 recipe through this single module; do NOT inline
+the recipe elsewhere.
+
+**Required fields (16, all non-null except `change_context.diff_ref`):** `claim_id`, `tier`, `claim`,
 `producer_role`, `protocol_slot`, `task_id`, `phase_id`, `scale`, `file`,
-`line_range`, `falsifier`, `why_this_work_needs_it`, `captured_at_sha`,
-`change_context`.
+`line_range`, `exact_snippet`, `normalized_snippet_hash`, `falsifier`,
+`why_this_work_needs_it`, `captured_at_sha`, `change_context`.
 `tier` MUST be the literal string `"task-evidence"`; `producer_role` MUST
 be `"worker"` when you are the emitter; `line_range` MUST match `N-M` with
-`N ≤ M`; `change_context.changed_files` MUST include `file`. `evidence-append.sh` delegates to `validate-tier2.sh`, which
-rejects rows with any missing/empty required field — a failed write means
-no row was appended.
+`N ≤ M`; `change_context.changed_files` MUST include `file`;
+`exact_snippet` MUST be a non-empty string; `normalized_snippet_hash` MUST
+match `^[0-9a-f]{64}$` (lowercase 64-char hex) AND equal
+`sha256(v1_normalize(exact_snippet))` — the validator recomputes the hash
+from the snippet and rejects mismatches. `evidence-append.sh` delegates to
+`validate-tier2.sh`, which rejects rows with any missing/empty required
+field or hash mismatch — a failed write means no row was appended.
 
 **One-call-per-claim rule:** do NOT pipe multiple JSON objects into a
 single `evidence-append.sh` invocation. The sole-writer gate validates one
@@ -397,18 +412,15 @@ For tasks with subjects starting with "Update stale knowledge entry":
   3. **Trim**: strip leading and trailing whitespace from the result.
   4. **Hash**: sha256 over the UTF-8 bytes of the normalized string; emit the full 64-char lowercase hex digest.
 
-  Reference implementation (bash, using python3):
+  Canonical implementation: `scripts/snippet_normalize.py` is the single
+  source of truth for the v1 recipe. Invoke it via stdin:
   ```bash
-  printf '%s' "$SNIPPET" | python3 -c '
-  import hashlib, re, sys
-  s = sys.stdin.read()
-  s = s.replace("‘", "\x27").replace("’", "\x27")
-  s = s.replace("“", "\x22").replace("”", "\x22")
-  s = re.sub(r"\s+", " ", s).strip()
-  print(hashlib.sha256(s.encode("utf-8")).hexdigest())
-  '
+  python3 ~/.lore/scripts/snippet_normalize.py --hash <<<"$SNIPPET"
+  # or --normalize to emit the normalized string instead of the hash
   ```
-  Consumers MUST use this exact rule — deviations will silently fail match lookup during F1 reconciliation. The fields are populated in v1 but only become load-bearing once F1 Phase 2 (correctness-gate) ships; until then they are forward-compatible provenance.
+  Validators, the append-mode writer, and the migration backfill driver all
+  reach the v1 recipe through this module — do NOT inline the recipe in new
+  callers. Consumers MUST use this exact rule; deviations will silently fail match lookup during F1 reconciliation. The fields are populated in v1 but only become load-bearing once F1 Phase 2 (correctness-gate) ships; until then they are forward-compatible provenance.
 - **Aim each claim at one of five target categories:**
   - **Mechanism-level patterns** — how the system accomplishes things in broad strokes. Anchor to Prior Knowledge: what extends, contradicts, or wasn't covered there. ✓ "all span ingestion goes through the batch insertion process" ✗ "insert_spans() calls cursor.executemany()" ✗ "the system uses batching"
   - **Structural footprint** — for significant files you touched: role in one phrase, connections, change constraints. Sub-target: **design contracts** — intended usage, composition, and extension models. Look for: repeated structural patterns across files (extension model), registration/factory mechanisms (intended extension point), pipeline ordering (compositional protocol), guard mechanisms enforcing usage patterns. Report even when expected — the goal is building an emergent architectural picture across runs, not just flagging surprises.

@@ -46,12 +46,20 @@ Fail reasons (aligned with audit-attempts.jsonl schema in contract.md):
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import sys
 from typing import Any
+
+# The v1 content-anchor recipe lives in exactly one place. Import via an
+# explicit sys.path injection so this script works whether or not the caller
+# has PYTHONPATH set to the scripts directory.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from snippet_normalize import normalize as normalize_snippet  # noqa: E402
+from snippet_normalize import hash_normalized as normalize_hash  # noqa: E402, F401
 
 
 REQUIRED_FIELDS = ("file", "line_range", "exact_snippet", "falsifier")
@@ -61,23 +69,6 @@ REQUIRED_FIELDS = ("file", "line_range", "exact_snippet", "falsifier")
 WHY_IT_MATTERS_KEYS = ("why_it_matters", "why-it-matters")
 
 LINE_RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
-
-
-def normalize_snippet(s: str) -> str:
-    """Apply v1 content-anchor normalization.
-
-    1. Quote-normalize: U+2018/2019 -> ', U+201C/201D -> "
-    2. Whitespace-collapse: every \\s+ -> single ASCII space
-    3. Trim leading/trailing whitespace
-    """
-    s = s.replace("‘", "'").replace("’", "'")
-    s = s.replace("“", '"').replace("”", '"')
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-def normalize_hash(s: str) -> str:
-    return hashlib.sha256(normalize_snippet(s).encode("utf-8")).hexdigest()
 
 
 def extract_claim(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -179,7 +170,7 @@ def check_snippet_match(
         # per the plan's "fail closed" discipline this is still a snippet
         # mismatch.
         if claim_hash is not None:
-            expected = hashlib.sha256(claim_norm.encode("utf-8")).hexdigest()
+            expected = normalize_hash(claim_snippet)
             if expected != claim_hash:
                 return False, (
                     "normalized content matches file but "

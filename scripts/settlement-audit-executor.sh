@@ -93,17 +93,23 @@ try:
     payload = json.loads(os.environ.get("INPUT_JSON", ""))
     item = payload.get("item") or {}
     work_item = item.get("work_item") or ""
-    claim_id = item.get("claim_id") or ""
+    kind = item.get("kind") or "task-claim"
+    # source_id is the natural id of the source row: claim_id for task-claim,
+    # candidate_id for omission, contradiction_id for consumption-contradiction.
+    # Older queue items only carry claim_id; fall back so historical rows still
+    # process. The executor forwards this as `lore audit --kind <K> --id <ID>`.
+    source_id = item.get("source_id") or item.get("claim_id") or item.get("candidate_id") or item.get("contradiction_id") or ""
+    claim_id = item.get("claim_id") or source_id
 except Exception as exc:
     print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
     sys.exit(0)
 
 if not work_item:
     print(json.dumps({"ok": False, "error": "input item.work_item is required"}))
-elif not claim_id:
-    print(json.dumps({"ok": False, "error": "input item.claim_id is required"}))
+elif not source_id:
+    print(json.dumps({"ok": False, "error": "input item.source_id (or claim_id) is required"}))
 else:
-    print(json.dumps({"ok": True, "work_item": work_item, "claim_id": claim_id}))
+    print(json.dumps({"ok": True, "work_item": work_item, "claim_id": claim_id, "kind": kind, "source_id": source_id}))
 PYEOF
 then
   echo "[settlement-executor] Error: failed to parse input payload" >&2
@@ -121,6 +127,8 @@ fi
 
 work_item=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["work_item"])' "$fields_file")
 claim_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["claim_id"])' "$fields_file")
+kind=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kind"])' "$fields_file")
+source_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_id"])' "$fields_file")
 
 extra_args=()
 if [[ -n "${LORE_SETTLEMENT_AUDIT_ARGS:-}" ]]; then
@@ -169,7 +177,21 @@ done
 if [[ -z "$audit_kdir" ]]; then
   audit_kdir=$(resolve_knowledge_dir 2>/dev/null || echo "")
 fi
-task_claims_path=""
+
+# Map kind to its sole source filename. Mirrors KIND_SOURCES in
+# settlement-processor.py — both must agree.
+source_filename=""
+case "$kind" in
+  task-claim)                 source_filename="task-claims.jsonl" ;;
+  omission)                   source_filename="audit-candidates.jsonl" ;;
+  consumption-contradiction)  source_filename="consumption-contradictions.jsonl" ;;
+  *)
+    echo "[settlement-executor] Error: unknown kind '$kind'" >&2
+    emit_envelope "error" "unknown kind: $kind" "" "1" ""
+    exit 0
+    ;;
+esac
+
 work_dir=""
 if [[ -n "$audit_kdir" ]]; then
   # Walk the active path first, then _archive/. We pick by ARTIFACT presence,
@@ -186,7 +208,7 @@ if [[ -n "$audit_kdir" ]]; then
   for candidate in "${candidate_dirs[@]}"; do
     [[ -d "$candidate" ]] || continue
     any_dir_present=1
-    if [[ -f "$candidate/task-claims.jsonl" || -f "$candidate/lens-findings.json" || -f "$candidate/execution-log.md" || -f "$candidate/plan.md" ]]; then
+    if [[ -f "$candidate/$source_filename" ]]; then
       work_dir="$candidate"
       break
     fi
@@ -195,38 +217,23 @@ if [[ -n "$audit_kdir" ]]; then
     echo "[settlement-executor] Resolving work_item=$work_item from _archive (active dir absent or stub)" >&2
   fi
   if [[ -z "$work_dir" && "$any_dir_present" -eq 1 ]]; then
-    # At least one candidate dir existed but none held an auditable artifact —
-    # this is the same "no auditable artifact" condition the original guard
-    # detected. Skip rather than falling through to a hopeless `lore audit <slug>`.
-    echo "[settlement-executor] Skipping work_item=$work_item: no auditable artifact" >&2
-    emit_envelope "skipped" "no auditable artifact for work_item=$work_item" "" "0" ""
+    # At least one candidate dir existed but none held the per-kind source
+    # file — skip rather than driving the audit on a missing source.
+    echo "[settlement-executor] Skipping work_item=$work_item kind=$kind: no $source_filename" >&2
+    emit_envelope "skipped" "no auditable artifact for work_item=$work_item kind=$kind" "" "0" ""
     exit 0
   fi
 fi
-if [[ -n "$work_dir" && -f "$work_dir/task-claims.jsonl" ]]; then
-  task_claims_path="$work_dir/task-claims.jsonl"
-fi
 
-echo "[settlement-executor] Auditing work_item=$work_item claim_id=$claim_id framework=$FRAMEWORK" >&2
+echo "[settlement-executor] Auditing work_item=$work_item kind=$kind id=$source_id framework=$FRAMEWORK" >&2
 
 audit_stdout="$tmp_dir/audit-stdout.json"
 audit_stderr="$tmp_dir/audit-stderr.txt"
-priority_claims_file="$tmp_dir/priority-claims.json"
-python3 - "$claim_id" >"$priority_claims_file" <<'PYEOF'
-import json
-import sys
-print(json.dumps([sys.argv[1]], separators=(",", ":")))
-PYEOF
 
-audit_target="$work_item"
-if [[ -n "$task_claims_path" ]]; then
-  audit_target="$task_claims_path"
-fi
-audit_cmd=(lore audit "$audit_target" --json)
+audit_cmd=(lore audit --kind "$kind" --id "$source_id" --work-item "$work_item" --json)
 if [[ ${#extra_args[@]} -gt 0 ]]; then
   audit_cmd+=("${extra_args[@]}")
 fi
-audit_cmd+=(--priority-claims "$priority_claims_file")
 set +e
 "${audit_cmd[@]}" >"$audit_stdout" 2>"$audit_stderr"
 audit_exit=$?

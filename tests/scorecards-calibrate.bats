@@ -32,8 +32,12 @@ setup() {
   mkdir -p "$TEST_KDIR/_scorecards"
 
   # Compute the actual template-versions so marker keys match what the
-  # calibration runner will produce.
-  GATE_TV=$(bash "$TEMPLATE_VERSION_SH" "$REPO_DIR/agents/correctness-gate.md")
+  # calibration runner will produce. The three correctness-gate forks each
+  # carry their own template; the bats coverage exercises the assertion fork
+  # (the canonical hard-cal gate) plus the soft-cal omission fork to verify
+  # the runner handles both hard-cal and soft-cal-with-discrimination tiers.
+  GATE_TV=$(bash "$TEMPLATE_VERSION_SH" "$REPO_DIR/agents/correctness-gate-assertion.md")
+  OMISSION_TV=$(bash "$TEMPLATE_VERSION_SH" "$REPO_DIR/agents/correctness-gate-omission.md")
   CURATOR_TV=$(bash "$TEMPLATE_VERSION_SH" "$REPO_DIR/agents/curator.md")
   RA_TV=$(bash "$TEMPLATE_VERSION_SH" "$REPO_DIR/agents/reverse-auditor.md")
 }
@@ -55,7 +59,7 @@ build_gate_fixture() {
   mkdir -p "$root/$id"
   cat > "$root/$id/output.json" <<EOF
 {
-  "judge": "correctness-gate",
+  "judge": "correctness-gate-assertion",
   "judge_template_version": "$GATE_TV",
   "verdicts": [
     {"claim_id": "c1", "verdict": "$actual", "evidence": "evidence", "correction": "$( [ "$actual" = contradicted ] && echo correction || echo "" )"}
@@ -157,31 +161,31 @@ marker_state_for() {
 
 @test "correctness-gate passing fixture-set flips marker and appends history" {
   build_gate_set "$TEST_FIXTURES/gate-pass" pass
-  run bash "$CALIBRATE_SH" --judge correctness-gate \
+  run bash "$CALIBRATE_SH" --judge correctness-gate-assertion \
     --fixture-set "$TEST_FIXTURES/gate-pass" --kdir "$KDIR"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "PASS"
 
   # Marker entry exists and reads 'calibrated'.
-  state=$(marker_state_for "correctness-gate" "$GATE_TV")
+  state=$(marker_state_for "correctness-gate-assertion" "$GATE_TV")
   [ "$state" = "calibrated" ]
 
   # History row appended with gate_pass=true.
   history="$KDIR/_scorecards/calibration-history.jsonl"
   [ -f "$history" ]
   [ "$(wc -l < "$history" | tr -d ' ')" = "1" ]
-  jq -e '.gate_pass == true and .judge_template_id == "correctness-gate"' "$history" >/dev/null
+  jq -e '.gate_pass == true and .judge_template_id == "correctness-gate-assertion"' "$history" >/dev/null
 }
 
 @test "correctness-gate failing fixture-set leaves marker untouched, appends history" {
   build_gate_set "$TEST_FIXTURES/gate-fail" fail
-  run bash "$CALIBRATE_SH" --judge correctness-gate \
+  run bash "$CALIBRATE_SH" --judge correctness-gate-assertion \
     --fixture-set "$TEST_FIXTURES/gate-fail" --kdir "$KDIR"
   [ "$status" -ne 0 ]
   echo "$output" | grep -q "FAIL"
 
   # Marker entry MUST NOT exist (no prior pass).
-  state=$(marker_state_for "correctness-gate" "$GATE_TV")
+  state=$(marker_state_for "correctness-gate-assertion" "$GATE_TV")
   [ "$state" = "missing" ]
 
   # History row still appended with gate_pass=false.
@@ -250,18 +254,18 @@ marker_state_for() {
 
 @test "failing run after a passing run does not regress the marker" {
   build_gate_set "$TEST_FIXTURES/gate-pass" pass
-  bash "$CALIBRATE_SH" --judge correctness-gate \
+  bash "$CALIBRATE_SH" --judge correctness-gate-assertion \
     --fixture-set "$TEST_FIXTURES/gate-pass" --kdir "$KDIR" >/dev/null
-  state=$(marker_state_for "correctness-gate" "$GATE_TV")
+  state=$(marker_state_for "correctness-gate-assertion" "$GATE_TV")
   [ "$state" = "calibrated" ]
 
   build_gate_set "$TEST_FIXTURES/gate-fail" fail
-  run bash "$CALIBRATE_SH" --judge correctness-gate \
+  run bash "$CALIBRATE_SH" --judge correctness-gate-assertion \
     --fixture-set "$TEST_FIXTURES/gate-fail" --kdir "$KDIR"
   [ "$status" -ne 0 ]
 
   # Marker entry remains 'calibrated' — failing run did not touch the marker.
-  state=$(marker_state_for "correctness-gate" "$GATE_TV")
+  state=$(marker_state_for "correctness-gate-assertion" "$GATE_TV")
   [ "$state" = "calibrated" ]
 
   # Both runs accumulated in history.

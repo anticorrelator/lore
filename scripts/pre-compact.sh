@@ -15,9 +15,11 @@ Before context is compacted, consider whether you've discovered any reusable ins
 
 4-condition gate (all four must be true — for facts, gotchas, rationale, conventions, directives):
 - Reusable (applicable beyond the current task)
-- Non-obvious (not in README/CLAUDE.md/docs)
+- Non-obvious — non-obvious to a future agent doing similar work; not already recoverable from sources a future agent loads before raw exploration (the harness instructions file, knowledge-store entries already loaded at session start, or in-tree documentation a sibling prefetch would surface)
 - Stable (unlikely to change soon)
 - High confidence (verified, not speculative)
+
+Whose perspective: condition 2 is agent-centric, not reader-centric — ask "would a future agent re-derive this from sources they already read, or would they have to dig?" rather than treating the agent's knowledge state as identical to a reader skimming the repo. The commons is curated by agents for agents.
 
 Orientation gate (all five must be true — for system maps, lifecycle overviews, cross-boundary assembly):
 1. Reusable — likely needed by future agents on more than one task. (Recurrence is required, not "could be useful someday.")

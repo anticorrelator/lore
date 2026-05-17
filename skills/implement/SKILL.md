@@ -123,13 +123,23 @@ This is a **lead-attested semantic check, not machine-enforced.** No script adju
 
 **On `aligned`:** write a one-line **Anchor fit statement** (required, non-empty) — the lead's brief explanation of *why* the plan covers the anchor (e.g., "Phases P1–P3 implement the X capability the anchor names via the Y mechanism"). This mirrors Step 6.2's `capability_loop_summary` requirement on `full` — every lead-attested verdict carries a one-line attestation explaining the verdict, so an empty/silent `aligned` cannot degrade to a yes-button reflex. Then emit one `execution-log.md` row per the D6 template below and continue to Step 1.6.
 
-**On `misaligned`:** name the misalignment gap (anchor capability vs plan scope) in a one-line statement, then offer via `AskUserQuestion` exactly three options. **Re-spec is the first/recommended option** (label suffix `(Recommended)`):
+**On `misaligned`:** name the misalignment gap (anchor capability vs plan scope) in a one-line statement, then the lead emits a per-misalignment verdict — `route-respec`, `route-override`, or `escalate`. The lead is the primary decider; `AskUserQuestion` fires only on `escalate`. The lead's verdict reasoning is recorded alongside the execution-log row regardless of which route fires.
+
+**Verdict criteria (per misaligned-route decision):**
+
+- **`route-respec` (default)** — the misalignment gap is *capability-level* (plan does not address what the anchor names; re-shaping the plan is the appropriate response). This is the default verdict for unambiguous capability gaps and the verdict the `--yes` escape hatch forces. Proceeds to option (a) below.
+- **`route-override` (lead-attested scope-delta)** — the misalignment gap is *scope-level* and the lead can articulate a concrete one-line scope-delta acknowledgment naming what is in-scope vs deferred (the same delta the existing `notes.md` entry requires). Proceeds to option (b) below. The lead's scope-delta is recorded as the verdict rationale.
+- **`escalate`** — the lead cannot confidently pick between route-respec, route-override, or abort. Common reasons: the gap straddles capability-and-scope (some phases address the anchor partially, others do not), the lead reads two equally-plausible scope-delta framings and neither dominates, or the cost of being wrong on this gate is high (e.g., the work item carries upstream dependencies). Route through `AskUserQuestion` with the three options below; record the human's resolution alongside the execution-log row.
+
+For `route-respec` and `route-override`, the lead proceeds without `AskUserQuestion`. For `escalate`, the lead presents the three options interactively. **Abort (option (c)) is available only on the escalate path** — the lead does not auto-abort (the lead can choose to delay decision-making by escalating, but cannot unilaterally walk away from the work item).
+
+**Three options (presented to the human only when the lead escalates):**
 
 - **(a) re-spec (Recommended)** — exit `/implement` with the prescribed-next-command line `Next: run /spec <slug>`. The lead does NOT auto-invoke `/spec`; control returns to the user so they can read the gap themselves and run `/spec` deliberately. Write one `execution-log.md` row with `Anchor-coverage gate: misaligned-respec`, a non-`None` `Misalignment gap:` field, and `Remediation choice: run /spec <slug>`. Write NOTHING to `notes.md`. Then exit.
 - **(b) override** — proceed anyway with an explicit scope-delta acknowledgment. **Dual write** to BOTH `execution-log.md` (one row with `Anchor-coverage gate: misaligned-override` and `Override scope delta:` non-`None`) AND `notes.md` (a single-line entry under a fresh timestamp heading: `## YYYY-MM-DDTHH:MM\n**Anchor-coverage override:** <one-line scope delta>`). The dual write mirrors Step 6.2's `partial` pattern — execution-log carries the structured/machine-readable trail retro reads; notes.md carries the human session-timeline entry. Then continue to Step 1.6.
 - **(c) abort** — exit `/implement` immediately. Write one `execution-log.md` row with `Anchor-coverage gate: abort`, a non-`None` `Misalignment gap:`, and `Remediation choice: none (user aborted)`. Write NOTHING to `notes.md` (no human-facing timeline entry, since the user explicitly chose to walk away). Then exit.
 
-**`--yes` semantics:** when the lead was invoked with `--yes` (parsed in Step 1.1 above), skip the `AskUserQuestion` prompt and default to (a) re-spec without prompting. The execution-log row, the misalignment-gap field, and the prescribed-next-command exit text are emitted identically to the interactive re-spec path. **`--yes` NEVER skips the gate evaluation itself** — per `inside-lore-protocol-silent-skip-is`, the evaluation always runs; only the user-facing prompt is suppressed.
+**`--yes` semantics:** when the lead was invoked with `--yes` (parsed in Step 1.1 above), skip the `AskUserQuestion` prompt regardless of the verdict and default to (a) re-spec without prompting. The execution-log row, the misalignment-gap field, and the prescribed-next-command exit text are emitted identically to the interactive re-spec path. **`--yes` NEVER skips the gate evaluation itself** — per `inside-lore-protocol-silent-skip-is`, the lead's semantic-coverage evaluation and per-verdict reasoning always run; only the user-facing `AskUserQuestion` prompt on the escalate path is suppressed.
 
 **Legacy-no-anchor branch:** if `_meta.json.intent_anchor` is empty or absent, skip the user-facing prompt silently and emit one `execution-log.md` row with `Anchor-coverage gate: legacy-skip`. No `AskUserQuestion`, no anchor-fit statement, no misalignment-gap. This is the only authorized silent prompt in the gate; the skip is still logged so the audit loop fires. Mirrors `verify-plan-intent-anchor.sh`'s exit-0-with-stderr-info pattern and Step 6.4's legacy fallback.
 
@@ -299,6 +309,11 @@ The gate fires when **all four** conditions hold:
    echo '<tier2-row-json>' \
      | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>
    ```
+   Every row MUST carry `exact_snippet` (verbatim content at `file:line_range`) and `normalized_snippet_hash` (sha256 hex of the v1-normalized snippet). Compute the hash via the canonical helper — do NOT inline the recipe:
+   ```bash
+   python3 ~/.lore/scripts/snippet_normalize.py --hash <<<"$SNIPPET"
+   ```
+   The v1 normalization recipe (curly→straight quotes, `\s+`→single space, trim, sha256 lowercase hex) lives only in `scripts/snippet_normalize.py`. `evidence-append.sh` delegates to `validate-tier2.sh`, which rejects rows that omit either field, carry a non-hex hash, or carry a hash that does not equal `sha256(v1_normalize(exact_snippet))` — a failed write means no row was appended.
 
 5. **Stash any Tier 3 candidates** the lead notices for Step 5 promotion. Promotion still goes through `lore promote` with `--producer-role implement-lead --template-version "$LEAD_TEMPLATE_VERSION"`.
 

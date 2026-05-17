@@ -59,6 +59,8 @@ WINDOW_END=""
 CALIBRATION_STATE="pre-calibration"
 KDIR_OVERRIDE=""
 VERDICTS_PATH=""
+JUDGE_FILTER=""
+REPORT_MODE=0
 
 usage() {
   sed -n '2,35p' "$0" >&2
@@ -75,6 +77,8 @@ while [[ $# -gt 0 ]]; do
     --calibration-state)           CALIBRATION_STATE="$2";          shift 2 ;;
     --kdir)                        KDIR_OVERRIDE="$2";              shift 2 ;;
     --verdicts)                    VERDICTS_PATH="$2";              shift 2 ;;
+    --judge)                       JUDGE_FILTER="$2";               shift 2 ;;
+    --report)                      REPORT_MODE=1;                    shift   ;;
     -h|--help)                     usage; exit 0 ;;
     *)
       echo "[rollup] Error: unknown argument '$1'" >&2
@@ -89,6 +93,71 @@ fail() {
   exit 1
 }
 
+# --- Report mode (reader): aggregate rows.jsonl filtered by --judge ---
+# When --report is supplied, the script reads $KDIR/_scorecards/rows.jsonl and
+# emits the verdict_source-grouped aggregate for the named judge. Skips the
+# writer path entirely. Useful for ad-hoc inspection of a single fork's
+# (factual_precision, falsifier_quality, audit_contradiction_rate) trio
+# without re-running the audit pipeline.
+if [[ $REPORT_MODE -eq 1 ]]; then
+  if [[ -z "$JUDGE_FILTER" ]]; then
+    fail "--report requires --judge <judge-name>"
+  fi
+  if [[ -n "$KDIR_OVERRIDE" ]]; then
+    REPORT_KDIR="$KDIR_OVERRIDE"
+  else
+    REPORT_KDIR=$(resolve_knowledge_dir)
+  fi
+  ROWS_FILE="$REPORT_KDIR/_scorecards/rows.jsonl"
+  if [[ ! -f "$ROWS_FILE" ]]; then
+    fail "rows.jsonl not found at: $ROWS_FILE"
+  fi
+  JUDGE_FILTER_ENV="$JUDGE_FILTER" python3 - "$ROWS_FILE" <<'PYEOF'
+import json, os, sys
+from collections import defaultdict
+judge = os.environ["JUDGE_FILTER_ENV"]
+path = sys.argv[1]
+by_metric = defaultdict(list)
+n_rows = 0
+with open(path, encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("verdict_source") != judge:
+            continue
+        metric = row.get("metric")
+        try:
+            value = float(row.get("value"))
+            sample = int(row.get("sample_size") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not metric:
+            continue
+        by_metric[metric].append({"value": value, "sample_size": sample,
+                                  "calibration_state": row.get("calibration_state"),
+                                  "captured_sha": row.get("captured_sha")})
+        n_rows += 1
+out = {"judge": judge, "rows": n_rows, "metrics": {}}
+for metric, entries in sorted(by_metric.items()):
+    total_n = sum(e["sample_size"] for e in entries) or len(entries)
+    weighted = sum(e["value"] * e["sample_size"] for e in entries)
+    avg = weighted / total_n if total_n else 0.0
+    out["metrics"][metric] = {
+        "rows": len(entries),
+        "weighted_average": avg,
+        "sample_size_sum": total_n,
+        "calibration_states": sorted({e["calibration_state"] for e in entries if e["calibration_state"]}),
+    }
+print(json.dumps(out, indent=2, sort_keys=True))
+PYEOF
+  exit 0
+fi
+
 [[ -n "$ARTIFACT_ID"               ]] || fail "--artifact-id is required"
 [[ -n "$PRODUCER_TEMPLATE_ID"      ]] || fail "--producer-template-id is required"
 [[ -n "$PRODUCER_TEMPLATE_VERSION" ]] || fail "--producer-template-version is required"
@@ -96,9 +165,9 @@ fail() {
 [[ -n "$WINDOW_END"                ]] || fail "--window-end is required"
 
 case "$CALIBRATION_STATE" in
-  calibrated|pre-calibration|unknown) ;;
+  calibrated|pre-calibration|calibration-failed|unknown) ;;
   *)
-    fail "--calibration-state must be one of: calibrated, pre-calibration, unknown"
+    fail "--calibration-state must be one of: calibrated, pre-calibration, calibration-failed, unknown"
     ;;
 esac
 
@@ -121,14 +190,30 @@ fi
 # Single pass over the JSONL: count verified, unverified, contradicted.
 # Tolerate lines that aren't correctness-gate verdicts (a verdicts file
 # may contain mixed-judge entries; filter in).
-METRICS=$(printf '%s' "$VERDICTS_INPUT" | python3 -c '
-import json, sys
+METRICS=$(JUDGE_FILTER_ENV="$JUDGE_FILTER" printf '%s' "$VERDICTS_INPUT" | JUDGE_FILTER_ENV="$JUDGE_FILTER" python3 -c '
+import json, os, sys
 
 verified = 0
 unverified = 0
 contradicted = 0
 total = 0
 bad_lines = 0
+
+# When --judge is supplied, narrow the filter to exactly that judge name.
+# Otherwise accept any correctness-gate-* judge (the three forks) plus the
+# legacy "correctness-gate" name for transitional verdict files.
+explicit_judge = (os.environ.get("JUDGE_FILTER_ENV") or "").strip()
+CORRECTNESS_GATE_JUDGES = {
+    "correctness-gate-assertion",
+    "correctness-gate-omission",
+    "correctness-gate-contradiction",
+    "correctness-gate",
+}
+
+def judge_matches(name: str) -> bool:
+    if explicit_judge:
+        return name == explicit_judge
+    return name in CORRECTNESS_GATE_JUDGES
 
 for i, line in enumerate(sys.stdin, start=1):
     line = line.strip()
@@ -139,7 +224,7 @@ for i, line in enumerate(sys.stdin, start=1):
     except json.JSONDecodeError:
         bad_lines += 1
         continue
-    if row.get("judge") != "correctness-gate":
+    if not judge_matches(row.get("judge") or ""):
         continue
     verdict = row.get("verdict")
     if verdict == "verified":

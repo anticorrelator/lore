@@ -950,56 +950,50 @@ Computationally: let `tripped = [<names of checks that fired>]`. If `tripped` is
 
 **Warm-up state — `warmup: awaiting-template-tier-rows`.** Distinct from `pipeline-degraded`. Emitted when the tier migration has recently landed and `tier: template` row counts are below Step 3.9's sample-size minimum (n ≥ 10). Informational, not a gate — `/evolve` runs proceed, but the Step 3.9 headline naturally shows `insufficient:<N>` until enough new-tier rows accumulate. The warm-up state clears automatically as rows arrive.
 
-### Check: Audit coverage (D6/D8 rewrite — lag + routing-realization, NOT coverage-threshold)
+### Check: Audit coverage (G1 disposition: redirected to settlement substrate)
 
-**What it measures.** Two independent sub-checks, both of which must be healthy for the check to be green under the lazy-audit model.
+**What it measures.** Two independent sub-checks, both of which must be healthy for the check to be green under the settlement-pipeline model.
 
-**Why the old 60% coverage threshold was retired.** Under lazy-audit (`lore audit` is decorative, not publication precondition), coverage < 60% is *expected* behavior, not degradation. The old threshold tripped every window and destroyed the signal-to-noise ratio of `pipeline-degraded` — every window looked degraded, so /evolve treated every window as non-evidentiary. The rewrite re-anchors the check to lag and routing realization, which are genuine failure signals under lazy-audit.
+**G1 disposition (substrate redirect).** Audit coverage now reads from the settlement substrate — `_settlement/runs/*.json` (verdict-landing ratios) and `_settlement/queue.json` (enqueue→completion times) — rather than from the older `audit-attempts.jsonl` + `rows.jsonl` pair. The sub-check semantics (lag + routing realization) are preserved; only the read sources change. The settlement substrate is the canonical input under the post-Phase-1 substrate; the older sources are retained only for back-compat reads when the settlement substrate is absent.
 
 **Sub-check 1: Lag.**
 
-Median time from promotion-time proxy to audit-triggered-proxy for promoted Tier 3 claims in the window is ≤ configurable threshold (default: **7 days**). Exceeding → this sub-check trips.
+Median time from settlement-queue enqueue to settlement-run completion for items in the window is ≤ configurable threshold (default: **7 days**). Exceeding → this sub-check trips.
 
-**Promotion-time precedence (D8 fallback):**
-1. Primary: entry-internal `learned:` timestamp in commons markdown YAML frontmatter.
-2. Secondary: filesystem birthtime (`stat -f %SB` macOS, `stat -c %W` Linux).
-3. Tertiary (degraded): filesystem `ctime`. When only `ctime` is available, the lag sub-check runs in **advisory mode**: the sub-check reports its observation in the output but does NOT trigger `pipeline-degraded` state (ctime is noisy and would wrongly gate /evolve on filesystem quirks). The routing sub-check remains authoritative even under ctime-only conditions.
-
-**Audit-triggered proxy:** rows in `$KDIR/_scorecards/audit-attempts.jsonl` plus future `audit_triggered` flow-event rows. Until probabilistic audit work lands, absence of trigger telemetry is not a pipeline failure by itself.
+**Source-of-truth.** Read enqueue→completion timings from `_settlement/queue.json` entries (each carries `enqueued_at` and either `completed_at` or `status: pending`); join against `_settlement/runs/*.json` to confirm completion timestamps. When a queue entry's `completed_at` is missing but a corresponding run record exists, prefer the run record's timestamp.
 
 **Sub-check 2: Routing realization.**
 
-For the set of audit-triggered-proxy rows older than a **grace period of 24h** in the window, compute:
+For settlement queue entries enqueued more than a **grace period of 24h** before window close, compute:
 
 ```
-verdict_realization_ratio = |{rows with corresponding verdict row in rows.jsonl}| / |audit-triggered rows older than grace period|
+verdict_realization_ratio = |{queue entries with a corresponding completed run in _settlement/runs/}| / |queue entries enqueued > grace period before window close|
 ```
 
 Healthy when **either**:
 - Ratio ≥ **0.50** with sample size ≥ **10**, OR
-- **≥ 3 verdicts** when sample size < 10.
+- **≥ 3 completed runs** when sample size < 10.
 
-Below threshold → routing partially failed (triggers fired, verdicts aren't landing) — this sub-check trips.
+Below threshold → routing partially failed (items enqueued, runs aren't completing) — this sub-check trips.
 
-**Why both sub-checks.** Routing realization catches the case where triggers fire but downstream judges don't produce verdicts (earlier Round 1 design tested only "at least one verdict" which missed partial routing failure — 100 triggered, 1 verdict would pass). Lag catches slow pipelines even when routing is complete. Both together catch the main failure modes under lazy-audit.
+**Why both sub-checks.** Routing realization catches the case where queue items don't progress to completed runs (analogous to the earlier "triggers fire but verdicts don't land" failure mode, restated against the settlement substrate). Lag catches slow pipelines even when routing is complete. Both together catch the main failure modes under the settlement model.
 
-**Alignment with future trigger realization.** The routing realization sub-check is **distinct** from trigger realization, which will measure "did probabilistic triggers fire at the configured rate?" once that trigger source exists. Routing realization measures the downstream half: "of triggers that fired, did verdicts land?"
+**Alignment with trigger realization (deferred).** The routing realization sub-check measures "of items enqueued, did runs complete?" Trigger realization (deferred) measures whether ceremonies produced enqueue events at the configured probability. The two are distinct and remain so under the substrate redirect.
 
 **When green: no prose.**
 
 **When tripped, output:**
 ```
 [retro] pipeline-degraded: audit coverage
-  lag: median <days> (threshold 7 days)     [advisory-mode | authoritative]
-    promotion-time source: learned | birthtime | ctime
-  routing_realization: <ratio> (threshold 0.50 @ n≥10, or ≥3 verdicts @ n<10)
-    triggered_old_enough=<N>  verdicts_landed=<M>
-  see: $KDIR/_scorecards/audit-attempts.jsonl and rows.jsonl
+  lag: median <days> (threshold 7 days)
+  routing_realization: <ratio> (threshold 0.50 @ n≥10, or ≥3 completed runs @ n<10)
+    enqueued_old_enough=<N>  runs_completed=<M>
+  see: $KDIR/_settlement/queue.json and $KDIR/_settlement/runs/*.json
 ```
 
 If only one sub-check tripped, omit the healthy sub-check's detail line.
 
-**Distinguished from.** Old "coverage < 60%" absolute-coverage threshold is retired. The lag + routing-realization design catches real failure modes (slow pipelines, broken routing) without false-alarming on expected sparse coverage.
+**Distinguished from.** Old "coverage < 60%" absolute-coverage threshold remains retired. The lag + routing-realization design catches real failure modes (slow pipelines, broken routing) without false-alarming on expected sparse coverage. Under the G1 substrate redirect, the read sources are `_settlement/queue.json` and `_settlement/runs/*.json` rather than the older `audit-attempts.jsonl` + `rows.jsonl` pair.
 
 ### Check: Trigger realization rate
 
@@ -1079,87 +1073,74 @@ Aggregate across work items by summing numerator and denominator separately.
   see: $KDIR/_work/<slug>/audit-attempts.jsonl (per-work-item breakdown)
 ```
 
-### Check: Candidate-queue backlog
+### Check: Candidate-queue backlog (G1 disposition: redirected to settlement substrate, per-kind)
 
-**What it measures.** For each work item with reverse-auditor activity in the retro window, the growth trend of `$KDIR/_work/<slug>/audit-candidates.jsonl`. Queue length = count of rows with `status: pending_correctness_gate`.
+**What it measures.** The growth trend of the settlement queue, broken down by `kind` (e.g., task-evidence, omission-candidate, consumption-contradiction). Queue length = count of `_settlement/queue.json` items with `status: pending` per kind.
 
-**Two distinct failure modes:** **growth-rate trip** (`added / max(resolved, 1) > 2.0` with `added ≥ 10`) and **absolute-size trip** (>50 pending cluster-wide at window close).
+**G1 disposition (substrate redirect).** Replaces the older per-work-item `audit-candidates.jsonl` read with a single cluster-wide read of `_settlement/queue.json`, grouped by `kind`. The substrate is now kind-aware (post-Phase-1), so the backlog check operates per-kind instead of cluster-wide-only — a backlog in one kind (e.g., consumption-contradiction) is informative even when other kinds are healthy.
 
-**Why it matters.** The candidate queue is the handoff from reverse-auditor to correctness-gate. Unbounded growth means reverse-auditor is *outrunning* the gate. Either the gate is not firing or it's firing but slowly. Both cases silently starve L2 commons promotion.
+**Two distinct failure modes (per kind):** **growth-rate trip** (`added / max(resolved, 1) > 2.0` with `added ≥ 10` for that kind) and **absolute-size trip** (>50 pending cluster-wide at window close, summed across kinds, OR >25 pending in any single kind).
 
-**Inputs.** `$KDIR/_work/<slug>/audit-candidates.jsonl` per work item.
+**Why it matters.** The settlement queue is the handoff from producers (capture, reverse-auditor, consumption-contradiction) to the three-judge settlement pipeline. Unbounded growth in any kind means producers are outrunning the gate-and-curator pipeline for that kind. Per-kind visibility lets the operator localize the failure (e.g., consumption-contradiction backlog signals priority routing problems; task-evidence backlog signals correctness-gate throughput).
+
+**Inputs.** `$KDIR/_settlement/queue.json` (cluster-wide; entries carry `kind`, `status`, `enqueued_at`, and either `completed_at` or `status: pending`).
 
 **Computation.**
 ```
-For each work item:
-  added_w      = |rows with created_at ∈ window|
-  resolved_w   = |rows whose status transitioned to gate-passed|gate-failed|retired with ts ∈ window|
-  pending_w    = |rows with status == "pending_correctness_gate" at window close|
+For each kind K observed in _settlement/queue.json:
+  added_K      = |entries with kind == K and enqueued_at ∈ window|
+  resolved_K   = |entries with kind == K and status transitioned to completed|gate-failed|retired with ts ∈ window|
+  pending_K    = |entries with kind == K and status == "pending" at window close|
+  growth_ratio_K = added_K / max(resolved_K, 1)
 
-Aggregate:
-  added = sum(added_w); resolved = sum(resolved_w); pending_total = sum(pending_w)
-  growth_ratio = added / max(resolved, 1)
+Aggregate (cluster-wide totals):
+  pending_total = sum(pending_K) across all kinds
 ```
 
-**Thresholds.** Trips when either: `growth_ratio > 2.0` with `added ≥ 10`; or `pending_total > 50` cluster-wide.
+**Thresholds.** A kind trips when either: `growth_ratio_K > 2.0` with `added_K ≥ 10`; or `pending_K > 25`. The check also trips on the cluster-wide aggregate when `pending_total > 50`.
 
 **When green: no prose.**
 
-**When tripped, output:**
+**When tripped, output (one block per tripped kind plus a cluster-aggregate line when the aggregate trips):**
 ```
 [retro] pipeline-degraded: candidate-queue backlog
-  added=<N> resolved=<M> growth_ratio=<ratio> (threshold 2.0, min N=10)
-  pending_total=<K> (threshold 50)
-  see: $KDIR/_work/*/audit-candidates.jsonl
+  kind=<K> added=<N> resolved=<M> growth_ratio=<ratio> (threshold 2.0, min N=10)
+                  pending=<K> (threshold 25 per-kind)
+  cluster pending_total=<K> (threshold 50, summed across kinds)
+  see: $KDIR/_settlement/queue.json
 ```
 
-### Check: Provenance resolution rate
+### Check: Provenance resolution rate (G1 disposition: retired)
 
-**What it measures.** Of the reconciliation attempts in the retro window, the fraction landing at `verified | provenance-unknown | provenance-lost`. Triggered by `provenance-unknown` share specifically.
+**Status.** Retired under G1. The previous design measured the share of reconciliation attempts landing at `provenance-unknown` to detect brittle content anchors; under the post-Phase-1 settlement substrate, content-anchor failures surface through the per-kind correctness-gate's grounding preflight (see Grounding failure rate below, with the `field-missing` and `snippet-mismatch` reasons covering the same pathology). Maintaining a second standalone provenance check produced redundant pipeline-degraded fires against the same underlying failure mode.
 
-**Why it matters.** High `provenance-unknown` means content anchors are too brittle (churn broke matching) or snippet-capture fields are underpopulated. Both fixable — first by enabling the optional token-shingle fuzzy tier, second by auditing `exact_snippet` / `symbol_anchor` capture completeness.
+**Migration path.** Operators previously triggered by this check should read Grounding failure rate's per-reason breakdown for the same diagnostic signal. The `tuning signal` line ("consider enabling token-shingle fuzzy tier") remains valid but moves out of the retro pipeline-degraded surface.
 
-**Computation.**
-```
-total = |reconciliation attempts in window|
-unknown_rate = |{verdict == "provenance-unknown"}| / total
-```
+### Check: Judge liveness (G1 disposition: redefined per-gate against calibration logs)
 
-**Threshold.** `unknown_rate > 0.40` trips.
+**What it measures.** Per-gate verdict distribution and recent-run liveness, read from each gate's calibration log at `_calibration/<gate>/calibration-log.jsonl`. The post-Phase-2 substrate forks the correctness-gate into three kind-specialized gates (one per kind), each with its own calibration log; this check evaluates liveness per-gate.
+
+**G1 disposition (substrate redirect).** Replaces the older `rows.jsonl` + future-trigger-telemetry pair with a single read of each gate's `_calibration/<gate>/calibration-log.jsonl`. The calibration log carries one row per gate run with the verdict and timestamp; reading per-gate logs both localizes the signal (which gate is degraded) and aligns the liveness check with the calibrated write-gate model (calibration-log is the operational truth for each gate's recent activity).
+
+**Three signatures (evaluated per gate):**
+
+1. **Gate broken** — a gate emits `unverified` (or the gate-specific equivalent rejection verdict) on >80% of its calibration-log entries in the window.
+2. **Auditor degraded** — for gates that admit an explicit-silence verdict (`reverse-auditor`-class gates), the silence rate exceeds >90% of entries in the window.
+3. **Zero-rows-despite-routing** — any gate with **zero** entries in its calibration-log for the retro window *while* the settlement queue (`_settlement/queue.json`) shows items routed to that gate during the same window.
+
+**Thresholds (per gate).**
+- `gate_unverified_rate > 0.80` over the window → gate-broken
+- `auditor_silence_rate > 0.90` over the window → auditor-degraded
+- any gate with `calibration_log_rows_in_window == 0 AND settlement_queue_items_routed > 0` → zero-rows-despite-routing
 
 **When green: no prose.**
 
-**When tripped, output:**
-```
-[retro] pipeline-degraded: provenance resolution rate
-  total=<N> verified=<v> provenance-unknown=<u> provenance-lost=<l>
-  unknown_rate=<pct> (threshold 40%)
-  tuning signal: consider enabling token-shingle fuzzy tier (same-path)
-                 or audit exact_snippet/symbol_anchor capture completeness
-  see: Phase 1 branch-aware reconciliation appendix
-```
-
-### Check: Judge liveness
-
-**What it measures.** Per-judge verdict distribution. Three signatures:
-
-1. **Gate broken** — `correctness-gate` emitting `unverified` on >80% of candidate claims.
-2. **Auditor degraded** — `reverse-auditor` emitting `∅` (explicit silence) on >90% of portfolios.
-3. **Zero-rows-despite-triggers** — any judge (`correctness-gate`, `curator`, `reverse-auditor`) with **zero** rows in `rows.jsonl` for the retro window *while* future trigger telemetry shows audits firing for its role.
-
-**Thresholds.**
-- `gate_unverified_rate > 0.80` → gate-broken
-- `auditor_silence_rate > 0.90` → auditor-degraded
-- any judge with `rows_in_window == 0 AND triggers_fired > 0` → zero-rows-despite-triggers
-
-**When green: no prose.**
-
-**When tripped, output (one block per tripped signature):**
+**When tripped, output (one block per tripped gate × signature combination):**
 ```
 [retro] pipeline-degraded: judge liveness (<signature>)
-  judge=<name> <metric>=<value> (threshold <pct>)
+  gate=<gate-name> <metric>=<value> (threshold <pct>)
   sample=<N> window=<start>..<end>
-  see: $KDIR/_scorecards/rows.jsonl (and future trigger telemetry for zero-rows case)
+  see: $KDIR/_calibration/<gate>/calibration-log.jsonl (and $KDIR/_settlement/queue.json for zero-rows case)
 ```
 
 ### Check: Calibration state surface

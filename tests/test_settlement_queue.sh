@@ -45,32 +45,36 @@ setup_kdir() {
   mkdir -p "$kdir/_work/$slug"
 }
 
-setup_plan_assertions_fixture() {
-  local kdir="$1" slug="$2"
+setup_task_claims_smoke_fixture() {
+  # Writes a single task-claim row matching claim_id "$3" (default
+  # "assertion-0" for back-compat with existing smoke calls) to
+  # _work/<slug>/task-claims.jsonl. The downstream executor dispatches
+  # via `lore audit --kind task-claim --id <claim_id>`, which requires
+  # the per-kind source file to be present and contain that id.
+  local kdir="$1" slug="$2" claim_id="${3:-assertion-0}"
   mkdir -p "$kdir/_work/$slug"
-  cat > "$kdir/_work/$slug/plan.md" <<'PLANEOF'
-# settlement smoke fixture
-
-## Goal
-Synthetic fixture for settlement executor smoke coverage.
-
-## Investigations
-
-### Verified path
-**Question:** Does the executor return a real audit verdict?
-Template-version: settlement-smoke-v1
-**Findings:**
-- The executor returns a real audit verdict.
-
-**Assertions:**
-- claim: settlement executor can route a verified audit fixture
-  file: scripts/settlement-processor.py
-  line_range: "1-1"
-  exact_snippet: "#!/usr/bin/env python3"
-  normalized_snippet_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  falsifier: Run the settlement executor smoke test and inspect run.verdict
-  significance: high
-PLANEOF
+  jq -nc --arg cid "$claim_id" '{
+    claim_id: $cid,
+    tier: "task-evidence",
+    claim: ("settlement processor smoke fixture row for claim " + $cid),
+    producer_role: "worker",
+    protocol_slot: "implementation",
+    task_id: "task-1",
+    phase_id: "1",
+    scale: "implementation",
+    file: "scripts/settlement-processor.py",
+    line_range: "1-20",
+    falsifier: "Run settlement smoke and inspect run.verdict for verified fixture",
+    why_this_work_needs_it: "Smoke covers the per-kind dispatch path for task-claim",
+    captured_at_sha: "test-sha",
+    change_context: {
+      diff_ref: "test-sha",
+      changed_files: ["scripts/settlement-processor.py"],
+      summary: "settlement smoke fixture row"
+    },
+    exact_snippet: "settlement smoke fixture snippet",
+    normalized_snippet_hash: "fe36a0b26f180f1bccf74316c366108736c120752d30230840ad20bc7e004c03"
+  }' > "$kdir/_work/$slug/task-claims.jsonl"
 }
 
 row_json() {
@@ -98,7 +102,9 @@ row_json() {
       diff_ref: "test-sha",
       changed_files: ["scripts/settlement-processor.py"],
       summary: "settlement queue fixture row used to exercise durable trigger processing"
-    }
+    },
+    exact_snippet: "settlement smoke fixture snippet",
+    normalized_snippet_hash: "fe36a0b26f180f1bccf74316c366108736c120752d30230840ad20bc7e004c03"
   }'
 }
 
@@ -341,7 +347,7 @@ KDIR8="$TEST_DIR/kdir8"
 SETTINGS8="$TEST_DIR/settings8.json"
 GATE8="$TEST_DIR/gate8.json"
 SMOKE_SLUG="settlement-smoke"
-setup_plan_assertions_fixture "$KDIR8" "$SMOKE_SLUG"
+setup_task_claims_smoke_fixture "$KDIR8" "$SMOKE_SLUG"
 printf '%s' "$(row_json "assertion-0")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS8" bash "$QUEUE" enqueue --work-item "$SMOKE_SLUG" --kdir "$KDIR8" --json >/dev/null
 write_settings "$SETTINGS8" "$(jq -nc '{
   version: 1,
@@ -386,7 +392,7 @@ KDIR8F="$TEST_DIR/kdir8f"
 SETTINGS8F="$TEST_DIR/settings8f.json"
 GATE8F="$TEST_DIR/gate8f.json"
 SMOKE_SLUG_F="settlement-smoke-contradicted"
-setup_plan_assertions_fixture "$KDIR8F" "$SMOKE_SLUG_F"
+setup_task_claims_smoke_fixture "$KDIR8F" "$SMOKE_SLUG_F"
 printf '%s' "$(row_json "assertion-0")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS8F" bash "$QUEUE" enqueue --work-item "$SMOKE_SLUG_F" --kdir "$KDIR8F" --json >/dev/null
 write_settings "$SETTINGS8F" "$(jq -nc '{
   version: 1,
@@ -713,6 +719,50 @@ else
   echo "  FAIL: status latency too high with bounded scan (${ELAPSED_MS}ms >= 1000ms)"
   FAIL=$((FAIL + 1))
 fi
+
+echo ""
+echo "Test 17: drain on empty queue returns aborted=false with iterations=1"
+KDIR_DR1="$TEST_DIR/kdir-drain-empty"
+SETTINGS_DR1="$TEST_DIR/settings-drain-empty.json"
+setup_kdir "$KDIR_DR1" "wi"
+write_settings "$SETTINGS_DR1" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+DRAIN_EMPTY=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DR1" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" bash "$QUEUE" drain --kdir "$KDIR_DR1" --json)
+assert_json_eq "drain empty queue not aborted" "$DRAIN_EMPTY" '.aborted' "false"
+assert_json_eq "drain empty queue early-exits in one iteration" "$DRAIN_EMPTY" '.iterations' "1"
+assert_json_eq "drain empty queue dispatched zero" "$DRAIN_EMPTY" '.dispatched' "0"
+assert_json_eq "drain empty queue remaining zero" "$DRAIN_EMPTY" '.remaining' "0"
+assert_json_eq "drain empty queue last_reason empty_queue" "$DRAIN_EMPTY" '.last_reason' "empty_queue"
+
+echo ""
+echo "Test 18: drain enforces --max-iterations cap"
+KDIR_DR2="$TEST_DIR/kdir-drain-cap"
+SETTINGS_DR2="$TEST_DIR/settings-drain-cap.json"
+setup_kdir "$KDIR_DR2" "wi"
+write_settings "$SETTINGS_DR2" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+for i in 1 2 3 4 5; do
+  printf '%s' "$(row_json "claim-drain-cap-$i")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DR2" bash "$QUEUE" enqueue --work-item wi --kdir "$KDIR_DR2" --json >/dev/null
+done
+DRAIN_CAP=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DR2" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" bash "$QUEUE" drain --kdir "$KDIR_DR2" --max-iterations 2 --json)
+assert_json_eq "drain cap reaches exactly max-iterations" "$DRAIN_CAP" '.iterations' "2"
+assert_json_eq "drain cap dispatched two items" "$DRAIN_CAP" '.dispatched' "2"
+assert_json_eq "drain cap leaves three items pending" "$DRAIN_CAP" '.remaining' "3"
+assert_json_eq "drain cap not aborted on iteration cap" "$DRAIN_CAP" '.aborted' "false"
+
+echo ""
+echo "Test 19: drain aborts on hard-cal gate uncalibrated (calibration-failed marker)"
+KDIR_DR3="$TEST_DIR/kdir-drain-abort"
+SETTINGS_DR3="$TEST_DIR/settings-drain-abort.json"
+setup_kdir "$KDIR_DR3" "wi"
+write_settings "$SETTINGS_DR3" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+printf '%s' "$(row_json "claim-drain-abort")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DR3" bash "$QUEUE" enqueue --work-item wi --kdir "$KDIR_DR3" --json >/dev/null
+GATE_VERSION=$("$SCRIPTS_DIR/template-version.sh" "$REPO_DIR/agents/correctness-gate-assertion.md")
+mkdir -p "$KDIR_DR3/_scorecards"
+jq -nc --arg key "correctness-gate-assertion:$GATE_VERSION" '{($key): {calibration_state: "calibration-failed"}}' > "$KDIR_DR3/_scorecards/calibration-state.json"
+DRAIN_ABORT=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DR3" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" bash "$QUEUE" drain --kdir "$KDIR_DR3" --json)
+assert_json_eq "drain aborts on calibration-failed marker" "$DRAIN_ABORT" '.aborted' "true"
+assert_json_eq "drain abort dispatched zero" "$DRAIN_ABORT" '.dispatched' "0"
+assert_json_eq "drain abort surfaces hard-cal reason" "$DRAIN_ABORT" '.last_reason | startswith("audit-error: hard-cal gate uncalibrated")' "true"
+assert_json_eq "drain abort leaves item pending" "$DRAIN_ABORT" '.remaining' "1"
 
 echo ""
 echo "=== Summary ==="

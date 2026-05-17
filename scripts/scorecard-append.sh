@@ -22,7 +22,7 @@
 #
 # Required fields (row-level):
 #   kind               enum: scored | telemetry
-#   calibration_state  enum: calibrated | pre-calibration | unknown
+#   calibration_state  enum: calibrated | pre-calibration | calibration-failed | unknown
 #   schema_version     any non-null scalar (readers enforce upgrade policy)
 #   tier               enum: reusable | task-evidence | telemetry | template | correction
 #
@@ -34,6 +34,14 @@
 #                 metric, sample_size (integer > 0), calibration_state
 #   correction    rows REQUIRE corrected_entry_path, correction_target
 #                 (claim|observation|doctrine), calibrated_by_verdict_id
+#
+# Recognized free-form event_type values under kind=telemetry (not enforced;
+# readers consume for window filtering):
+#   calibration-cutover   marker row emitted by `settlement-queue.sh drain`
+#                         after a successful real-data cutover; carries
+#                         cutover_timestamp + template_id/template_version
+#                         so /retro and /evolve can partition rows into
+#                         pre-cutover / post-cutover windows.
 #
 # The row schema (see architecture/scorecards/row-schema.md) also defines:
 #   template_id, template_version, metric, value, sample_size,
@@ -138,12 +146,12 @@ esac
 
 CAL_STATE=$(printf '%s' "$ROW" | jq -r '.calibration_state // ""')
 case "$CAL_STATE" in
-  calibrated|pre-calibration|unknown) ;;
+  calibrated|pre-calibration|calibration-failed|unknown) ;;
   "")
-    fail "missing required field: calibration_state (must be 'calibrated', 'pre-calibration', or 'unknown')"
+    fail "missing required field: calibration_state (must be 'calibrated', 'pre-calibration', 'calibration-failed', or 'unknown')"
     ;;
   *)
-    fail "invalid calibration_state: '$CAL_STATE' (must be 'calibrated', 'pre-calibration', or 'unknown')"
+    fail "invalid calibration_state: '$CAL_STATE' (must be 'calibrated', 'pre-calibration', 'calibration-failed', or 'unknown')"
     ;;
 esac
 
@@ -216,7 +224,7 @@ if [[ "$TIER" == "template" ]]; then
       and ((.template_version // "") | test("^[0-9a-f]{12}$"))
       and ((.metric // "") != "")
       and ((.sample_size // null) | (type == "number") and (. > 0))
-      and ((.calibration_state // "") | test("^(calibrated|pre-calibration|unknown)$"))
+      and ((.calibration_state // "") | test("^(calibrated|pre-calibration|calibration-failed|unknown)$"))
   ' >/dev/null 2>&1 && echo "true" || echo "false")
   if [[ "$TEMPLATE_OK" != "true" ]]; then
     MISSING_FIELDS=""
@@ -224,7 +232,7 @@ if [[ "$TIER" == "template" ]]; then
     printf '%s' "$ROW" | jq -e '((.template_version // "") | test("^[0-9a-f]{12}$"))' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS template_version(12-char-hex)"
     printf '%s' "$ROW" | jq -e '((.metric // "") != "")' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS metric"
     printf '%s' "$ROW" | jq -e '((.sample_size // null) | (type == "number") and (. > 0))' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS sample_size(int>0)"
-    printf '%s' "$ROW" | jq -e '((.calibration_state // "") | test("^(calibrated|pre-calibration|unknown)$"))' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS calibration_state"
+    printf '%s' "$ROW" | jq -e '((.calibration_state // "") | test("^(calibrated|pre-calibration|calibration-failed|unknown)$"))' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS calibration_state"
     fail "template row rejected: missing or invalid required fields:$MISSING_FIELDS (tier=template requires template_id, template_version[12-char hex], metric, sample_size[int>0], calibration_state)"
   fi
 fi

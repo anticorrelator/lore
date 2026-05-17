@@ -35,7 +35,7 @@
 # Verdict shape (see architecture/audit-pipeline/contract.md for full spec):
 #   {
 #     "artifact_id":          "<work-item slug or absolute path>",
-#     "judge":                "correctness-gate | curator | reverse-auditor",
+#     "judge":                "correctness-gate-assertion | correctness-gate-omission | correctness-gate-contradiction | correctness-gate (legacy) | curator | reverse-auditor",
 #     "judge_template_version": "<12-char hash>",
 #     "claim_id":             "<stable id within artifact; e.g. finding-0>",
 #     "verdict":              "verified | unverified | contradicted |
@@ -171,11 +171,18 @@ if ! printf '%s' "$VERDICT" | jq -e 'type == "object"' >/dev/null 2>&1; then
   fail "verdict must be a JSON object"
 fi
 
-# judge must be one of the three canonical values
+# judge must be one of the canonical values — the three kind-specialized
+# correctness-gate forks, the legacy "correctness-gate" name (kept until the
+# Phase 4 cutover drains pre-fork verdict files), curator, or reverse-auditor.
 if ! printf '%s' "$VERDICT" | jq -e '
-  .judge == "correctness-gate" or .judge == "curator" or .judge == "reverse-auditor"
+  .judge == "correctness-gate-assertion"
+  or .judge == "correctness-gate-omission"
+  or .judge == "correctness-gate-contradiction"
+  or .judge == "correctness-gate"
+  or .judge == "curator"
+  or .judge == "reverse-auditor"
 ' >/dev/null 2>&1; then
-  fail "verdict.judge must be one of: correctness-gate, curator, reverse-auditor"
+  fail "verdict.judge must be one of: correctness-gate-assertion, correctness-gate-omission, correctness-gate-contradiction, correctness-gate (legacy), curator, reverse-auditor"
 fi
 
 # claim_id must be a non-empty string

@@ -83,6 +83,19 @@ if [[ -z "${ROW// }" ]]; then
   die "row is empty"
 fi
 
+# --- Writer-path gate: reject the legacy-migration marker ---
+# `provenance: "legacy-no-snippet"` is reserved for the Phase 2 backfill writer
+# (evidence-update.sh). New producer emissions via evidence-append.sh must
+# carry a real snippet+hash; they cannot opt into the slow-path legacy state.
+# The validator (validate-tier2.sh) accepts the legacy state because the
+# migration writer reuses it for the canonical schema check, but only this
+# script is the sanctioned writer for new rows.
+APPEND_PROVENANCE=$(printf '%s' "$ROW" | jq -r '.provenance // ""' 2>/dev/null || echo "")
+if [[ "$APPEND_PROVENANCE" == "legacy-no-snippet" ]]; then
+  echo "[evidence-append] Row rejected: provenance=\"legacy-no-snippet\" is reserved for the migration writer; new emissions must carry exact_snippet + normalized_snippet_hash" >&2
+  exit 1
+fi
+
 # --- Validate via validate-tier2.sh ---
 # Let the validator write its own diagnostics to stderr directly.
 # The || block only runs if the validator exits non-zero; -e does not

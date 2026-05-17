@@ -237,12 +237,16 @@ As researcher messages arrive (or after direct file reading in short branch):
 2. **Preserve `**Findings:**` verbatim** — copy findings exactly as reported.
 3. **Preserve `**Observations:**` verbatim** — copy researcher observations exactly as reported. Do not rephrase, merge, or summarize. These are mechanism-level patterns, design rationale, and structural footprint signals that feed the Step 5.4 capture step.
 4. **Emit Tier-2 artifacts** — for each researcher assertion (full branch) or lead-observed task-scoped grounding claim (short branch):
-   - Format the claim as a JSON row with the evidence fields (`claim`, `file`, `line_range`, `exact_snippet`, `normalized_snippet_hash`, `falsifier`, `significance`) plus producer/template provenance and `change_context` (`diff_ref`, `changed_files[]`, `summary`). `changed_files[]` must include the row's `file`; `summary` should name why the current investigation/change made the claim relevant. See `architecture/artifacts/tier2-evidence-schema.md` for the full schema.
+   - Format the claim as a JSON row with the evidence fields (`claim`, `file`, `line_range`, `exact_snippet`, `normalized_snippet_hash`, `falsifier`, `significance`) plus producer/template provenance and `change_context` (`diff_ref`, `changed_files[]`, `summary`). `changed_files[]` must include the row's `file`; `summary` should name why the current investigation/change made the claim relevant. `exact_snippet` and `normalized_snippet_hash` are REQUIRED for every row: `exact_snippet` is the verbatim content at `file:line_range` that grounds the claim, and `normalized_snippet_hash` is the sha256 hex of the v1-normalized snippet. Compute the hash via the canonical helper — do NOT inline the recipe:
+     ```bash
+     python3 ~/.lore/scripts/snippet_normalize.py --hash <<<"$SNIPPET"
+     ```
+     The v1 normalization recipe (curly→straight quotes, `\s+`→single space, trim, sha256 lowercase hex) lives only in `scripts/snippet_normalize.py`. See `architecture/artifacts/tier2-evidence-schema.md` for the full schema.
    - Append the row via the sole-writer:
      ```bash
      echo '<json-row>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>
      ```
-     `evidence-append.sh` validates the row via `validate-tier2.sh` before appending to `$KDIR/_work/<slug>/task-claims.jsonl`. Direct writes to `task-claims.jsonl` bypass validation and are treated as corrupt.
+     `evidence-append.sh` validates the row via `validate-tier2.sh` before appending to `$KDIR/_work/<slug>/task-claims.jsonl`. The validator enforces that `exact_snippet` is a non-empty string, `normalized_snippet_hash` matches `^[0-9a-f]{64}$`, and the hash equals `sha256(v1_normalize(exact_snippet))` — rows that fail any check are rejected. Direct writes to `task-claims.jsonl` bypass validation and are treated as corrupt.
    - **On validation failure:** `evidence-append.sh` exits non-zero. Either fix the row and retry, or log the failure to `execution-log.md` and proceed. Schema-valid absence is acceptable; silent corrupt writes are not.
    - After successful append, write a human-readable mirror entry to `$KDIR/_work/<slug>/evidence.md`. Do not write a mirror entry for a row that failed validation.
    - **Absence semantics:** if no assertions or lead-observed task claims exist, both `task-claims.jsonl` and `evidence.md` may be absent — absence means "no Tier-2 claims captured this session," not "work was fully verified."

@@ -142,9 +142,11 @@ Review the full conversation context (filtered by any Step 1 constraints) and id
 
 For each candidate, assess against the capture gate — all 4 conditions must be true:
 1. **Reusable** — applicable beyond the current task
-2. **Non-obvious** — not already in README, the harness instructions file (CLAUDE.md/AGENTS.md), or docs
+2. **Non-obvious** — non-obvious to a future agent doing similar work; not already recoverable from sources a future agent loads before raw exploration (the harness instructions file, knowledge-store entries already loaded at session start, or in-tree documentation a sibling prefetch would surface)
 3. **Stable** — unlikely to change soon
 4. **High confidence** — verified through code exploration, not speculative
+
+**Whose perspective the gate evaluates.** Condition 2's "non-obvious" test is agent-centric, not reader-centric — ask "would a future agent re-derive this from sources they already read, or would they have to dig?" rather than treating the agent's knowledge state as identical to a human reader skimming the repo. The commons is curated by agents for agents; the gate evaluates against that audience.
 
 **Capture when the candidate passes the 4-condition gate OR the orientation gate.** The two gates are parallel paths, not stacked filters — a candidate that passes either is captured. The 4-condition gate above governs facts (gotchas, rationale, conventions, directives). The orientation gate below governs *system maps* — content whose pieces are individually readable from source but whose assembly takes meaningful cross-boundary search.
 

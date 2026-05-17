@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# test_audit.sh — Tests for scripts/audit-artifact.sh correctness-gate wiring
+# test_audit.sh — Tests for scripts/audit-artifact.sh
 #
-# Covers:
-#   - End-to-end: lens-findings.json + --gate-output-file produces verdicts
-#     file + 3 scorecard rows with correct metric values
-#   - Contract validation: rejects bad shape (wrong judge, missing fields,
-#     missing correction on contradicted, correction-on-verified)
-#   - --skip-scorecard persists verdicts but does not append rows
-#   - User-supplied --gate-output-file is preserved (not deleted by trap)
-#   - Multi-run on same artifact appends to verdicts file and scorecard
+# Covers the three live source streams (task-claims, omission, consumption-
+# contradiction) and the per-kind --kind/--id dispatch flag pair introduced
+# alongside the kind-aware substrate. Each stream gets:
+#   - happy-path resolution via positional artifact-id
+#   - happy-path resolution via --kind/--id
+#   - error path on absent/duplicate/malformed/kind-mismatched rows
+# Plus general gate-contract and pipeline-skip tests that apply to every kind.
 
 set -euo pipefail
 
@@ -59,14 +58,32 @@ assert_file_exists() {
   fi
 }
 
-setup_fixture() {
-  # setup_fixture <kdir> <slug> [findings-json]
-  local kdir="$1" slug="$2" findings="${3:-}"
-  mkdir -p "$kdir/_followups/$slug"
-  if [[ -z "$findings" ]]; then
-    findings='{"pr":42,"findings":[{"title":"off-by-one","file":"app.py","line":10,"severity":"blocking","grounding":"loop bound","selected":true},{"title":"nit","severity":"info","selected":false}]}'
-  fi
-  printf '%s\n' "$findings" > "$kdir/_followups/$slug/lens-findings.json"
+setup_task_claims_fixture() {
+  # setup_task_claims_fixture <kdir> <slug>
+  local kdir="$1" slug="$2"
+  mkdir -p "$kdir/_work/$slug"
+  cat > "$kdir/_work/$slug/task-claims.jsonl" <<'JSONLEOF'
+{"claim_id":"task-claim-a","tier":"task-evidence","claim":"task claim A is auditable directly from task-claims.jsonl","producer_role":"worker","protocol_slot":"implementation","task_id":"task-1","phase_id":"1","scale":"implementation","source":{"file":"scripts/audit-artifact.sh","line_range":"1-20"},"falsifier":"Run lore audit against task-claims.jsonl with a matching priority claim"}
+{"claim_id":"task-claim-b","tier":"task-evidence","claim":"task claim B remains available for priority filtering","producer_role":"worker","protocol_slot":"implementation","task_id":"task-1","phase_id":"1","scale":"implementation","source":{"file":"scripts/audit-artifact.sh","line_range":"21-40"},"falsifier":"Run lore audit against task-claims.jsonl without a matching priority claim"}
+JSONLEOF
+}
+
+setup_audit_candidates_fixture() {
+  # setup_audit_candidates_fixture <kdir> <slug>
+  local kdir="$1" slug="$2"
+  mkdir -p "$kdir/_work/$slug"
+  cat > "$kdir/_work/$slug/audit-candidates.jsonl" <<'JSONLEOF'
+{"candidate_id":"cand-aaaaaaaaaaaa","verdict_source":"reverse-auditor","work_item":"omission-fixture-slug","file":"scripts/audit-artifact.sh","line_range":"10-12","falsifier":"Confirm caller does not pass --foo when --bar is set","rationale":"Untested branch on flag combination","status":"pending_correctness_gate","created_at":"2026-05-16T00:00:00Z"}
+JSONLEOF
+}
+
+setup_consumption_contradictions_fixture() {
+  # setup_consumption_contradictions_fixture <kdir> <slug>
+  local kdir="$1" slug="$2"
+  mkdir -p "$kdir/_work/$slug"
+  cat > "$kdir/_work/$slug/consumption-contradictions.jsonl" <<'JSONLEOF'
+{"contradiction_id":"ctr-aaaaaaaaaaaa","verdict_source":"consumer-contradiction-channel","work_item":"cc-fixture-slug","source":"worker","producer_role":"worker","protocol_slot":"implementation","cycle_id":"cycle-1","prefetched_commons_entry":{"knowledge_path":"conventions/foo.md","heading":""},"contradiction_rationale":"The code at this line falsifies the commons claim","claim_payload":{"claim_id":"contradict-1","claim_text":"The function never returns null","file":"scripts/audit-artifact.sh","line_range":"50-50","exact_snippet":"return None","falsifier":"Trace the return paths and confirm None can be returned"},"status":"pending","created_at":"2026-05-16T00:00:00Z","dedupe_key":"d","captured_at_branch":null,"captured_at_sha":null,"captured_at_merge_base_sha":null}
+JSONLEOF
 }
 
 gate_fixture() {
@@ -75,254 +92,260 @@ gate_fixture() {
   printf '%s\n' "$body" > "$path"
 }
 
-setup_plan_assertions_fixture() {
-  # setup_plan_assertions_fixture <kdir> <slug> [assertions-yaml]
-  # Creates $kdir/_work/<slug>/plan.md with a minimal synthetic plan-assertions
-  # payload: Template-version header, one investigation, and a parameterized
-  # **Assertions:** YAML block. Default YAML has 2 entries with full v1 coverage.
-  local kdir="$1" slug="$2" yaml="${3:-}"
-  mkdir -p "$kdir/_work/$slug"
-  if [[ -z "$yaml" ]]; then
-    yaml='- claim: loop bound is off-by-one on exit condition
-  file: scripts/audit-artifact.sh
-  line_range: "10-10"
-  exact_snippet: "for i in range(n)"
-  normalized_snippet_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  falsifier: Check loop termination condition in the implementation
-  significance: high
-- claim: error handler drops context on wrapped exceptions
-  file: scripts/audit-artifact.sh
-  line_range: "20-20"
-  exact_snippet: "raise RuntimeError(msg)"
-  normalized_snippet_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-  falsifier: Trace error path through call stack and verify context propagation
-  significance: medium'
-  fi
-  cat > "$kdir/_work/$slug/plan.md" <<PLANEOF
-# $slug
-
-## Goal
-Synthetic fixture for plan-assertions audit tests.
-
-## Investigations
-
-### Core logic
-**Question:** Does the implementation handle edge cases correctly?
-Template-version: test-plan-v1
-**Findings:**
-- The implementation handles edge cases.
-
-**Assertions:**
-$yaml
-PLANEOF
-}
-
-setup_worker_observations_fixture() {
-  # setup_worker_observations_fixture <kdir> <slug> [observations-yaml]
-  # Creates $kdir/_work/<slug>/execution-log.md with a minimal synthetic
-  # worker-observations payload: Template-version header and a **Observations:**
-  # YAML block. Default YAML has 2 entries with full v1 field coverage.
-  local kdir="$1" slug="$2" yaml="${3:-}"
-  mkdir -p "$kdir/_work/$slug"
-  if [[ -z "$yaml" ]]; then
-    yaml='- claim: null check missing before pointer dereference
-  file: scripts/audit-artifact.sh
-  line_range: "30-30"
-  exact_snippet: "return obj.value"
-  normalized_snippet_hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-  falsifier: Search for callers that pass unvalidated input to this path
-  significance: high
-- claim: retry loop cap is off-by-one on max attempts
-  file: scripts/audit-artifact.sh
-  line_range: "40-40"
-  exact_snippet: "while retries < max_retries"
-  normalized_snippet_hash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-  falsifier: Trace retry counter increment and comparison against cap constant
-  significance: medium'
-  fi
-  cat > "$kdir/_work/$slug/execution-log.md" <<LOGEOF
-# Execution Log: $slug
-
-<!-- Auto-generated by write-execution-log.sh. Do not edit the header. -->
-
-## 2026-01-01T00:00:00Z | source: worker-2
-
-Template-version: test-worker-v1
-
-Task: Synthetic fixture for worker-observations audit tests.
-
-**Observations:**
-$yaml
-LOGEOF
-}
-
-setup_task_claims_fixture() {
-  # setup_task_claims_fixture <kdir> <slug>
-  mkdir -p "$1/_work/$2"
-  cat > "$1/_work/$2/task-claims.jsonl" <<'JSONLEOF'
-{"claim_id":"task-claim-a","tier":"task-evidence","claim":"task claim A is auditable directly from task-claims.jsonl","producer_role":"worker","protocol_slot":"implementation","task_id":"task-1","phase_id":"1","scale":"implementation","source":{"file":"scripts/audit-artifact.sh","line_range":"1-20"},"falsifier":"Run lore audit against task-claims.jsonl with a matching priority claim"}
-{"claim_id":"task-claim-b","tier":"task-evidence","claim":"task claim B remains available for priority filtering","producer_role":"worker","protocol_slot":"implementation","task_id":"task-1","phase_id":"1","scale":"implementation","source":{"file":"scripts/audit-artifact.sh","line_range":"21-40"},"falsifier":"Run lore audit against task-claims.jsonl without a matching priority claim"}
-JSONLEOF
-}
-
 echo "=== Audit-artifact.sh Tests ==="
 echo ""
 
 # =============================================
-# Test 1: End-to-end happy path
+# Test 1: Task-claims happy path — positional artifact-id resolves the dir,
+# --priority-claims narrows to one row, gate verdict landed correctly.
 # =============================================
-echo "Test 1: End-to-end — 1 verified, 1 contradicted"
-KDIR="$TEST_DIR/kdir1"
-setup_fixture "$KDIR" "pr-42"
+echo "Test 1: task-claims via directory positional + --priority-claims"
+KDIR1="$TEST_DIR/kdir1"
+setup_task_claims_fixture "$KDIR1" "wi-task-claims"
 gate_fixture "$TEST_DIR/gate1.json" '{
-  "judge":"correctness-gate",
-  "judge_template_version":"abc123def456",
-  "verdicts":[
-    {"claim_id":"finding-0","verdict":"verified","evidence":"app.py:10 matches"},
-    {"claim_id":"finding-1","verdict":"contradicted","evidence":"no match found","correction":"nit claim was about a different file"}
-  ]
-}'
-
-OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-42" --kdir "$KDIR" --gate-output-file "$TEST_DIR/gate1.json")
-assert_contains "reports correctness-gate complete" "$OUT" "correctness-gate complete"
-assert_contains "reports verdict counts" "$OUT" "total=2 verified=1 unverified=0 contradicted=1"
-assert_contains "reports scorecard rows appended" "$OUT" "scorecard rows appended: 3"
-
-assert_file_exists "verdicts file landed under _followups" "$KDIR/_followups/pr-42/verdicts/pr-42.jsonl"
-assert_file_exists "scorecard rows.jsonl landed" "$KDIR/_scorecards/rows.jsonl"
-
-# Verify scorecard row values
-METRICS=$(jq -c '{metric,value,verdict_source,kind}' < "$KDIR/_scorecards/rows.jsonl")
-assert_contains "factual_precision metric row present" "$METRICS" '"metric":"factual_precision","value":0.5'
-assert_contains "audit_contradiction_rate metric row present" "$METRICS" '"metric":"audit_contradiction_rate","value":0.5'
-assert_contains "falsifier_quality reflects all contradictions have corrections" "$METRICS" '"metric":"falsifier_quality","value":1'
-assert_contains "rows attribute verdict_source=correctness-gate" "$METRICS" '"verdict_source":"correctness-gate"'
-assert_contains "rows are kind=scored" "$METRICS" '"kind":"scored"'
-
-echo ""
-echo "Test 1b: task-claims.jsonl artifact supports priority claim audit"
-KDIR1B="$TEST_DIR/kdir1b"
-setup_task_claims_fixture "$KDIR1B" "wi-task-claims"
-gate_fixture "$TEST_DIR/gate1b.json" '{
   "judge":"correctness-gate",
   "judge_template_version":"taskclaims111",
   "verdicts":[
     {"claim_id":"task-claim-a","verdict":"unverified","evidence":"fixture leaves claim unresolved"}
   ]
 }'
-printf '%s\n' '["task-claim-a"]' > "$TEST_DIR/priority1b.json"
+printf '%s\n' '["task-claim-a"]' > "$TEST_DIR/priority1.json"
 
-OUT1B=$(bash "$AUDIT" "$KDIR1B/_work/wi-task-claims/task-claims.jsonl" --kdir "$KDIR1B" \
-  --gate-output-file "$TEST_DIR/gate1b.json" \
-  --priority-claims "$TEST_DIR/priority1b.json" 2>&1)
-assert_contains "task-claims: priority narrowed to one row" "$OUT1B" "priority-claims: narrowed claim_payload to 1 claim(s)"
-assert_contains "task-claims: correctness-gate completes" "$OUT1B" "correctness-gate complete"
-assert_contains "task-claims: verdict totals reflect one unverified claim" "$OUT1B" "total=1 verified=0 unverified=1 contradicted=0"
-assert_file_exists "task-claims verdict file landed under work item" "$KDIR1B/_work/wi-task-claims/verdicts/task-claims.jsonl"
-
-DRY1B=$(bash "$AUDIT" "$KDIR1B/_work/wi-task-claims/task-claims.jsonl" --kdir "$KDIR1B" \
-  --dry-run --json --priority-claims "$TEST_DIR/priority1b.json")
-DRY1B_FILE=$(printf '%s' "$DRY1B" | jq -r '.change_context.changed_files[0]')
-DRY1B_SUMMARY=$(printf '%s' "$DRY1B" | jq -r '.change_context.summary | length > 0')
-assert_eq "task-claims: dry-run synthesizes change_context changed file" "$DRY1B_FILE" "scripts/audit-artifact.sh"
-assert_eq "task-claims: dry-run synthesizes non-empty change_context summary" "$DRY1B_SUMMARY" "true"
+OUT1=$(bash "$AUDIT" "$KDIR1/_work/wi-task-claims/task-claims.jsonl" --kdir "$KDIR1" \
+  --gate-output-file "$TEST_DIR/gate1.json" \
+  --priority-claims "$TEST_DIR/priority1.json" 2>&1)
+assert_contains "task-claims: priority narrowed to one row" "$OUT1" "priority-claims: narrowed claim_payload to 1 claim(s)"
+assert_contains "task-claims: assertion gate completes" "$OUT1" "correctness-gate-assertion complete"
+assert_contains "task-claims: verdict totals reflect one unverified claim" "$OUT1" "total=1 verified=0 unverified=1 contradicted=0"
+assert_file_exists "task-claims verdict file landed under work item" "$KDIR1/_work/wi-task-claims/verdicts/task-claims.jsonl"
 
 # =============================================
-# Test 2: User-supplied --gate-output-file is preserved across runs
+# Test 2: Task-claims via --kind task-claim --id <claim_id> --work-item <slug>
+# Resolves exactly one row and routes only that row through the pipeline.
 # =============================================
 echo ""
-echo "Test 2: --gate-output-file is not deleted, multi-run appends"
-KDIR="$TEST_DIR/kdir2"
-setup_fixture "$KDIR" "pr-1" '{"pr":1,"findings":[{"title":"x","severity":"blocking","grounding":"g"}]}'
+echo "Test 2: task-claims via --kind/--id"
+KDIR2="$TEST_DIR/kdir2"
+setup_task_claims_fixture "$KDIR2" "wi-kind"
 gate_fixture "$TEST_DIR/gate2.json" '{
   "judge":"correctness-gate",
-  "judge_template_version":"zzz",
-  "verdicts":[{"claim_id":"finding-0","verdict":"verified","evidence":"ok"}]
+  "judge_template_version":"kind222",
+  "verdicts":[
+    {"claim_id":"task-claim-b","verdict":"verified","evidence":"matches"}
+  ]
 }'
 
-bash "$AUDIT" "$KDIR/_followups/pr-1" --kdir "$KDIR" --gate-output-file "$TEST_DIR/gate2.json" >/dev/null
-assert_file_exists "gate output file preserved after run 1" "$TEST_DIR/gate2.json"
-
-bash "$AUDIT" "$KDIR/_followups/pr-1" --kdir "$KDIR" --gate-output-file "$TEST_DIR/gate2.json" >/dev/null
-assert_file_exists "gate output file preserved after run 2" "$TEST_DIR/gate2.json"
-
-VERDICT_LINES=$(wc -l < "$KDIR/_followups/pr-1/verdicts/pr-1.jsonl" | tr -d ' ')
-assert_eq "2 runs → 2 verdict lines" "$VERDICT_LINES" "2"
-
-ROW_LINES=$(wc -l < "$KDIR/_scorecards/rows.jsonl" | tr -d ' ')
-assert_eq "2 runs → 6 scorecard rows" "$ROW_LINES" "6"
+OUT2=$(bash "$AUDIT" --kdir "$KDIR2" --work-item "wi-kind" \
+  --kind task-claim --id task-claim-b \
+  --gate-output-file "$TEST_DIR/gate2.json" 2>&1)
+assert_contains "kind/id: narrowing message present" "$OUT2" "priority-claims: narrowed claim_payload to 1 claim(s)"
+assert_contains "kind/id: assertion gate completes" "$OUT2" "correctness-gate-assertion complete"
+assert_contains "kind/id: verdict totals reflect one verified claim" "$OUT2" "total=1 verified=1 unverified=0 contradicted=0"
 
 # =============================================
-# Test 3: Contract violation — wrong judge name
+# Test 3: Omission via --kind omission --id <candidate_id>
 # =============================================
 echo ""
-echo "Test 3: Contract violation — wrong judge name"
-KDIR="$TEST_DIR/kdir3"
-setup_fixture "$KDIR" "pr-bad"
+echo "Test 3: omission via --kind/--id"
+KDIR3="$TEST_DIR/kdir3"
+setup_audit_candidates_fixture "$KDIR3" "wi-omission"
+gate_fixture "$TEST_DIR/gate3.json" '{
+  "judge":"correctness-gate",
+  "judge_template_version":"omiss333",
+  "verdicts":[
+    {"claim_id":"cand-aaaaaaaaaaaa","verdict":"verified","evidence":"branch confirmed missing"}
+  ]
+}'
+
+OUT3=$(bash "$AUDIT" --kdir "$KDIR3" --work-item "wi-omission" \
+  --kind omission --id cand-aaaaaaaaaaaa \
+  --gate-output-file "$TEST_DIR/gate3.json" 2>&1)
+assert_contains "omission: gate completes" "$OUT3" "correctness-gate-omission complete"
+assert_contains "omission: verdict totals reflect one verified claim" "$OUT3" "total=1 verified=1 unverified=0 contradicted=0"
+
+# =============================================
+# Test 4: Consumption-contradiction via --kind consumption-contradiction --id <contradiction_id>
+# =============================================
+echo ""
+echo "Test 4: consumption-contradiction via --kind/--id"
+KDIR4="$TEST_DIR/kdir4"
+setup_consumption_contradictions_fixture "$KDIR4" "wi-cc"
+gate_fixture "$TEST_DIR/gate4.json" '{
+  "judge":"correctness-gate",
+  "judge_template_version":"cc444",
+  "verdicts":[
+    {"claim_id":"contradict-1","verdict":"contradicted","evidence":"the claim is wrong","correction":"the function can return None"}
+  ]
+}'
+
+OUT4=$(bash "$AUDIT" --kdir "$KDIR4" --work-item "wi-cc" \
+  --kind consumption-contradiction --id ctr-aaaaaaaaaaaa \
+  --gate-output-file "$TEST_DIR/gate4.json" 2>&1)
+assert_contains "cc: contradiction gate completes" "$OUT4" "correctness-gate-contradiction complete"
+assert_contains "cc: verdict totals reflect one contradicted claim" "$OUT4" "total=1 verified=0 unverified=0 contradicted=1"
+
+# =============================================
+# Test 5: --kind/--id error: missing source file
+# =============================================
+echo ""
+echo "Test 5: --kind/--id error — missing source file"
+KDIR5="$TEST_DIR/kdir5"
+mkdir -p "$KDIR5/_work/wi-empty"
+
+EXIT5=0
+ERR5=$(bash "$AUDIT" --kdir "$KDIR5" --work-item "wi-empty" \
+  --kind task-claim --id task-claim-x 2>&1 >/dev/null) || EXIT5=$?
+assert_eq "missing source file exits 1" "$EXIT5" "1"
+assert_contains "missing source: stderr names the missing file" "$ERR5" "source file not found"
+
+# =============================================
+# Test 6: --kind/--id error: absent id (file exists but no matching row)
+# =============================================
+echo ""
+echo "Test 6: --kind/--id error — id not present in source file"
+KDIR6="$TEST_DIR/kdir6"
+setup_task_claims_fixture "$KDIR6" "wi-no-match"
+
+EXIT6=0
+ERR6=$(bash "$AUDIT" --kdir "$KDIR6" --work-item "wi-no-match" \
+  --kind task-claim --id task-claim-zzzzz 2>&1 >/dev/null) || EXIT6=$?
+assert_eq "absent id exits 1" "$EXIT6" "1"
+assert_contains "absent id: stderr cites 'resolved 0 source rows'" "$ERR6" "resolved 0 source rows"
+
+# =============================================
+# Test 7: --kind/--id error: duplicate id (file has two matching rows)
+# =============================================
+echo ""
+echo "Test 7: --kind/--id error — duplicate id resolves >1 row"
+KDIR7="$TEST_DIR/kdir7"
+mkdir -p "$KDIR7/_work/wi-dup"
+cat > "$KDIR7/_work/wi-dup/task-claims.jsonl" <<'JSONLEOF'
+{"claim_id":"dup-id","tier":"task-evidence","claim":"first occurrence","producer_role":"worker","protocol_slot":"implementation","task_id":"task-1","phase_id":"1","scale":"implementation","source":{"file":"x","line_range":"1-1"},"falsifier":"x","change_context":{"diff_ref":null,"changed_files":["x"],"summary":"s"}}
+{"claim_id":"dup-id","tier":"task-evidence","claim":"second occurrence","producer_role":"worker","protocol_slot":"implementation","task_id":"task-1","phase_id":"1","scale":"implementation","source":{"file":"x","line_range":"2-2"},"falsifier":"x","change_context":{"diff_ref":null,"changed_files":["x"],"summary":"s"}}
+JSONLEOF
+
+EXIT7=0
+ERR7=$(bash "$AUDIT" --kdir "$KDIR7" --work-item "wi-dup" \
+  --kind task-claim --id dup-id 2>&1 >/dev/null) || EXIT7=$?
+assert_eq "duplicate id exits 1" "$EXIT7" "1"
+assert_contains "duplicate id: stderr cites 'resolved 2 source rows'" "$ERR7" "resolved 2 source rows"
+
+# =============================================
+# Test 8: --kind/--id error: malformed source file (invalid JSON line) is
+# silently skipped — duplicate/zero-match detection is unaffected by it.
+# Here the only valid row has the requested id; absent-id error fires only if
+# malformed lines were the *only* lines. Use a tighter fixture: malformed
+# row + zero valid rows ⇒ absent-id error after dedupe.
+# =============================================
+echo ""
+echo "Test 8: --kind/--id error — malformed source file leaves zero matches"
+KDIR8="$TEST_DIR/kdir8"
+mkdir -p "$KDIR8/_work/wi-malformed"
+printf '%s\n' '{this is not valid json' > "$KDIR8/_work/wi-malformed/task-claims.jsonl"
+
+EXIT8=0
+ERR8=$(bash "$AUDIT" --kdir "$KDIR8" --work-item "wi-malformed" \
+  --kind task-claim --id task-claim-x 2>&1 >/dev/null) || EXIT8=$?
+assert_eq "malformed-only file exits 1" "$EXIT8" "1"
+assert_contains "malformed-only: stderr cites 'resolved 0 source rows'" "$ERR8" "resolved 0 source rows"
+
+# =============================================
+# Test 9: --kind/--id error: kind mismatch — id exists in a different stream
+# than --kind names. The wrapper resolves only against the --kind file, so the
+# error is "resolved 0 source rows" (the id lives elsewhere).
+# =============================================
+echo ""
+echo "Test 9: --kind/--id error — kind mismatch (id lives in another stream)"
+KDIR9="$TEST_DIR/kdir9"
+mkdir -p "$KDIR9/_work/wi-mismatch"
+# task-claim id, but we'll ask for kind=omission
+cat > "$KDIR9/_work/wi-mismatch/task-claims.jsonl" <<'JSONLEOF'
+{"claim_id":"wrong-stream-id","tier":"task-evidence","claim":"x","producer_role":"worker","protocol_slot":"implementation","task_id":"t","phase_id":"1","scale":"implementation","source":{"file":"x","line_range":"1-1"},"falsifier":"x","change_context":{"diff_ref":null,"changed_files":["x"],"summary":"s"}}
+JSONLEOF
+# Empty omission file (signals file presence, no rows)
+: > "$KDIR9/_work/wi-mismatch/audit-candidates.jsonl"
+
+EXIT9=0
+ERR9=$(bash "$AUDIT" --kdir "$KDIR9" --work-item "wi-mismatch" \
+  --kind omission --id wrong-stream-id 2>&1 >/dev/null) || EXIT9=$?
+assert_eq "kind-mismatch exits 1" "$EXIT9" "1"
+assert_contains "kind-mismatch: stderr cites 'resolved 0 source rows'" "$ERR9" "resolved 0 source rows"
+
+# =============================================
+# Test 10: --kind/--id flag pairing — --kind without --id rejected
+# =============================================
+echo ""
+echo "Test 10: --kind without --id rejected"
+EXIT10=0
+ERR10=$(bash "$AUDIT" --kdir "$TEST_DIR" --work-item "wi-x" --kind task-claim 2>&1 >/dev/null) || EXIT10=$?
+assert_eq "--kind without --id exits 1" "$EXIT10" "1"
+assert_contains "stderr names flag pairing rule" "$ERR10" "--kind and --id must both be present"
+
+# =============================================
+# Test 11: --kind invalid value rejected
+# =============================================
+echo ""
+echo "Test 11: --kind invalid value rejected"
+EXIT11=0
+ERR11=$(bash "$AUDIT" --kdir "$TEST_DIR" --work-item "wi-x" --kind nonsense --id foo 2>&1 >/dev/null) || EXIT11=$?
+assert_eq "--kind invalid exits 1" "$EXIT11" "1"
+assert_contains "stderr names valid kind enum" "$ERR11" "--kind must be"
+
+# =============================================
+# Test 12: Gate contract violation — wrong judge name
+# =============================================
+echo ""
+echo "Test 12: Contract violation — wrong judge name"
+KDIR12="$TEST_DIR/kdir12"
+setup_task_claims_fixture "$KDIR12" "wi-bad"
 gate_fixture "$TEST_DIR/gate-bad-judge.json" '{"judge":"wrong-gate","verdicts":[]}'
 
-EXIT_CODE=0
-ERR_OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-bad" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate-bad-judge.json" --skip-scorecard 2>&1 >/dev/null) || EXIT_CODE=$?
-assert_eq "wrong judge name exits 2 (contract violation)" "$EXIT_CODE" "2"
-assert_contains "error cites contract violation" "$ERR_OUT" "contract violation"
+EXIT12=0
+ERR12=$(bash "$AUDIT" --kdir "$KDIR12" --work-item "wi-bad" \
+  --kind task-claim --id task-claim-a \
+  --gate-output-file "$TEST_DIR/gate-bad-judge.json" --skip-scorecard 2>&1 >/dev/null) || EXIT12=$?
+assert_eq "wrong judge name exits 2 (contract violation)" "$EXIT12" "2"
+assert_contains "error cites contract violation" "$ERR12" "contract violation"
 
 # =============================================
-# Test 4: Contract violation — contradicted without correction
+# Test 13: Gate contract violation — contradicted without correction
 # =============================================
 echo ""
-echo "Test 4: Contract violation — contradicted verdict missing correction"
-KDIR="$TEST_DIR/kdir4"
-setup_fixture "$KDIR" "pr-bad2"
+echo "Test 13: Contract violation — contradicted verdict missing correction"
+KDIR13="$TEST_DIR/kdir13"
+setup_task_claims_fixture "$KDIR13" "wi-bad2"
 gate_fixture "$TEST_DIR/gate-bad-correction.json" '{
   "judge":"correctness-gate",
   "judge_template_version":"a",
-  "verdicts":[{"claim_id":"finding-0","verdict":"contradicted","evidence":"x"}]
+  "verdicts":[{"claim_id":"task-claim-a","verdict":"contradicted","evidence":"x"}]
 }'
 
-EXIT_CODE=0
-ERR_OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-bad2" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate-bad-correction.json" --skip-scorecard 2>&1 >/dev/null) || EXIT_CODE=$?
-assert_eq "missing correction on contradicted exits 2" "$EXIT_CODE" "2"
-assert_contains "error names the correction field" "$ERR_OUT" "correction missing on contradicted"
+EXIT13=0
+ERR13=$(bash "$AUDIT" --kdir "$KDIR13" --work-item "wi-bad2" \
+  --kind task-claim --id task-claim-a \
+  --gate-output-file "$TEST_DIR/gate-bad-correction.json" --skip-scorecard 2>&1 >/dev/null) || EXIT13=$?
+assert_eq "missing correction on contradicted exits 2" "$EXIT13" "2"
+assert_contains "error names the correction field" "$ERR13" "correction missing on contradicted"
 
 # =============================================
-# Test 5: Contract violation — correction on verified verdict
+# Test 14: --skip-scorecard persists verdicts but no scorecard rows
 # =============================================
 echo ""
-echo "Test 5: Contract violation — correction on verified verdict"
-KDIR="$TEST_DIR/kdir5"
-setup_fixture "$KDIR" "pr-bad3"
-gate_fixture "$TEST_DIR/gate-correction-on-verified.json" '{
-  "judge":"correctness-gate",
-  "judge_template_version":"a",
-  "verdicts":[{"claim_id":"finding-0","verdict":"verified","evidence":"ok","correction":"should not be here"}]
-}'
-
-EXIT_CODE=0
-ERR_OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-bad3" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate-correction-on-verified.json" --skip-scorecard 2>&1 >/dev/null) || EXIT_CODE=$?
-assert_eq "correction on verified exits 2" "$EXIT_CODE" "2"
-assert_contains "error names correction-must-be-absent" "$ERR_OUT" "correction must be absent"
-
-# =============================================
-# Test 6: --skip-scorecard persists verdicts but no scorecard rows
-# =============================================
-echo ""
-echo "Test 6: --skip-scorecard"
-KDIR="$TEST_DIR/kdir6"
-setup_fixture "$KDIR" "pr-skip"
+echo "Test 14: --skip-scorecard"
+KDIR14="$TEST_DIR/kdir14"
+setup_task_claims_fixture "$KDIR14" "wi-skip"
 gate_fixture "$TEST_DIR/gate-skip.json" '{
   "judge":"correctness-gate",
   "judge_template_version":"a",
-  "verdicts":[{"claim_id":"finding-0","verdict":"verified","evidence":"ok"}]
+  "verdicts":[{"claim_id":"task-claim-a","verdict":"verified","evidence":"ok"}]
 }'
 
-bash "$AUDIT" "$KDIR/_followups/pr-skip" --kdir "$KDIR" \
+bash "$AUDIT" --kdir "$KDIR14" --work-item "wi-skip" \
+  --kind task-claim --id task-claim-a \
   --gate-output-file "$TEST_DIR/gate-skip.json" --skip-scorecard >/dev/null
 
-assert_file_exists "verdicts persisted" "$KDIR/_followups/pr-skip/verdicts/pr-skip.jsonl"
-if [[ -f "$KDIR/_scorecards/rows.jsonl" ]]; then
+assert_file_exists "verdicts persisted" "$KDIR14/_work/wi-skip/verdicts/task-claims.jsonl"
+if [[ -f "$KDIR14/_scorecards/rows.jsonl" ]]; then
   echo "  FAIL: --skip-scorecard did not prevent rows.jsonl creation"
   FAIL=$((FAIL + 1))
 else
@@ -331,797 +354,26 @@ else
 fi
 
 # =============================================
-# Test 7: Missing --gate-output-file and no claude CLI → clean error
+# Test 15: --priority-claims absent → unchanged pipeline (regression)
 # =============================================
 echo ""
-echo "Test 7: No claude CLI and no --gate-output-file → clean error"
-KDIR="$TEST_DIR/kdir7"
-setup_fixture "$KDIR" "pr-nogate"
-
-# Hide `claude` if present by running with a sanitized PATH
-EXIT_CODE=0
-ERR_OUT=$(PATH="/usr/bin:/bin" bash "$AUDIT" "$KDIR/_followups/pr-nogate" --kdir "$KDIR" 2>&1 >/dev/null) || EXIT_CODE=$?
-assert_eq "no-claude, no-gate-file exits 1" "$EXIT_CODE" "1"
-assert_contains "error names both integration modes" "$ERR_OUT" "claude"
-
-# =============================================
-# Test 8: Curator stage end-to-end via injection
-# =============================================
-echo ""
-echo "Test 8: Curator stage — 2 verified → 1 selected + 1 dropped"
-KDIR="$TEST_DIR/kdir8"
-setup_fixture "$KDIR" "pr-8" '{"pr":8,"findings":[
-  {"title":"a","file":"a.py","line":1,"severity":"blocking","grounding":"g"},
-  {"title":"b","file":"b.py","line":2,"severity":"blocking","grounding":"g"},
-  {"title":"c","severity":"info"}
-]}'
-gate_fixture "$TEST_DIR/gate8.json" '{
-  "judge":"correctness-gate",
-  "judge_template_version":"abc",
-  "verdicts":[
-    {"claim_id":"finding-0","verdict":"verified","evidence":"a.py:1 ok"},
-    {"claim_id":"finding-1","verdict":"verified","evidence":"b.py:2 ok"},
-    {"claim_id":"finding-2","verdict":"unverified","evidence":"no ref"}
-  ]
-}'
-gate_fixture "$TEST_DIR/curator8.json" '{
-  "judge":"curator",
-  "judge_template_version":"def",
-  "selected":[
-    {"claim_id":"finding-0","selection_rationale":"non-recoverable rationale"}
-  ],
-  "dropped":[
-    {"claim_id":"finding-1","trivial_reason":"duplicate-of-survivor","drop_rationale":"dup of finding-0"}
-  ]
-}'
-
-OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-8" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate8.json" \
-  --curator-output-file "$TEST_DIR/curator8.json")
-assert_contains "reports curator complete" "$OUT" "curator complete"
-assert_contains "reports selected=1 dropped=1" "$OUT" "selected=1 dropped=1"
-assert_contains "total rows = 5 (3 gate + 2 curator)" "$OUT" "total scorecard rows appended: 5"
-
-# Verify curator scorecard rows landed with correct attribution
-METRICS=$(jq -c '{metric,value,verdict_source,granularity,sample_size}' < "$KDIR/_scorecards/rows.jsonl")
-assert_contains "curated_rate row present (0.5 = 1 selected / 2 verified)" "$METRICS" '"metric":"curated_rate","value":0.5,"verdict_source":"curator","granularity":"set-level","sample_size":2'
-assert_contains "triviality_rate row present (0.5 = 1 dropped / 2 verified)" "$METRICS" '"metric":"triviality_rate","value":0.5,"verdict_source":"curator","granularity":"set-level","sample_size":2'
-
-# Verify verdict file has 2 lines (gate + curator)
-VERDICT_LINES=$(wc -l < "$KDIR/_followups/pr-8/verdicts/pr-8.jsonl" | tr -d ' ')
-assert_eq "verdict file has 2 lines (gate + curator)" "$VERDICT_LINES" "2"
-
-# =============================================
-# Test 9: Curator skipped when 0 verified
-# =============================================
-echo ""
-echo "Test 9: Curator skipped — 0 verified survivors"
-KDIR="$TEST_DIR/kdir9"
-setup_fixture "$KDIR" "pr-9"
-gate_fixture "$TEST_DIR/gate9.json" '{
-  "judge":"correctness-gate",
-  "judge_template_version":"abc",
-  "verdicts":[
-    {"claim_id":"finding-0","verdict":"contradicted","evidence":"no","correction":"actual"}
-  ]
-}'
-
-OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-9" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate9.json" \
-  --curator-output-file "$TEST_DIR/curator8.json")
-# With 0 verified, curator never runs even if --curator-output-file is supplied.
-# The "no curator runs" is inferred from the absence of "curator complete" output.
-if echo "$OUT" | grep -qF "curator complete"; then
-  echo "  FAIL: curator ran despite 0 verified survivors"
-  FAIL=$((FAIL + 1))
-else
-  echo "  PASS: curator skipped when 0 verified"
-  PASS=$((PASS + 1))
-fi
-assert_contains "next-step says curator skipped" "$OUT" "curator skipped (no verified survivors)"
-
-# =============================================
-# Test 10: Curator auto-skip when gate injected but no curator file
-# =============================================
-echo ""
-echo "Test 10: Curator auto-skip when gate is injected but no curator file"
-KDIR="$TEST_DIR/kdir10"
-setup_fixture "$KDIR" "pr-10"
-gate_fixture "$TEST_DIR/gate10.json" '{
-  "judge":"correctness-gate",
-  "judge_template_version":"abc",
-  "verdicts":[{"claim_id":"finding-0","verdict":"verified","evidence":"ok"}]
-}'
-
-ERR_OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-10" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate10.json" 2>&1 >/dev/null)
-assert_contains "auto-skip explanation cites gate-injected-but-no-curator-file" "$ERR_OUT" "gate was injected but no --curator-output-file supplied"
-
-# =============================================
-# Test 11: Contract violation — curator missing drop_rationale
-# =============================================
-echo ""
-echo "Test 11: Contract violation — curator drop without drop_rationale"
-KDIR="$TEST_DIR/kdir11"
-setup_fixture "$KDIR" "pr-11" '{"pr":11,"findings":[
-  {"title":"a","severity":"blocking","grounding":"g"},
-  {"title":"b","severity":"blocking","grounding":"g"}
-]}'
-gate_fixture "$TEST_DIR/gate11.json" '{
-  "judge":"correctness-gate",
-  "judge_template_version":"abc",
-  "verdicts":[
-    {"claim_id":"finding-0","verdict":"verified","evidence":"ok"},
-    {"claim_id":"finding-1","verdict":"verified","evidence":"ok"}
-  ]
-}'
-gate_fixture "$TEST_DIR/curator-bad.json" '{
-  "judge":"curator","judge_template_version":"d",
-  "selected":[{"claim_id":"finding-0","selection_rationale":"ok"}],
-  "dropped":[{"claim_id":"finding-1"}]
-}'
-
-EXIT_CODE=0
-ERR_OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-11" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate11.json" \
-  --curator-output-file "$TEST_DIR/curator-bad.json" --skip-scorecard 2>&1 >/dev/null) || EXIT_CODE=$?
-assert_eq "curator drop without drop_rationale exits 2" "$EXIT_CODE" "2"
-assert_contains "error names drop_rationale" "$ERR_OUT" "drop_rationale missing"
-
-# =============================================
-# Test 12: Contract violation — curator selected empty despite verified set
-# =============================================
-echo ""
-echo "Test 12: Contract violation — curator selected empty with non-empty verified"
-KDIR="$TEST_DIR/kdir12"
-setup_fixture "$KDIR" "pr-12"
-gate_fixture "$TEST_DIR/gate12.json" '{
-  "judge":"correctness-gate",
-  "judge_template_version":"abc",
-  "verdicts":[{"claim_id":"finding-0","verdict":"verified","evidence":"ok"}]
-}'
-gate_fixture "$TEST_DIR/curator-empty-sel.json" '{
-  "judge":"curator","judge_template_version":"d",
-  "selected":[],
-  "dropped":[{"claim_id":"finding-0","drop_rationale":"trivial"}]
-}'
-
-EXIT_CODE=0
-ERR_OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-12" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate12.json" \
-  --curator-output-file "$TEST_DIR/curator-empty-sel.json" --skip-scorecard 2>&1 >/dev/null) || EXIT_CODE=$?
-assert_eq "curator empty selected with verified exits 2" "$EXIT_CODE" "2"
-assert_contains "error names empty-selected-vs-verified" "$ERR_OUT" "selected is empty but verified_candidate_set was non-empty"
-
-# =============================================
-# Test 13: Contract violation — curator selected > 3
-# =============================================
-echo ""
-echo "Test 13: Contract violation — curator selected > 3"
-KDIR="$TEST_DIR/kdir13"
-setup_fixture "$KDIR" "pr-13" '{"pr":13,"findings":[
-  {"title":"a","severity":"blocking","grounding":"g"},
-  {"title":"b","severity":"blocking","grounding":"g"},
-  {"title":"c","severity":"blocking","grounding":"g"},
-  {"title":"d","severity":"blocking","grounding":"g"}
-]}'
-gate_fixture "$TEST_DIR/gate13.json" '{
-  "judge":"correctness-gate","judge_template_version":"abc",
-  "verdicts":[
-    {"claim_id":"finding-0","verdict":"verified","evidence":"ok"},
-    {"claim_id":"finding-1","verdict":"verified","evidence":"ok"},
-    {"claim_id":"finding-2","verdict":"verified","evidence":"ok"},
-    {"claim_id":"finding-3","verdict":"verified","evidence":"ok"}
-  ]
-}'
-gate_fixture "$TEST_DIR/curator-too-many.json" '{
-  "judge":"curator","judge_template_version":"d",
-  "selected":[
-    {"claim_id":"finding-0","selection_rationale":"r"},
-    {"claim_id":"finding-1","selection_rationale":"r"},
-    {"claim_id":"finding-2","selection_rationale":"r"},
-    {"claim_id":"finding-3","selection_rationale":"r"}
-  ],
-  "dropped":[]
-}'
-
-EXIT_CODE=0
-ERR_OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-13" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate13.json" \
-  --curator-output-file "$TEST_DIR/curator-too-many.json" --skip-scorecard 2>&1 >/dev/null) || EXIT_CODE=$?
-assert_eq "curator selected > 3 exits 2" "$EXIT_CODE" "2"
-assert_contains "error names the k-bound violation" "$ERR_OUT" "curator contract caps at 3"
-
-# =============================================
-# Test 14: Reverse-auditor stage — silence (explicit no-omission)
-# =============================================
-echo ""
-echo "Test 14: Reverse-auditor silence"
-KDIR="$TEST_DIR/kdir14"
-setup_fixture "$KDIR" "pr-14"
-gate_fixture "$TEST_DIR/gate14.json" '{
-  "judge":"correctness-gate","judge_template_version":"gtv",
-  "verdicts":[{"claim_id":"finding-0","verdict":"verified","evidence":"ok"}]
-}'
-gate_fixture "$TEST_DIR/curator14.json" '{
-  "judge":"curator","judge_template_version":"ctv",
-  "selected":[{"claim_id":"finding-0","selection_rationale":"kept"}],
-  "dropped":[]
-}'
-gate_fixture "$TEST_DIR/ra14.json" '{
-  "judge":"reverse-auditor","judge_template_version":"rtv",
-  "omission_claim":null,
-  "silence_rationale":"coverage looks clean"
-}'
-
-OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-14" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate14.json" \
-  --curator-output-file "$TEST_DIR/curator14.json" \
-  --reverse-auditor-output-file "$TEST_DIR/ra14.json")
-assert_contains "reports reverse-auditor complete" "$OUT" "reverse-auditor complete"
-assert_contains "silence verdict reported" "$OUT" "verdict=silence"
-assert_contains "queue destination is silence (no write)" "$OUT" "queue=silence"
-# Silence emits exactly one telemetry row (grounding_failure_rate=0)
-assert_contains "total rows = 6 (3 gate + 2 curator + 1 telemetry)" "$OUT" "total scorecard rows appended: 6"
-
-# Verify no audit-candidates/attempts file was created (silence short-circuits queue)
-if [[ -f "$KDIR/_followups/pr-14/audit-candidates.jsonl" ]]; then
-  echo "  FAIL: silence created audit-candidates.jsonl"; FAIL=$((FAIL + 1))
-else
-  echo "  PASS: silence did not create audit-candidates.jsonl"; PASS=$((PASS + 1))
-fi
-if [[ -f "$KDIR/_followups/pr-14/audit-attempts.jsonl" ]]; then
-  echo "  FAIL: silence created audit-attempts.jsonl"; FAIL=$((FAIL + 1))
-else
-  echo "  PASS: silence did not create audit-attempts.jsonl"; PASS=$((PASS + 1))
-fi
-
-# Verify telemetry row shape
-RA_METRICS=$(jq -c 'select(.verdict_source=="reverse-auditor")' < "$KDIR/_scorecards/rows.jsonl")
-assert_contains "grounding_failure_rate telemetry row=0" "$RA_METRICS" '"metric":"grounding_failure_rate"'
-assert_contains "reverse-auditor rows are kind=telemetry on silence" "$RA_METRICS" '"kind":"telemetry"'
-
-# Verdict file has 3 lines (gate + curator + reverse-auditor)
-VERDICT_LINES=$(wc -l < "$KDIR/_followups/pr-14/verdicts/pr-14.jsonl" | tr -d ' ')
-assert_eq "verdict file has 3 lines" "$VERDICT_LINES" "3"
-
-# =============================================
-# Test 15: Reverse-auditor stage — grounded omission claim (preflight pass)
-# =============================================
-echo ""
-echo "Test 15: Reverse-auditor grounded omission (preflight pass)"
-KDIR="$TEST_DIR/kdir15"
-setup_fixture "$KDIR" "pr-15"
-
-# Build a fixture repo with a file the omission claim anchors into.
-FIXTURE_REPO="$TEST_DIR/repo15"
-mkdir -p "$FIXTURE_REPO"
-printf 'line-one\nline-two\nline-three\n' > "$FIXTURE_REPO/target.py"
-
-# exact_snippet must be verbatim lines 2-2 ("line-two"); normalized hash
-# follows v1 normalization (already clean ASCII, single-line).
-HASH=$(printf '%s' "line-two" | python3 -c '
-import hashlib,re,sys
-s=sys.stdin.read()
-s=s.replace("‘","\x27").replace("’","\x27")
-s=s.replace("“","\x22").replace("”","\x22")
-s=re.sub(r"\s+"," ",s).strip()
-print(hashlib.sha256(s.encode("utf-8")).hexdigest())
-')
-
+echo "Test 15: --priority-claims absent → pipeline unchanged"
+KDIR15="$TEST_DIR/kdir15"
+setup_task_claims_fixture "$KDIR15" "wi-noflag"
 gate_fixture "$TEST_DIR/gate15.json" '{
-  "judge":"correctness-gate","judge_template_version":"gtv",
-  "verdicts":[{"claim_id":"finding-0","verdict":"verified","evidence":"ok"}]
-}'
-gate_fixture "$TEST_DIR/curator15.json" '{
-  "judge":"curator","judge_template_version":"ctv",
-  "selected":[{"claim_id":"finding-0","selection_rationale":"kept"}],
-  "dropped":[]
-}'
-gate_fixture "$TEST_DIR/ra15.json" '{
-  "judge":"reverse-auditor","judge_template_version":"rtv",
-  "omission_claim":{
-    "file":"target.py","line_range":"2-2",
-    "exact_snippet":"line-two",
-    "normalized_snippet_hash":"'"$HASH"'",
-    "falsifier":"grep for callers of line-two",
-    "why_it_matters":"documents an untested branch"
-  }
-}'
-
-OUT=$(LORE_REPO_ROOT="$FIXTURE_REPO" bash "$AUDIT" "$KDIR/_followups/pr-15" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate15.json" \
-  --curator-output-file "$TEST_DIR/curator15.json" \
-  --reverse-auditor-output-file "$TEST_DIR/ra15.json")
-assert_contains "omission-claim verdict reported" "$OUT" "verdict=omission-claim"
-assert_contains "preflight ok" "$OUT" "preflight=ok"
-assert_contains "queue destination is candidates" "$OUT" "queue=candidates"
-# Grounded omission → 3 reverse-auditor scorecard rows (omission_rate scored +
-# coverage_quality scored + grounding_failure_rate telemetry)
-assert_contains "total rows = 8 (3 gate + 2 curator + 3 ra)" "$OUT" "total scorecard rows appended: 8"
-
-# audit-candidates.jsonl landed in the followup dir (no _work/<slug>)
-assert_file_exists "audit-candidates.jsonl written" "$KDIR/_followups/pr-15/audit-candidates.jsonl"
-CAND_LINE=$(cat "$KDIR/_followups/pr-15/audit-candidates.jsonl")
-assert_contains "candidate row carries file" "$CAND_LINE" '"file": "target.py"'
-assert_contains "candidate row status=pending_correctness_gate" "$CAND_LINE" '"status": "pending_correctness_gate"'
-
-# Verify claim_anchor landed on scored reverse-auditor rows
-RA_SCORED=$(jq -c 'select(.verdict_source=="reverse-auditor" and .kind=="scored")' < "$KDIR/_scorecards/rows.jsonl")
-assert_contains "scored reverse-auditor row has claim_anchor.file" "$RA_SCORED" '"file":"target.py"'
-assert_contains "omission_rate=1.0 on grounded omission" "$RA_SCORED" '"metric":"omission_rate","value":1'
-
-# =============================================
-# Test 16: Reverse-auditor preflight fail → audit-attempts.jsonl + exit 3
-# =============================================
-echo ""
-echo "Test 16: Reverse-auditor preflight fail — bad line-range"
-KDIR="$TEST_DIR/kdir16"
-setup_fixture "$KDIR" "pr-16"
-
-FIXTURE_REPO="$TEST_DIR/repo16"
-mkdir -p "$FIXTURE_REPO"
-printf 'only-one-line\n' > "$FIXTURE_REPO/short.py"
-
-gate_fixture "$TEST_DIR/gate16.json" '{
-  "judge":"correctness-gate","judge_template_version":"gtv",
-  "verdicts":[{"claim_id":"finding-0","verdict":"verified","evidence":"ok"}]
-}'
-gate_fixture "$TEST_DIR/curator16.json" '{
-  "judge":"curator","judge_template_version":"ctv",
-  "selected":[{"claim_id":"finding-0","selection_rationale":"kept"}],
-  "dropped":[]
-}'
-# Claim points at line 99 of a 1-line file → line-out-of-range
-gate_fixture "$TEST_DIR/ra16.json" '{
-  "judge":"reverse-auditor","judge_template_version":"rtv",
-  "omission_claim":{
-    "file":"short.py","line_range":"99-99",
-    "exact_snippet":"phantom",
-    "normalized_snippet_hash":"0000000000000000000000000000000000000000000000000000000000000000",
-    "falsifier":"falsifier",
-    "why_it_matters":"why"
-  }
-}'
-
-EXIT_CODE=0
-OUT=$(LORE_REPO_ROOT="$FIXTURE_REPO" bash "$AUDIT" "$KDIR/_followups/pr-16" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate16.json" \
-  --curator-output-file "$TEST_DIR/curator16.json" \
-  --reverse-auditor-output-file "$TEST_DIR/ra16.json") || EXIT_CODE=$?
-assert_eq "preflight-failed exits 3" "$EXIT_CODE" "3"
-assert_contains "preflight reason is line-out-of-range" "$OUT" "preflight=line-out-of-range"
-assert_contains "queue destination is attempts" "$OUT" "queue=attempts"
-
-assert_file_exists "audit-attempts.jsonl written" "$KDIR/_followups/pr-16/audit-attempts.jsonl"
-ATT_LINE=$(cat "$KDIR/_followups/pr-16/audit-attempts.jsonl")
-assert_contains "attempt row cites line-out-of-range reason" "$ATT_LINE" '"reason": "line-out-of-range"'
-
-# grounding_failure_rate telemetry row = 1.0 on preflight fail
-RA_TELEMETRY=$(jq -c 'select(.verdict_source=="reverse-auditor" and .kind=="telemetry")' < "$KDIR/_scorecards/rows.jsonl")
-assert_contains "grounding_failure_rate=1.0 on preflight fail" "$RA_TELEMETRY" '"metric":"grounding_failure_rate","value":1'
-# omission_rate scored row must NOT be emitted on preflight fail (no grounded claim)
-RA_OMISSION=$(jq -c 'select(.verdict_source=="reverse-auditor" and .metric=="omission_rate")' < "$KDIR/_scorecards/rows.jsonl")
-if [[ -z "$RA_OMISSION" ]]; then
-  echo "  PASS: no omission_rate scored row on preflight fail"; PASS=$((PASS + 1))
-else
-  echo "  FAIL: omission_rate scored row emitted on preflight fail: $RA_OMISSION"; FAIL=$((FAIL + 1))
-fi
-
-# =============================================
-# Test 17: Reverse-auditor contract violation — malformed emission
-# =============================================
-echo ""
-echo "Test 17: Reverse-auditor shape violation — omission_claim missing required field"
-KDIR="$TEST_DIR/kdir17"
-setup_fixture "$KDIR" "pr-17"
-gate_fixture "$TEST_DIR/gate17.json" '{
-  "judge":"correctness-gate","judge_template_version":"gtv",
-  "verdicts":[{"claim_id":"finding-0","verdict":"verified","evidence":"ok"}]
-}'
-gate_fixture "$TEST_DIR/curator17.json" '{
-  "judge":"curator","judge_template_version":"ctv",
-  "selected":[{"claim_id":"finding-0","selection_rationale":"kept"}],
-  "dropped":[]
-}'
-# Missing falsifier
-gate_fixture "$TEST_DIR/ra-bad.json" '{
-  "judge":"reverse-auditor","judge_template_version":"rtv",
-  "omission_claim":{
-    "file":"x.py","line_range":"1-1","exact_snippet":"x",
-    "normalized_snippet_hash":"h","why_it_matters":"w"
-  }
-}'
-
-EXIT_CODE=0
-ERR_OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-17" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate17.json" \
-  --curator-output-file "$TEST_DIR/curator17.json" \
-  --reverse-auditor-output-file "$TEST_DIR/ra-bad.json" --skip-scorecard 2>&1 >/dev/null) || EXIT_CODE=$?
-assert_eq "reverse-auditor shape violation exits 2" "$EXIT_CODE" "2"
-assert_contains "error names the missing field" "$ERR_OUT" "omission_claim.falsifier missing"
-
-# =============================================
-# Test 18: Reverse-auditor skipped when curator produced 0 selected
-# =============================================
-echo ""
-echo "Test 18: Reverse-auditor skipped — 0 curator-selected survivors"
-KDIR="$TEST_DIR/kdir18"
-setup_fixture "$KDIR" "pr-18"
-gate_fixture "$TEST_DIR/gate18.json" '{
-  "judge":"correctness-gate","judge_template_version":"gtv",
-  "verdicts":[{"claim_id":"finding-0","verdict":"contradicted","evidence":"no","correction":"actual"}]
-}'
-
-OUT=$(bash "$AUDIT" "$KDIR/_followups/pr-18" --kdir "$KDIR" \
-  --gate-output-file "$TEST_DIR/gate18.json" \
-  --curator-output-file "$TEST_DIR/curator14.json" \
-  --reverse-auditor-output-file "$TEST_DIR/ra14.json")
-# With 0 verified → no curator → no reverse-auditor. Confirm by absence of
-# "reverse-auditor complete" output.
-if echo "$OUT" | grep -qF "reverse-auditor complete"; then
-  echo "  FAIL: reverse-auditor ran when curator had no survivors"; FAIL=$((FAIL + 1))
-else
-  echo "  PASS: reverse-auditor skipped when curator stage did not run"; PASS=$((PASS + 1))
-fi
-
-# =============================================
-# Test 19: Plan-assertions explicit-path override
-# Dir contains both plan.md and execution-log.md; passing plan.md as an
-# explicit path must route to plan-assertions (not worker-observations).
-# Uses human-readable --dry-run (no --json) to test routing without invoking
-# the extractor, which is wired in task 5.
-# =============================================
-echo ""
-echo "Test 19: Plan-assertions explicit-path — overrides directory detection order"
-KDIR19="$TEST_DIR/kdir19"
-WORK_SLUG19="audit-plan-explicit-slug"
-mkdir -p "$KDIR19/_work/$WORK_SLUG19"
-
-# execution-log.md present so directory detection order would pick worker-observations.
-printf '# Execution Log\nTemplate-version: exec-tv1\n' > "$KDIR19/_work/$WORK_SLUG19/execution-log.md"
-
-# plan.md — minimal content, enough for type detection.
-printf '# Plan\nTemplate-version: plan-tv1\n\n## Investigations\n\n### Route selection logic\n\n**Assertions:**\n' \
-  > "$KDIR19/_work/$WORK_SLUG19/plan.md"
-
-# Human-readable dry-run: artifact_type reported by the shell-level detection,
-# not the extractor — verifies routing without depending on task 5 completion.
-DRY_OUT19=$(bash "$AUDIT" "$KDIR19/_work/$WORK_SLUG19/plan.md" \
-  --kdir "$KDIR19" --dry-run 2>/dev/null)
-
-assert_contains "explicit plan.md path routes to plan-assertions not worker-observations" \
-  "$DRY_OUT19" "artifact_type: plan-assertions"
-assert_contains "plan_assertions path reported in dry-run output" \
-  "$DRY_OUT19" "plan_assertions:"
-
-# JSON dry-run: verify artifact_type and plan_assertions_path fields are wired,
-# and work_item is derived from _work/<slug>/ parent path.
-DRY_JSON19=$(bash "$AUDIT" "$KDIR19/_work/$WORK_SLUG19/plan.md" \
-  --kdir "$KDIR19" --dry-run --json 2>/dev/null || true)
-if [[ -n "$DRY_JSON19" ]]; then
-  ATYPE19=$(printf '%s' "$DRY_JSON19" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("artifact_type",""))' 2>/dev/null || true)
-  WITEM19=$(printf '%s' "$DRY_JSON19" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("work_item",""))' 2>/dev/null || true)
-  assert_eq "JSON dry-run: artifact_type=plan-assertions" "$ATYPE19" "plan-assertions"
-  assert_eq "JSON dry-run: work_item derived from _work/<slug>/ for plan-assertions path" "$WITEM19" "$WORK_SLUG19"
-else
-  echo "  SKIP: JSON dry-run skipped (extractor not ready — task 5 in progress)"
-fi
-
-# =============================================
-# Test 20: Worker-observations explicit-path (path to execution-log.md)
-# Invoke with explicit path to execution-log.md; artifact_type must be
-# worker-observations and work_item must be the parent slug.
-# =============================================
-echo ""
-echo "Test 20: Worker-observations explicit-path — execution-log.md under _work/<slug>/"
-KDIR20="$TEST_DIR/kdir20"
-WOBS_SLUG="worker-obs-explicit-slug"
-mkdir -p "$KDIR20/_work/$WOBS_SLUG"
-cat > "$KDIR20/_work/$WOBS_SLUG/execution-log.md" << 'EOF'
-# Execution Log: worker-obs-explicit-slug
-
-Template-version: worker-tv1
-
-## 2026-01-01T00:00:00Z | source: worker-1
-
-**Observations:**
-```yaml
-- claim: "type-refinement block treats explicit execution-log.md path as worker-observations"
-  file: scripts/audit-artifact.sh
-  line_range: "221-223"
-  exact_snippet: "elif [[ $ARTIFACT_PATH == */execution-log.md ..."
-  normalized_snippet_hash: "0000000000000000000000000000000000000000000000000000000000000010"
-  falsifier: "pass explicit path to execution-log.md and confirm artifact_type in dry-run JSON"
-  significance: high
-```
-EOF
-
-DRY_OUT20=$(bash "$AUDIT" "$KDIR20/_work/$WOBS_SLUG/execution-log.md" \
-  --kdir "$KDIR20" --dry-run --json 2>/dev/null)
-ATYPE20=$(printf '%s' "$DRY_OUT20" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("artifact_type",""))')
-WITEM20=$(printf '%s' "$DRY_OUT20" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("work_item",""))')
-
-assert_eq "explicit execution-log.md path → artifact_type worker-observations" "$ATYPE20" "worker-observations"
-assert_eq "work_item derived from _work/<slug>/ for worker-observations path" "$WITEM20" "$WOBS_SLUG"
-
-# =============================================
-# Test 21: Plan-assertions happy-path
-# setup_plan_assertions_fixture → gate-plan-1.json with 1 verified + 1 contradicted
-# Asserts: 3 scorecard rows, template_id=researcher, tier=reusable,
-# factual_precision=0.5, audit_contradiction_rate=0.5, falsifier_quality=1.0
-# =============================================
-echo ""
-echo "Test 21: Plan-assertions happy-path — gate + scorecard emission"
-KDIR21="$TEST_DIR/kdir21"
-PLAN_SLUG21="plan-happy-slug"
-setup_plan_assertions_fixture "$KDIR21" "$PLAN_SLUG21"
-gate_fixture "$TEST_DIR/gate-plan-1.json" '{
   "judge":"correctness-gate",
-  "judge_template_version":"plan-tv-abc",
+  "judge_template_version":"ppp",
   "verdicts":[
-    {"claim_id":"assertion-0","verdict":"verified","evidence":"loop bound confirmed correct"},
-    {"claim_id":"assertion-1","verdict":"contradicted","evidence":"error handler found","correction":"context is propagated via cause chain"}
+    {"claim_id":"task-claim-a","verdict":"verified","evidence":"ok"},
+    {"claim_id":"task-claim-b","verdict":"verified","evidence":"ok"}
   ]
 }'
 
-OUT21=$(bash "$AUDIT" "$KDIR21/_work/$PLAN_SLUG21" --kdir "$KDIR21" \
-  --gate-output-file "$TEST_DIR/gate-plan-1.json")
-assert_contains "plan-assertions: correctness-gate complete" "$OUT21" "correctness-gate complete"
-assert_contains "plan-assertions: reports verdict counts" "$OUT21" "total=2 verified=1 unverified=0 contradicted=1"
-assert_contains "plan-assertions: 3 scorecard rows appended" "$OUT21" "scorecard rows appended: 3"
-
-PLAN_METRICS21=$(jq -c '{metric,value,template_id,tier,verdict_source}' < "$KDIR21/_scorecards/rows.jsonl")
-assert_contains "plan-assertions: factual_precision=0.5" "$PLAN_METRICS21" '"metric":"factual_precision","value":0.5'
-assert_contains "plan-assertions: audit_contradiction_rate=0.5" "$PLAN_METRICS21" '"metric":"audit_contradiction_rate","value":0.5'
-assert_contains "plan-assertions: falsifier_quality=1 (correction present)" "$PLAN_METRICS21" '"metric":"falsifier_quality","value":1'
-assert_contains "plan-assertions: template_id=researcher" "$PLAN_METRICS21" '"template_id":"researcher"'
-assert_contains "plan-assertions: tier=reusable" "$PLAN_METRICS21" '"tier":"reusable"'
-assert_contains "plan-assertions: verdict_source=correctness-gate" "$PLAN_METRICS21" '"verdict_source":"correctness-gate"'
-
-# =============================================
-# Test 22: Full-pipeline smoke — plan-assertions gate→curator→reverse-auditor
-# Verifies: claim IDs flow through as assertion-<i>, grounding_failure_rate
-# telemetry row emitted, audit-queue-route.sh invoked (candidates in _work/).
-# =============================================
-echo ""
-echo "Test 22: Full-pipeline smoke — plan-assertions gate→curator→reverse-auditor (silence)"
-KDIR22="$TEST_DIR/kdir22"
-PLAN_SLUG22="plan-smoke-slug"
-setup_plan_assertions_fixture "$KDIR22" "$PLAN_SLUG22"
-gate_fixture "$TEST_DIR/gate-smoke22.json" '{
-  "judge":"correctness-gate",
-  "judge_template_version":"smoke-gtv",
-  "verdicts":[
-    {"claim_id":"assertion-0","verdict":"verified","evidence":"loop bound confirmed"},
-    {"claim_id":"assertion-1","verdict":"unverified","evidence":"not enough context"}
-  ]
-}'
-gate_fixture "$TEST_DIR/curator-smoke22.json" '{
-  "judge":"curator",
-  "judge_template_version":"smoke-ctv",
-  "selected":[{"claim_id":"assertion-0","selection_rationale":"only verified survivor"}],
-  "dropped":[]
-}'
-gate_fixture "$TEST_DIR/ra-smoke22.json" '{
-  "judge":"reverse-auditor",
-  "judge_template_version":"smoke-rtv",
-  "omission_claim":null,
-  "silence_rationale":"plan assertions fully covered"
-}'
-
-OUT22=$(bash "$AUDIT" "$KDIR22/_work/$PLAN_SLUG22" --kdir "$KDIR22" \
-  --gate-output-file "$TEST_DIR/gate-smoke22.json" \
-  --curator-output-file "$TEST_DIR/curator-smoke22.json" \
-  --reverse-auditor-output-file "$TEST_DIR/ra-smoke22.json")
-
-assert_contains "smoke: correctness-gate complete" "$OUT22" "correctness-gate complete"
-assert_contains "smoke: curator complete" "$OUT22" "curator complete"
-assert_contains "smoke: reverse-auditor complete" "$OUT22" "reverse-auditor complete"
-assert_contains "smoke: silence verdict" "$OUT22" "verdict=silence"
-# 3 gate rows + 2 curator rows + 1 telemetry = 6 total
-assert_contains "smoke: 6 total scorecard rows" "$OUT22" "total scorecard rows appended: 6"
-
-# Verify grounding_failure_rate telemetry row emitted
-RA_TEL22=$(jq -c 'select(.verdict_source=="reverse-auditor" and .kind=="telemetry")' < "$KDIR22/_scorecards/rows.jsonl")
-assert_contains "smoke: grounding_failure_rate=0 telemetry row" "$RA_TEL22" '"metric":"grounding_failure_rate"'
-
-# Verify audit-queue-route.sh invocation (silence does NOT write audit-candidates)
-# — silence short-circuits before queue write; confirm no file created in _work/<slug>/
-if [[ -f "$KDIR22/_work/$PLAN_SLUG22/audit-candidates.jsonl" ]]; then
-  echo "  FAIL: silence created audit-candidates.jsonl in _work/ — should not"; FAIL=$((FAIL + 1))
-else
-  echo "  PASS: silence correctly skipped audit-candidates.jsonl write"; PASS=$((PASS + 1))
-fi
-
-# =============================================
-# Test 23: Worker-observations happy-path — gate + scorecard emission
-# setup_worker_observations_fixture → gate-worker-1.json with 1 verified + 1 contradicted
-# Asserts: 3 scorecard rows, template_id=worker, verdict_source=correctness-gate
-# =============================================
-echo ""
-echo "Test 23: Worker-observations happy-path — gate + scorecard emission"
-KDIR23="$TEST_DIR/kdir23"
-WOBS_SLUG23="worker-happy-slug"
-setup_worker_observations_fixture "$KDIR23" "$WOBS_SLUG23"
-gate_fixture "$TEST_DIR/gate-worker-1.json" '{
-  "judge":"correctness-gate",
-  "judge_template_version":"worker-gtv-abc",
-  "verdicts":[
-    {"claim_id":"observation-0","verdict":"verified","evidence":"null check confirmed present"},
-    {"claim_id":"observation-1","verdict":"contradicted","evidence":"retry cap is correct","correction":"comparison uses <= not <, so max_retries is inclusive"}
-  ]
-}'
-
-OUT23=$(bash "$AUDIT" "$KDIR23/_work/$WOBS_SLUG23" --kdir "$KDIR23" \
-  --gate-output-file "$TEST_DIR/gate-worker-1.json")
-assert_contains "worker-obs: correctness-gate complete" "$OUT23" "correctness-gate complete"
-assert_contains "worker-obs: reports verdict counts" "$OUT23" "total=2 verified=1 unverified=0 contradicted=1"
-assert_contains "worker-obs: 3 scorecard rows appended" "$OUT23" "scorecard rows appended: 3"
-
-WOBS_METRICS23=$(jq -c '{metric,value,template_id,verdict_source}' < "$KDIR23/_scorecards/rows.jsonl")
-assert_contains "worker-obs: factual_precision=0.5" "$WOBS_METRICS23" '"metric":"factual_precision","value":0.5'
-assert_contains "worker-obs: audit_contradiction_rate=0.5" "$WOBS_METRICS23" '"metric":"audit_contradiction_rate","value":0.5'
-assert_contains "worker-obs: falsifier_quality=1 (correction present)" "$WOBS_METRICS23" '"metric":"falsifier_quality","value":1'
-assert_contains "worker-obs: template_id=worker" "$WOBS_METRICS23" '"template_id":"worker"'
-assert_contains "worker-obs: verdict_source=correctness-gate" "$WOBS_METRICS23" '"verdict_source":"correctness-gate"'
-
-# =============================================
-# Test 24: Malformed plan-assertions — broken indent drops required field
-# falsifier at wrong indentation level → regex misses it → extractor exits 1
-# =============================================
-echo ""
-echo "Test 24: Malformed plan-assertions — broken indent causes missing-field rejection"
-KDIR24="$TEST_DIR/kdir24"
-BROKEN_SLUG24="plan-broken-indent"
-mkdir -p "$KDIR24/_work/$BROKEN_SLUG24"
-cat > "$KDIR24/_work/$BROKEN_SLUG24/plan.md" << 'PLANEOF'
-# plan-broken-indent
-
-Template-version: test-v1
-
-## Goal
-Bad fixture — falsifier at wrong indent level.
-
-## Investigations
-
-### Topic
-
-**Assertions:**
-- claim: something plausible
-  file: foo.py
-  line_range: "1-1"
-  exact_snippet: "x = 1"
-  normalized_snippet_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-falsifier: this is at top-level indent, not entry indent
-  significance: high
-PLANEOF
-
-EXIT_CODE24=0
-ERR24=$(bash "$AUDIT" "$KDIR24/_work/$BROKEN_SLUG24" --kdir "$KDIR24" --dry-run --json \
-  2>&1 >/dev/null) || EXIT_CODE24=$?
-assert_eq "broken-indent plan-assertions exits non-zero" "$EXIT_CODE24" "1"
-assert_contains "broken-indent: [audit] extractor: diagnostic emitted" "$ERR24" "[audit] extractor:"
-assert_contains "broken-indent: diagnostic names missing falsifier" "$ERR24" "falsifier"
-
-# =============================================
-# Test 25: Malformed worker-observations — missing required field (falsifier absent)
-# Entry has 6 of 7 required fields; falsifier is omitted → extractor exits 1
-# =============================================
-echo ""
-echo "Test 25: Malformed worker-observations — missing falsifier field"
-KDIR25="$TEST_DIR/kdir25"
-WOBS_SLUG25="worker-missing-field"
-mkdir -p "$KDIR25/_work/$WOBS_SLUG25"
-cat > "$KDIR25/_work/$WOBS_SLUG25/execution-log.md" << 'LOGEOF'
-# Execution Log: worker-missing-field
-
-Template-version: test-v1
-
-## 2026-01-01T00:00:00Z | source: worker-1
-
-**Observations:**
-- claim: null check missing before dereference
-  file: scripts/audit-artifact.sh
-  line_range: "30-30"
-  exact_snippet: "return obj.value"
-  normalized_snippet_hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-  significance: high
-LOGEOF
-
-EXIT_CODE25=0
-ERR25=$(bash "$AUDIT" "$KDIR25/_work/$WOBS_SLUG25" --kdir "$KDIR25" --dry-run --json \
-  2>&1 >/dev/null) || EXIT_CODE25=$?
-assert_eq "missing-field worker-observations exits non-zero" "$EXIT_CODE25" "1"
-assert_contains "missing-field: [audit] extractor: diagnostic emitted" "$ERR25" "[audit] extractor:"
-assert_contains "missing-field: diagnostic names missing falsifier" "$ERR25" "falsifier"
-
-# =============================================
-# Test 26: Empty plan-assertions block — zero claims parsed → extractor exits 1
-# **Assertions:** present but no entries below it
-# =============================================
-echo ""
-echo "Test 26: Empty plan-assertions block — zero entries causes rejection"
-KDIR26="$TEST_DIR/kdir26"
-EMPTY_SLUG26="plan-empty-assertions"
-mkdir -p "$KDIR26/_work/$EMPTY_SLUG26"
-cat > "$KDIR26/_work/$EMPTY_SLUG26/plan.md" << 'PLANEOF'
-# plan-empty-assertions
-
-Template-version: test-v1
-
-## Goal
-Fixture with empty Assertions block.
-
-## Investigations
-
-### Topic
-
-**Assertions:**
-PLANEOF
-
-EXIT_CODE26=0
-ERR26=$(bash "$AUDIT" "$KDIR26/_work/$EMPTY_SLUG26" --kdir "$KDIR26" --dry-run --json \
-  2>&1 >/dev/null) || EXIT_CODE26=$?
-assert_eq "empty-assertions plan exits non-zero" "$EXIT_CODE26" "1"
-assert_contains "empty-block: [audit] extractor: diagnostic emitted" "$ERR26" "[audit] extractor:"
-assert_contains "empty-block: diagnostic mentions no entries found" "$ERR26" "no **Assertions:** entries found"
-
-# =============================================
-# Tests 27-32: --priority-claims pre-filter (D3, Phase 3)
-# =============================================
-# Covers the plan's required matrix: no-flag regression, valid filter (narrows
-# claim_payload and emits [audit] priority-claims: narrowed message), non-existent
-# file, non-array JSON, empty array, priority list with no matching ids.
-# Behavior contract (from scripts/audit-artifact.sh lines 189-210, 615-641):
-#   - validation gate rejects missing/non-array/empty-array files with exit 1
-#     and a [audit] priority-claims ... stderr message
-#   - post-resolve filter rejects 0-match result with exit 1 and a
-#     [audit] Error: priority-claims filter yielded 0 claims ... stderr message
-#   - valid filter narrows the resolved claim_payload and continues the pipeline
-
-# Common 2-finding fixture for the priority-claims tests below.
-# Lens-findings with 2 selected findings → claim_ids = {finding-0, finding-1}.
-pc_findings='{"pr":99,"findings":[{"title":"loop-bound","file":"app.py","line":10,"severity":"blocking","grounding":"off-by-one","selected":true},{"title":"null-deref","file":"app.py","line":20,"severity":"blocking","grounding":"missing null check","selected":true}]}'
-
-# Gate fixture that verifies BOTH findings (used by Test 27: no-flag regression).
-pc_gate_both='{
-  "judge":"correctness-gate",
-  "judge_template_version":"ppp111",
-  "verdicts":[
-    {"claim_id":"finding-0","verdict":"verified","evidence":"loop bound confirmed"},
-    {"claim_id":"finding-1","verdict":"verified","evidence":"null check confirmed"}
-  ]
-}'
-
-# Gate fixture that verifies ONLY finding-0 (used by Test 28: valid filter).
-# After priority filter narrows claim_payload to [finding-0], the gate output
-# must also reflect exactly one verdict for finding-0 — otherwise contract
-# validation would complain. This mirrors how orchestrator would invoke
-# correctness-gate on the narrowed payload.
-pc_gate_only0='{
-  "judge":"correctness-gate",
-  "judge_template_version":"ppp111",
-  "verdicts":[
-    {"claim_id":"finding-0","verdict":"verified","evidence":"loop bound confirmed"}
-  ]
-}'
-
-# =============================================
-# Test 27: No-flag regression — absence of --priority-claims leaves pipeline unchanged
-# =============================================
-echo ""
-echo "Test 27: --priority-claims absent → pipeline unchanged (regression)"
-KDIR27="$TEST_DIR/kdir27"
-setup_fixture "$KDIR27" "pr-99" "$pc_findings"
-gate_fixture "$TEST_DIR/gate27.json" "$pc_gate_both"
-
-OUT27=$(bash "$AUDIT" "$KDIR27/_followups/pr-99" --kdir "$KDIR27" \
-  --gate-output-file "$TEST_DIR/gate27.json" 2>&1)
-assert_contains "no-flag: correctness-gate completes normally" "$OUT27" "correctness-gate complete"
-assert_contains "no-flag: both claims present in verdict totals" "$OUT27" "total=2 verified=2"
-# Absence of priority-claims must mean NO narrowing message appears.
-if echo "$OUT27" | grep -qF "priority-claims: narrowed"; then
+OUT15=$(bash "$AUDIT" "$KDIR15/_work/wi-noflag/task-claims.jsonl" --kdir "$KDIR15" \
+  --gate-output-file "$TEST_DIR/gate15.json" 2>&1)
+assert_contains "no-flag: assertion gate completes" "$OUT15" "correctness-gate-assertion complete"
+assert_contains "no-flag: both claims kept" "$OUT15" "total=2 verified=2"
+if echo "$OUT15" | grep -qF "priority-claims: narrowed"; then
   echo "  FAIL: no-flag run emitted a priority-claims narrowing message"
   FAIL=$((FAIL + 1))
 else
@@ -1130,107 +382,43 @@ else
 fi
 
 # =============================================
-# Test 28: Valid priority-claims file narrows claim_payload
+# Test 16: --priority-claims missing file → exit 1
 # =============================================
 echo ""
-echo "Test 28: valid --priority-claims narrows claim_payload"
-KDIR28="$TEST_DIR/kdir28"
-setup_fixture "$KDIR28" "pr-99" "$pc_findings"
-gate_fixture "$TEST_DIR/gate28.json" "$pc_gate_only0"
-printf '%s\n' '["finding-0"]' > "$TEST_DIR/priority28.json"
+echo "Test 16: --priority-claims missing file → exit 1"
+KDIR16="$TEST_DIR/kdir16"
+setup_task_claims_fixture "$KDIR16" "wi-pcmiss"
+gate_fixture "$TEST_DIR/gate16.json" '{
+  "judge":"correctness-gate","judge_template_version":"x",
+  "verdicts":[{"claim_id":"task-claim-a","verdict":"verified","evidence":"ok"}]
+}'
 
-OUT28=$(bash "$AUDIT" "$KDIR28/_followups/pr-99" --kdir "$KDIR28" \
-  --gate-output-file "$TEST_DIR/gate28.json" \
-  --priority-claims "$TEST_DIR/priority28.json" 2>&1)
-assert_contains "valid filter: narrowing message present" "$OUT28" "priority-claims: narrowed claim_payload to 1 claim(s)"
-assert_contains "valid filter: correctness-gate runs on narrowed input" "$OUT28" "correctness-gate complete"
-# Post-filter verdict totals reflect only the 1 kept claim, not the original 2.
-assert_contains "valid filter: narrowed verdict totals reflect 1 claim" "$OUT28" "total=1 verified=1"
-
-# =============================================
-# Test 29: --priority-claims file does not exist
-# =============================================
-echo ""
-echo "Test 29: --priority-claims file missing → exit 1, descriptive stderr"
-KDIR29="$TEST_DIR/kdir29"
-setup_fixture "$KDIR29" "pr-99" "$pc_findings"
-gate_fixture "$TEST_DIR/gate29.json" "$pc_gate_both"
-
-EXIT_CODE29=0
-ERR29=$(bash "$AUDIT" "$KDIR29/_followups/pr-99" --kdir "$KDIR29" \
-  --gate-output-file "$TEST_DIR/gate29.json" \
-  --priority-claims "$TEST_DIR/does-not-exist-$RANDOM.json" 2>&1 >/dev/null) || EXIT_CODE29=$?
-assert_eq "missing file exits 1" "$EXIT_CODE29" "1"
-assert_contains "missing file: stderr names 'priority-claims file not found'" "$ERR29" "priority-claims file not found"
+EXIT16=0
+ERR16=$(bash "$AUDIT" "$KDIR16/_work/wi-pcmiss/task-claims.jsonl" --kdir "$KDIR16" \
+  --gate-output-file "$TEST_DIR/gate16.json" \
+  --priority-claims "$TEST_DIR/does-not-exist-$RANDOM.json" 2>&1 >/dev/null) || EXIT16=$?
+assert_eq "missing priority-claims file exits 1" "$EXIT16" "1"
+assert_contains "missing file: stderr names 'priority-claims file not found'" "$ERR16" "priority-claims file not found"
 
 # =============================================
-# Test 30: --priority-claims file is not a JSON array
+# Test 17: --priority-claims empty array → exit 1
 # =============================================
 echo ""
-echo "Test 30: --priority-claims non-array JSON → exit 1, descriptive stderr"
-KDIR30="$TEST_DIR/kdir30"
-setup_fixture "$KDIR30" "pr-99" "$pc_findings"
-gate_fixture "$TEST_DIR/gate30.json" "$pc_gate_both"
-# Object, not array — also covers malformed "array of non-strings" implicitly
-# because the validator is `type == "array" and all(.[]; type == "string")`.
-printf '%s\n' '{"not":"an array"}' > "$TEST_DIR/priority30.json"
+echo "Test 17: --priority-claims empty array → exit 1"
+KDIR17="$TEST_DIR/kdir17"
+setup_task_claims_fixture "$KDIR17" "wi-pcempty"
+gate_fixture "$TEST_DIR/gate17.json" '{
+  "judge":"correctness-gate","judge_template_version":"x",
+  "verdicts":[{"claim_id":"task-claim-a","verdict":"verified","evidence":"ok"}]
+}'
+printf '%s\n' '[]' > "$TEST_DIR/priority17.json"
 
-EXIT_CODE30=0
-ERR30=$(bash "$AUDIT" "$KDIR30/_followups/pr-99" --kdir "$KDIR30" \
-  --gate-output-file "$TEST_DIR/gate30.json" \
-  --priority-claims "$TEST_DIR/priority30.json" 2>&1 >/dev/null) || EXIT_CODE30=$?
-assert_eq "non-array JSON exits 1" "$EXIT_CODE30" "1"
-assert_contains "non-array: stderr names 'must be a JSON array of claim_id strings'" "$ERR30" "must be a JSON array of claim_id strings"
-
-# Additional variant: array of non-strings (e.g., array of numbers) — same gate.
-printf '%s\n' '[1, 2, 3]' > "$TEST_DIR/priority30b.json"
-EXIT_CODE30B=0
-ERR30B=$(bash "$AUDIT" "$KDIR30/_followups/pr-99" --kdir "$KDIR30" \
-  --gate-output-file "$TEST_DIR/gate30.json" \
-  --priority-claims "$TEST_DIR/priority30b.json" 2>&1 >/dev/null) || EXIT_CODE30B=$?
-assert_eq "array-of-non-strings exits 1" "$EXIT_CODE30B" "1"
-assert_contains "array-of-non-strings: stderr cites JSON array of strings" "$ERR30B" "must be a JSON array of claim_id strings"
-
-# =============================================
-# Test 31: --priority-claims empty array
-# =============================================
-echo ""
-echo "Test 31: --priority-claims empty array → exit 1, descriptive stderr"
-KDIR31="$TEST_DIR/kdir31"
-setup_fixture "$KDIR31" "pr-99" "$pc_findings"
-gate_fixture "$TEST_DIR/gate31.json" "$pc_gate_both"
-printf '%s\n' '[]' > "$TEST_DIR/priority31.json"
-
-EXIT_CODE31=0
-ERR31=$(bash "$AUDIT" "$KDIR31/_followups/pr-99" --kdir "$KDIR31" \
-  --gate-output-file "$TEST_DIR/gate31.json" \
-  --priority-claims "$TEST_DIR/priority31.json" 2>&1 >/dev/null) || EXIT_CODE31=$?
-assert_eq "empty array exits 1" "$EXIT_CODE31" "1"
-assert_contains "empty array: stderr names 'priority-claims array is empty'" "$ERR31" "priority-claims array is empty"
-
-# =============================================
-# Test 32: --priority-claims list has no matching ids → 0-claim post-filter
-# =============================================
-# The validation gate (Tests 29-31) accepts this file (well-formed non-empty
-# array of strings), but the post-resolve filter narrows to 0 and rejects with
-# exit 1 + a distinct error message. This is the behavior chosen in
-# scripts/audit-artifact.sh line 637-640; the plan allowed either "clean warning
-# and continue" or "reject" here, and the implementation chose "reject" to
-# avoid silently running judges on an empty narrowed payload.
-echo ""
-echo "Test 32: --priority-claims with no matching ids → exit 1, narrowed-to-0 message"
-KDIR32="$TEST_DIR/kdir32"
-setup_fixture "$KDIR32" "pr-99" "$pc_findings"
-gate_fixture "$TEST_DIR/gate32.json" "$pc_gate_both"
-printf '%s\n' '["finding-999", "nonexistent-id"]' > "$TEST_DIR/priority32.json"
-
-EXIT_CODE32=0
-ERR32=$(bash "$AUDIT" "$KDIR32/_followups/pr-99" --kdir "$KDIR32" \
-  --gate-output-file "$TEST_DIR/gate32.json" \
-  --priority-claims "$TEST_DIR/priority32.json" 2>&1 >/dev/null) || EXIT_CODE32=$?
-assert_eq "no-matching-ids exits 1" "$EXIT_CODE32" "1"
-assert_contains "no-matching-ids: stderr cites 'yielded 0 claims'" "$ERR32" "yielded 0 claims"
-assert_contains "no-matching-ids: stderr references the priority-claims file path" "$ERR32" "priority32.json"
+EXIT17=0
+ERR17=$(bash "$AUDIT" "$KDIR17/_work/wi-pcempty/task-claims.jsonl" --kdir "$KDIR17" \
+  --gate-output-file "$TEST_DIR/gate17.json" \
+  --priority-claims "$TEST_DIR/priority17.json" 2>&1 >/dev/null) || EXIT17=$?
+assert_eq "empty array exits 1" "$EXIT17" "1"
+assert_contains "empty array: stderr names 'priority-claims array is empty'" "$ERR17" "priority-claims array is empty"
 
 echo ""
 echo "=== Results ==="

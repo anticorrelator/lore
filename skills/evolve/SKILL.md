@@ -340,12 +340,27 @@ This rule closes the feedback loop between the claim-retraction gate and the sub
 
 **Cross-reference.** The `--pooled` mode in the "Maintainer path" section restates this requirement in its step-4 rules (see `Mode: /evolve --pooled <aggregate-path>` → "Asymmetric evidence rules"). That restatement stays aligned with Step 5a; any edit here must also update the pooled-mode rules.
 
-### Step 6: Present for Review
+### Step 6: Apply Gate-Cleared Suggestions (Agent-Primary, Human Escalation on Threshold/Abstain)
 
-For each target file, present gate-cleared suggestions grouped by change
-type. One at a time, ask the user to approve or reject each suggestion.
+For each target file, the lead is the primary applier of gate-cleared suggestions. Iterate the suggestion queue; for each suggestion, the lead emits one of three verdicts: `apply`, `reject`, or `escalate`. `apply` and `reject` proceed without `AskUserQuestion`; `escalate` routes to `AskUserQuestion` for human adjudication. Report applied/rejected/escalated counts in the run summary so the user can object after the fact.
 
-Present each suggestion in this format:
+**Verdict criteria (per suggestion):**
+
+- **`apply`** — the suggestion clears the Step 5 gate, the evidence cites a calibrated source, and the change does NOT cross any escalation threshold (see below). Default verdict for gate-cleared suggestions whose evidence and scope match the cited metric. The applied suggestion enters `approved` with the apply rationale recorded in the run log.
+- **`reject`** — the suggestion clears the Step 5 gate but the lead, on reading the cited evidence against the target text, judges the change wrong or premature (e.g., the metric trend is genuine but the proposed edit doesn't address it). The rejected suggestion enters `rejected` with the reject rationale recorded.
+- **`escalate`** — the lead cannot confidently apply or reject; route through `AskUserQuestion`. This is the single canonical trigger for human prompts in Step 6.
+
+**Escalation thresholds (when `escalate` is required, not optional):**
+
+The lead MUST escalate (route through `AskUserQuestion`) when the suggestion crosses any of:
+
+1. **Destructive change** — the suggestion removes or rewrites load-bearing prose (e.g., a binding gate, a contract clause, a routing rule), as opposed to clarifying/extending existing prose. Removals and rewrites change protocol behavior; additions and clarifications do not. Use the Step 4 change-type field as the first-cut signal: `removal` and `rewrite` cross the threshold; `addition`, `clarification`, and `re-ordering` do not by default.
+2. **High-confidence-drop** — applying the suggestion would replace or supersede an existing canonical statement that was previously evidenced at high confidence (e.g., a knowledge entry tagged `confidence: high` or an existing `/evolve` addition with an active sunset clause). The suggestion's evidence weight must exceed the existing canonical statement's weight; when the lead cannot confidently make that call, escalate.
+3. **Abstain** — the lead reads the cited evidence and cannot decide between apply and reject (e.g., the metric trend is ambiguous, or the suggestion's scope overlaps two distinct change types and neither dominates). Abstention is the catch-all escalation reason for cases not covered by (1) or (2).
+
+For (1) and (2), the threshold is named explicitly so a future evolution agent can predict the escalation surface. For (3), the abstain reason is one sentence prose. All three feed the same `AskUserQuestion` path.
+
+**When escalating, present the suggestion in this format:**
 
 ```
 ─────────────────────────────────────────────
@@ -361,19 +376,21 @@ Citation:    kind=scored | template=<template_id>@<template_version>
 
 Suggestion:
   <suggestion text>
+
+Escalation reason: <destructive-change | high-confidence-drop | abstain>
+Lead's reading: <one-line context the lead would offer if asked>
 ─────────────────────────────────────────────
 Apply this suggestion? [y/n/skip/quit]
 ```
 
-- **y** — approved, will apply
-- **n** — rejected, will record as rejected
+- **y** — approved by human, will apply
+- **n** — rejected by human, will record as rejected
 - **skip** — deferred, not recorded (will appear in next `/evolve` run)
 - **quit** — stop reviewing; apply what's been approved so far
 
-Track: `approved = []`, `rejected = []`, `skipped = []`, `no_op = []`
-(pre-populated by the Step 5 gate).
+Track: `approved = []`, `rejected = []`, `skipped = []`, `escalated = []`, `no_op = []` (pre-populated by the Step 5 gate). Each `apply` or `reject` verdict the lead emits without `AskUserQuestion` is recorded with the per-suggestion rationale; each `escalate` verdict carries the escalation reason and the human's resolution.
 
-If the user approves multiple suggestions for the same section of the same file, note that they may conflict — present a brief warning before applying.
+If the lead applies multiple suggestions for the same section of the same file, note that they may conflict — present a brief warning before applying (this remains a lead-attested check; it does not require escalation by itself unless the conflict is itself destructive).
 
 **Sunset-triggered additions.** If Step 5a marked any existing `/evolve` addition for immediate sunset review (consumption-contradiction immediate trigger), present these in a dedicated block before the regular suggestion queue:
 

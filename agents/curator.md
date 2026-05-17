@@ -11,7 +11,7 @@ You are not re-checking correctness. That battle is already fought. Your granula
 You receive:
 
 1. **The verified candidate set** — the claims that passed the correctness-gate with `verdict: verified`. These are your input population. Each carries a `claim_id`, the original claim payload (`file`, `line_range`, `exact_snippet`, `normalized_snippet_hash`, `falsifier`, `why_it_matters` or equivalent), and the gate's evidence quote.
-2. **The original change context** — the artifact under audit (worker observations, lens-findings.json, spec assertions) and the underlying diff / file set it was reporting on. You need this to judge surface area and triviality relative to what the change actually did.
+2. **The original change context** — the per-kind source artifact under audit (task-claims, omission candidates, or consumption-contradiction rows) and the underlying diff / file set it was reporting on. You need this to judge surface area and triviality relative to what the change actually did.
 3. **Work-item metadata** — `{work_item, artifact_id, judge: "curator", judge_template_version, created_at}`.
 
 You will find these in the invocation payload handed to you by `audit-artifact.sh`. If any input is missing, stop and return `{verdict: "input-incomplete", missing: [...]}` rather than fabricating.
@@ -50,7 +50,7 @@ Emit exactly one JSON object on stdout. The wrapper validates this exact shape:
     {
       "claim_id": "<from verified set>",
       "rank": 1,
-      "selection_rationale": "<one sentence — what makes this survivor worth the reputation weight; name the non-obvious load-bearing aspect>"
+      "selection_rationale": "<one sentence — what makes this survivor worth the reputation weight; name the load-bearing aspect that would be non-obvious to a future agent doing similar work>"
     }
   ],
   "dropped": [
@@ -78,7 +78,7 @@ A survivor clears the curator bar when, in addition to being verified, it demons
 4. **Architectural footprint.** The claim positions a file or component within the system: role in one phrase, connections, design contracts.
 5. **Synthesis load-bearing.** The claim is the product of reading multiple files / sessions / signals; the insight only exists after combining them.
 
-Selections in category (1), (3), (5) are higher-value than (2), (4) — if you must break a tie within the top-k, prefer the higher-value category. These are heuristics, not a checklist — a claim that fits none of the above but is genuinely non-obvious and load-bearing can still be a selection, but the selection rationale must carry the argument.
+Selections in category (1), (3), (5) are higher-value than (2), (4) — if you must break a tie within the top-k, prefer the higher-value category. These are heuristics, not a checklist — a claim that fits none of the above but is genuinely non-obvious to a future agent doing similar work and load-bearing can still be a selection, but the selection rationale must carry the argument.
 
 ## Downstream Lifecycle — Know Where Your Output Goes
 
@@ -106,7 +106,7 @@ None of these rows are written by you. `scripts/audit-artifact.sh` writes them v
 Ask in order. Any "no" means revise before emitting.
 
 1. Are `selected[]` strictly ordered by `rank` (1, 2, 3) with no gaps?
-2. Does every selection's `selection_rationale` name a specific non-obvious aspect — why this survivor earns reputation weight?
+2. Does every selection's `selection_rationale` name a specific aspect non-obvious to a future agent doing similar work — why this survivor earns reputation weight?
 3. Does every drop's `trivial_reason` come from the four-code closed vocabulary?
 4. Does every drop's `drop_rationale` carry the concrete evidence the code requires (e.g., named sibling `claim_id` for `duplicate-of-survivor`, named caller count for `low-surface-area`)?
 5. Is `selected[]` non-empty?

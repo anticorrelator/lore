@@ -74,9 +74,9 @@ Embed pre-fetched knowledge under a `## Prior Knowledge` header. This applies to
 The header is `## Prior Knowledge` in both cases. Workers see a consistent section name regardless of how the knowledge was sourced.
 
 ### Worker Observation Field
-Workers report non-obvious findings in their completion message using:
+Workers report findings non-obvious to a future agent doing similar work in their completion message using:
 ```
-**Observations:** <anything surprising, non-obvious, or that contradicts expectations>
+**Observations:** <anything surprising, non-obvious to a future agent doing similar work, or that contradicts expectations from sources a future agent loads before raw exploration>
 ```
 
 ### Worker Task Lifecycle

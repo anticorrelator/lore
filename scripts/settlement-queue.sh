@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 usage() {
   cat >&2 <<EOF
-Usage: settlement-queue.sh <status|scan|enqueue|process|enable|disable|queue|retry-errors> [args...]
+Usage: settlement-queue.sh <status|scan|enqueue|process|enable|disable|queue|retry-errors|drain> [args...]
 
 Commands:
   status --json                 Show queue, lease, run, and budget status.
@@ -18,9 +18,12 @@ Commands:
   enable|disable --json         Toggle settlement.enabled in settings.json.
   queue recompute --json        Recompute the active settlement batch.
   retry-errors --json           Requeue audit errors and timeout-blocked attempts.
+  drain --json                  Loop process_once until queue empty; abort on
+                                pipeline-degraded or hard-cal gate uncalibrated*.
 
 Options:
   --kdir PATH                   Override knowledge dir.
+  --max-iterations N            (drain only) cap loop iterations; default 200.
 EOF
 }
 
@@ -34,7 +37,7 @@ case "$1" in
     usage
     exit 0
     ;;
-  status|scan|enqueue|process|enable|disable|queue|retry-errors)
+  status|scan|enqueue|process|enable|disable|queue|retry-errors|drain)
     python3 "$SCRIPT_DIR/settlement-processor.py" "$@"
     ;;
   *)

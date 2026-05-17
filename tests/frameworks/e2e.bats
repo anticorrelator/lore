@@ -169,7 +169,14 @@ row = {
         "changed_files":     ["/tmp/synthetic.txt"],
         "summary":           f"cross-framework Tier 2 append smoke for {framework}/{slug}",
     },
+    "exact_snippet":         "e2e bats fixture snippet",
+    "normalized_snippet_hash": "81f48ce3c5838f2bb4743dc880ee1c3de26280b92faacf805a8322bcc6407707",
 }
+import hashlib, re
+_s = re.sub(r"\s+", " ", row["exact_snippet"]).strip()
+assert hashlib.sha256(_s.encode("utf-8")).hexdigest() == row["normalized_snippet_hash"], (
+    "fixture hash drifted; recompute with scripts/snippet_normalize.py --hash"
+)
 print(json.dumps(row))
 PYEOF
 }

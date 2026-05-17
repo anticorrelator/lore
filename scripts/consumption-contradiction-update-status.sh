@@ -91,9 +91,10 @@ fail() {
 [[ -n "$CONTRADICTION_ID" ]] || fail "--contradiction-id is required"
 [[ -n "$NEW_STATUS"       ]] || fail "--status is required"
 
-# --- Enum validation: --status (only the terminal canonical values are
-#     valid update targets; pending/accepted/declined/remediated are legacy
-#     append-time values, not update targets). ---
+# --- Enum validation: --status — only the canonical terminal values are
+#     valid update targets. pending is the initial append-time state and not
+#     a re-update target. Legacy values (accepted|declined|remediated) are
+#     no longer accepted by the append writer either. ---
 case "$NEW_STATUS" in
   verified|rejected) : ;;
   *)
