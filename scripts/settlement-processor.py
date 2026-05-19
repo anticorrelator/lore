@@ -1452,21 +1452,31 @@ class Settlement:
 
     def process_once(self, settings: dict[str, Any]) -> dict[str, Any]:
         self.ensure()
-        if not settings["enabled"]:
-            return {"ok": True, "dispatched": False, "reason": "disabled"}
-        active_hours = self.active_hours_status(settings)
-        if not active_hours["allowed"]:
-            return {"ok": True, "dispatched": False, "reason": active_hours["reason"], "active_hours": active_hours}
-        eligible, rejected = self.eligible_frameworks(settings)
-        if not eligible:
-            return {"ok": True, "dispatched": False, "reason": "no_eligible_harnesses", "rejected_harnesses": rejected}
-        executor = executor_command(settings)
-
+        # GC orphaned leases and structural inconsistencies on every tick,
+        # regardless of dispatch state. Pausing the queue, out-of-hours, or
+        # no-eligible-harness should NOT prevent reclaiming dead leases —
+        # otherwise a crashed worker can wedge the dispatcher indefinitely.
         with repo_lock(self.state):
             queue = self.load_queue()
             leases = self.load_leases()
             healed = self.heal_queue(queue, leases)
             expired = self.expire_stale_leases(queue, leases)
+            if healed or expired:
+                self.save_queue(queue)
+                self.save_leases(leases)
+
+            # Dispatch guards run after GC so the reclaim is durable
+            # before any short-circuit return.
+            if not settings["enabled"]:
+                return {"ok": True, "dispatched": False, "reason": "disabled", "expired_leases_reclaimed": expired, "healed": healed}
+            active_hours = self.active_hours_status(settings)
+            if not active_hours["allowed"]:
+                return {"ok": True, "dispatched": False, "reason": active_hours["reason"], "active_hours": active_hours, "expired_leases_reclaimed": expired, "healed": healed}
+            eligible, rejected = self.eligible_frameworks(settings)
+            if not eligible:
+                return {"ok": True, "dispatched": False, "reason": "no_eligible_harnesses", "rejected_harnesses": rejected, "expired_leases_reclaimed": expired, "healed": healed}
+            executor = executor_command(settings)
+
             active = [l for l in leases.get("leases", {}).values() if l.get("state") == "active"]
             if len(active) >= int(settings["max_concurrency"]):
                 self.save_queue(queue)

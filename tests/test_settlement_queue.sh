@@ -246,6 +246,37 @@ assert_json_eq "reclaimed no-op executor records opaque verdict" "$SECOND" '.run
 assert_json_eq "reclaimed item reaches one terminal state" "$THIRD" '[.terminal_items[] | select(.status=="completed")] | length' "1"
 
 echo ""
+echo "Test 4b: disabled processor still reclaims expired leases (regression: paused queues must GC dead leases)"
+KDIR2B="$TEST_DIR/kdir2b"
+SETTINGS2B="$TEST_DIR/settings2b.json"
+setup_kdir "$KDIR2B" "wi"
+# Settlement disabled — must NOT dispatch, but MUST still reclaim stale leases.
+write_settings "$SETTINGS2B" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":false,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+# Enqueue requires enabled=true momentarily so the row admits — toggle, enqueue, toggle back.
+write_settings "$SETTINGS2B" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+printf '%s' "$(row_json "claim-stale-paused")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS2B" bash "$QUEUE" enqueue --work-item wi --kdir "$KDIR2B" --json >/dev/null
+write_settings "$SETTINGS2B" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":false,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+python3 - "$KDIR2B" <<'PY'
+import json, pathlib, time
+k = pathlib.Path(__import__("sys").argv[1]) / "_settlement"
+q = json.load(open(k / "queue.json"))
+item = q["items"][0]
+item["status"] = "leased"
+item["lease_id"] = "lease-expired-paused"
+json.dump(q, open(k / "queue.json", "w"))
+leases = {"version": 1, "leases": {"lease-expired-paused": {"lease_id": "lease-expired-paused", "item_id": item["id"], "run_id": "run-expired-paused", "state": "active", "expires_at_epoch": int(time.time()) - 1}}}
+json.dump(leases, open(k / "leases.json", "w"))
+PY
+PAUSED_PROCESS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS2B" bash "$QUEUE" process --kdir "$KDIR2B" --once --json)
+PAUSED_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS2B" bash "$QUEUE" status --kdir "$KDIR2B" --json)
+assert_json_eq "paused process_once short-circuits dispatch" "$PAUSED_PROCESS" '.dispatched' "false"
+assert_json_eq "paused process_once reports disabled reason" "$PAUSED_PROCESS" '.reason' "disabled"
+assert_json_eq "paused process_once still reclaims expired lease" "$PAUSED_PROCESS" '.expired_leases_reclaimed' "1"
+assert_json_eq "paused sweep returns item to pending" "$PAUSED_STATUS" '.counts.pending' "1"
+assert_json_eq "paused sweep clears leased count" "$PAUSED_STATUS" '.counts.leased // 0' "0"
+assert_json_eq "paused sweep clears active leases" "$PAUSED_STATUS" '.active_leases' "0"
+
+echo ""
 echo "Test 5: active lease remains visible while executor runs"
 KDIR3="$TEST_DIR/kdir3"
 SETTINGS3="$TEST_DIR/settings3.json"
