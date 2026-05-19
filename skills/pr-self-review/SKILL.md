@@ -11,7 +11,7 @@ Author-calibrated self-review combining structured lens analysis with grounding 
 
 ## Resolve Template Version
 
-Compute the content-hash of the `/pr-self-review` skill template itself. This is the `template_version` that accompanies the `create-followup.sh` call in Step 4 and every `lore capture` call in Step 5:
+Compute the skill's content-hash; this is the `template_version` for the `create-followup.sh` call in Step 4 and every `lore capture` call in Step 5:
 
 ```bash
 source ~/.lore/scripts/lib.sh
@@ -21,7 +21,7 @@ SELF_REVIEW_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$SKILLS
 
 Per-lens methodology files (`claude-md/review-protocol/*-methodology.md`) are embedded verbatim into each lens agent's prompt — they are content-equivalent to the skill template from the scorecard's perspective, so the skill's hash is the canonical `template_version` for this skill's outputs. Individual lens findings carry their own `producer_role` of `lens-<name>` but inherit the skill's `template_version`.
 
-If the `template-version.sh` call fails, fall through with an empty string — downstream scripts accept the omitted flag.
+If `template-version.sh` fails, fall through with an empty string — downstream scripts accept the omitted flag.
 
 Since this is your own work, locally-scoped action items can be implement-ready. Findings with cross-boundary implications (especially from Blast Radius) get verification directives instead.
 
@@ -42,9 +42,9 @@ Argument provided: `$ARGUMENTS`
 gh pr list --state open --head "$(git branch --show-current)" --json number,baseRefName --jq '.[] | "#\(.number) → \(.baseRefName)"' 2>/dev/null
 ```
 
-**If multiple PRs found:** Present the list and ask the user which one to review.
+**If multiple PRs found:** Present the list and ask which one to review.
 
-**If no PRs found:** Ask for the PR number or the base branch to diff against. If only a base branch is provided, fall back to `git diff <base>...HEAD` and skip comment fetching.
+**If no PRs found:** Ask for the PR number or a base branch to diff against. If only a base branch is provided, fall back to `git diff <base>...HEAD` and skip comment fetching.
 
 ### 1b. Fetch PR data
 
@@ -54,11 +54,10 @@ gh pr diff <PR_NUMBER>
 gh pr view <PR_NUMBER> --json files,title,body,baseRefName,headRefName,commits,headRefOid
 ```
 
-Resolve the repo owner/name from the git remote:
+Resolve `OWNER/REPO` from the git remote:
 ```bash
 REMOTE_URL=$(git remote get-url origin)
 ```
-Extract `OWNER/REPO` from the remote URL.
 
 Note any existing reviewer feedback to avoid duplicating observations.
 
@@ -118,65 +117,9 @@ Structure as a context block:
 
 ### 2b. Spawn lens agents
 
-For each selected lens, read its Step 3 methodology:
+For each selected lens, read its Step 3 methodology. Lens methodology source table: see `skills/pr-review/SKILL.md` Step 3b (the seven-row table mapping each lens to its source file and Step 3 heading is the canonical reference; Blast Radius row applies here unchanged).
 
-| Lens | Source | Step 3 heading |
-|------|--------|---------------|
-| Blast Radius | `skills/pr-blast-radius/SKILL.md` | Blast Radius Analysis |
-| Security | `claude-md/review-protocol/security-methodology.md` | Security Lens Methodology |
-| Test Quality | `skills/pr-test-quality/SKILL.md` | Test Quality Analysis |
-| Correctness | `skills/pr-correctness/SKILL.md` | Correctness Analysis |
-| Regressions | `skills/pr-regressions/SKILL.md` | Regressions Analysis |
-| Interface Clarity | `skills/pr-interface-clarity/SKILL.md` | Interface Clarity Analysis |
-| User Impact | `skills/pr-user-impact/SKILL.md` | User Impact Analysis |
-
-For each lens, create a task:
-
-```
-# <Lens Name> Lens — PR #<number> (Self-Review Pre-Scan)
-
-You are a lens review agent analyzing PR #<number> in <owner>/<repo>.
-Your sole focus is the <lens name> lens. Apply only this methodology.
-
-## PR Context
-- **Title:** <title>
-- **Author:** @<author> (this is the author's own self-review)
-- **Files changed:** <count>
-- **Existing review concerns:** <summary of relevant prior comments, or "None">
-
-<Self-Review Context block from 2a>
-
-## Diff
-
-<inline diff for <=400 LOC, or:>
-Read the diff from: /tmp/pr-self-review-<PR_NUMBER>.diff
-
-## Methodology
-
-<verbatim Step 3 content from the lens's source>
-
-## Output
-
-Produce findings JSON conforming to the Findings Output Format:
-- lens: "<lens-id>"
-- pr: <number>
-- repo: "<owner>/<repo>"
-- Severity: blocking / suggestion / question (default to suggestion when uncertain)
-- Each finding: severity, title, file, line, body, knowledge_context
-
-Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line in the body that traces from technical mechanism to observable human/operational consequence:
-- blocking: `**Grounding:** <mechanism — what breaks, for whom, when> → <consequence — what the user experiences or what operational impact follows>.`
-- suggestion: `**Grounding:** <situation — when a real person encounters the problem> → <improvement — what changes for them>.`
-
-Grounding that stops at the technical mechanism without landing on a human/operational consequence is weak and will be rewritten during synthesis. Findings without a `**Grounding:**` line will be downgraded or dropped.
-
-Query the knowledge store for each finding:
-```bash
-lore search "<topic>" --type knowledge --json --limit 3
-```
-
-Report back with your findings JSON when complete.
-```
+For each lens, create a task using the lens-agent prompt template — read `skills/pr-self-review/templates/lens-agent-prompt.md` for the verbatim prompt scaffold (the self-review variant adds "Self-Review Pre-Scan" framing distinct from pr-review's lens-agent prompt). The template embeds the role-assignment opener "You are a lens review agent analyzing PR #<number>" and the grounding contract "Findings without a `**Grounding:**` line will be downgraded or dropped." verbatim.
 
 **Correctness lens modification:** Append: "Skip step 3d (intent alignment). The author already knows the intent."
 
@@ -205,23 +148,18 @@ Ceremony lens results are collected alongside built-in lens results in Step 2c. 
 
 Collect findings from lens agents as they complete. If a lens agent fails or times out, proceed with available findings and note the coverage gap.
 
-**Ceremony lens two-tier classification:** For each ceremony lens result, check whether the output conforms to the Findings Output Format (`lens`, `pr`, `repo`, `findings[]` with each finding having `severity`, `title`, `file`, `line`, `body`):
-
-- **Conforming:** Include findings in the synthesis pipeline below alongside built-in lens findings. These participate in compound detection, severity grouping, and deduplication. Conforming ceremony findings enter grounding evaluation (Step 3).
-- **Non-conforming:** Store the raw output separately as a supplementary report. Tag it with the ceremony lens name. Non-conforming output does **not** enter synthesis or grounding evaluation — it is presented in the followup summary (Step 4).
-- **Malformed JSON:** Treat as non-conforming with an additional `[malformed]` tag. Store the raw text for supplementary presentation.
-- **Failure/timeout:** Note the coverage gap in the summary. The review continues with available findings.
+**Ceremony lens two-tier classification:** Apply the four-bullet classification rubric (Conforming / Non-conforming / Malformed JSON / Failure-timeout) from `skills/pr-review/SKILL.md` Step 3d to each ceremony lens result. Self-review variant: Conforming findings enter the synthesis pipeline below *and* the Step 3 grounding evaluation; Non-conforming output is presented in the followup summary (Step 4), not in a separate Supplementary Reports section yet.
 
 Clean up the temp diff file:
 ```bash
 rm -f /tmp/pr-self-review-<PR_NUMBER>.diff
 ```
 
-**Compound findings:** Group by `file`. Within each file, findings from different lenses within 3 lines of each other form a compound finding. Apply severity elevation and merge.
+**Compound findings:** Apply the compound-finding detection rule from `skills/pr-review/SKILL.md` Step 4a — group by `file`; findings from different lenses within 3 lines of each other form a compound finding; apply severity elevation and merge.
 
 **Grounding check:** For each `blocking` or `suggestion` finding, verify it has a `**Grounding:**` line. Ungrounded blocking → downgrade to suggestion. Ungrounded suggestion → drop.
 
-**Deduplicate:** Same file, overlapping line, same severity, same concern — keep the more detailed body. Do NOT deduplicate different concerns at the same location.
+**Deduplicate:** Apply the deduplication rule from `skills/pr-review/SKILL.md` Step 4c — same file, overlapping line, same severity, same concern, keep the more detailed body; do NOT deduplicate different concerns at the same location.
 
 Display summary:
 ```
@@ -242,38 +180,7 @@ Spawn one agent with:
 - All lens findings with their `**Grounding:**` lines from Step 2c
 - The Sound/Weak/Unsound rubric from `severity.md`
 
-Agent task:
-
-```
-# Grounding Evaluation — PR #<number>
-
-You are a grounding evaluation agent. Apply the Grounding Quality Rubric from severity.md to every `blocking` and `suggestion` finding from the lens scan.
-
-## PR Intent
-**Title:** <title>
-**Body:** <body>
-**Commits:** <commit messages>
-
-## severity.md Rubric (loaded above)
-
-## Findings to Evaluate
-
-<all lens findings with their Grounding lines>
-
-## Instructions
-
-For each finding with severity `blocking` or `suggestion`:
-1. Classify the `**Grounding:**` line as Sound, Weak, or Unsound per the rubric.
-2. Apply the outcome:
-   - **Sound** → pass through unchanged, set `selected: true`
-   - **Weak** → rewrite the `**Grounding:**` line to complete the mechanism → consequence chain; keep severity intact, set `selected: true`
-   - **Unsound** → drop the finding (do not include it in output)
-   - **Missing grounding** → treat as Unsound; drop the finding
-
-For `question` findings: pass through unchanged, set `selected: false`.
-
-Output the evaluated findings list. For each finding include: severity, title, file, line, body (with grounding rewritten if weak), lens, grounding (the final grounding text only, without the `**Grounding:**` label), selected.
-```
+Agent task: read `skills/pr-self-review/templates/grounding-eval-prompt.md` for the verbatim prompt scaffold. The template embeds the role-assignment opener "You are a grounding evaluation agent" and the full Sound/Weak/Unsound rubric application (the same rubric application is canonical at `skills/pr-review/SKILL.md` Step 4b).
 
 ### 3b. Present evaluation summary
 
@@ -297,26 +204,7 @@ The followup is the sole artifact this skill produces. Work-item creation is def
 
 ### Assemble lens-findings.json
 
-Build the `lens-findings.json` payload from the evaluated findings produced by Step 3:
-
-```json
-{
-  "pr": <PR_NUMBER>,
-  "work_item": "",
-  "findings": [
-    {
-      "severity": "<blocking|suggestion|question>",
-      "title": "<finding title>",
-      "file": "<relative path>",
-      "line": <1-indexed, 0 for file-level>,
-      "body": "<finding body, may contain markdown>",
-      "lens": "<lens id>",
-      "grounding": "<grounding text — mechanism → consequence chain, no label prefix>",
-      "selected": <true|false>
-    }
-  ]
-}
-```
+Build the `lens-findings.json` payload from the evaluated findings produced by Step 3 — read `skills/pr-self-review/templates/lens-findings-json.md` for the JSON payload shape.
 
 **Selection contract:** The grounding evaluation step (Step 3) owns `selected`. Set `selected: true` for every finding with sound or rewritten-weak grounding (`blocking` and `suggestion`). Set `selected: false` for `question` findings. Do not include findings with unsound or missing grounding — they are dropped during evaluation.
 
@@ -326,7 +214,7 @@ Include only findings that survived grounding evaluation. If `--skip-pre-scan` w
 
 ### Build --content summary
 
-Assemble the `--content` value with all sections below. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
+Per-section assembly: see `skills/pr-review/SKILL.md` Step 6e — every section is mandatory, do not abbreviate, summarize, or omit any section; `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
 
 **First line:** One-line diagnostic summary for TUI excerpt compatibility (FindingExcerpt skips `#` heading lines and blank lines, returning the first 3 non-heading non-empty lines — this summary must be first):
 
@@ -336,7 +224,7 @@ Self-review of PR #<N>: <N> findings retained (<K> blocking, <J> suggestions, <Q
 
 **Section 1 — PR Narrative** (from Step 2a review context and PR metadata):
 
-Using the review context built in Step 2a (alignment map and design signals) and the PR metadata (title, body, branch), synthesize a 1-2 paragraph narrative:
+From the Step 2a review context (alignment map, design signals) and PR metadata (title, body, branch), synthesize a 1-2 paragraph narrative covering:
 - What the PR does structurally (drawn from the alignment map)
 - Design signals and cross-cutting concerns identified
 - Notable alignment observations (unrelated files, missing pieces) — omit if the PR is coherent
@@ -349,11 +237,7 @@ Using the review context built in Step 2a (alignment map and design signals) and
 
 **Section 2 — Implementation Diagram** (conditional):
 
-Include only when the PR touches 2 or more distinct modules (grouped by first directory component, or `(root)` for repo-root files). Read diagram conventions:
-
-```bash
-cat ~/.lore/claude-md/review-protocol/followup-template.md
-```
+Include only when the PR touches 2 or more distinct modules (grouped by first directory component, or `(root)` for repo-root files). Read diagram conventions per `skills/pr-review/SKILL.md` Step 6b (`cat ~/.lore/claude-md/review-protocol/followup-template.md`).
 
 Build an ASCII logical flow diagram showing how the PR's changes work mechanically. Omit this section entirely for single-module PRs or when directional relationships cannot be determined from available context.
 
@@ -386,11 +270,8 @@ Findings are grouped by severity with user-facing labels (blocking → "Findings
 ---
 
 ### Improvement opportunities (<count>)
-
 ...
-
 ### Questions (<count>)
-
 ...
 ```
 
@@ -459,13 +340,11 @@ Per-finding provenance: `create-followup.sh` enriches each finding in `lens-find
 Open the TUI Triage tab to review findings. Press `p` on the followup to promote selected findings to a work item.
 ```
 
-If ceremony lenses ran, include them in the lens coverage count: `**Lens coverage:** <L> lenses (<M> ceremony), <N> findings retained (<K> blocking, <J> suggestions, <Q> questions)`.
-
-If lenses ran in degraded mode, show: `**Lens coverage:** <L>/<T> lenses (<degraded names> degraded), <N> findings retained`.
-
-If non-conforming ceremony lens output exists, append a `### Supplementary Reports` section naming each skill. Omit when all ceremony lenses were conforming or none ran.
-
-Omit zero counts.
+Variants:
+- If ceremony lenses ran: `**Lens coverage:** <L> lenses (<M> ceremony), <N> findings retained (<K> blocking, <J> suggestions, <Q> questions)`.
+- If lenses ran in degraded mode: `**Lens coverage:** <L>/<T> lenses (<degraded names> degraded), <N> findings retained`.
+- If non-conforming ceremony lens output exists, append a `### Supplementary Reports` section naming each skill. Omit when all ceremony lenses were conforming or none ran.
+- Omit zero counts.
 
 ## Step 5: Capture Insights
 
@@ -483,7 +362,4 @@ Each invocation produces an independent followup — the skill does not resume o
 
 ## Error Handling
 
-- **No gh CLI or authentication:** Tell user to run `gh auth login`
-- **PR not found:** Confirm PR number and repo access
-- **Empty PR (no changes):** Inform user, skip review
-- **Knowledge store unavailable:** Continue without enrichment, note degraded mode
+Per the canonical block at `skills/pr-review/SKILL.md` ## Error Handling: gh CLI/auth → `gh auth login`; PR not found → confirm PR number and repo access; empty PR → inform user, skip review; knowledge store unavailable → continue without enrichment, note degraded mode.

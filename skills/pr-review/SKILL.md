@@ -54,6 +54,8 @@ From the fetched data, extract:
 - **Existing reviews** — from `fetch-pr-data.sh` grouped output. Filter out outdated threads (`isOutdated: true`). Note existing review concerns to avoid duplicate findings.
 - **Diff stats** — total LOC changed (additions + deletions)
 
+<!-- section-boundary -->
+
 ### 1d. Diff delivery for lens agents
 
 - **Standard diff (<=400 LOC):** Pass inline in lens agent task descriptions.
@@ -90,10 +92,7 @@ cat ~/.lore/claude-md/review-protocol/risk-triage.md
 
 **If mode is `--thorough`:** Select all lenses. Skip signal matching.
 
-**Otherwise:** Start with the default set (Correctness + Regressions + Test Quality + Interface Clarity + User Impact), then:
-1. For each remaining lens (Security, Blast Radius), check trigger signals against the PR's changed files and diff content
-2. If risk tier is High: force-add Security regardless of signals
-3. Apply skip conditions — only skip a lens if ALL its skip conditions are true
+**Otherwise:** Start with the default set (Correctness + Regressions + Test Quality + Interface Clarity + User Impact), then: 1. For each remaining lens (Security, Blast Radius), check trigger signals against the PR's changed files and diff content 2. If risk tier is High: force-add Security regardless of signals 3. Apply skip conditions — only skip a lens if ALL its skip conditions are true
 
 **Ceremony config lookup:** After adaptive selection, check for ceremony-configured lenses:
 
@@ -101,10 +100,7 @@ cat ~/.lore/claude-md/review-protocol/risk-triage.md
 lore ceremony get pr-review
 ```
 
-If the result is non-empty (not `[]`), append each returned skill to the selected lens set. Ceremony lenses:
-- Are tagged `[ceremony]` in the triage table with reason "Ceremony config"
-- Are **not** subject to adaptive skip conditions — they always run when configured
-- Can be removed by the user at the triage gate (Step 2c) like any other lens
+If the result is non-empty (not `[]`), append each returned skill to the selected lens set. Ceremony lenses are tagged `[ceremony]` in the triage table with reason "Ceremony config" and are **not** subject to adaptive skip conditions — they always run when configured.
 
 **Agency constraint:** The user — and only the user — can remove a ceremony lens at Step 2c. The agent MUST NOT self-remove a ceremony lens on the basis of latency, PR size, perceived low signal, or any other judgment call. Invalid skip rationales — do not act on any of these: the PR is small, the review is low-signal, the run will take too long, or the user did not explicitly ask for ceremony lenses this session. The user configured them; only the user can unconfigure them.
 
@@ -132,7 +128,7 @@ Change types detected: [list]
 Proceed with this lens set? You can add or remove lenses before we begin.
 ```
 
-Present the triage summary and proceed immediately to Step 3. If the user interjects to adjust the lens set before agents launch, update the selection accordingly. Ceremony lenses appear in the table with the `[ceremony]` prefix and can be removed by name like any other lens.
+Present the triage summary and proceed immediately to Step 3. If the user interjects to adjust the lens set before agents launch, update the selection accordingly.
 
 If the diff is >400 LOC, include a note:
 ```
@@ -159,7 +155,7 @@ Identify design signals for lens agents:
 - Areas of higher risk or complexity
 - Missing pieces that lenses should verify
 
-Structure as a context block for injection into each lens agent's prompt:
+Structure as a context block for each lens agent's prompt:
 
 ```
 ## Review Context
@@ -234,22 +230,7 @@ Query the knowledge store for each finding:
 lore search "<topic>" --type knowledge --json --limit 3
 ```
 
-**Voice — hedge the inference, not the observed code fact.** Every finding is a hypothesis formed from incomplete information; frame it that way. A hedged observation that names the code precisely is more useful than a confident assertion that names nothing.
-
-- **State observed code facts directly** — the reviewer can see the code.
-  - Weak: "This might be storing the session token where it's readable."
-  - Strong: "`logRequest` writes `session.token` to the access log."
-- **Hedge impact claims with an explicit condition** — the reviewer cannot know whether the scenario applies.
-  - Weak: "This will cause a nil dereference and crash the server."
-  - Strong: "`session.user` is dereferenced here without a nil check — if this handler is reachable before authentication completes, the nil dereference panics."
-- **Lead with the observation, not the hedge.** Put the code fact first, the uncertainty qualifier second.
-- **Use impersonal constructions.** Describe the code, not the author ("The handler dereferences…", not "You forgot to check…").
-- **Fix suggestions are secondary and optional.** The default posture is to surface the issue and stop — the author chooses between a small local fix, a broader refactor, or a deeper redesign. Include a fix only when non-obvious (non-local change, hard to characterize without showing a resolution, or unusual constraints). When included: place it **after** impact and evidence (never lead with it), frame it as one option ("One approach: …"), and keep the scope open so the finding can still motivate a broader change.
-- **Vocabulary to avoid:**
-  - Overstatement of reviewer confidence: "this will crash" / "this is wrong" / "this is a bug" / "definitely" → name the specific condition ("this panics if `x` is nil", "this deviates from the contract in…").
-  - Hollow hedges on observations: "seems like" / "might be" / "I think" / "could potentially" → state the code fact; hedge the *impact*, not the observation.
-
-Full voice guide (optional deeper reference): `~/.lore/claude-md/review-protocol/review-voice.md`.
+**Voice — hedge the inference, not the observed code fact.** State observed code facts directly; hedge impact claims with an explicit condition. Lead with the observation, then the qualifier. Use impersonal constructions ("The handler dereferences…", not "You forgot to check…"). Fix suggestions are secondary and optional — surface the issue and stop unless the fix is non-obvious; never lead with a fix. Avoid overstated vocabulary ("this will crash", "this is a bug", "definitely") and hollow hedges on observations ("seems like", "might be", "I think") — name the specific condition. Full guidance: `~/.lore/claude-md/review-protocol/review-voice.md` (see also Step 6d-ii below for the externally-facing variant).
 
 Report back with your findings JSON when complete.
 ```
@@ -258,21 +239,11 @@ Construct one Agent task per built-in lens, but **do not dispatch yet** — cere
 
 ### 3b-ceremony. Construct ceremony lens tasks
 
-**This step is mandatory and must not be skipped.** Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b. For each ceremony lens in the selected set, construct an `Agent` task — *not* a `Skill` invocation — using the `general-purpose` subagent type with this prompt structure:
-
-```
-# <Ceremony Lens Name> — PR #<PR_NUMBER>
-
-Invoke the `/<skill-name>` skill on PR #<PR_NUMBER> in <owner>/<repo>:
-
-    /<skill-name> <PR_NUMBER>
-
-The skill fetches its own PR data — do not pre-fetch diff content, review context, or metadata.
-
-When the skill completes, return its output verbatim. If it produced findings JSON in the standard Findings Output Format, return that JSON. If it produced a different output shape (narrative report, table, raw scanner output, etc.), return the raw text so it can be classified as supplementary in Step 3d.
-```
+**This step is mandatory and must not be skipped.** Ceremony lenses are identified by the `[ceremony]` tag assigned during Step 2b. For each ceremony lens in the selected set, construct an `Agent` task — *not* a `Skill` invocation — using the `general-purpose` subagent type with this prompt structure: read `skills/pr-review/templates/ceremony-lens-prompt.md`.
 
 The `Agent`-wrapped invocation — rather than a direct `Skill` call from the main conversation — is what makes parallel execution with built-in lens agents possible. `Skill` invocations run synchronously in the main thread; `Agent` invocations issued in a single message run concurrently.
+
+<!-- section-boundary -->
 
 ### 3b-launch. Spawn all lens agents in a single parallel batch
 
@@ -284,7 +255,7 @@ There is no fixed concurrent-agent cap; spawn the full selected set together. Ty
 
 Do NOT skip this step. Do NOT omit a ceremony lens because the PR is small. Do NOT omit because the run seems low-signal. Do NOT omit because the user did not explicitly re-request ceremony lenses this session. Do NOT omit because of perceived latency cost. Do NOT defer ceremony dispatch to a follow-up message under any of these rationales — deferral is functionally a skip from the parallelism perspective. None of these are valid rationales — the user configured the ceremony; only the user can remove it. If a ceremony lens is genuinely inapplicable, stop and ask the user whether to remove it at Step 2c rather than self-removing.
 
-Ceremony lens results are collected alongside built-in lens results in Step 3d. If a ceremony lens does not produce findings in the standard Findings Output Format, its output is handled as non-conforming (see Step 3d).
+Ceremony lens results are collected in Step 3d alongside built-in results; output not in the standard Findings Output Format is handled as non-conforming there.
 
 ### 3c. Self-review perspective lenses (--self mode only)
 
@@ -340,6 +311,8 @@ Apply the Grounding Quality Rubric from `severity.md` (already loaded above) to 
 
 **Compound findings** — evaluate grounding across all contributing findings. If at least one contributing finding has sound or weak grounding, the compound finding qualifies (apply rewrite if the merged grounding is weak). If all contributing findings are unsound or ungrounded, drop the compound finding.
 
+<!-- section-boundary -->
+
 ### 4c. Deduplicate
 
 Same file, overlapping line (within 3 lines), same severity, same underlying concern — keep the more detailed body and add the other lens's ID to attribution. Do NOT deduplicate findings that address different concerns at the same location.
@@ -370,10 +343,7 @@ Attach relevant citations. If any knowledge entry is STALE and the PR contradict
 3. <third finding> — [<contributing lenses>]
 ```
 
-Verdict logic:
-- Any blocking findings -> `BLOCKING`
-- Only suggestions/questions -> `SUGGESTIONS ONLY`
-- No findings -> `CLEAN`
+Verdict logic: - Any blocking findings -> `BLOCKING` - Only suggestions/questions -> `SUGGESTIONS ONLY` - No findings -> `CLEAN`
 
 ## Step 5: Present Findings
 
@@ -390,66 +360,15 @@ Verdict logic:
 
 ### 5b. Findings by severity
 
-Present findings grouped by severity. Compound findings appear first within each group.
-
-```
-### Findings requiring action
-
-#### 1. [compound] <title>
-**Lenses:** correctness, security
-**File:** `path/to/file.ext:42`
-
-<merged body from both lenses>
-
-**Knowledge:** [knowledge: entry-title] — relevance summary
-
----
-
-#### 2. <title>
-**Lens:** correctness
-**File:** `path/to/file.ext:87`
-
-<body>
-
-**Knowledge:** [knowledge: entry-title] — relevance summary
-
----
-
-### Improvement opportunities
-...
-
-### Open questions
-...
-```
+Present findings grouped by severity (compound findings first within each group). Read `skills/pr-review/templates/step5b-presentation.md` for the by-severity and supplementary-reports templates (supplementary block renders only when ceremony lenses produced non-conforming output per Step 3d).
 
 ### 5b-supplementary. Supplementary Reports
 
-This section appears **only** when one or more ceremony lenses produced non-conforming output (classified in Step 3d). Present each non-conforming ceremony lens result verbatim under its own header:
-
-```
-### Supplementary Reports
-
-These reports are from ceremony-configured lenses that did not produce findings in the standard format. They are presented as-is and are not included in the synthesis verdict.
-
-#### <skill-name> [ceremony]
-
-<raw output from the ceremony lens>
-
----
-
-#### <skill-name> [ceremony] [malformed]
-
-<raw text from the ceremony lens that produced malformed JSON>
-```
-
-Supplementary reports are:
-- **Excluded** from synthesis (Step 4) — they do not affect compound detection, severity counts, or the verdict
-- **Excluded** from `post-review.sh` output — they are not posted as GitHub review comments
-- **Included** in the followup report body (Step 6d) for record-keeping
+Supplementary reports are: - **Excluded** from synthesis (Step 4) — they do not affect compound detection, severity counts, or the verdict - **Excluded** from `post-review.sh` output — they are not posted as GitHub review comments - **Included** in the followup report body (Step 6d) for record-keeping
 
 ### 5c. User interaction
 
-After presenting findings, offer the user a chance to discuss or ask questions. Findings are captured in the followup report (Step 6) with proposed comments for downstream TUI posting. Proceed to Step 6.
+After presenting findings, offer the user a chance to discuss or ask questions, then proceed to Step 6. Findings are captured in the followup report with proposed comments for downstream TUI posting.
 
 ## Step 6: Generate Followup Report
 
@@ -457,16 +376,7 @@ This step is mandatory and must not be skipped. It always runs after Step 5c res
 
 ### 6a. PR Narrative
 
-Using the review brief from Step 3a, synthesize a 1-2 paragraph narrative:
-- What the PR does structurally (drawn from the alignment map)
-- Design signals and cross-cutting concerns identified
-- Notable alignment observations (unrelated files, missing pieces) — omit if the PR is coherent
-
-```
-## PR Narrative
-
-<1-2 paragraphs>
-```
+Using the review brief from Step 3a, synthesize a 1-2 paragraph narrative under a `## PR Narrative` heading covering: what the PR does structurally (drawn from the alignment map); design signals and cross-cutting concerns identified; notable alignment observations (unrelated files, missing pieces) — omit if the PR is coherent.
 
 ### 6b. Implementation Diagram
 
@@ -508,63 +418,24 @@ The test: if the PR author asks "why does this matter?", the finding must answer
 Full voice guide (optional deeper reference): `~/.lore/claude-md/review-protocol/review-voice.md`.
 
 After stripping and shaping, produce two variants of each finding body:
-
-- **Section 3 variant** (used verbatim under `#### N. <title>` in `## Review Findings`): the stripped+shaped prose as-is. Do **not** prepend a bolded title — the `####` heading already carries the title, and duplicating it would produce a visual stutter.
-- **Comment-body variant** (used in `## Proposed Comments` preview blocks and in the `body` field emitted by Step 6f): prepend `**<title>**\n\n` as the first line of the prose, where `<title>` is the finding's title text. This is a plain bolded title, not a labeled header like `**Impact:**`.
-
-Step 6f is serialization-only — it emits the already-constructed comment-body variant without reformatting.
+- **Section 3 variant** (used verbatim under `#### N. <title>` in `## Review Findings`): the stripped+shaped prose as-is. Do **not** prepend a bolded title — the `####` heading already carries it; duplicating produces a visual stutter.
+- **Comment-body variant** (used in `## Proposed Comments` previews and the `body` field emitted by Step 6f): prepend `**<title>**\n\n` as the first line, where `<title>` is the finding's title text. Plain bolded title, not a labeled header like `**Impact:**`. Step 6f is serialization-only — it emits this variant without reformatting.
 
 ### 6e. Assemble the full report body
 
 Assemble the `--content` value with **all** of the following sections. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
 
-**First line:** One-line diagnostic summary (e.g., `ACTION NEEDED — 2 findings requiring action, 3 improvement opportunities`). This must be the first non-heading line — it appears as the excerpt in the TUI.
+**First line:** One-line diagnostic summary (e.g., `ACTION NEEDED — 2 findings requiring action, 3 improvement opportunities`). First non-heading line — it appears as the TUI excerpt.
 
-**Second line:** `**Author:** @<author>` — the PR author's GitHub handle from the `gh pr view` data fetched in Step 1c.
+**Second line:** `**Author:** @<author>` — PR author's GitHub handle from Step 1c.
 
-**Section 1 — PR Narrative** (from 6a):
+**Section 1 — PR Narrative** (from 6a): include the 1-2 paragraphs verbatim under a `## PR Narrative` heading; do not re-summarize.
 
-```markdown
-## PR Narrative
-
-<1-2 paragraphs from 6a — include verbatim, do not re-summarize>
-```
-
-**Section 2 — Implementation Diagram** (from 6b):
-
-```markdown
-## Implementation Diagram
-
-<ASCII box-drawing diagram from 6b — include verbatim>
-```
+**Section 2 — Implementation Diagram** (from 6b): include the ASCII box-drawing diagram verbatim under a `## Implementation Diagram` heading.
 
 **Section 3 — Review Findings:**
 
-Include the full finding details from Step 5b with internal protocol headers stripped per Step 6d-ii. The report is an author-facing artifact. If ceremony lenses produced non-conforming output (Step 5b-supplementary), append the Supplementary Reports block after the structured findings. Supplementary reports are presentation-only — they do **not** generate review code blocks in Section 4 or entries in `proposed-comments.json`.
-
-```markdown
-## Review Findings
-
-**Verdict:** <ACTION NEEDED / SUGGESTIONS / CLEAN>
-**Findings requiring action:** <count> | **Improvement opportunities:** <count> | **Questions:** <count>
-
-### Findings requiring action (<count>)
-<findings with internal severity "blocking", headers stripped per 6d-ii>
-
-### Improvement opportunities (<count>)
-<findings with internal severity "suggestion", headers stripped per 6d-ii>
-
-### Questions (<count>)
-<findings with internal severity "question">
-
-### Supplementary Reports
-
-<Include only if non-conforming ceremony output exists — omit this heading entirely otherwise>
-
-#### <skill-name> [ceremony]
-
-<raw output from the ceremony lens>
-```
+Include the full finding details from Step 5b with internal protocol headers stripped per Step 6d-ii. The report is an author-facing artifact. If ceremony lenses produced non-conforming output (Step 5b-supplementary), append the Supplementary Reports block after the structured findings. Supplementary reports are presentation-only — they do **not** generate review code blocks in Section 4 or entries in `proposed-comments.json`. Read `skills/pr-review/templates/review-findings-section.md` for the Section 3 markdown template.
 
 **Section 4 — Proposed Comments:**
 
@@ -582,14 +453,14 @@ line: <N>
 
 ### 6f. Persist the report
 
-Build the proposed comments JSON array by walking findings in severity-group order (`blocking` → `suggestion` → `question`), matching the order they appear in the markdown report. Within each group, maintain a 1-based ordinal counter that increments for every finding encountered — including findings that lack `file` or `line`. For each finding that has both `file` and `line` fields, emit `{"path": "<file>", "line": <line>, "body": "<finding body>", "title": "<finding title>", "finding_ordinal": <N>}` where `<N>` is the current ordinal for that severity group and `<finding title>` is the title text from the finding's `#### N. <title>` header. If a finding lacks `file` or `line`, skip emission but still increment the ordinal so that later findings in the same group preserve their markdown `#### N.` position. The body must have internal protocol headers stripped per Step 6d-ii and grounding content preserved. The ordinal counter resets to 1 at the start of each severity group.
+Build the proposed comments JSON array by walking findings in severity-group order (`blocking` → `suggestion` → `question`), matching markdown report order. Within each group, maintain a 1-based ordinal counter that increments for every finding encountered — including findings that lack `file` or `line` (skip emission for those but still increment, so later findings keep their markdown `#### N.` position). The counter resets to 1 at the start of each severity group. For each finding with both `file` and `line`, emit `{"path": "<file>", "line": <line>, "body": "<finding body>", "title": "<finding title>", "finding_ordinal": <N>}` where `<N>` is the current ordinal and `<finding title>` is the text from the finding's `#### N. <title>` header. Bodies must have internal protocol headers stripped per Step 6d-ii with grounding content preserved.
 
 Pass the **complete report body from 6e** as `--content`:
 
 ```bash
 bash ~/.lore/scripts/create-followup.sh \
   --source "pr-review" \
-  --title "Review: <PR title> (#<N>)" \  # ≤70 chars; truncate PR title if needed
+  --title "Review: <PR title> (#<N>)" \
   --author "@<author>" \
   --attachments '[{"type":"pr","ref":"#<N>"}]' \
   --suggested-actions '[{"type": "<type>", "label": "<label>"}]' \
@@ -607,9 +478,7 @@ bash ~/.lore/scripts/create-followup.sh \
 
 **Gate:** Do not execute this step until Step 6 has completed and `create-followup.sh` has been called. If Step 6 was not executed, go back and execute it now before proceeding.
 
-```
-/remember Holistic review of PR #<N> — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered (why the architecture is this way, what constraints drove decisions), cross-lens convergence patterns (areas where multiple lenses flagged the same concern), convention patterns observed across the codebase. Use confidence: medium for reviewer observations. Skip: findings specific to this PR, style opinions, lens-specific methodology notes. For every `lore capture` call, pass `--producer-role pr-review --protocol-slot Synthesis --work-item <slug>` (when a work item matches the PR).
-```
+Read `skills/pr-review/templates/capture-invocation.md` for the full `/remember` invocation to dispatch.
 
 ## Error Handling
 
@@ -621,7 +490,4 @@ bash ~/.lore/scripts/create-followup.sh \
 
 ## Resuming
 
-If re-invoked on the same PR, check for existing work items (`pr-lens-review-<PR_NUMBER>` or `pr-review-<PR_NUMBER>` in `/work list`). If found:
-- Load existing findings from the work item
-- Offer to run additional lenses or re-run synthesis with new findings
-- Append rather than overwrite
+If re-invoked on the same PR, check for existing work items (`pr-lens-review-<PR_NUMBER>` or `pr-review-<PR_NUMBER>` in `/work list`). If found: - Load existing findings from the work item - Offer to run additional lenses or re-run synthesis with new findings - Append rather than overwrite

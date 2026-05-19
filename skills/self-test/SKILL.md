@@ -27,9 +27,7 @@ lore resolve
 
 If `lore resolve` succeeds, set `HAS_CLI` = true and `KNOWLEDGE_DIR` to the result.
 
-If it fails, fall back:
-1. Check `$KNOWLEDGE_DIR` environment variable
-2. If neither works, ask the agent for the knowledge store path
+If it fails, fall back: 1. Check `$KNOWLEDGE_DIR` environment variable 2. If neither works, ask the agent for the knowledge store path
 
 ### Command Fallbacks
 
@@ -52,7 +50,7 @@ When `HAS_CLI` is false, use these fallbacks for CLI commands referenced through
 | `lore check-links` | Skip — score as N/A with note: "Link checker requires lore CLI" |
 | `lore work list` / `lore work search` | Read `$WORK_DIR/_index.json` or glob `$WORK_DIR/*/_meta.json` directly |
 
-Throughout the test steps below, use the CLI command when `HAS_CLI` is true; otherwise use the fallback.
+Use the CLI command when `HAS_CLI` is true; otherwise the fallback.
 
 ### Step 1: Resolve Paths and Detect Infrastructure
 
@@ -94,11 +92,7 @@ If `HAS_ENTRIES` is false (no category directories with `.md` files), the knowle
 
 ### Load Previous Results
 
-If `HAS_PREVIOUS` is true, read `$RESULTS_FILE` and extract:
-1. **Scores table** — parse the `## Scores` markdown table. Store each test's score for comparison.
-2. **Run number** — from the title line `# Self-Test Results — [date] (Run N)`. The current run is N+1.
-3. **Previous recommendations** — parse the `## Recommendations` section. Store each bullet for resolution tracking.
-4. **Previous bypass log** — parse `## Bypass Log` to compare bypass patterns.
+If `HAS_PREVIOUS` is true, read `$RESULTS_FILE` and extract: 1. **Scores table** — parse the `## Scores` markdown table. Store each test's score for comparison. 2. **Run number** — from the title line `# Self-Test Results — [date] (Run N)`. The current run is N+1. 3. **Previous recommendations** — parse the `## Recommendations` section. Store each bullet for resolution tracking. 4. **Previous bypass log** — parse `## Bypass Log` to compare bypass patterns.
 
 If parsing fails (malformed results file), note this in the output and treat as first run.
 
@@ -108,36 +102,25 @@ If the argument is "quick", only run Tests 1, 2, and 7. Skip the rest and mark t
 
 ### Step 2: Initialize Tracking
 
-Set up tracking counters for the entire run:
-- `TOOL_CALLS` = 0 (increment each time you use Read, Glob, Grep, Bash, or any tool)
-- `KNOWLEDGE_CALLS` = 0 (subset: tool calls that read from `$KNOWLEDGE_DIR`)
-- `RAW_SEARCH_CALLS` = 0 (subset: Grep/Glob/Explore calls outside `$KNOWLEDGE_DIR`)
-- `BYPASS_LOG` = [] (each entry: test number, what you bypassed, why)
+Set up tracking counters for the entire run: - `TOOL_CALLS` = 0 (increment each time you use Read, Glob, Grep, Bash, or any tool) - `KNOWLEDGE_CALLS` = 0 (subset: tool calls that read from `$KNOWLEDGE_DIR`) - `RAW_SEARCH_CALLS` = 0 (subset: Grep/Glob/Explore calls outside `$KNOWLEDGE_DIR`) - `BYPASS_LOG` = [] (each entry: test number, what you bypassed, why)
 
 Be honest about counting. Every tool invocation counts. The ratio of knowledge-system to raw-search calls is diagnostic.
 
 ## Test 1: Orientation
 
-**Purpose:** Evaluate what the session-start hooks loaded into context — both breadth (what exists) and depth (what it says).
+**Purpose:** Evaluate what the session-start hooks loaded into context — breadth (what exists) and depth (what it says). Without reading any files or running any searches, answer using only what was loaded at session start.
 
-Without reading any files or running any searches, answer these questions using only what was loaded at session start.
+**Breadth questions (2):** 1. What knowledge categories exist and what does each hold? 2. What is the directory layout of the knowledge store?
 
-**Breadth questions (2):**
-1. What knowledge categories exist and what does each hold?
-2. What is the directory layout of the knowledge store?
+**Synthesis question (1) — requires combining information across categories:** 3. Pick a principle from `principles.md` and trace its influence through the system: identify at least one convention it generates, one gotcha it addresses, and one workflow or script that implements it. Explain the causal chain. This tests whether you absorbed the relationships between categories, not just each category in isolation.
 
-**Synthesis question (1) — requires combining information across categories:**
-3. Pick a principle from `principles.md` and trace its influence through the system: identify at least one convention it generates, one gotcha it addresses, and one workflow or script that implements it. Explain the causal chain. This tests whether you absorbed the relationships between categories, not just each category in isolation.
-
-**Depth questions (2) — these test whether you internalized content, not just structure:**
-4. Name a specific gotcha and describe its mitigation from memory. Then identify a convention or workflow entry that relates to it and explain the connection. If you can only name the heading but not the substance, that's partial credit. Full credit requires demonstrating the cross-reference — how two entries in different files connect.
-5. Describe a specific convention and when it applies. Then identify a gotcha or architecture entry it was designed to address. Again — substance and cross-reference, not just the heading.
+**Depth questions (2) — these test whether you internalized content, not just structure:** 4. Name a specific gotcha and describe its mitigation from memory. Then identify a convention or workflow entry that relates to it and explain the connection. If you can only name the heading but not the substance, that's partial credit. Full credit requires demonstrating the cross-reference — how two entries in different files connect. 5. Describe a specific convention and when it applies. Then identify a gotcha or architecture entry it was designed to address. Again — substance and cross-reference, not just the heading.
 
 **Note (Run 6):** Test 1 scored 5/5 for 6 consecutive runs (Runs 1-6). The synthesis question (added Run 5) scored 5/5 on first attempt — answerable because principles are loaded at session start with See-also links that provide the traversal path. If 5/5 persists in Run 7, raise the bar: require tracing a principle to a specific code implementation line (function name, line number), not just naming the script.
 
-**Scoring:** X/5 questions answered confidently with specific, accurate details. Breadth questions that only require listing score normally. Depth questions require demonstrating you absorbed the actual content AND can connect it to related entries in other files, not just that you saw the heading in a summary.
+**Scoring:** X/5 confidently with specific, accurate details. Breadth = listing; depth = absorbed content AND cross-reference to entries in other files, not just headings.
 
-**Record:** For each depth question, note whether your answer included concrete details (mitigations, conditions, examples) AND a valid cross-reference. Vague = not confident = doesn't count. Cross-reference missing = partial credit only.
+**Record:** For each depth question, note whether your answer included concrete details (mitigations, conditions, examples) AND a valid cross-reference. Vague = not confident = doesn't count. Missing cross-reference = partial credit only.
 
 ## Test 2: Retrieval Value
 
@@ -145,49 +128,23 @@ Without reading any files or running any searches, answer these questions using 
 
 This test replaced the previous "Retrieval Race" (Runs 1-2) which compared knowledge reads vs Grep. That comparison was structurally decided by architecture (knowledge data is outside the logic repo), producing no diagnostic signal.
 
-**Procedure:**
+**Procedure:** 1. Run `lore index` to identify 3 diverse topics with knowledge entries. 2. For each, formulate a *practical implementation question* you'd actually ask while working on this codebase (e.g., "What happens if I archive a work item with active backlinks?"). 3. Answer using only the knowledge store (read the category file, follow backlinks). 4. Verify each answer against the actual source code or scripts referenced. Classify: **Accurate** (matched code), **Stale** (was true, code changed), **Incomplete** (correct but missed code-revealed details), **Wrong** (contradicts code).
 
-1. Run `lore index` to identify 3 diverse topics that have knowledge entries.
-2. For each topic, formulate a *practical implementation question* — the kind of question you'd actually ask while working on this codebase. Examples: "What happens if I archive a work item with active backlinks?" or "How should I add a new script to the hook system?"
-3. Answer each question using only the knowledge store (read the relevant category file, follow backlinks).
-4. Then verify each answer by reading the actual source code or scripts referenced. Note:
-   - **Accurate:** Knowledge answer matched code reality
-   - **Stale:** Knowledge answer was once true but code has changed
-   - **Incomplete:** Knowledge was correct but missed important details the code reveals
-   - **Wrong:** Knowledge contradicts what the code actually does
-
-**Scoring:**
-- Accuracy: X/3 answers fully accurate when verified against code
-- Completeness: X/3 answers had no significant gaps
-- Token efficiency: average elimination percentage across all 3 questions, mapped to 1-5:
-  - 5: >80% of code reading eliminated — knowledge entry was nearly self-contained
-  - 4: 60-80% eliminated — most exploration prevented, minor verification needed
-  - 3: 40-60% eliminated — meaningful savings but substantial code reading still required
-  - 2: 20-40% eliminated — some orientation value but most answers came from code
-  - 1: <20% eliminated — knowledge entry added negligible value over starting from scratch
-- Overall: average of Accuracy (mapped to 1-5), Completeness (mapped to 1-5), and Token efficiency
+**Scoring:** Accuracy X/3 verified, Completeness X/3 no significant gaps, Token efficiency = average code-reading elimination % across 3 questions mapped to 1-5 (5: >80% eliminated, 4: 60-80%, 3: 40-60%, 2: 20-40%, 1: <20%). Overall = average of all three (Accuracy and Completeness mapped to 1-5).
 
 **Record:** For each question, estimate: how many file reads did the knowledge entry prevent? How many were still needed? What percentage of code consumption was eliminated? Also note the token economics: entry tokens consumed (~150-300) vs. file-read tokens prevented (~N x 500-3000). An entry that eliminates 3 of 5 file reads is valuable (60% elimination, ~1500-9000 tokens saved for ~150 consumed) even though the agent still reads 2 files — this is not "insufficient," it is a measurable efficiency gain. Entries are efficient when they replace reads, not supplement them.
 
 ## Test 3: Backlink Navigation
 
-**Purpose:** Test the cross-reference network quality — both traversability and density.
+**Purpose:** Test cross-reference network quality — traversability and density.
 
 **Requires:** `HAS_ENTRIES` = true. If false, score as N/A.
 
-**Traversal test:**
-Run `lore index` to list all entries. Pick any entry and follow its `[[backlinks]]` to find related context across files. Try to traverse at least 3 hops. Attempt a cross-type chain (e.g., knowledge → work → thread, or gotchas → conventions → architecture).
+**Traversal test:** Run `lore index` to list all entries. Pick any entry and follow its `[[backlinks]]` to find related context across files. Try to traverse at least 3 hops. Attempt a cross-type chain (e.g., knowledge → work → thread, or gotchas → conventions → architecture).
 
-**Connectivity audit:**
-While traversing, count:
-- Entries that have `See also:` backlinks (connected)
-- Entries that have no outgoing references (isolated)
-- Entries where you expected a cross-reference but didn't find one (missing links)
+**Connectivity audit:** While traversing, count: - Entries that have `See also:` backlinks (connected) - Entries with no outgoing references (isolated) - Entries where you expected a cross-reference but didn't find one (missing links)
 
-**Scoring:**
-- Hops completed: X. Dead ends: X.
-- Connectivity: X% of traversed entries have outgoing links
-- Missing links identified: X (these become recommendations)
+**Scoring:** Hops X, dead ends X, connectivity X% with outgoing links, missing links X (become recommendations).
 
 **Record:** Note any missing cross-references you'd expect to exist. These are actionable — they can be added.
 
@@ -197,24 +154,13 @@ While traversing, count:
 
 **Requires:** `HAS_THREADS` = true. If false, score as N/A with note: "No threads exist yet. Create threads to enable this test."
 
-**Procedure:**
-1. List `.md` files in `$THREADS_DIR` (exclude `_index.json` or other non-thread files).
-2. For each thread, read frontmatter to identify `tier` (pinned/active/dormant) and `topic`.
-3. Read the most recent entry of each pinned and active thread.
+**Procedure:** 1. List `.md` files in `$THREADS_DIR` (exclude `_index.json` or other non-thread files). 2. For each thread, read frontmatter to identify `tier` (pinned/active/dormant) and `topic`. 3. Read the most recent entry of each pinned and active thread.
 
-**Behavioral evidence test:**
-For each thread, identify:
-- A **specific behavior** you exhibited this session that was shaped by thread content. Not "I was aware of X" but "I did Y because the thread said Z." If you can't identify a specific behavior, that thread scored no impact.
-- A **shift or decision** recorded in the thread that you would have gotten wrong without it. E.g., a preference that contradicts what you'd assume by default.
+**Behavioral evidence test:** For each thread, identify: - A **specific behavior** you exhibited this session that was shaped by thread content. Not "I was aware of X" but "I did Y because the thread said Z." If you can't identify a specific behavior, that thread scored no impact. - A **shift or decision** recorded in the thread that you would have gotten wrong without it. E.g., a preference that contradicts what you'd assume by default.
 
-**Scoring:** Actionability (1-5):
-- 5: Multiple specific behaviors directly shaped by thread content, with at least one you'd have gotten wrong without it
-- 4: At least one clear behavior shaped, plus general awareness that improved approach
-- 3: Thread content was useful context but didn't measurably change any specific action
-- 2: Threads were loaded but you can't point to any concrete impact
-- 1: Threads had no discernible effect on session behavior
+**Scoring:** Actionability (1-5): - 5: multiple behaviors directly shaped, with one you'd have gotten wrong without it - 4: one clear behavior shaped plus general awareness - 3: useful context but no measurable action change - 2: threads loaded but no concrete impact - 1: no discernible effect.
 
-**Record:** List the specific behaviors and which thread entries produced them. This is the evidence.
+**Record:** The specific behaviors and which thread entries produced them. This is the evidence.
 
 **Note (Run 6):** Thread Awareness has been 3/5 for 3 consecutive runs (Runs 4-6). This reflects a structural ceiling when the self-test is the session's primary activity — threads are most impactful during implementation sessions where they can prevent wrong assumptions. If 3/5 persists for 2+ more runs, consider restructuring this test to evaluate thread quality directly (entry specificity, shift documentation accuracy, backlink density) rather than behavioral impact, which requires implementation context the self-test doesn't generate.
 
@@ -224,30 +170,17 @@ For each thread, identify:
 
 **Requires:** `HAS_WORK` = true. If false, score as N/A with note: "No work items exist. Create work items to enable this test."
 
-**Procedure:**
-1. Read `$WORK_DIR/_index.json` to list all work items with their status.
-2. Pick an active work item (prefer one with unchecked plan tasks).
-3. Read its `plan.md` and the last 2-3 entries of `notes.md`.
+**Procedure:** 1. Read `$WORK_DIR/_index.json` to list work items with status. 2. Pick an active item (prefer one with unchecked plan tasks). 3. Read its `plan.md` and the last 2-3 entries of `notes.md`.
 
-**Cold-start exercise:**
-Pretend you're a fresh instance with no prior conversation context. Using only the plan and notes:
-1. Write out the **exact next 3 actions** you'd take to continue this work (specific file reads, commands, or edits — not vague descriptions).
-2. Identify any **missing context** — questions you'd need answered that the plan doesn't address.
-3. Check whether the design decisions in the plan are specific enough to prevent you from making a wrong choice.
+**Cold-start exercise:** Pretend you're a fresh instance with no prior conversation context. Using only the plan and notes: 1. Write out the **exact next 3 actions** you'd take to continue this work (specific file reads, commands, or edits — not vague descriptions). 2. Identify any **missing context** — questions you'd need answered that the plan doesn't address. 3. Check whether the design decisions in the plan are specific enough to prevent you from making a wrong choice.
 
-**Backlink freshness check (added Run 4):**
-Pick 2-3 `[[knowledge:...]]` backlinks from the plan's Knowledge context or Related sections and resolve them with `lore resolve`. Are the referenced sections still accurate for this plan's purposes? A plan with stale backlinks gives implementers misleading context.
+**Backlink freshness check (added Run 4):** Pick 2-3 `[[knowledge:...]]` backlinks from the plan's Knowledge context or Related sections and resolve them with `lore resolve`. Are the referenced sections still accurate for this plan's purposes? A plan with stale backlinks gives implementers misleading context.
 
 **Note (Run 4):** Test 5 scored 5/5 for 3 consecutive runs (Runs 2-4). The backlink freshness sub-dimension tests plan freshness alongside plan completeness — catching the failure mode where plans reference knowledge entries that have drifted since the plan was written.
 
-**Scoring:** Actionability (1-5):
-- 5: All 3 next-actions are concrete and correct; no missing context
-- 4: Actions are mostly concrete; 1 minor question that doesn't block work
-- 3: Actions are directionally right but vague; 1-2 real questions needed
-- 2: Could describe the goal but not the next steps; multiple questions needed
-- 1: Insufficient context to begin work
+**Scoring:** Actionability (1-5): - 5: all 3 next-actions concrete and correct, no missing context - 4: mostly concrete, 1 minor non-blocking question - 3: directionally right but vague, 1-2 real questions - 2: goal yes, next-steps no, multiple questions - 1: insufficient context to begin.
 
-**Record:** The 3 next-actions and any missing context. The missing context items become recommendations for improving the plan.
+**Record:** The 3 next-actions and any missing context. The missing-context items become recommendations.
 
 ## Test 6: Knowledge Utilization and Capture
 
@@ -255,32 +188,16 @@ Pick 2-3 `[[knowledge:...]]` backlinks from the plan's Knowledge context or Rela
 
 This test replaced the previous "Capture Protocol" test (Runs 1-2) which artificially tested capture by reading a script during the test itself. That test couldn't detect the real failure mode: knowledge being bypassed during actual work.
 
-**Part A — Utilization audit:**
-Review what happened in this session *before* the self-test was invoked. Answer:
-
-1. **Was the knowledge store consulted before raw exploration?** Identify moments where you (or spawned agents) explored code. For each, was the knowledge store checked first?
-   - If yes: which entries helped?
-   - If no: would an entry have been useful? (Check the store now to find out.)
-2. **Were there knowledge-search bypasses?** Moments where you defaulted to Grep/Glob/Read for information the store already had. Count them.
-3. **Did spawned agents use the knowledge store?** If `/implement` or `/spec` was used, did the worker agents actually resolve backlinks and search knowledge, or did they skip straight to code?
+**Part A — Utilization audit:** Review what happened in this session *before* the self-test was invoked. Answer: 1. **Was the knowledge store consulted before raw exploration?** Identify moments you (or spawned agents) explored code — was the store checked first? If yes, which entries helped? If no, would an entry have been useful? (Check now.) 2. **Knowledge-search bypasses** — moments you defaulted to Grep/Glob/Read for info the store already had. Count them. 3. **Did spawned agents use the knowledge store?** For `/implement` or `/spec`, did workers resolve backlinks and search knowledge, or skip straight to code?
 
 If this is the first action in the session (no real work preceded the self-test), note "No prior work to audit" and score based on the protocol's readiness: are the hooks, skill prompts, and agent instructions set up to make knowledge utilization likely?
 
 **Note (Run 5):** Capture scoring should not give a free pass to "light" sessions. Conversational sessions where genuine insights emerge (e.g., identifying structural gaps, recognizing thread usage patterns, noting maintenance debt) still warrant captures. If the 4-condition gate is met, the session type is irrelevant. Score capture based on whether capturable insights were present, not on whether code was written.
 
-**Part B — Capture audit:**
-Review the session for capture opportunities:
+**Part B — Capture audit:** Review the session for capture opportunities: 1. **What was captured?** Count inbox entries created this session (timestamps in `$INBOX_DIR` or session actions). 2. **What was missed?** Identify 1-3 moments where the 4-condition gate (Reusable, Non-obvious, Stable, High confidence) was met but no capture occurred. If you can't find missed opportunities, that's a good sign. 3. **Filed correctly?** Did `lore capture` write directly to category files, or are there unfiled inbox entries?
 
-1. **What was captured?** Count inbox entries created this session (check file timestamps in `$INBOX_DIR` or review session actions).
-2. **What was missed?** Identify 1-3 moments where the 4-condition gate (Reusable, Non-obvious, Stable, High confidence) was met but no capture occurred. If you can't find missed opportunities, that's a good sign.
-3. **Were captures filed correctly?** Did `lore capture` write entries directly to category files, or are there unfiled entries in the inbox?
-
-**Scoring:**
-- Utilization: X/5 (5=knowledge checked first every time, 1=never consulted)
-- Capture: X/5 (5=all opportunities caught and correctly filed, 1=many missed)
-- Combined: average of both, reported as X/5
-
-**Record:** List specific utilization moments and bypasses. These are the most actionable findings in the entire self-test — they reveal exactly where the system is failing to deliver value.
+**Scoring:** Utilization X/5 (5=knowledge first every time, 1=never), Capture X/5 (5=all caught and filed, 1=many missed), Combined = average.
+**Record:** Specific utilization moments and bypasses. These are the most actionable findings in the entire self-test — they reveal exactly where the system is failing to deliver value.
 
 ## Test 7: Search and Resolution
 
@@ -304,13 +221,11 @@ Were the top-3 results the right answers? Did snippets give enough context to de
 
 ### 7b: Backlink Resolution
 
-Pick a `See also: [[...]]` reference from any knowledge file and resolve it:
+Pick a `See also: [[...]]` reference from any knowledge file and resolve it (adapt to one that actually exists in the store):
 
 ```bash
 lore resolve "[[knowledge:gotchas#Some Heading]]"
 ```
-
-(Adapt the backlink reference to one that actually exists in the store.)
 
 Did it return the exact section? Compare to manually reading the file.
 
@@ -322,10 +237,7 @@ lore check-links
 
 How many broken links? Are they real breaks or false positives? Track the FP ratio (false positives / total reported) across runs — a rising ratio means the checker needs improvement.
 
-**Scoring:**
-- Search relevance (1-5): Were top results the right answers?
-- Resolution accuracy: X/X resolved correctly.
-- Broken links: X real, X false positive (FP ratio: X%).
+**Scoring:** Search relevance X/5, resolution X/X correct, broken links X real / X FP (ratio X%).
 
 ## Test 8: Freshness and Trust
 
@@ -335,28 +247,11 @@ This test replaced the previous "Honest Assessment" (Runs 1-2) which asked hypot
 
 **Persistent staleness escalation (Run 5):** If the same entry is flagged as stale for 3+ consecutive runs, it's no longer a recommendation — it's a systemic maintenance failure. Flag it prominently in the results and recommend creating a dedicated work item to address the maintenance backlog. The self-test protocol shouldn't just observe staleness; it should escalate when repeated observation fails to produce action.
 
-**Spot-check procedure:**
-1. Pick 3 knowledge entries from different category files (prefer entries >7 days old, or entries that reference specific code paths/scripts). If an entry was stale in the previous run, re-check it — persistent staleness is a stronger signal than new staleness.
-2. For each entry, verify its claims against the actual code:
-   - Read the referenced files/scripts
-   - Check: is the described behavior still accurate?
-   - Check: are referenced paths/filenames still correct?
-   - Check: are the `See also:` backlinks still valid?
+**Spot-check procedure:** 1. Pick 3 knowledge entries from different category files (prefer >7 days old, or entries referencing specific code paths/scripts). If an entry was stale in the previous run, re-check it — persistent staleness is a stronger signal than new staleness. 2. For each entry, verify against the actual code: read the referenced files/scripts; check whether the described behavior, paths/filenames, and `See also:` backlinks are still accurate.
 
-**Scoring by entry:**
-- **Fresh:** All claims verified, references valid
-- **Aging:** Minor inaccuracies (renamed variable, changed default) but substance correct
-- **Stale:** Key claims no longer match code — entry needs updating
-- **Wrong:** Entry contradicts current behavior — dangerous if trusted
+**Scoring by entry:** - **Fresh:** All claims verified, references valid - **Aging:** Minor inaccuracies (renamed variable, changed default) but substance correct - **Stale:** Key claims no longer match code — entry needs updating - **Wrong:** Entry contradicts current behavior — dangerous if trusted
 
-**Overall scoring:** Score the original state (before fix). The score records what was found, not what was left — this preserves trend tracking across runs even when Step 3 corrects entries inline.
-- Freshness: X/3 entries fully fresh
-- Trust: 1-5 scale based on findings:
-  - 5: All spot-checked entries verified accurate
-  - 4: Minor staleness found, substance still reliable
-  - 3: 1 stale entry found — pattern may be broader
-  - 2: Multiple stale entries — store needs maintenance pass
-  - 1: Wrong entries found — store is actively misleading
+**Overall scoring:** Score the original state (before fix). The score records what was found, not what was left — this preserves trend tracking across runs even when Step 3 corrects entries inline. - Freshness: X/3 entries fully fresh - Trust: 1-5 scale based on findings: - 5: All spot-checked entries verified accurate - 4: Minor staleness found, substance still reliable - 3: 1 stale entry found — pattern may be broader - 2: Multiple stale entries — store needs maintenance pass - 1: Wrong entries found — store is actively misleading
 
 **Record:** For each spot-checked entry, note what was verified, what was stale, and what was updated. Stale entries should be corrected as part of the test (fix-as-you-go), with the staleness still recorded in the score.
 
@@ -364,122 +259,19 @@ This test replaced the previous "Honest Assessment" (Runs 1-2) which asked hypot
 
 **This step is mandatory.** For every entry scored as **aging** or **stale** in Test 8, attempt a mechanical fix before proceeding. The goal: leave the knowledge store more accurate than you found it, without blocking the self-test on rewrites that require deep investigation.
 
-**Scope rules — what counts as mechanical:**
-- Fix broken file paths (renamed or moved files)
-- Update renamed references (function names, variable names, script names)
-- Correct wrong counts or enumerations (e.g., "3 scripts" when there are now 4)
-- Update changed defaults or flag names
-- Fix stale `See also:` backlinks that point to renamed/moved entries
+**Scope rules — what counts as mechanical:** broken file paths (renamed/moved); renamed references (function, variable, script); wrong counts or enumerations (e.g., "3 scripts" → 4); changed defaults or flag names; stale `See also:` backlinks to renamed/moved entries.
 
-**Scope limit — when to defer:**
-If a fix requires reading **more than 2 source files** to verify correctness, or requires a **full content rewrite** (the entry's core claim is wrong, not just a detail), do NOT attempt the fix inline. Instead, log it as **"deferred to /renormalize"** in the results.
+**Scope limit — when to defer:** If a fix requires reading **more than 2 source files** to verify correctness, or requires a **full content rewrite** (the entry's core claim is wrong, not just a detail), do NOT attempt the fix inline. Instead, log it as **"deferred to /renormalize"** in the results.
 
-**Procedure:**
-1. For each aging/stale entry from Test 8, determine whether the staleness is mechanical (path, name, count, reference) or substantive (core claim outdated).
-2. **Mechanical:** Read the 1-2 relevant source files, then use the Edit tool to correct the entry in place. Update the entry's `learned` date to today.
-3. **Substantive or complex:** Log as deferred. Format: `- <entry path>: <drift reason> — deferred to /renormalize`
+**Procedure:** For each aging/stale entry, classify mechanical (path/name/count/reference) vs substantive (core claim outdated). Mechanical: read the 1-2 relevant source files, Edit the entry in place, update its `learned` date to today. Substantive: log as `- <entry path>: <drift reason> — deferred to /renormalize`.
 
-**Record:** List each fix applied (entry, what changed) and each deferral (entry, why deferred). This feeds into Step 4's results.
+**Record:** Each fix applied (entry, what changed) and each deferral (entry, why). Feeds into Step 4 results.
 
 ### Step 4: Compile and Write Results
 
 Compile all test scores into the structured results format. Write to `$RESULTS_FILE`.
 
-```markdown
-# Self-Test Results — [YYYY-MM-DD] (Run N)
-
-## Infrastructure
-| Layer | Status |
-|-------|--------|
-| Knowledge index | yes/no (N core + N domain) |
-| Threads | N found (N pinned, N active, N dormant) |
-| Work | N active, N archived |
-| FTS5 search | yes/no (N files, N entries, size) |
-| Previous results | yes/no (Run N) |
-
-## Scores
-| Test | Score | Notes |
-|------|-------|-------|
-| 1. Orientation | X/5 | depth: X/2 breadth: X/3 |
-| 2. Retrieval Value | X/5 | accuracy: X/3 completeness: X/3 efficiency: X% eliminated |
-| 3. Backlinks | X hops, X dead ends, X% connected | |
-| 4. Thread Awareness | X/5 actionability | N behaviors evidenced |
-| 5. Plan Continuity | X/5 actionability | N missing-context items |
-| 6. Knowledge Utilization | X/5 | utilization: X/5 capture: X/5 |
-| 7a. Search Relevance | X/5 | |
-| 7b. Resolution | X/X resolved | |
-| 7c. Link Integrity | X real breaks, X FP (ratio: X%) | |
-| 8. Freshness and Trust | X/5 | X/3 fresh, X/3 aging, X/3 stale |
-
-**Run metadata:**
-- Date: YYYY-MM-DD
-- Run number: N (auto-incremented from previous results, or 1 if first run)
-- Tool calls: X total (X knowledge-system, X raw-search, X infrastructure/utility)
-- Bypasses: X (see bypass log)
-
-## Comparison with Previous Results
-[If this is the first run: "Baseline run — no previous results to compare."
-
-If previous results were loaded in Step 1, compute:
-
-### Score Delta
-| Test | Previous | Current | Change |
-|------|----------|---------|--------|
-For each test, show the previous score, current score, and a direction indicator:
-- `+N` or `improved` for improvements
-- `-N` or `regressed` for regressions
-- `=` for unchanged
-- `new` for tests that didn't exist in the previous run
-
-### Regressions
-List any tests where the score dropped. For each regression, note the likely cause from the test results.
-
-### Improvements
-List any tests where the score improved. Note what changed.
-
-### Recommendation Resolution
-For each recommendation from the previous run, check if it was addressed:
-- `[resolved]` — the issue was fixed (cite evidence)
-- `[open]` — still unresolved
-- `[superseded]` — replaced by a different approach
-
-### Infrastructure Changes
-Note any layers that were added or removed since last run.]
-
-## Test Results
-[For each test: what happened, what you noticed, specific evidence and findings]
-
-## Fixes Applied (Step 3)
-[For each entry fixed or deferred during Step 3:
-
-**Fixed:**
-- `<entry path>`: <what was corrected> (e.g., updated file path from `old/path` to `new/path`)
-
-**Deferred to /renormalize:**
-- `<entry path>`: <drift reason> — <why deferred> (e.g., core claim outdated, requires full rewrite)
-
-If no aging/stale entries were found in Test 8, note: "No fixes needed — all spot-checked entries were fresh."
-
-## Bypass Log
-[Every time you used Grep/Glob/Explore instead of the knowledge system, note why.
-Format: Test X.Y — Bypassed because: reason]
-
-## Recommendations
-[Specific, actionable changes that would improve the system.]
-
-## Work Items Created
-[Work items created from this run's findings. Format:
-- `work-item-slug` — brief description (from recommendation #N)
-- ...
-If no work items warranted, note why.]
-
-## Protocol Changes (Run N)
-Evolution suggestions logged to journal this run:
-- [Test X]: <what was suggested and why>
-- [New]: <any new test dimensions suggested>
-
-Rationale: <1-2 sentences on what this run taught about self-diagnosis>
-```
+When writing the results file, read `skills/self-test/templates/results.md` for the canonical output template — that sidecar holds the Infrastructure/Scores/Comparison/Test Results/Fixes Applied/Bypass Log/Recommendations/Work Items Created/Protocol Changes structure verbatim. Fill in every placeholder; the section headings and metadata layout are parsed literally by `/retro`, `/evolve`, and inter-run delta computation.
 
 ### Step 4b: Write Effectiveness Journal Entry
 
@@ -515,10 +307,7 @@ After writing results, report to the user:
 
 If previous results exist, compare across runs:
 
-1. **Ceiling tests:** Any test at maximum score for 2+ consecutive runs has stopped producing signal. For each:
-   - Can the bar be raised? (Harder questions, stricter criteria, additional sub-dimensions)
-   - Should it be replaced with a test that probes a current weakness?
-   - At minimum, note it in findings so future runs are aware
+1. **Ceiling tests:** Any test at maximum score for 2+ consecutive runs has stopped producing signal. For each: - Can the bar be raised? (Harder questions, stricter criteria, additional sub-dimensions) - Should it be replaced with a test that probes a current weakness? - At minimum, note it in findings so future runs are aware
 
 2. **Recurring recommendations:** If the same issue appears in 2+ consecutive runs, flag it as a persistent problem. Suggest: "Persistent issue: [description]. Consider `/work create [slug]` to address this systematically."
 
@@ -528,7 +317,7 @@ If previous results exist, compare across runs:
 
 ### 6b: Log improvement suggestions
 
-Based on this run's findings, write a journal entry for each protocol improvement identified:
+For each protocol improvement identified, write a journal entry:
 
 ```bash
 lore journal write \
@@ -548,8 +337,7 @@ lore journal write \
 
 4. **Scoring rubric adjustments:** If the rubric made it easy to justify a high score without real evidence, tighten it. Every score should require concrete demonstration, not self-assessment.
 
-**One entry per suggestion.** If multiple improvements are identified, write multiple journal entries. The observation should be 2-4 sentences: the suggested change, the target test or section, the rationale, and which pattern triggered it.
-
+**One entry per suggestion.** Observation: 2-4 sentences — suggested change, target test/section, rationale, triggering pattern.
 **Minimum bar:** At least one suggestion per run. If scoring went smoothly and no improvements are obvious, log why each test is still producing useful signal — the justification is the deliverable.
 
 ### 6c: Record in results file
@@ -581,15 +369,9 @@ Rationale: <1-2 sentences on what this run taught about self-diagnosis>
 
 Review all recommendations from the `## Recommendations` section. For each, decide:
 
-1. **Create work item** — if the recommendation meets ANY of these criteria:
-   - **Persistent:** Appeared in 2+ consecutive runs without resolution. The self-test has surfaced this repeatedly; passive observation isn't producing action.
-   - **Significant scope:** Requires more than a quick inline fix (multiple files, investigation needed, design decisions involved).
-   - **Regression risk:** If left unfixed, this will cause scores to drop or new problems to emerge.
+1. **Create work item** — if the recommendation meets ANY of: **Persistent:** appeared in 2+ consecutive runs without resolution (passive observation isn't producing action); **Significant scope:** more than a quick inline fix (multiple files, investigation, design decisions); **Regression risk:** unfixed it will cause scores to drop or new problems to emerge.
 
-2. **Skip** — if the recommendation is:
-   - Already tracked by an existing work item (check with `lore work list` or `lore work search`)
-   - Trivially fixable inline during the test itself (and was already fixed)
-   - Low impact and not persistent
+2. **Skip** — if already tracked by an existing work item (check `lore work list`/`lore work search`), trivially fixable inline (and was), or low-impact and not persistent.
 
 ### 7b: Create work items
 
@@ -599,15 +381,11 @@ For each recommendation that warrants a work item:
 lore work create --title "<slug>"
 ```
 
-Then write a notes.md entry scoping the work:
-- **Origin:** Which self-test run(s) surfaced this, which test(s) it came from
-- **Problem:** What's wrong, with specific evidence from the test results
-- **Scope:** Rough size estimate and approach
-- **Related:** Backlinks to relevant knowledge entries
+Then write a notes.md entry: **Origin** (which run/test surfaced this), **Problem** (what's wrong, with evidence), **Scope** (rough size + approach), **Related** (backlinks to relevant knowledge entries).
 
 ### 7c: Record in results
 
-Append the `## Work Items Created` section to the results file listing what was created and why. If no work items were warranted, note the reason (e.g., "all recommendations are already tracked" or "all findings were fixed inline").
+Append `## Work Items Created` to the results file listing what was created and why. If none were warranted, note the reason ("all recommendations already tracked" or "all findings fixed inline").
 
 ### 7d: Report
 

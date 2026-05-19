@@ -38,7 +38,7 @@ The step numbering encodes a dependency order that downstream `/evolve` and tren
 
 ## Tier-aware reading (canonical contract)
 
-`/retro` is a **tier-aware reader** of `rows.jsonl`. The tier enum values and their /retro semantics are:
+/retro is a **tier-aware reader** of `rows.jsonl`. The tier enum values and their /retro semantics are:
 
 | `tier` | /retro treatment |
 |---|---|
@@ -73,9 +73,9 @@ Set `KNOWLEDGE_DIR` to result, `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
    fi
    ```
    `/retro` is read-only — surface `ARCHIVED=true` items silently with an `[archived]` tag; no confirmation prompt.
-2. Load `plan.md`, `notes.md`, `_meta.json` from `$WORK_DIR/<slug>/` (or `_archive/<slug>/` if `ARCHIVED=true`)
+2. Load `plan.md`, `notes.md`, `_meta.json` from `$WORK_DIR/<slug>/` (or `_archive/<slug>/` if `ARCHIVED=true`).
 3. No argument → invoke `lore work resolve` with the current git branch (passing the branch as `--branch`); when only branch inference is needed, pass the literal ref `recent` to fall back to most-recent active item.
-4. No match → ask user
+4. No match → ask user.
 
 Report: `[retro] Evaluating: <title> (<slug>) [archived]`
 
@@ -87,76 +87,39 @@ Read existing artifacts only. No new exploration needed.
 
 ### 2a: Worker observations
 
-Primary source: **`execution-log.md`** if it exists — per-task entries with Changes, Observations, and test results. Secondary: worker SendMessage reports in conversation context. Cross-session fallback: `notes.md` session entries. Review-only: check subagent launches and knowledge preambles.
-
-When both exist: execution-log for task-level decisions; notes.md for session-level context (blockers, cross-task synthesis).
+Primary source: **`execution-log.md`** if it exists — per-task entries with Changes, Observations, and test results. Secondary: worker SendMessage reports in conversation context. Cross-session fallback: `notes.md` session entries. Review-only: check subagent launches and knowledge preambles. When both exist: execution-log for task-level decisions; notes.md for session-level context (blockers, cross-task synthesis).
 
 ### 2b: Knowledge delivery audit
 
-1. Read `plan.md`, extract `**Knowledge context:**` blocks per phase
-2. Check delivery mode per phase (`**Knowledge delivery:** full` vs annotation-only default)
-3. **Zero-context-block check:** If 0/N phases have context blocks, check via `lore search` whether relevant entries existed. See `failure-modes.md` "Plan-level context block omission"
-4. **Delivery mode mismatch:** For `full` phases, verify tasks.json matches. Plan says full but tasks.json has annotation-only = pipeline failure, D1 ≤ 3
-5. **Backlink resolution rate:** Count resolved vs unresolved in `## Prior Knowledge`. >30% unresolved caps D1 at 2
-6. **Annotation completeness:** For annotation-only phases, count entries with vs without annotation text. >40% empty caps D1 at 3. Subtract `## Related`-sourced bare entries and `_work/` paths from denominator (see `failure-modes.md` for details)
-7. **Prefetch hit rate (spec-only):** Useful vs empty results. <40% → disambiguate coverage gap vs query recall failure
+1. Read `plan.md`; extract `**Knowledge context:**` blocks per phase.
+2. Check delivery mode per phase (`**Knowledge delivery:** full` vs annotation-only default).
+3. **Zero-context-block check:** if 0/N phases have context blocks, check via `lore search` whether relevant entries existed. See `failure-modes.md` "Plan-level context block omission".
+4. **Delivery mode mismatch:** for `full` phases, verify tasks.json matches — plan says full but tasks.json has annotation-only = pipeline failure, D1 ≤ 3.
+5. **Backlink resolution rate:** count resolved vs unresolved in `## Prior Knowledge`. >30% unresolved caps D1 at 2.
+6. **Annotation completeness:** for annotation-only phases, count entries with vs without annotation text. >40% empty caps D1 at 3. Subtract `## Related`-sourced bare entries and `_work/` paths from denominator (see `failure-modes.md`).
+7. **Prefetch hit rate (spec-only):** useful vs empty results. <40% → disambiguate coverage gap vs query recall failure.
 
 ### 2b.5: Surfaced concerns (off-scale routing)
 
-Check for worker-surfaced concerns that were routed during implementation:
+Check for worker-surfaced concerns routed during implementation: `KDIR=$(lore resolve); SC_FILE="$KDIR/_work/<slug>/surfaced_concerns.jsonl"; [ -f "$SC_FILE" ] && cat "$SC_FILE"`.
 
-```bash
-KDIR=$(lore resolve)
-SC_FILE="$KDIR/_work/<slug>/surfaced_concerns.jsonl"
-[ -f "$SC_FILE" ] && cat "$SC_FILE"
-```
-
-If `surfaced_concerns.jsonl` is non-empty, read each entry. For each concern:
-
-- **Count them** in the evidence summary (see format below)
-- **Assess disposition:** Were the concerns addressed in the work? Check plan.md Design Decisions and Open Questions for matching content.
-- **Feed D3 scoring** (Knowledge Capture & Propagation): unaddressed concerns that reveal genuine gaps in the plan's scope inform D3 — workers shouldn't need to route off-scale for concerns that a well-scoped plan would have anticipated.
-- **Do not re-resolve them here.** Report their presence and disposition as evidence; resolution is a spec-lead or follow-on spec decision.
+If non-empty, read each entry. For each concern: **count** them in the evidence summary; **assess disposition** — were they addressed in the work? Check plan.md Design Decisions and Open Questions for matching content; **feed D3 scoring** (Knowledge Capture & Propagation) — unaddressed concerns that reveal genuine gaps in the plan's scope inform D3 since workers shouldn't need to route off-scale for concerns a well-scoped plan would have anticipated; **do not re-resolve them here** — report presence and disposition as evidence; resolution is a spec-lead or follow-on spec decision.
 
 ### 2b.6: Channel-contract review loop
 
 Aggregate channel-shopping signals per role × slot over the last 5 retro cycles (or all available cycles if fewer than 5 exist). Three signal types:
 
-- **`under_routing`** — off-scale concerns that were routed by workers but, in retrospect, should have been emitted as captures. Inferred from `surfaced_concerns.jsonl` entries that were later addressed inline (`accepted-one-shot`) rather than resolved via follow-on or knowledge promotion. High rate = workers routing things off-scale that the channel contract should have told them to capture directly.
-- **`over_capture`** — captures that should have been off-scale routes. Inferred from knowledge entries later corrected (have `corrections[]` within 2 cycles) or off-scale routes resolved as `declined` by the lead. High rate = workers capturing speculative/architectural content as settled knowledge.
-- **`evidence_only_durable`** — worker reports where Investigation or Tests contain durable architectural claims never promoted. Heuristic: execution-log entries with declarative architectural language ("X always does Y", "the invariant is", "every Z must") in Investigation/Tests with no corresponding `lore capture` in the session.
+- **`under_routing`** — off-scale concerns workers routed that, in retrospect, should have been emitted as captures. Inferred from `surfaced_concerns.jsonl` entries later addressed inline (`accepted-one-shot`) rather than resolved via follow-on or knowledge promotion. High rate = workers routing things off-scale the channel contract should have told them to capture directly.
+- **`over_capture`** — captures that should have been off-scale routes. Inferred from knowledge entries later corrected (`corrections[]` within 2 cycles) or off-scale routes resolved as `declined` by the lead. High rate = workers capturing speculative/architectural content as settled knowledge.
+- **`evidence_only_durable`** — worker reports where Investigation or Tests carry durable architectural claims never promoted. Heuristic: execution-log entries with declarative architectural language ("X always does Y", "the invariant is", "every Z must") in Investigation/Tests with no corresponding `lore capture` in the session.
 
-**Computation (per role × slot, over last N cycles up to 5):**
-```
-For each signal_type in {under_routing, over_capture, evidence_only_durable}:
-  numerator   = count of outputs in that role×slot matching the signal heuristic
-  denominator = total outputs in that role×slot in the window
-  rate        = numerator / denominator  (skip if denominator == 0)
-```
+**Computation (per role × slot, over last N cycles up to 5):** for each signal_type in `{under_routing, over_capture, evidence_only_durable}`, compute `rate = numerator/denominator` where numerator = count of outputs in that role×slot matching the signal heuristic, denominator = total outputs in that role×slot in the window (skip if denominator == 0).
 
-**Threshold:** Rate > 0.30 over at least 3 cycles fires a flag. Below 3 cycles is too noisy to attribute to systematic drift vs one-cycle variance.
+**Threshold:** rate > 0.30 over at least 3 cycles fires a flag. Below 3 cycles is too noisy to attribute to systematic drift vs one-cycle variance.
 
-**When a flag fires**, emit a sidecar row:
-```bash
-KDIR=$(lore resolve)
-bash ~/.lore/scripts/retro-channel-flag-append.sh \
-  --cycle-id "<slug>" \
-  --role "<role>" \
-  --slot "<slot>" \
-  --signal-type "<under_routing|over_capture|evidence_only_durable>" \
-  --rate "<observed rate as decimal>" \
-  --window-cycles "<N cycles in window>" \
-  --remedy-hint "<optional one-line remedy suggestion>"
-```
+**When a flag fires**, emit a sidecar row — read `skills/retro/templates/emit-commands.md` § "Step 2b.6 — Channel-contract flag emit" for the `retro-channel-flag-append.sh` invocation. The script writes to `$KDIR/_scorecards/retro-channel-flags.jsonl`. One row per flagged role × slot per retro cycle.
 
-The script writes to `$KDIR/_scorecards/retro-channel-flags.jsonl`. One row per flagged role × slot per retro cycle.
-
-**Remedy narrative (when flags fire):** Add a prose paragraph to the retro narrative (Step 6) naming the role × slot, signal type, rate, and a proposed remedy. Remedies target the **workflow contract**, not the individual producer.
-
-Remedy heuristics by signal type:
-- `under_routing`: consider adding a worked example of this slot's capture threshold to the channel-contract matrix, or lowering the capture bar for this role × slot.
-- `over_capture`: consider adding an ingestion warning that speculative claims in this slot should be routed off-scale; or raise the capture confidence threshold.
-- `evidence_only_durable`: consider adding a protocol step that requires workers to decide capture-vs-route for declarative claims before closing a task.
+**Remedy narrative (when flags fire):** Add a prose paragraph to the retro narrative (Step 6) naming the role × slot, signal type, rate, and a proposed remedy. Remedies target the **workflow contract**, not the individual producer. Remedy heuristics: `under_routing` — add a worked example of this slot's capture threshold to the channel-contract matrix, or lower the capture bar for this role × slot; `over_capture` — add an ingestion warning that speculative claims in this slot should be routed off-scale, or raise the capture confidence threshold; `evidence_only_durable` — add a protocol step that requires workers to decide capture-vs-route for declarative claims before closing a task.
 
 **When no flags fire: no prose.** Per the healthy-case silence invariant (same rationale as Step 3.8 health checks). Channel-contract drift is only notable when it crosses the threshold.
 
@@ -173,64 +136,27 @@ Remedy heuristics by signal type:
 
 New evidence class introduced by the consumer-contradiction-channel substrate. Consumer contradictions are **observational** signals — a reader (worker, spec-lead, implement-lead) prefetched a commons entry and observed it is false in the context of their current work. They are a distinct evidence class from the adjudicative three-judge pipeline.
 
-**Enumerate `$KDIR/_work/<slug>/consumption-contradictions.jsonl`** across work items with activity in the retro window. Each row carries:
-- `contradiction_id` — slug-form identifier unique per work item
-- `claim_id` — the commons-entry claim being contradicted
-- `corrected_entry_path` — the commons entry the contradiction targets
-- `template_id`, `template_version` — the template that produced the contradicted entry (for attribution)
-- `status` — `routed | verified | rejected` (lifecycle state from correctness-gate audit)
-- `verified_by_verdict_id` — present when `status=verified`; the settlement record id
-- `dispatch_status` — `routed` when `consumption-contradiction-append.sh` priority-dispatched to `lore audit`
-- `captured_at_sha`, `observed_at`
+**Enumerate `$KDIR/_work/<slug>/consumption-contradictions.jsonl`** across work items with activity in the retro window. Each row carries: `contradiction_id` (slug-form identifier unique per work item), `claim_id` (commons-entry claim being contradicted), `corrected_entry_path` (the entry the contradiction targets), `template_id` / `template_version` (the template that produced the contradicted entry, for attribution), `status` — `routed | verified | rejected` (lifecycle state from correctness-gate audit), `verified_by_verdict_id` (present when `status=verified`; the settlement record id), `dispatch_status` — `routed` when `consumption-contradiction-append.sh` priority-dispatched to `lore audit`, `captured_at_sha`, `observed_at`.
 
-Count rows by status: `routed`, `verified`, `rejected`. Report:
-
-```
-Consumption contradictions: N total (R routed to audit, V verified, J rejected)
-  pending verdict (routed, no verdict yet): <P>
-```
-
-The `verified` count feeds Step 3.0 `contradiction_verification_rate` and Step 3.8 consumer-contradiction routing health. The `routed` set is excluded from Step 2.7 batch audit (already priority-dispatched).
+Count rows by status: `routed`, `verified`, `rejected`. Report shape: `Consumption contradictions: N total (R routed to audit, V verified, J rejected)` plus a `pending verdict (routed, no verdict yet): <P>` indented line. The `verified` count feeds Step 3.0 `contradiction_verification_rate` and Step 3.8 consumer-contradiction routing health. The `routed` set is excluded from Step 2.7 batch audit (already priority-dispatched).
 
 ### 2c–2e: Logs
 
-- **Session entries:** Read `notes.md` `## YYYY-MM-DD` entries. Empty = degraded evidence.
-- **Retrieval log:** `$KNOWLEDGE_DIR/_meta/retrieval-log.jsonl` filtered to work period.
-- **Friction log:** `$KNOWLEDGE_DIR/_meta/friction-log.jsonl` filtered to work period.
+Read three logs filtered to the work period: session entries from `notes.md` `## YYYY-MM-DD` blocks (empty = degraded evidence); retrieval log at `$KNOWLEDGE_DIR/_meta/retrieval-log.jsonl`; friction log at `$KNOWLEDGE_DIR/_meta/friction-log.jsonl`.
 
 ### 2f: Token efficiency
 
 Annotation-only: wrong-path explorations prevented, first-attempt accuracy gains. Full-resolution: file reads replaced (~500-3000 tokens/file).
 
-Report:
-```
-[retro] Evidence gathered:
-  Worker observations: N tasks | Context blocks: N phases (M/K resolved)
-  Surfaced concerns: N entries (M addressed / K pending)
-  Consumption contradictions: N total (R routed, V verified, J rejected)
-  Sessions: N entries | Retrieval: N events | Friction: N events
-  Token savings: ~Nk estimate
-```
+Emit a one-block `[retro] Evidence gathered:` report covering worker observations (N tasks), context blocks (N phases, M/K resolved), surfaced concerns (N entries, M addressed / K pending), consumption contradictions (N total, R routed, V verified, J rejected), sessions (N entries), retrieval/friction events (N each), and a token-savings estimate (~Nk).
 
 ### Step 2.5: Low-Diagnostic Check
 
 Before scoring, detect whether this retro will produce meaningful signal.
 
-**Trigger** (ANY of):
-- ≤5 tasks, all deletion/simple edits, 0 escalations, 0 captures
-- All tasks are prescriptive prose edits (SKILL.md, protocol files, convention files)
-- &gt;80% of task subjects contain verbatim edit instructions (exact text to add/remove)
+**Trigger** (ANY of): ≤5 tasks, all deletion/simple edits, 0 escalations, 0 captures; all tasks are prescriptive prose edits (SKILL.md, protocol files, convention files); >80% of task subjects contain verbatim edit instructions (exact text to add/remove).
 
-When triggered, produce a **compressed assessment**:
-
-```
-[retro] <slug> — LOW-DIAGNOSTIC
-  Scope: <N tasks, prescriptive/trivial/prose>
-  Delivery worked: yes/no (brief note)
-  Notable: <anything surprising, or "none — scope too narrow for signal">
-```
-
-Log scores with `"low_diagnostic": true` in journal entry. D1-D4 scored honestly but flagged for trend weighting. Focus narrative on D5 only. Skip to Step 4.
+When triggered, produce a **compressed assessment** — a `[retro] <slug> — LOW-DIAGNOSTIC` block with scope (N tasks + character), delivery worked yes/no with brief note, and notable surprises (or "none — scope too narrow for signal"). Log scores with `"low_diagnostic": true` in journal entry. D1-D4 scored honestly but flagged for trend weighting. Focus narrative on D5 only. Skip to Step 4.
 
 **Why:** Prescriptive/trivial retros consistently produce all-ceiling D1-D4 that inflate averages. Knowledge value concentrates at spec time; implementation-time scoring is low-signal. Full ceremony wastes evaluation effort.
 
@@ -240,51 +166,19 @@ Under the lazy-audit model, `lore audit` is **decorative, not a publication prec
 
 **Observational windows.** Advisory for review-only, spec-only, or prose-only retros where no producer artifacts were emitted. Skip with: `[retro] No eligible artifacts for batch audit; skipping.`
 
-**D8 fallback substrate — what this step reads in lieu of `flow-events.jsonl`:**
+**D8 fallback substrate — what this step reads in lieu of `flow-events.jsonl`:** *Promotion-time proxy* (precedence, chosen to avoid filesystem ctime instability): (1) primary — entry-internal `learned:` timestamp in commons markdown YAML frontmatter (canonical field written by `capture.sh` / `lore-promote.sh`; stable across FS operations); (2) secondary — filesystem birthtime (`stat -f %SB` macOS, `stat -c %W` Linux) when supported; (3) tertiary degraded — `ctime` only, under which Step 3.8 Audit-coverage lag runs in **advisory mode**. *Audit-triggered proxy:* rows in `$KDIR/_scorecards/audit-attempts.jsonl` plus future `audit_triggered` flow-event rows = "audit dispatched"; the old `probabilistic-audit-trigger.py` / `trigger-log.jsonl` path was retired (do not treat missing trigger logs as a live failure). *Verdict rows:* `kind==scored` entries in `rows.jsonl` with `template_id in {correctness-gate, curator, reverse-auditor}` = "audit completed + produced verdict."
 
-- **Promotion-time proxy** (precedence order, chosen to avoid filesystem ctime instability):
-  1. **Primary:** entry-internal `learned:` timestamp in commons markdown YAML frontmatter — the canonical field written by `capture.sh` / `lore-promote.sh`. Use this when present; stable across filesystem operations, restores, and syncs.
-  2. **Secondary:** filesystem *birthtime* (`stat -f %SB` macOS, `stat -c %W` Linux) when the filesystem supports it. Stable for the file's lifetime but unavailable on some filesystems.
-  3. **Tertiary (degraded):** filesystem `ctime` only as a last resort. Under ctime-only conditions, Step 3.8 Audit-coverage lag sub-check runs in **advisory mode** (see Step 3.8 below) — this step still enumerates candidates but reports reduced-confidence in the output.
-- **Audit-triggered proxy:** rows in `$KDIR/_scorecards/audit-attempts.jsonl` plus future `audit_triggered` flow-event rows = "audit dispatched for artifact." The old `probabilistic-audit-trigger.py` / `trigger-log.jsonl` path was retired; do not treat missing trigger logs as a live pipeline failure.
-- **Verdict rows:** `kind==scored` entries in `rows.jsonl` with `template_id in {correctness-gate, curator, reverse-auditor}` = "audit completed + produced verdict."
+**Signal for eligibility.** An artifact is eligible for batch dispatch when both hold: (1) **Promoted Tier 3 claim** in the retro window (via promotion-time proxy); (2) **Uncovered** — no row in `$KDIR/_scorecards/rows.jsonl` whose `source_artifact_ids` includes this artifact's id AND whose `window_start`/`window_end` overlap this retro window.
 
-**Signal for eligibility.**
+**Exclusions.** Priority-routed consumption-contradiction artifacts (rows in any `$KDIR/_work/<slug>/consumption-contradictions.jsonl` with `dispatch_status: routed`) are already in the priority-audit queue via `consumption-contradiction-append.sh`; double-dispatching wastes audit budget. Observational windows skip entirely.
 
-An artifact is eligible for batch dispatch when both hold:
-1. **Promoted Tier 3 claim** in the retro window (identified via promotion-time proxy falling in the window).
-2. **Uncovered** — no row in `$KDIR/_scorecards/rows.jsonl` whose `source_artifact_ids` includes this artifact's id AND whose `window_start`/`window_end` overlap this retro window.
+**Dispatch.** For each eligible artifact: `lore audit "<artifact-id>"`. `lore audit` resolves the artifact, routes it through the three-judge pipeline, and appends verdict rows to `$KDIR/_scorecards/rows.jsonl` via `scorecard-append.sh`. No new retro-side persistence required — Step 3.8 reads the same `rows.jsonl` and picks up backfilled rows automatically.
 
-**Exclusions.**
+**Rate limit and failure handling.** Cap at **20 uncovered artifacts per retro invocation** (unbounded batching would make execution time O(uncovered)). If the uncovered set is larger, audit the 20 highest-priority (by `scripts/audit-sample.sh` risk weights, or by recency when the sampler is not yet wired) and report the remainder as a pending-backlog counter — 50+ uncovered artifacts is itself a pipeline-health signal that Step 3.8's routing-realization check surfaces. Non-zero `lore audit` exit = partial failure: log artifact-id + exit code to `$KDIR/_meta/retro-audit-log.jsonl` and continue. Stub `lore audit` phases (pre full routing) may exit 0 without writing rows — expected; Step 3.8 emits `pipeline-degraded` once ≥10 eligible artifacts have produced no verdicts.
 
-- **Priority-routed consumption-contradiction artifacts.** Rows in any `$KDIR/_work/<slug>/consumption-contradictions.jsonl` with `dispatch_status: routed` are already in the priority-audit queue via `consumption-contradiction-append.sh`. Double-dispatching wastes audit budget. Exclude these from the batch.
-- **Observational windows** (see above) skip entirely.
+**Output:** read `skills/retro/templates/emit-commands.md` § "Step 2.7 — Batch audit output" for the emit line.
 
-**Dispatch.** For each eligible artifact, invoke:
-
-```bash
-lore audit "<artifact-id>"
-```
-
-`lore audit` resolves the artifact, routes it through the three-judge pipeline, and appends verdict rows to `$KDIR/_scorecards/rows.jsonl` via `scorecard-append.sh`. No new retro-side persistence is required — Step 3.8 reads the same `rows.jsonl` and picks up backfilled rows automatically.
-
-**Rate limit and failure handling.**
-- Do **not** batch more than **20 uncovered artifacts per retro invocation**. If the uncovered set is larger, audit the 20 highest-priority (by `scripts/audit-sample.sh` risk weights, or by recency when the sampler is not yet wired) and report the remainder as a pending-backlog counter. A window with 50+ uncovered artifacts is itself a pipeline-health signal (Step 3.8 routing-realization check will surface it). Unbounded batching would make retro execution time O(uncovered artifacts).
-- Treat non-zero exit codes from `lore audit` as partial failures: log artifact-id + exit code to `$KDIR/_meta/retro-audit-log.jsonl` and continue.
-- Stub phases of `lore audit` (pre full routing) may exit 0 without writing rows. That is expected — Step 3.8 will see the coverage shortfall and emit `pipeline-degraded` once ≥10 eligible artifacts have produced no verdicts, the canonical signal the pipeline stub is still in place.
-
-**Output:**
-```
-[retro] Batch audit: <K> eligible / <M> uncovered (post-exclusion)
-  audited: <A> (rows written: <R>)
-  deferred: <D> (queue backlog — see Step 3.8 audit-coverage)
-  excluded: <E> (priority-routed consumption-contradictions)
-  failed: <F> (see $KDIR/_meta/retro-audit-log.jsonl)
-```
-
-**Why this is selective, not unconditional.** The pre-lazy-audit version of this step unconditionally ran `lore audit` to close coverage gaps before Step 3.8's 60% threshold tripped. Under lazy-audit, that threshold no longer applies — coverage is expected to be incomplete, and audits are sampled probabilistically. Unconditional batch would (a) double-dispatch consumption-contradiction artifacts already in the priority queue, (b) saturate audit capacity on low-risk material, and (c) inflate retro latency without a health-check benefit.
-
-**Flow-events swap-in (future work).** When `flow-events.jsonl` lands, the promotion-time-proxy + audit-attempts.jsonl reads are replaced by structured event rows (`tier3_emitted`, `audit_triggered`). The logic shape here stays the same; only the signal sources change. That swap is explicitly out of scope for this rewrite and is tracked separately.
+**Why this is selective, not unconditional.** The pre-lazy-audit version of this step unconditionally ran `lore audit` to close coverage gaps before Step 3.8's 60% threshold tripped. Under lazy-audit, that threshold no longer applies — coverage is expected to be incomplete, and audits are sampled probabilistically. Unconditional batch would (a) double-dispatch consumption-contradiction artifacts already in the priority queue, (b) saturate audit capacity on low-risk material, and (c) inflate retro latency without a health-check benefit. Flow-events swap-in (future work): when `flow-events.jsonl` lands, the promotion-time-proxy + audit-attempts.jsonl reads are replaced by structured event rows (`tier3_emitted`, `audit_triggered`); logic shape unchanged.
 
 ### Step 2.8: Escalation verdict surface (work-item telemetry, not scored)
 
@@ -296,58 +190,27 @@ lore audit "<artifact-id>"
 
 ### 2.8a: Inputs
 
-Read escalation verdicts from the cycle's worker reports:
-- **Primary:** `execution-log.md` entries in `$WORK_DIR/<slug>/` — each completed task's worker report is persisted there; the report text contains the escalation stanza when one was emitted.
-- **Secondary:** cross-session worker SendMessage reports surfaced in `notes.md` session entries, when `execution-log.md` is absent (review-only cycles) but a worker still returned an escalation.
+Read escalation verdicts from the cycle's worker reports. **Primary:** `execution-log.md` entries in `$WORK_DIR/<slug>/` — each completed task's worker report is persisted there with the escalation stanza when one was emitted. **Secondary:** cross-session worker SendMessage reports surfaced in `notes.md` session entries, when `execution-log.md` is absent (review-only cycles) but a worker still returned an escalation.
 
 Parse each report with the same regex pattern used by `validate-structured-report.py:find_escalation()` so this surface counts exactly what the gate counts — `VALID_ESCALATION = "task-too-trivial-for-solo-decomposition"` with a non-empty `rationale`. Malformed escalations are explicitly excluded.
 
 ### 2.8b: Lead disposition
 
-For each escalation verdict, record a **lead disposition** — what the lead agent (team-lead or /implement orchestrator) did with the escalation. Closed enum:
+For each escalation verdict, record a **lead disposition** — what the lead agent (team-lead or /implement orchestrator) did with the escalation. Closed enum: `merged` (lead merged the sub-task into a larger peer task rather than decomposing further); `re-scoped` (lead edited the plan to replace the escalated task with a wider-scope alternative, then discarded the original); `accepted-one-shot` (lead accepted the escalation but proceeded with the original trivial task as-is, no plan change); `unreviewed` (no visible lead response before the retro fires — either the work is still in-flight or the lead missed the escalation; distinct from `accepted-one-shot` because the intent signal is missing).
 
-- `merged` — lead merged the sub-task into a larger peer task rather than decomposing further.
-- `re-scoped` — lead edited the plan to replace the escalated task with a wider-scope alternative, then discarded the original.
-- `accepted-one-shot` — lead accepted the escalation but proceeded with the original trivial task as-is (no plan change).
-- `unreviewed` — no visible lead response before the retro fires. Either the work is still in-flight or the lead missed the escalation. Distinct from `accepted-one-shot` because the intent signal is missing.
-
-Infer disposition from `tasks.json` and `plan.md` state at retro time:
-- Escalated task's subject rewritten + sibling absorbed it → `merged`.
-- Plan's phase edited after escalation timestamp AND task set changed → `re-scoped`.
-- Task completed with `status: completed` and no plan/tasks edit followed → `accepted-one-shot`.
-- Task still `in_progress` or `pending` → `unreviewed`.
+Infer disposition from `tasks.json` and `plan.md` state at retro time: escalated task's subject rewritten + sibling absorbed it → `merged`; plan's phase edited after escalation timestamp AND task set changed → `re-scoped`; task completed with `status: completed` and no plan/tasks edit followed → `accepted-one-shot`; task still `in_progress` or `pending` → `unreviewed`.
 
 ### 2.8c: Report shape
 
 Render as a compact work-item telemetry block, **separate from dimension scores in Step 3 and separate from the Step 3.8 pipeline-degraded block**. Empty when zero escalations fired.
 
-```
-[retro] Escalation telemetry (diagnostic, not scored)
-  total:       <N> escalations in cycle
-  rate:        <N>/<T> tasks  (T = total worker tasks in cycle)
-  disposition:
-    merged:             <a>
-    re-scoped:          <b>
-    accepted-one-shot:  <c>
-    unreviewed:         <d>
-  per-task:
-    - <task-id>: <disposition> — rationale: "<one-sentence reason from worker>"
-    - ...
-```
+For the emit format, read `skills/retro/templates/emit-commands.md` § "Step 2.8c — Escalation telemetry output".
 
 When zero escalations fired, emit **no prose** — consistent with the Step 3.8 silence invariant.
 
 ### 2.8d: Journal persistence
 
-Write a separate journal entry so longitudinal queries can filter cleanly:
-
-```bash
-lore journal write \
-  --observation "Escalations: <N> (<a> merged, <b> re-scoped, <c> one-shot, <d> unreviewed) | rate: <N>/<T> | rationales: <brief joined list>" \
-  --context "retro-escalations: <slug>" \
-  --work-item "<slug>" \
-  --role "retro-escalations"
-```
+Write a separate journal entry so longitudinal queries can filter cleanly. Read `skills/retro/templates/emit-commands.md` § "Step 2.8d — Escalation journal write" for the `lore journal write` invocation.
 
 `--role "retro-escalations"` is distinct from `retro` (dimension scores), `retro-behavioral-health` (qualitative), and `retro-evolution` (suggestions). **Four separate roles by design** — collapsing them would force consumers to demux by observation prose, which is fragile.
 
@@ -359,108 +222,25 @@ lore journal write \
 
 ### Four factual signals (read from telemetry)
 
-**1. `declaration_coverage`** — fraction of retrieval opportunities in this cycle where `scale_declared=true` in `retrieval-log.jsonl`.
+Compute four signals from telemetry: **1. `declaration_coverage`** (fraction of retrieval opportunities where `scale_declared=true` in `retrieval-log.jsonl`); **2. `redeclare_rate`** (fraction of session retrievals re-issued at a different scale set from the previous call in the same session — measures rubric ↔ agent reality drift); **3. `off_scale_routes_emitted`** (count of worker-surfaced concerns routed off-scale, from `_work/<slug>/off_scale_routes.jsonl`); **4. `verifier_disagreements`** (count of classifier disagreements from the most recent `/renormalize` run, from `$KDIR/_meta/classification-report.json` or `scale_drift_rate` telemetry).
 
-```bash
-KDIR=$(lore resolve)
-python3 -c "
-import json, sys
-rows = [json.loads(l) for l in open('$KDIR/_meta/retrieval-log.jsonl') if l.strip()]
-total = len(rows)
-declared = sum(1 for r in rows if r.get('scale_declared') is True)
-print(f'declaration_coverage: {declared}/{total} ({declared/total:.0%})' if total else 'declaration_coverage: no retrieval events')
-"
-```
-
-If `retrieval-log.jsonl` is absent: emit `declaration_coverage: no retrieval log this cycle`.
-
-**2. `redeclare_rate`** — fraction of session retrievals that re-issued at a different scale set from the previous call in the same session. Measures rubric ↔ agent reality drift: a climbing rate means agents are correcting scale mid-session, indicating the rubric isn’t landing on first read.
-
-```bash
-python3 -c "
-import json
-rows = [json.loads(l) for l in open('$KDIR/_meta/retrieval-log.jsonl') if l.strip()]
-session_rows = [r for r in rows if r.get('scale_declared') is True]
-redeclares = sum(
-    1 for i in range(1, len(session_rows))
-    if session_rows[i].get('scale_set') != session_rows[i-1].get('scale_set')
-       and session_rows[i].get('session_id') == session_rows[i-1].get('session_id')
-)
-total = max(len(session_rows) - 1, 0)
-print(f'redeclare_rate: {redeclares}/{total} ({redeclares/total:.0%})' if total else 'redeclare_rate: insufficient data')
-"
-```
-
-**3. `off_scale_routes_emitted`** — count of worker-surfaced concerns routed off-scale this cycle. Read from `_work/<slug>/off_scale_routes.jsonl`.
-
-```bash
-SLUG="<current work item slug>"
-ROUTES="$KDIR/_work/$SLUG/off_scale_routes.jsonl"
-COUNT=0
-[ -f "$ROUTES" ] && COUNT=$(wc -l < "$ROUTES" | tr -d ' ')
-echo "off_scale_routes_emitted: $COUNT"
-```
-
-**4. `verifier_disagreements`** — count of classifier disagreements from the most recent `/renormalize` run. Read from `$KDIR/_meta/classification-report.json`'s `disagreements` array (or from telemetry rows where `metric == "scale_drift_rate"`).
-
-```bash
-REPORT="$KDIR/_meta/classification-report.json"
-if [ -f "$REPORT" ]; then
-  python3 -c "import json; d=json.load(open('$REPORT')); print(f'verifier_disagreements: {len(d.get(\"disagreements\", []))}\')"
-else
-  # Fall back to telemetry rows
-  python3 -c "
-import json
-rows = [json.loads(l) for l in open('$KDIR/_scorecards/rows.jsonl') if l.strip()]
-drift_rows = [r for r in rows if r.get('metric') == 'scale_drift_rate']
-total_disagreements = sum(int(r.get('disagreements', 0)) for r in drift_rows[-1:])
-print(f'verifier_disagreements: {total_disagreements} (from scale_drift_rate telemetry)')
-  " 2>/dev/null || echo 'verifier_disagreements: no data'
-fi
-```
+For the bash scripts that compute each signal, read `skills/retro/templates/step2-9-signal-scripts.md` — sections "Factual signal 1" through "Factual signal 4".
 
 ### Two eval signals (agent self-report)
 
-**5. `off_altitude_skipped`** — how many retrieved entries did you (the agent) judge as wrong-altitude and skip during this cycle?
-
-> "During this cycle, did you receive any retrieved knowledge entries that were at the wrong altitude for your task and consciously skip them rather than read them in full? Estimate the count."
-
-Record the count. Zero is a valid answer.
-
-**6. `counterfactual_better`** — would retrieval without declared scale have produced better, the same, or worse results?
-
-> "If you had retrieved without declaring a scale set — pulling from the full knowledge store without altitude filtering — do you think the results would have been: better (more relevant context delivered), same (no meaningful difference), or worse (more noise, less signal)?"
-
-Grade: `better | same | worse`
-
-One-line rationale.
+Two prompts the agent answers from its own session experience: **5. `off_altitude_skipped`** (count of retrieved entries judged wrong-altitude and skipped this cycle); **6. `counterfactual_better`** (grade `better | same | worse`: would retrieval without declared scale have produced different results?). For the verbatim prompt text, read `skills/retro/templates/step2-9-signal-scripts.md` — sections "Eval signal 5" and "Eval signal 6".
 
 ### Sub-question: Abstraction level (retained)
 
 > "Did agents get context at the right level of abstraction — enough to reason at the scale of the problem, without fine detail crowding out the framing or forcing descent to reconstruct it?"
 
-Grade: `right-sized | too-coarse | too-fine`
+Grade: `right-sized | too-coarse | too-fine`. One-line rationale citing specific retrieval calls observed in evidence (Step 2b's delivery audit, Step 2c's retrieval log). The rationale must name at least one concrete retrieval event or cite "no retrieval log — evidence absent" if the log is missing.
 
-One-line rationale citing specific retrieval calls observed in evidence (Step 2b's delivery audit, Step 2c's retrieval log). The rationale must name at least one concrete retrieval event or cite "no retrieval log — evidence absent" if the log is missing.
-
-**Directionality** (for longitudinal interpretation):
-- `too-coarse` → missing or under-linked child entries; the knowledge store has the concept but not the implementation-level detail workers needed.
-- `too-fine` → missing bridging parent entries; workers were handed implementation detail without the framing context.
-- `right-sized` → no structural gap surfaced.
+**Directionality** (for longitudinal interpretation): `too-coarse` → missing or under-linked child entries; the knowledge store has the concept but not the implementation-level detail workers needed. `too-fine` → missing bridging parent entries; workers were handed implementation detail without the framing context. `right-sized` → no structural gap surfaced.
 
 ### Emission
 
-```bash
-KDIR=$(lore resolve)
-bash ~/.lore/scripts/retro-scale-access-append.sh \
-  --cycle-id "<slug>" \
-  --abstraction-grade "<right-sized|too-coarse|too-fine>" \
-  --abstraction-rationale "<one-line citing retrieval calls>" \
-  --counterfactual-better "<better|same|worse>" \
-  --counterfactual-rationale "<one-line>"
-```
-
-The script writes to `$KDIR/_scorecards/retro-scale-access.jsonl` (schema_version: 2, created on first use). It validates grades against the closed enum before appending.
+Invoke `retro-scale-access-append.sh` with the six signals — read `skills/retro/templates/step2-9-signal-scripts.md` § "Emission" for the bash invocation. The script writes to `$KDIR/_scorecards/retro-scale-access.jsonl` (schema_version: 2, created on first use). It validates grades against the closed enum before appending.
 
 ### Three "better than no scale" derivations
 
@@ -470,22 +250,7 @@ After computing the six signals, evaluate the three derivation tests:
 2. **`counterfactual_better` dominantly `same` or `worse`** — declared scale is at least as good as no-scale baseline. A majority `better` result would indicate the scale system is actively harmful and warrants investigation (but never automatic disablement).
 3. **`redeclare_rate` stable or decreasing** — rubric ↔ agent reality alignment is stable. An increasing trend across cycles indicates rubric drift requiring attention.
 
-**Report shape:**
-```
-[retro] Scale signals (Step 2.9):
-  declaration_coverage:     <N>/<total> (<PCT>)
-  redeclare_rate:           <N>/<total> (<PCT>)
-  off_scale_routes_emitted: <N>
-  verifier_disagreements:   <N>
-  off_altitude_skipped:     <N>  [agent self-report]
-  counterfactual_better:    <better|same|worse>  — <one-line rationale>
-  abstraction:              <right-sized|too-coarse|too-fine>  — <one-line rationale>
-
-  Better-than-no-scale derivations:
-    off_scale_routes_emitted > 0:                yes|no
-    counterfactual_better dominantly same/worse: yes|no
-    redeclare_rate stable/decreasing:            yes|no
-```
+**Report shape:** read `skills/retro/templates/step3-telemetry-outputs.md` § "scale signals (sidecar)" — the same emit format is reused by Step 3.5.
 
 **Invariant.** This step never calls `scorecard-append`. The sidecar is not a scorecard row — it has no `calibration_state`, no `template_version`, no `kind: scored`, no `tier`. Mixing it into `rows.jsonl` would expose it to `/evolve` consumption; the separate file structurally prevents that. /retro is observational-only — it emits the signals and derivations but never auto-suggests disabling the scale system based on its own evaluation.
 ### Step 3.0: Scorecard delta surface (primary, tier-partitioned)
@@ -494,141 +259,63 @@ After computing the six signals, evaluate the three derivation tests:
 
 **Why delta-first.** A single-window scorecard cell tells you where a template stands; a delta tells you which direction it's moving. A template at `factual_precision=0.72` might be `weak` in absolute terms but trending sharply upward (last window: 0.58) — the delta is the actionable signal.
 
-**Relationship to other steps.**
-- Step 3.8 (health checks) runs first; if `pipeline-degraded`, Step 3.0's deltas are non-evidentiary and the surface reads "not computed — window is pipeline-degraded, see Step 3.8".
-- Step 3.9 (headline) supplies the current-window values; Step 3.0 supplies the deltas *against* the previous eligible window.
-- Step 3 (dimensions) runs after Step 3.0 and is demoted to **narrative coda**.
+**Relationship to other steps.** Step 3.8 (health checks) runs first; if `pipeline-degraded`, Step 3.0's deltas are non-evidentiary and the surface reads "not computed — window is pipeline-degraded, see Step 3.8". Step 3.9 (headline) supplies current-window values; Step 3.0 supplies deltas *against* the previous eligible window. Step 3 (dimensions) runs after Step 3.0 and is demoted to **narrative coda**.
 
 ### 3.0a: Inputs
 
-- `$KDIR/_scorecards/_current.json` — the rollup produced by `scorecard-rollup.sh` for the current retro window.
-- Previous window's rollup — selected from `$KDIR/_scorecards/snapshots/*.json`, the per-rollup snapshots written alongside `_current.json`. Each snapshot is the same JSON content as the `_current.json` produced by that rollup; its filename matches its top-level `window_end` field. To pick the previous window:
-  1. List candidates from `$KDIR/_scorecards/snapshots/*.json`. **Do not** include `$KDIR/_scorecards/_current.json` — `_current.json` lives in the parent directory and is not a snapshot.
-  2. For each candidate, parse the top-level `window_end` field. Exclude any candidate whose `window_end` is missing, empty, or otherwise invalid (do **not** fall back to filename parsing — the field is the selection key per D5).
-  3. Select the snapshot whose `window_end` is the **max value strictly earlier than** the current retro window's start. Equal-to-start is **not** eligible (strict inequality), and at-or-after-start is excluded.
-  4. If no candidate satisfies (3), report "first eligible window — no delta baseline" and emit no delta rows; downstream readers treat this as informational, not a degradation signal.
-- `$KDIR/_scorecards/template-registry.json` — unregistered rows render as `unregistered:<hash>` and are excluded from delta surfaces (same rule as Step 3.9).
-- `$KDIR/_work/*/consumption-contradictions.jsonl` — for the `contradiction_verification_rate` metric added below.
-- The set of `pipeline-degraded` windows (from Step 4's journal) — if either the current or previous window is degraded, the delta for that template-version is **skipped**, not zeroed.
+- `$KDIR/_scorecards/_current.json` — current window's rollup (`scorecard-rollup.sh`).
+- **Previous window's rollup** — selected from `$KDIR/_scorecards/snapshots/*.json` (per-rollup snapshots; same JSON content as `_current.json` from that rollup; filename matches top-level `window_end`). Selection rule: (1) List candidates from `snapshots/*.json` — **do not** include `_current.json` (lives in parent dir, not a snapshot); (2) Parse each candidate's top-level `window_end`; exclude missing/empty/invalid (no filename fallback — the field is the selection key per D5); (3) Pick the snapshot whose `window_end` is the **max value strictly earlier than** the current retro window's start (strict inequality; at-or-after-start excluded); (4) If no candidate satisfies (3), report "first eligible window — no delta baseline" and emit no delta rows — informational, not a degradation signal.
+- `$KDIR/_scorecards/template-registry.json` — unregistered rows render as `unregistered:<hash>`, excluded from delta surfaces (same rule as Step 3.9).
+- `$KDIR/_work/*/consumption-contradictions.jsonl` — for the `contradiction_verification_rate` metric below.
+- The set of `pipeline-degraded` windows (from Step 4's journal) — if either window is degraded, the delta for that template-version is **skipped**, not zeroed.
 
 ### 3.0b: Tier partitioning
 
 Partition rows by `tier` and emit **one delta surface per tier** in this order (most actionable first):
 
-1. **`tier: template`** — template-behavior deltas. Primary surface. Feeds Step 3.9 headline and /evolve Step 5 primary gate.
+1. **`tier: template`** — template-behavior deltas. Primary. Feeds Step 3.9 headline and /evolve Step 5 primary gate.
 2. **`tier: correction`** — doctrine-correction deltas. Secondary. May feed /evolve's doctrine-correction gate (see `skills/evolve/SKILL.md` Step 5).
 3. **`tier: reusable`** — reusable commons-entry deltas. Informational; no /evolve weight.
 4. **`tier: task-evidence`** — task-local grounding deltas. Informational; no /evolve weight.
 
-Each tier's surface is computed independently with the same 3-filter gate described below. Mixing tiers would Goodhart the template metric — task-local claim quality ≠ template-produced claim quality.
+Each tier's surface is computed independently with the same 3-filter gate below. Mixing tiers would Goodhart the template metric — task-local claim quality ≠ template-produced claim quality.
 
 **Never mix tiers in a single delta cell.** A `tier: task-evidence` factual_precision reading and a `tier: template` factual_precision reading measure different things.
 
 ### 3.0c: Delta computation
 
-For each registered `(template_id, template_version)` that has `kind==scored, calibrated` rows in both the current and previous windows, scoped to one tier at a time:
+For each registered `(template_id, template_version)` with `kind==scored, calibrated` rows in both the current and previous windows, scoped to one tier at a time: `delta_{metric} = current_{metric} - previous_{metric}`.
 
-```
-delta_{metric} = current_{metric} - previous_{metric}
-```
+Compute a delta per metric in the six-MVP-metric vector from Step 3.9, plus the new `contradiction_verification_rate` metric below. Two MVP metrics are inverted (`triviality_rate`, `omission_rate`) — *improvement* means the delta is **negative**. The surface notation uses an explicit direction indicator (↑ improving, ↓ regressing) so readers don't track direction per metric.
 
-Compute a delta per metric in the six-MVP-metric vector from Step 3.9, plus the new `contradiction_verification_rate` metric (see below). Two of the MVP metrics are inverted (`triviality_rate`, `omission_rate`) — *improvement* means the delta is **negative**. The surface notation uses an explicit direction indicator (↑ improving, ↓ regressing) so readers don't track direction per metric.
-
-**New metric: `contradiction_verification_rate`.** For `tier: template` surfaces only:
-
-```
-contradiction_verification_rate = |{consumption-contradictions with status=verified against this template in window}|
-                                / |{consumption-contradictions with status ∈ {verified, rejected} against this template in window}|
-```
-
-A high rate indicates the template is producing claims that field observers repeatedly find false — a strong signal for template mutation. The rate is **inverted**: lower is better.
+**New metric: `contradiction_verification_rate`.** For `tier: template` surfaces only: `contradiction_verification_rate = |{contradictions with status=verified against this template in window}| / |{contradictions with status ∈ {verified, rejected} against this template in window}|`. A high rate indicates the template is producing claims that field observers repeatedly find false — a strong signal for template mutation. The rate is **inverted**: lower is better.
 
 ### 3.0d: 3-filter surface gate (load-bearing)
 
 The delta surface is **not** a per-cell dump. It surfaces only deltas that carry actionable signal. A delta is surfaced when **all three** hold:
 
-1. **Large change.** `|delta|` exceeds the per-metric magnitude threshold. MVP thresholds:
-   - `factual_precision`: |delta| ≥ 0.05
-   - `curated_rate`: |delta| ≥ 0.05
-   - `triviality_rate`: |delta| ≥ 0.05
-   - `omission_rate`: |delta| ≥ 0.03 (more sensitive; small changes in portfolio-level miss rate are load-bearing)
-   - `observation_promotion_rate`: |delta| ≥ 0.03
-   - `contradiction_verification_rate`: |delta| ≥ 0.10 (observational signal is coarser than adjudicative)
+1. **Large change.** `|delta|` exceeds the per-metric magnitude threshold (MVP): `factual_precision` ≥ 0.05; `curated_rate` ≥ 0.05; `triviality_rate` ≥ 0.05; `omission_rate` ≥ 0.03 (more sensitive — small changes in portfolio-level miss rate are load-bearing); `observation_promotion_rate` ≥ 0.03; `contradiction_verification_rate` ≥ 0.10 (observational signal is coarser than adjudicative).
 2. **Sufficient sample size.** Both windows must have n ≥ 10 rows for that metric. Below-sample deltas are noise.
 3. **Registered template_version in both windows.** If either current or previous `template_version` is unregistered, skip — we can't attribute the delta to a known template lineage.
 
-Deltas that pass the filter are **surfaced**; deltas that fail are **suppressed** but counted (one line at the end: "<N> small / below-sample / unregistered deltas suppressed"). Preserves the "did something change?" signal without drowning the surface in noise.
+Deltas that pass the filter are **surfaced**; failures are **suppressed** but counted (one line at the end: "<N> small / below-sample / unregistered deltas suppressed") — preserves the "did something change?" signal without drowning the surface in noise.
 
 ### 3.0e: Report shape (per tier)
 
-The delta surface is the first block of the Step 6 report output. Structure:
-
-```
-[retro] Scorecard deltas — primary surface
-
-  Window: <current-window-id>  vs  <previous-window-id>
-
-  --- tier: template ---
-  Eligible templates with deltas: <N> surfaced, <M> suppressed
-
-  <template_id>@<version-prefix-12>:
-    factual_precision:             0.72 → 0.81  (↑ +0.09, n=24)     [delta-pass → regressing]
-    curated_rate:                  0.48 → 0.41  (↓ -0.07, n=18)     [regressing]
-    omission_rate:                 0.22 → 0.14  (↓ -0.08, n=32)     [inverted: ↓ is improving]
-    contradiction_verification_rate: 0.08 → 0.17 (↑ +0.09, n=12)     [inverted: ↑ is regressing]
-    (other metrics: unchanged or below threshold)
-
-  Suppressed: 12 (7 below-sample, 3 unregistered, 2 below-magnitude)
-
-  --- tier: correction ---
-  <template_id>@<version-prefix-12>:
-    factual_precision (correction): 0.82 → 0.88  (↑ +0.06, n=11)     [improving]
-
-  --- tier: reusable ---
-  (informational — no deltas meet the 3-filter gate)
-
-  --- tier: task-evidence ---
-  (informational — no deltas meet the 3-filter gate)
-```
+For the delta-surface output template (the first block of the Step 6 report), read `skills/retro/templates/step3-telemetry-outputs.md` — section "Step 3.0e — Delta surface report shape (per tier)".
 
 Each surfaced delta line reads left-to-right:
 `<metric>: <previous> → <current>  (<direction symbol> <signed delta>, n=<current sample>)  [<classification change if any>]`
 
 "Classification change" is derived from Step 3.9's headline thresholds (applies to `tier: template` surface only): a delta that moved the metric from `weak` to `pass`, or from `pass` to `fail`, is flagged.
 
-**Pipeline-degraded windows.** If either window was `pipeline-degraded`, emit per affected template-version:
-```
-  Deltas for <template_id>@<version>: skipped (degraded window — see Step 3.8)
-```
+**Pipeline-degraded windows.** If either window was `pipeline-degraded`, emit per affected template-version: `Deltas for <template_id>@<version>: skipped (degraded window — see Step 3.8)`.
 
-**First-window case.** If no prior eligible window exists:
-```
-  First eligible window — no delta baseline. Full current-window values
-  appear in Step 3.9's headline block below.
-```
+**First-window case.** If no prior eligible window exists, emit `First eligible window — no delta baseline. Full current-window values appear in Step 3.9's headline block below.`
 
 ### 3.0f: Journal persistence
 
-Deltas are derived signal, not source data. They are NOT written to `rows.jsonl` — the scorecard substrate remains append-only with first-derivative storage only. The delta surface IS persisted to the retro journal entry (Step 4) under a `scorecard_deltas` field keyed by tier:
-
-```json
-{
-  "scorecard_deltas": {
-    "template": {
-      "<template_id>@<version>": {
-        "factual_precision": {"prev": 0.72, "curr": 0.81, "delta": 0.09, "n_curr": 24, "surfaced": true},
-        "contradiction_verification_rate": {"prev": 0.08, "curr": 0.17, "delta": 0.09, "n_curr": 12, "surfaced": true},
-        ...
-      }
-    },
-    "correction": { ... },
-    "reusable": { ... },
-    "task-evidence": { ... }
-  }
-}
-```
-
-`surfaced: true` iff the delta passed all three filters. This lets downstream readers (dashboards, /evolve ranking) access both the full delta map and the filtered view without re-computing.
+Deltas are derived signal, not source data. They are NOT written to `rows.jsonl` — the scorecard substrate remains append-only with first-derivative storage only. The delta surface IS persisted to the retro journal entry (Step 4) under a `scorecard_deltas` field keyed by tier. Read `skills/retro/templates/step3-telemetry-outputs.md` § "Step 3.0f — scorecard_deltas journal-persistence JSON" for the full schema. `surfaced: true` iff the delta passed all three filters — lets downstream readers (dashboards, /evolve ranking) access both the full delta map and the filtered view without re-computing.
 
 **Invariant — no compensation.** A large improvement on one metric does NOT suppress a surfaced regression on another metric for the same template. The surface shows all surfaced deltas; the reader (human or `/evolve`) composes them. This mirrors the Step 3.9 non-compensatory rule.
 
@@ -644,48 +331,29 @@ Score each 1-5 with concrete evidence. Cite specific artifacts. Consult `failure
 
 Was knowledge delivered to workers? Compare `**Knowledge context:**` in plan against worker behavior.
 
-**Evidence by cycle type:**
-- **Implementation:** Explicit citations in Observations OR correct approach choices in output. Annotation-only: workers internalize framing, not cite by name — implementation output is the evidence.
-- **Review:** Subagents received knowledge preambles.
-- **Spec-only:** Ad-hoc subagents dispatched without knowledge context when available = delivery failure.
-- **Prose/convention:** Output aligned with delivered principles = knowledge applied, even without citation.
+**Evidence by cycle type:** *Implementation* — explicit citations in Observations OR correct approach choices in output (annotation-only: workers internalize framing, not cite by name — implementation output is the evidence). *Review* — subagents received knowledge preambles. *Spec-only* — ad-hoc subagents dispatched without knowledge context when available = delivery failure. *Prose/convention* — output aligned with delivered principles = knowledge applied, even without citation.
 
 Scoring: 5 = every phase delivered, high completeness | 4 = most phases, minor gaps | 3 = low annotation quality or spec-only without subagent delivery | 2 = phases missing, >30% unresolved, or pipeline silent drop | 1 = no delivery
 
 ### Dimension 2 — Retrieval Quality
 
-Were delivered entries relevant, current, and at the right abstraction level?
-
-Scoring: 5 = all relevant + current + right level | 4 = mostly, one minor mismatch | 3 = topically relevant but wrong abstraction level | 2 = mostly irrelevant/stale | 1 = actively misleading
-
-Note: Abstraction mismatch on prescriptive tasks is structural, not retrieval failure. See low-diagnostic check.
+Were delivered entries relevant, current, and at the right abstraction level? Scoring: 5 = all relevant + current + right level | 4 = mostly, one minor mismatch | 3 = topically relevant but wrong abstraction level | 2 = mostly irrelevant/stale | 1 = actively misleading. Note: abstraction mismatch on prescriptive tasks is structural, not retrieval failure (see low-diagnostic check).
 
 ### Dimension 3 — Gap Analysis
 
-What did workers need that wasn't in the store? Use `execution-log.md` `source: remember` entries as confirmed gap list.
-
-- Distinguish *coverage failures* (pattern existed elsewhere, wasn't captured) from *genuinely novel discoveries*. Coverage failures weigh heavier.
-- ≤4 tasks, 1-2 files = "trivial scope — gap dimension low-signal"
-- Stale corrections (0 new captures, N corrections) = positive maturity signal, not gaps
+What did workers need that wasn't in the store? Use `execution-log.md` `source: remember` entries as confirmed gap list. Distinguish *coverage failures* (pattern existed elsewhere, wasn't captured) from *genuinely novel discoveries* — coverage failures weigh heavier. ≤4 tasks, 1-2 files = "trivial scope — gap dimension low-signal". Stale corrections (0 new captures, N corrections) = positive maturity signal, not gaps.
 
 Scoring: 5 = no gaps | 4 = one minor or only novel discoveries | 3 = one significant coverage failure | 2 = multiple coverage failures | 1 = no knowledge system support
 
 ### Dimension 4 — Plan-Knowledge Alignment
 
-Did plan design decisions reference entries that actually influenced implementation?
-
-Review cycles: knowledge flow store→review (good) vs review→store (lower — store was consumer).
+Did plan design decisions reference entries that actually influenced implementation? Review cycles: knowledge flow store→review (good) vs review→store (lower — store was consumer).
 
 Scoring: 5 = decisions shaped implementation | 4 = most influenced, 1-2 decorative | 3 = existed but workers chose independently | 2 = cited but diverged | 1 = no alignment
 
 ### Dimension 5 — Spec Utility
 
-Did the spec reduce workers' need for independent exploration?
-
-Evidence: escalations, out-of-scope file reads, divergent choices, unexpected discoveries. See `failure-modes.md` Section D for modifiers.
-
-- **Spec-only:** Score structural quality as `(predictive)`. N corrections caps at 4.
-- **Intent tasks:** Out-of-scope reads for discovery are by-design, not gaps.
+Did the spec reduce workers' need for independent exploration? Evidence: escalations, out-of-scope file reads, divergent choices, unexpected discoveries. See `failure-modes.md` Section D for modifiers. Spec-only: score structural quality as `(predictive)`; N corrections caps at 4. Intent tasks: out-of-scope reads for discovery are by-design, not gaps.
 
 Scoring: 5 = spec-guided, 0 escalations | 4 = minor exploration, ≤1 escalation | 3 = several reads, 2-3 escalations | 2 = frequent exploration, multiple divergences | 1 = no meaningful guidance
 
@@ -695,148 +363,35 @@ Scoring: 5 = spec-guided, 0 escalations | 4 = minor exploration, ≤1 escalation
 
 **P2.3-16 anti-coupling invariant.** The `tier: telemetry` enum value exists specifically to keep these rows out of /evolve's citation gate. Any row emitted by this step carries `tier: telemetry` (or no tier — readers apply the missing-tier legacy policy and treat it as telemetry). If /evolve's citation gate ever accepts a `tier: telemetry` row as evidence for template mutation, the anti-coupling has been broken — this is the highest-priority silent-breakage risk in the memory-telemetry pipeline.
 
-Read `$KDIR/_scorecards/rows.jsonl` filtered to rows with `tier: telemetry` in the retro window. For each metric below, compute a one-line summary and select the top-3 highlights.
-
-When a metric has zero rows in `rows.jsonl` for the window, emit: `<metric>: no data in window` and continue. Do not treat absence as a failure.
-
----
+Read `$KDIR/_scorecards/rows.jsonl` filtered to rows with `tier: telemetry` in the retro window. For each metric below, compute a one-line summary and select the top-3 highlights. When a metric has zero rows in the window, emit `<metric>: no data in window` and continue — do not treat absence as a failure. For per-metric output templates, read `skills/retro/templates/step3-telemetry-outputs.md` § "Step 3.5 — Memory-system telemetry per-metric output blocks"; entries below name source rows and summary computation, the emit format lives in the sidecar.
 
 ### Retention after renormalize
 
-**Source:** rows where `metric == "retention_after_renormalize"`.
-Key fields: `entry_id`, `cycles_survived`, `template_id` (producer template), `run_id`.
-
-**Summary:** median `cycles_survived` across all entries in window; count of entries with `cycles_survived >= 3` (signal of durable high-quality output).
-
-**Top-3 highlights:** entries with the highest `cycles_survived`.
-
-```
-retention_after_renormalize:
-  median cycles_survived: <N>  |  entries with ≥3 cycles: <K>/<total>
-  top survivors:
-    <entry_id>  cycles=<N>  producer=<template_id>
-    <entry_id>  cycles=<N>  producer=<template_id>
-    <entry_id>  cycles=<N>  producer=<template_id>
-```
-
----
+Source: rows where `metric == "retention_after_renormalize"`. Key fields: `entry_id`, `cycles_survived`, `template_id` (producer template), `run_id`. Summary: median `cycles_survived` across all entries in window; count of entries with `cycles_survived >= 3` (signal of durable high-quality output). Top-3 highlights: entries with the highest `cycles_survived`.
 
 ### Downstream adoption rate
 
-**Source:** rows where `metric == "downstream_adoption_rate"`.
-Key fields: `entry_id`, `value` (adoption rate 0.0–1.0), `status`, `window_days`.
-
-**Summary:** mean adoption rate across entries in window; fraction with `value > 0.5`.
-
-**Top-3 highlights:** entries with the highest adoption rate, with their `status`.
-
-```
-downstream_adoption_rate:
-  mean rate: <val>  |  entries >50%: <K>/<total>
-  top adopters:
-    <entry_id>  rate=<val>  status=<status>
-    <entry_id>  rate=<val>  status=<status>
-    <entry_id>  rate=<val>  status=<status>
-```
-
----
+Source: rows where `metric == "downstream_adoption_rate"`. Key fields: `entry_id`, `value` (adoption rate 0.0–1.0), `status`, `window_days`. Summary: mean adoption rate across entries in window; fraction with `value > 0.5`. Top-3 highlights: entries with the highest adoption rate, with their `status`.
 
 ### Route precision
 
-**Source:** rows where `metric == "route_precision"`.
-Key fields: `role`, `outcome` (accepted/declined), `route_id`, `template_id`.
-
-**Summary:** acceptance rate per role (accepted / total routes) in window.
-
-**Top-3 highlights:** roles with the lowest acceptance rate (most likely to benefit from channel-contract adjustment).
-
-```
-route_precision:
-  <role>: <accepted>/<total> routes accepted (<pct>%)
-  <role>: <accepted>/<total> routes accepted (<pct>%)
-  <role>: <accepted>/<total> routes accepted (<pct>%)
-```
-
----
+Source: rows where `metric == "route_precision"`. Key fields: `role`, `outcome` (accepted/declined), `route_id`, `template_id`. Summary: acceptance rate per role (accepted / total routes) in window. Top-3 highlights: roles with the lowest acceptance rate (most likely to benefit from channel-contract adjustment).
 
 ### Supersession quality
 
-**Source:** rows where `metric == "supersession_quality"`.
-Key fields: `superseded_entry_id`, `successor_entry_id`, `quality` (improved/neutral/regressed).
-
-**Summary:** fraction of supersessions marked `improved` in window.
-
-**Top-3 highlights:** any `neutral` or `regressed` supersessions.
-
-```
-supersession_quality:
-  improved: <K>/<total> (<pct>%)  |  neutral: <N>  |  regressed: <M>
-  notable (non-improved):
-    <superseded_entry_id> → <successor_entry_id>  quality=<neutral|regressed>
-    ...
-```
-
-When all supersessions are `improved` and count ≥ 1: emit `supersession_quality: all improved (<K> total)` with no highlights.
-
----
+Source: rows where `metric == "supersession_quality"`. Key fields: `superseded_entry_id`, `successor_entry_id`, `quality` (improved/neutral/regressed). Summary: fraction of supersessions marked `improved` in window. Top-3 highlights: any `neutral` or `regressed` supersessions. When all supersessions are `improved` and count ≥ 1: emit `supersession_quality: all improved (<K> total)` with no highlights.
 
 ### Scale drift rate
 
-**Source:** rows where `metric == "scale_drift_rate"`.
-Key fields: `producer_role`, `value` (drift rate 0.0–1.0), `run_id`.
-
-**Summary:** drift rate per role; flag any role where `value > 0.20` (guardrail threshold).
-
-**Top-3 highlights:** roles with highest drift rate.
-
-```
-scale_drift_rate:
-  <producer_role>: drift=<val>  [ABOVE-THRESHOLD]
-  <producer_role>: drift=<val>
-  <producer_role>: drift=<val>
-```
-
-When no role exceeds 0.20: emit `scale_drift_rate: all roles within guardrail` with no highlights.
-
----
+Source: rows where `metric == "scale_drift_rate"`. Key fields: `producer_role`, `value` (drift rate 0.0–1.0), `run_id`. Summary: drift rate per role; flag any role where `value > 0.20` (guardrail threshold). Top-3 highlights: roles with highest drift rate. When no role exceeds 0.20: emit `scale_drift_rate: all roles within guardrail` with no highlights.
 
 ### Scale signals (sidecar)
 
-**Source:** `$KDIR/_scorecards/retro-scale-access.jsonl` — the row whose `cycle_id` matches the current retro slug (most recent by `ts` if multiple).
-
-```
-scale signals (Step 2.9):
-  declaration_coverage:     <N>/<total> (<PCT>)
-  redeclare_rate:           <N>/<total> (<PCT>)
-  off_scale_routes_emitted: <N>
-  verifier_disagreements:   <N>
-  off_altitude_skipped:     <N>  [agent self-report]
-  counterfactual_better:    <better|same|worse>  — <one-line rationale>
-  abstraction:              <right-sized|too-coarse|too-fine>  — <one-line rationale>
-
-  Better-than-no-scale derivations:
-    off_scale_routes_emitted > 0:                yes|no
-    counterfactual_better dominantly same/worse: yes|no
-    redeclare_rate stable/decreasing:            yes|no
-```
-
-When no row exists for this cycle: `scale signals: not assessed this cycle`.
-
----
+Source: `$KDIR/_scorecards/retro-scale-access.jsonl` — the row whose `cycle_id` matches the current retro slug (most recent by `ts` if multiple). When no row exists for this cycle: `scale signals: not assessed this cycle`.
 
 ### Channel-contract flags (sidecar)
 
-**Source:** `$KDIR/_scorecards/retro-channel-flags.jsonl` — all rows whose `cycle_id` matches the current retro slug.
-
-```
-channel-contract flags:
-  <role>/<slot>  signal=<signal_type>  rate=<pct>  over <N> cycles
-    remedy: <remedy_hint or "see Step 2b.6 guidance">
-```
-
-When no flags fired: `channel-contract flags: none`.
-
----
+Source: `$KDIR/_scorecards/retro-channel-flags.jsonl` — all rows whose `cycle_id` matches the current retro slug. When no flags fired: `channel-contract flags: none`.
 
 **Step 3.5 invariant — no `/evolve` coupling.** The metrics in this section describe memory-system health, not producer-template quality. They inform the operator's understanding of how the knowledge store is aging, routing, and self-correcting — they do not adjudicate whether any template produced correct output. `/evolve` MUST NOT cite any metric from this section as evidence for a template mutation. If `/evolve` sees a "retention_after_renormalize" or "downstream_adoption_rate" citation, it must skip that citation as non-evidentiary (enforced structurally by the `tier: template` filter in `/evolve` Step 5).
 
@@ -872,11 +427,11 @@ Don't run all 7 checks every retro — rotation prevents ritualization and stops
 
 1. **Ritualization** — outputs technically conformant but generic.
 2. **Confirmation bias** — agents under-produce findings that contradict prior knowledge; the store calcifies.
-3. **Form-filling vs. substance** — required fields get content, optional fields go empty. Schema crowds out craft.
+3. **Form-filling vs. substance** — required fields get content, optional fields go empty; schema crowds out craft.
 4. **Goodhart drift** — behavior bends toward any added metric and away from the underlying goal.
 5. **Judgment atrophy** — agents stop making non-obvious calls because the protocol doesn't reward them.
 6. **Calibration drift** — auto-disposition, routing, or scoring thresholds fall out of alignment with human override patterns.
-7. **Compliance theater** — multi-step skills where every step "succeeds" but the substance was thin.
+7. **Compliance theater** — multi-step skills where every step "succeeds" but substance was thin.
 
 ### Candidate checks
 
@@ -898,10 +453,7 @@ Each is a question answerable from artifacts in the cycle just completed. Record
 
 ### How to keep the checks themselves from becoming ritual
 
-- **Rotate.** See *Rotation policy* above — 3 of Checks 1–6 + Check 7 always, selected at invocation time.
-- **Demand prose, not scores.** Each check produces a sentence or two, never a number.
-- **Pair quantitative with qualitative.** Where a count is computable (Checks 2, 5, 6), require an explanation alongside it.
-- **Meta-check periodically.** See *Tuning cadence* — formulaic answers are a tuning trigger, not a passing observation.
+**Rotate** (see *Rotation policy* above — 3 of Checks 1–6 + Check 7 always, selected at invocation time). **Demand prose, not scores** — each check produces a sentence or two, never a number. **Pair quantitative with qualitative** — where a count is computable (Checks 2, 5, 6), require an explanation alongside it. **Meta-check periodically** (see *Tuning cadence* — formulaic answers are a tuning trigger, not a passing observation).
 
 ### Tuning cadence
 
@@ -912,12 +464,7 @@ The check set is not frozen. As answers accumulate across retros they reveal whi
 - A single check has answered "same phrasing" across ≥3 consecutive selections — that check has gone formulaic.
 - A check has been selected ≥5 times over the window and its answers have never once diverged from the dimension-score narrative — it is redundant.
 
-**Pass procedure.** When the trigger fires:
-1. Query the journal: `jq -c 'select(.role == "retro-behavioral-health")' _meta/effectiveness-journal.jsonl | tail -<N>`.
-2. For each of Checks 1–6, read the most recent ≥3 answers and classify each as *surprising*, *formulaic*, or *redundant-with-dimensions*.
-3. Check 7 is never tuned away — its answer quality can drift but its slot is protected.
-4. For checks that are formulaic or redundant, either (a) reword the check prompt to target the *underlying* drift mode more directly, or (b) retire the check and replace it with a new candidate from the drift-mode list. Record the edit in a journal entry with `--role "retro-behavioral-health-tuning"`.
-5. Bump template-version so the tuning edit is visible to the scorecard substrate as a distinct version.
+**Pass procedure.** When the trigger fires: (1) Query the journal — `jq -c 'select(.role == "retro-behavioral-health")' _meta/effectiveness-journal.jsonl | tail -<N>`; (2) For each of Checks 1–6, read the most recent ≥3 answers and classify each as *surprising*, *formulaic*, or *redundant-with-dimensions*; (3) Check 7 is never tuned away — its answer quality can drift but its slot is protected; (4) For checks that are formulaic or redundant, either (a) reword the check prompt to target the *underlying* drift mode more directly, or (b) retire and replace from the drift-mode list. Record the edit in a journal entry with `--role "retro-behavioral-health-tuning"`; (5) Bump template-version so the tuning edit is visible to the scorecard substrate as a distinct version.
 
 **Cadence floor.** Do not tune more often than the trigger. Tuning before the journal has enough entries just churns the question set without evidence.
 
@@ -935,16 +482,13 @@ Rationale: if every retro narrated "audit coverage nominal, provenance ok" the c
 
 Only tripped checks generate narrative. The `pipeline-degraded` headline is the sole indicator in a healthy window that the checks are there at all: it doesn't appear, and the dimension-score headline reads normally.
 
-**Where the invariant is enforced.**
-- Each `### Check:` subsection below carries a `**When green: no prose.**` line — load-bearing, not decorative. A check that emits a green line on passing violates the invariant.
-- The Step 6 report's `pipeline-degraded` block is the only place tripped-check narrative appears. The normal-window block reports the scorecard delta + headline + dimension scores only — never `Health checks: all green`.
-- A future check added under this step MUST include the silent-when-green clause.
+**Where the invariant is enforced.** Each `### Check:` subsection below carries a `**When green: no prose.**` line — load-bearing, not decorative; a check that emits a green line on passing violates the invariant. The Step 6 report's `pipeline-degraded` block is the only place tripped-check narrative appears — the normal-window block reports the scorecard delta + headline + dimension scores only, never `Health checks: all green`. A future check added under this step MUST include the silent-when-green clause.
 
 **Degraded state — `pipeline-degraded`.** A retro headline state, **distinct from `pass | weak | fail`**, emitted when any Step 3.8 health check trips. Not a fourth tier of the non-compensatory headline — a separate axis that **supersedes** the headline for the window:
 
 - A clean scorecard over a broken pipeline is **not** `pass`. When `pipeline-degraded` fires, the dimension-score headline is replaced by `pipeline-degraded` in the journal and the final report. Underlying scores may still be computed and recorded (for trend analysis) but the operator-facing headline is the degraded state.
 - `/evolve` treats `pipeline-degraded` windows as **non-evidentiary**. No template mutation may cite a scorecard cell, retro finding, or reconciliation delta from a `pipeline-degraded` window, regardless of the dimension scores or scorecard cell values. See `skills/evolve/SKILL.md` Step 5 for enforcement.
-- The prose section in Step 6 lists which checks tripped and points at the relevant telemetry file(s). Checks that did *not* trip remain silent.
+- Step 6's prose section lists which checks tripped and points at the relevant telemetry file(s). Checks that did *not* trip remain silent.
 
 Computationally: let `tripped = [<names of checks that fired>]`. If `tripped` is non-empty, set `window_state = "pipeline-degraded"`; otherwise the window inherits the Step 3.9 non-compensatory headline (`pass | weak | fail`). A pure function of Step 3.8 outputs — deterministic, consultable by `/evolve` without re-running the checks.
 
@@ -954,44 +498,27 @@ Computationally: let `tripped = [<names of checks that fired>]`. If `tripped` is
 
 **What it measures.** Two independent sub-checks, both of which must be healthy for the check to be green under the settlement-pipeline model.
 
-**G1 disposition (substrate redirect).** Audit coverage now reads from the settlement substrate — `_settlement/runs/*.json` (verdict-landing ratios) and `_settlement/queue.json` (enqueue→completion times) — rather than from the older `audit-attempts.jsonl` + `rows.jsonl` pair. The sub-check semantics (lag + routing realization) are preserved; only the read sources change. The settlement substrate is the canonical input under the post-Phase-1 substrate; the older sources are retained only for back-compat reads when the settlement substrate is absent.
+**G1 disposition (substrate redirect).** Audit coverage now reads from the settlement substrate — `_settlement/runs/*.json` (verdict-landing ratios) and `_settlement/queue.json` (enqueue→completion times) — rather than from the older `audit-attempts.jsonl` + `rows.jsonl` pair. The sub-check semantics (lag + routing realization) are preserved; only the read sources change. The settlement substrate is the canonical input under the post-Phase-1 substrate; older sources are retained only for back-compat reads when the settlement substrate is absent.
 
-**Sub-check 1: Lag.**
-
-Median time from settlement-queue enqueue to settlement-run completion for items in the window is ≤ configurable threshold (default: **7 days**). Exceeding → this sub-check trips.
+**Sub-check 1: Lag.** Median time from settlement-queue enqueue to settlement-run completion for items in the window is ≤ configurable threshold (default: **7 days**). Exceeding → this sub-check trips.
 
 **Source-of-truth.** Read enqueue→completion timings from `_settlement/queue.json` entries (each carries `enqueued_at` and either `completed_at` or `status: pending`); join against `_settlement/runs/*.json` to confirm completion timestamps. When a queue entry's `completed_at` is missing but a corresponding run record exists, prefer the run record's timestamp.
 
-**Sub-check 2: Routing realization.**
-
-For settlement queue entries enqueued more than a **grace period of 24h** before window close, compute:
+**Sub-check 2: Routing realization.** For settlement queue entries enqueued more than a **grace period of 24h** before window close, compute:
 
 ```
 verdict_realization_ratio = |{queue entries with a corresponding completed run in _settlement/runs/}| / |queue entries enqueued > grace period before window close|
 ```
 
-Healthy when **either**:
-- Ratio ≥ **0.50** with sample size ≥ **10**, OR
-- **≥ 3 completed runs** when sample size < 10.
+Healthy when **either**: Ratio ≥ **0.50** with sample size ≥ **10**, OR **≥ 3 completed runs** when sample size < 10. Below threshold → routing partially failed (items enqueued, runs aren't completing) — this sub-check trips.
 
-Below threshold → routing partially failed (items enqueued, runs aren't completing) — this sub-check trips.
-
-**Why both sub-checks.** Routing realization catches the case where queue items don't progress to completed runs (analogous to the earlier "triggers fire but verdicts don't land" failure mode, restated against the settlement substrate). Lag catches slow pipelines even when routing is complete. Both together catch the main failure modes under the settlement model.
+**Why both sub-checks.** Routing realization catches the case where queue items don't progress to completed runs (analogous to the earlier "triggers fire but verdicts don't land" failure mode, restated against the settlement substrate). Lag catches slow pipelines even when routing is complete.
 
 **Alignment with trigger realization (deferred).** The routing realization sub-check measures "of items enqueued, did runs complete?" Trigger realization (deferred) measures whether ceremonies produced enqueue events at the configured probability. The two are distinct and remain so under the substrate redirect.
 
 **When green: no prose.**
 
-**When tripped, output:**
-```
-[retro] pipeline-degraded: audit coverage
-  lag: median <days> (threshold 7 days)
-  routing_realization: <ratio> (threshold 0.50 @ n≥10, or ≥3 completed runs @ n<10)
-    enqueued_old_enough=<N>  runs_completed=<M>
-  see: $KDIR/_settlement/queue.json and $KDIR/_settlement/runs/*.json
-```
-
-If only one sub-check tripped, omit the healthy sub-check's detail line.
+**When tripped, output:** read `skills/retro/templates/step3-8-tripped-outputs.md` § "Audit coverage" for the tripped-output block.
 
 **Distinguished from.** Old "coverage < 60%" absolute-coverage threshold remains retired. The lag + routing-realization design catches real failure modes (slow pipelines, broken routing) without false-alarming on expected sparse coverage. Under the G1 substrate redirect, the read sources are `_settlement/queue.json` and `_settlement/runs/*.json` rather than the older `audit-attempts.jsonl` + `rows.jsonl` pair.
 
@@ -1024,13 +551,7 @@ For each trigger source c with configured_p[c] > 0:
 
 **When green: no prose.**
 
-**When tripped, output (one block per tripped ceremony):**
-```
-[retro] pipeline-degraded: trigger realization rate
-  source=<type> observed=<rate> configured=<p> (band ±50%, min 10 samples)
-  rolls=<total> fires=<fires> divergence=<pct>
-  see: future trigger-roll telemetry and probabilistic-audit config
-```
+**When tripped, output (one block per tripped ceremony):** read `skills/retro/templates/step3-8-tripped-outputs.md` § "Trigger realization rate".
 
 **Distinguished from.** Audit coverage measures whether triggered audits produced *verdicts*; trigger realization measures whether ceremonies produced *triggers*. A window can have healthy verdict flow but broken trigger rates and vice versa.
 
@@ -1063,15 +584,7 @@ Aggregate across work items by summing numerator and denominator separately.
 
 **When green: no prose.**
 
-**When tripped, output:**
-```
-[retro] pipeline-degraded: grounding failure rate
-  aggregate=<pct> (threshold 30%, N=<total>)
-  per_reason: file-missing=<pct>  line-out-of-range=<pct>
-              snippet-mismatch=<pct>  field-missing=<pct>
-  dominant=<reason> (concentration=<pct>, threshold 50%)
-  see: $KDIR/_work/<slug>/audit-attempts.jsonl (per-work-item breakdown)
-```
+**When tripped, output:** read `skills/retro/templates/step3-8-tripped-outputs.md` § "Grounding failure rate".
 
 ### Check: Candidate-queue backlog (G1 disposition: redirected to settlement substrate, per-kind)
 
@@ -1101,18 +614,11 @@ Aggregate (cluster-wide totals):
 
 **When green: no prose.**
 
-**When tripped, output (one block per tripped kind plus a cluster-aggregate line when the aggregate trips):**
-```
-[retro] pipeline-degraded: candidate-queue backlog
-  kind=<K> added=<N> resolved=<M> growth_ratio=<ratio> (threshold 2.0, min N=10)
-                  pending=<K> (threshold 25 per-kind)
-  cluster pending_total=<K> (threshold 50, summed across kinds)
-  see: $KDIR/_settlement/queue.json
-```
+**When tripped, output (one block per tripped kind plus a cluster-aggregate line when the aggregate trips):** read `skills/retro/templates/step3-8-tripped-outputs.md` § "Candidate-queue backlog".
 
 ### Check: Provenance resolution rate (G1 disposition: retired)
 
-**Status.** Retired under G1. The previous design measured the share of reconciliation attempts landing at `provenance-unknown` to detect brittle content anchors; under the post-Phase-1 settlement substrate, content-anchor failures surface through the per-kind correctness-gate's grounding preflight (see Grounding failure rate below, with the `field-missing` and `snippet-mismatch` reasons covering the same pathology). Maintaining a second standalone provenance check produced redundant pipeline-degraded fires against the same underlying failure mode.
+**Status.** Retired under G1. The previous design measured the share of reconciliation attempts landing at `provenance-unknown` to detect brittle content anchors; under the post-Phase-1 settlement substrate, content-anchor failures surface through the per-kind correctness-gate's grounding preflight (see Grounding failure rate above, with the `field-missing` and `snippet-mismatch` reasons covering the same pathology). A second standalone provenance check produced redundant pipeline-degraded fires against the same failure mode.
 
 **Migration path.** Operators previously triggered by this check should read Grounding failure rate's per-reason breakdown for the same diagnostic signal. The `tuning signal` line ("consider enabling token-shingle fuzzy tier") remains valid but moves out of the retro pipeline-degraded surface.
 
@@ -1135,13 +641,7 @@ Aggregate (cluster-wide totals):
 
 **When green: no prose.**
 
-**When tripped, output (one block per tripped gate × signature combination):**
-```
-[retro] pipeline-degraded: judge liveness (<signature>)
-  gate=<gate-name> <metric>=<value> (threshold <pct>)
-  sample=<N> window=<start>..<end>
-  see: $KDIR/_calibration/<gate>/calibration-log.jsonl (and $KDIR/_settlement/queue.json for zero-rows case)
-```
+**When tripped, output (one block per tripped gate × signature combination):** read `skills/retro/templates/step3-8-tripped-outputs.md` § "Judge liveness".
 
 ### Check: Calibration state surface
 
@@ -1167,14 +667,7 @@ for each judge J:
 
 **When green: no prose.**
 
-**When tripped, output (one block per tripped judge):**
-```
-[retro] pipeline-degraded: calibration state surface
-  judge=<name> state=<calibration-pending | calibration-failed>
-  rows_in_window=<N> (non-load-bearing — /retro will not count)
-  reason_if_failed=<text or "n/a">
-  see: <judge's calibration log path>
-```
+**When tripped, output (one block per tripped judge):** read `skills/retro/templates/step3-8-tripped-outputs.md` § "Calibration state surface".
 
 **Non-load-bearing in /retro.** When this check trips, rows from the offending judge are **excluded** from Step 3 dimension-score evidence and from the scorecard headline. They remain in `rows.jsonl` (storage is append-only), but `/retro`'s scoring must filter them out.
 
@@ -1205,12 +698,7 @@ if routed ≥ 10 and (verdicts / routed) < 0.10:
 
 **When green: no prose.**
 
-**When tripped, output:**
-```
-[retro] pipeline-degraded: consumer-contradiction routing
-  routed=<N>  verdicts_landed=<M>  realization=<pct> (threshold 10% at N≥10)
-  see: $KDIR/_work/*/consumption-contradictions.jsonl and rows.jsonl
-```
+**When tripped, output:** read `skills/retro/templates/step3-8-tripped-outputs.md` § "Consumer-contradiction routing".
 
 ### Step 3.9: Non-compensatory scorecard headline (per template-version, tier:template only)
 
@@ -1254,51 +742,13 @@ Rows between pass and fail thresholds are `weak`. Thresholds are policy — `/ev
 
 **Per-template-version grouping.** Group the filtered rows by `template_version`. Compute each metric's aggregate value (mean across rows) per-template-version. Emit one headline per distinct `template_version`.
 
-**Worst-dimension-wins combination per template_version.**
-```
-per_metric_classification = {pass | weak | fail | insufficient:<N>} for each of the 6 classified metrics
-headline_per_template = worst(per_metric_classification)
-```
-- any `fail` → `fail`
-- no `fail` but any `weak` (including insufficient:<N>) → `weak`
-- all `pass` → `pass`
+**Worst-dimension-wins combination per template_version.** Classify each of the 6 metrics as `{pass | weak | fail | insufficient:<N>}`, then `headline_per_template = worst(per_metric_classification)`: any `fail` → `fail`; no `fail` but any `weak` (including insufficient:<N>) → `weak`; all `pass` → `pass`.
 
 **Never a weighted average.** Load-bearing: a weighted average would let high scores on one metric compensate for low scores on another, exactly the failure mode the non-compensatory headline exists to prevent. A template with perfect factual_precision (0.95) and terrible omission_rate (0.60) is `fail`, not `weak-but-close-to-pass`.
 
-**Report shape (per template-version).**
-```
-[retro] Scorecard headline — per template-version (non-compensatory, tier:template only)
+**Report shape (per template-version).** Read `skills/retro/templates/step3-telemetry-outputs.md` — section "Step 3.9 — Scorecard headline per template-version" — for the per-template-version output block, the all-filtered fallback line, and the warmup block.
 
-  <template_id>@<version-prefix-12>        HEADLINE=<pass|weak|fail>
-    factual_precision:            <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
-    curated_rate:                 <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
-    triviality_rate:              <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
-    omission_rate:                <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
-    observation_promotion_rate:   <val>    [<pass|weak|fail|insufficient:<N>>]  n=<N>
-    worst: <metric-that-set-headline>
-    unregistered/pre-calibration/degraded-window/wrong-tier rows excluded: <count>
-```
-
-One such block per distinct registered `template_version` with tier:template rows in the window. If the filter produces zero eligible rows for every template, render `[retro] Scorecard headline: no eligible rows (all-filtered)` — a condition adjacent to `pipeline-degraded`.
-
-If the `tier: template` row count is below the 10-sample floor on every metric, emit:
-```
-[retro] Scorecard headline: warmup — awaiting-template-tier-rows
-  tier:template rows in window: <N> (below n≥10 minimum for all metrics)
-  /evolve runs proceed; individual metrics show insufficient:<N> until sample accumulates.
-```
-
-**Journal persistence.** The headline goes into the retro journal entry (Step 4) under a `scorecard_headline` field in `--scores`:
-```json
-{
-  "scorecard_headline": {
-    "<template_id>@<version>": "pass",
-    "<template_id>@<version-2>": "fail"
-  }
-}
-```
-
-So `/evolve` can read per-template state without re-running Step 3.9. `/evolve` ranks templates by harmonic mean for mutation prioritization (per plan). Headline and harmonic-mean ranking are distinct — headline is the pass/weak/fail gate; harmonic mean orders within a failing set.
+**Journal persistence.** The headline goes into the retro journal entry (Step 4) under a `scorecard_headline` field in `--scores` — read `skills/retro/templates/emit-commands.md` § "Step 4 / 3.9 — scorecard_headline journal field" for the JSON shape. So `/evolve` can read per-template state without re-running Step 3.9. `/evolve` ranks templates by harmonic mean for mutation prioritization (per plan). Headline and harmonic-mean ranking are distinct — headline is the pass/weak/fail gate; harmonic mean orders within a failing set.
 
 **Invariant.** `/evolve` reads `scorecard_headline` to gate template mutations: a `fail` template can be edited from evidence in the current window (if it also passes the Step 5 citation gate); a `pass` template should not be edited from this window absent a specific failing-metric citation; a `weak` template is editable but deprioritized. `/evolve` does not re-derive these verdicts.
 
@@ -1306,45 +756,17 @@ So `/evolve` can read per-template state without re-running Step 3.9. `/evolve` 
 
 **Mandatory.**
 
-Two shapes depending on `window_state` from Step 3.8:
+Two shapes depending on `window_state` from Step 3.8 — read `skills/retro/templates/emit-commands.md` § "Step 4 — Retro dimension-score journal write" for both `lore journal write` invocations.
 
-**When `window_state == "pipeline-degraded"`:**
+**When `window_state == "pipeline-degraded"`:** dimension scores are still written (for trend analysis) but the headline prose leads with `pipeline-degraded`. The `window_state` + `tripped_checks` fields make the degraded status queryable by `/evolve`.
 
-```bash
-lore journal write \
-  --observation "pipeline-degraded | Tripped: <check-name-1>, <check-name-2>, ... | Key finding: <one sentence on which check(s) tripped and where to look>. Scorecard cells from this window are non-evidentiary for /evolve." \
-  --context "retro: <slug>" \
-  --work-item "<slug>" \
-  --role "retro" \
-  --scores '{"d1_delivery": X, "d2_quality": X, "d3_gaps": X, "d4_alignment": X, "d5_spec_utility": X, "window_state": "pipeline-degraded", "tripped_checks": ["<check-name-1>", "<check-name-2>"]}'
-```
-
-Dimension scores are still written (for trend analysis) but the headline prose leads with `pipeline-degraded`. The `window_state` + `tripped_checks` fields make the degraded status queryable by `/evolve`.
-
-**When `window_state != "pipeline-degraded"` (normal window):**
-
-```bash
-lore journal write \
-  --observation "Delivery: X/5 | Quality: X/5 | Gaps: X/5 | Alignment: X/5 | Spec Utility: X/5. Key finding: <one sentence>. Most actionable gap: <specific gap>." \
-  --context "retro: <slug>" \
-  --work-item "<slug>" \
-  --role "retro" \
-  --scores '{"d1_delivery": X, "d2_quality": X, "d3_gaps": X, "d4_alignment": X, "d5_spec_utility": X, "scorecard_headline": {"<template_id>@<version>": "pass|weak|fail", ...}, "scorecard_deltas": {"template": {...}, "correction": {...}, "reusable": {...}, "task-evidence": {...}}}'
-```
+**When `window_state != "pipeline-degraded"` (normal window):** observation carries 1-5 scores per dimension plus key finding + actionable gap; `--scores` carries dimensional values, `scorecard_headline`, and `scorecard_deltas` per tier.
 
 ### Step 4a: Behavioral-health journal entry
 
 **Mandatory when Step 3.7 ran.** Persists the rotation selection and answers into the journal so tuning has a queryable trail. Separate entry (distinct `--role`) so longitudinal queries filter cleanly from dimension-score entries.
 
-```bash
-lore journal write \
-  --observation "Checks: <C1,C4,C5,C7> | C1: <1–3 sentence answer> | C4: <answer> | C5: <answer> | C7: <answer>" \
-  --context "retro-behavioral-health: <slug>" \
-  --work-item "<slug>" \
-  --role "retro-behavioral-health"
-```
-
-`Checks:` lists the 4 selected check numbers (3 random from 1–6 plus Check 7). One `C<n>: <answer>` segment per selected check, in numeric order. No score fields.
+Read `skills/retro/templates/emit-commands.md` § "Step 4a — Behavioral-health journal write" for the `lore journal write` invocation. `Checks:` lists the 4 selected check numbers (3 random from 1–6 plus Check 7). One `C<n>: <answer>` segment per selected check, in numeric order. No score fields.
 
 ### Four journal roles — load-bearing
 
@@ -1365,15 +787,7 @@ The /retro ceremony emits **four distinct journal roles** across Steps 2.8d, 4, 
 
 Watch for: ceiling dimensions (5/5 for 2+ retros), new failure modes, dead dimensions (stuck at 3), evidence quality gaps, tier:template scorecard regressions.
 
-```bash
-lore journal write \
-  --observation "Target: <file> | Change type: <ceiling/new-failure-mode/dead-dimension/evidence-gap/template-regression> | Section: <section> | Suggestion: <specific change> | Evidence: <retro finding>" \
-  --context "retro-evolution: <slug>" \
-  --work-item "<slug>" \
-  --role "retro-evolution"
-```
-
-One entry per suggestion. 2-4 sentences each.
+Read `skills/retro/templates/emit-commands.md` § "Step 5 — Evolution-suggestion journal write" for the `lore journal write` invocation. One entry per suggestion. 2–4 sentences each.
 
 **CC-05 closed loop invariant.** `/retro` → `lore journal write --role retro-evolution` → `/evolve` Step 3 reads exclusively this role (and `self-test-evolution`) → `/evolve` applies edits → `/evolve` Step 7.5 bumps template-version → next `/retro` A/B compares pre/post.
 
@@ -1381,99 +795,11 @@ One entry per suggestion. 2-4 sentences each.
 
 ### Step 6: Report
 
-**When `window_state == "pipeline-degraded"`:**
+When emitting the report, read `skills/retro/templates/step6-report.md` for the two output templates (pipeline-degraded variant + normal-window variant). Branch on `window_state` from Step 3.8.
 
-```
-[retro] <slug> — PIPELINE-DEGRADED
-  Tripped: <check-name-1>, <check-name-2>, ...
-  <per-tripped-check block from Step 3.8's tripped-output templates>
+**When `window_state == "pipeline-degraded"`:** emit the pipeline-degraded variant — tripped-check blocks lead, dimension scores recorded but non-headline, evolution suggestions logged but won't be applied.
 
-  Dimension scores (recorded but non-headline):
-    Delivery: X/5 | Quality: X/5 | Gaps: X/5 | Alignment: X/5 | Spec Utility: X/5
-
-  /evolve will refuse to cite this window's scorecard cells. Fix the
-  tripped pipeline stage(s), then re-run /retro on the next window.
-  Evolution suggestions logged: N (will NOT be applied from this window)
-```
-
-**When `window_state != "pipeline-degraded"` (normal window):**
-
-Scorecard-first shape: delta surface + headline first, dimension scores relegated to narrative coda.
-
-```
-[retro] <slug>
-
-  # Primary: scorecard deltas (Step 3.0), partitioned by tier
-  Scorecard deltas — window <current-window-id> vs <previous-window-id>
-
-    --- tier: template ---
-    <template_id>@<version-prefix-12>:
-      <metric>: <prev> → <curr>  (<direction> <signed delta>, n=<N>)  [<classification change>]
-      ...
-    Suppressed: <N> (below-sample / below-magnitude / unregistered)
-
-    --- tier: correction ---
-    <template_id>@<version-prefix-12>:
-      <metric>: <prev> → <curr>  ...
-    --- tier: reusable ---
-    (informational)
-    --- tier: task-evidence ---
-    (informational)
-
-  # Headline: non-compensatory pass|weak|fail per template-version (Step 3.9, tier:template only)
-  Scorecard headline (non-compensatory, worst-dimension-wins, tier:template):
-    <template_id>@<version-prefix-12>  HEADLINE=<pass|weak|fail>
-      worst metric: <metric>
-    <template_id-2>@<version-prefix-12>  HEADLINE=<pass|weak|fail>
-      worst metric: <metric>
-
-  # Narrative coda: dimension scores (Step 3)
-  Narrative coda (dimension scores, not headline):
-    Delivery: X/5 | Quality: X/5 | Gaps: X/5 | Alignment: X/5 | Spec Utility: X/5
-    Key finding: <one sentence on the knowledge-system behavior this cycle>
-    Disagreement with scorecard headline? <none | brief note>
-
-  ## Memory System Telemetry (Step 3.5 — observability only, does not feed /evolve)
-
-  retention_after_renormalize:
-    median cycles_survived: <N>  |  entries with ≥3 cycles: <K>/<total>
-    top survivors: <entry_id> cycles=<N> | ...
-
-  downstream_adoption_rate:
-    mean rate: <val>  |  entries >50%: <K>/<total>
-    top adopters: <entry_id> rate=<val> status=<status> | ...
-
-  route_precision:
-    <role>: <accepted>/<total> (<pct>%)  |  ...
-
-  supersession_quality:
-    improved: <K>/<total>  |  neutral: <N>  |  regressed: <M>
-    notable (non-improved): ...  (or "all improved")
-
-  scale_drift_rate: <role>: drift=<val> [ABOVE-THRESHOLD if >0.20]  |  ...
-
-  scale signals (Step 2.9):
-    declaration_coverage: <N>/<total> (<PCT>)
-    redeclare_rate: <N>/<total> (<PCT>)
-    off_scale_routes_emitted: <N>
-    verifier_disagreements: <N>
-    off_altitude_skipped: <N>  [agent self-report]
-    counterfactual_better: <better|same|worse>  — <one-line rationale>
-    abstraction: <right-sized|too-coarse|too-fine>  — <one-line rationale>
-    better-than-no-scale: routes>0=<yes|no> | counterfactual=<yes|no> | redeclare=<yes|no>
-
-  channel-contract flags: <none | one line per flag>
-
-  # Channel-contract flags (Step 2b.6) — omit when no flags fired
-  Channel-contract drift detected:
-    <role>/<slot>  signal=<signal_type>  rate=<pct> over <N> cycles
-      Remedy: <one-line targeting workflow contract, not individual producers>
-
-  # Behavioral-health coda (Step 3.7)
-  <4 selected checks + answers — 1-3 sentences each>
-
-  Evolution suggestions logged: N (run /evolve to apply)
-```
+**When `window_state != "pipeline-degraded"` (normal window):** emit the normal-window variant — scorecard-first shape with deltas + headline first, dimension scores relegated to narrative coda, then Step 3.5 memory telemetry, Step 2.9 scale signals, Step 2b.6 channel-contract flags (when fired), Step 3.7 behavioral-health coda.
 
 **Section order is load-bearing.** The delta surface leads because it is the actionable signal. The headline follows because it is the settlement verdict. Dimension scores come last because they're longitudinal context, not primary signal. Reversing this order would re-establish the dimension-score-as-headline pattern that was explicitly retired.
 

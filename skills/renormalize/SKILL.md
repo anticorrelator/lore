@@ -28,21 +28,7 @@ mkdir -p "$KDIR/_meta"
 
 ### Step 2: Analysis (parallel agents)
 
-Create a team named `renorm-<YYYYMMDD-HHMMSS>` with 2 Explore agents running in parallel:
-
-**Agent 1 — Staleness scan:**
-```
-Run: lore analyze staleness --json
-Report the summary back via SendMessage: total entries scanned, stale count, breakdown by reason (age, low-confidence, missing referenced files).
-```
-
-**Agent 2 — Usage analysis:**
-```
-Run: lore analyze usage --json --write
-Report the summary back via SendMessage: total entries, hot/warm/cold counts, cold entries list, retrieval-log coverage.
-```
-
-Wait for both agents to complete and acknowledge their reports.
+Read `skills/renormalize/templates/step2-analysis-agents.md` for the team-spawn instruction and the two parallel Explore-agent prompts (Staleness scan + Usage analysis). Wait for both agents to complete and acknowledge their reports.
 
 ### Step 2b: Audit Union + Holistic Assessment
 
@@ -277,106 +263,11 @@ After approval, execute in two waves. **Wave 1 MUST complete before Wave 2 start
 
 ### Wave 1: Fix stale entries (including those in consolidation clusters)
 
-**Agent 4 — Entry Fixer:**
-```
-Read $KDIR/_meta/renormalize-plan.json.
-Execute the "fix" actions: for each fix-candidate entry, read the entry file and each of its related_files from the repo. Compare the entry's claims to current code. Rewrite the entry preserving format:
-- Keep the H1 title (# heading)
-- Rewrite prose to match current code behavior
-- Preserve or update See also: backlinks
-- Update the HTML metadata comment: set `learned` date to today, set `source: renormalize-fix`
-If a related_file is missing from the repo, skip that entry and report it.
-
-IMPORTANT: The fix list includes stale entries that are also members of consolidation clusters. These MUST be fixed now so that Wave 2 consolidation combines fresh content. Do not skip an entry because it will later be consolidated — fix it first.
-
-Report: entries fixed, entries skipped (with reasons), any issues encountered.
-```
-
-Wait for Agent 4 to complete before proceeding to Wave 2.
+Read `skills/renormalize/templates/wave1-fixer-prompt.md` for the Agent 4 Entry Fixer prompt template. Wait for Agent 4 to complete before proceeding to Wave 2.
 
 ### Wave 2: Prune, merge, demote, consolidate, restructure, and backlink (parallel)
 
-Spawn 4 general-purpose agents:
-
-**Agent 5 — Merger/Pruner:**
-```
-Read $KDIR/_meta/renormalize-plan.json.
-Execute the "prune" actions: delete each listed file.
-Execute the "merge" actions: for each merge set, apply the scale-check rule FIRST, then merge.
-
-Scale-check rule (cross-scale merge guard):
-1. Read the scale: field from the HTML metadata comment of each entry in the merge set (target + sources).
-2. If all entries share the same scale: proceed with the merge.
-3. If the entries span multiple scales AND the target entry is tagged `bridging: true` in its metadata
-   OR the target entry's path is under `bridging-entries/`:
-   - Proceed. The bridging entry becomes the parent. Add `supersedes: <source-path>` edges to the
-     target entry's See also: section for each cross-scale source, with a comment:
-     <!-- cross-scale child via renormalize-merge -->
-   - Delete the source files as normal.
-4. If the entries span multiple scales AND no bridging entry exists:
-   - Do NOT execute the merge. Log a rejection:
-     "REJECTED merge of [source paths] into [target]: spans scales [list]. Use consolidate action instead."
-   - Continue to the next merge set. Do not abort the full run.
-
-After the scale-check, for allowed merges: combine content from source entries into the target entry
-(preserve all unique insights, deduplicate, update backlinks), then delete the source files.
-Report: files pruned, files merged, merges rejected (with reason), any issues encountered.
-```
-
-**Agent 6 — Demoter/Consolidator:**
-```
-Read $KDIR/_meta/renormalize-plan.json.
-Execute the "demote" actions: for each demote candidate, read the entry and rewrite it to reduce scope/prominence appropriate to the recommended level. If recommended_level is "subcategory", move the file to the appropriate subcategory directory (create it if needed). If recommended_level is "domain", move to domains/. Update the HTML metadata comment: set source to "renormalize-demote". Update any inbound backlinks that reference the old path.
-Execute the "consolidate" actions with scale-aware logic:
-
-Scale-aware consolidation:
-1. For each consolidation cluster, read the scale: field from each member's HTML metadata comment.
-2. If all members share the same scale (same-scale cluster):
-   - Standard consolidate: create a new parent entry at that scale with the specified parent_title.
-   - Combine unique insights into subsections (following proposed_structure).
-   - Preserve all backlinks and metadata. Delete the original entries.
-   - Update any inbound backlinks to point to the new parent entry.
-3. If the cluster spans multiple scales (cross-scale cluster), check for a "consolidate-bridge" plan action:
-   - Create the bridging parent entry at the scale specified in parent_scale (highest scale in cluster).
-   - Set `bridging: true` in the bridging entry's HTML metadata comment.
-   - For each lower-scale member: do NOT delete it. Instead add `parent: <bridge_entry_id>` to its
-     HTML metadata comment. Update any inbound backlinks to reference both the child and the bridge.
-   - Write a summary subsection in the bridge entry that links to each child entry.
-   - Report the bridge entry path and all child paths with their preserved scales.
-
-Report: entries demoted (with old/new paths), clusters consolidated (with parent paths, and whether same-scale or bridge), any issues encountered.
-```
-
-**Agent 7 — Budget Rebalancer:**
-```
-Read $KDIR/_meta/renormalize-plan.json.
-Execute the "restructure" actions: for each restructure proposal, check the split_by_scale flag.
-
-If split_by_scale is false (or absent): create new subdirectories by topic, move entries into appropriate groupings, update any backlinks that reference moved entries.
-
-If split_by_scale is true: create scale-keyed subdirectories under the category (e.g., conventions/implementation/, conventions/subsystem/, conventions/architectural/). Move each entry into the subdirectory matching its scale: field from its HTML metadata comment. Update any backlinks that reference moved entries.
-
-Report: categories restructured (with split_by_scale flag noted), entries moved (with destination paths), backlinks updated.
-```
-
-**Agent 8 — Backlink Writer:**
-```
-Read $KDIR/_meta/assessment-report.json.
-Execute the "suggested_backlinks" actions: for each suggestion, read the source entry file and check whether a backlink to the target already exists. If not, append a `See also:` line with the backlink and a provenance comment:
-
-See also: [[knowledge:target-entry]]
-<!-- source: renormalize-backlinks -->
-
-Rules:
-- If the source file already has a "See also:" section, append the new link to it.
-- If no "See also:" section exists, add one at the end of the file (after a blank line).
-- Skip the link if [[knowledge:target-entry]] already appears anywhere in the source file.
-- The `<!-- source: renormalize-backlinks -->` comment MUST appear on the line immediately after the backlink line. This provenance marker is used by the structural importance computation to weight LLM-suggested links at 0.8 (vs 1.0 for explicit backlinks).
-
-Report: links written (with source → target pairs), links skipped (already present), any issues encountered.
-```
-
-Wait for all agents to complete and review their reports for any errors.
+Read `skills/renormalize/templates/wave2-agent-prompts.md` for the four general-purpose agent prompt templates (Agent 5 Merger/Pruner with the scale-check cross-scale merge guard, Agent 6 Demoter/Consolidator with scale-aware consolidation, Agent 7 Budget Rebalancer, Agent 8 Backlink Writer with the provenance-comment rule). Spawn all four in parallel, then wait for all agents to complete and review their reports for any errors.
 
 ### Step 5: Cleanup and verification
 
@@ -420,7 +311,7 @@ Reads `$KDIR/_renormalize/prune-history.jsonl` (one line per run: `{"run_id":"..
 
 **First-run behavior:** if `prune-history.jsonl` does not exist, all entries emit `cycles_survived: 0` — expected; the metric becomes meaningful after multiple renormalize runs accumulate history.
 
-**Interpretation:** entries with consistently low `cycles_survived` relative to their peers are candidates for pruning review. Stratify by `template_id` to detect whether specific producer templates generate less durable knowledge. Diagnostic telemetry only — must NOT feed `/evolve` citations or primary scoring.
+**Interpretation:** entries with consistently low `cycles_survived` relative to their peers are candidates for pruning review. Stratify by `template_id` to detect whether specific producer templates generate less durable knowledge. Guardrail interpretation per `skills/renormalize/SKILL.md:292` (canonical site).
 
 ### Emit downstream_adoption_rate rows
 
@@ -441,7 +332,7 @@ Reads `$KDIR/_meta/retrieval-log.jsonl` (loaded_paths from prefetch + session-st
  "value": <float>, "window_days": 30, "ts": "<ISO-8601>", "renormalize_run_id": "<run-id>"}
 ```
 
-**Interpretation:** low `value` on `status: current` entries indicates knowledge that agents rarely retrieve — candidates for consolidation or better keyword tagging. Equal or higher `value` on `status: superseded` entries vs `current` peers indicates trust signals aren't influencing retrieval behavior — feeds the trust-stamping feedback loop (Pass 2 task-21). Diagnostic telemetry only — must NOT feed `/evolve` citations or primary scoring.
+**Interpretation:** low `value` on `status: current` entries indicates knowledge that agents rarely retrieve — candidates for consolidation or better keyword tagging. Equal or higher `value` on `status: superseded` entries vs `current` peers indicates trust signals aren't influencing retrieval behavior — feeds the trust-stamping feedback loop (Pass 2 task-21). Guardrail interpretation per `skills/renormalize/SKILL.md:292` (canonical site).
 
 ### Emit correction_rate and precedent_rate rows
 
@@ -468,7 +359,7 @@ Reads `_manifest.json` and `scripts/scale-registry.json`. Walks all entries, rea
  "window_days": 30, "ts": "<ISO-8601>", "renormalize_run_id": "<run-id>"}
 ```
 
-`corrections_in_window` counts entries with ≥1 correction[] item dated within the window. L3 corrections (for `precedent_rate`) are entries that have both `corrections[]` AND `precedent_note:` in the META block — indicating the correction escalated to a supersedes edge. Diagnostic telemetry only — must NOT feed `/evolve` citations or primary scoring.
+`corrections_in_window` counts entries with ≥1 correction[] item dated within the window. L3 corrections (for `precedent_rate`) are entries that have both `corrections[]` AND `precedent_note:` in the META block — indicating the correction escalated to a supersedes edge. Guardrail interpretation per `skills/renormalize/SKILL.md:292` (canonical site).
 
 ### Run post-execution maintenance
 
@@ -486,21 +377,14 @@ Rebuild FTS5 search index — **must be `--force`**, not incremental:
 python3 ~/.lore/scripts/pk_cli.py index "$KDIR" --force
 ```
 
-Renormalize mutates META blocks in place (rescale, relabel, status flips). The
-incremental indexer keys on file create/delete/mtime, not META content
-diffs, so in-place META mutations on existing files can leave the SQLite
-index pointing at stale `scale` values. Any operation that rewrites META
-across the corpus must follow the same protocol: corpus-wide META mutation →
-`pk_cli.py index --force`.
+Renormalize mutates META blocks in place (rescale, relabel, status flips). The incremental indexer keys on file create/delete/mtime, not META content diffs, so in-place META mutations on existing files can leave the SQLite index pointing at stale `scale` values. Any operation that rewrites META across the corpus must follow the same protocol: corpus-wide META mutation → `pk_cli.py index --force`.
 
 Update manifest:
 ```bash
 bash ~/.lore/scripts/update-manifest.sh
 ```
 
-Mirror the post-renormalize source state to the Obsidian vault (no-op when
-`~/.lore/config/obsidian.json` is absent; full re-export propagates file
-moves, deletes, and inbound-link rewrites):
+Mirror the post-renormalize source state to the Obsidian vault (no-op when `~/.lore/config/obsidian.json` is absent; full re-export propagates file moves, deletes, and inbound-link rewrites):
 ```bash
 bash ~/.lore/scripts/export-obsidian.sh --full
 ```

@@ -110,67 +110,7 @@ Spawn agents and collect findings.
    DOMAIN_TREE=$(tree -L 3 --dirsfirst -I 'node_modules|.git|vendor|__pycache__|dist|build|.next|target|coverage' <paths>)
    ```
 
-3. **Spawn `min(subsystem_count, 4)` agents in a single message:**
-   ```
-   Task:
-     subagent_type: "general-purpose"
-     model: "<selected-model>"
-     team_name: "bootstrap-<SLUG>"
-     name: "explorer-N"
-     mode: "bypassPermissions"
-     prompt: |
-       You are explorer-N on the bootstrap-<SLUG> team.
-
-       ## Project Sketch
-       <embed the sketch from findings.md>
-
-       ## Prior Knowledge
-       <embed $PRIOR_KNOWLEDGE>
-
-       ## Subsystem Structure
-       <embed $DOMAIN_TREE>
-
-       ## Mission
-       Map this subsystem's **boundaries, contracts, and shapes** at architecture/subsystem scale. Use the project's own vocabulary from the sketch.
-
-       Report on:
-       - **Boundaries** — what does this subsystem own? what's outside it?
-       - **Contracts at the seams** — signatures of public functions, REST/CLI/IPC surfaces, schemas, message formats, file formats, env-var/config contracts, hook/plugin registries
-       - **Shapes** — core data structures, types, schemas that flow through or persist
-       - **Lifecycle and ownership** — who creates/mutates/destroys state; ordering constraints; init/teardown paths
-       - **Internal layering** — if the subsystem decomposes further, name the layers and what each owns
-       - **Integration points** — how this subsystem talks to others (function call, event, queue, file, socket, shared store)
-       - **Entry points** — top-of-stack files/symbols that anchor the map (use sparingly; prefer subsystem names over paths)
-
-       Out of scope — do NOT report:
-       - Function bodies, algorithm choices, line-level behavior
-       - Style/formatting conventions
-       - Gotchas, sharp edges, "things that would bite a developer" (these accrue through use, not bootstrap)
-       - Test details unless tests *are* the contract
-
-       ## Workflow
-       1. TaskList → claim one (TaskUpdate owner=you, status=in_progress)
-       2. TaskGet for full context
-       3. Explore: README and top-level first; then entry points; then contract definitions (types, schemas, interfaces, registries). Read enough to map the shape — not every line.
-       4. SendMessage to "<team-lead-name>":
-          summary: "Findings: <subsystem name>"
-          content: |
-            **Subsystem:** <name>
-            **Boundaries:** <what it owns, what's outside>
-            **Contracts at the seams:** <bullets>
-            **Shapes:** <bullets>
-            **Lifecycle and ownership:** <bullets>
-            **Internal layering:** <bullets, or "flat">
-            **Integration points:** <bullets>
-            **Entry points:** <minimal anchor list>
-            **Observations:** <claims you're unsure of; contradictions across files; patterns that span beyond this subsystem>
-
-          Do NOT call `lore capture`.
-       5. TaskUpdate status=completed
-       6. TaskList → claim next if available; done when none remain
-
-       800–2000 chars. Architecture and subsystem scale only. Facts over opinions.
-   ```
+3. **Spawn `min(subsystem_count, 4)` agents in a single message:** read `skills/bootstrap/templates/explorer-prompt.md` for the Task spawn block and prompt scaffold (Project Sketch + Prior Knowledge + Subsystem Structure + Mission + Out-of-scope + Workflow). Embed `$PRIOR_KNOWLEDGE` and `$DOMAIN_TREE` into each spawn.
 
 4. **As messages arrive, append to `$WORK_DIR/<SLUG>/findings.md`:**
    ```markdown
@@ -228,18 +168,16 @@ Group findings by theme, flag contradictions, draft entries.
    Prune freely. (e.g., "drop 3, edit 2")
    ```
 
-2. Apply user feedback. Write approved entries to `$WORK_DIR/<SLUG>/_batch_entries.json`:
+2. Apply user feedback. Write approved entries to `$WORK_DIR/<SLUG>/_batch_entries.json` — one object per entry, fields match `lore capture` flags:
    ```json
    [{"insight": "...", "context": "Discovered during bootstrap of <repo>", "category": "<cat>", "confidence": "medium", "related_files": "<csv>"}]
    ```
-   One object per entry. Fields match `lore capture` flags.
 
 3. File:
    ```bash
    lore batch-capture --file "$WORK_DIR/<SLUG>/_batch_entries.json"
    ```
-   - Success: delete `_batch_entries.json`.
-   - Failure: retain the file; prompt the user to retry with the same command. Do not proceed to heal until resolved.
+   On success delete `_batch_entries.json`. On failure retain the file; prompt the user to retry with the same command; do not proceed to heal until resolved.
 
 4. Run `lore heal` regardless of partial failure.
 
@@ -273,8 +211,7 @@ Verify the **map matches the territory** — sample architectural claims, not fi
 
 2. Check off completed phases in `plan.md`.
 
-3. **All subsystems done** → `lore work archive "<SLUG>"`.
-   **Partial completion** → leave active; run `lore work heal`.
+3. **All subsystems done** → `lore work archive "<SLUG>"`. **Partial completion** → leave active; run `lore work heal`.
 
 4. Report:
    ```

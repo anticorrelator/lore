@@ -37,7 +37,7 @@ Team-based divide-and-conquer: the spec-lead composes an investigation plan tabl
    ```
    Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
-3. Compute template versions for provenance. Resolve agent template paths via `resolve_agent_template` (lib.sh helper) so the canonical lore-repo `agents/<name>.md` is hashed regardless of which harness is active. The skill template path uses the active harness's skills install path — on Claude Code that's `~/.claude/skills/`, on Codex it's `~/.codex/skills/` (per `resolve_harness_install_path skills`):
+3. Compute template versions for provenance. Resolve agent paths via `resolve_agent_template` (lib.sh) — the canonical lore-repo `agents/<name>.md` is hashed regardless of active harness. The skill path uses the harness skills install path (`~/.claude/skills/` on Claude Code, `~/.codex/skills/` on Codex; resolve via `resolve_harness_install_path skills`):
    ```bash
    source ~/.lore/scripts/lib.sh
    SKILLS_DIR=$(resolve_harness_install_path skills)
@@ -45,9 +45,9 @@ Team-based divide-and-conquer: the spec-lead composes an investigation plan tabl
    RESEARCHER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$(resolve_agent_template researcher)")
    ADVISOR_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$(resolve_agent_template advisor)")
    ```
-   If any call fails, fall through with an empty string. Registration into `$KDIR/_scorecards/template-registry.json` is handled by `scorecard-append.sh` on first use. Reports without a `Template-version:` field warn+pass rather than fail — the CC-01 backwards-compat gate enables incremental template migration without blocking legacy emitters.
+   On call failure, fall through with empty string. `scorecard-append.sh` registers into `$KDIR/_scorecards/template-registry.json` on first use. Missing `Template-version:` warns+passes (CC-01 backwards-compat) so legacy emitters don't block.
 
-4. Try to resolve input as an existing work item via `lore work resolve` (delegated to the canonical resolver — handles exact-slug fast path, fuzzy match, branch matching, and archive fallback):
+4. Resolve input via `lore work resolve` (handles exact-slug, fuzzy, branch-matching, and archive fallback):
 
    ```bash
    if RESULT=$(lore work resolve "$INPUT" --branch "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"); then
@@ -67,11 +67,11 @@ Team-based divide-and-conquer: the spec-lead composes an investigation plan tabl
    - **If resolved item has `ARCHIVED=true`:** Warn the user and wait for explicit confirmation before continuing.
    - **If resolved** → load the work item:
     - Read `_meta.json.intent_anchor` when present. Treat it as the capability anchor from work-item intake — an interpreted one-sentence statement of the user-visible capability the work must deliver, audited for looseness at intake (alternatives, comparatives without targets, vague verbs) and tightened via user clarification before commit. The spec may refine implementation shape, but it must not silently narrow or remove the capability implied by this statement; any such change is a user-visible scope delta. Preserve the wording verbatim when restating it — downstream gates (Step 5.5 verifier, `/implement` anchor prompts) detect drift by string comparison, so a paraphrase here breaks the audit chain even when intent is preserved.
-     - If `plan.md` exists with synthesis already complete (Design Decisions + Phases present), skip to Step 5.1 (Confirm understanding). If a `## Strategy` section exists, load it silently as shaping context.
-     - If `plan.md` exists with `## Investigations` and completed findings but no synthesis yet, skip to synthesis (Step 5). If a `## Strategy` section exists, load it silently and use it as shaping context — do not re-prompt.
-     - If it has investigations but `## Open Questions` needing follow-up, dispatch targeted follow-ups.
-     - If `plan.md` exists but is incomplete, present for discussion/editing. If no `## Strategy` section exists and synthesis has not yet run, offer the strategy gate (Step 4) before synthesizing.
-     - If no `plan.md`, continue to Step 2.
+     - `plan.md` with synthesis complete (Design Decisions + Phases) → skip to Step 5.1. Load any `## Strategy` silently as shaping context.
+     - `plan.md` with `## Investigations` and findings but no synthesis → skip to Step 5. Load any `## Strategy` silently; do not re-prompt.
+     - Investigations with `## Open Questions` needing follow-up → dispatch targeted follow-ups.
+     - `plan.md` incomplete → present for discussion/editing. If no `## Strategy` and synthesis has not run, offer the strategy gate (Step 4) first.
+     - No `plan.md` → continue to Step 2.
    - **If NOT resolved** → treat input as freeform description, go to Goal Refinement.
    - **If no input at all** → try branch inference; if no match, ask what they want to spec.
 
@@ -99,7 +99,7 @@ If the user's description is already specific enough (clear scope, stated constr
 4. Read the files yourself — do NOT spawn subagents.
 5. Note key findings as you go.
 6. **External skill and agent discovery (strict — exclude lore protocol toolchain)** — after reading key files, scan for relevant *external* skills and agents:
-   - Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** from discovery — they are the protocol toolchain, not advisors. Discovery targets purely external skills (e.g., security review, language-specific tooling, harness configuration helpers, domain-specific reviewers).
+   - Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** — they are protocol toolchain, not advisors. Target external skills (security review, language tooling, harness helpers, domain reviewers).
    - Build the exclusion list from the canonical lore repo:
      ```bash
      source ~/.lore/scripts/lib.sh
@@ -107,10 +107,10 @@ If the user's description is already specific enough (clear scope, stated constr
      LORE_SKILL_NAMES=$(ls "$LORE_SOURCE_REPO/skills/" 2>/dev/null | grep -v '\.md$')
      LORE_AGENT_NAMES=$(ls "$LORE_SOURCE_REPO/agents/"*.md 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.md$//')
      ```
-   - Glob `<skills_dir>/*/SKILL.md` — for each, take the parent directory name; if it appears in `$LORE_SKILL_NAMES`, skip. Otherwise read the YAML frontmatter (`name`, `description`) and first section. Resolve `<skills_dir>` via `resolve_harness_install_path skills` (typically `~/.claude/skills` on Claude Code; differs on Codex).
-   - Glob `<agents_dir>/*.md` — apply the same name filter against `$LORE_AGENT_NAMES`. Read each remaining agent template name and opening description. Resolve `<agents_dir>` via `resolve_harness_install_path agents` (typically `~/.claude/agents` on Claude Code).
-   - Match the work item title, description, and key findings against the surviving (external) skill/agent names using keyword overlap. **Skill match criterion is strict:** include only when the skill's stated domain plausibly contributes to *this* work item's implementation, not "could in theory be invoked someday."
-   - Deep-read any SKILL.md or agent template that shows strong overlap with the work item domain.
+   - Glob `<skills_dir>/*/SKILL.md` (resolve via `resolve_harness_install_path skills`); skip names in `$LORE_SKILL_NAMES`; read remaining frontmatter (`name`, `description`) and first section.
+   - Glob `<agents_dir>/*.md` (resolve via `resolve_harness_install_path agents`); apply the same name filter against `$LORE_AGENT_NAMES`; read remaining template name and opening description.
+   - Match work item title, description, and key findings against the surviving (external) skill/agent names by keyword overlap. **Skill match criterion is strict:** include only when the skill's stated domain plausibly contributes to *this* work item's implementation — not "could in theory be invoked someday."
+   - Deep-read any SKILL.md or agent template with strong overlap.
    - Emit a skill discovery block (mandatory):
      ```
      **External skill discovery:**
@@ -119,7 +119,7 @@ If the user's description is already specific enough (clear scope, stated constr
      ```
 
 7. **Preferences and conventions discovery (permissive — include if possibly relevant)** — after skill discovery, surface every preference or convention that *might* apply, even tangentially:
-   - **Inclusion criterion is the inverse of skill discovery.** The test is "is it *possible* the work might need this preference or convention" — not "will we definitely apply it." If an entry covers a topic, file pattern, ceremony, surface, or activity that overlaps with the work item even loosely, include it. Err on the side of over-inclusion; synthesis culls. Missing an applicable preference is worse than carrying an inapplicable one through review.
+   - **Inclusion criterion is the inverse of skill discovery.** The test is "is it *possible* the work might need this" — not "will we definitely apply it." Any topic, file pattern, ceremony, surface, or activity overlap (even loose) qualifies. Err on the side of over-inclusion; synthesis culls. Missing an applicable preference is worse than carrying an inapplicable one through review.
    - Enumerate canonical directories so nothing is missed by ranking:
      ```bash
      KDIR=$(lore resolve)
@@ -127,13 +127,13 @@ If the user's description is already specific enough (clear scope, stated constr
        [[ -d "$dir" ]] && ls "$dir"
      done
      ```
-     Missing directories count as zero entries; do not let one absent category fail the whole scan.
-   - Run BM25 queries at both altitudes to catch entries the directory walk wouldn't surface by topic affinity:
+     Missing directories count as zero; one absent category does not fail the scan.
+   - Run BM25 queries at both altitudes to catch entries the directory walk misses by topic affinity:
      ```bash
      lore search "<work item topic>" --type knowledge --scale-set subsystem,implementation --limit 10
      lore search "<work item topic>" --type knowledge --scale-set abstract,architecture --limit 5
      ```
-     From each result set, retain entries whose path is under `preferences/`, `conventions/`, or `cross-cutting-conventions/`.
+     Retain results whose path is under `preferences/`, `conventions/`, or `cross-cutting-conventions/`.
    - Read each candidate's title and lead paragraph; deep-read any with surface-level overlap.
    - Emit a discovery block (mandatory):
      ```
@@ -150,11 +150,11 @@ If the user's description is already specific enough (clear scope, stated constr
 ### Step 2b: Full branch (default, no `--short` flag)
 
 1. From the feature description, identify 3-7 focused investigation questions. Each should target a specific codebase concern, be answerable by exploring files, and be independent enough to run in parallel.
-2. **Always include** two mandatory fixed investigations (both count toward the 3-7 total):
+2. Always include two mandatory fixed investigations (both count toward the 3-7 total): a. External skill and agent applicability (strict)... b. Preferences and conventions applicability (permissive)...
 
-   a. **External skill and agent applicability (strict)** — which installed *external* (non-lore) skills and agent templates should be invoked during **implementation** of this work item. Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** — they are the protocol toolchain, not advisors. The researcher must filter them out before reporting matches. Key files: `<skills_dir>/*/SKILL.md`, `<agents_dir>/*.md` (resolve via `resolve_harness_install_path skills` / `resolve_harness_install_path agents`); exclusion list comes from the canonical Lore source repo, `source ~/.lore/scripts/lib.sh && printf '%s\n' "$LORE_REPO_DIR"`, then `/skills/` and `/agents/`. Do not use `resolve-repo.sh` for this; it returns the target project's knowledge store, not the Lore source tree. Match criterion is **strict** — include only skills whose stated domain plausibly contributes to *this* work item's implementation.
+   a. **External skill and agent applicability (strict)** — which installed *external* (non-lore) skills and agent templates should be invoked during **implementation** of this work item. Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** — protocol toolchain, not advisors. The researcher filters them out before reporting matches. Key files: `<skills_dir>/*/SKILL.md`, `<agents_dir>/*.md` (resolve via `resolve_harness_install_path skills` / `resolve_harness_install_path agents`); exclusion list comes from the canonical Lore source repo (`source ~/.lore/scripts/lib.sh && printf '%s\n' "$LORE_REPO_DIR"` + `/skills/` and `/agents/`). Do not use `resolve-repo.sh` here — it returns the project's knowledge store, not the Lore source tree. Match criterion is **strict** — include only skills whose stated domain plausibly contributes to *this* work item's implementation.
 
-   b. **Preferences and conventions applicability (permissive)** — which entries from the knowledge store's `preferences/`, `conventions/`, and `cross-cutting-conventions/` directories the work might need to honor. **Inclusion criterion is permissive — the inverse of skill discovery.** The test is "is it *possible* the work might need this" — not "will we definitely apply it." Err on the side of over-inclusion; synthesis culls. Missing an applicable preference is worse than carrying an inapplicable one through review. Key files: `$KDIR/preferences/`, `$KDIR/conventions/`, `$KDIR/cross-cutting-conventions/` (full directory enumeration; absent directories count as zero entries) plus BM25 results from `lore search "<topic>" --type knowledge --scale-set subsystem,implementation --limit 10` and `--scale-set abstract,architecture --limit 5`.
+   b. **Preferences and conventions applicability (permissive)** — which entries from `preferences/`, `conventions/`, and `cross-cutting-conventions/` the work might need to honor. **Inclusion criterion is permissive — the inverse of skill discovery.** The test is "is it *possible* the work might need this" — not "will we definitely apply it." Err on over-inclusion; synthesis culls. Missing an applicable preference is worse than carrying an inapplicable one through review. Key files: `$KDIR/preferences/`, `$KDIR/conventions/`, `$KDIR/cross-cutting-conventions/` (full enumeration; absent = zero) plus BM25 from `lore search "<topic>" --type knowledge --scale-set subsystem,implementation --limit 10` and `--scale-set abstract,architecture --limit 5`.
 3. Check the knowledge store index for file hints per investigation.
 4. Assess complexity for each investigation: **simple** (1-2 files), **moderate** (3-5 files), **complex** (6+ files or cross-cutting).
 5. Present the Investigation Plan to the user:
@@ -171,21 +171,21 @@ If the user's description is already specific enough (clear scope, stated constr
    Proceed, or adjust?
    ```
 6. Wait for user confirmation. If the user requests adjustments, revise and re-present. **If `--yes`, dispatch immediately without confirmation.**
-7. **Create team via orchestration adapter.** Resolve the active framework's orchestration adapter at `adapters/agents/<framework>.sh` and treat its `spawn` / `wait` / `send_message` / `collect_result` / `shutdown` subcommands as the dispatch contract for every team operation in this skill. The adapter emits `delegate:<tool> ...` directives that the skill body translates into the harness's native tool calls — on Claude Code that means `TeamCreate` / `TaskCreate` / `SendMessage` / `TaskList` / `TaskGet`; on opencode/codex the same directives map to plugin runtime / subagent spawn APIs. Before creating the team, query the adapter's capability gates:
+7. **Create team via orchestration adapter.** The adapter at `adapters/agents/<framework>.sh` exposes `spawn` / `wait` / `send_message` / `collect_result` / `shutdown` as the dispatch contract; it emits `delegate:<tool> ...` directives the skill body translates into native tool calls (Claude Code: `TeamCreate` / `TaskCreate` / `SendMessage` / `TaskList` / `TaskGet`; opencode/codex: plugin-runtime / subagent-spawn APIs). Before creating the team, query capability gates:
    ```bash
    ADAPTER="$LORE_REPO_DIR/adapters/agents/$(resolve_active_framework).sh"
    ENFORCEMENT=$(bash "$ADAPTER" completion_enforcement)  # native_blocking | lead_validator | self_attestation | unavailable
    TEAM_MESSAGING=$(framework_capability team_messaging)  # full | partial | fallback | none
    ```
    - `ENFORCEMENT` shapes the retry/abandon decision in Step 3 (per `adapters/agents/README.md` §"Completion Enforcement Degradation Modes").
-   - `TEAM_MESSAGING != full` collapses only the shared-team layer: skip `TeamCreate`, `SendMessage`, and on-disk team config, then use a lead-side handle map. Do **not** collapse to `--short` while `subagents` remains available; continue with lead-orchestrated researcher fanout and serial collection.
-   - `subagents=none` is the collapse point for `--short`: if the adapter cannot spawn isolated researcher contexts, fall back to the Step 2a short branch.
+   - `TEAM_MESSAGING != full` collapses only the shared-team layer: skip `TeamCreate`, `SendMessage`, and on-disk team config; use a lead-side handle map. Do **not** collapse to `--short` while `subagents` remains available — continue with lead-orchestrated fanout and serial collection.
+   - `subagents=none` is the `--short` collapse point: if the adapter cannot spawn isolated researcher contexts, fall back to Step 2a.
 
-   For Claude Code (the default path), team creation is the native `TeamCreate` tool:
+   On Claude Code (default), team creation is the native `TeamCreate` tool:
    ```
    TeamCreate: team_name="spec-<slug>", description="Investigating <work item title>"
    ```
-   On harnesses with `TEAM_MESSAGING != full` (opencode/codex today), skip team creation entirely and initialize an in-memory handle map keyed by investigation number.
+   When `TEAM_MESSAGING != full` (opencode/codex today), skip team creation and initialize an in-memory handle map keyed by investigation number.
 8. Read your team lead name from the active harness's teams install path (resolved via `resolve_harness_install_path teams`; typically `~/.claude/teams/` on Claude Code), at `<teams_dir>/spec-<slug>/config.json`. Frameworks where `install_paths.teams=unsupported` (e.g. codex today) cannot persist team config — use the lead-side handle map instead of on-disk config.
 9. Create investigation tasks — for each question, route through the adapter's `spawn` operation:
    ```bash
@@ -193,39 +193,23 @@ If the user's description is already specific enough (clear scope, stated constr
    bash "$ADAPTER" spawn researcher "<task_prompt>" "$RESEARCHER_MODEL"
    # → delegate:TaskCreate role=researcher model=<id>  (claude-code)
    ```
-   On Claude Code, the lead model invokes `TaskCreate` with the directive's role/model; the spawn directive carries one `TaskCreate` per question with full question, context, file hints, and expected report format.
-   - For the mandatory **External skill and agent applicability** investigation: include instructions to (a) evaluate implementation-phase applicability (not the investigation phase), (b) read actual SKILL.md files, (c) **exclude lore-managed skills and agents** before matching — build the exclusion list from the Lore source repo resolved by `source ~/.lore/scripts/lib.sh; printf '%s\n' "$LORE_REPO_DIR"`, applied by parent-directory name, (d) apply a strict match criterion (skill's domain must plausibly contribute to *this* work item, not "could in theory be invoked"), and (e) report `**Matched skills:**` / `**Matched agents:**` blocks after `**Implications:**`. If every candidate gets filtered out, the report is `**Matched skills:** none` — that is a valid terminal.
-   - For the mandatory **Preferences and conventions applicability** investigation: include instructions to (a) enumerate existing `$KDIR/preferences/`, `$KDIR/conventions/`, and `$KDIR/cross-cutting-conventions/` directories directly, treating absent directories as zero entries instead of an error, plus BM25 queries at both `subsystem,implementation` and `abstract,architecture` scale-sets retaining hits whose path is under those three directories, (b) apply a **permissive** inclusion criterion — include if it is *possible* the work might need to honor the entry, not "will we definitely apply it," (c) read each candidate's title and lead paragraph, deep-reading any with surface-level overlap, and (d) report a `**Surfaced preferences/conventions:**` block after `**Implications:**` listing each surfaced entry as `[[knowledge:<path>]] — 1-line "why it might apply"`. Err on the side of over-inclusion; synthesis culls. If no entries surface after permissive review, report `**Surfaced preferences/conventions:** none`.
+   On Claude Code the lead invokes `TaskCreate` with the directive's role/model; one `TaskCreate` per question with full question, context, file hints, and expected report format.
+   - Mandatory **External skill and agent applicability** investigation — instructions: (a) evaluate implementation-phase applicability (not investigation phase); (b) read actual SKILL.md files; (c) **exclude lore-managed skills and agents** (exclusion list from `source ~/.lore/scripts/lib.sh; printf '%s\n' "$LORE_REPO_DIR"`, matched by parent-directory name); (d) strict match criterion — skill domain must plausibly contribute to *this* work item, not "could in theory be invoked"; (e) report `**Matched skills:**` / `**Matched agents:**` blocks after `**Implications:**`. `**Matched skills:** none` after filtering is a valid terminal.
+   - Mandatory **Preferences and conventions applicability** investigation — instructions: (a) enumerate `$KDIR/preferences/`, `$KDIR/conventions/`, `$KDIR/cross-cutting-conventions/` directly (absent = zero, not error), plus BM25 at `subsystem,implementation` and `abstract,architecture` retaining hits under those paths; (b) **permissive** inclusion — include if it is *possible* the work might need to honor the entry; (c) read title and lead paragraph, deep-read on surface overlap; (d) report `**Surfaced preferences/conventions:**` block after `**Implications:**` listing each entry as `[[knowledge:<path>]] — 1-line "why it might apply"`. Err on over-inclusion; synthesis culls. No surfaced entries → report `**Surfaced preferences/conventions:** none`.
 10. Pre-fetch knowledge for each investigation:
     ```bash
     PRIOR_KNOWLEDGE=$(lore prefetch "<investigation topic>" --format prompt --limit 5 --scale-set=<bucket>)
     ```
-11. **External skill-applicability scan (strict — exclude lore protocol toolchain):** the scan identifies skills relevant to this work item but does NOT spawn advisor agents in the default flow. Per D1/D3, default-route consultations are handled inline by the spec-lead (and by `/implement`'s lead at implementation time); skill-backed domains are invoked directly via the `Skill` tool when a researcher SendMessages a question. Applicable external skills are recorded in (a) an in-memory `$SKILL_INVOCATION_MAP` the spec-lead consults inline if a researcher routes a question to that domain, and (b) the eventual `**Related skills:**` block in `plan.md` (added in Step 5's Discovery findings integration).
-    a. Scan the skill list in your system prompt. **Filter out lore-managed skills** (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) before matching — they are the protocol toolchain, not advisors. Apply a strict match criterion: include only when the skill's domain plausibly contributes to *this* work item's implementation. Emit a skill discovery block (mandatory):
+11. **External skill-applicability scan (strict — exclude lore protocol toolchain):** identifies skills relevant to this work item but does NOT spawn advisor agents on the default route. Per D1/D3, default-route consultations are handled inline by the spec-lead (and `/implement`'s lead at implementation time); skill-backed domains are invoked directly via the `Skill` tool when a researcher SendMessages a question. Applicable external skills are recorded in (a) an in-memory `$SKILL_INVOCATION_MAP` consulted inline if a researcher routes a question to that domain, and (b) the `**Related skills:**` block in `plan.md` (added in Step 5 Discovery findings integration).
+    a. Scan the skill list in your system prompt. **Filter out lore-managed skills** (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) before matching — protocol toolchain, not advisors. Apply a strict match criterion: include only when the skill's domain plausibly contributes to *this* work item's implementation. Emit a skill discovery block (mandatory):
        ```
        **External skill discovery:**
        Considered: <comma-separated list of external skills checked, after lore-toolchain filter>
        Matched: <skill-name — rationale> (or "none")
        ```
-    b. For each matched skill, read its SKILL.md and record an entry in the `$SKILL_INVOCATION_MAP` keyed by the skill's domain (skill name + scope). The lead consults this map inline if a researcher's SendMessage routes to that domain — the lead invokes the skill via the `Skill` tool and replies to the researcher with its output.
-    c. **`$ADVISORY_MIXIN` is empty on the default route.** Researcher prompts do not receive `scripts/agent-protocols/advisory-consultation.md` in the default flow. The mixin file is an opt-in artifact consumed by `/implement` when a phase declares `**Advisors:** ... mode: persistent` in `plan.md` (authored in Step 5b and consumed downstream — `/spec` itself does not author or consume `mode: persistent` declarations during investigation).
-
-    <!-- Opt-in surface: not exposed by /spec today; /implement consumes mode: persistent declarations from plan.md instead.
-         The legacy advisor-spawn / mixin-build path is preserved below for any future spec-time opt-in surface but is gated on
-         a condition that is always false today (no /spec mechanism authors a persistent advisor declaration during
-         investigation; only phase-level plan.md does, and that is read by /implement after /spec completes). Keep the code
-         path readable as a reference; do NOT execute it on the default route. -->
-    ```bash
-    SPEC_PERSISTENT_ADVISORS_OPT_IN=false  # always false today; no /spec surface flips this
-    if [ "$SPEC_PERSISTENT_ADVISORS_OPT_IN" = "true" ]; then
-      # Legacy opt-in path (preserved for reference only — unreachable on default route):
-      #   - For each matched skill, spawn an advisor using `agents/advisor.md` with template injections:
-      #     {{team_name}} → spec-<slug>, {{advisor_domain}} → skill name + scope, {{domain_context}} → SKILL.md content.
-      #   - Build $ADVISORY_MIXIN from scripts/agent-protocols/advisory-consultation.md with {{advisors}} resolved.
-      :
-    fi
-    ```
-12. Spawn researcher agents — `min(investigation_count, 4)` in a single message via the orchestration adapter's `spawn` operation. Use the `researcher` agent template (resolve via `resolve_agent_template researcher`; on Claude Code that path is `~/.claude/agents/researcher.md`) with template injections: `{{team_name}}` → `spec-<slug>`, `{{team_lead}}` → lead name, `{{prior_knowledge}}` → `$PRIOR_KNOWLEDGE`, `{{template_version}}` → `$RESEARCHER_TEMPLATE_VERSION`. On the default route, `$ADVISORY_MIXIN` is empty (per Step 2b.11.c) and the mixin concatenation is a no-op — researcher prompts end at the resolved researcher template content. The concatenation step is therefore conditional: append `$ADVISORY_MIXIN` after the resolved researcher template content with a blank line separator **only if `$ADVISORY_MIXIN` is non-empty** (i.e. an opt-in path populated it; the default `/spec` flow never does). Per-spawn model selection routes through `resolve_model_for_role researcher` (or the explicit override set in Step 1.1 from `--model`); the adapter validates the role→model binding against the active framework's `model_routing.shape` and rejects mismatches without silent fallback.
+    b. For each matched skill, read its SKILL.md and record an entry in `$SKILL_INVOCATION_MAP` keyed by domain (skill name + scope). The lead consults this map inline when a researcher's SendMessage routes to that domain — invokes the skill via the `Skill` tool and replies with its output.
+    c. **`$ADVISORY_MIXIN` is empty on the default route.** Researcher prompts do not receive `scripts/agent-protocols/advisory-consultation.md`; the mixin is consumed only by `/implement` when a phase declares `**Advisors:** ... mode: persistent`. `/spec` neither authors nor consumes `mode: persistent` declarations. The legacy advisor-spawn / mixin-build path (`agents/advisor.md` per matched skill + `{{advisors}}` resolution) is gated behind a `SPEC_PERSISTENT_ADVISORS_OPT_IN` flag that no `/spec` surface flips today — preserved as reference for a future opt-in surface, unreachable on the default route.
+12. Spawn researcher agents — `min(investigation_count, 4)` in a single message via the adapter's `spawn` operation. Use the `researcher` agent template (`resolve_agent_template researcher`; Claude Code path `~/.claude/agents/researcher.md`) with injections: `{{team_name}}` → `spec-<slug>`, `{{team_lead}}` → lead name, `{{prior_knowledge}}` → `$PRIOR_KNOWLEDGE`, `{{template_version}}` → `$RESEARCHER_TEMPLATE_VERSION`. On the default route `$ADVISORY_MIXIN` is empty (per Step 2b.11.c) and mixin concatenation is a no-op. Concatenation is conditional: append `$ADVISORY_MIXIN` after the resolved template with a blank-line separator **only if non-empty** (opt-in path; default `/spec` never populates). Per-spawn model selection routes through `resolve_model_for_role researcher` (or the `--model` override from Step 1.1); the adapter validates the role→model binding against `model_routing.shape` and rejects mismatches without silent fallback.
 
 ---
 
@@ -252,8 +236,8 @@ As researcher messages arrive (or after direct file reading in short branch):
    - **Absence semantics:** if no assertions or lead-observed task claims exist, both `task-claims.jsonl` and `evidence.md` may be absent — absence means "no Tier-2 claims captured this session," not "work was fully verified."
 
 5. **Full branch only:** When all investigation tasks are complete:
-   - Send shutdown requests via the orchestration adapter's `shutdown` operation: `bash "$ADAPTER" shutdown <handle> true` for each researcher handle, **plus each advisor handle if any were created on the opt-in path.** On the default route Step 2b.11 does not spawn advisor agents (`$SPEC_PERSISTENT_ADVISORS_OPT_IN=false`), so there are no advisor handles to shut down — skip the advisor-shutdown block silently. The shutdown call for researcher handles always runs. On Claude Code each shutdown expands to `delegate:SendMessage handle=<id> type=shutdown_request approve=true` which the lead invokes as the native `SendMessage` tool. On harnesses where `team_messaging=none`, the adapter returns `unsupported` and the skill body relies on harness-native session cleanup (Codex subagent-stop, OpenCode plugin-runtime kill).
-   - Run `TeamDelete` to clean up the team (Claude Code only; opencode/codex's adapter does not require an explicit teardown — the runtime owns lifecycle).
+   - Send shutdown via the adapter: `bash "$ADAPTER" shutdown <handle> true` for each researcher handle, **plus each advisor handle if any were created on the opt-in path.** Default-route Step 2b.11 spawns no advisor agents (`$SPEC_PERSISTENT_ADVISORS_OPT_IN=false`), so skip the advisor-shutdown block silently; researcher shutdown always runs. On Claude Code each shutdown expands to `delegate:SendMessage handle=<id> type=shutdown_request approve=true` invoked as the native `SendMessage` tool. When `team_messaging=none` the adapter returns `unsupported` and the skill relies on harness-native session cleanup (Codex subagent-stop, OpenCode plugin-runtime kill).
+   - Run `TeamDelete` (Claude Code only; opencode/codex adapters require no explicit teardown — runtime owns lifecycle).
 
 6. Append an investigation summary to `execution-log.md`:
    ```bash
@@ -334,17 +318,16 @@ Produce the conceptual frame first before committing to phase breakdown.
        --captured-at-branch <branch> \
        --captured-at-sha <sha> \
        --captured-at-merge-base-sha <merge-base>
-     # Rows emit to $KDIR/_work/<slug>/consumption-contradictions.jsonl
-     # lore audit picks these up as priority-input (not probabilistic sampling)
+     # Rows → $KDIR/_work/<slug>/consumption-contradictions.jsonl; lore audit consumes as priority-input.
    else
-     # consumption-contradiction-append.sh not yet installed (consumer-contradiction-channel follow-on pending)
+     # consumption-contradiction-append.sh not yet installed (follow-on pending)
      bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source spec-lead \
        --template-version "$LEAD_TEMPLATE_VERSION" <<< \
        "consumer-contradiction emission skipped — consumption-contradiction-append.sh not found"
    fi
    ```
 
-   Emission is non-blocking — synthesis continues immediately after emitting.
+   Emission is non-blocking — synthesis continues immediately.
 
 6. Present the abstract plan (Goal, Design Decisions, Narrative, Architecture Diagram) to the user for review.
 
@@ -380,46 +363,42 @@ This evaluates the abstract plan. If WEAK or MISSING areas are identified, revis
 
 Draft concrete implementation sections on top of the approved abstract plan:
 
-0. **Intent anchor** — if the work item has an `intent_anchor` in `_meta.json`, render a `## Intent Anchor` section in `plan.md` immediately after `## Narrative` and before `## Strategy`/`## Context`. Write the anchor body **verbatim** from `_meta.json.intent_anchor` — no quoting, no prefix label, no paraphrase. Follow it with a `**Scope delta:**` line (default `none — anchor preserved unchanged`; if the spec narrows the capability, name the narrowing here) and a `**Tempting narrower implementation:**` heading the spec author fills in. The anchor body and the `**Scope delta:**` line are **verifier-enforced** (the Step 5.5 gate refuses to regenerate tasks if they are missing or divergent); the `**Tempting narrower implementation:**` body is **template-prescribed but not verifier-enforced** — its presence in the template forces the spec author to confront the failure mode, but its content is free-text reasoning that no parser can adjudicate. Before decomposing, name the tempting narrower implementation that would appear successful while violating the anchor; ensure Exit Criteria and Verification cover the load-bearing promise or explicitly label the scope delta. For work items without an `intent_anchor` field, omit the section entirely — the Step 5.5 verifier skips with a one-line stderr info message.
+0. **Intent anchor** — if the work item has an `intent_anchor` in `_meta.json`, render a `## Intent Anchor` section in `plan.md` immediately after `## Narrative` and before `## Strategy`/`## Context`. Write the anchor body **verbatim** from `_meta.json.intent_anchor` — no quoting, no prefix label, no paraphrase. ... Before decomposing, name the tempting narrower implementation that would appear successful while violating the anchor; ensure Exit Criteria and Verification cover the load-bearing promise or explicitly label the scope delta.
 
-1. **Phases** — concrete implementation phases with tasks, file paths, objectives. For each phase, include `**Knowledge context:**`, `**Tasks:**` (checkbox lines), optional `**Retrieval directive:**`, optional `**Advisors:**`, optional `**Verification:**`, and optional `**Scope:**` blocks.
+   Follow the anchor with a `**Scope delta:**` line (default `none — anchor preserved unchanged`; if the spec narrows the capability, name the narrowing here) and a `**Tempting narrower implementation:**` heading the spec author fills in. The anchor body and `**Scope delta:**` line are **verifier-enforced** — the Step 5.5 gate refuses to regenerate tasks if missing or divergent. The `**Tempting narrower implementation:**` body is template-prescribed but not verifier-enforced — its presence forces the author to confront the failure mode, but the content is free-text that no parser can adjudicate. For work items without an `intent_anchor` field, omit the section entirely — the Step 5.5 verifier skips with a one-line stderr info message.
+
+1. **Phases** — concrete implementation phases with tasks, file paths, objectives. Each phase includes `**Knowledge context:**`, `**Tasks:**` (checkbox lines), and optional `**Retrieval directive:**` / `**Advisors:**` / `**Verification:**` / `**Scope:**` blocks.
 
    **Plan-as-unit rule.** A plan is **one** phase by default. Each additional phase is a separate `/implement` worker batch with its own dispatch ceremony — write one phase per plan unless the split earns its keep across the entire run.
 
    Split a plan into multiple phases **only when all three** conditions hold:
 
-   1. **Cross-phase parallelism** — at least one later phase has tasks with file targets disjoint from all earlier phases, so `/implement` can dispatch the phases concurrently. If every later phase is forced-sequential behind earlier phases by file overlap, `generate-tasks.py` chains them onto one worker anyway and merging into one phase produces the same execution shape with less ceremony.
-   2. **Independent deliverable boundary** — each phase produces a coherent artifact a reviewer could accept, capture, or roll back on its own — not a sub-step of the next phase's work.
-   3. **Architectural checkpoint** — an interface, contract, schema, or substrate finalizes at the phase boundary that later phases consume as a stable input. Pure file-overlap-induced sequencing is not a checkpoint; visual organization is not a checkpoint.
+   1. **Cross-phase parallelism** — at least one later phase has tasks with file targets disjoint from all earlier phases, so `/implement` dispatches concurrently. If file overlap forces every later phase sequential, `generate-tasks.py` chains them onto one worker — merging yields the same execution shape with less ceremony.
+   2. **Independent deliverable boundary** — each phase produces a coherent artifact a reviewer could accept, capture, or roll back on its own — not a sub-step of the next.
+   3. **Architectural checkpoint** — an interface, contract, schema, or substrate finalizes at the boundary that later phases consume as stable input. File-overlap sequencing is not a checkpoint; visual organization is not a checkpoint.
 
-   If any condition fails, merge into one phase. The Phase-as-unit rule below still applies *within* the merged phase: most consolidated plans land at one phase, one task.
+   If any condition fails, merge. The Phase-as-unit rule below still applies *within* the merged phase: most consolidated plans land at one phase, one task.
 
    **Phase-as-unit rule.** A phase is the default delegation unit. Write **one** `- [ ]` checkbox per phase by default — deliver the phase objective across the listed files while honoring the phase design decisions. Each task spawns a fresh worker that loads ~22KB of fixed context plus the phase brief; a phase split has to earn that overhead.
 
    Split a phase into multiple tasks **only when all four** conditions hold:
 
-   1. **Disjoint file ownership** — the tasks edit non-overlapping file sets. Tasks sharing a file are chained sequentially by `generate-tasks.py` and run on one worker anyway, so the split buys nothing.
+   1. **Disjoint file ownership** — tasks edit non-overlapping file sets. Tasks sharing a file get chained sequentially by `generate-tasks.py` onto one worker — the split buys nothing.
    2. **Independently reviewable deliverables** — each task produces a coherent artifact a reviewer could accept or reject on its own.
    3. **Real parallel execution** — the split enables concurrent work, not serialized hand-off.
    4. **No residue** — neither side is solely verification, capture, cleanup, single-CLI invocation, or a sub-edit of the other.
 
-   If any condition fails, keep one task. Cross-phase dependencies are file-based. Uniform same-mechanism edits across many files stay one task: a single worker doing one read-modify-write pass is cheaper than N fresh agents repeating identical edits.
+   If any condition fails, keep one task. Cross-phase dependencies are file-based. Uniform same-mechanism edits across many files stay one task — one worker doing one read-modify-write pass beats N fresh agents repeating the same edit.
 
-   **Deliverable contract gate.** Every task line names a durable artifact outcome — what gets built, refactored, authored, migrated, wired, or added. The valid primary verbs are:
+   **Deliverable contract gate.** Every task line names a durable artifact outcome — what gets built, refactored, authored, migrated, wired, or added. The valid primary verbs are: Implement / Refactor / Author / Migrate / Add support for / Wire... The following primary verbs are **never tasks** — they belong elsewhere: Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only.
 
-   `Implement / Refactor / Author / Migrate / Add support for / Wire`
-
-   A valid task line states: the **deliverable**, the **owned file or surface**, and at least one **design or integration constraint** that scopes the worker's choices.
-
-   The following primary verbs are **never tasks** — they belong elsewhere:
-
-   `Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only`
+   A valid task line states the **deliverable**, the **owned file or surface**, and at least one **design or integration constraint** that scopes the worker's choices.
 
    Route invalid units:
 
-   - **"Verify X" / "Check Y"** → phase-level `**Verification:**` objective the worker is implicitly held to. Do not duplicate the same verification block into each task description.
-   - **"Capture Z" / "Append session note"** → lead-side post-phase step. The lead runs `lore capture` or appends to `notes.md` after the phase completes; this is not worker work.
-   - **Single-line edits, single CLI invocations, sub-edits of a larger piece** → fold into the adjacent implementation task.
+   - **"Verify X" / "Check Y"** → phase-level `**Verification:**` objective; do not duplicate into each task description.
+   - **"Capture Z" / "Append session note"** → lead-side post-phase step (`lore capture` or `notes.md`); not worker work.
+   - **Single-line edits, single CLI invocations, sub-edits** → fold into the adjacent implementation task.
 
    **Task format (intent+constraints).** Default. State what the change accomplishes, what not to do, and what success looks like at the deliverable level. Opt into prescriptive format with `**Task format:** prescriptive` for mechanical work where step-by-step instructions are required.
 
@@ -429,41 +408,30 @@ Draft concrete implementation sections on top of the approved abstract plan:
    ```
    Declare `--scale-set` explicitly for every prefetch call. Missing declaration is an error.
 
-   **Scale rubric — declare explicitly at every retrieval surface.** Four tiers in canonical top-to-bottom order: `abstract > architecture > subsystem > implementation`.
-
-   - **abstract** — portable principle, behavioral law, or design maxim. The claim survives translation to a different project: it still teaches the same lesson when concrete project nouns are replaced with generic placeholders. Abstract entries make a *law*.
-   - **architecture** — project-level structure: decomposition, lifecycle, contracts, data model, invariants, cross-component flows, promoted abstractions, or major platform choices. Architecture entries make a *map*: "A does B, C does D, and E connects them."
-   - **subsystem** — local rule about one named area, feature, module, team, command family, integration, or workflow within a larger system. Concrete terms may appear as participants in a local workflow rather than as the whole claim.
-   - **implementation** — concrete artifact fact: file, function, script, command, limit, field, test, bug, line-level behavior. If removing the artifact name destroys the claim, classify here.
-
-   **Multi-label encoding:** an entry's scale may be a single id or a comma-delimited pair of adjacent ids (allowed pairs: `abstract,architecture`, `architecture,subsystem`, `subsystem,implementation`); for the full decision tree (four linguistic tests + substitution test) see the `classifier` agent template (lore repo `agents/classifier.md`).
-
-   **Boundary tests:** abstract vs architecture — does the claim survive generic-noun substitution (abstract) or does it become "A does B, C does D, E connects them" (architecture)? architecture vs subsystem — whole project structure (architecture) or one named bounded area (subsystem)? subsystem vs implementation — can you state the rule without naming a specific function/file/line (subsystem) or does the claim depend on the artifact (implementation)?
-
-   **±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architecture,subsystem`; designing a feature → `abstract,architecture`.
+   **Scale rubric** — declare `--scale-set` explicitly on every prefetch. The four tiers (`abstract`, `architecture`, `subsystem`, `implementation`), boundary tests, multi-label encoding rules, and the ±1 query pattern live in `skills/memory/SKILL.md` Scale-Aware Navigation — read that section before declaring if the right bucket is not obvious. For decision-tree details see the `classifier` agent template (lore repo `agents/classifier.md`).
 
    Add relevant entries as `[[knowledge:...]]` backlinks with "— why relevant" annotations. Investigation findings are the primary source; concordance is a widener.
 
-   **Distribute surfaced preferences/conventions into per-phase Knowledge context (mandatory).** The top-level `**Related preferences/conventions:**` block from Step 5's Discovery findings integration is an audit manifest — it does not reach workers on its own. To wire it into worker `{{prior_knowledge}}`, distribute each surfaced entry into the `**Knowledge context:**` block of every phase whose scope plausibly overlaps:
+   **Distribute surfaced preferences/conventions into per-phase Knowledge context (mandatory).** The top-level `**Related preferences/conventions:**` block from Step 5 Discovery is an audit manifest — it does not reach workers. To wire into worker `{{prior_knowledge}}`, distribute each surfaced entry into `**Knowledge context:**` of every phase whose scope plausibly overlaps:
 
-   - **Scope-overlap test:** an entry overlaps a phase when the entry's `related_files`, file-path globs, ceremony scope, or activity domain intersects the phase's `**Files:**` list, the phase's objective, or the phase's owned subsystem. Apply this permissively — the same gate that surfaced the entry in Step 2 carries through to distribution. If a reviewer would expect the worker to be aware of the entry while editing this phase's files, distribute it.
-   - **Format:** add the entry as a `[[knowledge:preferences/<entry>]]` (or `conventions/`, or `cross-cutting-conventions/`) backlink in the phase's `**Knowledge context:**` block, with a "— what to honor at implement time" annotation oriented to the worker (not the reviewer). Implementation-facing annotations: tell the worker what to *do* with the entry, not just what it says.
-   - **Distribute to multiple phases when warranted.** A cross-cutting convention that touches every phase's files belongs in every phase's Knowledge context — duplication here is correct, because each phase becomes its own `/implement` worker batch and each batch needs its own seeds. Do not consolidate across phases.
-   - **Entries with no overlap stay in the top-level manifest only.** If after permissive review an entry binds to no phase, leave it solely in `**Related preferences/conventions:**` — the manifest preserves the audit trail.
-   - **Why distribution at this step:** `/implement` Step 3.1 (directive branch) resolves seeds via `resolve-manifest.sh` from the phase's `**Knowledge context:**` backlinks plus `**Files:**` paths. Distributing here means the entries flow through the existing seeds → directive → worker `{{prior_knowledge}}` pipeline without new protocol surface in `/implement`.
+   - **Scope-overlap test:** an entry overlaps when its `related_files`, file-path globs, ceremony scope, or activity domain intersects the phase's `**Files:**`, objective, or owned subsystem. Apply permissively — the Step 2 surfacing gate carries through to distribution. If a reviewer would expect the worker aware of the entry while editing the phase's files, distribute.
+   - **Format:** add as `[[knowledge:preferences/<entry>]]` (or `conventions/`, or `cross-cutting-conventions/`) in `**Knowledge context:**`, with a worker-facing "— what to honor at implement time" annotation. Implementation-facing means tell the worker what to *do*, not just what it says.
+   - **Distribute to multiple phases when warranted.** Cross-cutting conventions touching every phase's files belong in every phase's Knowledge context — duplication is correct here because each phase is its own `/implement` worker batch needing its own seeds. Do not consolidate across phases.
+   - **No-overlap entries stay in the top-level manifest only.** If after permissive review an entry binds to no phase, leave it solely in `**Related preferences/conventions:**` — the manifest preserves the audit trail.
+   - **Why distribute here:** `/implement` Step 3.1 (directive branch) resolves seeds via `resolve-manifest.sh` from `**Knowledge context:**` backlinks + `**Files:**` paths. Distributing here flows entries through seeds → directive → worker `{{prior_knowledge}}` without new protocol surface in `/implement`.
 
-3. **Retrieval directive derivation** — after concordance widening, populate a `**Retrieval directive:**` block for each phase. The directive must be derivable from content already in the phase; no additional user input is required.
+3. **Retrieval directive derivation** — after concordance widening, populate `**Retrieval directive:**` for each phase. Derivable from phase content alone; no user input.
 
-   **Per-topic decomposition (v2 — default):** every directive is a list of `(topic, scale_set, [activity_vocab])` entries — **exactly one focal topic** plus **up to five adjacent topics**. Each topic fires its own BM25 OR query at its own declared scale_set; the worker prompt's `## Prior Knowledge` block ends up sectioned (`### Focal: <topic>` / `### Adjacent: <topic>`) per D3.
+   **Per-topic decomposition (v2 — default):** the directive is a list of `(topic, scale_set, [activity_vocab])` — **exactly one focal topic** plus **up to five adjacent topics**. Each topic fires its own BM25 OR query at its own scale_set; the worker prompt's `## Prior Knowledge` block ends up sectioned (`### Focal: <topic>` / `### Adjacent: <topic>`).
 
-   - **Focal topic.** The phase's primary subject. Default `scale_set` is `subsystem,implementation`. Seeds: the phase's owned files (from `**Files:**`) plus `[[knowledge:...]]` entries in `**Knowledge context:**` directly about that subsystem. When seeding from canonical entries, prefer **title-vocabulary terms** (the entry's title tokens) over the topic label alone — title-vocabulary seeds resolve to entries the index can actually rank, while raw `knowledge:...` strings tokenize as a single literal and miss the index.
-   - **Adjacent topics (≤5).** Subsystems or themes the phase touches but does not own. Default `scale_set` is one tier higher than the focal's bottom — typically `architecture,subsystem`. Seeds: title-vocabulary terms drawn from canonical entries about *that adjacent subsystem*, not the topic label and not the focal seeds. Weak seeds (right scale, wrong entries) are the dominant failure mode here — re-derive the seeds from the adjacent entries' titles and resolved paths.
-   - **Activity vocabulary (optional, per topic).** Attach when files in the topic imply a recurring practice (writing tests, emitting telemetry, capturing). Look up the token list from `$KDIR/_meta/activity-vocab.yaml` by matching its file-path globs against the topic's owned file set; **do not invent activity tokens inline**. The activity-vocab file is the single authority for the practice → tokens mapping. When present, the topic fires one extra BM25 OR query at the same `scale_set` with these tokens (logged as `query_kind=activity`).
-   - **Strict v2 invariant.** A v2 directive MUST have exactly one entry with `role: focal`. Zero-focal or multi-focal v2 directives are a hard parse error in `generate-tasks.py` — they are NOT silently accepted, and they are NOT normalized to the legacy flat form. If after seed derivation no genuine focal candidate emerges (e.g., a purely cross-cutting refactor across many subsystems), emit the legacy flat directive instead — that path remains valid for rollout compatibility.
+   - **Focal topic.** The phase's primary subject. Default `scale_set: subsystem,implementation`. Seeds: phase's owned files (from `**Files:**`) plus `[[knowledge:...]]` entries in `**Knowledge context:**` about that subsystem. Prefer **title-vocabulary terms** (the entry's title tokens) over the topic label — title vocabulary resolves to entries the index can rank, while raw `knowledge:...` strings tokenize as a single literal and miss the index.
+   - **Adjacent topics (≤5).** Subsystems the phase touches but does not own. Default `scale_set` one tier above focal's bottom — typically `architecture,subsystem`. Seeds: title-vocabulary terms from canonical entries about *that adjacent subsystem* — not the topic label, not the focal seeds. Weak seeds (right scale, wrong entries) are the dominant failure mode — re-derive from adjacent entries' titles and resolved paths.
+   - **Activity vocabulary (optional, per topic).** Attach when topic files imply a recurring practice (writing tests, emitting telemetry, capturing). Look up tokens from `$KDIR/_meta/activity-vocab.yaml` by matching its file-path globs against the topic's owned files; **do not invent activity tokens inline**. The activity-vocab file is the single authority. When present, the topic fires one extra BM25 OR query at the same `scale_set` with these tokens (`query_kind=activity`).
+   - **Strict v2 invariant.** A v2 directive MUST have exactly one `role: focal` entry. Zero-focal or multi-focal v2 is a hard parse error in `generate-tasks.py` — not silently accepted, not normalized to legacy. If no genuine focal candidate emerges (e.g., purely cross-cutting refactor), emit the legacy flat directive — that path remains valid for rollout compatibility.
 
-   **Seeds derivation (mandatory):** for each topic, collect seeds from two sources — (a) `[[knowledge:...]]` backlinks in the phase's `**Knowledge context:**` block whose subject matches the topic become seeds (resolve to entry title and path-vocabulary terms before emitting — raw `knowledge:` strings won't tokenize); (b) file paths in the phase's `**Files:**` block that the topic owns become seeds verbatim. Deduplicate per topic. If a topic's seed union is empty, the topic itself is suspect — drop it rather than emit an empty `seeds:` bullet.
+   **Seeds derivation (mandatory):** per topic, collect from two sources — (a) `[[knowledge:...]]` backlinks in `**Knowledge context:**` whose subject matches the topic (resolve to entry title and path-vocabulary terms before emitting — raw `knowledge:` strings won't tokenize); (b) `**Files:**` paths the topic owns (verbatim). Deduplicate per topic. Empty seed union → the topic itself is suspect; drop it rather than emit an empty `seeds:` bullet.
 
-   **Defaults:** `hop_budget: 1`. Per-section limits: focal `limit: 8`, adjacent `limit: 4` (tunable). `scale_set:` is **mandatory per topic** — declaration is required at every topic; omitting it is an error. Pick the appropriate bucket (`abstract`, `architecture`, `subsystem`, `implementation`); multi-label form (e.g., `architecture,subsystem`) is allowed for adjacent pairs. Omit `filters:` unless the topic has a narrow domain where type or category filtering adds value.
+   **Defaults:** `hop_budget: 1`. Per-section limits: focal `limit: 8`, adjacent `limit: 4` (tunable). `scale_set:` is **mandatory per topic**; omitting is an error. Pick `abstract`, `architecture`, `subsystem`, or `implementation`; multi-label form (e.g., `architecture,subsystem`) is allowed for adjacent pairs. Omit `filters:` unless type or category filtering adds value.
 
    **Format (v2 — default):**
    ```yaml
@@ -513,7 +481,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
 lore work regen-tasks <slug>
 ```
 
-Inspect `phase_cost_summary` as a sanity check — a single task far larger than its peers may signal an under-decomposed deliverable worth a closer read. Cost diagnostics are **advisory only**; the *Plan-as-unit rule*, *Phase-as-unit rule*, and *Deliverable contract gate* in Step 5b are the binding gates. Do not split tasks merely because they fall above an avg-comparison threshold, and do not merge tasks merely because they fall below one. The avg-comparison heuristic is post-hoc and uniform-thinness blind; trust the intrinsic gates instead.
+Inspect `phase_cost_summary` as a sanity check — a single task far larger than its peers may signal an under-decomposed deliverable worth a closer read. Cost diagnostics are advisory only; the Plan-as-unit rule, Phase-as-unit rule, and Deliverable contract gate in Step 5b are the binding gates. Do not split tasks merely because they fall above an avg-comparison threshold, and do not merge tasks merely because they fall below one. The avg-comparison heuristic is post-hoc and uniform-thinness blind; trust the intrinsic gates instead.
 
 ### Step 5.0a: Verify backlinks
 
@@ -596,19 +564,16 @@ Before finalizing, present the plan phases as structured summaries. This is a se
 
 Invoke `/remember` scoped to the spec investigation. **Always invoke it — even when no observation appears to meet the gate.** The gate lives in `/remember`; rejecting candidates is `/remember`'s job, not the lead's. Pre-filtering observations on the rationalization "nothing qualifies, so `/remember` would be a no-op" is the bypass shape named in the commitment protocol — the lead's commitment is to invoke the gate and surface the result, not to short-circuit it. A run that captures zero entries is a valid terminal so long as `/remember` actually evaluated the observations.
 
-Every `lore capture` call must carry provenance flags; for captures promoted from specific researcher observations, preserve the original producer's attribution:
+Every `lore capture` call must carry provenance flags; for captures promoted from researcher observations, preserve the original producer's attribution:
 
 - **Lead-original insights:** `--producer-role spec-lead --protocol-slot Synthesis --work-item <slug> --template-version $LEAD_TEMPLATE_VERSION`
 - **Researcher-sourced observations:** `--producer-role researcher --capturer-role spec-lead --source-artifact-ids <researcher-report-ids> --protocol-slot Synthesis --work-item <slug> --template-version $RESEARCHER_TEMPLATE_VERSION`
-- **Multi-producer synthesis:** split into one capture call per distinct producer — never merge.
+- **Multi-producer synthesis:** one capture call per distinct producer — never merge.
 
 ```
-/remember Research findings from <work item title> — Read all **Observations:** entries from investigation reports in plan.md and evaluate each — mechanism-level patterns, design rationale, and structural footprint signals all qualify; implementation facts already expressed in assertions routed to Tier-2 do not. Also capture: cross-investigation synthesis patterns not surfaced individually.
+/remember Research findings from <work item title> — Read all **Observations:** entries from investigation reports in plan.md and evaluate each: mechanism-level patterns, design rationale, and structural footprint signals all qualify; implementation facts already expressed in Tier-2 assertions do not. Also capture cross-investigation synthesis patterns not surfaced individually.
 
-Provenance on every `lore capture`:
-  - Lead-original insight: `--producer-role spec-lead --protocol-slot Synthesis --work-item <slug> --template-version $LEAD_TEMPLATE_VERSION`.
-  - Promoted researcher observation: `--producer-role researcher --capturer-role spec-lead --source-artifact-ids <researcher-report-id[,id2,...]> --protocol-slot Synthesis --work-item <slug> --template-version $RESEARCHER_TEMPLATE_VERSION`.
-  - Multi-producer synthesis: split per distinct producer; one capture call per producer.
+Apply the provenance flags above on every `lore capture`.
 ```
 
 ---
@@ -621,7 +586,9 @@ Before regenerating `tasks.json`, run the intent-anchor verifier:
 bash scripts/verify-plan-intent-anchor.sh <slug>
 ```
 
-This gate enforces **structural anchor preservation and scope-delta attestation, not semantic non-drift** — semantic alignment between the anchor and the rest of the plan remains a spec-author responsibility (and a downstream reviewer responsibility, e.g., `/codex-plan-review`). A free-text "preserve near Goal" instruction is rhetoric without an actionable required check — exactly the failure mode this gate exists to close. The verifier exits 0 when the plan's `## Intent Anchor` section body matches `_meta.json.intent_anchor` and the `**Scope delta:**` line is present; it exits 0 with a one-line stderr info message when the work item has no `intent_anchor` field (absence is legible, not silent); it exits non-zero (2 = section missing, 3 = body diverges, 4 = `**Scope delta:**` missing) otherwise. On any non-zero exit, **do not proceed** to `lore work regen-tasks` — surface the verifier's error, address the gap in `plan.md`, and re-run the verifier until it passes.
+This gate enforces structural anchor preservation and scope-delta attestation, not semantic non-drift — semantic alignment between the anchor and the rest of the plan remains a spec-author responsibility... A free-text "preserve near Goal" instruction is rhetoric without an actionable required check — exactly the failure mode this gate exists to close.
+
+Semantic alignment also falls to downstream reviewers (e.g., `/codex-plan-review`). The verifier exits 0 when `## Intent Anchor` body matches `_meta.json.intent_anchor` and `**Scope delta:**` is present; exits 0 with a one-line stderr info when the work item has no `intent_anchor` field (absence is legible, not silent); exits non-zero (2 = section missing, 3 = body diverges, 4 = `**Scope delta:**` missing) otherwise. On any non-zero exit, **do not proceed** to `lore work regen-tasks` — surface the error, address the gap in `plan.md`, and re-run until it passes.
 
 ```bash
 lore work regen-tasks <slug>
@@ -664,166 +631,7 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 
 ## Plan.md Template
 
-```markdown Plan.md Template
-# <Work Item Title>
-
-## Goal
-<!-- One paragraph: what we're building/changing and why -->
-
-## Narrative
-<!-- 1-2 paragraphs synthesizing the goal and key design choices into a readable story.
-     Written for a reader who wants the "what, why, and how it fits together" without reading all sections.
-     Draw from Goal (the what/why) and Design Decisions (trade-offs chosen).
-     Omit file paths and task lists — those belong in Phases. -->
-
-## Intent Anchor
-<!-- Conditional — emit this section only when the work item's `_meta.json.intent_anchor` is present.
-     For legacy or no-anchor work items, omit the section entirely; the Step 5.5 verifier skips with a stderr info message.
-
-     Three fields, in this order:
-       1. The anchor body verbatim from `_meta.json.intent_anchor` (no quoting, no prefix label — just the raw text).
-       2. `**Scope delta:**` line — default "none — anchor preserved unchanged"; if the spec narrows the capability, name the narrowing here.
-       3. `**Tempting narrower implementation:**` heading — the spec author names the tempting narrower implementation that
-          would appear successful while violating the anchor.
-
-     Verifier-enforced fields (load-bearing for Step 5.5 gate): anchor body and `**Scope delta:**` line.
-     Template-only field (not verifier-enforced): `**Tempting narrower implementation:**` body. -->
-<anchor body verbatim from `_meta.json.intent_anchor`>
-
-**Scope delta:** none — anchor preserved unchanged
-
-**Tempting narrower implementation:** <name the tempting narrower implementation that would appear successful while violating the anchor>
-
-## Strategy
-<!-- Optional. Written verbatim from user input at the strategy gate (Step 4).
-     Omit this section entirely if the user skips the strategy prompt — absence is the default.
-     On continuation runs, this section is read silently and used to shape synthesis.
-
-     Format: free-form text block written as a worker-facing directive.
-     Write the user's input as-is — do not summarize, annotate, or interpret.
-     If the user provides a list, preserve it as a list. If prose, preserve as prose.
-
-     This content is injected into worker task descriptions alongside design decisions.
-     Write it so a worker reading it for the first time understands what to do. -->
-
-## Context
-<!-- SHORT BRANCH ONLY: 3-6 bullets summarizing key files, constraints, and patterns found -->
-<!-- FULL BRANCH: delete this section and use ## Investigations instead -->
-
-## Investigations
-<!-- FULL BRANCH ONLY: findings from team-based exploration -->
-<!-- SHORT BRANCH: delete this section and use ## Context instead -->
-
-### <Topic 1>
-**Question:** <what was investigated>
-**Findings:**
-- Finding 1
-- Finding 2
-**Key files:** `path/to/file.ts`, `path/to/other.ts`
-**Implications:** How this affects the design
-**Observations:**
-- <mechanism-level pattern, design rationale, or structural footprint signal, preserved verbatim from researcher report>
-
-<!-- Note: researcher assertions are emitted to task-claims.jsonl (Tier 2)
-     via evidence-append.sh — they do not appear in plan.md. See architecture/artifacts/tier2-evidence-schema.md. -->
-
-## Design Decisions
-
-### D1: <Decision Title>
-**Decision:** What was decided — a concrete, actionable statement
-**Rationale:** Why this choice over others — the reasoning, constraints, or evidence that led here
-**Alternatives considered:** What other approaches were evaluated and why they were rejected
-**Applies to:** Phase N (<name>), Phase M (<name>) — which phases/tasks this decision affects
-
-## Architecture Diagram
-<!-- Optional — include when the work involves multi-component systems, novel data flows, or module boundaries
-     that are not self-evident from the phase list. Omit for single-file or straightforward additive changes.
-     Format: plain-text ASCII art inside a fenced code block. Use box-drawing characters (─ │ ┌ ┐ └ ┘ ├ ┤),
-     arrows (──►, ──┐, ◄──). Do NOT use Mermaid or other diagram DSLs.
-     Label components with actual file/module names. -->
-
-## Phases
-<!-- One phase per plan by default. Add a second phase only when all three Plan-as-unit conditions
-     hold (Step 5b): cross-phase parallelism, independent deliverable boundary, architectural
-     checkpoint. File-overlap-forced sequencing is not a checkpoint — merge into one phase. -->
-
-### Phase 1: <Name>
-**Objective:** What this phase accomplishes
-**Files:** relevant file paths
-**Scope:**
-<!-- Optional — list files/components workers must NOT modify and any output contracts. -->
-- Do not modify: `path/to/file`
-- Output contract: <what the phase must produce without changing>
-**Task format:** prescriptive  <!-- optional — omit for default intent+constraints format -->
-**Knowledge delivery:** full  <!-- optional — omit for default annotation-only delivery -->
-**Retrieval directive:**
-<!-- Optional — omit when phase has no Knowledge context backlinks and no Files entries.
-     Seeds are derived from (a) [[knowledge:...]] backlinks in Knowledge context, and
-     (b) file paths in Files. Deduplication applied. hop_budget defaults to 1.
-     scale_set: REQUIRED — declare the appropriate bucket (abstract | architecture | subsystem | implementation); multi-label form (e.g., architecture,subsystem) is allowed for adjacent pairs. Omitting is an error.
-     Consumed by /implement Step 3.1 branch (a) via resolve-manifest.sh → {{prior_knowledge}}. -->
-- seeds: [[knowledge:file#heading]], path/to/file.py
-- hop_budget: 1
-<!-- scale_set: REQUIRED — declare one bucket: abstract | architecture | subsystem | implementation (multi-label form architecture,subsystem etc. allowed for adjacent pairs) -->
-<!-- - filters: type=knowledge, exclude_category=... (optional; omit when not filtering) -->
-**Knowledge context:**
-<!-- Each entry MUST include a "— why relevant" annotation after the backlink.
-     Annotations are implementation-facing: tell the worker what to DO with the entry.
-     GOOD: "— understand the call graph before modifying resolve_backlinks()"
-     BAD:  "— provides context for this phase" -->
-- [[knowledge:file#heading]] — why this is relevant to this phase
-**Advisors:**
-<!-- Optional — declare domain-expert advisors. By default (no `mode: persistent` suffix), advisor declarations are
-     lead-handled inline on the default `/implement` route: the lead replies to worker consultations using its own
-     investigation/plan/code-read tools (and may invoke a skill via the `Skill` tool if the domain is skill-backed) and
-     does NOT spawn a separate advisor agent.
-
-     Append `mode: persistent` to opt into the agent route — `/implement` then spawns a persistent advisor agent for the
-     domain, concatenates `scripts/agent-protocols/advisory-consultation.md` onto worker prompts, and emits advisor
-     scorecard rows on shutdown. Reserve `mode: persistent` for cases where calibration-attribution or parallel-
-     consultation throughput earns the ceremony cost. -->
-- advisor-name — domain scope. [must-consult|on-demand]
-- advisor-name — domain scope. [must-consult|on-demand] mode: persistent  <!-- opt into agent route; omit suffix for default lead-handled -->
-**Consultations required:**
-<!-- Optional — phase-level declaration listing consultation domains a worker on this phase MUST request before
-     starting implementation. Replaces the structural meaning of today's `must-consult` mode on a phase-declared
-     advisor: the worker sends a `## Consultation` request (with `consultation-id`, `domain`, `reason`, `question`,
-     and task/phase context), ends its turn without implementation work, and resumes when the answering side
-     (lead by default, persistent advisor on the opt-in route) replies on the next turn boundary.
-
-     `/implement` lifts this block into `phase_context` (via `lore work phase-context <slug> <phase-number>`) and
-     tracks per-worker which required consultations are outstanding. A worker report `**Consultations:**` entry that
-     references a required domain without a matching acknowledged lead-side reply is rejected during worker-progress
-     collection (the gate's teeth replace the legacy `[must-consult]` structural gate).
-
-     Absence = no consultations required for this phase. -->
-- <domain-label>  <!-- e.g. auth-middleware, serialization, security-review -->
-- <domain-label>
-**Verification:**
-<!-- 0–3 observable-behavior criteria. Lives at phase level only — never duplicated into per-task descriptions.
-     The phase worker(s) are implicitly held to these objectives; "Verify X" is never its own task.
-     Each bullet names a behavior of the changed system a worker can check without reading the diff.
-     Anti-patterns — never use:
-       "X no longer exists" — recoverable from ls/diff, not a behavior
-       grep-for-absence-as-audit — acceptable only when prose is the contract being verified
-       task restatement — "refactored Y" is the task, not a verification criterion
-     Good example: "`lore prefetch` with no `--scale-set` exits non-zero with a usable error" -->
-- <observable behavior — e.g., "`lore search foo` returns ranked results from the updated index">
-**Tasks:**
-<!-- One - [ ] checkbox per phase by default. Multiple only when the four conditions in Step 5b hold:
-     disjoint file ownership, independently reviewable deliverables, real parallel execution, no residue.
-     Valid primary verbs: Implement / Refactor / Author / Migrate / Add support for / Wire.
-     Banned as primary verb: Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only.
-     See Step 5b "Deliverable contract gate" for routing of invalid units. -->
-- [ ] <Verb> <deliverable> in <owned file/surface> — <design or integration constraint>
-
-## Open Questions
-- Unresolved decisions or items needing follow-up
-
-## Related
-<!-- Cross-cutting references that apply to the whole plan, not a specific phase. -->
-- [[knowledge:file#heading]] — cross-references to knowledge store
-```
+When emitting `plan.md` in Step 5b (and the corresponding Step 5b.0 Intent Anchor render), read `skills/spec/templates/plan.md` for the canonical plan structure. The sidecar holds the full fenced template — Goal, Narrative, Intent Anchor, Strategy, Context, Investigations, Design Decisions, Architecture Diagram, Phases, Open Questions, Related — with the inline HTML-comment guidance preserved alongside each section it governs.
 
 ---
 

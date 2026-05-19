@@ -11,7 +11,7 @@ Interactive pair-review skill for GitHub PRs. Reviewer comments drive the agenda
 
 ## Step 1: Identify PR and Focus Context
 
-Argument provided: `$ARGUMENTS`
+Argument: `$ARGUMENTS`
 
 **Parse arguments:** The first token that looks like a PR number (digits) or GitHub URL is the PR identifier. Everything else is **focus context** — free-text guidance about which areas to concentrate on during the review.
 
@@ -20,35 +20,22 @@ Examples:
 - `42 focus on the new turn protocol logic` → PR #42, focus on turn protocol
 - `concentrate on the knowledge enrichment pipeline` → no PR (auto-detect), focus context provided
 
-**If no PR identifier:** Detect from current branch:
-```bash
-gh pr list --state open --head "$(git branch --show-current)" --json number,baseRefName --jq '.[] | "#\(.number) → \(.baseRefName)"' 2>/dev/null
-```
+**Auto-detect PR from branch (no identifier given) and disambiguate:** see `skills/pr-self-review/SKILL.md` Step 1a "If no PR identifier" for the `gh pr list` opener and multi-PR / no-PR fallbacks. Pair-review variant: if the user gives only a base branch, search by base — `gh pr list --state open --base <branch> --head "$(git branch --show-current)" ...`.
 
-**If multiple PRs found:** Present the list with base branches and ask the user which one to review.
-
-**If no PRs found:** Ask the user for the PR number. If they provide a base branch instead, search by base: `gh pr list --state open --base <branch> --head "$(git branch --show-current)" ...`
-
-**Carry focus context forward** — it influences risk area identification in Step 3 (focused areas are listed first and marked as priority) and topic selection in Step 4 (the first review round should address the focused area).
+**Carry focus context forward** — it shapes risk-area ordering in Step 3 (focused areas listed first, marked as priority) and topic selection in Step 4 (the first review round addresses the focused area).
 
 ## Step 2: Fetch PR data
 
-Fetch all PR data using the shared script:
+Fetch all PR data and the diff/file scope:
 ```bash
 bash ~/.lore/scripts/fetch-pr-data.sh <PR_NUMBER>
-```
-
-Also gather the diff and file scope:
-```bash
 gh pr diff <PR_NUMBER>
 gh pr view <PR_NUMBER> --json files --jq '.files[].path'
 ```
 
-Parse the grouped JSON output. The script returns `grouped_reviews` (reviews with inline comments attached), `unmatched_threads` (review threads not matched to any review), and `orphan_comments` (general PR comments).
+Parse the grouped JSON. Output keys: `grouped_reviews` (reviews + inline comments), `unmatched_threads` (threads with no review), `orphan_comments` (general PR comments).
 
-**Review Selection:** Follow the Review Selection protocol defined in `claude-md/review-protocol/review-selection.md`. Present fetched reviews as batches grouped by reviewer and let the user select which batch to work through. Only process comments from the selected batch — other batches are deferred to subsequent invocations.
-
-If the PR has only one reviewer with feedback, skip the selection prompt and proceed with that batch automatically.
+**Review Selection:** see `skills/pr-revise/SKILL.md` Step 3 — present batches grouped by reviewer, defer non-selected batches, follow `~/.lore/claude-md/review-protocol/review-selection.md`. Single-reviewer PRs skip the prompt and proceed automatically.
 
 **Filter the selected batch:**
 - Outdated threads (`isOutdated: true`) — filter out unless the concern clearly still applies to the current diff. Threads on subsequently-changed code are likely addressed by later commits; do not treat as needing action.
@@ -94,7 +81,7 @@ Process reviewer comments in this order:
 
 The default interaction mode is alternating messages — agent and user take turns. No explicit mode switching is needed.
 
-When the user pastes a transcript (e.g., a Slack thread, meeting notes, or prior review discussion), detect it by indicators such as multiple speaker names, `Name: ...` prefixes, quoted blocks with attribution, or contextual speaker changes. Parse the transcript to identify speakers and attribute statements correctly, then process each distinct point through the turn protocol as if raised by the appropriate party.
+When the user pastes a transcript (Slack thread, meeting notes, prior review), detect it via multi-speaker indicators (`Name:` prefixes, quoted attributed blocks, contextual speaker changes). Parse, attribute statements, and run each distinct point through the turn protocol as if raised by the appropriate party.
 
 If attribution is ambiguous, ask the user to clarify rather than guessing.
 
@@ -123,7 +110,7 @@ For comments with substantive labels (suggestion, issue, question, thought):
    lore search "<topic>" --type knowledge --json --limit 3
    ```
 2. Surface 1-3 compact citations inline: `[knowledge: entry-title]` with a one-line summary of relevance.
-3. If a knowledge entry is STALE and the PR contradicts it, flag as "convention may need updating" — not "PR is wrong."
+3. Stale-knowledge flagging: see `skills/pr-review/SKILL.md` Step 4d — if an entry is STALE and the PR contradicts it, flag as "convention may need updating" — not "PR is wrong."
 
 **Conditional investigation escalation:** If knowledge results are insufficient AND the concern involves cross-boundary invariants or architectural patterns spanning multiple files, spawn an Explore agent:
 ```
@@ -169,19 +156,11 @@ This gives both parties visibility into where they are in the review and what's 
 
 ### Thread state tracking
 
-Track each thread as:
-```
-{id, topic, status, label, blocking?, knowledge_checked, round_count, linked_task}
-```
-
-Where:
-- `blocking?` — true if the finding would block merge
-- `knowledge_checked` — true after Beat 2 enrichment completes
-- `linked_task` — reference to generated task (set in Step 5)
+Track each thread as `{id, topic, status, label, blocking?, knowledge_checked, round_count, linked_task}`, where `blocking?` is true if the finding would block merge, `knowledge_checked` is true after Beat 2 enrichment completes, and `linked_task` references the generated task (set in Step 5).
 
 ### Checklist review offer
 
-After all reviewer comments have been discussed (all threads from the selected batch are resolved, deferred, or open), offer an optional agent-initiated checklist pass before proceeding to wrap-up:
+After every thread in the selected batch is resolved, deferred, or open, offer an optional agent-initiated checklist pass before wrap-up:
 
 ```
 All of @<reviewer>'s points discussed (<resolved> resolved, <deferred> deferred, <open> open).
@@ -189,8 +168,8 @@ All of @<reviewer>'s points discussed (<resolved> resolved, <deferred> deferred,
 Want me to do an additional pass using the 8-point review checklist? This checks for issues the reviewer may not have covered — semantic contract violations, cross-boundary invariants, proportionality, etc.
 ```
 
-- **If the user accepts:** Apply the full 8-point checklist from `claude-md/review-protocol/checklist.md` to each changed file or logical unit, following the same 3-beat turn protocol (raise, enrich, respond) for any new findings. Findings from the checklist pass are tracked as agent-initiated threads (`initiator: "agent"`). Do not re-raise topics already covered in the reviewer's batch.
-- **If the user declines:** Proceed directly to the wrap-up gate.
+- **Accepted:** Apply the full 8-point checklist from `claude-md/review-protocol/checklist.md` to each changed file or logical unit, running the same 3-beat turn protocol on new findings. Track them as agent-initiated threads (`initiator: "agent"`). Do not re-raise topics already covered in the reviewer's batch.
+- **Declined:** Proceed directly to the wrap-up gate.
 
 This offer is a single prompt — do not ask repeatedly or push back on a decline.
 
@@ -198,16 +177,16 @@ This offer is a single prompt — do not ask repeatedly or push back on a declin
 
 **Do not proceed to Step 5 (work item creation) until the user explicitly says to wrap up.** This is a hard gate — the agent never initiates wrap-up on its own.
 
-After all review points are discussed (including any checklist review findings if the user accepted), present a summary and ask:
+After all points (plus any checklist findings) are discussed, present a summary and ask:
 
 ```
 All <N> review points discussed. <resolved> resolved, <open> still open, <deferred> deferred.
 Ready to wrap up and create the work item, or want to continue discussing?
 ```
 
-- If the user wants to continue, stay in Step 4 — they may raise new topics or revisit resolved ones.
-- If the user explicitly says to wrap up (e.g., "wrap up", "let's create the work item", "done"), proceed to Step 5.
-- If the user hasn't addressed all points yet and says to wrap up, confirm: "There are still <N> undiscussed points. Wrap up anyway, or continue?"
+- If the user continues, stay in Step 4 — they may raise new topics or revisit resolved ones.
+- If the user explicitly wraps up (e.g., "wrap up", "let's create the work item", "done"), proceed to Step 5.
+- If undiscussed points remain at wrap-up, confirm: "There are still <N> undiscussed points. Wrap up anyway, or continue?"
 
 ## Step 5: Synthesize into work item
 
@@ -248,10 +227,7 @@ Valid concerns explicitly marked out of scope for this PR.
 - ...
 ```
 
-Omit empty sections. Generate tasks:
-```
-/work tasks pr-pair-review-<PR_NUMBER>
-```
+Omit empty sections. Generate tasks: `/work tasks pr-pair-review-<PR_NUMBER>`.
 
 Assess readiness:
 - **spec-needed** (default) — if any items exist in "Verification Needed"
@@ -289,12 +265,8 @@ This step is automatic — do not ask whether to run it.
 
 ## Resuming
 
-If re-invoked on the same PR, check for an existing work item (e.g., `pr-pair-review-<PR_NUMBER>` in `/work list`). If found, load `notes.md` and continue the review from where it left off — append new discussion points to the Discussion Summary, new fixes to Agreed Changes, and new directives to Verification Needed rather than creating a duplicate work item.
+Resuming protocol: see `skills/pr-review/SKILL.md` ## Resuming. Pair-review work-item slug: `pr-pair-review-<PR_NUMBER>`. On re-invocation, load existing `notes.md` and append new discussion points / fixes / verification directives rather than creating a duplicate work item.
 
 ## Error Handling
 
-- **No gh CLI or authentication:** Tell user to run `gh auth login`
-- **PR not found:** Confirm PR number and repo access
-- **Empty PR (no changes):** Inform user, skip review
-- **No review threads from other party:** Proceed with agent-initiated review using checklist
-- **Knowledge store unavailable:** Continue review without enrichment, note degraded mode in summary
+GitHub-CLI and knowledge-store handlers: see `skills/pr-review/SKILL.md` ## Error Handling. Pair-review variant: when there are no review threads from the other party, proceed with agent-initiated review using the 8-point checklist.

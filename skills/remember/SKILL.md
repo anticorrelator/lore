@@ -33,7 +33,7 @@ SKILLS_DIR=$(resolve_harness_install_path skills)
 REMEMBER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$SKILLS_DIR/remember/SKILL.md")
 ```
 
-When `/remember` is invoked by another skill (e.g., `/implement` or `/spec` post-work extraction), the caller passes its own template-version context via the delegation prompt — see Step 5's provenance rules for the lead-synthesis path. For interactive invocations, use `$REMEMBER_TEMPLATE_VERSION` directly. If the hash command fails, fall through with an empty string; downstream scripts treat that as "no template version."
+When invoked by another skill (e.g., `/implement` or `/spec` post-work extraction), the caller passes its own template-version via the delegation prompt — see Step 5 for the lead-synthesis path. Interactive invocations use `$REMEMBER_TEMPLATE_VERSION` directly. On hash-command failure, fall through with an empty string; downstream scripts treat that as "no template version."
 
 ### Step 0a: Pending Captures Intake
 
@@ -41,8 +41,8 @@ When `_pending_captures/` directory exists in the knowledge store at session sta
 
 1. Glob `_pending_captures/*.md` — each file contains one candidate segment extracted by the stop hook's novelty detection
 2. For each file, read it and evaluate the candidate against **the 4-condition gate (reusable, non-obvious, stable, high-confidence) OR the orientation gate** (see Step 2 canonical body for both gates' full criteria; a candidate qualifies if either gate passes) and assess synthesis level for tier placement. **Trigger-type guidance:**
-   - **`debug-root-cause` and `debug-narrative` candidates:** apply the debugging narrative lens — the insight is most valuable when it captures what you expected → what you found → what it means for the system. Evaluate whether the root cause reveals something non-obvious about how the system works. Format the insight using that narrative structure if qualifying. (`debug-narrative` is the expanded form emitted by stop-novelty-check.py when debug context is included; treat both as the same trigger family.)
-   - **`structural-*` candidates** (e.g., `structural-footprint`, `structural-signal`): evaluate as architectural observations — module roles, integration points, what constrains changes. These often qualify for the Architectural models or Cross-cutting conventions categories.
+   - **`debug-root-cause` and `debug-narrative` candidates:** apply the debugging narrative lens — most valuable when it captures expected → found → meaning. Evaluate whether the root cause reveals something non-obvious about how the system works; format qualifying insights in that narrative structure. (`debug-narrative` is the expanded form emitted by stop-novelty-check.py when debug context is included — same trigger family.)
+   - **`structural-*` candidates** (e.g., `structural-footprint`, `structural-signal`): evaluate as architectural observations — module roles, integration points, change constraints. Often qualify as Architectural models or Cross-cutting conventions.
    - **`preference-signal` candidates:** evaluate as scoped working-style preferences. If `related_files` names a skill, file, or directory (non-`none`), route to `lore capture --category preferences --related-files <paths>` via Step 3 branch. If `related_files: none`, route to thread `accumulated_preferences` instead — not to a knowledge entry.
    - **Other trigger types** (`design-decision`, `gotcha`, `self-correction`): evaluate normally against capture gate.
 
@@ -51,29 +51,29 @@ When `_pending_captures/` directory exists in the knowledge store at session sta
    **Staleness branch:** when the "non-obvious" check reveals a similar entry may already exist, run `lore search "<key terms>" --type knowledge --limit 3`, read the top match, and branch: (a) same claim — skip the candidate, (b) divergent (contradicts or supersedes) — edit the existing entry file in-place to reflect the new insight, update its `learned` date to today, then skip the new capture. Note: `[staleness] Updated "<existing title>" — superseded by new finding`.
 
 3. For qualifying insights, determine the emission path before running the capture command:
-   - **Tier 3 path (`lore promote`):** use when ALL four predicates are true: (a) the candidate is backed by a Tier 2 evidence artifact (worker/researcher observation from `execution-log.md` or `plan.md`), (b) it can be expressed as a `validate-tier3.sh`-accepted row with `claim`, `why_future_agent_cares`, `falsifier`, and `source_artifact_ids`, (c) `source_artifact_ids` is non-empty, and (d) the claim is reusable outside the current work item.
-   - **Tier 1 path (`lore capture`):** everything else — interactive candidates, candidates without Tier 2 backing, and any candidate that fails any of the four Tier 3 predicates.
+   - **Tier 3 path (`lore promote`):** use when ALL four predicates are true: (a) backed by a Tier 2 evidence artifact (worker/researcher observation from `execution-log.md` or `plan.md`), (b) expressible as a `validate-tier3.sh`-accepted row with `claim`, `why_future_agent_cares`, `falsifier`, and `source_artifact_ids`, (c) `source_artifact_ids` non-empty, and (d) reusable outside the current work item.
+   - **Tier 1 path (`lore capture`):** everything else — interactive candidates, candidates without Tier 2 backing, and any candidate that fails any Tier 3 predicate.
 
    **Pass `--related-files`** using the `**Related files:**` field from the candidate file (skip if the field is `none`):
    ```bash
    lore capture --insight "..." --context "..." --category "..." --confidence "high" --related-files "<value from Related files field>"
    ```
 
-4. Delete each file after evaluation (regardless of whether the candidate qualified)
+4. Delete each file after evaluation (whether the candidate qualified or not)
 5. Remove the `_pending_captures/` directory once empty
 6. Brief feedback: `[capture] Reviewed N candidates from previous session, captured M insights`
 
-If no candidates qualify, delete all files, remove the directory, and note: `[capture] Reviewed N candidates, none met capture gate`
+If none qualify, delete all files, remove the directory, and note: `[capture] Reviewed N candidates, none met capture gate`
 
 ### Step 0b: Pending Digest Intake
 
 When `_threads/_pending_digest.md` exists at session start:
 1. Read the pending digest (previous session's extracted highlights).
 2. Decide which existing thread(s) to update — or if a new thread is needed.
-3. Write thread entries with format: `## YYYY-MM-DD` + Summary, Key points, Shifts (optional), Preferences (optional), Related.
-4. Extract preference signals from the digest and thread entries written in step 3. For each clear, reusable preference found, update the relevant thread's `_meta.json` `accumulated_preferences` array:
-   - **Existing preference:** update `last_reinforced` date and append the new entry filename to `source_entries`
-   - **New preference:** add a new object with `preference`, `first_seen`, `last_reinforced` (both today), and `source_entries`
+3. Write thread entries: `## YYYY-MM-DD` + Summary, Key points, Shifts (optional), Preferences (optional), Related.
+4. Extract preference signals from the digest and step-3 entries. For each clear, reusable preference, update the thread's `_meta.json` `accumulated_preferences`:
+   - **Existing:** update `last_reinforced`; append new entry filename to `source_entries`
+   - **New:** add `{preference, first_seen, last_reinforced (both today), source_entries}`
 5. Delete the `_pending_digest.md` file.
 6. Brief feedback: `[thread: topic-name] Updated with previous session discussion` (or `[thread: new] Created "..."` if new).
 
@@ -88,7 +88,7 @@ The argument can be:
 - **A capture filter** (e.g., "skip style preferences, capture architecture decisions") — tightens the gate criteria
 - **Both** (e.g., "PR review feedback — capture architectural insights and gotchas, skip style nits")
 
-When called from another skill, the argument typically provides context about what kind of work just happened and what's worth persisting vs what's ephemeral. Apply these constraints throughout Steps 2-5.
+When called from another skill, the argument typically distinguishes what's worth persisting vs ephemeral. Apply these constraints throughout Steps 2-5.
 
 **Examples of how constraints tighten the gate:**
 
@@ -204,7 +204,7 @@ Scale values: `abstract`, `architecture`, `subsystem`, `implementation` (single 
 Review the conversation for thread-worthy content:
 
 1. Read the thread index at `$THREADS_DIR/_index.json`
-2. For each existing thread, check if this session discussed the topic
+2. For each thread, check if this session discussed its topic
 3. While scanning, also detect **preference signals** — patterns of user behavior or explicit statements that reveal reusable working-style preferences. Look for:
    - **User corrections:** "Don't do X, I prefer Y" or repeated pushback on a pattern
    - **Stated preferences:** "I like when...", "Always use...", "Skip the..."
@@ -214,8 +214,8 @@ Review the conversation for thread-worthy content:
    **Not preferences:** One-off requests, task-specific instructions, or transient choices that won't apply next session.
 
    **Scoped vs. global routing:** For each detected preference signal, classify before acting:
-   - **Scoped** — the preference names a skill (`/pr-review`, `/implement`), a specific file or directory, or only applies when a particular workflow or tool is active → route to `lore capture --category preferences --related-files <paths> --producer-role interactive --protocol-slot Reflection`. Use the skill's SKILL.md path or the relevant source file(s) as `related_files`. Do NOT also write it to thread `accumulated_preferences`.
-   - **Global** — the preference has no detectable scope and applies regardless of context ("be terse", "use active voice") → skip `lore capture` and continue to Step 5 thread accumulation as usual.
+   - **Scoped** — names a skill (`/pr-review`, `/implement`), a specific file or directory, or only applies under a particular workflow or tool → route to `lore capture --category preferences --related-files <paths> --producer-role interactive --protocol-slot Reflection`. Use the skill's SKILL.md path or the relevant source file(s) as `related_files`. Do NOT also write it to thread `accumulated_preferences`.
+   - **Global** — no detectable scope; applies regardless of context ("be terse", "use active voice") → skip `lore capture` and continue to Step 5 thread accumulation as usual.
 
    When scope is ambiguous, ask: "would this preference be irrelevant or wrong in a different skill or file context?" If yes → scoped. If it applies equally everywhere → global.
 
@@ -246,7 +246,7 @@ Review the conversation for thread-worthy content:
      ]
    }
    ```
-   The `accumulated_preferences` array tracks user preferences distilled from thread entries. Each entry records when the preference was first observed, when it was most recently reinforced, and which thread entry files provide evidence. Preferences are added during `/remember` and pending digest evaluation. The array may be empty but should always be present for new threads.
+   The `accumulated_preferences` array distills user preferences from thread entries — each entry records `first_seen`, `last_reinforced`, and `source_entries` evidence. Added during `/remember` and pending digest evaluation. May be empty but must be present for new threads.
 
    Then write the first entry file as in step 4. Update `$THREADS_DIR/_index.json` to include the new thread.
 
@@ -281,10 +281,10 @@ If neither gate passes, drop the candidate silently and move on. Do NOT downgrad
 Before invoking `lore capture`, evaluate whether each qualifying candidate is a **Tier 3 commons promotion** or a **Tier 1 work-scoped / interactive capture**:
 
 **Use `lore promote` (Tier 3 path)** when ALL four predicates are true:
-1. The candidate is backed by a Tier 2 evidence artifact (worker/researcher observation from `execution-log.md` or `plan.md` Observations)
-2. It can be expressed as a `validate-tier3.sh`-accepted Tier 3 row (with `claim`, `why_future_agent_cares`, `falsifier`, `source_artifact_ids`)
-3. `source_artifact_ids` is non-empty (traceability back to Tier 2 source is required)
-4. The claim is reusable **outside** the current work item — future agents in different contexts should care
+1. Backed by a Tier 2 evidence artifact (worker/researcher observation from `execution-log.md` or `plan.md` Observations)
+2. Expressible as a `validate-tier3.sh`-accepted Tier 3 row (with `claim`, `why_future_agent_cares`, `falsifier`, `source_artifact_ids`)
+3. `source_artifact_ids` non-empty (traceability back to Tier 2 source is required)
+4. Reusable **outside** the current work item — future agents in different contexts should care
 
 ```bash
 echo '<tier3-json-row>' | lore promote --work-item "$RESOLVED_SLUG" \
@@ -304,21 +304,12 @@ lore capture --insight "..." --context "..." --category "..." --confidence "..."
 
 **Always populate `--producer-role`, `--protocol-slot`, and `--template-version`** when values are known; **omit the flags entirely** (do not pass empty strings) when values are unavailable. `capture.sh` treats flag presence as a deliberate provenance marker.
 
-- When `/remember` is invoked directly by the user: `--producer-role interactive --protocol-slot Reflection --template-version $REMEMBER_TEMPLATE_VERSION`
-- When `/remember` is invoked by another skill: use the role passed in by that skill — typically `implement-lead` or `spec-lead` with `--protocol-slot Synthesis`, AND use the `--template-version` the caller passes
+- Direct user invocation: `--producer-role interactive --protocol-slot Reflection --template-version $REMEMBER_TEMPLATE_VERSION`
+- Another-skill delegation: use the role passed in (typically `implement-lead` or `spec-lead` with `--protocol-slot Synthesis`), AND the `--template-version` the caller passes
 
 **Work item association:** When `RESOLVED_SLUG` is set, add `--work-item $RESOLVED_SLUG`. Absence of a work item never errors. Scale declaration (`--scale`) is always required — missing declaration is an error, not a default.
 
-**Scale rubric — declare explicitly at every retrieval surface:**
-
-- **abstract** — portable principle, behavioral law, or design maxim. The claim survives generic-noun substitution: replace project-specific proper nouns with placeholders and the lesson still holds. Abstract entries make a *law*.
-- **architecture** — project-level structure: decomposition, lifecycle, contracts, data model, invariants, cross-component flows, or major platform choices. Architecture entries make a *map*: "A does B, C does D, and E connects them."
-- **subsystem** — local rule about one named area, feature, module, team, command family, integration, or workflow within a larger system. Concrete terms appear as participants in a local workflow rather than as the whole claim.
-- **implementation** — concrete artifact fact: file, function, script, command, limit, field, test, line-level behavior. If removing the artifact name destroys the claim, classify here.
-
-**Boundary tests:** abstract vs architecture — substitution test (does the claim survive replacing concrete proper nouns with generic placeholders, or does it become "A does B, C does D"?); architecture vs subsystem — whole-project structure or one bounded area?; subsystem vs implementation — can you state the rule without naming a specific function/file/line?
-
-**±1 query pattern:** fixing a bug → `subsystem,implementation`; adding to a module → `subsystem,implementation`; modifying a component → `architecture,subsystem`; designing a feature → `abstract,architecture`.
+**Scale rubric:** the 4-bucket definitions (abstract / architecture / subsystem / implementation), boundary tests, and ±1 query pattern live canonically at `skills/memory/SKILL.md` Scale-Aware Navigation. Consult that section when classifying.
 
 #### Lead-synthesis attribution
 
@@ -421,7 +412,7 @@ After running heal, check for renormalize flags:
 cat "$KNOWLEDGE_DIR/_meta/renormalize-flags.json" 2>/dev/null
 ```
 
-If the file exists, count the total flags across all arrays (`oversized_categories`, `stale_related_files`, `zero_access_entries`). If **2 or more total flags** exist, append to the Step 6 report:
+If the file exists, sum flags across `oversized_categories`, `stale_related_files`, `zero_access_entries`. If **2 or more total**, append to Step 6 report:
 
 ```
   [renormalize] N flags detected (oversized: X, stale refs: Y, zero-access: Z) — run /memory renormalize

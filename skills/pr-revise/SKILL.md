@@ -97,22 +97,17 @@ For each unresolved item in the selected batch, determine:
 
 Assign a Conventional Comments label to each item: `suggestion`, `issue`, `question`, `thought`, `nitpick`, or `praise`.
 
-**Grounding:** For each item labeled `issue` or `suggestion`, include a `**Grounding:**` line that traces from technical mechanism to observable human/operational consequence, using uncertain language. Use the hedged phrasing patterns from `~/.lore/claude-md/review-protocol/review-voice.md` — key forms:
-- `issue`: `**Grounding:** <mechanism — what may break, for whom, when> → <consequence — what the user experiences or what operational impact follows>.`
-- `suggestion`: `**Grounding:** <situation — when a real person encounters the problem> → <improvement — what changes for them>.`
+**Grounding contract:** see `skills/pr-review/SKILL.md` Step 3b. For each item labeled `issue` or `suggestion`, include a `**Grounding:**` line that traces from technical mechanism to observable human/operational consequence, using the hedged phrasing patterns from `~/.lore/claude-md/review-protocol/review-voice.md` — `issue` uses `<mechanism — what may break, for whom, when> → <consequence — what the user experiences>`; `suggestion` uses `<situation — when a real person encounters the problem> → <improvement — what changes for them>`.
 
 For reviewer-sourced findings specifically, grounding comes from the **code's actual behavior**, not the reviewer's framing. Read the referenced function before writing the grounding line. If the code does not support the reviewer's implied consequence, that is a signal the finding is unsound — not a signal to rewrite the reviewer into something defensible.
 
-**Apply the Grounding Quality Rubric** from `~/.lore/claude-md/review-protocol/severity.md` (Sound / Weak / Unsound) to each grounded item:
-- **Sound** — grounding completes the mechanism → consequence chain against observable code behavior. Keep as-is.
-- **Weak** — grounding stops at the mechanism, or names an abstract benefit without a scenario. Rewrite the line to complete the chain; keep the label intact.
-- **Unsound** — no realistic failure scenario or concrete benefit exists in the code. Downgrade `issue` to `thought`; drop `suggestion` entirely.
+**Grounding Quality Rubric:** see `skills/pr-review/SKILL.md` Step 4b (Sound / Weak / Unsound). Keep Sound items as-is; rewrite Weak grounding to complete the mechanism→consequence chain (label intact); demote Unsound `issue` to `thought` and drop Unsound `suggestion`.
 
 Items without a grounding line are treated the same as unsound: demote `issue` to `thought`, drop `suggestion`. This prevents reviewer style preferences from being elevated to action items.
 
-**Apply the 8-point review checklist** from `~/.lore/claude-md/review-protocol/checklist.md` as an additional analysis lens when categorizing. Read the checklist at invocation time — do not duplicate it here. The checklist helps distinguish substantive feedback from style preferences.
+**Apply the 8-point review checklist** from `~/.lore/claude-md/review-protocol/checklist.md` as an additional analysis lens. Read it at invocation — do not duplicate it here. The checklist helps distinguish substantive feedback from style preferences.
 
-**Scoping for large diffs:** For PRs touching more than ~10 files, prioritize analysis by: (1) files with blocking/CHANGES_REQUESTED feedback, (2) files with the most review threads, (3) files touching shared interfaces or public APIs. Apply detailed categorization to priority files; batch remaining items by category.
+**Scoping for large diffs:** For PRs touching more than ~10 files, prioritize: (1) files with blocking/CHANGES_REQUESTED feedback, (2) files with the most review threads, (3) files touching shared interfaces or public APIs. Apply detailed categorization to priority files; batch remaining items by category.
 
 ## Step 4: Knowledge Enrichment
 
@@ -127,7 +122,7 @@ For each feedback item with a substantive label (suggestion, issue, question, th
 
 2. Surface 1-3 compact citations inline with the categorized item. Format: `[knowledge: entry-title]` with a one-line summary of relevance.
 
-3. Check for staleness: if a knowledge entry is STALE and the PR contradicts it, flag as "convention may need updating" — not "PR is wrong."
+3. Stale-knowledge flagging: see `skills/pr-review/SKILL.md` Step 4d. If a knowledge entry is STALE and the PR contradicts it, flag as 'convention may need updating' — not 'PR is wrong.'
 
 **This enrichment is critical for /pr-revise specifically:** external reviewers bring fresh eyes but also stylistic baggage. Knowledge enrichment distinguishes project conventions from reviewer preferences. When a reviewer suggests something that contradicts a known convention, the enrichment surfaces the convention so the user can make an informed decision.
 
@@ -145,37 +140,9 @@ Create a work item from the categorized, enriched feedback:
 
 Where `<short-slug>` is 2-3 words from the PR title, slugified (e.g., `pr-42-fix-auth-flow`).
 
-Write `notes.md` (not `plan.md`) with feedback organized by actionability. Each item leads with the **substantiated impact claim** (mechanism → consequence derived from reading the code), not a restatement of the reviewer's phrasing. Reviewer quote goes second as evidence.
-
-```markdown
-# PR #<NUMBER>: <Title>
-
-> **Review-level analysis.** These findings came from a code review (diff-level analysis). Investigation agents should verify assumptions against the full codebase, not accept them as validated. Verification items state open questions, not expected outcomes.
-
-## Goal
-Substantiate or dismiss reviewer feedback from @<reviewer>'s review on PR #<NUMBER> against code behavior.
-
-## Agreed Changes
-Items where reading the referenced code confirms the reviewer's point — typos, naming corrections, clear style fixes, or claims that reduce to a one-liner once the code is read. Each is actionable without further investigation.
-- [ ] **<Impact claim — mechanism → consequence>** — `<file:line>`. Reviewer: "<quote>".
-- [ ] ...
-
-## Verification Needed
-Reviewer claims where grounding is plausible but evidence requires multi-file or cross-boundary investigation. **State the open question, not the expected outcome** — pre-writing the answer turns downstream investigation into confirmation.
-- [ ] **<Impact claim if the reviewer is correct>** — `<file:function>`. Reviewer: "<quote>". **Verify:** <open question, e.g., "whether callers depend on the prior nil-return path"> [knowledge: <citation>]
-- [ ] ...
-
-## Deferred
-Out of scope for this revision pass, or blocked on user input.
-- [ ] <item> — <reason deferred>
-- [ ] ...
-```
-
-Group related feedback into single items when they touch the same file/function. Include knowledge citations so `/spec` investigators have context. Omit empty sections.
+Write `notes.md` (not `plan.md`) with feedback organized by actionability. Each item leads with the **substantiated impact claim** (mechanism → consequence derived from reading the code), not a restatement of the reviewer's phrasing. Reviewer quote goes second as evidence. When writing `notes.md`, read `skills/pr-revise/templates/notes-md-template.md` for the structure (Goal / Agreed Changes / Verification Needed / Deferred sections plus the downstream `/spec` pointer).
 
 **Before finalizing each Verification Needed item, run the trivial reduction check:** re-read the referenced function. If it reduces to a one-liner that makes the reviewer's point obvious, move the item to Agreed Changes. This is where asymmetric scrutiny gets caught before it reaches the output — a verification item that you can already answer is not a verification item.
-
-> **Next step:** To generate implementation tasks, run `/spec pr-<NUMBER>-<short-slug>` on this work item after investigation validates the findings. The pipeline is: review findings (notes.md) -> `/spec` investigation (plan.md) -> `/implement` execution. Do not skip the `/spec` step — review findings are diff-level hypotheses, not validated implementation plans.
 
 ### Readiness assessment
 
@@ -184,11 +151,7 @@ Default readiness is `spec-needed`. Override to `implement-ready` only when ALL 
 - All items are trivially obvious fixes verifiable from the diff alone
 - No item touches cross-boundary invariants or shared interfaces
 
-**Only ask the user when:**
-- Feedback contradicts project conventions (knowledge enrichment will surface this)
-- Multiple valid architectural approaches exist
-- Feedback seems incorrect or based on misunderstanding
-- The change would have broad implications
+**Only ask the user when:** feedback contradicts project conventions, multiple valid architectural approaches exist, feedback seems incorrect or misunderstood, or the change would have broad implications.
 
 When asking, be specific: "The reviewer suggests X, but convention Y applies here [knowledge: entry-title]. Which should I follow?"
 
@@ -196,36 +159,7 @@ This step is automatic — do not ask whether to create the work item.
 
 ## Step 6: Present Summary
 
-```
-## PR Feedback Summary
-
-**PR:** #<number> — <title>
-**Reviewed batch:** @<reviewer> (<STATE>) — N inline comments
-**Readiness:** spec-needed | implement-ready
-**Agreed changes:** N (direct tasks)
-**Verification needed:** M (requires /spec)
-**Deferred:** K
-**Skipped (resolved/outdated):** J
-**Knowledge enrichments:** X queries, Y citations surfaced
-
-### Agreed Changes:
-1. [task subject] — file.py:123
-2. ...
-
-### Verification Directives:
-1. [item] — Verify: [what to check] in `file:function`
-2. ...
-
-### Items needing your input:
-- [description with knowledge context — e.g., "Reviewer suggests X, but convention Y applies"]
-
-### Deferred batches:
-- @<reviewer2> (<STATE>) — N inline comments
-```
-
-If there are items needing input, ask about them in a single batched question.
-
-If there are deferred batches, note that the user can re-invoke `/pr-revise` on the same PR to process the next batch.
+When presenting the summary, read `skills/pr-revise/templates/feedback-summary.md` for the `## PR Feedback Summary` output template (header fields, Agreed Changes / Verification Directives / Items needing your input / Deferred batches sub-blocks, and the two follow-up prompts for input items and deferred batches).
 
 ## Step 7: Generate Followup Report
 
@@ -256,7 +190,7 @@ Produce a suggested-actions JSON array, omitting types for empty categories:
 
 ### 7b. Assemble the full report body
 
-Assemble the `--content` value with **all** of the following sections. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
+Assembly preamble: see `skills/pr-review/SKILL.md` Step 6e. Assemble the `--content` value with **all** of the following sections. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
 
 **Grounding re-check before assembly.** Re-verify that every `issue` and `suggestion` item still has a specific mechanism → consequence chain per the Sound/Weak/Unsound rubric applied in Step 3. The test: if the PR author asks "why does this matter?", the Summary column must answer with a specific scenario, not a vague assertion. Any item that lacks grounding at this point: demote `issue` to `thought`, drop `suggestion`. Grounding can be lost during grouping or categorization — this pass catches it before the external artifact is written.
 
@@ -265,52 +199,33 @@ Assemble the `--content` value with **all** of the following sections. Every sec
 **Section 1 — PR Narrative**
 
 Derive from three sources:
-- **PR description and commit messages:** the stated purpose and context of the change, drawn from `gh pr view` output (title, body, commits).
-- **Reviewer feedback themes:** recurring concerns or patterns across the selected batch (e.g., "reviewer flagged missing error handling in two places", "two suggestions about naming consistency").
-- **Knowledge enrichment context:** any conventions or architectural patterns surfaced by Step 4 enrichment that are relevant to understanding the feedback.
+- **PR description and commit messages:** stated purpose and context from `gh pr view` (title, body, commits).
+- **Reviewer feedback themes:** recurring concerns across the selected batch (e.g., "missing error handling in two places").
+- **Knowledge enrichment context:** conventions or patterns surfaced by Step 4 that are relevant to the feedback.
 
 ```markdown
 ## PR Narrative
 
-<1–3 sentences summarizing what the PR does, drawn from its description and commits>
+<1–3 sentences summarizing what the PR does>
 
-**Reviewer themes:** <patterns or recurring concerns across the feedback batch, or "None" if feedback is isolated>
+**Reviewer themes:** <patterns across the feedback batch, or "None">
 
-**Knowledge context:** <relevant conventions or patterns from Step 4 enrichment, or "None" if no relevant citations>
+**Knowledge context:** <relevant conventions from Step 4, or "None">
 ```
 
-Omit **Reviewer themes** if all feedback items are isolated (no recurring patterns). Omit **Knowledge context** if Step 4 produced no citations relevant to the PR's overall direction.
+Omit **Reviewer themes** if all feedback items are isolated. Omit **Knowledge context** if Step 4 produced no citations relevant to the PR's overall direction.
 
 **Section 2 — Implementation Diagram**
 
 Draw an ASCII box-drawing diagram showing the logical flow of the PR's changes as understood from the diff: which components were added or modified, how they connect, and the direction of data or control flow.
 
-Read diagram conventions:
-```bash
-cat ~/.lore/claude-md/review-protocol/followup-template.md
-```
+Diagram conventions: see `skills/pr-review/SKILL.md` Step 6b (reads `~/.lore/claude-md/review-protocol/followup-template.md`).
 
 If directional relationships cannot be determined from the diff alone, omit the diagram.
 
 **Section 3 — Review Findings**
 
-List all categorized feedback items from Step 3. Include every item regardless of category — Agreed Changes, Verification Needed, and Deferred are all listed with their full context.
-
-```markdown
-## Review Findings
-
-| # | Label | Item | File:Line | Category | Knowledge | Reviewer Quote | Summary |
-|---|-------|------|-----------|----------|-----------|----------------|---------|
-| 1 | issue | <title> | <file:line> | Agreed Changes | <citation or —> | "<verbatim quote>" | <uncertain framing> |
-| 2 | suggestion | <title> | <file:line> | Verification Needed | <citation or —> | "<verbatim quote>" | <uncertain framing> |
-| 3 | question | <title> | <file:line> | Deferred | <citation or —> | "<verbatim quote>" | <uncertain framing> |
-```
-
-- **Label** column: the Conventional Comments label assigned in Step 3 (`suggestion`, `issue`, `question`, `thought`, `nitpick`, `praise`).
-- **Category** column: `Agreed Changes`, `Verification Needed`, or `Deferred`.
-- **Knowledge** column: the `[knowledge: entry-title]` citation from Step 4 enrichment, or `—` if no citation applies.
-- **Reviewer Quote** column: the verbatim reviewer comment (truncated to ~80 chars if long; use `...` to indicate truncation).
-- **Summary** column: the mechanism → consequence chain from the item's grounding, expressed in hedged voice. Must name the specific code behavior (mechanism) AND the observable impact that follows (consequence). The Reviewer Quote column already carries the reviewer's phrasing — do not restate it here. Follow `~/.lore/claude-md/review-protocol/review-voice.md`: hedge the inference, not the observed code fact. Key forms: "`<function>` does X — if <condition>, <consequence>" for issues, "the <situation> means <person> has to <friction>; <change> removes it" for suggestions, the reviewer's open question verbatim for question-labeled items. Do not include internal analysis headers (`**Grounding:**`, `**Severity:**`, etc.) — they are internal protocol language and must not appear in the report.
+List all categorized feedback items from Step 3. Include every item regardless of category — Agreed Changes, Verification Needed, and Deferred are all listed with their full context. Read `skills/pr-revise/templates/review-findings-table.md` for the table column structure and the per-column shaping rules (Label / Category / Knowledge / Reviewer Quote / Summary, hedged-voice forms by label, and the prohibition on internal protocol headers — per `skills/pr-review/SKILL.md` Step 6d-ii). Voice for the externally-facing Summary column follows `skills/pr-review/SKILL.md:475-484`.
 
 ### 7c. Persist the report
 
