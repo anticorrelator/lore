@@ -854,6 +854,79 @@ func TestAutomaticSettlementProcessCompletionDoesNotTightLoop(t *testing.T) {
 	}
 }
 
+func TestSettlementInFlightFailsafeClearsStuckFlag(t *testing.T) {
+	// Regression: a subprocess goroutine that never returned would leave
+	// settlementProcessInFlight=true forever, gating every subsequent
+	// auto-process tick. The failsafe must clear it after the ceiling.
+	m := minimalModel(stateSettlement, nil, nil)
+	m.settlementProcessInFlight = true
+	m.settlementProcessStartedAt = time.Now().Add(-(settlementInFlightCeiling + time.Minute))
+
+	nm, recovered := m.settlementInFlightFailsafe()
+	if !recovered {
+		t.Fatal("expected failsafe to fire on a flag stuck past the ceiling")
+	}
+	if nm.settlementProcessInFlight {
+		t.Fatal("failsafe should clear settlementProcessInFlight")
+	}
+	if !nm.settlementProcessStartedAt.IsZero() {
+		t.Fatal("failsafe should reset the started-at timestamp")
+	}
+	if nm.flashErr == "" {
+		t.Fatal("failsafe should surface a flash error so the user sees recovery")
+	}
+}
+
+func TestSettlementInFlightFailsafeLeavesRecentInFlightAlone(t *testing.T) {
+	// The failsafe must NOT fire while a subprocess is still legitimately
+	// running — otherwise we'd dispatch a second process that races the
+	// first for the queue lock.
+	m := minimalModel(stateSettlement, nil, nil)
+	m.settlementProcessInFlight = true
+	m.settlementProcessStartedAt = time.Now().Add(-30 * time.Second) // well within ceiling
+
+	nm, recovered := m.settlementInFlightFailsafe()
+	if recovered {
+		t.Fatal("failsafe should not fire for a recently-started subprocess")
+	}
+	if !nm.settlementProcessInFlight {
+		t.Fatal("failsafe should leave the in-flight flag set")
+	}
+	if nm.flashErr != "" {
+		t.Fatalf("failsafe should not flash for healthy in-flight, got %q", nm.flashErr)
+	}
+}
+
+func TestSettlementInFlightFailsafeRecoversFromMissingTimestamp(t *testing.T) {
+	// Defensive: if InFlight is true but the timestamp was never set
+	// (e.g. older state from a code path we missed), the failsafe must
+	// still recover rather than leaving the loop permanently gated.
+	m := minimalModel(stateSettlement, nil, nil)
+	m.settlementProcessInFlight = true
+	// settlementProcessStartedAt is intentionally left zero.
+
+	nm, recovered := m.settlementInFlightFailsafe()
+	if !recovered {
+		t.Fatal("expected failsafe to fire when timestamp was never set")
+	}
+	if nm.settlementProcessInFlight {
+		t.Fatal("failsafe should clear the flag when timestamp is zero")
+	}
+}
+
+func TestSettlementInFlightFailsafeNoOpWhenNotInFlight(t *testing.T) {
+	m := minimalModel(stateSettlement, nil, nil)
+	// settlementProcessInFlight intentionally false.
+
+	nm, recovered := m.settlementInFlightFailsafe()
+	if recovered {
+		t.Fatal("failsafe should never fire when no subprocess is in flight")
+	}
+	if nm.flashErr != "" {
+		t.Fatalf("failsafe should not flash when not in flight, got %q", nm.flashErr)
+	}
+}
+
 // --- handlePanelRouting tests ---
 
 // noopCallbacks returns a panelCallbacks where every field is a no-op.

@@ -923,6 +923,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		case "p":
 			if m.state == stateSettlement {
 				m.settlementProcessInFlight = true
+				m.settlementProcessStartedAt = time.Now()
 				return m, runSettlementAction("process")
 			}
 			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
@@ -1121,6 +1122,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.settlement = m.settlement.ReplaceStatus(msg.status)
 		if m.shouldAutoProcessSettlement(msg.status) {
 			m.settlementProcessInFlight = true
+			m.settlementProcessStartedAt = time.Now()
 			return m, runAutomaticSettlementProcess()
 		}
 		return m, nil
@@ -1128,6 +1130,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case settlementActionCompleteMsg:
 		if msg.action == "process" {
 			m.settlementProcessInFlight = false
+			m.settlementProcessStartedAt = time.Time{}
 		}
 		if msg.err != nil {
 			if !msg.automatic {
@@ -1516,6 +1519,39 @@ func (m model) updateInlineSettlementSettings(msg tea.KeyMsg) (model, tea.Cmd) {
 		cmd = batchCmd(cmd, loadSettlementStatus())
 	}
 	return m, cmd
+}
+
+// settlementInFlightCeiling is the model-level belt to commands.go's
+// CommandContext suspenders. If the subprocess goroutine never returns
+// settlementActionCompleteMsg (e.g. the kill itself wedges, or the
+// goroutine leaks for an unrelated reason), settlementProcessInFlight
+// would stay true forever and gate every subsequent auto-process tick.
+// This ceiling must comfortably exceed settlementSubprocessTimeout so
+// the normal cancel-and-kill path fires first under typical hangs.
+const settlementInFlightCeiling = 12 * time.Minute
+
+// settlementInFlightFailsafe clears a stuck settlementProcessInFlight
+// flag and surfaces a flash error so the user knows auto-process
+// recovered. Called from handleIndexPollTick so every 5s tick re-checks.
+// Returns the (possibly mutated) model and whether a recovery fired.
+func (m model) settlementInFlightFailsafe() (model, bool) {
+	if !m.settlementProcessInFlight {
+		return m, false
+	}
+	if m.settlementProcessStartedAt.IsZero() {
+		// Defensive: flag is true but timestamp was never set. Clear it
+		// so we don't deadlock the auto-process loop.
+		m.settlementProcessInFlight = false
+		m.flashErr = "[settlement] in-flight flag had no timestamp — cleared"
+		return m, true
+	}
+	if time.Since(m.settlementProcessStartedAt) <= settlementInFlightCeiling {
+		return m, false
+	}
+	m.settlementProcessInFlight = false
+	m.settlementProcessStartedAt = time.Time{}
+	m.flashErr = fmt.Sprintf("[settlement] subprocess flag stuck >%s — cleared (auto-process resuming)", settlementInFlightCeiling)
+	return m, true
 }
 
 func (m model) shouldAutoProcessSettlement(st settlement.Status) bool {

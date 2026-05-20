@@ -171,6 +171,13 @@ type model struct {
 	// embedded directly in the settlement view.
 	settlementSettingsPanel   *settings.SettingsModel
 	settlementProcessInFlight bool
+	// settlementProcessStartedAt is set when settlementProcessInFlight flips
+	// true and cleared when it flips back. The failsafe in
+	// settlementInFlightFailsafe (called from handleIndexPollTick) uses this
+	// to detect a stuck flag — i.e. a subprocess goroutine that never
+	// returned, despite the CommandContext timeout in commands.go — and
+	// reset the flag so auto-process can resume. Zero value means not in flight.
+	settlementProcessStartedAt time.Time
 
 	// Confirm modal for archive/delete actions.
 	confirmAction string // "archive", "unarchive", "delete", "post_review", etc.; empty = inactive

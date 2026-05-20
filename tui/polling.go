@@ -156,6 +156,10 @@ func readPlanContent(workDir, slug string) tea.Cmd {
 // handleIndexPollTick handles the periodic poll tick: schedules mtime checks, touches
 // session files for active spec panels, and kicks off a new tick.
 func (m model) handleIndexPollTick() (model, tea.Cmd) {
+	// Defensive: clear a stuck settlementProcessInFlight flag if its
+	// subprocess goroutine never returned. Without this, the auto-process
+	// loop would be silently gated for the rest of the TUI session.
+	m, _ = m.settlementInFlightFailsafe()
 	cmds := []tea.Cmd{checkIndexMtime(m.indexPath), loadSettlementStatus(), indexPollTick()}
 	// Poll plan.md and detail files for the current item on every tick.
 	if slug := m.list.CurrentSlug(); slug != "" {

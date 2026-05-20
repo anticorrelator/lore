@@ -137,15 +137,37 @@ func runAutomaticSettlementProcess() tea.Cmd {
 	return runSettlementActionWithMode("process", true)
 }
 
+// settlementSubprocessTimeout caps how long the TUI will wait for a
+// `lore settlement <action>` subprocess to return. It must comfortably
+// exceed the executor budget (default executor_timeout_seconds=300 inside
+// settlement-audit-executor.sh) plus typical setup/teardown overhead.
+// If the subprocess hangs past this ceiling — e.g. a wedged `claude -p`
+// invocation or a held flock — CommandContext cancels and kills it so
+// the TUI's settlementProcessInFlight flag can be cleared and auto-process
+// can resume. A separate model-level failsafe (settlementInFlightFailsafe
+// in update.go) catches the rarer case where even the cancel can't free
+// the goroutine.
+const settlementSubprocessTimeout = 10 * time.Minute
+
 func runSettlementActionWithMode(action string, automatic bool) tea.Cmd {
 	return func() tea.Msg {
 		args := []string{"settlement", action, "--json"}
 		if action == "process" {
 			args = []string{"settlement", "process", "--once", "--json"}
 		}
-		cmd := exec.Command("lore", args...)
+		ctx, cancel := context.WithTimeout(context.Background(), settlementSubprocessTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "lore", args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		out, err := cmd.CombinedOutput()
+		if ctx.Err() == context.DeadlineExceeded {
+			return settlementActionCompleteMsg{
+				action:    action,
+				automatic: automatic,
+				err:       fmt.Errorf("subprocess exceeded %s ceiling and was killed (output: %s)", settlementSubprocessTimeout, strings.TrimSpace(string(out))),
+				output:    string(out),
+			}
+		}
 		if err != nil {
 			return settlementActionCompleteMsg{action: action, automatic: automatic, err: fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out))), output: string(out)}
 		}
