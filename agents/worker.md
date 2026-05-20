@@ -80,30 +80,70 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
      Read the `**Verification:**` bullets in this brief carefully — you MUST
      self-check your changes against each bullet before reporting completion.
 5. Implement the change — read existing code first, follow codebase conventions.
-   **Comments and docstrings you leave in the codebase are read by maintainers
-   who have no lore context.** Before committing any comment or docstring:
-   - **Strip lore-internal scaffolding.** No `D1`/`D2`/`D3`/`D6` decision IDs,
-     no `P1`/`P2` phase refs, no "per D3" / "see §X" cross-references, no
-     `[[knowledge:...]]` / `[[work:...]]` backlinks, no references to "the
-     spec" or "the plan". These are protocol scaffolding; outside the protocol
-     they read as noise. (See preference
-     `never-leave-lore-internal-scaffolding-markers-in-c.md`.)
-   - **Avoid protocol-speak as load-bearing comment vocabulary.** Words like
-     "harness", "invariant" (in the "promise/contract" sense), "structural",
-     "by-design", "asymmetric-by-design", "load-bearing", "consumer downstream"
-     come out of /spec deliberation, not maintainer-facing English. If a
-     comment needs one of these to parse, rewrite from the maintainer's POV.
-   - **No inline architectural essays.** Comments longer than 2-3 lines are
-     suspect. Architectural reasoning belongs in `plan.md`, the commit
-     message, or the PR description — never in inline source comments. Tests
-     in particular should not carry section banners (`# ---- ANSI hygiene —
-     D4 ----`) describing how the test relates to the plan.
-   - **Audit before reporting completion.** Grep your diff:
-     `grep -nE 'D[0-9]+|per P[0-9]|class invariant|load-bearing|by-design|consumer downstream'`.
-     Rephrase or delete every hit.
 
-   The reviewer-facing test: a maintainer reading this code in 6 months with
-   no protocol context should learn something useful without a glossary.
+   **Inline comments are for readers, not for thinking.** Reason at any length
+   while editing — including in scratch inline comments. Before completion,
+   compress committed comments to their reader-facing form. Long-form
+   reasoning that's still useful goes in Observations or Investigation;
+   reasoning that was only useful while writing can be deleted.
+
+   **Plan and phase-brief vocabulary is for the lead; source comments are for
+   codebase maintainers.** Don't carry the brief's dialect into the source.
+   The brief speaks /spec-deliberation language (design decisions, load-bearing
+   claims, structural invariants); the codebase speaks maintainer-facing
+   English.
+
+   **Drift test for any comment:** if the surrounding code changes, will this
+   comment quietly become a lie? Drift-prone comments are worse than no
+   comment — wrong comments mislead future maintainers (human or agent). When
+   in doubt, drop.
+
+   **Drop:**
+   - Multi-paragraph essays in docstrings arguing design choices — belongs in
+     commit message, `plan.md`, or PR description.
+   - Justifications against alternatives not visible in the code ("we
+     deliberately don't X because…", "could have used Y but…").
+   - Restating the code in prose immediately above it.
+   - Re-explaining language/runtime semantics every competent reader knows
+     (GIL, async, dict atomicity).
+   - Cross-references between comments in the same file ("see X above").
+   - Section banners with prose announcing what comes next.
+   - Lore-internal scaffolding: `D1`/`P2` IDs, `[[knowledge:...]]` /
+     `[[work:...]]` backlinks, "per D3" / "see the spec/plan" cross-refs,
+     protocol-speak as load-bearing vocabulary ("load-bearing", "by-design",
+     "consumer downstream", "harness", "invariant" in the promise/contract
+     sense — not the math/data-structure sense).
+
+   **Keep:**
+   - Single-line invariants a future edit could plausibly violate (ordering
+     constraints, non-obvious dependencies between calls).
+   - Operational gotchas with no other surface (empirical findings,
+     non-obvious paths, footguns that would cost an hour to rediscover).
+   - External SDK or library behavior the call site can't show.
+   - Fail-closed or security rationale for checks that would otherwise look
+     paranoid.
+   - One-sentence public-method docstrings stating *what* the method does.
+
+   **Worked examples:**
+   ```python
+   # DROP — justifies against an absent alternative:
+   # We deliberately don't pop here — popping would break the invariant
+   # that the head element is available for the next iteration's comparison.
+   if items[0].priority > threshold:
+       process(items[0])
+
+   # KEEP — load-bearing ordering not visible from function names:
+   # Must run before _flush_buffer; _flush_buffer assumes _index is final.
+   _finalize_index()
+   self._flush_buffer()
+
+   # KEEP — external SDK behavior the call site can't show:
+   # Anthropic's stream API closes after 30s of silence, not 30s total.
+   # Send a keepalive if batch logic might exceed that window.
+   ```
+
+   See preference `never-leave-lore-internal-scaffolding-markers-in-c.md`
+   for the full rationale.
 6. **During the task, emit Tier 2 evidence as you go.** Each time you form a
    claim anchored to a specific `file:line_range` that grounds the work in
    this task, emit it immediately via `evidence-append.sh` — one call per
