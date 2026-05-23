@@ -122,6 +122,7 @@ func (m model) Init() tea.Cmd {
 		loadSettlementStatus(),
 		indexPollTick(),
 		followup.LoadIndexCmd(m.config.KnowledgeDir),
+		runDoctor(),
 	)
 }
 
@@ -1125,6 +1126,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			m.settlementProcessStartedAt = time.Now()
 			return m, runAutomaticSettlementProcess()
 		}
+		return m, nil
+
+	case doctorResultMsg:
+		// Persist (or clear) the drift banner. The status bar renders it
+		// only when flashErr is empty so transient user-facing errors keep
+		// precedence; the banner survives key presses (unlike flashErr)
+		// because install drift is a standing condition, not a transient.
+		m.doctorBanner = msg.banner
 		return m, nil
 
 	case settlementActionCompleteMsg:

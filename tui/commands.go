@@ -25,6 +25,46 @@ type initFinishedMsg struct {
 	Err error
 }
 
+// doctorResultMsg carries the outcome of an async `lore doctor --quiet` run
+// kicked off at TUI startup. Banner is the one-line drift summary from
+// doctor's stdout when drift was detected; empty when clean, throttled, or
+// the script could not be invoked. The TUI never blocks on this message —
+// it merely surfaces the banner in the status bar.
+type doctorResultMsg struct {
+	banner string
+}
+
+// runDoctor invokes `bash ~/.lore/scripts/doctor.sh --quiet` and returns a
+// doctorResultMsg. Throttling lives inside doctor.sh (24h marker file), so
+// the TUI can call this on every Init without worry. When doctor exits
+// non-zero it writes a one-line summary to stdout — we forward that string
+// (trimmed) as the banner. When doctor exits zero or the script is missing,
+// we return an empty banner and the status bar shows its normal hints.
+func runDoctor() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "bash", filepath.Join(os.Getenv("HOME"), ".lore/scripts/doctor.sh"), "--quiet")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		out, err := cmd.Output()
+		if err == nil {
+			// Exit 0 — clean or throttled. Nothing to surface.
+			return doctorResultMsg{}
+		}
+		// Exit non-zero. doctor.sh --quiet prints a one-line summary to
+		// stdout in this branch. If stdout is empty (e.g. script missing,
+		// permission error, timeout), leave banner empty rather than
+		// surface a misleading message.
+		banner := strings.TrimSpace(string(out))
+		// Keep only the first line — defensive against future doctor.sh
+		// changes that may add follow-up lines like "agent: enabled".
+		if i := strings.IndexByte(banner, '\n'); i >= 0 {
+			banner = banner[:i]
+		}
+		return doctorResultMsg{banner: banner}
+	}
+}
+
 // runInit runs init-repo.sh then init-work.sh sequentially, returning initFinishedMsg.
 // Both scripts are idempotent; if init-repo fails, init-work is skipped.
 func runInit(projectDir string) tea.Cmd {

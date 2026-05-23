@@ -209,6 +209,16 @@ type model struct {
 	// It is cleared on the next key press.
 	flashErr string
 
+	// doctorBanner holds a one-line install-drift summary from
+	// `lore doctor --quiet` (e.g. "lore doctor: 1 issue(s) detected — run
+	// 'lore doctor' for details"). Populated asynchronously by runDoctor on
+	// Init when doctor's exit code is non-zero; empty when clean or
+	// throttled-no-rerun. Shown in the status bar with lower precedence
+	// than flashErr and aiLoading. Persists until the next TUI launch
+	// re-evaluates (no key press clears it — drift is a standing condition,
+	// not a transient error).
+	doctorBanner string
+
 	// initLoading is true while the background initialization command is running
 	// during the onboarding flow.
 	initLoading bool

@@ -2346,3 +2346,87 @@ func TestStateNoRepoKeyHandling(t *testing.T) {
 		t.Error("state should remain stateNoRepo after unrelated key")
 	}
 }
+
+// TestDoctorResultMsgPopulatesBanner verifies that a non-empty banner from
+// runDoctor is stored on the model so the status bar can render it.
+func TestDoctorResultMsgPopulatesBanner(t *testing.T) {
+	m := minimalModel(stateWork, nil, nil)
+	banner := "lore doctor: 1 issue(s) detected — run 'lore doctor' for details"
+
+	next, cmd := m.Update(doctorResultMsg{banner: banner})
+	nm := next.(model)
+
+	if nm.doctorBanner != banner {
+		t.Errorf("doctorBanner = %q, want %q", nm.doctorBanner, banner)
+	}
+	if cmd != nil {
+		t.Error("doctorResultMsg should not return a follow-up Cmd")
+	}
+}
+
+// TestDoctorResultMsgClearsBannerOnClean verifies that an empty banner from a
+// later clean run replaces a prior drift banner (so a heal-then-relaunch
+// cycle clears the warning).
+func TestDoctorResultMsgClearsBannerOnClean(t *testing.T) {
+	m := minimalModel(stateWork, nil, nil)
+	m.doctorBanner = "stale drift message"
+
+	next, _ := m.Update(doctorResultMsg{})
+	nm := next.(model)
+
+	if nm.doctorBanner != "" {
+		t.Errorf("doctorBanner = %q, want empty after clean result", nm.doctorBanner)
+	}
+}
+
+// TestDoctorBannerSurvivesKeyPress verifies the contract that drift is a
+// standing condition, not a transient error. Pressing a key clears flashErr
+// but must not clear doctorBanner.
+func TestDoctorBannerSurvivesKeyPress(t *testing.T) {
+	m := minimalModel(stateWork, nil, nil)
+	m.doctorBanner = "lore doctor: 2 issue(s) detected — run 'lore doctor' for details"
+	m.flashErr = "transient failure"
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	nm := next.(model)
+
+	if nm.flashErr != "" {
+		t.Errorf("flashErr should clear on key press, got %q", nm.flashErr)
+	}
+	if nm.doctorBanner == "" {
+		t.Error("doctorBanner must survive key press (drift is standing condition)")
+	}
+}
+
+// TestStatusBarFlashErrTakesPrecedenceOverDoctorBanner verifies the status
+// bar precedence: flashErr (red) outranks doctorBanner (amber) so transient
+// action failures are visible immediately.
+func TestStatusBarFlashErrTakesPrecedenceOverDoctorBanner(t *testing.T) {
+	m := minimalModel(stateWork, nil, nil)
+	m.width = 200
+	m.height = 40
+	m.flashErr = "transient-fail-marker"
+	m.doctorBanner = "doctor-banner-marker"
+
+	bar := m.renderStatusBar(m.width)
+	if !strings.Contains(bar, "transient-fail-marker") {
+		t.Errorf("status bar should contain flashErr when both set; got %q", bar)
+	}
+	if strings.Contains(bar, "doctor-banner-marker") {
+		t.Errorf("status bar must not show doctorBanner while flashErr is set; got %q", bar)
+	}
+}
+
+// TestStatusBarRendersDoctorBannerWhenNoFlashErr verifies the amber drift
+// indicator appears when there is no higher-priority signal to render.
+func TestStatusBarRendersDoctorBannerWhenNoFlashErr(t *testing.T) {
+	m := minimalModel(stateWork, nil, nil)
+	m.width = 200
+	m.height = 40
+	m.doctorBanner = "doctor-banner-marker"
+
+	bar := m.renderStatusBar(m.width)
+	if !strings.Contains(bar, "doctor-banner-marker") {
+		t.Errorf("status bar should contain doctorBanner when flashErr empty; got %q", bar)
+	}
+}

@@ -798,6 +798,18 @@ func (m model) renderStatusBar(width int) string {
 		return bar
 	}
 
+	if m.doctorBanner != "" {
+		// Color 3 = yellow/amber — distinct from flashErr's red. Drift is a
+		// "you should look at this" signal, not an "action failed" signal.
+		warnS := lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
+		bar := "  " + warnS.Render(m.doctorBanner)
+		barW := lipgloss.Width(bar)
+		if barW < width {
+			bar += strings.Repeat(" ", width-barW)
+		}
+		return bar
+	}
+
 	if m.aiLoading {
 		aiS := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 		bar := "  " + aiS.Render("Creating work items...")

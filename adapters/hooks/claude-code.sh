@@ -114,7 +114,9 @@ else:
 # process truth, so later installs for other harnesses cannot redirect these
 # hook commands.
 lore_hooks = [
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/doctor.sh --quiet", 5),
+    # doctor.sh moved to TUI startup (tui/update.go::Model.Init via runDoctor) —
+    # keeps drift checks attached to the lore surface that can act on them
+    # instead of every claude-code session, including non-lore ones.
     ("SessionStart", None, "command", "bash ~/.lore/scripts/auto-reindex.sh", 5),
     ("SessionStart", None, "command", "bash ~/.lore/scripts/load-knowledge.sh", 5),
     ("SessionStart", None, "command", "bash ~/.lore/scripts/load-work.sh", 5),
@@ -245,7 +247,7 @@ cmd_smoke() {
   echo
   echo "  Lore event           Support   Native hook (claude-code)"
   echo "  -------------------- --------- ----------------------------------------"
-  printf '  %-20s %-9s %s\n' session_start      full      "SessionStart hook (~/.lore/scripts/{doctor,auto-reindex,load-knowledge,load-work,load-threads,extract-session-digest})"
+  printf '  %-20s %-9s %s\n' session_start      full      "SessionStart hook (~/.lore/scripts/{auto-reindex,load-knowledge,load-work,load-threads,extract-session-digest}); doctor.sh runs from TUI startup instead"
   printf '  %-20s %-9s %s\n' user_prompt        full      "(no native UserPromptSubmit hook today; PreToolUse Write matcher covers lore writes)"
   printf '  %-20s %-9s %s\n' pre_tool           full      "PreToolUse hook (matcher=Write -> guard-work-writes.sh)"
   printf '  %-20s %-9s %s\n' post_tool          full      "(currently unused by lore; PostToolUse hook surface available)"
