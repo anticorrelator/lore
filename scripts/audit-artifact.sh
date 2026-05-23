@@ -96,6 +96,18 @@ JUDGE_MODEL=""
 #
 # Returns 0 on success, non-zero on subprocess failure. Stderr is
 # captured and summarized so settlement run records explain the real failure.
+#
+# Retry contract (post-investigation of the May 17-20 failure cluster):
+# the model occasionally returns empty or non-JSON output on a prompt that
+# succeeds on retry. _headless_runner_invoke_once classifies the failure
+# (rc=64 setup error, rc=65 empty output, rc=66 non-JSON output, rc=* other
+# subprocess failure) and headless_runner_invoke wraps it with up to
+# LORE_JUDGE_MAX_ATTEMPTS attempts. Setup errors bypass retry; transient
+# flakes retry with linear backoff. Both knobs override via env var so
+# tests can pin attempts=1.
+: "${LORE_JUDGE_MAX_ATTEMPTS:=3}"
+: "${LORE_JUDGE_RETRY_BACKOFF_SECS:=2}"
+
 split_codex_model_variant() {
   local binding="$1"
   local model="$binding"
@@ -110,7 +122,53 @@ split_codex_model_variant() {
   printf '%s\t%s\n' "$model" "$effort"
 }
 
+# headless_runner_invoke — public entry point with retry on transient flakes.
+# Wraps _headless_runner_invoke_once with up to LORE_JUDGE_MAX_ATTEMPTS attempts.
+# Setup errors (rc=64) bypass retry; other non-zero returns retry with linear
+# backoff. On exhaustion, returns the last attempt's exit code so the caller
+# can still distinguish (e.g. empty-output vs subprocess-failure) for logging.
 headless_runner_invoke() {
+  local system_prompt_file="$1"
+  local user_prompt="$2"
+  local output_file="$3"
+  local attempt=1
+  local rc=0
+  while (( attempt <= LORE_JUDGE_MAX_ATTEMPTS )); do
+    rc=0
+    _headless_runner_invoke_once "$system_prompt_file" "$user_prompt" "$output_file" || rc=$?
+    if (( rc == 0 )); then
+      if (( attempt > 1 )); then
+        echo "[audit] headless runner succeeded on attempt $attempt/$LORE_JUDGE_MAX_ATTEMPTS after retry" >&2
+      fi
+      return 0
+    fi
+    # Setup errors (capability gate, CLI missing, unsupported framework) are
+    # configuration problems, not transient flakes — retrying is wasted time
+    # and noise.
+    if (( rc == 64 )); then
+      return 64
+    fi
+    if (( attempt == LORE_JUDGE_MAX_ATTEMPTS )); then
+      echo "[audit] headless runner exhausted $LORE_JUDGE_MAX_ATTEMPTS attempts (last rc=$rc)" >&2
+      return "$rc"
+    fi
+    echo "[audit] headless runner attempt $attempt/$LORE_JUDGE_MAX_ATTEMPTS returned rc=$rc; retrying in ${LORE_JUDGE_RETRY_BACKOFF_SECS}s" >&2
+    sleep "$LORE_JUDGE_RETRY_BACKOFF_SECS"
+    attempt=$((attempt + 1))
+  done
+  return "$rc"
+}
+
+# _headless_runner_invoke_once — internal single-attempt invocation. Callers
+# should use headless_runner_invoke instead, which adds retry on transient
+# flakes. Exit-code conventions:
+#   0  success: output file is non-empty AND parses as JSON
+#   64 setup error: capability gate, CLI missing, unsupported framework
+#      (NOT retried — these are config problems, not transient flakes)
+#   65 empty output (rc=0 but file size 0) — retried by caller
+#   66 non-empty output but not parseable as JSON — retried by caller
+#   *  any other non-zero subprocess exit — retried by caller
+_headless_runner_invoke_once() {
   local system_prompt_file="$1"
   local user_prompt="$2"
   local output_file="$3"
@@ -216,6 +274,18 @@ $user_prompt"
     fi
     rm -f "$err_file"
     return 65
+  fi
+  # rc==0, output non-empty, but model occasionally returns plain text /
+  # markdown-wrapped JSON / partial output that the downstream shape
+  # validators reject with parse-error at the first character. Surface that
+  # as rc=66 so the retry layer can catch it before the call site emits a
+  # contract-violation exit. Cheaper than re-walking the full audit pipeline.
+  if ! python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$output_file" >/dev/null 2>&1; then
+    local sz
+    sz=$(wc -c < "$output_file" 2>/dev/null | tr -d ' ' || echo 0)
+    echo "[audit] headless runner exit=0 but output is not parseable JSON (size=$sz, file=$output_file)" >&2
+    rm -f "$err_file"
+    return 66
   fi
   rm -f "$err_file"
   return 0
