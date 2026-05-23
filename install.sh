@@ -284,7 +284,6 @@ config_dir = os.path.join(data_dir, "config")
 # errors and skip on malformed JSON without aborting the whole install.
 legacy_specs = [
     "config/agent.json",
-    "config/capture-config.json",
     "config/framework.json",
     "config/harness-args.json",
     "config/obsidian.json",
@@ -372,16 +371,11 @@ if legacy_agent_enabled is not None:
             harnesses[fw] = new_block
     doc["harnesses"] = harnesses
 
-# capture-config.json -> capture.{core, structural_signals, adaptive}
-capture_doc = load_legacy("config/capture-config.json")
-if isinstance(capture_doc, dict):
-    capture_block = dict(doc.get("capture", {}))
-    for key in ("core", "structural_signals"):
-        if isinstance(capture_doc.get(key), dict):
-            capture_block[key] = capture_doc[key]
-    if "adaptive" in capture_doc:
-        capture_block["adaptive"] = bool(capture_doc["adaptive"])
-    doc["capture"] = capture_block
+# capture-config.json was retired 2026-05-06 with stop-novelty-check.py; the
+# schema removed `capture` in 884c20b. Strip any stale `capture` block that an
+# earlier install wrote into settings.json so doctor's schema check stays green.
+if "capture" in doc:
+    del doc["capture"]
     mark("config/capture-config.json")
 
 # framework.json -> {tui_launch_framework, harnesses.<fw>.roles, capability_overrides}
@@ -495,12 +489,19 @@ PYEOF
   fi
 fi
 
-# Retired 2026-05: the old probabilistic settlement settings were no longer
-# wired into hook adapters. Keep the open audit work item as the source for any
-# future trigger config, and prune the stale user-facing section from existing
-# unified settings files.
+# Retired-key pruning: strip top-level keys from existing settings.json that
+# the schema no longer accepts. Each entry here is a key the schema retired
+# without leaving a backward-compat shim; without this pass, doctor's schema
+# check flags the stale block on every run.
+#
+# - "settlement" — retired 2026-05 when the probabilistic settlement settings
+#   were no longer wired into hook adapters.
+# - "capture" — retired 2026-05-06 with stop-novelty-check.py; the schema
+#   removed `capture` in 884c20b. install.sh used to migrate the legacy
+#   capture-config.json into this block; the migration was removed but
+#   existing installs still carry the stale data.
 if [ -f "$SETTINGS_FILE" ]; then
-  info "Pruning retired settlement settings from $SETTINGS_FILE"
+  info "Pruning retired top-level keys from $SETTINGS_FILE"
   if ! $DRY_RUN; then
     SETTINGS_FILE="$SETTINGS_FILE" python3 - <<'PYEOF'
 import json
@@ -511,8 +512,11 @@ settings_path = os.environ["SETTINGS_FILE"]
 with open(settings_path, "r", encoding="utf-8") as f:
     doc = json.load(f)
 
-if isinstance(doc, dict) and "settlement" in doc:
-    doc.pop("settlement", None)
+retired_keys = ("settlement", "capture")
+removed = [k for k in retired_keys if isinstance(doc, dict) and k in doc]
+if removed:
+    for k in removed:
+        doc.pop(k, None)
     config_dir = os.path.dirname(settings_path)
     fd, tmp_path = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=config_dir)
     try:
@@ -526,6 +530,7 @@ if isinstance(doc, dict) and "settlement" in doc:
         except OSError:
             pass
         raise
+    print(f"  [lore] pruned: {', '.join(removed)}")
 PYEOF
   fi
 fi
@@ -616,38 +621,7 @@ if [ -f "$SMOKE_BAK" ]; then
   dry rm -f "$SMOKE_BAK"
 fi
 
-# --- 1d. Create default capture-config.json (idempotent) ---
 dry mkdir -p "$LORE_DATA_DIR/config"
-if [ ! -f "$LORE_DATA_DIR/config/capture-config.json" ]; then
-  info "Creating default capture-config.json"
-  if ! $DRY_RUN; then
-    cat > "$LORE_DATA_DIR/config/capture-config.json" <<'CONFIGEOF'
-{
-  "core": {
-    "novelty_threshold": -1.0,
-    "region_window": 5,
-    "max_candidates": 5,
-    "max_phrases": 15,
-    "min_tool_uses": 5,
-    "max_tool_uses": 10
-  },
-  "structural_signals": {
-    "investigation_window": 10,
-    "iterative_debug_window": 15,
-    "test_fix_window": 20,
-    "synthesis_char_threshold": 500,
-    "synthesis_tool_threshold": 5,
-    "file_context_window": 10,
-    "debug_context_window": 10,
-    "debug_context_chars": 800
-  },
-  "adaptive": false
-}
-CONFIGEOF
-  fi
-else
-  info "capture-config.json already exists, skipping"
-fi
 
 # --- 1c. Persist TUI launch framework + harness-local role defaults ---
 # settings.json is the authoritative user config. Re-running install with a
