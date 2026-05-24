@@ -472,6 +472,18 @@ if [[ -z "$ARTIFACT_ID" ]]; then
   exit 1
 fi
 
+# Reject the archive root literal — '_archive' is a structural container,
+# never a work-item slug. Without this guard, an upstream caller passing
+# '_archive' as a slug (e.g. from a path-parser that captured the archive
+# directory by accident) would resolve to $KDIR/_work/_archive, then write
+# verdicts into $KDIR/_work/_archive/verdicts/ as a phantom stub.
+if [[ "$ARTIFACT_ID" == "_archive" ]]; then
+  echo "[audit] Error: '_archive' is the archive root, not a work-item slug" >&2
+  echo "[audit]   Caller passed --work-item _archive or an equivalent ARTIFACT_ID;" >&2
+  echo "[audit]   trace upstream to find the path-parser that lost the real slug." >&2
+  exit 1
+fi
+
 # --- Resolve judge model from role ---
 # All three judges (correctness-gate, curator, reverse-auditor) run as
 # role `judge`. The single resolution applies to every judge invocation
@@ -848,9 +860,17 @@ if dry_run_flag == "true":
 
 # Populate work_item from path when artifact lives under $KDIR/_work/<slug>/.
 # Required for audit-queue-route.sh canonical routing (vs. direct-write fallback).
-_work_match = re.search(r'/_work/([^/]+)(?:/|$)', artifact_path)
+# Handles both active (/_work/<slug>/) and archived (/_work/_archive/<slug>/)
+# paths. Without the _archive-aware branch, the regex would greedily capture
+# '_archive' as the slug for any archived artifact, contaminating downstream
+# routing and producing phantom stubs at $KDIR/_work/_archive/verdicts/.
+_work_match = re.search(r'/_work/([^/]+)(?:/([^/]+))?(?:/|$)', artifact_path)
 if _work_match:
-    out["work_item"] = _work_match.group(1)
+    first, second = _work_match.group(1), _work_match.group(2)
+    if first == "_archive" and second:
+        out["work_item"] = second
+    elif first != "_archive":
+        out["work_item"] = first
 
 if task_claims_path:
     claims = []

@@ -420,6 +420,70 @@ ERR17=$(bash "$AUDIT" "$KDIR17/_work/wi-pcempty/task-claims.jsonl" --kdir "$KDIR
 assert_eq "empty array exits 1" "$EXIT17" "1"
 assert_contains "empty array: stderr names 'priority-claims array is empty'" "$ERR17" "priority-claims array is empty"
 
+
+# =============================================
+# Test 18: '_archive' literal rejected as work-item slug
+# Regression: a path-parsing bug at audit-artifact.sh:851 used to capture
+# '_archive' as the slug for any artifact under /_work/_archive/<real-slug>/,
+# producing phantom verdict stubs at $KDIR/_work/_archive/verdicts/. The
+# defensive guard rejects '_archive' as an ARTIFACT_ID outright.
+# =============================================
+echo ""
+echo "Test 18: '_archive' literal rejected as work-item slug"
+KDIR18="$TEST_DIR/kdir18"
+mkdir -p "$KDIR18/_work/_archive/real-slug"
+cat > "$KDIR18/_work/_archive/real-slug/audit-candidates.jsonl" <<'JSONLEOF'
+{"candidate_id":"cand-bbbbbbbbbbbb","verdict_source":"reverse-auditor","work_item":"real-slug","file":"scripts/audit-artifact.sh","line_range":"1-1","falsifier":"f","rationale":"r","status":"pending_correctness_gate","created_at":"2026-05-24T00:00:00Z"}
+JSONLEOF
+
+EXIT18=0
+ERR18=$(bash "$AUDIT" --kdir "$KDIR18" --work-item "_archive" \
+  --kind omission --id cand-bbbbbbbbbbbb 2>&1 >/dev/null) || EXIT18=$?
+assert_eq "'_archive' as --work-item exits 1" "$EXIT18" "1"
+assert_contains "stderr names archive root rule" "$ERR18" "_archive' is the archive root"
+
+# Confirm no phantom stub was created
+if [[ ! -d "$KDIR18/_work/_archive/verdicts" ]]; then
+  echo "  PASS: no phantom verdicts/ stub created under _archive/"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: phantom stub created at $KDIR18/_work/_archive/verdicts/"
+  FAIL=$((FAIL + 1))
+fi
+
+# =============================================
+# Test 19: Archived work item resolves to real slug, not '_archive'
+# Regression: the resolved-input.json work_item extractor at audit-artifact.sh
+# now correctly captures the slug under /_work/_archive/<slug>/ rather than
+# greedily matching '_archive'.
+# =============================================
+echo ""
+echo "Test 19: archived artifact resolves to real slug in resolved-input"
+KDIR19="$TEST_DIR/kdir19"
+mkdir -p "$KDIR19/_work/_archive/archived-slug"
+cat > "$KDIR19/_work/_archive/archived-slug/task-claims.jsonl" <<'JSONLEOF'
+{"claim_id":"task-claim-arc","tier":"task-evidence","claim":"archived claim","producer_role":"worker","protocol_slot":"implementation","task_id":"task-1","phase_id":"1","scale":"implementation","source":{"file":"scripts/audit-artifact.sh","line_range":"1-20"},"falsifier":"f"}
+JSONLEOF
+gate_fixture "$TEST_DIR/gate19.json" '{
+  "judge":"correctness-gate","judge_template_version":"arc",
+  "verdicts":[{"claim_id":"task-claim-arc","verdict":"verified","evidence":"ok"}]
+}'
+
+OUT19=$(bash "$AUDIT" "$KDIR19/_work/_archive/archived-slug/task-claims.jsonl" \
+  --kdir "$KDIR19" --gate-output-file "$TEST_DIR/gate19.json" 2>&1)
+assert_contains "archived artifact: assertion gate completes" "$OUT19" "correctness-gate-assertion complete"
+assert_file_exists "archived artifact: verdicts land under real slug, not _archive" \
+  "$KDIR19/_work/_archive/archived-slug/verdicts/task-claims.jsonl"
+
+# Confirm phantom location was NOT created
+if [[ ! -d "$KDIR19/_work/_archive/verdicts" ]]; then
+  echo "  PASS: archived artifact did not create _archive/verdicts/ stub"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: phantom stub created at $KDIR19/_work/_archive/verdicts/"
+  FAIL=$((FAIL + 1))
+fi
+
 echo ""
 echo "=== Results ==="
 TOTAL=$((PASS + FAIL))
