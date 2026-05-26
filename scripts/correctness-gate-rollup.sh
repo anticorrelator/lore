@@ -61,6 +61,7 @@ KDIR_OVERRIDE=""
 VERDICTS_PATH=""
 JUDGE_FILTER=""
 REPORT_MODE=0
+AGGREGATE_WINDOW_MODE=0
 
 usage() {
   sed -n '2,35p' "$0" >&2
@@ -79,6 +80,7 @@ while [[ $# -gt 0 ]]; do
     --verdicts)                    VERDICTS_PATH="$2";              shift 2 ;;
     --judge)                       JUDGE_FILTER="$2";               shift 2 ;;
     --report)                      REPORT_MODE=1;                    shift   ;;
+    --aggregate-window)            AGGREGATE_WINDOW_MODE=1;          shift   ;;
     -h|--help)                     usage; exit 0 ;;
     *)
       echo "[rollup] Error: unknown argument '$1'" >&2
@@ -92,6 +94,36 @@ fail() {
   echo "[rollup] Error: $1" >&2
   exit 1
 }
+
+# --- Aggregate-window mode (D8: queue-job rollup) ---
+# When --aggregate-window is supplied, the script reads tier=reusable rows from
+# $KDIR/_scorecards/rows.jsonl, filters to the named judge in [W_start, W_end),
+# groups by (template_id, template_version), and emits one tier=template row
+# per (template, metric) via scorecard-append.sh. The actual aggregation lives
+# in scripts/rollup_aggregate.py — invoked here so the three rollup scripts
+# share one aggregator code path.
+#
+# Mode invariant: --aggregate-window is mutually exclusive with the per-artifact
+# emit mode and the --report debug surface. The window semantics differ from
+# the per-artifact rollup's point-in-time window (start==end) — this is the
+# first true interval-window usage in the rollup family.
+if [[ $AGGREGATE_WINDOW_MODE -eq 1 ]]; then
+  [[ -n "$JUDGE_FILTER"  ]] || fail "--aggregate-window requires --judge"
+  [[ -n "$WINDOW_START" ]] || fail "--aggregate-window requires --window-start"
+  [[ -n "$WINDOW_END"   ]] || fail "--aggregate-window requires --window-end"
+  if [[ -n "$KDIR_OVERRIDE" ]]; then
+    AGG_KDIR="$KDIR_OVERRIDE"
+  else
+    AGG_KDIR=$(resolve_knowledge_dir)
+  fi
+  REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+  exec python3 "$SCRIPT_DIR/rollup_aggregate.py" \
+    --judge "$JUDGE_FILTER" \
+    --window-start "$WINDOW_START" \
+    --window-end "$WINDOW_END" \
+    --kdir "$AGG_KDIR" \
+    --repo-root "$REPO_ROOT"
+fi
 
 # --- Report mode (reader): aggregate rows.jsonl filtered by --judge ---
 # When --report is supplied, the script reads $KDIR/_scorecards/rows.jsonl and
@@ -273,6 +305,13 @@ emit_row() {
   local metric="$1"
   local value="$2"
   local sample_size="$3"
+  # Per D9, tier=template rows MUST carry verdict_source. For the per-artifact
+  # emit path, default to the bare "correctness-gate" judge name when --judge
+  # was not supplied (the legacy single-judge call sites). If --judge was
+  # supplied, propagate that exact value so callers that pass one of the
+  # three forks (correctness-gate-assertion|-omission|-contradiction) get
+  # disambiguated rows.
+  local verdict_source="${JUDGE_FILTER:-correctness-gate}"
   local row
   row=$(ARTIFACT_ID_ENV="$ARTIFACT_ID" \
         TEMPLATE_ID_ENV="$PRODUCER_TEMPLATE_ID" \
@@ -283,6 +322,7 @@ emit_row() {
         WINDOW_START_ENV="$WINDOW_START" \
         WINDOW_END_ENV="$WINDOW_END" \
         CALIBRATION_STATE_ENV="$CALIBRATION_STATE" \
+        VERDICT_SOURCE_ENV="$verdict_source" \
         python3 -c '
 import json, os
 print(json.dumps({
@@ -290,6 +330,7 @@ print(json.dumps({
     "kind":                "scored",
     "tier":                "template",
     "calibration_state":   os.environ["CALIBRATION_STATE_ENV"],
+    "verdict_source":      os.environ["VERDICT_SOURCE_ENV"],
     "template_id":         os.environ["TEMPLATE_ID_ENV"],
     "template_version":    os.environ["TEMPLATE_VERSION_ENV"],
     "metric":              os.environ["METRIC_ENV"],

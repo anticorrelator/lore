@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 usage() {
   cat >&2 <<EOF
-Usage: settlement-queue.sh <status|scan|enqueue|process|enable|disable|queue|retry-errors|drain> [args...]
+Usage: settlement-queue.sh <status|scan|enqueue|process|enable|disable|queue|retry-errors|drain|enqueue-rollup-backfill> [args...]
 
 Commands:
   status --json                 Show queue, lease, run, and budget status.
@@ -20,10 +20,19 @@ Commands:
   retry-errors --json           Requeue audit errors and timeout-blocked attempts.
   drain --json                  Loop process_once until queue empty; abort on
                                 pipeline-degraded or hard-cal gate uncalibrated*.
+  enqueue-rollup-backfill --json
+                                Enqueue per-judge weekly rollup items for the
+                                trailing N completed weeks (default 30, range
+                                1-104). Skips windows whose tier=template row
+                                or completed rollup run record already exists.
 
 Options:
   --kdir PATH                   Override knowledge dir.
   --max-iterations N            (drain only) cap loop iterations; default 200.
+  --weeks N                     (enqueue-rollup-backfill only) trailing weeks.
+  --judge NAME                  (enqueue-rollup-backfill only) limit to one of
+                                correctness-gate-assertion, correctness-gate-omission,
+                                correctness-gate-contradiction, curator, reverse-auditor.
 EOF
 }
 
@@ -37,7 +46,7 @@ case "$1" in
     usage
     exit 0
     ;;
-  status|scan|enqueue|process|enable|disable|queue|retry-errors|drain)
+  status|scan|enqueue|process|enable|disable|queue|retry-errors|drain|enqueue-rollup-backfill)
     python3 "$SCRIPT_DIR/settlement-processor.py" "$@"
     ;;
   *)

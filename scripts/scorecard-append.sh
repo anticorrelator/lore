@@ -157,10 +157,16 @@ esac
 
 # --- Grounded-or-nothing enforcement for reverse-auditor scored rows (task-21) ---
 # If the row declares verdict_source == "reverse-auditor" AND kind == "scored",
-# require claim_anchor.{file, line_range, exact_snippet} all non-empty.
+# require claim_anchor.{file, line_range, exact_snippet} all non-empty for
+# per-claim tier=reusable rows. tier=template aggregate rows (emitted by the
+# rollup --aggregate-window mode) can EITHER carry the single claim_anchor
+# (aggregating a one-claim window) OR aggregate-provenance: non-empty
+# source_artifact_ids AND a source_anchor_count (integer) equal to sample_size,
+# signifying every underlying tier=reusable row carried a grounded claim_anchor.
 # Telemetry rows (e.g., grounding_failure_rate) are exempt — ungrounded
 # diagnostic signal is explicit and permitted under the kind discriminator.
 VERDICT_SOURCE=$(printf '%s' "$ROW" | jq -r '.verdict_source // ""')
+ROW_TIER_PRECHECK=$(printf '%s' "$ROW" | jq -r '.tier // ""')
 if [[ "$VERDICT_SOURCE" == "reverse-auditor" && "$KIND" == "scored" ]]; then
   ANCHOR_OK=$(printf '%s' "$ROW" | jq -e '
     (.claim_anchor // null) as $a
@@ -170,7 +176,18 @@ if [[ "$VERDICT_SOURCE" == "reverse-auditor" && "$KIND" == "scored" ]]; then
       and (($a.exact_snippet // "") != "")
   ' >/dev/null 2>&1 && echo "true" || echo "false")
   if [[ "$ANCHOR_OK" != "true" ]]; then
-    fail "reverse-auditor scored row rejected: grounded-or-nothing enforced — claim_anchor.{file, line_range, exact_snippet} all required and non-empty (kind=scored, verdict_source=reverse-auditor). Telemetry-kind rows are exempt; surface ungrounded concerns in /retro narrative instead."
+    AGGREGATE_PROVENANCE_OK="false"
+    if [[ "$ROW_TIER_PRECHECK" == "template" ]]; then
+      AGGREGATE_PROVENANCE_OK=$(printf '%s' "$ROW" | jq -e '
+        ((.source_artifact_ids // []) | type == "array" and length > 0)
+        and ((.source_anchor_count // null) | (type == "number") and (. >= 0))
+        and ((.sample_size // null) | (type == "number") and (. > 0))
+        and ((.source_anchor_count) == (.sample_size))
+      ' >/dev/null 2>&1 && echo "true" || echo "false")
+    fi
+    if [[ "$AGGREGATE_PROVENANCE_OK" != "true" ]]; then
+      fail "reverse-auditor scored row rejected: grounded-or-nothing enforced — claim_anchor.{file, line_range, exact_snippet} all required and non-empty for per-claim rows (tier=reusable). tier=template rows may instead carry aggregate-provenance: non-empty source_artifact_ids AND source_anchor_count == sample_size. Telemetry-kind rows are exempt; surface ungrounded concerns in /retro narrative instead."
+    fi
   fi
 fi
 
@@ -225,6 +242,7 @@ if [[ "$TIER" == "template" ]]; then
       and ((.metric // "") != "")
       and ((.sample_size // null) | (type == "number") and (. > 0))
       and ((.calibration_state // "") | test("^(calibrated|pre-calibration|calibration-failed|unknown)$"))
+      and ((.verdict_source // "") != "")
   ' >/dev/null 2>&1 && echo "true" || echo "false")
   if [[ "$TEMPLATE_OK" != "true" ]]; then
     MISSING_FIELDS=""
@@ -233,7 +251,8 @@ if [[ "$TIER" == "template" ]]; then
     printf '%s' "$ROW" | jq -e '((.metric // "") != "")' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS metric"
     printf '%s' "$ROW" | jq -e '((.sample_size // null) | (type == "number") and (. > 0))' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS sample_size(int>0)"
     printf '%s' "$ROW" | jq -e '((.calibration_state // "") | test("^(calibrated|pre-calibration|calibration-failed|unknown)$"))' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS calibration_state"
-    fail "template row rejected: missing or invalid required fields:$MISSING_FIELDS (tier=template requires template_id, template_version[12-char hex], metric, sample_size[int>0], calibration_state)"
+    printf '%s' "$ROW" | jq -e '((.verdict_source // "") != "")' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS verdict_source"
+    fail "template row rejected: missing or invalid required fields:$MISSING_FIELDS (tier=template requires template_id, template_version[12-char hex], metric, sample_size[int>0], calibration_state, verdict_source[D9])"
   fi
 fi
 

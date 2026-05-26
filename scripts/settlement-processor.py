@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -65,9 +65,63 @@ KIND_TO_GATE = {
 }
 HARD_CAL_GATES = {"correctness-gate-assertion", "correctness-gate-contradiction"}
 
+# Rollup queue items aggregate per-claim tier=reusable scorecard rows into
+# per-template tier=template rows that /evolve's primary gate consumes. They
+# are kept ORTHOGONAL to KINDS / KIND_SOURCES / KIND_TO_GATE because they have
+# no `_work/<slug>/<file>` source row — see D6. Direct-enqueued via
+# enqueue_rollup_item; dispatched via execute_item's rollup branch; never
+# walked by scan()'s source-stream loop.
+KIND_ROLLUP_CORRECTNESS_GATE_ASSERTION = "rollup-correctness-gate-assertion"
+KIND_ROLLUP_CORRECTNESS_GATE_OMISSION = "rollup-correctness-gate-omission"
+KIND_ROLLUP_CORRECTNESS_GATE_CONTRADICTION = "rollup-correctness-gate-contradiction"
+KIND_ROLLUP_CURATOR = "rollup-curator"
+KIND_ROLLUP_REVERSE_AUDITOR = "rollup-reverse-auditor"
+ROLLUP_KINDS = (
+    KIND_ROLLUP_CORRECTNESS_GATE_ASSERTION,
+    KIND_ROLLUP_CORRECTNESS_GATE_OMISSION,
+    KIND_ROLLUP_CORRECTNESS_GATE_CONTRADICTION,
+    KIND_ROLLUP_CURATOR,
+    KIND_ROLLUP_REVERSE_AUDITOR,
+)
+ROLLUP_KIND_TO_SCRIPT = {
+    KIND_ROLLUP_CORRECTNESS_GATE_ASSERTION: ("correctness-gate-rollup.sh", "correctness-gate-assertion"),
+    KIND_ROLLUP_CORRECTNESS_GATE_OMISSION: ("correctness-gate-rollup.sh", "correctness-gate-omission"),
+    KIND_ROLLUP_CORRECTNESS_GATE_CONTRADICTION: ("correctness-gate-rollup.sh", "correctness-gate-contradiction"),
+    KIND_ROLLUP_CURATOR: ("curator-rollup.sh", "curator"),
+    KIND_ROLLUP_REVERSE_AUDITOR: ("reverse-auditor-rollup.sh", "reverse-auditor"),
+}
+ROLLUP_JUDGE_TO_KIND = {judge: kind for kind, (_script, judge) in ROLLUP_KIND_TO_SCRIPT.items()}
+ROLLUP_JUDGES = tuple(judge for _kind, (_script, judge) in ROLLUP_KIND_TO_SCRIPT.items())
+ROLLUP_BACKFILL_DEFAULT_WEEKS = 30
+ROLLUP_BACKFILL_MAX_WEEKS = 104
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def utc_now_dt() -> datetime:
+    override = os.environ.get("LORE_SETTLEMENT_NOW")
+    if override:
+        dt = datetime.fromisoformat(override.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+def monday_floor_utc(dt: datetime) -> datetime:
+    """Return Monday 00:00:00 UTC of the week containing `dt`."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    day_floor = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    weekday = day_floor.weekday()  # Mon=0, Sun=6
+    return day_floor - timedelta(days=weekday)
+
+
+def iso_z(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def now_epoch() -> int:
@@ -236,7 +290,7 @@ class Settlement:
                 "usage.json": ["settlement-processor.py"],
                 "runs/*.json": ["settlement-processor.py"],
                 "_work/*/task-claims.jsonl": ["evidence-append.sh"],
-                "_work/*/audit-candidates.jsonl": ["audit-queue-route.sh", "audit-artifact.sh"],
+                "_work/*/audit-candidates.jsonl": ["audit-queue-route.sh", "audit-artifact.sh", "audit-candidate-transition.sh"],
                 "_work/*/consumption-contradictions.jsonl": ["consumption-contradiction-append.sh", "consumption-contradiction-update-status.sh"],
                 "settings.json:settlement": ["settings.sh", "lore_settings.py", "operator"],
             },
@@ -475,15 +529,273 @@ class Settlement:
             self.save_queue(queue)
             return {"ok": True, "action": "enqueued", "item": item, "queue_path": str(self.queue_path)}
 
+    # --- Rollup queue helpers (D3, D6, D7, D11, D12) ---
+    #
+    # Rollup queue items aggregate the per-claim tier=reusable scorecard rows
+    # written by audit-artifact.sh into per-(judge, template, window) tier=template
+    # rows that /evolve's primary gate consumes. They are direct-enqueued under
+    # repo_lock and never go through item_from_row / enqueue_row / KIND_SOURCES.
+
+    @staticmethod
+    def is_rollup_kind(kind: str) -> bool:
+        return isinstance(kind, str) and kind.startswith("rollup-")
+
+    @staticmethod
+    def rollup_item_id(kind: str, judge: str, window_start: str) -> str:
+        # D6 deterministic id derivation: sha256("{kind}|{judge}|{window_start}")[:20].
+        # The whole hash IS the id (no prefix) so the dedupe scan in
+        # enqueue_rollup_item just compares ids directly.
+        return hashlib.sha256(f"{kind}|{judge}|{window_start}".encode()).hexdigest()[:20]
+
+    @staticmethod
+    def rollup_item_invalid_reason(item: dict[str, Any]) -> str:
+        # Rollup items must carry kind, judge, window_start, window_end. No
+        # work_item / source_id / source row — those belong to the source-row
+        # KINDS (D6).
+        reasons: list[str] = []
+        kind = item.get("kind")
+        if not Settlement.is_rollup_kind(str(kind or "")) or kind not in ROLLUP_KIND_TO_SCRIPT:
+            reasons.append(f"unknown rollup kind: {kind}")
+        for field in ("judge", "window_start", "window_end"):
+            value = item.get(field)
+            if not isinstance(value, str) or not value.strip():
+                reasons.append(f"missing {field}")
+        return "; ".join(reasons)
+
+    def enqueue_rollup_item(self, kind: str, judge: str, window_start: str, window_end: str) -> dict[str, Any]:
+        # D6: bypass item_from_row / enqueue_row entirely. Writes a direct-shaped
+        # item under repo_lock. selection_reason="rollup_window" at enqueue time
+        # so the legacy-pending-normalization branch in process_once does NOT
+        # trigger a batch recompute for rollups (settlement-processor.py:1485).
+        if kind not in ROLLUP_KIND_TO_SCRIPT:
+            raise SystemExit(f"[settlement] Error: unknown rollup kind: {kind}")
+        if not (isinstance(judge, str) and judge.strip()):
+            raise SystemExit("[settlement] Error: enqueue_rollup_item requires non-empty judge")
+        if not (isinstance(window_start, str) and window_start.strip()):
+            raise SystemExit("[settlement] Error: enqueue_rollup_item requires window_start")
+        if not (isinstance(window_end, str) and window_end.strip()):
+            raise SystemExit("[settlement] Error: enqueue_rollup_item requires window_end")
+        self.ensure()
+        item_id = self.rollup_item_id(kind, judge, window_start)
+        now = utc_now()
+        item = {
+            "id": item_id,
+            "kind": kind,
+            "status": "pending",
+            "judge": judge,
+            "window_start": window_start,
+            "window_end": window_end,
+            "attempts": 0,
+            "enqueued_at": now,
+            "updated_at": now,
+            "selection_reason": "rollup_window",
+        }
+        with repo_lock(self.state):
+            queue = self.load_queue()
+            for existing in queue.get("items", []):
+                if existing.get("id") == item_id:
+                    return {"ok": True, "action": "duplicate", "item": existing, "queue_path": str(self.queue_path)}
+            queue.setdefault("items", []).append(item)
+            self.save_queue(queue)
+        return {"ok": True, "action": "enqueued", "item": item, "queue_path": str(self.queue_path)}
+
+    def tier_template_exists(self, judge: str, window_start: str) -> bool:
+        # D11: existence check is a sequential read of _scorecards/rows.jsonl,
+        # short-circuited on first match. If no match, ALSO consult
+        # _settlement/runs/ for a completed rollup run record whose item_id
+        # matches the deterministic rollup id for (kind, judge, window_start) —
+        # empty completed windows emit zero rows but DO leave a completed run
+        # record. Without that fallback the enqueuer would re-enqueue empty
+        # windows forever.
+        #
+        # Cached within one scan() invocation via the lazy attribute populated
+        # by _refresh_rollup_check_cache.
+        cache = getattr(self, "_rollup_existence_cache", None)
+        if cache is None:
+            cache = self._refresh_rollup_existence_cache()
+        rows = cache["template_rows"]
+        for row in rows:
+            if row.get("verdict_source") == judge and row.get("window_start") == window_start:
+                return True
+        run_ids = cache["completed_rollup_run_item_ids"]
+        kind = ROLLUP_JUDGE_TO_KIND.get(judge)
+        if kind:
+            item_id = self.rollup_item_id(kind, judge, window_start)
+            if item_id in run_ids:
+                return True
+        return False
+
+    def _refresh_rollup_existence_cache(self) -> dict[str, Any]:
+        template_rows: list[dict[str, Any]] = []
+        rows_path = self.kdir / "_scorecards" / "rows.jsonl"
+        if rows_path.exists():
+            try:
+                with rows_path.open(encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(row, dict):
+                            continue
+                        if row.get("tier") != "template":
+                            continue
+                        template_rows.append({
+                            "verdict_source": row.get("verdict_source"),
+                            "window_start": row.get("window_start"),
+                        })
+            except OSError:
+                pass
+        completed_item_ids: set[str] = set()
+        if self.runs_dir.exists():
+            for path in self.runs_dir.glob("*.json"):
+                try:
+                    run = json_load(path, {})
+                except Exception:
+                    continue
+                if not isinstance(run, dict):
+                    continue
+                if run.get("invalidated_at") or run.get("invalidated"):
+                    continue
+                if run.get("status") != "completed":
+                    continue
+                if not self.is_rollup_kind(str(run.get("kind") or "")):
+                    continue
+                item_id = run.get("item_id")
+                if isinstance(item_id, str) and item_id:
+                    completed_item_ids.add(item_id)
+        cache = {"template_rows": template_rows, "completed_rollup_run_item_ids": completed_item_ids}
+        self._rollup_existence_cache = cache
+        return cache
+
+    def _invalidate_rollup_existence_cache(self) -> None:
+        if hasattr(self, "_rollup_existence_cache"):
+            try:
+                delattr(self, "_rollup_existence_cache")
+            except AttributeError:
+                pass
+
+    @staticmethod
+    def completed_weekly_windows(weeks: int, now: datetime | None = None) -> list[tuple[str, str]]:
+        # D12: completed Monday-to-Monday UTC windows. Half-open [W_start, W_end).
+        # Returns oldest-first so the backfill enqueues with deterministic order.
+        if weeks <= 0:
+            return []
+        if now is None:
+            now = utc_now_dt()
+        this_monday = monday_floor_utc(now)
+        windows: list[tuple[str, str]] = []
+        for i in range(weeks, 0, -1):
+            start = this_monday - timedelta(weeks=i)
+            end = start + timedelta(weeks=1)
+            windows.append((iso_z(start), iso_z(end)))
+        return windows
+
+    @staticmethod
+    def current_completed_weekly_window(now: datetime | None = None) -> tuple[str, str]:
+        # D12: steady-state enqueuer targets the most recently COMPLETED week,
+        # not the in-progress week. Enqueueing on the in-progress week makes
+        # D11's existence check satisfy prematurely once the first tier=template
+        # row lands, causing rows arriving later that week to never be aggregated.
+        if now is None:
+            now = utc_now_dt()
+        this_monday = monday_floor_utc(now)
+        end = this_monday
+        start = end - timedelta(weeks=1)
+        return iso_z(start), iso_z(end)
+
+    def enqueue_rollup_backfill(self, weeks: int, judges: list[str] | None = None) -> dict[str, Any]:
+        # D5+D12: one-shot loop over the N most recent COMPLETED weekly windows
+        # for each judge; D11 existence check then enqueue_rollup_item.
+        if weeks < 1:
+            raise SystemExit("[settlement] Error: --weeks must be >= 1")
+        if weeks > ROLLUP_BACKFILL_MAX_WEEKS:
+            raise SystemExit(f"[settlement] Error: --weeks must be <= {ROLLUP_BACKFILL_MAX_WEEKS}")
+        target_judges = list(judges) if judges else list(ROLLUP_JUDGES)
+        for j in target_judges:
+            if j not in ROLLUP_JUDGE_TO_KIND:
+                raise SystemExit(f"[settlement] Error: unknown judge: {j}")
+        self.ensure()
+        self._invalidate_rollup_existence_cache()
+        enqueued = 0
+        duplicates = 0
+        skipped_existing = 0
+        windows = self.completed_weekly_windows(weeks)
+        for judge in target_judges:
+            kind = ROLLUP_JUDGE_TO_KIND[judge]
+            for window_start, window_end in windows:
+                if self.tier_template_exists(judge, window_start):
+                    skipped_existing += 1
+                    continue
+                res = self.enqueue_rollup_item(kind, judge, window_start, window_end)
+                if res["action"] == "enqueued":
+                    enqueued += 1
+                else:
+                    duplicates += 1
+        return {
+            "ok": True,
+            "enqueued": enqueued,
+            "duplicates": duplicates,
+            "skipped_existing": skipped_existing,
+            "weeks": weeks,
+            "judges": target_judges,
+        }
+
+    def scan_rollup_steady_state(self) -> dict[str, Any]:
+        # D4+D11+D12: at the start of each scan cycle, for each of the 5 judges,
+        # compute the most-recently-completed weekly window. Run D11's existence
+        # check; on miss, enqueue. Five bounded checks per cycle.
+        window_start, window_end = self.current_completed_weekly_window()
+        enqueued = 0
+        duplicates = 0
+        skipped_existing = 0
+        for judge in ROLLUP_JUDGES:
+            kind = ROLLUP_JUDGE_TO_KIND[judge]
+            if self.tier_template_exists(judge, window_start):
+                skipped_existing += 1
+                continue
+            res = self.enqueue_rollup_item(kind, judge, window_start, window_end)
+            if res["action"] == "enqueued":
+                enqueued += 1
+            else:
+                duplicates += 1
+        return {
+            "enqueued": enqueued,
+            "duplicates": duplicates,
+            "skipped_existing": skipped_existing,
+            "window_start": window_start,
+            "window_end": window_end,
+        }
+
     def scan(self) -> dict[str, Any]:
         self.ensure()
+        # Refresh the rollup existence cache once per scan() invocation so
+        # steady-state enqueuer checks share a single read of rows.jsonl and
+        # _settlement/runs/.
+        self._invalidate_rollup_existence_cache()
+        self._refresh_rollup_existence_cache()
         scanned = 0
         enqueued = 0
         duplicates = 0
         errors: list[str] = []
         work_root = self.kdir / "_work"
         if not work_root.exists():
-            return {"ok": True, "scanned": 0, "enqueued": 0, "duplicates": 0, "errors": []}
+            rollup_summary = self.scan_rollup_steady_state()
+            return {
+                "ok": True,
+                "scanned": 0,
+                "enqueued": 0,
+                "duplicates": 0,
+                "errors": [],
+                "rollup_enqueued": rollup_summary["enqueued"],
+                "rollup_duplicates": rollup_summary["duplicates"],
+                "rollup_skipped_existing": rollup_summary["skipped_existing"],
+                "rollup_window_start": rollup_summary["window_start"],
+                "rollup_window_end": rollup_summary["window_end"],
+            }
         # Walk all three source streams. enqueue_row dispatches per-kind; CC
         # rows that are already terminal (verified|rejected) are quietly skipped.
         skipped = 0
@@ -507,7 +819,20 @@ class Settlement:
                                 duplicates += 1
                         except Exception as exc:  # continue scanning other rows
                             errors.append(f"{source_file}:{line_no}: {exc}")
-        return {"ok": not errors, "scanned": scanned, "enqueued": enqueued, "duplicates": duplicates, "skipped": skipped, "errors": errors}
+        rollup_summary = self.scan_rollup_steady_state()
+        return {
+            "ok": not errors,
+            "scanned": scanned,
+            "enqueued": enqueued,
+            "duplicates": duplicates,
+            "skipped": skipped,
+            "errors": errors,
+            "rollup_enqueued": rollup_summary["enqueued"],
+            "rollup_duplicates": rollup_summary["duplicates"],
+            "rollup_skipped_existing": rollup_summary["skipped_existing"],
+            "rollup_window_start": rollup_summary["window_start"],
+            "rollup_window_end": rollup_summary["window_end"],
+        }
 
     def iter_backlog_items(self) -> tuple[list[dict[str, Any]], list[str]]:
         errors: list[str] = []
@@ -656,8 +981,13 @@ class Settlement:
         return out[:limit]
 
     def item_invalid_reason(self, item: dict[str, Any]) -> str:
-        work_item = str(item.get("work_item") or "")
         kind = str(item.get("kind") or KIND_TASK_CLAIM)
+        if self.is_rollup_kind(kind):
+            # Rollup items have no work_item / source_id; valid shape is just
+            # {kind, judge, window_start, window_end} (D6). MUST short-circuit
+            # before the work_item/source_id check below.
+            return self.rollup_item_invalid_reason(item)
+        work_item = str(item.get("work_item") or "")
         source_id = str(item.get("source_id") or item.get("claim_id") or item.get("candidate_id") or item.get("contradiction_id") or "")
         if not work_item or not source_id:
             return "queue item missing work_item or source_id"
@@ -1013,11 +1343,17 @@ class Settlement:
     def apply_recomputed_batch(self, queue: dict[str, Any], settings: dict[str, Any], reason: str) -> dict[str, Any]:
         active_leased = [item for item in queue.get("items", []) if item.get("status") == "leased"]
         legacy_pending = [item for item in queue.get("items", []) if item.get("status") == "pending"]
+        # Rollup items are direct-enqueued and have no source row to recompute
+        # from (D6); they must be preserved through batch recompute unchanged
+        # (no selection_reason pop, no score_item pass).
+        legacy_pending_rollup = [item for item in legacy_pending if self.is_rollup_kind(str(item.get("kind") or ""))]
+        legacy_pending_source = [item for item in legacy_pending if not self.is_rollup_kind(str(item.get("kind") or ""))]
         preserved_ids = {item.get("id") for item in active_leased}
+        preserved_ids.update(item.get("id") for item in legacy_pending_rollup)
         terminal_ids = self.terminal_run_item_ids()
         backlog, errors = self.iter_backlog_items()
         backlog_ids = {item.get("id") for item in backlog}
-        for item in legacy_pending:
+        for item in legacy_pending_source:
             if item.get("id") in backlog_ids:
                 continue
             clone = dict(item)
@@ -1048,7 +1384,13 @@ class Settlement:
             item.pop("_sort_score", None)
             item.pop("_backlog_order", None)
             pending.append(item)
-        queue["items"] = active_leased + pending
+        # Rollup items go AFTER source-row pending: source-row items represent
+        # real-time audits with stricter time pressure; rollups are weekly
+        # aggregations that are intentionally cold-path. Preserving the rollup
+        # items unchanged (no score, no reason rewrite) is what matters for
+        # D6 isolation — their position relative to source-row items can be
+        # last without weakening that invariant.
+        queue["items"] = active_leased + pending + legacy_pending_rollup
         queue["batch"] = {
             "id": batch_id,
             "recomputed_at": recomputed_at,
@@ -1596,6 +1938,16 @@ class Settlement:
         }
 
     def execute_item(self, item: dict[str, Any], run_id: str, chosen: dict[str, Any], settings: dict[str, Any], executor: list[str]) -> dict[str, Any]:
+        # D7: rollup items bypass settlement-audit-executor.sh entirely. They
+        # have no `lore audit --kind <K> --id <ID>` shape, no per-claim verdict,
+        # no aggregate gate counts — invoking the audit executor would 1) reject
+        # the missing source row at preflight and 2) couple two unrelated
+        # dispatch shapes in one shell file. Branch in-Python; synthesize a
+        # minimal run record with verdict_format=rollup; skip the correction
+        # pipeline (_apply_correction_from_verdict + _emit_correction_evidence).
+        kind = str(item.get("kind") or KIND_TASK_CLAIM)
+        if self.is_rollup_kind(kind):
+            return self._execute_rollup_item(item, run_id, chosen, settings)
         env = os.environ.copy()
         env["LORE_FRAMEWORK"] = chosen["framework"]
         started = utc_now()
@@ -1677,6 +2029,110 @@ class Settlement:
             written["correction_outcome"] = persisted
             if persisted.get("status") == "applied":
                 self._emit_correction_evidence(str(written.get("run_id") or ""), persisted)
+        self._apply_audit_candidate_transition(written, item)
+        return written
+
+    def _execute_rollup_item(self, item: dict[str, Any], run_id: str, chosen: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+        # D7 rollup dispatch: shell out to the per-judge rollup script in its
+        # --aggregate-window mode. Synthesize a verdict_format=rollup envelope;
+        # skip _apply_correction_from_verdict / _emit_correction_evidence
+        # (rollups carry no correction).
+        kind = str(item.get("kind") or "")
+        judge = str(item.get("judge") or "")
+        window_start = str(item.get("window_start") or "")
+        window_end = str(item.get("window_end") or "")
+        script_filename, _judge_for_kind = ROLLUP_KIND_TO_SCRIPT[kind]
+        script_path = str(Path(__file__).resolve().with_name(script_filename))
+        cmd = [
+            "bash",
+            script_path,
+            "--aggregate-window",
+            "--judge", judge,
+            "--window-start", window_start,
+            "--window-end", window_end,
+            "--kdir", str(self.kdir),
+        ]
+        started = utc_now()
+        status = "completed"
+        reason = "rollup_exit_0"
+        stdout = ""
+        stderr = ""
+        try:
+            proc = subprocess.run(
+                cmd,
+                input="",
+                text=True,
+                capture_output=True,
+                timeout=int(settings.get("executor_timeout_seconds", DEFAULT_EXECUTOR_TIMEOUT_SECONDS)),
+                check=False,
+                env={**os.environ, "LORE_KNOWLEDGE_DIR": str(self.kdir)},
+            )
+            stdout = proc.stdout
+            stderr = proc.stderr[-2000:]
+            status = "completed" if proc.returncode == 0 else "failed"
+            reason = f"rollup_exit_{proc.returncode}"
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            status = "blocked"
+            reason = "rollup_timeout"
+            returncode = -1
+        except OSError as exc:
+            status = "failed"
+            reason = "rollup_launch_failed"
+            stderr = str(exc)[-2000:]
+            returncode = -1
+        # Stderr summary line: the rollup script writes a final
+        # "[rollup] Aggregated: templates=<N> rows=<M> window=<...>" line.
+        # Pull the last non-empty stderr line as the verdict evidence.
+        summary_tail = ""
+        for line in reversed((stderr or "").splitlines()):
+            line = line.strip()
+            if line:
+                summary_tail = line
+                break
+        if status == "completed":
+            verdict_label = "rollup-complete"
+            evidence = summary_tail or f"rollup exit=0 (n=0 stderr summary)"
+        else:
+            verdict_label = "rollup-failed"
+            evidence = f"rollup script exit={returncode}: {summary_tail or stderr[-200:]}"
+        verdict = {
+            "verdict": verdict_label,
+            "evidence": evidence,
+            "correction": None,
+            "verdict_format": "rollup",
+        }
+        run = {
+            "version": VERSION,
+            "run_id": run_id,
+            "item_id": item["id"],
+            "kind": kind,
+            "source_id": "",
+            "judge": judge,
+            "window_start": window_start,
+            "window_end": window_end,
+            "framework": chosen["framework"],
+            "framework_capability": {k: chosen[k] for k in ("support", "evidence", "install_path_agents")},
+            "status": status,
+            "reason": reason,
+            "started_at": started,
+            "completed_at": utc_now(),
+            "runtime_seconds_reserved": int(settings["executor_timeout_seconds"]),
+            "verdict": verdict,
+            "verdict_ref": f"_settlement/runs/{run_id}.json#verdict",
+            "correction_ref": None,
+            "selection": self.selection_block(item),
+        }
+        if stderr:
+            run["stderr_tail"] = stderr
+        if stdout:
+            run["stdout_tail"] = stdout[-2000:]
+        written = self.write_run_record_once(run)
+        # Rollup runs invalidate the cached existence check: a fresh tier=template
+        # row may now exist for (judge, window_start). The next scan() will
+        # rebuild the cache, but if execute_item is called multiple times in one
+        # process (e.g., drain), invalidate now.
+        self._invalidate_rollup_existence_cache()
         return written
 
     def _emit_correction_evidence(self, run_id: str, outcome: dict[str, Any]) -> None:
@@ -1763,6 +2219,73 @@ class Settlement:
         except (subprocess.TimeoutExpired, OSError) as exc:
             sys.stderr.write(
                 f"[settlement] correction-evidence emission failed run_id={run_id}: {exc}\n"
+            )
+
+    def _apply_audit_candidate_transition(self, written: dict[str, Any], item: dict[str, Any]) -> None:
+        """Advance the audit-candidate source row through the correctness-gate
+        lifecycle after a completed omission run.
+
+        Mapping (D2):
+          verified                -> gate-passed
+          unverified|contradicted -> gate-failed
+          error|blocked|other     -> no transition (row retried on next dispatch)
+
+        Best-effort: subprocess failures (including legal-illegal transition
+        rejects from re-emit on an already-terminal row) are logged to stderr
+        and never raised. audit-candidate-transition.sh remains the sole
+        sanctioned post-append writer of the `status` field per the
+        ownership_matrix.
+        """
+        if str(item.get("kind") or "") != KIND_OMISSION:
+            return
+        if str(written.get("status") or "") != "completed":
+            return
+        candidate_id = str(item.get("source_id") or item.get("candidate_id") or "")
+        work_item = str(item.get("work_item") or "")
+        run_id = str(written.get("run_id") or "")
+        if not candidate_id or not work_item:
+            sys.stderr.write(
+                f"[settlement] audit-candidate transition skipped run_id={run_id}: "
+                f"missing candidate_id or work_item (candidate_id={candidate_id!r} work_item={work_item!r})\n"
+            )
+            return
+        verdict = written.get("verdict") if isinstance(written.get("verdict"), dict) else {}
+        verdict_value = str(verdict.get("verdict") or "").strip()
+        if verdict_value == "verified":
+            new_status = "gate-passed"
+        elif verdict_value in ("unverified", "contradicted"):
+            new_status = "gate-failed"
+        else:
+            return
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        cmd = [
+            "bash",
+            os.path.join(scripts_dir, "audit-candidate-transition.sh"),
+            "--kdir", str(self.kdir),
+            "--work-item", work_item,
+            "--candidate-id", candidate_id,
+            "--status", new_status,
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            sys.stderr.write(
+                f"[settlement] audit-candidate transition failed run_id={run_id} "
+                f"work_item={work_item} candidate_id={candidate_id}: {exc}\n"
+            )
+            return
+        if proc.returncode != 0:
+            stderr_tail = (proc.stderr or "").strip().splitlines()[-1:] if (proc.stderr or "").strip() else []
+            tail_text = stderr_tail[0] if stderr_tail else ""
+            sys.stderr.write(
+                f"[settlement] audit-candidate transition failed run_id={run_id} "
+                f"work_item={work_item} candidate_id={candidate_id} exit={proc.returncode}: {tail_text[:200]}\n"
             )
 
     def _apply_correction_from_verdict(self, run: dict[str, Any], item: dict[str, Any]) -> dict[str, Any] | None:
@@ -1994,7 +2517,7 @@ def resolve_kdir(arg: str | None) -> Path:
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="settlement-processor.py")
-    ap.add_argument("command", choices=["enqueue", "scan", "status", "process", "enable", "disable", "queue", "retry-errors", "drain"])
+    ap.add_argument("command", choices=["enqueue", "scan", "status", "process", "enable", "disable", "queue", "retry-errors", "drain", "enqueue-rollup-backfill"])
     ap.add_argument("subcommand", nargs="?")
     ap.add_argument("--kdir")
     ap.add_argument("--work-item")
@@ -2005,6 +2528,8 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--max-iterations", type=int, default=200)
+    ap.add_argument("--weeks", type=int, default=ROLLUP_BACKFILL_DEFAULT_WEEKS, help="enqueue-rollup-backfill: number of trailing completed weekly windows (1-104)")
+    ap.add_argument("--judge", choices=list(ROLLUP_JUDGES), default=None, help="enqueue-rollup-backfill: limit to one judge (default: all 5)")
     args = ap.parse_args()
 
     settlement = Settlement(resolve_kdir(args.kdir))
@@ -2037,6 +2562,9 @@ def main() -> int:
         if args.max_iterations <= 0:
             raise SystemExit("[settlement] Error: --max-iterations must be > 0")
         out = settlement.drain(settings, max_iterations=args.max_iterations)
+    elif args.command == "enqueue-rollup-backfill":
+        judges = [args.judge] if args.judge else None
+        out = settlement.enqueue_rollup_backfill(weeks=args.weeks, judges=judges)
     else:
         raise AssertionError(args.command)
 

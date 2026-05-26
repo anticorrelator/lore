@@ -83,6 +83,8 @@ WINDOW_END=""
 CALIBRATION_STATE="pre-calibration"
 KDIR_OVERRIDE=""
 VERDICTS_PATH=""
+JUDGE_FILTER=""
+AGGREGATE_WINDOW_MODE=0
 
 usage() {
   sed -n '2,60p' "$0" >&2
@@ -102,6 +104,8 @@ while [[ $# -gt 0 ]]; do
     --calibration-state)                CALIBRATION_STATE="$2";               shift 2 ;;
     --kdir)                             KDIR_OVERRIDE="$2";                   shift 2 ;;
     --verdicts)                         VERDICTS_PATH="$2";                   shift 2 ;;
+    --judge)                            JUDGE_FILTER="$2";                    shift 2 ;;
+    --aggregate-window)                 AGGREGATE_WINDOW_MODE=1;               shift   ;;
     -h|--help)                          usage; exit 0 ;;
     *)
       echo "[rollup] Error: unknown argument '$1'" >&2
@@ -115,6 +119,27 @@ fail() {
   echo "[rollup] Error: $1" >&2
   exit 1
 }
+
+# --- Aggregate-window mode (D8) — see correctness-gate-rollup.sh for design notes ---
+# Mutually exclusive with the per-artifact emit mode. The actual aggregation
+# lives in scripts/rollup_aggregate.py.
+if [[ $AGGREGATE_WINDOW_MODE -eq 1 ]]; then
+  [[ -n "$JUDGE_FILTER"  ]] || fail "--aggregate-window requires --judge"
+  [[ -n "$WINDOW_START" ]] || fail "--aggregate-window requires --window-start"
+  [[ -n "$WINDOW_END"   ]] || fail "--aggregate-window requires --window-end"
+  if [[ -n "$KDIR_OVERRIDE" ]]; then
+    AGG_KDIR="$KDIR_OVERRIDE"
+  else
+    AGG_KDIR=$(resolve_knowledge_dir)
+  fi
+  REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+  exec python3 "$SCRIPT_DIR/rollup_aggregate.py" \
+    --judge "$JUDGE_FILTER" \
+    --window-start "$WINDOW_START" \
+    --window-end "$WINDOW_END" \
+    --kdir "$AGG_KDIR" \
+    --repo-root "$REPO_ROOT"
+fi
 
 [[ -n "$ARTIFACT_ID"                      ]] || fail "--artifact-id is required"
 [[ -n "$PRODUCER_TEMPLATE_ID"             ]] || fail "--producer-template-id is required"
@@ -226,6 +251,8 @@ emit_row() {
   local template_version="$5"
   local kind="$6"
   local tier="$7"
+  # D9: tier=template rows MUST carry verdict_source. All three reverse-auditor
+  # per-artifact emits represent the "reverse-auditor" judge.
   local row
   row=$(ARTIFACT_ID_ENV="$ARTIFACT_ID" \
         TEMPLATE_ID_ENV="$template_id" \
@@ -245,6 +272,7 @@ print(json.dumps({
     "kind":                os.environ["KIND_ENV"],
     "tier":                os.environ["TIER_ENV"],
     "calibration_state":   os.environ["CALIBRATION_STATE_ENV"],
+    "verdict_source":      "reverse-auditor",
     "template_id":         os.environ["TEMPLATE_ID_ENV"],
     "template_version":    os.environ["TEMPLATE_VERSION_ENV"],
     "metric":              os.environ["METRIC_ENV"],
