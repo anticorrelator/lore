@@ -127,15 +127,21 @@ split_codex_model_variant() {
 # Setup errors (rc=64) bypass retry; other non-zero returns retry with linear
 # backoff. On exhaustion, returns the last attempt's exit code so the caller
 # can still distinguish (e.g. empty-output vs subprocess-failure) for logging.
+#
+# Optional 4th arg: schema_path. When set, the runner passes a JSON-schema
+# constraint to the CLI (claude --json-schema reads inline; codex
+# --output-schema reads a file). Opt-in per callsite — only the
+# reverse-auditor callsite passes this today (D7).
 headless_runner_invoke() {
   local system_prompt_file="$1"
   local user_prompt="$2"
   local output_file="$3"
+  local schema_path="${4:-}"
   local attempt=1
   local rc=0
   while (( attempt <= LORE_JUDGE_MAX_ATTEMPTS )); do
     rc=0
-    _headless_runner_invoke_once "$system_prompt_file" "$user_prompt" "$output_file" || rc=$?
+    _headless_runner_invoke_once "$system_prompt_file" "$user_prompt" "$output_file" "$schema_path" || rc=$?
     if (( rc == 0 )); then
       if (( attempt > 1 )); then
         echo "[audit] headless runner succeeded on attempt $attempt/$LORE_JUDGE_MAX_ATTEMPTS after retry" >&2
@@ -172,6 +178,11 @@ _headless_runner_invoke_once() {
   local system_prompt_file="$1"
   local user_prompt="$2"
   local output_file="$3"
+  # Optional 4th arg: a JSON-schema file path. claude --json-schema takes the
+  # schema inline (read here); codex --output-schema takes a file path
+  # directly. Empty/unset means no schema constraint (existing 3-arg call
+  # shape preserved per D7).
+  local schema_path="${4:-}"
 
   # Capability gate. The capability cells are the source of truth — if
   # the active harness reports `none`, we refuse rather than silently
@@ -205,14 +216,108 @@ _headless_runner_invoke_once() {
       # claim. With --max-turns 1, the first tool use consumes the budget
       # and the judge exits with "Reached max turns" before emitting JSON.
       # 10 turns is generous headroom — typical judges complete in 2-4.
-      printf '%s' "$user_prompt" | claude -p \
-        "${harness_args[@]}" \
-        --append-system-prompt "$(cat "$system_prompt_file")" \
-        --model "$JUDGE_MODEL" \
-        --output-format text \
-        --max-turns 15 \
-        > "$output_file" 2>"$err_file"
-      rc=$?
+      if [[ -n "$schema_path" ]]; then
+        if [[ ! -f "$schema_path" ]]; then
+          echo "[audit] Error: --json-schema source file not found: $schema_path" >&2
+          rm -f "$err_file"
+          return 64
+        fi
+        # When --json-schema is set, claude internally exposes a
+        # StructuredOutput tool whose input_schema is the supplied schema.
+        # Under --output-format text, the model invokes that tool but the
+        # captured stdout is only the final text turn — often prose
+        # narration, sometimes the JSON, sometimes empty — which the
+        # downstream :1879 parser sees. To get the schema-enforced payload
+        # reliably, switch to --output-format stream-json, capture all
+        # events, locate the StructuredOutput tool_use.input, and write
+        # that as the result file the rest of the pipeline reads.
+        local stream_file
+        stream_file=$(mktemp "${TMPDIR:-/tmp}/audit-headless-stream.XXXXXX")
+        printf '%s' "$user_prompt" | claude -p \
+          "${harness_args[@]}" \
+          --append-system-prompt "$(cat "$system_prompt_file")" \
+          --model "$JUDGE_MODEL" \
+          --output-format stream-json \
+          --verbose \
+          --max-turns 15 \
+          --json-schema "$(cat "$schema_path")" \
+          > "$stream_file" 2>"$err_file"
+        rc=$?
+        # Extract the LAST StructuredOutput tool_use.input from the stream.
+        # Multiple calls can appear if the model self-corrects; take the
+        # last as the model's final decision. Surface failures at the
+        # runner boundary, not at the upstream :1879 parser.
+        python3 - "$stream_file" "$output_file" "$err_file" << 'PYEOF'
+import json, sys
+stream_path, out_path, err_path = sys.argv[1:4]
+last_structured = None
+struct_count = 0
+saw_result = False
+result_subtype = None
+try:
+    with open(stream_path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(ev, dict) and ev.get("type") == "result":
+                saw_result = True
+                result_subtype = ev.get("subtype")
+            msg = ev.get("message") if isinstance(ev, dict) else None
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if (isinstance(block, dict)
+                        and block.get("type") == "tool_use"
+                        and block.get("name") == "StructuredOutput"
+                        and isinstance(block.get("input"), dict)
+                        and block.get("input")):
+                    last_structured = block["input"]
+                    struct_count += 1
+except FileNotFoundError:
+    pass
+
+err_lines = []
+if last_structured is None:
+    open(out_path, "w").close()
+    err_lines.append(f"[audit] schema-enforcement absent: no StructuredOutput tool_use in stream (result_subtype={result_subtype!r}, saw_result={saw_result})")
+else:
+    try:
+        with open(out_path, "w") as fh:
+            json.dump(last_structured, fh)
+    except (TypeError, ValueError) as e:
+        open(out_path, "w").close()
+        err_lines.append(f"[audit] StructuredOutput input not JSON-serializable: {e}")
+
+if struct_count > 1:
+    err_lines.append(f"[audit] StructuredOutput tool_use observed {struct_count} times; using the last")
+
+if err_lines:
+    try:
+        with open(err_path, "a") as fh:
+            for ln in err_lines:
+                fh.write(ln + "\n")
+    except OSError:
+        pass
+PYEOF
+        rm -f "$stream_file"
+      else
+        printf '%s' "$user_prompt" | claude -p \
+          "${harness_args[@]}" \
+          --append-system-prompt "$(cat "$system_prompt_file")" \
+          --model "$JUDGE_MODEL" \
+          --output-format text \
+          --max-turns 15 \
+          > "$output_file" 2>"$err_file"
+        rc=$?
+      fi
       ;;
     codex)
       if ! command -v codex >/dev/null 2>&1; then
@@ -242,6 +347,14 @@ $user_prompt"
       fi
       if [[ -n "$codex_effort" ]]; then
         cmd+=(-c "model_reasoning_effort=\"$codex_effort\"")
+      fi
+      if [[ -n "$schema_path" ]]; then
+        if [[ ! -f "$schema_path" ]]; then
+          echo "[audit] Error: --output-schema file not found: $schema_path" >&2
+          rm -f "$err_file"
+          return 64
+        fi
+        cmd+=(--output-schema "$schema_path")
       fi
       printf '%s' "$prompt" | "${cmd[@]}" - >/dev/null 2>"$err_file"
       rc=$?
@@ -1870,7 +1983,8 @@ Emit exactly one JSON object matching this Reverse-auditor output shape:
 }
 If you emit an omission, replace null with the omission_claim object required by the template. Do not emit legacy fields such as verdict_source, verdict, or claim. No markdown fences. No prose outside the JSON."
         echo "[audit] reverse-auditor: invoking headless runner (template-version: $REVERSE_AUDITOR_TEMPLATE_VERSION, model: $JUDGE_MODEL)" >&2
-        if ! headless_runner_invoke "$REVERSE_AUDITOR_TEMPLATE" "$REVERSE_AUDITOR_USER_PROMPT" "$REVERSE_AUDITOR_RAW_FILE"; then
+        REVERSE_AUDITOR_SCHEMA_PATH="$SCRIPT_DIR/judge-schemas/reverse-auditor-output.schema.json"
+        if ! headless_runner_invoke "$REVERSE_AUDITOR_TEMPLATE" "$REVERSE_AUDITOR_USER_PROMPT" "$REVERSE_AUDITOR_RAW_FILE" "$REVERSE_AUDITOR_SCHEMA_PATH"; then
           echo "[audit] warning: headless runner invocation failed for reverse-auditor — skipping reverse-auditor stage" >&2
           REVERSE_AUDITOR_RAW_FILE=""
         elif [[ ! -s "$REVERSE_AUDITOR_RAW_FILE" ]]; then
@@ -1894,7 +2008,7 @@ If you emit an omission, replace null with the omission_claim object required by
       # The grounding preflight is a separate deterministic validator that
       # runs AFTER shape validation; shape-ok claims with bad anchors route
       # to audit-attempts.jsonl rather than failing the audit outright.
-      RA_SHAPE_OK=$(python3 - "$REVERSE_AUDITOR_RAW_FILE" << 'PYEOF'
+      RA_SHAPE_OK=$(python3 - "$REVERSE_AUDITOR_RAW_FILE" "$REVERSE_AUDITOR_TEMPLATE_VERSION" << 'PYEOF'
 import json, sys
 try:
     with open(sys.argv[1]) as fh:
@@ -1903,14 +2017,16 @@ except Exception as e:
     print(f"parse-error: {type(e).__name__}: {e}")
     sys.exit(0)
 
+expected_tv = sys.argv[2]
+
 errs = []
 if not isinstance(obj, dict):
     errs.append("output is not a JSON object")
 else:
     if obj.get("judge") != "reverse-auditor":
         errs.append(f"judge != 'reverse-auditor' (got {obj.get('judge')!r})")
-    if not obj.get("judge_template_version"):
-        errs.append("judge_template_version missing or empty")
+    if obj.get("judge_template_version") != expected_tv:
+        errs.append(f"judge_template_version mismatch: expected {expected_tv!r}, got {obj.get('judge_template_version')!r}")
     if "omission_claim" not in obj:
         errs.append("omission_claim field missing (must be object or null)")
     else:

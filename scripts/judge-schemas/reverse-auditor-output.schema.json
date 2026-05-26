@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Reverse-auditor output",
+  "description": "Constrains the reverse-auditor judge's single-emission JSON output. The wrapper envelope is fixed; the `omission_claim` slot disjoins between Shape A (object — one grounded omission claim) and Shape B (null — explicit silence). `additionalProperties: false` at root AND inside `omission_claim` mechanically rejects legacy/drifted fields (`verdict`, `verdict_source`, `claim`, `no-omission`) even when the prompt already forbids them. Template-version identity is enforced post-parse in scripts/audit-artifact.sh — this schema only pins the 12-char hex shape.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "judge",
+    "judge_template_version",
+    "work_item",
+    "artifact_id",
+    "omission_claim",
+    "created_at"
+  ],
+  "properties": {
+    "judge": { "type": "string", "const": "reverse-auditor" },
+    "judge_template_version": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{12}$"
+    },
+    "work_item": { "type": "string", "minLength": 1 },
+    "artifact_id": { "type": "string", "minLength": 1 },
+    "omission_claim": {
+      "anyOf": [
+        {
+          "title": "Shape B — explicit silence",
+          "type": "null"
+        },
+        {
+          "title": "Shape A — one grounded omission claim",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "file",
+            "line_range",
+            "exact_snippet",
+            "normalized_snippet_hash",
+            "falsifier",
+            "why_it_matters"
+          ],
+          "properties": {
+            "file": { "type": "string", "minLength": 1 },
+            "line_range": {
+              "type": "string",
+              "pattern": "^[0-9]+-[0-9]+$"
+            },
+            "exact_snippet": { "type": "string", "minLength": 1 },
+            "normalized_snippet_hash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "falsifier": { "type": "string", "minLength": 1 },
+            "why_it_matters": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}
