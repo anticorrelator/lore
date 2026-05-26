@@ -90,17 +90,16 @@ print(hashlib.sha256(s.encode("utf-8")).hexdigest())
 
 ## What to Look For
 
-Scan the change + curated top-k for gaps across these axes. Each axis is a category of omission that has bitten the system before; none is a guarantee — evidence discipline still applies.
+Ask one question: **what load-bearing surface did the producer touch but not claim?**
 
-1. **Untested branches.** The change adds a conditional or error path the tests never exercise. Cite the branch line and the absent test.
-2. **Silent invariant drift.** The change modifies a function that callers depend on for an implicit guarantee (ordering, idempotence, error behavior); the producer updated the function but not the caller contract or the callers.
-3. **Callsite fanout missed.** A renamed symbol, changed signature, or altered return shape that the change updated in one place but missed in ≥1 other callsite. Cite the missed callsite, not the change point.
-4. **Config / flag drift.** A new flag, env var, or config key introduced without a corresponding default, schema update, docs touch, or migration path. Cite the introduction point + the absent counterpart.
-5. **Error-handling asymmetry.** A new call / operation that can fail, sibling to one that is wrapped, but this one is not. Cite the new call + the sibling's wrapper.
-6. **Behavioral contract mismatch.** The artifact's claim says X; the diff does Y; no reconciling update. Cite both and name the discrepancy. (This is close to correctness-gate territory — only emit if the correctness-gate curated set did not already surface it.)
-7. **Regression surface.** A deletion or refactor that removes a capability the curated claims quietly depend on, or that a nearby test depends on without the producer noticing. Cite the deletion + the dependent.
+Read the change + curated top-k. Look for evidence the producer modified, depended on, or implied something — but did not cover in a surviving claim — where missing coverage would let a future regression slip past audit. Concrete evidence is the bar: file + line + falsifier + consequence, or silence.
 
-These are starting points. An omission that fits none of the above but is grounded in file + line + falsifier + consequence still qualifies. Conversely, a concern that fits one of these patterns but *cannot* be anchored does not qualify — return silence.
+Two illustrative patterns that have produced real omission claims in lore's history (not obligations, not a checklist):
+
+- *Callsite fanout missed.* A renamed symbol, changed signature, or altered return shape that the change updated in one place but missed in ≥1 other callsite. The pattern surfaces when you trace dependents of a touched function and find one that wasn't updated.
+- *Behavioral contract mismatch.* The artifact's claim says X; the diff does Y; no reconciling update. (Close to correctness-gate territory — only emit if the curated set did not already surface it.)
+
+These are examples, not categories to enumerate. Do not walk a fixed list of axes — that turns the audit into a search-template-driven Bash loop and exhausts the turn budget before judgment lands. A grounded omission that fits neither example still qualifies. A concern that fits an example but cannot be anchored to file + line + falsifier does not — return silence.
 
 ## Downstream Lifecycle — Know Where Your Claim Goes
 
