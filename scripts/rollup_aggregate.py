@@ -45,8 +45,11 @@ TEMPLATE_SENTINEL_TO_PATH: dict[str, str] = {
     "task-claims-jsonl": "agents/worker.md",
     "audit-candidates-jsonl": "agents/reverse-auditor.md",
     # consumption-contradictions are routed through the consumer-contradiction-channel
-    # producer; no single template file represents that producer today. Left
-    # unresolved — the rollup SKIPs the group and surfaces the sentinel in stderr.
+    # producer. The sole-writer for the channel is consumption-contradiction-append.sh;
+    # that script's template-version is the canonical hash for the channel's tier=template
+    # attribution. Mirrors the producer-attribution decision originally proposed in the
+    # deleted 10-phase wire-judge-rollups plan (D2 mapping).
+    "consumption-contradictions-jsonl": "scripts/consumption-contradiction-append.sh",
 }
 
 
