@@ -27,12 +27,35 @@
 #
 # Routing semantics:
 #   * preflight.pass == true  → audit-candidates.jsonl with status
-#                               "pending_correctness_gate"
+#                               "pending_correctness_gate". The pass-side
+#                               reason is preserved on the row so consumers
+#                               can distinguish "ok" (clean verification)
+#                               from "verified-with-drift" (snippet found
+#                               via substring fallback after the line/hash
+#                               anchor drifted).
 #   * preflight.pass == false → audit-attempts.jsonl with the preflight
 #                               reason surfaced
 #   * preflight.reason == "silence" → neither file gets written; exit 0
 #     (silence is not a failure, it's no-op telemetry handled by the
 #     reverse-auditor rollup directly)
+#
+# Reason enum (per architecture/evidence/audit-pipeline-contract.md):
+#   silence | ok | verified-with-drift                       (pass-side)
+#   file-missing | line-out-of-range | snippet-mismatch |
+#   field-missing | provenance-unknown                       (fail-side)
+#
+#   * ok                   — anchor matched on the first attempt.
+#   * verified-with-drift  — anchor matched after substring fallback;
+#                            line/hash drifted but content is still
+#                            present. Routed as a pass; the row carries
+#                            reason=verified-with-drift so /retro can
+#                            count softened verifications.
+#   * provenance-unknown   — preflight could not determine whether the
+#                            referenced content exists in any reachable
+#                            source. Routed as a fail distinct from
+#                            file-missing/snippet-mismatch: environment-
+#                            class (no clone has the content) rather
+#                            than producer-class (snippet disagreed).
 #
 # Row schemas (per the plan and contract doc):
 #
@@ -45,6 +68,7 @@
 #     "line_range":     "<from claim>",
 #     "falsifier":      "<from claim>",
 #     "rationale":      "<why-it-matters / why_it_matters from claim>",
+#     "reason":         "ok | verified-with-drift",
 #     "status":         "pending_correctness_gate",
 #     "created_at":     "<ISO-8601>"
 #   }
@@ -56,7 +80,8 @@
 #     "work_item":      "<slug>",
 #     "claim_payload":  { ... full claim as emitted ... },
 #     "reason":         "file-missing | line-out-of-range |
-#                        snippet-mismatch | field-missing",
+#                        snippet-mismatch | field-missing |
+#                        provenance-unknown",
 #     "detail":         "<from preflight.detail, optional>",
 #     "created_at":     "<ISO-8601>"
 #   }
@@ -73,7 +98,7 @@ KDIR_OVERRIDE=""
 VERDICT_SOURCE="reverse-auditor"
 
 usage() {
-  sed -n '2,52p' "$0" >&2
+  sed -n '2,87p' "$0" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -181,8 +206,14 @@ else:
 now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 if pass_flag:
-    # audit-candidates.jsonl — row with pending_correctness_gate status
+    # audit-candidates.jsonl — row with pending_correctness_gate status.
+    # The reason is preserved so consumers (correctness-gate, /retro
+    # rollups) can distinguish ok (clean verification) from
+    # verified-with-drift (substring-fallback verification). Both are
+    # pass-side; the row's status is identical, but verified-with-drift
+    # also carries softened=true so downstream rollups can count drift.
     why = claim.get("why_it_matters") or claim.get("why-it-matters") or ""
+    pass_reason = reason or "ok"
     row = {
         "candidate_id":  f"cand-{uuid.uuid4().hex[:12]}",
         "verdict_source": verdict_source,
@@ -191,6 +222,8 @@ if pass_flag:
         "line_range":    claim.get("line_range"),
         "falsifier":     claim.get("falsifier"),
         "rationale":     why,
+        "reason":        pass_reason,
+        "softened":      pass_reason == "verified-with-drift",
         "status":        "pending_correctness_gate",
         "created_at":    now_iso,
     }

@@ -1901,8 +1901,17 @@ REVERSE_AUDITOR_APPENDED_COUNT=0
 REVERSE_AUDITOR_TEMPLATE_VERSION=""
 REVERSE_AUDITOR_RAW_FILE=""
 REVERSE_AUDITOR_VERDICT="none"          # none | omission-claim | silence | preflight-failed
-REVERSE_AUDITOR_PREFLIGHT_REASON=""     # silence | ok | file-missing | line-out-of-range | snippet-mismatch | field-missing
+# Reason enum per architecture/evidence/audit-pipeline-contract.md:
+#   silence | ok | verified-with-drift                          (pass-side)
+#   file-missing | line-out-of-range | snippet-mismatch |
+#   field-missing | provenance-unknown                          (fail-side)
+# verified-with-drift is a softened pass (substring fallback hit after
+# the line/hash anchor drifted); provenance-unknown is an environment-
+# class failure (no clone has the content) distinct from the producer-
+# class failures (snippet disagreed).
+REVERSE_AUDITOR_PREFLIGHT_REASON=""
 REVERSE_AUDITOR_QUEUE_DEST=""           # candidates | attempts | silence
+REVERSE_AUDITOR_PREFLIGHT_SOFTENED=0    # 1 when reason == verified-with-drift (pass with drift)
 REVERSE_AUDITOR_EXIT_CODE=0             # 0 unless preflight failed (sets to 3)
 
 if [[ "$CURATOR_STAGE_RAN" -eq 1 && "$N_SELECTED" -gt 0 ]]; then
@@ -2094,16 +2103,35 @@ PYEOF
       REVERSE_AUDITOR_PREFLIGHT_PASS=$(python3 -c 'import json,sys; print("true" if json.load(open(sys.argv[1])).get("pass") else "false")' "$REVERSE_AUDITOR_PREFLIGHT_TMP")
 
       # Classify the verdict for rollup + reporting.
-      #   silence              → no emission to route; rows reflect
-      #                          "nothing surfaced"
-      #   pass (ok)            → omission-claim; route to candidates queue
-      #   fail (any reason)    → preflight-failed; route to attempts queue
+      #   silence                        → no emission to route; rows
+      #                                    reflect "nothing surfaced"
+      #   pass (ok)                      → omission-claim; route to
+      #                                    candidates queue
+      #   pass (verified-with-drift)     → omission-claim with softened
+      #                                    flag; route to candidates
+      #                                    queue. Pass status, but
+      #                                    /retro counts softened
+      #                                    verifications separately.
+      #   fail (provenance-unknown)      → preflight-failed; route to
+      #                                    attempts. Environment-class
+      #                                    failure; grounding_failure_rate
+      #                                    telemetry carries
+      #                                    failure_reason=provenance-unknown
+      #                                    so /retro can distinguish it
+      #                                    from producer-class failures.
+      #   fail (any other reason)        → preflight-failed; route to
+      #                                    attempts. Producer-class
+      #                                    failure (file-missing,
+      #                                    snippet-mismatch, etc.).
       if [[ "$REVERSE_AUDITOR_PREFLIGHT_REASON" == "silence" ]]; then
         REVERSE_AUDITOR_VERDICT="silence"
         REVERSE_AUDITOR_QUEUE_DEST="silence"
       elif [[ "$REVERSE_AUDITOR_PREFLIGHT_PASS" == "true" ]]; then
         REVERSE_AUDITOR_VERDICT="omission-claim"
         REVERSE_AUDITOR_QUEUE_DEST="candidates"
+        if [[ "$REVERSE_AUDITOR_PREFLIGHT_REASON" == "verified-with-drift" ]]; then
+          REVERSE_AUDITOR_PREFLIGHT_SOFTENED=1
+        fi
       else
         REVERSE_AUDITOR_VERDICT="preflight-failed"
         REVERSE_AUDITOR_QUEUE_DEST="attempts"
@@ -2157,6 +2185,10 @@ claim = emission.get("omission_claim") or {}
 work_item = emission.get("work_item") or artifact_id
 now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 if pf.get("pass"):
+    # Preserve pass-side reason (ok | verified-with-drift) and surface
+    # softened=true on drift so downstream rollups can count softened
+    # verifications. Schema parity with audit-queue-route.sh.
+    pass_reason = pf.get("reason") or "ok"
     row = {
         "candidate_id":   f"cand-{uuid.uuid4().hex[:12]}",
         "verdict_source": "reverse-auditor",
@@ -2165,6 +2197,8 @@ if pf.get("pass"):
         "line_range":     claim.get("line_range"),
         "falsifier":      claim.get("falsifier"),
         "rationale":      claim.get("why_it_matters") or claim.get("why-it-matters") or "",
+        "reason":         pass_reason,
+        "softened":       pass_reason == "verified-with-drift",
         "status":         "pending_correctness_gate",
         "created_at":     now,
     }
@@ -2211,10 +2245,12 @@ PYEOF
         RA_CALIBRATION_STATE=$(read_calibration_state "reverse-auditor" "$REVERSE_AUDITOR_TEMPLATE_VERSION")
         RA_ROWS_JSON=$(python3 - "$REVERSE_AUDITOR_RAW_FILE" "$RESOLVED_INPUT_FILE" \
                                 "$REVERSE_AUDITOR_TEMPLATE_VERSION" "$CURATOR_TEMPLATE_VERSION" \
-                                "$REVERSE_AUDITOR_VERDICT" "$RA_CALIBRATION_STATE" << 'PYEOF'
+                                "$REVERSE_AUDITOR_VERDICT" "$RA_CALIBRATION_STATE" \
+                                "$REVERSE_AUDITOR_PREFLIGHT_REASON" "$REVERSE_AUDITOR_PREFLIGHT_SOFTENED" << 'PYEOF'
 import json, sys, datetime
 
-ra_file, resolved_file, ra_tv, curator_tv, verdict, calibration_state = sys.argv[1:7]
+(ra_file, resolved_file, ra_tv, curator_tv, verdict, calibration_state,
+ preflight_reason, preflight_softened) = sys.argv[1:9]
 with open(ra_file) as fh:
     ra = json.load(fh)
 with open(resolved_file) as fh:
@@ -2227,6 +2263,7 @@ artifact_id = resolved.get("artifact_id")
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 claim = ra.get("omission_claim") or {}
+softened = preflight_softened == "1"
 
 # Classify value contributions per verdict.
 if verdict == "omission-claim":
@@ -2304,7 +2341,17 @@ if verdict == "omission-claim":
 # grounding_failure_rate — reverse-auditor template, telemetry. Always
 # emit (even on silence) so /retro can track the rate. Telemetry rows
 # are exempt from the grounded-or-nothing gate per scorecard-append.sh.
-rows.append({
+#
+# failure_reason: present on preflight-failed verdicts so /retro can
+# distinguish environment-class failures (provenance-unknown — no clone
+# has the content) from producer-class failures (file-missing,
+# snippet-mismatch, line-out-of-range, field-missing). Absent on
+# silence (no failure to attribute) and on omission-claim (no failure).
+#
+# softened: present and true on omission-claim verdicts produced via
+# substring fallback (reason=verified-with-drift). Telemetry signal that
+# the anchor drifted but the content was still present.
+grounding_row = {
     **row_common,
     "kind": "telemetry",
     "tier": "telemetry",
@@ -2312,7 +2359,12 @@ rows.append({
     "template_version": ra_tv,
     "metric": "grounding_failure_rate",
     "value": grounding_fail,
-})
+}
+if verdict == "preflight-failed" and preflight_reason:
+    grounding_row["failure_reason"] = preflight_reason
+if verdict == "omission-claim" and softened:
+    grounding_row["softened"] = True
+rows.append(grounding_row)
 
 print(json.dumps(rows))
 PYEOF
@@ -2367,6 +2419,7 @@ if [[ $JSON_MODE -eq 1 ]]; then
     "$REVERSE_AUDITOR_STAGE_RAN" "$REVERSE_AUDITOR_TEMPLATE_VERSION" \
     "$REVERSE_AUDITOR_VERDICT" "$REVERSE_AUDITOR_PREFLIGHT_REASON" \
     "$REVERSE_AUDITOR_QUEUE_DEST" "$REVERSE_AUDITOR_APPENDED_COUNT" \
+    "$REVERSE_AUDITOR_PREFLIGHT_SOFTENED" \
     "$TOTAL_ROWS_APPENDED" "$PIPELINE_STAGE" "$NEXT_STAGE" << 'PYEOF'
 import json, sys
 (artifact_id, artifact_type, artifact_path, verdicts_file,
@@ -2375,7 +2428,8 @@ import json, sys
  curator_ran, curator_tv,
  n_selected, n_dropped, curator_appended,
  ra_ran, ra_tv, ra_verdict, ra_preflight_reason, ra_queue_dest, ra_appended,
- total_appended, pipeline_stage, next_stage) = sys.argv[1:25]
+ ra_softened,
+ total_appended, pipeline_stage, next_stage) = sys.argv[1:26]
 
 out = {
     "artifact_id": artifact_id,
@@ -2407,6 +2461,7 @@ if ra_ran == "1":
         "verdict": ra_verdict,
         "preflight_reason": ra_preflight_reason,
         "queue_destination": ra_queue_dest,
+        "softened": ra_softened == "1",
         "scorecard_rows_appended": int(ra_appended),
     }
 print(json.dumps(out, indent=2))
@@ -2422,7 +2477,11 @@ else
   fi
   if [[ $REVERSE_AUDITOR_STAGE_RAN -eq 1 ]]; then
     echo "[audit] reverse-auditor complete (template-version: $REVERSE_AUDITOR_TEMPLATE_VERSION)"
-    echo "[audit]   verdict=$REVERSE_AUDITOR_VERDICT preflight=$REVERSE_AUDITOR_PREFLIGHT_REASON queue=$REVERSE_AUDITOR_QUEUE_DEST"
+    if [[ "$REVERSE_AUDITOR_PREFLIGHT_SOFTENED" == "1" ]]; then
+      echo "[audit]   verdict=$REVERSE_AUDITOR_VERDICT preflight=$REVERSE_AUDITOR_PREFLIGHT_REASON queue=$REVERSE_AUDITOR_QUEUE_DEST softened=true"
+    else
+      echo "[audit]   verdict=$REVERSE_AUDITOR_VERDICT preflight=$REVERSE_AUDITOR_PREFLIGHT_REASON queue=$REVERSE_AUDITOR_QUEUE_DEST"
+    fi
     echo "[audit]   scorecard rows appended: $REVERSE_AUDITOR_APPENDED_COUNT"
   fi
   echo "[audit] verdicts persisted to: $VERDICTS_FILE"
