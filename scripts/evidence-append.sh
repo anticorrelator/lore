@@ -96,6 +96,52 @@ if [[ "$APPEND_PROVENANCE" == "legacy-no-snippet" ]]; then
   exit 1
 fi
 
+# --- Derive optional source-anchor metadata (additive, non-gating) ---
+# file_relative: walk upward from the row's `file` looking for a `.git/`
+#   ancestor; the file's path relative to that ancestor is `file_relative`.
+#   Omit silently when no git root is found. When `file` is already relative,
+#   `file_relative` equals `file` verbatim.
+# captured_origin_ref: first ref under refs/remotes/origin/ that contains the
+#   cwd repo's HEAD. JSON null when nothing matches (anchor on local-only
+#   commits). Derived from the cwd, not from `file`'s repo.
+# anchor_warning: set to "unpushed_local_only" iff captured_origin_ref is null,
+#   AND emit a single-line stderr soft-warning. Capture continues either way.
+ROW_FILE=$(printf '%s' "$ROW" | jq -r '.file // ""' 2>/dev/null || echo "")
+FILE_RELATIVE=""
+if [[ -n "$ROW_FILE" ]]; then
+  if [[ "$ROW_FILE" != /* ]]; then
+    FILE_RELATIVE="$ROW_FILE"
+  else
+    SEARCH_DIR=$(dirname "$ROW_FILE")
+    while [[ "$SEARCH_DIR" != "/" && "$SEARCH_DIR" != "." ]]; do
+      if [[ -e "$SEARCH_DIR/.git" ]]; then
+        FILE_RELATIVE="${ROW_FILE#$SEARCH_DIR/}"
+        break
+      fi
+      SEARCH_DIR=$(dirname "$SEARCH_DIR")
+    done
+  fi
+fi
+
+# `git for-each-ref refs/remotes/origin/` includes the symbolic `origin/HEAD`
+# pointer (short name `origin`); skip it so we record the concrete branch.
+CAPTURED_ORIGIN_REF=$(git for-each-ref --contains HEAD --format '%(refname:short)' refs/remotes/origin/ 2>/dev/null | grep -v '^origin$' | head -1 || true)
+
+if [[ -n "$FILE_RELATIVE" ]]; then
+  ROW=$(printf '%s' "$ROW" | jq --arg v "$FILE_RELATIVE" '.file_relative = $v')
+fi
+if [[ -n "$CAPTURED_ORIGIN_REF" ]]; then
+  ROW=$(printf '%s' "$ROW" | jq --arg v "$CAPTURED_ORIGIN_REF" '.captured_origin_ref = $v')
+else
+  # Only stamp captured_origin_ref:null and anchor_warning when we are inside
+  # a git repo at all — otherwise both fields stay absent (non-git capture).
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    ROW=$(printf '%s' "$ROW" | jq '.captured_origin_ref = null | .anchor_warning = "unpushed_local_only"')
+    WARN_CLAIM_ID=$(printf '%s' "$ROW" | jq -r '.claim_id // "(unknown)"')
+    echo "evidence-append: warning: $WORK_ITEM/$WARN_CLAIM_ID anchored on commit not reachable from any origin/* ref; audits from sibling workspaces will fail until pushed." >&2
+  fi
+fi
+
 # --- Validate via validate-tier2.sh ---
 # Let the validator write its own diagnostics to stderr directly.
 # The || block only runs if the validator exits non-zero; -e does not

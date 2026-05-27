@@ -39,6 +39,14 @@
 #                migration writer is the only sanctioned emitter of this state;
 #                evidence-append.sh rejects it at the writer-path gate.
 # Any other combination (mixed, partial, malformed) is rejected.
+#
+# Optional source-anchor metadata (additive, non-gating):
+#   file_relative           — string, path relative to a `.git/` ancestor of `file`
+#   captured_origin_ref     — string or null, e.g. "origin/main"; null when HEAD
+#                             is not reachable from any origin/* ref
+#   anchor_warning          — string, e.g. "unpushed_local_only"
+# When present, these fields are type-checked but never required. Pre-existing
+# rows without them continue to validate. Derivation happens in evidence-append.sh.
 
 set -euo pipefail
 
@@ -278,6 +286,25 @@ else
         fi
       fi
     fi
+  fi
+fi
+
+# --- Optional source-anchor metadata: type checks only ---
+# These fields are additive and non-gating. When present, they must have the
+# documented shape; when absent, validation is unaffected.
+if printf '%s' "$ROW" | jq -e 'has("file_relative")' >/dev/null 2>&1; then
+  if ! printf '%s' "$ROW" | jq -e '.file_relative | type == "string"' >/dev/null 2>&1; then
+    fail_field "file_relative must be a string"
+  fi
+fi
+if printf '%s' "$ROW" | jq -e 'has("captured_origin_ref")' >/dev/null 2>&1; then
+  if ! printf '%s' "$ROW" | jq -e '(.captured_origin_ref == null) or (.captured_origin_ref | type == "string")' >/dev/null 2>&1; then
+    fail_field "captured_origin_ref must be a string or null"
+  fi
+fi
+if printf '%s' "$ROW" | jq -e 'has("anchor_warning")' >/dev/null 2>&1; then
+  if ! printf '%s' "$ROW" | jq -e '.anchor_warning | type == "string"' >/dev/null 2>&1; then
+    fail_field "anchor_warning must be a string"
   fi
 fi
 
