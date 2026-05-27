@@ -105,11 +105,11 @@ resolve_settings_path() {
 # ~/.lore/scripts/<name> install symlink per checklist item 6. The chain
 # of SessionStart hooks mirrors the claude-code adapter's order:
 # doctor -> auto-reindex -> load-knowledge -> load-work -> load-threads ->
-# extract-session-digest. Stop runs check-plan-persistence (the prior
-# stop-novelty-check.py was retired 2026-05-06 — see
-# _meta/effectiveness-journal.jsonl and the heuristic-vs-definite-hook
-# entry under conventions/). PreToolUse with matcher=Write covers
-# guard-work-writes.
+# extract-session-digest. Lore no longer ships a Stop hook (the prior
+# stop-novelty-check.py was retired 2026-05-06, and check-plan-persistence.py
+# was retired 2026-05-26 — see _meta/effectiveness-journal.jsonl and the
+# heuristic-vs-definite-hook entry under conventions/). PreToolUse with
+# matcher=Write covers guard-work-writes.
 # PreCompact and SessionEnd are not native Codex events; PreCompact
 # falls back to a SessionStart bookend (pre-compact.sh on every session
 # start) and SessionEnd is derived from Stop (skipped here — Stop hook
@@ -150,9 +150,6 @@ command = "python3 ~/.lore/scripts/extract-session-digest.py"
 # adapters/hooks/README.md "Per-Harness Mapping" for the fallback.
 [[hooks.SessionStart]]
 command = "bash ~/.lore/scripts/pre-compact.sh"
-
-[[hooks.Stop]]
-command = "python3 ~/.lore/scripts/check-plan-persistence.py"
 
 [[hooks.PreToolUse]]
 # Codex 0.124+ requires `matcher` to be a TOML string (the tool name),
@@ -310,7 +307,7 @@ cmd_smoke() {
   printf '  %-20s %-9s %s\n' post_tool          full      "(currently unused by lore; PostToolUse hook surface available)"
   printf '  %-20s %-9s %s\n' permission_request full      "PermissionRequest hook (behavior=allow|deny|abstain JSON-stdout)"
   printf '  %-20s %-9s %s\n' pre_compact        fallback  "(no native PreCompact; SessionStart bookend -> pre-compact.sh)"
-  printf '  %-20s %-9s %s\n' stop               full      "Stop hook (check-plan-persistence.py)"
+  printf '  %-20s %-9s %s\n' stop               full      "(no lore Stop hook; ephemeral builtin plans are not auto-persisted)"
   printf '  %-20s %-9s %s\n' session_end        full      "(no native SessionEnd; Stop hook covers both turn-stop and clear)"
   printf '  %-20s %-9s %s\n' task_completed     fallback  "(no native blocking event; lead-side validator via orchestration adapter, T31/T32)"
 }

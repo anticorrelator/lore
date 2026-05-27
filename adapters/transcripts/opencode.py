@@ -274,38 +274,6 @@ def session_metadata(path: str) -> dict:
     return {"session_id": session_id, "session_date": session_date}
 
 
-def tool_use_timestamps(path: str, tool_name: str) -> list[tuple[int, str]]:
-    """Return `[(message_index, timestamp_iso8601_str), ...]` for events whose
-    tool name matches `tool_name`, in accumulator order.
-
-    OpenCode `tool.execute.before` events carry a `timestamp` field.  Returns
-    an empty list when the tool was not invoked or no timestamp is available.
-    Consumers that depend on per-entry timestamp precision should note that the
-    accumulator timestamp is at event-dispatch granularity, not turn granularity.
-    """
-    events = _read_events(path)
-    out: list[tuple[int, str]] = []
-    for i, ev in enumerate(events):
-        etype = ev.get("type", "")
-        if etype not in ("tool.execute.before", "tool.execute.after"):
-            # Also check message.updated tool_use entries.
-            if etype == "message.updated":
-                msg = ev.get("message", {}) or {}
-                for tu in (msg.get("tool_use", []) or []):
-                    if isinstance(tu, dict) and tu.get("name") == tool_name:
-                        ts = ev.get("timestamp", "")
-                        if ts:
-                            out.append((i, str(ts)))
-                        break
-            continue
-        tool = ev.get("tool", {}) or {}
-        if tool.get("name") == tool_name:
-            ts = ev.get("timestamp", "")
-            if ts:
-                out.append((i, str(ts)))
-    return out
-
-
 __all__ = [
     "parse_transcript",
     "extract_file_paths",
@@ -313,5 +281,4 @@ __all__ = [
     "provider_status",
     "read_raw_lines",
     "session_metadata",
-    "tool_use_timestamps",
 ]

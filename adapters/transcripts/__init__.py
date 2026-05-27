@@ -1,9 +1,9 @@
 """Lore transcript provider package.
 
 Per `adapters/transcripts/README.md` (T46–T56), every Lore consumer of
-session transcripts (digest, plan-persistence, ceremony detection,
-novelty review) reads through the provider boundary defined here
-rather than importing from `scripts/transcript.py` directly.
+session transcripts (digest, ceremony detection) reads through the
+provider boundary defined here rather than importing from
+`scripts/transcript.py` directly.
 
 Public API:
 
@@ -88,10 +88,10 @@ def extract_text_blocks(messages: Iterable[dict]) -> list[tuple[int, str]]:
 
     Consolidates the `for m in messages: for text in m["text_blocks"]:`
     pattern that historically appeared across consumers including the
-    retired `stop-novelty-check.py` (T56 observation). Still useful for
-    `extract-session-digest`, `check-plan-persistence`, and any
-    future transcript consumer. Iteration order matches the message
-    order returned by `parse_transcript`.
+    retired `stop-novelty-check.py` and `check-plan-persistence.py`
+    (T56 observation). Still useful for `extract-session-digest` and
+    any future transcript consumer. Iteration order matches the
+    message order returned by `parse_transcript`.
     """
     out: list[tuple[int, str]] = []
     for msg in messages:
@@ -179,7 +179,7 @@ def get_provider(framework: str | None = None) -> Any:
     Returns:
         The provider module (with `parse_transcript`,
         `extract_file_paths`, `previous_session_path`, `provider_status`,
-        `read_raw_lines`, `session_metadata`, `tool_use_timestamps`).
+        `read_raw_lines`, `session_metadata`).
 
     Raises:
         UnsupportedFrameworkError: if no provider is registered for

@@ -176,7 +176,6 @@
       "id": "claude-code",
       "display_name": "Claude Code",
       "binary": "claude",
-      "builtin_plan_mode_tool": "ExitPlanMode",
       "slash_command_tool": "SlashCommand",
       "description": "Reference baseline. Supports the full lore protocol surface: SessionStart/Stop/PreCompact/PreToolUse/SessionEnd/TaskCompleted hooks, ~/.claude/skills + ~/.claude/agents + ~/.claude/CLAUDE.md packaging, TeamCreate/SendMessage team messaging, and JSONL transcripts under ~/.claude/projects/.",
       "model_routing": {
@@ -222,7 +221,7 @@
         "stop_hook": {
           "support": "full",
           "evidence": "claude-code-stop-hook",
-          "notes": "Stop hook runs check-plan-persistence.py with JSON stdout decision protocol. (stop-novelty-check.py was retired 2026-05-06 as a low-yield heuristic capture-suggester — 5 captures lifetime across the multi-project store, 0 in the prior 3 months. See _meta/effectiveness-journal.jsonl and conventions/heuristic-vs-definite-condition-hooks.md.)"
+          "notes": "Native Stop hook surface is fully supported but lore no longer installs a Stop hook. (check-plan-persistence.py was retired 2026-05-26 — it forced ephemeral builtin plans to be persisted as _work/ items, which produced ghost work items when the model used plan mode for quick scratch planning. stop-novelty-check.py was retired earlier on 2026-05-06 as a low-yield heuristic capture-suggester. See _meta/effectiveness-journal.jsonl and conventions/heuristic-vs-definite-condition-hooks.md.)"
         },
         "pre_compact_hook": {
           "support": "full",
@@ -257,7 +256,7 @@
         "transcript_provider": {
           "support": "full",
           "evidence": "claude-code-transcript-provider",
-          "notes": "JSONL transcripts under ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl consumed by extract-session-digest and check-plan-persistence. (stop-novelty-check.py was a consumer until retired 2026-05-06.)"
+          "notes": "JSONL transcripts under ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl consumed by extract-session-digest. (stop-novelty-check.py and check-plan-persistence.py were consumers until retired 2026-05-06 and 2026-05-26 respectively.)"
         },
         "headless_runner": {
           "support": "full",
@@ -274,7 +273,6 @@
       "id": "opencode",
       "display_name": "OpenCode",
       "binary": "opencode",
-      "builtin_plan_mode_tool": null,
       "slash_command_tool": null,
       "description": "Multi-provider harness with native Claude-compatible discovery for skills and instruction files. Plugins are JavaScript/TypeScript modules under .opencode/plugins or ~/.config/opencode/plugins. Native team messaging is absent; team workflows degrade to lead-orchestrated fanout/aggregation.",
       "model_routing": {
@@ -371,7 +369,6 @@
       "id": "codex",
       "display_name": "Codex",
       "binary": "codex",
-      "builtin_plan_mode_tool": null,
       "slash_command_tool": null,
       "description": "Codex CLI with native hooks (SessionStart, PreToolUse, PermissionRequest, PostToolUse, Stop) and subagent workflows enabled by default. Native team messaging is absent; PreCompact and TaskCompleted blocking semantics are not covered by the native hook surface and require lead-side fallbacks. The February 2026 'notify-only' premise is stale and superseded by docs/codex-migration.md and the gotchas update in T16.",
       "model_routing": {

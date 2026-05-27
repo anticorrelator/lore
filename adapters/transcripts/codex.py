@@ -307,26 +307,6 @@ def session_metadata(path: str) -> dict:
     return {"session_id": session_id, "session_date": session_date}
 
 
-def tool_use_timestamps(path: str, tool_name: str) -> list[tuple[int, str]]:
-    """Return `[(message_index, timestamp_iso8601_str), ...]` for rollout
-    entries whose tool name matches `tool_name`, in rollout order.
-
-    Codex `tool_call` entries carry a per-entry `timestamp` field.  Returns
-    an empty list when the tool was not invoked or no timestamp is available.
-    """
-    events = _read_rollout_events(path)
-    out: list[tuple[int, str]] = []
-    for i, ev in enumerate(events):
-        if ev.get("type") != "tool_call":
-            continue
-        if ev.get("name") != tool_name:
-            continue
-        ts = ev.get("timestamp", "")
-        if ts:
-            out.append((i, str(ts)))
-    return out
-
-
 __all__ = [
     "parse_transcript",
     "extract_file_paths",
@@ -334,5 +314,4 @@ __all__ = [
     "provider_status",
     "read_raw_lines",
     "session_metadata",
-    "tool_use_timestamps",
 ]

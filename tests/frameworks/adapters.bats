@@ -75,10 +75,11 @@ AGENT_OPS=(
   resolve_model_for_role
 )
 
-# Closed seven-operation set per adapters/transcripts/README.md
+# Closed six-operation set per adapters/transcripts/README.md
 # §"Provider interface — extended operation set". This is the schematic
-# the consumer scripts (extract-session-digest.py, check-plan-persistence.py,
-# and historical stop-novelty-check.py) rely on.
+# the consumer scripts (extract-session-digest.py) rely on. The historical
+# tool_use_timestamps op (T48) was retired alongside check-plan-persistence.py
+# on 2026-05-26; stop-novelty-check.py was retired earlier on 2026-05-06.
 TRANSCRIPT_OPS=(
   parse_transcript
   extract_file_paths
@@ -86,7 +87,6 @@ TRANSCRIPT_OPS=(
   provider_status
   read_raw_lines
   session_metadata
-  tool_use_timestamps
 )
 
 setup() {
@@ -680,7 +680,7 @@ PYEOF
 # 5. Transcript provider contract
 # ============================================================
 
-@test "every transcript provider exports the closed seven-operation interface" {
+@test "every transcript provider exports the closed six-operation interface" {
   # adapters/transcripts/README.md §"Provider interface — extended
   # operation set" defines the seven operations every provider must
   # expose. Drift between the README's list and the provider modules

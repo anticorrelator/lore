@@ -17,10 +17,11 @@
 #      this because the most-recent JSONL IS the current session at
 #      SessionStart hook time.
 #
-# Plus a few extension checks (session_metadata, tool_use_timestamps,
-# the shared helpers count_tool_uses + has_recent_capture +
-# extract_text_blocks) so future regressions on T47/T48 surface here
-# rather than inside T52/T53 consumer migrations.
+# Plus a few extension checks (session_metadata and the shared helpers
+# count_tool_uses + has_recent_capture + extract_text_blocks) so future
+# regressions on T47 surface here rather than inside T52 consumer
+# migrations. (tool_use_timestamps was T48 for check-plan-persistence.py,
+# which was retired 2026-05-26; the operation came with it.)
 #
 # Style: pure bats. Skips cleanly when python3 is missing.
 
@@ -203,22 +204,6 @@ fixture = '$TRANSCRIPT_FIXTURE'
 md = provider.session_metadata(fixture)
 assert md['session_id'] == 'test-sess-1', f'got {md[\"session_id\"]!r}'
 assert isinstance(md['session_date'], datetime), f'got {type(md[\"session_date\"]).__name__}'
-print('OK')
-"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"OK"* ]]
-}
-
-@test "tool_use_timestamps returns per-entry ts for the named tool" {
-  run provider_py "
-from adapters.transcripts import get_provider
-provider = get_provider('claude-code')
-
-fixture = '$TRANSCRIPT_FIXTURE'
-ts = provider.tool_use_timestamps(fixture, 'ExitPlanMode')
-assert ts == [(3, '2026-05-04T08:00:03Z')], f'unexpected: {ts}'
-ts_empty = provider.tool_use_timestamps(fixture, 'Bash')
-assert ts_empty == [], f'expected empty for unused tool: {ts_empty}'
 print('OK')
 "
   [ "$status" -eq 0 ]

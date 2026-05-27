@@ -1,37 +1,46 @@
 # Lore Transcript Provider Contract
 
 This file is the canonical reference for how Lore's capture, digest,
-plan-persistence, and future transcript consumers read session artifacts across
+and future transcript consumers read session artifacts across
 harnesses. Every adapter under `adapters/transcripts/` consumes this
 contract.
 
-> **Historical note (2026-05-06):** `stop-novelty-check.py` is referenced
-> throughout this document as the largest transcript consumer (T56,
-> Phase 6). That script was retired on 2026-05-06 — it produced 5
-> captures lifetime across the multi-project store and zero in the
-> prior three months, classifying it as an inert heuristic-condition
-> hook (see `_meta/effectiveness-journal.jsonl` and
-> `conventions/heuristic-vs-definite-condition-hooks.md`). The
-> provider-API requirements documented below remain valid for the
-> remaining consumers (`extract-session-digest`,
-> `check-plan-persistence`) and for any
-> future transcript consumer; the call-site references to
-> `stop-novelty-check.py` are preserved for design lineage.
+> **Historical note (2026-05-26):** Two transcript consumers referenced
+> throughout this document have been retired:
+>
+> - `stop-novelty-check.py` (retired 2026-05-06) — produced 5 captures
+>   lifetime across the multi-project store and zero in the prior three
+>   months, classifying it as an inert heuristic-condition hook (see
+>   `_meta/effectiveness-journal.jsonl` and
+>   `conventions/heuristic-vs-definite-condition-hooks.md`).
+> - `check-plan-persistence.py` (retired 2026-05-26) — blocked Stop when
+>   ephemeral builtin plans were not persisted to `_work/`, but in
+>   practice produced ghost work items when plan mode was used for
+>   quick scratch planning. With it, the **T48 plan-persistence
+>   provider operation (`tool_use_timestamps`) and the
+>   `builtin_plan_mode_tool` capabilities key are also retired** — no
+>   live consumer remains. Provider modules and capabilities.json no
+>   longer carry these.
+>
+> The provider-API requirements documented below remain valid for the
+> remaining consumer (`extract-session-digest`) and for any future
+> transcript consumer; the call-site references to the retired scripts
+> and to `tool_use_timestamps` are preserved for design lineage only.
 
 > **Status:** Phase 5 contract — per-harness session artifact
 > enumeration (T46), digest field requirements (T47), plan-
-> persistence + TaskCompleted requirements (T48), and ceremony-
-> detection requirements (T49) are settled. Phase 6 — novelty-
-> review provider requirements (T56) — is also settled and reuses
-> the Phase 5 surface without new provider operations. Per-harness
-> provider implementations land in T50 (claude-code), T51 (opencode
-> + codex stubs), with consumer migrations T52-T53, T57. Until those
-> land, the only fully-wired transcript path is the legacy in-tree
-> `scripts/transcript.py` JSONL parser used by
-> `extract-session-digest.py`, `check-plan-persistence.py`,
-> and the retired `stop-novelty-check.py` —
-> which is hardcoded to Claude Code's transcript format and is the
-> baseline this provider abstraction supersedes.
+> persistence + TaskCompleted requirements (T48 — now historical, see
+> note above), and ceremony-detection requirements (T49) are settled.
+> Phase 6 — novelty-review provider requirements (T56) — is also
+> settled and reuses the Phase 5 surface without new provider
+> operations. Per-harness provider implementations land in T50
+> (claude-code), T51 (opencode + codex stubs), with consumer
+> migrations T52-T53, T57. Today the only fully-wired transcript path
+> is the legacy in-tree `scripts/transcript.py` JSONL parser used by
+> `extract-session-digest.py` (and previously by the retired
+> `stop-novelty-check.py` and `check-plan-persistence.py`) — which is
+> hardcoded to Claude Code's transcript format and is the baseline
+> this provider abstraction supersedes.
 
 ## Why this provider exists (D5)
 

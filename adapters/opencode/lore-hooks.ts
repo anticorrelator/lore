@@ -182,7 +182,7 @@ const HANDLER_SCRIPT: Record<LoreEvent, string | null> = {
   post_tool: null,                    // no handler today; reserved
   permission_request: null,           // no handler today; reserved
   pre_compact: "pre-compact.sh",
-  stop: "stop-novelty-check.py",      // chains to check-plan-persistence.py
+  stop: null,                         // no handler today; check-plan-persistence.py retired 2026-05-26
   session_end: "pre-compact.sh",      // matcher=clear semantics
   task_completed: "task-completed-capture-check.sh",
 };

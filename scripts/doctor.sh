@@ -283,7 +283,6 @@ EXPECTED_HOOK_COMMANDS=(
   "bash ~/.lore/scripts/load-threads.sh"
   "python3 ~/.lore/scripts/extract-session-digest.py"
   "bash ~/.lore/scripts/pre-compact.sh"
-  "python3 ~/.lore/scripts/check-plan-persistence.py"
   "bash ~/.lore/scripts/task-completed-capture-check.sh"
   "bash ~/.lore/scripts/guard-work-writes.sh"
 )

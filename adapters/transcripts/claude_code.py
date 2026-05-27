@@ -25,13 +25,6 @@ Design choices:
   `adapters/transcripts/__init__.py::_PROVIDER_MODULES` translates
   the hyphenated framework name to the underscored module name.
 
-- **No `tool_names` reads in T50.** The plan decision (notes.md
-  2026-05-04T07:55) places `builtin_plan_mode_tool` and
-  `slash_command_tool` under `frameworks.<fw>.tool_names` in
-  capabilities.json. Per the lead's T50 routing, the keys do NOT
-  exist yet — T53 and T54 add them. T50 therefore does not read
-  capabilities.json for tool names; the consumers (T53/T54) will.
-
 - **`previous_session_path` returns the file at index 1, not 0.**
   T47 observation: `find_previous_session_file` in
   `extract-session-digest.py` returns the *second*-most-recent
@@ -252,54 +245,6 @@ def session_metadata(path: str) -> dict:
     return {"session_id": session_id, "session_date": session_date}
 
 
-# ---------------------------------------------------------------------------
-# T48 plan-persistence extension
-# ---------------------------------------------------------------------------
-
-def tool_use_timestamps(path: str, tool_name: str) -> list[tuple[int, str]]:
-    """Return `[(message_index, timestamp_iso8601_str), ...]` for entries
-    whose `tool_use` blocks invoke `tool_name`, in transcript order.
-
-    Used by `check-plan-persistence.py` to find the *last* ExitPlanMode
-    invocation and its timestamp, which the consumer compares against
-    `_work/<slug>/{plan.md,_meta.json,notes.md}` mtimes to verify
-    persistence happened *after* plan mode.
-
-    Returns an empty list when `tool_name` is never invoked. The
-    consumer treats an empty list as "tool was not used in this
-    session" and exits without enforcement.
-    """
-    import json
-
-    out: list[tuple[int, str]] = []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                msg = entry.get("message", {})
-                content = msg.get("content", [])
-                if not isinstance(content, list):
-                    continue
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("name") != tool_name:
-                        continue
-                    ts = entry.get("timestamp", "")
-                    if ts:
-                        out.append((i, ts))
-                    break  # one match per entry is enough
-    except OSError:
-        return []
-    return out
-
-
 __all__ = [
     "parse_transcript",
     "extract_file_paths",
@@ -307,5 +252,4 @@ __all__ = [
     "provider_status",
     "read_raw_lines",
     "session_metadata",
-    "tool_use_timestamps",
 ]
