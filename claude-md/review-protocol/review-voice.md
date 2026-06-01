@@ -108,9 +108,9 @@ After:
 
 #### Body Construction
 
-**Lead with the path, not the code.** A posted comment is an input to the reader's triage — and the reader has *domain* context but not your *code-internal* context. The job is to translate from code facts (which you have) into the usage-level path (which they can map): *when* does this happen, and *what would they see*. Where one line carries the trigger and the manifestation, ship one line; escalate only when the path genuinely needs a second sentence. The full three-part body below is for the reviewer-facing findings list; the posted comment is its compression — but compression means dropping the *call-chain*, never dropping the *path*.
+**Lead with the path, not the code — and post one distilled line.** A posted comment is an input to the reader's triage — and the reader has *domain* context but not your *code-internal* context. The job is to translate from code facts (which you have) into the usage-level path (which they can map): *when* does this happen, and *what would they see* — and post that as a single scannable line. A reviewer fielding a dozen-plus findings, often across several reviewers, cannot hold a paragraph per finding in their head, so the posted comment is one line, not a re-oriented-but-still-long writeup. A second sentence is earned only by a soft fix-as-question, never by more explanation.
 
-A finding body has three parts: a path lead, an optional mechanism anchor, and an optional fix suggestion.
+The full three-part body below is the **reviewer-facing** finding — the cockpit, where the mechanism anchor, caveats, and lens attribution live. The posted comment is its distilled translation: keep the path, drop the call-chain and the caveats. A finding body has three parts: a path lead, an optional mechanism anchor, and an optional fix suggestion.
 
 **Path lead — open with when it happens and what you'd see.**
 
@@ -148,6 +148,22 @@ When a suggestion is warranted:
 - **Keep the scope open** — avoid language that commits the author to the smallest local patch if the finding could motivate a broader change.
 
 > Could `exp` presence be validated before signature verification, so the failure is an explicit rejection rather than a silent skip?
+
+---
+
+#### Anchored Deixis (Inline Comments)
+
+A posted inline comment is attached to a specific line, so every demonstrative — "this", "these", "here" — must resolve to something visible *on that line*. The reviewer-facing report has the whole finding in view; the author has only the anchored line plus the comment.
+
+This also reconciles deixis with the lead-in-usage-terms rule: a symbol that appears **on the commented line** is a legitimate anchor — naming it resolves the reference, it is not jargon. A symbol that lives **off-screen** (a function called elsewhere, a type defined in another file) is the mechanism that belongs in the cockpit, not the comment.
+
+When the issue spans several spots, anchor on the first occurrence and give a count the author can verify — "the other 9 occurrences" — never a vague plural that points off-screen.
+
+Before (points off-screen — the author cannot see "these cases"):
+> These eval cases still declare the removed `instanceIds` shape.
+
+After (anchored to the line; the count is verifiable):
+> This declares the removed `instanceIds` shape (9 other lines in this file do too) — the agent is handed an empty instance list at runtime.
 
 ---
 
@@ -196,3 +212,14 @@ The exception: direct questions to the author are natural and appropriate for qu
 | "maybe", "perhaps" (for observations) | reserve for genuine uncertainty about conditions, not observations |
 
 The asymmetry: hedge impact claims, not code observations. "This might be a problem" hedges the observation. "This is a nil dereference — if the nil case is reachable from user input, it panics" hedges the impact. The second is both more honest and more useful.
+
+---
+
+#### Rhetorical Padding
+
+State the fact and stop. These flourishes add length without adding information, and they read worse at the volume an author faces across a review:
+
+- **Validation flourishes** — "Good catch on X, but…", "Nicely structured, though…". The comment's job is the finding, not reassurance.
+- **Restating the author's point back as insight** — re-narrating what the diff already does before getting to the issue. The author wrote it; open with what they cannot see.
+
+The one to judge, not ban, is the **"X, not Y" closer**. When the contrast *is* the finding — "delete already resets the choice; rename doesn't" — it is the most compact way to state the asymmetry that makes this a bug; keep it. When it merely editorializes — "this is fragile, not robust" — it is padding; cut it. The test is whether the contrast carries the asymmetry being flagged or just decorates it.

@@ -12,9 +12,9 @@ Used by `/pr-self-review` Step 4. Build the `lens-findings.json` payload from th
       "title": "<finding title>",
       "file": "<relative path>",
       "line": <1-indexed, 0 for file-level>,
-      "body": "<finding body, may contain markdown>",
+      "body": "<reviewer-cockpit detail — full mechanism and caveats, may contain markdown>",
       "lens": "<lens id>",
-      "grounding": "<one-line material stake — observed fact + condition, no label prefix>",
+      "grounding": "<the distilled posted line: one usage-terms sentence — when it bites → what the author would observe, no code identifier in the lead, no label prefix (see findings-format.md → External Output Formatting)>",
       "selected": <true|false>
     }
   ]

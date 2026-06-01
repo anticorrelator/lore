@@ -204,7 +204,7 @@ The followup is the sole artifact this skill produces. Work-item creation is def
 
 ### Assemble lens-findings.json
 
-Build the `lens-findings.json` payload from the evaluated findings produced by Step 3 — read `skills/pr-self-review/templates/lens-findings-json.md` for the JSON payload shape.
+Build the `lens-findings.json` payload from the evaluated findings produced by Step 3 — read `skills/pr-self-review/templates/lens-findings-json.md` for the JSON payload shape. Two fields, two surfaces (per `findings-format.md` → External Output Formatting): `body` carries the reviewer-cockpit detail (mechanism, caveats — what Section 3 renders), while `grounding` carries the distilled posted line — one usage-terms sentence, no code identifier in the lead — which is what reaches the PR when the reviewer posts. Translate `grounding` from the finding; do not copy a trimmed `body` into it.
 
 **Selection contract:** The materiality gate (Step 3) owns `selected`. Set `selected: true` for every material `blocking` and `suggestion` finding. Set `selected: false` for `question` findings. Do not include immaterial or missing-stake findings — they are dropped to the `minor` tally during the gate.
 

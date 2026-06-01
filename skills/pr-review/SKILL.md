@@ -407,19 +407,28 @@ This step is mandatory and must not be skipped. It has two parts:
 
 The test is decision-theoretic, not descriptive: not "can a scenario be described?" (one always can) but "would the author change the code — or want to verify something — because of this?" A finding that survives only as a describable-but-inert scenario is not material.
 
-**6d-ii. Neutralize bodies for external output.** Posted comments are curated and neutral. Strip two things from every finding body:
-- **Internal scaffolding** — `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, compound markers. The stake *content* (the conditional fact) survives; the labels do not.
-- **Criticality** — no severity word and no verdict ("blocking", "critical", "must fix") crosses to the author. The conditional stake already delegates the criticality call to the reader.
+**6d-ii. Produce two variants — the cockpit finding and its distilled translation.** These are different artifacts, not one body lightly edited. The posted comment is written *from the lens finding*, not copied from it.
 
-The author should see: trigger (in usage terms) → what they would observe → optional soft fix (a question or light suggestion, never a confident prescription). Default to one line. *(Per-comment criticality opt-in — letting the reviewer re-add a criticality lead to a specific comment — is a Phase-2 TUI affordance; until it lands, posted comments are uniformly neutral.)*
+- **Reviewer-cockpit variant** (Section 3, under `#### N. <title>`, grouped by severity tier): the full finding. The mechanism anchor, call-chains, lens attribution, "not a regression" caveats, and the severity tier all live here. This is never posted — it is your triage view in the TUI.
+
+- **Posted-comment variant** (the `body` Step 6f emits to `proposed-comments.json`): a **distilled translation** of the finding into one human-scannable line, written from the reader's vantage. Translate the code facts you hold into the usage-level path the reader can map — *when* the issue bites and *what the author would observe* — then stop. Strip everything the cockpit already keeps:
+  - **Internal scaffolding** — `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, compound markers.
+  - **Criticality** — no severity word, no verdict ("blocking", "critical", "must fix"). The conditional stake already delegates the criticality call to the reader.
+  - **Mechanism** — function names, call-chains, type names. A symbol survives only if the comment is unintelligible without it, and never in the lead sentence.
+
+  One sentence is the target — a human triaging a dozen-plus findings across several review passes cannot hold a paragraph per finding. A second sentence is earned only by a soft fix-as-question, never by more explanation. This is the production bar that prompt guidance alone has missed: do not let the lens's mechanism-first prose flow through unchanged. And mind the anchor — an inline comment's "this/these/here" must resolve to something on the commented line; for a multi-spot issue, anchor on the first and give a verifiable count ("9 other lines in this file"), never a vague plural (see `review-voice.md` → Anchored Deixis).
+
+  If a finding genuinely can't compress this far without losing the path, it stays **cockpit-only** — keep it in Section 3 and omit it from `proposed-comments.json`. A material finding can be reviewer-facing without being posted; that is cleaner than shipping a paragraph inline.
+
+  *Translate, don't copy* — the failure mode is shipping the cockpit prose verbatim:
+
+  > **Bad (copied from cockpit — mechanism-led, do not post):** `applyModelNameDefaults` prefixes the name via `applyBedrockModelPrefix` when `provider === "AWS"`; no test sets `awsBedrockModelPrefix`, so if the `startsWith` idempotency guard regresses the agent sets an invalid model ID and `run_playground` fails.
+
+  > **Good (distilled translation — post this):** **AWS Bedrock model-switch is untested.** For an AWS user with a Bedrock prefix configured, a regression here would set an invalid model and the next run fails at launch. Add a happy-path AWS case?
+
+  *(Per-comment criticality opt-in — letting the reviewer re-add a criticality lead to a specific comment — is a Phase-2 TUI affordance; until it lands, posted comments are uniformly neutral.)*
 
 **Voice:** hedge the inference, not the code fact — state what the code does, hedge what follows from it; impersonal, no overstatement, fixes only when non-obvious and framed as a question. Full guide: `~/.lore/claude-md/review-protocol/review-voice.md`.
-
-Produce two variants. The landed comment is built from the path line, not the cockpit prose:
-- **Section 3 variant** (reviewer cockpit, under `#### N. <title>`): the fuller prose — mechanism anchor and extra detail live here. No bolded title; the `####` heading carries it.
-- **Comment-body variant** (what lands on the PR; the `body` Step 6f emits): `**<title>**`, the `**Grounding:**` path line, and at most one soft-fix question. That's the whole comment — call-chains and "not a regression" caveats stay in Section 3.
-
-  > **Renaming a forced-choice tool breaks the next run.** If the agent renames the tool that's the required choice, the next run is rejected by the provider for forcing a tool that no longer exists. Reset on rename like delete already does?
 
 ### 6e. Assemble the full report body
 
@@ -435,7 +444,7 @@ Assemble the `--content` value with **all** of the following sections. Every sec
 
 **Section 3 — Review Findings:**
 
-Include the full finding details from Step 5b with internal protocol headers stripped per Step 6d-ii, rendered as a **neutral, importance-ordered list — no tier headers, no severity counts, no verdict line** (the verdict and counts from Step 5a are reviewer-facing only; see `findings-format.md` → External Output Formatting → author-facing surfaces). Severity drives ordering, not grouping. The report is an author-facing artifact. If ceremony lenses produced non-conforming output (Step 5b-supplementary), append the Supplementary Reports block after the structured findings. Supplementary reports are presentation-only — they do **not** generate review code blocks in Section 4 or entries in `proposed-comments.json`. Read `skills/pr-review/templates/review-findings-section.md` for the Section 3 markdown template.
+Render the **reviewer-cockpit variant** of each finding from Step 6d-ii (full mechanism and caveats kept; internal protocol labels stripped for readability). This report is **reviewer-facing** — it lives in your knowledge store and is read in the TUI to triage; it is never posted (only the curated comments in Section 4 reach the PR). So it **retains** the severity grouping, counts, and verdict line, using the same reviewer-facing labels as Step 5a (see `findings-format.md` → External Output Formatting → reviewer-facing surfaces). If ceremony lenses produced non-conforming output (Step 5b-supplementary), append the Supplementary Reports block after the structured findings. Supplementary reports are presentation-only — they do **not** generate review code blocks in Section 4 or entries in `proposed-comments.json`. Read `skills/pr-review/templates/review-findings-section.md` for the Section 3 markdown template.
 
 **Section 4 — Proposed Comments:**
 
@@ -455,7 +464,7 @@ line: <N>
 
 Proposed comments are a **curated subset** — the posted artifact, not a projection of the Review Findings list. They need not be 1:1 with the Section 3 findings: immaterial findings (the `minor (N)` tally) are never posted, and where it reads better, several findings may collapse into one comment. Only material findings with both `file` and `line` become proposed comments.
 
-Build the array by walking the proposed comments in severity-group order (`blocking` → `suggestion` → `question`). Within each group, number them with a fresh 1-based `finding_ordinal` over the proposed comments themselves — this counter is the comment's own identity, **not** tied to any Section 3 `#### N.` position (the two are allowed to diverge). For each proposed comment, emit `{"path": "<file>", "line": <line>, "body": "<finding body>", "title": "<finding title>", "finding_ordinal": <N>}`. Bodies must be neutralized per Step 6d-ii — internal scaffolding **and** criticality stripped, stake content preserved, default to one line.
+Build the array by walking the proposed comments in severity-group order (`blocking` → `suggestion` → `question`). Within each group, number them with a fresh 1-based `finding_ordinal` over the proposed comments themselves — this counter is the comment's own identity, **not** tied to any Section 3 `#### N.` position (the two are allowed to diverge). For each proposed comment, emit `{"path": "<file>", "line": <line>, "body": "<finding body>", "title": "<finding title>", "finding_ordinal": <N>}`. Each `body` must be the **posted-comment variant** from Step 6d-ii — a distilled usage-terms translation, one line, with internal scaffolding, criticality, **and** mechanism stripped; not a copy of the Section 3 cockpit prose.
 
 Pass the **complete report body from 6e** as `--content`:
 
