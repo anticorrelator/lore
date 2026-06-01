@@ -435,7 +435,7 @@ Assemble the `--content` value with **all** of the following sections. Every sec
 
 **Section 3 — Review Findings:**
 
-Include the full finding details from Step 5b with internal protocol headers stripped per Step 6d-ii. The report is an author-facing artifact. If ceremony lenses produced non-conforming output (Step 5b-supplementary), append the Supplementary Reports block after the structured findings. Supplementary reports are presentation-only — they do **not** generate review code blocks in Section 4 or entries in `proposed-comments.json`. Read `skills/pr-review/templates/review-findings-section.md` for the Section 3 markdown template.
+Include the full finding details from Step 5b with internal protocol headers stripped per Step 6d-ii, rendered as a **neutral, importance-ordered list — no tier headers, no severity counts, no verdict line** (the verdict and counts from Step 5a are reviewer-facing only; see `findings-format.md` → External Output Formatting → author-facing surfaces). Severity drives ordering, not grouping. The report is an author-facing artifact. If ceremony lenses produced non-conforming output (Step 5b-supplementary), append the Supplementary Reports block after the structured findings. Supplementary reports are presentation-only — they do **not** generate review code blocks in Section 4 or entries in `proposed-comments.json`. Read `skills/pr-review/templates/review-findings-section.md` for the Section 3 markdown template.
 
 **Section 4 — Proposed Comments:**
 

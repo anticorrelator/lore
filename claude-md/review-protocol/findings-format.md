@@ -60,9 +60,11 @@ The result is an input to the reader's triage, not a directive: trigger (in usag
 
 **Uncertain framing — hedge the inference, not the observed code fact.** See `review-voice.md` for the full voice guide including uncertain framing patterns, verification urgency by severity, sentence structure, and vocabulary guidance.
 
-**User-facing vocabulary mapping:**
+**Two output surfaces — do not conflate them.** Severity is a *reviewer-facing* triage axis (see the Severity Classification section); the wall has a reviewer side and an author side, and the tier grouping crosses to one but not the other.
 
-| Internal value | User-facing equivalent |
+*Reviewer-facing surfaces* — the in-process by-severity view (`/pr-review` Step 5a/5b) and the followup sidecar / TUI triage (`/pr-self-review`). These **retain** severity grouping, counts, and the verdict line; that grouping is the reviewer's own triage aid and is never posted to the PR. Render tiers with these softened labels:
+
+| Internal value | Reviewer-facing label |
 |----------------|------------------------|
 | `blocking` findings | `Findings requiring action` |
 | `suggestion` findings | `Improvement opportunities` |
@@ -71,7 +73,9 @@ The result is an input to the reader's triage, not a directive: trigger (in usag
 | Verdict: suggestions only | `SUGGESTIONS` |
 | Verdict: clean | `CLEAN` |
 
-Internal severity values remain in JSON and sidecar files for routing. User-visible output (section headers, verdict lines, finding descriptions) uses the user-facing equivalents above.
+*Author-facing surfaces* — posted comments **and** the Section 3 report framed for the author. These carry **no tier grouping, no severity counts, and no verdict line**. Present the curated findings as a single neutral list in the reviewer's importance order: the order carries the priority, and each finding stands on its conditional stake, which already hands the criticality call to the reader. Grouping the author's view by tier (or leading with a verdict) re-imposes exactly the criticality the conditional stake was designed to delegate — the failure this rule exists to prevent.
+
+Internal severity values remain in JSON and sidecar files for routing regardless of surface.
 
 #### Review Code Block Format
 
