@@ -108,29 +108,29 @@ After:
 
 #### Body Construction
 
-**Default to one line.** A posted comment is an input to the reader's triage, not an essay — they have context the reviewer lacks, so the job is to point precisely and stop. Where one line carries the observed fact and its conditional stake, ship one line. Escalate to a second sentence only when the condition genuinely cannot be conveyed without it. The full three-part body below is for the reviewer-facing findings list; the posted comment is its compression.
+**Lead with the path, not the code.** A posted comment is an input to the reader's triage — and the reader has *domain* context but not your *code-internal* context. The job is to translate from code facts (which you have) into the usage-level path (which they can map): *when* does this happen, and *what would they see*. Where one line carries the trigger and the manifestation, ship one line; escalate only when the path genuinely needs a second sentence. The full three-part body below is for the reviewer-facing findings list; the posted comment is its compression — but compression means dropping the *call-chain*, never dropping the *path*.
 
-A finding body has three parts: an impact lead, evidence, and an optional fix suggestion.
+A finding body has three parts: a path lead, an optional mechanism anchor, and an optional fix suggestion.
 
-**Impact lead — open with the observable consequence.**
+**Path lead — open with when it happens and what you'd see.**
 
-The first sentence establishes why the finding matters. It names the failure scenario or the cost, not the code location. When a finding is produced via pr-review, the bolded title prefix (prepended by the review step) serves as the impact lead — the body then opens directly with evidence. When authoring findings manually, lead with the consequence.
+The first sentence establishes the trigger (in usage terms) and the observable symptom — not the code location, and not an internal call chain. When a finding is produced via pr-review, the bolded title prefix carries the headline; the body then opens with the path. A reviewer who has never seen the code should be able to read the lead and judge whether the trigger is realistic and the outcome a problem.
 
-Before (opens with location, buries impact):
-> In `verifyToken()`, the `exp` field is not validated.
+Before (code-state — unsituatable, can't be judged):
+> `toolChoice` may be left pointing at a removed tool name.
 
-After (opens with consequence):
-> Any token without an `exp` claim authenticates indefinitely — the expiry check is only reached when the field is present.
+After (path — a reviewer can judge it):
+> If the agent renames a tool that's set as the prompt's required choice, the next run is rejected by the provider for forcing a tool that no longer exists — and the write gave no warning.
 
-**Evidence — name the specific mechanism the author can check.**
+**Mechanism anchor — optional, secondary, for the author who wants to verify.**
 
-Evidence is a short prose statement pointing to the code that makes the claim verifiable. It describes what the diff shows: a function, a path, a missing check. The author can confirm it directly against the diff without running the code.
+The code mechanism (function, path, missing check) is a short trailing anchor that lets the *author* confirm the claim against the diff — it is not the substance and never leads. Keep it to a clause, and never let it replace the usage-level path: a comment that is *only* mechanism ("the reset fires only on the delete path") leaves an unfamiliar reviewer unable to situate the problem.
 
-Before (asserts the impact without grounding it):
-> Token expiry is not enforced, which is a security issue.
+Before (mechanism stands in for the path):
+> The `exp` claim is not validated in `verifyToken()` — the check at line 34 is only reached when `exp` is present.
 
-After (names the mechanism):
-> The `exp` claim is not validated in `verifyToken()` — the check at line 34 is only reached when `exp` is present, so absent-field tokens skip expiry entirely.
+After (path leads; mechanism anchors):
+> Any externally-issued token that omits `exp` authenticates indefinitely. (The expiry check in `verifyToken()` is only reached when the field is present.)
 
 **Fix suggestion — include only when the fix is non-obvious, and keep it secondary.**
 

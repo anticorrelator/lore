@@ -219,11 +219,13 @@ Produce findings JSON conforming to the Findings Output Format:
 - Severity: blocking / suggestion / question (default to suggestion when uncertain)
 - Each finding: severity, title, file, line, body, knowledge_context
 
-Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line stating the **material stake** in one line — the observed code fact plus the condition under which it matters. Write it as it should read to the author: short, conditional, no severity verdict.
-- blocking: `**Grounding:** <observed code fact> — <what fails> if <condition>.`
-- suggestion: `**Grounding:** <observed code fact> — <concrete cost felt in normal maintenance or use>.`
+Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line stating the **path to manifestation**, written for a reviewer who has never seen this code:
+- *Trigger* — what someone *does*, in product/usage terms, to reach this ("if the agent renames the forced-choice tool"), NOT a code path ("the update branch calls `patchDefinition`").
+- *Manifestation* — what they would *observe* ("the next run is rejected by the provider, with no warning at write time").
+- blocking shape: `**Grounding:** <trigger, in usage terms> → <what the reviewer would observe>.`
+- suggestion shape: `**Grounding:** <when this is felt in ordinary use or maintenance> → <what it costs the person who hits it>.`
 
-Do not pad the stake into a mechanism→consequence essay; when the impact is self-evident from the fact, the one line is enough. Findings without a `**Grounding:**` line — and findings whose stake does not clear the Materiality Gate in `severity.md` — are dropped during synthesis. They are **not** rewritten to sound material.
+Tracing the trigger is **also how you decide whether to raise the finding at all**: if the realistic trigger is contrived, or the outcome is an inherent/expected consequence of a deliberate action with nothing the code could reasonably do, drop it — do not surface it. Code mechanism (function names, call chains) is an optional trailing anchor for the author, never the substance. Never write a bare code-state with no trigger ("`X` may be orphaned") — a reviewer cannot situate or judge it. Findings without a `**Grounding:**` line, and findings whose stake a reviewer unfamiliar with the code could not situate, are dropped during synthesis. They are **not** rewritten to sound material.
 
 Query the knowledge store for each finding:
 ```bash
@@ -411,7 +413,7 @@ The test is decision-theoretic, not descriptive: not "can a scenario be describe
 - **Internal scaffolding** — `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, compound markers. The stake *content* (the conditional fact) survives; the labels do not.
 - **Criticality** — no severity word and no verdict ("blocking", "critical", "must fix") crosses to the author. The conditional stake already delegates the criticality call to the reader.
 
-The author should see: observed fact → conditional stake → optional soft fix (a question or light suggestion, never a confident prescription). Default to one line. *(Per-comment criticality opt-in — letting the reviewer re-add a criticality lead to a specific comment — is a Phase-2 TUI affordance; until it lands, posted comments are uniformly neutral.)*
+The author should see: trigger (in usage terms) → what they would observe → optional soft fix (a question or light suggestion, never a confident prescription). Default to one line. *(Per-comment criticality opt-in — letting the reviewer re-add a criticality lead to a specific comment — is a Phase-2 TUI affordance; until it lands, posted comments are uniformly neutral.)*
 
 **Voice — hedge the inference, not the observed code fact.** Reviewers cannot know the full system context; every external body should read as a grounded hypothesis, not a verdict.
 
