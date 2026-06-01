@@ -419,7 +419,7 @@ The author should see: observed fact → conditional stake → optional soft fix
 - **Hedge impact claims with an explicit condition.** Weak: "This will crash the server." Strong: "`session.user` is dereferenced without a nil check — if this handler is reachable before auth completes, it panics."
 - **Lead with the observation**, not the hedge. Code fact first, uncertainty qualifier second.
 - **Use impersonal constructions.** "The handler dereferences…", not "You forgot to check…".
-- **Fix suggestions are secondary.** Default to surfacing the issue and stopping. When a fix is included (non-obvious only), place it **after** impact and evidence, frame it as one option ("One approach: …"), and keep the scope open so the finding can motivate a broader redesign if appropriate. Never lead a comment body with a fix.
+- **Fix suggestions are secondary.** Default to surfacing the issue and stopping. When a fix is included (non-obvious only), place it **after** impact and evidence, frame it **softly — as a question or light suggestion, not a confident prescription** ("Worth …?", "Could … here?"), and keep the scope open so the finding can motivate a broader redesign if appropriate. Never lead a comment body with a fix.
 - **Avoid overstated vocabulary** ("this will crash" / "this is wrong" / "this is a bug" / "definitely") — name the condition instead. **Avoid hollow hedges on observations** ("seems like" / "might be" / "I think" / "could potentially") — state the code fact; hedge the *impact*, not the observation.
 
 Full voice guide (optional deeper reference): `~/.lore/claude-md/review-protocol/review-voice.md`.
