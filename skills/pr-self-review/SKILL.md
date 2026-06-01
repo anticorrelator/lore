@@ -1,13 +1,13 @@
 ---
 name: pr-self-review
-description: "Author-calibrated self-review: parallel lens pre-scan (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) then grounding evaluation, persisting findings into a followup sidecar for TUI triage"
+description: "Author-calibrated self-review: parallel lens pre-scan (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) then a materiality gate, persisting findings into a followup sidecar for TUI triage"
 user_invocable: true
 argument_description: "[PR_number_or_URL] [--skip-pre-scan] [focus context] — PR to self-review (or auto-detect from branch). --skip-pre-scan skips the lens team and uses heuristic findings instead. Optional focus context steers finding priority (e.g., '42 focus on error handling')"
 ---
 
 # /pr-self-review Skill
 
-Author-calibrated self-review combining structured lens analysis with grounding evaluation. A parallel lens team (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) runs a pre-scan, then findings are evaluated for grounding quality and persisted as a followup sidecar (`lens-findings.json`) for interactive TUI triage.
+Author-calibrated self-review combining structured lens analysis with a materiality gate. A parallel lens team (Blast Radius, Security, Test Quality, Correctness, Regressions, Interface Clarity, User Impact) runs a pre-scan, then findings are run through the materiality gate and persisted as a followup sidecar (`lens-findings.json`) for interactive TUI triage.
 
 ## Resolve Template Version
 
@@ -148,7 +148,7 @@ Ceremony lens results are collected alongside built-in lens results in Step 2c. 
 
 Collect findings from lens agents as they complete. If a lens agent fails or times out, proceed with available findings and note the coverage gap.
 
-**Ceremony lens two-tier classification:** Apply the four-bullet classification rubric (Conforming / Non-conforming / Malformed JSON / Failure-timeout) from `skills/pr-review/SKILL.md` Step 3d to each ceremony lens result. Self-review variant: Conforming findings enter the synthesis pipeline below *and* the Step 3 grounding evaluation; Non-conforming output is presented in the followup summary (Step 4), not in a separate Supplementary Reports section yet.
+**Ceremony lens two-tier classification:** Apply the four-bullet classification rubric (Conforming / Non-conforming / Malformed JSON / Failure-timeout) from `skills/pr-review/SKILL.md` Step 3d to each ceremony lens result. Self-review variant: Conforming findings enter the synthesis pipeline below *and* the Step 3 materiality gate; Non-conforming output is presented in the followup summary (Step 4), not in a separate Supplementary Reports section yet.
 
 Clean up the temp diff file:
 ```bash
@@ -157,7 +157,7 @@ rm -f /tmp/pr-self-review-<PR_NUMBER>.diff
 
 **Compound findings:** Apply the compound-finding detection rule from `skills/pr-review/SKILL.md` Step 4a — group by `file`; findings from different lenses within 3 lines of each other form a compound finding; apply severity elevation and merge.
 
-**Grounding check:** For each `blocking` or `suggestion` finding, verify it has a `**Grounding:**` line. Ungrounded blocking → downgrade to suggestion. Ungrounded suggestion → drop.
+**Stake check:** For each `blocking` or `suggestion` finding, verify it has a `**Grounding:**` line stating a one-line material stake (observed fact + condition). A finding missing the line is dropped to the `minor` tally — the materiality gate (Step 3) makes the keep/drop call; this is only a presence check.
 
 **Deduplicate:** Apply the deduplication rule from `skills/pr-review/SKILL.md` Step 4c — same file, overlapping line, same severity, same concern, keep the more detailed body; do NOT deduplicate different concerns at the same location.
 
@@ -166,28 +166,28 @@ Display summary:
 [pr-self-review] Lens scan complete: <N> findings (<K> blocking, <J> suggestions, <Q> questions) across <L> lenses
 ```
 
-## Step 3: Grounding Evaluation
+## Step 3: Materiality Gate
 
-Load the grounding rubric:
+Load the gate:
 ```bash
 cat ~/.lore/claude-md/review-protocol/severity.md
 ```
 
-### 3a. Evaluate grounding for all findings
+### 3a. Run all findings through the materiality gate
 
 Spawn one agent with:
 - The PR's stated intent (title, body, and commit messages from Step 1b)
 - All lens findings with their `**Grounding:**` lines from Step 2c
-- The Sound/Weak/Unsound rubric from `severity.md`
+- The Materiality Gate from `severity.md`
 
-Agent task: read `skills/pr-self-review/templates/grounding-eval-prompt.md` for the verbatim prompt scaffold. The template embeds the role-assignment opener "You are a grounding evaluation agent" and the full Sound/Weak/Unsound rubric application (the same rubric application is canonical at `skills/pr-review/SKILL.md` Step 4b).
+Agent task: read `skills/pr-self-review/templates/grounding-eval-prompt.md` for the verbatim prompt scaffold. The template embeds the role-assignment opener "You are a materiality gate agent" and the full gate application (the same application is canonical at `skills/pr-review/SKILL.md` Step 4b). The gate drops or routes; it never rewrites a finding to sound material.
 
 ### 3b. Present evaluation summary
 
 Display the summary (no confirmation gate — proceed immediately to Step 4):
 
 ```
-[pr-self-review] Grounding evaluation complete: <N> findings retained (<K> blocking, <J> suggestions, <Q> questions), <D> dropped (unsound/missing grounding)
+[pr-self-review] Materiality gate complete: <N> findings retained (<K> blocking, <J> suggestions, <Q> questions), <D> dropped to minor (immaterial/missing stake)
 → Selected for TUI triage: <S> findings
 ```
 
@@ -206,9 +206,9 @@ The followup is the sole artifact this skill produces. Work-item creation is def
 
 Build the `lens-findings.json` payload from the evaluated findings produced by Step 3 — read `skills/pr-self-review/templates/lens-findings-json.md` for the JSON payload shape.
 
-**Selection contract:** The grounding evaluation step (Step 3) owns `selected`. Set `selected: true` for every finding with sound or rewritten-weak grounding (`blocking` and `suggestion`). Set `selected: false` for `question` findings. Do not include findings with unsound or missing grounding — they are dropped during evaluation.
+**Selection contract:** The materiality gate (Step 3) owns `selected`. Set `selected: true` for every material `blocking` and `suggestion` finding. Set `selected: false` for `question` findings. Do not include immaterial or missing-stake findings — they are dropped to the `minor` tally during the gate.
 
-Include only findings that survived grounding evaluation. If `--skip-pre-scan` was set and no findings were generated, use an empty findings array `[]`.
+Include only findings that survived the materiality gate. If `--skip-pre-scan` was set and no findings were generated, use an empty findings array `[]`.
 
 `work_item` is always `""` at this stage — it gets populated by the TUI when the user promotes the followup.
 
@@ -249,7 +249,7 @@ Build an ASCII logical flow diagram showing how the PR's changes work mechanical
 
 **Section 3 — Review Findings:**
 
-Include the full finding details, stripped of internal protocol headers per the pr-review Step 6d-ii pattern: remove `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, and compound markers from finding bodies. Weave grounding content (the concrete scenario/consequence) into the body text without the protocol label.
+Include the full finding details with internal scaffolding labels stripped for readability (the label-stripping part of pr-review Step 6d-ii): remove `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, and compound markers from finding bodies; weave the stake content (the conditional fact) into the body text without the label. This followup is **reviewer-facing** (the author's own triage in the TUI; it does not auto-post to the PR), so — unlike posted comments — it **retains** the severity grouping and verdict below. The criticality-stripping in 6d-ii applies only when comments are posted.
 
 Findings are grouped by severity with user-facing labels (blocking → "Findings requiring action", suggestion → "Improvement opportunities", question → "Questions"). Empty severity groups render `None.` — do not omit the subheading. If zero findings overall, still emit `## Review Findings` with an explicit no-findings statement.
 
@@ -302,7 +302,7 @@ A table summarizing all retained findings with their selection state. Self-revie
 ...
 ```
 
-Include all retained findings (those that survived grounding evaluation). If zero findings, emit `## Findings Summary` with `None.` as the body rather than omitting the section.
+Include all retained findings (those that survived the materiality gate). If zero findings, emit `## Findings Summary` with `None.` as the body rather than omitting the section.
 
 ### Create followup
 
@@ -351,7 +351,7 @@ Variants:
 **Gate:** Do not execute this step until the followup has been created (`create-followup.sh` returned successfully).
 
 ```
-/remember Self-review of PR #<N> (lens scan + grounding evaluation) — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered or clarified (why the architecture is this way, what constraints drove decisions), convention drift patterns found by lenses, cross-boundary invariants identified (especially from Blast Radius). Use confidence: medium. Skip: obvious fixes, style issues, findings specific to this PR that don't generalize. For every `lore capture` call, pass `--producer-role pr-self-review --protocol-slot Synthesis --work-item <slug> --template-version $SELF_REVIEW_TEMPLATE_VERSION` (when a work item matches the PR).
+/remember Self-review of PR #<N> (lens scan + materiality gate) — capture: mechanism-level patterns (how the system accomplishes things structurally), structural footprint observations (component roles, integration points, what constrains changes), design rationale discovered or clarified (why the architecture is this way, what constraints drove decisions), convention drift patterns found by lenses, cross-boundary invariants identified (especially from Blast Radius). Use confidence: medium. Skip: obvious fixes, style issues, findings specific to this PR that don't generalize. For every `lore capture` call, pass `--producer-role pr-self-review --protocol-slot Synthesis --work-item <slug> --template-version $SELF_REVIEW_TEMPLATE_VERSION` (when a work item matches the PR).
 ```
 
 This step is automatic — do not ask whether to run it.

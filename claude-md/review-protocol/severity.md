@@ -4,9 +4,11 @@ Every review finding MUST be assigned exactly one severity level. These definiti
 
 #### Levels
 
-- **blocking** — The PR must not merge with this issue unresolved. Use for: correctness bugs, security vulnerabilities, data loss risks, broken invariants, API contract violations. The bar is "this will cause a defect or incident if shipped." **Required grounding:** state the concrete failure scenario — what breaks, for whom, and under what conditions — then land on the observable human or operational consequence. A blocking finding that stops at the technical mechanism ("nil dereference panics") without stating the downstream impact ("users see a 500 and lose their in-progress work") is incomplete and must be rewritten.
-- **suggestion** — The PR should address this but it is not a merge blocker. Use for: design improvements, convention violations, missing edge case handling, suboptimal patterns, maintainability concerns. The bar is "the code works but could be meaningfully better." **Required grounding:** state the specific improvement, who benefits, and the concrete situation where that benefit is felt. A suggestion that names an abstract quality ("reduces cognitive load") without a scenario where a real person encounters the problem ("the next engineer debugging a retry failure has to trace three identical copies") is a vague preference, not a review finding.
-- **question** — The reviewer cannot assess correctness without additional information from the author. Use for: unclear intent, ambiguous behavior, missing context on why an approach was chosen. The bar is "I need to understand this before I can evaluate it." No grounding required beyond the question itself.
+- **blocking** — The PR must not merge with this issue unresolved. Use for: correctness bugs, security vulnerabilities, data loss risks, broken invariants, API contract violations. The bar is "this will cause a defect or incident if shipped." **Stake:** name the observed code fact and the *condition* under which it fails — `X happens if Y`. The conditional is deliberate: the reviewer often cannot know whether `Y` holds, so stating it as a condition hands the block/no-block call to the reader, who has the context the reviewer lacks. Do not assert "this blocks"; state the fact and the condition and let the reader weigh it.
+- **suggestion** — The PR should address this but it is not a merge blocker. Use for: design improvements, convention violations, missing edge case handling, suboptimal patterns, maintainability concerns. The bar is "the code works but could be meaningfully better." **Stake:** name what is observed and the concrete situation in which the cost is actually felt. If that cost only appears in a contrived scenario, or the change is a matter of taste, the finding is immaterial — drop it (see the Materiality Gate); do not dress it up as impact.
+- **question** — The reviewer cannot assess correctness without additional information from the author. Use for: unclear intent, ambiguous behavior, missing context on why an approach was chosen. The bar is "I need context the diff does not give me before I can evaluate this." A question is the honest route when a finding turns on something the reviewer cannot see. No stake line required beyond the question itself.
+
+**Severity is a reviewer-facing axis.** It orders the reviewer's own triage and signals how urgently *they* should verify — it is not a label the PR author sees. Posted comments carry no severity word by default; the conditional stake delegates the criticality call to the reader. See `findings-format.md` → External Output Formatting for what crosses the wall, and `review-voice.md` for how the stake is phrased.
 
 #### Classification rules
 
@@ -14,43 +16,28 @@ Every review finding MUST be assigned exactly one severity level. These definiti
 2. **Questions are not soft suggestions.** A question means the reviewer genuinely does not know the answer. If you know the answer and think the code should change, that is a suggestion or blocking finding, not a question.
 3. **Severity is independent of effort.** A one-line fix can be blocking (security). A large refactor can be a suggestion (design improvement). Classify by impact, not by size of the required change.
 
-#### Grounding Quality Rubric
+#### Materiality Gate
 
-Evaluate each finding's `**Grounding:**` line against this rubric before finalizing severity. Three outcomes:
+Run every `blocking` and `suggestion` finding through the materiality gate before finalizing. This is a judgment about **magnitude**, not about whether the stake is well-written. The two are independent: a finding can have a perfectly articulated consequence and still not be worth the author's attention. The gate exists because *any* finding's impact can be written up as a complete cause-and-effect chain — so "I can describe a scenario where this matters" cannot be the bar. The bar is whether it matters.
 
-- **Sound** — grounding is concrete and proportionate. The finding can be acted on as written.
-- **Weak** — grounding exists but lacks specificity. Rewrite with a concrete scenario before reporting.
-- **Unsound** — no realistic failure scenario or benefit exists. Downgrade severity or drop the finding.
+**The test:** *Would the author plausibly change the code — or want to verify something — because of this?* Answer from the author's seat, not the reviewer's. If the honest answer is "only in a scenario that can't actually occur here" or "it's a matter of taste," the finding is below the bar.
 
-**Blocking findings:**
+Three outcomes:
 
-| Outcome | Criteria |
-|---------|----------|
-| Sound | Names the technical mechanism AND the downstream human/operational consequence — the chain from code state to observable impact is complete |
-| Weak | Names the technical mechanism but stops there — the reader knows *what breaks* but not *why it matters*. Also weak: names a concern but omits who is affected or when it triggers |
-| Unsound | No realistic failure scenario — theoretical risk only, or finding is a style preference |
+- **Material** — keep it; it becomes a candidate posted comment. For blocking: a *realistic, reachable* path produces the failure. For suggestion: the cost is felt in normal maintenance or use, not only in a contrived case.
+- **Immaterial** — **drop it.** The failure path is contrived or unreachable, or the improvement is taste with no concrete cost. Do **not** rewrite it into something that sounds material — that manufactures impact and inflates the comment. Immaterial findings collapse into a `minor (N)` count in the reviewer view; they are never posted.
+- **Question** — the concern turns on context the reviewer cannot see (intent, reachability, an upstream guarantee). Route it to a `question` rather than asserting a defect or dropping it. This is the honest move when the reviewer lacks the context to judge.
 
-Examples:
-- Sound: "If `session.user` is nil when the route is called without authentication, the nil dereference panics and crashes the server — any user hitting `/api/admin` while unauthenticated sees a 500 error and loses their in-progress request."
-- Weak (mechanism only): "If `session.user` is nil when the route is called without authentication, the nil dereference panics and crashes the server." (stops at the technical failure — missing: what the user experiences, what operational consequence follows)
-- Weak (vague): "This could cause a nil pointer dereference in some cases." (missing: which cases, what request path, who hits it, what they experience)
-- Unsound: "Nil dereferences are bad practice." (no scenario where this code actually crashes)
+**The gate drops or routes; it never pads.** A finding clears the bar as written, or it doesn't. (This replaces the former rule that rewrote weak grounding into a fuller chain — that rule dressed minutiae in impact prose and was the main source of verbose, reasoning-like comments.)
 
-**Suggestion findings:**
+Examples — blocking:
+- Material: "`session.user` is dereferenced without a nil check — panics if this route is reachable before auth completes." (the reader judges reachability and decides whether it blocks)
+- Question: "`session.user` is dereferenced without a nil check — is a non-nil `user` guaranteed on this path by the middleware chain?" (reviewer can't see the middleware; asking is honest)
+- Immaterial → drop: "Nil dereferences are bad practice." (no reachable path shown — taste dressed as risk)
 
-| Outcome | Criteria |
-|---------|----------|
-| Sound | Names the specific improvement, who benefits, and a concrete situation where a real person encounters the problem or feels the benefit |
-| Weak | Names an abstract quality improvement ("reduces cognitive load", "improves readability") without a scenario where someone actually encounters the friction |
-| Unsound | Subjective preference with no concrete benefit to maintainers, callers, or future readers |
-
-Examples:
-- Sound: "The retry loop appears identically in three callsites. The next engineer debugging a retry failure has to trace all three to find the failing one — extracting into `withRetry()` makes the failing callsite immediately identifiable in stack traces and reduces test setup from 40 lines to 5 per caller."
-- Weak (abstract benefit): "Extracting the retry loop into `withRetry()` lets callers test timeout behavior independently — reduces test setup from 40 lines to 5 in each caller." (names a technical benefit but not the situation where someone actually hits the problem)
-- Weak (vaguer): "This would be cleaner if extracted into a helper." (missing: what specifically improves, who benefits, when they encounter it)
-- Unsound: "I prefer early returns over nested conditionals." (personal style, no concrete maintainability benefit stated)
-
-**Action by outcome:** Sound → report as-is. Weak → rewrite grounding with missing specifics, then report. Unsound → downgrade to question if the concern is worth raising, or drop entirely.
+Examples — suggestion:
+- Material: "Retry loop is duplicated across 3 callsites — a fix to one (e.g. backoff) won't reach the others." (drift cost felt in ordinary maintenance)
+- Immaterial → `minor (N)`: "This would read more cleanly with early returns." (taste, no concrete cost named)
 
 #### Relationship to Conventional Comments labels
 

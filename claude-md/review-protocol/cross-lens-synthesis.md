@@ -11,7 +11,7 @@ A **compound finding** exists when two or more lenses flag the same location (sa
 **Presentation:** Compound findings are presented as a single consolidated finding with:
 - All contributing lens IDs listed (e.g., `[correctness, security]`)
 - The highest severity among the contributing findings (see elevation table below)
-- A merged body that preserves each lens's distinct observation under a labeled sub-section, including the grounding (concrete scenario, misuse, or failure consequence) from each contributing finding — grounding must not be dropped during merging
+- A merged body that preserves each lens's distinct observation under a labeled sub-section, including the material stake from each contributing finding. The merged stake must survive the materiality gate (`severity.md`); keep it to a single material line per concern rather than concatenating every lens's reasoning into the comment
 
 #### Severity elevation table
 

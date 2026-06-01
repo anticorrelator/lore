@@ -1,18 +1,18 @@
-# Grounding-Evaluation Agent Prompt Template
+# Materiality-Gate Agent Prompt Template
 
-Used by `/pr-self-review` Step 3a. Spawn one agent with the PR's stated intent, all lens findings with their `**Grounding:**` lines, and the Sound/Weak/Unsound rubric from `severity.md`.
+Used by `/pr-self-review` Step 3a. Spawn one agent with the PR's stated intent, all lens findings with their `**Grounding:**` lines, and the Materiality Gate from `severity.md`.
 
 ```
-# Grounding Evaluation — PR #<number>
+# Materiality Gate — PR #<number>
 
-You are a grounding evaluation agent. Apply the Grounding Quality Rubric from severity.md to every `blocking` and `suggestion` finding from the lens scan.
+You are a materiality gate agent. Run every `blocking` and `suggestion` finding from the lens scan through the Materiality Gate in severity.md.
 
 ## PR Intent
 **Title:** <title>
 **Body:** <body>
 **Commits:** <commit messages>
 
-## severity.md Rubric (loaded above)
+## severity.md Materiality Gate (loaded above)
 
 ## Findings to Evaluate
 
@@ -20,15 +20,17 @@ You are a grounding evaluation agent. Apply the Grounding Quality Rubric from se
 
 ## Instructions
 
-For each finding with severity `blocking` or `suggestion`:
-1. Classify the `**Grounding:**` line as Sound, Weak, or Unsound per the rubric.
-2. Apply the outcome:
-   - **Sound** → pass through unchanged, set `selected: true`
-   - **Weak** → rewrite the `**Grounding:**` line to complete the mechanism → consequence chain; keep severity intact, set `selected: true`
-   - **Unsound** → drop the finding (do not include it in output)
-   - **Missing grounding** → treat as Unsound; drop the finding
+This is a magnitude judgment, not a check on whether the stake is well-written. For each finding ask, from the author's seat: **would the author plausibly change the code — or want to verify something — because of this?**
 
-For `question` findings: pass through unchanged, set `selected: false`.
+For each finding with severity `blocking` or `suggestion`, apply one outcome:
+- **Material** → keep, set `selected: true`. A realistic, reachable path makes it matter (blocking) or the cost is felt in normal maintenance/use (suggestion).
+- **Immaterial** → drop the finding (do not include it in output). Contrived/unreachable failure, or taste with no concrete cost. Do **not** rewrite it to sound material.
+- **Question** → the concern turns on context the diff does not show; reclassify as `question`, set `selected: false`.
+- **Missing `**Grounding:**` line** → treat as immaterial; drop.
 
-Output the evaluated findings list. For each finding include: severity, title, file, line, body (with grounding rewritten if weak), lens, grounding (the final grounding text only, without the `**Grounding:**` label), selected.
+The gate drops or routes; it never pads. Do not rewrite a finding's stake to manufacture impact.
+
+For pre-existing `question` findings: pass through unchanged, set `selected: false`.
+
+Output the retained findings list. For each finding include: severity, title, file, line, body, lens, grounding (the one-line material stake — observed fact + condition, no `**Grounding:**` label), selected.
 ```

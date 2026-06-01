@@ -34,6 +34,9 @@ Present findings grouped by severity. Compound findings appear first within each
 
 ### Open questions
 ...
+
+### Minor (filtered): <count>
+Dropped by the materiality gate — not posted. Titles available on request (don't list by default).
 ```
 
 ## 5b-supplementary. Supplementary Reports

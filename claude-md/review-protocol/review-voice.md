@@ -2,7 +2,7 @@
 
 #### Purpose
 
-Voice is distinct from grounding and severity. Grounding determines whether a finding has evidentiary weight — a concrete failure scenario or a named improvement. Severity determines how urgently the author should verify. Voice determines how that finding is expressed: the sentence structure, the framing of uncertainty, and the choice of words.
+Voice is distinct from materiality and severity. The **materiality gate** (`severity.md`) determines whether a finding is worth surfacing at all. **Severity** is the reviewer's own triage axis — how urgently *they* should verify — and is not posted to the author; the conditional stake delegates that call to the reader instead. **Voice** determines how the finding is expressed: the sentence structure, the framing of uncertainty, and the choice of words.
 
 Agent reviewers are not the authority on correctness. A reviewer analyzing a diff cannot know the full system context, the author's intent, or what tests already exist. Every finding is a hypothesis formed from incomplete information. Voice encodes this epistemic position without abandoning the finding's substance. A hedged observation that names the code precisely is more useful than a confident assertion that names nothing.
 
@@ -36,19 +36,19 @@ The finding becomes weaker when the observation is hedged ("might be storing") a
 
 ---
 
-#### Verification Urgency by Severity
+#### Severity Calibrates the Reviewer, Not the Comment
 
-Severity calibrates the urgency of the verification ask. It does not calibrate reviewer confidence — all findings hedge the inference regardless of severity. A blocking finding is not a more-certain finding; it is a finding where the failure scenario, if real, cannot be shipped.
+Severity is the reviewer's triage axis — it orders what *they* look at and how urgently *they* verify. It is not posted to the author and it does not set the comment's tone. The posted comment is the same neutral shape regardless of severity: the **conditional stake** carries the stakes, and the reader — who knows whether the condition holds — assigns the criticality. A reviewer never writes "this is a merge blocker" into a comment; they state the fact and the condition and let it land.
 
-**Blocking — urgent verification request**
+What does change with severity is how sharply the condition is drawn. A high-stakes finding names the consequence concretely so the reader can weigh it; a low-stakes one stays light.
 
-The verification ask is direct and frames the consequence of not verifying. The author should understand that this question needs an answer before the PR merges.
+**High-stakes — name the consequence in the condition**
 
-Before:
-> You might want to look into whether the token expiry check is skipped when `exp` is absent.
+Before (hedges the observation, then asserts the verdict):
+> You might want to look into whether the token expiry check is skipped when `exp` is absent — this is a merge blocker.
 
-After:
-> The token expiry check is skipped when `exp` is absent — any token without that claim authenticates indefinitely. If tokens from external providers can omit `exp`, this is a merge blocker. Confirm whether the token source guarantees the field.
+After (states the fact, draws the condition, lets the reader judge):
+> The token expiry check is skipped when `exp` is absent — any token without that claim authenticates indefinitely if the token source can omit the field.
 
 **Suggestion — low-pressure observation**
 
@@ -108,6 +108,8 @@ After:
 
 #### Body Construction
 
+**Default to one line.** A posted comment is an input to the reader's triage, not an essay — they have context the reviewer lacks, so the job is to point precisely and stop. Where one line carries the observed fact and its conditional stake, ship one line. Escalate to a second sentence only when the condition genuinely cannot be conveyed without it. The full three-part body below is for the reviewer-facing findings list; the posted comment is its compression.
+
 A finding body has three parts: an impact lead, evidence, and an optional fix suggestion.
 
 **Impact lead — open with the observable consequence.**
@@ -142,10 +144,10 @@ After (identifies the issue, stops — fix is self-evident):
 
 When a suggestion is warranted:
 - **Place it last** — after impact and evidence. Never lead a finding with a fix.
-- **Frame it as one option** ("One approach: …"), not a directive.
+- **Frame it softly — as a question or a light suggestion, never a confident prescription.** The reviewer is missing the context that would justify a directive, so a fix should invite the author's judgment rather than presume it. Prefer the question form when it fits ("Share a `withRetry()`, or is the duplication deliberate?"); otherwise a tentative "Worth …?" or "Could … here?" Avoid framings that sound settled.
 - **Keep the scope open** — avoid language that commits the author to the smallest local patch if the finding could motivate a broader change.
 
-> One approach: validate `exp` presence before signature verification, so the failure is an explicit rejection rather than a silent skip.
+> Could `exp` presence be validated before signature verification, so the failure is an explicit rejection rather than a silent skip?
 
 ---
 

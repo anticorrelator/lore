@@ -34,12 +34,12 @@ Lens skills produce structured JSON findings that can be consumed by `post-revie
 - **title** — A concise summary (under 80 characters) suitable for use as a review comment heading.
 - **file** — Path relative to repository root. Required for inline PR comments. Omit only for PR-level (non-file-specific) findings.
 - **line** — Line number in the diff where the finding applies. Required for inline comments. Omit for file-level or PR-level findings.
-- **body** — Full explanation. Should include: what the issue is, why it matters, and (for suggestions) what to do about it. Markdown formatting allowed. **Required structure:** include a `**Grounding:**` line that traces from technical mechanism to observable human/operational consequence, calibrated to the severity level:
-  - *blocking*: `**Grounding:** <mechanism — what breaks, for whom, when> → <consequence — what the user experiences or what operational impact follows>.` Example: `**Grounding:** Token expiry check is skipped when `exp` is absent, so any token without that claim authenticates indefinitely — an attacker who obtains a single token retains account access permanently, surviving password resets and revocations.`
-  - *suggestion*: `**Grounding:** <situation — when a real person encounters the problem> → <improvement — what changes for them>.` Example: `**Grounding:** The next engineer debugging an auth failure has to mentally reconstruct the token validation flow across three inline blocks — extracting into a named function makes the validation sequence explicit and grep-able.`
-  - *question*: no `**Grounding:**` line required.
+- **body** — Full explanation. Should include: what the issue is and the stake. Markdown formatting allowed. **Required structure:** include a `**Grounding:**` line that states the **material stake** in one line — the observed code fact plus the *condition* under which it matters. This line is the seed for the posted comment, so write it the way it should read to the author: short, conditional, no severity verdict.
+  - *blocking*: `**Grounding:** <observed code fact> — <what fails> if <condition>.` Example: `**Grounding:** \`exp\` is not validated in \`verifyToken()\` — any token without that claim authenticates indefinitely if the token source can omit it.`
+  - *suggestion*: `**Grounding:** <observed code fact> — <concrete cost felt in normal maintenance/use>.` Example: `**Grounding:** The retry loop is duplicated across 3 callsites — a fix to one (e.g. backoff) won't reach the others.`
+  - *question*: no `**Grounding:**` line required — the question body is the stake.
 
-  A body missing the `**Grounding:**` line for a `blocking` or `suggestion` finding is incomplete. Presence alone is not sufficient — the orchestrator evaluates grounding quality against the rubric in `severity.md`. Grounding that stops at the technical mechanism without landing on a human/operational consequence is **weak** and will be rewritten. Unsound grounding (speculative or no causal link) triggers a severity downgrade or drop.
+  A `blocking` or `suggestion` finding missing the `**Grounding:**` line is incomplete. Presence alone is not sufficient: the orchestrator runs each finding through the **Materiality Gate** in `severity.md`. A finding that does not clear the bar (contrived/unreachable failure, or taste with no concrete cost) is **dropped** — it is not rewritten into something that sounds material. A finding that turns on context the reviewer cannot see is routed to a `question`.
 - **knowledge_context** — Array of knowledge store entries cited during enrichment. Each entry is a string in the format `"entry-title — relevance summary"`. Empty array `[]` when no relevant knowledge was found.
 
 #### Validation rules
@@ -51,9 +51,12 @@ Lens skills produce structured JSON findings that can be consumed by `post-revie
 
 #### External Output Formatting
 
-Before a finding body appears in external-facing output — proposed comments, followup reports, or `post-review.sh` — strip internal protocol language: `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, compound markers. These are internal analytical scaffolding. The author should see a self-contained comment grounded in impact, not an analysis artifact.
+Posted comments are a **curated, neutral** artifact, not a projection of the findings list. Two rules govern what crosses the wall to the PR author:
 
-The grounding content itself (the concrete failure scenario, improvement claim, or question) must be preserved — it is the substance of the comment. Only the protocol headers and labels are stripped.
+1. **Strip internal scaffolding.** Remove `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, and compound markers. The stake *content* (the conditional fact) is preserved — it is the substance of the comment — but the labels are not.
+2. **Strip criticality.** No severity word and no verdict crosses by default — not "blocking," not "critical," not "must fix." The conditional stake already hands the criticality call to the reader (who knows whether the condition holds). The reviewer may opt to re-add a criticality lead on a specific comment when they judge it warranted (a Phase-2 per-comment affordance); absent that opt-in, posted comments are neutral.
+
+The result is an input to the reader's triage, not a directive: observed fact → conditional stake → optional soft fix (framed as a question or light suggestion, never a confident prescription). Default to one line. Posted comments need not be 1:1 with the reviewer-facing findings list — immaterial findings (the `minor (N)` tally) are never posted, and several findings may collapse or reshape into fewer comments.
 
 **Uncertain framing — hedge the inference, not the observed code fact.** See `review-voice.md` for the full voice guide including uncertain framing patterns, verification urgency by severity, sentence structure, and vocabulary guidance.
 
@@ -85,11 +88,12 @@ lenses: correctness, security
 
 **Finding title**
 
-Detailed explanation of the finding. May include markdown formatting.
-
-**Grounding:** What breaks for whom when conditions are met — what the user experiences or what operational impact follows.
+Observed code fact stated directly — what fails if the condition holds.
+Optional soft fix as a question or light suggestion.
 ```
 ````
+
+The `severity` and `lenses` lines are internal routing metadata read by sidecar tooling — they are **not** rendered into the comment the author sees. The body carries no severity word: the conditional in the stake is what lets the reader assign criticality.
 
 **Front-matter fields** (key: value format, one per line):
 

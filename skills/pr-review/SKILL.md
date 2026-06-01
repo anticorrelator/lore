@@ -219,11 +219,11 @@ Produce findings JSON conforming to the Findings Output Format:
 - Severity: blocking / suggestion / question (default to suggestion when uncertain)
 - Each finding: severity, title, file, line, body, knowledge_context
 
-Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line in the body that traces from technical mechanism to observable human/operational consequence:
-- blocking: `**Grounding:** <mechanism — what breaks, for whom, when> → <consequence — what the user experiences or what operational impact follows>.`
-- suggestion: `**Grounding:** <situation — when a real person encounters the problem> → <improvement — what changes for them>.`
+Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line stating the **material stake** in one line — the observed code fact plus the condition under which it matters. Write it as it should read to the author: short, conditional, no severity verdict.
+- blocking: `**Grounding:** <observed code fact> — <what fails> if <condition>.`
+- suggestion: `**Grounding:** <observed code fact> — <concrete cost felt in normal maintenance or use>.`
 
-Grounding that stops at the technical mechanism without landing on a human/operational consequence is weak and will be rewritten during synthesis. Findings without a `**Grounding:**` line will be downgraded or dropped.
+Do not pad the stake into a mechanism→consequence essay; when the impact is self-evident from the fact, the one line is enough. Findings without a `**Grounding:**` line — and findings whose stake does not clear the Materiality Gate in `severity.md` — are dropped during synthesis. They are **not** rewritten to sound material.
 
 Query the knowledge store for each finding:
 ```bash
@@ -297,19 +297,19 @@ Group findings by `file`. Within each file, identify findings from different len
 
 Apply the severity elevation table from the Cross-Lens Synthesis protocol. Merge compound findings into a single finding with all contributing lens IDs and a merged body.
 
-### 4b. Grounding quality evaluation
+### 4b. Materiality gate
 
-Apply the Grounding Quality Rubric from `severity.md` (already loaded above) to every `blocking` and `suggestion` finding. For each finding, evaluate the `**Grounding:**` content and classify it as **sound**, **weak**, or **unsound**.
+Run every `blocking` and `suggestion` finding through the **Materiality Gate** from `severity.md` (already loaded above). This is a magnitude judgment — *would the author plausibly change the code, or want to verify something, because of this?* — not a check on whether the stake is well-written. The gate **drops or routes; it never pads.**
 
-**Outcomes by classification:**
+**Outcomes:**
 
-- **Sound** — grounding traces from technical mechanism to observable human/operational consequence. Pass through unchanged.
-- **Weak** — grounding stops at the technical mechanism without landing on a downstream consequence, or names an abstract benefit without a scenario where someone encounters the problem. Rewrite the `**Grounding:**` line to complete the chain: mechanism → who is affected → what they experience. Derive the consequence from the finding body, diff context, and review brief. Keep the finding's severity intact.
-- **Unsound** — no realistic failure scenario (blocking) or no concrete benefit (suggestion). For `blocking` findings: downgrade to `suggestion` and rewrite the `**Grounding:**` line to match the weaker severity bar. For `suggestion` findings: drop the finding.
+- **Material** — a realistic, reachable path makes this matter (blocking), or the cost is felt in normal maintenance/use (suggestion). Keep it; it is a candidate posted comment.
+- **Immaterial** — contrived/unreachable failure, or taste with no concrete cost. **Drop it** from the posted set and add it to the `minor (N)` tally (Step 5b). Do **not** rewrite it to sound material.
+- **Question** — the concern turns on context the diff does not show (intent, reachability, an upstream guarantee). Reclassify as a `question` rather than asserting a defect or dropping it.
 
-**Missing grounding line** — treat the same as unsound: downgrade `blocking` to `suggestion`, drop `suggestion`.
+**Missing grounding line** — treat as immaterial: drop and add to the `minor (N)` tally.
 
-**Compound findings** — evaluate grounding across all contributing findings. If at least one contributing finding has sound or weak grounding, the compound finding qualifies (apply rewrite if the merged grounding is weak). If all contributing findings are unsound or ungrounded, drop the compound finding.
+**Compound findings** — apply the gate across all contributing findings. The compound qualifies if at least one contributing finding is material; otherwise drop it. The merged stake must remain a single material line, not a concatenation of every lens's reasoning.
 
 <!-- section-boundary -->
 
@@ -336,6 +336,7 @@ Attach relevant citations. If any knowledge entry is STALE and the PR contradict
 **Suggestions:** <count>
 **Questions:** <count>
 **Compound findings:** <count> (findings flagged by multiple lenses)
+**Minor (filtered):** <count> (dropped by the materiality gate — not posted; titles available on request)
 
 **Top concerns:**
 1. <highest-severity finding title> — [<contributing lenses>]
@@ -355,8 +356,10 @@ Verdict logic: - Any blocking findings -> `BLOCKING` - Only suggestions/question
 **Verdict:** <BLOCKING / CLEAN / SUGGESTIONS ONLY>
 **Lenses applied:** <list of lenses that ran>
 **Blocking:** <count> | **Suggestions:** <count> | **Questions:** <count>
-**Compound findings:** <count>
+**Compound findings:** <count> | **Minor (filtered):** <count>
 ```
+
+The verdict, severity counts, and `minor (filtered)` tally are reviewer-facing — they orient *your* triage. None of them is posted to the PR. The `minor (filtered)` count is the materiality gate's paper trail; offer the dropped titles on request rather than listing them by default.
 
 ### 5b. Findings by severity
 
@@ -400,11 +403,15 @@ cat ~/.lore/claude-md/review-protocol/followup-template.md
 
 This step is mandatory and must not be skipped. It has two parts:
 
-**6d-i. Verify grounding survived synthesis.** Re-check that every `blocking` and `suggestion` finding has grounding — a concrete failure scenario (blocking) or specific improvement claim (suggestion) — per the bars defined in `severity.md`. Step 4b should have already enforced this, but findings can lose grounding during compound merging or deduplication. Any finding that lacks grounding at this point: downgrade blocking → suggestion, drop ungrounded suggestions.
+**6d-i. Verify materiality survived synthesis.** Re-check that every `blocking` and `suggestion` finding still clears the Materiality Gate (`severity.md`). Step 4b enforced this, but findings can lose their stake during compound merging or deduplication. Any finding that no longer clears the bar: drop it to the `minor (N)` tally (Step 5b/4e); do not rewrite it to recover.
 
-The test: if the PR author asks "why does this matter?", the finding must answer with a specific scenario, not a vague assertion. A finding that cannot survive that question is not grounded.
+The test is decision-theoretic, not descriptive: not "can a scenario be described?" (one always can) but "would the author change the code — or want to verify something — because of this?" A finding that survives only as a describable-but-inert scenario is not material.
 
-**6d-ii. Strip internal protocol language for external output.** Remove `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, and compound markers from finding bodies. These are internal analytical scaffolding — the author should see the grounding *content* (the concrete impact claim) woven into the finding body, not protocol headers.
+**6d-ii. Neutralize bodies for external output.** Posted comments are curated and neutral. Strip two things from every finding body:
+- **Internal scaffolding** — `**Grounding:**`, `**Severity:**`, `**Knowledge:**`, lens attribution, compound markers. The stake *content* (the conditional fact) survives; the labels do not.
+- **Criticality** — no severity word and no verdict ("blocking", "critical", "must fix") crosses to the author. The conditional stake already delegates the criticality call to the reader.
+
+The author should see: observed fact → conditional stake → optional soft fix (a question or light suggestion, never a confident prescription). Default to one line. *(Per-comment criticality opt-in — letting the reviewer re-add a criticality lead to a specific comment — is a Phase-2 TUI affordance; until it lands, posted comments are uniformly neutral.)*
 
 **Voice — hedge the inference, not the observed code fact.** Reviewers cannot know the full system context; every external body should read as a grounded hypothesis, not a verdict.
 
@@ -453,7 +460,9 @@ line: <N>
 
 ### 6f. Persist the report
 
-Build the proposed comments JSON array by walking findings in severity-group order (`blocking` → `suggestion` → `question`), matching markdown report order. Within each group, maintain a 1-based ordinal counter that increments for every finding encountered — including findings that lack `file` or `line` (skip emission for those but still increment, so later findings keep their markdown `#### N.` position). The counter resets to 1 at the start of each severity group. For each finding with both `file` and `line`, emit `{"path": "<file>", "line": <line>, "body": "<finding body>", "title": "<finding title>", "finding_ordinal": <N>}` where `<N>` is the current ordinal and `<finding title>` is the text from the finding's `#### N. <title>` header. Bodies must have internal protocol headers stripped per Step 6d-ii with grounding content preserved.
+Proposed comments are a **curated subset** — the posted artifact, not a projection of the Review Findings list. They need not be 1:1 with the Section 3 findings: immaterial findings (the `minor (N)` tally) are never posted, and where it reads better, several findings may collapse into one comment. Only material findings with both `file` and `line` become proposed comments.
+
+Build the array by walking the proposed comments in severity-group order (`blocking` → `suggestion` → `question`). Within each group, number them with a fresh 1-based `finding_ordinal` over the proposed comments themselves — this counter is the comment's own identity, **not** tied to any Section 3 `#### N.` position (the two are allowed to diverge). For each proposed comment, emit `{"path": "<file>", "line": <line>, "body": "<finding body>", "title": "<finding title>", "finding_ordinal": <N>}`. Bodies must be neutralized per Step 6d-ii — internal scaffolding **and** criticality stripped, stake content preserved, default to one line.
 
 Pass the **complete report body from 6e** as `--content`:
 

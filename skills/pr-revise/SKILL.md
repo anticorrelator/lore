@@ -97,13 +97,13 @@ For each unresolved item in the selected batch, determine:
 
 Assign a Conventional Comments label to each item: `suggestion`, `issue`, `question`, `thought`, `nitpick`, or `praise`.
 
-**Grounding contract:** see `skills/pr-review/SKILL.md` Step 3b. For each item labeled `issue` or `suggestion`, include a `**Grounding:**` line that traces from technical mechanism to observable human/operational consequence, using the hedged phrasing patterns from `~/.lore/claude-md/review-protocol/review-voice.md` — `issue` uses `<mechanism — what may break, for whom, when> → <consequence — what the user experiences>`; `suggestion` uses `<situation — when a real person encounters the problem> → <improvement — what changes for them>`.
+**Grounding contract:** For each item labeled `issue` or `suggestion`, include a `**Grounding:**` line. Because this skill's output is an internal work item (not a posted comment), the grounding may carry the fuller mechanism → consequence the author needs to act — `issue` uses `<mechanism — what may break, for whom, when> → <consequence — what the user experiences>`; `suggestion` uses `<situation — when a real person encounters the problem> → <improvement — what changes for them>`. Use the hedged phrasing patterns from `~/.lore/claude-md/review-protocol/review-voice.md`. (Posted PR comments use the terser one-line stake form in `skills/pr-review/SKILL.md` Step 3b; this skill does not post.)
 
-For reviewer-sourced findings specifically, grounding comes from the **code's actual behavior**, not the reviewer's framing. Read the referenced function before writing the grounding line. If the code does not support the reviewer's implied consequence, that is a signal the finding is unsound — not a signal to rewrite the reviewer into something defensible.
+For reviewer-sourced findings specifically, grounding comes from the **code's actual behavior**, not the reviewer's framing. Read the referenced function before writing the grounding line. If the code does not support the reviewer's implied consequence, that is a signal the finding is immaterial — not a signal to rewrite the reviewer into something defensible.
 
-**Grounding Quality Rubric:** see `skills/pr-review/SKILL.md` Step 4b (Sound / Weak / Unsound). Keep Sound items as-is; rewrite Weak grounding to complete the mechanism→consequence chain (label intact); demote Unsound `issue` to `thought` and drop Unsound `suggestion`.
+**Materiality gate:** see `skills/pr-review/SKILL.md` Step 4b. Keep material items as-is; demote immaterial `issue` to `thought` and drop immaterial `suggestion`; route an item that turns on context you cannot see to `question`. The gate drops or routes — do not manufacture impact for a terse reviewer note. (Note: unlike a posted PR comment, this skill's output is an internal work item, so substantiating a terse note into a fuller mechanism → consequence summary for the author is appropriate; what the gate forbids is *inventing* materiality the code doesn't support.)
 
-Items without a grounding line are treated the same as unsound: demote `issue` to `thought`, drop `suggestion`. This prevents reviewer style preferences from being elevated to action items.
+Items without a grounding line are treated the same as immaterial: demote `issue` to `thought`, drop `suggestion`. This prevents reviewer style preferences from being elevated to action items.
 
 **Apply the 8-point review checklist** from `~/.lore/claude-md/review-protocol/checklist.md` as an additional analysis lens. Read it at invocation — do not duplicate it here. The checklist helps distinguish substantive feedback from style preferences.
 
@@ -192,7 +192,7 @@ Produce a suggested-actions JSON array, omitting types for empty categories:
 
 Assembly preamble: see `skills/pr-review/SKILL.md` Step 6e. Assemble the `--content` value with **all** of the following sections. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
 
-**Grounding re-check before assembly.** Re-verify that every `issue` and `suggestion` item still has a specific mechanism → consequence chain per the Sound/Weak/Unsound rubric applied in Step 3. The test: if the PR author asks "why does this matter?", the Summary column must answer with a specific scenario, not a vague assertion. Any item that lacks grounding at this point: demote `issue` to `thought`, drop `suggestion`. Grounding can be lost during grouping or categorization — this pass catches it before the external artifact is written.
+**Materiality re-check before assembly.** Re-verify that every `issue` and `suggestion` item still clears the materiality gate applied in Step 3. The test is decision-theoretic: not "can a scenario be described?" but "would the author change the code — or want to verify something — because of this?" The Summary column must answer that, not a vague assertion. Any item that no longer clears the bar: demote `issue` to `thought`, drop `suggestion`. Materiality can be lost during grouping or categorization — this pass catches it before the artifact is written.
 
 **First line:** One-line diagnostic summary (e.g., "agreed 3, verification 2, deferred 1 findings from @reviewer's review"). This must be the first non-heading line — it appears as the excerpt in the TUI.
 

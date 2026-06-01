@@ -14,7 +14,7 @@ Used by `/pr-self-review` Step 4. Build the `lens-findings.json` payload from th
       "line": <1-indexed, 0 for file-level>,
       "body": "<finding body, may contain markdown>",
       "lens": "<lens id>",
-      "grounding": "<grounding text — mechanism → consequence chain, no label prefix>",
+      "grounding": "<one-line material stake — observed fact + condition, no label prefix>",
       "selected": <true|false>
     }
   ]

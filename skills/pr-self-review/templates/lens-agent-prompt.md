@@ -34,11 +34,11 @@ Produce findings JSON conforming to the Findings Output Format:
 - Severity: blocking / suggestion / question (default to suggestion when uncertain)
 - Each finding: severity, title, file, line, body, knowledge_context
 
-Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line in the body that traces from technical mechanism to observable human/operational consequence:
-- blocking: `**Grounding:** <mechanism — what breaks, for whom, when> → <consequence — what the user experiences or what operational impact follows>.`
-- suggestion: `**Grounding:** <situation — when a real person encounters the problem> → <improvement — what changes for them>.`
+Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line stating the **material stake** in one line — the observed code fact plus the condition under which it matters. Write it as it should read to the author: short, conditional, no severity verdict.
+- blocking: `**Grounding:** <observed code fact> — <what fails> if <condition>.`
+- suggestion: `**Grounding:** <observed code fact> — <concrete cost felt in normal maintenance or use>.`
 
-Grounding that stops at the technical mechanism without landing on a human/operational consequence is weak and will be rewritten during synthesis. Findings without a `**Grounding:**` line will be downgraded or dropped.
+Do not pad the stake into a mechanism→consequence essay; when the impact is self-evident from the fact, the one line is enough. Findings without a `**Grounding:**` line — and findings whose stake does not clear the Materiality Gate in `severity.md` — are dropped during the gate. They are **not** rewritten to sound material.
 
 Query the knowledge store for each finding:
 ```bash
