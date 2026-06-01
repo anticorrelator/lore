@@ -426,9 +426,13 @@ The author should see: trigger (in usage terms) → what they would observe → 
 
 Full voice guide (optional deeper reference): `~/.lore/claude-md/review-protocol/review-voice.md`.
 
-After stripping and shaping, produce two variants of each finding body:
-- **Section 3 variant** (used verbatim under `#### N. <title>` in `## Review Findings`): the stripped+shaped prose as-is. Do **not** prepend a bolded title — the `####` heading already carries it; duplicating produces a visual stutter.
-- **Comment-body variant** (used in `## Proposed Comments` previews and the `body` field emitted by Step 6f): prepend `**<title>**\n\n` as the first line, where `<title>` is the finding's title text. Plain bolded title, not a labeled header like `**Impact:**`. Step 6f is serialization-only — it emits this variant without reformatting.
+After stripping and shaping, produce **two genuinely different variants** of each finding — not the same prose with a title bolted on. The landed comment is deliberately the *thinner* of the two:
+- **Section 3 variant** (the reviewer cockpit — used verbatim under `#### N. <title>` in `## Review Findings`): the fuller stripped+shaped prose. This is where the optional mechanism anchor and any second clause of detail live. Do **not** prepend a bolded title — the `####` heading already carries it.
+- **Comment-body variant** (the text that LANDS on the PR — used in `## Proposed Comments` and the `body` emitted by Step 6f): a **single short block** — `**<title>**`, then the finding's `**Grounding:**` path line (trigger → manifestation), and *only if warranted* one soft-fix clause framed as a question. That is the entire comment.
+
+  **No second paragraph.** Do not append a mechanism walk-through, a file/function call-chain, a "this also happens elsewhere / not a regression here" caveat, or "for the author who wants to verify" detail. In the inline comment that elaboration is *wholly unnecessary* — it exists only in the Section 3 variant. The landed comment carries nothing beyond what the author needs to decide *whether the path is real and worth acting on*.
+
+  **Compression check (mandatory):** if the comment-body variant runs past the path line into a second paragraph — or is nearly as long as the Section 3 variant — you have not compressed it. Cut everything after the path line and the optional soft-fix. Step 6f is serialization-only — it emits this already-compressed variant without reformatting.
 
 ### 6e. Assemble the full report body
 
