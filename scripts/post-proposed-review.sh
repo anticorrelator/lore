@@ -94,8 +94,18 @@ echo "[post-proposed-review] PR #${PR_NUMBER} (${OWNER}/${REPO})"
 echo "[post-proposed-review] Comments: ${SELECTED_COUNT} selected / ${TOTAL_COUNT} total"
 
 if [[ "$SELECTED_COUNT" -eq 0 ]]; then
-  echo "[post-proposed-review] No comments selected — nothing to post."
-  exit 0
+  # A review with no inline comments is still postable as a clean APPROVE, or
+  # when a general review body is selected (e.g. a summary-only COMMENT). Only a
+  # true no-op — COMMENT/REQUEST_CHANGES with neither comments nor a body — is
+  # nothing to post.
+  GATE_EVENT=$(jq -r '.review_event // "COMMENT"' "$SIDECAR")
+  GATE_BODY=$(jq -r '.review_body // empty' "$SIDECAR")
+  GATE_BODY_SELECTED=$(jq -r '.review_body_selected // false' "$SIDECAR")
+  if [[ "$GATE_EVENT" != "APPROVE" && ! ( "$GATE_BODY_SELECTED" == "true" && -n "$GATE_BODY" ) ]]; then
+    echo "[post-proposed-review] No comments selected and no review body — nothing to post."
+    exit 0
+  fi
+  echo "[post-proposed-review] No inline comments — posting review as ${GATE_EVENT}."
 fi
 
 # --- Staleness check: compare sidecar head_sha to current PR head ---

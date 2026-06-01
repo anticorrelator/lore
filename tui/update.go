@@ -972,8 +972,13 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					break
 				}
 				selectedCount := m.followupDetail.SelectedCount()
-				if selectedCount == 0 {
-					m.flashErr = "P: no comments selected"
+				eventType := m.followupDetail.ReviewEvent()
+				// A review with zero inline comments is still postable as a
+				// clean APPROVE, or when a general review body is selected.
+				// Only a true no-op (COMMENT/REQUEST_CHANGES with neither
+				// comments nor a body) is blocked.
+				if selectedCount == 0 && eventType != "APPROVE" && !m.followupDetail.HasReviewBody() {
+					m.flashErr = "P: nothing to post — select a comment, add a review body, or set the event to Approve (2)"
 					break
 				}
 				if !m.followupDetail.HasPRMetadata() {
@@ -981,10 +986,13 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					break
 				}
 				prNumber := m.followupDetail.PRNumber()
-				eventType := m.followupDetail.ReviewEvent()
 				m.confirmAction = "post_review"
 				m.confirmSlug = m.followupDetail.CurrentID()
-				m.confirmTitle = fmt.Sprintf("Post %d comments to PR #%d as %s?", selectedCount, prNumber, eventType)
+				if selectedCount == 0 {
+					m.confirmTitle = fmt.Sprintf("Post review to PR #%d as %s (no inline comments)?", prNumber, eventType)
+				} else {
+					m.confirmTitle = fmt.Sprintf("Post %d comments to PR #%d as %s?", selectedCount, prNumber, eventType)
+				}
 				m.confirmCount = selectedCount
 				return m, nil
 			}
@@ -1365,7 +1373,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			m.flashErr = fmt.Sprintf("Posted %d (%s) — marked reviewed", msg.PostedCount, strings.Join(clauses, ", "))
 		} else {
-			m.flashErr = fmt.Sprintf("Posted %d comments — marked reviewed", msg.PostedCount)
+			if msg.PostedCount == 0 {
+				m.flashErr = "Review posted — marked reviewed"
+			} else {
+				m.flashErr = fmt.Sprintf("Posted %d comments — marked reviewed", msg.PostedCount)
+			}
 		}
 		// Mark the followup reviewed so it moves out of the pending filter;
 		// the resulting ActionCompleteMsg triggers an index reload which refreshes the detail.

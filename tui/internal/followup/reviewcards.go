@@ -201,6 +201,13 @@ func (m ReviewCardsModel) ReviewEvent() string {
 	return m.review.ReviewEvent
 }
 
+// HasReviewBody returns true when a non-empty general review body is selected
+// for posting. A selected body makes a review with zero inline comments
+// postable (e.g. a summary-only COMMENT or REQUEST_CHANGES).
+func (m ReviewCardsModel) HasReviewBody() bool {
+	return m.review != nil && m.review.ReviewBodySelected && strings.TrimSpace(m.review.ReviewBody) != ""
+}
+
 // hasGeneralCard returns true when a general comment card should be rendered
 // at the top of the card list. When true, cursor == -1 selects that card.
 func (m ReviewCardsModel) hasGeneralCard() bool {

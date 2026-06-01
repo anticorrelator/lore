@@ -664,6 +664,15 @@ func (m DetailModel) ReviewEvent() string {
 	return m.reviewCards.ReviewEvent()
 }
 
+// HasReviewBody returns true when a non-empty general review body is selected
+// for posting in the review cards model.
+func (m DetailModel) HasReviewBody() bool {
+	if m.reviewCards == nil {
+		return false
+	}
+	return m.reviewCards.HasReviewBody()
+}
+
 // HasPRMetadata returns true when the loaded sidecar has complete PR posting metadata.
 func (m DetailModel) HasPRMetadata() bool {
 	if m.detail == nil || m.detail.ProposedComments == nil {

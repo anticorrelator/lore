@@ -366,6 +366,28 @@ func TestReviewCardsSelectedCount(t *testing.T) {
 	}
 }
 
+func TestReviewCardsHasReviewBody(t *testing.T) {
+	cases := []struct {
+		name     string
+		review   *ProposedReview
+		expected bool
+	}{
+		{"nil review", nil, false},
+		{"body present but unselected", &ProposedReview{ReviewBody: "Looks good overall."}, false},
+		{"body selected but empty", &ProposedReview{ReviewBody: "", ReviewBodySelected: true}, false},
+		{"body selected but whitespace only", &ProposedReview{ReviewBody: "   \n\t", ReviewBodySelected: true}, false},
+		{"body selected and non-empty", &ProposedReview{ReviewBody: "Looks good overall.", ReviewBodySelected: true}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewReviewCardsModel("", "", tc.review)
+			if got := m.HasReviewBody(); got != tc.expected {
+				t.Errorf("HasReviewBody() = %v, want %v", got, tc.expected)
+			}
+		})
+	}
+}
+
 func TestReviewCardsViewBudgetWindowingLimitsCards(t *testing.T) {
 	// Create many comments but a very small height budget.
 	var comments []ProposedComment
