@@ -219,13 +219,11 @@ Produce findings JSON conforming to the Findings Output Format:
 - Severity: blocking / suggestion / question (default to suggestion when uncertain)
 - Each finding: severity, title, file, line, body, knowledge_context
 
-Every finding with severity `blocking` or `suggestion` MUST include a `**Grounding:**` line stating the **path to manifestation**, written for a reviewer who has never seen this code:
-- *Trigger* — what someone *does*, in product/usage terms, to reach this ("if the agent renames the forced-choice tool"), NOT a code path ("the update branch calls `patchDefinition`").
-- *Manifestation* — what they would *observe* ("the next run is rejected by the provider, with no warning at write time").
-- blocking shape: `**Grounding:** <trigger, in usage terms> → <what the reviewer would observe>.`
-- suggestion shape: `**Grounding:** <when this is felt in ordinary use or maintenance> → <what it costs the person who hits it>.`
+Every `blocking`/`suggestion` finding needs a `**Grounding:**` line: the **path to the problem**, for a reviewer who's never seen this code — *what someone does to hit it → what they'd see*, in usage terms, not code terms:
 
-Tracing the trigger is **also how you decide whether to raise the finding at all**: if the realistic trigger is contrived, or the outcome is an inherent/expected consequence of a deliberate action with nothing the code could reasonably do, drop it — do not surface it. Code mechanism (function names, call chains) is an optional trailing anchor for the author, never the substance. Never write a bare code-state with no trigger ("`X` may be orphaned") — a reviewer cannot situate or judge it. Findings without a `**Grounding:**` line, and findings whose stake a reviewer unfamiliar with the code could not situate, are dropped during synthesis. They are **not** rewritten to sound material.
+> **Grounding:** If the agent renames a tool that's the forced choice, the next run is rejected by the provider for forcing a tool that no longer exists.
+
+Writing that trigger is also the materiality test: if the trigger is contrived, or the outcome is just what the action asked for with nothing the code could do, drop the finding rather than dress up a bare code-state ("`X` may be orphaned"). Mechanism (function names, call chains) is an optional trailing clause for the author, never the substance.
 
 Query the knowledge store for each finding:
 ```bash
@@ -415,24 +413,13 @@ The test is decision-theoretic, not descriptive: not "can a scenario be describe
 
 The author should see: trigger (in usage terms) → what they would observe → optional soft fix (a question or light suggestion, never a confident prescription). Default to one line. *(Per-comment criticality opt-in — letting the reviewer re-add a criticality lead to a specific comment — is a Phase-2 TUI affordance; until it lands, posted comments are uniformly neutral.)*
 
-**Voice — hedge the inference, not the observed code fact.** Reviewers cannot know the full system context; every external body should read as a grounded hypothesis, not a verdict.
+**Voice:** hedge the inference, not the code fact — state what the code does, hedge what follows from it; impersonal, no overstatement, fixes only when non-obvious and framed as a question. Full guide: `~/.lore/claude-md/review-protocol/review-voice.md`.
 
-- **State observed code facts directly.** Weak: "This might be storing the token insecurely." Strong: "`logRequest` writes `session.token` to the access log."
-- **Hedge impact claims with an explicit condition.** Weak: "This will crash the server." Strong: "`session.user` is dereferenced without a nil check — if this handler is reachable before auth completes, it panics."
-- **Lead with the observation**, not the hedge. Code fact first, uncertainty qualifier second.
-- **Use impersonal constructions.** "The handler dereferences…", not "You forgot to check…".
-- **Fix suggestions are secondary.** Default to surfacing the issue and stopping. When a fix is included (non-obvious only), place it **after** impact and evidence, frame it **softly — as a question or light suggestion, not a confident prescription** ("Worth …?", "Could … here?"), and keep the scope open so the finding can motivate a broader redesign if appropriate. Never lead a comment body with a fix.
-- **Avoid overstated vocabulary** ("this will crash" / "this is wrong" / "this is a bug" / "definitely") — name the condition instead. **Avoid hollow hedges on observations** ("seems like" / "might be" / "I think" / "could potentially") — state the code fact; hedge the *impact*, not the observation.
+Produce two variants. The landed comment is built from the path line, not the cockpit prose:
+- **Section 3 variant** (reviewer cockpit, under `#### N. <title>`): the fuller prose — mechanism anchor and extra detail live here. No bolded title; the `####` heading carries it.
+- **Comment-body variant** (what lands on the PR; the `body` Step 6f emits): `**<title>**`, the `**Grounding:**` path line, and at most one soft-fix question. That's the whole comment — call-chains and "not a regression" caveats stay in Section 3.
 
-Full voice guide (optional deeper reference): `~/.lore/claude-md/review-protocol/review-voice.md`.
-
-After stripping and shaping, produce **two genuinely different variants** of each finding — not the same prose with a title bolted on. The landed comment is deliberately the *thinner* of the two:
-- **Section 3 variant** (the reviewer cockpit — used verbatim under `#### N. <title>` in `## Review Findings`): the fuller stripped+shaped prose. This is where the optional mechanism anchor and any second clause of detail live. Do **not** prepend a bolded title — the `####` heading already carries it.
-- **Comment-body variant** (the text that LANDS on the PR — used in `## Proposed Comments` and the `body` emitted by Step 6f): a **single short block** — `**<title>**`, then the finding's `**Grounding:**` path line (trigger → manifestation), and *only if warranted* one soft-fix clause framed as a question. That is the entire comment.
-
-  **No second paragraph.** Do not append a mechanism walk-through, a file/function call-chain, a "this also happens elsewhere / not a regression here" caveat, or "for the author who wants to verify" detail. In the inline comment that elaboration is *wholly unnecessary* — it exists only in the Section 3 variant. The landed comment carries nothing beyond what the author needs to decide *whether the path is real and worth acting on*.
-
-  **Compression check (mandatory):** if the comment-body variant runs past the path line into a second paragraph — or is nearly as long as the Section 3 variant — you have not compressed it. Cut everything after the path line and the optional soft-fix. Step 6f is serialization-only — it emits this already-compressed variant without reformatting.
+  > **Renaming a forced-choice tool breaks the next run.** If the agent renames the tool that's the required choice, the next run is rejected by the provider for forcing a tool that no longer exists. Reset on rename like delete already does?
 
 ### 6e. Assemble the full report body
 
