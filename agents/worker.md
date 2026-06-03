@@ -82,47 +82,44 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
 5. Implement the change — read existing code first, follow codebase conventions.
 
    **Inline comments are for readers, not for thinking.** Reason at any length
-   while editing — including in scratch inline comments. Before completion,
-   compress committed comments to their reader-facing form. Long-form
-   reasoning that's still useful goes in Observations or Investigation;
-   reasoning that was only useful while writing can be deleted.
+   while editing — scratch comments included — then compress to reader-facing
+   form before completion. Reasoning still worth keeping goes in Observations;
+   the rest is deleted.
 
    **Plan and phase-brief vocabulary is for the lead; source comments are for
-   codebase maintainers.** Don't carry the brief's dialect into the source.
-   The brief speaks /spec-deliberation language (design decisions, load-bearing
-   claims, structural invariants); the codebase speaks maintainer-facing
-   English.
+   maintainers.** Don't carry the brief's /spec dialect (design decisions,
+   load-bearing claims, structural invariants) into the source — the codebase
+   speaks maintainer English.
 
-   **Drift test for any comment:** if the surrounding code changes, will this
-   comment quietly become a lie? Drift-prone comments are worse than no
-   comment — wrong comments mislead future maintainers (human or agent). When
-   in doubt, drop.
+   **Drift test:** if the surrounding code changes, will this comment quietly
+   become a lie? A wrong comment is worse than none — when in doubt, drop.
 
    **Drop:**
    - Multi-paragraph essays in docstrings arguing design choices — belongs in
      commit message, `plan.md`, or PR description.
-   - Justifications against alternatives not visible in the code ("we
-     deliberately don't X because…", "could have used Y but…").
-   - Restating the code in prose immediately above it.
-   - Re-explaining language/runtime semantics every competent reader knows
-     (GIL, async, dict atomicity).
-   - Cross-references between comments in the same file ("see X above").
-   - Section banners with prose announcing what comes next.
+   - Justifications against alternatives not in the code ("we deliberately
+     don't X because…", "could have used Y but…"), and narration of the edit
+     itself ("previously X, now Y", migration/pre-release notes, churn) —
+     describe the code, not the change that produced it.
+   - Restating what the reader can already see: the code paraphrased in prose
+     above it, or language/runtime semantics every competent reader knows (GIL,
+     async, dict atomicity).
+   - Cross-references between comments in the same file ("see X above"); section
+     banners announcing what comes next.
    - Lore-internal scaffolding: `D1`/`P2` IDs, `[[knowledge:...]]` /
      `[[work:...]]` backlinks, "per D3" / "see the spec/plan" cross-refs,
      protocol-speak as load-bearing vocabulary ("load-bearing", "by-design",
      "consumer downstream", "harness", "invariant" in the promise/contract
      sense — not the math/data-structure sense).
 
-   **Keep:**
-   - Single-line invariants a future edit could plausibly violate (ordering
-     constraints, non-obvious dependencies between calls).
-   - Operational gotchas with no other surface (empirical findings,
-     non-obvious paths, footguns that would cost an hour to rediscover).
-   - External SDK or library behavior the call site can't show.
-   - Fail-closed or security rationale for checks that would otherwise look
-     paranoid.
-   - One-sentence public-method docstrings stating *what* the method does.
+   **Keep — the usefulness test:** a comment earns its length only by
+   disambiguating what the name and signature can't convey: precise semantics, a
+   misuse guard, or a non-obvious cross-boundary constraint (ordering
+   dependencies, external-SDK behavior, fail-closed rationale, operational
+   footguns that would cost an hour to rediscover). If it only restates what the
+   body shows, it's noise; when a docstring over-enumerates, trim to the
+   load-bearing clause rather than deleting wholesale. One-line public-API
+   docstrings stating *what* a method does are fine regardless.
 
    **Worked examples:**
    ```python
