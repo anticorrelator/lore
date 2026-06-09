@@ -174,14 +174,19 @@ if [[ -z "${VERDICTS_INPUT// }" ]]; then
 fi
 
 # --- Compute metrics via python ---
-# Filter to reverse-auditor lines. Accept three verdicts: omission-claim,
-# silence, preflight-failed. Anything else is a bad line.
+# Filter to reverse-auditor lines. Accept four verdicts: omission-claim,
+# silence, preflight-failed, insufficient-evidence. Anything else is a bad line.
+# insufficient-evidence is an abstention (the judge could not adjudicate from
+# the inlined packet) — a non-verdict. It is counted separately and EXCLUDED
+# from `total`, the denominator for omission_rate / coverage_quality /
+# grounding_failure_rate, so an inadequate packet does not dilute those signals.
 METRICS=$(printf '%s' "$VERDICTS_INPUT" | python3 -c '
 import json, sys
 
 omission_claims = 0
 silences = 0
 preflight_failed = 0
+abstentions = 0
 total = 0
 bad_lines = 0
 
@@ -203,6 +208,10 @@ for line in sys.stdin:
         silences += 1
     elif verdict == "preflight-failed":
         preflight_failed += 1
+    elif verdict == "insufficient-evidence" or row.get("coverage_state") == "insufficient-evidence":
+        # Abstention — non-verdict; excluded from the metric denominator.
+        abstentions += 1
+        continue
     else:
         bad_lines += 1
         continue
@@ -210,7 +219,7 @@ for line in sys.stdin:
 
 if total == 0:
     sys.stderr.write("[rollup] Warning: no reverse-auditor verdicts found\n")
-    print(json.dumps({"total": 0, "omission_claims": 0, "silences": 0, "preflight_failed": 0, "bad_lines": bad_lines}))
+    print(json.dumps({"total": 0, "omission_claims": 0, "silences": 0, "preflight_failed": 0, "abstentions": abstentions, "bad_lines": bad_lines}))
     sys.exit(0)
 
 omission_rate = omission_claims / total
@@ -222,6 +231,7 @@ print(json.dumps({
     "omission_claims":       omission_claims,
     "silences":              silences,
     "preflight_failed":      preflight_failed,
+    "abstentions":           abstentions,
     "bad_lines":             bad_lines,
     "omission_rate":         omission_rate,
     "coverage_quality":      coverage_quality,

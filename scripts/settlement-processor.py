@@ -45,11 +45,13 @@ STATUS_TERMINAL_PREVIEW_LIMIT = 5
 KIND_TASK_CLAIM = "task-claim"
 KIND_OMISSION = "omission"
 KIND_CONSUMPTION_CONTRADICTION = "consumption-contradiction"
-KINDS = (KIND_TASK_CLAIM, KIND_OMISSION, KIND_CONSUMPTION_CONTRADICTION)
+KIND_COMMONS = "commons"
+KINDS = (KIND_TASK_CLAIM, KIND_OMISSION, KIND_CONSUMPTION_CONTRADICTION, KIND_COMMONS)
 KIND_SOURCES = {
     KIND_TASK_CLAIM: {"filename": "task-claims.jsonl", "id_field": "claim_id"},
     KIND_OMISSION: {"filename": "audit-candidates.jsonl", "id_field": "candidate_id"},
     KIND_CONSUMPTION_CONTRADICTION: {"filename": "consumption-contradictions.jsonl", "id_field": "contradiction_id"},
+    KIND_COMMONS: {"filename": "promoted-commons.jsonl", "id_field": "claim_id"},
 }
 
 # Maps a queue item's kind to the kind-specialized correctness-gate it will
@@ -62,6 +64,7 @@ KIND_TO_GATE = {
     KIND_TASK_CLAIM: "correctness-gate-assertion",
     KIND_OMISSION: "correctness-gate-omission",
     KIND_CONSUMPTION_CONTRADICTION: "correctness-gate-contradiction",
+    KIND_COMMONS: "correctness-gate-assertion",
 }
 HARD_CAL_GATES = {"correctness-gate-assertion", "correctness-gate-contradiction"}
 
@@ -409,6 +412,33 @@ class Settlement:
                     reasons.append(f"missing claim_payload.{field}")
         return f"_work/{work_item}/consumption-contradictions.jsonl: " + "; ".join(reasons) if reasons else ""
 
+    def commons_invalid_reason(self, work_item: str, row: dict[str, Any]) -> str:
+        # promote-commons-append.sh validates the row at write time; this is a
+        # defensive re-check. entry_path becomes mutation authority at flowback,
+        # so reject any row whose target does not resolve to an existing commons
+        # entry inside the store (escaping paths, deleted entries, typos).
+        reasons: list[str] = []
+        for field in ("claim_id", "claim", "falsifier", "scale", "entry_path"):
+            value = row.get(field)
+            if not isinstance(value, str) or not value.strip():
+                reasons.append(f"missing {field}")
+        related = row.get("related_files")
+        if not isinstance(related, list) or not related:
+            reasons.append("missing related_files")
+        entry_path = row.get("entry_path")
+        if isinstance(entry_path, str) and entry_path.strip():
+            resolved = (self.kdir / entry_path).resolve()
+            try:
+                resolved.relative_to(self.kdir.resolve())
+                inside = True
+            except ValueError:
+                inside = False
+            if not inside:
+                reasons.append("entry_path escapes knowledge store")
+            elif not resolved.is_file():
+                reasons.append("entry_path does not point at an existing entry")
+        return f"_work/{work_item}/promoted-commons.jsonl: " + "; ".join(reasons) if reasons else ""
+
     def kind_invalid_reason(self, kind: str, work_item: str, row: dict[str, Any]) -> str:
         if kind == KIND_TASK_CLAIM:
             return self.task_claim_invalid_reason(work_item, row)
@@ -416,6 +446,8 @@ class Settlement:
             return self.omission_invalid_reason(work_item, row)
         if kind == KIND_CONSUMPTION_CONTRADICTION:
             return self.consumption_contradiction_invalid_reason(work_item, row)
+        if kind == KIND_COMMONS:
+            return self.commons_invalid_reason(work_item, row)
         return f"unknown kind: {kind}"
 
     def source_id_for_row(self, kind: str, row: dict[str, Any]) -> str:
@@ -492,6 +524,29 @@ class Settlement:
                 "evidence_ref": {"path": f"_work/{work_item}/consumption-contradictions.jsonl", "contradiction_id": contradiction_id},
                 "attempts": 0,
                 "enqueued_at": row.get("created_at") or "",
+                "updated_at": utc_now(),
+                "_backlog_order": order,
+            }
+        if kind == KIND_COMMONS:
+            claim_id = str(row.get("claim_id") or "")
+            related = row.get("related_files") if isinstance(row.get("related_files"), list) else []
+            return {
+                "id": self.item_id(work_item, claim_id, KIND_COMMONS),
+                "kind": KIND_COMMONS,
+                "status": "pending",
+                "work_item": work_item,
+                "source_id": claim_id,
+                "claim_id": claim_id,
+                "scale": row.get("scale"),
+                "claim": row.get("claim"),
+                # entry_path is the flowback target — carried verbatim so the
+                # terminus resolves the mutation entry without re-running search.
+                "entry_path": row.get("entry_path"),
+                "source": {"file": (related[0] if related else None), "line_range": None},
+                "falsifier": row.get("falsifier"),
+                "evidence_ref": {"path": f"_work/{work_item}/promoted-commons.jsonl", "claim_id": claim_id},
+                "attempts": 0,
+                "enqueued_at": "",
                 "updated_at": utc_now(),
                 "_backlog_order": order,
             }
@@ -2297,7 +2352,14 @@ class Settlement:
         Returns a `correction_outcome` dict for every branch reached after a
         contradicted verdict (closed taxonomy in D2), or None for non-contradicted
         verdicts. Stderr lines are preserved as the live-operator surface.
+
+        Commons kind flows both verdict directions through this same terminus:
+        verified -> advance the entry's confidence; contradicted -> mutate the
+        entry resolved from the producer row's entry_path. See
+        _apply_commons_flowback.
         """
+        if str(run.get("kind") or KIND_TASK_CLAIM) == KIND_COMMONS:
+            return self._apply_commons_flowback(run, item)
         verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
         if verdict.get("verdict") != "contradicted":
             return None
@@ -2409,6 +2471,113 @@ class Settlement:
             return {"status": "skipped", "reason": "not_mechanically_applicable", "target_entry": target_path_relative}
         sys.stderr.write(f"[settlement] auto-correction failed run_id={run_id}: apply-correction exit {apply_proc.returncode}: {apply_proc.stderr[-500:]}\n")
         return {"status": "failed", "reason": "apply_unexpected_exit", "target_entry": target_path_relative, "detail": f"exit {apply_proc.returncode}: {apply_proc.stderr[-160:]}"}
+
+    def _apply_commons_flowback(self, run: dict[str, Any], item: dict[str, Any]) -> dict[str, Any] | None:
+        """Commons-kind half of the correction terminus. Both verdict directions
+        land here: verified advances the entry's confidence (unaudited -> high),
+        contradicted mutates the entry text. The mutation target is the producer
+        row's entry_path (carried on the item), NOT a re-run of find-correction-
+        targets — the promotion already named the exact entry the audit covers.
+
+        Best-effort per the terminus contract: subprocess failures are logged to
+        stderr with run_id + work_item + claim_id and never raised. Returns a
+        correction_outcome dict for every reached branch, or None for verdicts
+        this terminus does not act on (e.g. unverified/error).
+        """
+        verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
+        verdict_value = str(verdict.get("verdict") or "").strip()
+        run_id = str(run.get("run_id") or "")
+        work_item = str(item.get("work_item") or "")
+        claim_id = str(item.get("claim_id") or item.get("source_id") or "")
+        if verdict_value not in ("verified", "contradicted"):
+            return None
+        if os.environ.get("LORE_SETTLEMENT_DISABLE_AUTO_CORRECTION", "").strip():
+            return {"status": "skipped", "reason": "auto_correction_disabled"}
+        if not run_id:
+            return {"status": "skipped", "reason": "auto_correction_disabled"}
+
+        # entry_path passed commons_invalid_reason at enqueue, but the entry may
+        # have moved or been superseded since — re-validate before mutating.
+        entry_rel = str(item.get("entry_path") or "")
+        if not entry_rel:
+            sys.stderr.write(f"[settlement] commons flowback skipped run_id={run_id} work_item={work_item} claim_id={claim_id}: item missing entry_path\n")
+            return {"status": "skipped", "reason": "missing_entry_path"}
+        entry_abs = (self.kdir / entry_rel).resolve()
+        try:
+            entry_abs.relative_to(self.kdir.resolve())
+            inside = True
+        except ValueError:
+            inside = False
+        if not inside or not entry_abs.is_file():
+            sys.stderr.write(f"[settlement] commons flowback skipped run_id={run_id} work_item={work_item} claim_id={claim_id}: entry_path no longer resolves ({entry_rel})\n")
+            return {"status": "skipped", "reason": "entry_path_unresolved", "target_entry": entry_rel}
+
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        evidence_text = verdict.get("evidence") or f"settlement_run_id={run_id}"
+
+        if verdict_value == "verified":
+            cmd = [
+                "bash",
+                os.path.join(scripts_dir, "apply-correction.sh"),
+                "--advance-confidence",
+                "--entry", str(entry_abs),
+                "--verdict-id", run_id,
+                "--verdict-source", "correctness-gate",
+                "--evidence", evidence_text,
+                "--allow-settlement-verdict",
+            ]
+            try:
+                proc = subprocess.run(
+                    cmd, text=True, capture_output=True, timeout=30, check=False,
+                    env={**os.environ, "LORE_KNOWLEDGE_DIR": str(self.kdir)},
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                sys.stderr.write(f"[settlement] commons flowback failed run_id={run_id} work_item={work_item} claim_id={claim_id}: advance-confidence subprocess: {exc}\n")
+                return {"status": "failed", "reason": "advance_subprocess_error", "target_entry": entry_rel, "detail": str(exc)[:200]}
+            if proc.returncode == 0:
+                sys.stderr.write(f"[settlement] commons flowback ADVANCED run_id={run_id} entry={entry_rel}\n")
+                return {"status": "advanced", "reason": "confidence_advanced", "target_entry": entry_rel}
+            sys.stderr.write(f"[settlement] commons flowback failed run_id={run_id} work_item={work_item} claim_id={claim_id}: advance-confidence exit {proc.returncode}: {proc.stderr[-300:]}\n")
+            return {"status": "failed", "reason": "advance_unexpected_exit", "target_entry": entry_rel, "detail": f"exit {proc.returncode}: {proc.stderr[-160:]}"}
+
+        # contradicted -> mutate. Reuse the exact-match safety boundary: the
+        # claim text must be present verbatim in the entry body or apply-
+        # correction exits 2 (a safe skip, not an error).
+        correction_text = verdict.get("correction")
+        if not (isinstance(correction_text, str) and correction_text.strip()):
+            sys.stderr.write(f"[settlement] commons flowback skipped run_id={run_id} work_item={work_item} claim_id={claim_id}: empty correction text\n")
+            return {"status": "skipped", "reason": "empty_correction_text", "target_entry": entry_rel}
+        claim_text = item.get("claim") or ""
+        if not str(claim_text).strip():
+            sys.stderr.write(f"[settlement] commons flowback skipped run_id={run_id} work_item={work_item} claim_id={claim_id}: empty claim text\n")
+            return {"status": "skipped", "reason": "empty_claim_text", "target_entry": entry_rel}
+        cmd = [
+            "bash",
+            os.path.join(scripts_dir, "apply-correction.sh"),
+            "--entry", str(entry_abs),
+            "--verdict-id", run_id,
+            "--verdict-source", "correctness-gate",
+            "--evidence", evidence_text,
+            "--superseded-text", str(claim_text),
+            "--replacement-text", correction_text,
+            "--allow-settlement-verdict",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, text=True, capture_output=True, timeout=30, check=False,
+                env={**os.environ, "LORE_KNOWLEDGE_DIR": str(self.kdir)},
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            sys.stderr.write(f"[settlement] commons flowback failed run_id={run_id} work_item={work_item} claim_id={claim_id}: apply-correction subprocess: {exc}\n")
+            return {"status": "failed", "reason": "apply_subprocess_error", "target_entry": entry_rel, "detail": str(exc)[:200]}
+        if proc.returncode == 0:
+            sys.stderr.write(f"[settlement] commons flowback APPLIED run_id={run_id} entry={entry_rel}\n")
+            return {"status": "applied", "reason": "applied", "target_entry": entry_rel}
+        if proc.returncode == 2:
+            sys.stderr.write(f"[settlement] commons flowback skipped run_id={run_id} work_item={work_item} claim_id={claim_id}: superseded_text not present in {entry_rel} (not_mechanically_applicable)\n")
+            return {"status": "skipped", "reason": "not_mechanically_applicable", "target_entry": entry_rel}
+        sys.stderr.write(f"[settlement] commons flowback failed run_id={run_id} work_item={work_item} claim_id={claim_id}: apply-correction exit {proc.returncode}: {proc.stderr[-300:]}\n")
+        return {"status": "failed", "reason": "apply_unexpected_exit", "target_entry": entry_rel, "detail": f"exit {proc.returncode}: {proc.stderr[-160:]}"}
 
     def parse_verdict_envelope(self, stdout: str) -> dict[str, Any] | None:
         self._last_executor_audit = None

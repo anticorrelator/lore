@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
-# apply-correction.sh — Apply a correction OR add a new entry to the knowledge commons
+# apply-correction.sh — Apply a correction, add a new entry, or advance an
+# entry's confidence in the knowledge commons.
 #
-# Two modes, keyed on the presence of --add-entry:
+# Three modes, keyed on --add-entry / --advance-confidence (default: mutate):
+#
+# Advance-confidence mode:
+#   apply-correction.sh --advance-confidence
+#                        --entry <path>
+#                        --verdict-id <id> --verdict-source <source>
+#                        --evidence "<file:line quote>"
+#                        --allow-settlement-verdict
+#                        [--date <YYYY-MM-DD>]
+#                        [--dry-run]
 #
 # Mutation mode (default):
 #   apply-correction.sh --entry <path> --verdict-id <id> --verdict-source <source>
@@ -45,6 +55,14 @@
 #   (b) kind=omission with capture-gate-passed marker.
 # The capture-gate / curator markers land on the run record in Phase 2; for
 # now the gate accepts a non-empty 'verified' verdict with matching kind.
+#
+# Advance-confidence mode: advances an existing entry's confidence from
+# 'unaudited' to 'high' in its META block and appends a confidence_advances[]
+# provenance item. Forbids the mutation/add-entry text flags. Authorization
+# always requires --allow-settlement-verdict and validates against
+# _settlement/runs/<verdict-id>.json — verdict.verdict must be 'verified'.
+# Idempotent: an entry already at 'high' is a no-op (exit 0) that appends no
+# duplicate confidence_advances[] item, so the settlement terminus can re-run it.
 #
 # With --check-escalation (mutation mode only), also evaluates L3 conditions:
 #   (a) entry has >= N inbound backlinks (default 3) in _manifest.json
@@ -91,6 +109,7 @@ BACKLINK_THRESHOLD=3
 DRY_RUN=0
 ALLOW_SETTLEMENT_VERDICT=0
 ADD_ENTRY_MODE=0
+ADVANCE_CONFIDENCE_MODE=0
 NEW_TITLE=""
 NEW_BODY=""
 NEW_SCALE=""
@@ -98,6 +117,14 @@ META_FIELDS=""
 
 usage() {
   cat >&2 <<EOF
+Advance-confidence mode:
+  apply-correction.sh --advance-confidence --entry <path>
+                       --verdict-id <id> --verdict-source <source>
+                       --evidence "<file:line quote>"
+                       --allow-settlement-verdict
+                       [--date <YYYY-MM-DD>]
+                       [--dry-run]
+
 Mutation mode:
   apply-correction.sh --entry <path> --verdict-id <id> --verdict-source <source>
                        --evidence "<file:line quote>"
@@ -205,6 +232,10 @@ while [[ $# -gt 0 ]]; do
       ADD_ENTRY_MODE=1
       shift
       ;;
+    --advance-confidence)
+      ADVANCE_CONFIDENCE_MODE=1
+      shift
+      ;;
     --title)
       NEW_TITLE="$2"
       shift 2
@@ -234,7 +265,31 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Validate required args (per mode) ---
-if [[ "$ADD_ENTRY_MODE" == "1" ]]; then
+if [[ $((ADD_ENTRY_MODE + ADVANCE_CONFIDENCE_MODE)) -gt 1 ]]; then
+  echo "Error: --add-entry and --advance-confidence are mutually exclusive" >&2
+  exit 1
+fi
+if [[ "$ADVANCE_CONFIDENCE_MODE" == "1" ]]; then
+  # Advance-confidence forbids the text flags (it edits no body, only the META
+  # confidence field) and demands the settlement authorization.
+  if [[ -n "$SUPERSEDED_TEXT" || -n "$REPLACEMENT_TEXT" || -n "$NEW_TITLE" || -n "$NEW_BODY" || -n "$NEW_SCALE" ]]; then
+    echo "Error: --advance-confidence forbids --superseded-text, --replacement-text, --title, --body, --scale" >&2
+    usage
+    exit 1
+  fi
+  for flag_name in ENTRY_PATH VERDICT_ID VERDICT_SOURCE EVIDENCE; do
+    if [[ -z "${!flag_name}" ]]; then
+      flag_dashed="${flag_name//_/-}"
+      echo "Error: --${flag_dashed,,} is required in --advance-confidence mode" >&2
+      usage
+      exit 1
+    fi
+  done
+  if [[ "$ALLOW_SETTLEMENT_VERDICT" != "1" ]]; then
+    echo "Error: --advance-confidence requires --allow-settlement-verdict" >&2
+    exit 1
+  fi
+elif [[ "$ADD_ENTRY_MODE" == "1" ]]; then
   # Add-entry mode forbids the mutation-specific text flags and demands the
   # new-entry-specific ones plus the settlement authorization. This branch
   # creates a NEW commons entry rather than mutating an existing one.
@@ -315,14 +370,29 @@ if [[ "$ALLOW_SETTLEMENT_VERDICT" == "1" ]]; then
     echo "Correction rejected: --allow-settlement-verdict set but settlement run not found: $RUN_FILE" >&2
     exit 4
   fi
-  # Two authorization branches keyed on mode:
-  #   mutate    → verdict.verdict == "contradicted" + non-empty correction
-  #   add-entry → verdict.verdict == "verified" + matching kind (task-claim
-  #               with curator-selected + capture-gate-passed, OR omission
-  #               with capture-gate-passed). The curator/capture markers are
-  #               written on the run record in Phase 2; for now we accept a
-  #               verified verdict with kind ∈ {task-claim, omission}.
-  if [[ "$ADD_ENTRY_MODE" == "1" ]]; then
+  # Authorization branches keyed on mode:
+  #   mutate            → verdict.verdict == "contradicted" + non-empty correction
+  #   add-entry         → verdict.verdict == "verified" + matching kind (task-claim
+  #                       with curator-selected + capture-gate-passed, OR omission
+  #                       with capture-gate-passed). The curator/capture markers are
+  #                       written on the run record in Phase 2; for now we accept a
+  #                       verified verdict with kind ∈ {task-claim, omission}.
+  #   advance-confidence → verdict.verdict == "verified" (the commons audit
+  #                       confirmed the promoted claim).
+  if [[ "$ADVANCE_CONFIDENCE_MODE" == "1" ]]; then
+    SETTLEMENT_OK=$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        run = json.load(f)
+except (OSError, json.JSONDecodeError):
+    print("unreadable"); sys.exit(0)
+verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
+if verdict.get("verdict") != "verified":
+    print("not_verified"); sys.exit(0)
+print("ok")
+' "$RUN_FILE" 2>/dev/null || echo "error")
+  elif [[ "$ADD_ENTRY_MODE" == "1" ]]; then
     SETTLEMENT_OK=$(python3 -c '
 import json, sys
 try:
@@ -487,6 +557,84 @@ print(os.path.relpath(sys.argv[1], sys.argv[2]))
   echo "[add-entry] Created $rel"
   echo "  verdict_id=$VERDICT_ID  verdict_source=$VERDICT_SOURCE"
   echo "  scale=$NEW_SCALE"
+  exit 0
+fi
+
+# --- Advance-confidence mode: advance META confidence and exit. ---
+# Rewrites `confidence: unaudited` -> `confidence: high` in the entry's META
+# block and appends a confidence_advances[] provenance item (mirroring the
+# corrections[] trail). Idempotent: an entry already at `high` is a no-op that
+# appends nothing, so the settlement terminus can re-run on a retried verdict.
+if [[ "$ADVANCE_CONFIDENCE_MODE" == "1" ]]; then
+  python3 - "$ENTRY_PATH" "$VERDICT_ID" "$VERDICT_SOURCE" "$EVIDENCE" "$DATE_TODAY" "$DRY_RUN" "$KDIR" <<'ADVANCE_PY'
+import sys, os, re, json
+
+entry_path     = sys.argv[1]
+verdict_id     = sys.argv[2]
+verdict_source = sys.argv[3]
+evidence       = sys.argv[4]
+date_str       = sys.argv[5]
+dry_run        = sys.argv[6] == '1'
+kdir           = sys.argv[7]
+
+try:
+    original = open(entry_path, encoding='utf-8').read()
+except (OSError, UnicodeDecodeError) as e:
+    print(f"Error: cannot read entry: {e}", file=sys.stderr)
+    sys.exit(2)
+
+META_RE = re.compile(r'(<!--)(.*?)(-->)', re.DOTALL)
+meta_matches = list(META_RE.finditer(original))
+if not meta_matches:
+    print(f"Error: no HTML META block found in entry: {entry_path!r}", file=sys.stderr)
+    sys.exit(3)
+meta_match = meta_matches[-1]
+meta_inner = meta_match.group(2)
+
+rel_path = os.path.relpath(entry_path, kdir) if kdir else entry_path
+
+# Read current confidence from META. Absent confidence is treated as unaudited.
+conf_match = re.search(r'\|\s*confidence:\s*(\S+)', meta_inner)
+current = conf_match.group(1) if conf_match else "unaudited"
+if current == "high":
+    print(f"[advance-confidence] {rel_path}: already high — no-op")
+    sys.exit(0)
+
+advance_item = json.dumps({
+    "date": date_str,
+    "verdict_source": verdict_source,
+    "verdict_id": verdict_id,
+    "evidence": evidence,
+    "from": current,
+    "to": "high",
+}, ensure_ascii=False, separators=(', ', ': '))
+
+if conf_match:
+    new_inner = meta_inner[:conf_match.start(1)] + "high" + meta_inner[conf_match.end(1):]
+else:
+    new_inner = meta_inner.rstrip() + " | confidence: high"
+
+ADVANCES_RE = re.compile(r'\|\s*confidence_advances:\s*\[.*?\]', re.DOTALL)
+existing = ADVANCES_RE.search(new_inner)
+if existing:
+    block = existing.group(0)
+    new_inner = new_inner.replace(block, block.rstrip(']') + ', ' + advance_item + ']')
+else:
+    new_inner = new_inner.rstrip() + f' | confidence_advances: [{advance_item}]'
+
+final = original[:meta_match.start()] + meta_match.group(1) + new_inner + meta_match.group(3) + original[meta_match.end():]
+
+if dry_run:
+    print(f"[dry-run][advance-confidence] Would update: {rel_path}")
+    print(f"[dry-run][advance-confidence]   confidence: {current} -> high")
+    print(f"[dry-run][advance-confidence]   confidence_advances item: {advance_item}")
+    sys.exit(0)
+
+with open(entry_path, 'w', encoding='utf-8') as f:
+    f.write(final)
+print(f"[advance-confidence] {rel_path}: confidence {current} -> high")
+print(f"  verdict_id={verdict_id}  verdict_source={verdict_source}")
+ADVANCE_PY
   exit 0
 fi
 

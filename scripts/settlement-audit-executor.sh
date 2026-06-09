@@ -185,6 +185,7 @@ case "$kind" in
   task-claim)                 source_filename="task-claims.jsonl" ;;
   omission)                   source_filename="audit-candidates.jsonl" ;;
   consumption-contradiction)  source_filename="consumption-contradictions.jsonl" ;;
+  commons)                    source_filename="promoted-commons.jsonl" ;;
   *)
     echo "[settlement-executor] Error: unknown kind '$kind'" >&2
     emit_envelope "error" "unknown kind: $kind" "" "1" ""

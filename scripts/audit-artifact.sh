@@ -132,16 +132,20 @@ split_codex_model_variant() {
 # constraint to the CLI (claude --json-schema reads inline; codex
 # --output-schema reads a file). Opt-in per callsite — only the
 # reverse-auditor callsite passes this today (D7).
+# Optional 5th arg: max_turns. Per-callsite turn cap (default 15). The
+# reverse-auditor passes a low cap because its evidence is inlined — it has
+# nothing to fetch — while gate/curator keep the default.
 headless_runner_invoke() {
   local system_prompt_file="$1"
   local user_prompt="$2"
   local output_file="$3"
   local schema_path="${4:-}"
+  local max_turns="${5:-15}"
   local attempt=1
   local rc=0
   while (( attempt <= LORE_JUDGE_MAX_ATTEMPTS )); do
     rc=0
-    _headless_runner_invoke_once "$system_prompt_file" "$user_prompt" "$output_file" "$schema_path" || rc=$?
+    _headless_runner_invoke_once "$system_prompt_file" "$user_prompt" "$output_file" "$schema_path" "$max_turns" || rc=$?
     if (( rc == 0 )); then
       if (( attempt > 1 )); then
         echo "[audit] headless runner succeeded on attempt $attempt/$LORE_JUDGE_MAX_ATTEMPTS after retry" >&2
@@ -183,6 +187,8 @@ _headless_runner_invoke_once() {
   # directly. Empty/unset means no schema constraint (existing 3-arg call
   # shape preserved per D7).
   local schema_path="${4:-}"
+  # Optional 5th arg: per-callsite turn cap (default 15).
+  local max_turns="${5:-15}"
 
   # Capability gate. The capability cells are the source of truth — if
   # the active harness reports `none`, we refuse rather than silently
@@ -239,7 +245,7 @@ _headless_runner_invoke_once() {
           --model "$JUDGE_MODEL" \
           --output-format stream-json \
           --verbose \
-          --max-turns 15 \
+          --max-turns "$max_turns" \
           --json-schema "$(cat "$schema_path")" \
           > "$stream_file" 2>"$err_file"
         rc=$?
@@ -314,7 +320,7 @@ PYEOF
           --append-system-prompt "$(cat "$system_prompt_file")" \
           --model "$JUDGE_MODEL" \
           --output-format text \
-          --max-turns 15 \
+          --max-turns "$max_turns" \
           > "$output_file" 2>"$err_file"
         rc=$?
       fi
@@ -388,20 +394,58 @@ $user_prompt"
     rm -f "$err_file"
     return 65
   fi
-  # rc==0, output non-empty, but model occasionally returns plain text /
-  # markdown-wrapped JSON / partial output that the downstream shape
-  # validators reject with parse-error at the first character. Surface that
-  # as rc=66 so the retry layer can catch it before the call site emits a
-  # contract-violation exit. Cheaper than re-walking the full audit pipeline.
-  if ! python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$output_file" >/dev/null 2>&1; then
-    local sz
-    sz=$(wc -c < "$output_file" 2>/dev/null | tr -d ' ' || echo 0)
-    echo "[audit] headless runner exit=0 but output is not parseable JSON (size=$sz, file=$output_file)" >&2
+  # rc==0, output non-empty, but the model occasionally wraps the JSON in
+  # markdown fences (```json ... ```) or surrounds it with prose ("Here is the
+  # verdict: {...}"). A strict json.load() rejects those at the first character,
+  # and because the wrapping is *deterministic* for a given model+template the
+  # 3-attempt retry layer cannot recover it — every attempt re-fails identically
+  # and the run lands as executor_audit_error. So first try to SALVAGE the JSON:
+  # strip fences / extract the outermost object, and if that yields valid JSON,
+  # rewrite output_file in place (only when salvage was actually needed, so a
+  # clean payload stays byte-for-byte) so the downstream shape validators — still
+  # the real gate — see clean input. Only a genuinely unparseable payload (no
+  # recoverable JSON object) falls through to rc=66.
+  if python3 - "$output_file" <<'PYEOF' 2>/dev/null
+import json, re, sys
+p = sys.argv[1]
+s = open(p).read().strip()
+
+def try_load(x):
+    try:
+        return json.loads(x)
+    except Exception:
+        return None
+
+obj = try_load(s)
+need_rewrite = obj is None
+if obj is None:
+    m = re.search(r"```(?:json)?\s*(.*?)```", s, re.DOTALL)
+    if m:
+        obj = try_load(m.group(1).strip())
+if obj is None:
+    starts = [i for i in (s.find("{"), s.find("[")) if i != -1]
+    if starts:
+        start = min(starts)
+        close = "}" if s[start] == "{" else "]"
+        end = s.rfind(close)
+        if end > start:
+            obj = try_load(s[start:end + 1])
+if obj is None:
+    sys.exit(1)
+if need_rewrite:
+    with open(p, "w") as f:
+        json.dump(obj, f)
+sys.exit(0)
+PYEOF
+  then
     rm -f "$err_file"
-    return 66
+    return 0
   fi
+  local sz
+  sz=$(wc -c < "$output_file" 2>/dev/null | tr -d ' ' || echo 0)
+  echo "[audit] headless runner exit=0 but output is not parseable JSON after fence/prose salvage (size=$sz, file=$output_file)" >&2
   rm -f "$err_file"
-  return 0
+  return 66
 }
 
 usage() {
@@ -561,9 +605,9 @@ if [[ -n "$KIND_FLAG" || -n "$ID_FLAG" ]]; then
     exit 1
   fi
   case "$KIND_FLAG" in
-    task-claim|omission|consumption-contradiction) : ;;
+    task-claim|omission|consumption-contradiction|commons) : ;;
     *)
-      echo "[audit] Error: --kind must be 'task-claim', 'omission', or 'consumption-contradiction' (got '$KIND_FLAG')" >&2
+      echo "[audit] Error: --kind must be 'task-claim', 'omission', 'consumption-contradiction', or 'commons' (got '$KIND_FLAG')" >&2
       exit 1
       ;;
   esac
@@ -796,6 +840,10 @@ if [[ -n "$KIND_FLAG" && -n "$ID_FLAG" ]]; then
       kind_source_file="$ARTIFACT_PATH/consumption-contradictions.jsonl"
       kind_id_field="contradiction_id"
       ;;
+    commons)
+      kind_source_file="$ARTIFACT_PATH/promoted-commons.jsonl"
+      kind_id_field="claim_id"
+      ;;
   esac
   if [[ ! -f "$kind_source_file" ]]; then
     echo "[audit] Error: --kind $KIND_FLAG source file not found: $kind_source_file" >&2
@@ -851,6 +899,16 @@ PYEOF
       AUDIT_CANDIDATES_PATH=""
       CONSUMPTION_CONTRADICTIONS_PATH="$kind_source_file"
       ARTIFACT_TYPE="consumption-contradiction"
+      ;;
+    commons)
+      # A promoted-commons.jsonl row carries claim_id + claim + falsifier, so the
+      # task-claims extractor reads it directly; ARTIFACT_TYPE=commons keeps the
+      # provenance legible while the gate dispatch below routes it to the
+      # assertion fork (no per-kind extractor or gate template needed).
+      TASK_CLAIMS_PATH="$kind_source_file"
+      AUDIT_CANDIDATES_PATH=""
+      CONSUMPTION_CONTRADICTIONS_PATH=""
+      ARTIFACT_TYPE="commons"
       ;;
   esac
   ARTIFACT_PATH="$kind_source_file"
@@ -1271,6 +1329,12 @@ case "$ARTIFACT_TYPE" in
     ;;
   consumption-contradiction)
     GATE_TEMPLATE_NAME="correctness-gate-contradiction"
+    ;;
+  commons)
+    # Commons-entry claims are assertion-style (claim + falsifier); reuse the
+    # assertion gate. Verdict rows stay tier:reusable like every other kind
+    # routed through this gate, so /evolve excludes them by construction (D4).
+    GATE_TEMPLATE_NAME="correctness-gate-assertion"
     ;;
   *)
     # Path-provided artifacts that did not match any per-kind file still need a
@@ -1900,7 +1964,8 @@ REVERSE_AUDITOR_STAGE_RAN=0
 REVERSE_AUDITOR_APPENDED_COUNT=0
 REVERSE_AUDITOR_TEMPLATE_VERSION=""
 REVERSE_AUDITOR_RAW_FILE=""
-REVERSE_AUDITOR_VERDICT="none"          # none | omission-claim | silence | preflight-failed
+REVERSE_AUDITOR_INLINED_FILE=""        # set only on the claude -p path (injected outputs skip inlining)
+REVERSE_AUDITOR_VERDICT="none"          # none | omission-claim | silence | insufficient-evidence | preflight-failed
 # Reason enum per architecture/evidence/audit-pipeline-contract.md:
 #   silence | ok | verified-with-drift                          (pass-side)
 #   file-missing | line-out-of-range | snippet-mismatch |
@@ -1910,7 +1975,8 @@ REVERSE_AUDITOR_VERDICT="none"          # none | omission-claim | silence | pref
 # class failure (no clone has the content) distinct from the producer-
 # class failures (snippet disagreed).
 REVERSE_AUDITOR_PREFLIGHT_REASON=""
-REVERSE_AUDITOR_QUEUE_DEST=""           # candidates | attempts | silence
+REVERSE_AUDITOR_QUEUE_DEST=""           # candidates | attempts | silence | reattempt
+REVERSE_AUDITOR_COVERAGE_STATE=""       # covered | insufficient-evidence (read from emission)
 REVERSE_AUDITOR_PREFLIGHT_SOFTENED=0    # 1 when reason == verified-with-drift (pass with drift)
 REVERSE_AUDITOR_EXIT_CODE=0             # 0 unless preflight failed (sets to 3)
 
@@ -1975,9 +2041,22 @@ payload = {
 with open(out_file, "w") as fh:
     json.dump(payload, fh, indent=2)
 PYEOF
-        REVERSE_AUDITOR_USER_PROMPT="Reverse-auditor input object (curator-surviving portfolio + change context per contract.md):
+        # Resolve the evidence the judge needs (snippet@HEAD + window, the diff
+        # hunks for the changed files, content_locate_verdict per file) and
+        # inline it, so the adjudicate-only judge has nothing left to fetch.
+        # RA-scoped: only this callsite inlines; gate/curator inputs are
+        # untouched. The inlined packet is also the verdict-envelope record.
+        REVERSE_AUDITOR_INLINED_FILE=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-inlined.XXXXXX")
+        if ! LORE_REPO_ROOT="${LORE_REPO_ROOT:-$(pwd)}" KDIR="$KDIR" \
+            python3 "$SCRIPT_DIR/reverse-auditor-inline-evidence.py" \
+            "$REVERSE_AUDITOR_INPUT_FILE" "$REVERSE_AUDITOR_INLINED_FILE" \
+            --lore-repo "${LORE_REPO_ROOT:-$(pwd)}" --kdir "$KDIR" 2>&1; then
+          echo "[audit] warning: inline-evidence resolution failed — judge will see unresolved packet" >&2
+          cp "$REVERSE_AUDITOR_INPUT_FILE" "$REVERSE_AUDITOR_INLINED_FILE" 2>/dev/null || true
+        fi
+        REVERSE_AUDITOR_USER_PROMPT="Reverse-auditor input object — evidence already resolved and inlined under inlined_evidence (adjudicate from the packet alone; do not read files or run shell commands):
 
-$(cat "$REVERSE_AUDITOR_INPUT_FILE")
+$(cat "$REVERSE_AUDITOR_INLINED_FILE")
 
 Use judge_template_version: $REVERSE_AUDITOR_TEMPLATE_VERSION
 
@@ -1987,13 +2066,18 @@ Emit exactly one JSON object matching this Reverse-auditor output shape:
   \"judge_template_version\": \"$REVERSE_AUDITOR_TEMPLATE_VERSION\",
   \"work_item\": \"<slug>\",
   \"artifact_id\": \"<id>\",
+  \"coverage_state\": \"covered\",
+  \"abstention_reason\": null,
+  \"insufficient_evidence_refs\": null,
   \"omission_claim\": null,
   \"created_at\": \"<ISO-8601 UTC>\"
 }
-If you emit an omission, replace null with the omission_claim object required by the template. Do not emit legacy fields such as verdict_source, verdict, or claim. No markdown fences. No prose outside the JSON."
+Set coverage_state to \"insufficient-evidence\" (with abstention_reason + insufficient_evidence_refs, omission_claim null) when the inlined packet is inadequate to adjudicate. If you emit an omission, replace omission_claim null with the omission_claim object required by the template and keep coverage_state \"covered\". Do not emit legacy fields such as verdict_source, verdict, or claim. No markdown fences. No prose outside the JSON."
         echo "[audit] reverse-auditor: invoking headless runner (template-version: $REVERSE_AUDITOR_TEMPLATE_VERSION, model: $JUDGE_MODEL)" >&2
         REVERSE_AUDITOR_SCHEMA_PATH="$SCRIPT_DIR/judge-schemas/reverse-auditor-output.schema.json"
-        if ! headless_runner_invoke "$REVERSE_AUDITOR_TEMPLATE" "$REVERSE_AUDITOR_USER_PROMPT" "$REVERSE_AUDITOR_RAW_FILE" "$REVERSE_AUDITOR_SCHEMA_PATH"; then
+        # --max-turns 3: the adjudicate-only judge has its evidence inlined, so
+        # it needs no fetch turns. The cap is RA-scoped; gate/curator default.
+        if ! headless_runner_invoke "$REVERSE_AUDITOR_TEMPLATE" "$REVERSE_AUDITOR_USER_PROMPT" "$REVERSE_AUDITOR_RAW_FILE" "$REVERSE_AUDITOR_SCHEMA_PATH" 3; then
           echo "[audit] warning: headless runner invocation failed for reverse-auditor — skipping reverse-auditor stage" >&2
           REVERSE_AUDITOR_RAW_FILE=""
         elif [[ ! -s "$REVERSE_AUDITOR_RAW_FILE" ]]; then
@@ -2011,9 +2095,12 @@ If you emit an omission, replace null with the omission_claim object required by
       # Validate reverse-auditor output shape per contract.md:
       #   judge == "reverse-auditor"
       #   judge_template_version non-empty
-      #   omission_claim present: either null (silence) or object with all
-      #     required fields (file, line_range, exact_snippet,
+      #   coverage_state in {covered, insufficient-evidence}
+      #   omission_claim present: either null (silence/abstention) or object
+      #     with all required fields (file, line_range, exact_snippet,
       #     normalized_snippet_hash, falsifier, why_it_matters).
+      #   coverage_state == insufficient-evidence requires omission_claim null
+      #     + a non-empty abstention_reason (the visible non-verdict shape).
       # The grounding preflight is a separate deterministic validator that
       # runs AFTER shape validation; shape-ok claims with bad anchors route
       # to audit-attempts.jsonl rather than failing the audit outright.
@@ -2036,11 +2123,19 @@ else:
         errs.append(f"judge != 'reverse-auditor' (got {obj.get('judge')!r})")
     if obj.get("judge_template_version") != expected_tv:
         errs.append(f"judge_template_version mismatch: expected {expected_tv!r}, got {obj.get('judge_template_version')!r}")
+    coverage_state = obj.get("coverage_state")
+    if coverage_state not in ("covered", "insufficient-evidence"):
+        errs.append(f"coverage_state must be 'covered' or 'insufficient-evidence' (got {coverage_state!r})")
     if "omission_claim" not in obj:
         errs.append("omission_claim field missing (must be object or null)")
     else:
         oc = obj["omission_claim"]
-        if oc is not None:
+        if coverage_state == "insufficient-evidence":
+            if oc is not None:
+                errs.append("coverage_state=insufficient-evidence requires omission_claim null")
+            if not obj.get("abstention_reason"):
+                errs.append("coverage_state=insufficient-evidence requires non-empty abstention_reason")
+        elif oc is not None:
             if not isinstance(oc, dict):
                 errs.append("omission_claim must be an object or null")
             else:
@@ -2069,40 +2164,43 @@ PYEOF
       REVERSE_AUDITOR_STAGE_RAN=1
 
       # Persist the reverse-auditor emission to the artifact settlement
-      # record (append-only), mirroring the gate/curator pattern.
-      python3 - "$REVERSE_AUDITOR_RAW_FILE" "$ARTIFACT_ID" "$VERDICTS_FILE" << 'PYEOF'
+      # record (append-only), mirroring the gate/curator pattern. The exact
+      # inlined packet the judge adjudicated on (resolved snippet@HEAD +
+      # window, the diff hunks, content_locate_verdict per file) is recorded
+      # alongside the emission so the judged evidence stays reconstructible.
+      python3 - "$REVERSE_AUDITOR_RAW_FILE" "$ARTIFACT_ID" "$VERDICTS_FILE" "$REVERSE_AUDITOR_INLINED_FILE" << 'PYEOF'
 import json, sys, datetime
-ra_file, artifact_id, verdicts_file = sys.argv[1:4]
+ra_file, artifact_id, verdicts_file, inlined_file = sys.argv[1:5]
 with open(ra_file) as fh:
     obj = json.load(fh)
+inlined_evidence = None
+try:
+    with open(inlined_file) as fh:
+        inlined_evidence = json.load(fh).get("inlined_evidence")
+except (OSError, json.JSONDecodeError, AttributeError):
+    inlined_evidence = None
 wrapped = {
     "artifact_id": artifact_id,
     "judge_run_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     **obj,
+    "inlined_evidence": inlined_evidence,
 }
 with open(verdicts_file, "a") as fh:
     fh.write(json.dumps(wrapped) + "\n")
 PYEOF
 
-      # Run grounding preflight on the emission. Silence short-circuits
-      # with reason=silence (preflight treats it as a no-op pass).
-      REVERSE_AUDITOR_PREFLIGHT_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-preflight.XXXXXX")
-      # --repo-root should point at the repo whose files the claim anchors
-      # reference. For the audit pipeline that's the lore checkout (where
-      # the source files live), not $KDIR. Default preflight to $PWD.
-      PREFLIGHT_REPO_ROOT="${LORE_REPO_ROOT:-$(pwd)}"
-      if ! python3 "$SCRIPT_DIR/grounding-preflight.py" \
-          --claim-file "$REVERSE_AUDITOR_RAW_FILE" \
-          --repo-root "$PREFLIGHT_REPO_ROOT" \
-          > "$REVERSE_AUDITOR_PREFLIGHT_TMP" 2>/dev/null; then
-        echo "[audit] warning: grounding-preflight.py invocation failed — treating as preflight-failed" >&2
-        printf '%s\n' '{"pass": false, "reason": "field-missing", "detail": "grounding-preflight.py invocation failed"}' > "$REVERSE_AUDITOR_PREFLIGHT_TMP"
-      fi
+      REVERSE_AUDITOR_COVERAGE_STATE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("coverage_state") or "")' "$REVERSE_AUDITOR_RAW_FILE")
 
-      REVERSE_AUDITOR_PREFLIGHT_REASON=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reason","unknown"))' "$REVERSE_AUDITOR_PREFLIGHT_TMP")
-      REVERSE_AUDITOR_PREFLIGHT_PASS=$(python3 -c 'import json,sys; print("true" if json.load(open(sys.argv[1])).get("pass") else "false")' "$REVERSE_AUDITOR_PREFLIGHT_TMP")
+      REVERSE_AUDITOR_PREFLIGHT_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-preflight.XXXXXX")
 
       # Classify the verdict for rollup + reporting.
+      #   insufficient-evidence          → abstention; the inlined packet was
+      #                                    inadequate to adjudicate. RA-local
+      #                                    re-attempt signal — route to a
+      #                                    re-attempt queue (NOT silence, NOT
+      #                                    the gate-derived aggregate
+      #                                    unverified). No claim to ground, so
+      #                                    grounding-preflight is skipped.
       #   silence                        → no emission to route; rows
       #                                    reflect "nothing surfaced"
       #   pass (ok)                      → omission-claim; route to
@@ -2123,35 +2221,110 @@ PYEOF
       #                                    attempts. Producer-class
       #                                    failure (file-missing,
       #                                    snippet-mismatch, etc.).
-      if [[ "$REVERSE_AUDITOR_PREFLIGHT_REASON" == "silence" ]]; then
-        REVERSE_AUDITOR_VERDICT="silence"
-        REVERSE_AUDITOR_QUEUE_DEST="silence"
-      elif [[ "$REVERSE_AUDITOR_PREFLIGHT_PASS" == "true" ]]; then
-        REVERSE_AUDITOR_VERDICT="omission-claim"
-        REVERSE_AUDITOR_QUEUE_DEST="candidates"
-        if [[ "$REVERSE_AUDITOR_PREFLIGHT_REASON" == "verified-with-drift" ]]; then
-          REVERSE_AUDITOR_PREFLIGHT_SOFTENED=1
-        fi
+      if [[ "$REVERSE_AUDITOR_COVERAGE_STATE" == "insufficient-evidence" ]]; then
+        REVERSE_AUDITOR_VERDICT="insufficient-evidence"
+        REVERSE_AUDITOR_QUEUE_DEST="reattempt"
+        REVERSE_AUDITOR_PREFLIGHT_REASON="insufficient-evidence"
+        # Synthesize a non-pass preflight record so the abstention is
+        # captured uniformly downstream without grounding a claim.
+        printf '%s\n' '{"pass": false, "reason": "insufficient-evidence", "detail": "reverse-auditor abstained: inlined packet inadequate to adjudicate"}' > "$REVERSE_AUDITOR_PREFLIGHT_TMP"
       else
-        REVERSE_AUDITOR_VERDICT="preflight-failed"
-        REVERSE_AUDITOR_QUEUE_DEST="attempts"
-        # Exit 3 is informational per contract: the audit completed but the
-        # omission claim was routed to audit-attempts.jsonl.
-        REVERSE_AUDITOR_EXIT_CODE=3
+        # Run grounding preflight on the emission. Silence short-circuits
+        # with reason=silence (preflight treats it as a no-op pass). The RA
+        # omission anchors to snippet@HEAD the wrapper inlined, so --no-cascade
+        # checks it against the on-disk file at the lore checkout — the source
+        # of truth the packet was resolved from (the default cwd-cascade needs
+        # a file_relative + capture refs the inlined claim does not carry).
+        # --repo-root should point at the repo whose files the claim anchors
+        # reference: the lore checkout (where the source files live), not
+        # $KDIR. Default to $PWD.
+        PREFLIGHT_REPO_ROOT="${LORE_REPO_ROOT:-$(pwd)}"
+        if ! python3 "$SCRIPT_DIR/grounding-preflight.py" \
+            --claim-file "$REVERSE_AUDITOR_RAW_FILE" \
+            --repo-root "$PREFLIGHT_REPO_ROOT" \
+            --no-cascade \
+            > "$REVERSE_AUDITOR_PREFLIGHT_TMP" 2>/dev/null; then
+          echo "[audit] warning: grounding-preflight.py invocation failed — treating as preflight-failed" >&2
+          printf '%s\n' '{"pass": false, "reason": "field-missing", "detail": "grounding-preflight.py invocation failed"}' > "$REVERSE_AUDITOR_PREFLIGHT_TMP"
+        fi
+
+        REVERSE_AUDITOR_PREFLIGHT_REASON=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reason","unknown"))' "$REVERSE_AUDITOR_PREFLIGHT_TMP")
+        REVERSE_AUDITOR_PREFLIGHT_PASS=$(python3 -c 'import json,sys; print("true" if json.load(open(sys.argv[1])).get("pass") else "false")' "$REVERSE_AUDITOR_PREFLIGHT_TMP")
+
+        if [[ "$REVERSE_AUDITOR_PREFLIGHT_REASON" == "silence" ]]; then
+          REVERSE_AUDITOR_VERDICT="silence"
+          REVERSE_AUDITOR_QUEUE_DEST="silence"
+        elif [[ "$REVERSE_AUDITOR_PREFLIGHT_PASS" == "true" ]]; then
+          REVERSE_AUDITOR_VERDICT="omission-claim"
+          REVERSE_AUDITOR_QUEUE_DEST="candidates"
+          if [[ "$REVERSE_AUDITOR_PREFLIGHT_REASON" == "verified-with-drift" ]]; then
+            REVERSE_AUDITOR_PREFLIGHT_SOFTENED=1
+          fi
+        else
+          REVERSE_AUDITOR_VERDICT="preflight-failed"
+          REVERSE_AUDITOR_QUEUE_DEST="attempts"
+          # Exit 3 is informational per contract: the audit completed but the
+          # omission claim was routed to audit-attempts.jsonl.
+          REVERSE_AUDITOR_EXIT_CODE=3
+        fi
+      fi
+
+      # Resolve the owning work-item slug once — both the abstention
+      # re-attempt route and the candidates/attempts route use it.
+      WORK_ITEM_SLUG=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("work_item") or "")' "$RESOLVED_INPUT_FILE")
+      if [[ -z "$WORK_ITEM_SLUG" && "$ARTIFACT_TYPE" == "work-item" ]]; then
+        WORK_ITEM_SLUG="$ARTIFACT_ID"
+      fi
+
+      # Abstention is an RA-local re-attempt signal — it carries no omission
+      # claim, so it does NOT flow through the candidates/attempts queue (nor
+      # the gate-derived aggregate unverified). Record it in a distinct
+      # audit-reattempts.jsonl so a re-drain can pick it up with a better
+      # packet. Re-attempt rows live alongside candidates/attempts in the
+      # work-item dir, or in the owning/_audit dir for followup-rooted
+      # artifacts.
+      if [[ "$REVERSE_AUDITOR_QUEUE_DEST" == "reattempt" ]]; then
+        if [[ -n "$WORK_ITEM_SLUG" && -d "$KDIR/_work/$WORK_ITEM_SLUG" ]]; then
+          REATTEMPT_DIR="$KDIR/_work/$WORK_ITEM_SLUG"
+        elif [[ -n "$OWNING_DIR" ]]; then
+          REATTEMPT_DIR="$OWNING_DIR"
+        else
+          REATTEMPT_DIR="$KDIR/_audit"
+          mkdir -p "$REATTEMPT_DIR"
+        fi
+        python3 - "$REVERSE_AUDITOR_RAW_FILE" "$REATTEMPT_DIR" "$ARTIFACT_ID" << 'PYEOF'
+import json, os, sys, uuid
+from datetime import datetime, timezone
+ra_file, queue_dir, artifact_id = sys.argv[1:4]
+with open(ra_file) as fh:
+    emission = json.load(fh)
+work_item = emission.get("work_item") or artifact_id
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+row = {
+    "reattempt_id":   f"reatt-{uuid.uuid4().hex[:12]}",
+    "verdict_source": "reverse-auditor",
+    "work_item":      work_item,
+    "artifact_id":    artifact_id,
+    "coverage_state": "insufficient-evidence",
+    "abstention_reason": emission.get("abstention_reason") or "",
+    "insufficient_evidence_refs": emission.get("insufficient_evidence_refs") or [],
+    "status":         "pending_reattempt",
+    "created_at":     now,
+}
+target = os.path.join(queue_dir, "audit-reattempts.jsonl")
+with open(target, "a") as fh:
+    fh.write(json.dumps(row, sort_keys=True) + "\n")
+# stderr only — stdout is reserved for the --json report.
+print(target, file=sys.stderr)
+PYEOF
       fi
 
       # Route the emission to candidates/attempts queue. Prefer
       # audit-queue-route.sh when a work-item slug resolves under
       # $KDIR/_work/<slug>/; otherwise write directly into the owning
-      # artifact dir (the followup sidecar case). Silence writes nothing.
-      if [[ "$REVERSE_AUDITOR_QUEUE_DEST" != "silence" ]]; then
-        # Prefer the work_item field from the resolved input; fall back
-        # to the artifact_id when the artifact itself is a work-item slug.
-        WORK_ITEM_SLUG=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("work_item") or "")' "$RESOLVED_INPUT_FILE")
-        if [[ -z "$WORK_ITEM_SLUG" && "$ARTIFACT_TYPE" == "work-item" ]]; then
-          WORK_ITEM_SLUG="$ARTIFACT_ID"
-        fi
-
+      # artifact dir (the followup sidecar case). Silence and abstention
+      # write nothing here (abstention routed to the re-attempt queue above).
+      if [[ "$REVERSE_AUDITOR_QUEUE_DEST" == "candidates" || "$REVERSE_AUDITOR_QUEUE_DEST" == "attempts" ]]; then
         if [[ -n "$WORK_ITEM_SLUG" && -d "$KDIR/_work/$WORK_ITEM_SLUG" ]]; then
           # Canonical routing path — audit-queue-route.sh is sole writer
           # of _work/<slug>/audit-{candidates,attempts}.jsonl.
@@ -2274,6 +2447,14 @@ elif verdict == "silence":
     omission_value = 0.0
     coverage_value = 1.0
     grounding_fail = 0.0
+elif verdict == "insufficient-evidence":
+    # Abstention is a non-verdict: the judge could not adjudicate from the
+    # packet. It scores no omission_rate / coverage_quality (no claim to
+    # anchor) and is NOT a grounding failure — the telemetry row carries the
+    # coverage_state so the rollup can track abstention separately.
+    omission_value = 0.0
+    coverage_value = 0.0
+    grounding_fail = 0.0
 else:  # preflight-failed
     omission_value = 0.0
     coverage_value = 1.0
@@ -2364,6 +2545,8 @@ if verdict == "preflight-failed" and preflight_reason:
     grounding_row["failure_reason"] = preflight_reason
 if verdict == "omission-claim" and softened:
     grounding_row["softened"] = True
+if verdict == "insufficient-evidence":
+    grounding_row["coverage_state"] = "insufficient-evidence"
 rows.append(grounding_row)
 
 print(json.dumps(rows))
@@ -2380,6 +2563,8 @@ PYEOF
           fi
         done < <(printf '%s' "$RA_ROWS_JSON" | jq -c '.[]?')
       fi
+
+      rm -f "$REVERSE_AUDITOR_INLINED_FILE" 2>/dev/null || true
     fi
   fi
 fi
@@ -2419,7 +2604,7 @@ if [[ $JSON_MODE -eq 1 ]]; then
     "$REVERSE_AUDITOR_STAGE_RAN" "$REVERSE_AUDITOR_TEMPLATE_VERSION" \
     "$REVERSE_AUDITOR_VERDICT" "$REVERSE_AUDITOR_PREFLIGHT_REASON" \
     "$REVERSE_AUDITOR_QUEUE_DEST" "$REVERSE_AUDITOR_APPENDED_COUNT" \
-    "$REVERSE_AUDITOR_PREFLIGHT_SOFTENED" \
+    "$REVERSE_AUDITOR_PREFLIGHT_SOFTENED" "$REVERSE_AUDITOR_COVERAGE_STATE" \
     "$TOTAL_ROWS_APPENDED" "$PIPELINE_STAGE" "$NEXT_STAGE" << 'PYEOF'
 import json, sys
 (artifact_id, artifact_type, artifact_path, verdicts_file,
@@ -2428,8 +2613,8 @@ import json, sys
  curator_ran, curator_tv,
  n_selected, n_dropped, curator_appended,
  ra_ran, ra_tv, ra_verdict, ra_preflight_reason, ra_queue_dest, ra_appended,
- ra_softened,
- total_appended, pipeline_stage, next_stage) = sys.argv[1:26]
+ ra_softened, ra_coverage_state,
+ total_appended, pipeline_stage, next_stage) = sys.argv[1:27]
 
 out = {
     "artifact_id": artifact_id,
@@ -2459,6 +2644,7 @@ if ra_ran == "1":
     out["reverse_auditor"] = {
         "template_version": ra_tv,
         "verdict": ra_verdict,
+        "coverage_state": ra_coverage_state or None,
         "preflight_reason": ra_preflight_reason,
         "queue_destination": ra_queue_dest,
         "softened": ra_softened == "1",
@@ -2478,9 +2664,9 @@ else
   if [[ $REVERSE_AUDITOR_STAGE_RAN -eq 1 ]]; then
     echo "[audit] reverse-auditor complete (template-version: $REVERSE_AUDITOR_TEMPLATE_VERSION)"
     if [[ "$REVERSE_AUDITOR_PREFLIGHT_SOFTENED" == "1" ]]; then
-      echo "[audit]   verdict=$REVERSE_AUDITOR_VERDICT preflight=$REVERSE_AUDITOR_PREFLIGHT_REASON queue=$REVERSE_AUDITOR_QUEUE_DEST softened=true"
+      echo "[audit]   verdict=$REVERSE_AUDITOR_VERDICT coverage_state=$REVERSE_AUDITOR_COVERAGE_STATE preflight=$REVERSE_AUDITOR_PREFLIGHT_REASON queue=$REVERSE_AUDITOR_QUEUE_DEST softened=true"
     else
-      echo "[audit]   verdict=$REVERSE_AUDITOR_VERDICT preflight=$REVERSE_AUDITOR_PREFLIGHT_REASON queue=$REVERSE_AUDITOR_QUEUE_DEST"
+      echo "[audit]   verdict=$REVERSE_AUDITOR_VERDICT coverage_state=$REVERSE_AUDITOR_COVERAGE_STATE preflight=$REVERSE_AUDITOR_PREFLIGHT_REASON queue=$REVERSE_AUDITOR_QUEUE_DEST"
     fi
     echo "[audit]   scorecard rows appended: $REVERSE_AUDITOR_APPENDED_COUNT"
   fi

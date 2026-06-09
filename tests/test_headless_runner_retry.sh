@@ -38,6 +38,11 @@ cat > "$STUB_BIN_DIR/claude" <<'STUB'
 #!/usr/bin/env bash
 # Read everything from stdin so the parent's `printf '%s' "$user_prompt" | claude ...`
 # completes without SIGPIPE.
+# Record the --max-turns value so tests can assert per-callsite cap forwarding.
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--max-turns" ]]; then echo "$2" > "$STUB_DIR/last_max_turns"; fi
+  shift
+done
 cat >/dev/null
 attempt_file="$STUB_DIR/attempt_count"
 recipe_file="$STUB_DIR/recipe"
@@ -54,6 +59,16 @@ case "$recipe" in
     ;;
   json:*)
     printf '%s' "${recipe#json:}"
+    exit 0
+    ;;
+  fenced:*)
+    # markdown-fenced JSON — exit 0, deterministically wrapped
+    printf '```json\n%s\n```\n' "${recipe#fenced:}"
+    exit 0
+    ;;
+  prose:*)
+    # JSON surrounded by conversational prose — exit 0
+    printf 'Here is the verdict:\n%s\nThat concludes the audit.\n' "${recipe#prose:}"
     exit 0
     ;;
   fail:*)
@@ -107,8 +122,12 @@ eval "\$(awk '
 export LORE_FRAMEWORK="claude-code"
 JUDGE_MODEL="opus"
 
-# Args: <sys_file> <user_prompt> <output_file>
-headless_runner_invoke "\$1" "\$2" "\$3"
+# Args: <sys_file> <user_prompt> <output_file> [schema_path] [max_turns].
+# Forward only the args actually supplied so the function's own defaults apply.
+ARGS=("\$1" "\$2" "\$3")
+[[ \$# -ge 4 ]] && ARGS+=("\$4")
+[[ \$# -ge 5 ]] && ARGS+=("\$5")
+headless_runner_invoke "\${ARGS[@]}"
 DRIVEREOF
 chmod +x "$DRIVER"
 
@@ -128,6 +147,20 @@ run_case() {
 attempts() { cat "$STUB_DIR/attempt_count"; }
 out_contents() { cat "$TEST_ROOT/out.txt"; }
 stderr_contents() { cat "$TEST_ROOT/stderr.log"; }
+
+# Invoke with an explicit per-callsite max-turns cap (empty 4th schema arg).
+run_case_maxturns() {
+  local recipe_lines="$1" max_turns="$2"
+  local sys_file="$TEST_ROOT/sys.md"
+  local out_file="$TEST_ROOT/out.txt"
+  echo "test system prompt" > "$sys_file"
+  : > "$out_file"
+  rm -f "$STUB_DIR/last_max_turns"
+  printf '%s' "$recipe_lines" > "$STUB_DIR/recipe"
+  echo 0 > "$STUB_DIR/attempt_count"
+  bash "$DRIVER" "$sys_file" "test user prompt" "$out_file" "" "$max_turns" 2>"$TEST_ROOT/stderr.log"
+  echo $?
+}
 
 echo "=== headless_runner_invoke retry tests ==="
 
@@ -226,6 +259,52 @@ if [[ "$rc" == "64" ]] && [[ "$(attempts)" == "0" ]]; then
   pass "setup error: rc=64, attempts=0 (no retry waste)"
 else
   fail "expected rc=64 attempts=0, got rc=$rc attempts=$(attempts); stderr: $(stderr_contents)"
+fi
+
+echo ""
+echo "Test 9: markdown-fenced JSON → salvaged on attempt 1, no retry waste"
+rc=$(run_case "fenced:{\"verdict\":\"upheld\"}")
+if [[ "$rc" == "0" ]] && [[ "$(attempts)" == "1" ]]; then
+  pass "fenced JSON: rc=0, attempts=1 (salvaged, not retried)"
+else
+  fail "expected rc=0 attempts=1, got rc=$rc attempts=$(attempts); stderr: $(stderr_contents)"
+fi
+if [[ "$(out_contents)" == '{"verdict": "upheld"}' ]]; then
+  pass "fenced JSON: output_file rewritten to clean JSON (fences stripped)"
+else
+  fail "expected clean JSON in output_file, got: $(out_contents)"
+fi
+
+echo ""
+echo "Test 10: prose-wrapped JSON → salvaged on attempt 1, no retry waste"
+rc=$(run_case "prose:{\"verdict\":\"contradicted\"}")
+if [[ "$rc" == "0" ]] && [[ "$(attempts)" == "1" ]]; then
+  pass "prose-wrapped JSON: rc=0, attempts=1 (salvaged, not retried)"
+else
+  fail "expected rc=0 attempts=1, got rc=$rc attempts=$(attempts); stderr: $(stderr_contents)"
+fi
+if [[ "$(out_contents)" == '{"verdict": "contradicted"}' ]]; then
+  pass "prose-wrapped JSON: output_file rewritten to clean JSON (prose stripped)"
+else
+  fail "expected clean JSON in output_file, got: $(out_contents)"
+fi
+
+echo ""
+echo "Test 11: per-callsite max-turns (5th arg) is forwarded to claude --max-turns"
+rc=$(run_case_maxturns "json:{\"ok\":true}" 3)
+if [[ "$rc" == "0" ]] && [[ "$(cat "$STUB_DIR/last_max_turns" 2>/dev/null)" == "3" ]]; then
+  pass "explicit max-turns=3 forwarded (reverse-auditor cap)"
+else
+  fail "expected forwarded max-turns=3, got rc=$rc max_turns=$(cat "$STUB_DIR/last_max_turns" 2>/dev/null); stderr: $(stderr_contents)"
+fi
+
+echo ""
+echo "Test 12: default max-turns (3-arg call) stays 15"
+rc=$(run_case "json:{\"ok\":true}")
+if [[ "$rc" == "0" ]] && [[ "$(cat "$STUB_DIR/last_max_turns" 2>/dev/null)" == "15" ]]; then
+  pass "default max-turns=15 preserved for gate/curator callsites"
+else
+  fail "expected default max-turns=15, got rc=$rc max_turns=$(cat "$STUB_DIR/last_max_turns" 2>/dev/null); stderr: $(stderr_contents)"
 fi
 
 echo ""

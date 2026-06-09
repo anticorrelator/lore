@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Reverse-auditor output",
-  "description": "Constrains the reverse-auditor judge's single-emission JSON output. The wrapper envelope is fixed; the `omission_claim` slot disjoins between Shape A (object — one grounded omission claim) and Shape B (null — explicit silence). `additionalProperties: false` at root AND inside `omission_claim` mechanically rejects legacy/drifted fields (`verdict`, `verdict_source`, `claim`, `no-omission`) even when the prompt already forbids them. Template-version identity is enforced post-parse in scripts/audit-artifact.sh — this schema only pins the 12-char hex shape.",
+  "description": "Constrains the reverse-auditor judge's single-emission JSON output. A distinct top-level `coverage_state` field is carried on every emission: `covered` (the judge adjudicated from the inlined packet) or `insufficient-evidence` (the inlined packet was inadequate to adjudicate — a visible non-verdict, NOT silence). The `omission_claim` slot disjoins between Shape A (object — one grounded omission claim) and Shape B (null — explicit silence or the abstention companion). Three caller-visible states: {coverage_state:covered, omission_claim:null} = covered silence; {coverage_state:covered, omission_claim:{…}} = grounded omission; {coverage_state:insufficient-evidence, omission_claim:null, abstention_reason, insufficient_evidence_refs[]} = abstention. `additionalProperties: false` at root AND inside `omission_claim` mechanically rejects legacy/drifted fields (`verdict`, `verdict_source`, `claim`, `no-omission`) even when the prompt already forbids them. Per the json-schema-codex convention the disjunct uses anyOf+type (never oneOf). Template-version identity is enforced post-parse in scripts/audit-artifact.sh — this schema only pins the 12-char hex shape.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -9,6 +9,7 @@
     "judge_template_version",
     "work_item",
     "artifact_id",
+    "coverage_state",
     "omission_claim",
     "created_at"
   ],
@@ -20,10 +21,29 @@
     },
     "work_item": { "type": "string", "minLength": 1 },
     "artifact_id": { "type": "string", "minLength": 1 },
+    "coverage_state": {
+      "type": "string",
+      "enum": ["covered", "insufficient-evidence"]
+    },
+    "abstention_reason": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1 }
+      ]
+    },
+    "insufficient_evidence_refs": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      ]
+    },
     "omission_claim": {
       "anyOf": [
         {
-          "title": "Shape B — explicit silence",
+          "title": "Shape B — explicit silence (or abstention companion)",
           "type": "null"
         },
         {
