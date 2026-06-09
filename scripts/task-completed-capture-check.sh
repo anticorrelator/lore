@@ -15,6 +15,16 @@
 #   silently let empty observations through — the hard-check converts that failure mode into
 #   an explicit blocked-exit with a lead-visible verdict path.
 #
+# Convention-handling presence check:
+#   Worker (general-purpose) reports must also carry a non-empty
+#     **Convention handling:**  section — the worker dispositions each woven norm
+#                                (honored / diverged / none in scope). Presence is
+#                                structural here; the lead assesses the dispositions
+#                                and runs the completeness comparison. This check is
+#                                folded into validate-structured-report.py's
+#                                Observations path, so it rides the same template_version
+#                                gate as the structured-observation requirement.
+#
 # Tier 2 / Tier 3 section shape-check (implement-rewrite, task #4):
 #   Worker reports MAY carry additional sections produced by the extended worker.md:
 #     **Tier 2 evidence:**      list of claim_id strings — already validated at write-time
@@ -215,7 +225,7 @@ case "$AGENT_TYPE" in
     # Tier 2 evidence / Tier 3 candidates sections when present.
     if ! validate_structured_report "Observations"; then
       echo "Update the task description before marking complete." >&2
-      echo "Required: ≥1 structured observation under **Observations:** with all of {claim, file, line_range, falsifier, significance} (significance ∈ {low, medium, high}), OR a well-formed escalation verdict {escalation: \"task-too-trivial-for-solo-decomposition\", rationale: \"<one-sentence reason>\"}." >&2
+      echo "Required: ≥1 structured observation under **Observations:** with all of {claim, file, line_range, falsifier, significance} (significance ∈ {low, medium, high}), AND a non-empty **Convention handling:** section dispositioning each woven norm (honored / diverged / none in scope), OR a well-formed escalation verdict {escalation: \"task-too-trivial-for-solo-decomposition\", rationale: \"<one-sentence reason>\"}." >&2
       echo "Validation failure: $FAIL_REASON" >&2
       exit 2
     fi
@@ -234,7 +244,7 @@ case "$AGENT_TYPE" in
     # Unknown or empty agent type — apply worker-style hard-validation as default.
     if ! validate_structured_report "Observations"; then
       echo "Update the task description before marking complete." >&2
-      echo "Required: ≥1 structured observation under **Observations:** with all of {claim, file, line_range, falsifier, significance} (significance ∈ {low, medium, high}), OR a well-formed escalation verdict {escalation: \"task-too-trivial-for-solo-decomposition\", rationale: \"<one-sentence reason>\"}." >&2
+      echo "Required: ≥1 structured observation under **Observations:** with all of {claim, file, line_range, falsifier, significance} (significance ∈ {low, medium, high}), AND a non-empty **Convention handling:** section dispositioning each woven norm (honored / diverged / none in scope), OR a well-formed escalation verdict {escalation: \"task-too-trivial-for-solo-decomposition\", rationale: \"<one-sentence reason>\"}." >&2
       echo "Validation failure: $FAIL_REASON" >&2
       exit 2
     fi

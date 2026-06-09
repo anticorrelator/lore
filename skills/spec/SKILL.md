@@ -344,6 +344,8 @@ Produce the conceptual frame first before committing to phase breakdown.
   - [[knowledge:conventions/<entry>]] — what to honor at implement time (1 line)
   ```
   **This block is the audit manifest, not the worker delivery channel.** It exists so a reviewer (and the post-plan ceremony) can see every preference/convention discovery surfaced. Workers do not read top-level plan.md sections — `/implement` consumes per-phase `**Knowledge context:**` backlinks (Step 3.1 directive branch resolves them via `resolve-manifest.sh` into worker `{{prior_knowledge}}`). Distribution into per-phase Knowledge context happens in Step 5b #2 (concordance-assisted annotation) — see that step for the per-phase placement rule. Entries that don't bind to any specific phase still appear here; the manifest also catches them during review even when they have no per-phase home.
+
+  Keep this block at the **full permissive surfaced set** regardless of what binds to a task. The manifest is permissive; the *weave* into task lines is strict (Step 5b "Deliverable contract gate" — only scope-overlapping judgment-class norms become constraint clauses). A backlink staying here while its norm is also woven into a task is correct: the manifest is provenance, the task line is delivery.
 - **Advisor declarations:** For each matched skill whose domain overlaps with a phase's scope, consider adding an `**Advisors:**` entry. Set mode based on phase complexity — `must-consult` if the skill defines invariants workers must respect, `on-demand` otherwise.
 
 ### Step 5a: Design ceremony evaluation
@@ -394,6 +396,26 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    A valid task line states the **deliverable**, the **owned file or surface**, and at least one **design or integration constraint** that scopes the worker's choices.
 
+   <!-- INVARIANT — canonical /spec weave vocabulary. Keep these terms stable; the
+        /implement worker report's `Convention handling:` field and the lead's
+        completeness comparison key on them. Drift silently breaks the handoff.
+          - "constraint clause" — the imperative norm woven into a task line
+          - "woven norm" / "binding norm" — a surfaced norm that became a constraint clause
+          - "stable label" — the entry slug/title the backlink resolves to; the
+            identifier shared with the worker report and the lead comparison -->
+   **Weave binding judgment-class norms into the constraint clause.** When a preference/convention from Step 5 Discovery *binds* to a task, render it as an imperative **constraint clause** in the task line itself — the instruction the worker executes — not only as a `**Knowledge context:**` backlink the worker must choose to fetch. The clause **names the norm by its stable label** (the entry slug/title the backlink resolves to) so the worker's `Convention handling:` report and the lead's completeness comparison reference the same identifier. Keep the backlink for provenance even when the norm is woven.
+
+   A norm *binds* only when **both** hold (strict weave):
+   - **Scope-overlap** — its `related_files`, file-path globs, ceremony scope, or activity domain intersect this task's owned files, objective, or surface.
+   - **Judgment-class** — compliance is a judgment a one-line deterministic check could not make. Mechanical/lint-class norms (file-header rules, scaffolding-marker bans, structural lint) are **never woven** — they route to the hook arm of `route-conventions-by-enforcement-class-delivery-vs`. Judgment-class but no scope-overlap → backlink only (no constraint clause); neither → top-level manifest only.
+
+   Weave only this binding subset — never the full permissive surfaced set, never mechanical norms. The top-level `**Related preferences/conventions:**` audit manifest stays unchanged (Step 5 — full permissive set); strict weaving into task lines is what prevents task-description bloat and dilution.
+
+   Example bound task line:
+   ```
+   - [ ] Implement the retry wrapper in `src/net/client.py` — surface partial failures rather than swallowing them; honor `error-messages-name-the-failed-operation-and-the-fix` (name the failed operation and the corrective action in every raised error). [[knowledge:conventions/error-messages-name-the-failed-operation-and-the-fix]]
+   ```
+
    Route invalid units:
 
    - **"Verify X" / "Check Y"** → phase-level `**Verification:**` objective; do not duplicate into each task description.
@@ -418,6 +440,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
    - **Format:** add as `[[knowledge:preferences/<entry>]]` (or `conventions/`, or `cross-cutting-conventions/`) in `**Knowledge context:**`, with a worker-facing "— what to honor at implement time" annotation. Implementation-facing means tell the worker what to *do*, not just what it says.
    - **Distribute to multiple phases when warranted.** Cross-cutting conventions touching every phase's files belong in every phase's Knowledge context — duplication is correct here because each phase is its own `/implement` worker batch needing its own seeds. Do not consolidate across phases.
    - **No-overlap entries stay in the top-level manifest only.** If after permissive review an entry binds to no phase, leave it solely in `**Related preferences/conventions:**` — the manifest preserves the audit trail.
+   - **Distribution is permissive; weaving is strict — two separate channels.** This step (per-phase `**Knowledge context:**`) carries every scope-overlapping entry, judgment-class or not, as a backlink — the worker can dismiss inapplicable ones. Weaving into a task's constraint clause (Deliverable contract gate above) is the *strict* subset: only the judgment-class entries that also scope-overlap the task become imperative constraint clauses naming the norm by its stable label. A judgment-class entry that binds to a task gets **both** — the backlink here (provenance + `{{prior_knowledge}}` seed) and the woven clause in the task line (the instruction the worker executes). A mechanical entry gets only the backlink (it is never woven).
    - **Why distribute here:** `/implement` Step 3.1 (directive branch) resolves seeds via `resolve-manifest.sh` from `**Knowledge context:**` backlinks + `**Files:**` paths. Distributing here flows entries through seeds → directive → worker `{{prior_knowledge}}` without new protocol surface in `/implement`.
 
 3. **Retrieval directive derivation** — after concordance widening, populate `**Retrieval directive:**` for each phase. Derivable from phase content alone; no user input.

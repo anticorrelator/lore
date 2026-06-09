@@ -1,19 +1,9 @@
 # Retro emit/journal-write command templates
 
 Read this file when emitting a retro output line or invoking
-`lore journal write` from one of Steps 2.7, 2.8, 2b.6, 4, 4a, or 5. Each
+`lore journal write` from one of Steps 2.8, 2b.6, 4, 4a, or 5. Each
 block below is a fill-in template — load condition is named at the SKILL.md
 prose pointer for the corresponding step.
-
-## Step 2.7 — Batch audit output
-
-```
-[retro] Batch audit: <K> eligible / <M> uncovered (post-exclusion)
-  audited: <A> (rows written: <R>)
-  deferred: <D> (queue backlog — see Step 3.8 audit-coverage)
-  excluded: <E> (priority-routed consumption-contradictions)
-  failed: <F> (see $KDIR/_meta/retro-audit-log.jsonl)
-```
 
 ## Step 2.8c — Escalation telemetry output
 

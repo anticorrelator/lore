@@ -217,11 +217,65 @@ if [[ $DRY_RUN -eq 1 ]]; then
 fi
 
 # --- Invoke capture.sh ---
-"$SCRIPT_DIR/capture.sh" "${CAPTURE_ARGS[@]}"
+# Capture stdout in --json mode so we can read the entry path the commons-audit
+# producer row anchors on. capture.sh prints the JSON object on the line emitted
+# by its --json handler; a trailing "[capture] Filed to ..." line follows.
+set +e
+CAPTURE_OUT=$("$SCRIPT_DIR/capture.sh" "${CAPTURE_ARGS[@]}" --json)
 CAPTURE_EXIT=$?
+set -e
+printf '%s\n' "$CAPTURE_OUT"
 
-if [[ $CAPTURE_EXIT -eq 0 ]]; then
-  echo "[promote] promoted claim_id: $CLAIM_ID"
+if [[ $CAPTURE_EXIT -ne 0 ]]; then
+  exit $CAPTURE_EXIT
 fi
 
-exit $CAPTURE_EXIT
+echo "[promote] promoted claim_id: $CLAIM_ID"
+
+# --- Commons audit loop: producer row (fail-closed) + enqueue (fail-open) ---
+# The entry path is the only line of CAPTURE_OUT that parses as a JSON object
+# carrying `.path`; capture.sh emits it before its human-readable trailer.
+ENTRY_PATH=$(printf '%s\n' "$CAPTURE_OUT" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if isinstance(obj, dict) and obj.get("path"):
+        print(obj["path"]); break
+')
+if [[ -z "$ENTRY_PATH" ]]; then
+  die "could not resolve promoted entry path from capture.sh output; commons-audit row not written"
+fi
+
+# (a) Durably append the producer row. FAIL-CLOSED: the row is the sole carrier
+# of the falsifier (capture.sh does not persist it into the entry .md), so a
+# missing row is unrecoverable — let the failure fail the promotion visibly.
+# entry_path is stamped on so the enqueue below sees the same shape the writer
+# persists (the writer also stamps it from --entry-path).
+COMMONS_ROW=$(printf '%s' "$ROW" | jq -c --arg ep "$ENTRY_PATH" --arg wi "$WORK_ITEM" '{
+  claim_id, claim, falsifier, scale,
+  related_files: (.related_files // []),
+  work_item: $wi,
+  captured_at_sha,
+  entry_path: $ep
+}')
+if ! printf '%s' "$COMMONS_ROW" \
+  | "$SCRIPT_DIR/promote-commons-append.sh" --work-item "$WORK_ITEM" --entry-path "$ENTRY_PATH"; then
+  die "promote-commons-append.sh rejected the producer row — promotion failed (the falsifier is unrecoverable without it)"
+fi
+
+# (b) Enqueue a commons settlement item. FAIL-OPEN: scan() recovers a missing
+# queue item from the durably-written row, so a queue failure only warns.
+if [[ -x "$SCRIPT_DIR/settlement-queue.sh" ]]; then
+  if ! printf '%s' "$COMMONS_ROW" \
+    | "$SCRIPT_DIR/settlement-queue.sh" enqueue --work-item "$WORK_ITEM" --kind commons --kdir "$KNOWLEDGE_DIR" --json >/dev/null 2>&1; then
+    echo "[promote] warning: settlement enqueue failed; producer row preserved (scan will recover the queue item)" >&2
+  fi
+fi
+
+exit 0

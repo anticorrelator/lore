@@ -152,8 +152,15 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
      disjoint file ownership, independently reviewable deliverables, real parallel execution, no residue.
      Valid primary verbs: Implement / Refactor / Author / Migrate / Add support for / Wire.
      Banned as primary verb: Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only.
-     See Step 5b "Deliverable contract gate" for routing of invalid units. -->
-- [ ] <Verb> <deliverable> in <owned file/surface> — <design or integration constraint>
+     See Step 5b "Deliverable contract gate" for routing of invalid units.
+
+     Weave binding norms into the constraint clause (Step 5b "Deliverable contract gate"): when a surfaced
+     preference/convention is BOTH scope-overlapping AND judgment-class, render it as an imperative constraint
+     clause in the task line naming the norm by its stable label (the entry slug/title the backlink resolves to),
+     and keep the [[knowledge:...]] backlink for provenance. Strict weave — mechanical/lint-class norms are never
+     woven (they route to the enforcement-class hook arm); only the binding judgment-class subset becomes a clause.
+     The stable label is the identifier the /implement worker's `Convention handling:` report keys on. -->
+- [ ] <Verb> <deliverable> in <owned file/surface> — <design or integration constraint>[; honor <stable-label> (<what to do>)] [[knowledge:conventions/<woven-norm-entry>]]
 
 ## Open Questions
 - Unresolved decisions or items needing follow-up

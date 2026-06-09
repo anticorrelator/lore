@@ -23,7 +23,7 @@ Run every step as written. Role-gating applies to `/evolve` and to CLI-level ret
 
 The step numbering encodes a dependency order that downstream `/evolve` and trend analysis rely on. Running steps out of order produces coherent-looking output whose headline misrepresents the window.
 
-1. **Steps 1–2.7**: setup, evidence gathering, selective batch audit. Steps 1–2.6 run unconditionally. Step 2.7 is **signal-triggered** (runs only when promoted Tier 3 claims are uncovered and not already in the priority-audit queue) — advisory for observational windows. Step 2.7 must complete before any scorecard read so Step 3.8's routing-realization check sees current `rows.jsonl`.
+1. **Steps 1–2.6**: setup, evidence gathering. Run unconditionally. Commons audit is no longer dispatched here — promotions enqueue a `commons` settlement audit at write time, so `/retro` reads settlement health (Step 3.8) rather than backfilling coverage reactively. Step 3.8's routing-realization check reads the settlement substrate (`_settlement/queue.json` + `runs/`) directly and is independent of any earlier scorecard read.
 2. **Step 2.8**: escalation telemetry. Non-scored, feeds retro prose only.
 3. **Step 2.9**: scale signal block. Six factual + eval signals (declaration_coverage, redeclare_rate, off_scale_routes_emitted, verifier_disagreements, off_altitude_skipped, counterfactual_better) emitted as sidecar row to `retro-scale-access.jsonl` plus three "better than no scale" derivations. Runs unconditionally alongside Step 2.8; never affects `pipeline-degraded` state.
 4. **Step 3.8** (settlement pipeline health checks): **runs before** any scorecard-consumption step. Sets `window_state = "pipeline-degraded" | "warmup" | normal`. If degraded, Steps 3.0/3.9 skip.
@@ -138,7 +138,7 @@ New evidence class introduced by the consumer-contradiction-channel substrate. C
 
 **Enumerate `$KDIR/_work/<slug>/consumption-contradictions.jsonl`** across work items with activity in the retro window. Each row carries: `contradiction_id` (slug-form identifier unique per work item), `claim_id` (commons-entry claim being contradicted), `corrected_entry_path` (the entry the contradiction targets), `template_id` / `template_version` (the template that produced the contradicted entry, for attribution), `status` — `routed | verified | rejected` (lifecycle state from correctness-gate audit), `verified_by_verdict_id` (present when `status=verified`; the settlement record id), `dispatch_status` — `routed` when `consumption-contradiction-append.sh` priority-dispatched to `lore audit`, `captured_at_sha`, `observed_at`.
 
-Count rows by status: `routed`, `verified`, `rejected`. Report shape: `Consumption contradictions: N total (R routed to audit, V verified, J rejected)` plus a `pending verdict (routed, no verdict yet): <P>` indented line. The `verified` count feeds Step 3.0 `contradiction_verification_rate` and Step 3.8 consumer-contradiction routing health. The `routed` set is excluded from Step 2.7 batch audit (already priority-dispatched).
+Count rows by status: `routed`, `verified`, `rejected`. Report shape: `Consumption contradictions: N total (R routed to audit, V verified, J rejected)` plus a `pending verdict (routed, no verdict yet): <P>` indented line. The `verified` count feeds Step 3.0 `contradiction_verification_rate` and Step 3.8 consumer-contradiction routing health. The `routed` set is already priority-dispatched to `lore audit` by `consumption-contradiction-append.sh` — a distinct channel from the proactive `commons` settlement audit enqueued at promotion time.
 
 ### 2c–2e: Logs
 
@@ -150,6 +150,8 @@ Annotation-only: wrong-path explorations prevented, first-attempt accuracy gains
 
 Emit a one-block `[retro] Evidence gathered:` report covering worker observations (N tasks), context blocks (N phases, M/K resolved), surfaced concerns (N entries, M addressed / K pending), consumption contradictions (N total, R routed, V verified, J rejected), sessions (N entries), retrieval/friction events (N each), and a token-savings estimate (~Nk).
 
+**Historical-unaudited commons coverage line.** Also include one line: `historical-unaudited (outside settlement coverage): <H>` — the count of commons entries with `confidence: unaudited` frontmatter that have **no** corresponding `commons` queue entry in `$KNOWLEDGE_DIR/_settlement/queue.json` (never enqueued by the forward loop). This is the honesty companion to Step 3.8's forward-settlement coverage ratio: the ratio measures forward coverage only, so this standalone count keeps the operator from reading a clean ratio as whole-store coverage. It is evidence context, not a health-check trip — these entries are out of scope for the forward loop (Design Decision D6) and are surfaced here precisely so the silent-when-green Step 3.8 check need not break its invariant to report them.
+
 ### Step 2.5: Low-Diagnostic Check
 
 Before scoring, detect whether this retro will produce meaningful signal.
@@ -159,26 +161,6 @@ Before scoring, detect whether this retro will produce meaningful signal.
 When triggered, produce a **compressed assessment** — a `[retro] <slug> — LOW-DIAGNOSTIC` block with scope (N tasks + character), delivery worked yes/no with brief note, and notable surprises (or "none — scope too narrow for signal"). Log scores with `"low_diagnostic": true` in journal entry. D1-D4 scored honestly but flagged for trend weighting. Focus narrative on D5 only. Skip to Step 4.
 
 **Why:** Prescriptive/trivial retros consistently produce all-ceiling D1-D4 that inflate averages. Knowledge value concentrates at spec time; implementation-time scoring is low-signal. Full ceremony wastes evaluation effort.
-
-### Step 2.7: Selective batch audit (signal-triggered)
-
-Under the lazy-audit model, `lore audit` is **decorative, not a publication precondition** — audit coverage below 60% is *expected*, not pipeline degradation. This step selectively batch-dispatches `lore audit` for promoted Tier 3 claims whose audit coverage is lagging, using a fallback substrate that does not depend on `flow-events.jsonl` (which is a future substrate and not yet available).
-
-**Observational windows.** Advisory for review-only, spec-only, or prose-only retros where no producer artifacts were emitted. Skip with: `[retro] No eligible artifacts for batch audit; skipping.`
-
-**D8 fallback substrate — what this step reads in lieu of `flow-events.jsonl`:** *Promotion-time proxy* (precedence, chosen to avoid filesystem ctime instability): (1) primary — entry-internal `learned:` timestamp in commons markdown YAML frontmatter (canonical field written by `capture.sh` / `lore-promote.sh`; stable across FS operations); (2) secondary — filesystem birthtime (`stat -f %SB` macOS, `stat -c %W` Linux) when supported; (3) tertiary degraded — `ctime` only, under which Step 3.8 Audit-coverage lag runs in **advisory mode**. *Audit-triggered proxy:* rows in `$KDIR/_scorecards/audit-attempts.jsonl` plus future `audit_triggered` flow-event rows = "audit dispatched"; the old `probabilistic-audit-trigger.py` / `trigger-log.jsonl` path was retired (do not treat missing trigger logs as a live failure). *Verdict rows:* `kind==scored` entries in `rows.jsonl` with `template_id in {correctness-gate, curator, reverse-auditor}` = "audit completed + produced verdict."
-
-**Signal for eligibility.** An artifact is eligible for batch dispatch when both hold: (1) **Promoted Tier 3 claim** in the retro window (via promotion-time proxy); (2) **Uncovered** — no row in `$KDIR/_scorecards/rows.jsonl` whose `source_artifact_ids` includes this artifact's id AND whose `window_start`/`window_end` overlap this retro window.
-
-**Exclusions.** Priority-routed consumption-contradiction artifacts (rows in any `$KDIR/_work/<slug>/consumption-contradictions.jsonl` with `dispatch_status: routed`) are already in the priority-audit queue via `consumption-contradiction-append.sh`; double-dispatching wastes audit budget. Observational windows skip entirely.
-
-**Dispatch.** For each eligible artifact: `lore audit "<artifact-id>"`. `lore audit` resolves the artifact, routes it through the three-judge pipeline, and appends verdict rows to `$KDIR/_scorecards/rows.jsonl` via `scorecard-append.sh`. No new retro-side persistence required — Step 3.8 reads the same `rows.jsonl` and picks up backfilled rows automatically.
-
-**Rate limit and failure handling.** Cap at **20 uncovered artifacts per retro invocation** (unbounded batching would make execution time O(uncovered)). If the uncovered set is larger, audit the 20 highest-priority (by `scripts/audit-sample.sh` risk weights, or by recency when the sampler is not yet wired) and report the remainder as a pending-backlog counter — 50+ uncovered artifacts is itself a pipeline-health signal that Step 3.8's routing-realization check surfaces. Non-zero `lore audit` exit = partial failure: log artifact-id + exit code to `$KDIR/_meta/retro-audit-log.jsonl` and continue. Stub `lore audit` phases (pre full routing) may exit 0 without writing rows — expected; Step 3.8 emits `pipeline-degraded` once ≥10 eligible artifacts have produced no verdicts.
-
-**Output:** read `skills/retro/templates/emit-commands.md` § "Step 2.7 — Batch audit output" for the emit line.
-
-**Why this is selective, not unconditional.** The pre-lazy-audit version of this step unconditionally ran `lore audit` to close coverage gaps before Step 3.8's 60% threshold tripped. Under lazy-audit, that threshold no longer applies — coverage is expected to be incomplete, and audits are sampled probabilistically. Unconditional batch would (a) double-dispatch consumption-contradiction artifacts already in the priority queue, (b) saturate audit capacity on low-risk material, and (c) inflate retro latency without a health-check benefit. Flow-events swap-in (future work): when `flow-events.jsonl` lands, the promotion-time-proxy + audit-attempts.jsonl reads are replaced by structured event rows (`tier3_emitted`, `audit_triggered`); logic shape unchanged.
 
 ### Step 2.8: Escalation verdict surface (work-item telemetry, not scored)
 
@@ -512,6 +494,10 @@ verdict_realization_ratio = |{queue entries with a corresponding completed run i
 
 Healthy when **either**: Ratio ≥ **0.50** with sample size ≥ **10**, OR **≥ 3 completed runs** when sample size < 10. Below threshold → routing partially failed (items enqueued, runs aren't completing) — this sub-check trips.
 
+**Denominator semantics — forward-settlement coverage only (load-bearing).** This ratio measures *forward-settlement* coverage exclusively: its denominator is the set of `_settlement/queue.json` entries the forward loop enqueued (`commons` audits enqueued at promotion time, plus the other settlement kinds). It is **not** a coverage ratio over all commons entries. Pre-existing `unaudited` entries that predate enqueue-at-promotion are never enqueued by the forward loop, so they fall **outside** this denominator entirely — they neither inflate it nor trip the check.
+
+**Historical-unaudited count (honesty companion — surfaced as evidence, not as a check output).** Because those pre-existing entries sit outside the forward-settlement denominator, a clean `verdict_realization_ratio` would read falsely-green about *total* commons audit coverage. The honest count is therefore surfaced in the Step 2f evidence block (not here), so it does **not** depend on this check tripping and does **not** violate the silent-when-green invariant: count commons entries with `confidence: unaudited` in their markdown frontmatter that have **no** corresponding `commons` queue entry in `_settlement/queue.json` (i.e., never enqueued by the forward loop). This is a **reporting line, not a backfill and not a trip condition** — these entries lack the structured falsifier the correctness-gate needs and are out of scope for the forward loop (see Design Decision D6 in the plan); surfacing their count prevents the forward-coverage ratio from being misread as whole-store coverage.
+
 **Why both sub-checks.** Routing realization catches the case where queue items don't progress to completed runs (analogous to the earlier "triggers fire but verdicts don't land" failure mode, restated against the settlement substrate). Lag catches slow pipelines even when routing is complete.
 
 **Alignment with trigger realization (deferred).** The routing realization sub-check measures "of items enqueued, did runs complete?" Trigger realization (deferred) measures whether ceremonies produced enqueue events at the configured probability. The two are distinct and remain so under the substrate redirect.
@@ -643,33 +629,19 @@ Aggregate (cluster-wide totals):
 
 **When tripped, output (one block per tripped gate × signature combination):** read `skills/retro/templates/step3-8-tripped-outputs.md` § "Judge liveness".
 
-### Check: Calibration state surface
+### Check: Calibration state surface (demoted — per-row filter, NOT a `pipeline-degraded` trigger)
 
-**What it measures.** For each judge (`correctness-gate`, `curator`, `reverse-auditor`), the current scorecard-weight state:
-- `calibrated` — judge passed discrimination test; rows carry full scorecard weight.
-- `calibration-pending` — calibration hasn't happened yet or is in progress; rows emit but are non-load-bearing.
-- `calibration-failed` — calibration completed and failed; rows emit but advisory only.
+**What it does.** Excludes non-`calibrated` rows from `/retro` scoring — the *same* per-row rule `/evolve` Step 5 already applies. It does **not** set `window_state`.
 
-Source of truth: each judge's calibration log.
+Each scorecard row carries its own `calibration_state` ∈ {`calibrated`, `pre-calibration`, `calibration-failed`}. `/retro` scoring (Step 3 dimensions, Step 3.9 headline) counts only `calibrated` rows; `pre-calibration` and `calibration-failed` rows are filtered out at read time. Rows stay in `rows.jsonl` (append-only).
 
-**Why it matters.** An uncalibrated judge emits rows that look identical to calibrated rows in `rows.jsonl`. If /retro and /evolve treat those as load-bearing, the pipeline silently aggregates untrusted signal.
+**Why this is NOT `pipeline-degraded` (the cut).** `pre-calibration` is the *designed steady state* for soft-cal judges (curator, reverse-auditor) that have no calibration runner — see [`architecture/soft-cal-judges-curator-reverse-auditor-are-handle.md`](../../architecture/soft-cal-judges-curator-reverse-auditor-are-handle.md). A judge sitting at `pre-calibration` is expected, not a failure. The earlier version escalated *any* non-`calibrated` judge with rows > 0 to `pipeline-degraded`, which was both:
+- **redundant** — `/evolve`'s per-row `calibration_state == "calibrated"` gate already excludes those rows, so the window-level flag protected nothing; and
+- **harmful** — it poisoned the *calibrated* judges' rows that merely shared the window, discarding good signal and stamping every real window degraded (curator + reverse-auditor emit on essentially every window by design).
 
-**Computation.**
-```
-for each judge J:
-  state_J       = read from J's calibration log (default "calibration-pending")
-  rows_J        = |{rows in window attributable to J}|
-  if state_J != "calibrated" and rows_J > 0:
-    tripped.append((J, state_J, rows_J))
-```
+Genuine judge breakage (a gate emitting its rejection verdict on > 80% of runs, or zero-rows-despite-routing) is still caught by the **Judge liveness** check above, which legitimately sets `pipeline-degraded`. Calibration *state* alone never does.
 
-**Threshold.** Any tripped tuple (uncalibrated judge with rows > 0 in the window) sets `window_state = "pipeline-degraded"`.
-
-**When green: no prose.**
-
-**When tripped, output (one block per tripped judge):** read `skills/retro/templates/step3-8-tripped-outputs.md` § "Calibration state surface".
-
-**Non-load-bearing in /retro.** When this check trips, rows from the offending judge are **excluded** from Step 3 dimension-score evidence and from the scorecard headline. They remain in `rows.jsonl` (storage is append-only), but `/retro`'s scoring must filter them out.
+**Never narrates.** No green prose, no tripped block — a silent per-row filter.
 
 ### Check: Consumer-contradiction routing
 

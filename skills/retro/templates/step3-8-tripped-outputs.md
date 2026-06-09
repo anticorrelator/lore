@@ -62,17 +62,9 @@ One block per tripped gate × signature combination:
   see: $KDIR/_calibration/<gate>/calibration-log.jsonl (and $KDIR/_settlement/queue.json for zero-rows case)
 ```
 
-## Calibration state surface
-
-One block per tripped judge:
-
-```
-[retro] pipeline-degraded: calibration state surface
-  judge=<name> state=<calibration-pending | calibration-failed>
-  rows_in_window=<N> (non-load-bearing — /retro will not count)
-  reason_if_failed=<text or "n/a">
-  see: <judge's calibration log path>
-```
+<!-- "Calibration state surface" tripped-block removed: that check is demoted to a silent per-row
+     filter and no longer sets pipeline-degraded. See skills/retro/SKILL.md § Check: Calibration
+     state surface. pre-calibration (soft-cal steady state) is not a degradation. -->
 
 ## Consumer-contradiction routing
 

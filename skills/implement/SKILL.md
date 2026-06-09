@@ -308,7 +308,7 @@ The gate fires when **all four** conditions hold:
    lore work check <slug> "<task-subject>"
    ```
 
-7. **Skip Steps 3, 4, and Step 7's TeamDelete** — no team to shut down. Proceed directly to **Step 5** → **Step 6** → **Step 7** with `Tier 2 claims written: <count>` reflecting the lead's emissions.
+7. **Skip Steps 3, 4, and Step 7's TeamDelete** — no team to shut down. Proceed directly to **Step 5** → **Step 6** → **Step 7**; the closure-report script emits the terminal close from the lead's own run state.
 
 **Sanctioned pause:** if the lead is unsure whether the prescriptive task is fully determined enough to execute without discretion, fall through to Step 3. Lead-inline is a short-circuit, not a forced route.
 
@@ -439,8 +439,8 @@ The gate fires when **all four** conditions hold:
 As worker messages arrive (delivered automatically), branch by message kind:
 
 - **Consultation requests** — bodies whose first line is `## Consultation` and that carry `consultation-id:` route to §0 below. Mid-task questions; reply immediately so the worker resumes on the next turn boundary.
-- **Completion reports** — bodies matching `## Reporting Guidelines` shape from `agents/worker.md` route through §1–§7.
-- **Blocker messages** — anything else from a worker requiring intervention falls through to §6.
+- **Completion reports** — bodies matching `## Reporting Guidelines` shape from `agents/worker.md` route through §1–§8.
+- **Blocker messages** — anything else from a worker requiring intervention falls through to §7.
 
 Maintain a per-run **`$CONSULTATION_TRANSCRIPT`** throughout Step 4: a list of records, one per consultation reply, with `{consultation_id, worker, domain, handler, skill_template_version?, replied_at}`. §0 appends on every reply; §1 reads to verify required-consultation acknowledgement when accepting a task.
 
@@ -509,23 +509,48 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
 
       Per [[knowledge:gotchas/skills-and-protocols/advisory-consultation-protocol-relies-entirely-on-behavioral]], delivery is still behavioral-compliance + turn-boundary; lead-side tracking adds *one* lever the previous pipeline lacked — the lead can reject reports that name a `consultation_id` no acknowledged reply matches. Fabricated entries fail here.
 
-2. **Write execution log entry** — immediately after task acceptance. Pass `--template-version "$WORKER_TEMPLATE_VERSION"` because the body logged is the worker's report:
+2. **Assess convention handling — completeness comparison + divergence review (non-blocking).** Read the worker's `**Convention handling:**` section. This step is observability, not a gate: it NEVER blocks task acceptance and NEVER edits the worker's output.
+
+   The TaskCompleted hook already enforced *presence* (the section is non-empty), so this step does the two checks the hook cannot:
+
+   a. **Completeness comparison — report dispositions vs. the woven-norm list you hold.** You wove the judgment-class norms into this task's constraint clauses when you dispatched it (the stable labels are in the task description, resolved from `/spec`). Compare that list against the labels the worker dispositioned. This needs only the woven-norm list — **do NOT read the diff.** Flag any norm that is:
+      - **missing** — a woven norm with no `honored:`/`diverged:` bullet;
+      - **duplicated** — the same label dispositioned twice;
+      - **unrecognized** — a dispositioned label that was never woven into this task.
+
+      `none in scope` is correct only when you wove no norm into the task; if you wove norms and the report says `none in scope`, that is a completeness failure. A completeness finding is surfaced (see step c), not a rejection.
+
+   b. **Divergence review.** For each `diverged: <label> — <why>` bullet, assess whether the rationale is convincing. A worker may legitimately diverge — silencing principled divergence is worse than the violation. "Woven but inapplicable to the actual change" is a valid divergence rationale (and a signal the upstream relevance-gate wove too loosely). You are assessing the *rationale*, not re-deriving compliance from the diff.
+
+   c. **Open a non-blocking followup for unconvincing divergences or completeness findings.** When a divergence rationale is unconvincing, or the completeness comparison flagged a missing/duplicated/unrecognized norm, open a followup. Do this for the observability trail only — task acceptance already happened in §1 and is unaffected:
+      ```bash
+      bash ~/.lore/scripts/create-followup.sh \
+        --title "Convention handling: <work item title> — <task subject>" \
+        --source "implement" \
+        --attachments '[{"type":"work_item","slug":"<slug>"}]' \
+        --suggested-actions '[{"type":"create_work_item"}]' \
+        --content "<which norm label(s); whether unconvincing-divergence or missing/duplicated/unrecognized; the worker's rationale verbatim>"
+      ```
+      `honored`/`none in scope` reports with a clean completeness comparison pass without a followup — this is the common path. Never auto-fix the worker's output; the followup is the review-loop's input, not an edit.
+
+3. **Write execution log entry** — immediately after task acceptance. Pass `--template-version "$WORKER_TEMPLATE_VERSION"` because the body logged is the worker's report:
    ```bash
-   printf 'Task: %s\nChanges: %s\nSkills: %s\nTier2-claims: %s\nObservations: %s\nInvestigation: %s\nBlockers: %s\nConsultations: %s\nTest result: %s\n' \
+   printf 'Task: %s\nChanges: %s\nSkills: %s\nTier2-claims: %s\nObservations: %s\nConvention: %s\nInvestigation: %s\nBlockers: %s\nConsultations: %s\nTest result: %s\n' \
      "<task-subject>" "<worker Changes field>" "<worker Skills used field>" \
      "<comma-separated claim_ids from Tier 2 evidence>" \
      "<worker Observations field or Tier 3 candidates summary>" \
+     "<worker Convention handling field + your §2 assessment outcome: clean | followup-opened: <reason>>" \
      "<worker Investigation field>" "<worker Blockers field>" "<worker Consultations field — verbatim YAML list, or 'none'>" \
      "<passed|failed|skipped>" \
      | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$WORKER_TEMPLATE_VERSION"
    ```
    If the worker omitted a field, use `None`. `execution-log.md` is created on first write.
 
-3. **Verdict-fabrication guard (handler: agent only)** — before invoking advisor-impact rollup, verify each consultation in the worker's `**Consultations:**` field **whose `handler` is `agent`** against the transcript's actual advisor spawn events. The guard withholds attribution for unverifiable consultations so the advisor scorecard does not absorb fabricated worker reports as real consultation events.
+4. **Verdict-fabrication guard (handler: agent only)** — before invoking advisor-impact rollup, verify each consultation in the worker's `**Consultations:**` field **whose `handler` is `agent`** against the transcript's actual advisor spawn events. The guard withholds attribution for unverifiable consultations so the advisor scorecard does not absorb fabricated worker reports as real consultation events.
 
    **Pre-filter by handler.** From `**Consultations:**`, select only entries with `handler: agent` (per D6). Apply D6 backward-compat normalization: an entry missing `handler` but carrying `advisor_template_version` is normalized to `handler: agent`; an entry missing both is invalid (the §1 verifier already rejected it). `handler: lead` and `handler: skill` entries bypass this guard — they have no advisor agent to corroborate against.
 
-   Skip the entire guard (and §4 below) when (i) the filtered subset is empty (common on default route) OR (ii) the original field was empty/`none`.
+   Skip the entire guard (and §5 below) when (i) the filtered subset is empty (common on default route) OR (ii) the original field was empty/`none`.
 
    The guard consumes the active framework's transcript provider per the canonical consumer pattern (`get_provider()` → catch `UnsupportedFrameworkError` → `provider_status()` gate → operation calls):
 
@@ -544,11 +569,11 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
 
    Branch on the result:
 
-   **(a) Provider OK and every claimed advisor verified** — proceed to §4 with the `handler: agent` subset forwarded verbatim. The rollup runs as today.
+   **(a) Provider OK and every claimed advisor verified** — proceed to §5 with the `handler: agent` subset forwarded verbatim. The rollup runs as today.
 
-   **(b) Mismatch** — provider returns `full` (or `partial` with spawn surface intact), but one or more claimed advisor identifiers do NOT appear in the transcript's spawn events. For each unverified entry: log `fabrication-guard: skipped <advisor_template_version_or_name>` to `execution-log.md`, then strip THAT entry from the payload. Forward remaining (verified) entries to §4. The guard is a per-entry filter, not all-or-nothing reject.
+   **(b) Mismatch** — provider returns `full` (or `partial` with spawn surface intact), but one or more claimed advisor identifiers do NOT appear in the transcript's spawn events. For each unverified entry: log `fabrication-guard: skipped <advisor_template_version_or_name>` to `execution-log.md`, then strip THAT entry from the payload. Forward remaining (verified) entries to §5. The guard is a per-entry filter, not all-or-nothing reject.
 
-   **(c) Provider returns `unavailable` or `partial` with spawn surface degraded** — log `fabrication-guard: provider-<status>; rollup skipped` and skip §4 entirely. **Do NOT fall through to today's verbatim-trust behavior.** The guard exists to withhold unsupported attribution; treating absent verification as license to attribute would preserve the exact fabrication path the guard closes. On harnesses without a transcript provider, zero advisor-impact rows result; `/retro` interprets zero rows as "no signal" the same way it does for never-invoked judges.
+   **(c) Provider returns `unavailable` or `partial` with spawn surface degraded** — log `fabrication-guard: provider-<status>; rollup skipped` and skip §5 entirely. **Do NOT fall through to today's verbatim-trust behavior.** The guard exists to withhold unsupported attribution; treating absent verification as license to attribute would preserve the exact fabrication path the guard closes. On harnesses without a transcript provider, zero advisor-impact rows result; `/retro` interprets zero rows as "no signal" the same way it does for never-invoked judges.
 
    Use `write-execution-log.sh` for both log paths so the entry carries the lead's template-version:
 
@@ -562,11 +587,11 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
          --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
    ```
 
-   The guard is metadata-only: worker task acceptance (verified in §1, logged in §2) is unaffected. Fabrication is a metadata fault, not a code fault — the worker's code changes still ship, the Tier 2 evidence still grounds them, only the advisor scorecard attribution is withheld.
+   The guard is metadata-only: worker task acceptance (verified in §1, logged in §3) is unaffected. Fabrication is a metadata fault, not a code fault — the worker's code changes still ship, the Tier 2 evidence still grounds them, only the advisor scorecard attribution is withheld.
 
    **Identifier semantics.** Worker reports list `advisor_template_version` per consultation. The lead already knows which advisor names it spawned and what `--template-version` flag it passed (Step 3.5b). The intersection: "did the lead spawn an advisor whose template-version matches?" The transcript provides the corroborating spawn event (TaskCreate with `name: <advisor-name>`) per Step 3.5c's logged `Advisor spawned: <name>` line; consumers needing raw tool inputs follow the two-pass pattern. When the lead's spawned-advisor map records every active advisor, the guard MAY satisfy verification from that map alone without the second pass — the transcript is corroborator, not sole source of truth. The lead-side spawn map is canonical only when `provider_status()` is `full`; partial/unavailable returns flow to branch (c) regardless.
 
-4. **Advisor-impact rollup (handler: agent only)** — if the guard's branch (a) or (b) selected at least one verified `handler: agent` consultation, invoke the rollup with the filtered payload:
+5. **Advisor-impact rollup (handler: agent only)** — if the guard's branch (a) or (b) selected at least one verified `handler: agent` consultation, invoke the rollup with the filtered payload:
    ```bash
    bash ~/.lore/scripts/advisor-impact-rollup.sh \
      --work-item <slug> \
@@ -574,16 +599,16 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
      --consultations "<verified handler: agent consultations subset, verbatim YAML/JSON>" \
      --template-version "$ADVISOR_TEMPLATE_VERSION"
    ```
-   This emits `consultation_rate` and `advice_followed_rate` scorecard rows attributed to `template_id=advisor`. Per D5 the rollup runs only on the opt-in path; `handler: lead` and `handler: skill` entries do NOT emit advisor scorecard rows. Skip when (i) original field empty or `none`, (ii) §3 pre-filter found zero `handler: agent` entries, (iii) §3 branch (b) filtered every entry as fabricated, or (iv) §3 branch (c) fired.
+   This emits `consultation_rate` and `advice_followed_rate` scorecard rows attributed to `template_id=advisor`. Per D5 the rollup runs only on the opt-in path; `handler: lead` and `handler: skill` entries do NOT emit advisor scorecard rows. Skip when (i) original field empty or `none`, (ii) §4 pre-filter found zero `handler: agent` entries, (iii) §4 branch (b) filtered every entry as fabricated, or (iv) §4 branch (c) fired.
 
-5. **Set aside Tier 3 candidates for Step 5** — if the worker report contains a `Tier 3 candidates:` YAML block, stash each entry (preserving producer_role and source_artifact_ids) for Step 5 promotion. Do NOT promote here — Step 5 is the sole promotion site.
+6. **Set aside Tier 3 candidates for Step 5** — if the worker report contains a `Tier 3 candidates:` YAML block, stash each entry (preserving producer_role and source_artifact_ids) for Step 5 promotion. Do NOT promote here — Step 5 is the sole promotion site.
 
-6. **Handle blockers** — if a worker reports blockers:
+7. **Handle blockers** — if a worker reports blockers:
    - Read the relevant code/context
    - Send guidance via the adapter's `send_message`: `bash "$ADAPTER" send_message <handle> "<body>"`. On Claude Code this expands to `delegate:SendMessage handle=<id>` invoked as the native `SendMessage` tool. On harnesses where the adapter returns `unsupported`, fall back to lead-only orchestration (re-spawn with corrected prompt instead).
    - If unresolvable, note in `notes.md` and move on.
 
-7. **Check off completed items in plan.md** (best-effort):
+8. **Check off completed items in plan.md** (best-effort):
    ```bash
    lore work check <slug> "<task-subject>"
    ```
@@ -656,7 +681,7 @@ The system has three distinct closure layers (D2 Precedence). They operate on di
 
 1. **Task-system archive precondition** (Step 7 behavior): `REMAINING_COUNT=0`. Hard-blocks archive while any task is `pending`/`in_progress`. Unchanged.
 2. **Mechanical Followup Creation Gate** (§6.4 fallback for legacy items + parallel sub-step for anchored items): when `TaskList` shows incompletion or `execution-log.md` Blocker fields carry non-`none` text, it creates a followup in `_followups/`. **Non-blocking** — surfaces mechanical residue for review-loop pickup.
-3. **Anchor verdict** (§6.2): the semantic capability assertion against `intent_anchor`. `full` and `partial` permit archive; `none` hard-blocks.
+3. **Anchor verdict** (§6.2): the semantic capability assertion against `intent_anchor`. Only `full` permits archive; both `partial` and `none` are non-completions that hold the parent open as `capability-incomplete`. Both record a closure row (`capability_incomplete: true`) and route through the same loud, non-zero close.
 
 **Run order is load-bearing.** Evaluate the task-system archive precondition (§6.1) *before* prompting for or writing the anchor verdict. If `REMAINING_COUNT != 0`, run §6.3 (mechanical gate) and stop — do NOT prompt for a verdict, do NOT write a closure row. The anchor verdict is recorded only against the final task-complete run; otherwise a stale closure row could attach to a state the system no longer matches.
 
@@ -684,25 +709,39 @@ print((data.get("intent_anchor") or "").strip())
 Display the `intent_anchor` text verbatim to the lead and prompt for exactly one trichotomous verdict, using the [[knowledge:principles/workflow-design/closure-laundering-is-failure-mode-where-local|closure-laundering vocabulary]] verbatim (load-bearing step, mocked, deferred):
 
 - **`full`** — the run delivers the load-bearing capability the anchor names. The lead writes a one-line `capability_loop_summary` naming the user-facing loop now operable. Archive proceeds.
-- **`partial`** — at least one load-bearing step the anchor depends on is mocked or deferred. The lead writes a `capability_loop_summary` that *names what shipped* (the delivered subset that justifies archiving the parent), then a one-line residue title and residue intent anchor naming what is mocked or deferred. The protocol creates a child work item, captures the child slug from the successful command result, and only then writes the parent's closure row.
-- **`none`** — the run does not deliver the capability. Archive is blocked. Either resume `/implement` with more workers or explicitly reframe via `/spec`. **Skip §6.3 and Step 7 entirely** and exit with a single user-facing line naming the verdict and the next-action choice.
+- **`partial`** — at least one load-bearing step the anchor depends on is mocked or deferred. This is a **non-completion**: the parent is NOT archived — it stays active as `capability-incomplete`. The lead writes a `capability_loop_summary` that *names what shipped*, a one-line `divergence_summary` naming what was mocked or deferred, and a one-line residue title and residue intent anchor for the deferred capability. The protocol creates a child work item, captures the child slug from the successful command result, and only then writes the parent's closure row (with `capability_incomplete: true` and `residue_followup` set to the child slug).
+- **`none`** — the run does not deliver the capability. Also a **non-completion**: the parent is NOT archived — it stays active as `capability-incomplete`. `none` is anchor non-delivery routed through the same loud channel as `partial` (closure row + non-zero close from the closure-report script), not a separate concept. The lead writes a `capability_loop_summary` naming what was attempted and a `divergence_summary` naming that no load-bearing capability was delivered. No residue child is created (`residue_followup: null`).
 
 The verdict prompt is the lead's discretion-bearing read of what actually shipped — `notes.md`, `execution-log.md`, the run's worker reports, and any blocker context all inform it. The lead asks via `AskUserQuestion` only if the lead cannot ground the call in the run's evidence; if the run record is unambiguous (all tasks checked off, no blockers, load-bearing steps all have direct artifact evidence), the lead decides and reports rather than prompting.
 
-Define a single closure-writer helper used by both `full` and `partial`. Same Python heredoc handles both; only verdict label and residue-followup slug differ.
+Define a single closure-writer helper used by `full`, `partial`, and `none`. Same Python heredoc handles all three; only the verdict label, divergence summary, and residue-followup slug differ. The closure schema is the FIXED contract the closure-report script and the work-index projector both code against — do NOT rename fields:
+
+```
+closure = {
+  verdict:                 "full" | "partial" | "none",
+  capability_incomplete:   bool,          # true iff verdict in {partial, none}; false on full
+  capability_loop_summary: str,           # full/partial: what shipped; none: what was attempted
+  divergence_summary:      str | null,    # partial/none: one line on what was mocked or deferred; null on full
+  residue_followup:        str | null,    # child slug on partial; null otherwise
+  verdict_at:              iso8601 str,
+  intent_anchor_at_close:  str,
+}
+```
 
 ```bash
 write_closure_row() {
-  # Args: <verdict> <capability_loop_summary> <intent_anchor> <partial_residue_followup_or_empty>
-  python3 - "$KDIR/_work/<slug>/_meta.json" "$1" "$2" "$3" "$4" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" << 'PYEOF'
+  # Args: <verdict> <capability_loop_summary> <intent_anchor> <divergence_summary_or_empty> <residue_followup_or_empty>
+  python3 - "$KDIR/_work/<slug>/_meta.json" "$1" "$2" "$3" "$4" "$5" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" << 'PYEOF'
 import json, sys
-path, verdict, summary, anchor, residue, ts = sys.argv[1:7]
+path, verdict, summary, anchor, divergence, residue, ts = sys.argv[1:8]
 with open(path, encoding="utf-8") as f:
     data = json.load(f)
 data["closure"] = {
     "verdict": verdict,
+    "capability_incomplete": verdict in ("partial", "none"),
     "capability_loop_summary": summary,
-    "partial_residue_followup": residue or None,
+    "divergence_summary": divergence or None,
+    "residue_followup": residue or None,
     "verdict_at": ts,
     "intent_anchor_at_close": anchor,
 }
@@ -713,10 +752,10 @@ PYEOF
 }
 ```
 
-**On `full`:** write the closure row and proceed to §6.3 + Step 7.
+**On `full`:** write the closure row and proceed to §6.3 + Step 7 (archive runs; the closure-report script emits the Done summary).
 
 ```bash
-write_closure_row "full" "<capability_loop_summary>" "$INTENT_ANCHOR" ""
+write_closure_row "full" "<capability_loop_summary>" "$INTENT_ANCHOR" "" ""
 ```
 
 **On `partial`:** create the child work item *before* writing the parent's closure row. The child's intent anchor must obey the [[knowledge:conventions/protocol/work-item-intake-should-store-neutral-intent-ancho|intake neutrality rule]] — describe the residue capability in neutral terms, do not smuggle the parent's framing or solution into the child. Capture the child slug from the command's output; if the create call fails, do NOT write the closure row and do NOT archive — exit so the lead can re-attempt:
@@ -733,7 +772,7 @@ CHILD_OUTPUT=$(lore work create --json \
   }
 CHILD_SLUG=$(printf '%s' "$CHILD_OUTPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["slug"])')
 
-write_closure_row "partial" "<capability_loop_summary>" "$INTENT_ANCHOR" "$CHILD_SLUG"
+write_closure_row "partial" "<capability_loop_summary>" "$INTENT_ANCHOR" "<divergence_summary>" "$CHILD_SLUG"
 
 # Append a one-line note to parent notes.md naming the child slug.
 printf '\n## %s\n**Closure (partial):** see follow-up `%s`. Delivered subset: %s\n' \
@@ -741,15 +780,12 @@ printf '\n## %s\n**Closure (partial):** see follow-up `%s`. Delivered subset: %s
   >> "$KDIR/_work/<slug>/notes.md"
 ```
 
-**After archive on `partial`,** the parent is responsible only for the delivered subset named in `capability_loop_summary`; all remaining load-bearing capability residue is owned by the child via its own intent anchor and its own subsequent `/spec` + `/implement` cycle.
+**`partial` does not archive.** The parent stays active as `capability-incomplete` and remains responsible for the deferred residue until the child delivers it; the child owns the deferred capability via its own intent anchor and its own subsequent `/spec` + `/implement` cycle. Proceed to §6.3, then Step 7, where the no-archive branch holds the parent open and the closure-report script emits the divergence banner.
 
-**On `none`:** write nothing to `_meta.json`. Skip §6.3 and Step 7. Report:
+**On `none`:** write the closure row (so the standing `capability-incomplete` state is recorded), then proceed to §6.3 + Step 7 exactly like `partial`. No residue child is created and `residue_followup` stays null. The parent is NOT archived. Do NOT hand-compose a user-facing message here — Step 7's closure-report script is the sole emitter of the divergence banner.
 
-```
-[implement] Closure verdict: none — capability not delivered.
-Anchor: <intent_anchor verbatim>
-Next: resume `/implement <slug>` with additional scope, or reframe via `/spec <slug>`.
-Work item remains active in _work/.
+```bash
+write_closure_row "none" "<capability_loop_summary>" "$INTENT_ANCHOR" "<divergence_summary>" ""
 ```
 
 #### Step 6.3: Mechanical Followup Creation Gate (runs alongside §6.2 for anchored items, and as the sole closure path on legacy items per §6.4)
@@ -829,14 +865,13 @@ If `INTENT_ANCHOR` is empty/absent on `_meta.json`, run §6.3 exactly as today a
 
    **Overwrite semantics:** on re-run against the same work item, replace the file unconditionally. No append, no merge, no rotation — each run reflects only that run's producer facts. Canonical log files already carry historical data.
 
-5. **Archive the completed work item.** This step is mandatory when all tasks are done AND, on anchored items, the Step 6 closure verdict permits archive — it is the structural close of the implement cycle, not a discretionary cleanup. Branch on task-system completion state (not on plan.md), then on the anchored closure precondition:
+5. **Archive the completed work item — only on a clean (`full`/legacy) close.** This step is mandatory when all tasks are done AND, on anchored items, the closure verdict is `full` — archive is the structural close of a *clean* implement cycle. A `partial`/`none` close is a non-completion: the parent is NOT archived and stays active as `capability-incomplete`. Branch on task-system completion state (not on plan.md), then on the anchored closure precondition:
 
-   - **All tasks completed AND (legacy item OR anchored item with a valid `closure` row):** archive and verify the move:
+   - **All tasks completed AND (legacy item OR anchored item with a valid `full` `closure` row):** archive and verify the move:
      ```bash
      # Anchored-item precondition: a valid closure row must exist on _meta.json
-     # before archive runs. `none` verdicts skip Step 7 entirely, so reaching
-     # this branch on an anchored item implies verdict ∈ {full, partial}.
-     # Re-validate as a defensive gate against Step 6 implementation drift.
+     # before archive runs. Only `full` archives; `partial`/`none` hold the
+     # parent open. Re-validate as a defensive gate against Step 6 drift.
      CLOSURE_VALID=$(python3 -c '
      import json, sys
      with open(sys.argv[1], encoding="utf-8") as f:
@@ -852,8 +887,10 @@ If `INTENT_ANCHOR` is empty/absent on `_meta.json`, run §6.3 exactly as today a
      verdict = closure.get("verdict")
      summary = (closure.get("capability_loop_summary") or "").strip()
      anchor_at_close = (closure.get("intent_anchor_at_close") or "").strip()
-     residue = closure.get("partial_residue_followup")
-     if verdict not in ("full", "partial"):
+     cap_incomplete = bool(closure.get("capability_incomplete"))
+     divergence = (closure.get("divergence_summary") or "").strip()
+     residue = closure.get("residue_followup")
+     if verdict not in ("full", "partial", "none"):
          print("bad_verdict")
          sys.exit(0)
      if not summary:
@@ -862,8 +899,16 @@ If `INTENT_ANCHOR` is empty/absent on `_meta.json`, run §6.3 exactly as today a
      if not anchor_at_close:
          print("missing_anchor_at_close")
          sys.exit(0)
-     if verdict == "partial" and not (isinstance(residue, str) and residue.strip()):
-         print("missing_residue_for_partial")
+     if verdict in ("partial", "none"):
+         # Non-completion: the standing capability-incomplete row must be valid
+         # (flag set, divergence named; partial also names a residue child).
+         if not cap_incomplete or not divergence:
+             print("bad_incomplete_row")
+             sys.exit(0)
+         if verdict == "partial" and not (isinstance(residue, str) and residue.strip()):
+             print("missing_residue_for_partial")
+             sys.exit(0)
+         print("capability_incomplete")
          sys.exit(0)
      print("ok")
      ' "$KDIR/_work/<slug>/_meta.json")
@@ -876,6 +921,12 @@ If `INTENT_ANCHOR` is empty/absent on `_meta.json`, run §6.3 exactly as today a
          test ! -d "$KDIR/_work/<slug>" \
            || { echo "[implement] FATAL: archive left work item in active _work/ path"; exit 1; }
          ;;
+       capability_incomplete)
+         # Expected divergence: parent stays active. Do NOT archive. The
+         # closure-report script (Step 7.6) emits the divergence banner.
+         test -d "$KDIR/_work/<slug>" \
+           || { echo "[implement] FATAL: capability-incomplete close but work item not in active _work/"; exit 1; }
+         ;;
        *)
          echo "[implement] FATAL: anchored work item lacks a valid _meta.json.closure block ($CLOSURE_VALID); refusing to archive." >&2
          echo "[implement]        Re-run Step 6 to record the closure verdict before archive." >&2
@@ -883,58 +934,80 @@ If `INTENT_ANCHOR` is empty/absent on `_meta.json`, run §6.3 exactly as today a
          ;;
      esac
      ```
-     If verification fails, do not proceed. Diagnose and re-run archive before rendering the report. Silently skipping archive corrupts the active-vs-archived distinction. **Anchored items missing or malformed `_meta.json.closure` MUST NOT be archived from this step** — that path is exactly the closure-laundering failure mode Step 6 exists to prevent. The advisory in `scripts/archive-work.sh` is a *non-blocking* warning intended for manual / bulk-archive callers; this Step 7 precondition is the *blocking* gate on the `/implement` ceremony path.
+     If verification fails, do not proceed. Diagnose and re-run archive before rendering the report. Silently skipping archive on a `full` close corrupts the active-vs-archived distinction. **Anchored items missing or malformed `_meta.json.closure` MUST NOT be archived from this step** — that path is exactly the closure-laundering failure mode Step 6 exists to prevent. The advisory in `scripts/archive-work.sh` is a *non-blocking* warning intended for manual / bulk-archive callers; this Step 7 precondition is the *blocking* gate on the `/implement` ceremony path.
    - **Some tasks incomplete or blocked:** do not archive. Leave the work item active so a later `/implement` can resume.
-   - **Anchored item with verdict `none`:** Step 6.2 already exited before reaching Step 7. This branch is unreachable here; do not add a path that silently re-routes around it.
+   - **Anchored item with verdict `partial` or `none`:** a non-completion. The parent stays active as `capability-incomplete`; the divergence banner is emitted by the closure-report script in Step 7.6.
 
    **Why this is the last step before the report.** The user-facing 'Done' report is the natural exit point of `/implement`; once it renders, the operator typically transitions to `/retro` or moves on. Coupling archive to the report (rather than treating it as an earlier optional step) ensures the work item's active/archived state is committed before the cycle visibly closes. Prior versions of this skill placed archive earlier in Step 7 — observed live, the archive call got silently skipped roughly half the time because the report's 'consider /retro' line created a perceived clean handoff before archive ran. Placing archive here, with verification, removes that gap.
 
-6. **Report to user.** Before rendering, check archive ran if it should have. The precondition has two forms — task-completion and anchored-closure:
+6. **Emit the close via the closure-report script.** `scripts/implement-closure-report.sh` is the sole terminal emitter: it reads the work item's `_meta.json` (from either the active or the archived location) and emits the close branched on the verdict — the Done summary + exit 0 on `full`/legacy, the isolated divergence banner + non-zero exit on `partial`/`none`. Do NOT hand-compose a Done block here; the success summary text exists ONLY inside the script's exit-0 branch, so the non-zero (divergence) path has no success prose the lead could re-emit.
+
+   The run-context counts that the historical Done block carried (tasks completed/total, Tier 2 count, Tier 3 accepted/rejected, followup title) are passed as **flag values**, not authored prose — the script still owns the template, so structural suppression holds: these flags render only on the success branch and are inert on the divergence branch. Compute them from the run state already gathered in this step:
+   - `TASKS_COMPLETED` = count of `TaskList` tasks with `status: completed` (same value written to `retro-bundle.json.tasks_completed`).
+   - `TASKS_TOTAL` = `TASKS_COMPLETED + REMAINING_COUNT` (at the close `REMAINING_COUNT=0`, so total equals completed).
+   - `TIER2_COUNT` = number of `claim_id`s in `$KDIR/_work/<slug>/task-claims.jsonl` (length of `retro-bundle.json.tier2_claim_ids`).
+   - `TIER3_ACCEPTED` / `TIER3_REJECTED` = accepted/rejected promotion counts from Step 5's `lore promote` results.
+   - `FOLLOWUP_TITLE` = the title of the followup created by §6.3, or empty when none was created.
+
+   Before invoking it, guard the pre-report state. A completed-but-active parent is FATAL **only** when it lacks a valid `capability_incomplete == true` closure row — a completed-active parent that *does* carry that row is the expected divergence state, not an error:
 
    ```bash
    if [ "$REMAINING_COUNT" = "0" ] && [ -d "$KDIR/_work/<slug>" ]; then
-     # Distinguish "missing closure row" from "archive skipped for unrelated reason"
-     # so the operator gets a precise next-action.
-     CLOSURE_DIAG=$(python3 -c '
+     # Active + task-complete is EXPECTED when the parent diverged (partial/none)
+     # and carries a valid capability_incomplete row. Distinguish that from a
+     # genuinely stuck close (missing/invalid closure row) so the operator gets
+     # a precise next-action.
+     PRE_REPORT=$(python3 -c '
      import json, sys
      try:
          with open(sys.argv[1], encoding="utf-8") as f:
              data = json.load(f)
          anchor = (data.get("intent_anchor") or "").strip()
          closure = data.get("closure")
-         if anchor and not isinstance(closure, dict):
+         closure = closure if isinstance(closure, dict) else {}
+         verdict = closure.get("verdict")
+         cap_incomplete = bool(closure.get("capability_incomplete"))
+         divergence = (closure.get("divergence_summary") or "").strip()
+         if not anchor:
+             print("legacy_unarchived")
+         elif verdict in ("partial", "none") and cap_incomplete and divergence:
+             print("diverged")
+         elif not closure:
              print("anchored_no_closure")
-         elif anchor and isinstance(closure, dict) and closure.get("verdict") not in ("full", "partial"):
-             print("anchored_invalid_verdict")
          else:
-             print("other")
+             print("anchored_invalid_closure")
      except Exception:
          print("other")
      ' "$KDIR/_work/<slug>/_meta.json")
-     case "$CLOSURE_DIAG" in
-       anchored_no_closure|anchored_invalid_verdict)
-         echo "[implement] FATAL: tasks complete but anchored work item has no valid closure row. Re-run Step 6 to record the verdict, then archive."
+     case "$PRE_REPORT" in
+       diverged)
+         : # expected — parent held open as capability-incomplete; fall through to the script
+         ;;
+       anchored_no_closure|anchored_invalid_closure)
+         echo "[implement] FATAL: tasks complete but anchored work item has no valid closure row. Re-run Step 6 to record the verdict, then archive." >&2
+         exit 1
          ;;
        *)
-         echo "[implement] FATAL: all tasks completed but work item not archived. Run Step 7.5 archive before this report."
+         echo "[implement] FATAL: all tasks completed but work item not archived. Run Step 7.5 archive before this report." >&2
+         exit 1
          ;;
      esac
-     exit 1
    fi
+
+   # Pass the run-context counts as flag VALUES; the script renders them only on
+   # the full/legacy branch and ignores them on the divergence branch. Omit a
+   # flag (or pass empty) to drop just that line. FOLLOWUP_TITLE is only added
+   # when §6.3 created a followup.
+   CLOSURE_FLAGS=(--tasks-completed "$TASKS_COMPLETED" --tasks-total "$TASKS_TOTAL"
+                  --tier2-count "$TIER2_COUNT"
+                  --tier3-accepted "$TIER3_ACCEPTED" --tier3-rejected "$TIER3_REJECTED")
+   if [ -n "$FOLLOWUP_TITLE" ]; then
+     CLOSURE_FLAGS+=(--followup "$FOLLOWUP_TITLE")
+   fi
+   bash ~/.lore/scripts/implement-closure-report.sh --slug "<slug>" "${CLOSURE_FLAGS[@]}"
    ```
 
-   The report MUST NOT render with a completed-but-unarchived work item. If the precondition fires, return to Step 6 (record the verdict if missing) and Step 7.5 (archive). For `none` verdicts, Step 6.2 already produced the user-facing exit message and skipped Step 7 — the report below does not render in that case.
-
-   ```
-   [implement] Done.
-   Completed: N/M tasks
-   Closure: <full|partial|legacy>  <("see follow-up <child-slug>" if partial, omit otherwise)>
-   Tier 2 claims written: <count>
-   Tier 3 promoted: <count> (rejected: <count>)
-   Remaining: <list if any, or "none — work item archived">
-   Followup: <"<title>" if created, omit line if not>
-   Consider `/retro <slug>` to evaluate knowledge system effectiveness for this work.
-   ```
+   Emit the script's stdout verbatim as the terminal close, and nothing further. A non-zero exit from the script *is* the run's non-completion — do not paper over it with a success line. On a `full`/legacy close the script prints the Done summary (with the run-context lines above) and exits 0; on `partial`/`none` it prints only the divergence banner and exits non-zero; on a location-vs-verdict mismatch it fails without printing Done, so a corrupted close cannot launder into a success report.
 
 ## Handling Partial Completion
 

@@ -20,6 +20,10 @@ fi
 
 INDEX="$WORK_DIR/_index.json"
 
+# Freshen the index before reading so a just-written divergence (or archive)
+# shows up immediately, not on the next run.
+"$SCRIPT_DIR/update-work-index.sh" >/dev/null 2>/dev/null || true
+
 # Self-heal: regenerate index if missing
 if [[ ! -f "$INDEX" ]]; then
   "$SCRIPT_DIR/update-work-index.sh" 2>/dev/null || true
@@ -241,6 +245,24 @@ else:
 
 print()
 print(f"Active: {len(rows)} | Archived: {len(archived)}")
+
+# Active parents that diverged from their anchor at /implement close stay in
+# the list but are not routine: name what diverged and the child holding the gap.
+diverged = [
+    item for item in plans
+    if str(item.get("status", "")) == "active"
+    and (item.get("closure") or {}).get("capability_incomplete") is True
+]
+if diverged:
+    print()
+    for item in diverged:
+        slug = str(item.get("slug", ""))
+        closure = item.get("closure") or {}
+        summary = closure.get("divergence_summary") or "capability incomplete"
+        print(f"[capability-incomplete] {slug} — diverged from anchor; {summary}")
+        residue = closure.get("residue_followup")
+        if residue:
+            print(f"  waiting-on: {residue}")
 
 if show_all and archived:
     print()

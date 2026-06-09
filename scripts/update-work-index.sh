@@ -58,6 +58,23 @@ def list_field(meta, key, default=None, aliases=None):
         return val
     return [val]
 
+def closure_field(meta):
+    """Project the standing-state subset of _meta.json.closure the renderers read.
+
+    Only capability_incomplete / divergence_summary / residue_followup surface
+    on the orchestration map; the rest of the closure row stays in _meta.json.
+    A missing/non-true capability_incomplete normalizes to false so full,
+    legacy, and pre-closure items render no marker.
+    """
+    closure = meta.get("closure")
+    if not isinstance(closure, dict):
+        return {"capability_incomplete": False}
+    return {
+        "capability_incomplete": closure.get("capability_incomplete") is True,
+        "divergence_summary": closure.get("divergence_summary"),
+        "residue_followup": closure.get("residue_followup"),
+    }
+
 for meta_path in sorted(glob.glob(os.path.join(work_dir, "*", "_meta.json"))):
     slug = os.path.basename(os.path.dirname(meta_path))
     if slug == "_archive" or slug in seen_slugs:
@@ -85,6 +102,7 @@ for meta_path in sorted(glob.glob(os.path.join(work_dir, "*", "_meta.json"))):
         "pr": str_field(meta, "pr"),
         "intent_anchor": str_field(meta, "intent_anchor"),
         "related_work": list_field(meta, "related_work"),
+        "closure": closure_field(meta),
         "has_plan_doc": os.path.exists(os.path.join(parent, "plan.md")),
         "has_execution_log": os.path.exists(os.path.join(parent, "execution-log.md"))
                           or os.path.exists(os.path.join(parent, "execution_log.md")),

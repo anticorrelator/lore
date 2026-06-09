@@ -164,6 +164,8 @@ template_version: abc123def456
   line_range: 90-110
   falsifier: "A pre-F0 report (no template_version) exiting 2 instead of 0."
   significance: medium
+**Convention handling:**
+- none in scope
 **Blockers:** none'
 
 PAYLOAD=$(python3 -c '
@@ -237,6 +239,122 @@ cp "$TEAM_CONFIG_DIR/config.json" "$TEST_DIR/.claude/teams/spec-test-slug/config
 
 run_hook "$PAYLOAD"
 assert_eq "legacy researcher exits 0" "$_EXIT" "0"
+
+# =============================================
+# Test 7: Post-F0 worker, structured obs + Convention handling → exit 0
+# =============================================
+echo ""
+echo "Test 7: Post-F0 worker — template_version + structured obs + Convention handling → pass"
+
+CONV_GOOD='**Task:** Convention work
+template_version: abc123def456
+**Observations:**
+- claim: "The convention field rides the Observations validation path."
+  file: /abs/path/to/scripts/validate-structured-report.py
+  line_range: 130-145
+  falsifier: "An Observations-path report without the field passing."
+  significance: high
+**Convention handling:**
+- honored: script-first-skill-design
+**Blockers:** none'
+
+PAYLOAD=$(python3 -c '
+import json, sys
+d = {
+  "team_name": "impl-test-slug",
+  "task_description": sys.argv[1],
+  "agent_name": "worker-1"
+}
+print(json.dumps(d))
+' "$CONV_GOOD")
+
+run_hook "$PAYLOAD"
+assert_eq "worker with Convention handling exits 0 (pass)" "$_EXIT" "0"
+
+# =============================================
+# Test 8: Post-F0 worker, structured obs but NO Convention handling → exit 2
+# =============================================
+echo ""
+echo "Test 8: Post-F0 worker — template_version + structured obs, missing Convention handling → hard-fail (exit 2)"
+
+CONV_MISSING='**Task:** Convention work
+template_version: abc123def456
+**Observations:**
+- claim: "A structured observation with no convention disposition."
+  file: /abs/path/to/scripts/validate-structured-report.py
+  line_range: 130-145
+  falsifier: "The report passing despite the missing section."
+  significance: high
+**Blockers:** none'
+
+PAYLOAD=$(python3 -c '
+import json, sys
+d = {
+  "team_name": "impl-test-slug",
+  "task_description": sys.argv[1],
+  "agent_name": "worker-1"
+}
+print(json.dumps(d))
+' "$CONV_MISSING")
+
+run_hook "$PAYLOAD"
+assert_eq "worker missing Convention handling exits 2 (hard-fail)" "$_EXIT" "2"
+assert_contains "error names Convention handling requirement" "$_STDERR" "Convention handling"
+
+# =============================================
+# Test 9: Post-F0 worker, Convention handling present but empty → exit 2
+# =============================================
+echo ""
+echo "Test 9: Post-F0 worker — Convention handling heading present but empty → hard-fail (exit 2)"
+
+CONV_EMPTY='**Task:** Convention work
+template_version: abc123def456
+**Observations:**
+- claim: "A structured observation with an empty convention section."
+  file: /abs/path/to/scripts/validate-structured-report.py
+  line_range: 130-145
+  falsifier: "The report passing despite the empty section."
+  significance: high
+**Convention handling:**
+**Blockers:** none'
+
+PAYLOAD=$(python3 -c '
+import json, sys
+d = {
+  "team_name": "impl-test-slug",
+  "task_description": sys.argv[1],
+  "agent_name": "worker-1"
+}
+print(json.dumps(d))
+' "$CONV_EMPTY")
+
+run_hook "$PAYLOAD"
+assert_eq "worker empty Convention handling exits 2 (hard-fail)" "$_EXIT" "2"
+
+# =============================================
+# Test 10: Legacy worker (no template_version) without Convention handling → pass
+# =============================================
+echo ""
+echo "Test 10: Legacy worker — no template_version, no Convention handling → pass (backward-compat path intact)"
+
+LEGACY_NO_CONV='**Task:** Old work
+**Changes:**
+- some file: something
+**Observations:** No structured entries here, just prose.
+**Blockers:** none'
+
+PAYLOAD=$(python3 -c '
+import json, sys
+d = {
+  "team_name": "impl-test-slug",
+  "task_description": sys.argv[1],
+  "agent_name": "worker-1"
+}
+print(json.dumps(d))
+' "$LEGACY_NO_CONV")
+
+run_hook "$PAYLOAD"
+assert_eq "legacy worker without Convention handling exits 0 (pass)" "$_EXIT" "0"
 
 # =============================================
 # Summary

@@ -111,6 +111,19 @@ for item in data.get('plans', []):
             f'[stale] {slug} — inactive {dir_age_days} days, {guidance}'
         )
 
+    # A parent that diverged from its anchor at /implement close stays active
+    # but is not routine: surface what diverged and the child holding the gap.
+    closure = item.get('closure') or {}
+    if closure.get('capability_incomplete') is True:
+        summary = closure.get('divergence_summary') or 'capability incomplete'
+        active_work_lines.append(
+            f'[capability-incomplete] {slug} — diverged from anchor; {summary}'
+        )
+        residue = closure.get('residue_followup')
+        if residue:
+            active_work_lines.append(f'  waiting-on: {residue}')
+        continue
+
     active_work_lines.append(f'- {slug}: {title} (updated {rel})')
 
 # Shell-escape helper for single quotes

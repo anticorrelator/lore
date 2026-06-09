@@ -12,6 +12,12 @@ Reads the full report text on stdin; takes the section heading to search under a
 
 Exits 0 on pass, 1 on fail.
 
+When the section heading is "Observations" (the worker report path), a present-and-
+populated `Convention handling:` section is additionally required: the worker dispositions
+each woven norm there, and the field is always emitted (`none in scope` when no norm was
+woven). Researcher ("Assertions") reports do not carry this field. The escalation path
+bypasses the requirement — an escalating report ships no convention dispositions.
+
 Structured entry contract (per task #20 / #21): YAML-style list entry under the section
 heading, starting with `- claim:` and carrying all of:
   claim, file, line_range, falsifier, significance
@@ -35,6 +41,11 @@ import sys
 REQUIRED_FIELDS = ("claim", "file", "line_range", "falsifier", "significance")
 SIGNIFICANCE_VALUES = {"low", "medium", "high"}
 VALID_ESCALATION = "task-too-trivial-for-solo-decomposition"
+
+# Exact label, casing, and trailing colon are a protocol constant — worker.md,
+# this validator, and the hook all match the same literal. Workers report it
+# alongside Surfaced concerns; only the Observations (worker) path requires it.
+CONVENTION_HANDLING_HEADING = "Convention handling"
 
 
 def find_escalation(s: str):
@@ -108,6 +119,36 @@ def find_structured_entries(s: str, section_heading: str):
     return 0, f"no valid structured entries under **{section_heading}:** — failures: {'; '.join(failures)}"
 
 
+def find_convention_handling(s: str):
+    """Return None if the report carries a present, non-empty Convention handling
+    section, else a single-line error reason.
+
+    Presence only — the section's dispositions (honored / diverged / none in scope)
+    are assessed by the lead, not the hook. The body must be non-empty: an empty
+    section is the silent-omission shape the always-emit contract closes.
+    """
+    heading_pat = re.compile(
+        rf'\*\*{re.escape(CONVENTION_HANDLING_HEADING)}:\*\*', re.IGNORECASE
+    )
+    m = heading_pat.search(s)
+    if not m:
+        return (
+            f"missing required section: **{CONVENTION_HANDLING_HEADING}:** — "
+            f"disposition each woven norm by stable label "
+            f"(honored: <label> / diverged: <label> — <why>), or `none in scope`"
+        )
+    section = s[m.end():]
+    next_h = re.search(r'\n\*\*[A-Z][a-zA-Z0-9 ]+:\*\*', section)
+    if next_h:
+        section = section[:next_h.start()]
+    if not section.strip():
+        return (
+            f"**{CONVENTION_HANDLING_HEADING}:** present but empty — emit one "
+            f"disposition per woven norm, or `none in scope` when none was woven"
+        )
+    return None
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("FAIL: usage: validate-structured-report.py <section-heading>", file=sys.stderr)
@@ -131,11 +172,20 @@ def main() -> int:
         return 1
 
     count, err = find_structured_entries(text, section_heading)
-    if err is None:
-        print(f"PASS_STRUCTURED:{count}")
-        return 0
-    print(f"FAIL: {err}")
-    return 1
+    if err is not None:
+        print(f"FAIL: {err}")
+        return 1
+
+    # Worker reports (Observations) must also carry the convention-handling
+    # disposition. Researcher (Assertions) reports do not.
+    if section_heading.lower() == "observations":
+        conv_err = find_convention_handling(text)
+        if conv_err is not None:
+            print(f"FAIL: {conv_err}")
+            return 1
+
+    print(f"PASS_STRUCTURED:{count}")
+    return 0
 
 
 if __name__ == "__main__":
