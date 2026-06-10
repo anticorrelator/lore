@@ -58,6 +58,17 @@ assert_grep() {
   fi
 }
 
+# Fixed-string variant — for asserting literal prose that contains regex
+# metacharacters (backticks, asterisks, parentheses) without escaping them.
+assert_fgrep() {
+  local label="$1" literal="$2" file="$3"
+  if grep -qF -- "$literal" "$file"; then
+    pass "$label"
+  else
+    fail "$label" "Literal not found in $file: $literal"
+  fi
+}
+
 assert_eq() {
   local label="$1" actual="$2" expected="$3"
   if [[ "$actual" == "$expected" ]]; then
@@ -413,6 +424,118 @@ write_retro_evolution_row "2026-05-10T02:00:00Z" "wi-gamma" "skills/foo/SKILL.md
 CANDIDATES=$(compute_candidate_clusters 3)
 assert_eq "raw pass fires at K=3 from raw-only count" "$(echo "$CANDIDATES" | json_len)" "1"
 assert_eq "K reflects raw work_items only"            "$(echo "$CANDIDATES" | json_eval 'd[0]["K"]')" "3"
+
+# =========================================================================
+# Layer 3: Step 5 eligibility aggregation over the sidecar (Phase 3, D4)
+# =========================================================================
+# The gate's K-threshold check reads _evolve/accepted-clusters.jsonl directly,
+# groups rows by (target, change_type), and fires when the UNION of distinct
+# work_items in a group is >= K (K=3). These tests use the real sole-writer
+# (accepted-cluster-append.sh) to populate the sidecar, then evaluate the D4
+# aggregation the same way the documented Step 5 procedure describes.
+
+WRITER="$REPO_DIR/scripts/accepted-cluster-append.sh"
+
+append_accepted_cluster() {
+  local target="$1" change_types="$2" work_items="$3" run_id="$4" decision="${5:-merge}"
+  "$WRITER" \
+    --target "$target" \
+    --change-types "$change_types" \
+    --work-items "$work_items" \
+    --decision "$decision" \
+    --accepted-at-run-id "$run_id" \
+    --kdir "$KDIR" >/dev/null
+}
+
+# D4 eligibility aggregation: group sidecar rows by (target, change_type),
+# union distinct work_items, emit an eligible proposal (with a cited
+# cluster_id) when the union size >= k.
+evaluate_eligibility() {
+  local target="$1" change_type="$2" k="$3"
+  python3 - "$ACCEPTED" "$target" "$change_type" "$k" <<'PY'
+import json, sys
+from collections import defaultdict
+
+path, target, ct, k = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+union = set()
+cited = None
+try:
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            if r.get("target") != target:
+                continue
+            if ct not in (r.get("change_types") or []):
+                continue
+            union.update(r.get("work_items") or [])
+            if cited is None:
+                cited = r.get("cluster_id")
+except FileNotFoundError:
+    pass
+
+eligible = len(union) >= k
+out = {"eligible": eligible, "K": len(union)}
+if eligible:
+    out["cited_cluster_id"] = cited
+print(json.dumps(out))
+PY
+}
+
+echo ""
+echo "Test 13: Eligibility aggregation — single row at K=3 fires and cites a sidecar row"
+setup_store
+append_accepted_cluster "skills/foo/SKILL.md" "ceiling-raise" "wi-alpha,wi-beta,wi-gamma" "run-N"
+RESULT=$(evaluate_eligibility "skills/foo/SKILL.md" "ceiling-raise" 3)
+assert_eq "K=3 union → eligible"        "$(echo "$RESULT" | json_field eligible)" "True"
+assert_eq "K reported as 3"             "$(echo "$RESULT" | json_field K)" "3"
+CITED=$(echo "$RESULT" | json_field cited_cluster_id)
+assert_eq "proposal cites a non-empty cluster_id" "$([[ -n "$CITED" ]] && echo yes || echo no)" "yes"
+# The cited id must actually exist in the sidecar (rows are compact JSONL).
+assert_eq "cited cluster_id present in sidecar" \
+  "$(grep -cF "\"cluster_id\":\"$CITED\"" "$ACCEPTED" 2>/dev/null || echo 0)" "1"
+
+echo ""
+echo "Test 14: Eligibility aggregation — K=2 union does not fire"
+setup_store
+append_accepted_cluster "skills/foo/SKILL.md" "ceiling-raise" "wi-alpha,wi-beta" "run-N"
+RESULT=$(evaluate_eligibility "skills/foo/SKILL.md" "ceiling-raise" 3)
+assert_eq "K=2 union → not eligible" "$(echo "$RESULT" | json_field eligible)" "False"
+assert_eq "K reported as 2"          "$(echo "$RESULT" | json_field K)" "2"
+
+echo ""
+echo "Test 15: Union across rows — two overlapping rows reach K=3 without double-counting"
+setup_store
+# Two distinct rows (distinct cluster_ids) on the same (target, change_type)
+# sharing wi-beta. Distinct union is {alpha, beta, gamma} = 3.
+append_accepted_cluster "skills/foo/SKILL.md" "ceiling-raise" "wi-alpha,wi-beta" "run-N"
+append_accepted_cluster "skills/foo/SKILL.md" "ceiling-raise" "wi-beta,wi-gamma" "run-N"
+assert_eq "two distinct sidecar rows" "$(wc -l < "$ACCEPTED" | tr -d ' ')" "2"
+RESULT=$(evaluate_eligibility "skills/foo/SKILL.md" "ceiling-raise" 3)
+assert_eq "overlapping rows union → K=3 (beta counted once)" "$(echo "$RESULT" | json_field K)" "3"
+assert_eq "union K=3 → eligible"                            "$(echo "$RESULT" | json_field eligible)" "True"
+
+echo ""
+echo "Test 16: Bucketing on (target, change_type) — different change_type does not pool"
+setup_store
+append_accepted_cluster "skills/foo/SKILL.md" "ceiling-raise" "wi-alpha,wi-beta" "run-N"
+append_accepted_cluster "skills/foo/SKILL.md" "guardrail-add" "wi-gamma" "run-N"
+RESULT=$(evaluate_eligibility "skills/foo/SKILL.md" "ceiling-raise" 3)
+assert_eq "rows under a different change_type are not pooled (K=2)" "$(echo "$RESULT" | json_field K)" "2"
+assert_eq "K=2 → not eligible" "$(echo "$RESULT" | json_field eligible)" "False"
+
+echo ""
+echo "Test 17: Step 5 documentation contract — Eligibility check block (D4) present"
+# Fixed-string assertions over the documented procedure (avoids over-escaping
+# the prose's backticks/asterisks/parens).
+assert_fgrep "names Eligibility check heading" "**Eligibility check" "$SKILL_MD"
+assert_fgrep "reads sidecar directly"          "reads \`_evolve/accepted-clusters.jsonl\` directly" "$SKILL_MD"
+assert_fgrep "groups by (target, change_type)" "Group rows by the \`(target, change_type)\` key" "$SKILL_MD"
+assert_fgrep "union of distinct work_item"     "union of distinct \`work_item\`" "$SKILL_MD"
+assert_fgrep "K=3 eligibility threshold"       "union size is **≥ K (K = 3)**" "$SKILL_MD"
+assert_fgrep "proposal cites a sidecar row"    "cites at least one row" "$SKILL_MD"
 
 # =========================================================================
 # Summary

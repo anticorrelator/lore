@@ -161,7 +161,16 @@ Routing-gate properties:
 - **Inputs:** `_meta/effectiveness-journal.jsonl` rows with `role == "retro-evolution"` (raw pass); `_evolve/accepted-clusters.jsonl` rows from prior runs (consumption pass); the staged suggestion's `(target, change_type)` key.
 - **Success route:** clears when `(target, change_type)` matches an `accepted_cluster` row whose `consumed_at_run_id` is unset; the row is marked consumed for this run.
 - **Conservative fallback:** no match → `no_op` reason `no_accepted_cluster`. Does NOT silently re-route to primary/secondary gate (different evidence classes by definition).
-- **Lifecycle:** writes to `_evolve/accepted-clusters.jsonl` happen only in Step 6's CLUSTER REVIEW block; this gate path is read-only over that artifact.
+- **Lifecycle constraints:** writes to `_evolve/accepted-clusters.jsonl` happen only in Step 6's CLUSTER REVIEW block; this gate path is read-only over that artifact. No same-run re-entry — a cluster accepted in run N is consumed no earlier than run N+1.
+
+**Eligibility check (sidecar aggregation, per D4).** The gate's K-threshold check reads `_evolve/accepted-clusters.jsonl` directly — it does not re-derive candidates from the journal on the consumption side. Procedure:
+
+1. Read every row from `_evolve/accepted-clusters.jsonl`.
+2. Group rows by the `(target, change_type)` key. Each row carries `change_types[]`; a row joins one group per distinct `change_type` it lists. Bucketing is on the pair — never `target` alone.
+3. Per group, compute the **union of distinct `work_item` values** across all `work_items[]` arrays from every row in the group. Union, not sum: a work_item appearing in two overlapping rows counts once, so partial-overlap rows cannot inflate the count past the true distinct-work_item population.
+4. The group is **eligible** when that union size is **≥ K (K = 3)**. An eligible group emits one recurring-failure proposal.
+
+Each emitted proposal **cites at least one row** from `_evolve/accepted-clusters.jsonl` — minimally the `cluster_id` of a member row plus the distinct-work_item count — so the proposal is auditable back to the persisted evidence. A group whose union is below K produces no proposal (conservative fallback, reason `no_accepted_cluster`).
 
 **K threshold (candidate-cluster formation, raw pass):**
 
@@ -205,7 +214,7 @@ The two passes produce a unified candidate-cluster list for Step 6.
 }
 ```
 
-`consumed_at_run_id` starts `null` and is updated to the consuming run's id when the gate fires in run N+1. Sole writer: `bash ~/.lore/scripts/accepted-cluster-append.sh` (Phase 5 dependency) — `/evolve` does NOT write the file directly outside that script.
+`consumed_at_run_id` starts `null` and is updated to the consuming run's id when the gate fires in run N+1. Sole writer: `bash ~/.lore/scripts/accepted-cluster-append.sh` — `/evolve` does NOT write the file directly outside that script.
 
 **Do NOT:**
 - silently fall back to the primary or secondary gate when an accepted cluster is missing — emit `no_op` with reason `no_accepted_cluster` and surface the reason in Step 9 reporting.
@@ -364,16 +373,23 @@ Representative Evidence: <Evidence line from one member, verbatim>
 Merge cluster as recurring-failure suggestion? [y/edit/split/n]
 ```
 
-- **y** — accept verbatim; append `accepted_cluster` row (decision: `merge`).
-- **edit** — accept a maintainer-edited member set before persisting (decision: `edit`).
-- **split** — accept as ≥2 sub-clusters; one `accepted_cluster` row per (decision: `split`).
-- **n** — reject; no row written. Candidate does not re-appear unless future rows push K back above threshold from a fresh distinct work_item.
+- **y** — accept verbatim; append one `accepted_cluster` row with the candidate's member list (decision: `merge`).
+- **edit** — accept a maintainer-edited member set before persisting (decision: `edit`); the edited `--work-items` list is what gets written.
+- **split** — accept as ≥2 sub-clusters; invoke the writer once per sub-cluster, each with its own `--work-items` list (decision: `split`).
+- **merge** — when the maintainer combines two presented candidates that share a `(target, change_type)`, append one `accepted_cluster` row whose `--work-items` is the union of both candidates' members (decision: `merge`).
+- **n** — reject; **do not invoke the writer**, no row written. Candidate does not re-appear unless future rows push K back above threshold from a fresh distinct work_item.
 
 Acceptance side effects and the two-run lifecycle are stated canonically in Step 5's Recurring-failure gate; writes happen here, consumption in run N+1, no same-run re-entry.
 
-Append via the sole-writer script:
+On any accept decision (y / edit / split / merge), append via the sole-writer script — once per resulting cluster. `n` is the only branch that skips the call entirely:
 
 ```bash
+# Canonical vocabulary consumed by accepted-cluster-append.sh — do not drift:
+#   --decision : merge | edit | split   (writer rejects any other value)
+#   bucketing  : (target, change_type)  — never target alone (matches Step 5.x)
+# A row's cluster_id is sha256(target | sorted change_types | sorted work_items)[:16];
+# re-running the same cycle re-derives the same id and the writer no-ops, so
+# repeated /evolve runs over an unchanged journal never duplicate rows.
 bash ~/.lore/scripts/accepted-cluster-append.sh \
   --target "<file>" \
   --change-types "<comma-list>" \
@@ -382,7 +398,28 @@ bash ~/.lore/scripts/accepted-cluster-append.sh \
   --accepted-at-run-id "<run_id>"
 ```
 
-(`accepted-cluster-append.sh` lands with Phase 5; until then, the CLUSTER REVIEW block reports candidates but the persistence step is a stub.)
+The writer is idempotent on `cluster_id`: a confirmed cluster persisted in a prior run that is confirmed again with the same members exits 0 without appending a second row.
+
+**Batch-confirmation mode (backfill input).** The same CLUSTER REVIEW prompt drives a one-time backfill over the accumulated retro-evolution journal. Instead of clusters formed from the current run's raw pass, the candidate source is `lore retro backfill`:
+
+```bash
+lore retro backfill --since <date> --json
+```
+
+Each emitted candidate carries `target`, a singular `change_type`, and a `work_items[]` list (already at or above `--min-cluster K`, default 3). Present **one CLUSTER REVIEW prompt per candidate**, in descending K order, using the identical `[y/edit/split/n]` grammar and the identical accept→writer / `n`→skip routing above. The only mapping needed is the candidate's singular `change_type` → a one-element `--change-types` list:
+
+```bash
+bash ~/.lore/scripts/accepted-cluster-append.sh \
+  --target "<candidate.target>" \
+  --change-types "<candidate.change_type>" \
+  --work-items "<comma-joined candidate.work_items>" \
+  --decision "merge|edit|split" \
+  --accepted-at-run-id "<backfill_run_id>"
+```
+
+Idempotency makes the batch safely re-runnable: a candidate confirmed in an earlier backfill pass re-derives the same `cluster_id` and no-ops. As the operator works the batch, tally **proposed / confirmed / merged / rejected** counts and record them in the work item's `evidence.md` closure entry — proposed = candidates presented, confirmed = `y`/`edit` accepts, merged = `merge` combines, rejected = `n` skips.
+
+This is a maintainer-operated session: each prompt is a human decision. Do not auto-confirm candidates or synthesize operator input — an empty/declined batch persists no rows, which is a valid (if non-closing) outcome.
 
 ### Step 7: Apply Approved Suggestions
 
