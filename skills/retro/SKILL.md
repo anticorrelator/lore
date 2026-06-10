@@ -89,6 +89,9 @@ Read existing artifacts only. No new exploration needed.
 
 Primary source: **`execution-log.md`** if it exists — per-task entries with Changes, Observations, and test results. Secondary: worker SendMessage reports in conversation context. Cross-session fallback: `notes.md` session entries. Review-only: check subagent launches and knowledge preambles. When both exist: execution-log for task-level decisions; notes.md for session-level context (blockers, cross-task synthesis).
 
+**Evidence anomaly screen:** before scoring, scan execution-log for anomalies that degrade evidence and signal lead-orchestration gaps: duplicate task subjects with near-identical Changes (worker task race), `pending worker report` placeholder observations (premature logging), and multi-task batched entries (per-task sequence lost). Note each in the evidence block and treat affected entries as degraded — they feed the narrative, never silently into dimension scores. Also classify the cycle: code vs prose/protocol editing — code-centric criteria (out-of-scope reads, wrong-path exploration) mis-fit prose cycles; read those through the low-diagnostic lens.
+<!-- Sunset: remove if retro-evolution rows targeting skills/retro/SKILL.md change-type evidence-gap citing execution-log anomalies or prose-cycle misfit recur from ≥3 new distinct work items within the next 20 retro cycles. -->
+
 ### 2b: Knowledge delivery audit
 
 1. Read `plan.md`; extract `**Knowledge context:**` blocks per phase.
@@ -162,6 +165,9 @@ When triggered, produce a **compressed assessment** — a `[retro] <slug> — LO
 
 **Why:** Prescriptive/trivial retros consistently produce all-ceiling D1-D4 that inflate averages. Knowledge value concentrates at spec time; implementation-time scoring is low-signal. Full ceremony wastes evaluation effort.
 
+**Plan-saturated sentinel (post-scoring):** if no trigger fired here but Step 3 lands D1–D5 all at 5 with 0 escalations and 0 surfaced concerns, add `"plan_saturated": true` to the journal entry scores. All-ceiling retros on well-specified cycles are saturation, not signal — the flag lets longitudinal averages weight them distinctly without suppressing the scores.
+<!-- Sunset: remove if ceiling-class retro-evolution rows targeting skills/retro/SKILL.md recur from ≥3 new distinct work items within the next 20 retro cycles. -->
+
 ### Step 2.8: Escalation verdict surface (work-item telemetry, not scored)
 
 **Diagnostic, not scored.** When a worker returns a structured escalation verdict of the shape `{escalation: "task-too-trivial-for-solo-decomposition", rationale: "<one-sentence reason>"}` (validated at `scripts/validate-structured-report.py`), /retro surfaces it here as **work-item telemetry**. This surface is intentionally off-band from the dimension scores in Step 3 and off-band from the scorecard substrate:
@@ -204,7 +210,7 @@ Write a separate journal entry so longitudinal queries can filter cleanly. Read 
 
 ### Four factual signals (read from telemetry)
 
-Compute four signals from telemetry: **1. `declaration_coverage`** (fraction of retrieval opportunities where `scale_declared=true` in `retrieval-log.jsonl`); **2. `redeclare_rate`** (fraction of session retrievals re-issued at a different scale set from the previous call in the same session — measures rubric ↔ agent reality drift); **3. `off_scale_routes_emitted`** (count of worker-surfaced concerns routed off-scale, from `_work/<slug>/off_scale_routes.jsonl`); **4. `verifier_disagreements`** (count of classifier disagreements from the most recent `/renormalize` run, from `$KDIR/_meta/classification-report.json` or `scale_drift_rate` telemetry).
+Compute four signals from telemetry: **1. `declaration_coverage`** (fraction of retrieval opportunities where `scale_declared=true` in `retrieval-log.jsonl`, computed over **agent-driven rows only**, keyed by **exclusion** so new agent callers count by default: exclude rows with **no `caller` field** (session-startup hook writers — load-knowledge.sh logs its own retrieval records without one) and rows with caller in {`lore-query`, `resolve-manifest`} (background machinery whose call sites never require `--scale-set` and dilute the signal toward zero); the live agent-driven vocabulary as of 2026-06 is {`worker`, `worker-N`, `lead`, `prefetch`, `cli`, per-agent names like `tradeoffs`/`crossref-scout`} and all of it counts — do not re-key to an include-list without checking the log's actual caller values first (`jq -r '.caller // "<absent>"' retrieval-log.jsonl | sort | uniq -c`); treat `scale_declared` as true for boolean true OR a non-empty scale-set string <!-- Sunset: revert caller filtering if declaration_coverage remains <10% over the next 10 retro cycles after filtering — would indicate the dilution hypothesis was wrong -->); **2. `redeclare_rate`** (fraction of session retrievals re-issued at a different scale set from the previous call in the same session — measures rubric ↔ agent reality drift); **3. `off_scale_routes_emitted`** (count of worker-surfaced concerns routed off-scale, from `_work/<slug>/off_scale_routes.jsonl`); **4. `verifier_disagreements`** (count of classifier disagreements from the most recent `/renormalize` run, from `$KDIR/_meta/classification-report.json` or `scale_drift_rate` telemetry).
 
 For the bash scripts that compute each signal, read `skills/retro/templates/step2-9-signal-scripts.md` — sections "Factual signal 1" through "Factual signal 4".
 

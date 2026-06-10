@@ -127,6 +127,11 @@ Affects: Dimension 5 interpretation — does not cap scores.
 
 **Sequential same-file phantom work:** Fast worker implements beyond scope on shared file. Later workers report "no changes needed." Over-serialization signal, not knowledge failure.
 
+**Unresolved blocking open questions:** plan.md marks a question blocking but implementation proceeded per recommendation without empirical resolution. Spec-to-implementation handoff gap — note in D5 narrative; the question's resolution status is evidence, not a worker fault.
+
+**Task over-decomposition:** spec splits logically coupled changes into separate tasks targeting the same code block. Workers collide or serialize; phantom completions follow. D5 modifier plus spec-synthesis feedback; compounds with "Sequential same-file phantom work."
+<!-- Sunset: remove these two modifiers if new-failure-mode retro-evolution rows targeting skills/retro/failure-modes.md citing these patterns recur from ≥3 new distinct work items within the next 20 cycles. -->
+
 **Go same-package split constraint:** Go compiler rejects duplicate declarations in same package. Phased removal fails — all removals forced into single pass. Specs should consolidate removal tasks.
 
 **Spec code reference error:** Spec cites code artifact by wrong name (e.g., BASIC_PLAN vs actual MINIMAL_PLAN). Worker must investigate — escalation-equivalent. Mitigation: `/spec` synthesis should grep cited artifacts.

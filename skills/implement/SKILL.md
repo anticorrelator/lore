@@ -415,6 +415,9 @@ The gate fires when **all four** conditions hold:
 
 7. **Spawn worker agents with tier-aware emission instructions** — launch `min(recommended_workers, 4)` workers in a single message. Use the `worker` agent template (resolve via `resolve_agent_template worker`; on Claude Code `~/.claude/agents/worker.md`) as base, with these injections:
 
+   **Pre-dispatch same-file collision check:** before assigning tasks, intersect the `**Files:**` targets (tasks.json `file_targets`) of all tasks that would run concurrently. Any two concurrent tasks sharing a file: serialize them within one worker's queue or merge them into a single assignment — never parallel-dispatch same-file tasks across workers. After claiming (`TaskUpdate(owner=…)`), a worker-side `TaskGet` ownership re-check is the backstop for claim races; this lead-side intersection is the primary guard.
+   <!-- Sunset: remove if same-file collision / phantom-completion retro-evolution rows targeting skills/implement/SKILL.md recur from ≥3 new distinct work items within the next 20 implement cycles. -->
+
    Workers declare `--scale-set` at every `lore prefetch` and `lore search` call. **Scale rubric — declare explicitly at every retrieval surface:** for the four scale definitions (abstract / architecture / subsystem / implementation), boundary tests, multi-label encoding, and the ±1 query pattern, see `skills/memory/SKILL.md` § Scale-Aware Navigation. The full decision tree lives in the canonical `classifier` agent template (resolved via `resolve_agent_template classifier`).
 
    - `{{team_name}}` → `impl-<slug>`
@@ -545,6 +548,9 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
      | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$WORKER_TEMPLATE_VERSION"
    ```
    If the worker omitted a field, use `None`. `execution-log.md` is created on first write.
+
+   **Log discipline:** one execution-log entry per task, written only after that task's worker completion report arrives — never log `pending worker report` placeholders. When a worker reports several tasks in one message, write one entry per task (batched entries lose per-task sequence and starve /retro of evidence). When Step 3.1 used the fallback branch because the plan had no **Knowledge context:** blocks, log one `Knowledge-delivery-path: lead-fallback-prefetch` line so the delivery gap is visible to /retro.
+   <!-- Sunset: remove if execution-log completeness retro-evolution rows targeting skills/implement/SKILL.md change-type evidence-gap recur from ≥3 new distinct work items within the next 20 implement cycles. -->
 
 4. **Verdict-fabrication guard (handler: agent only)** — before invoking advisor-impact rollup, verify each consultation in the worker's `**Consultations:**` field **whose `handler` is `agent`** against the transcript's actual advisor spawn events. The guard withholds attribution for unverifiable consultations so the advisor scorecard does not absorb fabricated worker reports as real consultation events.
 

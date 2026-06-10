@@ -98,6 +98,9 @@ If the user's description is already specific enough (clear scope, stated constr
 3. Check the knowledge store index for relevant domain files.
 4. Read the files yourself — do NOT spawn subagents.
 5. Note key findings as you go.
+   - **Current-state verification (mandatory before a finding becomes a design constraint):** when a design choice hinges on a current-state claim sourced from a sibling work item's `notes.md` or other uncommitted prose (not committed code or a commons entry), verify the claim against HEAD before adopting it. Notes age faster than code; a stale note silently shapes scope.
+   - **Integration-seam trace:** when the work adds a field to a shared substrate (e.g., `_meta.json`) or inserts a script into an existing control-flow gate, trace three seams before drafting: (a) does an existing gate/guard intercept the new state? (b) does the denormalized read model (e.g., `_index.json`) project the field, or is it invisible to consumers? (c) does ordering (archive/move) change where a later step finds the file?
+   <!-- Sunset: remove these two sub-checks if retro-evolution rows targeting skills/spec/SKILL.md change-type new-failure-mode citing unverified-current-state or missed-integration-seam evidence recur from ≥3 new distinct work items within the next 20 spec cycles. -->
 6. **External skill and agent discovery (strict — exclude lore protocol toolchain)** — after reading key files, scan for relevant *external* skills and agents:
    - Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** — they are protocol toolchain, not advisors. Target external skills (security review, language tooling, harness helpers, domain reviewers).
    - Build the exclusion list from the canonical lore repo:
@@ -618,6 +621,9 @@ lore work regen-tasks <slug>
 ```
 
 Run `lore work heal`.
+
+**Emission contract round-trip (mandatory):** after regen-tasks, validate emitted artifacts against their live consumers, never from memory: (1) every `retrieval_directive` in tasks.json carries non-empty `seeds` AND non-empty `scale_set` (jq assert; a bare/empty directive → fix the plan block or apply the omission rule, then regen); (2) any script invocation block the plan instructs agents to run must match the live script's current flags (check `--help` or source — script schemas drift faster than plans); (3) Tier-2 emission instructions point at the validator's canonical required-field set rather than enumerating fields inline.
+<!-- Sunset: remove if evidence-gap retro-evolution rows targeting skills/spec/SKILL.md citing consumer-contract drift recur from ≥3 new distinct work items within the next 20 spec cycles. -->
 
 ---
 
