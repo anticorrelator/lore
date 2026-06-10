@@ -10,6 +10,8 @@
     "work_item",
     "artifact_id",
     "coverage_state",
+    "abstention_reason",
+    "insufficient_evidence_refs",
     "omission_claim",
     "created_at"
   ],

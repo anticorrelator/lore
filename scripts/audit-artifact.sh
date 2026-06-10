@@ -2050,7 +2050,7 @@ PYEOF
         if ! LORE_REPO_ROOT="${LORE_REPO_ROOT:-$(pwd)}" KDIR="$KDIR" \
             python3 "$SCRIPT_DIR/reverse-auditor-inline-evidence.py" \
             "$REVERSE_AUDITOR_INPUT_FILE" "$REVERSE_AUDITOR_INLINED_FILE" \
-            --lore-repo "${LORE_REPO_ROOT:-$(pwd)}" --kdir "$KDIR" 2>&1; then
+            --lore-repo "${LORE_REPO_ROOT:-$(pwd)}" --kdir "$KDIR"; then
           echo "[audit] warning: inline-evidence resolution failed — judge will see unresolved packet" >&2
           cp "$REVERSE_AUDITOR_INPUT_FILE" "$REVERSE_AUDITOR_INLINED_FILE" 2>/dev/null || true
         fi

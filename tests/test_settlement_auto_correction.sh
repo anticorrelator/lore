@@ -425,6 +425,42 @@ print((d.get("correction_outcome") or {}).get("reason",""))
 ' "$RUN_FILES4")
 assert_eq "kill-switch: correction_outcome.reason is auto_correction_disabled" "$RUN_OUTCOME4_REASON" "auto_correction_disabled"
 
+# =============================================
+# Test 5: Paraphrase claim (right topic, different wording) → terminal skip
+# =============================================
+# Regression for the secondary-gate audit: every historical
+# not_mechanically_applicable rejection was a claim that paraphrased a fact the
+# entry already states in different words — not a claim about a missing topic.
+# apply-correction's match is exact-substring (claim text must appear verbatim
+# in the entry body), so a paraphrase correctly rejects. This pins that the
+# rejection is by-design conservatism, not a normalization gap.
+echo ""
+echo "Test 5: paraphrase claim that restates an entry fact in other words → skip"
+setup_kdir_with_indexed_entry
+
+# The entry body says "the first regex hit wins and shortcircuits the rest."
+# This claim asserts the SAME fact in different words — no verbatim overlap.
+PARAPHRASE_CLAIM="Routing dispatch resolves to whichever pattern matches earliest and ignores all later patterns."
+ROW5=$(emit_tier2_row "claim-paraphrase-1" "$PARAPHRASE_CLAIM")
+ENTRY_BEFORE5=$(cat "$KDIR/conventions/example-routing-rule.md")
+printf '%s' "$ROW5" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS" \
+  bash "$QUEUE" enqueue --work-item auto-correction-test --kdir "$KDIR" --json >/dev/null
+LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS" \
+  LORE_SETTLEMENT_EXECUTOR="$FAKE_EXEC" \
+  bash "$QUEUE" process --kdir "$KDIR" --once --json 2>"$TEST_DIR/proc-stderr5.txt" >/dev/null
+ENTRY_AFTER5=$(cat "$KDIR/conventions/example-routing-rule.md")
+assert_eq "paraphrase claim does not mutate entry" "$ENTRY_AFTER5" "$ENTRY_BEFORE5"
+PROC_STDERR5=$(cat "$TEST_DIR/proc-stderr5.txt")
+assert_contains "stderr logs not_mechanically_applicable for paraphrase" "$PROC_STDERR5" "not_mechanically_applicable"
+
+RUN_FILES5=$(find "$KDIR/_settlement/runs" -name '*.json' 2>/dev/null | head -1)
+RUN_OUTCOME5_REASON=$(python3 -c '
+import json,sys
+d = json.load(open(sys.argv[1]))
+print((d.get("correction_outcome") or {}).get("reason",""))
+' "$RUN_FILES5")
+assert_eq "paraphrase: correction_outcome.reason is not_mechanically_applicable" "$RUN_OUTCOME5_REASON" "not_mechanically_applicable"
+
 echo ""
 echo "================================"
 echo "Results: $PASS passed, $FAIL failed"
