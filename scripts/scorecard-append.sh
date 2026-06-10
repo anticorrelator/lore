@@ -4,7 +4,11 @@
 # Usage:
 #   lore scorecard append --row '<json>'
 #   echo '<json>' | lore scorecard append
-#   lore scorecard append --row '<json>' [--kdir <path>] [--json]
+#   lore scorecard append --row '<json>' [--kdir <path>] [--json] [--model <id>]
+#
+# Model provenance: every appended row is stamped with a `model` field
+# (row's own value > --model flag > LORE_MODEL env > "unrecorded") so
+# readers can segment evidence across model generations.
 #
 # Reads a single JSON object (via --row or stdin), validates it against the
 # canonical scorecard row schema, and appends one JSON line to
@@ -71,6 +75,7 @@ source "$SCRIPT_DIR/lib.sh"
 ROW=""
 KDIR_OVERRIDE=""
 JSON_MODE=0
+MODEL_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -80,6 +85,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --kdir)
       KDIR_OVERRIDE="$2"
+      shift 2
+      ;;
+    --model)
+      MODEL_OVERRIDE="$2"
       shift 2
       ;;
     --json)
@@ -289,6 +298,19 @@ mkdir -p "$SCORECARDS_DIR"
 # Seed _scorecards/README.md on first use so the invariant travels with the store.
 if [[ ! -f "$SCORECARDS_DIR/README.md" ]]; then
   "$SCRIPT_DIR/seed-scorecards-readme.sh" "$SCORECARDS_DIR" 2>/dev/null || true
+fi
+
+# --- Model provenance stamp ---
+# Stamp which model generation produced the evidence so /retro and /evolve
+# can segment signal across model transitions (behavioral-rate claims do not
+# transfer across generations; structural claims do). Priority: the row's own
+# model field > --model flag > LORE_MODEL env (exported by judge pipelines,
+# e.g. audit-artifact.sh) > "unrecorded". Stamping is provenance, not
+# validation — rows are never rejected for missing model.
+ROW_MODEL=$(printf '%s' "$ROW" | jq -r '.model // ""')
+if [[ -z "$ROW_MODEL" ]]; then
+  STAMP_MODEL="${MODEL_OVERRIDE:-${LORE_MODEL:-unrecorded}}"
+  ROW=$(printf '%s' "$ROW" | jq -c --arg m "$STAMP_MODEL" '. + {model: $m}')
 fi
 
 # --- Compact to one line and append ---

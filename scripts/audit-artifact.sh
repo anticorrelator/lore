@@ -662,6 +662,16 @@ if [[ -z "$JUDGE_MODEL" ]] && [[ -z "$GATE_OUTPUT_FILE" || -z "$CURATOR_OUTPUT_F
   fi
 fi
 
+# Model provenance: scorecard-append.sh stamps rows with LORE_MODEL when the
+# row carries no model field. Export the resolved judge model so every row
+# this pipeline emits records which model generation produced the verdicts
+# (pre-computed --*-output-file paths leave it unset → "unrecorded", which is
+# honest: the producing model is unknown to this process). Respect a caller's
+# own LORE_MODEL if already set.
+if [[ -n "$JUDGE_MODEL" && -z "${LORE_MODEL:-}" ]]; then
+  export LORE_MODEL="$JUDGE_MODEL"
+fi
+
 # --- Resolve knowledge directory ---
 if [[ -n "$KDIR_OVERRIDE" ]]; then
   KDIR="$KDIR_OVERRIDE"

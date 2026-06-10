@@ -545,6 +545,35 @@ ACCEPTED_OMISSION_COUNT=$(grep -c '"omission_rate"' "$ROWS_FILE" 2>/dev/null || 
 assert_eq "only the one accepted omission_rate row landed" "$ACCEPTED_OMISSION_COUNT" "1"
 
 # =============================================
+# Model provenance stamp (segmentation across model generations)
+# Priority: row's own model field > --model flag > LORE_MODEL env > "unrecorded"
+# =============================================
+
+# Case A: no model anywhere -> stamped "unrecorded"
+bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","tier":"telemetry","metric":"model_stamp_probe_a"}' >/dev/null
+STAMPED=$(grep '"model_stamp_probe_a"' "$ROWS_FILE" | tail -1 | jq -r '.model')
+assert_eq "no model anywhere stamps unrecorded" "$STAMPED" "unrecorded"
+
+# Case B: LORE_MODEL env -> stamped from env
+LORE_MODEL="env-model-id" bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" \
+  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","tier":"telemetry","metric":"model_stamp_probe_b"}' >/dev/null
+STAMPED=$(grep '"model_stamp_probe_b"' "$ROWS_FILE" | tail -1 | jq -r '.model')
+assert_eq "LORE_MODEL env stamps row" "$STAMPED" "env-model-id"
+
+# Case C: --model flag beats env
+LORE_MODEL="env-model-id" bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --model "flag-model-id" \
+  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","tier":"telemetry","metric":"model_stamp_probe_c"}' >/dev/null
+STAMPED=$(grep '"model_stamp_probe_c"' "$ROWS_FILE" | tail -1 | jq -r '.model')
+assert_eq "--model flag beats LORE_MODEL env" "$STAMPED" "flag-model-id"
+
+# Case D: row's own model field is never overwritten
+LORE_MODEL="env-model-id" bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --model "flag-model-id" \
+  --row '{"schema_version":"1","kind":"telemetry","calibration_state":"unknown","tier":"telemetry","metric":"model_stamp_probe_d","model":"row-model-id"}' >/dev/null
+STAMPED=$(grep '"model_stamp_probe_d"' "$ROWS_FILE" | tail -1 | jq -r '.model')
+assert_eq "row's own model field wins" "$STAMPED" "row-model-id"
+
+# =============================================
 # Summary
 # =============================================
 echo ""

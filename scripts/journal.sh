@@ -14,12 +14,16 @@ source "$SCRIPT_DIR/lib.sh"
 
 # --- write subcommand ---
 journal_write() {
-  local observation="" context="" work_item="" role="interactive" scores=""
+  local observation="" context="" work_item="" role="interactive" scores="" model=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --observation)
         observation="$2"
+        shift 2
+        ;;
+      --model)
+        model="$2"
         shift 2
         ;;
       --context)
@@ -48,6 +52,8 @@ Options:
   --work-item     Associated work item slug (optional)
   --role          Role of the observer: interactive, worker, hook, spec, retro (default: interactive)
   --scores        JSON object with numeric scores (optional, e.g. '{"accuracy": 0.8}')
+  --model         Model identity of the observer (falls back to LORE_MODEL env, then "unrecorded");
+                  lets /retro and /evolve segment evidence across model generations
   --help, -h      Show this help
 EOF
         return 0
@@ -80,6 +86,11 @@ EOF
   local meta_dir="$knowledge_dir/_meta"
   mkdir -p "$meta_dir"
 
+  # Model provenance: --model flag > LORE_MODEL env > "unrecorded"
+  if [[ -z "$model" ]]; then
+    model="${LORE_MODEL:-unrecorded}"
+  fi
+
   # Build JSONL entry
   local timestamp branch
   timestamp=$(timestamp_iso)
@@ -94,13 +105,14 @@ entry = {
     'context': sys.argv[3],
     'role': sys.argv[4],
     'git_branch': sys.argv[5],
+    'model': sys.argv[8],
 }
 if sys.argv[6]:
     entry['work_item'] = sys.argv[6]
 if sys.argv[7]:
     entry['scores'] = json.loads(sys.argv[7])
 print(json.dumps(entry, ensure_ascii=False))
-" "$timestamp" "$observation" "$context" "$role" "$branch" "$work_item" "$scores")
+" "$timestamp" "$observation" "$context" "$role" "$branch" "$work_item" "$scores" "$model")
 
   # Append to journal
   local logfile="$meta_dir/effectiveness-journal.jsonl"
