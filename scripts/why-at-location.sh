@@ -114,10 +114,10 @@ def _file_matches(related_files, target_file, target_basename):
     return False
 
 # Walk all knowledge category directories
-CATEGORY_DIRS = {"abstractions", "architecture", "conventions", "gotchas", "principles", "workflows", "domains", "preferences"}
+CATEGORY_DIRS = {"design-rationale", "abstractions", "architecture", "conventions", "gotchas", "principles", "workflows", "domains", "preferences"}
 
 # Rationale-bearing categories get a rank boost
-RATIONALE_CATEGORIES = {"principles", "architecture", "abstractions"}
+RATIONALE_CATEGORIES = {"design-rationale", "principles", "architecture", "abstractions"}
 RATIONALE_BOOST = 2.0
 
 matches = []
@@ -193,7 +193,7 @@ for m in matches:
     m["template_version"] = fm.get("template_version")
 
 # Sort by boosted importance descending, then category priority
-CAT_PRIORITY = {"principles": 5, "architecture": 4, "abstractions": 3, "gotchas": 2, "conventions": 1, "workflows": 0, "domains": 0, "preferences": 0}
+CAT_PRIORITY = {"design-rationale": 6, "principles": 5, "architecture": 4, "abstractions": 3, "gotchas": 2, "conventions": 1, "workflows": 0, "domains": 0, "preferences": 0}
 matches.sort(key=lambda x: (-x["boosted_importance"], -CAT_PRIORITY.get(x["category"], 0)))
 matches = matches[:limit]
 

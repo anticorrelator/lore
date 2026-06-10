@@ -501,12 +501,16 @@ EOF
   # Step 4.0 heading exists.
   grep -q '#### Step 4.0: Lead consultation handler' "$SKILL_FILE"
 
-  # The four documented sub-steps are present in prose.
+  # The four documented sub-steps are present in prose (semantic tokens, not
+  # exact voice register — the filing now routes through `lore impl consult-log`,
+  # which appends the durable consultation-transcript.jsonl record).
   grep -q "Parse the request body" "$SKILL_FILE"
   grep -q "Route by domain" "$SKILL_FILE"
   grep -q "SKILL_INVOCATION_MAP" "$SKILL_FILE"
   grep -q "Reply via SendMessage" "$SKILL_FILE"
-  grep -q "Append a transcript record" "$SKILL_FILE"
+  grep -qi "transcript record" "$SKILL_FILE"
+  grep -q "consultation-transcript.jsonl" "$SKILL_FILE"
+  grep -q "lore impl consult-log" "$SKILL_FILE"
 
   # The reply shape names consultation-id, handler, lead-acknowledged, and
   # the conditional skill_template_version field (per D6 / D6a).
@@ -532,33 +536,36 @@ EOF
 # edits.
 # ============================================================
 
-@test "SKILL.md Step 4.1.d documents required-consultation rejection on missing acknowledged reply" {
-  # Step 4.1.d heading / rule prose.
+@test "SKILL.md documents required-consultation rejection on missing acknowledged reply" {
+  # The blocking check is named (now part of the `lore impl check-report`
+  # contract; the durable transcript is consultation-transcript.jsonl).
   grep -q "Required-consultation acknowledgement check" "$SKILL_FILE"
 
-  # The cross-check names the canonical CONSULTATION_TRANSCRIPT structure
-  # and the lead-acknowledged: true reply field per D6a.
-  grep -q 'CONSULTATION_TRANSCRIPT' "$SKILL_FILE"
+  # The cross-check names the canonical durable transcript artifact and the
+  # lead-acknowledged: true reply field per D6a.
+  grep -q 'consultation-transcript.jsonl' "$SKILL_FILE"
   grep -q 'lead-acknowledged: true' "$SKILL_FILE"
 
   # Rejection branch: if a required domain has no matching entry OR the
   # consultation_id does not match an acknowledged reply, the task is
-  # rejected.
-  grep -q 'the task is \*\*rejected\*\*' "$SKILL_FILE"
+  # rejected (semantic token — exact bolding is a register, not a contract).
+  grep -q 'the task is rejected' "$SKILL_FILE"
 
   # The mechanism's teeth are documented as the new lead-side lever the
   # previous pipeline lacked.
-  grep -q 'lead-side tracking adds' "$SKILL_FILE"
+  grep -qi 'lead-side tracking adds' "$SKILL_FILE"
 }
 
-@test "SKILL.md Step 4 §3 names the three branches and the verify-or-skip default" {
-  # Branch labels appear in prose.
-  grep -q "Provider OK and every claimed advisor is verified" "$SKILL_FILE"
+@test "SKILL.md names the fabrication guard's three branches and the verify-or-skip default" {
+  # Branch labels appear in prose (semantic tokens — the guard mechanics now
+  # live in scripts/impl-check-report.sh; the SKILL.md call-site contract
+  # still names all three branches).
+  grep -qi "every claimed advisor is verified" "$SKILL_FILE"
   grep -q "Mismatch" "$SKILL_FILE"
-  grep -q "Provider returns \`unavailable\`" "$SKILL_FILE"
+  grep -qi "provider \`unavailable\`" "$SKILL_FILE"
 
   # Verify-or-skip default is explicit.
-  grep -q "Do NOT fall through to today's verbatim-trust behavior" "$SKILL_FILE"
+  grep -qi "fall through to verbatim-trust" "$SKILL_FILE"
 
   # Canonical log line shapes are documented verbatim so consumers (this
   # bats file, /retro, future audit tooling) can match them.

@@ -24,11 +24,36 @@ allowed-tools:
 
 # /implement Skill
 
-Executes a work item's `plan.md` with a team of knowledge-aware agents. Agents produce Tier 2 task evidence during work and optionally surface Tier 3 candidates for commons promotion. The lead verifies, promotes accepted candidates via `lore promote`, and writes a retro-prep bundle for the next-step `/retro` ceremony.
+Executes a work item's `plan.md` with a team of knowledge-aware agents. Agents produce Tier 2 task evidence during work and optionally surface Tier 3 candidates for commons promotion. The lead verifies, promotes accepted candidates, and closes the run against the capability anchor.
+
+Mechanical bookkeeping routes through the eight `lore impl` verbs — `start`, `gate-anchor`, `open`, `next-batch`, `check-report`, `consult-log`, `promote-batch`, `close`. Each verb stamps provenance at the write site and appends its own `execution-log.md` attribution row (`--source impl-verb`), so verb-mediated bookkeeping is distinctly attributable from hand-run writes. The verbs file judgments; they never make them. Every verdict, route choice, acceptance, and selection in this skill is the lead's, made in prose before the verb is invoked — a verb that receives a verdict it did not expect rejects it rather than inferring one.
 
 ## Approach
 
 **Approach this work from confidence, not caution.** Mistakes are part of working; most are recoverable through normal review. The cost of constant deferral on settled steps exceeds the cost of occasional errors caught later. When the rubric or the protocol gives you a clear path, take it. Defer at genuine forks (multiple plausible directions where the protocol does not pre-decide) or at high-blast-radius operations (destructive, hard-to-reverse, or shared-state-affecting). Defer is a tool for forks, not a default for actions.
+
+## Judgment Kernels
+
+<!-- INVARIANT — canonical kernel vocabulary, validated by the verb scripts.
+     A future edit that renames any token here silently silences a downstream
+     gate; change the verb contract first, then this file in the same commit.
+       anchor verdict (impl-gate-anchor.sh): aligned | misaligned-respec | misaligned-override | abort | legacy-skip
+       gate route (impl-gate-anchor.sh):     continue | respec | abort
+       consultation handler (impl-consult-log.sh, impl-check-report.sh): lead | skill | agent
+       closure verdict (impl-close.sh):      full | partial | none -->
+
+Eight decisions stay in lead prose. The verbs validate the vocabulary these kernels emit, so a drifted token is rejected at filing time:
+
+| Kernel | Where | Canonical vocabulary | Filing verb |
+|---|---|---|---|
+| Anchor verdict | Step 1.5b | `aligned` \| `misaligned-respec` \| `misaligned-override` \| `abort` \| `legacy-skip` | `gate-anchor` |
+| Lead-inline decision | Step 3.0 | four condition fields, read by the lead | — (route choice) |
+| Spawn decision | Steps 3, 4 batch loop | who runs what, serialize vs merge | — (harness calls) |
+| Consultation answers | Step 4.0 | `handler: lead` \| `skill` \| `agent` | `consult-log` |
+| Accept/reject | Step 4 §1 | acceptance after mechanical pass | `check-report` (mechanics only) |
+| Divergence-rationale assessment | Step 4 §2 | convincing / unconvincing | — (followup) |
+| Tier-3 selection | Step 5 | accepted candidate set | `promote-batch` |
+| Closure verdict | Steps 6–7 | `full` \| `partial` \| `none` | `close` |
 
 ## Resolve Paths
 
@@ -41,21 +66,7 @@ Agent templates live in the lore repo under `agents/<name>.md` and surface via `
 
 **MANDATORY:** You MUST read the actual template files for `worker` and `advisor` when spawning agents — resolve each via `resolve_agent_template worker` and `resolve_agent_template advisor`. Do NOT skip this step. Do NOT generate inline agent prompts as a substitute. If the resolver fails or the files are missing, stop and report the error — never fall back to improvised prompts.
 
-## Resolve Template Versions
-
-Compute content-hashes of the agent templates you'll spawn and the skill template itself. These feed the `template_version` provenance field on every downstream emission site (`evidence-append.sh`, `lore promote`, `write-execution-log.sh`, scorecard rows) plus the `{{template_version}}` injection into each agent's resolved prompt:
-
-```bash
-source ~/.lore/scripts/lib.sh
-SKILLS_DIR=$(resolve_harness_install_path skills)
-LEAD_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$SKILLS_DIR/implement/SKILL.md")
-WORKER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$(resolve_agent_template worker)")
-ADVISOR_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$(resolve_agent_template advisor)")
-```
-
-The three are NOT interchangeable — each tags emissions produced by its matching template. If `template-version.sh` fails for any template, log a warning and continue with an empty string; downstream scripts treat the omitted flag as "no template version" (CC-01 legacy warn+pass).
-
-Registration into `$KDIR/_scorecards/template-registry.json` happens automatically on first use by `scripts/scorecard-append.sh` — no separate registration step.
+Template versions and role→model bindings come from the `lore impl start` struct (Step 1) — `$LEAD_TEMPLATE_VERSION`, `$WORKER_TEMPLATE_VERSION`, `$ADVISOR_TEMPLATE_VERSION` tag emissions produced by their matching templates and are NOT interchangeable. A version the verb could not resolve arrives as an empty string with a stderr warning; downstream scripts treat the omitted flag as "no template version" (CC-01 legacy warn+pass). Registration into `$KDIR/_scorecards/template-registry.json` happens automatically on first use by `scripts/scorecard-append.sh`.
 
 ## Protocol-to-Skill Projection (9 → 7)
 
@@ -69,339 +80,176 @@ Proposal §9.2 describes nine logical steps. This SKILL.md presents them as seve
 | 4 Lead verifies work output + Tier 2 evidence | Step 4 |
 | 5 Lead separates accepted work from remembered doctrine | Step 4 |
 | 6 Lead writes/updates execution evidence | Step 4 |
-| 7 Lead runs `lore promote` on accepted Tier 3 | Step 5 |
+| 7 Lead runs Tier 3 promotion on accepted candidates | Step 5 |
 | 8 Stop hook lazily triggers audit; completion non-blocking | Step 6 (reference only) |
 | 9 Prepare `/retro` inputs | Step 7 |
 
-**Lead-inline route variant.** Step 3.0 introduces a pre-dispatch short-circuit. When the plan satisfies the lead-inline conditions (single prescriptive task, no persistent advisor, no required pre-edit orchestration — file count is no longer gated), §9.2 steps 2–6 collapse into direct lead execution: the lead applies edits using its own tools, emits Tier 2 evidence with `LEAD_TEMPLATE_VERSION`, then jumps to Step 5 → Step 6 → Step 7. No team is created and no workers spawn.
+**Lead-inline route variant.** Step 3.0 introduces a pre-dispatch short-circuit. When the plan satisfies the lead-inline conditions (single prescriptive task, no persistent advisor, no required pre-edit orchestration — file count is no longer gated), §9.2 steps 2–6 collapse into direct lead execution: the lead applies edits using its own tools, emits Tier 2 evidence with `$LEAD_TEMPLATE_VERSION`, then jumps to Step 5 → Step 6 → Step 7. No team is created and no workers spawn.
 
-### Step 1: Load work item and validate
+### Step 1: Start the run
 
-1. Parse arguments: extract work item name. The `--model <id>` flag is an undocumented per-invocation override that, when present, exports `LORE_MODEL_LEAD=<id>` for the duration of this skill — it stamps only the lead role for this run and does NOT touch worker/advisor/researcher bindings. Per-role models for spawned agents always come from `resolve_model_for_role <role>`; the override is a one-shot escape hatch, not a documented user-facing API. (Per-role overrides via `LORE_MODEL_<ROLE>` env vars are honored independently.) The `--yes` flag is the documented user-facing escape hatch for the Step 1.5b anchor-coverage gate's misaligned-route prompt — when present, the gate skips the `AskUserQuestion` prompt and defaults to the recommended remediation (re-spec, i.e. exit `/implement` with the prescribed-next-command line `Next: run /spec <slug>`; the lead does NOT auto-invoke `/spec`). The flag mirrors `/spec --yes` semantics. **`--yes` NEVER skips the gate evaluation itself** — per `inside-lore-protocol-silent-skip-is`, only the user-facing prompt is suppressed; the lead still evaluates anchor-vs-plan coverage, still emits the `execution-log.md` row, and still respects the legacy-no-anchor branch's logged-skip contract. `--yes` does not affect any other prompt in this skill (e.g., the Step 1.2 archived-item confirmation or the Step 2.3 checksum-mismatch prompt remain interactive).
+1. **Parse arguments:** extract the work item reference. The `--model <id>` flag is an undocumented per-invocation override that, when present, exports `LORE_MODEL_LEAD=<id>` for the duration of this skill — it stamps only the lead role for this run and does NOT touch worker/advisor/researcher bindings. (Per-role overrides via `LORE_MODEL_<ROLE>` env vars are honored independently.) The `--yes` flag is the documented user-facing escape hatch for the Step 1.5b anchor-coverage gate's misaligned-route prompt — when present, the gate skips the `AskUserQuestion` prompt and defaults to the recommended remediation (re-spec). **`--yes` NEVER skips the gate evaluation itself** — per `inside-lore-protocol-silent-skip-is`, only the user-facing prompt is suppressed; the lead still evaluates anchor-vs-plan coverage, still files the gate row, and still respects the legacy-no-anchor branch's logged-skip contract. `--yes` does not affect any other prompt in this skill (the Step 1.2 archived-item confirmation and the Step 2 checksum-mismatch prompt remain interactive). Record `RUN_STARTED_AT` (ISO-8601 now) — Step 7's close consumes it.
 
-2. **Resolve the user-provided string to a canonical slug — delegate to `lore work resolve`, then stop.** Do NOT improvise via `ls`, `find`, or directory listing — the resolver is the canonical fuzzy source and carries the exact-slug fast path internally. **Do NOT use `lore work show` here:** it is a human-readable presentation command; consuming it forces you to parse the rendered view of files you are about to read directly in step 3.
+2. **Run the start verb — the sole Step 1 envelope.** Do NOT improvise resolution via `ls`, `find`, `lore work show`, or directory listing, and do NOT hand-run the resolver, plan validation, branch cache, claims parsing, or model/template-version resolution it absorbs:
 
    ```bash
-   if RESULT=$(lore work resolve "$INPUT" --branch "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"); then
-     SLUG=$(printf '%s' "$RESULT" | sed -n '1p')
-     ARCHIVED=$(printf '%s' "$RESULT" | sed -n '2p')
-     if [[ "$ARCHIVED" == "true" ]]; then
-       ITEM_DIR="$WORK_DIR/_archive/$SLUG"
-     else
-       ITEM_DIR="$WORK_DIR/$SLUG"
-     fi
-   else
-     case $? in
-       1) echo "[implement] No work item matches '$INPUT'. Stop — do not fall back to broader filesystem inspection." >&2; exit 1 ;;
-       2) echo "[implement] Multiple work items match '$INPUT' (candidates on stderr above). Disambiguate via AskUserQuestion and re-invoke with a unique reference." >&2; exit 1 ;;
-     esac
-   fi
+   lore impl start "$INPUT" --json
    ```
 
-   Output is exactly two values — `SLUG` and `ARCHIVED` — plus derived `ITEM_DIR`. `_meta.json` and `plan.md` on disk are the source of truth for everything else.
+   Contract (`scripts/impl-start.sh`): resolves `<ref>` to a canonical slug via the canonical fuzzy resolver (`--branch <name>` influences fuzzy resolution only); validates `plan.md` has a `## Phases` section and ≥1 unchecked `- [ ]`; returns `_meta.json`'s title and `intent_anchor` VERBATIM (the verb computes facts only and never adjudicates the anchor); writes the branch cache — its only write — skipped for archived items and non-fatal on failure; parses prior `task-claims.jsonl` into `prior_claims.by_task` / `by_file` maps; resolves `models` and `template_versions` for lead/worker/advisor (each failure degrades to `""` with a stderr warning).
 
-   - **If resolved item is archived (`ARCHIVED=true`):** Warn the user: "This work item is archived. Proceed anyway?" Wait for explicit confirmation.
-   - **If no candidate matches:** report the failure and stop. Do not fall back to broader filesystem inspection.
+   Exit codes: `0` start struct printed (single JSON object with `--json`); `1` no match, missing `plan.md` ("No structured plan found. Run `/spec` first…"), or no unchecked tasks ("All plan tasks are already complete.") — report the verb's message and stop, do NOT fall back to broader filesystem inspection; `2` ambiguous reference — disambiguate via `AskUserQuestion` from the candidate list and re-invoke.
 
-3. **Read the on-disk source-of-truth files directly with `Read`** — not via `lore work show`, not via shell piping. The CLI's job ended at step 2:
-   - `$ITEM_DIR/_meta.json` — metadata, including `intent_anchor` (consumed by Step 1.5b).
-   - `$ITEM_DIR/plan.md` — phases, design decisions, retrieval directives, task lists.
-   - `$ITEM_DIR/notes.md` — last entry for session continuity.
+   Bind from the struct: `SLUG`, `ITEM_DIR` (`$WORK_DIR/<slug>`, or `$WORK_DIR/_archive/<slug>` when `archived: true`), `INTENT_ANCHOR`, the three models, the three template versions, and the prior-claims maps (these feed Step 3's per-worker Tier 2 extracts via `open`).
 
-4. **If no `plan.md`:** Tell user "No structured plan found. Run `/spec` first to create phases and tasks."
-5. **If `plan.md` has no `## Phases` or no unchecked `- [ ]` items:** Tell user "All plan tasks are already complete."
+   - **If `archived: true`:** warn the user: "This work item is archived. Proceed anyway?" Wait for explicit confirmation. (Note: `gate-anchor` and the other writing verbs refuse archived items.)
 
-**Gate:** Anchor-coverage start gate (prose-named "Step 1.5b" — unnumbered to preserve Step 1's 1.1–1.8 numbering). Read the anchor. Read the plan. Decide whether the plan as written will deliver the capability the anchor names.
+3. **Read the on-disk source-of-truth files directly with `Read`** — `$ITEM_DIR/plan.md` (phases, design decisions, retrieval directives, task lists) and `$ITEM_DIR/notes.md` (last entry for session continuity). The verb validated structure; the lead's judgments — the anchor gate below, dispatch shaping, consultation answers — read content.
 
-This is a **lead-attested semantic check, not machine-enforced.** No script adjudicates the alignment verdict; the lead's discretion-bearing read of `_meta.json.intent_anchor` against `plan.md` is the only judge. The sibling structural check (`scripts/verify-plan-intent-anchor.sh`, called by `/spec`) is deliberately distinct — it verifies the anchor block's presence and exact-whitespace match, never its semantic coverage. Do not confuse this gate with a hardened verifier.
+4. **Present a brief summary and proceed immediately.** The verb's text output already renders the operator-facing lines (`Models: lead=… worker=… advisor=…`, `Phases: N with M unchecked tasks`, `Prior Tier 2 claims: …`, the verbatim intent anchor) — surface them. If `--model <id>` was passed, the lead model reflects that override.
 
-**Routing contract (the four things):**
-- **Inputs:** `_meta.json.intent_anchor` (verbatim body) and `plan.md`'s `## Phases`, task lists, and verification objectives.
-- **Success route:** verdict `aligned` → continue to Step 1.6 (branch cache write).
-- **Fallback:** legacy-skip when `_meta.json.intent_anchor` is empty/absent — silent at the user-facing surface, one row logged to `execution-log.md`.
-- **Lifecycle:** `misaligned-respec` and `abort` branches fire BEFORE Step 1.6, Step 2 (TeamCreate), Step 3 (worker dispatch), any code edits, and any `notes.md` writes. The required `execution-log.md` row is the only side effect on those exits. Failing earlier keeps misaligned-and-aborted runs from leaving stale cache or team artifacts.
+<!-- INVARIANT — canonical anchor-gate vocabulary. scripts/impl-gate-anchor.sh
+     validates these exact tokens and rejects any other:
+       verdict: aligned | misaligned-respec | misaligned-override | abort | legacy-skip
+       route:   continue | respec | abort
+     Do not rename a verdict here without changing the verb's contract first;
+     a drifted token is refused at filing time and the gate's audit row never lands. -->
 
-**Verdict shape (start-time):** binary — `aligned` | `misaligned`. There is no `partial` rung here. The trichotomous `full | partial | none` shape is closure-time only (Step 6.2); at start-time nothing has shipped, so residue routing has no meaning.
+**Gate:** Anchor-coverage start gate (prose-named "Step 1.5b"). **Evaluate the gate now — this step is mandatory and must not be skipped.** Read the anchor (verbatim in the start struct). Read the plan. Decide whether the plan as written will deliver the capability the anchor names.
 
-**On `aligned`:** write a one-line **Anchor fit statement** (required, non-empty) — the lead's brief explanation of *why* the plan covers the anchor. Mirrors Step 6.2's `capability_loop_summary` requirement on `full` — every lead-attested verdict carries a one-line attestation so an empty/silent `aligned` cannot degrade to a yes-button reflex. Then emit one `execution-log.md` row per the format below and continue to Step 1.6.
+This is a **lead-attested semantic check, not machine-enforced.** No script adjudicates the alignment verdict; the lead's discretion-bearing read of `intent_anchor` against `plan.md` is the only judge. `gate-anchor` files the verdict the lead hands it — it never infers one. The sibling structural check (`scripts/verify-plan-intent-anchor.sh`, called by `/spec`) is deliberately distinct — it verifies the anchor block's presence and exact-whitespace match, never its semantic coverage. Do not confuse this gate with a hardened verifier.
 
-**On `misaligned`:** name the misalignment gap in a one-line statement, then emit a per-misalignment verdict — `route-respec`, `route-override`, or `escalate`. The lead is the primary decider; `AskUserQuestion` fires only on `escalate`. The lead's verdict reasoning is recorded alongside the execution-log row regardless of route.
+**Verdict shape (start-time):** binary — `aligned` | `misaligned`. There is no `partial` rung here. The trichotomous `full | partial | none` shape is closure-time only (Step 6); at start-time nothing has shipped, so residue routing has no meaning.
+
+**On `aligned`:** write a one-line **Anchor fit statement** (required, non-empty) — the lead's brief explanation of *why* the plan covers the anchor. Mirrors Step 6's `capability_loop_summary` requirement on `full` — every lead-attested verdict carries a one-line attestation so an empty/silent `aligned` cannot degrade to a yes-button reflex.
+
+**On `misaligned`:** name the misalignment gap in a one-line statement, then emit a per-misalignment verdict — `route-respec`, `route-override`, or `escalate`. The lead is the primary decider; `AskUserQuestion` fires only on `escalate`.
 
 **Verdict criteria (per misaligned-route decision):**
 
-- **`route-respec` (default)** — the gap is *capability-level* (plan does not address what the anchor names). Default for unambiguous capability gaps; the verdict `--yes` forces. Proceeds to option (a).
-- **`route-override` (lead-attested scope-delta)** — the gap is *scope-level* and the lead can articulate a concrete one-line scope-delta acknowledgment naming in-scope vs deferred. Proceeds to option (b). The scope-delta is recorded as the verdict rationale.
-- **`escalate`** — the lead cannot confidently pick between the three. Common reasons: gap straddles capability-and-scope, two equally-plausible scope-delta framings, high cost-of-wrong (upstream dependencies). Route through `AskUserQuestion`; record the human's resolution alongside the execution-log row.
+- **`route-respec` (default)** — the gap is *capability-level* (plan does not address what the anchor names). Default for unambiguous capability gaps; the verdict `--yes` forces. Files as `misaligned-respec`.
+- **`route-override` (lead-attested scope-delta)** — the gap is *scope-level* and the lead can articulate a concrete one-line scope-delta acknowledgment naming in-scope vs deferred. Files as `misaligned-override`; the scope-delta is the verdict rationale.
+- **`escalate`** — the lead cannot confidently pick between the three. Common reasons: gap straddles capability-and-scope, two equally-plausible scope-delta framings, high cost-of-wrong (upstream dependencies). Route through `AskUserQuestion` with three options — **(a) re-spec (Recommended)**, **(b) override** with an explicit scope-delta acknowledgment, **(c) abort**. The user-facing prompt MUST restate the anchor body **verbatim** (no paraphrase) per `work-item-intake-should-store-neutral-intent-ancho`. Record the human's resolution as the verdict. **Abort is available only on the escalate path** — the lead does not auto-abort.
 
-For `route-respec` and `route-override` the lead proceeds without `AskUserQuestion`. **Abort (option (c)) is available only on the escalate path** — the lead does not auto-abort.
+**`--yes` semantics:** skip the `AskUserQuestion` prompt regardless of verdict and default to re-spec without prompting. The gate row, misalignment-gap field, and prescribed-next-command exit text are emitted identically to the interactive re-spec path.
 
-**Three options (presented to the human only when the lead escalates):**
+**Legacy-no-anchor branch:** if the start struct's `intent_anchor` is empty/absent, the verdict is `legacy-skip` — no user-facing prompt, no anchor-fit statement, no misalignment gap. This is the only authorized silent prompt in the gate; the skip is still filed so the audit loop fires. (`gate-anchor` enforces the pairing both ways: `legacy-skip` is refused when an anchor exists, and every other verdict is refused when none does.)
 
-- **(a) re-spec (Recommended)** — exit `/implement` with the prescribed-next-command line `Next: run /spec <slug>`. The lead does NOT auto-invoke `/spec`; control returns to the user. Write one `execution-log.md` row with `Anchor-coverage gate: misaligned-respec`, a non-`None` `Misalignment gap:`, and `Remediation choice: run /spec <slug>`. Write NOTHING to `notes.md`. Then exit.
-- **(b) override** — proceed anyway with an explicit scope-delta acknowledgment. **Dual write** to BOTH `execution-log.md` (one row with `Anchor-coverage gate: misaligned-override` and `Override scope delta:` non-`None`) AND `notes.md` (a single-line entry under a fresh timestamp heading: `## YYYY-MM-DDTHH:MM\n**Anchor-coverage override:** <one-line scope delta>`). Mirrors Step 6.2's `partial` pattern. Then continue to Step 1.6.
-- **(c) abort** — exit `/implement` immediately. Write one `execution-log.md` row with `Anchor-coverage gate: abort`, a non-`None` `Misalignment gap:`, and `Remediation choice: none (user aborted)`. Write NOTHING to `notes.md`. Then exit.
-
-**`--yes` semantics:** when invoked with `--yes`, skip the `AskUserQuestion` prompt regardless of verdict and default to (a) re-spec without prompting. The execution-log row, misalignment-gap field, and prescribed-next-command exit text are emitted identically to the interactive re-spec path. **`--yes` NEVER skips the gate evaluation itself** — per `inside-lore-protocol-silent-skip-is`, the semantic-coverage evaluation and per-verdict reasoning always run; only the user-facing `AskUserQuestion` prompt on the escalate path is suppressed.
-
-**Legacy-no-anchor branch:** if `_meta.json.intent_anchor` is empty/absent, skip the user-facing prompt silently and emit one `execution-log.md` row with `Anchor-coverage gate: legacy-skip`. No `AskUserQuestion`, no anchor-fit statement, no misalignment-gap. This is the only authorized silent prompt in the gate; the skip is still logged so the audit loop fires. Mirrors `verify-plan-intent-anchor.sh`'s exit-0-with-stderr-info pattern and Step 6.4's legacy fallback.
-
-**Execution-log emission (every verdict):** for ALL five verdicts (`aligned`, `misaligned-respec`, `misaligned-override`, `abort`, `legacy-skip`), pipe a fixed-body payload through `write-execution-log.sh`. The body uses these labeled lines in **exact order**, with free-text field values rendered as either the literal `None` or a single-line JSON string (so internal anchor newlines survive the append without breaking line anchors):
-
-```
-Anchor-coverage gate: <aligned|misaligned-respec|misaligned-override|abort|legacy-skip>
-Intent anchor: <JSON string of verbatim anchor body, or None on legacy-skip>
-Anchor fit statement: <JSON string one-line on aligned, None on every other verdict>
-Misalignment gap: <JSON string one-line on misaligned-* and abort, None on aligned and legacy-skip>
-Override scope delta: <JSON string of lead acknowledgment on misaligned-override, None on every other verdict>
-Remediation choice: <continue|run /spec <slug>|none (user aborted)|none (legacy skip)>
-```
-
-Field provenance: `Anchor-coverage gate`, `Anchor fit statement`, `Misalignment gap`, `Override scope delta`, `Remediation choice` are all **lead-attested**. `Intent anchor` is **machine-sourced** (verbatim copy of `_meta.json.intent_anchor`, rendered through `json.dumps` so newlines escape for line-anchor stability). The user-facing `AskUserQuestion` body still displays the anchor verbatim per `work-item-intake-should-store-neutral-intent-ancho` — only the execution-log encoding uses the JSON-string form.
-
-Concrete invocation example (the `aligned` verdict):
+**File EVERY verdict through the gate verb — the only legal channel for the gate row.** Do NOT hand-compose the execution-log row and do NOT inline an encoding of the anchor body; the verb reads the anchor from `_meta.json` itself, JSON-string encodes the free-text fields so multi-line values survive as single log lines, and owns the six-field row shape (`Anchor-coverage gate` / `Intent anchor` / `Anchor fit statement` / `Misalignment gap` / `Override scope delta` / `Remediation choice` — gate, fit, gap, scope-delta, and remediation are lead-attested; the anchor line is machine-sourced):
 
 ```bash
-ANCHOR_JSON=$(printf '%s' "$INTENT_ANCHOR" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
-FIT_JSON=$(printf '%s' "$ANCHOR_FIT_STATEMENT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
-printf 'Anchor-coverage gate: aligned\nIntent anchor: %s\nAnchor fit statement: %s\nMisalignment gap: None\nOverride scope delta: None\nRemediation choice: continue\n' \
-  "$ANCHOR_JSON" "$FIT_JSON" \
-  | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
+lore impl gate-anchor "$SLUG" --verdict <verdict> \
+  [--fit "<anchor fit statement>"] [--gap "<misalignment gap>"] \
+  [--scope-delta "<in-scope vs deferred>"] \
+  --template-version "$LEAD_TEMPLATE_VERSION"
 ```
 
-Other verdicts follow the same shape — six labeled lines in the same order — with per-verdict required values and `None` for fields the verdict does not carry. The user-facing prompt MUST restate the anchor body **verbatim** (no paraphrase) per `work-item-intake-should-store-neutral-intent-ancho` — the JSON-string single-line encoding is for the execution-log row only.
+Per-verdict field contract (R = required, − = must be omitted; the verb rejects every other combination, in both directions — a row can never carry a field its verdict does not define):
 
-**Output contract:** items 6, 7, 8 below retain their numbering and prose textually unchanged. Cross-references elsewhere in SKILL.md to Step 1.7 continue to resolve. Step 3.0, Step 6.2, and Step 7 wording is untouched.
+| verdict | `--fit` | `--gap` | `--scope-delta` | remediation filed | route returned |
+|---|---|---|---|---|---|
+| `aligned` | R | − | − | `continue` | `continue` |
+| `misaligned-respec` | − | R | − | `run /spec <slug>` | `respec` |
+| `misaligned-override` | − | R | R | `continue` | `continue` |
+| `abort` | − | R | − | `none (user aborted)` | `abort` |
+| `legacy-skip` | − | − | − | `none (legacy skip)` | `continue` |
 
-6. **Write branch cache** — associate the current branch with this work item:
-   ```bash
-   lore work cache-branch --write <slug>
-   ```
-   If it fails, log `[implement] Warning: branch cache write failed` and continue — non-fatal.
+On `misaligned-override` the verb dual-writes: the gate row AND a timestamped `**Anchor-coverage override:**` entry in `notes.md`. Exit codes: `0` filed, `Route:` on stdout; `1` validation error / no match; `2` ambiguous reference.
 
-7. **Load prior Tier 2 evidence** — read `$KDIR/_work/<slug>/task-claims.jsonl` if it exists. This is the canonical log of Tier 2 claims written by prior workers (via `evidence-append.sh`). Parse each line as JSON and build an in-memory map keyed by `task_id` and by files touched. This map feeds Step 3's worker `{{prior_knowledge}}` injection — each worker receives only Tier 2 rows whose `task_id` matches its assigned task or whose files overlap with the task's `**Files:**` block. If absent or empty, skip silently (first `/implement` run).
+**Route handling:**
+- **`continue`** (aligned, misaligned-override, legacy-skip) → proceed to Step 2.
+- **`respec`** → exit `/implement` with the prescribed-next-command line `Next: run /spec <slug>`. The lead does NOT auto-invoke `/spec`; control returns to the user. Write NOTHING further to `notes.md`.
+- **`abort`** → exit `/implement` immediately. Write NOTHING further to `notes.md`.
 
-8. Present a brief summary and proceed immediately. Resolve role→model bindings for the roles this skill spawns (`lead`, `worker`, `advisor`) via `resolve_model_for_role <role>`, then render them so the operator sees what models the active framework will produce:
-   ```bash
-   LEAD_MODEL=$(resolve_model_for_role lead)
-   WORKER_MODEL=$(resolve_model_for_role worker)
-   ADVISOR_MODEL=$(resolve_model_for_role advisor)
-   ```
-   Output:
-   ```
-   [implement] <Title>
-   Models: lead=$LEAD_MODEL  worker=$WORKER_MODEL  advisor=$ADVISOR_MODEL
-   Phases: N with M unchecked tasks
-   Prior Tier 2 claims: K rows loaded from task-claims.jsonl (or "none — first run")
-   ```
-   On default install all three resolve to the active harness's role-map default; per-repo `.lore.config` or user `settings.json` `harnesses.<active>.roles.<role>` overrides flow through. If `--model <id>` was passed, `$LEAD_MODEL` reflects that override.
+**Lifecycle:** the `respec` and `abort` routes fire BEFORE Step 2 (TeamCreate), Step 3 (worker dispatch), any code edits, and any lead `notes.md` writes. The gate row (plus `start`'s branch-cache write) is the only side effect on those exits — failing here keeps misaligned-and-aborted runs from leaving stale team artifacts.
 
-### Step 2: Create team and generate tasks
+### Step 2: Open the dispatch
 
-**IMPORTANT: Create the team BEFORE creating tasks.** TaskCreate calls go into whichever task list is active. If you create tasks before TeamCreate, they land in the session's default list — invisible to workers who see the team's list. This produces orphaned stale tasks that persist for the rest of the session.
+**Prepare the dispatch envelope with the open verb, then execute its manifest in order.** Run:
 
-0. **Resolve the orchestration adapter and query its capability gates.** Every team operation routes through the active framework's adapter at `adapters/agents/<framework>.sh`. The adapter emits `delegate:<tool> ...` directives the skill body translates into harness-native tool calls — on Claude Code: `TeamCreate` / `TaskCreate` / `SendMessage` / `TaskList` / `TaskGet`; on opencode/codex the same directives map to plugin-runtime / subagent spawn APIs.
-   ```bash
-   ADAPTER="$LORE_REPO_DIR/adapters/agents/$(resolve_active_framework).sh"
-   ENFORCEMENT=$(bash "$ADAPTER" completion_enforcement)  # native_blocking | lead_validator | self_attestation | unavailable
-   TEAM_MESSAGING=$(framework_capability team_messaging)  # full | partial | fallback | none
-   ```
-   - `ENFORCEMENT` shapes the per-task verification fork in Step 4.1 (per `adapters/agents/README.md` §"Completion Enforcement Degradation Modes"). `native_blocking` (Claude Code) rejects malformed worker reports synchronously; `lead_validator` requires the post-hoc validator; `self_attestation`/`unavailable` degrade further.
-   - `TEAM_MESSAGING=none` collapses to lead-inline execution (Step 3.0): no TeamCreate, no worker spawns. The skill is gated to harnesses whose `team_messaging=full` per `adapters/capabilities.json.skills.implement.requires`.
+```bash
+lore impl open "$SLUG" --all --json --template-version "$LEAD_TEMPLATE_VERSION"
+```
 
-1. **Create team first:**
-   ```
-   TeamCreate: team_name="impl-<slug>", description="Implementing <work item title>"
-   ```
-   On opencode/codex the adapter emits `delegate:plugin_team_init` / `delegate:codex_subagent_init`; invoke the documented translation.
+Selection is the caller's declaration — exactly one mode is required, no default: `--all` (every task), `--phase <n>` (repeatable), or `--task <id>` (repeatable; e.g. `task-3`). Use subset selection when resuming or staging phases.
 
-   **`team_name` MUST be exactly `impl-<work-item-slug>`** — the slug suffix has to match the work item directory name in `$KDIR/_work/` byte-for-byte. The TaskCompleted hook (`scripts/task-completed-capture-check.sh`) derives the work-item slug by stripping the `impl-` prefix. `lore work check` and Tier 2 evidence reads use the same convention. Use the exact slug.
+Contract (`scripts/impl-open.sh`) — a prepare-and-return emitter; it never invokes harness tools, never spawns anything, never decides routes. Its only write is one execution-log attribution row. It returns:
 
-2. **Read your team lead name** from the active harness's teams install path (resolved via `resolve_harness_install_path teams`; typically `~/.claude/teams/`) at `<teams_dir>/impl-<slug>/config.json`. Frameworks whose `install_paths.teams=unsupported` (codex today) cannot persist team config — the adapter returns a lead-side handle map instead; the skill reads the lead name from the map.
+- **Checksum validation** — delegates to `load-tasks`; a `tasks.json`/`plan.md` checksum mismatch is a hard exit-1 directing to `lore work regen-tasks <slug>`. Tell the user: "plan.md was edited after tasks.json was generated. Run `/work regen-tasks <slug>` to regenerate, or edit plan.md back." Wait for the user's decision — this prompt stays interactive. If `tasks.json` does not exist, generate it with `lore work tasks "$SLUG"`, then re-run `open`. The checksum gate is owned by `open` alone — `next-batch` deliberately does not re-enforce it mid-run.
+- **`capabilities`** — the active framework's adapter gates: `completion_enforcement` ∈ `native_blocking | lead_validator | self_attestation | unavailable` (shapes the Step 4 verification fork per `adapters/agents/README.md` §"Completion Enforcement Degradation Modes" — `native_blocking` rejects malformed worker reports synchronously; `lead_validator` requires the post-hoc validator; the rest degrade further) and `team_messaging` ∈ `full | partial | fallback | none` (`none` collapses to lead-inline execution per Step 3.0: no TeamCreate, no worker spawns; the skill is gated to harnesses whose `team_messaging=full` per `adapters/capabilities.json.skills.implement.requires`).
+- **`manifest`** — TeamCreate first, then one TaskCreate per eligible task in `tasks.json` order, then TaskUpdate wiring ops whose `add_blocked_by` edges are complete (tasks.json edges within the selection plus collision-serialization edges). Edges pointing outside the selection surface per-task as `external_blocked_by` for the lead to wire against already-created tasks. An empty manifest is success with an explanatory `status`, not an error.
+- **`collisions`** — same-file intersections among concurrent selected tasks, already folded into the manifest as serialization edges so the wiring is collision-safe. **Cross-selection collisions are NOT detected:** when dispatching a `--phase`/`--task` subset, the lead accounts for files held by unselected or still-in-flight tasks before spawning.
+- **`phase_map`** and **`prior_knowledge`** — per-phase knowledge resolved through the 3-branch gate: a `retrieval_directive` resolves via `resolve-manifest.sh` (authoritative; v2 directives return `### Focal:`/`### Adjacent:` sectioned blocks, legacy flat directives a single section — the dispatcher does not branch on shape); task descriptions embedding `## Prior Knowledge` skip prefetch (the phase already carries resolved knowledge; appending would duplicate or conflict); otherwise the fallback `lore prefetch` runs ONLY when the caller declared `--fallback-scale-set <buckets>` (comma-separated from `abstract|architecture|subsystem|implementation`). Without a declaration the phase returns `status: needs-prefetch` with the suggested query — **scale is the caller's declaration, never a default.** On `needs-prefetch`, declare the bucket per the scale rubric (see `skills/memory/SKILL.md` § Scale-Aware Navigation) and re-run `open` with `--fallback-scale-set` — re-declare with intent, not habit. When the fallback branch ran, log one `Knowledge-delivery-path: lead-fallback-prefetch` line via `write-execution-log.sh` so the delivery gap is visible to /retro.
+- **`tier2_extracts`** — per-task prior Tier 2 rows from `task-claims.jsonl`, matched by `task_id` or file-target overlap. These feed each worker's `{{prior_knowledge}}` injection in Step 3.
+- **`skill_invocation_map`** — plan `**Related skills:**` entries (non-persistent) merged with `lore ceremony get implement` entries (tagged `source: ceremony`; the verb logs each `Ceremony-injected skill:` row), each with its `skill_template_version`. Per D3 this map is in-memory routing state for Step 4.0 — the lead invokes the skill directly; no agent spawns for these. Forward-compat: if a future ceremony schema returns `{skill, mode: "agent"}`, treat it as persistent-advisor opt-in; today no ceremony entry can request agent-mode.
+- **`advisors`** — `mode: persistent` declarations only. Per D1/D2, advisor declarations without `mode: persistent` (e.g. `[must-consult]`, `[on-demand]`) are lead-handled inline on the default route and do NOT spawn advisor agents.
+- **`lead_inline_conditions`** — the four gate conditions as SEPARATE fields (`single_task`, `prescriptive`, `no_persistent_advisor`, `no_required_consultation`) plus a `detail` block. Never an aggregate eligibility boolean — the lead reads conditions and decides (Step 3.0).
 
-3. **Load tasks** — run one command that validates checksum and outputs all tasks as structured text:
-   ```bash
-   lore work load-tasks <slug>
-   ```
-   - **If `tasks.json` exists and checksum matches:** outputs a header line followed by `=== task-N ===` blocks, each with `subject`, `activeForm`, `blockedBy`, `description`.
-   - **If `tasks.json` exists but checksum mismatches:** exits with error. Tell user: "plan.md was edited after tasks.json was generated. Run `/work regen-tasks <slug>` to regenerate, or edit plan.md back." Wait for user decision.
-   - **If `tasks.json` does not exist:** exits with error. Run the fallback (item 4).
+Exit codes: `0` manifest emitted (possibly empty with explanatory status); `1` validation error / no match / missing tasks.json / checksum mismatch; `2` ambiguous reference.
 
-4. **Fallback — `tasks.json` missing:** generate it:
-   ```bash
-   lore work tasks <slug>
-   ```
-   This generates and prints the full `tasks.json` schema. Re-run `lore work load-tasks <slug>` after.
+**The lead executes every harness tool call itself, in manifest order — TeamCreate first.** A CLI verb cannot invoke harness tools; the TeamCreate-first ordering is the orphan-task guard: TaskCreate calls go into whichever task list is active, so tasks created before TeamCreate land in the session's default list — invisible to workers who see the team's list, persisting as orphaned stale tasks for the rest of the session. Walk the manifest top-to-bottom:
 
-5. **Create tasks from the output:** read once. For each `=== task-N ===` block, call `TaskCreate` with `subject`, `activeForm`, `description`. Track `task-N` → TaskCreate ID mapping, then call `TaskUpdate(addBlockedBy=[...])` for any task with a non-empty `blockedBy`.
+1. **TeamCreate** with the manifest's `team_name` and `description="Implementing <work item title>"`. **`team_name` MUST be exactly `impl-<work-item-slug>`** — the slug suffix has to match the work item directory name in `$KDIR/_work/` byte-for-byte. The TaskCompleted hook (`scripts/task-completed-capture-check.sh`) derives the work-item slug by stripping the `impl-` prefix; `lore work check` and Tier 2 evidence reads use the same convention. On opencode/codex the adapter emits `delegate:plugin_team_init` / `delegate:codex_subagent_init`; invoke the documented translation.
+2. **TaskCreate** per manifest entry with its `subject`, `activeForm`, `description`, tracking each `local_id` → created-task ID. Per-task descriptions are lean by design — each begins with a `**Phase:** N` line (the authoritative phase-number source) followed only by the task-specific assignment; phase-level context lives in `tasks.json → phases[N-1].phase_context`, fetched lazily by the worker via `lore work phase-context <slug> <phase-number>` after `TaskGet`. The lead does NOT embed phase context into descriptions. (Legacy `tasks.json` without `phase_context` exits 0 with empty stdout there; workers fall back to inline phase context — no regen required.)
+3. **TaskUpdate(addBlockedBy=[…])** per wiring op, mapping `local_id`s through the ID map; wire any `external_blocked_by` edges against the matching already-created tasks.
 
-   **Per-task descriptions are lean by design** — each begins with a `**Phase:** N` line (the authoritative phase-number source per D6) followed only by the task-specific assignment (objective, files, scope). Phase-level context (Design Decisions, Verification, Strategy, Reference files, Knowledge backlinks) lives in `tasks.json → phases[N-1].phase_context`, fetched lazily by the worker via `lore work phase-context <slug> <phase-number>` after `TaskGet`. The lead does NOT embed phase context into descriptions.
-
-   **Backward-compatibility:** legacy `tasks.json` files (pre-change) do not carry `phase_context`. `lore work phase-context` exits 0 with empty stdout for those; workers proceed using the inline phase context already in their description. No regen required.
-
-6. **Build phase map** — after `lore work load-tasks` succeeds, read `tasks.json` directly:
-   ```bash
-   python3 -c "
-   import json, sys
-   with open('$WORK_DIR/<slug>/tasks.json') as f:
-       data = json.load(f)
-   for p in data['phases']:
-       print(p['phase_number'], json.dumps(p.get('retrieval_directive')))
-   "
-   ```
-   Store as `$PHASE_MAP`: a mapping of `phase_number → {objective, files, retrieval_directive}`. Authoritative source for per-phase retrieval directives consumed by Step 3.1.
-
-   If `tasks.json` is missing (fallback path from Step 2.4), run this after fallback generation completes.
+**Read your team lead name** from the active harness's teams install path (resolved via `resolve_harness_install_path teams`; typically `~/.claude/teams/`) at `<teams_dir>/impl-<slug>/config.json`. Frameworks whose `install_paths.teams=unsupported` (codex today) cannot persist team config — the adapter returns a lead-side handle map instead; read the lead name from the map.
 
 ### Step 3.0: Lead-inline gate (pre-dispatch short-circuit)
 
-Before spawning anything, evaluate whether the plan qualifies for **lead-inline execution**. Worker dispatch's value is parallelism across independent tasks plus discretion-bearing context for intent+constraints work; both vanish when the plan reduces to a single fully-determined edit. The ~22KB context tax per spawn plus TeamCreate + TaskCreate + completion round-trip is then pure overhead.
+**Read the four condition fields from `open`'s `lead_inline_conditions` and decide the route yourself.** The verb reports conditions as separate fields — never an aggregate boolean — because the route is a judgment, not an arithmetic AND: the `detail` block tells you *why* a condition is false, and the carve-out below turns on that distinction. Worker dispatch's value is parallelism across independent tasks plus discretion-bearing context for intent+constraints work; both vanish when the plan reduces to a single fully-determined edit. The ~22KB context tax per spawn plus TeamCreate + TaskCreate + completion round-trip is then pure overhead.
 
 The gate fires when **all four** conditions hold:
 
-1. **Single task** — `tasks.json` contains exactly one task across all phases.
-2. **Prescriptive format** — the task's containing phase declares `**Task format:** prescriptive` in `plan.md`. Intent+constraints tasks involve worker discretion; lead-inline removes that channel and is unsafe for them.
-3. **No persistent advisor declaration** — no phase declares an `**Advisors:** ... mode: persistent` line. Per D2, advisor declarations without `mode: persistent` (e.g. `[must-consult]`, `[on-demand]`) become lead-handled inline on the default route and do NOT spawn a separate advisor agent, so they do not by themselves disqualify lead-inline; only `mode: persistent` declarations disqualify it.
-4. **No required pre-edit consultation or skill invocation** — the selected phase declares no `**Consultations required:**` domains, AND `lore ceremony get implement` returns `[]`, AND plan.md's `**Related skills:**` block declares no entries the lead must invoke for the selected phase's scope. Each signals orchestration that has no inline analogue when no team exists.
+1. **`single_task`** — `tasks.json` contains exactly one task across all phases.
+2. **`prescriptive`** — the task's containing phase declares `**Task format:** prescriptive`. Intent+constraints tasks involve worker discretion; lead-inline removes that channel and is unsafe for them.
+3. **`no_persistent_advisor`** — no phase declares a `mode: persistent` advisor. Non-persistent advisor declarations are lead-handled inline and do not disqualify.
+4. **`no_required_consultation`** — no phase declares `**Consultations required:**` domains, the ceremony list is empty, AND plan.md's `**Related skills:**` block declares no entries. Each signals orchestration that has no inline analogue when no team exists.
 
-   **Lead route with a lead-invoked skill in scope.** When condition 4 fails *only* because plan.md's `**Related skills:**` lists one or more skills (and the other three hold), the lead route remains eligible *provided* the lead first invokes each in-scope skill via the `Skill` tool and records the invocation in `execution-log.md` via `write-execution-log.sh` before applying any edits. Log line format: `Lead-invoked skill: <skill-name>\nDomain: <domain>\nSkill template-version: <hash>\n` stamped with `--template-version "$LEAD_TEMPLATE_VERSION"`. If condition 4 fails because of `**Consultations required:**` or a non-empty ceremony list, fall through to Step 3 worker dispatch.
+   **Lead route with a lead-invoked skill in scope.** When condition 4 is false *only* because `detail.related_skills` is non-empty (and the other three hold), the lead route remains eligible *provided* the lead first invokes each in-scope skill via the `Skill` tool and records the invocation in `execution-log.md` before applying any edits (log line format: `Lead-invoked skill: <skill-name>\nDomain: <domain>\nSkill template-version: <hash>` via `write-execution-log.sh --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"`; the skill's `skill_template_version` is already in `open`'s map). If condition 4 is false because of `**Consultations required:**` or a non-empty ceremony list, fall through to Step 3 worker dispatch.
 
-**No file-count cap.** An earlier version of this gate required ≤3 files. Evidence from the scale-registry-rename cycle (single prescriptive task, 10 verbatim file edits, no discretion) showed the cap was a proxy for "discretion required" that the other conditions already cover better. Single-task + prescriptive + no-persistent-advisor + no-required-pre-edit-orchestration collapses both worker-dispatch values — parallelism and discretion-bearing context — regardless of file count. A 50-file prescriptive rename is still 50 file edits with no discretion; splitting across workers pays N × ~22KB context tax for no shaping gain. File count is logged below as diagnostic telemetry but does not gate.
+**No file-count cap.** An earlier version of this gate required ≤3 files. Evidence from the scale-registry-rename cycle (single prescriptive task, 10 verbatim file edits, no discretion) showed the cap was a proxy for "discretion required" that the other conditions already cover better. A 50-file prescriptive rename is still 50 file edits with no discretion; splitting across workers pays N × ~22KB context tax for no shaping gain. `detail.file_count_diagnostic` is logged below as telemetry but does not gate.
 
-**If any condition fails:** skip Step 3.0 entirely and proceed to Step 3 (worker dispatch). Do not log a skip — the worker pipeline is the default.
+**If any condition fails (outside the carve-out):** skip Step 3.0 entirely and proceed to Step 3 (worker dispatch). Do not log a skip — the worker pipeline is the default.
 
 **If all conditions hold:** apply edits inline.
 
-1. **Log the gate firing** — one line to `execution-log.md` so retro can attribute the route taken:
+1. **Log the gate firing** — one entry to `execution-log.md` so retro can attribute the route taken:
    ```bash
    printf 'Lead-inline execution: gate fired\nConditions: single task, prescriptive, no persistent advisor, no required pre-edit orchestration\nFile count (diagnostic): %d\nTask: %s\n' \
      "<file-count>" "<task-subject>" \
-     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
+     | bash ~/.lore/scripts/write-execution-log.sh --slug "$SLUG" --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
    ```
-
-2. **Invoke in-scope skills before editing (if any).** If plan.md's `**Related skills:**` block lists skills applying to the selected phase's scope (and the lead route remained eligible per the condition-4 carve-out), invoke each via the `Skill` tool with `args` matching the phase's objective, then record:
+2. **Invoke in-scope skills before editing (if any),** per the condition-4 carve-out, logging each as above.
+3. **Apply the edits directly** using the lead's `Read` / `Edit` / `Write` / `Bash` tools, honoring the phase's `**Verification:**` objectives. Read the task description the same way a worker would, then execute the prescriptive instructions yourself. **Reviewer-facing comment discipline applies to the lead too** — apply the drop/keep rules, drift test, and worked examples from `agents/worker.md` step 5 to any comments you write into committed source.
+4. **Emit Tier 2 evidence** for any falsifiable claims the edits depend on, with `$LEAD_TEMPLATE_VERSION` — the lead is the producer:
    ```bash
-   SKILL_TV=$(bash ~/.lore/scripts/template-version.sh "$SKILLS_DIR/<skill-name>/SKILL.md")
-   printf 'Lead-invoked skill: %s\nDomain: %s\nSkill template-version: %s\n' \
-     "<skill-name>" "<domain>" "$SKILL_TV" \
-     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
+   echo '<tier2-row-json>' | bash ~/.lore/scripts/evidence-append.sh --work-item "$SLUG"
    ```
-   Per D3, the skill's output informs the edits the lead applies in step 3. If empty or no entries apply, skip this sub-step silently.
-
-3. **Apply the edits directly** using the lead's `Read` / `Edit` / `Write` / `Bash` tools, honoring the phase's `**Verification:**` objectives implicitly. The task description still loads via `lore work load-tasks <slug>` — read it the same way a worker would, then execute the prescriptive instructions yourself.
-
-   **Reviewer-facing comment discipline applies to the lead too.** Apply the same drop/keep rules, drift test, and worked examples from `agents/worker.md` step 5 to any comments you write into committed source. Single source of truth lives there; this route follows it.
-
-4. **Emit Tier 2 evidence** for any falsifiable claims the edits depend on. Use `LEAD_TEMPLATE_VERSION` — the lead is the producer:
-   ```bash
-   echo '<tier2-row-json>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>
-   ```
-   Every row MUST carry `exact_snippet` and `normalized_snippet_hash` (sha256 of v1-normalized snippet). Compute via the canonical helper — do NOT inline the recipe:
-   ```bash
-   python3 ~/.lore/scripts/snippet_normalize.py --hash <<<"$SNIPPET"
-   ```
-   The v1 normalization recipe (curly→straight quotes, `\s+`→single space, trim, sha256 lowercase hex) lives only in `scripts/snippet_normalize.py`. `evidence-append.sh` delegates to `validate-tier2.sh`, which rejects rows that omit either field, carry a non-hex hash, or carry a hash that does not equal `sha256(v1_normalize(exact_snippet))`.
-
-5. **Stash any Tier 3 candidates** for Step 5 promotion. Promotion still goes through `lore promote` with `--producer-role implement-lead --template-version "$LEAD_TEMPLATE_VERSION"`.
-
-6. **Mark the task complete:**
-   ```bash
-   lore work check <slug> "<task-subject>"
-   ```
-
-7. **Skip Steps 3, 4, and Step 7's TeamDelete** — no team to shut down. Proceed directly to **Step 5** → **Step 6** → **Step 7**; the closure-report script emits the terminal close from the lead's own run state.
+   Every row MUST carry `exact_snippet` and `normalized_snippet_hash`. Compute via the canonical helper — do NOT inline the recipe (`python3 ~/.lore/scripts/snippet_normalize.py --hash <<<"$SNIPPET"`); the v1 normalization recipe lives only in `scripts/snippet_normalize.py`, and `evidence-append.sh` delegates to `validate-tier2.sh`, which rejects rows that omit either field or carry a hash that does not match.
+5. **Stash any Tier 3 candidates** for Step 5 (promotion still goes through `promote-batch` with `producer_role: implement-lead`).
+6. **Mark the task complete:** `lore work check "$SLUG" "<task-subject>"`.
+7. **Skip Steps 3, 4, and the batch-loop shutdown** — no team to shut down. Proceed directly to **Step 5** → **Step 6** → **Step 7**.
 
 **Sanctioned pause:** if the lead is unsure whether the prescriptive task is fully determined enough to execute without discretion, fall through to Step 3. Lead-inline is a short-circuit, not a forced route.
 
 ### Step 3: Spawn agents
 
-**You MUST spawn workers immediately after Step 3.6 completes.** Do not pause to confirm scope. Do not echo plan-resolved open questions back to the user (the plan already encodes scope guards in task descriptions). Do not surface "this is large" as a decision request. Do not request approval to modify a skill because the skill being modified is the running skill (your prompt is loaded; file edits do not affect the current run). The only sanctioned pre-dispatch pauses: (a) item resolved to `[archived]` without confirmation (Step 1.2), (b) `tasks.json` checksum mismatch (Step 2.3), (c) the `worker` agent template is missing (Step 1's MANDATORY clause), or (d) Step 3.0 fired and execution completed inline. Pausing for any other reason is a faster-path bypass — the cost is borne by the user as session-spanning delay; the lead pays nothing. **Why immediate dispatch matters:** one bad spawn is caught in Step 4 review; pre-dispatch confirmation does not buy safety the system already provides.
+**You MUST spawn workers immediately once the manifest is executed and worker prompts are assembled.** Do not pause to confirm scope. Do not echo plan-resolved open questions back to the user (the plan already encodes scope guards in task descriptions). Do not surface "this is large" as a decision request. Do not request approval to modify a skill because the skill being modified is the running skill (your prompt is loaded; file edits do not affect the current run). The only sanctioned pre-dispatch pauses: (a) item resolved to archived without confirmation (Step 1.2), (b) `tasks.json` checksum mismatch (Step 2), (c) the `worker` agent template is missing (Resolve Paths' MANDATORY clause), or (d) Step 3.0 fired and execution completed inline. Pausing for any other reason is a faster-path bypass — the cost is borne by the user as session-spanning delay; the lead pays nothing. **Why immediate dispatch matters:** one bad spawn is caught in Step 4 review; pre-dispatch confirmation does not buy safety the system already provides.
 
-1. **Pre-fetch knowledge for worker prompts** — build `$PRIOR_KNOWLEDGE` by iterating each phase in `$PHASE_MAP`. Apply the three-branch gate in priority order:
+1. **Assemble `$PRIOR_KNOWLEDGE` from `open`'s `prior_knowledge`** — the verb already ran the 3-branch gate per phase. Concatenate each resolved phase's content under its `### Phase N: <phase_name>` heading, blank-line separated; phases with no output contribute no heading. Resolve every `needs-prefetch` phase (declare scale, re-run `open` with `--fallback-scale-set`) before spawning any worker. For v2 directives, workers consume the multi-section `### Focal:`/`### Adjacent:` shape as candidates-to-curate per `agents/worker.md`'s `## Knowledge Context` directive, not as authoritative pre-resolved context.
 
-   **(a) Directive branch — retrieval_directive is non-null:**
-   ```bash
-   PHASE_PK=$(bash ~/.lore/scripts/resolve-manifest.sh "<slug>" "<phase_number>" 2>/dev/null || true)
-   ```
-   Append non-empty output under a `### Phase N: <phase_name>` heading. A retrieval directive is authoritative — do not also run prefetch or skip-check for that phase.
+2. **Prepare advisory mixin (opt-in only)** — from `open`'s `advisors` field (already filtered to `mode: persistent`).
 
-   **Sectioned output for v2 directives.** When the directive is `version: 2` (per-topic decomposition — see `/spec` Step 5b), `resolve-manifest.sh` emits a multi-section block: one `### Focal: <topic>` followed by zero or more `### Adjacent: <topic>` sections. Each is independently top-K-bounded (focal=8, adjacent=4 default) and dedup'd by file_path with focal precedence. The dispatcher passes the resolved block to workers verbatim. Activity-vocab hits appear *inside* the focal section's entries (no separate `### Activity:` section); the second BM25 OR query is logged as `query_kind=activity`.
+   **Default route (empty list):** set `$ADVISORY_MIXIN=""` and skip the rest of this sub-step. Do NOT read `scripts/agent-protocols/advisory-consultation.md`.
 
-   **Legacy flat directives** (no `version` field, single `scale_set`, single seed list) resolve to a single-section block at the declared scale via the same call — the dispatcher does not branch on directive shape.
+   **Opt-in route (at least one persistent advisor):** read the advisory mixin at `scripts/agent-protocols/advisory-consultation.md` (its opt-in-only header note confirms this is the correct consumer), build the `{{advisors}}` replacement block as a markdown list (`- **advisor-name** — domain scope. Mode: persistent`), resolve the placeholder, store as `$ADVISORY_MIXIN`.
 
-   **(b) Task-description branch — no directive, but task descriptions contain `## Prior Knowledge`:**
-   **Skip prefetch for this phase.** The phase already embeds resolved knowledge. Appending would duplicate or conflict.
+3. **Hold `open`'s `skill_invocation_map` as `$SKILL_INVOCATION_MAP`** — in-memory routing state for Step 4.0's per-domain skill invocation. Do NOT modify `plan.md`; per D3 the skill's calibration unit is its SKILL.md template-version, already captured in the map. An empty map means Step 4.0 falls through to inline lead evaluation for every domain.
 
-   **(c) Fallback branch — no directive AND no `## Prior Knowledge`:**
-   ```bash
-   PHASE_PK=$(lore prefetch "<phase objective> <file paths from task>" --format prompt --limit 3 --scale-set=<bucket>)
-   ```
-   Append non-empty output under a `### Phase N: <phase_name>` heading.
+4. **Spawn advisor agents (opt-in only)** — one per unique persistent advisor. **Skip this entire sub-step when the persistent-advisor list is empty** — no advisor agents spawn on the default route; the lead handles consultations inline via Step 4.0 and the execution log records zero `Advisor spawned:` lines. For the spawn block and log entry shape, read `skills/implement/templates/advisor-spawn.md`. Advisors are persistent — active for the entire session and shut down alongside workers in the batch-loop shutdown.
 
-   **Concatenation rule:** accumulate per-phase outputs (heading + content) into a single `$PRIOR_KNOWLEDGE` string separated by blank lines. Phases that produce no output contribute no heading. The final string is injected into the `{{prior_knowledge}}` slot in `agents/worker.md` at spawn time (Step 3.6). Resolve all phases before spawning any worker. For v2 directives, workers consume the multi-section shape as candidates-to-curate per `agents/worker.md`'s `## Knowledge Context` directive, not as authoritative pre-resolved context.
-
-2. **Prepare advisory mixin (opt-in only)** — scan all phases in `plan.md` for `**Advisors:**` lines carrying `mode: persistent`. Per D1/D2, only `mode: persistent` advisors opt into the advisor-agent route; declarations without that suffix become lead-handled inline on the default route and do NOT trigger mixin concatenation.
-
-   **Default route (no `mode: persistent` declarations):** set `$ADVISORY_MIXIN=""` and skip the rest of this sub-step. Do NOT read `scripts/agent-protocols/advisory-consultation.md`.
-
-   **Opt-in route (at least one `mode: persistent` declaration):**
-
-   a. **Collect persistent advisor declarations** — filter to lines matching `**Advisors:**\n- <name> — <domain>. mode: persistent`.
-
-   b. **Read the advisory mixin:** `scripts/agent-protocols/advisory-consultation.md`. The file's opt-in-only header note confirms this is the correct consumer.
-
-   c. **Build `{{advisors}}` replacement block** — markdown list with name, domain, mode:
-      ```
-      - **advisor-name** — domain scope. Mode: persistent
-      ```
-
-   d. **Resolve `{{advisors}}`** by replacing the placeholder with the block. Store as `$ADVISORY_MIXIN`.
-
-3. **Skill reconciliation — build skill-invocation map** — per D3, skill-backed advisors stop being agents on the default route. The lead invokes the skill directly via the `Skill` tool when a worker SendMessages a consultation in the skill's domain. This step repurposes the former late-advisor-declaration logic into a per-domain map the lead consults from Step 4.X.
-
-   a. **Read `**Related skills:**`** from plan.md's `## Context` or `## Investigations` (if present). The discovery researcher's output from `/spec`.
-
-   b. **Build `$SKILL_INVOCATION_MAP`** as a JSON object keyed by domain. For each entry in `**Related skills:**` NOT declared as `mode: persistent` advisor:
-      ```json
-      {"<skill-domain>": {"skill": "<skill-name>", "skill_template_version": "<hash>"}}
-      ```
-      Compute `skill_template_version` via `bash ~/.lore/scripts/template-version.sh "$SKILLS_DIR/<skill-name>/SKILL.md"` at map-build time. Persistent-advisor skills route to the agent on the opt-in route per Step 3.5, not into this map.
-
-   c. **Do NOT modify `plan.md`.** This step no longer declares late `**Advisors:**` entries; per D3 the skill's calibration unit is its SKILL.md template-version, captured directly on lead skill invocation in Step 4.X. The map is in-memory state for this run only.
-
-   d. **If no `**Related skills:**` block exists** or all entries are `mode: persistent`, set `$SKILL_INVOCATION_MAP={}` and skip. The Step 4.X handler falls through to inline evaluation for empty-map domains.
-
-4. **Ceremony config injection — lead-invocation route by default** — read ceremony-level skill entries and merge into the lead-invocation map. Per D2, today's `lore ceremony get implement` returns a flat list of skill names that always collapses to lead-invocation; agent-mode opt-in requires a future schema extension and is out of scope.
-
-   a. **Read configured ceremony skills:**
-      ```bash
-      lore ceremony get implement
-      ```
-      Returns a JSON array. **If `[]`, skip to Step 3.5.**
-
-   b. **Merge each entry into `$SKILL_INVOCATION_MAP`** — for each ceremony entry NOT already keyed in the map (Step 3.3.b) and NOT declared `mode: persistent` (Step 3.2.a), add under its declared domain (derive from `domain` field if present, else use skill name):
-      ```json
-      {"<skill-domain-or-name>": {"skill": "<skill-name>", "skill_template_version": "<hash>", "source": "ceremony"}}
-      ```
-      Do NOT spawn advisor agents for these.
-
-   c. **Forward-compat: agent-mode entries.** If a future ceremony schema returns `{skill: "<name>", mode: "agent"}`, treat as persistent-advisor opt-in: add to the list collected in Step 3.2.a and rebuild `$ADVISORY_MIXIN`. Today no ceremony entry can request agent-mode, so this branch is dormant.
-
-   d. **Log ceremony-injected skills** — for each entry added from ceremony config:
-      ```bash
-      printf 'Ceremony-injected skill: %s\nDomain: %s\nSource: ceremony config\nSkill template-version: %s\n' \
-        "<skill-name>" "<domain>" "<skill_template_version>" \
-        | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
-      ```
-
-5. **Spawn advisor agents (opt-in only)** — for each unique advisor name from Step 3.2.a's `mode: persistent` filter.
-
-   **Skip this entire sub-step when the persistent-advisor list is empty.** No advisor agents spawn on the default route; per D1 the lead handles consultations inline via Step 4.X. The execution-log records zero `Advisor spawned:` lines.
-
-   For the spawn block and log entry shape, read `skills/implement/templates/advisor-spawn.md`.
-
-   Advisors are persistent — active for the entire session and shut down alongside workers in Step 4.
-
-6. **Surface Tier 2 evidence per worker** — before spawning, assemble each worker's per-task Tier 2 extract from the map built in Step 1.7. For each assigned task, collect matching rows (task_id or file overlap) and render as a YAML block appended to that worker's `{{prior_knowledge}}`:
+5. **Surface Tier 2 evidence per worker** — render each task's rows from `open`'s `tier2_extracts` as a YAML block appended to that worker's `{{prior_knowledge}}`:
 
    ```yaml
    Prior Tier 2 evidence (from task-claims.jsonl):
@@ -413,27 +261,25 @@ The gate fires when **all four** conditions hold:
 
    If no rows match, omit the block (do NOT emit an empty section).
 
-7. **Spawn worker agents with tier-aware emission instructions** — launch `min(recommended_workers, 4)` workers in a single message. Use the `worker` agent template (resolve via `resolve_agent_template worker`; on Claude Code `~/.claude/agents/worker.md`) as base, with these injections:
+6. **Spawn worker agents with tier-aware emission instructions** — launch `min(recommended_workers, 4)` workers in a single message (`recommended_workers` is in the `open` struct). Use the `worker` agent template (resolve via `resolve_agent_template worker`) as base, with these injections:
 
-   **Pre-dispatch same-file collision check:** before assigning tasks, intersect the `**Files:**` targets (tasks.json `file_targets`) of all tasks that would run concurrently. Any two concurrent tasks sharing a file: serialize them within one worker's queue or merge them into a single assignment — never parallel-dispatch same-file tasks across workers. After claiming (`TaskUpdate(owner=…)`), a worker-side `TaskGet` ownership re-check is the backstop for claim races; this lead-side intersection is the primary guard.
+   - `{{team_name}}` → `impl-<slug>`
+   - `{{team_lead}}` → the lead name read from team config in Step 2
+   - `{{prior_knowledge}}` → `$PRIOR_KNOWLEDGE`, followed by that worker's Tier 2 extract block (blank-line separator)
+   - `{{template_version}}` → `$WORKER_TEMPLATE_VERSION`
+
+   Assign only tasks from `open`'s `initial_unblocked` set. Same-file serialization is already wired into the manifest's blockedBy edges for this selection — never parallel-dispatch same-file tasks across workers; for subset selections, also account for files held by unselected tasks (the cross-selection caveat in Step 2). After claiming (`TaskUpdate(owner=…)`), a worker-side `TaskGet` ownership re-check is the backstop for claim races.
    <!-- Sunset: remove if same-file collision / phantom-completion retro-evolution rows targeting skills/implement/SKILL.md recur from ≥3 new distinct work items within the next 20 implement cycles. -->
 
    Workers declare `--scale-set` at every `lore prefetch` and `lore search` call. **Scale rubric — declare explicitly at every retrieval surface:** for the four scale definitions (abstract / architecture / subsystem / implementation), boundary tests, multi-label encoding, and the ±1 query pattern, see `skills/memory/SKILL.md` § Scale-Aware Navigation. The full decision tree lives in the canonical `classifier` agent template (resolved via `resolve_agent_template classifier`).
 
-   - `{{team_name}}` → `impl-<slug>`
-   - `{{team_lead}}` → the lead name read from team config in Step 2
-   - `{{prior_knowledge}}` → `$PRIOR_KNOWLEDGE` from Step 3.1, followed by per-worker Tier 2 evidence from Step 3.6 (blank-line separator)
-   - `{{template_version}}` → `$WORKER_TEMPLATE_VERSION`
-
    The worker template documents the tier-aware emission contract. Workers are required to:
 
    - **During task:** write each structured Tier 2 claim by piping a JSON row through `echo '<json>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>` before sending the completion report. One call per claim. `evidence-append.sh` is the sole-writer for `$KDIR/_work/<slug>/task-claims.jsonl`.
-   - **Post task:** send a completion report to the lead containing the traditional prose fields (**Task**, **Changes**, **Tests**, **Blockers**, **Surfaced concerns**, **Consultations** — renamed from `Advisor consultations:` per D4, with the D6 `handler: lead|skill|agent` discriminator), a **Tier 2 evidence:** field listing `claim_id` values written during the task, and an optional **Tier 3 candidates:** YAML block (producer_role + 13-field Tier 3 shape minus `confidence`).
+   - **Post task:** send a completion report to the lead containing the traditional prose fields (**Task**, **Changes**, **Tests**, **Blockers**, **Surfaced concerns**, **Consultations** — with the `handler: lead|skill|agent` discriminator), a **Tier 2 evidence:** field listing `claim_id` values written during the task, and an optional **Tier 3 candidates:** YAML block (producer_role + 13-field Tier 3 shape minus `confidence`).
    - **Naming standard:** the optional Tier 3 section MUST be labeled exactly **Tier 3 candidates:** — not "Tier 3 claims" or "Tier 3 observations". The TaskCompleted hook validates literal-prefix-match.
 
-   **If `$ADVISORY_MIXIN` is non-empty (opt-in route only):** append the resolved mixin content after the fully resolved worker template content, separated by a blank line: `<resolved worker template>\n\n<resolved advisory-consultation.md>`.
-
-   **On the default route `$ADVISORY_MIXIN` is empty** (Step 3.2 short-circuit). Worker prompts end at the resolved worker template — workers still have the `**Consultations:**` reporting field and `## Consultation` request shape from the worker template's §Reporting Guidelines, so they can SendMessage the lead per D6a without the mixin. The lead's Step 4.X handler answers on the next turn boundary.
+   **If `$ADVISORY_MIXIN` is non-empty (opt-in route only):** append the resolved mixin content after the fully resolved worker template content, separated by a blank line. **On the default route `$ADVISORY_MIXIN` is empty** — worker prompts end at the resolved worker template; workers still have the `**Consultations:**` reporting field and `## Consultation` request shape from the worker template's §Reporting Guidelines, so they can SendMessage the lead without the mixin. The lead's Step 4.0 handler answers on the next turn boundary.
 
    For the spawn block (`WORKER_MODEL` resolution + Task: spawn template), read `skills/implement/templates/worker-spawn.md`.
 
@@ -441,31 +287,25 @@ The gate fires when **all four** conditions hold:
 
 As worker messages arrive (delivered automatically), branch by message kind:
 
-- **Consultation requests** — bodies whose first line is `## Consultation` and that carry `consultation-id:` route to §0 below. Mid-task questions; reply immediately so the worker resumes on the next turn boundary.
+- **Consultation requests** — bodies whose first line is `## Consultation` and that carry `consultation-id:` route to Step 4.0 below. Mid-task questions; reply immediately so the worker resumes on the next turn boundary.
 - **Completion reports** — bodies matching `## Reporting Guidelines` shape from `agents/worker.md` route through §1–§8.
 - **Blocker messages** — anything else from a worker requiring intervention falls through to §7.
 
-Maintain a per-run **`$CONSULTATION_TRANSCRIPT`** throughout Step 4: a list of records, one per consultation reply, with `{consultation_id, worker, domain, handler, skill_template_version?, replied_at}`. §0 appends on every reply; §1 reads to verify required-consultation acknowledgement when accepting a task.
+The durable consultation record is `$ITEM_DIR/consultation-transcript.jsonl` — one acknowledged-reply record per line, written ONLY by `lore impl consult-log` (the verb is its sole sanctioned writer). It replaces the old in-memory per-run transcript: §1's required-consultation check intersects against this file, so a consultation that was answered but never filed is indistinguishable from one that never happened. File every reply.
 
 #### Step 4.0: Lead consultation handler (default route)
 
-A worker SendMessage whose body begins with `## Consultation` and carries `consultation-id:` is a worker question routed to the lead per D6a. On the default route the lead answers inline using its own investigation/plan/code-read tools; per D3, skill-backed domains route through `$SKILL_INVOCATION_MAP` and invoke the named skill via the `Skill` tool before the lead replies. This sub-step is judgment-heavy (matching the worker's specific question to investigation/plan context) and intentionally stays inline rather than scripted — see `[[knowledge:conventions/skills/script-first-skill-design]]`.
+A worker SendMessage whose body begins with `## Consultation` and carries `consultation-id:` is a worker question routed to the lead. On the default route the lead answers inline using its own investigation/plan/code-read tools; skill-backed domains route through `$SKILL_INVOCATION_MAP` and invoke the named skill via the `Skill` tool before the lead replies. Answering is judgment-heavy (matching the worker's specific question to investigation/plan context) and intentionally stays inline rather than scripted — see `[[knowledge:conventions/skills/script-first-skill-design]]`; only the filing is a verb.
 
-**Skip this sub-step entirely on the opt-in route** when the worker's phase declared `mode: persistent` advisors — the worker SendMessages the advisor agent directly on that route, not the lead. The advisor agent's reply path is owned by `agents/advisor.md` §"Responding to Consultations".
+**Skip this sub-step entirely on the opt-in route** when the worker's phase declared `mode: persistent` advisors — the worker SendMessages the advisor agent directly on that route, not the lead. The advisor agent's reply path is owned by `agents/advisor.md` §"Responding to Consultations" (its reply carries `handler: agent`, `advisor_template_version`, and `advisor-acknowledged: true`). When an advisor-handled consultation surfaces (the advisor's reply, or the worker's report naming it), file it via `consult-log` with `--handler agent` so the durable transcript stays complete — the Step 4 §1 fabrication guard separately verifies `handler: agent` entries against actually-spawned advisors.
 
-1. **Parse the request body** (per `agents/worker.md` §"Sending a `## Consultation` Request"):
-   - `consultation-id` — opaque worker-minted token
-   - `domain` — one-word or short-phrase domain label
-   - `reason` — one-sentence trigger
-   - `question` — concrete query (may reference files/symbols/line ranges)
-   - `task` — worker's current task id and subject
-   - `phase` — worker's current phase number
+1. **Parse the request body** (per `agents/worker.md` §"Sending a `## Consultation` Request"): `consultation-id` (opaque worker-minted token), `domain`, `reason`, `question`, `task`, `phase`.
 
 2. **Route by domain** — look up `$SKILL_INVOCATION_MAP[<domain>]`:
 
-   **(a) Skill-backed domain.** Invoke the named skill via the `Skill` tool with `args` set to the worker's `question` (and any file/symbol context). Capture output and `skill_template_version`. Set `handler="skill"`.
+   **(a) Skill-backed domain.** Invoke the named skill via the `Skill` tool with `args` set to the worker's `question` (and any file/symbol context). Capture output and the map's `skill_template_version`. Set `handler="skill"`.
 
-   **(b) No map entry.** Evaluate inline using the lead's `Read` / `Grep` / `Glob` tools, the `plan.md` already loaded in Step 1, and the in-flight `notes.md`. Set `handler="lead"`. Do NOT spawn an advisor agent — absence of a map entry is the default-route signal that the lead answers directly per D1.
+   **(b) No map entry.** Evaluate inline using the lead's `Read` / `Grep` / `Glob` tools, the `plan.md` already loaded in Step 1, and the in-flight `notes.md`. Set `handler="lead"`. Do NOT spawn an advisor agent — absence of a map entry is the default-route signal that the lead answers directly.
 
 3. **Reply via SendMessage** to the requesting worker, in order:
    ```
@@ -478,65 +318,83 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
 
    <answer body — concrete, anchored, ready for the worker to apply>
    ```
+   `lead-acknowledged: true` is the acknowledgement field §1's required-consultation check cross-checks for satisfaction.
 
-   `lead-acknowledged: true` is the acknowledgement field per D6a; §1.b cross-checks it for required-consult satisfaction.
+4. **File the consultation through the verb — the only legal channel for the transcript record.** Immediately after replying, append both the transcript record (to `consultation-transcript.jsonl`) and the execution-log entry in one call; do NOT hand-append to either file:
 
-4. **Append a transcript record** to `$CONSULTATION_TRANSCRIPT`:
-   ```
-   {"consultation_id": "<id>", "worker": "<worker-name>", "domain": "<domain>", "handler": "<skill|lead>", "skill_template_version": "<hash-or-null>", "replied_at": "<ISO-8601-now>"}
-   ```
-
-5. **Log to `execution-log.md`** via `write-execution-log.sh`. For `handler=lead`:
    ```bash
-   printf 'Consultation: %s\nWorker: %s\nDomain: %s\nConsultation-handler: lead\nQuestion: %s\nAnswer summary: %s\n' \
-     "<consultation-id>" "<worker-name>" "<domain>" "<one-line summary of question>" "<one-line summary of answer>" \
-     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
+   lore impl consult-log "$SLUG" \
+     --consultation-id <id> --worker <worker-name> --domain <domain> \
+     --handler <lead|skill|agent> \
+     --question "<one-line summary>" --answer "<one-line summary>" \
+     [--skill-template-version <hash>] [--advisor-template-version <hash>] \
+     --template-version "$LEAD_TEMPLATE_VERSION"
    ```
-   For `handler=skill`, add `Skill template-version: <hash>` between `Consultation-handler: skill` and `Question:`. The `consultation-handler:` line is the canonical signal §1.b cross-checks against worker `**Consultations:**` entries.
 
-6. **Do NOT block other Step 4 sub-steps** on consultation handling — the lead may receive a consultation from worker-A while waiting for a completion report from worker-B. Reply, append, log, then return to whichever queue the next message arrives on.
+   Contract (`scripts/impl-consult-log.sh`): judgment in, filing out — the answer is the lead's already-made judgment and the verb never produces or amends it; a missing answer or missing consultation metadata is a non-zero usage error before any write. Question and answer are JSON-string encoded so multi-line values survive as single log lines. Per-handler field contract (R = required, − = must be omitted; other combinations are rejected):
 
-1. **Verify Tier 2 evidence and required consultations before accepting the task** — do NOT re-parse Tier 2 rows from the `SendMessage` body. Instead:
+   | handler | `--skill-template-version` | `--advisor-template-version` |
+   |---|---|---|
+   | `lead` | − | − |
+   | `skill` | R | − |
+   | `agent` | − | R |
 
-   a. Read the canonical `$KDIR/_work/<slug>/task-claims.jsonl` directly.
+   Exit codes: `0` filed (transcript/log identifiers on stdout); `1` validation error / no match; `2` ambiguous reference.
 
-   b. Cross-reference against the worker's reported `Tier 2 evidence:` claim_id list. Every reported id MUST exist as a row in the file; any missing id means the worker misreported and the task is rejected back for correction.
+5. **Do NOT block other Step 4 sub-steps** on consultation handling — the lead may receive a consultation from worker-A while waiting for a completion report from worker-B. Reply, file, then return to whichever queue the next message arrives on.
 
-   c. Rows in the file have already been validated by `evidence-append.sh` against the Tier 2 schema — no additional per-row validation here.
+#### Step 4 §1–§8: Completion reports
 
-   d. **Required-consultation acknowledgement check (D4 lead-side tracking).** Read the worker's phase brief (from `lore work phase-context <slug> <phase-number>`) and extract any `**Consultations required:**` domain list. For each required domain:
-      - Find the matching `**Consultations:**` entry in the worker's report whose `domain` field equals the required label.
-      - Confirm that entry's `consultation_id` appears in `$CONSULTATION_TRANSCRIPT` with a matching `domain` and a `lead-acknowledged: true` reply already emitted; for the opt-in route confirm an `advisor-acknowledged: true` reply from the named advisor.
-      - If a required domain has NO matching entry, OR the entry's `consultation_id` does not match any acknowledged reply, the task is **rejected** the same way unanswered-must-consult is today: SendMessage back to the worker naming the unsatisfied required domain and the missing/mismatched id; do NOT accept; do NOT proceed to §2.
-      - Phases with no `**Consultations required:**` block skip this check entirely. The report field is then optional.
+1. **Run the mechanical report check before accepting the task — every report, no exceptions.** Save the worker's completion report body verbatim to a file (e.g. via `mktemp`), then gather the harness facts the verb cannot read itself and invoke:
 
-      Per [[knowledge:gotchas/skills-and-protocols/advisory-consultation-protocol-relies-entirely-on-behavioral]], delivery is still behavioral-compliance + turn-boundary; lead-side tracking adds *one* lever the previous pipeline lacked — the lead can reject reports that name a `consultation_id` no acknowledged reply matches. Fabricated entries fail here.
+   ```bash
+   lore impl check-report "$SLUG" --task <task-id> --report <file> --phase <n> \
+     [--transcript "$ITEM_DIR/consultation-transcript.jsonl"] \
+     [--woven-norm <label>]... \
+     [--provider-status <full|partial|unavailable>] [--spawned-advisors <csv>] \
+     --template-version "$LEAD_TEMPLATE_VERSION" --json
+   ```
 
-2. **Assess convention handling — completeness comparison + divergence review (non-blocking).** Read the worker's `**Convention handling:**` section. This step is observability, not a gate: it NEVER blocks task acceptance and NEVER edits the worker's output.
+   Contract (`scripts/impl-check-report.sh`) — the verb never accepts or rejects the report; it runs the mechanical checks and files the findings:
 
-   The TaskCompleted hook already enforced *presence* (the section is non-empty), so this step does the two checks the hook cannot:
+   - **Tier 2 cross-reference (BLOCKING).** Every `claim_id` in the report's `**Tier 2 evidence:**` section must exist as a row in the canonical `task-claims.jsonl` — the substrate is checked, never the report's own assertion (rows there were already validated by `evidence-append.sh`; no re-validation). Missing ids are named in the findings.
+   - **Required-consultation acknowledgement check (BLOCKING).** The phase brief's `**Consultations required:**` domains (from `lore work phase-context`) must each have a matching `**Consultations:**` entry in the report whose `consultation_id` appears in the `--transcript` file with a matching domain — i.e. a `lead-acknowledged: true` (or advisor-acknowledged) reply was actually filed. `--transcript` is required when the phase brief declares required domains; pass `consultation-transcript.jsonl`. Phases with no required block skip this check; the report field is then optional. Lead-side tracking adds *one* lever the previous pipeline lacked — a report naming a `consultation_id` no acknowledged record matches fails here; fabricated entries cannot satisfy a required consult.
+   - **Convention-handling completeness (non-blocking).** Pass one `--woven-norm <label>` per norm you wove into this task's constraint clauses at dispatch (the stable labels are in the task description, resolved from `/spec`). The verb compares the report's dispositions against that list — missing / duplicated / unrecognized labels and `none in scope`-despite-woven-norms conflicts are surfaced as findings, never as failures. This needs only the woven-norm list — do NOT read the diff. Divergence rationales are listed verbatim; assessing them is §2's judgment, not the verb's.
+   - **Fabrication guard (non-blocking, metadata-only).** `handler: agent` consultations are pre-filtered from the report's `**Consultations:**` field (entries with `handler: lead` or `handler: skill` bypass the guard — they have no advisor agent to corroborate against; an entry missing `handler` but carrying `advisor_template_version` is normalized to `handler: agent` for backward compat) and intersected with `--spawned-advisors` under the declared `--provider-status`. Three outcomes: **(a)** provider OK and every claimed advisor is verified — the full `handler: agent` subset flows to the rollup; **(b)** Mismatch — each unverified entry is stripped from the rollup payload and logged as `fabrication-guard: skipped <identifier>` (a per-entry filter, not all-or-nothing); **(c)** provider `unavailable`, or `partial` with the spawn surface degraded — the rollup is withheld entirely and `fabrication-guard: provider-<status>; rollup skipped` is logged. The guard exists to withhold unsupported attribution: absent verification is never license to attribute, so branch (c) does NOT fall through to verbatim-trust of the report. Zero rows on a providerless harness reads as "no signal" to /retro, same as never-invoked judges. The guard is metadata-only — the worker's code changes still ship, the Tier 2 evidence still grounds them; only the advisor scorecard attribution is withheld.
+   - **Advisor-impact rollup.** The verified `handler: agent` subset is forwarded to `advisor-impact-rollup.sh` (the scorecard sole writer), emitting `consultation_rate` and `advice_followed_rate` rows. `handler: lead` and `handler: skill` entries never emit advisor scorecard rows. Rollup status (`appended` / `skipped` + reason / `failed`) is in the output.
+   - **One execution-log entry** (source: impl-verb) filing the findings, including the canonical `fabrication-guard:` log lines.
 
-   a. **Completeness comparison — report dispositions vs. the woven-norm list you hold.** You wove the judgment-class norms into this task's constraint clauses when you dispatched it (the stable labels are in the task description, resolved from `/spec`). Compare that list against the labels the worker dispositioned. This needs only the woven-norm list — **do NOT read the diff.** Flag any norm that is:
-      - **missing** — a woven norm with no `honored:`/`diverged:` bullet;
-      - **duplicated** — the same label dispositioned twice;
-      - **unrecognized** — a dispositioned label that was never woven into this task.
+   Every check reports a status — skips are loud, never swallowed. Exit codes: `0` checks ran, `mechanical_pass: true`; `1` validation error / no match; `2` ambiguous reference; `3` checks ran, `mechanical_pass: false`.
 
-      `none in scope` is correct only when you wove no norm into the task; if you wove norms and the report says `none in scope`, that is a completeness failure. A completeness finding is surfaced (see step c), not a rejection.
+   **Harness facts are flag-passed because a CLI verb cannot read harness tool surfaces.** `--provider-status` is required only when the report carries `handler: agent` consultations; `full` additionally requires `--spawned-advisors` (pass an empty value when none were spawned). Compute the status via the canonical transcript-provider consumer pattern — `get_provider()` → catch `UnsupportedFrameworkError` → `provider_status()`:
 
-   b. **Divergence review.** For each `diverged: <label> — <why>` bullet, assess whether the rationale is convincing. A worker may legitimately diverge — silencing principled divergence is worse than the violation. "Woven but inapplicable to the actual change" is a valid divergence rationale (and a signal the upstream relevance-gate wove too loosely). You are assessing the *rationale*, not re-deriving compliance from the diff.
+   ```python
+   from adapters.transcripts import get_provider, UnsupportedFrameworkError
+   try:
+       provider = get_provider()
+       status, _reason = provider.provider_status()
+   except UnsupportedFrameworkError:
+       status = "unavailable"
+   ```
 
-   c. **Open a non-blocking followup for unconvincing divergences or completeness findings.** When a divergence rationale is unconvincing, or the completeness comparison flagged a missing/duplicated/unrecognized norm, open a followup. Do this for the observability trail only — task acceptance already happened in §1 and is unaffected:
-      ```bash
-      bash ~/.lore/scripts/create-followup.sh \
-        --title "Convention handling: <work item title> — <task subject>" \
-        --source "implement" \
-        --attachments '[{"type":"work_item","slug":"<slug>"}]' \
-        --suggested-actions '[{"type":"create_work_item"}]' \
-        --content "<which norm label(s); whether unconvincing-divergence or missing/duplicated/unrecognized; the worker's rationale verbatim>"
-      ```
-      `honored`/`none in scope` reports with a clean completeness comparison pass without a followup — this is the common path. Never auto-fix the worker's output; the followup is the review-loop's input, not an edit.
+   The spawned-advisor list comes from the lead's own spawn map (Step 3.4); when `provider_status()` is `full`, the transcript's spawn events (TaskCreate with `name: <advisor-name>`, extracted via the documented two-pass `parse_transcript()` + `read_raw_lines()` pattern) corroborate it — the lead-side map is canonical only on `full`; `partial`/`unavailable` statuses flow to branch (c) regardless.
 
-3. **Write execution log entry** — immediately after task acceptance. Pass `--template-version "$WORKER_TEMPLATE_VERSION"` because the body logged is the worker's report:
+   **On exit 3, the task is rejected — reject it.** SendMessage the report back to the worker naming the verb's `fail_reasons` (missing claim_ids, unsatisfied required domains); do NOT accept; do NOT proceed to §2. **On exit 0, acceptance remains the lead's decision** — mechanical checks alone never accept; weigh the report's substance (tests, blockers, scope) and accept or send back with guidance.
+
+2. **Assess divergence rationales — the lead's judgment, never the verb's.** For each `diverged: <label> — <why>` finding the check surfaced, assess whether the rationale is convincing. A worker may legitimately diverge — silencing principled divergence is worse than the violation. "Woven but inapplicable to the actual change" is a valid divergence rationale (and a signal the upstream relevance-gate wove too loosely). You are assessing the *rationale*, not re-deriving compliance from the diff. This assessment is observability, not a gate: it NEVER blocks task acceptance and NEVER edits the worker's output.
+
+   **Open a non-blocking followup for unconvincing divergences or completeness findings** (missing/duplicated/unrecognized norms from the check) — the observability trail only; task acceptance already happened in §1 and is unaffected:
+   ```bash
+   bash ~/.lore/scripts/create-followup.sh \
+     --title "Convention handling: <work item title> — <task subject>" \
+     --source "implement" \
+     --attachments '[{"type":"work_item","slug":"<slug>"}]' \
+     --suggested-actions '[{"type":"create_work_item"}]' \
+     --content "<which norm label(s); whether unconvincing-divergence or missing/duplicated/unrecognized; the worker's rationale verbatim>"
+   ```
+   `honored`/`none in scope` reports with a clean completeness comparison pass without a followup — this is the common path. Never auto-fix the worker's output; the followup is the review-loop's input, not an edit.
+
+3. **Write the worker-report execution log entry** — immediately after task acceptance. Pass `--template-version "$WORKER_TEMPLATE_VERSION"` because the body logged is the worker's report:
    ```bash
    printf 'Task: %s\nChanges: %s\nSkills: %s\nTier2-claims: %s\nObservations: %s\nConvention: %s\nInvestigation: %s\nBlockers: %s\nConsultations: %s\nTest result: %s\n' \
      "<task-subject>" "<worker Changes field>" "<worker Skills used field>" \
@@ -545,288 +403,116 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
      "<worker Convention handling field + your §2 assessment outcome: clean | followup-opened: <reason>>" \
      "<worker Investigation field>" "<worker Blockers field>" "<worker Consultations field — verbatim YAML list, or 'none'>" \
      "<passed|failed|skipped>" \
-     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$WORKER_TEMPLATE_VERSION"
+     | bash ~/.lore/scripts/write-execution-log.sh --slug "$SLUG" --source implement-lead --template-version "$WORKER_TEMPLATE_VERSION"
    ```
-   If the worker omitted a field, use `None`. `execution-log.md` is created on first write.
+   If the worker omitted a field, use `None`.
 
-   **Log discipline:** one execution-log entry per task, written only after that task's worker completion report arrives — never log `pending worker report` placeholders. When a worker reports several tasks in one message, write one entry per task (batched entries lose per-task sequence and starve /retro of evidence). When Step 3.1 used the fallback branch because the plan had no **Knowledge context:** blocks, log one `Knowledge-delivery-path: lead-fallback-prefetch` line so the delivery gap is visible to /retro.
+   **Log discipline:** one execution-log entry per task, written only after that task's worker completion report arrives — never log `pending worker report` placeholders. When a worker reports several tasks in one message, write one entry per task (batched entries lose per-task sequence and starve /retro of evidence).
    <!-- Sunset: remove if execution-log completeness retro-evolution rows targeting skills/implement/SKILL.md change-type evidence-gap recur from ≥3 new distinct work items within the next 20 implement cycles. -->
 
-4. **Verdict-fabrication guard (handler: agent only)** — before invoking advisor-impact rollup, verify each consultation in the worker's `**Consultations:**` field **whose `handler` is `agent`** against the transcript's actual advisor spawn events. The guard withholds attribution for unverifiable consultations so the advisor scorecard does not absorb fabricated worker reports as real consultation events.
+4. **Set aside Tier 3 candidates for Step 5** — if the worker report contains a `Tier 3 candidates:` YAML block, stash each entry (preserving producer_role and source_artifact_ids) for Step 5. Do NOT promote here — Step 5 is the sole promotion site.
 
-   **Pre-filter by handler.** From `**Consultations:**`, select only entries with `handler: agent` (per D6). Apply D6 backward-compat normalization: an entry missing `handler` but carrying `advisor_template_version` is normalized to `handler: agent`; an entry missing both is invalid (the §1 verifier already rejected it). `handler: lead` and `handler: skill` entries bypass this guard — they have no advisor agent to corroborate against.
+5. **Handle blockers** — if a worker reports blockers: read the relevant code/context; send guidance via the adapter's `send_message` (on Claude Code the native `SendMessage` tool; on harnesses where the adapter returns `unsupported`, fall back to lead-only orchestration — re-spawn with a corrected prompt instead). If unresolvable, note in `notes.md` and move on.
 
-   Skip the entire guard (and §5 below) when (i) the filtered subset is empty (common on default route) OR (ii) the original field was empty/`none`.
-
-   The guard consumes the active framework's transcript provider per the canonical consumer pattern (`get_provider()` → catch `UnsupportedFrameworkError` → `provider_status()` gate → operation calls):
-
-   ```python
-   from adapters.transcripts import get_provider, UnsupportedFrameworkError
-
-   try:
-       provider = get_provider()
-       status, _reason = provider.provider_status()
-   except UnsupportedFrameworkError:
-       status = "unavailable"
-   # Branch on `status` ∈ {"full", "partial", "unavailable"}; on full|partial-with-spawn-surface
-   # call provider.parse_transcript() + provider.read_raw_lines() (two-pass) to extract the set of
-   # advisor names actually spawned this session, then intersect with the worker's reported entries.
-   ```
-
-   Branch on the result:
-
-   **(a) Provider OK and every claimed advisor verified** — proceed to §5 with the `handler: agent` subset forwarded verbatim. The rollup runs as today.
-
-   **(b) Mismatch** — provider returns `full` (or `partial` with spawn surface intact), but one or more claimed advisor identifiers do NOT appear in the transcript's spawn events. For each unverified entry: log `fabrication-guard: skipped <advisor_template_version_or_name>` to `execution-log.md`, then strip THAT entry from the payload. Forward remaining (verified) entries to §5. The guard is a per-entry filter, not all-or-nothing reject.
-
-   **(c) Provider returns `unavailable` or `partial` with spawn surface degraded** — log `fabrication-guard: provider-<status>; rollup skipped` and skip §5 entirely. **Do NOT fall through to today's verbatim-trust behavior.** The guard exists to withhold unsupported attribution; treating absent verification as license to attribute would preserve the exact fabrication path the guard closes. On harnesses without a transcript provider, zero advisor-impact rows result; `/retro` interprets zero rows as "no signal" the same way it does for never-invoked judges.
-
-   Use `write-execution-log.sh` for both log paths so the entry carries the lead's template-version:
-
+6. **Check off completed items in plan.md** (required before the batch loop reads completion state):
    ```bash
-   printf 'fabrication-guard: skipped %s\n' "<unverified-identifier>" \
-     | bash ~/.lore/scripts/write-execution-log.sh \
-         --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
-
-   printf 'fabrication-guard: provider-%s; rollup skipped\n' "<unavailable|partial>" \
-     | bash ~/.lore/scripts/write-execution-log.sh \
-         --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
+   lore work check "$SLUG" "<task-subject>"
    ```
-
-   The guard is metadata-only: worker task acceptance (verified in §1, logged in §3) is unaffected. Fabrication is a metadata fault, not a code fault — the worker's code changes still ship, the Tier 2 evidence still grounds them, only the advisor scorecard attribution is withheld.
-
-   **Identifier semantics.** Worker reports list `advisor_template_version` per consultation. The lead already knows which advisor names it spawned and what `--template-version` flag it passed (Step 3.5b). The intersection: "did the lead spawn an advisor whose template-version matches?" The transcript provides the corroborating spawn event (TaskCreate with `name: <advisor-name>`) per Step 3.5c's logged `Advisor spawned: <name>` line; consumers needing raw tool inputs follow the two-pass pattern. When the lead's spawned-advisor map records every active advisor, the guard MAY satisfy verification from that map alone without the second pass — the transcript is corroborator, not sole source of truth. The lead-side spawn map is canonical only when `provider_status()` is `full`; partial/unavailable returns flow to branch (c) regardless.
-
-5. **Advisor-impact rollup (handler: agent only)** — if the guard's branch (a) or (b) selected at least one verified `handler: agent` consultation, invoke the rollup with the filtered payload:
-   ```bash
-   bash ~/.lore/scripts/advisor-impact-rollup.sh \
-     --work-item <slug> \
-     --task-id <task-id> \
-     --consultations "<verified handler: agent consultations subset, verbatim YAML/JSON>" \
-     --template-version "$ADVISOR_TEMPLATE_VERSION"
-   ```
-   This emits `consultation_rate` and `advice_followed_rate` scorecard rows attributed to `template_id=advisor`. Per D5 the rollup runs only on the opt-in path; `handler: lead` and `handler: skill` entries do NOT emit advisor scorecard rows. Skip when (i) original field empty or `none`, (ii) §4 pre-filter found zero `handler: agent` entries, (iii) §4 branch (b) filtered every entry as fabricated, or (iv) §4 branch (c) fired.
-
-6. **Set aside Tier 3 candidates for Step 5** — if the worker report contains a `Tier 3 candidates:` YAML block, stash each entry (preserving producer_role and source_artifact_ids) for Step 5 promotion. Do NOT promote here — Step 5 is the sole promotion site.
-
-7. **Handle blockers** — if a worker reports blockers:
-   - Read the relevant code/context
-   - Send guidance via the adapter's `send_message`: `bash "$ADAPTER" send_message <handle> "<body>"`. On Claude Code this expands to `delegate:SendMessage handle=<id>` invoked as the native `SendMessage` tool. On harnesses where the adapter returns `unsupported`, fall back to lead-only orchestration (re-spawn with corrected prompt instead).
-   - If unresolvable, note in `notes.md` and move on.
-
-8. **Check off completed items in plan.md** (best-effort):
-   ```bash
-   lore work check <slug> "<task-subject>"
-   ```
-   If this fails or is missed, Step 7 reconciles from the task system.
+   `next-batch` reads completion from these checkboxes; Step 7's close reconciles any misses via `--check-task`.
 
 Do NOT gate on reviewing diffs — workers proceed autonomously. The user reviews at the end.
 
-When a batch of workers has all reported completion:
+#### Batch loop
 
-1. Call `TaskList` to count remaining tasks with status `pending` and no `blockedBy` dependencies (unblocked tasks).
-2. **If unblocked tasks remain:** spawn `min(unblocked_count, max_workers)` fresh workers (same template and injections as Step 3.7, incrementing names as `worker-N`). Rebuild each worker's per-task Tier 2 extract from the latest `task-claims.jsonl` — prior batches may have added new rows. Continue collecting.
-   - `max_workers` is the same cap as Step 3.7: `min(recommended_workers, 4)`.
-   - Repeat until no unblocked tasks remain.
-3. **If no unblocked tasks remain:**
-   a. Send `shutdown_request` to all active workers and advisors via the adapter: `bash "$ADAPTER" shutdown <handle> true` per handle. On Claude Code expands to `delegate:SendMessage handle=<id> type=shutdown_request approve=true`. On opencode/codex routes to the harness's native subagent-stop / plugin-runtime kill API.
-   b. **Write advisor shutdown log entries** — for each spawned advisor:
-      ```bash
-      printf 'Advisor shutdown: %s\nDomain: %s\n' \
-        "<advisor-name>" "<domain scope>" \
-        | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$ADVISOR_TEMPLATE_VERSION"
-      ```
-   c. Run `TeamDelete` (Claude Code only; opencode/codex's runtime owns team teardown).
+When a batch of workers has all reported completion, ask the next-batch verb what is now dispatchable:
+
+```bash
+lore impl next-batch "$SLUG" [--active <task-id>]... --json --template-version "$LEAD_TEMPLATE_VERSION"
+```
+
+Contract (`scripts/impl-next-batch.sh`) — a prepare-and-return emitter; the LEAD spawns workers. Completion state is read from plan.md checkboxes — the durable record §6 maintains — by matching each tasks.json subject against `- [x]`/`- [ ]` lines; tasks whose subject matches no checkbox return as `unmatched` and count as incomplete blockers (fix the checkbox via `lore work check` and re-run). **The plan checksum is deliberately NOT enforced here** — checking boxes edits plan.md after tasks.json generation by design; the cryptographic gate is `open`'s job alone — do not reintroduce it mid-run. `--active <task-id>` (repeatable) declares tasks the lead has already dispatched and still in flight (live task state is harness-side; the lead passes it in); active tasks are excluded from the batch and count as incomplete blockers. Batch entries carry refreshed per-task Tier 2 extracts (rows workers appended in earlier batches included) and the four lead-inline condition fields. The only write is one execution-log attribution row. Exit codes: `0` batch emitted (possibly empty with explanatory `status`); `1` error / missing tasks.json or plan.md; `2` ambiguous reference.
+
+- **Batch non-empty:** spawn `min(batch_size, max_workers)` fresh workers (same template and injections as Step 3.6, incrementing names as `worker-N`; `max_workers` is the same `min(recommended_workers, 4)` cap), with each worker's refreshed Tier 2 extract. **Same-file collision groups return as conditions, not pre-decided wiring** — those tasks must not be parallel-dispatched across workers; serialize-within-one-worker vs merge-into-one-assignment is the lead's call per group. Repeat the loop.
+- **`status: all-blocked`:** every pending task is blocked or in flight — return to collecting reports (§ above) or resolve blockers (§5).
+- **`status: all-complete`:** no pending tasks remain. Shut down the team:
+  a. Send `shutdown_request` to all active workers and advisors via the orchestration adapter — `ADAPTER="$LORE_REPO_DIR/adapters/agents/$(resolve_active_framework).sh"`, then `bash "$ADAPTER" shutdown <handle> true` per handle (on Claude Code this expands to the native `SendMessage` with `type=shutdown_request approve=true`).
+  b. **Write advisor shutdown log entries** — for each spawned advisor:
+     ```bash
+     printf 'Advisor shutdown: %s\nDomain: %s\n' "<advisor-name>" "<domain scope>" \
+       | bash ~/.lore/scripts/write-execution-log.sh --slug "$SLUG" --source implement-lead --template-version "$ADVISOR_TEMPLATE_VERSION"
+     ```
+  c. Run `TeamDelete` (Claude Code only; opencode/codex's runtime owns team teardown).
 
 ### Step 5: Promote accepted Tier 3 candidates
 
-Step 5 is the sole Tier 3 promotion site for `/implement`. Do NOT delegate to `/remember`. Do NOT call `lore capture` directly for work-item-scoped observations — `lore promote` is the canonical path because it forces `confidence=unaudited` and enforces Tier 3 schema via `validate-tier3.sh` before writing.
+Step 5 is the sole Tier 3 promotion site for `/implement`. Do NOT delegate to `/remember`. Do NOT call `lore capture` directly for work-item-scoped observations — promotion goes through the verb, which delegates to `lore promote` (the canonical path: it forces `confidence=unaudited` and enforces Tier 3 schema via `validate-tier3.sh` before writing).
 
-Inputs: the Tier 3 candidate list stashed in Step 4.4, plus any lead-originated cross-task candidates the lead produces by reading the complete `execution-log.md` after the last batch.
+**Select the accepted set — the lead's judgment; the verb never selects candidates.** Inputs: the Tier 3 candidate list stashed in Step 4 §4, plus any lead-originated cross-task candidates the lead produces by reading the complete `execution-log.md` after the last batch. Review each candidate on its merits (reusability, grounding, falsifier quality) and write the accepted set to a file as a JSON array or JSONL (one Tier 3 row object per entry, `producer_role` and `source_artifact_ids` preserved from the worker's block).
 
-**Empty input is a valid input — Step 5 always runs through to the sub-step 4 summary log.** The terminal state when no candidates were stashed is `Tier 3 promotion summary: 0 accepted, 0 rejected` written to `execution-log.md`; that log line is the committed reasoning a later auditor reads. Skipping Step 5 because "no candidates → no-op → nothing to do" is the bypass shape named in the commitment protocol — the commitment is to evaluate and emit the summary, not to produce non-zero promotions.
-
-For each accepted Tier 3 candidate, emit one `lore promote` call. Multi-producer synthesis is NEVER merged — one call per distinct producer so scorecard rows retain role × template attribution.
-
-1. **Source-artifact verification.** Before promotion, read `$KDIR/_work/<slug>/task-claims.jsonl` and confirm EVERY id in the candidate's `source_artifact_ids` exists as a `claim_id` of some row. Scope is this work item only — cross-work-item references are always rejected. Candidates referencing missing or stale ids are rejected. Note each rejection in `execution-log.md`:
-   ```bash
-   printf 'Rejected Tier 3 candidate: %s\nReason: source_artifact_ids refer to missing claim_ids: %s\n' \
-     "<candidate-summary>" "<missing-ids>" \
-     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
-   ```
-
-2. **Attribution rule (producer_role → template-version mapping).** Pick `--template-version` based on `producer_role` so commons-side rollups attribute correctly:
-   - `producer_role: worker` → `--template-version "$WORKER_TEMPLATE_VERSION"`
-   - `producer_role: advisor` → `--template-version "$ADVISOR_TEMPLATE_VERSION"`
-   - `producer_role: implement-lead` → `--template-version "$LEAD_TEMPLATE_VERSION"`
-
-   If `producer_role` is absent, default to `implement-lead` and note the defaulting in the execution log.
-
-3. **Invoke `lore promote` per candidate.** One call per accepted candidate; row JSON piped on stdin:
-   ```bash
-   echo '<tier3-row-json>' | lore promote \
-     --work-item <slug> \
-     --source-artifact-ids "<comma-separated tier2-claim-ids>" \
-     --producer-role "<worker|advisor|implement-lead>" \
-     --template-version "<TV-per-attribution-rule>"
-   ```
-   The script forces `confidence=unaudited`, validates via `validate-tier3.sh`, delegates the commons write to `capture.sh`. A non-zero exit means the row was rejected — log the failure and move on.
-
-4. **Log promotion summary to execution-log.md** after the batch:
-   ```bash
-   printf 'Tier 3 promotion summary: %d accepted, %d rejected\nAccepted ids: %s\nRejected reasons: %s\n' \
-     "$ACCEPTED" "$REJECTED" "<accepted-claim-id-list>" "<rejection-reasons>" \
-     | bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
-   ```
-
-### Step 6: Closure Acceptance Reconciliation
-
-Step 6 is the capability-anchor reconciliation gate. It compares the run against `_meta.json.intent_anchor`, records a single trichotomous verdict (`full | partial | none`) on the parent's `_meta.json`, and — for `partial` — routes the load-bearing residue into a child work item. The closure failure mode this gate catches is named in the [[knowledge:principles/workflow-design/closure-laundering-is-failure-mode-where-local|closure-laundering principle]]: substrate completion (Tier 2 evidence valid, every task checked) accepted as capability completion when a load-bearing step was mocked or deferred.
-
-The system has three distinct closure layers (D2 Precedence). They operate on disjoint signals; none can override another. **All three** must produce a permissive outcome for archive to proceed on an anchored item:
-
-1. **Task-system archive precondition** (Step 7 behavior): `REMAINING_COUNT=0`. Hard-blocks archive while any task is `pending`/`in_progress`. Unchanged.
-2. **Mechanical Followup Creation Gate** (§6.4 fallback for legacy items + parallel sub-step for anchored items): when `TaskList` shows incompletion or `execution-log.md` Blocker fields carry non-`none` text, it creates a followup in `_followups/`. **Non-blocking** — surfaces mechanical residue for review-loop pickup.
-3. **Anchor verdict** (§6.2): the semantic capability assertion against `intent_anchor`. Only `full` permits archive; both `partial` and `none` are non-completions that hold the parent open as `capability-incomplete`. Both record a closure row (`capability_incomplete: true`) and route through the same loud, non-zero close.
-
-**Run order is load-bearing.** Evaluate the task-system archive precondition (§6.1) *before* prompting for or writing the anchor verdict. If `REMAINING_COUNT != 0`, run §6.3 (mechanical gate) and stop — do NOT prompt for a verdict, do NOT write a closure row. The anchor verdict is recorded only against the final task-complete run; otherwise a stale closure row could attach to a state the system no longer matches.
-
-#### Step 6.1: Compute REMAINING_COUNT and read intent_anchor
+**Run the promote verb on the selection — including an empty one.** Step 5's commitment is to evaluate and file the summary, not to produce non-zero promotions; "no candidates → no-op → nothing to do" is the bypass shape named in the commitment protocol. The verb makes the empty case concrete: an empty candidates file is valid input and still files the `Tier 3 promotion summary: 0 accepted, 0 rejected` execution-log entry — the committed reasoning a later auditor reads.
 
 ```bash
-REMAINING_COUNT=<count of TaskList tasks with status pending OR in_progress for this work item>
-INTENT_ANCHOR=$(python3 -c 'import json,sys
-with open(sys.argv[1], encoding="utf-8") as f:
-    data = json.load(f)
-print((data.get("intent_anchor") or "").strip())
-' "$KDIR/_work/<slug>/_meta.json")
+lore impl promote-batch "$SLUG" --candidates <file> \
+  --lead-template-version "$LEAD_TEMPLATE_VERSION" \
+  --worker-template-version "$WORKER_TEMPLATE_VERSION" \
+  --advisor-template-version "$ADVISOR_TEMPLATE_VERSION"
 ```
 
-**Branch table:**
+Contract (`scripts/impl-promote-batch.sh`) — judgment in, filing out; per candidate row:
 
-| `REMAINING_COUNT` | `INTENT_ANCHOR` non-empty | Route |
-|---|---|---|
-| `> 0` | yes or no | §6.3 mechanical gate only; no verdict |
-| `0` | no (empty/absent) | §6.4 legacy fallback; no verdict, no closure row |
-| `0` | yes | §6.2 anchor verdict + §6.3 mechanical gate run alongside |
+1. **Source-artifact verification** — every id in the candidate's `source_artifact_ids` must exist as a `claim_id` in THIS work item's `task-claims.jsonl`; cross-work-item references are always rejected. Rejections are named with reasons in the output and the summary log.
+2. **Attribution** — `producer_role` maps to its template version (`worker` / `advisor` / `implement-lead`); an absent `producer_role` defaults to `implement-lead`, the default is injected INTO the row itself (lore-promote validates the row, not flags), and the defaulting is noted in the summary log. Any other role is rejected as mis-attribution. One `lore promote` call per candidate keeps role × template attribution intact — multi-producer synthesis is NEVER merged.
+3. **Promotion** — one `lore promote` per accepted candidate (forces `confidence=unaudited`, validates via `validate-tier3.sh`, delegates the commons write to `capture.sh`). A non-zero promote exit moves the candidate to the rejected list — rejections are results, not command failures.
+4. **Summary log** — one execution-log entry per invocation, always written, including `0 accepted, 0 rejected` on empty input.
 
-#### Step 6.2: Anchor verdict (anchored + task-complete only)
+Role template versions default from the implement-skill/worker/advisor templates when the flags are omitted (warn-degrade to unstamped). Exit codes: `0` batch processed (accepted/rejected lists on stdout); `1` usage error / unreadable or malformed candidates file / no match / summary-log failure; `2` ambiguous reference.
 
-Display the `intent_anchor` text verbatim to the lead and prompt for exactly one trichotomous verdict, using the [[knowledge:principles/workflow-design/closure-laundering-is-failure-mode-where-local|closure-laundering vocabulary]] verbatim (load-bearing step, mocked, deferred):
+### Step 6: Closure verdict
 
-- **`full`** — the run delivers the load-bearing capability the anchor names. The lead writes a one-line `capability_loop_summary` naming the user-facing loop now operable. Archive proceeds.
-- **`partial`** — at least one load-bearing step the anchor depends on is mocked or deferred. This is a **non-completion**: the parent is NOT archived — it stays active as `capability-incomplete`. The lead writes a `capability_loop_summary` that *names what shipped*, a one-line `divergence_summary` naming what was mocked or deferred, and a one-line residue title and residue intent anchor for the deferred capability. The protocol creates a child work item, captures the child slug from the successful command result, and only then writes the parent's closure row (with `capability_incomplete: true` and `residue_followup` set to the child slug).
-- **`none`** — the run does not deliver the capability. Also a **non-completion**: the parent is NOT archived — it stays active as `capability-incomplete`. `none` is anchor non-delivery routed through the same loud channel as `partial` (closure row + non-zero close from the closure-report script), not a separate concept. The lead writes a `capability_loop_summary` naming what was attempted and a `divergence_summary` naming that no load-bearing capability was delivered. No residue child is created (`residue_followup: null`).
+<!-- INVARIANT — canonical closure vocabulary. scripts/impl-close.sh validates
+     these exact tokens and rejects any other:
+       verdict: full | partial | none
+     The closure block schema below is the FIXED contract impl-close.sh writes and
+     implement-closure-report.sh + the work-index projector read — do NOT rename
+     fields or verdict tokens here without changing those consumers first. -->
 
-The verdict prompt is the lead's discretion-bearing read of what actually shipped — `notes.md`, `execution-log.md`, the run's worker reports, and any blocker context all inform it. The lead asks via `AskUserQuestion` only if the lead cannot ground the call in the run's evidence; if the run record is unambiguous (all tasks checked off, no blockers, load-bearing steps all have direct artifact evidence), the lead decides and reports rather than prompting.
+Step 6 is the capability-anchor reconciliation: the lead compares the run against `_meta.json.intent_anchor` and decides a single trichotomous verdict — `full | partial | none` — which Step 7's close verb records. The closure failure mode this verdict catches is named in the [[knowledge:principles/workflow-design/closure-laundering-is-failure-mode-where-local|closure-laundering principle]]: substrate completion (Tier 2 evidence valid, every task checked) accepted as capability completion when a load-bearing step was mocked or deferred.
 
-Define a single closure-writer helper used by `full`, `partial`, and `none`. Same Python heredoc handles all three; only the verdict label, divergence summary, and residue-followup slug differ. The closure schema is the FIXED contract the closure-report script and the work-index projector both code against — do NOT rename fields:
+The system has three distinct closure layers. They operate on disjoint signals; none can override another, and **all three** must produce a permissive outcome for archive to proceed on an anchored item. The close verb runs them in load-bearing order:
+
+1. **Task-system archive precondition** — `REMAINING_COUNT=0` after `--check-task` reconciliation. The verb hard-refuses the close (exit 1, mechanical followup filed, NO verdict recorded, NO closure block written) while any plan.md checkbox remains unchecked — the verdict is recorded only against the final task-complete run, so a stale closure row can never attach to a state the system no longer matches.
+2. **Mechanical Followup Creation Gate** — when unchecked tasks or non-`none` `Blockers:` entries in `execution-log.md` exist, the verb files a `Deferred work:` followup in `_followups/`. **Non-blocking observability** for the review loop: its firing is not proof of archive-unclear, its silence not proof of archive-clear. [[knowledge:principles/workflow-design/workflow-theater-anti-pattern-in-skill-design-steps-that|Workflow-theater guard:]] this layer surfaces *mechanical* residue only — it does NOT consult `intent_anchor`, and collapsing it into the verdict recreates the closure-laundering gap by either reading the verdict off mechanical signals or laundering blockers as anchor compliance.
+3. **Anchor verdict** — the lead's semantic capability assertion against `intent_anchor`. Only `full` permits archive; `partial` and `none` are non-completions that hold the parent open as `capability-incomplete` through the same loud, non-zero close.
+
+**Decide the verdict — the lead's discretion-bearing read of what actually shipped.** Read the `intent_anchor` verbatim, then `notes.md`, `execution-log.md`, the run's worker reports, and any blocker context. Use the closure-laundering vocabulary verbatim (load-bearing step, mocked, deferred):
+
+- **`full`** — the run delivers the load-bearing capability the anchor names. Write a one-line `capability_loop_summary` naming the user-facing loop now operable. Archive proceeds.
+- **`partial`** — at least one load-bearing step the anchor depends on is mocked or deferred. A **non-completion**: the parent is NOT archived — it stays active as `capability-incomplete`. Write a `capability_loop_summary` that *names what shipped*, a one-line `divergence_summary` naming what was mocked or deferred, and a residue title + residue intent anchor for the deferred capability. The residue anchor must obey the [[knowledge:conventions/protocol/work-item-intake-should-store-neutral-intent-ancho|intake neutrality rule]] — describe the residue capability in neutral terms; do not smuggle the parent's framing or solution into the child.
+- **`none`** — the run does not deliver the capability. Also a **non-completion**: the parent stays active as `capability-incomplete`. Write a `capability_loop_summary` naming what was attempted and a `divergence_summary` naming that no load-bearing capability was delivered. No residue child; `none` is anchor non-delivery routed through the same loud channel as `partial`, not a separate concept.
+
+Ask via `AskUserQuestion` only if the lead cannot ground the call in the run's evidence; if the run record is unambiguous (all tasks checked off, no blockers, load-bearing steps all have direct artifact evidence), the lead decides and reports rather than prompting.
+
+The closure block the verb writes against this verdict is the fixed contract (declarative — for reading, never for hand-writing):
 
 ```
 closure = {
   verdict:                 "full" | "partial" | "none",
-  capability_incomplete:   bool,          # true iff verdict in {partial, none}; false on full
+  capability_incomplete:   bool,          # true iff verdict in {partial, none}
   capability_loop_summary: str,           # full/partial: what shipped; none: what was attempted
-  divergence_summary:      str | null,    # partial/none: one line on what was mocked or deferred; null on full
+  divergence_summary:      str | null,    # partial/none: one line on what was mocked or deferred
   residue_followup:        str | null,    # child slug on partial; null otherwise
   verdict_at:              iso8601 str,
   intent_anchor_at_close:  str,
 }
 ```
 
-```bash
-write_closure_row() {
-  # Args: <verdict> <capability_loop_summary> <intent_anchor> <divergence_summary_or_empty> <residue_followup_or_empty>
-  python3 - "$KDIR/_work/<slug>/_meta.json" "$1" "$2" "$3" "$4" "$5" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" << 'PYEOF'
-import json, sys
-path, verdict, summary, anchor, divergence, residue, ts = sys.argv[1:8]
-with open(path, encoding="utf-8") as f:
-    data = json.load(f)
-data["closure"] = {
-    "verdict": verdict,
-    "capability_incomplete": verdict in ("partial", "none"),
-    "capability_loop_summary": summary,
-    "divergence_summary": divergence or None,
-    "residue_followup": residue or None,
-    "verdict_at": ts,
-    "intent_anchor_at_close": anchor,
-}
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-PYEOF
-}
-```
+**Legacy fallback (no intent_anchor):** items without an anchor take only `--verdict full` — `partial`/`none` are anchor-relative verdicts and the verb refuses them. No closure block is written and the item archives via the mechanical layers alone. This preserves the cycle on pre-anchor work items without back-filling — closure-time anchor synthesis would be retroactive intake under conversational pressure, the exact failure mode the intake-side anchor moved capture to intake to avoid.
 
-**On `full`:** write the closure row and proceed to §6.3 + Step 7 (archive runs; the closure-report script emits the Done summary).
+[[knowledge:architecture/plan-task-models/lore-work-check-is-not-taskcompleted-acceptance|Acceptance-layer note:]] `lore work check` (task-system layer) and the closure verdict (capability-loop layer) sit at different altitudes. The task system answers "did this artifact get produced and pass per-task checks"; the closure verdict answers "did the run deliver the capability the anchor names." The closure verdict cannot override the task-system archive precondition (a `full` verdict on a task-incomplete item is refused outright — no row is recorded at all), and the task-system precondition cannot substitute for the closure verdict (every task checked is the *input* to the verdict, not its conclusion).
 
-```bash
-write_closure_row "full" "<capability_loop_summary>" "$INTENT_ANCHOR" "" ""
-```
+**Lazy audit note:** per §9.2 Step 8, the Stop hook lazily triggers audit of this session's promotions; `/implement` does not invoke the audit explicitly. Completion of `/implement` is non-blocking — the audit runs opportunistically after session end.
 
-**On `partial`:** create the child work item *before* writing the parent's closure row. The child's intent anchor must obey the [[knowledge:conventions/protocol/work-item-intake-should-store-neutral-intent-ancho|intake neutrality rule]] — describe the residue capability in neutral terms, do not smuggle the parent's framing or solution into the child. Capture the child slug from the command's output; if the create call fails, do NOT write the closure row and do NOT archive — exit so the lead can re-attempt:
-
-```bash
-CHILD_OUTPUT=$(lore work create --json \
-  --title "<residue title>" \
-  --intent-anchor "<residue intent anchor>" \
-  --related-work "<parent-slug>" 2>&1) || {
-    echo "[implement] Closure FATAL: child work item creation failed for partial-residue path." >&2
-    echo "$CHILD_OUTPUT" >&2
-    echo "[implement] Parent closure row NOT written; parent NOT archived. Re-attempt after diagnosing the create failure." >&2
-    exit 1
-  }
-CHILD_SLUG=$(printf '%s' "$CHILD_OUTPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["slug"])')
-
-write_closure_row "partial" "<capability_loop_summary>" "$INTENT_ANCHOR" "<divergence_summary>" "$CHILD_SLUG"
-
-# Append a one-line note to parent notes.md naming the child slug.
-printf '\n## %s\n**Closure (partial):** see follow-up `%s`. Delivered subset: %s\n' \
-  "$(date -u +"%Y-%m-%dT%H:%M")" "$CHILD_SLUG" "<capability_loop_summary>" \
-  >> "$KDIR/_work/<slug>/notes.md"
-```
-
-**`partial` does not archive.** The parent stays active as `capability-incomplete` and remains responsible for the deferred residue until the child delivers it; the child owns the deferred capability via its own intent anchor and its own subsequent `/spec` + `/implement` cycle. Proceed to §6.3, then Step 7, where the no-archive branch holds the parent open and the closure-report script emits the divergence banner.
-
-**On `none`:** write the closure row (so the standing `capability-incomplete` state is recorded), then proceed to §6.3 + Step 7 exactly like `partial`. No residue child is created and `residue_followup` stays null. The parent is NOT archived. Do NOT hand-compose a user-facing message here — Step 7's closure-report script is the sole emitter of the divergence banner.
-
-```bash
-write_closure_row "none" "<capability_loop_summary>" "$INTENT_ANCHOR" "<divergence_summary>" ""
-```
-
-#### Step 6.3: Mechanical Followup Creation Gate (runs alongside §6.2 for anchored items, and as the sole closure path on legacy items per §6.4)
-
-[[knowledge:principles/workflow-design/workflow-theater-anti-pattern-in-skill-design-steps-that|Workflow-theater guard:]] this gate's job is to surface *mechanical* residue (incomplete tasks, blocker fields). It does NOT consult `intent_anchor` — that is §6.2's job. Do NOT collapse the two layers; doing so recreates the closure-laundering gap by either reading the verdict off mechanical signals or laundering blockers as anchor compliance.
-
-**Signal detection** — check two sources:
-
-1. **Incomplete tasks** — call `TaskList`. Flag if any remain `pending` or `in_progress`.
-2. **Explicit blockers** — read `execution-log.md` for worker-report entries where `Blockers:` contains text other than `none` (case-insensitive).
-
-**If no signals found:** skip to Step 7.
-
-**If signals found:** create a followup:
-
-```bash
-bash ~/.lore/scripts/create-followup.sh \
-  --title "Deferred work: <work item title>" \
-  --source "implement" \
-  --attachments '[{"type":"work_item","slug":"<slug>"}]' \
-  --suggested-actions '[{"type":"create_work_item"}]' \
-  --content "<one-line summary of what didn't finish and why, followed by a checklist of remaining items>"
-```
-
-This gate is non-blocking — its firing is not itself proof of archive-clear, and its silence is not itself proof of archive-clear either. Layer 1 (task-system precondition) and layer 3 (anchor verdict) are the gating layers; this layer is observability for the review loop.
-
-#### Step 6.4: Legacy fallback (no intent_anchor)
-
-If `INTENT_ANCHOR` is empty/absent on `_meta.json`, run §6.3 exactly as today and proceed to Step 7. No verdict is required, no closure row is written, no advisory fires in `archive-work.sh`. This preserves the cycle on pre-anchor work items without back-filling — closure-time anchor synthesis would be retroactive intake under conversational pressure, the exact failure mode the intake-side anchor moved capture to intake to avoid.
-
-[[knowledge:architecture/plan-task-models/lore-work-check-is-not-taskcompleted-acceptance|Acceptance-layer note:]] `lore work check` (task-system layer) and the closure verdict (capability-loop layer) sit at different altitudes. The task system answers "did this artifact get produced and pass per-task checks"; the closure verdict answers "did the run deliver the capability the anchor names." The closure verdict cannot override the task-system archive precondition (a `full` verdict on a task-incomplete item is not just non-archiving — §6.1's branch table refuses to record it at all), and the task-system precondition cannot substitute for the closure verdict (every task checked is the input to §6.2, not its conclusion).
-
-**Lazy audit note:** per §9.2 Step 8, the Stop hook lazily triggers audit of this session's promotions; `/implement` does not invoke the audit explicitly here. Completion of `/implement` is non-blocking — the audit runs opportunistically after session end.
-
-### Step 7: Cleanup and report
+### Step 7: Close the run
 
 1. **Append a session entry to `notes.md`:**
    ```markdown
@@ -837,196 +523,58 @@ If `INTENT_ANCHOR` is empty/absent on `_meta.json`, run §6.3 exactly as today a
    **Next:** <remaining tasks if partial, or "Implementation complete">
    ```
 
-2. **Reconcile plan.md from task system** — task system is source of truth for completion:
-   ```bash
-   lore work check <slug> "<task-subject>"
-   ```
-   Run for every completed task whose checkbox is still unchecked.
-
-3. Run `lore work heal`.
-
-4. **Retro-prep bundle (per §9.2 Step 9, D8).** Write a snapshot of this run's producer facts to `$KDIR/_work/<slug>/retro-bundle.json` so `/retro` has a single, stable input artifact. One write per `/implement` run; overwrite on re-run (snapshot semantics). `/implement` is the sole writer; `/retro` is a read-only consumer.
-
-   The bundle has exactly these nine required fields:
-
-   | Field | Type | Source |
-   |---|---|---|
-   | `work_item` | string | `<slug>` |
-   | `tasks_completed` | integer | count of `TaskList` tasks with `status: "completed"` |
-   | `tier2_claim_ids` | array of strings | every `claim_id` in `$KDIR/_work/<slug>/task-claims.jsonl` produced this run |
-   | `tier3_promoted_ids` | array of strings | commons entry ids emitted by `lore promote` in Step 5 (accepted only) |
-   | `advisor_consultations_count` | integer | total `Consultations:` entries counted across this run's `execution-log.md` worker-report bodies (legacy `Advisor consultations:` lines counted for backward compat) |
-   | `blockers` | array of strings | verbatim `Blockers:` text where value was anything other than `none` |
-   | `template_versions` | object `{lead, worker, advisor}` | `$LEAD_TEMPLATE_VERSION`, `$WORKER_TEMPLATE_VERSION`, `$ADVISOR_TEMPLATE_VERSION` |
-   | `captured_at_sha` | string | `git rev-parse HEAD` at emission |
-   | `run_started_at` | string | ISO-8601 timestamp captured at Step 1 |
-
-   Write with:
-   ```bash
-   python3 -c 'import json, sys; json.dump(<fields>, sys.stdout, indent=2)' \
-     > "$KDIR/_work/<slug>/retro-bundle.json"
-   ```
-
-   **Scope:** producer-only. This rewrite ships the emitter; it does NOT ship a schema validator. `/retro` treats the bundle as a convenience summary — canonical artifacts (`task-claims.jsonl`, `observations.jsonl`, `execution-log.md`, `notes.md`) remain historical truth. If `retro-bundle.json` is missing or malformed, `/retro` falls back to canonical artifacts rather than failing.
-
-   **Overwrite semantics:** on re-run against the same work item, replace the file unconditionally. No append, no merge, no rotation — each run reflects only that run's producer facts. Canonical log files already carry historical data.
-
-5. **Archive the completed work item — only on a clean (`full`/legacy) close.** This step is mandatory when all tasks are done AND, on anchored items, the closure verdict is `full` — archive is the structural close of a *clean* implement cycle. A `partial`/`none` close is a non-completion: the parent is NOT archived and stays active as `capability-incomplete`. Branch on task-system completion state (not on plan.md), then on the anchored closure precondition:
-
-   - **All tasks completed AND (legacy item OR anchored item with a valid `full` `closure` row):** archive and verify the move:
-     ```bash
-     # Anchored-item precondition: a valid closure row must exist on _meta.json
-     # before archive runs. Only `full` archives; `partial`/`none` hold the
-     # parent open. Re-validate as a defensive gate against Step 6 drift.
-     CLOSURE_VALID=$(python3 -c '
-     import json, sys
-     with open(sys.argv[1], encoding="utf-8") as f:
-         data = json.load(f)
-     anchor = (data.get("intent_anchor") or "").strip()
-     if not anchor:
-         print("legacy")
-         sys.exit(0)
-     closure = data.get("closure")
-     if not isinstance(closure, dict):
-         print("missing")
-         sys.exit(0)
-     verdict = closure.get("verdict")
-     summary = (closure.get("capability_loop_summary") or "").strip()
-     anchor_at_close = (closure.get("intent_anchor_at_close") or "").strip()
-     cap_incomplete = bool(closure.get("capability_incomplete"))
-     divergence = (closure.get("divergence_summary") or "").strip()
-     residue = closure.get("residue_followup")
-     if verdict not in ("full", "partial", "none"):
-         print("bad_verdict")
-         sys.exit(0)
-     if not summary:
-         print("missing_summary")
-         sys.exit(0)
-     if not anchor_at_close:
-         print("missing_anchor_at_close")
-         sys.exit(0)
-     if verdict in ("partial", "none"):
-         # Non-completion: the standing capability-incomplete row must be valid
-         # (flag set, divergence named; partial also names a residue child).
-         if not cap_incomplete or not divergence:
-             print("bad_incomplete_row")
-             sys.exit(0)
-         if verdict == "partial" and not (isinstance(residue, str) and residue.strip()):
-             print("missing_residue_for_partial")
-             sys.exit(0)
-         print("capability_incomplete")
-         sys.exit(0)
-     print("ok")
-     ' "$KDIR/_work/<slug>/_meta.json")
-
-     case "$CLOSURE_VALID" in
-       legacy|ok)
-         lore work archive "<slug>"
-         test -d "$KDIR/_work/_archive/<slug>" \
-           || { echo "[implement] FATAL: archive did not move work item to _archive/"; exit 1; }
-         test ! -d "$KDIR/_work/<slug>" \
-           || { echo "[implement] FATAL: archive left work item in active _work/ path"; exit 1; }
-         ;;
-       capability_incomplete)
-         # Expected divergence: parent stays active. Do NOT archive. The
-         # closure-report script (Step 7.6) emits the divergence banner.
-         test -d "$KDIR/_work/<slug>" \
-           || { echo "[implement] FATAL: capability-incomplete close but work item not in active _work/"; exit 1; }
-         ;;
-       *)
-         echo "[implement] FATAL: anchored work item lacks a valid _meta.json.closure block ($CLOSURE_VALID); refusing to archive." >&2
-         echo "[implement]        Re-run Step 6 to record the closure verdict before archive." >&2
-         exit 1
-         ;;
-     esac
-     ```
-     If verification fails, do not proceed. Diagnose and re-run archive before rendering the report. Silently skipping archive on a `full` close corrupts the active-vs-archived distinction. **Anchored items missing or malformed `_meta.json.closure` MUST NOT be archived from this step** — that path is exactly the closure-laundering failure mode Step 6 exists to prevent. The advisory in `scripts/archive-work.sh` is a *non-blocking* warning intended for manual / bulk-archive callers; this Step 7 precondition is the *blocking* gate on the `/implement` ceremony path.
-   - **Some tasks incomplete or blocked:** do not archive. Leave the work item active so a later `/implement` can resume.
-   - **Anchored item with verdict `partial` or `none`:** a non-completion. The parent stays active as `capability-incomplete`; the divergence banner is emitted by the closure-report script in Step 7.6.
-
-   **Why this is the last step before the report.** The user-facing 'Done' report is the natural exit point of `/implement`; once it renders, the operator typically transitions to `/retro` or moves on. Coupling archive to the report (rather than treating it as an earlier optional step) ensures the work item's active/archived state is committed before the cycle visibly closes. Prior versions of this skill placed archive earlier in Step 7 — observed live, the archive call got silently skipped roughly half the time because the report's 'consider /retro' line created a perceived clean handoff before archive ran. Placing archive here, with verification, removes that gap.
-
-6. **Emit the close via the closure-report script.** `scripts/implement-closure-report.sh` is the sole terminal emitter: it reads the work item's `_meta.json` (from either the active or the archived location) and emits the close branched on the verdict — the Done summary + exit 0 on `full`/legacy, the isolated divergence banner + non-zero exit on `partial`/`none`. Do NOT hand-compose a Done block here; the success summary text exists ONLY inside the script's exit-0 branch, so the non-zero (divergence) path has no success prose the lead could re-emit.
-
-   The run-context counts that the historical Done block carried (tasks completed/total, Tier 2 count, Tier 3 accepted/rejected, followup title) are passed as **flag values**, not authored prose — the script still owns the template, so structural suppression holds: these flags render only on the success branch and are inert on the divergence branch. Compute them from the run state already gathered in this step:
-   - `TASKS_COMPLETED` = count of `TaskList` tasks with `status: completed` (same value written to `retro-bundle.json.tasks_completed`).
-   - `TASKS_TOTAL` = `TASKS_COMPLETED + REMAINING_COUNT` (at the close `REMAINING_COUNT=0`, so total equals completed).
-   - `TIER2_COUNT` = number of `claim_id`s in `$KDIR/_work/<slug>/task-claims.jsonl` (length of `retro-bundle.json.tier2_claim_ids`).
-   - `TIER3_ACCEPTED` / `TIER3_REJECTED` = accepted/rejected promotion counts from Step 5's `lore promote` results.
-   - `FOLLOWUP_TITLE` = the title of the followup created by §6.3, or empty when none was created.
-
-   Before invoking it, guard the pre-report state. A completed-but-active parent is FATAL **only** when it lacks a valid `capability_incomplete == true` closure row — a completed-active parent that *does* carry that row is the expected divergence state, not an error:
+2. **Close through the close verb — the only legal channel for the closure write.** `lore impl close` is the sole sanctioned writer of the `_meta.json` `closure` block; hand-writing that block (or any of the close's composed artifacts) corrupts every reader of the closure contract. One invocation carries the Step 6 verdict and the run facts:
 
    ```bash
-   if [ "$REMAINING_COUNT" = "0" ] && [ -d "$KDIR/_work/<slug>" ]; then
-     # Active + task-complete is EXPECTED when the parent diverged (partial/none)
-     # and carries a valid capability_incomplete row. Distinguish that from a
-     # genuinely stuck close (missing/invalid closure row) so the operator gets
-     # a precise next-action.
-     PRE_REPORT=$(python3 -c '
-     import json, sys
-     try:
-         with open(sys.argv[1], encoding="utf-8") as f:
-             data = json.load(f)
-         anchor = (data.get("intent_anchor") or "").strip()
-         closure = data.get("closure")
-         closure = closure if isinstance(closure, dict) else {}
-         verdict = closure.get("verdict")
-         cap_incomplete = bool(closure.get("capability_incomplete"))
-         divergence = (closure.get("divergence_summary") or "").strip()
-         if not anchor:
-             print("legacy_unarchived")
-         elif verdict in ("partial", "none") and cap_incomplete and divergence:
-             print("diverged")
-         elif not closure:
-             print("anchored_no_closure")
-         else:
-             print("anchored_invalid_closure")
-     except Exception:
-         print("other")
-     ' "$KDIR/_work/<slug>/_meta.json")
-     case "$PRE_REPORT" in
-       diverged)
-         : # expected — parent held open as capability-incomplete; fall through to the script
-         ;;
-       anchored_no_closure|anchored_invalid_closure)
-         echo "[implement] FATAL: tasks complete but anchored work item has no valid closure row. Re-run Step 6 to record the verdict, then archive." >&2
-         exit 1
-         ;;
-       *)
-         echo "[implement] FATAL: all tasks completed but work item not archived. Run Step 7.5 archive before this report." >&2
-         exit 1
-         ;;
-     esac
-   fi
-
-   # Pass the run-context counts as flag VALUES; the script renders them only on
-   # the full/legacy branch and ignores them on the divergence branch. Omit a
-   # flag (or pass empty) to drop just that line. FOLLOWUP_TITLE is only added
-   # when §6.3 created a followup.
-   CLOSURE_FLAGS=(--tasks-completed "$TASKS_COMPLETED" --tasks-total "$TASKS_TOTAL"
-                  --tier2-count "$TIER2_COUNT"
-                  --tier3-accepted "$TIER3_ACCEPTED" --tier3-rejected "$TIER3_REJECTED")
-   if [ -n "$FOLLOWUP_TITLE" ]; then
-     CLOSURE_FLAGS+=(--followup "$FOLLOWUP_TITLE")
-   fi
-   bash ~/.lore/scripts/implement-closure-report.sh --slug "<slug>" "${CLOSURE_FLAGS[@]}"
+   lore impl close "$SLUG" --verdict <full|partial|none> \
+     --summary "<capability_loop_summary>" \
+     [--divergence "<one line: what was mocked or deferred>"] \
+     [--residue-title "<residue title>" --residue-anchor "<residue intent anchor>"] \
+     [--check-task "<task-subject>"]... \
+     --tier3-accepted <N> --tier3-rejected <M> \
+     --lead-template-version "$LEAD_TEMPLATE_VERSION" \
+     --worker-template-version "$WORKER_TEMPLATE_VERSION" \
+     --advisor-template-version "$ADVISOR_TEMPLATE_VERSION" \
+     --run-started-at "$RUN_STARTED_AT"
    ```
 
-   Emit the script's stdout verbatim as the terminal close, and nothing further. A non-zero exit from the script *is* the run's non-completion — do not paper over it with a success line. On a `full`/legacy close the script prints the Done summary (with the run-context lines above) and exits 0; on `partial`/`none` it prints only the divergence banner and exits non-zero; on a location-vs-verdict mismatch it fails without printing Done, so a corrupted close cannot launder into a success report.
+   Per-verdict field contract (R = required, − = must be omitted; other combinations are rejected):
+
+   | verdict | `--summary` | `--divergence` | `--residue-title` / `--residue-anchor` |
+   |---|---|---|---|
+   | `full` | R | − | − |
+   | `partial` | R | R | R (child work item created) |
+   | `none` | R | R | − |
+
+   Pass one `--check-task <subject>` per task completed this run whose plan.md checkbox might still be unchecked — the verb reconciles from these before counting (the task system is the source of truth for completion; the checkbox is the durable record). `--tier3-accepted`/`--tier3-rejected` come from Step 5's results (defaults: accepted from the `promoted-commons.jsonl` row count, rejected `0` — display values for the report).
+
+   Contract (`scripts/impl-close.sh`) — the composed Steps 6–7 sequence, every write through the file's sanctioned writer:
+
+   - **Reconcile and heal:** check `--check-task` subjects into plan.md (via `update-plan-checkbox.sh`), run the work-structure heal.
+   - **Task-system precondition (hard refusal):** with unchecked tasks remaining, file the mechanical followup, refuse the close — exit 1, no verdict recorded, no closure block written. Complete or re-plan, then re-run close. (Tasks-complete-but-blockers-logged files the followup and continues.)
+   - **Partial residue child BEFORE parent closure:** on `partial`, create the child work item (with the residue title/anchor and `--related-work` back-link) and capture its slug; if creation fails, the parent closure block is NOT written and the parent is NOT archived — diagnose and re-run.
+   - **Closure block write** on `_meta.json` (the one write owned here; legacy items get none), plus the `partial` notes.md cross-link naming the child slug.
+   - **`retro-bundle.json` snapshot** — the nine-field producer bundle `/retro` reads (`work_item`, `tasks_completed`, `tier2_claim_ids`, `tier3_promoted_ids`, `advisor_consultations_count`, `blockers`, `template_versions`, `captured_at_sha`, `run_started_at`). Overwrite-per-run snapshot semantics; producer-only — canonical artifacts (`task-claims.jsonl`, `execution-log.md`, `notes.md`) remain historical truth and `/retro` falls back to them if the bundle is missing or malformed.
+   - **One execution-log closure entry** (source: impl-verb).
+   - **Closure-validity gate, then archive-before-report:** legacy/`full` → archive via `archive-work.sh` and verify the move (item present in `_archive/`, absent from active `_work/` — FATAL on either failure); `partial`/`none` → hold the parent open as `capability-incomplete` (verifying it IS still active); a missing/malformed closure block → refuse without archiving. Archive is committed before the terminal report renders — prior versions of this skill placed archive earlier and observed it silently skipped roughly half the time once the report's clean-handoff feel landed; the verb removes that gap structurally.
+   - **One `kind=telemetry` scorecard row per close** (`metric: impl_close_bookkeeping` via `scorecard-append.sh`): closure verdict plus counts of verb-mediated (`source: impl-verb`) vs hand-run execution-log entries. Observability-only — never `kind=scored`, never /evolve-cited; a failed append warns and the close continues.
+   - **Terminal report via `implement-closure-report.sh`** — the sole terminal emitter: the Done summary + exit 0 on `full`/legacy, the isolated divergence banner + exit 3 on `partial`/`none`, and a location-vs-verdict mismatch fails without printing Done so a corrupted close cannot launder into a success report. The verb propagates the report's exit verbatim.
+
+   Exit codes: `0` clean close (full/legacy) — Done report emitted, item archived; `1` validation error / precondition refusal; `2` ambiguous reference; `3` anchor divergence (partial/none) — banner emitted, parent held open.
+
+3. **Emit the verb's stdout verbatim as the terminal close, and nothing further.** Do NOT hand-compose a Done block — the success summary text exists ONLY inside the report script's exit-0 branch, so the divergence path has no success prose the lead could re-emit. A non-zero exit from the close *is* the run's non-completion — report it as such; do not paper over it with a success line. On exit 3 the parent remains active and responsible for the deferred residue until the child (named in the banner, on `partial`) delivers it via its own `/spec` + `/implement` cycle.
 
 ## Handling Partial Completion
 
 If workers hit blockers or the team can't finish all tasks:
-1. Capture progress to `notes.md` via the session entry above
-2. Reconcile plan.md from the task system (Step 7.2) — completed tasks get checked, incomplete stay unchecked
+1. Capture progress to `notes.md` via the Step 7.1 session entry
+2. Reconcile plan.md from the task system — run `lore work check` for every completed task whose checkbox is still unchecked (or pass the subjects as `--check-task` if attempting a close; the close's task-system precondition will refuse and file the deferred-work followup, which is the correct loud outcome)
 3. Report what completed and what's left
-4. The user can re-run `/implement` later to pick up remaining tasks (Step 2 skips checked items)
+4. The user can re-run `/implement` later to pick up remaining tasks
 
 ## Resuming Implementation
 
 When `/implement` is called on a work item with partially-checked `plan.md`:
-- Only generate tasks for unchecked `- [ ]` items
-- Skip phases where all items are checked
-- Step 1.7 re-reads `task-claims.jsonl` so resumed workers still see prior Tier 2 evidence
+- `lore impl start` re-reads `task-claims.jsonl`, so resumed workers still see prior Tier 2 evidence
+- `lore impl open` excludes already-checked tasks from the manifest (they return in `already_complete`) — use `--phase`/`--task` selection to stage the remainder, accounting for cross-selection file collisions
 - Report: "Resuming — N remaining tasks across M phases"

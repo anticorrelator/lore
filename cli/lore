@@ -110,6 +110,7 @@ Commands:
   harness      Per-harness integration toggle (see: lore harness --help)
   scale        Capture-scale helpers (see: lore scale --help)
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
+  impl         /implement bookkeeping verbs (see: lore impl --help)
   retro        Federated retro pooling (see: lore retro --help)
   correction   Verdict-driven correction management (see: lore correction --help)
   off-scale    Off-scale route management (see: lore off-scale --help)
@@ -421,6 +422,27 @@ Notes:
 EOF
 }
 
+impl_usage() {
+  cat >&2 <<EOF
+lore impl — /implement bookkeeping verbs
+
+Usage: lore impl <verb> [args...]
+
+Verbs:
+  gate-anchor    File the anchor-coverage gate outcome and return the route
+  start          Assemble the /implement startup manifest for a work item
+  close          Reconcile closure, write the closure block, archive, emit telemetry
+  open           Return work-item open conditions for lead-inline eligibility
+  next-batch     Compute the next executable task batch from tasks.json
+  check-report   Mechanically verify a worker completion report
+  consult-log    File a consultation record
+  promote-batch  Promote accepted Tier 3 candidates in batch
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
 settlement_usage() {
   cat >&2 <<EOF
 lore settlement — durable settlement queue and processor
@@ -579,6 +601,54 @@ cmd_scorecard() {
       echo "Error: unknown scorecard subcommand '$subcmd'" >&2
       echo "" >&2
       scorecard_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Impl subgroup (/implement bookkeeping verbs) ---
+cmd_impl() {
+  if [[ $# -eq 0 ]]; then
+    impl_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      impl_usage
+      return 0
+      ;;
+    gate-anchor)
+      "$SCRIPTS_DIR/impl-gate-anchor.sh" "$@"
+      ;;
+    start)
+      "$SCRIPTS_DIR/impl-start.sh" "$@"
+      ;;
+    close)
+      "$SCRIPTS_DIR/impl-close.sh" "$@"
+      ;;
+    open)
+      "$SCRIPTS_DIR/impl-open.sh" "$@"
+      ;;
+    next-batch)
+      "$SCRIPTS_DIR/impl-next-batch.sh" "$@"
+      ;;
+    check-report)
+      "$SCRIPTS_DIR/impl-check-report.sh" "$@"
+      ;;
+    consult-log)
+      "$SCRIPTS_DIR/impl-consult-log.sh" "$@"
+      ;;
+    promote-batch)
+      "$SCRIPTS_DIR/impl-promote-batch.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown impl verb '$subcmd'" >&2
+      echo "" >&2
+      impl_usage
       return 1
       ;;
   esac
@@ -1902,6 +1972,10 @@ case "$1" in
   scorecard)
     shift
     cmd_scorecard "$@"
+    ;;
+  impl)
+    shift
+    cmd_impl "$@"
     ;;
   retro)
     shift
