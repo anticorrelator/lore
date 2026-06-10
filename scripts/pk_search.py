@@ -910,8 +910,13 @@ class Indexer:
 class Searcher:
     """FTS5 BM25 search over indexed entries."""
 
-    # FTS5 operators that indicate the user is writing an explicit query
-    _FTS5_OPERATORS = re.compile(r'[":*]|\bAND\b|\bOR\b|\bNOT\b|\bNEAR\b', re.IGNORECASE)
+    # FTS5 operators that indicate the user is writing an explicit query.
+    # Case-sensitive on the operator words: FTS5 itself only treats uppercase
+    # AND/OR/NOT/NEAR as operators, so lowercase English ("materiality and
+    # review-protocol") must NOT trigger raw passthrough — passthrough of
+    # natural-language text containing path tokens (e.g. "claude-md/foo.md")
+    # is an FTS5 syntax error.
+    _FTS5_OPERATORS = re.compile(r'[":*]|\b(?:AND|OR|NOT|NEAR)\b')
 
     def __init__(self, knowledge_dir: str, repo_root: str | None = None):
         self.knowledge_dir = os.path.abspath(knowledge_dir)
