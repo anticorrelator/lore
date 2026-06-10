@@ -6,6 +6,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="load-knowledge"
+SECONDS=0  # elapsed-time clock for the degradation guard (bash builtin, no fork)
 
 # Hook failure diagnostic trap
 trap 'echo "[hook] $SCRIPT_NAME: Failed at line $LINENO with exit code $?" >&2' ERR
@@ -108,11 +109,10 @@ echo ""
 
     INDEX_FULL+="**${category}/** (${ENTRY_COUNT} entries):"$'\n'
     INDEX_COMPACT+="**${category}/** (${ENTRY_COUNT} entries)"$'\n'
-    for entry_file in "${ENTRY_FILES[@]}"; do
-      # Extract title from first line (# Title)
-      TITLE=$(head -1 "$entry_file" | sed 's/^# //')
-      INDEX_FULL+="  - ${TITLE}"$'\n'
-    done
+    # Extract titles from first lines (# Title) — one awk fork for the whole
+    # category instead of head+sed forks per file (O(N) forks dominated hook
+    # runtime once the store passed ~500 entries)
+    INDEX_FULL+=$(awk 'FNR==1 { sub(/^# /, ""); print "  - " $0 }' "${ENTRY_FILES[@]}")$'\n'
     INDEX_FULL+=$'\n'
   done
 
@@ -127,10 +127,7 @@ echo ""
     if [[ ${#DOMAIN_FILES[@]} -gt 0 ]]; then
       INDEX_FULL+="**domains/** (${#DOMAIN_FILES[@]} files, lazy-loaded):"$'\n'
       INDEX_COMPACT+="**domains/** (${#DOMAIN_FILES[@]} files, lazy-loaded)"$'\n'
-      for df in "${DOMAIN_FILES[@]}"; do
-        TITLE=$(head -1 "$df" | sed 's/^# //')
-        INDEX_FULL+="  - ${TITLE}"$'\n'
-      done
+      INDEX_FULL+=$(awk 'FNR==1 { sub(/^# /, ""); print "  - " $0 }' "${DOMAIN_FILES[@]}")$'\n'
       INDEX_FULL+=$'\n'
     fi
   fi
@@ -198,7 +195,20 @@ echo ""
   RELEVANCE_SEARCH_COUNT=0
   RELEVANCE_LOADED_PATHS=()   # track paths loaded via relevance search
 
-  if [[ -n "$CONTEXT_SIGNAL" ]]; then
+  # Degradation guard: the relevance search is optional enrichment. If the
+  # mandatory phases (signal + index + direct-resolve) already consumed most
+  # of the hook's time allowance — e.g. cold FS cache, store growth — skip it
+  # VISIBLY rather than letting the hook timeout kill the whole payload
+  # silently. The index and direct-resolved entries always ship.
+  TIME_BUDGET_SECS="${LORE_LOAD_KNOWLEDGE_TIME_BUDGET:-6}"
+  RELEVANCE_SKIPPED=0
+  if [[ -n "$CONTEXT_SIGNAL" && $SECONDS -ge $TIME_BUDGET_SECS ]]; then
+    echo "[budget] relevance search skipped — ${SECONDS}s elapsed of ${TIME_BUDGET_SECS}s time budget (compact index + direct-resolved entries delivered; run \`lore prefetch\` for more)"
+    echo ""
+    RELEVANCE_SKIPPED=1
+  fi
+
+  if [[ -n "$CONTEXT_SIGNAL" && $RELEVANCE_SKIPPED -eq 0 ]]; then
     # Build FTS5 OR query from context signal
     FTS5_QUERY=$(python3 -c "
 import re, sys
@@ -368,43 +378,55 @@ for e in data.get('titles_only', []):
   NOW=$(date +%s)
   NINETY_DAYS=$((90 * 86400))
 
+  # Collect all entry files once, then batch the per-file checks into single
+  # invocations: one stat for all mtimes, one grep for all low-confidence
+  # markers. The previous per-file get_mtime + grep -c forks were the hook's
+  # dominant cost at store scale (~3s for ~600 entries).
+  ALL_ENTRY_FILES=()
   for category in "${ACTIVE_CATEGORIES[@]}"; do
     CAT_DIR="$KNOWLEDGE_DIR/$category"
     [[ -d "$CAT_DIR" ]] || continue
-
     while IFS= read -r -d '' file; do
-      BASENAME=$(basename "$file")
+      ALL_ENTRY_FILES+=("$file")
+    done < <(find "$CAT_DIR" -maxdepth 1 -name '*.md' -print0 2>/dev/null)
+  done
 
-      # Check file mtime > 90 days
-      FILE_MTIME=$(get_mtime "$file")
+  if [[ ${#ALL_ENTRY_FILES[@]} -gt 0 ]]; then
+    # Batched mtime check (>90 days)
+    while IFS=' ' read -r FILE_MTIME file; do
+      [[ -n "$FILE_MTIME" && -n "$file" ]] || continue
       [[ "$FILE_MTIME" -eq 0 ]] && FILE_MTIME="$NOW"
       AGE=$((NOW - FILE_MTIME))
       if [[ $AGE -gt $NINETY_DAYS ]]; then
         DAYS_OLD=$((AGE / 86400))
-        STALE_ENTRIES+=("${category}/${BASENAME} (${DAYS_OLD}d)")
+        STALE_ENTRIES+=("${file#"$KNOWLEDGE_DIR/"} (${DAYS_OLD}d)")
         STALE_COUNT=$((STALE_COUNT + 1))
       fi
-
-      # Check for low-confidence markers
-      LOW_CONF=$(grep -c 'confidence: low' "$file" 2>/dev/null || true)
-      LOW_CONF=$(echo "$LOW_CONF" | tr -d '[:space:]')
-      if [[ "${LOW_CONF:-0}" -gt 0 ]]; then
-        ALREADY=0
-        if [[ $STALE_COUNT -gt 0 ]]; then
-          for entry in "${STALE_ENTRIES[@]}"; do
-            if [[ "$entry" == "${category}/${BASENAME}"* ]]; then
-              ALREADY=1
-              break
-            fi
-          done
-        fi
-        if [[ $ALREADY -eq 0 ]]; then
-          STALE_ENTRIES+=("${category}/${BASENAME} (low-confidence)")
-          STALE_COUNT=$((STALE_COUNT + 1))
-        fi
+    done < <(
+      if [[ "$(uname)" == "Darwin" ]]; then
+        stat -f '%m %N' "${ALL_ENTRY_FILES[@]}" 2>/dev/null
+      else
+        stat -c '%Y %n' "${ALL_ENTRY_FILES[@]}" 2>/dev/null
       fi
-    done < <(find "$CAT_DIR" -maxdepth 1 -name '*.md' -print0 2>/dev/null)
-  done
+    )
+
+    # Batched low-confidence check
+    while IFS= read -r file; do
+      [[ -n "$file" ]] || continue
+      REL_PATH="${file#"$KNOWLEDGE_DIR/"}"
+      ALREADY=0
+      for entry in ${STALE_ENTRIES[@]+"${STALE_ENTRIES[@]}"}; do
+        if [[ "$entry" == "${REL_PATH}"* ]]; then
+          ALREADY=1
+          break
+        fi
+      done
+      if [[ $ALREADY -eq 0 ]]; then
+        STALE_ENTRIES+=("${REL_PATH} (low-confidence)")
+        STALE_COUNT=$((STALE_COUNT + 1))
+      fi
+    done < <(grep -l 'confidence: low' "${ALL_ENTRY_FILES[@]}" 2>/dev/null || true)
+  fi
 
   if [[ $STALE_COUNT -gt 0 ]]; then
     echo ""

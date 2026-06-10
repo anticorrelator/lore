@@ -15,7 +15,8 @@ The full scale rubric (4 definitions + boundary tests + ±1 query pattern) lives
 
 ### Knowledge Retrieval (Before Grep/Glob/Explore)
 Before searching the codebase with Grep, Glob, or Explore agents, run `lore search "<topic>"` first. The knowledge store documents conventions, architecture, past decisions, and gotchas that raw code exploration cannot surface. If the knowledge store has a relevant entry, use it — don't re-derive the same insight from source files.
-- Knowledge is auto-loaded on session start (index + priority files within budget)
+- Knowledge is auto-loaded on session start (index + priority files within budget), delivered between `=== Project Knowledge ===` and `=== End Project Knowledge ===` markers
+- **Delivery check:** if session-start output has work items but NO `=== Project Knowledge ===` block, the knowledge hook failed or timed out — recover with `bash ~/.lore/scripts/load-knowledge.sh` before relying on session context
 - Domain files (`domains/`) are NOT loaded at startup — read them on-demand via the index
 - When starting work in a specific area, check the index for a relevant domain file and read it
 - **The test:** if you're about to Grep for how something works, a convention, or why a decision was made — search knowledge first

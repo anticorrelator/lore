@@ -117,10 +117,17 @@ lore_hooks = [
     # doctor.sh moved to TUI startup (tui/update.go::Model.Init via runDoctor) —
     # keeps drift checks attached to the lore surface that can act on them
     # instead of every claude-code session, including non-lore ones.
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/auto-reindex.sh", 5),
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-knowledge.sh", 5),
+    # Timeouts: store-scaling SessionStart hooks get 15s, not 5s. Their
+    # runtime grows with store size, and a hook timeout kills the payload
+    # SILENTLY — at ~1,600 indexed files load-knowledge.sh (7.8s pre-
+    # optimization) and auto-reindex.sh (5.6s) both exceeded 5s, so sessions
+    # started with no knowledge context and no error anywhere. load-knowledge
+    # also self-limits via LORE_LOAD_KNOWLEDGE_TIME_BUDGET (graceful
+    # degradation before the cliff).
+    ("SessionStart", None, "command", "bash ~/.lore/scripts/auto-reindex.sh", 15),
+    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-knowledge.sh", 15),
     ("SessionStart", None, "command", "bash ~/.lore/scripts/load-work.sh", 5),
-    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-threads.sh", 5),
+    ("SessionStart", None, "command", "bash ~/.lore/scripts/load-threads.sh", 15),
     ("SessionStart", None, "command", "python3 ~/.lore/scripts/extract-session-digest.py", 5),
     ("PreCompact",   None, "command", "bash ~/.lore/scripts/pre-compact.sh", 5),
     ("TaskCompleted", None, "command", "bash ~/.lore/scripts/task-completed-capture-check.sh", 10),
