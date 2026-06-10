@@ -858,6 +858,14 @@ class Settlement:
             filename = KIND_SOURCES[kind]["filename"]
             for source_file in sorted(work_root.glob(f"*/{filename}")):
                 work_item = source_file.parent.name
+                # Underscore-prefixed dirs (_archive, _index, ...) are
+                # infrastructure, not work-item slugs. A stray source file at
+                # the archive root would otherwise enqueue items whose
+                # work_item is literally "_archive" — the audit script
+                # fail-closes on those ("'_archive' is the archive root, not
+                # a work-item slug"), burning a judge dispatch per scan.
+                if work_item.startswith("_"):
+                    continue
                 with source_file.open(encoding="utf-8") as fh:
                     for line_no, line in enumerate(fh, 1):
                         if not line.strip():
@@ -901,6 +909,10 @@ class Settlement:
             filename = KIND_SOURCES[kind]["filename"]
             for source_file in sorted(work_root.glob(f"*/{filename}")):
                 work_item = source_file.parent.name
+                # Mirror the scan() guard: underscore-prefixed dirs are not
+                # work-item slugs (see scan()).
+                if work_item.startswith("_"):
+                    continue
                 try:
                     lines = source_file.read_text(encoding="utf-8").splitlines()
                 except OSError as exc:
@@ -2082,7 +2094,21 @@ class Settlement:
         if isinstance(outcome, dict):
             persisted = self.write_run_correction_outcome_once(str(written.get("run_id") or ""), outcome)
             written["correction_outcome"] = persisted
-            if persisted.get("status") == "applied":
+            # Correction-evidence rows feed /evolve's secondary (doctrine-
+            # correction) gate, whose evidence class is protocol/template
+            # corrections from task-claim audits. Commons-kind corrections are
+            # knowledge-drift signal, not doctrine signal — their /evolve
+            # channel is the claim-retraction gate (verified consumption-
+            # contradictions), and their forensic record is the entry's
+            # corrections[] trail + this run's correction_outcome. Emitting
+            # them here would conflate evidence classes and let bulk drift-
+            # sweep corrections satisfy the secondary gate's sample-size
+            # minimum. Decision record:
+            # _work/decide-commons-correction-feed-evolve-secondary-ga
+            if (
+                persisted.get("status") == "applied"
+                and str(item.get("kind") or KIND_TASK_CLAIM) == KIND_TASK_CLAIM
+            ):
                 self._emit_correction_evidence(str(written.get("run_id") or ""), persisted)
         self._apply_audit_candidate_transition(written, item)
         return written

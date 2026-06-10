@@ -243,6 +243,16 @@ print(text[:m[-1].start()] if m else text)
 assert_not_contains "body no longer contains original claim" "$ENTRY_BODY" "$CLAIM_TEXT"
 assert_contains "body now contains the replacement" "$ENTRY_BODY" "$REPLACEMENT"
 assert_contains "META carries a corrections[] trail" "$(cat "$ENTRY_ABS")" "corrections:"
+# Evidence-class gate (decide-commons-correction-feed-evolve-secondary-ga):
+# a commons-kind applied correction must NOT emit a tier:correction row into
+# the /evolve secondary-gate pool — exercises the execute_item kind gate on
+# the real dispatch path, not a test-harness mirror.
+if [[ -f "$KDIR/_scorecards/rows.jsonl" ]]; then
+  COMMONS_CORRECTION_ROWS=$(jq -s 'map(select(.tier == "correction" and .kind == "scored")) | length' "$KDIR/_scorecards/rows.jsonl")
+else
+  COMMONS_CORRECTION_ROWS=0
+fi
+assert_eq "commons applied correction emits NO tier:correction scorecard row" "$COMMONS_CORRECTION_ROWS" "0"
 
 # =============================================
 # Test 4: --advance-confidence is idempotent

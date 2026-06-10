@@ -10,6 +10,8 @@
 #   Test 2 (idempotent retry) — re-emit same run_id → row count stays at 1.
 #   Test 3 (skipped outcome)  — status=skipped → no row written.
 #   Test 4 (failed outcome)   — status=failed  → no row written.
+#   Test 5 (commons kind)     — status=applied + kind=commons → no row
+#                               (evidence-class gate; task-claim still emits).
 #
 # Drives the emission helper directly via python -c (instead of routing
 # through the full settlement-queue loop) so the test is hermetic, fast, and
@@ -59,10 +61,14 @@ setup_kdir() {
 }
 
 # Drive Settlement._emit_correction_evidence directly for a given outcome.
-# args: run_id, status, target_entry (may be empty for non-applied)
+# args: run_id, status, target_entry (may be empty for non-applied),
+#       kind (optional; defaults to task-claim — the only kind the call-site
+#       gate emits for, per the decide-commons-correction-feed-evolve-secondary-ga
+#       decision record)
 emit() {
-  local run_id="$1" status="$2" target_entry="$3"
+  local run_id="$1" status="$2" target_entry="$3" kind="${4:-task-claim}"
   KDIR_ABS="$KDIR" RUN_ID="$run_id" STATUS="$status" TARGET_ENTRY="$target_entry" \
+    ITEM_KIND="$kind" \
     SETTLEMENT_PY="$SETTLEMENT_PY" \
   python3 - <<'PYEOF'
 import importlib.util
@@ -83,8 +89,10 @@ target_entry = os.environ.get("TARGET_ENTRY") or ""
 if target_entry:
     outcome["target_entry"] = target_entry
 
-# Mirror the execute_item gate: only emit for status=="applied".
-if outcome.get("status") == "applied":
+# Mirror the execute_item gate: only emit for status=="applied" AND
+# kind=="task-claim" (commons corrections are knowledge-drift signal, not
+# doctrine signal — they must never reach the /evolve secondary gate).
+if outcome.get("status") == "applied" and os.environ.get("ITEM_KIND", "task-claim") == "task-claim":
     settlement._emit_correction_evidence(os.environ["RUN_ID"], outcome)
 PYEOF
 }
@@ -182,6 +190,24 @@ setup_kdir
 emit "run-fail-001" "failed" "conventions/example-routing-rule.md"
 assert_eq "no rows.jsonl after failed outcome" "$(count_rows_total)" "0"
 assert_eq "no matching row for failed run_id" "$(count_rows_for_run "run-fail-001")" "0"
+
+# =============================================
+# Test 5: Commons kind, applied outcome → no row (kind gate)
+# Decision record: _work/decide-commons-correction-feed-evolve-secondary-ga —
+# contradicted-commons corrections flow back to the entry (corrections[] trail)
+# but must NOT emit tier:correction rows into /evolve's secondary-gate pool.
+# =============================================
+echo ""
+echo "Test 5: commons kind + applied outcome → no row (evidence-class gate)"
+setup_kdir
+
+emit "run-commons-001" "applied" "conventions/drifted-entry.md" "commons"
+assert_eq "no rows.jsonl after commons applied outcome" "$(count_rows_total)" "0"
+assert_eq "no matching row for commons run_id" "$(count_rows_for_run "run-commons-001")" "0"
+
+# task-claim applied in the same KDIR still emits (gate is kind-specific, not global)
+emit "run-commons-002" "applied" "conventions/real-doctrine-fix.md" "task-claim"
+assert_eq "task-claim applied still emits exactly 1 row" "$(count_rows_for_run "run-commons-002")" "1"
 
 echo ""
 echo "================================"
