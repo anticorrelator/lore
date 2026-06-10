@@ -102,6 +102,7 @@ Commands:
   migrate      Format migration (see: lore migrate --help)
   manifest     Manifest management (see: lore manifest --help)
   analyze      Knowledge store analysis (see: lore analyze --help)
+  drift-sweep  Re-enqueue committed entries whose cited code drifted (see: lore drift-sweep --help)
   bootstrap    Bootstrap knowledge store (see: lore bootstrap --help)
   ceremony     Ceremony config management (see: lore ceremony --help)
   config       Read framework/role/capability config (see: lore config --help)
@@ -730,6 +731,17 @@ cmd_analyze_staleness() {
   fi
 
   python3 "$script" "$kdir" "$@"
+}
+
+cmd_drift_sweep() {
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Usage: lore drift-sweep [--dry-run] [--json] [--category NAME]... [--repo-root PATH]" >&2
+    echo "  Detect committed-entry drift against each entry's captured_at_sha and" >&2
+    echo "  re-enqueue drifted entries through the commons settlement path." >&2
+    echo "  --dry-run reports without writing producer rows or enqueuing." >&2
+    return 0
+  fi
+  "$SCRIPTS_DIR/drift-sweep.sh" "$@"
 }
 
 cmd_analyze_usage() {
@@ -1830,6 +1842,10 @@ case "$1" in
   analyze)
     shift
     cmd_analyze "$@"
+    ;;
+  drift-sweep)
+    shift
+    cmd_drift_sweep "$@"
     ;;
   followup)
     shift
