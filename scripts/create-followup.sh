@@ -5,6 +5,7 @@
 #   [--proposed-comments <filepath>] [--lens-findings <filepath>]
 #   [--content <body>] [--json]
 #   [--pr <number>] [--owner <owner>] [--repo <repo>] [--head-sha <sha>]
+#   [--review-body <text>] [--review-body-selected] [--review-event <COMMENT|APPROVE|REQUEST_CHANGES>]
 #   [--producer-role <role>] [--protocol-slot <slot>] [--template-version <hash>]
 #   [--capturer-role <role>] [--source-artifact-ids <csv>]
 #   [--captured-at-branch <name>] [--captured-at-sha <sha>] [--captured-at-merge-base-sha <sha>]
@@ -23,6 +24,13 @@
 #   --captured-at-branch          Branch at capture time. Defaults to local git resolution; falls back to JSON null.
 #   --captured-at-sha             HEAD commit SHA at capture time. Defaults to local git resolution; falls back to JSON null.
 #   --captured-at-merge-base-sha  Merge-base against origin/main. Defaults to local git resolution; falls back to JSON null.
+#
+# Review-body channel flags (top-level PR comment in the ProposedReview wrapper):
+#   --review-body           Body text for the proposed top-level (general) review comment.
+#                           Requires the ProposedReview wrapper path (--proposed-comments + all PR metadata flags).
+#   --review-body-selected  Marks the body selected so post-proposed-review.sh posts it. Requires --review-body.
+#   --review-event          Review event for the body: COMMENT (default), APPROVE, or REQUEST_CHANGES. Requires --review-body.
+#   Omitting all three leaves the wrapper free of review_body keys — byte-identical to legacy output.
 #
 # Propagation rules:
 #   * Non-empty provenance flags are emitted as top-level fields in _meta.json.
@@ -62,6 +70,10 @@ SOURCE_ARTIFACT_IDS=""
 CAPTURED_AT_BRANCH=""
 CAPTURED_AT_SHA=""
 CAPTURED_AT_MERGE_BASE_SHA=""
+REVIEW_BODY=""
+REVIEW_BODY_SET=0
+REVIEW_BODY_SELECTED=0
+REVIEW_EVENT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -149,9 +161,22 @@ while [[ $# -gt 0 ]]; do
       CAPTURED_AT_MERGE_BASE_SHA="$2"
       shift 2
       ;;
+    --review-body)
+      REVIEW_BODY="$2"
+      REVIEW_BODY_SET=1
+      shift 2
+      ;;
+    --review-body-selected)
+      REVIEW_BODY_SELECTED=1
+      shift
+      ;;
+    --review-event)
+      REVIEW_EVENT="$2"
+      shift 2
+      ;;
     *)
       echo "[followup] Error: Unknown flag '$1'" >&2
-      echo "Usage: create-followup.sh --title <name> --source <agent> [--attachments <json>] [--suggested-actions <json>] [--proposed-comments <filepath>] [--lens-findings <filepath>] [--content <body>] [--json] [--pr <number> --owner <owner> --repo <repo> --head-sha <sha>] [--producer-role <role>] [--protocol-slot <slot>] [--template-version <hash>] [--capturer-role <role>] [--source-artifact-ids <csv>] [--captured-at-branch <name>] [--captured-at-sha <sha>] [--captured-at-merge-base-sha <sha>]" >&2
+      echo "Usage: create-followup.sh --title <name> --source <agent> [--attachments <json>] [--suggested-actions <json>] [--proposed-comments <filepath>] [--lens-findings <filepath>] [--content <body>] [--json] [--pr <number> --owner <owner> --repo <repo> --head-sha <sha>] [--review-body <text>] [--review-body-selected] [--review-event <COMMENT|APPROVE|REQUEST_CHANGES>] [--producer-role <role>] [--protocol-slot <slot>] [--template-version <hash>] [--capturer-role <role>] [--source-artifact-ids <csv>] [--captured-at-branch <name>] [--captured-at-sha <sha>] [--captured-at-merge-base-sha <sha>]" >&2
       exit 1
       ;;
   esac
@@ -202,6 +227,50 @@ if [[ $PR_FLAGS_SET -eq 4 && -z "$PROPOSED_COMMENTS" ]]; then
   fi
   echo "[followup] Error: PR metadata flags require --proposed-comments." >&2
   exit 1
+fi
+
+# Review-body channel flags are dependent: --review-body-selected and --review-event
+# only mean anything alongside --review-body. Reject the dependent flags when the body
+# was not provided rather than silently writing a wrapper that posts nothing.
+if [[ $REVIEW_BODY_SELECTED -eq 1 && $REVIEW_BODY_SET -eq 0 ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "--review-body-selected requires --review-body"
+  fi
+  echo "[followup] Error: --review-body-selected requires --review-body." >&2
+  exit 1
+fi
+if [[ -n "$REVIEW_EVENT" && $REVIEW_BODY_SET -eq 0 ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "--review-event requires --review-body"
+  fi
+  echo "[followup] Error: --review-event requires --review-body." >&2
+  exit 1
+fi
+# The review_body channel lives in the ProposedReview wrapper, which is only written
+# when all four PR metadata flags accompany --proposed-comments. Reject --review-body
+# outside that path so the body is never silently dropped into a bare-array sidecar.
+if [[ $REVIEW_BODY_SET -eq 1 && ! ( $PR_FLAGS_SET -eq 4 && -n "$PROPOSED_COMMENTS" ) ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "--review-body requires --proposed-comments with --pr/--owner/--repo/--head-sha"
+  fi
+  echo "[followup] Error: --review-body requires --proposed-comments with --pr/--owner/--repo/--head-sha." >&2
+  exit 1
+fi
+# Default the event to COMMENT and constrain to the enum post-proposed-review.sh accepts.
+if [[ $REVIEW_BODY_SET -eq 1 ]]; then
+  if [[ -z "$REVIEW_EVENT" ]]; then
+    REVIEW_EVENT="COMMENT"
+  fi
+  case "$REVIEW_EVENT" in
+    COMMENT|APPROVE|REQUEST_CHANGES) ;;
+    *)
+      if [[ $JSON_MODE -eq 1 ]]; then
+        json_error "--review-event must be one of COMMENT, APPROVE, REQUEST_CHANGES"
+      fi
+      echo "[followup] Error: --review-event must be one of COMMENT, APPROVE, REQUEST_CHANGES." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 KNOWLEDGE_DIR=$(resolve_knowledge_dir)
@@ -341,9 +410,16 @@ if [[ -n "$PROPOSED_COMMENTS" ]]; then
     # Write raw comments to a temp file, then wrap via Python to avoid quoting issues
     _tmp_comments=$(mktemp)
     printf '%s\n' "$_raw_comments" > "$_tmp_comments"
+    # Pass the review-body channel through env: LORE_REVIEW_BODY_SET gates whether
+    # the three review_body keys are emitted at all, so a call that omits --review-body
+    # writes a wrapper byte-identical to the pre-change output (legacy parity).
+    LORE_REVIEW_BODY_SET="$REVIEW_BODY_SET" \
+    LORE_REVIEW_BODY="$REVIEW_BODY" \
+    LORE_REVIEW_BODY_SELECTED="$REVIEW_BODY_SELECTED" \
+    LORE_REVIEW_EVENT="$REVIEW_EVENT" \
     python3 - "$_tmp_comments" "$ITEM_DIR/proposed-comments.json" \
       "$PR_NUMBER" "$PR_OWNER" "$PR_REPO" "$PR_HEAD_SHA" << 'PYEOF'
-import json, sys
+import json, os, sys
 comments_path, out_path, pr_number, owner, repo, head_sha = sys.argv[1:]
 try:
     pr_number_int = int(pr_number)
@@ -359,6 +435,10 @@ wrapper = {
     "head_sha": head_sha,
     "comments": comments,
 }
+if os.environ.get("LORE_REVIEW_BODY_SET") == "1":
+    wrapper["review_body"] = os.environ.get("LORE_REVIEW_BODY", "")
+    wrapper["review_body_selected"] = os.environ.get("LORE_REVIEW_BODY_SELECTED") == "1"
+    wrapper["review_event"] = os.environ.get("LORE_REVIEW_EVENT") or "COMMENT"
 with open(out_path, "w") as f:
     json.dump(wrapper, f, indent=2)
     f.write("\n")

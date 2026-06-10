@@ -92,7 +92,9 @@ cat ~/.lore/claude-md/review-protocol/risk-triage.md
 
 **If mode is `--thorough`:** Select all lenses. Skip signal matching.
 
-**Otherwise:** Start with the default set (Correctness + Regressions + Test Quality + Interface Clarity + User Impact), then: 1. For each remaining lens (Security, Blast Radius), check trigger signals against the PR's changed files and diff content 2. If risk tier is High: force-add Security regardless of signals 3. Apply skip conditions — only skip a lens if ALL its skip conditions are true
+**Otherwise:** Start with the default set (Correctness + Regressions + Test Quality + Interface Clarity + User Impact + Structural Read), then: 1. For each remaining lens (Security, Blast Radius), check trigger signals against the PR's changed files and diff content 2. If risk tier is High: force-add Security regardless of signals 3. Apply skip conditions — only skip a lens if ALL its skip conditions are true
+
+**Structural Read is always in the default set and has no skip condition** — it is the one whole-PR lens (solution-shape, not changed lines) and runs on every non-`--thorough` review. Its substrate is the promoted Narrative + Diagram built in Step 3, so it reads the PR end to end rather than line by line; see `~/.lore/claude-md/review-protocol/structural-altitude.md` for the altitude boundary that keeps it from re-filing what interface-clarity (local) or thematic (scope) already own.
 
 **Ceremony config lookup:** After adaptive selection, check for ceremony-configured lenses:
 
@@ -123,6 +125,7 @@ Change types detected: [list]
 | Regressions | Default selection |
 | Test Quality | Default selection |
 | User Impact | Default selection |
+| Structural Read | Default selection (whole-PR) |
 | [ceremony] insecure-defaults | Ceremony config |
 
 Proceed with this lens set? You can add or remove lenses before we begin.
@@ -171,6 +174,31 @@ Structure as a context block for each lens agent's prompt:
 - <signal 2>
 ```
 
+### 3a-narrative. Build the PR Narrative and Implementation Diagram
+
+Build these now — before lens dispatch — so the Structural Read lens (Step 3b) can consume them as its substrate. They are also the same artifacts Step 6 reports, so building them here avoids double-authoring (Step 6a/6b reuse this output rather than re-deriving it).
+
+- **PR Narrative.** From the alignment map, synthesize a 1-2 paragraph narrative covering what the PR does structurally, the design signals and cross-cutting concerns identified, and notable alignment observations (unrelated files, missing pieces) — omit the alignment-observation note if the PR is coherent.
+- **Implementation Diagram.** An ASCII logical-flow diagram of how the changes work mechanically, per `~/.lore/claude-md/review-protocol/followup-template.md`. The multi-module gate still governs: draw it only when the PR touches 2+ distinct modules (grouped by first directory component, `(root)` for repo-root files). On a single-module PR, omit the diagram — the Structural Read lens then runs on narrative + diff alone.
+
+Append both to the shared `## Review Context` block as **orienting context only**:
+
+```
+**PR Narrative:**
+<1-2 paragraphs from above>
+
+**Implementation Diagram:**
+<ASCII diagram, or omit this sub-block on single-module PRs>
+```
+
+**Evidence precedence — the narrative and diagram are non-authoritative derived context.** The orchestrator generated them; they are not ground truth. Diff-local lenses receive this block to orient, not as a new finding surface: they continue to emit only `{file, line}` findings grounded in the diff/source, and the brief alone can never be the sole basis for a finding anchored to a changed line. Pass the following caveat verbatim inside every lens prompt's context block so no lens treats the generated brief as proof:
+
+```
+The PR Narrative and Implementation Diagram above are derived context the
+orchestrator generated to orient you — not ground truth. Ground every finding
+in the diff or source. The brief alone is never sufficient basis for a finding.
+```
+
 ### 3b. Read lens methodologies and spawn agents
 
 For each selected lens, read its Step 3 methodology:
@@ -184,6 +212,7 @@ For each selected lens, read its Step 3 methodology:
 | Regressions | `skills/pr-regressions/SKILL.md` | Regressions Analysis |
 | Test Quality | `skills/pr-test-quality/SKILL.md` | Test Quality Analysis |
 | User Impact | `skills/pr-user-impact/SKILL.md` | User Impact Analysis |
+| Structural Read | `~/.lore/claude-md/review-protocol/structural-altitude.md` | Structural Read Lens |
 
 For each selected lens, create a task with this structure:
 
@@ -235,7 +264,66 @@ lore search "<topic>" --type knowledge --json --limit 3
 Report back with your findings JSON when complete.
 ```
 
-Construct one Agent task per built-in lens, but **do not dispatch yet** — ceremony lens tasks must launch together with built-in lens tasks in the same parallel batch (see Step 3b-ceremony, then Step 3b-launch).
+The diff-local lens prompt above asks for `{file, line}` findings JSON. The Structural Read lens is the **deliberate whole-PR exception** — it carries observations, not diff-anchored findings — so it gets the distinct prompt in Step 3b-structural, not the generic template above.
+
+Construct one Agent task per built-in lens (Structural Read included), but **do not dispatch yet** — ceremony lens tasks and the structural lens must launch together with the diff-local lens tasks in the same parallel batch (see Step 3b-structural and Step 3b-ceremony, then Step 3b-launch).
+
+### 3b-structural. Construct the Structural Read lens task
+
+The Structural Read lens is the one whole-PR lens. Construct it as an `Agent` task — *not* a `Skill` invocation (a `Skill` call would serialize it; see Step 3b-launch) — using the `general-purpose` subagent type. Read its methodology from `~/.lore/claude-md/review-protocol/structural-altitude.md` and embed it verbatim, the same way the Security lens embeds `security-methodology.md`.
+
+Its substrate is **diagram (when present) + narrative + diff** — the promoted Narrative + Diagram from Step 3a-narrative, plus the diff. It never receives other lenses' raw findings; the cross-finding benefit is recovered later in synthesis (Step 4-structural). On a single-module PR no diagram was drawn — embed narrative + diff alone and say so, so the diagram-dependent checks are skipped rather than hallucinated.
+
+```
+# Structural Read Lens — PR #<number>
+
+You are the Structural Read lens agent for PR #<number> in <owner>/<repo>.
+You are the one WHOLE-PR lens: unlike the diff-local lenses, you do not scan
+changed lines and emit {file, line} findings. You read the PR as a designed
+solution — its logical flow, its fit to codebase idiom, and its PR-level
+abstractions and contracts — and return a reviewer-facing assessment with
+observations. Apply only the Structural Read methodology below.
+
+## PR Context
+- **Title:** <title>
+- **Author:** @<author>
+- **Files changed:** <count>
+
+## Substrate
+
+**PR Narrative:**
+<narrative from Step 3a-narrative>
+
+**Implementation Diagram:**
+<ASCII diagram from Step 3a-narrative, OR:>
+No diagram was drawn (single-module PR). Run on narrative + diff alone;
+skip diagram-dependent checks rather than inferring a diagram.
+
+## Diff
+
+<inline diff for <=400 LOC, or:>
+Read the diff from: /tmp/pr-review-<PR_NUMBER>.diff
+
+**Evidence precedence:** the Narrative and Diagram are derived context the
+orchestrator generated to orient you — not ground truth. Ground every
+observation in the diff or source; the brief alone is never sufficient basis.
+
+## Methodology
+
+<verbatim contents of structural-altitude.md>
+
+## Output
+
+Return one reviewer-facing assessment: a `verdict`, a brief rationale, and an
+`observations[]` array. Zero observations is a valid result ("no structural
+issue beyond the assessment"), not a failure. Each observation carries
+`summary`, `evidence`, `scope`, and `downstream_cost` (present only when it
+clears the structural materiality bar) per the Observation Schema in the
+methodology. Set `scope` honestly — a `whole-PR` observation must not invent
+fake line anchors to look correlatable.
+
+Report back with your structural assessment when complete.
+```
 
 ### 3b-ceremony. Construct ceremony lens tasks
 
@@ -247,9 +335,9 @@ The `Agent`-wrapped invocation — rather than a direct `Skill` call from the ma
 
 ### 3b-launch. Spawn all lens agents in a single parallel batch
 
-Issue every `Agent` tool call — one per selected lens, both built-in and ceremony — in a **single message**. Spawning built-in lens agents first and then dispatching ceremony lens agents in a follow-up message serializes ceremony work behind built-in completion and erases the latency gain the parallel design is meant to capture.
+Issue every `Agent` tool call — one per selected lens (diff-local, the Structural Read lens, and ceremony) — in a **single message**. Spawning built-in lens agents first and then dispatching the structural or ceremony lens in a follow-up message serializes that work behind built-in completion and erases the latency gain the parallel design is meant to capture. The structural lens is dispatched in this same batch as the diff-local lenses — its whole-PR scope does not move it to a serial post-pass.
 
-There is no fixed concurrent-agent cap; spawn the full selected set together. Typical batches run 5–8 agents (defaults plus 0–3 ceremony lenses).
+There is no fixed concurrent-agent cap; spawn the full selected set together. Typical batches run 6–9 agents (defaults including Structural Read, plus 0–3 ceremony lenses).
 
 **Why unconditional parallel dispatch matters.** A downstream telemetry consumer — tournament reconciliation, coverage dashboards, session observability — cannot distinguish "ceremony not configured" from "agent chose not to run it" when the dispatch is silently skipped. Silent omission corrupts the signal: configured lenses appear as absent lenses, and the consumer has no way to recover the distinction after the fact.
 
@@ -277,6 +365,8 @@ As each lens agent reports findings JSON, verify it conforms to the Findings Out
 - **Non-conforming:** Store the raw output separately as a supplementary report. Tag it with the ceremony lens name. Non-conforming output does **not** enter synthesis — it is presented verbatim in the Supplementary Reports section (Step 5b).
 - **Malformed JSON:** Treat as non-conforming with an additional `[malformed]` tag. Store the raw text for supplementary presentation.
 - **Failure/timeout:** Note the coverage gap in the verdict. The review continues with available findings.
+
+**Structural Read lens result:** the structural lens returns an assessment (`verdict` + rationale + `observations[]`), not the diff-local `{file, line}` findings format — by design, it is the whole-PR lens. Hold its observations aside; they do **not** join compound detection or the severity counts as ordinary findings. They feed two places: the cockpit-only correlation in Step 4d-structural and the altitude routing in Step 6d-structural. If the structural agent fails, times out, or returns malformed output, record that in the Structural Assessment section (Step 6d-structural) and propose no structural posted comment — never fabricate observations.
 
 Clean up the temp diff file if one was created:
 ```bash
@@ -327,6 +417,15 @@ lore search "<finding topic>" --type knowledge --json --limit 3
 
 Attach relevant citations. If any knowledge entry is STALE and the PR contradicts it, flag as "convention may need updating" — not "PR is wrong."
 
+### 4d-structural. Correlate structural observations with diff-local clusters (cockpit-only)
+
+For each structural observation that carries a changed-line or file anchor (per its `scope`), check whether the diff-local findings synthesized above cluster in the region it names. Reuse the **existing** file/line proximity mechanics — the same within-3-lines, grouped-by-`file` test compound detection already uses (`cross-lens-synthesis.md`). Introduce no new thresholds, no new severity, no new routing.
+
+A cluster is a strain signal: independent diff-local findings converging where the structural lens flagged the solution-shape raises the reviewer's confidence. When findings cluster in an observation's region, **annotate that observation's cockpit entry** with a corroboration note — e.g. "3 diff-local findings cluster here." That is the whole effect.
+
+- An observation whose `scope` is `whole-PR` or module-only has no concrete anchor — it is simply **not correlated**. Absence of a cluster check means "no annotation," never lower confidence or a dropped observation.
+- This correlation is **strictly cockpit-only**. It annotates the reviewer's triage view and **never changes what crosses the wall** to a posted comment. The structural materiality bar (Step 6d-structural), not the cluster, decides what gets posted — a corroboration note must not promote an observation past the bar, and its absence must not demote one.
+
 ### 4e. Produce verdict
 
 ```
@@ -365,6 +464,8 @@ The verdict, severity counts, and `minor (filtered)` tally are reviewer-facing �
 
 Present findings grouped by severity (compound findings first within each group). Read `skills/pr-review/templates/step5b-presentation.md` for the by-severity and supplementary-reports templates (supplementary block renders only when ceremony lenses produced non-conforming output per Step 3d).
 
+After the severity groups, present the **Structural Assessment** (Step 3d's structural lens result): the structural verdict, rationale, and observations with any Step 4d-structural corroboration notes. This is the whole-PR read and is reviewer-facing — it does not enter the severity counts. The full section is assembled into the report body at Step 6d-structural; here, surface it so the reviewer sees the solution-shape read alongside the line-level findings.
+
 ### 5b-supplementary. Supplementary Reports
 
 Supplementary reports are: - **Excluded** from synthesis (Step 4) — they do not affect compound detection, severity counts, or the verdict - **Excluded** from `post-review.sh` output — they are not posted as GitHub review comments - **Included** in the followup report body (Step 6d) for record-keeping
@@ -379,16 +480,11 @@ This step is mandatory and must not be skipped. It always runs after Step 5c res
 
 ### 6a. PR Narrative
 
-Using the review brief from Step 3a, synthesize a 1-2 paragraph narrative under a `## PR Narrative` heading covering: what the PR does structurally (drawn from the alignment map); design signals and cross-cutting concerns identified; notable alignment observations (unrelated files, missing pieces) — omit if the PR is coherent.
+Reuse the PR Narrative built in Step 3a-narrative — do not re-author it. Present it under a `## PR Narrative` heading, optionally enriched with where findings landed (e.g., which files drew the most findings). The 1-2 paragraphs already cover what the PR does structurally, the design signals and cross-cutting concerns, and notable alignment observations.
 
 ### 6b. Implementation Diagram
 
-Build an ASCII logical flow diagram showing how the PR's changes work mechanically.
-
-Read diagram conventions:
-```bash
-cat ~/.lore/claude-md/review-protocol/followup-template.md
-```
+Reuse the Implementation Diagram built in Step 3a-narrative — do not re-draw it. The multi-module gate already governed whether one exists (`followup-template.md`, 2+ modules); on a single-module PR there is no diagram and this section is omitted, exactly as Step 3a-narrative decided.
 
 ### 6c. Determine suggested actions
 
@@ -430,6 +526,28 @@ The test is decision-theoretic, not descriptive: not "can a scenario be describe
 
 **Voice:** hedge the inference, not the code fact — state what the code does, hedge what follows from it; impersonal, no overstatement, fixes only when non-obvious and framed as a question. Full guide: `~/.lore/claude-md/review-protocol/review-voice.md`.
 
+### 6d-structural. Route the structural assessment to three altitude channels
+
+The structural lens result (Step 3d) routes to three channels. The materiality bar and posted form are defined in `~/.lore/claude-md/review-protocol/structural-altitude.md` — apply it here; do not restate it.
+
+**Channel 1 — Structural Assessment (cockpit, always).** Build a `## Structural Assessment` report section from the lens's `verdict`, rationale, and **every** observation — including the ones that drop the materiality bar and the corroboration notes from Step 4d-structural. This section renders on **every** run, even when zero observations cleared the bar and even when the lens found nothing (state "no structural concerns" then). It is never posted; it is the reviewer's whole-PR triage view, so it keeps the full reasoning. If the structural agent failed or returned malformed output (Step 3d), say so here and stop — propose no structural posted comment.
+
+**Channel 2 — top-level PR comment (`review_body`, materiality-gated).** An observation crosses to the posted top-level comment only when it clears the structural materiality bar — i.e. it carries a concrete `downstream_cost`. For each such observation, write its **posted form** (per `structural-altitude.md`: names material impact in usage terms, neutral, no severity word, one line where possible; a non-obvious fix framed softly as a question). Wrap the collected posted forms in a sentinel block:
+
+```
+<!-- lore-structural -->
+## Structural notes
+
+<one neutral one-line posted form per crossed observation>
+<!-- /lore-structural -->
+```
+
+The sentinel pair lets this block coexist in `review_body` with the generated summary and the `<!-- lore-additional-comments -->` block downstream tools splice — each owns its own delimiters, so write order does not matter and none clobbers another. Emit the block via the `create-followup.sh` review-body flags in Step 6f (`--review-body`, `--review-body-selected`, `--review-event COMMENT`).
+
+**When nothing clears the bar, build no block** — leave `review_body` unset and do **not** pass `--review-body-selected`; no top-level comment is proposed. (`create-followup.sh` rejects `--review-body-selected` without `--review-body`, so the two move together.)
+
+**Channel 3 — inline spill (route-priority).** An observation that clears the bar **and** carries an honest changed-line anchor (its `scope` is changed-line, not `whole-PR` or module-only) becomes a normal inline proposed comment instead — distilled to the same one-line posted form, added to the Step 6f `proposed-comments` array like any other material finding. **Route-priority — never the same ask in both:** a locally-anchored observation routes to the inline comment; a PR-level observation with no honest line anchor routes to the top-level `review_body` block. The same observation must not appear as both an inline comment and a top-level note. A `whole-PR` observation is top-level-only by construction; an honestly line-anchored one is inline-only.
+
 ### 6e. Assemble the full report body
 
 Assemble the `--content` value with **all** of the following sections. Every section is mandatory — do not abbreviate, summarize, or omit any section. The `--content` passed to `create-followup.sh` must contain the complete report, not a summary.
@@ -460,6 +578,8 @@ line: <N>
 ```
 ````
 
+**Section 5 — Structural Assessment** (from 6d-structural): include the cockpit `## Structural Assessment` section verbatim — the structural verdict, rationale, and every observation with its Step 4d-structural corroboration note. This section is **always present**: on a clean structural read state "no structural concerns"; on agent failure state the coverage gap. It is reviewer-facing (never posted); the posted structural notes live only in the `review_body` sentinel block (Channel 2), not here.
+
 ### 6f. Persist the report
 
 Proposed comments are a **curated subset** — the posted artifact, not a projection of the Review Findings list. They need not be 1:1 with the Section 3 findings: immaterial findings (the `minor (N)` tally) are never posted, and where it reads better, several findings may collapse into one comment. Only material findings with both `file` and `line` become proposed comments.
@@ -480,10 +600,20 @@ bash ~/.lore/scripts/create-followup.sh \
   --owner <owner> \
   --repo <repo> \
   --head-sha <headRefOid> \
-  --content "<complete report body from 6e — all 4 sections>" \
+  --content "<complete report body from 6e — all sections>" \
   --producer-role "pr-review" \
   --protocol-slot "Observations"
 ```
+
+**Structural top-level comment (Channel 2 of Step 6d-structural).** When — and only when — at least one structural observation cleared the materiality bar, append these flags to the call above so the `<!-- lore-structural -->` block lands in `review_body` and is pre-selected for posting:
+
+```bash
+  --review-body "<the <!-- lore-structural -->...<!-- /lore-structural --> block from 6d-structural>" \
+  --review-body-selected \
+  --review-event COMMENT
+```
+
+When nothing cleared the bar, omit all three — `--review-body-selected` without `--review-body` is rejected, so they move as a unit and no top-level comment is proposed. The inline-spill observations (Channel 3) are already in the `--proposed-comments` array above and need no extra flag.
 
 ## Step 7: Capture Insights
 
