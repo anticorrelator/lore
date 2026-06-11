@@ -174,6 +174,32 @@ Structure as a context block for each lens agent's prompt:
 - <signal 2>
 ```
 
+### 3a-knowledge. Prefetch domain knowledge for lens agents
+
+Lens agents must start from the knowledge store, not raw exploration — and they are diff-scoped subagents, so knowledge is delivered **push-style** in their prompts rather than each agent re-deriving it.
+
+1. Derive **at most 3** topic queries from the PR: the primary touched module(s) from the alignment map first, ordered by changed surface and centrality, then the PR's domain (from its title/intent) only if budget remains and no module query already covers it. Each query names a concrete module or domain — neither a single generic word nor a full sentence.
+2. For **each** derived topic, run both prefetches — one per consumer altitude:
+   ```bash
+   lore prefetch "<topic>" --scale-set subsystem,implementation   # for diff-local lenses
+   lore prefetch "<topic>" --scale-set architecture,subsystem     # for the Structural Read lens
+   ```
+3. Route the outputs into two exclusive blocks, concatenating across topics grouped by topic:
+   - **Diff-local block** — the `subsystem,implementation` output. Append to the shared `## Review Context` block:
+
+     ```
+     **Prior Knowledge:**
+     <subsystem/implementation prefetch output — conventions, gotchas, and decisions for the touched area>
+     ```
+   - **Architecture block** — the `architecture,subsystem` output. Hold it aside for the Structural Read prompt (Step 3b-structural).
+
+   Route the two altitude blocks **exclusively**: implementation-scale content never reaches the structural prompt; architecture-scale content never reaches diff-local prompts. (`subsystem` is the deliberate overlap layer in both prefetches.) Do not mix altitudes — implementation detail in the structural prompt pushes it off its whole-PR altitude, and architectural philosophy in diff-local prompts invites over-thinking line-level findings.
+
+**Empty vs. failed — distinguish, never collapse one into the other:**
+- A prefetch that **exits zero with empty stdout** is treated as absence for prompt construction: omit the diff-local sub-block (Step 3b template), or use the explicit one-liner in the structural prompt (Step 3b-structural). Do not pad with filler — fabricated context is worse than none. But do not claim this proves the store is empty: the prefetch path can return clean-empty for silent query failures, so absence here means "nothing surfaced," not "nothing exists."
+- A prefetch that **exits non-zero or emits errors** is a retrieval failure, not absence. Report the failed topic + scale in the same routed channel that block feeds (a one-line failure note in the diff-local Prior Knowledge sub-block or the structural Prior Knowledge section), so the lens knows that altitude went unqueried rather than came back empty.
+- **Partial failure** keeps the successful topics' output and reports only the failed topic + scale alongside it — it never collapses the whole block into absence.
+
 ### 3a-narrative. Build the PR Narrative and Implementation Diagram
 
 Build these now — before lens dispatch — so the Structural Read lens (Step 3b) can consume them as its substrate. They are also the same artifacts Step 6 reports, so building them here avoids double-authoring (Step 6a/6b reuse this output rather than re-deriving it).
@@ -230,6 +256,27 @@ Your sole focus is the <lens name> lens. Apply only this methodology.
 
 <review context block from 3a>
 
+## Prior Knowledge
+
+<When the Review Context carries a **Prior Knowledge** sub-block (Step
+3a-knowledge appended one), keep the next sentence; when the prefetch surfaced
+nothing and the sub-block was omitted, replace it with:
+"No prior knowledge surfaced at this altitude — query the store as below before
+raw exploration.">
+
+The Review Context above includes a **Prior Knowledge** sub-block prefetched
+from the project knowledge store. Read it BEFORE analyzing the diff — it
+documents conventions, gotchas, and past decisions for the touched area that
+the diff alone cannot surface. Use it two ways:
+- Before flagging a pattern as wrong, check whether Prior Knowledge documents
+  it as an intentional convention or known trade-off.
+- A finding that contradicts a documented convention cites that entry in its
+  `knowledge_context`.
+For topics it does not cover, query the store before raw code exploration:
+```bash
+lore search "<topic>" --type knowledge --scale-set subsystem,implementation --json --limit 3
+```
+
 ## Diff
 
 <inline diff for <=400 LOC, or:>
@@ -256,7 +303,7 @@ Writing that trigger is also the materiality test: if the trigger is contrived, 
 
 Query the knowledge store for each finding:
 ```bash
-lore search "<topic>" --type knowledge --json --limit 3
+lore search "<topic>" --type knowledge --scale-set subsystem,implementation --json --limit 3
 ```
 
 **Voice — hedge the inference, not the observed code fact.** State observed code facts directly; hedge impact claims with an explicit condition. Lead with the observation, then the qualifier. Use impersonal constructions ("The handler dereferences…", not "You forgot to check…"). Fix suggestions are secondary and optional — surface the issue and stop unless the fix is non-obvious; never lead with a fix. Avoid overstated vocabulary ("this will crash", "this is a bug", "definitely") and hollow hedges on observations ("seems like", "might be", "I think") — name the specific condition. Full guidance: `~/.lore/claude-md/review-protocol/review-voice.md` (see also Step 6d-ii below for the externally-facing variant).
@@ -272,7 +319,7 @@ Construct one Agent task per built-in lens (Structural Read included), but **do 
 
 The Structural Read lens is the one whole-PR lens. Construct it as an `Agent` task — *not* a `Skill` invocation (a `Skill` call would serialize it; see Step 3b-launch) — using the `general-purpose` subagent type. Read its methodology from `~/.lore/claude-md/review-protocol/structural-altitude.md` and embed it verbatim, the same way the Security lens embeds `security-methodology.md`.
 
-Its substrate is **diagram (when present) + narrative + diff** — the promoted Narrative + Diagram from Step 3a-narrative, plus the diff. It never receives other lenses' raw findings; the cross-finding benefit is recovered later in synthesis (Step 4-structural). On a single-module PR no diagram was drawn — embed narrative + diff alone and say so, so the diagram-dependent checks are skipped rather than hallucinated.
+Its substrate is **diagram (when present) + narrative + diff** — the promoted Narrative + Diagram from Step 3a-narrative, plus the diff. It never receives other lenses' raw findings; the cross-finding benefit is recovered later in synthesis (Step 4-structural). On a single-module PR no diagram was drawn — embed narrative + diff alone and say so, so the diagram-dependent checks are skipped rather than hallucinated. It also receives the **architecture-scale Prior Knowledge** held aside in Step 3a-knowledge — not the diff-local block — so its idiom-fit judgment is grounded in documented architecture and conventions rather than re-inferred from the diff.
 
 ```
 # Structural Read Lens — PR #<number>
@@ -298,6 +345,19 @@ observations. Apply only the Structural Read methodology below.
 <ASCII diagram from Step 3a-narrative, OR:>
 No diagram was drawn (single-module PR). Run on narrative + diff alone;
 skip diagram-dependent checks rather than inferring a diagram.
+
+## Prior Knowledge
+
+<architecture/subsystem-scale prefetch output from Step 3a-knowledge, OR:>
+No prior knowledge surfaced at this altitude.
+
+Read this before assessing the PR: documented architecture, conventions, and
+design rationale are the baseline for your idiom-fit judgment — prefer citing
+a documented convention over re-inferring codebase idiom from the diff. For
+topics it does not cover:
+```bash
+lore search "<topic>" --type knowledge --scale-set architecture,subsystem --json --limit 3
+```
 
 ## Diff
 
@@ -412,7 +472,7 @@ Same file, overlapping line (within 3 lines), same severity, same underlying con
 For compound findings and blocking findings with empty `knowledge_context`, query the knowledge store:
 
 ```bash
-lore search "<finding topic>" --type knowledge --json --limit 3
+lore search "<finding topic>" --type knowledge --scale-set subsystem,implementation --json --limit 3
 ```
 
 Attach relevant citations. If any knowledge entry is STALE and the PR contradicts it, flag as "convention may need updating" — not "PR is wrong."
