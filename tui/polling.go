@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/work"

@@ -63,9 +63,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // ----------------------------------------------------------------------------
@@ -230,11 +230,11 @@ type SettingsModel struct {
 // SetSize tick reaches every nested rendered description in one pass.
 func (m *SettingsModel) SetSize(width, height int) {
 	if !m.viewportInit {
-		m.viewport = viewport.New(width, height)
+		m.viewport = viewport.New(viewport.WithWidth(width), viewport.WithHeight(height))
 		m.viewportInit = true
 	} else {
-		m.viewport.Width = width
-		m.viewport.Height = height
+		m.viewport.SetWidth(width)
+		m.viewport.SetHeight(height)
 	}
 	m.wrapWidth = width
 	m.propagateWrapWidth()
@@ -1070,7 +1070,7 @@ type harnessToggleResultMsg struct {
 func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 	if m.schemaErr != nil {
 		// In schema-error mode, only Esc is honored.
-		if key, ok := msg.(tea.KeyMsg); ok && key.String() == "esc" {
+		if key, ok := msg.(tea.KeyPressMsg); ok && key.String() == "esc" {
 			m.closed = true
 		}
 		return m, nil
@@ -1118,7 +1118,7 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 		return m, nil
 	}
 
-	if key, ok := msg.(tea.KeyMsg); ok {
+	if key, ok := msg.(tea.KeyPressMsg); ok {
 		switch key.String() {
 		case "esc":
 			// Esc semantics: forward to the focused widget first; if the
@@ -1942,15 +1942,15 @@ func (m *SettingsModel) focusConsumesNavRunes() bool {
 // is within the visible window. No-op when the viewport hasn't been sized,
 // when nothing is focused, or when focus is already in view.
 func (m *SettingsModel) ensureFocusedVisible() {
-	if !m.viewportInit || m.viewport.Height <= 0 {
+	if !m.viewportInit || m.viewport.Height() <= 0 {
 		return
 	}
 	top, bottom := m.computeFocusedYRange()
 	if top < 0 {
 		return
 	}
-	yo := m.viewport.YOffset
-	h := m.viewport.Height
+	yo := m.viewport.YOffset()
+	h := m.viewport.Height()
 	if top < yo {
 		m.viewport.SetYOffset(top)
 	} else if bottom >= yo+h {
@@ -2058,7 +2058,7 @@ func (m *SettingsModel) View() string {
 	if m.limitDotPath != "" && m.compactEmbed {
 		return content
 	}
-	if !m.viewportInit || m.viewport.Height <= 0 {
+	if !m.viewportInit || m.viewport.Height() <= 0 {
 		return content
 	}
 	m.viewport.SetContent(content)
@@ -2590,7 +2590,7 @@ func (m *SettingsModel) compactActiveHoursEditLines(a *ActiveHoursRangesEditor) 
 	if total == 0 {
 		lines = append(lines, a.styles.dim.Render("  (no windows)"))
 	} else {
-		maxRows := compactActiveHoursEditWindowRows(m.viewport.Height)
+		maxRows := compactActiveHoursEditWindowRows(m.viewport.Height())
 		start, end := compactVisibleWindow(total, a.cursor, maxRows)
 		if start > 0 {
 			lines = append(lines, a.styles.dim.Render(fmt.Sprintf("  ... %d earlier", start)))

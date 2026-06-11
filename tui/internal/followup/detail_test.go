@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/gh"
 )
@@ -566,14 +566,14 @@ func TestDetailModelTabCyclesThroughTabs(t *testing.T) {
 	startIdx := updated.activeTab
 
 	// Tab forward wraps through all tabs.
-	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ = updated.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	wantNext := (startIdx + 1) % len(updated.tabs)
 	if updated.activeTab != wantNext {
 		t.Errorf("after tab: activeTab = %d, want %d", updated.activeTab, wantNext)
 	}
 
 	// Shift+Tab cycles backward.
-	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	updated, _ = updated.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	if updated.activeTab != startIdx {
 		t.Errorf("after shift+tab: activeTab = %d, want %d", updated.activeTab, startIdx)
 	}
@@ -605,12 +605,12 @@ func TestDetailModelTabCyclesWithoutComments(t *testing.T) {
 	}
 
 	// Tab forward: Meta(0) -> Finding(1) -> Meta(0) wraps correctly.
-	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ = updated.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	if updated.activeTab != 0 {
 		t.Errorf("after tab from Finding: activeTab = %d, want 0 (Meta)", updated.activeTab)
 	}
 
-	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ = updated.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	if updated.activeTab != 1 {
 		t.Errorf("after tab from Meta: activeTab = %d, want 1 (Finding)", updated.activeTab)
 	}
@@ -692,7 +692,7 @@ func TestDetailModelKeyRoutesToActiveTab(t *testing.T) {
 	}
 
 	// j key routes to reviewCards when active tab is TabComments.
-	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	updated, _ = updated.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if updated.reviewCards.cursor != 1 {
 		t.Errorf("after j on Comments tab: cards cursor = %d, want 1", updated.reviewCards.cursor)
 	}
@@ -704,7 +704,7 @@ func TestDetailModelKeyRoutesToActiveTab(t *testing.T) {
 	}
 	// j key on Finding tab should not change reviewCards cursor.
 	cardsCursorBefore := updated.reviewCards.cursor
-	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	updated, _ = updated.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if updated.reviewCards.cursor != cardsCursorBefore {
 		t.Errorf("j on Finding tab: reviewCards cursor changed from %d to %d (should not)", cardsCursorBefore, updated.reviewCards.cursor)
 	}
@@ -831,11 +831,11 @@ func TestDetailModelWindowSizeMsgForwardsToAllTabs(t *testing.T) {
 	// Viewport should be sized to inner content dimensions.
 	wantW := updated.contentWidth()
 	wantH := updated.contentHeight()
-	if updated.viewport.Width != wantW {
-		t.Errorf("viewport.Width = %d, want %d", updated.viewport.Width, wantW)
+	if updated.viewport.Width() != wantW {
+		t.Errorf("viewport.Width = %d, want %d", updated.viewport.Width(), wantW)
 	}
-	if updated.viewport.Height != wantH {
-		t.Errorf("viewport.Height = %d, want %d", updated.viewport.Height, wantH)
+	if updated.viewport.Height() != wantH {
+		t.Errorf("viewport.Height = %d, want %d", updated.viewport.Height(), wantH)
 	}
 	// reviewCards should have received the updated dimensions.
 	if updated.reviewCards == nil {
@@ -1528,7 +1528,7 @@ func TestDetailModelKeyDelegationToLensFindings(t *testing.T) {
 	updated.activeTab = updated.tabIndexFor(TabTriage)
 
 	// j should be delegated to LensFindingsModel (cursor moves down).
-	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	updated, _ = updated.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if updated.lensFindings.cursor != 1 {
 		t.Errorf("after j: lensFindings cursor = %d, want 1", updated.lensFindings.cursor)
 	}
@@ -1548,7 +1548,7 @@ func TestDetailModelTabPreservationAcrossReload(t *testing.T) {
 
 	// Switch to Comments tab.
 	for updated.ActiveTab() != TabComments {
-		updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyTab})
+		updated, _ = updated.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	}
 	if updated.ActiveTab() != TabComments {
 		t.Fatalf("active tab = %v, want TabComments", updated.ActiveTab())
@@ -1578,7 +1578,7 @@ func TestDetailModelTabPreservationByIDNotIndex(t *testing.T) {
 
 	// Navigate to TabTriage.
 	for updated.ActiveTab() != TabTriage {
-		updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyTab})
+		updated, _ = updated.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	}
 	updated.PreserveTab()
 
@@ -1811,7 +1811,7 @@ func TestDetailModelIsEditingDelegatesToReviewCards(t *testing.T) {
 	}
 
 	// Enter edit mode via 'e' key forwarded through the detail model.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
 
 	if !m.IsEditing() {
 		t.Error("IsEditing should be true after 'e' on TabComments")
@@ -1821,7 +1821,7 @@ func TestDetailModelIsEditingDelegatesToReviewCards(t *testing.T) {
 func TestDetailModelKeyEventsForwardedToReviewCardsOnTabComments(t *testing.T) {
 	m := testDetailWithReviewCards(t)
 	// cursor is at 0 in the reviewCards; press 'j' to advance.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.reviewCards.cursor != 1 {
 		t.Errorf("j forwarded to reviewCards: cursor = %d, want 1", m.reviewCards.cursor)
 	}
@@ -1832,19 +1832,19 @@ func TestDetailModelTabSuppressedDuringEditing(t *testing.T) {
 	tabBefore := m.activeTab
 
 	// Enter edit mode.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
 	if !m.IsEditing() {
 		t.Fatal("must be editing for this test to be meaningful")
 	}
 
 	// Tab should not cycle tabs while editing.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	if m.activeTab != tabBefore {
 		t.Errorf("tab during editing changed activeTab from %d to %d", tabBefore, m.activeTab)
 	}
 
 	// Shift+tab should also not cycle.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	if m.activeTab != tabBefore {
 		t.Errorf("shift+tab during editing changed activeTab from %d to %d", tabBefore, m.activeTab)
 	}

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
@@ -73,7 +73,9 @@ func main() {
 			m.settlementSettingsPanel = panel
 		}
 	}
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// Terminal modes (alt screen, mouse) are view state in bubbletea v2:
+	// the root View() applies them on every render.
+	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

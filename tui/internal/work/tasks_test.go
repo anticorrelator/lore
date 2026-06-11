@@ -3,7 +3,7 @@ package work
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestTasksModelMouseScroll(t *testing.T) {
@@ -41,28 +41,28 @@ func TestTasksModelMouseScroll(t *testing.T) {
 	}
 
 	// Wheel down should advance cursor
-	m, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	m, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
 	if m.cursor == 0 {
 		t.Fatal("cursor did not advance after WheelDown")
 	}
 	afterDown := m.cursor
 
 	// Wheel down again
-	m, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	m, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
 	if m.cursor <= afterDown {
 		t.Errorf("cursor did not advance further: got %d, was %d", m.cursor, afterDown)
 	}
 
 	// Wheel up should reverse
 	beforeUp := m.cursor
-	m, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	m, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
 	if m.cursor >= beforeUp {
 		t.Errorf("cursor did not reverse after WheelUp: got %d, was %d", m.cursor, beforeUp)
 	}
 
 	// Wheel up back to start
 	for i := 0; i < 20; i++ {
-		m, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+		m, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
 	}
 	if m.cursor != 0 {
 		t.Errorf("cursor should clamp at 0 after repeated WheelUp, got %d", m.cursor)
@@ -70,7 +70,7 @@ func TestTasksModelMouseScroll(t *testing.T) {
 
 	// Wheel down to the end
 	for i := 0; i < 20; i++ {
-		m, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+		m, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
 	}
 	visible := m.visibleRows()
 	lastVisible := visible[len(visible)-1]

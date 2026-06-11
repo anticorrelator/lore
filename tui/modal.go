@@ -3,10 +3,11 @@ package main
 import (
 	"fmt"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 // modalInnerW is the visible content width inside all modals.
@@ -21,13 +22,17 @@ type modalStyleSet struct {
 	sep    lipgloss.Style
 }
 
+// modalStyles is allocated once at package init; border is modal-local
+// chrome, the rest alias the shared primitives.
+var modalStyles = newModalStyles()
+
 func newModalStyles() modalStyleSet {
 	return modalStyleSet{
 		border: lipgloss.NewStyle().Foreground(lipgloss.Color("4")),
-		title:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4")),
-		dim:    lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		key:    lipgloss.NewStyle().Foreground(lipgloss.Color("7")).Bold(true),
-		sep:    lipgloss.NewStyle().Foreground(lipgloss.Color("238")),
+		title:  style.SectionTitle,
+		dim:    style.Dim,
+		key:    style.KeyHint,
+		sep:    style.Separator,
 	}
 }
 
@@ -70,7 +75,7 @@ func newModalTextarea() textarea.Model {
 // renderSpecConfirmModal shows a centered confirmation modal before launching the spec subprocess.
 // Displays the slug, an optional context input, and enter/esc hints.
 func (m model) renderSpecConfirmModal() string {
-	s := newModalStyles()
+	s := modalStyles
 
 	inputBox := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
@@ -111,7 +116,7 @@ func (m model) renderSpecConfirmModal() string {
 
 // renderAIModal shows a centered modal for the AI work-item creation prompt.
 func (m model) renderAIModal() string {
-	s := newModalStyles()
+	s := modalStyles
 	inputBox := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color("238")).
@@ -129,7 +134,7 @@ func (m model) renderAIModal() string {
 
 // renderConfirmModal overlays a centered confirmation modal for archive/delete actions.
 func (m model) renderConfirmModal() string {
-	s := newModalStyles()
+	s := modalStyles
 
 	var title, body string
 	switch m.confirmAction {
@@ -144,7 +149,7 @@ func (m model) renderConfirmModal() string {
 			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
 			s.key.Render("any key") + s.dim.Render("  cancel")
 	case "delete":
-		warnS := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))
+		warnS := style.SevBlocking
 		title = warnS.Render("Delete Work Item")
 		body = fmt.Sprintf("Permanently delete %s?\n\n", s.key.Render(m.confirmTitle)) +
 			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
@@ -155,7 +160,7 @@ func (m model) renderConfirmModal() string {
 			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
 			s.key.Render("any key") + s.dim.Render("  cancel")
 	case "delete_followup":
-		warnS := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))
+		warnS := style.SevBlocking
 		title = warnS.Render("Delete Follow-up")
 		body = fmt.Sprintf("Permanently delete %s?\n\n", s.key.Render(m.confirmTitle)) +
 			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
@@ -172,8 +177,8 @@ func (m model) renderConfirmModal() string {
 
 // renderHelpModal overlays a centered modal listing all keybindings.
 func (m model) renderHelpModal() string {
-	s := newModalStyles()
-	sectionS := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("7"))
+	s := modalStyles
+	sectionS := style.SubsectionTitle
 
 	row := func(key, desc string) string {
 		k := s.key.Render(fmt.Sprintf("  %-18s", key))
@@ -218,9 +223,10 @@ func (m model) renderHelpModal() string {
 		row("t", "settlement panel") + "\n" +
 		"\n" +
 		sectionS.Render("Settlement") + "\n" +
+		row("j / k", "navigate queue") + "\n" +
 		row("p", "process one batch") + "\n" +
 		row("e", "enable / disable") + "\n" +
-		row("v", "show config") + "\n" +
+		row("l / h", "settings / status") + "\n" +
 		row("w / f", "work / follow-ups") + "\n" +
 		"\n" +
 		sectionS.Render("Work Detail") + "\n" +

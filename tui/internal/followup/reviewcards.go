@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/gh"
 	"github.com/anticorrelator/lore/tui/internal/render"
@@ -297,7 +297,7 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 		}
 		return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// Clear any transient flash message on every keypress.
 		m.flashMsg = ""
 
@@ -352,7 +352,7 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 				// Move up from first inline comment to general card.
 				m.cursor = -1
 			}
-		case " ", "x", "enter":
+		case "space", "x", "enter":
 			if m.cursor == -1 && m.hasGeneralCard() {
 				// Toggle ReviewBodySelected on the general comment card.
 				m.review.ReviewBodySelected = !m.review.ReviewBodySelected

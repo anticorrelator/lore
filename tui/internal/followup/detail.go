@@ -8,12 +8,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/gh"
 	"github.com/anticorrelator/lore/tui/internal/render"
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 // ProposedComment represents a single review comment from the proposed-comments.json sidecar.
@@ -374,8 +375,8 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		m.height = msg.Height
 		cw := m.contentWidth()
 		ch := m.contentHeight()
-		m.viewport.Width = cw
-		m.viewport.Height = ch
+		m.viewport.SetWidth(cw)
+		m.viewport.SetHeight(ch)
 		if m.detail != nil {
 			m.viewport.SetContent(m.renderFinding())
 		}
@@ -491,14 +492,14 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 					m.activeTab = m.defaultTabIndex()
 				}
 
-				m.viewport.Width = cw
-				m.viewport.Height = ch
+				m.viewport.SetWidth(cw)
+				m.viewport.SetHeight(ch)
 				m.viewport.SetContent(m.renderFinding())
 			}
 		}
 		return m, fetchCmd
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "tab":
 			// Suppress tab cycling when the review cards textarea is active.
@@ -545,15 +546,15 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 
 	case tea.MouseMsg:
 		// Tab bar click hit-test: only switch tabs on left-click press.
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+		if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
 			tabBarY := m.contentStartY + 1
-			if msg.Y == tabBarY && len(m.tabs) > 0 {
+			if click.Y == tabBarY && len(m.tabs) > 0 {
 				// Tab bar format: "  " + [" label "] + " " + [" label "] + ...
 				// Each label rendered with Padding(0,1) so visual width = len(label)+2.
 				x := m.contentStartX + 2 // "  " indent
 				for i, tab := range m.tabs {
 					tabW := len(tab.label) + 2 // padding(0,1) adds 1 char each side
-					if msg.X >= x && msg.X < x+tabW {
+					if click.X >= x && click.X < x+tabW {
 						m.activeTab = i
 						return m, nil
 					}
@@ -816,7 +817,7 @@ func (m DetailModel) renderMetaTab() string {
 		return ""
 	}
 
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	dimStyle := style.Dim
 	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 
 	var b strings.Builder
@@ -870,16 +871,8 @@ func (m DetailModel) renderMetaTab() string {
 }
 
 func (m DetailModel) renderTabBar() string {
-	activeStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("0")).
-		Background(lipgloss.Color("4")).
-		Padding(0, 1)
-
-	inactiveStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("7")).
-		Background(lipgloss.Color("238")).
-		Padding(0, 1)
+	activeStyle := style.ActiveTab
+	inactiveStyle := style.InactiveTab
 
 	var parts []string
 	for i, tab := range m.tabs {
@@ -900,7 +893,7 @@ func (m DetailModel) renderTabBar() string {
 // renderMergeBadge returns the merge-status badge shown next to the tab bar
 // when PR coordinates drove a fetch. Empty when no fetch was dispatched.
 func (m DetailModel) renderMergeBadge() string {
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	dimStyle := style.Dim
 	switch {
 	case m.mergeStatusLoading:
 		return dimStyle.Render("merge: checking…")
@@ -955,9 +948,9 @@ func (m DetailModel) renderTabContent() string {
 func (m DetailModel) View() string {
 	if m.loading || m.id == "" {
 		if m.id == "" {
-			return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  No follow-up selected.")
+			return style.Dim.Render("  No follow-up selected.")
 		}
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  Loading…")
+		return style.Dim.Render("  Loading…")
 	}
 	if m.err != nil {
 		return fmt.Sprintf("Error: %v\n", m.err)

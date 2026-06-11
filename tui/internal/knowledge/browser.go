@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 // BrowserDismissedMsg is sent when the user exits the knowledge browser.
@@ -425,8 +427,10 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 		return m, cmd
 
 	case tea.MouseMsg:
-		isClick := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft
-		if msg.X < leftPanelWidth+2 {
+		mouse := msg.Mouse()
+		_, isPress := msg.(tea.MouseClickMsg)
+		isClick := isPress && mouse.Button == tea.MouseLeft
+		if mouse.X < leftPanelWidth+2 {
 			// Left pane click: set focus and reverse-map Y to tree node index.
 			if isClick {
 				m.focusedPanel = panelLeft
@@ -443,7 +447,7 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 
 			// Map click Y to visual line index using persisted scroll offset.
 			// Y=0 is top border, content starts at Y=1.
-			clickedVisualLine := m.scrollOffset + (msg.Y - 1)
+			clickedVisualLine := m.scrollOffset + (mouse.Y - 1)
 			if clickedVisualLine >= 0 && clickedVisualLine < len(allLines) {
 				targetNode := allLines[clickedVisualLine].nodeIndex
 				if targetNode < len(m.nodes) && targetNode != m.cursor {
@@ -466,7 +470,7 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 			return m, cmd
 		}
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// When search is active, route all keys to the search panel
 		if m.searchActive {
 			var cmd tea.Cmd
@@ -531,7 +535,7 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 					return m, cmd
 				}
 			}
-		case "enter", " ":
+		case "enter", "space":
 			if m.focusedPanel == panelLeft && m.cursor < len(m.nodes) {
 				if m.nodes[m.cursor].isCategory {
 					toggleFold(m.nodes, m.cursor)
@@ -638,7 +642,7 @@ func (m BrowserModel) View() string {
 	}
 
 	if m.err != nil {
-		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+		dimStyle := style.Dim
 		return fmt.Sprintf("\n  Error: %v\n\n  %s\n", m.err,
 			dimStyle.Render("Press Esc to go back."))
 	}
@@ -651,7 +655,7 @@ func (m BrowserModel) View() string {
 // ├──/└── tree connectors. Each visible node is exactly one visual line,
 // padded to leftPanelWidth columns.
 func (m BrowserModel) viewTree() string {
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	dimStyle := style.Dim
 	catStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 	selStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
 
@@ -698,7 +702,7 @@ func (m BrowserModel) viewTree() string {
 				connector = "└── "
 			}
 			prefixLen := len(indent) + len(connector)
-			title := truncateText(node.label, leftPanelWidth-prefixLen)
+			title := style.Truncate(node.label, leftPanelWidth-prefixLen)
 			line := indent + connector + title
 			line = padLine(line, leftPanelWidth)
 			if selected {
@@ -740,7 +744,7 @@ func (m BrowserModel) viewTree() string {
 	}
 
 	// Add scroll indicators when content overflows
-	dimStyle2 := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	dimStyle2 := style.Dim
 	hasMore := end < len(allLines)
 	hasLess := offset > 0
 
@@ -857,13 +861,13 @@ func (m BrowserModel) viewSplit() string {
 
 		lW := lipgloss.Width(left)
 		if lW > leftInner {
-			left = truncateTreeLine(left, leftInner)
+			left = style.Truncate(left, leftInner)
 		} else if lW < leftInner {
 			left += strings.Repeat(" ", leftInner-lW)
 		}
 		rW := lipgloss.Width(right)
 		if rW > rightInner {
-			right = truncateTreeLine(right, rightInner)
+			right = style.Truncate(right, rightInner)
 		} else if rW < rightInner {
 			right += strings.Repeat(" ", rightInner-rW)
 		}
@@ -900,42 +904,9 @@ func padLine(s string, width int) string {
 		return s + strings.Repeat(" ", width-w)
 	}
 	if w > width {
-		return truncateTreeLine(s, width)
+		return style.Truncate(s, width)
 	}
 	return s
-}
-
-// truncateTreeLine clips s to at most maxW visual columns, appending "…" if needed.
-func truncateTreeLine(s string, maxW int) string {
-	if lipgloss.Width(s) <= maxW {
-		return s
-	}
-	runes := []rune(s)
-	for i := len(runes) - 1; i >= 0; i-- {
-		candidate := string(runes[:i]) + "…"
-		if lipgloss.Width(candidate) <= maxW {
-			return candidate
-		}
-	}
-	return "…"
-}
-
-// truncateText truncates plain text to maxW visual columns.
-func truncateText(s string, maxW int) string {
-	if lipgloss.Width(s) <= maxW {
-		return s
-	}
-	runes := []rune(s)
-	if maxW <= 1 {
-		return "…"
-	}
-	for i := len(runes) - 1; i >= 0; i-- {
-		candidate := string(runes[:i]) + "…"
-		if lipgloss.Width(candidate) <= maxW {
-			return candidate
-		}
-	}
-	return "…"
 }
 
 // replaceLastChar replaces the trailing padding of a line with a rendered
@@ -943,7 +914,7 @@ func truncateText(s string, maxW int) string {
 func replaceLastChar(line string, targetWidth int, indicator string) string {
 	indW := lipgloss.Width(indicator)
 	// Truncate line to make room for the indicator
-	trimmed := truncateTreeLine(line, targetWidth-indW)
+	trimmed := style.Truncate(line, targetWidth-indW)
 	trimmedW := lipgloss.Width(trimmed)
 	gap := targetWidth - trimmedW - indW
 	if gap < 0 {

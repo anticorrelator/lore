@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/vt"
 )
 
@@ -658,7 +658,7 @@ func TestSpecPanelSingleEscForwardsAndDoesNotDetach(t *testing.T) {
 	m := NewSpecPanelModel("test")
 	m.ptmx = w
 
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 
 	if msg := firstCmdMsg(cmd); msg != nil {
 		if _, ok := msg.(TerminalDetachMsg); ok {
@@ -684,8 +684,8 @@ func TestSpecPanelDoubleEscDetaches(t *testing.T) {
 	m := NewSpecPanelModel("test")
 	// Leave m.ptmx nil — handleEscKey skips the write but still arms/fires.
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 
 	msg := firstCmdMsg(cmd)
 	detach, ok := msg.(TerminalDetachMsg)
@@ -703,11 +703,11 @@ func TestSpecPanelDoubleEscDetaches(t *testing.T) {
 func TestSpecPanelEscOutsideWindowForwardsAgain(t *testing.T) {
 	m := NewSpecPanelModel("test")
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	// Backdate the arm so the next Esc falls outside the window.
 	m.lastEscTime = m.lastEscTime.Add(-2 * escDetachWindow)
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if msg := firstCmdMsg(cmd); msg != nil {
 		if _, ok := msg.(TerminalDetachMsg); ok {
 			t.Fatal("Esc after window expired produced detach; expected re-arm and forward")
@@ -718,15 +718,15 @@ func TestSpecPanelEscOutsideWindowForwardsAgain(t *testing.T) {
 func TestSpecPanelInterveningKeyClearsEscArm(t *testing.T) {
 	m := NewSpecPanelModel("test")
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	// A non-Esc key arriving between the two Escs should clear the arm so the
 	// follow-up Esc is treated as a fresh single press, not a detach.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	if !m.lastEscTime.IsZero() {
 		t.Errorf("non-Esc key should clear lastEscTime; got %v", m.lastEscTime)
 	}
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if msg := firstCmdMsg(cmd); msg != nil {
 		if _, ok := msg.(TerminalDetachMsg); ok {
 			t.Fatal("Esc after intervening key produced detach; expected forward")

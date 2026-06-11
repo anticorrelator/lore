@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // sampleItems returns a slice of FollowUpItems covering all statuses for test use.
@@ -57,7 +57,7 @@ func TestListModelClosedFilterOrdersByUpdatedDescending(t *testing.T) {
 	// Pre-sort as LoadIndex would deliver them (newest first).
 	sorted := []FollowUpItem{items[3], items[1], items[2], items[0]}
 	m := NewListModel(sorted)
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
 	visible := m.visibleItems()
 	if len(visible) != 4 {
 		t.Fatalf("closed filter: got %d items, want 4", len(visible))
@@ -109,7 +109,7 @@ func TestListModelCurrentItemEmptyList(t *testing.T) {
 
 func TestListModelKeyDownMovesCursor(t *testing.T) {
 	m := NewListModel(sampleItems())
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.Cursor() != 1 {
 		t.Errorf("cursor after j = %d, want 1", m.Cursor())
 	}
@@ -117,7 +117,7 @@ func TestListModelKeyDownMovesCursor(t *testing.T) {
 
 func TestListModelKeyUpBoundedAtZero(t *testing.T) {
 	m := NewListModel(sampleItems())
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.Cursor() != 0 {
 		t.Errorf("cursor after k at 0 = %d, want 0 (bounded)", m.Cursor())
 	}
@@ -126,8 +126,8 @@ func TestListModelKeyUpBoundedAtZero(t *testing.T) {
 func TestListModelKeyGGoesToStart(t *testing.T) {
 	m := NewListModel(sampleItems())
 	// Move to end, then g.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("G")})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'G', Text: "G"})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
 	if m.Cursor() != 0 {
 		t.Errorf("cursor after G then g = %d, want 0", m.Cursor())
 	}
@@ -136,7 +136,7 @@ func TestListModelKeyGGoesToStart(t *testing.T) {
 func TestListModelKeyCapGGoesToEnd(t *testing.T) {
 	m := NewListModel(sampleItems())
 	visible := m.visibleItems()
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("G")})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'G', Text: "G"})
 	if m.Cursor() != len(visible)-1 {
 		t.Errorf("cursor after G = %d, want %d", m.Cursor(), len(visible)-1)
 	}
@@ -144,7 +144,7 @@ func TestListModelKeyCapGGoesToEnd(t *testing.T) {
 
 func TestListModelKeyDownEmitsPrefetch(t *testing.T) {
 	m := NewListModel(sampleItems())
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if cmd == nil {
 		t.Fatal("moving cursor down should emit a Cmd (hover-prefetch)")
 	}
@@ -161,7 +161,7 @@ func TestListModelKeyDownEmitsPrefetch(t *testing.T) {
 
 func TestListModelEnterEmitsSelectedMsg(t *testing.T) {
 	m := NewListModel(sampleItems())
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("Enter should emit a Cmd")
 	}
@@ -178,7 +178,7 @@ func TestListModelEnterEmitsSelectedMsg(t *testing.T) {
 
 func TestListModelEscEmitsDismissedMsg(t *testing.T) {
 	m := NewListModel(sampleItems())
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if cmd == nil {
 		t.Fatal("Esc should emit a Cmd")
 	}
@@ -205,7 +205,7 @@ func TestListModelSetItemsUpdatesVisible(t *testing.T) {
 
 func TestListModelSetItemsClampsCursor(t *testing.T) {
 	m := NewListModel(sampleItems())
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	// Replace with a single-item list — cursor should clamp to 0.
 	m.SetItems([]FollowUpItem{
 		{ID: "only", Title: "Only", Status: "open", Source: "test"},

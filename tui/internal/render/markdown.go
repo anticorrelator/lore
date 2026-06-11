@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // Package-level compiled regexps for inline markdown parsing.

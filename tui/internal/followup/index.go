@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // Attachment is a reference to an artifact associated with a follow-up

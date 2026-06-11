@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 type Model struct {
@@ -51,7 +53,7 @@ func (m Model) Count() int {
 }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
-	if km, ok := msg.(tea.KeyMsg); ok {
+	if km, ok := msg.(tea.KeyPressMsg); ok {
 		switch km.String() {
 		case "j", "down":
 			m.cursor++
@@ -123,16 +125,17 @@ func (m Model) View() string {
 	} else {
 		visibleItems := m.visibleItems()
 		for _, item := range visibleItems {
-			marker := " "
+			line := formatItem(" ", item, bodyW, s)
 			if m.itemIndex(item) == m.cursor {
-				marker = ">"
+				line = s.selected.Render(formatItem(">", item, bodyW, s))
 			}
-			lines = append(lines, formatItem(marker, item, bodyW, s))
+			lines = append(lines, line)
 		}
 		if end := m.offset + len(visibleItems); end < len(st.Items) {
 			lines = append(lines, s.dim.Render(fmt.Sprintf("... %d more", len(st.Items)-end)))
 		}
 	}
+	lines = append(lines, m.selectedClaimBlock(bodyW, s)...)
 	lines = append(lines, s.heading.Render("Recent verdicts"))
 	lines = append(lines, formatRecentSettled(st, bodyW, s)...)
 	if len(st.Leases) > 0 {
@@ -193,6 +196,29 @@ func (m Model) itemIndex(item Item) int {
 	return -1
 }
 
+// maxSelectedClaimLines bounds the selected-claim detail block so the panel
+// stays a compact dashboard rather than a full status report.
+const maxSelectedClaimLines = 4
+
+// selectedClaimBlock renders the compact detail block for the cursor-selected
+// queue item below the queue preview: a heading plus at most
+// maxSelectedClaimLines truncated lines. Nil when nothing is selected so the
+// empty section is omitted entirely.
+func (m Model) selectedClaimBlock(width int, s styleSet) []string {
+	sel := m.selectedItem()
+	if sel == nil {
+		return nil
+	}
+	block := formatSelectedClaim(sel, width, s)
+	if len(block) > maxSelectedClaimLines {
+		block = block[:maxSelectedClaimLines]
+	}
+	out := make([]string, 0, len(block)+2)
+	out = append(out, "", s.heading.Render("Selected claim"))
+	out = append(out, block...)
+	return out
+}
+
 func (m Model) selectedItem() *Item {
 	if len(m.status.Items) == 0 || m.cursor < 0 || m.cursor >= len(m.status.Items) {
 		return nil
@@ -215,19 +241,26 @@ func visibleItemRows(height int) int {
 }
 
 type styleSet struct {
-	heading lipgloss.Style
-	dim     lipgloss.Style
-	warn    lipgloss.Style
-	key     lipgloss.Style
+	heading  lipgloss.Style
+	dim      lipgloss.Style
+	warn     lipgloss.Style
+	key      lipgloss.Style
+	selected lipgloss.Style
+}
+
+// panelStyles is allocated once at package init; warn and selected are
+// widget-local (no shared primitive carries those values), the rest alias
+// the canonical primitives.
+var panelStyles = styleSet{
+	heading:  style.SubsectionTitle,
+	dim:      style.Dim,
+	warn:     lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true),
+	key:      style.KeyHint,
+	selected: lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true),
 }
 
 func styles() styleSet {
-	return styleSet{
-		heading: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("7")),
-		dim:     lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		warn:    lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true),
-		key:     lipgloss.NewStyle().Foreground(lipgloss.Color("7")).Bold(true),
-	}
+	return panelStyles
 }
 
 func row(label, value string) string {
@@ -319,7 +352,7 @@ func formatItem(marker string, item Item, width int, s styleSet) string {
 	} else if item.NextAction != "" {
 		parts = append(parts, "next: "+item.NextAction)
 	}
-	return truncate(strings.Join(parts, " "), width)
+	return style.Truncate(strings.Join(parts, " "), width)
 }
 
 func formatRecentSettled(st Status, width int, s styleSet) []string {
@@ -349,7 +382,7 @@ func formatSelectedClaim(item *Item, width int, s styleSet) []string {
 		return []string{s.dim.Render("no claim selected")}
 	}
 	id := firstNonEmpty(item.ClaimID, item.ID, "selected claim")
-	lines := []string{truncate("- "+id+" ["+stringDefault(item.Status, "pending")+"] "+item.WorkItem, width)}
+	lines := []string{style.Truncate("- "+id+" ["+stringDefault(item.Status, "pending")+"] "+item.WorkItem, width)}
 	if item.Claim != "" {
 		lines = append(lines, wrapDetail("claim: ", item.Claim, width, s)...)
 	}
@@ -358,7 +391,7 @@ func formatSelectedClaim(item *Item, width int, s styleSet) []string {
 		source = strings.TrimSpace(source + ":" + item.LineRange)
 	}
 	if source != "" {
-		lines = append(lines, truncate(s.dim.Render("evidence target: "+source), width))
+		lines = append(lines, style.Truncate(s.dim.Render("evidence target: "+source), width))
 	}
 	if item.Falsifier != "" {
 		lines = append(lines, wrapDetail("falsifier: ", item.Falsifier, width, s)...)
@@ -384,7 +417,7 @@ func formatLease(lease Lease, width int, s styleSet) string {
 	if lease.ExpiresAt != "" {
 		parts = append(parts, "expires "+lease.ExpiresAt)
 	}
-	return truncate(strings.Join(parts, " "), width)
+	return style.Truncate(strings.Join(parts, " "), width)
 }
 
 func formatLastSettled(last *LastSettled, width int, s styleSet) []string {
@@ -394,7 +427,7 @@ func formatLastSettled(last *LastSettled, width int, s styleSet) []string {
 	label := verdictLabel(last)
 	claim := firstNonEmpty(last.Claim, last.ClaimID, last.ID, "claim")
 	line := "- " + label + correctionOutcomeSuffix(last.CorrectionOutcome) + "  " + claim
-	return []string{truncate(line, width)}
+	return []string{style.Truncate(line, width)}
 }
 
 func correctionOutcomeSuffix(outcome CorrectionOutcome) string {
@@ -445,7 +478,7 @@ func wrapDetail(prefix, text string, width int, s styleSet) []string {
 	}
 	available := width - lipgloss.Width(prefix)
 	if available < 16 {
-		return []string{truncate(s.dim.Render(prefix+text), width)}
+		return []string{style.Truncate(s.dim.Render(prefix+text), width)}
 	}
 	words := strings.Fields(text)
 	if len(words) == 0 {
@@ -478,23 +511,9 @@ func wrapLines(lines []string, width int) string {
 	}
 	out := make([]string, len(lines))
 	for i, line := range lines {
-		out[i] = truncate(line, width)
+		out[i] = style.Truncate(line, width)
 	}
 	return strings.Join(out, "\n")
-}
-
-func truncate(s string, width int) string {
-	if width <= 0 || lipgloss.Width(s) <= width {
-		return s
-	}
-	runes := []rune(s)
-	for i := len(runes); i >= 0; i-- {
-		candidate := string(runes[:i]) + "..."
-		if lipgloss.Width(candidate) <= width {
-			return candidate
-		}
-	}
-	return ""
 }
 
 func firstNonEmpty(values ...string) string {

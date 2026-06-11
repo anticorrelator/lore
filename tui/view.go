@@ -5,13 +5,32 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/followup"
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
-func (m model) View() string {
+// View is the single wrapping point where terminal modes (alt screen, mouse)
+// and keyboard enhancements are applied to the rendered frame. Keep mode flags
+// here — scattering tea.NewView wrappers across call sites risks silently
+// dropping one.
+//
+// KeyboardEnhancements is left at its zero value on purpose: bubbletea v2
+// always requests basic Kitty key disambiguation (the renderer ORs in flag 1
+// unconditionally), which is what delivers Shift+Enter and other modified
+// keys to the modals. The struct fields only add key release/repeat and
+// alternate-key reporting, which this app does not use.
+func (m model) View() tea.View {
+	v := tea.NewView(m.viewContent())
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+func (m model) viewContent() string {
 	if m.err != nil {
 		return fmt.Sprintf("Error: %v\n\nPress q to quit.\n", m.err)
 	}
@@ -63,8 +82,8 @@ func (m model) View() string {
 
 // viewOnboarding renders a full-screen centered welcome view for first-time initialization.
 func (m model) viewOnboarding() string {
-	titleS := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
-	dimS := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	titleS := style.SectionTitle
+	dimS := style.Dim
 
 	repoName := m.config.RepoIdentifier
 	title := titleS.Render(repoName)
@@ -83,8 +102,8 @@ func (m model) viewOnboarding() string {
 
 // viewNoRepo renders a full-screen centered view when the TUI is launched outside a git repository.
 func (m model) viewNoRepo() string {
-	titleS := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
-	dimS := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	titleS := style.SectionTitle
+	dimS := style.Dim
 
 	dirName := filepath.Base(m.config.ProjectDir)
 	title := titleS.Render(dirName)
@@ -94,21 +113,6 @@ func (m model) viewNoRepo() string {
 
 	content := title + "\n\n" + line1 + "\n" + line2 + "\n\n" + quit
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
-}
-
-// truncateLine clips s to at most maxW visual columns, appending "…" if needed.
-func truncateLine(s string, maxW int) string {
-	if lipgloss.Width(s) <= maxW {
-		return s
-	}
-	runes := []rune(s)
-	for i := len(runes) - 1; i >= 0; i-- {
-		candidate := string(runes[:i]) + "…"
-		if lipgloss.Width(candidate) <= maxW {
-			return candidate
-		}
-	}
-	return "…"
 }
 
 // renderTabIndicator renders a full-width tab row showing "work (N) · follow-ups (N)".
@@ -161,7 +165,7 @@ func (m model) viewSettlement() string {
 		innerW = 24
 	}
 	borderS := lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
-	titleS := lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
+	titleS := style.SectionTitle
 	bodyW := innerW - 1 // outer row renderer adds one leading space
 	if bodyW < 1 {
 		bodyW = 1
@@ -171,8 +175,18 @@ func (m model) viewSettlement() string {
 	var b strings.Builder
 	b.WriteString(renderTabIndicator(stateSettlement, len(m.list.Items()), m.followupList.FollowUpCount(), m.settlement.Count(), w))
 	b.WriteString("\n")
+	// Border annotation: advertise j/k for whichever side of the split has
+	// focus, mirroring the annotation vocabulary used by the other panels.
+	annotKeyS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	annotLabelS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	annotLabel := "queue"
+	if m.focusedPanel == panelRight {
+		annotLabel = "settings"
+	}
+	annot := annotKeyS.Render("j/k  ") + annotLabelS.Render(annotLabel)
+	annotW := 5 + len(annotLabel) // "j/k  " + label
 	b.WriteString(borderS.Render("┌"))
-	b.WriteString(renderBorderTitle("Settlement", innerW, titleS, borderS))
+	b.WriteString(renderBorderTitleWithAnnot("Settlement", innerW, titleS, borderS, annot, annotW))
 	b.WriteString(borderS.Render("┐"))
 	b.WriteString("\n")
 	for i := 0; i < contentH; i++ {
@@ -182,7 +196,7 @@ func (m model) viewSettlement() string {
 		}
 		lineW := lipgloss.Width(line)
 		if lineW > innerW {
-			line = truncateLine(line, innerW)
+			line = style.Truncate(line, innerW)
 		} else if lineW < innerW {
 			line += strings.Repeat(" ", innerW-lineW)
 		}
@@ -251,25 +265,25 @@ func settlementSettingsMaxHeight(height int) int {
 func renderSettlementSeparator(width int) string {
 	label := " Settings "
 	if width <= lipgloss.Width(label)+2 {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", width))
+		return style.SectionRule.Render(strings.Repeat("─", width))
 	}
 	left := "─"
 	right := strings.Repeat("─", width-lipgloss.Width(label)-1)
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(left) +
-		lipgloss.NewStyle().Foreground(lipgloss.Color("7")).Bold(true).Render(label) +
-		lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(right)
+	return style.SectionRule.Render(left) +
+		style.SubsectionTitle.Render(label) +
+		style.SectionRule.Render(right)
 }
 
 func renderSettlementRule(width int) string {
 	if width < 1 {
 		return ""
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", width))
+	return style.SectionRule.Render(strings.Repeat("─", width))
 }
 
 func (m model) settlementSettingsInlineView(width, height int) string {
 	if m.settlementSettingsPanel == nil {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("settlement settings unavailable")
+		return style.Dim.Render("settlement settings unavailable")
 	}
 	if width < 24 {
 		width = 24
@@ -287,7 +301,7 @@ func fitLine(line string, width int) string {
 	}
 	lineW := lipgloss.Width(line)
 	if lineW > width {
-		return truncateLine(line, width)
+		return style.Truncate(line, width)
 	}
 	if lineW < width {
 		return line + strings.Repeat(" ", width-lineW)
@@ -446,13 +460,13 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 
 		lW := lipgloss.Width(left)
 		if lW > leftInner {
-			left = truncateLine(left, leftInner)
+			left = style.Truncate(left, leftInner)
 		} else if lW < leftInner {
 			left += strings.Repeat(" ", leftInner-lW)
 		}
 		rW := lipgloss.Width(right)
 		if rW > rightInner {
-			right = truncateLine(right, rightInner)
+			right = style.Truncate(right, rightInner)
 		} else if rW < rightInner {
 			right += strings.Repeat(" ", rightInner-rW)
 		}
@@ -531,7 +545,7 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 	padLine := func(line string) string {
 		w := lipgloss.Width(line)
 		if w > panelW {
-			return truncateLine(line, panelW)
+			return style.Truncate(line, panelW)
 		}
 		if w < panelW {
 			return line + strings.Repeat(" ", panelW-w)
@@ -628,9 +642,9 @@ func followupListDims(m model) (int, int) {
 
 // renderStatusBar renders a single-line context-sensitive keybinding hint bar.
 func (m model) renderStatusBar(width int) string {
-	dimS := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	keyS := lipgloss.NewStyle().Foreground(lipgloss.Color("7")).Bold(true)
-	sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	dimS := style.Dim
+	keyS := style.KeyHint
+	sepS := style.Separator
 
 	sep := sepS.Render("  ·  ")
 	hint := func(key, desc string) string {
@@ -721,6 +735,7 @@ func (m model) renderStatusBar(width int) string {
 				toggleLabel = "disable"
 			}
 			hints = []string{
+				hint("j/k", "queue"),
 				hint("p", "process once"),
 				hint("e", toggleLabel),
 				hint("l", "settings"),
@@ -789,7 +804,7 @@ func (m model) renderStatusBar(width int) string {
 	}
 
 	if m.flashErr != "" {
-		errS := lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+		errS := style.SevBlocking
 		bar := "  " + errS.Render(m.flashErr)
 		barW := lipgloss.Width(bar)
 		if barW < width {
@@ -811,7 +826,7 @@ func (m model) renderStatusBar(width int) string {
 	}
 
 	if m.aiLoading {
-		aiS := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+		aiS := style.SevSuggestion
 		bar := "  " + aiS.Render("Creating work items...")
 		barW := lipgloss.Width(bar)
 		if barW < width {

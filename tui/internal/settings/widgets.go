@@ -28,8 +28,8 @@ import (
 	"strconv"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // ----------------------------------------------------------------------------
@@ -314,9 +314,9 @@ func (a *AdvancedSection) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldInten
 	if !a.focused {
 		return a, nil, nil
 	}
-	if key, ok := msg.(tea.KeyMsg); ok {
+	if key, ok := msg.(tea.KeyPressMsg); ok {
 		switch key.String() {
-		case "enter", " ":
+		case "enter", "space":
 			if !a.expanded {
 				a.expanded = true
 				a.entered = true
@@ -324,7 +324,7 @@ func (a *AdvancedSection) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldInten
 					return a, nil, nil
 				}
 				cmd := a.child.Focus()
-				child, childCmd, intent := a.child.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				child, childCmd, intent := a.child.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 				a.child = child
 				return a, teaBatchLocal(cmd, childCmd), intent
 			}
@@ -532,7 +532,7 @@ func (e *EnumSelector) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) 
 	if !e.focused {
 		return e, nil, nil
 	}
-	key, ok := msg.(tea.KeyMsg)
+	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return e, nil, nil
 	}
@@ -545,7 +545,7 @@ func (e *EnumSelector) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) 
 		if e.cursor < len(e.values)-1 {
 			e.cursor++
 		}
-	case "enter", " ":
+	case "enter", "space":
 		// Commit selection. Closed-set rejection is structurally impossible
 		// here (cursor is bounded by len(e.values)) — but we still emit the
 		// validated typed value, not a free-form string, per D6.
@@ -695,12 +695,12 @@ func (t *ToggleRow) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 	if !t.focused {
 		return t, nil, nil
 	}
-	key, ok := msg.(tea.KeyMsg)
+	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return t, nil, nil
 	}
 	switch key.String() {
-	case " ", "enter", "x":
+	case "space", "enter", "x":
 		t.current = !t.current
 		t.present = true
 		return t, nil, &FieldIntent{
@@ -838,7 +838,7 @@ func (t *TextInput) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 	if !t.focused {
 		return t, nil, nil
 	}
-	key, ok := msg.(tea.KeyMsg)
+	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return t, nil, nil
 	}
@@ -1082,7 +1082,7 @@ func (n *NumericInput) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) 
 	if !n.focused {
 		return n, nil, nil
 	}
-	key, ok := msg.(tea.KeyMsg)
+	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return n, nil, nil
 	}
@@ -1369,7 +1369,7 @@ func (l *ListEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 	if !l.focused {
 		return l, nil, nil
 	}
-	key, ok := msg.(tea.KeyMsg)
+	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return l, nil, nil
 	}
@@ -1455,7 +1455,7 @@ func (l *ListEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 				l.cursor--
 			}
 		}
-	case " ", "x":
+	case "space", "x":
 		if l.selector && l.cursor >= 0 && l.cursor < len(l.allowed) {
 			l.toggleSelectedOption(l.allowed[l.cursor])
 		}
@@ -1645,7 +1645,7 @@ func (a *ActiveHoursRangesEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *Fi
 	if !a.focused {
 		return a, nil, nil
 	}
-	key, ok := msg.(tea.KeyMsg)
+	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return a, nil, nil
 	}
@@ -2157,7 +2157,7 @@ func (p *ClosedObjectSubPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *Field
 	if !p.focused || len(p.children) == 0 {
 		return p, nil, nil
 	}
-	if key, ok := msg.(tea.KeyMsg); ok {
+	if key, ok := msg.(tea.KeyPressMsg); ok {
 		switch key.String() {
 		case "enter":
 			if !p.entered {
@@ -2448,7 +2448,7 @@ func (kv *OpenKeysetKVEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldI
 	if !kv.focused {
 		return kv, nil, nil
 	}
-	key, ok := msg.(tea.KeyMsg)
+	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return kv, nil, nil
 	}

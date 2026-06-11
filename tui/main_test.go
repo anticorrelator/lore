@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/followup"
@@ -55,323 +55,194 @@ func TestClassifyStartupState_IndexMissing(t *testing.T) {
 	}
 }
 
-// fakeCSIMsg simulates bubbletea's unexported unknownCSISequenceMsg,
-// which is a []byte ([]uint8 under the hood). The reflect check in
-// translateCSIu detects any []uint8 slice, so this plain []byte works.
-type fakeCSIMsg []byte
-
-func TestTranslateCSIuEnter(t *testing.T) {
-	msg := fakeCSIMsg([]byte("\x1b[13u"))
-	got := translateCSIu(msg)
-	km, ok := got.(tea.KeyMsg)
-	if !ok {
-		t.Fatalf("expected tea.KeyMsg, got %T", got)
-	}
-	if km.Type != tea.KeyEnter {
-		t.Errorf("expected KeyEnter, got %v", km.Type)
-	}
-}
-
-func TestTranslateCSIuEsc(t *testing.T) {
-	msg := fakeCSIMsg([]byte("\x1b[27u"))
-	got := translateCSIu(msg)
-	km, ok := got.(tea.KeyMsg)
-	if !ok {
-		t.Fatalf("expected tea.KeyMsg, got %T", got)
-	}
-	if km.Type != tea.KeyEscape {
-		t.Errorf("expected KeyEscape, got %v", km.Type)
-	}
-}
-
-func TestTranslateCSIuTab(t *testing.T) {
-	msg := fakeCSIMsg([]byte("\x1b[9u"))
-	got := translateCSIu(msg)
-	km, ok := got.(tea.KeyMsg)
-	if !ok {
-		t.Fatalf("expected tea.KeyMsg, got %T", got)
-	}
-	if km.Type != tea.KeyTab {
-		t.Errorf("expected KeyTab, got %v", km.Type)
-	}
-}
-
-func TestTranslateCSIuBackspace(t *testing.T) {
-	msg := fakeCSIMsg([]byte("\x1b[127u"))
-	got := translateCSIu(msg)
-	km, ok := got.(tea.KeyMsg)
-	if !ok {
-		t.Fatalf("expected tea.KeyMsg, got %T", got)
-	}
-	if km.Type != tea.KeyBackspace {
-		t.Errorf("expected KeyBackspace, got %v", km.Type)
-	}
-}
-
-func TestTranslateCSIuShiftEnter(t *testing.T) {
-	msg := fakeCSIMsg([]byte("\x1b[13;2u"))
-	got := translateCSIu(msg)
-	if _, ok := got.(shiftEnterMsg); !ok {
-		t.Fatalf("expected shiftEnterMsg, got %T", got)
-	}
-}
-
-func TestTranslateCSIuAltEnter(t *testing.T) {
-	msg := fakeCSIMsg([]byte("\x1b[13;3u"))
-	got := translateCSIu(msg)
-	km, ok := got.(tea.KeyMsg)
-	if !ok {
-		t.Fatalf("expected tea.KeyMsg, got %T", got)
-	}
-	if km.Type != tea.KeyEnter {
-		t.Errorf("expected KeyEnter, got %v", km.Type)
-	}
-	if !km.Alt {
-		t.Errorf("expected Alt=true")
-	}
-}
-
-func TestTranslateCSIuCtrlC(t *testing.T) {
-	msg := fakeCSIMsg([]byte("\x1b[99;5u"))
-	got := translateCSIu(msg)
-	km, ok := got.(tea.KeyMsg)
-	if !ok {
-		t.Fatalf("expected tea.KeyMsg, got %T", got)
-	}
-	if km.Type != tea.KeyCtrlC {
-		t.Errorf("expected KeyCtrlC, got %v", km.Type)
-	}
-}
-
-func TestTranslateCSIuCtrlD(t *testing.T) {
-	msg := fakeCSIMsg([]byte("\x1b[100;5u"))
-	got := translateCSIu(msg)
-	km, ok := got.(tea.KeyMsg)
-	if !ok {
-		t.Fatalf("expected tea.KeyMsg, got %T", got)
-	}
-	if km.Type != tea.KeyCtrlD {
-		t.Errorf("expected KeyCtrlD, got %v", km.Type)
-	}
-}
-
-func TestTranslateCSIuPrintableChar(t *testing.T) {
-	msg := fakeCSIMsg([]byte("\x1b[97u"))
-	got := translateCSIu(msg)
-	km, ok := got.(tea.KeyMsg)
-	if !ok {
-		t.Fatalf("expected tea.KeyMsg, got %T", got)
-	}
-	if km.Type != tea.KeyRunes {
-		t.Errorf("expected KeyRunes, got %v", km.Type)
-	}
-	if len(km.Runes) != 1 || km.Runes[0] != 'a' {
-		t.Errorf("expected Runes=['a'], got %v", km.Runes)
-	}
-}
-
-func TestTranslateCSIuAltPrintable(t *testing.T) {
-	msg := fakeCSIMsg([]byte("\x1b[49;3u"))
-	got := translateCSIu(msg)
-	km, ok := got.(tea.KeyMsg)
-	if !ok {
-		t.Fatalf("expected tea.KeyMsg, got %T", got)
-	}
-	if km.Type != tea.KeyRunes {
-		t.Errorf("expected KeyRunes, got %v", km.Type)
-	}
-	if !km.Alt {
-		t.Errorf("expected Alt=true")
-	}
-	if len(km.Runes) != 1 || km.Runes[0] != '1' {
-		t.Errorf("expected Runes=['1'], got %v", km.Runes)
-	}
-}
-
-func TestTranslateCSIuSpace(t *testing.T) {
-	msg := fakeCSIMsg([]byte("\x1b[32u"))
-	got := translateCSIu(msg)
-	km, ok := got.(tea.KeyMsg)
-	if !ok {
-		t.Fatalf("expected tea.KeyMsg, got %T", got)
-	}
-	if km.Type != tea.KeyRunes {
-		t.Errorf("expected KeyRunes, got %v", km.Type)
-	}
-	if len(km.Runes) != 1 || km.Runes[0] != ' ' {
-		t.Errorf("expected Runes=[' '], got %v", km.Runes)
-	}
-}
-
-func TestTranslateCSIuNonCSIPassthrough(t *testing.T) {
-	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}
-	got := translateCSIu(msg)
-	km, ok := got.(tea.KeyMsg)
-	if !ok {
-		t.Fatalf("expected tea.KeyMsg, got %T", got)
-	}
-	if km.Type != tea.KeyRunes || len(km.Runes) != 1 || km.Runes[0] != 'a' {
-		t.Errorf("expected unchanged KeyMsg{Runes: ['a']}, got %v", km)
-	}
-}
-
-func TestTranslateCSIuNonUFinalPassthrough(t *testing.T) {
-	// CSI sequence that doesn't end in 'u' should pass through.
-	msg := fakeCSIMsg([]byte("\x1b[13~"))
-	got := translateCSIu(msg)
-	if _, ok := got.(fakeCSIMsg); !ok {
-		t.Fatalf("expected fakeCSIMsg passthrough, got %T", got)
-	}
-}
-
 // --- Keybind contract tests ---
 //
 // These verify that every keybind advertised in a modal's render function
-// produces the correct tea.Msg when sent as a kitty CSI u sequence.
-// If a new keybind is added to a modal's UI but the CSI u parser can't
-// translate it, these tests fail — catching the regression before it ships.
+// dispatches correctly through the modal's real Update path when delivered
+// as a native bubbletea v2 KeyPressMsg. If a keybind is added to a modal's
+// UI but the dispatch switch can't match it, these tests fail — catching the
+// regression before it ships.
+//
+// Enable surface: bubbletea v2 always requests basic Kitty keyboard
+// disambiguation from the terminal (its renderer ORs in flag 1 regardless of
+// View.KeyboardEnhancements), so Shift+Enter and Alt-modified keys arrive as
+// native key presses with no app-level enable sequence. The app intentionally
+// relies on that default; TestRootViewTerminalModes pins it.
 
-// csiuSeq builds a CSI u byte sequence: ESC [ <codepoint> [; <modifier>] u
-func csiuSeq(codepoint int, modifier int) fakeCSIMsg {
-	if modifier <= 1 {
-		return fakeCSIMsg([]byte(fmt.Sprintf("\x1b[%du", codepoint)))
+// TestRootViewTerminalModes verifies the root View() applies the terminal
+// modes at its single wrapping point: alt screen, cell-motion mouse, and the
+// intentionally zero-value KeyboardEnhancements (v2's default Kitty
+// disambiguation is what delivers Shift+Enter to the modals; the struct
+// fields only add key release/repeat reporting this app does not use).
+func TestRootViewTerminalModes(t *testing.T) {
+	m := minimalModel(stateWork, nil, nil)
+	m.width = 80
+	m.height = 24
+	v := m.View()
+	if !v.AltScreen {
+		t.Error("root view must set AltScreen")
 	}
-	return fakeCSIMsg([]byte(fmt.Sprintf("\x1b[%d;%du", codepoint, modifier)))
+	if v.MouseMode != tea.MouseModeCellMotion {
+		t.Errorf("root view must request cell-motion mouse mode, got %v", v.MouseMode)
+	}
+	if v.KeyboardEnhancements != (tea.KeyboardEnhancements{}) {
+		t.Errorf("KeyboardEnhancements should stay zero (reliance on v2 default disambiguation), got %+v", v.KeyboardEnhancements)
+	}
 }
 
-// TestSpecConfirmModalKeybindContract verifies that the keybinds displayed in
-// renderSpecConfirmModal (Alt+1, Alt+2, Enter, Esc, Shift+Enter) all produce
-// the correct tea.Msg via translateCSIu.
+// specConfirmModel builds a model with the spec-confirm modal open and a
+// focused textarea, mirroring handleSpecRequest.
+func specConfirmModel() model {
+	m := minimalModel(stateWork, nil, nil)
+	m.width = 100
+	m.height = 40
+	ta := newModalTextarea()
+	ta.Focus()
+	m.sessionConfirmInput = ta
+	m.sessionConfirmActive = true
+	m.sessionConfirmSlug = "test-item"
+	m.sessionConfirmTitle = "test-item"
+	m.sessionConfirmFindingIndex = -1
+	return m
+}
+
+// updateModel runs m.Update and re-asserts the concrete model type.
+func updateModel(t *testing.T, m model, msg tea.Msg) (model, tea.Cmd) {
+	t.Helper()
+	um, cmd := m.Update(msg)
+	nm, ok := um.(model)
+	if !ok {
+		t.Fatalf("Update returned %T, want model", um)
+	}
+	return nm, cmd
+}
+
+// TestSpecConfirmModalKeybindContract verifies the keybinds displayed in
+// renderSpecConfirmModal (Enter, Esc, Shift+Enter, Alt+1, Alt+2) against the
+// modal's actual dispatch in Update.
 func TestSpecConfirmModalKeybindContract(t *testing.T) {
-	tests := []struct {
-		label   string
-		seq     fakeCSIMsg
-		checkFn func(t *testing.T, msg tea.Msg)
-	}{
-		{
-			label: "Enter (launch)",
-			seq:   csiuSeq(13, 1),
-			checkFn: func(t *testing.T, msg tea.Msg) {
-				km := assertKeyMsg(t, msg)
-				if km.Type != tea.KeyEnter {
-					t.Errorf("expected KeyEnter, got %v", km.Type)
-				}
-			},
-		},
-		{
-			label: "Esc (cancel)",
-			seq:   csiuSeq(27, 1),
-			checkFn: func(t *testing.T, msg tea.Msg) {
-				km := assertKeyMsg(t, msg)
-				if km.Type != tea.KeyEscape {
-					t.Errorf("expected KeyEscape, got %v", km.Type)
-				}
-			},
-		},
-		{
-			label: "Shift+Enter (newline)",
-			seq:   csiuSeq(13, 2),
-			checkFn: func(t *testing.T, msg tea.Msg) {
-				if _, ok := msg.(shiftEnterMsg); !ok {
-					t.Fatalf("expected shiftEnterMsg, got %T", msg)
-				}
-			},
-		},
-		{
-			label: "Alt+1 (toggle short mode)",
-			seq:   csiuSeq('1', 3),
-			checkFn: func(t *testing.T, msg tea.Msg) {
-				km := assertKeyMsg(t, msg)
-				assertKeyString(t, km, "alt+1")
-			},
-		},
-		{
-			label: "Alt+2 (toggle skip confirm)",
-			seq:   csiuSeq('2', 3),
-			checkFn: func(t *testing.T, msg tea.Msg) {
-				km := assertKeyMsg(t, msg)
-				assertKeyString(t, km, "alt+2")
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.label, func(t *testing.T) {
-			tt.checkFn(t, translateCSIu(tt.seq))
-		})
-	}
+	t.Run("Shift+Enter (newline)", func(t *testing.T) {
+		m := specConfirmModel()
+		nm, _ := updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+		if got := nm.sessionConfirmInput.Value(); got != "\n" {
+			t.Errorf("expected newline in textarea, got %q", got)
+		}
+		if !nm.sessionConfirmActive {
+			t.Error("modal should stay open")
+		}
+	})
+	t.Run("Alt+Enter (newline)", func(t *testing.T) {
+		m := specConfirmModel()
+		nm, _ := updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
+		if got := nm.sessionConfirmInput.Value(); got != "\n" {
+			t.Errorf("expected newline in textarea, got %q", got)
+		}
+	})
+	t.Run("Enter (launch)", func(t *testing.T) {
+		m := specConfirmModel()
+		nm, cmd := updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+		if nm.sessionConfirmActive {
+			t.Error("modal should close on Enter")
+		}
+		if cmd == nil {
+			t.Error("Enter should dispatch the launch command")
+		}
+		if !nm.hasSpecPanel("test-item") {
+			t.Error("Enter should pre-create the spec panel")
+		}
+	})
+	t.Run("Esc (cancel)", func(t *testing.T) {
+		m := specConfirmModel()
+		nm, _ := updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+		if nm.sessionConfirmActive {
+			t.Error("modal should close on Esc")
+		}
+	})
+	t.Run("Alt+1 (toggle short mode)", func(t *testing.T) {
+		m := specConfirmModel()
+		before := m.sessionConfirmShortMode
+		nm, _ := updateModel(t, m, tea.KeyPressMsg{Code: '1', Mod: tea.ModAlt})
+		if nm.sessionConfirmShortMode == before {
+			t.Error("Alt+1 should toggle short mode")
+		}
+	})
+	t.Run("Alt+2 (toggle skip confirm)", func(t *testing.T) {
+		m := specConfirmModel()
+		before := m.sessionConfirmSkipConfirm
+		nm, _ := updateModel(t, m, tea.KeyPressMsg{Code: '2', Mod: tea.ModAlt})
+		if nm.sessionConfirmSkipConfirm == before {
+			t.Error("Alt+2 should toggle skip confirm")
+		}
+	})
 }
 
-// TestAIModalKeybindContract verifies keybinds used by the AI input modal.
+// TestAIModalKeybindContract verifies keybinds used by the AI input modal
+// (Enter, Esc, Shift+Enter, Alt+Enter, typed characters).
 func TestAIModalKeybindContract(t *testing.T) {
-	tests := []struct {
-		label   string
-		seq     fakeCSIMsg
-		checkFn func(t *testing.T, msg tea.Msg)
-	}{
-		{
-			label: "Enter (submit)",
-			seq:   csiuSeq(13, 1),
-			checkFn: func(t *testing.T, msg tea.Msg) {
-				km := assertKeyMsg(t, msg)
-				if km.Type != tea.KeyEnter {
-					t.Errorf("expected KeyEnter, got %v", km.Type)
-				}
-			},
-		},
-		{
-			label: "Esc (cancel)",
-			seq:   csiuSeq(27, 1),
-			checkFn: func(t *testing.T, msg tea.Msg) {
-				km := assertKeyMsg(t, msg)
-				if km.Type != tea.KeyEscape {
-					t.Errorf("expected KeyEscape, got %v", km.Type)
-				}
-			},
-		},
-		{
-			label: "Shift+Enter (newline)",
-			seq:   csiuSeq(13, 2),
-			checkFn: func(t *testing.T, msg tea.Msg) {
-				if _, ok := msg.(shiftEnterMsg); !ok {
-					t.Fatalf("expected shiftEnterMsg, got %T", msg)
-				}
-			},
-		},
-		{
-			label: "Alt+Enter (newline)",
-			seq:   csiuSeq(13, 3),
-			checkFn: func(t *testing.T, msg tea.Msg) {
-				km := assertKeyMsg(t, msg)
-				if km.Type != tea.KeyEnter {
-					t.Errorf("expected KeyEnter, got %v", km.Type)
-				}
-				if !km.Alt {
-					t.Error("expected Alt=true")
-				}
-			},
-		},
+	aiModel := func() model {
+		m := minimalModel(stateWork, nil, nil)
+		m.width = 100
+		m.height = 40
+		ta := newModalTextarea()
+		ta.Focus()
+		m.aiInput = ta
+		m.aiInputActive = true
+		return m
 	}
-	for _, tt := range tests {
-		t.Run(tt.label, func(t *testing.T) {
-			tt.checkFn(t, translateCSIu(tt.seq))
-		})
-	}
+	t.Run("Shift+Enter (newline)", func(t *testing.T) {
+		nm, _ := updateModel(t, aiModel(), tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+		if got := nm.aiInput.Value(); got != "\n" {
+			t.Errorf("expected newline in textarea, got %q", got)
+		}
+	})
+	t.Run("Alt+Enter (newline)", func(t *testing.T) {
+		nm, _ := updateModel(t, aiModel(), tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
+		if got := nm.aiInput.Value(); got != "\n" {
+			t.Errorf("expected newline in textarea, got %q", got)
+		}
+	})
+	t.Run("Enter on empty input (close, no-op)", func(t *testing.T) {
+		nm, cmd := updateModel(t, aiModel(), tea.KeyPressMsg{Code: tea.KeyEnter})
+		if nm.aiInputActive {
+			t.Error("modal should close on Enter")
+		}
+		if cmd != nil {
+			t.Error("empty prompt should not dispatch a command")
+		}
+	})
+	t.Run("Esc (cancel)", func(t *testing.T) {
+		nm, _ := updateModel(t, aiModel(), tea.KeyPressMsg{Code: tea.KeyEscape})
+		if nm.aiInputActive {
+			t.Error("modal should close on Esc")
+		}
+	})
+	t.Run("typed characters reach textarea", func(t *testing.T) {
+		m := aiModel()
+		for _, c := range "hi" {
+			m, _ = updateModel(t, m, tea.KeyPressMsg{Code: c, Text: string(c)})
+		}
+		if got := m.aiInput.Value(); got != "hi" {
+			t.Errorf("expected %q in textarea, got %q", "hi", got)
+		}
+	})
 }
 
 // TestTypedCharactersInKittyMode verifies that regular character input
-// is correctly translated from CSI u to KeyRunes. This prevents the
-// "modal freezes because typed characters don't reach the textarea" regression.
+// reaches the modal textarea as native v2 key presses. This guards the
+// "modal freezes because typed characters don't reach the textarea"
+// regression that the v1 CSI u translation layer existed to fix.
 func TestTypedCharactersInKittyMode(t *testing.T) {
 	chars := "abcdefghijklmnopqrstuvwxyz0123456789 "
 	for _, c := range chars {
 		t.Run(fmt.Sprintf("char_%c", c), func(t *testing.T) {
-			got := translateCSIu(csiuSeq(int(c), 1))
-			km := assertKeyMsg(t, got)
-			if km.Type != tea.KeyRunes {
-				t.Errorf("char %c: expected KeyRunes, got %v", c, km.Type)
+			m := specConfirmModel()
+			key := tea.KeyPressMsg{Code: c, Text: string(c)}
+			if c == ' ' {
+				key = tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
 			}
-			if len(km.Runes) != 1 || km.Runes[0] != c {
-				t.Errorf("char %c: expected rune %c, got %v", c, c, km.Runes)
+			nm, _ := updateModel(t, m, key)
+			if got := nm.sessionConfirmInput.Value(); got != string(c) {
+				t.Errorf("char %c: expected %q in textarea, got %q", c, string(c), got)
 			}
 		})
 	}
@@ -564,7 +435,7 @@ func TestSettlementRootNavigationFromListViews(t *testing.T) {
 			m := minimalModel(tc.state, []work.WorkItem{{Slug: "work-1", Title: "Work 1"}}, nil)
 			m.focusedPanel = panelLeft
 
-			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+			next, cmd := m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 			nm := next.(model)
 			if nm.state != stateSettlement {
 				t.Fatalf("state = %v, want stateSettlement", nm.state)
@@ -588,7 +459,7 @@ func TestSettlementRootNavigationIgnoredInTerminalMode(t *testing.T) {
 	m.focusedPanel = panelRight
 	m.setSpecPanel("work-1", work.NewSpecPanelModel("work-1"))
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 	nm := next.(model)
 	if nm.state != stateWork {
 		t.Fatalf("state = %v, want stateWork", nm.state)
@@ -607,7 +478,7 @@ func TestSettlementRootNavigationAllowedWhenTerminalNotFocused(t *testing.T) {
 	m.focusedPanel = panelLeft
 	m.setSpecPanel("work-1", work.NewSpecPanelModel("work-1"))
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 	nm := next.(model)
 	if nm.state != stateSettlement {
 		t.Fatalf("state = %v, want stateSettlement", nm.state)
@@ -669,7 +540,7 @@ func TestSettlementActionKeybindsReturnCommands(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.key, func(t *testing.T) {
 			m := minimalModel(stateSettlement, nil, nil)
-			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.key)})
+			next, cmd := m.Update(tea.KeyPressMsg{Code: []rune(tc.key)[0], Text: tc.key})
 			if next.(model).state != stateSettlement {
 				t.Fatalf("state changed unexpectedly")
 			}
@@ -682,7 +553,7 @@ func TestSettlementActionKeybindsReturnCommands(t *testing.T) {
 
 func TestSettlementVNoLongerOpensConfigModal(t *testing.T) {
 	m := minimalModel(stateSettlement, nil, nil)
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'v', Text: "v"})
 	nm := next.(model)
 	if nm.settingsActive {
 		t.Fatalf("v should not open a settlement config overlay")
@@ -696,7 +567,7 @@ func TestSettlementEscLeavesInlineSettingsPanel(t *testing.T) {
 	m := minimalModel(stateSettlement, nil, nil)
 	m.focusedPanel = panelRight
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	nm := next.(model)
 	if cmd != nil {
 		t.Fatalf("esc leaving inline settings should not dispatch a command")
@@ -948,9 +819,8 @@ func TestHandlePanelRoutingMouseClickLeftPanel(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	msg := tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonLeft,
+	msg := tea.MouseClickMsg{
+		Button: tea.MouseLeft,
 		X:      10, // well within left panel (< leftPanelWidth+2 = 42)
 		Y:      5,
 	}
@@ -970,9 +840,8 @@ func TestHandlePanelRoutingMouseClickRightPanel(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	msg := tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonLeft,
+	msg := tea.MouseClickMsg{
+		Button: tea.MouseLeft,
 		X:      60, // right of boundary (leftPanelWidth+2 = 42)
 		Y:      5,
 	}
@@ -992,9 +861,8 @@ func TestHandlePanelRoutingMouseClickTopBottomTopPanel(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	msg := tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonLeft,
+	msg := tea.MouseClickMsg{
+		Button: tea.MouseLeft,
 		X:      30,
 		Y:      2, // within top panel (topPanelHeight ~= 10 for height=40)
 	}
@@ -1011,7 +879,7 @@ func TestHandlePanelRoutingTabFocusesRight(t *testing.T) {
 	m := minimalModel(stateWork, nil, nil)
 	m.focusedPanel = panelLeft
 
-	msg := tea.KeyMsg{Type: tea.KeyTab}
+	msg := tea.KeyPressMsg{Code: tea.KeyTab}
 	_, consumed := handlePanelRouting(&m, msg, noopCallbacks())
 	if !consumed {
 		t.Error("tab should be consumed")
@@ -1025,7 +893,7 @@ func TestHandlePanelRoutingTabNotConsumedWhenOnRight(t *testing.T) {
 	m := minimalModel(stateWork, nil, nil)
 	m.focusedPanel = panelRight
 
-	msg := tea.KeyMsg{Type: tea.KeyTab}
+	msg := tea.KeyPressMsg{Code: tea.KeyTab}
 	_, consumed := handlePanelRouting(&m, msg, noopCallbacks())
 	if consumed {
 		t.Error("tab when already on right should not be consumed")
@@ -1037,7 +905,7 @@ func TestHandlePanelRoutingEscFocusesLeft(t *testing.T) {
 	m.focusedPanel = panelRight
 	m.terminalMode = false
 
-	msg := tea.KeyMsg{Type: tea.KeyEscape}
+	msg := tea.KeyPressMsg{Code: tea.KeyEscape}
 	_, consumed := handlePanelRouting(&m, msg, noopCallbacks())
 	if !consumed {
 		t.Error("esc should be consumed")
@@ -1051,7 +919,7 @@ func TestHandlePanelRoutingEscNotConsumedWhenOnLeft(t *testing.T) {
 	m := minimalModel(stateWork, nil, nil)
 	m.focusedPanel = panelLeft
 
-	msg := tea.KeyMsg{Type: tea.KeyEscape}
+	msg := tea.KeyPressMsg{Code: tea.KeyEscape}
 	_, consumed := handlePanelRouting(&m, msg, noopCallbacks())
 	if consumed {
 		t.Error("esc on left panel should not be consumed")
@@ -1074,7 +942,7 @@ func TestHandlePanelRoutingCtrlTTogglesTerminalMode(t *testing.T) {
 		return sm, true
 	}
 
-	keyMsg := tea.KeyMsg{Type: tea.KeyCtrlT}
+	keyMsg := tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl}
 	_, consumed := handlePanelRouting(&m, keyMsg, cb)
 	if !consumed {
 		t.Error("ctrl+t should be consumed when spec panel exists and is done")
@@ -1089,7 +957,7 @@ func TestHandlePanelRoutingCtrlTExitsTerminalMode(t *testing.T) {
 	m.focusedPanel = panelRight
 	m.terminalMode = true
 
-	msg := tea.KeyMsg{Type: tea.KeyCtrlT}
+	msg := tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl}
 	_, consumed := handlePanelRouting(&m, msg, noopCallbacks())
 	if !consumed {
 		t.Error("ctrl+t in terminal mode should be consumed")
@@ -1105,9 +973,9 @@ func TestHandlePanelRoutingEntitySpecificKeyNotConsumed(t *testing.T) {
 
 	// 's', 'c', 'p', 'd' are entity-specific and must NOT be consumed by handlePanelRouting
 	for _, key := range []string{"s", "c", "p", "d", "enter"} {
-		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
+		msg := tea.KeyPressMsg{Code: []rune(key)[0], Text: key}
 		if key == "enter" {
-			msg = tea.KeyMsg{Type: tea.KeyEnter}
+			msg = tea.KeyPressMsg{Code: tea.KeyEnter}
 		}
 		_, consumed := handlePanelRouting(&m, msg, noopCallbacks())
 		if consumed {
@@ -1350,24 +1218,6 @@ func TestHandleFollowupDetailMtimeCheckedMtimeChangeProducesDetailLoadedMsg(t *t
 	}
 }
 
-// --- Test helpers ---
-
-func assertKeyMsg(t *testing.T, msg tea.Msg) tea.KeyMsg {
-	t.Helper()
-	km, ok := msg.(tea.KeyMsg)
-	if !ok {
-		t.Fatalf("expected tea.KeyMsg, got %T", msg)
-	}
-	return km
-}
-
-func assertKeyString(t *testing.T, km tea.KeyMsg, want string) {
-	t.Helper()
-	if km.String() != want {
-		t.Errorf("expected %q, got %q", want, km.String())
-	}
-}
-
 // --- Posting flow tests ---
 
 // modelWithLoadedFollowup builds a stateFollowUps model with the Comments tab active
@@ -1406,7 +1256,7 @@ func modelWithLoadedFollowup(t *testing.T, id string, review *followup.ProposedR
 		if m.followupDetail.ActiveTab() == followup.TabComments {
 			break
 		}
-		fd, _ := m.followupDetail.Update(tea.KeyMsg{Type: tea.KeyTab})
+		fd, _ := m.followupDetail.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 		m.followupDetail = fd
 	}
 
@@ -1430,7 +1280,7 @@ func TestPKeyTriggersConfirmModalWithSelectedComments(t *testing.T) {
 		t.Fatalf("pre-condition: SelectedCount = %d, want 1", m.followupDetail.SelectedCount())
 	}
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'P', Text: "P"})
 	nm := next.(model)
 
 	if nm.confirmAction != "post_review" {
@@ -1453,7 +1303,7 @@ func TestPKeyWithZeroSelectedSetsFlashErr(t *testing.T) {
 	}
 	m := modelWithLoadedFollowup(t, "test-fu-zero", review, 0)
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'P', Text: "P"})
 	nm := next.(model)
 
 	if nm.confirmAction != "" {
@@ -1474,7 +1324,7 @@ func TestPKeyWithoutPRMetadataSetsFlashErr(t *testing.T) {
 	}
 	m := modelWithLoadedFollowup(t, "test-fu-nometa", review, 1)
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'P', Text: "P"})
 	nm := next.(model)
 
 	if nm.confirmAction != "" {
@@ -1693,7 +1543,7 @@ func TestFollowupLeftPanelKeySyncsTerminalMode(t *testing.T) {
 	m.terminalMode = false
 	// Cursor starts at 0 (idNone); pressing j moves it to 1 (idPanel).
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	nm := next.(model)
 
 	if !nm.terminalMode {
@@ -1714,7 +1564,7 @@ func TestFollowupLeftPanelKeyNoSpecPanelLeavesTerminalModeOff(t *testing.T) {
 	m.focusedPanel = panelLeft
 	m.terminalMode = false
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	nm := next.(model)
 
 	if nm.terminalMode {
@@ -1724,39 +1574,15 @@ func TestFollowupLeftPanelKeyNoSpecPanelLeavesTerminalModeOff(t *testing.T) {
 
 // --- loadFollowupDetail unit tests ---
 
-// cmdContainsMouseEnable reports whether cmd, when executed, produces a BatchMsg
-// that contains tea.EnableMouseCellMotion (identified by the returned msg type name).
-func cmdContainsMouseEnable(cmd tea.Cmd) bool {
-	if cmd == nil {
-		return false
-	}
-	msg := cmd()
-	batch, ok := msg.(tea.BatchMsg)
-	if !ok {
-		// Single cmd — check directly.
-		return fmt.Sprintf("%T", msg) == "tea.enableMouseCellMotionMsg"
-	}
-	for _, c := range batch {
-		if c == nil {
-			continue
-		}
-		if fmt.Sprintf("%T", c()) == "tea.enableMouseCellMotionMsg" {
-			return true
-		}
-	}
-	return false
-}
-
-// TestLoadFollowupDetailSyncsTerminalMode tests loadFollowupDetail directly for
-// three cases: (a) spec panel + panelRight → terminalMode=true, cmd contains
-// EnableMouseCellMotion; (b) no spec panel → terminalMode=false, cmd does not
-// contain EnableMouseCellMotion; (c) spec panel + panelLeft → terminalMode=true,
-// cmd is NOT a batch (no EnableMouseCellMotion injected).
+// TestLoadFollowupDetailSyncsTerminalMode tests loadFollowupDetail directly:
+// terminalMode tracks spec-panel existence and the mtime baseline resets.
+// (Mouse tracking is persistent root-view state under bubbletea v2, so no
+// re-enable command is expected in any case.)
 func TestLoadFollowupDetailSyncsTerminalMode(t *testing.T) {
 	const id = "fu-test"
 	panel := work.NewSpecPanelModel(id)
 
-	t.Run("spec_panel_right_focus", func(t *testing.T) {
+	t.Run("spec_panel", func(t *testing.T) {
 		m := minimalModel(stateFollowUps, nil, nil)
 		m.focusedPanel = panelRight
 		m.setSpecPanel(id, panel)
@@ -1769,8 +1595,8 @@ func TestLoadFollowupDetailSyncsTerminalMode(t *testing.T) {
 		if m.lastFollowupDetailMtime != (time.Time{}) {
 			t.Error("lastFollowupDetailMtime should be reset to zero")
 		}
-		if !cmdContainsMouseEnable(cmd) {
-			t.Error("cmd should contain EnableMouseCellMotion when terminalMode && focusedPanel==panelRight")
+		if cmd == nil {
+			t.Error("loadFollowupDetail should return the detail load command")
 		}
 	})
 
@@ -1787,27 +1613,8 @@ func TestLoadFollowupDetailSyncsTerminalMode(t *testing.T) {
 		if m.lastFollowupDetailMtime != (time.Time{}) {
 			t.Error("lastFollowupDetailMtime should be reset to zero")
 		}
-		if cmdContainsMouseEnable(cmd) {
-			t.Error("cmd should not contain EnableMouseCellMotion when no spec panel")
-		}
-	})
-
-	t.Run("spec_panel_left_focus", func(t *testing.T) {
-		m := minimalModel(stateFollowUps, nil, nil)
-		m.focusedPanel = panelLeft
-		m.setSpecPanel(id, panel)
-
-		cmd := m.loadFollowupDetail(id)
-
-		if !m.terminalMode {
-			t.Error("terminalMode should be true when spec panel exists")
-		}
-		if m.lastFollowupDetailMtime != (time.Time{}) {
-			t.Error("lastFollowupDetailMtime should be reset to zero")
-		}
-		// When focus is on the left panel, EnableMouseCellMotion should NOT be batched.
-		if cmdContainsMouseEnable(cmd) {
-			t.Error("cmd should not contain EnableMouseCellMotion when focusedPanel==panelLeft")
+		if cmd == nil {
+			t.Error("loadFollowupDetail should return the detail load command")
 		}
 	})
 }
@@ -1852,12 +1659,12 @@ func followupModelWithEditingActive(t *testing.T) model {
 		if m.followupDetail.ActiveTab() == followup.TabComments {
 			break
 		}
-		fd, _ := m.followupDetail.Update(tea.KeyMsg{Type: tea.KeyTab})
+		fd, _ := m.followupDetail.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 		m.followupDetail = fd
 	}
 
 	// Send 'e' to enter edit mode on the first inline comment.
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
 	m = next.(model)
 
 	if !m.followupDetail.IsEditing() {
@@ -1870,7 +1677,7 @@ func TestEditModeGuardEscDoesNotShiftPanelFocus(t *testing.T) {
 	m := followupModelWithEditingActive(t)
 
 	// Esc during editing should NOT move focus to panelLeft.
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	nm := next.(model)
 
 	if nm.focusedPanel != panelRight {
@@ -1887,7 +1694,7 @@ func TestEditModeGuardEscShiftsFocusWhenNotEditing(t *testing.T) {
 	m.focusedPanel = panelRight
 
 	// Esc when not editing should move focus to panelLeft.
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	nm := next.(model)
 
 	if nm.focusedPanel != panelLeft {
@@ -1934,7 +1741,7 @@ func followupModelWithReview(t *testing.T, eventType string, selectedCount int) 
 		if m.followupDetail.ActiveTab() == followup.TabComments {
 			break
 		}
-		fd, _ := m.followupDetail.Update(tea.KeyMsg{Type: tea.KeyTab})
+		fd, _ := m.followupDetail.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 		m.followupDetail = fd
 	}
 	if m.followupDetail.ActiveTab() != followup.TabComments {
@@ -1946,7 +1753,7 @@ func followupModelWithReview(t *testing.T, eventType string, selectedCount int) 
 func TestPKeyConfirmTitleContainsDefaultCOMMENT(t *testing.T) {
 	m := followupModelWithReview(t, "COMMENT", 2)
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'P', Text: "P"})
 	nm := next.(model)
 
 	if nm.confirmAction != "post_review" {
@@ -1963,7 +1770,7 @@ func TestPKeyConfirmTitleContainsDefaultCOMMENT(t *testing.T) {
 func TestPKeyConfirmTitleInterpolatesAPPROVE(t *testing.T) {
 	m := followupModelWithReview(t, "APPROVE", 1)
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'P', Text: "P"})
 	nm := next.(model)
 
 	if nm.confirmAction != "post_review" {
@@ -1977,7 +1784,7 @@ func TestPKeyConfirmTitleInterpolatesAPPROVE(t *testing.T) {
 func TestPKeyConfirmTitleInterpolatesREQUESTCHANGES(t *testing.T) {
 	m := followupModelWithReview(t, "REQUEST_CHANGES", 3)
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'P', Text: "P"})
 	nm := next.(model)
 
 	if nm.confirmAction != "post_review" {
@@ -1992,7 +1799,7 @@ func TestPKeyNoopWhenNoCommentsSelected(t *testing.T) {
 	m := followupModelWithReview(t, "COMMENT", 0)
 	// Mark all comments unselected (none were added above since selectedCount=0).
 	// confirmAction should not be set.
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'P', Text: "P"})
 	nm := next.(model)
 
 	if nm.confirmAction != "" {
@@ -2007,14 +1814,14 @@ func TestEditModeGuardGlobalShortcutsSuppressedDuringEditing(t *testing.T) {
 	m := followupModelWithEditingActive(t)
 
 	// 'w' should NOT leave stateFollowUps during editing.
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'w', Text: "w"})
 	nm := next.(model)
 	if nm.state != stateFollowUps {
 		t.Errorf("w during editing: state changed to %v, want stateFollowUps", nm.state)
 	}
 
 	// '?' should NOT open help during editing.
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	next, _ = m.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
 	nm = next.(model)
 	if nm.showHelp {
 		t.Error("? during editing: showHelp was set, want suppressed")
@@ -2025,7 +1832,7 @@ func TestEditModeGuardTabDoesNotShiftPanelFocusDuringEditing(t *testing.T) {
 	m := followupModelWithEditingActive(t)
 
 	// Tab during editing should not move focus to left panel.
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	nm := next.(model)
 
 	if nm.focusedPanel != panelRight {
@@ -2078,7 +1885,7 @@ func followupModelWithLensFindings(t *testing.T, selectAll bool) model {
 		if m.followupDetail.ActiveTab() == followup.TabTriage {
 			break
 		}
-		fd, _ := m.followupDetail.Update(tea.KeyMsg{Type: tea.KeyTab})
+		fd, _ := m.followupDetail.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 		m.followupDetail = fd
 	}
 	if m.followupDetail.ActiveTab() != followup.TabTriage {
@@ -2094,7 +1901,7 @@ func TestFindingsTabPKeyEmitsPromoteRequestMsgWithFindings(t *testing.T) {
 	m := followupModelWithLensFindings(t, true) // all findings selected
 
 	var captured followup.PromoteRequestMsg
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"})
 	_ = next
 
 	if cmd == nil {
@@ -2122,7 +1929,7 @@ func TestFindingsTabPKeyEmitsPromoteRequestMsgWithFindings(t *testing.T) {
 func TestFindingsTabPKeyEmitsPromoteRequestMsgWithEmptyFindingsWhenNoneSelected(t *testing.T) {
 	m := followupModelWithLensFindings(t, false) // no findings selected
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"})
 	_ = next
 
 	if cmd == nil {
@@ -2164,7 +1971,7 @@ func TestStateOnboardingRendersWelcomeScreen(t *testing.T) {
 	m.width = 80
 	m.height = 24
 
-	out := m.View()
+	out := m.viewContent()
 
 	// Should contain the repo name.
 	if !strings.Contains(out, "my-repo") {
@@ -2192,7 +1999,7 @@ func TestStateOnboardingEnterDispatchesInit(t *testing.T) {
 	m.width = 80
 	m.height = 24
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	updated := next.(model)
 
 	if !updated.initLoading {
@@ -2213,7 +2020,7 @@ func TestStateOnboardingEnterWhileLoadingIsNoop(t *testing.T) {
 	m.config.ProjectDir = "/tmp/my-repo"
 	m.initLoading = true
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	if cmd != nil {
 		t.Error("Enter while initLoading=true should return nil Cmd, got non-nil")
@@ -2279,7 +2086,7 @@ func TestStateOnboardingLoadingRendersInitializing(t *testing.T) {
 	m.height = 24
 	m.initLoading = true
 
-	out := m.View()
+	out := m.viewContent()
 
 	if !strings.Contains(out, "Initializing...") {
 		t.Errorf("onboarding view with initLoading should contain 'Initializing...', got:\n%s", out)
@@ -2297,7 +2104,7 @@ func TestStateNoRepoRendersMessage(t *testing.T) {
 	m.width = 80
 	m.height = 24
 
-	out := m.View()
+	out := m.viewContent()
 
 	if !strings.Contains(out, "myproject") {
 		t.Errorf("no-repo view should contain directory name 'myproject', got:\n%s", out)
@@ -2326,19 +2133,19 @@ func TestStateNoRepoKeyHandling(t *testing.T) {
 	m := minimalModel(stateNoRepo, nil, nil)
 
 	// q should return tea.Quit
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
 	if cmd == nil {
 		t.Error("q key in stateNoRepo should return a non-nil Cmd (tea.Quit)")
 	}
 
 	// ctrl+c should return tea.Quit
-	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if cmd == nil {
 		t.Error("ctrl+c in stateNoRepo should return a non-nil Cmd (tea.Quit)")
 	}
 
 	// an unrelated key (e.g. 'j') should be consumed silently
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if cmd != nil {
 		t.Error("unrelated key in stateNoRepo should return nil Cmd")
 	}
@@ -2387,7 +2194,7 @@ func TestDoctorBannerSurvivesKeyPress(t *testing.T) {
 	m.doctorBanner = "lore doctor: 2 issue(s) detected — run 'lore doctor' for details"
 	m.flashErr = "transient failure"
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	nm := next.(model)
 
 	if nm.flashErr != "" {

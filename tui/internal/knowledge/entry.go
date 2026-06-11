@@ -7,9 +7,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // EntryMeta holds metadata parsed from the HTML comment at the bottom of a knowledge entry.
@@ -156,8 +156,8 @@ func (m EntryModel) Update(msg tea.Msg) (EntryModel, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		if m.ready {
-			m.viewport.Width = msg.Width
-			m.viewport.Height = m.contentHeight()
+			m.viewport.SetWidth(msg.Width)
+			m.viewport.SetHeight(m.contentHeight())
 		}
 
 	case EntryLoadedMsg:
@@ -170,7 +170,7 @@ func (m EntryModel) Update(msg tea.Msg) (EntryModel, tea.Cmd) {
 
 		rendered := renderEntryMarkdown(msg.Content, m.contentWidth())
 
-		vp := viewport.New(m.contentWidth(), m.contentHeight())
+		vp := viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
 		vp.SetContent(rendered)
 		m.viewport = vp
 		m.ready = true

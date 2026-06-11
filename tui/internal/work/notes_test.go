@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestParseNotes(t *testing.T) {
@@ -280,11 +280,11 @@ func TestNewNotesTabModel(t *testing.T) {
 		if m.height != 40 {
 			t.Errorf("expected height=40, got %d", m.height)
 		}
-		if m.vp.Width != 120 {
-			t.Errorf("expected vp.Width=120, got %d", m.vp.Width)
+		if m.vp.Width() != 120 {
+			t.Errorf("expected vp.Width=120, got %d", m.vp.Width())
 		}
-		if m.vp.Height != 40 {
-			t.Errorf("expected vp.Height=40, got %d", m.vp.Height)
+		if m.vp.Height() != 40 {
+			t.Errorf("expected vp.Height=40, got %d", m.vp.Height())
 		}
 	})
 }

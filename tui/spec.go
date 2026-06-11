@@ -1,7 +1,7 @@
 package main
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/work"
@@ -13,7 +13,7 @@ func (m model) handleSpecRequest(msg work.SpecRequestMsg) (model, tea.Cmd) {
 	if m.hasSpecPanel(msg.Slug) {
 		m.terminalMode = true
 		m.focusedPanel = panelRight
-		return m, tea.EnableMouseCellMotion
+		return m, nil
 	}
 	ta := newModalTextarea()
 	focusCmd := ta.Focus()
@@ -24,7 +24,6 @@ func (m model) handleSpecRequest(msg work.SpecRequestMsg) (model, tea.Cmd) {
 	m.sessionConfirmSkipConfirm = true
 	m.sessionConfirmChatMode = false
 	m.sessionConfirmActive = true
-	m.enableKittyKeyboard()
 	return m, focusCmd
 }
 
@@ -42,7 +41,6 @@ func (m model) handleChatRequest(msg work.ChatRequestMsg) (model, tea.Cmd) {
 	m.sessionConfirmChatMode = true
 	m.sessionConfirmFollowupMode = false
 	m.sessionConfirmActive = true
-	m.enableKittyKeyboard()
 	return m, focusCmd
 }
 
@@ -72,7 +70,6 @@ func (m model) handleFollowupChatRequest(msg followup.FollowupChatRequestMsg) (m
 	if msg.EditPrompt != "" {
 		ta2.SetValue(msg.EditPrompt)
 	}
-	m.enableKittyKeyboard()
 	return m, focusCmd2
 }
 
@@ -96,17 +93,17 @@ func (m model) handleSpecProcessStarted(msg work.SpecProcessStartedMsg) (model, 
 			m.sessionLaunchedFromModal = false
 			m.terminalMode = true
 			m.focusedPanel = panelLeft
-			return m, tea.Batch(cmd, tea.EnableMouseCellMotion)
+			return m, cmd
 		}
 		m.terminalMode = true
 		m.focusedPanel = panelRight
-		return m, tea.Batch(cmd, tea.EnableMouseCellMotion)
+		return m, cmd
 	}
 	// Auto-enter terminal focus for follow-up chat sessions.
 	if m.state == stateFollowUps && slug == m.followupDetail.CurrentID() {
 		m.terminalMode = true
 		m.focusedPanel = panelRight
-		return m, tea.Batch(cmd, tea.EnableMouseCellMotion)
+		return m, cmd
 	}
 	return m, cmd
 }
@@ -197,7 +194,6 @@ func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 	// PTY error — mark done with error, cleanup PTY. Still reload list in
 	// case spec wrote partial files before failing.
 	slug := msg.Slug
-	wasSpec := false
 	if m.specPanels != nil {
 		if panel, ok := m.specPanels[slug]; ok {
 			sm, _ := panel.Update(msg) // marks hasError+done
@@ -205,11 +201,9 @@ func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 			m.specPanels[slug] = sm
 			if m.terminalMode && m.list.CurrentSlug() == slug {
 				m.focusedPanel = panelRight
-				wasSpec = true
 			}
 			if m.terminalMode && m.state == stateFollowUps && m.followupDetail.CurrentID() == slug {
 				m.focusedPanel = panelRight
-				wasSpec = true
 			}
 		}
 	}
@@ -226,9 +220,6 @@ func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 	} else {
 		reloadCmd = loadWorkItems(m.config.WorkDir)
 	}
-	if wasSpec {
-		return m, tea.Batch(tea.EnableMouseCellMotion, reloadCmd)
-	}
 	return m, reloadCmd
 }
 
@@ -236,7 +227,7 @@ func (m model) handleTerminalDetach(_ work.TerminalDetachMsg) (model, tea.Cmd) {
 	// User pressed Esc from terminal focus — return to list view.
 	m.focusedPanel = panelLeft
 	m.terminalMode = false
-	return m, tea.EnableMouseCellMotion
+	return m, nil
 }
 
 func (m model) handleTerminalTerminate(msg work.TerminalTerminateMsg) (model, tea.Cmd) {
@@ -249,7 +240,6 @@ func (m model) handleTerminalTerminate(msg work.TerminalTerminateMsg) (model, te
 			delete(m.specPanels, slug)
 		}
 	}
-	wasSpec := m.terminalMode
 	m.terminalMode = false
 
 	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
@@ -262,9 +252,6 @@ func (m model) handleTerminalTerminate(msg work.TerminalTerminateMsg) (model, te
 		reloadCmd = followup.LoadIndexCmd(m.config.KnowledgeDir)
 	} else {
 		reloadCmd = loadWorkItems(m.config.WorkDir)
-	}
-	if wasSpec {
-		return m, tea.Batch(tea.EnableMouseCellMotion, reloadCmd)
 	}
 	return m, reloadCmd
 }

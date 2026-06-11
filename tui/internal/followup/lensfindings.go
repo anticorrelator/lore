@@ -7,10 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/render"
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 // WriteLensSidecarMsg is sent after an async write of lens-findings.json completes.
@@ -87,7 +88,7 @@ func (m LensFindingsModel) Update(msg tea.Msg) (LensFindingsModel, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		visible := m.visibleFindings()
 
 		// Action menu is open: intercept keys before normal navigation.
@@ -162,7 +163,7 @@ func (m LensFindingsModel) Update(msg tea.Msg) (LensFindingsModel, tea.Cmd) {
 			if len(visible) > 0 {
 				m.cursor = len(visible) - 1
 			}
-		case " ", "x":
+		case "space", "x":
 			// Toggle selection on the current finding (via backing index).
 			if m.cursor >= 0 && m.cursor < len(visible) {
 				backingIdx := visible[m.cursor]
@@ -255,17 +256,20 @@ func (m LensFindingsModel) AllLensFindings() []LensFinding {
 
 func (m LensFindingsModel) View() string {
 	if len(m.findings) == 0 {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  No lens findings.")
+		return style.Dim.Render("  No lens findings.")
 	}
 
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	dimStyle := style.Dim
 	selectedBg := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
 	pathStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	// groundingStyle derives from the canonical Dim; hoisted here so the
+	// card loop below never allocates per row.
+	groundingStyle := style.Dim.Italic(true)
 
 	// Severity styles
-	sevBlocking := lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	sevSuggestion := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	sevQuestion := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	sevBlocking := style.SevBlocking
+	sevSuggestion := style.SevSuggestion
+	sevQuestion := style.SevQuestion
 
 	visible := m.visibleFindings()
 
@@ -369,7 +373,7 @@ func (m LensFindingsModel) View() string {
 					card.WriteByte('\n')
 				}
 				for _, gl := range groundingLines {
-					card.WriteString(selectedBg.Render(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true).Render("      " + gl)))
+					card.WriteString(selectedBg.Render(groundingStyle.Render("      " + gl)))
 					card.WriteByte('\n')
 				}
 				if m.actionMenuOpen {
@@ -389,7 +393,7 @@ func (m LensFindingsModel) View() string {
 					card.WriteByte('\n')
 				}
 				for _, gl := range groundingLines {
-					card.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true).Render("      " + gl))
+					card.WriteString(groundingStyle.Render("      " + gl))
 					card.WriteByte('\n')
 				}
 			}

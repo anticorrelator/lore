@@ -4,9 +4,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // NoteEntry represents a parsed session note entry.
@@ -69,7 +69,7 @@ func NewNotesTabModel(notesContent *string, width, height int) NotesTabModel {
 	}
 
 	rendered := renderMarkdown(stripped, width)
-	vp := viewport.New(width, height)
+	vp := viewport.New(viewport.WithWidth(width), viewport.WithHeight(height))
 	vp.SetContent(rendered)
 	return NotesTabModel{
 		fallback: true,
@@ -132,8 +132,8 @@ func (m NotesTabModel) Update(msg tea.Msg) (NotesTabModel, tea.Cmd) {
 		case tea.WindowSizeMsg:
 			m.width = msg.Width
 			m.height = msg.Height
-			m.vp.Width = msg.Width
-			m.vp.Height = msg.Height
+			m.vp.SetWidth(msg.Width)
+			m.vp.SetHeight(msg.Height)
 		default:
 			var cmd tea.Cmd
 			m.vp, cmd = m.vp.Update(msg)
@@ -147,9 +147,9 @@ func (m NotesTabModel) Update(msg tea.Msg) (NotesTabModel, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-	case tea.MouseMsg:
+	case tea.MouseWheelMsg:
 		switch msg.Button {
-		case tea.MouseButtonWheelDown:
+		case tea.MouseWheelDown:
 			// Clamp to max scroll: total content lines minus 1.
 			if m.cursor >= 0 && m.cursor < len(m.entries) {
 				contentLines := strings.Split(m.entries[m.cursor].Content, "\n")
@@ -161,13 +161,13 @@ func (m NotesTabModel) Update(msg tea.Msg) (NotesTabModel, tea.Cmd) {
 					m.scroll++
 				}
 			}
-		case tea.MouseButtonWheelUp:
+		case tea.MouseWheelUp:
 			if m.scroll > 0 {
 				m.scroll--
 			}
 		}
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "j", "down":
 			if m.cursor < len(m.entries)-1 {

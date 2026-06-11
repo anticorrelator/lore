@@ -3,7 +3,7 @@ package work
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestExtraFileLabel(t *testing.T) {
@@ -130,7 +130,7 @@ func TestDetailModelTabCycling(t *testing.T) {
 		if m.ActiveTab() != m.tabs[m.activeTab].id {
 			t.Fatalf("step %d: ActiveTab mismatch", i)
 		}
-		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	}
 
 	// Should wrap around to first tab
@@ -139,7 +139,7 @@ func TestDetailModelTabCycling(t *testing.T) {
 	}
 
 	// Shift-Tab should go to last tab
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	if m.activeTab != len(m.tabs)-1 {
 		t.Errorf("after shift-tab from 0, activeTab = %d, want %d", m.activeTab, len(m.tabs)-1)
 	}
@@ -152,7 +152,7 @@ func TestDetailModelBackToList(t *testing.T) {
 	m.tabs = m.buildTabs()
 
 	// Esc should produce BackToListMsg
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if cmd == nil {
 		t.Fatal("expected a command from Esc")
 	}

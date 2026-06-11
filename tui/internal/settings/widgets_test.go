@@ -6,38 +6,38 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
-// keyMsg returns the tea.KeyMsg the widget Update path matches against.
-// Wraps a single string the same way bubbletea's tea.KeyMsg.String() round-trips.
-func keyMsg(s string) tea.KeyMsg {
+// keyMsg returns the tea.KeyPressMsg the widget Update path matches against.
+// Wraps a single string the same way bubbletea's tea.KeyPressMsg.String() round-trips.
+func keyMsg(s string) tea.KeyPressMsg {
 	switch s {
 	case "enter":
-		return tea.KeyMsg{Type: tea.KeyEnter}
+		return tea.KeyPressMsg{Code: tea.KeyEnter}
 	case "esc":
-		return tea.KeyMsg{Type: tea.KeyEsc}
+		return tea.KeyPressMsg{Code: tea.KeyEsc}
 	case "tab":
-		return tea.KeyMsg{Type: tea.KeyTab}
+		return tea.KeyPressMsg{Code: tea.KeyTab}
 	case "shift+tab":
-		return tea.KeyMsg{Type: tea.KeyShiftTab}
+		return tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
 	case "backspace":
-		return tea.KeyMsg{Type: tea.KeyBackspace}
+		return tea.KeyPressMsg{Code: tea.KeyBackspace}
 	case "up":
-		return tea.KeyMsg{Type: tea.KeyUp}
+		return tea.KeyPressMsg{Code: tea.KeyUp}
 	case "down":
-		return tea.KeyMsg{Type: tea.KeyDown}
+		return tea.KeyPressMsg{Code: tea.KeyDown}
 	case "left":
-		return tea.KeyMsg{Type: tea.KeyLeft}
+		return tea.KeyPressMsg{Code: tea.KeyLeft}
 	case "right":
-		return tea.KeyMsg{Type: tea.KeyRight}
+		return tea.KeyPressMsg{Code: tea.KeyRight}
 	case " ":
-		return tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
+		return tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
 	}
 	if len([]rune(s)) == 1 {
-		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+		return tea.KeyPressMsg{Code: []rune(s)[0], Text: s}
 	}
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+	return tea.KeyPressMsg{Code: []rune(s)[0], Text: s}
 }
 
 // dispatch sends a single keystroke and returns the new widget + intent.
@@ -764,7 +764,7 @@ func TestEnumSelector_MultiLineRenderWithLabel(t *testing.T) {
 	w := NewEnumSelector("capability_overrides.subagents", []string{"full", "partial", "fallback", "none"}, nil, "", true)
 	w.SetDisplayHints("subagents", "Spawns fresh subagent contexts for fanout (worker, researcher, reviewer) so each receives a clean context window.")
 	w.SetWrapWidth(60)
-	out := w.View()
+	out := stripANSI(w.View())
 	lines := strings.Split(out, "\n")
 	if len(lines) < 3 {
 		t.Fatalf("expected at least 3 lines (header, options, description), got %d:\n%s", len(lines), out)
@@ -920,7 +920,7 @@ func TestToggleRow_RendersDescription(t *testing.T) {
 	w := NewToggleRow("features.enabled", "enabled", true, true, false)
 	w.SetDisplayHints("enabled", "When true, this feature is active.")
 	w.SetWrapWidth(60)
-	out := w.View()
+	out := stripANSI(w.View())
 	if !strings.Contains(out, "When true, this feature is active.") {
 		t.Errorf("expected description in toggle render, got:\n%s", out)
 	}

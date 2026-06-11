@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/creack/pty"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
@@ -40,18 +40,19 @@ func compactErr(prefix string, err error) string {
 func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
-		isClick := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && !msg.Shift
+		click, isClick := msg.(tea.MouseClickMsg)
+		isClick = isClick && click.Button == tea.MouseLeft && !click.Mod.Contains(tea.ModShift)
 		if isClick {
 			if m.layoutMode == config.LayoutLeftRight {
 				xBoundary := leftPanelWidth + 2
-				if msg.X < xBoundary {
+				if click.X < xBoundary {
 					m.focusedPanel = panelLeft
 				} else {
 					m.focusedPanel = panelRight
 				}
 			} else {
 				topH := m.topPanelHeight()
-				if msg.Y <= 1+topH {
+				if click.Y <= 1+topH {
 					m.focusedPanel = panelLeft
 				} else {
 					m.focusedPanel = panelRight
@@ -84,7 +85,7 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 			return cmd, true
 		}
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc":
 			if m.focusedPanel == panelRight && !m.terminalMode {
@@ -99,7 +100,7 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 				}
 				if panel, ok := cb.specPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
 					m.terminalMode = true
-					return tea.EnableMouseCellMotion, true
+					return nil, true
 				}
 			}
 		case "tab":
@@ -136,11 +137,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 	}()
 
-	msg = translateCSIu(msg)
-
 	// Help modal: intercept all keys; Esc or ? closes it.
 	if m.showHelp {
-		if km, ok := msg.(tea.KeyMsg); ok {
+		if km, ok := msg.(tea.KeyPressMsg); ok {
 			if km.String() == "esc" || km.String() == "?" {
 				m.showHelp = false
 			}
@@ -155,7 +154,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	// active draft). Per D10, drafts are discarded at modal close — the
 	// next open rebuilds the panel from disk state below.
 	if m.settingsActive && m.settingsPanel != nil {
-		if km, ok := msg.(tea.KeyMsg); ok {
+		if km, ok := msg.(tea.KeyPressMsg); ok {
 			// Global quit shortcuts must escape the modal so the TUI
 			// behaves consistently with every other view (the main
 			// key-block at line ~534 below). 'q' is letter input for
@@ -196,7 +195,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	// Confirm modal for archive/delete: intercept all keys.
 	if m.confirmAction != "" {
-		if km, ok := msg.(tea.KeyMsg); ok {
+		if km, ok := msg.(tea.KeyPressMsg); ok {
 			switch km.String() {
 			case "y", "enter":
 				action := m.confirmAction
@@ -231,19 +230,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	// Spec confirm modal: intercept all keys before launching subprocess.
 	if m.sessionConfirmActive {
-		if _, ok := msg.(shiftEnterMsg); ok {
-			m.sessionConfirmInput.InsertRune('\n')
-			return m, nil
-		}
-		if km, ok := msg.(tea.KeyMsg); ok {
+		if km, ok := msg.(tea.KeyPressMsg); ok {
 			switch km.String() {
-			case "alt+enter":
+			case "shift+enter", "alt+enter":
 				m.sessionConfirmInput.InsertRune('\n')
 				return m, nil
 			case "enter":
 				extraContext := strings.TrimSpace(m.sessionConfirmInput.Value())
 				m.sessionConfirmActive = false
-				m.disableKittyKeyboard()
 				slug := m.sessionConfirmSlug
 				// Mark item as speccing in the list.
 				m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug})
@@ -260,7 +254,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, work.StartTerminalCmd(slug, m.sessionConfirmTitle, m.config.ProjectDir, specW, specH, extraContext, m.sessionConfirmShortMode, m.sessionConfirmChatMode, m.sessionConfirmSkipConfirm, m.sessionConfirmFollowupMode, m.config.KnowledgeDir, findingIndex)
 			case "esc", "ctrl+c":
 				m.sessionConfirmActive = false
-				m.disableKittyKeyboard()
 				return m, nil
 			case "alt+1":
 				if !m.sessionConfirmChatMode {
@@ -283,19 +276,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	// AI modal: intercept all keys when the input is active.
 	if m.aiInputActive {
-		if _, ok := msg.(shiftEnterMsg); ok {
-			m.aiInput.InsertRune('\n')
-			return m, nil
-		}
-		if km, ok := msg.(tea.KeyMsg); ok {
+		if km, ok := msg.(tea.KeyPressMsg); ok {
 			switch km.String() {
-			case "alt+enter":
+			case "shift+enter", "alt+enter":
 				m.aiInput.InsertRune('\n')
 				return m, nil
 			case "enter":
 				prompt := strings.TrimSpace(m.aiInput.Value())
 				m.aiInputActive = false
-				m.disableKittyKeyboard()
 				if prompt == "" {
 					return m, nil
 				}
@@ -307,7 +295,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, tea.Batch(runWorkAI(ctx, prompt), aiTick())
 			case "esc", "ctrl+c":
 				m.aiInputActive = false
-				m.disableKittyKeyboard()
 				return m, nil
 			default:
 				var taCmd tea.Cmd
@@ -320,7 +307,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	// Popup overlay: route all key messages to popup when active.
 	if m.popupActive {
-		if _, ok := msg.(tea.KeyMsg); ok {
+		if _, ok := msg.(tea.KeyPressMsg); ok {
 			var cmd tea.Cmd
 			m.popup, cmd = m.popup.Update(msg)
 
@@ -477,10 +464,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			return m, cmd
 		case stateKnowledge:
 			// Browser uses the same leftPanelWidth split as stateWork LayoutLeftRight.
-			isClick := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && !msg.Shift
+			click, isClick := msg.(tea.MouseClickMsg)
+			isClick = isClick && click.Button == tea.MouseLeft && !click.Mod.Contains(tea.ModShift)
 			if isClick {
 				xBoundary := leftPanelWidth + 2
-				if msg.X < xBoundary {
+				if click.X < xBoundary {
 					m.browser.FocusLeft()
 				} else {
 					m.browser.FocusRight()
@@ -520,7 +508,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			return m, cmd
 		}
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// Clear any transient flash error on the next key press.
 		m.flashErr = ""
 
@@ -711,7 +699,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				focusCmd := ta.Focus()
 				m.aiInput = ta
 				m.aiInputActive = true
-				m.enableKittyKeyboard()
 				return m, focusCmd
 			}
 		case "L":
@@ -880,7 +867,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				}
 				if panel, ok := specPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
 					m.terminalMode = true
-					return m, tea.EnableMouseCellMotion
+					return m, nil
 				}
 			}
 		case "tab":
@@ -1528,7 +1515,7 @@ func (m *model) refreshSettlementSettingsPanel() {
 	m.ensureSettlementSettingsPanel()
 }
 
-func (m model) updateInlineSettlementSettings(msg tea.KeyMsg) (model, tea.Cmd) {
+func (m model) updateInlineSettlementSettings(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	m.ensureSettlementSettingsPanel()
 	if m.settlementSettingsPanel == nil {
 		return m, nil
@@ -1536,7 +1523,7 @@ func (m model) updateInlineSettlementSettings(msg tea.KeyMsg) (model, tea.Cmd) {
 	panel, cmd := m.settlementSettingsPanel.Update(msg)
 	m.settlementSettingsPanel = panel
 	switch msg.String() {
-	case "enter", " ", "u":
+	case "enter", "space", "u":
 		cmd = batchCmd(cmd, loadSettlementStatus())
 	}
 	return m, cmd
@@ -1638,16 +1625,10 @@ func (m *model) leaveFollowups() tea.Cmd {
 
 // loadFollowupDetail is the single chokepoint for all followup navigation paths.
 // It resets the mtime baseline, syncs terminalMode, and initiates the detail load.
-// When arriving at an item that has an active terminal and right-panel focus,
-// it also re-emits tea.EnableMouseCellMotion to restore app-level mouse tracking.
 func (m *model) loadFollowupDetail(id string) tea.Cmd {
 	m.lastFollowupDetailMtime = time.Time{}
 	m.terminalMode = m.hasSpecPanel(id)
-	loadCmd := m.followupDetail.SetID(id)
-	if m.terminalMode && m.focusedPanel == panelRight {
-		return tea.Batch(loadCmd, tea.EnableMouseCellMotion)
-	}
-	return loadCmd
+	return m.followupDetail.SetID(id)
 }
 
 // loadDetail creates a fresh DetailModel for slug, applies current dimensions,
@@ -1677,8 +1658,5 @@ func (m model) loadDetail(slug string) (model, tea.Cmd) {
 		initCmd = m.detail.Init()
 	}
 
-	if m.terminalMode && m.focusedPanel == panelRight {
-		return m, tea.Batch(initCmd, tea.EnableMouseCellMotion)
-	}
 	return m, initCmd
 }

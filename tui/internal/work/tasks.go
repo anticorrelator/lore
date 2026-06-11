@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 // TasksFile is the top-level shape of tasks.json.
@@ -111,16 +113,16 @@ func (m TasksModel) Update(msg tea.Msg) (TasksModel, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-	case tea.MouseMsg:
+	case tea.MouseWheelMsg:
 		visible := m.visibleRows()
 		switch msg.Button {
-		case tea.MouseButtonWheelDown:
+		case tea.MouseWheelDown:
 			m.cursor = m.nextVisible(m.cursor, 1, visible)
-		case tea.MouseButtonWheelUp:
+		case tea.MouseWheelUp:
 			m.cursor = m.nextVisible(m.cursor, -1, visible)
 		}
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		visible := m.visibleRows()
 		switch msg.String() {
 		case "j", "down":
@@ -245,7 +247,7 @@ func (m TasksModel) View() string {
 			subject := row.task.Subject
 			maxW := m.width - 8
 			if maxW > 0 && lipgloss.Width(subject) > maxW {
-				subject = truncate(subject, maxW)
+				subject = style.Truncate(subject, maxW)
 			}
 			line = fmt.Sprintf("    [ ] %s", subject)
 

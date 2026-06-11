@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // KnowledgeSearchResult represents a single result from `lore search --type knowledge --json`.
@@ -59,7 +59,7 @@ func NewSearchModel() SearchModel {
 	ti.Placeholder = "Search knowledge..."
 	ti.Focus()
 	ti.CharLimit = 200
-	ti.Width = 60
+	ti.SetWidth(60)
 
 	return SearchModel{
 		input:  ti,
@@ -76,7 +76,7 @@ func (m SearchModel) Update(msg tea.Msg) (SearchModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.input.Width = msg.Width - 6
+		m.input.SetWidth(msg.Width - 6)
 
 	case knowledgeSearchResultsMsg:
 		if msg.query == m.lastQuery {
@@ -92,7 +92,7 @@ func (m SearchModel) Update(msg tea.Msg) (SearchModel, tea.Cmd) {
 			}
 		}
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc":
 			return m, func() tea.Msg { return KnowledgeSearchDismissedMsg{} }

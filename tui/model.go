@@ -3,12 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/followup"
@@ -185,8 +184,6 @@ type model struct {
 	confirmTitle  string
 	confirmCount  int // used by post_review to capture SelectedCount at dispatch time
 
-	kittyModeActive bool // true while kitty keyboard protocol is enabled
-
 	popup          search.PopupModel
 	popupActive    bool
 	popupCtx       popupContext
@@ -287,27 +284,6 @@ func (m *model) cleanupAllSubprocesses() {
 		m.specPanels[slug] = panel.Cleanup()
 		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
 	}
-	m.disableKittyKeyboard()
-}
-
-// enableKittyKeyboard writes the kitty keyboard protocol enable sequence (mode 1)
-// to stdout. No-op if kitty mode is already active.
-func (m *model) enableKittyKeyboard() {
-	if m.kittyModeActive {
-		return
-	}
-	os.Stdout.WriteString("\x1b[>1u") //nolint:errcheck
-	m.kittyModeActive = true
-}
-
-// disableKittyKeyboard writes the kitty keyboard protocol pop sequence to stdout.
-// No-op if kitty mode is not active.
-func (m *model) disableKittyKeyboard() {
-	if !m.kittyModeActive {
-		return
-	}
-	os.Stdout.WriteString("\x1b[<u") //nolint:errcheck
-	m.kittyModeActive = false
 }
 
 // paneConfig carries all state-varying inputs the compositor functions need.

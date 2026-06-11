@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // ----------------------------------------------------------------------------
@@ -577,7 +577,7 @@ func TestAbsentOverlayTabThroughDoesNotPatch(t *testing.T) {
 	// current widget and focuses the next. With no draft activity, no
 	// IntentCommit should ever fire.
 	for i := 0; i < 8; i++ {
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	}
 
 	if len(store.patches) > 0 {
@@ -624,7 +624,7 @@ func TestEscClosesModalWhenNoFocus(t *testing.T) {
 	if m.Closed() {
 		t.Fatalf("model started in closed state")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if !m.Closed() {
 		t.Errorf("expected Closed() after Esc with no focus")
 	}
@@ -740,7 +740,7 @@ func TestLimitToDotPath_RendersOnlyOneSubtreeAndDoesNotCloseOnEsc(t *testing.T) 
 		t.Fatalf("limited view should not render sibling settings, got:\n%s", out)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m.Closed() {
 		t.Fatal("embedded limited settings should not close on top-level Esc")
 	}
@@ -784,7 +784,7 @@ func TestLimitToDotPath_CompactEmbedNavigationStartsInsideSubtree(t *testing.T) 
 		t.Fatalf("compact limited panel should start inside first child; entered=%v children=%d", panel.entered, len(panel.children))
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if panel.cursor == 0 && len(panel.children) > 1 {
 		t.Fatalf("j should navigate the embedded subtree, cursor=%d", panel.cursor)
 	}
@@ -1398,18 +1398,18 @@ func TestHierarchicalNavigation_JKMovesTopLevelUntilEnter(t *testing.T) {
 	m.RegisterTopSection("harness claude-code", panel1)
 	m.RegisterTopSection("harness codex", panel2)
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.focusIdx != 0 {
 		t.Fatalf("first j should focus the first top-level section, got %d", m.focusIdx)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.focusIdx != 1 {
 		t.Fatalf("second j should move to the next top-level section before enter, got %d", m.focusIdx)
 	}
 	if panel1.entered || panel1.cursor != 0 {
 		t.Fatalf("unentered panel should not move its inner cursor; entered=%v cursor=%d", panel1.entered, panel1.cursor)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.focusIdx != 0 {
 		t.Fatalf("k should move back to the previous top-level section, got %d", m.focusIdx)
 	}
@@ -1423,8 +1423,8 @@ func TestHierarchicalNavigation_EnterDescendsOneLevel(t *testing.T) {
 	panel := NewHarnessBlockPanel("claude-code", true, nil, args, roles, nil, HarnessEffective{})
 	m.RegisterTopSection("harness claude-code", panel)
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !panel.entered {
 		t.Fatalf("enter should open the focused harness panel")
 	}
@@ -1432,14 +1432,14 @@ func TestHierarchicalNavigation_EnterDescendsOneLevel(t *testing.T) {
 		t.Fatalf("enter should focus the first child, got %T focused=%v", c, c != nil && c.Focused())
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if panel.cursor != 1 {
 		t.Fatalf("j inside an entered panel should move to args, got cursor=%d", panel.cursor)
 	}
 	if !args.Focused() || args.editing {
 		t.Fatalf("args should be selected but not editing; focused=%v editing=%v", args.Focused(), args.editing)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if panel.cursor != 2 {
 		t.Fatalf("j from a selected list should move to roles, not inside the list; cursor=%d", panel.cursor)
 	}
@@ -1529,7 +1529,7 @@ func TestHierarchicalNavigation_NestedClosedObjectRequiresRepeatedEnter(t *testi
 		return m, tuning, core, tuningIdx
 	}
 
-	walkTo := func(m *SettingsModel, tuningIdx int, key tea.KeyMsg) {
+	walkTo := func(m *SettingsModel, tuningIdx int, key tea.KeyPressMsg) {
 		guard := 0
 		for m.focusIdx != tuningIdx {
 			_, _ = m.Update(key)
@@ -1541,13 +1541,13 @@ func TestHierarchicalNavigation_NestedClosedObjectRequiresRepeatedEnter(t *testi
 	}
 
 	m, tuning, core, tuningIdx := build(t)
-	jKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}
+	jKey := tea.KeyPressMsg{Code: 'j', Text: "j"}
 	walkTo(m, tuningIdx, jKey)
 	if tuning.entered || core.focused {
 		t.Fatalf("focused tuning should not auto-enter children; tuning.entered=%v core.focused=%v", tuning.entered, core.focused)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !tuning.entered || !core.focused || core.entered {
 		t.Fatalf("first enter should open tuning and select core only; tuning.entered=%v core.focused=%v core.entered=%v", tuning.entered, core.focused, core.entered)
 	}
@@ -1555,8 +1555,8 @@ func TestHierarchicalNavigation_NestedClosedObjectRequiresRepeatedEnter(t *testi
 	if tuning.cursor != 1 || core.cursor != 0 {
 		t.Fatalf("j after first enter should move tuning core→adaptive, not core alpha→beta; tuning.cursor=%d core.cursor=%d", tuning.cursor, core.cursor)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !core.entered {
 		t.Fatalf("second enter should open nested core")
 	}
@@ -1569,8 +1569,8 @@ func TestHierarchicalNavigation_NestedClosedObjectRequiresRepeatedEnter(t *testi
 	if !ok {
 		t.Fatalf("core.children[1] is not a NumericInput (beta): %T", core.children[1])
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'9'}})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, _ = m.Update(tea.KeyPressMsg{Code: '9', Text: "9"})
 	if beta.draft != "29" {
 		t.Fatalf("typing after the leaf enter should reach beta; draft=%q", beta.draft)
 	}
@@ -1583,23 +1583,23 @@ func TestHierarchicalNavigation_EscBacksOutOneLevel(t *testing.T) {
 	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
 	m.RegisterTopSection("harness claude-code", panel)
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !panel.entered || !args.editing {
 		t.Fatalf("setup expected entered panel and editing args; panel.entered=%v args.editing=%v", panel.entered, args.editing)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.Closed() || !panel.entered || args.editing {
 		t.Fatalf("first esc should leave list edit mode only; closed=%v panel.entered=%v args.editing=%v", m.Closed(), panel.entered, args.editing)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.Closed() || panel.entered {
 		t.Fatalf("second esc should back out of the panel only; closed=%v panel.entered=%v", m.Closed(), panel.entered)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if !m.Closed() {
 		t.Fatalf("third esc at the outer boundary should close the settings modal")
 	}
@@ -1612,20 +1612,20 @@ func TestHierarchicalNavigation_FocusConsumesRunesOnlyInLeafEditMode(t *testing.
 	panel := NewHarnessBlockPanel("claude-code", true, nil, args, nil, nil, HarnessEffective{})
 	m.RegisterTopSection("harness claude-code", panel)
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.FocusConsumesRunes() {
 		t.Fatalf("selected but unopened panel should let q/j/k remain global/settings navigation")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.FocusConsumesRunes() {
 		t.Fatalf("selected list row should not consume q/j/k before edit mode")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !m.FocusConsumesRunes() {
 		t.Fatalf("list edit mode should consume q/j/k so q can be typed instead of quitting")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.FocusConsumesRunes() {
 		t.Fatalf("after leaving edit mode, q should be available to quit again")
 	}
@@ -1682,11 +1682,11 @@ func TestHierarchicalNavigation_StringFieldsUseNavModeUntilEditing(t *testing.T)
 		t.Fatalf("models slot is %T, want ClosedObjectSubPanel", slots[0])
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if models.entered {
 		t.Fatalf("j should select the models section without entering it")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if models.cursor != 0 {
 		t.Fatalf("enter should focus models.lead without stepping past it; cursor=%d", models.cursor)
 	}
@@ -1695,7 +1695,7 @@ func TestHierarchicalNavigation_StringFieldsUseNavModeUntilEditing(t *testing.T)
 		t.Fatalf("lead should be selected but not editing; focused=%v editing=%v", lead.focused, lead.editing)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if models.cursor != 1 {
 		t.Fatalf("second j should move from lead to worker, not type into lead; cursor=%d lead.draft=%q", models.cursor, lead.draft)
 	}
@@ -1704,11 +1704,11 @@ func TestHierarchicalNavigation_StringFieldsUseNavModeUntilEditing(t *testing.T)
 		t.Fatalf("worker should be selected but not editing; focused=%v editing=%v", worker.focused, worker.editing)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !worker.editing {
 		t.Fatalf("Enter should put selected worker field into edit mode")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if worker.draft != "sonnetj" {
 		t.Fatalf("j should be literal input while editing worker; draft=%q", worker.draft)
 	}

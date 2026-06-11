@@ -5,8 +5,10 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 
 	"github.com/anticorrelator/lore/tui/internal/gh"
 )
@@ -177,7 +179,7 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 	case ExternalSessionMsg:
 		m.externalActiveSlugs = msg.Slugs
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		items := m.visibleItems()
 		switch msg.String() {
 		case "ctrl+a":
@@ -292,7 +294,7 @@ func (m ListModel) viewCompact() string {
 	var b strings.Builder
 
 	if len(items) == 0 {
-		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+		dimStyle := style.Dim
 		label := "active"
 		if m.filterMode == FilterArchived {
 			label = "archived"
@@ -335,7 +337,7 @@ func (m ListModel) viewCompact() string {
 		if m.specActiveSlugs[item.Slug] && m.specNeedsInputSlugs[item.Slug] {
 			specGlyph = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("●") + " "
 		} else if !m.specActiveSlugs[item.Slug] && m.externalActiveSlugs[item.Slug] {
-			specGlyph = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("◆") + " "
+			specGlyph = style.Dim.Render("◆") + " "
 		}
 
 		// Line 1: title (fall back to slug)
@@ -344,7 +346,7 @@ func (m ListModel) viewCompact() string {
 			name = item.Slug
 		}
 		glyphW := lipgloss.Width(specGlyph)
-		line1 := cursor + specGlyph + truncate(name, panelW-2-glyphW)
+		line1 := cursor + specGlyph + style.Truncate(name, panelW-2-glyphW)
 		for lipgloss.Width(line1) < panelW {
 			line1 += " "
 		}
@@ -386,7 +388,7 @@ func readinessLabel(item WorkItem) (string, string) {
 // buildInfoCompact builds the status line for compact mode: readiness · issue.
 // Issue is always shown ("--" when not set). No PR badge (space is reserved for slug on the same line).
 func (m ListModel) buildInfoCompact(item WorkItem) string {
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	dimStyle := style.Dim
 	sep := dimStyle.Render(" · ")
 
 	var parts []string
@@ -398,7 +400,7 @@ func (m ListModel) buildInfoCompact(item WorkItem) string {
 		specS := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 		parts = append(parts, specS.Render("speccing"+dots+strings.Repeat(" ", 3-len(dots))))
 	} else if m.externalActiveSlugs[item.Slug] {
-		parts = append(parts, lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("active"))
+		parts = append(parts, style.Dim.Render("active"))
 	} else {
 		label, color := readinessLabel(item)
 		parts = append(parts, lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(label))
@@ -454,9 +456,9 @@ func (m ListModel) viewFull() string {
 	}
 
 	// Styles
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
+	headerStyle := style.SectionTitle
 	selectedStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	dimStyle := style.Dim
 
 	// Header
 	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
@@ -492,9 +494,9 @@ func (m ListModel) viewFull() string {
 	for i := offset; i < end; i++ {
 		item := items[i]
 
-		slug := truncate(item.Slug, slugW)
+		slug := style.Truncate(item.Slug, slugW)
 		updated := FormatRelativeTime(item.Updated)
-		updated = truncate(updated, updatedW)
+		updated = style.Truncate(updated, updatedW)
 		pr := m.prBadge(item.PR, prW)
 
 		// Dot column — shows ● (amber) when spec is waiting for input.
@@ -518,14 +520,14 @@ func (m ListModel) viewFull() string {
 		} else {
 			statusLabel, statusColor = readinessLabel(item)
 		}
-		status := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Render(truncate(statusLabel, statusW))
+		status := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Render(style.Truncate(statusLabel, statusW))
 
 		// Issue number
 		issueStr := "--"
 		if item.Issue != "" {
 			issueStr = extractURLRef(item.Issue)
 		}
-		issue := dimStyle.Render(truncate(issueStr, issueW))
+		issue := dimStyle.Render(style.Truncate(issueStr, issueW))
 
 		row := fmt.Sprintf("  %s  %-*s  %s%s  %s%s  %s%s  %-*s",
 			dotStr,
@@ -550,26 +552,26 @@ func (m ListModel) viewFull() string {
 func (m ListModel) prBadge(prField string, width int) string {
 	if prField == "" {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-			truncate("--", width),
+			style.Truncate("--", width),
 		)
 	}
 
 	if !m.prLoaded {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(
-			truncate("...", width),
+			style.Truncate("...", width),
 		)
 	}
 
 	if m.prStatus == nil {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-			truncate("--", width),
+			style.Truncate("--", width),
 		)
 	}
 
 	ps, ok := m.prStatus[prField]
 	if !ok {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-			truncate("--", width),
+			style.Truncate("--", width),
 		)
 	}
 
@@ -583,37 +585,19 @@ func (m ListModel) prBadge(prField string, width int) string {
 			badge += " ✗"
 		}
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(
-			truncate(badge, width),
+			style.Truncate(badge, width),
 		)
 	case "MERGED":
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Render(
-			truncate(label+" ●", width),
+			style.Truncate(label+" ●", width),
 		)
 	case "CLOSED":
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(
-			truncate(label+" ✗", width),
+			style.Truncate(label+" ✗", width),
 		)
 	}
 
-	return truncate(label, width)
-}
-
-func truncate(s string, maxW int) string {
-	if lipgloss.Width(s) <= maxW {
-		return s
-	}
-	// Simple rune-based truncation with ellipsis
-	runes := []rune(s)
-	if maxW <= 1 {
-		return "…"
-	}
-	for i := len(runes) - 1; i >= 0; i-- {
-		candidate := string(runes[:i]) + "…"
-		if lipgloss.Width(candidate) <= maxW {
-			return candidate
-		}
-	}
-	return "…"
+	return style.Truncate(label, width)
 }
 
 func FormatRelativeTime(iso string) string {

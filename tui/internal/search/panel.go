@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // SearchResult represents a single search result from `lore work search --json`.
@@ -59,7 +59,7 @@ func NewPanelModel() PanelModel {
 	ti.Placeholder = "Search work items..."
 	ti.Focus()
 	ti.CharLimit = 200
-	ti.Width = 60
+	ti.SetWidth(60)
 
 	return PanelModel{
 		input:  ti,
@@ -76,7 +76,7 @@ func (m PanelModel) Update(msg tea.Msg) (PanelModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.input.Width = msg.Width - 6
+		m.input.SetWidth(msg.Width - 6)
 
 	case searchResultsMsg:
 		// Only accept results for the current query
@@ -93,7 +93,7 @@ func (m PanelModel) Update(msg tea.Msg) (PanelModel, tea.Cmd) {
 			}
 		}
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc":
 			return m, func() tea.Msg { return SearchDismissedMsg{} }

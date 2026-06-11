@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 // PopupItem represents a single item in the popup list.
@@ -42,7 +44,7 @@ func New(items []PopupItem, title string) PopupModel {
 	ti.Placeholder = "Type to filter..."
 	ti.Focus()
 	ti.CharLimit = 200
-	ti.Width = 60
+	ti.SetWidth(60)
 
 	m := PopupModel{
 		input:    ti,
@@ -85,7 +87,7 @@ func (m *PopupModel) filter(query string) {
 func (m *PopupModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	m.input.Width = w - 8
+	m.input.SetWidth(w - 8)
 }
 
 // InputValue returns the current textinput value.
@@ -103,7 +105,7 @@ func (m *PopupModel) SetItems(items []PopupItem) {
 // j/k (or down/up) navigate, and all other input goes to the textinput.
 func (m PopupModel) Update(msg tea.Msg) (PopupModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc":
 			return m, func() tea.Msg { return PopupDismissedMsg{} }
@@ -151,7 +153,7 @@ func (m PopupModel) View() string {
 	// Styles consistent with main.go modal conventions.
 	borderColor := lipgloss.Color("4")
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(borderColor)
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	dimStyle := style.Dim
 	selectedStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
 
 	// Box width: fit within available space, cap at 80 for readability.

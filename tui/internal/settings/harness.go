@@ -28,8 +28,8 @@ import (
 	"sort"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // ----------------------------------------------------------------------------
@@ -105,7 +105,7 @@ func (r *PrimaryRadio) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) 
 	if !r.focused {
 		return r, nil, nil
 	}
-	key, ok := msg.(tea.KeyMsg)
+	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return r, nil, nil
 	}
@@ -118,7 +118,7 @@ func (r *PrimaryRadio) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) 
 		if r.cursor < len(r.options)-1 {
 			r.cursor++
 		}
-	case "enter", " ":
+	case "enter", "space":
 		if r.cursor < 0 || r.cursor >= len(r.options) {
 			return r, nil, nil
 		}
@@ -404,7 +404,7 @@ func (h *HarnessBlockPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldInt
 	if len(children) == 0 {
 		return h, nil, nil
 	}
-	if key, ok := msg.(tea.KeyMsg); ok {
+	if key, ok := msg.(tea.KeyPressMsg); ok {
 		switch key.String() {
 		case "enter":
 			if !h.entered {
@@ -767,12 +767,12 @@ func (t *harnessEnabledToggle) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *Field
 	if !t.focused {
 		return t, nil, nil
 	}
-	key, ok := msg.(tea.KeyMsg)
+	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return t, nil, nil
 	}
 	switch key.String() {
-	case " ", "enter", "x":
+	case "space", "enter", "x":
 		next := !t.current
 		if t.toggle != nil {
 			cmd := t.toggle(t.framework, next)

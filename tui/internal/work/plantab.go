@@ -3,9 +3,9 @@ package work
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/render"
 )
@@ -24,7 +24,7 @@ func NewPlanTabModel(content *string, width, height int) PlanTabModel {
 		return PlanTabModel{empty: true}
 	}
 	rendered := renderMarkdown(*content, width)
-	vp := viewport.New(width, height)
+	vp := viewport.New(viewport.WithWidth(width), viewport.WithHeight(height))
 	vp.SetContent(rendered)
 	return PlanTabModel{viewport: vp, ready: true}
 }
@@ -36,8 +36,8 @@ func (m PlanTabModel) Update(msg tea.Msg) (PlanTabModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.viewport.Width = msg.Width - 4
-		m.viewport.Height = msg.Height - 7
+		m.viewport.SetWidth(msg.Width - 4)
+		m.viewport.SetHeight(msg.Height - 7)
 	default:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // loadCapabilitiesFrameworks reads adapters/capabilities.json from a fixture
@@ -420,7 +420,7 @@ func TestHarnessBlockPanel_EffectiveColumnRendersAllThreeStates(t *testing.T) {
 	emptyRoles := makeRolesWidget("harnesses.claude-code.roles", map[string]string{})
 	args2 := makeArgsWidget("harnesses.claude-code.args", []string{})
 	explicit := NewHarnessBlockPanel("claude-code", true, nil, args2, emptyRoles, nil, HarnessEffective{})
-	view := explicit.View()
+	view := stripANSI(explicit.View())
 	if !strings.Contains(view, "roles: (0 entries)") {
 		t.Fatalf("explicit-empty harness-local roles must show an empty editor, got:\n%s", view)
 	}

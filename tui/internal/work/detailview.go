@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 // Tab identifies a detail view tab.
@@ -111,8 +113,8 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		m.tasksModel, _ = m.tasksModel.Update(inner)
 		m.execLogModel, _ = m.execLogModel.Update(inner)
 		for i := range m.extraViewports {
-			m.extraViewports[i].Width = m.contentWidth()
-			m.extraViewports[i].Height = m.contentHeight()
+			m.extraViewports[i].SetWidth(m.contentWidth())
+			m.extraViewports[i].SetHeight(m.contentHeight())
 		}
 		return m, nil
 
@@ -144,7 +146,7 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		m.notesTab = NewNotesTabModel(m.detail.NotesContent, m.contentWidth(), m.contentHeight())
 		if m.detail.PlanContent != nil {
 			rendered := renderMarkdown(*m.detail.PlanContent, m.contentWidth())
-			vp := viewport.New(m.contentWidth(), m.contentHeight())
+			vp := viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
 			vp.SetContent(rendered)
 			m.planTab = PlanTabModel{viewport: vp, ready: true}
 		} else {
@@ -172,7 +174,7 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		m.extraViewports = nil
 		for _, ef := range m.detail.ExtraFiles {
 			rendered := renderMarkdown(ef.Content, m.contentWidth())
-			vp := viewport.New(m.contentWidth(), m.contentHeight())
+			vp := viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
 			vp.SetContent(rendered)
 			m.extraViewports = append(m.extraViewports, vp)
 		}
@@ -183,8 +185,8 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 			return m, nil
 		}
 		rendered := renderMarkdown(msg.Content, m.contentWidth())
-		prevOffset := m.planTab.viewport.YOffset
-		vp := viewport.New(m.contentWidth(), m.contentHeight())
+		prevOffset := m.planTab.viewport.YOffset()
+		vp := viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
 		vp.SetContent(rendered)
 		vp.SetYOffset(prevOffset)
 		m.planTab = PlanTabModel{viewport: vp, ready: true}
@@ -198,16 +200,16 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 
 	case tea.MouseMsg:
 		// Tab bar click hit-test: only switch tabs on left-click press.
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+		if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
 			tabBarY := m.contentStartY + 1
-			if msg.Y == tabBarY && len(m.tabs) > 0 {
+			if click.Y == tabBarY && len(m.tabs) > 0 {
 				// Compute each tab's column range from label widths.
 				// Tab bar format: "  " + [" label "] + " " + [" label "] + ...
 				// Each label rendered with Padding(0,1) so visual width = len(label)+2.
 				x := m.contentStartX + 2 // "  " indent (2 chars within panel + panel margin)
 				for i, tab := range m.tabs {
 					tabW := len(tab.label) + 2 // padding(0,1) adds 1 char each side
-					if msg.X >= x && msg.X < x+tabW {
+					if click.X >= x && click.X < x+tabW {
 						m.activeTab = i
 						return m, nil
 					}
@@ -217,7 +219,7 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		}
 		// Forward all mouse events to the active tab for scroll handling.
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc", "b":
 			return m, func() tea.Msg { return BackToListMsg{} }
@@ -393,7 +395,7 @@ func (m DetailModel) View() string {
 	var b strings.Builder
 
 	if m.externalSession {
-		banner := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  ◆ active session in another window")
+		banner := style.Dim.Render("  ◆ active session in another window")
 		b.WriteString(banner)
 		b.WriteString("\n")
 	}
@@ -411,16 +413,8 @@ func (m DetailModel) View() string {
 }
 
 func (m DetailModel) renderTabBar() string {
-	activeStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("0")).
-		Background(lipgloss.Color("4")).
-		Padding(0, 1)
-
-	inactiveStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("7")).
-		Background(lipgloss.Color("238")).
-		Padding(0, 1)
+	activeStyle := style.ActiveTab
+	inactiveStyle := style.InactiveTab
 
 	var parts []string
 	for i, tab := range m.tabs {
@@ -466,9 +460,9 @@ func (m DetailModel) renderTabContent(width, height int) string {
 func (m DetailModel) renderMetaTab(width int) string {
 	d := m.detail
 	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	dimStyle := style.Dim
 	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
-	archivedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	archivedStyle := style.Dim
 	linkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Underline(true)
 
 	var b strings.Builder

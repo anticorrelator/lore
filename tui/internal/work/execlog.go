@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // ExecEntry represents a parsed execution log entry.
@@ -112,21 +112,21 @@ func (m ExecLogModel) Update(msg tea.Msg) (ExecLogModel, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-	case tea.MouseMsg:
+	case tea.MouseWheelMsg:
 		switch msg.Button {
-		case tea.MouseButtonWheelDown:
+		case tea.MouseWheelDown:
 			if m.cursor < len(m.entries)-1 {
 				m.cursor++
 				m.scroll = 0
 			}
-		case tea.MouseButtonWheelUp:
+		case tea.MouseWheelUp:
 			if m.cursor > 0 {
 				m.cursor--
 				m.scroll = 0
 			}
 		}
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "j", "down":
 			if m.cursor < len(m.entries)-1 {

@@ -2,10 +2,13 @@ package followup
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -122,7 +125,7 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		items := m.visibleItems()
 		prevCursor := m.cursor
 		switch msg.String() {
@@ -168,7 +171,7 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 }
 
 // statusGlyph returns a short indicator for the follow-up status.
-func statusGlyph(status string) (string, lipgloss.Color) {
+func statusGlyph(status string) (string, color.Color) {
 	switch status {
 	case "open", "pending":
 		return "○", lipgloss.Color("4") // blue circle
@@ -232,9 +235,9 @@ func (m ListModel) viewFull() string {
 	}
 
 	// Styles
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
+	headerStyle := style.SectionTitle
 	selectedStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	dimStyle := style.Dim
 
 	// Header
 	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
@@ -271,35 +274,35 @@ func (m ListModel) viewFull() string {
 		item := items[i]
 
 		// ID — always show the slug for quick identification.
-		idStr := truncateFollowUp(item.ID, idW)
+		idStr := style.Truncate(item.ID, idW)
 
 		// Status with glyph
 		glyph, glyphColor := statusGlyph(item.Status)
-		statusStr := lipgloss.NewStyle().Foreground(glyphColor).Render(glyph + " " + truncateFollowUp(item.Status, statusW-2))
+		statusStr := lipgloss.NewStyle().Foreground(glyphColor).Render(glyph + " " + style.Truncate(item.Status, statusW-2))
 
 		// Source
-		source := dimStyle.Render(truncateFollowUp(item.Source, sourceW))
+		source := dimStyle.Render(style.Truncate(item.Source, sourceW))
 
 		// PR ref
 		prStr := "--"
 		if pr := item.PRRef(); pr != "" {
 			prStr = pr
 		}
-		prCell := dimStyle.Render(truncateFollowUp(prStr, prW))
+		prCell := dimStyle.Render(style.Truncate(prStr, prW))
 
 		// Work item ref
 		wiStr := "--"
 		if wi := item.WorkItemRef(); wi != "" {
 			wiStr = wi
 		}
-		wiCell := dimStyle.Render(truncateFollowUp(wiStr, workW))
+		wiCell := dimStyle.Render(style.Truncate(wiStr, workW))
 
 		// Updated
 		updated := work.FormatRelativeTime(item.Updated)
 		if updated == item.Updated {
 			updated = "--"
 		}
-		updatedCell := dimStyle.Render(truncateFollowUp(updated, updatedW))
+		updatedCell := dimStyle.Render(style.Truncate(updated, updatedW))
 
 		row := fmt.Sprintf("  %-*s  %s%s  %s%s  %s%s  %s%s  %s",
 			idW, idStr,
@@ -326,7 +329,7 @@ func (m ListModel) viewCompact() string {
 	items := m.visibleItems()
 	var b strings.Builder
 
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	dimStyle := style.Dim
 
 	if len(items) == 0 {
 		label := "active"
@@ -374,7 +377,7 @@ func (m ListModel) viewCompact() string {
 
 		// Title line — always show the slug (ID) for quick identification.
 		titleAvail := panelWidth - 2 // 2 cursor chars
-		titleTrunc := truncateFollowUp(item.ID, titleAvail)
+		titleTrunc := style.Truncate(item.ID, titleAvail)
 
 		line1 := cursor + titleTrunc
 		for lipgloss.Width(line1) < panelWidth {
@@ -384,7 +387,7 @@ func (m ListModel) viewCompact() string {
 		// Metadata line: status glyph + source + relative time [+ PR ref] [+ work item ref]
 		glyph, glyphColor := statusGlyph(item.Status)
 		statusStr := lipgloss.NewStyle().Foreground(glyphColor).Render(glyph)
-		sourceStr := dimStyle.Render(truncateFollowUp(item.Source, 20))
+		sourceStr := dimStyle.Render(style.Truncate(item.Source, 20))
 		sep := dimStyle.Render(" · ")
 		line2 := "    " + statusStr + sep + sourceStr
 		if relTime := work.FormatRelativeTime(item.Updated); relTime != "" && relTime != item.Updated {
@@ -410,25 +413,4 @@ func (m ListModel) viewCompact() string {
 	}
 
 	return b.String()
-}
-
-// truncateFollowUp truncates s to maxW visible columns using an ellipsis.
-func truncateFollowUp(s string, maxW int) string {
-	if maxW <= 0 {
-		return ""
-	}
-	if lipgloss.Width(s) <= maxW {
-		return s
-	}
-	runes := []rune(s)
-	if maxW <= 1 {
-		return "…"
-	}
-	for i := len(runes) - 1; i >= 0; i-- {
-		candidate := string(runes[:i]) + "…"
-		if lipgloss.Width(candidate) <= maxW {
-			return candidate
-		}
-	}
-	return "…"
 }

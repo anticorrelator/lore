@@ -5,12 +5,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
+
+var testANSIPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// stripTestANSI removes SGR sequences so substring assertions see plain text
+// (lipgloss v2 always emits styles; profile downsampling happens in the
+// program writer, not at Render time).
+func stripTestANSI(s string) string {
+	return testANSIPattern.ReplaceAllString(s, "")
+}
 
 func testReview() *ProposedReview {
 	return &ProposedReview{
@@ -213,12 +223,12 @@ func TestReviewCardsCursorDownJ(t *testing.T) {
 		t.Fatalf("initial cursor = %d, want 0", m.cursor)
 	}
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.cursor != 1 {
 		t.Errorf("after j: cursor = %d, want 1", m.cursor)
 	}
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.cursor != 2 {
 		t.Errorf("after j j: cursor = %d, want 2", m.cursor)
 	}
@@ -233,12 +243,12 @@ func TestReviewCardsCursorUpK(t *testing.T) {
 	// Move to last item first.
 	m.cursor = 2
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.cursor != 1 {
 		t.Errorf("after k: cursor = %d, want 1", m.cursor)
 	}
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.cursor != 0 {
 		t.Errorf("after k k: cursor = %d, want 0", m.cursor)
 	}
@@ -251,12 +261,12 @@ func TestReviewCardsCursorClampsAtBoundaries(t *testing.T) {
 	m.height = 40
 
 	// At top (cursor 0), pressing k moves to the general comment card (-1).
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.cursor != -1 {
 		t.Errorf("k at top: cursor = %d, want -1 (general card)", m.cursor)
 	}
 	// Pressing k again on the general card stays at -1.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.cursor != -1 {
 		t.Errorf("k at general card: cursor = %d, want -1 (no card above general)", m.cursor)
 	}
@@ -265,7 +275,7 @@ func TestReviewCardsCursorClampsAtBoundaries(t *testing.T) {
 	m.cursor = len(m.comments) - 1
 
 	// At bottom, pressing j should stay at last index.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.cursor != len(m.comments)-1 {
 		t.Errorf("j at bottom: cursor = %d, want %d", m.cursor, len(m.comments)-1)
 	}
@@ -286,7 +296,7 @@ func TestReviewCardsToggleSelection(t *testing.T) {
 	}
 
 	// Toggle with space — should deselect.
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	if m.comments[0].Selected {
 		t.Error("comment 0 should be deselected after space")
 	}
@@ -295,7 +305,7 @@ func TestReviewCardsToggleSelection(t *testing.T) {
 	}
 
 	// Toggle again — should re-select.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	if !m.comments[0].Selected {
 		t.Error("comment 0 should be selected after second space")
 	}
@@ -313,7 +323,7 @@ func TestReviewCardsToggleXKey(t *testing.T) {
 		t.Fatal("comment 1 should start unselected")
 	}
 
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	if !m.comments[1].Selected {
 		t.Error("comment 1 should be selected after x")
 	}
@@ -329,7 +339,7 @@ func TestReviewCardsToggleSyncsReview(t *testing.T) {
 	m.height = 40
 
 	// Toggle comment 0 (starts selected → deselect).
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 
 	// The review struct should also be updated.
 	if m.review.Comments[0].Selected {
@@ -341,7 +351,7 @@ func TestReviewCardsEmptyNoToggle(t *testing.T) {
 	m := NewReviewCardsModel("", "", nil)
 
 	// Toggle on empty model should not panic.
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	if cmd != nil {
 		t.Error("toggle on empty model should not emit a command")
 	}
@@ -360,7 +370,7 @@ func TestReviewCardsSelectedCount(t *testing.T) {
 
 	// Select second comment.
 	m.cursor = 1
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	if m.SelectedCount() != 2 {
 		t.Errorf("after toggle: SelectedCount = %d, want 2", m.SelectedCount())
 	}
@@ -407,7 +417,7 @@ func TestReviewCardsViewBudgetWindowingLimitsCards(t *testing.T) {
 	// a handful of inline cards (each 2 lines) but not all 20.
 	m.height = 16
 
-	out := m.View()
+	out := stripTestANSI(m.View())
 
 	// Count how many "file.go:" occurrences appear — should be less than 20.
 	count := strings.Count(out, "file.go:")
@@ -465,7 +475,7 @@ func TestReviewCardsCapitalEOnGeneralEmitsRequestWithBackingIdxNegOne(t *testing
 	m.height = 24
 	m.cursor = -1 // focus general card
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'E', Text: "E"})
 	if cmd == nil {
 		t.Fatal("Capital E on general card should emit ExternalEditRequestMsg")
 	}
@@ -564,7 +574,7 @@ func TestWriteSidecarCmdRoundTrip(t *testing.T) {
 
 	// Toggle comment 1 (c2): false → true.
 	m.cursor = 1
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	if !m.comments[1].Selected {
 		t.Fatal("comment 1 should be selected after toggle")
 	}
@@ -664,7 +674,7 @@ func TestReviewCardsBulkSelectAllFromPartial(t *testing.T) {
 	m.height = 40
 
 	// 'a' with some unselected → select all.
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	for i, c := range m.comments {
 		if !c.Selected {
 			t.Errorf("after a (select all): comment %d not selected", i)
@@ -682,14 +692,14 @@ func TestReviewCardsBulkDeselectAllWhenAllSelected(t *testing.T) {
 	m.height = 40
 
 	// Select all first.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	// Confirm all selected.
 	if m.SelectedCount() != 3 {
 		t.Fatalf("expected all selected after first a, got %d", m.SelectedCount())
 	}
 
 	// 'a' again with all selected → deselect all.
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	if m.SelectedCount() != 0 {
 		t.Errorf("after a (deselect all): SelectedCount = %d, want 0", m.SelectedCount())
 	}
@@ -703,9 +713,9 @@ func TestReviewCardsBulkOpNoopOnEmpty(t *testing.T) {
 	m := NewReviewCardsModel("", "", nil)
 
 	// All bulk ops on empty model should not panic and return no cmd.
-	m, cmdA := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
-	m, cmdI := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
-	m, cmdS := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	m, cmdA := m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	m, cmdI := m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
+	m, cmdS := m.Update(tea.KeyPressMsg{Code: 'S', Text: "S"})
 
 	if cmdA != nil {
 		t.Error("'a' on empty model should not emit cmd")
@@ -723,7 +733,7 @@ func TestReviewCardsBulkOpNoopOnEmpty(t *testing.T) {
 // enterEditOnComment positions cursor on the first inline comment and presses e.
 // cursor starts at 0 (first inline comment) when review is non-nil.
 func enterEditOnComment(m ReviewCardsModel) (ReviewCardsModel, tea.Cmd) {
-	return m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	return m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
 }
 
 func TestReviewCardsEditModeEntersWithCorrectBody(t *testing.T) {
@@ -757,7 +767,7 @@ func TestReviewCardsEditModeEnterSaves(t *testing.T) {
 	m.editInput.SetValue("Updated body text")
 
 	// Press Enter to save.
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	if m.editing {
 		t.Error("Enter should clear editing flag")
@@ -784,7 +794,7 @@ func TestReviewCardsEditModeEscCancels(t *testing.T) {
 	m.editInput.SetValue("discarded content")
 
 	// Press Esc to cancel.
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 
 	if m.editing {
 		t.Error("Esc should clear editing flag")
@@ -807,19 +817,19 @@ func TestReviewCardsEditModeSuppressesNavKeys(t *testing.T) {
 	cursorBefore := m.cursor
 
 	// j/k/g/G should not move cursor while editing.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.cursor != cursorBefore {
 		t.Errorf("j during edit: cursor moved to %d, want %d", m.cursor, cursorBefore)
 	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.cursor != cursorBefore {
 		t.Errorf("k during edit: cursor moved to %d, want %d", m.cursor, cursorBefore)
 	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
 	if m.cursor != cursorBefore {
 		t.Errorf("g during edit: cursor moved to %d, want %d", m.cursor, cursorBefore)
 	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'G', Text: "G"})
 	if m.cursor != cursorBefore {
 		t.Errorf("G during edit: cursor moved to %d, want %d", m.cursor, cursorBefore)
 	}
@@ -835,12 +845,12 @@ func TestReviewCardsEditModeSuppressesSelectionKeys(t *testing.T) {
 	selectedBefore := m.comments[0].Selected
 
 	// space/x should not toggle selection while editing; selection state is unchanged.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 	if m.comments[0].Selected != selectedBefore {
 		t.Error("space during edit should not toggle selection")
 	}
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	if m.comments[0].Selected != selectedBefore {
 		t.Error("x during edit should not toggle selection")
 	}
@@ -857,7 +867,7 @@ func TestReviewCardsEditModeAltEnterInsertsNewline(t *testing.T) {
 
 	// Alt+Enter should insert a newline (not save).
 	// KeyMsg.String() == "alt+enter" for the alt+enter combination.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 	// Model should still be editing.
 	if !m.editing {
 		t.Error("alt+enter should not exit editing")
@@ -870,7 +880,7 @@ func TestReviewCardsEditEOnEmptyIsNoop(t *testing.T) {
 	m.width = 80
 	m.height = 40
 
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
 	if m.editing {
 		t.Error("e on nil review model should not enter edit mode")
 	}
@@ -903,7 +913,7 @@ func TestReviewCardsEnterTogglesSelectionWhenNotEditing(t *testing.T) {
 	selectedBefore := m.comments[0].Selected
 
 	// Enter should toggle selection when not editing.
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.comments[0].Selected == selectedBefore {
 		t.Error("Enter should toggle selection when not editing")
 	}
@@ -949,12 +959,12 @@ func TestReviewCardsGeneralCardToggleSyncsReviewBodySelected(t *testing.T) {
 	m.height = 40
 
 	// Navigate to general card via k (up from cursor 0).
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.cursor != -1 {
 		t.Fatalf("k should move to general card (cursor -1), got %d", m.cursor)
 	}
 
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 	if !m.review.ReviewBodySelected {
 		t.Error("space on general card should set ReviewBodySelected=true")
 	}
@@ -970,12 +980,12 @@ func TestReviewCardsEditGeneralCardSavesToReviewBody(t *testing.T) {
 	m.height = 40
 
 	// Navigate to general card via k (up from cursor 0).
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.cursor != -1 {
 		t.Fatalf("k should move to general card (cursor -1), got %d", m.cursor)
 	}
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
 	if !m.editing {
 		t.Fatal("e on general card should enter edit mode")
 	}
@@ -984,7 +994,7 @@ func TestReviewCardsEditGeneralCardSavesToReviewBody(t *testing.T) {
 	}
 
 	m.editInput.SetValue("Overall review summary.")
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	if m.editing {
 		t.Error("Enter should exit editing")
@@ -1020,7 +1030,7 @@ func TestReviewCardsBulkWritesThroughToBothArrays(t *testing.T) {
 	m.height = 40
 
 	// Select all — must sync m.comments and m.review.Comments.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 
 	for i := range m.comments {
 		if !m.comments[i].Selected {
@@ -1032,7 +1042,7 @@ func TestReviewCardsBulkWritesThroughToBothArrays(t *testing.T) {
 	}
 
 	// Deselect all — both arrays must reflect the flip.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	for i := range m.comments {
 		if m.comments[i].Selected {
 			t.Errorf("m.comments[%d].Selected not deselected", i)
@@ -1058,7 +1068,7 @@ func TestReviewCardsYCopiesBodyViaInjectedFn(t *testing.T) {
 		return nil
 	}
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 
 	if copied != review.Comments[0].Body {
 		t.Errorf("y: copied = %q, want %q", copied, review.Comments[0].Body)
@@ -1078,7 +1088,7 @@ func TestReviewCardsYCopyFailureSetsFlashMsg(t *testing.T) {
 		return fmt.Errorf("clipboard unavailable")
 	}
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 
 	if !strings.Contains(m.flashMsg, "Copy failed") {
 		t.Errorf("flashMsg on error = %q, want it to contain 'Copy failed'", m.flashMsg)
@@ -1097,13 +1107,13 @@ func TestReviewCardsFlashMsgClearsOnNextKeypress(t *testing.T) {
 	m.clipboardWriteFn = func(s string) error { return nil }
 
 	// y sets flashMsg.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	if m.flashMsg == "" {
 		t.Fatal("pre-condition: flashMsg should be set after y")
 	}
 
 	// Any next keypress clears it.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.flashMsg != "" {
 		t.Errorf("flashMsg not cleared on next keypress, got: %q", m.flashMsg)
 	}
@@ -1117,7 +1127,7 @@ func TestReviewCardsFlashMsgAppearsInView(t *testing.T) {
 
 	m.clipboardWriteFn = func(s string) error { return nil }
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	out := m.View()
 
 	if !strings.Contains(out, "Copied to clipboard") {
@@ -1134,7 +1144,7 @@ func TestReviewCardsYOnEmptyNoops(t *testing.T) {
 		return nil
 	}
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	if called {
 		t.Error("y on empty model should not call clipboardWriteFn")
 	}
@@ -1183,7 +1193,7 @@ func TestReviewCardsEEmitsRequestMsgWithCorrectBackingIdx(t *testing.T) {
 	m.height = 40
 	m.cursor = 1 // cursor 1 → backingIdx 1 (no filter active)
 
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'E', Text: "E"})
 	if cmd == nil {
 		t.Fatal("E should emit a command")
 	}
@@ -1267,7 +1277,7 @@ func TestReviewCardsEDuringEditingIsNoop(t *testing.T) {
 	m.height = 40
 	m.externalEditing = true // already editing externally
 
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'E', Text: "E"})
 	if cmd != nil {
 		t.Error("E during externalEditing should be a no-op (no cmd)")
 	}
@@ -1277,7 +1287,7 @@ func TestReviewCardsEOnEmptyListIsNoop(t *testing.T) {
 	t.Setenv("EDITOR", "vim")
 	m := NewReviewCardsModel("", "", nil)
 
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'E', Text: "E"})
 	if cmd != nil {
 		t.Error("E on empty list should be a no-op")
 	}
@@ -1290,7 +1300,7 @@ func TestReviewCardsEWhenEditorUnsetSetsFlashMsg(t *testing.T) {
 	m.width = 80
 	m.height = 40
 
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'E', Text: "E"})
 	if cmd != nil {
 		t.Error("E with EDITOR unset should not emit a cmd")
 	}
@@ -1323,7 +1333,7 @@ func TestReviewCardsNumberKeysSelectEventType(t *testing.T) {
 	m.height = 40
 
 	// 1 on COMMENT is no-op (already selected)
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: '1', Text: "1"})
 	if m.review.ReviewEvent != "COMMENT" {
 		t.Errorf("after 1: ReviewEvent = %q, want COMMENT", m.review.ReviewEvent)
 	}
@@ -1332,7 +1342,7 @@ func TestReviewCardsNumberKeysSelectEventType(t *testing.T) {
 	}
 
 	// 2 selects APPROVE
-	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	m, cmd = m.Update(tea.KeyPressMsg{Code: '2', Text: "2"})
 	if m.review.ReviewEvent != "APPROVE" {
 		t.Errorf("after 2: ReviewEvent = %q, want APPROVE", m.review.ReviewEvent)
 	}
@@ -1341,7 +1351,7 @@ func TestReviewCardsNumberKeysSelectEventType(t *testing.T) {
 	}
 
 	// 3 selects REQUEST_CHANGES
-	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	m, cmd = m.Update(tea.KeyPressMsg{Code: '3', Text: "3"})
 	if m.review.ReviewEvent != "REQUEST_CHANGES" {
 		t.Errorf("after 3: ReviewEvent = %q, want REQUEST_CHANGES", m.review.ReviewEvent)
 	}
@@ -1350,7 +1360,7 @@ func TestReviewCardsNumberKeysSelectEventType(t *testing.T) {
 	}
 
 	// 1 switches back to COMMENT
-	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	m, cmd = m.Update(tea.KeyPressMsg{Code: '1', Text: "1"})
 	if m.review.ReviewEvent != "COMMENT" {
 		t.Errorf("after 1 again: ReviewEvent = %q, want COMMENT", m.review.ReviewEvent)
 	}
@@ -1370,7 +1380,7 @@ func TestReviewCardsReviewEventGetterReflectsSelectedValue(t *testing.T) {
 		t.Errorf("ReviewEvent() = %q, want COMMENT", m.ReviewEvent())
 	}
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: '2', Text: "2"})
 	if m.ReviewEvent() != "APPROVE" {
 		t.Errorf("ReviewEvent() after 2 = %q, want APPROVE", m.ReviewEvent())
 	}
@@ -1379,7 +1389,7 @@ func TestReviewCardsReviewEventGetterReflectsSelectedValue(t *testing.T) {
 func TestReviewCardsNumberKeyNoopOnNilReview(t *testing.T) {
 	m := NewReviewCardsModel("", "", nil)
 
-	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	m, cmd := m.Update(tea.KeyPressMsg{Code: '2', Text: "2"})
 	if cmd != nil {
 		t.Error("2 on nil review should not emit cmd")
 	}
@@ -1580,7 +1590,7 @@ func TestGKeyZeroSelectedSetsFlashNoSummaryRequest(t *testing.T) {
 	m.width = 80
 	m.height = 40
 
-	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m2, cmd := m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
 
 	if m2.flashMsg == "" {
 		t.Error("g with 0 selected should set flashMsg")
@@ -1604,7 +1614,7 @@ func TestGKeyWithSelectedEmitsSummaryRequestMsg(t *testing.T) {
 	m.width = 80
 	m.height = 40
 
-	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m2, cmd := m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
 
 	if !m2.generatingSummary {
 		t.Error("generatingSummary should be true after g with selected comments")
@@ -1727,7 +1737,7 @@ func TestStaleMarkerAppearsAfterSelectionChange(t *testing.T) {
 
 	// Toggle comment 0 (currently selected → deselected), which changes the hash.
 	m.cursor = 0
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 
 	outAfter := m.View()
 	if !strings.Contains(outAfter, "(stale)") {
@@ -1768,7 +1778,7 @@ func TestReviewBodySelectedPreservedByGAndSummaryMsg(t *testing.T) {
 	m.height = 40
 
 	// Press g to start generation.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
 	if !m.review.ReviewBodySelected {
 		t.Error("ReviewBodySelected must be preserved after pressing g")
 	}

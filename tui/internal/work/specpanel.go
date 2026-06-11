@@ -1,19 +1,18 @@
 package work
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"runtime/debug"
 	"strings"
 	"time"
+	"unicode"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 
@@ -502,12 +501,12 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 		// Re-arm the tick.
 		return m, QuiescenceTickCmd(m.slug)
 
-	case tea.MouseMsg:
+	case tea.MouseWheelMsg:
 		visH := m.height
 		if visH < 1 {
 			visH = 1
 		}
-		switch msg.Type {
+		switch msg.Button {
 		case tea.MouseWheelUp:
 			m.scrollOffset += 3
 			maxOff := m.totalLines() - visH
@@ -559,24 +558,33 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 		m.cachedRender = safeRender(m.emulator)
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.PasteMsg:
+		// Bracketed paste: forward the pasted text to the PTY. Pasted input
+		// clears the pending double-Esc gesture like any non-Esc key.
+		m.lastEscTime = time.Time{}
+		if m.ptmx != nil && msg.Content != "" {
+			m.ptmx.Write([]byte(msg.Content)) //nolint:errcheck
+		}
+		return m, nil
+
+	case tea.KeyPressMsg:
 		// This handler is only reached when focusedPanel == panelSpec, meaning
 		// the terminal has keyboard focus. Intercept escape chords and scroll keys;
 		// forward all other keys to the PTY subprocess.
 		//
 		// Any non-Esc key arrives here clears the pending double-Esc gesture so
 		// that an accidentally-paired Esc-letter-Esc sequence does not detach.
-		if msg.Type != tea.KeyEscape {
+		if msg.Code != tea.KeyEscape {
 			m.lastEscTime = time.Time{}
 		}
-		switch msg.Type {
-		case tea.KeyEscape: // single Esc forwards; double Esc within window detaches
+		switch msg.String() {
+		case "esc": // single Esc forwards; double Esc within window detaches
 			return m.handleEscKey()
-		case tea.KeyCtrlBackslash: // Ctrl+\ — terminate subprocess
+		case "ctrl+\\": // Ctrl+\ — terminate subprocess
 			slug := m.slug
 			return m, func() tea.Msg { return TerminalTerminateMsg{Slug: slug} }
 
-		case tea.KeyPgUp: // PgUp — scroll up by half a page
+		case "pgup": // PgUp — scroll up by half a page
 			visH := m.height
 			if visH < 1 {
 				visH = 1
@@ -591,7 +599,7 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 			}
 			return m, nil
 
-		case tea.KeyPgDown: // PgDown — scroll down by half a page
+		case "pgdown": // PgDown — scroll down by half a page
 			visH := m.height
 			if visH < 1 {
 				visH = 1
@@ -602,11 +610,11 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 			}
 			return m, nil
 
-		case tea.KeyEnd: // End — snap to live view (bottom)
+		case "end": // End — snap to live view (bottom)
 			m.scrollOffset = 0
 			return m, nil
 
-		case tea.KeyHome: // Home — scroll to top of buffer
+		case "home": // Home — scroll to top of buffer
 			visH := m.height
 			if visH < 1 {
 				visH = 1
@@ -625,30 +633,6 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 				}
 			}
 			return m, nil
-		}
-	}
-
-	// Forward raw bytes for unrecognized messages — e.g. bubbletea's unexported
-	// unknownCSISequenceMsg carries kitty-protocol sequences (like Shift+Enter = \x1b[13;2u)
-	// as a []byte slice. The reflect check is the only way to access them without forking bubbletea.
-	if m.ptmx != nil {
-		v := reflect.ValueOf(msg)
-		if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.Uint8 {
-			b := v.Bytes()
-			// Kitty-encoded Escape (\x1b[27u) — route through the same double-Esc
-			// gesture handler as tea.KeyEscape so behavior is uniform across
-			// terminals with and without the kitty keyboard protocol.
-			if bytes.Equal(b, []byte{0x1b, '[', '2', '7', 'u'}) {
-				return m.handleEscKey()
-			}
-			// Intercept kitty-encoded Ctrl+\ (\x1b[92;5u) — same semantic as tea.KeyCtrlBackslash
-			if bytes.Equal(b, []byte{0x1b, '[', '9', '2', ';', '5', 'u'}) {
-				slug := m.slug
-				return m, func() tea.Msg { return TerminalTerminateMsg{Slug: slug} }
-			}
-			// Any other byte input clears the pending double-Esc gesture.
-			m.lastEscTime = time.Time{}
-			m.ptmx.Write(b) //nolint:errcheck
 		}
 	}
 
@@ -1041,104 +1025,79 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 	}
 }
 
-// keyToBytes converts a BubbleTea KeyMsg into the raw byte sequence that
+// keyToBytes converts a Bubble Tea key press into the raw byte sequence that
 // should be written to a PTY to reproduce that keypress. Returns nil for
-// unknown key types.
-func keyToBytes(km tea.KeyMsg) []byte {
-	var b []byte
-
-	switch km.Type {
-	case tea.KeyRunes:
-		b = []byte(string(km.Runes))
-	case tea.KeySpace:
-		b = []byte{' '}
-	case tea.KeyEnter:
-		b = []byte{'\r'}
-	case tea.KeyBackspace:
-		b = []byte{0x7f}
-	case tea.KeyTab:
-		b = []byte{'\t'}
-	case tea.KeyEscape:
-		b = []byte{0x1b}
-	case tea.KeyUp:
-		b = []byte{0x1b, '[', 'A'}
-	case tea.KeyDown:
-		b = []byte{0x1b, '[', 'B'}
-	case tea.KeyRight:
-		b = []byte{0x1b, '[', 'C'}
-	case tea.KeyLeft:
-		b = []byte{0x1b, '[', 'D'}
-	case tea.KeyHome:
-		b = []byte{0x1b, '[', 'H'}
-	case tea.KeyEnd:
-		b = []byte{0x1b, '[', 'F'}
-	case tea.KeyPgUp:
-		b = []byte{0x1b, '[', '5', '~'}
-	case tea.KeyPgDown:
-		b = []byte{0x1b, '[', '6', '~'}
-	case tea.KeyDelete:
-		b = []byte{0x1b, '[', '3', '~'}
-	case tea.KeyInsert:
-		b = []byte{0x1b, '[', '2', '~'}
-	case tea.KeyCtrlA:
-		b = []byte{0x01}
-	case tea.KeyCtrlB:
-		b = []byte{0x02}
-	case tea.KeyCtrlC:
-		b = []byte{0x03}
-	case tea.KeyCtrlD:
-		b = []byte{0x04}
-	case tea.KeyCtrlE:
-		b = []byte{0x05}
-	case tea.KeyCtrlF:
-		b = []byte{0x06}
-	case tea.KeyCtrlG:
-		b = []byte{0x07}
-	case tea.KeyCtrlH:
-		b = []byte{0x08}
-	case tea.KeyCtrlJ:
-		b = []byte{0x0a}
-	case tea.KeyCtrlK:
-		b = []byte{0x0b}
-	case tea.KeyCtrlL:
-		b = []byte{0x0c}
-	case tea.KeyCtrlN:
-		b = []byte{0x0e}
-	case tea.KeyCtrlO:
-		b = []byte{0x0f}
-	case tea.KeyCtrlP:
-		b = []byte{0x10}
-	case tea.KeyCtrlQ:
-		b = []byte{0x11}
-	case tea.KeyCtrlR:
-		b = []byte{0x12}
-	case tea.KeyCtrlS:
-		b = []byte{0x13}
-	case tea.KeyCtrlT:
-		b = []byte{0x14}
-	case tea.KeyCtrlU:
-		b = []byte{0x15}
-	case tea.KeyCtrlV:
-		b = []byte{0x16}
-	case tea.KeyCtrlW:
-		b = []byte{0x17}
-	case tea.KeyCtrlX:
-		b = []byte{0x18}
-	case tea.KeyCtrlY:
-		b = []byte{0x19}
-	case tea.KeyCtrlZ:
-		b = []byte{0x1a}
-	case tea.KeyCtrlBackslash:
-		b = []byte{0x1c}
-	case tea.KeyCtrlCloseBracket:
-		b = []byte{0x1d}
-	default:
+// unknown keys.
+func keyToBytes(km tea.KeyPressMsg) []byte {
+	key := km.Key()
+	b := keyBaseBytes(key)
+	if b == nil {
 		return nil
 	}
-
 	// Alt modifier prepends ESC
-	if km.Alt && km.Type != tea.KeyEscape {
+	if key.Mod.Contains(tea.ModAlt) && key.Code != tea.KeyEscape {
 		return append([]byte{0x1b}, b...)
 	}
 	return b
+}
+
+// keyBaseBytes maps a v2 Key to the legacy byte encoding a terminal without
+// the kitty protocol would send — what the child PTY expects on stdin.
+func keyBaseBytes(key tea.Key) []byte {
+	if key.Mod.Contains(tea.ModCtrl) {
+		switch {
+		case key.Code >= 'a' && key.Code <= 'z':
+			return []byte{byte(key.Code-'a') + 1}
+		case key.Code == '\\':
+			return []byte{0x1c}
+		case key.Code == ']':
+			return []byte{0x1d}
+		}
+		// No dedicated C0 byte (e.g. ctrl+enter): fall through to the
+		// unmodified mapping, matching what a legacy terminal would send.
+	}
+
+	switch key.Code {
+	case tea.KeySpace:
+		return []byte{' '}
+	case tea.KeyEnter:
+		return []byte{'\r'}
+	case tea.KeyBackspace:
+		return []byte{0x7f}
+	case tea.KeyTab:
+		return []byte{'\t'}
+	case tea.KeyEscape:
+		return []byte{0x1b}
+	case tea.KeyUp:
+		return []byte{0x1b, '[', 'A'}
+	case tea.KeyDown:
+		return []byte{0x1b, '[', 'B'}
+	case tea.KeyRight:
+		return []byte{0x1b, '[', 'C'}
+	case tea.KeyLeft:
+		return []byte{0x1b, '[', 'D'}
+	case tea.KeyHome:
+		return []byte{0x1b, '[', 'H'}
+	case tea.KeyEnd:
+		return []byte{0x1b, '[', 'F'}
+	case tea.KeyPgUp:
+		return []byte{0x1b, '[', '5', '~'}
+	case tea.KeyPgDown:
+		return []byte{0x1b, '[', '6', '~'}
+	case tea.KeyDelete:
+		return []byte{0x1b, '[', '3', '~'}
+	case tea.KeyInsert:
+		return []byte{0x1b, '[', '2', '~'}
+	}
+
+	// Printable input: prefer the produced text (covers shifted characters),
+	// falling back to the key code for modified printables (e.g. alt+f, where
+	// Text is empty but Code is the letter).
+	if key.Text != "" {
+		return []byte(key.Text)
+	}
+	if unicode.IsPrint(key.Code) {
+		return []byte(string(key.Code))
+	}
+	return nil
 }

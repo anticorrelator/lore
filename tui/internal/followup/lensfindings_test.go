@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func testLensReview() *LensReview {
@@ -151,37 +151,37 @@ func TestLensFindingsCursorNavigation(t *testing.T) {
 	}
 
 	// j moves down
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.cursor != 1 {
 		t.Errorf("after j: cursor = %d, want 1", m.cursor)
 	}
 
 	// k moves up
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.cursor != 0 {
 		t.Errorf("after k: cursor = %d, want 0", m.cursor)
 	}
 
 	// k at top stays at 0
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.cursor != 0 {
 		t.Errorf("k at top: cursor = %d, want 0", m.cursor)
 	}
 
 	// G goes to end
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'G', Text: "G"})
 	if m.cursor != 3 {
 		t.Errorf("after G: cursor = %d, want 3", m.cursor)
 	}
 
 	// j at bottom stays at end
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.cursor != 3 {
 		t.Errorf("j at bottom: cursor = %d, want 3", m.cursor)
 	}
 
 	// g goes to start
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
 	if m.cursor != 0 {
 		t.Errorf("after g: cursor = %d, want 0", m.cursor)
 	}
@@ -214,7 +214,7 @@ func TestLensFindingsSpaceTogglesSelection(t *testing.T) {
 	}
 
 	// space selects
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	if !m.findings[0].Selected {
 		t.Error("finding 0 should be selected after space")
 	}
@@ -224,7 +224,7 @@ func TestLensFindingsSpaceTogglesSelection(t *testing.T) {
 	}
 
 	// space deselects
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	if m.findings[0].Selected {
 		t.Error("finding 0 should be deselected after second space")
 	}
@@ -234,7 +234,7 @@ func TestLensFindingsXTogglesSelection(t *testing.T) {
 	m := NewLensFindingsModel("", "", testLensReview())
 	m.SetSize(80, 40)
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	if !m.findings[0].Selected {
 		t.Error("x should select finding 0")
 	}
@@ -249,7 +249,7 @@ func TestLensFindingsEnterTogglesSelection(t *testing.T) {
 		t.Fatal("finding 0 should start unselected")
 	}
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !m.findings[0].Selected {
 		t.Error("enter should toggle finding 0 to selected")
 	}
@@ -262,7 +262,7 @@ func TestLensFindingsEnterTogglesSelection(t *testing.T) {
 	}
 
 	// Second enter deselects.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.findings[0].Selected {
 		t.Error("second enter should deselect finding 0")
 	}
@@ -276,7 +276,7 @@ func TestLensFindingsEscClosesActionMenu(t *testing.T) {
 	m.actionMenuOpen = true
 
 	// Esc should close it
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.actionMenuOpen {
 		t.Error("esc should close the action menu")
 	}
@@ -288,7 +288,7 @@ func TestLensFindingsJDismissesMenuAndNavigates(t *testing.T) {
 
 	m.actionMenuOpen = true
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if m.actionMenuOpen {
 		t.Error("j should dismiss the action menu")
 	}
@@ -304,7 +304,7 @@ func TestLensFindingsKDismissesMenuAtTop(t *testing.T) {
 	m.actionMenuOpen = true
 
 	// k at top: dismisses menu, cursor stays at 0
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.actionMenuOpen {
 		t.Error("k should dismiss the action menu")
 	}
@@ -321,7 +321,7 @@ func TestLensFindingsMenuSwallowsOtherKeys(t *testing.T) {
 	selBefore := m.findings[0].Selected
 
 	// space should be swallowed (no selection toggle)
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	if !m.actionMenuOpen {
 		t.Error("space should be swallowed, menu should remain open")
 	}
@@ -338,7 +338,7 @@ func TestLensFindingsDKeySwallowedInMenu(t *testing.T) {
 	selBefore := m.findings[0].Selected
 
 	// 'd' no longer opens a disposition sub-menu; it is swallowed
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
 	if !m.actionMenuOpen {
 		t.Error("d should be swallowed (menu should remain open)")
 	}
@@ -422,10 +422,10 @@ func TestLensFindingsSelectedCount(t *testing.T) {
 	}
 
 	// Toggle idx 0: select it → 3 selected.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	// Move to idx 1 and toggle: deselect it → back to 2 selected.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 
 	if m.selectedCount() != 2 {
 		t.Errorf("selectedCount = %d, want 2", m.selectedCount())
@@ -437,7 +437,7 @@ func TestLensFindingsBulkSelectAll(t *testing.T) {
 	m.SetSize(80, 40)
 
 	// a selects all
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	if m.selectedCount() != len(m.findings) {
 		t.Errorf("after a: selectedCount = %d, want %d", m.selectedCount(), len(m.findings))
 	}
@@ -458,13 +458,13 @@ func TestLensFindingsBulkDeselectAllWhenAllSelected(t *testing.T) {
 	m.SetSize(80, 40)
 
 	// First a selects all
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	if m.selectedCount() != len(m.findings) {
 		t.Fatalf("expected all selected after first a, got %d", m.selectedCount())
 	}
 
 	// Second a deselects all
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	if m.selectedCount() != 0 {
 		t.Errorf("after a (deselect all): selectedCount = %d, want 0", m.selectedCount())
 	}
