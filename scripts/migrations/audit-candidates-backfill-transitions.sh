@@ -26,8 +26,10 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/lib.sh"
+# Lives in scripts/migrations/; lib.sh and audit-candidate-transition.sh are
+# one level up in scripts/.
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$SCRIPT_ROOT/lib.sh"
 
 KDIR_OVERRIDE=""
 DRY_RUN="false"
@@ -60,7 +62,7 @@ if [[ ! -d "$KDIR" ]]; then
   exit 2
 fi
 
-TRANSITION="$SCRIPT_DIR/audit-candidate-transition.sh"
+TRANSITION="$SCRIPT_ROOT/audit-candidate-transition.sh"
 if [[ ! -x "$TRANSITION" ]]; then
   echo "[backfill] Error: transition script not found or not executable: $TRANSITION" >&2
   exit 2

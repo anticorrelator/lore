@@ -12,6 +12,10 @@ PASS=0
 FAIL=0
 
 cleanup() {
+  # Restore load-knowledge.sh if it was modified (tiny-budget test safety net)
+  if [[ -f "$TEST_DIR/load-knowledge.sh.bak" ]]; then
+    cp "$TEST_DIR/load-knowledge.sh.bak" "$SCRIPT_DIR/load-knowledge.sh"
+  fi
   rm -rf "$TEST_DIR"
 }
 trap cleanup EXIT
@@ -279,6 +283,99 @@ OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
 # Should load actual entry content when context signal triggers relevance search
 assert_contains "loads entry content" "$OUTPUT" "camelCase"
 unset LORE_GIT_BRANCH
+
+# =============================================
+# Test 7: Budget report breaks down full/summary/skipped counts
+# =============================================
+echo ""
+echo "Test 7: Budget report breakdown"
+rm -rf "$KNOWLEDGE_DIR"
+setup_v2_knowledge_store
+OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+assert_contains "budget report has full count" "$OUTPUT" "full,"
+assert_contains "budget report has summary count" "$OUTPUT" "summary,"
+assert_contains "budget report has skipped count" "$OUTPUT" "skipped"
+
+# =============================================
+# Test 8: Tiny budget still emits index + budget report
+# =============================================
+echo ""
+echo "Test 8: Tiny budget (summary mode)"
+# Temporarily set a tiny budget to force summary mode.
+# Modify the actual script in-place and restore after (cleanup trap is the safety net).
+ORIG_LOAD="$SCRIPT_DIR/load-knowledge.sh"
+cp "$ORIG_LOAD" "$TEST_DIR/load-knowledge.sh.bak"
+sed -i.tmp 's/^BUDGET=8000$/BUDGET=200/' "$ORIG_LOAD"
+
+OUTPUT=$(bash "$ORIG_LOAD" 2>&1)
+
+# Restore original
+cp "$TEST_DIR/load-knowledge.sh.bak" "$ORIG_LOAD"
+rm -f "$ORIG_LOAD.tmp"
+assert_contains "tiny budget still shows index" "$OUTPUT" "Index (compact)"
+assert_contains "tiny budget has budget report" "$OUTPUT" "[Budget]"
+
+# =============================================
+# Test 9: Staleness — low confidence
+# =============================================
+echo ""
+echo "Test 9: Staleness indicator for low-confidence entries"
+rm -rf "$KNOWLEDGE_DIR"
+setup_v2_knowledge_store
+# Must live in a rubric category (conventions) — scale-bearing categories
+# (gotchas, architecture, ...) are only scanned when a context signal exists.
+cat > "$KNOWLEDGE_DIR/conventions/flaky-retry.md" << 'EOF'
+# Flaky Retry
+
+Retries are capped at 3 attempts.
+<!-- learned: 2026-01-10 | confidence: low | source: manual -->
+EOF
+OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+assert_contains "staleness detects low confidence" "$OUTPUT" "low-confidence"
+
+# =============================================
+# Test 10: Staleness — old file mtime
+# =============================================
+echo ""
+echo "Test 10: Staleness indicator for old mtime"
+rm -rf "$KNOWLEDGE_DIR"
+setup_v2_knowledge_store
+# Set workflows entry mtime to 100 days ago
+if [[ "$(uname)" == "Darwin" ]]; then
+  touch -t "$(date -v-100d '+%Y%m%d%H%M.%S')" "$KNOWLEDGE_DIR/workflows/deploy-process.md"
+else
+  touch -d "100 days ago" "$KNOWLEDGE_DIR/workflows/deploy-process.md"
+fi
+OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+assert_contains "staleness detects old mtime" "$OUTPUT" "deploy-process.md"
+assert_contains "staleness shows days" "$OUTPUT" "d)"
+
+# =============================================
+# Test 11: Inbox detection
+# =============================================
+echo ""
+echo "Test 11: Inbox detection"
+rm -rf "$KNOWLEDGE_DIR"
+setup_v2_knowledge_store
+mkdir -p "$KNOWLEDGE_DIR/_inbox"
+cat > "$KNOWLEDGE_DIR/_inbox/pending-insight.md" << 'EOF'
+# Rate Limiting
+
+The API uses rate limiting of 100 req/min.
+EOF
+OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+assert_contains "inbox detection" "$OUTPUT" "inbox"
+
+# =============================================
+# Test 12: Health check — missing manifest
+# =============================================
+echo ""
+echo "Test 12: Health check (missing manifest)"
+rm -rf "$KNOWLEDGE_DIR"
+setup_v2_knowledge_store
+rm "$KNOWLEDGE_DIR/_manifest.json"
+OUTPUT=$(bash "$SCRIPT_DIR/load-knowledge.sh" 2>&1)
+assert_contains "health detects missing manifest" "$OUTPUT" "No knowledge store found"
 
 # =============================================
 # Summary

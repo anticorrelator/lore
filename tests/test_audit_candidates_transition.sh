@@ -17,7 +17,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts"
-BACKFILL="$SCRIPT_DIR/audit-candidates-backfill-transitions.sh"
+BACKFILL="$SCRIPT_DIR/migrations/audit-candidates-backfill-transitions.sh"
 PROCESSOR="$SCRIPT_DIR/settlement-processor.py"
 
 PASS=0
