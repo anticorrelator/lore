@@ -812,6 +812,25 @@ if [[ "$ARTIFACT_TYPE" == "path-provided" ]]; then
     ARTIFACT_TYPE="consumption-contradiction"
   fi
 elif [[ "$ARTIFACT_TYPE" == "work-item" || "$ARTIFACT_TYPE" == "work-item-archived" ]]; then
+  # Artifact presence, not directory presence, decides the owning dir: an
+  # active stub dir can coexist with the archive copy that actually holds the
+  # source files (e.g. after `lore work archive` leaves a stub behind). When
+  # the active dir holds none of the three auto-discoverable files but the
+  # archive sibling holds at least one, re-pin to the archive copy so the
+  # source resolves and verdicts land beside it.
+  if [[ "$ARTIFACT_TYPE" == "work-item" \
+        && ! -f "$ARTIFACT_PATH/task-claims.jsonl" \
+        && ! -f "$ARTIFACT_PATH/audit-candidates.jsonl" \
+        && ! -f "$ARTIFACT_PATH/consumption-contradictions.jsonl" ]]; then
+    _archive_sibling="$KDIR/_work/_archive/$ARTIFACT_ID"
+    if [[ -f "$_archive_sibling/task-claims.jsonl" \
+          || -f "$_archive_sibling/audit-candidates.jsonl" \
+          || -f "$_archive_sibling/consumption-contradictions.jsonl" ]]; then
+      echo "[audit] Active work-item dir holds no source artifact; using archive copy: $_archive_sibling" >&2
+      ARTIFACT_PATH="$_archive_sibling"
+      ARTIFACT_TYPE="work-item-archived"
+    fi
+  fi
   if [[ -f "$ARTIFACT_PATH/task-claims.jsonl" ]]; then
     TASK_CLAIMS_PATH="$ARTIFACT_PATH/task-claims.jsonl"
     ARTIFACT_TYPE="task-claims"
@@ -839,22 +858,37 @@ if [[ -n "$KIND_FLAG" && -n "$ID_FLAG" ]]; then
   # _work/_archive/<slug>/ as appropriate.
   case "$KIND_FLAG" in
     task-claim)
-      kind_source_file="$ARTIFACT_PATH/task-claims.jsonl"
+      kind_basename="task-claims.jsonl"
       kind_id_field="claim_id"
       ;;
     omission)
-      kind_source_file="$ARTIFACT_PATH/audit-candidates.jsonl"
+      kind_basename="audit-candidates.jsonl"
       kind_id_field="candidate_id"
       ;;
     consumption-contradiction)
-      kind_source_file="$ARTIFACT_PATH/consumption-contradictions.jsonl"
+      kind_basename="consumption-contradictions.jsonl"
       kind_id_field="contradiction_id"
       ;;
     commons)
-      kind_source_file="$ARTIFACT_PATH/promoted-commons.jsonl"
+      kind_basename="promoted-commons.jsonl"
       kind_id_field="claim_id"
       ;;
   esac
+  kind_source_file="$ARTIFACT_PATH/$kind_basename"
+  # Artifact presence decides the owning dir for the per-kind file too: when
+  # the resolved dir lacks it, probe active then archive by slug. Probes match
+  # the exact per-kind path at the dir root — verdicts/ subdirs reuse the
+  # task-claims.jsonl filename for verdict envelopes and must never match.
+  if [[ ! -f "$kind_source_file" ]]; then
+    for _kind_dir in "$KDIR/_work/$ARTIFACT_ID" "$KDIR/_work/_archive/$ARTIFACT_ID"; do
+      if [[ -f "$_kind_dir/$kind_basename" ]]; then
+        echo "[audit] Resolved dir lacks $kind_basename; using copy at: $_kind_dir/$kind_basename" >&2
+        ARTIFACT_PATH="$_kind_dir"
+        kind_source_file="$_kind_dir/$kind_basename"
+        break
+      fi
+    done
+  fi
   if [[ ! -f "$kind_source_file" ]]; then
     echo "[audit] Error: --kind $KIND_FLAG source file not found: $kind_source_file" >&2
     exit 1
@@ -2428,7 +2462,8 @@ else:
     target = os.path.join(queue_dir, "audit-attempts.jsonl")
 with open(target, "a") as fh:
     fh.write(json.dumps(row, sort_keys=True) + "\n")
-print(target)
+# stderr only — stdout is reserved for the --json report.
+print(target, file=sys.stderr)
 PYEOF
         fi
       fi

@@ -68,6 +68,17 @@ setup_task_claims_fixture() {
 JSONLEOF
 }
 
+setup_archived_task_claims_fixture() {
+  # setup_archived_task_claims_fixture <kdir> <slug> — same rows as the active
+  # fixture, but under _work/_archive/<slug>/ for artifact-presence fallback tests.
+  local kdir="$1" slug="$2"
+  mkdir -p "$kdir/_work/_archive/$slug"
+  cat > "$kdir/_work/_archive/$slug/task-claims.jsonl" <<'JSONLEOF'
+{"claim_id":"task-claim-a","tier":"task-evidence","claim":"task claim A is auditable directly from task-claims.jsonl","producer_role":"worker","protocol_slot":"implementation","task_id":"task-1","phase_id":"1","scale":"implementation","source":{"file":"scripts/audit-artifact.sh","line_range":"1-20"},"falsifier":"Run lore audit against task-claims.jsonl with a matching priority claim"}
+{"claim_id":"task-claim-b","tier":"task-evidence","claim":"task claim B remains available for priority filtering","producer_role":"worker","protocol_slot":"implementation","task_id":"task-1","phase_id":"1","scale":"implementation","source":{"file":"scripts/audit-artifact.sh","line_range":"21-40"},"falsifier":"Run lore audit against task-claims.jsonl without a matching priority claim"}
+JSONLEOF
+}
+
 setup_audit_candidates_fixture() {
   # setup_audit_candidates_fixture <kdir> <slug>
   local kdir="$1" slug="$2"
@@ -483,6 +494,135 @@ else
   echo "  FAIL: phantom stub created at $KDIR19/_work/_archive/verdicts/"
   FAIL=$((FAIL + 1))
 fi
+
+# =============================================
+# Test 20: Active stub shadows archive copy — --kind task-claim falls back to
+# the archive per-kind file and verdicts land beside it (under _archive/).
+# Regression: an empty active stub dir used to win directory-presence
+# resolution, then the dispatch hard-errored on the missing per-kind file.
+# =============================================
+echo ""
+echo "Test 20: active stub + archive copy — --kind resolves archive, verdicts follow"
+KDIR20="$TEST_DIR/kdir20"
+mkdir -p "$KDIR20/_work/wi-stub"
+setup_archived_task_claims_fixture "$KDIR20" "wi-stub"
+gate_fixture "$TEST_DIR/gate20.json" '{
+  "judge":"correctness-gate","judge_template_version":"stub20",
+  "verdicts":[{"claim_id":"task-claim-a","verdict":"verified","evidence":"ok"}]
+}'
+
+OUT20=$(bash "$AUDIT" --kdir "$KDIR20" --work-item "wi-stub" \
+  --kind task-claim --id task-claim-a \
+  --gate-output-file "$TEST_DIR/gate20.json" 2>&1)
+assert_contains "stub-shadow: assertion gate completes" "$OUT20" "correctness-gate-assertion complete"
+assert_file_exists "stub-shadow: verdicts land under archive dir" \
+  "$KDIR20/_work/_archive/wi-stub/verdicts/task-claims.jsonl"
+if [[ ! -d "$KDIR20/_work/wi-stub/verdicts" ]]; then
+  echo "  PASS: stub-shadow: no verdicts dir created under the active stub"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: stub-shadow: verdicts dir created under the active stub"
+  FAIL=$((FAIL + 1))
+fi
+
+# =============================================
+# Test 21: Archive-only work item — no active dir at all; --kind resolves the
+# archive copy via the slug resolver and completes.
+# =============================================
+echo ""
+echo "Test 21: archive-only work item via --kind/--id"
+KDIR21="$TEST_DIR/kdir21"
+setup_archived_task_claims_fixture "$KDIR21" "wi-arch-only"
+gate_fixture "$TEST_DIR/gate21.json" '{
+  "judge":"correctness-gate","judge_template_version":"arch21",
+  "verdicts":[{"claim_id":"task-claim-b","verdict":"verified","evidence":"ok"}]
+}'
+
+OUT21=$(bash "$AUDIT" --kdir "$KDIR21" --work-item "wi-arch-only" \
+  --kind task-claim --id task-claim-b \
+  --gate-output-file "$TEST_DIR/gate21.json" 2>&1)
+assert_contains "archive-only: assertion gate completes" "$OUT21" "correctness-gate-assertion complete"
+assert_file_exists "archive-only: verdicts land under archive dir" \
+  "$KDIR21/_work/_archive/wi-arch-only/verdicts/task-claims.jsonl"
+
+# =============================================
+# Test 22: Per-kind file present in BOTH active and archive dirs — active wins;
+# live-item behavior unchanged.
+# =============================================
+echo ""
+echo "Test 22: both-present prefers active copy"
+KDIR22="$TEST_DIR/kdir22"
+setup_task_claims_fixture "$KDIR22" "wi-both"
+setup_archived_task_claims_fixture "$KDIR22" "wi-both"
+gate_fixture "$TEST_DIR/gate22.json" '{
+  "judge":"correctness-gate","judge_template_version":"both22",
+  "verdicts":[{"claim_id":"task-claim-a","verdict":"verified","evidence":"ok"}]
+}'
+
+OUT22=$(bash "$AUDIT" --kdir "$KDIR22" --work-item "wi-both" \
+  --kind task-claim --id task-claim-a \
+  --gate-output-file "$TEST_DIR/gate22.json" 2>&1)
+assert_contains "both-present: assertion gate completes" "$OUT22" "correctness-gate-assertion complete"
+assert_file_exists "both-present: verdicts land under active dir" \
+  "$KDIR22/_work/wi-both/verdicts/task-claims.jsonl"
+if [[ ! -d "$KDIR22/_work/_archive/wi-both/verdicts" ]]; then
+  echo "  PASS: both-present: archive copy untouched"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: both-present: verdicts dir created under archive copy"
+  FAIL=$((FAIL + 1))
+fi
+
+# =============================================
+# Test 23: --kind commons resolves promoted-commons.jsonl from the archive
+# behind an active stub. The dispatch is closed: promoted-commons.jsonl is
+# reachable only via --kind commons, never via non-kind dir refinement.
+# =============================================
+echo ""
+echo "Test 23: --kind commons resolves archive copy behind active stub"
+KDIR23="$TEST_DIR/kdir23"
+mkdir -p "$KDIR23/_work/wi-commons"
+mkdir -p "$KDIR23/_work/_archive/wi-commons"
+cat > "$KDIR23/_work/_archive/wi-commons/promoted-commons.jsonl" <<'JSONLEOF'
+{"claim_id":"commons-claim-1","tier":"reusable","claim":"promoted commons claim is auditable via --kind commons","falsifier":"Run lore audit --kind commons and confirm the assertion gate adjudicates it"}
+JSONLEOF
+gate_fixture "$TEST_DIR/gate23.json" '{
+  "judge":"correctness-gate","judge_template_version":"comm23",
+  "verdicts":[{"claim_id":"commons-claim-1","verdict":"verified","evidence":"ok"}]
+}'
+
+OUT23=$(bash "$AUDIT" --kdir "$KDIR23" --work-item "wi-commons" \
+  --kind commons --id commons-claim-1 \
+  --gate-output-file "$TEST_DIR/gate23.json" 2>&1)
+assert_contains "commons: assertion gate completes" "$OUT23" "correctness-gate-assertion complete"
+assert_file_exists "commons: verdicts land under archive dir" \
+  "$KDIR23/_work/_archive/wi-commons/verdicts/promoted-commons.jsonl"
+
+# =============================================
+# Test 24: Non-kind positional slug — empty active stub falls back to the
+# archive copy during dir refinement; whole-file audit runs from the archive.
+# =============================================
+echo ""
+echo "Test 24: non-kind positional slug falls back to archive copy"
+KDIR24="$TEST_DIR/kdir24"
+mkdir -p "$KDIR24/_work/wi-refine"
+setup_archived_task_claims_fixture "$KDIR24" "wi-refine"
+gate_fixture "$TEST_DIR/gate24.json" '{
+  "judge":"correctness-gate","judge_template_version":"ref24",
+  "verdicts":[
+    {"claim_id":"task-claim-a","verdict":"verified","evidence":"ok"},
+    {"claim_id":"task-claim-b","verdict":"verified","evidence":"ok"}
+  ]
+}'
+
+OUT24=$(bash "$AUDIT" "wi-refine" --kdir "$KDIR24" \
+  --gate-output-file "$TEST_DIR/gate24.json" 2>&1)
+assert_contains "refine-fallback: assertion gate completes" "$OUT24" "correctness-gate-assertion complete"
+assert_contains "refine-fallback: both claims audited" "$OUT24" "total=2 verified=2"
+# Directory positionals name the verdict file after the resolved dir's
+# basename (the slug), unlike per-kind dispatch which uses the source file's.
+assert_file_exists "refine-fallback: verdicts land under archive dir" \
+  "$KDIR24/_work/_archive/wi-refine/verdicts/wi-refine.jsonl"
 
 echo ""
 echo "=== Results ==="
