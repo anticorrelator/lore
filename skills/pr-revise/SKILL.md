@@ -117,7 +117,7 @@ For each feedback item with a substantive label (suggestion, issue, question, th
 
 1. Query the knowledge store:
    ```bash
-   lore search "<feedback topic>" --type knowledge --json --limit 3
+   lore search "<feedback topic>" --type knowledge --scale-set subsystem,implementation --json --limit 3
    ```
 
 2. Surface 1-3 compact citations inline with the categorized item. Format: `[knowledge: entry-title]` with a one-line summary of relevance.

@@ -48,7 +48,7 @@ When `_pending_captures/` directory exists in the knowledge store at session sta
 
    **Low-context candidates:** If the candidate excerpt is too sparse to evaluate the gate confidently, read the **Related files:** field and skim those files before deciding. Do not reject a candidate solely because the excerpt is thin — the stop hook pre-filter has already established baseline relevance. Rejection requires a positive reason (fails Reusable, Non-obvious, Stable, or High confidence), not an absence of evidence.
 
-   **Staleness branch:** when the "non-obvious" check reveals a similar entry may already exist, run `lore search "<key terms>" --type knowledge --limit 3`, read the top match, and branch: (a) same claim — skip the candidate, (b) divergent (contradicts or supersedes) — edit the existing entry file in-place to reflect the new insight, update its `learned` date to today, then skip the new capture. Note: `[staleness] Updated "<existing title>" — superseded by new finding`.
+   **Staleness branch:** when the "non-obvious" check reveals a similar entry may already exist, run `lore search "<key terms>" --type knowledge --scale-set <candidate-scale> --limit 3` (declare the candidate's own scale — the conflict check compares like with like), read the top match, and branch: (a) same claim — skip the candidate, (b) divergent (contradicts or supersedes) — edit the existing entry file in-place to reflect the new insight, update its `learned` date to today, then skip the new capture. Note: `[staleness] Updated "<existing title>" — superseded by new finding`.
 
 3. For qualifying insights, determine the emission path before running the capture command:
    - **Tier 3 path (`lore promote`):** use when ALL four predicates are true: (a) backed by a Tier 2 evidence artifact (worker/researcher observation from `execution-log.md` or `plan.md`), (b) expressible as a `validate-tier3.sh`-accepted row with `claim`, `why_future_agent_cares`, `falsifier`, and `source_artifact_ids`, (c) `source_artifact_ids` non-empty, and (d) reusable outside the current work item.
@@ -181,7 +181,7 @@ If capture constraints were provided in Step 1, apply them as an additional filt
 - ✓ *Lower-priority capture (single-source, still valuable):* "The stop hook must complete in <500ms — enforced by the ceremony-config.sh timeout setting." Directly readable from one config file, but saves token cost for any agent that would otherwise re-read that file to confirm the constraint.
 - ✗ *Anti-pattern — existence ≠ recoverability:* "lib.sh defines slugify() as tr + sed." This is a factual description of a function signature readable directly from lib.sh — it fails Non-obvious and fails the recoverability test: the "what" is in the code. Capture the *why* (slugify uses this approach because scripts must run in restricted shell environments without external tools) not the *what*.
 
-**Staleness branch:** when the "non-obvious" check reveals a similar entry may already exist, run `lore search "<key terms>" --type knowledge --limit 3`, read the top match, and branch: (a) same claim — skip the candidate; (b) divergent (contradicts or supersedes) — edit the existing entry file in-place to reflect the new insight, update its `learned` date to today, then skip the new capture. Note: `[staleness] Updated "<existing title>" — superseded by new finding`.
+**Staleness branch:** when the "non-obvious" check reveals a similar entry may already exist, run `lore search "<key terms>" --type knowledge --scale-set <candidate-scale> --limit 3` (declare the candidate's own scale — the conflict check compares like with like), read the top match, and branch: (a) same claim — skip the candidate; (b) divergent (contradicts or supersedes) — edit the existing entry file in-place to reflect the new insight, update its `learned` date to today, then skip the new capture. Note: `[staleness] Updated "<existing title>" — superseded by new finding`.
 
 **Synthesis as a loading signal:** After an entry qualifies, assess whether it required combining information from multiple files, sessions, or components. Synthesis entries load at startup; single-source entries are still captured — they provide real token savings when retrieved on demand — but rank lower in auto-loading naturally. Strong positive indicators of synthesis: architectural models, design rationale, cross-cutting conventions, behavioral directives, mental models, and directional intent.
 
@@ -366,9 +366,9 @@ After writing thread entries that contain a `**Preferences:**` field, update the
 
 After all captures are filed, check each new entry for conflicts with existing entries:
 
-1. For each entry just captured, search the same category with FTS5:
+1. For each entry just captured, search the same category with FTS5, declaring the candidate's own scale (the conflict check compares like with like):
    ```bash
-   lore search "<key terms from entry title>" --type knowledge --limit 5
+   lore search "<key terms from entry title>" --type knowledge --scale-set <candidate-scale> --limit 5
    ```
 2. For each match with an **older `learned` date** than the new entry, compare content. Look for direct contradiction, supersession, or overlap.
 3. **Act on conflicts:**

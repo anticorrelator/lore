@@ -102,10 +102,7 @@ A finding without a concrete misuse scenario is not ready to report. Ground ever
 
 ## Step 4: Knowledge Enrichment
 
-**Mandatory for every finding.** For each finding, query the knowledge store:
-```bash
-lore search "<finding topic>" --type knowledge --json --limit 3
-```
+**Mandatory for every finding.** For each finding, query the knowledge store using the canonical enrichment query in `claude-md/review-protocol/enrichment.md` (read into the protocol preamble in Step 3), substituting the finding topic for `<topic>`.
 
 Attach relevant citations as `knowledge_context` entries in the finding. Follow the enrichment gate and output cap from the shared protocol. If no relevant knowledge is found, set `knowledge_context` to an empty array.
 

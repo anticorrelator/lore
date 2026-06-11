@@ -107,7 +107,7 @@ For comments with substantive labels (suggestion, issue, question, thought):
 
 1. Query the knowledge store:
    ```bash
-   lore search "<topic>" --type knowledge --json --limit 3
+   lore search "<topic>" --type knowledge --scale-set subsystem,implementation --json --limit 3
    ```
 2. Surface 1-3 compact citations inline: `[knowledge: entry-title]` with a one-line summary of relevance.
 3. Stale-knowledge flagging: see `skills/pr-review/SKILL.md` Step 4d — if an entry is STALE and the PR contradicts it, flag as "convention may need updating" — not "PR is wrong."

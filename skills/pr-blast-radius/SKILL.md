@@ -95,10 +95,7 @@ cat ~/.lore/claude-md/review-protocol/findings-format.md
 cat ~/.lore/claude-md/review-protocol/review-voice.md
 ```
 
-For each finding, query the knowledge store:
-```bash
-lore search "<finding topic>" --type knowledge --json --limit 3
-```
+For each finding, query the knowledge store using the canonical enrichment query in `claude-md/review-protocol/enrichment.md` (read into the protocol preamble above), substituting the finding topic for `<topic>`.
 
 Attach relevant citations as `knowledge_context` entries in the finding. Follow the enrichment gate and output cap from the shared protocol. If no relevant knowledge is found, set `knowledge_context` to an empty array.
 

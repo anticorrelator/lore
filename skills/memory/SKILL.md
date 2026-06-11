@@ -32,9 +32,9 @@ Quick-add directly to a category directory (bypasses inbox):
 
 ### `search <query>`
 ```bash
-lore search "<query>" --type knowledge
+lore search "<query>" --type knowledge --scale-set <bucket>
 ```
-Show the script output. For top matches, briefly summarize relevant context.
+Show the script output. For top matches, briefly summarize relevant context. Declare `<bucket>` per the rubric below — this is a per-query judgment, not a default.
 
 **Scale rubric — declare explicitly at every retrieval surface:**
 

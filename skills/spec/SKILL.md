@@ -522,7 +522,7 @@ Output: `{verified: N, corrected: [...], unresolved: [...]}`.
 
 ### Step 5.0b: Knowledge context block audit
 
-For each phase, run `lore search "<phase objective keywords>" --limit 3`. If results exist but the phase has no `**Knowledge context:**` block, add the most relevant entry as a backlink with an implementation-facing annotation.
+For each phase, run `lore search "<phase objective keywords>" --scale-set subsystem,implementation --limit 3`. If results exist but the phase has no `**Knowledge context:**` block, add the most relevant entry as a backlink with an implementation-facing annotation.
 
 ---
 

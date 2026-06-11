@@ -101,7 +101,7 @@ create work items. Do nothing else.
 PERMITTED ACTIONS:
   1. Read-only information gathering:
        gh issue list, gh issue view <number>, gh pr list, gh api <endpoint>
-       lore work list, lore work search "<query>", lore search "<query>"
+       lore work list, lore work search "<query>", lore search "<query>" --scale-set abstract,architecture,subsystem,implementation
        curl <url> (read-only fetches only)
 
   2. Create work items — the ONLY write action permitted:

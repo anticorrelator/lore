@@ -14,7 +14,7 @@ When all three gate conditions are met:
 
 1. **Prefetch knowledge for the agent prompt** — use the concern and scope files as query terms:
    ```bash
-   PRIOR_KNOWLEDGE=$(lore prefetch "<concern> <scope files>" --format prompt --limit 3)
+   PRIOR_KNOWLEDGE=$(lore prefetch "<concern> <scope files>" --format prompt --scale-set subsystem,implementation --limit 3)
    ```
    For example, if the concern is "cross-boundary state mutation" and scope is `scripts/pk_search.py scripts/pk_cli.py`, the query would be `"cross-boundary state mutation pk_search.py pk_cli.py"`.
 
@@ -29,7 +29,7 @@ When all three gate conditions are met:
 
    If the above context doesn't cover your area, search:
    ```bash
-   lore search "<query>" --type knowledge --json --limit 3
+   lore search "<query>" --type knowledge --scale-set subsystem,implementation --json --limit 3
    ```
 
    Report: Return findings as structured observations — confirmed/refuted/uncertain with evidence.

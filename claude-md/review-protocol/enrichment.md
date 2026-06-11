@@ -7,10 +7,17 @@
 For each substantive finding:
 
 1. **Query the knowledge store:**
+   <!-- CANONICAL ENRICHMENT QUERY — single source for the lens-skill class.
+        Consumers that defer to this line (do not duplicate it inline):
+          skills/pr-blast-radius, pr-correctness, pr-interface-clarity,
+          pr-regressions, pr-security, pr-test-quality, pr-thematic,
+          pr-user-impact (all cat this file in their protocol preamble).
+        Enforced by tests/test_scale_set_contract.sh — any edit to the
+        --scale-set declaration below must keep it present and valid. -->
    ```bash
-   lore search "<topic>" --type knowledge --json --limit 3
+   lore search "<topic>" --type knowledge --scale-set subsystem,implementation --json --limit 3
    ```
-   Where `<topic>` is the specific concept, pattern, or component the finding concerns.
+   Where `<topic>` is the specific concept, pattern, or component the finding concerns. A review finding concerns a concrete code change, so enrichment seeks conventions and gotchas at the `subsystem,implementation` altitude.
 
 2. **Surface citations inline.** Include 1-3 compact knowledge citations with the finding. Format: `[knowledge: entry-title]` with a one-line summary of why it's relevant.
 

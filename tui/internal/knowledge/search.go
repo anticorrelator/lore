@@ -240,7 +240,11 @@ func (m SearchModel) View() string {
 }
 
 func executeKnowledgeSearch(query string) tea.Msg {
-	cmd := exec.Command("lore", "search", query, "--type", "knowledge", "--json")
+	// The CLI requires an explicit --scale-set; a human browsing the TUI wants
+	// every altitude, and a narrower set would silently hide architecture-scaled
+	// entries (abstract and preferences bypass the filter regardless).
+	cmd := exec.Command("lore", "search", query, "--type", "knowledge",
+		"--scale-set", "abstract,architecture,subsystem,implementation", "--json")
 	out, err := cmd.Output()
 	if err != nil {
 		return knowledgeSearchResultsMsg{query: query, err: err}

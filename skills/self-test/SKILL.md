@@ -210,8 +210,8 @@ If this is the first action in the session (no real work preceded the self-test)
 Run these searches:
 
 ```bash
-lore search "backlinks"
-lore search "session start"
+lore search "backlinks" --scale-set abstract,architecture,subsystem,implementation
+lore search "session start" --scale-set abstract,architecture,subsystem,implementation
 lore stats
 ```
 

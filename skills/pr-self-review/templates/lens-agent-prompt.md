@@ -42,7 +42,7 @@ Writing that trigger is also the materiality test: if the trigger is contrived, 
 
 Query the knowledge store for each finding:
 ```bash
-lore search "<topic>" --type knowledge --json --limit 3
+lore search "<topic>" --type knowledge --scale-set subsystem,implementation --json --limit 3
 ```
 
 Report back with your findings JSON when complete.
