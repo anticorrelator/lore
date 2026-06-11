@@ -344,12 +344,12 @@ assert_contains "entry META has verdict id" "$(cat "$CAL_ENTRY")" "$CAL_VERDICT_
 # =============================================
 # Test 7: retrieval surfaces correction recency
 # =============================================
-# Continues from Test 6's corrected entry: the prefetch full format renders
+# Continues from Test 6's corrected entry: the prefetch prompt format renders
 # the trust stamp's correction_recency and a "Last corrected" line.
 echo ""
 echo "Test 7: prefetch surfaces correction recency for corrected entries"
 LORE_KNOWLEDGE_DIR="$KDIR" python3 "$SCRIPTS_DIR/pk_cli.py" index "$KDIR" --force >/dev/null 2>&1
-PREFETCH_FULL=$(LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPTS_DIR/prefetch-knowledge.sh" "resolver remediated" --format full --type knowledge --scale-set subsystem)
+PREFETCH_FULL=$(LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPTS_DIR/prefetch-knowledge.sh" "resolver remediated" --format prompt --type knowledge --scale-set subsystem)
 assert_contains "trust stamp carries correction_recency" "$PREFETCH_FULL" "correction_recency=2026-05-09"
 assert_contains "prefetch shows Last corrected" "$PREFETCH_FULL" "Last corrected: 2026-05-09"
 

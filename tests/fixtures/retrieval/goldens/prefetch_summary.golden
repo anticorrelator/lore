@@ -1,0 +1,28 @@
+## Prior Knowledge
+Results from knowledge store for: "widget pipeline" (scale-set: implementation,subsystem)
+
+- **Widget Naming** (conventions/widget-naming.md, score: <NUM>): # Widget Naming
+
+Widget identifiers use kebab-case slugs. Every widget pipeline stage prefixes
+its logs with the widget slug so cross-stage traces line up.
+<!-- learned: 2025-02-20 | confidence: high ...
+- **Review Widget Diffs Stage By Stage** (preferences/widget-review-preference.md, score: <NUM>): # Review Widget Diffs Stage By Stage
+
+When reviewing widget pipeline changes, review one stage at a time and name
+the stage in the review summary.
+<!-- learned: 2025-05-01 | confidence: high | source:...
+- **Widget Domain** (domains/widget-domain.md, score: <NUM>): # Widget Domain
+
+Deep widget domain notes, lazy-loaded on demand. Widget telemetry schema and
+widget retention windows live here.
+<!-- learned: 2025-02-01 | confidence: high | source: manual | related...
+- **Widget Release Steps** (workflows/widget-release.md, score: <NUM>): # Widget Release Steps
+
+Run widget-release.sh --dry-run first, inspect the widget manifest diff, then
+run it again without the flag to ship widgets.
+<!-- learned: 2025-04-05 | confidence: medium | sou...
+- **Widget Cache Stale Reads** (gotchas/widget-cache-stale.md, score: <NUM>): # Widget Cache Stale Reads
+
+The widget assembly cache serves stale widget parts when the intake stage
+rewrites a spec in place. Bust the cache key on every widget spec rewrite.
+<!-- learned: 2025-03-1...

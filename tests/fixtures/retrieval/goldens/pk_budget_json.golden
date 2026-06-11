@@ -1,0 +1,46 @@
+{
+  "full": [
+    {
+      "heading": "Widget Naming",
+      "file_path": "conventions/widget-naming.md",
+      "content": "# Widget Naming\n\nWidget identifiers use kebab-case slugs. Every widget pipeline stage prefixes\nits logs with the widget slug so cross-stage traces line up.\n<!-- learned: 2025-02-20 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->",
+      "score": "<NUM>",
+      "category": "conventions"
+    },
+    {
+      "heading": "Review Widget Diffs Stage By Stage",
+      "file_path": "preferences/widget-review-preference.md",
+      "content": "# Review Widget Diffs Stage By Stage\n\nWhen reviewing widget pipeline changes, review one stage at a time and name\nthe stage in the review summary.\n<!-- learned: 2025-05-01 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->",
+      "score": "<NUM>",
+      "category": "preferences"
+    }
+  ],
+  "titles_only": [
+    {
+      "heading": "Widget Pipeline Overview",
+      "file_path": "architecture/widget-pipeline-overview.md",
+      "score": "<NUM>",
+      "category": "architecture"
+    },
+    {
+      "heading": "Widget Abstraction Law",
+      "file_path": "principles/widget-abstraction-law.md",
+      "score": "<NUM>",
+      "category": "principles"
+    },
+    {
+      "heading": "Widget Release Steps",
+      "file_path": "workflows/widget-release.md",
+      "score": "<NUM>",
+      "category": "workflows"
+    },
+    {
+      "heading": "Widget Cache Stale Reads",
+      "file_path": "gotchas/widget-cache-stale.md",
+      "score": "<NUM>",
+      "category": "gotchas"
+    }
+  ],
+  "budget_used": 645,
+  "budget_total": 700
+}

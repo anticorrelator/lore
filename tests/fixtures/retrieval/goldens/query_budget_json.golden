@@ -1,0 +1,51 @@
+{
+  "full": [
+    {
+      "heading": "Widget Naming",
+      "file_path": "conventions/widget-naming.md",
+      "content": "# Widget Naming\n\nWidget identifiers use kebab-case slugs. Every widget pipeline stage prefixes\nits logs with the widget slug so cross-stage traces line up.\n<!-- learned: 2025-02-20 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->",
+      "score": "<NUM>",
+      "category": "conventions",
+      "path": "conventions/widget-naming.md"
+    }
+  ],
+  "titles_only": [
+    {
+      "heading": "Review Widget Diffs Stage By Stage",
+      "file_path": "preferences/widget-review-preference.md",
+      "score": "<NUM>",
+      "category": "preferences",
+      "path": "preferences/widget-review-preference.md"
+    },
+    {
+      "heading": "Widget Abstraction Law",
+      "file_path": "principles/widget-abstraction-law.md",
+      "score": "<NUM>",
+      "category": "principles",
+      "path": "principles/widget-abstraction-law.md"
+    },
+    {
+      "heading": "Widget Release Steps",
+      "file_path": "workflows/widget-release.md",
+      "score": "<NUM>",
+      "category": "workflows",
+      "path": "workflows/widget-release.md"
+    },
+    {
+      "heading": "Widget Cache Stale Reads",
+      "file_path": "gotchas/widget-cache-stale.md",
+      "score": "<NUM>",
+      "category": "gotchas",
+      "path": "gotchas/widget-cache-stale.md"
+    },
+    {
+      "heading": "Widget Domain",
+      "file_path": "domains/widget-domain.md",
+      "score": "<NUM>",
+      "category": "domains",
+      "path": "domains/widget-domain.md"
+    }
+  ],
+  "budget_used": 327,
+  "budget_total": 600
+}

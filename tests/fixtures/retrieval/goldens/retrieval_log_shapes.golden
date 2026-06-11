@@ -1,0 +1,7 @@
+manifest_load: calls,event,loaded_paths,manifest_version,phase,sections,slug,task_id,timestamp sections[chars_budget,chars_used,content_degraded,deduped_count,entry_count_before_budget,manifest_version,raw_count,render_mode_counts,requested_k,section_role,served_count,served_paths,shrunk_for_budget,topic] calls[query,query_kind,raw_count,scale_set,topic]
+manifest_load: event,loaded_paths,manifest_version,phase,slug,task_id,timestamp
+prefetch: event,loaded_paths,timestamp
+search: caller,elapsed_ms,event,query,query_kind,result_count,scale_declared,source_type,timestamp
+search: caller,elapsed_ms,event,query,query_kind,result_count,source_type,timestamp
+search: elapsed_ms,event,query,query_kind,result_count,source_type,timestamp
+unknown: budget_total,budget_used,context_sections,context_signal,direct_resolved,files_full,files_skipped,files_summary,format_version,git_branch,loaded_paths,relevance_search,scale_declared,signal_sources,timestamp

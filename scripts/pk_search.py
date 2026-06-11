@@ -136,6 +136,41 @@ def render_trust_stamp(result: dict, knowledge_dir: str | None = None) -> str:
 
 from pk_markdown import MarkdownParser  # noqa: E402
 from pk_resolve import Resolver, BACKLINK_RE as _BACKLINK_RE  # noqa: E402
+import pk_retrieval  # noqa: E402
+
+
+def attach_similar_entries(searcher: "Searcher", results: list[dict]) -> None:
+    """Enrich search results in place with up to 3 similar entries each from
+    the TF-IDF concordance (`similar_entries` field). Degrades to a no-op when
+    the concordance is unavailable.
+    """
+    if not results:
+        return
+    try:
+        from pk_concordance import Concordance
+        concordance = Concordance(searcher.db_path)
+        knowledge_dir_abs = searcher.knowledge_dir
+        seen: set[tuple[str, str]] = set()
+        for r in results:
+            abs_path = os.path.join(knowledge_dir_abs, r["file_path"])
+            seen.add((abs_path, r["heading"]))
+
+        for r in results:
+            abs_path = os.path.join(knowledge_dir_abs, r["file_path"])
+            similar = concordance.find_similar(
+                abs_path, r["heading"],
+                limit=3,
+                source_type_filter="knowledge",
+                exclude=set(seen),
+            )
+            for s in similar:
+                try:
+                    s["file_path"] = os.path.relpath(s["file_path"], knowledge_dir_abs)
+                except ValueError:
+                    pass
+            r["similar_entries"] = similar
+    except (ImportError, Exception):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1521,12 +1556,19 @@ class Searcher:
         importance_weight: float = 0.1,
         include_status: tuple[str, ...] | list[str] | None = None,
         scale_set: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
     ) -> dict:
         """Search with composite scoring and budget-aware result partitioning.
 
         Wraps composite_search() and partitions results into two tiers:
         - 'full': results whose cumulative content fits within budget_chars
         - 'titles_only': remaining results (heading + file_path only)
+
+        Args:
+            exclude_paths: Store-relative paths to drop before partitioning
+                (matched with or without the .md suffix) — lets callers that
+                already loaded entries (e.g. SessionStart direct-resolve)
+                dedupe inside the primitive.
 
         Returns dict with keys:
             full: list of result dicts (with 'content' field)
@@ -1551,32 +1593,12 @@ class Searcher:
             scale_set=scale_set,
         )
 
-        full: list[dict] = []
-        titles_only: list[dict] = []
-        budget_used = 0
+        if exclude_paths:
+            results = pk_retrieval.exclude_by_paths(
+                results, pk_retrieval.path_exclusion_set(list(exclude_paths))
+            )
 
-        for r in results:
-            content = r.get("content", "")
-            content_size = len(content)
-
-            if budget_used + content_size <= budget_chars:
-                full.append(r)
-                budget_used += content_size
-            else:
-                titles_only.append({
-                    "heading": r.get("heading", ""),
-                    "file_path": r.get("file_path", ""),
-                    "source_type": r.get("source_type", ""),
-                    "category": r.get("category"),
-                    "composite_score": r.get("composite_score", 0),
-                })
-
-        return {
-            "full": full,
-            "titles_only": titles_only,
-            "budget_used": budget_used,
-            "budget_total": budget_chars,
-        }
+        return pk_retrieval.partition_two_tier(results, budget_chars)
 
 
 # ---------------------------------------------------------------------------

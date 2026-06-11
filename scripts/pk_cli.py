@@ -6,6 +6,9 @@ pk_search.py is now a pure library (Indexer, Searcher, Stats, LinkChecker).
 Usage:
     python pk_cli.py index <knowledge_dir> [--force]
     python pk_cli.py search <knowledge_dir> <query> [--limit N] [--threshold F] [--json] [--budget N]
+    python pk_cli.py prefetch <knowledge_dir> <query> --scale-set <csv> [--format prompt|summary]
+    python pk_cli.py query <knowledge_dir> <seeds> --scale-set <csv> [--format json|prompt]
+    python pk_cli.py resolve-manifest <knowledge_dir> --directive <json> --slug <slug> --phase <n>
     python pk_cli.py stats <knowledge_dir>
     python pk_cli.py resolve <knowledge_dir> <backlinks...> [--json]
     python pk_cli.py read <knowledge_dir> <file> [--query Q] [--type T]
@@ -30,9 +33,11 @@ from pk_search import (  # noqa: E402
     DEFAULT_LIMIT,
     DEFAULT_THRESHOLD,
     SOURCE_TYPES,
+    attach_similar_entries,
     render_trust_stamp,
 )
 from pk_resolve import Resolver, resolve_read_path  # noqa: E402
+import pk_retrieval  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +81,11 @@ def cmd_search(args: argparse.Namespace) -> None:
     # --budget: budget-aware search with two-tier JSON output
     budget = getattr(args, "budget", None)
     if budget is not None:
+        exclude_paths_arg = getattr(args, "exclude_paths", None)
+        exclude_paths = (
+            [p.strip() for p in exclude_paths_arg.split(",") if p.strip()]
+            if isinstance(exclude_paths_arg, str) else exclude_paths_arg
+        )
         result = searcher.budget_search(
             query=args.query,
             budget_chars=budget,
@@ -88,31 +98,9 @@ def cmd_search(args: argparse.Namespace) -> None:
             include_archived=include_archived,
             include_status=include_status,
             scale_set=scale_set,
+            exclude_paths=exclude_paths,
         )
-        # Normalize full entries for JSON output
-        full_out = []
-        for r in result["full"]:
-            full_out.append({
-                "heading": r.get("heading", ""),
-                "file_path": r.get("file_path", ""),
-                "content": r.get("content", ""),
-                "score": r.get("composite_score", 0),
-                "category": r.get("category"),
-            })
-        titles_out = []
-        for r in result["titles_only"]:
-            titles_out.append({
-                "heading": r.get("heading", ""),
-                "file_path": r.get("file_path", ""),
-                "score": r.get("composite_score", 0),
-                "category": r.get("category"),
-            })
-        print(json.dumps({
-            "full": full_out,
-            "titles_only": titles_out,
-            "budget_used": result["budget_used"],
-            "budget_total": result["budget_total"],
-        }, indent=2))
+        print(json.dumps(pk_retrieval.budget_json_payload(result), indent=2))
         return
 
     if mode == "composite":
@@ -196,35 +184,8 @@ def cmd_search(args: argparse.Namespace) -> None:
             results = [pk_semantic.format_result_for_cli(r, searcher.knowledge_dir) for r in results]
 
     # --expand: enrich results with similar entries from TF-IDF concordance
-    expand = getattr(args, "expand", False)
-    if expand and results:
-        try:
-            from pk_concordance import Concordance
-            concordance = Concordance(searcher.db_path)
-            knowledge_dir_abs = os.path.abspath(args.knowledge_dir)
-            # Collect already-seen entries to avoid duplicates across results
-            seen: set[tuple[str, str]] = set()
-            for r in results:
-                abs_path = os.path.join(knowledge_dir_abs, r["file_path"])
-                seen.add((abs_path, r["heading"]))
-
-            for r in results:
-                abs_path = os.path.join(knowledge_dir_abs, r["file_path"])
-                similar = concordance.find_similar(
-                    abs_path, r["heading"],
-                    limit=3,
-                    source_type_filter="knowledge",
-                    exclude=set(seen),
-                )
-                # Convert absolute paths back to relative for display
-                for s in similar:
-                    try:
-                        s["file_path"] = os.path.relpath(s["file_path"], knowledge_dir_abs)
-                    except ValueError:
-                        pass
-                r["similar_entries"] = similar
-        except (ImportError, Exception):
-            pass  # gracefully degrade if concordance not available
+    if getattr(args, "expand", False):
+        attach_similar_entries(searcher, results)
 
     if args.json:
         print(json.dumps(results, indent=2))
@@ -853,6 +814,66 @@ def cmd_check_links(args: argparse.Namespace) -> None:
             print(f"  {al['source_file']}: {al['backlink']}")
 
 
+def _csv_to_list(value) -> list[str] | None:
+    """Normalize a comma-delimited CLI string into a list (None stays None)."""
+    if isinstance(value, str):
+        return [s.strip() for s in value.split(",") if s.strip()] or None
+    return value
+
+
+def cmd_prefetch(args: argparse.Namespace) -> None:
+    import pk_prefetch
+
+    scale_set = _csv_to_list(args.scale_set)
+    if not scale_set:
+        print("Error: --scale-set <csv> is required for prefetch.", file=sys.stderr)
+        sys.exit(1)
+    rc = pk_prefetch.run_prefetch(
+        args.knowledge_dir,
+        args.query,
+        scale_set=scale_set,
+        fmt=args.format,
+        limit=args.limit,
+        source_type=getattr(args, "type", "knowledge") or "knowledge",
+        exclude_backlinks=args.exclude_backlinks or "",
+        work_item=args.work_item or "",
+        no_preferences=args.no_preferences,
+    )
+    sys.exit(rc)
+
+
+def cmd_query(args: argparse.Namespace) -> None:
+    import pk_query
+
+    scale_set = _csv_to_list(args.scale_set)
+    if not scale_set:
+        print("Error: --scale-set <csv> is required for query.", file=sys.stderr)
+        sys.exit(1)
+    rc = pk_query.run_query(
+        args.knowledge_dir,
+        args.seeds,
+        scale_set=scale_set,
+        hop_budget=args.hop_budget,
+        budget=args.budget,
+        type_filter=getattr(args, "type", "knowledge") or "knowledge",
+        exclude_category=args.exclude_category or "",
+        fmt=args.format,
+    )
+    sys.exit(rc)
+
+
+def cmd_resolve_manifest(args: argparse.Namespace) -> None:
+    import pk_manifest
+
+    try:
+        directive = json.loads(args.directive)
+    except json.JSONDecodeError as e:
+        print(f"Error: directive is not valid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+    rc = pk_manifest.resolve_v2(args.knowledge_dir, directive, args.slug, args.phase)
+    sys.exit(rc)
+
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -896,6 +917,7 @@ def main() -> None:
     p_search.add_argument("--include-archived", action="store_true", help="Include archived work items in results (excluded by default)")
     p_search.add_argument("--expand", action="store_true", help="Expand results with similar entries from TF-IDF concordance (See also)")
     p_search.add_argument("--budget", type=int, default=None, help="Budget in chars: return two-tier JSON (full + titles_only) within budget")
+    p_search.add_argument("--exclude-paths", default=None, metavar="CSV", help="With --budget: store-relative paths to drop before partitioning (matched with or without .md)")
     p_search.add_argument("--scale-set", default=None, metavar="BUCKETS", help="Declared retrieval scale bucket(s), comma-separated (e.g. 'implementation' or 'subsystem,implementation'). Set-membership filter against entry META scale field.")
     p_search.add_argument("--include-status", nargs="+", default=None, metavar="STATUS", help="Status values to include (current, superseded, historical). Default: current only.")
     p_search.set_defaults(func=cmd_search)
@@ -956,6 +978,39 @@ def main() -> None:
     p_genbl.add_argument("--threshold", type=float, default=0.20, help="Min similarity for backlink generation (default: 0.20)")
     p_genbl.add_argument("--dry-run", action="store_true", help="Preview links without writing")
     p_genbl.set_defaults(func=cmd_generate_backlinks)
+
+    # prefetch
+    p_prefetch = subparsers.add_parser("prefetch", help="Search and render a ## Prior Knowledge block for agent prompts")
+    p_prefetch.add_argument("knowledge_dir", help="Path to knowledge directory")
+    p_prefetch.add_argument("query", help="Search query")
+    p_prefetch.add_argument("--format", choices=["prompt", "summary"], default="prompt", help="Output format (default: prompt)")
+    p_prefetch.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
+    p_prefetch.add_argument("--type", choices=list(SOURCE_TYPES) + ["all"], default="knowledge", help="Source type filter (default: knowledge)")
+    p_prefetch.add_argument("--scale-set", default=None, metavar="CSV", help="Required declared retrieval scale bucket(s), comma-separated")
+    p_prefetch.add_argument("--exclude-backlinks", default=None, metavar="CSV", help="Backlink paths to exclude from results")
+    p_prefetch.add_argument("--work-item", default=None, metavar="SLUG", help="Work item slug for scope_pointers injection")
+    p_prefetch.add_argument("--no-preferences", action="store_true", help="Skip the preferences side-channel")
+    p_prefetch.set_defaults(func=cmd_prefetch)
+
+    # query
+    p_query = subparsers.add_parser("query", help="Seeds-keyed compositional retrieval (backlinks or query text)")
+    p_query.add_argument("knowledge_dir", help="Path to knowledge directory")
+    p_query.add_argument("seeds", help="Comma-separated seed list (backlinks or query text)")
+    p_query.add_argument("--scale-set", default=None, metavar="CSV", help="Required declared retrieval scale bucket(s), comma-separated")
+    p_query.add_argument("--hop-budget", type=int, default=0, help="0=no expand, >=1 adds TF-IDF concordance see-also widening")
+    p_query.add_argument("--budget", type=int, default=None, help="Budget in chars: two-tier full/titles_only output")
+    p_query.add_argument("--type", default="knowledge", help="Source type: knowledge, work, or all (default: knowledge)")
+    p_query.add_argument("--exclude-category", default=None, help="Exclude entries in this category")
+    p_query.add_argument("--format", choices=["json", "prompt"], default="json", help="Output format (default: json)")
+    p_query.set_defaults(func=cmd_query)
+
+    # resolve-manifest
+    p_manifest = subparsers.add_parser("resolve-manifest", help="Resolve a v2 retrieval_directive into a ## Prior Knowledge bundle")
+    p_manifest.add_argument("knowledge_dir", help="Path to knowledge directory")
+    p_manifest.add_argument("--directive", required=True, help="retrieval_directive JSON (version 2)")
+    p_manifest.add_argument("--slug", required=True, help="Work item slug (telemetry)")
+    p_manifest.add_argument("--phase", type=int, required=True, help="1-based phase number (telemetry)")
+    p_manifest.set_defaults(func=cmd_resolve_manifest)
 
     # stats
     p_stats = subparsers.add_parser("stats", help="Show index statistics")

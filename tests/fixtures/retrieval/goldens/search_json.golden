@@ -1,0 +1,72 @@
+[
+  {
+    "heading": "Widget Naming",
+    "file_path": "conventions/widget-naming.md",
+    "source_type": "knowledge",
+    "category": "conventions",
+    "confidence": "high",
+    "learned_date": "2025-02-20",
+    "structural_importance": "<NUM>",
+    "scale": "subsystem",
+    "entry_status": "current",
+    "template_version": "fix1",
+    "score": "<NUM>",
+    "snippet": "# Widget Naming\n\nWidget identifiers use kebab-case slugs. Every widget pipeline stage prefixes\nits logs with the widget slug so cross-stage traces line up.\n<!-- learned: 2025-02-20 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->"
+  },
+  {
+    "heading": "Review Widget Diffs Stage By Stage",
+    "file_path": "preferences/widget-review-preference.md",
+    "source_type": "knowledge",
+    "category": "preferences",
+    "confidence": "high",
+    "learned_date": "2025-05-01",
+    "structural_importance": "<NUM>",
+    "scale": "subsystem",
+    "entry_status": "current",
+    "template_version": "fix1",
+    "score": "<NUM>",
+    "snippet": "# Review Widget Diffs Stage By Stage\n\nWhen reviewing widget pipeline changes, review one stage at a time and name\nthe stage in the review summary.\n<!-- learned: 2025-05-01 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->"
+  },
+  {
+    "heading": "Widget Domain",
+    "file_path": "domains/widget-domain.md",
+    "source_type": "knowledge",
+    "category": "domains",
+    "confidence": "high",
+    "learned_date": "2025-02-01",
+    "structural_importance": "<NUM>",
+    "scale": "subsystem",
+    "entry_status": "current",
+    "template_version": "fix1",
+    "score": "<NUM>",
+    "snippet": "# Widget Domain\n\nDeep widget domain notes, lazy-loaded on demand. Widget telemetry schema and\nwidget retention windows live here.\n<!-- learned: 2025-02-01 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->"
+  },
+  {
+    "heading": "Widget Cache Stale Reads",
+    "file_path": "gotchas/widget-cache-stale.md",
+    "source_type": "knowledge",
+    "category": "gotchas",
+    "confidence": "high",
+    "learned_date": "2025-03-10",
+    "structural_importance": "<NUM>",
+    "scale": "subsystem,implementation",
+    "entry_status": "current",
+    "template_version": "fix1",
+    "score": "<NUM>",
+    "snippet": "# Widget Cache Stale Reads\n\nThe widget assembly cache serves stale widget parts when the intake stage\nrewrites a spec in place. Bust the cache key on every widget spec rewrite.\n<!-- learned: 2025-03-10 | confidence: high | source: manual | related_files: scripts/widget-cache.sh | template_version: fix1 | scale: subsystem,implementation | scale_registry_version: 1 -->"
+  },
+  {
+    "heading": "Widget Abstraction Law",
+    "file_path": "principles/widget-abstraction-law.md",
+    "source_type": "knowledge",
+    "category": "principles",
+    "confidence": "high",
+    "learned_date": "2025-01-30",
+    "structural_importance": "<NUM>",
+    "scale": "abstract",
+    "entry_status": "current",
+    "template_version": "fix1",
+    "score": "<NUM>",
+    "snippet": "# Widget Abstraction Law\n\nWhen multiple consumers compose the same widget primitive, policy lives in\nthe primitive, never per consumer. Duplicated widget policy drifts.\n<!-- learned: 2025-01-30 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: abstract | scale_registry_version: 1 -->"
+  }
+]

@@ -1,0 +1,35 @@
+## Prior Knowledge
+
+### Focal: widget pipeline
+
+#### Widget Naming (from conventions/widget-naming.md)
+# Widget Naming
+
+Widget identifiers use kebab-case slugs. Every widget pipeline stage prefixes
+its logs with the widget slug so cross-stage traces line up.
+<!-- learned: 2025-02-20 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->
+
+#### Review Widget Diffs Stage By Stage (from preferences/widget-review-preference.md)
+# Review Widget Diffs Stage By Stage
+
+When reviewing widget pipeline changes, review one stage at a time and name
+the stage in the review summary.
+<!-- learned: 2025-05-01 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->
+
+#### Widget Domain (from domains/widget-domain.md)
+# Widget Domain
+
+Deep widget domain notes, lazy-loaded on demand. Widget telemetry schema and
+widget retention windows live here.
+<!-- learned: 2025-02-01 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->
+
+### Adjacent: widget cache
+
+#### Widget Cache Stale Reads (from gotchas/widget-cache-stale.md)
+# Widget Cache Stale Reads
+
+The widget assembly cache serves stale widget parts when the intake stage
+rewrites a spec in place. Bust the cache key on every widget spec rewrite.
+<!-- learned: 2025-03-10 | confidence: high | source: manual | related_files: scripts/widget-cache.sh | template_version: fix1 | scale: subsystem,implementation | scale_registry_version: 1 -->
+
+<!-- _RM_PATHS=conventions/widget-naming.md,preferences/widget-review-preference.md,domains/widget-domain.md,gotchas/widget-cache-stale.md -->

@@ -250,21 +250,20 @@ print(' OR '.join(terms))
     if [[ -n "$FTS5_QUERY" ]]; then
       REMAINING_BUDGET=$((BUDGET - CHARS_USED))
 
-      # Call budget_search via pk_cli.py — returns two-tier JSON
-      # Exclude domains/ (lazy-loaded on demand, never at startup)
-      BUDGET_RESULTS=$(python3 "$SCRIPT_DIR/pk_cli.py" search "$KNOWLEDGE_DIR" "$FTS5_QUERY" \
-        --type knowledge --limit 20 --budget "$REMAINING_BUDGET" \
-        --exclude-category domains 2>/dev/null) || BUDGET_RESULTS="{}"
-
-      # Build direct-loaded paths for dedup
-      DIRECT_PATHS_JSON="[]"
+      # Call budget_search via pk_cli.py — returns two-tier JSON.
+      # Exclude domains/ (lazy-loaded on demand, never at startup) and the
+      # direct-resolved paths (deduped inside the primitive via --exclude-paths).
+      DIRECT_PATHS_CSV=""
       if [[ ${#DIRECT_LOADED_PATHS[@]} -gt 0 ]]; then
-        DIRECT_PATHS_JSON=$(printf '%s\n' "${DIRECT_LOADED_PATHS[@]}" | python3 -c "
-import json, sys
-paths = [line.strip() for line in sys.stdin if line.strip()]
-print(json.dumps(paths))
-" 2>/dev/null) || DIRECT_PATHS_JSON="[]"
+        DIRECT_PATHS_CSV=$(IFS=','; echo "${DIRECT_LOADED_PATHS[*]}")
       fi
+      BUDGET_ARGS=("search" "$KNOWLEDGE_DIR" "$FTS5_QUERY"
+        --type knowledge --limit 20 --budget "$REMAINING_BUDGET"
+        --exclude-category domains)
+      if [[ -n "$DIRECT_PATHS_CSV" ]]; then
+        BUDGET_ARGS+=(--exclude-paths "$DIRECT_PATHS_CSV")
+      fi
+      BUDGET_RESULTS=$(python3 "$SCRIPT_DIR/pk_cli.py" "${BUDGET_ARGS[@]}" 2>/dev/null) || BUDGET_RESULTS="{}"
 
       # Parse full entries (null-delimited: file_path\tcontent\0)
       FIRST_FULL=1
@@ -285,21 +284,10 @@ print(json.dumps(paths))
       done < <(echo "$BUDGET_RESULTS" | python3 -c "
 import json, sys, os
 data = json.load(sys.stdin)
-direct_paths = json.loads(sys.argv[1])
-knowledge_dir = sys.argv[2]
-
-# Build dedup set from direct-resolved paths
-direct_set = set()
-for dp in direct_paths:
-    direct_set.add(dp)
-    if not dp.endswith('.md'):
-        direct_set.add(dp + '.md')
+knowledge_dir = sys.argv[1]
 
 for e in data.get('full', []):
     fp = e.get('file_path', '')
-    fp_no_ext = fp.rsplit('.', 1)[0] if '.' in fp else fp
-    if fp in direct_set or fp_no_ext in direct_set:
-        continue
     content = e.get('content', '')
     if not content:
         abs_path = os.path.join(knowledge_dir, fp)
@@ -307,7 +295,7 @@ for e in data.get('full', []):
             content = open(abs_path, 'r').read().rstrip('\n')
     if content:
         sys.stdout.write(fp + '\t' + content + '\0')
-" "$DIRECT_PATHS_JSON" "$KNOWLEDGE_DIR" 2>/dev/null)
+" "$KNOWLEDGE_DIR" 2>/dev/null)
 
       # Parse titles-only entries (null-delimited: heading\tfile_path\0)
       FIRST_TITLE=1
@@ -322,23 +310,13 @@ for e in data.get('full', []):
       done < <(echo "$BUDGET_RESULTS" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
-direct_paths = json.loads(sys.argv[1])
-
-direct_set = set()
-for dp in direct_paths:
-    direct_set.add(dp)
-    if not dp.endswith('.md'):
-        direct_set.add(dp + '.md')
 
 for e in data.get('titles_only', []):
     fp = e.get('file_path', '')
-    fp_no_ext = fp.rsplit('.', 1)[0] if '.' in fp else fp
-    if fp in direct_set or fp_no_ext in direct_set:
-        continue
     heading = e.get('heading', '')
     if heading:
         sys.stdout.write(heading + '\t' + fp + '\0')
-" "$DIRECT_PATHS_JSON" 2>/dev/null)
+" 2>/dev/null)
 
       if [[ $FIRST_TITLE -eq 0 ]]; then
         echo ""

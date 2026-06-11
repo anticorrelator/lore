@@ -1,0 +1,95 @@
+
+--- Result 1 [knowledge] (score: <NUM>) ---
+  File: conventions/widget-naming.md
+  Heading: Widget Naming
+  Category: conventions
+  Confidence: high
+  Learned: 2025-02-20
+  Scale: subsystem
+  [trust: template=fix1 | status=current | learned=2025-02-20 | confidence=high | retention=null | correction_recency=null]
+  Snippet: # Widget Naming
+
+Widget identifiers use kebab-case slugs. Every widget pipeline stage prefixes
+its logs with the widget slug so cross-stage traces line up.
+<!-- learned: 2025-02-20 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->
+
+--- Result 2 [knowledge] (score: <NUM>) ---
+  File: preferences/widget-review-preference.md
+  Heading: Review Widget Diffs Stage By Stage
+  Category: preferences
+  Confidence: high
+  Learned: 2025-05-01
+  Scale: subsystem
+  [trust: template=fix1 | status=current | learned=2025-05-01 | confidence=high | retention=null | correction_recency=null]
+  Snippet: # Review Widget Diffs Stage By Stage
+
+When reviewing widget pipeline changes, review one stage at a time and name
+the stage in the review summary.
+<!-- learned: 2025-05-01 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->
+
+--- Result 3 [knowledge] (score: <NUM>) ---
+  File: domains/widget-domain.md
+  Heading: Widget Domain
+  Category: domains
+  Confidence: high
+  Learned: 2025-02-01
+  Scale: subsystem
+  [trust: template=fix1 | status=current | learned=2025-02-01 | confidence=high | retention=null | correction_recency=null]
+  Snippet: # Widget Domain
+
+Deep widget domain notes, lazy-loaded on demand. Widget telemetry schema and
+widget retention windows live here.
+<!-- learned: 2025-02-01 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->
+
+--- Result 4 [knowledge] (score: <NUM>) ---
+  File: gotchas/widget-cache-stale.md
+  Heading: Widget Cache Stale Reads
+  Category: gotchas
+  Confidence: high
+  Learned: 2025-03-10
+  Scale: subsystem,implementation
+  [trust: template=fix1 | status=current | learned=2025-03-10 | confidence=high | retention=null | correction_recency=null]
+  Snippet: # Widget Cache Stale Reads
+
+The widget assembly cache serves stale widget parts when the intake stage
+rewrites a spec in place. Bust the cache key on every widget spec rewrite.
+<!-- learned: 2025-03-10 | confidence: high | source: manual | related_files: scripts/widget-cache.sh | template_version: fix1 | scale: subsystem,implementation | scale_registry_version: 1 -->
+
+--- Result 5 [knowledge] (score: <NUM>) ---
+  File: principles/widget-abstraction-law.md
+  Heading: Widget Abstraction Law
+  Category: principles
+  Confidence: high
+  Learned: 2025-01-30
+  Scale: abstract
+  [trust: template=fix1 | status=current | learned=2025-01-30 | confidence=high | retention=null | correction_recency=null]
+  Snippet: # Widget Abstraction Law
+
+When multiple consumers compose the same widget primitive, policy lives in
+the primitive, never per consumer. Duplicated widget policy drifts.
+<!-- learned: 2025-01-30 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: abstract | scale_registry_version: 1 -->
+
+=== Work Search: "widget pipeline" ===
+
+--- Ranked results (FTS5) ---
+
+--- Result 1 [work] (score: <NUM>) ---
+  File: _work/fixture-item/notes.md
+  Heading: (ungrouped)
+  [trust: template=unknown | status=current | learned=unknown | confidence=unknown | retention=null | correction_recency=null]
+  Snippet: Consolidating the widget pipeline stages.
+See [[knowledge:conventions/widget-naming]] for slug rules.
+
+--- Result 2 [work] (score: <NUM>) ---
+  File: _work/fixture-item/plan.md
+  Heading: Stage intake widget specs
+  [trust: template=unknown | status=current | learned=unknown | confidence=unknown | retention=null | correction_recency=null]
+  Snippet: 
+
+--- Result 3 [work] (score: <NUM>) ---
+  File: _work/fixture-item/plan.md
+  Heading: Stage assembly widget parts
+  [trust: template=unknown | status=current | learned=unknown | confidence=unknown | retention=null | correction_recency=null]
+  Snippet: 
+
+=== End Work Search ===

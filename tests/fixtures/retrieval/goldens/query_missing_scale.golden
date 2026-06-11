@@ -1,0 +1,4 @@
+exit=1
+Error: --scale-set is required. Declare your retrieval scale to proceed.
+  Use: lore query --seeds <seed> --scale-set <bucket>
+  Buckets: abstract, architecture, subsystem, implementation

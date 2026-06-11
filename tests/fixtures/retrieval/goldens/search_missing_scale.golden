@@ -1,0 +1,4 @@
+exit=1
+Scale declaration required: add --scale-set <bucket> to your search.
+  Example: lore search "widget pipeline" --scale-set implementation
+  Buckets: abstract, architecture, subsystem, implementation

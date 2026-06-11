@@ -1,0 +1,42 @@
+## Prior Knowledge
+Results from knowledge store for: "widget pipeline" (scale-set: subsystem)
+
+### Widget Naming (from conventions/widget-naming.md)
+[trust: template=fix1 | status=current | learned=2025-02-20 | confidence=high | retention=null | correction_recency=null]
+# Widget Naming
+
+Widget identifiers use kebab-case slugs. Every widget pipeline stage prefixes
+its logs with the widget slug so cross-stage traces line up.
+<!-- learned: 2025-02-20 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->
+
+### Review Widget Diffs Stage By Stage (from preferences/widget-review-preference.md)
+[trust: template=fix1 | status=current | learned=2025-05-01 | confidence=high | retention=null | correction_recency=null]
+# Review Widget Diffs Stage By Stage
+
+When reviewing widget pipeline changes, review one stage at a time and name
+the stage in the review summary.
+<!-- learned: 2025-05-01 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->
+
+### Widget Domain (from domains/widget-domain.md)
+[trust: template=fix1 | status=current | learned=2025-02-01 | confidence=high | retention=null | correction_recency=null]
+# Widget Domain
+
+Deep widget domain notes, lazy-loaded on demand. Widget telemetry schema and
+widget retention windows live here.
+<!-- learned: 2025-02-01 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: subsystem | scale_registry_version: 1 -->
+
+### Widget Cache Stale Reads (from gotchas/widget-cache-stale.md)
+[trust: template=fix1 | status=current | learned=2025-03-10 | confidence=high | retention=null | correction_recency=null]
+# Widget Cache Stale Reads
+
+The widget assembly cache serves stale widget parts when the intake stage
+rewrites a spec in place. Bust the cache key on every widget spec rewrite.
+<!-- learned: 2025-03-10 | confidence: high | source: manual | related_files: scripts/widget-cache.sh | template_version: fix1 | scale: subsystem,implementation | scale_registry_version: 1 -->
+
+### Widget Abstraction Law (from principles/widget-abstraction-law.md)
+[trust: template=fix1 | status=current | learned=2025-01-30 | confidence=high | retention=null | correction_recency=null]
+# Widget Abstraction Law
+
+When multiple consumers compose the same widget primitive, policy lives in
+the primitive, never per consumer. Duplicated widget policy drifts.
+<!-- learned: 2025-01-30 | confidence: high | source: manual | related_files: scripts/widget.sh | template_version: fix1 | scale: abstract | scale_registry_version: 1 -->

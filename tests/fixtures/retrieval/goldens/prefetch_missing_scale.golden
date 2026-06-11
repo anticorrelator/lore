@@ -1,0 +1,4 @@
+exit=1
+Error: --scale-set <csv> is required. Declare your retrieval scale before fetching.
+  Use: prefetch-knowledge.sh <query> --scale-set <bucket>[,<bucket>]
+  Buckets: abstract, architecture, subsystem, implementation
