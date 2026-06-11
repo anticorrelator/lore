@@ -1013,7 +1013,7 @@ def _parse_topic_block(block_lines: list[str]) -> dict:
     if first.startswith("- "):
         first = first[2:].strip()
     # Track base indent (continuation keys live at +2 of "- ")
-    base_indent = len(block_lines[0]) - len(block_lines[0].lstrip())
+    len(block_lines[0]) - len(block_lines[0].lstrip())
     # Parse first key
     if ":" in first:
         k, _, v = first.partition(":")

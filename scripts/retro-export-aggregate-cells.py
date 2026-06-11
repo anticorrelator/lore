@@ -19,7 +19,6 @@ Corrupt rows (missing kind or calibration_state) are silently dropped —
 the scorecard-rollup emits its own warnings elsewhere; this script just
 produces the export.
 """
-import hashlib
 import json
 import sys
 import uuid

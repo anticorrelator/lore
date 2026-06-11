@@ -12,7 +12,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from pk_search import (
-    DEFAULT_LIMIT,
     KNOWLEDGE_BOOST,
     SOURCE_TYPES,
     Indexer,
@@ -1689,7 +1688,7 @@ class TestArchiveIndexing:
     def test_index_includes_archived_entries(self, archive_dir):
         """Full index should contain entries from archived work items."""
         indexer = Indexer(str(archive_dir))
-        result = indexer.index_all()
+        indexer.index_all()
 
         conn = sqlite3.connect(indexer.db_path)
         rows = conn.execute(

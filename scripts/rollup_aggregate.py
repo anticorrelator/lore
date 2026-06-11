@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 from collections import defaultdict
@@ -236,7 +235,7 @@ def aggregate_window(judge: str, window_start: str, window_end: str, kdir: Path,
             sys.stderr.write(f"[rollup] Error: read rows.jsonl: {exc}\n")
             return 2
     if not matched_rows:
-        sys.stderr.write(f"[rollup] no rows in window\n")
+        sys.stderr.write("[rollup] no rows in window\n")
         sys.stderr.write(f"[rollup] Aggregated: templates=0 rows=0 window={window_start}..{window_end}\n")
         return 0
     # --- Group by (template_id, template_version) with sentinel resolution ---

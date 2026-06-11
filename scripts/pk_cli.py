@@ -32,7 +32,7 @@ from pk_search import (  # noqa: E402
     SOURCE_TYPES,
     render_trust_stamp,
 )
-from pk_resolve import Resolver, resolve_read_path, build_backlink_from_result  # noqa: E402
+from pk_resolve import Resolver, resolve_read_path  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -328,11 +328,11 @@ def cmd_stats(args: argparse.Namespace) -> None:
     print(f"Last indexed:  {result['last_indexed']}")
     importance = result.get("importance")
     if importance:
-        print(f"Structural importance:")
+        print("Structural importance:")
         print(f"  Entries with importance: {importance['nonzero_count']}")
         print(f"  Max: {importance['max']}, Avg: {importance['avg']}")
         if importance.get("top_entries"):
-            print(f"  Top entries:")
+            print("  Top entries:")
             for e in importance["top_entries"]:
                 print(f"    {e['importance']}  {e['heading']} ({e['file_path']})")
     print(f"Stale files:   {result['stale_files']}")
@@ -562,7 +562,7 @@ def cmd_analyze_concordance(args: argparse.Namespace) -> None:
         print(json.dumps(result, indent=2))
         return
 
-    print(f"Concordance analysis complete.")
+    print("Concordance analysis complete.")
     print(f"  Entries analyzed: {result['entries_analyzed']}")
     print(f"  See-also pairs:   {result['see_also_pairs']}")
     print(f"  Related files:    {result['related_file_pairs']}")
@@ -807,7 +807,7 @@ def cmd_generate_backlinks(args: argparse.Namespace) -> None:
         for d in added_details:
             print(f"  {d['source']} -> {d['target']} (sim: {d['similarity']})")
     if skipped_details and not args.json:
-        print(f"\nSkipped (already present):")
+        print("\nSkipped (already present):")
         for d in skipped_details[:10]:
             print(f"  {d['source']} -> {d['target']}")
         if len(skipped_details) > 10:

@@ -16,7 +16,6 @@ import os
 import sys
 import time
 from collections import defaultdict
-from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +362,7 @@ def main() -> None:
 
     # Human-readable summary
     s = report["summary"]
-    print(f"Knowledge Store Usage Analysis")
+    print("Knowledge Store Usage Analysis")
     print(f"{'=' * 40}")
     print(f"Entries:          {s['total_entries']}")
     print(f"Sessions logged:  {s['total_sessions']}")

@@ -166,7 +166,7 @@ def synthetic_assertion(n: int) -> list[dict]:
                 "expected_verdict": "contradicted",
                 "claim_text": f"function sub_{i} returns the sum of its arguments",
                 "snippet": snippet,
-                "evidence": f"src.py:1-2 — body returns `a - b`, not a sum",
+                "evidence": "src.py:1-2 — body returns `a - b`, not a sum",
                 "correction": f"sub_{i}(a, b) returns a - b (subtraction), not the sum",
             })
         else:
@@ -235,7 +235,7 @@ def synthetic_contradiction(n: int) -> list[dict]:
                 "expected_verdict": "verified",
                 "claim_text": commons_text,
                 "snippet": src_snippet,
-                "evidence": f"src.sh:1-2 — `set -euo pipefail` disproves the `set +e` commons text",
+                "evidence": "src.sh:1-2 — `set -euo pipefail` disproves the `set +e` commons text",
                 "correction": None,
             })
         elif kind == "contradicted":

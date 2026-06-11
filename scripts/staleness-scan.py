@@ -20,7 +20,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -386,27 +385,18 @@ def compute_neighbor_drift(
 # ---------------------------------------------------------------------------
 
 
-def compute_vocabulary_drift(
-    file_path: str,
-    heading: str,
-    knowledge_dir: str,
-) -> dict:
-    """Compute vocabulary drift by checking if a knowledge entry's key terms still exist in the codebase.
+def build_vocabulary_context(knowledge_dir: str) -> dict | None:
+    """Load the scan-invariant inputs to vocabulary drift once, for reuse across entries.
 
-    Instantiates Concordance, calls its compute_vocabulary_drift() method to
-    find what fraction of the entry's top TF-IDF terms are absent from source
-    file vectors.
+    The codebase vocabulary and reverse term index are identical for every entry
+    in a single scan, but recomputing them per entry reloads every source vector
+    from the DB — the dominant cost of a full run. Building them once here lets
+    run_scan pass them into each compute_vocabulary_drift() call.
 
-    Args:
-        file_path: Absolute path of the entry file.
-        heading: Heading of the entry (from entry metadata or filename).
-        knowledge_dir: Path to knowledge directory (for DB access).
-
-    Returns:
-        dict with: score (float), available (bool),
-        detail: {top_k_terms, absent_terms, absent_term_names}.
+    Returns a dict with the open Concordance plus precomputed lookups, or None when
+    the DB is absent (callers then skip vocabulary drift, matching the old per-entry
+    fallback).
     """
-    # Import concordance lazily
     script_dir = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, script_dir)
     try:
@@ -417,10 +407,52 @@ def compute_vocabulary_drift(
 
     db_path = os.path.join(knowledge_dir, DB_FILENAME)
     if not os.path.exists(db_path):
-        return {"score": 0.0, "available": False, "detail": {}}
+        return None
 
     concordance = Concordance(db_path)
-    return concordance.compute_vocabulary_drift(file_path, heading)
+    return {
+        "concordance": concordance,
+        "codebase_vocab": concordance.get_codebase_vocabulary(),
+        "reverse_index": concordance.get_reverse_term_index(),
+    }
+
+
+def compute_vocabulary_drift(
+    file_path: str,
+    heading: str,
+    knowledge_dir: str,
+    vocab_context: dict | None = None,
+) -> dict:
+    """Compute vocabulary drift by checking if a knowledge entry's key terms still exist in the codebase.
+
+    Calls Concordance.compute_vocabulary_drift() to find what fraction of the
+    entry's top TF-IDF terms are absent from source file vectors.
+
+    Args:
+        file_path: Absolute path of the entry file.
+        heading: Heading of the entry (from entry metadata or filename).
+        knowledge_dir: Path to knowledge directory (for DB access).
+        vocab_context: Optional bundle from build_vocabulary_context() — the open
+            Concordance and the precomputed codebase vocabulary / reverse index. Pass
+            it when scoring many entries in a loop to avoid reloading source vectors
+            per entry. When None, a fresh Concordance is built and the lookups are
+            computed for this single call.
+
+    Returns:
+        dict with: score (float), available (bool),
+        detail: {top_k_terms, absent_terms, absent_term_names}.
+    """
+    if vocab_context is None:
+        vocab_context = build_vocabulary_context(knowledge_dir)
+        if vocab_context is None:
+            return {"score": 0.0, "available": False, "detail": {}}
+
+    return vocab_context["concordance"].compute_vocabulary_drift(
+        file_path,
+        heading,
+        codebase_vocab=vocab_context["codebase_vocab"],
+        reverse_index=vocab_context["reverse_index"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +719,10 @@ def run_scan(knowledge_dir: str, repo_root: str) -> dict:
     # Pre-compute usage freshness for all entries
     usage_freshness_data = compute_usage_freshness(knowledge_dir)
 
+    # Load the scan-invariant vocabulary-drift inputs once; reused for every entry
+    # below so each entry doesn't reload the full source-vector corpus from the DB.
+    vocab_context = build_vocabulary_context(knowledge_dir)
+
     # Extract heading from entry files for neighbor drift lookups
     def _extract_heading(fpath: str) -> str:
         """Extract heading from first line of entry file."""
@@ -710,7 +746,7 @@ def run_scan(knowledge_dir: str, repo_root: str) -> dict:
         )
         backlink_drift = compute_backlink_drift(fpath, knowledge_dir)
         neighbor_drift = compute_neighbor_drift(fpath, heading, meta["learned"], knowledge_dir)
-        vocab_drift = compute_vocabulary_drift(fpath, heading, knowledge_dir)
+        vocab_drift = compute_vocabulary_drift(fpath, heading, knowledge_dir, vocab_context)
         # Build per-entry usage freshness signal
         try:
             entry_rel_path = os.path.relpath(fpath, knowledge_dir)

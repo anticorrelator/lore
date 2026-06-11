@@ -10,7 +10,6 @@ import os
 import re
 import sys
 from collections import Counter
-from datetime import datetime
 from pathlib import Path
 
 # Add the repo root to sys.path so `adapters` package is importable.
@@ -394,9 +393,9 @@ def main():
         # Get transcript provider for the active framework
         try:
             provider = get_provider(args.framework or None)
-        except UnsupportedFrameworkError as e:
+        except UnsupportedFrameworkError:
             print(
-                f"[lore] degraded: extract-session-digest via transcript_provider=unavailable; skipping",
+                "[lore] degraded: extract-session-digest via transcript_provider=unavailable; skipping",
                 file=sys.stderr,
             )
             sys.exit(0)
@@ -405,7 +404,7 @@ def main():
         support_level, degraded_reason = provider.provider_status()
         if support_level == 'unavailable':
             print(
-                f"[lore] degraded: extract-session-digest via transcript_provider=unavailable; skipping",
+                "[lore] degraded: extract-session-digest via transcript_provider=unavailable; skipping",
                 file=sys.stderr,
             )
             sys.exit(0)

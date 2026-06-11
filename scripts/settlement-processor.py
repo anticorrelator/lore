@@ -2173,7 +2173,7 @@ class Settlement:
                 break
         if status == "completed":
             verdict_label = "rollup-complete"
-            evidence = summary_tail or f"rollup exit=0 (n=0 stderr summary)"
+            evidence = summary_tail or "rollup exit=0 (n=0 stderr summary)"
         else:
             verdict_label = "rollup-failed"
             evidence = f"rollup script exit={returncode}: {summary_tail or stderr[-200:]}"

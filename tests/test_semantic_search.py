@@ -13,7 +13,7 @@ import struct
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 # Add scripts directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))

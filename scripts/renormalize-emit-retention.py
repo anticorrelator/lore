@@ -15,7 +15,6 @@ Output: one JSON object per line, consumed by renormalize-emit-retention.sh.
 """
 import argparse
 import json
-import sys
 from datetime import datetime, timezone
 
 

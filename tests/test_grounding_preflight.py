@@ -491,7 +491,7 @@ class TestCwdCascade(unittest.TestCase):
 
     def setUp(self):
         # Per-test repo so each test sees a clean cascade state.
-        import shutil, uuid
+        import uuid
         self.repo_dir = os.path.join(self._tmp, f"repo-{uuid.uuid4().hex[:8]}")
         self.upstream = os.path.join(self.repo_dir, "upstream.git")
         self.cwd = os.path.join(self.repo_dir, "cwd")
@@ -586,7 +586,7 @@ class TestCwdCascade(unittest.TestCase):
     # --- Step 4: substring at HEAD (line drift but content present) ---
     def test_verified_with_drift_via_step4_head(self):
         # captured anchor: claim is for lines 2-3 = "line two\nline three"
-        sha = self._commit(
+        self._commit(
             "fixture.txt",
             "line one\nline two\nline three\nline four\nline five\n",
             "init fixture",

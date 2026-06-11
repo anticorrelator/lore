@@ -135,7 +135,7 @@ def render_trust_stamp(result: dict, knowledge_dir: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 from pk_markdown import MarkdownParser  # noqa: E402
-from pk_resolve import Resolver, BACKLINK_RE as _BACKLINK_RE, resolve_read_path as _resolve_read_path  # noqa: E402
+from pk_resolve import Resolver, BACKLINK_RE as _BACKLINK_RE  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

@@ -287,7 +287,12 @@ class Concordance:
         return vocab
 
     def compute_vocabulary_drift(
-        self, file_path: str, heading: str, top_k: int = 10
+        self,
+        file_path: str,
+        heading: str,
+        top_k: int = 10,
+        codebase_vocab: set[int] | None = None,
+        reverse_index: dict[int, str] | None = None,
     ) -> dict:
         """Score how much a knowledge entry's vocabulary has drifted from the codebase.
 
@@ -299,6 +304,14 @@ class Concordance:
             file_path: File path of the knowledge entry.
             heading: Heading of the knowledge entry.
             top_k: Number of top TF-IDF terms to check (default 10).
+            codebase_vocab: Precomputed codebase vocabulary (the result of
+                get_codebase_vocabulary()). Pass this when scoring many entries in
+                a loop to avoid reloading every source vector per entry. Both this
+                and the underlying DB must be consistent — only reuse a value
+                computed against the same unmodified store (do not carry one across
+                a build_vectors() call). When None, it is computed here.
+            reverse_index: Precomputed term-index→name map (get_reverse_term_index());
+                same reuse rules as codebase_vocab. When None, it is computed here.
 
         Returns:
             Dict with:
@@ -314,7 +327,8 @@ class Concordance:
                 "detail": {"top_k_terms": 0, "absent_terms": 0, "absent_term_names": []},
             }
 
-        codebase_vocab = self.get_codebase_vocabulary()
+        if codebase_vocab is None:
+            codebase_vocab = self.get_codebase_vocabulary()
         if not codebase_vocab:
             return {
                 "score": 0.0,
@@ -326,8 +340,8 @@ class Concordance:
         sorted_terms = sorted(vec.items(), key=lambda x: -x[1])[:top_k]
         top_indices = [idx for idx, _ in sorted_terms]
 
-        # Build reverse term index for debuggability
-        reverse_index = self.get_reverse_term_index()
+        if reverse_index is None:
+            reverse_index = self.get_reverse_term_index()
 
         # Check which top terms are absent from codebase vocabulary
         absent_indices = [idx for idx in top_indices if idx not in codebase_vocab]

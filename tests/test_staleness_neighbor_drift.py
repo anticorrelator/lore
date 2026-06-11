@@ -14,7 +14,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from pk_search import Indexer
-from pk_concordance import Concordance
 
 # Import staleness-scan.py dynamically (filename has a hyphen)
 import importlib.util

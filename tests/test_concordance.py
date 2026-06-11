@@ -18,7 +18,6 @@ Phase 4 tests covering:
 11. find_similar method (renamed from find_similar_to)
 """
 
-import math
 import os
 import sys
 
@@ -431,7 +430,7 @@ class TestSourceFileIndexing:
         """Without repo_root, no source files should be indexed."""
         kd, repo = repo_with_sources
         indexer = Indexer(str(kd))  # no repo_root
-        result = indexer.index_all(force=True)
+        indexer.index_all(force=True)
 
         import sqlite3
         conn = sqlite3.connect(indexer.db_path)
@@ -895,7 +894,7 @@ class TestRunFullAnalysis:
         conc = Concordance(indexed_db)
         conc.build_vectors()
 
-        result1 = conc.run_full_analysis()
+        conc.run_full_analysis()
         result2 = conc.run_full_analysis()
 
         conn = sqlite3.connect(indexed_db)
@@ -939,7 +938,7 @@ class TestRunFullAnalysis:
 
         conc = Concordance(indexer.db_path)
         conc.build_vectors()
-        result = conc.run_full_analysis(related_files_threshold=0.0)
+        conc.run_full_analysis(related_files_threshold=0.0)
 
         conn = sqlite3.connect(indexer.db_path)
         related = conn.execute(

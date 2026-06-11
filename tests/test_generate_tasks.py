@@ -5,7 +5,6 @@ and returns a tasks.json-compatible dict with phases and task payloads.
 """
 
 import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
@@ -1311,146 +1310,6 @@ Implement a sample feature.
 class TestPrintSizingDiagnostics:
     """Tests for print_sizing_diagnostics() output format and warning thresholds."""
 
-    def _make_result(self, phases):
-        """Build a minimal result dict with the given phase list."""
-        return {"plan_checksum": "abc123", "generated_at": "2026-01-01T00:00:00Z", "phases": phases}
-
-    def _make_task(self, subject, total_chars, file_read_chars=0):
-        """Build a minimal task dict with a context_cost_estimate."""
-        return {
-            "id": "task-1",
-            "subject": subject,
-            "description": "desc",
-            "activeForm": "Doing x",
-            "blockedBy": [],
-            "file_targets": [],
-            "context_cost_estimate": {
-                "fixed_overhead_chars": FIXED_OVERHEAD_CHARS,
-                "description_chars": total_chars - FIXED_OVERHEAD_CHARS,
-                "file_read_chars": file_read_chars,
-                "edit_space_chars": 0,
-                "advisory_chars": 0,
-                "total_chars": total_chars,
-            },
-        }
-
-    def _make_phase(self, phase_name, tasks, avg_per_task):
-        """Build a minimal phase dict with phase_cost_summary."""
-        total = sum(t["context_cost_estimate"]["total_chars"] for t in tasks)
-        max_task = max(t["context_cost_estimate"]["total_chars"] for t in tasks)
-        min_task = min(t["context_cost_estimate"]["total_chars"] for t in tasks)
-        return {
-            "phase_number": 1,
-            "phase_name": phase_name,
-            "objective": "",
-            "files": [],
-            "tasks": tasks,
-            "phase_cost_summary": {
-                "total_chars": total,
-                "avg_per_task": avg_per_task,
-                "max_task": max_task,
-                "min_task": min_task,
-            },
-        }
-
-    def test_summary_header_in_stderr(self, capsys):
-        """Output should include 'Context cost summary:' header on stderr."""
-        tasks = [self._make_task("Add x", 30000)]
-        phase = self._make_phase("Core", tasks, avg_per_task=30000)
-        result = self._make_result([phase])
-        print_sizing_diagnostics(result)
-        captured = capsys.readouterr()
-        assert "Context cost summary:" in captured.err
-
-    def test_phase_name_appears_in_output(self, capsys):
-        """Phase name should appear in the summary table."""
-        tasks = [self._make_task("Add x", 30000)]
-        phase = self._make_phase("MyPhase", tasks, avg_per_task=30000)
-        result = self._make_result([phase])
-        print_sizing_diagnostics(result)
-        captured = capsys.readouterr()
-        assert "MyPhase" in captured.err
-
-    def test_task_count_appears_in_output(self, capsys):
-        """Task count should appear in the summary table."""
-        tasks = [
-            self._make_task("Add x", 30000),
-            self._make_task("Update y", 30000),
-            self._make_task("Fix z", 30000),
-        ]
-        phase = self._make_phase("Core", tasks, avg_per_task=30000)
-        result = self._make_result([phase])
-        print_sizing_diagnostics(result)
-        captured = capsys.readouterr()
-        assert "3" in captured.err
-
-    def test_no_warning_when_no_outliers(self, capsys):
-        """No 'WARNING:' line should appear when all tasks are within threshold."""
-        tasks = [
-            self._make_task("Add x", 30000),
-            self._make_task("Add y", 32000),
-        ]
-        # avg = 31000; max = 32000 < 2 * 31000 = 62000 — no warning
-        phase = self._make_phase("Core", tasks, avg_per_task=31000)
-        result = self._make_result([phase])
-        print_sizing_diagnostics(result)
-        captured = capsys.readouterr()
-        assert "WARNING" not in captured.err
-
-    def test_warning_when_task_exceeds_2x_avg(self, capsys):
-        """A 'WARNING:' line should appear for tasks > 2x the phase avg."""
-        tasks = [
-            self._make_task("Add x", 10000),
-            self._make_task("Implement giant feature", 60000),
-        ]
-        # avg = 35000; 60000 > 2 * 35000? No. Let's make avg=10000 and outlier=25000
-        tasks = [
-            self._make_task("Add x", 10000),
-            self._make_task("Implement giant feature", 25000),
-        ]
-        # avg_per_task = 10000 (simulate — 25000 > 2 * 10000 = 20000 → warning)
-        phase = self._make_phase("Core", tasks, avg_per_task=10000)
-        result = self._make_result([phase])
-        print_sizing_diagnostics(result)
-        captured = capsys.readouterr()
-        assert "WARNING" in captured.err
-        assert "Implement giant feature" in captured.err
-
-    def test_warning_includes_task_subject(self, capsys):
-        """Warning message should identify the specific oversized task."""
-        tasks = [
-            self._make_task("Small task", 5000),
-            self._make_task("Huge refactor task", 30000),
-        ]
-        # avg = 5000; 30000 > 2 * 5000 = 10000 → warning
-        phase = self._make_phase("Core", tasks, avg_per_task=5000)
-        result = self._make_result([phase])
-        print_sizing_diagnostics(result)
-        captured = capsys.readouterr()
-        assert "Huge refactor task" in captured.err
-
-    def test_empty_phases_no_output(self, capsys):
-        """Empty phases list should produce no output."""
-        result = self._make_result([])
-        print_sizing_diagnostics(result)
-        captured = capsys.readouterr()
-        assert captured.err == ""
-        assert captured.out == ""
-
-    def test_output_goes_to_stderr_not_stdout(self, capsys):
-        """All diagnostic output should go to stderr, not stdout."""
-        tasks = [self._make_task("Add x", 30000)]
-        phase = self._make_phase("Core", tasks, avg_per_task=30000)
-        result = self._make_result([phase])
-        print_sizing_diagnostics(result)
-        captured = capsys.readouterr()
-        assert captured.out == ""
-        assert len(captured.err) > 0
-
-
-class TestPrintSizingDiagnostics:
-    """Tests for print_sizing_diagnostics() output format and warning thresholds."""
-
     def _make_result_with_tasks(self, task_totals: list[int]) -> dict:
         """Build a minimal result dict with the specified task total_chars values."""
         tasks = []
@@ -1488,10 +1347,11 @@ class TestPrintSizingDiagnostics:
         }
 
     def test_empty_phases_produces_no_output(self, capsys):
-        """With no phases, diagnostics should output nothing."""
+        """With no phases, diagnostics should output nothing on either stream."""
         print_sizing_diagnostics({"phases": []})
         captured = capsys.readouterr()
         assert captured.err == ""
+        assert captured.out == ""
 
     def test_summary_header_in_output(self, capsys):
         """Output should include 'Context cost summary:' header."""

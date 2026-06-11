@@ -1,7 +1,6 @@
 """Tests for extract_section.py"""
 
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
