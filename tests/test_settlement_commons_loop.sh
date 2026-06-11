@@ -308,6 +308,51 @@ echo '{"claim_id":"w3","claim":"x","falsifier":"if not x","scale":"implementatio
 STAMPED=$(python3 -c 'import json; print(json.loads(open("'"$KDIR"'/_work/writer-test/promoted-commons.jsonl").readline())["entry_path"])' 2>/dev/null)
 assert_eq "valid row is appended with entry_path stamped" "$STAMPED" "conventions/writer-entry.md"
 
+# =============================================
+# Test 6: default calibration gate accepts a calibrated scorecard verdict
+# =============================================
+# Without --allow-settlement-verdict, apply-correction authorizes against
+# _scorecards/rows.jsonl: the verdict row must have calibration_state=calibrated.
+echo ""
+echo "Test 6: apply-correction default gate accepts calibrated scorecard evidence"
+setup_kdir cal-gate-test
+CAL_ENTRY="$KDIR/conventions/cal-gate-entry.md"
+cat > "$CAL_ENTRY" <<'EOF'
+# Calibration Gate Fixture
+
+The resolver has no remediated state.
+
+<!-- learned: 2026-05-09 | confidence: high | source: test | related_files: scripts/settlement-processor.py | scale: subsystem | status: current -->
+EOF
+CAL_VERDICT_ID="verdict-cal-1"
+mkdir -p "$KDIR/_scorecards"
+bash "$SCRIPTS_DIR/scorecard-append.sh" --kdir "$KDIR" --row "$(jq -nc \
+  --arg vid "$CAL_VERDICT_ID" \
+  '{schema_version:"1",kind:"consumption-contradiction",tier:"correction",calibration_state:"calibrated",corrected_entry_path:"conventions/cal-gate-entry.md",correction_target:"claim",calibrated_by_verdict_id:$vid,verdict_id:$vid}')" >/dev/null
+LORE_KNOWLEDGE_DIR="$KDIR" bash "$APPLY" \
+  --entry "$CAL_ENTRY" \
+  --verdict-id "$CAL_VERDICT_ID" \
+  --verdict-source correctness-gate \
+  --evidence "scripts/x.sh:1" \
+  --superseded-text "The resolver has no remediated state." \
+  --replacement-text "The resolver supports remediated." \
+  --date "2026-05-09" >/dev/null
+assert_contains "calibrated verdict correction applied" "$(cat "$CAL_ENTRY")" "supports remediated"
+assert_contains "entry META has corrections trail" "$(cat "$CAL_ENTRY")" "corrections:"
+assert_contains "entry META has verdict id" "$(cat "$CAL_ENTRY")" "$CAL_VERDICT_ID"
+
+# =============================================
+# Test 7: retrieval surfaces correction recency
+# =============================================
+# Continues from Test 6's corrected entry: the prefetch full format renders
+# the trust stamp's correction_recency and a "Last corrected" line.
+echo ""
+echo "Test 7: prefetch surfaces correction recency for corrected entries"
+LORE_KNOWLEDGE_DIR="$KDIR" python3 "$SCRIPTS_DIR/pk_cli.py" index "$KDIR" --force >/dev/null 2>&1
+PREFETCH_FULL=$(LORE_KNOWLEDGE_DIR="$KDIR" bash "$SCRIPTS_DIR/prefetch-knowledge.sh" "resolver remediated" --format full --type knowledge --scale-set subsystem)
+assert_contains "trust stamp carries correction_recency" "$PREFETCH_FULL" "correction_recency=2026-05-09"
+assert_contains "prefetch shows Last corrected" "$PREFETCH_FULL" "Last corrected: 2026-05-09"
+
 echo ""
 echo "================================"
 echo "Results: $PASS passed, $FAIL failed"

@@ -343,7 +343,12 @@ def main() -> int:
     inlined = build_inlined(
         ra_input, args.window, args.diff_context, lore_repo, kdir
     )
-    Path(args.out).write_text(json.dumps(inlined, indent=2))
+    # ensure_ascii=False keeps non-ASCII evidence (em-dashes, arrows) verbatim
+    # in the packet rather than as \uXXXX escapes the judge would have to
+    # mentally unescape to reproduce file content for grounding.
+    Path(args.out).write_text(
+        json.dumps(inlined, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     cov = inlined["inlined_evidence"]["coverage"]
     print(
         f"[inline] claims {cov['claims_resolved']}/{cov['claims_total']} "

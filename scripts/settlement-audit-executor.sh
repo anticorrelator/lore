@@ -15,8 +15,13 @@
 #   unverified    if unverified > 0 and verified == 0
 #   verified      if verified > 0 and contradicted == 0
 #   skipped       if no auditable artifact/counts exist
-#   error         if audit exits nonzero, audit JSON is unparseable, or input/args
-#                 cannot be parsed.
+#   error         if audit exits nonzero (other than exit 3), audit JSON is
+#                 unparseable, or input/args cannot be parsed.
+#
+# Exit 3 is informational, not failure: the audit completed and printed its
+# full verdict JSON, exiting 3 only to flag that the reverse-auditor omission
+# claim was routed to audit-attempts.jsonl. Exit-3 stdout derives a real
+# verdict by the rules above.
 
 set -euo pipefail
 
@@ -242,13 +247,23 @@ set -e
 
 audit_stderr_one_line=$(tr '\n' ' ' <"$audit_stderr" | sed 's/[[:space:]]*$//')
 
-if [[ "$audit_exit" -ne 0 ]]; then
+# Exit 3 is informational, not failure: `lore audit` completed and printed a
+# full verdict JSON, then exited 3 only to signal that the reverse-auditor
+# omission claim was routed to audit-attempts.jsonl (grounding preflight
+# failed). Its stdout carries a complete gate/curator/RA summary, so it derives
+# a real verdict by the normal rules. Treating it as fatal discarded that
+# summary and converted adjudicated claims into verdict=error. Every other
+# non-zero exit is a genuine failure and keeps the error-envelope path.
+if [[ "$audit_exit" -ne 0 && "$audit_exit" -ne 3 ]]; then
   if [[ -z "$audit_stderr_one_line" ]]; then
     audit_stderr_one_line="lore audit exited $audit_exit"
   fi
   echo "[settlement-executor] Error: $audit_stderr_one_line" >&2
   emit_envelope "error" "$audit_stderr_one_line" "" "$audit_exit" ""
   exit 0
+fi
+if [[ "$audit_exit" -eq 3 ]]; then
+  echo "[settlement-executor] audit exit 3 (grounding preflight routed omission to audit-attempts); deriving verdict from stdout" >&2
 fi
 
 derivation_file="$tmp_dir/derivation.json"

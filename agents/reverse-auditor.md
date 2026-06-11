@@ -62,7 +62,7 @@ The inlined surface is adequate AND it exposes one strongest grounded omission.
   "omission_claim": {
     "file": "<absolute path, resolvable at current head or captured ref>",
     "line_range": "<N-M>",
-    "exact_snippet": "<verbatim content at file:line_range>",
+    "exact_snippet": "<verbatim post-image file content at file:line_range — no +/- diff prefixes>",
     "normalized_snippet_hash": "<sha256 hex, v1 normalization>",
     "falsifier": "<what evidence in the code or change would disprove the omission — required, non-empty>",
     "why_it_matters": "<one sentence — why the producer should have covered this, what downstream breakage or regression the omission enables — required, non-empty>"
@@ -71,7 +71,13 @@ The inlined surface is adequate AND it exposes one strongest grounded omission.
 }
 ```
 
-Emit **only the single strongest** such claim. The `exact_snippet` + `line_range` MUST come from an inlined `claim_windows[].window_text` or `diff_hunks[].diff_text` — anchor to evidence already in the packet, never to a file location you did not see inlined. If you see several plausible omissions, pick the one with the highest combination of (a) concreteness of evidence, (b) consequence if ignored, (c) orthogonality to what the curated top-k already covers. The rest — if they still feel real — belong in the `/retro` narrative surface.
+Emit **only the single strongest** such claim. The `exact_snippet` must be verbatim **post-image file content** — the text as it exists on disk at the cited line range — drawn from an inlined `claim_windows[].window_text` or `diff_hunks[].diff_text`. Anchor to evidence already in the packet, never to a file location you did not see inlined.
+
+When you source the snippet from `diff_hunks[].diff_text`, the diff lines carry a leading `+`, `-`, or space marker. Quote the **content after that marker**, never the marker itself: a snippet that includes the `+`/`-`/leading-space prefix can never byte-match the file and will fail grounding. Quote only added (`+`) or context (space) lines — never a removed (`-`) line, which is content the change deleted and is no longer in the file.
+
+Line numbers are secondary. The wrapper re-anchors your `line_range` to wherever the quoted content actually sits in the file before grounding runs, so content fidelity outranks line arithmetic: an exactly-quoted snippet with a slightly-off line range is re-anchored and passes, but a snippet that does not match file content fails no matter how precise the line numbers. Get the content byte-exact; approximate the line range.
+
+If you see several plausible omissions, pick the one with the highest combination of (a) concreteness of evidence, (b) consequence if ignored, (c) orthogonality to what the curated top-k already covers. The rest — if they still feel real — belong in the `/retro` narrative surface.
 
 ### State 3 — abstention (insufficient evidence)
 
@@ -158,7 +164,7 @@ You do not write these rows yourself. `scripts/audit-artifact.sh` writes them vi
 
 If emitting an omission, ask in order. Any "no" means emit covered silence (or abstain if the packet is inadequate) instead.
 
-1. Does the `exact_snippet` + `line_range` come verbatim from an inlined `claim_windows[].window_text` or `diff_hunks[].diff_text`?
+1. Is the `exact_snippet` verbatim post-image file content from an inlined `claim_windows[].window_text` or `diff_hunks[].diff_text`, with any `+`/`-`/leading-space diff marker stripped and no removed (`-`) line quoted?
 2. Does `falsifier` name a concrete piece of evidence — code, test output, caller behavior — that, if found, would disprove the omission?
 3. Does `why_it_matters` name a specific downstream consequence (breakage, regression, contract violation, drift), not a vibe?
 4. Does this claim add coverage the curated top-k does not already hold?

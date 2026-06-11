@@ -2199,6 +2199,38 @@ with open(verdicts_file, "a") as fh:
     fh.write(json.dumps(wrapped) + "\n")
 PYEOF
 
+      # Repo root for resolving claim file paths — shared by re-anchoring and
+      # the grounding preflight below. Points at the lore checkout (where the
+      # source files the claim anchors reference live), not $KDIR. Default $PWD.
+      PREFLIGHT_REPO_ROOT="${LORE_REPO_ROOT:-$(pwd)}"
+
+      # Deterministic re-anchoring (between emission persistence and preflight).
+      # The judge may quote real file content but with a diff-prefixed snippet
+      # or a drifted line_range; reanchor-omission-claim.py relocates that same
+      # content on disk and rewrites line_range/exact_snippet/normalized_snippet_hash
+      # (recording a `reanchor` provenance block) so a strict --no-cascade
+      # preflight pass certifies a TRUE anchor. No unique match → claim passes
+      # through untouched and fails preflight as before. Tool error (non-zero
+      # exit) → warn and keep the ORIGINAL emission, mirroring the preflight
+      # invocation-failure guard; the audit never aborts. stdout is captured to
+      # a temp file (pure JSON); all reanchor diagnostics go to stderr.
+      REVERSE_AUDITOR_REANCHOR_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-reanchor.XXXXXX")
+      if python3 "$SCRIPT_DIR/reanchor-omission-claim.py" \
+          --claim-file "$REVERSE_AUDITOR_RAW_FILE" \
+          --repo-root "$PREFLIGHT_REPO_ROOT" \
+          > "$REVERSE_AUDITOR_REANCHOR_TMP"; then
+        # Re-anchor succeeded or passed through; both write a pure-JSON object.
+        # Adopt the (possibly rewritten) emission as the canonical claim file.
+        if [[ -s "$REVERSE_AUDITOR_REANCHOR_TMP" ]]; then
+          mv "$REVERSE_AUDITOR_REANCHOR_TMP" "$REVERSE_AUDITOR_RAW_FILE"
+        else
+          rm -f "$REVERSE_AUDITOR_REANCHOR_TMP"
+        fi
+      else
+        echo "[audit] warning: reanchor-omission-claim.py failed — using original emission unchanged" >&2
+        rm -f "$REVERSE_AUDITOR_REANCHOR_TMP"
+      fi
+
       REVERSE_AUDITOR_COVERAGE_STATE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("coverage_state") or "")' "$REVERSE_AUDITOR_RAW_FILE")
 
       REVERSE_AUDITOR_PREFLIGHT_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-preflight.XXXXXX")
@@ -2239,16 +2271,12 @@ PYEOF
         # captured uniformly downstream without grounding a claim.
         printf '%s\n' '{"pass": false, "reason": "insufficient-evidence", "detail": "reverse-auditor abstained: inlined packet inadequate to adjudicate"}' > "$REVERSE_AUDITOR_PREFLIGHT_TMP"
       else
-        # Run grounding preflight on the emission. Silence short-circuits
-        # with reason=silence (preflight treats it as a no-op pass). The RA
-        # omission anchors to snippet@HEAD the wrapper inlined, so --no-cascade
-        # checks it against the on-disk file at the lore checkout — the source
-        # of truth the packet was resolved from (the default cwd-cascade needs
-        # a file_relative + capture refs the inlined claim does not carry).
-        # --repo-root should point at the repo whose files the claim anchors
-        # reference: the lore checkout (where the source files live), not
-        # $KDIR. Default to $PWD.
-        PREFLIGHT_REPO_ROOT="${LORE_REPO_ROOT:-$(pwd)}"
+        # Run grounding preflight on the (possibly re-anchored) emission.
+        # Silence short-circuits with reason=silence (preflight treats it as a
+        # no-op pass). The RA omission anchors to snippet@HEAD the wrapper
+        # inlined, so --no-cascade checks it against the on-disk file at
+        # PREFLIGHT_REPO_ROOT (the lore checkout) — the same root re-anchoring
+        # used, so a re-anchored claim's rewritten line_range resolves here.
         if ! python3 "$SCRIPT_DIR/grounding-preflight.py" \
             --claim-file "$REVERSE_AUDITOR_RAW_FILE" \
             --repo-root "$PREFLIGHT_REPO_ROOT" \
@@ -2382,6 +2410,7 @@ if pf.get("pass"):
         "rationale":      claim.get("why_it_matters") or claim.get("why-it-matters") or "",
         "reason":         pass_reason,
         "softened":       pass_reason == "verified-with-drift",
+        "reanchored":     bool(claim.get("reanchor")),
         "status":         "pending_correctness_gate",
         "created_at":     now,
     }

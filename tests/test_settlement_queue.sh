@@ -563,6 +563,52 @@ assert_eq "executor did not emit spurious no-auditable-artifact skip" "$SKIP_LOG
 assert_json_eq "executor produced non-skip verdict via fake audit" "$EXEC_STDOUT_12D" '.verdict' "verified"
 
 echo ""
+echo "Test 12e: audit executor treats exit 3 (grounding preflight routed) as informational success"
+# Regression coverage for the exit-3 classification fix. `lore audit` exits 3
+# when the reverse-auditor omission claim is routed to audit-attempts.jsonl
+# (grounding preflight failed), but it prints a complete verdict JSON first.
+# The prior any-non-zero=error branch discarded that JSON and emitted
+# verdict=error, converting adjudicated claims into executor_audit_error. The
+# fix parses the exit-3 stdout and derives the real envelope verdict.
+KDIR8G="$TEST_DIR/kdir8g"
+mkdir -p "$KDIR8G/_work/wi"
+printf '%s\n' "$(row_json "claim-exit3")" > "$KDIR8G/_work/wi/task-claims.jsonl"
+# Stub `lore` to mimic an exit-3 audit: full verified verdict JSON on stdout,
+# a [audit] diagnostic on stderr, then exit 3.
+FAKE_BIN_12E="$TEST_DIR/fake-bin-12e"
+mkdir -p "$FAKE_BIN_12E"
+cat > "$FAKE_BIN_12E/lore" <<'BIN'
+#!/usr/bin/env bash
+echo '{"correctness_gate":{"verified":1,"unverified":0,"contradicted":0,"verdicts_total":1}}'
+echo '[audit] reverse-auditor omission routed to audit-attempts.jsonl (grounding preflight failed)' >&2
+exit 3
+BIN
+chmod +x "$FAKE_BIN_12E/lore"
+EXEC_STDERR_12E="$TEST_DIR/12e-stderr.txt"
+EXEC_STDOUT_12E=$(printf '%s' '{"item": {"work_item": "wi", "claim_id": "claim-exit3"}}' | \
+  PATH="$FAKE_BIN_12E:$PATH" LORE_SETTLEMENT_AUDIT_ARGS="--kdir $KDIR8G" bash "$SCRIPTS_DIR/settlement-audit-executor.sh" 2>"$EXEC_STDERR_12E")
+# stdout must be exactly one parseable JSON envelope (no stderr bleed).
+EXEC_STDOUT_12E_LINES=$(printf '%s\n' "$EXEC_STDOUT_12E" | grep -c .)
+assert_eq "exit-3 executor emits exactly one stdout line" "$EXEC_STDOUT_12E_LINES" "1"
+assert_json_eq "exit-3 run derives real verdict, not error" "$EXEC_STDOUT_12E" '.verdict' "verified"
+assert_json_eq "exit-3 envelope retains the audit correctness_gate block" "$EXEC_STDOUT_12E" '.audit.correctness_gate.verified' "1"
+assert_json_eq "exit-3 executor records inner exit code 3" "$EXEC_STDOUT_12E" '.executor.exit_code' "3"
+EXIT3_LOG_COUNT=$(grep -c 'audit exit 3' "$EXEC_STDERR_12E" || true)
+assert_eq "exit-3 executor logs the informational-exit diagnostic to stderr" "$EXIT3_LOG_COUNT" "1"
+# A genuine failure exit (non-3) must still produce verdict=error.
+FAKE_BIN_12E_FAIL="$TEST_DIR/fake-bin-12e-fail"
+mkdir -p "$FAKE_BIN_12E_FAIL"
+cat > "$FAKE_BIN_12E_FAIL/lore" <<'BIN'
+#!/usr/bin/env bash
+echo '[audit] crashed before judging' >&2
+exit 2
+BIN
+chmod +x "$FAKE_BIN_12E_FAIL/lore"
+EXEC_STDOUT_12E_FAIL=$(printf '%s' '{"item": {"work_item": "wi", "claim_id": "claim-exit3"}}' | \
+  PATH="$FAKE_BIN_12E_FAIL:$PATH" LORE_SETTLEMENT_AUDIT_ARGS="--kdir $KDIR8G" bash "$SCRIPTS_DIR/settlement-audit-executor.sh" 2>/dev/null)
+assert_json_eq "non-3 failure exit still produces error verdict" "$EXEC_STDOUT_12E_FAIL" '.verdict' "error"
+
+echo ""
 echo "Test 13: recompute scores only batch_size rows and exposes bounds"
 KDIR9="$TEST_DIR/kdir9"
 SETTINGS9="$TEST_DIR/settings9.json"

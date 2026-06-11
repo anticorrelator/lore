@@ -224,6 +224,10 @@ if pass_flag:
         "rationale":     why,
         "reason":        pass_reason,
         "softened":      pass_reason == "verified-with-drift",
+        # True when the wrapper re-anchored the claim before preflight; the
+        # `reanchor` provenance block names the rung. Drift telemetry — kept
+        # rare by producer hygiene, so a nonzero rate flags judge anchoring.
+        "reanchored":    bool(claim.get("reanchor")),
         "status":        "pending_correctness_gate",
         "created_at":    now_iso,
     }
