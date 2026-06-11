@@ -1,0 +1,17 @@
+# Incremental lint baseline: correctness-class rules only.
+# Line length (E501, ~980 hits at adoption) is deliberately unselected --
+# bulk reflow is a separate, deliberate reformat decision; the baseline
+# count is recorded in the lore-cleanliness-debt work item.
+line-length = 88
+select = ["F", "E4", "E7", "E9"]
+
+[per-file-ignores]
+# These files mutate sys.path before importing repo-local modules, so the
+# imports cannot sit at the top of the file.
+"scripts/extract-session-digest.py" = ["E402"]
+"tests/test_concordance.py" = ["E402"]
+"tests/test_extract_section.py" = ["E402"]
+"tests/test_pk_concordance.py" = ["E402"]
+"tests/test_pk_search.py" = ["E402"]
+"tests/test_semantic_search.py" = ["E402"]
+"tests/test_staleness_neighbor_drift.py" = ["E402"]

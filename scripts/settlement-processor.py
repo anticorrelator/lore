@@ -1886,7 +1886,7 @@ class Settlement:
                 return {"ok": True, "dispatched": False, "reason": "no_eligible_harnesses", "rejected_harnesses": rejected, "expired_leases_reclaimed": expired, "healed": healed}
             executor = executor_command(settings)
 
-            active = [l for l in leases.get("leases", {}).values() if l.get("state") == "active"]
+            active = [lease for lease in leases.get("leases", {}).values() if lease.get("state") == "active"]
             if len(active) >= int(settings["max_concurrency"]):
                 self.save_queue(queue)
                 self.save_leases(leases)

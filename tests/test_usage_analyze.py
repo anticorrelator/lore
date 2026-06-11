@@ -54,7 +54,7 @@ def test_returns_four_tuple_on_empty_log(tmp_path):
 def test_per_entry_counts_is_plain_dict(tmp_path):
     log_path = write_log(tmp_path, [])
     _, _, per_entry_counts, _ = parse_retrieval_log(log_path)
-    assert type(per_entry_counts) is dict
+    assert isinstance(per_entry_counts, dict)
 
 
 # ---------------------------------------------------------------------------
