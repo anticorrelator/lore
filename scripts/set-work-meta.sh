@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # set-work-meta.sh — Set metadata fields on an existing work item
-# Usage: bash set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--intent-anchor <text>]
+# Usage: bash set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--intent-anchor <text>]
 # Updates the specified fields in _meta.json, touches the timestamp, and rebuilds the index.
 #
 # --scope (Phase 2 — work item 02-durable-signal-foundation):
@@ -18,10 +18,12 @@ SLUG=""
 ISSUE=""
 PR=""
 SCOPE=""
+PROJECT=""
 INTENT_ANCHOR=""
 HAS_ISSUE=0
 HAS_PR=0
 HAS_SCOPE=0
+HAS_PROJECT=0
 HAS_INTENT_ANCHOR=0
 DETECT_PR=0
 JSON_MODE=0
@@ -69,6 +71,11 @@ while [[ $# -gt 0 ]]; do
       HAS_SCOPE=1
       shift 2
       ;;
+    --project)
+      PROJECT="$2"
+      HAS_PROJECT=1
+      shift 2
+      ;;
     --intent-anchor)
       INTENT_ANCHOR="$2"
       HAS_INTENT_ANCHOR=1
@@ -88,17 +95,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "[work] Error: Unknown flag '$1'" >&2
-      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--intent-anchor <text>] [--related-work <slug>] [--detect-pr] [--json]" >&2
+      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--intent-anchor <text>] [--related-work <slug>] [--detect-pr] [--json]" >&2
       exit 1
       ;;
   esac
 done
 
-if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 && "$HAS_SCOPE" -eq 0 && "$HAS_INTENT_ANCHOR" -eq 0 && "$DETECT_PR" -eq 0 && ${#RELATED_WORK_SLUGS[@]} -eq 0 ]]; then
+if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 && "$HAS_SCOPE" -eq 0 && "$HAS_PROJECT" -eq 0 && "$HAS_INTENT_ANCHOR" -eq 0 && "$DETECT_PR" -eq 0 && ${#RELATED_WORK_SLUGS[@]} -eq 0 ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
-    json_error "No fields to set. Provide --issue, --pr, --scope, --intent-anchor, --related-work, and/or --detect-pr."
+    json_error "No fields to set. Provide --issue, --pr, --scope, --project, --intent-anchor, --related-work, and/or --detect-pr."
   fi
-  echo "[work] Error: No fields to set. Provide --issue, --pr, --scope, --intent-anchor, --related-work, and/or --detect-pr." >&2
+  echo "[work] Error: No fields to set. Provide --issue, --pr, --scope, --project, --intent-anchor, --related-work, and/or --detect-pr." >&2
   exit 1
 fi
 
@@ -207,6 +214,32 @@ with open(path, "w") as f:
     f.write("\n")
 PYEOF
   CHANGES+=("scope=$SCOPE")
+fi
+
+if [[ "$HAS_PROJECT" -eq 1 ]]; then
+  # Non-empty values are slugified; the stored slug is also the display value.
+  # An empty value clears project membership.
+  if [[ -n "$PROJECT" ]]; then
+    PROJECT_INPUT="$PROJECT"
+    PROJECT=$(slugify "$PROJECT")
+    if [[ -z "$PROJECT" ]]; then
+      echo "[work] Warning: --project '$PROJECT_INPUT' produced an empty slug; clearing project." >&2
+    fi
+  fi
+  python3 - "$META_FILE" "$PROJECT" << 'PYEOF'
+import json, sys
+path, project = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+if project:
+    data["project"] = project
+else:
+    data.pop("project", None)
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+  CHANGES+=("project=${PROJECT:-\"\"}")
 fi
 
 if [[ "$HAS_INTENT_ANCHOR" -eq 1 ]]; then

@@ -70,21 +70,24 @@ def dir_max_mtime(path):
 
 def relative_date(iso_str):
     if not iso_str:
-        return 'unknown', -1
+        return 'unknown', -1, 0
     try:
         # Handle both Z suffix and plain ISO
         clean = iso_str.replace('Z', '+00:00')
         dt = datetime.fromisoformat(clean)
-        days = int((now - dt.timestamp()) / 86400)
+        epoch = dt.timestamp()
+        days = int((now - epoch) / 86400)
         if days == 0:
-            return 'today', days
+            return 'today', days, epoch
         elif days == 1:
-            return 'yesterday', days
+            return 'yesterday', days, epoch
         else:
-            return f'{days}d ago', days
+            return f'{days}d ago', days, epoch
     except (ValueError, OSError):
-        return 'unknown', -1
+        return 'unknown', -1, 0
 
+grouped_items = {}
+ungrouped_lines = []
 for item in data.get('plans', []):
     slug = item.get('slug', '')
     title = item.get('title', '')
@@ -94,7 +97,7 @@ for item in data.get('plans', []):
     if status != 'active':
         continue
 
-    rel, days_ago = relative_date(updated)
+    rel, days_ago, epoch = relative_date(updated)
 
     item_dir = os.path.join(work_dir, slug)
 
@@ -113,18 +116,35 @@ for item in data.get('plans', []):
 
     # A parent that diverged from its anchor at /implement close stays active
     # but is not routine: surface what diverged and the child holding the gap.
+    item_lines = []
     closure = item.get('closure') or {}
     if closure.get('capability_incomplete') is True:
         summary = closure.get('divergence_summary') or 'capability incomplete'
-        active_work_lines.append(
+        item_lines.append(
             f'[capability-incomplete] {slug} — diverged from anchor; {summary}'
         )
         residue = closure.get('residue_followup')
         if residue:
-            active_work_lines.append(f'  waiting-on: {residue}')
-        continue
+            item_lines.append(f'  waiting-on: {residue}')
+    else:
+        item_lines.append(f'- {slug}: {title} (updated {rel})')
 
-    active_work_lines.append(f'- {slug}: {title} (updated {rel})')
+    project = str(item.get('project', '') or '')
+    if project:
+        grouped_items.setdefault(project, []).append((epoch, item_lines))
+    else:
+        ungrouped_lines.extend(item_lines)
+
+# Project sections lead, ordered by most-recent member update; members are
+# recency-sorted within. Ungrouped lines follow flat, unchanged from before.
+for project, members in sorted(
+    grouped_items.items(), key=lambda kv: max(e for e, _ in kv[1]), reverse=True
+):
+    active_work_lines.append(f'{project} ({len(members)}):')
+    for _, item_lines in sorted(members, key=lambda m: m[0], reverse=True):
+        for line in item_lines:
+            active_work_lines.append(f'  {line}')
+active_work_lines.extend(ungrouped_lines)
 
 # Shell-escape helper for single quotes
 def sq(s):

@@ -60,6 +60,21 @@ fi
 if [[ $JSON_MODE -eq 0 ]]; then
   echo "=== Work Search: \"$QUERY\" ==="
   echo ""
+
+  # Index metadata matches (title/tags/slug/project). Runs ahead of the FTS
+  # backend because FTS indexes prose documents only — _meta.json fields like
+  # project are findable solely through the index.
+  INDEX="$WORK_DIR/_index.json"
+  if [[ -f "$INDEX" ]]; then
+    echo "--- Index matches ---"
+    MATCHES=$(grep -i "$QUERY" "$INDEX" 2>/dev/null | grep -E '"(title|tags|slug|project)"' || true)
+    if [[ -n "$MATCHES" ]]; then
+      echo "$MATCHES" | sed 's/^/  /'
+    else
+      echo "  (no title/tag matches)"
+    fi
+    echo ""
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -242,20 +257,7 @@ print(json.dumps(results, indent=2))
   exit 0
 fi
 
-# Search 1: Index title/tag matches
-INDEX="$WORK_DIR/_index.json"
-if [[ -f "$INDEX" ]]; then
-  echo "--- Index matches ---"
-  MATCHES=$(grep -i "$QUERY" "$INDEX" 2>/dev/null | grep -E '"(title|tags|slug)"' || true)
-  if [[ -n "$MATCHES" ]]; then
-    echo "$MATCHES" | sed 's/^/  /'
-  else
-    echo "  (no title/tag matches)"
-  fi
-  echo ""
-fi
-
-# Search 2: Full-text search across active work item files
+# Full-text search across active work item files
 echo "--- Active work matches ---"
 FOUND=0
 while IFS= read -r -d '' file; do

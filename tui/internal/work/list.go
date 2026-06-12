@@ -84,11 +84,21 @@ const (
 	FilterArchived                   // show only archived items
 )
 
+// listRow is a display row — either a project group header or a work item.
+type listRow struct {
+	isHeader    bool
+	project     string // header: group label; item: the item's project ("" = ungrouped)
+	memberCount int    // header only: visible (filtered) member count
+	item        WorkItem
+}
+
 // ListModel is the Bubble Tea model for the work item list panel.
+// The cursor indexes display rows (headers + items), not items.
 type ListModel struct {
 	allItems            []WorkItem
 	filterMode          FilterMode
 	cursor              int
+	collapsed           map[string]bool // project → collapsed (session-local, not persisted)
 	prStatus            map[string]gh.PRStatus
 	prLoaded            bool
 	compactMode         bool
@@ -118,15 +128,91 @@ func (m ListModel) visibleItems() []WorkItem {
 	return out
 }
 
-// NewListModel creates a list model from pre-loaded work items.
+// NewListModel creates a list model from pre-loaded work items. All groups
+// start expanded; the cursor starts on the first item row (past any leading
+// group header) so an item is selected from the first frame.
 func NewListModel(items []WorkItem) ListModel {
-	return ListModel{
+	m := ListModel{
 		allItems:   items,
 		filterMode: FilterActive,
-		cursor:     0,
+		collapsed:  make(map[string]bool),
 		prStatus:   nil,
 		prLoaded:   false,
 	}
+	m.cursor = m.firstItemRow()
+	return m
+}
+
+// rows derives the display rows from the filtered items: a header row per
+// project section followed by its members, then the ungrouped items flat
+// with no header. Collapsed members are still present — visibility is
+// applied by visibleRowIdxs.
+func (m ListModel) rows() []listRow {
+	var rows []listRow
+	for _, g := range GroupByProject(m.visibleItems()) {
+		if g.Project != "" {
+			rows = append(rows, listRow{isHeader: true, project: g.Project, memberCount: len(g.Items)})
+		}
+		for _, it := range g.Items {
+			rows = append(rows, listRow{project: g.Project, item: it})
+		}
+	}
+	return rows
+}
+
+// visibleRowIdxs returns indices of rows not hidden by a collapsed project.
+func (m ListModel) visibleRowIdxs(rows []listRow) []int {
+	idxs := make([]int, 0, len(rows))
+	for i, r := range rows {
+		if !r.isHeader && r.project != "" && m.collapsed[r.project] {
+			continue
+		}
+		idxs = append(idxs, i)
+	}
+	return idxs
+}
+
+// firstItemRow returns the index of the first item row (skipping any leading
+// group header), or 0 when the list is empty.
+func (m ListModel) firstItemRow() int {
+	for i, r := range m.rows() {
+		if !r.isHeader {
+			return i
+		}
+	}
+	return 0
+}
+
+// nextVisible returns the next visible row index from current, in the given direction.
+func (m ListModel) nextVisible(current, dir int, visible []int) int {
+	if len(visible) == 0 {
+		return current
+	}
+
+	pos := -1
+	for i, idx := range visible {
+		if idx == current {
+			pos = i
+			break
+		}
+	}
+
+	if pos < 0 {
+		// Current row not visible; jump to nearest end.
+		if dir > 0 {
+			return visible[0]
+		}
+		return visible[len(visible)-1]
+	}
+
+	next := pos + dir
+	if next < 0 {
+		next = 0
+	}
+	if next >= len(visible) {
+		next = len(visible) - 1
+	}
+	return visible[next]
 }
 
 // FilterMode returns the current filter mode.
@@ -180,7 +266,8 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 		m.externalActiveSlugs = msg.Slugs
 
 	case tea.KeyPressMsg:
-		items := m.visibleItems()
+		rows := m.rows()
+		visible := m.visibleRowIdxs(rows)
 		switch msg.String() {
 		case "ctrl+a":
 			// Toggle between active and archived
@@ -189,40 +276,45 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 			} else {
 				m.filterMode = FilterActive
 			}
-			m.cursor = 0
+			m.cursor = m.firstItemRow()
 		case "j", "down":
-			if m.cursor < len(items)-1 {
-				m.cursor++
-			}
+			m.cursor = m.nextVisible(m.cursor, 1, visible)
 		case "k", "up":
-			if m.cursor > 0 {
-				m.cursor--
-			}
+			m.cursor = m.nextVisible(m.cursor, -1, visible)
 		case "g", "home":
-			m.cursor = 0
+			if len(visible) > 0 {
+				m.cursor = visible[0]
+			} else {
+				m.cursor = 0
+			}
 		case "G", "end":
-			if len(items) > 0 {
-				m.cursor = len(items) - 1
+			if len(visible) > 0 {
+				m.cursor = visible[len(visible)-1]
 			}
 		case "s":
-			if len(items) > 0 {
-				slug := items[m.cursor].Slug
+			if item, ok := m.CurrentItem(); ok {
 				return m, func() tea.Msg {
-					return SpecRequestMsg{Slug: slug}
+					return SpecRequestMsg{Slug: item.Slug}
 				}
 			}
 		case "c":
-			if len(items) > 0 {
-				item := items[m.cursor]
+			if item, ok := m.CurrentItem(); ok {
 				return m, func() tea.Msg {
 					return ChatRequestMsg{Slug: item.Slug, Title: item.Title}
 				}
 			}
 		case "enter":
-			if len(items) > 0 {
-				item := items[m.cursor]
-				return m, func() tea.Msg {
-					return ItemSelectedMsg{Item: item}
+			if m.cursor >= 0 && m.cursor < len(rows) {
+				if row := rows[m.cursor]; row.isHeader {
+					if m.collapsed == nil {
+						m.collapsed = make(map[string]bool)
+					}
+					m.collapsed[row.project] = !m.collapsed[row.project]
+				} else {
+					item := row.item
+					return m, func() tea.Msg {
+						return ItemSelectedMsg{Item: item}
+					}
 				}
 			}
 		}
@@ -230,36 +322,64 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 	return m, nil
 }
 
-// Items returns the currently visible (filtered) work items.
+// Items returns the currently visible (filtered) work items in display
+// (grouped) order. Collapse state does not affect the result.
 func (m ListModel) Items() []WorkItem {
-	return m.visibleItems()
+	var out []WorkItem
+	for _, g := range GroupByProject(m.visibleItems()) {
+		out = append(out, g.Items...)
+	}
+	return out
 }
 
-// Cursor returns the current cursor position.
+// Cursor returns the current cursor row position.
 func (m ListModel) Cursor() int {
 	return m.cursor
 }
 
-// CurrentSlug returns the slug of the currently highlighted item, or "" if empty.
-func (m ListModel) CurrentSlug() string {
-	items := m.visibleItems()
-	if len(items) == 0 || m.cursor >= len(items) {
-		return ""
+// CurrentItem returns the work item under the cursor, or false when the
+// cursor is on a group header or the list is empty.
+func (m ListModel) CurrentItem() (WorkItem, bool) {
+	rows := m.rows()
+	if m.cursor < 0 || m.cursor >= len(rows) || rows[m.cursor].isHeader {
+		return WorkItem{}, false
 	}
-	return items[m.cursor].Slug
+	return rows[m.cursor].item, true
+}
+
+// CurrentSlug returns the slug of the currently highlighted item, or "" when
+// the list is empty or the cursor is on a group header.
+func (m ListModel) CurrentSlug() string {
+	if item, ok := m.CurrentItem(); ok {
+		return item.Slug
+	}
+	return ""
 }
 
 // SetCursorBySlug moves the cursor to the item with the given slug.
-// Returns true if found, false if not (cursor resets to 0).
+// Returns true if found, false if not (cursor resets to the first item row).
 func (m *ListModel) SetCursorBySlug(slug string) bool {
-	for i, item := range m.visibleItems() {
-		if item.Slug == slug {
+	for i, r := range m.rows() {
+		if !r.isHeader && r.item.Slug == slug {
 			m.cursor = i
 			return true
 		}
 	}
-	m.cursor = 0
+	m.cursor = m.firstItemRow()
 	return false
+}
+
+// CollapsedProjects returns the session's collapsed-project set so a rebuilt
+// model can inherit it across index reloads.
+func (m ListModel) CollapsedProjects() map[string]bool {
+	return m.collapsed
+}
+
+// SetCollapsedProjects replaces the collapsed-project set (no-op for nil).
+func (m *ListModel) SetCollapsedProjects(collapsed map[string]bool) {
+	if collapsed != nil {
+		m.collapsed = collapsed
+	}
 }
 
 // SetCompactMode enables or disables compact rendering (slug + status only).
@@ -302,16 +422,94 @@ var (
 	infoSelStyle  = lipgloss.NewStyle().Background(style.ColorSelectionBg)
 )
 
-// viewCompact renders the compact split-pane list with two lines per item:
+// windowByBudget walks outward from the cursor row, greedily adding rows
+// above and below until the rendered line budget is exhausted, and returns
+// the half-open [offset, end) window into visible. Same windowing as
+// tasks.go: row heights vary (headers vs items, collapsed groups), so the
+// window is computed in rendered lines, not row counts. visible must be
+// non-empty; a cursor not in visible anchors the window at the top.
+func windowByBudget(visible, heights []int, cursor, budget int) (int, int) {
+	if budget < 1 {
+		budget = 1<<31 - 1 // unbounded when height not set
+	}
+
+	cursorPos := 0
+	for i, idx := range visible {
+		if idx == cursor {
+			cursorPos = i
+			break
+		}
+	}
+
+	// Always include the cursor row, then expand both directions greedily.
+	offset := cursorPos
+	end := cursorPos + 1
+	used := heights[cursorPos]
+
+	lo, hi := cursorPos-1, cursorPos+1
+	for used < budget {
+		addedAny := false
+		if hi < len(visible) && used+heights[hi] <= budget {
+			used += heights[hi]
+			end = hi + 1
+			hi++
+			addedAny = true
+		}
+		if lo >= 0 && used+heights[lo] <= budget {
+			used += heights[lo]
+			offset = lo
+			lo--
+			addedAny = true
+		}
+		if !addedAny {
+			break
+		}
+	}
+	return offset, end
+}
+
+// groupHeaderStyle renders project group header rows; hoisted per the
+// allocate-once rule (style.go).
+var groupHeaderStyle = lipgloss.NewStyle().Foreground(style.ColorAccent).Bold(true)
+
+// renderGroupHeader renders a project group header row, padded to width:
+//
+//	"  ▼ project (n)"   (▶ when collapsed; n = visible member count)
+func (m ListModel) renderGroupHeader(row listRow, selected bool, width int) string {
+	arrow := "▼"
+	if m.collapsed[row.project] {
+		arrow = "▶"
+	}
+	cursor := "  "
+	if selected {
+		cursor = "> "
+	}
+	label := fmt.Sprintf("%s (%d)", row.project, row.memberCount)
+	if maxW := width - 4; maxW > 0 {
+		label = style.Truncate(label, maxW)
+	}
+	line := cursor + arrow + " " + label
+	for lipgloss.Width(line) < width {
+		line += " "
+	}
+	if selected {
+		return titleSelStyle.Render(line)
+	}
+	return groupHeaderStyle.Render(line)
+}
+
+// viewCompact renders the compact split-pane list. Group headers occupy one
+// line; items occupy two:
 //
 //	Line 1: "> Title"              (bold when selected)
 //	Line 2: "    status · #issue"  (dim metadata)
 func (m ListModel) viewCompact() string {
-	items := m.visibleItems()
+	rows := m.rows()
+	visible := m.visibleRowIdxs(rows)
 
 	var b strings.Builder
 
-	if len(items) == 0 {
+	if len(visible) == 0 {
 		dimStyle := style.Dim
 		label := "active"
 		if m.filterMode == FilterArchived {
@@ -320,26 +518,26 @@ func (m ListModel) viewCompact() string {
 		return dimStyle.Render(fmt.Sprintf("  No %s work items.  (ctrl+a to switch)", label))
 	}
 
-	// Each item occupies 2 lines; compute visible item count accordingly.
-	visibleCount := m.height / 2
-	if visibleCount < 1 {
-		visibleCount = len(items)
+	heights := make([]int, len(visible))
+	for i, idx := range visible {
+		if rows[idx].isHeader {
+			heights[i] = 1
+		} else {
+			heights[i] = 2
+		}
 	}
+	offset, end := windowByBudget(visible, heights, m.cursor, m.height)
 
-	// Scrolling: keep cursor visible
-	offset := 0
-	if m.cursor >= visibleCount {
-		offset = m.cursor - visibleCount + 1
-	}
+	for vi := offset; vi < end; vi++ {
+		idx := visible[vi]
+		row := rows[idx]
+		selected := idx == m.cursor
 
-	end := offset + visibleCount
-	if end > len(items) {
-		end = len(items)
-	}
-
-	for i := offset; i < end; i++ {
-		item := items[i]
-		selected := i == m.cursor
+		if row.isHeader {
+			b.WriteString(m.renderGroupHeader(row, selected, panelW) + "\n")
+			continue
+		}
+		item := row.item
 
 		cursor := "  "
 		if selected {
@@ -488,27 +686,28 @@ func (m ListModel) viewFull() string {
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
 
-	items := m.visibleItems()
-
-	// Visible rows (reserve 1 line for header — footer is in parent status bar)
-	visibleRows := m.height - 1
-	if visibleRows < 1 {
-		visibleRows = len(items)
+	rows := m.rows()
+	visible := m.visibleRowIdxs(rows)
+	if len(visible) == 0 {
+		return b.String()
 	}
 
-	// Scrolling: keep cursor visible
-	offset := 0
-	if m.cursor >= visibleRows {
-		offset = m.cursor - visibleRows + 1
+	// Every row is one line; reserve 1 for the column header — footer is in
+	// the parent status bar.
+	heights := make([]int, len(visible))
+	for i := range heights {
+		heights[i] = 1
 	}
+	offset, end := windowByBudget(visible, heights, m.cursor, m.height-1)
 
-	end := offset + visibleRows
-	if end > len(items) {
-		end = len(items)
-	}
-
-	for i := offset; i < end; i++ {
-		item := items[i]
+	for vi := offset; vi < end; vi++ {
+		idx := visible[vi]
+		if rows[idx].isHeader {
+			b.WriteString(m.renderGroupHeader(rows[idx], idx == m.cursor, m.width))
+			b.WriteString("\n")
+			continue
+		}
+		item := rows[idx].item
 
 		slug := style.Truncate(item.Slug, slugW)
 		updated := FormatRelativeTime(item.Updated)
@@ -553,7 +752,7 @@ func (m ListModel) viewFull() string {
 			updatedW, updated,
 		)
 
-		if i == m.cursor {
+		if idx == m.cursor {
 			row = selectedStyle.Render(row)
 		}
 

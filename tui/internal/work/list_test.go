@@ -362,6 +362,187 @@ func TestListModelCEmitsChatRequest(t *testing.T) {
 	}
 }
 
+// --- Project grouping (group headers, collapse, flat-tail regression) ---
+
+// groupedItems is recency-sorted (as LoadIndex guarantees) with two labeled
+// projects, an ungrouped tail, and archived members in both projects.
+func groupedItems() []WorkItem {
+	return []WorkItem{
+		{Slug: "beta-1", Title: "Beta One", Status: "active", Project: "beta", Updated: "2026-06-10T12:00:00Z"},
+		{Slug: "alpha-1", Title: "Alpha One", Status: "active", Project: "alpha", Updated: "2026-06-09T12:00:00Z"},
+		{Slug: "beta-2", Title: "Beta Two", Status: "active", Project: "beta", Updated: "2026-06-08T12:00:00Z"},
+		{Slug: "loose-1", Title: "Loose One", Status: "active", Updated: "2026-06-07T12:00:00Z"},
+		{Slug: "alpha-old", Title: "Alpha Old", Status: "archived", Project: "alpha", Updated: "2026-06-06T12:00:00Z"},
+		{Slug: "loose-2", Title: "Loose Two", Status: "active", Updated: "2026-06-05T12:00:00Z"},
+		{Slug: "beta-old", Title: "Beta Old", Status: "archived", Project: "beta", Updated: "2026-06-04T12:00:00Z"},
+	}
+}
+
+func TestGroupByProjectSectionsByRecencyUngroupedTailLast(t *testing.T) {
+	groups := GroupByProject(groupedItems())
+	if len(groups) != 3 {
+		t.Fatalf("expected 3 sections (beta, alpha, ungrouped), got %d: %+v", len(groups), groups)
+	}
+	if groups[0].Project != "beta" || groups[1].Project != "alpha" {
+		t.Errorf("sections should follow most-recent-member order, got %q, %q", groups[0].Project, groups[1].Project)
+	}
+	if groups[2].Project != "" {
+		t.Errorf("ungrouped tail must be last, got %q", groups[2].Project)
+	}
+	tail := groups[2].Items
+	if len(tail) != 2 || tail[0].Slug != "loose-1" || tail[1].Slug != "loose-2" {
+		t.Errorf("ungrouped tail should preserve input (recency) order, got %+v", tail)
+	}
+	if got := len(groups[0].Items); got != 3 {
+		t.Errorf("beta section should hold all 3 members pre-filter, got %d", got)
+	}
+}
+
+// The cursor starts on the first item row, not the leading group header, so
+// the detail panel has a selection from the first frame.
+func TestListModelInitialCursorOnFirstItem(t *testing.T) {
+	m := newTestListModel(groupedItems())
+	if got := m.CurrentSlug(); got != "beta-1" {
+		t.Fatalf("initial selection = %q, want beta-1", got)
+	}
+}
+
+func TestListModelGroupsDefaultExpanded(t *testing.T) {
+	m := newTestListModel(groupedItems())
+	view := stripListANSI(m.View())
+	for _, slug := range []string{"beta-1", "beta-2", "alpha-1", "loose-1", "loose-2"} {
+		if !strings.Contains(view, slug) {
+			t.Errorf("expanded-by-default view should show %q, got:\n%s", slug, view)
+		}
+	}
+	if strings.Contains(view, "▶") {
+		t.Errorf("no group should start collapsed, got:\n%s", view)
+	}
+}
+
+// Header rows render "<project> (n)" with the visible (filtered) member count.
+func TestListModelHeaderShowsVisibleMemberCount(t *testing.T) {
+	m := newTestListModel(groupedItems())
+	view := stripListANSI(m.View())
+	if !strings.Contains(view, "beta (2)") || !strings.Contains(view, "alpha (1)") {
+		t.Fatalf("active filter should show 'beta (2)' and 'alpha (1)', got:\n%s", view)
+	}
+}
+
+// Border annotation "ctrl+a  active · archived" — toggling the filter
+// recomputes groups and counts for the selected set.
+func TestListModelCtrlARecomputesGroupsAndCounts(t *testing.T) {
+	m := newTestListModel(groupedItems())
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	view := stripListANSI(m.View())
+	if !strings.Contains(view, "alpha (1)") || !strings.Contains(view, "beta (1)") {
+		t.Fatalf("archived filter should show 'alpha (1)' and 'beta (1)', got:\n%s", view)
+	}
+	if strings.Contains(view, "beta (2)") {
+		t.Fatalf("active-filter count must not survive the toggle, got:\n%s", view)
+	}
+	if got := m.CurrentSlug(); got != "alpha-old" {
+		t.Errorf("cursor should reset to the first archived item, got %q", got)
+	}
+}
+
+// "Enter open detail" — contextual on a group header: Enter toggles collapse
+// in-model (no command), and j/k then skip the hidden members.
+func TestListModelEnterOnHeaderTogglesCollapse(t *testing.T) {
+	m := newTestListModel(groupedItems())
+	// k from the first item lands on the beta header.
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	if _, ok := m.CurrentItem(); ok {
+		t.Fatal("precondition: cursor should be on the beta group header")
+	}
+
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("Enter on a header must toggle collapse, not emit a command")
+	}
+	view := stripListANSI(m.View())
+	if !strings.Contains(view, "▶ beta (2)") {
+		t.Fatalf("collapsed header should show ▶ with unchanged count, got:\n%s", view)
+	}
+	if strings.Contains(view, "beta-1") || strings.Contains(view, "beta-2") {
+		t.Fatalf("collapsed members must not render, got:\n%s", view)
+	}
+
+	// j from the collapsed header skips its members: next stop is the alpha
+	// header, then alpha's first item.
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if _, ok := m.CurrentItem(); ok {
+		t.Fatalf("j should land on the alpha header, got item %q", m.CurrentSlug())
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if got := m.CurrentSlug(); got != "alpha-1" {
+		t.Fatalf("j should skip collapsed beta members to alpha-1, got %q", got)
+	}
+
+	// Enter on the header again re-expands.
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	view = stripListANSI(m.View())
+	if !strings.Contains(view, "▼ beta (2)") || !strings.Contains(view, "beta-1") {
+		t.Fatalf("re-expanded group should show ▼ and its members, got:\n%s", view)
+	}
+}
+
+// "Enter open detail" — on an item row inside a group, Enter still selects.
+func TestListModelEnterOnGroupedItemStillSelects(t *testing.T) {
+	m := newTestListModel(groupedItems())
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("Enter on an item should emit a selection command")
+	}
+	msg, ok := cmd().(ItemSelectedMsg)
+	if !ok {
+		t.Fatalf("Enter produced %T, want ItemSelectedMsg", cmd())
+	}
+	if msg.Item.Slug != "beta-1" {
+		t.Errorf("selected slug = %q, want beta-1", msg.Item.Slug)
+	}
+}
+
+// "s run spec" / "c chat about spec" — no-ops on a group header.
+func TestListModelSCNoopOnHeader(t *testing.T) {
+	m := newTestListModel(groupedItems())
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"}) // beta header
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: 's', Text: "s"}); cmd != nil {
+		t.Error("s on a header should not emit a spec request")
+	}
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"}); cmd != nil {
+		t.Error("c on a header should not emit a chat request")
+	}
+}
+
+// Regression: a list with no projects renders the same flat list as before
+// grouping existed — no header rows, input order, one cursor stop per item.
+func TestListModelUngroupedOnlyRendersFlat(t *testing.T) {
+	for _, compact := range []bool{true, false} {
+		m := newTestListModel(contractItems())
+		m.compactMode = compact
+
+		view := stripListANSI(m.View())
+		if strings.Contains(view, "▼") || strings.Contains(view, "▶") {
+			t.Fatalf("compact=%v: ungrouped-only list must not render group headers, got:\n%s", compact, view)
+		}
+		if one, two := strings.Index(view, "One"), strings.Index(view, "Two"); compact && (one < 0 || two < 0 || one > two) {
+			t.Errorf("items should keep input order, got:\n%s", view)
+		}
+
+		// Cursor stops are exactly the items, in order.
+		if got := m.CurrentSlug(); got != "one" {
+			t.Errorf("compact=%v: initial selection = %q, want one", compact, got)
+		}
+		m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+		if got := m.CurrentSlug(); got != "two" {
+			t.Errorf("compact=%v: j selection = %q, want two", compact, got)
+		}
+	}
+}
+
 // Border annotation "ctrl+a  active · archived"
 func TestListModelCtrlAToggleActiveArchivedFilter(t *testing.T) {
 	m := newTestListModel(contractItems())

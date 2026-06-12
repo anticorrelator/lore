@@ -24,6 +24,7 @@ type WorkItemDetail struct {
 	Status          string      `json:"status"`
 	Branches        []string    `json:"branches"`
 	Tags            []string    `json:"tags"`
+	Project         string      `json:"project"`
 	RelatedWork     []string    `json:"related_work"`
 	Issue           string      `json:"issue"`
 	PR              string      `json:"pr"`
@@ -56,6 +57,7 @@ type workItemMeta struct {
 	Status      string   `json:"status"`
 	Branches    []string `json:"branches"`
 	Tags        []string `json:"tags"`
+	Project     string   `json:"project"`
 	RelatedWork []string `json:"related_work"`
 	Issue       string   `json:"issue"`
 	PR          string   `json:"pr"`
@@ -158,6 +160,7 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 		Status:      meta.Status,
 		Branches:    meta.Branches,
 		Tags:        meta.Tags,
+		Project:     meta.Project,
 		RelatedWork: meta.RelatedWork,
 		Issue:       meta.Issue,
 		PR:          meta.PR,

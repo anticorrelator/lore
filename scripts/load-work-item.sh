@@ -108,6 +108,7 @@ result = {
     'title': meta.get('title', ''),
     'status': meta.get('status', ''),
     'archived': archived,
+    'project': meta.get('project', ''),
     'branches': meta.get('branches', []),
     'tags': meta.get('tags', []),
     'issue': meta.get('issue', ''),
@@ -147,6 +148,7 @@ CREATED=$(json_field "created" "$META")
 UPDATED=$(json_field "updated" "$META")
 ISSUE=$(json_field "issue" "$META" || true)
 PR=$(json_field "pr" "$META" || true)
+PROJECT=$(json_field "project" "$META" || true)
 INTENT_ANCHOR=$(json_field "intent_anchor" "$META" || true)
 
 # Extract branches, tags, and related_work as comma-separated display strings
@@ -164,6 +166,9 @@ else
 fi
 echo "Slug: $SLUG"
 echo "Status: $STATUS"
+if [[ -n "$PROJECT" ]]; then
+  echo "Project: $PROJECT"
+fi
 echo "Branches: ${BRANCHES:-none}"
 echo "Tags: ${TAGS:-none}"
 if [[ -n "$RELATED_WORK" ]]; then

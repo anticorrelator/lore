@@ -101,6 +101,7 @@ for meta_path in sorted(glob.glob(os.path.join(work_dir, "*", "_meta.json"))):
         "issue": str_field(meta, "issue"),
         "pr": str_field(meta, "pr"),
         "intent_anchor": str_field(meta, "intent_anchor"),
+        "project": str_field(meta, "project"),
         "related_work": list_field(meta, "related_work"),
         "closure": closure_field(meta),
         "has_plan_doc": os.path.exists(os.path.join(parent, "plan.md")),
@@ -130,6 +131,7 @@ for meta_path in sorted(glob.glob(os.path.join(work_dir, "_archive", "*", "_meta
         "title": str_field(meta, "title", slug),
         "status": str_field(meta, "status", "archived"),
         "archived_date": archived_date,
+        "project": str_field(meta, "project"),
     })
 
 index = {

@@ -14,6 +14,7 @@ type WorkItem struct {
 	Status          string   `json:"status"`
 	Branches        []string `json:"branches"`
 	Tags            []string `json:"tags"`
+	Project         string   `json:"project"` // "" = ungrouped
 	Created         string   `json:"created"`
 	Updated         string   `json:"updated"`
 	Issue           string   `json:"issue"`
@@ -26,6 +27,38 @@ type WorkItem struct {
 // indexFile is the top-level shape of _index.json.
 type indexFile struct {
 	Plans []WorkItem `json:"plans"`
+}
+
+// ProjectGroup is one section of a project-grouped item list: the project
+// label ("" for the ungrouped tail) and its members in input order.
+type ProjectGroup struct {
+	Project string
+	Items   []WorkItem
+}
+
+// GroupByProject buckets items into project sections: labeled sections
+// first, the ungrouped ("") tail always last. Input order is preserved
+// within each section, and labeled sections follow the position of their
+// first member — so a recency-sorted input yields sections ordered by
+// most-recent member, with a recency-sorted flat tail.
+func GroupByProject(items []WorkItem) []ProjectGroup {
+	var order []string
+	buckets := make(map[string][]WorkItem)
+	for _, item := range items {
+		if _, seen := buckets[item.Project]; !seen && item.Project != "" {
+			order = append(order, item.Project)
+		}
+		buckets[item.Project] = append(buckets[item.Project], item)
+	}
+
+	groups := make([]ProjectGroup, 0, len(order)+1)
+	for _, p := range order {
+		groups = append(groups, ProjectGroup{Project: p, Items: buckets[p]})
+	}
+	if tail, ok := buckets[""]; ok {
+		groups = append(groups, ProjectGroup{Project: "", Items: tail})
+	}
+	return groups
 }
 
 // LoadIndex reads _index.json from the given work directory and returns
@@ -75,11 +108,12 @@ func LoadIndex(workDir string) ([]WorkItem, error) {
 				continue
 			}
 			idx.Plans = append(idx.Plans, WorkItem{
-				Slug:    slug,
-				Title:   meta.Title,
-				Status:  "archived",
+				Slug:     slug,
+				Title:    meta.Title,
+				Status:   "archived",
 				Branches: meta.Branches,
 				Tags:     meta.Tags,
+				Project:  meta.Project,
 				Issue:    meta.Issue,
 				PR:       meta.PR,
 				Created:  meta.Created,

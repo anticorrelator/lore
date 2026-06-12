@@ -663,10 +663,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			// A opens archive/unarchive confirmation modal (left panel only).
 			if m.state == stateWork && m.focusedPanel == panelLeft {
-				items := m.list.Items()
-				cur := m.list.Cursor()
-				if cur < len(items) {
-					item := items[cur]
+				if item, ok := m.list.CurrentItem(); ok {
 					title := item.Title
 					if title == "" {
 						title = item.Slug
@@ -697,10 +694,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			// D opens delete confirmation modal (left panel only).
 			if m.state == stateWork && m.focusedPanel == panelLeft {
-				items := m.list.Items()
-				cur := m.list.Cursor()
-				if cur < len(items) {
-					item := items[cur]
+				if item, ok := m.list.CurrentItem(); ok {
 					title := item.Title
 					if title == "" {
 						title = item.Slug
@@ -1075,7 +1069,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			return m, nil
 		}
 		prevSlug := m.list.CurrentSlug()
+		prevCollapsed := m.list.CollapsedProjects()
 		m.list = work.NewListModel(msg.items)
+		// Collapse state is session-local: carry it across index reloads,
+		// like the cursor restore below.
+		m.list.SetCollapsedProjects(prevCollapsed)
 		m.list.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
 		// Re-apply current window dimensions — the new model starts with height=0
 		// and any previously received WindowSizeMsg was dispatched to the old model.

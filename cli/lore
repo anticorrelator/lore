@@ -137,7 +137,7 @@ Subcommands:
   list      List active work items
   show      Show a work item's full context
   resolve   Resolve a fuzzy work-item reference to (slug, archived)
-  set       Set metadata fields (issue, pr, scope, intent anchor) on a work item
+  set       Set metadata fields (issue, pr, scope, project, intent anchor) on a work item
   archive   Archive a completed work item
   delete    Permanently delete a work item
   unarchive Restore an archived work item

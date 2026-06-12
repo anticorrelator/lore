@@ -15,9 +15,9 @@ Match the first word of `$ARGUMENTS` to a command below. If no command matches b
 
 ---
 
-### `create <name> [--issue <value>] [--pr <value>] [--intent-anchor <text>]`
+### `create <name> [--issue <value>] [--pr <value>] [--project <name>] [--intent-anchor <text>]`
 ```bash
-lore work create --title "<name>" [--intent-anchor "<interpreted capability statement>"] [--issue "<value>"] [--pr "<value>"]
+lore work create --title "<name>" [--intent-anchor "<interpreted capability statement>"] [--issue "<value>"] [--pr "<value>"] [--project "<name>"]
 ```
 **Before running:** Titles must be ≤70 characters (same as git/PR title convention). Keep it concise — 3–6 words that identify the goal, not a sentence. The slug is generated from the title (stopwords stripped, kebab-cased, capped at 50 chars). Good: `"TUI Mouse Click Focus"`. Bad: `"Add Mouse Click To Focus Panel In TUI When User Clicks"`.
 
@@ -34,7 +34,9 @@ Do not copy emotionally loaded or conversationally pressuring user text verbatim
 
 **Dedup:** The script rejects creation if the new slug overlaps with an existing slug (substring match). If this happens, use the existing item — do NOT retry with a different name for the same topic.
 
-Pass `--issue` and `--pr` only when provided by the user. Show the script output. If it exits non-zero, show the error.
+**Project grouping:** Pass `--project` to group the item under a project label (e.g. several items making up one effort). The value is slugified on write and the stored slug is also the display value — `--project "TUI Rework"` stores and renders as `tui-rework`. Omit the flag to leave the item ungrouped.
+
+Pass `--issue`, `--pr`, and `--project` only when provided by the user. Show the script output. If it exits non-zero, show the error.
 
 ---
 
@@ -91,12 +93,14 @@ Show the script output.
 
 ---
 
-### `set <name> --issue <value> --pr <value>`
+### `set <name> --issue <value> --pr <value> --project <name>`
 Resolve name to slug via `lore work resolve` (see "Resolving Names to Slugs" below), then run:
 ```bash
-lore work set "<slug>" --issue "<value>" --pr "<value>"
+lore work set "<slug>" --issue "<value>" --pr "<value>" --project "<name>"
 ```
-Both flags are optional — pass only what the user provided. Show the script output.
+All flags are optional — pass only what the user provided. Show the script output.
+
+`--project` groups the item under a project label (slugified on write; the stored slug is the display value). `--project ""` clears the item's project membership.
 
 ---
 

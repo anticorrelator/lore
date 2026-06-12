@@ -38,19 +38,25 @@ for dir in "$WORK_DIR"/*/; do
     # Title case the dirname: replace hyphens with spaces, capitalize each word
     TITLE=$(echo "$DIRNAME" | tr '-' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)}1')
     TIMESTAMP=$(timestamp_iso)
+    # Field set must stay in sync with the canonical template in
+    # create-work.sh — fields present there but missing here are silently
+    # dropped from regenerated orphans.
     cat > "$dir/_meta.json" << METAEOF
 {
   "slug": "$DIRNAME",
   "title": "$TITLE",
   "status": "active",
+  "scope": "subsystem",
+  "project": "",
   "branches": [],
   "tags": [],
+  "issue": "",
+  "pr": "",
   "created": "$TIMESTAMP",
   "updated": "$TIMESTAMP",
   "related_knowledge": [],
   "related_work": [],
-  "issue": "",
-  "pr": ""
+  "intent_anchor": ""
 }
 METAEOF
     FINDINGS+=("[heal] Created missing _meta.json for '$DIRNAME'")

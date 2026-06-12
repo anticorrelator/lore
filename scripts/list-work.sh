@@ -149,7 +149,7 @@ def truncate(value, width):
     return value[: width - 2] + ".."
 
 
-def render_table(rows, columns):
+def column_widths(columns):
     fixed_total = sum(col["size"] for col in columns if col["type"] == "fixed")
     flex_total = sum(col["size"] for col in columns if col["type"] == "flex")
     gaps = len(columns) - 1
@@ -164,21 +164,30 @@ def render_table(rows, columns):
             widths.append(max(flex_space * col["size"] // flex_total, 10))
         else:
             widths.append(10)
+    return widths
 
-    def format_row(values):
-        rendered = []
-        for value, width, col in zip(values, widths, columns):
-            value = truncate(value, width)
-            if col["align"] == "right":
-                rendered.append(value.rjust(width))
-            else:
-                rendered.append(value.ljust(width))
-        print("  " + " ".join(rendered))
 
-    format_row([col["name"] for col in columns])
-    format_row(["-" * width for width in widths])
+def format_row(values, widths, columns):
+    rendered = []
+    for value, width, col in zip(values, widths, columns):
+        value = truncate(value, width)
+        if col["align"] == "right":
+            rendered.append(value.rjust(width))
+        else:
+            rendered.append(value.ljust(width))
+    print("  " + " ".join(rendered))
+
+
+def render_header(widths, columns):
+    format_row([col["name"] for col in columns], widths, columns)
+    format_row(["-" * width for width in widths], widths, columns)
+
+
+def render_table(rows, columns):
+    widths = column_widths(columns)
+    render_header(widths, columns)
     for row in rows:
-        format_row(row)
+        format_row(row, widths, columns)
 
 
 with open(index_path) as f:
@@ -202,21 +211,29 @@ if archived is None:
 rows = []
 has_any_issue = False
 has_any_pr = False
+project_rows = {}
+ungrouped_rows = []
 for item in plans:
     issue = str(item.get("issue", "") or "")
     pr = str(item.get("pr", "") or "")
     has_any_issue = has_any_issue or bool(issue)
     has_any_pr = has_any_pr or bool(pr)
-    rows.append(
-        {
-            "slug": str(item.get("slug", "")),
-            "status": str(item.get("status", "")),
-            "updated": relative_date(item.get("updated", "")),
-            "issue": f"#{issue}" if issue else "",
-            "pr": f"#{pr}" if pr else "",
-            "plan": "yes" if item.get("has_plan_doc") else "no",
-        }
-    )
+    row = {
+        "slug": str(item.get("slug", "")),
+        "status": str(item.get("status", "")),
+        "updated": relative_date(item.get("updated", "")),
+        "issue": f"#{issue}" if issue else "",
+        "pr": f"#{pr}" if pr else "",
+        "plan": "yes" if item.get("has_plan_doc") else "no",
+    }
+    rows.append(row)
+    project = str(item.get("project", "") or "")
+    if project:
+        project_rows.setdefault(project, []).append(
+            (parse_epoch(item.get("updated", "")), row)
+        )
+    else:
+        ungrouped_rows.append(row)
 
 draw_separator("Work Items")
 print()
@@ -241,7 +258,26 @@ else:
         fields.append("pr")
     columns.append({"name": "PLAN", "type": "fixed", "size": 4, "align": "left"})
     fields.append("plan")
-    render_table([[row[field] for field in fields] for row in rows], columns)
+    if not project_rows:
+        render_table([[row[field] for field in fields] for row in rows], columns)
+    else:
+        # Grouped sections lead, projects ordered by most-recent member
+        # update; ungrouped items follow flat in index order, as before.
+        widths = column_widths(columns)
+        render_header(widths, columns)
+        ordered_projects = sorted(
+            project_rows.items(),
+            key=lambda kv: max(epoch for epoch, _ in kv[1]),
+            reverse=True,
+        )
+        for project, members in ordered_projects:
+            draw_separator(f"{project} ({len(members)})")
+            for _, row in sorted(members, key=lambda m: m[0], reverse=True):
+                format_row([row[field] for field in fields], widths, columns)
+        if ungrouped_rows:
+            draw_separator()
+            for row in ungrouped_rows:
+                format_row([row[field] for field in fields], widths, columns)
 
 print()
 print(f"Active: {len(rows)} | Archived: {len(archived)}")
@@ -274,6 +310,9 @@ if show_all and archived:
         slug = str(item.get("slug", ""))
         title = str(item.get("title", slug))
         refs = ""
+        project = str(item.get("project", "") or "")
+        if project:
+            refs += f" project:{project}"
         issue = str(item.get("issue", "") or "")
         pr = str(item.get("pr", "") or "")
         if issue:

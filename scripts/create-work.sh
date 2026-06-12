@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # create-work.sh — Create a new work item in _work/
-# Usage: bash create-work.sh --title <name> [--slug <slug>] [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--json] [--detect-pr]
+# Usage: bash create-work.sh --title <name> [--slug <slug>] [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--project <name>] [--json] [--detect-pr]
 # Creates _work/<slug>/ with _meta.json and notes.md, then updates the index.
 #
 # --scope (Phase 2 — work item 02-durable-signal-foundation):
@@ -27,6 +27,9 @@ ISSUE=""
 PR=""
 TAGS=""
 SCOPE="subsystem"
+# --project: optional grouping label. Slugified on write; the stored slug is
+# both the canonical value and the display value. "" = ungrouped.
+PROJECT=""
 JSON_MODE=0
 DETECT_PR=0
 # --related-work: append-only references to other work items. May be passed
@@ -89,6 +92,10 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
         SCOPE="$2"
         shift 2
         ;;
+      --project)
+        PROJECT="$2"
+        shift 2
+        ;;
       --json)
         JSON_MODE=1
         shift
@@ -103,7 +110,7 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
         ;;
       *)
         echo "[work] Error: Unknown flag '$1'" >&2
-        echo "Usage: create-work.sh --title <name> [--slug <slug>] [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--related-work <slug>] [--json] [--detect-pr]" >&2
+        echo "Usage: create-work.sh --title <name> [--slug <slug>] [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--project <name>] [--related-work <slug>] [--json] [--detect-pr]" >&2
         exit 1
         ;;
     esac
@@ -192,6 +199,16 @@ if [[ -z "$SLUG" ]]; then
   exit 1
 fi
 
+# Normalize the project label; the slug is stored as-is and doubles as the
+# display value.
+if [[ -n "$PROJECT" ]]; then
+  PROJECT_INPUT="$PROJECT"
+  PROJECT=$(slugify "$PROJECT")
+  if [[ -z "$PROJECT" ]]; then
+    echo "[work] Warning: --project '$PROJECT_INPUT' produced an empty slug; item left ungrouped." >&2
+  fi
+fi
+
 # Check for similar slugs (substring overlap in either direction)
 SIMILAR=()
 for existing_dir in "$WORK_DIR"/*/; do
@@ -270,16 +287,17 @@ if [[ ${#RELATED_WORK_SLUGS[@]} -gt 0 ]]; then
 fi
 
 # Write _meta.json
-python3 - "$WORK_DIR/$SLUG/_meta.json" "$SLUG" "$TITLE" "$SCOPE" "$BRANCHES_JSON" "$TAGS_JSON" "$ISSUE" "$PR" "$TIMESTAMP" "$INTENT_ANCHOR" "$RELATED_WORK_JSON" << 'PYEOF'
+python3 - "$WORK_DIR/$SLUG/_meta.json" "$SLUG" "$TITLE" "$SCOPE" "$PROJECT" "$BRANCHES_JSON" "$TAGS_JSON" "$ISSUE" "$PR" "$TIMESTAMP" "$INTENT_ANCHOR" "$RELATED_WORK_JSON" << 'PYEOF'
 import json
 import sys
 
-path, slug, title, scope, branches_json, tags_json, issue, pr, timestamp, intent_anchor, related_work_json = sys.argv[1:12]
+path, slug, title, scope, project, branches_json, tags_json, issue, pr, timestamp, intent_anchor, related_work_json = sys.argv[1:13]
 meta = {
     "slug": slug,
     "title": title,
     "status": "active",
     "scope": scope,
+    "project": project,
     "branches": json.loads(branches_json),
     "tags": json.loads(tags_json),
     "issue": issue,
