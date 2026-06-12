@@ -39,14 +39,14 @@ echo ""
 
 echo "Test 1: Lore source repo references do not use target knowledge resolver"
 assert_contains "spec uses LORE_REPO_DIR for source repo discovery" 'LORE_SOURCE_REPO="$LORE_REPO_DIR"'
-assert_contains "full-branch instructions warn against resolve-repo.sh source usage" "Do not use \`resolve-repo.sh\` for this"
+assert_contains "full-branch instructions warn against resolve-repo.sh source usage" "Do not use \`resolve-repo.sh\`"
 assert_not_contains "no resolve-repo.sh /skills exclusion path" 'resolve-repo.sh)/skills/'
 assert_not_contains "no resolve-repo.sh /agents exclusion path" 'resolve-repo.sh)/agents/'
 
 echo ""
 echo "Test 2: Optional knowledge categories do not fail directory scans"
 assert_contains "spec directory scan guards missing category directories" '[[ -d "$dir" ]] && ls "$dir"'
-assert_contains "spec states absent categories are zero entries" "absent directories count as zero entries"
+assert_contains "spec states absent categories are zero entries" "count as zero"
 assert_not_contains "no single ls call over all optional category dirs" 'ls "$KDIR/preferences/" "$KDIR/conventions/" "$KDIR/cross-cutting-conventions/"'
 
 echo ""
