@@ -260,14 +260,16 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        each norm woven into your task's constraint clauses, referencing it by the
        **stable label** the task named (the convention's entry slug/title). One
        bullet per woven norm, each in exactly one of two forms:
-       - honored: <norm-label>
+       - honored: <norm-label>[ — <optional rationale>]
        - diverged: <norm-label> — <why you judged the norm a poor fit here>
        When NO norm was woven into your task, the section's entire value is the
        sentinel `none in scope`. A task that DID carry woven norms may not use
        `none in scope` — disposition every one. The label is exact: spelling,
        casing, and the trailing colon on `Convention handling:` are a protocol
-       constant the TaskCompleted hook matches literally. Format:
-       - honored: <norm-label>
+       constant the TaskCompleted hook matches literally. A dash-separated
+       rationale after an honored label is permitted — the completeness
+       comparison matches on the label alone. Format:
+       - honored: <norm-label>[ — <optional rationale>]
        - diverged: <norm-label> — <why>
        or simply: none in scope
      **Surfaced concerns:** REQUIRED — always include this section; `None` is
@@ -481,7 +483,7 @@ For tasks with subjects starting with "Update stale knowledge entry":
   - **Implicit constraints** — non-code-visible rules discovered ("can't do X because of Y constraint").
 - **Narrative** is an optional prose slot below the structured observations, preserved for judgment, synthesis, and cross-observation connections that don't fit the structured-field shape. Keep it brief. Use when the captured signal is stronger than any single structured observation. Do NOT use Narrative to work around structured-field discipline — if a claim can be made with a falsifier, make it structured.
   - Structured observations capture load-bearing claims; narrative captures judgment, context, and emergent observations that don't fit the schema. Both are valuable — neither supersedes the other.
-- **Convention handling** is a REQUIRED always-present field, modeled on Surfaced concerns: always emit it; `none in scope` is a valid value, never a conditional omission. Disposition every norm woven into your task's constraint clauses, by stable label, as `honored: <label>` or `diverged: <label> — <why>`. You may diverge from a woven norm when you judge it a poor fit — record the reason; the lead assesses divergences and opens a non-blocking followup only when a rationale is unconvincing. It never blocks your task and never edits your output. Disposition every woven norm: the lead compares your dispositions against the norms it wove into the task, so a missing, duplicated, or unrecognized label surfaces as a completeness finding. The label's spelling, casing, and trailing colon are a protocol constant the TaskCompleted hook matches literally — a report with a `template_version` marker that omits this section (or leaves it empty) is rejected.
+- **Convention handling** is a REQUIRED always-present field, modeled on Surfaced concerns: always emit it; `none in scope` is a valid value, never a conditional omission. Disposition every norm woven into your task's constraint clauses, by stable label, as `honored: <label>` (an optional ` — <rationale>` after the label is tolerated) or `diverged: <label> — <why>`. You may diverge from a woven norm when you judge it a poor fit — record the reason; the lead assesses divergences and opens a non-blocking followup only when a rationale is unconvincing. It never blocks your task and never edits your output. Disposition every woven norm: the lead compares your dispositions against the norms it wove into the task, so a missing, duplicated, or unrecognized label surfaces as a completeness finding. The label's spelling, casing, and trailing colon are a protocol constant the TaskCompleted hook matches literally — a report with a `template_version` marker that omits this section (or leaves it empty) is rejected.
 - **Surfaced concerns** is a REQUIRED always-present field. Use it to surface architectural or cross-cutting concerns you spotted while working on this task but that you should NOT own or act on within the task — items that belong with a lead, advisor, or a follow-up work item. The worker-scope × architectural-scope gap lives here. `None` is a correct and common answer; always include the section even when empty. The *rate* at which this field is non-None is a calibration signal — do NOT conditionally emit based on whether you found anything. Always include it; the rate is the signal. Trigger-based conditional emission was explicitly considered and rejected in Phase 5.
 - **Investigation** is optional — use it when the task involved unexpected friction. Format: what you expected → what you found → what you did about it. Skip entirely for straightforward tasks.
 - **Consultations** is optional — emit only when you actually sent consultations during the task. A consultation is a `## Consultation` request you sent to the lead, to a skill the lead invoked, or to a persistent advisor agent on the opt-in route. Each entry has the following fields:

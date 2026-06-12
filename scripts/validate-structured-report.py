@@ -135,7 +135,8 @@ def find_convention_handling(s: str):
         return (
             f"missing required section: **{CONVENTION_HANDLING_HEADING}:** — "
             f"disposition each woven norm by stable label "
-            f"(honored: <label> / diverged: <label> — <why>), or `none in scope`"
+            f"(honored: <label>[ — <rationale>] / diverged: <label> — <why>), "
+            f"or `none in scope`"
         )
     section = s[m.end():]
     next_h = re.search(r'\n\*\*[A-Z][a-zA-Z0-9 ]+:\*\*', section)

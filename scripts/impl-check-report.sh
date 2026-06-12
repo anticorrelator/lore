@@ -467,7 +467,9 @@ else:
             continue
         rest = m.group(2).strip()
         if m.group(1) == "honored":
-            honored.append(clean(rest))
+            # Workers may append a dash-separated rationale; only the label
+            # participates in the completeness comparison.
+            honored.append(clean(re.split(r"\s+[—–-]+\s+", rest, maxsplit=1)[0]))
         else:
             parts = re.split(r"\s+[—–-]+\s+", rest, maxsplit=1)
             diverged.append({"label": clean(parts[0]),

@@ -368,6 +368,71 @@ EOF
   echo "$output" | grep -q "Convention handling: skipped-no-woven-list"
 }
 
+@test "honored with em-dash rationale resolves to the bare woven label" {
+  cat > "$REPORT" <<'EOF'
+**Tier 2 evidence:**
+c1
+**Convention handling:**
+- honored: norm-a — applied the convention as written
+EOF
+  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+    --report "$REPORT" --phase 1 --woven-norm norm-a --json
+  [ "$status" -eq 0 ]
+  json_line | python3 -c '
+import json, sys
+ch = json.loads(sys.stdin.read())["findings"]["convention_handling"]
+assert ch["status"] == "clean"
+assert ch["honored"] == ["norm-a"]
+'
+}
+
+@test "honored with en-dash rationale resolves to the woven label" {
+  cat > "$REPORT" <<'EOF'
+**Tier 2 evidence:**
+c1
+**Convention handling:**
+- honored: norm-a – applied the convention as written
+EOF
+  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+    --report "$REPORT" --phase 1 --woven-norm norm-a
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "Convention handling: clean"
+}
+
+@test "honored with hyphen rationale resolves to the woven label" {
+  cat > "$REPORT" <<'EOF'
+**Tier 2 evidence:**
+c1
+**Convention handling:**
+- honored: norm-a - applied the convention as written
+EOF
+  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+    --report "$REPORT" --phase 1 --woven-norm norm-a
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "Convention handling: clean"
+}
+
+@test "bare honored label with no rationale reports clean" {
+  write_basic_report
+  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+    --report "$REPORT" --phase 1 --woven-norm norm-a
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "Convention handling: clean"
+}
+
+@test "hyphenated norm label with rationale splits only at spaced dashes" {
+  cat > "$REPORT" <<'EOF'
+**Tier 2 evidence:**
+c1
+**Convention handling:**
+- honored: norm-with-hyphens — rationale text here
+EOF
+  run bash "$LORE_CLI" impl check-report report-item --task 5 \
+    --report "$REPORT" --phase 1 --woven-norm norm-with-hyphens
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "Convention handling: clean"
+}
+
 @test "diverged entries are listed verbatim for the caller to assess" {
   cat > "$REPORT" <<'EOF'
 **Tier 2 evidence:**
