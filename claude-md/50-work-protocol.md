@@ -6,7 +6,9 @@ Work items persist in the project's `_work/` directory (path resolved by `lore r
 
 `/work` is the primary way to create and manage work items. It handles persistence, indexing, and cross-referencing automatically.
 
-**Never write work item files directly** (mkdir, Write `_meta.json`, etc.). Always use `lore work create --title "<name>"` — this handles slug generation, indexing, and metadata consistently. This applies to agents and subagents too: if a task requires creating a work item, invoke the CLI, not the filesystem.
+**Don't hand-create a work item's managed files** (mkdir the item, Write `_meta.json`, edit the index). Always use `lore work create --title "<name>"` to bring a work item into existence — it handles slug generation, indexing, and metadata consistently. This applies to agents and subagents too: if a task requires creating a work item, invoke the CLI, not the filesystem.
+
+**But a work item is a bag of files.** Once it exists, add freeform artifacts to its directory freely — `Write` a `design.md`, `evidence.md`, captures, whatever the work needs. `lore work show` auto-delivers every file in the directory, so added files are first-class and need no registration step. The session *log* stays in `notes.md` via `/work update`; everything else is just files.
 
 **Builtin plan mode (where the harness exposes one — e.g., Claude Code's `EnterPlanMode`/`ExitPlanMode`) produces ephemeral plans** that live in the harness's transient plan storage (resolved via `resolve_harness_install_path ephemeral_plans`; `unsupported` on harnesses without one) and are lost across sessions. Only use it for quick, small-scope planning that doesn't need to survive the current session. For anything that warrants persistence — multi-step work, design decisions, cross-session tasks — use `/work` instead.
 
