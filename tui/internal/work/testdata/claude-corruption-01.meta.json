@@ -1,0 +1,31 @@
+{
+  "provenance": "Synthetic, generated deterministically (not a live capture): D8 describes capturing a real corrupted Claude Code PTY session via creack/pty, but a live capture is not reproducible in CI, so this fixture replays the byte patterns that corrupted the x/vt backend — truecolor lines scrolling off-screen (color was lost in scrollback), Ink-style cursor-up/erase-below redraw frames with stray CRs, an 80-column line rewritten via CR from the right border (border corruption), and embedded DA1/DSR/XTVERSION device queries.",
+  "terminal": {
+    "cols": 80,
+    "rows": 24
+  },
+  "replay": "fed in 257-byte chunks (prime stride) so escape sequences and multi-byte UTF-8 runes split across chunk boundaries",
+  "total_bytes": 5144,
+  "sections": [
+    {
+      "name": "A-colored-scroll",
+      "end_offset": 4034,
+      "intent": "41 colored lines; 40-row body scrolls past a 24-row screen so scrollback retains SGR content; every 8th line carries wide CJK + braille for width accounting"
+    },
+    {
+      "name": "B-device-queries",
+      "end_offset": 4045,
+      "intent": "DA1 + DSR(6n) + XTVERSION; responses must reach the PTY via the WRITE_PTY callback"
+    },
+    {
+      "name": "C-ink-redraw-churn",
+      "end_offset": 4796,
+      "intent": "cursor-up + erase-below spinner frames inside synchronized-update brackets, stray CRs, and an 80-col line rewritten via CR from the right border"
+    },
+    {
+      "name": "D-final-screen",
+      "end_offset": 5144,
+      "intent": "colored box + prompt with no trailing newline; the golden pins this screen"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "purpose": "Provenance and build pins for the vendored libghostty-vt headers and per-platform SIMD-off static archives linked by the `-tags ghostty` TUI build. Build-on-install machines need only a C compiler; Zig/CMake are required only to (re)produce the archives recorded here.",
+  "binding": {
+    "module": "go.mitchellh.com/libghostty",
+    "version": "v0.0.0-20260528200934-790a3ff6e9f6",
+    "vcs_url": "https://tangled.org/mitchellh.com/go-libghostty",
+    "commit": "790a3ff6e9f697b7d2697eeebd5d2548a7b25e23"
+  },
+  "ghostty": {
+    "repository": "https://github.com/ghostty-org/ghostty",
+    "commit": "cb36966a752982014827a9cabcf630ec3788b3d9",
+    "pin_source": "FetchContent GIT_TAG in go-libghostty's CMakeLists.txt at the binding commit above; the two pins must move together",
+    "minimum_zig_version": "0.15.2"
+  },
+  "headers": {
+    "path": "include/ghostty",
+    "source": "include/ghostty/ tree at the pinned ghostty commit, vendored unmodified (LICENSE alongside is ghostty's)"
+  },
+  "build": {
+    "zig_version": "0.15.2",
+    "simd": false,
+    "command": "./build-archives.sh (encodes the full recipe). NOT just `zig build -Demit-lib-vt`: that emits members Apple ld rejects as unaligned and omits the f128 quad-float compiler-rt builtins Zig's std formatting references. The script builds the SIMD-off vt archive, builds Zig's compiler_rt standalone for the target, then merges the main vt object with the full compiler_rt object \u2014 via Apple `libtool` (8-byte aligns) for darwin targets, `llvm-ar` for linux. Run with GHOSTTY_DIR=<checkout at ghostty.commit> ZIG=/opt/homebrew/opt/zig@0.15/bin/zig.",
+    "notes": "SIMD off yields a fully static, zero-dependency archive so end-user machines link it with only a C compiler. The cgo CFLAGS/LDFLAGS contract lives in tui/internal/work/ghostty_link.go; the binding's pkg-config directive is satisfied by pkg-config-shim.sh. The merged-in compiler_rt provides __extenddftf2/__extendxftf2/__multf3/__trunctfdf2 (absent from Apple libclang_rt.osx.a; supplied by libgcc on Linux).",
+    "built_at": "2026-06-12",
+    "built_with": "Homebrew zig@0.15 bottle (exactly 0.15.2, arm64_tahoe) on macOS 26.5 host (darwin/arm64). darwin_amd64 and linux_amd64 were cross-compiled from that host via -Dtarget; native codegen ran on arm64.",
+    "toolchain_caveat": "The official ziglang.org zig-0.15.2 release binary CANNOT build on a macOS 26 host: its self-hosted MachO linker fails to resolve any libSystem symbol for native targets (only explicit cross-targets link). The Homebrew zig@0.15 bottle (built against Homebrew LLVM/LLD for macOS 26) links natively and was used here. ghostty requires exactly Zig 0.15.x (rejects 0.16), so use the Homebrew zig@0.15 bottle, or build on macOS <=15 / Linux, when reproducing these archives."
+  },
+  "targets": {
+    "darwin_arm64": {
+      "zig_target": "aarch64-macos",
+      "archive": "lib/darwin_arm64/libghostty-vt.a",
+      "sha256": "59dd3a374d71087d0253b3d314c3e71faa77505f0fd61696f979ba273f23df8b",
+      "status": "built"
+    },
+    "darwin_amd64": {
+      "zig_target": "x86_64-macos",
+      "archive": "lib/darwin_amd64/libghostty-vt.a",
+      "sha256": "c79ccc166f493bada8a836355e83fd983b2e3d3fed60825b7c8b6f3168ed46f3",
+      "status": "built"
+    },
+    "linux_amd64": {
+      "zig_target": "x86_64-linux-gnu",
+      "archive": "lib/linux_amd64/libghostty-vt.a",
+      "sha256": "44cffd04265fa88918e690215c8a41ef85610df6cc496dc6b0af6bc5773a616d",
+      "status": "built"
+    }
+  }
+}

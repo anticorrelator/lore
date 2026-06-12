@@ -730,13 +730,30 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then
 fi
 
 # --- 3b. Build and install TUI ---
+# The TUI links the vendored libghostty-vt static archive via cgo, so in
+# addition to the go toolchain the build needs a C compiler and the
+# per-platform archive; tui_ghostty_preflight (lib.sh) names the first
+# missing requirement so a broken toolchain surfaces as an actionable skip
+# instead of a raw cgo link error mid-build.
 if command -v go >/dev/null 2>&1; then
-  info "Building TUI"
-  if ! $DRY_RUN; then
-    (cd "$LORE_REPO_DIR/tui" && go build -o "$HOME/.local/bin/lore-tui" .)
+  TUI_BUILD_TAGS="${LORE_TUI_BUILD_TAGS:-}"
+  if _ghostty_missing=$(tui_ghostty_preflight "$LORE_REPO_DIR/tui"); then
+    if [ -n "$TUI_BUILD_TAGS" ]; then
+      info "Building TUI (-tags $TUI_BUILD_TAGS)"
+    else
+      info "Building TUI"
+    fi
+    if ! $DRY_RUN; then
+      (cd "$LORE_REPO_DIR/tui" && CGO_ENABLED=1 \
+        PKG_CONFIG="$(tui_ghostty_pkg_config_shim "$LORE_REPO_DIR/tui")" \
+        go build ${TUI_BUILD_TAGS:+-tags "$TUI_BUILD_TAGS"} -o "$HOME/.local/bin/lore-tui" .)
+    else
+      echo "  [dry-run] (cd $LORE_REPO_DIR/tui && go build${TUI_BUILD_TAGS:+ -tags $TUI_BUILD_TAGS} -o ~/.local/bin/lore-tui .)"
+    fi
   else
-    echo "  [dry-run] (cd $LORE_REPO_DIR/tui && go build -o ~/.local/bin/lore-tui .)"
+    info "Skipping TUI build — $_ghostty_missing"
   fi
+  unset _ghostty_missing
 else
   info "Skipping TUI build — go not found on PATH"
 fi

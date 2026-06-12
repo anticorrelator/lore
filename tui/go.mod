@@ -1,21 +1,25 @@
 module github.com/anticorrelator/lore/tui
 
-go 1.25.0
+go 1.26.0
+
+// go1.26.0's darwin/arm64 linker segfaults (gensymlate) when externally
+// linking the race-instrumented root test binary against the vendored
+// libghostty archive; fixed in go1.26.4.
+toolchain go1.26.4
 
 require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.7
 	charm.land/lipgloss/v2 v2.0.3
 	github.com/atotto/clipboard v0.1.4
-	github.com/charmbracelet/x/vt v0.0.0-20260608090822-c3ad58c6c9e5
 	github.com/creack/pty v1.1.24
+	go.mitchellh.com/libghostty v0.0.0-20260528200934-790a3ff6e9f6
 )
 
 require (
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260525132238-948f4557a654 // indirect
 	github.com/charmbracelet/x/ansi v0.11.7 // indirect
-	github.com/charmbracelet/x/exp/ordered v0.1.0 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect

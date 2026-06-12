@@ -2224,3 +2224,51 @@ init_followups_dir() {
     mkdir -p "$followups_dir"
   fi
 }
+
+# --- TUI ghostty-backend build helpers ---
+# The TUI's libghostty terminal backend links a vendored SIMD-off static
+# archive via cgo, so every TUI build needs a C compiler and the
+# per-platform archive under tui/internal/work/libghostty/lib/ in addition
+# to the go toolchain. install.sh and `lore rebuild` use these helpers to
+# turn a missing requirement into an actionable skip/error instead of a
+# raw cgo failure.
+
+# tui_ghostty_vendor_dir <tui_dir>
+# Root of the vendored libghostty-vt headers/archives/manifest.
+tui_ghostty_vendor_dir() {
+  printf '%s/internal/work/libghostty\n' "$1"
+}
+
+# tui_ghostty_pkg_config_shim <tui_dir>
+# pkg-config replacement satisfying go.mitchellh.com/libghostty's
+# `#cgo pkg-config: libghostty-vt-static` directive from the vendored
+# headers. Export as PKG_CONFIG for TUI builds.
+tui_ghostty_pkg_config_shim() {
+  printf '%s/pkg-config-shim.sh\n' "$(tui_ghostty_vendor_dir "$1")"
+}
+
+# tui_ghostty_preflight <tui_dir>
+# Verify a TUI build can compile and link: a C compiler on PATH and the
+# vendored static archive for the native platform. Prints the first
+# unmet requirement (with the action to fix it) and returns 1; silent
+# success when the build can proceed.
+tui_ghostty_preflight() {
+  local tui_dir="$1"
+  local vendor_dir
+  vendor_dir=$(tui_ghostty_vendor_dir "$tui_dir")
+  if ! command -v cc >/dev/null 2>&1 \
+    && ! command -v clang >/dev/null 2>&1 \
+    && ! command -v gcc >/dev/null 2>&1; then
+    echo "the TUI's libghostty terminal backend needs a C compiler (cc/clang/gcc) and none was found on PATH. Install Xcode Command Line Tools (xcode-select --install) on macOS or gcc/clang via your package manager, then re-run."
+    return 1
+  fi
+  local goos goarch
+  goos=$(go env GOOS 2>/dev/null || true)
+  goarch=$(go env GOARCH 2>/dev/null || true)
+  local archive="$vendor_dir/lib/${goos}_${goarch}/libghostty-vt.a"
+  if [[ ! -f "$archive" ]]; then
+    echo "no vendored libghostty-vt static archive for ${goos}/${goarch} (expected at $archive). See $vendor_dir/MANIFEST.json for the pinned build recipe."
+    return 1
+  fi
+  return 0
+}

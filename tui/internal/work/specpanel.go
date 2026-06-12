@@ -13,7 +13,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
@@ -102,103 +101,11 @@ type TerminalTerminateMsg struct {
 	Slug string
 }
 
-const maxScrollBufLines = 5000
-
 // writeCrashLog writes a panic stack trace to a temp file for post-mortem debugging.
 func writeCrashLog(label string, r interface{}) {
 	crashLog := filepath.Join(os.TempDir(), "lore-tui-crash.log")
 	stack := fmt.Sprintf("panic in %s: %v\n\n%s", label, r, debug.Stack())
 	_ = os.WriteFile(crashLog, []byte(stack), 0644)
-}
-
-// readScreenLines reads the current emulator screen as plain text lines,
-// one string per row, with trailing spaces trimmed.
-func readScreenLines(emu *vt.Emulator) []string {
-	h := emu.Height()
-	w := emu.Width()
-	lines := make([]string, h)
-	for y := 0; y < h; y++ {
-		var b strings.Builder
-		for x := 0; x < w; x++ {
-			cell := emu.CellAt(x, y)
-			if cell == nil || cell.Width == 0 {
-				// Zero-width cells are placeholders for wide chars — skip.
-				continue
-			}
-			b.WriteString(cell.Content)
-		}
-		lines[y] = strings.TrimRight(b.String(), " ")
-	}
-	return lines
-}
-
-// safeReadScreenLines wraps readScreenLines with panic recovery to guard
-// against vt emulator bugs (e.g. CellAt on corrupt state).
-func safeReadScreenLines(emu *vt.Emulator) (lines []string) {
-	defer func() {
-		if r := recover(); r != nil {
-			lines = nil
-		}
-	}()
-	return readScreenLines(emu)
-}
-
-// safeRender wraps emulator.Render() with panic recovery.
-func safeRender(emu *vt.Emulator) (result string) {
-	defer func() {
-		if r := recover(); r != nil {
-			result = ""
-		}
-	}()
-	return strings.ReplaceAll(emu.Render(), "\r\n", "\n")
-}
-
-// detectScrollUp compares the previous and current screen snapshots to find
-// how many lines scrolled off the top. Returns the smallest k >= 1 where a
-// sufficient number of contiguous lines from the top of cur match the
-// corresponding lines from prev shifted by k, meaning prev[0:k] scrolled off.
-//
-// Uses contiguous-from-top matching rather than requiring all h-k lines to
-// match. This is critical for Ink-based apps (like Claude Code) which
-// re-render the bottom portion of the screen (spinner, streaming token) on
-// every update — only the top portion (committed static content) is stable
-// across writes.
-func detectScrollUp(prev, cur []string) int {
-	h := len(prev)
-	if h == 0 || h != len(cur) {
-		return 0
-	}
-
-	// Minimum contiguous matching lines from the top to accept a scroll.
-	minMatch := 3
-	if h <= 4 {
-		minMatch = 1
-	} else if h <= 8 {
-		minMatch = 2
-	}
-
-	// Allow detecting scrolls up to h - minMatch lines (need at least
-	// minMatch lines remaining to compare).
-	limit := h - minMatch
-	if limit < 1 {
-		limit = 1
-	}
-
-	for k := 1; k <= limit; k++ {
-		// Count contiguous matching lines from the top.
-		matchCount := 0
-		for i := 0; i < h-k; i++ {
-			if cur[i] == prev[i+k] {
-				matchCount++
-			} else {
-				break
-			}
-		}
-		if matchCount >= minMatch {
-			return k
-		}
-	}
-	return 0
 }
 
 // SpecPanelModel is the Bubble Tea model for the interactive spec panel.
@@ -207,26 +114,24 @@ type SpecPanelModel struct {
 	width      int
 	height     int
 	open       bool
-	emulator   *vt.Emulator
 	done       bool
 	hasError   bool
 	ptmx       *os.File
 	cmd        *exec.Cmd
 	outputChan <-chan []byte
 
-	// cachedRender holds the last emulator.Render() output, updated in Update()
+	// backend is the build-tag-selected terminal emulator (x/vt or
+	// libghostty). It is shared mutable state outside the Elm model:
+	// functional model copies all point at the same backend instance.
+	backend *terminalBackend
+
+	// cachedRender holds the last rendered screen, updated in Update()
 	// handlers so that View() can return it in O(1) without re-rendering.
 	cachedRender string
 
-	// scrollBuf accumulates lines that scrolled off the top of the emulator
-	// screen, detected by diffing screen snapshots between writes.
-	// scrollOffset is lines from the bottom of the virtual document (0 = live view).
-	scrollBuf    []string
+	// scrollOffset is lines from the bottom of the terminal document
+	// (scrollback + screen); 0 = live view.
 	scrollOffset int
-
-	// prevScreen holds the screen content (one string per row) after the
-	// last emulator write. Used to detect scrolling via screen-diff.
-	prevScreen []string
 
 	// lastOutputTime records when the last TerminalOutputMsg was received.
 	// Used for quiescence detection — if no output arrives for a threshold
@@ -238,11 +143,6 @@ type SpecPanelModel struct {
 	// the subprocess is likely waiting for user input.
 	needsInput bool
 
-	// stopDrain signals the emulator response drain goroutine to exit.
-	stopDrain chan struct{}
-	// ptmxCh sends the PTY master to the drain goroutine for response forwarding.
-	ptmxCh chan *os.File
-
 	// lastEscTime records when an Esc was last forwarded to the PTY. A second
 	// Esc arriving within escDetachWindow with no intervening non-Esc KeyMsg
 	// is interpreted as the detach gesture instead of being forwarded.
@@ -250,62 +150,13 @@ type SpecPanelModel struct {
 }
 
 // NewSpecPanelModel creates a spec panel model for the given work item slug.
-// A background goroutine drains the emulator's response pipe so that DA1,
-// XTVERSION, and similar query responses don't block emulator.Write().
-// Responses are forwarded to the PTY once attached via SetPtmx.
+// The backend forwards emulator-originated device-query responses (DA1,
+// XTVERSION, DSR) to the PTY once one is attached via SetPtmx.
 func NewSpecPanelModel(slug string) SpecPanelModel {
-	emu := vt.NewEmulator(80, 24)
-	stopDrain := make(chan struct{})
-	ptmxCh := make(chan *os.File, 1)
-	go drainEmulatorResponses(emu, ptmxCh, stopDrain)
 	return SpecPanelModel{
-		slug:      slug,
-		open:      true,
-		emulator:  emu,
-		stopDrain: stopDrain,
-		ptmxCh:    ptmxCh,
-	}
-}
-
-// drainEmulatorResponses reads from the emulator's response pipe and optionally
-// forwards data to the PTY master. Runs until the emulator is closed (Read
-// returns an error). The ptmxCh delivers the PTY master once available.
-func drainEmulatorResponses(emu *vt.Emulator, ptmxCh <-chan *os.File, stop <-chan struct{}) {
-	var ptmx *os.File
-	buf := make([]byte, 4096)
-	// emu.Read blocks on io.Pipe, so run it in a sub-goroutine and
-	// multiplex with the stop channel.
-	type readResult struct {
-		n   int
-		err error
-	}
-	readCh := make(chan readResult, 1)
-	go func() {
-		for {
-			n, err := emu.Read(buf)
-			readCh <- readResult{n, err}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	for {
-		select {
-		case <-stop:
-			emu.Close() // unblocks the Read goroutine
-			return
-		case f := <-ptmxCh:
-			ptmx = f
-		case r := <-readCh:
-			if r.n > 0 && ptmx != nil {
-				data := make([]byte, r.n)
-				copy(data, buf[:r.n])
-				ptmx.Write(data) //nolint:errcheck
-			}
-			if r.err != nil {
-				return
-			}
-		}
+		slug:    slug,
+		open:    true,
+		backend: newTerminalBackend(80, 24),
 	}
 }
 
@@ -346,25 +197,21 @@ func (m SpecPanelModel) OutputChan() <-chan []byte {
 }
 
 // SetPtmx stores the PTY master, command, and output channel after process launch.
-// Also notifies the drain goroutine so emulator responses are forwarded to the PTY.
-// Returns the updated model (value semantics).
+// Also attaches the PTY to the backend so emulator-originated query responses
+// are forwarded to it. Returns the updated model (value semantics).
 func (m SpecPanelModel) SetPtmx(ptmx *os.File, cmd *exec.Cmd, output <-chan []byte) SpecPanelModel {
 	m.ptmx = ptmx
 	m.cmd = cmd
 	m.outputChan = output
-	if m.ptmxCh != nil && ptmx != nil {
-		select {
-		case m.ptmxCh <- ptmx:
-		default:
-		}
+	if m.backend != nil && ptmx != nil {
+		m.backend.setPtyWriter(ptmx)
 	}
 	return m
 }
 
-// Cleanup closes the PTY master, kills the subprocess, stops the emulator
-// response drain goroutine, and closes the emulator. Reaps the subprocess in
-// a background goroutine so the caller is never blocked.
-// Safe to call multiple times (nil checks throughout).
+// Cleanup closes the PTY master, kills the subprocess, and closes the terminal
+// backend. Reaps the subprocess in a background goroutine so the caller is
+// never blocked. Safe to call multiple times (the backend close is idempotent).
 func (m SpecPanelModel) Cleanup() SpecPanelModel {
 	if m.ptmx != nil {
 		m.ptmx.Close()
@@ -378,12 +225,8 @@ func (m SpecPanelModel) Cleanup() SpecPanelModel {
 		}
 		go cmd.Wait() // reap without blocking the event loop
 	}
-	if m.stopDrain != nil {
-		close(m.stopDrain)
-		m.stopDrain = nil
-	}
-	if m.emulator != nil {
-		m.emulator.Close()
+	if m.backend != nil {
+		m.backend.close()
 	}
 	return m
 }
@@ -392,10 +235,13 @@ func (m SpecPanelModel) Init() tea.Cmd {
 	return nil
 }
 
-// totalLines returns the total number of lines in the virtual document
+// totalLines returns the total number of lines in the terminal document
 // (scrollback history + current screen).
 func (m SpecPanelModel) totalLines() int {
-	return len(m.scrollBuf) + len(m.prevScreen)
+	if m.backend == nil {
+		return 0
+	}
+	return m.backend.totalLines()
 }
 
 func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
@@ -409,12 +255,10 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 		m.ptmx = msg.Ptmx
 		m.cmd = msg.Cmd
 		m.outputChan = msg.Output
-		// Notify drain goroutine so it can forward emulator responses to the PTY.
-		if m.ptmxCh != nil && msg.Ptmx != nil {
-			select {
-			case m.ptmxCh <- msg.Ptmx:
-			default:
-			}
+		// Attach the PTY to the backend so emulator-originated query
+		// responses are forwarded to the subprocess.
+		if m.backend != nil && msg.Ptmx != nil {
+			m.backend.setPtyWriter(msg.Ptmx)
 		}
 		return m, tea.Batch(
 			PollTerminalCmd(m.slug, m.outputChan),
@@ -422,10 +266,8 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 		)
 
 	case TerminalOutputMsg:
-		func() {
-			defer func() { recover() }() // guard against vt emulator panics
-			m.emulator.Write(msg.Data)
-		}()
+		prevTotal := m.totalLines()
+		m.backend.write(msg.Data)
 
 		// Track output timing for quiescence detection.
 		m.lastOutputTime = time.Now()
@@ -438,33 +280,12 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 			})
 		}
 
-		// Snapshot current screen and detect scrolled-off lines.
-		curScreen := safeReadScreenLines(m.emulator)
-		if m.prevScreen != nil {
-			k := detectScrollUp(m.prevScreen, curScreen)
-			if k > 0 {
-				for i := 0; i < k; i++ {
-					m.scrollBuf = append(m.scrollBuf, m.prevScreen[i])
-				}
-				if m.scrollOffset > 0 {
-					m.scrollOffset += k
-				}
-			}
-		}
-		m.prevScreen = curScreen
-
-		// Trim scrollback buffer to cap.
-		if len(m.scrollBuf) > maxScrollBufLines {
-			trimCount := len(m.scrollBuf) - maxScrollBufLines
-			m.scrollBuf = m.scrollBuf[trimCount:]
-			m.scrollOffset -= trimCount
-			if m.scrollOffset < 0 {
-				m.scrollOffset = 0
-			}
-		}
-
-		// Clamp scroll offset.
+		// While scrolled into history, keep the same content visible as the
+		// document grows, then clamp to the document size.
 		if m.scrollOffset > 0 {
+			if grown := m.totalLines() - prevTotal; grown > 0 {
+				m.scrollOffset += grown
+			}
 			visH := m.height
 			if visH < 1 {
 				visH = 1
@@ -478,7 +299,7 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 			}
 		}
 
-		m.cachedRender = safeRender(m.emulator)
+		m.cachedRender = m.backend.renderScreen()
 		if len(cmds) > 0 {
 			return m, tea.Batch(cmds...)
 		}
@@ -535,27 +356,19 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 		if vpHeight < 1 {
 			vpHeight = 1
 		}
-		m.emulator.Resize(vpWidth, vpHeight)
-		// Invalidate prevScreen — height changed, screen content is reflowed.
-		m.prevScreen = nil
-		m.cachedRender = safeRender(m.emulator)
+		m.backend.resize(vpWidth, vpHeight)
+		m.cachedRender = m.backend.renderScreen()
 		return m, nil
 
 	case StreamCompleteMsg:
 		m.done = true
-		// Capture final screen state so it's available for scrollback viewing.
-		m.prevScreen = safeReadScreenLines(m.emulator)
 		return m, nil
 
 	case StreamErrorMsg:
 		m.hasError = true
 		m.done = true
-		func() {
-			defer func() { recover() }()
-			m.emulator.Write([]byte(fmt.Sprintf("\n[error] %v\n", msg.Err)))
-		}()
-		m.prevScreen = safeReadScreenLines(m.emulator)
-		m.cachedRender = safeRender(m.emulator)
+		m.backend.write([]byte(fmt.Sprintf("\r\n[error] %v\r\n", msg.Err)))
+		m.cachedRender = m.backend.renderScreen()
 		return m, nil
 
 	case tea.PasteMsg:
@@ -668,7 +481,8 @@ func (m SpecPanelModel) View() (result string) {
 			result = fmt.Sprintf("[view panic: %v]", r)
 		}
 	}()
-	// Scrollback view: render from the virtual document (scrollBuf + current screen).
+	// Scrollback view: render the requested window of the terminal document
+	// (native scrollback + current screen) through the backend.
 	if m.scrollOffset > 0 && m.totalLines() > 0 {
 		visH := m.height
 		if visH < 1 {
@@ -691,16 +505,8 @@ func (m SpecPanelModel) View() (result string) {
 		}
 
 		var lines []string
-		sbLen := len(m.scrollBuf)
-		for i := startIdx; i < endIdx; i++ {
-			if i < sbLen {
-				lines = append(lines, "  "+m.scrollBuf[i])
-			} else {
-				screenIdx := i - sbLen
-				if m.prevScreen != nil && screenIdx < len(m.prevScreen) {
-					lines = append(lines, "  "+m.prevScreen[screenIdx])
-				}
-			}
+		for _, ln := range m.backend.readScrollback(startIdx, endIdx) {
+			lines = append(lines, "  "+ln)
 		}
 		// Pad content area then append indicator.
 		for len(lines) < contentH {

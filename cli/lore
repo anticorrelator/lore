@@ -1902,8 +1902,24 @@ case "$1" in
       echo "Error: tui/ directory not found at $TUI_DIR" >&2
       exit 1
     fi
-    echo "Building lore-tui..."
-    (cd "$TUI_DIR" && go build -o "$HOME/.local/bin/lore-tui" .)
+    # The TUI links the vendored libghostty-vt static archive via cgo, so
+    # the build needs a C compiler and the per-platform archive;
+    # tui_ghostty_preflight (lib.sh) names the first missing requirement so
+    # a broken toolchain is a clear error instead of a raw cgo link failure
+    # mid-build.
+    TUI_BUILD_TAGS="${LORE_TUI_BUILD_TAGS:-}"
+    if ! _ghostty_missing=$(tui_ghostty_preflight "$TUI_DIR"); then
+      echo "Error: $_ghostty_missing" >&2
+      exit 1
+    fi
+    if [[ -n "$TUI_BUILD_TAGS" ]]; then
+      echo "Building lore-tui (-tags $TUI_BUILD_TAGS)..."
+    else
+      echo "Building lore-tui..."
+    fi
+    (cd "$TUI_DIR" && CGO_ENABLED=1 \
+      PKG_CONFIG="$(tui_ghostty_pkg_config_shim "$TUI_DIR")" \
+      go build ${TUI_BUILD_TAGS:+-tags "$TUI_BUILD_TAGS"} -o "$HOME/.local/bin/lore-tui" .)
     echo "Installed: ~/.local/bin/lore-tui"
     ;;
   *)
