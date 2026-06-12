@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 func testLensReview() *LensReview {
@@ -529,6 +531,51 @@ func TestLensFindingsSelectedLensFindingsReadsFromSidecar(t *testing.T) {
 	// testLensReview fixture has findings[1] and [3] pre-selected.
 	if len(selected) != 2 {
 		t.Fatalf("SelectedLensFindings() returned %d findings, want 2", len(selected))
+	}
+}
+
+// The body styles derive from the style.Sev* tokens: same foreground per
+// tier, with blocking dropping the badge's bold. Getter-based assertions per
+// the SGR-aware testing convention (lipgloss v2 always emits ANSI).
+func TestLensFindingsBodyStylesRouteThroughSevTokens(t *testing.T) {
+	if got, want := sevBodyBlocking.GetForeground(), style.SevBlocking.GetForeground(); got != want {
+		t.Errorf("blocking body foreground = %v, want SevBlocking %v", got, want)
+	}
+	if sevBodyBlocking.GetBold() {
+		t.Error("blocking body should drop the badge's bold")
+	}
+	if got, want := sevBodySuggestion.GetForeground(), style.SevSuggestion.GetForeground(); got != want {
+		t.Errorf("suggestion body foreground = %v, want SevSuggestion %v", got, want)
+	}
+	if got, want := sevBodyQuestion.GetForeground(), style.SevQuestion.GetForeground(); got != want {
+		t.Errorf("question body foreground = %v, want SevQuestion %v", got, want)
+	}
+}
+
+// Severity is a color channel carried onto the body prose, not just the
+// badge. Cursor parks on the last finding so the asserted cards render
+// without the selection-background wrapper.
+func TestLensFindingsBodyCarriesSeverityColor(t *testing.T) {
+	m := NewLensFindingsModel("", "", testLensReview())
+	m.SetSize(80, 40)
+	m.cursor = 3
+
+	out := m.View()
+
+	blocking := "      This function call ignores the error return value."
+	if !strings.Contains(out, sevBodyBlocking.Render(blocking)) {
+		t.Error("blocking finding body should render in the blocking severity color")
+	}
+	if strings.Contains(out, style.Dim.Render(blocking)) {
+		t.Error("blocking finding body must not render flat dim")
+	}
+	suggestion := "      This block could be simplified into a helper function."
+	if !strings.Contains(out, sevBodySuggestion.Render(suggestion)) {
+		t.Error("suggestion finding body should render in the suggestion severity color")
+	}
+	question := "      The default timeout is very high."
+	if !strings.Contains(out, sevBodyQuestion.Render(question)) {
+		t.Error("question finding body should render in the question severity color")
 	}
 }
 

@@ -13,6 +13,33 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
+// Chrome styles for the hand-drawn panel compositor, constructed once at
+// package init (render paths must not allocate styles per frame). The docked
+// panels draw the shared style.DockBorder runes inline so titles and key
+// annotations can live in the top border; the focus colors are lifted from
+// style.BorderFocused / style.BorderBlur so the hand-drawn path cannot drift
+// from the lipgloss-rendered modal boxes.
+var (
+	borderFocusedS = lipgloss.NewStyle().Foreground(style.BorderFocused.GetBorderTopForeground())
+	borderBlurS    = lipgloss.NewStyle().Foreground(style.BorderBlur.GetBorderTopForeground())
+
+	// Tab-indicator parts: the active section pops, inactive sections and
+	// separators recede, and each switch key reads one tier above its label.
+	tabActiveS   = lipgloss.NewStyle().Foreground(style.ColorTextBright).Bold(true)
+	tabInactiveS = lipgloss.NewStyle().Foreground(style.ColorChrome)
+	tabKeyS      = lipgloss.NewStyle().Foreground(style.ColorDim)
+	tabSepS      = lipgloss.NewStyle().Foreground(style.ColorChrome)
+
+	// annotDimS is the receding part (keys, separators, unselected states) of
+	// a border annotation; the selected state renders with style.TitleFilter.
+	annotDimS = lipgloss.NewStyle().Foreground(style.ColorChrome)
+
+	// doctorWarnS renders the doctor drift banner: ColorWarn (amber), distinct
+	// from flashErr's red. Drift is a "you should look at this" signal, not an
+	// "action failed" signal.
+	doctorWarnS = lipgloss.NewStyle().Foreground(style.ColorWarn).Bold(true)
+)
+
 // View is the single wrapping point where terminal modes (alt screen, mouse)
 // and keyboard enhancements are applied to the rendered frame. Keep mode flags
 // here — scattering tea.NewView wrappers across call sites risks silently
@@ -117,35 +144,25 @@ func (m model) viewNoRepo() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 }
 
-// renderTabIndicator renders a full-width tab row showing "work (N) · follow-ups (N)".
-// The active tab is highlighted; the inactive tab is dimmed. Width is the total line width.
-// Only the key to switch to the inactive view is shown (f when in work view, w when in follow-ups view).
+// renderTabIndicator renders a full-width section row showing
+// "work (N) · follow-ups (N) · settlement (N)". The active section is
+// highlighted; every other section is prefixed with the key that switches to
+// it (w / f / t). The keys are routed in update.go and mirrored in the status
+// bar and help modal — do not display a key here without all three.
 func renderTabIndicator(activeTab appState, workCount, followupCount, settlementCount, width int) string {
-	activeS := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
-	inactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	hintS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-
-	var workS, followupS, settlementS lipgloss.Style
-	var hint string
-	switch activeTab {
-	case stateFollowUps:
-		workS, followupS, settlementS = inactiveS, activeS, inactiveS
-		hint = "w  "
-	case stateSettlement:
-		workS, followupS, settlementS = inactiveS, inactiveS, activeS
-		hint = "w/f"
-	default:
-		workS, followupS, settlementS = activeS, inactiveS, inactiveS
-		hint = "f  "
+	section := func(key, label string, count int, active bool) string {
+		text := fmt.Sprintf("%s (%d)", label, count)
+		if active {
+			return tabActiveS.Render(text)
+		}
+		return tabKeyS.Render(key+" ") + tabInactiveS.Render(text)
 	}
+	sep := tabSepS.Render(" · ")
 
-	workLabel := fmt.Sprintf("work (%d)", workCount)
-	followupLabel := fmt.Sprintf("follow-ups (%d)", followupCount)
-	settlementLabel := fmt.Sprintf("settlement (%d)", settlementCount)
-	sep := sepS.Render(" · ")
-
-	line := "  " + hintS.Render(hint+"  ") + workS.Render(workLabel) + sep + followupS.Render(followupLabel) + sep + settlementS.Render(settlementLabel)
+	line := "  " +
+		section("w", "work", workCount, activeTab != stateFollowUps && activeTab != stateSettlement) + sep +
+		section("f", "follow-ups", followupCount, activeTab == stateFollowUps) + sep +
+		section("t", "settlement", settlementCount, activeTab == stateSettlement)
 	lineW := lipgloss.Width(line)
 	if lineW < width {
 		line += strings.Repeat(" ", width-lineW)
@@ -166,8 +183,7 @@ func (m model) viewSettlement() string {
 	if innerW < 24 {
 		innerW = 24
 	}
-	borderS := lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
-	titleS := style.SectionTitle
+	borderS := borderFocusedS
 	bodyW := innerW - 1 // outer row renderer adds one leading space
 	if bodyW < 1 {
 		bodyW = 1
@@ -179,17 +195,15 @@ func (m model) viewSettlement() string {
 	b.WriteString("\n")
 	// Border annotation: advertise j/k for whichever side of the split has
 	// focus, mirroring the annotation vocabulary used by the other panels.
-	annotKeyS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	annotLabelS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	annotLabel := "queue"
 	if m.focusedPanel == panelRight {
 		annotLabel = "settings"
 	}
-	annot := annotKeyS.Render("j/k  ") + annotLabelS.Render(annotLabel)
+	annot := annotDimS.Render("j/k  ") + style.TitleFilter.Render(annotLabel)
 	annotW := 5 + len(annotLabel) // "j/k  " + label
-	b.WriteString(borderS.Render("┌"))
-	b.WriteString(renderBorderTitleWithAnnot("Settlement", innerW, titleS, borderS, annot, annotW))
-	b.WriteString(borderS.Render("┐"))
+	b.WriteString(borderS.Render(style.DockBorder.TopLeft))
+	b.WriteString(renderBorderTitleWithAnnot(style.TitleName.Render("Settlement"), innerW, borderS, annot, annotW))
+	b.WriteString(borderS.Render(style.DockBorder.TopRight))
 	b.WriteString("\n")
 	for i := 0; i < contentH; i++ {
 		line := ""
@@ -202,14 +216,14 @@ func (m model) viewSettlement() string {
 		} else if lineW < innerW {
 			line += strings.Repeat(" ", innerW-lineW)
 		}
-		b.WriteString(borderS.Render("│"))
+		b.WriteString(borderS.Render(style.DockBorder.Left))
 		b.WriteString(line)
-		b.WriteString(borderS.Render("│"))
+		b.WriteString(borderS.Render(style.DockBorder.Right))
 		b.WriteString("\n")
 	}
-	b.WriteString(borderS.Render("└"))
-	b.WriteString(borderS.Render(strings.Repeat("─", innerW)))
-	b.WriteString(borderS.Render("┘"))
+	b.WriteString(borderS.Render(style.DockBorder.BottomLeft))
+	b.WriteString(borderS.Render(strings.Repeat(style.DockBorder.Bottom, innerW)))
+	b.WriteString(borderS.Render(style.DockBorder.BottomRight))
 	b.WriteString("\n")
 	b.WriteString(m.renderStatusBar(w))
 	return b.String()
@@ -320,30 +334,30 @@ func trimTrailingBlankLines(lines []string) []string {
 }
 
 // renderBorderTitle renders "─ Title ──────────" filling exactly width chars.
-func renderBorderTitle(title string, width int, titleS, borderS lipgloss.Style) string {
-	prefix := borderS.Render("─ ")
-	rendered := titleS.Render(title)
-	usedW := 2 + lipgloss.Width(rendered) // "─ " + title
+// title is pre-rendered (may contain ANSI codes).
+func renderBorderTitle(title string, width int, borderS lipgloss.Style) string {
+	prefix := borderS.Render(style.DockBorder.Top + " ")
+	usedW := 2 + lipgloss.Width(title) // "─ " + title
 	remaining := width - usedW
 	if remaining < 0 {
 		remaining = 0
 	}
-	return prefix + rendered + borderS.Render(strings.Repeat("─", remaining))
+	return prefix + title + borderS.Render(strings.Repeat(style.DockBorder.Top, remaining))
 }
 
 // renderBorderTitleWithAnnot renders "─ Title ─── annot ─" filling exactly width chars.
-// annot is a pre-rendered string (may contain ANSI codes); annotW is its visual width.
-func renderBorderTitleWithAnnot(title string, width int, titleS, borderS lipgloss.Style, annot string, annotW int) string {
-	prefix := borderS.Render("─ ")
-	rendered := titleS.Render(title)
-	usedLeft := 2 + lipgloss.Width(rendered) // "─ " + title
+// title and annot are pre-rendered strings (may contain ANSI codes); annotW is
+// the annotation's visual width.
+func renderBorderTitleWithAnnot(title string, width int, borderS lipgloss.Style, annot string, annotW int) string {
+	prefix := borderS.Render(style.DockBorder.Top + " ")
+	usedLeft := 2 + lipgloss.Width(title) // "─ " + title
 	// Right side: " " + annot + " ─" = annotW + 3 visual chars
 	rightSlot := annotW + 3
 	middle := width - usedLeft - rightSlot
 	if middle < 1 {
 		middle = 1
 	}
-	return prefix + rendered + borderS.Render(strings.Repeat("─", middle)) + borderS.Render(" ") + annot + borderS.Render(" ─")
+	return prefix + title + borderS.Render(strings.Repeat(style.DockBorder.Top, middle)) + borderS.Render(" ") + annot + borderS.Render(" "+style.DockBorder.Top)
 }
 
 // viewSideBySide renders a side-by-side split pane using the entity-neutral paneConfig.
@@ -353,51 +367,32 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 	leftInner := leftPanelWidth
 	rightInner := m.rightPanelWidth()
 
-	activeBorderColor := lipgloss.Color("4")     // blue
-	inactiveBorderColor := lipgloss.Color("238") // dim
-
-	leftBorderColor := inactiveBorderColor
-	rightBorderColor := inactiveBorderColor
+	leftBS := borderBlurS
+	rightBS := borderBlurS
 	if m.focusedPanel == panelLeft {
-		leftBorderColor = activeBorderColor
+		leftBS = borderFocusedS
 	}
 	if m.focusedPanel == panelRight {
-		rightBorderColor = activeBorderColor
+		rightBS = borderFocusedS
 	}
 
-	leftBS := lipgloss.NewStyle().Foreground(leftBorderColor)
-	rightBS := lipgloss.NewStyle().Foreground(rightBorderColor)
-
-	leftTitleFg := lipgloss.Color("7")
-	if m.focusedPanel == panelLeft {
-		leftTitleFg = activeBorderColor
-	}
-	rightTitleFg := lipgloss.Color("7")
-	if m.focusedPanel == panelRight {
-		rightTitleFg = activeBorderColor
-	}
-	leftTitleS := lipgloss.NewStyle().Foreground(leftTitleFg).Bold(m.focusedPanel == panelLeft)
-	rightTitleS := lipgloss.NewStyle().Foreground(rightTitleFg).Bold(m.focusedPanel == panelRight)
-
-	// Truncate detail title to fit the right panel.
+	// Truncate detail title to fit the right panel. Focus is signaled by the
+	// border color alone, so the title renders with TitleName either way.
 	rightTitle := cfg.detailTitle
 	maxTitleW := rightInner - 6
-	if lipgloss.Width(rightTitle) > maxTitleW && maxTitleW > 3 {
-		runes := []rune(rightTitle)
-		rightTitle = string(runes[:maxTitleW-1]) + "…"
+	if maxTitleW > 3 {
+		rightTitle = style.Truncate(rightTitle, maxTitleW)
 	}
+	rightTitleRendered := style.TitleName.Render(rightTitle)
 
 	// Right panel annotation: show "ctrl+t  detail · terminal" when a spec session exists.
 	var rightBorderTitle string
 	if cfg.hasSpecPanel {
-		activeS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-		inactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-		sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 		var detailS, terminalS lipgloss.Style
 		if m.terminalMode {
-			detailS, terminalS = inactiveS, activeS
+			detailS, terminalS = annotDimS, style.TitleFilter
 		} else {
-			detailS, terminalS = activeS, inactiveS
+			detailS, terminalS = style.TitleFilter, annotDimS
 		}
 		termLabel := "terminal"
 		termLabelW := 8
@@ -405,26 +400,26 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 			termLabel = "terminal (done)"
 			termLabelW = 15
 		}
-		modeAnnot := sepS.Render("ctrl+t  ") + detailS.Render("detail") + sepS.Render(" · ") + terminalS.Render(termLabel)
+		modeAnnot := annotDimS.Render("ctrl+t  ") + detailS.Render("detail") + annotDimS.Render(" · ") + terminalS.Render(termLabel)
 		modeAnnotW := 8 + 6 + 3 + termLabelW // "ctrl+t  " + "detail" + " · " + termLabel
-		rightBorderTitle = renderBorderTitleWithAnnot(rightTitle, rightInner, rightTitleS, rightBS, modeAnnot, modeAnnotW)
+		rightBorderTitle = renderBorderTitleWithAnnot(rightTitleRendered, rightInner, rightBS, modeAnnot, modeAnnotW)
 	} else {
-		rightBorderTitle = renderBorderTitle(rightTitle, rightInner, rightTitleS, rightBS)
+		rightBorderTitle = renderBorderTitle(rightTitleRendered, rightInner, rightBS)
 	}
 
-	topRow := leftBS.Render("┌") +
-		renderBorderTitleWithAnnot(cfg.listTitle, leftInner, leftTitleS, leftBS, cfg.filterAnnot, cfg.filterAnnotW) +
-		leftBS.Render("┐") +
-		rightBS.Render("┌") +
+	topRow := leftBS.Render(style.DockBorder.TopLeft) +
+		renderBorderTitleWithAnnot(cfg.listTitle, leftInner, leftBS, cfg.filterAnnot, cfg.filterAnnotW) +
+		leftBS.Render(style.DockBorder.TopRight) +
+		rightBS.Render(style.DockBorder.TopLeft) +
 		rightBorderTitle +
-		rightBS.Render("┐")
+		rightBS.Render(style.DockBorder.TopRight)
 
-	bottomRow := leftBS.Render("└") +
-		leftBS.Render(strings.Repeat("─", leftInner)) +
-		leftBS.Render("┘") +
-		rightBS.Render("└") +
-		rightBS.Render(strings.Repeat("─", rightInner)) +
-		rightBS.Render("┘")
+	bottomRow := leftBS.Render(style.DockBorder.BottomLeft) +
+		leftBS.Render(strings.Repeat(style.DockBorder.Bottom, leftInner)) +
+		leftBS.Render(style.DockBorder.BottomRight) +
+		rightBS.Render(style.DockBorder.BottomLeft) +
+		rightBS.Render(strings.Repeat(style.DockBorder.Bottom, rightInner)) +
+		rightBS.Render(style.DockBorder.BottomRight)
 
 	leftLines := strings.Split(cfg.listView, "\n")
 
@@ -436,8 +431,8 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 		rightLines = strings.Split(cfg.detailView, "\n")
 	}
 
-	leftBorderChar := leftBS.Render("│")
-	rightBorderChar := rightBS.Render("│")
+	leftBorderChar := leftBS.Render(style.DockBorder.Left)
+	rightBorderChar := rightBS.Render(style.DockBorder.Right)
 
 	var b strings.Builder
 	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, m.width))
@@ -497,42 +492,26 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 	bottomH := m.detailPanelHeight()
 	panelW := m.topPanelWidth()
 
-	activeBorderColor := lipgloss.Color("4")     // blue
-	inactiveBorderColor := lipgloss.Color("238") // dim
-
-	topBorderColor := inactiveBorderColor
-	bottomBorderColor := inactiveBorderColor
+	topBS := borderBlurS
+	bottomBS := borderBlurS
 	if m.focusedPanel == panelLeft {
-		topBorderColor = activeBorderColor
+		topBS = borderFocusedS
 	}
 	if m.focusedPanel == panelRight {
-		bottomBorderColor = activeBorderColor
+		bottomBS = borderFocusedS
 	}
 
-	topBS := lipgloss.NewStyle().Foreground(topBorderColor)
-	bottomBS := lipgloss.NewStyle().Foreground(bottomBorderColor)
-
-	topTitleFg := lipgloss.Color("7")
-	if m.focusedPanel == panelLeft {
-		topTitleFg = activeBorderColor
-	}
-	bottomTitleFg := lipgloss.Color("7")
-	if m.focusedPanel == panelRight {
-		bottomTitleFg = activeBorderColor
-	}
-	topTitleS := lipgloss.NewStyle().Foreground(topTitleFg).Bold(m.focusedPanel == panelLeft)
-	bottomTitleS := lipgloss.NewStyle().Foreground(bottomTitleFg).Bold(m.focusedPanel == panelRight)
-
-	// Truncate detail title to fit the bottom panel.
+	// Truncate detail title to fit the bottom panel. Focus is signaled by the
+	// border color alone, so the title renders with TitleName either way.
 	bottomTitle := cfg.detailTitle
 	maxTitleW := panelW - 6
-	if lipgloss.Width(bottomTitle) > maxTitleW && maxTitleW > 3 {
-		runes := []rune(bottomTitle)
-		bottomTitle = string(runes[:maxTitleW-1]) + "…"
+	if maxTitleW > 3 {
+		bottomTitle = style.Truncate(bottomTitle, maxTitleW)
 	}
+	bottomTitleRendered := style.TitleName.Render(bottomTitle)
 
-	topBorderChar := topBS.Render("│")
-	bottomBorderChar := bottomBS.Render("│")
+	topBorderChar := topBS.Render(style.DockBorder.Left)
+	bottomBorderChar := bottomBS.Render(style.DockBorder.Left)
 
 	topLines := strings.Split(cfg.listView, "\n")
 
@@ -558,14 +537,11 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 	// Bottom panel annotation: show "ctrl+t  detail · terminal" when a spec session exists.
 	var bottomBorderTitle string
 	if cfg.hasSpecPanel {
-		activeS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-		inactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-		sepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 		var detailS, terminalS lipgloss.Style
 		if m.terminalMode {
-			detailS, terminalS = inactiveS, activeS
+			detailS, terminalS = annotDimS, style.TitleFilter
 		} else {
-			detailS, terminalS = activeS, inactiveS
+			detailS, terminalS = style.TitleFilter, annotDimS
 		}
 		termLabel := "terminal"
 		termLabelW := 8
@@ -573,11 +549,11 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 			termLabel = "terminal (done)"
 			termLabelW = 15
 		}
-		modeAnnot := sepS.Render("ctrl+t  ") + detailS.Render("detail") + sepS.Render(" · ") + terminalS.Render(termLabel)
+		modeAnnot := annotDimS.Render("ctrl+t  ") + detailS.Render("detail") + annotDimS.Render(" · ") + terminalS.Render(termLabel)
 		modeAnnotW := 8 + 6 + 3 + termLabelW // "ctrl+t  " + "detail" + " · " + termLabel
-		bottomBorderTitle = renderBorderTitleWithAnnot(bottomTitle, panelW, bottomTitleS, bottomBS, modeAnnot, modeAnnotW)
+		bottomBorderTitle = renderBorderTitleWithAnnot(bottomTitleRendered, panelW, bottomBS, modeAnnot, modeAnnotW)
 	} else {
-		bottomBorderTitle = renderBorderTitle(bottomTitle, panelW, bottomTitleS, bottomBS)
+		bottomBorderTitle = renderBorderTitle(bottomTitleRendered, panelW, bottomBS)
 	}
 
 	var b strings.Builder
@@ -585,9 +561,9 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 	b.WriteString("\n")
 
 	// === Top panel (list) ===
-	b.WriteString(topBS.Render("┌"))
-	b.WriteString(renderBorderTitleWithAnnot(cfg.listTitle, panelW, topTitleS, topBS, cfg.filterAnnot, cfg.filterAnnotW))
-	b.WriteString(topBS.Render("┐"))
+	b.WriteString(topBS.Render(style.DockBorder.TopLeft))
+	b.WriteString(renderBorderTitleWithAnnot(cfg.listTitle, panelW, topBS, cfg.filterAnnot, cfg.filterAnnotW))
+	b.WriteString(topBS.Render(style.DockBorder.TopRight))
 	b.WriteString("\n")
 	for i := 0; i < topH; i++ {
 		line := ""
@@ -599,15 +575,15 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 		b.WriteString(topBorderChar)
 		b.WriteString("\n")
 	}
-	b.WriteString(topBS.Render("└"))
-	b.WriteString(topBS.Render(strings.Repeat("─", panelW)))
-	b.WriteString(topBS.Render("┘"))
+	b.WriteString(topBS.Render(style.DockBorder.BottomLeft))
+	b.WriteString(topBS.Render(strings.Repeat(style.DockBorder.Bottom, panelW)))
+	b.WriteString(topBS.Render(style.DockBorder.BottomRight))
 	b.WriteString("\n")
 
 	// === Bottom panel (detail or terminal) ===
-	b.WriteString(bottomBS.Render("┌"))
+	b.WriteString(bottomBS.Render(style.DockBorder.TopLeft))
 	b.WriteString(bottomBorderTitle)
-	b.WriteString(bottomBS.Render("┐"))
+	b.WriteString(bottomBS.Render(style.DockBorder.TopRight))
 	b.WriteString("\n")
 	for i := 0; i < bottomH; i++ {
 		var content string
@@ -625,9 +601,9 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 		b.WriteString(bottomBorderChar)
 		b.WriteString("\n")
 	}
-	b.WriteString(bottomBS.Render("└"))
-	b.WriteString(bottomBS.Render(strings.Repeat("─", panelW)))
-	b.WriteString(bottomBS.Render("┘"))
+	b.WriteString(bottomBS.Render(style.DockBorder.BottomLeft))
+	b.WriteString(bottomBS.Render(strings.Repeat(style.DockBorder.Bottom, panelW)))
+	b.WriteString(bottomBS.Render(style.DockBorder.BottomRight))
 	b.WriteString("\n")
 
 	b.WriteString(m.renderStatusBar(m.width))
@@ -690,6 +666,8 @@ func (m model) renderStatusBar(width int) string {
 				hint("Enter", "open"),
 				hint("s", "spec"),
 				hint("c", "chat"),
+				hint("f", "follow-ups"),
+				hint("t", "settlement"),
 				hint("K", "knowledge"),
 				hint("S", "settings"),
 				hint("q", "quit"),
@@ -754,6 +732,7 @@ func (m model) renderStatusBar(width int) string {
 				hint("A", "dismiss"),
 				hint("D", "delete"),
 				hint("w", "work list"),
+				hint("t", "settlement"),
 				hint("Esc", "exit"),
 				hint("?", "help"),
 			}
@@ -814,10 +793,7 @@ func (m model) renderStatusBar(width int) string {
 	}
 
 	if m.doctorBanner != "" {
-		// Color 3 = yellow/amber — distinct from flashErr's red. Drift is a
-		// "you should look at this" signal, not an "action failed" signal.
-		warnS := lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
-		bar := "  " + warnS.Render(m.doctorBanner)
+		bar := "  " + doctorWarnS.Render(m.doctorBanner)
 		barW := lipgloss.Width(bar)
 		if barW < width {
 			bar += strings.Repeat(" ", width-barW)

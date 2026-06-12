@@ -15,28 +15,26 @@ const modalInnerW = 58
 
 // modalStyles returns the shared style set used by all modals.
 type modalStyleSet struct {
-	border lipgloss.Style
-	title  lipgloss.Style
-	dim    lipgloss.Style
-	key    lipgloss.Style
-	sep    lipgloss.Style
+	title lipgloss.Style
+	dim   lipgloss.Style
+	key   lipgloss.Style
+	sep   lipgloss.Style
 }
 
-// modalStyles is allocated once at package init; border is modal-local
-// chrome, the rest alias the shared primitives.
+// modalStyles is allocated once at package init; every field aliases the
+// shared primitives (modal box chrome comes from style.BorderFocused).
 var modalStyles = newModalStyles()
 
 func newModalStyles() modalStyleSet {
 	return modalStyleSet{
-		border: lipgloss.NewStyle().Foreground(lipgloss.Color("4")),
-		title:  style.SectionTitle,
-		dim:    style.Dim,
-		key:    style.KeyHint,
-		sep:    style.Separator,
+		title: style.SectionTitle,
+		dim:   style.Dim,
+		key:   style.KeyHint,
+		sep:   style.Separator,
 	}
 }
 
-// buildModalBox wraps title+body in a rounded blue border box at modalInnerW width.
+// buildModalBox wraps title+body in the shared focused border box at modalInnerW width.
 func buildModalBox(s modalStyleSet, title, body string) string {
 	return buildModalBoxWidth(s, title, body, modalInnerW)
 }
@@ -45,9 +43,7 @@ func buildModalBox(s modalStyleSet, title, body string) string {
 // uses this to span more of the terminal so long harness blocks don't wrap;
 // other modals stick with the buildModalBox default at modalInnerW.
 func buildModalBoxWidth(s modalStyleSet, title, body string, width int) string {
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(s.border.GetForeground()).
+	return style.BorderFocused.
 		Width(width).
 		Render(s.title.Render(title) + "\n" + body)
 }
@@ -77,9 +73,9 @@ func newModalTextarea() textarea.Model {
 func (m model) renderSpecConfirmModal() string {
 	s := modalStyles
 
-	inputBox := lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("238")).
+	// Nested input keeps the one DockBorder shape and recedes via the dim
+	// blur border.
+	inputBox := style.BorderBlur.
 		Width(modalInnerW - 2).
 		Render(m.sessionConfirmInput.View())
 	hints := s.key.Render("Enter") + " " + s.dim.Render("start") +
@@ -117,9 +113,7 @@ func (m model) renderSpecConfirmModal() string {
 // renderAIModal shows a centered modal for the AI work-item creation prompt.
 func (m model) renderAIModal() string {
 	s := modalStyles
-	inputBox := lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("238")).
+	inputBox := style.BorderBlur.
 		Width(modalInnerW - 2).
 		Render(m.aiInput.View())
 	hints := s.key.Render("Enter") + " " + s.dim.Render("run") +
@@ -194,6 +188,8 @@ func helpContent() string {
 		row("A", "dismiss from list") + "\n" +
 		row("D", "delete from list") + "\n" +
 		row("c", "chat about follow-up") + "\n" +
+		row("w", "work list") + "\n" +
+		row("t", "settlement panel") + "\n" +
 		row("Esc", "exit follow-ups") + "\n" +
 		"\n" +
 		sectionS.Render("Triage Tab") + "\n" +
@@ -219,6 +215,7 @@ func helpContent() string {
 		row("D", "delete") + "\n" +
 		row("ctrl+a", "toggle archived") + "\n" +
 		row("K", "knowledge browser") + "\n" +
+		row("f", "follow-ups") + "\n" +
 		row("t", "settlement panel") + "\n" +
 		"\n" +
 		sectionS.Render("Settlement") + "\n" +
@@ -276,9 +273,7 @@ func (m model) renderHelpModal() string {
 	if !m.helpViewport.AtTop() || !m.helpViewport.AtBottom() {
 		footer = "  j/k scroll  ·  g/G top/bottom  ·  ? or Esc to close"
 	}
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(s.border.GetForeground()).
+	box := style.BorderFocused.
 		Padding(0, 1).
 		Render(s.title.Render("Keyboard Shortcuts") + "\n\n" + m.helpViewport.View() + "\n\n" +
 			s.dim.Render(footer))

@@ -37,6 +37,22 @@ func WriteLensSidecarCmd(knowledgeDir, followupID string, review *LensReview) te
 	}
 }
 
+// Body prose carries the finding's severity color — severity is a color
+// channel, not just a badge. Blocking drops the badge's bold so multi-line
+// bodies stay readable. Hoisted so View never allocates these per frame.
+var (
+	sevBodyBlocking   = style.SevBlocking.Bold(false)
+	sevBodySuggestion = style.SevSuggestion
+	sevBodyQuestion   = style.SevQuestion
+)
+
+// Card chrome styles, hoisted so View never allocates per frame.
+var (
+	lensSelectedBg  = lipgloss.NewStyle().Background(style.ColorSelectionBg).Bold(true)
+	lensPathStyle   = lipgloss.NewStyle().Foreground(style.ColorMetaKey)
+	lensActionStyle = lipgloss.NewStyle().Foreground(style.ColorAccent)
+)
+
 // LensFindingsModel is the Bubble Tea model for lens review findings.
 // It renders finding cards with cursor navigation,
 // following the budget-based windowing pattern from ReviewCardsModel.
@@ -260,8 +276,8 @@ func (m LensFindingsModel) View() string {
 	}
 
 	dimStyle := style.Dim
-	selectedBg := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
-	pathStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	selectedBg := lensSelectedBg
+	pathStyle := lensPathStyle
 	// groundingStyle derives from the canonical Dim; hoisted here so the
 	// card loop below never allocates per row.
 	groundingStyle := style.Dim.Italic(true)
@@ -323,15 +339,20 @@ func (m LensFindingsModel) View() string {
 			backingIdx := visible[visPos]
 			f := m.findings[backingIdx]
 
-			// Severity coloring
+			// Severity coloring — the badge and the body prose share the
+			// severity color; bodyStyle falls back to dim for unknown tiers.
 			var sevStr string
+			bodyStyle := dimStyle
 			switch f.Severity {
 			case "blocking":
 				sevStr = sevBlocking.Render(f.Severity)
+				bodyStyle = sevBodyBlocking
 			case "suggestion":
 				sevStr = sevSuggestion.Render(f.Severity)
+				bodyStyle = sevBodySuggestion
 			case "question":
 				sevStr = sevQuestion.Render(f.Severity)
+				bodyStyle = sevBodyQuestion
 			default:
 				sevStr = dimStyle.Render(f.Severity)
 			}
@@ -369,7 +390,7 @@ func (m LensFindingsModel) View() string {
 				card.WriteString(selectedBg.Render(line1))
 				card.WriteByte('\n')
 				for _, bl := range bodyLines {
-					card.WriteString(selectedBg.Render(dimStyle.Render("      " + bl)))
+					card.WriteString(selectedBg.Render(bodyStyle.Render("      " + bl)))
 					card.WriteByte('\n')
 				}
 				for _, gl := range groundingLines {
@@ -377,10 +398,9 @@ func (m LensFindingsModel) View() string {
 					card.WriteByte('\n')
 				}
 				if m.actionMenuOpen {
-					accentStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 					menuRow := fmt.Sprintf("  ↳ %s  %s",
-						accentStyle.Render("(c)hat"),
-						accentStyle.Render("(e)dit & chat"),
+						lensActionStyle.Render("(c)hat"),
+						lensActionStyle.Render("(e)dit & chat"),
 					)
 					card.WriteString(menuRow)
 					card.WriteByte('\n')
@@ -389,7 +409,7 @@ func (m LensFindingsModel) View() string {
 				card.WriteString(line1)
 				card.WriteByte('\n')
 				for _, bl := range bodyLines {
-					card.WriteString(dimStyle.Render("      " + bl))
+					card.WriteString(bodyStyle.Render("      " + bl))
 					card.WriteByte('\n')
 				}
 				for _, gl := range groundingLines {

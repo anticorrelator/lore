@@ -10,6 +10,17 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
+// Browser styles, constructed once at package init — render paths must not
+// allocate styles per frame.
+var (
+	treeCategoryStyle  = lipgloss.NewStyle().Bold(true).Foreground(style.ColorMetaKey)
+	treeSelectedStyle  = lipgloss.NewStyle().Background(style.ColorSelectionBg).Bold(true)
+	panelBorderFocused = lipgloss.NewStyle().Foreground(style.ColorAccent)
+	panelBorderBlur    = lipgloss.NewStyle().Foreground(style.ColorChrome)
+	panelTitleFocused  = lipgloss.NewStyle().Foreground(style.ColorAccent).Bold(true)
+	panelTitleBlur     = lipgloss.NewStyle().Foreground(style.ColorText)
+)
+
 // BrowserDismissedMsg is sent when the user exits the knowledge browser.
 type BrowserDismissedMsg struct{}
 
@@ -33,6 +44,7 @@ type treeNode struct {
 	isLast     bool            // entry nodes: last entry in its parent group (└── vs ├──)
 	entry      *KnowledgeEntry // nil for category/subcategory headers
 	label      string          // display text (category name, subcategory name, or entry title)
+	count      int             // category/subcategory nodes: number of entries beneath
 }
 
 // buildTree creates a flat list of treeNode from a manifest.
@@ -92,6 +104,7 @@ func buildTree(manifest *Manifest) []treeNode {
 			depth:      0,
 			folded:     false,
 			label:      cat.Name,
+			count:      len(catEntries),
 		})
 
 		for si, subdir := range subdirOrder {
@@ -119,6 +132,7 @@ func buildTree(manifest *Manifest) []treeNode {
 					folded:     true,
 					isLast:     isLastSubdir,
 					label:      subdir,
+					count:      len(entries),
 				})
 				firstEntry := len(nodes)
 				for _, e := range entries {
@@ -665,12 +679,8 @@ func (m BrowserModel) View() string {
 // ├──/└── tree connectors. Each visible node is exactly one visual line,
 // padded to leftPanelWidth columns.
 func (m BrowserModel) viewTree() string {
-	dimStyle := style.Dim
-	catStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	selStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
-
 	if len(m.nodes) == 0 {
-		line := dimStyle.Render("  No knowledge entries.")
+		line := style.Dim.Render("  No knowledge entries.")
 		return padLine(line, leftPanelWidth)
 	}
 
@@ -694,15 +704,16 @@ func (m BrowserModel) viewTree() string {
 		indent := strings.Repeat("  ", node.depth)
 
 		if node.isCategory {
-			// Category/subcategory: fold indicator + name + "/"
+			// Category/subcategory: fold indicator + name + "/" + entry count
 			indicator := "▼ "
 			if node.folded {
 				indicator = "▶ "
 			}
-			line := catStyle.Render(indent + indicator + node.label + "/")
+			line := treeCategoryStyle.Render(indent+indicator+node.label+"/") +
+				" " + style.TitleCount.Render(fmt.Sprintf("[%d]", node.count))
 			line = padLine(line, leftPanelWidth)
 			if selected {
-				line = selStyle.Render(line)
+				line = treeSelectedStyle.Render(line)
 			}
 			allLines = append(allLines, visualLine{text: line, nodeIndex: i})
 		} else {
@@ -716,7 +727,7 @@ func (m BrowserModel) viewTree() string {
 			line := indent + connector + title
 			line = padLine(line, leftPanelWidth)
 			if selected {
-				line = selStyle.Render(line)
+				line = treeSelectedStyle.Render(line)
 			}
 			allLines = append(allLines, visualLine{text: line, nodeIndex: i})
 		}
@@ -782,32 +793,17 @@ func (m BrowserModel) viewSplit() string {
 	leftInner := leftPanelWidth
 	rightInner := m.rightPanelWidth()
 
-	// Focus-aware border colors
-	activeBorderColor := lipgloss.Color("4")     // blue
-	inactiveBorderColor := lipgloss.Color("238") // dim
-
-	leftBorderColor := inactiveBorderColor
-	rightBorderColor := inactiveBorderColor
+	// Focus-aware border and title styles, selected from the package-level set
+	leftBS, rightBS := panelBorderBlur, panelBorderBlur
+	leftTitleS, rightTitleS := panelTitleBlur, panelTitleBlur
 	if m.focusedPanel == panelLeft {
-		leftBorderColor = activeBorderColor
+		leftBS = panelBorderFocused
+		leftTitleS = panelTitleFocused
 	}
 	if m.focusedPanel == panelRight {
-		rightBorderColor = activeBorderColor
+		rightBS = panelBorderFocused
+		rightTitleS = panelTitleFocused
 	}
-
-	leftBS := lipgloss.NewStyle().Foreground(leftBorderColor)
-	rightBS := lipgloss.NewStyle().Foreground(rightBorderColor)
-
-	leftTitleFg := lipgloss.Color("7")
-	if m.focusedPanel == panelLeft {
-		leftTitleFg = activeBorderColor
-	}
-	rightTitleFg := lipgloss.Color("7")
-	if m.focusedPanel == panelRight {
-		rightTitleFg = activeBorderColor
-	}
-	leftTitleS := lipgloss.NewStyle().Foreground(leftTitleFg).Bold(m.focusedPanel == panelLeft)
-	rightTitleS := lipgloss.NewStyle().Foreground(rightTitleFg).Bold(m.focusedPanel == panelRight)
 
 	// Build panel titles
 	leftTitle := "Knowledge"
@@ -826,20 +822,20 @@ func (m BrowserModel) viewSplit() string {
 	}
 
 	// Top border
-	topRow := leftBS.Render("┌") +
+	topRow := leftBS.Render(style.DockBorder.TopLeft) +
 		renderBrowserBorderTitle(leftTitle, leftInner, leftTitleS, leftBS) +
-		leftBS.Render("┐") +
-		rightBS.Render("┌") +
+		leftBS.Render(style.DockBorder.TopRight) +
+		rightBS.Render(style.DockBorder.TopLeft) +
 		renderBrowserBorderTitle(rightTitle, rightInner, rightTitleS, rightBS) +
-		rightBS.Render("┐")
+		rightBS.Render(style.DockBorder.TopRight)
 
 	// Bottom border
-	bottomRow := leftBS.Render("└") +
-		leftBS.Render(strings.Repeat("─", leftInner)) +
-		leftBS.Render("┘") +
-		rightBS.Render("└") +
-		rightBS.Render(strings.Repeat("─", rightInner)) +
-		rightBS.Render("┘")
+	bottomRow := leftBS.Render(style.DockBorder.BottomLeft) +
+		leftBS.Render(strings.Repeat(style.DockBorder.Bottom, leftInner)) +
+		leftBS.Render(style.DockBorder.BottomRight) +
+		rightBS.Render(style.DockBorder.BottomLeft) +
+		rightBS.Render(strings.Repeat(style.DockBorder.Bottom, rightInner)) +
+		rightBS.Render(style.DockBorder.BottomRight)
 
 	// Get panel content
 	leftView := m.viewTree()
@@ -853,8 +849,8 @@ func (m BrowserModel) viewSplit() string {
 	leftLines := strings.Split(leftView, "\n")
 	rightLines := strings.Split(rightView, "\n")
 
-	leftBorderChar := leftBS.Render("│")
-	rightBorderChar := rightBS.Render("│")
+	leftBorderChar := leftBS.Render(style.DockBorder.Left)
+	rightBorderChar := rightBS.Render(style.DockBorder.Right)
 
 	var b strings.Builder
 	b.WriteString(topRow)
@@ -895,16 +891,16 @@ func (m BrowserModel) viewSplit() string {
 	return b.String()
 }
 
-// renderBrowserBorderTitle renders "─ Title ──────────" filling exactly width chars.
+// renderBrowserBorderTitle renders "<border> Title <border>…" filling exactly width chars.
 func renderBrowserBorderTitle(title string, width int, titleS, borderS lipgloss.Style) string {
-	prefix := borderS.Render("─ ")
+	prefix := borderS.Render(style.DockBorder.Top + " ")
 	rendered := titleS.Render(title)
-	usedW := 2 + lipgloss.Width(rendered) // "─ " + title
+	usedW := 2 + lipgloss.Width(rendered) // border rune + space + title
 	remaining := width - usedW
 	if remaining < 0 {
 		remaining = 0
 	}
-	return prefix + rendered + borderS.Render(strings.Repeat("─", remaining))
+	return prefix + rendered + borderS.Render(strings.Repeat(style.DockBorder.Top, remaining))
 }
 
 // padLine pads or truncates a line to exactly width visual columns.

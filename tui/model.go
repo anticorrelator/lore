@@ -16,6 +16,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/search"
 	"github.com/anticorrelator/lore/tui/internal/settings"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
+	"github.com/anticorrelator/lore/tui/internal/style"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
@@ -103,7 +104,7 @@ func (m model) detailPanelHeight() int {
 }
 
 // rightPanelWidth returns the inner content width for the right (or bottom) panel.
-// In left/right mode: 1(┌) + leftPanelWidth + 1(┐) + 1(┌) + rightPanelWidth + 1(┐) = m.width
+// In left/right mode: 1(╭) + leftPanelWidth + 1(╮) + 1(╭) + rightPanelWidth + 1(╮) = m.width
 // In top/bottom mode: returns topPanelWidth() since both panels span full width.
 func (m model) rightPanelWidth() int {
 	if m.layoutMode == config.LayoutTopBottom {
@@ -302,7 +303,9 @@ type paneConfig struct {
 	specPanel work.SpecPanelModel
 	// hasSpecPanel reports whether specPanel is valid.
 	hasSpecPanel bool
-	// listTitle is the title shown in the list panel border (e.g. "Active (3)").
+	// listTitle is the pre-rendered title shown in the list panel border
+	// (e.g. "Active (3)" composed from the TitleName/TitleCount tokens; may
+	// contain ANSI codes).
 	listTitle string
 	// detailTitle is the title shown in the detail panel border (e.g. item title or "Detail").
 	detailTitle string
@@ -323,10 +326,6 @@ type paneConfig struct {
 // buildPaneConfig constructs a paneConfig from the current model state.
 // It switches on m.state and populates the config from the appropriate sub-models.
 func (m model) buildPaneConfig() paneConfig {
-	tabActiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	tabInactiveS := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	tabSepS := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-
 	listItemCount := len(m.list.Items())
 	fuItemCount := m.followupList.FollowUpCount()
 	settlementCount := m.settlement.Count()
@@ -337,9 +336,9 @@ func (m model) buildPaneConfig() paneConfig {
 		if m.followupList.GetFilterMode() == followup.FilterClosed {
 			modeLabel = "Closed"
 		}
-		listTitle := modeLabel
+		listTitle := style.TitleName.Render(modeLabel)
 		if items := m.followupList.Items(); len(items) > 0 {
-			listTitle = fmt.Sprintf("%s (%d)", modeLabel, len(items))
+			listTitle += " " + style.TitleCount.Render(fmt.Sprintf("(%d)", len(items)))
 		}
 		detailTitle := "Detail"
 		if t := m.followupDetail.Title(); t != "" {
@@ -348,11 +347,11 @@ func (m model) buildPaneConfig() paneConfig {
 
 		var openTabS, closedTabS lipgloss.Style
 		if m.followupList.GetFilterMode() == followup.FilterClosed {
-			openTabS, closedTabS = tabInactiveS, tabActiveS
+			openTabS, closedTabS = annotDimS, style.TitleFilter
 		} else {
-			openTabS, closedTabS = tabActiveS, tabInactiveS
+			openTabS, closedTabS = style.TitleFilter, annotDimS
 		}
-		filterAnnot := tabSepS.Render("ctrl+a  ") + openTabS.Render("open") + tabSepS.Render(" · ") + closedTabS.Render("closed")
+		filterAnnot := annotDimS.Render("ctrl+a  ") + openTabS.Render("open") + annotDimS.Render(" · ") + closedTabS.Render("closed")
 		filterAnnotW := 8 + 4 + 3 + 6 // "ctrl+a  " + "open" + " · " + "closed"
 
 		specPanel, hasSpecPanel := m.currentFollowupPanel()
@@ -375,18 +374,18 @@ func (m model) buildPaneConfig() paneConfig {
 		if m.list.GetFilterMode() == work.FilterArchived {
 			modeLabel = "Archived"
 		}
-		listTitle := modeLabel
+		listTitle := style.TitleName.Render(modeLabel)
 		if items := m.list.Items(); len(items) > 0 {
-			listTitle = fmt.Sprintf("%s (%d)", modeLabel, len(items))
+			listTitle += " " + style.TitleCount.Render(fmt.Sprintf("(%d)", len(items)))
 		}
 
 		var activeTabS, archivedTabS lipgloss.Style
 		if m.list.GetFilterMode() == work.FilterArchived {
-			activeTabS, archivedTabS = tabInactiveS, tabActiveS
+			activeTabS, archivedTabS = annotDimS, style.TitleFilter
 		} else {
-			activeTabS, archivedTabS = tabActiveS, tabInactiveS
+			activeTabS, archivedTabS = style.TitleFilter, annotDimS
 		}
-		filterAnnot := tabSepS.Render("ctrl+a  ") + activeTabS.Render("active") + tabSepS.Render(" · ") + archivedTabS.Render("archived")
+		filterAnnot := annotDimS.Render("ctrl+a  ") + activeTabS.Render("active") + annotDimS.Render(" · ") + archivedTabS.Render("archived")
 		filterAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
 
 		detailTitle := "Detail"

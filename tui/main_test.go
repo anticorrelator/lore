@@ -312,8 +312,9 @@ func TestBuildPaneConfigStateWorkEmptyList(t *testing.T) {
 	if cfg.state != stateWork {
 		t.Errorf("state = %v, want stateWork", cfg.state)
 	}
-	if cfg.listTitle != "Active" {
-		t.Errorf("listTitle = %q, want %q", cfg.listTitle, "Active")
+	// listTitle is pre-rendered with the title tokens; compare the visible text.
+	if got := stripANSI(cfg.listTitle); got != "Active" {
+		t.Errorf("listTitle = %q, want %q", got, "Active")
 	}
 	if cfg.detailTitle != "Detail" {
 		t.Errorf("detailTitle = %q, want %q", cfg.detailTitle, "Detail")
@@ -353,8 +354,9 @@ func TestBuildPaneConfigStateFollowUpsEmptyList(t *testing.T) {
 	if cfg.state != stateFollowUps {
 		t.Errorf("state = %v, want stateFollowUps", cfg.state)
 	}
-	if cfg.listTitle != "Open" {
-		t.Errorf("listTitle = %q, want %q", cfg.listTitle, "Open")
+	// listTitle is pre-rendered with the title tokens; compare the visible text.
+	if got := stripANSI(cfg.listTitle); got != "Open" {
+		t.Errorf("listTitle = %q, want %q", got, "Open")
 	}
 	if cfg.detailTitle != "Detail" {
 		t.Errorf("detailTitle = %q, want %q", cfg.detailTitle, "Detail")
@@ -2501,9 +2503,10 @@ func TestHelpModalKeybindContract(t *testing.T) {
 
 // TestWorkListStatusBarKeybindContract verifies the stateWork panelLeft
 // status-bar hint set: "j/k navigate · Enter open · s spec · c chat ·
-// K knowledge · S settings · q quit · ? help" plus the help-modal-only
-// Work List rows (N, L, ctrl+a) and the "ctrl+a active · archived" border
-// annotation.
+// f follow-ups · t settlement · K knowledge · S settings · q quit · ? help"
+// plus the help-modal-only Work List rows (N, L, ctrl+a) and the
+// "ctrl+a active · archived" border annotation. f and t are also advertised
+// per-section in the tab indicator (TestTabIndicatorAdvertisesSectionKeys).
 func TestWorkListStatusBarKeybindContract(t *testing.T) {
 	t.Run("j/k (navigate)", func(t *testing.T) {
 		m := workContractModel()
@@ -2602,6 +2605,21 @@ func TestWorkListStatusBarKeybindContract(t *testing.T) {
 		nm, _ = updateModel(t, nm, press('a', tea.ModCtrl))
 		if nm.list.GetFilterMode() != work.FilterActive {
 			t.Error("ctrl+a should toggle back to the active filter")
+		}
+	})
+	t.Run("f (follow-ups)", func(t *testing.T) {
+		nm, cmd := updateModel(t, workContractModel(), press('f'))
+		if nm.state != stateFollowUps {
+			t.Error("f should switch to the follow-ups view")
+		}
+		if cmd == nil {
+			t.Error("f should dispatch the follow-up index load")
+		}
+	})
+	t.Run("t (settlement)", func(t *testing.T) {
+		nm, _ := updateModel(t, workContractModel(), press('t'))
+		if nm.state != stateSettlement {
+			t.Error("t should switch to the settlement panel")
 		}
 	})
 }
@@ -2787,6 +2805,12 @@ func TestFollowupListStatusBarKeybindContract(t *testing.T) {
 			t.Error("ctrl+a should switch the follow-up list to the closed filter")
 		}
 	})
+	t.Run("t (settlement)", func(t *testing.T) {
+		nm, _ := updateModel(t, followupContractModel(), press('t'))
+		if nm.state != stateSettlement {
+			t.Error("t should switch to the settlement panel")
+		}
+	})
 }
 
 // TestFollowupDetailStatusBarKeybindContract verifies the stateFollowUps
@@ -2935,6 +2959,87 @@ func TestSettlementBorderAnnotationAdvertisesJK(t *testing.T) {
 	if !strings.Contains(out, "j/k  settings") {
 		t.Errorf("panelRight border annotation should advertise j/k settings:\n%s", out)
 	}
+}
+
+// TestTabIndicatorAdvertisesSectionKeys verifies the tab row prefixes every
+// inactive section with its switch key (w / f / t) and shows no key on the
+// active section. Key dispatch is pinned by the status-bar contract tests;
+// this pins the display side of the three-surface sync.
+func TestTabIndicatorAdvertisesSectionKeys(t *testing.T) {
+	cases := []struct {
+		name    string
+		state   appState
+		want    []string
+		notWant []string
+	}{
+		{"work", stateWork, []string{"work (1)", "f follow-ups (2)", "t settlement (3)"}, []string{"w work"}},
+		{"followups", stateFollowUps, []string{"w work (1)", "t settlement (3)"}, []string{"f follow-ups"}},
+		{"settlement", stateSettlement, []string{"w work (1)", "f follow-ups (2)"}, []string{"t settlement"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := stripANSI(renderTabIndicator(tc.state, 1, 2, 3, 80))
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("tab indicator missing %q:\n%s", want, out)
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if strings.Contains(out, notWant) {
+					t.Errorf("active section must not advertise a switch key %q:\n%s", notWant, out)
+				}
+			}
+		})
+	}
+}
+
+// TestRoundedBordersEverywhere verifies every docked panel and nested modal
+// input renders the one rounded DockBorder shape — no hand-drawn square
+// corners remain in any compositor output.
+func TestRoundedBordersEverywhere(t *testing.T) {
+	assertRounded := func(t *testing.T, out string) {
+		t.Helper()
+		for _, corner := range []string{"╭", "╮", "╰", "╯"} {
+			if !strings.Contains(out, corner) {
+				t.Errorf("output missing rounded corner %q", corner)
+			}
+		}
+		for _, corner := range []string{"┌", "┐", "└", "┘"} {
+			if strings.Contains(out, corner) {
+				t.Errorf("output still contains square corner %q:\n%s", corner, out)
+			}
+		}
+	}
+	t.Run("work side-by-side", func(t *testing.T) {
+		assertRounded(t, stripANSI(workContractModel().viewContent()))
+	})
+	t.Run("work top-bottom", func(t *testing.T) {
+		m := workContractModel()
+		m.layoutMode = config.LayoutTopBottom
+		assertRounded(t, stripANSI(m.viewContent()))
+	})
+	t.Run("settlement", func(t *testing.T) {
+		assertRounded(t, stripANSI(settlementContractModel(t).viewSettlement()))
+	})
+	t.Run("spec confirm modal nested input", func(t *testing.T) {
+		assertRounded(t, stripANSI(specConfirmModel().renderSpecConfirmModal()))
+	})
+	t.Run("ai modal nested input", func(t *testing.T) {
+		m := minimalModel(stateWork, nil, nil)
+		m.width = 100
+		m.height = 40
+		m.aiInput = newModalTextarea()
+		m.aiInputActive = true
+		assertRounded(t, stripANSI(m.renderAIModal()))
+	})
+	t.Run("help modal", func(t *testing.T) {
+		m := minimalModel(stateWork, nil, nil)
+		m.width = 120
+		m.height = 50
+		m.showHelp = true
+		m.sizeHelpViewport()
+		assertRounded(t, stripANSI(m.renderHelpModal()))
+	})
 }
 
 // TestSettlementSelectedClaimBlockFollowsCursor pins the compact selected-claim

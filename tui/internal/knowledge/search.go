@@ -10,6 +10,16 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
+)
+
+// Search panel styles, constructed once at package init — render paths must
+// not allocate styles per frame.
+var (
+	searchTitleStyle    = lipgloss.NewStyle().Bold(true).Foreground(style.ColorAccent)
+	searchSelectedStyle = lipgloss.NewStyle().Background(style.ColorSelectionBg).Bold(true)
+	searchCategoryStyle = lipgloss.NewStyle().Foreground(style.ColorCategory)
 )
 
 // KnowledgeSearchResult represents a single result from `lore search --type knowledge --json`.
@@ -150,15 +160,11 @@ func (m SearchModel) Update(msg tea.Msg) (SearchModel, tea.Cmd) {
 func (m SearchModel) View() string {
 	var b strings.Builder
 
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	selectedStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
-	scoreStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	categoryStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
+	dimStyle := style.Dim
 
 	b.WriteString("\n")
 	b.WriteString("  ")
-	b.WriteString(titleStyle.Render("Search Knowledge"))
+	b.WriteString(searchTitleStyle.Render("Search Knowledge"))
 	b.WriteString("\n\n")
 
 	// Input field
@@ -179,7 +185,13 @@ func (m SearchModel) View() string {
 		b.WriteString(dimStyle.Render("No results found."))
 		b.WriteString("\n")
 	} else if len(m.results) > 0 {
-		maxVisible := m.height - 8
+		// fzf-style match counter: highlighted position / total matches.
+		// Rank is conveyed by result order; raw scores never surface.
+		b.WriteString("  ")
+		b.WriteString(style.TitleCount.Render(fmt.Sprintf("%d/%d", m.cursor+1, len(m.results))))
+		b.WriteString("\n")
+
+		maxVisible := m.height - 9
 		if maxVisible < 3 {
 			maxVisible = len(m.results)
 		}
@@ -202,13 +214,12 @@ func (m SearchModel) View() string {
 				heading = r.FilePath
 			}
 
-			score := scoreStyle.Render(fmt.Sprintf("[%.1f]", r.Score))
-			category := categoryStyle.Render(r.Category)
+			category := searchCategoryStyle.Render(r.Category)
 
-			row := fmt.Sprintf("  %s %s  %s", score, heading, category)
+			row := fmt.Sprintf("  %s  %s", heading, category)
 
 			if i == m.cursor {
-				row = selectedStyle.Render(row)
+				row = searchSelectedStyle.Render(row)
 			}
 
 			b.WriteString(row)

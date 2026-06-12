@@ -94,67 +94,100 @@ func (m Model) View() string {
 		}, bodyW)
 	}
 
-	state := "enabled"
-	if !st.Enabled {
-		state = "disabled"
-	}
+	lines := m.headerRegion(bodyW, s)
+	lines = append(lines, m.queueRegion(bodyW, s)...)
+	lines = append(lines, m.selectedClaimBlock(bodyW, s)...)
 
+	// The host clips the rendered body at the panel height (statusH) without
+	// the panel's knowledge, so each region below must fit its own line
+	// budget — a wrapped verdict that overflows would be cut mid-record at
+	// the clip boundary. The lease block is small and capped, so reserve its
+	// lines first and give the verdict region whatever height remains.
+	leases := leaseRegion(st, bodyW, s)
+	verdictBudget := -1
+	if m.height > 0 {
+		// 2 = the verdict region's own blank separator + rule lines.
+		verdictBudget = m.height - len(lines) - 2 - len(leases)
+		if verdictBudget < 0 {
+			verdictBudget = 0
+		}
+	}
+	lines = append(lines, "", regionRule("Recent verdicts", bodyW, s))
+	lines = append(lines, formatRecentSettled(st, bodyW, verdictBudget, s)...)
+	lines = append(lines, leases...)
+	return wrapLines(lines, bodyW)
+}
+
+// headerRegion renders the compact operational-status dashboard: a labeled
+// rule plus a fixed three-row summary and an optional blocked row. State and
+// placeholder values carry status-ramp colors so "enabled" reads ready,
+// "disabled" demands attention, and default-unset values recede.
+func (m Model) headerRegion(width int, s styleSet) []string {
+	st := m.status
+	state := s.ready.Render("enabled")
+	if !st.Enabled {
+		state = s.attention.Render("disabled")
+	}
 	nextAction := readableNextAction(firstNonEmpty(st.BlockedReason, st.NextAction, InferNextAction(st)))
 	lines := []string{
-		s.heading.Render("Operational status"),
+		regionRule("Operational status", width, s),
 		strings.Join([]string{
 			"state: " + state,
-			"budget: " + stringDefault(st.Usage.BudgetState, "unknown"),
-			"runtime left: " + durationLabel(st.Harness.CapRemaining, st.Harness.CapTotal),
+			"budget: " + orPlaceholder(st.Usage.BudgetState, "unknown", s),
+			"runtime left: " + durationLabel(st.Harness.CapRemaining, st.Harness.CapTotal, s),
 		}, "  |  "),
 		strings.Join([]string{
 			"queue: " + queueLabel(st.Queue),
 			"leases: " + fmt.Sprintf("%d active", st.Harness.ActiveLeases),
 		}, "  |  "),
 		strings.Join([]string{
-			"harness: " + harnessLabel(st.Harness),
+			"harness: " + harnessLabel(st.Harness, s),
 			"next: " + nextAction,
 		}, "  |  "),
 	}
 	if st.BlockedReason != "" {
-		lines = append(lines, "blocked "+st.BlockedReason)
+		lines = append(lines, s.attention.Render("blocked "+st.BlockedReason))
 	}
-	lines = append(lines, "", s.heading.Render("Settlement queue"))
+	return lines
+}
+
+// queueRegion renders the queue preview: a labeled rule, the visible window
+// of queue rows (sized by visibleItemRows against m.height), and an overflow
+// marker for rows beyond the window.
+func (m Model) queueRegion(width int, s styleSet) []string {
+	st := m.status
+	lines := []string{"", regionRule("Settlement queue", width, s)}
 	if len(st.Items) == 0 {
-		lines = append(lines, s.dim.Render("no visible items"))
-	} else {
-		visibleItems := m.visibleItems()
-		for _, item := range visibleItems {
-			line := formatItem(" ", item, bodyW, s)
-			if m.itemIndex(item) == m.cursor {
-				line = s.selected.Render(formatItem(">", item, bodyW, s))
-			}
-			lines = append(lines, line)
-		}
-		if end := m.offset + len(visibleItems); end < len(st.Items) {
-			lines = append(lines, s.dim.Render(fmt.Sprintf("... %d more", len(st.Items)-end)))
-		}
+		return append(lines, s.dim.Render("no visible items"))
 	}
-	lines = append(lines, m.selectedClaimBlock(bodyW, s)...)
-	lines = append(lines, s.heading.Render("Recent verdicts"))
-	// The host clips the rendered body at the panel height (statusH), so the
-	// verdict block must fit the remaining lines or a wrapped verdict would be
-	// cut mid-wrap at the clip boundary. -1 means unbounded (height unknown).
-	verdictBudget := -1
-	if m.height > 0 {
-		verdictBudget = m.height - len(lines)
-		if verdictBudget < 0 {
-			verdictBudget = 0
+	visibleItems := m.visibleItems()
+	for _, item := range visibleItems {
+		line := formatItem(" ", item, width, queueStatusStyle(item.Status))
+		if m.itemIndex(item) == m.cursor {
+			// The selection background owns the row; inner status colors
+			// would reset it mid-line, so the selected row renders unstyled
+			// inside the highlight.
+			line = s.selected.Render(formatItem(">", item, width, noStyle))
 		}
+		lines = append(lines, line)
 	}
-	lines = append(lines, formatRecentSettled(st, bodyW, verdictBudget, s)...)
-	if len(st.Leases) > 0 {
-		lines = append(lines, s.heading.Render("Active leases"))
-		for _, lease := range compactLeases(st.Leases) {
-			lines = append(lines, formatLease(lease, bodyW, s))
-		}
+	if end := m.offset + len(visibleItems); end < len(st.Items) {
+		lines = append(lines, s.dim.Render(fmt.Sprintf("... %d more", len(st.Items)-end)))
 	}
-	return wrapLines(lines, bodyW)
+	return lines
+}
+
+// leaseRegion renders the active-lease block (labeled rule plus at most two
+// leases). Nil when no leases are held so the empty section is omitted.
+func leaseRegion(st Status, width int, s styleSet) []string {
+	if len(st.Leases) == 0 {
+		return nil
+	}
+	lines := []string{"", regionRule("Active leases", width, s)}
+	for _, lease := range compactLeases(st.Leases) {
+		lines = append(lines, formatLease(lease, width, s))
+	}
+	return lines
 }
 
 func (m *Model) clamp() {
@@ -224,7 +257,7 @@ func (m Model) selectedClaimBlock(width int, s styleSet) []string {
 		block = block[:maxSelectedClaimLines]
 	}
 	out := make([]string, 0, len(block)+2)
-	out = append(out, "", s.heading.Render("Selected claim"))
+	out = append(out, "", regionRule("Selected claim", width, s))
 	out = append(out, block...)
 	return out
 }
@@ -251,26 +284,92 @@ func visibleItemRows(height int) int {
 }
 
 type styleSet struct {
-	heading  lipgloss.Style
-	dim      lipgloss.Style
-	warn     lipgloss.Style
-	key      lipgloss.Style
-	selected lipgloss.Style
+	heading     lipgloss.Style
+	rule        lipgloss.Style
+	dim         lipgloss.Style
+	warn        lipgloss.Style
+	key         lipgloss.Style
+	selected    lipgloss.Style
+	ready       lipgloss.Style
+	attention   lipgloss.Style
+	placeholder lipgloss.Style
 }
 
-// panelStyles is allocated once at package init; warn and selected are
-// widget-local (no shared primitive carries those values), the rest alias
-// the canonical primitives.
+// panelStyles is allocated once at package init; warn and selected compose
+// widget-local Bold onto the canonical palette roles (no shared *style*
+// primitive carries those compositions), the rest alias the canonical
+// primitives directly.
 var panelStyles = styleSet{
-	heading:  style.SubsectionTitle,
-	dim:      style.Dim,
-	warn:     lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true),
-	key:      style.KeyHint,
-	selected: lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true),
+	heading:     style.SubsectionTitle,
+	rule:        style.SectionRule,
+	dim:         style.Dim,
+	warn:        lipgloss.NewStyle().Foreground(style.ColorWarn).Bold(true),
+	key:         style.KeyHint,
+	selected:    lipgloss.NewStyle().Background(style.ColorSelectionBg).Bold(true),
+	ready:       style.StatusReady,
+	attention:   style.StatusWarn,
+	placeholder: style.StatusDisabled,
 }
+
+// noStyle is the identity style for values that render uncolored; allocated
+// once so render paths never construct styles per frame.
+var noStyle = lipgloss.NewStyle()
 
 func styles() styleSet {
 	return panelStyles
+}
+
+// regionRule renders a section header as a labeled horizontal rule
+// (─ Label ───…) so each panel region reads as a visually distinct block,
+// matching the host's Settings-dock separator idiom.
+func regionRule(label string, width int, s styleSet) string {
+	text := " " + label + " "
+	if width <= lipgloss.Width(text)+2 {
+		return s.heading.Render(label)
+	}
+	return s.rule.Render("─") +
+		s.heading.Render(text) +
+		s.rule.Render(strings.Repeat("─", width-lipgloss.Width(text)-1))
+}
+
+// queueStatusStyle maps a queue-item status onto the shared status ramp;
+// statuses outside the ramp render uncolored.
+func queueStatusStyle(status string) lipgloss.Style {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "ready":
+		return style.StatusReady
+	case "running":
+		return style.StatusActive
+	case "blocked", "failed":
+		return style.StatusError
+	case "completed", "settled":
+		return style.StatusDone
+	}
+	return noStyle
+}
+
+// verdictStyle maps a normalized verdict label (verdictLabel output) onto the
+// shared status ramp; unknown labels render uncolored.
+func verdictStyle(label string) lipgloss.Style {
+	switch label {
+	case "verified":
+		return style.StatusReady
+	case "contradicted", "audit error":
+		return style.StatusError
+	case "unverified", "blocked":
+		return style.StatusWarn
+	}
+	return noStyle
+}
+
+// orPlaceholder returns value when set, otherwise the fallback rendered in
+// the default-unset style so placeholder values never read as configured
+// ones (or as disabled state, which carries the attention color).
+func orPlaceholder(value, fallback string, s styleSet) string {
+	if value != "" {
+		return value
+	}
+	return s.placeholder.Render(fallback)
 }
 
 func row(label, value string) string {
@@ -282,10 +381,10 @@ func queueLabel(q Queue) string {
 		q.Ready, q.Pending, q.Running, q.Total)
 }
 
-func harnessLabel(h Harness) string {
-	selected := stringDefault(h.Selected, "active")
-	mode := stringDefault(h.Mode, "default")
-	return fmt.Sprintf("%s (%s), concurrency %s", selected, mode, intLabel(h.Concurrency))
+func harnessLabel(h Harness, s styleSet) string {
+	selected := orPlaceholder(h.Selected, "active", s)
+	mode := orPlaceholder(h.Mode, "default", s)
+	return fmt.Sprintf("%s (%s), concurrency %s", selected, mode, intLabel(h.Concurrency, s))
 }
 
 func readableNextAction(action string) string {
@@ -320,7 +419,7 @@ func capLabel(remaining, total int) string {
 	return "unlimited"
 }
 
-func durationLabel(remaining, total int) string {
+func durationLabel(remaining, total int, s styleSet) string {
 	format := func(seconds int) string {
 		if seconds%60 == 0 {
 			return fmt.Sprintf("%dm", seconds/60)
@@ -333,7 +432,7 @@ func durationLabel(remaining, total int) string {
 	if remaining > 0 {
 		return format(remaining)
 	}
-	return "unlimited"
+	return s.placeholder.Render("unlimited")
 }
 
 func yesNo(v bool) string {
@@ -343,18 +442,18 @@ func yesNo(v bool) string {
 	return "no"
 }
 
-func intLabel(v int) string {
+func intLabel(v int, s styleSet) string {
 	if v == 0 {
-		return "unlimited"
+		return s.placeholder.Render("unlimited")
 	}
 	return fmt.Sprintf("%d", v)
 }
 
-func formatItem(marker string, item Item, width int, s styleSet) string {
+func formatItem(marker string, item Item, width int, statusS lipgloss.Style) string {
 	claim := firstNonEmpty(item.Claim, item.ClaimID, item.ID, "claim")
 	parts := []string{marker}
 	if item.Status != "" {
-		parts = append(parts, "["+item.Status+"]")
+		parts = append(parts, statusS.Render("["+item.Status+"]"))
 	}
 	parts = append(parts, claim)
 	if item.BlockedReason != "" {
@@ -452,8 +551,8 @@ func formatLastSettled(last *LastSettled, width int, s styleSet) []string {
 	}
 	label := verdictLabel(last)
 	claim := firstNonEmpty(last.Claim, last.ClaimID, last.ID, "claim")
-	prefix := "- " + label + correctionOutcomeSuffix(last.CorrectionOutcome) + "  "
-	return wrapDetail(prefix, claim, width, lipgloss.NewStyle())
+	prefix := "- " + verdictStyle(label).Render(label) + correctionOutcomeSuffix(last.CorrectionOutcome) + "  "
+	return wrapDetail(prefix, claim, width, noStyle)
 }
 
 func correctionOutcomeSuffix(outcome CorrectionOutcome) string {

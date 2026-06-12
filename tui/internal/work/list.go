@@ -285,6 +285,23 @@ func (m ListModel) View() string {
 // panelW is the inner width of the left panel (matches leftPanelWidth in main.go).
 const panelW = 40
 
+// needsInputStyle flags a spec session waiting for user input. ColorAttention
+// rather than StatusWarn: the dot marks an active process needing a human,
+// not a readiness state. Hoisted so render paths never allocate per frame.
+var needsInputStyle = lipgloss.NewStyle().Foreground(style.ColorAttention)
+
+// prMergedStyle keeps GitHub's merged-purple for the PR badge; the status
+// ramp has no merged role, and StatusDone (dim) would make merged PRs read
+// like the dim "--" placeholder for no PR at all.
+var prMergedStyle = lipgloss.NewStyle().Foreground(style.ColorMerged)
+
+// Selected-row styles, hoisted so viewCompact/viewTable never allocate per
+// frame (allocate-once rule, style.go).
+var (
+	titleSelStyle = lipgloss.NewStyle().Background(style.ColorSelectionBg).Bold(true)
+	infoSelStyle  = lipgloss.NewStyle().Background(style.ColorSelectionBg)
+)
+
 // viewCompact renders the compact split-pane list with two lines per item:
 //
 //	Line 1: "> Title"              (bold when selected)
@@ -302,9 +319,6 @@ func (m ListModel) viewCompact() string {
 		}
 		return dimStyle.Render(fmt.Sprintf("  No %s work items.  (ctrl+a to switch)", label))
 	}
-
-	titleSelStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
-	infoSelStyle := lipgloss.NewStyle().Background(lipgloss.Color("237"))
 
 	// Each item occupies 2 lines; compute visible item count accordingly.
 	visibleCount := m.height / 2
@@ -336,7 +350,7 @@ func (m ListModel) viewCompact() string {
 		// External session indicator: dim ◆ when another TUI instance is working on this slug.
 		specGlyph := ""
 		if m.specActiveSlugs[item.Slug] && m.specNeedsInputSlugs[item.Slug] {
-			specGlyph = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("●") + " "
+			specGlyph = needsInputStyle.Render("●") + " "
 		} else if !m.specActiveSlugs[item.Slug] && m.externalActiveSlugs[item.Slug] {
 			specGlyph = style.Dim.Render("◆") + " "
 		}
@@ -371,18 +385,20 @@ func (m ListModel) viewCompact() string {
 	return b.String()
 }
 
-// readinessLabel returns the styled readiness label for a work item ("ready", "needs tasks", "needs spec").
-// For archived items it returns a dim "archived" label.
-func readinessLabel(item WorkItem) (string, string) {
+// readinessLabel returns the readiness label and its status-ramp style for a
+// work item. Archived items use the done style; "needs spec" uses the
+// disabled style (dim italic) so unstarted items read differently from
+// archived ones, which share the same dim foreground.
+func readinessLabel(item WorkItem) (string, lipgloss.Style) {
 	switch {
 	case item.Status == "archived":
-		return "archived", "8"
+		return "archived", style.StatusDone
 	case item.HasTasks:
-		return "ready", "2"
+		return "ready", style.StatusReady
 	case item.HasPlanDoc:
-		return "needs tasks", "3"
+		return "needs tasks", style.StatusWarn
 	default:
-		return "needs spec", "8"
+		return "needs spec", style.StatusDisabled
 	}
 }
 
@@ -398,13 +414,12 @@ func (m ListModel) buildInfoCompact(item WorkItem) string {
 	// When another TUI has the session, show dim "active".
 	if m.specActiveSlugs[item.Slug] {
 		dots := strings.Repeat(".", m.specDots)
-		specS := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-		parts = append(parts, specS.Render("speccing"+dots+strings.Repeat(" ", 3-len(dots))))
+		parts = append(parts, style.StatusActive.Render("speccing"+dots+strings.Repeat(" ", 3-len(dots))))
 	} else if m.externalActiveSlugs[item.Slug] {
 		parts = append(parts, style.Dim.Render("active"))
 	} else {
-		label, color := readinessLabel(item)
-		parts = append(parts, lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(label))
+		label, st := readinessLabel(item)
+		parts = append(parts, st.Render(label))
 	}
 
 	issueStr := "--"
@@ -458,7 +473,7 @@ func (m ListModel) viewFull() string {
 
 	// Styles
 	headerStyle := style.SectionTitle
-	selectedStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
+	selectedStyle := titleSelStyle
 	dimStyle := style.Dim
 
 	// Header
@@ -503,25 +518,24 @@ func (m ListModel) viewFull() string {
 		// Dot column — shows ● (amber) when spec is waiting for input.
 		var dotStr string
 		if m.specNeedsInputSlugs[item.Slug] {
-			dotStr = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("●")
+			dotStr = needsInputStyle.Render("●")
 		} else {
 			dotStr = " "
 		}
 
-		// Readiness label — animated "speccing" when active, or dim "◆ active" for external sessions.
-		var statusLabel string
-		var statusColor string
+		// Readiness label — animated "speccing" when active, or dim "◆ active"
+		// for external sessions. Local speccing wins over external so one slug
+		// never shows conflicting indicators.
+		var status string
 		if m.specActiveSlugs[item.Slug] {
 			dots := strings.Repeat(".", m.specDots)
-			statusLabel = "speccing" + dots + strings.Repeat(" ", 3-len(dots))
-			statusColor = "6" // cyan
+			status = style.StatusActive.Render(style.Truncate("speccing"+dots+strings.Repeat(" ", 3-len(dots)), statusW))
 		} else if m.externalActiveSlugs[item.Slug] {
-			statusLabel = "◆ active"
-			statusColor = "8" // dim
+			status = style.Dim.Render(style.Truncate("◆ active", statusW))
 		} else {
-			statusLabel, statusColor = readinessLabel(item)
+			label, st := readinessLabel(item)
+			status = st.Render(style.Truncate(label, statusW))
 		}
-		status := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Render(style.Truncate(statusLabel, statusW))
 
 		// Issue number
 		issueStr := "--"
@@ -556,9 +570,7 @@ func (m ListModel) prBadge(prField string, width int) string {
 	}
 
 	if !m.prLoaded {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(
-			style.Truncate("...", width),
-		)
+		return style.StatusWarn.Render(style.Truncate("...", width))
 	}
 
 	if m.prStatus == nil {
@@ -579,17 +591,11 @@ func (m ListModel) prBadge(prField string, width int) string {
 		} else if ps.ReviewDecision == "CHANGES_REQUESTED" {
 			badge += " ✗"
 		}
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(
-			style.Truncate(badge, width),
-		)
+		return style.StatusReady.Render(style.Truncate(badge, width))
 	case "MERGED":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Render(
-			style.Truncate(label+" ●", width),
-		)
+		return prMergedStyle.Render(style.Truncate(label+" ●", width))
 	case "CLOSED":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(
-			style.Truncate(label+" ✗", width),
-		)
+		return style.StatusError.Render(style.Truncate(label+" ✗", width))
 	}
 
 	return style.Truncate(label, width)

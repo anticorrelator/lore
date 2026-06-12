@@ -5,7 +5,30 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
+
+// stripANSI removes SGR escape sequences; lipgloss v2 styles output even
+// without a TTY, so plain-substring assertions must run on stripped text.
+func stripANSI(s string) string {
+	var b strings.Builder
+	inEsc := false
+	for _, r := range s {
+		if r == 0x1b {
+			inEsc = true
+			continue
+		}
+		if inEsc {
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 func TestParseStatusToleratesExpectedContract(t *testing.T) {
 	data := []byte(`{
@@ -341,7 +364,7 @@ func TestModelRendersCorrectionOutcomeSuffix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseStatus: %v", err)
 	}
-	view := NewModel().ReplaceStatus(st).SetSize(200, 30).View()
+	view := stripANSI(NewModel().ReplaceStatus(st).SetSize(200, 30).View())
 	if !strings.Contains(view, "contradicted → applied  applied claim text") {
 		t.Fatalf("applied suffix missing, got:\n%s", view)
 	}
@@ -426,7 +449,7 @@ func TestTightVerdictBlockDropsWholeVerdicts(t *testing.T) {
 	}
 
 	// width 44 -> bodyW 40 (each verdict wraps to ~3 lines); height 13 leaves a
-	// 5-line budget after the headings, so only the first verdict fits whole.
+	// 4-line budget after the region rules, so only the first verdict fits whole.
 	view := NewModel().ReplaceStatus(st).SetSize(44, 13).View()
 	idx := strings.Index(view, "Recent verdicts")
 	if idx < 0 {
@@ -462,7 +485,7 @@ func TestModelRendersLastSettledBetweenQueueAndLeases(t *testing.T) {
 		t.Fatalf("ParseStatus: %v", err)
 	}
 
-	view := NewModel().ReplaceStatus(st).SetSize(120, 20).View()
+	view := stripANSI(NewModel().ReplaceStatus(st).SetSize(120, 20).View())
 	queueIdx := strings.Index(view, "Settlement queue")
 	lastIdx := strings.Index(view, "Recent verdicts")
 	leaseIdx := strings.Index(view, "Active leases")
@@ -477,5 +500,113 @@ func TestModelRendersLastSettledBetweenQueueAndLeases(t *testing.T) {
 	}
 	if strings.Contains(view, "claim-done") || strings.Contains(view, "evidence matched the claim") {
 		t.Fatalf("last-settled view should hide ids and evidence detail, got:\n%s", view)
+	}
+}
+
+func TestViewSeparatesRegionsWithLabeledRules(t *testing.T) {
+	st, err := ParseStatus([]byte(`{
+		"enabled": true,
+		"queue": {"pending": 1, "total": 1},
+		"items": [{"id": "item-1", "status": "pending"}],
+		"last_settled": {"id": "item-0", "claim_id": "claim-z", "status": "completed", "verdict_label": "verified"},
+		"leases": [{"id": "lease-1", "item_id": "item-1"}]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+
+	view := stripANSI(NewModel().ReplaceStatus(st).SetSize(100, 24).View())
+	rules := []string{
+		"─ Operational status ─",
+		"─ Settlement queue ─",
+		"─ Selected claim ─",
+		"─ Recent verdicts ─",
+		"─ Active leases ─",
+	}
+	prev := -1
+	for _, rule := range rules {
+		idx := strings.Index(view, rule)
+		if idx < 0 {
+			t.Fatalf("missing region rule %q, got:\n%s", rule, view)
+		}
+		if idx <= prev {
+			t.Fatalf("region rule %q out of order, got:\n%s", rule, view)
+		}
+		prev = idx
+	}
+
+	// Empty sections are omitted entirely, rule included.
+	st.Leases = nil
+	view = stripANSI(NewModel().ReplaceStatus(st).SetSize(100, 24).View())
+	if strings.Contains(view, "Active leases") {
+		t.Fatalf("empty lease region should be omitted, got:\n%s", view)
+	}
+}
+
+func TestDefaultPlaceholdersRenderDistinctFromDisabledState(t *testing.T) {
+	st, err := ParseStatus([]byte(`{
+		"enabled": false,
+		"queue": {"total": 0}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+
+	view := NewModel().ReplaceStatus(st).SetSize(120, 20).View()
+	disabled := style.StatusWarn.Render("disabled")
+	placeholder := style.StatusDisabled.Render("default")
+	if disabled == "disabled" || placeholder == "default" {
+		t.Fatal("status tokens should style their output even without a TTY")
+	}
+	if !strings.Contains(view, disabled) {
+		t.Fatalf("disabled state should carry the attention status token, got:\n%s", view)
+	}
+	for _, want := range []string{placeholder, style.StatusDisabled.Render("unknown"), style.StatusDisabled.Render("unlimited")} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("default-unset placeholder %q should carry the disabled/default-unset token, got:\n%s", stripANSI(want), view)
+		}
+	}
+
+	st.Enabled = true
+	view = NewModel().ReplaceStatus(st).SetSize(120, 20).View()
+	if !strings.Contains(view, style.StatusReady.Render("enabled")) {
+		t.Fatalf("enabled state should carry the ready status token, got:\n%s", view)
+	}
+}
+
+func TestLeaseRegionIsReservedWithinHeightBudget(t *testing.T) {
+	st, err := ParseStatus([]byte(`{
+		"enabled": true,
+		"queue": {"total": 0},
+		"terminal_items": [
+			{"id": "t1", "claim_id": "claim-a", "claim": "alpha bravo charlie delta echo foxtrot golf hotel india juliet", "status": "completed", "verdict": {"verdict": "verified", "evidence": "matched"}},
+			{"id": "t2", "claim_id": "claim-b", "claim": "kilo lima mike november oscar papa quebec romeo sierra tango", "status": "completed", "verdict": {"verdict": "verified", "evidence": "matched"}},
+			{"id": "t3", "claim_id": "claim-c", "claim": "uniform victor whiskey xray yankee zulu omega sigma theta iota", "status": "completed", "verdict": {"verdict": "verified", "evidence": "matched"}}
+		],
+		"leases": [{"id": "lease-1", "item_id": "item-9", "worker_id": "proc-a"}]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+
+	// The lease block is reserved before the verdict budget, so the whole
+	// view must fit the host clip height with the lease region intact and
+	// overflowing verdicts dropped whole.
+	height := 17
+	view := stripANSI(NewModel().ReplaceStatus(st).SetSize(44, height).View())
+	if got := len(strings.Split(view, "\n")); got > height {
+		t.Fatalf("view has %d lines, exceeding the host clip height %d:\n%s", got, height, view)
+	}
+	if !strings.Contains(view, "lease-1") {
+		t.Fatalf("lease region should survive the verdict budget, got:\n%s", view)
+	}
+	if !strings.Contains(view, "... 2 more verdicts") {
+		t.Fatalf("overflowing verdicts should collapse into a whole-verdict marker, got:\n%s", view)
+	}
+	if strings.Contains(view, "kilo") || strings.Contains(view, "uniform") {
+		t.Fatalf("dropped verdicts must be dropped whole, got:\n%s", view)
+	}
+	if strings.Index(view, "Active leases") < strings.Index(view, "more verdicts") {
+		t.Fatalf("lease region should sit below the verdict region, got:\n%s", view)
 	}
 }
