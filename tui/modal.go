@@ -175,8 +175,8 @@ func (m model) renderConfirmModal() string {
 	return m.placeModal(buildModalBox(s, title, body))
 }
 
-// renderHelpModal overlays a centered modal listing all keybindings.
-func (m model) renderHelpModal() string {
+// helpContent builds the full keybinding list shown in the help modal.
+func helpContent() string {
 	s := modalStyles
 	sectionS := style.SubsectionTitle
 
@@ -185,7 +185,7 @@ func (m model) renderHelpModal() string {
 		return k + s.dim.Render(desc)
 	}
 
-	content := sectionS.Render("Follow-Ups") + "\n" +
+	return sectionS.Render("Follow-Ups") + "\n" +
 		row("j / k", "navigate") + "\n" +
 		row("Enter", "open detail") + "\n" +
 		row("Tab / Shift-Tab", "cycle tabs") + "\n" +
@@ -205,7 +205,6 @@ func (m model) renderHelpModal() string {
 		row("a", "select all / deselect all") + "\n" +
 		row("y", "copy body to clipboard") + "\n" +
 		row("E", "edit body in $EDITOR") + "\n" +
-		row("D", "delete comment (confirm)") + "\n" +
 		row("P", "post selected comments to PR") + "\n" +
 		row("g", "generate thematic summary (LLM)") + "\n" +
 		"\n" +
@@ -248,13 +247,41 @@ func (m model) renderHelpModal() string {
 		row("t", "settlement panel") + "\n" +
 		row("S / Ctrl+,", "settings configurator") + "\n" +
 		row("q / Ctrl+C / Ctrl+D", "quit")
+}
 
+// helpModalChrome is the number of rows the help modal consumes around the
+// viewport: 2 border + title + blank-after-title + blank-before-footer +
+// footer hint, plus the status-bar row placeModal reserves.
+const helpModalChrome = 7
+
+// sizeHelpViewport sizes the help viewport to its full content, capped so the
+// modal box never exceeds the terminal height. Called on open and on resize.
+func (m *model) sizeHelpViewport() {
+	content := helpContent()
+	h := lipgloss.Height(content)
+	if maxH := m.height - helpModalChrome; m.height > 0 && h > maxH {
+		h = max(maxH, 3)
+	}
+	m.helpViewport.SetWidth(lipgloss.Width(content))
+	m.helpViewport.SetHeight(h)
+	m.helpViewport.SetContent(content)
+}
+
+// renderHelpModal overlays a centered modal listing all keybindings, windowed
+// through m.helpViewport so short terminals can scroll the full list.
+func (m model) renderHelpModal() string {
+	s := modalStyles
+
+	footer := "  Press ? or Esc to close"
+	if !m.helpViewport.AtTop() || !m.helpViewport.AtBottom() {
+		footer = "  j/k scroll  ·  g/G top/bottom  ·  ? or Esc to close"
+	}
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(s.border.GetForeground()).
 		Padding(0, 1).
-		Render(s.title.Render("Keyboard Shortcuts") + "\n\n" + content + "\n\n" +
-			s.dim.Render("  Press ? or Esc to close"))
+		Render(s.title.Render("Keyboard Shortcuts") + "\n\n" + m.helpViewport.View() + "\n\n" +
+			s.dim.Render(footer))
 
 	return m.placeModal(box)
 }

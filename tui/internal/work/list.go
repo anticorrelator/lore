@@ -286,8 +286,9 @@ func (m ListModel) View() string {
 const panelW = 40
 
 // viewCompact renders the compact split-pane list with two lines per item:
-//   Line 1: "> Title"              (bold when selected)
-//   Line 2: "    status · #issue"  (dim metadata)
+//
+//	Line 1: "> Title"              (bold when selected)
+//	Line 2: "    status · #issue"  (dim metadata)
 func (m ListModel) viewCompact() string {
 	items := m.visibleItems()
 
@@ -303,7 +304,7 @@ func (m ListModel) viewCompact() string {
 	}
 
 	titleSelStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
-	infoSelStyle  := lipgloss.NewStyle().Background(lipgloss.Color("237"))
+	infoSelStyle := lipgloss.NewStyle().Background(lipgloss.Color("237"))
 
 	// Each item occupies 2 lines; compute visible item count accordingly.
 	visibleCount := m.height / 2
@@ -551,9 +552,7 @@ func (m ListModel) viewFull() string {
 
 func (m ListModel) prBadge(prField string, width int) string {
 	if prField == "" {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-			style.Truncate("--", width),
-		)
+		return style.Dim.Render(style.Truncate("--", width))
 	}
 
 	if !m.prLoaded {
@@ -563,16 +562,12 @@ func (m ListModel) prBadge(prField string, width int) string {
 	}
 
 	if m.prStatus == nil {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-			style.Truncate("--", width),
-		)
+		return style.Dim.Render(style.Truncate("--", width))
 	}
 
 	ps, ok := m.prStatus[prField]
 	if !ok {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-			style.Truncate("--", width),
-		)
+		return style.Dim.Render(style.Truncate("--", width))
 	}
 
 	label := fmt.Sprintf("#%d", ps.Number)

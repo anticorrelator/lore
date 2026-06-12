@@ -45,8 +45,8 @@ func (m Model) Count() int {
 	if !m.hasStatus || !m.status.Available {
 		return 0
 	}
-	count := m.status.Queue.Ready + m.status.Queue.Pending
-	if count == 0 && m.status.Queue.Running == 0 {
+	count := m.status.Queue.Ready + m.status.Queue.Pending + m.status.Queue.Running
+	if count == 0 {
 		count = m.status.Batch.BacklogSize
 	}
 	return count
@@ -137,7 +137,17 @@ func (m Model) View() string {
 	}
 	lines = append(lines, m.selectedClaimBlock(bodyW, s)...)
 	lines = append(lines, s.heading.Render("Recent verdicts"))
-	lines = append(lines, formatRecentSettled(st, bodyW, s)...)
+	// The host clips the rendered body at the panel height (statusH), so the
+	// verdict block must fit the remaining lines or a wrapped verdict would be
+	// cut mid-wrap at the clip boundary. -1 means unbounded (height unknown).
+	verdictBudget := -1
+	if m.height > 0 {
+		verdictBudget = m.height - len(lines)
+		if verdictBudget < 0 {
+			verdictBudget = 0
+		}
+	}
+	lines = append(lines, formatRecentSettled(st, bodyW, verdictBudget, s)...)
 	if len(st.Leases) > 0 {
 		lines = append(lines, s.heading.Render("Active leases"))
 		for _, lease := range compactLeases(st.Leases) {
@@ -355,7 +365,11 @@ func formatItem(marker string, item Item, width int, s styleSet) string {
 	return style.Truncate(strings.Join(parts, " "), width)
 }
 
-func formatRecentSettled(st Status, width int, s styleSet) []string {
+// formatRecentSettled renders up to four recent verdicts, packing only whole
+// wrapped verdicts into budget (rendered lines; -1 = unbounded) so the host's
+// statusH clip never lands mid-wrap. Verdicts that would overflow are dropped
+// whole and summarized by the "... N more verdicts" marker.
+func formatRecentSettled(st Status, width, budget int, s styleSet) []string {
 	recent := st.RecentSettled
 	if len(recent) == 0 && st.LastSettled != nil {
 		recent = []LastSettled{*st.LastSettled}
@@ -367,12 +381,24 @@ func formatRecentSettled(st Status, width int, s styleSet) []string {
 	if len(recent) < limit {
 		limit = len(recent)
 	}
-	lines := make([]string, 0, limit*3)
+	lines := make([]string, 0, limit*2)
+	shown := 0
 	for i := 0; i < limit; i++ {
-		lines = append(lines, formatLastSettled(&recent[i], width, s)...)
+		block := formatLastSettled(&recent[i], width, s)
+		if budget >= 0 {
+			need := len(lines) + len(block)
+			if len(recent) > i+1 {
+				need++ // reserve a line for the "... N more verdicts" marker
+			}
+			if need > budget {
+				break
+			}
+		}
+		lines = append(lines, block...)
+		shown++
 	}
-	if len(recent) > limit {
-		lines = append(lines, s.dim.Render(fmt.Sprintf("... %d more verdicts", len(recent)-limit)))
+	if shown < len(recent) {
+		lines = append(lines, s.dim.Render(fmt.Sprintf("... %d more verdicts", len(recent)-shown)))
 	}
 	return lines
 }
@@ -384,7 +410,7 @@ func formatSelectedClaim(item *Item, width int, s styleSet) []string {
 	id := firstNonEmpty(item.ClaimID, item.ID, "selected claim")
 	lines := []string{style.Truncate("- "+id+" ["+stringDefault(item.Status, "pending")+"] "+item.WorkItem, width)}
 	if item.Claim != "" {
-		lines = append(lines, wrapDetail("claim: ", item.Claim, width, s)...)
+		lines = append(lines, wrapDetail("claim: ", item.Claim, width, s.dim)...)
 	}
 	source := item.SourceFile
 	if item.LineRange != "" {
@@ -394,7 +420,7 @@ func formatSelectedClaim(item *Item, width int, s styleSet) []string {
 		lines = append(lines, style.Truncate(s.dim.Render("evidence target: "+source), width))
 	}
 	if item.Falsifier != "" {
-		lines = append(lines, wrapDetail("falsifier: ", item.Falsifier, width, s)...)
+		lines = append(lines, wrapDetail("falsifier: ", item.Falsifier, width, s.dim)...)
 	}
 	return lines
 }
@@ -426,8 +452,8 @@ func formatLastSettled(last *LastSettled, width int, s styleSet) []string {
 	}
 	label := verdictLabel(last)
 	claim := firstNonEmpty(last.Claim, last.ClaimID, last.ID, "claim")
-	line := "- " + label + correctionOutcomeSuffix(last.CorrectionOutcome) + "  " + claim
-	return []string{style.Truncate(line, width)}
+	prefix := "- " + label + correctionOutcomeSuffix(last.CorrectionOutcome) + "  "
+	return wrapDetail(prefix, claim, width, lipgloss.NewStyle())
 }
 
 func correctionOutcomeSuffix(outcome CorrectionOutcome) string {
@@ -472,13 +498,13 @@ func verdictLabel(last *LastSettled) string {
 	return firstNonEmpty(label, status, "unknown")
 }
 
-func wrapDetail(prefix, text string, width int, s styleSet) []string {
+func wrapDetail(prefix, text string, width int, render lipgloss.Style) []string {
 	if width <= 0 {
-		return []string{s.dim.Render(prefix + text)}
+		return []string{render.Render(prefix + text)}
 	}
 	available := width - lipgloss.Width(prefix)
 	if available < 16 {
-		return []string{style.Truncate(s.dim.Render(prefix+text), width)}
+		return []string{style.Truncate(render.Render(prefix+text), width)}
 	}
 	words := strings.Fields(text)
 	if len(words) == 0 {
@@ -493,14 +519,14 @@ func wrapDetail(prefix, text string, width int, s styleSet) []string {
 		}
 		candidate += word
 		if lipgloss.Width(candidate) > width && current != prefix {
-			lines = append(lines, s.dim.Render(current))
+			lines = append(lines, render.Render(current))
 			current = strings.Repeat(" ", lipgloss.Width(prefix)) + word
 			continue
 		}
 		current = candidate
 	}
 	if strings.TrimSpace(current) != "" {
-		lines = append(lines, s.dim.Render(current))
+		lines = append(lines, render.Render(current))
 	}
 	return lines
 }

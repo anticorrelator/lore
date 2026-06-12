@@ -531,3 +531,50 @@ func TestLensFindingsSelectedLensFindingsReadsFromSidecar(t *testing.T) {
 		t.Fatalf("SelectedLensFindings() returned %d findings, want 2", len(selected))
 	}
 }
+
+// --- Action-menu keybind contract (hints: "c chat · e edit · Esc cancel") ---
+
+func TestLensFindingsActionMenuCEmitsChatRequest(t *testing.T) {
+	m := NewLensFindingsModel("", "fu-1", testLensReview())
+	m.SetSize(80, 40)
+	m.actionMenuOpen = true
+
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	if m.actionMenuOpen {
+		t.Error("c should close the action menu")
+	}
+	if cmd == nil {
+		t.Fatal("c should emit a chat request for the cursor finding")
+	}
+	msg, ok := cmd().(FollowupChatRequestMsg)
+	if !ok {
+		t.Fatalf("c produced %T, want FollowupChatRequestMsg", cmd())
+	}
+	if msg.EditPrompt != "" {
+		t.Error("c (chat) must not pre-fill an edit prompt")
+	}
+	if msg.FindingIndex != 0 {
+		t.Errorf("FindingIndex = %d, want 0", msg.FindingIndex)
+	}
+}
+
+func TestLensFindingsActionMenuEEmitsEditChatRequest(t *testing.T) {
+	m := NewLensFindingsModel("", "fu-1", testLensReview())
+	m.SetSize(80, 40)
+	m.actionMenuOpen = true
+
+	m, cmd := m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	if m.actionMenuOpen {
+		t.Error("e should close the action menu")
+	}
+	if cmd == nil {
+		t.Fatal("e should emit an edit-prompt chat request")
+	}
+	msg, ok := cmd().(FollowupChatRequestMsg)
+	if !ok {
+		t.Fatalf("e produced %T, want FollowupChatRequestMsg", cmd())
+	}
+	if msg.EditPrompt == "" {
+		t.Error("e (edit) must pre-fill the edit prompt")
+	}
+}

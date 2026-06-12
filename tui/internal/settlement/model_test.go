@@ -3,6 +3,8 @@ package settlement
 import (
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
 )
 
 func TestParseStatusToleratesExpectedContract(t *testing.T) {
@@ -352,6 +354,99 @@ func TestModelRendersCorrectionOutcomeSuffix(t *testing.T) {
 	// Legacy / non-contradicted lines must render without a suffix.
 	if !strings.Contains(view, "verified  verified claim text") {
 		t.Fatalf("legacy (no outcome) row should render without suffix, got:\n%s", view)
+	}
+}
+
+func TestCountIncludesRunningClaims(t *testing.T) {
+	st, err := ParseStatus([]byte(`{
+		"enabled": true,
+		"queue": {"ready": 0, "pending": 0, "running": 3, "total": 3},
+		"batch": {"backlog_size": 76}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+	if got := NewModel().ReplaceStatus(st).Count(); got != 3 {
+		t.Fatalf("Count = %d, want 3 (running claims are active queue depth)", got)
+	}
+}
+
+func TestCountFallsBackToBacklogWhenQueueIdle(t *testing.T) {
+	st, err := ParseStatus([]byte(`{
+		"enabled": true,
+		"queue": {"ready": 0, "pending": 0, "running": 0, "total": 0},
+		"batch": {"backlog_size": 76}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+	if got := NewModel().ReplaceStatus(st).Count(); got != 76 {
+		t.Fatalf("Count = %d, want backlog fallback 76", got)
+	}
+}
+
+func TestFormatLastSettledWrapsLongClaim(t *testing.T) {
+	long := "alpha bravo charlie delta echo foxtrot golf hotel india juliet"
+	lines := formatLastSettled(&LastSettled{VerdictLabel: "verified", Claim: long}, 40, styles())
+	if len(lines) < 2 {
+		t.Fatalf("long claim should wrap onto continuation lines, got %d line(s): %q", len(lines), lines)
+	}
+	joined := strings.Join(lines, "\n")
+	if strings.Contains(joined, "…") {
+		t.Fatalf("wrapped verdict must not be truncated mid-content, got:\n%s", joined)
+	}
+	for _, word := range strings.Fields(long) {
+		if !strings.Contains(joined, word) {
+			t.Fatalf("wrapped verdict lost word %q, got:\n%s", word, joined)
+		}
+	}
+	indent := strings.Repeat(" ", len("- verified  "))
+	if !strings.HasPrefix(lines[1], indent) {
+		t.Fatalf("continuation lines should carry a hanging indent, got %q", lines[1])
+	}
+	for _, line := range lines {
+		if lipgloss.Width(line) > 40 {
+			t.Fatalf("wrapped line exceeds width: %q", line)
+		}
+	}
+}
+
+func TestTightVerdictBlockDropsWholeVerdicts(t *testing.T) {
+	st, err := ParseStatus([]byte(`{
+		"enabled": true,
+		"queue": {"total": 0},
+		"terminal_items": [
+			{"id": "t1", "claim_id": "claim-a", "claim": "alpha bravo charlie delta echo foxtrot golf hotel india juliet", "status": "completed", "verdict": {"verdict": "verified", "evidence": "matched"}},
+			{"id": "t2", "claim_id": "claim-b", "claim": "kilo lima mike november oscar papa quebec romeo sierra tango", "status": "completed", "verdict": {"verdict": "verified", "evidence": "matched"}},
+			{"id": "t3", "claim_id": "claim-c", "claim": "uniform victor whiskey xray yankee zulu omega sigma theta iota", "status": "completed", "verdict": {"verdict": "verified", "evidence": "matched"}}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+
+	// width 44 -> bodyW 40 (each verdict wraps to ~3 lines); height 13 leaves a
+	// 5-line budget after the headings, so only the first verdict fits whole.
+	view := NewModel().ReplaceStatus(st).SetSize(44, 13).View()
+	idx := strings.Index(view, "Recent verdicts")
+	if idx < 0 {
+		t.Fatalf("missing Recent verdicts section, got:\n%s", view)
+	}
+	block := view[idx:]
+	if !strings.Contains(block, "... 2 more verdicts") {
+		t.Fatalf("overflowing verdicts should collapse into a whole-verdict marker, got:\n%s", block)
+	}
+	if !strings.Contains(block, "delta") || !strings.Contains(block, "juliet") {
+		t.Fatalf("the shown verdict must be complete, got:\n%s", block)
+	}
+	if strings.Contains(block, "kilo") || strings.Contains(block, "uniform") {
+		t.Fatalf("dropped verdicts must be dropped whole, not partially wrapped, got:\n%s", block)
+	}
+	if strings.Contains(block, "…") {
+		t.Fatalf("verdict block must not contain mid-content truncation, got:\n%s", block)
+	}
+	if statusH := 13; len(strings.Split(view, "\n")) > statusH {
+		t.Fatalf("view exceeds the host clip height %d, so a verdict could be cut mid-wrap:\n%s", statusH, view)
 	}
 }
 

@@ -242,11 +242,21 @@ type ManifestLoadedMsg struct {
 	Err      error
 }
 
+// SearchActive reports whether the search panel owns keystrokes — the host
+// must not treat letter keys (e.g. q-to-quit) as shortcuts while it is true.
+func (m BrowserModel) SearchActive() bool { return m.searchActive }
+
 // FocusLeft sets keyboard focus to the left (tree) panel.
 func (m *BrowserModel) FocusLeft() { m.focusedPanel = panelLeft }
 
-// FocusRight sets keyboard focus to the right (detail) panel.
-func (m *BrowserModel) FocusRight() { m.focusedPanel = panelRight }
+// FocusRight sets keyboard focus to the right (detail) panel. It is the
+// readiness-gated chokepoint for every focus-to-right transition: when no
+// entry has loaded it is a no-op, so focus never enters an empty detail pane.
+func (m *BrowserModel) FocusRight() {
+	if m.entryDetail.Ready() {
+		m.focusedPanel = panelRight
+	}
+}
 
 // NewBrowserModel creates a knowledge browser.
 func NewBrowserModel(knowledgeDir string) BrowserModel {
@@ -463,7 +473,7 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 		} else {
 			// Right pane: set focus on click, always forward to entry detail.
 			if isClick {
-				m.focusedPanel = panelRight
+				m.FocusRight()
 			}
 			var cmd tea.Cmd
 			m.entryDetail, cmd = m.entryDetail.Update(msg)
@@ -585,12 +595,12 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 					return m, nil
 				}
 				// Expanded category or entry: switch focus to right panel
-				m.focusedPanel = panelRight
+				m.FocusRight()
 				return m, nil
 			}
 		case "l":
 			if m.focusedPanel == panelLeft {
-				m.focusedPanel = panelRight
+				m.FocusRight()
 				return m, nil
 			}
 		case "h":
@@ -600,7 +610,7 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 			}
 		case "tab":
 			if m.focusedPanel == panelLeft {
-				m.focusedPanel = panelRight
+				m.FocusRight()
 			} else {
 				m.focusedPanel = panelLeft
 			}

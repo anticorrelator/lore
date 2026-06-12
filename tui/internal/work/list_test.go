@@ -3,6 +3,8 @@ package work
 import (
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 func newTestListModel(items []WorkItem) ListModel {
@@ -137,5 +139,87 @@ func TestFullNeedsInputReadinessPreserved(t *testing.T) {
 	// "attention" text must NOT appear in readiness column
 	if strings.Contains(view, "attention") {
 		t.Fatalf("'attention' text should not appear in readiness column, got:\n%s", view)
+	}
+}
+
+// --- Status-bar keybind contract (panelLeft hints) ---
+
+func contractItems() []WorkItem {
+	return []WorkItem{
+		{Slug: "one", Title: "One", Status: "active"},
+		{Slug: "two", Title: "Two", Status: "active"},
+		{Slug: "old", Title: "Old", Status: "archived"},
+	}
+}
+
+// "j/k navigate"
+func TestListModelJKMoveCursor(t *testing.T) {
+	m := newTestListModel(contractItems())
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if m.Cursor() != 1 {
+		t.Fatalf("j should move the cursor down, got %d", m.Cursor())
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	if m.Cursor() != 0 {
+		t.Fatalf("k should move the cursor up, got %d", m.Cursor())
+	}
+}
+
+// "Enter open detail"
+func TestListModelEnterEmitsItemSelected(t *testing.T) {
+	m := newTestListModel(contractItems())
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("Enter should emit a selection command")
+	}
+	msg, ok := cmd().(ItemSelectedMsg)
+	if !ok {
+		t.Fatalf("Enter produced %T, want ItemSelectedMsg", cmd())
+	}
+	if msg.Item.Slug != "one" {
+		t.Errorf("selected slug = %q, want one", msg.Item.Slug)
+	}
+}
+
+// "s run spec"
+func TestListModelSEmitsSpecRequest(t *testing.T) {
+	m := newTestListModel(contractItems())
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 's', Text: "s"})
+	if cmd == nil {
+		t.Fatal("s should emit a spec request")
+	}
+	msg, ok := cmd().(SpecRequestMsg)
+	if !ok {
+		t.Fatalf("s produced %T, want SpecRequestMsg", cmd())
+	}
+	if msg.Slug != "one" {
+		t.Errorf("spec slug = %q, want one", msg.Slug)
+	}
+}
+
+// "c chat about spec"
+func TestListModelCEmitsChatRequest(t *testing.T) {
+	m := newTestListModel(contractItems())
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	if cmd == nil {
+		t.Fatal("c should emit a chat request")
+	}
+	if _, ok := cmd().(ChatRequestMsg); !ok {
+		t.Fatalf("c produced %T, want ChatRequestMsg", cmd())
+	}
+}
+
+// Border annotation "ctrl+a  active · archived"
+func TestListModelCtrlAToggleActiveArchivedFilter(t *testing.T) {
+	m := newTestListModel(contractItems())
+	if m.GetFilterMode() != FilterActive {
+		t.Fatal("precondition: list starts on the active filter")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	if m.GetFilterMode() != FilterArchived {
+		t.Error("ctrl+a should switch to the archived filter")
+	}
+	if len(m.Items()) != 1 || m.Items()[0].Slug != "old" {
+		t.Errorf("archived filter should show only the archived item, got %v", m.Items())
 	}
 }

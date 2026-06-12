@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/creack/pty"
 
@@ -137,11 +138,21 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 	}()
 
-	// Help modal: intercept all keys; Esc or ? closes it.
+	// Help modal: intercept all keys; Esc or ? closes it, scroll keys move
+	// the help viewport, everything else is swallowed.
 	if m.showHelp {
 		if km, ok := msg.(tea.KeyPressMsg); ok {
-			if km.String() == "esc" || km.String() == "?" {
+			switch km.String() {
+			case "esc", "?":
 				m.showHelp = false
+			case "g":
+				m.helpViewport.GotoTop()
+			case "G":
+				m.helpViewport.GotoBottom()
+			case "j", "down", "k", "up", "pgup", "pgdown":
+				var cmd tea.Cmd
+				m.helpViewport, cmd = m.helpViewport.Update(msg)
+				return m, cmd
 			}
 			return m, nil
 		}
@@ -618,10 +629,18 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		case "?":
 			if !m.terminalMode {
 				m.showHelp = true
+				m.helpViewport = viewport.New()
+				m.sizeHelpViewport()
 				return m, nil
 			}
 		case "q":
 			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSettlement) && !m.terminalMode {
+				m.cleanupAllSubprocesses()
+				return m, tea.Quit
+			}
+			// Knowledge browser: q quits as the help modal's Global section
+			// advertises, except while the search input owns letter keys.
+			if m.state == stateKnowledge && !m.browser.SearchActive() {
 				m.cleanupAllSubprocesses()
 				return m, tea.Quit
 			}
@@ -842,11 +861,13 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.state = stateWork
 				return m, loadWorkItems(m.config.WorkDir)
 			}
-		case "esc":
-			// Esc from right panel (detail mode only): back to list.
-			// In terminal mode, esc falls through to the spec panel, which forwards
-			// a single Esc to the PTY (so e.g. Claude Code's "esc to interrupt"
-			// works) and emits TerminalDetachMsg only on a double-Esc gesture.
+		case "esc", "h":
+			// Esc/h from right panel (detail mode only): back to list, as the
+			// "h/Esc back to list" status-bar hint advertises.
+			// In terminal mode both fall through to the spec panel: a single Esc
+			// is forwarded to the PTY (so e.g. Claude Code's "esc to interrupt"
+			// works) and emits TerminalDetachMsg only on a double-Esc gesture;
+			// h is ordinary typed input there.
 			if (m.state == stateWork || m.state == stateFollowUps) && m.focusedPanel == panelRight && !m.terminalMode {
 				m.focusedPanel = panelLeft
 				return m, nil
@@ -993,6 +1014,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// content scrolls correctly when the user grows/shrinks the window.
 		if m.settingsActive {
 			m.sizeSettingsPanel()
+		}
+
+		// Re-size the help viewport so the modal keeps fitting the terminal.
+		if m.showHelp {
+			m.sizeHelpViewport()
 		}
 
 		// Send constrained sizes to sub-models. List height matches the rendered

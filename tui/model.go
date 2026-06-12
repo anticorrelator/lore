@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -157,6 +158,9 @@ type model struct {
 	sessionLaunchedFromModal   bool
 
 	showHelp bool
+	// helpViewport scrolls the help modal's keybinding list when it exceeds
+	// the terminal height. Rebuilt on each open; re-sized on WindowSizeMsg.
+	helpViewport viewport.Model
 
 	// settingsActive flips the configurator modal on top of the current
 	// view. settingsPanel is the schema-driven sub-model that owns the

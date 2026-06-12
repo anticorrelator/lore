@@ -7,11 +7,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/followup"
+	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -117,13 +119,28 @@ func updateModel(t *testing.T, m model, msg tea.Msg) (model, tea.Cmd) {
 	return nm, cmd
 }
 
+// press is the single shared v2-native key constructor for keybind contract
+// tests. Unmodified printable runes carry Text (matching real terminal
+// input); special keys (tea.KeyEnter, tea.KeyEscape, …) and modified keys
+// carry none. A future key-API migration changes this one helper.
+func press(code rune, mods ...tea.KeyMod) tea.KeyPressMsg {
+	k := tea.KeyPressMsg{Code: code}
+	for _, mod := range mods {
+		k.Mod |= mod
+	}
+	if k.Mod == 0 && unicode.IsPrint(code) {
+		k.Text = string(code)
+	}
+	return k
+}
+
 // TestSpecConfirmModalKeybindContract verifies the keybinds displayed in
 // renderSpecConfirmModal (Enter, Esc, Shift+Enter, Alt+1, Alt+2) against the
 // modal's actual dispatch in Update.
 func TestSpecConfirmModalKeybindContract(t *testing.T) {
 	t.Run("Shift+Enter (newline)", func(t *testing.T) {
 		m := specConfirmModel()
-		nm, _ := updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+		nm, _ := updateModel(t, m, press(tea.KeyEnter, tea.ModShift))
 		if got := nm.sessionConfirmInput.Value(); got != "\n" {
 			t.Errorf("expected newline in textarea, got %q", got)
 		}
@@ -133,14 +150,14 @@ func TestSpecConfirmModalKeybindContract(t *testing.T) {
 	})
 	t.Run("Alt+Enter (newline)", func(t *testing.T) {
 		m := specConfirmModel()
-		nm, _ := updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
+		nm, _ := updateModel(t, m, press(tea.KeyEnter, tea.ModAlt))
 		if got := nm.sessionConfirmInput.Value(); got != "\n" {
 			t.Errorf("expected newline in textarea, got %q", got)
 		}
 	})
 	t.Run("Enter (launch)", func(t *testing.T) {
 		m := specConfirmModel()
-		nm, cmd := updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
 		if nm.sessionConfirmActive {
 			t.Error("modal should close on Enter")
 		}
@@ -153,7 +170,7 @@ func TestSpecConfirmModalKeybindContract(t *testing.T) {
 	})
 	t.Run("Esc (cancel)", func(t *testing.T) {
 		m := specConfirmModel()
-		nm, _ := updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+		nm, _ := updateModel(t, m, press(tea.KeyEscape))
 		if nm.sessionConfirmActive {
 			t.Error("modal should close on Esc")
 		}
@@ -161,7 +178,7 @@ func TestSpecConfirmModalKeybindContract(t *testing.T) {
 	t.Run("Alt+1 (toggle short mode)", func(t *testing.T) {
 		m := specConfirmModel()
 		before := m.sessionConfirmShortMode
-		nm, _ := updateModel(t, m, tea.KeyPressMsg{Code: '1', Mod: tea.ModAlt})
+		nm, _ := updateModel(t, m, press('1', tea.ModAlt))
 		if nm.sessionConfirmShortMode == before {
 			t.Error("Alt+1 should toggle short mode")
 		}
@@ -169,7 +186,7 @@ func TestSpecConfirmModalKeybindContract(t *testing.T) {
 	t.Run("Alt+2 (toggle skip confirm)", func(t *testing.T) {
 		m := specConfirmModel()
 		before := m.sessionConfirmSkipConfirm
-		nm, _ := updateModel(t, m, tea.KeyPressMsg{Code: '2', Mod: tea.ModAlt})
+		nm, _ := updateModel(t, m, press('2', tea.ModAlt))
 		if nm.sessionConfirmSkipConfirm == before {
 			t.Error("Alt+2 should toggle skip confirm")
 		}
@@ -190,19 +207,19 @@ func TestAIModalKeybindContract(t *testing.T) {
 		return m
 	}
 	t.Run("Shift+Enter (newline)", func(t *testing.T) {
-		nm, _ := updateModel(t, aiModel(), tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+		nm, _ := updateModel(t, aiModel(), press(tea.KeyEnter, tea.ModShift))
 		if got := nm.aiInput.Value(); got != "\n" {
 			t.Errorf("expected newline in textarea, got %q", got)
 		}
 	})
 	t.Run("Alt+Enter (newline)", func(t *testing.T) {
-		nm, _ := updateModel(t, aiModel(), tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
+		nm, _ := updateModel(t, aiModel(), press(tea.KeyEnter, tea.ModAlt))
 		if got := nm.aiInput.Value(); got != "\n" {
 			t.Errorf("expected newline in textarea, got %q", got)
 		}
 	})
 	t.Run("Enter on empty input (close, no-op)", func(t *testing.T) {
-		nm, cmd := updateModel(t, aiModel(), tea.KeyPressMsg{Code: tea.KeyEnter})
+		nm, cmd := updateModel(t, aiModel(), press(tea.KeyEnter))
 		if nm.aiInputActive {
 			t.Error("modal should close on Enter")
 		}
@@ -211,7 +228,7 @@ func TestAIModalKeybindContract(t *testing.T) {
 		}
 	})
 	t.Run("Esc (cancel)", func(t *testing.T) {
-		nm, _ := updateModel(t, aiModel(), tea.KeyPressMsg{Code: tea.KeyEscape})
+		nm, _ := updateModel(t, aiModel(), press(tea.KeyEscape))
 		if nm.aiInputActive {
 			t.Error("modal should close on Esc")
 		}
@@ -219,7 +236,7 @@ func TestAIModalKeybindContract(t *testing.T) {
 	t.Run("typed characters reach textarea", func(t *testing.T) {
 		m := aiModel()
 		for _, c := range "hi" {
-			m, _ = updateModel(t, m, tea.KeyPressMsg{Code: c, Text: string(c)})
+			m, _ = updateModel(t, m, press(c))
 		}
 		if got := m.aiInput.Value(); got != "hi" {
 			t.Errorf("expected %q in textarea, got %q", "hi", got)
@@ -236,10 +253,7 @@ func TestTypedCharactersInKittyMode(t *testing.T) {
 	for _, c := range chars {
 		t.Run(fmt.Sprintf("char_%c", c), func(t *testing.T) {
 			m := specConfirmModel()
-			key := tea.KeyPressMsg{Code: c, Text: string(c)}
-			if c == ' ' {
-				key = tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
-			}
+			key := press(c)
 			nm, _ := updateModel(t, m, key)
 			if got := nm.sessionConfirmInput.Value(); got != string(c) {
 				t.Errorf("char %c: expected %q in textarea, got %q", c, string(c), got)
@@ -417,8 +431,9 @@ func TestBuildPaneConfigIncludesSettlementCount(t *testing.T) {
 	m.settlement = m.settlement.ReplaceStatus(st)
 
 	cfg := m.buildPaneConfig()
-	if cfg.settlementCount != 5 {
-		t.Errorf("settlementCount = %d, want 5", cfg.settlementCount)
+	// Count is active queue depth: ready + pending + running.
+	if cfg.settlementCount != 6 {
+		t.Errorf("settlementCount = %d, want 6", cfg.settlementCount)
 	}
 }
 
@@ -2236,4 +2251,961 @@ func TestStatusBarRendersDoctorBannerWhenNoFlashErr(t *testing.T) {
 	if !strings.Contains(bar, "doctor-banner-marker") {
 		t.Errorf("status bar should contain doctorBanner when flashErr empty; got %q", bar)
 	}
+}
+
+// === Hint↔handler keybind contract tests ===
+//
+// Every key advertised on a display surface (status bar hint set, help modal
+// row, panel border annotation) gets a subtest named by its hint text that
+// drives the key through the real model.Update path and asserts a minimal
+// observable effect. Deleting a handler makes the matching test fail.
+
+// workContractModel builds a stateWork model with two items and a loaded
+// detail (Meta/Plan/Notes tabs) for status-bar contract tests.
+func workContractModel() model {
+	items := []work.WorkItem{
+		{Slug: "item-1", Title: "Item One"},
+		{Slug: "item-2", Title: "Item Two"},
+	}
+	m := minimalModel(stateWork, items, nil)
+	m.width = 120
+	m.height = 40
+	plan := "# Plan\n\nbody"
+	notes := "notes"
+	m.detail = work.NewDetailModel("", "item-1")
+	m.detail, _ = m.detail.Update(work.DetailLoadedMsg{Slug: "item-1", Detail: &work.WorkItemDetail{
+		Slug: "item-1", Title: "Item One", Status: "active",
+		PlanContent: &plan, NotesContent: &notes,
+	}})
+	return m
+}
+
+// TestConfirmModalKeybindContract verifies the keybinds displayed in
+// renderConfirmModal ("y / Enter confirm", "any key cancel", and post_review's
+// "n / Esc cancel") against the confirm interception in Update.
+func TestConfirmModalKeybindContract(t *testing.T) {
+	actions := []string{"archive", "unarchive", "delete", "dismiss", "delete_followup", "post_review"}
+	confirmModel := func(action string) model {
+		m := minimalModel(stateWork, nil, nil)
+		m.confirmAction = action
+		m.confirmSlug = "slug-x"
+		m.confirmTitle = "Title X"
+		return m
+	}
+	for _, action := range actions {
+		t.Run(action+"/y (confirm)", func(t *testing.T) {
+			nm, cmd := updateModel(t, confirmModel(action), press('y'))
+			if nm.confirmAction != "" {
+				t.Error("confirm modal should close on y")
+			}
+			if cmd == nil {
+				t.Error("y should dispatch the confirmed action command")
+			}
+		})
+		t.Run(action+"/Enter (confirm)", func(t *testing.T) {
+			nm, cmd := updateModel(t, confirmModel(action), press(tea.KeyEnter))
+			if nm.confirmAction != "" {
+				t.Error("confirm modal should close on Enter")
+			}
+			if cmd == nil {
+				t.Error("Enter should dispatch the confirmed action command")
+			}
+		})
+		t.Run(action+"/any key (cancel)", func(t *testing.T) {
+			nm, cmd := updateModel(t, confirmModel(action), press('z'))
+			if nm.confirmAction != "" {
+				t.Error("confirm modal should close on any other key")
+			}
+			if cmd != nil {
+				t.Error("cancel must not dispatch an action command")
+			}
+		})
+	}
+	t.Run("post_review/n / Esc (cancel)", func(t *testing.T) {
+		for _, k := range []tea.KeyPressMsg{press('n'), press(tea.KeyEscape)} {
+			nm, cmd := updateModel(t, confirmModel("post_review"), k)
+			if nm.confirmAction != "" {
+				t.Errorf("confirm modal should close on %v", k)
+			}
+			if cmd != nil {
+				t.Errorf("%v must not dispatch the post command", k)
+			}
+		}
+	})
+}
+
+// TestHelpModalKeybindContract verifies "? this help" opens the modal from
+// every advertising state and "Press ? or Esc to close" closes it.
+func TestHelpModalKeybindContract(t *testing.T) {
+	states := []struct {
+		name  string
+		state appState
+	}{
+		{"work", stateWork},
+		{"followups", stateFollowUps},
+		{"settlement", stateSettlement},
+		{"knowledge", stateKnowledge},
+	}
+	for _, tc := range states {
+		t.Run(tc.name+"/? (open help)", func(t *testing.T) {
+			nm, _ := updateModel(t, minimalModel(tc.state, nil, nil), press('?'))
+			if !nm.showHelp {
+				t.Error("? should open the help modal")
+			}
+		})
+	}
+	t.Run("? (close)", func(t *testing.T) {
+		m := minimalModel(stateWork, nil, nil)
+		m.showHelp = true
+		nm, _ := updateModel(t, m, press('?'))
+		if nm.showHelp {
+			t.Error("? should close the help modal")
+		}
+	})
+	t.Run("Esc (close)", func(t *testing.T) {
+		m := minimalModel(stateWork, nil, nil)
+		m.showHelp = true
+		nm, _ := updateModel(t, m, press(tea.KeyEscape))
+		if nm.showHelp {
+			t.Error("Esc should close the help modal")
+		}
+	})
+	t.Run("other keys swallowed while open", func(t *testing.T) {
+		m := workContractModel()
+		m.showHelp = true
+		nm, cmd := updateModel(t, m, press('q'))
+		if !nm.showHelp {
+			t.Error("q must not close the help modal")
+		}
+		if cmd != nil {
+			t.Error("swallowed keys must not dispatch commands")
+		}
+		if nm.list.Cursor() != 0 {
+			t.Error("swallowed keys must not reach the list")
+		}
+	})
+	t.Run("scroll keys stay inside the modal", func(t *testing.T) {
+		m := workContractModel()
+		m.showHelp = true
+		nm, _ := updateModel(t, m, press('j'))
+		if !nm.showHelp {
+			t.Error("j must not close the help modal")
+		}
+		if nm.list.Cursor() != 0 {
+			t.Error("j must scroll the help viewport, not the list")
+		}
+	})
+
+	// Scroll contract: open at a 20-row terminal so the keybinding list
+	// overflows the viewport and every advertised scroll key is meaningful.
+	scrollableHelp := func(t *testing.T) model {
+		t.Helper()
+		m := minimalModel(stateWork, nil, nil)
+		m.width = 100
+		m.height = 20
+		nm, _ := updateModel(t, m, press('?'))
+		if !nm.showHelp {
+			t.Fatal("? should open the help modal")
+		}
+		if nm.helpViewport.AtBottom() {
+			t.Fatal("help content should overflow the viewport at height 20")
+		}
+		return nm
+	}
+	t.Run("? (open: viewport capped to terminal height)", func(t *testing.T) {
+		nm := scrollableHelp(t)
+		if got, want := nm.helpViewport.Height(), nm.height-helpModalChrome; got != want {
+			t.Errorf("viewport height = %d, want terminal-capped %d", got, want)
+		}
+		if !nm.helpViewport.AtTop() {
+			t.Error("help should open scrolled to top")
+		}
+	})
+	t.Run("j (scroll down)", func(t *testing.T) {
+		nm, _ := updateModel(t, scrollableHelp(t), press('j'))
+		if nm.helpViewport.YOffset() != 1 {
+			t.Errorf("j should scroll down one line, offset = %d", nm.helpViewport.YOffset())
+		}
+	})
+	t.Run("down (scroll down)", func(t *testing.T) {
+		nm, _ := updateModel(t, scrollableHelp(t), press(tea.KeyDown))
+		if nm.helpViewport.YOffset() != 1 {
+			t.Errorf("down should scroll down one line, offset = %d", nm.helpViewport.YOffset())
+		}
+	})
+	t.Run("k (scroll up)", func(t *testing.T) {
+		m, _ := updateModel(t, scrollableHelp(t), press('j'))
+		nm, _ := updateModel(t, m, press('k'))
+		if nm.helpViewport.YOffset() != 0 {
+			t.Errorf("k should scroll back up, offset = %d", nm.helpViewport.YOffset())
+		}
+	})
+	t.Run("up (scroll up)", func(t *testing.T) {
+		m, _ := updateModel(t, scrollableHelp(t), press('j'))
+		nm, _ := updateModel(t, m, press(tea.KeyUp))
+		if nm.helpViewport.YOffset() != 0 {
+			t.Errorf("up should scroll back up, offset = %d", nm.helpViewport.YOffset())
+		}
+	})
+	t.Run("pgdn (page down)", func(t *testing.T) {
+		nm, _ := updateModel(t, scrollableHelp(t), press(tea.KeyPgDown))
+		if got, want := nm.helpViewport.YOffset(), nm.helpViewport.Height(); got != want {
+			t.Errorf("pgdn should advance one page, offset = %d, want %d", got, want)
+		}
+	})
+	t.Run("pgup (page up)", func(t *testing.T) {
+		m, _ := updateModel(t, scrollableHelp(t), press(tea.KeyPgDown))
+		nm, _ := updateModel(t, m, press(tea.KeyPgUp))
+		if nm.helpViewport.YOffset() != 0 {
+			t.Errorf("pgup should return one page up, offset = %d", nm.helpViewport.YOffset())
+		}
+	})
+	t.Run("G (jump to bottom)", func(t *testing.T) {
+		nm, _ := updateModel(t, scrollableHelp(t), press('G'))
+		if !nm.helpViewport.AtBottom() {
+			t.Error("G should jump to bottom")
+		}
+	})
+	t.Run("g (jump to top)", func(t *testing.T) {
+		m, _ := updateModel(t, scrollableHelp(t), press('G'))
+		nm, _ := updateModel(t, m, press('g'))
+		if !nm.helpViewport.AtTop() {
+			t.Error("g should jump back to top")
+		}
+	})
+	t.Run("Esc (close while scrolled)", func(t *testing.T) {
+		m, _ := updateModel(t, scrollableHelp(t), press('G'))
+		nm, _ := updateModel(t, m, press(tea.KeyEscape))
+		if nm.showHelp {
+			t.Error("Esc should close the help modal")
+		}
+	})
+	t.Run("resize re-caps the viewport", func(t *testing.T) {
+		m := scrollableHelp(t)
+		nm, _ := updateModel(t, m, tea.WindowSizeMsg{Width: 100, Height: 14})
+		if got, want := nm.helpViewport.Height(), 14-helpModalChrome; got != want {
+			t.Errorf("viewport height after shrink = %d, want %d", got, want)
+		}
+	})
+	t.Run("help modal renders over knowledge browser", func(t *testing.T) {
+		m := minimalModel(stateKnowledge, nil, nil)
+		m.width = 120
+		m.height = 40
+		m.showHelp = true
+		out := stripANSI(m.viewContent())
+		if !strings.Contains(out, "Keyboard Shortcuts") {
+			t.Error("help modal opened from stateKnowledge must actually render")
+		}
+	})
+}
+
+// TestWorkListStatusBarKeybindContract verifies the stateWork panelLeft
+// status-bar hint set: "j/k navigate · Enter open · s spec · c chat ·
+// K knowledge · S settings · q quit · ? help" plus the help-modal-only
+// Work List rows (N, L, ctrl+a) and the "ctrl+a active · archived" border
+// annotation.
+func TestWorkListStatusBarKeybindContract(t *testing.T) {
+	t.Run("j/k (navigate)", func(t *testing.T) {
+		m := workContractModel()
+		nm, _ := updateModel(t, m, press('j'))
+		if nm.list.Cursor() != 1 {
+			t.Fatalf("j should move cursor down, got %d", nm.list.Cursor())
+		}
+		nm, _ = updateModel(t, nm, press('k'))
+		if nm.list.Cursor() != 0 {
+			t.Fatalf("k should move cursor up, got %d", nm.list.Cursor())
+		}
+	})
+	t.Run("Enter (open)", func(t *testing.T) {
+		m := workContractModel()
+		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
+		if cmd == nil {
+			t.Fatal("Enter should emit a selection command")
+		}
+		msg := cmd()
+		if _, ok := msg.(work.ItemSelectedMsg); !ok {
+			t.Fatalf("Enter produced %T, want work.ItemSelectedMsg", msg)
+		}
+		nm, _ = updateModel(t, nm, msg)
+		if nm.focusedPanel != panelRight {
+			t.Error("opening an item should focus the detail panel")
+		}
+	})
+	t.Run("s (spec)", func(t *testing.T) {
+		m := workContractModel()
+		nm, cmd := updateModel(t, m, press('s'))
+		if cmd == nil {
+			t.Fatal("s should emit a spec request")
+		}
+		msg := cmd()
+		if _, ok := msg.(work.SpecRequestMsg); !ok {
+			t.Fatalf("s produced %T, want work.SpecRequestMsg", msg)
+		}
+		nm, _ = updateModel(t, nm, msg)
+		if !nm.sessionConfirmActive || nm.sessionConfirmChatMode {
+			t.Error("spec request should open the spec confirm modal in spec mode")
+		}
+	})
+	t.Run("c (chat)", func(t *testing.T) {
+		m := workContractModel()
+		nm, cmd := updateModel(t, m, press('c'))
+		if cmd == nil {
+			t.Fatal("c should emit a chat request")
+		}
+		msg := cmd()
+		if _, ok := msg.(work.ChatRequestMsg); !ok {
+			t.Fatalf("c produced %T, want work.ChatRequestMsg", msg)
+		}
+		nm, _ = updateModel(t, nm, msg)
+		if !nm.sessionConfirmActive || !nm.sessionConfirmChatMode {
+			t.Error("chat request should open the confirm modal in chat mode")
+		}
+	})
+	t.Run("K (knowledge)", func(t *testing.T) {
+		nm, cmd := updateModel(t, workContractModel(), press('K'))
+		if nm.state != stateKnowledge {
+			t.Error("K should enter the knowledge browser")
+		}
+		if cmd == nil {
+			t.Error("K should dispatch the manifest load")
+		}
+	})
+	t.Run("q (quit)", func(t *testing.T) {
+		_, cmd := updateModel(t, workContractModel(), press('q'))
+		if cmd == nil {
+			t.Fatal("q should quit")
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Error("q should dispatch tea.Quit")
+		}
+	})
+	t.Run("N (create work items with AI)", func(t *testing.T) {
+		nm, _ := updateModel(t, workContractModel(), press('N'))
+		if !nm.aiInputActive {
+			t.Error("N should open the AI work-item modal")
+		}
+	})
+	t.Run("L (toggle layout)", func(t *testing.T) {
+		m := workContractModel()
+		before := m.layoutMode
+		nm, _ := updateModel(t, m, press('L'))
+		if nm.layoutMode == before {
+			t.Error("L should toggle the layout mode")
+		}
+	})
+	t.Run("ctrl+a (active · archived)", func(t *testing.T) {
+		m := workContractModel()
+		nm, _ := updateModel(t, m, press('a', tea.ModCtrl))
+		if nm.list.GetFilterMode() != work.FilterArchived {
+			t.Error("ctrl+a should switch the list to the archived filter")
+		}
+		nm, _ = updateModel(t, nm, press('a', tea.ModCtrl))
+		if nm.list.GetFilterMode() != work.FilterActive {
+			t.Error("ctrl+a should toggle back to the active filter")
+		}
+	})
+}
+
+// TestWorkDetailStatusBarKeybindContract verifies the stateWork panelRight
+// hint set: "s spec · c chat · Tab/Shift-Tab cycle tabs · j/k scroll ·
+// h/Esc back to list · ? help".
+func TestWorkDetailStatusBarKeybindContract(t *testing.T) {
+	detailModel := func() model {
+		m := workContractModel()
+		m.focusedPanel = panelRight
+		return m
+	}
+	t.Run("Tab/Shift-Tab (cycle tabs)", func(t *testing.T) {
+		m := detailModel()
+		before := m.detail.ActiveTab()
+		nm, _ := updateModel(t, m, press(tea.KeyTab))
+		if nm.detail.ActiveTab() == before {
+			t.Fatal("Tab should cycle the detail tab")
+		}
+		nm, _ = updateModel(t, nm, press(tea.KeyTab, tea.ModShift))
+		if nm.detail.ActiveTab() != before {
+			t.Fatal("Shift-Tab should cycle back")
+		}
+	})
+	t.Run("s (spec)", func(t *testing.T) {
+		nm, cmd := updateModel(t, detailModel(), press('s'))
+		if cmd == nil {
+			t.Fatal("s should emit a spec request from the detail panel")
+		}
+		msg := cmd()
+		if _, ok := msg.(work.SpecRequestMsg); !ok {
+			t.Fatalf("s produced %T, want work.SpecRequestMsg", msg)
+		}
+		nm, _ = updateModel(t, nm, msg)
+		if !nm.sessionConfirmActive {
+			t.Error("spec request should open the confirm modal")
+		}
+	})
+	t.Run("c (chat)", func(t *testing.T) {
+		nm, cmd := updateModel(t, detailModel(), press('c'))
+		if cmd == nil {
+			t.Fatal("c should emit a chat request from the detail panel")
+		}
+		msg := cmd()
+		if _, ok := msg.(work.ChatRequestMsg); !ok {
+			t.Fatalf("c produced %T, want work.ChatRequestMsg", msg)
+		}
+		nm, _ = updateModel(t, nm, msg)
+		if !nm.sessionConfirmActive || !nm.sessionConfirmChatMode {
+			t.Error("chat request should open the confirm modal in chat mode")
+		}
+	})
+	t.Run("h (back to list)", func(t *testing.T) {
+		nm, _ := updateModel(t, detailModel(), press('h'))
+		if nm.focusedPanel != panelLeft {
+			t.Error("h should refocus the list panel")
+		}
+	})
+	t.Run("Esc (back to list)", func(t *testing.T) {
+		nm, _ := updateModel(t, detailModel(), press(tea.KeyEscape))
+		if nm.focusedPanel != panelLeft {
+			t.Error("Esc should refocus the list panel")
+		}
+	})
+}
+
+// TestTerminalModeStatusBarKeybindContract verifies the terminal-mode hint
+// set: "ctrl+t detail · Esc back to list (forwarded) · Ctrl+c terminate".
+func TestTerminalModeStatusBarKeybindContract(t *testing.T) {
+	terminalModel := func() model {
+		m := workContractModel()
+		m.focusedPanel = panelRight
+		m.terminalMode = true
+		m.setSpecPanel("item-1", work.NewSpecPanelModel("item-1"))
+		return m
+	}
+	t.Run("ctrl+t (detail)", func(t *testing.T) {
+		nm, _ := updateModel(t, terminalModel(), press('t', tea.ModCtrl))
+		if nm.terminalMode {
+			t.Error("ctrl+t should switch back to detail view")
+		}
+	})
+	t.Run("Ctrl+c (terminate)", func(t *testing.T) {
+		_, cmd := updateModel(t, terminalModel(), press('c', tea.ModCtrl))
+		if cmd == nil {
+			t.Fatal("ctrl+c should dispatch a terminate command")
+		}
+		msg := cmd()
+		tm, ok := msg.(work.TerminalTerminateMsg)
+		if !ok {
+			t.Fatalf("ctrl+c produced %T, want work.TerminalTerminateMsg", msg)
+		}
+		if tm.Slug != "item-1" {
+			t.Errorf("terminate slug = %q, want item-1", tm.Slug)
+		}
+	})
+	t.Run("Esc (forwarded to subprocess, focus kept)", func(t *testing.T) {
+		nm, _ := updateModel(t, terminalModel(), press(tea.KeyEscape))
+		if nm.focusedPanel != panelRight || !nm.terminalMode {
+			t.Error("a single Esc in terminal mode must stay focused on the terminal (forwarded to the PTY)")
+		}
+	})
+}
+
+// followupContractModel builds a stateFollowUps model with two open items.
+func followupContractModel() model {
+	items := []followup.FollowUpItem{
+		{ID: "fu-1", Title: "FU One", Status: "open"},
+		{ID: "fu-2", Title: "FU Two", Status: "open"},
+	}
+	return minimalModel(stateFollowUps, nil, items)
+}
+
+// TestFollowupListStatusBarKeybindContract verifies the stateFollowUps
+// panelLeft hint set: "j/k navigate · Enter detail · A dismiss · D delete ·
+// w work list · Esc exit · ? help" plus the "ctrl+a open · closed" border
+// annotation.
+func TestFollowupListStatusBarKeybindContract(t *testing.T) {
+	t.Run("j/k (navigate)", func(t *testing.T) {
+		m := followupContractModel()
+		nm, _ := updateModel(t, m, press('j'))
+		if nm.followupList.CurrentID() != "fu-2" {
+			t.Fatalf("j should move to fu-2, got %q", nm.followupList.CurrentID())
+		}
+		nm, _ = updateModel(t, nm, press('k'))
+		if nm.followupList.CurrentID() != "fu-1" {
+			t.Fatalf("k should move back to fu-1, got %q", nm.followupList.CurrentID())
+		}
+	})
+	t.Run("Enter (detail)", func(t *testing.T) {
+		m := followupContractModel()
+		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
+		if cmd == nil {
+			t.Fatal("Enter should emit a selection command")
+		}
+		msg := cmd()
+		if _, ok := msg.(followup.FollowUpSelectedMsg); !ok {
+			t.Fatalf("Enter produced %T, want followup.FollowUpSelectedMsg", msg)
+		}
+		nm, _ = updateModel(t, nm, msg)
+		if nm.focusedPanel != panelRight {
+			t.Error("selecting a follow-up should focus the detail panel")
+		}
+	})
+	t.Run("A (dismiss)", func(t *testing.T) {
+		nm, _ := updateModel(t, followupContractModel(), press('A'))
+		if nm.confirmAction != "dismiss" {
+			t.Errorf("A should open the dismiss confirm modal, got %q", nm.confirmAction)
+		}
+	})
+	t.Run("D (delete)", func(t *testing.T) {
+		nm, _ := updateModel(t, followupContractModel(), press('D'))
+		if nm.confirmAction != "delete_followup" {
+			t.Errorf("D should open the delete confirm modal, got %q", nm.confirmAction)
+		}
+	})
+	t.Run("w (work list)", func(t *testing.T) {
+		nm, _ := updateModel(t, followupContractModel(), press('w'))
+		if nm.state != stateWork {
+			t.Error("w should return to the work list")
+		}
+	})
+	t.Run("Esc (exit)", func(t *testing.T) {
+		m := followupContractModel()
+		nm, cmd := updateModel(t, m, press(tea.KeyEscape))
+		if cmd == nil {
+			t.Fatal("Esc should emit the list-dismissed command")
+		}
+		msg := cmd()
+		if _, ok := msg.(followup.ListDismissedMsg); !ok {
+			t.Fatalf("Esc produced %T, want followup.ListDismissedMsg", msg)
+		}
+		nm, _ = updateModel(t, nm, msg)
+		if nm.state != stateWork {
+			t.Error("dismissing the list should return to the work view")
+		}
+	})
+	t.Run("ctrl+a (open · closed)", func(t *testing.T) {
+		m := followupContractModel()
+		nm, _ := updateModel(t, m, press('a', tea.ModCtrl))
+		if nm.followupList.GetFilterMode() != followup.FilterClosed {
+			t.Error("ctrl+a should switch the follow-up list to the closed filter")
+		}
+	})
+}
+
+// TestFollowupDetailStatusBarKeybindContract verifies the stateFollowUps
+// panelRight (detail) hint set: "p promote · d dismiss · c chat ·
+// h/Esc back to list".
+func TestFollowupDetailStatusBarKeybindContract(t *testing.T) {
+	detailModel := func(t *testing.T) model {
+		t.Helper()
+		m := followupContractModel()
+		m.focusedPanel = panelRight
+		detail := &followup.FollowUpDetail{ID: "fu-1", Title: "FU One", Status: "open"}
+		_ = m.followupDetail.SetID("fu-1")
+		fd, _ := m.followupDetail.Update(followup.DetailLoadedMsg{ID: "fu-1", Detail: detail})
+		m.followupDetail = fd
+		return m
+	}
+	t.Run("p (promote)", func(t *testing.T) {
+		_, cmd := updateModel(t, detailModel(t), press('p'))
+		if cmd == nil {
+			t.Fatal("p should emit a promote request")
+		}
+		if msg := cmd(); func() bool { _, ok := msg.(followup.PromoteRequestMsg); return !ok }() {
+			t.Fatalf("p produced wrong message type")
+		}
+	})
+	t.Run("d (dismiss)", func(t *testing.T) {
+		_, cmd := updateModel(t, detailModel(t), press('d'))
+		if cmd == nil {
+			t.Fatal("d should emit a dismiss request")
+		}
+		if _, ok := cmd().(followup.DismissRequestMsg); !ok {
+			t.Fatal("d produced wrong message type")
+		}
+	})
+	t.Run("c (chat)", func(t *testing.T) {
+		m := detailModel(t)
+		nm, cmd := updateModel(t, m, press('c'))
+		if cmd == nil {
+			t.Fatal("c should emit a chat request")
+		}
+		msg := cmd()
+		if _, ok := msg.(followup.FollowupChatRequestMsg); !ok {
+			t.Fatalf("c produced %T, want followup.FollowupChatRequestMsg", msg)
+		}
+		nm, _ = updateModel(t, nm, msg)
+		if !nm.sessionConfirmActive || !nm.sessionConfirmChatMode {
+			t.Error("chat request should open the confirm modal in chat mode")
+		}
+	})
+	t.Run("h (back to list)", func(t *testing.T) {
+		nm, _ := updateModel(t, detailModel(t), press('h'))
+		if nm.focusedPanel != panelLeft {
+			t.Error("h should refocus the list panel")
+		}
+	})
+	t.Run("Esc (back to list)", func(t *testing.T) {
+		nm, _ := updateModel(t, detailModel(t), press(tea.KeyEscape))
+		if nm.focusedPanel != panelLeft {
+			t.Error("Esc should refocus the list panel")
+		}
+	})
+}
+
+// settlementContractModel builds a stateSettlement model with two queue items.
+func settlementContractModel(t *testing.T) model {
+	t.Helper()
+	m := minimalModel(stateSettlement, nil, nil)
+	m.width = 120
+	m.height = 40
+	st, err := settlement.ParseStatus([]byte(`{
+		"enabled": true,
+		"queue": {"pending": 2, "total": 2},
+		"items": [
+			{"id": "claim-aaa", "claim_id": "claim-aaa", "status": "pending", "work_item": "wi", "claim": "first claim text"},
+			{"id": "claim-bbb", "claim_id": "claim-bbb", "status": "pending", "work_item": "wi", "claim": "second claim text"}
+		],
+		"harness": {"mode": "random", "selected": "claude-code", "concurrency": 1}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+	m.settlement = m.settlement.ReplaceStatus(st).SetSize(110, 30)
+	return m
+}
+
+// TestSettlementStatusBarKeybindContract verifies the stateSettlement
+// panelLeft hint set: "j/k queue · p process once · e enable/disable ·
+// l settings · w work · f follow-ups · ? help" (p/e command dispatch is
+// pinned by TestSettlementActionKeybindsReturnCommands).
+func TestSettlementStatusBarKeybindContract(t *testing.T) {
+	t.Run("j/k (queue)", func(t *testing.T) {
+		m := settlementContractModel(t)
+		if !strings.Contains(stripANSI(m.settlement.View()), "> [pending] first claim text") {
+			t.Fatalf("precondition: cursor should start on the first queue item:\n%s", stripANSI(m.settlement.View()))
+		}
+		nm, _ := updateModel(t, m, press('j'))
+		if !strings.Contains(stripANSI(nm.settlement.View()), "> [pending] second claim text") {
+			t.Fatalf("j should move the queue cursor to the second item:\n%s", stripANSI(nm.settlement.View()))
+		}
+		nm, _ = updateModel(t, nm, press('k'))
+		if !strings.Contains(stripANSI(nm.settlement.View()), "> [pending] first claim text") {
+			t.Error("k should move the queue cursor back to the first item")
+		}
+	})
+	t.Run("l (settings)", func(t *testing.T) {
+		nm, _ := updateModel(t, settlementContractModel(t), press('l'))
+		if nm.focusedPanel != panelRight {
+			t.Error("l should focus the inline settings side")
+		}
+	})
+	t.Run("w (work)", func(t *testing.T) {
+		nm, cmd := updateModel(t, settlementContractModel(t), press('w'))
+		if nm.state != stateWork {
+			t.Error("w should return to the work view")
+		}
+		if cmd == nil {
+			t.Error("w should reload work items")
+		}
+	})
+	t.Run("f (follow-ups)", func(t *testing.T) {
+		nm, _ := updateModel(t, settlementContractModel(t), press('f'))
+		if nm.state != stateFollowUps {
+			t.Error("f should switch to the follow-ups view")
+		}
+	})
+	t.Run("? (help)", func(t *testing.T) {
+		nm, _ := updateModel(t, settlementContractModel(t), press('?'))
+		if !nm.showHelp {
+			t.Error("? should open the help modal")
+		}
+	})
+}
+
+// TestSettlementBorderAnnotationAdvertisesJK verifies the settlement panel
+// title annotation shows "j/k queue" with the status side focused and
+// "j/k settings" with the settings side focused (third hint surface beside
+// the status bar and the help modal).
+func TestSettlementBorderAnnotationAdvertisesJK(t *testing.T) {
+	m := settlementContractModel(t)
+	out := stripANSI(m.viewSettlement())
+	if !strings.Contains(out, "j/k  queue") {
+		t.Errorf("panelLeft border annotation should advertise j/k queue:\n%s", out)
+	}
+	m.focusedPanel = panelRight
+	out = stripANSI(m.viewSettlement())
+	if !strings.Contains(out, "j/k  settings") {
+		t.Errorf("panelRight border annotation should advertise j/k settings:\n%s", out)
+	}
+}
+
+// TestSettlementSelectedClaimBlockFollowsCursor pins the compact selected-claim
+// block: bounded (heading + ≤4 lines), follows j/k, omitted when empty.
+func TestSettlementSelectedClaimBlockFollowsCursor(t *testing.T) {
+	m := settlementContractModel(t)
+	view := stripANSI(m.settlement.View())
+	if !strings.Contains(view, "Selected claim") {
+		t.Fatalf("selected-claim block should render for the cursor item:\n%s", view)
+	}
+	if !strings.Contains(view, "- claim-aaa") {
+		t.Fatalf("selected-claim block should show the first claim id:\n%s", view)
+	}
+	nm, _ := updateModel(t, m, press('j'))
+	view = stripANSI(nm.settlement.View())
+	if !strings.Contains(view, "- claim-bbb") {
+		t.Fatalf("selected-claim block should follow the cursor to claim-bbb:\n%s", view)
+	}
+
+	// Bounded: between the "Selected claim" heading and the next section
+	// heading there are at most 4 detail lines.
+	lines := strings.Split(view, "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.Contains(l, "Selected claim") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatal("missing Selected claim heading")
+	}
+	count := 0
+	for _, l := range lines[start+1:] {
+		if strings.Contains(l, "Recent verdicts") {
+			break
+		}
+		count++
+	}
+	if count > 4 {
+		t.Errorf("selected-claim block must stay within 4 lines, got %d:\n%s", count, view)
+	}
+
+	// Omitted when the queue is empty.
+	empty := minimalModel(stateSettlement, nil, nil)
+	st, err := settlement.ParseStatus([]byte(`{"enabled": true, "queue": {"total": 0}, "items": [], "harness": {"concurrency": 1}}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+	empty.settlement = empty.settlement.ReplaceStatus(st).SetSize(110, 30)
+	if strings.Contains(stripANSI(empty.settlement.View()), "Selected claim") {
+		t.Error("selected-claim block must be omitted when nothing is selected")
+	}
+}
+
+// TestSettlementSettingsKeybindContract verifies the stateSettlement
+// panelRight hint set against the inline settings dispatch: "j/k settings ·
+// Enter edit/commit · h status · S all settings", and pins the advertised
+// Esc semantics verbatim: Esc forwards to an actively-editing editor first,
+// else refocuses the status side.
+func TestSettlementSettingsKeybindContract(t *testing.T) {
+	rightModel := func(t *testing.T) model {
+		t.Helper()
+		setupFakeLoreData(t, `{"version": 1, "tui_launch_framework": "claude-code", "settlement": {"enabled": false}}`)
+		m := settlementContractModel(t)
+		m.focusedPanel = panelRight
+		m.ensureSettlementSettingsPanel()
+		if m.settlementSettingsPanel == nil {
+			t.Fatal("expected inline settlement settings panel")
+		}
+		return m
+	}
+	t.Run("j/k (settings)", func(t *testing.T) {
+		m := rightModel(t)
+		before := m.settlementSettingsPanel.View()
+		nm, _ := updateModel(t, m, press('j'))
+		if nm.settlementSettingsPanel.View() == before {
+			t.Error("j should move focus inside the inline settings panel")
+		}
+	})
+	t.Run("Enter (edit/commit)", func(t *testing.T) {
+		m := rightModel(t)
+		// Install focus first so Enter lands on a widget.
+		nm, _ := updateModel(t, m, press('j'))
+		_, cmd := updateModel(t, nm, press(tea.KeyEnter))
+		if cmd == nil {
+			t.Error("Enter should reach the inline settings panel and refresh settlement status")
+		}
+	})
+	t.Run("h (status)", func(t *testing.T) {
+		nm, _ := updateModel(t, rightModel(t), press('h'))
+		if nm.focusedPanel != panelLeft {
+			t.Error("h should refocus the status side")
+		}
+	})
+	t.Run("S (all settings)", func(t *testing.T) {
+		nm, _ := updateModel(t, rightModel(t), press('S'))
+		if !nm.settingsActive {
+			t.Error("S should open the full settings configurator")
+		}
+	})
+	t.Run("Esc (refocuses status side when not editing)", func(t *testing.T) {
+		m := rightModel(t)
+		if m.settlementSettingsPanel.FocusConsumesRunes() {
+			t.Fatal("precondition: panel should not start in an editing state")
+		}
+		nm, _ := updateModel(t, m, press(tea.KeyEscape))
+		if nm.focusedPanel != panelLeft {
+			t.Error("Esc with no active editor should refocus the status side")
+		}
+	})
+	t.Run("Esc (forwards to an actively-editing editor first)", func(t *testing.T) {
+		m := rightModel(t)
+		// Drive the panel into a leaf edit mode: walk rows pressing Enter
+		// until the focused widget consumes runes (a string/number editor).
+		for i := 0; i < 40 && !m.settlementSettingsPanel.FocusConsumesRunes(); i++ {
+			key := press(tea.KeyEnter)
+			if i%2 == 1 {
+				key = press('j')
+			}
+			m, _ = updateModel(t, m, key)
+			if m.focusedPanel != panelRight {
+				// Defensive: stay on the settings side while walking.
+				m.focusedPanel = panelRight
+			}
+		}
+		if !m.settlementSettingsPanel.FocusConsumesRunes() {
+			t.Fatal("could not drive the inline settings panel into an editing state")
+		}
+		nm, _ := updateModel(t, m, press(tea.KeyEscape))
+		if nm.focusedPanel != panelRight {
+			t.Error("Esc while an editor is active must forward to the editor, not refocus the status side")
+		}
+	})
+}
+
+// TestSettingsModalStatusBarKeybindContract verifies the settings-configurator
+// status-bar hint set rendered while the modal is open ("j/k navigate ·
+// Enter/Space commit · u unset · PgUp/PgDn scroll · Esc close") reaches the
+// panel through the modal interception, plus the global quit escape hatches.
+// Widget-level commit/unset semantics are pinned by the internal/settings
+// package tests.
+func TestSettingsModalStatusBarKeybindContract(t *testing.T) {
+	settingsModel := func(t *testing.T) model {
+		t.Helper()
+		setupFakeLoreData(t, `{"version": 1, "tui_launch_framework": "claude-code"}`)
+		m := workContractModel()
+		nm, _ := updateModel(t, m, press('S'))
+		if !nm.settingsActive || nm.settingsPanel == nil {
+			t.Fatal("S should open the settings configurator")
+		}
+		return nm
+	}
+	t.Run("S / Ctrl+, (open)", func(t *testing.T) {
+		_ = settingsModel(t) // S
+		setupFakeLoreData(t, `{"version": 1}`)
+		nm, _ := updateModel(t, workContractModel(), press(',', tea.ModCtrl))
+		if !nm.settingsActive {
+			t.Error("ctrl+, should open the settings configurator")
+		}
+	})
+	t.Run("j/k (navigate)", func(t *testing.T) {
+		m := settingsModel(t)
+		before := m.settingsPanel.View()
+		nm, _ := updateModel(t, m, press('j'))
+		if !nm.settingsActive {
+			t.Fatal("j must not close the modal")
+		}
+		if nm.settingsPanel.View() == before {
+			t.Error("j should move focus inside the settings panel")
+		}
+	})
+	t.Run("PgDn (scroll)", func(t *testing.T) {
+		m := settingsModel(t)
+		nm, _ := updateModel(t, m, press(tea.KeyPgDown))
+		if !nm.settingsActive {
+			t.Error("PgDn must scroll, not close the modal")
+		}
+	})
+	t.Run("Esc (close)", func(t *testing.T) {
+		m := settingsModel(t)
+		nm, _ := updateModel(t, m, press(tea.KeyEscape))
+		if nm.settingsActive {
+			t.Error("Esc should close the settings configurator")
+		}
+	})
+	t.Run("q (quit when not editing)", func(t *testing.T) {
+		m := settingsModel(t)
+		_, cmd := updateModel(t, m, press('q'))
+		if cmd == nil {
+			t.Fatal("q should quit while no text widget is focused")
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Error("q should dispatch tea.Quit")
+		}
+	})
+	t.Run("ctrl+c / ctrl+d (quit)", func(t *testing.T) {
+		for _, k := range []tea.KeyPressMsg{press('c', tea.ModCtrl), press('d', tea.ModCtrl)} {
+			_, cmd := updateModel(t, settingsModel(t), k)
+			if cmd == nil {
+				t.Fatalf("%v should quit from the settings modal", k)
+			}
+			if _, ok := cmd().(tea.QuitMsg); !ok {
+				t.Errorf("%v should dispatch tea.Quit", k)
+			}
+		}
+	})
+}
+
+// TestOnboardingStatusBarKeybindContract verifies the onboarding hint set
+// ("Enter initialize · q quit"); Enter dispatch is pinned by
+// TestStateOnboardingEnterDispatchesInit.
+func TestOnboardingStatusBarKeybindContract(t *testing.T) {
+	t.Run("q (quit)", func(t *testing.T) {
+		m := minimalModel(stateOnboarding, nil, nil)
+		_, cmd := updateModel(t, m, press('q'))
+		if cmd == nil {
+			t.Fatal("q should quit from onboarding")
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Error("q should dispatch tea.Quit")
+		}
+	})
+}
+
+// TestKnowledgeGlobalKeybindContract verifies the help modal's Global rows
+// from the knowledge browser: "q quit" (except while the search input owns
+// letters) and "S settings configurator" (which must actually render).
+// Tree navigation keys are pinned in internal/knowledge browser tests.
+func TestKnowledgeGlobalKeybindContract(t *testing.T) {
+	knowledgeModel := func() model {
+		m := minimalModel(stateKnowledge, nil, nil)
+		m.width = 120
+		m.height = 40
+		m.browser = knowledge.NewBrowserModel("")
+		return m
+	}
+	t.Run("q (quit)", func(t *testing.T) {
+		_, cmd := updateModel(t, knowledgeModel(), press('q'))
+		if cmd == nil {
+			t.Fatal("q should quit from the knowledge browser")
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Error("q should dispatch tea.Quit")
+		}
+	})
+	t.Run("q (typed into active search, no quit)", func(t *testing.T) {
+		m := knowledgeModel()
+		nm, _ := updateModel(t, m, press('/'))
+		if !nm.browser.SearchActive() {
+			t.Fatal("/ should activate the browser search panel")
+		}
+		nm, cmd := updateModel(t, nm, press('q'))
+		if !nm.browser.SearchActive() {
+			t.Error("q while searching must stay in the search input")
+		}
+		if cmd != nil {
+			if _, ok := cmd().(tea.QuitMsg); ok {
+				t.Error("q while searching must not quit")
+			}
+		}
+	})
+	t.Run("S (settings configurator renders over browser)", func(t *testing.T) {
+		setupFakeLoreData(t, `{"version": 1}`)
+		nm, _ := updateModel(t, knowledgeModel(), press('S'))
+		if !nm.settingsActive {
+			t.Fatal("S should open the settings configurator from the knowledge browser")
+		}
+		out := stripANSI(nm.viewContent())
+		if !strings.Contains(out, "Settings") {
+			t.Error("settings modal opened from stateKnowledge must actually render")
+		}
+	})
 }

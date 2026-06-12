@@ -43,12 +43,14 @@ func (m model) viewContent() string {
 		return m.viewOnboarding()
 	}
 
-	if m.state == stateKnowledge {
-		return m.browser.View()
-	}
-
+	// stateKnowledge composes into base (not an early return) so modal
+	// overlays opened from the browser — help (?), settings (S) — actually
+	// render; an early return here left those modals intercepting keys while
+	// invisible.
 	var base string
-	if m.state == stateSettlement {
+	if m.state == stateKnowledge {
+		base = m.browser.View()
+	} else if m.state == stateSettlement {
 		base = m.viewSettlement()
 	} else {
 		cfg := m.buildPaneConfig()
@@ -764,16 +766,14 @@ func (m model) renderStatusBar(width int) string {
 		} else if m.followupDetail.ActiveTab() == followup.TabTriage && m.followupDetail.ActionMenuOpen() {
 			hints = []string{
 				hint("c", "chat"),
-				hint("d", "disposition"),
 				hint("e", "edit"),
 				hint("Esc", "cancel"),
 			}
 		} else if m.followupDetail.ActiveTab() == followup.TabTriage {
 			hints = []string{
 				hint("j/k", "navigate"),
-				hint("space/x", "toggle"),
+				hint("space/x/Enter", "toggle"),
 				hint("a", "all"),
-				hint("Enter", "actions"),
 				hint("p", "promote"),
 				hint("Tab/Shift-Tab", "cycle tabs"),
 				hint("h/Esc", "back to list"),

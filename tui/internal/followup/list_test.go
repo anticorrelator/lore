@@ -287,3 +287,19 @@ func TestListModelViewCompactEmptyList(t *testing.T) {
 		t.Errorf("compact view for empty list should contain 'No', got: %q", view)
 	}
 }
+
+// Border-annotation contract: "ctrl+a  open · closed" toggles the list filter.
+func TestListModelCtrlAToggleOpenClosedFilter(t *testing.T) {
+	m := NewListModel(sampleItems())
+	if m.GetFilterMode() != FilterOpen {
+		t.Fatalf("precondition: list starts on the open filter")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	if m.GetFilterMode() != FilterClosed {
+		t.Error("ctrl+a should switch to the closed filter")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	if m.GetFilterMode() != FilterOpen {
+		t.Error("ctrl+a should toggle back to the open filter")
+	}
+}

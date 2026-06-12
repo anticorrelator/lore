@@ -150,6 +150,10 @@ func (m EntryModel) Init() tea.Cmd {
 	return nil
 }
 
+// Ready reports whether an entry has been loaded into the viewport.
+// The detail pane should only take focus when this is true.
+func (m EntryModel) Ready() bool { return m.ready }
+
 func (m EntryModel) Update(msg tea.Msg) (EntryModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -214,14 +218,14 @@ func (m EntryModel) View() string {
 			dimStyle.Render("Press Esc to go back."))
 	}
 
-	var b strings.Builder
-
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
-	if m.ready {
-		b.WriteString(m.viewport.View())
+	if !m.ready {
+		return "\n  " + dimStyle.Render("Select an entry to view it here.") + "\n"
 	}
 
+	var b strings.Builder
+	b.WriteString(m.viewport.View())
 	b.WriteString("\n")
 
 	// Metadata footer

@@ -1,8 +1,11 @@
 package work
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestPlanTabEmpty(t *testing.T) {
@@ -63,5 +66,26 @@ func TestRenderMarkdownZeroWidth(t *testing.T) {
 	result := renderMarkdown(input, 0)
 	if result == "" {
 		t.Error("should handle zero width gracefully")
+	}
+}
+
+// Status-bar contract "j/k scroll": detail-tab content scrolls via the
+// viewport's default j/k bindings.
+func TestPlanTabJKScrollsViewport(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 80; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	content := b.String()
+	m := NewPlanTabModel(&content, 60, 10)
+	before := m.View()
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	after := m.View()
+	if before == after {
+		t.Fatal("j should scroll the plan viewport down")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	if m.View() != before {
+		t.Error("k should scroll back up")
 	}
 }

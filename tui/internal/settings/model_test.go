@@ -1805,3 +1805,22 @@ func TestHarnessToggleStderrSurfaces_NoticesCount(t *testing.T) {
 		t.Errorf("expected '2 notices' in status, got %q", m.statusMsg)
 	}
 }
+
+// Status-bar contract "PgUp/PgDn scroll": the configurator routes page keys
+// to its viewport even while a widget has focus.
+func TestPgDnPgUpScrollViewport(t *testing.T) {
+	m, _, _ := newTestModel(t, nil)
+	// Small viewport so the widget tree overflows and scrolling has room.
+	m.SetSize(80, 6)
+	_ = m.View() // View populates the viewport content
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if m.viewport.YOffset() == 0 {
+		t.Fatal("PgDn should scroll the settings viewport down")
+	}
+	down := m.viewport.YOffset()
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if m.viewport.YOffset() >= down {
+		t.Error("PgUp should scroll the settings viewport back up")
+	}
+}
