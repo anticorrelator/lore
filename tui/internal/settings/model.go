@@ -49,9 +49,9 @@
 //   - IntentDiscard / IntentNavigate → no-op; the widget already reverted
 //     a draft, or a container consumed navigation without changing values.
 //
-//   - Style caching per D3 + the lipgloss O(n)-per-frame gotcha: themeStyles
-//     is constructed once at NewSettingsModel time and stashed on the model
-//     struct. View() never allocates a lipgloss.Style.
+//   - Style caching per D3 + the lipgloss O(n)-per-frame gotcha: every
+//     shared style is a package-init value in tui/internal/style. View()
+//     never allocates a lipgloss.Style.
 package settings
 
 import (
@@ -65,7 +65,8 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 // ----------------------------------------------------------------------------
@@ -186,10 +187,15 @@ type SettingsModel struct {
 	// inline editors such as the settlement panel, where the whole settings
 	// modal would be too much surface area.
 	limitDotPath string
-	compactEmbed bool
+	// profile selects the layout engine's rendering profile (layout.go).
+	// layoutCompactEmbed only takes effect together with limitDotPath.
+	profile layoutProfile
 
-	focusIdx int  // -1 when nothing focused; otherwise index into the combined topSections+widgets list
-	closed   bool // set by Esc at top-level when no draft is active
+	// nav is the editing/navigation coordinator (coordinator.go). It owns
+	// the focus cursor, navigation gestures, and intent-routing dispatch.
+	nav coordinator
+
+	closed bool // set by Esc at top-level when no draft is active
 
 	// statusMsg is rendered at the bottom of the body. Written on
 	// IntentReject, write errors, and external-command stderr surfacing.
@@ -202,8 +208,6 @@ type SettingsModel struct {
 	// sharp-edges consult). Other harnesses' toggles remain interactive
 	// while one is mid-flight.
 	harnessToggleLocked map[string]bool
-
-	styles themeStyles
 
 	// schemaErr captures *UnsupportedConstructError (or any LoadSchema error)
 	// so View() can render the modal as a static error banner per the D1
@@ -304,10 +308,9 @@ func NewSettingsModel(opts SettingsModelOptions) (*SettingsModel, error) {
 		disableScript:       opts.DisableScript,
 		frameworks:          frameworks,
 		descByPath:          opts.DescriptionsByDotPath,
-		styles:              newThemeStyles(),
-		focusIdx:            -1,
 		harnessToggleLocked: map[string]bool{},
 	}
+	m.nav = coordinator{m: m, focusIdx: -1}
 
 	schema, schemaErr := LoadSchema(opts.SchemaPath)
 	if schemaErr != nil {
@@ -383,7 +386,7 @@ func (m *SettingsModel) rebuildWidgets() {
 		return
 	}
 
-	priorFocusPath := m.focusedDotPath()
+	priorFocusPath := m.nav.focusedDotPath()
 	m.widgets = m.widgets[:0]
 
 	for _, name := range m.schema.Root.PropertyOrder {
@@ -412,7 +415,7 @@ func (m *SettingsModel) rebuildWidgets() {
 	// stable but the widgets slice indices can shift if the property set
 	// changes between sessions.
 	if priorFocusPath != "" {
-		m.focusByDotPath(priorFocusPath)
+		m.nav.focusByDotPath(priorFocusPath)
 	}
 }
 
@@ -1050,7 +1053,7 @@ func (m *SettingsModel) Closed() bool { return m.closed }
 // Hosts use this to decide whether global shortcuts like 'q' (quit) should
 // be intercepted before reaching the panel: when a text-entry widget is
 // focused the host must defer so the user can type the letter literally.
-func (m *SettingsModel) FocusConsumesRunes() bool { return m.focusConsumesNavRunes() }
+func (m *SettingsModel) FocusConsumesRunes() bool { return m.nav.consumesNavRunes() }
 
 // Update routes keystrokes to the focused widget and translates the
 // resulting FieldIntent into write-routing calls.
@@ -1132,8 +1135,8 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 			// dispatch, which silently swallowed Esc whenever the focused
 			// widget didn't have an `esc` case (EnumSelector, ToggleRow,
 			// etc.) and never closed.
-			focused := m.focusedWidget()
-			if compactFocused := m.compactFocusedControl(); compactFocused != nil {
+			focused := m.nav.focusedWidget()
+			if compactFocused := m.nav.focusedCompactControl(); compactFocused != nil {
 				focused = compactFocused
 			}
 			if focused == nil {
@@ -1141,9 +1144,9 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 				return m, nil
 			}
 			updated, cmd, intent := focused.Update(msg)
-			m.replaceFocusedControl(updated)
+			m.nav.replaceFocusedControl(updated)
 			if intent != nil {
-				if extra := m.routeIntent(intent); extra != nil {
+				if extra := m.nav.routeIntent(intent); extra != nil {
 					cmd = teaBatch(cmd, extra)
 				}
 				return m, cmd
@@ -1155,10 +1158,10 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 			m.closed = true
 			return m, cmd
 		case "tab":
-			m.stepRowNavigation(+1)
+			m.nav.stepRowNavigation(+1)
 			return m, nil
 		case "shift+tab":
-			m.stepRowNavigation(-1)
+			m.nav.stepRowNavigation(-1)
 			return m, nil
 		// Scroll keys: route to the viewport so users can navigate long
 		// widget trees with PgUp/PgDn even mid-edit.
@@ -1174,37 +1177,32 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 		// leaf editor is in edit mode, j/k are forwarded as literal/editor
 		// input instead.
 		case "j", "k":
-			if !m.focusConsumesNavRunes() {
+			if !m.nav.consumesNavRunes() {
 				delta := +1
 				if key.String() == "k" {
 					delta = -1
 				}
-				m.stepRowNavigation(delta)
+				m.nav.stepRowNavigation(delta)
 				return m, nil
 			}
 		}
 	}
 
 	// Initial focus: first navigation keystroke installs focus on first item.
-	if m.focusIdx < 0 && len(m.allWidgetSlots()) > 0 {
-		m.focusIdx = 0
-		_ = m.allWidgetSlots()[0].Focus()
-		m.enterLimitedCompactContainer()
-		m.ensureFocusedVisible()
-	}
+	m.nav.ensureInitialFocus()
 
 	// Forward to the focused widget.
-	w := m.focusedWidget()
-	if compactFocused := m.compactFocusedControl(); compactFocused != nil {
+	w := m.nav.focusedWidget()
+	if compactFocused := m.nav.focusedCompactControl(); compactFocused != nil {
 		w = compactFocused
 	}
 	if w == nil {
 		return m, nil
 	}
 	updated, cmd, intent := w.Update(msg)
-	m.replaceFocusedControl(updated)
+	m.nav.replaceFocusedControl(updated)
 	if intent != nil {
-		if extra := m.routeIntent(intent); extra != nil {
+		if extra := m.nav.routeIntent(intent); extra != nil {
 			cmd = teaBatch(cmd, extra)
 		}
 	}
@@ -1253,53 +1251,11 @@ func (m *SettingsModel) limitedWidget() FieldWidget {
 	return nil
 }
 
-func (m *SettingsModel) focusedWidget() FieldWidget {
-	all := m.allWidgetSlots()
-	if m.focusIdx < 0 || m.focusIdx >= len(all) {
-		return nil
-	}
-	return all[m.focusIdx]
-}
-
-// focusedDotPath returns the dot-path of the currently-focused widget, or ""
-// when nothing is focused.
-func (m *SettingsModel) focusedDotPath() string {
-	w := m.focusedWidget()
-	if w == nil {
-		return ""
-	}
-	return w.DotPath()
-}
-
-// focusByDotPath moves focus to the widget with the matching dot-path. No-op
-// when no widget matches (e.g., the path was excluded by a schema edit).
-func (m *SettingsModel) focusByDotPath(dotPath string) {
-	if m.limitDotPath != "" {
-		if dotPath == m.limitDotPath && m.limitedWidget() != nil {
-			m.focusIdx = 0
-			_ = m.limitedWidget().Focus()
-			m.enterLimitedCompactContainer()
-		} else {
-			m.focusIdx = -1
-		}
-		return
-	}
-	all := m.allWidgetSlots()
-	for i, w := range all {
-		if w.DotPath() == dotPath {
-			m.focusIdx = i
-			_ = w.Focus()
-			return
-		}
-	}
-	m.focusIdx = -1
-}
-
 // FocusDotPath moves the initial modal focus to a rendered settings path.
 // Hosts use this for context-sensitive entry points such as opening Settings
 // from the settlement panel directly at the settlement section.
 func (m *SettingsModel) FocusDotPath(dotPath string) {
-	m.focusByDotPath(dotPath)
+	m.nav.focusByDotPath(dotPath)
 }
 
 // LimitToDotPath renders and updates only the matching top-level widget while
@@ -1309,296 +1265,20 @@ func (m *SettingsModel) FocusDotPath(dotPath string) {
 func (m *SettingsModel) LimitToDotPath(dotPath string) {
 	m.limitDotPath = dotPath
 	m.closed = false
-	m.focusByDotPath(dotPath)
-	m.enterLimitedCompactContainer()
+	m.nav.focusByDotPath(dotPath)
+	m.nav.autoEnterCompactEmbed()
 }
 
 // SetCompactEmbed trims section chrome for an embedded limited settings
 // editor. It is intended for surfaces that already provide their own panel
 // title and split chrome, such as the settlement panel.
 func (m *SettingsModel) SetCompactEmbed(compact bool) {
-	m.compactEmbed = compact
-	m.enterLimitedCompactContainer()
-}
-
-func (m *SettingsModel) enterLimitedCompactContainer() {
-	if !m.compactEmbed || m.limitDotPath == "" {
-		return
+	if compact {
+		m.profile = layoutCompactEmbed
+	} else {
+		m.profile = layoutFull
 	}
-	panel, ok := m.limitedWidget().(*ClosedObjectSubPanel)
-	if !ok || len(panel.children) == 0 {
-		return
-	}
-	panel.focused = true
-	panel.entered = true
-	controls := m.compactNavigationControls(panel)
-	if len(controls) > 0 {
-		hasFocus := false
-		for _, control := range controls {
-			if control.Focused() {
-				hasFocus = true
-				break
-			}
-		}
-		if !hasFocus {
-			_ = controls[0].Focus()
-		}
-		return
-	}
-	if panel.cursor < 0 || panel.cursor >= len(panel.children) {
-		panel.cursor = 0
-	}
-}
-
-// replaceFocused updates the focused slot with a new widget value (Bubble
-// Tea value-semantics dance: widgets return possibly-new values from
-// Update). topSections vs widgets dispatch is handled internally.
-func (m *SettingsModel) replaceFocused(w FieldWidget) {
-	if m.limitDotPath != "" {
-		for i, ts := range m.topSections {
-			if ts.widget.DotPath() == m.limitDotPath {
-				m.topSections[i].widget = w
-				return
-			}
-		}
-		for i, widget := range m.widgets {
-			if widget.DotPath() == m.limitDotPath {
-				m.widgets[i] = w
-				return
-			}
-		}
-		return
-	}
-	if m.focusIdx < 0 {
-		return
-	}
-	if m.focusIdx < len(m.topSections) {
-		m.topSections[m.focusIdx].widget = w
-		return
-	}
-	idx := m.focusIdx - len(m.topSections)
-	if idx < len(m.widgets) {
-		m.widgets[idx] = w
-	}
-}
-
-func (m *SettingsModel) replaceFocusedControl(w FieldWidget) {
-	if m.compactEmbed && m.limitDotPath != "" {
-		if m.replaceCompactControl(w) {
-			return
-		}
-	}
-	m.replaceFocused(w)
-}
-
-func (m *SettingsModel) compactFocusedControl() FieldWidget {
-	if !m.compactEmbed || m.limitDotPath == "" {
-		return nil
-	}
-	panel, ok := m.limitedWidget().(*ClosedObjectSubPanel)
-	if !ok {
-		return nil
-	}
-	for _, control := range m.compactNavigationControls(panel) {
-		if control.Focused() {
-			return control
-		}
-	}
-	return nil
-}
-
-func (m *SettingsModel) replaceCompactControl(updated FieldWidget) bool {
-	panel, ok := m.limitedWidget().(*ClosedObjectSubPanel)
-	if !ok || updated == nil {
-		return false
-	}
-	return replacePanelChildByDotPath(panel, updated)
-}
-
-func replacePanelChildByDotPath(panel *ClosedObjectSubPanel, updated FieldWidget) bool {
-	for i, child := range panel.children {
-		if child.DotPath() == updated.DotPath() {
-			panel.children[i] = updated
-			return true
-		}
-		if childPanel, ok := child.(*ClosedObjectSubPanel); ok {
-			if replacePanelChildByDotPath(childPanel, updated) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// stepRowNavigation advances focus by delta (+1 / -1) using hierarchical
-// semantics:
-//
-//  1. At the outer boundary, j/k or tab move between top-level sections.
-//  2. If the selected section has been entered with Enter, NavStep advances
-//     within that container level. Nested containers only receive NavStep after
-//     they have also been entered, so every Enter descends exactly one level.
-//  3. If the focused leaf is actively editing, j/k are not intercepted here;
-//     they are forwarded to the leaf as input.
-func (m *SettingsModel) stepRowNavigation(delta int) {
-	if m.stepLimitedCompactNavigation(delta) {
-		m.ensureFocusedVisible()
-		return
-	}
-	if stepper, ok := m.focusedWidget().(NavStepper); ok {
-		if moved, intent := stepper.NavStep(delta); moved {
-			if intent != nil {
-				m.routeIntent(intent)
-			}
-			m.ensureFocusedVisible()
-			return
-		}
-	}
-	if m.limitDotPath != "" {
-		m.ensureFocusedVisible()
-		return
-	}
-	if intent := m.focusOffset(delta); intent != nil {
-		m.routeIntent(intent)
-	}
-	m.ensureFocusedVisible()
-}
-
-func (m *SettingsModel) stepLimitedCompactNavigation(delta int) bool {
-	if !m.compactEmbed || m.limitDotPath == "" {
-		return false
-	}
-	panel, ok := m.limitedWidget().(*ClosedObjectSubPanel)
-	if !ok {
-		return false
-	}
-	controls := m.compactNavigationControls(panel)
-	if len(controls) == 0 {
-		return true
-	}
-	current := -1
-	for i, control := range controls {
-		if control.Focused() {
-			current = i
-			break
-		}
-	}
-	if current < 0 {
-		current = 0
-		_ = controls[current].Focus()
-		return true
-	}
-	next := current + delta
-	if next < 0 {
-		next = 0
-	}
-	if next >= len(controls) {
-		next = len(controls) - 1
-	}
-	if next == current {
-		return true
-	}
-	if intent := controls[current].Blur(); intent != nil {
-		m.routeIntent(intent)
-	}
-	_ = controls[next].Focus()
-	panel.focused = true
-	panel.entered = true
-	return true
-}
-
-func (m *SettingsModel) compactNavigationControls(panel *ClosedObjectSubPanel) []FieldWidget {
-	var controls []FieldWidget
-	var deferred []FieldWidget
-	var walk func(w FieldWidget)
-	walk = func(w FieldWidget) {
-		if childPanel, ok := w.(*ClosedObjectSubPanel); ok {
-			var localDeferred []FieldWidget
-			for _, child := range childPanel.children {
-				if childPanel.dotPath == "settlement.active_hours" {
-					deferred = append(deferred, child)
-					continue
-				}
-				if childPanel.dotPath == "settlement.harness_selection" && child.DotPath() == "settlement.harness_selection.eligible_frameworks" {
-					localDeferred = append(localDeferred, child)
-					continue
-				}
-				walk(child)
-			}
-			controls = append(controls, localDeferred...)
-			return
-		}
-		controls = append(controls, w)
-	}
-	for _, child := range panel.children {
-		walk(child)
-	}
-	controls = append(controls, deferred...)
-	return controls
-}
-
-// focusOffset shifts focus by delta (+1 / -1), blurring the current focused
-// widget and focusing the new one. Returns the FieldIntent emitted by the
-// blurred widget (typically IntentDiscard for a draft-buffered widget that
-// had a pending draft). Wraps at the ends.
-func (m *SettingsModel) focusOffset(delta int) *FieldIntent {
-	if m.limitDotPath != "" {
-		return nil
-	}
-	all := m.allWidgetSlots()
-	if len(all) == 0 {
-		return nil
-	}
-	var intent *FieldIntent
-	if m.focusIdx >= 0 && m.focusIdx < len(all) {
-		intent = all[m.focusIdx].Blur()
-	}
-	next := m.focusIdx + delta
-	if next < 0 {
-		next = len(all) - 1
-	}
-	if next >= len(all) {
-		next = 0
-	}
-	m.focusIdx = next
-	_ = all[next].Focus()
-	return intent
-}
-
-// routeIntent translates a FieldIntent into write-routing calls per D5/D8/D9.
-// Returns a tea.Cmd when the routing requires async work (only the agent
-// toggle today).
-func (m *SettingsModel) routeIntent(intent *FieldIntent) tea.Cmd {
-	if intent == nil {
-		return nil
-	}
-	switch intent.Status {
-	case IntentCommit:
-		return m.routeCommit(intent)
-	case IntentReject:
-		m.statusMsg = strings.Join(intent.Errors, "; ")
-		m.statusIsError = true
-		return nil
-	case IntentUnset:
-		if err := m.store.Delete(intent.DotPath); err != nil {
-			m.statusMsg = fmt.Sprintf("unset %s: %v", intent.DotPath, err)
-			m.statusIsError = true
-			return nil
-		}
-		// Refresh effective for the affected path so subsequent renders
-		// see absence.
-		m.invalidateEffective(intent.DotPath)
-		m.statusMsg = ""
-		m.statusIsError = false
-		return nil
-	case IntentDiscard:
-		// No-op — widget already reverted its draft.
-		return nil
-	case IntentNavigate:
-		// No-op — container navigation was consumed without clearing or
-		// reverting any committed leaf value.
-		return nil
-	}
-	return nil
+	m.nav.autoEnterCompactEmbed()
 }
 
 // routeCommit handles the IntentCommit branch of routeIntent. Split out for
@@ -1660,6 +1340,20 @@ func (m *SettingsModel) routeCommit(intent *FieldIntent) tea.Cmd {
 	m.statusMsg = ""
 	m.statusIsError = false
 	return nil
+}
+
+// routeUnset handles the IntentUnset branch of the coordinator's intent
+// routing: delete the overlay key so inheritance resumes, refreshing the
+// cached effective document so subsequent renders see absence.
+func (m *SettingsModel) routeUnset(intent *FieldIntent) {
+	if err := m.store.Delete(intent.DotPath); err != nil {
+		m.statusMsg = fmt.Sprintf("unset %s: %v", intent.DotPath, err)
+		m.statusIsError = true
+		return
+	}
+	m.invalidateEffective(intent.DotPath)
+	m.statusMsg = ""
+	m.statusIsError = false
 }
 
 // ToggleHarness runs the harness-toggle enable/disable shell-out for the
@@ -1846,192 +1540,6 @@ func (m *SettingsModel) harnessEnabledFromEffective(framework string) bool {
 	return b
 }
 
-// NavRuneConsumer is implemented by container widgets that need to delegate
-// the j/k-vs-focus-step decision to a currently-active inner widget rather
-// than answering for themselves. Container widgets (HarnessBlockPanel,
-// ClosedObjectSubPanel) implement this so j/k typed into a child that is
-// actively editing reaches the child rather than jumping focus to the next
-// slot.
-//
-// Leaf widgets that toggle between an editing mode and a navigating mode
-// (ListEditor, OpenKeysetKVEditor) also implement this — they consume runes
-// only while a draft is being typed; in nav mode they let j/k pass through
-// for settings-level navigation.
-type NavRuneConsumer interface {
-	ConsumesNavRunes() bool
-}
-
-// NavStepper is implemented by container widgets that own multiple
-// navigable rows. NavStep advances the container's internal cursor by
-// `delta` (+1 forward, -1 backward) and returns:
-//
-//   - moved=true when the cursor moved one row internally, with `intent`
-//     carrying any IntentDiscard the just-blurred child wants to surface
-//     (per D10's tab/focus = discard rule). The model routes the intent
-//     and stops — focusIdx (the top-level slot) does NOT change, so the
-//     containing section frame keeps its bright rail.
-//   - moved=false when the cursor is at the boundary (first row on -1,
-//     last row on +1). The model then advances focus to the next/prev
-//     top-level slot via focusOffset.
-//
-// HarnessBlockPanel and ClosedObjectSubPanel both implement NavStepper so
-// opened containers can traverse their current child level while unopened
-// containers remain a single top-level stop.
-type NavStepper interface {
-	NavStep(delta int) (moved bool, intent *FieldIntent)
-}
-
-// NestedNavigator is implemented by container widgets whose children are only
-// active after the user explicitly enters the container with Enter. It lets
-// parent containers avoid recursive descent until each level has been opened.
-type NestedNavigator interface {
-	Entered() bool
-}
-
-// InnerFocusRanger is implemented by container widgets that render multiple
-// navigable children and need the host viewport to track the *inner* cursor
-// rather than the whole container. Returns (top, bottom) line indices of
-// the inner-cursor child's region within the widget's own View() output
-// (NOT within the rendered slot — the model adds the section-frame offset).
-//
-// Without this, a HarnessBlockPanel taller than the viewport would have
-// ensureFocusedVisible pin the panel's bottom (because the slot as a whole
-// exceeds the viewport), leaving the user's actual cursor — at the top of
-// the panel — off-screen.
-//
-// Returning (-1, -1) means "no inner cursor info; fall back to the slot's
-// whole y-range" (e.g. the panel isn't focused).
-type InnerFocusRanger interface {
-	InnerFocusYRange() (int, int)
-}
-
-// focusConsumesNavRunes reports whether the focused widget is currently
-// interpreting j/k as widget-internal input (typing or editor navigation).
-// When true, j/k must NOT be intercepted for settings navigation — the
-// keystrokes belong to the
-// widget. The taxonomy:
-//
-//   - TextInput / NumericInput: consume only in edit mode. Focus alone is
-//     row selection for navigation.
-//   - ListEditor / OpenKeysetKVEditor: implement NavRuneConsumer with mode-
-//     aware logic — consume only after Enter opens their editor mode. While
-//     merely selected, they release j/k to settings navigation.
-//   - Container widgets (HarnessBlockPanel, ClosedObjectSubPanel) implement
-//     NavRuneConsumer by delegating to their currently-focused child, so
-//     a TextInput nested inside a panel still gets its 'j' keystrokes once
-//     it is in edit mode.
-func (m *SettingsModel) focusConsumesNavRunes() bool {
-	w := m.focusedWidget()
-	if compactFocused := m.compactFocusedControl(); compactFocused != nil {
-		w = compactFocused
-	}
-	if w == nil {
-		return false
-	}
-	if c, ok := w.(NavRuneConsumer); ok {
-		return c.ConsumesNavRunes()
-	}
-	switch w.(type) {
-	case *TextInput, *NumericInput:
-		return false
-	}
-	return false
-}
-
-// ensureFocusedVisible nudges the viewport so the currently-focused widget
-// is within the visible window. No-op when the viewport hasn't been sized,
-// when nothing is focused, or when focus is already in view.
-func (m *SettingsModel) ensureFocusedVisible() {
-	if !m.viewportInit || m.viewport.Height() <= 0 {
-		return
-	}
-	top, bottom := m.computeFocusedYRange()
-	if top < 0 {
-		return
-	}
-	yo := m.viewport.YOffset()
-	h := m.viewport.Height()
-	if top < yo {
-		m.viewport.SetYOffset(top)
-	} else if bottom >= yo+h {
-		m.viewport.SetYOffset(bottom - h + 1)
-	}
-}
-
-// computeFocusedYRange returns the inclusive [top, bottom] line indices of
-// the currently-focused slot within the rendered body. Returns (-1, -1) when
-// nothing is focused. Used by ensureFocusedVisible to decide whether the
-// viewport needs to scroll on focus change.
-//
-// Routes through renderedSlots() so the line counts MUST match what
-// renderBodyContent emits — codex's consult flagged drift between these two
-// paths as a load-bearing risk.
-//
-// Container widgets that implement InnerFocusRanger refine the result: when
-// the focused slot is a multi-child container (HarnessBlockPanel today),
-// the y-range narrows to the inner-cursor child's region within the slot.
-// Without that refinement, a tall panel scrolls its bottom into view while
-// the user's cursor sits at the top, leaving the focused row off-screen.
-func (m *SettingsModel) computeFocusedYRange() (int, int) {
-	if m.focusIdx < 0 {
-		return -1, -1
-	}
-	slots := m.renderedSlots()
-	if m.focusIdx >= len(slots) {
-		return -1, -1
-	}
-	const sep = "\n\n" // joiner between slots (must match renderBodyContent)
-	// Lines added by the joiner BETWEEN two non-empty slots = newline count - 1.
-	// Each joiner "\n\n" carries 2 newline chars but only the inner gap counts
-	// as new content (one blank line between slots) — the outer newlines are
-	// the line terminators for the adjacent slots' content. Computing as
-	// `strings.Count(sep, "\n")` would over-count by 1 per joiner, drifting
-	// the focused y-range a line further down per preceding slot. With many
-	// slots, that drift pushes the focused row off-screen and ensureFocusedVisible
-	// pins the viewport to the wrong line — the user sees no cursor and pressing
-	// k only retreats the over-shoot one slot at a time.
-	gapLines := strings.Count(sep, "\n") - 1
-	cursor := 0
-	for i, slot := range slots {
-		if i > 0 {
-			cursor += gapLines
-		}
-		lines := lineCount(slot)
-		if i == m.focusIdx {
-			// Refine for container widgets that report inner-cursor ranges.
-			// Top sections are ALWAYS framed by renderSection, which prepends
-			// exactly one header line before the widget's body — so the
-			// slot-relative position of the widget's own line 0 is `cursor+1`.
-			//
-			// Schema-driven widgets at top level may render bare (unframed) per
-			// schemaSectionParts; those don't implement InnerFocusRanger today,
-			// so the +1 offset doesn't fire incorrectly. If a future bare widget
-			// implements InnerFocusRanger, this branch would over-shift by 1 —
-			// add a "framed" hint to renderedSlots if/when that case arises.
-			if focused := m.focusedWidget(); focused != nil && !m.compactEmbed {
-				if r, ok := focused.(InnerFocusRanger); ok {
-					if top, bottom := r.InnerFocusYRange(); top >= 0 {
-						return cursor + m.focusedWidgetBodyOffset() + top, cursor + m.focusedWidgetBodyOffset() + bottom
-					}
-				}
-			}
-			return cursor, cursor + lines - 1
-		}
-		cursor += lines
-	}
-	return -1, -1
-}
-
-// lineCount returns the number of visual lines in s. Empty string is 0; a
-// non-empty string has at least one line. Counts '\n' chars and adds 1 for
-// the implicit trailing line. Used by computeFocusedYRange and renderedSlots.
-func lineCount(s string) int {
-	if s == "" {
-		return 0
-	}
-	return strings.Count(s, "\n") + 1
-}
-
 // View renders the body of the configurator modal — chrome (border, title,
 // status bar) is supplied by the host (D2). Per D3, all styles are cached
 // fields on m.styles; View() never allocates a lipgloss.Style.
@@ -2046,16 +1554,16 @@ func (m *SettingsModel) View() string {
 		// D1 verification gate: render the error inline rather than silently
 		// rendering a partial widget.
 		var b strings.Builder
-		b.WriteString(m.styles.sevBlocking.Render("settings schema error"))
+		b.WriteString(style.SevBlocking.Render("settings schema error"))
 		b.WriteByte('\n')
-		b.WriteString(m.styles.dim.Render(m.schemaErr.Error()))
+		b.WriteString(style.Dim.Render(m.schemaErr.Error()))
 		b.WriteByte('\n')
 		return b.String()
 	}
 
 	content := m.renderBodyContent()
 
-	if m.limitDotPath != "" && m.compactEmbed {
+	if m.compactEmbedActive() {
 		return content
 	}
 	if !m.viewportInit || m.viewport.Height() <= 0 {
@@ -2063,860 +1571,6 @@ func (m *SettingsModel) View() string {
 	}
 	m.viewport.SetContent(content)
 	return m.viewport.View()
-}
-
-// renderBodyContent builds the unwrapped body string. Pulled out of View() so
-// the viewport can SetContent on the same string each render without re-
-// computing inside the viewport's own render path.
-//
-// Sections are emitted via renderedSlots() so renderBodyContent and
-// computeFocusedYRange share a single rendering path. If the section frame's
-// line count diverges between the two, scroll-to-focus drifts (a regression
-// codex's consult flagged for the prior side-by-side rendering paths).
-func (m *SettingsModel) renderBodyContent() string {
-	var b strings.Builder
-
-	for i, slot := range m.renderedSlots() {
-		if i > 0 {
-			b.WriteString("\n\n")
-		}
-		b.WriteString(slot)
-	}
-
-	// Status line.
-	if m.statusMsg != "" {
-		b.WriteString("\n\n")
-		if m.statusIsError {
-			b.WriteString(m.styles.sevBlocking.Render(m.statusMsg))
-		} else {
-			b.WriteString(m.styles.dim.Render(m.statusMsg))
-		}
-	}
-
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// renderedSlots returns one rendered string per focusable slot in
-// allWidgetSlots() order. Each top section and each schema-driven top-level
-// widget gets exactly one entry — the focus index from focusIdx maps directly
-// to a position in this slice, which is what makes computeFocusedYRange
-// possible without re-walking the rendering logic.
-//
-// Each slot is wrapped in an open section frame (header rule + left rail) by
-// renderSection, EXCEPT for leaf schema-driven widgets (single-row inputs)
-// which render bare. Framing a one-liner adds chrome without hierarchy
-// benefit.
-func (m *SettingsModel) renderedSlots() []string {
-	if m.limitDotPath != "" {
-		w := m.limitedWidget()
-		if w == nil {
-			return nil
-		}
-		if m.compactEmbed {
-			return []string{m.compactWidgetView(w)}
-		}
-		for _, ts := range m.topSections {
-			if ts.widget.DotPath() == m.limitDotPath {
-				return []string{m.renderSection(ts.name, ts.widget.View(), m.focusIdx == 0)}
-			}
-		}
-		title, body, framed := schemaSectionParts(w)
-		if framed {
-			return []string{m.renderSection(title, body, m.focusIdx == 0)}
-		}
-		return []string{body}
-	}
-
-	out := make([]string, 0, len(m.topSections)+len(m.widgets))
-	cursor := 0
-
-	for _, ts := range m.topSections {
-		focused := m.focusIdx == cursor
-		body := ts.widget.View()
-		out = append(out, m.renderSection(ts.name, body, focused))
-		cursor++
-	}
-
-	for _, w := range m.widgets {
-		focused := m.focusIdx == cursor
-		title, body, framed := schemaSectionParts(w)
-		if framed {
-			out = append(out, m.renderSection(title, body, focused))
-		} else {
-			out = append(out, body)
-		}
-		cursor++
-	}
-
-	return out
-}
-
-func (m *SettingsModel) focusedWidgetBodyOffset() int {
-	if m.limitDotPath != "" && m.compactEmbed {
-		return 0
-	}
-	return 1
-}
-
-func (m *SettingsModel) compactWidgetView(w FieldWidget) string {
-	switch typed := w.(type) {
-	case *ClosedObjectSubPanel:
-		return m.compactClosedObjectView(typed, typed.dotPath == m.limitDotPath)
-	case *ListEditor:
-		if typed.selector && !typed.editing {
-			return m.compactSelectorView(typed)
-		}
-		cp := *typed
-		cp.description = ""
-		return cp.View()
-	case *ActiveHoursRangesEditor:
-		if !typed.editing {
-			return m.compactActiveHoursRangesView(typed)
-		}
-		cp := *typed
-		cp.description = ""
-		return cp.View()
-	case *OpenKeysetKVEditor:
-		cp := *typed
-		cp.description = ""
-		return cp.View()
-	case *AdvancedSection:
-		return typed.View()
-	default:
-		if cell, ok := m.compactLeafCell(w); ok {
-			return cell
-		}
-		return w.View()
-	}
-}
-
-func (m *SettingsModel) compactClosedObjectView(p *ClosedObjectSubPanel, topLevel bool) string {
-	if topLevel {
-		return m.compactTopLevelObjectView(p)
-	}
-
-	var lines []string
-	labelText := compactLabel(p.dotPath, p.label)
-	label := p.styles.subLabel.Render(labelText)
-	if p.focused {
-		state := "[enter]"
-		if p.entered {
-			state = "[active]"
-		}
-		label = p.styles.cursor.Render(labelText) + " " + p.styles.dim.Render(state)
-	}
-	lines = append(lines, label)
-
-	var cells []string
-	flushCells := func() {
-		if len(cells) == 0 {
-			return
-		}
-		lines = append(lines, m.compactGridRows(cells)...)
-		cells = nil
-	}
-
-	for _, child := range p.children {
-		if cell, ok := m.compactLeafCell(child); ok {
-			cells = append(cells, cell)
-			continue
-		}
-		flushCells()
-		childView := m.compactWidgetView(child)
-		if childView != "" {
-			_, isPanel := child.(*ClosedObjectSubPanel)
-			if (topLevel || isPanel) && len(lines) > 0 && lines[len(lines)-1] != "" {
-				lines = append(lines, "")
-			}
-			lines = append(lines, strings.Split(childView, "\n")...)
-		}
-	}
-	flushCells()
-
-	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
-}
-
-func (m *SettingsModel) compactTopLevelObjectView(p *ClosedObjectSubPanel) string {
-	var lines []string
-	var deferred []string
-	var cells []string
-	var batchCells []string
-	flushCells := func() {
-		if len(cells) == 0 {
-			return
-		}
-		lines = append(lines, "general: "+strings.Join(compactTrimCells(cells), "  |  "))
-		cells = nil
-	}
-	flushBatchCells := func() {
-		if len(batchCells) == 0 {
-			return
-		}
-		lines = append(lines, "batch: "+strings.Join(compactTrimCells(batchCells), "  |  "))
-		batchCells = nil
-	}
-
-	for _, child := range p.children {
-		if cell, ok := m.compactLeafCell(child); ok {
-			if p.dotPath == "settlement" && compactSettlementBatchControl(child.DotPath()) {
-				batchCells = append(batchCells, cell)
-				continue
-			}
-			cells = append(cells, cell)
-			continue
-		}
-		flushCells()
-		flushBatchCells()
-		if panel, ok := child.(*ClosedObjectSubPanel); ok {
-			panelLine, panelDeferred := m.compactPanelSummaryWithDeferredWindows(panel)
-			if panelLine != "" {
-				lines = append(lines, strings.Split(panelLine, "\n")...)
-			}
-			deferred = append(deferred, panelDeferred...)
-			continue
-		}
-		childView := m.compactWidgetView(child)
-		if childView != "" {
-			lines = append(lines, strings.Split(childView, "\n")...)
-		}
-	}
-	flushCells()
-	flushBatchCells()
-	lines = append(lines, deferred...)
-
-	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
-}
-
-func compactSettlementBatchControl(dotPath string) bool {
-	switch dotPath {
-	case "settlement.batch_size", "settlement.batch_recompute_min_interval_seconds":
-		return true
-	default:
-		return false
-	}
-}
-
-func (m *SettingsModel) compactPanelSummary(p *ClosedObjectSubPanel) string {
-	line, deferred := m.compactPanelSummaryWithDeferredWindows(p)
-	if len(deferred) > 0 {
-		if line != "" {
-			return strings.TrimRight(line+"\n"+strings.Join(deferred, "\n"), "\n")
-		}
-		return strings.TrimRight(strings.Join(deferred, "\n"), "\n")
-	}
-	return line
-}
-
-func (m *SettingsModel) compactPanelSummaryWithDeferredWindows(p *ClosedObjectSubPanel) (string, []string) {
-	labelText := compactLabel(p.dotPath, p.label)
-	label := p.styles.subLabel.Render(labelText)
-	if p.focused {
-		state := "[enter]"
-		if p.entered {
-			state = "[active]"
-		}
-		label = p.styles.cursor.Render(labelText) + " " + p.styles.dim.Render(state)
-	}
-
-	parts := []string{}
-	var expanded []string
-	var deferred []string
-	var deferredWindowControls []string
-	for _, child := range p.children {
-		if cell, ok := m.compactLeafCell(child); ok {
-			if p.dotPath == "settlement.active_hours" {
-				deferredWindowControls = append(deferredWindowControls, strings.TrimSpace(cell))
-				continue
-			}
-			parts = append(parts, strings.TrimSpace(cell))
-			continue
-		}
-		switch typed := child.(type) {
-		case *ListEditor:
-			if typed.selector && !typed.editing {
-				if p.dotPath == "settlement.harness_selection" && !m.compactActiveHoursRangesEditing() {
-					expanded = append(expanded, m.compactSelectorBlockLines(typed)...)
-				} else {
-					parts = append(parts, strings.TrimSpace(m.compactSelectorLine(typed)))
-				}
-				continue
-			}
-		case *ActiveHoursRangesEditor:
-			if !typed.editing {
-				if p.dotPath == "settlement.active_hours" {
-					deferred = append(deferred, compactActiveHoursGroupLines(labelText, m.compactActiveHoursWindowLines(typed), deferredWindowControls)...)
-				} else {
-					parts = append(parts, strings.TrimSpace(m.compactActiveHoursRangesLine(typed)))
-				}
-				continue
-			}
-			if p.dotPath == "settlement.active_hours" {
-				deferred = append(deferred, compactActiveHoursGroupLines(labelText, m.compactActiveHoursEditLines(typed), deferredWindowControls)...)
-				continue
-			}
-		}
-		childView := m.compactWidgetView(child)
-		if childView != "" {
-			expanded = append(expanded, strings.Split(childView, "\n")...)
-		}
-	}
-
-	if len(parts) == 0 && len(expanded) == 0 && len(deferred) > 0 {
-		return "", deferred
-	}
-
-	line := labelText + ":"
-	if len(parts) > 0 {
-		line += " " + strings.Join(parts, "  |  ")
-	}
-	if p.focused {
-		state := "[enter]"
-		if p.entered {
-			state = "[active]"
-		}
-		line = p.styles.cursor.Render(line) + " " + p.styles.dim.Render(state)
-	} else {
-		line = label + ": " + strings.Join(parts, "  |  ")
-	}
-	lines := []string{line}
-	lines = append(lines, expanded...)
-	return strings.TrimRight(strings.Join(lines, "\n"), "\n"), deferred
-}
-
-func (m *SettingsModel) compactActiveHoursRangesEditing() bool {
-	panel, ok := m.limitedWidget().(*ClosedObjectSubPanel)
-	if !ok {
-		return false
-	}
-	var walk func(FieldWidget) bool
-	walk = func(w FieldWidget) bool {
-		switch typed := w.(type) {
-		case *ActiveHoursRangesEditor:
-			return typed.dotPath == "settlement.active_hours.ranges" && typed.editing
-		case *ClosedObjectSubPanel:
-			for _, child := range typed.children {
-				if walk(child) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	return walk(panel)
-}
-
-func (m *SettingsModel) compactGridRows(cells []string) []string {
-	if len(cells) == 0 {
-		return nil
-	}
-	width := m.wrapWidth
-	if width <= 0 {
-		width = 80
-	}
-	gap := 2
-	preferredColW := 34
-	cols := width / (preferredColW + gap)
-	if cols < 1 {
-		cols = 1
-	}
-	if cols > 3 {
-		cols = 3
-	}
-	if len(cells) < cols {
-		cols = len(cells)
-	}
-	colW := preferredColW
-	if cols == 1 || width < preferredColW {
-		cols = 1
-		colW = width
-	}
-
-	var rows []string
-	for i := 0; i < len(cells); i += cols {
-		end := i + cols
-		if end > len(cells) {
-			end = len(cells)
-		}
-		parts := make([]string, 0, end-i)
-		for _, cell := range cells[i:end] {
-			parts = append(parts, compactFitCell(cell, colW))
-		}
-		rows = append(rows, strings.Join(parts, strings.Repeat(" ", gap)))
-	}
-	return rows
-}
-
-func (m *SettingsModel) compactLeafCell(w FieldWidget) (string, bool) {
-	switch typed := w.(type) {
-	case *ToggleRow:
-		marker := "[ ]"
-		if typed.current {
-			marker = "[x]"
-		}
-		cell := fmt.Sprintf("%s %s", marker, typed.styles.label.Render(compactLabel(typed.dotPath, typed.label)))
-		if !typed.present && typed.allowUnset {
-			cell += " " + typed.styles.dim.Render("(default)")
-		}
-		if typed.focused {
-			cell = typed.styles.cursor.Render(cell)
-		}
-		return cell, true
-	case *TextInput:
-		indicator := " "
-		if typed.draft != typed.committed {
-			indicator = typed.styles.pending.Render("*")
-		}
-		display := typed.draft
-		if display == "" && !typed.focused {
-			display = typed.styles.dim.Render(compactEmptyValue(typed.present, typed.allowUnset))
-		}
-		cursor := ""
-		if typed.focused && typed.editing {
-			cursor = "_"
-		}
-		cell := fmt.Sprintf("%s %s: %s%s", indicator, typed.styles.label.Render(compactLabel(typed.dotPath, typed.label)), typed.styles.value.Render(display), cursor)
-		if typed.focused && !typed.editing {
-			cell = typed.styles.cursor.Render(cell) + " " + typed.styles.dim.Render("[edit]")
-		}
-		if len(typed.errors) > 0 {
-			cell += " " + typed.styles.error.Render("!")
-		}
-		return cell, true
-	case *NumericInput:
-		indicator := " "
-		if typed.draft != typed.committed {
-			indicator = typed.styles.pending.Render("*")
-		}
-		display := typed.draft
-		if display == "" && !typed.focused {
-			display = typed.styles.dim.Render(compactEmptyValue(typed.present, typed.allowUnset))
-		}
-		cursor := ""
-		if typed.focused && typed.editing {
-			cursor = "_"
-		}
-		cell := fmt.Sprintf("%s %s: %s%s", indicator, typed.styles.label.Render(compactLabel(typed.dotPath, typed.label)), typed.styles.value.Render(display), cursor)
-		if typed.focused && !typed.editing {
-			cell = typed.styles.cursor.Render(cell) + " " + typed.styles.dim.Render("[edit]")
-		}
-		if len(typed.errors) > 0 {
-			cell += " " + typed.styles.error.Render("!")
-		}
-		return cell, true
-	case *EnumSelector:
-		label := typed.fieldLabel
-		if label == "" {
-			label = pathLeaf(typed.dotPath)
-		}
-		label = compactLabel(typed.dotPath, label)
-		value := ""
-		if typed.current >= 0 && typed.current < len(typed.values) {
-			value = typed.values[typed.current]
-		} else {
-			value = "<unset>"
-		}
-		cell := fmt.Sprintf("  %s: %s", typed.styles.label.Render(label), typed.styles.value.Render(value))
-		if typed.focused {
-			cell = typed.styles.cursor.Render(cell) + " " + typed.styles.dim.Render("[select]")
-		}
-		return cell, true
-	default:
-		return "", false
-	}
-}
-
-func (m *SettingsModel) compactSelectorView(l *ListEditor) string {
-	return compactFitCell(m.compactSelectorLine(l), compactWidth(m.wrapWidth))
-}
-
-func (m *SettingsModel) compactSelectorLine(l *ListEditor) string {
-	label := compactLabel(l.dotPath, l.label)
-	value := "none"
-	if len(l.draft) > 0 {
-		value = strings.Join(l.draft, ", ")
-	}
-	line := fmt.Sprintf("  %s: %s", l.styles.label.Render(label), l.styles.value.Render(value))
-	if !l.present && l.allowUnset {
-		line += " " + l.styles.dim.Render("(default)")
-	}
-	if l.focused {
-		line = l.styles.cursor.Render(line) + " " + l.styles.dim.Render("[select]")
-	}
-	return line
-}
-
-func (m *SettingsModel) compactSelectorBlockLines(l *ListEditor) []string {
-	label := compactLabel(l.dotPath, l.label)
-	header := fmt.Sprintf("%s:", l.styles.label.Render(label))
-	if !l.present && l.allowUnset {
-		header += " " + l.styles.dim.Render("(default)")
-	}
-	if l.focused && !l.editing {
-		header = l.styles.cursor.Render(header) + " " + l.styles.dim.Render("[select]")
-	}
-	lines := []string{header}
-	for i, item := range l.allowed {
-		marker := "[ ]"
-		if stringSliceContains(l.draft, item) {
-			marker = "[x]"
-		}
-		line := fmt.Sprintf("  %s %s", marker, item)
-		if l.focused && l.editing && i == l.cursor {
-			line = l.styles.cursor.Render(line)
-		} else {
-			line = l.styles.value.Render(line)
-		}
-		lines = append(lines, line)
-	}
-	if l.focused && l.editing {
-		lines = append(lines, l.styles.dim.Render("  [Space toggle  Enter commit  Esc discard]"))
-	}
-	return lines
-}
-
-func (m *SettingsModel) compactActiveHoursRangesView(a *ActiveHoursRangesEditor) string {
-	return strings.Join(compactFitLines(m.compactActiveHoursWindowLines(a), compactWidth(m.wrapWidth)), "\n")
-}
-
-func (m *SettingsModel) compactActiveHoursEditLines(a *ActiveHoursRangesEditor) []string {
-	total := len(a.draft)
-	header := fmt.Sprintf("%s: (%d windows)", a.styles.label.Render(compactLabel(a.dotPath, a.label)), total)
-	if !a.present {
-		header += " " + a.styles.dim.Render("(default)")
-	}
-	header += " " + a.styles.dim.Render("[editing]")
-
-	lines := []string{header}
-	if total == 0 {
-		lines = append(lines, a.styles.dim.Render("  (no windows)"))
-	} else {
-		maxRows := compactActiveHoursEditWindowRows(m.viewport.Height())
-		start, end := compactVisibleWindow(total, a.cursor, maxRows)
-		if start > 0 {
-			lines = append(lines, a.styles.dim.Render(fmt.Sprintf("  ... %d earlier", start)))
-		}
-		for i := start; i < end; i++ {
-			r := a.draft[i]
-			row := fmt.Sprintf("  %s %s  %s-%s", compactCursorMarker(i == a.cursor), daysLabel(r.Days), r.Start, r.End)
-			if i == a.cursor {
-				row += " " + a.styles.dim.Render(activeHoursFieldLabel(a.field))
-				lines = append(lines, a.styles.cursor.Render(row))
-				if a.field == 0 {
-					lines = append(lines, a.styles.dim.Render("    "+activeHoursDaySelector(r.Days)))
-				}
-			} else {
-				lines = append(lines, a.styles.value.Render(row))
-			}
-		}
-		if end < total {
-			lines = append(lines, a.styles.dim.Render(fmt.Sprintf("  ... %d later", total-end)))
-		}
-	}
-	help := "  j/k field  h/l field  +/- time  1-7 days  a add  d delete  Enter save  Esc discard"
-	lines = append(lines, a.styles.dim.Render(help))
-	if len(a.errors) > 0 {
-		lines = append(lines, a.styles.error.Render("  "+strings.Join(a.errors, "; ")))
-	}
-	return compactFitLines(lines, compactWidth(m.wrapWidth))
-}
-
-func compactActiveHoursEditWindowRows(height int) int {
-	if height >= 11 {
-		return 3
-	}
-	if height >= 8 {
-		return 2
-	}
-	return 1
-}
-
-func compactVisibleWindow(total, cursor, maxRows int) (int, int) {
-	if total <= 0 {
-		return 0, 0
-	}
-	if maxRows < 1 {
-		maxRows = 1
-	}
-	if maxRows > total {
-		maxRows = total
-	}
-	if cursor < 0 {
-		cursor = 0
-	}
-	if cursor >= total {
-		cursor = total - 1
-	}
-	start := cursor - maxRows/2
-	if start < 0 {
-		start = 0
-	}
-	if start+maxRows > total {
-		start = total - maxRows
-	}
-	return start, start + maxRows
-}
-
-func compactCursorMarker(active bool) string {
-	if active {
-		return ">"
-	}
-	return " "
-}
-
-func (m *SettingsModel) compactActiveHoursRangesLine(a *ActiveHoursRangesEditor) string {
-	lines := m.compactActiveHoursWindowLines(a)
-	if len(lines) == 0 {
-		return ""
-	}
-	return lines[0]
-}
-
-func (m *SettingsModel) compactActiveHoursWindowLines(a *ActiveHoursRangesEditor) []string {
-	label := compactLabel(a.dotPath, a.label)
-	parts := make([]string, 0, len(a.draft))
-	for _, r := range a.draft {
-		parts = append(parts, fmt.Sprintf("%s %s-%s", daysLabel(r.Days), r.Start, r.End))
-	}
-	if len(parts) > 0 {
-		lines := make([]string, 0, len(parts))
-		prefix := fmt.Sprintf("%s: ", a.styles.label.Render(label))
-		continuation := strings.Repeat(" ", lipgloss.Width(label)+2)
-		for i, part := range parts {
-			line := continuation + a.styles.value.Render(part)
-			if i == 0 {
-				line = prefix + a.styles.value.Render(part)
-				if !a.present {
-					line += " " + a.styles.dim.Render("(default)")
-				}
-				if a.focused {
-					line = a.styles.cursor.Render(line) + " " + a.styles.dim.Render("[edit]")
-				}
-			}
-			lines = append(lines, line)
-		}
-		return lines
-	}
-	line := fmt.Sprintf("%s: %s", a.styles.label.Render(label), a.styles.dim.Render("(all time)"))
-	if a.focused {
-		line = a.styles.cursor.Render(line) + " " + a.styles.dim.Render("[edit]")
-	}
-	return []string{line}
-}
-
-func compactActiveHoursGroupLines(groupLabel string, lines, controls []string) []string {
-	if len(lines) == 0 {
-		return lines
-	}
-	out := append([]string(nil), lines...)
-	first := strings.TrimSpace(out[0])
-	if len(controls) > 0 {
-		if before, after, ok := strings.Cut(first, ": "); ok {
-			first = strings.Join(controls, "  |  ") + "  |  " + before + ": " + after
-		} else {
-			first = first + "  |  " + strings.Join(controls, "  |  ")
-		}
-	}
-	out[0] = groupLabel + ": " + first
-	continuation := strings.Repeat(" ", lipgloss.Width(groupLabel)+2)
-	for i := 1; i < len(out); i++ {
-		out[i] = continuation + strings.TrimSpace(out[i])
-	}
-	return out
-}
-
-func compactEmptyValue(present, allowUnset bool) string {
-	if !present && allowUnset {
-		return "default"
-	}
-	return "<empty>"
-}
-
-func compactLabel(dotPath, fallback string) string {
-	switch dotPath {
-	case "settlement.max_concurrency":
-		return "concurrency"
-	case "settlement.batch_size":
-		return "batch size"
-	case "settlement.batch_recompute_min_interval_seconds":
-		return "batch interval"
-	case "settlement.lease_ttl_seconds":
-		return "lease ttl"
-	case "settlement.executor_timeout_seconds":
-		return "timeout"
-	case "settlement.active_hours":
-		return "active hours"
-	case "settlement.active_hours.enabled":
-		return "enabled"
-	case "settlement.active_hours.timezone":
-		return "timezone"
-	case "settlement.active_hours.ranges":
-		return "windows"
-	case "settlement.harness_selection":
-		return "harness"
-	case "settlement.harness_selection.mode":
-		return "mode"
-	case "settlement.harness_selection.eligible_frameworks":
-		return "eligible"
-	case "settlement.harness_selection.random_seed":
-		return "seed"
-	default:
-		if fallback != "" {
-			return fallback
-		}
-		return pathLeaf(dotPath)
-	}
-}
-
-func compactFitCell(cell string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	styled := lipgloss.NewStyle().MaxWidth(width).Render(cell)
-	cellW := lipgloss.Width(styled)
-	if cellW < width {
-		styled += strings.Repeat(" ", width-cellW)
-	}
-	return styled
-}
-
-func compactFitLines(lines []string, width int) []string {
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		out = append(out, compactFitCell(line, width))
-	}
-	return out
-}
-
-func compactTrimCells(cells []string) []string {
-	out := make([]string, 0, len(cells))
-	for _, cell := range cells {
-		out = append(out, strings.TrimSpace(cell))
-	}
-	return out
-}
-
-func compactWidth(width int) int {
-	if width <= 0 {
-		return 80
-	}
-	return width
-}
-
-func pathLeaf(path string) string {
-	if idx := strings.LastIndexByte(path, '.'); idx >= 0 && idx+1 < len(path) {
-		return path[idx+1:]
-	}
-	return path
-}
-
-// schemaSectionParts extracts (title, body, framed) for a schema-driven
-// top-level widget. Container widgets (ClosedObjectSubPanel via BodyViewer,
-// OpenKeysetKVEditor, ListEditor) get a section frame whose header carries
-// the field name; leaf widgets render bare so single-row inputs don't pay
-// the chrome cost of a frame around one line.
-//
-// The title comes from the widget's first dot-path segment (top-level field
-// name) — for nested sub-panels rendered inside a parent's body, the parent
-// retains its existing label-rendering inside the frame body, untouched.
-func schemaSectionParts(w FieldWidget) (title, body string, framed bool) {
-	dotPath := w.DotPath()
-	title = topLevelName(dotPath)
-	if bv, ok := w.(BodyViewer); ok {
-		return title, bv.ViewBody(), true
-	}
-	// Non-BodyViewer widgets render their full View(). Whether they get a
-	// frame depends on whether they're container-shaped — we use a type
-	// switch rather than a method so leaf widgets stay free of an interface
-	// they have no business implementing.
-	switch w.(type) {
-	case *ListEditor:
-		return title, w.View(), true
-	}
-	// Leaf widget (TextInput / NumericInput / ToggleRow / EnumSelector at
-	// top level). Render bare; the section frame would be visual overhead
-	// for a single row.
-	return "", w.View(), false
-}
-
-// topLevelName returns the first segment of a dot-path, used as the section
-// title for schema-driven top-level widgets. Empty string when dotPath is
-// empty.
-func topLevelName(dotPath string) string {
-	if dotPath == "" {
-		return ""
-	}
-	if idx := strings.IndexByte(dotPath, '.'); idx >= 0 {
-		return dotPath[:idx]
-	}
-	return dotPath
-}
-
-// renderSection wraps `body` in an open section frame:
-//
-//	╭─ title ──────────────...
-//	│ body line 1
-//	│ body line 2
-//
-// The rail color tracks `focused`: dim by default, bright when this section
-// holds the focused widget — so the user can see at a glance which section
-// their keystrokes affect. The trailing rule fills the section header out to
-// the body width pushed by SetSize, falling back to a 60-col default when the
-// host hasn't sized the model yet.
-//
-// Per D3, every style is pulled from the cached themeStyles bag — no
-// lipgloss.Style is allocated here. Per the codex consult, this idiom replaces
-// the old activeTab pill on top-section labels (which read like tab navigation
-// rather than a section header).
-func (m *SettingsModel) renderSection(title, body string, focused bool) string {
-	rail := m.styles.sectionRail
-	if focused {
-		rail = m.styles.sectionRailActive
-	}
-
-	width := m.wrapWidth
-	if width <= 0 {
-		width = 60
-	}
-
-	// Header: ╭─ title ────...
-	var header strings.Builder
-	header.WriteString(rail.Render("╭─ "))
-	header.WriteString(m.styles.sectionTitle.Render(title))
-	header.WriteByte(' ')
-	// Fill the remainder with ─ characters. "╭─ " (3) + title runes + " " (1)
-	// already consumed; clamp to ≥1 to avoid negative repeat counts on very
-	// narrow widths.
-	used := 3 + runeCount(title) + 1
-	fillN := width - used
-	if fillN < 1 {
-		fillN = 1
-	}
-	header.WriteString(m.styles.sectionRule.Render(strings.Repeat("─", fillN)))
-
-	// Body: each line prefixed with rail glyph + space.
-	railPrefix := rail.Render("│") + " "
-	var b strings.Builder
-	b.WriteString(header.String())
-	if body != "" {
-		for _, line := range strings.Split(body, "\n") {
-			b.WriteByte('\n')
-			b.WriteString(railPrefix)
-			b.WriteString(line)
-		}
-	}
-	return b.String()
-}
-
-// runeCount returns the rune count of s. Inlined here (rather than reaching
-// into widgets.go's runeLen) so model.go stays decoupled from widget-internal
-// helpers — the cost is one ~5-line duplicate, the benefit is that section
-// framing has no cross-file dependency on widget rendering primitives.
-func runeCount(s string) int {
-	n := 0
-	for range s {
-		n++
-	}
-	return n
 }
 
 // ----------------------------------------------------------------------------

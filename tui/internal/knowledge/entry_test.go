@@ -3,6 +3,8 @@ package knowledge
 import (
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 // Real-world fixtures sampled from the live knowledge store. Keep these as
@@ -120,6 +122,31 @@ func TestStripMetaComment_PreservesNonMetaComments(t *testing.T) {
 	out := stripMetaComment(in)
 	if !strings.Contains(out, "Append new entries below this line.") {
 		t.Errorf("non-meta comment was incorrectly stripped: %q", out)
+	}
+}
+
+func TestEntryView_BodyAndFooterAfterLoad(t *testing.T) {
+	m := NewEntryModel("test-entry")
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = m.Update(EntryLoadedMsg{
+		Content: "## Section\n\nBody text with `code`.\n",
+		Meta: EntryMeta{
+			Learned:    "2026-04-01",
+			Confidence: "high",
+			Source:     "manual",
+			Scale:      "subsystem",
+		},
+	})
+
+	view := stripANSI(m.View())
+	for _, want := range []string{
+		"Section",
+		"Body text with code.",
+		"learned: 2026-04-01 | confidence: high | source: manual | scale: subsystem  |  Esc back",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("View() missing %q after stripANSI:\n%s", want, view)
+		}
 	}
 }
 

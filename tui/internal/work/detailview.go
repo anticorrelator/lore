@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/anticorrelator/lore/tui/internal/collection"
 	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
@@ -20,14 +21,48 @@ const (
 	TabNotes
 	TabTasks
 	TabExecLog
-	TabFile // extra document tabs; use tabInfo.extraIndex to identify the viewport
+	TabFile // extra document tabs; identified by a "file:<name>" host ID
 )
 
-// tabInfo holds display metadata for a tab.
-type tabInfo struct {
-	id         Tab
-	label      string
-	extraIndex int // index into DetailModel.extraViewports; only meaningful for TabFile
+// extraFileIDPrefix namespaces extra-file tab IDs in the collection.TabHost;
+// the suffix is the file's name stem, which is unique within the work item.
+const extraFileIDPrefix = "file:"
+
+// hostID is the Tab's stable string identity inside the collection.TabHost.
+// TabFile tabs are identified per file via extraFileIDPrefix instead.
+func (t Tab) hostID() string {
+	switch t {
+	case TabMeta:
+		return "meta"
+	case TabPlan:
+		return "plan"
+	case TabNotes:
+		return "notes"
+	case TabTasks:
+		return "tasks"
+	case TabExecLog:
+		return "execlog"
+	}
+	return ""
+}
+
+// tabFromHostID maps a TabHost ID back to the Tab constant (TabMeta when
+// the host is empty or the ID is unknown).
+func tabFromHostID(id string) Tab {
+	if strings.HasPrefix(id, extraFileIDPrefix) {
+		return TabFile
+	}
+	switch id {
+	case "plan":
+		return TabPlan
+	case "notes":
+		return TabNotes
+	case "tasks":
+		return TabTasks
+	case "execlog":
+		return TabExecLog
+	}
+	return TabMeta
 }
 
 // DetailLoadedMsg is sent when work item detail finishes loading.
@@ -52,18 +87,20 @@ type DetailPlanRefreshedMsg struct {
 	Content string
 }
 
-// DetailModel is the Bubble Tea model for the tabbed detail view.
+// DetailModel is the Bubble Tea model for the tabbed detail view. The tab
+// host owns tab state, cycling, preserve-across-reload, and mouse
+// hit-testing; content rendering and key routing stay here because the tab
+// sub-models are value types descriptor callbacks cannot track across model
+// copies, so descriptors carry identity and label only.
 type DetailModel struct {
-	slug      string
-	workDir   string
-	detail    *WorkItemDetail
-	loading   bool
-	err       error
-	tabs      []tabInfo
-	activeTab int
-	savedTab  int // 1-indexed tab index to restore after reload; 0 = not set
-	width     int
-	height    int
+	slug    string
+	workDir string
+	detail  *WorkItemDetail
+	loading bool
+	err     error
+	tabHost collection.TabHost
+	width   int
+	height  int
 
 	// contentStartY/X track the absolute terminal position of the first row
 	// of this detail view's output, set by the parent via SetContentStart().
@@ -86,6 +123,7 @@ func NewDetailModel(workDir, slug string) DetailModel {
 		slug:    slug,
 		workDir: workDir,
 		loading: true,
+		tabHost: collection.NewTabHost(),
 	}
 }
 
@@ -120,6 +158,13 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 
 	case DetailExternalSessionMsg:
 		m.externalSession = msg.Active
+		// The banner line shifts the tab bar down one row; keep the host's
+		// mouse hit-test anchored on the bar.
+		if msg.Active {
+			m.tabHost.SetBarOffsetY(2)
+		} else {
+			m.tabHost.SetBarOffsetY(1)
+		}
 		return m, nil
 
 	case DetailLoadedMsg:
@@ -132,17 +177,7 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 			return m, nil
 		}
 		m.detail = msg.Detail
-		m.tabs = m.buildTabs()
-		if m.savedTab > 0 {
-			restored := m.savedTab - 1
-			if restored >= len(m.tabs) {
-				restored = len(m.tabs) - 1
-			}
-			m.activeTab = restored
-			m.savedTab = 0
-		} else {
-			m.activeTab = 0
-		}
+		m.tabHost.SetTabs(m.buildTabs())
 		m.notesTab = NewNotesTabModel(m.detail.NotesContent, m.contentWidth(), m.contentHeight())
 		if m.detail.PlanContent != nil {
 			rendered := renderMarkdown(*m.detail.PlanContent, m.contentWidth())
@@ -194,44 +229,28 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		if m.detail != nil && m.detail.PlanContent == nil {
 			s := msg.Content
 			m.detail.PlanContent = &s
-			m.tabs = m.buildTabs()
+			m.tabHost.SetTabs(m.buildTabs())
 		}
 		return m, nil
 
 	case tea.MouseMsg:
-		// Tab bar click hit-test: only switch tabs on left-click press.
+		// Tab bar click hit-test: only switch tabs on left-click press. The
+		// host owns the per-label arithmetic; bar-line clicks never reach the
+		// active tab's content.
 		if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
-			tabBarY := m.contentStartY + 1
-			if click.Y == tabBarY && len(m.tabs) > 0 {
-				// Compute each tab's column range from label widths.
-				// Tab bar format: "  " + [" label "] + " " + [" label "] + ...
-				// Each label rendered with Padding(0,1) so visual width = len(label)+2.
-				x := m.contentStartX + 2 // "  " indent (2 chars within panel + panel margin)
-				for i, tab := range m.tabs {
-					tabW := len(tab.label) + 2 // padding(0,1) adds 1 char each side
-					if click.X >= x && click.X < x+tabW {
-						m.activeTab = i
-						return m, nil
-					}
-					x += tabW + 1 // +1 for the " " separator between tabs
-				}
+			if click.Y == m.tabBarY() && len(m.tabHost.Tabs()) > 0 {
+				m.tabHost, _ = m.tabHost.Update(click)
+				return m, nil
 			}
 		}
-		// Forward all mouse events to the active tab for scroll handling.
+		// Forward all other mouse events to the active tab for scroll handling.
 
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc", "b":
 			return m, func() tea.Msg { return BackToListMsg{} }
-		case "tab":
-			if len(m.tabs) > 0 {
-				m.activeTab = (m.activeTab + 1) % len(m.tabs)
-			}
-			return m, nil
-		case "shift+tab":
-			if len(m.tabs) > 0 {
-				m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
-			}
+		case "tab", "shift+tab":
+			m.tabHost, _ = m.tabHost.Update(msg)
 			return m, nil
 		}
 	}
@@ -248,39 +267,65 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 	case TabExecLog:
 		m.execLogModel, cmd = m.execLogModel.Update(msg)
 	case TabFile:
-		if m.activeTab < len(m.tabs) {
-			idx := m.tabs[m.activeTab].extraIndex
-			if idx >= 0 && idx < len(m.extraViewports) {
-				m.extraViewports[idx], cmd = m.extraViewports[idx].Update(msg)
-			}
+		if idx := m.activeExtraIndex(); idx >= 0 && idx < len(m.extraViewports) {
+			m.extraViewports[idx], cmd = m.extraViewports[idx].Update(msg)
 		}
 	}
 
 	return m, cmd
 }
 
+// tabBarY returns the absolute terminal row of the tab bar line: one below
+// the content start, two when the external-session banner is showing.
+func (m DetailModel) tabBarY() int {
+	if m.externalSession {
+		return m.contentStartY + 2
+	}
+	return m.contentStartY + 1
+}
+
+// activeExtraIndex resolves the active "file:" tab to its index in
+// extraViewports (and detail.ExtraFiles), or -1 when the active tab is not
+// an extra-file tab.
+func (m DetailModel) activeExtraIndex() int {
+	id := m.tabHost.ActiveID()
+	if m.detail == nil || !strings.HasPrefix(id, extraFileIDPrefix) {
+		return -1
+	}
+	name := strings.TrimPrefix(id, extraFileIDPrefix)
+	for i, ef := range m.detail.ExtraFiles {
+		if ef.Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
 // buildTabs creates the visible tab list based on what content is available.
-func (m DetailModel) buildTabs() []tabInfo {
-	tabs := []tabInfo{
-		{id: TabMeta, label: "Meta"},
+// Extra files contribute one tab each, identified by their name stem, so the
+// descriptor set is unbounded. Descriptors carry identity and label only —
+// content dispatch stays in Update/renderTabContent.
+func (m DetailModel) buildTabs() []collection.Tab {
+	tabs := []collection.Tab{
+		{ID: TabMeta.hostID(), Label: "Meta"},
 	}
 
 	if m.detail.PlanContent != nil {
-		tabs = append(tabs, tabInfo{id: TabPlan, label: "Plan"})
+		tabs = append(tabs, collection.Tab{ID: TabPlan.hostID(), Label: "Plan"})
 	}
 
-	tabs = append(tabs, tabInfo{id: TabNotes, label: "Notes"})
+	tabs = append(tabs, collection.Tab{ID: TabNotes.hostID(), Label: "Notes"})
 
 	if m.detail.HasTasks {
-		tabs = append(tabs, tabInfo{id: TabTasks, label: "Tasks"})
+		tabs = append(tabs, collection.Tab{ID: TabTasks.hostID(), Label: "Tasks"})
 	}
 
 	if m.detail.HasExecutionLog {
-		tabs = append(tabs, tabInfo{id: TabExecLog, label: "Exec Log"})
+		tabs = append(tabs, collection.Tab{ID: TabExecLog.hostID(), Label: "Exec Log"})
 	}
 
-	for i, ef := range m.detail.ExtraFiles {
-		tabs = append(tabs, tabInfo{id: TabFile, label: extraFileLabel(ef.Name), extraIndex: i})
+	for _, ef := range m.detail.ExtraFiles {
+		tabs = append(tabs, collection.Tab{ID: extraFileIDPrefix + ef.Name, Label: extraFileLabel(ef.Name)})
 	}
 
 	return tabs
@@ -302,22 +347,13 @@ func extraFileLabel(name string) string {
 
 // ActiveTab returns the currently active tab ID.
 func (m DetailModel) ActiveTab() Tab {
-	if m.activeTab < len(m.tabs) {
-		return m.tabs[m.activeTab].id
-	}
-	return TabMeta
+	return tabFromHostID(m.tabHost.ActiveID())
 }
 
 // JumpTo navigates the detail view to the position described by loc.
 // It switches to the target tab and sets the cursor or scroll offset.
 func (m *DetailModel) JumpTo(loc SearchLocation) {
-	// Find the tab index matching loc.TabID.
-	for i, tab := range m.tabs {
-		if tab.id == loc.TabID {
-			m.activeTab = i
-			break
-		}
-	}
+	m.tabHost.SetActiveID(loc.TabID.hostID())
 	// Set cursor/offset within the target tab's sub-model.
 	switch loc.TabID {
 	case TabNotes:
@@ -347,13 +383,13 @@ func (m *DetailModel) JumpTo(loc SearchLocation) {
 func (m *DetailModel) SetContentStart(y, x int) {
 	m.contentStartY = y
 	m.contentStartX = x
+	m.tabHost.SetContentStart(y, x)
 }
 
 // PreserveTab snapshots the current active tab so it can be restored after a
-// poll-triggered reload. The value is stored 1-indexed so that zero means
-// "no tab saved".
+// poll-triggered reload.
 func (m *DetailModel) PreserveTab() {
-	m.savedTab = m.activeTab + 1
+	m.tabHost.Preserve()
 }
 
 // Detail returns the loaded detail, or nil if still loading.
@@ -413,19 +449,7 @@ func (m DetailModel) View() string {
 }
 
 func (m DetailModel) renderTabBar() string {
-	activeStyle := style.ActiveTab
-	inactiveStyle := style.InactiveTab
-
-	var parts []string
-	for i, tab := range m.tabs {
-		if i == m.activeTab {
-			parts = append(parts, activeStyle.Render(tab.label))
-		} else {
-			parts = append(parts, inactiveStyle.Render(tab.label))
-		}
-	}
-
-	return "  " + strings.Join(parts, " ")
+	return m.tabHost.ViewBar()
 }
 
 func (m DetailModel) renderTabContent(width, height int) string {
@@ -446,11 +470,8 @@ func (m DetailModel) renderTabContent(width, height int) string {
 	case TabExecLog:
 		return m.execLogModel.View()
 	case TabFile:
-		if m.activeTab < len(m.tabs) {
-			idx := m.tabs[m.activeTab].extraIndex
-			if idx >= 0 && idx < len(m.extraViewports) {
-				return m.extraViewports[idx].View()
-			}
+		if idx := m.activeExtraIndex(); idx >= 0 && idx < len(m.extraViewports) {
+			return m.extraViewports[idx].View()
 		}
 	}
 	return ""
@@ -459,11 +480,11 @@ func (m DetailModel) renderTabContent(width, height int) string {
 // renderMetaTab shows work item metadata with styled badges and relative times.
 func (m DetailModel) renderMetaTab(width int) string {
 	d := m.detail
-	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(style.ColorMetaKey)
 	dimStyle := style.Dim
-	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
+	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(style.ColorSuccess)
 	archivedStyle := style.Dim
-	linkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Underline(true)
+	linkStyle := lipgloss.NewStyle().Foreground(style.ColorAccent).Underline(true)
 
 	var b strings.Builder
 

@@ -3,6 +3,7 @@ package settings
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -391,7 +392,7 @@ func TestEnumReject_ValueNotInSet(t *testing.T) {
 		Status:  IntentCommit,
 		Value:   "diagonal", // not in [left, right]
 	}
-	m.routeIntent(intent)
+	m.nav.routeIntent(intent)
 
 	if len(store.patches) != 0 {
 		t.Errorf("expected no patches for out-of-set enum, got %v", store.patches)
@@ -415,7 +416,7 @@ func TestActiveFrameworkReject_NotInCapabilities(t *testing.T) {
 		Status:  IntentCommit,
 		Value:   "rogue-framework",
 	}
-	m.routeIntent(intent)
+	m.nav.routeIntent(intent)
 
 	if len(store.patches) != 0 {
 		t.Errorf("expected no patches for unknown framework, got %v", store.patches)
@@ -438,7 +439,7 @@ func TestActiveFrameworkAccept_InCapabilities(t *testing.T) {
 		Status:  IntentCommit,
 		Value:   "opencode",
 	}
-	m.routeIntent(intent)
+	m.nav.routeIntent(intent)
 
 	if len(store.patches) != 1 {
 		t.Fatalf("expected 1 patch, got %d: %v", len(store.patches), store.patches)
@@ -502,7 +503,7 @@ func TestHarnessEnabledDirectCommit_TreatedAsProgrammingError(t *testing.T) {
 		Status:  IntentCommit,
 		Value:   true,
 	}
-	m.routeIntent(intent)
+	m.nav.routeIntent(intent)
 
 	if len(store.patches) != 0 {
 		t.Errorf("harnesses.<fw>.enabled direct-commit must not Patch, got %v", store.patches)
@@ -550,13 +551,13 @@ func TestUnsetRoundTrip_PatchThenUnset(t *testing.T) {
 	m, store, _ := newTestModel(t, seed)
 
 	// Patch: set name = "foo"
-	m.routeIntent(&FieldIntent{DotPath: "name", Status: IntentCommit, Value: "foo"})
+	m.nav.routeIntent(&FieldIntent{DotPath: "name", Status: IntentCommit, Value: "foo"})
 	if v, ok := store.doc["name"]; !ok || v != "foo" {
 		t.Fatalf("after patch, expected name=foo in store, got %v (present=%v)", v, ok)
 	}
 
 	// Unset: remove name
-	m.routeIntent(&FieldIntent{DotPath: "name", Status: IntentUnset})
+	m.nav.routeIntent(&FieldIntent{DotPath: "name", Status: IntentUnset})
 	if _, ok := store.doc["name"]; ok {
 		t.Errorf("after unset, expected name absent in store, got %v", store.doc["name"])
 	}
@@ -589,7 +590,7 @@ func TestEscBacksOutOfParentWithoutClearingCommittedLeaf(t *testing.T) {
 	m, store, _ := newTestModel(t, map[string]any{
 		"closed_obj": map[string]any{"label": ""},
 	})
-	m.focusByDotPath("closed_obj")
+	m.nav.focusByDotPath("closed_obj")
 
 	_, _ = m.Update(keyMsg("enter")) // enter closed_obj
 	_, _ = m.Update(keyMsg("enter")) // edit label
@@ -1075,7 +1076,7 @@ func TestLimitToDotPath_CompactEmbedFlattensNestedSettlementGroups(t *testing.T)
 		t.Fatalf("limited widget = %T, want settlement panel", m.limitedWidget())
 	}
 	var gotPaths []string
-	for _, control := range m.compactNavigationControls(panel) {
+	for _, control := range m.nav.compactEmbedControls(panel) {
 		gotPaths = append(gotPaths, control.DotPath())
 	}
 	wantPaths := []string{
@@ -1093,13 +1094,13 @@ func TestLimitToDotPath_CompactEmbedFlattensNestedSettlementGroups(t *testing.T)
 	}
 
 	for steps := 0; steps < len(wantPaths); steps++ {
-		focused := m.compactFocusedControl()
+		focused := m.nav.focusedCompactControl()
 		if focused != nil && focused.DotPath() == "settlement.active_hours.ranges" {
 			break
 		}
 		_, _ = m.Update(keyMsg("j"))
 	}
-	if focused := m.compactFocusedControl(); focused == nil || focused.DotPath() != "settlement.active_hours.ranges" {
+	if focused := m.nav.focusedCompactControl(); focused == nil || focused.DotPath() != "settlement.active_hours.ranges" {
 		t.Fatalf("expected focus to reach active-hour ranges, got %v", focused)
 	}
 	_, _ = m.Update(keyMsg("enter"))
@@ -1193,6 +1194,356 @@ func TestLimitToDotPath_CompactEmbedUnsetWindowsRenderAllTime(t *testing.T) {
 	}
 	if strings.Contains(out, "09:00-17:00") {
 		t.Fatalf("unset active-hour windows should not invent a weekday window, got:\n%s", out)
+	}
+}
+
+// TestLimitToDotPath_CompactEmbedDescriptionSuppressionIsProfileGated pins
+// that description/frame suppression belongs to the compact-embed layout
+// profile, not to LimitToDotPath: the same limited model renders the section
+// frame and field descriptions in full mode, and drops them in compact mode.
+func TestLimitToDotPath_CompactEmbedDescriptionSuppressionIsProfileGated(t *testing.T) {
+	schemaPath := writeFixture(t, `{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"type": "object",
+		"additionalProperties": false,
+		"required": ["tui_launch_framework", "harnesses"],
+		"properties": {
+			"tui_launch_framework": {"type": "string", "enum": ["claude-code"]},
+			"harnesses": {"type": "object", "additionalProperties": false, "properties": {"claude-code": {"type": "object", "additionalProperties": false, "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}},
+			"settlement": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"enabled": {"type": "boolean", "description": "Enable explanation should not appear inline."},
+					"max_concurrency": {"type": "integer", "minimum": 1, "description": "Concurrency explanation should not appear inline."}
+				}
+			}
+		}
+	}`)
+	capsPath := writeMinimalCapabilities(t, []string{"claude-code"})
+	store := newFakeStore(map[string]any{
+		"tui_launch_framework": "claude-code",
+		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"settlement": map[string]any{
+			"enabled":         true,
+			"max_concurrency": float64(20),
+		},
+	})
+	m, err := NewSettingsModel(SettingsModelOptions{
+		SchemaPath:       schemaPath,
+		CapabilitiesPath: capsPath,
+		Store:            store,
+		Runner:           &fakeRunner{},
+		EnableScript:     "/fake/enable.sh",
+		DisableScript:    "/fake/disable.sh",
+		Registry:         NewWidgetRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("NewSettingsModel: %v", err)
+	}
+	m.LimitToDotPath("settlement")
+	m.SetSize(90, 20)
+
+	full := stripANSI(m.View())
+	if !strings.Contains(full, "settlement") {
+		t.Fatalf("full limited view should keep the section title, got:\n%s", full)
+	}
+	if !strings.Contains(full, "explanation") {
+		t.Fatalf("full limited view should render field descriptions, got:\n%s", full)
+	}
+
+	m.SetCompactEmbed(true)
+	compact := stripANSI(m.View())
+	if strings.Contains(compact, "explanation") || strings.Contains(compact, "settlement") {
+		t.Fatalf("compact embed should suppress descriptions and host-owned title, got:\n%s", compact)
+	}
+	if strings.Contains(compact, "╭") || strings.Contains(compact, "│") {
+		t.Fatalf("compact embed should omit the section frame, got:\n%s", compact)
+	}
+}
+
+// TestLimitToDotPath_CompactEmbedEditingManyWindowsCentersCursorWithOverflowCounts
+// pins the bounded window-editing viewport: with more windows than fit the
+// compact allowance, edit mode shows a cursor-centered slice with explicit
+// "... N earlier" / "... N later" overflow counts, and the embed never closes
+// on Esc.
+func TestLimitToDotPath_CompactEmbedEditingManyWindowsCentersCursorWithOverflowCounts(t *testing.T) {
+	schemaPath := writeFixture(t, `{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"type": "object",
+		"additionalProperties": false,
+		"required": ["tui_launch_framework", "harnesses"],
+		"properties": {
+			"tui_launch_framework": {"type": "string", "enum": ["claude-code"]},
+			"harnesses": {"type": "object", "additionalProperties": false, "properties": {"claude-code": {"type": "object", "additionalProperties": false, "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}},
+			"settlement": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"active_hours": {
+						"type": "object",
+						"additionalProperties": false,
+						"properties": {
+							"enabled": {"type": "boolean"},
+							"timezone": {"type": "string"},
+							"ranges": {
+								"type": "array",
+								"items": {
+									"type": "object",
+									"additionalProperties": false,
+									"properties": {
+										"days": {"type": "array", "items": {"type": "string", "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]}},
+										"start": {"type": "string"},
+										"end": {"type": "string"}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}`)
+	capsPath := writeMinimalCapabilities(t, []string{"claude-code"})
+	days := []string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+	ranges := make([]any, 0, len(days))
+	for i, d := range days {
+		ranges = append(ranges, map[string]any{
+			"days":  []any{d},
+			"start": fmt.Sprintf("%02d:00", i+1),
+			"end":   fmt.Sprintf("%02d:00", i+2),
+		})
+	}
+	store := newFakeStore(map[string]any{
+		"tui_launch_framework": "claude-code",
+		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"settlement": map[string]any{
+			"active_hours": map[string]any{
+				"enabled":  true,
+				"timezone": "local",
+				"ranges":   ranges,
+			},
+		},
+	})
+	m, err := NewSettingsModel(SettingsModelOptions{
+		SchemaPath:       schemaPath,
+		CapabilitiesPath: capsPath,
+		Store:            store,
+		Runner:           &fakeRunner{},
+		EnableScript:     "/fake/enable.sh",
+		DisableScript:    "/fake/disable.sh",
+		Registry:         NewWidgetRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("NewSettingsModel: %v", err)
+	}
+	m.LimitToDotPath("settlement")
+	m.SetCompactEmbed(true)
+	m.SetSize(140, 20)
+
+	// Auto-enter focuses the first deferred control (active_hours.enabled);
+	// two steps land on the windows editor.
+	_, _ = m.Update(keyMsg("j"))
+	_, _ = m.Update(keyMsg("j"))
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "[edit]") {
+		t.Fatalf("focused windows control should advertise the [edit] entry cue, got:\n%s", out)
+	}
+
+	_, _ = m.Update(keyMsg("enter"))
+	if !m.FocusConsumesRunes() {
+		t.Fatal("window editing should consume nav runes")
+	}
+	out = stripANSI(m.View())
+	if !strings.Contains(out, "[editing]") || !strings.Contains(out, "(7 windows)") {
+		t.Fatalf("edit mode should show the editing cue and total window count, got:\n%s", out)
+	}
+	if !strings.Contains(out, "later") || strings.Contains(out, "earlier") {
+		t.Fatalf("with the cursor on the first window only a later-overflow marker should render, got:\n%s", out)
+	}
+
+	// Three editable fields per window: nine j presses move the cursor from
+	// window 0 to window 3 (the 04:00 window).
+	for i := 0; i < 9; i++ {
+		_, _ = m.Update(keyMsg("j"))
+	}
+	out = stripANSI(m.View())
+	if !strings.Contains(out, "... 2 earlier") || !strings.Contains(out, "... 2 later") {
+		t.Fatalf("mid-list cursor should produce both overflow markers, got:\n%s", out)
+	}
+	cursorLine := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, ">") {
+			cursorLine = line
+			break
+		}
+	}
+	if !strings.Contains(cursorLine, "04:00") {
+		t.Fatalf("cursor should sit on the fourth window (04:00), got cursor line %q in:\n%s", cursorLine, out)
+	}
+
+	_, _ = m.Update(keyMsg("esc"))
+	if m.FocusConsumesRunes() {
+		t.Fatal("Esc should exit window editing")
+	}
+	if m.Closed() {
+		t.Fatal("Esc must not close the embedded panel while discarding an edit")
+	}
+	_, _ = m.Update(keyMsg("esc"))
+	if m.Closed() {
+		t.Fatal("top-level Esc must never close the compact embed")
+	}
+}
+
+// TestLimitToDotPath_CompactEmbedNavigationStaysWiredAfterImmediateCommit pins
+// that an immediate-commit leaf (ToggleRow) keeps the auto-entered container
+// navigable: after space commits the toggle, j still moves focus to the next
+// control instead of being swallowed by an unfocused container.
+func TestLimitToDotPath_CompactEmbedNavigationStaysWiredAfterImmediateCommit(t *testing.T) {
+	schemaPath := writeFixture(t, `{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"type": "object",
+		"additionalProperties": false,
+		"required": ["tui_launch_framework", "harnesses"],
+		"properties": {
+			"tui_launch_framework": {"type": "string", "enum": ["claude-code"]},
+			"harnesses": {"type": "object", "additionalProperties": false, "properties": {"claude-code": {"type": "object", "additionalProperties": false, "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}},
+			"settlement": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"enabled": {"type": "boolean"},
+					"max_concurrency": {"type": "integer", "minimum": 1}
+				}
+			}
+		}
+	}`)
+	capsPath := writeMinimalCapabilities(t, []string{"claude-code"})
+	store := newFakeStore(map[string]any{
+		"tui_launch_framework": "claude-code",
+		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"settlement": map[string]any{
+			"enabled":         true,
+			"max_concurrency": float64(20),
+		},
+	})
+	m, err := NewSettingsModel(SettingsModelOptions{
+		SchemaPath:       schemaPath,
+		CapabilitiesPath: capsPath,
+		Store:            store,
+		Runner:           &fakeRunner{},
+		EnableScript:     "/fake/enable.sh",
+		DisableScript:    "/fake/disable.sh",
+		Registry:         NewWidgetRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("NewSettingsModel: %v", err)
+	}
+	m.LimitToDotPath("settlement")
+	m.SetCompactEmbed(true)
+	m.SetSize(120, 20)
+
+	_, _ = m.Update(keyMsg("space"))
+	if len(store.patches) != 1 || store.patches[0].dotPath != "settlement.enabled" || store.patches[0].value != false {
+		t.Fatalf("space should immediately commit the toggle, got patches %+v", store.patches)
+	}
+
+	_, _ = m.Update(keyMsg("j"))
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "concurrency: 20 [edit]") {
+		t.Fatalf("j after a commit should focus the next control, got:\n%s", out)
+	}
+}
+
+// TestLimitToDotPath_CompactEmbedDeferredOnlyPanelEmitsNoSummaryRow pins that
+// a nested panel whose content is entirely deferred (active-hours windows
+// with no sibling leaf controls) contributes no bare header row — the embed
+// renders only the merged windows block, with no empty padding lines.
+func TestLimitToDotPath_CompactEmbedDeferredOnlyPanelEmitsNoSummaryRow(t *testing.T) {
+	schemaPath := writeFixture(t, `{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"type": "object",
+		"additionalProperties": false,
+		"required": ["tui_launch_framework", "harnesses"],
+		"properties": {
+			"tui_launch_framework": {"type": "string", "enum": ["claude-code"]},
+			"harnesses": {"type": "object", "additionalProperties": false, "properties": {"claude-code": {"type": "object", "additionalProperties": false, "properties": {"args": {"type": "array", "items": {"type": "string"}}}}}},
+			"settlement": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"active_hours": {
+						"type": "object",
+						"additionalProperties": false,
+						"properties": {
+							"ranges": {
+								"type": "array",
+								"items": {
+									"type": "object",
+									"additionalProperties": false,
+									"properties": {
+										"days": {"type": "array", "items": {"type": "string", "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]}},
+										"start": {"type": "string"},
+										"end": {"type": "string"}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}`)
+	capsPath := writeMinimalCapabilities(t, []string{"claude-code"})
+	store := newFakeStore(map[string]any{
+		"tui_launch_framework": "claude-code",
+		"harnesses":            map[string]any{"claude-code": map[string]any{"args": []any{}}},
+		"settlement": map[string]any{
+			"active_hours": map[string]any{
+				"ranges": []any{
+					map[string]any{"days": []any{"mon"}, "start": "09:00", "end": "17:00"},
+					map[string]any{"days": []any{"sat"}, "start": "10:00", "end": "14:00"},
+				},
+			},
+		},
+	})
+	m, err := NewSettingsModel(SettingsModelOptions{
+		SchemaPath:       schemaPath,
+		CapabilitiesPath: capsPath,
+		Store:            store,
+		Runner:           &fakeRunner{},
+		EnableScript:     "/fake/enable.sh",
+		DisableScript:    "/fake/disable.sh",
+		Registry:         NewWidgetRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("NewSettingsModel: %v", err)
+	}
+	m.LimitToDotPath("settlement")
+	m.SetCompactEmbed(true)
+	m.SetSize(120, 20)
+
+	out := stripANSI(m.View())
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 2 {
+		t.Fatalf("deferred-only panel should render exactly the two window lines, got %d:\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[0], "active hours:") || !strings.Contains(lines[0], "windows:") || !strings.Contains(lines[0], "mon 09:00-17:00") {
+		t.Fatalf("first line should be the merged active-hours windows row, got:\n%s", out)
+	}
+	if !strings.Contains(lines[1], "sat 10:00-14:00") {
+		t.Fatalf("second window should render as an indented continuation, got:\n%s", out)
+	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "active hours:" || strings.HasPrefix(trimmed, "general:") {
+			t.Fatalf("deferred-only panel must not emit a bare summary or general row, got:\n%s", out)
+		}
 	}
 }
 
@@ -1399,19 +1750,19 @@ func TestHierarchicalNavigation_JKMovesTopLevelUntilEnter(t *testing.T) {
 	m.RegisterTopSection("harness codex", panel2)
 
 	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
-	if m.focusIdx != 0 {
-		t.Fatalf("first j should focus the first top-level section, got %d", m.focusIdx)
+	if m.nav.focusIdx != 0 {
+		t.Fatalf("first j should focus the first top-level section, got %d", m.nav.focusIdx)
 	}
 	_, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
-	if m.focusIdx != 1 {
-		t.Fatalf("second j should move to the next top-level section before enter, got %d", m.focusIdx)
+	if m.nav.focusIdx != 1 {
+		t.Fatalf("second j should move to the next top-level section before enter, got %d", m.nav.focusIdx)
 	}
 	if panel1.entered || panel1.cursor != 0 {
 		t.Fatalf("unentered panel should not move its inner cursor; entered=%v cursor=%d", panel1.entered, panel1.cursor)
 	}
 	_, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
-	if m.focusIdx != 0 {
-		t.Fatalf("k should move back to the previous top-level section, got %d", m.focusIdx)
+	if m.nav.focusIdx != 0 {
+		t.Fatalf("k should move back to the previous top-level section, got %d", m.nav.focusIdx)
 	}
 }
 
@@ -1531,7 +1882,7 @@ func TestHierarchicalNavigation_NestedClosedObjectRequiresRepeatedEnter(t *testi
 
 	walkTo := func(m *SettingsModel, tuningIdx int, key tea.KeyPressMsg) {
 		guard := 0
-		for m.focusIdx != tuningIdx {
+		for m.nav.focusIdx != tuningIdx {
 			_, _ = m.Update(key)
 			guard++
 			if guard > 50 {
@@ -1754,7 +2105,7 @@ func TestComputeFocusedYRange_AlignsWithRenderedBody(t *testing.T) {
 	// reported `top` would land on a blank line; the third slot's would
 	// land beyond the slot entirely.
 	for slotIdx, want := range []string{"alpha", "beta", "gamma"} {
-		m.focusIdx = slotIdx
+		m.nav.focusIdx = slotIdx
 		// The HarnessBlockPanel reports an inner cursor range; for this
 		// alignment check we want the slot-wide range, so blur the panel
 		// (clears its `focused` flag and InnerFocusYRange returns -1,-1).

@@ -71,6 +71,12 @@ var (
 	// work/list.go). Do not spend it on ordinary in-progress states or the
 	// attention pop is lost.
 	ColorAttention = lipgloss.Color("214")
+	// ColorModified: acknowledged / human-attended intermediate status cyan
+	// (k9s frame.status.modifyColor) — an item that was acted on but is not
+	// yet finalized (e.g. a reviewed follow-up awaiting promote/dismiss).
+	// Same index as ColorMetaKey by coincidence: metadata keys and the
+	// status ramp are different meanings.
+	ColorModified = lipgloss.Color("6")
 	// ColorMerged: GitHub's merged-purple for PR badges. Deliberately its
 	// own role rather than ColorCategory (same index by coincidence): merged
 	// is a status association users carry over from GitHub, and StatusDone
@@ -125,6 +131,10 @@ var (
 	// that earns ColorAttention.
 	StatusActive = lipgloss.NewStyle().
 			Foreground(ColorAccent)
+	// StatusModified: acted on but not finalized (ColorModified) — between
+	// StatusActive (in progress) and StatusReady/StatusDone (settled).
+	StatusModified = lipgloss.NewStyle().
+			Foreground(ColorModified)
 	// StatusWarn: needs attention.
 	StatusWarn = lipgloss.NewStyle().
 			Foreground(ColorWarn)

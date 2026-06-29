@@ -30,6 +30,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 // ----------------------------------------------------------------------------
@@ -118,25 +120,24 @@ type widgetStyles struct {
 	checkOff lipgloss.Style
 	desc     lipgloss.Style // dimmed inline description
 	// subLabel renders the bold header for inner panels (e.g.,
-	// capture > core). It's parallel to
-	// themeStyles.subsectionTitle but lives here so widgets can render their
-	// own subsection labels without reaching into the themeStyles bag —
-	// preserves the cached-style discipline (no per-frame allocation).
+	// capture > core). Same composition as style.SubsectionTitle, cached
+	// here with the rest of the widget styles so widget renders draw from
+	// one bag (no per-frame allocation).
 	subLabel lipgloss.Style
 }
 
 func defaultStyles() widgetStyles {
 	return widgetStyles{
-		dim:      lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		label:    lipgloss.NewStyle().Foreground(lipgloss.Color("7")),
-		value:    lipgloss.NewStyle().Foreground(lipgloss.Color("4")),
-		cursor:   lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("4")).Bold(true),
-		error:    lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
-		pending:  lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
-		checkOn:  lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true),
-		checkOff: lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		desc:     lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true),
-		subLabel: lipgloss.NewStyle().Foreground(lipgloss.Color("7")).Bold(true),
+		dim:      lipgloss.NewStyle().Foreground(style.ColorDim),
+		label:    lipgloss.NewStyle().Foreground(style.ColorText),
+		value:    lipgloss.NewStyle().Foreground(style.ColorAccent),
+		cursor:   lipgloss.NewStyle().Foreground(style.ColorOnAccent).Background(style.ColorAccent).Bold(true),
+		error:    lipgloss.NewStyle().Foreground(style.ColorDanger),
+		pending:  lipgloss.NewStyle().Foreground(style.ColorWarn),
+		checkOn:  lipgloss.NewStyle().Foreground(style.ColorSuccess).Bold(true),
+		checkOff: lipgloss.NewStyle().Foreground(style.ColorDim),
+		desc:     lipgloss.NewStyle().Foreground(style.ColorDim).Italic(true),
+		subLabel: lipgloss.NewStyle().Foreground(style.ColorText).Bold(true),
 	}
 }
 
@@ -225,12 +226,12 @@ type BodyViewer interface {
 // that are valid but rarely touched. It keeps the wrapped widget's own dot
 // paths and intents intact; only the top-level presentation changes.
 type AdvancedSection struct {
+	containerBase
+
 	dotPath  string
 	label    string
 	child    FieldWidget
-	focused  bool
 	expanded bool
-	entered  bool
 	styles   widgetStyles
 
 	wrapWidth int
@@ -247,7 +248,6 @@ func NewAdvancedSection(dotPath, label string, child FieldWidget) *AdvancedSecti
 
 func (a *AdvancedSection) Init() tea.Cmd   { return nil }
 func (a *AdvancedSection) DotPath() string { return a.dotPath }
-func (a *AdvancedSection) Focused() bool   { return a.focused }
 func (a *AdvancedSection) Focus() tea.Cmd {
 	a.focused = true
 	return nil
@@ -269,20 +269,11 @@ func (a *AdvancedSection) SetWrapWidth(w int) {
 	}
 }
 
-func (a *AdvancedSection) Entered() bool { return a.entered }
-
 func (a *AdvancedSection) ConsumesNavRunes() bool {
-	if !a.expanded || !a.entered || a.child == nil {
+	if !a.expanded || !a.entered {
 		return false
 	}
-	if c, ok := a.child.(NavRuneConsumer); ok {
-		return c.ConsumesNavRunes()
-	}
-	switch a.child.(type) {
-	case *TextInput, *NumericInput:
-		return false
-	}
-	return false
+	return widgetConsumesNavRunes(a.child)
 }
 
 func (a *AdvancedSection) InnerFocusYRange() (int, int) {
@@ -301,13 +292,10 @@ func (a *AdvancedSection) InnerFocusYRange() (int, int) {
 }
 
 func (a *AdvancedSection) NavStep(delta int) (bool, *FieldIntent) {
-	if !a.focused || !a.expanded || !a.entered || a.child == nil {
+	if !a.expanded || a.child == nil {
 		return false, nil
 	}
-	if stepper, ok := a.child.(NavStepper); ok {
-		return stepper.NavStep(delta)
-	}
-	return false, nil
+	return a.containerBase.navStep([]FieldWidget{a.child}, delta)
 }
 
 func (a *AdvancedSection) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
@@ -333,20 +321,8 @@ func (a *AdvancedSection) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldInten
 				return a, nil, nil
 			}
 			if a.entered && a.child != nil {
-				child, cmd, intent := a.child.Update(msg)
-				a.child = child
-				if intent != nil {
-					return a, cmd, intent
-				}
-				if nested, ok := child.(NestedNavigator); ok && nested.Entered() {
-					return a, cmd, nil
-				}
-				if blurIntent := a.child.Blur(); blurIntent != nil {
-					a.entered = false
-					return a, cmd, blurIntent
-				}
-				a.entered = false
-				return a, cmd, &FieldIntent{DotPath: a.dotPath, Status: IntentNavigate}
+				cmd, intent := a.containerBase.escStep(a.dotPath, a.child, func(w FieldWidget) { a.child = w }, msg)
+				return a, cmd, intent
 			}
 			a.expanded = false
 			return a, nil, &FieldIntent{DotPath: a.dotPath, Status: IntentNavigate}
@@ -1947,12 +1923,11 @@ func formatMinutes(mins int) string {
 // currently-focused child's draft buffer; the panel surfaces the resulting
 // IntentDiscard up to the host.
 type ClosedObjectSubPanel struct {
+	containerBase
+
 	dotPath  string
 	label    string
 	children []FieldWidget
-	cursor   int
-	focused  bool
-	entered  bool
 	styles   widgetStyles
 
 	description string
@@ -1998,7 +1973,6 @@ func (p *ClosedObjectSubPanel) SetWrapWidth(w int) {
 		}
 	}
 }
-func (p *ClosedObjectSubPanel) Focused() bool { return p.focused }
 func (p *ClosedObjectSubPanel) Focus() tea.Cmd {
 	p.focused = true
 	p.entered = false
@@ -2008,40 +1982,19 @@ func (p *ClosedObjectSubPanel) Focus() tea.Cmd {
 	return nil
 }
 
-func (p *ClosedObjectSubPanel) Entered() bool { return p.entered }
-
 // Blur on the panel blurs the focused child and propagates any IntentDiscard
 // the child wants to emit (per D10's tab/focus = discard).
 func (p *ClosedObjectSubPanel) Blur() *FieldIntent {
-	p.focused = false
-	p.entered = false
-	if p.cursor >= 0 && p.cursor < len(p.children) && p.children[p.cursor].Focused() {
-		return p.children[p.cursor].Blur()
-	}
-	return nil
+	return p.containerBase.blur(p.children)
 }
 
 // ConsumesNavRunes (NavRuneConsumer) — delegate to the currently-focused
 // child so j/k typed into a scalar/list/kv editor's active edit mode reaches
 // the child as literal input. When the child is only selected for navigation
-// (or is a non-typing widget like ToggleRow), we report `false` so the model
-// can advance the panel's internal cursor via NavStep instead.
+// (or is a non-typing widget like ToggleRow), we report `false` so the
+// coordinator can advance the panel's internal cursor via NavStep instead.
 func (p *ClosedObjectSubPanel) ConsumesNavRunes() bool {
-	if !p.entered {
-		return false
-	}
-	if p.cursor < 0 || p.cursor >= len(p.children) {
-		return false
-	}
-	c := p.children[p.cursor]
-	if cc, ok := c.(NavRuneConsumer); ok {
-		return cc.ConsumesNavRunes()
-	}
-	switch c.(type) {
-	case *TextInput, *NumericInput:
-		return false
-	}
-	return false
+	return p.containerBase.consumesNavRunes(p.children)
 }
 
 // InnerFocusYRange returns the inclusive [top, bottom] line offsets of the
@@ -2117,40 +2070,12 @@ func (p *ClosedObjectSubPanel) InnerFocusYRange() (int, int) {
 	return -1, -1
 }
 
-// NavStep advances the closed-object panel's internal cursor by `delta`,
-// blurring the previously-focused child and focusing the new one. Returns
-// (false, nil) at the boundary so the model can hop to the next top-level
-// slot via focusOffset. Mirrors HarnessBlockPanel.NavStep — both containers
-// participate in the same explicit-enter navigation contract so the user can
-// move through one visible nesting level at a time.
-//
-// Recursive descent: when the currently-focused child is itself a NavStepper
-// (e.g. a nested ClosedObjectSubPanel), we delegate the step to the child
-// first. Only when the child reports it cannot move (boundary of its inner
-// cursor) do we advance our own cursor. Without this, panels nested inside
-// panels — `capture` containing `core`/`structural_signals`, etc. — would
-// be unreachable past their first child after the nested panel was opened.
+// NavStep advances the closed-object panel's internal cursor by `delta` per
+// the shared container contract (containerBase.navStep): nested entered
+// containers receive the step first; (false, nil) at the boundary lets the
+// coordinator hop to the next top-level slot via focusOffset.
 func (p *ClosedObjectSubPanel) NavStep(delta int) (bool, *FieldIntent) {
-	if !p.focused || !p.entered || len(p.children) == 0 {
-		return false, nil
-	}
-	if p.cursor >= 0 && p.cursor < len(p.children) {
-		if cs, ok := p.children[p.cursor].(NavStepper); ok {
-			if nn, ok := p.children[p.cursor].(NestedNavigator); ok && nn.Entered() {
-				if moved, intent := cs.NavStep(delta); moved {
-					return true, intent
-				}
-			}
-		}
-	}
-	next := p.cursor + delta
-	if next < 0 || next >= len(p.children) {
-		return false, nil
-	}
-	intent := p.children[p.cursor].Blur()
-	p.cursor = next
-	_ = p.children[p.cursor].Focus()
-	return true, intent
+	return p.containerBase.navStep(p.children, delta)
 }
 
 func (p *ClosedObjectSubPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
@@ -2161,54 +2086,24 @@ func (p *ClosedObjectSubPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *Field
 		switch key.String() {
 		case "enter":
 			if !p.entered {
-				p.entered = true
-				if p.cursor < 0 {
-					p.cursor = 0
-				}
-				if p.cursor < len(p.children) {
-					return p, p.children[p.cursor].Focus(), nil
-				}
-				return p, nil, nil
+				return p, p.containerBase.enter(p.children), nil
 			}
 		case "tab":
 			if !p.entered {
 				return p, nil, nil
 			}
-			// Tab = discard the focused child's draft, advance cursor.
-			intent := p.children[p.cursor].Blur()
-			if p.cursor < len(p.children)-1 {
-				p.cursor++
-				_ = p.children[p.cursor].Focus()
-			}
-			return p, nil, intent
+			return p, nil, p.containerBase.tabStep(p.children, +1)
 		case "shift+tab":
 			if !p.entered {
 				return p, nil, nil
 			}
-			intent := p.children[p.cursor].Blur()
-			if p.cursor > 0 {
-				p.cursor--
-				_ = p.children[p.cursor].Focus()
-			}
-			return p, nil, intent
+			return p, nil, p.containerBase.tabStep(p.children, -1)
 		case "esc":
 			if !p.entered {
 				return p, nil, nil
 			}
-			child, cmd, intent := p.children[p.cursor].Update(msg)
-			p.children[p.cursor] = child
-			if intent != nil {
-				return p, cmd, intent
-			}
-			if nested, ok := child.(NestedNavigator); ok && nested.Entered() {
-				return p, cmd, nil
-			}
-			if blurIntent := p.children[p.cursor].Blur(); blurIntent != nil {
-				p.entered = false
-				return p, cmd, blurIntent
-			}
-			p.entered = false
-			return p, cmd, &FieldIntent{DotPath: p.dotPath, Status: IntentNavigate}
+			cmd, intent := p.containerBase.escStep(p.dotPath, p.children[p.cursor], func(w FieldWidget) { p.children[p.cursor] = w }, msg)
+			return p, cmd, intent
 		}
 	}
 	if !p.entered {

@@ -32,16 +32,9 @@ import (
 // (component extraction / settings redesign) or Track A (specpanel.go) and
 // will be retired when those rewrites land.
 var inlineColorAllowlist = map[string]int{
-	"internal/followup/detail.go":      4,
-	"internal/followup/list.go":        8,
 	"internal/followup/reviewcards.go": 11,
-	"internal/knowledge/entry.go":      7,
-	"internal/render/markdown.go":      5,
 	"internal/search/panel.go":         5,
 	"internal/search/popup.go":         2,
-	"internal/settings/harness.go":     13,
-	"internal/settings/widgets.go":     11,
-	"internal/work/detailview.go":      3,
 	"internal/work/execlog.go":         8,
 	"internal/work/notes.go":           4,
 	"internal/work/plantab.go":         1,

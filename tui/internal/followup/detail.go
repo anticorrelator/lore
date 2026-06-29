@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/anticorrelator/lore/tui/internal/collection"
 	"github.com/anticorrelator/lore/tui/internal/gh"
 	"github.com/anticorrelator/lore/tui/internal/render"
 	"github.com/anticorrelator/lore/tui/internal/style"
@@ -317,10 +318,41 @@ const (
 	TabTriage
 )
 
-// tabInfo holds display metadata for a tab.
-type tabInfo struct {
-	id    Tab
-	label string
+// hostID is the Tab's stable string identity inside the collection.TabHost.
+func (t Tab) hostID() string {
+	switch t {
+	case TabMeta:
+		return "meta"
+	case TabFinding:
+		return "finding"
+	case TabComments:
+		return "comments"
+	case TabTriage:
+		return "triage"
+	}
+	return ""
+}
+
+// tabFromHostID maps a TabHost ID back to the Tab constant (TabMeta when
+// the host is empty or the ID is unknown).
+func tabFromHostID(id string) Tab {
+	switch id {
+	case "finding":
+		return TabFinding
+	case "comments":
+		return TabComments
+	case "triage":
+		return TabTriage
+	}
+	return TabMeta
+}
+
+// newDetailTabHost returns the empty tab host with the detail pane's
+// default-tab precedence installed.
+func newDetailTabHost() collection.TabHost {
+	h := collection.NewTabHost()
+	h.SetDefaultID(TabFinding.hostID())
+	return h
 }
 
 // DetailModel is the Bubble Tea model for the follow-up detail pane.
@@ -333,9 +365,7 @@ type DetailModel struct {
 	viewport              viewport.Model
 	reviewCards           *ReviewCardsModel
 	lensFindings          *LensFindingsModel
-	tabs                  []tabInfo
-	activeTab             int
-	savedTabID            Tab // Tab ID to restore after reload; -1 = not set
+	tabHost               collection.TabHost
 	contentStartY         int
 	contentStartX         int
 	width                 int
@@ -351,7 +381,7 @@ type DetailModel struct {
 func NewDetailModel(knowledgeDir string) DetailModel {
 	return DetailModel{
 		knowledgeDir:        knowledgeDir,
-		savedTabID:          -1,
+		tabHost:             newDetailTabHost(),
 		fetchMergeStatusCmd: FetchMergeStatusCmd,
 	}
 }
@@ -478,19 +508,7 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 					m.lensFindings = nil
 				}
 
-				m.tabs = m.buildTabs()
-				if m.savedTabID >= 0 {
-					idx := m.tabIndexFor(m.savedTabID)
-					// tabIndexFor returns 0 if not found; verify it actually matched.
-					if idx > 0 || (len(m.tabs) > 0 && m.tabs[0].id == m.savedTabID) {
-						m.activeTab = idx
-					} else {
-						m.activeTab = m.defaultTabIndex()
-					}
-					m.savedTabID = -1
-				} else {
-					m.activeTab = m.defaultTabIndex()
-				}
+				m.tabHost.SetTabs(m.buildTabs())
 
 				m.viewport.SetWidth(cw)
 				m.viewport.SetHeight(ch)
@@ -501,23 +519,13 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		switch msg.String() {
-		case "tab":
-			// Suppress tab cycling when the review cards textarea is active.
+		case "tab", "shift+tab":
+			// Suppress tab cycling when the review cards textarea is active —
+			// fall through so the key reaches the textarea.
 			if m.reviewCards != nil && m.reviewCards.IsEditing() {
 				break
 			}
-			if len(m.tabs) > 0 {
-				m.activeTab = (m.activeTab + 1) % len(m.tabs)
-			}
-			return m, nil
-		case "shift+tab":
-			// Suppress tab cycling when the review cards textarea is active.
-			if m.reviewCards != nil && m.reviewCards.IsEditing() {
-				break
-			}
-			if len(m.tabs) > 0 {
-				m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
-			}
+			m.tabHost, _ = m.tabHost.Update(msg)
 			return m, nil
 		}
 		switch m.ActiveTab() {
@@ -545,21 +553,13 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
-		// Tab bar click hit-test: only switch tabs on left-click press.
+		// Tab bar click hit-test: only switch tabs on left-click press. The
+		// host owns the per-label arithmetic; bar-line clicks never reach the
+		// active tab's content.
 		if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
-			tabBarY := m.contentStartY + 1
-			if click.Y == tabBarY && len(m.tabs) > 0 {
-				// Tab bar format: "  " + [" label "] + " " + [" label "] + ...
-				// Each label rendered with Padding(0,1) so visual width = len(label)+2.
-				x := m.contentStartX + 2 // "  " indent
-				for i, tab := range m.tabs {
-					tabW := len(tab.label) + 2 // padding(0,1) adds 1 char each side
-					if click.X >= x && click.X < x+tabW {
-						m.activeTab = i
-						return m, nil
-					}
-					x += tabW + 1 // +1 for the " " separator between tabs
-				}
+			if click.Y == m.contentStartY+1 && len(m.tabHost.Tabs()) > 0 {
+				m.tabHost, _ = m.tabHost.Update(click)
+				return m, nil
 			}
 		}
 		// Forward mouse to active tab for scroll handling.
@@ -693,32 +693,14 @@ func (m DetailModel) PRNumber() int {
 
 // ActiveTab returns the currently active tab ID.
 func (m DetailModel) ActiveTab() Tab {
-	if m.activeTab < len(m.tabs) {
-		return m.tabs[m.activeTab].id
-	}
-	return TabMeta
-}
-
-// tabIndexFor searches m.tabs for the given ID and returns its index (or 0 if not found).
-func (m DetailModel) tabIndexFor(id Tab) int {
-	for i, tab := range m.tabs {
-		if tab.id == id {
-			return i
-		}
-	}
-	return 0
+	return tabFromHostID(m.tabHost.ActiveID())
 }
 
 // PreserveTab snapshots the current active tab ID so it can be restored after
 // a reload. On restore, the saved ID is looked up in the new tabs list; if not
 // found, the default precedence applies.
 func (m *DetailModel) PreserveTab() {
-	m.savedTabID = m.ActiveTab()
-}
-
-// defaultTabIndex returns the tab index to use when no saved tab is set.
-func (m DetailModel) defaultTabIndex() int {
-	return m.tabIndexFor(TabFinding)
+	m.tabHost.Preserve()
 }
 
 // FindingExcerpt returns up to the first 3 non-empty, non-heading lines of the finding
@@ -748,9 +730,7 @@ func (m *DetailModel) ClearID() {
 	m.detail = nil
 	m.reviewCards = nil
 	m.lensFindings = nil
-	m.tabs = nil
-	m.activeTab = 0
-	m.savedTabID = -1
+	m.tabHost = newDetailTabHost()
 }
 
 // SetID sets the follow-up ID and returns a Cmd to load it.
@@ -764,25 +744,25 @@ func (m *DetailModel) SetID(id string) tea.Cmd {
 	m.detail = nil
 	m.reviewCards = nil
 	m.lensFindings = nil
-	m.tabs = nil
-	m.activeTab = 0
-	m.savedTabID = -1
+	m.tabHost = newDetailTabHost()
 	m.viewport.SetContent("")
 	return LoadDetail(m.knowledgeDir, id)
 }
 
 // buildTabs creates the visible tab list based on what content is available.
 // Tab order: Meta | Finding | Triage | Comments. Absent tabs are omitted.
-func (m DetailModel) buildTabs() []tabInfo {
-	tabs := []tabInfo{
-		{id: TabMeta, label: "Meta"},
-		{id: TabFinding, label: "Finding"},
+// Content rendering and key routing stay in DetailModel (the viewport is a
+// value-type sub-model), so descriptors carry identity and label only.
+func (m DetailModel) buildTabs() []collection.Tab {
+	tabs := []collection.Tab{
+		{ID: TabMeta.hostID(), Label: "Meta"},
+		{ID: TabFinding.hostID(), Label: "Finding"},
 	}
 	if m.lensFindings != nil {
-		tabs = append(tabs, tabInfo{id: TabTriage, label: "Triage"})
+		tabs = append(tabs, collection.Tab{ID: TabTriage.hostID(), Label: "Triage"})
 	}
 	if m.reviewCards != nil {
-		tabs = append(tabs, tabInfo{id: TabComments, label: "Comments"})
+		tabs = append(tabs, collection.Tab{ID: TabComments.hostID(), Label: "Comments"})
 	}
 	return tabs
 }
@@ -792,6 +772,7 @@ func (m DetailModel) buildTabs() []tabInfo {
 func (m *DetailModel) SetContentStart(y, x int) {
 	m.contentStartY = y
 	m.contentStartX = x
+	m.tabHost.SetContentStart(y, x)
 }
 
 func (m DetailModel) contentHeight() int {
@@ -818,14 +799,13 @@ func (m DetailModel) renderMetaTab() string {
 	}
 
 	dimStyle := style.Dim
-	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	labelStyle := lipgloss.NewStyle().Foreground(style.ColorMetaKey)
 
 	var b strings.Builder
 
 	// Status
-	glyph, glyphColor := statusGlyph(m.detail.Status)
-	statusStr := lipgloss.NewStyle().Foreground(glyphColor).Render(glyph + " " + m.detail.Status)
-	b.WriteString(statusStr)
+	glyph, glyphStyle := statusGlyph(m.detail.Status)
+	b.WriteString(glyphStyle.Render(glyph + " " + m.detail.Status))
 	b.WriteString("\n")
 
 	// Author
@@ -871,19 +851,7 @@ func (m DetailModel) renderMetaTab() string {
 }
 
 func (m DetailModel) renderTabBar() string {
-	activeStyle := style.ActiveTab
-	inactiveStyle := style.InactiveTab
-
-	var parts []string
-	for i, tab := range m.tabs {
-		if i == m.activeTab {
-			parts = append(parts, activeStyle.Render(tab.label))
-		} else {
-			parts = append(parts, inactiveStyle.Render(tab.label))
-		}
-	}
-
-	bar := "  " + strings.Join(parts, " ")
+	bar := m.tabHost.ViewBar()
 	if badge := m.renderMergeBadge(); badge != "" {
 		bar += "   " + badge
 	}
@@ -903,11 +871,11 @@ func (m DetailModel) renderMergeBadge() string {
 		label := "merge: " + m.mergeStatus.Label()
 		switch m.mergeStatus.Classification() {
 		case gh.MergeOK:
-			return lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(label)
+			return style.StatusReady.Render(label)
 		case gh.MergeBlocked:
-			return lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(label)
+			return style.StatusError.Render(label)
 		case gh.MergeWarn:
-			return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(label)
+			return style.StatusWarn.Render(label)
 		default:
 			return dimStyle.Render(label)
 		}

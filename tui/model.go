@@ -8,7 +8,6 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/followup"
@@ -72,6 +71,15 @@ func (m model) topPanelHeight() int {
 // topPanelWidth returns the inner content width for panels in top/bottom layout.
 func (m model) topPanelWidth() int {
 	return m.width - 2
+}
+
+// listDims returns the width and height to pass to a list panel sub-model
+// (work or followup) based on layoutMode.
+func (m model) listDims() (int, int) {
+	if m.layoutMode == config.LayoutTopBottom {
+		return m.topPanelWidth(), m.listPanelHeight()
+	}
+	return leftPanelWidth, m.listPanelHeight()
 }
 
 // listPanelHeight returns the height of the rendered list area in the current
@@ -226,16 +234,135 @@ type model struct {
 	initLoading bool
 }
 
-// panelCallbacks abstracts entity-specific operations for shared routing helpers.
-// Callers build this via closures that capture *model so mutations are visible
-// to the helper. setContentStart may be nil (followup path omits it).
+// panelCallbacks abstracts entity-specific operations for the shared
+// split-pane helpers (handlePanelRouting, routeFocusedPanel) and the sizing
+// fan-out. Callers build this via closures that capture *model so mutations
+// are visible to the helper.
 type panelCallbacks struct {
 	currentSlug     func() string
 	loadDetail      func(id string) tea.Cmd
 	specPanelFn     func() (work.SpecPanelModel, bool)
 	listUpdate      func(msg tea.Msg) (tea.Cmd, string, string) // returns cmd, prevID, newID
 	detailUpdate    func(msg tea.Msg) tea.Cmd
-	setContentStart func() // nil for followup
+	setContentStart func()         // nil when the detail view does no mouse hit-testing
+	focusClick      func(x, y int) // nil = focus by host panel geometry (layoutMode split)
+	resize          func() tea.Cmd // re-apply current layout dimensions to the sub-models
+}
+
+// workPanelCallbacks builds the split-pane callbacks for the work list+detail
+// workspace. The closures capture m so mutations land on the model value the
+// caller returns.
+func (m *model) workPanelCallbacks() panelCallbacks {
+	return panelCallbacks{
+		currentSlug: func() string { return m.list.CurrentSlug() },
+		loadDetail: func(slug string) tea.Cmd {
+			var cmd tea.Cmd
+			*m, cmd = m.loadDetail(slug)
+			return cmd
+		},
+		specPanelFn: func() (work.SpecPanelModel, bool) { return m.currentSpecPanel() },
+		listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
+			prevSlug := m.list.CurrentSlug()
+			lm, cmd := m.list.Update(lmsg)
+			m.list = lm
+			return cmd, prevSlug, m.list.CurrentSlug()
+		},
+		detailUpdate: func(dmsg tea.Msg) tea.Cmd {
+			var cmd tea.Cmd
+			m.detail, cmd = m.detail.Update(dmsg)
+			return cmd
+		},
+		// Set absolute position so detail can hit-test tab bar clicks.
+		setContentStart: func() {
+			if m.layoutMode == config.LayoutLeftRight {
+				m.detail.SetContentStart(2, leftPanelWidth+5)
+			} else {
+				m.detail.SetContentStart(m.topPanelHeight()+4, 3)
+			}
+		},
+		resize: func() tea.Cmd {
+			listW, listH := m.listDims()
+			lm, lcmd := m.list.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
+			m.list = lm
+			var dcmd tea.Cmd
+			m.detail, dcmd = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+			return batchCmd(lcmd, dcmd)
+		},
+	}
+}
+
+// followupPanelCallbacks builds the split-pane callbacks for the follow-up
+// list+detail workspace.
+func (m *model) followupPanelCallbacks() panelCallbacks {
+	return panelCallbacks{
+		currentSlug: func() string { return m.followupDetail.CurrentID() },
+		loadDetail: func(id string) tea.Cmd {
+			return m.loadFollowupDetail(id)
+		},
+		specPanelFn: func() (work.SpecPanelModel, bool) { return m.currentFollowupPanel() },
+		listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
+			prevID := m.followupList.CurrentID()
+			fl, cmd := m.followupList.Update(lmsg)
+			m.followupList = fl
+			return cmd, prevID, m.followupList.CurrentID()
+		},
+		detailUpdate: func(dmsg tea.Msg) tea.Cmd {
+			var cmd tea.Cmd
+			m.followupDetail, cmd = m.followupDetail.Update(dmsg)
+			return cmd
+		},
+		// Set absolute position so detail can hit-test tab bar clicks.
+		setContentStart: func() {
+			if m.layoutMode == config.LayoutLeftRight {
+				m.followupDetail.SetContentStart(2, leftPanelWidth+5)
+			} else {
+				m.followupDetail.SetContentStart(m.topPanelHeight()+4, 3)
+			}
+		},
+		resize: func() tea.Cmd {
+			listW, listH := m.listDims()
+			fl, lcmd := m.followupList.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
+			m.followupList = fl
+			fd, dcmd := m.followupDetail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+			m.followupDetail = fd
+			return batchCmd(lcmd, dcmd)
+		},
+	}
+}
+
+// knowledgePanelCallbacks adapts the knowledge browser onto the split-pane
+// seam for mouse routing and sizing only. The browser keeps its own focus
+// and tree behavior: clicks hand focus to the browser (FocusRight is
+// readiness-gated internally) and every message is delegated to
+// browser.Update unchanged.
+func (m *model) knowledgePanelCallbacks() panelCallbacks {
+	browserUpdate := func(msg tea.Msg) tea.Cmd {
+		bm, cmd := m.browser.Update(msg)
+		m.browser = bm
+		return cmd
+	}
+	return panelCallbacks{
+		currentSlug: func() string { return "" },
+		loadDetail:  func(string) tea.Cmd { return nil },
+		specPanelFn: func() (work.SpecPanelModel, bool) { return work.SpecPanelModel{}, false },
+		listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
+			return browserUpdate(lmsg), "", ""
+		},
+		detailUpdate: browserUpdate,
+		// The browser renders a fixed-width tree on the left in every host
+		// layout mode, so clicks split on the same x boundary as the
+		// left/right layout.
+		focusClick: func(x, _ int) {
+			if x < leftPanelWidth+2 {
+				m.browser.FocusLeft()
+			} else {
+				m.browser.FocusRight()
+			}
+		},
+		resize: func() tea.Cmd {
+			return browserUpdate(tea.WindowSizeMsg{Width: m.width, Height: m.height})
+		},
+	}
 }
 
 // currentSpecPanel returns the spec panel for the currently selected work item, if any.
@@ -345,14 +472,11 @@ func (m model) buildPaneConfig() paneConfig {
 			detailTitle = t
 		}
 
-		var openTabS, closedTabS lipgloss.Style
+		filterSel := 0
 		if m.followupList.GetFilterMode() == followup.FilterClosed {
-			openTabS, closedTabS = annotDimS, style.TitleFilter
-		} else {
-			openTabS, closedTabS = style.TitleFilter, annotDimS
+			filterSel = 1
 		}
-		filterAnnot := annotDimS.Render("ctrl+a  ") + openTabS.Render("open") + annotDimS.Render(" · ") + closedTabS.Render("closed")
-		filterAnnotW := 8 + 4 + 3 + 6 // "ctrl+a  " + "open" + " · " + "closed"
+		filterAnnot, filterAnnotW := annotFollowupFilter.render(filterSel)
 
 		specPanel, hasSpecPanel := m.currentFollowupPanel()
 		return paneConfig{
@@ -379,14 +503,11 @@ func (m model) buildPaneConfig() paneConfig {
 			listTitle += " " + style.TitleCount.Render(fmt.Sprintf("(%d)", len(items)))
 		}
 
-		var activeTabS, archivedTabS lipgloss.Style
+		filterSel := 0
 		if m.list.GetFilterMode() == work.FilterArchived {
-			activeTabS, archivedTabS = annotDimS, style.TitleFilter
-		} else {
-			activeTabS, archivedTabS = style.TitleFilter, annotDimS
+			filterSel = 1
 		}
-		filterAnnot := annotDimS.Render("ctrl+a  ") + activeTabS.Render("active") + annotDimS.Render(" · ") + archivedTabS.Render("archived")
-		filterAnnotW := 8 + 6 + 3 + 8 // "ctrl+a  " + "active" + " · " + "archived"
+		filterAnnot, filterAnnotW := annotWorkFilter.render(filterSel)
 
 		detailTitle := "Detail"
 		if d := m.detail.Detail(); d != nil {

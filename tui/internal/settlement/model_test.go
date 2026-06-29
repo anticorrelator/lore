@@ -1,9 +1,11 @@
 package settlement
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/style"
@@ -233,7 +235,7 @@ func TestModelReplacesMultiInstanceSnapshots(t *testing.T) {
 	}
 }
 
-func TestModelReadableViewCapsQueuePreview(t *testing.T) {
+func TestModelReadableViewClipsViaViewport(t *testing.T) {
 	st, err := ParseStatus([]byte(`{
 		"enabled": true,
 		"queue": {"pending": 5, "total": 5},
@@ -252,7 +254,11 @@ func TestModelReadableViewCapsQueuePreview(t *testing.T) {
 		t.Fatalf("ParseStatus: %v", err)
 	}
 
-	view := NewModel().ReplaceStatus(st).SetSize(120, 9).View()
+	m := NewModel().ReplaceStatus(st).SetSize(120, 9)
+	view := m.View()
+	if got := len(strings.Split(view, "\n")); got != 9 {
+		t.Fatalf("viewport should clip the view to exactly 9 lines, got %d:\n%s", got, view)
+	}
 	if !strings.Contains(view, "next: process once or wait for processor") {
 		t.Fatalf("status should keep the next action readable, got:\n%s", view)
 	}
@@ -265,11 +271,21 @@ func TestModelReadableViewCapsQueuePreview(t *testing.T) {
 	if strings.Contains(view, "rate ") {
 		t.Fatalf("status should omit launch rate from the summary row, got:\n%s", view)
 	}
-	if !strings.Contains(view, "Recent verdicts") || !strings.Contains(view, "no settled claims yet") {
-		t.Fatalf("compact queue preview should include stable last-settled placeholder, got:\n%s", view)
+	if strings.Contains(view, "no settled claims yet") {
+		t.Fatalf("verdict placeholder should start below the 9-line fold, got:\n%s", view)
 	}
-	if !strings.Contains(view, "... 4 more") || strings.Contains(view, "item-2") {
-		t.Fatalf("compact queue preview should reserve room below the queue, got:\n%s", view)
+
+	// The regions below the fold scroll into view instead of being squeezed
+	// into a height budget.
+	for i := 0; i < 4; i++ {
+		m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	}
+	view = stripANSI(m.View())
+	if got := len(strings.Split(view, "\n")); got != 9 {
+		t.Fatalf("scrolled viewport should still clip to 9 lines, got %d:\n%s", got, view)
+	}
+	if !strings.Contains(view, "Recent verdicts") || !strings.Contains(view, "no settled claims yet") {
+		t.Fatalf("scrolling should reveal the verdict region and placeholder, got:\n%s", view)
 	}
 }
 
@@ -434,7 +450,7 @@ func TestFormatLastSettledWrapsLongClaim(t *testing.T) {
 	}
 }
 
-func TestTightVerdictBlockDropsWholeVerdicts(t *testing.T) {
+func TestTightVerdictBlockScrollsWholeVerdictsIntoView(t *testing.T) {
 	st, err := ParseStatus([]byte(`{
 		"enabled": true,
 		"queue": {"total": 0},
@@ -448,28 +464,35 @@ func TestTightVerdictBlockDropsWholeVerdicts(t *testing.T) {
 		t.Fatalf("ParseStatus: %v", err)
 	}
 
-	// width 44 -> bodyW 40 (each verdict wraps to ~3 lines); height 13 leaves a
-	// 4-line budget after the region rules, so only the first verdict fits whole.
-	view := NewModel().ReplaceStatus(st).SetSize(44, 13).View()
-	idx := strings.Index(view, "Recent verdicts")
-	if idx < 0 {
-		t.Fatalf("missing Recent verdicts section, got:\n%s", view)
+	// width 44 -> bodyW 40 (each verdict wraps to ~3 lines); height 13 cannot
+	// show all three verdicts at once, so the tail scrolls into view instead
+	// of being dropped against a height budget.
+	m := NewModel().ReplaceStatus(st).SetSize(44, 13)
+	statusH := 13
+	seen := stripANSI(m.View())
+	for i := 0; i < 8; i++ {
+		view := m.View()
+		if got := len(strings.Split(view, "\n")); got > statusH {
+			t.Fatalf("view has %d lines, exceeding the viewport height %d:\n%s", got, statusH, view)
+		}
+		m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+		seen += "\n" + stripANSI(m.View())
 	}
-	block := view[idx:]
-	if !strings.Contains(block, "... 2 more verdicts") {
-		t.Fatalf("overflowing verdicts should collapse into a whole-verdict marker, got:\n%s", block)
+	if strings.Contains(seen, "more verdicts") {
+		t.Fatalf("three verdicts fit the compactness cap; no marker should render, got:\n%s", seen)
 	}
-	if !strings.Contains(block, "delta") || !strings.Contains(block, "juliet") {
-		t.Fatalf("the shown verdict must be complete, got:\n%s", block)
+	for _, word := range []string{"delta", "juliet", "kilo", "tango", "uniform", "iota"} {
+		if !strings.Contains(seen, word) {
+			t.Fatalf("scrolling should reveal every verdict whole, missing %q in:\n%s", word, seen)
+		}
 	}
-	if strings.Contains(block, "kilo") || strings.Contains(block, "uniform") {
-		t.Fatalf("dropped verdicts must be dropped whole, not partially wrapped, got:\n%s", block)
+	if strings.Contains(seen, "…") {
+		t.Fatalf("verdict block must not contain mid-content truncation, got:\n%s", seen)
 	}
-	if strings.Contains(block, "…") {
-		t.Fatalf("verdict block must not contain mid-content truncation, got:\n%s", block)
-	}
-	if statusH := 13; len(strings.Split(view, "\n")) > statusH {
-		t.Fatalf("view exceeds the host clip height %d, so a verdict could be cut mid-wrap:\n%s", statusH, view)
+	for _, line := range strings.Split(seen, "\n") {
+		if lipgloss.Width(line) > 40 {
+			t.Fatalf("wrapped verdict line exceeds the body width: %q", line)
+		}
 	}
 }
 
@@ -574,7 +597,7 @@ func TestDefaultPlaceholdersRenderDistinctFromDisabledState(t *testing.T) {
 	}
 }
 
-func TestLeaseRegionIsReservedWithinHeightBudget(t *testing.T) {
+func TestLeaseRegionScrollsIntoViewBelowVerdicts(t *testing.T) {
 	st, err := ParseStatus([]byte(`{
 		"enabled": true,
 		"queue": {"total": 0},
@@ -589,24 +612,116 @@ func TestLeaseRegionIsReservedWithinHeightBudget(t *testing.T) {
 		t.Fatalf("ParseStatus: %v", err)
 	}
 
-	// The lease block is reserved before the verdict budget, so the whole
-	// view must fit the host clip height with the lease region intact and
-	// overflowing verdicts dropped whole.
+	// The lease region sits at the bottom of the scrollable content; tight
+	// heights reach it by scrolling rather than by reserving a line budget
+	// that drops verdicts.
 	height := 17
-	view := stripANSI(NewModel().ReplaceStatus(st).SetSize(44, height).View())
-	if got := len(strings.Split(view, "\n")); got > height {
-		t.Fatalf("view has %d lines, exceeding the host clip height %d:\n%s", got, height, view)
+	m := NewModel().ReplaceStatus(st).SetSize(44, height)
+	for i := 0; i < 8; i++ {
+		if got := len(strings.Split(m.View(), "\n")); got > height {
+			t.Fatalf("view has %d lines, exceeding the viewport height %d:\n%s", got, height, m.View())
+		}
+		m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	}
+	view := stripANSI(m.View())
 	if !strings.Contains(view, "lease-1") {
-		t.Fatalf("lease region should survive the verdict budget, got:\n%s", view)
+		t.Fatalf("scrolling to the bottom should reveal the lease region, got:\n%s", view)
 	}
+	if !strings.Contains(view, "Active leases") {
+		t.Fatalf("lease region rule should render at the bottom of the content, got:\n%s", view)
+	}
+	leaseIdx := strings.Index(view, "Active leases")
+	if verdictIdx := strings.LastIndex(view[:leaseIdx], "iota"); verdictIdx < 0 {
+		t.Fatalf("lease region should sit below the last verdict, got:\n%s", view)
+	}
+}
+
+func manyItemStatus(t *testing.T, n int) Status {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString(`{"enabled": true, "queue": {"pending": 12, "total": 12}, "items": [`)
+	for i := 1; i <= n; i++ {
+		if i > 1 {
+			b.WriteString(",")
+		}
+		b.WriteString(`{"id": "item-` + strconv.Itoa(i) + `", "status": "pending"}`)
+	}
+	b.WriteString(`]}`)
+	st, err := ParseStatus([]byte(b.String()))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+	return st
+}
+
+func TestCursorFollowKeepsSelectedRowVisible(t *testing.T) {
+	m := NewModel().ReplaceStatus(manyItemStatus(t, 12)).SetSize(120, 10)
+	j := tea.KeyPressMsg{Code: 'j', Text: "j"}
+	for i := 0; i < 11; i++ {
+		m, _ = m.Update(j)
+	}
+	view := stripANSI(m.View())
+	if got := len(strings.Split(view, "\n")); got != 10 {
+		t.Fatalf("view should clip to 10 lines, got %d:\n%s", got, view)
+	}
+	if !strings.Contains(view, "> [pending] item-12") {
+		t.Fatalf("viewport should follow the cursor to the last queue row, got:\n%s", view)
+	}
+
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	view = stripANSI(m.View())
+	if !strings.Contains(view, "> [pending] item-1") {
+		t.Fatalf("home should select the first row and scroll it into view, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Operational status") {
+		t.Fatalf("home should scroll back to the top of the panel, got:\n%s", view)
+	}
+}
+
+func TestPageScrollLeavesSelectionAnchored(t *testing.T) {
+	m := NewModel().ReplaceStatus(manyItemStatus(t, 12)).SetSize(120, 10)
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	// Paging scrolls the viewport without moving the selection, so the next
+	// j advances from the first row, not from the scrolled position.
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "> [pending] item-2") {
+		t.Fatalf("selection should advance from item-1 to item-2 after paging, got:\n%s", view)
+	}
+}
+
+func TestEndSelectsLastQueueRow(t *testing.T) {
+	m := NewModel().ReplaceStatus(manyItemStatus(t, 12)).SetSize(120, 10)
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "> [pending] item-12") {
+		t.Fatalf("end should select the last queue row and scroll it into view, got:\n%s", view)
+	}
+}
+
+func TestVerdictCompactnessCapSummarizesOverflow(t *testing.T) {
+	st, err := ParseStatus([]byte(`{
+		"enabled": true,
+		"queue": {"total": 0},
+		"terminal_items": [
+			{"id": "t1", "claim_id": "c1", "claim": "first", "status": "completed", "verdict": {"verdict": "verified", "evidence": "e"}},
+			{"id": "t2", "claim_id": "c2", "claim": "second", "status": "completed", "verdict": {"verdict": "verified", "evidence": "e"}},
+			{"id": "t3", "claim_id": "c3", "claim": "third", "status": "completed", "verdict": {"verdict": "verified", "evidence": "e"}},
+			{"id": "t4", "claim_id": "c4", "claim": "fourth", "status": "completed", "verdict": {"verdict": "verified", "evidence": "e"}},
+			{"id": "t5", "claim_id": "c5", "claim": "fifth", "status": "completed", "verdict": {"verdict": "verified", "evidence": "e"}},
+			{"id": "t6", "claim_id": "c6", "claim": "sixth", "status": "completed", "verdict": {"verdict": "verified", "evidence": "e"}}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+
+	view := stripANSI(NewModel().ReplaceStatus(st).SetSize(200, 40).View())
 	if !strings.Contains(view, "... 2 more verdicts") {
-		t.Fatalf("overflowing verdicts should collapse into a whole-verdict marker, got:\n%s", view)
+		t.Fatalf("verdicts beyond the four-entry compactness cap should be summarized, got:\n%s", view)
 	}
-	if strings.Contains(view, "kilo") || strings.Contains(view, "uniform") {
-		t.Fatalf("dropped verdicts must be dropped whole, got:\n%s", view)
-	}
-	if strings.Index(view, "Active leases") < strings.Index(view, "more verdicts") {
-		t.Fatalf("lease region should sit below the verdict region, got:\n%s", view)
+	if strings.Contains(view, "fifth") || strings.Contains(view, "sixth") {
+		t.Fatalf("verdicts beyond the compactness cap should not render, got:\n%s", view)
 	}
 }

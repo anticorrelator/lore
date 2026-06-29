@@ -29,8 +29,14 @@ func sgrOpen(st lipgloss.Style) string {
 
 func newTestListModel(items []WorkItem) ListModel {
 	m := NewListModel(items)
-	m.width = 120
-	m.height = 20
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	return m
+}
+
+// resizeStacked shrinks the list below the stacked threshold (the old
+// compact mode is now width-driven).
+func resizeStacked(m ListModel) ListModel {
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
 	return m
 }
 
@@ -38,14 +44,12 @@ func TestCompactNeedsInputShowsBullet(t *testing.T) {
 	items := []WorkItem{
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
-	m := newTestListModel(items)
-	m.compactMode = true
-	m.specActiveSlugs = map[string]bool{"my-item": true}
-	m.specNeedsInputSlugs = map[string]bool{"my-item": true}
+	m := resizeStacked(newTestListModel(items))
+	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: true})
 
 	view := m.View()
 	if !strings.Contains(view, "●") {
-		t.Fatalf("expected ● glyph in compact view, got:\n%s", view)
+		t.Fatalf("expected ● glyph in stacked view, got:\n%s", view)
 	}
 	// Should NOT contain the old diamond glyph for this item's attention indicator.
 	// (External sessions use ◆, but this item is not external.)
@@ -55,10 +59,8 @@ func TestCompactActiveNoNeedsInputNoBullet(t *testing.T) {
 	items := []WorkItem{
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
-	m := newTestListModel(items)
-	m.compactMode = true
-	m.specActiveSlugs = map[string]bool{"my-item": true}
-	m.specNeedsInputSlugs = map[string]bool{"my-item": false}
+	m := resizeStacked(newTestListModel(items))
+	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: false})
 
 	view := m.View()
 	if strings.Contains(view, "●") {
@@ -70,13 +72,30 @@ func TestCompactExternalSessionShowsDiamond(t *testing.T) {
 	items := []WorkItem{
 		{Slug: "ext-item", Title: "External", Status: "active", Updated: "2026-01-01"},
 	}
-	m := newTestListModel(items)
-	m.compactMode = true
-	m.externalActiveSlugs = map[string]bool{"ext-item": true}
+	m := resizeStacked(newTestListModel(items))
+	m, _ = m.Update(ExternalSessionMsg{Slugs: map[string]bool{"ext-item": true}})
 
 	view := m.View()
 	if !strings.Contains(view, "◆") {
 		t.Fatalf("expected dim ◆ glyph for external session, got:\n%s", view)
+	}
+}
+
+// The stacked title-line glyph keeps its attention color on unselected rows
+// via the row-decorator hook; the selected row stays unstyled under the
+// selection background.
+func TestStackedGlyphDecoratorColorsUnselectedRow(t *testing.T) {
+	items := []WorkItem{
+		{Slug: "cursor-row", Title: "Cursor", Status: "active", Updated: "2026-01-01"},
+		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
+	}
+	m := resizeStacked(newTestListModel(items))
+	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: true})
+
+	view := m.View()
+	want := needsInputStyle.Render("●")
+	if !strings.Contains(view, want) {
+		t.Fatalf("unselected stacked glyph should render in ColorAttention, got:\n%s", view)
 	}
 }
 
@@ -85,9 +104,7 @@ func TestFullNeedsInputShowsDotColumn(t *testing.T) {
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m.compactMode = false
-	m.specActiveSlugs = map[string]bool{"my-item": true}
-	m.specNeedsInputSlugs = map[string]bool{"my-item": true}
+	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: true})
 
 	view := m.View()
 	// ● moves to the dot column (before slug), readiness shows "speccing"
@@ -107,9 +124,7 @@ func TestFullActiveNoNeedsInputShowsSpeccing(t *testing.T) {
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m.compactMode = false
-	m.specActiveSlugs = map[string]bool{"my-item": true}
-	m.specNeedsInputSlugs = map[string]bool{"my-item": false}
+	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: false})
 
 	view := m.View()
 	if !strings.Contains(view, "speccing") {
@@ -125,8 +140,7 @@ func TestFullExternalSessionShowsDiamondActive(t *testing.T) {
 		{Slug: "ext-item", Title: "External", Status: "active", Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m.compactMode = false
-	m.externalActiveSlugs = map[string]bool{"ext-item": true}
+	m, _ = m.Update(ExternalSessionMsg{Slugs: map[string]bool{"ext-item": true}})
 
 	view := m.View()
 	if !strings.Contains(view, "◆ active") {
@@ -143,9 +157,7 @@ func TestFullNeedsInputReadinessPreserved(t *testing.T) {
 		{Slug: "my-item", Title: "My Item", Status: "active", HasTasks: true, Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m.compactMode = false
-	m.specActiveSlugs = map[string]bool{"my-item": true}
-	m.specNeedsInputSlugs = map[string]bool{"my-item": true}
+	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: true})
 
 	view := m.View()
 	// ● must appear in dot column
@@ -191,7 +203,10 @@ func TestReadinessLabelRoutesThroughStatusRamp(t *testing.T) {
 }
 
 func TestFullViewReadinessUsesStatusRampColor(t *testing.T) {
+	// The selected row renders unstyled under the selection background, so
+	// the asserted item sits below the cursor.
 	items := []WorkItem{
+		{Slug: "cursor-row", Title: "Cursor", Status: "active", Updated: "2026-01-01"},
 		{Slug: "ready-item", Title: "Ready", Status: "active", HasTasks: true, Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
@@ -204,10 +219,11 @@ func TestFullViewReadinessUsesStatusRampColor(t *testing.T) {
 
 func TestFullViewSpeccingUsesStatusActive(t *testing.T) {
 	items := []WorkItem{
+		{Slug: "cursor-row", Title: "Cursor", Status: "active", Updated: "2026-01-01"},
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m.specActiveSlugs = map[string]bool{"my-item": true}
+	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: false})
 
 	view := m.View()
 	if !strings.Contains(view, sgrOpen(style.StatusActive)+"speccing") {
@@ -217,11 +233,11 @@ func TestFullViewSpeccingUsesStatusActive(t *testing.T) {
 
 func TestNeedsInputDotUsesAttentionColor(t *testing.T) {
 	items := []WorkItem{
+		{Slug: "cursor-row", Title: "Cursor", Status: "active", Updated: "2026-01-01"},
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m.specActiveSlugs = map[string]bool{"my-item": true}
-	m.specNeedsInputSlugs = map[string]bool{"my-item": true}
+	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: true})
 
 	want := lipgloss.NewStyle().Foreground(style.ColorAttention).Render("●")
 	if view := m.View(); !strings.Contains(view, want) {
@@ -260,10 +276,11 @@ func TestStatusIndicatorPriorityLocalOverExternal(t *testing.T) {
 	}
 	for _, compact := range []bool{true, false} {
 		m := newTestListModel(items)
-		m.compactMode = compact
-		m.specActiveSlugs = map[string]bool{"both": true}
-		m.specNeedsInputSlugs = map[string]bool{"both": false}
-		m.externalActiveSlugs = map[string]bool{"both": true}
+		if compact {
+			m = resizeStacked(m)
+		}
+		m, _ = m.Update(SpecStatusMsg{Slug: "both", NeedsInput: false})
+		m, _ = m.Update(ExternalSessionMsg{Slugs: map[string]bool{"both": true}})
 
 		view := stripListANSI(m.View())
 		if !strings.Contains(view, "speccing") {
@@ -281,7 +298,7 @@ func TestStatusIndicatorPriorityExternalOverReadiness(t *testing.T) {
 		{Slug: "ext", Title: "External", Status: "active", HasTasks: true, Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m.externalActiveSlugs = map[string]bool{"ext": true}
+	m, _ = m.Update(ExternalSessionMsg{Slugs: map[string]bool{"ext": true}})
 
 	view := stripListANSI(m.View())
 	if !strings.Contains(view, "◆ active") {
@@ -522,7 +539,9 @@ func TestListModelSCNoopOnHeader(t *testing.T) {
 func TestListModelUngroupedOnlyRendersFlat(t *testing.T) {
 	for _, compact := range []bool{true, false} {
 		m := newTestListModel(contractItems())
-		m.compactMode = compact
+		if compact {
+			m = resizeStacked(m)
+		}
 
 		view := stripListANSI(m.View())
 		if strings.Contains(view, "▼") || strings.Contains(view, "▶") {

@@ -237,54 +237,36 @@ func TestListModelSetCursorByIDMissingIsNoOp(t *testing.T) {
 	}
 }
 
-// --- compact / full mode rendering ---
+// --- stacked / columnar rendering (width-driven) ---
 
-func TestListModelSetCompactMode(t *testing.T) {
+func TestListModelViewStackedContainsSlugs(t *testing.T) {
 	m := NewListModel(sampleItems())
-	m.SetCompactMode(true)
-	if !m.compactMode {
-		t.Error("compactMode should be true after SetCompactMode(true)")
-	}
-	m.SetCompactMode(false)
-	if m.compactMode {
-		t.Error("compactMode should be false after SetCompactMode(false)")
-	}
-}
-
-func TestListModelViewCompactContainsSlugs(t *testing.T) {
-	m := NewListModel(sampleItems())
-	m.SetCompactMode(true)
-	m.width = 80
-	m.height = 20
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
 	view := m.View()
 	for _, item := range m.visibleItems() {
 		if !strings.Contains(view, item.ID) {
-			t.Errorf("compact view missing slug %q", item.ID)
+			t.Errorf("stacked view missing slug %q", item.ID)
 		}
 	}
 }
 
-func TestListModelViewFullContainsSlugs(t *testing.T) {
+func TestListModelViewColumnarContainsSlugs(t *testing.T) {
 	m := NewListModel(sampleItems())
-	m.SetCompactMode(false)
-	m.width = 120
-	m.height = 20
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
 	view := m.View()
 	for _, item := range m.visibleItems() {
 		if !strings.Contains(view, item.ID) {
-			t.Errorf("full view missing slug %q", item.ID)
+			t.Errorf("columnar view missing slug %q", item.ID)
 		}
 	}
 }
 
-func TestListModelViewCompactEmptyList(t *testing.T) {
+func TestListModelViewEmptyList(t *testing.T) {
 	m := NewListModel([]FollowUpItem{})
-	m.SetCompactMode(true)
-	m.width = 80
-	m.height = 20
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
 	view := m.View()
 	if !strings.Contains(view, "No") {
-		t.Errorf("compact view for empty list should contain 'No', got: %q", view)
+		t.Errorf("view for empty list should contain 'No', got: %q", view)
 	}
 }
 

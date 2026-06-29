@@ -438,6 +438,43 @@ func TestFindingExcerptOnlyHeadings(t *testing.T) {
 	}
 }
 
+// TestDetailModelTabBarClickSwitchesTab verifies a left-click on the tab bar
+// line switches tabs through the TabHost hit-test, anchored at the content
+// start the parent supplies via SetContentStart.
+func TestDetailModelTabBarClickSwitchesTab(t *testing.T) {
+	m := NewDetailModel("/tmp/test")
+	m.width = 80
+	m.height = 40
+
+	id := "tab-click"
+	m.SetID(id)
+	detail := &FollowUpDetail{
+		ID: id, Title: "Tab Click", Status: "open", Source: "review",
+		FindingContent:   "# Finding",
+		Attachments:      []Attachment{},
+		SuggestedActions: []SuggestedAction{},
+	}
+	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
+	updated.SetContentStart(2, 10)
+
+	if updated.ActiveTab() != TabFinding {
+		t.Fatalf("active tab = %v, want TabFinding (default)", updated.ActiveTab())
+	}
+
+	// Bar line is contentStartY+1 = 3; "Meta" occupies X 12..17 (2-cell
+	// indent from contentStartX, label width 4 + padding 2).
+	updated, _ = updated.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 13, Y: 3})
+	if updated.ActiveTab() != TabMeta {
+		t.Errorf("after click on Meta label: active tab = %v, want TabMeta", updated.ActiveTab())
+	}
+
+	// A click on the bar line missing every label leaves the tab unchanged.
+	updated, _ = updated.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 70, Y: 3})
+	if updated.ActiveTab() != TabMeta {
+		t.Errorf("after miss click: active tab = %v, want TabMeta (unchanged)", updated.ActiveTab())
+	}
+}
+
 // --- DetailModel + ReviewCardsModel integration tests ---
 
 func TestDetailModelUsesReviewCardsWhenSidecarPresent(t *testing.T) {
@@ -470,8 +507,8 @@ func TestDetailModelUsesReviewCardsWhenSidecarPresent(t *testing.T) {
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
 	// Three tabs: Meta, Finding, Comments.
-	if len(updated.tabs) != 3 {
-		t.Errorf("tabs len = %d, want 3 (Meta+Finding+Comments)", len(updated.tabs))
+	if len(updated.tabHost.Tabs()) != 3 {
+		t.Errorf("tabs len = %d, want 3 (Meta+Finding+Comments)", len(updated.tabHost.Tabs()))
 	}
 	if updated.ActiveTab() != TabFinding {
 		t.Errorf("active tab = %v, want TabFinding (default tab)", updated.ActiveTab())
@@ -511,11 +548,11 @@ func TestDetailModelUsesViewportWhenNoSidecar(t *testing.T) {
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
 	// Two tabs only: Meta and Finding (no Comments tab without sidecar).
-	if len(updated.tabs) != 2 {
-		t.Errorf("tabs len = %d, want 2 (Meta+Finding)", len(updated.tabs))
+	if len(updated.tabHost.Tabs()) != 2 {
+		t.Errorf("tabs len = %d, want 2 (Meta+Finding)", len(updated.tabHost.Tabs()))
 	}
-	if updated.activeTab != 1 {
-		t.Errorf("activeTab = %d, want 1 (TabFinding)", updated.activeTab)
+	if updated.tabHost.ActiveIndex() != 1 {
+		t.Errorf("activeTab = %d, want 1 (TabFinding)", updated.tabHost.ActiveIndex())
 	}
 	if updated.reviewCards != nil {
 		t.Error("reviewCards should be nil when no sidecar")
@@ -563,19 +600,19 @@ func TestDetailModelTabCyclesThroughTabs(t *testing.T) {
 	if updated.ActiveTab() != TabFinding {
 		t.Fatalf("initial tab = %v, want TabFinding", updated.ActiveTab())
 	}
-	startIdx := updated.activeTab
+	startIdx := updated.tabHost.ActiveIndex()
 
 	// Tab forward wraps through all tabs.
 	updated, _ = updated.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	wantNext := (startIdx + 1) % len(updated.tabs)
-	if updated.activeTab != wantNext {
-		t.Errorf("after tab: activeTab = %d, want %d", updated.activeTab, wantNext)
+	wantNext := (startIdx + 1) % len(updated.tabHost.Tabs())
+	if updated.tabHost.ActiveIndex() != wantNext {
+		t.Errorf("after tab: activeTab = %d, want %d", updated.tabHost.ActiveIndex(), wantNext)
 	}
 
 	// Shift+Tab cycles backward.
 	updated, _ = updated.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-	if updated.activeTab != startIdx {
-		t.Errorf("after shift+tab: activeTab = %d, want %d", updated.activeTab, startIdx)
+	if updated.tabHost.ActiveIndex() != startIdx {
+		t.Errorf("after shift+tab: activeTab = %d, want %d", updated.tabHost.ActiveIndex(), startIdx)
 	}
 }
 
@@ -600,19 +637,19 @@ func TestDetailModelTabCyclesWithoutComments(t *testing.T) {
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
 	// Without sidecar: 2 tabs (Meta=0, Finding=1), starts on Finding.
-	if len(updated.tabs) != 2 {
-		t.Fatalf("tabs len = %d, want 2", len(updated.tabs))
+	if len(updated.tabHost.Tabs()) != 2 {
+		t.Fatalf("tabs len = %d, want 2", len(updated.tabHost.Tabs()))
 	}
 
 	// Tab forward: Meta(0) -> Finding(1) -> Meta(0) wraps correctly.
 	updated, _ = updated.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	if updated.activeTab != 0 {
-		t.Errorf("after tab from Finding: activeTab = %d, want 0 (Meta)", updated.activeTab)
+	if updated.tabHost.ActiveIndex() != 0 {
+		t.Errorf("after tab from Finding: activeTab = %d, want 0 (Meta)", updated.tabHost.ActiveIndex())
 	}
 
 	updated, _ = updated.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	if updated.activeTab != 1 {
-		t.Errorf("after tab from Meta: activeTab = %d, want 1 (Finding)", updated.activeTab)
+	if updated.tabHost.ActiveIndex() != 1 {
+		t.Errorf("after tab from Meta: activeTab = %d, want 1 (Finding)", updated.tabHost.ActiveIndex())
 	}
 }
 
@@ -640,16 +677,16 @@ func TestDetailModelClearIDResetsCardState(t *testing.T) {
 	}
 
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
-	if len(updated.tabs) == 0 {
+	if len(updated.tabHost.Tabs()) == 0 {
 		t.Fatal("tabs should be populated after load")
 	}
 
 	updated.ClearID()
-	if updated.tabs != nil {
-		t.Errorf("tabs should be nil after ClearID, got %v", updated.tabs)
+	if len(updated.tabHost.Tabs()) != 0 {
+		t.Errorf("tabs should be empty after ClearID, got %v", updated.tabHost.Tabs())
 	}
-	if updated.activeTab != 0 {
-		t.Errorf("activeTab should be 0 after ClearID, got %d", updated.activeTab)
+	if updated.tabHost.ActiveIndex() != 0 {
+		t.Errorf("activeTab should be 0 after ClearID, got %d", updated.tabHost.ActiveIndex())
 	}
 	if updated.reviewCards != nil {
 		t.Error("reviewCards should be nil after ClearID")
@@ -686,7 +723,7 @@ func TestDetailModelKeyRoutesToActiveTab(t *testing.T) {
 	if updated.ActiveTab() != TabFinding {
 		t.Fatalf("active tab = %v, want TabFinding", updated.ActiveTab())
 	}
-	updated.activeTab = updated.tabIndexFor(TabComments)
+	updated.tabHost.SetActiveID(TabComments.hostID())
 	if updated.reviewCards.cursor != 0 {
 		t.Fatalf("initial cards cursor = %d, want 0", updated.reviewCards.cursor)
 	}
@@ -698,7 +735,7 @@ func TestDetailModelKeyRoutesToActiveTab(t *testing.T) {
 	}
 
 	// Switch to Finding tab, keys should route to viewport (cursor stays at reviewCards).
-	updated.activeTab = updated.tabIndexFor(TabFinding)
+	updated.tabHost.SetActiveID(TabFinding.hostID())
 	if updated.ActiveTab() != TabFinding {
 		t.Fatalf("active tab = %v, want TabFinding after manual switch", updated.ActiveTab())
 	}
@@ -736,7 +773,7 @@ func TestDetailModelWriteSidecarMsgReachesInactiveComments(t *testing.T) {
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
 	// Switch away from Comments tab to Finding.
-	updated.activeTab = updated.tabIndexFor(TabFinding)
+	updated.tabHost.SetActiveID(TabFinding.hostID())
 	if updated.ActiveTab() != TabFinding {
 		t.Fatalf("active tab = %v, want TabFinding", updated.ActiveTab())
 	}
@@ -778,7 +815,7 @@ func TestDetailModelSummaryGeneratedMsgReachesInactiveComments(t *testing.T) {
 	// Put reviewCards into the generating state, then switch away from Comments
 	// to verify SummaryGeneratedMsg still unblocks it.
 	updated.reviewCards.generatingSummary = true
-	updated.activeTab = updated.tabIndexFor(TabFinding)
+	updated.tabHost.SetActiveID(TabFinding.hostID())
 	if updated.ActiveTab() != TabFinding {
 		t.Fatalf("active tab = %v, want TabFinding", updated.ActiveTab())
 	}
@@ -821,7 +858,7 @@ func TestDetailModelWindowSizeMsgForwardsToAllTabs(t *testing.T) {
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
 	// Switch to Meta tab to verify WindowSizeMsg still updates viewport and reviewCards.
-	updated.activeTab = updated.tabIndexFor(TabMeta)
+	updated.tabHost.SetActiveID(TabMeta.hostID())
 
 	updated, _ = updated.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
 
@@ -868,7 +905,7 @@ func TestDetailModelMetaTabRendersMetadata(t *testing.T) {
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
 	// Switch to Meta tab.
-	updated.activeTab = updated.tabIndexFor(TabMeta)
+	updated.tabHost.SetActiveID(TabMeta.hostID())
 	if updated.ActiveTab() != TabMeta {
 		t.Fatalf("active tab = %v, want TabMeta", updated.ActiveTab())
 	}
@@ -1392,15 +1429,15 @@ func TestDetailModelTabVisibilityWithLensFindings(t *testing.T) {
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
 	// Four tabs: Meta, Finding, Findings, Comments.
-	if len(updated.tabs) != 4 {
-		t.Errorf("tabs len = %d, want 4 (Meta+Finding+Findings+Comments)", len(updated.tabs))
+	if len(updated.tabHost.Tabs()) != 4 {
+		t.Errorf("tabs len = %d, want 4 (Meta+Finding+Findings+Comments)", len(updated.tabHost.Tabs()))
 	}
 
 	// Verify tab order.
 	wantOrder := []Tab{TabMeta, TabFinding, TabTriage, TabComments}
 	for i, want := range wantOrder {
-		if i < len(updated.tabs) && updated.tabs[i].id != want {
-			t.Errorf("tab[%d].id = %v, want %v", i, updated.tabs[i].id, want)
+		if i < len(updated.tabHost.Tabs()) && updated.tabHost.Tabs()[i].ID != want.hostID() {
+			t.Errorf("tab[%d].ID = %v, want %v", i, updated.tabHost.Tabs()[i].ID, want.hostID())
 		}
 	}
 
@@ -1440,11 +1477,11 @@ func TestDetailModelTabVisibilityWithoutLensFindings(t *testing.T) {
 	updated, _ := m.Update(DetailLoadedMsg{ID: id, Detail: detail})
 
 	// Three tabs: Meta, Finding, Comments — no Findings.
-	if len(updated.tabs) != 3 {
-		t.Errorf("tabs len = %d, want 3 (Meta+Finding+Comments)", len(updated.tabs))
+	if len(updated.tabHost.Tabs()) != 3 {
+		t.Errorf("tabs len = %d, want 3 (Meta+Finding+Comments)", len(updated.tabHost.Tabs()))
 	}
-	for _, tab := range updated.tabs {
-		if tab.id == TabTriage {
+	for _, tab := range updated.tabHost.Tabs() {
+		if tab.ID == TabTriage.hostID() {
 			t.Error("TabTriage should not appear when LensFindings is nil")
 		}
 	}
@@ -1525,7 +1562,7 @@ func TestDetailModelKeyDelegationToLensFindings(t *testing.T) {
 	if updated.ActiveTab() != TabFinding {
 		t.Fatalf("active tab = %v, want TabFinding (default)", updated.ActiveTab())
 	}
-	updated.activeTab = updated.tabIndexFor(TabTriage)
+	updated.tabHost.SetActiveID(TabTriage.hostID())
 
 	// j should be delegated to LensFindingsModel (cursor moves down).
 	updated, _ = updated.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
@@ -1790,9 +1827,9 @@ func testDetailWithReviewCards(t *testing.T) DetailModel {
 	rc := NewReviewCardsModel("/tmp", "test", review)
 	rc, _ = rc.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
 	m.reviewCards = &rc
-	m.tabs = m.buildTabs()
+	m.tabHost.SetTabs(m.buildTabs())
 	// Set active tab to TabComments.
-	m.activeTab = m.tabIndexFor(TabComments)
+	m.tabHost.SetActiveID(TabComments.hostID())
 	return m
 }
 
@@ -1829,7 +1866,7 @@ func TestDetailModelKeyEventsForwardedToReviewCardsOnTabComments(t *testing.T) {
 
 func TestDetailModelTabSuppressedDuringEditing(t *testing.T) {
 	m := testDetailWithReviewCards(t)
-	tabBefore := m.activeTab
+	tabBefore := m.tabHost.ActiveIndex()
 
 	// Enter edit mode.
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
@@ -1839,14 +1876,14 @@ func TestDetailModelTabSuppressedDuringEditing(t *testing.T) {
 
 	// Tab should not cycle tabs while editing.
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	if m.activeTab != tabBefore {
-		t.Errorf("tab during editing changed activeTab from %d to %d", tabBefore, m.activeTab)
+	if m.tabHost.ActiveIndex() != tabBefore {
+		t.Errorf("tab during editing changed activeTab from %d to %d", tabBefore, m.tabHost.ActiveIndex())
 	}
 
 	// Shift+tab should also not cycle.
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-	if m.activeTab != tabBefore {
-		t.Errorf("shift+tab during editing changed activeTab from %d to %d", tabBefore, m.activeTab)
+	if m.tabHost.ActiveIndex() != tabBefore {
+		t.Errorf("shift+tab during editing changed activeTab from %d to %d", tabBefore, m.tabHost.ActiveIndex())
 	}
 }
 

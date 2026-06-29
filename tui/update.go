@@ -33,67 +33,53 @@ func compactErr(prefix string, err error) string {
 	return msg
 }
 
-// handlePanelRouting handles shared mouse-focus routing and tab/esc/ctrl+t key
-// handling for split-pane states (stateWork and stateFollowUps). It mutates m
-// in place and returns a command and a bool indicating whether the message was
-// consumed. If consumed is false the caller must handle the message itself.
-// Entity-specific action keys (s, c, p, d, …) are NOT handled here.
+// handlePanelRouting handles shared mouse-focus routing and tab/l/esc/h/ctrl+t
+// key handling for split-pane states. It mutates m in place and returns a
+// command and a bool indicating whether the message was consumed. If consumed
+// is false the caller must handle the message itself (route-to-active falls
+// back to routeFocusedPanel). Entity-specific action keys (s, c, p, d, …) are
+// NOT handled here.
 func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
 		click, isClick := msg.(tea.MouseClickMsg)
 		isClick = isClick && click.Button == tea.MouseLeft && !click.Mod.Contains(tea.ModShift)
 		if isClick {
-			if m.layoutMode == config.LayoutLeftRight {
-				xBoundary := leftPanelWidth + 2
-				if click.X < xBoundary {
+			switch {
+			case cb.focusClick != nil:
+				cb.focusClick(click.X, click.Y)
+			case m.layoutMode == config.LayoutLeftRight:
+				if click.X < leftPanelWidth+2 {
 					m.focusedPanel = panelLeft
 				} else {
 					m.focusedPanel = panelRight
 				}
-			} else {
-				topH := m.topPanelHeight()
-				if click.Y <= 1+topH {
+			default:
+				if click.Y <= 1+m.topPanelHeight() {
 					m.focusedPanel = panelLeft
 				} else {
 					m.focusedPanel = panelRight
 				}
 			}
 		}
-		switch m.focusedPanel {
-		case panelLeft:
-			cmd, prevID, newID := cb.listUpdate(msg)
-			if newID != "" && newID != prevID {
-				detailCmd := cb.loadDetail(newID)
-				return tea.Batch(cmd, detailCmd), true
-			}
-			return cmd, true
-		default: // panelRight
-			if m.terminalMode {
-				id := cb.currentSlug()
-				if m.specPanels != nil {
-					if panel, ok := m.specPanels[id]; ok {
-						sm, cmd := panel.Update(msg)
-						m.specPanels[id] = sm
-						return cmd, true
-					}
-				}
-			}
-			if cb.setContentStart != nil {
-				cb.setContentStart()
-			}
-			cmd := cb.detailUpdate(msg)
-			return cmd, true
-		}
+		return routeFocusedPanel(m, msg, cb), true
 
 	case tea.KeyPressMsg:
 		switch msg.String() {
-		case "esc":
+		case "esc", "h":
+			// Back to list from the detail panel, as the "h/Esc back to
+			// list" status-bar hint advertises. In terminal mode both fall
+			// through to the spec panel: a single Esc is forwarded to the
+			// PTY (so e.g. Claude Code's "esc to interrupt" works) and
+			// emits TerminalDetachMsg only on a double-Esc gesture; h is
+			// ordinary typed input there.
 			if m.focusedPanel == panelRight && !m.terminalMode {
 				m.focusedPanel = panelLeft
 				return nil, true
 			}
 		case "ctrl+t":
+			// Toggles the right panel between detail and terminal, like a
+			// tab. Consumed here so it is never forwarded to the PTY.
 			if m.focusedPanel == panelRight {
 				if m.terminalMode {
 					m.terminalMode = false
@@ -104,7 +90,12 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 					return nil, true
 				}
 			}
-		case "tab":
+		case "tab", "l":
+			// Tab and l both move focus left→right, matching the settlement
+			// and knowledge panels' h/l vocabulary. When on the right panel
+			// neither is consumed: Tab falls through to the detail view so it
+			// can cycle tabs; l is ordinary input there (and reaches the PTY
+			// in terminal mode).
 			if m.focusedPanel == panelLeft {
 				m.focusedPanel = panelRight
 				return nil, true
@@ -112,6 +103,37 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 		}
 	}
 	return nil, false
+}
+
+// routeFocusedPanel forwards msg to the focused panel's sub-model: the list
+// (loading detail when the cursor lands on a new row — this diff is what
+// drives detail load on filter toggles, which move the cursor without firing
+// the list's onCursorChange hook), the spec panel in terminal mode, or the
+// detail view.
+func routeFocusedPanel(m *model, msg tea.Msg, cb panelCallbacks) tea.Cmd {
+	if m.focusedPanel == panelLeft {
+		cmd, prevID, newID := cb.listUpdate(msg)
+		if newID != "" && newID != prevID {
+			return tea.Batch(cmd, cb.loadDetail(newID))
+		}
+		return cmd
+	}
+	if m.terminalMode {
+		id := cb.currentSlug()
+		if m.specPanels != nil {
+			if panel, ok := m.specPanels[id]; ok {
+				sm, cmd := panel.Update(msg)
+				m.specPanels[id] = sm
+				return cmd
+			}
+		}
+		// No panel for the current item — fall back to detail.
+		m.terminalMode = false
+	}
+	if cb.setContentStart != nil {
+		cb.setContentStart()
+	}
+	return cb.detailUpdate(msg)
 }
 
 func (m model) Init() tea.Cmd {
@@ -438,87 +460,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case followupDetailMtimeCheckedMsg:
 		return m.handleFollowupDetailMtimeChecked(msg)
 
-	case tea.MouseMsg:
-		// Centralized click routing: main.go owns all panel geometry,
-		// so mouse events are routed here before reaching sub-models.
-		switch m.state {
-		case stateWork:
-			cb := panelCallbacks{
-				currentSlug: func() string { return m.list.CurrentSlug() },
-				loadDetail: func(slug string) tea.Cmd {
-					var cmd tea.Cmd
-					m, cmd = m.loadDetail(slug)
-					return cmd
-				},
-				specPanelFn: func() (work.SpecPanelModel, bool) { return m.currentSpecPanel() },
-				listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
-					prevSlug := m.list.CurrentSlug()
-					lm, cmd := m.list.Update(lmsg)
-					m.list = lm
-					return cmd, prevSlug, m.list.CurrentSlug()
-				},
-				detailUpdate: func(dmsg tea.Msg) tea.Cmd {
-					var cmd tea.Cmd
-					m.detail, cmd = m.detail.Update(dmsg)
-					return cmd
-				},
-				// Set absolute position so detail can hit-test tab bar clicks.
-				setContentStart: func() {
-					if m.layoutMode == config.LayoutLeftRight {
-						m.detail.SetContentStart(2, leftPanelWidth+5)
-					} else {
-						m.detail.SetContentStart(m.topPanelHeight()+4, 3)
-					}
-				},
-			}
-			cmd, _ := handlePanelRouting(&m, msg, cb)
-			return m, cmd
-		case stateKnowledge:
-			// Browser uses the same leftPanelWidth split as stateWork LayoutLeftRight.
-			click, isClick := msg.(tea.MouseClickMsg)
-			isClick = isClick && click.Button == tea.MouseLeft && !click.Mod.Contains(tea.ModShift)
-			if isClick {
-				xBoundary := leftPanelWidth + 2
-				if click.X < xBoundary {
-					m.browser.FocusLeft()
-				} else {
-					m.browser.FocusRight()
-				}
-			}
-			bm, cmd := m.browser.Update(msg)
-			m.browser = bm
-			return m, cmd
-		case stateFollowUps:
-			cb := panelCallbacks{
-				currentSlug: func() string { return m.followupDetail.CurrentID() },
-				loadDetail: func(id string) tea.Cmd {
-					return m.loadFollowupDetail(id)
-				},
-				specPanelFn: func() (work.SpecPanelModel, bool) { return m.currentFollowupPanel() },
-				listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
-					prevID := m.followupList.CurrentID()
-					fl, cmd := m.followupList.Update(lmsg)
-					m.followupList = fl
-					return cmd, prevID, m.followupList.CurrentID()
-				},
-				detailUpdate: func(dmsg tea.Msg) tea.Cmd {
-					var cmd tea.Cmd
-					m.followupDetail, cmd = m.followupDetail.Update(dmsg)
-					return cmd
-				},
-				// Set absolute position so detail can hit-test tab bar clicks.
-				setContentStart: func() {
-					if m.layoutMode == config.LayoutLeftRight {
-						m.followupDetail.SetContentStart(2, leftPanelWidth+5)
-					} else {
-						m.followupDetail.SetContentStart(m.topPanelHeight()+4, 3)
-					}
-				},
-			}
-			cmd, _ := handlePanelRouting(&m, msg, cb)
-			return m, cmd
-		}
-
 	case tea.KeyPressMsg:
 		// Clear any transient flash error on the next key press.
 		m.flashErr = ""
@@ -723,50 +664,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					m.layoutMode = config.LayoutLeftRight
 				}
 
-				if m.state == stateWork {
-					m.list.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
-
-					// Re-apply dimensions to list
-					listW := leftPanelWidth
-					if m.layoutMode == config.LayoutTopBottom {
-						listW = m.topPanelWidth()
-					}
-					listH := m.listPanelHeight()
-					m.list, _ = m.list.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
-
-					// Re-apply dimensions to detail and all open spec panels.
-					m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-					specH := m.detailPanelHeight()
-					specW := m.rightPanelWidth() - 2
-					for slug, panel := range m.specPanels {
-						sm, _ := panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
-						if ptmx := sm.Ptmx(); ptmx != nil {
-							_ = pty.Setsize(ptmx, &pty.Winsize{
-								Rows: uint16(specH),
-								Cols: uint16(specW),
-							})
-						}
-						m.specPanels[slug] = sm
-					}
-				} else {
-					// stateFollowUps: re-apply dimensions to followup models and open spec panels.
-					m.followupList.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
-					fuListW, fuListH := followupListDims(m)
-					m.followupList, _ = m.followupList.Update(tea.WindowSizeMsg{Width: fuListW, Height: fuListH})
-					m.followupDetail, _ = m.followupDetail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-					specH := m.detailPanelHeight()
-					specW := m.rightPanelWidth() - 2
-					for slug, panel := range m.specPanels {
-						sm, _ := panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
-						if ptmx := sm.Ptmx(); ptmx != nil {
-							_ = pty.Setsize(ptmx, &pty.Winsize{
-								Rows: uint16(specH),
-								Cols: uint16(specW),
-							})
-						}
-						m.specPanels[slug] = sm
-					}
-				}
+				// Re-apply dimensions to both workspaces (the inactive one
+				// must not accumulate stale sizes) and all open spec panels.
+				m.workPanelCallbacks().resize()
+				m.followupPanelCallbacks().resize()
+				m.resizeSpecPanels()
 
 				// Persist preference asynchronously
 				prefs := config.Prefs{Layout: m.layoutMode}
@@ -837,11 +739,8 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				if len(m.followupList.Items()) == 0 {
 					m.followupList = followup.NewListModel(nil)
 				}
-				m.followupList.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
-				fuListW, fuListH := followupListDims(m)
-				m.followupList, _ = m.followupList.Update(tea.WindowSizeMsg{Width: fuListW, Height: fuListH})
 				m.followupDetail = followup.NewDetailModel(m.config.KnowledgeDir)
-				m.followupDetail, _ = m.followupDetail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+				m.followupPanelCallbacks().resize()
 				m.lastFollowupDetailMtime = time.Time{}
 				m.focusedPanel = panelLeft
 				return m, followup.LoadIndexCmd(m.config.KnowledgeDir)
@@ -854,43 +753,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			if m.state == stateSettlement {
 				m.state = stateWork
 				return m, loadWorkItems(m.config.WorkDir)
-			}
-		case "esc", "h":
-			// Esc/h from right panel (detail mode only): back to list, as the
-			// "h/Esc back to list" status-bar hint advertises.
-			// In terminal mode both fall through to the spec panel: a single Esc
-			// is forwarded to the PTY (so e.g. Claude Code's "esc to interrupt"
-			// works) and emits TerminalDetachMsg only on a double-Esc gesture;
-			// h is ordinary typed input there.
-			if (m.state == stateWork || m.state == stateFollowUps) && m.focusedPanel == panelRight && !m.terminalMode {
-				m.focusedPanel = panelLeft
-				return m, nil
-			}
-		case "ctrl+t":
-			// ctrl+t toggles the right panel between detail and terminal, like a tab.
-			// Handled here (before route-to-active-view) so it is never forwarded to the PTY.
-			if (m.state == stateWork || m.state == stateFollowUps) && m.focusedPanel == panelRight {
-				if m.terminalMode {
-					m.terminalMode = false
-					return m, nil
-				}
-				var specPanelFn func() (work.SpecPanelModel, bool)
-				if m.state == stateFollowUps {
-					specPanelFn = m.currentFollowupPanel
-				} else {
-					specPanelFn = m.currentSpecPanel
-				}
-				if panel, ok := specPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
-					m.terminalMode = true
-					return m, nil
-				}
-			}
-		case "tab":
-			// Tab moves focus left→right only. When on the right panel, Tab
-			// falls through to the detail view so it can cycle through tabs.
-			if (m.state == stateWork || m.state == stateFollowUps) && m.focusedPanel == panelLeft {
-				m.focusedPanel = panelRight
-				return m, nil
 			}
 		case "s":
 			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
@@ -1015,46 +877,20 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			m.sizeHelpViewport()
 		}
 
-		// Send constrained sizes to sub-models. List height matches the rendered
-		// area (listPanelHeight); width spans the full panel in top/bottom layout.
-		listW := leftPanelWidth
-		if m.layoutMode == config.LayoutTopBottom {
-			listW = m.topPanelWidth()
-		}
-		listH := m.listPanelHeight()
-		lm, lcmd := m.list.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
-		m.list = lm
+		// Fan constrained sizes out to every workspace, active and inactive —
+		// inactive sub-models must not accumulate stale dimensions.
+		wcmd := m.workPanelCallbacks().resize()
+		fcmd := m.followupPanelCallbacks().resize()
+		bcmd := m.knowledgePanelCallbacks().resize()
+		m.resizeSpecPanels()
 
-		// Size detail — reduced when current item has a spec panel open.
-		var dcmd tea.Cmd
-		m.detail, dcmd = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-		specH := m.detailPanelHeight()
-		specW := m.rightPanelWidth() - 2
-		for slug, panel := range m.specPanels {
-			sm, _ := panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
-			if ptmx := sm.Ptmx(); ptmx != nil {
-				_ = pty.Setsize(ptmx, &pty.Winsize{
-					Rows: uint16(specH),
-					Cols: uint16(specW),
-				})
-			}
-			m.specPanels[slug] = sm
-		}
-
-		bm, bcmd := m.browser.Update(msg)
-		m.browser = bm
-		fuListW, fuListH := followupListDims(m)
-		fl, _ := m.followupList.Update(tea.WindowSizeMsg{Width: fuListW, Height: fuListH})
-		m.followupList = fl
-		fd, _ := m.followupDetail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-		m.followupDetail = fd
 		m.settlement = m.settlement.SetSize(msg.Width-2, msg.Height-4)
 		if m.settlementSettingsPanel != nil {
 			m.settlementSettingsPanel.SetSize(msg.Width/2, msg.Height-4)
 		}
 		m.popup.SetSize(msg.Width, msg.Height)
 
-		return m, tea.Batch(lcmd, dcmd, bcmd)
+		return m, tea.Batch(wcmd, fcmd, bcmd)
 
 	case workItemsLoadedMsg:
 		if msg.err != nil {
@@ -1074,14 +910,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// Collapse state is session-local: carry it across index reloads,
 		// like the cursor restore below.
 		m.list.SetCollapsedProjects(prevCollapsed)
-		m.list.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
 		// Re-apply current window dimensions — the new model starts with height=0
 		// and any previously received WindowSizeMsg was dispatched to the old model.
-		listW := leftPanelWidth
-		if m.layoutMode == config.LayoutTopBottom {
-			listW = m.topPanelWidth()
-		}
-		listH := m.listPanelHeight()
+		listW, listH := m.listDims()
 		m.list, _ = m.list.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
 		// Restore cursor to the previously selected item after rebuild.
 		m.list.SetCursorBySlug(prevSlug)
@@ -1221,6 +1052,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.focusedPanel = panelRight
 		return m.loadDetail(msg.Item.Slug)
 
+	case work.LoadDetailMsg:
+		// Hover-prefetch emitted by the list's onCursorChange hook.
+		return m.loadDetail(msg.Slug)
+
 	case work.DetailLoadedMsg:
 		// Cache the raw detail for instant revisit (renderMarkdown is synchronous and fast)
 		if msg.Err == nil && msg.Detail != nil && m.detailCache != nil {
@@ -1293,7 +1128,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		if msg.Err == nil {
 			prevID := m.followupDetail.CurrentID()
 			m.followupList.SetItems(msg.Items)
-			m.followupList.SetCompactMode(m.layoutMode == config.LayoutLeftRight)
 			// Always sync detail to the current list item after reload.
 			// This handles: initial load (detail empty), post-dismiss/promote
 			// (dismissed item gone, cursor moved to next), and live-reload.
@@ -1441,73 +1275,32 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		return m, cmd
 	}
 
-	// Route to active view
+	// Route to active view. Work and follow-ups share the split-pane seam:
+	// handlePanelRouting consumes mouse focus and tab/esc/h/ctrl+t, and
+	// routeFocusedPanel forwards everything else to the focused sub-model.
 	switch m.state {
 	case stateWork:
-		if m.focusedPanel == panelRight && m.terminalMode {
-			// Route to the spec panel (terminal mode) for the currently selected work item.
-			slug := m.list.CurrentSlug()
-			if m.specPanels != nil {
-				if panel, ok := m.specPanels[slug]; ok {
-					sm, cmd := panel.Update(msg)
-					m.specPanels[slug] = sm
-					return m, cmd
-				}
-			}
-			// No panel for current item — fall back to detail.
-			m.terminalMode = false
-			dm, cmd := m.detail.Update(msg)
-			m.detail = dm
+		cb := m.workPanelCallbacks()
+		if cmd, consumed := handlePanelRouting(&m, msg, cb); consumed {
 			return m, cmd
 		}
-		if m.focusedPanel == panelLeft {
-			prevSlug := m.list.CurrentSlug()
-			lm, cmd := m.list.Update(msg)
-			m.list = lm
-			newSlug := m.list.CurrentSlug()
-			if newSlug != "" && newSlug != prevSlug {
-				var detailCmd tea.Cmd
-				m, detailCmd = m.loadDetail(newSlug)
-				return m, tea.Batch(cmd, detailCmd)
-			}
+		return m, routeFocusedPanel(&m, msg, cb)
+	case stateFollowUps:
+		cb := m.followupPanelCallbacks()
+		if cmd, consumed := handlePanelRouting(&m, msg, cb); consumed {
 			return m, cmd
 		}
-		dm, cmd := m.detail.Update(msg)
-		m.detail = dm
-		return m, cmd
+		return m, routeFocusedPanel(&m, msg, cb)
 	case stateKnowledge:
+		// Only mouse routing goes through the seam (focus clicks delegate to
+		// the browser); keys and async results reach browser.Update directly
+		// so the browser keeps its own focus and tree handling.
+		if _, ok := msg.(tea.MouseMsg); ok {
+			cmd, _ := handlePanelRouting(&m, msg, m.knowledgePanelCallbacks())
+			return m, cmd
+		}
 		bm, cmd := m.browser.Update(msg)
 		m.browser = bm
-		return m, cmd
-	case stateFollowUps:
-		if m.focusedPanel == panelRight && m.terminalMode {
-			// Route to the spec panel (terminal mode) for the currently selected follow-up.
-			id := m.followupDetail.CurrentID()
-			if m.specPanels != nil {
-				if panel, ok := m.specPanels[id]; ok {
-					sm, cmd := panel.Update(msg)
-					m.specPanels[id] = sm
-					return m, cmd
-				}
-			}
-			// No panel for current follow-up — fall back to detail.
-			m.terminalMode = false
-			fd, cmd := m.followupDetail.Update(msg)
-			m.followupDetail = fd
-			return m, cmd
-		}
-		if m.focusedPanel == panelLeft {
-			prevID := m.followupList.CurrentID()
-			fl, cmd := m.followupList.Update(msg)
-			m.followupList = fl
-			newID := m.followupList.CurrentID()
-			if newID != "" && newID != prevID {
-				return m, tea.Batch(cmd, m.loadFollowupDetail(newID))
-			}
-			return m, cmd
-		}
-		fd, cmd := m.followupDetail.Update(msg)
-		m.followupDetail = fd
 		return m, cmd
 	case stateSettlement:
 		sm, cmd := m.settlement.Update(msg)
@@ -1516,6 +1309,23 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// resizeSpecPanels re-applies the spec panel slot size to every open spec
+// panel and propagates it to each panel's PTY.
+func (m *model) resizeSpecPanels() {
+	specH := m.detailPanelHeight()
+	specW := m.rightPanelWidth() - 2
+	for slug, panel := range m.specPanels {
+		sm, _ := panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
+		if ptmx := sm.Ptmx(); ptmx != nil {
+			_ = pty.Setsize(ptmx, &pty.Winsize{
+				Rows: uint16(specH),
+				Cols: uint16(specW),
+			})
+		}
+		m.specPanels[slug] = sm
+	}
 }
 
 func (m *model) ensureSettlementSettingsPanel() {

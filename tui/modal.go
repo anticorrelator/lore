@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/lipgloss/v2"
@@ -169,7 +170,9 @@ func (m model) renderConfirmModal() string {
 	return m.placeModal(buildModalBox(s, title, body))
 }
 
-// helpContent builds the full keybinding list shown in the help modal.
+// helpContent builds the keybinding list shown in the help modal: the keymap
+// registry's help-visible projection, one section per registry section with a
+// helpTitle, in registry order.
 func helpContent() string {
 	s := modalStyles
 	sectionS := style.SubsectionTitle
@@ -179,71 +182,31 @@ func helpContent() string {
 		return k + s.dim.Render(desc)
 	}
 
-	return sectionS.Render("Follow-Ups") + "\n" +
-		row("j / k", "navigate") + "\n" +
-		row("Enter", "open detail") + "\n" +
-		row("Tab / Shift-Tab", "cycle tabs") + "\n" +
-		row("p", "promote to work item") + "\n" +
-		row("d", "dismiss") + "\n" +
-		row("A", "dismiss from list") + "\n" +
-		row("D", "delete from list") + "\n" +
-		row("c", "chat about follow-up") + "\n" +
-		row("w", "work list") + "\n" +
-		row("t", "settlement panel") + "\n" +
-		row("Esc", "exit follow-ups") + "\n" +
-		"\n" +
-		sectionS.Render("Triage Tab") + "\n" +
-		row("space / x / Enter", "toggle selection") + "\n" +
-		row("a", "select all / deselect all") + "\n" +
-		row("p", "promote with selected findings") + "\n" +
-		"\n" +
-		sectionS.Render("Comments Tab") + "\n" +
-		row("a", "select all / deselect all") + "\n" +
-		row("y", "copy body to clipboard") + "\n" +
-		row("E", "edit body in $EDITOR") + "\n" +
-		row("P", "post selected comments to PR") + "\n" +
-		row("g", "generate thematic summary (LLM)") + "\n" +
-		"\n" +
-		sectionS.Render("Work List") + "\n" +
-		row("j / k", "navigate") + "\n" +
-		row("Enter", "open detail") + "\n" +
-		row("s", "run spec") + "\n" +
-		row("c", "chat about spec") + "\n" +
-		row("N", "create work items with AI") + "\n" +
-		row("L", "toggle layout") + "\n" +
-		row("A", "archive / unarchive") + "\n" +
-		row("D", "delete") + "\n" +
-		row("ctrl+a", "toggle archived") + "\n" +
-		row("K", "knowledge browser") + "\n" +
-		row("f", "follow-ups") + "\n" +
-		row("t", "settlement panel") + "\n" +
-		"\n" +
-		sectionS.Render("Settlement") + "\n" +
-		row("j / k", "navigate queue") + "\n" +
-		row("p", "process one batch") + "\n" +
-		row("e", "enable / disable") + "\n" +
-		row("l / h", "settings / status") + "\n" +
-		row("w / f", "work / follow-ups") + "\n" +
-		"\n" +
-		sectionS.Render("Work Detail") + "\n" +
-		row("Tab / Shift-Tab", "cycle tabs") + "\n" +
-		row("j / k", "scroll") + "\n" +
-		row("h / Esc", "back to list") + "\n" +
-		"\n" +
-		sectionS.Render("Spec Panel (terminal mode)") + "\n" +
-		row("scroll wheel", "scroll output") + "\n" +
-		row("ctrl+t", "switch to detail view") + "\n" +
-		row("Esc", "forward to subprocess (e.g. interrupt)") + "\n" +
-		row("Esc Esc", "detach focus, back to list") + "\n" +
-		row("Ctrl+c", "terminate subprocess") + "\n" +
-		row("Ctrl+\\", "terminate subprocess") + "\n" +
-		row("(all other keys)", "forwarded to subprocess") + "\n" +
-		"\n" +
-		sectionS.Render("Global") + "\n" +
-		row("?", "this help") + "\n" +
-		row("t", "settlement panel") + "\n" +
-		row("S / Ctrl+,", "settings configurator") + "\n" +
-		row("q / Ctrl+C / Ctrl+D", "quit")
+	var sections []string
+	for _, sec := range keymapRegistry {
+		if sec.helpTitle == "" {
+			continue
+		}
+		var rows []string
+		for _, e := range sec.entries {
+			if e.surfaces&surfHelp == 0 {
+				continue
+			}
+			key, label := e.key, e.label
+			if e.helpKey != "" {
+				key = e.helpKey
+			}
+			if e.helpLabel != "" {
+				label = e.helpLabel
+			}
+			rows = append(rows, row(key, label))
+		}
+		if len(rows) == 0 {
+			continue
+		}
+		sections = append(sections, sectionS.Render(sec.helpTitle)+"\n"+strings.Join(rows, "\n"))
+	}
+	return strings.Join(sections, "\n\n")
 }
 
 // helpModalChrome is the number of rows the help modal consumes around the

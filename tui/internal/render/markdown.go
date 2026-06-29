@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 // Package-level compiled regexps for inline markdown parsing.
@@ -12,6 +14,15 @@ var (
 	mdBoldRe     = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
 	mdCodeRe     = regexp.MustCompile("`([^`\n]+)`")
 	mdWikiLinkRe = regexp.MustCompile(`\[\[([^\]]+)\]\]`)
+)
+
+// Markdown element styles, constructed once from the shared palette roles.
+var (
+	mdH1Style   = lipgloss.NewStyle().Bold(true).Foreground(style.ColorAccent)
+	mdH2Style   = lipgloss.NewStyle().Bold(true).Foreground(style.ColorMetaKey)
+	mdH3Style   = lipgloss.NewStyle().Bold(true).Foreground(style.ColorText)
+	mdCodeStyle = lipgloss.NewStyle().Foreground(style.ColorCode)
+	mdBoldStyle = lipgloss.NewStyle().Bold(true)
 )
 
 // WordWrapRaw splits text into lines of at most width bytes (word-boundary).
@@ -45,22 +56,15 @@ func Markdown(content string, width int) string {
 		width = 80
 	}
 
-	h1Style   := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	h2Style   := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	h3Style   := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("7"))
-	dimStyle  := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	codeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
-	boldStyle := lipgloss.NewStyle().Bold(true)
-
 	applyInline := func(s string) string {
 		s = mdBoldRe.ReplaceAllStringFunc(s, func(m string) string {
-			return boldStyle.Render(m[2 : len(m)-2])
+			return mdBoldStyle.Render(m[2 : len(m)-2])
 		})
 		s = mdCodeRe.ReplaceAllStringFunc(s, func(m string) string {
-			return codeStyle.Render(m[1 : len(m)-1])
+			return mdCodeStyle.Render(m[1 : len(m)-1])
 		})
 		s = mdWikiLinkRe.ReplaceAllStringFunc(s, func(m string) string {
-			return dimStyle.Render(m)
+			return style.Dim.Render(m)
 		})
 		return s
 	}
@@ -75,11 +79,11 @@ func Markdown(content string, width int) string {
 		if strings.HasPrefix(line, "```") {
 			inCodeBlock = !inCodeBlock
 			justWroteHeading = false
-			out.WriteString(dimStyle.Render(line) + "\n")
+			out.WriteString(style.Dim.Render(line) + "\n")
 			continue
 		}
 		if inCodeBlock {
-			out.WriteString(dimStyle.Render(line) + "\n")
+			out.WriteString(style.Dim.Render(line) + "\n")
 			continue
 		}
 
@@ -92,16 +96,16 @@ func Markdown(content string, width int) string {
 
 		switch {
 		case strings.HasPrefix(line, "#### "):
-			out.WriteString("  " + h3Style.Render(line[5:]) + "\n\n")
+			out.WriteString("  " + mdH3Style.Render(line[5:]) + "\n\n")
 			justWroteHeading = true
 		case strings.HasPrefix(line, "### "):
-			out.WriteString(h3Style.Render(line[4:]) + "\n\n")
+			out.WriteString(mdH3Style.Render(line[4:]) + "\n\n")
 			justWroteHeading = true
 		case strings.HasPrefix(line, "## "):
-			out.WriteString(h2Style.Render(line[3:]) + "\n\n")
+			out.WriteString(mdH2Style.Render(line[3:]) + "\n\n")
 			justWroteHeading = true
 		case strings.HasPrefix(line, "# "):
-			out.WriteString(h1Style.Render(line[2:]) + "\n\n")
+			out.WriteString(mdH1Style.Render(line[2:]) + "\n\n")
 			justWroteHeading = true
 		default:
 			stripped := strings.TrimLeft(line, " ")
@@ -115,7 +119,7 @@ func Markdown(content string, width int) string {
 					if i == 0 {
 						pfx = indent + "✓ "
 					}
-					out.WriteString(dimStyle.Render(pfx+wl) + "\n")
+					out.WriteString(style.Dim.Render(pfx+wl) + "\n")
 				}
 			case strings.HasPrefix(stripped, "- [ ] "):
 				for i, wl := range WordWrapRaw(stripped[6:], avail) {
@@ -134,7 +138,7 @@ func Markdown(content string, width int) string {
 					}
 				}
 			case strings.TrimSpace(line) == "---":
-				out.WriteString(dimStyle.Render(strings.Repeat("─", 60)) + "\n")
+				out.WriteString(style.Dim.Render(strings.Repeat("─", 60)) + "\n")
 			default:
 				if strings.TrimSpace(line) == "" {
 					out.WriteByte('\n')

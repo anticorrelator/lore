@@ -594,6 +594,120 @@ func TestSettlementEscLeavesInlineSettingsPanel(t *testing.T) {
 	}
 }
 
+// newSettlementEmbedModel builds a stateSettlement model with a real inline
+// settings panel (backed by fixture lore data) and right-panel focus, for
+// pinning the host's inline-settlement key dispatch in update.go.
+func newSettlementEmbedModel(t *testing.T) model {
+	t.Helper()
+	setupFakeLoreData(t, `{
+		"version": 1,
+		"tui_launch_framework": "claude-code",
+		"settlement": {
+			"enabled": true,
+			"active_hours": {
+				"enabled": true,
+				"timezone": "local",
+				"ranges": [{"days": ["mon"], "start": "09:00", "end": "17:00"}]
+			}
+		}
+	}`)
+	m := minimalModel(stateSettlement, nil, nil)
+	m.focusedPanel = panelRight
+	m.ensureSettlementSettingsPanel()
+	if m.settlementSettingsPanel == nil {
+		t.Fatalf("expected settlement settings panel, flashErr=%q", m.flashErr)
+	}
+	return m
+}
+
+// driveSettlementEmbedIntoEditing navigates the inline embed to its last
+// control (the active-hours windows editor, which navigation clamps to) and
+// enters edit mode, so the focused editor consumes runes. Every key goes
+// through the host Update path, exercising the real dispatch.
+func driveSettlementEmbedIntoEditing(t *testing.T, m model) model {
+	t.Helper()
+	for i := 0; i < 20; i++ {
+		m, _ = updateModel(t, m, press('j'))
+	}
+	m, _ = updateModel(t, m, press(tea.KeyEnter))
+	if !m.settlementSettingsPanel.FocusConsumesRunes() {
+		t.Fatal("expected the windows editor to be editing and consuming runes")
+	}
+	return m
+}
+
+func TestSettlementEscWithIdleEmbedReturnsFocusToStatusSide(t *testing.T) {
+	m := newSettlementEmbedModel(t)
+	if m.settlementSettingsPanel.FocusConsumesRunes() {
+		t.Fatal("freshly opened embed should not consume runes")
+	}
+
+	nm, _ := updateModel(t, m, press(tea.KeyEscape))
+	if nm.focusedPanel != panelLeft {
+		t.Fatalf("focusedPanel = %v, want panelLeft", nm.focusedPanel)
+	}
+	if nm.settlementSettingsPanel.Closed() {
+		t.Fatal("Esc must return focus to the status side, not close the embed")
+	}
+}
+
+func TestSettlementHWithIdleEmbedReturnsFocusToStatusSide(t *testing.T) {
+	m := newSettlementEmbedModel(t)
+	nm, _ := updateModel(t, m, press('h'))
+	if nm.focusedPanel != panelLeft {
+		t.Fatalf("focusedPanel = %v, want panelLeft", nm.focusedPanel)
+	}
+}
+
+func TestSettlementEscForwardedToConsumingEditorBeforeFocusReturn(t *testing.T) {
+	m := newSettlementEmbedModel(t)
+	m = driveSettlementEmbedIntoEditing(t, m)
+
+	// First Esc: the consuming editor receives it (discarding the edit);
+	// focus stays on the settings side.
+	m, _ = updateModel(t, m, press(tea.KeyEscape))
+	if m.focusedPanel != panelRight {
+		t.Fatalf("focusedPanel = %v, want panelRight while the editor consumed Esc", m.focusedPanel)
+	}
+	if m.settlementSettingsPanel.FocusConsumesRunes() {
+		t.Fatal("first Esc should exit the editor's edit mode")
+	}
+
+	// Second Esc: nothing consumes runes — focus returns to the status side.
+	m, _ = updateModel(t, m, press(tea.KeyEscape))
+	if m.focusedPanel != panelLeft {
+		t.Fatalf("focusedPanel = %v, want panelLeft after second Esc", m.focusedPanel)
+	}
+}
+
+func TestSettlementQGatedByFocusConsumesRunes(t *testing.T) {
+	t.Run("consuming editor swallows q", func(t *testing.T) {
+		m := newSettlementEmbedModel(t)
+		m = driveSettlementEmbedIntoEditing(t, m)
+
+		nm, cmd := updateModel(t, m, press('q'))
+		if cmd != nil {
+			t.Fatal("q must route to the consuming editor, not quit")
+		}
+		if nm.state != stateSettlement || nm.focusedPanel != panelRight {
+			t.Fatalf("state/focus changed: state=%v focus=%v", nm.state, nm.focusedPanel)
+		}
+		if !nm.settlementSettingsPanel.FocusConsumesRunes() {
+			t.Fatal("editor should still be editing after q")
+		}
+	})
+	t.Run("idle embed lets q quit", func(t *testing.T) {
+		m := newSettlementEmbedModel(t)
+		_, cmd := updateModel(t, m, press('q'))
+		if cmd == nil {
+			t.Fatal("expected quit command from q on an idle embed")
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Fatalf("expected tea.QuitMsg, got %T", cmd())
+		}
+	})
+}
+
 func TestSettlementBodyUsesHorizontalSplit(t *testing.T) {
 	m := minimalModel(stateSettlement, nil, nil)
 	m.width = 140
@@ -2622,6 +2736,24 @@ func TestWorkListStatusBarKeybindContract(t *testing.T) {
 			t.Error("t should switch to the settlement panel")
 		}
 	})
+	t.Run("l (open)", func(t *testing.T) {
+		nm, _ := updateModel(t, workContractModel(), press('l'))
+		if nm.focusedPanel != panelRight {
+			t.Error("l should enter the detail panel (parity with tab)")
+		}
+	})
+	t.Run("A (archive / unarchive)", func(t *testing.T) {
+		nm, _ := updateModel(t, workContractModel(), press('A'))
+		if nm.confirmAction != "archive" {
+			t.Errorf("A should open the archive confirm modal, got %q", nm.confirmAction)
+		}
+	})
+	t.Run("D (delete)", func(t *testing.T) {
+		nm, _ := updateModel(t, workContractModel(), press('D'))
+		if nm.confirmAction != "delete" {
+			t.Errorf("D should open the delete confirm modal, got %q", nm.confirmAction)
+		}
+	})
 }
 
 // TestWorkDetailStatusBarKeybindContract verifies the stateWork panelRight
@@ -2809,6 +2941,12 @@ func TestFollowupListStatusBarKeybindContract(t *testing.T) {
 		nm, _ := updateModel(t, followupContractModel(), press('t'))
 		if nm.state != stateSettlement {
 			t.Error("t should switch to the settlement panel")
+		}
+	})
+	t.Run("l (detail)", func(t *testing.T) {
+		nm, _ := updateModel(t, followupContractModel(), press('l'))
+		if nm.focusedPanel != panelRight {
+			t.Error("l should focus the detail panel (parity with tab)")
 		}
 	})
 }
@@ -3313,4 +3451,71 @@ func TestKnowledgeGlobalKeybindContract(t *testing.T) {
 			t.Error("settings modal opened from stateKnowledge must actually render")
 		}
 	})
+}
+
+// TestStatusBarAdvertisesLForDetailEntry pins the hint text the new l binding's
+// contract tests are named after ("l (open)" / "l (detail)" above): the work
+// and follow-up list status bars advertise l/Enter for detail entry.
+func TestStatusBarAdvertisesLForDetailEntry(t *testing.T) {
+	m := workContractModel()
+	bar := stripANSI(m.renderStatusBar(m.width))
+	if !strings.Contains(bar, "l/Enter open") {
+		t.Errorf("work list status bar should advertise l/Enter open:\n%s", bar)
+	}
+	fm := followupContractModel()
+	fm.width = 120
+	bar = stripANSI(fm.renderStatusBar(fm.width))
+	if !strings.Contains(bar, "l/Enter detail") {
+		t.Errorf("follow-up list status bar should advertise l/Enter detail:\n%s", bar)
+	}
+}
+
+// TestSettlementEditingStatusBarOmitsDeadHHint pins the settlement editing
+// hint context: while an embedded editor consumes runes, h reaches neither
+// the focus gate (which requires no consuming editor) nor the editor (the key
+// falls through to a global switch with no settlement h case), so the status
+// bar must not advertise it; Enter/Esc are the reachable keys.
+func TestSettlementEditingStatusBarOmitsDeadHHint(t *testing.T) {
+	m := newSettlementEmbedModel(t)
+	m.width = 120
+	bar := stripANSI(m.renderStatusBar(m.width))
+	if !strings.Contains(bar, "h status") {
+		t.Fatalf("idle embed should advertise h status:\n%s", bar)
+	}
+	m = driveSettlementEmbedIntoEditing(t, m)
+	bar = stripANSI(m.renderStatusBar(m.width))
+	if strings.Contains(bar, "h status") {
+		t.Errorf("editing embed must not advertise the dead h key:\n%s", bar)
+	}
+	if !strings.Contains(bar, "Enter commit") || !strings.Contains(bar, "Esc cancel") {
+		t.Errorf("editing embed should advertise Enter commit and Esc cancel:\n%s", bar)
+	}
+}
+
+// TestHelpContentProjectsKeymapRegistry spot-checks the help modal against
+// the registry's help-visible projection: every help section title renders in
+// registry order, and help-only rows (work-list N) appear.
+func TestHelpContentProjectsKeymapRegistry(t *testing.T) {
+	out := stripANSI(helpContent())
+	wants := []string{
+		"Follow-Ups", "Triage Tab", "Comments Tab", "Follow-Up Detail",
+		"Work List", "Work Detail", "Settlement", "Settlement Settings",
+		"Knowledge Browser", "Spec Panel (terminal mode)", "Global",
+		"l / Enter", "create work items with AI",
+	}
+	pos := -1
+	for _, want := range wants {
+		idx := strings.Index(out, want)
+		if idx < 0 {
+			t.Errorf("help content missing %q", want)
+			continue
+		}
+		if want == "l / Enter" || want == "create work items with AI" {
+			continue // row content, not ordered section titles
+		}
+		if idx < pos {
+			t.Errorf("help section %q out of registry order", want)
+		}
+		pos = idx
+	}
 }

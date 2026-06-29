@@ -2,12 +2,11 @@ package followup
 
 import (
 	"fmt"
-	"image/color"
-	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/anticorrelator/lore/tui/internal/collection"
 	"github.com/anticorrelator/lore/tui/internal/style"
 
 	"github.com/anticorrelator/lore/tui/internal/work"
@@ -33,31 +32,113 @@ const (
 	FilterClosed
 )
 
+// listColumns is the follow-up table's column set. The slug absorbs spare
+// width; lower-priority columns drop as the panel narrows.
+var listColumns = []collection.Column{
+	{Key: "slug", Title: "SLUG", Width: 16, Priority: 0, Flex: true},
+	{Key: "status", Title: "STATUS", Width: 9, Priority: 1},
+	{Key: "source", Title: "SOURCE", Width: 14, Priority: 3},
+	{Key: "pr", Title: "PR", Width: 8, Priority: 5},
+	{Key: "work", Title: "WORK ITEM", Width: 20, Priority: 4},
+	{Key: "updated", Title: "UPDATED", Width: 10, Priority: 2},
+}
+
 // ListModel is the Bubble Tea model for the follow-up list panel.
 type ListModel struct {
 	allItems   []FollowUpItem
 	filterMode FollowUpFilterMode
-	cursor     int
-	compactMode bool
-	width       int
-	height      int
-	err         error
+	list       collection.List
 }
 
 // NewListModel creates a follow-up list model from pre-loaded items.
 func NewListModel(items []FollowUpItem) ListModel {
-	return ListModel{
+	m := ListModel{
 		allItems: items,
-		cursor:   0,
+		list:     collection.NewList(listColumns),
 	}
+	m.list.SetOnCursorChange(func(id string) tea.Cmd {
+		return func() tea.Msg { return LoadDetailMsg{ID: id} }
+	})
+	m.refreshRows()
+	return m
 }
 
 // SetItems replaces the item list (used on live-reload).
 func (m *ListModel) SetItems(items []FollowUpItem) {
 	m.allItems = items
-	if m.cursor >= len(m.visibleItems()) {
-		m.cursor = 0
+	m.refreshRows()
+}
+
+// refreshRows rebuilds the collection rows (and the select hook's item
+// snapshot) from the current items and filter mode.
+func (m *ListModel) refreshRows() {
+	items := m.visibleItems()
+	rows := make([]collection.Row, len(items))
+	for i, item := range items {
+		rows[i] = itemRow(item)
 	}
+
+	label := "active"
+	if m.filterMode == FilterClosed {
+		label = "closed"
+	}
+	m.list.SetEmptyText(fmt.Sprintf("  No %s follow-ups.  (ctrl+a to switch)", label))
+
+	m.list.SetOnSelect(func(r collection.Row) tea.Cmd {
+		for _, item := range items {
+			if item.ID == r.ID {
+				return func() tea.Msg { return FollowUpSelectedMsg{Item: item} }
+			}
+		}
+		return nil
+	})
+	m.list.SetRows(rows)
+}
+
+// itemRow maps a follow-up item to a collection row: cells parallel to
+// listColumns for the columnar table, Title+Meta for the stacked layout.
+func itemRow(item FollowUpItem) collection.Row {
+	glyph, glyphStyle := statusGlyph(item.Status)
+
+	pr := item.PRRef()
+	if pr == "" {
+		pr = "--"
+	}
+	wi := item.WorkItemRef()
+	if wi == "" {
+		wi = "--"
+	}
+	updated := work.FormatRelativeTime(item.Updated)
+	if updated == item.Updated {
+		updated = "--"
+	}
+
+	row := collection.Row{
+		ID: item.ID,
+		Cells: []collection.Cell{
+			{Text: item.ID},
+			{Text: glyph + " " + item.Status, Style: glyphStyle},
+			{Text: item.Source, Style: style.Dim},
+			{Text: pr, Style: style.Dim},
+			{Text: wi, Style: style.Dim},
+			{Text: updated, Style: style.Dim},
+		},
+		Title: collection.Cell{Text: item.ID},
+		Meta: []collection.Cell{
+			{Text: glyph, Style: glyphStyle},
+			{Text: style.Truncate(item.Source, 20), Style: style.Dim},
+		},
+	}
+	if updated != "--" {
+		row.Meta = append(row.Meta, collection.Cell{Text: updated, Style: style.Dim})
+	}
+	if p := item.PRRef(); p != "" {
+		row.Meta = append(row.Meta, collection.Cell{Text: p, Style: style.Dim})
+	}
+	if w := item.WorkItemRef(); w != "" {
+		row.Meta = append(row.Meta, collection.Cell{Text: w, Style: style.Dim})
+	}
+	return row
 }
 
 // visibleItems returns follow-up items matching the current filter mode.
@@ -94,25 +175,22 @@ func (m ListModel) FollowUpCount() int {
 
 // Cursor returns the current cursor position.
 func (m ListModel) Cursor() int {
-	return m.cursor
+	return m.list.Cursor()
 }
 
 // CurrentID returns the ID of the currently highlighted item, or "" if empty.
 func (m ListModel) CurrentID() string {
-	items := m.visibleItems()
-	if len(items) == 0 || m.cursor >= len(items) {
-		return ""
-	}
-	return items[m.cursor].ID
+	return m.list.CurrentID()
 }
 
 // CurrentItem returns the currently highlighted item and whether one exists.
 func (m ListModel) CurrentItem() (FollowUpItem, bool) {
 	items := m.visibleItems()
-	if len(items) == 0 || m.cursor >= len(items) {
+	cursor := m.list.Cursor()
+	if len(items) == 0 || cursor >= len(items) {
 		return FollowUpItem{}, false
 	}
-	return items[m.cursor], true
+	return items[cursor], true
 }
 
 func (m ListModel) Init() tea.Cmd {
@@ -120,297 +198,48 @@ func (m ListModel) Init() tea.Cmd {
 }
 
 func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-
-	case tea.KeyPressMsg:
-		items := m.visibleItems()
-		prevCursor := m.cursor
-		switch msg.String() {
+	if key, ok := msg.(tea.KeyPressMsg); ok {
+		switch key.String() {
 		case "ctrl+a":
 			if m.filterMode == FilterOpen {
 				m.filterMode = FilterClosed
 			} else {
 				m.filterMode = FilterOpen
 			}
-			m.cursor = 0
+			m.refreshRows()
+			m.list.CursorToFirstItem()
+			return m, nil
 		case "esc":
 			return m, func() tea.Msg { return ListDismissedMsg{} }
-		case "j", "down":
-			if m.cursor < len(items)-1 {
-				m.cursor++
-			}
-		case "k", "up":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case "g", "home":
-			m.cursor = 0
-		case "G", "end":
-			if len(items) > 0 {
-				m.cursor = len(items) - 1
-			}
-		case "enter":
-			if len(items) > 0 {
-				item := items[m.cursor]
-				return m, func() tea.Msg {
-					return FollowUpSelectedMsg{Item: item}
-				}
-			}
-		}
-
-		// Emit hover-prefetch when cursor moves
-		if m.cursor != prevCursor && len(items) > 0 && m.cursor < len(items) {
-			id := items[m.cursor].ID
-			return m, func() tea.Msg { return LoadDetailMsg{ID: id} }
 		}
 	}
-	return m, nil
+	l, cmd := m.list.Update(msg)
+	m.list = l
+	return m, cmd
 }
 
-// statusGlyph returns a short indicator for the follow-up status.
-func statusGlyph(status string) (string, color.Color) {
+// statusGlyph returns a short indicator and the status-ramp style for the
+// follow-up status.
+func statusGlyph(status string) (string, lipgloss.Style) {
 	switch status {
 	case "open", "pending":
-		return "○", lipgloss.Color("4") // blue circle
+		return "○", style.StatusActive
 	case "reviewed":
-		return "◎", lipgloss.Color("6") // cyan
+		return "◎", style.StatusModified
 	case "promoted":
-		return "●", lipgloss.Color("2") // green
+		return "●", style.StatusReady
 	case "dismissed":
-		return "✗", lipgloss.Color("8") // dim
+		return "✗", style.StatusDone
 	default:
-		return "?", lipgloss.Color("8")
+		return "?", style.StatusDone
 	}
 }
 
 // SetCursorByID moves the cursor to the item with the given ID if it is visible.
 func (m *ListModel) SetCursorByID(id string) {
-	for i, item := range m.visibleItems() {
-		if item.ID == id {
-			m.cursor = i
-			return
-		}
-	}
-}
-
-// SetCompactMode enables or disables compact rendering.
-func (m *ListModel) SetCompactMode(compact bool) {
-	m.compactMode = compact
+	m.list.SetCursorByID(id)
 }
 
 func (m ListModel) View() string {
-	if m.err != nil {
-		return fmt.Sprintf("Error loading follow-ups: %v\n", m.err)
-	}
-
-	if m.compactMode {
-		return m.viewCompact()
-	}
-	return m.viewFull()
-}
-
-// viewFull renders the full-width columnar table with one row per item.
-func (m ListModel) viewFull() string {
-	var b strings.Builder
-
-	// Column widths — ID absorbs spare space.
-	statusW := 9  // "dismissed" = 9 chars
-	sourceW := 14
-	prW := 8
-	workW := 20
-	updatedW := 10
-	idW := 30 // default; grows to fill terminal width
-
-	// Adapt to terminal width: ID absorbs all spare space.
-	// Fixed: status(9) + source(14) + pr(8) + work(20) + updated(10) + gaps(14) = 75
-	// Gaps: 2 leading + 6 pairs of "  " separators = 14 chars.
-	if m.width > 0 {
-		idW = m.width - statusW - sourceW - prW - workW - updatedW - 14
-		if idW < 16 {
-			idW = 16
-		}
-	}
-
-	// Styles
-	headerStyle := style.SectionTitle
-	selectedStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
-	dimStyle := style.Dim
-
-	// Header
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
-		idW, "SLUG",
-		statusW, "STATUS",
-		sourceW, "SOURCE",
-		prW, "PR",
-		workW, "WORK ITEM",
-		updatedW, "UPDATED",
-	)
-	b.WriteString(headerStyle.Render(header))
-	b.WriteString("\n")
-
-	items := m.visibleItems()
-
-	// Visible rows (reserve 1 line for header)
-	visibleRows := m.height - 1
-	if visibleRows < 1 {
-		visibleRows = len(items)
-	}
-
-	// Scrolling: keep cursor visible
-	offset := 0
-	if m.cursor >= visibleRows {
-		offset = m.cursor - visibleRows + 1
-	}
-
-	end := offset + visibleRows
-	if end > len(items) {
-		end = len(items)
-	}
-
-	for i := offset; i < end; i++ {
-		item := items[i]
-
-		// ID — always show the slug for quick identification.
-		idStr := style.Truncate(item.ID, idW)
-
-		// Status with glyph
-		glyph, glyphColor := statusGlyph(item.Status)
-		statusStr := lipgloss.NewStyle().Foreground(glyphColor).Render(glyph + " " + style.Truncate(item.Status, statusW-2))
-
-		// Source
-		source := dimStyle.Render(style.Truncate(item.Source, sourceW))
-
-		// PR ref
-		prStr := "--"
-		if pr := item.PRRef(); pr != "" {
-			prStr = pr
-		}
-		prCell := dimStyle.Render(style.Truncate(prStr, prW))
-
-		// Work item ref
-		wiStr := "--"
-		if wi := item.WorkItemRef(); wi != "" {
-			wiStr = wi
-		}
-		wiCell := dimStyle.Render(style.Truncate(wiStr, workW))
-
-		// Updated
-		updated := work.FormatRelativeTime(item.Updated)
-		if updated == item.Updated {
-			updated = "--"
-		}
-		updatedCell := dimStyle.Render(style.Truncate(updated, updatedW))
-
-		row := fmt.Sprintf("  %-*s  %s%s  %s%s  %s%s  %s%s  %s",
-			idW, idStr,
-			statusStr, strings.Repeat(" ", max(0, statusW-lipgloss.Width(statusStr))),
-			source, strings.Repeat(" ", max(0, sourceW-lipgloss.Width(source))),
-			prCell, strings.Repeat(" ", max(0, prW-lipgloss.Width(prCell))),
-			wiCell, strings.Repeat(" ", max(0, workW-lipgloss.Width(wiCell))),
-			updatedCell,
-		)
-
-		if i == m.cursor {
-			row = selectedStyle.Render(row)
-		}
-
-		b.WriteString(row)
-		b.WriteString("\n")
-	}
-
-	return b.String()
-}
-
-// viewCompact renders the compact split-pane list with two lines per item.
-func (m ListModel) viewCompact() string {
-	items := m.visibleItems()
-	var b strings.Builder
-
-	dimStyle := style.Dim
-
-	if len(items) == 0 {
-		label := "active"
-		if m.filterMode == FilterClosed {
-			label = "closed"
-		}
-		b.WriteString(dimStyle.Render(fmt.Sprintf("  No %s follow-ups.  (ctrl+a to switch)", label)))
-		b.WriteString("\n")
-		return b.String()
-	}
-
-	titleSelStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
-	infoSelStyle := lipgloss.NewStyle().Background(lipgloss.Color("237"))
-
-	// Compute panel width (default 40 for split-pane use)
-	panelWidth := m.width
-	if panelWidth <= 0 {
-		panelWidth = 40
-	}
-
-	// Each item occupies 2 lines: title + metadata
-	visibleCount := m.height / 2
-	if visibleCount < 1 {
-		visibleCount = len(items)
-	}
-
-	offset := 0
-	if m.cursor >= visibleCount {
-		offset = m.cursor - visibleCount + 1
-	}
-
-	end := offset + visibleCount
-	if end > len(items) {
-		end = len(items)
-	}
-
-	for i := offset; i < end; i++ {
-		item := items[i]
-		selected := i == m.cursor
-
-		cursor := "  "
-		if selected {
-			cursor = "> "
-		}
-
-		// Title line — always show the slug (ID) for quick identification.
-		titleAvail := panelWidth - 2 // 2 cursor chars
-		titleTrunc := style.Truncate(item.ID, titleAvail)
-
-		line1 := cursor + titleTrunc
-		for lipgloss.Width(line1) < panelWidth {
-			line1 += " "
-		}
-
-		// Metadata line: status glyph + source + relative time [+ PR ref] [+ work item ref]
-		glyph, glyphColor := statusGlyph(item.Status)
-		statusStr := lipgloss.NewStyle().Foreground(glyphColor).Render(glyph)
-		sourceStr := dimStyle.Render(style.Truncate(item.Source, 20))
-		sep := dimStyle.Render(" · ")
-		line2 := "    " + statusStr + sep + sourceStr
-		if relTime := work.FormatRelativeTime(item.Updated); relTime != "" && relTime != item.Updated {
-			line2 += sep + dimStyle.Render(relTime)
-		}
-		if pr := item.PRRef(); pr != "" {
-			line2 += sep + dimStyle.Render(pr)
-		}
-		if wi := item.WorkItemRef(); wi != "" {
-			line2 += sep + dimStyle.Render(wi)
-		}
-		for lipgloss.Width(line2) < panelWidth {
-			line2 += " "
-		}
-
-		if selected {
-			line1 = titleSelStyle.Render(line1)
-			line2 = infoSelStyle.Render(line2)
-		}
-
-		b.WriteString(line1 + "\n")
-		b.WriteString(line2 + "\n")
-	}
-
-	return b.String()
+	return m.list.View()
 }

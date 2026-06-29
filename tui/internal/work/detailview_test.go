@@ -35,27 +35,32 @@ func TestDetailModelExtraFileTabs(t *testing.T) {
 	}
 	m := NewDetailModel("", "test")
 	m.detail = &detail
-	m.tabs = m.buildTabs()
+	m.tabHost.SetTabs(m.buildTabs())
 
 	// Expected: Meta, Plan, Notes, Research, Context
 	wantLabels := []string{"Meta", "Plan", "Notes", "Research", "Context"}
-	if len(m.tabs) != len(wantLabels) {
-		t.Fatalf("got %d tabs, want %d: %v", len(m.tabs), len(wantLabels), m.tabs)
+	if len(m.tabHost.Tabs()) != len(wantLabels) {
+		t.Fatalf("got %d tabs, want %d: %v", len(m.tabHost.Tabs()), len(wantLabels), m.tabHost.Tabs())
 	}
 	for i, want := range wantLabels {
-		if m.tabs[i].label != want {
-			t.Errorf("tab[%d].label = %q, want %q", i, m.tabs[i].label, want)
+		if m.tabHost.Tabs()[i].Label != want {
+			t.Errorf("tab[%d].Label = %q, want %q", i, m.tabHost.Tabs()[i].Label, want)
 		}
 	}
-	// Extra tabs should have TabFile id and correct extraIndex
-	if m.tabs[3].id != TabFile {
-		t.Errorf("tab[3].id = %v, want TabFile", m.tabs[3].id)
+	// Extra tabs map to TabFile via their "file:<name>" host IDs, which
+	// resolve to the matching extraViewports index.
+	if got := tabFromHostID(m.tabHost.Tabs()[3].ID); got != TabFile {
+		t.Errorf("tab[3] maps to %v, want TabFile", got)
 	}
-	if m.tabs[3].extraIndex != 0 {
-		t.Errorf("tab[3].extraIndex = %d, want 0", m.tabs[3].extraIndex)
+	if got := m.tabHost.Tabs()[3].ID; got != "file:research" {
+		t.Errorf("tab[3].ID = %q, want %q", got, "file:research")
 	}
-	if m.tabs[4].extraIndex != 1 {
-		t.Errorf("tab[4].extraIndex = %d, want 1", m.tabs[4].extraIndex)
+	if got := m.tabHost.Tabs()[4].ID; got != "file:context" {
+		t.Errorf("tab[4].ID = %q, want %q", got, "file:context")
+	}
+	m.tabHost.SetActiveID("file:context")
+	if got := m.activeExtraIndex(); got != 1 {
+		t.Errorf("activeExtraIndex() = %d, want 1", got)
 	}
 }
 
@@ -99,14 +104,14 @@ func TestDetailModelTabBuilding(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			m := NewDetailModel("", "test")
 			m.detail = &tt.detail
-			m.tabs = m.buildTabs()
+			m.tabHost.SetTabs(m.buildTabs())
 
-			if len(m.tabs) != len(tt.wantTabs) {
-				t.Fatalf("got %d tabs, want %d", len(m.tabs), len(tt.wantTabs))
+			if len(m.tabHost.Tabs()) != len(tt.wantTabs) {
+				t.Fatalf("got %d tabs, want %d", len(m.tabHost.Tabs()), len(tt.wantTabs))
 			}
 			for i, want := range tt.wantTabs {
-				if m.tabs[i].id != want {
-					t.Errorf("tab[%d] = %v, want %v", i, m.tabs[i].id, want)
+				if got := m.tabHost.Tabs()[i].ID; got != want.hostID() {
+					t.Errorf("tab[%d] = %v, want %v", i, got, want.hostID())
 				}
 			}
 		})
@@ -122,26 +127,25 @@ func TestDetailModelTabCycling(t *testing.T) {
 		HasExecutionLog: true,
 	}
 	m.loading = false
-	m.tabs = m.buildTabs()
-	m.activeTab = 0
+	m.tabHost.SetTabs(m.buildTabs())
 
 	// Tab forward through all tabs
-	for i := 0; i < len(m.tabs); i++ {
-		if m.ActiveTab() != m.tabs[m.activeTab].id {
+	for i := 0; i < len(m.tabHost.Tabs()); i++ {
+		if m.ActiveTab() != tabFromHostID(m.tabHost.ActiveID()) {
 			t.Fatalf("step %d: ActiveTab mismatch", i)
 		}
 		m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	}
 
 	// Should wrap around to first tab
-	if m.activeTab != 0 {
-		t.Errorf("after full cycle, activeTab = %d, want 0", m.activeTab)
+	if m.tabHost.ActiveIndex() != 0 {
+		t.Errorf("after full cycle, active index = %d, want 0", m.tabHost.ActiveIndex())
 	}
 
 	// Shift-Tab should go to last tab
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-	if m.activeTab != len(m.tabs)-1 {
-		t.Errorf("after shift-tab from 0, activeTab = %d, want %d", m.activeTab, len(m.tabs)-1)
+	if m.tabHost.ActiveIndex() != len(m.tabHost.Tabs())-1 {
+		t.Errorf("after shift-tab from 0, active index = %d, want %d", m.tabHost.ActiveIndex(), len(m.tabHost.Tabs())-1)
 	}
 }
 
@@ -149,7 +153,7 @@ func TestDetailModelBackToList(t *testing.T) {
 	m := NewDetailModel("", "test")
 	m.loading = false
 	m.detail = &WorkItemDetail{}
-	m.tabs = m.buildTabs()
+	m.tabHost.SetTabs(m.buildTabs())
 
 	// Esc should produce BackToListMsg
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
@@ -185,7 +189,7 @@ func TestDetailModelLoadedMsg(t *testing.T) {
 	if m.detail == nil {
 		t.Fatal("detail should be set")
 	}
-	if len(m.tabs) == 0 {
+	if len(m.tabHost.Tabs()) == 0 {
 		t.Error("tabs should be built after loading")
 	}
 }
@@ -280,9 +284,9 @@ func TestBuildSearchIndexFallbackNotes(t *testing.T) {
 		notesContent := "# Session Notes\n\nFreeform content."
 		m := NewDetailModel("", "test")
 		m.detail = &WorkItemDetail{}
-		m.tabs = m.buildTabs()
+		m.tabHost.SetTabs(m.buildTabs())
 		m.notesTab = NewNotesTabModel(&notesContent, 80, 24)
-		m.activeTab = 0 // start on Meta tab
+		m.tabHost.SetActiveID(TabMeta.hostID()) // start on Meta tab
 
 		m.JumpTo(SearchLocation{TabID: TabNotes, Label: "Notes (raw)", EntryIdx: -1})
 

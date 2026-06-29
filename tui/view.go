@@ -9,7 +9,6 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
-	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
@@ -195,12 +194,11 @@ func (m model) viewSettlement() string {
 	b.WriteString("\n")
 	// Border annotation: advertise j/k for whichever side of the split has
 	// focus, mirroring the annotation vocabulary used by the other panels.
-	annotLabel := "queue"
+	annotSel := 0
 	if m.focusedPanel == panelRight {
-		annotLabel = "settings"
+		annotSel = 1
 	}
-	annot := annotDimS.Render("j/k  ") + style.TitleFilter.Render(annotLabel)
-	annotW := 5 + len(annotLabel) // "j/k  " + label
+	annot, annotW := annotSettlementFocus.renderSelected(annotSel)
 	b.WriteString(borderS.Render(style.DockBorder.TopLeft))
 	b.WriteString(renderBorderTitleWithAnnot(style.TitleName.Render("Settlement"), innerW, borderS, annot, annotW))
 	b.WriteString(borderS.Render(style.DockBorder.TopRight))
@@ -388,20 +386,11 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 	// Right panel annotation: show "ctrl+t  detail · terminal" when a spec session exists.
 	var rightBorderTitle string
 	if cfg.hasSpecPanel {
-		var detailS, terminalS lipgloss.Style
+		modeSel := 0
 		if m.terminalMode {
-			detailS, terminalS = annotDimS, style.TitleFilter
-		} else {
-			detailS, terminalS = style.TitleFilter, annotDimS
+			modeSel = 1
 		}
-		termLabel := "terminal"
-		termLabelW := 8
-		if cfg.specPanel.IsDone() {
-			termLabel = "terminal (done)"
-			termLabelW = 15
-		}
-		modeAnnot := annotDimS.Render("ctrl+t  ") + detailS.Render("detail") + annotDimS.Render(" · ") + terminalS.Render(termLabel)
-		modeAnnotW := 8 + 6 + 3 + termLabelW // "ctrl+t  " + "detail" + " · " + termLabel
+		modeAnnot, modeAnnotW := annotPanelMode(cfg.specPanel.IsDone()).render(modeSel)
 		rightBorderTitle = renderBorderTitleWithAnnot(rightTitleRendered, rightInner, rightBS, modeAnnot, modeAnnotW)
 	} else {
 		rightBorderTitle = renderBorderTitle(rightTitleRendered, rightInner, rightBS)
@@ -537,20 +526,11 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 	// Bottom panel annotation: show "ctrl+t  detail · terminal" when a spec session exists.
 	var bottomBorderTitle string
 	if cfg.hasSpecPanel {
-		var detailS, terminalS lipgloss.Style
+		modeSel := 0
 		if m.terminalMode {
-			detailS, terminalS = annotDimS, style.TitleFilter
-		} else {
-			detailS, terminalS = style.TitleFilter, annotDimS
+			modeSel = 1
 		}
-		termLabel := "terminal"
-		termLabelW := 8
-		if cfg.specPanel.IsDone() {
-			termLabel = "terminal (done)"
-			termLabelW = 15
-		}
-		modeAnnot := annotDimS.Render("ctrl+t  ") + detailS.Render("detail") + annotDimS.Render(" · ") + terminalS.Render(termLabel)
-		modeAnnotW := 8 + 6 + 3 + termLabelW // "ctrl+t  " + "detail" + " · " + termLabel
+		modeAnnot, modeAnnotW := annotPanelMode(cfg.specPanel.IsDone()).render(modeSel)
 		bottomBorderTitle = renderBorderTitleWithAnnot(bottomTitleRendered, panelW, bottomBS, modeAnnot, modeAnnotW)
 	} else {
 		bottomBorderTitle = renderBorderTitle(bottomTitleRendered, panelW, bottomBS)
@@ -610,211 +590,39 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 	return b.String()
 }
 
-// followupListDims returns the width and height to pass to followupList based on layoutMode.
-func followupListDims(m model) (int, int) {
-	if m.layoutMode == config.LayoutTopBottom {
-		return m.topPanelWidth(), m.listPanelHeight()
-	}
-	return leftPanelWidth, m.listPanelHeight()
-}
-
-// renderStatusBar renders a single-line context-sensitive keybinding hint bar.
+// renderStatusBar renders a single-line context-sensitive keybinding hint
+// bar. Hint sets come from the keymap registry (keymap.go); this function
+// owns only the override ladder, whose precedence is
+// flashErr > doctorBanner > aiLoading > hints.
 func (m model) renderStatusBar(width int) string {
 	dimS := style.Dim
-	keyS := style.KeyHint
-	sepS := style.Separator
+	sep := style.Separator.Render("  ·  ")
 
-	sep := sepS.Render("  ·  ")
-	hint := func(key, desc string) string {
-		return keyS.Render(key) + " " + dimS.Render(desc)
-	}
-
-	var hints []string
-	// Modal overlays steal hint context from the underlying state. The
-	// settings configurator renders its hints here (below the modal box,
-	// same slot as the work/follow-up views) instead of inlining them in
-	// the modal body.
-	if m.settingsActive && m.settingsPanel != nil {
-		hints = []string{
-			hint("j/k", "navigate"),
-			hint("Enter/Space", "commit"),
-			hint("u", "unset"),
-			hint("PgUp/PgDn", "scroll"),
-			hint("Esc", "close"),
-		}
-		bar := "  " + strings.Join(hints, sep)
-		barW := lipgloss.Width(bar)
-		if barW < width {
+	pad := func(bar string) string {
+		if barW := lipgloss.Width(bar); barW < width {
 			bar += strings.Repeat(" ", width-barW)
 		}
-		return dimS.Render(bar)
+		return bar
 	}
-	switch m.state {
-	case stateOnboarding:
-		if m.initLoading {
-			hints = []string{dimS.Render("Initializing...")}
-		} else {
-			hints = []string{
-				hint("Enter", "initialize"),
-				hint("q", "quit"),
-			}
-		}
-	case stateWork:
-		if m.focusedPanel == panelLeft {
-			hints = []string{
-				hint("j/k", "navigate"),
-				hint("Enter", "open"),
-				hint("s", "spec"),
-				hint("c", "chat"),
-				hint("f", "follow-ups"),
-				hint("t", "settlement"),
-				hint("K", "knowledge"),
-				hint("S", "settings"),
-				hint("q", "quit"),
-				hint("?", "help"),
-			}
-		} else if m.terminalMode {
-			// terminal mode: keys go to PTY
-			hints = []string{
-				hint("ctrl+t", "detail"),
-				hint("Esc", "back to list"),
-				hint("Ctrl+c", "terminate"),
-			}
-		} else {
-			// panelRight — detail view (content tabs)
-			hints = []string{
-				hint("s", "spec"),
-				hint("c", "chat"),
-				hint("Tab/Shift-Tab", "cycle tabs"),
-				hint("j/k", "scroll"),
-				hint("h/Esc", "back to list"),
-				hint("?", "help"),
-			}
-		}
-	case stateKnowledge:
-		hints = []string{
-			hint("j/k", "navigate"),
-			hint("l/Enter", "detail"),
-			hint("h/Esc", "tree"),
-			hint("/", "search"),
-			hint("Esc", "exit"),
-			hint("?", "help"),
-		}
-	case stateSettlement:
-		if m.focusedPanel == panelRight {
-			hints = []string{
-				hint("j/k", "settings"),
-				hint("Enter", "edit/commit"),
-				hint("h", "status"),
-				hint("S", "all settings"),
-				hint("?", "help"),
-			}
-		} else {
-			toggleLabel := "enable"
-			if m.settlement.Status().Enabled {
-				toggleLabel = "disable"
-			}
-			hints = []string{
-				hint("j/k", "queue"),
-				hint("p", "process once"),
-				hint("e", toggleLabel),
-				hint("l", "settings"),
-				hint("w", "work"),
-				hint("f", "follow-ups"),
-				hint("?", "help"),
-			}
-		}
-	case stateFollowUps:
-		if m.focusedPanel == panelLeft {
-			hints = []string{
-				hint("j/k", "navigate"),
-				hint("Enter", "detail"),
-				hint("A", "dismiss"),
-				hint("D", "delete"),
-				hint("w", "work list"),
-				hint("t", "settlement"),
-				hint("Esc", "exit"),
-				hint("?", "help"),
-			}
-		} else if m.terminalMode {
-			hints = []string{
-				hint("ctrl+t", "detail"),
-				hint("Esc", "back to list"),
-				hint("Ctrl+c", "terminate"),
-			}
-		} else if m.followupDetail.ActiveTab() == followup.TabTriage && m.followupDetail.ActionMenuOpen() {
-			hints = []string{
-				hint("c", "chat"),
-				hint("e", "edit"),
-				hint("Esc", "cancel"),
-			}
-		} else if m.followupDetail.ActiveTab() == followup.TabTriage {
-			hints = []string{
-				hint("j/k", "navigate"),
-				hint("space/x/Enter", "toggle"),
-				hint("a", "all"),
-				hint("p", "promote"),
-				hint("Tab/Shift-Tab", "cycle tabs"),
-				hint("h/Esc", "back to list"),
-				hint("?", "help"),
-			}
-		} else if m.followupDetail.ActiveTab() == followup.TabComments {
-			hints = []string{
-				hint("a", "all"),
-				hint("y", "copy"),
-				hint("E", "editor"),
-				hint("P", "post"),
-				hint("g", "summarize"),
-				hint("Tab/Shift-Tab", "cycle tabs"),
-				hint("h/Esc", "back to list"),
-				hint("?", "help"),
-			}
-		} else {
-			hints = []string{
-				hint("Tab/Shift-Tab", "cycle tabs"),
-				hint("p", "promote"),
-				hint("d", "dismiss"),
-				hint("c", "chat"),
-				hint("j/k", "scroll"),
-				hint("h/Esc", "back to list"),
-				hint("?", "help"),
-			}
-		}
+
+	// Settings configurator pre-case: the modal's hints replace the
+	// underlying state's and return before the override ladder (the modal
+	// hides whatever the flash/banner would refer to).
+	if m.settingsActive && m.settingsPanel != nil {
+		return dimS.Render(pad("  " + strings.Join(m.statusBarHints(kmSettingsModal), sep)))
 	}
 
 	if m.flashErr != "" {
-		errS := style.SevBlocking
-		bar := "  " + errS.Render(m.flashErr)
-		barW := lipgloss.Width(bar)
-		if barW < width {
-			bar += strings.Repeat(" ", width-barW)
-		}
-		return bar
+		return pad("  " + style.SevBlocking.Render(m.flashErr))
 	}
 
 	if m.doctorBanner != "" {
-		bar := "  " + doctorWarnS.Render(m.doctorBanner)
-		barW := lipgloss.Width(bar)
-		if barW < width {
-			bar += strings.Repeat(" ", width-barW)
-		}
-		return bar
+		return pad("  " + doctorWarnS.Render(m.doctorBanner))
 	}
 
 	if m.aiLoading {
-		aiS := style.SevSuggestion
-		bar := "  " + aiS.Render("Creating work items...")
-		barW := lipgloss.Width(bar)
-		if barW < width {
-			bar += strings.Repeat(" ", width-barW)
-		}
-		return bar
+		return pad("  " + style.SevSuggestion.Render("Creating work items..."))
 	}
 
-	bar := "  " + strings.Join(hints, sep)
-	barW := lipgloss.Width(bar)
-	if barW < width {
-		bar += strings.Repeat(" ", width-barW)
-	}
-	return dimS.Render(bar)
+	return dimS.Render(pad("  " + strings.Join(m.statusBarHints(m.keymapContext()), sep)))
 }

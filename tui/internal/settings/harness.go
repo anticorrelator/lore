@@ -30,6 +30,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 // ----------------------------------------------------------------------------
@@ -85,9 +87,9 @@ func NewPrimaryRadio(dotPath string, options, labels []string, current string) *
 		labels:        append([]string(nil), labels...),
 		current:       cur,
 		cursor:        cursor,
-		activeStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true),
-		inactiveStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		cursorStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("4")).Bold(true),
+		activeStyle:   lipgloss.NewStyle().Foreground(style.ColorAccent).Bold(true),
+		inactiveStyle: lipgloss.NewStyle().Foreground(style.ColorDim),
+		cursorStyle:   lipgloss.NewStyle().Foreground(style.ColorOnAccent).Background(style.ColorAccent).Bold(true),
 	}
 }
 
@@ -187,6 +189,8 @@ type HarnessEffective struct {
 // widgets for both so users can edit harness-specific defaults without hand
 // editing settings.json.
 type HarnessBlockPanel struct {
+	containerBase // cursor: 0=enabled, 1=args, 2=roles (skipped if nil), 3=ceremonies (if non-nil)
+
 	name       string // harness id, e.g. "claude-code"
 	dotPath    string // "harnesses.<name>"
 	enabled    *harnessEnabledToggle
@@ -194,10 +198,6 @@ type HarnessBlockPanel struct {
 	roles      FieldWidget // production: non-nil harness-local defaults editor
 	ceremonies FieldWidget // production: non-nil harness-local defaults editor
 	effective  HarnessEffective
-
-	cursor  int // 0=enabled, 1=args, 2=roles (skipped if nil), 3=ceremonies (if non-nil)
-	focused bool
-	entered bool
 
 	headerStyle    lipgloss.Style
 	overrideStyle  lipgloss.Style
@@ -232,11 +232,11 @@ func NewHarnessBlockPanel(name string, enabled bool, toggle HarnessToggler, args
 		roles:          roles,
 		ceremonies:     ceremonies,
 		effective:      effective,
-		headerStyle:    lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true),
-		overrideStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("4")),
-		effectiveStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("7")),
-		dimStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		emptyStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
+		headerStyle:    lipgloss.NewStyle().Foreground(style.ColorAccent).Bold(true),
+		overrideStyle:  lipgloss.NewStyle().Foreground(style.ColorAccent),
+		effectiveStyle: lipgloss.NewStyle().Foreground(style.ColorText),
+		dimStyle:       lipgloss.NewStyle().Foreground(style.ColorDim),
+		emptyStyle:     lipgloss.NewStyle().Foreground(style.ColorWarn),
 	}
 }
 
@@ -266,82 +266,20 @@ func (h *HarnessBlockPanel) Framework() string { return h.name }
 
 func (h *HarnessBlockPanel) Init() tea.Cmd   { return nil }
 func (h *HarnessBlockPanel) DotPath() string { return h.dotPath }
-func (h *HarnessBlockPanel) Focused() bool   { return h.focused }
-func (h *HarnessBlockPanel) Entered() bool   { return h.entered }
 
 // ConsumesNavRunes (NavRuneConsumer) — delegate to the currently-focused
-// child so the model's j/k routing reflects the *effective* focused widget
-// rather than the container. The model's hierarchical navigation uses
-// NavStep (below) only after the panel has been entered; this method
-// governs the typing-vs-navigating decision for j/k. When the cursor
-// child is in active edit/typing mode, j/k must reach the child as literal
-// input, so we report `true`. In every other case (toggle child, scalar row
-// selected but not editing, list/kv editor in nav mode), we report `false`
-// and the model invokes NavStep instead.
-//
-// Recursive composition: terminal widgets that don't implement the
-// interface fall through to the model-side type switch
-// (TextInput/NumericInput).
+// child per the shared container contract, so the coordinator's j/k routing
+// reflects the *effective* focused widget rather than the container.
 func (h *HarnessBlockPanel) ConsumesNavRunes() bool {
-	if !h.entered {
-		return false
-	}
-	c, _ := h.childAt(h.cursor)
-	if c == nil {
-		return false
-	}
-	if cc, ok := c.(NavRuneConsumer); ok {
-		return cc.ConsumesNavRunes()
-	}
-	switch c.(type) {
-	case *TextInput, *NumericInput:
-		return false
-	}
-	return false
+	return h.containerBase.consumesNavRunes(h.children())
 }
 
-// NavStep advances the panel's internal cursor by `delta` (+1 forward,
-// -1 backward), blurring the previously-focused child (per D10 this may
-// surface an IntentDiscard for a draft-buffered child) and focusing the
-// new child. Returns (false, nil) when the cursor is already at the
-// boundary so the model can hop to the next top-level slot via
-// focusOffset; the section rail brightness on the rendered panel only
-// changes when focusIdx changes, so a successful NavStep keeps the user
-// visually anchored in the same harness section even as the inner row
-// changes.
-//
-// Recursive descent: when the currently-focused child is itself a
-// NavStepper, we delegate the step to it first and only advance our own
-// cursor on its boundary. Today's harness children (enabled toggle,
-// ListEditor args, OpenKeysetKVEditor overlays) are all leaf widgets, but
-// keeping the descent symmetric with ClosedObjectSubPanel.NavStep means a
-// future nested panel under a harness block can't reintroduce the
-// "fields-are-not-reachable" failure mode we just fixed there.
+// NavStep advances the panel's internal cursor by `delta` per the shared
+// container contract (containerBase.navStep). A successful step keeps the
+// user visually anchored in the same harness section — the section rail
+// brightness only changes when the top-level focusIdx changes.
 func (h *HarnessBlockPanel) NavStep(delta int) (bool, *FieldIntent) {
-	if !h.focused || !h.entered {
-		return false, nil
-	}
-	children := h.children()
-	if len(children) == 0 {
-		return false, nil
-	}
-	if h.cursor >= 0 && h.cursor < len(children) {
-		if cs, ok := children[h.cursor].(NavStepper); ok {
-			if nn, ok := children[h.cursor].(NestedNavigator); ok && nn.Entered() {
-				if moved, intent := cs.NavStep(delta); moved {
-					return true, intent
-				}
-			}
-		}
-	}
-	next := h.cursor + delta
-	if next < 0 || next >= len(children) {
-		return false, nil
-	}
-	intent := children[h.cursor].Blur()
-	h.cursor = next
-	_ = children[h.cursor].Focus()
-	return true, intent
+	return h.containerBase.navStep(h.children(), delta)
 }
 
 // childAt returns the FieldWidget at logical cursor index, skipping nil
@@ -388,12 +326,7 @@ func (h *HarnessBlockPanel) Focus() tea.Cmd {
 // the child wants to emit (per D10's tab/focus = discard). For an absent
 // overlay this is a no-op — there is no child to blur.
 func (h *HarnessBlockPanel) Blur() *FieldIntent {
-	h.focused = false
-	h.entered = false
-	if c, _ := h.childAt(h.cursor); c != nil && c.Focused() {
-		return c.Blur()
-	}
-	return nil
+	return h.containerBase.blur(h.children())
 }
 
 func (h *HarnessBlockPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
@@ -408,11 +341,7 @@ func (h *HarnessBlockPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldInt
 		switch key.String() {
 		case "enter":
 			if !h.entered {
-				h.entered = true
-				if c, _ := h.childAt(h.cursor); c != nil {
-					return h, c.Focus(), nil
-				}
-				return h, nil, nil
+				return h, h.containerBase.enter(children), nil
 			}
 		case "tab":
 			if !h.entered {
@@ -423,40 +352,18 @@ func (h *HarnessBlockPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldInt
 			// emit IntentCommit on an absent overlay. Because absent
 			// overlays are skipped entirely (no child to traverse),
 			// there is no path here that can synthesize a write.
-			intent := children[h.cursor].Blur()
-			if h.cursor < len(children)-1 {
-				h.cursor++
-				_ = children[h.cursor].Focus()
-			}
-			return h, nil, intent
+			return h, nil, h.containerBase.tabStep(children, +1)
 		case "shift+tab":
 			if !h.entered {
 				return h, nil, nil
 			}
-			intent := children[h.cursor].Blur()
-			if h.cursor > 0 {
-				h.cursor--
-				_ = children[h.cursor].Focus()
-			}
-			return h, nil, intent
+			return h, nil, h.containerBase.tabStep(children, -1)
 		case "esc":
 			if !h.entered {
 				return h, nil, nil
 			}
-			child, cmd, intent := children[h.cursor].Update(msg)
-			h.replaceChildAt(h.cursor, child)
-			if intent != nil {
-				return h, cmd, intent
-			}
-			if nested, ok := child.(NestedNavigator); ok && nested.Entered() {
-				return h, cmd, nil
-			}
-			if blurIntent := child.Blur(); blurIntent != nil {
-				h.entered = false
-				return h, cmd, blurIntent
-			}
-			h.entered = false
-			return h, cmd, &FieldIntent{DotPath: h.dotPath, Status: IntentNavigate}
+			cmd, intent := h.containerBase.escStep(h.dotPath, children[h.cursor], func(w FieldWidget) { h.replaceChildAt(h.cursor, w) }, msg)
+			return h, cmd, intent
 		}
 	}
 	if !h.entered {
@@ -751,9 +658,9 @@ func newHarnessEnabledToggle(framework string, current bool, toggle HarnessToggl
 		dotPath:      "harnesses." + framework + ".enabled",
 		current:      current,
 		toggle:       toggle,
-		checkStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true),
-		uncheckStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		focusStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("4")).Bold(true),
+		checkStyle:   lipgloss.NewStyle().Foreground(style.ColorSuccess).Bold(true),
+		uncheckStyle: lipgloss.NewStyle().Foreground(style.ColorDim),
+		focusStyle:   lipgloss.NewStyle().Foreground(style.ColorOnAccent).Background(style.ColorAccent).Bold(true),
 	}
 }
 
