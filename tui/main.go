@@ -10,7 +10,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
+	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
 // classifyStartupState returns stateOnboarding if the knowledge store is
@@ -23,6 +25,31 @@ func classifyStartupState(cfg config.Config) appState {
 		return stateOnboarding
 	}
 	return stateWork
+}
+
+// newModel constructs the root model with its list sub-models initialized.
+//
+// followupList in particular MUST be built via NewListModel here. The
+// follow-up index is loaded in the background (the startup batch and the
+// mtime poll both fire LoadIndexCmd while the app sits in stateWork), and its
+// IndexLoadedMsg handler updates the list *in place* via SetItems — unlike the
+// work list, which is rebuilt via NewListModel on every load. A zero-value
+// followupList therefore keeps nil columns and stackedBelow=0, so ModeFor
+// always selects the columnar path and FitColumns yields no slots: every row
+// renders as blank padding (the selected row as a highlighted empty bar) even
+// though navigation and detail prefetch work. The stale `if Items()==0`
+// guard in the f-handler does not save us, because the background load has
+// already populated items by the time the user opens the panel.
+func newModel(cfg config.Config, prefs config.Prefs, startState appState) model {
+	return model{
+		state:        startState,
+		config:       cfg,
+		layoutMode:   prefs.Layout,
+		indexPath:    filepath.Join(cfg.WorkDir, "_index.json"),
+		settlement:   settlement.NewModel(),
+		list:         work.NewListModel(nil),
+		followupList: followup.NewListModel(nil),
+	}
 }
 
 func main() {
@@ -52,13 +79,7 @@ func main() {
 		startState = classifyStartupState(cfg)
 	}
 
-	m := model{
-		state:      startState,
-		config:     cfg,
-		layoutMode: prefs.Layout,
-		indexPath:  filepath.Join(cfg.WorkDir, "_index.json"),
-		settlement: settlement.NewModel(),
-	}
+	m := newModel(cfg, prefs, startState)
 
 	// Best-effort settings panel initialization. A nil panel disables the
 	// configurator open key but does not block startup — the modal is a

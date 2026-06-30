@@ -277,6 +277,41 @@ func minimalModel(state appState, workItems []work.WorkItem, fuItems []followup.
 	}
 }
 
+// TestNewModelFollowupListRendersAfterBackgroundLoad guards the production
+// construction path (newModel) against the zero-value followupList bug: the
+// follow-up index loads in the background while the app sits in stateWork, its
+// handler updates the list in place via SetItems, and a followupList that was
+// not built by NewListModel would carry nil columns and render every row blank
+// (the selected row as a highlighted empty bar) even though navigation and
+// detail prefetch keep working. minimalModel cannot catch this because it
+// always builds the list via NewListModel; this test must use newModel.
+func TestNewModelFollowupListRendersAfterBackgroundLoad(t *testing.T) {
+	items := make([]followup.FollowUpItem, 6)
+	for i := range items {
+		items[i] = followup.FollowUpItem{
+			ID: "followup-row-identity-token", Status: "open", Source: "pr-self-review",
+			Updated: "2026-06-20T10:00:00Z",
+		}
+	}
+
+	for _, layout := range []config.LayoutMode{config.LayoutLeftRight, config.LayoutTopBottom} {
+		m := newModel(config.Config{}, config.Prefs{Layout: layout}, stateWork)
+		m, _ = updateModel(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+		// Background index load arrives while still in the work view.
+		m, _ = updateModel(t, m, followup.IndexLoadedMsg{Items: items})
+		// User opens the follow-ups panel.
+		m, _ = updateModel(t, m, press('f'))
+
+		if got := m.followupList.FollowUpCount(); got != 6 {
+			t.Fatalf("layout %v: expected 6 visible follow-ups, got %d", layout, got)
+		}
+		composed := stripANSI(m.viewContent())
+		if !strings.Contains(composed, "followup-row-identity-token") {
+			t.Errorf("layout %v: follow-up list rendered blank — item text missing from view", layout)
+		}
+	}
+}
+
 func setupFakeLoreData(t *testing.T, settingsJSON string) string {
 	t.Helper()
 
