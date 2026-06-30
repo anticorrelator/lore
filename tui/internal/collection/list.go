@@ -448,9 +448,21 @@ func (l List) stackedRowHeight(row Row) int {
 	return 2
 }
 
+// metaIndent is the leading indent of the stacked metadata line, wider than
+// rowLead so the metadata reads as subordinate to its title.
+const metaIndent = 4
+
 // renderStackedRow assembles the two-line card: a marker+title line and an
 // indented metadata line with dim "·" separators. Selected rows assemble
 // unstyled text and apply the selection styles once per line.
+//
+// Both lines obey the engine invariant that a row never emits content wider
+// than width: the title truncates like every other render path, and the
+// metadata segments are admitted within a width budget — trailing segments
+// elide and the last partial segment truncates, mirroring how columnar mode
+// drops columns. Truncation operates on plain text before styling, so the
+// single selection background applied to a selected row keeps its trailing
+// reset (a post-style clamp would strip it and bleed the background).
 func (l List) renderStackedRow(row Row, selected bool, width int) []string {
 	marker := "  "
 	if selected {
@@ -467,19 +479,42 @@ func (l List) renderStackedRow(row Row, selected bool, width int) []string {
 		return []string{line1}
 	}
 
-	segs := make([]string, len(row.Meta))
+	avail := max(0, width-metaIndent)
+	sepW := lipgloss.Width(" · ")
+
+	segs := make([]string, 0, len(row.Meta))
+	used := 0
+	for i, cell := range row.Meta {
+		gap := 0
+		if i > 0 {
+			gap = sepW
+		}
+		rem := avail - used - gap
+		if rem <= 0 {
+			break // no room for another separator + segment
+		}
+		text := cell.Text
+		truncated := false
+		if lipgloss.Width(text) > rem {
+			text = style.Truncate(text, rem)
+			truncated = true
+		}
+		used += gap + lipgloss.Width(text)
+		if selected {
+			segs = append(segs, text)
+		} else {
+			segs = append(segs, cell.Style.Render(text))
+		}
+		if truncated {
+			break // partial segment filled the remaining space
+		}
+	}
+
 	sep := " · "
 	if !selected {
 		sep = style.Dim.Render(sep)
 	}
-	for i, cell := range row.Meta {
-		if selected {
-			segs[i] = cell.Text
-		} else {
-			segs[i] = cell.Style.Render(cell.Text)
-		}
-	}
-	line2 := padTo("    "+strings.Join(segs, sep), width)
+	line2 := padTo(strings.Repeat(" ", metaIndent)+strings.Join(segs, sep), width)
 	if selected {
 		line2 = rowSelectedDim.Render(line2)
 	}

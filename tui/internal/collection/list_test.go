@@ -283,6 +283,105 @@ func TestListSelectedRowContentUnstyled(t *testing.T) {
 	}
 }
 
+// longMetaRow mimics a follow-up row whose metadata (glyph · source · updated ·
+// PR · work-item) is far wider than a narrow split-pane panel.
+func longMetaRow(id string) Row {
+	return Row{
+		ID:    id,
+		Title: Cell{Text: id},
+		Meta: []Cell{
+			{Text: "○", Style: style.StatusActive},
+			{Text: "pr-self-review", Style: style.Dim},
+			{Text: "9d ago", Style: style.Dim},
+			{Text: "#412", Style: style.Dim},
+			{Text: "audit-judge-requeue", Style: style.Dim},
+		},
+	}
+}
+
+// TestStackedRowLineNeverExceedsWidth is the engine invariant: no rendered
+// stacked line — title or metadata, selected or not — is wider than the panel.
+// The metadata line previously only padded (never truncated), so a long
+// follow-up meta line overflowed and the composition clamp stripped the
+// selection background's trailing reset, bleeding it across the panel.
+func TestStackedRowLineNeverExceedsWidth(t *testing.T) {
+	l := NewList(testColumns())
+	l.SetRows([]Row{longMetaRow("pr-review-correctness-gate"), longMetaRow("settlement-archived")})
+	for _, w := range []int{20, 30, 40, 55} {
+		l.SetSize(w, 20)
+		for _, line := range strings.Split(strings.TrimRight(stripANSI(l.View()), "\n"), "\n") {
+			if got := lipgloss.Width(line); got > w {
+				t.Errorf("width %d: line exceeds panel (%d cols): %q", w, got, line)
+			}
+		}
+	}
+}
+
+// TestStackedSelectedMetaLineClosesSelectionStyle pins the no-bleed contract:
+// the selected metadata line ends with an SGR reset so the selection
+// background cannot leak past the panel border.
+func TestStackedSelectedMetaLineClosesSelectionStyle(t *testing.T) {
+	l := NewList(testColumns())
+	l.SetRows([]Row{longMetaRow("pr-review-correctness-gate")})
+	l.SetSize(40, 20) // narrow -> stacked, meta would overflow without truncation
+
+	var metaLine string
+	for _, line := range strings.Split(l.View(), "\n") {
+		if strings.Contains(stripANSI(line), "pr-self-review") {
+			metaLine = line
+		}
+	}
+	if metaLine == "" {
+		t.Fatalf("selected meta line not found in view:\n%s", l.View())
+	}
+	if !strings.Contains(metaLine, "\x1b[48;5;237m") {
+		t.Fatalf("selected meta line is not selection-styled: %q", metaLine)
+	}
+	if !strings.HasSuffix(metaLine, "\x1b[m") {
+		t.Errorf("selected meta line does not close its selection background (bleed): %q", metaLine)
+	}
+}
+
+// TestStackedMetaBudgetElidesTrailingSegments verifies that, like columnar
+// column-dropping, the leading metadata segments survive and trailing ones
+// elide when the panel is too narrow to hold them all.
+func TestStackedMetaBudgetElidesTrailingSegments(t *testing.T) {
+	l := NewList(testColumns())
+	l.SetRows([]Row{longMetaRow("pr-review-correctness-gate")})
+	l.SetSize(40, 20)
+
+	view := stripANSI(l.View())
+	if !strings.Contains(view, "pr-self-review") {
+		t.Errorf("leading metadata segment should survive at width 40:\n%s", view)
+	}
+	if strings.Contains(view, "audit-judge-requeue") {
+		t.Errorf("trailing metadata segment should elide at width 40:\n%s", view)
+	}
+}
+
+// TestStackedMetaEdgeCases guards the budget loop against degenerate inputs.
+func TestStackedMetaEdgeCases(t *testing.T) {
+	t.Run("single segment wider than budget truncates without panic", func(t *testing.T) {
+		l := NewList(testColumns())
+		l.SetRows([]Row{{ID: "x", Title: Cell{Text: "x"}, Meta: []Cell{{Text: strings.Repeat("y", 200)}}}})
+		l.SetSize(20, 20)
+		for _, line := range strings.Split(strings.TrimRight(stripANSI(l.View()), "\n"), "\n") {
+			if got := lipgloss.Width(line); got > 20 {
+				t.Errorf("oversized single segment overflowed: %d cols: %q", got, line)
+			}
+		}
+	})
+	t.Run("empty meta renders a single line", func(t *testing.T) {
+		l := NewList(testColumns())
+		l.SetRows([]Row{{ID: "x", Title: Cell{Text: "solo"}, Meta: nil}})
+		l.SetSize(40, 20)
+		lines := strings.Split(strings.TrimRight(stripANSI(l.View()), "\n"), "\n")
+		if len(lines) != 1 {
+			t.Errorf("meta-less stacked row should render one line, got %d:\n%v", len(lines), lines)
+		}
+	})
+}
+
 func TestListWindowKeepsCursorVisible(t *testing.T) {
 	ids := make([]string, 30)
 	for i := range ids {
