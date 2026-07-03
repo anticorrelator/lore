@@ -258,11 +258,9 @@ if [[ -z "$CATEGORY" ]]; then
   CATEGORY="conventions"
 fi
 
-# --- Generate title from first ~8 words of insight, title-cased ---
+# --- Generate title from the insight ---
 generate_title() {
-  local text="$1"
-  # Take first ~8 words, title-case each (macOS-compatible via awk)
-  echo "$text" | awk '{for(i=1;i<=NF && i<=8;i++){$i=toupper(substr($i,1,1)) substr($i,2)}; NF=(NF>8?8:NF); print}'
+  derive_entry_title "$1"
 }
 
 TITLE=$(generate_title "$INSIGHT")

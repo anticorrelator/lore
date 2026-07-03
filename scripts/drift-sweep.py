@@ -14,6 +14,16 @@ against the entry's exact `captured_at_sha` baseline:
 An entry is *drifted* when any related_file is `changed` or `vanished`.
 `unresolved` files are report-only and never by themselves mark an entry drifted.
 
+With --include-unaudited, the sweep also plans enqueues for `status: current`
+entries whose footer says `confidence: unaudited` — never-audited claims that
+need no git baseline (a missing/unresolvable captured_at_sha only disables
+drift classification, not eligibility). An unaudited entry whose commons
+settlement item already has a completed run with a real gate verdict
+(verified/unverified/contradicted) is suppressed and reported with
+`already_settled: true`; the drift arm ignores that suppression because a new
+code change is a new audit question. --unaudited-only additionally suppresses
+enqueues for purely-drifted entries (drift is still classified and reported).
+
 This planner performs NO writes. It emits, for each scoped entry, a JSON plan row
 on stdout describing the drift decision plus the synthesized commons producer-row
 payload (claim, falsifier, related_files, scale, entry_path, claim_id). The
@@ -24,6 +34,7 @@ what distinguishes drift-sweep from staleness-scan.py (age-since-review).
 
 Usage:
     drift-sweep.py <knowledge_dir> [--repo-root PATH] [--category NAME]... [--json]
+                   [--include-unaudited] [--unaudited-only] [--work-item SLUG]
 
 With --json, emits a single JSON object {"entries": [...], ...}. Without --json,
 emits one plan row per line as compact JSON (the orchestrator consumes this).
@@ -76,15 +87,17 @@ def parse_footer(text: str) -> dict:
     """Extract the footer fields drift-sweep needs.
 
     Returns related_files (list), scale (list), captured_at_sha (str|None),
-    status (str|None). related_files and scale are comma-split into lists; a
-    consumer that treats them as single strings silently corrupts multi-value
-    entries (47 use scale=architecture,subsystem; 64 use subsystem,implementation).
+    status (str|None), confidence (str|None). related_files and scale are
+    comma-split into lists; a consumer that treats them as single strings
+    silently corrupts multi-value entries (47 use scale=architecture,subsystem;
+    64 use subsystem,implementation).
     """
     out: dict = {
         "related_files": [],
         "scale": [],
         "captured_at_sha": None,
         "status": None,
+        "confidence": None,
     }
     m = _META_RE.search(text)
     if not m:
@@ -101,6 +114,10 @@ def parse_footer(text: str) -> dict:
             out["captured_at_sha"] = part.split(":", 1)[1].strip() or None
         elif part.startswith("status:"):
             out["status"] = part.split(":", 1)[1].strip() or None
+        elif part.startswith("confidence:"):
+            # `confidence_advances:` does not match this prefix — the char
+            # after "confidence" there is "_", not ":".
+            out["confidence"] = part.split(":", 1)[1].strip() or None
     return out
 
 
@@ -155,6 +172,48 @@ def extract_claim(text: str) -> tuple[str | None, str | None]:
         falsifier = fm.group(1).strip() or None
 
     return claim, falsifier
+
+
+# Gate verdicts that settle a claim. Deliberately stricter than the settlement
+# processor's TERMINAL run statuses: failed/blocked runs must stay re-reachable,
+# so only a completed run with one of these verdicts suppresses the unaudited arm.
+REAL_VERDICTS = ("verified", "unverified", "contradicted")
+
+
+def commons_item_id(work_item: str, claim_id: str) -> str:
+    """Settlement queue identity for a commons item — must mirror
+    settlement-processor.py::item_id (sha256 over kind:work_item:source_id)."""
+    digest = hashlib.sha256(f"commons:{work_item}:{claim_id}".encode()).hexdigest()[:20]
+    return f"commons-{digest}"
+
+
+def load_settled_item_ids(knowledge_dir: str) -> set[str]:
+    """item_ids of non-invalidated completed runs carrying a real gate verdict.
+
+    Read-only dedupe against the audit substrate: the sweep uses this to avoid
+    re-enqueueing claims the gate already settled — it never makes verdicts.
+    """
+    runs_dir = Path(knowledge_dir) / "_settlement" / "runs"
+    out: set[str] = set()
+    if not runs_dir.is_dir():
+        return out
+    for path in sorted(runs_dir.glob("*.json")):
+        try:
+            run = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(run, dict):
+            continue
+        if run.get("invalidated_at") or run.get("invalidated"):
+            continue
+        if run.get("status") != "completed":
+            continue
+        verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
+        if verdict.get("verdict") not in REAL_VERDICTS:
+            continue
+        if run.get("item_id"):
+            out.add(str(run["item_id"]))
+    return out
 
 
 def slugify_path(rel_path: str) -> str:
@@ -258,7 +317,10 @@ def sha_resolvable(repo_root: str, sha: str) -> bool:
     return result.returncode == 0
 
 
-def plan_entry(knowledge_dir: str, repo_root: str, head: str, abs_path: str) -> dict:
+def plan_entry(knowledge_dir: str, repo_root: str, head: str, abs_path: str, *,
+               include_unaudited: bool = False, unaudited_only: bool = False,
+               settled_ids: set[str] | None = None,
+               work_item: str | None = None) -> dict:
     """Build the drift plan row for one entry. Never writes."""
     rel_path = os.path.relpath(abs_path, knowledge_dir)
     text = Path(abs_path).read_text(encoding="utf-8", errors="replace")
@@ -267,6 +329,7 @@ def plan_entry(knowledge_dir: str, repo_root: str, head: str, abs_path: str) -> 
     row: dict = {
         "entry_path": rel_path,
         "status": footer["status"],
+        "confidence": footer["confidence"],
         "captured_at_sha": footer["captured_at_sha"],
         "scale": footer["scale"],
         "related_files": footer["related_files"],
@@ -280,29 +343,61 @@ def plan_entry(knowledge_dir: str, repo_root: str, head: str, abs_path: str) -> 
     if footer["status"] != "current":
         row["skip_reason"] = f"status is {footer['status']!r}, not current"
         return row
-    if not footer["captured_at_sha"]:
-        row["skip_reason"] = "missing captured_at_sha"
-        return row
     if not footer["related_files"]:
         row["skip_reason"] = "no related_files"
         return row
-    if not sha_resolvable(repo_root, footer["captured_at_sha"]):
+
+    # The unaudited arm audits never-audited current claims; it needs no git
+    # baseline, so a missing/unresolvable captured_at_sha only disables drift
+    # classification for such entries instead of skipping them outright.
+    unaudited_candidate = include_unaudited and footer["confidence"] == "unaudited"
+
+    drift_skip = None
+    if not footer["captured_at_sha"]:
+        drift_skip = "missing captured_at_sha"
+    elif not sha_resolvable(repo_root, footer["captured_at_sha"]):
         # The baseline commit is not in this checkout — we cannot compute drift.
         # Report-only; not an operational failure of the sweep.
-        row["skip_reason"] = f"captured_at_sha not resolvable in repo: {footer['captured_at_sha']}"
+        drift_skip = f"captured_at_sha not resolvable in repo: {footer['captured_at_sha']}"
+
+    if drift_skip and not unaudited_candidate:
+        row["skip_reason"] = drift_skip
         return row
 
-    files = [classify_file(repo_root, footer["captured_at_sha"], head, rf)
-             for rf in footer["related_files"]]
-    row["files"] = files
-    drifted = any(f["drift_class"] in ("changed", "vanished") for f in files)
-    row["drifted"] = drifted
+    drifted = False
+    if drift_skip:
+        row["drift_check"] = "skipped"
+        row["drift_skip_reason"] = drift_skip
+    else:
+        files = [classify_file(repo_root, footer["captured_at_sha"], head, rf)
+                 for rf in footer["related_files"]]
+        row["files"] = files
+        drifted = any(f["drift_class"] in ("changed", "vanished") for f in files)
+        row["drifted"] = drifted
 
-    if not drifted:
+    claim_id = f"drift-{slugify_path(rel_path)}"
+
+    # Unaudited arm, suppressed when a completed run already settled this exact
+    # commons item with a real verdict: the arm's premise is "never audited",
+    # which a recorded verdict falsifies. The drift arm ignores the suppression
+    # — a new code change is a new audit question.
+    unaudited_arm = False
+    if unaudited_candidate:
+        if settled_ids and commons_item_id(work_item or "", claim_id) in settled_ids:
+            row["already_settled"] = True
+        else:
+            unaudited_arm = True
+
+    arms = []
+    if drifted and not unaudited_only:
+        arms.append("drift")
+    if unaudited_arm:
+        arms.append("unaudited")
+    if not arms:
         return row
 
-    # Drifted: synthesize the commons producer-row payload from the entry. claim
-    # and related_files come from the entry verbatim; an unparseable entry is
+    # Synthesize the commons producer-row payload from the entry. claim and
+    # related_files come from the entry verbatim; an unparseable entry is
     # reported and never enqueued (no claim fabrication).
     claim, falsifier = extract_claim(text)
     if claim is None:
@@ -313,15 +408,25 @@ def plan_entry(knowledge_dir: str, repo_root: str, head: str, abs_path: str) -> 
         return row
 
     if not falsifier:
-        falsifier = (
-            "entry claim no longer matches cited code at HEAD; re-verify against "
-            + ", ".join(footer["related_files"])
-        )
+        if "drift" in arms:
+            falsifier = (
+                "entry claim no longer matches cited code at HEAD; re-verify against "
+                + ", ".join(footer["related_files"])
+            )
+        else:
+            # Unaudited-arm wording must not assert a code change that didn't
+            # happen — the entry may be byte-identical to its baseline.
+            falsifier = (
+                "promoted claim has never been independently audited; verify against "
+                + ", ".join(footer["related_files"])
+                + " at HEAD"
+            )
     scale = footer["scale"] or ["subsystem"]
 
-    row["claim_id"] = f"drift-{slugify_path(rel_path)}"
+    row["claim_id"] = claim_id
+    row["enqueue_reason"] = "+".join(arms)
     row["synthesized_payload"] = {
-        "claim_id": row["claim_id"],
+        "claim_id": claim_id,
         "claim": claim,
         "falsifier": falsifier,
         "scale": ",".join(scale),
@@ -332,14 +437,22 @@ def plan_entry(knowledge_dir: str, repo_root: str, head: str, abs_path: str) -> 
     return row
 
 
-def run(knowledge_dir: str, repo_root: str, categories: tuple[str, ...]) -> dict:
+def run(knowledge_dir: str, repo_root: str, categories: tuple[str, ...], *,
+        include_unaudited: bool = False, unaudited_only: bool = False,
+        work_item: str | None = None) -> dict:
     knowledge_dir = os.path.abspath(knowledge_dir)
     repo_root = os.path.abspath(repo_root)
     if not os.path.isdir(os.path.join(repo_root, ".git")):
         raise RuntimeError(f"repo root is not a git repository: {repo_root}")
     head = git_head(repo_root)
 
-    rows = [plan_entry(knowledge_dir, repo_root, head, p)
+    settled_ids = load_settled_item_ids(knowledge_dir) if include_unaudited else set()
+
+    rows = [plan_entry(knowledge_dir, repo_root, head, p,
+                       include_unaudited=include_unaudited,
+                       unaudited_only=unaudited_only,
+                       settled_ids=settled_ids,
+                       work_item=work_item)
             for p in collect_entry_files(knowledge_dir, categories)]
 
     drifted = [r for r in rows if r.get("drifted")]
@@ -348,8 +461,13 @@ def run(knowledge_dir: str, repo_root: str, categories: tuple[str, ...]) -> dict
         "repo_root": repo_root,
         "head": head,
         "categories": list(categories),
+        "include_unaudited": include_unaudited,
+        "unaudited_only": unaudited_only,
         "scanned": len(rows),
         "drifted_count": len(drifted),
+        "unaudited_enqueue_count": sum(
+            1 for r in rows if "unaudited" in (r.get("enqueue_reason") or "")),
+        "already_settled_count": sum(1 for r in rows if r.get("already_settled")),
         "entries": rows,
     }
 
@@ -363,13 +481,28 @@ def main() -> int:
                     help="Restrict to a category (repeatable; default: conventions, gotchas, architecture)")
     ap.add_argument("--json", action="store_true",
                     help="Emit one JSON report object; default emits one plan row per line")
+    ap.add_argument("--include-unaudited", action="store_true",
+                    help="Also plan enqueues for status:current confidence:unaudited entries")
+    ap.add_argument("--unaudited-only", action="store_true",
+                    help="Implies --include-unaudited; suppress enqueues for purely-drifted entries")
+    ap.add_argument("--work-item", default=None,
+                    help="Work item slug owning synthesized commons items "
+                         "(required with --include-unaudited; used for already-settled dedupe)")
     args = ap.parse_args()
+
+    if args.unaudited_only:
+        args.include_unaudited = True
+    if args.include_unaudited and not args.work_item:
+        ap.error("--work-item is required with --include-unaudited/--unaudited-only")
 
     categories = tuple(args.category) if args.category else DEFAULT_CATEGORIES
     repo_root = os.path.abspath(args.repo_root) if args.repo_root else os.getcwd()
 
     try:
-        report = run(args.knowledge_dir, repo_root, categories)
+        report = run(args.knowledge_dir, repo_root, categories,
+                     include_unaudited=args.include_unaudited,
+                     unaudited_only=args.unaudited_only,
+                     work_item=args.work_item)
     except (RuntimeError, subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as exc:
         print(f"[drift-sweep] operational failure: {exc}", file=sys.stderr)
         return 1

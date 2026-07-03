@@ -251,6 +251,13 @@ assert_contains "META block has corrections[] item" "$ENTRY_AFTER" "corrections:
 assert_contains "corrections item names verdict-source" "$ENTRY_AFTER" "correctness-gate"
 assert_contains "META preserves original as superseded_text" "$ENTRY_AFTER" "superseded_text"
 
+# H1 step: "Example routing rule" is hand-authored (not derived from the claim)
+# and the correction replaced the lead paragraph — the title is flagged, never
+# rewritten.
+assert_contains "hand-authored H1 left unchanged" "$ENTRY_AFTER" "# Example routing rule"
+assert_contains "META flags title_stale for the hand-authored title" "$ENTRY_AFTER" "title_stale:"
+assert_not_contains "no title regeneration recorded for hand-authored H1" "$ENTRY_AFTER" '"previous_title"'
+
 # No L3 supersedes archive (we explicitly do NOT pass --check-escalation)
 SUPERSEDED_FILES=$(find "$KDIR/conventions" -name 'example-routing-rule-superseded-*.md' 2>/dev/null | wc -l | tr -d ' ')
 assert_eq "no supersedes archive created" "$SUPERSEDED_FILES" "0"

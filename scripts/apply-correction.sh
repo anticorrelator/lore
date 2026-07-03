@@ -39,6 +39,15 @@
 #
 # Mutation mode: replaces the superseded_text snippet in <entry> with
 # replacement_text and appends a corrections[] item to the META block.
+# H1 handling after the body replacement:
+#   - If the entry's H1 was derived from the superseded claim (normalized
+#     match against derive_entry_title(superseded_text), or a word-prefix of
+#     the claim with >= 3 tokens), the H1 is regenerated from replacement_text
+#     and the corrections[] item records previous_title/new_title.
+#   - A non-derived (hand-authored) H1 is never rewritten; if the replacement
+#     touched the entry's lead paragraph, META gains title_stale: <date> and a
+#     notice goes to stderr.
+#   - Otherwise the H1 is left alone.
 # Authorization (default scorecard path): requires the verdict's
 # calibration_state in rows.jsonl to be 'calibrated'.
 # Authorization with --allow-settlement-verdict: validates against
@@ -701,10 +710,18 @@ ESCALATION_PY
   fi
 fi
 
+# --- Candidate titles for the H1 decision ---
+# Bash derives both candidates through the same helper capture.sh titles new
+# entries with; the Python heredoc decides whether the entry's H1 was derived
+# from the superseded claim and applies the outcome.
+SUPERSEDED_DERIVED_TITLE=$(derive_entry_title "$SUPERSEDED_TEXT")
+REPLACEMENT_DERIVED_TITLE=$(derive_entry_title "$REPLACEMENT_TEXT")
+
 # --- Delegate to Python for safe multi-line text replacement and META editing ---
 python3 - "$ENTRY_PATH" "$VERDICT_ID" "$VERDICT_SOURCE" "$EVIDENCE" \
           "$SUPERSEDED_TEXT" "$REPLACEMENT_TEXT" "$DATE_TODAY" "$DRY_RUN" "$KDIR" \
-          "$ESCALATE" "$ESCALATION_REASONS" <<'PYEOF'
+          "$ESCALATE" "$ESCALATION_REASONS" \
+          "$SUPERSEDED_DERIVED_TITLE" "$REPLACEMENT_DERIVED_TITLE" <<'PYEOF'
 import sys
 import os
 import re
@@ -721,6 +738,8 @@ dry_run           = sys.argv[8] == '1'
 kdir              = sys.argv[9]
 escalate          = sys.argv[10] == '1'
 escalation_reasons = sys.argv[11]  # comma-separated reason tags
+superseded_title  = sys.argv[12]  # derive_entry_title(superseded_text)
+candidate_title   = sys.argv[13]  # derive_entry_title(replacement_text)
 
 try:
     original = open(entry_path, encoding='utf-8').read()
@@ -736,18 +755,64 @@ if superseded not in original:
 
 updated_body = original.replace(superseded, replacement, 1)
 
+# --- Step 1b: decide the H1 action ---
+# A capture-derived H1 is mechanically the title-cased first ~8 words of the
+# claim it was derived from, so "was this title derived from the superseded
+# claim" is decidable by normalized token comparison. Derived titles are
+# regenerated from the replacement so the H1 stops asserting the falsified
+# claim; hand-authored titles are never rewritten — when the mutation replaced
+# the lead paragraph under one, the title is flagged title_stale instead.
+def norm_tokens(text):
+    return re.sub(r'[^a-z0-9\s]+', ' ', text.lower()).split()
+
+h1_action = 'none'
+previous_title = None
+new_title = None
+h1_match = re.search(r'^# (.+)$', original, re.MULTILINE)
+if h1_match:
+    h1_tokens = norm_tokens(h1_match.group(1))
+    sup_tokens = norm_tokens(superseded)
+    derivation_matched = (
+        h1_tokens == norm_tokens(superseded_title)
+        or (len(h1_tokens) >= 3 and sup_tokens[:len(h1_tokens)] == h1_tokens)
+    )
+    if derivation_matched:
+        h1_action = 'regenerate'
+        previous_title = h1_match.group(1)
+        # An H1 must stay on one line even if the derived candidate spans several.
+        new_title = ' '.join(candidate_title.split())
+        updated_body = re.sub(r'^# .+$', lambda m: '# ' + new_title,
+                              updated_body, count=1, flags=re.MULTILINE)
+    else:
+        # Lead paragraph span in the original: after the H1 line, skipping
+        # blank lines, through to the next blank line (or EOF).
+        lead_start = h1_match.end()
+        rest = original[lead_start:]
+        stripped = rest.lstrip('\n')
+        lead_start += len(rest) - len(stripped)
+        para_break = stripped.find('\n\n')
+        lead_end = lead_start + (para_break if para_break != -1 else len(stripped))
+        rep_start = original.find(superseded)
+        rep_end = rep_start + len(superseded)
+        if rep_start < lead_end and rep_end > lead_start:
+            h1_action = 'flag'
+
 # --- Step 2: build the corrections[] item ---
 # Encode the correction as a compact JSON object on one line; this is safe and parseable
 # by downstream tasks (#10 retrieval, #11 drift audit) without custom parsers.
 # Pipe-delimited META can't hold multi-line YAML, so we use JSON-in-META.
-correction_item = json.dumps({
+correction_fields = {
     "date": date_str,
     "verdict_source": verdict_source,
     "verdict_id": verdict_id,
     "evidence": evidence,
     "superseded_text": superseded,
     "replacement_text": replacement,
-}, ensure_ascii=False, separators=(', ', ': '))
+}
+if h1_action == 'regenerate':
+    correction_fields["previous_title"] = previous_title
+    correction_fields["new_title"] = new_title
+correction_item = json.dumps(correction_fields, ensure_ascii=False, separators=(', ', ': '))
 
 # --- Step 3: locate the META block (last <!-- ... --> in the file) ---
 META_RE = re.compile(r'(<!--)(.*?)(-->)', re.DOTALL)
@@ -776,6 +841,11 @@ if existing_corrections:
         new_inner = meta_inner + f' | corrections: [{correction_item}]'
 else:
     new_inner = meta_inner.rstrip() + f' | corrections: [{correction_item}]'
+
+# Flag a hand-authored title whose lead insight was just replaced. The flag is
+# durable and single-shot: an already-flagged entry keeps its original date.
+if h1_action == 'flag' and not re.search(r'\|\s*title_stale:', new_inner):
+    new_inner = new_inner.rstrip() + f' | title_stale: {date_str}'
 
 # --- Step 3b (L3): if escalating, archive the original and add supersedes edge ---
 archive_path = None
@@ -841,6 +911,14 @@ if dry_run:
     print(f"  + {replacement[:80]!r}...")
     print(f"[dry-run] META correction item:")
     print(f"  {correction_item}")
+    if h1_action == 'regenerate':
+        print(f"[dry-run] H1 action: regenerate")
+        print(f"  - {previous_title!r}")
+        print(f"  + {new_title!r}")
+    elif h1_action == 'flag':
+        print(f"[dry-run] H1 action: flag title_stale: {date_str}")
+    else:
+        print(f"[dry-run] H1 action: none")
     if escalate:
         print(f"[dry-run][L3] escalation_reasons: {escalation_reasons}")
     sys.exit(0)
@@ -852,6 +930,10 @@ rel_path = os.path.relpath(entry_path, kdir) if kdir else entry_path
 print(f"[correction] Applied to {rel_path}")
 print(f"  verdict_id={verdict_id}  verdict_source={verdict_source}")
 print(f"  evidence={evidence!r}")
+if h1_action == 'regenerate':
+    print(f"  [title] regenerated: {previous_title!r} -> {new_title!r}")
+elif h1_action == 'flag':
+    print(f"[title] H1 of {rel_path} not derived from the superseded claim; flagged title_stale: {date_str} instead of rewriting", file=sys.stderr)
 if escalate:
     print(f"  [L3] escalated: {escalation_reasons}")
     if archive_path:

@@ -169,9 +169,15 @@ if [[ -z "$ENTRY_ABS" ]]; then
   exit 1
 fi
 
+# Archived work items keep their artifacts under _work/_archive/<slug>/ — fall
+# back there (the same two-path resolution settlement-processor.py uses on the
+# read side) so producer rows for an archived item land next to its other files.
 WORK_DIR="$KNOWLEDGE_DIR/_work/$WORK_ITEM"
 if [[ ! -d "$WORK_DIR" ]]; then
-  die "work item not found: $WORK_DIR"
+  WORK_DIR="$KNOWLEDGE_DIR/_work/_archive/$WORK_ITEM"
+fi
+if [[ ! -d "$WORK_DIR" ]]; then
+  die "work item not found in _work/ or _work/_archive/: $WORK_ITEM"
 fi
 
 TARGET="$WORK_DIR/promoted-commons.jsonl"
@@ -181,4 +187,4 @@ COMPACT=$(printf '%s' "$ROW" | jq -c '.')
 printf '%s\n' "$COMPACT" >> "$TARGET"
 
 CLAIM_ID=$(printf '%s' "$ROW" | jq -r '.claim_id // "(unknown)"')
-echo "[promote-commons] Appended claim '$CLAIM_ID' to _work/$WORK_ITEM/promoted-commons.jsonl"
+echo "[promote-commons] Appended claim '$CLAIM_ID' to ${TARGET#"$KNOWLEDGE_DIR/"}"

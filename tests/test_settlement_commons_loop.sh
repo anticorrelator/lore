@@ -243,6 +243,13 @@ print(text[:m[-1].start()] if m else text)
 assert_not_contains "body no longer contains original claim" "$ENTRY_BODY" "$CLAIM_TEXT"
 assert_contains "body now contains the replacement" "$ENTRY_BODY" "$REPLACEMENT"
 assert_contains "META carries a corrections[] trail" "$(cat "$ENTRY_ABS")" "corrections:"
+# H1 step: the promoted entry's H1 was capture-derived from the claim, so the
+# contradicted flowback regenerates it from the replacement text.
+assert_eq "H1 regenerated from the replacement" \
+  "$(head -1 "$ENTRY_ABS")" "# The Token Bucket Refills Proportionally To Observed Headroom,"
+assert_contains "corrections item records previous_title" "$(cat "$ENTRY_ABS")" \
+  '"previous_title": "The Token Bucket Refills At A Constant Rate"'
+assert_not_contains "regenerated entry is not flagged title_stale" "$(cat "$ENTRY_ABS")" "title_stale:"
 # Evidence-class gate (decide-commons-correction-feed-evolve-secondary-ga):
 # a commons-kind applied correction must NOT emit a tier:correction row into
 # the /evolve secondary-gate pool — exercises the execute_item kind gate on

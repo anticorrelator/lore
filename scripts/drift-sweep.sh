@@ -17,7 +17,12 @@
 # back to the drifted entry.
 #
 # Usage:
-#   drift-sweep.sh [--dry-run] [--json] [--category NAME]... [--repo-root PATH]
+#   drift-sweep.sh [--dry-run] [--json] [--include-unaudited] [--unaudited-only]
+#                  [--category NAME]... [--repo-root PATH]
+#
+# --include-unaudited also enqueues status:current confidence:unaudited entries
+# that were never independently audited; --unaudited-only additionally skips
+# enqueueing purely-drifted entries (drift is still classified and reported).
 #
 # Exit codes:
 #   0  a report was produced (including all-skipped / all-unparseable runs)
@@ -35,20 +40,23 @@ DRY_RUN=0
 JSON=0
 REPO_ROOT=""
 CATEGORY_ARGS=()
+UNAUDITED_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --json)    JSON=1; shift ;;
+    --include-unaudited) UNAUDITED_ARGS+=(--include-unaudited); shift ;;
+    --unaudited-only)    UNAUDITED_ARGS+=(--unaudited-only); shift ;;
     --repo-root) REPO_ROOT="$2"; shift 2 ;;
     --category) CATEGORY_ARGS+=(--category "$2"); shift 2 ;;
     -h|--help)
-      sed -n '2,26p' "$0"
+      sed -n '2,31p' "$0"
       exit 0
       ;;
     *)
       echo "[drift-sweep] Unknown argument: $1" >&2
-      echo "Usage: drift-sweep.sh [--dry-run] [--json] [--category NAME]... [--repo-root PATH]" >&2
+      echo "Usage: drift-sweep.sh [--dry-run] [--json] [--include-unaudited] [--unaudited-only] [--category NAME]... [--repo-root PATH]" >&2
       exit 1
       ;;
   esac
@@ -70,7 +78,10 @@ QUEUE="$SCRIPT_DIR/settlement-queue.sh"
 # --- Run the planner (JSON report; no side effects) ---
 # Empty-array expansion is unbound under `set -u`, so expand only when populated.
 set +e
-PLAN_JSON=$(python3 "$PLANNER" "$KNOWLEDGE_DIR" --repo-root "$REPO_ROOT" "${CATEGORY_ARGS[@]+"${CATEGORY_ARGS[@]}"}" --json)
+PLAN_JSON=$(python3 "$PLANNER" "$KNOWLEDGE_DIR" --repo-root "$REPO_ROOT" \
+  "${CATEGORY_ARGS[@]+"${CATEGORY_ARGS[@]}"}" \
+  "${UNAUDITED_ARGS[@]+"${UNAUDITED_ARGS[@]}"}" \
+  --work-item "$WORK_ITEM" --json)
 PLAN_EXIT=$?
 set -e
 if [[ $PLAN_EXIT -ne 0 ]]; then
@@ -78,7 +89,12 @@ if [[ $PLAN_EXIT -ne 0 ]]; then
   exit 1
 fi
 
+# Archived work items keep their files under _work/_archive/<slug>/; read the
+# producer log from there so existing-row lookup keeps working after archival.
 PRODUCER_FILE="$KNOWLEDGE_DIR/_work/$WORK_ITEM/promoted-commons.jsonl"
+if [[ ! -f "$PRODUCER_FILE" && -f "$KNOWLEDGE_DIR/_work/_archive/$WORK_ITEM/promoted-commons.jsonl" ]]; then
+  PRODUCER_FILE="$KNOWLEDGE_DIR/_work/_archive/$WORK_ITEM/promoted-commons.jsonl"
+fi
 
 # Realize side effects for each drifted+parseable entry. Per-entry, the planner
 # decided drift; here we resolve producer_row + enqueue states (and perform the
@@ -94,13 +110,14 @@ cleanup() {
 trap cleanup EXIT
 
 # Drive one entry at a time through Python (to read its synthesized_payload) +
-# the writer scripts (bash). We iterate entry_paths the planner marked drifted
-# with a synthesized_payload; everything else keeps the planner's states.
-DRIFTED_PARSEABLE=$(printf '%s' "$PLAN_JSON" | python3 -c '
+# the writer scripts (bash). We iterate entry_paths the planner gave a
+# synthesized_payload (drift and/or unaudited arm); everything else keeps the
+# planner's states.
+ENQUEUE_PLANNED=$(printf '%s' "$PLAN_JSON" | python3 -c '
 import json, sys
 report = json.load(sys.stdin)
 for row in report["entries"]:
-    if row.get("drifted") and row.get("synthesized_payload"):
+    if row.get("synthesized_payload"):
         print(row["entry_path"])
 ')
 
@@ -207,7 +224,7 @@ import json, sys
 print(json.dumps({"entry_path": sys.argv[1], "producer_row": sys.argv[2], "enqueue": sys.argv[3]}))
 ' "$ENTRY_PATH" "$PRODUCER_STATE" "$ENQ_STATE")" >&3
 
-done <<< "$DRIFTED_PARSEABLE"
+done <<< "$ENQUEUE_PLANNED"
 
 exec 3>&-
 
@@ -246,16 +263,26 @@ head = report.get("head", "")[:12]
 print("drift-sweep: scanned {} entries in {} @ {}{}".format(
     report["scanned"], report["repo_root"], head, dry_tag))
 print("  drifted: {}".format(report["drifted_count"]))
+if report.get("include_unaudited"):
+    print("  unaudited enqueues planned: {}  already settled: {}".format(
+        report.get("unaudited_enqueue_count", 0),
+        report.get("already_settled_count", 0)))
 for row in report["entries"]:
-    if not row.get("drifted"):
+    if not (row.get("drifted") or row.get("synthesized_payload")
+            or row.get("already_settled")):
         continue
     files = ", ".join("{}={}".format(f["path"], f["drift_class"]) for f in row.get("files", []))
     sha = (row.get("captured_at_sha") or "")[:12]
     print("  - {}".format(row["entry_path"]))
     print("      sha={} files=[{}]".format(sha, files))
     claim_tag = " claim_id={}".format(row["claim_id"]) if row.get("claim_id") else ""
-    print("      producer_row={} enqueue={}{}".format(
-        row.get("producer_row"), row.get("enqueue"), claim_tag))
+    reason_tag = " reason={}".format(row["enqueue_reason"]) if row.get("enqueue_reason") else ""
+    print("      producer_row={} enqueue={}{}{}".format(
+        row.get("producer_row"), row.get("enqueue"), claim_tag, reason_tag))
+    if row.get("already_settled"):
+        print("      already_settled: prior completed run carries a real verdict")
+    if row.get("drift_skip_reason"):
+        print("      drift check skipped: {}".format(row["drift_skip_reason"]))
     if row.get("unparseable"):
         print("      unparseable: {}".format(row.get("skip_reason", "")))
 '

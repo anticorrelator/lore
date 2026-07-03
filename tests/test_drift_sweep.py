@@ -6,7 +6,9 @@ HEAD. These tests build real git repos so the classification is exercised end to
 end (no mocking of git).
 """
 
+import hashlib
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -147,6 +149,27 @@ def test_footer_missing_status_is_none():
     assert footer["status"] is None
 
 
+def test_footer_confidence_extracted():
+    text = (
+        "# Title\nBody.\n"
+        "<!-- learned: 2026-01-01 | confidence: unaudited | related_files: a.py "
+        "| status: current -->\n"
+    )
+    footer = drift_sweep.parse_footer(text)
+    assert footer["confidence"] == "unaudited"
+
+
+def test_footer_confidence_advances_does_not_shadow_confidence():
+    # confidence_advances is a distinct key; only `confidence:` may set the field.
+    text = (
+        "# Title\nBody.\n"
+        '<!-- learned: 2026-01-01 | confidence: high | status: current '
+        '| confidence_advances: [{"from": "unaudited", "to": "high"}] -->\n'
+    )
+    footer = drift_sweep.parse_footer(text)
+    assert footer["confidence"] == "high"
+
+
 # ---------------------------------------------------------------------------
 # Claim synthesis: H1 + lead paragraph; falsifier extraction; unparseable
 # ---------------------------------------------------------------------------
@@ -282,6 +305,216 @@ def test_plan_drifted_but_unparseable_never_enqueues(tmp_path, repo):
     assert row.get("unparseable") is True
     assert "synthesized_payload" not in row
     assert row["enqueue"] == "skipped"
+
+
+# ---------------------------------------------------------------------------
+# Unaudited arm: --include-unaudited / --unaudited-only eligibility, settled-run
+# suppression, enqueue_reason, and falsifier wording
+# ---------------------------------------------------------------------------
+
+WORK_ITEM = "proactive-drift-sweep-re-hash-commons-snippets-vs"
+
+
+def _write_run(kdir, item_id, status="completed", verdict="verified", invalidated=False):
+    runs = os.path.join(kdir, "_settlement", "runs")
+    os.makedirs(runs, exist_ok=True)
+    run = {
+        "run_id": f"run-{item_id}",
+        "item_id": item_id,
+        "status": status,
+        "verdict": {"verdict": verdict},
+    }
+    if invalidated:
+        run["invalidated_at"] = "2026-01-02T00:00:00Z"
+    with open(os.path.join(runs, f"run-{item_id}.json"), "w") as fh:
+        json.dump(run, fh)
+
+
+def _unaudited_entry(kdir, rel="conventions/unaudited.md", related="stable.py",
+                     sha=None, body="The stable module returns one."):
+    footer = f"related_files: {related} | scale: subsystem | confidence: unaudited"
+    if sha:
+        footer += f" | captured_at_sha: {sha}"
+    footer += " | status: current"
+    _write_entry(kdir, rel, "# Unaudited Entry\n" + body, footer)
+    return os.path.join(kdir, rel)
+
+
+def test_commons_item_id_mirrors_settlement_identity():
+    digest = hashlib.sha256(b"commons:wi:claim-1").hexdigest()[:20]
+    assert drift_sweep.commons_item_id("wi", "claim-1") == f"commons-{digest}"
+
+
+def test_unchanged_unaudited_entry_enqueues_only_with_flag(tmp_path, repo):
+    head = _head(repo["path"])
+    kdir = str(tmp_path / "k")
+    os.makedirs(kdir)
+    path = _unaudited_entry(kdir, sha=repo["base_sha"])
+
+    # Without the flag: unchanged entries stay unenqueued exactly as today.
+    row = drift_sweep.plan_entry(kdir, repo["path"], head, path)
+    assert row["drifted"] is False
+    assert "synthesized_payload" not in row
+
+    row = drift_sweep.plan_entry(
+        kdir, repo["path"], head, path,
+        include_unaudited=True, settled_ids=set(), work_item=WORK_ITEM)
+    assert row["drifted"] is False
+    assert row["enqueue_reason"] == "unaudited"
+    assert row["claim_id"] == "drift-conventions-unaudited"
+    payload = row["synthesized_payload"]
+    # Never-audited fallback wording — must not assert a code change.
+    assert payload["falsifier"].startswith(
+        "promoted claim has never been independently audited")
+    assert "stable.py" in payload["falsifier"]
+
+
+def test_high_confidence_unchanged_entry_not_enqueued_by_flag(tmp_path, repo):
+    head = _head(repo["path"])
+    kdir = str(tmp_path / "k")
+    os.makedirs(kdir)
+    _write_entry(
+        kdir, "conventions/high.md", "# High\nBody.",
+        "related_files: stable.py | scale: subsystem | confidence: high | "
+        f"captured_at_sha: {repo['base_sha']} | status: current",
+    )
+    row = drift_sweep.plan_entry(
+        kdir, repo["path"], head, os.path.join(kdir, "conventions/high.md"),
+        include_unaudited=True, settled_ids=set(), work_item=WORK_ITEM)
+    assert "synthesized_payload" not in row
+    assert "enqueue_reason" not in row
+
+
+def test_sha_unresolvable_unaudited_entry_is_eligible(tmp_path, repo):
+    head = _head(repo["path"])
+    kdir = str(tmp_path / "k")
+    os.makedirs(kdir)
+    path = _unaudited_entry(kdir, sha="f" * 40)
+
+    # Without the flag the bad baseline skips the entry entirely.
+    row = drift_sweep.plan_entry(kdir, repo["path"], head, path)
+    assert "skip_reason" in row and "not resolvable" in row["skip_reason"]
+
+    row = drift_sweep.plan_entry(
+        kdir, repo["path"], head, path,
+        include_unaudited=True, settled_ids=set(), work_item=WORK_ITEM)
+    assert row["drift_check"] == "skipped"
+    assert "not resolvable" in row["drift_skip_reason"]
+    assert row["drifted"] is False
+    assert row["enqueue_reason"] == "unaudited"
+    assert row["synthesized_payload"]["claim_id"] == "drift-conventions-unaudited"
+
+
+def test_missing_sha_unaudited_entry_is_eligible(tmp_path, repo):
+    head = _head(repo["path"])
+    kdir = str(tmp_path / "k")
+    os.makedirs(kdir)
+    path = _unaudited_entry(kdir, sha=None)
+    row = drift_sweep.plan_entry(
+        kdir, repo["path"], head, path,
+        include_unaudited=True, settled_ids=set(), work_item=WORK_ITEM)
+    assert row["drift_check"] == "skipped"
+    assert row["drift_skip_reason"] == "missing captured_at_sha"
+    assert row["enqueue_reason"] == "unaudited"
+
+
+def test_settled_run_suppresses_unaudited_arm_with_distinct_report(tmp_path, repo):
+    head = _head(repo["path"])
+    kdir = str(tmp_path / "k")
+    os.makedirs(kdir)
+    path = _unaudited_entry(kdir, sha=repo["base_sha"])
+    item_id = drift_sweep.commons_item_id(WORK_ITEM, "drift-conventions-unaudited")
+    _write_run(kdir, item_id, status="completed", verdict="contradicted")
+
+    settled = drift_sweep.load_settled_item_ids(kdir)
+    assert item_id in settled
+
+    row = drift_sweep.plan_entry(
+        kdir, repo["path"], head, path,
+        include_unaudited=True, settled_ids=settled, work_item=WORK_ITEM)
+    assert row["already_settled"] is True
+    assert "synthesized_payload" not in row
+    assert "enqueue_reason" not in row
+
+
+def test_non_settling_runs_do_not_suppress(tmp_path):
+    kdir = str(tmp_path / "k")
+    os.makedirs(kdir)
+    # failed/blocked stay re-reachable; skipped is not a real gate verdict;
+    # invalidated runs never count.
+    _write_run(kdir, "commons-aaaa", status="failed", verdict="verified")
+    _write_run(kdir, "commons-bbbb", status="completed", verdict="skipped")
+    _write_run(kdir, "commons-cccc", status="completed", verdict="verified",
+               invalidated=True)
+    _write_run(kdir, "commons-dddd", status="blocked", verdict="contradicted")
+    assert drift_sweep.load_settled_item_ids(kdir) == set()
+
+
+def test_drifted_unaudited_entry_reports_both_arms(tmp_path, repo):
+    with open(os.path.join(repo["path"], "mutated.py"), "w") as fh:
+        fh.write("v = 7\n")
+    _commit(repo["path"], "mutate for both arms")
+    head = _head(repo["path"])
+    kdir = str(tmp_path / "k")
+    os.makedirs(kdir)
+    path = _unaudited_entry(kdir, related="mutated.py", sha=repo["base_sha"])
+    row = drift_sweep.plan_entry(
+        kdir, repo["path"], head, path,
+        include_unaudited=True, settled_ids=set(), work_item=WORK_ITEM)
+    assert row["drifted"] is True
+    assert row["enqueue_reason"] == "drift+unaudited"
+    # A real code change happened, so the drift wording is the honest fallback.
+    assert row["synthesized_payload"]["falsifier"].startswith(
+        "entry claim no longer matches cited code at HEAD")
+
+
+def test_settled_run_leaves_drift_arm_unaffected(tmp_path, repo):
+    with open(os.path.join(repo["path"], "mutated.py"), "w") as fh:
+        fh.write("v = 8\n")
+    _commit(repo["path"], "mutate for settled drift")
+    head = _head(repo["path"])
+    kdir = str(tmp_path / "k")
+    os.makedirs(kdir)
+    path = _unaudited_entry(kdir, related="mutated.py", sha=repo["base_sha"])
+    item_id = drift_sweep.commons_item_id(WORK_ITEM, "drift-conventions-unaudited")
+    _write_run(kdir, item_id)
+    settled = drift_sweep.load_settled_item_ids(kdir)
+
+    row = drift_sweep.plan_entry(
+        kdir, repo["path"], head, path,
+        include_unaudited=True, settled_ids=settled, work_item=WORK_ITEM)
+    assert row["already_settled"] is True
+    assert row["enqueue_reason"] == "drift"
+    assert "synthesized_payload" in row
+
+
+def test_unaudited_only_suppresses_purely_drifted_entries(tmp_path, repo):
+    with open(os.path.join(repo["path"], "mutated.py"), "w") as fh:
+        fh.write("v = 9\n")
+    _commit(repo["path"], "mutate for unaudited-only")
+    head = _head(repo["path"])
+    kdir = str(tmp_path / "k")
+    os.makedirs(kdir)
+    _write_entry(
+        kdir, "conventions/drifted-high.md", "# Drifted High\nBody.",
+        "related_files: mutated.py | scale: subsystem | confidence: high | "
+        f"captured_at_sha: {repo['base_sha']} | status: current",
+    )
+    row = drift_sweep.plan_entry(
+        kdir, repo["path"], head, os.path.join(kdir, "conventions/drifted-high.md"),
+        include_unaudited=True, unaudited_only=True,
+        settled_ids=set(), work_item=WORK_ITEM)
+    # Drift is still classified and reported, but nothing is planned for enqueue.
+    assert row["drifted"] is True
+    assert "synthesized_payload" not in row
+    assert "enqueue_reason" not in row
+
+    path = _unaudited_entry(kdir, related="stable.py", sha=repo["base_sha"])
+    row = drift_sweep.plan_entry(
+        kdir, repo["path"], head, path,
+        include_unaudited=True, unaudited_only=True,
+        settled_ids=set(), work_item=WORK_ITEM)
+    assert row["enqueue_reason"] == "unaudited"
 
 
 if __name__ == "__main__":
