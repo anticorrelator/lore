@@ -506,6 +506,90 @@ func TestListModelEnterOnHeaderTogglesCollapse(t *testing.T) {
 	}
 }
 
+// With at least one labeled group, the ungrouped tail renders under its own
+// header with the visible member count.
+func TestListModelUngroupedHeaderWithMixedItems(t *testing.T) {
+	m := newTestListModel(groupedItems())
+	view := stripListANSI(m.View())
+	if !strings.Contains(view, "▼ ungrouped (2)") {
+		t.Fatalf("mixed list should show '▼ ungrouped (2)' header, got:\n%s", view)
+	}
+	if !strings.Contains(view, "loose-1") || !strings.Contains(view, "loose-2") {
+		t.Fatalf("ungrouped members should render under the header, got:\n%s", view)
+	}
+}
+
+// The ungrouped header renders dim, not in the project-accent color, so it
+// reads as a pseudo-group rather than a project named "ungrouped".
+func TestListModelUngroupedHeaderUsesDimStyle(t *testing.T) {
+	m := newTestListModel(groupedItems())
+	view := m.View()
+	if !strings.Contains(view, sgrOpen(ungroupedHeaderStyle)+"  ▼ ungrouped") {
+		t.Fatalf("ungrouped header should open with the dim-bold sequence, got:\n%s", view)
+	}
+}
+
+// Enter on the ungrouped header collapses and re-expands the section, exactly
+// like a labeled group.
+func TestListModelEnterOnUngroupedHeaderTogglesCollapse(t *testing.T) {
+	m := newTestListModel(groupedItems())
+	// beta-1 → beta-2 → alpha header → alpha-1 → ungrouped header.
+	for range 4 {
+		m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	}
+	if r, ok := m.list.CurrentRow(); !ok || r.ID != headerIDPrefix {
+		t.Fatalf("precondition: cursor should be on the ungrouped header, got %+v", r)
+	}
+
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("Enter on the ungrouped header must toggle collapse, not emit a command")
+	}
+	view := stripListANSI(m.View())
+	if !strings.Contains(view, "▶ ungrouped (2)") {
+		t.Fatalf("collapsed ungrouped header should show ▶ with unchanged count, got:\n%s", view)
+	}
+	if strings.Contains(view, "loose-1") || strings.Contains(view, "loose-2") {
+		t.Fatalf("collapsed ungrouped members must not render, got:\n%s", view)
+	}
+
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	view = stripListANSI(m.View())
+	if !strings.Contains(view, "▼ ungrouped (2)") || !strings.Contains(view, "loose-1") {
+		t.Fatalf("re-expanded ungrouped section should show ▼ and its members, got:\n%s", view)
+	}
+}
+
+// The ungrouped collapse state rides the same CollapsedProjects carry-over as
+// labeled groups, so it survives the index-reload model rebuild.
+func TestListModelUngroupedCollapseSurvivesCarryOver(t *testing.T) {
+	m := newTestListModel(groupedItems())
+	for range 4 {
+		m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	rebuilt := newTestListModel(groupedItems())
+	rebuilt.SetCollapsedProjects(m.CollapsedProjects())
+	view := stripListANSI(rebuilt.View())
+	if !strings.Contains(view, "▶ ungrouped (2)") || strings.Contains(view, "loose-1") {
+		t.Fatalf("carried-over collapse state should keep ungrouped collapsed, got:\n%s", view)
+	}
+}
+
+// refreshRows rebuilds outside SetItems-style reloads (e.g. external-session
+// updates); the cursor must stay on the ungrouped header by raw row ID.
+func TestListModelCursorSurvivesRefreshOnUngroupedHeader(t *testing.T) {
+	m := newTestListModel(groupedItems())
+	for range 4 {
+		m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	}
+	m, _ = m.Update(ExternalSessionMsg{Slugs: map[string]bool{"beta-1": true}})
+	if r, ok := m.list.CurrentRow(); !ok || r.ID != headerIDPrefix {
+		t.Fatalf("cursor should stay on the ungrouped header across refreshRows, got %+v", r)
+	}
+}
+
 // "Enter open detail" — on an item row inside a group, Enter still selects.
 func TestListModelEnterOnGroupedItemStillSelects(t *testing.T) {
 	m := newTestListModel(groupedItems())

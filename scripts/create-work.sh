@@ -206,6 +206,8 @@ if [[ -n "$PROJECT" ]]; then
   PROJECT=$(slugify "$PROJECT")
   if [[ -z "$PROJECT" ]]; then
     echo "[work] Warning: --project '$PROJECT_INPUT' produced an empty slug; item left ungrouped." >&2
+  else
+    warn_near_project_label "$WORK_DIR" "$PROJECT"
   fi
 fi
 

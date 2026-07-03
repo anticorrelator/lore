@@ -224,6 +224,8 @@ if [[ "$HAS_PROJECT" -eq 1 ]]; then
     PROJECT=$(slugify "$PROJECT")
     if [[ -z "$PROJECT" ]]; then
       echo "[work] Warning: --project '$PROJECT_INPUT' produced an empty slug; clearing project." >&2
+    else
+      warn_near_project_label "$WORK_DIR" "$PROJECT"
     fi
   fi
   python3 - "$META_FILE" "$PROJECT" << 'PYEOF'

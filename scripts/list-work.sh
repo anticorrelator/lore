@@ -84,14 +84,25 @@ fi
 
 TERM_WIDTH="$(term_width)"
 
-python3 - "$INDEX" "$WORK_DIR/_archive" "$FILTER_STATUS" "$SHOW_ALL" "$TERM_WIDTH" << 'PYEOF'
+# Project records feed only the header status token; counts come from the
+# index projections. One "slug<TAB>status" line per record file.
+PROJECT_RECORD_STATUSES=""
+if [[ -d "$WORK_DIR/_projects" ]]; then
+  for record in "$WORK_DIR/_projects"/*.md; do
+    [[ -f "$record" ]] || continue
+    pslug=$(basename "$record" .md)
+    PROJECT_RECORD_STATUSES+="${pslug}"$'\t'"$(project_record_field "$WORK_DIR" "$pslug" Status)"$'\n'
+  done
+fi
+
+python3 - "$INDEX" "$WORK_DIR/_archive" "$FILTER_STATUS" "$SHOW_ALL" "$TERM_WIDTH" "$PROJECT_RECORD_STATUSES" << 'PYEOF'
 import json
 import os
 import sys
 import time
 from datetime import datetime, timezone
 
-index_path, archive_dir, filter_status, show_all, term_width = sys.argv[1:]
+index_path, archive_dir, filter_status, show_all, term_width, record_status_raw = sys.argv[1:]
 show_all = show_all == "true"
 try:
     term_width = int(term_width)
@@ -208,6 +219,34 @@ if archived is None:
     else:
         archived = []
 
+# Archived rollup counts come from the archived[] projection; the legacy
+# dirname fallback carries no project field and contributes nothing.
+archived_counts = {}
+for item in archived:
+    if isinstance(item, dict):
+        project = str(item.get("project", "") or "")
+        if project:
+            archived_counts[project] = archived_counts.get(project, 0) + 1
+
+record_status = {}
+for line in record_status_raw.splitlines():
+    if "\t" in line:
+        name, _, status = line.partition("\t")
+        record_status[name] = status.strip()
+
+
+def project_header(name, active_count):
+    header = name
+    status = record_status.get(name, "")
+    if status and status != "active":
+        header += f" [{status}]"
+    header += f" — {active_count} active"
+    archived_count = archived_counts.get(name, 0)
+    if archived_count:
+        header += f", {archived_count} archived"
+    return header
+
+
 rows = []
 has_any_issue = False
 has_any_pr = False
@@ -258,24 +297,30 @@ else:
         fields.append("pr")
     columns.append({"name": "PLAN", "type": "fixed", "size": 4, "align": "left"})
     fields.append("plan")
+    # A project record file makes the project a section even with no active
+    # members (e.g. a done project whose members are all archived).
+    for name in record_status:
+        project_rows.setdefault(name, [])
     if not project_rows:
         render_table([[row[field] for field in fields] for row in rows], columns)
     else:
         # Grouped sections lead, projects ordered by most-recent member
-        # update; ungrouped items follow flat in index order, as before.
+        # update (member-less record sections sort last); ungrouped items
+        # follow in index order under their own titled section so the tail
+        # reads as a sibling of project groups.
         widths = column_widths(columns)
         render_header(widths, columns)
         ordered_projects = sorted(
             project_rows.items(),
-            key=lambda kv: max(epoch for epoch, _ in kv[1]),
+            key=lambda kv: max((epoch for epoch, _ in kv[1]), default=0),
             reverse=True,
         )
         for project, members in ordered_projects:
-            draw_separator(f"{project} ({len(members)})")
+            draw_separator(project_header(project, len(members)))
             for _, row in sorted(members, key=lambda m: m[0], reverse=True):
                 format_row([row[field] for field in fields], widths, columns)
         if ungrouped_rows:
-            draw_separator()
+            draw_separator(f"ungrouped — {len(ungrouped_rows)} active")
             for row in ungrouped_rows:
                 format_row([row[field] for field in fields], widths, columns)
 

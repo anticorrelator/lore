@@ -209,7 +209,7 @@ if [[ $JSON_MODE -eq 1 ]]; then
       EXCERPT=$(echo "$HITS" | head -1 | sed 's/^[0-9]*://')
       GREP_RESULTS="${GREP_RESULTS}${SLUG}"$'\t'"${TITLE}"$'\t'"${EXCERPT}"$'\t'"active"$'\n'
     fi
-  done < <(find "$WORK_DIR" -path "$WORK_DIR/_archive" -prune -o -name '*.md' -print0 2>/dev/null)
+  done < <(find "$WORK_DIR" -path "$WORK_DIR/_*" -prune -o -name '*.md' -print0 2>/dev/null)
 
   # Always search archive for JSON output
   ARCHIVE_DIR="$WORK_DIR/_archive"
@@ -269,7 +269,7 @@ while IFS= read -r -d '' file; do
     echo "$HITS" | head -10 | sed 's/^/    /'
     FOUND=$((FOUND + 1))
   fi
-done < <(find "$WORK_DIR" -path "$WORK_DIR/_archive" -prune -o -name '*.md' -print0 2>/dev/null)
+done < <(find "$WORK_DIR" -path "$WORK_DIR/_*" -prune -o -name '*.md' -print0 2>/dev/null)
 
 if [[ $FOUND -eq 0 ]]; then
   echo "  (no matches in active work items)"

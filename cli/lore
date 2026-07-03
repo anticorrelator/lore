@@ -150,6 +150,23 @@ Subcommands:
   heal         Detect and fix work structure issues
   ai           Create work items from a natural-language prompt (headless Claude)
   cache-branch Cache or retrieve the active branch for a work item
+  project      Project verbs: show, describe, archive (see: lore work project --help)
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
+work_project_usage() {
+  cat >&2 <<EOF
+lore work project — project record and member management
+
+Usage: lore work project <subcommand> [args...]
+
+Subcommands:
+  show      Show a project's record (when present) and all members, active and archived
+  describe  Create or update the project record (--anchor, --status, --description)
+  archive   Archive every active member; mark a pre-existing record archived
 
 Options:
   --help, -h    Show this help
@@ -805,10 +822,12 @@ cmd_analyze_staleness() {
 
 cmd_drift_sweep() {
   if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    echo "Usage: lore drift-sweep [--dry-run] [--json] [--category NAME]... [--repo-root PATH]" >&2
+    echo "Usage: lore drift-sweep [--dry-run] [--json] [--include-unaudited] [--unaudited-only] [--category NAME]... [--repo-root PATH]" >&2
     echo "  Detect committed-entry drift against each entry's captured_at_sha and" >&2
     echo "  re-enqueue drifted entries through the commons settlement path." >&2
     echo "  --dry-run reports without writing producer rows or enqueuing." >&2
+    echo "  --include-unaudited also enqueues never-audited current entries" >&2
+    echo "  (confidence: unaudited); --unaudited-only skips purely-drifted entries." >&2
     return 0
   fi
   "$SCRIPTS_DIR/drift-sweep.sh" "$@"
@@ -1454,10 +1473,45 @@ cmd_work() {
     cache-branch)
       "$SCRIPTS_DIR/cache-branch.sh" "$@"
       ;;
+    project)
+      cmd_work_project "$@"
+      ;;
     *)
       echo "Error: unknown work subcommand '$subcmd'" >&2
       echo "" >&2
       work_usage
+      return 1
+      ;;
+  esac
+}
+
+cmd_work_project() {
+  if [[ $# -eq 0 ]]; then
+    work_project_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      work_project_usage
+      return 0
+      ;;
+    show)
+      "$SCRIPTS_DIR/show-project.sh" "$@"
+      ;;
+    describe)
+      "$SCRIPTS_DIR/describe-project.sh" "$@"
+      ;;
+    archive)
+      "$SCRIPTS_DIR/archive-project.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown work project subcommand '$subcmd'" >&2
+      echo "" >&2
+      work_project_usage
       return 1
       ;;
   esac

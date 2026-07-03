@@ -32,7 +32,7 @@ fi
 for dir in "$WORK_DIR"/*/; do
   [[ -d "$dir" ]] || continue
   DIRNAME=$(basename "$dir")
-  [[ "$DIRNAME" == "_archive" ]] && continue
+  [[ "$DIRNAME" == _* ]] && continue  # _archive, _projects, and any future _-substrate are not work items
 
   if [[ ! -f "$dir/_meta.json" ]]; then
     # Title case the dirname: replace hyphens with spaces, capitalize each word
@@ -68,7 +68,7 @@ done
 for dir in "$WORK_DIR"/*/; do
   [[ -d "$dir" ]] || continue
   DIRNAME=$(basename "$dir")
-  [[ "$DIRNAME" == "_archive" ]] && continue
+  [[ "$DIRNAME" == _* ]] && continue
 
   if [[ -f "$dir/_meta.json" ]] && [[ ! -f "$dir/notes.md" ]]; then
     # Extract title from _meta.json
@@ -89,7 +89,7 @@ ACTUAL_COUNT=0
 for dir in "$WORK_DIR"/*/; do
   [[ -d "$dir" ]] || continue
   DIRNAME=$(basename "$dir")
-  [[ "$DIRNAME" == "_archive" ]] && continue
+  [[ "$DIRNAME" == _* ]] && continue
   [[ -f "$dir/_meta.json" ]] && ACTUAL_COUNT=$((ACTUAL_COUNT + 1))
 done
 
@@ -112,7 +112,7 @@ THIRTY_DAYS=$((30 * 86400))
 for dir in "$WORK_DIR"/*/; do
   [[ -d "$dir" ]] || continue
   DIRNAME=$(basename "$dir")
-  [[ "$DIRNAME" == "_archive" ]] && continue
+  [[ "$DIRNAME" == _* ]] && continue
   [[ -f "$dir/_meta.json" ]] || continue
 
   STATUS=$(json_field "status" "$dir/_meta.json")

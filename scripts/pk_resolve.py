@@ -8,6 +8,7 @@ Extracted from pk_search.py. Provides:
 Used by: pk_search.py (LinkChecker, CLI), staleness-scan.py
 """
 
+import json
 import os
 import re
 import sys
@@ -30,9 +31,12 @@ SKIP_FILES = {"_inbox.md", "_index.md", "_meta.md", "_meta.json", "_index.json",
 #   [[plan:slug#heading]]       -> deprecated alias for [[work:slug#heading]]
 #   [[thread:slug]]             -> return all entries from thread directory (or monolithic file)
 #   [[thread:slug#date]]        -> return specific entry file (e.g. [[thread:how-we-work#2026-02-06-s6]])
+#   [[project:slug]]            -> return record at _work/_projects/slug.md; without a record,
+#                                  synthesize a member list from _work/_index.json (headings
+#                                  apply only when a record file exists)
 
 BACKLINK_RE = re.compile(
-    r"\[\[(?P<type>knowledge|work|plan|thread):(?P<target>[^\]#]+)(?:#(?P<heading>[^\]]+))?\]\]"
+    r"\[\[(?P<type>knowledge|work|plan|thread|project):(?P<target>[^\]#]+)(?:#(?P<heading>[^\]]+))?\]\]"
 )
 
 
@@ -173,6 +177,19 @@ class Resolver:
 
         file_path, is_archived = self._resolve_path(source_type, target)
         if not file_path:
+            # Recordless project: synthesize a member list from _work/_index.json.
+            # A slug with no record and no members stays unresolved.
+            if source_type == "project":
+                members = self._resolve_project_members(target)
+                if members is not None:
+                    return {
+                        "backlink": backlink,
+                        "resolved": True,
+                        "source_type": source_type,
+                        "target": target,
+                        "heading": heading,
+                        "content": members.strip(),
+                    }
             return {
                 "backlink": backlink,
                 "resolved": False,
@@ -336,6 +353,34 @@ class Resolver:
                     return content.strip()
             return None
 
+    def _resolve_project_members(self, project: str) -> str | None:
+        """Synthesize a member list for a recordless project from _work/_index.json.
+
+        Reads both index projections — plans[] (active) and archived[] — since
+        archived members appear only in the latter. Returns a bullet list of
+        members, or None when the project has no members at all.
+        """
+        index_path = os.path.join(self.knowledge_dir, "_work", "_index.json")
+        try:
+            with open(index_path, encoding="utf-8") as f:
+                index = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+        lines = []
+        for key, label in (("plans", "active"), ("archived", "archived")):
+            for item in index.get(key) or []:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("project", "") or "") != project:
+                    continue
+                slug = item.get("slug", "")
+                title = item.get("title", "") or slug
+                lines.append(f"- {slug}: {title} ({label})")
+        if not lines:
+            return None
+        return "\n".join(lines)
+
     def resolve_batch(self, backlinks: list[str]) -> list[dict]:
         """Resolve multiple backlinks. Returns list of resolve results."""
         return [self.resolve(bl) for bl in backlinks]
@@ -407,6 +452,13 @@ class Resolver:
                 return thread_dir, False
             # v1 fallback: monolithic file
             candidate = os.path.join(self.knowledge_dir, "_threads", f"{target}.md")
+            if os.path.isfile(candidate):
+                return candidate, False
+
+        elif source_type == "project":
+            # Record-first; resolve() falls back to an _index.json member list
+            # when no record file exists.
+            candidate = os.path.join(self.knowledge_dir, "_work", "_projects", f"{target}.md")
             if os.path.isfile(candidate):
                 return candidate, False
 

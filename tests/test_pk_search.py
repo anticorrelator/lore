@@ -1165,6 +1165,87 @@ class TestResolver:
         assert result["resolved"] is True
         assert "Envoy sidecars" in result["content"]
 
+    @staticmethod
+    def _write_project_record(knowledge_dir):
+        projects_dir = knowledge_dir / "_work" / "_projects"
+        projects_dir.mkdir(parents=True, exist_ok=True)
+        (projects_dir / "platform-rework.md").write_text(
+            "# Platform Rework\n"
+            "**Status:** active\n"
+            "**Anchor:** Replace the legacy platform layer.\n\n"
+            "Freeform description body for the rework effort.\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _write_work_index(knowledge_dir):
+        index = {
+            "version": 1,
+            "plans": [
+                {"slug": "auth-refactor", "title": "Auth Refactor",
+                 "status": "active", "project": "platform-rework"},
+                {"slug": "other-item", "title": "Other Item",
+                 "status": "active", "project": ""},
+            ],
+            "archived": [
+                {"slug": "legacy-cleanup", "title": "Legacy Cleanup",
+                 "status": "archived", "project": "platform-rework"},
+            ],
+        }
+        (knowledge_dir / "_work").mkdir(exist_ok=True)
+        (knowledge_dir / "_work" / "_index.json").write_text(
+            json.dumps(index), encoding="utf-8"
+        )
+
+    def test_resolve_project_record(self, knowledge_dir):
+        """[[project:slug]] returns the record file content when a record exists."""
+        self._write_project_record(knowledge_dir)
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[project:platform-rework]]")
+        assert result["resolved"] is True
+        assert result["source_type"] == "project"
+        assert result["target"] == "platform-rework"
+        assert "Replace the legacy platform layer" in result["content"]
+
+    def test_resolve_project_record_precedes_member_list(self, knowledge_dir):
+        """With both a record and index members, the record wins."""
+        self._write_project_record(knowledge_dir)
+        self._write_work_index(knowledge_dir)
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[project:platform-rework]]")
+        assert result["resolved"] is True
+        assert "Replace the legacy platform layer" in result["content"]
+        assert "legacy-cleanup" not in result["content"]
+
+    def test_resolve_project_recordless_member_list(self, knowledge_dir):
+        """Without a record, [[project:slug]] synthesizes members from both
+        _index.json projections — active (plans) and archived."""
+        self._write_work_index(knowledge_dir)
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[project:platform-rework]]")
+        assert result["resolved"] is True
+        assert result["source_type"] == "project"
+        assert "auth-refactor" in result["content"]
+        assert "(active)" in result["content"]
+        assert "legacy-cleanup" in result["content"]
+        assert "(archived)" in result["content"]
+        assert "other-item" not in result["content"]
+
+    def test_resolve_project_no_record_no_members(self, knowledge_dir):
+        """A slug with no record and no members is unresolved, not an empty list."""
+        self._write_work_index(knowledge_dir)
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[project:ghost-effort]]")
+        assert result["resolved"] is False
+        assert "not found" in result["error"].lower()
+
+    def test_resolve_project_no_index_at_all(self, knowledge_dir):
+        """Missing _index.json degrades to unresolved rather than raising."""
+        resolver = Resolver(str(knowledge_dir))
+        result = resolver.resolve("[[project:platform-rework]]")
+        assert result["resolved"] is False
+        assert "error" in result
+
 
 # ---------------------------------------------------------------------------
 # Link Checker Tests

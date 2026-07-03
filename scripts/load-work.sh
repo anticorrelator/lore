@@ -42,6 +42,17 @@ WORK_COUNT=$(grep -c '"slug"' "$INDEX" 2>/dev/null || true)
 WORK_COUNT=$(echo "$WORK_COUNT" | tr -d '[:space:]')
 [[ "$WORK_COUNT" -gt 0 ]] || exit 0
 
+# Project records feed only the header status token; counts come from the
+# index projections. One "slug<TAB>status" line per record file.
+PROJECT_RECORD_STATUSES=""
+if [[ -d "$WORK_DIR/_projects" ]]; then
+  for record in "$WORK_DIR/_projects"/*.md; do
+    [[ -f "$record" ]] || continue
+    pslug=$(basename "$record" .md)
+    PROJECT_RECORD_STATUSES+="${pslug}"$'\t'"$(project_record_field "$WORK_DIR" "$pslug" Status)"$'\n'
+  done
+fi
+
 # Parse work items, calculate dates, check staleness — single python3 pass
 eval "$(python3 -c "
 import json, os, time, re, sys
@@ -49,10 +60,36 @@ from datetime import datetime, timezone
 
 work_dir = sys.argv[1]
 index_path = sys.argv[2]
+record_status_raw = sys.argv[3] if len(sys.argv) > 3 else ''
 now = time.time()
 
 with open(index_path) as f:
     data = json.load(f)
+
+record_status = {}
+for line in record_status_raw.splitlines():
+    if '\t' in line:
+        name, _, status = line.partition('\t')
+        record_status[name] = status.strip()
+
+# Archived rollup counts come from the archived[] projection.
+archived_counts = {}
+for item in data.get('archived') or []:
+    if isinstance(item, dict):
+        project = str(item.get('project', '') or '')
+        if project:
+            archived_counts[project] = archived_counts.get(project, 0) + 1
+
+def project_header(name, active_count):
+    header = name
+    status = record_status.get(name, '')
+    if status and status != 'active':
+        header += f' [{status}]'
+    header += f' — {active_count} active'
+    archived_count = archived_counts.get(name, 0)
+    if archived_count:
+        header += f', {archived_count} archived'
+    return header
 
 active_work_lines = []
 stale_work_lines = []
@@ -87,7 +124,7 @@ def relative_date(iso_str):
         return 'unknown', -1, 0
 
 grouped_items = {}
-ungrouped_lines = []
+ungrouped_items = []
 for item in data.get('plans', []):
     slug = item.get('slug', '')
     title = item.get('title', '')
@@ -133,18 +170,28 @@ for item in data.get('plans', []):
     if project:
         grouped_items.setdefault(project, []).append((epoch, item_lines))
     else:
-        ungrouped_lines.extend(item_lines)
+        ungrouped_items.append(item_lines)
 
 # Project sections lead, ordered by most-recent member update; members are
-# recency-sorted within. Ungrouped lines follow flat, unchanged from before.
+# recency-sorted within. When any project section exists, ungrouped items get
+# their own 'ungrouped — N active' section (N counts items, not lines) with
+# the same member indent; with no projects they stay flat, unchanged from
+# before.
 for project, members in sorted(
     grouped_items.items(), key=lambda kv: max(e for e, _ in kv[1]), reverse=True
 ):
-    active_work_lines.append(f'{project} ({len(members)}):')
+    active_work_lines.append(f'{project_header(project, len(members))}:')
     for _, item_lines in sorted(members, key=lambda m: m[0], reverse=True):
         for line in item_lines:
             active_work_lines.append(f'  {line}')
-active_work_lines.extend(ungrouped_lines)
+if grouped_items and ungrouped_items:
+    active_work_lines.append(f'ungrouped — {len(ungrouped_items)} active:')
+    for item_lines in ungrouped_items:
+        for line in item_lines:
+            active_work_lines.append(f'  {line}')
+else:
+    for item_lines in ungrouped_items:
+        active_work_lines.extend(item_lines)
 
 # Shell-escape helper for single quotes
 def sq(s):
@@ -156,7 +203,7 @@ print(f\"ACTIVE_WORK='{sq(active)}'\")
 
 stale = '\\n'.join(stale_work_lines)
 print(f\"STALE_WORK='{sq(stale)}'\")
-" "$WORK_DIR" "$INDEX")"
+" "$WORK_DIR" "$INDEX" "$PROJECT_RECORD_STATUSES")"
 
 # Build output (budget: ~2000 chars)
 draw_separator "Active Work"

@@ -163,25 +163,41 @@ func (m *ListModel) refreshRows() {
 		cur = r.ID
 	}
 
-	var rows []collection.Row
-	for _, g := range GroupByProject(m.visibleItems()) {
+	groups := GroupByProject(m.visibleItems())
+	hasLabeledGroup := false
+	for _, g := range groups {
 		if g.Project != "" {
+			hasLabeledGroup = true
+			break
+		}
+	}
+
+	var rows []collection.Row
+	for _, g := range groups {
+		// The ungrouped tail gets a header only alongside labeled groups; an
+		// ungrouped-only list stays flat.
+		hasHeader := g.Project != "" || hasLabeledGroup
+		if hasHeader {
 			arrow := "▼"
 			if m.collapsed[g.Project] {
 				arrow = "▶"
+			}
+			label, st := g.Project, groupHeaderStyle
+			if g.Project == "" {
+				label, st = "ungrouped", ungroupedHeaderStyle
 			}
 			rows = append(rows, collection.Row{
 				ID:     headerIDPrefix + g.Project,
 				Header: true,
 				Title: collection.Cell{
-					Text:  fmt.Sprintf("%s %s (%d)", arrow, g.Project, len(g.Items)),
-					Style: groupHeaderStyle,
+					Text:  fmt.Sprintf("%s %s (%d)", arrow, label, len(g.Items)),
+					Style: st,
 				},
 			})
 		}
 		for _, it := range g.Items {
 			row := m.itemRow(it)
-			row.Hidden = g.Project != "" && m.collapsed[g.Project]
+			row.Hidden = hasHeader && m.collapsed[g.Project]
 			rows = append(rows, row)
 		}
 	}
@@ -472,6 +488,11 @@ var prMergedStyle = lipgloss.NewStyle().Foreground(style.ColorMerged)
 // groupHeaderStyle renders project group header rows; hoisted per the
 // allocate-once rule (style.go).
 var groupHeaderStyle = lipgloss.NewStyle().Foreground(style.ColorAccent).Bold(true)
+
+// ungroupedHeaderStyle renders the pseudo-group header over unassigned items
+// dim rather than accent, so it can't be mistaken for a real project named
+// "ungrouped".
+var ungroupedHeaderStyle = lipgloss.NewStyle().Foreground(style.ColorDim).Bold(true)
 
 // readinessLabel returns the readiness label and its status-ramp style for a
 // work item. Archived items use the done style; "needs spec" uses the

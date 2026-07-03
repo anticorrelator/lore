@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify-plan-backlinks.sh — Verify [[knowledge:...]] and [[work:...]] backlinks in a plan.md
+# verify-plan-backlinks.sh — Verify [[knowledge:...]], [[work:...]], and [[project:...]] backlinks in a plan.md
 # Usage: bash verify-plan-backlinks.sh <plan_file> <knowledge_dir> [--fix]
 # Default: report-only JSON. With --fix: apply auto-corrections in-place.
 #
@@ -49,8 +49,8 @@ if ! command -v python3 &>/dev/null; then
   json_error "python3 is required but not found"
 fi
 
-# --- Extract all [[knowledge:...]] and [[work:...]] backlinks ---
-BACKLINKS=$(grep -oE '\[\[(knowledge|work|plan):[^]]+\]\]' "$PLAN_FILE" 2>/dev/null | sort -u || true)
+# --- Extract all [[knowledge:...]], [[work:...]], and [[project:...]] backlinks ---
+BACKLINKS=$(grep -oE '\[\[(knowledge|work|plan|project):[^]]+\]\]' "$PLAN_FILE" 2>/dev/null | sort -u || true)
 
 if [[ -z "$BACKLINKS" ]]; then
   printf '{"verified": 0, "corrected": [], "unresolved": []}\n'
@@ -117,7 +117,7 @@ corrected = []
 unresolved = []
 
 BACKLINK_RE = re.compile(
-    r"\[\[(?P<type>knowledge|work|plan|thread):(?P<target>[^\]#]+)(?:#(?P<heading>[^\]]+))?\]\]"
+    r"\[\[(?P<type>knowledge|work|plan|thread|project):(?P<target>[^\]#]+)(?:#(?P<heading>[^\]]+))?\]\]"
 )
 
 for r in resolve_results:
@@ -139,6 +139,8 @@ for r in resolve_results:
     search_query = " ".join(p for p in slug_parts if len(p) > 2)
 
     correction = None
+    # "project" is deliberately excluded: project labels have no search index
+    # entries, so fuzzy correction would rewrite them to unrelated work items.
     if search_query and source_type in ("knowledge", "work", "plan"):
         try:
             search_result = subprocess.run(

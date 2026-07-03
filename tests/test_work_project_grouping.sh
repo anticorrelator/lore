@@ -7,10 +7,13 @@
 #      archived rows.
 #   3. set-work-meta.sh --project slugifies on write; --project "" clears.
 #   4. list-work.sh renders grouped sections first (recency-ordered, members
-#      recency-sorted) with ungrouped items in a flat tail; a no-project store
-#      renders without any section artifacts.
-#   5. load-work.sh (SessionStart digest) renders project sections with
-#      indented member lines; ungrouped lines keep the legacy format.
+#      recency-sorted) with `{project} — N active[, M archived]` rollup
+#      headers and ungrouped items under a titled `ungrouped — N active`
+#      separator; a no-project store renders without any section artifacts.
+#   5. load-work.sh (SessionStart digest) renders project sections with the
+#      same rollup headers and indented member lines; ungrouped items get an
+#      `ungrouped — N active:` section with the same indent when any project
+#      exists, flat lines otherwise.
 #   6. load-work-item.sh prints a Project: line for grouped items and none
 #      for legacy items.
 #   7. heal-work.sh orphan regeneration writes a _meta.json carrying
@@ -173,17 +176,19 @@ assert_eq "set: --project '' clears membership" "$CLEARED" "False"
 # --- 4: list-work.sh grouped rendering ---------------------------------------
 
 LIST_OUT=$(bash "$SCRIPTS_DIR/list-work.sh" 2>&1)
-assert_contains "list: tui-rework section header with member count" \
-  "$LIST_OUT" "tui-rework (3)"
-assert_contains "list: side-effort section header" \
-  "$LIST_OUT" "side-effort (1)"
+assert_contains "list: tui-rework header carries active and archived rollup counts" \
+  "$LIST_OUT" "tui-rework — 3 active, 1 archived"
+assert_contains "list: side-effort header omits zero archived count" \
+  "$LIST_OUT" "side-effort — 1 active"
 assert_contains "list: ungrouped legacy item still listed" \
   "$LIST_OUT" "legacy-item"
+assert_contains "list: ungrouped section header with member count" \
+  "$LIST_OUT" "ungrouped — 1 active"
 
 # Section order: tui-rework leads because its newest member (flag-created)
 # was created just now, beating side-effort's 06-11 member.
-TUI_LINE=$(printf '%s\n' "$LIST_OUT" | grep -nF "tui-rework (" | cut -d: -f1)
-SIDE_LINE=$(printf '%s\n' "$LIST_OUT" | grep -nF "side-effort (" | cut -d: -f1)
+TUI_LINE=$(printf '%s\n' "$LIST_OUT" | grep -nF "tui-rework —" | cut -d: -f1)
+SIDE_LINE=$(printf '%s\n' "$LIST_OUT" | grep -nF "side-effort —" | cut -d: -f1)
 if [[ "$TUI_LINE" -lt "$SIDE_LINE" ]]; then
   echo "  PASS: list: project sections ordered by most-recent member update"
   PASS=$((PASS + 1))
@@ -211,11 +216,14 @@ assert_contains "list --all: archived member shows its project" \
 # --- 5: load-work.sh digest grouping -----------------------------------------
 
 LOAD_OUT=$(bash "$SCRIPTS_DIR/load-work.sh" 2>&1)
-assert_contains "digest: project section header" "$LOAD_OUT" "tui-rework (3):"
+assert_contains "digest: project section header carries rollup counts" \
+  "$LOAD_OUT" "tui-rework — 3 active, 1 archived:"
 assert_contains "digest: member line indented under section" \
   "$LOAD_OUT" "  - grouped-new: Grouped New"
-assert_contains "digest: ungrouped item keeps legacy flat line" \
-  "$LOAD_OUT" "- legacy-item: Legacy Item"
+assert_contains "digest: ungrouped section header with item count" \
+  "$LOAD_OUT" "ungrouped — 1 active:"
+assert_contains "digest: ungrouped member indented under section" \
+  "$LOAD_OUT" "  - legacy-item: Legacy Item"
 
 # --- 6: load-work-item.sh Project: line --------------------------------------
 
@@ -253,7 +261,15 @@ JSON
 PLAIN_OUT=$(LORE_KNOWLEDGE_DIR="$KDIR2" bash "$SCRIPTS_DIR/list-work.sh" 2>&1)
 assert_contains "list: no-project store lists the item" "$PLAIN_OUT" "plain-item"
 assert_absent "list: no-project store has no section separators between header and rows" \
-  "$PLAIN_OUT" "(1)"
+  "$PLAIN_OUT" "— 1 active"
+
+PLAIN_LOAD=$(LORE_KNOWLEDGE_DIR="$KDIR2" bash "$SCRIPTS_DIR/load-work.sh" 2>&1)
+assert_contains "digest: no-project store keeps flat unindented line" \
+  "$PLAIN_LOAD" "- plain-item: Plain Item"
+assert_absent "digest: no-project store emits no ungrouped header" \
+  "$PLAIN_LOAD" "ungrouped —"
+assert_absent "digest: no-project store does not indent item lines" \
+  "$PLAIN_LOAD" "  - plain-item"
 rm -rf "$KDIR2"
 
 # --- Results -----------------------------------------------------------------

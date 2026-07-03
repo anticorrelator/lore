@@ -2,7 +2,7 @@
 name: work
 description: "Check project status, remaining tasks, and session context — USE FIRST when asked 'what's left', 'what should I do', 'remaining work', or status questions. Also: create, update, archive, search work items."
 user_invocable: true
-argument_description: "[command] [name] — commands: create, list, update, set, archive, search, tasks, regen-tasks, heal"
+argument_description: "[command] [name] — commands: create, list, update, set, archive, search, project, tasks, regen-tasks, heal"
 ---
 
 # /work Skill
@@ -101,6 +101,16 @@ lore work set "<slug>" --issue "<value>" --pr "<value>" --project "<name>"
 All flags are optional — pass only what the user provided. Show the script output.
 
 `--project` groups the item under a project label (slugified on write; the stored slug is the display value). `--project ""` clears the item's project membership.
+
+---
+
+### `project <show|describe|archive> <slug> [...]`
+```bash
+lore work project show "<slug>"
+lore work project describe "<slug>" [--anchor "<text>"] [--status <active|done|archived>] [--description "<text>"]
+lore work project archive "<slug>" [--yes]
+```
+Show the script output. `show` renders the project record (when one exists) plus all members, active and archived. `describe` creates or updates the record at `_work/_projects/<slug>.md`; omitted fields keep their values. `archive` archives every active member and flips a pre-existing record to archived — confirm with the user first, then pass `--yes`.
 
 ---
 

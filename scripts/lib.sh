@@ -132,6 +132,17 @@ slugify() {
     | sed 's/-*$//'
 }
 
+# --- derive_entry_title ---
+# Derive a knowledge-entry H1 from an insight/claim: first ~8 words, each
+# title-cased (macOS-compatible via awk). Shared by capture.sh (titling new
+# entries) and apply-correction.sh (regenerating a derived H1 after a body
+# correction) — both must produce identical titles for identical input.
+# Usage: title=$(derive_entry_title "some insight text")
+derive_entry_title() {
+  local text="$1"
+  echo "$text" | awk '{for(i=1;i<=NF && i<=8;i++){$i=toupper(substr($i,1,1)) substr($i,2)}; NF=(NF>8?8:NF); print}'
+}
+
 # --- resolve_knowledge_dir ---
 # Resolve the knowledge store directory for the current project.
 # Usage: KDIR=$(resolve_knowledge_dir)
@@ -1435,6 +1446,58 @@ update_meta_timestamp() {
   else
     sed -i "s/\"updated\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"updated\": \"$ts\"/" "$meta_file"
   fi
+}
+
+# --- project_record_field ---
+# Read a bold field from a project record at _work/_projects/<slug>.md.
+# Usage: status=$(project_record_field "$WORK_DIR" "$slug" "Status")
+# Prints the field value (text after "**<Field>:** "), or nothing when the
+# record or the field is absent. Always returns 0 so read-only surfaces
+# (list, digest, show, archive) can call it unconditionally under set -e.
+project_record_field() {
+  local work_dir="$1" slug="$2" field="$3"
+  local record="$work_dir/_projects/$slug.md"
+  [[ -f "$record" ]] || return 0
+  sed -n "s/^\*\*${field}:\*\*[[:space:]]*//p" "$record" | head -1
+}
+
+# --- warn_near_project_label ---
+# Label hygiene for project grouping: warn on stderr when a project label is
+# edit-distance-close to (but not exactly) an existing one. Existing labels
+# are the union of plans[].project and archived[].project from _index.json
+# plus _projects/*.md record basenames. Warn-only — never normalizes, merges,
+# rejects the label, or creates a record. Always returns 0.
+# Usage: warn_near_project_label "$WORK_DIR" "$label"
+warn_near_project_label() {
+  local work_dir="$1" label="$2"
+  [[ -n "$label" ]] || return 0
+  local matches match
+  matches=$(python3 - "$work_dir" "$label" 2>/dev/null <<'PYEOF' || true
+import difflib, glob, json, os, sys
+
+work_dir, label = sys.argv[1], sys.argv[2]
+labels = set()
+try:
+    with open(os.path.join(work_dir, "_index.json"), encoding="utf-8") as f:
+        data = json.load(f)
+    for key in ("plans", "archived"):
+        for item in data.get(key) or []:
+            if isinstance(item, dict) and item.get("project"):
+                labels.add(str(item["project"]))
+except Exception:
+    pass
+for path in glob.glob(os.path.join(work_dir, "_projects", "*.md")):
+    labels.add(os.path.splitext(os.path.basename(path))[0])
+labels.discard(label)
+for match in difflib.get_close_matches(label, sorted(labels), n=3, cutoff=0.8):
+    print(match)
+PYEOF
+)
+  while IFS= read -r match; do
+    [[ -z "$match" ]] && continue
+    echo "[work] Warning: project '$label' is close to existing project '$match' — grouping matches exact labels only." >&2
+  done <<<"$matches"
+  return 0
 }
 
 # --- iso_to_epoch ---
