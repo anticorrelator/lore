@@ -36,8 +36,11 @@ func (m PlanTabModel) Update(msg tea.Msg) (PlanTabModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.viewport.SetWidth(msg.Width - 4)
-		m.viewport.SetHeight(msg.Height - 7)
+		// Dimensions arrive already-inner: DetailModel.Update forwards
+		// contentWidth/contentHeight, so use them verbatim (same convention
+		// as the notes tab). Do not subtract chrome again here.
+		m.viewport.SetWidth(msg.Width)
+		m.viewport.SetHeight(msg.Height)
 	default:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)

@@ -329,3 +329,48 @@ func TestDetailModelDimensionsAfterWindowThenLoad(t *testing.T) {
 		t.Errorf("contentHeight() = %d, want %d", got, want)
 	}
 }
+
+func TestDetailModelPlanViewportTracksResize(t *testing.T) {
+	// Regression: DetailModel.Update forwards already-inner dimensions
+	// (contentWidth/contentHeight) to tab models on resize. PlanTabModel
+	// used to subtract chrome again (-4/-7), shrinking the plan viewport
+	// after any terminal resize even though initial load sized correctly.
+	m := NewDetailModel("", "test")
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
+
+	planContent := "# Plan\n\nSome plan body."
+	m, _ = m.Update(DetailLoadedMsg{
+		Slug: "test",
+		Detail: &WorkItemDetail{
+			Slug:        "test",
+			Title:       "Test Item",
+			PlanContent: &planContent,
+		},
+	})
+
+	// Initial load sizes the plan viewport to the inner content box.
+	if got, want := m.planTab.viewport.Width(), m.contentWidth(); got != want {
+		t.Fatalf("after load: plan viewport width = %d, want %d", got, want)
+	}
+	if got, want := m.planTab.viewport.Height(), m.contentHeight(); got != want {
+		t.Fatalf("after load: plan viewport height = %d, want %d", got, want)
+	}
+
+	// Terminal resize: the plan viewport must track the new inner box exactly.
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 60})
+	if got, want := m.planTab.viewport.Width(), m.contentWidth(); got != want {
+		t.Errorf("after resize: plan viewport width = %d, want %d (double-subtracted chrome?)", got, want)
+	}
+	if got, want := m.planTab.viewport.Height(), m.contentHeight(); got != want {
+		t.Errorf("after resize: plan viewport height = %d, want %d (double-subtracted chrome?)", got, want)
+	}
+
+	// Resizing back must be lossless — repeated resizes must not drift.
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
+	if got, want := m.planTab.viewport.Width(), 96; got != want {
+		t.Errorf("after resize back: plan viewport width = %d, want %d", got, want)
+	}
+	if got, want := m.planTab.viewport.Height(), 47; got != want {
+		t.Errorf("after resize back: plan viewport height = %d, want %d", got, want)
+	}
+}
