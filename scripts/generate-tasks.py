@@ -817,21 +817,30 @@ def compute_recommended_workers(all_tasks: list[dict]) -> int:
 # Retrieval directive parsing (legacy flat + v2 grouped)
 # ---------------------------------------------------------------------------
 
-_V2_VERSION_RE = re.compile(r"^\s*-\s*version\s*:\s*2\s*$", re.MULTILINE)
+_V2_VERSION_RE = re.compile(r"^\s*(?:-\s*)?version\s*:\s*2\s*$", re.MULTILINE)
 
 
 def _is_v2_directive(block: str) -> bool:
-    """Return True if the directive block declares ``version: 2``."""
+    """Return True if the directive block declares ``version: 2``.
+
+    Matches both the bullet form (``- version: 2``) and the plain-key form
+    (``version: 2``) that fenced YAML blocks use, including when nested under
+    a ``retrieval_directive:`` top key.
+    """
     return bool(_V2_VERSION_RE.search(block))
 
 
-def _split_csv_list(val: str) -> list[str]:
+def _split_csv_list(val) -> list[str]:
     """Parse a value as either YAML inline list ``[a, b, c]``, ``a, b, c``, or ``a``.
 
-    Strips a *single* outer ``[...]`` pair only when the contents don't themselves
-    begin with another ``[`` — this preserves lists of ``[[knowledge:...]]`` backlinks.
+    Also accepts an actual list (from a real-YAML parse of a fenced block),
+    returning its items stringified. For string input, strips a *single* outer
+    ``[...]`` pair only when the contents don't themselves begin with another
+    ``[`` — this preserves lists of ``[[knowledge:...]]`` backlinks.
     """
-    s = val.strip()
+    if isinstance(val, list):
+        return [str(tok).strip() for tok in val if str(tok).strip()]
+    s = str(val).strip()
     if s.startswith("[") and s.endswith("]") and not s.startswith("[["):
         s = s[1:-1]
     return [tok.strip().strip('"').strip("'") for tok in s.split(",") if tok.strip()]
@@ -874,6 +883,60 @@ def _parse_legacy_directive(block: str) -> dict:
     }
 
 
+def _parse_v2_directive_yaml(body: str, phase_num: int) -> dict | None:
+    """Parse a fenced directive body with a real YAML parser when available.
+
+    Returns the normalized v2 directive dict, or ``None`` when PyYAML is not
+    installed or the body is not parseable YAML (caller falls back to the
+    yaml-ish line parser). Tolerates the body being wrapped under a top-level
+    ``retrieval_directive:`` key. Structurally-invalid v2 content (no topics,
+    wrong focal count) raises ``ValueError`` with the same messages as the
+    yaml-ish path — invalid is loud, not a silent legacy downgrade.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return None
+    try:
+        data = yaml.safe_load(body)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("retrieval_directive"), dict):
+        data = data["retrieval_directive"]
+    if data.get("version") != 2:
+        return None
+    topics_raw = data.get("topics")
+    if not isinstance(topics_raw, list) or not topics_raw:
+        raise ValueError(
+            f"[generate-tasks] phase {phase_num}: retrieval_directive declares "
+            f"version: 2 but no topics were parsed; v2 requires a non-empty topics list."
+        )
+    topics: list[dict] = []
+    focal_count = 0
+    for raw_topic in topics_raw:
+        if not isinstance(raw_topic, dict):
+            raise ValueError(
+                f"[generate-tasks] phase {phase_num}: v2 retrieval_directive "
+                f"topics must be mappings, got: {type(raw_topic).__name__}"
+            )
+        topic = _normalize_v2_topic(raw_topic)
+        if topic["role"] == "focal":
+            focal_count += 1
+        topics.append(topic)
+    if focal_count != 1:
+        raise ValueError(
+            f"[generate-tasks] phase {phase_num}: v2 retrieval_directive must "
+            f"declare exactly one role: focal topic (found {focal_count}). "
+            f"If no focal candidate exists, emit a legacy flat directive instead."
+        )
+    return {
+        "version": 2,
+        "topics": topics,
+    }
+
+
 def _parse_v2_directive(block: str, phase_num: int) -> dict:
     """Parse a ``version: 2`` grouped directive block.
 
@@ -901,6 +964,12 @@ def _parse_v2_directive(block: str, phase_num: int) -> dict:
     )
     if fence_match:
         body = fence_match.group(1)
+        # A fenced block is real YAML (nested keys, multi-line seed lists) that
+        # the line-oriented yaml-ish extractor mis-parses — each nested seed
+        # bullet reads as a new topic. Prefer a real-YAML parse when available.
+        yaml_parsed = _parse_v2_directive_yaml(body, phase_num)
+        if yaml_parsed is not None:
+            return yaml_parsed
     else:
         body = block
         # Strip leading "- " on bullet lines so YAML-ish indentation stands alone.
@@ -1036,16 +1105,16 @@ def _normalize_v2_topic(raw: dict) -> dict:
         raise ValueError(
             f"v2 topic role must be 'focal' or 'adjacent', got: {role!r}"
         )
-    topic = (raw.get("topic") or "").strip().strip('"').strip("'")
+    topic = str(raw.get("topic") or "").strip().strip('"').strip("'")
     seeds = _split_csv_list(raw.get("seeds", ""))
     scale_set = _split_csv_list(raw.get("scale_set", ""))
     activity_vocab = _split_csv_list(raw.get("activity_vocab", ""))
-    query_raw = (raw.get("query") or "").strip()
+    query_raw = str(raw.get("query") or "").strip()
     if query_raw.startswith('"') and query_raw.endswith('"'):
         query_raw = query_raw[1:-1]
     elif query_raw.startswith("'") and query_raw.endswith("'"):
         query_raw = query_raw[1:-1]
-    limit_raw = (raw.get("limit") or "").strip()
+    limit_raw = str(raw.get("limit") or "").strip()
     try:
         limit = int(limit_raw) if limit_raw else (8 if role == "focal" else 4)
     except ValueError:
