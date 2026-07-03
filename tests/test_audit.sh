@@ -624,6 +624,207 @@ assert_contains "refine-fallback: both claims audited" "$OUT24" "total=2 verifie
 assert_file_exists "refine-fallback: verdicts land under archive dir" \
   "$KDIR24/_work/_archive/wi-refine/verdicts/wi-refine.jsonl"
 
+# =============================================
+# Test 25: Mid-run archive — the work item is archived while the gate judge is
+# running (simulated by a shim `claude` that performs the mv before emitting
+# its verdict). Write-time resolution must land the verdict envelope in the
+# archive copy and must not recreate the active _work/<slug>/ dir.
+# =============================================
+echo ""
+echo "Test 25: mid-run archive — verdicts follow the item to _archive/"
+KDIR25="$TEST_DIR/kdir25"
+setup_task_claims_fixture "$KDIR25" "wi-toctou"
+mkdir -p "$KDIR25/_work/_archive"
+SHIM25="$TEST_DIR/shim25"
+mkdir -p "$SHIM25"
+cat > "$SHIM25/claude" <<SHIMEOF
+#!/usr/bin/env bash
+cat > /dev/null
+mv "$KDIR25/_work/wi-toctou" "$KDIR25/_work/_archive/wi-toctou"
+cat <<'JSON'
+{"judge":"correctness-gate-assertion","judge_template_version":"toctou25","verdicts":[{"claim_id":"task-claim-a","verdict":"unverified","evidence":"fixture leaves claim unresolved"}]}
+JSON
+SHIMEOF
+chmod +x "$SHIM25/claude"
+
+OUT25=$(PATH="$SHIM25:$PATH" LORE_FRAMEWORK=claude-code bash "$AUDIT" "wi-toctou" \
+  --kdir "$KDIR25" --model shim-judge --skip-scorecard 2>&1)
+assert_contains "mid-run archive: assertion gate completes" "$OUT25" "correctness-gate-assertion complete"
+assert_file_exists "mid-run archive: verdicts land under archive dir" \
+  "$KDIR25/_work/_archive/wi-toctou/verdicts/wi-toctou.jsonl"
+if [[ ! -d "$KDIR25/_work/wi-toctou" ]]; then
+  echo "  PASS: mid-run archive: active _work/<slug>/ was not recreated"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: mid-run archive: active dir recreated at $KDIR25/_work/wi-toctou"
+  FAIL=$((FAIL + 1))
+fi
+
+# =============================================
+# Tests 26-27 drive the reverse-auditor stage with injected outputs. The RA
+# shape validator requires judge_template_version to equal the resolved
+# reverse-auditor template's version; compute it the same way the wrapper does.
+# =============================================
+RA_TV=$(bash -c "source '$SCRIPT_DIR/lib.sh'; t=\$(resolve_agent_template reverse-auditor) && bash '$SCRIPT_DIR/template-version.sh' \"\$t\"") || RA_TV=""
+
+curator_fixture_select_a() {
+  # curator_fixture_select_a <path> — selects task-claim-a so the RA stage runs
+  printf '%s\n' '{"judge":"curator","judge_template_version":"cur-fixture","selected":[{"claim_id":"task-claim-a","selection_rationale":"fixture"}],"dropped":[]}' > "$1"
+}
+
+# =============================================
+# Test 26: RA abstention with a stale active stub coexisting with the archive
+# copy that holds the source artifacts — the reattempt row must land beside
+# the archived artifacts, not in the stub.
+# =============================================
+echo ""
+echo "Test 26: RA abstention reattempt row lands in archive, not the stale stub"
+KDIR26="$TEST_DIR/kdir26"
+mkdir -p "$KDIR26/_work/wi-reatt"
+setup_archived_task_claims_fixture "$KDIR26" "wi-reatt"
+gate_fixture "$TEST_DIR/gate26.json" '{
+  "judge":"correctness-gate","judge_template_version":"g26",
+  "verdicts":[{"claim_id":"task-claim-a","verdict":"verified","evidence":"ok"}]
+}'
+curator_fixture_select_a "$TEST_DIR/curator26.json"
+cat > "$TEST_DIR/ra26.json" <<RAEOF
+{"judge":"reverse-auditor","judge_template_version":"$RA_TV","work_item":"wi-reatt","artifact_id":"wi-reatt","coverage_state":"insufficient-evidence","abstention_reason":"inlined packet inadequate","insufficient_evidence_refs":["fixture"],"omission_claim":null,"created_at":"2026-07-02T00:00:00Z"}
+RAEOF
+
+EXIT26=0
+OUT26=$(bash "$AUDIT" "wi-reatt" --kdir "$KDIR26" \
+  --gate-output-file "$TEST_DIR/gate26.json" \
+  --curator-output-file "$TEST_DIR/curator26.json" \
+  --reverse-auditor-output-file "$TEST_DIR/ra26.json" \
+  --skip-scorecard 2>&1) || EXIT26=$?
+assert_file_exists "abstention: reattempt row lands under archive dir" \
+  "$KDIR26/_work/_archive/wi-reatt/audit-reattempts.jsonl"
+if [[ ! -f "$KDIR26/_work/wi-reatt/audit-reattempts.jsonl" ]]; then
+  echo "  PASS: abstention: stale stub received no reattempt row"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: abstention: reattempt row written into the stale stub"
+  FAIL=$((FAIL + 1))
+fi
+
+# =============================================
+# Test 27: RA omission claim failing grounding preflight, same stale-stub
+# state — the attempts row routed via audit-queue-route.sh must land beside
+# the archived artifacts, not in the stub.
+# =============================================
+echo ""
+echo "Test 27: RA preflight-fail attempts row lands in archive, not the stale stub"
+KDIR27="$TEST_DIR/kdir27"
+mkdir -p "$KDIR27/_work/wi-qroute"
+setup_archived_task_claims_fixture "$KDIR27" "wi-qroute"
+gate_fixture "$TEST_DIR/gate27.json" '{
+  "judge":"correctness-gate","judge_template_version":"g27",
+  "verdicts":[{"claim_id":"task-claim-a","verdict":"verified","evidence":"ok"}]
+}'
+curator_fixture_select_a "$TEST_DIR/curator27.json"
+cat > "$TEST_DIR/ra27.json" <<RAEOF
+{"judge":"reverse-auditor","judge_template_version":"$RA_TV","work_item":"wi-qroute","artifact_id":"wi-qroute","coverage_state":"covered","abstention_reason":null,"insufficient_evidence_refs":null,"omission_claim":{"file":"tests/no-such-file-$RANDOM.sh","line_range":"1-2","exact_snippet":"missing","normalized_snippet_hash":"0000000000000000000000000000000000000000000000000000000000000000","falsifier":"fixture","why_it_matters":"fixture"},"created_at":"2026-07-02T00:00:00Z"}
+RAEOF
+
+EXIT27=0
+OUT27=$(bash "$AUDIT" "wi-qroute" --kdir "$KDIR27" \
+  --gate-output-file "$TEST_DIR/gate27.json" \
+  --curator-output-file "$TEST_DIR/curator27.json" \
+  --reverse-auditor-output-file "$TEST_DIR/ra27.json" \
+  --skip-scorecard 2>&1) || EXIT27=$?
+assert_file_exists "preflight-fail: attempts row lands under archive dir" \
+  "$KDIR27/_work/_archive/wi-qroute/audit-attempts.jsonl"
+if [[ ! -f "$KDIR27/_work/wi-qroute/audit-attempts.jsonl" ]]; then
+  echo "  PASS: preflight-fail: stale stub received no attempts row"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: preflight-fail: attempts row written into the stale stub"
+  FAIL=$((FAIL + 1))
+fi
+
+# =============================================
+# Test 28: audit-queue-route.sh direct invocation — archive-only work item
+# resolves to _work/_archive/<slug>/ instead of hard-failing on the missing
+# active dir.
+# =============================================
+echo ""
+echo "Test 28: audit-queue-route.sh resolves archive-only work item"
+KDIR28="$TEST_DIR/kdir28"
+setup_archived_task_claims_fixture "$KDIR28" "wi-route-arch"
+
+EXIT28=0
+OUT28=$(bash "$SCRIPT_DIR/audit-queue-route.sh" \
+  --work-item "wi-route-arch" \
+  --emission '{"omission_claim":{"file":"x.sh","line_range":"1-1","falsifier":"f","why_it_matters":"w"}}' \
+  --preflight '{"pass": false, "reason": "file-missing", "detail": "fixture"}' \
+  --kdir "$KDIR28" \
+  --source-filename "task-claims.jsonl" 2>&1) || EXIT28=$?
+assert_eq "queue-route: archive-only invocation exits 0" "$EXIT28" "0"
+assert_file_exists "queue-route: attempts row lands under archive dir" \
+  "$KDIR28/_work/_archive/wi-route-arch/audit-attempts.jsonl"
+
+# =============================================
+# Test 29: settlement-record-append.sh — archived item resolves to the archive
+# copy, and a stale stub whose only content is a verdicts/ envelope file never
+# satisfies the artifact probe (envelope files reuse source-artifact names).
+# =============================================
+echo ""
+echo "Test 29: settlement-record-append.sh archive resolution + envelope-shape probe"
+KDIR29="$TEST_DIR/kdir29"
+setup_archived_task_claims_fixture "$KDIR29" "wi-rec"
+# Stale stub containing ONLY a verdicts/ envelope file named like the source
+# artifact — must not win resolution.
+mkdir -p "$KDIR29/_work/wi-rec/verdicts"
+printf '%s\n' '{"artifact_id":"task-claims","judge":"curator","judge_run_at":"2026-07-01T00:00:00Z"}' \
+  > "$KDIR29/_work/wi-rec/verdicts/task-claims.jsonl"
+
+EXIT29=0
+OUT29=$(printf '%s' '{"artifact_id":"task-claims","judge":"curator","claim_id":"c1","verdict":"selected"}' \
+  | bash "$SCRIPT_DIR/settlement-record-append.sh" \
+      --work-item "wi-rec" --artifact-id "task-claims" --kdir "$KDIR29" 2>&1) || EXIT29=$?
+assert_eq "record-append: archived-item append exits 0" "$EXIT29" "0"
+assert_file_exists "record-append: verdict envelope lands under archive dir" \
+  "$KDIR29/_work/_archive/wi-rec/verdicts/task-claims.jsonl"
+STUB29_LINES=$(wc -l < "$KDIR29/_work/wi-rec/verdicts/task-claims.jsonl" | tr -d ' ')
+assert_eq "record-append: stub envelope file untouched (still 1 row)" "$STUB29_LINES" "1"
+
+# Missing everywhere still hard-fails.
+EXIT29B=0
+printf '%s' '{"artifact_id":"a","judge":"curator","claim_id":"c1","verdict":"selected"}' \
+  | bash "$SCRIPT_DIR/settlement-record-append.sh" \
+      --work-item "wi-nowhere" --artifact-id "a" --kdir "$KDIR29" >/dev/null 2>&1 || EXIT29B=$?
+assert_eq "record-append: item missing everywhere exits 1" "$EXIT29B" "1"
+
+# =============================================
+# Test 30: promote-commons-append.sh — a stale active stub loses to the
+# archive copy that holds the item's promoted-commons.jsonl.
+# =============================================
+echo ""
+echo "Test 30: promote-commons-append.sh appends to archive copy behind stale stub"
+KDIR30="$TEST_DIR/kdir30"
+mkdir -p "$KDIR30/_work/wi-commons-stub"
+mkdir -p "$KDIR30/_work/_archive/wi-commons-stub"
+mkdir -p "$KDIR30/conventions"
+printf '%s\n' '# Fixture entry' > "$KDIR30/conventions/fixture-entry.md"
+printf '%s\n' '{"claim_id":"existing-1","tier":"reusable","claim":"existing row","falsifier":"f","related_files":["x"],"scale":"implementation","entry_path":"conventions/fixture-entry.md"}' \
+  > "$KDIR30/_work/_archive/wi-commons-stub/promoted-commons.jsonl"
+
+EXIT30=0
+OUT30=$(printf '%s' '{"claim_id":"new-1","claim":"new commons claim","falsifier":"f","related_files":["/abs/x.sh"],"scale":"implementation"}' \
+  | bash "$SCRIPT_DIR/promote-commons-append.sh" \
+      --work-item "wi-commons-stub" --entry-path "conventions/fixture-entry.md" \
+      --kdir "$KDIR30" 2>&1) || EXIT30=$?
+assert_eq "promote-commons: stub-shadow append exits 0" "$EXIT30" "0"
+ARCH30_LINES=$(wc -l < "$KDIR30/_work/_archive/wi-commons-stub/promoted-commons.jsonl" | tr -d ' ')
+assert_eq "promote-commons: row appended to archive copy (2 rows)" "$ARCH30_LINES" "2"
+if [[ ! -f "$KDIR30/_work/wi-commons-stub/promoted-commons.jsonl" ]]; then
+  echo "  PASS: promote-commons: stale stub received no row"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: promote-commons: row written into the stale stub"
+  FAIL=$((FAIL + 1))
+fi
+
 echo ""
 echo "=== Results ==="
 TOTAL=$((PASS + FAIL))

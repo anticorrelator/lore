@@ -16,6 +16,8 @@
 #       --emission <json-file-or-inline> \
 #       --preflight <json-file-or-inline> \
 #       [--kdir <path>] \
+#       [--source-filename <basename>] \  # audited source artifact, steers
+#                                         # active-vs-archive dir resolution
 #       [--verdict-source <source>]  # default: reverse-auditor
 #
 # --emission is the reverse-auditor output per the audit contract
@@ -95,19 +97,21 @@ WORK_ITEM=""
 EMISSION_INPUT=""
 PREFLIGHT_INPUT=""
 KDIR_OVERRIDE=""
+SOURCE_FILENAME=""
 VERDICT_SOURCE="reverse-auditor"
 
 usage() {
-  sed -n '2,87p' "$0" >&2
+  sed -n '2,89p' "$0" >&2
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --work-item)      WORK_ITEM="$2";        shift 2 ;;
-    --emission)       EMISSION_INPUT="$2";   shift 2 ;;
-    --preflight)      PREFLIGHT_INPUT="$2";  shift 2 ;;
-    --kdir)           KDIR_OVERRIDE="$2";    shift 2 ;;
-    --verdict-source) VERDICT_SOURCE="$2";   shift 2 ;;
+    --work-item)        WORK_ITEM="$2";        shift 2 ;;
+    --emission)         EMISSION_INPUT="$2";   shift 2 ;;
+    --preflight)        PREFLIGHT_INPUT="$2";  shift 2 ;;
+    --kdir)             KDIR_OVERRIDE="$2";    shift 2 ;;
+    --source-filename)  SOURCE_FILENAME="$2";  shift 2 ;;
+    --verdict-source)   VERDICT_SOURCE="$2";   shift 2 ;;
     -h|--help)        usage; exit 0 ;;
     *)
       echo "[queue] Error: unknown argument '$1'" >&2
@@ -135,8 +139,11 @@ fi
 
 [[ -d "$KDIR" ]] || fail "knowledge directory not found: $KDIR"
 
-ITEM_DIR="$KDIR/_work/$WORK_ITEM"
-[[ -d "$ITEM_DIR" ]] || fail "work item not found: $WORK_ITEM (expected at $ITEM_DIR)"
+# Resolve the owning dir at write time (active then archive, steered by the
+# audited source artifact when --source-filename is given) so queue rows for
+# an archived item land beside its artifacts instead of feeding a stale stub.
+ITEM_DIR=$(resolve_work_item_dir "$KDIR" "$WORK_ITEM" "$SOURCE_FILENAME") \
+  || fail "work item not found in _work/ or _work/_archive/: $WORK_ITEM"
 
 # --- Read inputs (path or inline JSON) ---
 read_json() {

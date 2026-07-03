@@ -206,9 +206,13 @@ if [[ ! -d "$KDIR" ]]; then
   fail "knowledge directory not found: $KDIR"
 fi
 
-ITEM_DIR="$KDIR/_work/$WORK_ITEM"
-if [[ ! -d "$ITEM_DIR" ]]; then
-  fail "work item not found: $WORK_ITEM (expected at $ITEM_DIR)"
+# Resolve the owning dir at write time (active then archive, steered by the
+# audited artifact's source file when it matches <artifact-filename>.jsonl at
+# the dir root) so envelopes for archived items land beside their artifacts
+# instead of erroring out or feeding a stale active stub. Only the verdicts/
+# subdir is ever created — never the item dir itself.
+if ! ITEM_DIR=$(resolve_work_item_dir "$KDIR" "$WORK_ITEM" "$ARTIFACT_FILENAME.jsonl"); then
+  fail "work item not found in _work/ or _work/_archive/: $WORK_ITEM"
 fi
 
 VERDICTS_DIR="$ITEM_DIR/verdicts"

@@ -169,14 +169,11 @@ if [[ -z "$ENTRY_ABS" ]]; then
   exit 1
 fi
 
-# Archived work items keep their artifacts under _work/_archive/<slug>/ — fall
-# back there (the same two-path resolution settlement-processor.py uses on the
-# read side) so producer rows for an archived item land next to its other files.
-WORK_DIR="$KNOWLEDGE_DIR/_work/$WORK_ITEM"
-if [[ ! -d "$WORK_DIR" ]]; then
-  WORK_DIR="$KNOWLEDGE_DIR/_work/_archive/$WORK_ITEM"
-fi
-if [[ ! -d "$WORK_DIR" ]]; then
+# Archived work items keep their artifacts under _work/_archive/<slug>/ —
+# resolve at write time by artifact presence (active then archive) so rows for
+# an archived item land next to its other files and a stale active stub can no
+# longer win over the archive copy that holds the item's existing rows.
+if ! WORK_DIR=$(resolve_work_item_dir "$KNOWLEDGE_DIR" "$WORK_ITEM" "promoted-commons.jsonl"); then
   die "work item not found in _work/ or _work/_archive/: $WORK_ITEM"
 fi
 

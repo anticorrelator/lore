@@ -34,6 +34,21 @@ for dir in "$WORK_DIR"/*/; do
   DIRNAME=$(basename "$dir")
   [[ "$DIRNAME" == _* ]] && continue  # _archive, _projects, and any future _-substrate are not work items
 
+  # Settlement residue: an active stub whose slug also exists under _archive/
+  # (no _meta.json, or a scaffold-fingerprint one from a previous heal run) is
+  # merged into the archive copy, not scaffolded into a fake active item.
+  if [[ -d "$WORK_DIR/_archive/$DIRNAME" ]] \
+     && bash "$SCRIPT_DIR/merge-work-stub.sh" --check "$DIRNAME" >/dev/null 2>&1; then
+    if bash "$SCRIPT_DIR/merge-work-stub.sh" "$DIRNAME" >/dev/null 2>&1; then
+      FINDINGS+=("[heal] Merged residue stub '$DIRNAME' into _archive/$DIRNAME")
+      FIXES=$((FIXES + 1))
+    else
+      FINDINGS+=("[heal] Could not merge stub '$DIRNAME' — run 'bash merge-work-stub.sh $DIRNAME' for details")
+      WARNINGS=$((WARNINGS + 1))
+    fi
+    continue
+  fi
+
   if [[ ! -f "$dir/_meta.json" ]]; then
     # Title case the dirname: replace hyphens with spaces, capitalize each word
     TITLE=$(echo "$DIRNAME" | tr '-' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)}1')
@@ -93,10 +108,11 @@ for dir in "$WORK_DIR"/*/; do
   [[ -f "$dir/_meta.json" ]] && ACTUAL_COUNT=$((ACTUAL_COUNT + 1))
 done
 
-# Count entries in index
+# Count active entries in index. The index also carries an "archived" list
+# whose entries have slugs — only "plans" mirrors the active-dir count above.
 INDEX_COUNT=0
 if [[ -f "$WORK_DIR/_index.json" ]]; then
-  INDEX_COUNT=$(grep -c '"slug"' "$WORK_DIR/_index.json" 2>/dev/null || echo "0")
+  INDEX_COUNT=$(python3 -c "import json; print(len(json.load(open('$WORK_DIR/_index.json')).get('plans', [])))" 2>/dev/null || echo "0")
 fi
 
 if [[ "$ACTUAL_COUNT" -ne "$INDEX_COUNT" ]]; then

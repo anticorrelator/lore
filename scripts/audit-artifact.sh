@@ -1592,7 +1592,12 @@ fi
 # Persist per-claim verdicts to the artifact's settlement record (append-only).
 # Resolution rules (matching contract.md "Wrapper-level side effects"):
 #   - If the artifact lives under $KDIR/_work/<slug>/ (directory or per-kind
-#     source file), verdicts land at $KDIR/_work/<slug>/verdicts/<basename>.jsonl.
+#     source file), verdicts land at <owning-dir>/verdicts/<basename>.jsonl,
+#     where the owning dir is re-resolved against the live filesystem at every
+#     append via resolve_work_item_dir (active then archive, by per-kind
+#     artifact presence). Judge runs take minutes and the work item can be
+#     archived mid-run; a path resolved at run start would recreate the active
+#     _work/<slug>/ dir for an archived item.
 #   - If the artifact lives under $KDIR/_followups/<slug>/, verdicts land at
 #     $KDIR/_followups/<slug>/verdicts/<basename>.jsonl.
 #   - Otherwise, verdicts land at $KDIR/_audit/verdicts/<basename>.jsonl.
@@ -1600,29 +1605,54 @@ fi
 # file extension, so repeated audits of the same artifact append to the same
 # file.
 
-OWNING_DIR=""
+# Slug + per-kind source basename for owning-dir resolution. Both are string
+# derivations from the run-start resolution; the directory itself is re-probed
+# at every write.
+OWNING_WORK_SLUG=""
 if [[ "$ARTIFACT_PATH" == "$KDIR/_work/"* ]]; then
-  # $KDIR/_work/<slug>/ or $KDIR/_work/<slug>/<per-kind source file>
-  if [[ -d "$ARTIFACT_PATH" ]]; then
-    OWNING_DIR="$ARTIFACT_PATH"
-  else
-    OWNING_DIR=$(dirname "$ARTIFACT_PATH")
-  fi
-elif [[ "$ARTIFACT_PATH" == "$KDIR/_followups/"* ]]; then
-  if [[ -d "$ARTIFACT_PATH" ]]; then
-    OWNING_DIR="$ARTIFACT_PATH"
-  else
-    OWNING_DIR=$(dirname "$ARTIFACT_PATH")
-  fi
+  _rel="${ARTIFACT_PATH#"$KDIR/_work/"}"
+  _rel="${_rel#_archive/}"
+  OWNING_WORK_SLUG="${_rel%%/*}"
+fi
+OWNING_SOURCE_BASENAME=""
+if [[ -n "$TASK_CLAIMS_PATH" ]]; then
+  OWNING_SOURCE_BASENAME=$(basename "$TASK_CLAIMS_PATH")
+elif [[ -n "$AUDIT_CANDIDATES_PATH" ]]; then
+  OWNING_SOURCE_BASENAME=$(basename "$AUDIT_CANDIDATES_PATH")
+elif [[ -n "$CONSUMPTION_CONTRADICTIONS_PATH" ]]; then
+  OWNING_SOURCE_BASENAME=$(basename "$CONSUMPTION_CONTRADICTIONS_PATH")
 fi
 
-if [[ -n "$OWNING_DIR" ]]; then
-  VERDICTS_DIR="$OWNING_DIR/verdicts"
-else
-  VERDICTS_DIR="$KDIR/_audit/verdicts"
-fi
+# resolve_owning_dir — owning dir for a per-item write, probed against the
+# live filesystem. Empty output means no owning dir ($KDIR/_audit fallback).
+resolve_owning_dir() {
+  if [[ -n "$OWNING_WORK_SLUG" ]]; then
+    resolve_work_item_dir "$KDIR" "$OWNING_WORK_SLUG" "$OWNING_SOURCE_BASENAME" 2>/dev/null || true
+  elif [[ "$ARTIFACT_PATH" == "$KDIR/_followups/"* ]]; then
+    if [[ -d "$ARTIFACT_PATH" ]]; then
+      echo "$ARTIFACT_PATH"
+    else
+      dirname "$ARTIFACT_PATH"
+    fi
+  fi
+}
 
-mkdir -p "$VERDICTS_DIR"
+# resolve_verdicts_file — verdict-envelope target, re-resolved per append. A
+# window remains between this probe and the append (an archive mv can land
+# inside it); the worst outcome is a row written into a just-moved directory,
+# never a recreated active item dir — only the verdicts/ subdir is created
+# here, and only under a directory that existed at probe time.
+resolve_verdicts_file() {
+  local owning_dir verdicts_dir
+  owning_dir=$(resolve_owning_dir)
+  if [[ -n "$owning_dir" ]]; then
+    verdicts_dir="$owning_dir/verdicts"
+  else
+    verdicts_dir="$KDIR/_audit/verdicts"
+  fi
+  mkdir -p "$verdicts_dir"
+  echo "$verdicts_dir/${VERDICTS_BASE}.jsonl"
+}
 
 # Basename stripped of extension, falling back to "artifact" for unnamed inputs.
 _base=$(basename "$ARTIFACT_PATH")
@@ -1630,7 +1660,9 @@ _base="${_base%.*}"
 if [[ -z "$_base" ]]; then
   _base="artifact"
 fi
-VERDICTS_FILE="$VERDICTS_DIR/${_base}.jsonl"
+VERDICTS_BASE="$_base"
+
+VERDICTS_FILE=$(resolve_verdicts_file)
 
 # One JSONL line per judge run: the full judge output with a wrapper header.
 python3 - "$GATE_RAW_FILE" "$ARTIFACT_ID" "$VERDICTS_FILE" << 'PYEOF'
@@ -1909,6 +1941,9 @@ PYEOF
       fi
 
       # Persist curator verdict alongside the gate verdicts (append-only).
+      # Re-resolve the target: the curator judge run sits between this append
+      # and the gate's, and the work item may have been archived in between.
+      VERDICTS_FILE=$(resolve_verdicts_file)
       python3 - "$CURATOR_RAW_FILE" "$ARTIFACT_ID" "$VERDICTS_FILE" << 'PYEOF'
 import json, sys, datetime
 cur_file, artifact_id, verdicts_file = sys.argv[1:4]
@@ -2212,6 +2247,8 @@ PYEOF
       # inlined packet the judge adjudicated on (resolved snippet@HEAD +
       # window, the diff hunks, content_locate_verdict per file) is recorded
       # alongside the emission so the judged evidence stays reconstructible.
+      # Re-resolve the target across the reverse-auditor judge-run gap.
+      VERDICTS_FILE=$(resolve_verdicts_file)
       python3 - "$REVERSE_AUDITOR_RAW_FILE" "$ARTIFACT_ID" "$VERDICTS_FILE" "$REVERSE_AUDITOR_INLINED_FILE" << 'PYEOF'
 import json, sys, datetime
 ra_file, artifact_id, verdicts_file, inlined_file = sys.argv[1:5]
@@ -2356,11 +2393,17 @@ PYEOF
       # work-item dir, or in the owning/_audit dir for followup-rooted
       # artifacts.
       if [[ "$REVERSE_AUDITOR_QUEUE_DEST" == "reattempt" ]]; then
-        if [[ -n "$WORK_ITEM_SLUG" && -d "$KDIR/_work/$WORK_ITEM_SLUG" ]]; then
-          REATTEMPT_DIR="$KDIR/_work/$WORK_ITEM_SLUG"
-        elif [[ -n "$OWNING_DIR" ]]; then
-          REATTEMPT_DIR="$OWNING_DIR"
-        else
+        # Resolve at write time by artifact presence (active then archive): a
+        # stale stub dir must not win over the archive copy that holds the
+        # audited source artifacts.
+        REATTEMPT_DIR=""
+        if [[ -n "$WORK_ITEM_SLUG" ]]; then
+          REATTEMPT_DIR=$(resolve_work_item_dir "$KDIR" "$WORK_ITEM_SLUG" "$OWNING_SOURCE_BASENAME" 2>/dev/null) || REATTEMPT_DIR=""
+        fi
+        if [[ -z "$REATTEMPT_DIR" ]]; then
+          REATTEMPT_DIR=$(resolve_owning_dir)
+        fi
+        if [[ -z "$REATTEMPT_DIR" ]]; then
           REATTEMPT_DIR="$KDIR/_audit"
           mkdir -p "$REATTEMPT_DIR"
         fi
@@ -2392,19 +2435,26 @@ PYEOF
       fi
 
       # Route the emission to candidates/attempts queue. Prefer
-      # audit-queue-route.sh when a work-item slug resolves under
-      # $KDIR/_work/<slug>/; otherwise write directly into the owning
+      # audit-queue-route.sh when a work-item slug resolves to an existing
+      # active or archived dir; otherwise write directly into the owning
       # artifact dir (the followup sidecar case). Silence and abstention
       # write nothing here (abstention routed to the re-attempt queue above).
       if [[ "$REVERSE_AUDITOR_QUEUE_DEST" == "candidates" || "$REVERSE_AUDITOR_QUEUE_DEST" == "attempts" ]]; then
-        if [[ -n "$WORK_ITEM_SLUG" && -d "$KDIR/_work/$WORK_ITEM_SLUG" ]]; then
+        QUEUE_ITEM_DIR=""
+        if [[ -n "$WORK_ITEM_SLUG" ]]; then
+          QUEUE_ITEM_DIR=$(resolve_work_item_dir "$KDIR" "$WORK_ITEM_SLUG" "$OWNING_SOURCE_BASENAME" 2>/dev/null) || QUEUE_ITEM_DIR=""
+        fi
+        if [[ -n "$QUEUE_ITEM_DIR" ]]; then
           # Canonical routing path — audit-queue-route.sh is sole writer
-          # of _work/<slug>/audit-{candidates,attempts}.jsonl.
+          # of the per-item audit-{candidates,attempts}.jsonl. It re-resolves
+          # the owning dir itself at write time; --source-filename keeps its
+          # resolution on the same artifact-presence rule used here.
           if ! bash "$SCRIPT_DIR/audit-queue-route.sh" \
               --work-item "$WORK_ITEM_SLUG" \
               --emission "$REVERSE_AUDITOR_RAW_FILE" \
               --preflight "$REVERSE_AUDITOR_PREFLIGHT_TMP" \
               --kdir "$KDIR" \
+              --source-filename "$OWNING_SOURCE_BASENAME" \
               --verdict-source "reverse-auditor" >/dev/null 2>&1; then
             echo "[audit] warning: audit-queue-route.sh failed for work-item $WORK_ITEM_SLUG" >&2
           fi
@@ -2412,9 +2462,8 @@ PYEOF
           # Fallback: write directly into the artifact's owning dir
           # (followup-rooted artifact case, where no _work/<slug> exists).
           # Schema parity with audit-queue-route.sh is preserved.
-          if [[ -n "$OWNING_DIR" ]]; then
-            QUEUE_DIR="$OWNING_DIR"
-          else
+          QUEUE_DIR=$(resolve_owning_dir)
+          if [[ -z "$QUEUE_DIR" ]]; then
             QUEUE_DIR="$KDIR/_audit"
             mkdir -p "$QUEUE_DIR"
           fi

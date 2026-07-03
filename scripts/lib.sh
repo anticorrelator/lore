@@ -140,7 +140,12 @@ slugify() {
 # Usage: title=$(derive_entry_title "some insight text")
 derive_entry_title() {
   local text="$1"
-  echo "$text" | awk '{for(i=1;i<=NF && i<=8;i++){$i=toupper(substr($i,1,1)) substr($i,2)}; NF=(NF>8?8:NF); print}'
+  # LC_ALL=C: BSD awk's substr() is byte-oriented under a UTF-8 locale and
+  # errors ("illegal byte sequence") when a word starts with a multibyte
+  # character (e.g. a standalone em-dash in the first 8 words). Under the C
+  # locale bytes pass through untouched — non-ASCII first letters are left
+  # as-is instead of title-cased, and the output stays valid UTF-8.
+  echo "$text" | LC_ALL=C awk '{for(i=1;i<=NF && i<=8;i++){$i=toupper(substr($i,1,1)) substr($i,2)}; NF=(NF>8?8:NF); print}'
 }
 
 # --- resolve_knowledge_dir ---
@@ -174,6 +179,64 @@ resolve_followup_dir() {
     return 0
   fi
   echo "[followup] Error: followup '$id' not found in $FOLLOWUPS_DIR or $FOLLOWUPS_DIR/_archive" >&2
+  return 1
+}
+
+# --- resolve_work_item_dir ---
+# Resolve the owning directory for a per-item write against the live
+# filesystem. Call it immediately before writing — a work item can be archived
+# between an earlier resolution and the write, and a stale path recreates an
+# active dir for an archived item.
+#
+# Precedence when both _work/<slug>/ and _work/_archive/<slug>/ exist (each
+# rung probes active then archive):
+#   1. the dir holding <artifact-filename> at its root, when given — an active
+#      residue stub loses to the archive copy that holds the real artifacts
+#   2. the dir holding _meta.json — a real item beats a bare stub
+#   3. bare directory presence
+#
+# Never creates directories. Probes match the dir root only: verdicts/ subdirs
+# reuse artifact filenames for envelope storage and must never satisfy a probe,
+# so <artifact-filename> must be a bare basename.
+#
+# Echoes the absolute path on stdout; returns non-zero when neither dir exists.
+# Usage: dir=$(resolve_work_item_dir "$KDIR" "$slug" [artifact-filename]) || ...
+resolve_work_item_dir() {
+  local kdir="$1" slug="$2" artifact="${3:-}"
+  if [[ -z "$kdir" || -z "$slug" ]]; then
+    echo "[work] Error: resolve_work_item_dir requires <kdir> and <slug>" >&2
+    return 1
+  fi
+  if [[ "$slug" == "_archive" || "$slug" != "$(basename "$slug")" ]]; then
+    echo "[work] Error: resolve_work_item_dir: invalid work-item slug '$slug'" >&2
+    return 1
+  fi
+  if [[ "$artifact" == */* ]]; then
+    echo "[work] Error: resolve_work_item_dir: artifact filename must be a bare basename (got '$artifact')" >&2
+    return 1
+  fi
+  local candidates=("$kdir/_work/$slug" "$kdir/_work/_archive/$slug")
+  local dir
+  if [[ -n "$artifact" ]]; then
+    for dir in "${candidates[@]}"; do
+      if [[ -f "$dir/$artifact" ]]; then
+        echo "$dir"
+        return 0
+      fi
+    done
+  fi
+  for dir in "${candidates[@]}"; do
+    if [[ -f "$dir/_meta.json" ]]; then
+      echo "$dir"
+      return 0
+    fi
+  done
+  for dir in "${candidates[@]}"; do
+    if [[ -d "$dir" ]]; then
+      echo "$dir"
+      return 0
+    fi
+  done
   return 1
 }
 

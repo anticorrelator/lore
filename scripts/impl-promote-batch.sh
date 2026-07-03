@@ -312,7 +312,11 @@ for i, cand in enumerate(candidates, 1):
     argv = ["bash", promote_sh, "--work-item", slug, "--producer-role", role]
     if tv:
         argv += ["--template-version", tv]
-    proc = subprocess.run(argv, input=json.dumps(cand), capture_output=True, text=True)
+    # errors="replace": a child that emits invalid UTF-8 on stderr (e.g. a
+    # tool error message carrying a truncated multibyte byte) must land as a
+    # per-candidate rejection, not a decode crash that aborts the whole batch.
+    proc = subprocess.run(argv, input=json.dumps(cand), capture_output=True,
+                          text=True, errors="replace")
     if proc.returncode != 0:
         detail = (proc.stderr.strip().splitlines() or proc.stdout.strip().splitlines() or [""])[-1]
         sys.stderr.write(proc.stderr)
