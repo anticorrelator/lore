@@ -65,6 +65,9 @@ Commands:
   promote      Promote a Tier 3 observation row to the knowledge commons
   test         Run lore test suites (see: lore test protocols)
   annotate     Record a retrieval friction annotation
+  verify       Record a consumption-verification outcome (held|contradicted)
+               for a knowledge entry (see: lore verify --help), or report
+               per-entry ledger events (lore verify --report --help)
   audit        Route a producer artifact through the settlement judges
   settlement   Durable settlement queue, processor, and status
   resolve      Resolve repo path or [[backlink]] references
@@ -468,7 +471,8 @@ Usage: lore settlement <subcommand> [args...]
 
 Subcommands:
   status --json                       Show queue, lease, terminal item, and budget state
-  scan --json                         Idempotently enqueue validated Tier 2 task claims
+  triggers --json                     Run event-driven enqueue triggers (disputes, spot-sample, rollups)
+  scan --json                         Manual census walk (dormant automatic driver; still invocable)
   enqueue --work-item S               Enqueue one Tier 2 row from stdin
   process --once --json               Process one pending item
   drain --json                        Loop process_once until queue empty or blocked
@@ -493,7 +497,7 @@ cmd_settlement() {
       settlement_usage
       return 0
       ;;
-    status|scan|enqueue|process|enable|disable|retry-errors|queue|drain|enqueue-rollup-backfill)
+    status|triggers|scan|enqueue|process|enable|disable|retry-errors|queue|drain|enqueue-rollup-backfill)
       "$SCRIPTS_DIR/settlement-queue.sh" "$@"
       ;;
     *)
@@ -1714,6 +1718,15 @@ case "$1" in
   annotate)
     shift
     "$SCRIPTS_DIR/annotate.sh" "$@"
+    ;;
+  verify)
+    shift
+    if [[ "${1:-}" == "--report" ]]; then
+      shift
+      "$SCRIPTS_DIR/verify-report.sh" "$@"
+    else
+      "$SCRIPTS_DIR/verify-append.sh" "$@"
+    fi
     ;;
   audit)
     shift

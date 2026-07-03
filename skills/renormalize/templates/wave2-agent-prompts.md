@@ -33,6 +33,10 @@ Report: files pruned, files merged, merges rejected (with reason), any issues en
 ```
 Read $KDIR/_meta/renormalize-plan.json.
 Execute the "demote" actions: for each demote candidate, read the entry and rewrite it to reduce scope/prominence appropriate to the recommended level. If recommended_level is "subcategory", move the file to the appropriate subcategory directory (create it if needed). If recommended_level is "domain", move to domains/. Update the HTML metadata comment: set source to "renormalize-demote". Update any inbound backlinks that reference the old path.
+
+After each demote that MOVED a file, emit a trust-ledger provenance-migration event so the entry's trust history follows it to the new path (paths KDIR-relative; failure is a warning, not a stop):
+
+bash ~/.lore/scripts/trust-event-migrate.sh --from-entry-path <old-path> --to-entry-path <new-path> --reason renormalize-restructure --source renormalize --kdir $KDIR
 Execute the "consolidate" actions with scale-aware logic:
 
 Scale-aware consolidation:
@@ -61,6 +65,10 @@ Execute the "restructure" actions: for each restructure proposal, check the spli
 If split_by_scale is false (or absent): create new subdirectories by topic, move entries into appropriate groupings, update any backlinks that reference moved entries.
 
 If split_by_scale is true: create scale-keyed subdirectories under the category (e.g., conventions/implementation/, conventions/subsystem/, conventions/architectural/). Move each entry into the subdirectory matching its scale: field from its HTML metadata comment. Update any backlinks that reference moved entries.
+
+After each entry move, emit a trust-ledger provenance-migration event so the entry's trust history follows it to the new path (paths KDIR-relative; failure is a warning, not a stop):
+
+bash ~/.lore/scripts/trust-event-migrate.sh --from-entry-path <old-path> --to-entry-path <new-path> --reason renormalize-restructure --source renormalize --kdir $KDIR
 
 Report: categories restructured (with split_by_scale flag noted), entries moved (with destination paths), backlinks updated.
 ```

@@ -8,11 +8,16 @@ source "$SCRIPT_DIR/lib.sh"
 
 usage() {
   cat >&2 <<EOF
-Usage: settlement-queue.sh <status|scan|enqueue|process|enable|disable|queue|retry-errors|drain|enqueue-rollup-backfill> [args...]
+Usage: settlement-queue.sh <status|triggers|scan|enqueue|process|enable|disable|queue|retry-errors|drain|enqueue-rollup-backfill> [args...]
 
 Commands:
   status --json                 Show queue, lease, run, and budget status.
-  scan --json                   Idempotently scan _work/*/task-claims.jsonl.
+  triggers --json               Run the event-driven enqueue triggers: dispute
+                                detector, spot-sample budget, rollup steady-
+                                state. Idempotent; self-throttled (--force
+                                bypasses the throttle).
+  scan --json                   Manual census walk over _work/*/ source streams.
+                                Dormant as an automatic driver; still invocable.
   enqueue --work-item SLUG      Enqueue one Tier 2 row from stdin.
   process --once --json         Process one pending item.
   enable|disable --json         Toggle settlement.enabled in settings.json.
@@ -46,7 +51,7 @@ case "$1" in
     usage
     exit 0
     ;;
-  status|scan|enqueue|process|enable|disable|queue|retry-errors|drain|enqueue-rollup-backfill)
+  status|triggers|scan|enqueue|process|enable|disable|queue|retry-errors|drain|enqueue-rollup-backfill)
     python3 "$SCRIPT_DIR/settlement-processor.py" "$@"
     ;;
   *)

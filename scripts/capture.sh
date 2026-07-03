@@ -3,6 +3,7 @@
 # Usage: lore capture --insight "..." --scale "<bucket>" [--context "..."] [--category "..."] [--confidence "..."] [--related-files "..."] [--source "..."] [--example "..."]
 #        [--producer-role "..."] [--protocol-slot "..."] [--template-version "..."] [--capturer-role "..."] [--source-artifact-ids "..."]
 #        [--captured-at-branch "..."] [--captured-at-sha "..."] [--captured-at-merge-base-sha "..."] [--work-item "..."]
+#        [--executable-falsifier '<json>']
 #
 # Writes an individual entry file to the category directory (e.g., conventions/<slug>.md).
 #
@@ -24,6 +25,15 @@
 #   --scale <bucket>  Required. One of: abstract, architecture, subsystem, implementation (single label),
 #     or two adjacent labels comma-delimited (e.g. "subsystem,implementation").
 #     The caller declares scale explicitly; no formula derivation at capture time.
+#
+# Executable falsifier (optional):
+#   --executable-falsifier '<json>'  Optional object {command, expected_output_shape[, root]}.
+#     Shape-validated fail-closed here, then surfaced in the --json output for the
+#     orchestrating layer (e.g. promotion) to persist into the producer row — the
+#     durable home of falsifiers (this script persists neither the prose falsifier
+#     nor the executable one into the entry .md). NOT written into the META footer:
+#     footer consumers split the block on "|" (drift-sweep.py parse_meta), which
+#     raw command JSON containing pipes would corrupt.
 #
 # Convention: when a provenance flag is omitted OR passed an empty string, the corresponding field is OMITTED from the
 # HTML metadata comment block (rather than emitted with an empty value). This keeps legacy captures visually identical
@@ -53,6 +63,7 @@ CAPTURED_AT_SHA=""
 CAPTURED_AT_MERGE_BASE_SHA=""
 WORK_ITEM=""
 SCALE=""
+EXECUTABLE_FALSIFIER=""
 JSON_MODE=0
 SKIP_MANIFEST=0
 
@@ -130,6 +141,10 @@ while [[ $# -gt 0 ]]; do
       SCALE="${1#--scale=}"
       shift
       ;;
+    --executable-falsifier)
+      EXECUTABLE_FALSIFIER="$2"
+      shift 2
+      ;;
     --json)
       JSON_MODE=1
       shift
@@ -140,7 +155,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--producer-role \"...\"] [--protocol-slot \"...\"] [--template-version \"...\"] [--capturer-role \"...\"] [--source-artifact-ids \"...\"] [--captured-at-branch \"...\"] [--captured-at-sha \"...\"] [--captured-at-merge-base-sha \"...\"] [--work-item \"...\"] [--json] [--skip-manifest]" >&2
+      echo "Usage: capture.sh --insight \"...\" [--context \"...\"] [--category \"...\"] [--confidence \"...\"] [--related-files \"...\"] [--source \"...\"] [--example \"...\"] [--producer-role \"...\"] [--protocol-slot \"...\"] [--template-version \"...\"] [--capturer-role \"...\"] [--source-artifact-ids \"...\"] [--captured-at-branch \"...\"] [--captured-at-sha \"...\"] [--captured-at-merge-base-sha \"...\"] [--work-item \"...\"] [--executable-falsifier '<json>'] [--json] [--skip-manifest]" >&2
       exit 1
       ;;
   esac
@@ -232,6 +247,35 @@ if [[ $_scale_count -eq 2 ]]; then
     SCALE="$_second,$_first"
   else
     SCALE="$_first,$_second"
+  fi
+fi
+
+# --- Executable-falsifier shape validator (fail-closed when the flag is passed) ---
+# Same shape rule as validate-tier2.sh / validate-tier3.sh / promote-commons-append.sh:
+# object with non-empty-string command + expected_output_shape; optional
+# non-empty-string root. python3 (not jq) — capture.sh has no jq dependency.
+if [[ -n "$EXECUTABLE_FALSIFIER" ]]; then
+  _EF_ERR=$(printf '%s' "$EXECUTABLE_FALSIFIER" | python3 -c '
+import json, sys
+try:
+    ef = json.load(sys.stdin)
+except Exception as e:
+    print(f"is not valid JSON: {e}"); sys.exit(0)
+if not isinstance(ef, dict):
+    print("must be an object: {command, expected_output_shape}"); sys.exit(0)
+for key in ("command", "expected_output_shape"):
+    v = ef.get(key)
+    if not isinstance(v, str) or not v.strip():
+        print(f".{key} must be a non-empty string"); sys.exit(0)
+if "root" in ef and (not isinstance(ef["root"], str) or not ef["root"].strip()):
+    print(".root, when present, must be a non-empty string"); sys.exit(0)
+')
+  if [[ -n "$_EF_ERR" ]]; then
+    _msg="--executable-falsifier $_EF_ERR"
+    if [[ $JSON_MODE -eq 1 ]]; then
+      json_error "$_msg"
+    fi
+    die "$_msg"
   fi
 fi
 
@@ -375,8 +419,12 @@ if [[ $JSON_MODE -eq 1 ]]; then
   JSON_RESULT=$(python3 -c "
 import json, sys
 d = {'path': sys.argv[1], 'category': sys.argv[2], 'title': sys.argv[3], 'confidence': sys.argv[4]}
+if len(sys.argv) > 5 and sys.argv[5]:
+    # Shape-validated above; surfaced for the orchestrating layer to persist
+    # into the producer row (never written into the entry .md).
+    d['executable_falsifier'] = json.loads(sys.argv[5])
 print(json.dumps(d))
-" "$RELPATH" "$CATEGORY" "$TITLE" "$CONFIDENCE")
+" "$RELPATH" "$CATEGORY" "$TITLE" "$CONFIDENCE" "$EXECUTABLE_FALSIFIER")
   json_output "$JSON_RESULT"
 fi
 

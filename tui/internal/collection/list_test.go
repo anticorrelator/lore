@@ -423,3 +423,48 @@ func TestListDecoratorRewritesLines(t *testing.T) {
 		t.Errorf("decorator output missing from view:\n%s", view)
 	}
 }
+
+func TestListMouseWheelMovesCursor(t *testing.T) {
+	l := NewList(testColumns())
+	l.SetRows([]Row{
+		itemRow("alpha"),
+		{Header: true, Title: Cell{Text: "group"}},
+		itemRow("beta"),
+	})
+	l.SetSize(120, 20)
+
+	var hovered []string
+	l.SetOnCursorChange(func(id string) tea.Cmd {
+		hovered = append(hovered, id)
+		return nil
+	})
+
+	// Wheel down twice: alpha → header (no emission) → beta (emission).
+	l, _ = l.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if l.Cursor() != 1 {
+		t.Fatalf("cursor after wheel down = %d, want 1", l.Cursor())
+	}
+	l, _ = l.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if l.Cursor() != 2 {
+		t.Fatalf("cursor after second wheel down = %d, want 2", l.Cursor())
+	}
+	if len(hovered) != 1 || hovered[0] != "beta" {
+		t.Errorf("hovered = %v, want [beta] (hook fires for item rows only)", hovered)
+	}
+
+	// Wheel down at the bottom edge: no movement, no emission.
+	l, _ = l.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if l.Cursor() != 2 || len(hovered) != 1 {
+		t.Errorf("wheel at bottom edge moved cursor or re-fired hook: cursor=%d hovered=%v", l.Cursor(), hovered)
+	}
+
+	// Wheel up climbs back to alpha, skipping the header for emission.
+	l, _ = l.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	l, _ = l.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if l.Cursor() != 0 {
+		t.Errorf("cursor after wheel up x2 = %d, want 0", l.Cursor())
+	}
+	if len(hovered) != 2 || hovered[1] != "alpha" {
+		t.Errorf("hovered = %v, want [beta alpha]", hovered)
+	}
+}

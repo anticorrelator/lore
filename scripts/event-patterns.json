@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "description": "Named event-pattern sets for transcript consumers (adoption-metrics harness, mine-retrieval-misses). Consumers select a set by name; tool lists and command shapes live here as data so protocols can be re-tested without editing consumer code.",
+  "pattern_sets": {
+    "retrieval-call": {
+      "description": "Bash invocations of lore retrieval commands. Each regex's first non-null capture group is the query string used for the retrieval-log join.",
+      "tool": "Bash",
+      "command_regexes": {
+        "search": "\\blore\\s+search\\s+(?:\"([^\"]+)\"|'([^']+)')",
+        "prefetch": "\\blore\\s+prefetch\\s+(?:\"([^\"]+)\"|'([^']+)')"
+      }
+    },
+    "derivation": {
+      "description": "Source exploration that derives what retrieval failed to supply: non-sidechain Grep/Glob/Read tool_use, plus Explore/general-purpose agent spawns. Distinct from the Phase 1 adoption bypass set.",
+      "tool_names": ["Grep", "Glob", "Read"],
+      "agent_tool_names": ["Task", "Agent"],
+      "agent_subagent_types": ["Explore", "general-purpose"]
+    }
+  }
+}

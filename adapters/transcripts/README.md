@@ -206,6 +206,7 @@ consumer land in the follow-up tasks listed.
 | `check-plan-persistence.py`         | `tool_use_timestamps` for builtin-plan-mode tool name + a per-harness `builtin_plan_mode_tool` config value (see T48 below) | §"Plan-persistence provider requirements" below (T48) |
 | `task-completed-capture-check.sh`   | _no transcript read_ — operates on its own stdin payload; T53 migration is a teams-path migration only | §"TaskCompleted provider requirements" below (T48) |
 | `stop-novelty-check.py`             | full schema + `extract_file_paths` for related-files; uses no new provider operations beyond Phase 5 (see T56 below) | §"Novelty-review provider requirements" below (T56) |
+| `transcript-adoption-metrics.py`    | `list_session_paths` for corpus enumeration + full schema + `read_raw_lines` two-pass for tool inputs / model ids / sidechain flags + `session_metadata` | §"Adoption-metrics provider requirements" below |
 
 ### Digest provider requirements (T47)
 
@@ -383,6 +384,7 @@ operations here is the schema-bump-eligible action documented in
 | `read_raw_lines`           | session_id or path                    | list of strings (one per JSONL line / serialized event), index-aligned with `parse_transcript`     |
 | `session_metadata`         | session_id or path                    | `{"session_id": str, "session_date": datetime \| None}` from the first parseable entry             |
 | `tool_use_timestamps`      | session_id or path, tool_name         | list of `(message_index, ISO-8601 timestamp str)` for entries whose tool_use blocks invoke `tool_name`, in transcript order |
+| `list_session_paths`       | cwd                                   | ALL session artifact paths for that cwd sorted by mtime descending (index 0 is typically the in-flight current session at hook time), or `[]` when session enumeration is unavailable |
 
 Adapters that cannot supply `read_raw_lines` with the alignment
 invariant MUST return an empty list and report `partial` with
@@ -629,6 +631,46 @@ are the only two per-harness tool-name lookups documented in this
 contract — neither is a provider operation; both are
 capabilities.json config values.
 
+### Adoption-metrics provider requirements (retrieval-protocol graduation test)
+
+`scripts/transcript-adoption-metrics.py` sweeps the *whole* session
+corpus for a cwd — not just the previous session — to measure
+per-session retrieval-adoption ordering. It is a standard three-phase
+consumer (get_provider → status gate → operations) and reads only
+existing operations plus one addition:
+
+| Operation                  | Inputs | Outputs                                                                                              |
+|----------------------------|--------|------------------------------------------------------------------------------------------------------|
+| `list_session_paths`       | cwd    | every session artifact path for that cwd, sorted by mtime descending, or `[]` when session enumeration is unavailable |
+
+Semantics that MUST hold:
+
+- **mtime-descending order.** Index 0 is typically the in-flight
+  current session when called from a hook; corpus-sweep consumers
+  that must exclude live sessions filter on their side. This mirrors
+  the ordering `previous_session_path` already sorts by — that
+  operation is equivalent to `list_session_paths(cwd)[1]` on
+  harnesses with full support.
+- **`[]` is the degraded sentinel.** Harnesses without a cwd-keyed
+  atomic per-session artifact (OpenCode) return `[]` and name
+  `list_session_paths` in the `provider_status` reason. Harnesses
+  that can enumerate sessions but not scope them to cwd (Codex —
+  global rollout scan) return the unscoped list and name the
+  approximation in the reason. No synthesis, per Adapter
+  Responsibilities rule 5.
+
+| Harness     | `list_session_paths` semantics                                                     |
+|-------------|-------------------------------------------------------------------------------------|
+| claude-code | all `~/.claude/projects/<encoded-cwd>/*.jsonl`, mtime desc                         |
+| opencode    | `[]` + gap named in `provider_status` reason (same gap as `previous_session_path`) |
+| codex       | global mtime scan over rollout files — not cwd-scoped; named in status reason      |
+
+Everything else the adoption harness reads (Bash tool inputs, model
+ids, `isSidechain` flags, skill-invocation tags) comes from the
+documented two-pass pattern — `parse_transcript` for ordering and
+tool-name filtering, `read_raw_lines()[msg.index]` for raw fields the
+closed normalized schema deliberately omits. No schema change.
+
 ### Novelty-review provider requirements (T56, Phase 6)
 
 `scripts/stop-novelty-check.py` is the largest transcript consumer
@@ -778,6 +820,7 @@ the following items before it is considered Phase 5 complete.
 | `parse_transcript`         | wraps existing `scripts/transcript.py::parse_transcript`        | reads Lore-side event accumulator file (degraded for `role` reliability) | reads Codex rollout file (degraded for tool_input field-shape) |
 | `extract_file_paths`       | wraps existing `scripts/transcript.py::extract_file_paths`      | translates `tool.execute.before` events; same Read/Edit/Write/Glob filter | translates Codex `PreToolUse` payloads                        |
 | `previous_session_path`    | mtime-scan within `~/.claude/projects/<encoded-cwd>/`          | _unavailable_ (no documented vendor surface; T47 may add a Lore-managed sentinel) | reads Codex rollout directory listing                         |
+| `list_session_paths`       | all `~/.claude/projects/<encoded-cwd>/*.jsonl`, mtime desc     | `[]` (no cwd-keyed atomic session enumeration; gap named in status reason) | global mtime scan over rollout files — NOT cwd-scoped; approximation named in status reason |
 | `provider_status`          | `full`                                                         | `partial` (missing reliable cross-session continuity)             | `partial` (rollout file format coverage incomplete)            |
 
 ## Implementation Targets
@@ -792,6 +835,7 @@ the following items before it is considered Phase 5 complete.
 | `scripts/task-completed-capture-check.sh`    | T53        | Route through provider for any transcript-derived field (T48 confirms scope). |
 | `scripts/evidence-append.sh`                  | T55        | Continue functioning when the provider is degraded (does not depend on transcript fields today; verified). |
 | `scripts/stop-novelty-check.py`              | T57        | Phase-6 migration; provider extension for novelty review fields.     |
+| `scripts/transcript-adoption-metrics.py`      | retrieval-protocol-graduation-test | Corpus-sweep adoption measurement; adds + consumes `list_session_paths`. |
 
 ## Cross-cutting touchpoints
 
@@ -818,7 +862,9 @@ the following items before it is considered Phase 5 complete.
 ## Versioning
 
 This contract is versioned implicitly via
-`adapters/capabilities.json:.version` (currently `1`). Adding an
+`adapters/capabilities.json:.version` (currently `2`; bumped from `1`
+when `list_session_paths` was added for the adoption-metrics consumer,
+with all three adapters updated in the same change). Adding an
 operation, changing the message-dict schema, or introducing a new
 sentinel value requires a schema bump and a coordinated rewrite of
 all three adapters plus the consumer migrations in T52-T54, T57.

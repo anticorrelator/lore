@@ -111,6 +111,23 @@ func (m model) detailPanelHeight() int {
 	return m.innerHeight()
 }
 
+// panelAt maps absolute terminal coordinates to the split-pane panel that
+// renders there: the boundary column in left/right layout, the boundary row
+// (top panel's bottom border inclusive) in top/bottom layout. Used for mouse
+// click focus routing and pointer-positional wheel routing.
+func (m model) panelAt(x, y int) panelFocus {
+	if m.layoutMode == config.LayoutLeftRight {
+		if x < leftPanelWidth+2 {
+			return panelLeft
+		}
+		return panelRight
+	}
+	if y <= 1+m.topPanelHeight() {
+		return panelLeft
+	}
+	return panelRight
+}
+
 // rightPanelWidth returns the inner content width for the right (or bottom) panel.
 // In left/right mode: 1(╭) + leftPanelWidth + 1(╮) + 1(╭) + rightPanelWidth + 1(╮) = m.width
 // In top/bottom mode: returns topPanelWidth() since both panels span full width.
@@ -154,6 +171,13 @@ type model struct {
 	// selected list item is shown in the right panel when present.
 	specPanels   map[string]work.SpecPanelModel
 	terminalMode bool
+
+	// preferDetailView records, per work slug / follow-up ID, that the user
+	// explicitly switched the right panel to the detail view (ctrl+t) while a
+	// session exists, so navigating back to the item shows detail instead of
+	// auto-showing the terminal. Absent key = auto-show. Kept on model rather
+	// than the list models so index-reload rebuilds don't reset it.
+	preferDetailView map[string]bool
 
 	sessionConfirmActive       bool
 	sessionConfirmSlug         string
@@ -273,11 +297,15 @@ func (m *model) workPanelCallbacks() panelCallbacks {
 			return cmd
 		},
 		// Set absolute position so detail can hit-test tab bar clicks.
+		// TopBottom rows: indicator(1) + top border(1) + list content
+		// (topPanelHeight-1; one line of the panel budget goes to the
+		// indicator) + top bottom-border(1) + bottom top-border(1) ⇒ detail
+		// content starts at topPanelHeight+3.
 		setContentStart: func() {
 			if m.layoutMode == config.LayoutLeftRight {
 				m.detail.SetContentStart(2, leftPanelWidth+5)
 			} else {
-				m.detail.SetContentStart(m.topPanelHeight()+4, 3)
+				m.detail.SetContentStart(m.topPanelHeight()+3, 3)
 			}
 		},
 		resize: func() tea.Cmd {
@@ -312,11 +340,14 @@ func (m *model) followupPanelCallbacks() panelCallbacks {
 			return cmd
 		},
 		// Set absolute position so detail can hit-test tab bar clicks.
+		// Same TopBottom row arithmetic as workPanelCallbacks: detail
+		// content starts at topPanelHeight+3 (one line of the top panel's
+		// budget is spent on the workspace indicator).
 		setContentStart: func() {
 			if m.layoutMode == config.LayoutLeftRight {
 				m.followupDetail.SetContentStart(2, leftPanelWidth+5)
 			} else {
-				m.followupDetail.SetContentStart(m.topPanelHeight()+4, 3)
+				m.followupDetail.SetContentStart(m.topPanelHeight()+3, 3)
 			}
 		},
 		resize: func() tea.Cmd {
@@ -395,6 +426,23 @@ func (m model) currentFollowupPanel() (work.SpecPanelModel, bool) {
 func (m model) hasSpecPanel(slug string) bool {
 	_, ok := m.specPanels[slug]
 	return ok
+}
+
+// setPreferDetail records (prefer=true) or clears (prefer=false) the user's
+// choice to keep the right panel on the detail view for the given work slug
+// or follow-up ID.
+func (m *model) setPreferDetail(key string, prefer bool) {
+	if key == "" {
+		return
+	}
+	if !prefer {
+		delete(m.preferDetailView, key)
+		return
+	}
+	if m.preferDetailView == nil {
+		m.preferDetailView = make(map[string]bool)
+	}
+	m.preferDetailView[key] = true
 }
 
 // setSpecPanel stores or replaces the spec panel for the given slug.

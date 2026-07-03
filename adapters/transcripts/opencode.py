@@ -42,7 +42,8 @@ _PARTIAL_REASON = (
     "read_raw_lines alignment unverified (accumulator write protocol pending T57); "
     "novelty-review: parse_transcript and extract_file_paths surface partial event "
     "coverage (role and tool-input field shapes degrade to sentinels — detection "
-    "proceeds on available text but may miss role-filtered signals)"
+    "proceeds on available text but may miss role-filtered signals); "
+    "list_session_paths unavailable (no cwd-keyed atomic session enumeration)"
 )
 
 
@@ -203,6 +204,18 @@ def previous_session_path(cwd: str) -> None:  # type: ignore[return]
     return None
 
 
+def list_session_paths(cwd: str) -> list[str]:
+    """Always returns [] — session enumeration is unavailable on OpenCode.
+
+    Same gap as `previous_session_path`: no atomic per-session file
+    surface exists, and accumulator files are not cwd-keyed. Returning
+    a mtime-scan over accumulator files would present unverified,
+    possibly incomplete sessions as enumerable corpus — the no-synthesis
+    rule says report the gap instead.
+    """
+    return []
+
+
 def provider_status() -> tuple[str, str]:
     """Return `("partial", <reason>)` for the OpenCode provider.
 
@@ -277,6 +290,7 @@ __all__ = [
     "parse_transcript",
     "extract_file_paths",
     "previous_session_path",
+    "list_session_paths",
     "provider_status",
     "read_raw_lines",
     "session_metadata",

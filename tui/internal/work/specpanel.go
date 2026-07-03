@@ -381,15 +381,53 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
-		// This handler is only reached when focusedPanel == panelSpec, meaning
-		// the terminal has keyboard focus. Intercept escape chords and scroll keys;
-		// forward all other keys to the PTY subprocess.
+		// This handler is only reached when the terminal has keyboard focus
+		// (focusedPanel == panelRight in terminal mode). Intercept escape
+		// chords and shift-modified scroll keys; forward all other keys —
+		// including plain PgUp/PgDn/Home/End, which the subprocess may bind —
+		// to the PTY.
 		//
-		// Any non-Esc key arrives here clears the pending double-Esc gesture so
-		// that an accidentally-paired Esc-letter-Esc sequence does not detach.
+		// Any non-Esc key arriving here clears the pending double-Esc gesture
+		// so that an accidentally-paired Esc-letter-Esc sequence does not detach.
 		if msg.Code != tea.KeyEscape {
 			m.lastEscTime = time.Time{}
 		}
+
+		// Lore scrollback lives on the shifted keys, following the common
+		// terminal-emulator convention (shift+PgUp scrolls the host, plain
+		// PgUp goes to the program). Matched by code+modifier because the
+		// string form of modified keys varies across input protocols.
+		if msg.Mod.Contains(tea.ModShift) {
+			visH := m.height
+			if visH < 1 {
+				visH = 1
+			}
+			maxOff := m.totalLines() - visH
+			if maxOff < 0 {
+				maxOff = 0
+			}
+			switch msg.Code {
+			case tea.KeyPgUp: // Shift+PgUp — scroll up by half a page
+				m.scrollOffset += visH / 2
+				if m.scrollOffset > maxOff {
+					m.scrollOffset = maxOff
+				}
+				return m, nil
+			case tea.KeyPgDown: // Shift+PgDn — scroll down by half a page
+				m.scrollOffset -= visH / 2
+				if m.scrollOffset < 0 {
+					m.scrollOffset = 0
+				}
+				return m, nil
+			case tea.KeyHome: // Shift+Home — scroll to top of buffer
+				m.scrollOffset = maxOff
+				return m, nil
+			case tea.KeyEnd: // Shift+End — snap to live view (bottom)
+				m.scrollOffset = 0
+				return m, nil
+			}
+		}
+
 		switch msg.String() {
 		case "esc": // single Esc forwards; double Esc within window detaches
 			return m.handleEscKey()
@@ -397,51 +435,9 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 			slug := m.slug
 			return m, func() tea.Msg { return TerminalTerminateMsg{Slug: slug} }
 
-		case "pgup": // PgUp — scroll up by half a page
-			visH := m.height
-			if visH < 1 {
-				visH = 1
-			}
-			m.scrollOffset += visH / 2
-			maxOff := m.totalLines() - visH
-			if maxOff < 0 {
-				maxOff = 0
-			}
-			if m.scrollOffset > maxOff {
-				m.scrollOffset = maxOff
-			}
-			return m, nil
-
-		case "pgdown": // PgDown — scroll down by half a page
-			visH := m.height
-			if visH < 1 {
-				visH = 1
-			}
-			m.scrollOffset -= visH / 2
-			if m.scrollOffset < 0 {
-				m.scrollOffset = 0
-			}
-			return m, nil
-
-		case "end": // End — snap to live view (bottom)
-			m.scrollOffset = 0
-			return m, nil
-
-		case "home": // Home — scroll to top of buffer
-			visH := m.height
-			if visH < 1 {
-				visH = 1
-			}
-			maxOff := m.totalLines() - visH
-			if maxOff < 0 {
-				maxOff = 0
-			}
-			m.scrollOffset = maxOff
-			return m, nil
-
 		default:
 			if m.ptmx != nil {
-				if b := keyToBytes(msg); b != nil {
+				if b := KeyToBytes(msg); b != nil {
 					m.ptmx.Write(b)
 				}
 			}
@@ -831,10 +827,10 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 	}
 }
 
-// keyToBytes converts a Bubble Tea key press into the raw byte sequence that
+// KeyToBytes converts a Bubble Tea key press into the raw byte sequence that
 // should be written to a PTY to reproduce that keypress. Returns nil for
 // unknown keys.
-func keyToBytes(km tea.KeyPressMsg) []byte {
+func KeyToBytes(km tea.KeyPressMsg) []byte {
 	key := km.Key()
 	b := keyBaseBytes(key)
 	if b == nil {

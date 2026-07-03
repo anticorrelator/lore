@@ -305,32 +305,32 @@ Produce the conceptual frame first before committing to phase breakdown.
 
    Diagram types: call chain (invocation paths), state machine (state transitions), data flow (data transforms). Write a plain-text ASCII diagram inside a fenced code block using box-drawing characters. Do NOT use Mermaid or other diagram DSLs — the TUI renderer cannot interpret them.
 
-5. **Consumer-contradiction emission checkpoint** — before finalizing synthesis, check each prefetched commons entry for contradictions against code observed during investigation:
+5. **Consumption-verification checkpoint** — before finalizing synthesis, report the outcome for each prefetched commons entry you actually checked against code during investigation. Held and contradicted both count — a confirmation is signal, not ceremony. Skip entries you never tested; grounded-or-nothing means every report needs the code anchor trio, so an entry you can't anchor is an entry you didn't verify:
 
    ```bash
-   if [ -x ~/.lore/scripts/consumption-contradiction-append.sh ]; then
-     # For each prefetched entry where investigation directly falsifies a specific claim:
-     bash ~/.lore/scripts/consumption-contradiction-append.sh \
-       --work-item <slug> \
-       --entry-id <entry-path> \
-       --claim "<exact-claim-text>" \
-       --falsifying-evidence "<file:line + snippet>" \
-       --producer-role spec-lead \
-       --protocol-slot Synthesis \
-       --template-version "$LEAD_TEMPLATE_VERSION" \
-       --captured-at-branch <branch> \
-       --captured-at-sha <sha> \
-       --captured-at-merge-base-sha <merge-base>
-     # Rows → $KDIR/_work/<slug>/consumption-contradictions.jsonl; lore audit consumes as priority-input.
-   else
-     # consumption-contradiction-append.sh not yet installed (follow-on pending)
-     bash ~/.lore/scripts/write-execution-log.sh --slug <slug> --source spec-lead \
-       --template-version "$LEAD_TEMPLATE_VERSION" <<< \
-       "consumer-contradiction emission skipped — consumption-contradiction-append.sh not found"
-   fi
+   # Entry confirmed by investigation:
+   lore verify <knowledge-path> held \
+     --source spec-lead \
+     --protocol-slot Synthesis \
+     --cycle-id "spec-<topic>-$(date +%Y-%m-%d)" \
+     --template-version "$LEAD_TEMPLATE_VERSION" \
+     --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>"
+
+   # Entry falsified by investigation — additionally lands one pending row in
+   # $KDIR/_work/<slug>/consumption-contradictions.jsonl; lore audit consumes it as priority-input:
+   lore verify <knowledge-path> contradicted \
+     --source spec-lead \
+     --protocol-slot Synthesis \
+     --cycle-id "spec-<topic>-$(date +%Y-%m-%d)" \
+     --template-version "$LEAD_TEMPLATE_VERSION" \
+     --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>" \
+     --work-item <slug> \
+     --rationale "<why the code falsifies the entry>" \
+     --claim-text "<the entry assertion being contradicted>" \
+     --falsifier "<what evidence would disprove>"
    ```
 
-   Emission is non-blocking — synthesis continues immediately.
+   Events land in `$KDIR/_trust/trust-events.jsonl` (contract: `architecture/trust-ledger/README.md` in the knowledge store). Run these from the source repo's root, not from inside the knowledge store — `lore` resolves the store and records branch provenance from the current directory. Emission is non-blocking — synthesis continues immediately; re-running an identical invocation is a silent no-op (the writers dedupe).
 
 6. Present the abstract plan (Goal, Design Decisions, Narrative, Architecture Diagram) to the user for review.
 

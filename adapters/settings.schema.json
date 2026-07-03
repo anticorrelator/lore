@@ -288,6 +288,23 @@
             }
           }
         },
+        "dispatch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "census_enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Dispatch posture. False (default) is event-driven: enqueue happens only via `lore settlement triggers` (dispute detector, spot-sample budget, rollup steady-state) and explicit enqueue; batch recompute never refills from the source-stream backlog. True re-enables the dormant census wholesale (scan-era recompute refill and the TUI auto-process backlog arm)."
+            },
+            "spot_sample_weekly_budget": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 12,
+              "description": "Spot-sample audits enqueued per ISO week. Starts high per the settlement disposition memo — a throttled census while peer-verification volume is unproven; ratchet down as lore-verify volume proves out, hold or raise if thin."
+            }
+          }
+        },
         "harness_selection": {
           "type": "object",
           "additionalProperties": false,

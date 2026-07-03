@@ -45,22 +45,20 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 		click, isClick := msg.(tea.MouseClickMsg)
 		isClick = isClick && click.Button == tea.MouseLeft && !click.Mod.Contains(tea.ModShift)
 		if isClick {
-			switch {
-			case cb.focusClick != nil:
+			if cb.focusClick != nil {
 				cb.focusClick(click.X, click.Y)
-			case m.layoutMode == config.LayoutLeftRight:
-				if click.X < leftPanelWidth+2 {
-					m.focusedPanel = panelLeft
-				} else {
-					m.focusedPanel = panelRight
-				}
-			default:
-				if click.Y <= 1+m.topPanelHeight() {
-					m.focusedPanel = panelLeft
-				} else {
-					m.focusedPanel = panelRight
-				}
+			} else {
+				m.focusedPanel = m.panelAt(click.X, click.Y)
 			}
+		}
+		// Wheel scrolls the panel under the pointer without moving focus —
+		// wheel events carry coordinates, and scrolling what's hovered is
+		// the universal wheel contract. Everything else (clicks, motion)
+		// routes to the focused panel. Skipped for focusClick consumers
+		// (knowledge browser): they route every message to one sub-model
+		// anyway, so positional targeting has nothing to choose between.
+		if wheel, ok := msg.(tea.MouseWheelMsg); ok && cb.focusClick == nil {
+			return routePanelMsg(m, m.panelAt(wheel.X, wheel.Y), msg, cb), true
 		}
 		return routeFocusedPanel(m, msg, cb), true
 
@@ -79,16 +77,18 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 			}
 		case "ctrl+t":
 			// Toggles the right panel between detail and terminal, like a
-			// tab. Consumed here so it is never forwarded to the PTY.
-			if m.focusedPanel == panelRight {
-				if m.terminalMode {
-					m.terminalMode = false
-					return nil, true
-				}
-				if panel, ok := cb.specPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
-					m.terminalMode = true
-					return nil, true
-				}
+			// tab, from either side of the split. The choice is recorded per
+			// item so navigating away and back doesn't undo it. Consumed here
+			// so it is never forwarded to the PTY.
+			if m.terminalMode {
+				m.terminalMode = false
+				m.setPreferDetail(cb.currentSlug(), true)
+				return nil, true
+			}
+			if panel, ok := cb.specPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
+				m.terminalMode = true
+				m.setPreferDetail(cb.currentSlug(), false)
+				return nil, true
 			}
 		case "tab", "l":
 			// Tab and l both move focus left→right, matching the settlement
@@ -111,7 +111,13 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 // the list's onCursorChange hook), the spec panel in terminal mode, or the
 // detail view.
 func routeFocusedPanel(m *model, msg tea.Msg, cb panelCallbacks) tea.Cmd {
-	if m.focusedPanel == panelLeft {
+	return routePanelMsg(m, m.focusedPanel, msg, cb)
+}
+
+// routePanelMsg forwards msg to the given panel's sub-model, independent of
+// which panel holds focus (used for pointer-positional wheel routing).
+func routePanelMsg(m *model, panel panelFocus, msg tea.Msg, cb panelCallbacks) tea.Cmd {
+	if panel == panelLeft {
 		cmd, prevID, newID := cb.listUpdate(msg)
 		if newID != "" && newID != prevID {
 			return tea.Batch(cmd, cb.loadDetail(newID))
@@ -547,9 +553,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, loadSettlementStatus()
 			}
 		case "ctrl+c":
-			// In terminal mode, ctrl+c terminates the terminal panel only,
-			// but still cancel any background AI subprocess.
-			if m.terminalMode && (m.state == stateWork || m.state == stateFollowUps) {
+			// With the terminal focused, ctrl+c terminates that session only
+			// (discarding retained scrollback once it has finished), but still
+			// cancels any background AI subprocess. From anywhere else it quits.
+			if m.terminalMode && m.focusedPanel == panelRight && (m.state == stateWork || m.state == stateFollowUps) {
 				if m.aiCancel != nil {
 					m.aiCancel()
 					m.aiCancel = nil
@@ -568,14 +575,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			m.cleanupAllSubprocesses()
 			return m, tea.Quit
 		case "?":
-			if !m.terminalMode {
+			if !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.showHelp = true
 				m.helpViewport = viewport.New()
 				m.sizeHelpViewport()
 				return m, nil
 			}
 		case "q":
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSettlement) && !m.terminalMode {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.cleanupAllSubprocesses()
 				return m, tea.Quit
 			}
@@ -713,7 +720,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			// stateKnowledge / no match: no-op.
 		case "K":
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSettlement) && !m.terminalMode {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.prevState = m.state
 				m.state = stateKnowledge
 				m.browser = knowledge.NewBrowserModel(m.config.KnowledgeDir)
@@ -728,11 +735,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// rebuild a fresh panel each open so previously-discarded
 			// drafts cannot leak across sessions; if init fails, surface a
 			// flash error so the user sees something instead of silence.
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateKnowledge || m.state == stateSettlement) && !m.terminalMode {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateKnowledge || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				return m.openSettingsModal("")
 			}
 		case "f":
-			if (m.state == stateWork || m.state == stateSettlement) && !m.terminalMode {
+			if (m.state == stateWork || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateFollowUps
 				// Preserve items already loaded by the background poll so the
 				// counter and list don't flicker to 0 while the reload is in flight.
@@ -746,7 +753,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, followup.LoadIndexCmd(m.config.KnowledgeDir)
 			}
 		case "w":
-			if m.state == stateFollowUps && !m.terminalMode {
+			if m.state == stateFollowUps && !(m.terminalMode && m.focusedPanel == panelRight) {
 				cmd := m.leaveFollowups()
 				return m, cmd
 			}
@@ -1406,7 +1413,13 @@ func (m model) shouldAutoProcessSettlement(st settlement.Status) bool {
 	if st.BlockedReason != "" || st.Harness.BlockedReason != "" {
 		return false
 	}
-	if st.Queue.Ready+st.Queue.Pending <= 0 && !(st.Queue.Running == 0 && st.Batch.BacklogSize > 0) {
+	// Event-driven posture (memo §5.2): the census recompute-refill is
+	// retired, so only real queued items — enqueued by the trigger pump or
+	// explicit enqueue — drive auto-process. The batch-backlog arm belongs
+	// to the dormant census posture and only applies when the processor
+	// reports census_enabled.
+	backlogArm := st.Dispatch.CensusEnabled && st.Queue.Running == 0 && st.Batch.BacklogSize > 0
+	if st.Queue.Ready+st.Queue.Pending <= 0 && !backlogArm {
 		return false
 	}
 	concurrency := st.Harness.Concurrency
@@ -1461,7 +1474,7 @@ func (m *model) leaveFollowups() tea.Cmd {
 // It resets the mtime baseline, syncs terminalMode, and initiates the detail load.
 func (m *model) loadFollowupDetail(id string) tea.Cmd {
 	m.lastFollowupDetailMtime = time.Time{}
-	m.terminalMode = m.hasSpecPanel(id)
+	m.terminalMode = m.hasSpecPanel(id) && !m.preferDetailView[id]
 	return m.followupDetail.SetID(id)
 }
 
@@ -1474,7 +1487,7 @@ func (m model) loadDetail(slug string) (model, tea.Cmd) {
 	m.lastDetailMtime = time.Time{} // reset so new item's detail files get a fresh baseline
 	m.detail = work.NewDetailModel(m.config.WorkDir, slug)
 	m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-	m.terminalMode = m.hasSpecPanel(slug)
+	m.terminalMode = m.hasSpecPanel(slug) && !m.preferDetailView[slug]
 
 	var initCmd tea.Cmd
 	if m.detailCache != nil {

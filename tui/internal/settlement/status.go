@@ -24,6 +24,17 @@ type Status struct {
 	NextAction    string
 	BlockedReason string
 	UpdatedAt     string
+	Dispatch      Dispatch
+}
+
+// Dispatch reports the processor's dispatch posture (settlement disposition
+// memo §5.2). CensusEnabled=false is the event-driven posture: the queue is
+// an inbox fed by triggers, and the auto-process gate must not treat the
+// batch backlog as dispatchable work. Absent field (older CLI) parses as
+// false — the conservative, no-census direction.
+type Dispatch struct {
+	Mode          string
+	CensusEnabled bool
 }
 
 type Queue struct {
@@ -151,6 +162,15 @@ func ParseStatus(data []byte) (Status, error) {
 	st.Harness = parseHarness(root)
 	st.Usage = parseUsage(root)
 	st.Batch = parseBatch(root)
+	if raw, ok := first(root, "dispatch"); ok {
+		var m map[string]json.RawMessage
+		if json.Unmarshal(raw, &m) == nil {
+			st.Dispatch = Dispatch{
+				Mode:          stringField(m, "mode"),
+				CensusEnabled: boolField(m, "census_enabled", "censusEnabled"),
+			}
+		}
+	}
 	st.RecentSettled = parseRecentSettled(root)
 	st.LastSettled = parseLastSettled(root, st.RecentSettled)
 	if st.Harness.ActiveLeases == 0 {
@@ -223,7 +243,9 @@ func InferNextAction(st Status) string {
 	if st.Queue.Running > 0 {
 		return "processor active"
 	}
-	if st.Queue.Ready+st.Queue.Pending > 0 || (st.Queue.Running == 0 && st.Batch.BacklogSize > 0) {
+	// The backlog arm is census-posture work; in the event-driven posture the
+	// backlog does not auto-refill and must not advertise dispatchable work.
+	if st.Queue.Ready+st.Queue.Pending > 0 || (st.Dispatch.CensusEnabled && st.Queue.Running == 0 && st.Batch.BacklogSize > 0) {
 		return "process once or wait for processor"
 	}
 	return "idle"

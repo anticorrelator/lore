@@ -104,8 +104,10 @@ resolve_settings_path() {
 # Render the lore-managed TOML block. Hook commands point at the stable
 # ~/.lore/scripts/<name> install symlink per checklist item 6. The chain
 # of SessionStart hooks mirrors the claude-code adapter's order:
-# doctor -> auto-reindex -> load-knowledge -> load-work -> load-threads ->
-# extract-session-digest. Lore no longer ships a Stop hook (the prior
+# doctor -> auto-reindex -> mine-retrieval-misses -> load-knowledge ->
+# load-work -> load-threads -> extract-session-digest.
+# (mine-retrieval-misses self-skips on codex: the transcript provider is
+# partial, and the miner gates on provider status like the digest.) Lore no longer ships a Stop hook (the prior
 # stop-novelty-check.py was retired 2026-05-06, and check-plan-persistence.py
 # was retired 2026-05-26 — see _meta/effectiveness-journal.jsonl and the
 # heuristic-vs-definite-hook entry under conventions/). PreToolUse with
@@ -132,6 +134,9 @@ command = "bash ~/.lore/scripts/doctor.sh --quiet"
 
 [[hooks.SessionStart]]
 command = "bash ~/.lore/scripts/auto-reindex.sh"
+
+[[hooks.SessionStart]]
+command = "python3 ~/.lore/scripts/mine-retrieval-misses.py"
 
 [[hooks.SessionStart]]
 command = "bash ~/.lore/scripts/load-knowledge.sh"

@@ -941,3 +941,34 @@ if escalate:
         print(f"  [L3] archived prior version: {ar}")
 
 PYEOF
+
+# --- L3 trust-ledger provenance migration ---
+# The prior version's trust-event history follows its content to the archive
+# path; the corrected entry accrues trust events fresh. Emission is contained:
+# a ledger failure warns but never rolls back the already-applied correction.
+if [[ "$ESCALATE" == "1" && "$DRY_RUN" != "1" ]]; then
+  {
+    ENTRY_REL=$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
+      "$ENTRY_PATH" "$KDIR")
+    # Must mirror the archive naming in the L3 escalation step above
+    # (stem trimmed to 60 chars + "-superseded-<date>.md").
+    ARCHIVE_REL=$(python3 - "$ENTRY_PATH" "$KDIR" "$DATE_TODAY" <<'ARCHREL_PY'
+import os, sys
+entry_path, kdir, date_str = sys.argv[1:4]
+stem = os.path.basename(entry_path)
+if stem.endswith('.md'):
+    stem = stem[:-3]
+stem = stem[:60]
+archive = os.path.join(os.path.dirname(entry_path), f"{stem}-superseded-{date_str}.md")
+print(os.path.relpath(archive, kdir))
+ARCHREL_PY
+)
+    bash "$SCRIPT_DIR/trust-event-migrate.sh" \
+      --from-entry-path "$ENTRY_REL" \
+      --to-entry-path "$ARCHIVE_REL" \
+      --reason l3-supersede \
+      --source apply-correction \
+      --verdict-id "$VERDICT_ID" \
+      --kdir "$KDIR" >/dev/null
+  } || echo "[correction] Warning: trust-ledger provenance-migration emission failed (correction itself was applied)" >&2
+fi

@@ -98,6 +98,22 @@ ROLLUP_JUDGES = tuple(judge for _kind, (_script, judge) in ROLLUP_KIND_TO_SCRIPT
 ROLLUP_BACKFILL_DEFAULT_WEEKS = 30
 ROLLUP_BACKFILL_MAX_WEEKS = 104
 
+# Event-driven dispatch (settlement disposition memo, transition safeguards §5).
+# The always-on census (scan-as-enqueue + recompute-from-backlog refill + TUI
+# auto-process tick) is retired but dormant: settlement.dispatch.census_enabled
+# re-enables it wholesale, and `lore settlement scan` stays manually invocable
+# in either posture. Enqueue in the event-driven posture happens only through
+# the trigger pump (disputes, spot-sample, rollup steady-state) and explicit
+# `enqueue` calls.
+DEFAULT_SPOT_SAMPLE_WEEKLY_BUDGET = 12  # memo §5.1: starts HIGH — a throttled census while peer volume is unproven
+HIGH_TRUST_THRESHOLD = 0.5  # trust-compute score; 0.5 = one net held-equivalent of ledger signal
+# confirmer_sample is stamped by scripts/confirmer-sample.sh (which imports
+# this module as a library) after its own enqueue+placement intervention.
+EVENT_TRIGGER_REASONS = ("dispute", "spot_sample", "confirmer_sample")
+TRIGGER_PUMP_MIN_INTERVAL_SECONDS = 300  # the TUI status tick runs every 5s; the pump self-throttles
+VERIFY_VOLUME_THIN_THRESHOLD = 10  # memo §5.3: <10 verify events/week avg over 4 weeks = thin
+VERIFY_VOLUME_WINDOW_WEEKS = 4
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -552,7 +568,7 @@ class Settlement:
             }
         raise ValueError(f"unknown kind: {kind}")
 
-    def enqueue_row(self, work_item: str, row: dict[str, Any], kind: str = KIND_TASK_CLAIM) -> dict[str, Any]:
+    def enqueue_row(self, work_item: str, row: dict[str, Any], kind: str = KIND_TASK_CLAIM, selection_reason: str | None = None) -> dict[str, Any]:
         self.ensure()
         source_id = self.source_id_for_row(kind, row)
         if not source_id:
@@ -580,6 +596,14 @@ class Settlement:
             item = self.item_from_row(work_item, row, len(queue.get("items", [])), kind)
             item["enqueued_at"] = utc_now()
             item.pop("_backlog_order", None)
+            if selection_reason:
+                # Event-driven triggers stamp their reason at enqueue time so
+                # (1) the legacy-pending-normalization branch in process_once
+                # never recomputes over them, and (2) apply_recomputed_batch
+                # preserves them through any census-mode recompute instead of
+                # letting them fall outside the batch window.
+                item["selection_reason"] = selection_reason
+                item["selected_at"] = item["enqueued_at"]
             queue["items"].append(item)
             self.save_queue(queue)
             return {"ok": True, "action": "enqueued", "item": item, "queue_path": str(self.queue_path)}
@@ -826,6 +850,9 @@ class Settlement:
         }
 
     def scan(self) -> dict[str, Any]:
+        # The census walk. Retired as an automatic driver (memo §5.2) but
+        # RETAINED manually invocable: nothing calls this except an explicit
+        # `lore settlement scan`. Dormant, not deleted — one evaluation window.
         self.ensure()
         # Refresh the rollup existence cache once per scan() invocation so
         # steady-state enqueuer checks share a single read of rows.jsonl and
@@ -895,6 +922,277 @@ class Settlement:
             "rollup_skipped_existing": rollup_summary["skipped_existing"],
             "rollup_window_start": rollup_summary["window_start"],
             "rollup_window_end": rollup_summary["window_end"],
+        }
+
+    # --- Event-driven triggers (memo §5; the enqueue surface that replaces the census) ---
+    #
+    # Lifecycle: the pump runs on the TUI status tick (loadSettlementStatus in
+    # tui/commands.go) and via manual `lore settlement triggers`; it self-throttles
+    # to TRIGGER_PUMP_MIN_INTERVAL_SECONDS. It only ENQUEUES — dispatch stays with
+    # process_once, driven by the TUI auto-process gate (pending items only in the
+    # event-driven posture) and manual process/drain.
+
+    @property
+    def trust_ledger_path(self) -> Path:
+        return self.kdir / "_trust" / "trust-events.jsonl"
+
+    @staticmethod
+    def _trust_compute_module():
+        import importlib.util
+        if "trust_compute" in sys.modules:
+            return sys.modules["trust_compute"]
+        path = Path(__file__).resolve().with_name("trust-compute.py")
+        spec = importlib.util.spec_from_file_location("trust_compute", str(path))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["trust_compute"] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def read_verify_events(self) -> list[dict[str, Any]]:
+        """All parseable consumption-verification rows from the trust ledger."""
+        rows: list[dict[str, Any]] = []
+        try:
+            with self.trust_ledger_path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(row, dict) and row.get("event") == "consumption-verification":
+                        rows.append(row)
+        except FileNotFoundError:
+            pass
+        return rows
+
+    def detect_disputes(self) -> dict[str, Any]:
+        """Dispute gate.
+
+        Inputs: contradicted consumption-verification ledger rows (joined to
+        their bridged CC source row by payload work_item + contradiction_id),
+        the published trust fold (trust-compute.py), the queue, and terminal
+        run records.
+        Route: a contradicted report against a high-trust entry
+        (score >= HIGH_TRUST_THRESHOLD) or an entry with conflicting reports
+        (held AND contradicted) enqueues its CC row through enqueue_row with
+        selection_reason="dispute".
+        Fallback: no ledger -> no-op; rows without the CC bridge fields are
+        counted unroutable, never guessed; a trust-fold failure disables only
+        the high-trust arm (reported as a warning) — the conflict arm still runs.
+        Idempotency (two-layer): call-site skip on queue membership + terminal
+        run records by deterministic item_id, then enqueue_row's own id dedupe
+        and pending-only CC status check.
+        """
+        events = self.read_verify_events()
+        if not events:
+            return {"considered": 0, "enqueued": 0, "duplicates": 0, "unroutable": 0, "skipped": 0}
+        scores: dict[str, dict] = {}
+        migrations: dict[str, str] = {}
+        warning = ""
+        tc = None
+        try:
+            tc = self._trust_compute_module()
+            scores, migrations, _w = tc.compute_trust(str(self.kdir))
+        except Exception as exc:
+            warning = f"trust fold unavailable; high-trust arm disabled: {exc}"
+
+        dispositions: dict[str, set[str]] = {}
+        for row in events:
+            payload = row.get("payload") or {}
+            entry = str(row.get("entry_path") or "")
+            if entry:
+                dispositions.setdefault(entry, set()).add(str(payload.get("disposition") or ""))
+
+        queue_ids = {item.get("id") for item in self.load_queue().get("items", [])}
+        terminal_ids = self.terminal_run_item_ids()
+
+        considered = 0
+        enqueued = 0
+        duplicates = 0
+        unroutable = 0
+        skipped = 0
+        for row in events:
+            payload = row.get("payload") or {}
+            if payload.get("disposition") != "contradicted":
+                continue
+            considered += 1
+            entry = str(row.get("entry_path") or "")
+            high_trust = False
+            if tc is not None and entry:
+                summary = tc.score_for_entry(scores, migrations, entry)
+                high_trust = summary is not None and summary["score"] >= HIGH_TRUST_THRESHOLD
+            conflicting = entry and {"held", "contradicted"} <= dispositions.get(entry, set())
+            if not (high_trust or conflicting):
+                skipped += 1
+                continue
+            work_item = str(payload.get("work_item") or "")
+            contradiction_id = str(payload.get("contradiction_id") or "")
+            if not work_item or not contradiction_id:
+                unroutable += 1
+                continue
+            item_id = self.item_id(work_item, contradiction_id, KIND_CONSUMPTION_CONTRADICTION)
+            if item_id in queue_ids or item_id in terminal_ids:
+                duplicates += 1
+                continue
+            cc_row = self.find_source_row(KIND_CONSUMPTION_CONTRADICTION, work_item, contradiction_id)
+            if cc_row is None:
+                unroutable += 1
+                continue
+            try:
+                res = self.enqueue_row(work_item, cc_row, KIND_CONSUMPTION_CONTRADICTION, selection_reason="dispute")
+            except (ValueError, SystemExit):
+                unroutable += 1
+                continue
+            if res["action"] == "enqueued":
+                enqueued += 1
+                queue_ids.add(item_id)
+            else:
+                duplicates += 1
+        out = {
+            "considered": considered,
+            "enqueued": enqueued,
+            "duplicates": duplicates,
+            "unroutable": unroutable,
+            "skipped": skipped,
+        }
+        if warning:
+            out["warning"] = warning
+        return out
+
+    def spot_sample_week_start(self) -> str:
+        return iso_z(monday_floor_utc(utc_now_dt()))
+
+    def spot_sample_used_this_week(self) -> int:
+        """Budget accounting: spot_sample enqueues this ISO week, from queue
+        items plus (non-invalidated) run records — enqueue-time count, so a
+        dispatched-and-completed sample still consumes budget."""
+        week_start = self.spot_sample_week_start()
+        used_ids: set[str] = set()
+        for item in self.load_queue().get("items", []):
+            if item.get("selection_reason") == "spot_sample" and str(item.get("enqueued_at") or "") >= week_start:
+                used_ids.add(str(item.get("id")))
+        for run in self.load_runs():
+            if self.run_invalidated(run):
+                continue
+            selection = run.get("selection") if isinstance(run.get("selection"), dict) else {}
+            if selection.get("reason") == "spot_sample" and str(selection.get("selected_at") or "") >= week_start:
+                used_ids.add(str(run.get("item_id")))
+        return len(used_ids)
+
+    def spot_sample(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Spot-sample gate — the memo §5.1 fallback dial (a throttled census).
+
+        Inputs: settlement.dispatch.spot_sample_weekly_budget (visible dial),
+        the source-stream backlog (iter_backlog_items — claim plumbing
+        preserved as trigger intake), queue membership, and run records.
+        Route: up to the remaining weekly budget of not-yet-audited candidates
+        are enqueued with selection_reason="spot_sample"; sampling is seeded on
+        the week start, so a re-run in the same week re-picks the same
+        candidates and dedupes to a no-op.
+        Fallback: budget 0 or exhausted -> legible skip reason, no enqueue.
+        Idempotency (two-layer): call-site skip on queue membership + terminal
+        run ids, then enqueue_row's id dedupe.
+        """
+        budget = int(settings["dispatch"]["spot_sample_weekly_budget"])
+        week_start = self.spot_sample_week_start()
+        if budget <= 0:
+            return {"enqueued": 0, "budget": budget, "used_this_week": 0, "week_start": week_start, "reason": "budget_zero"}
+        used = self.spot_sample_used_this_week()
+        remaining = budget - used
+        if remaining <= 0:
+            return {"enqueued": 0, "budget": budget, "used_this_week": used, "week_start": week_start, "reason": "budget_exhausted"}
+        backlog, _errors = self.iter_backlog_items()
+        queue_ids = {item.get("id") for item in self.load_queue().get("items", [])}
+        terminal_ids = self.terminal_run_item_ids()
+        candidates = [item for item in backlog if item.get("id") not in queue_ids and item.get("id") not in terminal_ids]
+        rng = random.Random(f"spot-sample|{week_start}")
+        rng.shuffle(candidates)
+        enqueued = 0
+        duplicates = 0
+        for candidate in candidates:
+            if enqueued >= remaining:
+                break
+            kind = str(candidate.get("kind") or KIND_TASK_CLAIM)
+            work_item = str(candidate.get("work_item") or "")
+            source_id = str(candidate.get("source_id") or candidate.get("claim_id") or candidate.get("candidate_id") or candidate.get("contradiction_id") or "")
+            row = self.find_source_row(kind, work_item, source_id)
+            if row is None:
+                continue
+            try:
+                res = self.enqueue_row(work_item, row, kind, selection_reason="spot_sample")
+            except (ValueError, SystemExit):
+                continue
+            if res["action"] == "enqueued":
+                enqueued += 1
+            else:
+                duplicates += 1
+        return {
+            "enqueued": enqueued,
+            "duplicates": duplicates,
+            "budget": budget,
+            "used_this_week": used + enqueued,
+            "week_start": week_start,
+        }
+
+    def verify_volume(self) -> dict[str, Any]:
+        """Memo §5.3 volume measurement: weekly consumption-verification event
+        counts from ledger observed_at, over the trailing evaluation window."""
+        events = self.read_verify_events()
+        now = utc_now_dt()
+        current_week = monday_floor_utc(now)
+        weeks: list[dict[str, Any]] = []
+        for back in range(VERIFY_VOLUME_WINDOW_WEEKS, 0, -1):
+            start = current_week - timedelta(weeks=back)
+            end = start + timedelta(weeks=1)
+            start_s, end_s = iso_z(start), iso_z(end)
+            count = sum(1 for row in events if start_s <= str(row.get("observed_at") or "") < end_s)
+            weeks.append({"week_start": start_s, "events": count})
+        current_count = sum(1 for row in events if str(row.get("observed_at") or "") >= iso_z(current_week))
+        avg = round(sum(w["events"] for w in weeks) / max(len(weeks), 1), 2)
+        return {
+            "weeks": weeks,
+            "current_week_events": current_count,
+            "window_weeks": VERIFY_VOLUME_WINDOW_WEEKS,
+            "weekly_average": avg,
+            "thin_threshold": VERIFY_VOLUME_THIN_THRESHOLD,
+            "below_threshold": avg < VERIFY_VOLUME_THIN_THRESHOLD,
+        }
+
+    def pump_triggers(self, settings: dict[str, Any], force: bool = False) -> dict[str, Any]:
+        """Run the three event-driven enqueue triggers: rollup steady-state
+        (re-homed off scan(), memo §4.2(d) MOVE), the dispute detector, and
+        the spot-sampler. Enqueue-only; throttled via queue.json's triggers
+        block so the TUI's 5s status tick stays cheap."""
+        self.ensure()
+        mode = "census" if settings["dispatch"]["census_enabled"] else "event-driven"
+        with repo_lock(self.state):
+            queue = self.load_queue()
+            triggers_state = queue.get("triggers") if isinstance(queue.get("triggers"), dict) else {}
+            last = str(triggers_state.get("pump_ran_at") or "")
+            if not force and last:
+                try:
+                    last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                    if (datetime.now(timezone.utc) - last_dt).total_seconds() < TRIGGER_PUMP_MIN_INTERVAL_SECONDS:
+                        return {"ok": True, "ran": False, "reason": "throttled", "pump_ran_at": last, "dispatch_mode": mode}
+                except ValueError:
+                    pass
+            queue["triggers"] = {"pump_ran_at": utc_now()}
+            self.save_queue(queue)
+        self._invalidate_rollup_existence_cache()
+        self._refresh_rollup_existence_cache()
+        rollup = self.scan_rollup_steady_state()
+        disputes = self.detect_disputes()
+        sample = self.spot_sample(settings)
+        return {
+            "ok": True,
+            "ran": True,
+            "dispatch_mode": mode,
+            "rollup": rollup,
+            "disputes": disputes,
+            "spot_sample": sample,
+            "verify_volume": self.verify_volume(),
         }
 
     def iter_backlog_items(self) -> tuple[list[dict[str, Any]], list[str]]:
@@ -1412,9 +1710,15 @@ class Settlement:
         legacy_pending = [item for item in queue.get("items", []) if item.get("status") == "pending"]
         # Rollup items are direct-enqueued and have no source row to recompute
         # from (D6); they must be preserved through batch recompute unchanged
-        # (no selection_reason pop, no score_item pass).
-        legacy_pending_rollup = [item for item in legacy_pending if self.is_rollup_kind(str(item.get("kind") or ""))]
-        legacy_pending_source = [item for item in legacy_pending if not self.is_rollup_kind(str(item.get("kind") or ""))]
+        # (no selection_reason pop, no score_item pass). Event-trigger items
+        # (dispute / spot_sample) get the same protection: they were selected
+        # by their gate, not by batch scoring, and a census-mode recompute
+        # must not strand them outside the batch window.
+        def _preserved(item: dict[str, Any]) -> bool:
+            return self.is_rollup_kind(str(item.get("kind") or "")) or item.get("selection_reason") in EVENT_TRIGGER_REASONS
+
+        legacy_pending_rollup = [item for item in legacy_pending if _preserved(item)]
+        legacy_pending_source = [item for item in legacy_pending if not _preserved(item)]
         preserved_ids = {item.get("id") for item in active_leased}
         preserved_ids.update(item.get("id") for item in legacy_pending_rollup)
         terminal_ids = self.terminal_run_item_ids()
@@ -1470,6 +1774,12 @@ class Settlement:
 
     def recompute_queue(self, settings: dict[str, Any], reason: str = "recompute", force: bool = False) -> dict[str, Any]:
         self.ensure()
+        if not settings["dispatch"]["census_enabled"]:
+            # Recompute rebuilds pending from the full source-stream backlog —
+            # a census-wide enqueue. Refuse legibly in the event-driven posture
+            # rather than quietly running it; re-enabling the dormant census
+            # (settlement.dispatch.census_enabled=true) is the sanctioned path.
+            return {"ok": True, "recomputed": False, "reason": "census_disabled", "dispatch_mode": "event-driven"}
         with repo_lock(self.state):
             queue = self.load_queue()
             leases = self.load_leases()
@@ -1524,7 +1834,11 @@ class Settlement:
         budget = self.budget_status(usage)
         active_hours = self.active_hours_status(settings)
         eligible, rejected = self.eligible_frameworks(settings)
-        backlog_waiting = self.active_batch_drained_with_backlog(queue)
+        census = bool(settings["dispatch"]["census_enabled"])
+        # The drained-batch backlog only feeds dispatch under the census
+        # posture; in the event-driven posture a stale backlog_size must not
+        # advertise work that no longer auto-refills.
+        backlog_waiting = census and self.active_batch_drained_with_backlog(queue)
         blocked_reason = ""
         if not settings["enabled"]:
             blocked_reason = "disabled"
@@ -1541,9 +1855,21 @@ class Settlement:
             next_action = "process once or wait for processor"
         elif active_lease_rows:
             next_action = "processor active"
+        elif not census:
+            next_action = "idle (event-driven: triggers enqueue disputes/samples)"
         return {
             "ok": True,
             "enabled": bool(settings["enabled"]),
+            "dispatch": {
+                "mode": "census" if census else "event-driven",
+                "census_enabled": census,
+                "spot_sample": {
+                    "weekly_budget": int(settings["dispatch"]["spot_sample_weekly_budget"]),
+                    "used_this_week": self.spot_sample_used_this_week(),
+                    "week_start": self.spot_sample_week_start(),
+                },
+                "verify_volume": self.verify_volume(),
+            },
             "queue": {
                 "pending": counts.get("pending", 0),
                 "running": counts.get("leased", 0),
@@ -1891,12 +2217,19 @@ class Settlement:
                 self.save_queue(queue)
                 self.save_leases(leases)
                 return {"ok": True, "dispatched": False, "reason": "max_concurrency_reached", "active_leases": len(active), "expired_leases_reclaimed": expired}
-            legacy_pending = any(it.get("status") == "pending" and not it.get("selection_reason") for it in queue.get("items", []))
+            # Census posture gate (memo §5.2): batch recompute pulls the full
+            # source-stream backlog through iter_backlog_items — that refill IS
+            # the census. In the event-driven posture the queue is an inbox:
+            # items dispatch in queue order and an empty queue is empty, never
+            # silently refilled. The recompute machinery stays intact (dormant)
+            # behind settlement.dispatch.census_enabled.
+            census = bool(settings["dispatch"]["census_enabled"])
+            legacy_pending = census and any(it.get("status") == "pending" and not it.get("selection_reason") for it in queue.get("items", []))
             if legacy_pending:
                 self.apply_recomputed_batch(queue, settings, "legacy_pending_normalization")
             item = next((it for it in queue.get("items", []) if it.get("status") == "pending"), None)
             if item is None:
-                if self.active_batch_drained_with_backlog(queue) or self.should_recompute(queue, settings):
+                if census and (self.active_batch_drained_with_backlog(queue) or self.should_recompute(queue, settings)):
                     self.apply_recomputed_batch(queue, settings, "process_once")
                     item = next((it for it in queue.get("items", []) if it.get("status") == "pending"), None)
                 elif healed:
@@ -2676,6 +3009,7 @@ def settlement_settings() -> dict[str, Any]:
         raw = {}
     active_hours = raw.get("active_hours") if isinstance(raw.get("active_hours"), dict) else {}
     hs = raw.get("harness_selection") if isinstance(raw.get("harness_selection"), dict) else {}
+    dispatch = raw.get("dispatch") if isinstance(raw.get("dispatch"), dict) else {}
     ranges = []
     if isinstance(active_hours.get("ranges"), list):
         ranges = [r for r in (parse_active_hours_range(x) for x in active_hours.get("ranges", [])) if r is not None]
@@ -2697,6 +3031,13 @@ def settlement_settings() -> dict[str, Any]:
             "eligible_frameworks": hs.get("eligible_frameworks") if isinstance(hs.get("eligible_frameworks"), list) else [],
             "random_seed": int(hs.get("random_seed", 0)),
         },
+        # Dispatch posture (memo §5.2): census_enabled=false is the default
+        # event-driven posture; true re-enables the dormant census wholesale
+        # (scan-era recompute refill + TUI auto-process backlog arm).
+        "dispatch": {
+            "census_enabled": bool(dispatch.get("census_enabled", False)),
+            "spot_sample_weekly_budget": parse_int(dispatch.get("spot_sample_weekly_budget"), DEFAULT_SPOT_SAMPLE_WEEKLY_BUDGET, 0),
+        },
     }
 
 
@@ -2712,7 +3053,7 @@ def resolve_kdir(arg: str | None) -> Path:
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="settlement-processor.py")
-    ap.add_argument("command", choices=["enqueue", "scan", "status", "process", "enable", "disable", "queue", "retry-errors", "drain", "enqueue-rollup-backfill"])
+    ap.add_argument("command", choices=["enqueue", "scan", "status", "process", "enable", "disable", "queue", "retry-errors", "drain", "enqueue-rollup-backfill", "triggers"])
     ap.add_argument("subcommand", nargs="?")
     ap.add_argument("--kdir")
     ap.add_argument("--work-item")
@@ -2720,6 +3061,7 @@ def main() -> int:
     ap.add_argument("--claim-id", action="append", default=[])
     ap.add_argument("--row-file")
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--force", action="store_true", help="triggers: bypass the pump throttle")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--max-iterations", type=int, default=200)
@@ -2760,6 +3102,8 @@ def main() -> int:
     elif args.command == "enqueue-rollup-backfill":
         judges = [args.judge] if args.judge else None
         out = settlement.enqueue_rollup_backfill(weeks=args.weeks, judges=judges)
+    elif args.command == "triggers":
+        out = settlement.pump_triggers(settings, force=args.force)
     else:
         raise AssertionError(args.command)
 

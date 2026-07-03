@@ -124,9 +124,15 @@ var keymapRegistry = []keymapSection{
 	{ctx: kmFollowupList, helpTitle: "Follow-Ups", entries: []keymapEntry{
 		{key: "j/k", label: "navigate", surfaces: surfStatusBar | surfHelp, helpKey: "j / k",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestFollowupListStatusBarKeybindContract/j/k (navigate)"},
-		{key: "l/Enter", label: "detail", surfaces: surfStatusBar | surfHelp, helpKey: "l / Enter", helpLabel: "open detail",
+		{key: "l/Enter", label: "detail", surfaces: surfStatusBar | surfHelp, helpKey: "l / Enter", helpLabel: "open detail / attach session",
+			labelFn: func(m model) string {
+				if m.terminalMode && m.hasSpecPanel(m.followupList.CurrentID()) {
+					return "attach session"
+				}
+				return "detail"
+			},
 			ownerLayers: []ownerLayer{ownerRouter, ownerSubModel},
-			test:        "TestFollowupListStatusBarKeybindContract/l (detail), …/Enter (detail)"},
+			test:        "TestFollowupListStatusBarKeybindContract/l (detail), …/Enter (detail), TestFollowupListAttachSessionKeybindContract"},
 		{key: "A", label: "dismiss", surfaces: surfStatusBar | surfHelp, helpLabel: "dismiss from list",
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestFollowupListStatusBarKeybindContract/A (dismiss)"},
 		{key: "D", label: "delete", surfaces: surfStatusBar | surfHelp, helpLabel: "delete from list",
@@ -203,9 +209,15 @@ var keymapRegistry = []keymapSection{
 	{ctx: kmWorkList, helpTitle: "Work List", entries: []keymapEntry{
 		{key: "j/k", label: "navigate", surfaces: surfStatusBar | surfHelp, helpKey: "j / k",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestWorkListStatusBarKeybindContract/j/k (navigate)"},
-		{key: "l/Enter", label: "open", surfaces: surfStatusBar | surfHelp, helpKey: "l / Enter", helpLabel: "open detail",
+		{key: "l/Enter", label: "open", surfaces: surfStatusBar | surfHelp, helpKey: "l / Enter", helpLabel: "open detail / attach session",
+			labelFn: func(m model) string {
+				if m.terminalMode && m.hasSpecPanel(m.list.CurrentSlug()) {
+					return "attach session"
+				}
+				return "open"
+			},
 			ownerLayers: []ownerLayer{ownerRouter, ownerSubModel},
-			test:        "TestWorkListStatusBarKeybindContract/l (open), …/Enter (open)"},
+			test:        "TestWorkListStatusBarKeybindContract/l (open), …/Enter (open), TestWorkListAttachSessionKeybindContract"},
 		{key: "s", label: "spec", surfaces: surfStatusBar | surfHelp, helpLabel: "run spec",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestWorkListStatusBarKeybindContract/s (spec)"},
 		{key: "c", label: "chat", surfaces: surfStatusBar | surfHelp, helpLabel: "chat about spec",
@@ -308,14 +320,31 @@ var keymapRegistry = []keymapSection{
 	{ctx: kmTerminal, helpTitle: "Spec Panel (terminal mode)", entries: []keymapEntry{
 		{key: "scroll wheel", label: "scroll output", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerSubModel}},
+		{key: "Shift+PgUp/PgDn", label: "scrollback", surfaces: surfHelp, helpKey: "Shift+PgUp / PgDn", helpLabel: "scroll output history",
+			ownerLayers: []ownerLayer{ownerSubModel},
+			test:        "TestTerminalScrollbackKeybindContract/Shift+PgUp (scrollback), …/Shift+PgDn (scrollback)"},
+		{key: "Shift+Home/End", label: "history top / live", surfaces: surfHelp, helpKey: "Shift+Home / End", helpLabel: "jump to history top / live view",
+			ownerLayers: []ownerLayer{ownerSubModel},
+			test:        "TestTerminalScrollbackKeybindContract/Shift+Home (history top), …/Shift+End (live)"},
 		{key: "ctrl+t", label: "detail", surfaces: surfStatusBar | surfHelp | surfAnnot, role: roleAnnot, helpLabel: "switch to detail view",
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestTerminalModeStatusBarKeybindContract/ctrl+t (detail)"},
 		{key: "Esc", label: "forward to subprocess (e.g. interrupt)", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestTerminalModeStatusBarKeybindContract/Esc (forwarded to subprocess, focus kept)"},
 		{key: "Esc", label: "back to list", surfaces: surfStatusBar | surfHelp, helpKey: "Esc Esc", helpLabel: "detach focus, back to list",
-			ownerLayers: []ownerLayer{ownerSubModel}},
-		{key: "Ctrl+c", label: "terminate", surfaces: surfStatusBar | surfHelp, helpLabel: "terminate subprocess",
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestTerminalModeStatusBarKeybindContract/Ctrl+c (terminate)"},
+			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestTerminalDetachKeepsTerminalView"},
+		{key: "Ctrl+c", label: "terminate", surfaces: surfStatusBar | surfHelp, helpLabel: "terminate subprocess (discard when finished)",
+			labelFn: func(m model) string {
+				panel, ok := m.currentSpecPanel()
+				if m.state == stateFollowUps {
+					panel, ok = m.currentFollowupPanel()
+				}
+				if ok && panel.IsDone() {
+					return "discard"
+				}
+				return "terminate"
+			},
+			ownerLayers: []ownerLayer{ownerRouter},
+			test:        "TestTerminalModeStatusBarKeybindContract/Ctrl+c (terminate), …/Ctrl+c (discard)"},
 		{key: "Ctrl+\\", label: "terminate subprocess", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerSubModel}},
 		{key: "(all other keys)", label: "forwarded to subprocess", surfaces: surfHelp,
@@ -351,7 +380,7 @@ var keymapRegistry = []keymapSection{
 		{key: "S / Ctrl+,", label: "settings configurator", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSettingsModalStatusBarKeybindContract/S / Ctrl+, (open)"},
 		{key: "q / Ctrl+C / Ctrl+D", label: "quit", surfaces: surfHelp,
-			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkListStatusBarKeybindContract/q (quit)"},
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestGlobalQuitKeybindContract"},
 	}},
 }
 

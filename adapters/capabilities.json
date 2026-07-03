@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "description": "Capability registry for lore harness adapters. Each framework profile names the support level (`full`, `partial`, `fallback`, `none`) for every capability lore depends on. Every non-`none` cell points to an evidence id defined in adapters/capabilities-evidence.md so callers can audit when the claim was last verified. Lore code branches on capability support, not framework name (D1, D6, D8 in the multi-framework-agent-support plan).",
   "support_levels": {
     "full": "Native support that matches lore's protocol semantics with no degradation.",
@@ -216,7 +216,7 @@
         "session_start_hook": {
           "support": "full",
           "evidence": "claude-code-session-start-hook",
-          "notes": "SessionStart hook chain runs auto-reindex -> load-knowledge -> load-work -> load-threads -> extract-session-digest."
+          "notes": "SessionStart hook chain runs auto-reindex -> mine-retrieval-misses -> load-knowledge -> load-work -> load-threads -> extract-session-digest."
         },
         "stop_hook": {
           "support": "full",

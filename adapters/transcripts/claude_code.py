@@ -161,6 +161,24 @@ def previous_session_path(cwd: str) -> str | None:
     return str(prev) if prev is not None else None
 
 
+def list_session_paths(cwd: str) -> list[str]:
+    """Return every JSONL session path for `cwd`, sorted by mtime descending.
+
+    Enumerates `~/.claude/projects/<encoded-cwd>/*.jsonl`. Index 0 is
+    typically the in-flight current session when called from a hook —
+    corpus-sweep consumers that must exclude live sessions should skip
+    it or filter by mtime. Returns `[]` when the project directory
+    does not exist.
+    """
+    digest = _load_digest_module()
+    project_dir = digest.find_project_dir(cwd)
+    if project_dir is None:
+        return []
+    files = list(project_dir.glob("*.jsonl"))
+    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    return [str(f) for f in files]
+
+
 def provider_status() -> tuple[str, str]:
     """Return `(support_level, reason)` for the active provider.
 
@@ -249,6 +267,7 @@ __all__ = [
     "parse_transcript",
     "extract_file_paths",
     "previous_session_path",
+    "list_session_paths",
     "provider_status",
     "read_raw_lines",
     "session_metadata",

@@ -158,6 +158,18 @@ func loadPRStatus() tea.Cmd {
 
 func loadSettlementStatus() tea.Cmd {
 	return func() tea.Msg {
+		// Trigger pump: the event-driven enqueue surface (dispute detector,
+		// spot-sample budget, rollup steady-state) runs on this status tick —
+		// enqueue-only, self-throttled processor-side, best-effort here. This
+		// replaces the retired census drivers as the thing that keeps the
+		// queue fed; dispatch still goes through shouldAutoProcessSettlement
+		// or manual process/drain.
+		pumpCtx, pumpCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		pump := exec.CommandContext(pumpCtx, "lore", "settlement", "triggers", "--json")
+		pump.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		_ = pump.Run()
+		pumpCancel()
+
 		cmd := exec.Command("lore", "settlement", "status", "--json")
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		out, err := cmd.CombinedOutput()

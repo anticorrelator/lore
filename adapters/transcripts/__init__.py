@@ -178,8 +178,9 @@ def get_provider(framework: str | None = None) -> Any:
 
     Returns:
         The provider module (with `parse_transcript`,
-        `extract_file_paths`, `previous_session_path`, `provider_status`,
-        `read_raw_lines`, `session_metadata`).
+        `extract_file_paths`, `previous_session_path`,
+        `list_session_paths`, `provider_status`, `read_raw_lines`,
+        `session_metadata`).
 
     Raises:
         UnsupportedFrameworkError: if no provider is registered for

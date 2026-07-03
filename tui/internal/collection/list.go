@@ -211,9 +211,9 @@ func (l List) Init() tea.Cmd {
 	return nil
 }
 
-// Update handles sizing and navigation keys (j/k/up/down, g/G/home/end,
-// enter). Consumer-specific keys (filter toggles, actions) belong in the
-// consumer's Update before delegating here.
+// Update handles sizing, navigation keys (j/k/up/down, g/G/home/end,
+// enter), and mouse-wheel cursor movement. Consumer-specific keys (filter
+// toggles, actions) belong in the consumer's Update before delegating here.
 func (l List) Update(msg tea.Msg) (List, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -241,10 +241,30 @@ func (l List) Update(msg tea.Msg) (List, tea.Cmd) {
 				return l, l.onSelect(r)
 			}
 		}
-		if l.cursor != prev && l.onCursorChange != nil {
-			if r, ok := l.CurrentRow(); ok && !r.Header && r.ID != "" {
-				return l, l.onCursorChange(r.ID)
-			}
+		return l.emitCursorChange(prev)
+
+	case tea.MouseWheelMsg:
+		// Wheel moves the cursor like j/k: the render window follows the
+		// cursor (windowByBudget), so cursor movement is what scrolls.
+		visible := l.visibleIdxs()
+		prev := l.cursor
+		switch msg.Button {
+		case tea.MouseWheelDown:
+			l.cursor = nextVisible(l.cursor, 1, visible)
+		case tea.MouseWheelUp:
+			l.cursor = nextVisible(l.cursor, -1, visible)
+		}
+		return l.emitCursorChange(prev)
+	}
+	return l, nil
+}
+
+// emitCursorChange fires the onCursorChange hook when the cursor moved to a
+// non-header row with an ID.
+func (l List) emitCursorChange(prev int) (List, tea.Cmd) {
+	if l.cursor != prev && l.onCursorChange != nil {
+		if r, ok := l.CurrentRow(); ok && !r.Header && r.ID != "" {
+			return l, l.onCursorChange(r.ID)
 		}
 	}
 	return l, nil

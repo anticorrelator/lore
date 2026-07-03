@@ -829,10 +829,13 @@ func TestSettlementStatusLoadedAutoProcessesReadyQueue(t *testing.T) {
 }
 
 func TestSettlementStatusLoadedAutoProcessesDrainedBatchBacklog(t *testing.T) {
+	// The backlog arm only drives auto-process under the dormant census
+	// posture; in the event-driven posture the backlog does not auto-refill.
 	m := minimalModel(stateSettlement, nil, nil)
 	status := settlement.Status{
 		Available: true,
 		Enabled:   true,
+		Dispatch:  settlement.Dispatch{Mode: "census", CensusEnabled: true},
 		Queue:     settlement.Queue{Pending: 0, Running: 0, Total: 0},
 		Batch:     settlement.Batch{BacklogSize: 76},
 		Harness:   settlement.Harness{Concurrency: 1, ActiveLeases: 0},
@@ -842,10 +845,45 @@ func TestSettlementStatusLoadedAutoProcessesDrainedBatchBacklog(t *testing.T) {
 	nm := next.(model)
 
 	if !nm.settlementProcessInFlight {
-		t.Fatal("drained active batch with backlog should start an automatic process command")
+		t.Fatal("drained active batch with backlog should start an automatic process command under the census posture")
 	}
 	if cmd == nil {
 		t.Fatal("expected automatic process command")
+	}
+}
+
+func TestSettlementStatusLoadedEventDrivenBacklogDoesNotAutoProcess(t *testing.T) {
+	m := minimalModel(stateSettlement, nil, nil)
+	status := settlement.Status{
+		Available: true,
+		Enabled:   true,
+		Queue:     settlement.Queue{Pending: 0, Running: 0, Total: 0},
+		Batch:     settlement.Batch{BacklogSize: 76},
+		Harness:   settlement.Harness{Concurrency: 1, ActiveLeases: 0},
+	}
+
+	next, _ := m.Update(settlementStatusLoadedMsg{status: status})
+	nm := next.(model)
+
+	if nm.settlementProcessInFlight {
+		t.Fatal("event-driven posture must not auto-process from a batch backlog (census-wide enqueue retired)")
+	}
+}
+
+func TestSettlementStatusLoadedEventDrivenPendingStillAutoProcesses(t *testing.T) {
+	m := minimalModel(stateSettlement, nil, nil)
+	status := settlement.Status{
+		Available: true,
+		Enabled:   true,
+		Queue:     settlement.Queue{Pending: 2, Running: 0, Total: 2},
+		Harness:   settlement.Harness{Concurrency: 1, ActiveLeases: 0},
+	}
+
+	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
+	nm := next.(model)
+
+	if !nm.settlementProcessInFlight || cmd == nil {
+		t.Fatal("pending trigger-enqueued items are the event-driven dispatch signal and must auto-process")
 	}
 }
 
@@ -2871,7 +2909,12 @@ func TestTerminalModeStatusBarKeybindContract(t *testing.T) {
 		}
 	})
 	t.Run("Ctrl+c (terminate)", func(t *testing.T) {
-		_, cmd := updateModel(t, terminalModel(), press('c', tea.ModCtrl))
+		m := terminalModel()
+		hints := stripANSI(strings.Join(m.statusBarHints(kmTerminal), " · "))
+		if !strings.Contains(hints, "Ctrl+c terminate") {
+			t.Errorf("status bar does not advertise terminate: %s", hints)
+		}
+		_, cmd := updateModel(t, m, press('c', tea.ModCtrl))
 		if cmd == nil {
 			t.Fatal("ctrl+c should dispatch a terminate command")
 		}
@@ -2882,6 +2925,28 @@ func TestTerminalModeStatusBarKeybindContract(t *testing.T) {
 		}
 		if tm.Slug != "item-1" {
 			t.Errorf("terminate slug = %q, want item-1", tm.Slug)
+		}
+	})
+	t.Run("Ctrl+c (discard)", func(t *testing.T) {
+		m := terminalModel()
+		panel := m.specPanels["item-1"]
+		panel, _ = panel.Update(work.StreamCompleteMsg{Slug: "item-1"})
+		m.specPanels["item-1"] = panel
+		hints := stripANSI(strings.Join(m.statusBarHints(kmTerminal), " · "))
+		if !strings.Contains(hints, "Ctrl+c discard") {
+			t.Errorf("status bar does not advertise discard on a done panel: %s", hints)
+		}
+		nm, cmd := updateModel(t, m, press('c', tea.ModCtrl))
+		if cmd == nil {
+			t.Fatal("ctrl+c should dispatch the discard command")
+		}
+		msg := cmd()
+		if _, ok := msg.(work.TerminalTerminateMsg); !ok {
+			t.Fatalf("ctrl+c produced %T, want work.TerminalTerminateMsg", msg)
+		}
+		nm, _ = updateModel(t, nm, msg)
+		if nm.hasSpecPanel("item-1") {
+			t.Error("discard should drop the finished panel and its scrollback")
 		}
 	})
 	t.Run("Esc (forwarded to subprocess, focus kept)", func(t *testing.T) {

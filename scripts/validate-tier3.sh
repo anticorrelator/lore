@@ -22,6 +22,13 @@
 # claim, why_future_agent_cares, falsifier must be non-empty strings.
 # source_artifact_ids must be a non-empty array.
 # related_files must be an array (may be empty).
+#
+# Optional executable_falsifier (additive, non-gating):
+#   executable_falsifier    — object: {command, expected_output_shape[, root]}
+#                             command and expected_output_shape are non-empty
+#                             strings; root, when present, is a non-empty string.
+# When present, the object is type-checked but never required — the prose
+# `falsifier` field stays mandatory regardless. Executed by falsifier-run.py.
 
 set -euo pipefail
 
@@ -173,6 +180,26 @@ if ! printf '%s' "$ROW" | jq -e '.source_artifact_ids | type == "array"' >/dev/n
   fail_field "source_artifact_ids must be a JSON array"
 elif ! printf '%s' "$ROW" | jq -e '.source_artifact_ids | length > 0' >/dev/null 2>&1; then
   fail_field "source_artifact_ids must not be empty — at least one Tier 2 source artifact ID is required"
+fi
+
+# --- Optional executable_falsifier: type checks only (additive, non-gating) ---
+# Mirrors validate-tier2.sh's optional-metadata idiom: when present, the object
+# must have the documented shape; when absent, validation is unaffected.
+# Explicit null is rejected — writers omit the field rather than emit an empty
+# value.
+if printf '%s' "$ROW" | jq -e 'has("executable_falsifier")' >/dev/null 2>&1; then
+  EF_ERR=$(printf '%s' "$ROW" | jq -r '
+    def nonempty_str: type == "string" and (gsub("^\\s+|\\s+$"; "") | length) > 0;
+    .executable_falsifier |
+    if type != "object" then "must be an object: {command, expected_output_shape}"
+    elif (.command | nonempty_str | not) then ".command must be a non-empty string"
+    elif (.expected_output_shape | nonempty_str | not) then ".expected_output_shape must be a non-empty string"
+    elif (has("root") and ((.root | nonempty_str) | not)) then ".root, when present, must be a non-empty string"
+    else empty end
+  ')
+  if [[ -n "$EF_ERR" ]]; then
+    fail_field "executable_falsifier $EF_ERR"
+  fi
 fi
 
 # --- Final result ---

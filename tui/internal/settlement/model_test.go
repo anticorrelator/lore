@@ -117,8 +117,11 @@ func TestParseStatusCarriesTerminalVerdicts(t *testing.T) {
 }
 
 func TestParseStatusInfersNextActionFromDrainedBatchBacklog(t *testing.T) {
+	// The drained-batch backlog only implies dispatchable work under the
+	// dormant census posture; event-driven queues do not auto-refill from it.
 	st, err := ParseStatus([]byte(`{
 		"enabled": true,
+		"dispatch": {"mode": "census", "census_enabled": true},
 		"queue": {"pending": 0, "running": 0, "total": 0},
 		"batch": {"backlog_size": 76},
 		"harness": {"concurrency": 1}
@@ -131,6 +134,24 @@ func TestParseStatusInfersNextActionFromDrainedBatchBacklog(t *testing.T) {
 	}
 	if got := NewModel().ReplaceStatus(st).Count(); got != 76 {
 		t.Fatalf("Count = %d, want backlog size", got)
+	}
+}
+
+func TestParseStatusEventDrivenBacklogIsIdle(t *testing.T) {
+	st, err := ParseStatus([]byte(`{
+		"enabled": true,
+		"queue": {"pending": 0, "running": 0, "total": 0},
+		"batch": {"backlog_size": 76},
+		"harness": {"concurrency": 1}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+	if st.Dispatch.CensusEnabled {
+		t.Fatalf("absent dispatch block must parse as census_enabled=false")
+	}
+	if st.NextAction != "idle" {
+		t.Fatalf("NextAction = %q, want idle (backlog is not dispatchable without the census)", st.NextAction)
 	}
 }
 

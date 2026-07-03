@@ -257,13 +257,15 @@ fi
 # missing row is unrecoverable — let the failure fail the promotion visibly.
 # entry_path is stamped on so the enqueue below sees the same shape the writer
 # persists (the writer also stamps it from --entry-path).
+# executable_falsifier rides along when the Tier-3 row carries one — the
+# producer row is its durable home (validate-tier3.sh already type-checked it).
 COMMONS_ROW=$(printf '%s' "$ROW" | jq -c --arg ep "$ENTRY_PATH" --arg wi "$WORK_ITEM" '{
   claim_id, claim, falsifier, scale,
   related_files: (.related_files // []),
   work_item: $wi,
   captured_at_sha,
   entry_path: $ep
-}')
+} + (if has("executable_falsifier") then {executable_falsifier} else {} end)')
 if ! printf '%s' "$COMMONS_ROW" \
   | "$SCRIPT_DIR/promote-commons-append.sh" --work-item "$WORK_ITEM" --entry-path "$ENTRY_PATH"; then
   die "promote-commons-append.sh rejected the producer row — promotion failed (the falsifier is unrecoverable without it)"

@@ -240,6 +240,55 @@ print('OK')
   [[ "$output" == *"OK"* ]]
 }
 
+@test "list_session_paths returns all project JSONLs sorted mtime-descending (claude-code)" {
+  run provider_py "
+import os
+from pathlib import Path
+from adapters.transcripts import get_provider
+
+fake_home = os.environ['TEST_LORE_DATA_DIR']
+os.environ['HOME'] = fake_home
+cwd = '/work/test-project'
+project_dir = Path(fake_home) / '.claude' / 'projects' / cwd.replace('/', '-')
+project_dir.mkdir(parents=True, exist_ok=True)
+
+files = []
+for i, name in enumerate(['oldest.jsonl', 'middle.jsonl', 'newest.jsonl']):
+    p = project_dir / name
+    p.write_text('{}\n')
+    os.utime(p, (1000 + i, 1000 + i))
+    files.append(p)
+
+provider = get_provider('claude-code')
+result = provider.list_session_paths(cwd)
+expected = [str(files[2]), str(files[1]), str(files[0])]
+assert result == expected, f'expected mtime-desc {expected}, got {result}'
+assert provider.list_session_paths('/no/such/cwd') == []
+print('OK')
+"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+}
+
+@test "list_session_paths degraded stubs: opencode empty, codex names global-scan gap" {
+  run provider_py "
+from adapters.transcripts import get_provider
+
+oc = get_provider('opencode')
+assert oc.list_session_paths('/any/cwd') == [], 'opencode must return []'
+_, oc_reason = oc.provider_status()
+assert 'list_session_paths' in oc_reason, f'opencode reason must name the gap: {oc_reason!r}'
+
+cx = get_provider('codex')
+assert isinstance(cx.list_session_paths('/any/cwd'), list)
+_, cx_reason = cx.provider_status()
+assert 'list_session_paths' in cx_reason, f'codex reason must name the gap: {cx_reason!r}'
+print('OK')
+"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+}
+
 @test "get_provider returns partial provider for opencode (T51 stub landed)" {
   run provider_py "
 from adapters.transcripts import get_provider

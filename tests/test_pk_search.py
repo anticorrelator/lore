@@ -828,6 +828,30 @@ class TestSearchLogging:
             record = json.loads(f.readline())
         assert "caller" not in record
 
+    def test_search_logging_zero_results_is_miss(self, knowledge_dir):
+        """Zero-result searches should log miss=true with null top_score."""
+        searcher = Searcher(str(knowledge_dir))
+        searcher.search("xyzzy_nonexistent_term")
+
+        log_path = os.path.join(str(knowledge_dir), "_meta", "retrieval-log.jsonl")
+        with open(log_path, encoding="utf-8") as f:
+            record = json.loads(f.readline())
+        assert record["miss"] is True
+        assert record["top_score"] is None
+
+    def test_search_logging_hit_records_top_score(self, knowledge_dir):
+        """Searches with results should log miss=false and the best result's score."""
+        searcher = Searcher(str(knowledge_dir))
+        results = searcher.search("database sharding")
+        assert len(results) > 0
+
+        log_path = os.path.join(str(knowledge_dir), "_meta", "retrieval-log.jsonl")
+        with open(log_path, encoding="utf-8") as f:
+            record = json.loads(f.readline())
+        assert record["miss"] is False
+        assert record["top_score"] == min(r["score"] for r in results)
+        assert record["top_score"] < 0
+
 
 # ---------------------------------------------------------------------------
 # Source Type Filter Tests

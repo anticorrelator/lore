@@ -76,6 +76,10 @@
       "enabled": false,
       "timezone": "local"
     },
+    "dispatch": {
+      "census_enabled": false,
+      "spot_sample_weekly_budget": 12
+    },
     "harness_selection": {
       "mode": "first_eligible",
       "eligible_frameworks": [],

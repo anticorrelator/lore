@@ -684,6 +684,36 @@ if [[ ! -d "$KDIR" ]]; then
   exit 1
 fi
 
+# Trust-ledger mirror of deterministic check results (reanchor, grounding
+# preflight). The ledger keys on knowledge-entry identity, so emission happens
+# only when the audited artifact resolves to a commons entry (COMMONS_ENTRY_PATH
+# set by the --kind commons dispatch below); other artifact kinds have no entry
+# to attribute the evidence to. Best-effort: a failed append warns and never
+# fails the audit; results mirror the checks verbatim — entry status is
+# adjudicated by the gates, never here.
+COMMONS_ENTRY_PATH=""
+TRUST_RUN_ID="audit-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+
+emit_mechanical_check_event() {
+  local check_name="$1" result="$2" target="$3" detail="$4"
+  [[ -n "$COMMONS_ENTRY_PATH" ]] || return 0
+  local args=(
+    --event mechanical-check
+    --entry-path "$COMMONS_ENTRY_PATH"
+    --source audit
+    --check-name "$check_name"
+    --target "$target"
+    --result "$result"
+    --run-id "$TRUST_RUN_ID"
+    --kdir "$KDIR"
+  )
+  [[ -n "$detail" ]] && args+=(--detail "$detail")
+  if ! "$SCRIPT_DIR/trust-event-append.sh" "${args[@]}" >/dev/null 2>&1; then
+    echo "[audit] warning: trust-event append failed ($check_name) — non-fatal" >&2
+  fi
+  return 0
+}
+
 # read_calibration_state — resolve the judge's calibration_state from the
 # marker file at $KDIR/_scorecards/calibration-state.json keyed by
 # (judge_template_id, judge_template_version). Defaults to "pre-calibration"
@@ -953,6 +983,26 @@ PYEOF
       AUDIT_CANDIDATES_PATH=""
       CONSUMPTION_CONTRADICTIONS_PATH=""
       ARTIFACT_TYPE="commons"
+      # The row's entry_path (flowback authority) keys the trust-ledger mirror
+      # of this audit's deterministic check results.
+      COMMONS_ENTRY_PATH=$(KIND_FILE="$kind_source_file" KIND_ID="$ID_FLAG" python3 - <<'PYEOF'
+import json, os
+want = os.environ["KIND_ID"]
+found = ""
+with open(os.environ["KIND_FILE"], encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and str(row.get("claim_id") or "") == want:
+            found = str(row.get("entry_path") or "")
+print(found)
+PYEOF
+) || COMMONS_ENTRY_PATH=""
       ;;
   esac
   ARTIFACT_PATH="$kind_source_file"
@@ -1679,6 +1729,44 @@ with open(verdicts_file, "a") as fh:
     fh.write(json.dumps(wrapped) + "\n")
 PYEOF
 
+# Trust-ledger adjudication mirror. Like the mechanical-check mirror above,
+# emission requires knowledge-entry identity, so it fires only when the
+# audited artifact resolved to a commons entry. Attribution is the wrapper's
+# resolved (template_id, template_version) pair, registered first so ledger
+# rows always resolve against the template registry. Only real judge verdicts
+# on the claim map to adjudications — verified → confirmed, contradicted →
+# rejected; unverified is an abstention and emits nothing. Best-effort: a
+# failed register or append warns and never fails the audit.
+if [[ -n "$COMMONS_ENTRY_PATH" ]]; then
+  if ! bash "$SCRIPT_DIR/template-registry-register.sh" \
+        --template-id "$GATE_TEMPLATE_ID" \
+        --template-version "$GATE_TEMPLATE_VERSION" \
+        --template-path "$CORRECTNESS_GATE_TEMPLATE" \
+        --kdir "$KDIR" >/dev/null 2>&1; then
+    echo "[audit] warning: template-registry register failed ($GATE_TEMPLATE_ID) — non-fatal" >&2
+  fi
+  while IFS=$'\t' read -r _adj_claim_id _adj_verdict; do
+    [[ -n "$_adj_claim_id" ]] || continue
+    case "$_adj_verdict" in
+      verified)     _adj_mapped="confirmed" ;;
+      contradicted) _adj_mapped="rejected" ;;
+      *)            continue ;;
+    esac
+    if ! "$SCRIPT_DIR/trust-event-append.sh" \
+          --event adjudication \
+          --entry-path "$COMMONS_ENTRY_PATH" \
+          --source audit \
+          --claim-id "$_adj_claim_id" \
+          --verdict "$_adj_mapped" \
+          --template-id "$GATE_TEMPLATE_ID" \
+          --template-version "$GATE_TEMPLATE_VERSION" \
+          --run-id "$TRUST_RUN_ID" \
+          --kdir "$KDIR" >/dev/null 2>&1; then
+      echo "[audit] warning: trust-event append failed (adjudication $_adj_claim_id) — non-fatal" >&2
+    fi
+  done < <(jq -r '.verdicts[]? | [.claim_id, .verdict] | @tsv' "$GATE_RAW_FILE" 2>/dev/null)
+fi
+
 # Compute + append correctness-gate scorecard rows per contract.md table:
 #   factual_precision       (producer template, scored, claim-local)
 #   falsifier_quality       (producer template, scored, claim-local)
@@ -2054,6 +2142,7 @@ REVERSE_AUDITOR_VERDICT="none"          # none | omission-claim | silence | insu
 # class failure (no clone has the content) distinct from the producer-
 # class failures (snippet disagreed).
 REVERSE_AUDITOR_PREFLIGHT_REASON=""
+REVERSE_AUDITOR_PREFLIGHT_INVOKE_FAILED=0  # 1 when grounding-preflight.py itself errored (vs a fail verdict)
 REVERSE_AUDITOR_QUEUE_DEST=""           # candidates | attempts | silence | reattempt
 REVERSE_AUDITOR_COVERAGE_STATE=""       # covered | insufficient-evidence (read from emission)
 REVERSE_AUDITOR_PREFLIGHT_SOFTENED=0    # 1 when reason == verified-with-drift (pass with drift)
@@ -2286,6 +2375,7 @@ PYEOF
       # invocation-failure guard; the audit never aborts. stdout is captured to
       # a temp file (pure JSON); all reanchor diagnostics go to stderr.
       REVERSE_AUDITOR_REANCHOR_TMP=$(mktemp "${TMPDIR:-/tmp}/audit-reverse-auditor-reanchor.XXXXXX")
+      REANCHOR_RESULT="pass"
       if python3 "$SCRIPT_DIR/reanchor-omission-claim.py" \
           --claim-file "$REVERSE_AUDITOR_RAW_FILE" \
           --repo-root "$PREFLIGHT_REPO_ROOT" \
@@ -2300,7 +2390,33 @@ PYEOF
       else
         echo "[audit] warning: reanchor-omission-claim.py failed — using original emission unchanged" >&2
         rm -f "$REVERSE_AUDITOR_REANCHOR_TMP"
+        REANCHOR_RESULT="error"
       fi
+
+      # The claim's code anchor doubles as the mechanical-check target for
+      # the trust-ledger mirror of the reanchor and preflight results below.
+      RA_ANCHOR_TARGET=$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print("{}:{}".format(d.get("file") or "unknown", d.get("line_range") or "unknown"))
+except Exception:
+    print("unknown")
+' "$REVERSE_AUDITOR_RAW_FILE" 2>/dev/null) || RA_ANCHOR_TARGET="unknown"
+
+      if [[ "$REANCHOR_RESULT" == "error" ]]; then
+        REANCHOR_DETAIL="reanchor tool failed; original emission kept"
+      else
+        REANCHOR_DETAIL=$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print("reanchor-applied" if d.get("reanchor") else "no-rewrite")
+except Exception:
+    print("no-rewrite")
+' "$REVERSE_AUDITOR_RAW_FILE" 2>/dev/null) || REANCHOR_DETAIL="no-rewrite"
+      fi
+      emit_mechanical_check_event "reanchor-omission-claim" "$REANCHOR_RESULT" "$RA_ANCHOR_TARGET" "$REANCHOR_DETAIL"
 
       REVERSE_AUDITOR_COVERAGE_STATE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("coverage_state") or "")' "$REVERSE_AUDITOR_RAW_FILE")
 
@@ -2355,6 +2471,7 @@ PYEOF
             > "$REVERSE_AUDITOR_PREFLIGHT_TMP" 2>/dev/null; then
           echo "[audit] warning: grounding-preflight.py invocation failed — treating as preflight-failed" >&2
           printf '%s\n' '{"pass": false, "reason": "field-missing", "detail": "grounding-preflight.py invocation failed"}' > "$REVERSE_AUDITOR_PREFLIGHT_TMP"
+          REVERSE_AUDITOR_PREFLIGHT_INVOKE_FAILED=1
         fi
 
         REVERSE_AUDITOR_PREFLIGHT_REASON=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reason","unknown"))' "$REVERSE_AUDITOR_PREFLIGHT_TMP")
@@ -2376,6 +2493,24 @@ PYEOF
           # omission claim was routed to audit-attempts.jsonl.
           REVERSE_AUDITOR_EXIT_CODE=3
         fi
+      fi
+
+      # Trust-ledger mirror of the preflight outcome: skip = no anchor was
+      # checked (abstention, or silence short-circuit); error = the checker
+      # itself failed; pass/fail mirror the preflight verdict verbatim.
+      if [[ "$REVERSE_AUDITOR_COVERAGE_STATE" == "insufficient-evidence" ]]; then
+        emit_mechanical_check_event "grounding-preflight" "skip" "${RA_ANCHOR_TARGET:-unknown}" "insufficient-evidence: reverse-auditor abstained; preflight skipped"
+      elif [[ "$REVERSE_AUDITOR_PREFLIGHT_INVOKE_FAILED" -eq 1 ]]; then
+        emit_mechanical_check_event "grounding-preflight" "error" "${RA_ANCHOR_TARGET:-unknown}" "grounding-preflight invocation failed"
+      else
+        if [[ "$REVERSE_AUDITOR_PREFLIGHT_REASON" == "silence" ]]; then
+          PREFLIGHT_MC_RESULT="skip"
+        elif [[ "$REVERSE_AUDITOR_PREFLIGHT_PASS" == "true" ]]; then
+          PREFLIGHT_MC_RESULT="pass"
+        else
+          PREFLIGHT_MC_RESULT="fail"
+        fi
+        emit_mechanical_check_event "grounding-preflight" "$PREFLIGHT_MC_RESULT" "${RA_ANCHOR_TARGET:-unknown}" "$REVERSE_AUDITOR_PREFLIGHT_REASON"
       fi
 
       # Resolve the owning work-item slug once — both the abstention

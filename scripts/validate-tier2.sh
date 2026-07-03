@@ -47,6 +47,13 @@
 #   anchor_warning          — string, e.g. "unpushed_local_only"
 # When present, these fields are type-checked but never required. Pre-existing
 # rows without them continue to validate. Derivation happens in evidence-append.sh.
+#
+# Optional executable_falsifier (additive, non-gating):
+#   executable_falsifier    — object: {command, expected_output_shape[, root]}
+#                             command and expected_output_shape are non-empty
+#                             strings; root, when present, is a non-empty string.
+# When present, the object is type-checked but never required — the prose
+# `falsifier` field stays mandatory regardless. Executed by falsifier-run.py.
 
 set -euo pipefail
 
@@ -305,6 +312,25 @@ fi
 if printf '%s' "$ROW" | jq -e 'has("anchor_warning")' >/dev/null 2>&1; then
   if ! printf '%s' "$ROW" | jq -e '.anchor_warning | type == "string"' >/dev/null 2>&1; then
     fail_field "anchor_warning must be a string"
+  fi
+fi
+
+# --- Optional executable_falsifier: type checks only (additive, non-gating) ---
+# Same idiom as the source-anchor block above: when present, the object must
+# have the documented shape; when absent, validation is unaffected. Explicit
+# null is rejected — writers omit the field rather than emit an empty value.
+if printf '%s' "$ROW" | jq -e 'has("executable_falsifier")' >/dev/null 2>&1; then
+  EF_ERR=$(printf '%s' "$ROW" | jq -r '
+    def nonempty_str: type == "string" and (gsub("^\\s+|\\s+$"; "") | length) > 0;
+    .executable_falsifier |
+    if type != "object" then "must be an object: {command, expected_output_shape}"
+    elif (.command | nonempty_str | not) then ".command must be a non-empty string"
+    elif (.expected_output_shape | nonempty_str | not) then ".expected_output_shape must be a non-empty string"
+    elif (has("root") and ((.root | nonempty_str) | not)) then ".root, when present, must be a non-empty string"
+    else empty end
+  ')
+  if [[ -n "$EF_ERR" ]]; then
+    fail_field "executable_falsifier $EF_ERR"
   fi
 fi
 

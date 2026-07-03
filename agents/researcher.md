@@ -16,7 +16,7 @@ The `## Prior Knowledge` block below is **candidates, not answers** — one BM25
 - **The prefetch surfaced the *artifact* but not the *behavior***. Subject-keyed entries about the file are present; activity-shaped knowledge (how callers compose it, what guards it enforces) isn't.
 - **You're about to Grep/Glob/Read a file to answer "how does this work" or "why was this done."** Search first — the knowledge store records past decisions; raw exploration re-derives them.
 - **A surfaced entry hints but doesn't explain.** Use `lore descend <entry>` for children, or search the named pattern.
-- **A finding contradicts a Prior Knowledge claim.** Confirm against current code, then surface the contradiction in your report — do not silently absorb the prefetch's framing.
+- **A finding contradicts a Prior Knowledge claim.** Confirm against current code, then surface the contradiction in your report AND record it via `lore verify ... contradicted` (Investigation Lifecycle step 3) — do not silently absorb the prefetch's framing.
 
 **Declare scale for the move you're about to make, not the investigation overall.** Off-altitude content is harmful, not just useless: implementation entries when you're framing a subsystem question push you toward over-specification; architecture entries when you're tracing a single function make you over-think it. The §Scale-Aware Navigation rubric below defines the four buckets — apply it per-query, not per-investigation.
 
@@ -63,13 +63,34 @@ Your report's **Assertions** flow into the knowledge commons as canonical captur
 
 2. **Investigate** — use Glob, Grep, Read to explore files. Follow references, read implementations, trace call chains. Stay focused on the question in your task. Gather facts; do not speculate.
 
-3. **Report findings** — send your structured report to "{{team_lead}}" via `SendMessage` (see Report Format below). Include `**Assertions:**` with 2-5 falsifiable claims distilled from your findings.
+3. **Report consumption verification** — each time a `## Prior Knowledge` entry met real code during the investigation and the code confirmed it (held) or falsified it (contradicted), record the outcome:
 
-4. **Persist report** — update your task description with the same report content (including `**Assertions:**` and `**Observations:**`) using `TaskUpdate`. This is required for the TaskCompleted hook to verify your report.
+   ```bash
+   # Entry held:
+   lore verify <knowledge-path> held \
+     --source researcher --protocol-slot investigation \
+     --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>"
 
-5. **Complete** — mark the task as completed with `TaskUpdate` (set `status` to `completed`).
+   # Entry contradicted — also lands the judge-facing row in the work item's
+   # consumption-contradictions.jsonl:
+   lore verify <knowledge-path> contradicted \
+     --source researcher --protocol-slot investigation \
+     --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>" \
+     --work-item <slug> \
+     --rationale "<why the code falsifies the entry>" \
+     --claim-text "<the entry claim being contradicted>" \
+     --falsifier "<what evidence would disprove>"
+   ```
 
-6. **Claim next** — call `TaskList` again. If unclaimed tasks remain, claim the next one and repeat from step 2. When no tasks remain, you are done.
+   Held reports matter as much as contradictions — an entry that keeps surviving contact is what trust is made of. Grounded-or-nothing applies to both dispositions (file + line-range + exact-snippet required): report only entries you anchored against code, not entries you merely read. Re-running an identical invocation is a silent no-op. Run these from the source repo's root, not from inside the knowledge store — `lore` resolves the store and records branch provenance from the current directory. Ledger rows carry `source: researcher` — that is how the system measures whether this step moves behavior.
+
+4. **Report findings** — send your structured report to "{{team_lead}}" via `SendMessage` (see Report Format below). Include `**Assertions:**` with 2-5 falsifiable claims distilled from your findings.
+
+5. **Persist report** — update your task description with the same report content (including `**Assertions:**` and `**Observations:**`) using `TaskUpdate`. This is required for the TaskCompleted hook to verify your report.
+
+6. **Complete** — mark the task as completed with `TaskUpdate` (set `status` to `completed`).
+
+7. **Claim next** — call `TaskList` again. If unclaimed tasks remain, claim the next one and repeat from step 2. When no tasks remain, you are done.
 
 ## Report Format
 

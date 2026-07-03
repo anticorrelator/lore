@@ -40,7 +40,9 @@ _PARTIAL_REASON = (
     "from Claude JSONL; role extraction from Codex rollout entries is partial; "
     "novelty-review: parse_transcript surfaces available text and tool names but "
     "role-filtered heuristic signals (user-correction, preference-signal) degrade "
-    "when role is empty-sentinel — detection proceeds on unfiltered assistant text"
+    "when role is empty-sentinel — detection proceeds on unfiltered assistant text; "
+    "list_session_paths is a global mtime scan, not cwd-scoped (Codex has no "
+    "cwd-keyed session index)"
 )
 
 
@@ -233,6 +235,17 @@ def previous_session_path(cwd: str) -> str | None:
     return str(files[1])
 
 
+def list_session_paths(cwd: str) -> list[str]:
+    """Return all Codex rollout paths, sorted by mtime descending.
+
+    Codex has no cwd-keyed session index, so this is a global scan of
+    the sessions directory — the same approximation as
+    `previous_session_path`, named in the `provider_status` reason.
+    Returns `[]` when the sessions directory does not exist.
+    """
+    return [str(f) for f in _find_rollout_files_for_cwd(cwd)]
+
+
 def provider_status() -> tuple[str, str]:
     """Return `("partial", <reason>)` for the Codex provider.
 
@@ -310,6 +323,7 @@ __all__ = [
     "parse_transcript",
     "extract_file_paths",
     "previous_session_path",
+    "list_session_paths",
     "provider_status",
     "read_raw_lines",
     "session_metadata",

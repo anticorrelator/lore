@@ -36,6 +36,15 @@ SNIPPET_MAX_CHARS = 500
 DEFAULT_LIMIT = 10
 DEFAULT_THRESHOLD = 0.0
 KNOWLEDGE_BOOST = 2.0  # BM25 rank multiplier for knowledge entries in ORDER BY (rank is negative; higher multiplier = more negative = ranked higher)
+# Trust term in ORDER BY: rank is multiplied by (1 + TRUST_RANK_WEIGHT * trust_score).
+# trust_score lives in (-1, 1), so the factor stays in (0.7, 1.3) — the weight must
+# remain < 1.0 or a fully distrusted entry would flip the sign of its negative rank.
+TRUST_RANK_WEIGHT = 0.3
+# FTS5 rank is negative for every match, so 0.0 marks only zero-result searches
+# as misses. Lowering it would also flag weak-scoring hits, but BM25 rank
+# magnitude scales with query token count (OR-joined tokens sum) — calibrate
+# against live query lengths before setting a nonzero value.
+MISS_TOP_SCORE_THRESHOLD = 0.0
 SOURCE_TYPES = ("knowledge", "work", "plan", "thread", "source")
 SOURCE_FILE_EXTENSIONS = {".py", ".sh"}
 SOURCE_SKIP_DIRS = {"__pycache__", ".git", "node_modules", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", "dist", "build", ".egg-info"}
@@ -75,6 +84,40 @@ def _parse_scale_set(value: str | None) -> set[str]:
     return {part.strip() for part in stripped.split(",") if part.strip()}
 
 
+def _trust_compute():
+    """Import scripts/trust-compute.py (hyphenated filename) as a module."""
+    import importlib.util
+    if "trust_compute" in sys.modules:
+        return sys.modules["trust_compute"]
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trust-compute.py")
+    spec = importlib.util.spec_from_file_location("trust_compute", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["trust_compute"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# Live ledger fold for display, cached on the ledger file's identity so a batch
+# of render_trust_stamp calls parses the ledger once but never shows stale trust.
+_LEDGER_FOLD_CACHE: dict = {"stamp": None, "fold": None}
+
+
+def _ledger_fold(knowledge_dir: str) -> tuple[dict, dict]:
+    """(scores, migrations) from the store's trust ledger, mtime-cached."""
+    tc = _trust_compute()
+    ledger_path = os.path.join(os.path.abspath(knowledge_dir), tc.LEDGER_RELPATH)
+    try:
+        st = os.stat(ledger_path)
+        stamp = (ledger_path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = (ledger_path, None, None)
+    if _LEDGER_FOLD_CACHE["stamp"] != stamp:
+        scores, migrations, _warnings = tc.compute_trust(knowledge_dir)
+        _LEDGER_FOLD_CACHE["stamp"] = stamp
+        _LEDGER_FOLD_CACHE["fold"] = (scores, migrations)
+    return _LEDGER_FOLD_CACHE["fold"]
+
+
 _CORRECTIONS_FIELD_RE = re.compile(r"\|\s*corrections:\s*(\[.*?\])\s*(?:-->|\|)", re.DOTALL)
 
 
@@ -104,14 +147,17 @@ def render_trust_stamp(result: dict, knowledge_dir: str | None = None) -> str:
     """Render a compact trust-stamp header line for a search result.
 
     Format:
-        [trust: template=abc123 | status=current | learned=2026-04-14 | confidence=high | retention=null | correction_recency=2026-04-23]
+        [trust: template=abc123 | status=current | learned=2026-04-14 | confidence=high | retention=null | correction_recency=2026-04-23 | ledger=+0.667]
 
     Fields render as 'unknown' when absent (except retention which renders as 'null'
     and correction_recency which renders as 'null' when never corrected).
 
     When knowledge_dir is provided, the entry file is read to extract correction_recency
-    from the corrections[] META field (Phase 10 task-65). Omitted when knowledge_dir
-    is not provided for backwards-compatible callers.
+    from the corrections[] META field (Phase 10 task-65), and the ledger component is
+    folded live from _trust/trust-events.jsonl (the correction_recency live-read
+    precedent) so displayed trust is never stale even when the cached rank column is
+    one reindex behind. Entries with no ledger rows render 'ledger=unobserved'.
+    Both are omitted when knowledge_dir is not provided for backwards-compatible callers.
     """
     tv = result.get("template_version") or "unknown"
     status = result.get("entry_status") or "unknown"
@@ -126,7 +172,17 @@ def render_trust_stamp(result: dict, knowledge_dir: str | None = None) -> str:
             recency_val = recency if recency else "null"
         else:
             recency_val = "null"
-        return base + f" | correction_recency={recency_val}]"
+        ledger_val = "unobserved"
+        if rel_path:
+            try:
+                tc = _trust_compute()
+                scores, migrations = _ledger_fold(knowledge_dir)
+                summary = tc.score_for_entry(scores, migrations, rel_path)
+                if summary is not None:
+                    ledger_val = f"{summary['score']:+.3f}"
+            except Exception:
+                pass  # display is best-effort; the stamp's other fields still render
+        return base + f" | correction_recency={recency_val} | ledger={ledger_val}]"
     return base + "]"
 
 
@@ -180,12 +236,34 @@ def attach_similar_entries(searcher: "Searcher", results: list[dict]) -> None:
 class Indexer:
     """Builds and maintains the FTS5 index."""
 
-    SCHEMA_VERSION = 10  # v10: template_version column for trust-stamp support
+    SCHEMA_VERSION = 11  # v11: trust_score column (ledger fold cached at index time)
 
     def __init__(self, knowledge_dir: str, repo_root: str | None = None):
         self.knowledge_dir = os.path.abspath(knowledge_dir)
         self.db_path = os.path.join(self.knowledge_dir, DB_FILENAME)
         self.repo_root = os.path.abspath(repo_root) if repo_root else None
+        self._trust_fold: tuple[dict, dict] | None = None
+
+    def _get_trust_fold(self) -> tuple[dict, dict]:
+        """(scores, migrations) from the trust ledger, folded once per Indexer."""
+        if self._trust_fold is None:
+            tc = _trust_compute()
+            scores, migrations, warnings = tc.compute_trust(self.knowledge_dir)
+            for warning in warnings:
+                print(f"[pk_search] trust ledger warning: {warning}", file=sys.stderr)
+            self._trust_fold = (scores, migrations)
+        return self._trust_fold
+
+    def _trust_score_for(self, file_path: str) -> float:
+        """Cached-rank trust for one knowledge entry file; unobserved -> neutral 0.0."""
+        try:
+            rel_path = os.path.relpath(file_path, self.knowledge_dir)
+        except ValueError:
+            return 0.0
+        tc = _trust_compute()
+        scores, migrations = self._get_trust_fold()
+        summary = tc.score_for_entry(scores, migrations, rel_path)
+        return summary["score"] if summary is not None else 0.0
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -207,6 +285,7 @@ class Indexer:
                 scale UNINDEXED,
                 entry_status UNINDEXED,
                 template_version UNINDEXED,
+                trust_score UNINDEXED,
                 tokenize='porter unicode61'
             );
 
@@ -276,6 +355,65 @@ class Indexer:
             return True
         except (sqlite3.OperationalError, sqlite3.DatabaseError):
             return False
+
+    def _trust_marker_state(self) -> str:
+        """Identity of _trust/.rank-stale (touched by trust-event-append.sh on
+        every ledger append). Ledger appends don't touch entry files, so the
+        mtime/hash staleness check alone would never refresh the rank column."""
+        marker = os.path.join(self.knowledge_dir, "_trust", ".rank-stale")
+        try:
+            return str(os.stat(marker).st_mtime_ns)
+        except OSError:
+            return "absent"
+
+    def _record_trust_marker_state(self, conn: sqlite3.Connection, state: str) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+            ("trust_marker_state", state),
+        )
+
+    def trust_rank_stale(self) -> bool:
+        """True when the ledger has appends the trust_score column hasn't absorbed."""
+        current = self._trust_marker_state()
+        if current == "absent" or not os.path.exists(self.db_path):
+            return False
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT value FROM index_meta WHERE key='trust_marker_state'"
+            ).fetchone()
+            conn.close()
+        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+            return False
+        return row is None or row[0] != current
+
+    def refresh_trust_scores(self) -> dict:
+        """Recompute the ledger fold and rewrite the cached trust_score column.
+
+        The cheap arm of marker-triggered staleness: no file re-parse, just an
+        UPDATE per indexed knowledge file with the fresh fold's scores.
+        """
+        marker_state = self._trust_marker_state()
+        self._trust_fold = None
+        try:
+            conn = self._connect()
+        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+            return {"error": "index unavailable"}
+        if not self._validate_db(conn):
+            conn.close()
+            return {"error": "index schema invalid; run a full index"}
+        rows = conn.execute(
+            "SELECT DISTINCT file_path FROM entries WHERE source_type = 'knowledge'"
+        ).fetchall()
+        for (fp,) in rows:
+            conn.execute(
+                "UPDATE entries SET trust_score = ? WHERE file_path = ?",
+                (self._trust_score_for(fp), fp),
+            )
+        self._record_trust_marker_state(conn, marker_state)
+        conn.commit()
+        conn.close()
+        return {"trust_entries_updated": len(rows)}
 
     def _rebuild_db(self) -> sqlite3.Connection:
         """Drop and recreate the database."""
@@ -545,10 +683,12 @@ class Indexer:
             except (OSError, UnicodeDecodeError):
                 pass
 
+        trust_score = self._trust_score_for(file_path) if source_type == "knowledge" else 0.0
+
         for entry in entries:
             conn.execute(
-                "INSERT INTO entries (file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (entry["file_path"], entry["heading"], entry["content"], source_type, category, metadata["confidence"], metadata["learned"], 0.0, metadata["scale"], metadata["entry_status"], metadata["template_version"]),
+                "INSERT INTO entries (file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (entry["file_path"], entry["heading"], entry["content"], source_type, category, metadata["confidence"], metadata["learned"], 0.0, metadata["scale"], metadata["entry_status"], metadata["template_version"], trust_score),
             )
 
         # Update file_meta
@@ -593,6 +733,11 @@ class Indexer:
         total_entries = 0
         files_indexed = 0
 
+        # Capture marker identity before the fold runs; an append racing the
+        # loop below at worst causes one redundant refresh, never a stale rank.
+        trust_marker_state = self._trust_marker_state()
+        self._trust_fold = None
+
         for fpath, source_type in all_files:
             count = self._index_file(conn, fpath, source_type)
             total_entries += count
@@ -611,6 +756,7 @@ class Indexer:
             "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
             ("last_indexed", str(time.time())),
         )
+        self._record_trust_marker_state(conn, trust_marker_state)
         conn.commit()
         conn.close()
 
@@ -725,6 +871,12 @@ class Indexer:
             return self.index_all(force=True)
 
         start_time = time.time()
+
+        # Marker-triggered refresh first: the fresh fold then also feeds any
+        # file re-indexing below, and the refresh records the marker state.
+        if self.trust_rank_stale():
+            self.refresh_trust_scores()
+
         all_files = self._collect_all_files()
         existing_paths = {fp for fp, _ in all_files}
 
@@ -970,6 +1122,10 @@ class Searcher:
         stale = self.indexer.get_stale_files()
         if stale:
             self.indexer.incremental_index()
+        elif self.indexer.trust_rank_stale():
+            # Ledger appends don't touch entry files; the marker is the only
+            # signal that the cached trust_score column needs a refresh.
+            self.indexer.refresh_trust_scores()
 
     @classmethod
     def _tokenize_query(cls, query: str) -> list[str]:
@@ -1016,8 +1172,13 @@ class Searcher:
         scale_set: list[str] | None = None,
         query_kind: str = "topic",
         and_mode: bool = False,
+        top_score: float | None = None,
     ) -> None:
-        """Append a JSONL record to _meta/retrieval-log.jsonl."""
+        """Append a JSONL record to _meta/retrieval-log.jsonl.
+
+        top_score is the best (most negative) FTS5 rank among returned
+        results, or None when there were no results.
+        """
         meta_dir = os.path.join(self.knowledge_dir, "_meta")
         log_path = os.path.join(meta_dir, "retrieval-log.jsonl")
         record = {
@@ -1026,6 +1187,9 @@ class Searcher:
             "query": query,
             "source_type": source_type,
             "result_count": result_count,
+            "top_score": top_score,
+            "miss": result_count == 0
+            or (top_score is not None and top_score > MISS_TOP_SCORE_THRESHOLD),
             "elapsed_ms": round(elapsed_ms, 1),
             "query_kind": query_kind,
         }
@@ -1126,8 +1290,16 @@ class Searcher:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
 
-        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, rank"
-        order_expr = f"rank * CASE WHEN source_type = 'knowledge' THEN {KNOWLEDGE_BOOST} ELSE 1.0 END"
+        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, rank"
+        # Ledger-backed trust reaches ranking here — plain search() — so that
+        # default `lore search`, prefetch, and the composite path (which all
+        # fetch through this method) get it from one term. rank is negative:
+        # positive trust scales it more negative (ranked higher), negative
+        # trust the reverse; unobserved entries carry a neutral 0.0.
+        order_expr = (
+            f"rank * CASE WHEN source_type = 'knowledge' THEN {KNOWLEDGE_BOOST} ELSE 1.0 END"
+            f" * (1.0 + {TRUST_RANK_WEIGHT} * COALESCE(trust_score, 0.0))"
+        )
 
         try:
             rows = conn.execute(
@@ -1216,6 +1388,7 @@ class Searcher:
                 "scale": entry_scale,
                 "entry_status": effective_entry_status,
                 "template_version": row["template_version"],
+                "trust_score": row["trust_score"] if row["trust_score"] is not None else 0.0,
                 "score": round(score, 4),
                 "snippet": snippet,
             }
@@ -1236,6 +1409,7 @@ class Searcher:
             scale_set=scale_set,
             query_kind=query_kind,
             and_mode=and_mode,
+            top_score=min((r["score"] for r in results), default=None),
         )
 
         return results
@@ -1291,7 +1465,9 @@ class Searcher:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
 
-        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, rank"
+        # trust_score is selected for result-shape parity with search();
+        # side-channel ordering deliberately stays plain BM25 rank.
+        select_cols = "file_path, heading, content, source_type, category, confidence, learned_date, structural_importance, scale, entry_status, template_version, trust_score, rank"
 
         # Pull a generous batch so README skip + threshold drop + status filter
         # still leaves SIDE_CHANNEL_LIMIT survivors when matches exist.
@@ -1367,6 +1543,7 @@ class Searcher:
                 "scale": row["scale"],
                 "entry_status": effective_entry_status,
                 "template_version": row["template_version"],
+                "trust_score": row["trust_score"] if row["trust_score"] is not None else 0.0,
                 "score": round(score, 4),
                 "snippet": snippet,
             })
@@ -1385,6 +1562,7 @@ class Searcher:
             caller=caller,
             scale_set=None,
             query_kind="preference_side_channel",
+            top_score=min((r["score"] for r in results), default=None),
         )
 
         return results

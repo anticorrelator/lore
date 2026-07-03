@@ -9,6 +9,12 @@
 # Tier 2 evidence schema via validate-tier2.sh, and appends one JSONL line to
 # $KDIR/_work/<slug>/task-claims.jsonl. Creates the file on first use.
 #
+# Rows may carry an OPTIONAL executable_falsifier object
+# ({command, expected_output_shape[, root]}). It is never required; the row
+# passes through this writer untouched and validate-tier2.sh type-checks it
+# when present (additive — pre-existing rows without it validate unchanged).
+# falsifier-run.py is the runner that executes it.
+#
 # SOLE-WRITER INVARIANT: `evidence-append.sh` is the only sanctioned writer of
 # `$KDIR/_work/<slug>/task-claims.jsonl`. No other script, skill, agent prompt,
 # or human process may append, edit, or truncate that file directly. Rows that

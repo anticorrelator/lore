@@ -12,6 +12,7 @@ func (m model) handleSpecRequest(msg work.SpecRequestMsg) (model, tea.Cmd) {
 	// Otherwise show confirmation modal before launching subprocess.
 	if m.hasSpecPanel(msg.Slug) {
 		m.terminalMode = true
+		m.setPreferDetail(msg.Slug, false)
 		m.focusedPanel = panelRight
 		return m, nil
 	}
@@ -84,6 +85,9 @@ func (m model) handleSpecProcessStarted(msg work.SpecProcessStartedMsg) (model, 
 	}
 	sm, cmd := panel.Update(msg) // SpecProcessStartedMsg sets ptmx + starts PollTerminalCmd
 	m.setSpecPanel(slug, sm)
+	// A fresh session supersedes any detail preference left over from a
+	// previous session on the same item — navigation should auto-show it.
+	m.setPreferDetail(slug, false)
 	work.WriteSession(m.config.WorkDir, slug, "spec") //nolint:errcheck
 	// Auto-enter terminal focus when session starts for the currently viewed item,
 	// unless the spec was launched from the confirmation modal — in that case,
@@ -224,9 +228,9 @@ func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 }
 
 func (m model) handleTerminalDetach(_ work.TerminalDetachMsg) (model, tea.Cmd) {
-	// User pressed Esc from terminal focus — return to list view.
+	// Double-Esc from terminal focus detaches focus only: the list regains
+	// the keyboard while the right panel keeps showing the terminal.
 	m.focusedPanel = panelLeft
-	m.terminalMode = false
 	return m, nil
 }
 

@@ -125,6 +125,10 @@ lore_hooks = [
     # also self-limits via LORE_LOAD_KNOWLEDGE_TIME_BUDGET (graceful
     # degradation before the cliff).
     ("SessionStart", None, "command", "bash ~/.lore/scripts/auto-reindex.sh", 15),
+    # mine-retrieval-misses runs before load-knowledge so candidates it
+    # writes are counted by load-knowledge.sh's [capture] trigger in the
+    # same session start.
+    ("SessionStart", None, "command", "python3 ~/.lore/scripts/mine-retrieval-misses.py", 10),
     ("SessionStart", None, "command", "bash ~/.lore/scripts/load-knowledge.sh", 15),
     ("SessionStart", None, "command", "bash ~/.lore/scripts/load-work.sh", 5),
     ("SessionStart", None, "command", "bash ~/.lore/scripts/load-threads.sh", 15),
@@ -253,7 +257,7 @@ cmd_smoke() {
   echo
   echo "  Lore event           Support   Native hook (claude-code)"
   echo "  -------------------- --------- ----------------------------------------"
-  printf '  %-20s %-9s %s\n' session_start      full      "SessionStart hook (~/.lore/scripts/{auto-reindex,load-knowledge,load-work,load-threads,extract-session-digest}); doctor.sh runs from TUI startup instead"
+  printf '  %-20s %-9s %s\n' session_start      full      "SessionStart hook (~/.lore/scripts/{auto-reindex,mine-retrieval-misses,load-knowledge,load-work,load-threads,extract-session-digest}); doctor.sh runs from TUI startup instead"
   printf '  %-20s %-9s %s\n' user_prompt        full      "(no native UserPromptSubmit hook today; PreToolUse Write matcher covers lore writes)"
   printf '  %-20s %-9s %s\n' pre_tool           full      "PreToolUse hook (matcher=Write -> guard-work-writes.sh)"
   printf '  %-20s %-9s %s\n' post_tool          full      "(currently unused by lore; PostToolUse hook surface available)"

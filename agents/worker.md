@@ -149,10 +149,45 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
    call pattern. Do not batch Tier 2 rows into the completion report — they
    go into `task-claims.jsonl` at emission time; the report only references
    their `claim_id` values.
-7. Look for and run relevant tests:
+7. **Report consumption verification as you go.** Each time you check a
+   `## Prior Knowledge` entry against the actual code — it survives contact
+   (the code confirms its claim) or it breaks (the code falsifies it) —
+   record the outcome:
+
+   ```bash
+   # Entry held:
+   lore verify <knowledge-path> held \
+     --source worker --protocol-slot implement-step-3 \
+     --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>"
+
+   # Entry contradicted — also lands the judge-facing row in the work item's
+   # consumption-contradictions.jsonl:
+   lore verify <knowledge-path> contradicted \
+     --source worker --protocol-slot implement-step-3 \
+     --file <absolute-path> --line-range <N-M> --exact-snippet "<verbatim code>" \
+     --work-item <slug> \
+     --rationale "<why the code falsifies the entry>" \
+     --claim-text "<the entry claim being contradicted>" \
+     --falsifier "<what evidence would disprove>"
+   ```
+
+   Recognition patterns: you opened the file an entry describes and confirmed
+   its claim before building on it; you dropped a prefetch entry as wrong
+   after reading the code; a woven norm's cited mechanism matched (or didn't
+   match) the code you touched. Held reports matter as much as contradictions
+   — an entry that keeps surviving contact is exactly what trust is made of.
+   Grounded-or-nothing applies to both dispositions (file + line-range +
+   exact-snippet required), so report only entries you actually anchored
+   against code, not entries you merely read. Re-running an identical
+   invocation is a silent no-op. Run these from the source repo's root, not
+   from inside the knowledge store — `lore` resolves the store and records
+   branch provenance from the current directory. Ledger rows carry
+   `source: worker` — that is how the system measures whether this step
+   moves behavior.
+8. Look for and run relevant tests:
    - Check for package.json scripts, Makefile targets, pytest, etc.
    - Run tests if found; skip silently if no test command exists
-8. Send completion report to "{{team_lead}}" via SendMessage:
+9. Send completion report to "{{team_lead}}" via SendMessage:
    ```
    summary: "Done: <task subject>"
    content: |
@@ -314,13 +349,13 @@ Your report's **Observations** flow into the knowledge commons as canonical capt
        consultations.>
      **Blockers:** <none, or description of what's blocking>
    ```
-9. **Update task description** with your full completion report:
-   TaskUpdate with description set to the same content from step 8
+10. **Update task description** with your full completion report:
+   TaskUpdate with description set to the same content from step 9
    (including the **Observations:**, **Convention handling:**,
    **Tier 2 evidence:**, and — when present — **Tier 3 candidates:**
    sections). This is required for the TaskCompleted hook to verify your
    report — it checks the task description, not the SendMessage body.
-10. Mark task completed: TaskUpdate with status=completed
+11. Mark task completed: TaskUpdate with status=completed
 
 ## Tier 2 Evidence Emission
 
@@ -330,7 +365,7 @@ anchored claims that ground what you did. They live in
 NOT the knowledge commons (Tier 3 is, and only the lead promotes).
 
 **When to emit:** every time you form a claim anchored to a specific
-`file:line_range` during Workflow step 4. Each claim gets its own
+`file:line_range` during Workflow step 5. Each claim gets its own
 `evidence-append.sh` invocation — one call per claim, no batching. Emit
 immediately when the evidence is fresh; do not defer to the completion
 report.
@@ -392,7 +427,7 @@ validation and produces corrupt JSONL.
 
 **After emission — reference-only in the report:** list the `claim_id`
 values you wrote in the completion report's **Tier 2 evidence:** field
-(Workflow step 7). The lead cross-references those ids against the
+(Workflow step 9). The lead cross-references those ids against the
 canonical `task-claims.jsonl`; the report does not re-embed row contents.
 If you mention a `claim_id` in the report that was never written to the
 file, the lead rejects the entire report.

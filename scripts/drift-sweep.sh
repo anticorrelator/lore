@@ -10,7 +10,10 @@
 #
 # drift-sweep builds no terminus and no correction path — it is a *producer* for
 # the existing commons settlement chain. It writes nothing directly: the only
-# side effects are the two writer-script calls above.
+# side effects are the writer-script calls — the two above, plus a best-effort
+# per-entry mirror of each drift classification into the trust ledger via
+# trust-event-append.sh (mechanical-check events; a failed append warns and
+# never fails the sweep).
 #
 # Synthesized producer rows are filed under this work item's own
 # promoted-commons.jsonl; the entry_path on each row carries flowback authority
@@ -51,7 +54,7 @@ while [[ $# -gt 0 ]]; do
     --repo-root) REPO_ROOT="$2"; shift 2 ;;
     --category) CATEGORY_ARGS+=(--category "$2"); shift 2 ;;
     -h|--help)
-      sed -n '2,31p' "$0"
+      sed -n '2,34p' "$0"
       exit 0
       ;;
     *)
@@ -74,6 +77,7 @@ REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 PLANNER="$SCRIPT_DIR/drift-sweep.py"
 APPEND="$SCRIPT_DIR/promote-commons-append.sh"
 QUEUE="$SCRIPT_DIR/settlement-queue.sh"
+TRUST_APPEND="$SCRIPT_DIR/trust-event-append.sh"
 
 # --- Run the planner (JSON report; no side effects) ---
 # Empty-array expansion is unbound under `set -u`, so expand only when populated.
@@ -94,6 +98,52 @@ fi
 PRODUCER_FILE="$KNOWLEDGE_DIR/_work/$WORK_ITEM/promoted-commons.jsonl"
 if [[ ! -f "$PRODUCER_FILE" && -f "$KNOWLEDGE_DIR/_work/_archive/$WORK_ITEM/promoted-commons.jsonl" ]]; then
   PRODUCER_FILE="$KNOWLEDGE_DIR/_work/_archive/$WORK_ITEM/promoted-commons.jsonl"
+fi
+
+# --- Mirror per-entry drift classifications into the trust ledger ---
+# One mechanical-check event per entry the planner actually classified:
+# result=fail (drifted), pass (checked, unchanged), or skip (eligible entry
+# whose drift check could not run). Scope-gated entries (not current, no
+# related_files) emit nothing — "not checked" is not detection evidence.
+# run_id is the sweep's HEAD sha, so re-running at the same HEAD dedupes to
+# a no-op while a new HEAD appends a new observation. Detection evidence
+# only — entry status is adjudicated downstream by the commons gate.
+# Best-effort per entry: a failed append warns and never fails the sweep.
+if [[ $DRY_RUN -eq 0 ]]; then
+  SWEEP_HEAD=$(printf '%s' "$PLAN_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("head",""))')
+  while IFS=$'\t' read -r MC_ENTRY MC_RESULT MC_TARGET MC_DETAIL; do
+    [[ -n "$MC_ENTRY" && -n "$SWEEP_HEAD" ]] || continue
+    if ! "$TRUST_APPEND" \
+        --event mechanical-check \
+        --entry-path "$MC_ENTRY" \
+        --source drift-sweep \
+        --check-name drift-sweep \
+        --target "$MC_TARGET" \
+        --result "$MC_RESULT" \
+        --run-id "$SWEEP_HEAD" \
+        --detail "$MC_DETAIL" \
+        --kdir "$KNOWLEDGE_DIR" >/dev/null 2>&1; then
+      echo "[drift-sweep] warning: trust-event append failed for $MC_ENTRY (non-fatal)" >&2
+    fi
+  done < <(printf '%s' "$PLAN_JSON" | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+for row in report["entries"]:
+    files = row.get("files") or []
+    if files:
+        result = "fail" if row.get("drifted") else "pass"
+        detail = ",".join(
+            "{}={}".format(f.get("path", ""), f.get("drift_class", ""))
+            for f in files)
+    elif row.get("drift_check") == "skipped":
+        result = "skip"
+        detail = row.get("drift_skip_reason") or "drift check skipped"
+    else:
+        continue
+    target = row.get("captured_at_sha") or "unknown"
+    detail = detail.replace("\t", " ").replace("\n", " ")
+    print("\t".join([row["entry_path"], result, target, detail]))
+')
 fi
 
 # Realize side effects for each drifted+parseable entry. Per-entry, the planner
