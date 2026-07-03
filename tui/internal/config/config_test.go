@@ -98,8 +98,56 @@ func TestLoadPrefs_MissingFile(t *testing.T) {
 	t.Setenv("LORE_TUI_LAYOUT", "")
 
 	p := LoadPrefs()
+	if p.Layout != LayoutTopBottom {
+		t.Errorf("Layout = %q, want default %q", p.Layout, LayoutTopBottom)
+	}
+}
+
+func TestLoadPrefs_UnknownValueNormalizesToDefault(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("LORE_DATA_DIR", filepath.Join(tmp, ".lore"))
+	t.Setenv("LORE_TUI_LAYOUT", "")
+
+	dir := filepath.Join(tmp, ".lore", "config")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(dir, "settings.json"),
+		[]byte(`{"version":1,"tui":{"layout":"diagonal"}}`),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	p := LoadPrefs()
+	if p.Layout != LayoutTopBottom {
+		t.Errorf("Layout = %q, want default %q for an unknown value", p.Layout, LayoutTopBottom)
+	}
+}
+
+func TestLoadPrefs_PersistedLeftRightStillWins(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("LORE_DATA_DIR", filepath.Join(tmp, ".lore"))
+	t.Setenv("LORE_TUI_LAYOUT", "")
+
+	dir := filepath.Join(tmp, ".lore", "config")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(dir, "settings.json"),
+		[]byte(`{"version":1,"tui":{"layout":"left-right"}}`),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	p := LoadPrefs()
 	if p.Layout != LayoutLeftRight {
-		t.Errorf("Layout = %q, want %q", p.Layout, LayoutLeftRight)
+		t.Errorf("Layout = %q, want persisted %q to beat the built-in default", p.Layout, LayoutLeftRight)
 	}
 }
 
@@ -138,13 +186,14 @@ func TestLoadPrefs_IgnoresLegacyTuiJson(t *testing.T) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "tui.json"), []byte(`{"layout":"top-bottom"}`), 0644); err != nil {
+	// Legacy says left-right; ignoring it must yield the top-bottom default.
+	if err := os.WriteFile(filepath.Join(dir, "tui.json"), []byte(`{"layout":"left-right"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	p := LoadPrefs()
-	if p.Layout != LayoutLeftRight {
-		t.Errorf("Layout = %q, want default %q when only legacy tui.json exists", p.Layout, LayoutLeftRight)
+	if p.Layout != LayoutTopBottom {
+		t.Errorf("Layout = %q, want default %q when only legacy tui.json exists", p.Layout, LayoutTopBottom)
 	}
 }
 

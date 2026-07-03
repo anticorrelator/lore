@@ -61,6 +61,65 @@ func GroupByProject(items []WorkItem) []ProjectGroup {
 	return groups
 }
 
+// ProjectLabels returns the sorted set of distinct non-empty project labels
+// across the given items (active and archived alike).
+func ProjectLabels(items []WorkItem) []string {
+	seen := make(map[string]bool)
+	var labels []string
+	for _, item := range items {
+		if item.Project != "" && !seen[item.Project] {
+			seen[item.Project] = true
+			labels = append(labels, item.Project)
+		}
+	}
+	sort.Strings(labels)
+	return labels
+}
+
+// NearestLabel returns the existing label closest to the candidate when the
+// two are similar enough to be a likely typo (mirroring the CLI's
+// warn_near_project_label guard: similarity >= 0.8, exact matches excluded),
+// or "" when no existing label is that close. Grouping matches exact labels
+// only, so callers use a hit to ask for confirmation before writing.
+func NearestLabel(candidate string, labels []string) string {
+	best, bestSim := "", 0.0
+	for _, label := range labels {
+		if label == candidate {
+			continue
+		}
+		if sim := labelSimilarity(candidate, label); sim >= 0.8 && sim > bestSim {
+			best, bestSim = label, sim
+		}
+	}
+	return best
+}
+
+// labelSimilarity is 1 - levenshtein(a,b)/max(len(a),len(b)), in [0,1].
+func labelSimilarity(a, b string) float64 {
+	ra, rb := []rune(a), []rune(b)
+	if len(ra) == 0 && len(rb) == 0 {
+		return 1
+	}
+	prev := make([]int, len(rb)+1)
+	cur := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	dist := prev[len(rb)]
+	return 1 - float64(dist)/float64(max(len(ra), len(rb)))
+}
+
 // LoadIndex reads _index.json from the given work directory and returns
 // work items sorted by updated descending (most recent first).
 // It also checks each item directory for tasks.json to set HasTasks.

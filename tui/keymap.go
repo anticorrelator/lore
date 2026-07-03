@@ -222,6 +222,8 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestWorkListStatusBarKeybindContract/s (spec)"},
 		{key: "c", label: "chat", surfaces: surfStatusBar | surfHelp, helpLabel: "chat about spec",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestWorkListStatusBarKeybindContract/c (chat)"},
+		{key: "a", label: "assign", surfaces: surfHelp, helpLabel: "assign workstream",
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkListStatusBarKeybindContract/a (assign workstream)"},
 		{key: "N", label: "create with AI", surfaces: surfHelp, helpLabel: "create work items with AI",
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkListStatusBarKeybindContract/N (create work items with AI)"},
 		{key: "L", label: "toggle layout", surfaces: surfHelp,

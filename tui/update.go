@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/creack/pty"
@@ -344,6 +345,72 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// Non-key messages (window resize etc.) fall through to normal handling.
 	}
 
+	// Assign-workstream prompt: intercept all keys when active.
+	if m.assignActive {
+		if km, ok := msg.(tea.KeyPressMsg); ok {
+			// Near-match confirm step: the typed label is close to an
+			// existing one — Enter adopts the existing label, n keeps the
+			// typed one, anything else returns to editing.
+			if m.assignNearMatch != "" {
+				switch km.String() {
+				case "enter", "y":
+					label := m.assignNearMatch
+					m.assignNearMatch = ""
+					m.assignInput.SetValue(label)
+					m.assignInput.CursorEnd()
+					return m, runAssignProject(m.assignSlug, label)
+				case "n":
+					m.assignNearMatch = ""
+					return m, runAssignProject(m.assignSlug, strings.TrimSpace(m.assignInput.Value()))
+				default:
+					m.assignNearMatch = ""
+				}
+				return m, nil
+			}
+			switch km.String() {
+			case "enter":
+				label := strings.TrimSpace(m.assignInput.Value())
+				if label == "" {
+					m.assignErr = "workstream label required (Esc cancels)"
+					return m, nil
+				}
+				if match := work.NearestLabel(label, m.assignLabels); match != "" {
+					m.assignNearMatch = match
+					return m, nil
+				}
+				m.assignErr = ""
+				return m, runAssignProject(m.assignSlug, label)
+			case "esc", "ctrl+c":
+				m.assignActive = false
+				return m, nil
+			case "down", "ctrl+n":
+				if len(m.assignLabels) > 0 {
+					m.assignLabelIdx = (m.assignLabelIdx + 1) % len(m.assignLabels)
+					m.assignInput.SetValue(m.assignLabels[m.assignLabelIdx])
+					m.assignInput.CursorEnd()
+				}
+				return m, nil
+			case "up", "ctrl+p":
+				if len(m.assignLabels) > 0 {
+					if m.assignLabelIdx <= 0 {
+						m.assignLabelIdx = len(m.assignLabels)
+					}
+					m.assignLabelIdx--
+					m.assignInput.SetValue(m.assignLabels[m.assignLabelIdx])
+					m.assignInput.CursorEnd()
+				}
+				return m, nil
+			default:
+				m.assignErr = ""
+				m.assignLabelIdx = -1
+				var tiCmd tea.Cmd
+				m.assignInput, tiCmd = m.assignInput.Update(msg)
+				return m, tiCmd
+			}
+		}
+		// Non-key messages (AssignFinishedMsg, resize) fall through.
+	}
+
 	// Popup overlay: route all key messages to popup when active.
 	if m.popupActive {
 		if _, ok := msg.(tea.KeyPressMsg); ok {
@@ -425,6 +492,17 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		if msg.Err != nil {
 			m.flashErr = fmt.Sprintf("archive failed: %v", msg.Err)
 		}
+		return m, loadWorkItems(m.config.WorkDir)
+
+	case work.AssignFinishedMsg:
+		if msg.Err != nil {
+			// Failed write: keep the prompt open with the entered label so
+			// the user can correct it — never reload as if it succeeded.
+			m.assignErr = compactErr("assign failed", msg.Err)
+			return m, nil
+		}
+		m.assignActive = false
+		m.flashErr = fmt.Sprintf("assigned %s → %s", msg.Slug, msg.Label)
 		return m, loadWorkItems(m.config.WorkDir)
 
 	case work.DeleteRequestMsg:
@@ -661,6 +739,25 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.aiInput = ta
 				m.aiInputActive = true
 				return m, focusCmd
+			}
+		case "a":
+			// a opens the assign-workstream prompt for the highlighted work
+			// item (left panel only; no-op on group headers).
+			if m.state == stateWork && m.focusedPanel == panelLeft {
+				if slug := m.list.CurrentSlug(); slug != "" {
+					ti := textinput.New()
+					ti.Prompt = " "
+					ti.SetWidth(modalInnerW - 6)
+					focusCmd := ti.Focus()
+					m.assignInput = ti
+					m.assignSlug = slug
+					m.assignLabels = m.list.ProjectLabels()
+					m.assignLabelIdx = -1
+					m.assignNearMatch = ""
+					m.assignErr = ""
+					m.assignActive = true
+					return m, focusCmd
+				}
 			}
 		case "L":
 			// L toggles layout between left/right and top/bottom (left panel only).

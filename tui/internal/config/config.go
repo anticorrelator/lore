@@ -156,7 +156,7 @@ func prefsPath() string {
 // LoadPrefs reads TUI preferences. Resolution order:
 //  1. LORE_TUI_LAYOUT env var.
 //  2. Unified settings.json `tui.layout`.
-//  3. Built-in default LayoutLeftRight.
+//  3. Built-in default LayoutTopBottom.
 //
 // Bash counterpart: there is no bash reader for tui.layout (the TUI is the
 // only consumer); the unified loader is the cross-stack contract this
@@ -182,7 +182,7 @@ func LoadPrefs() Prefs {
 
 	// Normalize unknown / empty values to default.
 	if layout != LayoutLeftRight && layout != LayoutTopBottom {
-		layout = LayoutLeftRight
+		layout = LayoutTopBottom
 	}
 
 	return Prefs{Layout: layout}

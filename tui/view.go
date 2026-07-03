@@ -96,6 +96,9 @@ func (m model) viewContent() string {
 	if m.aiInputActive {
 		return m.renderAIModal()
 	}
+	if m.assignActive {
+		return m.renderAssignModal()
+	}
 	if m.confirmAction != "" {
 		return m.renderConfirmModal()
 	}

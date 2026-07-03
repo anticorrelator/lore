@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -2825,6 +2826,154 @@ func TestWorkListStatusBarKeybindContract(t *testing.T) {
 		nm, _ := updateModel(t, workContractModel(), press('D'))
 		if nm.confirmAction != "delete" {
 			t.Errorf("D should open the delete confirm modal, got %q", nm.confirmAction)
+		}
+	})
+	t.Run("a (assign workstream)", func(t *testing.T) {
+		nm, _ := updateModel(t, workContractModel(), press('a'))
+		if !nm.assignActive {
+			t.Fatal("a should open the assign-workstream prompt")
+		}
+		if nm.assignSlug != "item-1" {
+			t.Errorf("assign should target the highlighted item, got %q", nm.assignSlug)
+		}
+	})
+}
+
+// TestAssignModalKeybindContract verifies the keybinds displayed in
+// renderAssignModal (Enter assign, Esc cancel, ↑/↓ pick existing, and the
+// near-match confirm step's Enter/n/Esc) against the assign interception in
+// Update, plus the failed-write contract: a non-zero `lore work set` exit
+// keeps the prompt open with the entered label preserved.
+func TestAssignModalKeybindContract(t *testing.T) {
+	assignModel := func(t *testing.T) model {
+		items := []work.WorkItem{
+			{Slug: "item-1", Title: "One", Status: "active", Project: "settlement-trust"},
+			{Slug: "item-2", Title: "Two", Status: "active", Project: "tui-rework"},
+			{Slug: "item-3", Title: "Three", Status: "active"},
+		}
+		m := minimalModel(stateWork, items, nil)
+		m.width = 120
+		m.height = 40
+		nm, _ := updateModel(t, m, press('a'))
+		if !nm.assignActive {
+			t.Fatal("precondition: a should open the assign prompt")
+		}
+		return nm
+	}
+	typed := func(t *testing.T, m model, s string) model {
+		for _, r := range s {
+			m, _ = updateModel(t, m, press(r))
+		}
+		return m
+	}
+
+	t.Run("a (offers existing labels + free text)", func(t *testing.T) {
+		nm := assignModel(t)
+		if len(nm.assignLabels) != 2 || nm.assignLabels[0] != "settlement-trust" || nm.assignLabels[1] != "tui-rework" {
+			t.Fatalf("prompt should offer the existing labels, got %v", nm.assignLabels)
+		}
+		nm = typed(t, nm, "xy")
+		if nm.assignInput.Value() != "xy" {
+			t.Errorf("typing should edit the free-text label, got %q", nm.assignInput.Value())
+		}
+	})
+	t.Run("down/up (pick existing label)", func(t *testing.T) {
+		nm, _ := updateModel(t, assignModel(t), press(tea.KeyDown))
+		if nm.assignInput.Value() != "settlement-trust" {
+			t.Fatalf("down should fill the input with the first label, got %q", nm.assignInput.Value())
+		}
+		nm, _ = updateModel(t, nm, press(tea.KeyUp))
+		if nm.assignInput.Value() != "tui-rework" {
+			t.Errorf("up should wrap to the last label, got %q", nm.assignInput.Value())
+		}
+	})
+	t.Run("Enter (assign novel label)", func(t *testing.T) {
+		nm := typed(t, assignModel(t), "brand-new-stream")
+		nm, cmd := updateModel(t, nm, press(tea.KeyEnter))
+		if cmd == nil {
+			t.Fatal("Enter on a novel label should dispatch the assign command")
+		}
+		if nm.assignNearMatch != "" {
+			t.Errorf("distant label must not trigger the near-match confirm, got %q", nm.assignNearMatch)
+		}
+		if !nm.assignActive {
+			t.Error("prompt should stay open until the write reports back")
+		}
+	})
+	t.Run("Enter (exact existing label, no confirm)", func(t *testing.T) {
+		nm := typed(t, assignModel(t), "tui-rework")
+		nm, cmd := updateModel(t, nm, press(tea.KeyEnter))
+		if cmd == nil || nm.assignNearMatch != "" {
+			t.Errorf("exact label should assign directly, cmd=%v nearMatch=%q", cmd, nm.assignNearMatch)
+		}
+	})
+	t.Run("Enter (near-match asks for confirmation)", func(t *testing.T) {
+		nm := typed(t, assignModel(t), "tui-rewor")
+		nm, cmd := updateModel(t, nm, press(tea.KeyEnter))
+		if cmd != nil {
+			t.Fatal("a near-duplicate label must not write before confirmation")
+		}
+		if nm.assignNearMatch != "tui-rework" {
+			t.Fatalf("near-match confirm should name the existing label, got %q", nm.assignNearMatch)
+		}
+		// Enter adopts the existing label.
+		nm2, cmd2 := updateModel(t, nm, press(tea.KeyEnter))
+		if cmd2 == nil || nm2.assignInput.Value() != "tui-rework" {
+			t.Errorf("Enter should assign the existing label, cmd=%v value=%q", cmd2, nm2.assignInput.Value())
+		}
+		// n keeps the typed label instead.
+		nm3, cmd3 := updateModel(t, nm, press('n'))
+		if cmd3 == nil || nm3.assignNearMatch != "" {
+			t.Errorf("n should assign the typed label as-is, cmd=%v nearMatch=%q", cmd3, nm3.assignNearMatch)
+		}
+		// Esc returns to editing with the typed label preserved.
+		nm4, _ := updateModel(t, nm, press(tea.KeyEscape))
+		if !nm4.assignActive || nm4.assignNearMatch != "" || nm4.assignInput.Value() != "tui-rewor" {
+			t.Errorf("Esc should return to editing, active=%v nearMatch=%q value=%q",
+				nm4.assignActive, nm4.assignNearMatch, nm4.assignInput.Value())
+		}
+	})
+	t.Run("Enter (empty label rejected)", func(t *testing.T) {
+		nm, cmd := updateModel(t, assignModel(t), press(tea.KeyEnter))
+		if cmd != nil {
+			t.Fatal("an empty label must never reach the shell")
+		}
+		if !nm.assignActive || nm.assignErr == "" {
+			t.Errorf("empty Enter should surface an inline error, active=%v err=%q", nm.assignActive, nm.assignErr)
+		}
+	})
+	t.Run("Esc (cancel)", func(t *testing.T) {
+		nm, _ := updateModel(t, assignModel(t), press(tea.KeyEscape))
+		if nm.assignActive {
+			t.Error("Esc should close the assign prompt")
+		}
+	})
+	t.Run("failed write keeps prompt open with label preserved", func(t *testing.T) {
+		nm := typed(t, assignModel(t), "brand-new-stream")
+		nm, _ = updateModel(t, nm, press(tea.KeyEnter))
+		nm, cmd := updateModel(t, nm, work.AssignFinishedMsg{
+			Slug: "item-1", Label: "brand-new-stream", Err: errors.New("exit status 1: boom"),
+		})
+		if !nm.assignActive {
+			t.Fatal("a failed write must keep the prompt open")
+		}
+		if nm.assignErr == "" || nm.assignInput.Value() != "brand-new-stream" {
+			t.Errorf("failure should surface inline and preserve the label, err=%q value=%q",
+				nm.assignErr, nm.assignInput.Value())
+		}
+		if cmd != nil {
+			t.Error("a failed write must not trigger the success reload path")
+		}
+	})
+	t.Run("successful write closes prompt and reloads index", func(t *testing.T) {
+		nm := typed(t, assignModel(t), "brand-new-stream")
+		nm, _ = updateModel(t, nm, press(tea.KeyEnter))
+		nm, cmd := updateModel(t, nm, work.AssignFinishedMsg{Slug: "item-1", Label: "brand-new-stream"})
+		if nm.assignActive {
+			t.Fatal("a successful write should close the prompt")
+		}
+		if cmd == nil {
+			t.Error("success should dispatch the index reload")
 		}
 	})
 }

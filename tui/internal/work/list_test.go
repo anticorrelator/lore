@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -520,11 +521,13 @@ func TestListModelUngroupedHeaderWithMixedItems(t *testing.T) {
 }
 
 // The ungrouped header renders dim, not in the project-accent color, so it
-// reads as a pseudo-group rather than a project named "ungrouped".
+// reads as a pseudo-group rather than a project named "ungrouped". The
+// rollup decorator rebuilds unselected header lines as lead + styled name,
+// so the dim-bold sequence opens right before the arrow.
 func TestListModelUngroupedHeaderUsesDimStyle(t *testing.T) {
 	m := newTestListModel(groupedItems())
 	view := m.View()
-	if !strings.Contains(view, sgrOpen(ungroupedHeaderStyle)+"  ▼ ungrouped") {
+	if !strings.Contains(view, sgrOpen(ungroupedHeaderStyle)+"▼ ungrouped") {
 		t.Fatalf("ungrouped header should open with the dim-bold sequence, got:\n%s", view)
 	}
 }
@@ -643,6 +646,159 @@ func TestListModelUngroupedOnlyRendersFlat(t *testing.T) {
 		if got := m.CurrentSlug(); got != "two" {
 			t.Errorf("compact=%v: j selection = %q, want two", compact, got)
 		}
+	}
+}
+
+// --- Header rollups (readiness distribution + freshest recency) ---
+
+// rollupItems spans the readiness ramp across two labeled groups and an
+// ungrouped tail. Updated values are relative to now so recency labels are
+// stable under FormatRelativeTime.
+func rollupItems() []WorkItem {
+	ts := func(h int) string { return time.Now().Add(-time.Duration(h) * time.Hour).UTC().Format(time.RFC3339) }
+	return []WorkItem{
+		{Slug: "beta-1", Title: "Beta One", Status: "active", Project: "beta", Updated: ts(36), HasPlanDoc: true, HasTasks: true},
+		{Slug: "beta-2", Title: "Beta Two", Status: "active", Project: "beta", Updated: ts(60), HasPlanDoc: true},
+		{Slug: "alpha-1", Title: "Alpha One", Status: "active", Project: "alpha", Updated: ts(84)},
+		{Slug: "loose-1", Title: "Loose One", Status: "active", Updated: ts(108)},
+	}
+}
+
+// headerLine returns the (ANSI-stripped) view line containing marker, plus
+// the raw line for width checks.
+func headerLine(t *testing.T, view, marker string) (string, string) {
+	t.Helper()
+	for _, raw := range strings.Split(view, "\n") {
+		plain := stripListANSI(raw)
+		if strings.Contains(plain, marker) {
+			return plain, raw
+		}
+	}
+	t.Fatalf("no line containing %q in view:\n%s", marker, view)
+	return "", ""
+}
+
+// Every group header — including the ungrouped tail — carries a right-aligned
+// readiness/recency rollup at full width, and the rebuilt line stays exactly
+// panel-width.
+func TestListModelHeaderRollupAtFullWidth(t *testing.T) {
+	m := newTestListModel(rollupItems())
+	view := m.View()
+
+	beta, rawBeta := headerLine(t, view, "beta (2)")
+	if !strings.Contains(beta, "1 ready · 1 needs tasks · 1d ago") {
+		t.Errorf("beta header should carry its readiness rollup, got: %q", beta)
+	}
+	if got := lipgloss.Width(rawBeta); got != 120 {
+		t.Errorf("rebuilt beta header width = %d, want exactly 120", got)
+	}
+	if !strings.HasSuffix(beta, "1d ago  ") {
+		t.Errorf("rollup should be right-aligned with a two-space margin, got: %q", beta)
+	}
+
+	alpha, _ := headerLine(t, view, "alpha (1)")
+	if !strings.Contains(alpha, "1 needs spec · 3d ago") {
+		t.Errorf("alpha header should carry its readiness rollup, got: %q", alpha)
+	}
+	ungrouped, _ := headerLine(t, view, "ungrouped (1)")
+	if !strings.Contains(ungrouped, "1 needs spec · 4d ago") {
+		t.Errorf("ungrouped header should carry a rollup too, got: %q", ungrouped)
+	}
+}
+
+// The rollup renders through the dim token so it reads as an annotation, not
+// a second header label.
+func TestListModelHeaderRollupUsesDimStyle(t *testing.T) {
+	m := newTestListModel(rollupItems())
+	if view := m.View(); !strings.Contains(view, sgrOpen(style.Dim)+"1 ready") {
+		t.Fatalf("rollup should open with the dim sequence, got:\n%s", view)
+	}
+}
+
+// A selected header keeps the engine's row-wide selection background over
+// unstyled content — the decorator must not rewrite it.
+func TestListModelHeaderRollupHiddenOnSelectedHeader(t *testing.T) {
+	m := newTestListModel(rollupItems())
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"}) // beta header
+	view := m.View()
+	beta, rawBeta := headerLine(t, view, "beta (2)")
+	if strings.Contains(beta, "ready") {
+		t.Errorf("selected header must not carry the rollup, got: %q", beta)
+	}
+	// The engine's selection style (collection.rowSelected), rebuilt from the
+	// same tokens: the selected header must keep its row-wide background.
+	selected := lipgloss.NewStyle().Background(style.ColorSelectionBg).Bold(true)
+	if !strings.HasPrefix(rawBeta, sgrOpen(selected)) {
+		t.Errorf("selected header should open with the selection background, got: %q", rawBeta)
+	}
+}
+
+// Collapsed groups keep the rollup, reading as a one-line dashboard.
+func TestListModelHeaderRollupSurvivesCollapse(t *testing.T) {
+	m := newTestListModel(rollupItems())
+	// Collapse via the carry-over API: the cursor falls off the hidden member
+	// to another item row, leaving the header unselected.
+	m.SetCollapsedProjects(map[string]bool{"beta": true})
+	view := m.View()
+	beta, _ := headerLine(t, view, "beta (2)")
+	if !strings.Contains(beta, "▶ beta (2)") || !strings.Contains(beta, "1 ready · 1 needs tasks · 1d ago") {
+		t.Errorf("collapsed header should stay a one-line dashboard, got: %q", beta)
+	}
+	if strings.Contains(stripListANSI(view), "beta-1") {
+		t.Errorf("collapsed members must not render, got:\n%s", view)
+	}
+}
+
+// At narrow width the rollup no longer fits: headers degrade to the plain
+// engine render and no line exceeds the panel width.
+func TestListModelHeaderRollupDegradesAtNarrowWidth(t *testing.T) {
+	m := resizeStacked(newTestListModel(rollupItems()))
+	view := m.View()
+	beta, _ := headerLine(t, view, "beta (2)")
+	if strings.Contains(beta, "ready ·") || strings.Contains(beta, "ago") {
+		t.Errorf("narrow header should drop the rollup, got: %q", beta)
+	}
+	for _, raw := range strings.Split(strings.TrimRight(view, "\n"), "\n") {
+		if got := lipgloss.Width(raw); got > 40 {
+			t.Errorf("line exceeds 40-col panel width (%d): %q", got, stripListANSI(raw))
+		}
+	}
+}
+
+// Archived groups roll up as an archived count rather than a readiness ramp.
+func TestListModelHeaderRollupArchivedFilter(t *testing.T) {
+	ts := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339)
+	items := append(rollupItems(),
+		WorkItem{Slug: "beta-old", Title: "Beta Old", Status: "archived", Project: "beta", Updated: ts, HasTasks: true})
+	m := newTestListModel(items)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	view := m.View()
+	beta, _ := headerLine(t, view, "beta (1)")
+	if !strings.Contains(beta, "1 archived · 2d ago") {
+		t.Errorf("archived group should roll up as an archived count, got: %q", beta)
+	}
+}
+
+// --- Project label helpers (assign prompt support) ---
+
+func TestProjectLabelsSortedDistinctNonEmpty(t *testing.T) {
+	got := ProjectLabels(groupedItems())
+	want := []string{"alpha", "beta"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("ProjectLabels = %v, want %v", got, want)
+	}
+}
+
+func TestNearestLabelGuard(t *testing.T) {
+	labels := []string{"settlement-trust", "tui-rework"}
+	if got := NearestLabel("settlement-trus", labels); got != "settlement-trust" {
+		t.Errorf("near-typo should match, got %q", got)
+	}
+	if got := NearestLabel("settlement-trust", labels); got != "" {
+		t.Errorf("exact label must not trigger the guard, got %q", got)
+	}
+	if got := NearestLabel("brand-new-stream", labels); got != "" {
+		t.Errorf("distant label must not match, got %q", got)
 	}
 }
 

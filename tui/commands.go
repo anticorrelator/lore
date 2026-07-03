@@ -252,6 +252,23 @@ func runArchive(slug string, unarchive bool) tea.Cmd {
 	}
 }
 
+// runAssignProject runs `lore work set <slug> --project <label>` and returns
+// AssignFinishedMsg when done. The label must be non-empty — clearing
+// membership is a CLI-only act. Combined output rides the error so the
+// assign prompt can surface the script's message (including its near-label
+// warning backstop) inline.
+func runAssignProject(slug, label string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("lore", "work", "set", slug, "--project", label)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		}
+		return work.AssignFinishedMsg{Slug: slug, Label: label, Err: err}
+	}
+}
+
 // runPromoteFollowUp runs lore followup promote and returns ActionCompleteMsg when done.
 // When findingsJSON is non-empty it is passed as --findings-json so the script
 // can embed selected lens findings in the promoted work item's notes.md.

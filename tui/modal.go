@@ -127,6 +127,45 @@ func (m model) renderAIModal() string {
 	return m.placeModal(buildModalBox(s, "Add Work Items via AI", body))
 }
 
+// renderAssignModal shows a centered prompt assigning the selected work item
+// to a workstream: a free-text label input over the list of existing labels
+// (↑/↓ fills the input), with a near-match confirm step and an inline error
+// line when the write failed.
+func (m model) renderAssignModal() string {
+	s := modalStyles
+	inputBox := style.BorderBlur.
+		Width(modalInnerW - 2).
+		Render(m.assignInput.View())
+
+	var b strings.Builder
+	b.WriteString("\n" + s.dim.Render(" workstream label (type freely, ↑/↓ picks existing):"))
+	b.WriteString("\n" + inputBox + "\n")
+	if len(m.assignLabels) > 0 {
+		for i, label := range m.assignLabels {
+			if i == m.assignLabelIdx {
+				b.WriteString("\n > " + s.key.Render(label))
+			} else {
+				b.WriteString("\n   " + s.dim.Render(label))
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	if m.assignNearMatch != "" {
+		b.WriteString("\n " + style.StatusWarn.Render(fmt.Sprintf("close to existing %q", m.assignNearMatch)) +
+			"\n " + s.key.Render("Enter") + " " + s.dim.Render(fmt.Sprintf("use %q", m.assignNearMatch)) +
+			s.sep.Render("  ·  ") + s.key.Render("n") + " " + s.dim.Render("keep typed label") +
+			s.sep.Render("  ·  ") + s.key.Render("Esc") + " " + s.dim.Render("back") + "\n")
+	} else {
+		if m.assignErr != "" {
+			b.WriteString("\n " + style.StatusError.Render(m.assignErr) + "\n")
+		}
+		b.WriteString("\n " + s.key.Render("Enter") + " " + s.dim.Render("assign") +
+			s.sep.Render("  ·  ") + s.key.Render("Esc") + " " + s.dim.Render("cancel") + "\n")
+	}
+	return m.placeModal(buildModalBox(s, "Assign Workstream — "+m.assignSlug, b.String()))
+}
+
 // renderConfirmModal overlays a centered confirmation modal for archive/delete actions.
 func (m model) renderConfirmModal() string {
 	s := modalStyles

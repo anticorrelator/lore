@@ -34,9 +34,15 @@ Do not copy emotionally loaded or conversationally pressuring user text verbatim
 
 **Dedup:** The script rejects creation if the new slug overlaps with an existing slug (substring match). If this happens, use the existing item — do NOT retry with a different name for the same topic.
 
-**Project grouping:** Pass `--project` to group the item under a project label (e.g. several items making up one effort). The value is slugified on write and the stored slug is also the display value — `--project "TUI Rework"` stores and renders as `tui-rework`. Omit the flag to leave the item ungrouped.
+**Project grouping (create-time step):** Before running the script, check the existing workstreams: run `lore work list` — project labels render as section headers, and `_work/_projects/` records surface as sections even when they have no active members. Then decide:
 
-Pass `--issue`, `--pr`, and `--project` only when provided by the user. Show the script output. If it exits non-zero, show the error.
+- **Joins an existing effort** — the new item plausibly belongs to a workstream already on the list: pass `--project` with that existing label verbatim. Do not coin a near-variant; the script's near-match guard warns but never merges.
+- **Starts a new multi-item effort** — the item is plausibly the first of several under one umbrella: coin a label and pass it. The value is slugified on write and the stored slug is also the display value — `--project "TUI Rework"` stores and renders as `tui-rework`.
+- **Standalone** — no plausible workstream: omit the flag and leave the item ungrouped.
+
+Ask the user only at a genuine fork — two existing labels are equally plausible, or joins-existing vs. starts-new genuinely cannot be resolved from the item's scope. Everything short of that is your call to make at create time; do not create ungrouped "for now" and defer assignment to later cleanup.
+
+Pass `--issue` and `--pr` only when provided by the user; `--project` follows the grouping step above (a user-provided label always wins). Show the script output. If it exits non-zero, show the error.
 
 ---
 
@@ -112,6 +118,8 @@ lore work project archive "<slug>" [--yes]
 ```
 Show the script output. `show` renders the project record (when one exists) plus all members, active and archived. `describe` creates or updates the record at `_work/_projects/<slug>.md`; omitted fields keep their values. `archive` archives every active member and flips a pre-existing record to archived — confirm with the user first, then pass `--yes`.
 
+**Records are entity-on-demand:** run `describe` only when there is a real anchor or status worth declaring — typically when a spec reveals a workstream-level anchor, or a project's status genuinely changes. Never run it automatically as a side effect of creating or grouping items: a project label works fine with no record behind it. And never create planning files for a project — plans belong to work items; a project record carries an anchor, a status, and a description, nothing more.
+
 ---
 
 ### `search <query>`
@@ -172,6 +180,15 @@ Show the script output directly.
 
 ### No arguments
 Run **list**. Show the script output directly — no additional processing or summarization.
+
+---
+
+## Workstream Stewardship
+
+Grouping stays current because agents keep it current — the user should not have to assign items by hand. Whenever a listing or update puts the work map in front of you:
+
+- **Ungrouped items forming a workstream** — when ungrouped items clearly belong with an existing grouped effort (or with each other), propose `lore work set <slug> --project <label>` for the items involved. Propose rather than silently apply — membership is visible state the user may have opinions about.
+- **Scope moved between efforts** — when a work item's scope has migrated into a different effort, propose moving its membership the same way. `--project ""` clears membership entirely.
 
 ---
 

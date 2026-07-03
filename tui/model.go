@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
@@ -165,6 +166,19 @@ type model struct {
 	aiInput       textarea.Model
 	aiCtx         context.Context
 	aiCancel      context.CancelFunc
+
+	// Assign-workstream prompt (the 'a' verb on the work list).
+	// assignLabelIdx indexes assignLabels when ↑/↓ filled the input (-1 =
+	// free text); assignNearMatch holds an existing label close to the typed
+	// one, pending confirmation; assignErr keeps a failed `lore work set`
+	// visible inside the prompt so a failure never reads as success.
+	assignActive    bool
+	assignSlug      string
+	assignInput     textinput.Model
+	assignLabels    []string
+	assignLabelIdx  int
+	assignNearMatch string
+	assignErr       string
 
 	// specPanels holds one SpecPanelModel per work item slug that is currently
 	// speccing (or has just completed). The spec panel for the currently

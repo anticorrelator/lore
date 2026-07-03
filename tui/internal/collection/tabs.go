@@ -1,6 +1,8 @@
 package collection
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -31,6 +33,10 @@ type TabHost struct {
 	active    int
 	savedID   string
 	defaultID string
+
+	// width is the bar's cell budget; tabs that would overflow it collapse
+	// into a trailing "+N more" pill. Zero (unset) renders all tabs.
+	width int
 
 	// contentStartY/X are the absolute terminal coordinates of the first
 	// row of the host's rendered output; barOffsetY is the bar line's
@@ -128,6 +134,10 @@ func (h *TabHost) SetContentStart(y, x int) {
 // SetBarOffsetY sets the bar line's offset from the content start.
 func (h *TabHost) SetBarOffsetY(dy int) { h.barOffsetY = dy }
 
+// SetWidth sets the bar's width budget in cells. Zero disables overflow
+// collapsing.
+func (h *TabHost) SetWidth(w int) { h.width = w }
+
 // Update handles tab/shift+tab cycling and tab-bar mouse clicks, and
 // forwards anything else to the active tab's Update callback. Consumers
 // that must suppress cycling (e.g. while an inline editor is active)
@@ -160,33 +170,111 @@ func (h TabHost) Update(msg tea.Msg) (TabHost, tea.Cmd) {
 	return h, nil
 }
 
+// overflowPillLabel is the trailing pill collapsing n hidden tabs.
+func overflowPillLabel(n int) string { return fmt.Sprintf("+%d more", n) }
+
+// tabCellWidth is a rendered tab's cell width: label plus PadTabH each side.
+func tabCellWidth(label string) int {
+	return lipgloss.Width(label) + 2*style.PadTabH
+}
+
+// barWidth measures the bar line holding the given tab indices plus a
+// trailing "+hiddenN more" pill (omitted when hiddenN is 0).
+func (h TabHost) barWidth(visible []int, hiddenN int) int {
+	w := rowLead
+	for i, idx := range visible {
+		if i > 0 {
+			w++
+		}
+		w += tabCellWidth(h.tabs[idx].Label)
+	}
+	if hiddenN > 0 {
+		w += 1 + tabCellWidth(overflowPillLabel(hiddenN))
+	}
+	return w
+}
+
+// visibleTabs is the single source of truth for which tabs the bar shows,
+// shared by ViewBar and hitTest so clicks always land on the tab they
+// visually hit. It returns the rendered tab indices in bar order and the
+// indices collapsed into the trailing "+N more" pill. All tabs are visible
+// when the width budget is unset or everything fits. On overflow the bar
+// keeps the longest prefix that fits beside the pill; the active tab is
+// always visible, taking the last visible slot when it falls in the tail.
+func (h TabHost) visibleTabs() (visible, hidden []int) {
+	n := len(h.tabs)
+	if n == 0 {
+		return nil, nil
+	}
+	visible = make([]int, n)
+	for i := range visible {
+		visible[i] = i
+	}
+	if h.width <= 0 || h.barWidth(visible, 0) <= h.width {
+		return visible, nil
+	}
+	// k == 1 is the floor: the active tab and the pill render even when
+	// the budget cannot hold them.
+	for k := n - 1; k >= 1; k-- {
+		cand := make([]int, k)
+		for i := range cand {
+			cand[i] = i
+		}
+		if h.active >= k {
+			cand[k-1] = h.active
+		}
+		if k == 1 || h.barWidth(cand, n-k) <= h.width {
+			hidden = make([]int, 0, n-k)
+			for i := 0; i < n; i++ {
+				if !slices.Contains(cand, i) {
+					hidden = append(hidden, i)
+				}
+			}
+			return cand, hidden
+		}
+	}
+	return nil, nil // unreachable: the k == 1 floor always returns
+}
+
 // hitTest maps absolute click coordinates to a tab index. The bar format
 // is "  " + [" label "] + " " + [" label "] + …, each label rendered with
-// horizontal padding PadTabH.
+// horizontal padding PadTabH. A click on the "+N more" pill activates the
+// first hidden tab.
 func (h TabHost) hitTest(x, y int) (int, bool) {
 	if y != h.contentStartY+h.barOffsetY || len(h.tabs) == 0 {
 		return 0, false
 	}
+	visible, hidden := h.visibleTabs()
 	cellX := h.contentStartX + rowLead // "  " indent
-	for i, tab := range h.tabs {
-		tabW := lipgloss.Width(tab.Label) + 2*style.PadTabH
+	for _, idx := range visible {
+		tabW := tabCellWidth(h.tabs[idx].Label)
 		if x >= cellX && x < cellX+tabW {
-			return i, true
+			return idx, true
 		}
 		cellX += tabW + 1 // " " separator between tabs
+	}
+	if len(hidden) > 0 {
+		pillW := tabCellWidth(overflowPillLabel(len(hidden)))
+		if x >= cellX && x < cellX+pillW {
+			return hidden[0], true
+		}
 	}
 	return 0, false
 }
 
 // ViewBar renders the tab bar line.
 func (h TabHost) ViewBar() string {
-	parts := make([]string, len(h.tabs))
-	for i, tab := range h.tabs {
-		if i == h.active {
-			parts[i] = style.ActiveTab.Render(tab.Label)
+	visible, hidden := h.visibleTabs()
+	parts := make([]string, 0, len(visible)+1)
+	for _, idx := range visible {
+		if idx == h.active {
+			parts = append(parts, style.ActiveTab.Render(h.tabs[idx].Label))
 		} else {
-			parts[i] = style.InactiveTab.Render(tab.Label)
+			parts = append(parts, style.InactiveTab.Render(h.tabs[idx].Label))
 		}
+	}
+	if len(hidden) > 0 {
+		parts = append(parts, style.InactiveTab.Render(overflowPillLabel(len(hidden))))
 	}
 	return strings.Repeat(" ", rowLead) + strings.Join(parts, " ")
 }

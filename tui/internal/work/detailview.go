@@ -16,7 +16,8 @@ import (
 type Tab int
 
 const (
-	TabMeta Tab = iota
+	TabDigest Tab = iota
+	TabMeta
 	TabPlan
 	TabNotes
 	TabTasks
@@ -32,6 +33,8 @@ const extraFileIDPrefix = "file:"
 // TabFile tabs are identified per file via extraFileIDPrefix instead.
 func (t Tab) hostID() string {
 	switch t {
+	case TabDigest:
+		return "digest"
 	case TabMeta:
 		return "meta"
 	case TabPlan:
@@ -53,6 +56,8 @@ func tabFromHostID(id string) Tab {
 		return TabFile
 	}
 	switch id {
+	case "digest":
+		return TabDigest
 	case "plan":
 		return TabPlan
 	case "notes":
@@ -110,10 +115,11 @@ type DetailModel struct {
 
 	externalSession bool // true when another TUI instance has an active session on this slug
 
-	planTab       PlanTabModel
-	notesTab      NotesTabModel
-	tasksModel    TasksModel
-	execLogModel  ExecLogModel
+	digestTab      DigestTabModel
+	planTab        PlanTabModel
+	notesTab       NotesTabModel
+	tasksModel     TasksModel
+	execLogModel   ExecLogModel
 	extraViewports []viewport.Model
 }
 
@@ -144,8 +150,10 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.tabHost.SetWidth(m.contentWidth())
 		// Forward resize to all tab models so they stay in sync on terminal resize
 		inner := tea.WindowSizeMsg{Width: m.contentWidth(), Height: m.contentHeight()}
+		m.digestTab, _ = m.digestTab.Update(inner)
 		m.planTab, _ = m.planTab.Update(inner)
 		m.notesTab, _ = m.notesTab.Update(inner)
 		m.tasksModel, _ = m.tasksModel.Update(inner)
@@ -178,6 +186,7 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		}
 		m.detail = msg.Detail
 		m.tabHost.SetTabs(m.buildTabs())
+		m.digestTab = NewDigestTabModel(m.detail, m.contentWidth(), m.contentHeight())
 		m.notesTab = NewNotesTabModel(m.detail.NotesContent, m.contentWidth(), m.contentHeight())
 		if m.detail.PlanContent != nil {
 			rendered := renderMarkdown(*m.detail.PlanContent, m.contentWidth())
@@ -225,11 +234,19 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		vp.SetContent(rendered)
 		vp.SetYOffset(prevOffset)
 		m.planTab = PlanTabModel{viewport: vp, ready: true}
-		// Expose the plan tab if it wasn't present before (e.g. plan.md just created).
-		if m.detail != nil && m.detail.PlanContent == nil {
-			s := msg.Content
-			m.detail.PlanContent = &s
-			m.tabHost.SetTabs(m.buildTabs())
+		if m.detail != nil {
+			// Expose the plan tab if it wasn't present before (e.g. plan.md just created).
+			if m.detail.PlanContent == nil {
+				s := msg.Content
+				m.detail.PlanContent = &s
+				m.tabHost.SetTabs(m.buildTabs())
+			} else {
+				*m.detail.PlanContent = msg.Content
+			}
+			// The digest is derived from the plan; rebuild it in place.
+			digestOffset := m.digestTab.viewport.YOffset()
+			m.digestTab = NewDigestTabModel(m.detail, m.contentWidth(), m.contentHeight())
+			m.digestTab.viewport.SetYOffset(digestOffset)
 		}
 		return m, nil
 
@@ -258,6 +275,8 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 	// Forward to active tab
 	var cmd tea.Cmd
 	switch m.ActiveTab() {
+	case TabDigest:
+		m.digestTab, cmd = m.digestTab.Update(msg)
 	case TabPlan:
 		m.planTab, cmd = m.planTab.Update(msg)
 	case TabNotes:
@@ -307,7 +326,7 @@ func (m DetailModel) activeExtraIndex() int {
 // content dispatch stays in Update/renderTabContent.
 func (m DetailModel) buildTabs() []collection.Tab {
 	tabs := []collection.Tab{
-		{ID: TabMeta.hostID(), Label: "Meta"},
+		{ID: TabDigest.hostID(), Label: "Digest"},
 	}
 
 	if m.detail.PlanContent != nil {
@@ -315,6 +334,10 @@ func (m DetailModel) buildTabs() []collection.Tab {
 	}
 
 	tabs = append(tabs, collection.Tab{ID: TabNotes.hostID(), Label: "Notes"})
+
+	for _, ef := range m.detail.ExtraFiles {
+		tabs = append(tabs, collection.Tab{ID: extraFileIDPrefix + ef.Name, Label: extraFileLabel(ef.Name)})
+	}
 
 	if m.detail.HasTasks {
 		tabs = append(tabs, collection.Tab{ID: TabTasks.hostID(), Label: "Tasks"})
@@ -324,9 +347,7 @@ func (m DetailModel) buildTabs() []collection.Tab {
 		tabs = append(tabs, collection.Tab{ID: TabExecLog.hostID(), Label: "Exec Log"})
 	}
 
-	for _, ef := range m.detail.ExtraFiles {
-		tabs = append(tabs, collection.Tab{ID: extraFileIDPrefix + ef.Name, Label: extraFileLabel(ef.Name)})
-	}
+	tabs = append(tabs, collection.Tab{ID: TabMeta.hostID(), Label: "Meta"})
 
 	return tabs
 }
@@ -459,6 +480,8 @@ func (m DetailModel) renderTabContent(width, height int) string {
 
 	tab := m.ActiveTab()
 	switch tab {
+	case TabDigest:
+		return m.digestTab.View()
 	case TabMeta:
 		return m.renderMetaTab(width)
 	case TabPlan:

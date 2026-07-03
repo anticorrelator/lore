@@ -62,6 +62,14 @@ type DeleteFinishedMsg struct {
 	Err error
 }
 
+// AssignFinishedMsg is sent when the workstream-assign command
+// (`lore work set --project`) completes.
+type AssignFinishedMsg struct {
+	Slug  string
+	Label string
+	Err   error
+}
+
 // SpecStatusMsg is dispatched from main.go to update the list's spec indicator.
 // Done=true clears the indicator; otherwise sets specActiveSlug and specNeedsInput.
 type SpecStatusMsg struct {
@@ -146,7 +154,6 @@ func NewListModel(items []WorkItem) ListModel {
 		collapsed:  make(map[string]bool),
 		list:       collection.NewList(listColumns),
 	}
-	m.list.SetDecorator(decorateStackedGlyph)
 	m.list.SetOnCursorChange(func(id string) tea.Cmd {
 		return func() tea.Msg { return LoadDetailMsg{Slug: id} }
 	})
@@ -173,6 +180,7 @@ func (m *ListModel) refreshRows() {
 	}
 
 	var rows []collection.Row
+	rollups := make(map[string]string)
 	for _, g := range groups {
 		// The ungrouped tail gets a header only alongside labeled groups; an
 		// ungrouped-only list stays flat.
@@ -186,8 +194,10 @@ func (m *ListModel) refreshRows() {
 			if g.Project == "" {
 				label, st = "ungrouped", ungroupedHeaderStyle
 			}
+			id := headerIDPrefix + g.Project
+			rollups[id] = groupRollup(g.Items)
 			rows = append(rows, collection.Row{
-				ID:     headerIDPrefix + g.Project,
+				ID:     id,
 				Header: true,
 				Title: collection.Cell{
 					Text:  fmt.Sprintf("%s %s (%d)", arrow, label, len(g.Items)),
@@ -201,6 +211,7 @@ func (m *ListModel) refreshRows() {
 			rows = append(rows, row)
 		}
 	}
+	m.list.SetDecorator(newListDecorator(rollups))
 
 	label := "active"
 	if m.filterMode == FilterArchived {
@@ -282,6 +293,82 @@ func (m ListModel) stackedGlyph(item WorkItem) string {
 		return "◆ "
 	}
 	return ""
+}
+
+// newListDecorator builds the work list's single decorator: header rows get
+// the right-aligned rollup rewrite, item rows the stacked-glyph coloring.
+// rollups is keyed by header row ID; refreshRows rebuilds both together so
+// the decorator never outlives the rows it annotates.
+func newListDecorator(rollups map[string]string) collection.RowDecorator {
+	return func(row collection.Row, selected bool, lines []string) []string {
+		if row.Header {
+			return decorateHeaderRollup(row, selected, lines, rollups)
+		}
+		return decorateStackedGlyph(row, selected, lines)
+	}
+}
+
+// groupRollup summarizes one project group for its header's right-aligned
+// segment: the readiness distribution plus the freshest member's recency.
+func groupRollup(items []WorkItem) string {
+	var ready, tasks, spec, archived int
+	freshest := ""
+	for _, it := range items {
+		switch {
+		case it.Status == "archived":
+			archived++
+		case it.HasTasks:
+			ready++
+		case it.HasPlanDoc:
+			tasks++
+		default:
+			spec++
+		}
+		if freshest == "" || it.Updated > freshest {
+			freshest = it.Updated
+		}
+	}
+	var parts []string
+	if ready > 0 {
+		parts = append(parts, fmt.Sprintf("%d ready", ready))
+	}
+	if tasks > 0 {
+		parts = append(parts, fmt.Sprintf("%d needs tasks", tasks))
+	}
+	if spec > 0 {
+		parts = append(parts, fmt.Sprintf("%d needs spec", spec))
+	}
+	if archived > 0 {
+		parts = append(parts, fmt.Sprintf("%d archived", archived))
+	}
+	parts = append(parts, FormatRelativeTime(freshest))
+	return strings.Join(parts, " · ")
+}
+
+// decorateHeaderRollup right-aligns a group's dim rollup on unselected header
+// lines. Selected headers pass through untouched: the engine's row-wide
+// selection background must wrap unstyled content (lipgloss v2 clears the
+// background at inner SGR resets). The panel width is recovered from the
+// engine-padded incoming line, and the rebuilt line is exactly that wide;
+// when name and rollup can't fit with a gap between them the line is left as
+// rendered, so narrow panels degrade to the plain header.
+func decorateHeaderRollup(row collection.Row, selected bool, lines []string, rollups map[string]string) []string {
+	if selected || len(lines) == 0 {
+		return lines
+	}
+	rollup := rollups[row.ID]
+	if rollup == "" {
+		return lines
+	}
+	width := lipgloss.Width(lines[0])
+	name := row.Title.Text
+	pad := width - 2 - lipgloss.Width(name) - lipgloss.Width(rollup) - 2
+	if pad < 1 {
+		return lines
+	}
+	lines[0] = "  " + row.Title.Style.Render(name) +
+		strings.Repeat(" ", pad) + style.Dim.Render(rollup) + "  "
+	return lines
 }
 
 // decorateStackedGlyph colors the stacked title-line glyph on unselected
@@ -455,6 +542,12 @@ func (m *ListModel) SetCursorBySlug(slug string) bool {
 	}
 	m.list.CursorToFirstItem()
 	return false
+}
+
+// ProjectLabels returns the distinct project labels across all loaded items
+// (active and archived), sorted — the option set for the assign prompt.
+func (m ListModel) ProjectLabels() []string {
+	return ProjectLabels(m.allItems)
 }
 
 // CollapsedProjects returns the session's collapsed-project set so a rebuilt

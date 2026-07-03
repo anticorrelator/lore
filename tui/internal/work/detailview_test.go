@@ -37,8 +37,8 @@ func TestDetailModelExtraFileTabs(t *testing.T) {
 	m.detail = &detail
 	m.tabHost.SetTabs(m.buildTabs())
 
-	// Expected: Meta, Plan, Notes, Research, Context
-	wantLabels := []string{"Meta", "Plan", "Notes", "Research", "Context"}
+	// Expected: Digest, Plan, Notes, Research, Context, Meta
+	wantLabels := []string{"Digest", "Plan", "Notes", "Research", "Context", "Meta"}
 	if len(m.tabHost.Tabs()) != len(wantLabels) {
 		t.Fatalf("got %d tabs, want %d: %v", len(m.tabHost.Tabs()), len(wantLabels), m.tabHost.Tabs())
 	}
@@ -78,7 +78,7 @@ func TestDetailModelTabBuilding(t *testing.T) {
 				HasTasks:        true,
 				HasExecutionLog: true,
 			},
-			wantTabs: []Tab{TabMeta, TabPlan, TabNotes, TabTasks, TabExecLog},
+			wantTabs: []Tab{TabDigest, TabPlan, TabNotes, TabTasks, TabExecLog, TabMeta},
 		},
 		{
 			name: "minimal tabs",
@@ -87,7 +87,7 @@ func TestDetailModelTabBuilding(t *testing.T) {
 				HasTasks:        false,
 				HasExecutionLog: false,
 			},
-			wantTabs: []Tab{TabMeta, TabNotes},
+			wantTabs: []Tab{TabDigest, TabNotes, TabMeta},
 		},
 		{
 			name: "plan and exec log only",
@@ -96,7 +96,7 @@ func TestDetailModelTabBuilding(t *testing.T) {
 				HasTasks:        false,
 				HasExecutionLog: true,
 			},
-			wantTabs: []Tab{TabMeta, TabPlan, TabNotes, TabExecLog},
+			wantTabs: []Tab{TabDigest, TabPlan, TabNotes, TabExecLog, TabMeta},
 		},
 	}
 

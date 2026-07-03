@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func staticTab(id, label, content string) Tab {
@@ -174,5 +175,142 @@ func TestTabHostEmpty(t *testing.T) {
 	}
 	if h.ViewContent() != "" || stripANSI(h.ViewBar()) != "  " {
 		t.Errorf("empty host rendered content: bar=%q content=%q", h.ViewBar(), h.ViewContent())
+	}
+}
+
+func overflowTestHost(width int) TabHost {
+	h := NewTabHost()
+	h.SetTabs([]Tab{
+		staticTab("alpha", "Alpha", ""),
+		staticTab("beta", "Beta", ""),
+		staticTab("gamma", "Gamma", ""),
+		staticTab("delta", "Delta", ""),
+		staticTab("epsilon", "Epsilon", ""),
+		staticTab("zeta", "Zeta", ""),
+	})
+	h.SetContentStart(0, 0)
+	h.SetWidth(width)
+	return h
+}
+
+func TestTabHostUnsetWidthRendersAllTabs(t *testing.T) {
+	h := overflowTestHost(0)
+	bar := stripANSI(h.ViewBar())
+	for _, label := range []string{"Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta"} {
+		if !strings.Contains(bar, label) {
+			t.Errorf("unset width hid %q: %q", label, bar)
+		}
+	}
+	if strings.Contains(bar, "more") {
+		t.Errorf("unset width rendered an overflow pill: %q", bar)
+	}
+}
+
+func TestTabHostOverflowCollapsesTail(t *testing.T) {
+	h := overflowTestHost(30)
+	bar := stripANSI(h.ViewBar())
+	// Budget 30 fits Alpha and Beta beside the pill; the tail collapses.
+	if !strings.Contains(bar, "Alpha") || !strings.Contains(bar, "Beta") {
+		t.Fatalf("leading tabs missing: %q", bar)
+	}
+	for _, hidden := range []string{"Gamma", "Delta", "Epsilon", "Zeta"} {
+		if strings.Contains(bar, hidden) {
+			t.Errorf("tail tab %q still rendered: %q", hidden, bar)
+		}
+	}
+	if !strings.Contains(bar, "+4 more") {
+		t.Errorf("overflow pill missing: %q", bar)
+	}
+	if w := lipgloss.Width(bar); w > 30 {
+		t.Errorf("bar width %d exceeds budget 30: %q", w, bar)
+	}
+}
+
+func TestTabHostOverflowActiveTabAlwaysVisible(t *testing.T) {
+	h := overflowTestHost(30)
+	h.SetActiveID("epsilon")
+	bar := stripANSI(h.ViewBar())
+	if !strings.Contains(bar, "Epsilon") {
+		t.Fatalf("active tab hidden by overflow: %q", bar)
+	}
+	if !strings.Contains(bar, "+4 more") {
+		t.Errorf("pill missing with active in tail: %q", bar)
+	}
+}
+
+func TestTabHostOverflowPillActivatesFirstHidden(t *testing.T) {
+	h := overflowTestHost(30)
+	bar := stripANSI(h.ViewBar())
+	pillX := strings.Index(bar, "+4 more")
+	if pillX < 0 {
+		t.Fatalf("no pill in bar: %q", bar)
+	}
+	// Bar line is contentStartY+1 = 1 with content start at (0,0).
+	h, _ = h.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: pillX, Y: 1})
+	if h.ActiveID() != "gamma" {
+		t.Fatalf("pill click activated %q, want gamma (first hidden)", h.ActiveID())
+	}
+	// The newly active tab is now visible; the pill re-collapses around it.
+	bar = stripANSI(h.ViewBar())
+	if !strings.Contains(bar, "Gamma") {
+		t.Errorf("activated tab not visible after pill click: %q", bar)
+	}
+}
+
+func TestTabHostOverflowCyclingReachesHiddenTabs(t *testing.T) {
+	h := overflowTestHost(30)
+	seen := map[string]bool{}
+	for i := 0; i < len(h.Tabs()); i++ {
+		seen[h.ActiveID()] = true
+		if bar := stripANSI(h.ViewBar()); !strings.Contains(bar, h.Tabs()[h.ActiveIndex()].Label) {
+			t.Errorf("active %q not visible in bar: %q", h.ActiveID(), bar)
+		}
+		h, _ = h.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	}
+	if len(seen) != len(h.Tabs()) {
+		t.Fatalf("cycling reached %d of %d tabs: %v", len(seen), len(h.Tabs()), seen)
+	}
+}
+
+// TestTabHostOverflowClicksMatchBar sweeps widths and active tabs, asserting
+// the hit-test agrees with the rendered bar: every visible label click lands
+// on that tab, and a pill click lands on the first hidden tab.
+func TestTabHostOverflowClicksMatchBar(t *testing.T) {
+	labels := []string{"Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta"}
+	ids := []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta"}
+	for width := 10; width <= 52; width += 3 {
+		for active := range ids {
+			h := overflowTestHost(width)
+			h.SetActiveID(ids[active])
+			bar := stripANSI(h.ViewBar())
+
+			if !strings.Contains(bar, labels[active]) {
+				t.Fatalf("width %d: active %q not in bar %q", width, labels[active], bar)
+			}
+
+			hiddenFirst := ""
+			for i, label := range labels {
+				pos := strings.Index(bar, label)
+				if pos < 0 {
+					if hiddenFirst == "" {
+						hiddenFirst = ids[i]
+					}
+					continue
+				}
+				got, ok := h.hitTest(pos, 1)
+				if !ok || got != i {
+					t.Errorf("width %d active %d: click on %q at x=%d hit tab %d (ok=%v)",
+						width, active, label, pos, got, ok)
+				}
+			}
+
+			if pillX := strings.Index(bar, "+"); pillX >= 0 {
+				got, ok := h.hitTest(pillX, 1)
+				if !ok || h.Tabs()[got].ID != hiddenFirst {
+					t.Errorf("width %d active %d: pill click hit %d, want first hidden %q (bar %q)",
+						width, active, got, hiddenFirst, bar)
+				}
+			}
+		}
 	}
 }
