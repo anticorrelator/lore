@@ -12,12 +12,14 @@ pk_retrieval.
 """
 
 import datetime
+import hashlib
 import json
 import os
 import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pk_search  # noqa: E402
 from pk_search import Searcher  # noqa: E402
 import pk_retrieval  # noqa: E402
 
@@ -80,8 +82,46 @@ def _entry_backlink_block(entry: dict) -> str:
     return f"\n- {pk_retrieval.backlink_for(path, heading)}\n"
 
 
-def resolve_v2(knowledge_dir: str, directive: dict, slug: str, phase_number: int) -> int:
-    """Resolve a v2 directive: per-topic fan-out, sectioned render, telemetry."""
+def _trust_snapshot(knowledge_dir: str, entry: dict) -> dict:
+    """Per-entry trust at delivery: live ledger fold, never the cached
+    trust_score column (stale-at-INSERT until marker-triggered refresh)."""
+    rel_path = pk_retrieval.entry_path(entry)
+    score = None
+    try:
+        tc = pk_search._trust_compute()
+        scores, migrations = pk_search._ledger_fold(knowledge_dir)
+        summary = tc.score_for_entry(scores, migrations, rel_path)
+        if summary is not None:
+            score = summary["score"]
+    except Exception:
+        pass  # snapshot is best-effort; unobserved and unfoldable both read as null
+    recency = None
+    if rel_path:
+        recency = pk_search._parse_correction_recency(os.path.join(knowledge_dir, rel_path))
+    return {
+        "score": score,
+        "status": entry.get("entry_status") or "unknown",
+        "confidence": entry.get("confidence") or "unknown",
+        "correction_recency": recency,
+    }
+
+
+def resolve_v2(
+    knowledge_dir: str,
+    directive: dict,
+    slug: str,
+    phase_number: int,
+    task_id: str | None = None,
+    delivery_json_path: str | None = None,
+) -> int:
+    """Resolve a v2 directive: per-topic fan-out, sectioned render, telemetry.
+
+    `task_id` populates the manifest_load record's task_id slot when the
+    caller resolves on behalf of a single task. `delivery_json_path` requests
+    a per-entry delivery snapshot (path, render_mode, trust at delivery)
+    written as JSON to that path — the input packet emitters compose rows
+    from; the rendered manifest on stdout is unchanged.
+    """
     knowledge_dir = os.path.abspath(knowledge_dir)
     topics = directive.get("topics", [])
     if not topics:
@@ -235,6 +275,11 @@ def resolve_v2(knowledge_dir: str, directive: dict, slug: str, phase_number: int
             for c, _, _ in rendered_blocks
             if pk_retrieval.entry_path(c["entry"])
         ]
+        served_entries = [
+            {"path": pk_retrieval.entry_path(c["entry"]), "render_mode": m, "entry": c["entry"]}
+            for c, m, _ in rendered_blocks
+            if pk_retrieval.entry_path(c["entry"])
+        ]
 
         return {
             "rendered": header_line + "".join(b for _, _, b in rendered_blocks),
@@ -245,6 +290,7 @@ def resolve_v2(knowledge_dir: str, directive: dict, slug: str, phase_number: int
             "shrunk_for_budget": degraded["shrunk_for_budget"],
             "entry_count_before_budget": len(candidates),
             "served_paths": served_paths,
+            "served_entries": served_entries,
         }
 
     output_parts: list[str] = ["## Prior Knowledge\n"]
@@ -320,7 +366,7 @@ def resolve_v2(knowledge_dir: str, directive: dict, slug: str, phase_number: int
             "event": "manifest_load",
             "slug": slug,
             "phase": phase_number,
-            "task_id": None,
+            "task_id": task_id,
             "manifest_version": MANIFEST_VERSION,
             "loaded_paths": all_paths,
             "sections": section_records,
@@ -330,5 +376,43 @@ def resolve_v2(knowledge_dir: str, directive: dict, slug: str, phase_number: int
             lf.write(json.dumps(record) + "\n")
     except OSError:
         pass
+
+    # Delivery snapshot (fail-open): per-entry render mode + trust at delivery,
+    # for the caller's packet emission. Search-order ranking is trust-weighted;
+    # the trust-blind composite rerank exists only on the session-load path.
+    if delivery_json_path:
+        try:
+            entries = []
+            for sec in resolved_topics:
+                for served in sec["render_result"]["served_entries"]:
+                    entries.append({
+                        "path": served["path"],
+                        "render_mode": served["render_mode"],
+                        "section_role": sec["role"],
+                        "topic": sec["topic"],
+                        "ranking_path": "search-order",
+                        "trust": _trust_snapshot(knowledge_dir, served["entry"]),
+                    })
+            tc_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "trust-compute.py")
+            with open(tc_path, "rb") as fh:
+                trust_compute_sha = hashlib.sha256(fh.read()).hexdigest()
+            snapshot = {
+                "slug": slug,
+                "phase": phase_number,
+                "task_id": task_id,
+                "manifest_version": MANIFEST_VERSION,
+                "trust_compute_sha": trust_compute_sha,
+                "budget": {
+                    "chars_used": total_chars + sum(
+                        s["render_result"]["chars_used"] for s in resolved_topics),
+                    "chars_budget": GLOBAL_CHAR_CEILING,
+                },
+                "entries": entries,
+            }
+            with open(delivery_json_path, "w", encoding="utf-8") as fh:
+                json.dump(snapshot, fh, ensure_ascii=False)
+        except OSError as exc:
+            print(f"Warning: delivery snapshot write failed: {exc}", file=sys.stderr)
 
     return 0

@@ -37,6 +37,10 @@ FILES_FULL=0
 FILES_SUMMARY=0
 FILES_SKIPPED=0
 
+# Per-entry delivery records for the session-scope packet: "<render_mode>\t<rel_path>"
+# (rel_path is the KDIR-relative entry file path, .md included)
+PACKET_ENTRIES=()
+
 # Rubric categories: always loaded at SessionStart
 RUBRIC_CATEGORIES=(principles workflows conventions team preferences)
 # Scale-bearing categories: loaded only when a session scope declaration is present
@@ -164,9 +168,11 @@ echo ""
 
       CONTENT=$(cat "$ABS_PATH" 2>/dev/null) || continue
       ENTRY_SIZE=${#CONTENT}
+      REL_ENTRY_PATH="${ABS_PATH#"$KNOWLEDGE_DIR/"}"
 
       # Check budget
       if [[ $((CHARS_USED + ENTRY_SIZE + 2)) -gt $BUDGET ]]; then
+        PACKET_ENTRIES+=("skipped"$'\t'"$REL_ENTRY_PATH")
         continue
       fi
 
@@ -181,6 +187,7 @@ echo ""
       CHARS_USED=$((CHARS_USED + ENTRY_SIZE + 1))
       DIRECT_RESOLVED_COUNT=$((DIRECT_RESOLVED_COUNT + 1))
       FILES_FULL=$((FILES_FULL + 1))
+      PACKET_ENTRIES+=("full"$'\t'"$REL_ENTRY_PATH")
 
       # Track loaded path for dedup
       DIRECT_LOADED_PATHS+=("$backlink_path")
@@ -281,6 +288,7 @@ print(' OR '.join(terms))
         RELEVANCE_SEARCH_COUNT=$((RELEVANCE_SEARCH_COUNT + 1))
         FILES_FULL=$((FILES_FULL + 1))
         RELEVANCE_LOADED_PATHS+=("$rel_path")
+        PACKET_ENTRIES+=("full"$'\t'"$rel_path")
       done < <(echo "$BUDGET_RESULTS" | python3 -c "
 import json, sys, os
 data = json.load(sys.stdin)
@@ -307,6 +315,7 @@ for e in data.get('full', []):
         fi
         echo "  - ${heading} (${title_path})"
         FILES_SUMMARY=$((FILES_SUMMARY + 1))
+        PACKET_ENTRIES+=("summary"$'\t'"$title_path")
       done < <(echo "$BUDGET_RESULTS" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
@@ -489,3 +498,136 @@ printf '{"timestamp":"%s","format_version":%d,"budget_used":%d,"budget_total":%d
   "$LOADED_PATHS_JSON" \
   "$SCALE_DECLARED" \
   >> "$META_DIR/retrieval-log.jsonl" 2>/dev/null || true
+
+# --- Session-scope packet emission (sole writer: packet-append.sh) ---
+# Fail-open and time-gated: a slow or failed append must never delay the
+# knowledge payload — the SessionStart hook timeout kills the entire stdout
+# payload silently. Stdout is discarded so no packet trace reaches session
+# context (prompt-context invariant, $KDIR/_packets/README.md).
+# The gate is deliberately looser than TIME_BUDGET_SECS (the relevance-search
+# guard): emission costs well under a second, so it only needs headroom
+# against the hook timeout (15s for claude-code), not the search budget.
+PACKET_TIME_BUDGET_SECS="${LORE_PACKET_TIME_BUDGET:-12}"
+if [[ $SECONDS -lt $PACKET_TIME_BUDGET_SECS ]]; then
+  # Session identity must use the transcript-provider scheme. Both harness
+  # payloads normalize to it (claude-code stdin payload session_id == the
+  # transcript's sessionId; opencode LORE_HOOK_PAYLOAD session_id == the
+  # accumulator events' session_id). Anything else stays "unknown" — never
+  # invent a second identity scheme.
+  SESSION_ID="unknown"
+  HOOK_PAYLOAD="${LORE_HOOK_PAYLOAD:-}"
+  if [[ -z "$HOOK_PAYLOAD" && ! -t 0 ]]; then
+    # Bounded read: a harness that leaves stdin open must not stall the hook.
+    IFS= read -r -t 2 -d '' HOOK_PAYLOAD || true
+  fi
+  if [[ -n "$HOOK_PAYLOAD" ]]; then
+    SESSION_ID=$(printf '%s' "$HOOK_PAYLOAD" | python3 -c '
+import json, sys
+try:
+    payload = json.load(sys.stdin)
+    sid = payload.get("session_id") or payload.get("sessionId") or ""
+except Exception:
+    sid = ""
+print(sid if isinstance(sid, str) and sid else "unknown")
+' 2>/dev/null) || SESSION_ID="unknown"
+    [[ -n "$SESSION_ID" ]] || SESSION_ID="unknown"
+  fi
+
+  PACKET_EMPTY_REASON=""
+  if [[ ${#PACKET_ENTRIES[@]} -eq 0 ]]; then
+    if [[ -z "$CONTEXT_SIGNAL" ]]; then
+      PACKET_EMPTY_REASON="no context signal — compact index only, no entries resolved"
+    elif [[ $RELEVANCE_SKIPPED -eq 1 ]]; then
+      PACKET_EMPTY_REASON="relevance search skipped by time budget (${SECONDS}s of ${TIME_BUDGET_SECS}s); no direct-resolved entries"
+    else
+      PACKET_EMPTY_REASON="context signal present but no entries resolved within budget"
+    fi
+  fi
+
+  # Trust snapshots mirror pk_manifest._trust_snapshot: live ledger fold,
+  # never the cached trust_score column (stale-at-INSERT). All session-load
+  # entries are trust-blind deliveries -> ranking_path "composite-rerank".
+  printf '%s\n' ${PACKET_ENTRIES[@]+"${PACKET_ENTRIES[@]}"} | python3 -c '
+import json, os, subprocess, sys, uuid
+
+script_dir, kdir, session_id, chars_used, chars_budget, empty_reason = sys.argv[1:7]
+sys.path.insert(0, script_dir)
+import pk_search
+from pk_markdown import MarkdownParser
+
+rows, seen = [], set()
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line or "\t" not in line:
+        continue
+    mode, rel = line.split("\t", 1)
+    if not rel or (mode, rel) in seen:
+        continue
+    seen.add((mode, rel))
+    rows.append((mode, rel))
+
+fold = None
+try:
+    tc = pk_search._trust_compute()
+    fold = pk_search._ledger_fold(kdir)
+except Exception:
+    tc = None
+
+entries = []
+for mode, rel in rows:
+    score = None
+    if fold is not None:
+        try:
+            summary = tc.score_for_entry(fold[0], fold[1], rel)
+            if summary is not None:
+                score = summary["score"]
+        except Exception:
+            pass
+    status = confidence = recency = None
+    abs_path = os.path.join(kdir, rel)
+    try:
+        meta = MarkdownParser._extract_metadata(open(abs_path, encoding="utf-8").read())
+        status = meta.get("entry_status")
+        confidence = meta.get("confidence")
+    except Exception:
+        pass
+    try:
+        recency = pk_search._parse_correction_recency(abs_path)
+    except Exception:
+        pass
+    entries.append({
+        "path": rel,
+        "render_mode": mode,
+        "ranking_path": "composite-rerank",
+        "trust": {
+            "score": score,
+            "status": status or "unknown",
+            "confidence": confidence or "unknown",
+            "correction_recency": recency,
+        },
+    })
+
+row = {
+    "packet_id": "pkt-" + uuid.uuid4().hex[:12],
+    "packet_scope": "session",
+    "delivery_stage": "assembled",
+    "session_id": session_id or "unknown",
+    "work_item": None,
+    "phase": None,
+    "task_id": None,
+    "arm": os.environ.get("LORE_PACKET_ARM") or None,
+    "task_scale_set": None,
+    "delivered_entries": entries,
+    "budget": {"chars_used": int(chars_used), "chars_budget": int(chars_budget)},
+    "template_version": None,
+}
+if not entries:
+    row["empty_reason"] = empty_reason or "no entries delivered"
+
+subprocess.run(
+    ["bash", os.path.join(script_dir, "packet-append.sh"),
+     "--row", json.dumps(row, ensure_ascii=False), "--kdir", kdir],
+    capture_output=True, text=True, timeout=30, check=True)
+' "$SCRIPT_DIR" "$KNOWLEDGE_DIR" "$SESSION_ID" "$CHARS_USED" "$BUDGET" "$PACKET_EMPTY_REASON" \
+    >/dev/null 2>&1 || true
+fi

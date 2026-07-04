@@ -838,6 +838,7 @@ def cmd_prefetch(args: argparse.Namespace) -> None:
         exclude_backlinks=args.exclude_backlinks or "",
         work_item=args.work_item or "",
         no_preferences=args.no_preferences,
+        caller=getattr(args, "caller", None),
     )
     sys.exit(rc)
 
@@ -870,7 +871,9 @@ def cmd_resolve_manifest(args: argparse.Namespace) -> None:
     except json.JSONDecodeError as e:
         print(f"Error: directive is not valid JSON: {e}", file=sys.stderr)
         sys.exit(1)
-    rc = pk_manifest.resolve_v2(args.knowledge_dir, directive, args.slug, args.phase)
+    rc = pk_manifest.resolve_v2(
+        args.knowledge_dir, directive, args.slug, args.phase,
+        task_id=args.task_id, delivery_json_path=args.delivery_json)
     sys.exit(rc)
 
 
@@ -990,6 +993,7 @@ def main() -> None:
     p_prefetch.add_argument("--exclude-backlinks", default=None, metavar="CSV", help="Backlink paths to exclude from results")
     p_prefetch.add_argument("--work-item", default=None, metavar="SLUG", help="Work item slug for scope_pointers injection")
     p_prefetch.add_argument("--no-preferences", action="store_true", help="Skip the preferences side-channel")
+    p_prefetch.add_argument("--caller", default=None, help="Caller identifier logged to retrieval log (e.g. 'lead', 'worker')")
     p_prefetch.set_defaults(func=cmd_prefetch)
 
     # query
@@ -1010,6 +1014,8 @@ def main() -> None:
     p_manifest.add_argument("--directive", required=True, help="retrieval_directive JSON (version 2)")
     p_manifest.add_argument("--slug", required=True, help="Work item slug (telemetry)")
     p_manifest.add_argument("--phase", type=int, required=True, help="1-based phase number (telemetry)")
+    p_manifest.add_argument("--task-id", default=None, help="Task id this resolve serves (telemetry; populates manifest_load.task_id)")
+    p_manifest.add_argument("--delivery-json", default=None, help="Write a per-entry delivery snapshot (render mode + trust) as JSON to this path")
     p_manifest.set_defaults(func=cmd_resolve_manifest)
 
     # stats

@@ -996,6 +996,30 @@ framework_model_routing_shape() {
   echo "${shape:-single}"
 }
 
+# --- framework_model_routing_tiers ---
+# Print the framework's ordered model-tier aliases, one per line, in
+# ascending capability order. Reads adapters/capabilities.json
+# `.frameworks.<fw>.model_routing.tiers`. Optional $1 selects an explicit
+# framework; default is the active framework. A missing or empty tiers
+# array prints nothing — no default ladder is guessed, because the alias
+# strings are consumed verbatim by harness spawns and a wrong guess fails
+# only at audit time. Go counterpart: the capabilities profile's
+# ModelRouting.Tiers in tui/internal/config.
+framework_model_routing_tiers() {
+  local explicit_framework="${1:-}"
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  local active
+
+  if ! command -v jq &>/dev/null || [[ ! -f "$capabilities_file" ]]; then
+    return 0
+  fi
+  active="$explicit_framework"
+  if [[ -z "$active" ]]; then
+    active=$(resolve_active_framework) || return 1
+  fi
+  jq -r --arg fw "$active" '(.frameworks[$fw].model_routing.tiers // [])[] | select(type == "string")' "$capabilities_file" 2>/dev/null
+}
+
 # --- resolve_model_for_role ---
 # Print the resolved model id for a role on stdout.
 # Role MUST be one of the closed set in adapters/roles.json (see T3); unknown

@@ -26,15 +26,32 @@ PREFETCH_BUDGET = pk_retrieval.DEFAULT_PROMPT_BUDGET
 SNIPPET_LIMIT = pk_retrieval.SNIPPET_CHAR_LIMIT
 
 
-def _log_prefetch(knowledge_dir: str, served_results: list[dict]) -> None:
-    """Append a prefetch event to retrieval-log.jsonl."""
+def _log_prefetch(
+    knowledge_dir: str,
+    served_results: list[dict],
+    caller: str | None = None,
+    scale_set: list[str] | None = None,
+) -> None:
+    """Append a prefetch event to retrieval-log.jsonl.
+
+    `caller` and `scale_declared` are additive attribution fields (null/absent
+    on old rows) so assessment-time joins can attribute prefetch delivery;
+    `scale_declared` uses the same CSV form as search records.
+    """
     log_path = os.path.join(knowledge_dir, "_meta", "retrieval-log.jsonl")
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     loaded_paths = [r["file_path"] for r in served_results if r.get("file_path")]
+    record = {
+        "timestamp": ts,
+        "event": "prefetch",
+        "loaded_paths": loaded_paths,
+        "caller": caller,
+        "scale_declared": ",".join(scale_set) if scale_set else None,
+    }
     try:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         with open(log_path, "a") as lf:
-            lf.write(json.dumps({"timestamp": ts, "event": "prefetch", "loaded_paths": loaded_paths}) + "\n")
+            lf.write(json.dumps(record) + "\n")
     except OSError:
         pass
 
@@ -209,6 +226,7 @@ def run_prefetch(
     exclude_backlinks: str = "",
     work_item: str = "",
     no_preferences: bool = False,
+    caller: str | None = None,
 ) -> int:
     """Run the prefetch pipeline and print the formatted block to stdout."""
     knowledge_dir = os.path.abspath(knowledge_dir)
@@ -265,7 +283,7 @@ def run_prefetch(
                     filtered.append(r)
             results = filtered
         if not results:
-            _log_prefetch(knowledge_dir, results)
+            _log_prefetch(knowledge_dir, results, caller=caller, scale_set=scale_set)
             main_pool_emptied = True
 
     if main_pool_emptied:
@@ -305,7 +323,7 @@ def run_prefetch(
             if len(r.get("snippet", "")) > 200:
                 snippet += "..."
             print(f'- **{r["heading"]}** ({r["file_path"]}, score: {r.get("score", 0)}): {snippet}')
-        _log_prefetch(knowledge_dir, results)
+        _log_prefetch(knowledge_dir, results, caller=caller, scale_set=scale_set)
         if work_item:
             _emit_scope_pointers(knowledge_dir, work_item, query)
         return 0
@@ -367,7 +385,7 @@ def run_prefetch(
     for block in blocks:
         print(block)
 
-    _log_prefetch(knowledge_dir, results)
+    _log_prefetch(knowledge_dir, results, caller=caller, scale_set=scale_set)
 
     if work_item:
         _emit_scope_pointers(knowledge_dir, work_item, query)

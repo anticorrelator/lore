@@ -10,21 +10,25 @@ import (
 // The processor owns the durable schema; the TUI accepts documented fields and
 // a few conservative aliases while replacing snapshots wholesale.
 type Status struct {
-	Available     bool
-	Message       string
-	Enabled       bool
-	Queue         Queue
-	Items         []Item
-	Leases        []Lease
-	Harness       Harness
-	Usage         Usage
-	Batch         Batch
-	LastSettled   *LastSettled
-	RecentSettled []LastSettled
-	NextAction    string
-	BlockedReason string
-	UpdatedAt     string
-	Dispatch      Dispatch
+	Available         bool
+	Message           string
+	Enabled           bool
+	Queue             Queue
+	Items             []Item
+	Leases            []Lease
+	Harness           Harness
+	Usage             Usage
+	Batch             Batch
+	LastSettled       *LastSettled
+	RecentSettled     []LastSettled
+	NextAction        string
+	BlockedReason     string
+	UpdatedAt         string
+	Dispatch          Dispatch
+	Health            Health
+	ActiveHours       ActiveHours
+	AuditorModel      string
+	StaleActiveLeases int
 }
 
 // Dispatch reports the processor's dispatch posture (settlement disposition
@@ -35,6 +39,68 @@ type Status struct {
 type Dispatch struct {
 	Mode          string
 	CensusEnabled bool
+	SpotSample    SpotSample
+	VerifyVolume  VerifyVolume
+	Pump          Pump
+}
+
+// SpotSample is the weekly spot-sample budget dial (dispatch.spot_sample).
+type SpotSample struct {
+	Present      bool
+	UsedThisWeek int
+	WeeklyBudget int
+}
+
+// VerifyVolume is the peer-verification volume gauge (dispatch.verify_volume):
+// weekly consumption-verification event counts over the evaluation window,
+// with the held/contradicted disposition split per week.
+type VerifyVolume struct {
+	Present           bool
+	WindowWeeks       int
+	WeeklyAverage     float64
+	CurrentWeekEvents int
+	Weeks             []VerifyWeek
+}
+
+type VerifyWeek struct {
+	WeekStart    string
+	Events       int
+	Held         int
+	Contradicted int
+}
+
+// Pump is the trigger-pump liveness echo (dispatch.pump). HasGap is false
+// when seconds_since_last is null/absent — the pump has never run, which the
+// panel must render as "TUI closed", not as a zero-second gap.
+type Pump struct {
+	Present          bool
+	LastRanAt        string
+	SecondsSinceLast int
+	HasGap           bool
+}
+
+// Health is the top-level operational health block. Present is false when the
+// feed predates the block (older CLI); cells then render placeholders.
+// HasOldestPending distinguishes a null oldest_pending_age_seconds (no pending
+// rows) from a zero-age pending row.
+type Health struct {
+	Present                 bool
+	DrainRatePerHour        float64
+	Completions24h          int
+	OldestPendingAgeSeconds int
+	HasOldestPending        bool
+	RequeuesToday           int
+	FailuresToday           int
+}
+
+// ActiveHours is the schedule posture slice of the feed's active_hours block.
+type ActiveHours struct {
+	Present  bool
+	Enabled  bool
+	Allowed  bool
+	Reason   string
+	Timezone string
+	Ranges   int
 }
 
 type Queue struct {
@@ -65,12 +131,13 @@ type Item struct {
 }
 
 type Lease struct {
-	ID        string
-	ItemID    string
-	WorkerID  string
-	Harness   string
-	PID       int
-	ExpiresAt string
+	ID             string
+	ItemID         string
+	WorkerID       string
+	Harness        string
+	PID            int
+	ExpiresAt      string
+	ExpiresAtEpoch int64
 }
 
 type Harness struct {
@@ -168,9 +235,16 @@ func ParseStatus(data []byte) (Status, error) {
 			st.Dispatch = Dispatch{
 				Mode:          stringField(m, "mode"),
 				CensusEnabled: boolField(m, "census_enabled", "censusEnabled"),
+				SpotSample:    parseSpotSample(m),
+				VerifyVolume:  parseVerifyVolume(m),
+				Pump:          parsePump(m),
 			}
 		}
 	}
+	st.Health = parseHealth(root)
+	st.ActiveHours = parseActiveHours(root)
+	st.AuditorModel = stringField(root, "auditor_model", "auditorModel")
+	st.StaleActiveLeases = intField(root, "stale_active_leases", "staleActiveLeases")
 	st.RecentSettled = parseRecentSettled(root)
 	st.LastSettled = parseLastSettled(root, st.RecentSettled)
 	if st.Harness.ActiveLeases == 0 {
@@ -249,6 +323,123 @@ func InferNextAction(st Status) string {
 		return "process once or wait for processor"
 	}
 	return "idle"
+}
+
+func parseHealth(root map[string]json.RawMessage) Health {
+	raw, ok := first(root, "health")
+	if !ok {
+		return Health{}
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return Health{}
+	}
+	h := Health{
+		Present:          true,
+		DrainRatePerHour: floatField(m, "drain_rate_per_hour", "drainRatePerHour"),
+		Completions24h:   intField(m, "completions_24h", "completions24h"),
+		RequeuesToday:    intField(m, "requeues_today", "requeuesToday"),
+		FailuresToday:    intField(m, "failures_today", "failuresToday"),
+	}
+	// null oldest_pending_age_seconds means "no pending rows" — first()
+	// filters nulls, so presence here implies a real age.
+	if _, ok := first(m, "oldest_pending_age_seconds", "oldestPendingAgeSeconds"); ok {
+		h.OldestPendingAgeSeconds = intField(m, "oldest_pending_age_seconds", "oldestPendingAgeSeconds")
+		h.HasOldestPending = true
+	}
+	return h
+}
+
+func parseActiveHours(root map[string]json.RawMessage) ActiveHours {
+	raw, ok := first(root, "active_hours", "activeHours")
+	if !ok {
+		return ActiveHours{}
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return ActiveHours{}
+	}
+	out := ActiveHours{
+		Present:  true,
+		Enabled:  boolField(m, "enabled"),
+		Allowed:  boolField(m, "allowed"),
+		Reason:   stringField(m, "reason"),
+		Timezone: stringField(m, "timezone"),
+	}
+	if rangesRaw, ok := first(m, "ranges"); ok {
+		var ranges []json.RawMessage
+		if json.Unmarshal(rangesRaw, &ranges) == nil {
+			out.Ranges = len(ranges)
+		}
+	}
+	return out
+}
+
+func parseSpotSample(dispatch map[string]json.RawMessage) SpotSample {
+	raw, ok := first(dispatch, "spot_sample", "spotSample")
+	if !ok {
+		return SpotSample{}
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return SpotSample{}
+	}
+	return SpotSample{
+		Present:      true,
+		UsedThisWeek: intField(m, "used_this_week", "usedThisWeek"),
+		WeeklyBudget: intField(m, "weekly_budget", "weeklyBudget"),
+	}
+}
+
+func parseVerifyVolume(dispatch map[string]json.RawMessage) VerifyVolume {
+	raw, ok := first(dispatch, "verify_volume", "verifyVolume")
+	if !ok {
+		return VerifyVolume{}
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return VerifyVolume{}
+	}
+	out := VerifyVolume{
+		Present:           true,
+		WindowWeeks:       intField(m, "window_weeks", "windowWeeks"),
+		WeeklyAverage:     floatField(m, "weekly_average", "weeklyAverage"),
+		CurrentWeekEvents: intField(m, "current_week_events", "currentWeekEvents"),
+	}
+	if weeksRaw, ok := first(m, "weeks"); ok {
+		var rows []map[string]json.RawMessage
+		if json.Unmarshal(weeksRaw, &rows) == nil {
+			for _, row := range rows {
+				out.Weeks = append(out.Weeks, VerifyWeek{
+					WeekStart:    stringField(row, "week_start", "weekStart"),
+					Events:       intField(row, "events"),
+					Held:         intField(row, "held"),
+					Contradicted: intField(row, "contradicted"),
+				})
+			}
+		}
+	}
+	return out
+}
+
+func parsePump(dispatch map[string]json.RawMessage) Pump {
+	raw, ok := first(dispatch, "pump")
+	if !ok {
+		return Pump{}
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return Pump{}
+	}
+	out := Pump{
+		Present:   true,
+		LastRanAt: stringField(m, "last_ran_at", "lastRanAt"),
+	}
+	if _, ok := first(m, "seconds_since_last", "secondsSinceLast"); ok {
+		out.SecondsSinceLast = intField(m, "seconds_since_last", "secondsSinceLast")
+		out.HasGap = true
+	}
+	return out
 }
 
 func parseBatch(root map[string]json.RawMessage) Batch {
@@ -355,12 +546,13 @@ func parseLeases(root map[string]json.RawMessage) []Lease {
 	leases := make([]Lease, 0, len(rows))
 	for _, row := range rows {
 		leases = append(leases, Lease{
-			ID:        stringField(row, "id", "lease_id"),
-			ItemID:    stringField(row, "item_id", "claim_id"),
-			WorkerID:  stringField(row, "worker_id", "owner", "processor_id"),
-			Harness:   stringField(row, "harness", "framework"),
-			PID:       intField(row, "pid"),
-			ExpiresAt: stringField(row, "expires_at", "expiresAt"),
+			ID:             stringField(row, "id", "lease_id"),
+			ItemID:         stringField(row, "item_id", "claim_id"),
+			WorkerID:       stringField(row, "worker_id", "holder", "owner", "processor_id"),
+			Harness:        stringField(row, "harness", "framework"),
+			PID:            intField(row, "pid"),
+			ExpiresAt:      stringField(row, "expires_at", "expiresAt"),
+			ExpiresAtEpoch: int64(intField(row, "expires_at_epoch", "expiresAtEpoch")),
 		})
 	}
 	return leases
@@ -685,6 +877,25 @@ func intField(m map[string]json.RawMessage, keys ...string) int {
 	if json.Unmarshal(raw, &s) == nil {
 		var parsed int
 		if _, err := fmt.Sscanf(s, "%d", &parsed); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func floatField(m map[string]json.RawMessage, keys ...string) float64 {
+	raw, ok := first(m, keys...)
+	if !ok {
+		return 0
+	}
+	var f float64
+	if json.Unmarshal(raw, &f) == nil {
+		return f
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		var parsed float64
+		if _, err := fmt.Sscanf(s, "%g", &parsed); err == nil {
 			return parsed
 		}
 	}

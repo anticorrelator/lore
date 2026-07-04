@@ -377,6 +377,17 @@ $user_prompt"
     if [[ -s "$err_file" ]]; then
       echo "[audit] headless runner stderr tail:" >&2
       tail -n 20 "$err_file" >&2
+      # A model-not-found rejection (stale alias, retired dated id) is a
+      # configuration problem: every retry re-fails identically, so classify
+      # it as a setup error and fail fast instead of burning the retry budget.
+      # Signatures are best-effort matches on the Anthropic (not_found_error +
+      # model), claude CLI (invalid/unknown model), and OpenAI (model ...
+      # does not exist / model_not_found) stderr shapes.
+      if grep -Eiq 'not_found_error.*model|model_not_found|invalid model|unknown model|model not found|model .* does not exist' "$err_file"; then
+        echo "[audit] headless runner stderr matches a model-not-found signature — classifying as setup error (no retry). Check the configured judge model alias." >&2
+        rm -f "$err_file"
+        return 64
+      fi
     else
       echo "[audit] headless runner exit=$rc with empty stderr (output_file=$output_file size=$(wc -c < "$output_file" 2>/dev/null || echo 0))" >&2
     fi

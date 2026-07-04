@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # resolve-manifest.sh — Resolve a phase's retrieval_directive into a ## Prior Knowledge bundle
-# Usage: bash resolve-manifest.sh <slug> <phase_number>
+# Usage: bash resolve-manifest.sh <slug> <phase_number> [--task-id <id>] [--delivery-json <path>]
 #
 # <slug>          Work item slug (must have a tasks.json in $KDIR/_work/<slug>/)
 # <phase_number>  1-based phase index (must correspond to a phase in tasks.json)
+# --task-id       Task id this resolve serves; populates manifest_load.task_id
+#                 so manifest telemetry is task-joinable (omit for phase-level
+#                 resolves shared by several tasks)
+# --delivery-json Write a per-entry delivery snapshot (render mode + trust at
+#                 delivery) as JSON to this path (v2 directives only) — input
+#                 for packet emission; stdout is unchanged
 #
 # Stdout: A ## Prior Knowledge markdown block.
 #   - Legacy flat directive: passes through `lore query --format prompt` (single section).
@@ -29,12 +35,40 @@ source "$SCRIPT_DIR/lib.sh"
 
 # --- Validate arguments ---
 if [[ $# -lt 2 ]]; then
-  echo "Usage: resolve-manifest.sh <slug> <phase_number>" >&2
+  echo "Usage: resolve-manifest.sh <slug> <phase_number> [--task-id <id>] [--delivery-json <path>]" >&2
   exit 1
 fi
 
 SLUG="$1"
 PHASE_NUMBER="$2"
+shift 2
+
+TASK_ID=""
+DELIVERY_JSON=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task-id)
+      TASK_ID="${2:-}"
+      shift 2
+      ;;
+    --task-id=*)
+      TASK_ID="${1#--task-id=}"
+      shift
+      ;;
+    --delivery-json)
+      DELIVERY_JSON="${2:-}"
+      shift 2
+      ;;
+    --delivery-json=*)
+      DELIVERY_JSON="${1#--delivery-json=}"
+      shift
+      ;;
+    *)
+      echo "Error: unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
 
 if ! [[ "$PHASE_NUMBER" =~ ^[0-9]+$ ]] || [[ "$PHASE_NUMBER" -lt 1 ]]; then
   echo "Error: phase_number must be a positive integer, got: '$PHASE_NUMBER'" >&2
@@ -97,8 +131,10 @@ if [[ "$DIRECTIVE_VERSION" == "2" ]]; then
   # v2 grouped path — per-topic fan-out, sectioned output, per-section
   # budgets/degradation/telemetry. All of it lives in pk_manifest.py
   # (dispatched via pk_cli.py), composing Searcher + pk_retrieval.
-  python3 "$SCRIPT_DIR/pk_cli.py" resolve-manifest "$KNOWLEDGE_DIR" \
-    --directive "$DIRECTIVE_JSON" --slug "$SLUG" --phase "$PHASE_NUMBER"
+  V2_ARGS=(--directive "$DIRECTIVE_JSON" --slug "$SLUG" --phase "$PHASE_NUMBER")
+  [[ -n "$TASK_ID" ]] && V2_ARGS+=(--task-id "$TASK_ID")
+  [[ -n "$DELIVERY_JSON" ]] && V2_ARGS+=(--delivery-json "$DELIVERY_JSON")
+  python3 "$SCRIPT_DIR/pk_cli.py" resolve-manifest "$KNOWLEDGE_DIR" "${V2_ARGS[@]}"
   exit $?
 fi
 
@@ -182,13 +218,14 @@ if [[ -n "$PROMPT_OUTPUT" ]]; then
 fi
 
 # Legacy telemetry: manifest_load event without per-section fields.
-python3 - "$KNOWLEDGE_DIR" "$SLUG" "$PHASE_NUMBER" "$RESOLVE_MANIFEST_PATHS" <<'LOG_PY'
+python3 - "$KNOWLEDGE_DIR" "$SLUG" "$PHASE_NUMBER" "$RESOLVE_MANIFEST_PATHS" "$TASK_ID" <<'LOG_PY'
 import json, os, sys, datetime
 
 knowledge_dir = sys.argv[1]
 slug = sys.argv[2]
 phase = int(sys.argv[3])
 paths_csv = sys.argv[4]
+task_id = sys.argv[5] or None
 
 log_path = os.path.join(knowledge_dir, "_meta", "retrieval-log.jsonl")
 os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -201,7 +238,7 @@ record = json.dumps({
     "event": "manifest_load",
     "slug": slug,
     "phase": phase,
-    "task_id": None,
+    "task_id": task_id,
     "manifest_version": 1,
     "loaded_paths": loaded_paths,
 })

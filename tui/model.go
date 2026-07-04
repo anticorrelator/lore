@@ -217,9 +217,6 @@ type model struct {
 	settingsPanel      *settings.SettingsModel
 	settingsPriorFocus panelFocus
 
-	// settlementSettingsPanel is the schema-backed settlement subtree editor
-	// embedded directly in the settlement view.
-	settlementSettingsPanel   *settings.SettingsModel
 	settlementProcessInFlight bool
 	// settlementProcessStartedAt is set when settlementProcessInFlight flips
 	// true and cleared when it flips back. The failsafe in

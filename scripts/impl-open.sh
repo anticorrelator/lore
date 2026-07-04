@@ -40,7 +40,13 @@
 # already-created tasks. No eligible tasks is a successful empty manifest
 # with an explanatory status, not an error.
 #
-# The only write is one execution-log attribution row (source: impl-verb).
+# Writes: one execution-log attribution row (source: impl-verb), plus one
+# task-scope packet row per eligible task appended via the sole-writer
+# packet-append.sh (delivery_stage "assembled"; per-entry trust snapshots from
+# resolve-manifest's --delivery-json sidecar). Packet appends are fail-open:
+# a failed append warns and omits that task's packet_id from the manifest.
+# Each TaskCreate manifest entry carries its packet_id so the lead can thread
+# it into the worker Task prompt for dispatch confirmation.
 #
 # Exit codes:
 #   0  manifest emitted (possibly empty with explanatory status)
@@ -272,16 +278,18 @@ SELECT_TASKS_CSV=$(IFS=','; echo "${SELECT_TASKS[*]-}")
 PAYLOAD=$(_LORE_CEREMONY_JSON="$CEREMONY_JSON" python3 - "$ITEM_DIR" "$SLUG" \
   "$SELECT_ALL" "$SELECT_PHASES_CSV" "$SELECT_TASKS_CSV" \
   "$FALLBACK_SCALE_SET" "$FRAMEWORK" "$ENFORCEMENT" "$TEAM_MESSAGING" \
-  "$SCRIPT_DIR" "$LORE_REPO_DIR" "$CHECKSUM_LINE" <<'PYEOF'
+  "$SCRIPT_DIR" "$LORE_REPO_DIR" "$CHECKSUM_LINE" "$TEMPLATE_VERSION" <<'PYEOF'
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
+import uuid
 
 (item_dir, slug, select_all, phases_csv, tasks_csv, fallback_scale_set,
  framework, enforcement, team_messaging, script_dir, repo_dir,
- checksum_line) = sys.argv[1:13]
+ checksum_line, template_version) = sys.argv[1:14]
 
 ceremony_skills = json.loads(os.environ.get("_LORE_CEREMONY_JSON", "[]"))
 
@@ -404,6 +412,7 @@ for tid in eligible_ids:
 
 # --- Manifest: TeamCreate first, TaskCreate in order, then blockedBy wiring ---
 manifest = []
+taskcreate_by_id = {}
 if eligible_ids:
     manifest.append({
         "op": "TeamCreate",
@@ -424,6 +433,7 @@ if eligible_ids:
         if tid in external_blocked_by:
             entry["external_blocked_by"] = external_blocked_by[tid]
         manifest.append(entry)
+        taskcreate_by_id[tid] = entry
     for tid in eligible_ids:
         if tid not in edges:
             continue
@@ -451,8 +461,12 @@ else:
 
 # --- Phase map + per-phase prior knowledge (3-branch gate) ---------------------
 selected_phase_nums = sorted({phase_of[tid] for tid in eligible_ids})
+eligible_by_phase = {}
+for tid in eligible_ids:
+    eligible_by_phase.setdefault(phase_of[tid], []).append(tid)
 phase_map = []
 prior_knowledge = []
+delivery_by_phase = {}  # phase number -> resolve-manifest delivery snapshot
 for phase in phases:
     pnum = phase.get("phase_number")
     directive = phase.get("retrieval_directive")
@@ -479,10 +493,16 @@ for phase in phases:
     # the manifest, so every subprocess branch is contained per-iteration.
     if directive is not None:
         entry["branch"] = "directive"
+        delivery_fd, delivery_path = tempfile.mkstemp(suffix=".json", prefix="rm-delivery-")
+        os.close(delivery_fd)
+        rm_args = ["bash", os.path.join(script_dir, "resolve-manifest.sh"), slug, str(pnum),
+                   "--delivery-json", delivery_path]
+        # task_id attribution is only unambiguous when one task consumes the resolve
+        phase_eligible = eligible_by_phase.get(pnum, [])
+        if len(phase_eligible) == 1:
+            rm_args += ["--task-id", phase_eligible[0]]
         try:
-            proc = subprocess.run(
-                ["bash", os.path.join(script_dir, "resolve-manifest.sh"), slug, str(pnum)],
-                capture_output=True, text=True, timeout=120)
+            proc = subprocess.run(rm_args, capture_output=True, text=True, timeout=120)
             if proc.returncode == 0:
                 content = proc.stdout.strip()
                 entry["content"] = proc.stdout if content else None
@@ -506,6 +526,18 @@ for phase in phases:
             entry["content"] = None
             entry["note"] = str(exc)
             warn(f"phase {pnum}: resolve-manifest.sh failed ({exc})")
+        try:
+            with open(delivery_path, encoding="utf-8") as df:
+                snapshot_text = df.read().strip()
+            if snapshot_text:
+                delivery_by_phase[pnum] = json.loads(snapshot_text)
+        except (OSError, ValueError):
+            pass  # legacy directives and failed resolves leave no snapshot
+        finally:
+            try:
+                os.unlink(delivery_path)
+            except OSError:
+                pass
     elif any("## Prior Knowledge" in (t.get("description") or "")
              for t in phase.get("tasks", [])):
         entry["branch"] = "task-descriptions"
@@ -576,6 +608,67 @@ for tid in eligible_ids:
             "file": r.get("file"),
             "captured_at_sha": r.get("captured_at_sha"),
         } for r in rows]
+
+# --- Task-scope packet emission (append-supersede; one row per eligible task) --
+# Rows go through packet-append.sh, the sole writer of _packets/packets.jsonl.
+# Fail-open: a failed append warns and leaves that task without a packet_id.
+pk_status_by_phase = {e["phase_number"]: e for e in prior_knowledge}
+packets = []
+for tid in eligible_ids:
+    pnum = phase_of[tid]
+    snapshot = delivery_by_phase.get(pnum)
+    delivered_entries = []
+    if snapshot:
+        for se in snapshot.get("entries", []):
+            delivered_entries.append({
+                "path": se.get("path"),
+                "render_mode": se.get("render_mode"),
+                "ranking_path": se.get("ranking_path", "search-order"),
+                "section_role": se.get("section_role"),
+                "topic": se.get("topic"),
+                "trust": se.get("trust"),
+            })
+    row = {
+        "packet_id": "pkt-" + uuid.uuid4().hex[:12],
+        "packet_scope": "task",
+        "delivery_stage": "assembled",
+        "session_id": None,
+        "work_item": slug,
+        "phase": pnum,
+        "task_id": tid,
+        # arm is runner-stamped, never inferred; absent env means not experiment data
+        "arm": os.environ.get("LORE_PACKET_ARM") or None,
+        "task_scale_set": None,
+        "delivered_entries": delivered_entries,
+        "budget": (snapshot or {}).get("budget") or {"chars_used": None, "chars_budget": None},
+        "template_version": (template_version
+                             if re.fullmatch(r"[0-9a-f]{12}", template_version or "")
+                             else None),
+        "tier2_claim_ids": [r["claim_id"] for r in tier2_extracts.get(tid, [])
+                            if r.get("claim_id")],
+    }
+    if snapshot and snapshot.get("trust_compute_sha"):
+        row["trust_compute_sha"] = snapshot["trust_compute_sha"]
+    if not delivered_entries:
+        pk_entry = pk_status_by_phase.get(pnum, {})
+        row["empty_reason"] = (
+            f"phase {pnum} delivered no per-entry snapshot "
+            f"(branch={pk_entry.get('branch', 'unknown')}, "
+            f"status={pk_entry.get('status', 'unknown')})")
+    try:
+        proc = subprocess.run(
+            ["bash", os.path.join(script_dir, "packet-append.sh"),
+             "--row", json.dumps(row, ensure_ascii=False)],
+            capture_output=True, text=True, timeout=60)
+        if proc.returncode == 0:
+            taskcreate_by_id[tid]["packet_id"] = row["packet_id"]
+            packets.append({"task_id": tid, "phase": pnum, "packet_id": row["packet_id"]})
+        else:
+            stderr_lines = (proc.stderr or "").strip().splitlines()
+            warn(f"packet append failed for {tid}"
+                 + (f": {stderr_lines[-1]}" if stderr_lines else ""))
+    except Exception as exc:
+        warn(f"packet append failed for {tid} ({exc})")
 
 # --- Per-phase plan content: advisors, consultations, task format --------------
 phase_blocks = {}
@@ -729,6 +822,7 @@ print(json.dumps({
     "collisions": collisions,
     "phase_map": phase_map,
     "prior_knowledge": prior_knowledge,
+    "packets": packets,
     "tier2_extracts": tier2_extracts,
     "skill_invocation_map": skill_invocation_map,
     "ceremony_injected": ceremony_injected,
@@ -760,6 +854,7 @@ lines = [
     f"Status: {d['status']}",
     "Manifest ops: " + (", ".join(f"{v} {k}" for k, v in counts.items()) or "none"),
     f"Collisions serialized: {len(d['collisions'])}",
+    f"Task-scope packets appended: {len(d.get('packets', []))}",
 ]
 for c in d["ceremony_injected"]:
     tv = c["skill_template_version"] or "unknown"
@@ -816,6 +911,11 @@ print()
 print("Prior knowledge:")
 for pk in d["prior_knowledge"]:
     print(f"  Phase {pk['phase_number']} ({pk['branch']}): {pk['status']}")
+if d.get("packets"):
+    print()
+    print("Task-scope packets appended:")
+    for p in d["packets"]:
+        print(f"  {p['task_id']} (phase {p['phase']}): {p['packet_id']}")
 print()
 c = d["lead_inline_conditions"]
 print("Lead-inline conditions (read each; the route decision is yours):")

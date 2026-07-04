@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
@@ -195,11 +196,14 @@ func (m model) viewSettlement() string {
 	var b strings.Builder
 	b.WriteString(renderTabIndicator(stateSettlement, len(m.list.Items()), m.followupList.FollowUpCount(), m.settlement.Count(), w))
 	b.WriteString("\n")
-	// Border annotation: advertise j/k for whichever side of the split has
-	// focus, mirroring the annotation vocabulary used by the other panels.
+	// Border annotation: advertise what j/k currently walks — the queue at
+	// the root, claims or verdicts inside a drill-in.
 	annotSel := 0
-	if m.focusedPanel == panelRight {
+	switch m.settlement.Drill() {
+	case settlement.DrillClaim:
 		annotSel = 1
+	case settlement.DrillVerdict:
+		annotSel = 2
 	}
 	annot, annotW := annotSettlementFocus.renderSelected(annotSel)
 	b.WriteString(borderS.Render(style.DockBorder.TopLeft))
@@ -230,86 +234,23 @@ func (m model) viewSettlement() string {
 	return b.String()
 }
 
+// renderSettlementBodyLines renders the settlement sub-model at the full
+// panel height, padding short content with blank rows so the outer panel
+// stays full-height. The sub-model self-budgets its regions and scrolls
+// overflow; the host clips blindly at height.
 func (m model) renderSettlementBodyLines(width, height int) []string {
 	if height <= 0 {
 		return nil
 	}
-	settingsMaxH := settlementSettingsMaxHeight(height)
-	settingsLines := trimTrailingBlankLines(strings.Split(m.settlementSettingsInlineView(width, settingsMaxH), "\n"))
-	if len(settingsLines) > settingsMaxH {
-		settingsLines = settingsLines[:settingsMaxH]
-	}
-	settingsBlockH := 0
-	if len(settingsLines) > 0 {
-		settingsBlockH = len(settingsLines) + 1
-	}
-
-	statusH := height - settingsBlockH
-	if statusH < 1 {
-		statusH = 1
-	}
-	statusLines := strings.Split(m.settlement.SetSize(width, statusH).View(), "\n")
+	statusLines := strings.Split(m.settlement.SetSize(width, height).View(), "\n")
 	out := make([]string, 0, height)
-	for i := 0; i < len(statusLines) && i < statusH && len(out) < height; i++ {
+	for i := 0; i < len(statusLines) && i < height; i++ {
 		out = append(out, fitLine(statusLines[i], width))
 	}
-	for len(out) < statusH && len(out) < height {
+	for len(out) < height {
 		out = append(out, strings.Repeat(" ", width))
 	}
-	if len(settingsLines) > 0 && len(out) < height {
-		out = append(out, renderSettlementSeparator(width))
-		for i := 0; i < len(settingsLines) && len(out) < height; i++ {
-			out = append(out, fitLine(settingsLines[i], width))
-		}
-	}
 	return out
-}
-
-func settlementSettingsMaxHeight(height int) int {
-	if height < 8 {
-		return 2
-	}
-	maxH := height / 3
-	if maxH < 4 {
-		maxH = 4
-	}
-	if maxH > 10 {
-		maxH = 10
-	}
-	return maxH
-}
-
-func renderSettlementSeparator(width int) string {
-	label := " Settings "
-	if width <= lipgloss.Width(label)+2 {
-		return style.SectionRule.Render(strings.Repeat("─", width))
-	}
-	left := "─"
-	right := strings.Repeat("─", width-lipgloss.Width(label)-1)
-	return style.SectionRule.Render(left) +
-		style.SubsectionTitle.Render(label) +
-		style.SectionRule.Render(right)
-}
-
-func renderSettlementRule(width int) string {
-	if width < 1 {
-		return ""
-	}
-	return style.SectionRule.Render(strings.Repeat("─", width))
-}
-
-func (m model) settlementSettingsInlineView(width, height int) string {
-	if m.settlementSettingsPanel == nil {
-		return style.Dim.Render("settlement settings unavailable")
-	}
-	if width < 24 {
-		width = 24
-	}
-	if height < 1 {
-		height = 1
-	}
-	m.settlementSettingsPanel.SetSize(width, height)
-	return m.settlementSettingsPanel.View()
 }
 
 func fitLine(line string, width int) string {
@@ -324,14 +265,6 @@ func fitLine(line string, width int) string {
 		return line + strings.Repeat(" ", width-lineW)
 	}
 	return line
-}
-
-func trimTrailingBlankLines(lines []string) []string {
-	end := len(lines)
-	for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
-		end--
-	}
-	return lines[:end]
 }
 
 // renderBorderTitle renders "─ Title ──────────" filling exactly width chars.

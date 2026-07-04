@@ -122,6 +122,15 @@ mkdir -p "$KDIR0"
 write_settings "$SETTINGS0" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}'
 STATUS0=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS0" bash "$QUEUE" status --kdir "$KDIR0" --json)
 assert_json_eq "status returns ok on empty state" "$STATUS0" '.ok' "true"
+# Health block, auditor-model echo, and pump liveness must be present and
+# null-safe with no _settlement state at all (proves neither needs a runs
+# or queue scan to exist).
+assert_json_eq "empty-state health counters are zero" "$STATUS0" '[.health.drain_rate_per_hour, .health.completions_24h, .health.requeues_today, .health.failures_today] | map(. == 0) | all' "true"
+assert_json_eq "empty-state oldest pending age is null" "$STATUS0" '.health.oldest_pending_age_seconds' "null"
+assert_json_eq "empty-state auditor_model echoes null" "$STATUS0" '.auditor_model' "null"
+assert_json_eq "empty-state pump last_ran_at is null" "$STATUS0" '.dispatch.pump.last_ran_at' "null"
+assert_json_eq "empty-state pump seconds_since_last is null" "$STATUS0" '.dispatch.pump.seconds_since_last' "null"
+assert_json_eq "empty-state verify weeks carry the held/contradicted split" "$STATUS0" '[.dispatch.verify_volume.weeks[] | has("held") and has("contradicted")] | all' "true"
 if [[ ! -e "$KDIR0/_settlement" ]]; then
   echo "  PASS: status did not create _settlement"
   PASS=$((PASS + 1))
@@ -840,6 +849,159 @@ assert_json_eq "drain aborts on calibration-failed marker" "$DRAIN_ABORT" '.abor
 assert_json_eq "drain abort dispatched zero" "$DRAIN_ABORT" '.dispatched' "0"
 assert_json_eq "drain abort surfaces hard-cal reason" "$DRAIN_ABORT" '.last_reason | startswith("audit-error: hard-cal gate uncalibrated")' "true"
 assert_json_eq "drain abort leaves item pending" "$DRAIN_ABORT" '.remaining' "1"
+
+echo ""
+echo "Test 21: status health block matches the D4 contract (field names, types, windows)"
+KDIR_HB="$TEST_DIR/kdir-health"
+SETTINGS_HB="$TEST_DIR/settings-health.json"
+setup_kdir "$KDIR_HB" "wi"
+write_settings "$SETTINGS_HB" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}}}'
+NOW_HB="2026-05-13T12:00:00Z"
+python3 - "$KDIR_HB" <<'PY'
+import json, pathlib, sys
+k = pathlib.Path(sys.argv[1]) / "_settlement"
+runs = k / "runs"
+runs.mkdir(parents=True, exist_ok=True)
+# Pending item enqueued 120s before the pinned now; pump ran 60s before.
+json.dump({
+    "version": 1,
+    "items": [{"id": "item-pending", "status": "pending", "enqueued_at": "2026-05-13T11:58:00Z"}],
+    "batch": {},
+    "triggers": {"pump_ran_at": "2026-05-13T11:59:00Z"},
+}, open(k / "queue.json", "w"))
+json.dump({"version": 1, "leases": {}}, open(k / "leases.json", "w"))
+def run(name, status, completed_at, **extra):
+    row = {"version": 1, "run_id": name, "item_id": f"item-{name}", "work_item": "wi",
+           "claim_id": name, "status": status, "completed_at": completed_at,
+           "verdict": {"verdict": "verified", "evidence": "fixture"}}
+    row.update(extra)
+    json.dump(row, open(runs / f"{name}.json", "w"))
+run("comp-a", "completed", "2026-05-13T11:00:00Z")                    # in 24h, today
+run("comp-b", "completed", "2026-05-12T13:00:00Z")                    # in 24h, yesterday
+run("comp-old", "completed", "2026-05-10T12:00:00Z")                  # outside 24h
+run("fail-today", "failed", "2026-05-13T10:00:00Z")                   # in 24h, today
+run("requeued", "failed", "2026-05-13T09:00:00Z",
+    invalidated_at="2026-05-13T09:30:00Z",
+    invalidated_reason="retry_infrastructure_failure")                # invalidated today
+PY
+STATUS_HB=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_HB" LORE_SETTLEMENT_NOW="$NOW_HB" bash "$QUEUE" status --kdir "$KDIR_HB" --json)
+# The health block is the shell→python→Go bridging contract Phase 2 parses:
+# assert the exact field set and each field's JSON type explicitly.
+assert_json_eq "health block carries exactly the D4 field set" "$STATUS_HB" '.health | keys | sort | join(",")' "completions_24h,drain_rate_per_hour,failures_today,oldest_pending_age_seconds,requeues_today"
+assert_json_eq "drain_rate_per_hour is a number" "$STATUS_HB" '.health.drain_rate_per_hour | type' "number"
+assert_json_eq "completions_24h is an integer" "$STATUS_HB" '(.health.completions_24h | type == "number") and (.health.completions_24h == (.health.completions_24h | floor))' "true"
+assert_json_eq "requeues_today is an integer" "$STATUS_HB" '(.health.requeues_today | type == "number") and (.health.requeues_today == (.health.requeues_today | floor))' "true"
+assert_json_eq "failures_today is an integer" "$STATUS_HB" '(.health.failures_today | type == "number") and (.health.failures_today == (.health.failures_today | floor))' "true"
+assert_json_eq "completions_24h counts terminal non-invalidated runs in trailing 24h" "$STATUS_HB" '.health.completions_24h' "3"
+assert_json_eq "drain rate is completions_24h / 24" "$STATUS_HB" '.health.drain_rate_per_hour' "0.12"
+assert_json_eq "failures_today counts failed runs completed today" "$STATUS_HB" '.health.failures_today' "2"
+assert_json_eq "requeues_today counts retry_infrastructure_failure invalidations today" "$STATUS_HB" '.health.requeues_today' "1"
+assert_json_eq "oldest_pending_age_seconds is now minus min pending enqueued_at" "$STATUS_HB" '.health.oldest_pending_age_seconds' "120"
+assert_json_eq "auditor_model echoes null when unset" "$STATUS_HB" '.auditor_model' "null"
+assert_json_eq "pump liveness echoes triggers.pump_ran_at" "$STATUS_HB" '.dispatch.pump.last_ran_at' "2026-05-13T11:59:00Z"
+assert_json_eq "pump seconds_since_last derives from the same echo" "$STATUS_HB" '.dispatch.pump.seconds_since_last' "60"
+
+echo ""
+echo "Test 21b: verify_volume weeks split held/contradicted by ledger payload.disposition"
+mkdir -p "$KDIR_HB/_trust"
+# Week window under NOW_HB=2026-05-13: current week starts Mon 2026-05-11;
+# weeks[-1] is the completed week starting Mon 2026-05-04.
+cat > "$KDIR_HB/_trust/trust-events.jsonl" <<'LEDGER'
+{"event":"consumption-verification","observed_at":"2026-05-05T10:00:00Z","payload":{"disposition":"held"}}
+{"event":"consumption-verification","observed_at":"2026-05-06T10:00:00Z","payload":{"disposition":"held"}}
+{"event":"consumption-verification","observed_at":"2026-05-06T11:00:00Z","payload":{"disposition":"contradicted"}}
+{"event":"consumption-verification","observed_at":"2026-05-07T10:00:00Z"}
+{"event":"consumption-verification","observed_at":"2026-05-12T10:00:00Z","payload":{"disposition":"held"}}
+{"event":"other-event","observed_at":"2026-05-05T12:00:00Z","payload":{"disposition":"held"}}
+LEDGER
+STATUS_VV=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_HB" LORE_SETTLEMENT_NOW="$NOW_HB" bash "$QUEUE" status --kdir "$KDIR_HB" --json)
+assert_json_eq "last completed week counts all verify events" "$STATUS_VV" '.dispatch.verify_volume.weeks[-1].events' "4"
+assert_json_eq "last completed week held split" "$STATUS_VV" '.dispatch.verify_volume.weeks[-1].held' "2"
+assert_json_eq "last completed week contradicted split" "$STATUS_VV" '.dispatch.verify_volume.weeks[-1].contradicted' "1"
+assert_json_eq "dispositionless rows count in events but neither split" "$STATUS_VV" '.dispatch.verify_volume.weeks[-1] | .events - .held - .contradicted' "1"
+assert_json_eq "current-week events stay out of the completed weeks" "$STATUS_VV" '.dispatch.verify_volume.current_week_events' "1"
+
+echo ""
+echo "Test 22: schedule and model verbs mutate exactly one settings field and embed full status"
+KDIR_VB="$TEST_DIR/kdir-verbs"
+SETTINGS_VB="$TEST_DIR/settings-verbs.json"
+setup_kdir "$KDIR_VB" "wi"
+write_settings "$SETTINGS_VB" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"enabled":true,"active_hours":{"enabled":true,"timezone":"UTC"}}}'
+SNAP_BEFORE=$(jq -S 'del(.settlement.active_hours.enabled)' "$SETTINGS_VB")
+SCHED_OFF=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_VB" bash "$QUEUE" schedule off --kdir "$KDIR_VB" --json)
+SNAP_AFTER=$(jq -S 'del(.settlement.active_hours.enabled)' "$SETTINGS_VB")
+assert_json_eq "schedule off returns ok" "$SCHED_OFF" '.ok' "true"
+assert_json_eq "schedule off action label" "$SCHED_OFF" '.action' "schedule-off"
+assert_json_eq "schedule off flips the flag" "$SCHED_OFF" '.enabled' "false"
+assert_json_eq "schedule off embeds full status" "$SCHED_OFF" '.status.active_hours.enabled' "false"
+assert_json_eq "schedule off persists the flag" "$(cat "$SETTINGS_VB")" '.settlement.active_hours.enabled' "false"
+assert_eq "schedule verb mutates only active_hours.enabled" "$SNAP_AFTER" "$SNAP_BEFORE"
+SCHED_ON=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_VB" bash "$QUEUE" schedule on --kdir "$KDIR_VB" --json)
+assert_json_eq "schedule on flips the flag back" "$SCHED_ON" '.enabled' "true"
+if LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_VB" bash "$QUEUE" schedule sideways --kdir "$KDIR_VB" --json >/dev/null 2>&1; then
+  echo "  FAIL: schedule accepted an invalid subcommand"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: schedule rejects invalid subcommand"
+  PASS=$((PASS + 1))
+fi
+
+SNAP_MODEL_BEFORE=$(jq -S 'del(.settlement.auditor_model)' "$SETTINGS_VB")
+MODEL_SET=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_VB" bash "$QUEUE" model sonnet --kdir "$KDIR_VB" --json)
+SNAP_MODEL_AFTER=$(jq -S 'del(.settlement.auditor_model)' "$SETTINGS_VB")
+assert_json_eq "model set returns ok" "$MODEL_SET" '.ok' "true"
+assert_json_eq "model set action label" "$MODEL_SET" '.action' "model-set"
+assert_json_eq "model set echoes the alias" "$MODEL_SET" '.auditor_model' "sonnet"
+assert_json_eq "model set embeds status with the echo" "$MODEL_SET" '.status.auditor_model' "sonnet"
+assert_json_eq "model set persists the field" "$(cat "$SETTINGS_VB")" '.settlement.auditor_model' "sonnet"
+assert_eq "model verb mutates only auditor_model" "$SNAP_MODEL_AFTER" "$SNAP_MODEL_BEFORE"
+MODEL_UNSET=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_VB" bash "$QUEUE" model --unset --kdir "$KDIR_VB" --json)
+assert_json_eq "model --unset action label" "$MODEL_UNSET" '.action' "model-unset"
+assert_json_eq "model --unset echoes null" "$MODEL_UNSET" '.auditor_model' "null"
+assert_json_eq "model --unset removes the key" "$(cat "$SETTINGS_VB")" '.settlement | has("auditor_model")' "false"
+assert_json_eq "model --unset embeds status echoing null" "$MODEL_UNSET" '.status.auditor_model' "null"
+if LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_VB" bash "$QUEUE" model --kdir "$KDIR_VB" --json >/dev/null 2>&1; then
+  echo "  FAIL: model accepted a call with neither alias nor --unset"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: model rejects a call with neither alias nor --unset"
+  PASS=$((PASS + 1))
+fi
+if LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_VB" bash "$QUEUE" model sonnet --unset --kdir "$KDIR_VB" --json >/dev/null 2>&1; then
+  echo "  FAIL: model accepted alias and --unset together"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: model rejects alias and --unset together"
+  PASS=$((PASS + 1))
+fi
+
+echo ""
+echo "Test 23: settlement executor exports LORE_MODEL_JUDGE from settlement.auditor_model only when set"
+KDIR_EX="$TEST_DIR/kdir-executor-model"
+SETTINGS_EX="$TEST_DIR/settings-executor-model.json"
+mkdir -p "$KDIR_EX/_work/wi"
+printf '%s\n' "$(row_json "claim-model-export")" > "$KDIR_EX/_work/wi/task-claims.jsonl"
+FAKE_BIN_EX="$TEST_DIR/fake-bin-executor-model"
+mkdir -p "$FAKE_BIN_EX"
+cat > "$FAKE_BIN_EX/lore" <<'BIN'
+#!/usr/bin/env bash
+printf '{"correctness_gate":{"verified":1,"unverified":0,"contradicted":0,"verdicts_total":1},"judge_model_env":"%s"}\n' "${LORE_MODEL_JUDGE:-unset}"
+BIN
+chmod +x "$FAKE_BIN_EX/lore"
+write_settings "$SETTINGS_EX" '{"version":1,"settlement":{"auditor_model":"sonnet"}}'
+EX_SET=$(printf '%s' '{"item":{"work_item":"wi","claim_id":"claim-model-export"}}' | \
+  PATH="$FAKE_BIN_EX:$PATH" LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_EX" LORE_SETTLEMENT_AUDIT_ARGS="--kdir $KDIR_EX" LORE_MODEL_JUDGE="inherited-env" \
+  bash "$SCRIPTS_DIR/settlement-audit-executor.sh" 2>/dev/null)
+assert_json_eq "auditor_model set overrides inherited LORE_MODEL_JUDGE" "$EX_SET" '.audit.judge_model_env' "sonnet"
+write_settings "$SETTINGS_EX" '{"version":1,"settlement":{}}'
+EX_INHERIT=$(printf '%s' '{"item":{"work_item":"wi","claim_id":"claim-model-export"}}' | \
+  PATH="$FAKE_BIN_EX:$PATH" LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_EX" LORE_SETTLEMENT_AUDIT_ARGS="--kdir $KDIR_EX" LORE_MODEL_JUDGE="inherited-env" \
+  bash "$SCRIPTS_DIR/settlement-audit-executor.sh" 2>/dev/null)
+assert_json_eq "auditor_model unset preserves inherited LORE_MODEL_JUDGE" "$EX_INHERIT" '.audit.judge_model_env' "inherited-env"
+EX_NONE=$(printf '%s' '{"item":{"work_item":"wi","claim_id":"claim-model-export"}}' | \
+  PATH="$FAKE_BIN_EX:$PATH" LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_EX" LORE_SETTLEMENT_AUDIT_ARGS="--kdir $KDIR_EX" \
+  bash "$SCRIPTS_DIR/settlement-audit-executor.sh" 2>/dev/null)
+assert_json_eq "auditor_model unset without env leaves resolution untouched" "$EX_NONE" '.audit.judge_model_env' "unset"
 
 echo ""
 echo "=== Summary ==="

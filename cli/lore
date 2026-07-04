@@ -496,6 +496,10 @@ Subcommands:
   enqueue-rollup-backfill --weeks N   Enqueue per-judge weekly rollup items (1-104 weeks)
   enable --json                       Set settlement.enabled=true
   disable --json                      Set settlement.enabled=false
+  schedule on|off --json              Toggle settlement.active_hours.enabled
+  model <alias> --json                Set settlement.auditor_model (judge model
+                                      for settlement-executed audits)
+  model --unset --json                Remove settlement.auditor_model
   retry-errors --json                 Requeue audit errors and timeout-blocked attempts
 
 Options:
@@ -514,7 +518,7 @@ cmd_settlement() {
       settlement_usage
       return 0
       ;;
-    status|triggers|scan|enqueue|process|enable|disable|retry-errors|queue|drain|enqueue-rollup-backfill)
+    status|triggers|scan|enqueue|process|enable|disable|schedule|model|retry-errors|queue|drain|enqueue-rollup-backfill)
       "$SCRIPTS_DIR/settlement-queue.sh" "$@"
       ;;
     *)

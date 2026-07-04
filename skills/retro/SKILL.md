@@ -145,7 +145,7 @@ Count rows by status: `routed`, `verified`, `rejected`. Report shape: `Consumpti
 
 ### 2c–2e: Logs
 
-Read three logs filtered to the work period: session entries from `notes.md` `## YYYY-MM-DD` blocks (empty = degraded evidence); retrieval log at `$KNOWLEDGE_DIR/_meta/retrieval-log.jsonl`; friction log at `$KNOWLEDGE_DIR/_meta/friction-log.jsonl`.
+Read three logs filtered to the work period: session entries from `notes.md` `## YYYY-MM-DD` blocks (empty = degraded evidence); retrieval log at `$KNOWLEDGE_DIR/_meta/retrieval-log.jsonl`; friction log at `$KNOWLEDGE_DIR/_meta/friction-log.jsonl`. Also read packet assessments at `$KNOWLEDGE_DIR/_packets/assessments.jsonl` filtered by `assessed_at` to the work period — cite matching `packet_id` + verdict class as D2 evidence (`unused`, `harmful`) and D3 evidence (`missing`, `unattributed_retrieval`).
 
 ### 2f: Token efficiency
 

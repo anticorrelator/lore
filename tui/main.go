@@ -90,9 +90,6 @@ func main() {
 		if panel, _ := initSettingsPanel(); panel != nil {
 			m.settingsPanel = panel
 		}
-		if panel, _ := initSettlementSettingsPanel(); panel != nil {
-			m.settlementSettingsPanel = panel
-		}
 	}
 	// Terminal modes (alt screen, mouse) are view state in bubbletea v2:
 	// the root View() applies them on every render.

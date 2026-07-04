@@ -36,8 +36,10 @@ DEFAULT_BATCH_SIZE = 12
 DEFAULT_BATCH_RECOMPUTE_MIN_INTERVAL_SECONDS = 60
 DEFAULT_CONCORDANCE_WINDOW_SIZE = 8
 DEFAULT_EXECUTOR_TIMEOUT_SECONDS = 300
+DEFAULT_MAX_AUTO_RETRY_ATTEMPTS = 3
 STATUS_RECENT_RUNS_LIMIT = 25
 STATUS_TERMINAL_PREVIEW_LIMIT = 5
+STATUS_INFRA_EXHAUSTED_PREVIEW_LIMIT = 20
 
 # Source-stream registry. Each kind maps to:
 #   filename: glob-relative name under _work/<slug>/
@@ -967,7 +969,7 @@ class Settlement:
             pass
         return rows
 
-    def detect_disputes(self) -> dict[str, Any]:
+    def detect_disputes(self, cap: int) -> dict[str, Any]:
         """Dispute gate.
 
         Inputs: contradicted consumption-verification ledger rows (joined to
@@ -981,9 +983,9 @@ class Settlement:
         Fallback: no ledger -> no-op; rows without the CC bridge fields are
         counted unroutable, never guessed; a trust-fold failure disables only
         the high-trust arm (reported as a warning) — the conflict arm still runs.
-        Idempotency (two-layer): call-site skip on queue membership + terminal
-        run records by deterministic item_id, then enqueue_row's own id dedupe
-        and pending-only CC status check.
+        Idempotency (two-layer): call-site skip on queue membership + the
+        settled-or-exhausted exclusion set by deterministic item_id, then
+        enqueue_row's own id dedupe and pending-only CC status check.
         """
         events = self.read_verify_events()
         if not events:
@@ -1006,7 +1008,7 @@ class Settlement:
                 dispositions.setdefault(entry, set()).add(str(payload.get("disposition") or ""))
 
         queue_ids = {item.get("id") for item in self.load_queue().get("items", [])}
-        terminal_ids = self.terminal_run_item_ids()
+        excluded_ids = self.settled_or_exhausted_item_ids(cap)
 
         considered = 0
         enqueued = 0
@@ -1033,7 +1035,7 @@ class Settlement:
                 unroutable += 1
                 continue
             item_id = self.item_id(work_item, contradiction_id, KIND_CONSUMPTION_CONTRADICTION)
-            if item_id in queue_ids or item_id in terminal_ids:
+            if item_id in queue_ids or item_id in excluded_ids:
                 duplicates += 1
                 continue
             cc_row = self.find_source_row(KIND_CONSUMPTION_CONTRADICTION, work_item, contradiction_id)
@@ -1064,16 +1066,17 @@ class Settlement:
     def spot_sample_week_start(self) -> str:
         return iso_z(monday_floor_utc(utc_now_dt()))
 
-    def spot_sample_used_this_week(self) -> int:
+    def spot_sample_used_this_week(self, runs: list[dict[str, Any]] | None = None) -> int:
         """Budget accounting: spot_sample enqueues this ISO week, from queue
         items plus (non-invalidated) run records — enqueue-time count, so a
-        dispatched-and-completed sample still consumes budget."""
+        dispatched-and-completed sample still consumes budget. Callers that
+        already hold a load_runs() result pass it to avoid a second scan."""
         week_start = self.spot_sample_week_start()
         used_ids: set[str] = set()
         for item in self.load_queue().get("items", []):
             if item.get("selection_reason") == "spot_sample" and str(item.get("enqueued_at") or "") >= week_start:
                 used_ids.add(str(item.get("id")))
-        for run in self.load_runs():
+        for run in self.load_runs() if runs is None else runs:
             if self.run_invalidated(run):
                 continue
             selection = run.get("selection") if isinstance(run.get("selection"), dict) else {}
@@ -1092,8 +1095,8 @@ class Settlement:
         the week start, so a re-run in the same week re-picks the same
         candidates and dedupes to a no-op.
         Fallback: budget 0 or exhausted -> legible skip reason, no enqueue.
-        Idempotency (two-layer): call-site skip on queue membership + terminal
-        run ids, then enqueue_row's id dedupe.
+        Idempotency (two-layer): call-site skip on queue membership + the
+        settled-or-exhausted exclusion set, then enqueue_row's id dedupe.
         """
         budget = int(settings["dispatch"]["spot_sample_weekly_budget"])
         week_start = self.spot_sample_week_start()
@@ -1105,8 +1108,8 @@ class Settlement:
             return {"enqueued": 0, "budget": budget, "used_this_week": used, "week_start": week_start, "reason": "budget_exhausted"}
         backlog, _errors = self.iter_backlog_items()
         queue_ids = {item.get("id") for item in self.load_queue().get("items", [])}
-        terminal_ids = self.terminal_run_item_ids()
-        candidates = [item for item in backlog if item.get("id") not in queue_ids and item.get("id") not in terminal_ids]
+        excluded_ids = self.settled_or_exhausted_item_ids(int(settings["max_auto_retry_attempts"]))
+        candidates = [item for item in backlog if item.get("id") not in queue_ids and item.get("id") not in excluded_ids]
         rng = random.Random(f"spot-sample|{week_start}")
         rng.shuffle(candidates)
         enqueued = 0
@@ -1147,8 +1150,18 @@ class Settlement:
             start = current_week - timedelta(weeks=back)
             end = start + timedelta(weeks=1)
             start_s, end_s = iso_z(start), iso_z(end)
-            count = sum(1 for row in events if start_s <= str(row.get("observed_at") or "") < end_s)
-            weeks.append({"week_start": start_s, "events": count})
+            count = held = contradicted = 0
+            for row in events:
+                if not start_s <= str(row.get("observed_at") or "") < end_s:
+                    continue
+                count += 1
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                disposition = payload.get("disposition")
+                if disposition == "held":
+                    held += 1
+                elif disposition == "contradicted":
+                    contradicted += 1
+            weeks.append({"week_start": start_s, "events": count, "held": held, "contradicted": contradicted})
         current_count = sum(1 for row in events if str(row.get("observed_at") or "") >= iso_z(current_week))
         avg = round(sum(w["events"] for w in weeks) / max(len(weeks), 1), 2)
         return {
@@ -1183,7 +1196,7 @@ class Settlement:
         self._invalidate_rollup_existence_cache()
         self._refresh_rollup_existence_cache()
         rollup = self.scan_rollup_steady_state()
-        disputes = self.detect_disputes()
+        disputes = self.detect_disputes(int(settings["max_auto_retry_attempts"]))
         sample = self.spot_sample(settings)
         return {
             "ok": True,
@@ -1295,6 +1308,47 @@ class Settlement:
 
     def terminal_run_item_ids(self) -> set[str]:
         return {str(run.get("item_id")) for run in self.load_runs() if not self.run_invalidated(run) and run.get("status") in TERMINAL and run.get("item_id")}
+
+    def settled_or_exhausted_item_ids(self, cap: int, runs: list[dict[str, Any]] | None = None) -> set[str]:
+        """Recompute-candidacy exclusion set replacing the existence-based
+        terminal_run_item_ids() exclusion at every re-audit gate.
+
+        An item is excluded iff it has a non-invalidated terminal run that is a
+        genuine settled outcome (not an infrastructure failure), OR its count of
+        non-invalidated infrastructure-failure runs has reached `cap`. Below-cap
+        infra-failure items are NOT excluded — they are live retry candidates.
+        `cap=0` reproduces the old behavior: any single infra failure excludes.
+
+        This is the single seam a future event-recency refinement extends (the
+        settled arm gains a triggering-event-timestamp comparison); it must not
+        be paralleled by a second exclusion at the callsites.
+        """
+        settled, infra_counts = self._settled_and_infra_counts(runs)
+        excluded = set(settled)
+        for item_id, count in infra_counts.items():
+            if count > 0 and count >= cap:
+                excluded.add(item_id)
+        return excluded
+
+    def _settled_and_infra_counts(self, runs: list[dict[str, Any]] | None = None) -> tuple[set[str], dict[str, int]]:
+        """Group the non-invalidated terminal run census by item_id into the
+        settled set (genuine non-infra outcomes) and the per-item count of
+        infrastructure-failure runs (the durable auto-retry attempt ledger)."""
+        settled: set[str] = set()
+        infra_counts: dict[str, int] = {}
+        for run in (self.load_runs() if runs is None else runs):
+            item_id = str(run.get("item_id") or "")
+            if not item_id:
+                continue
+            if self.run_invalidated(run):
+                continue
+            if run.get("status") not in TERMINAL:
+                continue
+            if self.retryable_infrastructure_failure_reason(run):
+                infra_counts[item_id] = infra_counts.get(item_id, 0) + 1
+            else:
+                settled.add(item_id)
+        return settled, infra_counts
 
     def terminal_items_from_runs(self, limit: int = STATUS_TERMINAL_PREVIEW_LIMIT) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -1485,15 +1539,27 @@ class Settlement:
             leases = self.load_leases()
             active_item_ids = {str(lease.get("item_id")) for lease in leases.get("leases", {}).values() if lease.get("state") == "active"}
             queued_item_ids = {str(item.get("id")) for item in queue.get("items", []) if item.get("status") in {"pending", "leased"}}
+            all_runs = self.load_runs()
             latest_by_item: dict[str, dict[str, Any]] = {}
-            for run in sorted(self.load_runs(), key=lambda r: str(r.get("completed_at") or r.get("started_at") or "")):
+            for run in sorted(all_runs, key=lambda r: str(r.get("completed_at") or r.get("started_at") or "")):
                 if self.run_invalidated(run):
                     continue
                 if run.get("status") not in TERMINAL or not run.get("item_id"):
                     continue
                 latest_by_item[str(run.get("item_id"))] = run
+            # All non-invalidated infra-failure runs per item — the full attempt
+            # ledger. Resetting the exhaustion counter invalidates every one of
+            # these, not just the item's latest run.
+            infra_runs_by_item: dict[str, list[dict[str, Any]]] = {}
+            for run in all_runs:
+                if not self.retryable_infrastructure_failure_reason(run):
+                    continue
+                run_item_id = str(run.get("item_id") or "")
+                if not run_item_id:
+                    continue
+                infra_runs_by_item.setdefault(run_item_id, []).append(run)
 
-            targets: list[tuple[dict[str, Any], dict[str, Any], str, str]] = []
+            targets: list[tuple[dict[str, Any], dict[str, Any], str, str, str]] = []
             skipped: list[dict[str, Any]] = []
             for run in latest_by_item.values():
                 retry_reason = self.retryable_infrastructure_failure_reason(run)
@@ -1517,12 +1583,12 @@ class Settlement:
                 if row is None:
                     skipped.append({"run_id": run.get("run_id"), "item_id": item_id, "reason": f"missing_{run_kind.replace('-', '_')}"})
                     continue
-                targets.append((run, row, retry_reason, run_kind))
+                targets.append((run, row, retry_reason, run_kind, item_id))
 
             retry_items: list[dict[str, Any]] = []
             batch_id = f"retry-{hashlib.sha256((utc_now() + str(len(targets))).encode()).hexdigest()[:16]}"
             recomputed_at = utc_now()
-            for order, (run, row, retry_reason, run_kind) in enumerate(targets):
+            for order, (run, row, retry_reason, run_kind, _item_id) in enumerate(targets):
                 item = self.item_from_row(str(run.get("work_item") or ""), row, order, run_kind)
                 item["enqueued_at"] = recomputed_at
                 item["updated_at"] = recomputed_at
@@ -1533,6 +1599,10 @@ class Settlement:
                 item["retry_reason"] = retry_reason
                 item.pop("_backlog_order", None)
                 retry_items.append(item)
+
+            runs_to_invalidate: list[dict[str, Any]] = []
+            for _run, _row, _retry_reason, _kind, item_id in targets:
+                runs_to_invalidate.extend(infra_runs_by_item.get(item_id, []))
 
             if not dry_run and retry_items:
                 leased = [item for item in queue.get("items", []) if item.get("status") == "leased"]
@@ -1546,19 +1616,22 @@ class Settlement:
                     "recompute_reason": "retry_error_audits",
                     "errors": [],
                 }
-                for run, _row, retry_reason, _kind in targets:
+                for run in runs_to_invalidate:
+                    detail = self.retryable_infrastructure_failure_reason(run)
                     run["invalidated_at"] = recomputed_at
                     run["invalidated_reason"] = "retry_infrastructure_failure"
-                    run["invalidated_detail"] = retry_reason
+                    run["invalidated_detail"] = detail
                     run["retry_batch_id"] = batch_id
                     json_dump(self.run_path(str(run["run_id"])), run)
                 self.save_queue(queue)
 
+            # Unit contract: `matched`/`enqueued` count items, `invalidated`
+            # counts run records (an exhausted item carries several).
             return {
                 "ok": True,
                 "dry_run": dry_run,
                 "matched": len(targets),
-                "invalidated": 0 if dry_run else len(retry_items),
+                "invalidated": 0 if dry_run else len(runs_to_invalidate),
                 "enqueued": 0 if dry_run else len(retry_items),
                 "batch_id": batch_id if targets else "",
                 "items": retry_items,
@@ -1611,14 +1684,14 @@ class Settlement:
             block["signals"] = item.get("selection_signals")
         return block
 
-    def heal_queue(self, queue: dict[str, Any], leases: dict[str, Any]) -> int:
+    def heal_queue(self, queue: dict[str, Any], leases: dict[str, Any], cap: int) -> int:
         healed = 0
-        terminal_ids = self.terminal_run_item_ids()
+        excluded_ids = self.settled_or_exhausted_item_ids(cap)
         active_item_ids = {str(lease.get("item_id")) for lease in leases.get("leases", {}).values() if lease.get("state") == "active"}
         new_items: list[dict[str, Any]] = []
         for item in queue.get("items", []):
             status = item.get("status")
-            if item.get("id") in terminal_ids:
+            if item.get("id") in excluded_ids:
                 for lease in leases.get("leases", {}).values():
                     if lease.get("item_id") == item.get("id") and lease.get("state") == "active":
                         lease["state"] = "released"
@@ -1713,15 +1786,22 @@ class Settlement:
         # (no selection_reason pop, no score_item pass). Event-trigger items
         # (dispute / spot_sample) get the same protection: they were selected
         # by their gate, not by batch scoring, and a census-mode recompute
-        # must not strand them outside the batch window.
+        # must not strand them outside the batch window. Manual retry items
+        # (retry_infrastructure_failure) are preserved for the same reason:
+        # an archived-source retry is absent from the backlog glob, so a
+        # recompute would otherwise drop it before dispatch.
         def _preserved(item: dict[str, Any]) -> bool:
-            return self.is_rollup_kind(str(item.get("kind") or "")) or item.get("selection_reason") in EVENT_TRIGGER_REASONS
+            return (
+                self.is_rollup_kind(str(item.get("kind") or ""))
+                or item.get("selection_reason") in EVENT_TRIGGER_REASONS
+                or item.get("selection_reason") == "retry_infrastructure_failure"
+            )
 
         legacy_pending_rollup = [item for item in legacy_pending if _preserved(item)]
         legacy_pending_source = [item for item in legacy_pending if not _preserved(item)]
         preserved_ids = {item.get("id") for item in active_leased}
         preserved_ids.update(item.get("id") for item in legacy_pending_rollup)
-        terminal_ids = self.terminal_run_item_ids()
+        excluded_ids = self.settled_or_exhausted_item_ids(int(settings["max_auto_retry_attempts"]))
         backlog, errors = self.iter_backlog_items()
         backlog_ids = {item.get("id") for item in backlog}
         for item in legacy_pending_source:
@@ -1734,7 +1814,7 @@ class Settlement:
             clone.pop("batch_id", None)
             clone.pop("selected_at", None)
             backlog.append(clone)
-        candidates = [item for item in backlog if item.get("id") not in preserved_ids and item.get("id") not in terminal_ids]
+        candidates = [item for item in backlog if item.get("id") not in preserved_ids and item.get("id") not in excluded_ids]
         batch_size = int(settings["batch_size"])
         score_window = candidates[:batch_size]
         scored: list[dict[str, Any]] = []
@@ -1783,7 +1863,7 @@ class Settlement:
         with repo_lock(self.state):
             queue = self.load_queue()
             leases = self.load_leases()
-            healed = self.heal_queue(queue, leases)
+            healed = self.heal_queue(queue, leases, int(settings["max_auto_retry_attempts"]))
             if not self.should_recompute(queue, settings, force=force):
                 if healed:
                     self.save_queue(queue)
@@ -1812,10 +1892,111 @@ class Settlement:
                 expired += 1
         return expired
 
+    def health_metrics(self, queue: dict[str, Any], runs: list[dict[str, Any]]) -> dict[str, Any]:
+        """Operational health computed from the already-loaded queue and run
+        records. completions_24h counts terminal non-invalidated runs finished
+        in the trailing 24h (the drain-rate numerator); failures_today counts
+        failed runs by completion date regardless of later invalidation."""
+        now = utc_now_dt()
+        cutoff_24h = iso_z(now - timedelta(hours=24))
+        today = now.strftime("%Y-%m-%d")
+        completions_24h = 0
+        requeues_today = 0
+        failures_today = 0
+        for run in runs:
+            completed_at = str(run.get("completed_at") or "")
+            if str(run.get("invalidated_at") or "").startswith(today) and run.get("invalidated_reason") == "retry_infrastructure_failure":
+                requeues_today += 1
+            if run.get("status") == "failed" and completed_at.startswith(today):
+                failures_today += 1
+            if self.run_invalidated(run):
+                continue
+            if run.get("status") in TERMINAL and completed_at >= cutoff_24h:
+                completions_24h += 1
+        oldest_pending_age_seconds = None
+        pending_enqueued = [str(item.get("enqueued_at") or "") for item in queue.get("items", []) if item.get("status") == "pending" and item.get("enqueued_at")]
+        if pending_enqueued:
+            try:
+                oldest = datetime.fromisoformat(min(pending_enqueued).replace("Z", "+00:00"))
+                if oldest.tzinfo is None:
+                    oldest = oldest.replace(tzinfo=timezone.utc)
+                oldest_pending_age_seconds = max(int((now - oldest).total_seconds()), 0)
+            except ValueError:
+                oldest_pending_age_seconds = None
+        return {
+            "drain_rate_per_hour": round(completions_24h / 24, 2),
+            "completions_24h": completions_24h,
+            "oldest_pending_age_seconds": oldest_pending_age_seconds,
+            "requeues_today": requeues_today,
+            "failures_today": failures_today,
+        }
+
+    def pump_status(self, queue: dict[str, Any]) -> dict[str, Any]:
+        """Trigger-pump liveness echo from queue.json's triggers block; both
+        fields are null when the pump has never run."""
+        triggers_state = queue.get("triggers") if isinstance(queue.get("triggers"), dict) else {}
+        last_ran_at = str(triggers_state.get("pump_ran_at") or "") or None
+        seconds_since_last = None
+        if last_ran_at:
+            try:
+                last_dt = datetime.fromisoformat(last_ran_at.replace("Z", "+00:00"))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                seconds_since_last = max(int((utc_now_dt() - last_dt).total_seconds()), 0)
+            except ValueError:
+                seconds_since_last = None
+        return {"last_ran_at": last_ran_at, "seconds_since_last": seconds_since_last}
+
+    def infra_exhausted_status(self, cap: int, runs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """Observational census of items excluded solely by the exhaustion arm
+        of the settled-or-exhausted predicate: no genuine settled run, but their
+        non-invalidated infra-failure count has reached `cap`. Read-only —
+        derived from the full run census grouped by item_id, never from the
+        recent-runs preview (which would drop older exhausted items). Additive
+        to `status`; `count: 0` and an empty preview when none are exhausted.
+        """
+        runs = self.load_runs() if runs is None else runs
+        settled: set[str] = set()
+        infra_by_item: dict[str, list[dict[str, Any]]] = {}
+        for run in runs:
+            item_id = str(run.get("item_id") or "")
+            if not item_id or self.run_invalidated(run) or run.get("status") not in TERMINAL:
+                continue
+            if self.retryable_infrastructure_failure_reason(run):
+                infra_by_item.setdefault(item_id, []).append(run)
+            else:
+                settled.add(item_id)
+        exhausted: list[dict[str, Any]] = []
+        for item_id, infra_runs in infra_by_item.items():
+            if item_id in settled:
+                continue
+            count = len(infra_runs)
+            if not (count > 0 and count >= cap):
+                continue
+            latest = max(infra_runs, key=lambda r: str(r.get("completed_at") or r.get("started_at") or ""))
+            exhausted.append({
+                "item_id": item_id,
+                "kind": str(latest.get("kind") or KIND_TASK_CLAIM),
+                "work_item": latest.get("work_item"),
+                "source_id": latest.get("source_id") or latest.get("claim_id"),
+                "reason": latest.get("reason"),
+                "failure_count": count,
+            })
+        exhausted.sort(key=lambda entry: str(entry.get("item_id")))
+        return {
+            "count": len(exhausted),
+            "items": exhausted[:STATUS_INFRA_EXHAUSTED_PREVIEW_LIMIT],
+            "remedy": "lore settlement retry-errors",
+        }
+
     def status(self, settings: dict[str, Any]) -> dict[str, Any]:
         queue = self.load_queue()
         leases = self.load_leases()
         usage = self.load_usage()
+        # One consolidated runs pass feeds both spot-sample budget accounting
+        # and the health metrics; terminal_items_from_runs keeps its own
+        # bounded most-recent-K scan.
+        runs = self.load_runs()
         current = now_epoch()
         stale_active = sum(
             1
@@ -1865,11 +2046,14 @@ class Settlement:
                 "census_enabled": census,
                 "spot_sample": {
                     "weekly_budget": int(settings["dispatch"]["spot_sample_weekly_budget"]),
-                    "used_this_week": self.spot_sample_used_this_week(),
+                    "used_this_week": self.spot_sample_used_this_week(runs),
                     "week_start": self.spot_sample_week_start(),
                 },
                 "verify_volume": self.verify_volume(),
+                "pump": self.pump_status(queue),
             },
+            "health": self.health_metrics(queue, runs),
+            "auditor_model": settings.get("auditor_model"),
             "queue": {
                 "pending": counts.get("pending", 0),
                 "running": counts.get("leased", 0),
@@ -1926,6 +2110,7 @@ class Settlement:
             "state_dir": str(self.state),
             "terminal_items": terminal_items,
             "last_settled": last_settled,
+            "infra_exhausted": self.infra_exhausted_status(int(settings["max_auto_retry_attempts"]), runs),
         }
 
     def budget_status(self, usage: dict[str, Any]) -> dict[str, Any]:
@@ -1991,6 +2176,47 @@ class Settlement:
             "action": "enable" if enabled else "disable",
             "enabled": enabled,
             "message": "settlement enabled" if enabled else "settlement disabled",
+            "settings_path": str(settings_file),
+            "status": self.status(refreshed),
+        }
+
+    def set_schedule_enabled(self, enabled: bool) -> dict[str, Any]:
+        settings_file = settings_path()
+        doc = read_settings_doc()
+        section = doc.setdefault("settlement", {})
+        active_hours = section.setdefault("active_hours", {})
+        active_hours["enabled"] = enabled
+        settings_file.parent.mkdir(parents=True, exist_ok=True)
+        json_dump(settings_file, doc)
+        refreshed = settlement_settings()
+        return {
+            "ok": True,
+            "action": "schedule-on" if enabled else "schedule-off",
+            "enabled": enabled,
+            "message": "settlement schedule enabled" if enabled else "settlement schedule disabled",
+            "settings_path": str(settings_file),
+            "status": self.status(refreshed),
+        }
+
+    def set_auditor_model(self, model: str | None) -> dict[str, Any]:
+        """Set or (model=None) remove settlement.auditor_model. The value is
+        consumed verbatim by settlement-audit-executor.sh as LORE_MODEL_JUDGE;
+        absence means the judge role's normal resolution applies."""
+        settings_file = settings_path()
+        doc = read_settings_doc()
+        section = doc.setdefault("settlement", {})
+        if model:
+            section["auditor_model"] = model
+        else:
+            section.pop("auditor_model", None)
+        settings_file.parent.mkdir(parents=True, exist_ok=True)
+        json_dump(settings_file, doc)
+        refreshed = settlement_settings()
+        return {
+            "ok": True,
+            "action": "model-set" if model else "model-unset",
+            "auditor_model": model if model else None,
+            "message": f"settlement auditor model set to {model}" if model else "settlement auditor model unset (role default)",
             "settings_path": str(settings_file),
             "status": self.status(refreshed),
         }
@@ -2194,7 +2420,7 @@ class Settlement:
         with repo_lock(self.state):
             queue = self.load_queue()
             leases = self.load_leases()
-            healed = self.heal_queue(queue, leases)
+            healed = self.heal_queue(queue, leases, int(settings["max_auto_retry_attempts"]))
             expired = self.expire_stale_leases(queue, leases)
             if healed or expired:
                 self.save_queue(queue)
@@ -2444,7 +2670,46 @@ class Settlement:
             ):
                 self._emit_correction_evidence(str(written.get("run_id") or ""), persisted)
         self._apply_audit_candidate_transition(written, item)
+        self._supersede_infra_failures_on_settle(written)
         return written
+
+    def _supersede_infra_failures_on_settle(self, settled_run: dict[str, Any]) -> int:
+        """When a genuine settled terminal run is recorded, invalidate the
+        item's prior non-invalidated infrastructure-failure runs so the attempt
+        ledger doesn't keep stale failure rows next to the live verdict.
+
+        Best-effort: never raises. Idempotent — the classifier returns "" for
+        already-invalidated runs, so re-emitting on the same settled run is a
+        no-op. Skips when the just-written run is itself an infra failure.
+        """
+        try:
+            if settled_run.get("status") not in TERMINAL:
+                return 0
+            if self.retryable_infrastructure_failure_reason(settled_run):
+                return 0
+            item_id = str(settled_run.get("item_id") or "")
+            if not item_id:
+                return 0
+            settled_run_id = str(settled_run.get("run_id") or "")
+            invalidated_at = utc_now()
+            invalidated = 0
+            for run in self.load_runs():
+                if str(run.get("item_id") or "") != item_id:
+                    continue
+                if str(run.get("run_id") or "") == settled_run_id:
+                    continue
+                detail = self.retryable_infrastructure_failure_reason(run)
+                if not detail:
+                    continue
+                run["invalidated_at"] = invalidated_at
+                run["invalidated_reason"] = "superseded_by_settled_run"
+                run["invalidated_detail"] = detail
+                run["superseded_by_run_id"] = settled_run_id
+                json_dump(self.run_path(str(run["run_id"])), run)
+                invalidated += 1
+            return invalidated
+        except Exception:
+            return 0
 
     def _execute_rollup_item(self, item: dict[str, Any], run_id: str, chosen: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
         # D7 rollup dispatch: shell out to the per-judge rollup script in its
@@ -3013,14 +3278,22 @@ def settlement_settings() -> dict[str, Any]:
     ranges = []
     if isinstance(active_hours.get("ranges"), list):
         ranges = [r for r in (parse_active_hours_range(x) for x in active_hours.get("ranges", [])) if r is not None]
+    auditor_model = raw.get("auditor_model")
     return {
         "enabled": bool(raw.get("enabled", False)),
+        # Judge-model override for settlement-executed audits; None when unset
+        # (empty/non-string values are treated as unset).
+        "auditor_model": auditor_model if isinstance(auditor_model, str) and auditor_model else None,
         "max_concurrency": parse_int(raw.get("max_concurrency"), 1, 1),
         "lease_ttl_seconds": parse_int(raw.get("lease_ttl_seconds"), 900, 1),
         "executor_timeout_seconds": parse_int(raw.get("executor_timeout_seconds"), DEFAULT_EXECUTOR_TIMEOUT_SECONDS, 1),
         "batch_size": parse_int(raw.get("batch_size"), DEFAULT_BATCH_SIZE, 1),
         "batch_recompute_min_interval_seconds": parse_int(raw.get("batch_recompute_min_interval_seconds"), DEFAULT_BATCH_RECOMPUTE_MIN_INTERVAL_SECONDS, 0),
         "concordance_window_size": parse_int(raw.get("concordance_window_size"), DEFAULT_CONCORDANCE_WINDOW_SIZE, 0),
+        # Auto-retry attempts bound for infrastructure-failure runs, counted as
+        # non-invalidated infra-failure run records per item_id. 0 reproduces
+        # the pre-auto-retry behavior (any infra failure excludes the item).
+        "max_auto_retry_attempts": parse_int(raw.get("max_auto_retry_attempts"), DEFAULT_MAX_AUTO_RETRY_ATTEMPTS, 0),
         "active_hours": {
             "enabled": bool(active_hours.get("enabled", False)),
             "timezone": active_hours.get("timezone") if isinstance(active_hours.get("timezone"), str) and active_hours.get("timezone") else "local",
@@ -3053,8 +3326,9 @@ def resolve_kdir(arg: str | None) -> Path:
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="settlement-processor.py")
-    ap.add_argument("command", choices=["enqueue", "scan", "status", "process", "enable", "disable", "queue", "retry-errors", "drain", "enqueue-rollup-backfill", "triggers"])
+    ap.add_argument("command", choices=["enqueue", "scan", "status", "process", "enable", "disable", "schedule", "model", "queue", "retry-errors", "drain", "enqueue-rollup-backfill", "triggers"])
     ap.add_argument("subcommand", nargs="?")
+    ap.add_argument("--unset", action="store_true", help="model: remove settlement.auditor_model (revert to role default)")
     ap.add_argument("--kdir")
     ap.add_argument("--work-item")
     ap.add_argument("--kind", choices=list(KINDS), default=KIND_TASK_CLAIM)
@@ -3085,6 +3359,16 @@ def main() -> int:
         out = settlement.set_enabled(True)
     elif args.command == "disable":
         out = settlement.set_enabled(False)
+    elif args.command == "schedule":
+        if args.subcommand not in ("on", "off"):
+            raise SystemExit("[settlement] Error: schedule requires on|off")
+        out = settlement.set_schedule_enabled(args.subcommand == "on")
+    elif args.command == "model":
+        if args.unset and args.subcommand:
+            raise SystemExit("[settlement] Error: model takes an alias or --unset, not both")
+        if not args.unset and not args.subcommand:
+            raise SystemExit("[settlement] Error: model requires an alias or --unset")
+        out = settlement.set_auditor_model(None if args.unset else args.subcommand)
     elif args.command == "process":
         if not args.once:
             raise SystemExit("[settlement] Error: process currently requires --once")

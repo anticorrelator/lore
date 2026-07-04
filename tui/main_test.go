@@ -469,9 +469,9 @@ func TestBuildPaneConfigIncludesSettlementCount(t *testing.T) {
 	m.settlement = m.settlement.ReplaceStatus(st)
 
 	cfg := m.buildPaneConfig()
-	// Count is active queue depth: ready + pending + running.
-	if cfg.settlementCount != 6 {
-		t.Errorf("settlementCount = %d, want 6", cfg.settlementCount)
+	// The tab badge renders what's waiting: queue.pending.
+	if cfg.settlementCount != 3 {
+		t.Errorf("settlementCount = %d, want 3", cfg.settlementCount)
 	}
 }
 
@@ -547,204 +547,131 @@ func TestSettlementRootNavigationAllowedWhenTerminalNotFocused(t *testing.T) {
 	}
 }
 
-func TestSettlementEnableActionRefreshesInlineSettingsPanel(t *testing.T) {
-	setupFakeLoreData(t, `{
-		"version": 1,
-		"tui_launch_framework": "claude-code",
-		"settlement": {"enabled": false}
-	}`)
-
-	m := minimalModel(stateSettlement, nil, nil)
-	m.ensureSettlementSettingsPanel()
-	if m.settlementSettingsPanel == nil {
-		t.Fatal("expected settlement settings panel")
-	}
-	before := stripANSI(m.settlementSettingsPanel.View())
-	if !strings.Contains(before, "[ ] enabled") {
-		t.Fatalf("setup should render settlement disabled, got:\n%s", before)
-	}
-
-	if err := config.SettingsPatch("settlement.enabled", true); err != nil {
-		t.Fatalf("SettingsPatch: %v", err)
-	}
-	result, err := settlement.ParseActionResult("enable", []byte(`{"ok": true, "message": "enabled"}`))
-	if err != nil {
-		t.Fatalf("ParseActionResult: %v", err)
-	}
-
-	next, _ := m.Update(settlementActionCompleteMsg{action: "enable", result: result})
-	nm := next.(model)
-	if nm.settlementSettingsPanel == nil {
-		t.Fatal("expected settlement settings panel after refresh")
-	}
-	after := stripANSI(nm.settlementSettingsPanel.View())
-	if !strings.Contains(after, "[x] enabled") {
-		t.Fatalf("enable action should refresh inline settings view, got:\n%s", after)
-	}
-}
-
-func TestSettlementActionKeybindsReturnCommands(t *testing.T) {
-	tests := []struct {
-		key string
-	}{
-		{key: "p"},
-		{key: "e"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.key, func(t *testing.T) {
-			m := minimalModel(stateSettlement, nil, nil)
-			next, cmd := m.Update(tea.KeyPressMsg{Code: []rune(tc.key)[0], Text: tc.key})
-			if next.(model).state != stateSettlement {
-				t.Fatalf("state changed unexpectedly")
-			}
-			if cmd == nil {
-				t.Fatalf("expected command for key %q", tc.key)
-			}
-		})
-	}
-}
-
-func TestSettlementVNoLongerOpensConfigModal(t *testing.T) {
-	m := minimalModel(stateSettlement, nil, nil)
-	next, cmd := m.Update(tea.KeyPressMsg{Code: 'v', Text: "v"})
-	nm := next.(model)
-	if nm.settingsActive {
-		t.Fatalf("v should not open a settlement config overlay")
-	}
-	if cmd != nil {
-		t.Fatalf("v should not dispatch a command")
-	}
-}
-
-func TestSettlementEscLeavesInlineSettingsPanel(t *testing.T) {
-	m := minimalModel(stateSettlement, nil, nil)
-	m.focusedPanel = panelRight
-
-	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	nm := next.(model)
-	if cmd != nil {
-		t.Fatalf("esc leaving inline settings should not dispatch a command")
-	}
-	if nm.focusedPanel != panelLeft {
-		t.Fatalf("focusedPanel = %v, want panelLeft", nm.focusedPanel)
-	}
-}
-
-// newSettlementEmbedModel builds a stateSettlement model with a real inline
-// settings panel (backed by fixture lore data) and right-panel focus, for
-// pinning the host's inline-settlement key dispatch in update.go.
-func newSettlementEmbedModel(t *testing.T) model {
+// setupFakeLoreDataWithCaps builds a fake lore repo (adapters/capabilities.json
+// + scripts dir) and points LORE_DATA_DIR at it, so tests can control the
+// model_routing.tiers data the m-key reads without touching the real repo.
+func setupFakeLoreDataWithCaps(t *testing.T, settingsJSON, capsJSON string) {
 	t.Helper()
-	setupFakeLoreData(t, `{
-		"version": 1,
-		"tui_launch_framework": "claude-code",
-		"settlement": {
-			"enabled": true,
-			"active_hours": {
-				"enabled": true,
-				"timezone": "local",
-				"ranges": [{"days": ["mon"], "start": "09:00", "end": "17:00"}]
-			}
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, "adapters"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, "scripts"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "adapters", "capabilities.json"), []byte(capsJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	if err := os.Symlink(filepath.Join(repoDir, "scripts"), filepath.Join(dataDir, "scripts")); err != nil {
+		t.Fatal(err)
+	}
+	configDir := filepath.Join(dataDir, "config")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(settingsJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LORE_DATA_DIR", dataDir)
+	t.Setenv("LORE_FRAMEWORK", "")
+}
+
+// TestSettlementPostureKeybindContract verifies the settlement posture keys —
+// p pause/resume, s schedule, m model tier, x process once — dispatch
+// commands through the host router as the status-bar hints advertise.
+func TestSettlementPostureKeybindContract(t *testing.T) {
+	tieredCaps := `{"frameworks": {"claude-code": {"binary": "claude", "model_routing": {"tiers": ["haiku", "sonnet", "opus"]}}}}`
+	tierlessCaps := `{"frameworks": {"claude-code": {"binary": "claude"}}}`
+	statusWith := func(t *testing.T, raw string) model {
+		t.Helper()
+		m := minimalModel(stateSettlement, nil, nil)
+		st, err := settlement.ParseStatus([]byte(raw))
+		if err != nil {
+			t.Fatalf("ParseStatus: %v", err)
 		}
-	}`)
-	m := minimalModel(stateSettlement, nil, nil)
-	m.focusedPanel = panelRight
-	m.ensureSettlementSettingsPanel()
-	if m.settlementSettingsPanel == nil {
-		t.Fatalf("expected settlement settings panel, flashErr=%q", m.flashErr)
-	}
-	return m
-}
-
-// driveSettlementEmbedIntoEditing navigates the inline embed to its last
-// control (the active-hours windows editor, which navigation clamps to) and
-// enters edit mode, so the focused editor consumes runes. Every key goes
-// through the host Update path, exercising the real dispatch.
-func driveSettlementEmbedIntoEditing(t *testing.T, m model) model {
-	t.Helper()
-	for i := 0; i < 20; i++ {
-		m, _ = updateModel(t, m, press('j'))
-	}
-	m, _ = updateModel(t, m, press(tea.KeyEnter))
-	if !m.settlementSettingsPanel.FocusConsumesRunes() {
-		t.Fatal("expected the windows editor to be editing and consuming runes")
-	}
-	return m
-}
-
-func TestSettlementEscWithIdleEmbedReturnsFocusToStatusSide(t *testing.T) {
-	m := newSettlementEmbedModel(t)
-	if m.settlementSettingsPanel.FocusConsumesRunes() {
-		t.Fatal("freshly opened embed should not consume runes")
+		m.settlement = m.settlement.ReplaceStatus(st)
+		return m
 	}
 
-	nm, _ := updateModel(t, m, press(tea.KeyEscape))
-	if nm.focusedPanel != panelLeft {
-		t.Fatalf("focusedPanel = %v, want panelLeft", nm.focusedPanel)
-	}
-	if nm.settlementSettingsPanel.Closed() {
-		t.Fatal("Esc must return focus to the status side, not close the embed")
-	}
-}
-
-func TestSettlementHWithIdleEmbedReturnsFocusToStatusSide(t *testing.T) {
-	m := newSettlementEmbedModel(t)
-	nm, _ := updateModel(t, m, press('h'))
-	if nm.focusedPanel != panelLeft {
-		t.Fatalf("focusedPanel = %v, want panelLeft", nm.focusedPanel)
-	}
-}
-
-func TestSettlementEscForwardedToConsumingEditorBeforeFocusReturn(t *testing.T) {
-	m := newSettlementEmbedModel(t)
-	m = driveSettlementEmbedIntoEditing(t, m)
-
-	// First Esc: the consuming editor receives it (discarding the edit);
-	// focus stays on the settings side.
-	m, _ = updateModel(t, m, press(tea.KeyEscape))
-	if m.focusedPanel != panelRight {
-		t.Fatalf("focusedPanel = %v, want panelRight while the editor consumed Esc", m.focusedPanel)
-	}
-	if m.settlementSettingsPanel.FocusConsumesRunes() {
-		t.Fatal("first Esc should exit the editor's edit mode")
-	}
-
-	// Second Esc: nothing consumes runes — focus returns to the status side.
-	m, _ = updateModel(t, m, press(tea.KeyEscape))
-	if m.focusedPanel != panelLeft {
-		t.Fatalf("focusedPanel = %v, want panelLeft after second Esc", m.focusedPanel)
-	}
-}
-
-func TestSettlementQGatedByFocusConsumesRunes(t *testing.T) {
-	t.Run("consuming editor swallows q", func(t *testing.T) {
-		m := newSettlementEmbedModel(t)
-		m = driveSettlementEmbedIntoEditing(t, m)
-
-		nm, cmd := updateModel(t, m, press('q'))
-		if cmd != nil {
-			t.Fatal("q must route to the consuming editor, not quit")
+	t.Run("p (pause)", func(t *testing.T) {
+		m := statusWith(t, `{"enabled": true}`)
+		if got := m.statusBarHints(m.keymapContext()); !strings.Contains(strings.Join(got, " "), "pause") {
+			t.Fatalf("enabled settlement should advertise p pause, got %v", got)
 		}
-		if nm.state != stateSettlement || nm.focusedPanel != panelRight {
-			t.Fatalf("state/focus changed: state=%v focus=%v", nm.state, nm.focusedPanel)
-		}
-		if !nm.settlementSettingsPanel.FocusConsumesRunes() {
-			t.Fatal("editor should still be editing after q")
+		nm, cmd := updateModel(t, m, press('p'))
+		if nm.state != stateSettlement || cmd == nil {
+			t.Fatal("p should dispatch the disable (pause) command")
 		}
 	})
-	t.Run("idle embed lets q quit", func(t *testing.T) {
-		m := newSettlementEmbedModel(t)
-		_, cmd := updateModel(t, m, press('q'))
+	t.Run("p (resume)", func(t *testing.T) {
+		m := statusWith(t, `{"enabled": false}`)
+		if got := m.statusBarHints(m.keymapContext()); !strings.Contains(strings.Join(got, " "), "resume") {
+			t.Fatalf("paused settlement should advertise p resume, got %v", got)
+		}
+		_, cmd := updateModel(t, m, press('p'))
 		if cmd == nil {
-			t.Fatal("expected quit command from q on an idle embed")
+			t.Fatal("p should dispatch the enable (resume) command")
 		}
-		if _, ok := cmd().(tea.QuitMsg); !ok {
-			t.Fatalf("expected tea.QuitMsg, got %T", cmd())
+	})
+	t.Run("s (schedule)", func(t *testing.T) {
+		m := statusWith(t, `{"enabled": true, "active_hours": {"enabled": false, "allowed": true, "ranges": []}}`)
+		_, cmd := updateModel(t, m, press('s'))
+		if cmd == nil {
+			t.Fatal("s should dispatch the schedule verb")
+		}
+	})
+	t.Run("x (process once)", func(t *testing.T) {
+		m := statusWith(t, `{"enabled": true}`)
+		nm, cmd := updateModel(t, m, press('x'))
+		if cmd == nil {
+			t.Fatal("x should dispatch the process-once command")
+		}
+		if !nm.settlementProcessInFlight {
+			t.Fatal("x should mark the process subprocess in flight")
+		}
+	})
+	t.Run("m (model tier)", func(t *testing.T) {
+		setupFakeLoreDataWithCaps(t, `{"version": 1}`, tieredCaps)
+		m := statusWith(t, `{"enabled": true, "auditor_model": "sonnet", "harness": {"selected": "claude-code"}}`)
+		nm, cmd := updateModel(t, m, press('m'))
+		if cmd == nil {
+			t.Fatalf("m should dispatch the model verb when tiers exist, flashErr=%q", nm.flashErr)
+		}
+		if nm.flashErr != "" {
+			t.Fatalf("m with tiers should not flash an error, got %q", nm.flashErr)
+		}
+	})
+	t.Run("m (no tiers)", func(t *testing.T) {
+		setupFakeLoreDataWithCaps(t, `{"version": 1}`, tierlessCaps)
+		m := statusWith(t, `{"enabled": true, "harness": {"selected": "claude-code"}}`)
+		nm, cmd := updateModel(t, m, press('m'))
+		if cmd != nil {
+			t.Fatal("m without tiers must not dispatch a settings write")
+		}
+		if nm.flashErr != "no tiers for claude-code" {
+			t.Fatalf("m without tiers should surface a visible status, got %q", nm.flashErr)
 		}
 	})
 }
 
-func TestSettlementBodyUsesHorizontalSplit(t *testing.T) {
+func TestNextTierCyclesOrderedAliases(t *testing.T) {
+	tiers := []string{"haiku", "sonnet", "opus"}
+	if got := nextTier(tiers, "sonnet"); got != "opus" {
+		t.Fatalf("nextTier(sonnet) = %q, want opus", got)
+	}
+	if got := nextTier(tiers, "opus"); got != "haiku" {
+		t.Fatalf("nextTier should wrap at the end, got %q", got)
+	}
+	if got := nextTier(tiers, ""); got != "haiku" {
+		t.Fatalf("unset current should start the cycle, got %q", got)
+	}
+	if got := nextTier(tiers, "custom-model"); got != "haiku" {
+		t.Fatalf("unknown current should start the cycle, got %q", got)
+	}
+}
+
+func TestSettlementBodyHasNoSettingsDock(t *testing.T) {
 	m := minimalModel(stateSettlement, nil, nil)
 	m.width = 140
 	m.height = 36
@@ -753,10 +680,7 @@ func TestSettlementBodyUsesHorizontalSplit(t *testing.T) {
 		"queue": {"pending": 5, "total": 5},
 		"items": [
 			{"id": "item-1", "status": "pending", "work_item": "settlement-operational-closure"},
-			{"id": "item-2", "status": "pending", "work_item": "settlement-operational-closure"},
-			{"id": "item-3", "status": "pending", "work_item": "settlement-operational-closure"},
-			{"id": "item-4", "status": "pending", "work_item": "settlement-operational-closure"},
-			{"id": "item-5", "status": "pending", "work_item": "settlement-operational-closure"}
+			{"id": "item-2", "status": "pending", "work_item": "settlement-operational-closure"}
 		],
 		"harness": {"mode": "random", "selected": "claude-code", "concurrency": 1}
 	}`))
@@ -765,29 +689,15 @@ func TestSettlementBodyUsesHorizontalSplit(t *testing.T) {
 	}
 	m.settlement = m.settlement.ReplaceStatus(st)
 
-	lines := m.renderSettlementBodyLines(120, 24)
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "Settings") {
-		t.Fatalf("settlement body should include horizontal settings separator, got:\n%s", joined)
-	}
-	if strings.Contains(joined, "│") {
-		t.Fatalf("settlement body should not use a vertical split, got:\n%s", joined)
-	}
-	settingsIdx := -1
-	for i, line := range lines {
-		if strings.Contains(line, "Settings") {
-			settingsIdx = i
-			break
+	for _, height := range []int{6, 12, 24, 40} {
+		lines := m.renderSettlementBodyLines(120, height)
+		joined := stripANSI(strings.Join(lines, "\n"))
+		if strings.Contains(joined, "─ Settings ─") {
+			t.Fatalf("settlement body must not contain a settings dock at height %d:\n%s", height, joined)
 		}
-	}
-	if settingsIdx < 0 || settingsIdx < len(lines)/2 {
-		t.Fatalf("settings separator should be pinned near the bottom after the queue/status area, idx=%d:\n%s", settingsIdx, joined)
-	}
-	if len(lines) != 24 {
-		t.Fatalf("settlement body should fill the full panel height, len=%d:\n%s", len(lines), joined)
-	}
-	if strings.TrimSpace(lines[len(lines)-1]) == "" {
-		t.Fatalf("settings dock should end at the bottom of the settlement body:\n%s", joined)
+		if len(lines) != height {
+			t.Fatalf("settlement body should fill the full panel height %d, len=%d:\n%s", height, len(lines), joined)
+		}
 	}
 }
 
@@ -3261,7 +3171,8 @@ func TestFollowupDetailStatusBarKeybindContract(t *testing.T) {
 	})
 }
 
-// settlementContractModel builds a stateSettlement model with two queue items.
+// settlementContractModel builds a stateSettlement model with two queue items
+// and two recent verdicts.
 func settlementContractModel(t *testing.T) model {
 	t.Helper()
 	m := minimalModel(stateSettlement, nil, nil)
@@ -3274,6 +3185,10 @@ func settlementContractModel(t *testing.T) model {
 			{"id": "claim-aaa", "claim_id": "claim-aaa", "status": "pending", "work_item": "wi", "claim": "first claim text"},
 			{"id": "claim-bbb", "claim_id": "claim-bbb", "status": "pending", "work_item": "wi", "claim": "second claim text"}
 		],
+		"terminal_items": [
+			{"id": "t1", "claim_id": "verdict-one", "claim": "contradicted claim body", "status": "completed", "verdict": {"verdict": "contradicted", "evidence": "drift"}},
+			{"id": "t2", "claim_id": "verdict-two", "claim": "verified claim body", "status": "completed", "verdict": {"verdict": "verified", "evidence": "matched"}}
+		],
 		"harness": {"mode": "random", "selected": "claude-code", "concurrency": 1}
 	}`))
 	if err != nil {
@@ -3283,29 +3198,46 @@ func settlementContractModel(t *testing.T) model {
 	return m
 }
 
-// TestSettlementStatusBarKeybindContract verifies the stateSettlement
-// panelLeft hint set: "j/k queue · p process once · e enable/disable ·
-// l settings · w work · f follow-ups · ? help" (p/e command dispatch is
-// pinned by TestSettlementActionKeybindsReturnCommands).
+// TestSettlementStatusBarKeybindContract verifies the settlement root hint
+// set: "j/k queue · Enter claim · v verdicts · p pause · s schedule ·
+// m model tier · x process once · S settings · w work · f follow-ups ·
+// ? help" (posture command dispatch is pinned by
+// TestSettlementPostureKeybindContract).
 func TestSettlementStatusBarKeybindContract(t *testing.T) {
 	t.Run("j/k (queue)", func(t *testing.T) {
 		m := settlementContractModel(t)
-		if !strings.Contains(stripANSI(m.settlement.View()), "> [pending] first claim text") {
+		if !strings.Contains(stripANSI(m.settlement.View()), "> [pending]  claim-aaa") {
 			t.Fatalf("precondition: cursor should start on the first queue item:\n%s", stripANSI(m.settlement.View()))
 		}
 		nm, _ := updateModel(t, m, press('j'))
-		if !strings.Contains(stripANSI(nm.settlement.View()), "> [pending] second claim text") {
+		if !strings.Contains(stripANSI(nm.settlement.View()), "> [pending]  claim-bbb") {
 			t.Fatalf("j should move the queue cursor to the second item:\n%s", stripANSI(nm.settlement.View()))
 		}
 		nm, _ = updateModel(t, nm, press('k'))
-		if !strings.Contains(stripANSI(nm.settlement.View()), "> [pending] first claim text") {
+		if !strings.Contains(stripANSI(nm.settlement.View()), "> [pending]  claim-aaa") {
 			t.Error("k should move the queue cursor back to the first item")
 		}
 	})
-	t.Run("l (settings)", func(t *testing.T) {
-		nm, _ := updateModel(t, settlementContractModel(t), press('l'))
-		if nm.focusedPanel != panelRight {
-			t.Error("l should focus the inline settings side")
+	t.Run("Enter (claim)", func(t *testing.T) {
+		nm, _ := updateModel(t, settlementContractModel(t), press(tea.KeyEnter))
+		if nm.settlement.Drill() != settlement.DrillClaim {
+			t.Error("Enter should open the claim drill-in")
+		}
+	})
+	t.Run("v (verdicts)", func(t *testing.T) {
+		nm, _ := updateModel(t, settlementContractModel(t), press('v'))
+		if nm.settlement.Drill() != settlement.DrillVerdict {
+			t.Error("v should open the verdict drill-in")
+		}
+		if nm.settingsActive {
+			t.Error("v must not open a settings overlay")
+		}
+	})
+	t.Run("S (settings)", func(t *testing.T) {
+		setupFakeLoreData(t, `{"version": 1, "tui_launch_framework": "claude-code"}`)
+		nm, _ := updateModel(t, settlementContractModel(t), press('S'))
+		if !nm.settingsActive || nm.settingsPanel == nil {
+			t.Error("S should open the global settings modal focused at the settlement subtree")
 		}
 	})
 	t.Run("w (work)", func(t *testing.T) {
@@ -3331,20 +3263,93 @@ func TestSettlementStatusBarKeybindContract(t *testing.T) {
 	})
 }
 
+// TestSettlementClaimDrillInKeybindContract pins the claim drill-in hint set
+// ("j/k next/prev claim · Esc back") through the host Update path.
+func TestSettlementClaimDrillInKeybindContract(t *testing.T) {
+	t.Run("j/k (next/prev claim)", func(t *testing.T) {
+		m, _ := updateModel(t, settlementContractModel(t), press(tea.KeyEnter))
+		if !strings.Contains(stripANSI(m.settlement.View()), "Claim 1 of 2 — claim-aaa") {
+			t.Fatalf("drill-in should open on the selected claim:\n%s", stripANSI(m.settlement.View()))
+		}
+		m, _ = updateModel(t, m, press('j'))
+		if !strings.Contains(stripANSI(m.settlement.View()), "Claim 2 of 2 — claim-bbb") {
+			t.Fatalf("j should walk to the next claim:\n%s", stripANSI(m.settlement.View()))
+		}
+		m, _ = updateModel(t, m, press('k'))
+		if !strings.Contains(stripANSI(m.settlement.View()), "Claim 1 of 2 — claim-aaa") {
+			t.Error("k should walk back to the previous claim")
+		}
+	})
+	t.Run("Esc (back)", func(t *testing.T) {
+		m, _ := updateModel(t, settlementContractModel(t), press(tea.KeyEnter))
+		m, _ = updateModel(t, m, press(tea.KeyEscape))
+		if m.settlement.Drill() != settlement.DrillNone {
+			t.Error("Esc should return to the queue in one press")
+		}
+	})
+	t.Run("status bar advertises the drill-in hints", func(t *testing.T) {
+		m, _ := updateModel(t, settlementContractModel(t), press(tea.KeyEnter))
+		bar := stripANSI(m.renderStatusBar(m.width))
+		for _, want := range []string{"j/k next/prev claim", "Esc back"} {
+			if !strings.Contains(bar, want) {
+				t.Errorf("claim drill-in status bar missing %q:\n%s", want, bar)
+			}
+		}
+	})
+}
+
+// TestSettlementVerdictDrillInKeybindContract pins the verdict drill-in hint
+// set ("j/k next/prev verdict · Esc back") through the host Update path.
+func TestSettlementVerdictDrillInKeybindContract(t *testing.T) {
+	t.Run("j/k (next/prev verdict)", func(t *testing.T) {
+		m, _ := updateModel(t, settlementContractModel(t), press('v'))
+		if !strings.Contains(stripANSI(m.settlement.View()), "Verdict 1 of 2 — verdict-one") {
+			t.Fatalf("verdict drill-in should open contradictions-first:\n%s", stripANSI(m.settlement.View()))
+		}
+		m, _ = updateModel(t, m, press('j'))
+		if !strings.Contains(stripANSI(m.settlement.View()), "Verdict 2 of 2 — verdict-two") {
+			t.Fatalf("j should walk to the next verdict:\n%s", stripANSI(m.settlement.View()))
+		}
+		m, _ = updateModel(t, m, press('k'))
+		if !strings.Contains(stripANSI(m.settlement.View()), "Verdict 1 of 2 — verdict-one") {
+			t.Error("k should walk back to the previous verdict")
+		}
+	})
+	t.Run("Esc (back)", func(t *testing.T) {
+		m, _ := updateModel(t, settlementContractModel(t), press('v'))
+		m, _ = updateModel(t, m, press(tea.KeyEscape))
+		if m.settlement.Drill() != settlement.DrillNone {
+			t.Error("Esc should return to the queue in one press")
+		}
+	})
+	t.Run("status bar advertises the drill-in hints", func(t *testing.T) {
+		m, _ := updateModel(t, settlementContractModel(t), press('v'))
+		bar := stripANSI(m.renderStatusBar(m.width))
+		for _, want := range []string{"j/k next/prev verdict", "Esc back"} {
+			if !strings.Contains(bar, want) {
+				t.Errorf("verdict drill-in status bar missing %q:\n%s", want, bar)
+			}
+		}
+	})
+}
+
 // TestSettlementBorderAnnotationAdvertisesJK verifies the settlement panel
-// title annotation shows "j/k queue" with the status side focused and
-// "j/k settings" with the settings side focused (third hint surface beside
-// the status bar and the help modal).
+// title annotation tracks what j/k walks: the queue at the root, claims or
+// verdicts inside the drill-ins (third hint surface beside the status bar
+// and the help modal).
 func TestSettlementBorderAnnotationAdvertisesJK(t *testing.T) {
 	m := settlementContractModel(t)
-	out := stripANSI(m.viewSettlement())
-	if !strings.Contains(out, "j/k  queue") {
-		t.Errorf("panelLeft border annotation should advertise j/k queue:\n%s", out)
+	if out := stripANSI(m.viewSettlement()); !strings.Contains(out, "j/k  queue") {
+		t.Errorf("root border annotation should advertise j/k queue:\n%s", out)
 	}
-	m.focusedPanel = panelRight
-	out = stripANSI(m.viewSettlement())
-	if !strings.Contains(out, "j/k  settings") {
-		t.Errorf("panelRight border annotation should advertise j/k settings:\n%s", out)
+	m, _ = updateModel(t, m, press(tea.KeyEnter))
+	if out := stripANSI(m.viewSettlement()); !strings.Contains(out, "j/k  claim") {
+		t.Errorf("claim drill-in border annotation should advertise j/k claim:\n%s", out)
+	}
+	m, _ = updateModel(t, m, press(tea.KeyEscape))
+	m, _ = updateModel(t, m, press('v'))
+	if out := stripANSI(m.viewSettlement()); !strings.Contains(out, "j/k  verdict") {
+		t.Errorf("verdict drill-in border annotation should advertise j/k verdict:\n%s", out)
 	}
 }
 
@@ -3429,138 +3434,14 @@ func TestRoundedBordersEverywhere(t *testing.T) {
 	})
 }
 
-// TestSettlementSelectedClaimBlockFollowsCursor pins the compact selected-claim
-// block: bounded (heading + ≤4 lines), follows j/k, omitted when empty.
-func TestSettlementSelectedClaimBlockFollowsCursor(t *testing.T) {
-	m := settlementContractModel(t)
-	view := stripANSI(m.settlement.View())
-	if !strings.Contains(view, "Selected claim") {
-		t.Fatalf("selected-claim block should render for the cursor item:\n%s", view)
+// TestSettlementSelectedClaimBlockRetired pins the drill-in replacement for
+// the old capped selected-claim block: the root dashboard carries no
+// selected-claim region at all — Enter opens the full claim instead.
+func TestSettlementSelectedClaimBlockRetired(t *testing.T) {
+	view := stripANSI(settlementContractModel(t).settlement.View())
+	if strings.Contains(view, "Selected claim") {
+		t.Fatalf("root dashboard must not render the capped selected-claim block:\n%s", view)
 	}
-	if !strings.Contains(view, "- claim-aaa") {
-		t.Fatalf("selected-claim block should show the first claim id:\n%s", view)
-	}
-	nm, _ := updateModel(t, m, press('j'))
-	view = stripANSI(nm.settlement.View())
-	if !strings.Contains(view, "- claim-bbb") {
-		t.Fatalf("selected-claim block should follow the cursor to claim-bbb:\n%s", view)
-	}
-
-	// Bounded: between the "Selected claim" heading and the next section
-	// heading there are at most 4 detail lines.
-	lines := strings.Split(view, "\n")
-	start := -1
-	for i, l := range lines {
-		if strings.Contains(l, "Selected claim") {
-			start = i
-			break
-		}
-	}
-	if start < 0 {
-		t.Fatal("missing Selected claim heading")
-	}
-	count := 0
-	for _, l := range lines[start+1:] {
-		if strings.Contains(l, "Recent verdicts") {
-			break
-		}
-		count++
-	}
-	if count > 4 {
-		t.Errorf("selected-claim block must stay within 4 lines, got %d:\n%s", count, view)
-	}
-
-	// Omitted when the queue is empty.
-	empty := minimalModel(stateSettlement, nil, nil)
-	st, err := settlement.ParseStatus([]byte(`{"enabled": true, "queue": {"total": 0}, "items": [], "harness": {"concurrency": 1}}`))
-	if err != nil {
-		t.Fatalf("ParseStatus: %v", err)
-	}
-	empty.settlement = empty.settlement.ReplaceStatus(st).SetSize(110, 30)
-	if strings.Contains(stripANSI(empty.settlement.View()), "Selected claim") {
-		t.Error("selected-claim block must be omitted when nothing is selected")
-	}
-}
-
-// TestSettlementSettingsKeybindContract verifies the stateSettlement
-// panelRight hint set against the inline settings dispatch: "j/k settings ·
-// Enter edit/commit · h status · S all settings", and pins the advertised
-// Esc semantics verbatim: Esc forwards to an actively-editing editor first,
-// else refocuses the status side.
-func TestSettlementSettingsKeybindContract(t *testing.T) {
-	rightModel := func(t *testing.T) model {
-		t.Helper()
-		setupFakeLoreData(t, `{"version": 1, "tui_launch_framework": "claude-code", "settlement": {"enabled": false}}`)
-		m := settlementContractModel(t)
-		m.focusedPanel = panelRight
-		m.ensureSettlementSettingsPanel()
-		if m.settlementSettingsPanel == nil {
-			t.Fatal("expected inline settlement settings panel")
-		}
-		return m
-	}
-	t.Run("j/k (settings)", func(t *testing.T) {
-		m := rightModel(t)
-		before := m.settlementSettingsPanel.View()
-		nm, _ := updateModel(t, m, press('j'))
-		if nm.settlementSettingsPanel.View() == before {
-			t.Error("j should move focus inside the inline settings panel")
-		}
-	})
-	t.Run("Enter (edit/commit)", func(t *testing.T) {
-		m := rightModel(t)
-		// Install focus first so Enter lands on a widget.
-		nm, _ := updateModel(t, m, press('j'))
-		_, cmd := updateModel(t, nm, press(tea.KeyEnter))
-		if cmd == nil {
-			t.Error("Enter should reach the inline settings panel and refresh settlement status")
-		}
-	})
-	t.Run("h (status)", func(t *testing.T) {
-		nm, _ := updateModel(t, rightModel(t), press('h'))
-		if nm.focusedPanel != panelLeft {
-			t.Error("h should refocus the status side")
-		}
-	})
-	t.Run("S (all settings)", func(t *testing.T) {
-		nm, _ := updateModel(t, rightModel(t), press('S'))
-		if !nm.settingsActive {
-			t.Error("S should open the full settings configurator")
-		}
-	})
-	t.Run("Esc (refocuses status side when not editing)", func(t *testing.T) {
-		m := rightModel(t)
-		if m.settlementSettingsPanel.FocusConsumesRunes() {
-			t.Fatal("precondition: panel should not start in an editing state")
-		}
-		nm, _ := updateModel(t, m, press(tea.KeyEscape))
-		if nm.focusedPanel != panelLeft {
-			t.Error("Esc with no active editor should refocus the status side")
-		}
-	})
-	t.Run("Esc (forwards to an actively-editing editor first)", func(t *testing.T) {
-		m := rightModel(t)
-		// Drive the panel into a leaf edit mode: walk rows pressing Enter
-		// until the focused widget consumes runes (a string/number editor).
-		for i := 0; i < 40 && !m.settlementSettingsPanel.FocusConsumesRunes(); i++ {
-			key := press(tea.KeyEnter)
-			if i%2 == 1 {
-				key = press('j')
-			}
-			m, _ = updateModel(t, m, key)
-			if m.focusedPanel != panelRight {
-				// Defensive: stay on the settings side while walking.
-				m.focusedPanel = panelRight
-			}
-		}
-		if !m.settlementSettingsPanel.FocusConsumesRunes() {
-			t.Fatal("could not drive the inline settings panel into an editing state")
-		}
-		nm, _ := updateModel(t, m, press(tea.KeyEscape))
-		if nm.focusedPanel != panelRight {
-			t.Error("Esc while an editor is active must forward to the editor, not refocus the status side")
-		}
-	})
 }
 
 // TestSettingsModalStatusBarKeybindContract verifies the settings-configurator
@@ -3719,28 +3600,6 @@ func TestStatusBarAdvertisesLForDetailEntry(t *testing.T) {
 	}
 }
 
-// TestSettlementEditingStatusBarOmitsDeadHHint pins the settlement editing
-// hint context: while an embedded editor consumes runes, h reaches neither
-// the focus gate (which requires no consuming editor) nor the editor (the key
-// falls through to a global switch with no settlement h case), so the status
-// bar must not advertise it; Enter/Esc are the reachable keys.
-func TestSettlementEditingStatusBarOmitsDeadHHint(t *testing.T) {
-	m := newSettlementEmbedModel(t)
-	m.width = 120
-	bar := stripANSI(m.renderStatusBar(m.width))
-	if !strings.Contains(bar, "h status") {
-		t.Fatalf("idle embed should advertise h status:\n%s", bar)
-	}
-	m = driveSettlementEmbedIntoEditing(t, m)
-	bar = stripANSI(m.renderStatusBar(m.width))
-	if strings.Contains(bar, "h status") {
-		t.Errorf("editing embed must not advertise the dead h key:\n%s", bar)
-	}
-	if !strings.Contains(bar, "Enter commit") || !strings.Contains(bar, "Esc cancel") {
-		t.Errorf("editing embed should advertise Enter commit and Esc cancel:\n%s", bar)
-	}
-}
-
 // TestHelpContentProjectsKeymapRegistry spot-checks the help modal against
 // the registry's help-visible projection: every help section title renders in
 // registry order, and help-only rows (work-list N) appear.
@@ -3748,7 +3607,7 @@ func TestHelpContentProjectsKeymapRegistry(t *testing.T) {
 	out := stripANSI(helpContent())
 	wants := []string{
 		"Follow-Ups", "Triage Tab", "Comments Tab", "Follow-Up Detail",
-		"Work List", "Work Detail", "Settlement", "Settlement Settings",
+		"Work List", "Work Detail", "Settlement", "Settlement Claim", "Settlement Verdict",
 		"Knowledge Browser", "Spec Panel (terminal mode)", "Global",
 		"l / Enter", "create work items with AI",
 	}

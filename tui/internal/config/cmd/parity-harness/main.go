@@ -14,6 +14,8 @@
 //	resolve_active_framework        — print process framework id
 //	framework_capability <cap>      — print support level (T10-pending)
 //	framework_model_routing_shape   — print "single" | "multi" (T10-pending)
+//	framework_model_routing_tiers [framework]
+//	                                — print tier aliases, one per line
 //	resolve_harness_install_path <kind>
 //	                                — print absolute path or "unsupported"
 //	resolve_agent_template <name>   — print absolute path
@@ -128,6 +130,31 @@ func main() {
 		// remain Go-side TODOs; the harness keeps a stable sentinel so bats
 		// can skip the parity row without failing the suite.
 		fmt.Println("T10-pending")
+
+	case "framework_model_routing_tiers":
+		// Mirrors scripts/lib.sh framework_model_routing_tiers: optional
+		// positional <framework> (default: active framework), tiers printed
+		// one per line, empty output when none are declared.
+		framework := ""
+		if len(args) >= 1 {
+			framework = args[0]
+		}
+		if framework == "" {
+			active, err := config.ResolveActiveFramework()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Error:", err)
+				os.Exit(1)
+			}
+			framework = active
+		}
+		tiers, err := config.LoadModelRoutingTiers(framework)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		for _, tier := range tiers {
+			fmt.Println(tier)
+		}
 
 	case "settings_get":
 		// Mirror scripts/settings.sh cmd_get's stdout contract:

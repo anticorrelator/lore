@@ -35,6 +35,7 @@ def make_settings(census: bool = False, budget: int = 12, enabled: bool = True) 
         "active_hours": {"enabled": False, "timezone": "local", "ranges": []},
         "harness_selection": {"mode": "first_eligible", "eligible_frameworks": [], "random_seed": 0},
         "dispatch": {"census_enabled": census, "spot_sample_weekly_budget": budget},
+        "max_auto_retry_attempts": 3,
     }
 
 
@@ -139,11 +140,11 @@ def test_dispute_enqueues_exactly_once(kdir, settlement):
     write_ledger(kdir, HELD_X3 + [CONTRADICTED_BRIDGED])
     (kdir / "_work" / "wi1" / "consumption-contradictions.jsonl").write_text(cc_row("cc-1") + "\n", encoding="utf-8")
 
-    out = settlement.detect_disputes()
+    out = settlement.detect_disputes(3)
     assert out["enqueued"] == 1 and out["unroutable"] == 0
 
     # Replay: call-site guard sees the queued item; nothing new lands.
-    again = settlement.detect_disputes()
+    again = settlement.detect_disputes(3)
     assert again["enqueued"] == 0 and again["duplicates"] == 1
 
     items = settlement.load_queue()["items"]
@@ -156,7 +157,7 @@ def test_dispute_conflict_arm_fires_without_high_trust(kdir, settlement):
     # One held + one contradicted: trust 0.0 (below threshold) but conflicting.
     write_ledger(kdir, [HELD_X2[0], CONTRADICTED_BRIDGED])
     (kdir / "_work" / "wi1" / "consumption-contradictions.jsonl").write_text(cc_row("cc-1") + "\n", encoding="utf-8")
-    out = settlement.detect_disputes()
+    out = settlement.detect_disputes(3)
     assert out["enqueued"] == 1
 
 
@@ -164,7 +165,7 @@ def test_contradiction_against_unobserved_entry_skips(kdir, settlement):
     # No held rows anywhere: neither high-trust nor conflicting.
     write_ledger(kdir, [CONTRADICTED_BRIDGED])
     (kdir / "_work" / "wi1" / "consumption-contradictions.jsonl").write_text(cc_row("cc-1") + "\n", encoding="utf-8")
-    out = settlement.detect_disputes()
+    out = settlement.detect_disputes(3)
     assert out["enqueued"] == 0 and out["skipped"] == 1
 
 
@@ -172,14 +173,14 @@ def test_unbridged_contradiction_is_unroutable_not_guessed(kdir, settlement):
     # No work_item/contradiction_id in the ledger payload: legible unroutable count.
     row = ledger_row("e9", "contradicted", "conventions/e.md")
     write_ledger(kdir, HELD_X3 + [row])
-    out = settlement.detect_disputes()
+    out = settlement.detect_disputes(3)
     assert out["unroutable"] == 1 and out["enqueued"] == 0
 
 
 def test_settled_cc_row_never_reenqueued(kdir, settlement):
     write_ledger(kdir, HELD_X3 + [CONTRADICTED_BRIDGED])
     (kdir / "_work" / "wi1" / "consumption-contradictions.jsonl").write_text(cc_row("cc-1", status="verified") + "\n", encoding="utf-8")
-    out = settlement.detect_disputes()
+    out = settlement.detect_disputes(3)
     assert out["enqueued"] == 0
 
 
@@ -268,7 +269,7 @@ def test_census_recompute_preserves_event_trigger_items(kdir, settlement):
     # window is smaller than the backlog.
     write_ledger(kdir, HELD_X3 + [CONTRADICTED_BRIDGED])
     (kdir / "_work" / "wi1" / "consumption-contradictions.jsonl").write_text(cc_row("cc-1") + "\n", encoding="utf-8")
-    assert settlement.detect_disputes()["enqueued"] == 1
+    assert settlement.detect_disputes(3)["enqueued"] == 1
     write_claims(kdir, 8)
     settings = make_settings(census=True)
     settings["batch_size"] = 2

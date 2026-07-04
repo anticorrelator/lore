@@ -185,6 +185,14 @@ func runSettlementAction(action string) tea.Cmd {
 	return runSettlementActionWithMode(action, false)
 }
 
+// runSettlementVerb dispatches a posture verb that carries arguments
+// (`schedule on|off`, `model <alias>`) through the same subprocess path as
+// the one-word actions, so the embedded status return updates the panel
+// without waiting for the next poll tick.
+func runSettlementVerb(action string, extra ...string) tea.Cmd {
+	return runSettlementActionWithMode(action, false, extra...)
+}
+
 func runAutomaticSettlementProcess() tea.Cmd {
 	return runSettlementActionWithMode("process", true)
 }
@@ -201,9 +209,9 @@ func runAutomaticSettlementProcess() tea.Cmd {
 // the goroutine.
 const settlementSubprocessTimeout = 10 * time.Minute
 
-func runSettlementActionWithMode(action string, automatic bool) tea.Cmd {
+func runSettlementActionWithMode(action string, automatic bool, extra ...string) tea.Cmd {
 	return func() tea.Msg {
-		args := []string{"settlement", action, "--json"}
+		args := append(append([]string{"settlement", action}, extra...), "--json")
 		if action == "process" {
 			args = []string{"settlement", "process", "--once", "--json"}
 		}

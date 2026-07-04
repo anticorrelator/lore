@@ -1,15 +1,15 @@
 ---
 name: self-test
-description: Evaluate the lore memory system — run structured tests across 8 dimensions, produce scored comparable results, and log protocol evolution suggestions
+description: Evaluate the lore memory system — run structured tests across 9 dimensions, produce scored comparable results, and log protocol evolution suggestions
 user_invocable: true
-argument_description: "[optional: 'quick' for abbreviated run (Tests 1, 2, 7 only)]"
+argument_description: "[optional: 'quick' for abbreviated run (Tests 1, 2, 7 only); 'judge-quality-regression' to run only Test 9 (live judge invocations — costs real tokens)]"
 ---
 
 # /self-test Skill
 
 This self-test evaluates any knowledge-store-backed memory system. It uses `lore` CLI when available but falls back to direct file operations.
 
-Run a structured evaluation of the lore memory system from any codebase. Tests 8 dimensions of system health, produces scored results, and compares against previous runs to track regressions and improvements.
+Run a structured evaluation of the lore memory system from any codebase. Tests 9 dimensions of system health (Test 9, judge quality regression, is opt-in — it costs live judge tokens), produces scored results, and compares against previous runs to track regressions and improvements.
 
 **The core question:** Does the memory system make you effective, or do you find yourself bypassing it?
 
@@ -99,6 +99,8 @@ If parsing fails (malformed results file), note this in the output and treat as 
 ### Quick Mode
 
 If the argument is "quick", only run Tests 1, 2, and 7. Skip the rest and mark them as "Skipped (quick mode)" in results.
+
+If the argument is "judge-quality-regression", run only Test 9 and skip the rest. Test 9 is otherwise opt-in: it invokes live judges (real token cost, minutes of wall time), so a default full run marks it "Skipped (opt-in — pass 'judge-quality-regression' or invoke via the post-settlement canary trigger)".
 
 ### Step 2: Initialize Tracking
 
@@ -255,6 +257,44 @@ This test replaced the previous "Honest Assessment" (Runs 1-2) which asked hypot
 
 **Record:** For each spot-checked entry, note what was verified, what was stale, and what was updated. Stale entries should be corrected as part of the test (fix-as-you-go), with the staleness still recorded in the score.
 
+## Test 9: Judge Quality Regression (opt-in)
+
+**Purpose:** Detect drift in the reverse-auditor judge's omission-emission capability by replaying the frozen quality-regression fixture suite against the current judge configuration and tracking per-fixture reproduction rate over time. This is the drift-canary read side for the strict omission-quality regression bar (`scripts/judge-quality-regression.sh`).
+
+**Requires:** at least one fixture under `$KNOWLEDGE_DIR/_quality-fixtures/reverse-auditor/`. If none exist, score as N/A with note: "No quality fixtures captured. Capture one via scripts/capture-quality-fixture.sh."
+
+**Cost warning:** each fixture replay is a live judge invocation (roughly $1-2 and 1-3 minutes per fixture). Never run this test implicitly — only when the argument targets it or the post-settlement canary trigger invoked the self-test.
+
+**Procedure:**
+
+1. Run the suite. Use `--mode canary` when this self-test was invoked by the post-settlement canary trigger; use `--mode self-test-manual` when a user invoked it directly (manual rows are recorded but excluded from the drift signal):
+
+```bash
+bash scripts/judge-quality-regression.sh reverse-auditor --mode self-test-manual
+```
+
+Each fixture prints a PASS line on stdout or a FAIL line (with the failing gate: schema-valid, omission-nonnull, file-match, line-range-overlap) on stderr, and appends one telemetry scorecard row.
+
+2. Aggregate the rolling reproduction rate and surface drift suspects:
+
+```bash
+bash scripts/judge-quality-regression.sh reverse-auditor --rolling-report
+```
+
+The report computes each fixture's pass rate over its most recent post-settlement-canary runs (window 10, threshold 0.7 by default) and flags fixtures below threshold as DRIFT-SUSPECT.
+
+3. For each drift-suspect fixture, note it in the results with its rolling rate and the failing gate(s) from this run's replay. Do NOT retire or refresh fixtures during the test — surface them; the user decides between refresh (capture a new fixture), retirement (`scripts/retire-quality-fixture.sh <id> --rationale "..."`), or a model-drift investigation.
+
+**Scoring (1-5):**
+
+- 5: all fixtures pass this run AND no drift suspects in the rolling report
+- 4: all fixtures pass this run; 1 drift suspect in the rolling window (recovering or noisy)
+- 3: 1 fixture fails this run OR 1 persistent drift suspect
+- 2: multiple fixtures fail — likely model or template drift; check provenance (`template_version`, `model_variant`) against current values to attribute
+- 1: suite-wide failure or the runner itself errors
+
+**Record:** per-fixture pass/fail with failing gate, rolling rates, drift suspects, and the current `template_version` + `model_variant` vs each fixture's provenance (a divergence there is the drift attribution).
+
 ### Step 3: Apply Mechanical Fixes
 
 **This step is mandatory.** For every entry scored as **aging** or **stale** in Test 8, attempt a mechanical fix before proceeding. The goal: leave the knowledge store more accurate than you found it, without blocking the self-test on rewrites that require deep investigation.
@@ -282,8 +322,10 @@ lore journal write \
   --observation "Self-test Run N: Orientation X/5 | Retrieval X/5 | Backlinks X hops X% | Threads X/5 | Plans X/5 | Utilization X/5 | Search X/5 | Trust X/5. Key regressions: <list or 'none'>. Key improvements: <list or 'none'>. Most actionable finding: <1-2 sentences on the single most important thing to fix>." \
   --context "self-test run N" \
   --role "self-test" \
-  --scores '{"t1_orientation": X, "t2_retrieval": X, "t3_backlinks": X, "t4_threads": X, "t5_plans": X, "t6_utilization": X, "t7_search": X, "t8_trust": X}'
+  --scores '{"t1_orientation": X, "t2_retrieval": X, "t3_backlinks": X, "t4_threads": X, "t5_plans": X, "t6_utilization": X, "t7_search": X, "t8_trust": X, "t9_judge_quality": X}'
 ```
+
+Omit `t9_judge_quality` when Test 9 was skipped (opt-in not exercised).
 
 The observation should be 3-5 sentences containing: all 8 scores, any regressions or improvements compared to the previous run, and the single most actionable finding from this run.
 

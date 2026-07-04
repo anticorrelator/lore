@@ -363,17 +363,47 @@ assert "task-3" not in json.dumps([op.get("external_blocked_by") for op in d["ma
 
 # --- Write discipline -----------------------------------------------------------
 
-@test "the execution-log attribution row is the only filesystem write" {
+@test "filesystem writes are the execution-log row plus the packet substrate" {
   before="$(find "$TEST_KDIR" -type f | sort)"
   run bash "$LORE_CLI" impl open widget-pipeline --all --json
   [ "$status" -eq 0 ]
   after="$(find "$TEST_KDIR" -type f | sort)"
   diff <(echo "$before") <(echo "$after") > "$BATS_TEST_TMPDIR/fsdiff" || true
-  new_files="$(grep '^>' "$BATS_TEST_TMPDIR/fsdiff" | sed 's/^> //')"
-  [ "$new_files" = "$ITEM_DIR/execution-log.md" ]
+  new_files="$(grep '^>' "$BATS_TEST_TMPDIR/fsdiff" | sed 's/^> //' | sort)"
+  expected="$(printf '%s\n%s\n%s\n' \
+    "$TEST_KDIR/_packets/README.md" \
+    "$TEST_KDIR/_packets/packets.jsonl" \
+    "$ITEM_DIR/execution-log.md" | sort)"
+  [ "$new_files" = "$expected" ]
   grep -q "source: impl-verb" "$ITEM_DIR/execution-log.md"
   grep -q "Implement open: dispatch manifest prepared" "$ITEM_DIR/execution-log.md"
   grep -q "Collisions serialized: 1" "$ITEM_DIR/execution-log.md"
+  grep -q "Task-scope packets appended: 4" "$ITEM_DIR/execution-log.md"
+}
+
+@test "one task-scope packet row per eligible task; manifest TaskCreate entries carry packet_id" {
+  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  [ "$status" -eq 0 ]
+  payload > "$BATS_TEST_TMPDIR/payload.json"
+  python3 - "$BATS_TEST_TMPDIR/payload.json" "$TEST_KDIR/_packets/packets.jsonl" <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+rows = [json.loads(l) for l in open(sys.argv[2]) if l.strip()]
+assert [r["task_id"] for r in rows] == ["task-1", "task-2", "task-3", "task-4"]
+assert all(r["packet_scope"] == "task" for r in rows)
+assert all(r["delivery_stage"] == "assembled" for r in rows)
+assert all(r["arm"] is None for r in rows)
+# no retrieval directive in the fixture: empty deliveries carry a reason
+assert all(r["delivered_entries"] == [] and r["empty_reason"] for r in rows)
+creates = {op["local_id"]: op for op in d["manifest"] if op["op"] == "TaskCreate"}
+by_task = {r["task_id"]: r["packet_id"] for r in rows}
+assert {p["task_id"]: p["packet_id"] for p in d["packets"]} == by_task
+for tid, pid in by_task.items():
+    assert creates[tid]["packet_id"] == pid
+# tier2 extract references travel with the packet
+assert rows[0]["tier2_claim_ids"] == ["c1"]
+PYEOF
 }
 
 # --- Validation gates ------------------------------------------------------------

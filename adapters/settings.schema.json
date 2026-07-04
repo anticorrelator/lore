@@ -233,6 +233,12 @@
           "default": 8,
           "description": "Requested relevance concordance window. Readers cap the effective window to the active batch size."
         },
+        "max_auto_retry_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3,
+          "description": "Attempts bound for auto-retrying infrastructure-failure audit runs (judge non-JSON, executor timeout, unresolved artifact), counted as non-invalidated infra-failure run records per item. Below the cap an item auto-readmits to recompute; at the cap it becomes exhausted and is excluded until `lore settlement retry-errors` resets it. Zero reproduces the pre-auto-retry behavior: any single infra failure excludes the item."
+        },
         "lease_ttl_seconds": {
           "type": "integer",
           "minimum": 1,
@@ -244,6 +250,11 @@
           "minimum": 1,
           "default": 300,
           "description": "Maximum duration for an external settlement executor."
+        },
+        "auditor_model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Judge model for settlement-executed audits, passed verbatim to the harness (exported as LORE_MODEL_JUDGE by settlement-audit-executor.sh). Free text so dated model ids work; per-harness tier aliases live in capabilities.json model_routing.tiers. Unset means the judge role's normal resolution applies — express unset by omitting the key, never by an empty string."
         },
         "active_hours": {
           "type": "object",

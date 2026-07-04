@@ -4,6 +4,8 @@ Exercises mine_session() with a duck-typed provider over synthetic
 transcripts and retrieval-log rows: the timestamp+query join (matched /
 unmatched / ambiguous), miss detection across enriched and legacy rows,
 sidechain filtering, and candidate emission in the /remember Step 0a format.
+Also covers the packet-verdict candidate source: missing[] gap extraction,
+not-assessable and malformed handling, and packet-scoped idempotent filenames.
 """
 
 import importlib.util
@@ -288,6 +290,126 @@ def test_select_sessions_bounds_and_spans():
     assert picked[0] == "s0"
     assert len(set(picked)) == 10
     assert _mod.select_sessions(paths[:5], 10) == paths[:5]
+
+
+VERDICT = {
+    "packet_id": "pkt-abc123",
+    "session_id": "sess-test",
+    "dispatch_confirmed": True,
+    "unused": [],
+    "harmful": [],
+    "unattributed_retrieval": [],
+    "missing": [
+        {
+            "query": "widget frobnication lifecycle",
+            "evidence": "worker derived the lifecycle from source after the packet lacked it",
+            "related_files": ["/src/widget.py"],
+        },
+    ],
+}
+
+
+def test_packet_missing_gap_emits_step0a_candidate():
+    candidates, metrics = _mod.mine_packet_verdicts([VERDICT])
+    assert metrics["verdicts"] == 1
+    assert metrics["gaps"] == 1
+    assert len(candidates) == 1
+    filename, text = candidates[0]
+    assert filename.endswith(".md")
+    assert "**Trigger:** packet-gap" in text
+    assert "**Query:** widget frobnication lifecycle" in text
+    assert "**Session:** sess-test" in text
+    assert "**Packet:** pkt-abc123" in text
+    assert "**Related files:** /src/widget.py" in text
+    assert "Assessor evidence: worker derived" in text
+    assert "**Evaluate:**" in text and "**Synthesis check:**" in text
+
+
+def test_packet_candidate_filename_is_idempotent_and_packet_scoped():
+    first, _ = _mod.mine_packet_verdicts([VERDICT])
+    second, _ = _mod.mine_packet_verdicts([json.loads(json.dumps(VERDICT))])
+    assert first[0][0] == second[0][0]
+    other_packet = dict(VERDICT, packet_id="pkt-def456")
+    third, _ = _mod.mine_packet_verdicts([other_packet])
+    assert third[0][0] != first[0][0]
+
+
+def test_packet_missing_string_element_is_the_gap_text():
+    verdict = dict(VERDICT, missing=["widget frobnication lifecycle"])
+    candidates, metrics = _mod.mine_packet_verdicts([verdict])
+    assert metrics["gaps"] == 1
+    assert "**Query:** widget frobnication lifecycle" in candidates[0][1]
+    assert "**Related files:** none" in candidates[0][1]
+
+
+def test_packet_missing_null_is_not_assessable():
+    verdict = dict(VERDICT, missing=None)
+    candidates, metrics = _mod.mine_packet_verdicts([verdict])
+    assert metrics["missing_not_assessable"] == 1
+    assert candidates == []
+
+
+def test_packet_missing_empty_list_emits_nothing():
+    verdict = dict(VERDICT, missing=[])
+    candidates, metrics = _mod.mine_packet_verdicts([verdict])
+    assert metrics["verdicts"] == 1
+    assert metrics["gaps"] == 0
+    assert candidates == []
+
+
+def test_packet_verdict_without_packet_id_is_skipped():
+    verdict = {k: v for k, v in VERDICT.items() if k != "packet_id"}
+    candidates, metrics = _mod.mine_packet_verdicts([verdict, "not a dict"])
+    assert metrics["verdicts_skipped"] == 2
+    assert candidates == []
+
+
+def test_packet_gap_without_text_is_skipped():
+    verdict = dict(VERDICT, missing=[{"severity": "high"}, ""])
+    candidates, metrics = _mod.mine_packet_verdicts([verdict])
+    assert metrics["gaps_skipped"] == 2
+    assert candidates == []
+
+
+def test_packet_missing_malformed_is_counted():
+    verdict = dict(VERDICT, missing="not a list")
+    candidates, metrics = _mod.mine_packet_verdicts([verdict])
+    assert metrics["missing_malformed"] == 1
+    assert candidates == []
+
+
+def test_load_verdicts_accepts_object_array_and_jsonl(tmp_path):
+    obj = tmp_path / "one.json"
+    obj.write_text(json.dumps(VERDICT))
+    verdicts, skipped = _mod.load_verdicts(str(obj))
+    assert len(verdicts) == 1 and skipped == 0
+
+    arr = tmp_path / "arr.json"
+    arr.write_text(json.dumps([VERDICT, VERDICT]))
+    verdicts, skipped = _mod.load_verdicts(str(arr))
+    assert len(verdicts) == 2 and skipped == 0
+
+    jsonl = tmp_path / "verdicts.jsonl"
+    jsonl.write_text(json.dumps(VERDICT) + "\n{not json\n" + json.dumps(VERDICT) + "\n")
+    verdicts, skipped = _mod.load_verdicts(str(jsonl))
+    assert len(verdicts) == 2 and skipped == 1
+
+
+def test_run_packet_verdicts_mode_writes_to_output_dir(tmp_path, capsys):
+    import argparse
+    verdict_file = tmp_path / "verdicts.jsonl"
+    verdict_file.write_text(json.dumps(VERDICT) + "\n")
+    out_dir = tmp_path / "out"
+    args = argparse.Namespace(
+        packet_verdicts=str(verdict_file), output_dir=str(out_dir),
+        knowledge_dir=None, cwd=str(tmp_path),
+    )
+    _mod.run_packet_verdicts_mode(args)
+    files = list(out_dir.glob("*.md"))
+    assert len(files) == 1
+    assert "**Trigger:** packet-gap" in files[0].read_text()
+    err = capsys.readouterr().err
+    assert "packet-verdicts" in err and "candidates_emitted=1" in err
 
 
 def test_related_files_cap(tmp_path):

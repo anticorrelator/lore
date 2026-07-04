@@ -70,6 +70,7 @@
     "batch_size": 12,
     "batch_recompute_min_interval_seconds": 60,
     "concordance_window_size": 8,
+    "max_auto_retry_attempts": 3,
     "lease_ttl_seconds": 900,
     "executor_timeout_seconds": 300,
     "active_hours": {

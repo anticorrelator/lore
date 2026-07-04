@@ -221,8 +221,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				// agent-toggle shell-out result) still find a target;
 				// the rebuild on next open honors D10's discard rule.
 				m.settingsPanel = nil
-				m.settlementSettingsPanel = nil
-				m.ensureSettlementSettingsPanel()
 			}
 			return m, cmd
 		}
@@ -586,48 +584,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 		}
 
-		if m.state == stateSettlement && !m.terminalMode {
-			key := msg.String()
-			if m.focusedPanel == panelLeft && (key == "l" || key == "tab") {
-				m.ensureSettlementSettingsPanel()
-				m.focusedPanel = panelRight
-				return m, nil
-			}
-			if m.focusedPanel == panelRight {
-				m.ensureSettlementSettingsPanel()
-				consumesRunes := m.settlementSettingsPanel != nil && m.settlementSettingsPanel.FocusConsumesRunes()
-				switch key {
-				case "esc":
-					if consumesRunes {
-						return m.updateInlineSettlementSettings(msg)
-					}
-					m.focusedPanel = panelLeft
-					return m, nil
-				case "h":
-					if !consumesRunes {
-						m.focusedPanel = panelLeft
-						return m, nil
-					}
-				case "q", "?", "K", "S", "ctrl+,":
-					if !consumesRunes {
-						break
-					}
-					return m.updateInlineSettlementSettings(msg)
-				case "ctrl+c", "ctrl+d":
-					break
-				default:
-					return m.updateInlineSettlementSettings(msg)
-				}
-			}
-		}
-
 		switch msg.String() {
 		case "t":
 			if (m.state == stateWork || m.state == stateFollowUps) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateSettlement
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
-				m.ensureSettlementSettingsPanel()
 				return m, loadSettlementStatus()
 			}
 		case "ctrl+c":
@@ -832,8 +794,15 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// rebuild a fresh panel each open so previously-discarded
 			// drafts cannot leak across sessions; if init fails, surface a
 			// flash error so the user sees something instead of silence.
+			// From the settlement panel the modal opens focused at the
+			// settlement subtree — the durable-config home now that the
+			// panel carries no inline settings.
 			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateKnowledge || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
-				return m.openSettingsModal("")
+				focus := ""
+				if m.state == stateSettlement {
+					focus = "settlement"
+				}
+				return m.openSettingsModal(focus)
 			}
 		case "f":
 			if (m.state == stateWork || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
@@ -864,6 +833,13 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					return m, func() tea.Msg { return work.SpecRequestMsg{Slug: slug} }
 				}
 			}
+			if m.state == stateSettlement {
+				arg := "on"
+				if m.settlement.Status().ActiveHours.Enabled {
+					arg = "off"
+				}
+				return m, runSettlementVerb("schedule", arg)
+			}
 		case "c":
 			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
 				if slug := m.list.CurrentSlug(); slug != "" {
@@ -890,10 +866,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				}
 			}
 		case "p":
+			// Pause is the existing settlement.enabled gate re-keyed: no
+			// separate `paused` field exists (D1).
 			if m.state == stateSettlement {
-				m.settlementProcessInFlight = true
-				m.settlementProcessStartedAt = time.Now()
-				return m, runSettlementAction("process")
+				action := "disable"
+				if !m.settlement.Status().Enabled {
+					action = "enable"
+				}
+				return m, runSettlementAction(action)
 			}
 			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
 				id := m.followupDetail.CurrentID()
@@ -925,13 +905,15 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					m.flashErr = fmt.Sprintf("cannot dismiss: follow-up is already %s", status)
 				}
 			}
-		case "e":
+		case "x":
 			if m.state == stateSettlement {
-				action := "enable"
-				if m.settlement.Status().Enabled {
-					action = "disable"
-				}
-				return m, runSettlementAction(action)
+				m.settlementProcessInFlight = true
+				m.settlementProcessStartedAt = time.Now()
+				return m, runSettlementAction("process")
+			}
+		case "m":
+			if m.state == stateSettlement {
+				return m.cycleSettlementModelTier()
 			}
 		case "P":
 			if m.state == stateFollowUps && m.focusedPanel == panelRight && !m.terminalMode {
@@ -989,9 +971,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.resizeSpecPanels()
 
 		m.settlement = m.settlement.SetSize(msg.Width-2, msg.Height-4)
-		if m.settlementSettingsPanel != nil {
-			m.settlementSettingsPanel.SetSize(msg.Width/2, msg.Height-4)
-		}
 		m.popup.SetSize(msg.Width, msg.Height)
 
 		return m, tea.Batch(wcmd, fcmd, bcmd)
@@ -1104,9 +1083,6 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 		if msg.result.Status != nil {
 			m.settlement = m.settlement.ReplaceStatus(*msg.result.Status)
-		}
-		if msg.action == "enable" || msg.action == "disable" {
-			m.refreshSettlementSettingsPanel()
 		}
 		if msg.automatic {
 			return m, nil
@@ -1432,39 +1408,41 @@ func (m *model) resizeSpecPanels() {
 	}
 }
 
-func (m *model) ensureSettlementSettingsPanel() {
-	if m.settlementSettingsPanel != nil {
-		return
+// cycleSettlementModelTier advances settlement.auditor_model to the next
+// alias in the active framework's model_routing.tiers list, writing through
+// the `lore settlement model` verb. A framework without declared tiers
+// disables the key with a visible status and performs no write.
+func (m model) cycleSettlementModelTier() (model, tea.Cmd) {
+	fw := m.settlement.Status().Harness.Selected
+	if fw == "" {
+		active, err := config.ResolveActiveFramework()
+		if err != nil {
+			m.flashErr = compactErr("model tier", err)
+			return m, nil
+		}
+		fw = active
 	}
-	panel, err := initSettlementSettingsPanel()
-	if panel != nil {
-		m.settlementSettingsPanel = panel
-		return
-	}
+	tiers, err := config.LoadModelRoutingTiers(fw)
 	if err != nil {
-		m.flashErr = fmt.Sprintf("settings: %v", err)
-	} else {
-		m.flashErr = "settings: panel unavailable"
-	}
-}
-
-func (m *model) refreshSettlementSettingsPanel() {
-	m.settlementSettingsPanel = nil
-	m.ensureSettlementSettingsPanel()
-}
-
-func (m model) updateInlineSettlementSettings(msg tea.KeyPressMsg) (model, tea.Cmd) {
-	m.ensureSettlementSettingsPanel()
-	if m.settlementSettingsPanel == nil {
+		m.flashErr = compactErr("model tier", err)
 		return m, nil
 	}
-	panel, cmd := m.settlementSettingsPanel.Update(msg)
-	m.settlementSettingsPanel = panel
-	switch msg.String() {
-	case "enter", "space", "u":
-		cmd = batchCmd(cmd, loadSettlementStatus())
+	if len(tiers) == 0 {
+		m.flashErr = fmt.Sprintf("no tiers for %s", fw)
+		return m, nil
 	}
-	return m, cmd
+	return m, runSettlementVerb("model", nextTier(tiers, m.settlement.Status().AuditorModel))
+}
+
+// nextTier returns the tier after current in the ordered list, wrapping at
+// the end; an unset or unknown current starts the cycle at the first tier.
+func nextTier(tiers []string, current string) string {
+	for i, tier := range tiers {
+		if tier == current {
+			return tiers[(i+1)%len(tiers)]
+		}
+	}
+	return tiers[0]
 }
 
 // settlementInFlightCeiling is the model-level belt to commands.go's

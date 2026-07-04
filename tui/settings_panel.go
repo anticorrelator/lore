@@ -123,15 +123,6 @@ func initSettingsPanel() (*settings.SettingsModel, error) {
 	return m, err
 }
 
-func initSettlementSettingsPanel() (*settings.SettingsModel, error) {
-	panel, err := initSettingsPanel()
-	if panel != nil {
-		panel.LimitToDotPath("settlement")
-		panel.SetCompactEmbed(true)
-	}
-	return panel, err
-}
-
 // loadFieldDescriptions assembles the per-dot-path description map the
 // settings configurator threads into widget render. The map sources from the
 // capability registry:

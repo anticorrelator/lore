@@ -267,6 +267,7 @@ The gate fires when **all four** conditions hold:
    - `{{team_lead}}` → the lead name read from team config in Step 2
    - `{{prior_knowledge}}` → `$PRIOR_KNOWLEDGE`, followed by that worker's Tier 2 extract block (blank-line separator)
    - `{{template_version}}` → `$WORKER_TEMPLATE_VERSION`
+   - Include each assigned task's `packet_id` (carried on its TaskCreate manifest entry and in `open`'s `packets` field) as a literal `Packet-id: <packet_id>` line in that worker's Task prompt — the post-session packet assessor matches this line to confirm handoff. Omit the line for tasks without a `packet_id`.
 
    Assign only tasks from `open`'s `initial_unblocked` set. Same-file serialization is already wired into the manifest's blockedBy edges for this selection — never parallel-dispatch same-file tasks across workers; for subset selections, also account for files held by unselected tasks (the cross-selection caveat in Step 2). After claiming (`TaskUpdate(owner=…)`), a worker-side `TaskGet` ownership re-check is the backstop for claim races.
    <!-- Sunset: remove if same-file collision / phantom-completion retro-evolution rows targeting skills/implement/SKILL.md recur from ≥3 new distinct work items within the next 20 implement cycles. -->

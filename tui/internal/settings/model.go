@@ -183,13 +183,8 @@ type SettingsModel struct {
 	widgets []FieldWidget
 
 	// limitDotPath restricts the model to a single top-level widget while
-	// preserving the same schema-backed write routing. Hosts use this for
-	// inline editors such as the settlement panel, where the whole settings
-	// modal would be too much surface area.
+	// preserving the same schema-backed write routing.
 	limitDotPath string
-	// profile selects the layout engine's rendering profile (layout.go).
-	// layoutCompactEmbed only takes effect together with limitDotPath.
-	profile layoutProfile
 
 	// nav is the editing/navigation coordinator (coordinator.go). It owns
 	// the focus cursor, navigation gestures, and intent-routing dispatch.
@@ -1136,15 +1131,12 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 			// widget didn't have an `esc` case (EnumSelector, ToggleRow,
 			// etc.) and never closed.
 			focused := m.nav.focusedWidget()
-			if compactFocused := m.nav.focusedCompactControl(); compactFocused != nil {
-				focused = compactFocused
-			}
 			if focused == nil {
 				m.closed = true
 				return m, nil
 			}
 			updated, cmd, intent := focused.Update(msg)
-			m.nav.replaceFocusedControl(updated)
+			m.nav.replaceFocused(updated)
 			if intent != nil {
 				if extra := m.nav.routeIntent(intent); extra != nil {
 					cmd = teaBatch(cmd, extra)
@@ -1193,14 +1185,11 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 
 	// Forward to the focused widget.
 	w := m.nav.focusedWidget()
-	if compactFocused := m.nav.focusedCompactControl(); compactFocused != nil {
-		w = compactFocused
-	}
 	if w == nil {
 		return m, nil
 	}
 	updated, cmd, intent := w.Update(msg)
-	m.nav.replaceFocusedControl(updated)
+	m.nav.replaceFocused(updated)
 	if intent != nil {
 		if extra := m.nav.routeIntent(intent); extra != nil {
 			cmd = teaBatch(cmd, extra)
@@ -1266,19 +1255,6 @@ func (m *SettingsModel) LimitToDotPath(dotPath string) {
 	m.limitDotPath = dotPath
 	m.closed = false
 	m.nav.focusByDotPath(dotPath)
-	m.nav.autoEnterCompactEmbed()
-}
-
-// SetCompactEmbed trims section chrome for an embedded limited settings
-// editor. It is intended for surfaces that already provide their own panel
-// title and split chrome, such as the settlement panel.
-func (m *SettingsModel) SetCompactEmbed(compact bool) {
-	if compact {
-		m.profile = layoutCompactEmbed
-	} else {
-		m.profile = layoutFull
-	}
-	m.nav.autoEnterCompactEmbed()
 }
 
 // routeCommit handles the IntentCommit branch of routeIntent. Split out for
@@ -1563,9 +1539,6 @@ func (m *SettingsModel) View() string {
 
 	content := m.renderBodyContent()
 
-	if m.compactEmbedActive() {
-		return content
-	}
 	if !m.viewportInit || m.viewport.Height() <= 0 {
 		return content
 	}

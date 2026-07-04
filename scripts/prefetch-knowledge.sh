@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # prefetch-knowledge.sh — Search knowledge store and output formatted context for agent prompts
-# Usage: bash prefetch-knowledge.sh <query> [--format prompt|summary] [--limit N] [--type knowledge|work|all] [--exclude-backlinks <paths>] [--scale-set <csv>] [--work-item <slug>]
+# Usage: bash prefetch-knowledge.sh <query> [--format prompt|summary] [--limit N] [--type knowledge|work|all] [--exclude-backlinks <paths>] [--scale-set <csv>] [--work-item <slug>] [--caller <id>]
 #
 # --format prompt   (default) Full resolved sections for embedding in agent prompts
 # --format summary  Headings + snippets for display
@@ -13,6 +13,8 @@
 #                          No default; missing = error.
 # --work-item <slug>       Work item slug (from _work/<slug>/_meta.json). Used only for
 #                          scope_pointers injection; no longer used for scale computation.
+# --caller <id>            Caller identifier logged to the prefetch retrieval record
+#                          (e.g. 'lead', 'worker') for assessment-time attribution.
 #
 # Output: Clean markdown block (## Prior Knowledge) or empty string on zero results.
 
@@ -30,6 +32,7 @@ EXCLUDE_BACKLINKS=""
 SCALE_SET=""
 WORK_ITEM=""
 NO_PREFERENCES=0
+CALLER=""
 
 # --- Parse args ---
 while [[ $# -gt 0 ]]; do
@@ -70,6 +73,14 @@ while [[ $# -gt 0 ]]; do
       NO_PREFERENCES=1
       shift
       ;;
+    --caller)
+      CALLER="$2"
+      shift 2
+      ;;
+    --caller=*)
+      CALLER="${1#--caller=}"
+      shift
+      ;;
     -*)
       echo "Unknown option: $1" >&2
       exit 1
@@ -87,7 +98,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$QUERY" ]]; then
-  echo "Usage: prefetch-knowledge.sh <query> [--format prompt|summary] [--limit N] [--type knowledge|work|all] [--scale-context <role>] [--scale-set <set>] [--work-item <slug>]" >&2
+  echo "Usage: prefetch-knowledge.sh <query> [--format prompt|summary] [--limit N] [--type knowledge|work|all] [--scale-context <role>] [--scale-set <set>] [--work-item <slug>] [--caller <id>]" >&2
   exit 1
 fi
 
@@ -127,6 +138,9 @@ if [[ -n "$WORK_ITEM" ]]; then
 fi
 if [[ $NO_PREFERENCES -eq 1 ]]; then
   PREFETCH_ARGS+=("--no-preferences")
+fi
+if [[ -n "$CALLER" ]]; then
+  PREFETCH_ARGS+=("--caller" "$CALLER")
 fi
 
 exec python3 "$LORE_SEARCH" "${PREFETCH_ARGS[@]}"

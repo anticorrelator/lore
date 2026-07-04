@@ -36,6 +36,19 @@ if [[ -z "$FRAMEWORK" ]]; then
   FRAMEWORK=$(resolve_active_framework 2>/dev/null || echo "unknown")
 fi
 
+# settlement.auditor_model scopes a judge-model override to settlement-executed
+# audits: exporting LORE_MODEL_JUDGE feeds resolve_model_for_role's env layer,
+# so audit-artifact.sh needs no resolution changes and standalone `lore audit`
+# runs are untouched. When the setting is present it overrides any inherited
+# LORE_MODEL_JUDGE; when absent the inherited/normal resolution stays intact.
+SETTLEMENT_SETTINGS_FILE="${LORE_SETTLEMENT_SETTINGS_FILE:-${LORE_DATA_DIR:-$HOME/.lore}/config/settings.json}"
+if [[ -f "$SETTLEMENT_SETTINGS_FILE" ]] && command -v jq >/dev/null 2>&1; then
+  AUDITOR_MODEL=$(jq -r '.settlement.auditor_model // empty' "$SETTLEMENT_SETTINGS_FILE" 2>/dev/null || true)
+  if [[ -n "$AUDITOR_MODEL" ]]; then
+    export LORE_MODEL_JUDGE="$AUDITOR_MODEL"
+  fi
+fi
+
 emit_envelope() {
   local verdict="$1"
   local evidence="$2"

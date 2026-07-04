@@ -22,7 +22,7 @@
     "transcript_provider": "Exposes a parseable session/transcript artifact that capture, digest, novelty, and ceremony-detection scripts can consume.",
     "headless_runner": "Non-interactive `<harness> -p <prompt>` mode used by audit-artifact.sh (correctness-gate, curator, reverse-auditor) and other batch judges.",
     "plugin_runtime": "Native plugin/extension runtime where lore can register code (TypeScript, shell, etc.) that participates in lifecycle events.",
-    "model_routing": "Whether the harness exposes a single model/provider per session or can route per-spawn to multiple providers; values: `single` or `multi`."
+    "model_routing": "Whether the harness exposes a single model/provider per session or can route per-spawn to multiple providers; values: `single` or `multi`. The optional `tiers` array lists the harness's validated model aliases in ascending capability order (consumed by the settlement panel's tier cycle and framework_model_routing_tiers); an empty array means no validated alias ladder — consumers must not guess one."
   },
   "tools": {
     "gh_cli": "GitHub CLI (`gh`) on PATH for PR/issue read+write workflows. Sourced from the host environment, not the harness — no harness exposes it. Skills that consume PR diffs/comments/reviews require it; degradation is a hard `unsupported` rather than `partial` because the data is unreachable without it."
@@ -181,7 +181,8 @@
       "model_routing": {
         "shape": "single",
         "evidence": "claude-code-model-routing",
-        "notes": "Single Anthropic provider per session; the role->model map collapses to one binding without affecting call sites."
+        "notes": "Single Anthropic provider per session; the role->model map collapses to one binding without affecting call sites.",
+        "tiers": ["haiku", "sonnet", "opus", "fable"]
       },
       "install_paths": {
         "instructions":     "$HOME/.claude/CLAUDE.md",
@@ -278,7 +279,8 @@
       "model_routing": {
         "shape": "multi",
         "evidence": "opencode-model-routing",
-        "notes": "Per-spawn provider/model selection; the role->model map honors per-role bindings (e.g., Opus for lead, Haiku for worker fanout)."
+        "notes": "Per-spawn provider/model selection; the role->model map honors per-role bindings (e.g., Opus for lead, Haiku for worker fanout). Tiers use the provider/model id shape; the Anthropic ladder is the validated ordered set.",
+        "tiers": ["anthropic/haiku", "anthropic/sonnet", "anthropic/opus"]
       },
       "install_paths": {
         "instructions":     "$HOME/.config/opencode/AGENTS.md",
@@ -374,7 +376,8 @@
       "model_routing": {
         "shape": "single",
         "evidence": "codex-model-routing",
-        "notes": "Single provider per session; the role->model map collapses to one binding without affecting call sites."
+        "notes": "Single provider per session; the role->model map collapses to one binding without affecting call sites. Tiers vary reasoning effort on the shipped gpt-5.5 binding via the adapter's -<effort> suffix split.",
+        "tiers": ["gpt-5.5-low", "gpt-5.5-medium", "gpt-5.5-high", "gpt-5.5-xhigh"]
       },
       "install_paths": {
         "instructions":     "$HOME/.codex/AGENTS.md",

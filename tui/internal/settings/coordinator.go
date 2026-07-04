@@ -1,10 +1,9 @@
 // Package settings: coordinator.go is the single editing/navigation
-// coordinator for the configurator. It owns focus (which slot, and which
-// control inside the compact embed, receives keystrokes), edit-mode entry
-// (whether Enter/i/e and j/k reach the focused widget as editor input or act
-// as navigation), navigation (slot stepping, container descent, the embed's
-// flattened control list), and intent routing (translating each FieldIntent
-// a widget emits into the model's write surface).
+// coordinator for the configurator. It owns focus (which slot receives
+// keystrokes), edit-mode entry (whether Enter/i/e and j/k reach the focused
+// widget as editor input or act as navigation), navigation (slot stepping,
+// container descent), and intent routing (translating each FieldIntent a
+// widget emits into the model's write surface).
 //
 // The coordinator's boundary stops at routing: commit MECHANISMS remain
 // polymorphic on SettingsModel — immediate/draft-buffered intents go through
@@ -33,16 +32,13 @@ type coordinator struct {
 }
 
 // ensureInitialFocus installs focus on the first slot when nothing is
-// focused yet. Called on the first navigation keystroke; under the compact
-// embed it also auto-enters the limited container so j/k land on the first
-// real child row instead of an invisible top-level container.
+// focused yet. Called on the first navigation keystroke.
 func (c *coordinator) ensureInitialFocus() {
 	if c.focusIdx >= 0 || len(c.m.allWidgetSlots()) == 0 {
 		return
 	}
 	c.focusIdx = 0
 	_ = c.m.allWidgetSlots()[0].Focus()
-	c.autoEnterCompactEmbed()
 	c.ensureFocusedVisible()
 }
 
@@ -71,7 +67,6 @@ func (c *coordinator) focusByDotPath(dotPath string) {
 		if dotPath == c.m.limitDotPath && c.m.limitedWidget() != nil {
 			c.focusIdx = 0
 			_ = c.m.limitedWidget().Focus()
-			c.autoEnterCompactEmbed()
 		} else {
 			c.focusIdx = -1
 		}
@@ -86,39 +81,6 @@ func (c *coordinator) focusByDotPath(dotPath string) {
 		}
 	}
 	c.focusIdx = -1
-}
-
-// autoEnterCompactEmbed enters the limited container under the compact-embed
-// profile so navigation starts on the first real child row. Without this,
-// the embed receives keys while focus sits on an invisible top-level
-// container, making j/k appear unwired.
-func (c *coordinator) autoEnterCompactEmbed() {
-	if !c.m.compactEmbedActive() {
-		return
-	}
-	panel, ok := c.m.limitedWidget().(*ClosedObjectSubPanel)
-	if !ok || len(panel.children) == 0 {
-		return
-	}
-	panel.focused = true
-	panel.entered = true
-	controls := c.compactEmbedControls(panel)
-	if len(controls) > 0 {
-		hasFocus := false
-		for _, control := range controls {
-			if control.Focused() {
-				hasFocus = true
-				break
-			}
-		}
-		if !hasFocus {
-			_ = controls[0].Focus()
-		}
-		return
-	}
-	if panel.cursor < 0 || panel.cursor >= len(panel.children) {
-		panel.cursor = 0
-	}
 }
 
 // replaceFocused updates the focused slot with a new widget value (Bubble
@@ -153,57 +115,6 @@ func (c *coordinator) replaceFocused(w FieldWidget) {
 	}
 }
 
-func (c *coordinator) replaceFocusedControl(w FieldWidget) {
-	if c.m.compactEmbedActive() {
-		if c.replaceCompactControl(w) {
-			return
-		}
-	}
-	c.replaceFocused(w)
-}
-
-// focusedCompactControl returns the focused control within the compact
-// embed's flattened control list, or nil when the embed isn't active or no
-// control holds focus.
-func (c *coordinator) focusedCompactControl() FieldWidget {
-	if !c.m.compactEmbedActive() {
-		return nil
-	}
-	panel, ok := c.m.limitedWidget().(*ClosedObjectSubPanel)
-	if !ok {
-		return nil
-	}
-	for _, control := range c.compactEmbedControls(panel) {
-		if control.Focused() {
-			return control
-		}
-	}
-	return nil
-}
-
-func (c *coordinator) replaceCompactControl(updated FieldWidget) bool {
-	panel, ok := c.m.limitedWidget().(*ClosedObjectSubPanel)
-	if !ok || updated == nil {
-		return false
-	}
-	return replacePanelChildByDotPath(panel, updated)
-}
-
-func replacePanelChildByDotPath(panel *ClosedObjectSubPanel, updated FieldWidget) bool {
-	for i, child := range panel.children {
-		if child.DotPath() == updated.DotPath() {
-			panel.children[i] = updated
-			return true
-		}
-		if childPanel, ok := child.(*ClosedObjectSubPanel); ok {
-			if replacePanelChildByDotPath(childPanel, updated) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // stepRowNavigation advances focus by delta (+1 / -1) using hierarchical
 // semantics:
 //
@@ -214,10 +125,6 @@ func replacePanelChildByDotPath(panel *ClosedObjectSubPanel, updated FieldWidget
 //  3. If the focused leaf is actively editing, j/k are not intercepted here;
 //     they are forwarded to the leaf as input.
 func (c *coordinator) stepRowNavigation(delta int) {
-	if c.stepCompactEmbedNavigation(delta) {
-		c.ensureFocusedVisible()
-		return
-	}
 	if stepper, ok := c.focusedWidget().(NavStepper); ok {
 		if moved, intent := stepper.NavStep(delta); moved {
 			if intent != nil {
@@ -235,86 +142,6 @@ func (c *coordinator) stepRowNavigation(delta int) {
 		c.routeIntent(intent)
 	}
 	c.ensureFocusedVisible()
-}
-
-// stepCompactEmbedNavigation moves focus through the embed's flattened
-// control list. Reports true when the compact embed consumed the step.
-func (c *coordinator) stepCompactEmbedNavigation(delta int) bool {
-	if !c.m.compactEmbedActive() {
-		return false
-	}
-	panel, ok := c.m.limitedWidget().(*ClosedObjectSubPanel)
-	if !ok {
-		return false
-	}
-	controls := c.compactEmbedControls(panel)
-	if len(controls) == 0 {
-		return true
-	}
-	current := -1
-	for i, control := range controls {
-		if control.Focused() {
-			current = i
-			break
-		}
-	}
-	if current < 0 {
-		current = 0
-		_ = controls[current].Focus()
-		return true
-	}
-	next := current + delta
-	if next < 0 {
-		next = 0
-	}
-	if next >= len(controls) {
-		next = len(controls) - 1
-	}
-	if next == current {
-		return true
-	}
-	if intent := controls[current].Blur(); intent != nil {
-		c.routeIntent(intent)
-	}
-	_ = controls[next].Focus()
-	panel.focused = true
-	panel.entered = true
-	return true
-}
-
-// compactEmbedControls flattens the limited panel's leaf controls into the
-// compact embed's navigation order. The order mirrors the compact layout:
-// simple leaves first, the harness-selection selector after its sibling
-// leaves, and active-hours controls last (they render as the deferred
-// windows block at the bottom of the embed).
-func (c *coordinator) compactEmbedControls(panel *ClosedObjectSubPanel) []FieldWidget {
-	var controls []FieldWidget
-	var deferred []FieldWidget
-	var walk func(w FieldWidget)
-	walk = func(w FieldWidget) {
-		if childPanel, ok := w.(*ClosedObjectSubPanel); ok {
-			var localDeferred []FieldWidget
-			for _, child := range childPanel.children {
-				if childPanel.dotPath == "settlement.active_hours" {
-					deferred = append(deferred, child)
-					continue
-				}
-				if childPanel.dotPath == "settlement.harness_selection" && child.DotPath() == "settlement.harness_selection.eligible_frameworks" {
-					localDeferred = append(localDeferred, child)
-					continue
-				}
-				walk(child)
-			}
-			controls = append(controls, localDeferred...)
-			return
-		}
-		controls = append(controls, w)
-	}
-	for _, child := range panel.children {
-		walk(child)
-	}
-	controls = append(controls, deferred...)
-	return controls
 }
 
 // focusOffset shifts focus by delta (+1 / -1), blurring the current focused
@@ -389,11 +216,7 @@ func (c *coordinator) routeIntent(intent *FieldIntent) tea.Cmd {
 //     a TextInput nested inside a panel still gets its 'j' keystrokes once
 //     it is in edit mode.
 func (c *coordinator) consumesNavRunes() bool {
-	w := c.focusedWidget()
-	if compactFocused := c.focusedCompactControl(); compactFocused != nil {
-		w = compactFocused
-	}
-	return widgetConsumesNavRunes(w)
+	return widgetConsumesNavRunes(c.focusedWidget())
 }
 
 // ensureFocusedVisible nudges the viewport so the currently-focused widget

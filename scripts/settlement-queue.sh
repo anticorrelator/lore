@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 usage() {
   cat >&2 <<EOF
-Usage: settlement-queue.sh <status|triggers|scan|enqueue|process|enable|disable|queue|retry-errors|drain|enqueue-rollup-backfill> [args...]
+Usage: settlement-queue.sh <status|triggers|scan|enqueue|process|enable|disable|schedule|model|queue|retry-errors|drain|enqueue-rollup-backfill> [args...]
 
 Commands:
   status --json                 Show queue, lease, run, and budget status.
@@ -21,6 +21,11 @@ Commands:
   enqueue --work-item SLUG      Enqueue one Tier 2 row from stdin.
   process --once --json         Process one pending item.
   enable|disable --json         Toggle settlement.enabled in settings.json.
+  schedule on|off --json        Toggle settlement.active_hours.enabled in
+                                settings.json (the active-hours schedule gate).
+  model <alias> --json          Set settlement.auditor_model — the judge model
+                                for settlement-executed audits.
+  model --unset --json          Remove settlement.auditor_model (role default).
   queue recompute --json        Recompute the active settlement batch.
   retry-errors --json           Requeue audit errors and timeout-blocked attempts.
   drain --json                  Loop process_once until queue empty; abort on
@@ -51,7 +56,7 @@ case "$1" in
     usage
     exit 0
     ;;
-  status|triggers|scan|enqueue|process|enable|disable|queue|retry-errors|drain|enqueue-rollup-backfill)
+  status|triggers|scan|enqueue|process|enable|disable|schedule|model|queue|retry-errors|drain|enqueue-rollup-backfill)
     python3 "$SCRIPT_DIR/settlement-processor.py" "$@"
     ;;
   *)

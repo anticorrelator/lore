@@ -21,6 +21,18 @@ scripts/event-patterns.json: non-sidechain Grep/Glob/Read or Explore-agent
 spawns) produces one candidate file for /remember Step 0a. Every run
 prints join-audit metrics so silent under-matching is visible.
 
+A second candidate source arrives via --packet-verdicts: verdict JSON from
+packet-assess.py (one object per assessed packet_id; path or '-' for stdin,
+as a single object, an array, or JSONL). Each entry in a verdict's missing[]
+array is a needed-but-missing gap and produces one packet-gap candidate.
+missing: null means that class was not assessable and is skipped, never
+guessed; verdicts without a packet_id are skipped and counted. A missing[]
+entry may be a plain string (the gap statement) or an object — the gap text
+is read from the first of query/topic/need/claim/description/summary, with
+optional evidence/rationale/reason/context and related_files carried into
+the candidate. Duplicate suppression across runs belongs to the assessor's
+own state file; here idempotency comes from content-hashed filenames alone.
+
 Write discipline: this script is the sanctioned writer of _pending_captures/
 (succeeding the retired stop-novelty-check.py) and of
 _meta/miss-miner-state.json. It only reads retrieval-log.jsonl
@@ -51,6 +63,21 @@ if _SCRIPTS_DIR not in sys.path:
 from transcript import resolve_knowledge_dir as _resolve_knowledge_dir
 
 TRIGGER = "retrieval-miss"
+PACKET_GAP_TRIGGER = "packet-gap"
+
+# Field-key fallback order for object-shaped missing[] entries.
+GAP_TEXT_KEYS = ("query", "topic", "need", "claim", "description", "summary")
+GAP_CONTEXT_KEYS = ("evidence", "rationale", "reason", "context")
+
+EVALUATE_LINE = (
+    "**Evaluate:** Does this meet the capture gate? "
+    "(Reusable, Non-obvious, Stable, High-confidence)"
+)
+SYNTHESIS_CHECK_LINE = (
+    "**Synthesis check:** Does this insight combine information from multiple sources "
+    "(files, sessions, or components), or could it be read from a single file? "
+    "(Synthesis = high loading priority, single-source = searchable tier)"
+)
 
 # A log row joins a transcript call when its timestamp falls in
 # [call_ts - JOIN_SKEW, call_ts + JOIN_WINDOW]. The message timestamp
@@ -290,8 +317,8 @@ def related_files_after(file_path_tuples, raw_cache, start_index):
     return seen
 
 
-def candidate_filename(query, session_id):
-    key = TRIGGER + query + session_id
+def candidate_filename(query, scope_id, trigger=TRIGGER):
+    key = trigger + query + scope_id
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12] + ".md"
 
 
@@ -316,11 +343,9 @@ def build_candidate(call, rows, tool_counts, last_index, related_files, session_
         f"**Transcript region:** messages {call['index']}-{last_index}",
         f"**Related files:** {related}",
         "",
-        "**Evaluate:** Does this meet the capture gate? (Reusable, Non-obvious, Stable, High-confidence)",
+        EVALUATE_LINE,
         "",
-        "**Synthesis check:** Does this insight combine information from multiple sources "
-        "(files, sessions, or components), or could it be read from a single file? "
-        "(Synthesis = high loading priority, single-source = searchable tier)",
+        SYNTHESIS_CHECK_LINE,
         "",
         "**Miss guidance:** This candidate marks a demand-verified knowledge gap: a lore "
         "retrieval missed and the session derived the answer from source. If the "
@@ -329,6 +354,142 @@ def build_candidate(call, rows, tool_counts, last_index, related_files, session_
         "",
     ]
     return "\n".join(lines)
+
+
+# --- packet-verdict candidate source ---------------------------------------
+
+def load_verdicts(source):
+    """Read packet-assess verdict JSON from a path or '-' (stdin).
+
+    Accepts a single object, a top-level array, or JSONL. Returns
+    (verdict_list, corrupt_line_count); corrupt JSONL lines are skipped
+    with a count, never guessed at.
+    """
+    if source == "-":
+        text = sys.stdin.read()
+    else:
+        with open(source, encoding="utf-8") as f:
+            text = f.read()
+    text = text.strip()
+    if not text:
+        return [], 0
+    try:
+        doc = json.loads(text)
+        return (doc if isinstance(doc, list) else [doc]), 0
+    except json.JSONDecodeError:
+        pass
+    verdicts = []
+    skipped = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            verdicts.append(json.loads(line))
+        except json.JSONDecodeError:
+            skipped += 1
+    return verdicts, skipped
+
+
+def gap_text(item):
+    if isinstance(item, str):
+        return item.strip() or None
+    if isinstance(item, dict):
+        for key in GAP_TEXT_KEYS:
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def gap_context(item):
+    if isinstance(item, dict):
+        for key in GAP_CONTEXT_KEYS:
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def gap_related_files(item):
+    if not isinstance(item, dict):
+        return []
+    value = item.get("related_files")
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [p for p in value if isinstance(p, str) and p][:RELATED_FILES_LIMIT]
+
+
+def build_packet_candidate(text, context, related_files, packet_id, session_id):
+    related = ", ".join(related_files) if related_files else "none"
+    evidence = f" Assessor evidence: {context}" if context else ""
+    lines = [
+        f"# Capture Candidate: {PACKET_GAP_TRIGGER}",
+        "",
+        f"**Trigger:** {PACKET_GAP_TRIGGER}",
+        f"**Context:** packet {packet_id} was assessed needed-but-missing: the "
+        f"session needed knowledge its delivered context packet did not "
+        f"contain.{evidence}",
+        f"**Query:** {text}",
+        f"**Session:** {session_id}",
+        f"**Packet:** {packet_id}",
+        f"**Related files:** {related}",
+        "",
+        EVALUATE_LINE,
+        "",
+        SYNTHESIS_CHECK_LINE,
+        "",
+        "**Gap guidance:** This candidate marks a packet-assessed knowledge gap: "
+        "the context packet delivered for this session lacked knowledge the work "
+        "then needed. If the gap names a reusable insight, capture it phrased so "
+        "the query above would find it.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def mine_packet_verdicts(verdicts):
+    """Turn missing[] gaps into candidates. Returns ([(filename, text)], metrics)."""
+    metrics = {
+        "verdicts": 0,
+        "verdicts_skipped": 0,
+        "missing_not_assessable": 0,
+        "missing_malformed": 0,
+        "gaps": 0,
+        "gaps_skipped": 0,
+        "candidates_emitted": 0,
+    }
+    candidates = []
+    for verdict in verdicts:
+        if not isinstance(verdict, dict) or not verdict.get("packet_id"):
+            metrics["verdicts_skipped"] += 1
+            continue
+        metrics["verdicts"] += 1
+        packet_id = str(verdict["packet_id"])
+        session_id = verdict.get("session_id") or "unknown"
+        missing = verdict.get("missing")
+        if missing is None:
+            metrics["missing_not_assessable"] += 1
+            continue
+        if not isinstance(missing, list):
+            metrics["missing_malformed"] += 1
+            continue
+        for item in missing:
+            text = gap_text(item)
+            if not text:
+                metrics["gaps_skipped"] += 1
+                continue
+            metrics["gaps"] += 1
+            candidates.append((
+                candidate_filename(text, packet_id, PACKET_GAP_TRIGGER),
+                build_packet_candidate(
+                    text, gap_context(item), gap_related_files(item),
+                    packet_id, session_id,
+                ),
+            ))
+    return candidates, metrics
 
 
 def mine_session(provider, transcript_path, log_index, patterns):
@@ -487,6 +648,29 @@ def run_hook_mode(args):
     print(format_metrics(metrics, f"session={session_key}"), file=sys.stderr)
 
 
+def run_packet_verdicts_mode(args):
+    verdicts, corrupt = load_verdicts(args.packet_verdicts)
+    candidates, metrics = mine_packet_verdicts(verdicts)
+    metrics["verdict_lines_skipped"] = corrupt
+
+    if args.output_dir:
+        pending_dir = args.output_dir
+    else:
+        knowledge_dir = args.knowledge_dir or _resolve_knowledge_dir(cwd=args.cwd)
+        if not knowledge_dir or not os.path.exists(knowledge_dir):
+            return
+        if not os.path.isfile(os.path.join(knowledge_dir, "_manifest.json")):
+            return
+        pending_dir = os.path.join(knowledge_dir, "_pending_captures")
+
+    if candidates:
+        metrics["candidates_emitted"] = write_candidates(pending_dir, candidates)
+
+    # stderr for the same reason as run_hook_mode: this runs in the
+    # SessionStart chain, whose stdout surface load-knowledge.sh owns.
+    print(format_metrics(metrics, "packet-verdicts"), file=sys.stderr)
+
+
 def select_sessions(paths, max_sessions):
     """Evenly-spaced deterministic sample across the mtime-ordered corpus."""
     if len(paths) <= max_sessions:
@@ -544,13 +728,27 @@ def main():
     parser.add_argument("--output-dir", help="Candidate output dir (experiment mode)")
     parser.add_argument("--max-sessions", type=int, default=DEFAULT_MAX_SESSIONS,
                         help="Session cap for experiment mode")
+    parser.add_argument("--packet-verdicts",
+                        help="packet-assess.py verdict JSON (path or '-' for stdin); "
+                             "emits candidates for missing[] gaps instead of mining")
     args = parser.parse_args()
+
+    if args.experiment and args.packet_verdicts:
+        print("Error: --experiment and --packet-verdicts are separate modes", file=sys.stderr)
+        sys.exit(1)
 
     if args.experiment:
         run_experiment_mode(args)
         return
 
-    # Hook mode: never break a session start — fail open with a notice.
+    # Hook-chain modes: never break a session start — fail open with a notice.
+    if args.packet_verdicts:
+        try:
+            run_packet_verdicts_mode(args)
+        except Exception as e:
+            print(f"[hook] mine-retrieval-misses --packet-verdicts: {e}", file=sys.stderr)
+        sys.exit(0)
+
     try:
         run_hook_mode(args)
     except Exception as e:

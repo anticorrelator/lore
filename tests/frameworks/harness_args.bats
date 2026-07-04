@@ -345,6 +345,42 @@ EOF
   [ "$go_out" = "$bash_out" ]
 }
 
+@test "parity: framework_model_routing_tiers — Go-side TODO" {
+  # Same gating discipline as framework_model_routing_shape. The Go
+  # consumer reads the tiers list through the capabilities profile
+  # (ModelRouting.Tiers); until parity-harness grows a matching arm it
+  # either emits the pending sentinel or rejects the helper name — both
+  # skip cleanly here.
+  go_out=$(go_helper framework_model_routing_tiers 2>/dev/null || echo "go-side-missing")
+  if [ "$go_out" = "T10-pending" ] || [ "$go_out" = "go-side-missing" ]; then
+    skip "Go-side model_routing.tiers reader not yet exported via parity-harness"
+  fi
+  bash_out=$(bash_helper "framework_model_routing_tiers")
+  [ "$go_out" = "$bash_out" ]
+}
+
+@test "bash: framework_model_routing_tiers — claude-code ordered ladder" {
+  export LORE_FRAMEWORK=claude-code
+  out=$(bash_helper "framework_model_routing_tiers")
+  [ "$out" = "haiku
+sonnet
+opus
+fable" ]
+}
+
+@test "bash: framework_model_routing_tiers — explicit framework argument" {
+  out=$(bash_helper "framework_model_routing_tiers codex")
+  [ "$out" = "gpt-5.5-low
+gpt-5.5-medium
+gpt-5.5-high
+gpt-5.5-xhigh" ]
+}
+
+@test "bash: framework_model_routing_tiers — missing tiers yields empty output, not a guessed default" {
+  out=$(bash_helper "framework_model_routing_tiers no-such-framework")
+  [ -z "$out" ]
+}
+
 @test "parity: resolve_model_for_role — env-aware role binding" {
   export LORE_FRAMEWORK=claude-code
   write_settings <<EOF

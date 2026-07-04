@@ -246,6 +246,39 @@ if bad:
   [ "$status" -eq 0 ]
 }
 
+@test "every framework's model_routing.tiers is an ordered list of unique non-empty strings" {
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+bad = []
+for fw_id, fw in d["frameworks"].items():
+    mr = fw.get("model_routing") or {}
+    tiers = mr.get("tiers")
+    if not isinstance(tiers, list):
+        bad.append(f"{fw_id}.model_routing.tiers is not a list: {tiers!r}")
+        continue
+    for t in tiers:
+        if not isinstance(t, str) or not t.strip():
+            bad.append(f"{fw_id}.model_routing.tiers entry not a non-empty string: {t!r}")
+    if len(set(tiers)) != len(tiers):
+        bad.append(f"{fw_id}.model_routing.tiers has duplicates")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
+@test "claude-code model_routing.tiers is the haiku..fable ladder" {
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+tiers = d["frameworks"]["claude-code"]["model_routing"]["tiers"]
+assert tiers == ["haiku", "sonnet", "opus", "fable"], tiers
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
 # ============================================================
 # Evidence cross-reference tests
 # ============================================================

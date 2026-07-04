@@ -119,6 +119,35 @@ type capabilitiesProfile struct {
 	Binary         string            `json:"binary"`
 	InstallPaths   map[string]string `json:"install_paths"`
 	TUILaunchFlags map[string]string `json:"tui_launch_flags"`
+	ModelRouting   modelRouting      `json:"model_routing"`
+}
+
+// modelRouting is the per-framework model-routing block. Tiers is the ordered
+// auditor-model alias list the TUI's tier-cycle key walks; each alias must be
+// valid harness `--model` input for that framework.
+type modelRouting struct {
+	Tiers []string `json:"tiers"`
+}
+
+// LoadModelRoutingTiers returns the ordered model_routing.tiers alias list
+// for a framework from adapters/capabilities.json. Returns nil (no error)
+// when the framework has no tiers declared — callers MUST treat an empty list
+// as "tier cycling unavailable on this framework", never route to a default
+// list (see feedback_dont_reintroduce_defaults). Errors only on unreadable
+// capabilities.json or an unknown framework id.
+func LoadModelRoutingTiers(framework string) ([]string, error) {
+	if framework == "" {
+		return nil, fmt.Errorf("load_model_routing_tiers requires a framework")
+	}
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return nil, err
+	}
+	prof, ok := caps.Frameworks[framework]
+	if !ok {
+		return nil, fmt.Errorf("unknown framework %q (not present in adapters/capabilities.json)", framework)
+	}
+	return prof.ModelRouting.Tiers, nil
 }
 
 // capabilitiesFile is the top-level shape of adapters/capabilities.json.
