@@ -520,6 +520,8 @@ Output: `{verified: N, corrected: [...], unresolved: [...]}`.
 - If unresolved backlinks remain: carry forward to Step 5.1 as `[broken backlink]` bullets.
 - If all resolved: proceed silently.
 
+The Step 5.5 finalize verb re-runs backlink verification terminally; this early pass exists to surface broken links before the Step 5.1 review, not to replace the terminal check.
+
 ### Step 5.0b: Knowledge context block audit
 
 For each phase, run `lore search "<phase objective keywords>" --scale-set subsystem,implementation --limit 3`. If results exist but the phase has no `**Knowledge context:**` block, add the most relevant entry as a backlink with an implementation-facing annotation.
@@ -604,25 +606,24 @@ Apply the provenance flags above on every `lore capture`.
 
 ---
 
-### Step 5.5: Generate tasks.json and finalize
+### Step 5.5: Finalize through the spec verb
 
-Before regenerating `tasks.json`, run the intent-anchor verifier:
+**Lead-owned preflight (two prose asserts the verb cannot run):** validate emitted artifacts against their live consumers, never from memory: (1) any script invocation block the plan instructs agents to run must match the live script's current flags (check `--help` or source — script schemas drift faster than plans); (2) Tier-2 emission instructions point at the validator's canonical required-field set rather than enumerating fields inline. Fix `plan.md` first if either fails — a deterministic script can assert JSON structure, but adjudicating prose against live sources is the lead's judgment.
 
-```bash
-bash scripts/verify-plan-intent-anchor.sh <slug>
-```
-
-This gate enforces structural anchor preservation and scope-delta attestation, not semantic non-drift — semantic alignment between the anchor and the rest of the plan remains a spec-author responsibility... A free-text "preserve near Goal" instruction is rhetoric without an actionable required check — exactly the failure mode this gate exists to close.
-
-Semantic alignment also falls to downstream reviewers (e.g., `/codex-plan-review`). The verifier exits 0 when `## Intent Anchor` body matches `_meta.json.intent_anchor` and `**Scope delta:**` is present; exits 0 with a one-line stderr info when the work item has no `intent_anchor` field (absence is legible, not silent); exits non-zero (2 = section missing, 3 = body diverges, 4 = `**Scope delta:**` missing) otherwise. On any non-zero exit, **do not proceed** to `lore work regen-tasks` — surface the error, address the gap in `plan.md`, and re-run until it passes.
+Then close the plan through the finalize verb — do NOT hand-run the anchor verifier, regen-tasks, heal, or the directive structure assert; the verb composes them in load-bearing order (backlink verify → intent-anchor hard-gate → regen-tasks → heal → emission-contract assert over every `retrieval_directive`'s `seeds`/`scale_set`), stamps one `spec-verb` execution-log atom, and emits the adoption-telemetry row as its last write:
 
 ```bash
-lore work regen-tasks <slug>
+lore spec finalize <slug>
 ```
 
-Run `lore work heal`.
+Show the verb's output. The anchor gate enforces structural anchor preservation and scope-delta attestation, not semantic non-drift — semantic alignment between the anchor and the rest of the plan remains a spec-author responsibility, with downstream reviewers (e.g., `/codex-plan-review`) as the semantic backstop. A no-anchor work item reports the gate as `skipped` with the verifier's reason (absence is legible, not silent).
 
-**Emission contract round-trip (mandatory):** after regen-tasks, validate emitted artifacts against their live consumers, never from memory: (1) every `retrieval_directive` in tasks.json carries non-empty `seeds` AND non-empty `scale_set` (jq assert; a bare/empty directive → fix the plan block or apply the omission rule, then regen); (2) any script invocation block the plan instructs agents to run must match the live script's current flags (check `--help` or source — script schemas drift faster than plans); (3) Tier-2 emission instructions point at the validator's canonical required-field set rather than enumerating fields inline.
+**Refusal handling:**
+- **Exit 3 (intent-anchor gate) or an emission-contract assert failure:** surface the named diagnostic (verifier code 2 = section missing, 3 = body diverges, 4 = `**Scope delta:**` missing; contract failures name the failing phase), fix `plan.md`, and re-run `lore spec finalize <slug>` until it passes.
+- **Exit 2 (ambiguous reference):** re-run with the exact slug.
+- **Exit 1 (validation, precondition, or composed-script failure):** fix the named diagnostic before re-running.
+
+A refused finalize emits no telemetry row and no `spec-verb` atom; re-running after a fix appends a fresh point-event row per run — expected, not duplication.
 <!-- Sunset: remove if evidence-gap retro-evolution rows targeting skills/spec/SKILL.md citing consumer-contract drift recur from ≥3 new distinct work items within the next 20 spec cycles. -->
 
 ---

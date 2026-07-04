@@ -114,6 +114,7 @@ Commands:
   scale        Capture-scale helpers (see: lore scale --help)
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
   impl         /implement bookkeeping verbs (see: lore impl --help)
+  spec         /spec bookkeeping verbs (see: lore spec --help)
   retro        Federated retro pooling (see: lore retro --help)
   correction   Verdict-driven correction management (see: lore correction --help)
   off-scale    Off-scale route management (see: lore off-scale --help)
@@ -463,6 +464,22 @@ Options:
 EOF
 }
 
+spec_usage() {
+  cat >&2 <<EOF
+lore spec — /spec bookkeeping verbs
+
+Usage: lore spec <verb> [args...]
+
+Verbs:
+  finalize    Run the terminal gate sequence (backlink verify, intent-anchor
+              gate, regen-tasks, heal, emission-contract asserts) and emit
+              one adoption-telemetry scorecard row
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
 settlement_usage() {
   cat >&2 <<EOF
 lore settlement — durable settlement queue and processor
@@ -670,6 +687,33 @@ cmd_impl() {
       echo "Error: unknown impl verb '$subcmd'" >&2
       echo "" >&2
       impl_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Spec subgroup (/spec bookkeeping verbs) ---
+cmd_spec() {
+  if [[ $# -eq 0 ]]; then
+    spec_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      spec_usage
+      return 0
+      ;;
+    finalize)
+      "$SCRIPTS_DIR/spec-finalize.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown spec verb '$subcmd'" >&2
+      echo "" >&2
+      spec_usage
       return 1
       ;;
   esac
@@ -1865,6 +1909,10 @@ case "$1" in
   impl)
     shift
     cmd_impl "$@"
+    ;;
+  spec)
+    shift
+    cmd_spec "$@"
     ;;
   retro)
     shift
