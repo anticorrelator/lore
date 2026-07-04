@@ -1,22 +1,21 @@
 // Package settings hosts the schema-driven configurator for ~/.lore/config/settings.json.
 //
 // widgets.go defines the FieldWidget surface the host model dispatches to for
-// each schema-driven field. Per D10 (per-widget commit cadence + boundary
-// contract): widgets emit FieldIntent values describing what the host should
-// do; widgets do NOT call SettingsPatch/SettingsDelete themselves. That keeps
-// the persistence boundary in one place (the host SettingsModel — task 4) and
-// keeps widgets pure-render + draft-buffer state machines.
+// each schema-driven field. Widgets emit FieldIntent values describing what
+// the host should do; widgets do NOT call SettingsPatch/SettingsDelete
+// themselves. That keeps the persistence boundary in one place (the host
+// SettingsModel) and keeps widgets pure-render + local state machines.
 //
-// Two cadences (D10):
-//   - immediate-commit: ToggleRow, EnumSelector, primary-radio, unset gestures
-//     emit IntentCommit / IntentUnset on each user action.
-//   - draft-buffered: TextInput, NumericInput, ListEditor, OpenKeysetKVEditor
-//     keep an in-widget draft; emit IntentCommit on Enter (after validating
-//     ALL configured constraints), IntentReject on Enter with an invalid
-//     draft (draft + focus survive), and IntentDiscard on Esc / Tab /
-//     focus-out (the visible state reverts to the original committed value).
-//     Containers emit IntentNavigate when Esc only backs out of a nesting
-//     level and no leaf draft was reverted.
+// Commit cadence:
+//   - ToggleRow, EnumSelector, primary-radio, unset gestures, and completed
+//     collection operations emit IntentCommit / IntentUnset on each user
+//     action.
+//   - TextInput and NumericInput keep an in-widget draft only while editing;
+//     Enter, valid Blur, and up/down leave gestures commit, while invalid
+//     leave gestures revert the draft and emit IntentReject.
+//   - Esc is the deliberate cancel gesture for the active edit buffer.
+//     Containers emit IntentNavigate when Esc/Enter only backs out of a
+//     nesting level.
 //
 // Per D3 + the lipgloss O(n)-per-frame gotcha, every lipgloss.Style is cached
 // as a struct field at construction; View() never allocates styles.
@@ -47,9 +46,9 @@ const (
 	// IntentCommit means the typed candidate is well-formed and the host
 	// should write it via SettingsPatch.
 	IntentCommit IntentStatus = iota
-	// IntentDiscard means the user cancelled (Esc) or focus moved away
-	// (Tab / focus-out). The host writes nothing; the widget has already
-	// reverted its draft to the original committed value.
+	// IntentDiscard means the user deliberately cancelled the active edit
+	// buffer. The host writes nothing; the widget has already restored its
+	// visible state as needed.
 	IntentDiscard
 	// IntentNavigate means a container consumed a navigation gesture such as
 	// Esc backing out of one nesting level. The host writes nothing, and no
@@ -97,7 +96,7 @@ type FieldWidget interface {
 	Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent)
 	View() string
 	Focus() tea.Cmd
-	Blur() *FieldIntent // returns IntentDiscard for draft-buffered widgets that had a pending draft; nil for immediate-commit widgets
+	Blur() *FieldIntent // may return commit/reject for scalar dirty drafts; nil when leaving needs no host action
 	Focused() bool
 	DotPath() string
 }
@@ -420,7 +419,7 @@ func renderDescription(styles widgetStyles, description string, indent, wrap int
 }
 
 // ----------------------------------------------------------------------------
-// EnumSelector — closed-set picker. Immediate-commit (D10).
+// EnumSelector — closed-set picker. Immediate-commit.
 // ----------------------------------------------------------------------------
 
 // EnumSelector renders a horizontal list of enum candidates with h/l or arrow
@@ -500,8 +499,8 @@ func (e *EnumSelector) SetDisplayHints(label, description string) {
 // Called by the model on SetSize so descriptions track terminal resizes.
 func (e *EnumSelector) SetWrapWidth(w int) { e.wrapWidth = w }
 
-// Blur on EnumSelector is a no-op for state — selection is committed on Enter,
-// not on focus-out. Returning nil signals "no intent to emit."
+// Blur on EnumSelector is a no-op for state — selection commits immediately
+// as the cursor moves. Returning nil signals "no intent to emit."
 func (e *EnumSelector) Blur() *FieldIntent { e.focused = false; return nil }
 
 func (e *EnumSelector) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
@@ -517,15 +516,30 @@ func (e *EnumSelector) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) 
 		if e.cursor > 0 {
 			e.cursor--
 		}
+		// Commit only when the selection actually changes: a boundary press
+		// (cursor pinned at the end) or re-selecting the committed option
+		// must not re-emit IntentCommit — a no-op commit would spam the
+		// save flash and, worse, re-arm the single-slot undo with a no-op,
+		// clobbering the user's real undo target.
+		if e.cursor >= 0 && e.cursor < len(e.values) && e.current != e.cursor {
+			e.current = e.cursor
+			return e, nil, &FieldIntent{DotPath: e.dotPath, Value: e.values[e.cursor], Status: IntentCommit}
+		}
 	case "right", "l":
 		if e.cursor < len(e.values)-1 {
 			e.cursor++
 		}
+		if e.cursor >= 0 && e.cursor < len(e.values) && e.current != e.cursor {
+			e.current = e.cursor
+			return e, nil, &FieldIntent{DotPath: e.dotPath, Value: e.values[e.cursor], Status: IntentCommit}
+		}
 	case "enter", "space":
 		// Commit selection. Closed-set rejection is structurally impossible
 		// here (cursor is bounded by len(e.values)) — but we still emit the
-		// validated typed value, not a free-form string, per D6.
-		if e.cursor < 0 || e.cursor >= len(e.values) {
+		// validated typed value, not a free-form string, per D6. Same
+		// changed-only guard as h/l: re-pressing Enter/Space on the already
+		// committed option is a no-op, not a re-commit.
+		if e.cursor < 0 || e.cursor >= len(e.values) || e.current == e.cursor {
 			return e, nil, nil
 		}
 		e.current = e.cursor
@@ -620,7 +634,7 @@ func (e *EnumSelector) renderOptions() string {
 }
 
 // ----------------------------------------------------------------------------
-// ToggleRow — boolean toggle. Immediate-commit (D10).
+// ToggleRow — boolean toggle. Immediate-commit.
 // ----------------------------------------------------------------------------
 
 // ToggleRow renders a `[ ]`/`[x]` checkbox-style boolean. Space/Enter toggles
@@ -722,17 +736,18 @@ func (t *ToggleRow) View() string {
 }
 
 // ----------------------------------------------------------------------------
-// TextInput — string field with pattern + minLength. Draft-buffered (D10).
+// TextInput — string field with pattern + minLength.
 // ----------------------------------------------------------------------------
 
-// TextInput keeps an in-widget draft buffer. Focus means the row is selected
-// for navigation; Enter/i/e enters edit mode. In edit mode, Enter validates
-// against pattern/minLength and commits, while Esc/focus-out discards. This
-// split keeps j/k navigation from getting trapped on string fields.
+// TextInput keeps an in-widget draft buffer while editing. Focus means the row
+// is selected for navigation; Enter/i/e enters edit mode. In edit mode, Enter
+// commits, valid leave gestures commit, invalid leave gestures revert with a
+// rejection, and Esc cancels. This split keeps j/k navigation from getting
+// trapped on string fields.
 type TextInput struct {
 	dotPath    string
 	label      string
-	committed  string // last accepted value; the source of truth on discard
+	committed  string // last accepted value; the source of truth on cancel/revert
 	draft      string // mutable buffer
 	pattern    *regexp.Regexp
 	minLength  int
@@ -777,28 +792,41 @@ func (t *TextInput) SetDisplayHints(_, description string) {
 // SetWrapWidth re-flows the description text to the host-supplied width.
 func (t *TextInput) SetWrapWidth(w int) { t.wrapWidth = w }
 
-// Blur emits IntentDiscard when the draft diverged from committed (per D10:
-// tab/focus = discard, never commit). The widget reverts visible state to
-// committed before returning so re-focusing later shows committed, not stale
-// draft.
 func (t *TextInput) Blur() *FieldIntent {
 	t.focused = false
 	t.editing = false
+	return t.commitOrRevertOnLeave()
+}
+
+func (t *TextInput) commitOrRevertOnLeave() *FieldIntent {
 	if t.draft == t.committed {
 		return nil
 	}
+	invalid := t.draft
+	if errs := t.validate(t.draft); len(errs) > 0 {
+		t.draft = t.committed
+		t.errors = prefixIntentErrors("reverted: ", errs)
+		return &FieldIntent{
+			DotPath: t.dotPath,
+			Value:   invalid,
+			Status:  IntentReject,
+			Errors:  append([]string(nil), t.errors...),
+		}
+	}
+	t.committed = t.draft
+	t.present = true
 	t.draft = t.committed
 	t.errors = nil
 	return &FieldIntent{
 		DotPath: t.dotPath,
 		Value:   t.committed,
-		Status:  IntentDiscard,
+		Status:  IntentCommit,
 	}
 }
 
 // validateText runs all configured string constraints and returns one error
-// per failure in declaration order. Used at commit time only (D10: validate
-// at commit, not per-keystroke).
+// per failure in declaration order. Used at commit/leave time only, not
+// per-keystroke.
 func (t *TextInput) validate(s string) []string {
 	var errs []string
 	if t.minLength > 0 && len(s) < t.minLength {
@@ -855,6 +883,9 @@ func (t *TextInput) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 			Value:   t.draft,
 			Status:  IntentCommit,
 		}
+	case "up", "down":
+		t.editing = false
+		return t, nil, t.commitOrRevertOnLeave()
 	case "esc":
 		if t.draft == t.committed && t.errors == nil {
 			t.editing = false
@@ -942,11 +973,11 @@ func (t *TextInput) View() string {
 }
 
 // ----------------------------------------------------------------------------
-// NumericInput — int/float field with min/max. Draft-buffered (D10).
+// NumericInput — int/float field with min/max.
 // ----------------------------------------------------------------------------
 
 // NumericInput accepts a numeric draft and validates against minimum/maximum
-// at commit time (D10). IsInteger=true rejects non-integral commits via Atoi
+// at commit/leave time. IsInteger=true rejects non-integral commits via Atoi
 // (typed candidate is int); false uses ParseFloat (typed candidate is float64).
 type NumericInput struct {
 	dotPath    string
@@ -1004,15 +1035,33 @@ func (n *NumericInput) SetWrapWidth(w int) { n.wrapWidth = w }
 func (n *NumericInput) Blur() *FieldIntent {
 	n.focused = false
 	n.editing = false
+	return n.commitOrRevertOnLeave()
+}
+
+func (n *NumericInput) commitOrRevertOnLeave() *FieldIntent {
 	if n.draft == n.committed {
 		return nil
 	}
+	invalid := n.draft
+	typed, errs := n.validate(n.draft)
+	if len(errs) > 0 {
+		n.draft = n.committed
+		n.errors = prefixIntentErrors("reverted: ", errs)
+		return &FieldIntent{
+			DotPath: n.dotPath,
+			Value:   invalid,
+			Status:  IntentReject,
+			Errors:  append([]string(nil), n.errors...),
+		}
+	}
+	n.committed = n.draft
+	n.present = true
 	n.draft = n.committed
 	n.errors = nil
 	return &FieldIntent{
 		DotPath: n.dotPath,
-		Value:   n.committed,
-		Status:  IntentDiscard,
+		Value:   typed,
+		Status:  IntentCommit,
 	}
 }
 
@@ -1099,6 +1148,9 @@ func (n *NumericInput) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) 
 			Value:   typed,
 			Status:  IntentCommit,
 		}
+	case "up", "down":
+		n.editing = false
+		return n, nil, n.commitOrRevertOnLeave()
 	case "esc":
 		if n.draft == n.committed && n.errors == nil {
 			n.editing = false
@@ -1189,20 +1241,18 @@ func (n *NumericInput) View() string {
 
 // ----------------------------------------------------------------------------
 // ListEditor — array-of-strings field with minItems + uniqueItems.
-// Draft-buffered (D10).
 // ----------------------------------------------------------------------------
 
-// ListEditor manages a draft `[]string` and validates against minItems and
-// uniqueItems at commit time. Item-level constraints (e.g. an item-pattern for
-// advisor_ids) are checked as well: per-item pattern violations surface as
-// individual errors so the user can see which item is wrong.
+// ListEditor validates the full []string collection after every completed
+// operation. Item-level constraints (e.g. an item-pattern for advisor_ids) are
+// checked as well: per-item pattern violations surface as individual errors so
+// the user can see which item is wrong.
 //
 // Editing surface:
 //   - j/k to move the row cursor
-//   - 'a' opens an inline append buffer; Enter appends to draft; Esc cancels
-//   - 'd' deletes the row at cursor
-//   - Enter (when no append buffer is active) commits the entire draft
-//   - Esc discards the draft and restores committed
+//   - 'a' opens an inline append buffer; Enter validates and commits the full list; Esc cancels
+//   - 'd' deletes the row at cursor and commits the full list
+//   - Enter/Esc (when no append buffer is active) exit the entered editor level
 type ListEditor struct {
 	dotPath     string
 	label       string
@@ -1271,18 +1321,11 @@ func (l *ListEditor) SetWrapWidth(w int) { l.wrapWidth = w }
 func (l *ListEditor) Blur() *FieldIntent {
 	l.focused = false
 	l.editing = false
-	if stringSliceEqual(l.draft, l.committed) && !l.appending {
-		return nil
-	}
-	l.draft = append([]string(nil), l.committed...)
 	l.appending = false
 	l.appendBuf = ""
 	l.errors = nil
-	return &FieldIntent{
-		DotPath: l.dotPath,
-		Value:   append([]string(nil), l.committed...),
-		Status:  IntentDiscard,
-	}
+	l.draft = append([]string(nil), l.committed...)
+	return nil
 }
 
 func (l *ListEditor) validate(items []string) []string {
@@ -1321,7 +1364,7 @@ func (l *ListEditor) validate(items []string) []string {
 	return errs
 }
 
-func (l *ListEditor) toggleSelectedOption(value string) {
+func (l *ListEditor) toggledOptions(value string) []string {
 	selected := !stringSliceContains(l.draft, value)
 	current := make(map[string]bool, len(l.draft)+1)
 	for _, it := range l.draft {
@@ -1338,7 +1381,28 @@ func (l *ListEditor) toggleSelectedOption(value string) {
 			next = append(next, it)
 		}
 	}
-	l.draft = next
+	return next
+}
+
+func (l *ListEditor) commitCandidate(items []string) *FieldIntent {
+	if errs := l.validate(items); len(errs) > 0 {
+		l.errors = errs
+		return &FieldIntent{
+			DotPath: l.dotPath,
+			Value:   append([]string(nil), items...),
+			Status:  IntentReject,
+			Errors:  errs,
+		}
+	}
+	l.errors = nil
+	l.draft = append([]string(nil), items...)
+	l.committed = append([]string(nil), items...)
+	l.present = true
+	return &FieldIntent{
+		DotPath: l.dotPath,
+		Value:   append([]string(nil), items...),
+		Status:  IntentCommit,
+	}
 }
 
 func (l *ListEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
@@ -1357,9 +1421,14 @@ func (l *ListEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 				l.appending = false
 				return l, nil, nil
 			}
-			l.draft = append(l.draft, l.appendBuf)
+			next := append(append([]string(nil), l.draft...), l.appendBuf)
+			intent := l.commitCandidate(next)
+			if intent.Status == IntentReject {
+				return l, nil, intent
+			}
 			l.appendBuf = ""
 			l.appending = false
+			return l, nil, intent
 		case "esc":
 			// Esc cancels the in-progress append. Return IntentDiscard so the
 			// model recognizes esc was consumed and keeps the modal open.
@@ -1426,44 +1495,31 @@ func (l *ListEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 			return l, nil, nil
 		}
 		if l.cursor >= 0 && l.cursor < len(l.draft) {
-			l.draft = append(l.draft[:l.cursor], l.draft[l.cursor+1:]...)
+			oldCursor := l.cursor
+			next := append([]string(nil), l.draft[:l.cursor]...)
+			next = append(next, l.draft[l.cursor+1:]...)
+			intent := l.commitCandidate(next)
+			if intent.Status == IntentReject {
+				l.cursor = oldCursor
+				return l, nil, intent
+			}
 			if l.cursor >= len(l.draft) && l.cursor > 0 {
 				l.cursor--
 			}
+			return l, nil, intent
 		}
 	case "space", "x":
 		if l.selector && l.cursor >= 0 && l.cursor < len(l.allowed) {
-			l.toggleSelectedOption(l.allowed[l.cursor])
+			return l, nil, l.commitCandidate(l.toggledOptions(l.allowed[l.cursor]))
 		}
 	case "enter":
-		errs := l.validate(l.draft)
-		if len(errs) > 0 {
-			l.errors = errs
-			return l, nil, &FieldIntent{
-				DotPath: l.dotPath,
-				Value:   append([]string(nil), l.draft...),
-				Status:  IntentReject,
-				Errors:  errs,
-			}
-		}
-		l.errors = nil
-		l.committed = append([]string(nil), l.draft...)
-		l.present = true
 		l.editing = false
-		return l, nil, &FieldIntent{
-			DotPath: l.dotPath,
-			Value:   append([]string(nil), l.draft...),
-			Status:  IntentCommit,
-		}
+		l.errors = nil
+		return l, nil, &FieldIntent{DotPath: l.dotPath, Status: IntentNavigate}
 	case "esc":
 		l.editing = false
-		l.draft = append([]string(nil), l.committed...)
 		l.errors = nil
-		return l, nil, &FieldIntent{
-			DotPath: l.dotPath,
-			Value:   append([]string(nil), l.committed...),
-			Status:  IntentDiscard,
-		}
+		return l, nil, &FieldIntent{DotPath: l.dotPath, Status: IntentNavigate}
 	case "u":
 		if !l.allowUnset || !l.present {
 			return l, nil, nil
@@ -1479,15 +1535,11 @@ func (l *ListEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
 
 func (l *ListEditor) View() string {
 	var b strings.Builder
-	indicator := " "
-	if !stringSliceEqual(l.draft, l.committed) {
-		indicator = l.styles.pending.Render("*")
-	}
 	countLabel := "items"
 	if l.selector {
 		countLabel = "selected"
 	}
-	header := fmt.Sprintf("%s %s: (%d %s)", indicator, l.styles.label.Render(l.label), len(l.draft), countLabel)
+	header := fmt.Sprintf("%s: (%d %s)", l.styles.label.Render(l.label), len(l.draft), countLabel)
 	if !l.present && l.allowUnset {
 		header += " " + l.styles.dim.Render("(inherited)")
 	}
@@ -1534,10 +1586,10 @@ func (l *ListEditor) View() string {
 		cursor := "_"
 		b.WriteString(fmt.Sprintf("    %s%s\n", l.styles.pending.Render("+ "), l.appendBuf+cursor))
 	} else if l.focused && l.editing && l.selector {
-		b.WriteString(l.styles.dim.Render("    [Space toggle  Enter commit  Esc discard]"))
+		b.WriteString(l.styles.dim.Render("    [Space toggle  Enter done  Esc done]"))
 		b.WriteByte('\n')
 	} else if l.focused && l.editing {
-		b.WriteString(l.styles.dim.Render("    [a add  d delete  Enter commit  Esc discard]"))
+		b.WriteString(l.styles.dim.Render("    [a add  d delete  Enter done  Esc done]"))
 		b.WriteByte('\n')
 	}
 	if len(l.errors) > 0 {
@@ -1609,12 +1661,30 @@ func (a *ActiveHoursRangesEditor) SetWrapWidth(w int) { a.wrapWidth = w }
 func (a *ActiveHoursRangesEditor) Blur() *FieldIntent {
 	a.focused = false
 	a.editing = false
-	if activeHoursRangesEqual(a.draft, a.committed) {
-		return nil
-	}
 	a.draft = cloneActiveHoursRanges(a.committed)
 	a.errors = nil
-	return &FieldIntent{DotPath: a.dotPath, Value: activeHoursRangesValue(a.committed), Status: IntentDiscard}
+	return nil
+}
+
+func (a *ActiveHoursRangesEditor) commitCandidate(ranges []ActiveHoursRange) *FieldIntent {
+	if errs := a.validate(ranges); len(errs) > 0 {
+		a.errors = errs
+		return &FieldIntent{
+			DotPath: a.dotPath,
+			Value:   activeHoursRangesValue(ranges),
+			Status:  IntentReject,
+			Errors:  errs,
+		}
+	}
+	a.errors = nil
+	a.draft = cloneActiveHoursRanges(ranges)
+	a.committed = cloneActiveHoursRanges(ranges)
+	a.present = true
+	return &FieldIntent{
+		DotPath: a.dotPath,
+		Value:   activeHoursRangesValue(ranges),
+		Status:  IntentCommit,
+	}
 }
 
 func (a *ActiveHoursRangesEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
@@ -1629,9 +1699,15 @@ func (a *ActiveHoursRangesEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *Fi
 		switch key.String() {
 		case "enter", "i", "e":
 			if len(a.draft) == 0 {
-				a.draft = []ActiveHoursRange{defaultActiveHoursRange()}
+				candidate := []ActiveHoursRange{defaultActiveHoursRange()}
+				intent := a.commitCandidate(candidate)
+				if intent.Status == IntentReject {
+					return a, nil, intent
+				}
 				a.cursor = 0
 				a.field = 0
+				a.editing = true
+				return a, nil, intent
 			}
 			a.editing = true
 			a.errors = nil
@@ -1653,45 +1729,54 @@ func (a *ActiveHoursRangesEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *Fi
 			a.field++
 		}
 	case "a":
-		a.draft = append(a.draft, defaultActiveHoursRange())
-		a.cursor = len(a.draft) - 1
+		candidate := cloneActiveHoursRanges(a.draft)
+		candidate = append(candidate, defaultActiveHoursRange())
+		intent := a.commitCandidate(candidate)
+		if intent.Status == IntentReject {
+			return a, nil, intent
+		}
+		a.cursor = len(candidate) - 1
 		a.field = 0
+		return a, nil, intent
 	case "d":
 		if len(a.draft) > 0 && a.cursor >= 0 && a.cursor < len(a.draft) {
-			a.draft = append(a.draft[:a.cursor], a.draft[a.cursor+1:]...)
-			if a.cursor >= len(a.draft) {
-				a.cursor = len(a.draft) - 1
+			candidate := append([]ActiveHoursRange(nil), a.draft[:a.cursor]...)
+			candidate = append(candidate, a.draft[a.cursor+1:]...)
+			candidate = cloneActiveHoursRanges(candidate)
+			intent := a.commitCandidate(candidate)
+			if intent.Status == IntentReject {
+				return a, nil, intent
+			}
+			if a.cursor >= len(candidate) {
+				a.cursor = len(candidate) - 1
 			}
 			if a.cursor < 0 {
 				a.cursor = 0
-			}
-			if len(a.draft) == 0 {
 				a.field = 0
 			}
+			return a, nil, intent
 		}
 	case "+", "=":
-		a.adjustTime(+30)
-	case "-":
-		a.adjustTime(-30)
-	case "enter":
-		errs := a.validate()
-		if len(errs) > 0 {
-			a.errors = errs
-			return a, nil, &FieldIntent{DotPath: a.dotPath, Value: activeHoursRangesValue(a.draft), Status: IntentReject, Errors: errs}
+		if candidate, ok := a.adjustedTime(+30); ok {
+			return a, nil, a.commitCandidate(candidate)
 		}
-		a.errors = nil
-		a.committed = cloneActiveHoursRanges(a.draft)
-		a.present = true
+	case "-":
+		if candidate, ok := a.adjustedTime(-30); ok {
+			return a, nil, a.commitCandidate(candidate)
+		}
+	case "enter":
 		a.editing = false
-		return a, nil, &FieldIntent{DotPath: a.dotPath, Value: activeHoursRangesValue(a.draft), Status: IntentCommit}
+		a.errors = nil
+		return a, nil, &FieldIntent{DotPath: a.dotPath, Status: IntentNavigate}
 	case "esc":
 		a.editing = false
-		a.draft = cloneActiveHoursRanges(a.committed)
 		a.errors = nil
-		return a, nil, &FieldIntent{DotPath: a.dotPath, Value: activeHoursRangesValue(a.committed), Status: IntentDiscard}
+		return a, nil, &FieldIntent{DotPath: a.dotPath, Status: IntentNavigate}
 	default:
 		if len(key.String()) == 1 && key.String()[0] >= '1' && key.String()[0] <= '7' {
-			a.toggleDay(int(key.String()[0] - '1'))
+			if candidate, ok := a.toggledDay(int(key.String()[0] - '1')); ok {
+				return a, nil, a.commitCandidate(candidate)
+			}
 		}
 	}
 	return a, nil, nil
@@ -1713,36 +1798,36 @@ func (a *ActiveHoursRangesEditor) stepEditField(delta int) {
 	a.field = next % 3
 }
 
-func (a *ActiveHoursRangesEditor) adjustTime(delta int) {
+func (a *ActiveHoursRangesEditor) adjustedTime(delta int) ([]ActiveHoursRange, bool) {
 	if a.cursor < 0 || a.cursor >= len(a.draft) || a.field == 0 {
-		return
+		return nil, false
 	}
-	r := &a.draft[a.cursor]
+	next := cloneActiveHoursRanges(a.draft)
+	r := &next[a.cursor]
 	if a.field == 1 {
 		r.Start = formatMinutes(parseHHMM(r.Start) + delta)
 	} else {
 		r.End = formatMinutes(parseHHMM(r.End) + delta)
 	}
+	return next, true
 }
 
-func (a *ActiveHoursRangesEditor) toggleDay(dayIdx int) {
+func (a *ActiveHoursRangesEditor) toggledDay(dayIdx int) ([]ActiveHoursRange, bool) {
 	if a.cursor < 0 || a.cursor >= len(a.draft) || dayIdx < 0 || dayIdx >= len(activeHourDayIDs) {
-		return
+		return nil, false
 	}
 	day := activeHourDayIDs[dayIdx]
-	r := &a.draft[a.cursor]
+	next := cloneActiveHoursRanges(a.draft)
+	r := &next[a.cursor]
 	if stringSliceContains(r.Days, day) {
-		if len(r.Days) == 1 {
-			return
-		}
-		next := r.Days[:0]
+		days := r.Days[:0]
 		for _, d := range r.Days {
 			if d != day {
-				next = append(next, d)
+				days = append(days, d)
 			}
 		}
-		r.Days = append([]string(nil), next...)
-		return
+		r.Days = append([]string(nil), days...)
+		return next, true
 	}
 	for _, d := range activeHourDayIDs {
 		if d == day || stringSliceContains(r.Days, d) {
@@ -1752,11 +1837,12 @@ func (a *ActiveHoursRangesEditor) toggleDay(dayIdx int) {
 		}
 	}
 	r.Days = normalizeDays(r.Days)
+	return next, true
 }
 
-func (a *ActiveHoursRangesEditor) validate() []string {
+func (a *ActiveHoursRangesEditor) validate(ranges []ActiveHoursRange) []string {
 	var errs []string
-	for i, r := range a.draft {
+	for i, r := range ranges {
 		if len(normalizeDays(r.Days)) == 0 {
 			errs = append(errs, fmt.Sprintf("range %d must include at least one day", i+1))
 		}
@@ -1769,11 +1855,7 @@ func (a *ActiveHoursRangesEditor) validate() []string {
 
 func (a *ActiveHoursRangesEditor) View() string {
 	var b strings.Builder
-	indicator := " "
-	if !activeHoursRangesEqual(a.draft, a.committed) {
-		indicator = a.styles.pending.Render("*")
-	}
-	header := fmt.Sprintf("%s %s: (%d ranges)", indicator, a.styles.label.Render(a.label), len(a.draft))
+	header := fmt.Sprintf("%s: (%d ranges)", a.styles.label.Render(a.label), len(a.draft))
 	if !a.present {
 		header += " " + a.styles.dim.Render("(default)")
 	}
@@ -1799,7 +1881,7 @@ func (a *ActiveHoursRangesEditor) View() string {
 		b.WriteByte('\n')
 	}
 	if a.focused && a.editing {
-		b.WriteString(a.styles.dim.Render("    [j/k field  h/l field  +/- time  1-7 days  a add  d delete  Enter commit  Esc discard]"))
+		b.WriteString(a.styles.dim.Render("    [j/k field  h/l field  +/- time  1-7 days  a add  d delete  Enter done  Esc done]"))
 		b.WriteByte('\n')
 	}
 	if len(a.errors) > 0 {
@@ -1919,9 +2001,8 @@ func formatMinutes(mins int) string {
 
 // ClosedObjectSubPanel renders a header + a list of named child widgets. It
 // owns navigation between children (Tab/Shift-Tab) but otherwise forwards
-// Update to the focused child. Per D10, Tab is a discard gesture for the
-// currently-focused child's draft buffer; the panel surfaces the resulting
-// IntentDiscard up to the host.
+// Update to the focused child. Tab leaves the currently-focused child and
+// surfaces any resulting commit/reject/discard intent up to the host.
 type ClosedObjectSubPanel struct {
 	containerBase
 
@@ -1982,8 +2063,8 @@ func (p *ClosedObjectSubPanel) Focus() tea.Cmd {
 	return nil
 }
 
-// Blur on the panel blurs the focused child and propagates any IntentDiscard
-// the child wants to emit (per D10's tab/focus = discard).
+// Blur on the panel blurs the focused child and propagates any leave intent
+// the child wants to emit.
 func (p *ClosedObjectSubPanel) Blur() *FieldIntent {
 	return p.containerBase.blur(p.children)
 }
@@ -2174,11 +2255,11 @@ func (p *ClosedObjectSubPanel) ViewBody() string {
 
 // ----------------------------------------------------------------------------
 // OpenKeysetKVEditor — open-keyset map editor (e.g. ceremonies_map).
-// Draft-buffered (D10).
 // ----------------------------------------------------------------------------
 
-// OpenKeysetKVEditor manages a draft open-keyset map for fields whose keyset
-// is open at the schema layer. Add commits the full map (Enter); Esc discards.
+// OpenKeysetKVEditor manages an open-keyset map for fields whose keyset is
+// open at the schema layer. Each completed add/edit/delete validates and
+// commits the full typed map; Enter/Esc at the navigation level exits editing.
 // Per-value parsing delegates to a caller-supplied OpenMapValueParser so the
 // generic editor can still emit schema-shaped values (number maps commit
 // numbers, ceremony maps commit []string, nested object maps commit objects).
@@ -2300,20 +2381,14 @@ func (kv *OpenKeysetKVEditor) SetWrapWidth(w int) { kv.wrapWidth = w }
 func (kv *OpenKeysetKVEditor) Blur() *FieldIntent {
 	kv.focused = false
 	kv.editing = false
-	if kv.mode == kvNavigating && stringMapEqual(kv.draft, kv.committed) {
-		return nil
-	}
-	kv.draft = copyStringMap(kv.committed)
-	kv.keyOrder = sortedKeys(kv.committed)
 	kv.mode = kvNavigating
 	kv.keyBuf = ""
 	kv.valBuf = ""
+	kv.editingKey = ""
 	kv.errors = nil
-	return &FieldIntent{
-		DotPath: kv.dotPath,
-		Value:   copyStringMap(kv.committed),
-		Status:  IntentDiscard,
-	}
+	kv.draft = copyStringMap(kv.committed)
+	kv.keyOrder = sortedKeys(kv.committed)
+	return nil
 }
 
 func (kv *OpenKeysetKVEditor) typedDraft() (map[string]any, []string) {
@@ -2337,6 +2412,27 @@ func (kv *OpenKeysetKVEditor) typedDraft() (map[string]any, []string) {
 		typed[k] = parsed
 	}
 	return typed, errs
+}
+
+func (kv *OpenKeysetKVEditor) commitDraft() *FieldIntent {
+	typed, errs := kv.typedDraft()
+	if len(errs) > 0 {
+		kv.errors = errs
+		return &FieldIntent{
+			DotPath: kv.dotPath,
+			Value:   typed,
+			Status:  IntentReject,
+			Errors:  errs,
+		}
+	}
+	kv.errors = nil
+	kv.committed = copyStringMap(kv.draft)
+	kv.present = true
+	return &FieldIntent{
+		DotPath: kv.dotPath,
+		Value:   typed,
+		Status:  IntentCommit,
+	}
 }
 
 func (kv *OpenKeysetKVEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) {
@@ -2381,14 +2477,23 @@ func (kv *OpenKeysetKVEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldI
 	case kvAddingValue, kvEditingValue:
 		switch key.String() {
 		case "enter":
+			prevDraft := copyStringMap(kv.draft)
+			prevOrder := append([]string(nil), kv.keyOrder...)
 			if _, exists := kv.draft[kv.editingKey]; !exists {
 				kv.keyOrder = append(kv.keyOrder, kv.editingKey)
 			}
 			kv.draft[kv.editingKey] = kv.valBuf
+			intent := kv.commitDraft()
+			if intent.Status == IntentReject {
+				kv.draft = prevDraft
+				kv.keyOrder = prevOrder
+				return kv, nil, intent
+			}
 			kv.editingKey = ""
 			kv.keyBuf = ""
 			kv.valBuf = ""
 			kv.mode = kvNavigating
+			return kv, nil, intent
 		case "esc":
 			// Esc cancels the in-progress value entry (whether adding a new
 			// pair or editing an existing one). Same IntentDiscard return as
@@ -2452,43 +2557,32 @@ func (kv *OpenKeysetKVEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldI
 		}
 	case "d":
 		if kv.cursor >= 0 && kv.cursor < len(kv.keyOrder) {
+			prevDraft := copyStringMap(kv.draft)
+			prevOrder := append([]string(nil), kv.keyOrder...)
+			prevCursor := kv.cursor
 			k := kv.keyOrder[kv.cursor]
 			delete(kv.draft, k)
 			kv.keyOrder = append(kv.keyOrder[:kv.cursor], kv.keyOrder[kv.cursor+1:]...)
+			intent := kv.commitDraft()
+			if intent.Status == IntentReject {
+				kv.draft = prevDraft
+				kv.keyOrder = prevOrder
+				kv.cursor = prevCursor
+				return kv, nil, intent
+			}
 			if kv.cursor >= len(kv.keyOrder) && kv.cursor > 0 {
 				kv.cursor--
 			}
+			return kv, nil, intent
 		}
 	case "enter":
-		typed, errs := kv.typedDraft()
-		if len(errs) > 0 {
-			kv.errors = errs
-			return kv, nil, &FieldIntent{
-				DotPath: kv.dotPath,
-				Value:   copyStringMap(kv.draft),
-				Status:  IntentReject,
-				Errors:  errs,
-			}
-		}
-		kv.errors = nil
-		kv.committed = copyStringMap(kv.draft)
-		kv.present = true
 		kv.editing = false
-		return kv, nil, &FieldIntent{
-			DotPath: kv.dotPath,
-			Value:   typed,
-			Status:  IntentCommit,
-		}
+		kv.errors = nil
+		return kv, nil, &FieldIntent{DotPath: kv.dotPath, Status: IntentNavigate}
 	case "esc":
 		kv.editing = false
-		kv.draft = copyStringMap(kv.committed)
-		kv.keyOrder = sortedKeys(kv.committed)
 		kv.errors = nil
-		return kv, nil, &FieldIntent{
-			DotPath: kv.dotPath,
-			Value:   copyStringMap(kv.committed),
-			Status:  IntentDiscard,
-		}
+		return kv, nil, &FieldIntent{DotPath: kv.dotPath, Status: IntentNavigate}
 	case "u":
 		if !kv.allowUnset || !kv.present {
 			return kv, nil, nil
@@ -2504,11 +2598,7 @@ func (kv *OpenKeysetKVEditor) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldI
 
 func (kv *OpenKeysetKVEditor) View() string {
 	var b strings.Builder
-	indicator := " "
-	if !stringMapEqual(kv.draft, kv.committed) {
-		indicator = kv.styles.pending.Render("*")
-	}
-	header := fmt.Sprintf("%s %s: (%d entries)", indicator, kv.styles.label.Render(kv.label), len(kv.draft))
+	header := fmt.Sprintf("%s: (%d entries)", kv.styles.label.Render(kv.label), len(kv.draft))
 	if !kv.present && kv.allowUnset {
 		header += " " + kv.styles.dim.Render("(inherited)")
 	}
@@ -2526,14 +2616,10 @@ func (kv *OpenKeysetKVEditor) View() string {
 
 // ViewBody renders this KV editor's content without the outer label header,
 // for use inside a section frame whose own header already carries the label.
-// The "(N entries)" + draft-pending indicator are kept inside the body since
-// they describe state, not identity. Per the BodyViewer interface contract.
+// The "(N entries)" summary is kept inside the body since it describes state,
+// not identity. Per the BodyViewer interface contract.
 func (kv *OpenKeysetKVEditor) ViewBody() string {
-	indicator := " "
-	if !stringMapEqual(kv.draft, kv.committed) {
-		indicator = kv.styles.pending.Render("*")
-	}
-	header := fmt.Sprintf("%s (%d entries)", indicator, len(kv.draft))
+	header := fmt.Sprintf("(%d entries)", len(kv.draft))
 	if !kv.present && kv.allowUnset {
 		header += " " + kv.styles.dim.Render("(inherited)")
 	}
@@ -2576,7 +2662,7 @@ func (kv *OpenKeysetKVEditor) viewBodyRows() string {
 		b.WriteString(fmt.Sprintf("    %s%s = %s_\n", kv.styles.pending.Render("~ "), kv.editingKey, kv.valBuf))
 	default:
 		if kv.focused && kv.editing {
-			b.WriteString(kv.styles.dim.Render("    [a add  e edit  d delete  Enter commit  Esc discard]"))
+			b.WriteString(kv.styles.dim.Render("    [a add  e edit  d delete  Enter done  Esc done]"))
 			b.WriteByte('\n')
 		}
 	}
@@ -2645,6 +2731,14 @@ func sortedKeys(m map[string]string) []string {
 		for j := i; j > 0 && out[j-1] > out[j]; j-- {
 			out[j-1], out[j] = out[j], out[j-1]
 		}
+	}
+	return out
+}
+
+func prefixIntentErrors(prefix string, errs []string) []string {
+	out := make([]string, len(errs))
+	for i, err := range errs {
+		out[i] = prefix + err
 	}
 	return out
 }

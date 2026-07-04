@@ -3,7 +3,7 @@
 // ClosedObjectSubPanel, HarnessBlockPanel) embed containerBase and route
 // their navigation gestures through its helpers, so the explicit-enter
 // vocabulary — Enter descends one level, j/k steps within an entered level,
-// Tab/Shift-Tab discards-and-advances, Esc backs out one level — is defined
+// Tab/Shift-Tab leaves-and-advances, Esc backs out one level — is defined
 // once. Containers differ only in how they store children; everything else
 // here operates on a `children []FieldWidget` snapshot.
 package settings
@@ -32,10 +32,10 @@ type NavRuneConsumer interface {
 // `delta` (+1 forward, -1 backward) and returns:
 //
 //   - moved=true when the cursor moved one row internally, with `intent`
-//     carrying any IntentDiscard the just-blurred child wants to surface
-//     (per D10's tab/focus = discard rule). The coordinator routes the
-//     intent and stops — focusIdx (the top-level slot) does NOT change, so
-//     the containing section frame keeps its bright rail.
+//     carrying any leave intent the just-blurred child wants to surface
+//     (commit/reject/discard). The coordinator routes the intent and stops —
+//     focusIdx (the top-level slot) does NOT change, so the containing
+//     section frame keeps its bright rail.
 //   - moved=false when the cursor is at the boundary (first row on -1,
 //     last row on +1). The coordinator then advances focus to the next/prev
 //     top-level slot via focusOffset.
@@ -122,8 +122,8 @@ func (b *containerBase) enter(children []FieldWidget) tea.Cmd {
 	return nil
 }
 
-// blur clears focus state and blurs the cursor child, propagating any
-// IntentDiscard the child wants to surface (per D10's tab/focus = discard).
+// blur clears focus state and blurs the cursor child, propagating any leave
+// intent the child wants to surface.
 func (b *containerBase) blur(children []FieldWidget) *FieldIntent {
 	b.focused = false
 	b.entered = false
@@ -166,9 +166,9 @@ func (b *containerBase) navStep(children []FieldWidget, delta int) (bool, *Field
 	return true, intent
 }
 
-// tabStep is the Tab/Shift-Tab gesture: discard the cursor child's draft
-// (via Blur) and advance the cursor by delta, clamping at the container's
-// ends. Returns the blurred child's intent for the host to route.
+// tabStep is the Tab/Shift-Tab gesture: leave the cursor child via Blur and
+// advance the cursor by delta, clamping at the container's ends. Returns the
+// blurred child's intent for the host to route.
 func (b *containerBase) tabStep(children []FieldWidget, delta int) *FieldIntent {
 	if b.cursor < 0 || b.cursor >= len(children) {
 		return nil
