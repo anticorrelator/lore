@@ -63,7 +63,7 @@ These five calls are yours, made fresh each time, each landing in the ledger as 
 | 1 | micro-dispatch — item exists, no spec cycle | ledger row |
 | 0 | bugfix — fix + commit, no item | the commit |
 
-Over-ceremony is a defect to the same degree under-ceremony is: ceremony that doesn't scale down trains bypass. The rung-0 boundary is checkable — restores already-specified behavior, changes no contract, fits one commit; the moment a fix requires a *decision*, it climbs to rung 1 where the decision gets a trail.
+Over-ceremony is a defect to the same degree under-ceremony is: ceremony that doesn't scale down trains bypass. The rung-0 boundary is checkable — restores already-specified behavior, changes no contract, fits one commit; the moment a fix requires a *decision*, it climbs to rung 1 where the decision gets a trail. Rung selects ceremony, not executor: the never-write-source edge holds at every rung — a rung-0 fix is still dispatched (subagent or passing human), it just needs no item and no ceremony; its record is the commit.
 
 **Granularity and routing — an ordered procedure, never a balance.** Any instruction of the form "balance X and Y" without an ordering is a defect — rewrite it as default + earn-conditions + falsifier. The order:
 
