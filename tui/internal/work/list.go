@@ -190,6 +190,10 @@ func (m *ListModel) refreshRows() {
 		cur = r.ID
 	}
 
+	// Blockedness and ordering are derived fresh from the loaded items on every
+	// rebuild: no session-local state, so the index-reload ListModel discard
+	// needs no carry-over line for either.
+	active := ActiveSlugs(m.allItems)
 	groups := GroupByProject(m.visibleItems())
 	hasLabeledGroup := false
 	for _, g := range groups {
@@ -199,6 +203,7 @@ func (m *ListModel) refreshRows() {
 		}
 	}
 
+	blockedBadges := make(map[string][]string)
 	var rows []collection.Row
 	for _, g := range groups {
 		// The ungrouped tail gets a header only alongside labeled groups; an
@@ -222,13 +227,16 @@ func (m *ListModel) refreshRows() {
 				},
 			})
 		}
-		for _, it := range g.Items {
+		for _, it := range orderGroupItems(g.Items, active) {
+			if blockers := activeBlockers(it, active); len(blockers) > 0 {
+				blockedBadges[it.Slug] = blockers
+			}
 			row := m.itemRow(it)
 			row.Hidden = hasHeader && m.collapsed[g.Project]
 			rows = append(rows, row)
 		}
 	}
-	m.list.SetDecorator(newListDecorator())
+	m.list.SetDecorator(newListDecorator(blockedBadges))
 
 	label := "active"
 	if m.filterMode == FilterArchived {
@@ -345,15 +353,37 @@ func (m ListModel) stackedGlyph(item WorkItem) string {
 }
 
 // newListDecorator builds the work list's single decorator: header rows pass
-// through the engine render untouched, item rows get the stacked-glyph
-// coloring.
-func newListDecorator() collection.RowDecorator {
+// through the engine render untouched, item rows get the stacked-glyph coloring
+// and, for currently-blocked items, a dim "⧗ after: <slug>" continuation line
+// listing their still-active blockers (keyed by row ID / slug). The badge is
+// derived per rebuild, so it lives in the closure rather than on ListModel.
+func newListDecorator(blockedBadges map[string][]string) collection.RowDecorator {
 	return func(row collection.Row, selected bool, lines []string) []string {
 		if row.Header {
 			return lines
 		}
-		return decorateStackedGlyph(row, selected, lines)
+		lines = decorateStackedGlyph(row, selected, lines)
+		if blockers, ok := blockedBadges[row.ID]; ok && len(blockers) > 0 {
+			lines = append(lines, blockedBadgeLine(blockers, lines))
+		}
+		return lines
 	}
+}
+
+// blockedBadgeLine renders the "⧗ after: <slug>[, ...]" continuation line under
+// a blocked item, dim-italic per the tasks.go blocked-by grammar. Width is read
+// from an already-padded sibling line so the plain badge truncates before
+// styling, keeping the emitted line within the panel.
+func blockedBadgeLine(blockers []string, lines []string) string {
+	width := 0
+	if len(lines) > 0 {
+		width = lipgloss.Width(lines[0])
+	}
+	text := "    ⧗ after: " + strings.Join(blockers, ", ")
+	if width > 0 {
+		text = style.Truncate(text, width)
+	}
+	return blockedBadgeStyle.Render(text)
 }
 
 // decorateStackedGlyph colors the stacked title-line glyph on unselected
@@ -573,6 +603,11 @@ var (
 	reviewFlaggedStyle = lipgloss.NewStyle().Foreground(style.ColorModified)
 )
 
+// blockedBadgeStyle renders the work-item "⧗ after:" continuation line, reusing
+// the tasks.go blocked-by grammar (ColorDim = ANSI 8, italic) so a blocked work
+// item and a blocked task read the same. Hoisted per the allocate-once rule.
+var blockedBadgeStyle = lipgloss.NewStyle().Foreground(style.ColorDim).Italic(true)
+
 // prMergedStyle keeps GitHub's merged-purple for the PR badge; the status
 // ramp has no merged role, and StatusDone (dim) would make merged PRs read
 // like the dim "--" placeholder for no PR at all.
@@ -590,7 +625,10 @@ var ungroupedHeaderStyle = lipgloss.NewStyle().Foreground(style.ColorDim).Bold(t
 // readinessLabel returns the readiness label and its status-ramp style for a
 // work item. Archived items use the done style; "needs spec" uses the
 // disabled style (dim italic) so unstarted items read differently from
-// archived ones, which share the same dim foreground.
+// archived ones, which share the same dim foreground. A spec-less item at
+// ceremony depth 1 (a deliberate micro-dispatch, implemented directly) shows
+// "direct" on the active style instead of "needs spec", so a rung-1 item under
+// implementation never reads as unstarted.
 func readinessLabel(item WorkItem) (string, lipgloss.Style) {
 	switch {
 	case item.Status == "archived":
@@ -599,6 +637,8 @@ func readinessLabel(item WorkItem) (string, lipgloss.Style) {
 		return "ready", style.StatusReady
 	case item.HasPlanDoc:
 		return "needs tasks", style.StatusWarn
+	case item.CeremonyDepth == 1:
+		return "direct", style.StatusActive
 	default:
 		return "needs spec", style.StatusDisabled
 	}

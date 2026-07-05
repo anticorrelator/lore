@@ -26,6 +26,7 @@ type WorkItemDetail struct {
 	Tags            []string     `json:"tags"`
 	Project         string       `json:"project"`
 	RelatedWork     []string     `json:"related_work"`
+	BlockedBy       []string     `json:"blocked_by"`
 	Issue           string       `json:"issue"`
 	PR              string       `json:"pr"`
 	Created         string       `json:"created"`
@@ -60,6 +61,7 @@ type workItemMeta struct {
 	Tags        []string     `json:"tags"`
 	Project     string       `json:"project"`
 	RelatedWork []string     `json:"related_work"`
+	BlockedBy   []string     `json:"blocked_by"`
 	Issue       string       `json:"issue"`
 	PR          string       `json:"pr"`
 	Created     string       `json:"created"`
@@ -95,6 +97,7 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 			Branches:    []string{},
 			Tags:        []string{},
 			RelatedWork: []string{},
+			BlockedBy:   []string{},
 			Malformed:   true,
 		}
 
@@ -155,6 +158,9 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 	if meta.RelatedWork == nil {
 		meta.RelatedWork = []string{}
 	}
+	if meta.BlockedBy == nil {
+		meta.BlockedBy = []string{}
+	}
 
 	detail := &WorkItemDetail{
 		Slug:        slug,
@@ -164,6 +170,7 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 		Tags:        meta.Tags,
 		Project:     meta.Project,
 		RelatedWork: meta.RelatedWork,
+		BlockedBy:   meta.BlockedBy,
 		Issue:       meta.Issue,
 		PR:          meta.PR,
 		Created:     meta.Created,

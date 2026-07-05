@@ -187,6 +187,12 @@ func TestReadinessLabelRoutesThroughStatusRamp(t *testing.T) {
 		{"ready", WorkItem{Status: "active", HasTasks: true}, "ready", style.StatusReady},
 		{"needs tasks", WorkItem{Status: "active", HasPlanDoc: true}, "needs tasks", style.StatusWarn},
 		{"needs spec", WorkItem{Status: "active"}, "needs spec", style.StatusDisabled},
+		// A spec-less rung-1 micro-dispatch reads as "direct" (active), not "needs spec".
+		{"direct at ceremony depth 1", WorkItem{Status: "active", CeremonyDepth: 1}, "direct", style.StatusActive},
+		// Deeper ceremony depths keep the unstarted "needs spec" reading.
+		{"needs spec at ceremony depth 2", WorkItem{Status: "active", CeremonyDepth: 2}, "needs spec", style.StatusDisabled},
+		// Depth 1 never overrides a real readiness state.
+		{"ready wins over ceremony depth 1", WorkItem{Status: "active", HasTasks: true, CeremonyDepth: 1}, "ready", style.StatusReady},
 	}
 	for _, c := range cases {
 		label, st := readinessLabel(c.item)
@@ -772,5 +778,74 @@ func TestReviewStackedGlyphColors(t *testing.T) {
 	m = resizeStacked(newTestListModel(items))
 	if want := reviewFlaggedStyle.Render("⚑"); !strings.Contains(m.View(), want) {
 		t.Fatalf("flagged stacked glyph should render in ColorModified, got:\n%s", m.View())
+	}
+}
+
+// A blocked item shows the "⧗ after: <blocker>" continuation badge, and the
+// unblocked blocker leads it — in the wide columnar layout.
+func TestBlockedBadgeColumnar(t *testing.T) {
+	items := []WorkItem{
+		{Slug: "blocked-item", Title: "Blocked", Status: "active", Updated: "2026-01-01",
+			BlockedBy: []string{"blocker-item"}},
+		{Slug: "blocker-item", Title: "Blocker", Status: "active", Updated: "2026-01-02"},
+	}
+	view := stripListANSI(newTestListModel(items).View())
+	if !strings.Contains(view, "⧗ after: blocker-item") {
+		t.Fatalf("expected blocked badge in columnar view, got:\n%s", view)
+	}
+	if idxBlocker, idxBlocked := strings.Index(view, "blocker-item"), strings.Index(view, "blocked-item"); idxBlocker > idxBlocked {
+		t.Errorf("unblocked blocker should render before the blocked item, got:\n%s", view)
+	}
+}
+
+// The same badge renders in the narrow stacked layout.
+func TestBlockedBadgeStacked(t *testing.T) {
+	items := []WorkItem{
+		{Slug: "blocked-item", Title: "Blocked", Status: "active", Updated: "2026-01-01",
+			BlockedBy: []string{"blocker-item"}},
+		{Slug: "blocker-item", Title: "Blocker", Status: "active", Updated: "2026-01-02"},
+	}
+	view := stripListANSI(resizeStacked(newTestListModel(items)).View())
+	if !strings.Contains(view, "⧗ after: blocker-item") {
+		t.Fatalf("expected blocked badge in stacked view, got:\n%s", view)
+	}
+}
+
+// The badge uses the tasks.go blocked-by grammar: dim (ColorDim) italic.
+func TestBlockedBadgeUsesDimItalicStyle(t *testing.T) {
+	items := []WorkItem{
+		{Slug: "blocked-item", Title: "Blocked", Status: "active", Updated: "2026-01-01",
+			BlockedBy: []string{"blocker-item"}},
+		{Slug: "blocker-item", Title: "Blocker", Status: "active", Updated: "2026-01-02"},
+	}
+	view := newTestListModel(items).View()
+	if want := sgrOpen(blockedBadgeStyle); !strings.Contains(view, want) {
+		t.Fatalf("blocked badge should open with the dim-italic SGR sequence, got:\n%s", view)
+	}
+}
+
+// An archived blocker is a satisfied edge: the item is neither badged nor
+// demoted below its recency position.
+func TestBlockedBadgeClearedWhenBlockerArchived(t *testing.T) {
+	items := []WorkItem{
+		{Slug: "was-blocked", Title: "Was Blocked", Status: "active", Updated: "2026-01-02",
+			BlockedBy: []string{"done-item"}},
+		{Slug: "done-item", Title: "Done", Status: "archived", Updated: "2026-01-01"},
+	}
+	view := stripListANSI(newTestListModel(items).View())
+	if strings.Contains(view, "⧗ after:") {
+		t.Fatalf("archived blocker should leave no badge, got:\n%s", view)
+	}
+}
+
+// A dangling blocker slug (never loaded) is inert: no badge, no panic.
+func TestBlockedBadgeDanglingBlockerInert(t *testing.T) {
+	items := []WorkItem{
+		{Slug: "solo", Title: "Solo", Status: "active", Updated: "2026-01-01",
+			BlockedBy: []string{"never-loaded"}},
+	}
+	view := stripListANSI(newTestListModel(items).View())
+	if strings.Contains(view, "⧗ after:") {
+		t.Fatalf("dangling blocker should leave no badge, got:\n%s", view)
 	}
 }

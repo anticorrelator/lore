@@ -426,3 +426,26 @@ func TestMetaTabRendersReviewDwell(t *testing.T) {
 		t.Errorf("ungated item must not show a Review field, got:\n%s", out)
 	}
 }
+
+// The meta tab lists blockers under "Blocked by:" beside "Related:" when the
+// item has blocked_by edges, and omits the line entirely when it has none.
+func TestMetaTabRendersBlockedBy(t *testing.T) {
+	m := NewDetailModel("", "waiter")
+	m.detail = &WorkItemDetail{
+		Slug:      "waiter",
+		Status:    "active",
+		BlockedBy: []string{"upstream-a", "upstream-b"},
+	}
+	out := stripListANSI(m.renderMetaTab(80))
+	if !strings.Contains(out, "Blocked by:") {
+		t.Fatalf("blocked item should show a 'Blocked by:' field, got:\n%s", out)
+	}
+	if !strings.Contains(out, "upstream-a") || !strings.Contains(out, "upstream-b") {
+		t.Errorf("'Blocked by:' line should list every blocker, got:\n%s", out)
+	}
+
+	m.detail.BlockedBy = nil
+	if out := stripListANSI(m.renderMetaTab(80)); strings.Contains(out, "Blocked by:") {
+		t.Errorf("item with no blockers must not show a 'Blocked by:' field, got:\n%s", out)
+	}
+}

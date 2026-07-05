@@ -632,6 +632,10 @@ func (m DetailModel) renderMetaTab(width int) string {
 		field("Related", strings.Join(d.RelatedWork, ", "))
 	}
 
+	if len(d.BlockedBy) > 0 {
+		field("Blocked by", strings.Join(d.BlockedBy, ", "))
+	}
+
 	return b.String()
 }
 

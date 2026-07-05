@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # set-work-meta.sh — Set metadata fields on an existing work item
-# Usage: bash set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--intent-anchor <text>]
+# Usage: bash set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|"">]
 # Updates the specified fields in _meta.json, touches the timestamp, and rebuilds the index.
 #
 # --scope (Phase 2 — work item 02-durable-signal-foundation):
@@ -31,6 +31,11 @@ JSON_MODE=0
 # multiple times. Per closure-acceptance-reconciliation D3, the flag MUST
 # append (not replace) and reject invalid slugs with a non-zero exit.
 RELATED_WORK_SLUGS=()
+# --blocked-by: append-only dependency edges. Same validate-then-append
+# contract as --related-work, plus a write-time cycle check.
+BLOCKED_BY_SLUGS=()
+CEREMONY_DEPTH=""
+HAS_CEREMONY_DEPTH=0
 
 # Valid work-item scope values (Phase 2 capture-scale anchor).
 VALID_SCOPES=(architectural subsystem implementation granular-fix cross-cycle-meta)
@@ -47,7 +52,7 @@ is_valid_scope() {
 
 if [[ $# -lt 1 ]]; then
   echo "[work] Error: Missing required argument: slug" >&2
-  echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--intent-anchor <text>] [--detect-pr] [--json]" >&2
+  echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|\"\">] [--detect-pr] [--json]" >&2
   exit 1
 fi
 
@@ -93,19 +98,28 @@ while [[ $# -gt 0 ]]; do
       RELATED_WORK_SLUGS+=("$2")
       shift 2
       ;;
+    --blocked-by)
+      BLOCKED_BY_SLUGS+=("$2")
+      shift 2
+      ;;
+    --ceremony-depth)
+      CEREMONY_DEPTH="$2"
+      HAS_CEREMONY_DEPTH=1
+      shift 2
+      ;;
     *)
       echo "[work] Error: Unknown flag '$1'" >&2
-      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--intent-anchor <text>] [--related-work <slug>] [--detect-pr] [--json]" >&2
+      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|\"\">] [--detect-pr] [--json]" >&2
       exit 1
       ;;
   esac
 done
 
-if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 && "$HAS_SCOPE" -eq 0 && "$HAS_PROJECT" -eq 0 && "$HAS_INTENT_ANCHOR" -eq 0 && "$DETECT_PR" -eq 0 && ${#RELATED_WORK_SLUGS[@]} -eq 0 ]]; then
+if [[ "$HAS_ISSUE" -eq 0 && "$HAS_PR" -eq 0 && "$HAS_SCOPE" -eq 0 && "$HAS_PROJECT" -eq 0 && "$HAS_INTENT_ANCHOR" -eq 0 && "$DETECT_PR" -eq 0 && ${#RELATED_WORK_SLUGS[@]} -eq 0 && ${#BLOCKED_BY_SLUGS[@]} -eq 0 && "$HAS_CEREMONY_DEPTH" -eq 0 ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
-    json_error "No fields to set. Provide --issue, --pr, --scope, --project, --intent-anchor, --related-work, and/or --detect-pr."
+    json_error "No fields to set. Provide --issue, --pr, --scope, --project, --intent-anchor, --related-work, --blocked-by, --ceremony-depth, and/or --detect-pr."
   fi
-  echo "[work] Error: No fields to set. Provide --issue, --pr, --scope, --project, --intent-anchor, --related-work, and/or --detect-pr." >&2
+  echo "[work] Error: No fields to set. Provide --issue, --pr, --scope, --project, --intent-anchor, --related-work, --blocked-by, --ceremony-depth, and/or --detect-pr." >&2
   exit 1
 fi
 
@@ -115,6 +129,16 @@ if [[ "$HAS_SCOPE" -eq 1 ]] && ! is_valid_scope "$SCOPE"; then
     json_error "Invalid --scope '$SCOPE'. Valid values: ${VALID_SCOPES[*]}"
   fi
   echo "[work] Error: Invalid --scope '$SCOPE'. Valid values: ${VALID_SCOPES[*]}" >&2
+  exit 1
+fi
+
+# Validate --ceremony-depth: an empty value clears the field; otherwise it must
+# be an integer 1-3. Hand-rolled check — no shared lib.sh enum helper exists.
+if [[ "$HAS_CEREMONY_DEPTH" -eq 1 && -n "$CEREMONY_DEPTH" ]] && ! [[ "$CEREMONY_DEPTH" =~ ^[1-3]$ ]]; then
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_error "Invalid --ceremony-depth '$CEREMONY_DEPTH'. Valid values: integer 1-3 (or empty to clear)."
+  fi
+  echo "[work] Error: Invalid --ceremony-depth '$CEREMONY_DEPTH'. Valid values: integer 1-3 (or empty to clear)." >&2
   exit 1
 fi
 
@@ -261,6 +285,25 @@ PYEOF
   CHANGES+=("intent_anchor=$INTENT_ANCHOR")
 fi
 
+if [[ "$HAS_CEREMONY_DEPTH" -eq 1 ]]; then
+  # Scalar set (not append). A non-empty value is stored as an integer; an
+  # empty value removes the field, mirroring --project clear semantics.
+  python3 - "$META_FILE" "$CEREMONY_DEPTH" << 'PYEOF'
+import json, sys
+path, depth = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+if depth:
+    data["ceremony_depth"] = int(depth)
+else:
+    data.pop("ceremony_depth", None)
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+  CHANGES+=("ceremony_depth=${CEREMONY_DEPTH:-\"\"}")
+fi
+
 if [[ ${#RELATED_WORK_SLUGS[@]} -gt 0 ]]; then
   # Per closure-acceptance-reconciliation D3: validate shape and existence
   # before mutating; reject the entire call on any invalid slug. Append-only
@@ -310,6 +353,118 @@ with open(path, "w", encoding="utf-8") as f:
     f.write("\n")
 PYEOF
   CHANGES+=("related_work+=${RELATED_WORK_SLUGS[*]}")
+fi
+
+if [[ ${#BLOCKED_BY_SLUGS[@]} -gt 0 ]]; then
+  # Same validate-then-append contract as --related-work: validate shape and
+  # existence (active or archive) before mutating, reject the whole call on any
+  # invalid slug, append-only and deduplicated. Blocked_by additionally rejects
+  # self-reference and any edge that would close a dependency cycle.
+  BLOCKED_BY_KEBAB_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
+  for blocked_slug in "${BLOCKED_BY_SLUGS[@]}"; do
+    if [[ -z "$blocked_slug" ]]; then
+      if [[ $JSON_MODE -eq 1 ]]; then
+        json_error "--blocked-by value cannot be empty"
+      fi
+      echo "[work] Error: --blocked-by value cannot be empty." >&2
+      exit 1
+    fi
+    if ! [[ "$blocked_slug" =~ $BLOCKED_BY_KEBAB_RE ]]; then
+      if [[ $JSON_MODE -eq 1 ]]; then
+        json_error "--blocked-by '$blocked_slug' is not a valid kebab-case slug"
+      fi
+      echo "[work] Error: --blocked-by '$blocked_slug' is not a valid kebab-case slug." >&2
+      exit 1
+    fi
+    if [[ "$blocked_slug" == "$SLUG" ]]; then
+      if [[ $JSON_MODE -eq 1 ]]; then
+        json_error "a work item cannot be blocked by itself: $SLUG"
+      fi
+      echo "[work] Error: a work item cannot be blocked by itself: $SLUG." >&2
+      exit 1
+    fi
+    if [[ ! -d "$WORK_DIR/$blocked_slug" && ! -d "$WORK_DIR/_archive/$blocked_slug" ]]; then
+      if [[ $JSON_MODE -eq 1 ]]; then
+        json_error "--blocked-by '$blocked_slug' does not refer to an existing work item"
+      fi
+      echo "[work] Error: --blocked-by '$blocked_slug' does not refer to an existing work item (checked $WORK_DIR and $WORK_DIR/_archive)." >&2
+      exit 1
+    fi
+  done
+
+  BLOCKED_BY_JSON=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${BLOCKED_BY_SLUGS[@]}")
+
+  # Write-time cycle check: adding "$SLUG --blocked-by A" closes a loop iff
+  # $SLUG is already reachable from A along blocked_by edges. Walk breadth-first
+  # over _meta.json across the active tree and _archive/ (a cycle may route
+  # through an archived item). On a hit, print the cycle path and reject.
+  CYCLE_PATH=$(python3 - "$WORK_DIR" "$SLUG" "$BLOCKED_BY_JSON" << 'PYEOF'
+import json, os, sys
+from collections import deque
+
+work_dir, slug, new_json = sys.argv[1], sys.argv[2], sys.argv[3]
+new_blockers = json.loads(new_json)
+
+def blocked_by_of(item):
+    for base in (os.path.join(work_dir, item),
+                 os.path.join(work_dir, "_archive", item)):
+        meta = os.path.join(base, "_meta.json")
+        if os.path.isfile(meta):
+            try:
+                with open(meta, encoding="utf-8") as f:
+                    val = json.load(f).get("blocked_by", [])
+            except (json.JSONDecodeError, OSError):
+                return []
+            return val if isinstance(val, list) else []
+    return []
+
+for start in new_blockers:
+    parent = {start: None}
+    queue = deque([start])
+    while queue:
+        cur = queue.popleft()
+        if cur == slug:
+            path = []
+            node = cur
+            while node is not None:
+                path.append(node)
+                node = parent[node]
+            path.reverse()  # start -> ... -> slug (blocked_by edge direction)
+            print(" -> ".join([slug] + path))  # slug -> start -> ... -> slug
+            sys.exit(0)
+        for nxt in blocked_by_of(cur):
+            if nxt not in parent:
+                parent[nxt] = cur
+                queue.append(nxt)
+sys.exit(0)
+PYEOF
+)
+  if [[ -n "$CYCLE_PATH" ]]; then
+    if [[ $JSON_MODE -eq 1 ]]; then
+      json_error "--blocked-by would create a dependency cycle: $CYCLE_PATH"
+    fi
+    echo "[work] Error: --blocked-by would create a dependency cycle: $CYCLE_PATH" >&2
+    exit 1
+  fi
+
+  python3 - "$META_FILE" "$BLOCKED_BY_JSON" << 'PYEOF'
+import json, sys
+path, new_json = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+existing = data.get("blocked_by", []) or []
+new_slugs = json.loads(new_json)
+seen = set(existing)
+for slug in new_slugs:
+    if slug not in seen:
+        existing.append(slug)
+        seen.add(slug)
+data["blocked_by"] = existing
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+  CHANGES+=("blocked_by+=${BLOCKED_BY_SLUGS[*]}")
 fi
 
 # --- Check if any changes were actually made ---

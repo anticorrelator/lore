@@ -30,7 +30,9 @@ type WorkItem struct {
 	Updated         string       `json:"updated"`
 	Issue           string       `json:"issue"`
 	PR              string       `json:"pr"`
-	Review          *ReviewState `json:"review"` // nil = ungated
+	Review          *ReviewState `json:"review"`     // nil = ungated
+	BlockedBy       []string     `json:"blocked_by"` // slugs this item waits on; nil when unset
+	CeremonyDepth   int          `json:"ceremony_depth"`
 	HasPlanDoc      bool         `json:"has_plan_doc"`
 	HasExecutionLog bool         `json:"has_execution_log"`
 	HasTasks        bool         `json:"-"` // inferred from tasks.json presence
@@ -71,6 +73,113 @@ func GroupByProject(items []WorkItem) []ProjectGroup {
 		groups = append(groups, ProjectGroup{Project: "", Items: tail})
 	}
 	return groups
+}
+
+// ActiveSlugs returns the set of loaded slugs whose item is still active
+// (status != "archived"). It is the liveness test a blocker edge is measured
+// against: a blocker counts only while its target is active; an archived or
+// absent blocker is inert, so completion releases a blocked item with no edge
+// bookkeeping.
+func ActiveSlugs(items []WorkItem) map[string]bool {
+	active := make(map[string]bool, len(items))
+	for _, it := range items {
+		if it.Status != "archived" {
+			active[it.Slug] = true
+		}
+	}
+	return active
+}
+
+// activeBlockers returns the item's blocker slugs that are still active among
+// the given set — the slugs the "⧗ after:" badge lists, in BlockedBy order. An
+// empty result means the item is currently unblocked (every blocker archived,
+// dangling, or none declared).
+func activeBlockers(item WorkItem, active map[string]bool) []string {
+	var out []string
+	for _, slug := range item.BlockedBy {
+		if active[slug] {
+			out = append(out, slug)
+		}
+	}
+	return out
+}
+
+// orderGroupItems reorders one project group's items unblocked-first with a
+// cycle-tolerant topo-ish bump: items with no active blocker keep their input
+// (recency) order ahead of every blocked item, and within the blocked stratum
+// each item is bumped after any blocker that shares the group, recency breaking
+// ties. Blockedness is measured against active; blockers outside the group or
+// already satisfied never move an item. A blocker cycle degrades to input order
+// for the items it entangles rather than looping. Pure: the input slice is not
+// mutated.
+func orderGroupItems(items []WorkItem, active map[string]bool) []WorkItem {
+	if len(items) < 2 {
+		return items
+	}
+
+	// Stable unblocked-first partition, input (recency) order within each stratum.
+	seq := make([]WorkItem, 0, len(items))
+	var blocked []WorkItem
+	for _, it := range items {
+		if len(activeBlockers(it, active)) == 0 {
+			seq = append(seq, it)
+		} else {
+			blocked = append(blocked, it)
+		}
+	}
+	seq = append(seq, blocked...)
+
+	member := make(map[string]bool, len(seq))
+	for _, it := range seq {
+		member[it.Slug] = true
+	}
+	// deps[slug] is the item's in-group active blockers — the only edges that
+	// bump order; cross-group and self edges are excluded so they cannot loop.
+	deps := make(map[string][]string, len(seq))
+	for _, it := range seq {
+		var ig []string
+		for _, b := range activeBlockers(it, active) {
+			if member[b] && b != it.Slug {
+				ig = append(ig, b)
+			}
+		}
+		deps[it.Slug] = ig
+	}
+
+	placed := make(map[string]bool, len(seq))
+	out := make([]WorkItem, 0, len(seq))
+	for len(out) < len(seq) {
+		progressed := false
+		for _, it := range seq {
+			if placed[it.Slug] {
+				continue
+			}
+			ready := true
+			for _, b := range deps[it.Slug] {
+				if !placed[b] {
+					ready = false
+					break
+				}
+			}
+			if !ready {
+				continue
+			}
+			out = append(out, it)
+			placed[it.Slug] = true
+			progressed = true
+		}
+		if !progressed {
+			// A cycle leaves entangled items unplaced; flush them in seq order.
+			for _, it := range seq {
+				if !placed[it.Slug] {
+					out = append(out, it)
+					placed[it.Slug] = true
+				}
+			}
+			break
+		}
+	}
+	return out
 }
 
 // ProjectLabels returns the sorted set of distinct non-empty project labels

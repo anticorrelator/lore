@@ -117,6 +117,8 @@ result = {
     'created': meta.get('created', ''),
     'updated': meta.get('updated', ''),
     'related_work': meta.get('related_work', []),
+    'blocked_by': meta.get('blocked_by', []),
+    'ceremony_depth': meta.get('ceremony_depth'),
     'review': meta.get('review'),
     'plan_content': read_file(plan_path),
     'notes_content': read_file(notes_path),
@@ -171,10 +173,24 @@ if isinstance(review, dict) and review.get("mechanism") in ("flag", "hold"):
     print(" ".join(parts))
 ' "$META" || true)
 
-# Extract branches, tags, and related_work as comma-separated display strings
+# Extract branches, tags, related_work, and blocked_by as comma-separated
+# display strings.
 BRANCHES=$(json_array_field "branches" "$META" | sed 's/"//g; s/,/, /g')
 TAGS=$(json_array_field "tags" "$META" | sed 's/"//g; s/,/, /g')
 RELATED_WORK=$(json_array_field "related_work" "$META" | sed 's/"//g; s/,/, /g')
+BLOCKED_BY=$(json_array_field "blocked_by" "$META" | sed 's/"//g; s/,/, /g')
+
+# ceremony_depth is numeric (unquoted), so json_field can't read it.
+CEREMONY_DEPTH=$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        v = json.load(f).get("ceremony_depth")
+except Exception:
+    v = None
+if v is not None:
+    print(v)
+' "$META" || true)
 
 # --- Output structured metadata ---
 if [[ "$ARCHIVED" == true ]]; then
@@ -194,10 +210,16 @@ echo "Tags: ${TAGS:-none}"
 if [[ -n "$RELATED_WORK" ]]; then
   echo "Related: $RELATED_WORK"
 fi
+if [[ -n "$BLOCKED_BY" ]]; then
+  echo "Blocked by: $BLOCKED_BY"
+fi
 echo "Issue: ${ISSUE:-none}"
 echo "PR: ${PR:-none}"
 if [[ -n "$INTENT_ANCHOR" ]]; then
   echo "Intent anchor: $INTENT_ANCHOR"
+fi
+if [[ -n "$CEREMONY_DEPTH" ]]; then
+  echo "Ceremony depth: $CEREMONY_DEPTH"
 fi
 if [[ -n "$REVIEW_LINE" ]]; then
   echo "Review: $REVIEW_LINE"

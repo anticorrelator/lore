@@ -58,6 +58,16 @@ def list_field(meta, key, default=None, aliases=None):
         return val
     return [val]
 
+def int_field(meta, key, default=0):
+    """Extract an integer field, coercing strings; default on missing/invalid."""
+    val = meta.get(key, None)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
 def closure_field(meta):
     """Project the standing-state subset of _meta.json.closure the renderers read.
 
@@ -120,6 +130,8 @@ for meta_path in sorted(glob.glob(os.path.join(work_dir, "*", "_meta.json"))):
         "intent_anchor": str_field(meta, "intent_anchor"),
         "project": str_field(meta, "project"),
         "related_work": list_field(meta, "related_work"),
+        "blocked_by": list_field(meta, "blocked_by"),
+        "ceremony_depth": int_field(meta, "ceremony_depth"),
         "closure": closure_field(meta),
         "review": review_field(meta),
         "has_plan_doc": os.path.exists(os.path.join(parent, "plan.md")),

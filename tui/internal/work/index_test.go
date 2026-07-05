@@ -131,3 +131,144 @@ func TestLoadIndexInvalidJSON(t *testing.T) {
 		t.Error("expected error for invalid JSON")
 	}
 }
+
+func slugsOf(items []WorkItem) []string {
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = it.Slug
+	}
+	return out
+}
+
+func eqSlugs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestActiveBlockers(t *testing.T) {
+	// active set: two live items; "gone" is archived, "ghost" is never loaded.
+	active := ActiveSlugs([]WorkItem{
+		{Slug: "live-a", Status: "active"},
+		{Slug: "live-b", Status: "active"},
+		{Slug: "gone", Status: "archived"},
+	})
+	cases := []struct {
+		name string
+		item WorkItem
+		want []string
+	}{
+		{"no edges", WorkItem{Slug: "x"}, nil},
+		{"live blocker", WorkItem{Slug: "x", BlockedBy: []string{"live-a"}}, []string{"live-a"}},
+		{"archived blocker satisfied", WorkItem{Slug: "x", BlockedBy: []string{"gone"}}, nil},
+		{"dangling blocker inert", WorkItem{Slug: "x", BlockedBy: []string{"ghost"}}, nil},
+		{"order preserved, inert dropped", WorkItem{Slug: "x", BlockedBy: []string{"live-b", "gone", "live-a"}}, []string{"live-b", "live-a"}},
+	}
+	for _, c := range cases {
+		if got := activeBlockers(c.item, active); !eqSlugs(got, c.want) {
+			t.Errorf("%s: activeBlockers = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestOrderGroupItems(t *testing.T) {
+	cases := []struct {
+		name    string
+		items   []WorkItem // one project group, in input (recency) order
+		loaded  []WorkItem // full set backing the active-slug liveness test (defaults to items)
+		want    []string   // expected slug order out
+	}{
+		{
+			name: "unblocked lead blocked, input order kept within stratum",
+			items: []WorkItem{
+				{Slug: "b1", Status: "active", BlockedBy: []string{"u1"}},
+				{Slug: "u1", Status: "active"},
+				{Slug: "u2", Status: "active"},
+			},
+			want: []string{"u1", "u2", "b1"},
+		},
+		{
+			name: "topo bump: blocked item follows its in-group blocked blocker",
+			// recency puts the deepest dependent first; topo re-lifts the chain.
+			items: []WorkItem{
+				{Slug: "c", Status: "active", BlockedBy: []string{"b"}},
+				{Slug: "b", Status: "active", BlockedBy: []string{"a"}},
+				{Slug: "a", Status: "active"},
+			},
+			want: []string{"a", "b", "c"},
+		},
+		{
+			name: "independent blocked items keep recency tiebreak",
+			items: []WorkItem{
+				{Slug: "y", Status: "active", BlockedBy: []string{"a"}},
+				{Slug: "x", Status: "active", BlockedBy: []string{"a"}},
+				{Slug: "a", Status: "active"},
+			},
+			want: []string{"a", "y", "x"},
+		},
+		{
+			name: "cross-group blocker demotes but does not topo-bump",
+			items: []WorkItem{
+				{Slug: "p2", Status: "active", Project: "p", BlockedBy: []string{"q1"}},
+				{Slug: "p1", Status: "active", Project: "p"},
+			},
+			loaded: []WorkItem{
+				{Slug: "p2", Status: "active", Project: "p", BlockedBy: []string{"q1"}},
+				{Slug: "p1", Status: "active", Project: "p"},
+				{Slug: "q1", Status: "active", Project: "q"},
+			},
+			want: []string{"p1", "p2"},
+		},
+		{
+			name: "archived blocker clears the demotion",
+			items: []WorkItem{
+				{Slug: "b1", Status: "active", BlockedBy: []string{"done"}},
+				{Slug: "u1", Status: "active"},
+			},
+			loaded: []WorkItem{
+				{Slug: "b1", Status: "active", BlockedBy: []string{"done"}},
+				{Slug: "u1", Status: "active"},
+				{Slug: "done", Status: "archived"},
+			},
+			want: []string{"b1", "u1"}, // both unblocked → input order preserved
+		},
+		{
+			name: "blocker cycle is tolerated, no loss, no loop",
+			items: []WorkItem{
+				{Slug: "a", Status: "active", BlockedBy: []string{"b"}},
+				{Slug: "b", Status: "active", BlockedBy: []string{"a"}},
+			},
+			want: []string{"a", "b"}, // flushed in seq (input) order
+		},
+	}
+	for _, c := range cases {
+		loaded := c.loaded
+		if loaded == nil {
+			loaded = c.items
+		}
+		got := slugsOf(orderGroupItems(c.items, ActiveSlugs(loaded)))
+		if !eqSlugs(got, c.want) {
+			t.Errorf("%s: order = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// The ordering helper must not mutate its input slice (pure per-rebuild derive).
+func TestOrderGroupItemsDoesNotMutateInput(t *testing.T) {
+	items := []WorkItem{
+		{Slug: "c", Status: "active", BlockedBy: []string{"b"}},
+		{Slug: "b", Status: "active", BlockedBy: []string{"a"}},
+		{Slug: "a", Status: "active"},
+	}
+	before := slugsOf(items)
+	_ = orderGroupItems(items, ActiveSlugs(items))
+	if after := slugsOf(items); !eqSlugs(before, after) {
+		t.Errorf("input reordered: before %v, after %v", before, after)
+	}
+}
