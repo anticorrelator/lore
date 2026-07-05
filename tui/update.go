@@ -19,6 +19,7 @@ import (
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/followup"
+	"github.com/anticorrelator/lore/tui/internal/inputmsg"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/search"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
@@ -147,14 +148,20 @@ func (m model) Init() tea.Cmd {
 	if m.state == stateOnboarding || m.state == stateNoRepo {
 		return nil
 	}
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		loadWorkItems(m.config.WorkDir),
 		loadPRStatus(),
 		loadSettlementStatus(),
 		indexPollTick(),
 		followup.LoadIndexCmd(m.config.KnowledgeDir),
 		runDoctor(),
-	)
+	}
+	// Register this instance in the substrate so other instances see it (and the
+	// queue's own-liveness check works) from the first tick.
+	if m.instanceName != "" {
+		cmds = append(cmds, m.writeInstanceCmd())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
@@ -267,29 +274,38 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	}
 
 	// Spec confirm modal: intercept all keys before launching subprocess.
+	// Bracketed paste is text entry for the context textarea — it must be
+	// consumed here (inputmsg contract) or it falls through to panel routing.
 	if m.sessionConfirmActive {
+		if cmd, ok := inputmsg.ForwardPaste(&m.sessionConfirmInput, msg); ok {
+			return m, cmd
+		}
 		if km, ok := msg.(tea.KeyPressMsg); ok {
-			switch km.String() {
-			case "shift+enter", "alt+enter":
+			if inputmsg.IsNewlineChord(km) {
 				m.sessionConfirmInput.InsertRune('\n')
 				return m, nil
+			}
+			switch km.String() {
 			case "enter":
 				extraContext := strings.TrimSpace(m.sessionConfirmInput.Value())
 				m.sessionConfirmActive = false
-				slug := m.sessionConfirmSlug
-				// Mark item as speccing in the list.
-				m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug})
-				// Create spec panel sized to the panel slot it occupies (detailPanelHeight).
-				specH := m.detailPanelHeight()
-				specW := m.rightPanelWidth() - 2 // 1-char buffer on each side
-				panel := work.NewSpecPanelModel(slug)
-				panel, _ = panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
-				m.setSpecPanel(slug, panel)
-				m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-				m.sessionLaunchedFromModal = m.state == stateWork
 				findingIndex := m.sessionConfirmFindingIndex
 				m.sessionConfirmFindingIndex = -1
-				return m, work.StartTerminalCmd(slug, m.sessionConfirmTitle, m.config.ProjectDir, specW, specH, extraContext, m.sessionConfirmShortMode, m.sessionConfirmChatMode, m.sessionConfirmSkipConfirm, m.sessionConfirmFollowupMode, m.config.KnowledgeDir, findingIndex)
+				sessType := "spec"
+				if m.sessionConfirmChatMode {
+					sessType = "chat"
+				}
+				return m.spawnSession(work.SessionDescriptor{
+					Type:         sessType,
+					Slug:         m.sessionConfirmSlug,
+					Title:        m.sessionConfirmTitle,
+					ExtraContext: extraContext,
+					Initiator:    "human",
+					ShortMode:    m.sessionConfirmShortMode,
+					SkipConfirm:  m.sessionConfirmSkipConfirm,
+					FollowupMode: m.sessionConfirmFollowupMode,
+					FindingIndex: findingIndex,
+				}, "")
 			case "esc", "ctrl+c":
 				m.sessionConfirmActive = false
 				return m, nil
@@ -312,13 +328,18 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// Non-key messages fall through.
 	}
 
-	// AI modal: intercept all keys when the input is active.
+	// AI modal: intercept all keys when the input is active. Paste routes to
+	// the textarea first (inputmsg contract).
 	if m.aiInputActive {
+		if cmd, ok := inputmsg.ForwardPaste(&m.aiInput, msg); ok {
+			return m, cmd
+		}
 		if km, ok := msg.(tea.KeyPressMsg); ok {
-			switch km.String() {
-			case "shift+enter", "alt+enter":
+			if inputmsg.IsNewlineChord(km) {
 				m.aiInput.InsertRune('\n')
 				return m, nil
+			}
+			switch km.String() {
 			case "enter":
 				prompt := strings.TrimSpace(m.aiInput.Value())
 				m.aiInputActive = false
@@ -343,8 +364,17 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// Non-key messages (window resize etc.) fall through to normal handling.
 	}
 
-	// Assign-workstream prompt: intercept all keys when active.
+	// Assign-workstream prompt: intercept all keys when active. Paste is
+	// text entry: it routes to the input (inputmsg contract) and, like any
+	// typed character, clears the error line, the label-cycle cursor, and a
+	// pending near-match confirm.
 	if m.assignActive {
+		if cmd, ok := inputmsg.ForwardPaste(&m.assignInput, msg); ok {
+			m.assignErr = ""
+			m.assignLabelIdx = -1
+			m.assignNearMatch = ""
+			return m, cmd
+		}
 		if km, ok := msg.(tea.KeyPressMsg); ok {
 			// Near-match confirm step: the typed label is close to an
 			// existing one — Enter adopts the existing label, n keeps the
@@ -409,9 +439,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// Non-key messages (AssignFinishedMsg, resize) fall through.
 	}
 
-	// Popup overlay: route all key messages to popup when active.
+	// Popup overlay: route all key messages to popup when active. Bracketed
+	// paste rides the same path (inputmsg contract): the popup forwards both
+	// to its textinput, and pasted text must drive the same debounced
+	// subprocess search as typed input.
 	if m.popupActive {
-		if _, ok := msg.(tea.KeyPressMsg); ok {
+		_, isKey := msg.(tea.KeyPressMsg)
+		_, isPaste := msg.(tea.PasteMsg)
+		if isKey || isPaste {
 			var cmd tea.Cmd
 			m.popup, cmd = m.popup.Update(msg)
 
@@ -437,6 +472,18 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			return m, cmd
 		}
 		// Non-key messages (PopupDismissedMsg, PopupSelectedMsg, resize) fall through.
+	}
+
+	// Paste-while-editing guard: the follow-up inline comment textarea gets
+	// its keys via the KeyPressMsg edit-mode guard below, but bracketed
+	// paste is not a key press — route it to the detail model directly so
+	// pasting works even when the left panel holds focus (inputmsg contract).
+	if _, ok := msg.(tea.PasteMsg); ok {
+		if m.state == stateFollowUps && m.followupDetail.IsEditing() {
+			var cmd tea.Cmd
+			m.followupDetail, cmd = m.followupDetail.Update(msg)
+			return m, cmd
+		}
 	}
 
 	switch msg := msg.(type) {
@@ -527,8 +574,23 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case followupIndexMtimeCheckedMsg:
 		return m.handleFollowupIndexMtimeChecked(msg)
 
-	case activeSessionsCheckedMsg:
-		return m.handleActiveSessionsChecked(msg)
+	case sessionSnapshotMsg:
+		return m.handleSessionSnapshot(msg)
+
+	case queueTickResultMsg:
+		return m.handleQueueTickResult(msg)
+
+	case instanceSyncedMsg:
+		if msg.err != nil {
+			m.flashErr = compactErr("session registry", msg.err)
+		}
+		return m, nil
+
+	case journalResultMsg:
+		if msg.err != nil {
+			m.flashErr = compactErr("session journal", msg.err)
+		}
+		return m, nil
 
 	case planMtimeCheckedMsg:
 		return m.handlePlanMtimeChecked(msg)

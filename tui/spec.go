@@ -1,11 +1,30 @@
 package main
 
 import (
+	"time"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/followup"
+	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
+
+// endLocalSession drops a torn-down session from this instance's registry row
+// and returns the Cmds that persist the removal and journal the close. It is a
+// no-op (nil Cmds) for a slug this instance was not tracking.
+func (m model) endLocalSession(slug string) (model, []tea.Cmd) {
+	ls, ok := m.localSessions[slug]
+	if !ok {
+		return m, nil
+	}
+	delete(m.localSessions, slug)
+	delete(m.sessionIdle, slug)
+	return m, []tea.Cmd{
+		m.writeInstanceCmd(),
+		journalCmd(m.eventScript, m.config.KnowledgeDir, m.closedEventFor(slug, ls)),
+	}
+}
 
 func (m model) handleSpecRequest(msg work.SpecRequestMsg) (model, tea.Cmd) {
 	// 's' on list item: if spec already running, jump to terminal focus.
@@ -88,7 +107,39 @@ func (m model) handleSpecProcessStarted(msg work.SpecProcessStartedMsg) (model, 
 	// A fresh session supersedes any detail preference left over from a
 	// previous session on the same item — navigation should auto-show it.
 	m.setPreferDetail(slug, false)
-	work.WriteSession(m.config.WorkDir, slug, "spec") //nolint:errcheck
+
+	// Promote the pending spawn into this instance's live session set and
+	// register it. For a queue-claimed session, delete the claimed row and
+	// journal `spawned` now that the process is up.
+	meta, ok := m.pendingSpawns[slug]
+	if !ok {
+		meta = liveSession{typ: "spec", initiator: "human", started: time.Now()}
+	}
+	delete(m.pendingSpawns, slug)
+	if m.localSessions == nil {
+		m.localSessions = make(map[string]liveSession)
+	}
+	m.localSessions[slug] = meta
+
+	cmds := []tea.Cmd{cmd, m.writeInstanceCmd()}
+	if meta.requestID != "" {
+		cmds = append(cmds, emitSpawnedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, session.Event{
+			Event:         session.EventSpawned,
+			ActorInstance: session.StrPtr(m.instanceName),
+			Slug:          slug,
+			SessionType:   meta.typ,
+			Initiator:     meta.initiator,
+			RequestID:     meta.requestID,
+		}))
+	}
+
+	// Agent-initiated spawns never steal focus — the request row is the recorded
+	// intent, and interrupting the human to surface an agent's session inverts
+	// who the terminal serves.
+	if meta.initiator == "agent" {
+		return m, tea.Batch(cmds...)
+	}
+
 	// Auto-enter terminal focus when session starts for the currently viewed item,
 	// unless the spec was launched from the confirmation modal — in that case,
 	// return focus to the listing view so the user stays oriented.
@@ -97,19 +148,19 @@ func (m model) handleSpecProcessStarted(msg work.SpecProcessStartedMsg) (model, 
 			m.sessionLaunchedFromModal = false
 			m.terminalMode = true
 			m.focusedPanel = panelLeft
-			return m, cmd
+			return m, tea.Batch(cmds...)
 		}
 		m.terminalMode = true
 		m.focusedPanel = panelRight
-		return m, cmd
+		return m, tea.Batch(cmds...)
 	}
 	// Auto-enter terminal focus for follow-up chat sessions.
 	if m.state == stateFollowUps && slug == m.followupDetail.CurrentID() {
 		m.terminalMode = true
 		m.focusedPanel = panelRight
-		return m, cmd
+		return m, tea.Batch(cmds...)
 	}
-	return m, cmd
+	return m, tea.Batch(cmds...)
 }
 
 func (m model) handleTerminalOutput(msg work.TerminalOutputMsg) (model, tea.Cmd) {
@@ -152,9 +203,31 @@ func (m model) handleQuiescenceTick(msg work.QuiescenceTickMsg) (model, tea.Cmd)
 }
 
 func (m model) handleNeedsInputChanged(msg work.NeedsInputChangedMsg) (model, tea.Cmd) {
-	// Spec panel's quiescence state changed — forward to list for indicator update.
+	// Spec panel's quiescence state changed — forward to list for indicator update
+	// and journal the transition. The panel emits this message only on a real
+	// edge; sessionIdle is the emit-site guard so an unchanged state (or an
+	// untracked slug) never re-emits.
 	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: msg.Slug, NeedsInput: msg.NeedsInput})
-	return m, nil
+
+	ls, tracked := m.localSessions[msg.Slug]
+	if !tracked || m.sessionIdle[msg.Slug] == msg.NeedsInput {
+		return m, nil
+	}
+	if m.sessionIdle == nil {
+		m.sessionIdle = make(map[string]bool)
+	}
+	m.sessionIdle[msg.Slug] = msg.NeedsInput
+
+	script, kdir := m.eventScript, m.config.KnowledgeDir
+	if msg.NeedsInput {
+		// The panel's single quiescence signal grounds both substrate events: the
+		// session went idle and is now treated as awaiting input.
+		return m, tea.Batch(
+			journalCmd(script, kdir, m.idleEventFor(msg.Slug, session.EventQuiescent, ls)),
+			journalCmd(script, kdir, m.idleEventFor(msg.Slug, session.EventNeedsInput, ls)),
+		)
+	}
+	return m, journalCmd(script, kdir, m.idleEventFor(msg.Slug, session.EventResumed, ls))
 }
 
 func (m model) handleStreamComplete(msg work.StreamCompleteMsg) (model, tea.Cmd) {
@@ -171,9 +244,7 @@ func (m model) handleStreamComplete(msg work.StreamCompleteMsg) (model, tea.Cmd)
 	// Do NOT force m.terminalMode = false — if we're in terminal mode for
 	// this slug, keep it so the user can scroll through the output history.
 	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
-	if m.state != stateFollowUps {
-		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
-	}
+	m, sessCmds := m.endLocalSession(slug)
 	// Pre-size detail view and invalidate cache so it's ready when the user
 	// exits terminal mode (or immediately if not in terminal mode).
 	if m.list.CurrentSlug() == slug {
@@ -182,7 +253,7 @@ func (m model) handleStreamComplete(msg work.StreamCompleteMsg) (model, tea.Cmd)
 			delete(m.detailCache, slug)
 		}
 	}
-	var cmds []tea.Cmd
+	cmds := append([]tea.Cmd(nil), sessCmds...)
 	if m.state == stateFollowUps {
 		cmds = append(cmds, followup.LoadIndexCmd(m.config.KnowledgeDir))
 	} else {
@@ -215,16 +286,32 @@ func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 		m.terminalMode = false
 	}
 	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
-	if m.state != stateFollowUps {
-		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
-	}
-	var reloadCmd tea.Cmd
-	if m.state == stateFollowUps {
-		reloadCmd = followup.LoadIndexCmd(m.config.KnowledgeDir)
+
+	var cmds []tea.Cmd
+	if meta, pending := m.pendingSpawns[slug]; pending {
+		// The process never started: this is a spawn failure, not a session
+		// close. For a queue-claimed request, return it to pending (attempts++)
+		// and journal spawn_failed; a human spawn just drops.
+		delete(m.pendingSpawns, slug)
+		if meta.requestID != "" {
+			reason := "pty_start_failed"
+			if msg.Err != nil {
+				reason = compactErr("spawn", msg.Err)
+			}
+			cmds = append(cmds, emitSpawnFailedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, meta.requestID, reason, m.instanceName))
+		}
 	} else {
-		reloadCmd = loadWorkItems(m.config.WorkDir)
+		var sessCmds []tea.Cmd
+		m, sessCmds = m.endLocalSession(slug)
+		cmds = append(cmds, sessCmds...)
 	}
-	return m, reloadCmd
+
+	if m.state == stateFollowUps {
+		cmds = append(cmds, followup.LoadIndexCmd(m.config.KnowledgeDir))
+	} else {
+		cmds = append(cmds, loadWorkItems(m.config.WorkDir))
+	}
+	return m, tea.Batch(cmds...)
 }
 
 func (m model) handleTerminalDetach(_ work.TerminalDetachMsg) (model, tea.Cmd) {
@@ -248,14 +335,12 @@ func (m model) handleTerminalTerminate(msg work.TerminalTerminateMsg) (model, te
 
 	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
 	m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-	if m.state != stateFollowUps {
-		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
-	}
-	var reloadCmd tea.Cmd
+	m, sessCmds := m.endLocalSession(slug)
+	cmds := append([]tea.Cmd(nil), sessCmds...)
 	if m.state == stateFollowUps {
-		reloadCmd = followup.LoadIndexCmd(m.config.KnowledgeDir)
+		cmds = append(cmds, followup.LoadIndexCmd(m.config.KnowledgeDir))
 	} else {
-		reloadCmd = loadWorkItems(m.config.WorkDir)
+		cmds = append(cmds, loadWorkItems(m.config.WorkDir))
 	}
-	return m, reloadCmd
+	return m, tea.Batch(cmds...)
 }

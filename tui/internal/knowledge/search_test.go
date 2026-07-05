@@ -91,3 +91,15 @@ func TestSearchStylesRouteThroughPaletteRoles(t *testing.T) {
 		t.Errorf("search selection background = %v, want style.ColorSelectionBg", got)
 	}
 }
+
+// TestSearchPasteReachesInput locks the inputmsg contract (see
+// internal/inputmsg): bracketed paste must land in the search textinput.
+// The knowledge browser routes all non-key messages to the search panel
+// while search is active — this guards that path end to end.
+func TestSearchPasteReachesInput(t *testing.T) {
+	m := NewSearchModel()
+	m, _ = m.Update(tea.PasteMsg{Content: "retrieval protocol"})
+	if got := m.input.Value(); got != "retrieval protocol" {
+		t.Errorf("input = %q, want pasted text", got)
+	}
+}

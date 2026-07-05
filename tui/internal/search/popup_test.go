@@ -68,3 +68,21 @@ func TestPopupTypedCharactersFilter(t *testing.T) {
 		t.Errorf("filter should narrow to the beta item, got %v", m.filtered)
 	}
 }
+
+// TestPopupPasteReachesInput locks the inputmsg contract (see
+// internal/inputmsg): bracketed paste is text entry for the popup's
+// textinput and must drive the same filtering as typed characters.
+func TestPopupPasteReachesInput(t *testing.T) {
+	m := New([]PopupItem{
+		{ID: "a", Label: "alpha item"},
+		{ID: "b", Label: "beta item"},
+	}, "Search")
+
+	m, _ = m.Update(tea.PasteMsg{Content: "beta"})
+	if got := m.InputValue(); got != "beta" {
+		t.Errorf("InputValue = %q, want pasted text", got)
+	}
+	if len(m.filtered) != 1 || m.filtered[0].ID != "b" {
+		t.Errorf("paste should re-filter items, filtered = %+v", m.filtered)
+	}
+}

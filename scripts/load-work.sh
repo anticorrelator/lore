@@ -205,6 +205,61 @@ stale = '\\n'.join(stale_work_lines)
 print(f\"STALE_WORK='{sq(stale)}'\")
 " "$WORK_DIR" "$INDEX" "$PROJECT_RECORD_STATUSES")"
 
+# Pending session requests (D7): surface cold-start coordination requests waiting
+# in _sessions/requests/pending/ so a request enqueued while no TUI is alive is
+# visible to the next session. Rows are written tmp+atomic-rename, so a reader
+# never sees a torn row; a genuinely malformed row is excluded-with-warning to
+# stderr and skipped. Capped to protect the ~2000-char budget.
+SESSION_REQUESTS=""
+PENDING_DIR="$KNOWLEDGE_DIR/_sessions/requests/pending"
+if [[ -d "$PENDING_DIR" ]]; then
+  SESSION_REQUESTS=$(python3 - "$PENDING_DIR" <<'PYEOF' || true
+import json, os, sys, time
+from datetime import datetime
+
+pending_dir = sys.argv[1]
+now = time.time()
+
+def rel_age(iso_str):
+    if not iso_str:
+        return 'unknown age'
+    try:
+        dt = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
+        days = int((now - dt.timestamp()) / 86400)
+        if days <= 0:
+            return 'today'
+        if days == 1:
+            return 'yesterday'
+        return f'{days}d ago'
+    except (ValueError, OSError):
+        return 'unknown age'
+
+lines = []
+for name in sorted(os.listdir(pending_dir)):
+    if not name.endswith('.json'):
+        continue
+    path = os.path.join(pending_dir, name)
+    try:
+        with open(path) as f:
+            row = json.load(f)
+    except (OSError, ValueError) as exc:
+        print(f'[session] warning: {name} corrupt — {exc}; excluded', file=sys.stderr)
+        continue
+    typ = row.get('type') or '?'
+    slug = row.get('slug') or '(no slug)'
+    target = row.get('target_instance') or 'any'
+    age = rel_age(row.get('requested_at', ''))
+    lines.append(f'[session-request] {typ} {slug} → {target} ({age})')
+
+CAP = 8
+if len(lines) > CAP:
+    overflow = len(lines) - CAP
+    lines = lines[:CAP] + [f'[session-request] +{overflow} more pending']
+print('\n'.join(lines))
+PYEOF
+)
+fi
+
 # Build output (budget: ~2000 chars)
 draw_separator "Active Work"
 echo ""
@@ -215,6 +270,10 @@ echo "$ACTIVE_WORK"
 
 if [[ -n "$STALE_WORK" ]]; then
   echo "$STALE_WORK"
+fi
+
+if [[ -n "$SESSION_REQUESTS" ]]; then
+  echo "$SESSION_REQUESTS"
 fi
 
 # Check for orphaned ephemeral plan files. The path is harness-specific —

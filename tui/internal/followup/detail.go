@@ -517,6 +517,19 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		}
 		return m, fetchCmd
 
+	case tea.PasteMsg:
+		// Bracketed paste is text entry for the inline comment editor; with
+		// no textarea active there is nothing to paste into (inputmsg
+		// contract — see internal/inputmsg).
+		if m.reviewCards != nil && m.reviewCards.IsEditing() {
+			rc := *m.reviewCards
+			var cmd tea.Cmd
+			rc, cmd = rc.Update(msg)
+			m.reviewCards = &rc
+			return m, cmd
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "tab", "shift+tab":

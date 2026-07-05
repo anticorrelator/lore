@@ -14,6 +14,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/search"
+	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/settings"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/style"
@@ -203,6 +204,23 @@ type model struct {
 	sessionConfirmFollowupMode bool
 	sessionConfirmFindingIndex int
 	sessionLaunchedFromModal   bool
+
+	// Session substrate (_sessions/): this instance's identity, the substrate
+	// root, and the journal appender path. localSessions is the authoritative
+	// set of sessions this instance owns (written into its registry row);
+	// pendingSpawns holds a session's metadata between claim/confirm and the
+	// SpecProcessStarted that promotes it into localSessions.
+	instanceName       string
+	sessionsDir        string
+	eventScript        string
+	instanceStartedISO string
+	localSessions      map[string]liveSession
+	pendingSpawns      map[string]liveSession
+	// sessionIdle records, per local session slug, whether we have already
+	// journaled it as idle (quiescent/needs_input). It is the transition-edge
+	// guard for the needs_input/quiescent/resumed events: emit only when the
+	// incoming needs-input state differs from what we last journaled.
+	sessionIdle map[string]bool
 
 	showHelp bool
 	// helpViewport scrolls the help modal's keybinding list when it exceeds
@@ -465,7 +483,11 @@ func (m *model) setSpecPanel(slug string, panel work.SpecPanelModel) {
 }
 
 // cleanupAllSubprocesses cancels any running AI command, cleans up all spec
-// panels, and clears session locks. Call before quitting.
+// panels, journals each local session's close, and removes this instance's
+// registry file. Call before quitting. Journal and registry teardown are
+// best-effort and synchronous here — the program is about to exit, so any Cmd
+// returned alongside tea.Quit would not run; a missed close is recovered by the
+// registry's mtime TTL rather than left as queue debt.
 func (m *model) cleanupAllSubprocesses() {
 	if m.aiCancel != nil {
 		m.aiCancel()
@@ -473,7 +495,12 @@ func (m *model) cleanupAllSubprocesses() {
 	}
 	for slug, panel := range m.specPanels {
 		m.specPanels[slug] = panel.Cleanup()
-		work.ClearSession(m.config.WorkDir, slug) //nolint:errcheck
+	}
+	for slug, ls := range m.localSessions {
+		_ = session.AppendEvent(m.eventScript, m.config.KnowledgeDir, m.closedEventFor(slug, ls))
+	}
+	if m.instanceName != "" && m.sessionsDir != "" {
+		_ = session.RemoveInstance(m.sessionsDir, m.instanceName)
 	}
 }
 

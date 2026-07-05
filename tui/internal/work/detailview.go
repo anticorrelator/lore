@@ -80,9 +80,14 @@ type DetailLoadedMsg struct {
 // BackToListMsg is sent when the user exits the detail view.
 type BackToListMsg struct{}
 
-// DetailExternalSessionMsg tells the detail view whether an external session is active.
+// DetailExternalSessionMsg tells the detail view whether an external session is
+// active on the displayed slug, and — when it is — which instance owns it, its
+// type, and whether an agent or a human initiated it.
 type DetailExternalSessionMsg struct {
-	Active bool
+	Active    bool
+	Instance  string
+	Type      string // spec|implement|chat
+	Initiator string // agent|human
 }
 
 // DetailPlanRefreshedMsg carries freshly-read plan.md content for an in-place
@@ -114,6 +119,11 @@ type DetailModel struct {
 	contentStartX int
 
 	externalSession bool // true when another TUI instance has an active session on this slug
+	// externalInstance/externalInitiator/externalType describe that session for
+	// the banner; meaningful only when externalSession is true.
+	externalInstance  string
+	externalInitiator string
+	externalType      string
 
 	digestTab      DigestTabModel
 	planTab        PlanTabModel
@@ -166,6 +176,9 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 
 	case DetailExternalSessionMsg:
 		m.externalSession = msg.Active
+		m.externalInstance = msg.Instance
+		m.externalInitiator = msg.Initiator
+		m.externalType = msg.Type
 		// The banner line shifts the tab bar down one row; keep the host's
 		// mouse hit-test anchored on the bar.
 		if msg.Active {
@@ -301,6 +314,25 @@ func (m DetailModel) tabBarY() int {
 		return m.contentStartY + 2
 	}
 	return m.contentStartY + 1
+}
+
+// externalBanner renders the one-line notice shown above the tab bar when
+// another instance owns a session on this slug. It names the instance and, for
+// agent-initiated sessions, marks them amber so an agent's activity reads
+// differently from another human's.
+func (m DetailModel) externalBanner() string {
+	where := "another window"
+	if m.externalInstance != "" {
+		where = m.externalInstance
+	}
+	if m.externalInitiator == "agent" {
+		label := "agent session"
+		if m.externalType != "" {
+			label = "agent " + m.externalType + " session"
+		}
+		return needsInputStyle.Render(fmt.Sprintf("  ◈ %s in %s", label, where))
+	}
+	return style.Dim.Render(fmt.Sprintf("  ◆ active session in %s", where))
 }
 
 // activeExtraIndex resolves the active "file:" tab to its index in
@@ -452,8 +484,7 @@ func (m DetailModel) View() string {
 	var b strings.Builder
 
 	if m.externalSession {
-		banner := style.Dim.Render("  ◆ active session in another window")
-		b.WriteString(banner)
+		b.WriteString(m.externalBanner())
 		b.WriteString("\n")
 	}
 

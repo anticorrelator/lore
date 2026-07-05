@@ -73,7 +73,7 @@ func TestCompactExternalSessionShowsDiamond(t *testing.T) {
 		{Slug: "ext-item", Title: "External", Status: "active", Updated: "2026-01-01"},
 	}
 	m := resizeStacked(newTestListModel(items))
-	m, _ = m.Update(ExternalSessionMsg{Slugs: map[string]bool{"ext-item": true}})
+	m, _ = m.Update(ExternalSessionMsg{Sessions: map[string]ExternalSession{"ext-item": {Instance: "other"}}})
 
 	view := m.View()
 	if !strings.Contains(view, "◆") {
@@ -140,7 +140,7 @@ func TestFullExternalSessionShowsDiamondActive(t *testing.T) {
 		{Slug: "ext-item", Title: "External", Status: "active", Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m, _ = m.Update(ExternalSessionMsg{Slugs: map[string]bool{"ext-item": true}})
+	m, _ = m.Update(ExternalSessionMsg{Sessions: map[string]ExternalSession{"ext-item": {Instance: "other"}}})
 
 	view := m.View()
 	if !strings.Contains(view, "◆ active") {
@@ -280,7 +280,7 @@ func TestStatusIndicatorPriorityLocalOverExternal(t *testing.T) {
 			m = resizeStacked(m)
 		}
 		m, _ = m.Update(SpecStatusMsg{Slug: "both", NeedsInput: false})
-		m, _ = m.Update(ExternalSessionMsg{Slugs: map[string]bool{"both": true}})
+		m, _ = m.Update(ExternalSessionMsg{Sessions: map[string]ExternalSession{"both": {Instance: "other"}}})
 
 		view := stripListANSI(m.View())
 		if !strings.Contains(view, "speccing") {
@@ -298,7 +298,7 @@ func TestStatusIndicatorPriorityExternalOverReadiness(t *testing.T) {
 		{Slug: "ext", Title: "External", Status: "active", HasTasks: true, Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m, _ = m.Update(ExternalSessionMsg{Slugs: map[string]bool{"ext": true}})
+	m, _ = m.Update(ExternalSessionMsg{Sessions: map[string]ExternalSession{"ext": {Instance: "other"}}})
 
 	view := stripListANSI(m.View())
 	if !strings.Contains(view, "◆ active") {
@@ -586,7 +586,7 @@ func TestListModelCursorSurvivesRefreshOnUngroupedHeader(t *testing.T) {
 	for range 4 {
 		m, _ = m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	}
-	m, _ = m.Update(ExternalSessionMsg{Slugs: map[string]bool{"beta-1": true}})
+	m, _ = m.Update(ExternalSessionMsg{Sessions: map[string]ExternalSession{"beta-1": {Instance: "other"}}})
 	if r, ok := m.list.CurrentRow(); !ok || r.ID != headerIDPrefix {
 		t.Fatalf("cursor should stay on the ungrouped header across refreshRows, got %+v", r)
 	}

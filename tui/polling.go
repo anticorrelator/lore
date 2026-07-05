@@ -175,11 +175,12 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 			cmds = append(cmds, checkFollowupDetailMtime(m.config.KnowledgeDir, id))
 		}
 	}
-	// Touch session files for locally active slugs and discover external sessions.
-	for slug := range m.specPanels {
-		work.TouchSession(m.config.WorkDir, slug) //nolint:errcheck
+	// Session substrate: heartbeat our registry file, refresh the external-
+	// session snapshot for badging, and run one reclaim/claim queue pass. Guarded
+	// on a resolved instance identity (present only inside a real repo).
+	if m.instanceName != "" {
+		cmds = append(cmds, m.syncInstanceCmd(), readInstancesCmd(m.sessionsDir), m.queueTickCmd())
 	}
-	cmds = append(cmds, listActiveSessions(m.config.WorkDir))
 	return m, tea.Batch(cmds...)
 }
 
@@ -214,24 +215,6 @@ func (m model) handleFollowupIndexMtimeChecked(msg followupIndexMtimeCheckedMsg)
 		m.lastFollowupIndexMtime = msg.mtime
 		return m, followup.LoadIndexCmd(m.config.KnowledgeDir)
 	}
-	return m, nil
-}
-
-// handleActiveSessionsChecked filters out locally owned sessions and updates
-// the list and detail views with external session state.
-func (m model) handleActiveSessionsChecked(msg activeSessionsCheckedMsg) (model, tea.Cmd) {
-	// Filter out locally owned sessions — only external ones matter for the indicator.
-	external := make(map[string]bool)
-	myPID := os.Getpid()
-	for slug, info := range msg.sessions {
-		if info.PID != myPID {
-			external[slug] = true
-		}
-	}
-	m.list, _ = m.list.Update(work.ExternalSessionMsg{Slugs: external})
-	// Tell the detail view whether the currently displayed slug has an external session.
-	currentSlug := m.list.CurrentSlug()
-	m.detail, _ = m.detail.Update(work.DetailExternalSessionMsg{Active: external[currentSlug]})
 	return m, nil
 }
 

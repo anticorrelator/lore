@@ -130,18 +130,6 @@ type settlementActionCompleteMsg struct {
 	output    string
 }
 
-// activeSessionsCheckedMsg carries all non-stale sessions discovered on disk.
-type activeSessionsCheckedMsg struct {
-	sessions map[string]work.SessionInfo
-}
-
-// listActiveSessions returns a Cmd that reads all session lock files and sends activeSessionsCheckedMsg.
-func listActiveSessions(workDir string) tea.Cmd {
-	return func() tea.Msg {
-		return activeSessionsCheckedMsg{sessions: work.ListActiveSessions(workDir)}
-	}
-}
-
 func loadWorkItems(workDir string) tea.Cmd {
 	return func() tea.Msg {
 		items, err := work.LoadIndex(workDir)

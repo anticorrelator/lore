@@ -17,6 +17,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/gh"
+	"github.com/anticorrelator/lore/tui/internal/inputmsg"
 	"github.com/anticorrelator/lore/tui/internal/render"
 )
 
@@ -297,13 +298,29 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 		}
 		return m, WriteSidecarCmd(m.knowledgeDir, m.followupID, m.review)
 
+	case tea.PasteMsg:
+		// Bracketed paste routes to the inline textarea while editing; the
+		// textarea consumes PasteMsg natively, multi-line content included
+		// (inputmsg contract — see internal/inputmsg).
+		if m.editing {
+			var cmd tea.Cmd
+			m.editInput, cmd = m.editInput.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
 		// Clear any transient flash message on every keypress.
 		m.flashMsg = ""
 
-		// Edit-mode routing: when inline textarea is active, intercept Enter/Esc/Alt+Enter;
-		// all other keys are forwarded to editInput so the textarea handles them.
+		// Edit-mode routing: when inline textarea is active, intercept
+		// Enter/Esc and the newline chord (Shift+Enter / Alt+Enter); all
+		// other keys are forwarded to editInput so the textarea handles them.
 		if m.editing {
+			if inputmsg.IsNewlineChord(msg) {
+				m.editInput.InsertRune('\n')
+				return m, nil
+			}
 			switch msg.String() {
 			case "enter":
 				// Save: sync textarea value back to the model.
@@ -322,10 +339,6 @@ func (m ReviewCardsModel) Update(msg tea.Msg) (ReviewCardsModel, tea.Cmd) {
 			case "esc":
 				// Cancel: discard changes.
 				m.editing = false
-				return m, nil
-			case "alt+enter":
-				// Insert a literal newline into the textarea.
-				m.editInput.InsertRune('\n')
 				return m, nil
 			default:
 				var cmd tea.Cmd
@@ -542,7 +555,7 @@ func (m ReviewCardsModel) View() string {
 			label += dimStyle.Render(" (stale)")
 		}
 		if editingGeneral {
-			label = generalLabelStyle.Render("General Comment") + dimStyle.Render(" [editing — Enter to save, Esc to cancel]")
+			label = generalLabelStyle.Render("General Comment") + dimStyle.Render(" [editing — Enter to save, Shift+Enter newline, Esc to cancel]")
 		}
 		line1 := fmt.Sprintf("  %s %s", check, label)
 
@@ -747,7 +760,7 @@ func (m ReviewCardsModel) View() string {
 			if focused {
 				headerLine := line1
 				if editingThis {
-					headerLine = line1 + dimStyle.Render(" [editing — Enter to save, Esc to cancel]")
+					headerLine = line1 + dimStyle.Render(" [editing — Enter to save, Shift+Enter newline, Esc to cancel]")
 				}
 				card.WriteString(selectedBg.Render(headerLine))
 				card.WriteByte('\n')

@@ -2212,3 +2212,41 @@ func TestDetailModelAppliesMergeStatusWhenCurrent(t *testing.T) {
 		t.Error("mergeStatusLoading should be false after receiving loaded message")
 	}
 }
+
+// --- inputmsg contract: bracketed paste routing (see internal/inputmsg) ---
+
+func TestDetailModelRoutesPasteToEditingReviewCards(t *testing.T) {
+	rc := NewReviewCardsModel("", "", testReview())
+	rc.width, rc.height = 80, 40
+	rc, _ = enterEditOnComment(rc)
+	rc.editInput.SetValue("")
+
+	m := NewDetailModel("")
+	m.reviewCards = &rc
+
+	m, _ = m.Update(tea.PasteMsg{Content: "pasted body"})
+	if got := m.reviewCards.editInput.Value(); got != "pasted body" {
+		t.Errorf("paste should reach the inline textarea, got %q", got)
+	}
+}
+
+func TestDetailModelIgnoresPasteWhenNotEditing(t *testing.T) {
+	m := NewDetailModel("")
+
+	// nil reviewCards: paste must be a safe no-op.
+	m, cmd := m.Update(tea.PasteMsg{Content: "stray"})
+	if cmd != nil {
+		t.Error("paste with no editor should not emit a cmd")
+	}
+
+	// reviewCards present but not editing: still a no-op.
+	rc := NewReviewCardsModel("", "", testReview())
+	m.reviewCards = &rc
+	m, cmd = m.Update(tea.PasteMsg{Content: "stray"})
+	if cmd != nil {
+		t.Error("paste with editor closed should not emit a cmd")
+	}
+	if m.reviewCards.IsEditing() {
+		t.Error("paste must not open the editor")
+	}
+}

@@ -3370,7 +3370,7 @@ func TestTabIndicatorAdvertisesSectionKeys(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := stripANSI(renderTabIndicator(tc.state, 1, 2, 3, 80))
+			out := stripANSI(renderTabIndicator(tc.state, 1, 2, 3, 80, ""))
 			for _, want := range tc.want {
 				if !strings.Contains(out, want) {
 					t.Errorf("tab indicator missing %q:\n%s", want, out)

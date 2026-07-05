@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -36,7 +37,7 @@ func TestParityDumpWorkList(t *testing.T) {
 		loadWorkItems(cfg.WorkDir),
 		followup.LoadIndexCmd(cfg.KnowledgeDir),
 		loadSettlementStatus(),
-		listActiveSessions(cfg.WorkDir),
+		readInstancesCmd(filepath.Join(cfg.KnowledgeDir, "_sessions")),
 	} {
 		m, _ = updateModel(t, m, cmd())
 	}

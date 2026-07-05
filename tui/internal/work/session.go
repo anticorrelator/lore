@@ -1,108 +1,52 @@
 package work
 
 import (
-	"encoding/json"
-	"errors"
-	"os"
-	"path/filepath"
-	"time"
+	tea "charm.land/bubbletea/v2"
 )
 
-// sessionFileName is the name of the lock file written inside each work-item directory.
-const sessionFileName = ".lore-session"
+// SessionDescriptor is the shape a generalized session-spawn Cmd consumes: the
+// session Type plus the target item and its launch context. The human confirm
+// modal and the agent request queue both build one and hand it to a single
+// spawn path, so spawning is defined once regardless of who initiated it.
+//
+// The forward fields (Type, Slug, Title, ExtraContext, Initiator) are the
+// durable contract. The flags below them are a bounded compatibility shim over
+// the current StartTerminalCmd; they and StartSessionShimCmd are removed when
+// the generalized spawn Cmd lands and callers pass the descriptor straight
+// through. Prompt composition stays in buildInitialPrompt — these flags only
+// select which branch of it runs.
+type SessionDescriptor struct {
+	Type         string // spec|implement|chat
+	Slug         string
+	Title        string
+	ExtraContext string
+	Initiator    string // agent|human
 
-// sessionStaleTTL is the duration after which a session file is considered stale.
-const sessionStaleTTL = 30 * time.Second
-
-// SessionInfo describes an active TUI session operating on a work item.
-type SessionInfo struct {
-	PID      int       `json:"pid"`
-	Mode     string    `json:"mode"`
-	Slug     string    `json:"slug"`
-	Started  time.Time `json:"started"`
-	LastSeen time.Time `json:"last_seen"`
+	ShortMode    bool
+	SkipConfirm  bool
+	FollowupMode bool
+	FindingIndex int
 }
 
-// sessionPath returns the path to the session file for the given slug.
-func sessionPath(workDir, slug string) string {
-	return filepath.Join(workDir, slug, sessionFileName)
-}
-
-// WriteSession creates a new session lock file for the given work item.
-func WriteSession(workDir, slug, mode string) error {
-	now := time.Now()
-	info := SessionInfo{
-		PID:      os.Getpid(),
-		Mode:     mode,
-		Slug:     slug,
-		Started:  now,
-		LastSeen: now,
-	}
-	data, err := json.Marshal(info)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(sessionPath(workDir, slug), data, 0644)
-}
-
-// TouchSession updates the mtime of the session file to signal liveness.
-// Returns nil if the file does not exist (idempotent).
-func TouchSession(workDir, slug string) error {
-	p := sessionPath(workDir, slug)
-	now := time.Now()
-	err := os.Chtimes(p, now, now)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
-}
-
-// ClearSession removes the session lock file.
-// Returns nil if the file does not exist (idempotent).
-func ClearSession(workDir, slug string) error {
-	err := os.Remove(sessionPath(workDir, slug))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
-}
-
-// ReadSession reads and validates a session lock file.
-// Returns nil, false if the file is missing, stale (mtime > 30s), or malformed.
-func ReadSession(workDir, slug string) (*SessionInfo, bool) {
-	p := sessionPath(workDir, slug)
-	fi, err := os.Stat(p)
-	if err != nil {
-		return nil, false
-	}
-	if time.Since(fi.ModTime()) > sessionStaleTTL {
-		return nil, false
-	}
-	data, err := os.ReadFile(p)
-	if err != nil {
-		return nil, false
-	}
-	var info SessionInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		return nil, false
-	}
-	return &info, true
-}
-
-// ListActiveSessions returns all non-stale sessions in the work directory,
-// keyed by slug. Never returns nil.
-func ListActiveSessions(workDir string) map[string]SessionInfo {
-	result := make(map[string]SessionInfo)
-	matches, err := filepath.Glob(filepath.Join(workDir, "*", sessionFileName))
-	if err != nil {
-		return result
-	}
-	for _, match := range matches {
-		// Extract slug: the directory name between workDir and sessionFileName.
-		slug := filepath.Base(filepath.Dir(match))
-		if info, ok := ReadSession(workDir, slug); ok {
-			result[slug] = *info
-		}
-	}
-	return result
+// StartSessionShimCmd maps a descriptor onto the existing StartTerminalCmd. It
+// is the single spawn path for both the human-modal and queue routes. Chat
+// descriptors take the chat prompt branch; spec and implement descriptors take
+// the spec branch (a real implement prompt arrives with the generalized spawn
+// Cmd, which also retires this shim).
+func StartSessionShimCmd(d SessionDescriptor, projectDir string, width, height int, knowledgeDir string) tea.Cmd {
+	chatMode := d.Type == "chat"
+	return StartTerminalCmd(
+		d.Slug,
+		d.Title,
+		projectDir,
+		width,
+		height,
+		d.ExtraContext,
+		d.ShortMode,
+		chatMode,
+		d.SkipConfirm,
+		d.FollowupMode,
+		knowledgeDir,
+		d.FindingIndex,
+	)
 }

@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/followup"
+	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -80,6 +82,23 @@ func main() {
 	}
 
 	m := newModel(cfg, prefs, startState)
+
+	// Resolve this instance's session-substrate identity. A generated word-pair
+	// name is collision-checked against live instances; an explicit
+	// LORE_TUI_INSTANCE override that is empty, path-like, or reserved after
+	// normalization is a fatal startup error (fail loudly on a bad override).
+	if cfg.KnowledgeDir != "" {
+		sessionsDir := filepath.Join(cfg.KnowledgeDir, "_sessions")
+		name, nameErr := session.GenerateName(sessionsDir, os.Getenv("LORE_TUI_INSTANCE"))
+		if nameErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", nameErr)
+			os.Exit(1)
+		}
+		m.instanceName = name
+		m.sessionsDir = sessionsDir
+		m.eventScript = filepath.Join(os.Getenv("HOME"), ".lore/scripts/session-event-append.sh")
+		m.instanceStartedISO = time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	}
 
 	// Best-effort settings panel initialization. A nil panel disables the
 	// configurator open key but does not block startup — the modal is a

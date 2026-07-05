@@ -874,6 +874,63 @@ func TestReviewCardsEditModeAltEnterInsertsNewline(t *testing.T) {
 	}
 }
 
+func TestReviewCardsEditModeShiftEnterInsertsNewline(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	m, _ = enterEditOnComment(m)
+	m.editInput.SetValue("line1")
+
+	// Shift+Enter is the primary newline chord (inputmsg contract);
+	// Alt+Enter remains the fallback for terminals without kitty keys.
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	if !m.editing {
+		t.Error("shift+enter should not exit editing")
+	}
+	if got := m.editInput.Value(); !strings.Contains(got, "\n") {
+		t.Errorf("shift+enter should insert newline, textarea = %q", got)
+	}
+}
+
+func TestReviewCardsEditModePasteReachesTextarea(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	m, _ = enterEditOnComment(m)
+	m.editInput.SetValue("")
+
+	// Bracketed paste must reach the inline textarea (inputmsg contract),
+	// multi-line content included.
+	m, _ = m.Update(tea.PasteMsg{Content: "pasted line one\npasted line two"})
+	if !m.editing {
+		t.Error("paste should not exit editing")
+	}
+	if got := m.editInput.Value(); got != "pasted line one\npasted line two" {
+		t.Errorf("textarea = %q, want pasted content", got)
+	}
+}
+
+func TestReviewCardsPasteIgnoredWhenNotEditing(t *testing.T) {
+	review := testReview()
+	m := NewReviewCardsModel("", "", review)
+	m.width = 80
+	m.height = 40
+
+	// Paste with no active textarea must be a no-op, not a crash or a
+	// stray mutation.
+	m, cmd := m.Update(tea.PasteMsg{Content: "stray paste"})
+	if m.editing {
+		t.Error("paste should not enter edit mode")
+	}
+	if cmd != nil {
+		t.Error("paste outside edit mode should not emit a cmd")
+	}
+}
+
 func TestReviewCardsEditEOnEmptyIsNoop(t *testing.T) {
 	// Model with no review (nil), no general card.
 	m := NewReviewCardsModel("", "", nil)

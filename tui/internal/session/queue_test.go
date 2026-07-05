@@ -1,0 +1,251 @@
+package session
+
+import (
+	"encoding/json"
+	"os"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func strp(s string) *string { return &s }
+
+func plantPending(t *testing.T, dir string, req Request) {
+	t.Helper()
+	if err := WritePending(dir, req); err != nil {
+		t.Fatalf("WritePending %q: %v", req.RequestID, err)
+	}
+}
+
+// TestClaimIsAtMostOnce is the core substrate invariant: under any number of
+// racing claimers of one pending row, exactly one wins the atomic rename. Run
+// many rounds with fresh rows to exercise the race repeatedly.
+func TestClaimIsAtMostOnce(t *testing.T) {
+	dir := t.TempDir()
+	const rounds = 200
+	const claimers = 8
+	for r := 0; r < rounds; r++ {
+		id := NewRequestID()
+		plantPending(t, dir, Request{RequestID: id, Type: "spec", Slug: strp("s"), Initiator: "agent"})
+
+		var wins int64
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for c := 0; c < claimers; c++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				won, err := ClaimRequest(dir, id)
+				if err != nil {
+					t.Errorf("ClaimRequest error: %v", err)
+					return
+				}
+				if won {
+					atomic.AddInt64(&wins, 1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if wins != 1 {
+			t.Fatalf("round %d: %d claimers won, want exactly 1", r, wins)
+		}
+		// Clean up the claimed row for the next round.
+		_ = DeleteClaimed(dir, id)
+	}
+}
+
+func TestQueueTickTargeting(t *testing.T) {
+	dir := t.TempDir()
+	openReq := Request{RequestID: "open1", Type: "spec", Slug: strp("a"), Initiator: "agent"}
+	targetedMine := Request{RequestID: "mine1", Type: "spec", Slug: strp("b"), Initiator: "agent", TargetInstance: strp("me")}
+	targetedOther := Request{RequestID: "other1", Type: "spec", Slug: strp("c"), Initiator: "agent", TargetInstance: strp("someone-else")}
+
+	// An open request is claimable by this instance.
+	plantPending(t, dir, openReq)
+	res, err := QueueTick(dir, "me", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Claimed == nil || res.Claimed.RequestID != "open1" {
+		t.Fatalf("open request not claimed: %+v", res.Claimed)
+	}
+	_ = DeleteClaimed(dir, "open1")
+
+	// A targeted request is claimable only by its named instance.
+	plantPending(t, dir, targetedMine)
+	res, _ = QueueTick(dir, "me", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
+	if res.Claimed == nil || res.Claimed.RequestID != "mine1" {
+		t.Fatalf("targeted-to-me request not claimed: %+v", res.Claimed)
+	}
+	_ = DeleteClaimed(dir, "mine1")
+
+	// A request targeted at another instance stays pending here.
+	plantPending(t, dir, targetedOther)
+	res, _ = QueueTick(dir, "me", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
+	if res.Claimed != nil {
+		t.Fatalf("claimed a request targeted at another instance: %+v", res.Claimed)
+	}
+	if len(ScanPending(dir)) != 1 {
+		t.Fatal("targeted-other request should remain pending")
+	}
+}
+
+func TestQueueTickImplementGate(t *testing.T) {
+	dir := t.TempDir()
+	plantPending(t, dir, Request{RequestID: "impl1", Type: "implement", Slug: strp("needs-plan"), Initiator: "agent"})
+
+	// Without a plan doc, an implement request is not claimed.
+	res, _ := QueueTick(dir, "me", nil, func(string) bool { return false }, time.Now(), ReclaimAfter)
+	if res.Claimed != nil {
+		t.Fatalf("implement claimed despite no plan doc: %+v", res.Claimed)
+	}
+	// With a plan doc, it becomes claimable.
+	res, _ = QueueTick(dir, "me", nil, func(string) bool { return true }, time.Now(), ReclaimAfter)
+	if res.Claimed == nil || res.Claimed.RequestID != "impl1" {
+		t.Fatalf("implement not claimed once plan doc present: %+v", res.Claimed)
+	}
+}
+
+func TestQueueTickAbandonsAtAttemptCeiling(t *testing.T) {
+	dir := t.TempDir()
+	plantPending(t, dir, Request{RequestID: "dead1", Type: "spec", Slug: strp("x"), Initiator: "agent", Attempts: MaxAttempts})
+	res, err := QueueTick(dir, "me", nil, noPlan, time.Now(), ReclaimAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Abandoned) != 1 || res.Abandoned[0].RequestID != "dead1" {
+		t.Fatalf("attempts-ceiling row not abandoned: %+v", res.Abandoned)
+	}
+	if res.Claimed != nil {
+		t.Fatal("abandoned row must not also be claimed")
+	}
+	if len(ScanPending(dir)) != 0 {
+		t.Fatal("abandoned row should be deleted from pending")
+	}
+}
+
+func TestQueueTickReclaimsIncompleteClaim(t *testing.T) {
+	dir := t.TempDir()
+	// A claimed row with no claim metadata, aged past the reclaim window. Target
+	// it at another instance so it is reclaimed but not re-claimed here in the
+	// same tick — isolating the reclaim transition under test.
+	id := "incomplete1"
+	if err := ClaimRequestFixture(t, dir, Request{RequestID: id, Type: "spec", Slug: strp("y"), Initiator: "agent", TargetInstance: strp("other")}); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * ReclaimAfter)
+	if err := os.Chtimes(claimedPath(dir, id), old, old); err != nil {
+		t.Fatal(err)
+	}
+	res, err := QueueTick(dir, "me", nil, noPlan, time.Now(), ReclaimAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Reclaimed) != 1 || res.Reclaimed[0].Reason != ReasonIncompleteClaim {
+		t.Fatalf("incomplete claim not reclaimed: %+v", res.Reclaimed)
+	}
+	// The row is back in pending carrying the reclaim reason and no claim fields.
+	pend := ScanPending(dir)
+	if len(pend) != 1 || pend[0].LastError == nil || *pend[0].LastError != ReasonIncompleteClaim {
+		t.Fatalf("reclaimed row not returned to pending with reason: %+v", pend)
+	}
+	if pend[0].ClaimedBy != nil || pend[0].ClaimedAt != nil {
+		t.Fatalf("reclaimed pending row still carries claim metadata: %+v", pend[0])
+	}
+}
+
+func TestQueueTickReclaimsStaleClaimer(t *testing.T) {
+	dir := t.TempDir()
+	id := "stale1"
+	// A completed claim whose claimer is dead and whose claim aged out.
+	if err := ClaimRequestFixture(t, dir, Request{RequestID: id, Type: "spec", Slug: strp("z"), Initiator: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteClaimMetadata(dir, id, "dead-instance"); err != nil {
+		t.Fatal(err)
+	}
+	// Backdate claimed_at by rewriting the row.
+	req, _ := ReadClaimed(dir, id)
+	old := time.Now().Add(-2 * ReclaimAfter).UTC().Format("2006-01-02T15:04:05Z")
+	req.ClaimedAt = &old
+	if err := writeRow(claimedPath(dir, id), req); err != nil {
+		t.Fatal(err)
+	}
+	// Claimer "dead-instance" is absent from the live set → reclaim.
+	res, err := QueueTick(dir, "me", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Reclaimed) != 1 || res.Reclaimed[0].Reason != ReasonStaleInstance {
+		t.Fatalf("stale claim not reclaimed: %+v", res.Reclaimed)
+	}
+}
+
+func TestQueueTickLeavesLiveClaimerAlone(t *testing.T) {
+	dir := t.TempDir()
+	id := "live1"
+	if err := ClaimRequestFixture(t, dir, Request{RequestID: id, Type: "spec", Slug: strp("z"), Initiator: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteClaimMetadata(dir, id, "busy-instance"); err != nil {
+		t.Fatal(err)
+	}
+	// The claimer is live → the claim must not be reclaimed even if aged.
+	req, _ := ReadClaimed(dir, id)
+	old := time.Now().Add(-2 * ReclaimAfter).UTC().Format("2006-01-02T15:04:05Z")
+	req.ClaimedAt = &old
+	_ = writeRow(claimedPath(dir, id), req)
+	res, _ := QueueTick(dir, "me", map[string]bool{"me": true, "busy-instance": true}, noPlan, time.Now(), ReclaimAfter)
+	if len(res.Reclaimed) != 0 {
+		t.Fatalf("reclaimed a live claimer's row: %+v", res.Reclaimed)
+	}
+}
+
+func TestReturnToPendingBumpsAttempts(t *testing.T) {
+	dir := t.TempDir()
+	id := "retry1"
+	if err := ClaimRequestFixture(t, dir, Request{RequestID: id, Type: "spec", Slug: strp("s"), Initiator: "agent", Attempts: 1}); err != nil {
+		t.Fatal(err)
+	}
+	req, _ := ReadClaimed(dir, id)
+	req.Attempts++
+	reason := "pty_start_failed"
+	req.LastError = &reason
+	if err := ReturnToPending(dir, req); err != nil {
+		t.Fatalf("ReturnToPending: %v", err)
+	}
+	pend := ScanPending(dir)
+	if len(pend) != 1 || pend[0].Attempts != 2 {
+		t.Fatalf("attempts not bumped on return: %+v", pend)
+	}
+	// The claimed row is gone (renamed away).
+	if _, err := os.Stat(claimedPath(dir, id)); !os.IsNotExist(err) {
+		t.Fatal("claimed row still present after ReturnToPending")
+	}
+}
+
+// TestNumericFieldRejectsQuotedString guards the type-discipline contract: a
+// strict decode of attempts rejects a quoted number rather than coercing it.
+func TestNumericFieldRejectsQuotedString(t *testing.T) {
+	var req Request
+	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"spec","attempts":"0"}`), &req); err == nil {
+		t.Fatal("decoding attempts from a quoted string should fail")
+	}
+}
+
+func noPlan(string) bool { return false }
+
+// ClaimRequestFixture plants a pending row and renames it into claimed/ without
+// writing claim metadata — the shape of an incomplete claim, and the setup other
+// reclaim/metadata tests build on.
+func ClaimRequestFixture(t *testing.T, dir string, req Request) error {
+	t.Helper()
+	if err := WritePending(dir, req); err != nil {
+		return err
+	}
+	_, err := ClaimRequest(dir, req.RequestID)
+	return err
+}

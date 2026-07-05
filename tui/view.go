@@ -151,8 +151,11 @@ func (m model) viewNoRepo() string {
 // "work (N) · follow-ups (N) · settlement (N)". The active section is
 // highlighted; every other section is prefixed with the key that switches to
 // it (w / f / t). The keys are routed in update.go and mirrored in the status
-// bar and help modal — do not display a key here without all three.
-func renderTabIndicator(activeTab appState, workCount, followupCount, settlementCount, width int) string {
+// bar and help modal — do not display a key here without all three. identity,
+// when non-empty and it fits, is right-aligned into the same row as the
+// instance's "<repo> · <name>" chrome; it is dropped rather than wrapped when
+// the row is too narrow.
+func renderTabIndicator(activeTab appState, workCount, followupCount, settlementCount, width int, identity string) string {
 	section := func(key, label string, count int, active bool) string {
 		text := fmt.Sprintf("%s (%d)", label, count)
 		if active {
@@ -167,10 +170,30 @@ func renderTabIndicator(activeTab appState, workCount, followupCount, settlement
 		section("f", "follow-ups", followupCount, activeTab == stateFollowUps) + sep +
 		section("t", "settlement", settlementCount, activeTab == stateSettlement)
 	lineW := lipgloss.Width(line)
+	if identity != "" {
+		idW := lipgloss.Width(identity)
+		if lineW+1+idW <= width {
+			return line + strings.Repeat(" ", width-lineW-idW) + identity
+		}
+	}
 	if lineW < width {
 		line += strings.Repeat(" ", width-lineW)
 	}
 	return line
+}
+
+// tabIdentity renders the instance chrome shown right-aligned in the tab row as
+// "<repo> · <name>", or "" when no instance identity is resolved (e.g. outside a
+// repo). repo recedes; the instance name reads one tier brighter so it stays the
+// memorable token an agent would target.
+func (m model) tabIdentity() string {
+	if m.instanceName == "" {
+		return ""
+	}
+	if m.config.RepoIdentifier == "" {
+		return tabInactiveS.Render(m.instanceName)
+	}
+	return tabKeyS.Render(m.config.RepoIdentifier) + tabSepS.Render(" · ") + tabInactiveS.Render(m.instanceName)
 }
 
 func (m model) viewSettlement() string {
@@ -194,7 +217,7 @@ func (m model) viewSettlement() string {
 	lines := m.renderSettlementBodyLines(bodyW, contentH)
 
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(stateSettlement, len(m.list.Items()), m.followupList.FollowUpCount(), m.settlement.Count(), w))
+	b.WriteString(renderTabIndicator(stateSettlement, len(m.list.Items()), m.followupList.FollowUpCount(), m.settlement.Count(), w, m.tabIdentity()))
 	b.WriteString("\n")
 	// Border annotation: advertise what j/k currently walks — the queue at
 	// the root, claims or verdicts inside a drill-in.
@@ -360,7 +383,7 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 	rightBorderChar := rightBS.Render(style.DockBorder.Right)
 
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, m.width))
+	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, m.width, m.tabIdentity()))
 	b.WriteString("\n")
 	b.WriteString(topRow)
 	b.WriteString("\n")
@@ -473,7 +496,7 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, m.width))
+	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, m.width, m.tabIdentity()))
 	b.WriteString("\n")
 
 	// === Top panel (list) ===

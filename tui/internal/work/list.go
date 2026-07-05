@@ -78,9 +78,24 @@ type SpecStatusMsg struct {
 	Done       bool
 }
 
-// ExternalSessionMsg carries the set of slugs with active sessions from other TUI instances.
+// ExternalSession describes one active session on another TUI instance: who
+// owns it, what kind it is, and who initiated it (agent vs human) — enough to
+// badge it distinctly from a local session.
+type ExternalSession struct {
+	Instance  string
+	Type      string // spec|implement|chat
+	Initiator string // agent|human
+}
+
+// IsAgent reports whether the session was agent-initiated.
+func (e ExternalSession) IsAgent() bool { return e.Initiator == "agent" }
+
+// ExternalSessionMsg carries every slug with an active session on another TUI
+// instance, keyed by slug. It is a full snapshot: the handler replaces its map
+// wholesale rather than merging, since stale instances are already filtered out
+// upstream.
 type ExternalSessionMsg struct {
-	Slugs map[string]bool
+	Sessions map[string]ExternalSession
 }
 
 // specTickMsg drives the animated dots on the speccing status line.
@@ -123,7 +138,7 @@ type ListModel struct {
 	specActiveSlugs     map[string]bool // all slugs currently speccing
 	specNeedsInputSlugs map[string]bool // slugs with active input prompt
 	specDots            int
-	externalActiveSlugs map[string]bool // slugs with sessions from other TUI instances
+	externalSessions    map[string]ExternalSession // slug → session on another TUI instance
 	list                collection.List
 }
 
@@ -263,31 +278,40 @@ func (m ListModel) itemRow(item WorkItem) collection.Row {
 }
 
 // readinessCell returns the readiness column content: animated "speccing"
-// while a local spec session is active, dim "◆ active" for an external
-// session, otherwise the readiness label on the status ramp. Local speccing
-// wins over external so one slug never shows conflicting indicators.
+// while a local spec session is active, a badge for an external session
+// (amber "◆ agent" when agent-initiated, dim "◆ active" when human), otherwise
+// the readiness label on the status ramp. Local speccing wins over external so
+// one slug never shows conflicting indicators.
 func (m ListModel) readinessCell(item WorkItem) collection.Cell {
-	switch {
-	case m.specActiveSlugs[item.Slug]:
+	if m.specActiveSlugs[item.Slug] {
 		dots := strings.Repeat(".", m.specDots)
 		return collection.Cell{Text: "speccing" + dots + strings.Repeat(" ", 3-len(dots)), Style: style.StatusActive}
-	case m.externalActiveSlugs[item.Slug]:
-		return collection.Cell{Text: "◆ active", Style: style.Dim}
-	default:
-		label, st := readinessLabel(item)
-		return collection.Cell{Text: label, Style: st}
 	}
+	if es, ok := m.externalSessions[item.Slug]; ok {
+		if es.IsAgent() {
+			return collection.Cell{Text: "◆ agent", Style: needsInputStyle}
+		}
+		return collection.Cell{Text: "◆ active", Style: style.Dim}
+	}
+	label, st := readinessLabel(item)
+	return collection.Cell{Text: label, Style: st}
 }
 
 // stackedGlyph returns the title-line indicator prefix for the stacked
-// layout: ● (amber) only when a local spec session waits for input, dim ◆
-// when another TUI instance owns the session.
+// layout: ● (amber) when a local spec session waits for input, ◈ (amber) when
+// another instance runs an agent-initiated session, ◆ (dim) when it is a human
+// session on another instance.
 func (m ListModel) stackedGlyph(item WorkItem) string {
 	if m.specActiveSlugs[item.Slug] && m.specNeedsInputSlugs[item.Slug] {
 		return "● "
 	}
-	if !m.specActiveSlugs[item.Slug] && m.externalActiveSlugs[item.Slug] {
-		return "◆ "
+	if !m.specActiveSlugs[item.Slug] {
+		if es, ok := m.externalSessions[item.Slug]; ok {
+			if es.IsAgent() {
+				return "◈ "
+			}
+			return "◆ "
+		}
 	}
 	return ""
 }
@@ -321,6 +345,8 @@ func decorateStackedGlyph(row collection.Row, selected bool, lines []string) []s
 	switch {
 	case strings.HasPrefix(rest, "● "):
 		lines[0] = line[:2] + needsInputStyle.Render("●") + rest[len("●"):]
+	case strings.HasPrefix(rest, "◈ "):
+		lines[0] = line[:2] + needsInputStyle.Render("◈") + rest[len("◈"):]
 	case strings.HasPrefix(rest, "◆ "):
 		lines[0] = line[:2] + style.Dim.Render("◆") + rest[len("◆"):]
 	}
@@ -378,7 +404,7 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 		return m, nil
 
 	case ExternalSessionMsg:
-		m.externalActiveSlugs = msg.Slugs
+		m.externalSessions = msg.Sessions
 		m.refreshRows()
 		return m, nil
 

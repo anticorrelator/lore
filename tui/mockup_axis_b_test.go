@@ -402,7 +402,7 @@ func axisBViewTopBottomBorderTabs(m model, cfg paneConfig, d *work.WorkItemDetai
 	bottomLines := strings.Split(body, "\n")
 
 	var b strings.Builder
-	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, m.width))
+	b.WriteString(renderTabIndicator(cfg.state, cfg.listItemCount, cfg.fuItemCount, cfg.settlementCount, m.width, m.tabIdentity()))
 	b.WriteString("\n")
 
 	b.WriteString(topBS.Render(style.DockBorder.TopLeft))
