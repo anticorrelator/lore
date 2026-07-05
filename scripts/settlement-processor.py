@@ -1193,6 +1193,11 @@ class Settlement:
                     pass
             queue["triggers"] = {"pump_ran_at": utc_now()}
             self.save_queue(queue)
+            # Append-only pump history for the trust-transition evaluation
+            # window (measurement 4: runs/week + max gap); pump_ran_at alone
+            # is overwritten each run and cannot reconstruct liveness.
+            with (self.state / "pump-log.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"ran_at": queue["triggers"]["pump_ran_at"]}) + "\n")
         self._invalidate_rollup_existence_cache()
         self._refresh_rollup_existence_cache()
         rollup = self.scan_rollup_steady_state()
