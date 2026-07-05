@@ -3555,6 +3555,36 @@ func TestSettingsModalStatusBarModeHints(t *testing.T) {
 	}
 }
 
+// TestSettingsModalStatusBarSurfacesFlash pins the D6 outcome-flash surface:
+// a committed write must render its "saved <dotpath>" confirmation in
+// the host status bar ahead of the mode hints (the armed U-undo hint is
+// appended by the hint system, not the flash), and U must
+// swap it for the "undid" confirmation. Without StatusFlash plumbing the
+// model's statusMsg — including write errors — renders nowhere.
+func TestSettingsModalStatusBarSurfacesFlash(t *testing.T) {
+	setupFakeLoreData(t, `{"version": 1, "tui_launch_framework": "claude-code"}`)
+	m := workContractModel()
+	m, _ = updateModel(t, m, press('S'))
+	if !m.settingsActive || m.settingsPanel == nil {
+		t.Fatal("S should open the settings configurator")
+	}
+
+	// Focus the launch-framework radio and instant-apply the next option.
+	m, _ = updateModel(t, m, press('j'))
+	m, _ = updateModel(t, m, press('l'))
+
+	bar := stripANSI(m.renderStatusBar(m.width))
+	if !strings.Contains(bar, "saved tui_launch_framework") || !strings.Contains(bar, "U undo") {
+		t.Fatalf("status bar should surface the save flash with undo affordance:\n%s", bar)
+	}
+
+	m, _ = updateModel(t, m, press('U'))
+	bar = stripANSI(m.renderStatusBar(m.width))
+	if !strings.Contains(bar, "undid tui_launch_framework") {
+		t.Fatalf("status bar should surface the undo flash:\n%s", bar)
+	}
+}
+
 // TestOnboardingStatusBarKeybindContract verifies the onboarding hint set
 // ("Enter initialize · q quit"); Enter dispatch is pinned by
 // TestStateOnboardingEnterDispatchesInit.

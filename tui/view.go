@@ -546,7 +546,17 @@ func (m model) renderStatusBar(width int) string {
 	// hides whatever the flash/banner would refer to).
 	if m.settingsActive && m.settingsPanel != nil {
 		hints := m.settingsPanel.StatusHints()
-		rendered := make([]string, 0, len(hints))
+		rendered := make([]string, 0, len(hints)+1)
+		// Outcome flash first (saved/unset/undid confirmations, reject and
+		// write errors) — the hints describe what keys do next; the flash
+		// says what just happened. Both share the one status line.
+		if flash, isErr := m.settingsPanel.StatusFlash(); flash != "" {
+			if isErr {
+				rendered = append(rendered, style.SevBlocking.Render(flash))
+			} else {
+				rendered = append(rendered, style.SevSuggestion.Render(flash))
+			}
+		}
 		for _, hint := range hints {
 			if hint.Key == "" {
 				rendered = append(rendered, dimS.Render(hint.Label))

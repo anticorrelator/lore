@@ -449,7 +449,7 @@ func TestActiveFrameworkAccept_InCapabilities(t *testing.T) {
 	if m.statusIsError {
 		t.Errorf("expected no error on accepted framework, got %q", m.statusMsg)
 	}
-	if m.statusMsg != "saved tui_launch_framework · U undo" {
+	if m.statusMsg != "saved tui_launch_framework" {
 		t.Errorf("expected save flash with undo hint, got %q", m.statusMsg)
 	}
 }
@@ -570,7 +570,7 @@ func TestUnsetRoundTrip_PatchThenUnset(t *testing.T) {
 	if len(store.deletes) != 1 || store.deletes[0] != "name" {
 		t.Errorf("expected single delete on 'name', got %v", store.deletes)
 	}
-	if m.statusMsg != "unset name · U undo" {
+	if m.statusMsg != "unset name" {
 		t.Errorf("expected unset flash with undo hint, got %q", m.statusMsg)
 	}
 }
@@ -1080,7 +1080,7 @@ func TestHierarchicalNavigation_DownCommitsScalarEditAndMoves(t *testing.T) {
 	if got := m.nav.focusedDotPath(); got != "layout" {
 		t.Fatalf("down should move focus after committing, focused=%q", got)
 	}
-	if m.statusMsg != "saved name · U undo" || m.statusIsError {
+	if m.statusMsg != "saved name" || m.statusIsError {
 		t.Fatalf("expected save flash after down commit, status=%q err=%v", m.statusMsg, m.statusIsError)
 	}
 }

@@ -192,7 +192,8 @@ type SettingsModel struct {
 
 	closed bool // set by Esc at top-level when no draft is active
 
-	// statusMsg is rendered at the bottom of the body. Written on
+	// statusMsg is surfaced by the host status bar via StatusFlash(),
+	// rendered ahead of the mode-aware hints. Written on
 	// IntentReject, write errors, and external-command stderr surfacing.
 	statusMsg     string
 	statusIsError bool
@@ -1055,6 +1056,15 @@ func (m *SettingsModel) Closed() bool { return m.closed }
 // focused the host must defer so the user can type the letter literally.
 func (m *SettingsModel) FocusConsumesRunes() bool { return m.nav.consumesNavRunes() }
 
+// StatusFlash returns the transient outcome line (save/unset/undo
+// confirmations, reject and write errors) plus its error-ness. The host
+// status bar renders it ahead of the mode-aware hints; empty means no
+// pending flash. Without this surface the D6 save feedback — and, worse,
+// write errors — would be set on the model but rendered nowhere.
+func (m *SettingsModel) StatusFlash() (string, bool) {
+	return m.statusMsg, m.statusIsError
+}
+
 // StatusHints returns the mode-aware hint set the host renders in the modal
 // status bar. Leaf widgets provide their active-mode verbs; the model adds
 // only global suffixes whose handlers are currently reachable.
@@ -1369,7 +1379,7 @@ func (m *SettingsModel) routeCommit(intent *FieldIntent) tea.Cmd {
 		}
 		m.armUndoIfChanged(intent.DotPath, prevValue, prevPresent, chosen)
 		m.setEffective(intent.DotPath, chosen)
-		m.statusMsg = fmt.Sprintf("saved %s · U undo", intent.DotPath)
+		m.statusMsg = fmt.Sprintf("saved %s", intent.DotPath)
 		m.statusIsError = false
 		return nil
 	}
@@ -1392,7 +1402,7 @@ func (m *SettingsModel) routeCommit(intent *FieldIntent) tea.Cmd {
 	}
 	m.armUndoIfChanged(intent.DotPath, prevValue, prevPresent, intent.Value)
 	m.setEffective(intent.DotPath, intent.Value)
-	m.statusMsg = fmt.Sprintf("saved %s · U undo", intent.DotPath)
+	m.statusMsg = fmt.Sprintf("saved %s", intent.DotPath)
 	m.statusIsError = false
 	return nil
 }
@@ -1413,7 +1423,7 @@ func (m *SettingsModel) routeUnset(intent *FieldIntent) {
 		m.armUndo(intent.DotPath, prevValue, prevPresent)
 	}
 	m.invalidateEffective(intent.DotPath)
-	m.statusMsg = fmt.Sprintf("unset %s · U undo", intent.DotPath)
+	m.statusMsg = fmt.Sprintf("unset %s", intent.DotPath)
 	m.statusIsError = false
 }
 
