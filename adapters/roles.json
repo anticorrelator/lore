@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Closed agent role registry for lore. resolve_model_for_role(<role>) consults this list before consulting the per-repo and user role->model bindings. Adding a role requires updating this file, scripts/lib.sh resolve_model_for_role, tui/internal/config/config.go ResolveModelForRole, and tests/frameworks/roles.bats.",
+  "description": "Closed agent role registry for lore. resolve_model_for_role(<role>) consults this list before consulting the per-repo and user role->model bindings. A role may carry an optional fallback_role: when the queried role's own layers all miss short of the overlay default, the resolver re-resolves once with the fallback role (used by the class-qualified worker roles to inherit plain worker's binding). Adding a role requires updating this file, scripts/lib.sh resolve_model_for_role, tui/internal/config/framework.go ResolveModelForRoleInCeremony, adapters/settings.schema.json ($defs/role_id enum + $defs/roles_map_overlay properties), and tests/frameworks/roles.bats.",
   "default_role": "default",
   "roles": [
     {
@@ -19,6 +19,26 @@
         "agents/codex-worker.md",
         "skills/implement/SKILL.md",
         "scripts/batch-implement.sh"
+      ]
+    },
+    {
+      "id": "worker-mechanical",
+      "description": "Worker role for tasks a spec author labeled `[class: mechanical]` — uniform text substitution with no design judgment. Bind it to a cheaper model to route mechanical work down-tier; unbound it resolves to plain worker via fallback_role.",
+      "fallback_role": "worker",
+      "call_sites": [
+        "skills/implement/templates/worker-spawn.md",
+        "agents/codex-worker.md",
+        "scripts/impl-start.sh"
+      ]
+    },
+    {
+      "id": "worker-judgment-dense",
+      "description": "Worker role for tasks a spec author labeled `[class: judgment-dense]` — design-bearing work that must land on a capable model. Bind it to hold judgment-dense work at a capability ceiling; unbound it resolves to plain worker via fallback_role.",
+      "fallback_role": "worker",
+      "call_sites": [
+        "skills/implement/templates/worker-spawn.md",
+        "agents/codex-worker.md",
+        "scripts/impl-start.sh"
       ]
     },
     {

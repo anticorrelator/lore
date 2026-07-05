@@ -752,11 +752,13 @@ func resolveModelForRole_perRepoConfig(role string) string {
 	}
 }
 
-// rolesFile is the slice of adapters/roles.json the resolver needs to validate
-// role ids against the closed set.
+// rolesFile is the slice of adapters/roles.json the resolver needs: role ids to
+// validate against the closed set, and the optional fallback_role for the
+// class-qualified role re-resolution.
 type rolesFile struct {
 	Roles []struct {
-		ID string `json:"id"`
+		ID           string `json:"id"`
+		FallbackRole string `json:"fallback_role"`
 	} `json:"roles"`
 }
 
@@ -776,6 +778,34 @@ func loadRoleIDs() (map[string]struct{}, error) {
 	out := map[string]struct{}{}
 	for _, role := range r.Roles {
 		out[role.ID] = struct{}{}
+	}
+	return out, nil
+}
+
+// loadRoleFallbacks reads the optional fallback_role for each role in the closed
+// registry, mirroring the bash resolver's `.fallback_role // empty` read
+// (scripts/lib.sh). A class-qualified role (worker-mechanical,
+// worker-judgment-dense) declares fallback_role: "worker"; the resolver
+// re-resolves once with that role when the class role's own layers all miss.
+// Roles without a fallback are omitted from the map.
+func loadRoleFallbacks() (map[string]string, error) {
+	repo, err := loreRepoDir()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(repo, "adapters", "roles.json"))
+	if err != nil {
+		return nil, err
+	}
+	var r rolesFile
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, role := range r.Roles {
+		if role.FallbackRole != "" {
+			out[role.ID] = role.FallbackRole
+		}
 	}
 	return out, nil
 }
@@ -842,6 +872,11 @@ func ResolveModelForRole(role string) (string, error) {
 //     through (ABSENT and EXPLICIT-empty both fall through, matching the bash
 //     `. // empty` filter).
 //  4. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay).
+//     4b. Class-qualified role fallback: if the role declares a `fallback_role` in
+//     roles.json and layers 1-4 all missed, re-resolve once with that role (so
+//     an unbound worker-mechanical resolves exactly as plain worker). Runs
+//     before layer 5 so the fallback role consults its own overlay binding
+//     ahead of the shared default.
 //  5. Unified `.harnesses.<active>.roles.default` (overlay's own default).
 //
 // When ceremony == "" the ceremony layer (both its upfront query validation and
@@ -861,6 +896,11 @@ func ResolveModelForRoleInCeremony(role, ceremony string) (string, error) {
 		}
 	}
 
+	// Optional class-qualified fallback (used at layer 4b below). Soft-fails to
+	// nil when roles.json is unreadable, matching the bash guard that leaves
+	// fallback_role empty when jq / the file is unavailable.
+	roleFallbacks, _ := loadRoleFallbacks()
+
 	// Closed-set validation of the ceremony query, upfront (before the env
 	// layer) so an unknown ceremony never resolves regardless of an env
 	// override — mirrors the bash upfront guard at scripts/lib.sh:1068-1077.
@@ -872,8 +912,11 @@ func ResolveModelForRoleInCeremony(role, ceremony string) (string, error) {
 		}
 	}
 
-	// 1. Env override.
-	envVar := "LORE_MODEL_" + strings.ToUpper(role)
+	// 1. Env override. Hyphens in the role id (class-qualified roles like
+	// worker-mechanical) map to underscores so the env-var name is a valid
+	// shell identifier — byte-for-byte with the bash `tr '-' '_'` (scripts/lib.sh),
+	// where a hyphenated name would otherwise trip the ${param-word} operator.
+	envVar := "LORE_MODEL_" + strings.ReplaceAll(strings.ToUpper(role), "-", "_")
 	if v := os.Getenv(envVar); v != "" {
 		return v, nil
 	}
@@ -932,6 +975,19 @@ func ResolveModelForRoleInCeremony(role, ceremony string) (string, error) {
 		if v := readSettingsRoleString("harnesses." + active + ".roles." + role); v != "" {
 			return v, nil
 		}
+	}
+
+	// 4b. Class-qualified role fallback: a role that declares fallback_role in
+	// the registry re-resolves once with that role after all of its own layers
+	// (env, per-repo, ceremony overlay, role overlay) miss short of the shared
+	// overlay default. An unbound class-qualified role (worker-mechanical,
+	// worker-judgment-dense) therefore resolves byte-identically to plain
+	// worker; a class role bound at any layer above still wins. Placed before
+	// roles.default so the fallback role consults its own overlay binding ahead
+	// of the shared default. The fallback target declares no fallback_role of
+	// its own, so this recurses at most once.
+	if fb := roleFallbacks[role]; fb != "" {
+		return ResolveModelForRoleInCeremony(fb, ceremony)
 	}
 
 	// 5. Unified `.harnesses.<active>.roles.default`.

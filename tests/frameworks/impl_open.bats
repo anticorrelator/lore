@@ -137,6 +137,26 @@ assert d["initial_unblocked"] == ["task-1", "task-2"]
 '
 }
 
+@test "judgment_class projects into TaskCreate entries; absent marker is null" {
+  # Patch in place — plan_checksum is a hash of plan.md and stays valid.
+  python3 - "$ITEM_DIR/tasks.json" <<'PYEOF'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["phases"][0]["tasks"][0]["judgment_class"] = "mechanical"  # task-1
+json.dump(d, open(p, "w"), indent=1)
+PYEOF
+  run bash "$LORE_CLI" impl open widget-pipeline --all --json
+  [ "$status" -eq 0 ]
+  payload | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+creates = {op["local_id"]: op for op in d["manifest"] if op["op"] == "TaskCreate"}
+assert creates["task-1"]["judgment_class"] == "mechanical"
+assert creates["task-2"]["judgment_class"] is None
+'
+}
+
 @test "same-file concurrent tasks get a serialization edge; path-connected pairs do not" {
   run bash "$LORE_CLI" impl open widget-pipeline --all --json
   [ "$status" -eq 0 ]

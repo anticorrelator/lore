@@ -277,6 +277,8 @@ for tid in batch_ids:
         "activeForm": task.get("activeForm", ""),
         "description": task.get("description", ""),
         "file_targets": task.get("file_targets", []),
+        # null on legacy/unannotated tasks; routes as plain worker (D6).
+        "judgment_class": task.get("judgment_class"),
         "tier2_extract": [{
             "claim_id": r.get("claim_id"),
             "claim": r.get("claim"),
@@ -288,12 +290,28 @@ for tid in batch_ids:
 
 # --- Same-file collision groups within the batch -------------------------------
 # Returned as conditions: never parallel-dispatch these across workers;
-# serialize-within-one-worker vs merge is the lead's decision.
+# serialize-within-one-worker vs merge is the lead's decision. chain_class is
+# the max class over the group (judgment-dense > standard > mechanical): when a
+# chain merges onto one worker it must spawn at the highest class present, so
+# judgment-dense work never lands on a cheaper binding (D3).
+_CLASS_RANK = {"mechanical": 0, "standard": 1, "judgment-dense": 2}
+
+
+def _class_rank(judgment_class):
+    # Absent/unknown class sorts as standard — its resolution route is plain worker.
+    return _CLASS_RANK.get(judgment_class, _CLASS_RANK["standard"])
+
+
+def _max_class(tids):
+    return max((task_by_id[t].get("judgment_class") for t in tids),
+               key=_class_rank, default=None) or "standard"
+
+
 by_file = {}
 for tid in batch_ids:
     for ft in task_by_id[tid].get("file_targets", []):
         by_file.setdefault(ft, []).append(tid)
-collision_groups = [{"file": ft, "tasks": tids}
+collision_groups = [{"file": ft, "tasks": tids, "chain_class": _max_class(tids)}
                     for ft, tids in by_file.items() if len(tids) > 1]
 
 if batch_ids:
@@ -440,7 +458,8 @@ if d["batch"]:
     print("Unblocked batch (lead dispatches; collisions below must not run in parallel):")
     for t in d["batch"]:
         extract = f"  [{len(t['tier2_extract'])} Tier 2 row(s)]" if t["tier2_extract"] else ""
-        print(f"  -  {t['local_id']} (phase {t['phase']}): {t['subject']}{extract}")
+        cls = f"  [class: {t['judgment_class']}]" if t.get("judgment_class") else ""
+        print(f"  -  {t['local_id']} (phase {t['phase']}): {t['subject']}{cls}{extract}")
 else:
     print("Unblocked batch: empty")
 for blocked in d["pending_blocked"]:
@@ -449,7 +468,7 @@ if d["collision_groups"]:
     print()
     print("Same-file collision groups (serialize within one worker, or merge — your call):")
     for g in d["collision_groups"]:
-        print(f"  {g['file']}: {', '.join(g['tasks'])}")
+        print(f"  {g['file']}: {', '.join(g['tasks'])}  [chain class: {g['chain_class']}]")
 print()
 c = d["lead_inline_conditions"]
 print("Lead-inline conditions (read each; the route decision is yours):")

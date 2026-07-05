@@ -16,6 +16,13 @@
 #                                non-empty seeds AND non-empty scale_set (v2:
 #                                per topic; legacy flat: top level); failure
 #                                refuses naming the phase
+#   6b. judgment-class gate      every task line in plan.md carries a
+#                                [class: mechanical|standard|judgment-dense]
+#                                marker AND every >1-task phase carries a
+#                                **Split rationale:** block; failure refuses
+#                                naming the offending line or phase. Emits the
+#                                split_rationale + class_distribution recorded
+#                                in the step-9 telemetry row
 #   7. execution-log atom        write-execution-log.sh --source spec-verb
 #   8. attribution counts        parse execution-log.md '## ... | source: <tok>'
 #                                headers; spec-verb counts as verb-mediated,
@@ -94,6 +101,11 @@ REGEN_SUMMARY=""
 HEAL_STATUS="not-run"
 CONTRACT_STATUS="not-run"
 CONTRACT_DETAIL=""
+CLASS_GATE_STATUS="not-run"
+CLASS_GATE_DETAIL=""
+# Telemetry payloads computed by the class-annotation gate (step 6b). Defaults
+# stand in only if the gate never runs — every success path overwrites this.
+CLASS_GATE_PAYLOAD='{"split_rationale": {}, "class_distribution": {"mechanical": 0, "standard": 0, "judgment-dense": 0}}'
 TELEMETRY_STATUS="not-run"
 VERB_MEDIATED_COUNT=0
 HAND_RUN_COUNT=0
@@ -402,6 +414,84 @@ if [[ $CONTRACT_RC -ne 0 ]]; then
 fi
 CONTRACT_STATUS="passed"
 
+# --- 6b. Judgment-class annotation + split-rationale gate over plan.md --------
+# Every task checkbox line must carry a trailing [class: mechanical|standard|
+# judgment-dense] marker, and any phase with more than one task must carry a
+# **Split rationale:** block. The gate refuses (exit 1) before any telemetry row
+# or spec-verb execution-log atom is written. On success it emits the
+# split_rationale text and class distribution the step-9 telemetry row records.
+# Class markers ride here (not on the emission-contract assert) because they are
+# a plan.md authoring property, parsed straight from the source of truth rather
+# than from the regenerated tasks.json.
+set +e
+CLASS_GATE_JSON=$(python3 - "$PLAN_FILE" <<'PYEOF'
+import json, re, sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    plan = f.read()
+
+CLASS_RE = re.compile(r"\[class:\s*(mechanical|standard|judgment-dense)\s*\]")
+TASK_RE = re.compile(r"^- \[[ xX]\]\s+(.*)", re.MULTILINE)
+PHASE_RE = re.compile(r"^### Phase (\d+):\s*(.*)", re.MULTILINE)
+matches = list(PHASE_RE.finditer(plan))
+
+unannotated = []            # task lines with no [class: ...] marker
+missing_rationale = []      # >1-task phases with no **Split rationale:**
+split_rationale = {}        # phase_number -> rationale text
+class_distribution = {"mechanical": 0, "standard": 0, "judgment-dense": 0}
+
+for i, m in enumerate(matches):
+    phase_num = m.group(1)
+    start = m.end()
+    if i + 1 < len(matches):
+        end = matches[i + 1].start()
+    else:
+        nxt = re.search(r"^## ", plan[start:], re.MULTILINE)
+        end = start + nxt.start() if nxt else len(plan)
+    body = plan[start:end]
+
+    tasks = TASK_RE.findall(body)
+    for line in tasks:
+        cm = CLASS_RE.search(line)
+        if cm:
+            class_distribution[cm.group(1)] += 1
+        else:
+            unannotated.append(f"phase {phase_num}: {line.strip()}")
+
+    sr = re.search(
+        r"^\*\*Split rationale:\*\*[ \t]*(.*?)(?=\n\*\*[A-Za-z]|\n- \[|\n#|\Z)",
+        body, re.DOTALL | re.MULTILINE,
+    )
+    sr_text = re.sub(r"<!--.*?-->", "", sr.group(1), flags=re.DOTALL).strip() if sr else ""
+    if sr_text.startswith("<") and sr_text.endswith(">"):
+        sr_text = ""  # unfilled <placeholder> counts as absent
+    if sr_text:
+        split_rationale[phase_num] = sr_text
+    if len(tasks) > 1 and not sr_text:
+        missing_rationale.append(phase_num)
+
+if unannotated or missing_rationale:
+    print("[spec] Error: judgment-class gate refused finalize:", file=sys.stderr)
+    for u in unannotated:
+        print(f"[spec]   unannotated task line — {u}", file=sys.stderr)
+    for p in missing_rationale:
+        print(f"[spec]   phase {p}: more than one task with no **Split rationale:** block", file=sys.stderr)
+    sys.exit(1)
+
+print(json.dumps({"split_rationale": split_rationale, "class_distribution": class_distribution}))
+PYEOF
+)
+CLASS_GATE_RC=$?
+set -e
+if [[ $CLASS_GATE_RC -ne 0 ]]; then
+  CLASS_GATE_STATUS="failed"
+  CLASS_GATE_DETAIL="unannotated task line(s) or multi-task phase(s) missing split rationale"
+  echo "[spec] Annotate every task line with [class: mechanical|standard|judgment-dense] and add **Split rationale:** to multi-task phases, then re-run: lore spec finalize $SLUG" >&2
+  emit_json_and_exit 1 "judgment-class gate failed: $CLASS_GATE_DETAIL"
+fi
+CLASS_GATE_STATUS="passed"
+CLASS_GATE_PAYLOAD="$CLASS_GATE_JSON"
+
 # --- 7. Execution-log atom (source: spec-verb) --------------------------------
 ATOM_BODY=$(printf 'Spec finalize: terminal gate sequence completed\nBacklinks: %s\nAnchor gate: %s\nTasks: %s\nHeal: %s\nContract asserts: %s' \
   "$BACKLINKS_STATUS" "$ANCHOR_STATUS" "$REGEN_SUMMARY" "$HEAL_STATUS" "$CONTRACT_DETAIL")
@@ -431,7 +521,8 @@ PYEOF
 CAPTURED_SHA=$(captured_at_sha)
 TELEMETRY_ROW=$(python3 -c '
 import json, sys
-slug, verb_count, hand_count, tv, sha, ts = sys.argv[1:7]
+slug, verb_count, hand_count, tv, sha, ts, gate_payload = sys.argv[1:8]
+payload = json.loads(gate_payload)
 row = {
     "schema_version": "1",
     "kind": "telemetry",
@@ -442,12 +533,14 @@ row = {
     "work_item": slug,
     "verb_mediated_count": int(verb_count),
     "hand_run_count": int(hand_count),
+    "split_rationale": payload.get("split_rationale", {}),
+    "class_distribution": payload.get("class_distribution", {}),
     "template_version": tv,
     "captured_at_sha": None if sha == "null" else sha,
     "ts": ts,
 }
 print(json.dumps(row, ensure_ascii=False))
-' "$SLUG" "$VERB_MEDIATED_COUNT" "$HAND_RUN_COUNT" "$TEMPLATE_VERSION" "$CAPTURED_SHA" "$(timestamp_iso)")
+' "$SLUG" "$VERB_MEDIATED_COUNT" "$HAND_RUN_COUNT" "$TEMPLATE_VERSION" "$CAPTURED_SHA" "$(timestamp_iso)" "$CLASS_GATE_PAYLOAD")
 
 if printf '%s' "$TELEMETRY_ROW" | bash "$SCRIPT_DIR/scorecard-append.sh" >/dev/null; then
   TELEMETRY_STATUS="appended"
@@ -494,5 +587,6 @@ fi
 echo "[spec]   Tasks:            $REGEN_SUMMARY"
 echo "[spec]   Heal:             $HEAL_STATUS"
 echo "[spec]   Contract asserts: $CONTRACT_STATUS ($CONTRACT_DETAIL)"
+echo "[spec]   Class gate:       $CLASS_GATE_STATUS"
 echo "[spec]   Attribution:      verb-mediated=$VERB_MEDIATED_COUNT hand-run=$HAND_RUN_COUNT"
 echo "[spec]   Telemetry:        $TELEMETRY_STATUS (metric: spec_finalize_bookkeeping)"

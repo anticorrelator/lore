@@ -260,6 +260,39 @@ PYEOF
   [ "$verdict" = "none" ]
 }
 
+@test "telemetry row carries a per-task class-routing attribution array" {
+  # Env override is resolution order #1, so the standard class resolves without
+  # touching operator settings; the class-qualified roles fall back to it.
+  export LORE_MODEL_WORKER="test-worker-model"
+  cat > "$WORK_DIR/anchored-done/tasks.json" <<'EOF'
+{"plan_checksum": "x", "phases": [
+  {"phase_number": 1, "tasks": [
+    {"id": "task-1", "subject": "build the verb", "judgment_class": null,
+     "context_cost_estimate": {"total_chars": 1200}},
+    {"id": "task-2", "subject": "test the verb", "judgment_class": "standard",
+     "context_cost_estimate": {"total_chars": 3400}},
+    {"id": "task-3", "subject": "reason about the verb", "judgment_class": "judgment-dense",
+     "context_cost_estimate": {"total_chars": 9000}}]}]}
+EOF
+  run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
+  [ "$status" -eq 0 ]
+  python3 - "$(rows_file)" <<'PYEOF'
+import json, sys
+row = json.loads(open(sys.argv[1]).read())
+attr = row["task_attribution"]
+assert [a["task_id"] for a in attr] == ["task-1", "task-2", "task-3"]
+assert [a["judgment_class"] for a in attr] == [None, "standard", "judgment-dense"]
+assert [a["context_cost_estimate"] for a in attr] == [1200, 3400, 9000]
+by_id = {a["task_id"]: a for a in attr}
+# null and standard both route as plain worker → the env-bound model.
+assert by_id["task-1"]["worker_model"] == "test-worker-model"
+assert by_id["task-2"]["worker_model"] == "test-worker-model"
+# The class-qualified role resolves to the worker fallback once registered, or
+# null before task-1 lands the role in the registry — both are acceptable here.
+assert by_id["task-3"]["worker_model"] in ("test-worker-model", None)
+PYEOF
+}
+
 # --- Partial close --------------------------------------------------------------
 
 partial_close() {

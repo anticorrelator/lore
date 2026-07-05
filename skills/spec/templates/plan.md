@@ -147,6 +147,12 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
        task restatement — "refactored Y" is the task, not a verification criterion
      Good example: "`lore prefetch` with no `--scale-set` exits non-zero with a usable error" -->
 - <observable behavior — e.g., "`lore search foo` returns ranked results from the updated index">
+**Split rationale:**
+<!-- REQUIRED when this phase has more than one task; omit entirely for a single-task phase.
+     One or two sentences: name the judgment-density transition or genuine cross-file parallelism
+     that earns the split (why N tasks, not one). Step 5.5 finalize refuses a multi-task phase
+     missing this block. -->
+<why this phase splits into N tasks — the judgment-density boundary or parallelism that earns the extra worker spawns>
 **Tasks:**
 <!-- One - [ ] checkbox per phase by default. Multiple only when the four conditions in Step 5b hold:
      disjoint file ownership, independently reviewable deliverables, real parallel execution, no residue.
@@ -154,13 +160,19 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
      Banned as primary verb: Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only.
      See Step 5b "Deliverable contract gate" for routing of invalid units.
 
+     Every task line ends with a trailing [class: mechanical | standard | judgment-dense] marker
+     (after any [[knowledge:...]] backlinks) declaring the worker tier /implement routes it to.
+     mechanical = deterministic sweep/substitution; standard = ordinary implementation judgment
+     (the default); judgment-dense = novel design, cross-cutting reasoning, or subtle correctness.
+     Step 5.5 finalize refuses any unannotated task line.
+
      Weave binding norms into the constraint clause (Step 5b "Deliverable contract gate"): when a surfaced
      preference/convention is BOTH scope-overlapping AND judgment-class, render it as an imperative constraint
      clause in the task line naming the norm by its stable label (the entry slug/title the backlink resolves to),
      and keep the [[knowledge:...]] backlink for provenance. Strict weave — mechanical/lint-class norms are never
      woven (they route to the enforcement-class hook arm); only the binding judgment-class subset becomes a clause.
      The stable label is the identifier the /implement worker's `Convention handling:` report keys on. -->
-- [ ] <Verb> <deliverable> in <owned file/surface> — <design or integration constraint>[; honor <stable-label> (<what to do>)] [[knowledge:conventions/<woven-norm-entry>]]
+- [ ] <Verb> <deliverable> in <owned file/surface> — <design or integration constraint>[; honor <stable-label> (<what to do>)] [[knowledge:conventions/<woven-norm-entry>]] [class: mechanical|standard|judgment-dense]
 
 ## Open Questions
 - Unresolved decisions or items needing follow-up

@@ -301,6 +301,27 @@ def extract_task_backlinks(item_text: str) -> list[str]:
     return backlinks
 
 
+# Closed judgment-class vocabulary. A spec author writes a trailing
+# [class: <value>] marker on each task line; /implement routes each value to a
+# worker-tier binding. The three values are a closed set — anything else is not
+# a marker and yields no class.
+_JUDGMENT_CLASS_RE = re.compile(
+    r"\[class:\s*(mechanical|standard|judgment-dense)\s*\]"
+)
+
+
+def extract_judgment_class(item_text: str) -> "str | None":
+    """Extract the trailing [class: <value>] marker from a task line.
+
+    Returns ``mechanical`` | ``standard`` | ``judgment-dense``, or ``None`` when
+    the line carries no marker. The marker is left in place in the task subject —
+    this extraction is additive and never rewrites the subject. An absent marker
+    (``None``) routes the task as plain ``worker`` downstream.
+    """
+    match = _JUDGMENT_CLASS_RE.search(item_text)
+    return match.group(1) if match else None
+
+
 def _is_file_path(candidate: str) -> bool:
     """Return True if a backtick-quoted string looks like a real file path."""
     # Must contain '/' or '.' to look like a path
@@ -1339,12 +1360,14 @@ def generate_tasks_from_plan(
             active_form = to_active_form(subject)
             file_targets = extract_file_targets(item_text, files)
             task_backlinks = extract_task_backlinks(item_text)
+            judgment_class = extract_judgment_class(item_text)
             parsed_items.append({
                 "task_id": task_id,
                 "subject": subject,
                 "active_form": active_form,
                 "file_targets": file_targets,
                 "task_backlinks": task_backlinks,
+                "judgment_class": judgment_class,
             })
 
         # Filter design decisions relevant to this phase
@@ -1395,6 +1418,7 @@ def generate_tasks_from_plan(
             active_form = item["active_form"]
             file_targets = item["file_targets"]
             task_backlinks = item["task_backlinks"]
+            judgment_class = item["judgment_class"]
 
             # Build stripped description: Phase line (D6), objective hint, target files,
             # task line, task-specific Scope, task-specific backlinks (annotation-only), plan reference.
@@ -1447,6 +1471,7 @@ def generate_tasks_from_plan(
                 "activeForm": active_form,
                 "blockedBy": [],
                 "file_targets": file_targets,
+                "judgment_class": judgment_class,
                 "context_cost_estimate": context_cost_estimate,
             })
 

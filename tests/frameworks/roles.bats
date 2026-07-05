@@ -149,7 +149,12 @@ ids = [r["id"] for r in d["roles"]]
 # default may legitimately not have a call site; resolve via env override.
 for role in ids:
     env = os.environ.copy()
-    env[f"LORE_MODEL_{role.upper()}"] = "stub-model"
+    # Hyphens in the role id map to underscores in the env-var name (class roles
+    # like worker-mechanical) — the resolver derives the name the same way.
+    # Built on its own line with double quotes to avoid clashing with the outer
+    # single-quoted bash block and Python f-string quote nesting.
+    env_key = "LORE_MODEL_" + role.upper().replace("-", "_")
+    env[env_key] = "stub-model"
     out = subprocess.check_output(["bash", "-c", f"source $LIB && resolve_model_for_role {role}"], env=env, text=True).strip()
     assert out == "stub-model", f"role {role}: got {out!r}"
 PYEOF
@@ -367,6 +372,111 @@ JSON
   [ "$status" -ne 0 ]
   [[ "$output" == *"unknown role 'spectator'"* ]]
   [[ "$output" == *"roles.json"* ]]
+}
+
+# ============================================================
+# Class-qualified worker roles: registry-driven fallback_role (D2)
+# ============================================================
+
+@test "roles.json declares fallback_role: worker for both class-qualified roles" {
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+by_id = {r["id"]: r for r in d["roles"]}
+for rid in ("worker-mechanical", "worker-judgment-dense"):
+    assert rid in by_id, rid + " missing from roles.json"
+    got = by_id[rid].get("fallback_role")
+    assert got == "worker", rid + " fallback_role: " + repr(got)
+' "$ROLES"
+  [ "$status" -eq 0 ]
+}
+
+@test "every fallback_role target is a valid role with no fallback of its own (single-hop)" {
+  # Guarantees the resolver'"'"'s fallback re-resolution terminates after one
+  # hop: no fallback chain can form.
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+by_id = {r["id"]: r for r in d["roles"]}
+for r in d["roles"]:
+    fb = r.get("fallback_role")
+    if fb is None:
+        continue
+    assert fb in by_id, r["id"] + ": fallback_role " + repr(fb) + " not a known role"
+    assert not by_id[fb].get("fallback_role"), r["id"] + ": fallback target " + repr(fb) + " has its own fallback_role (would chain)"
+' "$ROLES"
+  [ "$status" -eq 0 ]
+}
+
+@test "unbound class role resolves exactly as plain worker (role overlay)" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": {
+    "claude-code": { "args": [], "roles": {"worker": "sonnet"} },
+    "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  wm=$(LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code bash -c "source '$LIB'; resolve_model_for_role worker-mechanical implement")
+  w=$(LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code bash -c "source '$LIB'; resolve_model_for_role worker implement")
+  [ "$wm" = "sonnet" ]
+  [ "$wm" = "$w" ]
+}
+
+@test "unbound class role falls through to roles.default just as worker does" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": {
+    "claude-code": { "args": [], "roles": {"default": "opus"} },
+    "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  wm=$(LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code bash -c "source '$LIB'; resolve_model_for_role worker-judgment-dense implement")
+  w=$(LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code bash -c "source '$LIB'; resolve_model_for_role worker implement")
+  [ "$wm" = "opus" ]
+  [ "$wm" = "$w" ]
+}
+
+@test "class role bound in ceremony_roles wins over the fallback" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": {
+    "claude-code": { "args": [], "roles": {"worker": "sonnet"},
+      "ceremony_roles": { "implement": {"worker-mechanical": "haiku"} } },
+    "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  wm=$(LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code bash -c "source '$LIB'; resolve_model_for_role worker-mechanical implement")
+  [ "$wm" = "haiku" ]
+}
+
+@test "class role bound in the role overlay wins over the fallback" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": {
+    "claude-code": { "args": [], "roles": {"worker": "sonnet", "worker-mechanical": "haiku"} },
+    "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  wm=$(LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code bash -c "source '$LIB'; resolve_model_for_role worker-mechanical implement")
+  [ "$wm" = "haiku" ]
+}
+
+@test "class role env override uses the underscore-normalized name" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": {
+    "claude-code": { "args": [], "roles": {"worker": "sonnet"} },
+    "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  wm=$(LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code LORE_MODEL_WORKER_MECHANICAL=mech-model \
+    bash -c "source '$LIB'; resolve_model_for_role worker-mechanical implement")
+  [ "$wm" = "mech-model" ]
+}
+
+@test "unbound class role errors naming the fallback role when nothing binds" {
+  write_settings <<'JSON'
+{ "version": 1, "tui_launch_framework": "claude-code",
+  "harnesses": { "claude-code": { "args": [] }, "opencode": {"args": []}, "codex": {"args": []} } }
+JSON
+  LORE_DATA_DIR="$FIXTURE_DIR" LORE_FRAMEWORK=claude-code run bash -c "source '$LIB'; resolve_model_for_role worker-mechanical implement"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"role 'worker'"* ]]
 }
 
 # ============================================================

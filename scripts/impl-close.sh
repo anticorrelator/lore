@@ -611,6 +611,54 @@ if [[ -z "$TIER3_REJECTED" ]]; then
   TIER3_REJECTED=0
 fi
 
+# --- Per-task class-routing attribution (built before the archive move) -------
+# Reconstruct, per task, the class-qualified model routing resolves at dispatch,
+# for /retro to correlate rework with (judgment_class, worker_model, size). Read
+# tasks.json while the item is still in active _work/ — the archive move below
+# relocates the dir. Observability-only: a missing/unreadable tasks.json yields
+# an empty array and never blocks the close.
+resolve_class_model() {
+  local role="$1" model
+  if model=$(resolve_model_for_role "$role" implement 2>/dev/null) && [[ -n "$model" ]]; then
+    printf '%s' "$model"
+  fi
+}
+WORKER_STD_MODEL=$(resolve_class_model worker)
+WORKER_MECH_MODEL=$(resolve_class_model worker-mechanical)
+WORKER_JD_MODEL=$(resolve_class_model worker-judgment-dense)
+
+ATTRIBUTION_JSON=$(_LORE_STD="$WORKER_STD_MODEL" _LORE_MECH="$WORKER_MECH_MODEL" \
+  _LORE_JD="$WORKER_JD_MODEL" python3 - "$ITEM_DIR/tasks.json" <<'PYEOF'
+import json, os, sys
+model_by_class = {
+    "mechanical": os.environ.get("_LORE_MECH") or None,
+    "judgment-dense": os.environ.get("_LORE_JD") or None,
+}
+standard_model = os.environ.get("_LORE_STD") or None
+attribution = []
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, ValueError):
+    data = None
+if isinstance(data, dict):
+    for phase in data.get("phases", []):
+        for task in phase.get("tasks", []):
+            jc = task.get("judgment_class")
+            # standard/null and any unrecognized value route as plain worker.
+            worker_model = model_by_class.get(jc, standard_model)
+            estimate = task.get("context_cost_estimate")
+            total_chars = estimate.get("total_chars") if isinstance(estimate, dict) else None
+            attribution.append({
+                "task_id": task.get("id"),
+                "judgment_class": jc,
+                "worker_model": worker_model,
+                "context_cost_estimate": total_chars,
+            })
+print(json.dumps(attribution, ensure_ascii=False))
+PYEOF
+)
+
 # --- Closure-validity gate: archive, hold open, or refuse --------------------
 CLOSURE_VALID=$(python3 -c '
 import json, sys
@@ -681,9 +729,14 @@ case "$CLOSURE_VALID" in
 esac
 
 # --- Per-cycle telemetry row (observability-only; never kind=scored) ----------
-TELEMETRY_ROW=$(python3 -c '
-import json, sys
+# Carries the per-task class-routing attribution array under task_attribution.
+TELEMETRY_ROW=$(_LORE_ATTRIBUTION="$ATTRIBUTION_JSON" python3 -c '
+import json, os, sys
 slug, verdict, verb_count, hand_count, tv, sha, ts = sys.argv[1:8]
+try:
+    attribution = json.loads(os.environ.get("_LORE_ATTRIBUTION") or "[]")
+except ValueError:
+    attribution = []
 row = {
     "schema_version": "1",
     "kind": "telemetry",
@@ -695,6 +748,7 @@ row = {
     "verdict": verdict,
     "verb_mediated_count": int(verb_count),
     "hand_run_count": int(hand_count),
+    "task_attribution": attribution,
     "template_version": tv,
     "captured_at_sha": None if sha == "null" else sha,
     "ts": ts,

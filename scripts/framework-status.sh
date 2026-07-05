@@ -225,7 +225,9 @@ if os.path.exists(cfg_path):
 
 rows = []
 for rid in role_ids:
-    env_var = "LORE_MODEL_" + rid.upper()
+    # Hyphens in class-qualified role ids map to underscores in the env-var
+    # name, matching resolve_model_for_role's derivation (scripts/lib.sh).
+    env_var = "LORE_MODEL_" + rid.upper().replace("-", "_")
     env_val = os.environ.get(env_var)
     # Per-repo lookup is intentionally skipped here — emulating the walk-up
     # search in pure python would diverge from resolve_model_for_role and

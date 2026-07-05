@@ -871,7 +871,10 @@ ids = [r["id"] for r in d["roles"]]
 errs = []
 for role in ids:
     env = os.environ.copy()
-    env[f"LORE_MODEL_{role.upper()}"] = "stub-model"
+    # Class-qualified role ids carry hyphens; the resolver maps them to
+    # underscores in the env-var name, so derive the key the same way.
+    env_key = "LORE_MODEL_" + role.upper().replace("-", "_")
+    env[env_key] = "stub-model"
     res = subprocess.run(
         ["bash", "-c", f'source "{os.environ["LIB"]}" && resolve_model_for_role {role}'],
         capture_output=True, text=True, env=env,

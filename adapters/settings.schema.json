@@ -77,8 +77,8 @@
 
     "role_id": {
       "type": "string",
-      "enum": ["lead", "worker", "researcher", "reviewer", "judge", "summarizer", "advisor", "default"],
-      "description": "Closed role registry. MUST stay in lockstep with adapters/roles.json `roles[].id` — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats. Adding a role requires updating roles.json AND this enum AND scripts/lib.sh resolve_model_for_role AND tui/internal/config/config.go ResolveModelForRole AND tests/frameworks/roles.bats."
+      "enum": ["lead", "worker", "worker-mechanical", "worker-judgment-dense", "researcher", "reviewer", "judge", "summarizer", "advisor", "default"],
+      "description": "Closed role registry. MUST stay in lockstep with adapters/roles.json `roles[].id` — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats. Adding a role requires updating roles.json AND this enum AND $defs/roles_map_overlay properties AND scripts/lib.sh resolve_model_for_role AND tui/internal/config/framework.go ResolveModelForRoleInCeremony AND tests/frameworks/roles.bats."
     },
 
     "role_value": {
@@ -104,10 +104,12 @@
     "roles_map_overlay": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Per-harness role -> model bindings. Closed-keyset against $defs/role_id. All keys optional except where callers need a concrete default.",
+      "description": "Per-harness role -> model bindings. Closed-keyset against $defs/role_id. All keys optional except where callers need a concrete default. worker-mechanical and worker-judgment-dense are the class-qualified worker roles; leaving them unset routes those classes through plain worker via the resolver's fallback_role step.",
       "properties": {
-        "lead":       {"$ref": "#/$defs/role_value"},
-        "worker":     {"$ref": "#/$defs/role_value"},
+        "lead":                  {"$ref": "#/$defs/role_value"},
+        "worker":                {"$ref": "#/$defs/role_value"},
+        "worker-mechanical":     {"$ref": "#/$defs/role_value"},
+        "worker-judgment-dense": {"$ref": "#/$defs/role_value"},
         "researcher": {"$ref": "#/$defs/role_value"},
         "reviewer":   {"$ref": "#/$defs/role_value"},
         "judge":      {"$ref": "#/$defs/role_value"},

@@ -29,7 +29,7 @@ The step numbering encodes a dependency order that downstream `/evolve` and tren
 4. **Step 3.8** (settlement pipeline health checks): **runs before** any scorecard-consumption step. Sets `window_state = "pipeline-degraded" | "warmup" | normal`. If degraded, Steps 3.0/3.9 skip.
 5. **Step 3.0** (scorecard delta surface, *primary*): tier-partitioned. Runs only on normal windows. Skipped on `pipeline-degraded`.
 6. **Step 3** (dimension scores): demoted to narrative coda. Always scored for longitudinal trend, never the headline.
-7. **Step 3.5** (memory system telemetry): reads `tier: telemetry` rows + sidecars; observability only, **never feeds `/evolve`**. Runs on all windows.
+7. **Step 3.5** (memory system telemetry) + **Step 3.5a** (judgment-class routing attribution): read `kind`/`tier: telemetry` rows + sidecars; observability only, **never feed `/evolve`**. Run on all windows.
 8. **Step 3.6–3.7**: scorecard forward guidance + behavioral-health — coda/diagnostic.
 9. **Step 3.9** (non-compensatory headline): filters `tier: template` only. Runs only on normal windows. Skipped on `pipeline-degraded`.
 10. **Steps 4–6**: journal persistence, evolution suggestions, operator-facing report. Branch on `window_state` so `pipeline-degraded` never surfaces a pass/weak/fail headline.
@@ -44,9 +44,9 @@ The step numbering encodes a dependency order that downstream `/evolve` and tren
 |---|---|
 | `task-evidence` | Step 3.0 delta surface emits a tier-partitioned view; never contributes to Step 3.9 headline. |
 | `reusable` | Step 3.0 delta surface; never Step 3.9 headline. |
-| `correction` | Step 3.0 delta surface. May factor into /evolve secondary doctrine-correction gate (see `skills/evolve/SKILL.md` Step 5). No Step 3.9 headline weight. |
+| `correction` | Step 3.0 delta surface. May factor into /evolve secondary doctrine-correction gate (see `skills/evolve/SKILL.md` Step 5). Also read observationally by Step 3.5a as a work-item rework overlay. No Step 3.9 headline weight. |
 | `template` | Step 3.0 delta surface + **Step 3.9 non-compensatory headline** (sole headline-eligible tier). Feeds /evolve primary template-mutation gate. |
-| `telemetry` | Step 3.5 memory-system telemetry **only**. Never Step 3.0/3.9. Never /evolve. P2.3-16 anti-coupling invariant. |
+| `telemetry` | Step 3.5 memory-system telemetry + Step 3.5a judgment-class routing attribution **only**. Never Step 3.0/3.9. Never /evolve. P2.3-16 anti-coupling invariant. |
 
 **Missing-tier legacy policy.** Rows written before the tier enum extension have no `tier` field. Readers MUST treat missing `tier` as `tier: telemetry` (safest default — non-evidentiary for /evolve; visible in Step 3.5 but excluded from template-behavior headline).
 
@@ -382,6 +382,32 @@ Source: `$KDIR/_scorecards/retro-scale-access.jsonl` — the row whose `cycle_id
 Source: `$KDIR/_scorecards/retro-channel-flags.jsonl` — all rows whose `cycle_id` matches the current retro slug. When no flags fired: `channel-contract flags: none`.
 
 **Step 3.5 invariant — no `/evolve` coupling.** The metrics in this section describe memory-system health, not producer-template quality. They inform the operator's understanding of how the knowledge store is aging, routing, and self-correcting — they do not adjudicate whether any template produced correct output. `/evolve` MUST NOT cite any metric from this section as evidence for a template mutation. If `/evolve` sees a "retention_after_renormalize" or "downstream_adoption_rate" citation, it must skip that citation as non-evidentiary (enforced structurally by the `tier: template` filter in `/evolve` Step 5).
+
+### Step 3.5a: Judgment-class routing attribution (observability — never `/evolve`)
+
+**Observability only — MUST NOT feed `/evolve` or template ranking.** Same anti-coupling as Step 3.5: the inputs are `kind: telemetry` rows (P2.3-16), and the author-inflation falsifier targets spec-author decomposition calibration, not producer-template mutation. Any `/evolve` citation of a figure from this surface is invalid and must be rejected.
+
+This surface closes the class-aware-decomposition calibration loop: `/spec` assigns each task a `[class: …]` (mechanical | standard | judgment-dense), `/implement` routes the worker model per class, and this step measures whether the classes actually earn their routing — reporting **rework rate per `(judgment_class, worker_model, size bucket)`** and flagging the **author-inflation falsifier** (judgment-dense-labeled work with a mechanical-level rework profile). Read-only; runs on all windows; emits no scorecard row.
+
+**3.5a-i: Inputs (all read-only).**
+
+- **Per-task attribution** — `$KDIR/_scorecards/rows.jsonl`, rows with `kind == "telemetry"`, `event_type == "impl-close"`, and `metric == "impl_close_bookkeeping"` whose `ts` falls in the retro window. Each carries a `task_attribution` array of `{task_id, judgment_class, worker_model, context_cost_estimate}`, one object per task in the closed cycle. `judgment_class` is `null` on unannotated/legacy tasks; `context_cost_estimate` is the integer `total_chars` (or `null`). An absent or empty `task_attribution` array (the latter when the item had no readable `tasks.json` at close) means no class-routed tasks to attribute — skip it; absence is not a failure. **`worker_model` fidelity:** it is re-resolved from the current class binding at close time (`null` when the class role has no binding and cannot fall back), so it reflects the *class binding*, not a runtime user model pin that may have overridden it at dispatch — read `(class, worker_model)` cells as binding-level, and treat the model axis as approximate whenever a user pin was in play (per `worker-sub-agent-model-selection-is-user-directed`).
+- **Split rationale (authoring-intent context)** — rows with `kind == "telemetry"`, `event_type == "spec-finalize"`, and `metric == "spec_finalize_bookkeeping"` in the window carry `split_rationale` (object keyed by phase number **as a string** — `"1"`, `"2"` — to rationale text; only phases with a `**Split rationale:**` block appear, `{}` when none) and `class_distribution` (all three keys always present → per-class task counts the author declared at finalize). The row is appended fresh on every finalize with **no dedup**, so key on the latest row per work item (same as the sibling `verb_mediated_count`/`hand_run_count` fields). Surface these beside the rework table so a divergence between the declared class mix and observed rework is legible — they explain why a phase was split and what class mix the author expected.
+- **Rework signals (per task):**
+  1. **Re-dispatch (primary, task-keyed).** In `execution-log.md`, a task whose `task_id` (or verbatim subject, which retains the `[class: …]` marker) heads **more than one** entry was re-dispatched — sent back and re-run. This is the same duplicate-subject pattern Step 2a's evidence-anomaly screen already detects; reuse that scan. Count one rework event per extra entry.
+  2. **`tier: correction` rows (secondary, work-item-keyed).** `rows.jsonl` rows with `tier == "correction"` in the window signal that a producer's captured claim/observation/doctrine was corrected (`corrected_entry_path`, `correction_target`). They key on the corrected entry and its producing template, **not** on `task_id`/`judgment_class`, so they attribute to the **work item**, not cleanly to one class cell. Report them as a work-item-level correction-pressure figure beside the table; fold a correction into a specific `(class, model, size)` cell only when its `corrected_entry_path` traces to exactly one task in this cycle's attribution set.
+
+  A task is **reworked** when it has ≥1 re-dispatch entry OR ≥1 task-attributable correction row.
+
+**3.5a-ii: Size bucket.** In the attribution object, `context_cost_estimate` is the task's total character count (a scalar integer — `impl-close.sh` flattens `context_cost_estimate.total_chars` to it — or `null` when the task carried no estimate). Bucket it: `small` < 15000; `medium` 15000–29999 (the historical ~22KB homogeneous split price lands here); `large` ≥ 30000; `unknown` when `null`.
+
+**3.5a-iii: Computation.** For each task in the joined attribution set, assign `(judgment_class, worker_model, size_bucket)` and the boolean `reworked`. Group and compute `rework_rate = |reworked| / |tasks|` per group. Surface only groups with `|tasks| ≥ 3` — below that a "rate" is single-task noise; suppressed groups are counted in one trailing line (`<N> below-sample groups suppressed`), mirroring Step 3.0's below-sample suppression.
+
+**3.5a-iv: Author-inflation falsifier.** The class system's premise is that judgment-dense tasks are genuinely harder — they rework more when under-resourced — while mechanical tasks stay cheap and rework little. The falsifier of an *inflated* label is the inverse: a `judgment-dense` cohort whose rework rate is **at or below** the `mechanical` cohort's rework rate in the same window. When judgment-dense work is not reworking more than mechanical work, the label is not tracking real difficulty and the author may be inflating class to claim the capability premium — routing to an expensive model the task did not need. Flag any such cohort, and name the individual `judgment-dense` tasks sitting in a mechanical-level low-rework profile. This is a **calibration signal for the spec author** — it informs plan-review judgment on future decompositions, never a template mutation.
+
+**3.5a-v: Report shape.** When no `impl-close` row carries `task_attribution` in the window, emit one line — `judgment-class attribution: no class-routed implementation in window` — and continue (same "no data in window" discipline as Step 3.5). Otherwise emit a compact block: one line per surfaced `(judgment_class, worker_model, size_bucket)` group as `<class> / <model> / <bucket>: rework <reworked>/<tasks> (<rate>)`; the below-sample suppression line; the work-item correction-pressure figure; and, under an `author-inflation:` heading, any flagged cohorts (or `author-inflation: none` when the falsifier does not fire). This block appears alongside Step 3.5 telemetry in the Step 6 normal-window report.
+
+**Invariant.** This step never calls `scorecard-append` — it is a pure reader, and the scorecard sole-writer invariant (CC-04) is untouched. Rework rates and inflation flags are derived signal: surfaced in the report, never written back to `rows.jsonl`, never journaled under a scored role, never cited by `/evolve`.
 
 ### Step 3.6: Scorecard data (forward guidance)
 
@@ -777,7 +803,7 @@ When emitting the report, read `skills/retro/templates/step6-report.md` for the 
 
 **When `window_state == "pipeline-degraded"`:** emit the pipeline-degraded variant — tripped-check blocks lead, dimension scores recorded but non-headline, evolution suggestions logged but won't be applied.
 
-**When `window_state != "pipeline-degraded"` (normal window):** emit the normal-window variant — scorecard-first shape with deltas + headline first, dimension scores relegated to narrative coda, then Step 3.5 memory telemetry, Step 2.9 scale signals, Step 2b.6 channel-contract flags (when fired), Step 3.7 behavioral-health coda.
+**When `window_state != "pipeline-degraded"` (normal window):** emit the normal-window variant — scorecard-first shape with deltas + headline first, dimension scores relegated to narrative coda, then Step 3.5 memory telemetry, Step 3.5a judgment-class routing attribution, Step 2.9 scale signals, Step 2b.6 channel-contract flags (when fired), Step 3.7 behavioral-health coda.
 
 **Section order is load-bearing.** The delta surface leads because it is the actionable signal. The headline follows because it is the settlement verdict. Dimension scores come last because they're longitudinal context, not primary signal. Reversing this order would re-establish the dimension-score-as-headline pattern that was explicitly retired.
 

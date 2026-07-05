@@ -374,7 +374,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    Follow the anchor with a `**Scope delta:**` line (default `none — anchor preserved unchanged`; if the spec narrows the capability, name the narrowing here) and a `**Tempting narrower implementation:**` heading the spec author fills in. The anchor body and `**Scope delta:**` line are **verifier-enforced** — the Step 5.5 gate refuses to regenerate tasks if missing or divergent. The `**Tempting narrower implementation:**` body is template-prescribed but not verifier-enforced — its presence forces the author to confront the failure mode, but the content is free-text that no parser can adjudicate. For work items without an `intent_anchor` field, omit the section entirely — the Step 5.5 verifier skips with a one-line stderr info message.
 
-1. **Phases** — concrete implementation phases with tasks, file paths, objectives. Each phase includes `**Knowledge context:**`, `**Tasks:**` (checkbox lines), and optional `**Retrieval directive:**` / `**Advisors:**` / `**Verification:**` / `**Scope:**` blocks.
+1. **Phases** — concrete implementation phases with tasks, file paths, objectives. Each phase includes `**Knowledge context:**`, `**Tasks:**` (checkbox lines), and optional `**Retrieval directive:**` / `**Advisors:**` / `**Verification:**` / `**Split rationale:**` (required when the phase has more than one task) / `**Scope:**` blocks.
 
    **Plan-as-unit rule.** A plan is **one** phase by default. Each additional phase is a separate `/implement` worker batch with its own dispatch ceremony — write one phase per plan unless the split earns its keep across the entire run.
 
@@ -386,7 +386,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    If any condition fails, merge. The Phase-as-unit rule below still applies *within* the merged phase: most consolidated plans land at one phase, one task.
 
-   **Phase-as-unit rule.** A phase is the default delegation unit. Write **one** `- [ ]` checkbox per phase by default — deliver the phase objective across the listed files while honoring the phase design decisions. Each task spawns a fresh worker that loads ~22KB of fixed context plus the phase brief; a phase split has to earn that overhead.
+   **Phase-as-unit rule.** A phase is the default delegation unit. Write **one** `- [ ]` checkbox per phase by default — deliver the phase objective across the listed files while honoring the phase design decisions. Each task spawns a fresh worker that loads its fixed context plus the phase brief; the four conditions below, not a flat per-task overhead, decide whether a split earns that spawn.
 
    Split a phase into multiple tasks **only when all four** conditions hold:
 
@@ -397,9 +397,20 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    If any condition fails, keep one task. Cross-phase dependencies are file-based. Uniform same-mechanism edits across many files stay one task — one worker doing one read-modify-write pass beats N fresh agents repeating the same edit.
 
+   **Judgment class and the split calculus.** Each task line carries a judgment class (`mechanical | standard | judgment-dense`; see the Deliverable contract gate below) that `/implement` routes to a worker-tier binding — mechanical to a cheaper model, judgment-dense to a stronger one. This gives the four conditions a second thing a split can buy beyond parallelism: separating a judgment-dense core from a mechanical shell over disjoint files, so each routes to its own tier instead of paying the strong-model rate across the whole phase. A judgment-density transition across disjoint files is a legitimate split point. But the four conditions still gate every split: a class mix that fails disjoint-file-ownership or real-parallel-execution stays one task, and a **uniform same-mechanism sweep stays one task regardless of worker tier** — a mechanical sweep never fragments into per-file tasks to shave model spend, because spawn overhead dwarfs the saving. The tipping point remains judgment density, not file count.
+
+   **Split rationale (required for multi-task phases).** Any phase with more than one task carries a `**Split rationale:**` block — one or two sentences naming the judgment-density transition or genuine parallelism that earned the split. The Step 5.5 finalize gate refuses a multi-task phase that lacks it. A single-task phase omits the block.
+
    **Deliverable contract gate.** Every task line names a durable artifact outcome — what gets built, refactored, authored, migrated, wired, or added. The valid primary verbs are: Implement / Refactor / Author / Migrate / Add support for / Wire... The following primary verbs are **never tasks** — they belong elsewhere: Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only.
 
    A valid task line states the **deliverable**, the **owned file or surface**, and at least one **design or integration constraint** that scopes the worker's choices.
+
+   **Judgment-class marker (required).** Every task line ends with a trailing `[class: mechanical | standard | judgment-dense]` marker, placed after any `[[knowledge:...]]` backlinks so the deliverable verb stays first. It declares the **judgment class** — the worker tier `/implement` routes the task to:
+   - **mechanical** — deterministic edits: uniform text substitution, one known transform swept across files, scaffolding. No design judgment; routes to the cheapest worker binding.
+   - **standard** — ordinary implementation judgment (the common default): local design choices a competent worker makes without novel reasoning. Routes to plain `worker`.
+   - **judgment-dense** — novel design, cross-cutting reasoning, subtle correctness, or security-sensitive surface. Routes to the strongest worker binding.
+
+   The class is **explicit on every line** — the Step 5.5 finalize gate refuses an unannotated task line. An unclassed line is not treated as `standard`: a legacy plan with no markers still regenerates (routing as plain `worker`), but re-finalizing it demands annotation.
 
    <!-- INVARIANT — canonical /spec weave vocabulary. Keep these terms stable; the
         /implement worker report's `Convention handling:` field and the lead's
@@ -418,7 +429,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    Example bound task line:
    ```
-   - [ ] Implement the retry wrapper in `src/net/client.py` — surface partial failures rather than swallowing them; honor `error-messages-name-the-failed-operation-and-the-fix` (name the failed operation and the corrective action in every raised error). [[knowledge:conventions/error-messages-name-the-failed-operation-and-the-fix]]
+   - [ ] Implement the retry wrapper in `src/net/client.py` — surface partial failures rather than swallowing them; honor `error-messages-name-the-failed-operation-and-the-fix` (name the failed operation and the corrective action in every raised error). [[knowledge:conventions/error-messages-name-the-failed-operation-and-the-fix]] [class: standard]
    ```
 
    Route invalid units:

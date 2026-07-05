@@ -128,6 +128,30 @@ for tv in d["template_versions"].values():
 '
 }
 
+@test "--json exposes the three worker-class bindings; standard is the plain worker model" {
+  run bash "$LORE_CLI" impl start widget-pipeline --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep '"slug"' | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+wc = d["worker_class_models"]
+assert set(wc.keys()) == {"mechanical", "standard", "judgment-dense"}
+# standard == plain worker (env-bound); the class roles fall back to it once
+# registered, or resolve to null before that registry entry lands.
+assert wc["standard"] == "test-worker-model"
+assert wc["mechanical"] in ("test-worker-model", None)
+assert wc["judgment-dense"] in ("test-worker-model", None)
+# The canonical role bindings are untouched by the class block.
+assert d["models"] == {"lead": "test-lead-model", "worker": "test-worker-model", "advisor": "test-advisor-model"}
+'
+}
+
+@test "text mode renders the worker class bindings line" {
+  run bash "$LORE_CLI" impl start widget-pipeline
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "Worker class bindings (implement ceremony): mechanical=.* standard=test-worker-model  judgment-dense="
+}
+
 @test "--json prior-claims maps are keyed by task and by file; malformed lines skipped" {
   run bash "$LORE_CLI" impl start widget-pipeline --json
   [ "$status" -eq 0 ]

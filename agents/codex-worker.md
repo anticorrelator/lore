@@ -29,18 +29,22 @@ PHASE_BRIEF=$(lore work phase-context <slug> <phase-number>)
 
 The Codex-side worker binding resolves through the shared resolver with the framework overridden to `codex`, so one routing substrate serves both same-harness and cross-harness workers. Do not hand-read `settings.json`.
 
+`{{worker_role}}` is the class-qualified role the lead resolved for this task (`worker`, `worker-mechanical`, or `worker-judgment-dense`; a merged same-file chain carries its max class). It defaults to `worker` when the lead leaves it unset.
+
 ```bash
 source ~/.lore/scripts/lib.sh
 CODEX_ADAPTER="$LORE_REPO_DIR/adapters/agents/codex.sh"
+WORKER_ROLE="{{worker_role}}"
+[[ -z "$WORKER_ROLE" ]] && WORKER_ROLE="worker"
 
-BINDING=$(LORE_FRAMEWORK=codex bash "$CODEX_ADAPTER" resolve_model_for_role worker implement) || {
+BINDING=$(LORE_FRAMEWORK=codex bash "$CODEX_ADAPTER" resolve_model_for_role "$WORKER_ROLE" implement) || {
   echo "[codex-worker] resolve_model_for_role failed — cannot route to codex" >&2
   # Report degraded (see §6) and stop; the lead falls back to a same-harness worker.
   exit 0
 }
 ```
 
-`worker implement` passes the ceremony so a `ceremony_roles.implement.worker` binding wins over the plain `roles.worker` binding when one is set.
+`resolve_model_for_role "$WORKER_ROLE" implement` passes the ceremony so a `ceremony_roles.implement.<role>` binding wins over the plain `roles.<role>` binding when one is set. A class role with no binding resolves identically to plain `worker` via the registry `fallback_role`.
 
 Split the binding into a model id and an optional reasoning-effort suffix through the Codex adapter — never re-implement the suffix split here; the adapter owns it.
 

@@ -429,6 +429,8 @@ if eligible_ids:
             "activeForm": task.get("activeForm", ""),
             "description": task.get("description", ""),
             "file_targets": task.get("file_targets", []),
+            # null on legacy/unannotated tasks; routes as plain worker (D6).
+            "judgment_class": task.get("judgment_class"),
         }
         if tid in external_blocked_by:
             entry["external_blocked_by"] = external_blocked_by[tid]

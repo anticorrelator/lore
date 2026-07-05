@@ -791,3 +791,82 @@ func TestHarnessDisplayName_UnknownFallsBackToId(t *testing.T) {
 		t.Errorf("HarnessDisplayName for unknown id = %q, want passthrough id", got)
 	}
 }
+
+// --- Class-qualified worker role fallback (D2) --------------------------------
+// These mirror the bash coverage in tests/frameworks/roles.bats; the two
+// resolvers must agree byte-for-byte on the fallback semantics.
+
+func TestResolveModelForRole_ClassRoleFallsBackToWorkerOverlay(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"worker": "sonnet"})
+	got, err := ResolveModelForRoleInCeremony("worker-mechanical", "implement")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
+	}
+	want, _ := ResolveModelForRoleInCeremony("worker", "implement")
+	if got != "sonnet" || got != want {
+		t.Errorf("worker-mechanical=%q worker=%q, want both sonnet", got, want)
+	}
+}
+
+func TestResolveModelForRole_ClassRoleFallsThroughToDefault(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"default": "opus"})
+	got, err := ResolveModelForRoleInCeremony("worker-judgment-dense", "implement")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
+	}
+	want, _ := ResolveModelForRoleInCeremony("worker", "implement")
+	if got != "opus" || got != want {
+		t.Errorf("worker-judgment-dense=%q worker=%q, want both opus", got, want)
+	}
+}
+
+func TestResolveModelForRole_ClassRoleCeremonyBindingWins(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"worker": "sonnet"})
+	writeCeremonyRoles(t, "claude-code", map[string]map[string]string{
+		"implement": {"worker-mechanical": "haiku"},
+	})
+	got, err := ResolveModelForRoleInCeremony("worker-mechanical", "implement")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
+	}
+	if got != "haiku" {
+		t.Errorf("got %q, want haiku (ceremony binding beats the fallback)", got)
+	}
+}
+
+func TestResolveModelForRole_ClassRoleOverlayBindingWins(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{
+		"worker":            "sonnet",
+		"worker-mechanical": "haiku",
+	})
+	got, err := ResolveModelForRoleInCeremony("worker-mechanical", "implement")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
+	}
+	if got != "haiku" {
+		t.Errorf("got %q, want haiku (own role overlay beats the fallback)", got)
+	}
+}
+
+func TestResolveModelForRole_ClassRoleEnvOverrideUnderscoreName(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"worker": "sonnet"})
+	t.Setenv("LORE_MODEL_WORKER_MECHANICAL", "mech-model")
+	got, err := ResolveModelForRoleInCeremony("worker-mechanical", "implement")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
+	}
+	if got != "mech-model" {
+		t.Errorf("got %q, want mech-model (env override uses underscore name)", got)
+	}
+}
+
+func TestResolveModelForRole_ClassRoleErrorsNamingWorkerWhenUnbound(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	_, err := ResolveModelForRoleInCeremony("worker-mechanical", "implement")
+	if err == nil {
+		t.Fatal("expected error when neither class role nor worker is bound")
+	}
+	if !strings.Contains(err.Error(), `role "worker"`) {
+		t.Errorf("error = %v, want it to name the fallback role \"worker\"", err)
+	}
+}

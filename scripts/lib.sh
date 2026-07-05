@@ -1045,6 +1045,11 @@ framework_model_routing_tiers() {
 #      falls through).
 #   4. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay
 #      — applies to the active harness only; absent overlay falls through).
+#   4b. Class-qualified role fallback: if the role declares a `fallback_role` in
+#      roles.json and layers 1-4 all missed, re-resolve once with that role (so
+#      an unbound worker-mechanical resolves exactly as plain worker). Runs
+#      before layer 5 so the fallback role consults its own overlay binding
+#      ahead of the shared default.
 #   5. Unified `.harnesses.<active>.roles.default` (overlay's own default).
 # Mirrors config.ResolveModelForRoleInCeremony() in tui/internal/config/framework.go.
 resolve_model_for_role() {
@@ -1057,12 +1062,19 @@ resolve_model_for_role() {
   local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
   local settings_sh="$LORE_LIB_DIR/settings.sh"
 
-  # Validate role against the closed registry.
+  # Validate role against the closed registry, and read its optional
+  # fallback_role in the same pass. A class-qualified role (worker-mechanical,
+  # worker-judgment-dense) declares fallback_role: "worker"; when the role's own
+  # layers all miss short of the overlay default, the resolver re-resolves once
+  # with that role (see the fallback step below). Empty when the role has no
+  # fallback or roles.json/jq is unavailable, matching the pre-class behavior.
+  local fallback_role=""
   if [[ -f "$roles_file" ]] && command -v jq &>/dev/null; then
     if ! jq -e --arg r "$role" '.roles[] | select(.id == $r)' "$roles_file" &>/dev/null; then
       echo "Error: unknown role '$role' (not in $roles_file)" >&2
       return 1
     fi
+    fallback_role=$(jq -r --arg r "$role" '.roles[] | select(.id == $r) | .fallback_role // empty' "$roles_file" 2>/dev/null)
   fi
 
   # Validate the ceremony query against the closed registry. Mirrors the role
@@ -1080,7 +1092,11 @@ resolve_model_for_role() {
   # Indirect expansion via eval rather than ${!var} — the latter is bash-only
   # and trips zsh with "bad substitution" when this library is sourced from
   # the harness shell (see lib.sh top-of-file comment on shell support).
-  local env_var="LORE_MODEL_$(echo "$role" | tr '[:lower:]' '[:upper:]')"
+  # Hyphens in the role id (class-qualified roles like worker-mechanical) are
+  # mapped to underscores in the env-var name so the name is a valid shell
+  # identifier — without this, `${LORE_MODEL_WORKER-MECHANICAL:-}` triggers the
+  # ${param-word} default operator on LORE_MODEL_WORKER instead of a lookup.
+  local env_var="LORE_MODEL_$(echo "$role" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
   local env_value=""
   eval "env_value=\${$env_var:-}"
   if [[ -n "$env_value" ]]; then
@@ -1187,6 +1203,19 @@ resolve_model_for_role() {
         return 0
       fi
     fi
+  fi
+
+  # Class-qualified role fallback: a role that declares fallback_role re-resolves
+  # once with that role after all of its own layers (env, per-repo, ceremony
+  # overlay, role overlay) miss short of the shared overlay default. This makes
+  # an unbound class-qualified role resolve byte-identically to its fallback
+  # (worker-mechanical == worker); a class role bound at any layer above still
+  # wins. Placed before roles.default so the fallback role gets its own overlay
+  # binding before the shared default is consulted. The fallback target declares
+  # no fallback_role of its own, so this re-resolution runs at most once.
+  if [[ -n "$fallback_role" ]]; then
+    resolve_model_for_role "$fallback_role" "$ceremony"
+    return $?
   fi
 
   # 5. Unified `.harnesses.<active>.roles.default` (overlay's own default)

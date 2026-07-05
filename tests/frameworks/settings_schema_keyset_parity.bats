@@ -153,6 +153,16 @@ for v in s["$defs"]["capability_id"]["enum"]:
 PY
 }
 
+schema_roles_map_overlay_keyset() {
+  SCHEMA="$SCHEMA" python3 - <<'PY'
+import json, os
+with open(os.environ["SCHEMA"]) as f:
+    s = json.load(f)
+for k in s["$defs"]["roles_map_overlay"]["properties"].keys():
+    print(k)
+PY
+}
+
 # --- Tests -------------------------------------------------------------------
 
 @test "schema tui_launch_framework enum matches capabilities.json frameworks keyset" {
@@ -173,6 +183,17 @@ PY
 
 @test "schema \$defs/role_id enum matches roles.json roles[].id" {
   schema_set=$(schema_role_id_enum | sorted_lines)
+  roles_set=$(roles_from_roles | sorted_lines)
+  [ -n "$schema_set" ]
+  [ -n "$roles_set" ]
+  diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$roles_set")
+}
+
+@test "schema \$defs/roles_map_overlay properties keyset matches roles.json roles[].id" {
+  # The role-binding surface (harnesses.<h>.roles and each ceremony_roles map)
+  # is closed against this keyset. It must list every role — including the
+  # class-qualified worker roles — or a valid binding would be schema-rejected.
+  schema_set=$(schema_roles_map_overlay_keyset | sorted_lines)
   roles_set=$(roles_from_roles | sorted_lines)
   [ -n "$schema_set" ]
   [ -n "$roles_set" ]

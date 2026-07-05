@@ -210,8 +210,9 @@ for rid in role_ids:
                     break
     entry["per_repo"] = repo_value
 
-    # Env layer.
-    entry["env"] = os.environ.get("LORE_MODEL_" + rid.upper(), "")
+    # Env layer. Hyphens in class-qualified role ids map to underscores in the
+    # env-var name, matching resolve_model_for_role's derivation (scripts/lib.sh).
+    entry["env"] = os.environ.get("LORE_MODEL_" + rid.upper().replace("-", "_"), "")
 
     # User-config layer (raw read; resolve_model_for_role handles fallback to
     # default but we want to see explicit-vs-default for the diff section).

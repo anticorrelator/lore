@@ -70,7 +70,7 @@ write_plan() {
         ;;
     esac
     echo "**Tasks:**"
-    echo "- [ ] build the module"
+    echo "- [ ] build the module [class: standard]"
   } > "$dir/plan.md"
 }
 
@@ -299,6 +299,81 @@ assert "no intent_anchor" in d["anchor"]["reason"], d["anchor"]
   echo "$output" | grep -q "empty seeds"
   [ "$(row_count)" -eq 0 ]
   ! grep -q "| source: spec-verb" "$WORK_DIR/empty-seeds-item/execution-log.md" 2>/dev/null
+}
+
+# --- Judgment-class gate --------------------------------------------------------
+
+# Writes a no-anchor plan.md (anchor gate skips) with a custom Phase 1 body.
+write_class_gate_plan() {
+  local slug="$1" phase_body="$2"
+  local dir="$WORK_DIR/$slug"
+  mkdir -p "$dir"
+  printf '{"title": "%s", "status": "active"}\n' "$slug" > "$dir/_meta.json"
+  {
+    echo "# Fixture Item"
+    echo ""
+    echo "## Goal"
+    echo "Ship the fixture."
+    echo ""
+    echo "## Phases"
+    echo ""
+    echo "### Phase 1: Build"
+    printf '%s\n' "$phase_body"
+  } > "$dir/plan.md"
+}
+
+@test "unannotated task line refuses naming the offending line, no row or atom" {
+  write_class_gate_plan "unannotated-item" "$(printf '%s\n' \
+    '**Objective:** Build the module' \
+    '**Tasks:**' \
+    '- [ ] build the module with no class marker')"
+  run bash "$LORE_CLI" spec finalize unannotated-item
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "judgment-class gate"
+  echo "$output" | grep -q "unannotated task line"
+  echo "$output" | grep -q "build the module with no class marker"
+  [ "$(row_count)" -eq 0 ]
+  ! grep -q "| source: spec-verb" "$WORK_DIR/unannotated-item/execution-log.md" 2>/dev/null
+}
+
+@test "multi-task phase without split rationale refuses naming the phase, no row" {
+  write_class_gate_plan "no-rationale-item" "$(printf '%s\n' \
+    '**Objective:** Build the module' \
+    '**Tasks:**' \
+    '- [ ] build the core in `src/a.py` [class: judgment-dense]' \
+    '- [ ] apply the sweep in `src/b.py` [class: mechanical]')"
+  run bash "$LORE_CLI" spec finalize no-rationale-item
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "judgment-class gate"
+  echo "$output" | grep -q "phase 1"
+  echo "$output" | grep -q "Split rationale"
+  [ "$(row_count)" -eq 0 ]
+}
+
+@test "annotated multi-task phase finalizes and stamps split_rationale + class_distribution" {
+  write_class_gate_plan "annotated-item" "$(printf '%s\n' \
+    '**Objective:** Build the module' \
+    '**Split rationale:**' \
+    'Separates the judgment-dense parser core from the mechanical rename sweep so each routes to its own worker tier.' \
+    '**Tasks:**' \
+    '- [ ] build the core in `src/a.py` [class: judgment-dense]' \
+    '- [ ] apply the sweep in `src/b.py` [class: mechanical]')"
+  run bash "$LORE_CLI" spec finalize annotated-item
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qE "Class gate:.*passed"
+  [ "$(row_count)" -eq 1 ]
+  python3 - "$(rows_file)" <<'PYEOF'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+rows = [r for r in rows if r.get("metric") == "spec_finalize_bookkeeping"]
+assert rows, "no telemetry row"
+r = rows[-1]
+assert r["class_distribution"]["judgment-dense"] == 1, r
+assert r["class_distribution"]["mechanical"] == 1, r
+assert r["class_distribution"]["standard"] == 0, r
+assert "1" in r["split_rationale"], r
+assert "judgment-dense parser core" in r["split_rationale"]["1"], r
+PYEOF
 }
 
 # --- Point-event semantics -------------------------------------------------------

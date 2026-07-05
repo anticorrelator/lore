@@ -207,7 +207,40 @@ PYEOF
 import json, sys
 d = json.loads(sys.stdin.read())
 assert [t["local_id"] for t in d["batch"]] == ["task-2", "task-4"]
-assert d["collision_groups"] == [{"file": "/src/beta.sh", "tasks": ["task-2", "task-4"]}]
+# Unannotated tasks carry no judgment_class, so the merged chain sorts as standard.
+assert d["collision_groups"] == [{"file": "/src/beta.sh", "tasks": ["task-2", "task-4"],
+                                  "chain_class": "standard"}]
+'
+}
+
+@test "batch entries carry judgment_class; a mixed-class chain reports the max chain_class" {
+  python3 - "$ITEM_DIR/plan.md" "$ITEM_DIR/tasks.json" <<'PYEOF'
+import json, sys
+plan, tasks = sys.argv[1], sys.argv[2]
+s = open(plan).read().replace("- [ ] verify alpha module",
+                              "- [ ] verify alpha module\n- [ ] polish beta module")
+open(plan, "w").write(s)
+d = json.load(open(tasks))
+# task-2 is mechanical; a colliding task-4 on the same file is judgment-dense.
+d["phases"][0]["tasks"][1]["judgment_class"] = "mechanical"  # task-2
+d["phases"][1]["tasks"].append({
+    "id": "task-4", "subject": "polish beta module", "activeForm": "Polishing beta",
+    "blockedBy": [], "file_targets": ["/src/beta.sh"], "judgment_class": "judgment-dense",
+    "description": "**Phase:** 2"})
+json.dump(d, open(tasks, "w"), indent=1)
+PYEOF
+  run bash "$LORE_CLI" impl next-batch batch-item --json
+  [ "$status" -eq 0 ]
+  payload | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+by_id = {t["local_id"]: t for t in d["batch"]}
+assert by_id["task-2"]["judgment_class"] == "mechanical"
+assert by_id["task-4"]["judgment_class"] == "judgment-dense"
+grp = d["collision_groups"][0]
+assert grp["file"] == "/src/beta.sh"
+assert sorted(grp["tasks"]) == ["task-2", "task-4"]
+assert grp["chain_class"] == "judgment-dense"   # max(mechanical, judgment-dense)
 '
 }
 

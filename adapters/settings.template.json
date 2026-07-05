@@ -7,6 +7,8 @@
       "roles": {
         "lead": "opus",
         "worker": "opus",
+        "worker-mechanical": "opus",
+        "worker-judgment-dense": "opus",
         "researcher": "opus",
         "reviewer": "opus",
         "judge": "opus",
@@ -26,6 +28,8 @@
       "roles": {
         "lead": "anthropic/opus",
         "worker": "openai/gpt-5.5",
+        "worker-mechanical": "openai/gpt-5.5",
+        "worker-judgment-dense": "openai/gpt-5.5",
         "researcher": "anthropic/opus",
         "reviewer": "openai/gpt-5.5",
         "judge": "anthropic/opus",
@@ -45,6 +49,8 @@
       "roles": {
         "lead": "gpt-5.5-high",
         "worker": "gpt-5.5-high",
+        "worker-mechanical": "gpt-5.5-high",
+        "worker-judgment-dense": "gpt-5.5-high",
         "researcher": "gpt-5.5-high",
         "reviewer": "gpt-5.5-high",
         "judge": "gpt-5.5-high",
