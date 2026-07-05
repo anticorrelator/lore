@@ -50,6 +50,13 @@ type Request struct {
 	// distinct from an explicit false.
 	AutoClose *bool `json:"auto_close,omitempty"`
 
+	// RoutingOverrides is a per-dispatch role→model map the claiming instance
+	// exports as LORE_MODEL_<ROLE> env into the spawned session's PTY — riding
+	// the resolver's top-of-precedence env layer so a coordinator's routing
+	// judgment wins over settings policy with zero resolver changes. Absent
+	// (omit-when-empty) leaves every role resolving against settings as before.
+	RoutingOverrides map[string]string `json:"routing_overrides,omitempty"`
+
 	// Present only on a claimed row; a claim is not active until both are set.
 	ClaimedBy *string `json:"claimed_by,omitempty"`
 	ClaimedAt *string `json:"claimed_at,omitempty"`

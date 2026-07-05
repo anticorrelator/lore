@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -233,6 +234,27 @@ func TestNumericFieldRejectsQuotedString(t *testing.T) {
 	var req Request
 	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"spec","attempts":"0"}`), &req); err == nil {
 		t.Fatal("decoding attempts from a quoted string should fail")
+	}
+}
+
+// TestRoutingOverridesRoundTrips guards the request-row amendment: routing_overrides
+// decodes into the role→model map, and an absent field stays nil (omit-when-empty,
+// so a marshal of an override-free row never emits the key).
+func TestRoutingOverridesRoundTrips(t *testing.T) {
+	var req Request
+	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"implement","routing_overrides":{"worker-mechanical":"haiku"}}`), &req); err != nil {
+		t.Fatalf("decode routing_overrides: %v", err)
+	}
+	if got := req.RoutingOverrides["worker-mechanical"]; got != "haiku" {
+		t.Fatalf("RoutingOverrides[worker-mechanical] = %q, want haiku", got)
+	}
+
+	data, err := json.Marshal(Request{RequestID: "x", Type: "spec"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "routing_overrides") {
+		t.Errorf("absent overrides should be omitted, got %s", data)
 	}
 }
 

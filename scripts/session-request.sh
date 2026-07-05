@@ -17,6 +17,10 @@
 #                      from a file when it names one, else treated as literal text. A
 #                      JSON object is stored verbatim as extra_context; any other text
 #                      is wrapped as {"dispatch_guidance": <text>}.
+#   --route role=model Per-dispatch routing override (repeatable). The claiming TUI
+#                      exports it as LORE_MODEL_<ROLE> into the spawned session, riding
+#                      the resolver's top-precedence env layer. role MUST be in the
+#                      adapters/roles.json closed set (unknown roles are refused).
 #   --kdir <path>      Knowledge-store override (test isolation).
 #   --json             Emit a JSON result object instead of a human line.
 #
@@ -43,6 +47,7 @@ REQUESTED_BY=""
 CONTEXT=""
 KDIR_OVERRIDE=""
 JSON_MODE=0
+ROUTE_SPECS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,12 +58,13 @@ while [[ $# -gt 0 ]]; do
     --auto-close) AUTO_CLOSE="$2"; shift 2 ;;
     --requested-by) REQUESTED_BY="$2"; shift 2 ;;
     --context) CONTEXT="$2"; shift 2 ;;
+    --route) ROUTE_SPECS+=("$2"); shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -94,6 +100,30 @@ case "$AUTO_CLOSE" in
   true|false) AUTO_CLOSE_JSON="$AUTO_CLOSE" ;;
   *) fail "invalid --auto-close: '$AUTO_CLOSE' (must be true or false)" ;;
 esac
+
+# routing_overrides is a role→model object built from repeatable --route flags.
+# Each role MUST be in the adapters/roles.json closed set — the same rejection
+# the resolver applies (resolve_model_for_role), enforced here at write time so a
+# reader never re-validates. The registry must exist to enforce the closed set:
+# a missing one is a refusal, not a silent pass. Empty (no --route) stays absent
+# (omit-when-empty), leaving every role to resolve against settings as before.
+ROUTING_JSON=""
+if [[ ${#ROUTE_SPECS[@]} -gt 0 ]]; then
+  ROLES_FILE="$LORE_LIB_DIR/../adapters/roles.json"
+  [[ -f "$ROLES_FILE" ]] || fail "role registry not found at: $ROLES_FILE (cannot validate --route roles)"
+  ROUTING_JSON="{}"
+  for spec in "${ROUTE_SPECS[@]}"; do
+    [[ "$spec" == *=* ]] || fail "invalid --route: '$spec' (expected role=model)"
+    route_role="${spec%%=*}"
+    route_model="${spec#*=}"
+    [[ -n "$route_role" ]] || fail "invalid --route: '$spec' (empty role)"
+    [[ -n "$route_model" ]] || fail "invalid --route: '$spec' (empty model)"
+    if ! jq -e --arg r "$route_role" '.roles[] | select(.id == $r)' "$ROLES_FILE" >/dev/null 2>&1; then
+      fail "unknown role '$route_role' in --route (not in $ROLES_FILE)"
+    fi
+    ROUTING_JSON="$(printf '%s' "$ROUTING_JSON" | jq -c --arg r "$route_role" --arg m "$route_model" '. + {($r): $m}')"
+  done
+fi
 
 if [[ -z "$REQUESTED_BY" ]]; then
   REQUESTED_BY="${LORE_SESSION_INSTANCE:-${USER:-unknown}}"
@@ -152,6 +182,12 @@ ROW="$(jq -n \
 # so an absent override stays absent (the Go decoder reads a nil *bool).
 if [[ -n "$AUTO_CLOSE_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson ac "$AUTO_CLOSE_JSON" '. + {auto_close: $ac}')"
+fi
+
+# routing_overrides follows omit-when-empty: added only when --route was passed,
+# so an absent map stays absent (the Go decoder reads a nil map).
+if [[ -n "$ROUTING_JSON" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --argjson ro "$ROUTING_JSON" '. + {routing_overrides: $ro}')"
 fi
 
 # Enqueue = tmp-write + atomic rename-in. The tmp name is hidden and lacks the

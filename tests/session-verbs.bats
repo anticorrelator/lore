@@ -206,6 +206,47 @@ journal_boundaries() {
   echo "$output" | jq -e '.enqueued == true and .type == "spec" and .slug == "demo" and (.request_id | length > 0)'
 }
 
+@test "request --route writes a routing_overrides map" {
+  bash "$REQUEST" --type implement --slug wi --route worker=opus --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '.routing_overrides.worker == "opus" and (.routing_overrides | type == "object")' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request --route is repeatable across roles" {
+  bash "$REQUEST" --type implement --slug wi --route worker=opus --route reviewer=haiku --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '.routing_overrides.worker == "opus" and .routing_overrides.reviewer == "haiku"' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request --route accepts a hyphenated class-qualified role" {
+  bash "$REQUEST" --type implement --slug wi --route worker-mechanical=haiku --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '.routing_overrides."worker-mechanical" == "haiku"' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request with an unknown --route role refuses naming the registry" {
+  run bash "$REQUEST" --type implement --slug wi --route bogus=opus --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unknown role 'bogus'"* ]]
+  [[ "$output" == *"roles.json"* ]]
+}
+
+@test "request with a malformed --route spec refuses" {
+  run bash "$REQUEST" --type implement --slug wi --route worker --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --route"* ]]
+}
+
+@test "request omits routing_overrides when no --route is passed" {
+  bash "$REQUEST" --type spec --slug wi --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e 'has("routing_overrides") | not' "$pending"
+  [ "$status" -eq 0 ]
+}
+
 # =====================================================================
 # session list
 # =====================================================================

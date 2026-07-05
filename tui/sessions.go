@@ -231,14 +231,15 @@ func (m model) handleQueueTickResult(msg queueTickResultMsg) (model, tea.Cmd) {
 // the shared spawn path. Agent-initiated, so it never steals focus.
 func (m model) spawnFromRequest(req session.Request) (model, tea.Cmd) {
 	d := work.SessionDescriptor{
-		Type:         req.Type,
-		Slug:         req.SlugValue(),
-		Title:        req.SlugValue(),
-		ExtraContext: req.ExtraContextText(),
-		Initiator:    req.Initiator,
-		AutoClose:    req.AutoClose,
-		SkipConfirm:  true,
-		FindingIndex: -1,
+		Type:             req.Type,
+		Slug:             req.SlugValue(),
+		Title:            req.SlugValue(),
+		ExtraContext:     req.ExtraContextText(),
+		Initiator:        req.Initiator,
+		AutoClose:        req.AutoClose,
+		RoutingOverrides: req.RoutingOverrides,
+		SkipConfirm:      true,
+		FindingIndex:     -1,
 	}
 	return m.spawnSession(d, req.RequestID)
 }
@@ -271,7 +272,7 @@ func (m model) spawnSession(d work.SessionDescriptor, requestID string) (model, 
 	if d.Initiator != "agent" {
 		m.sessionLaunchedFromModal = m.state == stateWork
 	}
-	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type)}
+	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type), RoutingOverrides: d.RoutingOverrides}
 	return m, work.StartSessionShimCmd(d, m.config.ProjectDir, specW, specH, m.config.KnowledgeDir, env)
 }
 

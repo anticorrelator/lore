@@ -214,6 +214,48 @@ func TestSessionEnvVarsOmitsEmptyFields(t *testing.T) {
 	}
 }
 
+// TestSessionEnvVars_RoutingOverrides asserts each routing override becomes a
+// LORE_MODEL_<ROLE> var whose name is byte-identical to scripts/lib.sh
+// resolve_model_for_role's env_var construction (uppercase + hyphens→underscores).
+// The hyphenated role is the load-bearing case: worker-mechanical must map to
+// LORE_MODEL_WORKER_MECHANICAL — the exact var the resolver's env layer reads —
+// not LORE_MODEL_WORKER-MECHANICAL (an invalid shell identifier). Roles are
+// sorted for a deterministic order and follow the LORE_SESSION_* vars.
+func TestSessionEnvVars_RoutingOverrides(t *testing.T) {
+	got := SessionEnv{
+		Instance: "amber-otter",
+		RoutingOverrides: map[string]string{
+			"worker":            "opus",
+			"worker-mechanical": "haiku",
+		},
+	}.vars()
+	want := []string{
+		"LORE_SESSION_INSTANCE=amber-otter",
+		"LORE_MODEL_WORKER=opus",
+		"LORE_MODEL_WORKER_MECHANICAL=haiku",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("vars() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("vars()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestSessionEnvVars_RoutingOverridesSkipsBlank: a blank role or model never
+// exports a var — the resolver's env layer reads "" as unset, so a blank export
+// would be both meaningless and (for a blank role) an invalid identifier.
+func TestSessionEnvVars_RoutingOverridesSkipsBlank(t *testing.T) {
+	got := SessionEnv{
+		RoutingOverrides: map[string]string{"worker": "", "": "opus"},
+	}.vars()
+	if len(got) != 0 {
+		t.Errorf("blank role/model should export nothing, got %v", got)
+	}
+}
+
 func TestStartTerminalCmd_PrependsHarnessArgs(t *testing.T) {
 	stageFakeBinaries(t)
 	dir := stageFakeLoreData(t, "claude-code", []string{"--my-prepended-flag"})

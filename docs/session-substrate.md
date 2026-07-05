@@ -97,6 +97,7 @@ and, once an instance claims it, moves to `requests/claimed/<request_id>.json`.
 | `last_error` | string \| null | Reason of the most recent failed transition; null until one occurs. |
 | `last_attempt_at` | string \| null | ISO 8601 UTC of the most recent attempt; null until one occurs. |
 | `auto_close` | boolean \| absent | Override for the TUI exit-ladder auto-close gate (see [Close-request queue](#close-request-queue)). Omit-when-empty: absent defers to `initiator` (agent auto-closes, human holds open), `true` forces auto-close, `false` holds open. Carried onto the live session so the ladder can consult it at teardown. |
+| `routing_overrides` | object \| absent | Per-dispatch `{<role>: <model>}` map. Omit-when-empty. The claiming instance exports each entry as `LORE_MODEL_<ROLE>` (role uppercased, `-`→`_`) into the spawned session's PTY, riding the resolver's top-of-precedence env layer — so a coordinator's per-dispatch routing wins over settings policy with no resolver change. Roles are validated against `adapters/roles.json` at enqueue time; settings.json stays untouched durable policy (user directive > coordinator override > settings). |
 
 A **claimed** file additionally carries:
 

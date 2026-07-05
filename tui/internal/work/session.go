@@ -1,6 +1,9 @@
 package work
 
 import (
+	"sort"
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -27,6 +30,11 @@ type SessionDescriptor struct {
 	// outcome. Carried from the request row through to the live session.
 	AutoClose *bool
 
+	// RoutingOverrides is the per-dispatch role→model map carried from the
+	// request row to the spawn, where it becomes LORE_MODEL_<ROLE> env on the
+	// session's PTY (see SessionEnv). Empty for human-modal spawns.
+	RoutingOverrides map[string]string
+
 	ShortMode    bool
 	SkipConfirm  bool
 	FollowupMode bool
@@ -42,11 +50,17 @@ type SessionEnv struct {
 	Instance string // LORE_SESSION_INSTANCE
 	Slug     string // LORE_SESSION_SLUG
 	Type     string // LORE_SESSION_TYPE: spec|implement|chat
+
+	// RoutingOverrides is a per-dispatch role→model map exported as
+	// LORE_MODEL_<ROLE> — the resolver's top-precedence env layer (tranche-1 D2:
+	// per-run direction always wins). This is delivery only; no resolver change.
+	RoutingOverrides map[string]string
 }
 
-// vars returns the LORE_SESSION_* assignments for a populated identity. Empty
-// fields are omitted so a partially-populated identity never exports a blank
-// var (a downstream `[ -n "$LORE_SESSION_INSTANCE" ]` gate stays meaningful).
+// vars returns the LORE_SESSION_* assignments for a populated identity, followed
+// by one LORE_MODEL_<ROLE> per routing override. Empty fields are omitted so a
+// partially-populated identity never exports a blank var (a downstream
+// `[ -n "$LORE_SESSION_INSTANCE" ]` gate stays meaningful).
 func (s SessionEnv) vars() []string {
 	var out []string
 	if s.Instance != "" {
@@ -58,7 +72,32 @@ func (s SessionEnv) vars() []string {
 	if s.Type != "" {
 		out = append(out, "LORE_SESSION_TYPE="+s.Type)
 	}
+	// Sort roles for a deterministic env order. Each role→model becomes
+	// LORE_MODEL_<ROLE> with the role uppercased and hyphens mapped to
+	// underscores — byte-identical to scripts/lib.sh resolve_model_for_role's
+	// env_var construction, so a hyphenated class-qualified role (worker-mechanical
+	// → LORE_MODEL_WORKER_MECHANICAL) names the same var the resolver reads.
+	roles := make([]string, 0, len(s.RoutingOverrides))
+	for role := range s.RoutingOverrides {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		model := s.RoutingOverrides[role]
+		if role == "" || model == "" {
+			continue // never export a blank var; the env layer reads "" as unset
+		}
+		out = append(out, "LORE_MODEL_"+modelEnvSuffix(role)+"="+model)
+	}
 	return out
+}
+
+// modelEnvSuffix maps a role id to the LORE_MODEL_ env-var suffix: uppercase and
+// hyphens to underscores. Mirrors scripts/lib.sh (uppercase + `tr '-' '_'`) so a
+// hyphenated role resolves to a valid shell identifier that the resolver's env
+// layer reads back exactly.
+func modelEnvSuffix(role string) string {
+	return strings.ToUpper(strings.ReplaceAll(role, "-", "_"))
 }
 
 // StartSessionShimCmd maps a descriptor onto the existing StartTerminalCmd. It
