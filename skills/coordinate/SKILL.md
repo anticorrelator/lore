@@ -147,5 +147,6 @@ The coordinator verb namespace is a candidate sibling item, scoped by evidence f
 
 - `lore work note <slug> --text` — session-log appends without the /work skill or hand-editing notes.md
 - a ledger-row append verb, if hand-edited rows ever drift from the pinned vocabulary in practice
+- `lore session wait <slug> [--until closed|needs_input] [--timeout <dur>]` — blocking journal read so a coordinator's harness can background it and be re-invoked on session events instead of polling awake or leaning on the human as its alarm clock (hand-rolled 2026-07-05: a background grep loop on events.jsonl during the coordination-arc dogfood)
 
 If a coordinator-specific *event type* ever earns a place in the session journal, it lands as a one-token vocabulary extension inside the sole writer (`session-event-append.sh`) plus a contract-doc amendment — never a second writer.
