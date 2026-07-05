@@ -1,0 +1,254 @@
+{
+  "harness": "claude-code",
+  "probed_at": "2026-07-05T07:59:12.923160+00:00",
+  "binary_version": "2.1.201 (Claude Code)",
+  "model_used": "haiku",
+  "tty_size": "120x40",
+  "composer_signature": {
+    "matcher": "a row matching ^\\s*[❯>](\\s|$) flanked by >=2 full-width rules (^─{80,}$); cursor sits on the prompt row",
+    "raw_rows": [
+      " ▎ continue on Fable 5 with usage credits. Fable 5 draws down usage faster than Opus 4.8. Learn more",
+      " ▎ (https://support.claude.com/en/articles/15424964-claude-fable-5-promotional-access)",
+      "                                                                                   auto mode unavailable for this model",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      "❯",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      "  ctx 0%                                                                                                            /rc",
+      "  ← for agents"
+    ],
+    "cursor": [
+      2,
+      36
+    ],
+    "prompt_row_index": 36,
+    "rule_row_indices": [
+      35,
+      37
+    ],
+    "cursor_on_prompt_row": true,
+    "composer_detected": true,
+    "stable_within_session": true,
+    "dialogs_seen_at_startup": [],
+    "stability": "verified across 2 idle passes in-session; cross-launch flagged for confirm"
+  },
+  "permission_prompt_signature": {
+    "induced_by": "echo probe-ok -> AUTO-APPROVED (safe allowlist); touch PERM_PROBE_MARKER -> modal",
+    "echo_probe": {
+      "command": "echo probe-ok",
+      "auto_approved_no_modal": true,
+      "evidence_rows": [
+        "  Ran 1 shell command                                                                                                   ",
+        "⏺ Done — probe-ok command executed successfully.                                                                        ",
+        "✻ Baked for 4s                                                                                                          ",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "❯                                                                                                                       ",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ctx 16%                                                                                                           /rc ",
+        "  ← for agents                                                                                                          "
+      ]
+    },
+    "matcher": "bottom-region rows with 'Do you want to proceed?' (or footer 'Esc to cancel · Tab to amend · ctrl+e to explain') AND >=2 numbered options ('❯ 1. Yes' / '2. …' / '3. No'); modal header is the tool name ('Bash command'). Scrollback-safe: keyed on the bottom 14 rows.",
+    "raw_rows": [
+      "❯ Run this exact shell command: echo probe-ok",
+      "  Ran 1 shell command",
+      "⏺ Done — probe-ok command executed successfully.",
+      "✻ Baked for 4s",
+      "❯ Run this exact shell command: touch PERM_PROBE_MARKER",
+      "  Running 1 shell command…",
+      "  ⎿  $ touch PERM_PROBE_MARKER",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      " Bash command",
+      "   touch PERM_PROBE_MARKER",
+      "   Create PERM_PROBE_MARKER file",
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. Yes, and always allow access to probe-env-claude/ from this project",
+      "   3. No",
+      " Esc to cancel · Tab to amend · ctrl+e to explain"
+    ],
+    "looks_like_permission_prompt": true,
+    "detection_note": "Captured live via the 'touch PERM_PROBE_MARKER' forcing command (see raw_rows). The run's own boolean was a false-negative from a scrollback veto in the heuristic; heuristic corrected to _rows_look_like_permission_modal and re-verified True against these exact raw_rows (and False against composer/echo rows)."
+  },
+  "modal_mode_sequences": {
+    "hide_cursor_25l": {
+      "count": 34,
+      "samples": [
+        "\\x1b[?25l"
+      ]
+    },
+    "show_cursor_25h": {
+      "count": 33,
+      "samples": [
+        "\\x1b[?25h"
+      ]
+    },
+    "any_decset": {
+      "count": 142,
+      "samples": [
+        "\\x1b[?1000h",
+        "\\x1b[?1002h",
+        "\\x1b[?1003h",
+        "\\x1b[?1006h",
+        "\\x1b[?2026h",
+        "\\x1b[?25h"
+      ]
+    },
+    "any_decrst": {
+      "count": 139,
+      "samples": [
+        "\\x1b[?2026l",
+        "\\x1b[?25l"
+      ]
+    }
+  },
+  "submit_sequence": "\\r (0x0d, CR) — submits; verified submitted=True (composer empties, spinner appears)",
+  "newline_sequence": "\\n (0x0a, LF) inserts a newline WITHOUT submitting; also newline-only: alt_enter=\\x1b\\x0d, csi_u_shift_enter=\\x1b[13;2u, backslash_enter=\\\\x0d, shift_enter_xterm=\\x1b[27;2;13~, raw_linefeed_lf=\\x0a. NOTE: only \\r (CR) submits — raw \\n does NOT submit in this harness.",
+  "honors_bracketed_paste": {
+    "found": true,
+    "in_logs": [
+      "shared_startup.log"
+    ]
+  },
+  "paste_multiline_semantics": "one multiline composer entry, needs trailing \\r to submit",
+  "mid_generation_inject": {
+    "ping_in_live_composer": false,
+    "ping_submitted_as_message": true,
+    "model_answered_ping": true,
+    "count_completed_before_ping": true,
+    "interrupted_generation": false,
+    "verdict": "queued_and_submitted_as_next_message",
+    "final_rows": [
+      "⏺ 34                                                                                                                    ",
+      "  35                                                                                                                    ",
+      "  36                                                                                                                    ",
+      "  37                                                                                                                    ",
+      "  38                                                                                                                    ",
+      "  39                                                                                                                    ",
+      "  40                                                                                                                    ",
+      "✻ Cooked for 1s                                                                                                         ",
+      "❯ PING-MIDGEN                                                                                                           ",
+      "⏺ I received your PING-MIDGEN signal. What would you like me to help you with?                                          ",
+      "✻ Sautéed for 2s                                                                                                        ",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      "❯                                                                                                                       ",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      "  ctx 16%                                                                                                           /rc ",
+      "  ← for agents                                                                                                          "
+    ]
+  },
+  "graceful_exit_sequence": {
+    "attempts": [
+      {
+        "send": "\\x03\\x03 (Ctrl-C x2, ~0.4s apart)",
+        "exit_hint_after_first": false,
+        "dead": true
+      }
+    ],
+    "graceful_sequence": "\\x03\\x03 (Ctrl-C twice, sent ~0.4s apart)"
+  },
+  "open_questions": [
+    "P1 stability claimed in-session only; cross-launch verification (2 fresh launches) deferred to keep session count at the directed 3",
+    "P3 vs settled design premise: the 'newline-as-submit trap' holds for \\r (CR) but NOT for raw \\n (LF) in claude-code — LF inserts a composer newline. Bracketed-paste (PasteEncode) is still the robust multiline transport because it makes both CR and LF literal; but a naive \\n-joined payload terminated by one \\r would land as a single multiline entry here, not N partial prompts. Cross-harness variance is exactly why the row is per-harness.",
+    "P2 modal-scoped escape sequences (bytes emitted while the modal renders) show NO DECSCUSR cursor-style ('CSI n q') and NO ?2004 toggle — only ?25l/?25h cursor hide/show, mouse modes ?1000/1002/1003/1006, and ?2026 synchronized-output. So ghostty's CursorPasswordInput heuristic (keyed on cursor-style) would NOT trip on this modal; confirm ghostty's exact heuristic input before relying on this."
+  ],
+  "_p3_detail": {
+    "carriage_return": {
+      "bytes": "\\r (0x0d)",
+      "submitted": true,
+      "spinner_appeared_after": true,
+      "composer_input_before": [
+        "❯ submit-probe"
+      ],
+      "composer_input_after": [
+        "❯"
+      ],
+      "evidence_rows": [
+        " ▎ (https://support.claude.com/en/articles/15424964-claude-fable-5-promotional-access)                                  ",
+        "❯ submit-probe                                                                                                          ",
+        "✶ Musing… (3s · thinking)                                                                                               ",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "❯                                                                                                                       ",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ctx 0%                                                                                                            /rc ",
+        "  ← for agents                                                                                                          "
+      ]
+    },
+    "newline_chords": {
+      "alt_enter": {
+        "bytes": "\\x1b\\x0d",
+        "text_retained_in_composer": true,
+        "input_rows_before": 1,
+        "input_rows_after": 2,
+        "composer_input_after": [
+          "❯ alpha",
+          ""
+        ],
+        "verdict": "newline_inserted"
+      },
+      "csi_u_shift_enter": {
+        "bytes": "\\x1b[13;2u",
+        "text_retained_in_composer": true,
+        "input_rows_before": 1,
+        "input_rows_after": 2,
+        "composer_input_after": [
+          "❯ alpha",
+          ""
+        ],
+        "verdict": "newline_inserted"
+      },
+      "backslash_enter": {
+        "bytes": "\\\\x0d",
+        "text_retained_in_composer": true,
+        "input_rows_before": 1,
+        "input_rows_after": 2,
+        "composer_input_after": [
+          "❯ alpha",
+          ""
+        ],
+        "verdict": "newline_inserted"
+      },
+      "shift_enter_xterm": {
+        "bytes": "\\x1b[27;2;13~",
+        "text_retained_in_composer": true,
+        "input_rows_before": 1,
+        "input_rows_after": 2,
+        "composer_input_after": [
+          "❯ alpha",
+          ""
+        ],
+        "verdict": "newline_inserted"
+      },
+      "raw_linefeed_lf": {
+        "bytes": "\\x0a",
+        "text_retained_in_composer": true,
+        "input_rows_before": 1,
+        "input_rows_after": 2,
+        "composer_input_after": [
+          "❯ alpha",
+          ""
+        ],
+        "verdict": "newline_inserted"
+      }
+    }
+  },
+  "_p4_detail": {
+    "harness_enabled_2004h": {
+      "found": true,
+      "in_logs": [
+        "shared_startup.log"
+      ]
+    },
+    "payload": "\\x1b[200~line-one\\x0aline-two\\x1b[201~",
+    "both_lines_in_composer": true,
+    "auto_submitted": false,
+    "composer_rows_after": [
+      "                                                                                                 ctrl+g to edit in Nvim ",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      "❯ line-one                                                                                                              ",
+      "  line-two                                                                                                              ",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      "  ctx 0%                                                                                                            /rc "
+    ],
+    "semantics": "one multiline composer entry, needs trailing \\r to submit"
+  }
+}

@@ -1,0 +1,186 @@
+{
+  "harness": "codex",
+  "probed_at": "2026-07-05T07:55:00.366144+00:00",
+  "binary_version": "codex-cli 0.142.5",
+  "model_used": "gpt-5.4-mini low",
+  "tty_size": "120x40",
+  "composer_signature": {
+    "matcher": "footer status row matches (?:minimal|low|medium|high|xhigh)\\s+\u00b7\\s AND an input row (at/above it) begins with '\u203a' \u2014 the '\u203a' glyph alone is shared with codex selection menus (incl. trust modal), so the footer middot+cwd is the disambiguator",
+    "footer_regex": "(minimal|low|medium|high|xhigh)\\s+\u00b7\\s",
+    "input_glyph": "\u203a",
+    "raw_rows": [
+      "\u203a Run /review on my current changes",
+      "",
+      "  gpt-5.4-mini low \u00b7 /private/tmp/claude-501/-Users-dustinqngo-work-lore/618e24b6-58ad-4aa7-a3e7-60c6b2023092/scratchpa\u2026"
+    ],
+    "cursor_on_input_row": [
+      2,
+      12
+    ],
+    "welcome_banner_present_at_start": true,
+    "welcome_banner_note": "'OpenAI Codex (vX)' box is present at fresh launch but scrolls off after the first submitted message (no alt-screen), so it is NOT a durable composer anchor \u2014 the footer status line is.",
+    "stability": "footer identical across 2 launches: True",
+    "launch_1_footer": "gpt-5.4-mini low \u00b7 /private/tmp/claude-501/-Users-dustinqngo-work-lore/618e24b6-58ad-4aa7-a3e7-60c6b2023092/scratchpa\u2026",
+    "launch_2_footer": "gpt-5.4-mini low \u00b7 /private/tmp/claude-501/-Users-dustinqngo-work-lore/618e24b6-58ad-4aa7-a3e7-60c6b2023092/scratchpa\u2026",
+    "graceful_exit_used": "Ctrl-C"
+  },
+  "permission_prompt_signature": {
+    "phase_a_default_mode": {
+      "induced_by": "prompt 'Run this exact shell command: echo probe-ok'",
+      "active_approval_mode": "default (no -a / -s override; config sets neither)",
+      "modal_seen": false,
+      "observed": "no modal \u2014 trusted command auto-approved",
+      "final_rows": [
+        "  Tip: New Use /fast to enable our fastest inference with increased plan usage.",
+        "\u203a Run this exact shell command: echo probe-ok",
+        "\u2022 You have 4 usage limit resets available. Run /usage to use one.",
+        "\u26a0 MCP startup interrupted. The following servers were not initialized: codex_apps",
+        "\u2022 Running the requested shell command exactly as given.",
+        "\u2022 Ran echo probe-ok",
+        "  \u2514 probe-ok",
+        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+        "\u2022 probe-ok",
+        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+        "\u203a Write tests for @filename",
+        "  gpt-5.4-mini low \u00b7 /private/tmp/claude-501/-Users-dustinqngo-work-lore/618e24b6-58ad-4aa7-a3e7-60c6b2023092/scratchpa\u2026"
+      ]
+    },
+    "phase_b_untrusted_mode": {
+      "induced_by": "prompt 'touch probe-approval-check.txt' under -a untrusted",
+      "active_approval_mode": "untrusted (-a untrusted): non-trusted commands escalate",
+      "modal_seen": true,
+      "matcher": "an approval modal shows a 'Would you like to run the following command?' header, a '$ <cmd>' line, and a numbered option list with the '\u203a' glyph on the selected row ('\u203a 1. Yes, proceed (y)' / 2. Yes+don't-ask / 3. No (esc)), plus a 'Press enter to confirm or esc to cancel' footer. The composer footer status line is NOT present while the modal owns the screen \u2014 its absence + this option list is the readiness-gate 'blocked' signal",
+      "modal_rows": [
+        "\u203a Run this exact shell command: touch probe-approval-check.txt",
+        "\u2022 Running touch probe-approval-check.txt",
+        "  Would you like to run the following command?",
+        "  $ touch probe-approval-check.txt",
+        "\u203a 1. Yes, proceed (y)",
+        "  2. Yes, and don't ask again for commands that start with `touch probe-approval-check.txt` (p)",
+        "  3. No, and tell Codex what to do differently (esc)",
+        "  Press enter to confirm or esc to cancel"
+      ],
+      "all_nonempty_rows": [
+        "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",
+        "\u2502 >_ OpenAI Codex (v0.142.5)                           \u2502",
+        "\u2502                                                      \u2502",
+        "\u2502 model:     gpt-5.4-mini low   /model to change       \u2502",
+        "\u2502 directory: /private/tmp/\u2026/scratchpad/probe-env-codex \u2502",
+        "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",
+        "  Tip: Try the Codex App. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true",
+        "\u2022 You have 4 usage limit resets available. Run /usage to use one.",
+        "\u203a Run this exact shell command: touch probe-approval-check.txt",
+        "\u26a0 MCP startup interrupted. The following servers were not initialized: codex_apps",
+        "\u2022 I\u2019m going to run the exact shell command in the workspace and confirm the file was created.",
+        "\u2022 Running touch probe-approval-check.txt",
+        "  Would you like to run the following command?",
+        "  Environment: local",
+        "  $ touch probe-approval-check.txt",
+        "\u203a 1. Yes, proceed (y)",
+        "  2. Yes, and don't ask again for commands that start with `touch probe-approval-check.txt` (p)",
+        "  3. No, and tell Codex what to do differently (esc)",
+        "  Press enter to confirm or esc to cancel"
+      ]
+    }
+  },
+  "modal_mode_sequences": {
+    "induced_under": "untrusted mode approval modal",
+    "scan": {
+      "bracketed_paste_on(?2004h)": "absent",
+      "bracketed_paste_off(?2004l)": "absent",
+      "alt_screen_enter(?1049h)": "absent",
+      "alt_screen_exit(?1049l)": "absent",
+      "cursor_hide(?25l)": "present",
+      "cursor_show(?25h)": "present",
+      "focus_events(?1004h)": "absent",
+      "sync_output_begin(?2026h)": "present",
+      "sync_output_end(?2026l)": "present",
+      "kitty_kbd_push(>7u)": "absent"
+    },
+    "csi_cursor_style_q": [
+      "1b5b302071"
+    ],
+    "note": "scan of the last ~12KB of raw frames spanning the modal render; codex uses NO alt-screen (?1049 absent) \u2014 the modal is drawn inline over the main screen via direct cursor addressing + ?2026 sync"
+  },
+  "submit_sequence": {
+    "sequence": "\\r (0x0D)",
+    "evidence": {
+      "bytes": "\\r",
+      "bytes_hex": "0d",
+      "pre_submit_composer": "\u203a hi\n",
+      "post_submit_composer": "\u203a Find and fix a bug in @filename\n",
+      "hi_left_composer": true,
+      "hi_in_transcript": true,
+      "looks_submitted": true
+    }
+  },
+  "newline_sequence": {
+    "winner": {
+      "candidate": "Ctrl-J (\\n / 0x0A)",
+      "bytes": "\n",
+      "bytes_hex": "0a",
+      "before_composer": "\u203a AAA\n",
+      "after_composer": "\u203a AAA\n  BBB\n",
+      "cursor_y_delta": 1,
+      "looks_submitted": false,
+      "looks_newline_inserted": true
+    },
+    "all_candidates_tried": [
+      {
+        "candidate": "Ctrl-J (\\n / 0x0A)",
+        "bytes": "\n",
+        "bytes_hex": "0a",
+        "before_composer": "\u203a AAA\n",
+        "after_composer": "\u203a AAA\n  BBB\n",
+        "cursor_y_delta": 1,
+        "looks_submitted": false,
+        "looks_newline_inserted": true
+      }
+    ],
+    "note": "codex pushes the kitty keyboard protocol (ESC[>7u) at startup, so Shift+Enter is expected to arrive as ESC[13;2u; Ctrl-J (0x0A) is the classic newline-without-submit. Winner = first chord that inserted a newline without submitting."
+  },
+  "honors_bracketed_paste": {
+    "composer_emits_2004h_at_ready": true,
+    "evidence": "ESC[?2004h present in raw startup log"
+  },
+  "paste_multiline_semantics": {
+    "sent": "ESC[200~line-one<LF>line-two ESC[201~",
+    "composer_after_paste": "\u203a line-one\n  line-two\n",
+    "both_lines_held_in_one_composer_entry": true,
+    "auto_submitted_on_close_bracket": false,
+    "needs_trailing_cr_to_submit": true,
+    "conclusion": "held as one multiline composer entry; trailing CR submits"
+  },
+  "mid_generation_inject": {
+    "generation_started_before_inject": true,
+    "injected": "PING-MIDGEN\\r during streaming",
+    "ping_in_composer_after": true,
+    "ping_submitted_as_turn": false,
+    "mid_stream_semantics": "buffered \u2014 text landed in composer as an unsent draft; the trailing CR did NOT submit while a turn was active",
+    "buffered_draft_submits_with_fresh_CR_when_idle": true,
+    "composer_stays_editable_during_stream": true,
+    "streaming_shows_esc_to_interrupt": true,
+    "final_nonempty_tail": [
+      "  29",
+      "  30",
+      "  31",
+      "  32",
+      "  33",
+      "  34",
+      "  35",
+      "  36",
+      "  37",
+      "  38",
+      "  39",
+      "\u2022 PONG",
+      "\u203a Implement {feature}",
+      "  esc again to edit previous message"
+    ]
+  },
+  "graceful_exit_sequence": {
+    "sequence": "Ctrl-C (0x03) on an empty composer",
+    "observed": "graceful_close terminated the child via: Ctrl-C",
+    "note": "single Ctrl-C exits from an idle empty composer (verified in P1 x2). With text in the composer the first Ctrl-C clears it, so send up to two. On exit codex pops the kitty keyboard flags (ESC[<u) and shows a brief 'Shutting down...' line \u2014 no alt-screen to restore."
+  },
+  "open_questions": []
+}

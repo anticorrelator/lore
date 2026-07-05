@@ -1,0 +1,304 @@
+{
+  "harness": "opencode",
+  "probed_at": "2026-07-05T07:56:26Z",
+  "binary_version": "1.14.30",
+  "model_used": "openai/gpt-4o-mini",
+  "tty_size": "120x40",
+  "composer_signature": {
+    "matcher": "composer-ready := (row matches /\u2579\u2580{5,}/  bottom border) AND (some row contains 'commands' key-hint) AND (left border '\u2503' present); empty-and-ready adds a row containing 'Ask anything...'",
+    "raw_rows_launch1": [
+      "13|                                                                          \u2584",
+      "14|                                         \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2584 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580",
+      "15|                                         \u2580  \u2580 \u2580  \u2580 \u2580\u2580\u2580\u2580 \u2580  \u2580 \u2580    \u2580  \u2580 \u2580  \u2580 \u2580\u2580\u2580\u2580",
+      "16|                                         \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580",
+      "19|                       \u2503",
+      "20|                       \u2503  Ask anything... \"Fix broken tests\"",
+      "21|                       \u2503",
+      "22|                       \u2503  Build \u00b7 GPT-4o mini OpenAI",
+      "23|                       \u2579\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580",
+      "24|                                                                       tab agents  ctrl+p commands",
+      "38|  /private/var/folders/xb/t60rdh1d4y3d37s881p75s1w0000gn/T/opencode-probe-9cv818of:main                        1.14.30"
+    ],
+    "raw_rows_launch2": [
+      "13|                                                                          \u2584",
+      "14|                                         \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2584 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580",
+      "15|                                         \u2580  \u2580 \u2580  \u2580 \u2580\u2580\u2580\u2580 \u2580  \u2580 \u2580    \u2580  \u2580 \u2580  \u2580 \u2580\u2580\u2580\u2580",
+      "16|                                         \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580",
+      "19|                       \u2503",
+      "20|                       \u2503  Ask anything... \"What is the tech stack of this project?\"",
+      "21|                       \u2503",
+      "22|                       \u2503  Build \u00b7 GPT-4o mini OpenAI",
+      "23|                       \u2579\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580",
+      "24|                                                                       tab agents  ctrl+p commands",
+      "38|  /private/var/folders/xb/t60rdh1d4y3d37s881p75s1w0000gn/T/opencode-probe-9cv818of:main                        1.14.30"
+    ],
+    "cursor_launch1": {
+      "x": 26,
+      "y": 20
+    },
+    "cursor_launch2": {
+      "x": 26,
+      "y": 20
+    },
+    "stability": {
+      "left_border_bar": true,
+      "bottom_border": true,
+      "hint_row_commands": true,
+      "placeholder_ask_anything": true
+    },
+    "verified_across_launches": 2,
+    "graceful_exit_observed": "single-ctrl-c",
+    "startup_mode_sequences": {
+      "bracketed-paste ENABLE": 1,
+      "cursor SHOW": 2,
+      "cursor HIDE": 6,
+      "alt-screen ENTER": 1,
+      "sync-update BEGIN": 5,
+      "sync-update END": 5,
+      "cursor-style (DECSCUSR)": 2,
+      "mouse X10": 1,
+      "mouse btn-event": 1,
+      "mouse any-event": 1,
+      "mouse SGR": 1
+    }
+  },
+  "permission_prompt_signature": {
+    "induced_by": "permission.bash=ask + prompt: Run this exact shell command: echo probe-ok",
+    "default_config_behavior": "auto-ran (no modal)",
+    "behavior_with_ask": "asked-permission",
+    "matcher": "permission-modal := a row containing '\u25b3 Permission required' AND an action row matching /Allow once\\s+Allow always\\s+Reject/",
+    "raw_rows": [
+      "1|  \u2503",
+      "2|  \u2503  Run this exact shell command: echo probe-ok",
+      "3|  \u2503",
+      "5|     $ echo probe-ok",
+      "7|     \u25a3  Build \u00b7 GPT-4o mini",
+      "30|  \u2503",
+      "31|  \u2503  \u25b3 Permission required",
+      "32|  \u2503    # Outputs the string 'probe-ok'",
+      "33|  \u2503",
+      "34|  \u2503  $ echo probe-ok",
+      "35|  \u2503",
+      "36|  \u2503",
+      "37|  \u2503   Allow once   Allow always   Reject                                 ctrl+f fullscreen  \u21c6 select  enter confirm",
+      "38|  \u2503"
+    ],
+    "esc_dismisses": true
+  },
+  "default_bash_behavior": "auto-ran (no modal)",
+  "modal_mode_sequences": {
+    "note": "modal renders in-band in the composer box; no dedicated DECSET layer",
+    "counts": {
+      "cursor SHOW": 51,
+      "cursor HIDE": 52,
+      "sync-update BEGIN": 52,
+      "sync-update END": 52
+    },
+    "verbatim_csi_dec": [
+      "b'\\x1b[?2026h'",
+      "b'\\x1b[?25l'",
+      "b'\\x1b[21;27H'",
+      "b'\\x1b[38;2;238;238;238m'",
+      "b'\\x1b[48;2;30;30;30m'",
+      "b'\\x1b[0m'",
+      "b'\\x1b[21;70H'",
+      "b'\\x1b[38;2;255;255;255m'",
+      "b'\\x1b[?25h'",
+      "b'\\x1b[?2026l'",
+      "b'\\x1b[38;2;128;128;128m'",
+      "b'\\x1b[29;34H'",
+      "b'\\x1b[38;2;245;167;66m'",
+      "b'\\x1b[48;2;10;10;10m'",
+      "b'\\x1b[29;40H'",
+      "b'\\x1b[29;44H'",
+      "b'\\x1b[29;63H'",
+      "b'\\x1b[1;3H'",
+      "b'\\x1b[38;2;92;156;245m'",
+      "b'\\x1b[1;4H'",
+      "b'\\x1b[48;2;20;20;20m'",
+      "b'\\x1b[2;3H'",
+      "b'\\x1b[2;4H'",
+      "b'\\x1b[2;6H'",
+      "b'\\x1b[2;49H'",
+      "b'\\x1b[3;3H'",
+      "b'\\x1b[3;4H'",
+      "b'\\x1b[5;6H'",
+      "b'\\x1b[5;8H'",
+      "b'\\x1b[5;9H'",
+      "b'\\x1b[5;14H'",
+      "b'\\x1b[14;42H'",
+      "b'\\x1b[14;62H'",
+      "b'\\x1b[15;42H'",
+      "b'\\x1b[15;62H'",
+      "b'\\x1b[16;42H'",
+      "b'\\x1b[16;62H'",
+      "b'\\x1b[17;42H'",
+      "b'\\x1b[17;62H'",
+      "b'\\x1b[20;24H'",
+      "b'\\x1b[21;24H'",
+      "b'\\x1b[22;24H'",
+      "b'\\x1b[23;24H'",
+      "b'\\x1b[24;24H'",
+      "b'\\x1b[25;72H'",
+      "b'\\x1b[25;84H'",
+      "b'\\x1b[34;3H'",
+      "b'\\x1b[34;4H'",
+      "b'\\x1b[35;3H'",
+      "b'\\x1b[35;4H'",
+      "b'\\x1b[36;3H'",
+      "b'\\x1b[36;4H'",
+      "b'\\x1b[37;3H'",
+      "b'\\x1b[37;4H'",
+      "b'\\x1b[37;6H'",
+      "b'\\x1b[37;11H'",
+      "b'\\x1b[37;12H'",
+      "b'\\x1b[37;13H'",
+      "b'\\x1b[37;14H'",
+      "b'\\x1b[37;25H'"
+    ]
+  },
+  "submit_sequence": "\\r",
+  "newline_sequence": "\\x1b\\r",
+  "honors_bracketed_paste": "YES \u2014 advertises ESC[?2004h at composer: True; 200~..201~ wrap with embedded \\n lands as one multi-line composer entry: True; single trailing \\r submits it as one message: True",
+  "paste_multiline_semantics": "HELD as one multi-line composer entry (needs trailing submit)",
+  "mid_generation_inject": "SUBMITTED-QUEUED (held during gen, auto-sent as 2nd message after gen finished)",
+  "graceful_exit_sequence": {
+    "recommended": "/exit + \\r  (explicit 'Exit the app' command; never ambiguous)",
+    "ctrl_c_single_from_idle": "exited",
+    "ctrl_d_from_idle": "exited",
+    "slash_exit_submits": "exited",
+    "slash_exit_palette_row": [
+      "                       \u2503 /exit      Exit the app                                                 \u2503",
+      "                       \u2503  /exit"
+    ],
+    "interrupt_vs_exit": "During an ACTIVE generation the footer shows 'esc interrupt' \u2014 ESC interrupts the running turn (does NOT exit). ctrl-c from a clean idle composer exits. Distinguish by screen state before sending.",
+    "note": "scripts/session-close.sh is lore's session-substrate close-request enqueue, not the harness keystroke exit; these are the harness chords.",
+    "raw_results": {
+      "ctrl_c_single_from_idle": "exited",
+      "ctrl_d_from_idle": "exited",
+      "slash_exit_palette_row": [
+        "                       \u2503 /exit      Exit the app                                                 \u2503",
+        "                       \u2503  /exit"
+      ],
+      "slash_exit_submits": "exited"
+    }
+  },
+  "open_questions": [
+    "Composer signature verified only with openai/gpt-4o-mini at 120x40; the status row text (`Build \u00b7 <model> <provider>`) is model/provider-dependent, but the proposed matcher anchors on model-independent glyphs (\u2579\u2580+ border, '\u2503' left border, 'commands' hint row). Confirm the anchor glyphs hold on another provider/model and at a different tty size.",
+    "Mid-generation QUEUED behavior verified for a plain-text injection; confirm a slash-command or bracketed-paste multiline injection queues identically."
+  ],
+  "modal_mode_sequences_startup": {
+    "bracketed-paste ENABLE": 1,
+    "cursor SHOW": 2,
+    "cursor HIDE": 6,
+    "alt-screen ENTER": 1,
+    "sync-update BEGIN": 5,
+    "sync-update END": 5,
+    "cursor-style (DECSCUSR)": 2,
+    "mouse X10": 1,
+    "mouse btn-event": 1,
+    "mouse any-event": 1,
+    "mouse SGR": 1
+  },
+  "launch_distractor_overlay": {
+    "name": "Update Available",
+    "arrival": "asynchronous, ~6s post-launch (background update check)",
+    "dismiss": "ESC (verified: overlay leaves, composer placeholder returns)",
+    "input_blocking": "overlays composer; input reaches composer after ESC dismiss",
+    "dismissed_each_launch": [
+      true,
+      true
+    ],
+    "env_dependent": "only shown when a newer release exists"
+  },
+  "submit_newline_probe": {
+    "typed_marker_visible": true,
+    "alt_enter": {
+      "chord": "b'\\x1b\\r'",
+      "result": "NEWLINE-or-edit (marker preserved, composer changed)",
+      "cursor_y": 20
+    },
+    "shift_enter_csiu": {
+      "chord": "b'\\x1b[13;2u'",
+      "result": "NEWLINE-or-edit (marker preserved, composer changed)",
+      "cursor_y": 21
+    },
+    "plain_cr": {
+      "chord": "b'\\r'",
+      "result": "SUBMITTED (marker left composer)",
+      "cursor_y": 34
+    },
+    "graceful_exit_observed": "single-ctrl-c"
+  },
+  "bracketed_paste_probe": {
+    "advertises_2004h_at_composer": true,
+    "after_band_has_both_lines": true,
+    "reached_transcript_without_submit": false,
+    "semantics": "HELD as one multi-line composer entry (needs trailing submit)",
+    "composer_band_after_paste": [
+      "                       \u2503",
+      "                       \u2503  paste-line-one",
+      "                       \u2503  paste-line-two",
+      "                       \u2503",
+      "                       \u2503  Build \u00b7 GPT-4o mini OpenAI",
+      "                       \u2579\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580",
+      "                                                                       tab agents  ctrl+p commands",
+      "  /private/var/folders/xb/t60rdh1d4y3d37s881p75s1w0000gn/T/opencode-probe-e3qs9uoq:main                        1.14.30"
+    ],
+    "trailing_cr_submits_single": true,
+    "graceful_exit_observed": "single-ctrl-c"
+  },
+  "mid_generation_probe": {
+    "generation_began_before_inject": true,
+    "injected_marker": "PING-MIDGEN",
+    "marker_in_live_composer": false,
+    "marker_in_transcript": true,
+    "got_second_assistant_response": true,
+    "first_gen_reached_40": true,
+    "live_composer_input_after": [],
+    "classification": "SUBMITTED-QUEUED (held during gen, auto-sent as 2nd message after gen finished)",
+    "final_screen_nonblank": [
+      "0|     20",
+      "1|     21",
+      "2|     22",
+      "3|     23",
+      "4|     24",
+      "5|     25",
+      "6|     26",
+      "7|     27",
+      "8|     28",
+      "9|     29",
+      "10|     30",
+      "11|     31",
+      "12|     32",
+      "13|     33",
+      "14|     34",
+      "15|     35",
+      "16|     36",
+      "17|     37",
+      "18|     38",
+      "19|     39",
+      "20|     40",
+      "22|     \u25a3  Build \u00b7 GPT-4o mini \u00b7 3.2s",
+      "24|  \u2503",
+      "25|  \u2503  PING-MIDGEN",
+      "26|  \u2503",
+      "28|     It looks like you've sent a \"PING-MIDGEN.\" If there's a specific task related to this command or if you need",
+      "29|     assistance with something else, please let me know!",
+      "31|     \u25a3  Build \u00b7 GPT-4o mini \u00b7 3.0s",
+      "33|  \u2503",
+      "34|  \u2503",
+      "35|  \u2503",
+      "36|  \u2503  Build \u00b7 GPT-4o mini OpenAI",
+      "37|  \u2579\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580",
+      "38|                                                                                  16.5K (13%) \u00b7 $0.00  ctrl+p commands"
+    ],
+    "graceful_exit_observed": "single-ctrl-c",
+    "native_queued_badge_seen": true,
+    "esc_interrupt_hint_seen": true
+  },
+  "honors_bracketed_paste_detail": {
+    "advertises_2004h": true,
+    "wrap_lands_multiline": true
+  }
+}
