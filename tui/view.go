@@ -545,7 +545,16 @@ func (m model) renderStatusBar(width int) string {
 	// underlying state's and return before the override ladder (the modal
 	// hides whatever the flash/banner would refer to).
 	if m.settingsActive && m.settingsPanel != nil {
-		return dimS.Render(pad("  " + strings.Join(m.statusBarHints(kmSettingsModal), sep)))
+		hints := m.settingsPanel.StatusHints()
+		rendered := make([]string, 0, len(hints))
+		for _, hint := range hints {
+			if hint.Key == "" {
+				rendered = append(rendered, dimS.Render(hint.Label))
+				continue
+			}
+			rendered = append(rendered, style.KeyHint.Render(hint.Key)+" "+dimS.Render(hint.Label))
+		}
+		return dimS.Render(pad("  " + strings.Join(rendered, sep)))
 	}
 
 	if m.flashErr != "" {

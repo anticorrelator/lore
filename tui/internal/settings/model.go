@@ -1055,6 +1055,59 @@ func (m *SettingsModel) Closed() bool { return m.closed }
 // focused the host must defer so the user can type the letter literally.
 func (m *SettingsModel) FocusConsumesRunes() bool { return m.nav.consumesNavRunes() }
 
+// StatusHints returns the mode-aware hint set the host renders in the modal
+// status bar. Leaf widgets provide their active-mode verbs; the model adds
+// only global suffixes whose handlers are currently reachable.
+func (m *SettingsModel) StatusHints() []StatusHint {
+	if m.schemaErr != nil {
+		return []StatusHint{{Key: "esc", Label: "close"}}
+	}
+
+	focused := m.nav.focusedWidget()
+	if focused == nil {
+		return m.genericStatusHints(nil)
+	}
+
+	provider, ok := focused.(HintProvider)
+	if !ok {
+		return m.genericStatusHints(focused)
+	}
+	hints := append([]StatusHint(nil), provider.StatusHints()...)
+	// Row navigation is the baseline gesture of the whole panel: prepend
+	// it whenever the focused widget is not consuming j/k as input (i.e.
+	// the user is at row-selection level, not inside an editor mode).
+	// Widget hints keep the front seats for their mode verbs otherwise.
+	if !widgetConsumesNavRunes(focused) && !hasStatusHintKey(hints, "j/k") {
+		hints = append([]StatusHint{{Key: "j/k", Label: "move"}}, hints...)
+	}
+	return m.appendStatusSuffixes(hints, focused)
+}
+
+func (m *SettingsModel) genericStatusHints(focused FieldWidget) []StatusHint {
+	hints := []StatusHint{
+		{Key: "j/k", Label: "move"},
+		{Key: "enter", Label: "open"},
+	}
+	return m.appendStatusSuffixes(hints, focused)
+}
+
+func (m *SettingsModel) appendStatusSuffixes(hints []StatusHint, focused FieldWidget) []StatusHint {
+	if m.lastWrite.armed && !m.nav.consumesNavRunes() {
+		hints = appendStatusHintIfMissing(hints, StatusHint{Key: "U", Label: "undo"})
+	}
+	if m.statusEscCloses(focused, hints) {
+		hints = appendStatusHintIfMissing(hints, StatusHint{Key: "esc", Label: "close"})
+	}
+	return hints
+}
+
+func (m *SettingsModel) statusEscCloses(focused FieldWidget, hints []StatusHint) bool {
+	if hasStatusHintKey(hints, "esc") || m.limitDotPath != "" {
+		return false
+	}
+	return focused == nil || !widgetConsumesNavRunes(focused)
+}
+
 // Update routes keystrokes to the focused widget and translates the
 // resulting FieldIntent into write-routing calls.
 //
