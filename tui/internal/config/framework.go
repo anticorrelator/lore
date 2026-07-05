@@ -115,11 +115,22 @@ func loadUserFrameworkConfig() userFrameworkConfig {
 // install_paths and resolver helpers touch. Other framework fields are
 // ignored here.
 type capabilitiesProfile struct {
-	DisplayName    string            `json:"display_name"`
-	Binary         string            `json:"binary"`
-	InstallPaths   map[string]string `json:"install_paths"`
-	TUILaunchFlags map[string]string `json:"tui_launch_flags"`
-	ModelRouting   modelRouting      `json:"model_routing"`
+	DisplayName    string             `json:"display_name"`
+	Binary         string             `json:"binary"`
+	InstallPaths   map[string]string  `json:"install_paths"`
+	TUILaunchFlags map[string]string  `json:"tui_launch_flags"`
+	ModelRouting   modelRouting       `json:"model_routing"`
+	Interaction    interactionProfile `json:"interaction"`
+}
+
+// interactionProfile is the per-framework interaction block. GracefulExitSequence
+// is the key sequence written to the harness's PTY to request a clean exit; it is
+// populated only once a framework's interaction contract has been probed and
+// recorded (the probe suite is a downstream deliverable). Absent today for every
+// framework, so the close ladder degrades to SIGTERM rather than guessing a
+// sequence.
+type interactionProfile struct {
+	GracefulExitSequence string `json:"graceful_exit_sequence"`
 }
 
 // modelRouting is the per-framework model-routing block. Tiers is the ordered
@@ -148,6 +159,34 @@ func LoadModelRoutingTiers(framework string) ([]string, error) {
 		return nil, fmt.Errorf("unknown framework %q (not present in adapters/capabilities.json)", framework)
 	}
 	return prof.ModelRouting.Tiers, nil
+}
+
+// HarnessGracefulExitSequence returns the harness's graceful-exit key sequence
+// for a framework from adapters/capabilities.json
+// `.frameworks[<id>].interaction.graceful_exit_sequence`, and whether the
+// framework supplies one. No framework declares it today (the interaction
+// contract is probed and recorded downstream), so this returns ("", false, nil)
+// universally — the close ladder degrades to SIGTERM explicitly rather than
+// hardcoding a per-harness exit string. Branch on the returned support flag,
+// never on the framework name. Errors only on unreadable capabilities.json or an
+// unknown framework id.
+func HarnessGracefulExitSequence(framework string) (string, bool, error) {
+	if framework == "" {
+		return "", false, fmt.Errorf("harness_graceful_exit_sequence requires a framework")
+	}
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return "", false, err
+	}
+	prof, ok := caps.Frameworks[framework]
+	if !ok {
+		return "", false, fmt.Errorf("unknown framework %q (not present in adapters/capabilities.json)", framework)
+	}
+	seq := prof.Interaction.GracefulExitSequence
+	if seq == "" {
+		return "", false, nil
+	}
+	return seq, true, nil
 }
 
 // capabilitiesFile is the top-level shape of adapters/capabilities.json.

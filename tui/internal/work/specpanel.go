@@ -181,6 +181,32 @@ func (m SpecPanelModel) NeedsInput() bool {
 	return m.needsInput
 }
 
+// QuiescentForClose is the single gate the close ladder waits on before tearing
+// a session down: true once the harness looks idle. It is deliberately the only
+// predicate the teardown path consults so a later composer-signature check can
+// replace this body without touching the ladder.
+//
+// v1 grounds it in output quiescence (no PTY output past the threshold) or a
+// finished process. That signal CANNOT distinguish "turn complete" from
+// "awaiting user input": a close-request that lands while the session is paused
+// on a post-terminus interactive prompt (e.g. a ceremony question after
+// finalize) reads as quiescent and the session is torn down mid-prompt. The
+// composer-signature check that can tell the two apart is the designated fix;
+// until it lands, teardown is gated on quiescence alone.
+func (m SpecPanelModel) QuiescentForClose() bool {
+	return m.done || m.needsInput
+}
+
+// Process returns the harness subprocess handle, or nil when no process is
+// attached (never started, or already reaped). The close ladder drives it
+// through SIGTERM→Kill escalation.
+func (m SpecPanelModel) Process() *os.Process {
+	if m.cmd == nil {
+		return nil
+	}
+	return m.cmd.Process
+}
+
 // LastOutputTime returns when the last PTY output was received.
 func (m SpecPanelModel) LastOutputTime() time.Time {
 	return m.lastOutputTime
@@ -719,7 +745,7 @@ func buildInitialPrompt(slug, title, extraContext string, shortMode, chatMode, s
 // interface — write user keystrokes, read subprocess output.
 // projectDir must be the project root (not the knowledge _work/ dir) so that
 // the /spec skill can explore the correct codebase.
-func StartTerminalCmd(slug, title, projectDir string, width, height int, extraContext string, shortMode, chatMode, skipConfirm, followupMode bool, knowledgeDir string, findingIndex int) tea.Cmd {
+func StartTerminalCmd(slug, title, projectDir string, width, height int, extraContext string, shortMode, chatMode, skipConfirm, followupMode bool, knowledgeDir string, findingIndex int, sessionEnv SessionEnv) tea.Cmd {
 	return func() (result tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -782,6 +808,7 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 		cmd := exec.Command(harnessBinary, args...)
 		cmd.Dir = projectDir
 		cmd.Env = append(os.Environ(), "LORE_FRAMEWORK="+activeFramework)
+		cmd.Env = append(cmd.Env, sessionEnv.vars()...)
 		// Do NOT set cmd.Stderr = io.Discard here: with a PTY the subprocess's
 		// stdin/stdout/stderr are all wired to the PTY slave, so claude's full
 		// TUI output (including stderr) is captured by the emulator. Discarding

@@ -55,6 +55,7 @@ teardown() {
     rm -rf "$TEST_KDIR"
   fi
   unset LORE_KNOWLEDGE_DIR
+  unset LORE_SESSION_INSTANCE LORE_SESSION_SLUG LORE_SESSION_TYPE
 }
 
 make_meta() {
@@ -415,4 +416,74 @@ assert "[implement] Done." in d["report"]
   run bash "$LORE_CLI" impl close anchored-done --json
   [ "$status" -eq 1 ]
   echo "$output" | python3 -c 'import json, sys; d = json.loads(sys.stdin.read()); assert "error" in d'
+}
+
+# --- D4 protocol-terminus close-request --------------------------------------
+# The post-telemetry step self-addresses a session close-request only inside a
+# TUI-hosted session (LORE_SESSION_* set), best-effort, and never disturbs the
+# verb's exit code, verdict, or telemetry. A completed close emits regardless of
+# whether the report exits 0 (full/legacy) or 3 (partial/none divergence); a
+# refused close (exit 1, before the emission point) emits nothing.
+
+close_request_count() {
+  local dir="$TEST_KDIR/_sessions/close-requests"
+  if [ -d "$dir" ]; then
+    find "$dir" -maxdepth 1 -name '*.json' | wc -l | tr -d ' '
+  else
+    echo 0
+  fi
+}
+
+@test "a full close inside a TUI session emits one self-addressed close-request" {
+  export LORE_SESSION_INSTANCE="tui-a1b2c3"
+  export LORE_SESSION_SLUG="anchored-done"
+  export LORE_SESSION_TYPE="implement"
+  run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
+  [ "$status" -eq 0 ]
+  [ "$(close_request_count)" -eq 1 ]
+}
+
+@test "a divergence close (exit 3) is a completed close and emits a close-request" {
+  # The session's protocol step completed — the close ran its full write sequence
+  # to a terminal verdict — so exit 3 emits, unlike a refused close.
+  export LORE_SESSION_INSTANCE="tui-a1b2c3"
+  export LORE_SESSION_SLUG="anchored-done"
+  export LORE_SESSION_TYPE="implement"
+  run bash "$LORE_CLI" impl close anchored-done --verdict none --summary "attempted" \
+    --divergence "nothing load-bearing shipped"
+  [ "$status" -eq 3 ]
+  [ "$(close_request_count)" -eq 1 ]
+}
+
+@test "close outside a session emits no close-request and archives as before" {
+  unset LORE_SESSION_INSTANCE LORE_SESSION_SLUG LORE_SESSION_TYPE
+  run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
+  [ "$status" -eq 0 ]
+  [ -d "$WORK_DIR/_archive/anchored-done" ]
+  [ "$(close_request_count)" -eq 0 ]
+  [ ! -d "$TEST_KDIR/_sessions/close-requests" ]
+}
+
+@test "a failing session-close.sh leaves the close exit code and telemetry untouched" {
+  # Plant a regular file where session-close.sh expects to mkdir close-requests/,
+  # forcing the real script to fail — no stub, a genuine failure condition.
+  mkdir -p "$TEST_KDIR/_sessions"
+  printf 'not-a-dir\n' > "$TEST_KDIR/_sessions/close-requests"
+  export LORE_SESSION_INSTANCE="tui-a1b2c3"
+  export LORE_SESSION_SLUG="anchored-done"
+  export LORE_SESSION_TYPE="implement"
+  run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done"
+  [ "$status" -eq 0 ]
+  [ -f "$(rows_file)" ]
+  [ "$(wc -l < "$(rows_file)")" -eq 1 ]
+  echo "$output" | grep -q "session close-request failed"
+}
+
+@test "a refused close (unchecked tasks, exit 1) emits no close-request inside a session" {
+  export LORE_SESSION_INSTANCE="tui-a1b2c3"
+  export LORE_SESSION_SLUG="anchored-open"
+  export LORE_SESSION_TYPE="implement"
+  run bash "$LORE_CLI" impl close anchored-open --verdict full --summary "done"
+  [ "$status" -eq 1 ]
+  [ "$(close_request_count)" -eq 0 ]
 }

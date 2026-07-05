@@ -118,6 +118,7 @@ teardown() {
     fi
   done
   unset LORE_KNOWLEDGE_DIR LORE_DATA_DIR
+  unset LORE_SESSION_INSTANCE LORE_SESSION_SLUG LORE_SESSION_TYPE
 }
 
 rows_file() { echo "$TEST_KDIR/_scorecards/rows.jsonl"; }
@@ -371,4 +372,69 @@ skill_step_5_5() {
 @test "spec SKILL.md Step 5.5 instructs fixing plan.md and re-running on refusal" {
   skill_step_5_5 | grep -qi "fix \`plan.md\`"
   skill_step_5_5 | grep -q "re-run"
+}
+
+# --- D4 protocol-terminus close-request --------------------------------------
+# The post-telemetry step self-addresses a session close-request only inside a
+# TUI-hosted session (LORE_SESSION_* set), best-effort, and never disturbs the
+# verb's exit code, refusal semantics, or telemetry. session-close.sh --self
+# writes the request into the isolated kdir; count those files to prove emission.
+
+close_request_count() {
+  local dir="$TEST_KDIR/_sessions/close-requests"
+  if [ -d "$dir" ]; then
+    find "$dir" -maxdepth 1 -name '*.json' | wc -l | tr -d ' '
+  else
+    echo 0
+  fi
+}
+
+@test "finalize inside a TUI session emits one self-addressed close-request" {
+  command -v jq >/dev/null 2>&1 || skip "jq required for session-close.sh"
+  export LORE_SESSION_INSTANCE="tui-a1b2c3"
+  export LORE_SESSION_SLUG="finalize-item"
+  export LORE_SESSION_TYPE="spec"
+  run bash "$LORE_CLI" spec finalize finalize-item
+  [ "$status" -eq 0 ]
+  [ "$(row_count)" -eq 1 ]
+  [ "$(close_request_count)" -eq 1 ]
+}
+
+@test "finalize outside a session emits no close-request and still finalizes" {
+  unset LORE_SESSION_INSTANCE LORE_SESSION_SLUG LORE_SESSION_TYPE
+  run bash "$LORE_CLI" spec finalize finalize-item
+  [ "$status" -eq 0 ]
+  [ "$(row_count)" -eq 1 ]
+  [ "$(close_request_count)" -eq 0 ]
+  [ ! -d "$TEST_KDIR/_sessions/close-requests" ]
+}
+
+@test "a failing session-close.sh leaves the finalize exit code and telemetry untouched" {
+  command -v jq >/dev/null 2>&1 || skip "jq required for session-close.sh"
+  # Plant a regular file where session-close.sh expects to mkdir close-requests/,
+  # forcing the real script to fail — no stub, a genuine failure condition.
+  mkdir -p "$TEST_KDIR/_sessions"
+  printf 'not-a-dir\n' > "$TEST_KDIR/_sessions/close-requests"
+  export LORE_SESSION_INSTANCE="tui-a1b2c3"
+  export LORE_SESSION_SLUG="finalize-item"
+  export LORE_SESSION_TYPE="spec"
+  run bash "$LORE_CLI" spec finalize finalize-item
+  [ "$status" -eq 0 ]
+  [ "$(row_count)" -eq 1 ]
+  echo "$output" | grep -q "session close-request failed"
+}
+
+@test "a refused finalize (anchor gate, exit 3) emits no close-request inside a session" {
+  # spec-finalize's exit 3 is a REFUSAL (anchor gate) reached before telemetry,
+  # so the close-request step never runs — unlike impl-close, where exit 3 is a
+  # completed divergence that does emit.
+  make_item "divergent-item" "Deliver the true capability." \
+    "A paraphrased anchor that diverges." v2
+  export LORE_SESSION_INSTANCE="tui-a1b2c3"
+  export LORE_SESSION_SLUG="divergent-item"
+  export LORE_SESSION_TYPE="spec"
+  run bash "$LORE_CLI" spec finalize divergent-item
+  [ "$status" -eq 3 ]
+  [ "$(row_count)" -eq 0 ]
+  [ "$(close_request_count)" -eq 0 ]
 }

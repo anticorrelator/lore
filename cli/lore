@@ -115,6 +115,7 @@ Commands:
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
   impl         /implement bookkeeping verbs (see: lore impl --help)
   spec         /spec bookkeeping verbs (see: lore spec --help)
+  session      Multi-session coordination substrate verbs (see: lore session --help)
   retro        Federated retro pooling (see: lore retro --help)
   correction   Verdict-driven correction management (see: lore correction --help)
   off-scale    Off-scale route management (see: lore off-scale --help)
@@ -480,6 +481,24 @@ Options:
 EOF
 }
 
+session_usage() {
+  cat >&2 <<EOF
+lore session — multi-session coordination substrate verbs
+
+Usage: lore session <verb> [args...]
+
+Verbs:
+  request   Enqueue a session spawn request into requests/pending/
+  list      Render live instances plus the pending/claimed/close-request queues
+  events    Read the events.jsonl journal from an opaque byte-offset cursor
+  close     Request teardown of a live session (<slug> | --self), or cancel a
+            pending spawn request (--request <id>)
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
 settlement_usage() {
   cat >&2 <<EOF
 lore settlement — durable settlement queue and processor
@@ -718,6 +737,42 @@ cmd_spec() {
       echo "Error: unknown spec verb '$subcmd'" >&2
       echo "" >&2
       spec_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Session subgroup (multi-session coordination substrate verbs) ---
+cmd_session() {
+  if [[ $# -eq 0 ]]; then
+    session_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      session_usage
+      return 0
+      ;;
+    request)
+      "$SCRIPTS_DIR/session-request.sh" "$@"
+      ;;
+    list)
+      "$SCRIPTS_DIR/session-list.sh" "$@"
+      ;;
+    events)
+      "$SCRIPTS_DIR/session-events.sh" "$@"
+      ;;
+    close)
+      "$SCRIPTS_DIR/session-close.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown session verb '$subcmd'" >&2
+      echo "" >&2
+      session_usage
       return 1
       ;;
   esac
@@ -1917,6 +1972,10 @@ case "$1" in
   spec)
     shift
     cmd_spec "$@"
+    ;;
+  session)
+    shift
+    cmd_session "$@"
     ;;
   retro)
     shift

@@ -221,6 +221,18 @@ type model struct {
 	// guard for the needs_input/quiescent/resumed events: emit only when the
 	// incoming needs-input state differs from what we last journaled.
 	sessionIdle map[string]bool
+	// pendingClose holds slugs with a consumed close-request awaiting teardown:
+	// the row was matched and deleted, and the D5 exit ladder fires once the
+	// panel's quiescence predicate reports idle. A slug is removed the moment
+	// its ladder is dispatched, so teardown fires at most once per request.
+	pendingClose map[string]bool
+	// closeGrace is the per-rung wait the close ladder allows a harness process
+	// to exit before escalating (graceful→SIGTERM→Kill); closePoll is how often
+	// it re-checks liveness within that window. Both are seams: zero values fall
+	// back to closeGraceDefault/closePollDefault, and tests inject small values
+	// so the ladder never blocks on a real 5s wait.
+	closeGrace time.Duration
+	closePoll  time.Duration
 
 	showHelp bool
 	// helpViewport scrolls the help modal's keybinding list when it exceeds

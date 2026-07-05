@@ -3,7 +3,7 @@
 #                    emit one adoption-telemetry scorecard row.
 # Usage: spec-finalize.sh <ref> [--template-version <hash>] [--json]
 #
-# Sequence (order matters — the telemetry row is always the last write):
+# Sequence (order matters — the telemetry row is the last work-item-substrate write):
 #   1. resolve <ref>             resolve-work-ref.sh tri-state passthrough
 #   2. backlink verify           verify-plan-backlinks.sh --fix; script failure
 #                                refuses; unresolved backlinks warn and continue
@@ -22,9 +22,21 @@
 #                                every other token as hand-run
 #   9. telemetry row             scorecard-append.sh; append failure warns and
 #                                the finalize still exits 0
+#  10. session close-request     post-telemetry, best-effort side effect on the
+#                                session substrate: if LORE_SESSION_INSTANCE is
+#                                set (the finalize is running inside a TUI-hosted
+#                                session), session-close.sh --self --reason
+#                                protocol_terminus; unset = silent no-op
 #
-# A refused finalize emits no telemetry row and no spec-verb execution-log
-# atom. Earlier sanctioned mutations may have occurred before the refusal
+# Cross-substrate ordering: the telemetry row (step 9) is the last write to the
+# work item's own substrate; step 10 targets a different substrate (the session)
+# and is best-effort by design. A session-substrate failure can never cost the
+# work item its telemetry row, and never alters this verb's exit code or refusal
+# semantics — it only warns.
+#
+# A refused finalize emits no telemetry row, no spec-verb execution-log atom,
+# and no session close-request. Earlier sanctioned mutations may have occurred
+# before the refusal
 # (backlink --fix corrections; a regenerated tasks.json when the failure is
 # at the contract assert) — the report names them.
 #
@@ -442,6 +454,19 @@ if printf '%s' "$TELEMETRY_ROW" | bash "$SCRIPT_DIR/scorecard-append.sh" >/dev/n
 else
   TELEMETRY_STATUS="failed"
   echo "[spec] Warning: telemetry row append failed; finalize continues (observability-only)." >&2
+fi
+
+# --- 10. Protocol terminus: self-addressed session close-request (best-effort) -
+# Post-telemetry side effect on the session substrate. Fires only inside a
+# TUI-hosted session (LORE_SESSION_INSTANCE set) — a bare-terminal finalize has
+# no session to close, so it silently no-ops. Every refusal path exits before
+# this point, so a refused finalize never emits. The `if !` guard keeps a
+# non-zero child from tripping set -e; stdout is discarded so it cannot corrupt
+# the --json payload emitted below. Any failure only warns.
+if [[ -n "${LORE_SESSION_INSTANCE:-}" ]]; then
+  if ! bash "$SCRIPT_DIR/session-close.sh" --self --reason protocol_terminus >/dev/null; then
+    echo "[spec] Warning: session close-request failed; finalize already complete (session teardown is best-effort)." >&2
+  fi
 fi
 
 # --- Report -------------------------------------------------------------------

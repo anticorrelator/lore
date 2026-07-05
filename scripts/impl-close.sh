@@ -27,6 +27,17 @@
 # kind=telemetry scorecard row, then invoke implement-closure-report.sh as the
 # sole terminal emitter and propagate its exit.
 #
+# Post-telemetry session side effect: after the close's write sequence has
+# completed and the pre-report consistency guard has passed, if
+# LORE_SESSION_INSTANCE is set (the close is running inside a TUI-hosted
+# session) a self-addressed close-request is enqueued via `session-close.sh
+# --self --reason protocol_terminus`. The telemetry row above remains the last
+# work-item-substrate write; the close-request targets a different substrate
+# (the session) and is best-effort — any failure only warns and never changes
+# this verb's exit code, verdict, or telemetry. A refused close (exit 1) emits
+# nothing; a partial/none divergence (the report's exit 3) is a COMPLETED close
+# whose write sequence ran to a terminal verdict, so it emits the close-request.
+#
 # Every write composes the file's sanctioned writer: update-plan-checkbox.sh,
 # create-work.sh, create-followup.sh, write-execution-log.sh, archive-work.sh,
 # scorecard-append.sh. The one write owned here is the `closure` block.
@@ -731,6 +742,21 @@ except Exception:
       fail "FATAL: all tasks completed but work item not archived. Diagnose the archive step before the close report."
       ;;
   esac
+fi
+
+# --- Protocol terminus: self-addressed session close-request (best-effort) -----
+# Post-telemetry side effect on the session substrate, reached only after the
+# close write sequence has completed and the pre-report guard has passed — so
+# every refusal path (all exit before this point) emits nothing, while a
+# completed close reaches here whether the report will exit 0 (full/legacy) or 3
+# (partial/none divergence). Fires only inside a TUI-hosted session
+# (LORE_SESSION_INSTANCE set); a bare-terminal close silently no-ops. The `if !`
+# guard keeps a non-zero child from tripping set -e; stdout is discarded so it
+# cannot corrupt the --json object emitted below. Any failure only warns.
+if [[ -n "${LORE_SESSION_INSTANCE:-}" ]]; then
+  if ! bash "$SCRIPT_DIR/session-close.sh" --self --reason protocol_terminus >/dev/null; then
+    echo "[impl] Warning: session close-request failed; close already complete (session teardown is best-effort)." >&2
+  fi
 fi
 
 # --- Terminal close: the closure-report script is the sole emitter ------------

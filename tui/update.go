@@ -580,6 +580,15 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case queueTickResultMsg:
 		return m.handleQueueTickResult(msg)
 
+	case closeRequestScanMsg:
+		return m.handleCloseRequestScan(msg)
+
+	case closeRequestDeletedMsg:
+		return m.handleCloseRequestDeleted(msg)
+
+	case closeLadderDoneMsg:
+		return m.handleCloseLadderDone(msg)
+
 	case instanceSyncedMsg:
 		if msg.err != nil {
 			m.flashErr = compactErr("session registry", msg.err)

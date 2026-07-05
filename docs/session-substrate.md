@@ -16,7 +16,7 @@ a strict Go decoder rejects a numeric field that arrives quoted.
 
 The substrate lives at `$KDIR/_sessions/`, a sibling of `_work/` and `_trust/`,
 so it inherits repo-scoping for free and stays out of the per-slug work glob. It
-has three surfaces, split by **write archetype**:
+has four surfaces, split by **write archetype**:
 
 ```
 $KDIR/_sessions/
@@ -25,15 +25,17 @@ $KDIR/_sessions/
   requests/pending/<id>.json     queue — one file per waiting request
   requests/claimed/<id>.json     queue — a request a specific instance has claimed
                                  (claim = atomic rename pending/ -> claimed/)
+  close-requests/<id>.json       queue — one file per close request, consumed
+                                 (deleted) by the owning instance (no claim split)
   events.jsonl                   journal — append-only history, one sanctioned writer
 ```
 
 Two archetypes, no third: **mutable per-owner state** (registry files, request
-files) is written tmp+atomic-rename so each file has exactly one writer at any
-moment — no lock in Go or bash. **History** (`events.jsonl`) uses the sole-writer
-append archetype. There is deliberately no single mutable `registry.json` or
-`queue.json`; per-owner/per-request files dissolve the read-modify-write case
-entirely.
+files, close-request files) is written tmp+atomic-rename so each file has exactly
+one writer at any moment — no lock in Go or bash. **History** (`events.jsonl`)
+uses the sole-writer append archetype. There is deliberately no single mutable
+`registry.json` or `queue.json`; per-owner/per-request files dissolve the
+read-modify-write case entirely.
 
 Writers create the directories they own lazily on first write (as
 `scorecard-append.sh` seeds `_scorecards/`). Nothing pre-creates the tree.
@@ -131,6 +133,45 @@ succeeds. `last_error` takes the values `"incomplete_claim"` and
 `"stale_instance"` for the two reclaim paths; spawn failures set it to the
 spawn-failure reason.
 
+## Close-request queue
+
+One file per close request at `close-requests/<request_id>.json`. A close request
+asks the one live instance running a slug to tear that session down. It is a
+*separate* surface from the spawn queue on purpose: a spawn request may be claimed
+by any matching instance (an at-most-once race resolved by rename), whereas exactly
+one instance is ever eligible to act on a close request — the one whose registry
+row hosts the slug. There is no claim race, so there is **no pending/claimed
+split**: the owning instance consumes the row by **deleting** it after initiating
+teardown.
+
+`request_id` = `<timestamp>-<random suffix>` (also the filename stem).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `request_id` | string | Unique id; also the filename stem. |
+| `slug` | string \| null | Work-item slug whose session is to close, or null. |
+| `target_instance` | string | Instance name that runs the slug and must act. |
+| `reason` | string | Enum `protocol_terminus\|coordinator\|human` — who/what asked for the close. |
+| `requested_by` | string | Who enqueued it (instance name, agent id, or human). |
+| `requested_at` | string | ISO 8601 UTC timestamp of enqueue. |
+
+**Enqueue** = write a tmp file + rename into `close-requests/<request_id>.json`
+(atomic; readers never see a torn row) — the same primitive as the spawn queue.
+The `close` verb resolves `target_instance` two ways: `lore session close <slug>`
+looks up the owning live instance in the registry (error if no live instance runs
+that slug); `lore session close --self` reads `LORE_SESSION_*` env and
+self-addresses. Both are argument-resolution fronts over one physical enqueue
+path. Enqueue emits a `close_requested` journal event; the owning instance's later
+`closed` emission records completion.
+
+**Consume** = the owning instance deletes the file after it begins teardown.
+Because there is only ever one eligible actor, delete-on-consume keeps the
+sole-writer-per-file invariant trivially true.
+
+The cancel form `lore session close --request <id>` is unrelated to this queue: it
+deletes a still-**pending spawn** row in `requests/pending/` and emits
+`request_cancelled` (the terminal state the request lifecycle reserves for it).
+
 ## Event journal
 
 `events.jsonl` — append-only history. Every emitter (the TUI via subprocess,
@@ -177,16 +218,18 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `spawn_failed` | TUI | spawn failed; request returned to pending (carries `reason`) |
 | `request_reclaimed` | TUI (any instance) | a stale/incomplete claim was returned to pending (carries `reason`) |
 | `request_abandoned` | TUI | `attempts >= 3`; request dropped, journal row is the dead-letter (carries last `reason`) |
-| `request_cancelled` | item 2 `close`/cancel verb | a pending request was cancelled |
+| `request_cancelled` | `session close --request` cancel verb | a pending spawn request was cancelled |
+| `close_requested` | `session close` enqueue verb (`<slug>` / `--self`) | a close request was enqueued for the instance running a slug |
 
 **Queue-lifecycle events** — `requested`, `claimed`, `spawned`, `spawn_failed`,
-`request_reclaimed`, `request_abandoned`, `request_cancelled` — each concern a
-specific request and MUST carry a non-empty `request_id`. The writer enforces
-this.
+`request_reclaimed`, `request_abandoned`, `request_cancelled`, `close_requested` —
+each concern a specific request and MUST carry a non-empty `request_id`. The writer
+enforces this.
 
 **Emitter ownership** (per the settled design): the TUI owns session transitions
-and TUI-driven queue lifecycle; the enqueue writer owns `requested` (and item 2's
-cancel verb owns `request_cancelled`); protocol terminal verbs own
+and TUI-driven queue lifecycle; the enqueue writer owns `requested`; the
+`session close` verb owns `close_requested` (its enqueue forms) and
+`request_cancelled` (its cancel form); protocol terminal verbs own
 `step_completed`; stop hooks own `harness_turn_ended`.
 
 ### Prospective emission (emitter obligation)
@@ -236,9 +279,14 @@ number would force the writer to read-modify state, breaking the lock-free
 archetype.
 
 Reader tolerance: a malformed or torn trailing row stops the read at the last
-newline-terminated valid row, and the reported cursor points there. A cursor that
-exceeds the file size (impossible without external tampering) resets to a full
-re-read with a warning.
+newline-terminated valid row, and the reported cursor points there. A malformed
+*interior* row is excluded with a stderr warning and the read continues past it. A
+cursor that exceeds the file size (impossible without external tampering) resets to
+a full re-read with a warning.
+
+`session events` reports that cursor as `next_cursor`. Under `--json` it wraps
+`{events: [...], next_cursor: N}`; plain output is NDJSON rows on stdout followed by
+a `next_cursor:` line on stderr, so stdout stays machine-consumable.
 
 ### Dedupe posture
 
@@ -258,6 +306,7 @@ reads full snapshots.
 | `instances/<name>.json` | the owning TUI instance (its own file) | tmp + `os.Rename`, `os.Chtimes` heartbeat | Phase 2 (TUI) |
 | `requests/pending/<id>.json` | the enqueuer | item 2 `request` verb; TUI human path | item 2 / Phase 2 |
 | `requests/claimed/<id>.json` | the claiming TUI instance | `os.Rename` claim + tmp+rename metadata | Phase 2 (TUI) |
+| `close-requests/<id>.json` | the enqueuer (`session close` verb); deleted-on-consume by the owning TUI instance | tmp + rename enqueue; owning instance deletes | item 2 (enqueue) / Phase 2 (consume) |
 | `events.jsonl` | `scripts/session-event-append.sh` | every emitter, via subprocess | **this phase** |
 | `[session-request]` cold-start marker | `scripts/load-work.sh` (reader of `requests/pending/`) | SessionStart hook | **this phase** |
 
@@ -300,10 +349,11 @@ than scope creep. **If you are reading this and tempted to add one of the
 below, don't — it belongs to the item named. Route the need there (or to `/retro`)
 rather than growing this contract.**
 
-- **No lifecycle verbs.** `lore session request` / `list` / `close` / cancel is
-  **item 2**. This phase ships test fixtures into `requests/pending/`, not a
-  production request writer. `request_cancelled` is named in the vocabulary only so
-  the schema covers the verb that lands there.
+- **Lifecycle verbs — landed (item 2).** `lore session request` / `list` /
+  `events` / `close` (and the `close --request` cancel form) are implemented as
+  prepare-and-return scripts behind the `session` dispatcher subgroup. They read
+  and write these surfaces per this contract; they do not spawn, wait, or touch
+  the TUI. Registry and claimed-queue *writes* remain Phase 2 (TUI).
 - **No TUI integration.** The per-instance registry, instance identity/naming, the
   pending-queue scan, atomic-rename claim, D4 lifecycle handling, badging, and
   journal emission wiring are **Phase 2** (`tui/`). This phase defines their

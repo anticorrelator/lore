@@ -176,10 +176,21 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 		}
 	}
 	// Session substrate: heartbeat our registry file, refresh the external-
-	// session snapshot for badging, and run one reclaim/claim queue pass. Guarded
-	// on a resolved instance identity (present only inside a real repo).
+	// session snapshot for badging, run one reclaim/claim queue pass, and scan
+	// for close-requests addressed to us. Guarded on a resolved instance identity
+	// (present only inside a real repo). The close scan rides this one heartbeat
+	// — no second tick loop.
 	if m.instanceName != "" {
-		cmds = append(cmds, m.syncInstanceCmd(), readInstancesCmd(m.sessionsDir), m.queueTickCmd())
+		hosted := make(map[string]bool, len(m.localSessions))
+		for slug := range m.localSessions {
+			hosted[slug] = true
+		}
+		cmds = append(cmds, m.syncInstanceCmd(), readInstancesCmd(m.sessionsDir), m.queueTickCmd(),
+			scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted))
+		// Re-evaluate any close-request already waiting on quiescence.
+		var advCmds []tea.Cmd
+		m, advCmds = m.advanceCloseLadders()
+		cmds = append(cmds, advCmds...)
 	}
 	return m, tea.Batch(cmds...)
 }

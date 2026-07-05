@@ -265,7 +265,8 @@ func (m model) spawnSession(d work.SessionDescriptor, requestID string) (model, 
 	if d.Initiator != "agent" {
 		m.sessionLaunchedFromModal = m.state == stateWork
 	}
-	return m, work.StartSessionShimCmd(d, m.config.ProjectDir, specW, specH, m.config.KnowledgeDir)
+	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type)}
+	return m, work.StartSessionShimCmd(d, m.config.ProjectDir, specW, specH, m.config.KnowledgeDir, env)
 }
 
 // instanceRow builds this instance's registry row from its live session set.

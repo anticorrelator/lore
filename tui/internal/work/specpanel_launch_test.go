@@ -128,7 +128,7 @@ func runStartTerminal(t *testing.T, slug, projectDir string, followupMode bool) 
 	t.Helper()
 	// width=80, height=24 are typical PTY defaults; the values aren't
 	// load-bearing for the args we assert.
-	cmd := StartTerminalCmd(slug, "smoke title", projectDir, 80, 24, "", false, false, true, followupMode, projectDir, -1)
+	cmd := StartTerminalCmd(slug, "smoke title", projectDir, 80, 24, "", false, false, true, followupMode, projectDir, -1, SessionEnv{})
 	msg := cmd()
 	if started, ok := msg.(SpecProcessStartedMsg); ok {
 		// Close the PTY so the stub subprocess receives EOF and exits without
@@ -164,6 +164,53 @@ func TestStartTerminalCmd_SpawnsClaudeBinaryWithDefaultFlags(t *testing.T) {
 	}
 	if argsContains(started.Cmd.Args, "--append-system-prompt") {
 		t.Errorf("Cmd.Args should NOT contain --append-system-prompt outside followup mode: %v", started.Cmd.Args)
+	}
+}
+
+// TestStartTerminalCmd_ExportsSessionIdentity asserts the D3 session identity
+// joins LORE_FRAMEWORK in the harness child's environment, and that an empty
+// SessionEnv field is omitted rather than exported blank.
+func TestStartTerminalCmd_ExportsSessionIdentity(t *testing.T) {
+	stageFakeBinaries(t)
+	dir := stageFakeLoreData(t, "claude-code", nil)
+
+	cmd := StartTerminalCmd("smoke-slug", "smoke title", dir, 80, 24, "", false, false, true, false, dir, -1,
+		SessionEnv{Instance: "amber-otter", Slug: "smoke-slug", Type: "spec"})
+	msg := cmd()
+	started, ok := msg.(SpecProcessStartedMsg)
+	if !ok {
+		t.Fatalf("expected SpecProcessStartedMsg, got %T (%+v)", msg, msg)
+	}
+	if started.Ptmx != nil {
+		_ = started.Ptmx.Close()
+	}
+	for _, want := range []string{
+		"LORE_SESSION_INSTANCE=amber-otter",
+		"LORE_SESSION_SLUG=smoke-slug",
+		"LORE_SESSION_TYPE=spec",
+	} {
+		if !envContains(started.Cmd.Env, want) {
+			t.Errorf("Cmd.Env missing %q: %v", want, started.Cmd.Env)
+		}
+	}
+}
+
+// TestSessionEnvVarsOmitsEmptyFields: a partially-populated identity exports
+// only its non-empty vars — a downstream `[ -n "$LORE_SESSION_INSTANCE" ]`
+// gate must never see a blank export.
+func TestSessionEnvVarsOmitsEmptyFields(t *testing.T) {
+	got := SessionEnv{Instance: "solo", Type: "chat"}.vars()
+	want := []string{"LORE_SESSION_INSTANCE=solo", "LORE_SESSION_TYPE=chat"}
+	if len(got) != len(want) {
+		t.Fatalf("vars() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("vars()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if len(SessionEnv{}.vars()) != 0 {
+		t.Errorf("zero SessionEnv should export nothing, got %v", SessionEnv{}.vars())
 	}
 }
 
