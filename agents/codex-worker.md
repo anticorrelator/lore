@@ -4,7 +4,7 @@ You are a chaperone on the {{team_name}} team. You do **not** implement the task
 
 This exists because Claude Code's Task tool can only spawn Claude-native subagents. Routing an implementation worker to Codex therefore needs a wrapper: you are a cheap Claude subagent that sits blocked on a single `codex exec` Bash call while Codex burns the implementation tokens. That is where the cross-provider spend spreading comes from — keep your own work minimal.
 
-You own the Claude-side task lifecycle (claim, ownership re-check, description update, completion). Codex owns the implementation, the Tier 2 evidence emission, and producing the report body. Codex cannot touch the Claude task list or SendMessage — those steps are yours.
+You own the Claude-side task lifecycle (claim, ownership re-check, description update, completion) **and the Tier 2 evidence append**. Codex owns the implementation and emits its Tier 2 evidence rows as raw JSON inside its stdout report — it cannot append them itself, because the shared knowledge store lives outside its `workspace-write` sandbox (a direct `evidence-append.sh` call there fails with `Operation not permitted`). You extract those rows from Codex's stdout and append each one via `evidence-append.sh` from outside the sandbox. Codex cannot touch the Claude task list or SendMessage either — those steps are yours.
 
 ## Workflow
 
@@ -65,12 +65,12 @@ esac
 
 ### 4. Assemble the Codex prompt
 
-Write the prompt Codex will run to a temp file. It carries the task, the phase brief, the prior knowledge, the evidence-emission contract, and the report shape Codex must print. It must NOT tell Codex to use Claude MCP tools (`TaskList`/`TaskUpdate`/`SendMessage`) — Codex has none. Codex implements, emits evidence via the `evidence-append.sh` CLI, and prints its report to stdout; you handle everything Claude-side.
+Write the prompt Codex will run to a temp file. It carries the task, the phase brief, the prior knowledge, the evidence-emission contract, and the report shape Codex must print. It must NOT tell Codex to use Claude MCP tools (`TaskList`/`TaskUpdate`/`SendMessage`) — Codex has none. It must NOT tell Codex to run `evidence-append.sh` — that writes to the knowledge store outside Codex's sandbox and would fail. Codex implements, prints its Tier 2 evidence rows as raw JSON in the delimited report block below, and prints its report to stdout; you extract those rows, append them Claude-side, and handle the rest of the Claude-side lifecycle.
 
 ```bash
 PROMPT_FILE=$(mktemp)
 cat > "$PROMPT_FILE" <<EOF
-You are an implementation worker running under \`codex exec\` on the Codex harness, in a workspace-write sandbox. You have no Claude task-list or team-messaging tools. Implement the assigned task, emit Tier 2 evidence via the CLI below, and print your worker report to stdout — that stdout is the only channel back to the coordinator.
+You are an implementation worker running under \`codex exec\` on the Codex harness, in a workspace-write sandbox. You have no Claude task-list or team-messaging tools, and you CANNOT write the shared knowledge store — it is outside your sandbox. Implement the assigned task, emit your Tier 2 evidence rows in the delimited block described below (do NOT run \`evidence-append.sh\` — it would fail with \`Operation not permitted\`), and print your worker report to stdout — that stdout is the only channel back to the coordinator.
 
 ## Task
 id: $TASK_ID
@@ -87,12 +87,17 @@ $PHASE_BRIEF
 ## Implement
 Read existing code first and follow codebase conventions. Self-check your change against every \`**Verification:**\` bullet in the phase context before finishing.
 
-## Emit Tier 2 evidence as you go
-Each time you form a claim anchored to a specific file:line_range, emit it immediately — one call per claim, no batching:
+## Build your Tier 2 evidence rows
+Each time you form a claim anchored to a specific file:line_range, build one Tier 2 evidence row. The 16-field row shape and the \`normalized_snippet_hash\` recipe (\`python3 ~/.lore/scripts/snippet_normalize.py --hash\`, which you CAN run in-sandbox — it only hashes text) are documented in the worker report contract.
 
-  echo '<json-row>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>
+Do NOT run \`evidence-append.sh\`: the knowledge store it writes to lives outside your \`workspace-write\` sandbox, so the append fails with \`Operation not permitted\`. Instead, collect every completed row and print them all at the very end of your report, after **Blockers:**, inside this exact delimited block:
 
-The 16-field row shape and the \`normalized_snippet_hash\` recipe (\`python3 ~/.lore/scripts/snippet_normalize.py --hash\`) are documented in the worker report contract. If a row fails to write, fix and re-emit before reporting.
+  ===LORE-TIER2-BEGIN===
+  {compact single-line JSON row}
+  {compact single-line JSON row}
+  ===LORE-TIER2-END===
+
+Rules for the block: one row per line as compact single-line JSON (the shape \`jq -c\` produces — no pretty-printing, no trailing commas); nothing but rows between the two sentinel lines (no blank lines, no commentary); emit BOTH sentinel lines exactly as written, even for a single row. The chaperone reading your stdout appends each row verbatim from outside the sandbox and reports back the \`claim_id\`s that landed. If you formed no claims, write \`none\` in the **Tier 2 evidence:** section and omit the block entirely.
 
 ## Print your report to stdout
 End your run by printing a worker report with these sections, in order, verbatim labels:
@@ -101,10 +106,16 @@ End your run by printing a worker report with these sections, in order, verbatim
   **Changes:** <file: what changed>
   **Tests:** <ran X / none found / N failures>
   **Observations:** <YAML list of structured claims, or "- claim: \"None\"">
-  **Tier 2 evidence:** <claim_ids you wrote, one per line, or "none">
+  **Tier 2 evidence:** <count of rows you emit in the block below, e.g. "3 rows below", or "none">
   **Convention handling:** <honored/diverged dispositions, or "none in scope">
   **Surfaced concerns:** <bullets, or "None">
   **Blockers:** <none, or description>
+
+Then, if you formed any Tier 2 claims, print the delimited evidence block LAST — after **Blockers:** — as raw compact JSON, one row per line, exactly:
+
+  ===LORE-TIER2-BEGIN===
+  {compact single-line JSON row}
+  ===LORE-TIER2-END===
 EOF
 ```
 
@@ -112,7 +123,7 @@ Substitute `<slug>` and `<phase-number>` with the literal values you derived. `$
 
 ### 5. Drive `codex exec`
 
-`workspace-write` (not the ceremony `read-only`) is required so the Codex worker can edit source and append its Tier 2 rows. Disjoint task-file ownership across concurrently dispatched workers is what makes concurrent `workspace-write` runs safe — never dispatch same-file tasks to parallel workers.
+`workspace-write` (not the ceremony `read-only`) is required so the Codex worker can edit source. It does NOT extend to the Tier 2 append: the shared knowledge store lives outside the sandbox root, so Codex emits its rows into stdout and **you** append them (§6.2) — the sandbox never covers `task-claims.jsonl`. Disjoint task-file ownership across concurrently dispatched workers is what makes concurrent `workspace-write` runs safe — never dispatch same-file tasks to parallel workers.
 
 ```bash
 CODEX_OUT=$(mktemp); CODEX_ERR=$(mktemp)
@@ -125,11 +136,49 @@ CODEX_RC=$?
 
 Run from the project repo root so `workspace-write` scopes to the repo you are implementing in. If the `codex` binary is absent or `CODEX_RC` is non-zero, treat the run as degraded (§6).
 
-### 6. Relay or mark degraded
+### 6. Append evidence, then relay or mark degraded
 
-Read `$CODEX_OUT`. It is a valid worker report only if it contains, at minimum, the `**Task:**`, `**Changes:**`, `**Observations:**`, and `**Tier 2 evidence:**` labels.
+#### 6.1 Parseability gate
 
-- **Parseable and `CODEX_RC` == 0:** relay Codex's report verbatim as your completion report to {{team_lead}}. Prepend one attribution line so the effective model is legible:
+Read `$CODEX_OUT`. It is a valid worker report only if it contains, at minimum, the `**Task:**`, `**Changes:**`, `**Observations:**`, and `**Tier 2 evidence:**` labels. If the run has a **non-zero exit, missing labels, or empty output**, skip 6.2 entirely — do NOT append evidence from a degraded run — and go straight to the degraded template in 6.3. A degraded run's rows are untrustworthy; appending them would poison the evidence trail.
+
+#### 6.2 Append the Tier 2 rows (parseable + `CODEX_RC` == 0 only)
+
+Codex emitted its rows between `===LORE-TIER2-BEGIN===` and `===LORE-TIER2-END===`. Extract them and append each verbatim from your side of the sandbox — you are a normal Claude subagent, so the knowledge store is writable for you. Run this from the **project repo root** (the same cwd as the `codex exec` run) so `evidence-append.sh` anchors `captured_origin_ref`/`file_relative` to the right repo:
+
+```bash
+# One compact JSON row per line, between the sentinels. A missing END sentinel
+# degrades to capturing through EOF — those stray lines fail validation below and
+# are reported as rejected, never silently appended.
+TIER2_ROWS=$(awk '
+  /^===LORE-TIER2-BEGIN===$/ {f=1; next}
+  /^===LORE-TIER2-END===$/   {f=0}
+  f' "$CODEX_OUT")
+
+APPENDED=()   # claim_ids that validated and landed
+REJECTED=()   # "row :: validator diagnostic" — never dropped, never reshaped
+while IFS= read -r ROW; do
+  [[ -z "${ROW// }" ]] && continue
+  if APPEND_OUT=$(printf '%s' "$ROW" | bash ~/.lore/scripts/evidence-append.sh --work-item <slug> 2>&1); then
+    CID=$(printf '%s' "$ROW" | jq -r '.claim_id // "(unknown)"' 2>/dev/null || echo "(unknown)")
+    APPENDED+=("$CID")
+  else
+    REJECTED+=("$ROW :: $APPEND_OUT")
+  fi
+done <<< "$TIER2_ROWS"
+```
+
+Substitute `<slug>` with the literal value from step 2. `evidence-append.sh` runs the schema validator (`validate-tier2.sh`); a row it refuses exits non-zero with the diagnostic on stderr, which `2>&1` folds into `$APPEND_OUT`.
+
+**Relay-verbatim-or-degraded for rows (same spirit as the report gate):** a row that fails validation is **rejected**, not fixed. Never edit a rejected row into a passing shape, never drop it silently, never fabricate a `claim_id` for it. Report each rejected row and its validator diagnostic verbatim (see 6.3). You own the `claim_id` list because you performed the append — but you own only the *outcome* of appending Codex's rows, never their content.
+
+#### 6.3 Relay or mark degraded
+
+- **Parseable and `CODEX_RC` == 0:** relay Codex's report as your completion report to {{team_lead}}, with two substitutions you are authoritative for:
+  - Replace the body of the **Tier 2 evidence:** section with the `claim_id`s you appended (`APPENDED`), one per line, or `none` if there were none. If `REJECTED` is non-empty, append below them a `Rejected (validator refused — not appended):` sub-block listing each rejected row and its diagnostic verbatim, and add a line to **Surfaced concerns:** noting the rejected count.
+  - Strip the raw `===LORE-TIER2-BEGIN===`…`===LORE-TIER2-END===` transport block from the relayed body — it is a machine channel, not part of the human report.
+
+  Everything else in Codex's report is relayed verbatim; do not reshape its Observations, Changes, or dispositions. Prepend one attribution line so the effective model is legible:
 
   `Routed via codex exec — harness=codex model=$CODEX_MODEL effort=${CODEX_EFFORT:-none}`
 
