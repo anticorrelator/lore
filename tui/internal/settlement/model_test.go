@@ -885,6 +885,31 @@ func TestPageScrollLeavesSelectionAnchored(t *testing.T) {
 	}
 }
 
+func TestMouseWheelMovesQueueCursorAndViewport(t *testing.T) {
+	m := NewModel().ReplaceStatus(manyItemStatus(t, 12)).SetSize(120, 10)
+	startOffset := m.vp.YOffset()
+
+	m, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if m.cursor != 1 {
+		t.Fatalf("wheel down should move queue cursor to item 2, cursor=%d", m.cursor)
+	}
+
+	for i := 0; i < 10; i++ {
+		m, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	}
+	if m.cursor != 11 {
+		t.Fatalf("repeated wheel down should reach the last item, cursor=%d", m.cursor)
+	}
+	if m.vp.YOffset() <= startOffset {
+		t.Fatalf("viewport offset should follow the wheeled cursor, got %d from %d", m.vp.YOffset(), startOffset)
+	}
+
+	m, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if m.cursor != 10 {
+		t.Fatalf("wheel up should move queue cursor back one row, cursor=%d", m.cursor)
+	}
+}
+
 func TestEndSelectsLastQueueRow(t *testing.T) {
 	m := NewModel().ReplaceStatus(manyItemStatus(t, 12)).SetSize(120, 10)
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd})

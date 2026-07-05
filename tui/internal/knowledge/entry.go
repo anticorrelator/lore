@@ -14,6 +14,8 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
+const entryWheelScrollLines = 3
+
 // EntryMeta holds metadata parsed from the HTML comment at the bottom of a knowledge entry.
 // The schema is open-ended: known fields are surfaced as named members; the full key/value
 // map is preserved on Fields so callers can render new fields without parser changes.
@@ -180,6 +182,19 @@ func (m EntryModel) Update(msg tea.Msg) (EntryModel, tea.Cmd) {
 		vp.SetContent(rendered)
 		m.viewport = vp
 		m.ready = true
+
+	case tea.MouseWheelMsg:
+		if !m.ready {
+			return m, nil
+		}
+		// Browser routing already chose the hovered pane; wheel should scroll
+		// detail content without borrowing focus or click semantics.
+		switch msg.Button {
+		case tea.MouseWheelDown:
+			m.viewport.ScrollDown(entryWheelScrollLines)
+		case tea.MouseWheelUp:
+			m.viewport.ScrollUp(entryWheelScrollLines)
+		}
 
 	default:
 		if m.ready {

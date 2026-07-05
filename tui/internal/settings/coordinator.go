@@ -6,7 +6,7 @@
 // widget emits into the model's write surface).
 //
 // The coordinator's boundary stops at routing: commit MECHANISMS remain
-// polymorphic on SettingsModel — immediate/draft-buffered intents go through
+// polymorphic on SettingsModel — immediate and commit-on-leave intents go through
 // routeCommit's validation + Patch, unset goes through routeUnset's Delete,
 // and the per-harness enabled toggle bypasses intents entirely via the
 // ToggleHarness shell-out (routeCommit rejects a stray IntentCommit on that
@@ -146,8 +146,8 @@ func (c *coordinator) stepRowNavigation(delta int) {
 
 // focusOffset shifts focus by delta (+1 / -1), blurring the current focused
 // widget and focusing the new one. Returns the FieldIntent emitted by the
-// blurred widget (typically IntentDiscard for a draft-buffered widget that
-// had a pending draft). Wraps at the ends.
+// blurred widget (commit/reject/discard when the widget has leave work).
+// Wraps at the ends.
 func (c *coordinator) focusOffset(delta int) *FieldIntent {
 	if c.m.limitDotPath != "" {
 		return nil

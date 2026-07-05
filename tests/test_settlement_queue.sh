@@ -1003,6 +1003,198 @@ EX_NONE=$(printf '%s' '{"item":{"work_item":"wi","claim_id":"claim-model-export"
   bash "$SCRIPTS_DIR/settlement-audit-executor.sh" 2>/dev/null)
 assert_json_eq "auditor_model unset without env leaves resolution untouched" "$EX_NONE" '.audit.judge_model_env' "unset"
 
+# --- Bounded auto-retry for infrastructure-failure runs (Tests 24-29) ---
+# Shared stub: always emits an error envelope -> executor_audit_error run (an
+# infrastructure failure, not a settled verdict). run_id derives from
+# item_id + wall-clock second, so same-item redispatch needs sleep 1.1 between
+# process cycles to avoid run_id collision (which would silently drop a run).
+AR_ERR_EXEC="$TEST_DIR/ar-error-exec.sh"
+cat > "$AR_ERR_EXEC" <<'EXEC'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"verdict_envelope_version":1,"verdict":"error","evidence":"fixture infra failure before judging the claim","correction":null}'
+EXEC
+chmod +x "$AR_ERR_EXEC"
+
+# The trigger pump also runs rollup steady-state, which would enqueue five
+# rollup items ahead of the spot-sample task-claim on every `triggers` call.
+# Pin now to a fixed Wednesday and seed a template row per judge for that
+# week's completed window so the existence check suppresses rollup enqueue,
+# leaving spot_sample as the sole event-driven re-enqueue path under test.
+AR_NOW="2026-05-13T12:00:00Z"
+AR_ROLLUP_WINDOW="2026-05-04T00:00:00Z"
+seed_rollup_suppression() {
+  local kdir="$1"
+  mkdir -p "$kdir/_scorecards"
+  {
+    for judge in correctness-gate-assertion correctness-gate-omission correctness-gate-contradiction curator reverse-auditor; do
+      printf '{"tier":"template","verdict_source":"%s","window_start":"%s"}\n' "$judge" "$AR_ROLLUP_WINDOW"
+    done
+  } > "$kdir/_scorecards/rows.jsonl"
+}
+
+echo ""
+echo "Test 24: bounded auto-retry re-audits below cap then exhausts (event-driven surface)"
+KDIR_ARED="$TEST_DIR/kdir-autoretry-ed"
+SETTINGS_ARED="$TEST_DIR/settings-autoretry-ed.json"
+setup_kdir "$KDIR_ARED" "wi"
+write_settings "$SETTINGS_ARED" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false,"spot_sample_weekly_budget":12},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+printf '%s\n' "$(row_json "claim-autoretry-ed")" >> "$KDIR_ARED/_work/wi/task-claims.jsonl"
+seed_rollup_suppression "$KDIR_ARED"
+for _cycle in 1 2 3; do
+  LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_ARED" LORE_SETTLEMENT_NOW="$AR_NOW" bash "$QUEUE" triggers --kdir "$KDIR_ARED" --force --json >/dev/null
+  LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_ARED" LORE_SETTLEMENT_EXECUTOR="$AR_ERR_EXEC" bash "$QUEUE" process --kdir "$KDIR_ARED" --once --json >/dev/null
+  sleep 1.1
+done
+ARED_RUNS=$(find "$KDIR_ARED/_settlement/runs" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "event-driven: three infra-failure run records accumulated" "$ARED_RUNS" "3"
+ARED_TRIG4=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_ARED" LORE_SETTLEMENT_NOW="$AR_NOW" bash "$QUEUE" triggers --kdir "$KDIR_ARED" --force --json)
+assert_json_eq "event-driven: exhausted item no longer re-sampled" "$ARED_TRIG4" '.spot_sample.enqueued' "0"
+ARED_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_ARED" bash "$QUEUE" status --kdir "$KDIR_ARED" --json)
+assert_json_eq "event-driven: one item reported exhausted" "$ARED_STATUS" '.infra_exhausted.count' "1"
+assert_json_eq "event-driven: exhausted preview names last failure reason" "$ARED_STATUS" '.infra_exhausted.items[0].reason' "executor_audit_error"
+assert_json_eq "event-driven: exhausted preview carries failure_count" "$ARED_STATUS" '.infra_exhausted.items[0].failure_count' "3"
+assert_json_eq "event-driven: exhausted preview identifies work_item" "$ARED_STATUS" '.infra_exhausted.items[0].work_item' "wi"
+assert_json_eq "event-driven: remedy names retry-errors" "$ARED_STATUS" '.infra_exhausted.remedy' "lore settlement retry-errors"
+
+echo ""
+echo "Test 25: bounded auto-retry re-batches below cap then stops batching (census surface)"
+KDIR_ARC="$TEST_DIR/kdir-autoretry-census"
+SETTINGS_ARC="$TEST_DIR/settings-autoretry-census.json"
+setup_kdir "$KDIR_ARC" "wi"
+write_settings "$SETTINGS_ARC" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":true},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":3,"batch_size":4,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+printf '%s\n' "$(row_json "claim-autoretry-census")" >> "$KDIR_ARC/_work/wi/task-claims.jsonl"
+for _cycle in 1 2 3; do
+  LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_ARC" LORE_SETTLEMENT_EXECUTOR="$AR_ERR_EXEC" bash "$QUEUE" process --kdir "$KDIR_ARC" --once --json >/dev/null
+  sleep 1.1
+done
+ARC_RUNS=$(find "$KDIR_ARC/_settlement/runs" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "census: three infra-failure run records accumulated" "$ARC_RUNS" "3"
+ARC_PROC4=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_ARC" LORE_SETTLEMENT_EXECUTOR="$AR_ERR_EXEC" bash "$QUEUE" process --kdir "$KDIR_ARC" --once --json)
+assert_json_eq "census: exhausted item no longer batched" "$ARC_PROC4" '.reason' "empty_queue"
+ARC_RUNS_AFTER=$(find "$KDIR_ARC/_settlement/runs" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "census: no fourth run produced" "$ARC_RUNS_AFTER" "3"
+ARC_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_ARC" bash "$QUEUE" status --kdir "$KDIR_ARC" --json)
+assert_json_eq "census: one item reported exhausted" "$ARC_STATUS" '.infra_exhausted.count' "1"
+assert_json_eq "census: exhausted preview carries failure_count" "$ARC_STATUS" '.infra_exhausted.items[0].failure_count' "3"
+
+echo ""
+echo "Test 26: a genuine settle supersedes prior infra-failure runs and excludes re-audit"
+KDIR_SUP="$TEST_DIR/kdir-supersede"
+SETTINGS_SUP="$TEST_DIR/settings-supersede.json"
+SUP_MARKER="$TEST_DIR/supersede-counter"
+SUP_EXEC="$TEST_DIR/ar-settle-exec.sh"
+setup_kdir "$KDIR_SUP" "wi"
+write_settings "$SETTINGS_SUP" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false,"spot_sample_weekly_budget":12},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+printf '%s\n' "$(row_json "claim-supersede")" >> "$KDIR_SUP/_work/wi/task-claims.jsonl"
+seed_rollup_suppression "$KDIR_SUP"
+# Stateful stub: first dispatch infra-fails, every later dispatch settles.
+cat > "$SUP_EXEC" <<EXEC
+#!/usr/bin/env bash
+cat >/dev/null
+n=\$(cat "$SUP_MARKER" 2>/dev/null || echo 0)
+n=\$((n + 1)); echo "\$n" > "$SUP_MARKER"
+if [ "\$n" -le 1 ]; then
+  printf '%s\n' '{"verdict_envelope_version":1,"verdict":"error","evidence":"first attempt infra failure","correction":null}'
+else
+  printf '%s\n' '{"verdict_envelope_version":1,"verdict":"verified","evidence":"the claim holds under audit on retry","correction":null}'
+fi
+EXEC
+chmod +x "$SUP_EXEC"
+LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SUP" LORE_SETTLEMENT_NOW="$AR_NOW" bash "$QUEUE" triggers --kdir "$KDIR_SUP" --force --json >/dev/null
+SUP_RUN1=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SUP" LORE_SETTLEMENT_EXECUTOR="$SUP_EXEC" bash "$QUEUE" process --kdir "$KDIR_SUP" --once --json)
+SUP_RUN1_ID=$(printf '%s' "$SUP_RUN1" | jq -r '.run.run_id')
+assert_json_eq "supersede: first attempt is an infra failure" "$SUP_RUN1" '.run.reason' "executor_audit_error"
+sleep 1.1
+LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SUP" LORE_SETTLEMENT_NOW="$AR_NOW" bash "$QUEUE" triggers --kdir "$KDIR_SUP" --force --json >/dev/null
+SUP_RUN2=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SUP" LORE_SETTLEMENT_EXECUTOR="$SUP_EXEC" bash "$QUEUE" process --kdir "$KDIR_SUP" --once --json)
+assert_json_eq "supersede: second attempt settles genuinely" "$SUP_RUN2" '.run.verdict.verdict' "verified"
+assert_json_eq "supersede: prior infra run invalidated by settle" "$(cat "$KDIR_SUP/_settlement/runs/$SUP_RUN1_ID.json")" '.invalidated_reason' "superseded_by_settled_run"
+sleep 1.1
+SUP_TRIG3=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SUP" LORE_SETTLEMENT_NOW="$AR_NOW" bash "$QUEUE" triggers --kdir "$KDIR_SUP" --force --json)
+assert_json_eq "supersede: settled item not re-sampled" "$SUP_TRIG3" '.spot_sample.enqueued' "0"
+SUP_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_SUP" bash "$QUEUE" status --kdir "$KDIR_SUP" --json)
+assert_json_eq "supersede: settled item is not exhausted" "$SUP_STATUS" '.infra_exhausted.count' "0"
+
+echo ""
+echo "Test 27: retry-errors resets the full ledger and the requeue survives census recompute (archived source)"
+KDIR_RR="$TEST_DIR/kdir-retry-reset"
+SETTINGS_RR="$TEST_DIR/settings-retry-reset.json"
+setup_kdir "$KDIR_RR" "wi"
+write_settings "$SETTINGS_RR" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":true},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":3,"batch_size":4,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+printf '%s\n' "$(row_json "claim-retry-reset")" >> "$KDIR_RR/_work/wi/task-claims.jsonl"
+for _cycle in 1 2 3; do
+  LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_RR" LORE_SETTLEMENT_EXECUTOR="$AR_ERR_EXEC" bash "$QUEUE" process --kdir "$KDIR_RR" --once --json >/dev/null
+  sleep 1.1
+done
+RR_STATUS_EXH=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_RR" bash "$QUEUE" status --kdir "$KDIR_RR" --json)
+assert_json_eq "retry-reset: item is exhausted before retry-errors" "$RR_STATUS_EXH" '.infra_exhausted.count' "1"
+# Archive the source so the requeued item is absent from the backlog glob:
+# only _preserved() keeps it through the intervening census recompute.
+mkdir -p "$KDIR_RR/_work/_archive"
+mv "$KDIR_RR/_work/wi" "$KDIR_RR/_work/_archive/wi"
+RR_RETRY=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_RR" bash "$QUEUE" retry-errors --kdir "$KDIR_RR" --json)
+assert_json_eq "retry-reset: invalidated counts all three run records" "$RR_RETRY" '.invalidated' "3"
+assert_json_eq "retry-reset: matched counts one item" "$RR_RETRY" '.matched' "1"
+assert_json_eq "retry-reset: enqueued counts one item" "$RR_RETRY" '.enqueued' "1"
+RR_RECOMPUTE=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_RR" bash "$QUEUE" queue recompute --kdir "$KDIR_RR" --json)
+assert_json_eq "retry-reset: census recompute runs" "$RR_RECOMPUTE" '.recomputed' "true"
+RR_STATUS_AFTER=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_RR" bash "$QUEUE" status --kdir "$KDIR_RR" --json)
+assert_json_eq "retry-reset: requeued item survives recompute" "$RR_STATUS_AFTER" '.counts.pending' "1"
+assert_json_eq "retry-reset: surviving item carries retry selection reason" "$RR_STATUS_AFTER" '.items[0].selection_reason' "retry_infrastructure_failure"
+assert_json_eq "retry-reset: no longer counts as exhausted" "$RR_STATUS_AFTER" '.infra_exhausted.count' "0"
+# No-match: with every infra run already invalidated, a second retry-errors is a no-op.
+RR_NOMATCH=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_RR" bash "$QUEUE" retry-errors --kdir "$KDIR_RR" --json)
+assert_json_eq "retry-reset: no-match reports zero matched" "$RR_NOMATCH" '.matched' "0"
+assert_json_eq "retry-reset: no-match reports zero invalidated" "$RR_NOMATCH" '.invalidated' "0"
+assert_json_eq "retry-reset: no-match reports zero enqueued" "$RR_NOMATCH" '.enqueued' "0"
+RR_STATUS_NOMATCH=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_RR" bash "$QUEUE" status --kdir "$KDIR_RR" --json)
+assert_json_eq "retry-reset: no-match leaves the queue unchanged" "$RR_STATUS_NOMATCH" '.counts.pending' "1"
+
+echo ""
+echo "Test 28: retry-errors requeue survives an intervening heal_queue tick (event-driven)"
+KDIR_HS="$TEST_DIR/kdir-heal-survive"
+SETTINGS_HS="$TEST_DIR/settings-heal-survive.json"
+SETTINGS_HS_OFF="$TEST_DIR/settings-heal-survive-off.json"
+setup_kdir "$KDIR_HS" "wi"
+write_settings "$SETTINGS_HS" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false,"spot_sample_weekly_budget":12},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+# Same posture with dispatch disabled: process --once then runs heal_queue only.
+write_settings "$SETTINGS_HS_OFF" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false,"spot_sample_weekly_budget":12},"enabled":false,"max_concurrency":1,"max_auto_retry_attempts":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+printf '%s\n' "$(row_json "claim-heal-survive")" >> "$KDIR_HS/_work/wi/task-claims.jsonl"
+seed_rollup_suppression "$KDIR_HS"
+for _cycle in 1 2 3; do
+  LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_HS" LORE_SETTLEMENT_NOW="$AR_NOW" bash "$QUEUE" triggers --kdir "$KDIR_HS" --force --json >/dev/null
+  LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_HS" LORE_SETTLEMENT_EXECUTOR="$AR_ERR_EXEC" bash "$QUEUE" process --kdir "$KDIR_HS" --once --json >/dev/null
+  sleep 1.1
+done
+HS_RETRY=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_HS" bash "$QUEUE" retry-errors --kdir "$KDIR_HS" --json)
+assert_json_eq "heal-survive: retry-errors requeued the exhausted item" "$HS_RETRY" '.enqueued' "1"
+HS_HEAL=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_HS_OFF" bash "$QUEUE" process --kdir "$KDIR_HS" --once --json)
+assert_json_eq "heal-survive: heal-only tick does not dispatch" "$HS_HEAL" '.dispatched' "false"
+HS_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_HS" bash "$QUEUE" status --kdir "$KDIR_HS" --json)
+assert_json_eq "heal-survive: requeued item survives the heal tick" "$HS_STATUS" '.counts.pending' "1"
+assert_json_eq "heal-survive: surviving item keeps retry selection reason" "$HS_STATUS" '.items[0].selection_reason' "retry_infrastructure_failure"
+
+echo ""
+echo "Test 29: max_auto_retry_attempts=0 reproduces immediate exclusion (current behavior)"
+KDIR_CAP0="$TEST_DIR/kdir-cap0"
+SETTINGS_CAP0="$TEST_DIR/settings-cap0.json"
+setup_kdir "$KDIR_CAP0" "wi"
+write_settings "$SETTINGS_CAP0" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":true},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":0,"batch_size":4,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+printf '%s\n' "$(row_json "claim-cap0")" >> "$KDIR_CAP0/_work/wi/task-claims.jsonl"
+CAP0_RUN=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_CAP0" LORE_SETTLEMENT_EXECUTOR="$AR_ERR_EXEC" bash "$QUEUE" process --kdir "$KDIR_CAP0" --once --json)
+assert_json_eq "cap0: first infra failure recorded" "$CAP0_RUN" '.run.reason' "executor_audit_error"
+sleep 1.1
+CAP0_PROC2=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_CAP0" LORE_SETTLEMENT_EXECUTOR="$AR_ERR_EXEC" bash "$QUEUE" process --kdir "$KDIR_CAP0" --once --json)
+assert_json_eq "cap0: single infra failure excludes item immediately" "$CAP0_PROC2" '.reason' "empty_queue"
+CAP0_RUNS=$(find "$KDIR_CAP0/_settlement/runs" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "cap0: no auto-retry run produced" "$CAP0_RUNS" "1"
+CAP0_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_CAP0" bash "$QUEUE" status --kdir "$KDIR_CAP0" --json)
+assert_json_eq "cap0: item exhausted after one failure" "$CAP0_STATUS" '.infra_exhausted.count' "1"
+CAP0_RETRY=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_CAP0" bash "$QUEUE" retry-errors --kdir "$KDIR_CAP0" --json)
+assert_json_eq "cap0: manual retry-errors still resets the one run" "$CAP0_RETRY" '.invalidated' "1"
+assert_json_eq "cap0: manual retry-errors requeues the item" "$CAP0_RETRY" '.enqueued' "1"
+
 echo ""
 echo "=== Summary ==="
 echo "PASS: $PASS"

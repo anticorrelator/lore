@@ -3444,12 +3444,10 @@ func TestSettlementSelectedClaimBlockRetired(t *testing.T) {
 	}
 }
 
-// TestSettingsModalStatusBarKeybindContract verifies the settings-configurator
-// status-bar hint set rendered while the modal is open ("j/k navigate ·
-// Enter/Space commit · u unset · PgUp/PgDn scroll · Esc close") reaches the
-// panel through the modal interception, plus the global quit escape hatches.
-// Widget-level commit/unset semantics are pinned by the internal/settings
-// package tests.
+// TestSettingsModalStatusBarKeybindContract verifies the settings modal keys
+// still reach the panel through modal interception, plus the global quit
+// escape hatches. The dynamic status-bar grammar is pinned separately by
+// TestSettingsModalStatusBarModeHints and internal/settings tests.
 func TestSettingsModalStatusBarKeybindContract(t *testing.T) {
 	settingsModel := func(t *testing.T) model {
 		t.Helper()
@@ -3469,7 +3467,7 @@ func TestSettingsModalStatusBarKeybindContract(t *testing.T) {
 			t.Error("ctrl+, should open the settings configurator")
 		}
 	})
-	t.Run("j/k (navigate)", func(t *testing.T) {
+	t.Run("j/k (move)", func(t *testing.T) {
 		m := settingsModel(t)
 		before := m.settingsPanel.View()
 		nm, _ := updateModel(t, m, press('j'))
@@ -3515,6 +3513,76 @@ func TestSettingsModalStatusBarKeybindContract(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestSettingsModalStatusBarModeHints(t *testing.T) {
+	setupFakeLoreData(t, `{"version": 1, "tui_launch_framework": "claude-code"}`)
+	m := workContractModel()
+	m, _ = updateModel(t, m, press('S'))
+	if !m.settingsActive || m.settingsPanel == nil {
+		t.Fatal("S should open the settings configurator")
+	}
+
+	bar := stripANSI(m.renderStatusBar(m.width))
+	for _, want := range []string{"j/k move", "enter open", "esc close"} {
+		if !strings.Contains(bar, want) {
+			t.Fatalf("nav-mode status bar missing %q:\n%s", want, bar)
+		}
+	}
+
+	m.settingsPanel.FocusDotPath("settlement")
+	m, _ = updateModel(t, m, press(tea.KeyEnter))
+	for i := 0; i < 8; i++ {
+		m, _ = updateModel(t, m, press('j'))
+	}
+	m, _ = updateModel(t, m, press(tea.KeyEnter))
+
+	bar = stripANSI(m.renderStatusBar(m.width))
+	for _, want := range []string{"save", "revert"} {
+		if !strings.Contains(bar, want) {
+			t.Fatalf("text-edit status bar missing %q:\n%s", want, bar)
+		}
+	}
+	if strings.Contains(bar, "close") {
+		t.Fatalf("text-edit status bar must not advertise close:\n%s", bar)
+	}
+
+	m, _ = updateModel(t, m, press(tea.KeyEscape))
+	m, _ = updateModel(t, m, press(tea.KeyEscape))
+	bar = stripANSI(m.renderStatusBar(m.width))
+	if !strings.Contains(bar, "esc close") {
+		t.Fatalf("backing out of the text edit should restore esc close:\n%s", bar)
+	}
+}
+
+// TestSettingsModalStatusBarSurfacesFlash pins the D6 outcome-flash surface:
+// a committed write must render its "saved <dotpath>" confirmation in
+// the host status bar ahead of the mode hints (the armed U-undo hint is
+// appended by the hint system, not the flash), and U must
+// swap it for the "undid" confirmation. Without StatusFlash plumbing the
+// model's statusMsg — including write errors — renders nowhere.
+func TestSettingsModalStatusBarSurfacesFlash(t *testing.T) {
+	setupFakeLoreData(t, `{"version": 1, "tui_launch_framework": "claude-code"}`)
+	m := workContractModel()
+	m, _ = updateModel(t, m, press('S'))
+	if !m.settingsActive || m.settingsPanel == nil {
+		t.Fatal("S should open the settings configurator")
+	}
+
+	// Focus the launch-framework radio and instant-apply the next option.
+	m, _ = updateModel(t, m, press('j'))
+	m, _ = updateModel(t, m, press('l'))
+
+	bar := stripANSI(m.renderStatusBar(m.width))
+	if !strings.Contains(bar, "saved tui_launch_framework") || !strings.Contains(bar, "U undo") {
+		t.Fatalf("status bar should surface the save flash with undo affordance:\n%s", bar)
+	}
+
+	m, _ = updateModel(t, m, press('U'))
+	bar = stripANSI(m.renderStatusBar(m.width))
+	if !strings.Contains(bar, "undid tui_launch_framework") {
+		t.Fatalf("status bar should surface the undo flash:\n%s", bar)
+	}
 }
 
 // TestOnboardingStatusBarKeybindContract verifies the onboarding hint set

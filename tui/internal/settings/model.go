@@ -46,8 +46,8 @@
 //
 //   - IntentReject → status-bar flash; no write issued.
 //
-//   - IntentDiscard / IntentNavigate → no-op; the widget already reverted
-//     a draft, or a container consumed navigation without changing values.
+//   - IntentDiscard / IntentNavigate → no-op; the widget already cancelled an
+//     active buffer, or a container consumed navigation without changing values.
 //
 //   - Style caching per D3 + the lipgloss O(n)-per-frame gotcha: every
 //     shared style is a package-init value in tui/internal/style. View()
@@ -192,10 +192,17 @@ type SettingsModel struct {
 
 	closed bool // set by Esc at top-level when no draft is active
 
-	// statusMsg is rendered at the bottom of the body. Written on
+	// statusMsg is surfaced by the host status bar via StatusFlash(),
+	// rendered ahead of the mode-aware hints. Written on
 	// IntentReject, write errors, and external-command stderr surfacing.
 	statusMsg     string
 	statusIsError bool
+	lastWrite     struct {
+		dotPath     string
+		prevValue   any
+		prevPresent bool
+		armed       bool
+	}
 
 	// harnessToggleLocked: set to a non-empty framework id while a
 	// harness-toggle shell-out is in flight, to suppress double-press races
@@ -367,10 +374,9 @@ func (m *SettingsModel) RegisterTopSection(name string, widget FieldWidget) {
 // list, excluding paths that are either owned by a dedicated top-section or
 // intentionally hidden because they are metadata/retired-compat fields, not
 // user settings. Called at construction and after external shell-outs that
-// touch settings.json (e.g., the agent toggle). Re-walking discards every
-// non-focused widget's draft (which is correct per D10's tab/focus = discard
-// rule); the focused widget's index is preserved when its dot-path still
-// exists post-walk.
+// touch settings.json (e.g., the agent toggle). Re-walking drops any
+// non-focused transient edit buffers; the focused widget's index is preserved
+// when its dot-path still exists post-walk.
 func (m *SettingsModel) rebuildWidgets() {
 	if m.schema == nil || m.schema.Root == nil {
 		m.widgets = nil
@@ -1050,6 +1056,68 @@ func (m *SettingsModel) Closed() bool { return m.closed }
 // focused the host must defer so the user can type the letter literally.
 func (m *SettingsModel) FocusConsumesRunes() bool { return m.nav.consumesNavRunes() }
 
+// StatusFlash returns the transient outcome line (save/unset/undo
+// confirmations, reject and write errors) plus its error-ness. The host
+// status bar renders it ahead of the mode-aware hints; empty means no
+// pending flash. Without this surface the D6 save feedback — and, worse,
+// write errors — would be set on the model but rendered nowhere.
+func (m *SettingsModel) StatusFlash() (string, bool) {
+	return m.statusMsg, m.statusIsError
+}
+
+// StatusHints returns the mode-aware hint set the host renders in the modal
+// status bar. Leaf widgets provide their active-mode verbs; the model adds
+// only global suffixes whose handlers are currently reachable.
+func (m *SettingsModel) StatusHints() []StatusHint {
+	if m.schemaErr != nil {
+		return []StatusHint{{Key: "esc", Label: "close"}}
+	}
+
+	focused := m.nav.focusedWidget()
+	if focused == nil {
+		return m.genericStatusHints(nil)
+	}
+
+	provider, ok := focused.(HintProvider)
+	if !ok {
+		return m.genericStatusHints(focused)
+	}
+	hints := append([]StatusHint(nil), provider.StatusHints()...)
+	// Row navigation is the baseline gesture of the whole panel: prepend
+	// it whenever the focused widget is not consuming j/k as input (i.e.
+	// the user is at row-selection level, not inside an editor mode).
+	// Widget hints keep the front seats for their mode verbs otherwise.
+	if !widgetConsumesNavRunes(focused) && !hasStatusHintKey(hints, "j/k") {
+		hints = append([]StatusHint{{Key: "j/k", Label: "move"}}, hints...)
+	}
+	return m.appendStatusSuffixes(hints, focused)
+}
+
+func (m *SettingsModel) genericStatusHints(focused FieldWidget) []StatusHint {
+	hints := []StatusHint{
+		{Key: "j/k", Label: "move"},
+		{Key: "enter", Label: "open"},
+	}
+	return m.appendStatusSuffixes(hints, focused)
+}
+
+func (m *SettingsModel) appendStatusSuffixes(hints []StatusHint, focused FieldWidget) []StatusHint {
+	if m.lastWrite.armed && !m.nav.consumesNavRunes() {
+		hints = appendStatusHintIfMissing(hints, StatusHint{Key: "U", Label: "undo"})
+	}
+	if m.statusEscCloses(focused, hints) {
+		hints = appendStatusHintIfMissing(hints, StatusHint{Key: "esc", Label: "close"})
+	}
+	return hints
+}
+
+func (m *SettingsModel) statusEscCloses(focused FieldWidget, hints []StatusHint) bool {
+	if hasStatusHintKey(hints, "esc") || m.limitDotPath != "" {
+		return false
+	}
+	return focused == nil || !widgetConsumesNavRunes(focused)
+}
+
 // Update routes keystrokes to the focused widget and translates the
 // resulting FieldIntent into write-routing calls.
 //
@@ -1163,15 +1231,20 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 				m.viewport = vp
 				return m, cmd
 			}
+		case "U":
+			if !m.nav.consumesNavRunes() {
+				m.undoLastWrite()
+				return m, nil
+			}
 		// j/k hierarchical navigation. At the outer boundary these move
 		// between top-level sections. Once Enter has opened a container,
 		// the focused container's NavStep moves within that level. When a
 		// leaf editor is in edit mode, j/k are forwarded as literal/editor
 		// input instead.
-		case "j", "k":
+		case "j", "k", "up", "down":
 			if !m.nav.consumesNavRunes() {
 				delta := +1
-				if key.String() == "k" {
+				if key.String() == "k" || key.String() == "up" {
 					delta = -1
 				}
 				m.nav.stepRowNavigation(delta)
@@ -1188,12 +1261,24 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 	if w == nil {
 		return m, nil
 	}
+	commitMoveDelta := 0
+	if key, ok := msg.(tea.KeyPressMsg); ok && m.nav.consumesNavRunes() {
+		switch key.String() {
+		case "up":
+			commitMoveDelta = -1
+		case "down":
+			commitMoveDelta = +1
+		}
+	}
 	updated, cmd, intent := w.Update(msg)
 	m.nav.replaceFocused(updated)
 	if intent != nil {
 		if extra := m.nav.routeIntent(intent); extra != nil {
 			cmd = teaBatch(cmd, extra)
 		}
+	}
+	if commitMoveDelta != 0 && !m.nav.consumesNavRunes() {
+		m.nav.stepRowNavigation(commitMoveDelta)
 	}
 	return m, cmd
 }
@@ -1286,13 +1371,15 @@ func (m *SettingsModel) routeCommit(intent *FieldIntent) tea.Cmd {
 			m.statusIsError = true
 			return nil
 		}
+		prevValue, prevPresent := m.lookupEffective(intent.DotPath)
 		if err := m.store.Patch("tui_launch_framework", chosen); err != nil {
 			m.statusMsg = fmt.Sprintf("write tui_launch_framework: %v", err)
 			m.statusIsError = true
 			return nil
 		}
+		m.armUndoIfChanged(intent.DotPath, prevValue, prevPresent, chosen)
 		m.setEffective(intent.DotPath, chosen)
-		m.statusMsg = ""
+		m.statusMsg = fmt.Sprintf("saved %s", intent.DotPath)
 		m.statusIsError = false
 		return nil
 	}
@@ -1307,13 +1394,15 @@ func (m *SettingsModel) routeCommit(intent *FieldIntent) tea.Cmd {
 			return nil
 		}
 	}
+	prevValue, prevPresent := m.lookupEffective(intent.DotPath)
 	if err := m.store.Patch(intent.DotPath, intent.Value); err != nil {
 		m.statusMsg = fmt.Sprintf("write %s: %v", intent.DotPath, err)
 		m.statusIsError = true
 		return nil
 	}
+	m.armUndoIfChanged(intent.DotPath, prevValue, prevPresent, intent.Value)
 	m.setEffective(intent.DotPath, intent.Value)
-	m.statusMsg = ""
+	m.statusMsg = fmt.Sprintf("saved %s", intent.DotPath)
 	m.statusIsError = false
 	return nil
 }
@@ -1322,14 +1411,97 @@ func (m *SettingsModel) routeCommit(intent *FieldIntent) tea.Cmd {
 // routing: delete the overlay key so inheritance resumes, refreshing the
 // cached effective document so subsequent renders see absence.
 func (m *SettingsModel) routeUnset(intent *FieldIntent) {
+	prevValue, prevPresent := m.lookupEffective(intent.DotPath)
 	if err := m.store.Delete(intent.DotPath); err != nil {
 		m.statusMsg = fmt.Sprintf("unset %s: %v", intent.DotPath, err)
 		m.statusIsError = true
 		return
 	}
+	// Arm only when the delete removed something: unsetting an already
+	// absent key is a no-op and must not clobber the real undo target.
+	if prevPresent {
+		m.armUndo(intent.DotPath, prevValue, prevPresent)
+	}
 	m.invalidateEffective(intent.DotPath)
-	m.statusMsg = ""
+	m.statusMsg = fmt.Sprintf("unset %s", intent.DotPath)
 	m.statusIsError = false
+}
+
+// armUndoIfChanged arms the single-slot undo only when the written value
+// actually differs from the previous effective value. Defense in depth
+// behind the widgets' changed-only commit guards: a no-op re-commit (same
+// value written again) must never clobber the user's real undo target.
+func (m *SettingsModel) armUndoIfChanged(dotPath string, prevValue any, prevPresent bool, newValue any) {
+	if prevPresent && effectiveValuesEqual(prevValue, newValue) {
+		return
+	}
+	m.armUndo(dotPath, prevValue, prevPresent)
+}
+
+// effectiveValuesEqual compares two settings values structurally via a JSON
+// round-trip, tolerating the mixed concrete types that reach routeCommit
+// (e.g. int from NumericInput vs float64 from the effective document).
+func effectiveValuesEqual(a, b any) bool {
+	ra, errA := json.Marshal(a)
+	rb, errB := json.Marshal(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return string(ra) == string(rb)
+}
+
+func (m *SettingsModel) armUndo(dotPath string, prevValue any, prevPresent bool) {
+	m.lastWrite.dotPath = dotPath
+	m.lastWrite.prevValue = cloneEffectiveValue(prevValue)
+	m.lastWrite.prevPresent = prevPresent
+	m.lastWrite.armed = true
+}
+
+func (m *SettingsModel) undoLastWrite() {
+	if !m.lastWrite.armed {
+		return
+	}
+	dotPath := m.lastWrite.dotPath
+	if m.lastWrite.prevPresent {
+		if err := m.store.Patch(dotPath, m.lastWrite.prevValue); err != nil {
+			m.statusMsg = fmt.Sprintf("undo %s: %v", dotPath, err)
+			m.statusIsError = true
+			return
+		}
+	} else {
+		if err := m.store.Delete(dotPath); err != nil {
+			m.statusMsg = fmt.Sprintf("undo %s: %v", dotPath, err)
+			m.statusIsError = true
+			return
+		}
+	}
+	if eff, err := m.store.LoadAll(); err == nil {
+		m.effective = eff
+		m.rebuildWidgets()
+		m.reconcileHarnessPanels()
+	} else {
+		m.statusMsg = fmt.Sprintf("undo %s reload: %v", dotPath, err)
+		m.statusIsError = true
+		return
+	}
+	m.lastWrite.armed = false
+	m.statusMsg = fmt.Sprintf("undid %s", dotPath)
+	m.statusIsError = false
+}
+
+func cloneEffectiveValue(v any) any {
+	if v == nil {
+		return nil
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	var out any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return v
+	}
+	return out
 }
 
 // ToggleHarness runs the harness-toggle enable/disable shell-out for the

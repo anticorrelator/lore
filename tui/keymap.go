@@ -98,8 +98,8 @@ const (
 	kmSettlementVerdictDetail
 	kmKnowledge
 	kmTerminal
-	// kmSettingsModal is the settings-configurator overlay pseudo-state; the
-	// renderStatusBar pre-case selects it before any state lookup.
+	// kmSettingsModal is the settings-configurator overlay pseudo-state; its
+	// status bar is widget-driven, while this registry entry feeds help.
 	kmSettingsModal
 	kmOnboarding
 	kmOnboardingLoading
@@ -354,17 +354,23 @@ var keymapRegistry = []keymapSection{
 		{key: "(all other keys)", label: "forwarded to subprocess", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerSubModel}},
 	}},
-	{ctx: kmSettingsModal, entries: []keymapEntry{
-		{key: "j/k", label: "navigate", surfaces: surfStatusBar,
-			ownerLayers: []ownerLayer{ownerModal}, test: "TestSettingsModalStatusBarKeybindContract/j/k (navigate)"},
-		{key: "Enter/Space", label: "commit", surfaces: surfStatusBar,
+	{ctx: kmSettingsModal, helpTitle: "Settings", entries: []keymapEntry{
+		{key: "j/k / ↕", label: "move", surfaces: surfHelp,
+			ownerLayers: []ownerLayer{ownerModal}, test: "TestSettingsModalStatusBarKeybindContract/j/k (move), TestSettingsModalStatusBarModeHints"},
+		{key: "Enter", label: "open / edit", surfaces: surfHelp,
+			ownerLayers: []ownerLayer{ownerModal}, test: "TestSettingsModalStatusBarModeHints"},
+		{key: "h/l", label: "select option", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerModal}},
-		{key: "u", label: "unset", surfaces: surfStatusBar,
+		{key: "a/e/d", label: "edit collections", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerModal}},
-		{key: "PgUp/PgDn", label: "scroll", surfaces: surfStatusBar,
+		{key: "u", label: "unset", surfaces: surfHelp,
+			ownerLayers: []ownerLayer{ownerModal}},
+		{key: "U", label: "undo last change", surfaces: surfHelp,
+			ownerLayers: []ownerLayer{ownerModal}},
+		{key: "Esc", label: "cancel / back / close", surfaces: surfHelp,
+			ownerLayers: []ownerLayer{ownerModal}, test: "TestSettingsModalStatusBarKeybindContract/Esc (close), TestSettingsModalStatusBarModeHints"},
+		{key: "PgUp/PgDn", label: "scroll", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerModal}, test: "TestSettingsModalStatusBarKeybindContract/PgDn (scroll)"},
-		{key: "Esc", label: "close", surfaces: surfStatusBar,
-			ownerLayers: []ownerLayer{ownerModal}, test: "TestSettingsModalStatusBarKeybindContract/Esc (close)"},
 	}},
 	{ctx: kmOnboarding, entries: []keymapEntry{
 		{key: "Enter", label: "initialize", surfaces: surfStatusBar,
@@ -402,8 +408,8 @@ func keymapEntries(ctx keymapContext) []keymapEntry {
 }
 
 // keymapContext resolves the model's current hint context. The settings
-// configurator pseudo-state is selected by renderStatusBar's pre-case, not
-// here, so the pre-case keeps its early return ahead of the override ladder.
+// configurator pseudo-state is handled outside this state lookup so its modal
+// can render widget-driven status hints while the registry still feeds help.
 func (m model) keymapContext() keymapContext {
 	switch m.state {
 	case stateOnboarding:

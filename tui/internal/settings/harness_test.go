@@ -112,9 +112,10 @@ func TestPrimaryRadio_CommitOnEnter(t *testing.T) {
 	w := NewPrimaryRadio("tui_launch_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code")
 	w.Focus()
 
+	// Each movement commits instantly (changed-only contract); the second
+	// press carries the final value, and Enter afterwards is a no-op.
 	_, _ = dispatch(w, "right")
-	_, _ = dispatch(w, "right")
-	_, intent := dispatch(w, "enter")
+	_, intent := dispatch(w, "right")
 	if intent == nil {
 		t.Fatalf("expected commit intent, got nil")
 	}
@@ -127,6 +128,30 @@ func TestPrimaryRadio_CommitOnEnter(t *testing.T) {
 	if intent.DotPath != "tui_launch_framework" {
 		t.Fatalf("expected dotpath tui_launch_framework, got %q", intent.DotPath)
 	}
+	if _, intent := dispatch(w, "enter"); intent != nil {
+		t.Fatalf("enter after instant commit should emit nothing, got %+v", intent)
+	}
+}
+
+func TestPrimaryRadio_MovementCommitsInstantly(t *testing.T) {
+	w := NewPrimaryRadio("tui_launch_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code")
+	w.Focus()
+
+	_, intent := dispatch(w, "right")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("right should commit the moved selection, got %+v", intent)
+	}
+	if intent.Value != "opencode" || w.current != 1 {
+		t.Fatalf("expected opencode/current=1, got value=%v current=%d", intent.Value, w.current)
+	}
+
+	_, intent = dispatch(w, "left")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("left should commit the moved selection, got %+v", intent)
+	}
+	if intent.Value != "claude-code" || w.current != 0 {
+		t.Fatalf("expected claude-code/current=0, got value=%v current=%d", intent.Value, w.current)
+	}
 }
 
 // PrimaryRadio's closed-set rejection is structural: cursor cannot exceed
@@ -135,22 +160,28 @@ func TestPrimaryRadio_CursorBoundedToOptions(t *testing.T) {
 	w := NewPrimaryRadio("tui_launch_framework", []string{"a", "b"}, nil, "a")
 	w.Focus()
 
+	// The first press commits the move; the remaining 49 clamp at the
+	// boundary as no-ops. Track the last commit seen across the walk.
+	var lastCommit *FieldIntent
 	for i := 0; i < 50; i++ {
-		_, _ = dispatch(w, "right")
+		if _, intent := dispatch(w, "right"); intent != nil {
+			lastCommit = intent
+		}
 	}
-	_, intent := dispatch(w, "enter")
-	if intent == nil || intent.Status != IntentCommit {
-		t.Fatalf("expected commit, got %+v", intent)
+	if lastCommit == nil || lastCommit.Status != IntentCommit {
+		t.Fatalf("expected commit during right walk, got %+v", lastCommit)
 	}
-	if intent.Value != "b" {
-		t.Fatalf("cursor leaked past last option: got %v", intent.Value)
+	if lastCommit.Value != "b" || w.current != 1 {
+		t.Fatalf("cursor leaked past last option: got value=%v current=%d", lastCommit.Value, w.current)
 	}
+	lastCommit = nil
 	for i := 0; i < 50; i++ {
-		_, _ = dispatch(w, "left")
+		if _, intent := dispatch(w, "left"); intent != nil {
+			lastCommit = intent
+		}
 	}
-	_, intent = dispatch(w, "enter")
-	if intent == nil || intent.Value != "a" {
-		t.Fatalf("cursor leaked past first option: got %+v", intent)
+	if lastCommit == nil || lastCommit.Value != "a" || w.current != 0 {
+		t.Fatalf("cursor leaked past first option: got %+v current=%d", lastCommit, w.current)
 	}
 }
 
@@ -633,5 +664,22 @@ func TestHarnessBlockPanel_NonNilOverlaysAreNavigable(t *testing.T) {
 	}
 	if c, _ := panel.childAt(4); c != nil {
 		t.Fatalf("expected nothing past slot 3; got %T", c)
+	}
+}
+
+func TestPrimaryRadio_NoOpPressesEmitNoCommit(t *testing.T) {
+	w := NewPrimaryRadio("tui_launch_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code")
+	w.Focus()
+
+	if _, intent := dispatch(w, "left"); intent != nil {
+		t.Fatalf("boundary left on committed option should emit nothing, got %+v", intent)
+	}
+	if _, intent := dispatch(w, "enter"); intent != nil {
+		t.Fatalf("enter on committed option should emit nothing, got %+v", intent)
+	}
+	_, _ = dispatch(w, "right")
+	_, _ = dispatch(w, "right")
+	if _, intent := dispatch(w, "right"); intent != nil {
+		t.Fatalf("boundary right on committed option should emit nothing, got %+v", intent)
 	}
 }

@@ -449,6 +449,9 @@ func TestActiveFrameworkAccept_InCapabilities(t *testing.T) {
 	if m.statusIsError {
 		t.Errorf("expected no error on accepted framework, got %q", m.statusMsg)
 	}
+	if m.statusMsg != "saved tui_launch_framework" {
+		t.Errorf("expected save flash with undo hint, got %q", m.statusMsg)
+	}
 }
 
 // TestHarnessEnabledShellOut_RoutesViaCommandRunner verifies the dual-write
@@ -485,6 +488,10 @@ func TestHarnessEnabledShellOut_RoutesViaCommandRunner(t *testing.T) {
 	}
 	if len(store.patches) != 0 {
 		t.Errorf("harness toggle must not direct-Patch harnesses.<fw>.enabled; got patches %v", store.patches)
+	}
+	_, _ = m.Update(result)
+	if m.lastWrite.armed {
+		t.Errorf("harness toggle must not arm settings undo")
 	}
 }
 
@@ -562,6 +569,79 @@ func TestUnsetRoundTrip_PatchThenUnset(t *testing.T) {
 	}
 	if len(store.deletes) != 1 || store.deletes[0] != "name" {
 		t.Errorf("expected single delete on 'name', got %v", store.deletes)
+	}
+	if m.statusMsg != "unset name" {
+		t.Errorf("expected unset flash with undo hint, got %q", m.statusMsg)
+	}
+}
+
+func TestUndoRestoresPreviousValueAfterUnset(t *testing.T) {
+	m, store, _ := newTestModel(t, map[string]any{"name": "old"})
+
+	m.nav.routeIntent(&FieldIntent{DotPath: "name", Status: IntentUnset})
+	if _, ok := store.doc["name"]; ok {
+		t.Fatalf("setup unset should remove name, got %v", store.doc["name"])
+	}
+	if !m.lastWrite.armed {
+		t.Fatalf("unset should arm undo")
+	}
+
+	_, _ = m.Update(keyMsg("U"))
+	if got := store.doc["name"]; got != "old" {
+		t.Fatalf("undo should restore previous value, got %v", got)
+	}
+	if m.lastWrite.armed {
+		t.Fatalf("undo should disarm the single slot")
+	}
+	if m.statusMsg != "undid name" {
+		t.Fatalf("expected undo flash, got %q", m.statusMsg)
+	}
+	patches := len(store.patches)
+	deletes := len(store.deletes)
+	_, _ = m.Update(keyMsg("U"))
+	if len(store.patches) != patches || len(store.deletes) != deletes {
+		t.Fatalf("second U should be ignored after disarm, patches=%v deletes=%v", store.patches, store.deletes)
+	}
+}
+
+func TestUndoDeletesValueWhenPreviousAbsent(t *testing.T) {
+	m, store, _ := newTestModel(t, nil)
+
+	m.nav.routeIntent(&FieldIntent{DotPath: "name", Status: IntentCommit, Value: "new"})
+	if got := store.doc["name"]; got != "new" {
+		t.Fatalf("setup commit should write name=new, got %v", got)
+	}
+
+	_, _ = m.Update(keyMsg("U"))
+	if _, ok := store.doc["name"]; ok {
+		t.Fatalf("undo should delete value that was previously absent, got %v", store.doc["name"])
+	}
+	if len(store.deletes) == 0 || store.deletes[len(store.deletes)-1] != "name" {
+		t.Fatalf("undo should route through Delete(name), deletes=%v", store.deletes)
+	}
+}
+
+func TestUndoIgnoredWhileScalarEditing(t *testing.T) {
+	m, store, _ := newTestModel(t, map[string]any{"name": "old"})
+	m.nav.routeIntent(&FieldIntent{DotPath: "layout", Status: IntentCommit, Value: "right"})
+	if !m.lastWrite.armed {
+		t.Fatalf("setup commit should arm undo")
+	}
+	patches := len(store.patches)
+	deletes := len(store.deletes)
+
+	m.nav.focusByDotPath("name")
+	_, _ = m.Update(keyMsg("enter"))
+	_, _ = m.Update(keyMsg("U"))
+	name := m.nav.focusedWidget().(*TextInput)
+	if name.draft != "oldU" {
+		t.Fatalf("U should be typed into the active scalar edit, draft=%q", name.draft)
+	}
+	if !m.lastWrite.armed {
+		t.Fatalf("undo slot should remain armed when U is consumed by editing widget")
+	}
+	if len(store.patches) != patches || len(store.deletes) != deletes {
+		t.Fatalf("U while editing should not restore undo, patches=%v deletes=%v", store.patches, store.deletes)
 	}
 }
 
@@ -966,6 +1046,68 @@ func TestHierarchicalNavigation_JKMovesTopLevelUntilEnter(t *testing.T) {
 	_, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if m.nav.focusIdx != 0 {
 		t.Fatalf("k should move back to the previous top-level section, got %d", m.nav.focusIdx)
+	}
+}
+
+func TestHierarchicalNavigation_ArrowKeysNavigateTopLevel(t *testing.T) {
+	m, _, _ := newTestModel(t, nil)
+
+	_, _ = m.Update(keyMsg("down"))
+	if m.nav.focusIdx != 0 {
+		t.Fatalf("first down should focus first widget, got %d", m.nav.focusIdx)
+	}
+	_, _ = m.Update(keyMsg("down"))
+	if m.nav.focusIdx != 1 {
+		t.Fatalf("second down should move to next widget, got %d", m.nav.focusIdx)
+	}
+	_, _ = m.Update(keyMsg("up"))
+	if m.nav.focusIdx != 0 {
+		t.Fatalf("up should move back to previous widget, got %d", m.nav.focusIdx)
+	}
+}
+
+func TestHierarchicalNavigation_DownCommitsScalarEditAndMoves(t *testing.T) {
+	m, store, _ := newTestModel(t, nil)
+	m.nav.focusByDotPath("name")
+
+	_, _ = m.Update(keyMsg("enter"))
+	_, _ = m.Update(keyMsg("a"))
+	_, _ = m.Update(keyMsg("down"))
+
+	if len(store.patches) != 1 || store.patches[0].dotPath != "name" || store.patches[0].value != "a" {
+		t.Fatalf("down from scalar edit should commit name=a, patches=%+v", store.patches)
+	}
+	if got := m.nav.focusedDotPath(); got != "layout" {
+		t.Fatalf("down should move focus after committing, focused=%q", got)
+	}
+	if m.statusMsg != "saved name" || m.statusIsError {
+		t.Fatalf("expected save flash after down commit, status=%q err=%v", m.statusMsg, m.statusIsError)
+	}
+}
+
+func TestHierarchicalNavigation_InvalidDownRevertsScalarAndMoves(t *testing.T) {
+	m, store, _ := newTestModel(t, nil)
+	m.nav.focusByDotPath("name")
+
+	_, _ = m.Update(keyMsg("enter"))
+	_, _ = m.Update(keyMsg("B"))
+	_, _ = m.Update(keyMsg("down"))
+
+	if len(store.patches) != 0 {
+		t.Fatalf("invalid down should not patch, patches=%+v", store.patches)
+	}
+	if got := m.nav.focusedDotPath(); got != "layout" {
+		t.Fatalf("invalid down should still move focus, focused=%q", got)
+	}
+	if !m.statusIsError || !strings.Contains(m.statusMsg, "reverted: must match pattern") {
+		t.Fatalf("expected reverted validation status, status=%q err=%v", m.statusMsg, m.statusIsError)
+	}
+	name, ok := m.allWidgetSlots()[1].(*TextInput)
+	if !ok {
+		t.Fatalf("name slot is %T, want TextInput", m.allWidgetSlots()[1])
+	}
+	if name.draft != "" || name.editing {
+		t.Fatalf("invalid down should revert and exit edit mode, draft=%q editing=%v", name.draft, name.editing)
 	}
 }
 
@@ -1376,5 +1518,48 @@ func TestPgDnPgUpScrollViewport(t *testing.T) {
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	if m.viewport.YOffset() >= down {
 		t.Error("PgUp should scroll the settings viewport back up")
+	}
+}
+
+func TestNoOpRecommitDoesNotClobberUndoTarget(t *testing.T) {
+	m, store, _ := newTestModel(t, map[string]any{"name": "old"})
+
+	// Real write arms the slot with prev "old".
+	m.nav.routeIntent(&FieldIntent{DotPath: "name", Value: "new", Status: IntentCommit})
+	if got := store.doc["name"]; got != "new" {
+		t.Fatalf("setup commit should write new, got %v", got)
+	}
+	if !m.lastWrite.armed {
+		t.Fatal("commit should arm undo")
+	}
+
+	// Identical re-commit: written again (harmless) but must NOT re-arm
+	// the slot with prev == "new".
+	m.nav.routeIntent(&FieldIntent{DotPath: "name", Value: "new", Status: IntentCommit})
+
+	_, _ = m.Update(keyMsg("U"))
+	if got := store.doc["name"]; got != "old" {
+		t.Fatalf("undo should restore the pre-change value, got %v", got)
+	}
+}
+
+func TestUnsetAbsentKeyDoesNotArmUndo(t *testing.T) {
+	m, store, _ := newTestModel(t, map[string]any{"name": "old"})
+
+	m.nav.routeIntent(&FieldIntent{DotPath: "name", Value: "new", Status: IntentCommit})
+	if !m.lastWrite.armed || m.lastWrite.dotPath != "name" {
+		t.Fatalf("setup commit should arm undo for name, got %+v", m.lastWrite)
+	}
+
+	// Unsetting a key that is not present is a no-op delete; the armed
+	// target must survive.
+	m.nav.routeIntent(&FieldIntent{DotPath: "ghost", Status: IntentUnset})
+	if m.lastWrite.dotPath != "name" {
+		t.Fatalf("no-op unset must not clobber undo target, got %+v", m.lastWrite)
+	}
+
+	_, _ = m.Update(keyMsg("U"))
+	if got := store.doc["name"]; got != "old" {
+		t.Fatalf("undo should restore name=old, got %v", got)
 	}
 }

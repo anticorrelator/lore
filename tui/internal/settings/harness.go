@@ -14,8 +14,8 @@
 //     harness-local roles, harness-local ceremonies). Nil role/ceremony
 //     children are still supported for legacy tests and migration views, but
 //     production materializes both editors so harness defaults are editable
-//     directly. Tab/Shift-Tab cycles between sub-fields and uses the child's
-//     Blur() to discard any draft buffer per D10.
+//     directly. Tab/Shift-Tab cycles between sub-fields and routes the
+//     child's Blur() leave intent.
 //
 // Both widgets implement FieldWidget so the host SettingsModel can dispatch
 // uniformly. Per D3 and the lipgloss O(n)-per-frame gotcha, every
@@ -116,12 +116,24 @@ func (r *PrimaryRadio) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldIntent) 
 		if r.cursor > 0 {
 			r.cursor--
 		}
+		// Changed-only commit (mirrors EnumSelector): boundary presses and
+		// re-selecting the committed option emit nothing, so the save flash
+		// stays honest and the single-slot undo target is never clobbered
+		// by a no-op write.
+		if r.cursor >= 0 && r.cursor < len(r.options) && r.current != r.cursor {
+			r.current = r.cursor
+			return r, nil, &FieldIntent{DotPath: r.dotPath, Value: r.options[r.cursor], Status: IntentCommit}
+		}
 	case "right", "l":
 		if r.cursor < len(r.options)-1 {
 			r.cursor++
 		}
+		if r.cursor >= 0 && r.cursor < len(r.options) && r.current != r.cursor {
+			r.current = r.cursor
+			return r, nil, &FieldIntent{DotPath: r.dotPath, Value: r.options[r.cursor], Status: IntentCommit}
+		}
 	case "enter", "space":
-		if r.cursor < 0 || r.cursor >= len(r.options) {
+		if r.cursor < 0 || r.cursor >= len(r.options) || r.current == r.cursor {
 			return r, nil, nil
 		}
 		r.current = r.cursor
@@ -322,9 +334,9 @@ func (h *HarnessBlockPanel) Focus() tea.Cmd {
 	return nil
 }
 
-// Blur on the panel blurs the focused child and propagates any IntentDiscard
-// the child wants to emit (per D10's tab/focus = discard). For an absent
-// overlay this is a no-op — there is no child to blur.
+// Blur on the panel blurs the focused child and propagates any leave intent
+// the child wants to emit. For an absent overlay this is a no-op — there is
+// no child to blur.
 func (h *HarnessBlockPanel) Blur() *FieldIntent {
 	return h.containerBase.blur(h.children())
 }
@@ -347,7 +359,7 @@ func (h *HarnessBlockPanel) Update(msg tea.Msg) (FieldWidget, tea.Cmd, *FieldInt
 			if !h.entered {
 				return h, nil, nil
 			}
-			// Tab = discard the focused child's draft, advance cursor.
+			// Tab = leave the focused child, advance cursor.
 			// Per D9: this is the load-bearing path that must NOT
 			// emit IntentCommit on an absent overlay. Because absent
 			// overlays are skipped entirely (no child to traverse),

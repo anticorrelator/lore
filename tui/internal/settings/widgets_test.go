@@ -68,10 +68,10 @@ func TestEnumSelector_CommitOnEnter(t *testing.T) {
 	w := NewEnumSelector("tui_launch_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code", false)
 	w.Focus()
 
-	// Move cursor right twice → "codex".
+	// Move cursor right twice → "codex". Each movement commits instantly
+	// (changed-only contract); the second one carries the final value.
 	_, _ = dispatch(w, "right")
-	_, _ = dispatch(w, "right")
-	_, intent := dispatch(w, "enter")
+	_, intent := dispatch(w, "right")
 	if intent == nil {
 		t.Fatalf("expected commit intent, got nil")
 	}
@@ -80,6 +80,31 @@ func TestEnumSelector_CommitOnEnter(t *testing.T) {
 	}
 	if intent.Value != "codex" {
 		t.Fatalf("expected codex, got %v", intent.Value)
+	}
+	// Enter on the already committed selection is a no-op, not a re-commit.
+	if _, intent := dispatch(w, "enter"); intent != nil {
+		t.Fatalf("enter after instant commit should emit nothing, got %+v", intent)
+	}
+}
+
+func TestEnumSelector_MovementCommitsInstantly(t *testing.T) {
+	w := NewEnumSelector("tui_launch_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code", false)
+	w.Focus()
+
+	_, intent := dispatch(w, "right")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("right should commit the moved selection, got %+v", intent)
+	}
+	if intent.Value != "opencode" || w.current != 1 {
+		t.Fatalf("expected instant opencode commit/current=1, got value=%v current=%d", intent.Value, w.current)
+	}
+
+	_, intent = dispatch(w, "left")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("left should commit the moved selection, got %+v", intent)
+	}
+	if intent.Value != "claude-code" || w.current != 0 {
+		t.Fatalf("expected instant claude-code commit/current=0, got value=%v current=%d", intent.Value, w.current)
 	}
 }
 
@@ -90,16 +115,25 @@ func TestEnumSelector_ClosedSetIsStructural(t *testing.T) {
 	w := NewEnumSelector("tui.layout", []string{"left-right", "top-bottom"}, nil, "left-right", false)
 	w.Focus()
 
-	// Walk past the right end — cursor must clamp at last index.
+	// Walk past the right end — cursor must clamp at last index. The first
+	// press commits the move (changed-only contract); the following nine
+	// are boundary no-ops that must not leak past the closed set.
+	var lastCommit *FieldIntent
 	for i := 0; i < 10; i++ {
-		_, _ = dispatch(w, "right")
+		_, intent := dispatch(w, "right")
+		if intent != nil {
+			lastCommit = intent
+		}
 	}
-	_, intent := dispatch(w, "enter")
-	if intent == nil || intent.Status != IntentCommit {
-		t.Fatalf("expected commit, got %+v", intent)
+	if lastCommit == nil || lastCommit.Status != IntentCommit {
+		t.Fatalf("expected the boundary walk to commit once, got %+v", lastCommit)
 	}
-	if intent.Value != "top-bottom" {
-		t.Fatalf("expected last-index commit (top-bottom), got %v — closed-set boundary leaked", intent.Value)
+	if lastCommit.Value != "top-bottom" || w.current != 1 {
+		t.Fatalf("expected clamped commit at top-bottom/current=1, got value=%v current=%d — closed-set boundary leaked", lastCommit.Value, w.current)
+	}
+	// Enter on the already committed clamped option is a no-op re-commit.
+	if _, intent := dispatch(w, "enter"); intent != nil {
+		t.Fatalf("enter on committed option should emit nothing, got %+v", intent)
 	}
 }
 
@@ -246,7 +280,7 @@ func TestTextInput_DiscardOnEscRevertsDraft(t *testing.T) {
 	}
 }
 
-func TestTextInput_DiscardOnFocusChange(t *testing.T) {
+func TestTextInput_CommitOnValidBlur(t *testing.T) {
 	w := NewTextInput("name", "Name", "original", nil, 0, true, false)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
@@ -254,16 +288,52 @@ func TestTextInput_DiscardOnFocusChange(t *testing.T) {
 
 	intent := w.Blur()
 	if intent == nil {
-		t.Fatalf("expected discard on blur")
+		t.Fatalf("expected commit on blur")
 	}
-	if intent.Status != IntentDiscard {
-		t.Fatalf("expected IntentDiscard, got %v", intent.Status)
+	if intent.Status != IntentCommit {
+		t.Fatalf("expected IntentCommit, got %v", intent.Status)
 	}
-	if intent.Value != "original" {
-		t.Fatalf("expected reverted value 'original', got %v", intent.Value)
+	if intent.Value != "originalX" {
+		t.Fatalf("expected committed value 'originalX', got %v", intent.Value)
 	}
 	if w.Focused() {
 		t.Fatalf("expected widget unfocused after Blur()")
+	}
+	if w.committed != "originalX" || !w.present {
+		t.Fatalf("blur should update committed/present, committed=%q present=%v", w.committed, w.present)
+	}
+}
+
+func TestTextInput_InvalidBlurRevertsWithPrefixedError(t *testing.T) {
+	w := NewTextInput("name", "Name", "", nil, 2, false, false)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+	_, _ = dispatch(w, "a")
+
+	intent := w.Blur()
+	if intent == nil || intent.Status != IntentReject {
+		t.Fatalf("expected reject on invalid blur, got %+v", intent)
+	}
+	if w.draft != "" || w.editing {
+		t.Fatalf("invalid blur should revert and exit editing, draft=%q editing=%v", w.draft, w.editing)
+	}
+	if len(intent.Errors) != 1 || intent.Errors[0] != "reverted: must be at least 2 characters" {
+		t.Fatalf("expected prefixed reverted error, got %v", intent.Errors)
+	}
+}
+
+func TestTextInput_UpDownCommitAndExitEdit(t *testing.T) {
+	w := NewTextInput("name", "Name", "", nil, 1, false, false)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+	_, _ = dispatch(w, "a")
+
+	_, intent := dispatch(w, "down")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("down should commit and exit edit mode, got %+v", intent)
+	}
+	if w.editing || w.committed != "a" {
+		t.Fatalf("down should exit editing and commit draft, editing=%v committed=%q", w.editing, w.committed)
 	}
 }
 
@@ -331,6 +401,41 @@ func TestNumericInput_ValidCommitsAsTypedFloat(t *testing.T) {
 	}
 }
 
+func TestNumericInput_BlurCommitsTypedInt(t *testing.T) {
+	min := 1.0
+	w := NewNumericInput("version", "Version", "", true, &min, nil, false, false)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+	_, _ = dispatch(w, "2")
+
+	intent := w.Blur()
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("expected blur commit, got %+v", intent)
+	}
+	if v, ok := intent.Value.(int); !ok || v != 2 {
+		t.Fatalf("expected typed int=2, got %T %v", intent.Value, intent.Value)
+	}
+}
+
+func TestNumericInput_InvalidDownRevertsWithPrefixedError(t *testing.T) {
+	min := 1.0
+	w := NewNumericInput("version", "Version", "", true, &min, nil, false, false)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+	_, _ = dispatch(w, "0")
+
+	_, intent := dispatch(w, "down")
+	if intent == nil || intent.Status != IntentReject {
+		t.Fatalf("expected reject on invalid down, got %+v", intent)
+	}
+	if w.draft != "" || w.editing {
+		t.Fatalf("invalid down should revert and exit editing, draft=%q editing=%v", w.draft, w.editing)
+	}
+	if len(intent.Errors) != 1 || intent.Errors[0] != "reverted: must be at least 1" {
+		t.Fatalf("expected prefixed reverted min error, got %v", intent.Errors)
+	}
+}
+
 func TestNumericInput_IntegerMode(t *testing.T) {
 	min := 1.0
 	w := NewNumericInput("version", "Version", "", true, &min, nil, false, false)
@@ -361,12 +466,15 @@ func TestNumericInput_IntegerMode(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 func TestListEditor_MinItemsRejection(t *testing.T) {
-	w := NewListEditor("ceremonies.foo", "advisors", []string{}, nil, 1, true, false, false)
+	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha"}, nil, 1, true, true, false)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
-	_, intent := dispatch(w, "enter")
+	_, intent := dispatch(w, "d")
 	if intent == nil || intent.Status != IntentReject {
-		t.Fatalf("expected reject (empty list violates minItems=1), got %+v", intent)
+		t.Fatalf("expected reject (delete would violate minItems=1), got %+v", intent)
+	}
+	if !reflect.DeepEqual(w.draft, []string{"alpha"}) || !reflect.DeepEqual(w.committed, []string{"alpha"}) {
+		t.Fatalf("invalid delete should roll back list state, draft=%v committed=%v", w.draft, w.committed)
 	}
 	hasMinErr := false
 	for _, e := range intent.Errors {
@@ -380,21 +488,30 @@ func TestListEditor_MinItemsRejection(t *testing.T) {
 }
 
 func TestListEditor_UniqueItemsRejection(t *testing.T) {
-	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha", "alpha"}, nil, 0, true, false, false)
+	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha"}, nil, 0, true, true, false)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
+	_, _ = dispatch(w, "a")
+	for _, k := range []string{"a", "l", "p", "h", "a"} {
+		_, _ = dispatch(w, k)
+	}
 	_, intent := dispatch(w, "enter")
 	if intent == nil || intent.Status != IntentReject {
-		t.Fatalf("expected reject (adjacent duplicate items), got %+v", intent)
+		t.Fatalf("expected reject (duplicate appended item), got %+v", intent)
+	}
+	if !w.appending || !reflect.DeepEqual(w.draft, []string{"alpha"}) {
+		t.Fatalf("invalid append should keep entry mode and roll back collection, appending=%v draft=%v", w.appending, w.draft)
 	}
 }
 
 func TestListEditor_UniqueItemsRejectsNonAdjacentDuplicate(t *testing.T) {
-	// Pin: detection must not be adjacency-only. ["alpha", "beta", "alpha"]
-	// has the duplicates separated by one element.
-	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha", "beta", "alpha"}, nil, 0, true, false, false)
+	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha", "beta"}, nil, 0, true, true, false)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
+	_, _ = dispatch(w, "a")
+	for _, k := range []string{"a", "l", "p", "h", "a"} {
+		_, _ = dispatch(w, k)
+	}
 	_, intent := dispatch(w, "enter")
 	if intent == nil || intent.Status != IntentReject {
 		t.Fatalf("expected reject (non-adjacent duplicate items), got %+v", intent)
@@ -412,8 +529,6 @@ func TestListEditor_AddAndCommit(t *testing.T) {
 	_, _ = dispatch(w, "p")
 	_, _ = dispatch(w, "h")
 	_, _ = dispatch(w, "a")
-	_, _ = dispatch(w, "enter")
-	// Now press enter to commit the list.
 	_, intent := dispatch(w, "enter")
 	if intent == nil || intent.Status != IntentCommit {
 		t.Fatalf("expected commit, got %+v", intent)
@@ -439,8 +554,7 @@ func TestEnumListEditor_TogglesSupportedValuesAndCommits(t *testing.T) {
 	_, _ = dispatch(w, "enter")
 	_, _ = dispatch(w, "down")
 	_, _ = dispatch(w, "down")
-	_, _ = dispatch(w, " ")
-	_, intent := dispatch(w, "enter")
+	_, intent := dispatch(w, " ")
 	if intent == nil || intent.Status != IntentCommit {
 		t.Fatalf("expected commit, got %+v", intent)
 	}
@@ -450,19 +564,30 @@ func TestEnumListEditor_TogglesSupportedValuesAndCommits(t *testing.T) {
 	}
 }
 
-func TestActiveHoursRangesEditor_EditsMultipleRanges(t *testing.T) {
+func TestActiveHoursRangesEditor_CommitsAddAndTimeAdjustPerOperation(t *testing.T) {
 	w := NewActiveHoursRangesEditor("settlement.active_hours.ranges", "ranges", []ActiveHoursRange{
 		{Days: []string{"mon", "tue", "wed", "thu", "fri"}, Start: "09:00", End: "17:00"},
 	}, true)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
-	_, _ = dispatch(w, "a")
+	_, intent := dispatch(w, "a")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("add should commit immediately, got %+v", intent)
+	}
+	if len(w.committed) != 2 || len(w.draft) != 2 {
+		t.Fatalf("add should update committed and draft, committed=%v draft=%v", w.committed, w.draft)
+	}
 	_, _ = dispatch(w, "right")
-	_, _ = dispatch(w, "+")
-	_, _ = dispatch(w, "+")
+	_, intent = dispatch(w, "+")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("time adjust should commit immediately, got %+v", intent)
+	}
+	_, intent = dispatch(w, "+")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("time adjust should commit immediately, got %+v", intent)
+	}
 	_, _ = dispatch(w, "right")
-	_, _ = dispatch(w, "-")
-	_, intent := dispatch(w, "enter")
+	_, intent = dispatch(w, "-")
 	if intent == nil || intent.Status != IntentCommit {
 		t.Fatalf("expected commit, got %+v", intent)
 	}
@@ -477,26 +602,31 @@ func TestActiveHoursRangesEditor_EditsMultipleRanges(t *testing.T) {
 	if second["start"] != "10:00" || second["end"] != "16:30" {
 		t.Fatalf("expected adjusted second range 10:00-16:30, got %v", second)
 	}
+
+	_, intent = dispatch(w, "enter")
+	if intent == nil || intent.Status != IntentNavigate {
+		t.Fatalf("Enter at entered level should navigate, got %+v", intent)
+	}
 }
 
-func TestActiveHoursRangesEditor_EditingAllTimeSeedsDraftWindow(t *testing.T) {
+func TestActiveHoursRangesEditor_EnteringAllTimeCommitsSeededWindow(t *testing.T) {
 	w := NewActiveHoursRangesEditor("settlement.active_hours.ranges", "ranges", nil, false)
 	w.Focus()
 
 	_, intent := dispatch(w, "enter")
-	if intent != nil {
-		t.Fatalf("entering edit mode should not commit, got %+v", intent)
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("entering all-time should commit the seeded default range, got %+v", intent)
 	}
-	if !w.editing || len(w.draft) != 1 {
-		t.Fatalf("entering all-time windows should seed one editable draft window, editing=%v draft=%v", w.editing, w.draft)
+	if !w.editing || len(w.draft) != 1 || len(w.committed) != 1 || !w.present {
+		t.Fatalf("entering all-time should seed and commit one window, editing=%v draft=%v committed=%v present=%v", w.editing, w.draft, w.committed, w.present)
 	}
 
 	_, intent = dispatch(w, "esc")
-	if intent == nil || intent.Status != IntentDiscard {
-		t.Fatalf("Esc should discard seeded all-time draft, got %+v", intent)
+	if intent == nil || intent.Status != IntentNavigate {
+		t.Fatalf("Esc should navigate out of the seeded editor, got %+v", intent)
 	}
-	if len(w.draft) != 0 || len(w.committed) != 0 {
-		t.Fatalf("Esc should restore all-time empty windows, draft=%v committed=%v", w.draft, w.committed)
+	if len(w.draft) != 1 || len(w.committed) != 1 {
+		t.Fatalf("Esc should not revert the committed seed, draft=%v committed=%v", w.draft, w.committed)
 	}
 }
 
@@ -507,8 +637,7 @@ func TestActiveHoursRangesEditor_DeleteLastWindowCommitsAllTime(t *testing.T) {
 	w.Focus()
 
 	_, _ = dispatch(w, "enter")
-	_, _ = dispatch(w, "d")
-	_, intent := dispatch(w, "enter")
+	_, intent := dispatch(w, "d")
 	if intent == nil || intent.Status != IntentCommit {
 		t.Fatalf("expected deleting last window to commit all-time, got %+v", intent)
 	}
@@ -519,6 +648,99 @@ func TestActiveHoursRangesEditor_DeleteLastWindowCommitsAllTime(t *testing.T) {
 	if len(w.committed) != 0 || len(w.draft) != 0 {
 		t.Fatalf("expected editor state to stay all-time after commit, committed=%v draft=%v", w.committed, w.draft)
 	}
+
+	_, intent = dispatch(w, "enter")
+	if intent == nil || intent.Status != IntentNavigate {
+		t.Fatalf("Enter after per-op delete should only navigate, got %+v", intent)
+	}
+}
+
+func TestActiveHoursRangesEditor_DayToggleCommitsPerOperation(t *testing.T) {
+	w := NewActiveHoursRangesEditor("settlement.active_hours.ranges", "ranges", []ActiveHoursRange{
+		{Days: []string{"mon", "tue"}, Start: "09:00", End: "17:00"},
+	}, true)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+
+	_, intent := dispatch(w, "2")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("day toggle should commit immediately, got %+v", intent)
+	}
+	if !reflect.DeepEqual(w.committed[0].Days, []string{"mon"}) || !reflect.DeepEqual(w.draft[0].Days, []string{"mon"}) {
+		t.Fatalf("expected tue toggled off in committed and draft, committed=%v draft=%v", w.committed, w.draft)
+	}
+
+	_, intent = dispatch(w, "3")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("day toggle should commit immediately, got %+v", intent)
+	}
+	if !reflect.DeepEqual(w.committed[0].Days, []string{"mon", "wed"}) {
+		t.Fatalf("expected wed toggled on with normalized ordering, got %v", w.committed[0].Days)
+	}
+}
+
+func TestActiveHoursRangesEditor_InvalidDayToggleRollsBack(t *testing.T) {
+	w := NewActiveHoursRangesEditor("settlement.active_hours.ranges", "ranges", []ActiveHoursRange{
+		{Days: []string{"mon"}, Start: "09:00", End: "17:00"},
+	}, true)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+
+	_, intent := dispatch(w, "1")
+	if intent == nil || intent.Status != IntentReject {
+		t.Fatalf("expected rejecting the no-days candidate, got %+v", intent)
+	}
+	if !reflect.DeepEqual(w.committed[0].Days, []string{"mon"}) || !reflect.DeepEqual(w.draft[0].Days, []string{"mon"}) {
+		t.Fatalf("invalid toggle should roll back state, committed=%v draft=%v", w.committed, w.draft)
+	}
+	if !w.editing {
+		t.Fatalf("invalid toggle should keep the editor entered")
+	}
+	if !strings.Contains(strings.Join(intent.Errors, "; "), "must include at least one day") {
+		t.Fatalf("expected no-days validation error, got %v", intent.Errors)
+	}
+}
+
+func TestActiveHoursRangesEditor_EscAtEnteredLevelNavigatesWithoutReverting(t *testing.T) {
+	w := NewActiveHoursRangesEditor("settlement.active_hours.ranges", "ranges", []ActiveHoursRange{
+		{Days: []string{"mon"}, Start: "09:00", End: "17:00"},
+	}, true)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+	_, intent := dispatch(w, "a")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("add should commit immediately before Esc, got %+v", intent)
+	}
+
+	_, intent = dispatch(w, "esc")
+	if intent == nil || intent.Status != IntentNavigate {
+		t.Fatalf("Esc at entered level should navigate, got %+v", intent)
+	}
+	if w.editing || len(w.committed) != 2 || len(w.draft) != 2 {
+		t.Fatalf("Esc should only leave editing and keep committed ops, editing=%v committed=%v draft=%v", w.editing, w.committed, w.draft)
+	}
+}
+
+func TestActiveHoursRangesEditor_BlurReturnsNil(t *testing.T) {
+	w := NewActiveHoursRangesEditor("settlement.active_hours.ranges", "ranges", []ActiveHoursRange{
+		{Days: []string{"mon"}, Start: "09:00", End: "17:00"},
+	}, true)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+	_, intent := dispatch(w, "a")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("add should commit before blur, got %+v", intent)
+	}
+
+	if intent := w.Blur(); intent != nil {
+		t.Fatalf("Blur should not emit an intent for ActiveHours, got %+v", intent)
+	}
+	if w.Focused() || w.editing {
+		t.Fatalf("Blur should clear focus and editing, focused=%v editing=%v", w.Focused(), w.editing)
+	}
+	if !activeHoursRangesEqual(w.draft, w.committed) || len(w.committed) != 2 {
+		t.Fatalf("Blur should leave draft aligned with committed state, committed=%v draft=%v", w.committed, w.draft)
+	}
 }
 
 func TestActiveHoursRangesEditor_JKMovesThroughEditableFields(t *testing.T) {
@@ -527,7 +749,13 @@ func TestActiveHoursRangesEditor_JKMovesThroughEditableFields(t *testing.T) {
 		{Days: []string{"tue"}, Start: "10:00", End: "18:00"},
 	}, true)
 	w.Focus()
+	if w.ConsumesNavRunes() {
+		t.Fatalf("unentered editor should not consume nav runes")
+	}
 	_, _ = dispatch(w, "enter")
+	if !w.ConsumesNavRunes() {
+		t.Fatalf("entered editor should consume nav runes")
+	}
 
 	_, _ = dispatch(w, "j")
 	if w.cursor != 0 || w.field != 1 {
@@ -552,38 +780,57 @@ func TestActiveHoursRangesEditor_JKMovesThroughEditableFields(t *testing.T) {
 	}
 }
 
-func TestListEditor_DiscardOnEsc(t *testing.T) {
+func TestListEditor_EscAtEnteredLevelNavigatesWithoutRevertingCommittedOps(t *testing.T) {
 	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha"}, nil, 0, true, false, false)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
-	// Add a second item to dirty the draft.
+	// Add a second item; append confirmation writes through immediately.
 	_, _ = dispatch(w, "a")
 	_, _ = dispatch(w, "b")
 	_, _ = dispatch(w, "e")
 	_, _ = dispatch(w, "t")
 	_, _ = dispatch(w, "a")
-	_, _ = dispatch(w, "enter")
-	// Now press Esc — should revert to original.
-	_, intent := dispatch(w, "esc")
-	if intent == nil || intent.Status != IntentDiscard {
-		t.Fatalf("expected IntentDiscard, got %+v", intent)
+	_, intent := dispatch(w, "enter")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("append should commit immediately, got %+v", intent)
 	}
-	if got, ok := intent.Value.([]string); !ok || !reflect.DeepEqual(got, []string{"alpha"}) {
-		t.Fatalf("expected revert to [alpha], got %v", intent.Value)
+	_, intent = dispatch(w, "esc")
+	if intent == nil || intent.Status != IntentNavigate {
+		t.Fatalf("expected IntentNavigate, got %+v", intent)
+	}
+	if !reflect.DeepEqual(w.committed, []string{"alpha", "beta"}) || !reflect.DeepEqual(w.draft, []string{"alpha", "beta"}) {
+		t.Fatalf("Esc at entered level must not revert committed ops, committed=%v draft=%v", w.committed, w.draft)
 	}
 }
 
-func TestListEditor_DiscardOnBlur(t *testing.T) {
+func TestListEditor_BlurDropsEntryBufferWithoutIntent(t *testing.T) {
 	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha"}, nil, 0, true, false, false)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
 	_, _ = dispatch(w, "a")
 	_, _ = dispatch(w, "b")
-	_, _ = dispatch(w, "enter")
 
 	intent := w.Blur()
-	if intent == nil || intent.Status != IntentDiscard {
-		t.Fatalf("expected IntentDiscard from Blur, got %+v", intent)
+	if intent != nil {
+		t.Fatalf("expected nil intent from collection Blur, got %+v", intent)
+	}
+	if w.appending || w.appendBuf != "" || !reflect.DeepEqual(w.draft, []string{"alpha"}) {
+		t.Fatalf("Blur should drop mid-entry buffer only, appending=%v buf=%q draft=%v", w.appending, w.appendBuf, w.draft)
+	}
+}
+
+func TestListEditor_DeleteCommitsPerOperation(t *testing.T) {
+	w := NewListEditor("ceremonies.foo", "advisors", []string{"alpha", "beta"}, nil, 0, true, true, false)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+
+	_, intent := dispatch(w, "d")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("delete should commit immediately, got %+v", intent)
+	}
+	want := []string{"beta"}
+	if got, ok := intent.Value.([]string); !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected %v, got %T %v", want, intent.Value, intent.Value)
 	}
 }
 
@@ -615,7 +862,6 @@ func TestOpenKeysetKVEditor_NumberMapCommitsTypedFloat(t *testing.T) {
 	for _, k := range []string{"0", ".", "5"} {
 		_, _ = dispatch(w, k)
 	}
-	_, _ = dispatch(w, "enter")
 	_, intent := dispatch(w, "enter")
 	if intent == nil || intent.Status != IntentCommit {
 		t.Fatalf("expected commit, got %+v", intent)
@@ -633,13 +879,23 @@ func TestOpenKeysetKVEditor_NumberMapRejectsOutOfBounds(t *testing.T) {
 	min := 0.0
 	max := 1.0
 	valueSchema := &SchemaNode{Kind: KindNumber, minimum: &min, maximum: &max}
-	w := NewTypedOpenKeysetKVEditor("thresholds.probabilities", "probabilities", map[string]string{"plan-review": "1.5"}, nil, openMapValueParser(valueSchema), true, true)
+	w := NewTypedOpenKeysetKVEditor("thresholds.probabilities", "probabilities", map[string]string{"plan-review": "0.5"}, nil, openMapValueParser(valueSchema), true, true)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
 
+	_, _ = dispatch(w, "e")
+	_, _ = dispatch(w, "backspace")
+	_, _ = dispatch(w, "backspace")
+	_, _ = dispatch(w, "backspace")
+	for _, k := range []string{"1", ".", "5"} {
+		_, _ = dispatch(w, k)
+	}
 	_, intent := dispatch(w, "enter")
 	if intent == nil || intent.Status != IntentReject {
 		t.Fatalf("expected out-of-bounds reject, got %+v", intent)
+	}
+	if w.mode != kvEditingValue || w.draft["plan-review"] != "0.5" {
+		t.Fatalf("invalid edit should stay in entry mode and roll back draft, mode=%v draft=%v", w.mode, w.draft)
 	}
 	if !strings.Contains(strings.Join(intent.Errors, "; "), "at most 1") {
 		t.Fatalf("expected maximum error, got %v", intent.Errors)
@@ -647,10 +903,18 @@ func TestOpenKeysetKVEditor_NumberMapRejectsOutOfBounds(t *testing.T) {
 }
 
 func TestOpenKeysetKVEditor_StringArrayMapCommitsTypedSlice(t *testing.T) {
-	w := NewStringArrayOpenKeysetKVEditor("ceremonies", "ceremonies", map[string]string{"plan-review": "sharp-edges,codex-pr-review"}, true, true)
+	w := NewStringArrayOpenKeysetKVEditor("ceremonies", "ceremonies", map[string]string{}, false, true)
 	w.Focus()
 	_, _ = dispatch(w, "enter")
 
+	_, _ = dispatch(w, "a")
+	for _, k := range []string{"p", "l", "a", "n", "-", "r", "e", "v", "i", "e", "w"} {
+		_, _ = dispatch(w, k)
+	}
+	_, _ = dispatch(w, "enter")
+	for _, k := range []string{"s", "h", "a", "r", "p", "-", "e", "d", "g", "e", "s", ",", "c", "o", "d", "e", "x", "-", "p", "r", "-", "r", "e", "v", "i", "e", "w"} {
+		_, _ = dispatch(w, k)
+	}
 	_, intent := dispatch(w, "enter")
 	if intent == nil || intent.Status != IntentCommit {
 		t.Fatalf("expected commit, got %+v", intent)
@@ -665,11 +929,62 @@ func TestOpenKeysetKVEditor_StringArrayMapCommitsTypedSlice(t *testing.T) {
 	}
 }
 
+func TestOpenKeysetKVEditor_EditAndDeleteCommitPerOperation(t *testing.T) {
+	w := NewOpenKeysetKVEditor("roles", "roles", map[string]string{"lead": "sonnet", "worker": "haiku"}, nil, nil, true, true)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+
+	_, _ = dispatch(w, "e")
+	for range "sonnet" {
+		_, _ = dispatch(w, "backspace")
+	}
+	for _, k := range []string{"o", "p", "u", "s"} {
+		_, _ = dispatch(w, k)
+	}
+	_, intent := dispatch(w, "enter")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("edit should commit immediately, got %+v", intent)
+	}
+	got, ok := intent.Value.(map[string]any)
+	if !ok || got["lead"] != "opus" {
+		t.Fatalf("expected typed map with lead=opus, got %T %v", intent.Value, intent.Value)
+	}
+
+	_, intent = dispatch(w, "d")
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("delete should commit immediately, got %+v", intent)
+	}
+	got, ok = intent.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("expected typed map after delete, got %T", intent.Value)
+	}
+	if _, present := got["lead"]; present {
+		t.Fatalf("delete commit should remove lead, got %v", got)
+	}
+}
+
+func TestOpenKeysetKVEditor_EscAtEnteredLevelNavigatesWithoutReverting(t *testing.T) {
+	w := NewOpenKeysetKVEditor("roles", "roles", map[string]string{"lead": "sonnet"}, nil, nil, true, true)
+	w.Focus()
+	_, _ = dispatch(w, "enter")
+
+	_, intent := dispatch(w, "esc")
+	if intent == nil || intent.Status != IntentNavigate {
+		t.Fatalf("Esc at entered level should navigate, got %+v", intent)
+	}
+	if w.editing || w.draft["lead"] != "sonnet" {
+		t.Fatalf("Esc should only leave entered level, editing=%v draft=%v", w.editing, w.draft)
+	}
+	if blur := w.Blur(); blur != nil {
+		t.Fatalf("collection Blur should not emit discard, got %+v", blur)
+	}
+}
+
 // ----------------------------------------------------------------------------
-// ClosedObjectSubPanel — Tab discard semantics.
+// ClosedObjectSubPanel — Tab routes the focused child's leave intent.
 // ----------------------------------------------------------------------------
 
-func TestClosedObjectSubPanel_TabDiscardsFocusedDraft(t *testing.T) {
+func TestClosedObjectSubPanel_TabCommitsFocusedDraft(t *testing.T) {
 	a := NewTextInput("a.x", "x", "", nil, 0, false, false)
 	b := NewTextInput("a.y", "y", "", nil, 0, false, false)
 	panel := NewClosedObjectSubPanel("a", "section", []FieldWidget{a, b})
@@ -683,13 +998,13 @@ func TestClosedObjectSubPanel_TabDiscardsFocusedDraft(t *testing.T) {
 		t.Fatalf("expected child draft 'z', got %q", a.draft)
 	}
 
-	// Press Tab — should discard a's draft AND advance cursor.
+	// Press Tab — should commit a's valid draft AND advance cursor.
 	_, intent := dispatch(panel, "tab")
-	if intent == nil || intent.Status != IntentDiscard {
-		t.Fatalf("expected IntentDiscard from Tab, got %+v", intent)
+	if intent == nil || intent.Status != IntentCommit {
+		t.Fatalf("expected IntentCommit from Tab, got %+v", intent)
 	}
-	if a.draft != "" {
-		t.Fatalf("expected draft reverted, got %q", a.draft)
+	if a.committed != "z" || a.draft != "z" {
+		t.Fatalf("expected draft committed, committed=%q draft=%q", a.committed, a.draft)
 	}
 	if panel.cursor != 1 {
 		t.Fatalf("expected cursor advanced to 1, got %d", panel.cursor)
@@ -1092,5 +1407,33 @@ func TestKVEditor_EscDuringEditValueEmitsIntentDiscard(t *testing.T) {
 	// The original committed value must remain unchanged in draft.
 	if w.draft["plan-review"] != "sharp-edges" {
 		t.Fatalf("draft value mutated by cancelled edit: %q", w.draft["plan-review"])
+	}
+}
+
+func TestEnumSelector_NoOpPressesEmitNoCommit(t *testing.T) {
+	w := NewEnumSelector("tui_launch_framework", []string{"claude-code", "opencode", "codex"}, nil, "claude-code", false)
+	w.Focus()
+
+	// Boundary press: cursor already at the left edge on the committed
+	// option — must not re-commit (a no-op commit clobbers the undo slot).
+	if _, intent := dispatch(w, "left"); intent != nil {
+		t.Fatalf("boundary left on committed option should emit nothing, got %+v", intent)
+	}
+	// Enter/space on the already committed option: no-op.
+	if _, intent := dispatch(w, "enter"); intent != nil {
+		t.Fatalf("enter on committed option should emit nothing, got %+v", intent)
+	}
+	if _, intent := dispatch(w, "space"); intent != nil {
+		t.Fatalf("space on committed option should emit nothing, got %+v", intent)
+	}
+
+	// Right edge: move to the end, then push past it.
+	_, _ = dispatch(w, "right")
+	_, _ = dispatch(w, "right")
+	if w.current != 2 {
+		t.Fatalf("expected current=2 at right edge, got %d", w.current)
+	}
+	if _, intent := dispatch(w, "right"); intent != nil {
+		t.Fatalf("boundary right on committed option should emit nothing, got %+v", intent)
 	}
 }

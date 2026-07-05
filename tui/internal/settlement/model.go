@@ -84,67 +84,74 @@ func (m Model) Count() int {
 }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
-	km, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		return m, nil
-	}
-	switch m.mode {
-	case DrillClaim:
-		switch km.String() {
-		case "esc":
-			m.exitDrill()
-		case "j", "down":
-			m.setCursor(m.cursor + 1)
-			m.vp.GotoTop()
-		case "k", "up":
-			m.setCursor(m.cursor - 1)
-			m.vp.GotoTop()
-		case "pgdown":
-			m.vp.HalfPageDown()
-		case "pgup":
-			m.vp.HalfPageUp()
+	switch msg := msg.(type) {
+	case tea.MouseWheelMsg:
+		// Settlement has one scrollable panel; wheel mirrors j/k movement
+		// without introducing focus or click semantics.
+		switch msg.Button {
+		case tea.MouseWheelDown:
+			m.moveSelection(1)
+		case tea.MouseWheelUp:
+			m.moveSelection(-1)
 		}
-	case DrillVerdict:
-		switch km.String() {
-		case "esc":
-			m.exitDrill()
-		case "j", "down":
-			m.setVerdictCursor(m.verdictCursor + 1)
-		case "k", "up":
-			m.setVerdictCursor(m.verdictCursor - 1)
-		case "pgdown":
-			m.vp.HalfPageDown()
-		case "pgup":
-			m.vp.HalfPageUp()
-		}
-	default:
-		switch km.String() {
-		case "enter":
-			if m.selectedItem() != nil {
-				m.mode = DrillClaim
-				m.syncContent()
-				m.vp.GotoTop()
+
+	case tea.KeyPressMsg:
+		switch m.mode {
+		case DrillClaim:
+			switch msg.String() {
+			case "esc":
+				m.exitDrill()
+			case "j", "down":
+				m.moveSelection(1)
+			case "k", "up":
+				m.moveSelection(-1)
+			case "pgdown":
+				m.vp.HalfPageDown()
+			case "pgup":
+				m.vp.HalfPageUp()
 			}
-		case "v":
-			if len(m.orderedVerdicts()) > 0 {
-				m.mode = DrillVerdict
-				m.verdictCursor = 0
-				m.syncContent()
-				m.vp.GotoTop()
+		case DrillVerdict:
+			switch msg.String() {
+			case "esc":
+				m.exitDrill()
+			case "j", "down":
+				m.moveSelection(1)
+			case "k", "up":
+				m.moveSelection(-1)
+			case "pgdown":
+				m.vp.HalfPageDown()
+			case "pgup":
+				m.vp.HalfPageUp()
 			}
-		case "j", "down":
-			m.setCursor(m.cursor + 1)
-		case "k", "up":
-			m.setCursor(m.cursor - 1)
-		case "pgdown":
-			m.vp.HalfPageDown()
-		case "pgup":
-			m.vp.HalfPageUp()
-		case "home":
-			m.setCursor(0)
-			m.vp.GotoTop()
-		case "end":
-			m.setCursor(len(m.status.Items) - 1)
+		default:
+			switch msg.String() {
+			case "enter":
+				if m.selectedItem() != nil {
+					m.mode = DrillClaim
+					m.syncContent()
+					m.vp.GotoTop()
+				}
+			case "v":
+				if len(m.orderedVerdicts()) > 0 {
+					m.mode = DrillVerdict
+					m.verdictCursor = 0
+					m.syncContent()
+					m.vp.GotoTop()
+				}
+			case "j", "down":
+				m.moveSelection(1)
+			case "k", "up":
+				m.moveSelection(-1)
+			case "pgdown":
+				m.vp.HalfPageDown()
+			case "pgup":
+				m.vp.HalfPageUp()
+			case "home":
+				m.setCursor(0)
+				m.vp.GotoTop()
+			case "end":
+				m.setCursor(len(m.status.Items) - 1)
+			}
 		}
 	}
 	return m, nil
@@ -156,6 +163,18 @@ func (m Model) View() string {
 		return strings.Join(lines, "\n")
 	}
 	return m.vp.View()
+}
+
+func (m *Model) moveSelection(delta int) {
+	switch m.mode {
+	case DrillClaim:
+		m.setCursor(m.cursor + delta)
+		m.vp.GotoTop()
+	case DrillVerdict:
+		m.setVerdictCursor(m.verdictCursor + delta)
+	default:
+		m.setCursor(m.cursor + delta)
+	}
 }
 
 // exitDrill returns to the root dashboard and scrolls the queue cursor back
