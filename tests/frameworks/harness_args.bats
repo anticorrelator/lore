@@ -381,6 +381,50 @@ gpt-5.5-xhigh" ]
   [ -z "$out" ]
 }
 
+# --- framework_interaction_field (bash-side interaction-contract reader) ---
+# Sequence values carry trailing control bytes (CR/LF) that $() strips, so these
+# assert on the raw byte hex via od rather than string equality. The reader's
+# stdout ends in jq's line terminator (one LF); strip that single trailing 0a so
+# the hex is the sequence value itself (a lone-LF value like claude-code's newline
+# survives as `0a`).
+seq_hex() {
+  bash -c "source '$LIB_SH' && framework_interaction_field $* | od -An -v -tx1 | tr -d ' \n'" 2>/dev/null | sed 's/0a$//'
+}
+
+@test "bash: framework_interaction_field — submit_sequence is CR for every framework" {
+  [ "$(seq_hex submit_sequence sequence claude-code)" = "0d" ]
+  [ "$(seq_hex submit_sequence sequence codex)" = "0d" ]
+  [ "$(seq_hex submit_sequence sequence opencode)" = "0d" ]
+}
+
+@test "bash: framework_interaction_field — newline_sequence diverges per harness (LF vs ESC-CR)" {
+  [ "$(seq_hex newline_sequence sequence claude-code)" = "0a" ]
+  [ "$(seq_hex newline_sequence sequence codex)" = "0a" ]
+  [ "$(seq_hex newline_sequence sequence opencode)" = "1b0d" ]
+}
+
+@test "bash: framework_interaction_field — graceful_exit_sequence (Ctrl-C x2 vs x1)" {
+  [ "$(seq_hex graceful_exit_sequence sequence claude-code)" = "0303" ]
+  [ "$(seq_hex graceful_exit_sequence sequence codex)" = "03" ]
+  [ "$(seq_hex graceful_exit_sequence sequence opencode)" = "03" ]
+}
+
+@test "bash: framework_interaction_field — value rows carry the closed-vocabulary token" {
+  [ "$(bash_helper 'framework_interaction_field honors_bracketed_paste value codex')" = "true" ]
+  [ "$(bash_helper 'framework_interaction_field mid_generation_semantics value codex')" = "buffered-draft" ]
+  [ "$(bash_helper 'framework_interaction_field mid_generation_semantics value claude-code')" = "queued-autosubmit" ]
+}
+
+@test "bash: framework_interaction_field — absent framework degrades to the unsupported token" {
+  out=$(bash_helper "framework_interaction_field submit_sequence sequence no-such-framework")
+  [ "$out" = "unsupported" ]
+}
+
+@test "bash: framework_interaction_field — unknown row is a closed-set error, not a degrade" {
+  run bash -c "source '$LIB_SH' && framework_interaction_field bogus_row sequence codex"
+  [ "$status" -eq 1 ]
+}
+
 @test "parity: resolve_model_for_role — env-aware role binding" {
   export LORE_FRAMEWORK=claude-code
   write_settings <<EOF

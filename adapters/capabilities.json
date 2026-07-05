@@ -22,7 +22,8 @@
     "transcript_provider": "Exposes a parseable session/transcript artifact that capture, digest, novelty, and ceremony-detection scripts can consume.",
     "headless_runner": "Non-interactive `<harness> -p <prompt>` mode used by audit-artifact.sh (correctness-gate, curator, reverse-auditor) and other batch judges.",
     "plugin_runtime": "Native plugin/extension runtime where lore can register code (TypeScript, shell, etc.) that participates in lifecycle events.",
-    "model_routing": "Whether the harness exposes a single model/provider per session or can route per-spawn to multiple providers; values: `single` or `multi`. The optional `tiers` array lists the harness's validated model aliases in ascending capability order (consumed by the settlement panel's tier cycle and framework_model_routing_tiers); an empty array means no validated alias ladder — consumers must not guess one."
+    "model_routing": "Whether the harness exposes a single model/provider per session or can route per-spawn to multiple providers; values: `single` or `multi`. The optional `tiers` array lists the harness's validated model aliases in ascending capability order (consumed by the settlement panel's tier cycle and framework_model_routing_tiers); an empty array means no validated alias ladder — consumers must not guess one.",
+    "interaction": "Per-framework probed PTY interaction contract (sibling of `capabilities` and `model_routing`, like `model_routing`). Each row is an evidence-gated cell — `support` from the closed level set plus an `evidence` id resolving in capabilities-evidence.md — carrying one typed payload: `sequence` rows (submit_sequence, newline_sequence, graceful_exit_sequence) hold the literal PTY bytes a caller writes to the harness master (JSON escapes: \\r=CR, \\n=LF, \\u0003=Ctrl-C, \\u001b=ESC); `matcher` rows (composer_signature, permission_prompt_signature) hold the human-readable screen-state description the readiness gate's matcher function implements; `value` rows carry a closed-vocabulary token — honors_bracketed_paste is a boolean, paste_multiline_semantics is one of {`held-multiline-needs-submit`, `auto-submit-on-close`}, mid_generation_semantics is one of {`queued-autosubmit`, `buffered-draft`, `dropped`, `interrupts`}. Rows are derived from tests/probes/session_injection and pinned by that suite's contract tests. Consumed by config.interactionProfile in tui/internal/config/framework.go (the close ladder reads graceful_exit_sequence via HarnessGracefulExitSequence) and by framework_interaction_field in scripts/lib.sh. An absent row or a framework without an interaction block degrades explicitly (`unsupported` / not-supported) with a `[lore] degraded:` notice — callers skip, never substitute a value from another harness."
   },
   "tools": {
     "gh_cli": "GitHub CLI (`gh`) on PATH for PR/issue read+write workflows. Sourced from the host environment, not the harness — no harness exposes it. Skills that consume PR diffs/comments/reviews require it; degradation is a hard `unsupported` rather than `partial` because the data is unreachable without it."
@@ -184,6 +185,56 @@
         "notes": "Single Anthropic provider per session; the role->model map collapses to one binding without affecting call sites.",
         "tiers": ["haiku", "sonnet", "opus", "fable"]
       },
+      "interaction": {
+        "composer_signature": {
+          "support": "full",
+          "evidence": "claude-code-interaction",
+          "matcher": "a row matching ^\\s*[❯>](\\s|$) flanked by >=2 full-width rules (^─{80,}$); cursor sits on the prompt row; AND permission_prompt_signature does NOT match (the modal renders in-band inside the composer chrome and its option rows satisfy the structural anchors)",
+          "notes": "The '❯' prompt row bordered by two pure-'─' full-width rules; persists after the welcome banner scrolls away. Probed in raw/claude-code/p1_composer.log."
+        },
+        "permission_prompt_signature": {
+          "support": "full",
+          "evidence": "claude-code-interaction",
+          "matcher": "bottom-region rows with 'Do you want to proceed?' (or footer 'Esc to cancel · Tab to amend · ctrl+e to explain') AND >=2 numbered options ('❯ 1. Yes' / '2. …' / '3. No'); modal header is the tool name ('Bash command'). Scrollback-safe: keyed on the bottom 14 rows.",
+          "notes": "A side-effecting command (touch) raises the modal; echo auto-approves off the safe allowlist. Probed in raw/claude-code/p2_permission.log."
+        },
+        "submit_sequence": {
+          "support": "full",
+          "evidence": "claude-code-interaction",
+          "sequence": "\r",
+          "notes": "CR (0x0d) submits the composer. Raw LF (0x0a) does NOT submit here — it inserts a newline. Probed in raw/claude-code/p3_submit_newline.log."
+        },
+        "newline_sequence": {
+          "support": "full",
+          "evidence": "claude-code-interaction",
+          "sequence": "\n",
+          "notes": "LF (0x0a) inserts a composer newline without submitting (as do alt+enter, shift+enter CSI-u, shift+enter xterm). Probed in raw/claude-code/p3_submit_newline.log."
+        },
+        "honors_bracketed_paste": {
+          "support": "full",
+          "evidence": "claude-code-interaction",
+          "value": true,
+          "notes": "Advertises ESC[?2004h; a 200~..201~-wrapped multiline payload lands as one composer entry. Probed in raw/claude-code/p4_bracketed_paste.log."
+        },
+        "paste_multiline_semantics": {
+          "support": "full",
+          "evidence": "claude-code-interaction",
+          "value": "held-multiline-needs-submit",
+          "notes": "One multiline composer entry; needs a trailing CR to submit. Probed in raw/claude-code/p4_bracketed_paste.log."
+        },
+        "mid_generation_semantics": {
+          "support": "full",
+          "evidence": "claude-code-interaction",
+          "value": "queued-autosubmit",
+          "notes": "Type-ahead: bytes injected mid-generation auto-submit as the next turn once the current generation ends — so the readiness gate must be strict (never inject mid-generation). Probed in raw/claude-code/p5_midgen.log."
+        },
+        "graceful_exit_sequence": {
+          "support": "full",
+          "evidence": "claude-code-interaction",
+          "sequence": "\u0003\u0003",
+          "notes": "Ctrl-C twice (~0.4s apart) exits; the close ladder writes these bytes to the PTY master as its first rung before SIGTERM. Probed en passant at shared-session teardown."
+        }
+      },
       "install_paths": {
         "instructions":     "$HOME/.claude/CLAUDE.md",
         "skills":           "$HOME/.claude/skills",
@@ -282,6 +333,56 @@
         "notes": "Per-spawn provider/model selection; the role->model map honors per-role bindings (e.g., Opus for lead, Haiku for worker fanout). Tiers use the provider/model id shape; the Anthropic ladder is the validated ordered set.",
         "tiers": ["anthropic/haiku", "anthropic/sonnet", "anthropic/opus"]
       },
+      "interaction": {
+        "composer_signature": {
+          "support": "full",
+          "evidence": "opencode-interaction",
+          "matcher": "composer-ready := (row matches /╹▀{5,}/  bottom border) AND (some row contains 'commands' key-hint) AND (left border '┃' present); empty-and-ready adds a row containing 'Ask anything...'; AND permission_prompt_signature does NOT match (the modal renders in-band inside the composer box, leaving the border/hint anchors on screen)",
+          "notes": "Model-independent glyph anchors: the '╹▀+' bottom border, the 'commands' key-hint, and the '┃' left border; 'Ask anything...' marks the empty-and-ready state. Probed in raw/opencode/p1_composer_launch{1,2}.raw."
+        },
+        "permission_prompt_signature": {
+          "support": "full",
+          "evidence": "opencode-interaction",
+          "matcher": "permission-modal := a row containing '△ Permission required' AND an action row matching /Allow once\\s+Allow always\\s+Reject/",
+          "notes": "Renders in-band in the composer box (no dedicated DECSET layer); requires permission.bash=ask (default config auto-runs bash). Probed in raw/opencode/p2b_permission_modal.raw."
+        },
+        "submit_sequence": {
+          "support": "full",
+          "evidence": "opencode-interaction",
+          "sequence": "\r",
+          "notes": "CR (0x0d) submits the composer. Probed in raw/opencode/p3_submit_newline.raw."
+        },
+        "newline_sequence": {
+          "support": "full",
+          "evidence": "opencode-interaction",
+          "sequence": "\u001b\r",
+          "notes": "Alt+Enter (ESC CR, 0x1b 0x0d) inserts a newline without submitting — NOT raw LF, unlike claude-code/codex. Probed in raw/opencode/p3_submit_newline.raw."
+        },
+        "honors_bracketed_paste": {
+          "support": "full",
+          "evidence": "opencode-interaction",
+          "value": true,
+          "notes": "Advertises ESC[?2004h at composer; 200~..201~ wrap with embedded LF lands as one multiline entry, single trailing CR submits it. Probed in raw/opencode/p4_bracketed_paste.raw."
+        },
+        "paste_multiline_semantics": {
+          "support": "full",
+          "evidence": "opencode-interaction",
+          "value": "held-multiline-needs-submit",
+          "notes": "Held as one multiline composer entry; needs a trailing submit. Probed in raw/opencode/p4_bracketed_paste.raw."
+        },
+        "mid_generation_semantics": {
+          "support": "full",
+          "evidence": "opencode-interaction",
+          "value": "queued-autosubmit",
+          "notes": "Queued: text injected mid-generation is held (native QUEUED badge) and auto-sent as the next message once generation finishes. Probed in raw/opencode/p5_mid_generation.raw."
+        },
+        "graceful_exit_sequence": {
+          "support": "full",
+          "evidence": "opencode-interaction",
+          "sequence": "\u0003",
+          "notes": "Single Ctrl-C from a clean idle composer exits (during an active generation ctrl-c/esc interrupts instead — distinguish by screen state); '/exit\\r' is the never-ambiguous alternative. The close ladder writes this byte to the PTY master before SIGTERM. Probed in raw/opencode/exit_ctrl_c.raw."
+        }
+      },
       "install_paths": {
         "instructions":     "$HOME/.config/opencode/AGENTS.md",
         "skills":           "$HOME/.agents/skills",
@@ -378,6 +479,56 @@
         "evidence": "codex-model-routing",
         "notes": "Single provider per session; the role->model map collapses to one binding without affecting call sites. Tiers vary reasoning effort on the shipped gpt-5.5 binding via the adapter's -<effort> suffix split.",
         "tiers": ["gpt-5.5-low", "gpt-5.5-medium", "gpt-5.5-high", "gpt-5.5-xhigh"]
+      },
+      "interaction": {
+        "composer_signature": {
+          "support": "full",
+          "evidence": "codex-interaction",
+          "matcher": "footer status row matches (?:minimal|low|medium|high|xhigh)\\s+·\\s AND an input row (at/above it) begins with '›' — the '›' glyph alone is shared with codex selection menus (incl. trust modal), so the footer middot+cwd is the disambiguator; AND permission_prompt_signature does NOT match (the approval modal usually drops the footer row; the negation guards partial repaints)",
+          "notes": "Footer status line '<model> <effort> · <cwd>' is the durable anchor; the welcome banner scrolls off after the first turn. Probed in raw/codex/p1_composer_launch{1,2}.log."
+        },
+        "permission_prompt_signature": {
+          "support": "full",
+          "evidence": "codex-interaction",
+          "matcher": "an approval modal shows a 'Would you like to run the following command?' header, a '$ <cmd>' line, and a numbered option list with the '›' glyph on the selected row ('› 1. Yes, proceed (y)' / 2. Yes+don't-ask / 3. No (esc)), plus a 'Press enter to confirm or esc to cancel' footer. The composer footer status line is NOT present while the modal owns the screen — its absence + this option list is the readiness-gate 'blocked' signal",
+          "notes": "Only escalates under -a untrusted (default auto-approves trusted commands with no modal). Probed in raw/codex/p2_approval_untrusted.log."
+        },
+        "submit_sequence": {
+          "support": "full",
+          "evidence": "codex-interaction",
+          "sequence": "\r",
+          "notes": "CR (0x0d) submits the composer. Probed in raw/codex/p3_submit.log."
+        },
+        "newline_sequence": {
+          "support": "full",
+          "evidence": "codex-interaction",
+          "sequence": "\n",
+          "notes": "Ctrl-J / LF (0x0a) inserts a newline without submitting. Probed in raw/codex/p3_newline_0_ctrl-j-n-0x0a-.log."
+        },
+        "honors_bracketed_paste": {
+          "support": "full",
+          "evidence": "codex-interaction",
+          "value": true,
+          "notes": "Composer emits ESC[?2004h at ready; 200~..201~ wrap holds a multiline payload. Probed in raw/codex/p4_bracketed_paste.log."
+        },
+        "paste_multiline_semantics": {
+          "support": "full",
+          "evidence": "codex-interaction",
+          "value": "held-multiline-needs-submit",
+          "notes": "Held as one multiline composer entry; trailing CR submits. Probed in raw/codex/p4_bracketed_paste.log."
+        },
+        "mid_generation_semantics": {
+          "support": "full",
+          "evidence": "codex-interaction",
+          "value": "buffered-draft",
+          "notes": "Buffered: text injected mid-turn lands in the composer as an unsent draft (the trailing CR does NOT submit while a turn is active); a fresh CR when idle submits it. Probed in raw/codex/p5_midgen.log."
+        },
+        "graceful_exit_sequence": {
+          "support": "full",
+          "evidence": "codex-interaction",
+          "sequence": "\u0003",
+          "notes": "Single Ctrl-C from an idle empty composer exits (with text present the first Ctrl-C clears it, so up to two). The close ladder writes this byte to the PTY master before SIGTERM. Probed in raw/codex/p1_composer_launch{1,2}.log."
+        }
       },
       "install_paths": {
         "instructions":     "$HOME/.codex/AGENTS.md",

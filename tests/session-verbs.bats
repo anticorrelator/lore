@@ -22,6 +22,9 @@ REQUEST="$REPO_DIR/scripts/session-request.sh"
 LIST="$REPO_DIR/scripts/session-list.sh"
 EVENTS="$REPO_DIR/scripts/session-events.sh"
 CLOSE="$REPO_DIR/scripts/session-close.sh"
+SEND="$REPO_DIR/scripts/session-send.sh"
+PEEK="$REPO_DIR/scripts/session-peek.sh"
+APPEND="$REPO_DIR/scripts/session-event-append.sh"
 
 setup() {
   [ -f "$REQUEST" ] || skip "session-request.sh missing"
@@ -38,6 +41,20 @@ teardown() {
 }
 
 # --- Fixtures --------------------------------------------------------------
+
+# Wait (up to ~10s) for the first request file under _sessions/<subdir> and echo
+# its request_id. Used by the send/peek --wait tests to seed an outcome/response
+# concurrently, standing in for the owning TUI instance.
+wait_request_id() {
+  local subdir="$1" f=""
+  local _i
+  for _i in $(seq 1 100); do
+    f="$(ls "$TEST_KDIR/_sessions/$subdir"/*.json 2>/dev/null | head -1)"
+    [ -n "$f" ] && { jq -r .request_id "$f"; return 0; }
+    sleep 0.1
+  done
+  return 1
+}
 
 # Write a live registry instance hosting one slug.
 write_instance() {
@@ -363,4 +380,99 @@ journal_boundaries() {
   run bash "$CLOSE" feature-x --reason nonsense --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"invalid --reason"* ]]
+}
+
+# =====================================================================
+# session send
+# =====================================================================
+
+@test "send <slug> <message> enqueues a send-request and emits send_requested" {
+  write_instance inst-a feature-x
+  run bash "$SEND" feature-x "hello world" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.enqueued==true and .slug=="feature-x" and .target_instance=="inst-a"'
+
+  local sr; sr="$(ls "$TEST_KDIR"/_sessions/send-requests/*.json)"
+  run jq -e '.body=="hello world" and .target_instance=="inst-a" and (.requested_at|length>0)' "$sr"
+  [ "$status" -eq 0 ]
+
+  run grep -c '"event":"send_requested"' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$output" = "1" ]
+}
+
+@test "send refuses when no live instance runs the slug" {
+  run bash "$SEND" ghost "hi" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no live instance is running session 'ghost'"* ]]
+}
+
+@test "send refuses a missing message" {
+  write_instance inst-a feature-x
+  run bash "$SEND" feature-x --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no message"* ]]
+}
+
+@test "send --wait maps a sent outcome to exit 0" {
+  write_instance inst-a feature-x
+  ( rid="$(wait_request_id send-requests)"
+    echo '{"event":"sent","request_id":"'"$rid"'","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  run bash "$SEND" feature-x "hi" --wait --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Sent to 'feature-x'"* ]]
+}
+
+@test "send --wait maps a send_refused outcome to exit 3" {
+  write_instance inst-a feature-x
+  ( rid="$(wait_request_id send-requests)"
+    echo '{"event":"send_refused","request_id":"'"$rid"'","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  run bash "$SEND" feature-x "hi" --wait --timeout 10 --json --kdir "$TEST_KDIR"
+  wait
+  [ "$status" -eq 3 ]
+  # JSON on stdout, human line on stderr; bats run combines them, so match the
+  # refusal fields as substrings rather than parsing the merged stream.
+  [[ "$output" == *'"refused": true'* ]]
+  [[ "$output" == *'"reason": "modal"'* ]]
+}
+
+@test "send --wait times out to exit 1 when no outcome lands" {
+  write_instance inst-a feature-x
+  run bash "$SEND" feature-x "hi" --wait --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"timed out"* ]]
+}
+
+# =====================================================================
+# session peek
+# =====================================================================
+
+@test "peek returns the seeded screen rows and deletes the response on read" {
+  write_instance inst-a feature-x
+  ( rid="$(wait_request_id peek-requests)"
+    mkdir -p "$TEST_KDIR/_sessions/peek-responses"
+    printf '%s\n' '{"request_id":"'"$rid"'","slug":"feature-x","captured_at":"t","ready":true,"blocked_reason":"","rows":["prompt line","second row"]}' \
+      > "$TEST_KDIR/_sessions/peek-responses/$rid.json" ) &
+  run bash "$PEEK" feature-x --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"prompt line"* ]]
+  [[ "$output" == *"ready=true"* ]]
+  [ -z "$(ls "$TEST_KDIR"/_sessions/peek-responses/ 2>/dev/null)" ]
+  # Peek is a read: it emits no journal events.
+  [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
+}
+
+@test "peek refuses when no live instance runs the slug" {
+  run bash "$PEEK" ghost --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no live instance is running session 'ghost'"* ]]
+}
+
+@test "peek times out to exit 1 and cleans up its request" {
+  write_instance inst-a feature-x
+  run bash "$PEEK" feature-x --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"timed out"* ]]
+  [ -z "$(ls "$TEST_KDIR"/_sessions/peek-requests/ 2>/dev/null)" ]
 }

@@ -576,6 +576,79 @@ non-`none` cell points at an id that exists here.
 
 ---
 
+## Session Interaction Probes
+
+The `interaction` block on each framework is backed by live PTY probes, not
+vendor docs: the probe suite spawns the real harness binary over a pexpect
+PTY, drives it, and observes the VT screen with pyte, recording each row's
+behavior. The recorded observation JSON plus the raw per-probe byte logs are
+the durable artifacts; `tests/probes/session_injection` re-runs the probes as
+contract tests (`LORE_LIVE_PROBES=1`) that assert live behavior still matches
+the row. Because a harness UI can change between releases, these entries name
+the exact binary version probed; refresh when the harness is upgraded.
+
+### claude-code-interaction
+
+- **Source:** Local artifact — lore session-injection probe suite
+  (`probe_claude_code.py`).
+- **URL / path:** `tests/probes/session_injection/observations/claude-code.json`
+  and the raw byte logs under
+  `tests/probes/session_injection/observations/raw/claude-code/`.
+- **Retrieved:** 2026-07-05
+- **Product / version:** Claude Code 2.1.201.
+- **Claim:** Per-row raw-log backing — `composer_signature` ←
+  `raw/claude-code/p1_composer.log`; `permission_prompt_signature` ←
+  `p2_permission.log`; `submit_sequence` (CR submits) and `newline_sequence`
+  (LF inserts) ← `p3_submit_newline.log`; `honors_bracketed_paste` and
+  `paste_multiline_semantics` (held, needs trailing CR) ←
+  `p4_bracketed_paste.log`; `mid_generation_semantics` (queued auto-submit,
+  type-ahead) ← `p5_midgen.log`; `graceful_exit_sequence` (Ctrl-C x2) ←
+  en-passant teardown of `shared_startup.log`.
+- **Consumed by:** every row of `claude-code.interaction`.
+
+### opencode-interaction
+
+- **Source:** Local artifact — lore session-injection probe suite
+  (`probe_opencode.py`).
+- **URL / path:** `tests/probes/session_injection/observations/opencode.json`
+  and the raw byte logs under
+  `tests/probes/session_injection/observations/raw/opencode/`.
+- **Retrieved:** 2026-07-05
+- **Product / version:** OpenCode 1.14.30.
+- **Claim:** Per-row raw-log backing — `composer_signature` ←
+  `raw/opencode/p1_composer_launch{1,2}.raw`; `permission_prompt_signature` ←
+  `p2b_permission_modal.raw` (needs `permission.bash=ask`);
+  `submit_sequence` (CR submits) and `newline_sequence` (Alt+Enter ESC-CR, not
+  raw LF) ← `p3_submit_newline.raw`; `honors_bracketed_paste` and
+  `paste_multiline_semantics` (held, needs trailing CR) ←
+  `p4_bracketed_paste.raw`; `mid_generation_semantics` (queued auto-submit,
+  native QUEUED badge) ← `p5_mid_generation.raw`; `graceful_exit_sequence`
+  (single Ctrl-C from idle) ← `exit_ctrl_c.raw`.
+- **Consumed by:** every row of `opencode.interaction`.
+
+### codex-interaction
+
+- **Source:** Local artifact — lore session-injection probe suite
+  (`probe_codex.py`).
+- **URL / path:** `tests/probes/session_injection/observations/codex.json`
+  and the raw byte logs under
+  `tests/probes/session_injection/observations/raw/codex/`.
+- **Retrieved:** 2026-07-05
+- **Product / version:** codex-cli 0.142.5.
+- **Claim:** Per-row raw-log backing — `composer_signature` (footer status
+  line anchor) ← `raw/codex/p1_composer_launch{1,2}.log`;
+  `permission_prompt_signature` (only under `-a untrusted`) ←
+  `p2_approval_untrusted.log`; `submit_sequence` (CR submits) ←
+  `p3_submit.log`; `newline_sequence` (Ctrl-J LF inserts) ←
+  `p3_newline_0_ctrl-j-n-0x0a-.log`; `honors_bracketed_paste` and
+  `paste_multiline_semantics` (held, needs trailing CR) ←
+  `p4_bracketed_paste.log`; `mid_generation_semantics` (buffered draft, needs
+  fresh CR when idle) ← `p5_midgen.log`; `graceful_exit_sequence` (single
+  Ctrl-C from idle) ← `p1_composer_launch{1,2}.log`.
+- **Consumed by:** every row of `codex.interaction`.
+
+---
+
 ## Known gaps and harness-specific exclusions
 
 These are intentionally `none` (or out of scope) and are listed here so
@@ -650,6 +723,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - claude-code-transcript-provider
 - claude-code-headless-runner
 - claude-code-model-routing
+- claude-code-interaction
 - opencode-instructions
 - opencode-skills
 - opencode-mcp
@@ -664,6 +738,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - opencode-headless-runner
 - opencode-plugin-runtime
 - opencode-model-routing
+- opencode-interaction
 - codex-instructions
 - codex-skills
 - codex-mcp
@@ -677,3 +752,4 @@ matches the union of all `evidence:` fields in capabilities.json.
 - codex-transcript-provider
 - codex-headless-runner
 - codex-model-routing
+- codex-interaction

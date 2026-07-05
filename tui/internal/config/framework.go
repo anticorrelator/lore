@@ -123,14 +123,39 @@ type capabilitiesProfile struct {
 	Interaction    interactionProfile `json:"interaction"`
 }
 
-// interactionProfile is the per-framework interaction block. GracefulExitSequence
-// is the key sequence written to the harness's PTY to request a clean exit; it is
-// populated only once a framework's interaction contract has been probed and
-// recorded (the probe suite is a downstream deliverable). Absent today for every
-// framework, so the close ladder degrades to SIGTERM rather than guessing a
-// sequence.
+// interactionProfile is the per-framework probed PTY interaction contract from
+// adapters/capabilities.json `.frameworks[<id>].interaction`. Each field is one
+// evidence-gated row; the rows are populated from tests/probes/session_injection
+// and pinned by that suite's contract tests. The row shape is uniform
+// (interactionRow) but only one payload field is meaningful per row: Sequence for
+// the byte-sequence rows (submit/newline/graceful_exit), Matcher for the
+// screen-state signature rows, Value for the closed-vocabulary rows. The close
+// ladder reads GracefulExitSequence.Sequence via HarnessGracefulExitSequence; the
+// remaining rows are the readiness gate's contract (consumed downstream).
 type interactionProfile struct {
-	GracefulExitSequence string `json:"graceful_exit_sequence"`
+	ComposerSignature         interactionRow `json:"composer_signature"`
+	PermissionPromptSignature interactionRow `json:"permission_prompt_signature"`
+	SubmitSequence            interactionRow `json:"submit_sequence"`
+	NewlineSequence           interactionRow `json:"newline_sequence"`
+	HonorsBracketedPaste      interactionRow `json:"honors_bracketed_paste"`
+	PasteMultilineSemantics   interactionRow `json:"paste_multiline_semantics"`
+	MidGenerationSemantics    interactionRow `json:"mid_generation_semantics"`
+	GracefulExitSequence      interactionRow `json:"graceful_exit_sequence"`
+}
+
+// interactionRow is one interaction-contract cell: the capability triple
+// (Support + Evidence) plus the single typed payload its row kind carries.
+// Sequence holds the literal PTY bytes for the byte-sequence rows; Matcher holds
+// the screen-state description for the signature rows; Value carries the
+// closed-vocabulary token (a bool for honors_bracketed_paste, a string enum for
+// the semantics rows) as raw JSON so a caller decodes it into the type it expects.
+type interactionRow struct {
+	Support  string          `json:"support"`
+	Evidence string          `json:"evidence"`
+	Sequence string          `json:"sequence"`
+	Matcher  string          `json:"matcher"`
+	Value    json.RawMessage `json:"value"`
+	Notes    string          `json:"notes"`
 }
 
 // modelRouting is the per-framework model-routing block. Tiers is the ordered
@@ -161,15 +186,20 @@ func LoadModelRoutingTiers(framework string) ([]string, error) {
 	return prof.ModelRouting.Tiers, nil
 }
 
-// HarnessGracefulExitSequence returns the harness's graceful-exit key sequence
-// for a framework from adapters/capabilities.json
-// `.frameworks[<id>].interaction.graceful_exit_sequence`, and whether the
-// framework supplies one. No framework declares it today (the interaction
-// contract is probed and recorded downstream), so this returns ("", false, nil)
-// universally — the close ladder degrades to SIGTERM explicitly rather than
-// hardcoding a per-harness exit string. Branch on the returned support flag,
-// never on the framework name. Errors only on unreadable capabilities.json or an
-// unknown framework id.
+// HarnessGracefulExitSequence returns the harness's graceful-exit byte sequence
+// from adapters/capabilities.json
+// `.frameworks[<id>].interaction.graceful_exit_sequence.sequence`, and whether
+// the framework supplies a usable one. The returned string is the literal bytes
+// the close ladder writes to the harness PTY master (e.g. two Ctrl-C bytes for
+// claude-code) — callers write it verbatim, never re-decode it.
+//
+// A framework without a probed interaction row (support=="none", empty sequence,
+// or an unknown framework id) degrades explicitly to ("", false, nil): the send
+// and close paths must skip-with-notice for a harness whose interaction contract
+// has not been probed rather than crash, so unknown-framework is the not-supported
+// case here, not an error (it mirrors framework_interaction_field in
+// scripts/lib.sh). Branch on the returned support flag, never on the framework
+// name. Errors only on unreadable capabilities.json.
 func HarnessGracefulExitSequence(framework string) (string, bool, error) {
 	if framework == "" {
 		return "", false, fmt.Errorf("harness_graceful_exit_sequence requires a framework")
@@ -180,13 +210,73 @@ func HarnessGracefulExitSequence(framework string) (string, bool, error) {
 	}
 	prof, ok := caps.Frameworks[framework]
 	if !ok {
-		return "", false, fmt.Errorf("unknown framework %q (not present in adapters/capabilities.json)", framework)
-	}
-	seq := prof.Interaction.GracefulExitSequence
-	if seq == "" {
 		return "", false, nil
 	}
-	return seq, true, nil
+	row := prof.Interaction.GracefulExitSequence
+	if row.Support == "none" || row.Sequence == "" {
+		return "", false, nil
+	}
+	return row.Sequence, true, nil
+}
+
+// HarnessSubmitSequence returns the harness's composer-submit byte sequence from
+// adapters/capabilities.json `.frameworks[<id>].interaction.submit_sequence.sequence`
+// (e.g. CR for claude-code), and whether the framework supplies a usable one. The
+// send path writes these bytes verbatim to the PTY after the bracketed paste to
+// commit the injected message. Degrades to ("", false, nil) exactly like
+// HarnessGracefulExitSequence for an unprobed or unknown framework; branch on the
+// support flag, never on the framework name. Errors only on unreadable
+// capabilities.json.
+func HarnessSubmitSequence(framework string) (string, bool, error) {
+	if framework == "" {
+		return "", false, fmt.Errorf("harness_submit_sequence requires a framework")
+	}
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return "", false, err
+	}
+	prof, ok := caps.Frameworks[framework]
+	if !ok {
+		return "", false, nil
+	}
+	row := prof.Interaction.SubmitSequence
+	if row.Support == "none" || row.Sequence == "" {
+		return "", false, nil
+	}
+	return row.Sequence, true, nil
+}
+
+// HarnessSignatureContract reports whether a framework has a usable screen-state
+// signature contract for the send/peek readiness gate: BOTH the composer and the
+// permission-prompt signature rows must be present (support != "none", non-empty
+// matcher). The gate needs both — the composer match to confirm the session is at
+// its prompt, the permission match to refuse injecting into a modal — so a
+// framework missing either degrades to (false, nil) and the send path refuses
+// with a no-contract notice rather than injecting blind. The matcher strings
+// themselves are the human-readable contract description; the executable matching
+// logic lives in the gate (screenMatchers), keyed by framework and gated on this
+// contract being present. Errors only on unreadable capabilities.json.
+func HarnessSignatureContract(framework string) (bool, error) {
+	if framework == "" {
+		return false, fmt.Errorf("harness_signature_contract requires a framework")
+	}
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return false, err
+	}
+	prof, ok := caps.Frameworks[framework]
+	if !ok {
+		return false, nil
+	}
+	composer := prof.Interaction.ComposerSignature
+	permission := prof.Interaction.PermissionPromptSignature
+	if composer.Support == "none" || strings.TrimSpace(composer.Matcher) == "" {
+		return false, nil
+	}
+	if permission.Support == "none" || strings.TrimSpace(permission.Matcher) == "" {
+		return false, nil
+	}
+	return true, nil
 }
 
 // capabilitiesFile is the top-level shape of adapters/capabilities.json.

@@ -27,11 +27,18 @@ $KDIR/_sessions/
                                  (claim = atomic rename pending/ -> claimed/)
   close-requests/<id>.json       queue — one file per close request, consumed
                                  (deleted) by the owning instance (no claim split)
+  send-requests/<id>.json        queue — one file per send request, consumed
+                                 (deleted) by the owning instance (no claim split)
+  peek-requests/<id>.json        queue — one file per peek request, consumed
+                                 (deleted) by the owning instance (no claim split)
+  peek-responses/<id>.json       response — one file per answered peek, written by
+                                 the owning instance, deleted-on-read by the requester
   events.jsonl                   journal — append-only history, one sanctioned writer
 ```
 
 Two archetypes, no third: **mutable per-owner state** (registry files, request
-files, close-request files) is written tmp+atomic-rename so each file has exactly
+files, close-request files, send/peek-request files, peek-response files) is
+written tmp+atomic-rename so each file has exactly
 one writer at any moment — no lock in Go or bash. **History** (`events.jsonl`)
 uses the sole-writer append archetype. There is deliberately no single mutable
 `registry.json` or `queue.json`; per-owner/per-request files dissolve the
@@ -172,6 +179,73 @@ The cancel form `lore session close --request <id>` is unrelated to this queue: 
 deletes a still-**pending spawn** row in `requests/pending/` and emits
 `request_cancelled` (the terminal state the request lifecycle reserves for it).
 
+## Send-request queue
+
+One file per send request at `send-requests/<request_id>.json`. A send request
+asks the one live instance running a slug to inject a message into that session's
+composer. Same eligibility posture as close-requests — exactly one instance hosts
+the slug, so there is **no pending/claimed split** and the owning instance
+consumes the row by **deleting** it after running the gate.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `request_id` | string | Unique id; also the filename stem. |
+| `slug` | string | Work-item slug whose session receives the message. |
+| `target_instance` | string | Instance name that runs the slug and must act. |
+| `body` | string | The message to inject. |
+| `requested_by` | string | Who enqueued it (instance name, agent id, or human). |
+| `requested_at` | string | ISO 8601 UTC timestamp of enqueue. |
+
+**Enqueue** = tmp-write + rename, resolving `target_instance` via the registry
+walk (`lore session send <slug> <message>`). Enqueue emits `send_requested`.
+
+**The readiness gate is strict.** The owning instance injects only when the
+session is quiescent AND its harness `composer_signature` matches the rendered
+screen AND the `permission_prompt_signature` does NOT — the screen check is
+load-bearing because quiescent/needs_input fire on a single timer edge and cannot,
+alone, distinguish a composer-idle session from one paused on a permission modal
+(injected text could *answer* the modal). Any other state is a refusal
+(`send_refused` with a reason: `generating`, `modal`, `no-signature`,
+`no-contract`, `unsafe-payload`, or `error`) and **no bytes reach the PTY**. A
+send to a harness with no probed `interaction` contract refuses with `no-contract`
+rather than guessing a signature.
+
+**Transport** is always a bracketed paste (`ESC[200~ … ESC[201~`, honoring the
+live DECSET 2004 state) followed by the harness's `submit_sequence` — never a raw
+write, so the harnesses' divergent CR/LF submit semantics are neutralized, and a
+multiline body rides through as **one** composer entry (all three harnesses were
+probed to hold a bracketed multiline paste without auto-submitting). The
+unsafe-payload refusal is narrow, not a blanket newline ban: a body containing the
+bracketed-paste terminator `ESC[201~` is refused in both modes (the encoder would
+strip its ESC to a space, silently mangling the coordinator's literal bytes — the
+send refuses loudly instead), and a body containing a line break is refused **only
+when bracketed-paste mode is off**, where each newline becomes a CR (= submit) and
+would fire N partial turns.
+
+**Consume** = delete the request file, then append the outcome (`sent` /
+`send_refused`) — the delete lands first so the journal row never precedes the
+consume it records.
+
+`lore session send --wait` polls the journal for its request id's `sent` /
+`send_refused` and maps the outcome to an exit code (0 sent, 3 refused, 1 error
+or timeout). Without `--wait` it enqueues and exits 0 with the request id.
+
+## Peek request / response
+
+`lore session peek <slug>` is the substrate's first **addressed-response**
+operation: a request file in, a response file out. The request at
+`peek-requests/<request_id>.json` carries `{request_id, slug, target_instance,
+raw, requested_by, requested_at}`. The owning instance snapshots the session's
+screen on its poll tick and writes `peek-responses/<request_id>.json`
+(tmp + atomic rename) carrying `{request_id, slug, captured_at, ready,
+blocked_reason, rows[]}` — the plain-text screen rows from the same snapshot the
+send gate uses, plus that gate's readiness classification; `--raw` adds the ANSI
+render under `ansi`. The requesting CLI polls for the response up to `--timeout`
+(default 15s ≈ 3 poll ticks), prints it, and **deletes it** (the requester is the
+sole consumer). The owning instance garbage-collects orphaned responses older than
+5 minutes on its scan. **Peek emits no journal events** — it is a read, not a
+lifecycle transition, so it stays out of the journal's lifecycle vocabulary.
+
 ## Event journal
 
 `events.jsonl` — append-only history. Every emitter (the TUI via subprocess,
@@ -220,17 +294,23 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `request_abandoned` | TUI | `attempts >= 3`; request dropped, journal row is the dead-letter (carries last `reason`) |
 | `request_cancelled` | `session close --request` cancel verb | a pending spawn request was cancelled |
 | `close_requested` | `session close` enqueue verb (`<slug>` / `--self`) | a close request was enqueued for the instance running a slug |
+| `send_requested` | `session send` enqueue verb | a send request was enqueued for the instance running a slug |
+| `sent` | TUI | the readiness gate passed and the message was injected into the composer |
+| `send_refused` | TUI | the readiness gate refused injection; `reason` names why (`generating`/`modal`/`no-signature`/`no-contract`/`unsafe-payload`/`error`) |
 
 **Queue-lifecycle events** — `requested`, `claimed`, `spawned`, `spawn_failed`,
-`request_reclaimed`, `request_abandoned`, `request_cancelled`, `close_requested` —
-each concern a specific request and MUST carry a non-empty `request_id`. The writer
-enforces this.
+`request_reclaimed`, `request_abandoned`, `request_cancelled`, `close_requested`,
+`send_requested`, `sent`, `send_refused` — each concern a specific request and
+MUST carry a non-empty `request_id`. The writer enforces this. (`sent` and
+`send_refused` carry it so `session send --wait` can match its outcome by id.)
 
 **Emitter ownership** (per the settled design): the TUI owns session transitions
 and TUI-driven queue lifecycle; the enqueue writer owns `requested`; the
 `session close` verb owns `close_requested` (its enqueue forms) and
-`request_cancelled` (its cancel form); protocol terminal verbs own
-`step_completed`; stop hooks own `harness_turn_ended`.
+`request_cancelled` (its cancel form); the `session send` verb owns
+`send_requested` (its enqueue), while the TUI owns the `sent` / `send_refused`
+outcomes it decides at consume; protocol terminal verbs own `step_completed`;
+stop hooks own `harness_turn_ended`. Peek has no events — it is a read.
 
 ### Prospective emission (emitter obligation)
 

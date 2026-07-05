@@ -493,6 +493,10 @@ Verbs:
   events    Read the events.jsonl journal from an opaque byte-offset cursor
   close     Request teardown of a live session (<slug> | --self), or cancel a
             pending spawn request (--request <id>)
+  send      Inject a message into a live session's composer (<slug> <message>),
+            gated on the session being idle at its prompt; --wait for the outcome
+  peek      Snapshot a live session's rendered screen (<slug>) plus its
+            readiness classification; --raw for the ANSI variant
 
 Options:
   --help, -h    Show this help
@@ -768,6 +772,12 @@ cmd_session() {
       ;;
     close)
       "$SCRIPTS_DIR/session-close.sh" "$@"
+      ;;
+    send)
+      "$SCRIPTS_DIR/session-send.sh" "$@"
+      ;;
+    peek)
+      "$SCRIPTS_DIR/session-peek.sh" "$@"
       ;;
     *)
       echo "Error: unknown session verb '$subcmd'" >&2

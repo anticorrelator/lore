@@ -161,6 +161,94 @@ func (b *terminalBackend) renderScreen() string {
 	return strings.Join(lines, "\n")
 }
 
+// screenState captures the observable terminal state the readiness gate and
+// peek both consume: cursor position/visibility, bracketed-paste mode,
+// password-input masking, the plain-text screen rows (for signature matching),
+// and the ANSI render (for peek --raw). One snapshot serves both so a gate
+// decision and the rows a peek reports are captured from the same instant. Like
+// every other backend method it must run on the Bubble Tea goroutine — the
+// terminal is stateful and not safe for concurrent use.
+func (b *terminalBackend) screenState() (ScreenSnapshot, error) {
+	if b == nil || b.closed {
+		return ScreenSnapshot{}, fmt.Errorf("terminal backend closed")
+	}
+	b.term.ScrollViewportBottom()
+	var snap ScreenSnapshot
+	snap.CursorX, _ = b.term.CursorX()
+	snap.CursorY, _ = b.term.CursorY()
+	snap.CursorVisible, _ = b.term.CursorVisible()
+	snap.BracketedPaste, _ = b.term.ModeGet(libghostty.ModeBracketedPaste)
+	rows, err := b.term.Rows()
+	if err != nil {
+		return snap, err
+	}
+	plain, err := b.plainViewportRows(int(rows))
+	if err != nil {
+		return snap, err
+	}
+	snap.Rows = plain
+	// Password masking lives on the render state, which plainViewportRows just
+	// refreshed from the terminal (rs.Update); read it before any further write.
+	snap.PasswordInput, _ = b.rs.CursorPasswordInput()
+	snap.ANSI = b.renderScreen()
+	return snap, nil
+}
+
+// plainViewportRows renders the first n viewport rows as plain text (no SGR),
+// one string per row — the form the screen-state signature matchers key on.
+func (b *terminalBackend) plainViewportRows(n int) ([]string, error) {
+	if err := b.rs.Update(b.term); err != nil {
+		return nil, err
+	}
+	if err := b.rs.RowIterator(b.ri); err != nil {
+		return nil, err
+	}
+	lines := make([]string, 0, n)
+	for len(lines) < n && b.ri.Next() {
+		if err := b.ri.Cells(b.rc); err != nil {
+			return nil, err
+		}
+		line, err := b.plainRowCells()
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, line)
+	}
+	return lines, nil
+}
+
+// plainRowCells renders the current row's cells as plain text, dropping wide-char
+// spacer cells and trimming trailing blanks. No SGR bytes, no \r or \n.
+func (b *terminalBackend) plainRowCells() (string, error) {
+	var sb strings.Builder
+	var scratch []byte
+	for b.rc.Next() {
+		scratch = scratch[:0]
+		var err error
+		scratch, err = b.rc.AppendGraphemes(scratch)
+		if err != nil {
+			return "", err
+		}
+		if len(scratch) == 0 {
+			raw, err := b.rc.Raw()
+			if err != nil {
+				return "", err
+			}
+			wide, err := raw.Wide()
+			if err != nil {
+				return "", err
+			}
+			if wide == libghostty.CellWideSpacerTail || wide == libghostty.CellWideSpacerHead {
+				continue
+			}
+			sb.WriteByte(' ')
+			continue
+		}
+		sb.Write(scratch)
+	}
+	return strings.TrimRight(sb.String(), " "), nil
+}
+
 // totalLines returns the document height: native scrollback plus the screen.
 func (b *terminalBackend) totalLines() int {
 	if b == nil || b.closed {

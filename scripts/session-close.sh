@@ -162,29 +162,7 @@ else
   # slug. Exactly one live instance is eligible; a missing one is a clear error.
   SLUG="$SLUG_ARG"
   command -v python3 &>/dev/null || fail "python3 is required but not found on PATH"
-  TARGET_INSTANCE="$(python3 - "$SESSIONS_DIR/instances" "$SLUG" "$TTL" <<'PYEOF'
-import json, os, sys, time
-
-instances_dir, slug, ttl = sys.argv[1], sys.argv[2], float(sys.argv[3])
-now = time.time()
-if os.path.isdir(instances_dir):
-    for name in sorted(os.listdir(instances_dir)):
-        if not name.endswith(".json"):
-            continue
-        path = os.path.join(instances_dir, name)
-        try:
-            if (now - os.path.getmtime(path)) > ttl:
-                continue
-            with open(path) as f:
-                row = json.load(f)
-        except (OSError, ValueError):
-            continue
-        for sess in row.get("sessions") or []:
-            if sess.get("slug") == slug:
-                print(row.get("name", ""))
-                sys.exit(0)
-PYEOF
-)"
+  TARGET_INSTANCE="$(resolve_session_owner "$SESSIONS_DIR/instances" "$SLUG" "$TTL")"
   [[ -n "$TARGET_INSTANCE" ]] || fail "no live instance is running session '$SLUG'"
 fi
 

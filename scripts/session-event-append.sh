@@ -30,12 +30,13 @@
 #   event        enum: requested | claimed | spawned | needs_input | quiescent |
 #                resumed | closed | step_completed | harness_turn_ended |
 #                spawn_failed | request_reclaimed | request_abandoned |
-#                request_cancelled | close_requested
+#                request_cancelled | close_requested | send_requested | sent |
+#                send_refused
 #
 # Conditional rules:
 #   Queue-lifecycle events (requested, claimed, spawned, spawn_failed,
-#   request_reclaimed, request_abandoned, request_cancelled, close_requested)
-#   REQUIRE a non-empty request_id.
+#   request_reclaimed, request_abandoned, request_cancelled, close_requested,
+#   send_requested, sent, send_refused) REQUIRE a non-empty request_id.
 #
 # Exit codes: 0 success; 1 validation error / refused. No child processes are
 # spawned, so no child exit code is propagated.
@@ -108,18 +109,18 @@ EVENT=$(printf '%s' "$ROW" | jq -r '.event // ""')
 case "$EVENT" in
   requested|claimed|spawned|needs_input|quiescent|resumed|closed|\
 step_completed|harness_turn_ended|spawn_failed|request_reclaimed|\
-request_abandoned|request_cancelled|close_requested) ;;
+request_abandoned|request_cancelled|close_requested|send_requested|sent|send_refused) ;;
   "")
     fail "missing required field: event"
     ;;
   *)
-    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, closed, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested)"
+    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, closed, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, send_requested, sent, send_refused)"
     ;;
 esac
 
 # --- Queue-lifecycle events require a non-empty request_id ---
 case "$EVENT" in
-  requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|close_requested)
+  requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|close_requested|send_requested|sent|send_refused)
     if ! printf '%s' "$ROW" | jq -e '(.request_id // "") != ""' >/dev/null 2>&1; then
       fail "missing required field: request_id (required for queue-lifecycle event '$EVENT')"
     fi

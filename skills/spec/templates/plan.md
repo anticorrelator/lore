@@ -156,6 +156,9 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
 **Tasks:**
 <!-- One - [ ] checkbox per phase by default. Multiple only when the four conditions in Step 5b hold:
      disjoint file ownership, independently reviewable deliverables, real parallel execution, no residue.
+     A split is additionally FORCED — regardless of class or the four conditions — when a task's owned
+     files + phase brief exceed one worker's context envelope (context-envelope ceiling, Step 5b): a
+     level-1 correctness constraint, not a weighable condition or a size-preference threshold.
      Valid primary verbs: Implement / Refactor / Author / Migrate / Add support for / Wire.
      Banned as primary verb: Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only.
      See Step 5b "Deliverable contract gate" for routing of invalid units.

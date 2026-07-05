@@ -226,6 +226,13 @@ type model struct {
 	// panel's quiescence predicate reports idle. A slug is removed the moment
 	// its ladder is dispatched, so teardown fires at most once per request.
 	pendingClose map[string]bool
+	// pendingSend and pendingPeek hold send/peek request ids whose consume is in
+	// flight, so a re-scan before the async delete lands does not double-process
+	// the same request. Keyed by request id (unlike pendingClose, which is keyed
+	// by slug): multiple send/peek requests can target one slug. An entry is
+	// cleared when its consume Cmd reports back.
+	pendingSend map[string]bool
+	pendingPeek map[string]bool
 	// closeGrace is the per-rung wait the close ladder allows a harness process
 	// to exit before escalating (graceful→SIGTERM→Kill); closePoll is how often
 	// it re-checks liveness within that window. Both are seams: zero values fall

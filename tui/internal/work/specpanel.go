@@ -1,7 +1,9 @@
 package work
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +16,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/creack/pty"
+	libghostty "go.mitchellh.com/libghostty"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 )
@@ -195,6 +198,92 @@ func (m SpecPanelModel) NeedsInput() bool {
 // until it lands, teardown is gated on quiescence alone.
 func (m SpecPanelModel) QuiescentForClose() bool {
 	return m.done || m.needsInput
+}
+
+// ScreenSnapshot is the observable terminal state the send/peek readiness gate
+// and peek response consume. Rows is the plain-text screen (the form signature
+// matchers key on); ANSI is the styled render for peek --raw. BracketedPaste is
+// the live DECSET 2004 state, which decides how an injected message is encoded.
+type ScreenSnapshot struct {
+	CursorX        uint16
+	CursorY        uint16
+	CursorVisible  bool
+	BracketedPaste bool
+	PasswordInput  bool
+	Rows           []string
+	ANSI           string
+}
+
+// ErrUnsafePayload is returned by InjectMessage when the message body must be
+// refused before any PTY write. Two cases (see unsafePayloadReason): the body
+// contains the bracketed-paste terminator ESC[201~, or it contains a line break
+// while bracketed-paste mode is off. The send path maps it to an unsafe-payload
+// refusal — the body is neither sanitized silently nor written.
+var ErrUnsafePayload = errors.New("unsafe message payload")
+
+// pasteTerminator is the bracketed-paste end sequence (ESC [ 2 0 1 ~). Built as
+// explicit bytes so the source carries the literal ESC (0x1b), not a decoded
+// control character.
+var pasteTerminator = []byte{0x1b, '[', '2', '0', '1', '~'}
+
+// unsafePayloadReason returns a non-empty reason when body must be refused, or ""
+// when it is safe to inject at the given bracketed-paste mode.
+//
+// libghostty.PasteEncode strips ESC to a space in both modes, so an embedded
+// ESC[201~ is technically neutralized ("hi\x1b[201~x" -> "hi [201~x") and cannot
+// escape the bracket — but we refuse it loudly rather than silently mangle a
+// coordinator's literal bytes, so the caller decides. Newlines ride verbatim
+// inside a bracketed paste (one composer entry, no submit), so multiline send is
+// in-scope when bracketed; unbracketed, PasteEncode turns each newline into CR
+// (= submit), so an unbracketed line break is N partial submits — the documented
+// trap, and the only mode where a newline is unsafe.
+func unsafePayloadReason(body []byte, bracketed bool) string {
+	if bytes.Contains(body, pasteTerminator) {
+		return "embedded bracketed-paste terminator (ESC[201~)"
+	}
+	if !bracketed && bytes.ContainsAny(body, "\n\r") {
+		return "line break with bracketed-paste mode off (each break would submit)"
+	}
+	return ""
+}
+
+// ScreenState returns a snapshot of the panel's terminal for the readiness gate
+// and peek. It reads the shared backend, so callers must invoke it from the
+// Bubble Tea goroutine (never a Cmd goroutine).
+func (m SpecPanelModel) ScreenState() (ScreenSnapshot, error) {
+	if m.backend == nil {
+		return ScreenSnapshot{}, errors.New("no terminal backend")
+	}
+	return m.backend.screenState()
+}
+
+// InjectMessage writes body into the session's composer as a bracketed paste
+// (per the live terminal's paste mode) followed by submitSeq to commit it. It
+// refuses an unsafe body (ErrUnsafePayload) before any PTY write, and never
+// writes body raw — PasteEncode neutralizes the harnesses' divergent CR/LF
+// submit semantics. bracketed is the caller-captured DECSET 2004 state (from the
+// same snapshot the gate used) so encoding matches what the gate observed.
+func (m SpecPanelModel) InjectMessage(body, submitSeq string, bracketed bool) error {
+	if m.ptmx == nil {
+		return errors.New("no PTY attached")
+	}
+	raw := []byte(body)
+	if reason := unsafePayloadReason(raw, bracketed); reason != "" {
+		return fmt.Errorf("%w: %s", ErrUnsafePayload, reason)
+	}
+	encoded, err := libghostty.PasteEncode(raw, bracketed)
+	if err != nil {
+		return err
+	}
+	if _, err := m.ptmx.Write(encoded); err != nil {
+		return err
+	}
+	if submitSeq != "" {
+		if _, err := m.ptmx.Write([]byte(submitSeq)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Process returns the harness subprocess handle, or nil when no process is

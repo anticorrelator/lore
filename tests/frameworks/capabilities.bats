@@ -75,9 +75,9 @@ PYEOF
 }
 
 consumed_evidence_ids() {
-  # Print every evidence id consumed in capabilities.json — both per-cell
-  # and per-framework model_routing.evidence — one per line, sorted +
-  # deduplicated.
+  # Print every evidence id consumed in capabilities.json — per-cell,
+  # per-framework model_routing.evidence, and per-framework interaction row
+  # evidence — one per line, sorted + deduplicated.
   CAPS="$CAPS" python3 - <<'PYEOF'
 import json, os
 with open(os.environ["CAPS"]) as f:
@@ -89,6 +89,9 @@ for fw_id, fw in data.get("frameworks", {}).items():
         ids.add(mr["evidence"])
     for cap_name, cell in (fw.get("capabilities") or {}).items():
         if cell.get("evidence"):
+            ids.add(cell["evidence"])
+    for row_name, cell in (fw.get("interaction") or {}).items():
+        if isinstance(cell, dict) and cell.get("evidence"):
             ids.add(cell["evidence"])
 for cid in sorted(ids):
     print(cid)
@@ -183,14 +186,14 @@ if bad:
 }
 
 @test "every framework declares all known capabilities (no partial profiles)" {
-  # model_routing lives at the framework root (sibling to capabilities)
-  # rather than inside the per-framework capabilities map because its
-  # shape is single|multi, not full|partial|fallback|none. Validated
-  # separately in the model_routing test below.
+  # model_routing and interaction live at the framework root (siblings to
+  # capabilities) rather than inside the per-framework capabilities map because
+  # their shapes are not full|partial|fallback|none. Validated separately in
+  # the model_routing and interaction tests below.
   run python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
-declared = set(d["capabilities"].keys()) - {"model_routing"}
+declared = set(d["capabilities"].keys()) - {"model_routing", "interaction"}
 bad = []
 for fw_id, fw in d["frameworks"].items():
     have = set((fw.get("capabilities") or {}).keys())
@@ -275,6 +278,54 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 tiers = d["frameworks"]["claude-code"]["model_routing"]["tiers"]
 assert tiers == ["haiku", "sonnet", "opus", "fable"], tiers
+' "$CAPS"
+  [ "$status" -eq 0 ]
+}
+
+@test "every framework's interaction rows are evidence-gated and correctly typed" {
+  # interaction is a framework-root block (sibling of capabilities/model_routing).
+  # Each row is an evidence-gated cell (support in the closed set + non-empty
+  # evidence) carrying exactly the typed payload its kind requires. Derived from
+  # the JSON, never hard-coded per harness.
+  run python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+levels = set(d["support_levels"].keys())
+SIG = {"composer_signature", "permission_prompt_signature"}
+SEQ = {"submit_sequence", "newline_sequence", "graceful_exit_sequence"}
+VAL = {"honors_bracketed_paste", "paste_multiline_semantics", "mid_generation_semantics"}
+ROWS = SIG | SEQ | VAL
+PASTE_VOCAB = {"held-multiline-needs-submit", "auto-submit-on-close"}
+MIDGEN_VOCAB = {"queued-autosubmit", "buffered-draft", "dropped", "interrupts"}
+bad = []
+for fw_id, fw in d["frameworks"].items():
+    ix = fw.get("interaction")
+    if not isinstance(ix, dict):
+        bad.append(f"{fw_id}: missing interaction block"); continue
+    if set(ix.keys()) != ROWS:
+        bad.append(f"{fw_id}.interaction rows {sorted(ix.keys())} != {sorted(ROWS)}")
+        continue
+    for row, cell in ix.items():
+        if not isinstance(cell, dict):
+            bad.append(f"{fw_id}.interaction.{row} not an object"); continue
+        if cell.get("support") not in levels:
+            bad.append(f"{fw_id}.interaction.{row} support outside closed set")
+        ev = cell.get("evidence")
+        if not isinstance(ev, str) or not ev.strip():
+            bad.append(f"{fw_id}.interaction.{row} missing evidence")
+        if row in SIG and not (isinstance(cell.get("matcher"), str) and cell["matcher"].strip()):
+            bad.append(f"{fw_id}.interaction.{row} missing matcher")
+        if row in SEQ and not (isinstance(cell.get("sequence"), str) and cell["sequence"]):
+            bad.append(f"{fw_id}.interaction.{row} missing non-empty sequence")
+        if row == "honors_bracketed_paste" and not isinstance(cell.get("value"), bool):
+            bad.append(f"{fw_id}.interaction.{row}.value not a bool")
+        if row == "paste_multiline_semantics" and cell.get("value") not in PASTE_VOCAB:
+            bad.append(f"{fw_id}.interaction.{row} paste value outside vocab")
+        if row == "mid_generation_semantics" and cell.get("value") not in MIDGEN_VOCAB:
+            bad.append(f"{fw_id}.interaction.{row} midgen value outside vocab")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
 ' "$CAPS"
   [ "$status" -eq 0 ]
 }

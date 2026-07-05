@@ -46,6 +46,9 @@ const (
 	EventReclaimed        = "request_reclaimed"
 	EventAbandoned        = "request_abandoned"
 	EventCancelled        = "request_cancelled"
+	EventSendRequested    = "send_requested"
+	EventSent             = "sent"
+	EventSendRefused      = "send_refused"
 )
 
 // AppendEvent emits one journal row by piping it into the sole-writer script

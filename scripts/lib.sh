@@ -904,6 +904,113 @@ framework_tui_launch_flag() {
   echo "$raw"
 }
 
+# --- framework_interaction_field ---
+# Print one field of a probed interaction-contract row from
+# adapters/capabilities.json `.frameworks.<fw>.interaction.<row>.<field>`.
+# Go counterpart: the interactionProfile rows in
+# tui/internal/config/framework.go (HarnessGracefulExitSequence reads the
+# graceful_exit_sequence row's `sequence`).
+#
+# Args: $1 = row, one of the closed interaction row set:
+#         composer_signature | permission_prompt_signature | submit_sequence |
+#         newline_sequence | honors_bracketed_paste | paste_multiline_semantics |
+#         mid_generation_semantics | graceful_exit_sequence
+#       $2 = field, e.g. sequence | matcher | value | support | evidence
+#       $3 = framework id (optional; defaults to the active framework)
+#
+# Output: a single line on stdout, exit 0:
+#   - The field value when the row+field resolve to a non-null JSON scalar.
+#     `sequence` rows print the literal PTY bytes the caller writes verbatim
+#     (\r=CR, \n=LF, 0x03=Ctrl-C, 0x1b=ESC); a legitimately-false boolean
+#     (honors_bracketed_paste=false) prints `false`, not the degraded token.
+#   - The literal `unsupported` when the framework has no interaction block, the
+#     row is absent, or the field is null — with a `[lore] degraded:` notice on
+#     stderr. Unlike framework_tui_launch_flag, an unknown/absent framework
+#     degrades to `unsupported` rather than erroring: a harness without a probed
+#     interaction row is the expected state for a newly-added harness, so the
+#     send/close paths skip-with-notice instead of crashing. Callers MUST skip
+#     rather than substitute a value from another harness.
+#
+# Exit codes:
+#   0  value or `unsupported` printed.
+#   1  unknown row (the row set is closed — an unknown row is a caller bug, not a
+#      data gap), missing capabilities.json, or jq unavailable.
+framework_interaction_field() {
+  local row="$1"
+  local field="$2"
+  local framework="${3:-}"
+  [[ -z "$row" ]] && { echo "Error: framework_interaction_field requires a row" >&2; return 1; }
+  [[ -z "$field" ]] && { echo "Error: framework_interaction_field requires a field" >&2; return 1; }
+  case "$row" in
+    composer_signature|permission_prompt_signature|submit_sequence|newline_sequence|\
+    honors_bracketed_paste|paste_multiline_semantics|mid_generation_semantics|graceful_exit_sequence) ;;
+    *) echo "Error: unknown interaction row '$row' (allowed: composer_signature, permission_prompt_signature, submit_sequence, newline_sequence, honors_bracketed_paste, paste_multiline_semantics, mid_generation_semantics, graceful_exit_sequence)" >&2; return 1 ;;
+  esac
+
+  if ! command -v jq &>/dev/null; then
+    echo "Error: framework_interaction_field requires jq" >&2
+    return 1
+  fi
+
+  if [[ -z "$framework" ]]; then
+    framework=$(resolve_active_framework) || return 1
+  fi
+
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  if [[ ! -f "$capabilities_file" ]]; then
+    echo "Error: framework_interaction_field cannot read $capabilities_file" >&2
+    return 1
+  fi
+
+  # `has_value` distinguishes an absent/null field (degrade) from a present
+  # scalar (including a legitimate `false`), which a `// default` cannot.
+  local present
+  present=$(jq -r --arg fw "$framework" --arg r "$row" --arg f "$field" \
+    '(.frameworks[$fw].interaction[$r][$f]) != null' "$capabilities_file" 2>/dev/null)
+  if [[ "$present" != "true" ]]; then
+    echo "[lore] degraded: interaction.$row.$field unavailable for framework '$framework' (no probed row); skipping" >&2
+    echo "unsupported"
+    return 0
+  fi
+  jq -r --arg fw "$framework" --arg r "$row" --arg f "$field" \
+    '.frameworks[$fw].interaction[$r][$f]' "$capabilities_file" 2>/dev/null
+}
+
+# --- resolve_session_owner ---
+# Echo the name of the single live TUI instance whose registry row hosts <slug>,
+# or nothing when none is live within <ttl_seconds>. The owning instance is the
+# one that must act on a close/send/peek request for that slug — the ptmx is
+# process-local, so exactly one instance is ever eligible. Requires python3.
+#
+# Args: $1 = instances dir ($SESSIONS_DIR/instances), $2 = slug, $3 = ttl seconds.
+resolve_session_owner() {
+  local instances_dir="$1"
+  local slug="$2"
+  local ttl="$3"
+  python3 - "$instances_dir" "$slug" "$ttl" <<'PYEOF'
+import json, os, sys, time
+
+instances_dir, slug, ttl = sys.argv[1], sys.argv[2], float(sys.argv[3])
+now = time.time()
+if os.path.isdir(instances_dir):
+    for name in sorted(os.listdir(instances_dir)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(instances_dir, name)
+        try:
+            if (now - os.path.getmtime(path)) > ttl:
+                continue
+            with open(path) as f:
+                row = json.load(f)
+        except (OSError, ValueError):
+            continue
+        for sess in row.get("sessions") or []:
+            if sess.get("slug") == slug:
+                print(row.get("name", ""))
+                sys.exit(0)
+PYEOF
+}
+
 # --- resolve_permission_adapter ---
 # Resolve the per-harness permission/settings policy installer for a
 # framework. The single source of truth for which adapter owns each

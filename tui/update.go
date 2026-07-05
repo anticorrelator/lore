@@ -589,6 +589,18 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case closeLadderDoneMsg:
 		return m.handleCloseLadderDone(msg)
 
+	case sendRequestScanMsg:
+		return m.handleSendRequestScan(msg)
+
+	case sendConsumedMsg:
+		return m.handleSendConsumed(msg)
+
+	case peekRequestScanMsg:
+		return m.handlePeekRequestScan(msg)
+
+	case peekRespondedMsg:
+		return m.handlePeekResponded(msg)
+
 	case instanceSyncedMsg:
 		if msg.err != nil {
 			m.flashErr = compactErr("session registry", msg.err)

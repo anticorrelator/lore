@@ -186,7 +186,9 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 			hosted[slug] = true
 		}
 		cmds = append(cmds, m.syncInstanceCmd(), readInstancesCmd(m.sessionsDir), m.queueTickCmd(),
-			scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted))
+			scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted),
+			scanSendRequestsCmd(m.sessionsDir, m.instanceName, hosted),
+			scanPeekRequestsCmd(m.sessionsDir, m.instanceName, hosted))
 		// Re-evaluate any close-request already waiting on quiescence.
 		var advCmds []tea.Cmd
 		m, advCmds = m.advanceCloseLadders()

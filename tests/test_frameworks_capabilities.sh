@@ -118,14 +118,14 @@ if bad:
 }
 
 check_no_partial_profiles() {
-  # model_routing lives at the framework root (sibling to capabilities)
-  # rather than inside the per-framework capabilities map because its
-  # shape is single|multi, not full|partial|fallback|none. Validate
-  # routing separately via check_model_routing.
+  # model_routing and interaction live at the framework root (siblings to
+  # capabilities) rather than inside the per-framework capabilities map because
+  # their shapes are not full|partial|fallback|none. Validate routing via
+  # check_model_routing and interaction via check_interaction_rows.
   python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
-declared = set(d["capabilities"].keys()) - {"model_routing"}
+declared = set(d["capabilities"].keys()) - {"model_routing", "interaction"}
 bad = []
 for fw_id, fw in d["frameworks"].items():
     have = set((fw.get("capabilities") or {}).keys())
@@ -178,6 +178,53 @@ if bad:
 ' "$CAPS"
 }
 
+check_interaction_rows() {
+  # Every framework declares the closed interaction row set; each row is an
+  # evidence-gated cell (support in the closed set + non-empty evidence) with
+  # exactly the typed payload its kind requires. Derived from the JSON, never
+  # hard-coded per harness.
+  python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+levels = set(d["support_levels"].keys())
+SIG = {"composer_signature", "permission_prompt_signature"}
+SEQ = {"submit_sequence", "newline_sequence", "graceful_exit_sequence"}
+VAL = {"honors_bracketed_paste", "paste_multiline_semantics", "mid_generation_semantics"}
+ROWS = SIG | SEQ | VAL
+PASTE_VOCAB = {"held-multiline-needs-submit", "auto-submit-on-close"}
+MIDGEN_VOCAB = {"queued-autosubmit", "buffered-draft", "dropped", "interrupts"}
+bad = []
+for fw_id, fw in d["frameworks"].items():
+    ix = fw.get("interaction")
+    if not isinstance(ix, dict):
+        bad.append(f"{fw_id}: missing interaction block"); continue
+    if set(ix.keys()) != ROWS:
+        bad.append(f"{fw_id}.interaction rows {sorted(ix.keys())} != {sorted(ROWS)}")
+        continue
+    for row, cell in ix.items():
+        if not isinstance(cell, dict):
+            bad.append(f"{fw_id}.interaction.{row} not an object"); continue
+        if cell.get("support") not in levels:
+            bad.append(f"{fw_id}.interaction.{row} support outside closed set")
+        ev = cell.get("evidence")
+        if not isinstance(ev, str) or not ev.strip():
+            bad.append(f"{fw_id}.interaction.{row} missing evidence")
+        if row in SIG and not (isinstance(cell.get("matcher"), str) and cell["matcher"].strip()):
+            bad.append(f"{fw_id}.interaction.{row} missing matcher")
+        if row in SEQ and not (isinstance(cell.get("sequence"), str) and cell["sequence"]):
+            bad.append(f"{fw_id}.interaction.{row} missing non-empty sequence")
+        if row == "honors_bracketed_paste" and not isinstance(cell.get("value"), bool):
+            bad.append(f"{fw_id}.interaction.{row}.value not a bool")
+        if row == "paste_multiline_semantics" and cell.get("value") not in PASTE_VOCAB:
+            bad.append(f"{fw_id}.interaction.{row} paste value outside vocab")
+        if row == "mid_generation_semantics" and cell.get("value") not in MIDGEN_VOCAB:
+            bad.append(f"{fw_id}.interaction.{row} midgen value outside vocab")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+' "$CAPS"
+}
+
 # --- Evidence cross-reference ---
 
 evidence_index() {
@@ -216,6 +263,8 @@ for fw_id, fw in data.get("frameworks", {}).items():
     if mr.get("evidence"): ids.add(mr["evidence"])
     for cap, cell in (fw.get("capabilities") or {}).items():
         if cell.get("evidence"): ids.add(cell["evidence"])
+    for row, cell in (fw.get("interaction") or {}).items():
+        if isinstance(cell, dict) and cell.get("evidence"): ids.add(cell["evidence"])
 for cid in sorted(ids): print(cid)
 PYEOF
 }
@@ -432,6 +481,7 @@ assert_ok "every per-cell capability key is declared globally"        check_per_
 assert_ok "every framework declares all known capabilities"           check_no_partial_profiles
 assert_ok "every non-none cell carries a non-empty evidence pointer"  check_evidence_present_for_non_none
 assert_ok "every framework's model_routing.shape and evidence valid"  check_model_routing
+assert_ok "every framework's interaction rows are evidence-gated + typed" check_interaction_rows
 
 echo "== Evidence cross-reference =="
 assert_ok "every consumed evidence id resolves in _index"             check_consumed_resolve_in_index

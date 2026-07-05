@@ -340,6 +340,43 @@ func TestHarnessSettingsOverrideFlag_RejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestHarnessGracefulExitSequence(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	cases := []struct {
+		framework     string
+		wantSeq       string
+		wantSupported bool
+	}{
+		{"claude-code", "\x03\x03", true}, // Ctrl-C twice
+		{"opencode", "\x03", true},        // single Ctrl-C from idle
+		{"codex", "\x03", true},           // single Ctrl-C on empty composer
+	}
+	for _, c := range cases {
+		gotSeq, gotSupported, err := HarnessGracefulExitSequence(c.framework)
+		if err != nil {
+			t.Errorf("HarnessGracefulExitSequence(%q): %v", c.framework, err)
+			continue
+		}
+		if gotSeq != c.wantSeq || gotSupported != c.wantSupported {
+			t.Errorf("HarnessGracefulExitSequence(%q) = (%q, %v), want (%q, %v)", c.framework, gotSeq, gotSupported, c.wantSeq, c.wantSupported)
+		}
+	}
+}
+
+// An unknown framework degrades to not-supported rather than erroring: a harness
+// without a probed interaction row is a state the close path must skip-with-notice
+// on, not crash — so the reader returns not-supported rather than an error.
+func TestHarnessGracefulExitSequence_UnknownDegrades(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	seq, supported, err := HarnessGracefulExitSequence("bogus")
+	if err != nil {
+		t.Fatalf("HarnessGracefulExitSequence(bogus): unexpected error %v", err)
+	}
+	if seq != "" || supported {
+		t.Errorf("HarnessGracefulExitSequence(bogus) = (%q, %v), want (\"\", false)", seq, supported)
+	}
+}
+
 func TestResolveAgentTemplate(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", nil)
 
