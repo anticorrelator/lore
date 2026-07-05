@@ -2412,7 +2412,7 @@ func TestPanelModeBadgeContract(t *testing.T) {
 // renderConfirmModal ("y / Enter confirm", "any key cancel", and post_review's
 // "n / Esc cancel") against the confirm interception in Update.
 func TestConfirmModalKeybindContract(t *testing.T) {
-	actions := []string{"archive", "unarchive", "delete", "dismiss", "delete_followup", "post_review"}
+	actions := []string{"archive", "unarchive", "delete", "dismiss", "delete_followup", "post_review", "release"}
 	confirmModel := func(action string) model {
 		m := minimalModel(stateWork, nil, nil)
 		m.confirmAction = action
@@ -2977,6 +2977,105 @@ func TestWorkDetailStatusBarKeybindContract(t *testing.T) {
 			t.Error("Esc should refocus the list panel")
 		}
 	})
+	t.Run("R (release)", func(t *testing.T) {
+		// R opens the release confirm modal for the gated item under the
+		// cursor; the same key does nothing on an ungated item.
+		gated := []work.WorkItem{
+			{Slug: "item-1", Title: "Item One",
+				Review: &work.ReviewState{Mechanism: "hold", GatedAt: "2026-07-01T00:00:00Z", Reason: "needs a human"}},
+			{Slug: "item-2", Title: "Item Two"},
+		}
+		m := minimalModel(stateWork, gated, nil)
+		m.width, m.height = 120, 40
+		m.focusedPanel = panelRight
+		nm, _ := updateModel(t, m, press('R'))
+		if nm.confirmAction != "release" {
+			t.Fatalf("R should open the release confirm modal, got %q", nm.confirmAction)
+		}
+		if nm.confirmSlug != "item-1" {
+			t.Errorf("release should target the current item, got %q", nm.confirmSlug)
+		}
+
+		ungated := minimalModel(stateWork, []work.WorkItem{{Slug: "item-1", Title: "Item One"}}, nil)
+		ungated.width, ungated.height = 120, 40
+		ungated.focusedPanel = panelRight
+		nm, _ = updateModel(t, ungated, press('R'))
+		if nm.confirmAction != "" {
+			t.Errorf("R on an ungated item must not open a modal, got %q", nm.confirmAction)
+		}
+	})
+	t.Run("R (list context is inert)", func(t *testing.T) {
+		// Release is a detail-context comprehension nudge: the same key on the
+		// list panel must not open a release modal.
+		gated := []work.WorkItem{
+			{Slug: "item-1", Title: "Item One",
+				Review: &work.ReviewState{Mechanism: "hold", GatedAt: "2026-07-01T00:00:00Z"}},
+		}
+		m := minimalModel(stateWork, gated, nil)
+		m.width, m.height = 120, 40
+		m.focusedPanel = panelLeft
+		nm, _ := updateModel(t, m, press('R'))
+		if nm.confirmAction == "release" {
+			t.Error("R in the list context must not open the release modal")
+		}
+	})
+}
+
+// TestArchiveRefusedOnGatedItem verifies the archive guard: pressing A on a
+// gated work item surfaces a refusal notice naming release instead of opening
+// the archive confirm modal.
+func TestArchiveRefusedOnGatedItem(t *testing.T) {
+	items := []work.WorkItem{
+		{Slug: "gated-1", Title: "Gated One", Status: "active",
+			Review: &work.ReviewState{Mechanism: "flag", GatedAt: "2026-07-01T00:00:00Z", Reason: "r"}},
+	}
+	m := minimalModel(stateWork, items, nil)
+	m.width, m.height = 120, 40
+	m.focusedPanel = panelLeft
+	nm, _ := updateModel(t, m, press('A'))
+	if nm.confirmAction != "" {
+		t.Fatalf("A on a gated item must not open the archive modal, got %q", nm.confirmAction)
+	}
+	if !strings.Contains(nm.flashErr, "release") {
+		t.Errorf("refusal notice should name release, got %q", nm.flashErr)
+	}
+
+	// An ungated item still archives.
+	m2 := minimalModel(stateWork, []work.WorkItem{{Slug: "ok-1", Title: "OK", Status: "active"}}, nil)
+	m2.width, m2.height = 120, 40
+	m2.focusedPanel = panelLeft
+	nm2, _ := updateModel(t, m2, press('A'))
+	if nm2.confirmAction != "archive" {
+		t.Errorf("A on an ungated item should open the archive modal, got %q", nm2.confirmAction)
+	}
+}
+
+// TestReviewBadgeSurvivesIndexReload verifies review state is index-projected
+// data (not session-local state): it flows through the reloaded items so the
+// badge survives an index poll, and clears once a poll shows the item released.
+func TestReviewBadgeSurvivesIndexReload(t *testing.T) {
+	gated := []work.WorkItem{
+		{Slug: "g1", Title: "Gated", Status: "active", Updated: "2026-07-01T00:00:00Z",
+			Review: &work.ReviewState{Mechanism: "hold", GatedAt: "2026-07-01T00:00:00Z", Reason: "needs a human"}},
+	}
+	m := minimalModel(stateWork, gated, nil)
+	m.width, m.height = 120, 40
+	m, _ = updateModel(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	// Non-zero mtime so the handler takes the auto-refresh branch, not initial load.
+	m.lastIndexMtime = time.Now()
+
+	m, _ = updateModel(t, m, workItemsLoadedMsg{items: gated})
+	if item, ok := m.list.CurrentItem(); !ok || item.Review == nil || item.Review.Mechanism != "hold" {
+		t.Fatalf("review state should survive the index reload, got %+v", item.Review)
+	}
+
+	released := []work.WorkItem{
+		{Slug: "g1", Title: "Gated", Status: "active", Updated: "2026-07-01T00:00:01Z"},
+	}
+	m, _ = updateModel(t, m, workItemsLoadedMsg{items: released})
+	if item, ok := m.list.CurrentItem(); !ok || item.Review != nil {
+		t.Errorf("review state should clear after a released-item reload, got %+v", item.Review)
+	}
 }
 
 // TestTerminalModeStatusBarKeybindContract verifies the terminal-mode hint

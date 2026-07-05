@@ -21,6 +21,7 @@ func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 		EventResumed, EventClosed, EventStepCompleted, EventHarnessTurnEnded,
 		EventSpawnFailed, EventReclaimed, EventAbandoned, EventCancelled,
 		EventSendRequested, EventSent, EventSendRefused,
+		EventReviewFlagged, EventReviewHeld, EventReviewNotified, EventReviewReleased,
 	}
 	tok := func() string { return string(rune('a'+r.Intn(26))) + string(rune('a'+r.Intn(26))) + "-x" }
 	ev := Event{Event: events[r.Intn(len(events))]}
@@ -115,6 +116,74 @@ func TestAppendEventThroughScript(t *testing.T) {
 	if back.EventID == "" || back.TS == "" {
 		t.Fatalf("writer did not stamp provenance: %+v", back)
 	}
+}
+
+// TestScriptReviewVocabulary drives the real sole-writer script to cross-check
+// the vocabulary the Go const block only mirrors: an out-of-set event is
+// rejected, a work-item review event without a slug is rejected, and both
+// close_requested and the review events (with a slug) are still accepted. It is
+// the reject-path assertion the roundtrip property can't make — that test never
+// calls the script, so an event added to the script alone would otherwise pass
+// everything. close_requested is spelled as a literal because it has no Go
+// const mirror; the point is to pin the script's behavior, not the mirror.
+func TestScriptReviewVocabulary(t *testing.T) {
+	script := locateAppendScript(t)
+	if script == "" {
+		t.Skip("session-event-append.sh not found; skipping vocabulary integration")
+	}
+	cases := []struct {
+		name    string
+		ev      Event
+		wantErr bool
+	}{
+		{"out-of-set event rejected", Event{Event: "bogus_event", Slug: "demo-slug"}, true},
+		{"review event without slug rejected", Event{Event: EventReviewFlagged}, true},
+		{"review_held with slug accepted", Event{Event: EventReviewHeld, Slug: "demo-slug"}, false},
+		{"review_released with slug accepted", Event{Event: EventReviewReleased, Slug: "demo-slug"}, false},
+		{"close_requested with request_id accepted", Event{Event: "close_requested", RequestID: "20260705T000000Z-abcd1234"}, false},
+		{"requested still accepted", Event{Event: EventRequested, RequestID: "20260705T000000Z-abcd1234"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kdir := t.TempDir()
+			err := AppendEvent(script, kdir, tc.ev)
+			rows := countJournalRows(t, kdir)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("event %q: expected rejection, got nil error", tc.ev.Event)
+				}
+				if rows != 0 {
+					t.Fatalf("event %q: rejected row still left %d journal rows", tc.ev.Event, rows)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("event %q: expected acceptance, got error: %v", tc.ev.Event, err)
+			}
+			if rows != 1 {
+				t.Fatalf("event %q: accepted event wrote %d journal rows, want 1", tc.ev.Event, rows)
+			}
+		})
+	}
+}
+
+// countJournalRows counts appended rows in the store's events journal. A missing
+// journal counts as zero: the reject path fails validation before the script
+// creates the _sessions directory, so a rejection leaves no file at all.
+func countJournalRows(t *testing.T, kdir string) int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(kdir, "_sessions", "events.jsonl"))
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("read journal: %v", err)
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return 0
+	}
+	return len(strings.Split(trimmed, "\n"))
 }
 
 func locateAppendScript(t *testing.T) string {

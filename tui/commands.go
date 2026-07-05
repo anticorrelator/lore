@@ -248,6 +248,20 @@ func runArchive(slug string, unarchive bool) tea.Cmd {
 	}
 }
 
+// runRelease runs `lore work release <slug>` and returns ReleaseFinishedMsg
+// when done. This is the TUI's only review-state write path: the verb clears
+// the item's _meta.json review block and emits the release journal event, so
+// the TUI never writes review state directly. The next index poll drops the
+// badge.
+func runRelease(slug string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("lore", "work", "release", slug)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		err := cmd.Run()
+		return work.ReleaseFinishedMsg{Err: err}
+	}
+}
+
 // runAssignProject runs `lore work set <slug> --project <label>` and returns
 // AssignFinishedMsg when done. The label must be non-empty — clearing
 // membership is a CLI-only act. Combined output rides the error so the

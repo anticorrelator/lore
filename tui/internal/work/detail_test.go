@@ -67,10 +67,10 @@ func TestWorkItemDetailJSONParsing(t *testing.T) {
 func TestWorkItemDetailNullableFields(t *testing.T) {
 	// Both plan_content and notes_content can be null or strings
 	cases := []struct {
-		name        string
-		json        string
-		wantPlan    bool
-		wantNotes   bool
+		name      string
+		json      string
+		wantPlan  bool
+		wantNotes bool
 	}{
 		{
 			name:      "both null",
@@ -354,5 +354,55 @@ func TestLoadWorkItemDetailIntegration(t *testing.T) {
 	}
 	if detail.Status == "" {
 		t.Error("Status should not be empty")
+	}
+}
+
+// TestReviewPacketRendersAsExtraFileTab pins the zero-code packet delivery: a
+// review-packet.md in the work-item directory rides the generic ExtraFiles
+// scan (no special-casing in loadWorkItemDetailDirect) and surfaces as a
+// "Review Packet" detail tab, while the read-side review block loads from
+// _meta.json for the dwell tab.
+func TestReviewPacketRendersAsExtraFileTab(t *testing.T) {
+	workDir := t.TempDir()
+	slug := "gated-item"
+	itemDir := filepath.Join(workDir, slug)
+	os.MkdirAll(itemDir, 0755)
+
+	meta := `{"slug":"gated-item","title":"Gated Item","status":"active",` +
+		`"created":"2026-07-01T00:00:00Z","updated":"2026-07-01T00:00:00Z",` +
+		`"review":{"mechanism":"hold","gate_id":"20260701-abc","gated_at":"2026-07-01T00:00:00Z",` +
+		`"reason":"needs a human","packet":"review-packet.md"}}`
+	os.WriteFile(filepath.Join(itemDir, "_meta.json"), []byte(meta), 0644)
+	os.WriteFile(filepath.Join(itemDir, "review-packet.md"), []byte("## Decisions & rationale\n\nx"), 0644)
+
+	detail, err := loadWorkItemDetailDirect(workDir, slug)
+	if err != nil {
+		t.Fatalf("loadWorkItemDetailDirect: %v", err)
+	}
+
+	var packet *ExtraFile
+	for i := range detail.ExtraFiles {
+		if detail.ExtraFiles[i].Name == "review-packet" {
+			packet = &detail.ExtraFiles[i]
+		}
+	}
+	if packet == nil {
+		t.Fatalf("review-packet.md should appear in ExtraFiles, got %+v", detail.ExtraFiles)
+	}
+
+	if detail.Review == nil || detail.Review.Mechanism != "hold" {
+		t.Errorf("detail.Review = %+v, want mechanism hold", detail.Review)
+	}
+
+	m := NewDetailModel(workDir, slug)
+	m, _ = m.Update(DetailLoadedMsg{Slug: slug, Detail: detail})
+	found := false
+	for _, tab := range m.tabHost.Tabs() {
+		if tab.Label == "Review Packet" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a 'Review Packet' tab, got %+v", m.tabHost.Tabs())
 	}
 }

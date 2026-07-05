@@ -138,10 +138,18 @@ for item in data.get('plans', []):
 
     item_dir = os.path.join(work_dir, slug)
 
+    # A review gate (flag/hold) is a definite condition on the projected review
+    # block. A gated item carries comprehension debt, so it inverts the stale
+    # sweep: it is excluded from the '[stale] … consider /work archive' nag (the
+    # gate is the reason it is NOT archivable) and instead carries a review
+    # marker below.
+    review = item.get('review') or {}
+    gated = isinstance(review, dict) and review.get('mechanism') in ('flag', 'hold')
+
     # Stale work: use directory-wide max mtime as activity signal
     dir_mtime = dir_max_mtime(item_dir)
     dir_age_days = int((now - dir_mtime) / 86400) if dir_mtime else -1
-    if dir_age_days > 30:
+    if dir_age_days > 30 and not gated:
         has_plan = item.get('has_plan_doc', os.path.isfile(os.path.join(item_dir, 'plan.md')))
         if has_plan:
             guidance = 'consider \`/work\` to review status'
@@ -163,6 +171,14 @@ for item in data.get('plans', []):
         residue = closure.get('residue_followup')
         if residue:
             item_lines.append(f'  waiting-on: {residue}')
+    elif gated:
+        _, gate_days, _ = relative_date(review.get('gated_at', ''))
+        age = f'{gate_days}d' if gate_days >= 0 else 'unknown'
+        reason = review.get('reason') or ''
+        if review.get('mechanism') == 'hold':
+            item_lines.append(f'[review-hold] {slug} — held {age} — {reason}')
+        else:
+            item_lines.append(f'[review-flag] {slug} — flagged {age}, unread — show or clear')
     else:
         item_lines.append(f'- {slug}: {title} (updated {rel})')
 

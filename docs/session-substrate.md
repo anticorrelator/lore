@@ -289,8 +289,9 @@ protocol terminal verbs, stop hooks) appends through the one sanctioned writer,
 | `session_type` | string | `spec\|implement\|chat` — the session's type (the request's `type` maps to this). |
 | `initiator` | string | `agent\|human`. |
 | `request_id` | string | The request this event concerns; required for queue-lifecycle events. |
-| `reason` | string | Failure/reclaim reason; carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`. |
-| `links` | object | `{work_item?, artifact?}` — pointers to work-item artifacts rather than duplicated progress. Writer defaults to `{}`. |
+| `reason` | string | Failure/reclaim reason; also the review-gate rationale carried by `review_flagged`/`review_held`/`review_released`. Also carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`. |
+| `gate_id` | string | Review-gate audit join key. Omit-when-empty. A gate-open verb (`review_flagged`/`review_held`) sets it as the row's `event_id`; the `review_released` row echoes it here so a reader pairs release→open without replaying state. See [docs/review-gates.md](review-gates.md). |
+| `links` | object | `{work_item?, artifact?}` — pointers to work-item artifacts rather than duplicated progress. Review events point `artifact` at the review packet. Writer defaults to `{}`. |
 | `spend` | object \| null | Reserved. `closed` carries what the TUI knows cheaply at teardown (`duration`); richer spend joins arrive with the model-routing substrate. |
 
 Optional fields follow **omit-when-empty** discipline: an absent optional field is
@@ -320,12 +321,24 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `send_requested` | `session send` enqueue verb | a send request was enqueued for the instance running a slug |
 | `sent` | TUI | the readiness gate passed and the message was injected into the composer |
 | `send_refused` | TUI | the readiness gate refused injection; `reason` names why (`generating`/`modal`/`no-signature`/`no-contract`/`unsafe-payload`/`error`) |
+| `review_flagged` | `lore work flag` verb | a lightweight (async) review gate was opened on a work item; `event_id` is the gate_id |
+| `review_held` | `lore work hold` verb | a blocking review gate was opened on a work item; `event_id` is the gate_id |
+| `review_notified` | coordinator (direct append) | a stateless review notification for a work item; no gate, no verb |
+| `review_released` | `lore work release` verb | a review gate was cleared; `gate_id` echoes the gate-open `event_id` (the audit join key) |
 
 **Queue-lifecycle events** — `requested`, `claimed`, `spawned`, `spawn_failed`,
 `request_reclaimed`, `request_abandoned`, `request_cancelled`, `close_requested`,
 `send_requested`, `sent`, `send_refused` — each concern a specific request and
 MUST carry a non-empty `request_id`. The writer enforces this. (`sent` and
 `send_refused` carry it so `session send --wait` can match its outcome by id.)
+
+**Work-item review events** — `review_flagged`, `review_held`, `review_notified`,
+`review_released` — form a third event class keyed to a work item rather than a
+queue request, so each MUST carry a non-empty `slug` (a distinct writer branch:
+`slug` is optional for every other event). The gate mechanism, verbs, packet
+contract, and audit semantics are the [review-gates contract](review-gates.md);
+this vocabulary is the journal half. Notify is a direct append (the coordinator
+owns it, no verb); flag/hold/release are emitted by their `lore work` verbs.
 
 **Emitter ownership** (per the settled design): the TUI owns session transitions
 and TUI-driven queue lifecycle; the enqueue writer owns `requested`; the
@@ -399,6 +412,13 @@ constructs a **deterministic `event_id`** and guards on it (checking its own sta
 or the journal) before calling the writer. Most session transitions are naturally
 once-only and need no guard; the writer-generated `event_id` is fine for them.
 
+Review events inherit this posture keyed to what a duplicate *means*: the
+flag/hold/release verbs refuse a second gate on an already-gated item and refuse a
+release with no active gate, so `review_flagged`/`review_held`/`review_released`
+are naturally once-only per gate (the verb's state guard, not the writer, enforces
+it). `review_notified` is fire-per-occurrence — a stateless notification with no
+gate — so re-emitting it is a new observation, never a duplicate.
+
 ## Ownership matrix
 
 Exactly one writer owns each surface. Everything else shells out to that writer or
@@ -467,6 +487,12 @@ rather than growing this contract.**
   is the coordinator role's protocol home: it consumes these surfaces read-only
   through the session verbs and adds no verbs, no event vocabulary, and no TUI
   surface of its own.
+- **Review mechanism — landed (separate contract).** The four `review_*` events
+  are journal vocabulary here, but the gate mechanism they record (flag/hold/notify
+  spectrum, the `_meta.json` review block, the flag/hold/release verbs, the review
+  packet, and the retro audit read-path) is its own contract in
+  [docs/review-gates.md](review-gates.md). Route review-gate needs there, not into
+  this substrate.
 - **No spend joins.** The `spend` object on `closed` is reserved and nullable; the
   TUI fills only cheap teardown duration. Richer spend arrives with the
   model-routing substrate.

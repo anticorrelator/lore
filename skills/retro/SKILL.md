@@ -147,11 +147,31 @@ Count rows by status: `routed`, `verified`, `rejected`. Report shape: `Consumpti
 
 Read three logs filtered to the work period: session entries from `notes.md` `## YYYY-MM-DD` blocks (empty = degraded evidence); retrieval log at `$KNOWLEDGE_DIR/_meta/retrieval-log.jsonl`; friction log at `$KNOWLEDGE_DIR/_meta/friction-log.jsonl`. Also read packet assessments at `$KNOWLEDGE_DIR/_packets/assessments.jsonl` filtered by `assessed_at` to the work period — cite matching `packet_id` + verdict class as D2 evidence (`unused`, `harmful`) and D3 evidence (`missing`, `unattributed_retrieval`).
 
+### 2c.6: Review-gate audit (`_sessions/events.jsonl`)
+
+A fourth windowed log read — the review-mechanism audit (contract: `docs/review-gates.md` § "Audit semantics"). Read the four review events (`review_flagged`, `review_held`, `review_notified`, `review_released`) from `$KNOWLEDGE_DIR/_sessions/events.jsonl`, filtered to the work period by each row's `ts`. **Re-read the journal at authoring time** — compute these figures fresh when writing the journal entry (Step 4), never inheriting a count captured in an earlier step. `events.jsonl` is append-only and continuously written, so a snapshot taken earlier in the cycle can undercount within the same cycle even when the direction holds.
+
+Three signals:
+
+- **Dwell** — for each gate-open row (`review_flagged` / `review_held`), join its `event_id` to the `gate_id` field of the matching `review_released` row and compute `dwell = review_released.ts − gate_open.ts`. Report the dwell distribution. A gate still open at retro time (no matching release in the window) has no dwell — it counts under flag-pileup, not as zero dwell.
+- **Rubber-stamp signal** — near-zero dwell on `review_held` gates. A hold cleared almost immediately after it opened is a comprehension checkpoint that was skipped, not honored — the qualitative inverse of the gate's purpose.
+- **Flag-pileup** — the count of currently-gated items, read from `_index.json` `plans[].review` (mechanism present), not from the journal. A rising backlog of unreleased gates means flags are accumulating unread.
+
+**Routing.** Findings land as **journal-entry evidence** — folded into the retro journal entry (Step 4) and cited in the Step 6 narrative, the same off-band destination the escalation (Step 2.8) and scale-signal (Step 2.9) surfaces use. A rubber-stamp or pileup finding that is an actionable, recurring drift (not one-cycle variance) is a qualitative drift indicator of the same class as the Step 2b.6 `retro_flag` rows; route it to that sidecar (`$KDIR/_scorecards/retro-channel-flags.jsonl`). Its signal-type enum currently carries only the channel-contract types (`under_routing|over_capture|evidence_only_durable`), so a review-gate signal type is the extension point in `retro-channel-flag-append.sh` when mechanical emission is wanted. Either way, propose the remedy in the Step 6 narrative and target the gate *policy* — which mechanism per step, packet-authoring discipline, owned by `/coordinate` — never an individual producer.
+
+**Invariant.** This step never calls `scorecard-append`. Dwell and rubber-stamp figures are precisely "tuning signal, not surveillance": routing them through `rows.jsonl` would expose them to `/evolve` consumption and create a scoring incentive to *suppress* gates — the exact failure the review mechanism exists to prevent. Same off-band rationale as Step 2b.6's `retro_flag` invariant and Steps 2.8 / 2.9.
+
+**Selective-run posture.** This read-path is batch, windowed, and artifact-fed — it runs when the operator runs `/retro`, and nothing about the review mechanism requires `/retro` to run per-gate. A release is observable in the `_meta.json` review block and the journal whether or not a retro ever reads it.
+
+**Named experiment (archive-directive review trigger).** `docs/review-gates.md` § "Named experiment" ships the "done = work-complete AND comprehension-complete" archive-blocking change with an explicit review trigger: after ~5 releases **or** 4 weeks of first use (whichever comes first), a `/retro` run evaluates this surface — did flags actually get read (the dwell distribution) and did the active list stay signal-rich (the flag-pileup trend). When that trigger window has elapsed, name the evaluation in the retro narrative; if flags are piling up unread, the archive-blocking directive is what to revisit, not the metric.
+
+**When no review events fall in the window: no prose** — the healthy-case silence invariant (same as Steps 2b.6 / 2.8 / 2.9).
+
 ### 2f: Token efficiency
 
 Annotation-only: wrong-path explorations prevented, first-attempt accuracy gains. Full-resolution: file reads replaced (~500-3000 tokens/file).
 
-Emit a one-block `[retro] Evidence gathered:` report covering worker observations (N tasks), context blocks (N phases, M/K resolved), surfaced concerns (N entries, M addressed / K pending), consumption contradictions (N total, R routed, V verified, J rejected), sessions (N entries), retrieval/friction events (N each), and a token-savings estimate (~Nk).
+Emit a one-block `[retro] Evidence gathered:` report covering worker observations (N tasks), context blocks (N phases, M/K resolved), surfaced concerns (N entries, M addressed / K pending), consumption contradictions (N total, R routed, V verified, J rejected), sessions (N entries), retrieval/friction events (N each), and a token-savings estimate (~Nk). When review events fell in the window (Step 2c.6), add `review gates: N released (median dwell D), P still gated` — omit the clause entirely when none did, per the silence invariant.
 
 **Historical-unaudited commons coverage line.** Also include one line: `historical-unaudited (outside settlement coverage): <H>` — the count of commons entries with `confidence: unaudited` frontmatter that have **no** corresponding `commons` queue entry in `$KNOWLEDGE_DIR/_settlement/queue.json` (never enqueued by the forward loop). This is the honesty companion to Step 3.8's forward-settlement coverage ratio: the ratio measures forward coverage only, so this standalone count keeps the operator from reading a clean ratio as whole-store coverage. It is evidence context, not a health-check trip — these entries are out of scope for the forward loop (Design Decision D6) and are surfaced here precisely so the silent-when-green Step 3.8 check need not break its invariant to report them.
 

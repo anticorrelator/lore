@@ -248,6 +248,8 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkDetailStatusBarKeybindContract/s (spec)"},
 		{key: "c", label: "chat", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkDetailStatusBarKeybindContract/c (chat)"},
+		{key: "R", label: "release", surfaces: surfStatusBar | surfHelp, helpLabel: "release review gate",
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkDetailStatusBarKeybindContract/R (release)"},
 		{key: "Tab/Shift-Tab", label: "cycle tabs", surfaces: surfStatusBar | surfHelp, helpKey: "Tab / Shift-Tab",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestWorkDetailStatusBarKeybindContract/Tab/Shift-Tab (cycle tabs)"},
 		{key: "j/k", label: "scroll", surfaces: surfStatusBar | surfHelp, helpKey: "j / k",

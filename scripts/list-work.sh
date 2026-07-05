@@ -345,6 +345,29 @@ if diverged:
         if residue:
             print(f"  waiting-on: {residue}")
 
+# Active items under a review gate get a marker (this surface has no shared
+# renderer with load-work.sh — the marker is applied to each independently).
+gated = [
+    item for item in plans
+    if str(item.get("status", "")) == "active"
+    and isinstance(item.get("review"), dict)
+    and item["review"].get("mechanism") in ("flag", "hold")
+]
+if gated:
+    print()
+    for item in gated:
+        slug = str(item.get("slug", ""))
+        review = item["review"]
+        mechanism = review.get("mechanism")
+        reason = review.get("reason") or ""
+        gated_at = review.get("gated_at", "")
+        epoch = parse_epoch(gated_at)
+        age = f"{int((time.time() - epoch) // 86400)}d" if epoch else "unknown"
+        if mechanism == "hold":
+            print(f"[review-hold] {slug} — held {age} — {reason}")
+        else:
+            print(f"[review-flag] {slug} — flagged {age}, unread — show or clear")
+
 if show_all and archived:
     print()
     print("--- Archived ---")

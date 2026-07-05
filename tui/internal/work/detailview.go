@@ -570,6 +570,15 @@ func (m DetailModel) renderMetaTab(width int) string {
 	b.WriteString(statusDisplay)
 	b.WriteString("\n")
 
+	// Review gate: dwell + reason, only when the item is currently gated.
+	if d.Review != nil {
+		b.WriteString("  ")
+		b.WriteString(labelStyle.Render("Review:"))
+		b.WriteString(" ")
+		b.WriteString(reviewDwellLine(d.Review))
+		b.WriteString("\n")
+	}
+
 	// Created timestamp
 	field("Created", d.Created)
 
@@ -624,6 +633,26 @@ func (m DetailModel) renderMetaTab(width int) string {
 	}
 
 	return b.String()
+}
+
+// reviewDwellLine renders the review-gate summary for the meta tab:
+// "held 3d — <reason>" for a hold (ColorAttention) or "flagged 3d — <reason>"
+// for a flag (ColorModified), the dwell measured from gated_at to now. The
+// reason (dim) is dropped when empty.
+func reviewDwellLine(r *ReviewState) string {
+	verb, st := "flagged", reviewFlaggedStyle
+	if r.Mechanism == "hold" {
+		verb, st = "held", reviewHeldStyle
+	}
+	head := verb
+	if dwell := formatDwell(r.GatedAt); dwell != "" {
+		head += " " + dwell
+	}
+	line := st.Render(head)
+	if r.Reason != "" {
+		line += style.Dim.Render(" — " + r.Reason)
+	}
+	return line
 }
 
 // BuildSearchIndex returns searchable locations across all tabs in the detail view.

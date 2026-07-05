@@ -261,6 +261,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				if action == "post_review" {
 					return m, runPostReview(m.config.KnowledgeDir, slug)
 				}
+				if action == "release" {
+					return m, runRelease(slug)
+				}
 				return m, runArchive(slug, action == "unarchive")
 			default:
 				// Any other key cancels.
@@ -539,6 +542,13 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 		return m, loadWorkItems(m.config.WorkDir)
 
+	case work.ReleaseFinishedMsg:
+		if msg.Err != nil {
+			m.flashErr = fmt.Sprintf("release failed: %v", msg.Err)
+		}
+		// On success the review block is gone; the reload drops the badge.
+		return m, loadWorkItems(m.config.WorkDir)
+
 	case work.AssignFinishedMsg:
 		if msg.Err != nil {
 			// Failed write: keep the prompt open with the entered label so
@@ -735,6 +745,13 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// A opens archive/unarchive confirmation modal (left panel only).
 			if m.state == stateWork && m.focusedPanel == panelLeft {
 				if item, ok := m.list.CurrentItem(); ok {
+					// A gated item cannot be archived — the CLI refuses it too.
+					// Name the escape hatch (release, in the detail view) instead
+					// of opening the archive modal.
+					if item.Review != nil {
+						m.flashErr = fmt.Sprintf("cannot archive %s: review gate active (%s) — release first (detail view, R)", item.Slug, item.Review.Mechanism)
+						return m, nil
+					}
 					title := item.Title
 					if title == "" {
 						title = item.Slug
@@ -946,6 +963,24 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 						FindingIndex:   -1,
 					}
 					return m, func() tea.Msg { return msg }
+				}
+			}
+		case "R":
+			// Release the current item's review gate — detail context only.
+			// Releasing from the detail view keeps the keybind adjacent to the
+			// review packet being read; a list-context release would be a
+			// one-keystroke rubber-stamp on an unopened item, the exact behavior
+			// the audit signal exists to catch. No-op on an ungated item.
+			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
+				if item, ok := m.list.CurrentItem(); ok && item.Review != nil {
+					title := item.Title
+					if title == "" {
+						title = item.Slug
+					}
+					m.confirmAction = "release"
+					m.confirmSlug = item.Slug
+					m.confirmTitle = title
+					return m, nil
 				}
 			}
 		case "p":

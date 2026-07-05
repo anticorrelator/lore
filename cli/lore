@@ -152,6 +152,9 @@ Subcommands:
   regen-tasks  Regenerate tasks.json from plan.md
   check        Check off a plan task
   relate       Add or remove related work item links
+  flag         Open a lightweight (async) review gate on a work item
+  hold         Open a blocking review gate on a work item
+  release      Clear an active review gate from a work item
   heal         Detect and fix work structure issues
   ai           Create work items from a natural-language prompt (headless Claude)
   cache-branch Cache or retrieve the active branch for a work item
@@ -1583,6 +1586,15 @@ cmd_work() {
       ;;
     relate)
       "$SCRIPTS_DIR/relate-work.sh" "$@"
+      ;;
+    flag)
+      "$SCRIPTS_DIR/flag-work.sh" "$@" --mechanism flag
+      ;;
+    hold)
+      "$SCRIPTS_DIR/flag-work.sh" "$@" --mechanism hold
+      ;;
+    release)
+      "$SCRIPTS_DIR/release-work.sh" "$@"
       ;;
     ai)
       "$SCRIPTS_DIR/work-ai.sh" "$@"

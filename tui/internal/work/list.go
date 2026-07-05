@@ -52,6 +52,11 @@ type ArchiveFinishedMsg struct {
 	Err error
 }
 
+// ReleaseFinishedMsg is sent when the `lore work release` command completes.
+type ReleaseFinishedMsg struct {
+	Err error
+}
+
 // DeleteRequestMsg is sent when the user confirms a delete action.
 type DeleteRequestMsg struct {
 	Slug string
@@ -277,11 +282,12 @@ func (m ListModel) itemRow(item WorkItem) collection.Row {
 	}
 }
 
-// readinessCell returns the readiness column content: animated "speccing"
-// while a local spec session is active, a badge for an external session
-// (amber "◆ agent" when agent-initiated, dim "◆ active" when human), otherwise
-// the readiness label on the status ramp. Local speccing wins over external so
-// one slug never shows conflicting indicators.
+// readinessCell returns the readiness column content, in strict priority
+// order: animated "speccing" while a local spec session is active, then a
+// badge for an external session (amber "◆ agent" when agent-initiated, dim
+// "◆ active" when human), then a review-gate badge (amber "⊘ held" for a hold,
+// cyan "⚑ flagged" for a flag), otherwise the readiness label on the status
+// ramp. Higher tiers win so one slug never shows conflicting indicators.
 func (m ListModel) readinessCell(item WorkItem) collection.Cell {
 	if m.specActiveSlugs[item.Slug] {
 		dots := strings.Repeat(".", m.specDots)
@@ -293,14 +299,30 @@ func (m ListModel) readinessCell(item WorkItem) collection.Cell {
 		}
 		return collection.Cell{Text: "◆ active", Style: style.Dim}
 	}
+	switch reviewMechanism(item) {
+	case "hold":
+		return collection.Cell{Text: "⊘ held", Style: reviewHeldStyle}
+	case "flag":
+		return collection.Cell{Text: "⚑ flagged", Style: reviewFlaggedStyle}
+	}
 	label, st := readinessLabel(item)
 	return collection.Cell{Text: label, Style: st}
 }
 
+// reviewMechanism returns the item's active review mechanism ("hold" | "flag"),
+// or "" when ungated.
+func reviewMechanism(item WorkItem) string {
+	if item.Review == nil {
+		return ""
+	}
+	return item.Review.Mechanism
+}
+
 // stackedGlyph returns the title-line indicator prefix for the stacked
-// layout: ● (amber) when a local spec session waits for input, ◈ (amber) when
-// another instance runs an agent-initiated session, ◆ (dim) when it is a human
-// session on another instance.
+// layout, in the same priority order as readinessCell: ● (amber) when a local
+// spec session waits for input, ◈ (amber) when another instance runs an
+// agent-initiated session, ◆ (dim) when it is a human session on another
+// instance, then ⊘ (amber) for a review hold or ⚑ (cyan) for a review flag.
 func (m ListModel) stackedGlyph(item WorkItem) string {
 	if m.specActiveSlugs[item.Slug] && m.specNeedsInputSlugs[item.Slug] {
 		return "● "
@@ -311,6 +333,12 @@ func (m ListModel) stackedGlyph(item WorkItem) string {
 				return "◈ "
 			}
 			return "◆ "
+		}
+		switch reviewMechanism(item) {
+		case "hold":
+			return "⊘ "
+		case "flag":
+			return "⚑ "
 		}
 	}
 	return ""
@@ -349,6 +377,10 @@ func decorateStackedGlyph(row collection.Row, selected bool, lines []string) []s
 		lines[0] = line[:2] + needsInputStyle.Render("◈") + rest[len("◈"):]
 	case strings.HasPrefix(rest, "◆ "):
 		lines[0] = line[:2] + style.Dim.Render("◆") + rest[len("◆"):]
+	case strings.HasPrefix(rest, "⊘ "):
+		lines[0] = line[:2] + reviewHeldStyle.Render("⊘") + rest[len("⊘"):]
+	case strings.HasPrefix(rest, "⚑ "):
+		lines[0] = line[:2] + reviewFlaggedStyle.Render("⚑") + rest[len("⚑"):]
 	}
 	return lines
 }
@@ -532,6 +564,15 @@ func (m ListModel) View() string {
 // not a readiness state. Hoisted so render paths never allocate per frame.
 var needsInputStyle = lipgloss.NewStyle().Foreground(style.ColorAttention)
 
+// reviewHeldStyle and reviewFlaggedStyle color the two review-gate badges by
+// their palette roles (style.go): a hold is ColorAttention (blocked on a
+// human), a flag is ColorModified (acted on, not yet finalized). Hoisted so
+// the list decorator and detail meta tab never allocate per frame.
+var (
+	reviewHeldStyle    = lipgloss.NewStyle().Foreground(style.ColorAttention)
+	reviewFlaggedStyle = lipgloss.NewStyle().Foreground(style.ColorModified)
+)
+
 // prMergedStyle keeps GitHub's merged-purple for the PR badge; the status
 // ramp has no merged role, and StatusDone (dim) would make merged PRs read
 // like the dim "--" placeholder for no PR at all.
@@ -620,6 +661,30 @@ func (m ListModel) prBadgeParts(prField string) (string, lipgloss.Style) {
 func (m ListModel) prBadge(prField string, width int) string {
 	text, st := m.prBadgeParts(prField)
 	return st.Render(style.Truncate(text, width))
+}
+
+// formatDwell renders how long ago an ISO-8601 instant was as a compact span
+// ("just now", "5m", "3h", "4d") with no "ago" suffix — the review-gate dwell
+// shown in the detail meta tab. Returns "" when iso is empty or unparseable.
+func formatDwell(iso string) string {
+	if iso == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, iso)
+	if err != nil {
+		return ""
+	}
+	diff := time.Since(t)
+	switch {
+	case diff < time.Minute:
+		return "just now"
+	case diff < time.Hour:
+		return fmt.Sprintf("%dm", int(diff.Minutes()))
+	case diff < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(diff.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(diff.Hours()/24))
+	}
 }
 
 func FormatRelativeTime(iso string) string {

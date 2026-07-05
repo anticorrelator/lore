@@ -49,6 +49,13 @@ const (
 	EventSendRequested    = "send_requested"
 	EventSent             = "sent"
 	EventSendRefused      = "send_refused"
+
+	// Work-item review events — a third class the writer keys to a work-item
+	// slug (not a request_id), so a row carrying one of these MUST set Slug.
+	EventReviewFlagged  = "review_flagged"
+	EventReviewHeld     = "review_held"
+	EventReviewNotified = "review_notified"
+	EventReviewReleased = "review_released"
 )
 
 // AppendEvent emits one journal row by piping it into the sole-writer script

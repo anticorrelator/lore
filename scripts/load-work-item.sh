@@ -117,6 +117,7 @@ result = {
     'created': meta.get('created', ''),
     'updated': meta.get('updated', ''),
     'related_work': meta.get('related_work', []),
+    'review': meta.get('review'),
     'plan_content': read_file(plan_path),
     'notes_content': read_file(notes_path),
     'has_execution_log': os.path.isfile(exec_log_path),
@@ -151,6 +152,25 @@ PR=$(json_field "pr" "$META" || true)
 PROJECT=$(json_field "project" "$META" || true)
 INTENT_ANCHOR=$(json_field "intent_anchor" "$META" || true)
 
+# Review gate (optional nested block) — one human line, or empty when ungated.
+REVIEW_LINE=$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        review = json.load(f).get("review")
+except Exception:
+    review = None
+if isinstance(review, dict) and review.get("mechanism") in ("flag", "hold"):
+    parts = [str(review.get("mechanism")) + " gate"]
+    if review.get("gated_at"):
+        parts.append("opened " + str(review.get("gated_at")))
+    if review.get("reason"):
+        parts.append("— " + str(review.get("reason")))
+    if review.get("packet"):
+        parts.append("(packet: " + str(review.get("packet")) + ")")
+    print(" ".join(parts))
+' "$META" || true)
+
 # Extract branches, tags, and related_work as comma-separated display strings
 BRANCHES=$(json_array_field "branches" "$META" | sed 's/"//g; s/,/, /g')
 TAGS=$(json_array_field "tags" "$META" | sed 's/"//g; s/,/, /g')
@@ -178,6 +198,9 @@ echo "Issue: ${ISSUE:-none}"
 echo "PR: ${PR:-none}"
 if [[ -n "$INTENT_ANCHOR" ]]; then
   echo "Intent anchor: $INTENT_ANCHOR"
+fi
+if [[ -n "$REVIEW_LINE" ]]; then
+  echo "Review: $REVIEW_LINE"
 fi
 echo "Created: $CREATED"
 echo "Updated: $UPDATED"

@@ -685,3 +685,92 @@ func TestListModelCtrlAToggleActiveArchivedFilter(t *testing.T) {
 		t.Errorf("archived filter should show only the archived item, got %v", m.Items())
 	}
 }
+
+// --- Review-gate badges (held / flagged) ---
+
+// A held item shows "⊘ held" in ColorAttention; a flagged item shows
+// "⚑ flagged" in ColorModified. The asserted item sits below the cursor so it
+// renders styled (the selected row is unstyled under the selection background).
+func TestReviewBadgeHeldAndFlagged(t *testing.T) {
+	held := []WorkItem{
+		{Slug: "cursor-row", Title: "Cursor", Status: "active", Updated: "2026-01-01"},
+		{Slug: "held-item", Title: "Held", Status: "active", Updated: "2026-01-01",
+			Review: &ReviewState{Mechanism: "hold", GatedAt: "2026-06-01T00:00:00Z", Reason: "needs a human"}},
+	}
+	view := newTestListModel(held).View()
+	if !strings.Contains(stripListANSI(view), "⊘ held") {
+		t.Fatalf("held item should show '⊘ held', got:\n%s", stripListANSI(view))
+	}
+	if !strings.Contains(view, sgrOpen(reviewHeldStyle)+"⊘ held") {
+		t.Fatalf("held badge should open with the ColorAttention sequence, got:\n%s", view)
+	}
+
+	flagged := []WorkItem{
+		{Slug: "cursor-row", Title: "Cursor", Status: "active", Updated: "2026-01-01"},
+		{Slug: "flagged-item", Title: "Flagged", Status: "active", Updated: "2026-01-01",
+			Review: &ReviewState{Mechanism: "flag", GatedAt: "2026-06-01T00:00:00Z", Reason: "look here"}},
+	}
+	view = newTestListModel(flagged).View()
+	if !strings.Contains(stripListANSI(view), "⚑ flagged") {
+		t.Fatalf("flagged item should show '⚑ flagged', got:\n%s", stripListANSI(view))
+	}
+	if !strings.Contains(view, sgrOpen(reviewFlaggedStyle)+"⚑ flagged") {
+		t.Fatalf("flagged badge should open with the ColorModified sequence, got:\n%s", view)
+	}
+}
+
+// Review-gate badges outrank the readiness label but are outranked by an
+// external session and by local speccing (priority: speccing > external >
+// held/flagged > readiness).
+func TestReviewBadgePriority(t *testing.T) {
+	gated := func() []WorkItem {
+		return []WorkItem{
+			{Slug: "cursor-row", Status: "active", Updated: "2026-01-01"},
+			{Slug: "g", Title: "Gated", Status: "active", HasTasks: true, Updated: "2026-01-01",
+				Review: &ReviewState{Mechanism: "hold", GatedAt: "2026-06-01T00:00:00Z"}},
+		}
+	}
+
+	// held outranks the "ready" readiness label.
+	m := newTestListModel(gated())
+	if v := stripListANSI(m.View()); !strings.Contains(v, "⊘ held") {
+		t.Errorf("held should outrank the readiness label, got:\n%s", v)
+	}
+
+	// an external session outranks held.
+	m, _ = m.Update(ExternalSessionMsg{Sessions: map[string]ExternalSession{"g": {Instance: "other"}}})
+	if v := stripListANSI(m.View()); strings.Contains(v, "held") {
+		t.Errorf("external session should outrank held, got:\n%s", v)
+	}
+
+	// local speccing outranks held.
+	m2 := newTestListModel(gated())
+	m2, _ = m2.Update(SpecStatusMsg{Slug: "g", NeedsInput: false})
+	v := stripListANSI(m2.View())
+	if strings.Contains(v, "held") {
+		t.Errorf("local speccing should outrank held, got:\n%s", v)
+	}
+	if !strings.Contains(v, "speccing") {
+		t.Errorf("speccing badge should show, got:\n%s", v)
+	}
+}
+
+// The stacked title-line glyph for a review gate keeps its role color on
+// unselected rows via the row decorator (⊘ ColorAttention, ⚑ ColorModified).
+func TestReviewStackedGlyphColors(t *testing.T) {
+	items := []WorkItem{
+		{Slug: "cursor-row", Title: "Cursor", Status: "active", Updated: "2026-01-01"},
+		{Slug: "held-item", Title: "Held", Status: "active", Updated: "2026-01-01",
+			Review: &ReviewState{Mechanism: "hold", GatedAt: "2026-06-01T00:00:00Z"}},
+	}
+	m := resizeStacked(newTestListModel(items))
+	if want := reviewHeldStyle.Render("⊘"); !strings.Contains(m.View(), want) {
+		t.Fatalf("held stacked glyph should render in ColorAttention, got:\n%s", m.View())
+	}
+
+	items[1].Review = &ReviewState{Mechanism: "flag", GatedAt: "2026-06-01T00:00:00Z"}
+	m = resizeStacked(newTestListModel(items))
+	if want := reviewFlaggedStyle.Render("⚑"); !strings.Contains(m.View(), want) {
+		t.Fatalf("flagged stacked glyph should render in ColorModified, got:\n%s", m.View())
+	}
+}

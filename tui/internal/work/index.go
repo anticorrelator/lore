@@ -7,21 +7,33 @@ import (
 	"sort"
 )
 
+// ReviewState is the active review-gate an item carries: the mechanism that
+// gated it, when, and why. Nil for an ungated item. In _index.json it is the
+// review_field projection from update-work-index.sh (mechanism / gated_at /
+// reason only); read from a work item's _meta.json review block it is the same
+// read-side subset (gate_id and packet stay out of the renderers' path).
+type ReviewState struct {
+	Mechanism string `json:"mechanism"` // "flag" | "hold"
+	GatedAt   string `json:"gated_at"`
+	Reason    string `json:"reason"`
+}
+
 // WorkItem represents a single work item from _index.json.
 type WorkItem struct {
-	Slug            string   `json:"slug"`
-	Title           string   `json:"title"`
-	Status          string   `json:"status"`
-	Branches        []string `json:"branches"`
-	Tags            []string `json:"tags"`
-	Project         string   `json:"project"` // "" = ungrouped
-	Created         string   `json:"created"`
-	Updated         string   `json:"updated"`
-	Issue           string   `json:"issue"`
-	PR              string   `json:"pr"`
-	HasPlanDoc      bool     `json:"has_plan_doc"`
-	HasExecutionLog bool     `json:"has_execution_log"`
-	HasTasks        bool     `json:"-"` // inferred from tasks.json presence
+	Slug            string       `json:"slug"`
+	Title           string       `json:"title"`
+	Status          string       `json:"status"`
+	Branches        []string     `json:"branches"`
+	Tags            []string     `json:"tags"`
+	Project         string       `json:"project"` // "" = ungrouped
+	Created         string       `json:"created"`
+	Updated         string       `json:"updated"`
+	Issue           string       `json:"issue"`
+	PR              string       `json:"pr"`
+	Review          *ReviewState `json:"review"` // nil = ungated
+	HasPlanDoc      bool         `json:"has_plan_doc"`
+	HasExecutionLog bool         `json:"has_execution_log"`
+	HasTasks        bool         `json:"-"` // inferred from tasks.json presence
 }
 
 // indexFile is the top-level shape of _index.json.

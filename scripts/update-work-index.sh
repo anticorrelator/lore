@@ -75,6 +75,23 @@ def closure_field(meta):
         "residue_followup": closure.get("residue_followup"),
     }
 
+def review_field(meta):
+    """Project the review-gate subset of _meta.json.review the renderers read.
+
+    Only mechanism / gated_at / reason reach the orchestration map — gate_id
+    (release join key) and packet (bag-of-files auto-delivery) stay in
+    _meta.json. Returns None when no active gate is present so an ungated item
+    projects no review state.
+    """
+    review = meta.get("review")
+    if not isinstance(review, dict) or review.get("mechanism") not in ("flag", "hold"):
+        return None
+    return {
+        "mechanism": review.get("mechanism"),
+        "gated_at": review.get("gated_at"),
+        "reason": review.get("reason"),
+    }
+
 for meta_path in sorted(glob.glob(os.path.join(work_dir, "*", "_meta.json"))):
     slug = os.path.basename(os.path.dirname(meta_path))
     if slug == "_archive" or slug in seen_slugs:
@@ -104,6 +121,7 @@ for meta_path in sorted(glob.glob(os.path.join(work_dir, "*", "_meta.json"))):
         "project": str_field(meta, "project"),
         "related_work": list_field(meta, "related_work"),
         "closure": closure_field(meta),
+        "review": review_field(meta),
         "has_plan_doc": os.path.exists(os.path.join(parent, "plan.md")),
         "has_execution_log": os.path.exists(os.path.join(parent, "execution-log.md"))
                           or os.path.exists(os.path.join(parent, "execution_log.md")),

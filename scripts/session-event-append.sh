@@ -31,12 +31,18 @@
 #                resumed | closed | step_completed | harness_turn_ended |
 #                spawn_failed | request_reclaimed | request_abandoned |
 #                request_cancelled | close_requested | send_requested | sent |
-#                send_refused
+#                send_refused | review_flagged | review_held | review_notified |
+#                review_released
 #
 # Conditional rules:
 #   Queue-lifecycle events (requested, claimed, spawned, spawn_failed,
 #   request_reclaimed, request_abandoned, request_cancelled, close_requested,
 #   send_requested, sent, send_refused) REQUIRE a non-empty request_id.
+#   Work-item review events (review_flagged, review_held, review_notified,
+#   review_released) REQUIRE a non-empty slug — a third event class keyed to a
+#   work item rather than a queue request. gate_id (optional, omit-when-empty)
+#   carries the audit join key: a gate-open verb sets it as the row's event_id
+#   and the release row echoes it in gate_id. See docs/review-gates.md.
 #
 # Exit codes: 0 success; 1 validation error / refused. No child processes are
 # spawned, so no child exit code is propagated.
@@ -109,12 +115,13 @@ EVENT=$(printf '%s' "$ROW" | jq -r '.event // ""')
 case "$EVENT" in
   requested|claimed|spawned|needs_input|quiescent|resumed|closed|\
 step_completed|harness_turn_ended|spawn_failed|request_reclaimed|\
-request_abandoned|request_cancelled|close_requested|send_requested|sent|send_refused) ;;
+request_abandoned|request_cancelled|close_requested|send_requested|sent|send_refused|\
+review_flagged|review_held|review_notified|review_released) ;;
   "")
     fail "missing required field: event"
     ;;
   *)
-    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, closed, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, send_requested, sent, send_refused)"
+    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, closed, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, send_requested, sent, send_refused, review_flagged, review_held, review_notified, review_released)"
     ;;
 esac
 
@@ -123,6 +130,17 @@ case "$EVENT" in
   requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|close_requested|send_requested|sent|send_refused)
     if ! printf '%s' "$ROW" | jq -e '(.request_id // "") != ""' >/dev/null 2>&1; then
       fail "missing required field: request_id (required for queue-lifecycle event '$EVENT')"
+    fi
+    ;;
+esac
+
+# --- Work-item review events require a non-empty slug ---
+# Third event class: keyed to a work item, not a queue request. This branch is
+# new because slug is optional for every other event today.
+case "$EVENT" in
+  review_flagged|review_held|review_notified|review_released)
+    if ! printf '%s' "$ROW" | jq -e '(.slug // "") != ""' >/dev/null 2>&1; then
+      fail "missing required field: slug (required for work-item review event '$EVENT')"
     fi
     ;;
 esac

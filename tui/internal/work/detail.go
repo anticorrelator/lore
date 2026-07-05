@@ -12,32 +12,33 @@ import (
 // work item directory (any .md file that isn't plan.md, notes.md, or
 // execution-log.md).
 type ExtraFile struct {
-	Name    string `json:"name"`    // filename without the .md extension
+	Name    string `json:"name"` // filename without the .md extension
 	Content string `json:"content"`
 }
 
 // WorkItemDetail holds the full detail of a single work item, as returned by
 // `lore work show <slug> --json`.
 type WorkItemDetail struct {
-	Slug            string      `json:"slug"`
-	Title           string      `json:"title"`
-	Status          string      `json:"status"`
-	Branches        []string    `json:"branches"`
-	Tags            []string    `json:"tags"`
-	Project         string      `json:"project"`
-	RelatedWork     []string    `json:"related_work"`
-	Issue           string      `json:"issue"`
-	PR              string      `json:"pr"`
-	Created         string      `json:"created"`
-	Updated         string      `json:"updated"`
-	PlanContent     *string     `json:"plan_content"`
-	NotesContent    *string     `json:"notes_content"`
-	HasExecutionLog bool        `json:"has_execution_log"`
-	HasTasks        bool        `json:"has_tasks"`
-	TasksContent    *TasksFile  `json:"tasks_content,omitempty"`
-	ExecLogContent  *string     `json:"exec_log_content,omitempty"`
-	ExtraFiles      []ExtraFile `json:"extra_files,omitempty"`
-	Malformed       bool        `json:"malformed,omitempty"`
+	Slug            string       `json:"slug"`
+	Title           string       `json:"title"`
+	Status          string       `json:"status"`
+	Branches        []string     `json:"branches"`
+	Tags            []string     `json:"tags"`
+	Project         string       `json:"project"`
+	RelatedWork     []string     `json:"related_work"`
+	Issue           string       `json:"issue"`
+	PR              string       `json:"pr"`
+	Created         string       `json:"created"`
+	Updated         string       `json:"updated"`
+	PlanContent     *string      `json:"plan_content"`
+	NotesContent    *string      `json:"notes_content"`
+	HasExecutionLog bool         `json:"has_execution_log"`
+	HasTasks        bool         `json:"has_tasks"`
+	TasksContent    *TasksFile   `json:"tasks_content,omitempty"`
+	ExecLogContent  *string      `json:"exec_log_content,omitempty"`
+	ExtraFiles      []ExtraFile  `json:"extra_files,omitempty"`
+	Review          *ReviewState `json:"review,omitempty"` // nil = ungated
+	Malformed       bool         `json:"malformed,omitempty"`
 }
 
 // SearchLocation identifies a navigable position within a detail view tab.
@@ -52,17 +53,18 @@ type SearchLocation struct {
 
 // workItemMeta mirrors the _meta.json schema for a work item.
 type workItemMeta struct {
-	Slug        string   `json:"slug"`
-	Title       string   `json:"title"`
-	Status      string   `json:"status"`
-	Branches    []string `json:"branches"`
-	Tags        []string `json:"tags"`
-	Project     string   `json:"project"`
-	RelatedWork []string `json:"related_work"`
-	Issue       string   `json:"issue"`
-	PR          string   `json:"pr"`
-	Created     string   `json:"created"`
-	Updated     string   `json:"updated"`
+	Slug        string       `json:"slug"`
+	Title       string       `json:"title"`
+	Status      string       `json:"status"`
+	Branches    []string     `json:"branches"`
+	Tags        []string     `json:"tags"`
+	Project     string       `json:"project"`
+	RelatedWork []string     `json:"related_work"`
+	Issue       string       `json:"issue"`
+	PR          string       `json:"pr"`
+	Created     string       `json:"created"`
+	Updated     string       `json:"updated"`
+	Review      *ReviewState `json:"review"`
 }
 
 // loadWorkItemDetailDirect reads work item files directly from disk,
@@ -166,6 +168,7 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 		PR:          meta.PR,
 		Created:     meta.Created,
 		Updated:     meta.Updated,
+		Review:      meta.Review,
 	}
 
 	// Read optional content files — nil when absent
