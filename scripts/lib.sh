@@ -1028,19 +1028,32 @@ framework_model_routing_tiers() {
 # `harnesses.<active>.roles` is the same error class as in `roles.<id>`).
 # The "default" role is the resolution fallback consumed internally by this
 # helper and is also a valid explicit role id.
+# The optional second argument is a ceremony id from the closed set in
+# adapters/ceremonies.json (`spec`, `implement`). When present it inserts a
+# ceremony-scoped overlay between the per-repo config and the role overlay;
+# when absent the ceremony layer is skipped entirely (role-only resolution is
+# byte-identical to the pre-ceremony behavior). Same closed-set rejection
+# applies at the ceremony layer to an unknown ceremony id (in the query or
+# stored under `ceremony_roles`) and an unknown role id stored inside a
+# ceremony map.
 # Resolution order (first match wins):
 #   1. Env var LORE_MODEL_<ROLE_UPPER> (e.g., LORE_MODEL_LEAD=opus).
 #   2. Per-repo .lore.config `model_for_<role>=<model>` (walk-up search from
 #      cwd; same lookup mechanism as resolve_knowledge_dir).
-#   3. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay
+#   3. Unified settings.json `.harnesses.<active>.ceremony_roles.<ceremony>.<role>`
+#      (only consulted when a ceremony argument is passed; absent binding
+#      falls through).
+#   4. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay
 #      — applies to the active harness only; absent overlay falls through).
-#   4. Unified `.harnesses.<active>.roles.default` (overlay's own default).
-# Mirrors config.ResolveModelForRole() in tui/internal/config/settings.go.
+#   5. Unified `.harnesses.<active>.roles.default` (overlay's own default).
+# Mirrors config.ResolveModelForRoleInCeremony() in tui/internal/config/framework.go.
 resolve_model_for_role() {
   local role="$1"
+  local ceremony="${2:-}"
   [[ -z "$role" ]] && { echo "Error: resolve_model_for_role requires a role name" >&2; return 1; }
 
   local roles_file="$LORE_LIB_DIR/../adapters/roles.json"
+  local ceremonies_file="$LORE_LIB_DIR/../adapters/ceremonies.json"
   local data_dir="${LORE_DATA_DIR:-$HOME/.lore}"
   local settings_sh="$LORE_LIB_DIR/settings.sh"
 
@@ -1048,6 +1061,17 @@ resolve_model_for_role() {
   if [[ -f "$roles_file" ]] && command -v jq &>/dev/null; then
     if ! jq -e --arg r "$role" '.roles[] | select(.id == $r)' "$roles_file" &>/dev/null; then
       echo "Error: unknown role '$role' (not in $roles_file)" >&2
+      return 1
+    fi
+  fi
+
+  # Validate the ceremony query against the closed registry. Mirrors the role
+  # query guard above — a malformed ceremony id is rejected upfront, before the
+  # env/per-repo layers, so an unknown ceremony never resolves regardless of
+  # env override.
+  if [[ -n "$ceremony" && -f "$ceremonies_file" ]] && command -v jq &>/dev/null; then
+    if ! jq -e --arg c "$ceremony" '.ceremonies[] | select(.id == $c)' "$ceremonies_file" &>/dev/null; then
+      echo "Error: unknown ceremony '$ceremony' (not in $ceremonies_file)" >&2
       return 1
     fi
   fi
@@ -1083,6 +1107,51 @@ resolve_model_for_role() {
   local active=""
   active=$(resolve_active_framework 2>/dev/null) || active=""
 
+  # 3. Ceremony overlay `.harnesses.<active>.ceremony_roles.<ceremony>.<role>`.
+  # Consulted only when a ceremony argument is passed, so role-only resolution
+  # is byte-identical to the pre-ceremony behavior. Closed-set rejection here
+  # mirrors the role overlay guard below: any unknown ceremony key or unknown
+  # role key stored under ceremony_roles is a misconfiguration the user should
+  # see, not a silently-ignored block.
+  if [[ -n "$ceremony" && -n "$active" && -f "$ceremonies_file" && -f "$roles_file" ]]; then
+    local ceremony_block
+    ceremony_block=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.ceremony_roles" 2>/dev/null || true)
+    if [[ -n "$ceremony_block" ]]; then
+      local valid_ceremony_ids
+      valid_ceremony_ids=$(jq -c '[.ceremonies[].id]' "$ceremonies_file" 2>/dev/null)
+      [[ -z "$valid_ceremony_ids" || "$valid_ceremony_ids" == "null" ]] && valid_ceremony_ids="[]"
+      local bad_ceremony
+      bad_ceremony=$(printf '%s' "$ceremony_block" | jq -r --argjson valid "$valid_ceremony_ids" \
+        '(keys) - $valid | .[]' 2>/dev/null | head -1)
+      if [[ -n "$bad_ceremony" ]]; then
+        echo "Error: unknown ceremony '$bad_ceremony' in harnesses.$active.ceremony_roles (not in $ceremonies_file)" >&2
+        return 1
+      fi
+
+      local valid_role_ids_c
+      valid_role_ids_c=$(jq -c '[.roles[].id]' "$roles_file" 2>/dev/null)
+      [[ -z "$valid_role_ids_c" || "$valid_role_ids_c" == "null" ]] && valid_role_ids_c="[]"
+      local bad_ceremony_role
+      bad_ceremony_role=$(printf '%s' "$ceremony_block" | jq -r --argjson valid "$valid_role_ids_c" \
+        '[.[] | keys[]] - $valid | .[]' 2>/dev/null | head -1)
+      if [[ -n "$bad_ceremony_role" ]]; then
+        echo "Error: unknown role '$bad_ceremony_role' in harnesses.$active.ceremony_roles (not in $roles_file)" >&2
+        return 1
+      fi
+    fi
+
+    local ceremony_raw
+    ceremony_raw=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.ceremony_roles.$ceremony.$role" 2>/dev/null || true)
+    if [[ -n "$ceremony_raw" ]]; then
+      local ceremony_value
+      ceremony_value=$(printf '%s' "$ceremony_raw" | jq -r '. // empty' 2>/dev/null)
+      if [[ -n "$ceremony_value" ]]; then
+        echo "$ceremony_value"
+        return 0
+      fi
+    fi
+  fi
+
   # D3b closed-set rejection at the overlay layer: any unknown role id
   # (anything not in adapters/roles.json) found under
   # `harnesses.<active>.roles` is rejected immediately. The role validation
@@ -1106,7 +1175,7 @@ resolve_model_for_role() {
     fi
   fi
 
-  # 3. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay)
+  # 4. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay)
   local overlay_value=""
   if [[ -n "$active" ]]; then
     local raw
@@ -1120,7 +1189,7 @@ resolve_model_for_role() {
     fi
   fi
 
-  # 4. Unified `.harnesses.<active>.roles.default` (overlay's own default)
+  # 5. Unified `.harnesses.<active>.roles.default` (overlay's own default)
   if [[ -n "$active" ]]; then
     local raw_default
     raw_default=$(LORE_DATA_DIR="$data_dir" bash "$settings_sh" get "harnesses.$active.roles.default" 2>/dev/null || true)

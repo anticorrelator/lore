@@ -282,7 +282,7 @@ The gate fires when **all four** conditions hold:
 
    **If `$ADVISORY_MIXIN` is non-empty (opt-in route only):** append the resolved mixin content after the fully resolved worker template content, separated by a blank line. **On the default route `$ADVISORY_MIXIN` is empty** — worker prompts end at the resolved worker template; workers still have the `**Consultations:**` reporting field and `## Consultation` request shape from the worker template's §Reporting Guidelines, so they can SendMessage the lead without the mixin. The lead's Step 4.0 handler answers on the next turn boundary.
 
-   For the spawn block (`WORKER_MODEL` resolution + Task: spawn template), read `skills/implement/templates/worker-spawn.md`.
+   For the spawn block (`WORKER_MODEL` resolution + Task: spawn template), read `skills/implement/templates/worker-spawn.md`. It carries two routes: the **default same-harness Claude worker**, and a **codex-routed worker** that dispatches implementation to Codex through the `agents/codex-worker.md` chaperone. The codex route resolves the worker model with the `implement` ceremony (`resolve_model_for_role worker implement`), the same as the default route. **Select the codex route only on explicit user or plan direction** — the user asked to route implementation workers to Codex, or the plan names Codex workers. It is never a silent default. Before dispatching it, confirm the effective worker model the chaperone resolves against that stated intent, and on a `degraded` return re-dispatch the task as a default-route worker (codex routing is a spend optimization, not a dependency).
 
 ### Step 4: Collect progress
 

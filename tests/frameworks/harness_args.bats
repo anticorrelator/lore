@@ -395,6 +395,51 @@ EOF
   [ "$go_out" = "opus" ]
 }
 
+@test "parity: resolve_model_for_role — ceremony binding beats role overlay" {
+  export LORE_FRAMEWORK=claude-code
+  write_settings <<EOF
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"researcher":"opus","default":"sonnet"},"ceremony_roles":{"spec":{"researcher":"haiku"}}},"opencode":{"args":[]},"codex":{"args":[]}}}
+EOF
+  go_out=$(go_helper resolve_model_for_role researcher spec)
+  bash_out=$(bash_helper "resolve_model_for_role researcher spec")
+  [ "$go_out" = "$bash_out" ]
+  [ "$go_out" = "haiku" ]
+}
+
+@test "parity: resolve_model_for_role — role-only ignores ceremony_roles" {
+  export LORE_FRAMEWORK=claude-code
+  write_settings <<EOF
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"researcher":"opus","default":"sonnet"},"ceremony_roles":{"spec":{"researcher":"haiku"}}},"opencode":{"args":[]},"codex":{"args":[]}}}
+EOF
+  go_out=$(go_helper resolve_model_for_role researcher)
+  bash_out=$(bash_helper "resolve_model_for_role researcher")
+  [ "$go_out" = "$bash_out" ]
+  [ "$go_out" = "opus" ]
+}
+
+@test "parity: resolve_model_for_role — unknown ceremony in query rejected on both sides" {
+  export LORE_FRAMEWORK=claude-code
+  go_status=0
+  go_out=$(go_helper resolve_model_for_role researcher bogus_ceremony) || go_status=$?
+  bash_status=0
+  bash_out=$(bash_helper "resolve_model_for_role researcher bogus_ceremony") || bash_status=$?
+  [ "$go_status" -ne 0 ]
+  [ "$bash_status" -ne 0 ]
+}
+
+@test "parity: resolve_model_for_role — unknown ceremony key stored rejected on both sides" {
+  export LORE_FRAMEWORK=claude-code
+  write_settings <<EOF
+{"version":1,"tui_launch_framework":"claude-code","capability_overrides":{},"harnesses":{"claude-code":{"args":[],"roles":{"researcher":"opus","default":"sonnet"},"ceremony_roles":{"deploy":{"researcher":"haiku"}}},"opencode":{"args":[]},"codex":{"args":[]}}}
+EOF
+  go_status=0
+  go_out=$(go_helper resolve_model_for_role researcher spec) || go_status=$?
+  bash_status=0
+  bash_out=$(bash_helper "resolve_model_for_role researcher spec") || bash_status=$?
+  [ "$go_status" -ne 0 ]
+  [ "$bash_status" -ne 0 ]
+}
+
 # ============================================================
 # Bash-only smoke tests (don't depend on Go)
 # Cover the bash side's load_harness_args resolution ladder so the

@@ -14,23 +14,29 @@
 #   2. schema.harnesses.properties keyset == capabilities.json frameworks keyset
 #   3. schema.$defs.role_id.enum == roles.json roles[].id list
 #   4. schema.$defs.capability_id.enum == capabilities.json capabilities keyset
+#   5. schema.$defs.ceremony_id.enum == ceremonies.json ceremonies[].id list
+#   6. schema.$defs.ceremony_roles.properties keyset == ceremonies.json ids
 #
 # Falsifier (worker-1 verified manually): adding a fake framework
 # "phantom-harness" to capabilities.json without updating the schema causes
 # tests 1 and 2 to fail. Adding a fake role "spectator" to roles.json
 # without updating $defs/role_id causes test 3 to fail. Removing a
 # capability from capabilities.json `capabilities` map without updating
-# $defs/capability_id causes test 4 to fail.
+# $defs/capability_id causes test 4 to fail. Adding a fake ceremony to
+# ceremonies.json without updating $defs/ceremony_id + $defs/ceremony_roles
+# causes tests 5 and 6 to fail.
 
 REPO_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/../.." && pwd)"
 SCHEMA="$REPO_DIR/adapters/settings.schema.json"
 CAPS="$REPO_DIR/adapters/capabilities.json"
 ROLES="$REPO_DIR/adapters/roles.json"
+CEREMONIES="$REPO_DIR/adapters/ceremonies.json"
 
 setup() {
   [ -f "$SCHEMA" ] || skip "adapters/settings.schema.json missing"
   [ -f "$CAPS" ]   || skip "adapters/capabilities.json missing"
   [ -f "$ROLES" ]  || skip "adapters/roles.json missing"
+  [ -f "$CEREMONIES" ] || skip "adapters/ceremonies.json missing"
   command -v python3 >/dev/null 2>&1 || skip "python3 unavailable"
 }
 
@@ -68,6 +74,36 @@ with open(os.environ["ROLES"]) as f:
     d = json.load(f)
 for r in d.get("roles", []):
     print(r["id"])
+PY
+}
+
+ceremonies_from_ceremonies() {
+  CEREMONIES="$CEREMONIES" python3 - <<'PY'
+import json, os
+with open(os.environ["CEREMONIES"]) as f:
+    d = json.load(f)
+for c in d.get("ceremonies", []):
+    print(c["id"])
+PY
+}
+
+schema_ceremony_id_enum() {
+  SCHEMA="$SCHEMA" python3 - <<'PY'
+import json, os
+with open(os.environ["SCHEMA"]) as f:
+    s = json.load(f)
+for v in s["$defs"]["ceremony_id"]["enum"]:
+    print(v)
+PY
+}
+
+schema_ceremony_roles_keyset() {
+  SCHEMA="$SCHEMA" python3 - <<'PY'
+import json, os
+with open(os.environ["SCHEMA"]) as f:
+    s = json.load(f)
+for k in s["$defs"]["ceremony_roles"]["properties"].keys():
+    print(k)
 PY
 }
 
@@ -151,6 +187,22 @@ PY
   diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$caps_set")
 }
 
+@test "schema \$defs/ceremony_id enum matches ceremonies.json ceremonies[].id" {
+  schema_set=$(schema_ceremony_id_enum | sorted_lines)
+  cer_set=$(ceremonies_from_ceremonies | sorted_lines)
+  [ -n "$schema_set" ]
+  [ -n "$cer_set" ]
+  diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$cer_set")
+}
+
+@test "schema \$defs/ceremony_roles properties keyset matches ceremonies.json ceremonies[].id" {
+  schema_set=$(schema_ceremony_roles_keyset | sorted_lines)
+  cer_set=$(ceremonies_from_ceremonies | sorted_lines)
+  [ -n "$schema_set" ]
+  [ -n "$cer_set" ]
+  diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$cer_set")
+}
+
 @test "schema capability_overrides properties keyset matches capabilities.json capabilities keyset" {
   schema_set=$(SCHEMA="$SCHEMA" python3 - <<'PY' | sorted_lines
 import json, os
@@ -166,7 +218,7 @@ PY
   diff <(printf '%s\n' "$schema_set") <(printf '%s\n' "$caps_set")
 }
 
-@test "harness_block requires args + permits enabled, roles, ceremonies + rejects unknown keys" {
+@test "harness_block requires args + permits enabled, roles, ceremony_roles, ceremonies + rejects unknown keys" {
   SCHEMA="$SCHEMA" python3 - <<'PY'
 import json, os
 with open(os.environ["SCHEMA"]) as f:
@@ -176,8 +228,8 @@ assert hb["additionalProperties"] is False, "harness_block must close additional
 assert "args" in hb["required"], "harness_block must require args"
 props = set(hb["properties"].keys())
 # `enabled` is the per-harness toggle (default-on; absence ≡ enabled).
-# `roles` and `ceremonies` are optional overlay maps.
-assert props == {"args", "enabled", "roles", "ceremonies"}, f"unexpected harness_block props: {props}"
+# `roles`, `ceremony_roles`, and `ceremonies` are optional overlay maps.
+assert props == {"args", "enabled", "roles", "ceremony_roles", "ceremonies"}, f"unexpected harness_block props: {props}"
 # enabled must be a plain boolean (no enum, no minLength) so absence ≡ enabled
 # is a clean default-on semantic.
 en = hb["properties"]["enabled"]
@@ -435,6 +487,101 @@ try:
 except jsonschema.ValidationError:
     sys.exit(0)
 sys.exit("schema FAILED to reject unknown role_id in overlay")
+PY
+}
+
+@test "schema accepts ceremony_roles overlay with valid ceremony + role bindings" {
+  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
+  SCHEMA="$SCHEMA" python3 - <<'PY'
+import json, os
+import jsonschema
+with open(os.environ["SCHEMA"]) as f:
+    schema = json.load(f)
+instance = {
+    "version": 1,
+    "tui_launch_framework": "claude-code",
+    "harnesses": {
+        "claude-code": {"args": [], "ceremony_roles": {
+            "spec": {"researcher": "haiku", "lead": "fable"},
+            "implement": {"lead": "opus"}
+        }},
+        "opencode": {"args": []},
+        "codex": {"args": []}
+    }
+}
+jsonschema.validate(instance, schema)
+PY
+}
+
+@test "schema rejects unknown ceremony key in ceremony_roles" {
+  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
+  SCHEMA="$SCHEMA" python3 - <<'PY'
+import json, os, sys
+import jsonschema
+with open(os.environ["SCHEMA"]) as f:
+    schema = json.load(f)
+instance = {
+    "version": 1,
+    "tui_launch_framework": "claude-code",
+    "harnesses": {
+        "claude-code": {"args": [], "ceremony_roles": {"deploy": {"lead": "opus"}}},
+        "opencode": {"args": []},
+        "codex": {"args": []}
+    }
+}
+try:
+    jsonschema.validate(instance, schema)
+except jsonschema.ValidationError:
+    sys.exit(0)
+sys.exit("schema FAILED to reject unknown ceremony key in ceremony_roles")
+PY
+}
+
+@test "schema rejects unknown role_id inside a ceremony map" {
+  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
+  SCHEMA="$SCHEMA" python3 - <<'PY'
+import json, os, sys
+import jsonschema
+with open(os.environ["SCHEMA"]) as f:
+    schema = json.load(f)
+instance = {
+    "version": 1,
+    "tui_launch_framework": "claude-code",
+    "harnesses": {
+        "claude-code": {"args": [], "ceremony_roles": {"spec": {"spectator": "opus"}}},
+        "opencode": {"args": []},
+        "codex": {"args": []}
+    }
+}
+try:
+    jsonschema.validate(instance, schema)
+except jsonschema.ValidationError:
+    sys.exit(0)
+sys.exit("schema FAILED to reject unknown role_id inside ceremony map")
+PY
+}
+
+@test "schema rejects empty-string role_value inside a ceremony map" {
+  python3 -c "import jsonschema" 2>/dev/null || skip "python3 jsonschema package not installed"
+  SCHEMA="$SCHEMA" python3 - <<'PY'
+import json, os, sys
+import jsonschema
+with open(os.environ["SCHEMA"]) as f:
+    schema = json.load(f)
+instance = {
+    "version": 1,
+    "tui_launch_framework": "claude-code",
+    "harnesses": {
+        "claude-code": {"args": [], "ceremony_roles": {"spec": {"lead": ""}}},
+        "opencode": {"args": []},
+        "codex": {"args": []}
+    }
+}
+try:
+    jsonschema.validate(instance, schema)
+except jsonschema.ValidationError:
+    sys.exit(0)
+sys.exit("schema FAILED to reject empty-string ceremony role value")
 PY
 }
 

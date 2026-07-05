@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "description": "Closed ceremony registry for lore. resolve_model_for_role(<role>, <ceremony>) consults harnesses.<active>.ceremony_roles.<ceremony>.<role> ahead of the role overlay when a ceremony argument is passed; the ceremony id MUST be one of the ids below. Ceremony identity is call-site-static (each entry's call_sites pass the id as a constant). Adding a ceremony requires updating this file, adapters/settings.schema.json ($defs/ceremony_id enum and $defs/ceremony_roles properties), scripts/lib.sh resolve_model_for_role, tui/internal/config/framework.go, and tests/frameworks/{roles,settings_schema_keyset_parity}.bats.",
+  "ceremonies": [
+    {
+      "id": "spec",
+      "description": "The /spec investigation-and-planning protocol: the spec-lead and its researcher fanout. Distinct from the /spec skill name — batch-spec.sh participates in this ceremony without being the skill.",
+      "call_sites": [
+        "skills/spec/SKILL.md",
+        "scripts/batch-spec.sh"
+      ]
+    },
+    {
+      "id": "implement",
+      "description": "The /implement execution protocol: the implement-lead and its worker fanout that claims tasks and emits Tier 2 evidence.",
+      "call_sites": [
+        "skills/implement/templates/worker-spawn.md",
+        "scripts/batch-implement.sh"
+      ]
+    }
+  ]
+}

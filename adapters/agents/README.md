@@ -33,7 +33,7 @@ adapter language split).
 | `collect_result`           | spawn_handle                                              | result_envelope (full text + structured report) or error                                 |
 | `shutdown`                 | spawn_handle, optional approve flag                       | `shut_down` / `error`                                                                    |
 | `completion_enforcement`   | (no inputs — read-only capability query)                  | one of: `native_blocking` / `lead_validator` / `self_attestation` / `unavailable`        |
-| `resolve_model_for_role`   | role                                                      | model id string (delegated to lib.sh / config.go helper) or error                        |
+| `resolve_model_for_role`   | role, optional ceremony                                   | model id string (delegated to lib.sh / config.go helper) or error                        |
 
 `spawn_handle` is opaque: a Claude Code adapter may use the harness's
 internal subagent UUID; an OpenCode adapter may use a plugin runtime
@@ -83,11 +83,16 @@ treating it as a fatal error.
 `resolve_model_for_role` is **the** entry point for model selection.
 Every adapter operation that spawns a process MUST go through it:
 
-1. The skill or script calls `resolve_model_for_role <role>`
+1. The skill or script calls `resolve_model_for_role <role> [<ceremony>]`
    (bash → `scripts/lib.sh`, Go → `tui/internal/config/framework.go`).
+   The optional ceremony id comes from the closed set in
+   `adapters/ceremonies.json` (`spec`, `implement`) and is passed as a
+   call-site constant (e.g. the `/spec` researcher fanout passes `spec`).
 2. The resolver returns a model id that respects the precedence
    (env override → per-repo `.lore.config` → user `settings.json`
-   `harnesses.<active>.roles.<role>` → `harnesses.<active>.roles.default`).
+   `harnesses.<active>.ceremony_roles.<ceremony>.<role>` (only when a
+   ceremony is passed) → `harnesses.<active>.roles.<role>` →
+   `harnesses.<active>.roles.default`).
 3. The adapter translates the resolved id into the harness-native
    spawn flag:
    - Claude Code: `--model <id>` argument.
@@ -97,7 +102,11 @@ Every adapter operation that spawns a process MUST go through it:
    - Codex: model selector at session start (single-provider; bare
      model id only). Codex bindings may append a reasoning-effort suffix
      such as `gpt-5.5-high`; the adapter splits this into
-     `model=gpt-5.5 reasoning_effort=high` in the spawn directive.
+     `model=gpt-5.5 reasoning_effort=high` in the spawn directive. The
+     codex adapter also exposes this split as a standalone
+     `split_model_variant <binding>` subcommand (a pure transform with no
+     active-framework guard) so the codex-worker chaperone reuses one
+     split implementation instead of copying the suffix table.
 4. If `validate_role_model_binding` rejects the resolved binding
    (e.g. multi-provider syntax on a single-shape harness), the adapter
    surfaces the error to the caller — no silent fallback to the

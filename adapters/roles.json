@@ -16,6 +16,7 @@
       "description": "Task-iterating implementation agent that claims tasks from a queue and emits Tier 2 evidence anchored to file:line ranges.",
       "call_sites": [
         "agents/worker.md",
+        "agents/codex-worker.md",
         "skills/implement/SKILL.md",
         "scripts/batch-implement.sh"
       ]

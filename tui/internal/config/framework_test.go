@@ -604,6 +604,158 @@ func TestResolveModelForRole_RejectsEmpty(t *testing.T) {
 	}
 }
 
+// writeCeremonyRoles stages a `ceremony_roles` block on the given framework in
+// the isolated settings.json. Call after setupFakeLoreData; existing `roles`
+// bindings are preserved. Mirrors the bash ceremony-layer fixtures in
+// tests/frameworks/roles.bats.
+func writeCeremonyRoles(t *testing.T, framework string, ceremonyRoles map[string]map[string]string) {
+	t.Helper()
+	dataDir := os.Getenv("LORE_DATA_DIR")
+	if dataDir == "" {
+		t.Fatal("LORE_DATA_DIR not set; call setupFakeLoreData first")
+	}
+	path := filepath.Join(dataDir, "config", "settings.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	harnesses, _ := out["harnesses"].(map[string]any)
+	if harnesses == nil {
+		harnesses = map[string]any{}
+		out["harnesses"] = harnesses
+	}
+	block, _ := harnesses[framework].(map[string]any)
+	if block == nil {
+		block = map[string]any{}
+		harnesses[framework] = block
+	}
+	block["ceremony_roles"] = ceremonyRoles
+	data, _ := json.MarshalIndent(out, "", "  ")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveModelForRoleInCeremony_CeremonyBindingBeatsRoleOverlay(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"researcher": "opus"})
+	writeCeremonyRoles(t, "claude-code", map[string]map[string]string{
+		"spec": {"researcher": "haiku"},
+	})
+	got, err := ResolveModelForRoleInCeremony("researcher", "spec")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
+	}
+	if got != "haiku" {
+		t.Errorf("got %q, want haiku (ceremony binding should beat role overlay)", got)
+	}
+}
+
+func TestResolveModelForRoleInCeremony_FallsThroughWhenCeremonyKeyAbsent(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"researcher": "opus"})
+	// A present-but-non-matching ceremony (implement) must fall through to the
+	// role overlay for a spec query.
+	writeCeremonyRoles(t, "claude-code", map[string]map[string]string{
+		"implement": {"researcher": "haiku"},
+	})
+	got, err := ResolveModelForRoleInCeremony("researcher", "spec")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
+	}
+	if got != "opus" {
+		t.Errorf("got %q, want opus (should fall through to role overlay)", got)
+	}
+}
+
+func TestResolveModelForRoleInCeremony_FallsThroughWhenRoleAbsentInCeremonyMap(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"researcher": "opus", "lead": "sonnet"})
+	writeCeremonyRoles(t, "claude-code", map[string]map[string]string{
+		"spec": {"lead": "fable"},
+	})
+	got, err := ResolveModelForRoleInCeremony("researcher", "spec")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
+	}
+	if got != "opus" {
+		t.Errorf("got %q, want opus (role absent in ceremony map should fall through)", got)
+	}
+}
+
+func TestResolveModelForRole_RoleOnlyIgnoresCeremonyRoles(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"researcher": "opus"})
+	writeCeremonyRoles(t, "claude-code", map[string]map[string]string{
+		"spec": {"researcher": "haiku"},
+	})
+	// Role-only resolution must be byte-identical to pre-ceremony behavior.
+	got, err := ResolveModelForRole("researcher")
+	if err != nil {
+		t.Fatalf("ResolveModelForRole: %v", err)
+	}
+	if got != "opus" {
+		t.Errorf("got %q, want opus (role-only must ignore ceremony_roles)", got)
+	}
+}
+
+func TestResolveModelForRoleInCeremony_EnvBeatsCeremony(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"researcher": "opus"})
+	writeCeremonyRoles(t, "claude-code", map[string]map[string]string{
+		"spec": {"researcher": "haiku"},
+	})
+	t.Setenv("LORE_MODEL_RESEARCHER", "sonnet")
+	got, err := ResolveModelForRoleInCeremony("researcher", "spec")
+	if err != nil {
+		t.Fatalf("ResolveModelForRoleInCeremony: %v", err)
+	}
+	if got != "sonnet" {
+		t.Errorf("got %q, want sonnet (env override should beat ceremony binding)", got)
+	}
+}
+
+func TestResolveModelForRoleInCeremony_RejectsUnknownCeremonyInQuery(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"researcher": "opus"})
+	_, err := ResolveModelForRoleInCeremony("researcher", "bogus_ceremony")
+	if err == nil {
+		t.Fatal("expected error for unknown ceremony in query, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown ceremony") {
+		t.Errorf("error = %v, want substring %q", err, "unknown ceremony")
+	}
+}
+
+func TestResolveModelForRoleInCeremony_RejectsUnknownCeremonyKeyStored(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"researcher": "opus"})
+	writeCeremonyRoles(t, "claude-code", map[string]map[string]string{
+		"deploy": {"researcher": "haiku"},
+	})
+	_, err := ResolveModelForRoleInCeremony("researcher", "spec")
+	if err == nil {
+		t.Fatal("expected error for unknown ceremony key stored under ceremony_roles, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown ceremony") || !strings.Contains(err.Error(), "deploy") {
+		t.Errorf("error = %v, want substrings %q and %q", err, "unknown ceremony", "deploy")
+	}
+}
+
+func TestResolveModelForRoleInCeremony_RejectsUnknownRoleKeyInCeremonyMap(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", map[string]string{"researcher": "opus"})
+	writeCeremonyRoles(t, "claude-code", map[string]map[string]string{
+		"spec": {"spectator": "haiku"},
+	})
+	_, err := ResolveModelForRoleInCeremony("researcher", "spec")
+	if err == nil {
+		t.Fatal("expected error for unknown role key inside a ceremony map, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown role") || !strings.Contains(err.Error(), "spectator") {
+		t.Errorf("error = %v, want substrings %q and %q", err, "unknown role", "spectator")
+	}
+	if !strings.Contains(err.Error(), "roles.json") {
+		t.Errorf("error = %v, want substring %q", err, "roles.json")
+	}
+}
+
 func TestHarnessDisplayName(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", nil)
 

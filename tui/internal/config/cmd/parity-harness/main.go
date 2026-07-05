@@ -19,7 +19,9 @@
 //	resolve_harness_install_path <kind>
 //	                                — print absolute path or "unsupported"
 //	resolve_agent_template <name>   — print absolute path
-//	resolve_model_for_role <role>   — print model id (T10-pending)
+//	resolve_model_for_role <role> [<ceremony>]
+//	                                — print model id; optional ceremony id
+//	                                  consults the ceremony overlay
 //	load_harness_args [framework]   — print args, one per line (T10-pending)
 //	migrate_claude_args_to_harness_args
 //	                                — print "ok" on success (T10-pending)
@@ -112,11 +114,18 @@ func main() {
 		// Match bash side: silent on success.
 
 	case "resolve_model_for_role":
-		if len(args) != 1 {
-			fmt.Fprintln(os.Stderr, "Error: resolve_model_for_role requires <role>")
+		// Optional second positional <ceremony> mirrors the bash
+		// resolve_model_for_role <role> [<ceremony>] contract; an omitted or
+		// empty ceremony means role-only resolution (ceremony layer skipped).
+		if len(args) < 1 || len(args) > 2 {
+			fmt.Fprintln(os.Stderr, "Error: resolve_model_for_role requires <role> [<ceremony>]")
 			os.Exit(1)
 		}
-		out, err := config.ResolveModelForRole(args[0])
+		ceremony := ""
+		if len(args) == 2 {
+			ceremony = args[1]
+		}
+		out, err := config.ResolveModelForRoleInCeremony(args[0], ceremony)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			os.Exit(1)

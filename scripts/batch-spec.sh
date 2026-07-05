@@ -106,8 +106,8 @@ if [[ -n "$MODEL" ]]; then
   JUDGE_MODEL_OVERRIDE="$MODEL"
 fi
 if [[ -z "$MODEL" ]]; then
-  if ! MODEL=$(resolve_model_for_role lead 2>/dev/null) || [[ -z "$MODEL" ]]; then
-    die "No model binding for role 'lead'. Pass --model <model> or set harnesses.<active>.roles.lead in ~/.lore/config/settings.json."
+  if ! MODEL=$(resolve_model_for_role lead spec 2>/dev/null) || [[ -z "$MODEL" ]]; then
+    die "No model binding for role 'lead'. Pass --model <model> or set harnesses.<active>.ceremony_roles.spec.lead / harnesses.<active>.roles.lead in ~/.lore/config/settings.json."
   fi
 fi
 

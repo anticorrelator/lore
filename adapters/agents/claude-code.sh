@@ -197,15 +197,17 @@ cmd_completion_enforcement() {
 # Pass-through to lib.sh::resolve_model_for_role for callers that prefer
 # a unified entry point (the orchestration adapter binary) over invoking
 # the helper directly. Mirrors the contract row in adapters/agents/README.md
-# §"Operation Surface".
+# §"Operation Surface". The optional second argument is a ceremony id
+# (adapters/ceremonies.json); when passed it selects the ceremony-scoped
+# binding ahead of the role overlay, when omitted resolution is role-only.
 cmd_resolve_model_for_role() {
   require_claude_code
-  local role="${1:-}"
+  local role="${1:-}" ceremony="${2:-}"
   if [[ -z "$role" ]]; then
     echo "Error: resolve_model_for_role requires <role>" >&2
     return 1
   fi
-  resolve_model_for_role "$role"
+  resolve_model_for_role "$role" "$ceremony"
 }
 
 # --- cmd_system_prompt_flag ---
@@ -296,8 +298,10 @@ Subcommands (mirroring adapters/agents/README.md §Operation Surface):
   shutdown <handle> [approve]
                             Emit SendMessage type=shutdown_request directive.
   completion_enforcement    Print resolved enforcement mode.
-  resolve_model_for_role <role>
-                            Print resolved model id.
+  resolve_model_for_role <role> [ceremony]
+                            Print resolved model id. Optional ceremony id
+                            (spec|implement) selects the ceremony-scoped
+                            binding ahead of the role overlay.
   system_prompt_flag        Print harness-native --append-system-prompt
                             spelling (or 'unsupported'). T11/T44 TUI-launch
                             flag-injection contract.

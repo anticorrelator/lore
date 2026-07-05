@@ -117,6 +117,22 @@
       }
     },
 
+    "ceremony_id": {
+      "type": "string",
+      "enum": ["spec", "implement"],
+      "description": "Closed ceremony registry. MUST stay in lockstep with adapters/ceremonies.json `ceremonies[].id` — drift is caught by tests/frameworks/settings_schema_keyset_parity.bats. Adding a ceremony requires updating ceremonies.json AND this enum AND $defs/ceremony_roles properties AND scripts/lib.sh resolve_model_for_role AND tui/internal/config/framework.go."
+    },
+
+    "ceremony_roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-harness ceremony-scoped role -> model bindings. Outer keyset is closed against $defs/ceremony_id (lockstep with adapters/ceremonies.json). Each value is a roles_map_overlay resolved ahead of the harness role overlay when resolve_model_for_role is called with a ceremony argument; without a ceremony argument this key is not consulted. Absent ceremony key or absent role inside it falls through to the role overlay; empty-string values are rejected by role_value the same way the role overlay rejects them.",
+      "properties": {
+        "spec":      {"$ref": "#/$defs/roles_map_overlay"},
+        "implement": {"$ref": "#/$defs/roles_map_overlay"}
+      }
+    },
+
     "ceremonies_map": {
       "type": "object",
       "description": "Skill -> advisor list. Property keys are kebab-case skill ids; values are arrays of kebab-case advisor ids. Empty array is valid and means \"run with no advisors\". Absent key means no ceremony configured for this harness. Keyset is open at the schema layer; closed-set rejection against the skills registry lives in the loaders and doctor.",
@@ -133,7 +149,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["args"],
-      "description": "Per-harness configuration block. `args` is required (every harness has a CLI arg list, possibly empty). New settings should include `roles` and `ceremonies` here because agent defaults and ceremony skills vary by harness. Absent `enabled` is default-on; explicit `false` disables this harness's integration.",
+      "description": "Per-harness configuration block. `args` is required (every harness has a CLI arg list, possibly empty). New settings should include `roles` and `ceremonies` here because agent defaults and ceremony skills vary by harness. `ceremony_roles` is the optional ceremony-scoped role overlay consulted ahead of `roles` when resolve_model_for_role is passed a ceremony. Absent `enabled` is default-on; explicit `false` disables this harness's integration.",
       "properties": {
         "args": {
           "type": "array",
@@ -144,8 +160,9 @@
           "type": "boolean",
           "description": "Per-harness integration toggle. When false, scripts/harness-toggle/disable.sh has removed this harness's skill/agent symlinks and cleared its instruction-file lore region. Absent = enabled. Mutated only via `lore harness {enable,disable}`; direct settings.json patches that bypass the toggle scripts are rejected by the unified loaders to keep symlink/instruction-file state in sync with the flag."
         },
-        "roles":      {"$ref": "#/$defs/roles_map_overlay"},
-        "ceremonies": {"$ref": "#/$defs/ceremonies_map"}
+        "roles":          {"$ref": "#/$defs/roles_map_overlay"},
+        "ceremony_roles": {"$ref": "#/$defs/ceremony_roles"},
+        "ceremonies":     {"$ref": "#/$defs/ceremonies_map"}
       }
     },
 

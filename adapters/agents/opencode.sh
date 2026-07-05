@@ -219,15 +219,17 @@ cmd_completion_enforcement() {
 # Pass-through to lib.sh::resolve_model_for_role for callers that prefer
 # the unified adapter binary over the helper directly. Output is the
 # raw binding (possibly `provider/model`); callers that need the split
-# form should invoke `spawn` instead.
+# form should invoke `spawn` instead. The optional second argument is a
+# ceremony id (adapters/ceremonies.json); when passed it selects the
+# ceremony-scoped binding ahead of the role overlay.
 cmd_resolve_model_for_role() {
   require_opencode
-  local role="${1:-}"
+  local role="${1:-}" ceremony="${2:-}"
   if [[ -z "$role" ]]; then
     echo "Error: resolve_model_for_role requires <role>" >&2
     return 1
   fi
-  resolve_model_for_role "$role"
+  resolve_model_for_role "$role" "$ceremony"
 }
 
 # --- cmd_system_prompt_flag ---
@@ -320,9 +322,11 @@ Subcommands (mirroring adapters/agents/README.md §Operation Surface):
                             directive (lead-mediated termination).
   completion_enforcement    Print resolved enforcement mode
                             (lead_validator on opencode today).
-  resolve_model_for_role <role>
+  resolve_model_for_role <role> [ceremony]
                             Print resolved role binding (raw, possibly
-                            'provider/model' form).
+                            'provider/model' form). Optional ceremony id
+                            (spec|implement) selects the ceremony-scoped
+                            binding ahead of the role overlay.
   system_prompt_flag        Returns 'unsupported' (opencode has no
                             --append-system-prompt equivalent).
   settings_override_flag    Returns 'unsupported' (opencode has no

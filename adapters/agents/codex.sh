@@ -227,15 +227,32 @@ cmd_completion_enforcement() {
 
 # --- cmd_resolve_model_for_role ---
 # Pass-through. Codex bindings are bare model ids; callers don't need
-# the split form opencode emits.
+# the split form opencode emits. The optional second argument is a
+# ceremony id (adapters/ceremonies.json); when passed it selects the
+# ceremony-scoped binding ahead of the role overlay.
 cmd_resolve_model_for_role() {
   require_codex
-  local role="${1:-}"
+  local role="${1:-}" ceremony="${2:-}"
   if [[ -z "$role" ]]; then
     echo "Error: resolve_model_for_role requires <role>" >&2
     return 1
   fi
-  resolve_model_for_role "$role"
+  resolve_model_for_role "$role" "$ceremony"
+}
+
+# --- cmd_split_model_variant ---
+# Expose split_codex_model_variant as a subcommand so the codex-worker
+# chaperone reuses one effort-suffix split rather than copying the suffix
+# table. Pure string transform with no active-framework guard — a caller
+# can split a binding without setting LORE_FRAMEWORK=codex.
+# Output: `model=<m>` or `model=<m> reasoning_effort=<effort>`.
+cmd_split_model_variant() {
+  local binding="${1:-}"
+  if [[ -z "$binding" ]]; then
+    echo "Error: split_model_variant requires <binding>" >&2
+    return 1
+  fi
+  split_codex_model_variant "$binding"
 }
 
 # --- cmd_system_prompt_flag ---
@@ -306,6 +323,7 @@ case "$cmd" in
   shutdown)                 shift; cmd_shutdown                 "$@" ;;
   completion_enforcement)   shift; cmd_completion_enforcement   "$@" ;;
   resolve_model_for_role)   shift; cmd_resolve_model_for_role   "$@" ;;
+  split_model_variant)      shift; cmd_split_model_variant      "$@" ;;
   system_prompt_flag)       shift; cmd_system_prompt_flag       "$@" ;;
   settings_override_flag)   shift; cmd_settings_override_flag   "$@" ;;
   smoke|--smoke)            shift; cmd_smoke                    "$@" ;;
@@ -328,8 +346,14 @@ Subcommands (mirroring adapters/agents/README.md §Operation Surface):
                             directive (lead-mediated termination).
   completion_enforcement    Print resolved enforcement mode
                             (lead_validator on codex today).
-  resolve_model_for_role <role>
-                            Print resolved bare model id.
+  resolve_model_for_role <role> [ceremony]
+                            Print resolved bare model id. Optional ceremony
+                            id (spec|implement) selects the ceremony-scoped
+                            binding ahead of the role overlay.
+  split_model_variant <binding>
+                            Split a codex binding into 'model=<m>' or
+                            'model=<m> reasoning_effort=<effort>' (reuses the
+                            adapter's effort-suffix split; no framework guard).
   system_prompt_flag        Returns 'unsupported' (codex has no
                             --append-system-prompt equivalent; system
                             prompt is statically configured).
@@ -344,7 +368,7 @@ EOF
     [[ -z "$cmd" ]] && exit 1 || exit 0
     ;;
   *)
-    echo "Error: unknown subcommand '$cmd' (allowed: spawn, wait, send_message, collect_result, shutdown, completion_enforcement, resolve_model_for_role, system_prompt_flag, settings_override_flag, smoke)" >&2
+    echo "Error: unknown subcommand '$cmd' (allowed: spawn, wait, send_message, collect_result, shutdown, completion_enforcement, resolve_model_for_role, split_model_variant, system_prompt_flag, settings_override_flag, smoke)" >&2
     exit 1
     ;;
 esac

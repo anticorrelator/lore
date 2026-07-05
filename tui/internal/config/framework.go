@@ -741,36 +741,95 @@ func loadRoleIDs() (map[string]struct{}, error) {
 	return out, nil
 }
 
-// ResolveModelForRole mirrors scripts/lib.sh resolve_model_for_role. Returns
-// the model id for a role on the active framework. Validates against the
-// closed role set in adapters/roles.json; rejects unknown roles with an
-// error.
+// ceremoniesFile is the slice of adapters/ceremonies.json the resolver needs to
+// validate ceremony ids against the closed set. Mirrors rolesFile.
+type ceremoniesFile struct {
+	Ceremonies []struct {
+		ID string `json:"id"`
+	} `json:"ceremonies"`
+}
+
+// loadCeremonyIDs reads the closed ceremony registry, mirroring loadRoleIDs
+// against adapters/ceremonies.json (the bash side reads the same file at
+// scripts/lib.sh:1056). Returns an error (soft-fail signal to callers) when the
+// file is absent or unparseable, matching the bash guard that skips ceremony
+// validation when the registry file is missing.
+func loadCeremonyIDs() (map[string]struct{}, error) {
+	repo, err := loreRepoDir()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(repo, "adapters", "ceremonies.json"))
+	if err != nil {
+		return nil, err
+	}
+	var c ceremoniesFile
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, err
+	}
+	out := map[string]struct{}{}
+	for _, ceremony := range c.Ceremonies {
+		out[ceremony.ID] = struct{}{}
+	}
+	return out, nil
+}
+
+// ResolveModelForRole mirrors scripts/lib.sh resolve_model_for_role for the
+// role-only call shape. Delegates to ResolveModelForRoleInCeremony with an
+// empty ceremony, which skips the ceremony layer entirely so resolution is
+// byte-identical to the pre-ceremony behavior (bash parity: a role-only
+// `resolve_model_for_role <role>` never consults `ceremony_roles`).
+func ResolveModelForRole(role string) (string, error) {
+	return ResolveModelForRoleInCeremony(role, "")
+}
+
+// ResolveModelForRoleInCeremony mirrors scripts/lib.sh resolve_model_for_role
+// (scripts/lib.sh:1050-1208) with its optional ceremony argument. Returns the
+// model id for a role on the active framework, inserting a ceremony-scoped
+// overlay ahead of the role overlay when a non-empty ceremony id is supplied.
 //
-// Resolution order (mirrors the bash side byte-for-byte; D3b overlay
-// inserted between env+per-repo and the top-level user config):
+// The ceremony id MUST be one of the closed set in adapters/ceremonies.json
+// (spec, implement). An unknown ceremony — passed in the query, or stored as a
+// key under `harnesses.<active>.ceremony_roles` — is rejected with an error
+// rather than routed to a default (feedback_dont_reintroduce_defaults). A role
+// key stored inside a ceremony map that is not in adapters/roles.json is the
+// same error class as the role-overlay guard below.
+//
+// Resolution order (byte-for-byte with the bash side, scripts/lib.sh:1039-1048):
 //  1. Env var LORE_MODEL_<ROLE_UPPER> (e.g., LORE_MODEL_LEAD=opus).
 //  2. Per-repo .lore.config `model_for_<role>=<model>` (walk-up from cwd).
-//  3. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay
-//     — applies to the active harness only).
-//  4. Unified `.harnesses.<active>.roles.default` (overlay's own default).
+//  3. Unified settings.json `.harnesses.<active>.ceremony_roles.<ceremony>.<role>`
+//     — only consulted when a ceremony id is passed; an absent binding falls
+//     through (ABSENT and EXPLICIT-empty both fall through, matching the bash
+//     `. // empty` filter).
+//  4. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay).
+//  5. Unified `.harnesses.<active>.roles.default` (overlay's own default).
 //
-// Closed-set rejection applies identically to the overlay layer and the
-// top-level layer: an unknown role id stored under
-// `harnesses.<active>.roles` is the same error class as an unknown role in
-// the query (bash D3b parity per scripts/lib.sh:964-985). Errors when no
-// binding resolves at any level OR when role is not in the closed set in
-// adapters/roles.json.
-func ResolveModelForRole(role string) (string, error) {
+// When ceremony == "" the ceremony layer (both its upfront query validation and
+// the overlay lookup) is skipped entirely.
+func ResolveModelForRoleInCeremony(role, ceremony string) (string, error) {
 	if role == "" {
 		return "", fmt.Errorf("resolve_model_for_role requires a role name")
 	}
 
-	// Closed-set validation. Soft-fails when adapters/roles.json is unreadable
-	// (matches bash behavior when jq is unavailable / file missing).
+	// Closed-set validation of the role query. Soft-fails when
+	// adapters/roles.json is unreadable (matches bash behavior when jq is
+	// unavailable / file missing).
 	validRoles, validRolesErr := loadRoleIDs()
 	if validRolesErr == nil {
 		if _, ok := validRoles[role]; !ok {
 			return "", fmt.Errorf("unknown role %q (not in adapters/roles.json)", role)
+		}
+	}
+
+	// Closed-set validation of the ceremony query, upfront (before the env
+	// layer) so an unknown ceremony never resolves regardless of an env
+	// override — mirrors the bash upfront guard at scripts/lib.sh:1068-1077.
+	// Soft-fails when adapters/ceremonies.json is unreadable.
+	validCeremonies, validCeremoniesErr := loadCeremonyIDs()
+	if ceremony != "" && validCeremoniesErr == nil {
+		if _, ok := validCeremonies[ceremony]; !ok {
+			return "", fmt.Errorf("unknown ceremony %q (not in adapters/ceremonies.json)", ceremony)
 		}
 	}
 
@@ -785,36 +844,58 @@ func ResolveModelForRole(role string) (string, error) {
 		return v, nil
 	}
 
-	// Resolve active harness once for the overlay layer.
+	// Resolve active harness once for the overlay layers.
 	active, _ := ResolveActiveFramework()
 
-	// D3b closed-set rejection at the overlay layer: any unknown role id
+	// 3. Ceremony overlay `.harnesses.<active>.ceremony_roles.<ceremony>.<role>`.
+	// Consulted only when a ceremony id is passed, so role-only resolution
+	// stays byte-identical. Closed-set rejection mirrors the bash overlay guard
+	// (scripts/lib.sh:1110-1153): an unknown ceremony key or an unknown role key
+	// stored under ceremony_roles is a misconfiguration surfaced to the user,
+	// not a silently-skipped block.
+	if ceremony != "" && active != "" && validRolesErr == nil && validCeremoniesErr == nil {
+		raw, present, _ := SettingsGet("harnesses." + active + ".ceremony_roles")
+		if present {
+			var block map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(raw), &block); err == nil {
+				if bad, ok := firstUnknownKey(block, validCeremonies); ok {
+					return "", fmt.Errorf("unknown ceremony %q in harnesses.%s.ceremony_roles (not in adapters/ceremonies.json)", bad, active)
+				}
+				if bad, ok := firstUnknownRoleInCeremonyMaps(block, validRoles); ok {
+					return "", fmt.Errorf("unknown role %q in harnesses.%s.ceremony_roles (not in adapters/roles.json)", bad, active)
+				}
+			}
+		}
+		if v := readSettingsRoleString("harnesses." + active + ".ceremony_roles." + ceremony + "." + role); v != "" {
+			return v, nil
+		}
+	}
+
+	// D3b closed-set rejection at the role overlay layer: any unknown role id
 	// stored under `harnesses.<active>.roles` is rejected immediately, same
 	// error class as an unknown role in the *query* above. Without this guard
 	// a misconfigured overlay would silently never be consulted (per
-	// scripts/lib.sh:964-985).
+	// scripts/lib.sh:1155-1176).
 	if active != "" && validRolesErr == nil {
 		raw, present, _ := SettingsGet("harnesses." + active + ".roles")
 		if present {
-			var overlay map[string]any
+			var overlay map[string]json.RawMessage
 			if err := json.Unmarshal([]byte(raw), &overlay); err == nil {
-				for k := range overlay {
-					if _, ok := validRoles[k]; !ok {
-						return "", fmt.Errorf("unknown role %q in harnesses.%s.roles (not in adapters/roles.json)", k, active)
-					}
+				if bad, ok := firstUnknownKey(overlay, validRoles); ok {
+					return "", fmt.Errorf("unknown role %q in harnesses.%s.roles (not in adapters/roles.json)", bad, active)
 				}
 			}
 		}
 	}
 
-	// 3. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay).
+	// 4. Unified settings.json `.harnesses.<active>.roles.<role>` (D3b overlay).
 	if active != "" {
 		if v := readSettingsRoleString("harnesses." + active + ".roles." + role); v != "" {
 			return v, nil
 		}
 	}
 
-	// 4. Unified `.harnesses.<active>.roles.default`.
+	// 5. Unified `.harnesses.<active>.roles.default`.
 	if active != "" {
 		if v := readSettingsRoleString("harnesses." + active + ".roles.default"); v != "" {
 			return v, nil
@@ -822,6 +903,52 @@ func ResolveModelForRole(role string) (string, error) {
 	}
 
 	return "", fmt.Errorf("no model binding for role %q (no env var, no per-repo .lore.config, no harnesses.<active>.roles.%s or harnesses.<active>.roles.default in settings.json)", role, role)
+}
+
+// firstUnknownKey returns the lexicographically-first top-level key of block
+// that is not present in valid. ok is false when every key is valid. Sorting
+// makes selection deterministic across Go's unordered map iteration and mirrors
+// the bash guard's `(keys) - $valid | .[] | head -1` — jq's `keys` sorts, so
+// the offending key named is identical between the two implementations.
+func firstUnknownKey(block map[string]json.RawMessage, valid map[string]struct{}) (string, bool) {
+	var unknown []string
+	for k := range block {
+		if _, ok := valid[k]; !ok {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return "", false
+	}
+	sort.Strings(unknown)
+	return unknown[0], true
+}
+
+// firstUnknownRoleInCeremonyMaps returns the lexicographically-first role key
+// stored inside any ceremony map in block that is not in validRoles. Mirrors
+// the bash guard `[.[] | keys[]] - $valid | .[] | head -1` at
+// scripts/lib.sh:1134-1140. Selection is sorted for determinism; this names the
+// same key as bash whenever a single offending role exists (the contract the
+// tests exercise), the only case where multi-key ordering could observably
+// differ from bash's object-iteration order.
+func firstUnknownRoleInCeremonyMaps(block map[string]json.RawMessage, validRoles map[string]struct{}) (string, bool) {
+	var unknown []string
+	for _, rawMap := range block {
+		var roleMap map[string]json.RawMessage
+		if err := json.Unmarshal(rawMap, &roleMap); err != nil {
+			continue
+		}
+		for r := range roleMap {
+			if _, ok := validRoles[r]; !ok {
+				unknown = append(unknown, r)
+			}
+		}
+	}
+	if len(unknown) == 0 {
+		return "", false
+	}
+	sort.Strings(unknown)
+	return unknown[0], true
 }
 
 // readSettingsRoleString reads a string-valued role binding from the unified
