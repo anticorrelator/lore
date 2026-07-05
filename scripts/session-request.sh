@@ -9,6 +9,9 @@
 #   --slug <s>         Work-item slug the request targets (default: null / no work item).
 #   --target <name>    Instance name to address the request to (default: null / any instance).
 #   --initiator <i>    Who initiated the request: agent | human (default: human).
+#   --auto-close <b>   Override the TUI exit-ladder auto-close gate: true | false.
+#                      Omitted (default) defers to --initiator (agent auto-closes,
+#                      human holds open); true forces auto-close, false holds open.
 #   --requested-by <w> Who enqueued it (default: $LORE_SESSION_INSTANCE, else $USER).
 #   --context <t|file> Dispatch guidance handed to prompt composition. Value is read
 #                      from a file when it names one, else treated as literal text. A
@@ -35,6 +38,7 @@ TYPE=""
 SLUG=""
 TARGET=""
 INITIATOR="human"
+AUTO_CLOSE=""
 REQUESTED_BY=""
 CONTEXT=""
 KDIR_OVERRIDE=""
@@ -46,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     --slug) SLUG="$2"; shift 2 ;;
     --target) TARGET="$2"; shift 2 ;;
     --initiator) INITIATOR="$2"; shift 2 ;;
+    --auto-close) AUTO_CLOSE="$2"; shift 2 ;;
     --requested-by) REQUESTED_BY="$2"; shift 2 ;;
     --context) CONTEXT="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
@@ -53,7 +58,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--requested-by <who>] [--context <text|file>] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -79,6 +84,15 @@ esac
 case "$INITIATOR" in
   agent|human) ;;
   *) fail "invalid --initiator: '$INITIATOR' (must be one of agent, human)" ;;
+esac
+
+# auto_close is a nullable bool: absent (omit-when-empty) defers to the initiator
+# gate; true/false force the exit-ladder outcome. Emitted with --argjson so the
+# Go decoder receives a real JSON boolean, never a quoted string.
+case "$AUTO_CLOSE" in
+  "") AUTO_CLOSE_JSON="" ;;
+  true|false) AUTO_CLOSE_JSON="$AUTO_CLOSE" ;;
+  *) fail "invalid --auto-close: '$AUTO_CLOSE' (must be true or false)" ;;
 esac
 
 if [[ -z "$REQUESTED_BY" ]]; then
@@ -133,6 +147,12 @@ ROW="$(jq -n \
   --argjson attempts 0 \
   --argjson extra "$EXTRA_JSON" \
   '{request_id: $request_id, type: $type, slug: $slug, target_instance: $target, initiator: $initiator, requested_by: $requested_by, requested_at: $requested_at, attempts: $attempts, extra_context: $extra, last_error: null, last_attempt_at: null}')"
+
+# auto_close follows omit-when-empty: added only when the flag forced a value,
+# so an absent override stays absent (the Go decoder reads a nil *bool).
+if [[ -n "$AUTO_CLOSE_JSON" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --argjson ac "$AUTO_CLOSE_JSON" '. + {auto_close: $ac}')"
+fi
 
 # Enqueue = tmp-write + atomic rename-in. The tmp name is hidden and lacks the
 # .json suffix, so a concurrent reader globbing *.json never sees a torn row.

@@ -20,6 +20,10 @@ type liveSession struct {
 	initiator string // agent|human
 	requestID string
 	started   time.Time
+	// autoClose is the per-request auto-close override the close ladder consults:
+	// nil defers to initiator (agent auto-closes, human holds open), a set value
+	// forces the outcome. Carried from the request row at spawn.
+	autoClose *bool
 }
 
 // --- messages ---
@@ -232,6 +236,7 @@ func (m model) spawnFromRequest(req session.Request) (model, tea.Cmd) {
 		Title:        req.SlugValue(),
 		ExtraContext: req.ExtraContextText(),
 		Initiator:    req.Initiator,
+		AutoClose:    req.AutoClose,
 		SkipConfirm:  true,
 		FindingIndex: -1,
 	}
@@ -261,6 +266,7 @@ func (m model) spawnSession(d work.SessionDescriptor, requestID string) (model, 
 		initiator: d.Initiator,
 		requestID: requestID,
 		started:   time.Now(),
+		autoClose: d.AutoClose,
 	}
 	if d.Initiator != "agent" {
 		m.sessionLaunchedFromModal = m.state == stateWork

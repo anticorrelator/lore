@@ -496,11 +496,17 @@ var (
 )
 
 // annotPanelMode is the right-panel detail/terminal mode annotation; the
-// terminal state label reflects a finished subprocess.
-func annotPanelMode(done bool) annotSpec {
+// terminal state label doubles as the session-lifecycle badge. A finished
+// subprocess reads "terminal (done)"; a close-requested session held open (the
+// initiator-gated hold) reads "terminal (done ✓)" — protocol-complete, but the
+// harness is still live and readable — distinct from a process that has exited.
+func annotPanelMode(done, closeRequested bool) annotSpec {
 	term := "terminal"
-	if done {
+	switch {
+	case done:
 		term = "terminal (done)"
+	case closeRequested:
+		term = "terminal (done ✓)"
 	}
 	return annotSpec{key: "ctrl+t", states: []string{"detail", term}}
 }

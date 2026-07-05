@@ -43,6 +43,13 @@ type Request struct {
 	LastError      *string         `json:"last_error,omitempty"`
 	LastAttemptAt  *string         `json:"last_attempt_at,omitempty"`
 
+	// AutoClose overrides the initiator-based auto-close gate at the TUI exit
+	// ladder: nil defers to the initiator (agent auto-closes, human holds open),
+	// a set value forces the outcome (a coordinator holds an agent session open,
+	// or a human opts a session into auto-close). Pointer so absent stays
+	// distinct from an explicit false.
+	AutoClose *bool `json:"auto_close,omitempty"`
+
 	// Present only on a claimed row; a claim is not active until both are set.
 	ClaimedBy *string `json:"claimed_by,omitempty"`
 	ClaimedAt *string `json:"claimed_at,omitempty"`

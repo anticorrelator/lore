@@ -96,6 +96,7 @@ and, once an instance claims it, moves to `requests/claimed/<request_id>.json`.
 | `extra_context` | object \| null | Free-form context object handed to prompt composition, or null. |
 | `last_error` | string \| null | Reason of the most recent failed transition; null until one occurs. |
 | `last_attempt_at` | string \| null | ISO 8601 UTC of the most recent attempt; null until one occurs. |
+| `auto_close` | boolean \| absent | Override for the TUI exit-ladder auto-close gate (see [Close-request queue](#close-request-queue)). Omit-when-empty: absent defers to `initiator` (agent auto-closes, human holds open), `true` forces auto-close, `false` holds open. Carried onto the live session so the ladder can consult it at teardown. |
 
 A **claimed** file additionally carries:
 
@@ -174,6 +175,27 @@ path. Enqueue emits a `close_requested` journal event; the owning instance's lat
 **Consume** = the owning instance deletes the file after it begins teardown.
 Because there is only ever one eligible actor, delete-on-consume keeps the
 sole-writer-per-file invariant trivially true.
+
+**Initiator-gated auto-close.** Consuming a close-request always deletes the row
+(the durable ack; `close_requested` already recorded intent), but what the TUI
+does next is gated, not unconditional. An **agent-initiated** session tears down
+as before — the ladder fires once the session is quiescent, and `closed` is
+journaled. A **human-initiated** session is instead **held open**: the panel
+shows a "done" badge and the harness keeps running so the human can read output,
+send follow-ups, or run an in-session closing-act retro; teardown stays available
+through the existing keybind (`Ctrl+\`) or a later `close` request that the
+override flips. The per-request `auto_close` field overrides the gate in either
+direction: a coordinator sets `auto_close: false` on an agent request to hold it
+open (e.g. for an in-session retro), or `auto_close: true` on a human request to
+opt into auto-close. The gate reads the session's `initiator` (which the registry
+and journal already carry) and its `auto_close` override — it introduces no new
+substrate state, and the close-request row itself is unchanged.
+
+Teardown of a quiescent auto-close session is additionally held while the
+session sits at an **interactive prompt** (a harness permission/approval modal,
+classified by the same screen matcher the injection readiness gate uses): a
+close-request that lands mid-prompt waits for the prompt to clear rather than
+tearing the session down on an unanswered question.
 
 The cancel form `lore session close --request <id>` is unrelated to this queue: it
 deletes a still-**pending spawn** row in `requests/pending/` and emits
@@ -440,7 +462,10 @@ rather than growing this contract.**
   contract; it does not touch `tui/`.
 - **No message injection or readiness gate.** Delivering a message into a running
   session and gating on harness readiness is **item 3**.
-- **No skill routing.** Surfacing sessions through skill discovery is **item 4**.
+- **Skill routing — landed (item 4).** `/coordinate` (`skills/coordinate/SKILL.md`)
+  is the coordinator role's protocol home: it consumes these surfaces read-only
+  through the session verbs and adds no verbs, no event vocabulary, and no TUI
+  surface of its own.
 - **No spend joins.** The `spend` object on `closed` is reserved and nullable; the
   TUI fills only cheap teardown duration. Richer spend arrives with the
   model-routing substrate.

@@ -22,6 +22,11 @@ type SessionDescriptor struct {
 	ExtraContext string
 	Initiator    string // agent|human
 
+	// AutoClose is the per-request override the exit ladder consults: nil defers
+	// to Initiator (agent auto-closes, human holds open), a set value forces the
+	// outcome. Carried from the request row through to the live session.
+	AutoClose *bool
+
 	ShortMode    bool
 	SkipConfirm  bool
 	FollowupMode bool

@@ -349,7 +349,7 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 		if m.terminalMode {
 			modeSel = 1
 		}
-		modeAnnot, modeAnnotW := annotPanelMode(cfg.specPanel.IsDone()).render(modeSel)
+		modeAnnot, modeAnnotW := annotPanelMode(cfg.specPanel.IsDone(), cfg.specPanel.CloseRequested()).render(modeSel)
 		rightBorderTitle = renderBorderTitleWithAnnot(rightTitleRendered, rightInner, rightBS, modeAnnot, modeAnnotW)
 	} else {
 		rightBorderTitle = renderBorderTitle(rightTitleRendered, rightInner, rightBS)
@@ -489,7 +489,7 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 		if m.terminalMode {
 			modeSel = 1
 		}
-		modeAnnot, modeAnnotW := annotPanelMode(cfg.specPanel.IsDone()).render(modeSel)
+		modeAnnot, modeAnnotW := annotPanelMode(cfg.specPanel.IsDone(), cfg.specPanel.CloseRequested()).render(modeSel)
 		bottomBorderTitle = renderBorderTitleWithAnnot(bottomTitleRendered, panelW, bottomBS, modeAnnot, modeAnnotW)
 	} else {
 		bottomBorderTitle = renderBorderTitle(bottomTitleRendered, panelW, bottomBS)

@@ -195,9 +195,26 @@ func (m model) closeLadderCmd(slug string, panel work.SpecPanelModel) tea.Cmd {
 
 // --- handlers ---
 
-// handleCloseRequestScan consumes each matched close-request: it marks the slug
-// awaiting-close (so a re-scan before the delete lands does not double-process),
-// deletes the row, then dispatches the ladder for any slug already quiescent.
+// shouldAutoClose decides what a consumed close-request does to a session: tear
+// it down (true) or hold it open with a "done" badge (false). The per-request
+// auto_close override wins when present; absent, the initiator gates it —
+// agent-initiated sessions auto-close (the no-polling rationale stands), while
+// human-initiated sessions hold open for reading, follow-ups, or an in-session
+// closing-act retro. An untracked session (no liveSession) defaults to
+// auto-close, matching the pre-gate behavior.
+func shouldAutoClose(ls liveSession) bool {
+	if ls.autoClose != nil {
+		return *ls.autoClose
+	}
+	return ls.initiator == "agent"
+}
+
+// handleCloseRequestScan consumes each matched close-request. Consuming always
+// deletes the row (the durable ack; the journal's close_requested already
+// recorded intent). What follows is initiator-gated: an auto-close session is
+// marked awaiting-close so the ladder fires on quiescence; a held-open session
+// gets a "done" panel badge and keeps running (teardown stays available via the
+// existing keybind/verb).
 func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) {
 	if len(msg.matched) == 0 {
 		return m, nil
@@ -207,11 +224,20 @@ func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) 
 		if m.pendingClose[cr.Slug] {
 			continue // already consumed this slug's close-request; awaiting quiescence
 		}
+		cmds = append(cmds, deleteCloseRequestCmd(m.sessionsDir, cr.RequestID))
+
+		if ls, tracked := m.localSessions[cr.Slug]; tracked && !shouldAutoClose(ls) {
+			// Held open: badge the panel done, do not schedule teardown.
+			if panel, ok := m.specPanels[cr.Slug]; ok {
+				m.specPanels[cr.Slug] = panel.MarkCloseRequested()
+			}
+			continue
+		}
+
 		if m.pendingClose == nil {
 			m.pendingClose = make(map[string]bool)
 		}
 		m.pendingClose[cr.Slug] = true
-		cmds = append(cmds, deleteCloseRequestCmd(m.sessionsDir, cr.RequestID))
 	}
 	var advCmds []tea.Cmd
 	m, advCmds = m.advanceCloseLadders()
@@ -248,13 +274,45 @@ func (m model) advanceCloseLadders() (model, []tea.Cmd) {
 			delete(m.pendingClose, slug) // panel already gone; nothing to tear down
 			continue
 		}
-		if !panel.QuiescentForClose() {
-			continue // mid-turn — wait for quiescence
+		// A running session paused on an interactive prompt reads as quiescent
+		// but must not be torn down mid-prompt; the screen classification tells
+		// the two apart. Skip the read for a finished process — teardown is
+		// unconditionally safe there and QuiescentForClose short-circuits on it.
+		interactive := false
+		if !panel.IsDone() {
+			interactive = atInteractivePrompt(panel)
+		}
+		if !panel.QuiescentForClose(interactive) {
+			continue // mid-turn or mid-prompt — wait
 		}
 		delete(m.pendingClose, slug)
 		cmds = append(cmds, m.closeLadderCmd(slug, panel))
 	}
 	return m, cmds
+}
+
+// atInteractivePrompt reports whether the panel's live screen shows a
+// permission/approval modal — the interactive-prompt state the close ladder must
+// not tear down through. It resolves the active harness's screen matcher (the
+// same one the injection readiness gate uses) and reads a ScreenSnapshot; on any
+// failure (no framework, no interaction contract, snapshot error) it returns
+// false so a screen we cannot classify never blocks a close indefinitely. It
+// reads the shared terminal backend, so callers must invoke it on the Bubble Tea
+// goroutine (advanceCloseLadders' two callers both do).
+func atInteractivePrompt(panel work.SpecPanelModel) bool {
+	framework, err := config.ResolveTUILaunchFramework()
+	if err != nil {
+		return false
+	}
+	mm, ok := screenMatchers[framework]
+	if !ok {
+		return false
+	}
+	snap, err := panel.ScreenState()
+	if err != nil {
+		return false
+	}
+	return mm.permission(gateRows(snap.Rows))
 }
 
 // handleCloseLadderDone finishes teardown after the ladder terminated the

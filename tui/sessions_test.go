@@ -111,6 +111,25 @@ func TestSpecProcessStartedPromotesQueueSession(t *testing.T) {
 	}
 }
 
+// TestSpawnFromRequestThreadsAutoClose verifies the per-request auto_close
+// override rides from the queue row through to the live session's metadata,
+// where the close ladder reads it.
+func TestSpawnFromRequestThreadsAutoClose(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	hold := false
+	m, _ = m.spawnFromRequest(session.Request{
+		RequestID: "req-hold", Type: "implement", Slug: strPtr("demo"),
+		Initiator: "agent", AutoClose: &hold,
+	})
+	meta, ok := m.pendingSpawns["demo"]
+	if !ok {
+		t.Fatal("spawn metadata not recorded")
+	}
+	if meta.autoClose == nil || *meta.autoClose != false {
+		t.Fatalf("autoClose override not threaded onto the session: %+v", meta.autoClose)
+	}
+}
+
 func strPtr(s string) *string { return &s }
 
 // repoScriptPath resolves a repo script to an absolute path for tests that

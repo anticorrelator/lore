@@ -428,6 +428,107 @@ func TestSpecPanelInterveningKeyClearsEscArm(t *testing.T) {
 	}
 }
 
+// --- Close-request hold + closed-panel input refusal ---------------------
+
+// TestMarkCloseRequestedFlipsBadge: the held-open badge is off on a fresh panel,
+// flips on with MarkCloseRequested, and is distinct from done (the harness of a
+// held-open session is still live).
+func TestMarkCloseRequestedFlipsBadge(t *testing.T) {
+	m := NewSpecPanelModel("demo")
+	if m.CloseRequested() {
+		t.Fatal("fresh panel should not be close-requested")
+	}
+	m = m.MarkCloseRequested()
+	if !m.CloseRequested() {
+		t.Fatal("MarkCloseRequested should set the badge")
+	}
+	if m.IsDone() {
+		t.Fatal("a held-open close-requested panel must not read as done")
+	}
+}
+
+// TestQuiescentForCloseScreenGate is the teardown-readiness truth table: a
+// finished process is always safe to close; a running-but-idle session is safe
+// only when it is NOT sitting at an interactive prompt (the screen gate).
+func TestQuiescentForCloseScreenGate(t *testing.T) {
+	donePanel, _ := NewSpecPanelModel("demo").Update(StreamCompleteMsg{Slug: "demo"})
+	idle := NewSpecPanelModel("demo")
+	idle.needsInput = true
+	running := NewSpecPanelModel("demo") // needsInput false, not done
+
+	cases := []struct {
+		name        string
+		panel       SpecPanelModel
+		interactive bool
+		want        bool
+	}{
+		{"done ignores interactive flag", donePanel, true, true},
+		{"idle, no prompt → close", idle, false, true},
+		{"idle at interactive prompt → hold", idle, true, false},
+		{"running → wait", running, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.panel.QuiescentForClose(tc.interactive); got != tc.want {
+				t.Errorf("QuiescentForClose(%v) = %v, want %v", tc.interactive, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClosedPanelRefusesInputVisibly: keystrokes and paste to a torn-down (done)
+// session emit ClosedPanelInputMsg — the host's status-line notice — instead of
+// writing into a dead PTY, while ctrl+\ still dismisses the panel and scrollback
+// keys still navigate retained history.
+func TestClosedPanelRefusesInputVisibly(t *testing.T) {
+	closed := func() SpecPanelModel {
+		m, _ := NewSpecPanelModel("demo").Update(StreamCompleteMsg{Slug: "demo"})
+		return m
+	}
+
+	t.Run("printable key refused", func(t *testing.T) {
+		_, cmd := closed().Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+		msg, ok := firstCmdMsg(cmd).(ClosedPanelInputMsg)
+		if !ok {
+			t.Fatalf("expected ClosedPanelInputMsg, got %T", firstCmdMsg(cmd))
+		}
+		if msg.Slug != "demo" {
+			t.Errorf("notice slug = %q, want demo", msg.Slug)
+		}
+	})
+
+	t.Run("esc refused", func(t *testing.T) {
+		_, cmd := closed().Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+		if _, ok := firstCmdMsg(cmd).(ClosedPanelInputMsg); !ok {
+			t.Fatalf("expected ClosedPanelInputMsg for esc, got %T", firstCmdMsg(cmd))
+		}
+	})
+
+	t.Run("paste refused", func(t *testing.T) {
+		_, cmd := closed().Update(tea.PasteMsg{Content: "hello"})
+		if _, ok := firstCmdMsg(cmd).(ClosedPanelInputMsg); !ok {
+			t.Fatalf("expected ClosedPanelInputMsg for paste, got %T", firstCmdMsg(cmd))
+		}
+	})
+
+	t.Run("ctrl+backslash still dismisses", func(t *testing.T) {
+		_, cmd := closed().Update(tea.KeyPressMsg{Code: '\\', Mod: tea.ModCtrl})
+		if _, ok := firstCmdMsg(cmd).(TerminalTerminateMsg); !ok {
+			t.Fatalf("expected TerminalTerminateMsg for ctrl+\\, got %T", firstCmdMsg(cmd))
+		}
+	})
+
+	t.Run("scrollback key still navigates", func(t *testing.T) {
+		m := closed()
+		m.height = 5
+		m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp, Mod: tea.ModShift})
+		if _, ok := firstCmdMsg(cmd).(ClosedPanelInputMsg); ok {
+			t.Fatal("scrollback navigation on a closed panel should not be refused as input")
+		}
+		_ = m
+	})
+}
+
 // extractBatchCmds extracts individual commands from a tea.Batch result.
 // It runs the outer cmd and checks if the result is a tea.BatchMsg ([]tea.Cmd).
 // Falls back to returning the single cmd if it's not a batch.

@@ -1210,6 +1210,14 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case work.TerminalTerminateMsg:
 		return m.handleTerminalTerminate(msg)
 
+	case work.ClosedPanelInputMsg:
+		// Input reached a torn-down session — surface a status-line notice so the
+		// keystroke is visibly refused instead of dropped into a dead PTY. The
+		// notice is a flashErr, so the next keypress clears it; ctrl+t (detail)
+		// and ctrl+\ (dismiss the panel) are the ways out.
+		m.flashErr = "[lore] session closed — input ignored (ctrl+t detail · ctrl+\\ close)"
+		return m, nil
+
 	case work.ItemSelectedMsg:
 		// Enter on list item: load detail and shift focus to right panel
 		m.focusedPanel = panelRight

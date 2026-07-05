@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,7 +256,7 @@ func TestAdvanceCloseLadders_QuiescenceWaitOrdering(t *testing.T) {
 	// Quiescent (process finished): dispatch exactly one, clear the slug.
 	panel, _ := m.specPanels["demo"].Update(work.StreamCompleteMsg{Slug: "demo"})
 	m.specPanels["demo"] = panel
-	if !panel.QuiescentForClose() {
+	if !panel.QuiescentForClose(false) {
 		t.Fatal("panel not quiescent after StreamComplete")
 	}
 	m, cmds = m.advanceCloseLadders()
@@ -290,6 +291,84 @@ func TestHandleCloseRequestScan_MarksAndDeletes(t *testing.T) {
 	}})
 	if cmd2 != nil {
 		t.Fatal("re-scan of an already-pending slug re-dispatched work")
+	}
+}
+
+// TestShouldAutoClose_OverrideMatrix is the truth table of the auto-close gate:
+// the per-request auto_close override wins when present, else the initiator
+// decides (agent auto-closes, human holds), and an untracked session defaults to
+// auto-close.
+func TestShouldAutoClose_OverrideMatrix(t *testing.T) {
+	yes, no := true, false
+	cases := []struct {
+		name string
+		ls   liveSession
+		want bool
+	}{
+		{"agent, no override → auto-close", liveSession{initiator: "agent"}, true},
+		{"human, no override → hold", liveSession{initiator: "human"}, false},
+		{"agent, override false → hold", liveSession{initiator: "agent", autoClose: &no}, false},
+		{"human, override true → auto-close", liveSession{initiator: "human", autoClose: &yes}, true},
+		{"empty initiator, no override → auto-close (default)", liveSession{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldAutoClose(tc.ls); got != tc.want {
+				t.Errorf("shouldAutoClose(%+v) = %v, want %v", tc.ls, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleCloseRequestScan_InitiatorGate: a consumed close-request tears down
+// an agent session (marked pendingClose, no badge) but holds a human session
+// open (panel badged close-requested, never marked pendingClose). Both rows are
+// consumed regardless.
+func TestHandleCloseRequestScan_InitiatorGate(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	m.localSessions = map[string]liveSession{
+		"agent-item": {typ: "spec", initiator: "agent", started: time.Now()},
+		"human-item": {typ: "spec", initiator: "human", started: time.Now()},
+	}
+	m.specPanels = map[string]work.SpecPanelModel{
+		"agent-item": work.NewSpecPanelModel("agent-item"),
+		"human-item": work.NewSpecPanelModel("human-item"),
+	}
+
+	m, cmd := m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{
+		{RequestID: "c-agent", Slug: "agent-item", TargetInstance: "me"},
+		{RequestID: "c-human", Slug: "human-item", TargetInstance: "me"},
+	}})
+	if cmd == nil {
+		t.Fatal("expected delete Cmds for the consumed rows")
+	}
+
+	if !m.pendingClose["agent-item"] {
+		t.Error("agent session should be marked pending-close (auto-close)")
+	}
+	if m.pendingClose["human-item"] {
+		t.Error("human session must not be scheduled for teardown")
+	}
+	if m.specPanels["human-item"].CloseRequested() != true {
+		t.Error("human session panel should carry the close-requested badge")
+	}
+	if m.specPanels["agent-item"].CloseRequested() {
+		t.Error("agent session panel should not be badged — it tears down")
+	}
+}
+
+// TestClosedPanelInputMsg_SetsStatusNotice is the contract for the closed-panel
+// input notice: routing a ClosedPanelInputMsg through Update surfaces the
+// "[lore] session closed" status-line flash rather than dropping the input.
+func TestClosedPanelInputMsg_SetsStatusNotice(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	um, _ := m.Update(work.ClosedPanelInputMsg{Slug: "demo", Key: "a"})
+	nm, ok := um.(model)
+	if !ok {
+		t.Fatalf("Update returned %T, want model", um)
+	}
+	if !strings.Contains(nm.flashErr, "session closed") {
+		t.Errorf("flashErr = %q, want a 'session closed' notice", nm.flashErr)
 	}
 }
 

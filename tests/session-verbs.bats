@@ -150,6 +150,33 @@ journal_boundaries() {
   [[ "$output" == *"invalid --initiator"* ]]
 }
 
+@test "request omits auto_close when the flag is not passed" {
+  bash "$REQUEST" --type spec --slug wi --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e 'has("auto_close") | not' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request --auto-close true writes a JSON boolean" {
+  bash "$REQUEST" --type spec --slug wi --auto-close true --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '.auto_close == true and (.auto_close | type == "boolean")' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request --auto-close false holds an agent session open" {
+  bash "$REQUEST" --type implement --slug wi --initiator agent --auto-close false --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '.auto_close == false and (.auto_close | type == "boolean")' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request with invalid --auto-close refuses" {
+  run bash "$REQUEST" --type spec --auto-close maybe --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --auto-close"* ]]
+}
+
 @test "request wraps plain --context text as a dispatch_guidance object" {
   bash "$REQUEST" --type spec --context "Run /spec and report the plan slug." --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"

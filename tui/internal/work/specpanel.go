@@ -104,6 +104,16 @@ type TerminalTerminateMsg struct {
 	Slug string
 }
 
+// ClosedPanelInputMsg is sent when a keystroke or paste reaches a torn-down
+// session (done, no live PTY). The host surfaces a status-line notice so the
+// input is visibly refused rather than silently written into a dead fd. Slug
+// identifies the panel; Key is the refused keystroke's string form (for tests
+// and any future affordance).
+type ClosedPanelInputMsg struct {
+	Slug string
+	Key  string
+}
+
 // writeCrashLog writes a panic stack trace to a temp file for post-mortem debugging.
 func writeCrashLog(label string, r interface{}) {
 	crashLog := filepath.Join(os.TempDir(), "lore-tui-crash.log")
@@ -146,6 +156,13 @@ type SpecPanelModel struct {
 	// the subprocess is likely waiting for user input.
 	needsInput bool
 
+	// closeRequested marks a session whose close-request was consumed but held
+	// open (a human-initiated session, or one with auto_close=false): the panel
+	// shows a "done" badge and stays readable while its harness keeps running.
+	// It is distinct from done (process exited) — a close-requested session
+	// still has a live PTY and accepts follow-up input.
+	closeRequested bool
+
 	// lastEscTime records when an Esc was last forwarded to the PTY. A second
 	// Esc arriving within escDetachWindow with no intervening non-Esc KeyMsg
 	// is interpreted as the detach gesture instead of being forwarded.
@@ -184,20 +201,38 @@ func (m SpecPanelModel) NeedsInput() bool {
 	return m.needsInput
 }
 
-// QuiescentForClose is the single gate the close ladder waits on before tearing
-// a session down: true once the harness looks idle. It is deliberately the only
-// predicate the teardown path consults so a later composer-signature check can
-// replace this body without touching the ladder.
+// CloseRequested reports whether this panel is holding open after a consumed
+// close-request (the "done" badge state) rather than being torn down.
+func (m SpecPanelModel) CloseRequested() bool {
+	return m.closeRequested
+}
+
+// MarkCloseRequested flips the held-open badge on. The close ladder calls it
+// when it consumes a close-request for a session the initiator gate keeps open
+// instead of tearing down (value semantics — returns the updated model).
+func (m SpecPanelModel) MarkCloseRequested() SpecPanelModel {
+	m.closeRequested = true
+	return m
+}
+
+// QuiescentForClose is the single predicate the close ladder waits on before
+// tearing a session down: true once teardown is safe. It stays the only
+// predicate the ladder consults so the screen classification can evolve without
+// touching the ladder.
 //
-// v1 grounds it in output quiescence (no PTY output past the threshold) or a
-// finished process. That signal CANNOT distinguish "turn complete" from
+// A finished process is always safe. Otherwise output quiescence (needsInput)
+// grounds it — but that signal alone CANNOT distinguish "turn complete" from
 // "awaiting user input": a close-request that lands while the session is paused
-// on a post-terminus interactive prompt (e.g. a ceremony question after
-// finalize) reads as quiescent and the session is torn down mid-prompt. The
-// composer-signature check that can tell the two apart is the designated fix;
-// until it lands, teardown is gated on quiescence alone.
-func (m SpecPanelModel) QuiescentForClose() bool {
-	return m.done || m.needsInput
+// on a post-terminus interactive prompt (e.g. a ceremony/permission question
+// after finalize) reads as quiescent and would tear the session down mid-prompt.
+// atInteractivePrompt is the readiness gate's screen classification (a
+// permission/approval modal is showing), computed by the caller from a
+// ScreenSnapshot; when it holds, an idle session is NOT considered safe to close.
+func (m SpecPanelModel) QuiescentForClose(atInteractivePrompt bool) bool {
+	if m.done {
+		return true
+	}
+	return m.needsInput && !atInteractivePrompt
 }
 
 // ScreenSnapshot is the observable terminal state the send/peek readiness gate
@@ -490,8 +525,13 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 		// Bracketed paste: forward the pasted text to the PTY. Pasted input
 		// clears the pending double-Esc gesture like any non-Esc key.
 		m.lastEscTime = time.Time{}
+		if m.done {
+			return m.refuseClosedInput("paste")
+		}
 		if m.ptmx != nil && msg.Content != "" {
-			m.ptmx.Write([]byte(msg.Content)) //nolint:errcheck
+			if _, err := m.ptmx.Write([]byte(msg.Content)); err != nil {
+				return m.refuseClosedInput("paste")
+			}
 		}
 		return m, nil
 
@@ -545,15 +585,23 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 
 		switch msg.String() {
 		case "esc": // single Esc forwards; double Esc within window detaches
+			if m.done {
+				return m.refuseClosedInput("esc")
+			}
 			return m.handleEscKey()
-		case "ctrl+\\": // Ctrl+\ — terminate subprocess
+		case "ctrl+\\": // Ctrl+\ — terminate subprocess (dismisses a closed panel)
 			slug := m.slug
 			return m, func() tea.Msg { return TerminalTerminateMsg{Slug: slug} }
 
 		default:
+			if m.done {
+				return m.refuseClosedInput(msg.String())
+			}
 			if m.ptmx != nil {
 				if b := KeyToBytes(msg); b != nil {
-					m.ptmx.Write(b)
+					if _, err := m.ptmx.Write(b); err != nil {
+						return m.refuseClosedInput(msg.String())
+					}
 				}
 			}
 			return m, nil
@@ -561,6 +609,16 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// refuseClosedInput is the response to a keystroke or paste that reached a
+// torn-down session (done, no live PTY, or a PTY write that just failed): it
+// writes nothing and emits a ClosedPanelInputMsg so the host surfaces a
+// status-line notice instead of dropping the input silently. Scrollback keys
+// are handled before this point, so navigating retained history still works.
+func (m SpecPanelModel) refuseClosedInput(key string) (SpecPanelModel, tea.Cmd) {
+	slug := m.slug
+	return m, func() tea.Msg { return ClosedPanelInputMsg{Slug: slug, Key: key} }
 }
 
 // handleEscKey implements the single-Esc-forwards / double-Esc-detaches gesture.
@@ -580,7 +638,9 @@ func (m SpecPanelModel) handleEscKey() (SpecPanelModel, tea.Cmd) {
 	}
 	m.lastEscTime = now
 	if m.ptmx != nil {
-		m.ptmx.Write([]byte{0x1b}) //nolint:errcheck
+		if _, err := m.ptmx.Write([]byte{0x1b}); err != nil {
+			return m.refuseClosedInput("esc")
+		}
 	}
 	return m, nil
 }

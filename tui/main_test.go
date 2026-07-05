@@ -2380,6 +2380,34 @@ func workContractModel() model {
 	return m
 }
 
+// TestPanelModeBadgeContract pins the right-panel mode annotation's terminal
+// label — the session-lifecycle badge surfaced in the panel border. A finished
+// process reads "terminal (done)"; a close-requested session held open reads
+// "terminal (done ✓)" (distinct from a running or exited one); done wins when
+// both flags are set.
+func TestPanelModeBadgeContract(t *testing.T) {
+	cases := []struct {
+		name           string
+		done           bool
+		closeRequested bool
+		wantTerm       string
+	}{
+		{"running", false, false, "terminal"},
+		{"process exited", true, false, "terminal (done)"},
+		{"close-requested held open", false, true, "terminal (done ✓)"},
+		{"done wins over close-requested", true, true, "terminal (done)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := annotPanelMode(tc.done, tc.closeRequested)
+			gotTerm := spec.states[len(spec.states)-1]
+			if gotTerm != tc.wantTerm {
+				t.Errorf("terminal label = %q, want %q", gotTerm, tc.wantTerm)
+			}
+		})
+	}
+}
+
 // TestConfirmModalKeybindContract verifies the keybinds displayed in
 // renderConfirmModal ("y / Enter confirm", "any key cancel", and post_review's
 // "n / Esc cancel") against the confirm interception in Update.
