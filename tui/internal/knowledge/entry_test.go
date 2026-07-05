@@ -150,6 +150,30 @@ func TestEntryView_BodyAndFooterAfterLoad(t *testing.T) {
 	}
 }
 
+func TestEntryMouseWheelScrollsViewport(t *testing.T) {
+	m := NewEntryModel("scroll-entry")
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 8})
+
+	var body strings.Builder
+	for i := 0; i < 30; i++ {
+		body.WriteString("line\n\n")
+	}
+	m, _ = m.Update(EntryLoadedMsg{Content: body.String()})
+	if got := m.viewport.YOffset(); got != 0 {
+		t.Fatalf("initial offset = %d, want 0", got)
+	}
+
+	m, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if got := m.viewport.YOffset(); got != entryWheelScrollLines {
+		t.Fatalf("wheel down offset = %d, want %d", got, entryWheelScrollLines)
+	}
+
+	m, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if got := m.viewport.YOffset(); got != 0 {
+		t.Fatalf("wheel up offset = %d, want 0", got)
+	}
+}
+
 func equalSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

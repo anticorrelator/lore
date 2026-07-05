@@ -330,6 +330,15 @@ func (m *BrowserModel) loadCurrentEntry() tea.Cmd {
 	return LoadEntryCmd(m.knowledgeDir, entry.Path)
 }
 
+func (m *BrowserModel) moveTreeCursor(target int) (tea.Cmd, bool) {
+	if target == m.cursor {
+		return nil, false
+	}
+	m.cursor = target
+	m.updateScrollOffset()
+	return m.loadCurrentEntry(), true
+}
+
 // updateScrollOffset recalculates the persisted scroll offset so the cursor
 // remains visible. Call this from Update after any cursor movement.
 func (m *BrowserModel) updateScrollOffset() {
@@ -452,6 +461,28 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 
 	case tea.MouseMsg:
 		mouse := msg.Mouse()
+		if wheel, ok := msg.(tea.MouseWheelMsg); ok {
+			if mouse.X < leftPanelWidth+2 {
+				// Wheel follows the app-wide positional contract: scroll the
+				// tree under the pointer without moving keyboard focus.
+				switch wheel.Button {
+				case tea.MouseWheelDown:
+					if cmd, moved := m.moveTreeCursor(nextVisible(m.nodes, m.cursor)); moved {
+						return m, cmd
+					}
+				case tea.MouseWheelUp:
+					if cmd, moved := m.moveTreeCursor(prevVisible(m.nodes, m.cursor)); moved {
+						return m, cmd
+					}
+				}
+				return m, nil
+			}
+
+			var cmd tea.Cmd
+			m.entryDetail, cmd = m.entryDetail.Update(wheel)
+			return m, cmd
+		}
+
 		_, isPress := msg.(tea.MouseClickMsg)
 		isClick := isPress && mouse.Button == tea.MouseLeft
 		if mouse.X < leftPanelWidth+2 {
@@ -512,11 +543,7 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 			return m, func() tea.Msg { return BrowserDismissedMsg{} }
 		case "j", "down":
 			if m.focusedPanel == panelLeft {
-				next := nextVisible(m.nodes, m.cursor)
-				if next != m.cursor {
-					m.cursor = next
-					m.updateScrollOffset()
-					cmd := m.loadCurrentEntry()
+				if cmd, moved := m.moveTreeCursor(nextVisible(m.nodes, m.cursor)); moved {
 					return m, cmd
 				}
 			} else {
@@ -527,11 +554,7 @@ func (m BrowserModel) Update(msg tea.Msg) (BrowserModel, tea.Cmd) {
 			}
 		case "k", "up":
 			if m.focusedPanel == panelLeft {
-				prev := prevVisible(m.nodes, m.cursor)
-				if prev != m.cursor {
-					m.cursor = prev
-					m.updateScrollOffset()
-					cmd := m.loadCurrentEntry()
+				if cmd, moved := m.moveTreeCursor(prevVisible(m.nodes, m.cursor)); moved {
 					return m, cmd
 				}
 			} else {

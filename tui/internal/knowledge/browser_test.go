@@ -57,6 +57,34 @@ func TestBrowserJKNavigateTree(t *testing.T) {
 	}
 }
 
+func TestBrowserLeftPaneWheelMovesTreeWithoutClickMapping(t *testing.T) {
+	m := testBrowser(t)
+	m.focusedPanel = panelRight
+
+	m, cmd := m.Update(tea.MouseWheelMsg{
+		Button: tea.MouseWheelDown,
+		X:      1,
+		Y:      1, // would map back to the category if wheel fell through as a click
+	})
+	if m.cursor != 1 || m.nodes[m.cursor].entry == nil || m.nodes[m.cursor].entry.Title != "Alpha" {
+		t.Fatalf("wheel down over the tree should move to first entry, cursor=%d", m.cursor)
+	}
+	if cmd == nil {
+		t.Fatal("wheel landing on an entry should dispatch the entry load command")
+	}
+	if m.focusedPanel != panelRight {
+		t.Fatalf("wheel must not move focus, got %v", m.focusedPanel)
+	}
+
+	m, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: 1, Y: 1})
+	if m.cursor != 0 {
+		t.Fatalf("wheel up over the tree should move back to the category, cursor=%d", m.cursor)
+	}
+	if m.focusedPanel != panelRight {
+		t.Fatalf("wheel up must not move focus, got %v", m.focusedPanel)
+	}
+}
+
 func TestBrowserLFocusesDetail(t *testing.T) {
 	m := loadedBrowser(t)
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
