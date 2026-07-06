@@ -164,9 +164,9 @@ contract, and the audit read-path. Three things it deliberately does **not** own
   role — belongs to the `/coordinate` skill. This doc gives that skill callable
   verbs and a packet contract to bind against.
 - **"What a hold blocks"** — cross-stream edge semantics belong to the work-item
-  dependency-edges item (plan-stage). Until it lands, a hold pauses only its own
-  stream; other streams structurally continue (a `blocked_by` edge is a displayed
-  signal, not a dispatch gate).
+  dependency-edges item (landed). A hold pauses only its own stream; other streams
+  structurally continue (a `blocked_by` edge is a displayed signal, not a dispatch
+  gate).
 - **Consumption-visibility read-release feed** — a release registering as a
   consumption signal is **dropped from committed scope**: the target endpoint is an
   absorbed stub with no landed surface. If a release should ever register as a

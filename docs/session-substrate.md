@@ -497,12 +497,11 @@ reads full snapshots.
 | `requests/pending/<id>.json` | the enqueuer | item 2 `request` verb; TUI human path | item 2 / Phase 2 |
 | `requests/claimed/<id>.json` | the claiming TUI instance | `os.Rename` claim + tmp+rename metadata | Phase 2 (TUI) |
 | `close-requests/<id>.json` | the enqueuer (`session close` verb); deleted-on-consume by the owning TUI instance | tmp + rename enqueue; owning instance deletes | item 2 (enqueue) / Phase 2 (consume) |
-| `events.jsonl` | `scripts/session-event-append.sh` | every emitter, via subprocess | **this phase** |
-| `[session-request]` cold-start marker | `scripts/load-work.sh` (reader of `requests/pending/`) | SessionStart hook | **this phase** |
+| `events.jsonl` | `scripts/session-event-append.sh` | every emitter, via subprocess | Phase 1 |
+| `[session-request]` cold-start marker | `scripts/load-work.sh` (reader of `requests/pending/`) | SessionStart hook | Phase 1 |
 
-This phase (Phase 1) lands only the `events.jsonl` writer and the load-work marker;
-the registry and request writers are defined by this contract and implemented in
-Phase 2 and item 2.
+Phase 1 landed the `events.jsonl` writer and the load-work marker; the registry and
+request writers, defined by this contract, landed in Phase 2 and item 2.
 
 ## Cold-start surface
 
@@ -544,12 +543,14 @@ rather than growing this contract.**
   prepare-and-return scripts behind the `session` dispatcher subgroup. They read
   and write these surfaces per this contract; they do not spawn, wait, or touch
   the TUI. Registry and claimed-queue *writes* remain Phase 2 (TUI).
-- **No TUI integration.** The per-instance registry, instance identity/naming, the
-  pending-queue scan, atomic-rename claim, D4 lifecycle handling, badging, and
-  journal emission wiring are **Phase 2** (`tui/`). This phase defines their
-  contract; it does not touch `tui/`.
-- **No message injection or readiness gate.** Delivering a message into a running
-  session and gating on harness readiness is **item 3**.
+- **TUI integration — landed (Phase 2).** The per-instance registry, instance
+  identity/naming, the pending-queue scan, atomic-rename claim, D4 lifecycle
+  handling, badging, and journal emission wiring are implemented in `tui/` per this
+  contract.
+- **Message injection and readiness gate — landed (item 3).** Delivering a message
+  into a running session (the Send-request queue) and gating on harness readiness
+  are specified in the body above (`## Send-request queue`, `## Peek request /
+  response`) and consumed by the TUI per that contract.
 - **Skill routing — landed (item 4).** `/coordinate` (`skills/coordinate/SKILL.md`)
   is the coordinator role's protocol home: it consumes these surfaces read-only
   through the session verbs and adds no verbs, no event vocabulary, and no TUI
