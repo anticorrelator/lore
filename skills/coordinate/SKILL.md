@@ -116,12 +116,15 @@ Final board join; a terminal ledger row for every opened stream; batch retro run
 
 Evidence log for the coordinator-verb sibling item — append when a run makes you hand-roll bookkeeping a verb should own:
 
-- `lore work note <slug> --text` — session-log appends without hand-editing notes.md (n=3 in the first live arc)
+- `lore work note <slug> --text` — session-log appends without hand-editing notes.md (n=3 in the first live arc; +7 hand-appends in the consolidation arc, including a 6-item triage batch; workers also trip on the `/work update` doc/CLI naming drift, n=2)
 - `--track` / `--model` / `--yes` on `lore session request` — ~~undeliverable~~ SHIPPED 2026-07-06: the three kernel dispatch judgments (depth, lead model, autonomy) are now request fields
 - ~~`close_refused` + tiered close authority~~ — RESOLVED by gate *removal*, not event addition: full-discretion close shipped; no refusal branch survived, so the token was never minted. Kept as the worked example of a verb-want dissolving.
 - a `step_completed` emitter in the /implement lead — the vocabulary token exists with zero emissions ever; phase boundaries stay peek-only until wired
 - `events --tail` (or `--cursor-only`) — a baseline cursor currently costs a full journal replay
 - a ledger-row append verb, if hand-edited rows ever drift from the pinned vocabulary
 - `lore session wait <slug> [--until …] [--timeout …]` — blocking journal read so the harness re-invokes the coordinator on session events instead of polling. Ship-bar: build only if hand-rolls keep drifting from the cursor contract (n=2 so far). Meanwhile: sloppy wakes are tolerable, reads must be correct; keep watcher naps inside the cache window (≤20–30 min).
+- `lore session close --wait` — `send` has `--wait`; `close` doesn't, so measuring teardown or confirming a `closed` event means hand-rolled cursor polls (n=1, wave-1 verifier)
+- slug echo on `lore work create` — silent 50-char slug truncation forces a verify-the-created-slug round-trip before any follow-on write (n=3 across two arcs)
+- (pattern, not a verb) the ledger is the cursor store: seats that hand off `next_cursor` through their ledger never pay the full-journal-replay baseline that `events --tail` would save; the want stands but a clean handoff mostly dissolves it
 
 If a coordinator-specific *event type* ever earns a place in the session journal, it lands as a one-token vocabulary extension inside the sole writer plus a contract-doc amendment — never a second writer.
