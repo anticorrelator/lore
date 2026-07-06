@@ -611,12 +611,16 @@ if [[ -z "$TIER3_REJECTED" ]]; then
   TIER3_REJECTED=0
 fi
 
-# --- Per-task class-routing attribution (built before the archive move) -------
+# --- Per-task class-routing attribution + spend join (before the archive move) -
 # Reconstruct, per task, the class-qualified model routing resolves at dispatch,
-# for /retro to correlate rework with (judgment_class, worker_model, size). Read
-# tasks.json while the item is still in active _work/ — the archive move below
+# for /retro to correlate rework with (judgment_class, worker_model, size), and
+# join measured per-task cost mined from execution-log.md's `Spend:` lines onto
+# each entry as a nullable `spend` object (absent -> null; one line -> object;
+# re-dispatch duplicates -> ordered list). Both tasks.json and execution-log.md
+# are read while the item is still in active _work/ — the archive move below
 # relocates the dir. Observability-only: a missing/unreadable tasks.json yields
-# an empty array and never blocks the close.
+# an empty array, a malformed `Spend:` line degrades that task to null with a
+# stderr warning, and neither ever blocks the close.
 resolve_class_model() {
   local role="$1" model
   if model=$(resolve_model_for_role "$role" implement 2>/dev/null) && [[ -n "$model" ]]; then
@@ -628,14 +632,65 @@ WORKER_MECH_MODEL=$(resolve_class_model worker-mechanical)
 WORKER_JD_MODEL=$(resolve_class_model worker-judgment-dense)
 
 ATTRIBUTION_JSON=$(_LORE_STD="$WORKER_STD_MODEL" _LORE_MECH="$WORKER_MECH_MODEL" \
-  _LORE_JD="$WORKER_JD_MODEL" python3 - "$ITEM_DIR/tasks.json" <<'PYEOF'
-import json, os, sys
+  _LORE_JD="$WORKER_JD_MODEL" python3 - "$ITEM_DIR/tasks.json" "$LOG_FILE" <<'PYEOF'
+import json, os, re, sys
 model_by_class = {
     "mechanical": os.environ.get("_LORE_MECH") or None,
     "judgment-dense": os.environ.get("_LORE_JD") or None,
 }
 standard_model = os.environ.get("_LORE_STD") or None
+
+# Mine execution-log.md for `Spend: task=<id> key=value …` lines (written by the
+# lead at task acceptance, D1 vocabulary flattened). Token fields are ints,
+# duration/cost floats, the rest strings; unknown keys are ignored so the schema
+# can grow. A line missing `task=` or carrying a non-numeric numeric field is
+# malformed: it contributes nothing (the task stays null) and warns.
+INT_FIELDS = {"input_tokens", "output_tokens", "cache_read_input_tokens",
+              "cache_creation_input_tokens", "reasoning_output_tokens", "total_tokens"}
+FLOAT_FIELDS = {"duration_seconds", "cost_usd"}
+STR_FIELDS = {"model", "harness", "basis", "effort"}
+SPEND_RE = re.compile(r'^\s*[*_]*Spend:[*_]*\s*(.*)$')
+
+spend_by_task = {}  # task_id -> [spend obj, …] in file order (re-dispatch keeps all)
+log_path = sys.argv[2] if len(sys.argv) > 2 else ""
+if log_path and os.path.isfile(log_path):
+    with open(log_path, encoding="utf-8") as f:
+        for raw in f:
+            m = SPEND_RE.match(raw.rstrip("\n"))
+            if not m:
+                continue
+            body = m.group(1).strip()
+            fields, malformed = {}, False
+            for tok in body.split():
+                if "=" not in tok:
+                    malformed = True
+                    break
+                k, v = tok.split("=", 1)
+                if k in INT_FIELDS:
+                    try:
+                        fields[k] = int(v)
+                    except ValueError:
+                        malformed = True
+                        break
+                elif k in FLOAT_FIELDS:
+                    try:
+                        fields[k] = float(v)
+                    except ValueError:
+                        malformed = True
+                        break
+                elif k == "task" or k in STR_FIELDS:
+                    fields[k] = v
+                # unknown keys ignored (forward-compatible)
+            task_id = fields.pop("task", None)
+            if malformed or not task_id:
+                sys.stderr.write(
+                    "[impl] Warning: malformed Spend: line in execution-log.md "
+                    "ignored (task spend degrades to null): %s\n" % body)
+                continue
+            spend_by_task.setdefault(task_id, []).append(fields)
+
 attribution = []
+matched = set()
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
         data = json.load(f)
@@ -649,12 +704,26 @@ if isinstance(data, dict):
             worker_model = model_by_class.get(jc, standard_model)
             estimate = task.get("context_cost_estimate")
             total_chars = estimate.get("total_chars") if isinstance(estimate, dict) else None
+            tid = task.get("id")
+            spends = spend_by_task.get(tid, [])
+            if tid is not None:
+                matched.add(tid)
+            # Absent -> null; one line -> object; re-dispatch duplicates -> list.
+            spend = None if not spends else (spends[0] if len(spends) == 1 else spends)
             attribution.append({
-                "task_id": task.get("id"),
+                "task_id": tid,
                 "judgment_class": jc,
                 "worker_model": worker_model,
                 "context_cost_estimate": total_chars,
+                "spend": spend,
             })
+
+for tid in spend_by_task:
+    if tid not in matched:
+        sys.stderr.write(
+            "[impl] Warning: Spend: line for task=%s has no matching "
+            "task_attribution entry; dropped.\n" % tid)
+
 print(json.dumps(attribution, ensure_ascii=False))
 PYEOF
 )
@@ -729,7 +798,8 @@ case "$CLOSURE_VALID" in
 esac
 
 # --- Per-cycle telemetry row (observability-only; never kind=scored) ----------
-# Carries the per-task class-routing attribution array under task_attribution.
+# Carries the per-task class-routing attribution array under task_attribution,
+# each entry's `spend` joined from the execution log's Spend: lines.
 TELEMETRY_ROW=$(_LORE_ATTRIBUTION="$ATTRIBUTION_JSON" python3 -c '
 import json, os, sys
 slug, verdict, verb_count, hand_count, tv, sha, ts = sys.argv[1:8]

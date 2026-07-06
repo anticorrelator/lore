@@ -263,6 +263,82 @@ def session_metadata(path: str) -> dict:
     return {"session_id": session_id, "session_date": session_date}
 
 
+# ---------------------------------------------------------------------------
+# Session spend extraction
+# ---------------------------------------------------------------------------
+
+def session_spend(path: str) -> dict:
+    """Sum per-assistant-message token usage from a claude-code transcript.
+
+    Returns the closed spend vocabulary with `basis: "transcript"`:
+    `input_tokens`, `output_tokens`, `cache_read_input_tokens`,
+    `cache_creation_input_tokens`, `total_tokens`, `model`, `harness`. The
+    four token sums add every `message.usage` row's field verbatim (a
+    hand `jq` sum over the same rows reproduces them); `total_tokens` is
+    their sum, the only derived field — claude-code's usage object carries
+    no total of its own. Fields claude-code never exposes
+    (`reasoning_output_tokens`, `cost_usd`) are omitted, never zero-filled.
+
+    Degrades to `{"basis": "duration-only"}` when the transcript is
+    absent, unreadable, or carries no usage rows — the same explicit
+    degradation marker the helper and the TUI teardown fall back to.
+    """
+    import json
+
+    input_tokens = 0
+    output_tokens = 0
+    cache_read = 0
+    cache_creation = 0
+    model = ""
+    rows = 0
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = data.get("message")
+                if not isinstance(msg, dict):
+                    continue
+                usage = msg.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                input_tokens += int(usage.get("input_tokens") or 0)
+                output_tokens += int(usage.get("output_tokens") or 0)
+                cache_read += int(usage.get("cache_read_input_tokens") or 0)
+                cache_creation += int(usage.get("cache_creation_input_tokens") or 0)
+                m = msg.get("model")
+                # Ignore the `<synthetic>` placeholder claude-code stamps on
+                # locally-generated rows (quota notices etc.); keep the last
+                # real model id seen.
+                if isinstance(m, str) and m and not m.startswith("<"):
+                    model = m
+                rows += 1
+    except OSError:
+        return {"basis": "duration-only"}
+
+    if rows == 0:
+        return {"basis": "duration-only"}
+
+    spend = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_creation,
+        "total_tokens": input_tokens + output_tokens + cache_read + cache_creation,
+        "harness": "claude-code",
+        "basis": "transcript",
+    }
+    if model:
+        spend["model"] = model
+    return spend
+
+
 __all__ = [
     "parse_transcript",
     "extract_file_paths",
@@ -271,4 +347,5 @@ __all__ = [
     "provider_status",
     "read_raw_lines",
     "session_metadata",
+    "session_spend",
 ]

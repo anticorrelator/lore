@@ -292,7 +292,7 @@ protocol terminal verbs, stop hooks) appends through the one sanctioned writer,
 | `reason` | string | Failure/reclaim reason; also the review-gate rationale carried by `review_flagged`/`review_held`/`review_released`. Also carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`. |
 | `gate_id` | string | Review-gate audit join key. Omit-when-empty. A gate-open verb (`review_flagged`/`review_held`) sets it as the row's `event_id`; the `review_released` row echoes it here so a reader pairs release→open without replaying state. See [docs/review-gates.md](review-gates.md). |
 | `links` | object | `{work_item?, artifact?}` — pointers to work-item artifacts rather than duplicated progress. Review events point `artifact` at the review packet. Writer defaults to `{}`. |
-| `spend` | object \| null | Reserved. `closed` carries what the TUI knows cheaply at teardown (`duration`); richer spend joins arrive with the model-routing substrate. |
+| `spend` | object \| null | Session token spend, on `closed`. `duration_seconds` is always present; a `basis` enum (`transcript\|rollout\|store\|duration-only`) marks how the tokens were sourced. When the harness exposes a deterministic transcript binding (claude-code, via a spawn-time `--session-id`), the TUI merges the D1 token vocabulary — `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_output_tokens`, `total_tokens`, `cost_usd`, `model`, `harness` (fields the harness does not expose are omitted, never zero-filled). Every gap — codex/opencode-hosted sessions, an absent transcript, a probe timeout, an abrupt quit — degrades to `{duration_seconds, basis:"duration-only"}`. Extraction runs at teardown via `scripts/session-spend.sh`; the row still flows only through the sole writer. |
 
 Optional fields follow **omit-when-empty** discipline: an absent optional field is
 simply not written (its presence is the signal), except `links`, which the writer
@@ -310,7 +310,7 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `needs_input` | TUI | a running session is waiting on input |
 | `quiescent` | TUI | a running session went idle |
 | `resumed` | TUI | a session resumed after idle/input |
-| `closed` | TUI | a session ended (reserves `spend`) |
+| `closed` | TUI | a session ended (carries `spend`: token counts where the harness exposes them, else duration-only) |
 | `step_completed` | protocol terminal verbs | a protocol step finished (e.g. `/implement` phase close) |
 | `harness_turn_ended` | stop hooks | a harness turn boundary was reached |
 | `spawn_failed` | TUI | spawn failed; request returned to pending (carries `reason`) |
@@ -493,9 +493,6 @@ rather than growing this contract.**
   packet, and the retro audit read-path) is its own contract in
   [docs/review-gates.md](review-gates.md). Route review-gate needs there, not into
   this substrate.
-- **No spend joins.** The `spend` object on `closed` is reserved and nullable; the
-  TUI fills only cheap teardown duration. Richer spend arrives with the
-  model-routing substrate.
 - **No compaction, truncation, or rotation** of `events.jsonl` in v1. Byte-offset
   cursors depend on it. If the journal outgrows a single file, that is a new design
   decision, not an in-place change.

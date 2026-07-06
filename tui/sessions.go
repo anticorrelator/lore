@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"strconv"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -11,6 +16,11 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
+
+// sessionSpendProbeTimeout caps the boundary-time token-spend probe
+// (session-spend.sh) at teardown. Teardown must never block on spend, so a
+// probe that exceeds this is killed and the row closes duration-only.
+const sessionSpendProbeTimeout = 5 * time.Second
 
 // liveSession is the metadata the TUI tracks for one local session: enough to
 // write its registry row and to journal its lifecycle. requestID is set only for
@@ -24,6 +34,12 @@ type liveSession struct {
 	// nil defers to initiator (agent auto-closes, human holds open), a set value
 	// forces the outcome. Carried from the request row at spawn.
 	autoClose *bool
+	// sessionID and harness bind teardown's token-spend probe: sessionID is the
+	// spawn-generated harness session id (empty when the harness has no
+	// deterministic binding), harness the framework it was spawned under. Both are
+	// stamped from SessionProcessStartedMsg when the process comes up.
+	sessionID string
+	harness   string
 }
 
 // --- messages ---
@@ -297,13 +313,9 @@ func (m model) instanceRow() session.Instance {
 	}
 }
 
-// closedEventFor builds the `closed` journal row for a torn-down local session,
-// carrying the cheap teardown duration in spend.
-func (m model) closedEventFor(slug string, ls liveSession) session.Event {
-	dur := int(time.Since(ls.started).Seconds())
-	if dur < 0 {
-		dur = 0
-	}
+// closedEventMeta builds the `closed` journal row's identity fields for a
+// torn-down local session, leaving Spend for the caller to fill.
+func (m model) closedEventMeta(slug string, ls liveSession) session.Event {
 	return session.Event{
 		Event:         session.EventClosed,
 		ActorInstance: session.StrPtr(m.instanceName),
@@ -311,8 +323,105 @@ func (m model) closedEventFor(slug string, ls liveSession) session.Event {
 		SessionType:   ls.typ,
 		Initiator:     ls.initiator,
 		RequestID:     ls.requestID,
-		Spend:         json.RawMessage(fmt.Sprintf(`{"duration_seconds":%d}`, dur)),
 	}
+}
+
+// closedEventFor builds the `closed` row with the duration-only spend shape —
+// the synchronous quit-path row (cleanupAllSubprocesses), where the program is
+// exiting and no boundary-time spend probe can run. The interactive teardown
+// paths enrich instead via closedSpendJournalCmd.
+func (m model) closedEventFor(slug string, ls liveSession) session.Event {
+	ev := m.closedEventMeta(slug, ls)
+	ev.Spend = durationOnlySpend(sessionDurationSeconds(ls.started))
+	return ev
+}
+
+// closedSpendJournalCmd runs the boundary-time token-spend probe and appends the
+// enriched `closed` row, both inside one Cmd goroutine so the probe never blocks
+// the UI thread and the append still flows through the sole writer
+// (session-event-append.sh). A session with no deterministic transcript binding,
+// or any probe gap, closes with the duration-only spend; duration_seconds is
+// always merged TUI-side — the helper never sees it.
+func (m model) closedSpendJournalCmd(slug string, ls liveSession) tea.Cmd {
+	script, kdir := m.eventScript, m.config.KnowledgeDir
+	spendScript, cwd := m.spendScript, m.config.ProjectDir
+	ev := m.closedEventMeta(slug, ls)
+	dur := sessionDurationSeconds(ls.started)
+	harness, sessionID := ls.harness, ls.sessionID
+	return func() tea.Msg {
+		ev.Spend = closedSpend(spendScript, harness, sessionID, cwd, dur)
+		return journalResultMsg{err: session.AppendEvent(script, kdir, ev)}
+	}
+}
+
+// sessionDurationSeconds is the teardown wall-clock in whole seconds, floored at
+// zero so a clock skew never emits a negative duration.
+func sessionDurationSeconds(started time.Time) int {
+	dur := int(time.Since(started).Seconds())
+	if dur < 0 {
+		dur = 0
+	}
+	return dur
+}
+
+// durationOnlySpend is the degraded closed-spend object: the always-present
+// duration plus the explicit degradation marker.
+func durationOnlySpend(durationSeconds int) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"duration_seconds":%d,"basis":"duration-only"}`, durationSeconds))
+}
+
+// closedSpend returns the `closed` row's spend object. With a deterministic
+// transcript binding (sessionID set at spawn) it probes session-spend.sh under a
+// short timeout and overlays the returned D1 token fields onto the duration-only
+// base; duration_seconds is always present and TUI-owned. Any gap — no binding,
+// timeout, non-JSON output, or a helper that itself degraded — leaves the
+// duration-only shape (`basis:"duration-only"`).
+func closedSpend(spendScript, harness, sessionID, cwd string, durationSeconds int) json.RawMessage {
+	if spendScript == "" || harness == "" || sessionID == "" {
+		return durationOnlySpend(durationSeconds)
+	}
+	probed := probeSessionSpend(spendScript, harness, sessionID, cwd)
+	if probed == nil {
+		return durationOnlySpend(durationSeconds)
+	}
+	// The helper never emits duration_seconds; it is the teardown's own field, so
+	// stamp it last and let it win over anything the overlay carried.
+	probed["duration_seconds"] = json.RawMessage(strconv.Itoa(durationSeconds))
+	if _, ok := probed["basis"]; !ok {
+		probed["basis"] = json.RawMessage(`"duration-only"`)
+	}
+	out, err := json.Marshal(probed)
+	if err != nil {
+		return durationOnlySpend(durationSeconds)
+	}
+	return out
+}
+
+// probeSessionSpend shells out to session-spend.sh with the session's binding and
+// returns the parsed spend object, or nil on timeout, launch failure, or
+// unparseable output. The helper always exits 0 and prints one JSON object; a
+// non-zero exit here therefore means the probe was killed (timeout) or never ran.
+// The child runs in its own process group so a timeout kills the python
+// grandchild too, not just the bash wrapper.
+func probeSessionSpend(spendScript, harness, sessionID, cwd string) map[string]json.RawMessage {
+	ctx, cancel := context.WithTimeout(context.Background(), sessionSpendProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", spendScript,
+		"--harness", harness, "--session-id", sessionID, "--cwd", cwd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	// stderr is dropped: the helper logs its degradations there, and teardown must
+	// never surface or block on them.
+	if err := cmd.Run(); err != nil {
+		return nil
+	}
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &parsed); err != nil {
+		return nil
+	}
+	return parsed
 }
 
 // idleEventFor builds one of the running-session transition rows

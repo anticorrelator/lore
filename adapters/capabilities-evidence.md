@@ -647,6 +647,58 @@ the exact binary version probed; refresh when the harness is upgraded.
   Ctrl-C from idle) ← `p1_composer_launch{1,2}.log`.
 - **Consumed by:** every row of `codex.interaction`.
 
+### claude-code-spend-telemetry
+
+- **Source:** Local live probe — 2026-07-05 (mirrored in the work item
+  `model-routing-spend-telemetry-empirical-validation/evidence.md`).
+- **URL / path:** `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`;
+  `claude --help` (`--session-id <uuid>`).
+- **Retrieved:** 2026-07-05
+- **Product / version:** Claude Code, unversioned.
+- **Claim:** Assistant transcript rows carry `message.usage` with
+  `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, and
+  `cache_read_input_tokens`, plus `message.model`. `--session-id <uuid>`
+  binds the transcript path deterministically at spawn, so `session_spend`
+  can sum per-assistant-message usage into `basis: transcript` (`total_tokens`
+  derived from the four sums). Deterministic spawn binding justifies
+  `support: full`.
+- **Consumed by:** `claude-code.spend_telemetry` (`support: full`).
+
+### opencode-spend-telemetry
+
+- **Source:** Local live probe — 2026-07-05 (mirrored in the work item
+  `model-routing-spend-telemetry-empirical-validation/evidence.md`).
+- **URL / path:** `~/.local/share/opencode/opencode.db` (sqlite;
+  `message.data` JSON keyed by `session_id`).
+- **Retrieved:** 2026-07-05
+- **Product / version:** OpenCode, unversioned.
+- **Claim:** Assistant `message.data` rows carry `tokens`
+  (`total`, `input`, `output`, `reasoning`, `cache.write`, `cache.read`) and a
+  per-message dollar `cost`, keyed by `session_id`. The `storage/` JSON tree
+  lags this sqlite source of truth, so `session_spend` reads the live store
+  (`basis: store`) and degrades to duration-only when only stale `storage/`
+  JSON is reachable. No deterministic session→artifact binding exists at spawn,
+  so TUI-hosted opencode sessions stay duration-only in v1 — `support: partial`.
+- **Consumed by:** `opencode.spend_telemetry` (`support: partial`).
+
+### codex-spend-telemetry
+
+- **Source:** Local live probe — 2026-07-05 (mirrored in the work item
+  `model-routing-spend-telemetry-empirical-validation/evidence.md`).
+- **URL / path:** `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`;
+  `codex exec --help` (`--json`, `-o/--output-last-message`).
+- **Retrieved:** 2026-07-05
+- **Product / version:** codex-cli, unversioned.
+- **Claim:** Rollout `event_msg` rows with `payload.type == "token_count"`
+  carry cumulative `payload.info.total_token_usage` (`input_tokens`,
+  `cached_input_tokens`, `output_tokens`, `reasoning_output_tokens`,
+  `total_tokens`); `turn_context` rows carry `payload.model`. `session_spend`
+  reads the terminal `token_count` (`basis: rollout`), normalizing
+  `cached_input_tokens → cache_read_input_tokens`. Rollout paths are
+  date-nested with no spawn-time session binding, so TUI-hosted codex sessions
+  stay duration-only in v1 — `support: partial`.
+- **Consumed by:** `codex.spend_telemetry` (`support: partial`).
+
 ---
 
 ## Known gaps and harness-specific exclusions
@@ -724,6 +776,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - claude-code-headless-runner
 - claude-code-model-routing
 - claude-code-interaction
+- claude-code-spend-telemetry
 - opencode-instructions
 - opencode-skills
 - opencode-mcp
@@ -739,6 +792,7 @@ matches the union of all `evidence:` fields in capabilities.json.
 - opencode-plugin-runtime
 - opencode-model-routing
 - opencode-interaction
+- opencode-spend-telemetry
 - codex-instructions
 - codex-skills
 - codex-mcp
@@ -753,3 +807,4 @@ matches the union of all `evidence:` fields in capabilities.json.
 - codex-headless-runner
 - codex-model-routing
 - codex-interaction
+- codex-spend-telemetry

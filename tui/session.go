@@ -23,7 +23,7 @@ func (m model) endLocalSession(slug string) (model, []tea.Cmd) {
 	delete(m.sessionIdle, slug)
 	return m, []tea.Cmd{
 		m.writeInstanceCmd(),
-		journalCmd(m.eventScript, m.config.KnowledgeDir, m.closedEventFor(slug, ls)),
+		m.closedSpendJournalCmd(slug, ls),
 	}
 }
 
@@ -180,6 +180,10 @@ func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (m
 		meta = liveSession{typ: "spec", initiator: "human", started: time.Now()}
 	}
 	delete(m.pendingSpawns, slug)
+	// Stamp the spawn-time spend binding onto the live session so teardown can
+	// probe this session's transcript (empty session id → duration-only close).
+	meta.sessionID = msg.SessionID
+	meta.harness = msg.Harness
 	if m.localSessions == nil {
 		m.localSessions = make(map[string]liveSession)
 	}

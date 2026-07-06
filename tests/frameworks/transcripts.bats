@@ -328,3 +328,140 @@ print('OK')
   [ "$status" -eq 0 ]
   [[ "$output" == *"OK"* ]]
 }
+
+# ============================================================
+# session_spend — boundary-time token-spend extraction
+# ============================================================
+
+@test "session_spend (claude-code) sums message.usage into the D1 vocabulary" {
+  # Two assistant rows with usage; sums must equal a hand computation and
+  # basis must be 'transcript'.
+  SPEND_FIXTURE="$(mktemp -t spend-cc.XXXXXX.jsonl)"
+  python3 <<PYEOF
+import json
+rows = [
+    {"type": "assistant", "message": {"role": "assistant", "model": "claude-fable-5",
+        "usage": {"input_tokens": 100, "output_tokens": 10,
+                  "cache_read_input_tokens": 5, "cache_creation_input_tokens": 2}}},
+    {"type": "user", "message": {"role": "user", "content": "hi"}},
+    {"type": "assistant", "message": {"role": "assistant", "model": "claude-fable-5",
+        "usage": {"input_tokens": 20, "output_tokens": 4,
+                  "cache_read_input_tokens": 1, "cache_creation_input_tokens": 0}}},
+]
+with open("$SPEND_FIXTURE", "w") as f:
+    for r in rows:
+        f.write(json.dumps(r) + "\n")
+PYEOF
+  run provider_py "
+from adapters.transcripts import get_provider
+s = get_provider('claude-code').session_spend('$SPEND_FIXTURE')
+assert s['basis'] == 'transcript', s
+assert s['input_tokens'] == 120, s
+assert s['output_tokens'] == 14, s
+assert s['cache_read_input_tokens'] == 6, s
+assert s['cache_creation_input_tokens'] == 2, s
+assert s['total_tokens'] == 142, s
+assert s['model'] == 'claude-fable-5', s
+assert s['harness'] == 'claude-code', s
+assert 'cost_usd' not in s and 'reasoning_output_tokens' not in s, s
+print('OK')
+"
+  rm -f "$SPEND_FIXTURE"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+}
+
+@test "session_spend (claude-code) degrades to duration-only on a missing transcript" {
+  run provider_py "
+from adapters.transcripts import get_provider
+s = get_provider('claude-code').session_spend('/no/such/transcript.jsonl')
+assert s == {'basis': 'duration-only'}, s
+print('OK')
+"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+}
+
+@test "session_spend (codex) reads terminal token_count and normalizes cached_input_tokens" {
+  ROLLOUT_FIXTURE="$(mktemp -t spend-codex.XXXXXX.jsonl)"
+  python3 <<PYEOF
+import json
+rows = [
+    {"type": "session_meta", "payload": {"type": "session_meta", "id": "x"}},
+    {"type": "turn_context", "payload": {"type": "turn_context", "model": "gpt-5.4-mini"}},
+    {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage":
+        {"input_tokens": 500, "cached_input_tokens": 100, "output_tokens": 30,
+         "reasoning_output_tokens": 5, "total_tokens": 530}}}},
+    {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage":
+        {"input_tokens": 900, "cached_input_tokens": 200, "output_tokens": 60,
+         "reasoning_output_tokens": 12, "total_tokens": 972}}}},
+]
+with open("$ROLLOUT_FIXTURE", "w") as f:
+    for r in rows:
+        f.write(json.dumps(r) + "\n")
+PYEOF
+  run provider_py "
+from adapters.transcripts import get_provider
+s = get_provider('codex').session_spend('$ROLLOUT_FIXTURE')
+assert s['basis'] == 'rollout', s
+assert s['input_tokens'] == 900, s          # terminal (cumulative) row, not the first
+assert s['cache_read_input_tokens'] == 200, s   # cached_input_tokens normalized
+assert s['output_tokens'] == 60, s
+assert s['reasoning_output_tokens'] == 12, s
+assert s['total_tokens'] == 972, s
+assert s['model'] == 'gpt-5.4-mini', s
+assert s['harness'] == 'codex', s
+print('OK')
+"
+  rm -f "$ROLLOUT_FIXTURE"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+}
+
+@test "session_spend (opencode) sums live-store tokens+cost and degrades when store absent" {
+  OC_DATA_DIR="$(mktemp -d)"
+  python3 <<PYEOF
+import json, sqlite3, os
+db = os.path.join("$OC_DATA_DIR", "opencode.db")
+conn = sqlite3.connect(db)
+conn.execute("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT)")
+rows = [
+    ("m1", "ses_A", {"role": "assistant", "modelID": "gpt-5.5", "cost": 0.02,
+        "tokens": {"total": 1000, "input": 800, "output": 40, "reasoning": 3,
+                   "cache": {"write": 10, "read": 5}}}),
+    ("m2", "ses_A", {"role": "user", "content": "hi"}),
+    ("m3", "ses_A", {"role": "assistant", "modelID": "gpt-5.5", "cost": 0.01,
+        "tokens": {"total": 500, "input": 300, "output": 20, "reasoning": 0,
+                   "cache": {"write": 0, "read": 100}}}),
+    ("m4", "ses_B", {"role": "assistant", "modelID": "gpt-5.5", "cost": 9.9,
+        "tokens": {"total": 9, "input": 9, "output": 0, "reasoning": 0,
+                   "cache": {"write": 0, "read": 0}}}),
+]
+for mid, sid, data in rows:
+    conn.execute("INSERT INTO message VALUES (?,?,?)", (mid, sid, json.dumps(data)))
+conn.commit(); conn.close()
+PYEOF
+  export OPENCODE_DATA_DIR="$OC_DATA_DIR"
+  run provider_py "
+from adapters.transcripts import get_provider
+prov = get_provider('opencode')
+s = prov.session_spend('ses_A')
+assert s['basis'] == 'store', s
+assert s['input_tokens'] == 1100, s          # only ses_A assistant rows
+assert s['output_tokens'] == 60, s
+assert s['cache_read_input_tokens'] == 105, s
+assert s['cache_creation_input_tokens'] == 10, s
+assert s['total_tokens'] == 1500, s
+assert abs(s['cost_usd'] - 0.03) < 1e-9, s
+assert s['model'] == 'gpt-5.5', s
+# Absent store degrades to duration-only.
+import os
+os.remove(os.path.join('$OC_DATA_DIR', 'opencode.db'))
+s2 = prov.session_spend('ses_A')
+assert s2 == {'basis': 'duration-only'}, s2
+print('OK')
+"
+  rm -rf "$OC_DATA_DIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+}

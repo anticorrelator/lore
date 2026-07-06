@@ -81,6 +81,14 @@ type SessionProcessStartedMsg struct {
 	Ptmx   *os.File      // PTY master — read/write interface to subprocess
 	Cmd    *exec.Cmd     // for cmd.Wait() in cleanup
 	Output <-chan []byte // byte chunks from the PTY reader goroutine
+
+	// SessionID is the spawn-generated harness session id passed as --session-id,
+	// empty when the active harness has no deterministic session→artifact binding.
+	// Carried back so the model can bind teardown's token-spend probe to this
+	// session's transcript. Harness is the resolved launch framework, the probe's
+	// --harness argument.
+	SessionID string
+	Harness   string
 }
 
 // TerminalDetachMsg is sent when the user double-presses Esc within
@@ -965,6 +973,21 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 		} else {
 			fmt.Fprintf(os.Stderr, "[lore] degraded: inline_settings_override skipped (capability=none on framework=%s); session-scoped settings overrides unavailable\n", activeFramework)
 		}
+
+		// Deterministic transcript binding: when the active harness joins its
+		// session artifact by a spawn-provided id (spend_telemetry binding
+		// `session-id-flag`, claude-code in v1), generate a UUID and pass it as
+		// --session-id so teardown can resolve the transcript for token-spend
+		// extraction. A capabilities read error, no spend block, or any other
+		// binding leaves sessionID empty and injects no flag — codex/opencode
+		// error on unknown flags and have no binding, so they close duration-only.
+		var sessionID string
+		if _, _, binding, ok, err := config.HarnessSpendTelemetry(activeFramework); err == nil && ok && binding == "session-id-flag" {
+			if id := newSessionID(); id != "" {
+				sessionID = id
+				args = append(args, "--session-id", id)
+			}
+		}
 		args = append(args, initialPrompt)
 
 		cmd := exec.Command(harnessBinary, args...)
@@ -1008,10 +1031,12 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 		}()
 
 		return SessionProcessStartedMsg{
-			Slug:   slug,
-			Ptmx:   ptmx,
-			Cmd:    cmd,
-			Output: outputCh,
+			Slug:      slug,
+			Ptmx:      ptmx,
+			Cmd:       cmd,
+			Output:    outputCh,
+			SessionID: sessionID,
+			Harness:   activeFramework,
 		}
 	}
 }

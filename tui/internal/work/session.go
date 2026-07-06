@@ -1,6 +1,8 @@
 package work
 
 import (
+	"crypto/rand"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -104,4 +106,20 @@ func (s SessionEnv) vars() []string {
 // layer reads back exactly.
 func modelEnvSuffix(role string) string {
 	return strings.ToUpper(strings.ReplaceAll(role, "-", "_"))
+}
+
+// newSessionID returns a random RFC-4122 v4 UUID. A harness that binds its
+// session artifact by a spawn-provided id (claude-code's --session-id) both
+// requires a valid UUID and names its transcript <uuid>.jsonl, so generating the
+// id here makes the teardown transcript path deterministic. Returns "" if the
+// system CSPRNG is unavailable, in which case the caller passes no --session-id
+// and the session closes duration-only.
+func newSessionID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

@@ -97,6 +97,7 @@ func main() {
 		m.instanceName = name
 		m.sessionsDir = sessionsDir
 		m.eventScript = filepath.Join(os.Getenv("HOME"), ".lore/scripts/session-event-append.sh")
+		m.spendScript = filepath.Join(os.Getenv("HOME"), ".lore/scripts/session-spend.sh")
 		m.instanceStartedISO = time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	}
 

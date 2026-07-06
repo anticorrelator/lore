@@ -397,16 +397,23 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
 
 3. **Write the worker-report execution log entry** — immediately after task acceptance. Pass `--template-version "$WORKER_TEMPLATE_VERSION"` because the body logged is the worker's report:
    ```bash
-   printf 'Task: %s\nChanges: %s\nSkills: %s\nTier2-claims: %s\nObservations: %s\nConvention: %s\nInvestigation: %s\nBlockers: %s\nConsultations: %s\nTest result: %s\n' \
-     "<task-subject>" "<worker Changes field>" "<worker Skills used field>" \
-     "<comma-separated claim_ids from Tier 2 evidence>" \
-     "<worker Observations field or Tier 3 candidates summary>" \
-     "<worker Convention handling field + your §2 assessment outcome: clean | followup-opened: <reason>>" \
-     "<worker Investigation field>" "<worker Blockers field>" "<worker Consultations field — verbatim YAML list, or 'none'>" \
-     "<passed|failed|skipped>" \
-     | bash ~/.lore/scripts/write-execution-log.sh --slug "$SLUG" --source implement-lead --template-version "$WORKER_TEMPLATE_VERSION"
+   {
+     printf 'Task: %s\nChanges: %s\nSkills: %s\nTier2-claims: %s\nObservations: %s\nConvention: %s\nInvestigation: %s\nBlockers: %s\nConsultations: %s\nTest result: %s\n' \
+       "<task-subject>" "<worker Changes field>" "<worker Skills used field>" \
+       "<comma-separated claim_ids from Tier 2 evidence>" \
+       "<worker Observations field or Tier 3 candidates summary>" \
+       "<worker Convention handling field + your §2 assessment outcome: clean | followup-opened: <reason>>" \
+       "<worker Investigation field>" "<worker Blockers field>" "<worker Consultations field — verbatim YAML list, or 'none'>" \
+       "<passed|failed|skipped>"
+     # Codex-routed tasks only — one Spend: line copied from the report's
+     # **Spend:** section (see the Spend-line note below). Drop this line
+     # entirely for claude-native workers, which relay no **Spend:** section.
+     printf 'Spend: task=%s %s\n' "<task-id>" "<the report's **Spend:** tokens, verbatim>"
+   } | bash ~/.lore/scripts/write-execution-log.sh --slug "$SLUG" --source implement-lead --template-version "$WORKER_TEMPLATE_VERSION"
    ```
    If the worker omitted a field, use `None`.
+
+   **The `Spend:` line — codex-routed tasks only (D6).** When an accepted worker report carries a `**Spend:**` section — the `agents/codex-worker.md` chaperone relays one; claude-native Task-tool workers do not — copy its `key=value` tokens verbatim into one `Spend: task=<task-id> <copied tokens>` line: `harness=<h> model=<m> effort=<e|none> input_tokens=<n> … duration_seconds=<n> basis=<b>`, the closed spend vocabulary flattened to `key=value`, fields omitted exactly as the report omitted them. It is a verbatim copy — the lead adds only `task=<task-id>` (the id it is logging), never rewrites, re-splits the effort suffix (already split adapter-side), or backfills a token the report did not carry. A report with **no** `**Spend:**` section writes **no** `Spend:` line; `impl-close` reads that absence as `spend: null`. A degraded chaperone run relays a duration-only `**Spend:**` (`duration_seconds=<n> basis=duration-only`) — copy it the same way. The line records the *effective* model the chaperone resolved, which may differ from the class binding `impl-close` re-resolves; both stay legible.
 
    **Log discipline:** one execution-log entry per task, written only after that task's worker completion report arrives — never log `pending worker report` placeholders. When a worker reports several tasks in one message, write one entry per task (batched entries lose per-task sequence and starve /retro of evidence).
    <!-- Sunset: remove if execution-log completeness retro-evolution rows targeting skills/implement/SKILL.md change-type evidence-gap recur from ≥3 new distinct work items within the next 20 implement cycles. -->

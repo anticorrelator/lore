@@ -377,6 +377,49 @@ func TestHarnessGracefulExitSequence_UnknownDegrades(t *testing.T) {
 	}
 }
 
+func TestHarnessSpendTelemetry(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	cases := []struct {
+		framework   string
+		wantSupport string
+		wantArtact  string
+		wantBinding string
+	}{
+		{"claude-code", "full", "transcript", "session-id-flag"},
+		{"opencode", "partial", "store", "none"},
+		{"codex", "partial", "rollout", "none"},
+	}
+	for _, c := range cases {
+		support, artifact, binding, ok, err := HarnessSpendTelemetry(c.framework)
+		if err != nil {
+			t.Errorf("HarnessSpendTelemetry(%q): %v", c.framework, err)
+			continue
+		}
+		if !ok {
+			t.Errorf("HarnessSpendTelemetry(%q): expected a usable spend block", c.framework)
+			continue
+		}
+		if support != c.wantSupport || artifact != c.wantArtact || binding != c.wantBinding {
+			t.Errorf("HarnessSpendTelemetry(%q) = (%q, %q, %q), want (%q, %q, %q)",
+				c.framework, support, artifact, binding, c.wantSupport, c.wantArtact, c.wantBinding)
+		}
+	}
+}
+
+// An unknown framework degrades to not-supported rather than erroring, mirroring
+// the interaction readers: the close path falls back to duration-only rather than
+// crashing on a harness with no probed spend block.
+func TestHarnessSpendTelemetry_UnknownDegrades(t *testing.T) {
+	setupFakeLoreData(t, "claude-code", nil)
+	support, artifact, binding, ok, err := HarnessSpendTelemetry("bogus")
+	if err != nil {
+		t.Fatalf("HarnessSpendTelemetry(bogus): unexpected error %v", err)
+	}
+	if ok || support != "" || artifact != "" || binding != "" {
+		t.Errorf("HarnessSpendTelemetry(bogus) = (%q, %q, %q, %v), want empty + false", support, artifact, binding, ok)
+	}
+}
+
 func TestResolveAgentTemplate(t *testing.T) {
 	setupFakeLoreData(t, "claude-code", nil)
 

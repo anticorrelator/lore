@@ -118,14 +118,15 @@ if bad:
 }
 
 check_no_partial_profiles() {
-  # model_routing and interaction live at the framework root (siblings to
-  # capabilities) rather than inside the per-framework capabilities map because
-  # their shapes are not full|partial|fallback|none. Validate routing via
-  # check_model_routing and interaction via check_interaction_rows.
+  # model_routing, interaction, and spend_telemetry live at the framework root
+  # (siblings to capabilities) rather than inside the per-framework capabilities
+  # map because their shapes are not full|partial|fallback|none. Validate routing
+  # via check_model_routing, interaction via check_interaction_rows, and spend via
+  # check_spend_telemetry.
   python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
-declared = set(d["capabilities"].keys()) - {"model_routing", "interaction"}
+declared = set(d["capabilities"].keys()) - {"model_routing", "interaction", "spend_telemetry"}
 bad = []
 for fw_id, fw in d["frameworks"].items():
     have = set((fw.get("capabilities") or {}).keys())
@@ -225,6 +226,47 @@ if bad:
 ' "$CAPS"
 }
 
+check_spend_telemetry() {
+  # spend_telemetry is a framework-root sibling block (like model_routing and
+  # interaction): every framework declares one, evidence-gated, with a closed
+  # artifact/binding vocabulary and a fields[] list drawn from the normalized
+  # spend token vocabulary. Derived from the JSON, never hard-coded per harness.
+  python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+levels = set(d["support_levels"].keys())
+ARTIFACTS = {"transcript", "rollout", "store"}
+BINDINGS = {"session-id-flag", "none"}
+FIELD_VOCAB = {"input_tokens", "output_tokens", "cache_read_input_tokens",
+               "cache_creation_input_tokens", "reasoning_output_tokens",
+               "total_tokens", "cost_usd", "model"}
+bad = []
+for fw_id, fw in d["frameworks"].items():
+    st = fw.get("spend_telemetry")
+    if not isinstance(st, dict):
+        bad.append(f"{fw_id}: missing spend_telemetry block"); continue
+    if st.get("support") not in levels:
+        bad.append(f"{fw_id}.spend_telemetry.support outside closed set")
+    ev = st.get("evidence")
+    if not isinstance(ev, str) or not ev.strip():
+        bad.append(f"{fw_id}.spend_telemetry missing evidence")
+    if st.get("artifact") not in ARTIFACTS:
+        bad.append(f"{fw_id}.spend_telemetry.artifact outside {sorted(ARTIFACTS)}")
+    if st.get("binding") not in BINDINGS:
+        bad.append(f"{fw_id}.spend_telemetry.binding outside {sorted(BINDINGS)}")
+    fields = st.get("fields")
+    if not isinstance(fields, list) or not fields:
+        bad.append(f"{fw_id}.spend_telemetry.fields not a non-empty list")
+    else:
+        for f in fields:
+            if f not in FIELD_VOCAB:
+                bad.append(f"{fw_id}.spend_telemetry.fields has unknown field {f!r}")
+if bad:
+    for b in bad: print(b)
+    sys.exit(1)
+' "$CAPS"
+}
+
 # --- Evidence cross-reference ---
 
 evidence_index() {
@@ -261,6 +303,8 @@ ids = set()
 for fw_id, fw in data.get("frameworks", {}).items():
     mr = fw.get("model_routing") or {}
     if mr.get("evidence"): ids.add(mr["evidence"])
+    st = fw.get("spend_telemetry") or {}
+    if st.get("evidence"): ids.add(st["evidence"])
     for cap, cell in (fw.get("capabilities") or {}).items():
         if cell.get("evidence"): ids.add(cell["evidence"])
     for row, cell in (fw.get("interaction") or {}).items():
@@ -482,6 +526,7 @@ assert_ok "every framework declares all known capabilities"           check_no_p
 assert_ok "every non-none cell carries a non-empty evidence pointer"  check_evidence_present_for_non_none
 assert_ok "every framework's model_routing.shape and evidence valid"  check_model_routing
 assert_ok "every framework's interaction rows are evidence-gated + typed" check_interaction_rows
+assert_ok "every framework's spend_telemetry block is evidence-gated + typed" check_spend_telemetry
 
 echo "== Evidence cross-reference =="
 assert_ok "every consumed evidence id resolves in _index"             check_consumed_resolve_in_index

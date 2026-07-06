@@ -385,12 +385,41 @@ operations here is the schema-bump-eligible action documented in
 | `session_metadata`         | session_id or path                    | `{"session_id": str, "session_date": datetime \| None}` from the first parseable entry             |
 | `tool_use_timestamps`      | session_id or path, tool_name         | list of `(message_index, ISO-8601 timestamp str)` for entries whose tool_use blocks invoke `tool_name`, in transcript order |
 | `list_session_paths`       | cwd                                   | ALL session artifact paths for that cwd sorted by mtime descending (index 0 is typically the in-flight current session at hook time), or `[]` when session enumeration is unavailable |
+| `session_spend`            | session binding (path for file-based harnesses; session id for the opencode store) | normalized spend dict (see below), or `{"basis": "duration-only"}` when spend is unavailable |
 
 Adapters that cannot supply `read_raw_lines` with the alignment
 invariant MUST return an empty list and report `partial` with
 `read_raw_lines` named in the degraded reason. Adapters that cannot
 supply `session_metadata` MUST return the documented sentinels
 (`"unknown"`, `None`) — never raise.
+
+#### `session_spend` — boundary-time token-spend extraction
+
+`session_spend` normalizes a harness's per-dialect token accounting onto
+one closed vocabulary: `input_tokens`, `output_tokens`,
+`cache_read_input_tokens`, `cache_creation_input_tokens`,
+`reasoning_output_tokens`, `total_tokens`, `cost_usd`, `model`, `harness`,
+and a `basis` discriminator (`transcript` | `rollout` | `store` |
+`duration-only`). Token fields a harness does not expose are omitted, never
+zero-filled; `basis: "duration-only"` (a bare `{"basis": "duration-only"}`)
+is the explicit degradation marker returned whenever the artifact is absent,
+unreadable, or carries no usage. Per-dialect normalization happens here so
+consumers see one shape: claude-code sums `message.usage` over the
+transcript; codex reads the terminal cumulative `token_count` from the
+rollout (mapping `cached_input_tokens` → `cache_read_input_tokens`);
+opencode sums assistant `tokens` + `cost` from its live sqlite store,
+degrading to duration-only when only the stale `storage/` JSON is reachable.
+The declared per-harness support/artifact/binding is the `spend_telemetry`
+block in `adapters/capabilities.json`; the non-Python front is
+`scripts/session-spend.sh`.
+
+**Extraction is boundary-time only.** `session_spend` runs at the session
+boundary — at teardown, while the artifact still exists — because the
+append-only telemetry it feeds (the `closed` journal row) outlives the
+transcripts it joins to. Retrospective bulk mining of rotated transcripts
+is out of contract: no consumer may be designed around re-mining spend from
+old artifacts (see
+`conventions/append-only-telemetry-logs-outlive-session-transcr`).
 
 The Claude-specific `type='human'`/`type='assistant'` top-level
 discriminator does NOT become a provider operation — the consumer

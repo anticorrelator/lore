@@ -1127,6 +1127,67 @@ framework_model_routing_tiers() {
   jq -r --arg fw "$active" '(.frameworks[$fw].model_routing.tiers // [])[] | select(type == "string")' "$capabilities_file" 2>/dev/null
 }
 
+# --- framework_spend_telemetry_field ---
+# Print one scalar field of the per-framework spend_telemetry sibling block from
+# adapters/capabilities.json `.frameworks.<fw>.spend_telemetry.<field>`.
+# spend_telemetry is a framework-root sibling of model_routing and interaction
+# describing how a harness exposes token spend: `support` (closed level set),
+# `evidence` (id resolving in capabilities-evidence.md), `artifact`
+# (transcript | rollout | store — the source kind), and `binding`
+# (session-id-flag | none — the spawn-time join mechanism). Go counterpart:
+# the spendTelemetry struct in tui/internal/config/framework.go.
+#
+# Args: $1 = field, one of: support | evidence | artifact | binding | notes
+#       $2 = framework id (optional; defaults to the active framework)
+#
+# Output: a single line on stdout, exit 0:
+#   - The field value when it resolves to a non-null JSON scalar.
+#   - The literal `unsupported` when the framework has no spend_telemetry block
+#     or the field is absent/null — with a `[lore] degraded:` notice on stderr.
+#     A harness without a probed spend row is the expected state for a newly
+#     added harness, so callers (session-spend.sh) fall back to duration-only
+#     rather than crashing.
+#
+# Exit codes:
+#   0  value or `unsupported` printed.
+#   1  unknown field (the field set is closed), missing capabilities.json, or jq
+#      unavailable.
+framework_spend_telemetry_field() {
+  local field="$1"
+  local framework="${2:-}"
+  [[ -z "$field" ]] && { echo "Error: framework_spend_telemetry_field requires a field" >&2; return 1; }
+  case "$field" in
+    support|evidence|artifact|binding|notes) ;;
+    *) echo "Error: unknown spend_telemetry field '$field' (allowed: support, evidence, artifact, binding, notes)" >&2; return 1 ;;
+  esac
+
+  if ! command -v jq &>/dev/null; then
+    echo "Error: framework_spend_telemetry_field requires jq" >&2
+    return 1
+  fi
+
+  if [[ -z "$framework" ]]; then
+    framework=$(resolve_active_framework) || return 1
+  fi
+
+  local capabilities_file="$LORE_LIB_DIR/../adapters/capabilities.json"
+  if [[ ! -f "$capabilities_file" ]]; then
+    echo "Error: framework_spend_telemetry_field cannot read $capabilities_file" >&2
+    return 1
+  fi
+
+  local present
+  present=$(jq -r --arg fw "$framework" --arg f "$field" \
+    '(.frameworks[$fw].spend_telemetry[$f]) != null' "$capabilities_file" 2>/dev/null)
+  if [[ "$present" != "true" ]]; then
+    echo "[lore] degraded: spend_telemetry.$field unavailable for framework '$framework' (no probed row); skipping" >&2
+    echo "unsupported"
+    return 0
+  fi
+  jq -r --arg fw "$framework" --arg f "$field" \
+    '.frameworks[$fw].spend_telemetry[$f]' "$capabilities_file" 2>/dev/null
+}
+
 # --- resolve_model_for_role ---
 # Print the resolved model id for a role on stdout.
 # Role MUST be one of the closed set in adapters/roles.json (see T3); unknown

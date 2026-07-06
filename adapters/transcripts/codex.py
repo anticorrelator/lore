@@ -319,6 +319,91 @@ def session_metadata(path: str) -> dict:
     return {"session_id": session_id, "session_date": session_date}
 
 
+# ---------------------------------------------------------------------------
+# Session spend extraction
+# ---------------------------------------------------------------------------
+
+def _token_usage_from_payload(payload: dict) -> dict | None:
+    """Return the cumulative token-usage map from a `token_count` payload.
+
+    Codex nests the cumulative totals at `payload.info.total_token_usage`;
+    older/other shapes place them at `payload.total_token_usage` or inline
+    on `payload`. Returns the first shape that carries token keys, or None.
+    """
+    if not isinstance(payload, dict):
+        return None
+    info = payload.get("info")
+    if isinstance(info, dict) and isinstance(info.get("total_token_usage"), dict):
+        return info["total_token_usage"]
+    if isinstance(payload.get("total_token_usage"), dict):
+        return payload["total_token_usage"]
+    if isinstance(info, dict) and any(k in info for k in ("input_tokens", "total_tokens")):
+        return info
+    if any(k in payload for k in ("input_tokens", "total_tokens")):
+        return payload
+    return None
+
+
+def session_spend(path: str) -> dict:
+    """Read the terminal cumulative `token_count` from a codex rollout.
+
+    Codex emits cumulative `token_count` events throughout a run; the last
+    one carries the run totals. Returns the closed spend vocabulary with
+    `basis: "rollout"`, mapping codex's `cached_input_tokens` onto the
+    normalized `cache_read_input_tokens` and passing through `input_tokens`,
+    `output_tokens`, `reasoning_output_tokens`, and `total_tokens`
+    (codex's own cumulative total). `model` is the last `turn_context`
+    model id when present. Fields the rollout does not carry are omitted.
+
+    Degrades to `{"basis": "duration-only"}` when the rollout is absent,
+    unreadable, or carries no `token_count` event.
+    """
+    events = _read_rollout_events(path)
+    if not events:
+        return {"basis": "duration-only"}
+
+    usage: dict | None = None
+    model = ""
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        payload = ev.get("payload")
+        # Rollout rows wrap the event in `payload`; some shapes expose the
+        # event type at the top level. Accept either.
+        row_type = None
+        if isinstance(payload, dict):
+            row_type = payload.get("type")
+        if row_type is None:
+            row_type = ev.get("type")
+        if row_type == "token_count":
+            found = _token_usage_from_payload(payload if isinstance(payload, dict) else ev)
+            if found is not None:
+                usage = found  # keep last — cumulative totals grow over the run
+        # `turn_context` rows carry the active model id under `payload.model`.
+        if isinstance(payload, dict):
+            m = payload.get("model")
+            if isinstance(m, str) and m:
+                model = m
+
+    if not isinstance(usage, dict):
+        return {"basis": "duration-only"}
+
+    spend = {"harness": "codex", "basis": "rollout"}
+    if "input_tokens" in usage:
+        spend["input_tokens"] = int(usage.get("input_tokens") or 0)
+    if "output_tokens" in usage:
+        spend["output_tokens"] = int(usage.get("output_tokens") or 0)
+    if "cached_input_tokens" in usage:
+        spend["cache_read_input_tokens"] = int(usage.get("cached_input_tokens") or 0)
+    if "reasoning_output_tokens" in usage:
+        spend["reasoning_output_tokens"] = int(usage.get("reasoning_output_tokens") or 0)
+    if "total_tokens" in usage:
+        spend["total_tokens"] = int(usage.get("total_tokens") or 0)
+    if model:
+        spend["model"] = model
+    return spend
+
+
 __all__ = [
     "parse_transcript",
     "extract_file_paths",
@@ -327,4 +412,5 @@ __all__ = [
     "provider_status",
     "read_raw_lines",
     "session_metadata",
+    "session_spend",
 ]

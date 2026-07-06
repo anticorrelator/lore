@@ -42,14 +42,15 @@ Task:
 
 The Task tool spawns Claude-native subagents only, so a Codex implementation worker is a chaperone: a cheap Claude subagent (`agents/codex-worker.md`) whose body drives `codex exec` and relays the result. Spend spreads because the chaperone sits blocked on the Codex call at cheap-tier cost while Codex burns the implementation tokens.
 
-Pick the chaperone's Claude model from the lowest validated claude-code tier. `model_routing.tiers` is ordered **cheapest-first (ascending capability)**, so the first entry is the cheapest validated alias.
+**Put the chaperone's Claude tier to the user at codex-dispatch — never default it.** The chaperone only relays (it sits blocked on the Codex call doing no implementation work), so the wrapper design wants it on the cheapest validated tier — `tiers[0]`, haiku. But the standing model-floor directive ([[knowledge:preferences/model-floor-directive-2026-07-05-for-time-being]]) holds work-doing agents at opus minimum and names this chaperone as the one exception *pending an explicit user decision when codex dispatch activates*. So at the dispatch that first routes workers to Codex, ask the user which tier the chaperone runs on — `tiers[0]` (cheapest, per the wrapper design) or opus (per the floor) — and use their answer. Do not silently pick `tiers[0]`; do not silently apply the floor. `model_routing.tiers` is ordered **cheapest-first (ascending capability)**; enumerate the ladder to present the options:
 
 ```
 source ~/.lore/scripts/lib.sh
-CHAPERONE_MODEL=$(framework_model_routing_tiers claude-code | head -n1)
+framework_model_routing_tiers claude-code   # validated claude-code alias ladder, cheapest-first — present tiers[0] and the opus option to the user
+CHAPERONE_MODEL=<the tier the user chose at this dispatch>
 ```
 
-**Empty-tiers handling:** an empty `tiers` array means claude-code has no validated alias ladder — do not guess an alias (a wrong alias fails only at spawn time). Omit the `model:` field so the chaperone inherits the session default model. The chaperone still routes the implementation to Codex; only its own (cheap) tier selection is lost.
+**Empty-tiers handling:** an empty `tiers` array means claude-code has no validated alias ladder — do not guess an alias (a wrong alias fails only at spawn time). Omit the `model:` field so the chaperone inherits the session default model. The chaperone still routes the implementation to Codex; only its own tier selection is lost.
 
 The class-qualified role is passed to the chaperone as `{{worker_role}}` so it resolves the Codex-side binding for the right class. Resolve it the same way (mapping table above): `worker` for standard/null, `worker-mechanical`, or `worker-judgment-dense`; for a merged same-file chain use the chain's max class.
 
@@ -68,3 +69,5 @@ Task:
 ```
 
 The chaperone resolves the Codex-side worker binding itself via `LORE_FRAMEWORK=codex resolve_model_for_role {{worker_role}} implement` and reports the effective Codex model back — that resolved model is what to confirm against the user/plan's stated intent. The chaperone marks its result `degraded` when Codex returns no parseable report; on a degraded return, re-dispatch the task as a default-route same-harness worker (codex routing is an optimization, never a dependency).
+
+The chaperone also captures the Codex run's token spend (its terminal `token_count` event) plus its own wall-clock, and relays them as a `**Spend:**` section in the closed spend vocabulary (duration-only, never fabricated tokens, on a degraded run). At task acceptance the lead copies that section into the task's execution-log atom as one `Spend: task=<id> …` line (Step 4 §3); `impl-close` joins it onto the scorecard row's `task_attribution`. Default-route claude-native workers expose no token stream, so their tasks relay no `**Spend:**` section and carry `spend: null`.

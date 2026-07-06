@@ -215,6 +215,7 @@ type model struct {
 	instanceName       string
 	sessionsDir        string
 	eventScript        string
+	spendScript        string
 	instanceStartedISO string
 	localSessions      map[string]liveSession
 	pendingSpawns      map[string]liveSession

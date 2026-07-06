@@ -500,11 +500,12 @@ JSON
 # capabilities.json model_routing.tiers ordering contract
 # ============================================================
 
-@test "claude-code model_routing.tiers ascend cheapest-first (codex-worker chaperone reads tiers[0])" {
-  # The codex-worker chaperone (agents/codex-worker.md) spawns itself on
-  # model_routing.tiers[0] as the cheapest claude-code tier while codex burns
-  # implementation tokens. If this ladder is reordered so tiers[0] is not the
-  # cheapest, the chaperone silently runs on an expensive tier. Pin the order.
+@test "claude-code model_routing.tiers ascend cheapest-first (codex-worker chaperone presents tiers[0])" {
+  # At codex-dispatch the lead puts the chaperone's tier to the user (see
+  # skills/implement/templates/worker-spawn.md) — tiers[0] as the cheapest
+  # option per the wrapper design, or opus per the standing model floor. The
+  # ladder must stay cheapest-first so tiers[0] is genuinely the cheapest option
+  # presented; if it is reordered, the "cheapest" option is a lie. Pin the order.
   run python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))

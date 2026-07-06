@@ -51,8 +51,13 @@ func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 	if r.Intn(2) == 0 {
 		ev.Links = map[string]string{"work_item": tok()}
 	}
-	if r.Intn(2) == 0 {
-		ev.Spend = json.RawMessage(`{"duration_seconds":5}`)
+	// Cover both closed-spend shapes: the duration-only degradation and the
+	// enriched D1 token vocabulary a claude-code teardown merges in.
+	switch r.Intn(3) {
+	case 1:
+		ev.Spend = json.RawMessage(`{"duration_seconds":5,"basis":"duration-only"}`)
+	case 2:
+		ev.Spend = json.RawMessage(`{"duration_seconds":5,"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":0,"total_tokens":160,"harness":"claude-code","basis":"transcript","model":"claude-opus"}`)
 	}
 	return reflect.ValueOf(genEvent{ev})
 }

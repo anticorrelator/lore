@@ -286,6 +286,122 @@ def session_metadata(path: str) -> dict:
     return {"session_id": session_id, "session_date": session_date}
 
 
+# ---------------------------------------------------------------------------
+# Session spend extraction
+# ---------------------------------------------------------------------------
+
+def _opencode_data_dir() -> Path:
+    """Return the OpenCode data directory holding `opencode.db` and `storage/`.
+
+    Defaults to `~/.local/share/opencode`; tests override via
+    `OPENCODE_DATA_DIR`. This is OpenCode's own vendor path, not a
+    Lore-managed one — spend lives in OpenCode's store, not the Lore
+    accumulator that the other operations read.
+    """
+    override = os.environ.get("OPENCODE_DATA_DIR", "")
+    if override:
+        return Path(override)
+    return Path(os.path.expanduser("~")) / ".local" / "share" / "opencode"
+
+
+def session_spend(path: str) -> dict:
+    """Sum assistant token + cost spend for a session from OpenCode's live store.
+
+    Unlike the file-based harnesses, OpenCode keeps spend in a single
+    sqlite store (`opencode.db`) keyed by session id, so `path` here is the
+    OpenCode **session id**, not a filesystem path. Assistant `message.data`
+    rows carry `tokens` (`input`, `output`, `reasoning`, `cache.read/write`,
+    `total`) and a per-message dollar `cost`; those are summed and normalized
+    onto the closed vocabulary (`cache.read` -> `cache_read_input_tokens`,
+    `cache.write` -> `cache_creation_input_tokens`) with `basis: "store"`.
+
+    Degrades to `{"basis": "duration-only"}` when the live store is
+    unreachable (only the stale `storage/` JSON tree present, no sqlite
+    module, or the session has no assistant token rows). The stale
+    `storage/` snapshot is never mined — it lags the sqlite source of truth,
+    so reading it would report a wrong number rather than an honest gap.
+    """
+    import json
+
+    data_dir = _opencode_data_dir()
+    db_path = data_dir / "opencode.db"
+
+    if not db_path.is_file():
+        return {"basis": "duration-only"}
+
+    try:
+        import sqlite3
+    except ImportError:
+        return {"basis": "duration-only"}
+
+    input_tokens = 0
+    output_tokens = 0
+    reasoning = 0
+    cache_read = 0
+    cache_write = 0
+    total = 0
+    cost = 0.0
+    model = ""
+    rows = 0
+
+    try:
+        # Read-only, immutable open so an in-use store is never locked or mutated.
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro&immutable=1", uri=True, timeout=2.0
+        )
+        try:
+            cur = conn.execute(
+                "SELECT data FROM message WHERE session_id = ?", (path,)
+            )
+            for (blob,) in cur:
+                try:
+                    msg = json.loads(blob)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                    continue
+                tokens = msg.get("tokens")
+                if not isinstance(tokens, dict):
+                    continue
+                input_tokens += int(tokens.get("input") or 0)
+                output_tokens += int(tokens.get("output") or 0)
+                reasoning += int(tokens.get("reasoning") or 0)
+                total += int(tokens.get("total") or 0)
+                cache = tokens.get("cache")
+                if isinstance(cache, dict):
+                    cache_read += int(cache.get("read") or 0)
+                    cache_write += int(cache.get("write") or 0)
+                c = msg.get("cost")
+                if isinstance(c, (int, float)):
+                    cost += float(c)
+                m = msg.get("modelID")
+                if isinstance(m, str) and m:
+                    model = m
+                rows += 1
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {"basis": "duration-only"}
+
+    if rows == 0:
+        return {"basis": "duration-only"}
+
+    spend = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_write,
+        "total_tokens": total,
+        "cost_usd": round(cost, 6),
+        "harness": "opencode",
+        "basis": "store",
+    }
+    if model:
+        spend["model"] = model
+    return spend
+
+
 __all__ = [
     "parse_transcript",
     "extract_file_paths",
@@ -294,4 +410,5 @@ __all__ = [
     "provider_status",
     "read_raw_lines",
     "session_metadata",
+    "session_spend",
 ]

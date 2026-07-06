@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test_codex_evidence_extraction.sh — Tests for the chaperone-proxied Tier 2
-# append contract in agents/codex-worker.md (§6.2).
+# append contract in agents/codex-worker.md (§ "Append the Tier 2 rows").
 #
 # Codex workers run in a workspace-write sandbox that does NOT reach the shared
 # knowledge store, so they cannot run evidence-append.sh directly. Instead they
@@ -11,7 +11,8 @@
 # those rows and appends each via evidence-append.sh.
 #
 # This test exercises the two mechanical halves of that contract:
-#   1. The awk sentinel extraction (mirrors the snippet in the doc's §6.2).
+#   1. The awk sentinel extraction (mirrors the snippet in the doc's
+#      "Append the Tier 2 rows" step).
 #   2. The extract → evidence-append.sh append loop against a real KDIR,
 #      including the relay-verbatim-or-degraded row path: a row the validator
 #      refuses lands in REJECTED with its diagnostic, never silently dropped.
@@ -109,8 +110,8 @@ PYEOF
 }
 
 # --- extract_rows: mirrors the awk sentinel extraction in
-#     agents/codex-worker.md §6.2. Keep in sync with the doc; Test 6 guards the
-#     sentinel tokens against drift.
+#     agents/codex-worker.md's "Append the Tier 2 rows" step. Keep in sync with
+#     the doc; Test 6 guards the sentinel tokens against drift.
 extract_rows() {
   awk '
     /^===LORE-TIER2-BEGIN===$/ {f=1; next}
@@ -118,7 +119,8 @@ extract_rows() {
     f' "$1"
 }
 
-# --- append_extracted: mirrors the extract → append loop in §6.2. Populates the
+# --- append_extracted: mirrors the extract → append loop in the "Append the
+#     Tier 2 rows" step. Populates the
 #     global APPENDED (claim_ids that landed) and REJECTED ("row :: diagnostic").
 append_extracted() {
   local codex_out="$1" kdir="$2" slug="$3" rows row cid append_out

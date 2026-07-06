@@ -355,6 +355,64 @@ func TestStartTerminalCmd_CodexSkipsUnsupportedConcerns(t *testing.T) {
 	}
 }
 
+// TestStartTerminalCmd_InjectsSessionIDOnClaudeCode asserts the D3 deterministic
+// transcript binding: claude-code declares spend_telemetry binding
+// `session-id-flag`, so the spawn generates a UUID, passes it as --session-id,
+// and hands it back on the message for teardown's spend probe. The flag value and
+// the message field must be the same id.
+func TestStartTerminalCmd_InjectsSessionIDOnClaudeCode(t *testing.T) {
+	stageFakeBinaries(t)
+	dir := stageFakeLoreData(t, "claude-code", nil)
+
+	msg := runStartTerminal(t, "smoke-slug", dir, false)
+	started, ok := msg.(SessionProcessStartedMsg)
+	if !ok {
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
+	}
+
+	flagVal := argValueAfter(started.Cmd.Args, "--session-id")
+	if flagVal == "" {
+		t.Fatalf("Cmd.Args missing `--session-id <uuid>` for claude-code: %v", started.Cmd.Args)
+	}
+	if len(flagVal) != 36 {
+		t.Errorf("--session-id value %q is not a 36-char UUID", flagVal)
+	}
+	if started.SessionID != flagVal {
+		t.Errorf("SessionProcessStartedMsg.SessionID = %q, want the injected flag value %q", started.SessionID, flagVal)
+	}
+	if started.Harness != "claude-code" {
+		t.Errorf("SessionProcessStartedMsg.Harness = %q, want claude-code", started.Harness)
+	}
+}
+
+// TestStartTerminalCmd_NoSessionIDWithoutBinding asserts codex and opencode —
+// which declare spend_telemetry binding `none` — get no --session-id flag and an
+// empty SessionID on the message, so they close duration-only. The harness field
+// is still carried for the teardown probe's --harness argument.
+func TestStartTerminalCmd_NoSessionIDWithoutBinding(t *testing.T) {
+	for _, framework := range []string{"codex", "opencode"} {
+		t.Run(framework, func(t *testing.T) {
+			stageFakeBinaries(t)
+			dir := stageFakeLoreData(t, framework, nil)
+
+			msg := runStartTerminal(t, "smoke-slug", dir, false)
+			started, ok := msg.(SessionProcessStartedMsg)
+			if !ok {
+				t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
+			}
+			if argsContains(started.Cmd.Args, "--session-id") {
+				t.Errorf("Cmd.Args contains --session-id on %s (binding=none, should be skipped): %v", framework, started.Cmd.Args)
+			}
+			if started.SessionID != "" {
+				t.Errorf("SessionProcessStartedMsg.SessionID = %q on %s, want empty (no binding)", started.SessionID, framework)
+			}
+			if started.Harness != framework {
+				t.Errorf("SessionProcessStartedMsg.Harness = %q, want %q", started.Harness, framework)
+			}
+		})
+	}
+}
+
 func TestStartTerminalCmd_UnknownFrameworkReturnsStreamError(t *testing.T) {
 	stageFakeBinaries(t)
 	t.Setenv("LORE_DATA_DIR", stageFakeLoreDataWithLaunchFramework(t, "definitely-not-a-real-harness"))
@@ -420,4 +478,16 @@ func argsContainPair(args []string, flag, value string) bool {
 		}
 	}
 	return false
+}
+
+// argValueAfter returns the argument immediately following `flag`, or "" when the
+// flag is absent or trails the slice — used to read an injected flag's value
+// (e.g. the generated --session-id).
+func argValueAfter(args []string, flag string) string {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == flag {
+			return args[i+1]
+		}
+	}
+	return ""
 }

@@ -121,6 +121,7 @@ type capabilitiesProfile struct {
 	TUILaunchFlags map[string]string  `json:"tui_launch_flags"`
 	ModelRouting   modelRouting       `json:"model_routing"`
 	Interaction    interactionProfile `json:"interaction"`
+	SpendTelemetry spendTelemetry     `json:"spend_telemetry"`
 }
 
 // interactionProfile is the per-framework probed PTY interaction contract from
@@ -163,6 +164,26 @@ type interactionRow struct {
 // valid harness `--model` input for that framework.
 type modelRouting struct {
 	Tiers []string `json:"tiers"`
+}
+
+// spendTelemetry is the per-framework spend_telemetry block from
+// adapters/capabilities.json `.frameworks[<id>].spend_telemetry` — a sibling of
+// model_routing and interaction describing how a harness exposes token spend.
+// Support is the closed level set; Artifact names the source kind
+// (transcript | rollout | store); Binding names the spawn-time join mechanism
+// (session-id-flag | none); Fields lists the normalized spend fields a harness's
+// extracted spend object carries. Extraction itself lives in
+// adapters/transcripts/<fw>.py::session_spend behind scripts/session-spend.sh;
+// this struct only carries the declared capability the close path reads to decide
+// whether a session can carry real token counts. Bash counterpart:
+// framework_spend_telemetry_field in scripts/lib.sh.
+type spendTelemetry struct {
+	Support  string   `json:"support"`
+	Evidence string   `json:"evidence"`
+	Artifact string   `json:"artifact"`
+	Binding  string   `json:"binding"`
+	Fields   []string `json:"fields"`
+	Notes    string   `json:"notes"`
 }
 
 // LoadModelRoutingTiers returns the ordered model_routing.tiers alias list
@@ -277,6 +298,34 @@ func HarnessSignatureContract(framework string) (bool, error) {
 		return false, nil
 	}
 	return true, nil
+}
+
+// HarnessSpendTelemetry returns a framework's spend-telemetry support level,
+// source artifact kind, and spawn-time binding mechanism from
+// adapters/capabilities.json `.frameworks[<id>].spend_telemetry`, and whether the
+// framework declares a usable (non-"none") spend block. A framework without a
+// spend_telemetry block, or one whose support is "none"/empty, degrades to
+// ("", "", "", false, nil): the close path falls back to the duration-only row
+// rather than crashing, mirroring framework_spend_telemetry_field in
+// scripts/lib.sh. Branch on the returned ok flag, never on the framework name.
+// Errors only on unreadable capabilities.json.
+func HarnessSpendTelemetry(framework string) (support, artifact, binding string, ok bool, err error) {
+	if framework == "" {
+		return "", "", "", false, fmt.Errorf("harness_spend_telemetry requires a framework")
+	}
+	caps, err := loadCapabilitiesFile()
+	if err != nil {
+		return "", "", "", false, err
+	}
+	prof, present := caps.Frameworks[framework]
+	if !present {
+		return "", "", "", false, nil
+	}
+	st := prof.SpendTelemetry
+	if st.Support == "" || st.Support == "none" {
+		return "", "", "", false, nil
+	}
+	return st.Support, st.Artifact, st.Binding, true, nil
 }
 
 // capabilitiesFile is the top-level shape of adapters/capabilities.json.
