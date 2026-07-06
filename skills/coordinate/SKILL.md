@@ -97,7 +97,7 @@ Walkthroughs come from the ledger and artifacts, re-read — never conversationa
 
 ## Close the arc
 
-Final board join; a terminal ledger row for every opened stream; batch retro run or explicitly deferred; capture sweep; final checkpoint. The last entry states anchor-delivered vs residue with a closure verdict's honesty. Archive follows residue, not ritual — an item with live residue stays capability-incomplete until the residue lands, and the ledger stays appendable after close (a late reframe from the user is a legitimate closure shape). Sweep enumerable janitorial debt — staled anchors, renamed files — into a named item or a scoped curate; never leave it implicit. If the arc ran inside a degraded settlement window, surface that at close rather than letting its scorecards read as more than trend.
+Final board join; a terminal ledger row for every opened stream; batch retro run or explicitly deferred; capture sweep; final checkpoint. The last entry states anchor-delivered vs residue with a closure verdict's honesty. The cost tally comes from the journal's `closed` events, never from your memory of what you dispatched — sessions running at close and human-initiated streams escape recall. Archive follows residue, not ritual — an item with live residue stays capability-incomplete until the residue lands, and the ledger stays appendable after close (a late reframe from the user is a legitimate closure shape). Sweep enumerable janitorial debt — staled anchors, renamed files — into a named item or a scoped curate; never leave it implicit. If the arc ran inside a degraded settlement window, surface that at close rather than letting its scorecards read as more than trend.
 
 ## The ledger
 
