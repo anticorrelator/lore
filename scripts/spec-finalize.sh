@@ -562,6 +562,22 @@ if [[ -n "${LORE_SESSION_INSTANCE:-}" ]]; then
   fi
 fi
 
+# --- 11. Protocol terminus: retro-sampling gate (best-effort) -----------------
+# Same terminus tier as the session close-request above — a post-telemetry
+# cross-substrate side effect reached only after every refusal/fatal gate, so a
+# refused finalize never consults it. Decides whether this completed cycle
+# surfaces a retro now or defers to the batch queue, recording the outcome
+# either way (sampled-out is never silence). Unlike the session close-request it
+# is NOT gated on LORE_SESSION_INSTANCE: the retro cadence covers the work cycle,
+# so a bare-terminal finalize gets the same discipline. stdout is discarded so it
+# cannot corrupt the --json payload; the operator prompt/note rides stderr. Any
+# failure only warns and never alters this verb's exit code or telemetry.
+if ! bash "$SCRIPT_DIR/retro-sampling-gate.sh" \
+    --terminus spec-finalize --slug "$SLUG" \
+    --template-version "$TEMPLATE_VERSION" >/dev/null; then
+  echo "[spec] Warning: retro-sampling gate errored; finalize already complete (gate is best-effort)." >&2
+fi
+
 # --- Report -------------------------------------------------------------------
 if [[ $JSON_MODE -eq 1 ]]; then
   emit_json_and_exit 0 ""

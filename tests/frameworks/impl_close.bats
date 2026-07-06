@@ -77,6 +77,14 @@ closure_of() {
 
 rows_file() { echo "$TEST_KDIR/_scorecards/rows.jsonl"; }
 
+json_payload() {
+  # `run` merges stderr into $output; the post-telemetry retro-sampling gate
+  # writes a `[retro] …` note there on every completed close. The --json payload
+  # is the object line — isolated by the JSON key `"slug"` (the gate's stderr
+  # wraps the slug in single quotes, so it is not matched).
+  echo "$output" | grep '"slug"'
+}
+
 # --- Required flags and enum ----------------------------------------------
 
 @test "missing --verdict exits 1 naming the flag" {
@@ -433,7 +441,7 @@ EOF
 @test "--json on full close returns the close summary object" {
   run bash "$LORE_CLI" impl close anchored-done --verdict full --summary "done" --json
   [ "$status" -eq 0 ]
-  echo "$output" | python3 -c '
+  json_payload | python3 -c '
 import json, sys
 d = json.loads(sys.stdin.read())
 assert d["slug"] == "anchored-done"

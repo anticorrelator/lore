@@ -883,6 +883,25 @@ if [[ -n "${LORE_SESSION_INSTANCE:-}" ]]; then
   fi
 fi
 
+# --- Protocol terminus: retro-sampling gate (best-effort) --------------------
+# Same terminus tier as the session close-request above — a post-telemetry
+# cross-substrate side effect reached only after the close write sequence and the
+# pre-report guard, so every refusal path (all exit earlier) skips it while a
+# completed close (report exit 0 full/legacy OR exit 3 partial/none divergence)
+# consults it. Decides whether this cycle surfaces a retro now or defers to the
+# batch queue, recording the outcome either way. A partial/none verdict trips the
+# degraded_closure always-stratum; the per-task routing attribution feeds the
+# first-K stratum. NOT gated on LORE_SESSION_INSTANCE (the cadence covers the work
+# cycle, so a bare-terminal close gets the same discipline). stdout is discarded
+# so it cannot corrupt the report/--json below; the operator prompt/note rides
+# stderr. Any failure only warns and never alters this verb's exit code.
+if ! bash "$SCRIPT_DIR/retro-sampling-gate.sh" \
+    --terminus impl-close --slug "$SLUG" \
+    --template-version "$TEMPLATE_VERSION" --verdict "$VERDICT" \
+    --task-attribution "$ATTRIBUTION_JSON" >/dev/null; then
+  echo "[impl] Warning: retro-sampling gate errored; close already complete (gate is best-effort)." >&2
+fi
+
 # --- Terminal close: the closure-report script is the sole emitter ------------
 CLOSURE_FLAGS=(--tasks-completed "$TASKS_COMPLETED" --tasks-total "$TASKS_TOTAL"
                --tier2-count "$TIER2_COUNT"

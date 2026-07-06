@@ -60,6 +60,8 @@ lore resolve
 
 Set `KNOWLEDGE_DIR` to result, `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
+**Where a cycle comes from.** The retro-sampling gate (`scripts/retro-sampling-gate.sh`, consulted at the spec-finalize and impl-close termini) decides per cycle whether a retro is *due now* (surfaced to the operator) or *deferred* to a batch. Sampled-out cycles are recorded — never silence — as rows in `$KNOWLEDGE_DIR/_scorecards/retro-deferred-queue.jsonl` (outcome vocabulary `done | deferred | skipped`, the coordinate ledger's grammar). A deferred-batch retro run resolves its cycles from that queue; the gate itself neither runs nor blocks `/retro`.
+
 1. Resolve the argument to a canonical slug via `lore work resolve`:
    ```bash
    if RESULT=$(lore work resolve "$ARG" --branch "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"); then

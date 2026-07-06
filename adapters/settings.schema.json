@@ -65,6 +65,10 @@
     "settlement": {
       "$ref": "#/$defs/settlement_config",
       "description": "Durable settlement queue/processor controls. Defaults are fail-closed in readers when absent: enabled=false, max_concurrency=1, finite daily job/runtime caps. Harness selection is per job via LORE_FRAMEWORK and must not mutate tui_launch_framework."
+    },
+    "retro_sampling": {
+      "$ref": "#/$defs/retro_sampling_config",
+      "description": "Retro-sampling gate controls (retro-sampling-gate.sh, consulted at the spec-finalize and impl-close protocol termini). Absent section reads as routine_rate=0 in the gate: no routine coin ever lands, so only the deterministic always-strata (new template version, first-K of a routing pair, degraded/contested closure) trigger a retro; every other cycle defers to the batch queue. This is a sampling-cadence preference, not a routing or harness control."
     }
   },
 
@@ -357,6 +361,20 @@
               "default": 0
             }
           }
+        }
+      }
+    },
+
+    "retro_sampling_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "routine_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0,
+          "description": "Probability [0,1] that a ROUTINE work cycle (one that trips none of the deterministic always-strata) surfaces a retro at its protocol terminus rather than deferring to the batch queue. The gate compares a mechanical coin — a hash of the work-item slug plus the calendar date, checkable and RNG-free — against this rate. Readers default to 0 when the key or section is absent: no routine cycle is ever sampled in, so the gate reduces to the always-strata alone. 1 samples in every routine cycle. Out-of-range values are rejected at the schema boundary — this is a closed constraint, not a clamp."
         }
       }
     }
