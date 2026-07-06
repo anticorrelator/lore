@@ -151,7 +151,7 @@ Three learned pieces of the ritual (from the arc that built this skill):
        step status:    pending | in-flight | blocked-on:<ref> | blocked-on-input | done | dropped
        step verdict:   full | partial | none        (anchor-relative, same vocabulary as impl closure)
        gate mechanism: hold | flag | notify
-       retro outcome:  done | deferred (rate, stratum) | dispatched:<ref> -->
+       retro outcome:  done | deferred (rate, stratum) | skipped (user) | dispatched:<ref> -->
 
 Rows are compact — decision, one-line rationale, evidence pointer. The ledger records judgments; the artifacts hold the evidence. Prose beyond that is welcome where it earns its keep (the worked example's wave-close entries are the register to aim for).
 

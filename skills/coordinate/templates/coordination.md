@@ -7,7 +7,7 @@
        step status:    pending | in-flight | blocked-on:<ref> | blocked-on-input | done | dropped
        step verdict:   full | partial | none
        gate mechanism: hold | flag | notify
-       retro outcome:  done | deferred (rate, stratum) | dispatched:<ref> -->
+       retro outcome:  done | deferred (rate, stratum) | skipped (user) | dispatched:<ref> -->
 
 **Feature under coordination:** <one line — what this arc delivers>
 **Intent anchor:** [[work:<slug>]] — read it there; don't paraphrase it here.
