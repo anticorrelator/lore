@@ -1623,8 +1623,25 @@ func (m model) shouldAutoProcessSettlement(st settlement.Status) bool {
 	if !st.Available || !st.Enabled {
 		return false
 	}
+	// A dead holder's expired-but-unreaped lease inflates the active-lease
+	// count and can raise max_concurrency_reached — but process_once reaps
+	// stale leases (expire_stale_leases) *before* it re-checks concurrency, and
+	// process_once is the only path that reaps them. So when the processor
+	// reports stale active leases, defer the concurrency-derived refusals to
+	// process_once rather than replicating a guard we evaluate with less
+	// information than it does: it re-checks concurrency itself and returns
+	// cheaply (max_concurrency_reached) if genuinely saturated. Scope is narrow
+	// — only the concurrency refusals bend. Disabled, unavailable, in-flight,
+	// active-hours, and no-eligible-harness refusals keep their behavior
+	// (max_concurrency_reached is the processor's last blocked_reason arm, so
+	// those are already clear when it fires; harness_blocked_reason only ever
+	// carries no_eligible_harnesses, so a set harness reason is never ours).
+	staleReapPending := st.StaleActiveLeases > 0
+	concurrencyOnlyBlock := st.BlockedReason == "max_concurrency_reached" && st.Harness.BlockedReason == ""
 	if st.BlockedReason != "" || st.Harness.BlockedReason != "" {
-		return false
+		if !(staleReapPending && concurrencyOnlyBlock) {
+			return false
+		}
 	}
 	// Event-driven posture (memo §5.2): the census recompute-refill is
 	// retired, so only real queued items — enqueued by the trigger pump or
@@ -1643,7 +1660,12 @@ func (m model) shouldAutoProcessSettlement(st settlement.Status) bool {
 	if active == 0 {
 		active = len(st.Leases)
 	}
-	return active < concurrency
+	if active < concurrency {
+		return true
+	}
+	// Saturated by the count alone — permit only when a stale lease is the
+	// likely cause; process_once reaps it, then decides.
+	return staleReapPending
 }
 
 func batchCmd(a, b tea.Cmd) tea.Cmd {

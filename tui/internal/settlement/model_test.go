@@ -830,6 +830,33 @@ func TestStuckLeaseRegionAutoExpandsOnStaleLeases(t *testing.T) {
 	}
 }
 
+func TestPostureLineNamesStaleLeasesUnderMaxConcurrency(t *testing.T) {
+	// When a corpse lease holds the pipeline at max_concurrency, the posture
+	// blocked line reads as ordinary saturation. The posture region must name
+	// the stale leases in place so a stall of this shape reads as a stall.
+	st, err := ParseStatus([]byte(`{
+		"enabled": true,
+		"blocked_reason": "max_concurrency_reached",
+		"stale_active_leases": 1,
+		"queue": {"pending": 584, "running": 1, "total": 585},
+		"harness": {"concurrency": 1, "active_leases": 1}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+	view := stripANSI(NewModel().ReplaceStatus(st).SetSize(140, 30).View())
+	if !strings.Contains(view, "stale leases: 1 — reaping on next process") {
+		t.Fatalf("posture region should name stale leases holding max_concurrency, got:\n%s", view)
+	}
+
+	// No stale leases: the posture region stays quiet about reaping.
+	st.StaleActiveLeases = 0
+	view = stripANSI(NewModel().ReplaceStatus(st).SetSize(140, 30).View())
+	if strings.Contains(view, "reaping on next process") {
+		t.Fatalf("posture region must not mention reaping when nothing is stale, got:\n%s", view)
+	}
+}
+
 func manyItemStatus(t *testing.T, n int) Status {
 	t.Helper()
 	var b strings.Builder

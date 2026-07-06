@@ -932,6 +932,73 @@ func TestSettlementStatusLoadedDoesNotAutoProcessWhileLeaseActive(t *testing.T) 
 	}
 }
 
+func TestSettlementStatusLoadedAutoProcessesWhenStaleLeaseInflatesActiveCount(t *testing.T) {
+	// A dead holder's expired-but-unreaped lease raises the active count to
+	// concurrency, but process_once reaps it before re-checking concurrency and
+	// is the only path that reaps it. The gate must defer to process_once rather
+	// than deadlock on the corpse. Inverse of the genuinely-active case above:
+	// same counts, StaleActiveLeases flipped from 0 to 1.
+	m := minimalModel(stateSettlement, nil, nil)
+	status := settlement.Status{
+		Available:         true,
+		Enabled:           true,
+		Queue:             settlement.Queue{Pending: 3, Running: 1, Total: 4},
+		Harness:           settlement.Harness{Concurrency: 1, ActiveLeases: 1},
+		StaleActiveLeases: 1,
+	}
+
+	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
+	nm := next.(model)
+
+	if !nm.settlementProcessInFlight || cmd == nil {
+		t.Fatal("a stale lease inflating the active count must not deadlock auto-process; process_once reaps then decides")
+	}
+}
+
+func TestSettlementStatusLoadedAutoProcessesThroughMaxConcurrencyBlockWhenStale(t *testing.T) {
+	// The live-incident shape: 584 pending behind one corpse lease, the
+	// processor reporting max_concurrency_reached. The gate must bypass the
+	// concurrency-derived block (only) when stale leases exist.
+	m := minimalModel(stateSettlement, nil, nil)
+	status := settlement.Status{
+		Available:         true,
+		Enabled:           true,
+		Queue:             settlement.Queue{Pending: 584, Running: 1, Total: 585},
+		Harness:           settlement.Harness{Concurrency: 1, ActiveLeases: 1},
+		BlockedReason:     "max_concurrency_reached",
+		StaleActiveLeases: 1,
+	}
+
+	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
+	nm := next.(model)
+
+	if !nm.settlementProcessInFlight || cmd == nil {
+		t.Fatal("max_concurrency_reached raised by a corpse lease must not permanently suppress the reaping process_once")
+	}
+}
+
+func TestSettlementStaleLeasesDoNotBypassNonConcurrencyBlock(t *testing.T) {
+	// Narrow scope: the stale-lease bypass bends only the concurrency refusals.
+	// A no-eligible-harness block (carried on Harness.BlockedReason) is not
+	// something process_once can clear by reaping, so it must still refuse even
+	// when stale leases exist.
+	m := minimalModel(stateSettlement, nil, nil)
+	status := settlement.Status{
+		Available:         true,
+		Enabled:           true,
+		Queue:             settlement.Queue{Pending: 3, Running: 1, Total: 4},
+		Harness:           settlement.Harness{Concurrency: 1, ActiveLeases: 1, BlockedReason: "no_eligible_harnesses"},
+		StaleActiveLeases: 1,
+	}
+
+	next, cmd := m.Update(settlementStatusLoadedMsg{status: status})
+	nm := next.(model)
+
+	if nm.settlementProcessInFlight || cmd != nil {
+		t.Fatal("stale leases must not bypass a non-concurrency block (no_eligible_harnesses)")
+	}
+}
+
 func TestAutomaticSettlementProcessCompletionDoesNotTightLoop(t *testing.T) {
 	m := minimalModel(stateSettlement, nil, nil)
 	m.settlementProcessInFlight = true

@@ -369,6 +369,14 @@ func (m Model) postureRegion(width int, s styleSet) []string {
 		next := readableNextAction(firstNonEmpty(st.NextAction, InferNextAction(st)))
 		lines = append(lines, style.Truncate(s.dim.Render("next: "+next), width))
 	}
+	// A dead holder's expired-but-unreaped lease can hold the pipeline at
+	// max_concurrency, which above reads as ordinary saturation. Name it so a
+	// stall of this shape reads as a stall: the count is inflated by leases the
+	// next process_once will reap.
+	if st.StaleActiveLeases > 0 {
+		lines = append(lines, style.Truncate(s.attention.Render(fmt.Sprintf(
+			"stale leases: %d — reaping on next process", st.StaleActiveLeases)), width))
+	}
 	return lines
 }
 
