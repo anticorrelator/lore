@@ -15,6 +15,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/search"
 	"github.com/anticorrelator/lore/tui/internal/session"
+	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/settings"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/style"
@@ -28,6 +29,7 @@ const (
 	stateWork appState = iota
 	stateKnowledge
 	stateFollowUps
+	stateSessions
 	stateSettlement
 	stateOnboarding
 	stateNoRepo
@@ -161,6 +163,21 @@ type model struct {
 	err            error
 	detailCache    map[string]*work.WorkItemDetail
 
+	// sessionsList / sessionsDetail back the first-class sessions workspace
+	// (stateSessions): a list keyed by session identity and a read-only card
+	// for rows with no local panel to attach. sessionActivity is the running
+	// journal-derived overlay (needs-input / close-pending) folded from
+	// sessionsJournalCursor forward on each substrate refresh. sessionsCount /
+	// sessionsNeedsInput feed the tab-indicator announcement and stay current
+	// from any state because the poll refreshes them whenever an instance
+	// identity is resolved.
+	sessionsList          sessionview.ListModel
+	sessionsDetail        sessionview.DetailModel
+	sessionActivity       map[sessionview.ActivityKey]sessionview.Activity
+	sessionsJournalCursor int64
+	sessionsCount         int
+	sessionsNeedsInput    int
+
 	aiInputActive bool
 	aiLoading     bool
 	aiDots        int
@@ -287,6 +304,9 @@ type model struct {
 	confirmSlug   string
 	confirmTitle  string
 	confirmCount  int // used by post_review to capture SelectedCount at dispatch time
+	// confirmSessionID carries the harness session_id for a "close_session"
+	// confirm whose target is slugless (addressed by --session).
+	confirmSessionID string
 
 	popup          search.PopupModel
 	popupActive    bool
@@ -463,6 +483,72 @@ func (m *model) knowledgePanelCallbacks() panelCallbacks {
 	}
 }
 
+// sessionsPanelCallbacks builds the split-pane callbacks for the sessions
+// workspace. It clones the work/follow-ups shape: the left panel is the sessions
+// list, the right panel routes by the current row's session key — a locally-
+// hosted row's live SessionPanelModel (attach/scrollback) or, for an external or
+// in-flight row, the read-only detail card. currentSlug returns the panel-map
+// key only for a local row, so the terminal-routing and ctrl+t seams reach the
+// right panel exactly as they do for work.
+func (m *model) sessionsPanelCallbacks() panelCallbacks {
+	return panelCallbacks{
+		currentSlug: func() string {
+			if row, ok := m.sessionsList.CurrentSession(); ok && row.Local {
+				return row.PanelKey
+			}
+			return ""
+		},
+		loadDetail: func(rowID string) tea.Cmd {
+			return m.loadSessionsDetail(rowID)
+		},
+		sessionPanelFn: func() (work.SessionPanelModel, bool) { return m.currentSessionsPanel() },
+		listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
+			prev := m.sessionsList.CurrentKey()
+			lm, cmd := m.sessionsList.Update(lmsg)
+			m.sessionsList = lm
+			return cmd, prev, m.sessionsList.CurrentKey()
+		},
+		detailUpdate: func(dmsg tea.Msg) tea.Cmd {
+			m.sessionsDetail, _ = m.sessionsDetail.Update(dmsg)
+			return nil
+		},
+		// The read-only card does no tab hit-testing, so no content-start offset.
+		resize: func() tea.Cmd {
+			listW, listH := m.listDims()
+			m.sessionsList, _ = m.sessionsList.Update(tea.WindowSizeMsg{Width: listW, Height: listH})
+			m.sessionsDetail, _ = m.sessionsDetail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+			return nil
+		},
+	}
+}
+
+// currentSessionsPanel returns the live panel for the sessions list's current
+// row when that row is locally hosted, mirroring currentSessionPanel for the
+// work list but routing by the row's own session key rather than a work-item
+// slug — the reachability the sessions view exists to provide.
+func (m model) currentSessionsPanel() (work.SessionPanelModel, bool) {
+	if m.sessionPanels == nil {
+		return work.SessionPanelModel{}, false
+	}
+	row, ok := m.sessionsList.CurrentSession()
+	if !ok || !row.Local {
+		return work.SessionPanelModel{}, false
+	}
+	panel, ok := m.sessionPanels[row.PanelKey]
+	return panel, ok
+}
+
+// loadSessionsDetail points the read-only card at the row under the cursor and
+// derives terminalMode: a locally-hosted row with a live panel shows the panel
+// (unless the user toggled to detail via ctrl+t); every other row shows the card.
+func (m *model) loadSessionsDetail(rowID string) tea.Cmd {
+	row, ok := m.sessionsList.SessionByID(rowID)
+	m.sessionsDetail.SetSession(row, ok)
+	hasPanel := ok && row.Local && m.hasSessionPanel(row.PanelKey)
+	m.terminalMode = hasPanel && !m.preferDetailView[row.PanelKey]
+	return nil
+}
+
 // currentSessionPanel returns the spec panel for the currently selected work item, if any.
 func (m model) currentSessionPanel() (work.SessionPanelModel, bool) {
 	if m.sessionPanels == nil {
@@ -592,6 +678,10 @@ type paneConfig struct {
 	fuItemCount int
 	// settlementCount is the pending/ready count passed to renderTabIndicator.
 	settlementCount int
+	// sessionsCount / sessionsNeedsInput feed the sessions tab section: the live
+	// count and whether any session awaits input (the needs-input marker).
+	sessionsCount      int
+	sessionsNeedsInput int
 }
 
 // buildPaneConfig constructs a paneConfig from the current model state.
@@ -602,6 +692,27 @@ func (m model) buildPaneConfig() paneConfig {
 	settlementCount := m.settlement.Count()
 
 	switch m.state {
+	case stateSessions:
+		listTitle := style.TitleName.Render("Sessions")
+		if n := m.sessionsList.Count(); n > 0 {
+			listTitle += " " + style.TitleCount.Render(fmt.Sprintf("(%d)", n))
+		}
+		detailTitle := m.sessionsDetail.Title()
+		sessionPanel, hasSessionPanel := m.currentSessionsPanel()
+		return paneConfig{
+			listView:           m.sessionsList.View(),
+			detailView:         m.sessionsDetail.View(),
+			sessionPanel:       sessionPanel,
+			hasSessionPanel:    hasSessionPanel,
+			listTitle:          listTitle,
+			detailTitle:        detailTitle,
+			state:              stateSessions,
+			listItemCount:      listItemCount,
+			fuItemCount:        fuItemCount,
+			settlementCount:    settlementCount,
+			sessionsCount:      m.sessionsCount,
+			sessionsNeedsInput: m.sessionsNeedsInput,
+		}
 	case stateFollowUps:
 		modeLabel := "Open"
 		if m.followupList.GetFilterMode() == followup.FilterClosed {
@@ -624,18 +735,20 @@ func (m model) buildPaneConfig() paneConfig {
 
 		sessionPanel, hasSessionPanel := m.currentFollowupPanel()
 		return paneConfig{
-			listView:        m.followupList.View(),
-			detailView:      m.followupDetail.View(),
-			sessionPanel:    sessionPanel,
-			hasSessionPanel: hasSessionPanel,
-			listTitle:       listTitle,
-			detailTitle:     detailTitle,
-			filterAnnot:     filterAnnot,
-			filterAnnotW:    filterAnnotW,
-			state:           stateFollowUps,
-			listItemCount:   listItemCount,
-			fuItemCount:     fuItemCount,
-			settlementCount: settlementCount,
+			listView:           m.followupList.View(),
+			detailView:         m.followupDetail.View(),
+			sessionPanel:       sessionPanel,
+			hasSessionPanel:    hasSessionPanel,
+			listTitle:          listTitle,
+			detailTitle:        detailTitle,
+			filterAnnot:        filterAnnot,
+			filterAnnotW:       filterAnnotW,
+			state:              stateFollowUps,
+			listItemCount:      listItemCount,
+			fuItemCount:        fuItemCount,
+			settlementCount:    settlementCount,
+			sessionsCount:      m.sessionsCount,
+			sessionsNeedsInput: m.sessionsNeedsInput,
 		}
 	default: // stateWork
 		modeLabel := "Active"
@@ -662,18 +775,20 @@ func (m model) buildPaneConfig() paneConfig {
 
 		sessionPanel, hasSessionPanel := m.currentSessionPanel()
 		return paneConfig{
-			listView:        m.list.View(),
-			detailView:      m.detail.View(),
-			sessionPanel:    sessionPanel,
-			hasSessionPanel: hasSessionPanel,
-			listTitle:       listTitle,
-			detailTitle:     detailTitle,
-			filterAnnot:     filterAnnot,
-			filterAnnotW:    filterAnnotW,
-			state:           stateWork,
-			listItemCount:   listItemCount,
-			fuItemCount:     fuItemCount,
-			settlementCount: settlementCount,
+			listView:           m.list.View(),
+			detailView:         m.detail.View(),
+			sessionPanel:       sessionPanel,
+			hasSessionPanel:    hasSessionPanel,
+			listTitle:          listTitle,
+			detailTitle:        detailTitle,
+			filterAnnot:        filterAnnot,
+			filterAnnotW:       filterAnnotW,
+			state:              stateWork,
+			listItemCount:      listItemCount,
+			fuItemCount:        fuItemCount,
+			settlementCount:    settlementCount,
+			sessionsCount:      m.sessionsCount,
+			sessionsNeedsInput: m.sessionsNeedsInput,
 		}
 	}
 }

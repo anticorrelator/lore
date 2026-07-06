@@ -13,6 +13,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/session"
+	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -44,13 +45,15 @@ func classifyStartupState(cfg config.Config) appState {
 // already populated items by the time the user opens the panel.
 func newModel(cfg config.Config, prefs config.Prefs, startState appState) model {
 	return model{
-		state:        startState,
-		config:       cfg,
-		layoutMode:   prefs.Layout,
-		indexPath:    filepath.Join(cfg.WorkDir, "_index.json"),
-		settlement:   settlement.NewModel(),
-		list:         work.NewListModel(nil),
-		followupList: followup.NewListModel(nil),
+		state:          startState,
+		config:         cfg,
+		layoutMode:     prefs.Layout,
+		indexPath:      filepath.Join(cfg.WorkDir, "_index.json"),
+		settlement:     settlement.NewModel(),
+		list:           work.NewListModel(nil),
+		followupList:   followup.NewListModel(nil),
+		sessionsList:   sessionview.NewListModel(),
+		sessionsDetail: sessionview.NewDetailModel(),
 	}
 }
 

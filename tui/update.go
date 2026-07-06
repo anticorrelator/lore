@@ -22,6 +22,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/inputmsg"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
 	"github.com/anticorrelator/lore/tui/internal/search"
+	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -159,7 +160,7 @@ func (m model) Init() tea.Cmd {
 	// Register this instance in the substrate so other instances see it (and the
 	// queue's own-liveness check works) from the first tick.
 	if m.instanceName != "" {
-		cmds = append(cmds, m.writeInstanceCmd())
+		cmds = append(cmds, m.writeInstanceCmd(), m.sessionsRefreshCmd())
 		// D5 crash/restart recovery: scan for dead instances' still-running
 		// tmux-hosted sessions and adopt them, once at startup (before the first
 		// poll tick, which is scheduled 5s out). tmux-gated — with tmux off,
@@ -252,10 +253,15 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			case "y", "enter":
 				action := m.confirmAction
 				slug := m.confirmSlug
+				sessionID := m.confirmSessionID
 				m.confirmAction = ""
 				m.confirmSlug = ""
 				m.confirmTitle = ""
 				m.confirmCount = 0
+				m.confirmSessionID = ""
+				if action == "close_session" {
+					return m, runSessionClose(slug, sessionID, m.instanceName)
+				}
 				if action == "delete" {
 					return m, runDelete(slug)
 				}
@@ -278,6 +284,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.confirmSlug = ""
 				m.confirmTitle = ""
 				m.confirmCount = 0
+				m.confirmSessionID = ""
 			}
 			return m, nil
 		}
@@ -677,8 +684,19 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 
 		switch msg.String() {
-		case "t":
+		case "v":
+			// Enter the sessions workspace. Available from work and follow-ups;
+			// settlement keeps its own `v` (verdict drill-in), so sessions is
+			// reached from settlement via w→work→v. Focus-conjunct guarded so a
+			// terminal-focused session still forwards `v` to its PTY.
 			if (m.state == stateWork || m.state == stateFollowUps) && !(m.terminalMode && m.focusedPanel == panelRight) {
+				m.state = stateSessions
+				m.terminalMode = false
+				m.focusedPanel = panelLeft
+				return m, m.sessionsRefreshCmd()
+			}
+		case "t":
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateSettlement
 				m.terminalMode = false
 				m.focusedPanel = panelLeft
@@ -688,15 +706,20 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// With the terminal focused, ctrl+c terminates that session only
 			// (discarding retained scrollback once it has finished), but still
 			// cancels any background AI subprocess. From anywhere else it quits.
-			if m.terminalMode && m.focusedPanel == panelRight && (m.state == stateWork || m.state == stateFollowUps) {
+			if m.terminalMode && m.focusedPanel == panelRight && (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions) {
 				if m.aiCancel != nil {
 					m.aiCancel()
 					m.aiCancel = nil
 				}
 				var slug string
-				if m.state == stateFollowUps {
+				switch m.state {
+				case stateFollowUps:
 					slug = m.followupDetail.CurrentID()
-				} else {
+				case stateSessions:
+					if row, ok := m.sessionsList.CurrentSession(); ok {
+						slug = row.PanelKey
+					}
+				default:
 					slug = m.list.CurrentSlug()
 				}
 				return m, func() tea.Msg { return work.TerminalTerminateMsg{Slug: slug} }
@@ -714,7 +737,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m, nil
 			}
 		case "q":
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.cleanupAllSubprocesses()
 				return m, tea.Quit
 			}
@@ -833,6 +856,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				// must not accumulate stale sizes) and all open spec panels.
 				m.workPanelCallbacks().resize()
 				m.followupPanelCallbacks().resize()
+				m.sessionsPanelCallbacks().resize()
 				m.resizeSessionPanels()
 
 				// Persist preference asynchronously
@@ -878,7 +902,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			// stateKnowledge / no match: no-op.
 		case "K":
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.prevState = m.state
 				m.state = stateKnowledge
 				m.browser = knowledge.NewBrowserModel(m.config.KnowledgeDir)
@@ -896,7 +920,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			// From the settlement panel the modal opens focused at the
 			// settlement subtree — the durable-config home now that the
 			// panel carries no inline settings.
-			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateKnowledge || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateFollowUps || m.state == stateSessions || m.state == stateKnowledge || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				focus := ""
 				if m.state == stateSettlement {
 					focus = "settlement"
@@ -904,7 +928,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				return m.openSettingsModal(focus)
 			}
 		case "f":
-			if (m.state == stateWork || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
+			if (m.state == stateWork || m.state == stateSessions || m.state == stateSettlement) && !(m.terminalMode && m.focusedPanel == panelRight) {
 				m.state = stateFollowUps
 				// Preserve items already loaded by the background poll so the
 				// counter and list don't flicker to 0 while the reload is in flight.
@@ -921,6 +945,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			if m.state == stateFollowUps && !(m.terminalMode && m.focusedPanel == panelRight) {
 				cmd := m.leaveFollowups()
 				return m, cmd
+			}
+			if m.state == stateSessions && !(m.terminalMode && m.focusedPanel == panelRight) {
+				m.state = stateWork
+				m.terminalMode = false
+				m.focusedPanel = panelLeft
+				return m, loadWorkItems(m.config.WorkDir)
 			}
 			if m.state == stateSettlement {
 				m.state = stateWork
@@ -1037,6 +1067,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				m.settlementProcessStartedAt = time.Now()
 				return m, runSettlementAction("process")
 			}
+			// Close the selected session (confirm-gated). Focus-conjunct guarded so
+			// an attached terminal session still forwards `x` to its PTY.
+			if m.state == stateSessions && !(m.terminalMode && m.focusedPanel == panelRight) {
+				return m.openSessionCloseConfirm()
+			}
 		case "m":
 			if m.state == stateSettlement {
 				return m.cycleSettlementModelTier()
@@ -1094,6 +1129,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		wcmd := m.workPanelCallbacks().resize()
 		fcmd := m.followupPanelCallbacks().resize()
 		bcmd := m.knowledgePanelCallbacks().resize()
+		m.sessionsPanelCallbacks().resize()
 		m.resizeSessionPanels()
 
 		m.settlement = m.settlement.SetSize(msg.Width-2, msg.Height-4)
@@ -1274,6 +1310,15 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// Hover-prefetch emitted by the list's onCursorChange hook.
 		return m.loadDetail(msg.Slug)
 
+	case sessionsRefreshedMsg:
+		return m.handleSessionsRefreshed(msg)
+
+	case sessionview.SessionSelectedMsg:
+		return m.handleSessionSelected(msg)
+
+	case sessionCloseRequestedMsg:
+		return m.handleSessionCloseRequested(msg)
+
 	case work.DetailLoadedMsg:
 		// Cache the raw detail for instant revisit (renderMarkdown is synchronous and fast)
 		if msg.Err == nil && msg.Detail != nil && m.detailCache != nil {
@@ -1320,7 +1365,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	case knowledge.BrowserDismissedMsg:
 		m.state = m.prevState
-		if m.state != stateWork && m.state != stateFollowUps && m.state != stateSettlement {
+		if m.state != stateWork && m.state != stateFollowUps && m.state != stateSessions && m.state != stateSettlement {
 			m.state = stateWork
 		}
 		return m, nil
@@ -1507,6 +1552,23 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		cb := m.followupPanelCallbacks()
 		if cmd, consumed := handlePanelRouting(&m, msg, cb); consumed {
 			return m, cmd
+		}
+		return m, routeFocusedPanel(&m, msg, cb)
+	case stateSessions:
+		cb := m.sessionsPanelCallbacks()
+		if cmd, consumed := handlePanelRouting(&m, msg, cb); consumed {
+			return m, cmd
+		}
+		// esc/h on the list (left focus) leaves the workspace back to work; the
+		// split-pane seam only maps esc/h on the right panel (card → list).
+		if km, ok := msg.(tea.KeyPressMsg); ok && m.focusedPanel == panelLeft {
+			switch km.String() {
+			case "esc", "h":
+				m.state = stateWork
+				m.terminalMode = false
+				m.focusedPanel = panelLeft
+				return m, loadWorkItems(m.config.WorkDir)
+			}
 		}
 		return m, routeFocusedPanel(&m, msg, cb)
 	case stateKnowledge:

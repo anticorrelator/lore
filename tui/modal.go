@@ -222,6 +222,11 @@ func (m model) renderConfirmModal() string {
 		body = fmt.Sprintf("Release the review gate on %s?\n\n", s.key.Render(m.confirmTitle)) +
 			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
 			s.key.Render("any key") + s.dim.Render("  cancel")
+	case "close_session":
+		title = "Close Session"
+		body = fmt.Sprintf("Request close of %s?\n\n", s.key.Render(m.confirmTitle)) +
+			s.key.Render("y / Enter") + s.dim.Render("  confirm") + "    " +
+			s.key.Render("any key") + s.dim.Render("  cancel")
 	}
 
 	return m.placeModal(buildModalBox(s, title, body))

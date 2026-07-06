@@ -50,6 +50,7 @@ const (
 	EventSendRequested    = "send_requested"
 	EventSent             = "sent"
 	EventSendRefused      = "send_refused"
+	EventCloseRequested   = "close_requested"
 
 	// Work-item review events — a third class the writer keys to a work-item
 	// slug (not a request_id), so a row carrying one of these MUST set Slug.

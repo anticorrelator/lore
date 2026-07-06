@@ -15,6 +15,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/followup"
 	"github.com/anticorrelator/lore/tui/internal/knowledge"
+	"github.com/anticorrelator/lore/tui/internal/sessionview"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -389,6 +390,8 @@ func minimalModel(state appState, workItems []work.WorkItem, fuItems []followup.
 		followupDetail: followup.NewDetailModel(""),
 		settlement:     settlement.NewModel(),
 		sessionPanels:  make(map[string]work.SessionPanelModel),
+		sessionsList:   sessionview.NewListModel(),
+		sessionsDetail: sessionview.NewDetailModel(),
 	}
 }
 
@@ -3691,13 +3694,14 @@ func TestTabIndicatorAdvertisesSectionKeys(t *testing.T) {
 		want    []string
 		notWant []string
 	}{
-		{"work", stateWork, []string{"work (1)", "f follow-ups (2)", "t settlement (3)"}, []string{"w work"}},
-		{"followups", stateFollowUps, []string{"w work (1)", "t settlement (3)"}, []string{"f follow-ups"}},
-		{"settlement", stateSettlement, []string{"w work (1)", "f follow-ups (2)"}, []string{"t settlement"}},
+		{"work", stateWork, []string{"work (1)", "f follow-ups (2)", "v sessions (4)", "t settlement (3)"}, []string{"w work"}},
+		{"followups", stateFollowUps, []string{"w work (1)", "v sessions (4)", "t settlement (3)"}, []string{"f follow-ups"}},
+		{"sessions", stateSessions, []string{"w work (1)", "f follow-ups (2)", "t settlement (3)"}, []string{"v sessions"}},
+		{"settlement", stateSettlement, []string{"w work (1)", "f follow-ups (2)", "v sessions (4)"}, []string{"t settlement"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := stripANSI(renderTabIndicator(tc.state, 1, 2, 3, 80, ""))
+			out := stripANSI(renderTabIndicator(tc.state, 1, 2, 3, 4, 0, 80, ""))
 			for _, want := range tc.want {
 				if !strings.Contains(out, want) {
 					t.Errorf("tab indicator missing %q:\n%s", want, out)
@@ -4002,7 +4006,7 @@ func TestHelpContentProjectsKeymapRegistry(t *testing.T) {
 	out := stripANSI(helpContent())
 	wants := []string{
 		"Follow-Ups", "Triage Tab", "Comments Tab", "Follow-Up Detail",
-		"Work List", "Work Detail", "Settlement", "Settlement Claim", "Settlement Verdict",
+		"Work List", "Work Detail", "Sessions", "Settlement", "Settlement Claim", "Settlement Verdict",
 		"Knowledge Browser", "Session Panel (terminal mode)", "Global",
 		"l / Enter", "create work items with AI",
 	}

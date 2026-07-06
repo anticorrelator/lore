@@ -340,9 +340,9 @@ func TestTabIndicatorIdentityRendering(t *testing.T) {
 	idW := lipgloss.Width(identity)
 	// baseW is the width of the tab sections alone; the row never truncates below
 	// it, so identity fitting is judged against baseW, not the raw width.
-	baseW := lipgloss.Width(strings.TrimRight(stripANSI(renderTabIndicator(stateWork, 1, 2, 3, 200, "")), " "))
+	baseW := lipgloss.Width(strings.TrimRight(stripANSI(renderTabIndicator(stateWork, 1, 2, 3, 4, 0, 200, "")), " "))
 	for _, width := range []int{60, 80, 120, 200} {
-		out := stripANSI(renderTabIndicator(stateWork, 1, 2, 3, width, identity))
+		out := stripANSI(renderTabIndicator(stateWork, 1, 2, 3, 4, 0, width, identity))
 		wantW := width
 		if baseW > width {
 			wantW = baseW

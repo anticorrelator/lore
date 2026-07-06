@@ -91,6 +91,8 @@ const (
 	kmFollowupDetail
 	kmWorkList
 	kmWorkDetail
+	kmSessionsList
+	kmSessionsDetail
 	kmSettlementQueue
 	// kmSettlementClaimDetail / kmSettlementVerdictDetail cover the panel's
 	// one-level drill-ins (Enter on a queue row / v on the verdict log).
@@ -134,6 +136,8 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestFollowupListStatusBarKeybindContract/D (delete)"},
 		{key: "w", label: "work list", surfaces: surfStatusBar | surfHelp,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestFollowupListStatusBarKeybindContract/w (work list)"},
+		{key: "v", label: "sessions", surfaces: surfStatusBar | surfHelp, helpLabel: "sessions view",
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSessionsEntryKeybindContract/v (sessions)"},
 		{key: "t", label: "settlement", surfaces: surfStatusBar | surfHelp, helpLabel: "settlement panel",
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestFollowupListStatusBarKeybindContract/t (settlement)"},
 		{key: "ctrl+a", label: "open · closed", surfaces: surfHelp | surfAnnot, role: roleAnnot, helpLabel: "toggle open / closed",
@@ -236,6 +240,8 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkListStatusBarKeybindContract/K (knowledge)"},
 		{key: "f", label: "follow-ups", surfaces: surfStatusBar | surfHelp,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkListStatusBarKeybindContract/f (follow-ups)"},
+		{key: "v", label: "sessions", surfaces: surfStatusBar | surfHelp, helpLabel: "sessions view",
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSessionsEntryKeybindContract/v (sessions)"},
 		{key: "t", label: "settlement", surfaces: surfStatusBar | surfHelp, helpLabel: "settlement panel",
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkListStatusBarKeybindContract/t (settlement)"},
 		{key: "S", label: "settings", surfaces: surfStatusBar,
@@ -261,6 +267,30 @@ var keymapRegistry = []keymapSection{
 		{key: "h/Esc", label: "back to list", surfaces: surfStatusBar | surfHelp, helpKey: "h / Esc",
 			ownerLayers: []ownerLayer{ownerRouter},
 			test:        "TestWorkDetailStatusBarKeybindContract/h (back to list), …/Esc (back to list)"},
+		{key: "?", label: "help", surfaces: surfStatusBar,
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestHelpModalKeybindContract"},
+	}},
+	{ctx: kmSessionsList, helpTitle: "Sessions", entries: []keymapEntry{
+		{key: "j/k", label: "navigate", surfaces: surfStatusBar | surfHelp, helpKey: "j / k",
+			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestSessionsListStatusBarKeybindContract/j/k (navigate)"},
+		{key: "Enter", label: "attach", surfaces: surfStatusBar | surfHelp, helpLabel: "focus / attach session",
+			ownerLayers: []ownerLayer{ownerSubModel, ownerRouter}, test: "TestSessionsListStatusBarKeybindContract/Enter (attach)"},
+		{key: "x", label: "close", surfaces: surfStatusBar | surfHelp, helpLabel: "request close (confirm)",
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSessionsListStatusBarKeybindContract/x (close)"},
+		{key: "h/Esc", label: "back", surfaces: surfStatusBar | surfHelp, helpKey: "h / Esc", helpLabel: "back to work",
+			ownerLayers: []ownerLayer{ownerRouter},
+			test:        "TestSessionsListStatusBarKeybindContract/h (back), …/Esc (back)"},
+		{key: "q", label: "quit", surfaces: surfStatusBar,
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestGlobalQuitKeybindContract"},
+		{key: "?", label: "help", surfaces: surfStatusBar,
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestHelpModalKeybindContract"},
+	}},
+	// Sessions read-only card (right panel, external/in-flight row): status-bar only.
+	{ctx: kmSessionsDetail, entries: []keymapEntry{
+		{key: "x", label: "close", surfaces: surfStatusBar,
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSessionsDetailStatusBarKeybindContract/x (close)"},
+		{key: "h/Esc", label: "back to list", surfaces: surfStatusBar,
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestSessionsDetailStatusBarKeybindContract/h (back to list)"},
 		{key: "?", label: "help", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestHelpModalKeybindContract"},
 	}},
@@ -345,8 +375,11 @@ var keymapRegistry = []keymapSection{
 		{key: "Ctrl+c", label: "terminate", surfaces: surfStatusBar | surfHelp, helpLabel: "terminate subprocess (discard when finished)",
 			labelFn: func(m model) string {
 				panel, ok := m.currentSessionPanel()
-				if m.state == stateFollowUps {
+				switch m.state {
+				case stateFollowUps:
 					panel, ok = m.currentFollowupPanel()
+				case stateSessions:
+					panel, ok = m.currentSessionsPanel()
 				}
 				if ok && panel.IsDone() {
 					return "discard"
@@ -431,6 +464,15 @@ func (m model) keymapContext() keymapContext {
 			return kmTerminal
 		default:
 			return kmWorkDetail
+		}
+	case stateSessions:
+		switch {
+		case m.focusedPanel == panelLeft:
+			return kmSessionsList
+		case m.terminalMode:
+			return kmTerminal
+		default:
+			return kmSessionsDetail
 		}
 	case stateKnowledge:
 		return kmKnowledge
