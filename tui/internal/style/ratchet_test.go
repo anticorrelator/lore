@@ -29,7 +29,7 @@ import (
 //     tighten the allowlist entry to lock in the improvement.
 //
 // The allowlist should only ever shrink. Most entries are owned by Track C
-// (component extraction / settings redesign) or Track A (specpanel.go) and
+// (component extraction / settings redesign) or Track A (sessionpanel.go) and
 // will be retired when those rewrites land.
 var inlineColorAllowlist = map[string]int{
 	"internal/followup/reviewcards.go": 11,
@@ -38,7 +38,7 @@ var inlineColorAllowlist = map[string]int{
 	"internal/work/execlog.go":         8,
 	"internal/work/notes.go":           4,
 	"internal/work/plantab.go":         1,
-	"internal/work/specpanel.go":       2,
+	"internal/work/sessionpanel.go":    2,
 	"internal/work/tasks.go":           4,
 }
 

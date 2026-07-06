@@ -10,7 +10,7 @@ import (
 )
 
 func TestQuiescenceTickEmitsNeedsInputAfterThreshold(t *testing.T) {
-	m := NewSpecPanelModel("test")
+	m := NewSessionPanelModel("test")
 	// Simulate output arriving 6 seconds ago (past the 5s threshold).
 	m.lastOutputTime = time.Now().Add(-6 * time.Second)
 	m.needsInput = false
@@ -44,7 +44,7 @@ func TestQuiescenceTickEmitsNeedsInputAfterThreshold(t *testing.T) {
 }
 
 func TestQuiescenceTickNoEmitBeforeThreshold(t *testing.T) {
-	m := NewSpecPanelModel("test")
+	m := NewSessionPanelModel("test")
 	// Simulate output arriving 2 seconds ago (within the 5s threshold).
 	m.lastOutputTime = time.Now().Add(-2 * time.Second)
 	m.needsInput = false
@@ -65,7 +65,7 @@ func TestQuiescenceTickNoEmitBeforeThreshold(t *testing.T) {
 }
 
 func TestOutputClearsNeedsInput(t *testing.T) {
-	m := NewSpecPanelModel("test")
+	m := NewSessionPanelModel("test")
 	m.lastOutputTime = time.Now().Add(-10 * time.Second)
 	m.needsInput = true
 
@@ -98,121 +98,95 @@ func TestOutputClearsNeedsInput(t *testing.T) {
 	}
 }
 
-// TestBuildInitialPrompt covers the four prompt construction paths in StartTerminalCmd.
+// TestBuildInitialPrompt is a table over descriptor Types covering every prompt
+// construction path: chat (/work and /followup-discuss, with --finding and
+// extra-context variants), implement (/implement, with --yes and -- context
+// variants), and spec (/spec, with short/--yes/-- context variants).
 func TestBuildInitialPrompt(t *testing.T) {
 	tests := []struct {
-		name         string
-		slug         string
-		title        string
-		extraContext string
-		shortMode    bool
-		chatMode     bool
-		skipConfirm  bool
-		followupMode bool
-		wantPrefix   string
-		wantContains []string
+		name string
+		desc SessionDescriptor
+		want string
 	}{
 		{
-			name:         "followup chat mode uses /followup-discuss prefix",
-			slug:         "my-followup",
-			title:        "My Followup",
-			chatMode:     true,
-			followupMode: true,
-			wantPrefix:   "/followup-discuss ",
-			wantContains: []string{"my-followup"},
+			name: "followup chat uses /followup-discuss prefix",
+			desc: SessionDescriptor{Type: SessionChat, Slug: "my-followup", FollowupMode: true, FindingIndex: -1},
+			want: "/followup-discuss my-followup",
 		},
 		{
-			name:         "followup chat mode with extraContext appends it",
-			slug:         "my-followup",
-			title:        "My Followup",
-			extraContext: "extra info",
-			chatMode:     true,
-			followupMode: true,
-			wantPrefix:   "/followup-discuss ",
-			wantContains: []string{"my-followup", ": extra info"},
+			name: "followup chat with extraContext appends it",
+			desc: SessionDescriptor{Type: SessionChat, Slug: "my-followup", ExtraContext: "extra info", FollowupMode: true, FindingIndex: -1},
+			want: "/followup-discuss my-followup: extra info",
 		},
 		{
-			name:         "regular chat mode uses /work slash command with slug",
-			slug:         "some-slug",
-			title:        "Some Title",
-			chatMode:     true,
-			followupMode: false,
-			wantPrefix:   "/work ",
-			wantContains: []string{"some-slug"},
+			name: "followup chat with findingIndex inserts --finding after the ID",
+			desc: SessionDescriptor{Type: SessionChat, Slug: "my-followup", FollowupMode: true, FindingIndex: 3},
+			want: "/followup-discuss my-followup --finding 3",
 		},
 		{
-			name:         "regular chat mode with extraContext appends it",
-			slug:         "some-slug",
-			title:        "Some Title",
-			extraContext: "more context",
-			chatMode:     true,
-			followupMode: false,
-			wantPrefix:   "/work ",
-			wantContains: []string{"some-slug", ": more context"},
+			name: "followup chat with findingIndex and extraContext",
+			desc: SessionDescriptor{Type: SessionChat, Slug: "my-followup", ExtraContext: "some context", FollowupMode: true, FindingIndex: 0},
+			want: "/followup-discuss my-followup --finding 0: some context",
 		},
 		{
-			name:         "spec mode uses /spec prefix",
-			slug:         "my-spec",
-			chatMode:     false,
-			wantPrefix:   "/spec ",
-			wantContains: []string{"my-spec"},
+			name: "regular chat uses /work with slug",
+			desc: SessionDescriptor{Type: SessionChat, Slug: "some-slug", FindingIndex: -1},
+			want: "/work some-slug",
 		},
 		{
-			name:         "spec short mode includes short keyword",
-			slug:         "my-spec",
-			chatMode:     false,
-			shortMode:    true,
-			wantPrefix:   "/spec ",
-			wantContains: []string{"short ", "my-spec"},
+			name: "regular chat with extraContext appends it",
+			desc: SessionDescriptor{Type: SessionChat, Slug: "some-slug", ExtraContext: "more context", FindingIndex: -1},
+			want: "/work some-slug: more context",
 		},
 		{
-			name:         "spec mode with skipConfirm appends --yes",
-			slug:         "my-spec",
-			chatMode:     false,
-			skipConfirm:  true,
-			wantContains: []string{"my-spec --yes"},
+			name: "implement uses /implement with slug",
+			desc: SessionDescriptor{Type: SessionImplement, Slug: "my-impl", FindingIndex: -1},
+			want: "/implement my-impl",
 		},
 		{
-			name:         "spec mode with extraContext appends -- separator",
-			slug:         "my-spec",
-			chatMode:     false,
-			extraContext: "some extra",
-			wantContains: []string{"my-spec -- some extra"},
+			name: "implement with skipConfirm appends --yes",
+			desc: SessionDescriptor{Type: SessionImplement, Slug: "my-impl", SkipConfirm: true, FindingIndex: -1},
+			want: "/implement my-impl --yes",
+		},
+		{
+			name: "implement with extraContext appends -- separator",
+			desc: SessionDescriptor{Type: SessionImplement, Slug: "my-impl", ExtraContext: "ship it", FindingIndex: -1},
+			want: "/implement my-impl -- ship it",
+		},
+		{
+			name: "implement with skipConfirm and extraContext",
+			desc: SessionDescriptor{Type: SessionImplement, Slug: "my-impl", SkipConfirm: true, ExtraContext: "ship it", FindingIndex: -1},
+			want: "/implement my-impl --yes -- ship it",
+		},
+		{
+			name: "spec uses /spec prefix",
+			desc: SessionDescriptor{Type: SessionSpec, Slug: "my-spec", FindingIndex: -1},
+			want: "/spec my-spec",
+		},
+		{
+			name: "spec short includes short keyword",
+			desc: SessionDescriptor{Type: SessionSpec, Slug: "my-spec", ShortMode: true, FindingIndex: -1},
+			want: "/spec short my-spec",
+		},
+		{
+			name: "spec with skipConfirm appends --yes",
+			desc: SessionDescriptor{Type: SessionSpec, Slug: "my-spec", SkipConfirm: true, FindingIndex: -1},
+			want: "/spec my-spec --yes",
+		},
+		{
+			name: "spec with extraContext appends -- separator",
+			desc: SessionDescriptor{Type: SessionSpec, Slug: "my-spec", ExtraContext: "some extra", FindingIndex: -1},
+			want: "/spec my-spec -- some extra",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildInitialPrompt(tc.slug, tc.title, tc.extraContext, tc.shortMode, tc.chatMode, tc.skipConfirm, tc.followupMode, -1)
-			if tc.wantPrefix != "" && !strings.HasPrefix(got, tc.wantPrefix) {
-				t.Errorf("expected prefix %q, got %q", tc.wantPrefix, got)
-			}
-			for _, want := range tc.wantContains {
-				if !strings.Contains(got, want) {
-					t.Errorf("expected %q to contain %q", got, want)
-				}
+			if got := buildInitialPrompt(tc.desc); got != tc.want {
+				t.Errorf("buildInitialPrompt(%+v) = %q, want %q", tc.desc, got, tc.want)
 			}
 		})
 	}
-
-	// Verify --finding flag is inserted after the followup ID for finding-scoped sessions.
-	t.Run("followup chat with findingIndex inserts --finding flag", func(t *testing.T) {
-		got := buildInitialPrompt("my-followup", "My Followup", "", false, true, false, true, 3)
-		want := "/followup-discuss my-followup --finding 3"
-		if got != want {
-			t.Errorf("expected %q, got %q", want, got)
-		}
-	})
-
-	t.Run("followup chat with findingIndex and extraContext", func(t *testing.T) {
-		got := buildInitialPrompt("my-followup", "My Followup", "some context", false, true, false, true, 0)
-		if !strings.Contains(got, "--finding 0") {
-			t.Errorf("expected --finding 0 in %q", got)
-		}
-		if !strings.Contains(got, ": some context") {
-			t.Errorf("expected ': some context' in %q", got)
-		}
-	})
 }
 
 // TestAppendFindingContext covers the finding-scoped prompt building logic.
@@ -326,7 +300,7 @@ func TestAppendFindingContext(t *testing.T) {
 // The terminal panel forwards a single Esc to the PTY (so harnesses like
 // Claude Code can use it to interrupt running work) and detaches focus only
 // on a second Esc within escDetachWindow with no intervening non-Esc key.
-// See SpecPanelModel.handleEscKey.
+// See SessionPanelModel.handleEscKey.
 
 // firstCmdMsg runs cmd and returns the first message it emits, unwrapping a
 // tea.BatchMsg if present. Returns nil for a nil cmd.
@@ -349,7 +323,7 @@ func TestSpecPanelSingleEscForwardsAndDoesNotDetach(t *testing.T) {
 	defer r.Close()
 	defer w.Close()
 
-	m := NewSpecPanelModel("test")
+	m := NewSessionPanelModel("test")
 	m.ptmx = w
 
 	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -375,7 +349,7 @@ func TestSpecPanelSingleEscForwardsAndDoesNotDetach(t *testing.T) {
 }
 
 func TestSpecPanelDoubleEscDetaches(t *testing.T) {
-	m := NewSpecPanelModel("test")
+	m := NewSessionPanelModel("test")
 	// Leave m.ptmx nil — handleEscKey skips the write but still arms/fires.
 
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -395,7 +369,7 @@ func TestSpecPanelDoubleEscDetaches(t *testing.T) {
 }
 
 func TestSpecPanelEscOutsideWindowForwardsAgain(t *testing.T) {
-	m := NewSpecPanelModel("test")
+	m := NewSessionPanelModel("test")
 
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	// Backdate the arm so the next Esc falls outside the window.
@@ -410,7 +384,7 @@ func TestSpecPanelEscOutsideWindowForwardsAgain(t *testing.T) {
 }
 
 func TestSpecPanelInterveningKeyClearsEscArm(t *testing.T) {
-	m := NewSpecPanelModel("test")
+	m := NewSessionPanelModel("test")
 
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	// A non-Esc key arriving between the two Escs should clear the arm so the
@@ -434,7 +408,7 @@ func TestSpecPanelInterveningKeyClearsEscArm(t *testing.T) {
 // flips on with MarkCloseRequested, and is distinct from done (the harness of a
 // held-open session is still live).
 func TestMarkCloseRequestedFlipsBadge(t *testing.T) {
-	m := NewSpecPanelModel("demo")
+	m := NewSessionPanelModel("demo")
 	if m.CloseRequested() {
 		t.Fatal("fresh panel should not be close-requested")
 	}
@@ -451,14 +425,14 @@ func TestMarkCloseRequestedFlipsBadge(t *testing.T) {
 // finished process is always safe to close; a running-but-idle session is safe
 // only when it is NOT sitting at an interactive prompt (the screen gate).
 func TestQuiescentForCloseScreenGate(t *testing.T) {
-	donePanel, _ := NewSpecPanelModel("demo").Update(StreamCompleteMsg{Slug: "demo"})
-	idle := NewSpecPanelModel("demo")
+	donePanel, _ := NewSessionPanelModel("demo").Update(StreamCompleteMsg{Slug: "demo"})
+	idle := NewSessionPanelModel("demo")
 	idle.needsInput = true
-	running := NewSpecPanelModel("demo") // needsInput false, not done
+	running := NewSessionPanelModel("demo") // needsInput false, not done
 
 	cases := []struct {
 		name        string
-		panel       SpecPanelModel
+		panel       SessionPanelModel
 		interactive bool
 		want        bool
 	}{
@@ -481,8 +455,8 @@ func TestQuiescentForCloseScreenGate(t *testing.T) {
 // writing into a dead PTY, while ctrl+\ still dismisses the panel and scrollback
 // keys still navigate retained history.
 func TestClosedPanelRefusesInputVisibly(t *testing.T) {
-	closed := func() SpecPanelModel {
-		m, _ := NewSpecPanelModel("demo").Update(StreamCompleteMsg{Slug: "demo"})
+	closed := func() SessionPanelModel {
+		m, _ := NewSessionPanelModel("demo").Update(StreamCompleteMsg{Slug: "demo"})
 		return m
 	}
 

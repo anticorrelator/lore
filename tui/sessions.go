@@ -251,12 +251,12 @@ func (m model) spawnFromRequest(req session.Request) (model, tea.Cmd) {
 // focus; human spawns keep the existing modal-return-focus behavior.
 func (m model) spawnSession(d work.SessionDescriptor, requestID string) (model, tea.Cmd) {
 	slug := d.Slug
-	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug})
+	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Type: sessionType(d.Type)})
 	specH := m.detailPanelHeight()
 	specW := m.rightPanelWidth() - 2 // 1-char buffer on each side
-	panel := work.NewSpecPanelModel(slug)
+	panel := work.NewSessionPanelModel(slug)
 	panel, _ = panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
-	m.setSpecPanel(slug, panel)
+	m.setSessionPanel(slug, panel)
 	m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
 
 	if m.pendingSpawns == nil {
@@ -273,7 +273,7 @@ func (m model) spawnSession(d work.SessionDescriptor, requestID string) (model, 
 		m.sessionLaunchedFromModal = m.state == stateWork
 	}
 	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type), RoutingOverrides: d.RoutingOverrides}
-	return m, work.StartSessionShimCmd(d, m.config.ProjectDir, specW, specH, m.config.KnowledgeDir, env)
+	return m, work.StartTerminalCmd(d, m.config.ProjectDir, specW, specH, m.config.KnowledgeDir, env)
 }
 
 // instanceRow builds this instance's registry row from its live session set.
@@ -333,9 +333,9 @@ func (m model) idleEventFor(slug, event string, ls liveSession) session.Event {
 // enum, defaulting an unknown value to "spec".
 func sessionType(t string) string {
 	switch t {
-	case "spec", "implement", "chat":
+	case work.SessionSpec, work.SessionImplement, work.SessionChat:
 		return t
 	default:
-		return "spec"
+		return work.SessionSpec
 	}
 }

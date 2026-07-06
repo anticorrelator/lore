@@ -163,7 +163,7 @@ func deleteCloseRequestCmd(sessionsDir, requestID string) tea.Cmd {
 // closeLadderCmd resolves the active harness's graceful-exit capability, then
 // runs the D5 exit ladder against the panel's process. The ladder's process
 // operations are side effects, so they run inside the Cmd, never in Update.
-func (m model) closeLadderCmd(slug string, panel work.SpecPanelModel) tea.Cmd {
+func (m model) closeLadderCmd(slug string, panel work.SessionPanelModel) tea.Cmd {
 	grace := m.closeGrace
 	if grace <= 0 {
 		grace = closeGraceDefault
@@ -228,8 +228,8 @@ func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) 
 
 		if ls, tracked := m.localSessions[cr.Slug]; tracked && !shouldAutoClose(ls) {
 			// Held open: badge the panel done, do not schedule teardown.
-			if panel, ok := m.specPanels[cr.Slug]; ok {
-				m.specPanels[cr.Slug] = panel.MarkCloseRequested()
+			if panel, ok := m.sessionPanels[cr.Slug]; ok {
+				m.sessionPanels[cr.Slug] = panel.MarkCloseRequested()
 			}
 			continue
 		}
@@ -269,7 +269,7 @@ func (m model) advanceCloseLadders() (model, []tea.Cmd) {
 	}
 	var cmds []tea.Cmd
 	for slug := range m.pendingClose {
-		panel, ok := m.specPanels[slug]
+		panel, ok := m.sessionPanels[slug]
 		if !ok {
 			delete(m.pendingClose, slug) // panel already gone; nothing to tear down
 			continue
@@ -299,7 +299,7 @@ func (m model) advanceCloseLadders() (model, []tea.Cmd) {
 // false so a screen we cannot classify never blocks a close indefinitely. It
 // reads the shared terminal backend, so callers must invoke it on the Bubble Tea
 // goroutine (advanceCloseLadders' two callers both do).
-func atInteractivePrompt(panel work.SpecPanelModel) bool {
+func atInteractivePrompt(panel work.SessionPanelModel) bool {
 	framework, err := config.ResolveTUILaunchFramework()
 	if err != nil {
 		return false
@@ -326,14 +326,14 @@ func (m model) handleCloseLadderDone(msg closeLadderDoneMsg) (model, tea.Cmd) {
 		m.flashErr = compactErr("session close", msg.err)
 	}
 	slug := msg.slug
-	if m.specPanels != nil {
-		if panel, ok := m.specPanels[slug]; ok {
+	if m.sessionPanels != nil {
+		if panel, ok := m.sessionPanels[slug]; ok {
 			sm := panel.Cleanup()
 			sm, _ = sm.Update(work.StreamCompleteMsg{Slug: slug}) // sets done
-			m.specPanels[slug] = sm
+			m.sessionPanels[slug] = sm
 		}
 	}
-	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
+	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Done: true})
 	m, sessCmds := m.endLocalSession(slug)
 	cmds := append([]tea.Cmd(nil), sessCmds...)
 	if m.state == stateFollowUps {

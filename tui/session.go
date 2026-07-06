@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -27,9 +28,9 @@ func (m model) endLocalSession(slug string) (model, []tea.Cmd) {
 }
 
 func (m model) handleSpecRequest(msg work.SpecRequestMsg) (model, tea.Cmd) {
-	// 's' on list item: if spec already running, jump to terminal focus.
-	// Otherwise show confirmation modal before launching subprocess.
-	if m.hasSpecPanel(msg.Slug) {
+	// 's' on a work item: attach if a session already exists, else show the
+	// confirmation modal before launching the spec subprocess.
+	if m.hasSessionPanel(msg.Slug) {
 		m.terminalMode = true
 		m.setPreferDetail(msg.Slug, false)
 		m.focusedPanel = panelRight
@@ -37,36 +38,73 @@ func (m model) handleSpecRequest(msg work.SpecRequestMsg) (model, tea.Cmd) {
 	}
 	ta := newModalTextarea()
 	focusCmd := ta.Focus()
-	m.sessionConfirmSlug = msg.Slug
-	m.sessionConfirmTitle = msg.Slug
 	m.sessionConfirmInput = ta
-	m.sessionConfirmShortMode = true
-	m.sessionConfirmSkipConfirm = true
-	m.sessionConfirmChatMode = false
+	m.sessionConfirmDescriptor = work.SessionDescriptor{
+		Type:         work.SessionSpec,
+		Slug:         msg.Slug,
+		Title:        msg.Slug,
+		Initiator:    "human",
+		ShortMode:    true,
+		SkipConfirm:  true,
+		FindingIndex: -1,
+	}
 	m.sessionConfirmActive = true
 	return m, focusCmd
 }
 
 func (m model) handleChatRequest(msg work.ChatRequestMsg) (model, tea.Cmd) {
-	// 'c' on list item: open a chat session about the work item.
-	if m.hasSpecPanel(msg.Slug) {
+	// 'c' on a work item: attach if a session exists, else open a chat confirm.
+	if m.hasSessionPanel(msg.Slug) {
 		m.focusedPanel = panelRight
 		return m, nil
 	}
 	ta := newModalTextarea()
 	focusCmd := ta.Focus()
-	m.sessionConfirmSlug = msg.Slug
-	m.sessionConfirmTitle = msg.Title
 	m.sessionConfirmInput = ta
-	m.sessionConfirmChatMode = true
-	m.sessionConfirmFollowupMode = false
+	m.sessionConfirmDescriptor = work.SessionDescriptor{
+		Type:         work.SessionChat,
+		Slug:         msg.Slug,
+		Title:        msg.Title,
+		Initiator:    "human",
+		FindingIndex: -1,
+	}
+	m.sessionConfirmActive = true
+	return m, focusCmd
+}
+
+func (m model) handleImplementRequest(msg work.ImplementRequestMsg) (model, tea.Cmd) {
+	// 'i' on a work item: attach if a session exists; otherwise gate on
+	// readiness before opening the confirm modal. /implement consumes tasks.json,
+	// so the human gate is stricter than the spec launch — an item with no tasks
+	// (or an archived one) has nothing to implement.
+	if m.hasSessionPanel(msg.Slug) {
+		m.terminalMode = true
+		m.setPreferDetail(msg.Slug, false)
+		m.focusedPanel = panelRight
+		return m, nil
+	}
+	item, ok := m.workItemBySlug(msg.Slug)
+	if !ok || !item.HasTasks || item.Status == "archived" {
+		m.flashErr = fmt.Sprintf("cannot implement %s: not ready — run /spec to generate tasks first", msg.Slug)
+		return m, nil
+	}
+	ta := newModalTextarea()
+	focusCmd := ta.Focus()
+	m.sessionConfirmInput = ta
+	m.sessionConfirmDescriptor = work.SessionDescriptor{
+		Type:         work.SessionImplement,
+		Slug:         msg.Slug,
+		Title:        item.Title,
+		Initiator:    "human",
+		FindingIndex: -1,
+	}
 	m.sessionConfirmActive = true
 	return m, focusCmd
 }
 
 func (m model) handleFollowupChatRequest(msg followup.FollowupChatRequestMsg) (model, tea.Cmd) {
 	// 'c' on a follow-up item: open a chat session about the follow-up.
-	if m.hasSpecPanel(msg.ID) {
+	if m.hasSessionPanel(msg.ID) {
 		m.focusedPanel = panelRight
 		return m, nil
 	}
@@ -78,32 +116,58 @@ func (m model) handleFollowupChatRequest(msg followup.FollowupChatRequestMsg) (m
 	}
 	ta2 := newModalTextarea()
 	focusCmd2 := ta2.Focus()
-	m.sessionConfirmSlug = msg.ID
-	m.sessionConfirmTitle = title
-	m.sessionConfirmShortMode = false
-	m.sessionConfirmSkipConfirm = false
-	m.sessionConfirmInput = ta2
-	m.sessionConfirmChatMode = true
-	m.sessionConfirmFollowupMode = true
-	m.sessionConfirmFindingIndex = msg.FindingIndex
-	m.sessionConfirmActive = true
 	if msg.EditPrompt != "" {
 		ta2.SetValue(msg.EditPrompt)
 	}
+	m.sessionConfirmInput = ta2
+	m.sessionConfirmDescriptor = work.SessionDescriptor{
+		Type:         work.SessionChat,
+		Slug:         msg.ID,
+		Title:        title,
+		Initiator:    "human",
+		FollowupMode: true,
+		FindingIndex: msg.FindingIndex,
+	}
+	m.sessionConfirmActive = true
 	return m, focusCmd2
 }
 
-func (m model) handleSpecProcessStarted(msg work.SpecProcessStartedMsg) (model, tea.Cmd) {
+// workItemBySlug returns the loaded work item for a slug from the list model,
+// or false when no such item is loaded.
+func (m model) workItemBySlug(slug string) (work.WorkItem, bool) {
+	for _, it := range m.list.Items() {
+		if it.Slug == slug {
+			return it, true
+		}
+	}
+	return work.WorkItem{}, false
+}
+
+// sessionTypeForSlug returns the session Type recorded for a slug across the
+// live and pending session sets, defaulting to spec when unknown. Used to re-tag
+// the list's active-session indicator after an index reload rebuilds the list
+// model, so the per-type label survives the rebuild.
+func (m model) sessionTypeForSlug(slug string) string {
+	if ls, ok := m.localSessions[slug]; ok {
+		return ls.typ
+	}
+	if ls, ok := m.pendingSpawns[slug]; ok {
+		return ls.typ
+	}
+	return work.SessionSpec
+}
+
+func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (model, tea.Cmd) {
 	// PTY subprocess launched — attach PTY to the pre-created spec panel and start polling.
 	slug := msg.Slug
-	var panel work.SpecPanelModel
-	if existing, ok := m.specPanels[slug]; ok && !existing.IsDone() {
+	var panel work.SessionPanelModel
+	if existing, ok := m.sessionPanels[slug]; ok && !existing.IsDone() {
 		panel = existing
 	} else {
-		panel = work.NewSpecPanelModel(slug)
+		panel = work.NewSessionPanelModel(slug)
 	}
-	sm, cmd := panel.Update(msg) // SpecProcessStartedMsg sets ptmx + starts PollTerminalCmd
-	m.setSpecPanel(slug, sm)
+	sm, cmd := panel.Update(msg) // SessionProcessStartedMsg sets ptmx + starts PollTerminalCmd
+	m.setSessionPanel(slug, sm)
 	// A fresh session supersedes any detail preference left over from a
 	// previous session on the same item — navigation should auto-show it.
 	m.setPreferDetail(slug, false)
@@ -167,10 +231,10 @@ func (m model) handleTerminalOutput(msg work.TerminalOutputMsg) (model, tea.Cmd)
 	// Route output to the correct spec panel, then continue polling.
 	// The panel may return a NeedsInputChangedMsg cmd if output clears quiescence.
 	slug := msg.Slug
-	if m.specPanels != nil {
-		if panel, ok := m.specPanels[slug]; ok {
+	if m.sessionPanels != nil {
+		if panel, ok := m.sessionPanels[slug]; ok {
 			sm, panelCmd := panel.Update(msg)
-			m.specPanels[slug] = sm
+			m.sessionPanels[slug] = sm
 			// Only re-arm polling if the panel hasn't completed — re-arming
 			// on a closed channel creates a tight StreamCompleteMsg loop.
 			var cmds []tea.Cmd
@@ -192,10 +256,10 @@ func (m model) handleTerminalOutput(msg work.TerminalOutputMsg) (model, tea.Cmd)
 func (m model) handleQuiescenceTick(msg work.QuiescenceTickMsg) (model, tea.Cmd) {
 	// Route quiescence tick to the correct spec panel.
 	slug := msg.Slug
-	if m.specPanels != nil {
-		if panel, ok := m.specPanels[slug]; ok {
+	if m.sessionPanels != nil {
+		if panel, ok := m.sessionPanels[slug]; ok {
 			sm, cmd := panel.Update(msg)
-			m.specPanels[slug] = sm
+			m.sessionPanels[slug] = sm
 			return m, cmd
 		}
 	}
@@ -203,11 +267,12 @@ func (m model) handleQuiescenceTick(msg work.QuiescenceTickMsg) (model, tea.Cmd)
 }
 
 func (m model) handleNeedsInputChanged(msg work.NeedsInputChangedMsg) (model, tea.Cmd) {
-	// Spec panel's quiescence state changed — forward to list for indicator update
-	// and journal the transition. The panel emits this message only on a real
-	// edge; sessionIdle is the emit-site guard so an unchanged state (or an
-	// untracked slug) never re-emits.
-	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: msg.Slug, NeedsInput: msg.NeedsInput})
+	// A session panel's quiescence state changed — forward to list for indicator
+	// update and journal the transition. The panel emits this message only on a
+	// real edge; sessionIdle is the emit-site guard so an unchanged state (or an
+	// untracked slug) never re-emits. Type carries the live session's kind so the
+	// active label survives the needs-input update.
+	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: msg.Slug, Type: m.localSessions[msg.Slug].typ, NeedsInput: msg.NeedsInput})
 
 	ls, tracked := m.localSessions[msg.Slug]
 	if !tracked || m.sessionIdle[msg.Slug] == msg.NeedsInput {
@@ -234,16 +299,16 @@ func (m model) handleStreamComplete(msg work.StreamCompleteMsg) (model, tea.Cmd)
 	// PTY channel closed (subprocess exited normally). Clean up PTY resources
 	// but keep the panel in the map so scrollback history remains accessible.
 	slug := msg.Slug
-	if m.specPanels != nil {
-		if panel, ok := m.specPanels[slug]; ok {
+	if m.sessionPanels != nil {
+		if panel, ok := m.sessionPanels[slug]; ok {
 			sm := panel.Cleanup()
 			sm, _ = sm.Update(msg) // sets done = true
-			m.specPanels[slug] = sm
+			m.sessionPanels[slug] = sm
 		}
 	}
 	// Do NOT force m.terminalMode = false — if we're in terminal mode for
 	// this slug, keep it so the user can scroll through the output history.
-	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
+	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Done: true})
 	m, sessCmds := m.endLocalSession(slug)
 	// Pre-size detail view and invalidate cache so it's ready when the user
 	// exits terminal mode (or immediately if not in terminal mode).
@@ -269,11 +334,11 @@ func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 	// PTY error — mark done with error, cleanup PTY. Still reload list in
 	// case spec wrote partial files before failing.
 	slug := msg.Slug
-	if m.specPanels != nil {
-		if panel, ok := m.specPanels[slug]; ok {
+	if m.sessionPanels != nil {
+		if panel, ok := m.sessionPanels[slug]; ok {
 			sm, _ := panel.Update(msg) // marks hasError+done
 			sm = sm.Cleanup()
-			m.specPanels[slug] = sm
+			m.sessionPanels[slug] = sm
 			if m.terminalMode && m.list.CurrentSlug() == slug {
 				m.focusedPanel = panelRight
 			}
@@ -285,7 +350,7 @@ func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 	if m.list.CurrentSlug() == slug || (m.state == stateFollowUps && m.followupDetail.CurrentID() == slug) {
 		m.terminalMode = false
 	}
-	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
+	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Done: true})
 
 	var cmds []tea.Cmd
 	if meta, pending := m.pendingSpawns[slug]; pending {
@@ -325,15 +390,15 @@ func (m model) handleTerminalTerminate(msg work.TerminalTerminateMsg) (model, te
 	// User killed the subprocess (Ctrl+\\) — cleanup and remove the panel.
 	// Reload list in case spec wrote files before being killed.
 	slug := msg.Slug
-	if m.specPanels != nil {
-		if panel, ok := m.specPanels[slug]; ok {
+	if m.sessionPanels != nil {
+		if panel, ok := m.sessionPanels[slug]; ok {
 			panel.Cleanup()
-			delete(m.specPanels, slug)
+			delete(m.sessionPanels, slug)
 		}
 	}
 	m.terminalMode = false
 
-	m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug, Done: true})
+	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Done: true})
 	m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
 	m, sessCmds := m.endLocalSession(slug)
 	cmds := append([]tea.Cmd(nil), sessCmds...)

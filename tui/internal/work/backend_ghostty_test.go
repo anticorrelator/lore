@@ -13,9 +13,9 @@ import (
 
 // newSizedPanel creates a panel sized via the real WindowSizeMsg path so the
 // model height and backend dimensions stay in sync, as in the live TUI.
-func newSizedPanel(t *testing.T, width, height int) SpecPanelModel {
+func newSizedPanel(t *testing.T, width, height int) SessionPanelModel {
 	t.Helper()
-	m := NewSpecPanelModel("test")
+	m := NewSessionPanelModel("test")
 	m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: height})
 	return m
 }
@@ -23,7 +23,7 @@ func newSizedPanel(t *testing.T, width, height int) SpecPanelModel {
 // feedNumberedLines writes rows "line00".."lineNN" through the real
 // TerminalOutputMsg path, without a trailing newline after the last row, so
 // document row i carries the label "line%02d" i.
-func feedNumberedLines(t *testing.T, m SpecPanelModel, n int) SpecPanelModel {
+func feedNumberedLines(t *testing.T, m SessionPanelModel, n int) SessionPanelModel {
 	t.Helper()
 	var sb strings.Builder
 	for i := 0; i < n; i++ {

@@ -92,7 +92,7 @@ func (m model) viewContent() string {
 		return lipgloss.Place(m.width, m.height-1, lipgloss.Center, lipgloss.Center, m.popup.View())
 	}
 	if m.sessionConfirmActive {
-		return m.renderSpecConfirmModal()
+		return m.renderSessionConfirmModal()
 	}
 	if m.aiInputActive {
 		return m.renderAIModal()
@@ -344,12 +344,12 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 
 	// Right panel annotation: show "ctrl+t  detail · terminal" when a spec session exists.
 	var rightBorderTitle string
-	if cfg.hasSpecPanel {
+	if cfg.hasSessionPanel {
 		modeSel := 0
 		if m.terminalMode {
 			modeSel = 1
 		}
-		modeAnnot, modeAnnotW := annotPanelMode(cfg.specPanel.IsDone(), cfg.specPanel.CloseRequested()).render(modeSel)
+		modeAnnot, modeAnnotW := annotPanelMode(cfg.sessionPanel.IsDone(), cfg.sessionPanel.CloseRequested()).render(modeSel)
 		rightBorderTitle = renderBorderTitleWithAnnot(rightTitleRendered, rightInner, rightBS, modeAnnot, modeAnnotW)
 	} else {
 		rightBorderTitle = renderBorderTitle(rightTitleRendered, rightInner, rightBS)
@@ -371,10 +371,10 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 
 	leftLines := strings.Split(cfg.listView, "\n")
 
-	// Right panel content: terminal mode shows spec panel, otherwise detail view.
+	// Right panel content: terminal mode shows session panel, otherwise detail view.
 	var rightLines []string
-	if m.terminalMode && cfg.hasSpecPanel {
-		rightLines = strings.Split(cfg.specPanel.View(), "\n")
+	if m.terminalMode && cfg.hasSessionPanel {
+		rightLines = strings.Split(cfg.sessionPanel.View(), "\n")
 	} else {
 		rightLines = strings.Split(cfg.detailView, "\n")
 	}
@@ -394,7 +394,7 @@ func (m model) viewSideBySide(cfg paneConfig) string {
 		}
 		var right string
 		if i < len(rightLines) {
-			if m.terminalMode && cfg.hasSpecPanel {
+			if m.terminalMode && cfg.hasSessionPanel {
 				right = " " + rightLines[i] // 1-char left buffer; right buffer from padding
 			} else {
 				right = "  " + rightLines[i]
@@ -463,10 +463,10 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 
 	topLines := strings.Split(cfg.listView, "\n")
 
-	// Bottom panel content: terminal mode shows spec panel, otherwise detail view.
+	// Bottom panel content: terminal mode shows session panel, otherwise detail view.
 	var bottomLines []string
-	if m.terminalMode && cfg.hasSpecPanel {
-		bottomLines = strings.Split(cfg.specPanel.View(), "\n")
+	if m.terminalMode && cfg.hasSessionPanel {
+		bottomLines = strings.Split(cfg.sessionPanel.View(), "\n")
 	} else {
 		bottomLines = strings.Split(cfg.detailView, "\n")
 	}
@@ -484,12 +484,12 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 
 	// Bottom panel annotation: show "ctrl+t  detail · terminal" when a spec session exists.
 	var bottomBorderTitle string
-	if cfg.hasSpecPanel {
+	if cfg.hasSessionPanel {
 		modeSel := 0
 		if m.terminalMode {
 			modeSel = 1
 		}
-		modeAnnot, modeAnnotW := annotPanelMode(cfg.specPanel.IsDone(), cfg.specPanel.CloseRequested()).render(modeSel)
+		modeAnnot, modeAnnotW := annotPanelMode(cfg.sessionPanel.IsDone(), cfg.sessionPanel.CloseRequested()).render(modeSel)
 		bottomBorderTitle = renderBorderTitleWithAnnot(bottomTitleRendered, panelW, bottomBS, modeAnnot, modeAnnotW)
 	} else {
 		bottomBorderTitle = renderBorderTitle(bottomTitleRendered, panelW, bottomBS)
@@ -527,7 +527,7 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 	for i := 0; i < bottomH; i++ {
 		var content string
 		if i < len(bottomLines) {
-			if m.terminalMode && cfg.hasSpecPanel {
+			if m.terminalMode && cfg.hasSessionPanel {
 				content = " " + bottomLines[i] // 1-char left buffer; right buffer from padding
 			} else {
 				content = "  " + bottomLines[i]

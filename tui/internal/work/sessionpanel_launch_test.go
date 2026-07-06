@@ -19,7 +19,7 @@ import (
 // The tests stage a fake LORE_DATA_DIR (mirroring the framework_test.go
 // pattern) plus a fake $PATH containing executable stubs for `claude`,
 // `opencode`, `codex`, and `lore`. We invoke StartTerminalCmd's tea.Cmd, then
-// inspect the SpecProcessStartedMsg.Cmd.Path / Cmd.Args before the subprocess
+// inspect the SessionProcessStartedMsg.Cmd.Path / Cmd.Args before the subprocess
 // exits — verifying what was *spawned* without depending on the real harness
 // being installed.
 
@@ -36,7 +36,7 @@ func stageFakeBinaries(t *testing.T) string {
 	dir := t.TempDir()
 
 	// Generic harness stub: print args and sleep so the parent can read the
-	// SpecProcessStartedMsg before the subprocess exits.
+	// SessionProcessStartedMsg before the subprocess exits.
 	harnessStub := "#!/bin/sh\nprintf '%s\\n' \"$@\"\nsleep 1\n"
 	for _, name := range []string{"claude", "opencode", "codex"} {
 		path := filepath.Join(dir, name)
@@ -122,15 +122,16 @@ func stageFakeLoreData(t *testing.T, framework string, extraArgs []string) strin
 }
 
 // runStartTerminal invokes StartTerminalCmd's tea.Cmd and returns either the
-// SpecProcessStartedMsg or the StreamErrorMsg. Closes the PTY immediately so
+// SessionProcessStartedMsg or the StreamErrorMsg. Closes the PTY immediately so
 // the subprocess teardown path runs cleanly.
 func runStartTerminal(t *testing.T, slug, projectDir string, followupMode bool) tea.Msg {
 	t.Helper()
 	// width=80, height=24 are typical PTY defaults; the values aren't
 	// load-bearing for the args we assert.
-	cmd := StartTerminalCmd(slug, "smoke title", projectDir, 80, 24, "", false, false, true, followupMode, projectDir, -1, SessionEnv{})
+	d := SessionDescriptor{Type: SessionSpec, Slug: slug, Title: "smoke title", SkipConfirm: true, FollowupMode: followupMode, FindingIndex: -1}
+	cmd := StartTerminalCmd(d, projectDir, 80, 24, projectDir, SessionEnv{})
 	msg := cmd()
-	if started, ok := msg.(SpecProcessStartedMsg); ok {
+	if started, ok := msg.(SessionProcessStartedMsg); ok {
 		// Close the PTY so the stub subprocess receives EOF and exits without
 		// leaving zombies. The reader goroutine drains via the channel close.
 		if started.Ptmx != nil {
@@ -145,9 +146,9 @@ func TestStartTerminalCmd_SpawnsClaudeBinaryWithDefaultFlags(t *testing.T) {
 	dir := stageFakeLoreData(t, "claude-code", nil)
 
 	msg := runStartTerminal(t, "smoke-slug", dir, false)
-	started, ok := msg.(SpecProcessStartedMsg)
+	started, ok := msg.(SessionProcessStartedMsg)
 	if !ok {
-		t.Fatalf("expected SpecProcessStartedMsg, got %T (%+v)", msg, msg)
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
 	}
 
 	if !strings.HasSuffix(started.Cmd.Path, "/claude") {
@@ -174,12 +175,13 @@ func TestStartTerminalCmd_ExportsSessionIdentity(t *testing.T) {
 	stageFakeBinaries(t)
 	dir := stageFakeLoreData(t, "claude-code", nil)
 
-	cmd := StartTerminalCmd("smoke-slug", "smoke title", dir, 80, 24, "", false, false, true, false, dir, -1,
+	d := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke title", SkipConfirm: true, FindingIndex: -1}
+	cmd := StartTerminalCmd(d, dir, 80, 24, dir,
 		SessionEnv{Instance: "amber-otter", Slug: "smoke-slug", Type: "spec"})
 	msg := cmd()
-	started, ok := msg.(SpecProcessStartedMsg)
+	started, ok := msg.(SessionProcessStartedMsg)
 	if !ok {
-		t.Fatalf("expected SpecProcessStartedMsg, got %T (%+v)", msg, msg)
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
 	}
 	if started.Ptmx != nil {
 		_ = started.Ptmx.Close()
@@ -261,9 +263,9 @@ func TestStartTerminalCmd_PrependsHarnessArgs(t *testing.T) {
 	dir := stageFakeLoreData(t, "claude-code", []string{"--my-prepended-flag"})
 
 	msg := runStartTerminal(t, "smoke-slug", dir, false)
-	started, ok := msg.(SpecProcessStartedMsg)
+	started, ok := msg.(SessionProcessStartedMsg)
 	if !ok {
-		t.Fatalf("expected SpecProcessStartedMsg, got %T (%+v)", msg, msg)
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
 	}
 
 	// Cmd.Args[0] is argv[0] (the binary basename), so harness args start at [1].
@@ -284,9 +286,9 @@ func TestStartTerminalCmd_FollowupModeInjectsAppendSystemPromptOnClaudeCode(t *t
 	dir := stageFakeLoreData(t, "claude-code", nil)
 
 	msg := runStartTerminal(t, "smoke-slug", dir, true)
-	started, ok := msg.(SpecProcessStartedMsg)
+	started, ok := msg.(SessionProcessStartedMsg)
 	if !ok {
-		t.Fatalf("expected SpecProcessStartedMsg, got %T (%+v)", msg, msg)
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
 	}
 
 	// Followup mode + a non-empty followup context should produce
@@ -304,9 +306,9 @@ func TestStartTerminalCmd_OpenCodeSkipsUnsupportedConcerns(t *testing.T) {
 	// followupMode=true → exercises the append_system_prompt path; opencode
 	// reports `unsupported` for both TUI launch flags and so should skip both.
 	msg := runStartTerminal(t, "smoke-slug", dir, true)
-	started, ok := msg.(SpecProcessStartedMsg)
+	started, ok := msg.(SessionProcessStartedMsg)
 	if !ok {
-		t.Fatalf("expected SpecProcessStartedMsg, got %T (%+v)", msg, msg)
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
 	}
 
 	if !strings.HasSuffix(started.Cmd.Path, "/opencode") {
@@ -332,9 +334,9 @@ func TestStartTerminalCmd_CodexSkipsUnsupportedConcerns(t *testing.T) {
 	dir := stageFakeLoreData(t, "codex", nil)
 
 	msg := runStartTerminal(t, "smoke-slug", dir, true)
-	started, ok := msg.(SpecProcessStartedMsg)
+	started, ok := msg.(SessionProcessStartedMsg)
 	if !ok {
-		t.Fatalf("expected SpecProcessStartedMsg, got %T (%+v)", msg, msg)
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
 	}
 
 	if !strings.HasSuffix(started.Cmd.Path, "/codex") {

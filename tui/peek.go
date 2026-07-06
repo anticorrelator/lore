@@ -84,7 +84,7 @@ func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
 		if m.pendingPeek[pr.RequestID] {
 			continue
 		}
-		panel, ok := m.specPanels[pr.Slug]
+		panel, ok := m.sessionPanels[pr.Slug]
 		if !ok {
 			continue
 		}

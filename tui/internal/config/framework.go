@@ -632,7 +632,7 @@ func resolveTUILaunchFlag(framework, kind string) (string, bool, error) {
 // HarnessSystemPromptFlag returns the harness-native CLI flag spelling for
 // appending text to the session system prompt (Claude Code's
 // `--append-system-prompt`). Used by the TUI's followup-discuss launch path
-// at tui/internal/work/specpanel.go to inject prior-finding context.
+// at tui/internal/work/sessionpanel.go to inject prior-finding context.
 //
 // Pass "" to resolve the active framework's flag.
 //
@@ -655,7 +655,7 @@ func HarnessSystemPromptFlag(framework string) (string, bool, error) {
 // HarnessSettingsOverrideFlag returns the harness-native CLI flag spelling
 // for inline session-scoped settings overrides (Claude Code's
 // `--settings <json>`). Used by the TUI launch path at
-// tui/internal/work/specpanel.go to pin per-session settings without
+// tui/internal/work/sessionpanel.go to pin per-session settings without
 // modifying the user's settings file.
 //
 // Pass "" to resolve the active framework's flag.

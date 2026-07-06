@@ -41,6 +41,13 @@ type ChatRequestMsg struct {
 	Title string
 }
 
+// ImplementRequestMsg is sent when the user presses 'i' to run /implement for an
+// item. The dispatch layers emit it unconditionally; the host applies the
+// readiness gate (ready = has tasks and not archived) before launching.
+type ImplementRequestMsg struct {
+	Slug string
+}
+
 // ArchiveRequestMsg is sent when the user confirms an archive/unarchive action.
 type ArchiveRequestMsg struct {
 	Slug      string
@@ -75,10 +82,14 @@ type AssignFinishedMsg struct {
 	Err   error
 }
 
-// SpecStatusMsg is dispatched from main.go to update the list's spec indicator.
-// Done=true clears the indicator; otherwise sets specActiveSlug and specNeedsInput.
-type SpecStatusMsg struct {
+// SessionStatusMsg is dispatched from main.go to update the list's local
+// active-session indicator. Done=true clears the indicator; otherwise it records
+// the session as active for the slug and updates its needs-input state. Type is
+// the session's spec|implement|chat kind, which selects the animated readiness
+// label; an empty Type on a needs-input-only update preserves the recorded type.
+type SessionStatusMsg struct {
 	Slug       string
+	Type       string
 	NeedsInput bool
 	Done       bool
 }
@@ -135,16 +146,16 @@ var listColumns = []collection.Column{
 
 // ListModel is the Bubble Tea model for the work item list panel.
 type ListModel struct {
-	allItems            []WorkItem
-	filterMode          FilterMode
-	collapsed           map[string]bool // project → collapsed (session-local, not persisted)
-	prStatus            map[string]gh.PRStatus
-	prLoaded            bool
-	specActiveSlugs     map[string]bool // all slugs currently speccing
-	specNeedsInputSlugs map[string]bool // slugs with active input prompt
-	specDots            int
-	externalSessions    map[string]ExternalSession // slug → session on another TUI instance
-	list                collection.List
+	allItems               []WorkItem
+	filterMode             FilterMode
+	collapsed              map[string]bool // project → collapsed (session-local, not persisted)
+	prStatus               map[string]gh.PRStatus
+	prLoaded               bool
+	sessionActiveType      map[string]string // slug → active local session Type (spec|implement|chat)
+	sessionNeedsInputSlugs map[string]bool   // slugs with active input prompt
+	specDots               int
+	externalSessions       map[string]ExternalSession // slug → session on another TUI instance
+	list                   collection.List
 }
 
 // visibleItems returns the filtered slice of items based on filterMode.
@@ -254,7 +265,7 @@ func (m *ListModel) refreshRows() {
 // listColumns for the columnar table, Title+Meta for the stacked layout.
 func (m ListModel) itemRow(item WorkItem) collection.Row {
 	dot := " "
-	if m.specNeedsInputSlugs[item.Slug] {
+	if m.sessionNeedsInputSlugs[item.Slug] {
 		dot = "●"
 	}
 
@@ -291,15 +302,15 @@ func (m ListModel) itemRow(item WorkItem) collection.Row {
 }
 
 // readinessCell returns the readiness column content, in strict priority
-// order: animated "speccing" while a local spec session is active, then a
-// badge for an external session (amber "◆ agent" when agent-initiated, dim
-// "◆ active" when human), then a review-gate badge (amber "⊘ held" for a hold,
-// cyan "⚑ flagged" for a flag), otherwise the readiness label on the status
-// ramp. Higher tiers win so one slug never shows conflicting indicators.
+// order: an animated per-type label while a local session is active
+// ("speccing"/"implementing"/"chatting"), then a badge for an external session
+// (amber "◆ agent" when agent-initiated, dim "◆ active" when human), then a
+// review-gate badge (amber "⊘ held" for a hold, cyan "⚑ flagged" for a flag),
+// otherwise the readiness label on the status ramp. Higher tiers win so one slug
+// never shows conflicting indicators.
 func (m ListModel) readinessCell(item WorkItem) collection.Cell {
-	if m.specActiveSlugs[item.Slug] {
-		dots := strings.Repeat(".", m.specDots)
-		return collection.Cell{Text: "speccing" + dots + strings.Repeat(" ", 3-len(dots)), Style: style.StatusActive}
+	if typ, ok := m.sessionActiveType[item.Slug]; ok {
+		return collection.Cell{Text: sessionActiveText(typ, m.specDots), Style: style.StatusActive}
 	}
 	if es, ok := m.externalSessions[item.Slug]; ok {
 		if es.IsAgent() {
@@ -317,6 +328,42 @@ func (m ListModel) readinessCell(item WorkItem) collection.Cell {
 	return collection.Cell{Text: label, Style: st}
 }
 
+// activeStatusWidth is the fixed width of the animated active-session label,
+// matched to the readiness column so the dots animate without shifting
+// neighboring stacked-layout metadata, and so the longest verb ("implementing")
+// never truncates mid-word.
+const activeStatusWidth = 12
+
+// sessionActiveText renders the animated active-session status for a session
+// type: the type's verb followed by up to `dots` cycling dots, padded to a
+// stable width. A full-width verb ("implementing") leaves no room for dots and
+// renders static.
+func sessionActiveText(typ string, dots int) string {
+	label := sessionActiveLabel(typ)
+	room := activeStatusWidth - len(label)
+	if room < 0 {
+		room = 0
+	}
+	if dots > room {
+		dots = room
+	}
+	return label + strings.Repeat(".", dots) + strings.Repeat(" ", room-dots)
+}
+
+// sessionActiveLabel maps a session Type to its animated readiness verb. An
+// unknown or empty type falls back to "speccing" — the historical label from
+// before the indicator carried a type.
+func sessionActiveLabel(typ string) string {
+	switch typ {
+	case SessionImplement:
+		return "implementing"
+	case SessionChat:
+		return "chatting"
+	default:
+		return "speccing"
+	}
+}
+
 // reviewMechanism returns the item's active review mechanism ("hold" | "flag"),
 // or "" when ungated.
 func reviewMechanism(item WorkItem) string {
@@ -332,10 +379,11 @@ func reviewMechanism(item WorkItem) string {
 // agent-initiated session, ◆ (dim) when it is a human session on another
 // instance, then ⊘ (amber) for a review hold or ⚑ (cyan) for a review flag.
 func (m ListModel) stackedGlyph(item WorkItem) string {
-	if m.specActiveSlugs[item.Slug] && m.specNeedsInputSlugs[item.Slug] {
+	_, active := m.sessionActiveType[item.Slug]
+	if active && m.sessionNeedsInputSlugs[item.Slug] {
 		return "● "
 	}
-	if !m.specActiveSlugs[item.Slug] {
+	if !active {
 		if es, ok := m.externalSessions[item.Slug]; ok {
 			if es.IsAgent() {
 				return "◈ "
@@ -434,22 +482,28 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 		m.refreshRows()
 		return m, nil
 
-	case SpecStatusMsg:
-		if m.specActiveSlugs == nil {
-			m.specActiveSlugs = make(map[string]bool)
-			m.specNeedsInputSlugs = make(map[string]bool)
+	case SessionStatusMsg:
+		if m.sessionActiveType == nil {
+			m.sessionActiveType = make(map[string]string)
+			m.sessionNeedsInputSlugs = make(map[string]bool)
 		}
 		var cmd tea.Cmd
 		if msg.Done {
-			delete(m.specActiveSlugs, msg.Slug)
-			delete(m.specNeedsInputSlugs, msg.Slug)
-			if len(m.specActiveSlugs) == 0 {
+			delete(m.sessionActiveType, msg.Slug)
+			delete(m.sessionNeedsInputSlugs, msg.Slug)
+			if len(m.sessionActiveType) == 0 {
 				m.specDots = 0
 			}
 		} else {
-			wasEmpty := len(m.specActiveSlugs) == 0
-			m.specActiveSlugs[msg.Slug] = true
-			m.specNeedsInputSlugs[msg.Slug] = msg.NeedsInput
+			wasEmpty := len(m.sessionActiveType) == 0
+			typ := msg.Type
+			if typ == "" {
+				// A needs-input-only update carries no Type; keep the one recorded
+				// at launch so the label doesn't flip to the "speccing" fallback.
+				typ = m.sessionActiveType[msg.Slug]
+			}
+			m.sessionActiveType[msg.Slug] = typ
+			m.sessionNeedsInputSlugs[msg.Slug] = msg.NeedsInput
 			if wasEmpty {
 				cmd = specTick()
 			}
@@ -458,7 +512,7 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 		return m, cmd
 
 	case specTickMsg:
-		if len(m.specActiveSlugs) > 0 {
+		if len(m.sessionActiveType) > 0 {
 			m.specDots = (m.specDots + 1) % 4
 			m.refreshRows()
 			return m, specTick()
@@ -485,6 +539,13 @@ func (m ListModel) Update(msg tea.Msg) (ListModel, tea.Cmd) {
 			if item, ok := m.CurrentItem(); ok {
 				return m, func() tea.Msg {
 					return SpecRequestMsg{Slug: item.Slug}
+				}
+			}
+			return m, nil
+		case "i":
+			if item, ok := m.CurrentItem(); ok {
+				return m, func() tea.Msg {
+					return ImplementRequestMsg{Slug: item.Slug}
 				}
 			}
 			return m, nil

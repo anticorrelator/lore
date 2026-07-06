@@ -241,7 +241,7 @@ func TestScanCloseRequestsCmd_TargetingMatrix(t *testing.T) {
 // pendingClose so teardown fires at most once.
 func TestAdvanceCloseLadders_QuiescenceWaitOrdering(t *testing.T) {
 	m, _ := baseSessionModel(t)
-	m.specPanels = map[string]work.SpecPanelModel{"demo": work.NewSpecPanelModel("demo")}
+	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
 	m.pendingClose = map[string]bool{"demo": true}
 
 	// Mid-turn: not quiescent → no dispatch, still pending.
@@ -254,8 +254,8 @@ func TestAdvanceCloseLadders_QuiescenceWaitOrdering(t *testing.T) {
 	}
 
 	// Quiescent (process finished): dispatch exactly one, clear the slug.
-	panel, _ := m.specPanels["demo"].Update(work.StreamCompleteMsg{Slug: "demo"})
-	m.specPanels["demo"] = panel
+	panel, _ := m.sessionPanels["demo"].Update(work.StreamCompleteMsg{Slug: "demo"})
+	m.sessionPanels["demo"] = panel
 	if !panel.QuiescentForClose(false) {
 		t.Fatal("panel not quiescent after StreamComplete")
 	}
@@ -273,7 +273,7 @@ func TestAdvanceCloseLadders_QuiescenceWaitOrdering(t *testing.T) {
 // already-pending slug is a no-op (no duplicate work).
 func TestHandleCloseRequestScan_MarksAndDeletes(t *testing.T) {
 	m, _ := baseSessionModel(t)
-	m.specPanels = map[string]work.SpecPanelModel{"demo": work.NewSpecPanelModel("demo")}
+	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
 
 	m, cmd := m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{
 		{RequestID: "c1", Slug: "demo", TargetInstance: "me"},
@@ -330,9 +330,9 @@ func TestHandleCloseRequestScan_InitiatorGate(t *testing.T) {
 		"agent-item": {typ: "spec", initiator: "agent", started: time.Now()},
 		"human-item": {typ: "spec", initiator: "human", started: time.Now()},
 	}
-	m.specPanels = map[string]work.SpecPanelModel{
-		"agent-item": work.NewSpecPanelModel("agent-item"),
-		"human-item": work.NewSpecPanelModel("human-item"),
+	m.sessionPanels = map[string]work.SessionPanelModel{
+		"agent-item": work.NewSessionPanelModel("agent-item"),
+		"human-item": work.NewSessionPanelModel("human-item"),
 	}
 
 	m, cmd := m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{
@@ -349,10 +349,10 @@ func TestHandleCloseRequestScan_InitiatorGate(t *testing.T) {
 	if m.pendingClose["human-item"] {
 		t.Error("human session must not be scheduled for teardown")
 	}
-	if m.specPanels["human-item"].CloseRequested() != true {
+	if m.sessionPanels["human-item"].CloseRequested() != true {
 		t.Error("human session panel should carry the close-requested badge")
 	}
-	if m.specPanels["agent-item"].CloseRequested() {
+	if m.sessionPanels["agent-item"].CloseRequested() {
 		t.Error("agent session panel should not be badged — it tears down")
 	}
 }
@@ -384,8 +384,8 @@ func TestHandleCloseLadderDone_JournalsClosedExactlyOnce(t *testing.T) {
 	m.localSessions = map[string]liveSession{
 		"demo": {typ: "spec", initiator: "human", started: time.Now()},
 	}
-	panel, _ := work.NewSpecPanelModel("demo").Update(work.StreamCompleteMsg{Slug: "demo"})
-	m.specPanels = map[string]work.SpecPanelModel{"demo": panel}
+	panel, _ := work.NewSessionPanelModel("demo").Update(work.StreamCompleteMsg{Slug: "demo"})
+	m.sessionPanels = map[string]work.SessionPanelModel{"demo": panel}
 
 	m, cmd := m.handleCloseLadderDone(closeLadderDoneMsg{slug: "demo", rung: rungSIGTERM})
 	if _, ok := m.localSessions["demo"]; ok {

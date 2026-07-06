@@ -103,9 +103,13 @@ func specConfirmModel() model {
 	ta.Focus()
 	m.sessionConfirmInput = ta
 	m.sessionConfirmActive = true
-	m.sessionConfirmSlug = "test-item"
-	m.sessionConfirmTitle = "test-item"
-	m.sessionConfirmFindingIndex = -1
+	m.sessionConfirmDescriptor = work.SessionDescriptor{
+		Type:         work.SessionSpec,
+		Slug:         "test-item",
+		Title:        "test-item",
+		Initiator:    "human",
+		FindingIndex: -1,
+	}
 	return m
 }
 
@@ -136,7 +140,7 @@ func press(code rune, mods ...tea.KeyMod) tea.KeyPressMsg {
 }
 
 // TestSpecConfirmModalKeybindContract verifies the keybinds displayed in
-// renderSpecConfirmModal (Enter, Esc, Shift+Enter, Alt+1, Alt+2) against the
+// renderSessionConfirmModal (Enter, Esc, Shift+Enter, Alt+1, Alt+2) against the
 // modal's actual dispatch in Update.
 func TestSpecConfirmModalKeybindContract(t *testing.T) {
 	t.Run("Shift+Enter (newline)", func(t *testing.T) {
@@ -165,7 +169,7 @@ func TestSpecConfirmModalKeybindContract(t *testing.T) {
 		if cmd == nil {
 			t.Error("Enter should dispatch the launch command")
 		}
-		if !nm.hasSpecPanel("test-item") {
+		if !nm.hasSessionPanel("test-item") {
 			t.Error("Enter should pre-create the spec panel")
 		}
 	})
@@ -178,18 +182,128 @@ func TestSpecConfirmModalKeybindContract(t *testing.T) {
 	})
 	t.Run("Alt+1 (toggle short mode)", func(t *testing.T) {
 		m := specConfirmModel()
-		before := m.sessionConfirmShortMode
+		before := m.sessionConfirmDescriptor.ShortMode
 		nm, _ := updateModel(t, m, press('1', tea.ModAlt))
-		if nm.sessionConfirmShortMode == before {
+		if nm.sessionConfirmDescriptor.ShortMode == before {
 			t.Error("Alt+1 should toggle short mode")
 		}
 	})
 	t.Run("Alt+2 (toggle skip confirm)", func(t *testing.T) {
 		m := specConfirmModel()
-		before := m.sessionConfirmSkipConfirm
+		before := m.sessionConfirmDescriptor.SkipConfirm
 		nm, _ := updateModel(t, m, press('2', tea.ModAlt))
-		if nm.sessionConfirmSkipConfirm == before {
+		if nm.sessionConfirmDescriptor.SkipConfirm == before {
 			t.Error("Alt+2 should toggle skip confirm")
+		}
+	})
+}
+
+// TestImplementReadinessGate verifies the host readiness gate on the 'i'
+// implement launch: a ready item (tasks generated, not archived) opens the
+// implement confirm modal; a non-ready or archived item flashes a not-ready
+// notice and launches nothing.
+func TestImplementReadinessGate(t *testing.T) {
+	gateModel := func(items []work.WorkItem) model {
+		m := minimalModel(stateWork, items, nil)
+		m.width, m.height = 120, 40
+		return m
+	}
+	t.Run("ready item opens the implement modal", func(t *testing.T) {
+		m := gateModel([]work.WorkItem{{Slug: "ready-1", Title: "Ready One", Status: "active", HasTasks: true}})
+		nm, _ := updateModel(t, m, work.ImplementRequestMsg{Slug: "ready-1"})
+		if !nm.sessionConfirmActive {
+			t.Fatal("a ready item should open the implement confirm modal")
+		}
+		if nm.sessionConfirmDescriptor.Type != work.SessionImplement {
+			t.Errorf("modal type = %q, want implement", nm.sessionConfirmDescriptor.Type)
+		}
+		if nm.flashErr != "" {
+			t.Errorf("a ready launch should not flash, got %q", nm.flashErr)
+		}
+	})
+	t.Run("needs-spec item flashes, no launch", func(t *testing.T) {
+		m := gateModel([]work.WorkItem{{Slug: "raw-1", Title: "Raw One", Status: "active"}})
+		nm, _ := updateModel(t, m, work.ImplementRequestMsg{Slug: "raw-1"})
+		if nm.sessionConfirmActive {
+			t.Error("a non-ready item must not open the modal")
+		}
+		if nm.hasSessionPanel("raw-1") {
+			t.Error("a non-ready item must not launch a session")
+		}
+		if !strings.Contains(nm.flashErr, "not ready") {
+			t.Errorf("non-ready launch should flash a not-ready notice, got %q", nm.flashErr)
+		}
+	})
+	t.Run("archived item flashes, no launch", func(t *testing.T) {
+		m := gateModel([]work.WorkItem{{Slug: "arc-1", Title: "Archived One", Status: "archived", HasTasks: true}})
+		// Switch to the archived filter so the item is visible to the gate,
+		// exercising the archived guard rather than the not-found path.
+		m.list, _ = m.list.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+		if m.list.GetFilterMode() != work.FilterArchived {
+			t.Fatal("test setup: expected archived filter after ctrl+a")
+		}
+		nm, _ := updateModel(t, m, work.ImplementRequestMsg{Slug: "arc-1"})
+		if nm.sessionConfirmActive {
+			t.Error("an archived item must not open the modal")
+		}
+		if nm.flashErr == "" {
+			t.Error("an archived item should flash a not-ready notice")
+		}
+	})
+}
+
+// TestImplementConfirmModalKeybindContract verifies the implement variant of the
+// session confirm modal: Alt+2 toggles the --yes (skip-confirm) checkbox, Alt+1
+// is inert (short mode is spec-only), and Enter launches the implement session.
+func TestImplementConfirmModalKeybindContract(t *testing.T) {
+	implementModel := func() model {
+		m := minimalModel(stateWork, []work.WorkItem{{Slug: "impl-1", Title: "Impl One", Status: "active", HasTasks: true}}, nil)
+		m.width, m.height = 120, 40
+		ta := newModalTextarea()
+		ta.Focus()
+		m.sessionConfirmInput = ta
+		m.sessionConfirmActive = true
+		m.sessionConfirmDescriptor = work.SessionDescriptor{
+			Type: work.SessionImplement, Slug: "impl-1", Title: "Impl One",
+			Initiator: "human", FindingIndex: -1,
+		}
+		return m
+	}
+	t.Run("Alt+2 (toggle skip confirm)", func(t *testing.T) {
+		m := implementModel()
+		before := m.sessionConfirmDescriptor.SkipConfirm
+		nm, _ := updateModel(t, m, press('2', tea.ModAlt))
+		if nm.sessionConfirmDescriptor.SkipConfirm == before {
+			t.Error("Alt+2 should toggle --yes on the implement modal")
+		}
+	})
+	t.Run("Alt+1 (inert)", func(t *testing.T) {
+		m := implementModel()
+		nm, _ := updateModel(t, m, press('1', tea.ModAlt))
+		if nm.sessionConfirmDescriptor.ShortMode {
+			t.Error("Alt+1 (short mode) is spec-only and must be inert on the implement modal")
+		}
+	})
+	t.Run("renders --yes (Alt+2) and not Alt+1", func(t *testing.T) {
+		out := stripANSI(implementModel().renderSessionConfirmModal())
+		if !strings.Contains(out, "Alt+2") || !strings.Contains(out, "auto-accept anchor gate") {
+			t.Error("implement modal should advertise the narrowly-labeled Alt+2 --yes checkbox")
+		}
+		if strings.Contains(out, "Alt+1") {
+			t.Error("implement modal must not advertise Alt+1 (short mode is spec-only)")
+		}
+	})
+	t.Run("Enter (launch implement)", func(t *testing.T) {
+		m := implementModel()
+		nm, cmd := updateModel(t, m, press(tea.KeyEnter))
+		if nm.sessionConfirmActive {
+			t.Error("Enter should close the implement modal")
+		}
+		if cmd == nil {
+			t.Error("Enter should dispatch the launch command")
+		}
+		if !nm.hasSessionPanel("impl-1") {
+			t.Error("Enter should pre-create the session panel")
 		}
 	})
 }
@@ -274,7 +388,7 @@ func minimalModel(state appState, workItems []work.WorkItem, fuItems []followup.
 		followupList:   followup.NewListModel(fuItems),
 		followupDetail: followup.NewDetailModel(""),
 		settlement:     settlement.NewModel(),
-		specPanels:     make(map[string]work.SpecPanelModel),
+		sessionPanels:  make(map[string]work.SessionPanelModel),
 	}
 }
 
@@ -510,7 +624,7 @@ func TestSettlementRootNavigationIgnoredInTerminalMode(t *testing.T) {
 	m := minimalModel(stateWork, []work.WorkItem{{Slug: "work-1", Title: "Work 1"}}, nil)
 	m.terminalMode = true
 	m.focusedPanel = panelRight
-	m.setSpecPanel("work-1", work.NewSpecPanelModel("work-1"))
+	m.setSessionPanel("work-1", work.NewSessionPanelModel("work-1"))
 
 	next, _ := m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 	nm := next.(model)
@@ -529,7 +643,7 @@ func TestSettlementRootNavigationAllowedWhenTerminalNotFocused(t *testing.T) {
 	m := minimalModel(stateWork, []work.WorkItem{{Slug: "work-1", Title: "Work 1"}}, nil)
 	m.terminalMode = true
 	m.focusedPanel = panelLeft
-	m.setSpecPanel("work-1", work.NewSpecPanelModel("work-1"))
+	m.setSessionPanel("work-1", work.NewSessionPanelModel("work-1"))
 
 	next, cmd := m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 	nm := next.(model)
@@ -919,11 +1033,11 @@ func TestSettlementInFlightFailsafeNoOpWhenNotInFlight(t *testing.T) {
 // Tests override only the fields they care about.
 func noopCallbacks() panelCallbacks {
 	return panelCallbacks{
-		currentSlug:  func() string { return "" },
-		loadDetail:   func(string) tea.Cmd { return nil },
-		specPanelFn:  func() (work.SpecPanelModel, bool) { return work.SpecPanelModel{}, false },
-		listUpdate:   func(tea.Msg) (tea.Cmd, string, string) { return nil, "", "" },
-		detailUpdate: func(tea.Msg) tea.Cmd { return nil },
+		currentSlug:    func() string { return "" },
+		loadDetail:     func(string) tea.Cmd { return nil },
+		sessionPanelFn: func() (work.SessionPanelModel, bool) { return work.SessionPanelModel{}, false },
+		listUpdate:     func(tea.Msg) (tea.Cmd, string, string) { return nil, "", "" },
+		detailUpdate:   func(tea.Msg) tea.Cmd { return nil },
 	}
 }
 
@@ -1046,12 +1160,12 @@ func TestHandlePanelRoutingCtrlTTogglesTerminalMode(t *testing.T) {
 	m.focusedPanel = panelRight
 	m.terminalMode = false
 
-	// specPanelFn returns a done panel — IsDone() = true satisfies the condition
+	// sessionPanelFn returns a done panel — IsDone() = true satisfies the condition
 	slug := "test-slug"
-	m.setSpecPanel(slug, work.NewSpecPanelModel(slug))
+	m.setSessionPanel(slug, work.NewSessionPanelModel(slug))
 	cb := noopCallbacks()
-	cb.specPanelFn = func() (work.SpecPanelModel, bool) {
-		panel := work.NewSpecPanelModel(slug)
+	cb.sessionPanelFn = func() (work.SessionPanelModel, bool) {
+		panel := work.NewSessionPanelModel(slug)
 		// Mark done so Ptmx() == nil path still qualifies via IsDone()
 		sm, _ := panel.Update(work.StreamCompleteMsg{Slug: slug})
 		return sm, true
@@ -1539,12 +1653,12 @@ func TestPostReviewCompleteFlashVariants(t *testing.T) {
 // the target follow-up ID. Tests dispatch messages directly to model.Update so
 // they exercise the real routing logic end-to-end.
 
-// fuModelWithSpecPanel returns a stateFollowUps model with a spec panel
+// fuModelWithSessionPanel returns a stateFollowUps model with a session panel
 // pre-registered for id. The list is seeded with fuItems so cursor navigation works.
-func fuModelWithSpecPanel(fuItems []followup.FollowUpItem, id string) model {
+func fuModelWithSessionPanel(fuItems []followup.FollowUpItem, id string) model {
 	m := minimalModel(stateFollowUps, nil, fuItems)
 	m.focusedPanel = panelLeft
-	m.setSpecPanel(id, work.NewSpecPanelModel(id))
+	m.setSessionPanel(id, work.NewSessionPanelModel(id))
 	return m
 }
 
@@ -1555,7 +1669,7 @@ func TestFollowupSelectedMsgSyncsTerminalMode(t *testing.T) {
 	fuItems := []followup.FollowUpItem{
 		{ID: id, Title: "Panel FU", Status: "open"},
 	}
-	m := fuModelWithSpecPanel(fuItems, id)
+	m := fuModelWithSessionPanel(fuItems, id)
 	m.terminalMode = false
 
 	next, _ := m.Update(followup.FollowUpSelectedMsg{Item: fuItems[0]})
@@ -1566,9 +1680,9 @@ func TestFollowupSelectedMsgSyncsTerminalMode(t *testing.T) {
 	}
 }
 
-// TestFollowupSelectedMsgNoSpecPanelLeavesTerminalModeOff verifies that
+// TestFollowupSelectedMsgNoSessionPanelLeavesTerminalModeOff verifies that
 // FollowUpSelectedMsg does not set terminalMode when no spec panel is registered.
-func TestFollowupSelectedMsgNoSpecPanelLeavesTerminalModeOff(t *testing.T) {
+func TestFollowupSelectedMsgNoSessionPanelLeavesTerminalModeOff(t *testing.T) {
 	id := "fu-no-panel"
 	fuItems := []followup.FollowUpItem{
 		{ID: id, Title: "No-Panel FU", Status: "open"},
@@ -1594,7 +1708,7 @@ func TestIndexLoadedMsgSyncsTerminalMode(t *testing.T) {
 	}
 	// Start with an empty list (no current ID) so IndexLoadedMsg sees a new item.
 	m := minimalModel(stateFollowUps, nil, nil)
-	m.setSpecPanel(id, work.NewSpecPanelModel(id))
+	m.setSessionPanel(id, work.NewSessionPanelModel(id))
 	m.terminalMode = false
 
 	next, _ := m.Update(followup.IndexLoadedMsg{Items: fuItems, Err: nil})
@@ -1612,7 +1726,7 @@ func TestLoadDetailMsgSyncsTerminalMode(t *testing.T) {
 	fuItems := []followup.FollowUpItem{
 		{ID: id, Title: "Hover FU", Status: "open"},
 	}
-	m := fuModelWithSpecPanel(fuItems, id)
+	m := fuModelWithSessionPanel(fuItems, id)
 	m.terminalMode = false
 
 	next, _ := m.Update(followup.LoadDetailMsg{ID: id})
@@ -1623,9 +1737,9 @@ func TestLoadDetailMsgSyncsTerminalMode(t *testing.T) {
 	}
 }
 
-// TestLoadDetailMsgNoSpecPanelLeavesTerminalModeOff verifies that LoadDetailMsg
+// TestLoadDetailMsgNoSessionPanelLeavesTerminalModeOff verifies that LoadDetailMsg
 // does not set terminalMode when no spec panel is registered for the target ID.
-func TestLoadDetailMsgNoSpecPanelLeavesTerminalModeOff(t *testing.T) {
+func TestLoadDetailMsgNoSessionPanelLeavesTerminalModeOff(t *testing.T) {
 	id := "fu-hover-no-panel"
 	fuItems := []followup.FollowUpItem{
 		{ID: id, Title: "Hover No-Panel FU", Status: "open"},
@@ -1653,7 +1767,7 @@ func TestFollowupLeftPanelKeySyncsTerminalMode(t *testing.T) {
 		{ID: idPanel, Title: "Panel FU", Status: "open"},
 	}
 	m := minimalModel(stateFollowUps, nil, fuItems)
-	m.setSpecPanel(idPanel, work.NewSpecPanelModel(idPanel))
+	m.setSessionPanel(idPanel, work.NewSessionPanelModel(idPanel))
 	m.focusedPanel = panelLeft
 	m.terminalMode = false
 	// Cursor starts at 0 (idNone); pressing j moves it to 1 (idPanel).
@@ -1666,9 +1780,9 @@ func TestFollowupLeftPanelKeySyncsTerminalMode(t *testing.T) {
 	}
 }
 
-// TestFollowupLeftPanelKeyNoSpecPanelLeavesTerminalModeOff verifies that a j/k
+// TestFollowupLeftPanelKeyNoSessionPanelLeavesTerminalModeOff verifies that a j/k
 // key press does not set terminalMode when the new item has no spec panel.
-func TestFollowupLeftPanelKeyNoSpecPanelLeavesTerminalModeOff(t *testing.T) {
+func TestFollowupLeftPanelKeyNoSessionPanelLeavesTerminalModeOff(t *testing.T) {
 	id1 := "fu-a"
 	id2 := "fu-b"
 	fuItems := []followup.FollowUpItem{
@@ -1695,12 +1809,12 @@ func TestFollowupLeftPanelKeyNoSpecPanelLeavesTerminalModeOff(t *testing.T) {
 // re-enable command is expected in any case.)
 func TestLoadFollowupDetailSyncsTerminalMode(t *testing.T) {
 	const id = "fu-test"
-	panel := work.NewSpecPanelModel(id)
+	panel := work.NewSessionPanelModel(id)
 
 	t.Run("spec_panel", func(t *testing.T) {
 		m := minimalModel(stateFollowUps, nil, nil)
 		m.focusedPanel = panelRight
-		m.setSpecPanel(id, panel)
+		m.setSessionPanel(id, panel)
 
 		cmd := m.loadFollowupDetail(id)
 
@@ -2671,8 +2785,18 @@ func TestWorkListStatusBarKeybindContract(t *testing.T) {
 			t.Fatalf("s produced %T, want work.SpecRequestMsg", msg)
 		}
 		nm, _ = updateModel(t, nm, msg)
-		if !nm.sessionConfirmActive || nm.sessionConfirmChatMode {
+		if !nm.sessionConfirmActive || nm.sessionConfirmDescriptor.Type != work.SessionSpec {
 			t.Error("spec request should open the spec confirm modal in spec mode")
+		}
+	})
+	t.Run("i (implement)", func(t *testing.T) {
+		m := workContractModel()
+		_, cmd := updateModel(t, m, press('i'))
+		if cmd == nil {
+			t.Fatal("i should emit an implement request")
+		}
+		if _, ok := cmd().(work.ImplementRequestMsg); !ok {
+			t.Fatalf("i produced %T, want work.ImplementRequestMsg", cmd())
 		}
 	})
 	t.Run("c (chat)", func(t *testing.T) {
@@ -2686,7 +2810,7 @@ func TestWorkListStatusBarKeybindContract(t *testing.T) {
 			t.Fatalf("c produced %T, want work.ChatRequestMsg", msg)
 		}
 		nm, _ = updateModel(t, nm, msg)
-		if !nm.sessionConfirmActive || !nm.sessionConfirmChatMode {
+		if !nm.sessionConfirmActive || nm.sessionConfirmDescriptor.Type != work.SessionChat {
 			t.Error("chat request should open the confirm modal in chat mode")
 		}
 	})
@@ -2951,6 +3075,15 @@ func TestWorkDetailStatusBarKeybindContract(t *testing.T) {
 			t.Error("spec request should open the confirm modal")
 		}
 	})
+	t.Run("i (implement)", func(t *testing.T) {
+		_, cmd := updateModel(t, detailModel(), press('i'))
+		if cmd == nil {
+			t.Fatal("i should emit an implement request from the detail panel")
+		}
+		if _, ok := cmd().(work.ImplementRequestMsg); !ok {
+			t.Fatalf("i produced %T, want work.ImplementRequestMsg", cmd())
+		}
+	})
 	t.Run("c (chat)", func(t *testing.T) {
 		nm, cmd := updateModel(t, detailModel(), press('c'))
 		if cmd == nil {
@@ -2961,7 +3094,7 @@ func TestWorkDetailStatusBarKeybindContract(t *testing.T) {
 			t.Fatalf("c produced %T, want work.ChatRequestMsg", msg)
 		}
 		nm, _ = updateModel(t, nm, msg)
-		if !nm.sessionConfirmActive || !nm.sessionConfirmChatMode {
+		if !nm.sessionConfirmActive || nm.sessionConfirmDescriptor.Type != work.SessionChat {
 			t.Error("chat request should open the confirm modal in chat mode")
 		}
 	})
@@ -3085,7 +3218,7 @@ func TestTerminalModeStatusBarKeybindContract(t *testing.T) {
 		m := workContractModel()
 		m.focusedPanel = panelRight
 		m.terminalMode = true
-		m.setSpecPanel("item-1", work.NewSpecPanelModel("item-1"))
+		m.setSessionPanel("item-1", work.NewSessionPanelModel("item-1"))
 		return m
 	}
 	t.Run("ctrl+t (detail)", func(t *testing.T) {
@@ -3115,9 +3248,9 @@ func TestTerminalModeStatusBarKeybindContract(t *testing.T) {
 	})
 	t.Run("Ctrl+c (discard)", func(t *testing.T) {
 		m := terminalModel()
-		panel := m.specPanels["item-1"]
+		panel := m.sessionPanels["item-1"]
 		panel, _ = panel.Update(work.StreamCompleteMsg{Slug: "item-1"})
-		m.specPanels["item-1"] = panel
+		m.sessionPanels["item-1"] = panel
 		hints := stripANSI(strings.Join(m.statusBarHints(kmTerminal), " · "))
 		if !strings.Contains(hints, "Ctrl+c discard") {
 			t.Errorf("status bar does not advertise discard on a done panel: %s", hints)
@@ -3131,7 +3264,7 @@ func TestTerminalModeStatusBarKeybindContract(t *testing.T) {
 			t.Fatalf("ctrl+c produced %T, want work.TerminalTerminateMsg", msg)
 		}
 		nm, _ = updateModel(t, nm, msg)
-		if nm.hasSpecPanel("item-1") {
+		if nm.hasSessionPanel("item-1") {
 			t.Error("discard should drop the finished panel and its scrollback")
 		}
 	})
@@ -3280,7 +3413,7 @@ func TestFollowupDetailStatusBarKeybindContract(t *testing.T) {
 			t.Fatalf("c produced %T, want followup.FollowupChatRequestMsg", msg)
 		}
 		nm, _ = updateModel(t, nm, msg)
-		if !nm.sessionConfirmActive || !nm.sessionConfirmChatMode {
+		if !nm.sessionConfirmActive || nm.sessionConfirmDescriptor.Type != work.SessionChat {
 			t.Error("chat request should open the confirm modal in chat mode")
 		}
 	})
@@ -3541,7 +3674,7 @@ func TestRoundedBordersEverywhere(t *testing.T) {
 		assertRounded(t, stripANSI(settlementContractModel(t).viewSettlement()))
 	})
 	t.Run("spec confirm modal nested input", func(t *testing.T) {
-		assertRounded(t, stripANSI(specConfirmModel().renderSpecConfirmModal()))
+		assertRounded(t, stripANSI(specConfirmModel().renderSessionConfirmModal()))
 	})
 	t.Run("ai modal nested input", func(t *testing.T) {
 		m := minimalModel(stateWork, nil, nil)
@@ -3803,7 +3936,7 @@ func TestHelpContentProjectsKeymapRegistry(t *testing.T) {
 	wants := []string{
 		"Follow-Ups", "Triage Tab", "Comments Tab", "Follow-Up Detail",
 		"Work List", "Work Detail", "Settlement", "Settlement Claim", "Settlement Verdict",
-		"Knowledge Browser", "Spec Panel (terminal mode)", "Global",
+		"Knowledge Browser", "Session Panel (terminal mode)", "Global",
 		"l / Enter", "create work items with AI",
 	}
 	pos := -1

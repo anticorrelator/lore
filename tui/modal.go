@@ -9,6 +9,7 @@ import (
 
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/style"
+	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
 // modalInnerW is the visible content width inside all modals.
@@ -69,10 +70,15 @@ func newModalTextarea() textarea.Model {
 	return ta
 }
 
-// renderSpecConfirmModal shows a centered confirmation modal before launching the spec subprocess.
-// Displays the slug, an optional context input, and enter/esc hints.
-func (m model) renderSpecConfirmModal() string {
+// renderSessionConfirmModal shows a centered confirmation modal before launching
+// a session subprocess. Title and checkbox set are keyed off the pending
+// descriptor's Type: chat shows a plain opening-message input; spec offers
+// Short mode (Alt+1) and Skip confirmations (Alt+2); implement offers only the
+// narrowly-labeled --yes (Alt+2), because /implement --yes suppresses just the
+// anchor-gate route prompt, not the archived-item/checksum prompts.
+func (m model) renderSessionConfirmModal() string {
 	s := modalStyles
+	d := m.sessionConfirmDescriptor
 
 	// Nested input keeps the one DockBorder shape and recedes via the dim
 	// blur border.
@@ -85,24 +91,31 @@ func (m model) renderSpecConfirmModal() string {
 		s.sep.Render("  ·  ") +
 		s.key.Render("Esc") + " " + s.dim.Render("cancel")
 
+	check := func(on bool) string {
+		if on {
+			return "[x]"
+		}
+		return "[ ]"
+	}
+
 	var title, body string
-	if m.sessionConfirmChatMode {
-		title = "Chat about " + m.sessionConfirmSlug + "?"
+	switch d.Type {
+	case work.SessionChat:
+		title = "Chat about " + d.Slug + "?"
 		body = "\n" + s.dim.Render(" opening message (optional):") +
 			"\n" + inputBox + "\n\n " + hints + "\n"
-	} else {
-		title = "Run /spec for " + m.sessionConfirmSlug + "?"
-		shortCheck := "[ ]"
-		if m.sessionConfirmShortMode {
-			shortCheck = "[x]"
-		}
-		skipCheck := "[ ]"
-		if m.sessionConfirmSkipConfirm {
-			skipCheck = "[x]"
-		}
-		checkboxes := " " + s.key.Render(shortCheck) + " " + s.dim.Render("Short mode") +
+	case work.SessionImplement:
+		title = "Run /implement for " + d.Slug + "?"
+		checkboxes := " " + s.key.Render(check(d.SkipConfirm)) + " " + s.dim.Render("--yes (auto-accept anchor gate)") +
+			"  " + s.sep.Render("(") + s.key.Render("Alt+2") + s.sep.Render(")")
+		body = "\n" + checkboxes + "\n\n" +
+			s.dim.Render(fmt.Sprintf(" additional context for %s (optional):", config.HarnessDisplayName(""))) +
+			"\n" + inputBox + "\n\n " + hints + "\n"
+	default: // spec
+		title = "Run /spec for " + d.Slug + "?"
+		checkboxes := " " + s.key.Render(check(d.ShortMode)) + " " + s.dim.Render("Short mode") +
 			"  " + s.sep.Render("(") + s.key.Render("Alt+1") + s.sep.Render(")") +
-			"\n " + s.key.Render(skipCheck) + " " + s.dim.Render("Skip confirmations") +
+			"\n " + s.key.Render(check(d.SkipConfirm)) + " " + s.dim.Render("Skip confirmations") +
 			"  " + s.sep.Render("(") + s.key.Render("Alt+2") + s.sep.Render(")")
 		body = "\n" + checkboxes + "\n\n" +
 			s.dim.Render(fmt.Sprintf(" additional context for %s (optional):", config.HarnessDisplayName(""))) +

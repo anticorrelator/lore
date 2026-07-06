@@ -45,7 +45,7 @@ func TestCompactNeedsInputShowsBullet(t *testing.T) {
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
 	m := resizeStacked(newTestListModel(items))
-	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: true})
+	m, _ = m.Update(SessionStatusMsg{Slug: "my-item", NeedsInput: true})
 
 	view := m.View()
 	if !strings.Contains(view, "●") {
@@ -60,7 +60,7 @@ func TestCompactActiveNoNeedsInputNoBullet(t *testing.T) {
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
 	m := resizeStacked(newTestListModel(items))
-	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: false})
+	m, _ = m.Update(SessionStatusMsg{Slug: "my-item", NeedsInput: false})
 
 	view := m.View()
 	if strings.Contains(view, "●") {
@@ -90,7 +90,7 @@ func TestStackedGlyphDecoratorColorsUnselectedRow(t *testing.T) {
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
 	m := resizeStacked(newTestListModel(items))
-	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: true})
+	m, _ = m.Update(SessionStatusMsg{Slug: "my-item", NeedsInput: true})
 
 	view := m.View()
 	want := needsInputStyle.Render("●")
@@ -104,7 +104,7 @@ func TestFullNeedsInputShowsDotColumn(t *testing.T) {
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: true})
+	m, _ = m.Update(SessionStatusMsg{Slug: "my-item", NeedsInput: true})
 
 	view := m.View()
 	// ● moves to the dot column (before slug), readiness shows "speccing"
@@ -124,7 +124,7 @@ func TestFullActiveNoNeedsInputShowsSpeccing(t *testing.T) {
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: false})
+	m, _ = m.Update(SessionStatusMsg{Slug: "my-item", NeedsInput: false})
 
 	view := m.View()
 	if !strings.Contains(view, "speccing") {
@@ -157,7 +157,7 @@ func TestFullNeedsInputReadinessPreserved(t *testing.T) {
 		{Slug: "my-item", Title: "My Item", Status: "active", HasTasks: true, Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: true})
+	m, _ = m.Update(SessionStatusMsg{Slug: "my-item", NeedsInput: true})
 
 	view := m.View()
 	// ● must appear in dot column
@@ -229,7 +229,7 @@ func TestFullViewSpeccingUsesStatusActive(t *testing.T) {
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: false})
+	m, _ = m.Update(SessionStatusMsg{Slug: "my-item", NeedsInput: false})
 
 	view := m.View()
 	if !strings.Contains(view, sgrOpen(style.StatusActive)+"speccing") {
@@ -243,7 +243,7 @@ func TestNeedsInputDotUsesAttentionColor(t *testing.T) {
 		{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"},
 	}
 	m := newTestListModel(items)
-	m, _ = m.Update(SpecStatusMsg{Slug: "my-item", NeedsInput: true})
+	m, _ = m.Update(SessionStatusMsg{Slug: "my-item", NeedsInput: true})
 
 	want := lipgloss.NewStyle().Foreground(style.ColorAttention).Render("●")
 	if view := m.View(); !strings.Contains(view, want) {
@@ -285,7 +285,7 @@ func TestStatusIndicatorPriorityLocalOverExternal(t *testing.T) {
 		if compact {
 			m = resizeStacked(m)
 		}
-		m, _ = m.Update(SpecStatusMsg{Slug: "both", NeedsInput: false})
+		m, _ = m.Update(SessionStatusMsg{Slug: "both", NeedsInput: false})
 		m, _ = m.Update(ExternalSessionMsg{Sessions: map[string]ExternalSession{"both": {Instance: "other"}}})
 
 		view := stripListANSI(m.View())
@@ -382,6 +382,48 @@ func TestListModelCEmitsChatRequest(t *testing.T) {
 	}
 	if _, ok := cmd().(ChatRequestMsg); !ok {
 		t.Fatalf("c produced %T, want ChatRequestMsg", cmd())
+	}
+}
+
+// "i run implement" — the list sub-model emits the request unconditionally; the
+// host applies the readiness gate.
+func TestListModelIEmitsImplementRequest(t *testing.T) {
+	m := newTestListModel(contractItems())
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
+	if cmd == nil {
+		t.Fatal("i should emit an implement request")
+	}
+	msg, ok := cmd().(ImplementRequestMsg)
+	if !ok {
+		t.Fatalf("i produced %T, want ImplementRequestMsg", cmd())
+	}
+	if msg.Slug != "one" {
+		t.Errorf("implement slug = %q, want one", msg.Slug)
+	}
+}
+
+// The local active-session readiness label is type-aware: a SessionStatusMsg
+// carrying an implement/chat Type renders "implementing"/"chatting", not the
+// "speccing" default.
+func TestReadinessCellRendersSessionTypeLabel(t *testing.T) {
+	cases := []struct {
+		typ  string
+		want string
+	}{
+		{SessionSpec, "speccing"},
+		{SessionImplement, "implementing"},
+		{SessionChat, "chatting"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.typ, func(t *testing.T) {
+			items := []WorkItem{{Slug: "my-item", Title: "My Item", Status: "active", Updated: "2026-01-01"}}
+			m := newTestListModel(items)
+			m, _ = m.Update(SessionStatusMsg{Slug: "my-item", Type: tc.typ})
+			view := m.View()
+			if !strings.Contains(view, tc.want) {
+				t.Fatalf("Type %q should render %q in readiness column, got:\n%s", tc.typ, tc.want, view)
+			}
+		})
 	}
 }
 
@@ -751,7 +793,7 @@ func TestReviewBadgePriority(t *testing.T) {
 
 	// local speccing outranks held.
 	m2 := newTestListModel(gated())
-	m2, _ = m2.Update(SpecStatusMsg{Slug: "g", NeedsInput: false})
+	m2, _ = m2.Update(SessionStatusMsg{Slug: "g", NeedsInput: false})
 	v := stripListANSI(m2.View())
 	if strings.Contains(v, "held") {
 		t.Errorf("local speccing should outrank held, got:\n%s", v)

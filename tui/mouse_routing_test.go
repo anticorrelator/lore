@@ -131,7 +131,7 @@ func terminalModel(t *testing.T) model {
 	items := []work.WorkItem{{Slug: "item-1", Title: "Item One"}}
 	m := minimalModel(stateWork, items, nil)
 	m.layoutMode = config.LayoutTopBottom
-	m.setSpecPanel("item-1", work.NewSpecPanelModel("item-1"))
+	m.setSessionPanel("item-1", work.NewSessionPanelModel("item-1"))
 	m, _ = updateModel(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	var out strings.Builder
 	for i := 0; i < 100; i++ {
@@ -155,14 +155,14 @@ func TestWheelScrollsTerminalScrollback(t *testing.T) {
 			m := terminalModel(t)
 			m.focusedPanel = focus
 
-			panel, ok := m.currentSpecPanel()
+			panel, ok := m.currentSessionPanel()
 			if !ok {
 				t.Fatal("no spec panel on current item")
 			}
 			before := panel.View()
 
 			nm, _ := updateModel(t, m, tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: 60, Y: 20})
-			panel, ok = nm.currentSpecPanel()
+			panel, ok = nm.currentSessionPanel()
 			if !ok {
 				t.Fatal("spec panel gone after wheel")
 			}
@@ -178,7 +178,7 @@ func TestWheelScrollsTerminalScrollback(t *testing.T) {
 
 			// Wheel down at the live edge returns to the live view.
 			nm2, _ := updateModel(t, nm, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 60, Y: 20})
-			panel, _ = nm2.currentSpecPanel()
+			panel, _ = nm2.currentSessionPanel()
 			if panel.View() != before {
 				t.Error("wheel down did not return to the live view")
 			}

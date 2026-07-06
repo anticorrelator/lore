@@ -26,16 +26,16 @@ import (
 // after launching a spec from the confirm modal (sessionLaunchedFromModal).
 func activeUnfocusedModel() model {
 	m := workContractModel()
-	m.setSpecPanel("item-1", work.NewSpecPanelModel("item-1"))
+	m.setSessionPanel("item-1", work.NewSessionPanelModel("item-1"))
 	m.terminalMode = true
 	m.focusedPanel = panelLeft
 	return m
 }
 
-// doneSpecPanel returns a finished panel, which qualifies for the ctrl+t
+// doneSessionPanel returns a finished session panel, which qualifies for the ctrl+t
 // toggle-to-terminal branch without needing a live PTY.
-func doneSpecPanel(slug string) work.SpecPanelModel {
-	p := work.NewSpecPanelModel(slug)
+func doneSessionPanel(slug string) work.SessionPanelModel {
+	p := work.NewSessionPanelModel(slug)
 	p, _ = p.Update(work.StreamCompleteMsg{Slug: slug})
 	return p
 }
@@ -106,7 +106,7 @@ func TestActiveUnfocusedWorkListKeybindContract(t *testing.T) {
 	})
 	t.Run("ctrl+t (detail · terminal)", func(t *testing.T) {
 		m := activeUnfocusedModel()
-		m.setSpecPanel("item-1", doneSpecPanel("item-1"))
+		m.setSessionPanel("item-1", doneSessionPanel("item-1"))
 		nm, _ := updateModel(t, m, press('t', tea.ModCtrl))
 		if nm.terminalMode {
 			t.Error("ctrl+t from the left panel should switch the right panel to detail")
@@ -179,9 +179,9 @@ func TestTerminalFocusedKeysForwardToSubprocess(t *testing.T) {
 		}
 		t.Cleanup(func() { r.Close(); w.Close() })
 		m := workContractModel()
-		panel := work.NewSpecPanelModel("item-1")
+		panel := work.NewSessionPanelModel("item-1")
 		panel = panel.SetPtmx(w, nil, nil)
-		m.setSpecPanel("item-1", panel)
+		m.setSessionPanel("item-1", panel)
 		m.terminalMode = true
 		m.focusedPanel = panelRight
 		return m, r
@@ -216,7 +216,7 @@ func TestTerminalFocusedKeysForwardToSubprocess(t *testing.T) {
 // round-trip instead of being re-derived away.
 func TestCtrlTChoicePersistsAcrossNavigation(t *testing.T) {
 	m := workContractModel()
-	m.setSpecPanel("item-1", doneSpecPanel("item-1"))
+	m.setSessionPanel("item-1", doneSessionPanel("item-1"))
 	m.terminalMode = true
 	m.focusedPanel = panelRight
 
@@ -253,7 +253,7 @@ func TestCtrlTChoicePersistsAcrossNavigation(t *testing.T) {
 // to list" hint: detach moves focus only; the right panel keeps the terminal.
 func TestTerminalDetachKeepsTerminalView(t *testing.T) {
 	m := workContractModel()
-	m.setSpecPanel("item-1", work.NewSpecPanelModel("item-1"))
+	m.setSessionPanel("item-1", work.NewSessionPanelModel("item-1"))
 	m.terminalMode = true
 	m.focusedPanel = panelRight
 	nm, _ := updateModel(t, m, work.TerminalDetachMsg{Slug: "item-1"})
@@ -316,7 +316,7 @@ func followupActiveUnfocusedModel(t *testing.T) model {
 	m := followupContractModel()
 	m.width = 120
 	m.height = 40
-	m.setSpecPanel("fu-1", work.NewSpecPanelModel("fu-1"))
+	m.setSessionPanel("fu-1", work.NewSessionPanelModel("fu-1"))
 	m.terminalMode = true
 	m.focusedPanel = panelLeft
 	return m
@@ -385,7 +385,7 @@ func scrollbackFixture(t *testing.T) (model, *os.File) {
 	}
 	t.Cleanup(func() { r.Close(); w.Close() })
 
-	panel := work.NewSpecPanelModel("item-1")
+	panel := work.NewSessionPanelModel("item-1")
 	panel, _ = panel.Update(tea.WindowSizeMsg{Width: 40, Height: 6})
 	var data []byte
 	for i := 0; i < 40; i++ {
@@ -395,7 +395,7 @@ func scrollbackFixture(t *testing.T) (model, *os.File) {
 	panel = panel.SetPtmx(w, nil, nil)
 
 	m := workContractModel()
-	m.setSpecPanel("item-1", panel)
+	m.setSessionPanel("item-1", panel)
 	m.terminalMode = true
 	m.focusedPanel = panelRight
 	return m, r
@@ -403,7 +403,7 @@ func scrollbackFixture(t *testing.T) (model, *os.File) {
 
 func panelView(t *testing.T, m model) string {
 	t.Helper()
-	panel, ok := m.specPanels["item-1"]
+	panel, ok := m.sessionPanels["item-1"]
 	if !ok {
 		t.Fatal("spec panel missing")
 	}

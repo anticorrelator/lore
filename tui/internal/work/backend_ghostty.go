@@ -25,7 +25,7 @@ const maxScrollbackBytes = 16 << 20
 //
 // All methods must be called from a single goroutine (the Bubble Tea event
 // loop) — the underlying terminal is stateful and not safe for concurrent
-// use. Functional SpecPanelModel copies share one backend pointer.
+// use. Functional SessionPanelModel copies share one backend pointer.
 type terminalBackend struct {
 	term *libghostty.Terminal
 	rs   *libghostty.RenderState

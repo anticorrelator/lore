@@ -121,7 +121,7 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestFollowupListStatusBarKeybindContract/j/k (navigate)"},
 		{key: "l/Enter", label: "detail", surfaces: surfStatusBar | surfHelp, helpKey: "l / Enter", helpLabel: "open detail / attach session",
 			labelFn: func(m model) string {
-				if m.terminalMode && m.hasSpecPanel(m.followupList.CurrentID()) {
+				if m.terminalMode && m.hasSessionPanel(m.followupList.CurrentID()) {
 					return "attach session"
 				}
 				return "detail"
@@ -206,7 +206,7 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestWorkListStatusBarKeybindContract/j/k (navigate)"},
 		{key: "l/Enter", label: "open", surfaces: surfStatusBar | surfHelp, helpKey: "l / Enter", helpLabel: "open detail / attach session",
 			labelFn: func(m model) string {
-				if m.terminalMode && m.hasSpecPanel(m.list.CurrentSlug()) {
+				if m.terminalMode && m.hasSessionPanel(m.list.CurrentSlug()) {
 					return "attach session"
 				}
 				return "open"
@@ -215,6 +215,8 @@ var keymapRegistry = []keymapSection{
 			test:        "TestWorkListStatusBarKeybindContract/l (open), …/Enter (open), TestWorkListAttachSessionKeybindContract"},
 		{key: "s", label: "spec", surfaces: surfStatusBar | surfHelp, helpLabel: "run spec",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestWorkListStatusBarKeybindContract/s (spec)"},
+		{key: "i", label: "implement", surfaces: surfStatusBar | surfHelp, helpLabel: "run implement",
+			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestWorkListStatusBarKeybindContract/i (implement)"},
 		{key: "c", label: "chat", surfaces: surfStatusBar | surfHelp, helpLabel: "chat about spec",
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestWorkListStatusBarKeybindContract/c (chat)"},
 		{key: "a", label: "assign", surfaces: surfHelp, helpLabel: "assign workstream",
@@ -246,6 +248,8 @@ var keymapRegistry = []keymapSection{
 	{ctx: kmWorkDetail, helpTitle: "Work Detail", entries: []keymapEntry{
 		{key: "s", label: "spec", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkDetailStatusBarKeybindContract/s (spec)"},
+		{key: "i", label: "implement", surfaces: surfStatusBar,
+			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkDetailStatusBarKeybindContract/i (implement)"},
 		{key: "c", label: "chat", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestWorkDetailStatusBarKeybindContract/c (chat)"},
 		{key: "R", label: "release", surfaces: surfStatusBar | surfHelp, helpLabel: "release review gate",
@@ -323,7 +327,7 @@ var keymapRegistry = []keymapSection{
 		{key: "?", label: "help", surfaces: surfStatusBar,
 			ownerLayers: []ownerLayer{ownerRouter}, test: "TestHelpModalKeybindContract"},
 	}},
-	{ctx: kmTerminal, helpTitle: "Spec Panel (terminal mode)", entries: []keymapEntry{
+	{ctx: kmTerminal, helpTitle: "Session Panel (terminal mode)", entries: []keymapEntry{
 		{key: "scroll wheel", label: "scroll output", surfaces: surfHelp,
 			ownerLayers: []ownerLayer{ownerSubModel}},
 		{key: "Shift+PgUp/PgDn", label: "scrollback", surfaces: surfHelp, helpKey: "Shift+PgUp / PgDn", helpLabel: "scroll output history",
@@ -340,7 +344,7 @@ var keymapRegistry = []keymapSection{
 			ownerLayers: []ownerLayer{ownerSubModel}, test: "TestTerminalDetachKeepsTerminalView"},
 		{key: "Ctrl+c", label: "terminate", surfaces: surfStatusBar | surfHelp, helpLabel: "terminate subprocess (discard when finished)",
 			labelFn: func(m model) string {
-				panel, ok := m.currentSpecPanel()
+				panel, ok := m.currentSessionPanel()
 				if m.state == stateFollowUps {
 					panel, ok = m.currentFollowupPanel()
 				}

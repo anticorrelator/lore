@@ -87,7 +87,7 @@ func handlePanelRouting(m *model, msg tea.Msg, cb panelCallbacks) (tea.Cmd, bool
 				m.setPreferDetail(cb.currentSlug(), true)
 				return nil, true
 			}
-			if panel, ok := cb.specPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
+			if panel, ok := cb.sessionPanelFn(); ok && (panel.Ptmx() != nil || panel.IsDone()) {
 				m.terminalMode = true
 				m.setPreferDetail(cb.currentSlug(), false)
 				return nil, true
@@ -128,10 +128,10 @@ func routePanelMsg(m *model, panel panelFocus, msg tea.Msg, cb panelCallbacks) t
 	}
 	if m.terminalMode {
 		id := cb.currentSlug()
-		if m.specPanels != nil {
-			if panel, ok := m.specPanels[id]; ok {
+		if m.sessionPanels != nil {
+			if panel, ok := m.sessionPanels[id]; ok {
 				sm, cmd := panel.Update(msg)
-				m.specPanels[id] = sm
+				m.sessionPanels[id] = sm
 				return cmd
 			}
 		}
@@ -290,36 +290,25 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			}
 			switch km.String() {
 			case "enter":
-				extraContext := strings.TrimSpace(m.sessionConfirmInput.Value())
+				// Enter stamps the textarea into the descriptor and hands it to
+				// the shared spawn path — the descriptor is the only mode carrier.
+				d := m.sessionConfirmDescriptor
+				d.ExtraContext = strings.TrimSpace(m.sessionConfirmInput.Value())
 				m.sessionConfirmActive = false
-				findingIndex := m.sessionConfirmFindingIndex
-				m.sessionConfirmFindingIndex = -1
-				sessType := "spec"
-				if m.sessionConfirmChatMode {
-					sessType = "chat"
-				}
-				return m.spawnSession(work.SessionDescriptor{
-					Type:         sessType,
-					Slug:         m.sessionConfirmSlug,
-					Title:        m.sessionConfirmTitle,
-					ExtraContext: extraContext,
-					Initiator:    "human",
-					ShortMode:    m.sessionConfirmShortMode,
-					SkipConfirm:  m.sessionConfirmSkipConfirm,
-					FollowupMode: m.sessionConfirmFollowupMode,
-					FindingIndex: findingIndex,
-				}, "")
+				return m.spawnSession(d, "")
 			case "esc", "ctrl+c":
 				m.sessionConfirmActive = false
 				return m, nil
 			case "alt+1":
-				if !m.sessionConfirmChatMode {
-					m.sessionConfirmShortMode = !m.sessionConfirmShortMode
+				// Short mode is a spec-only toggle.
+				if m.sessionConfirmDescriptor.Type == work.SessionSpec {
+					m.sessionConfirmDescriptor.ShortMode = !m.sessionConfirmDescriptor.ShortMode
 				}
 				return m, nil
 			case "alt+2":
-				if !m.sessionConfirmChatMode {
-					m.sessionConfirmSkipConfirm = !m.sessionConfirmSkipConfirm
+				// Skip-confirmations is offered for spec and implement.
+				if t := m.sessionConfirmDescriptor.Type; t == work.SessionSpec || t == work.SessionImplement {
+					m.sessionConfirmDescriptor.SkipConfirm = !m.sessionConfirmDescriptor.SkipConfirm
 				}
 				return m, nil
 			default:
@@ -834,7 +823,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 				// must not accumulate stale sizes) and all open spec panels.
 				m.workPanelCallbacks().resize()
 				m.followupPanelCallbacks().resize()
-				m.resizeSpecPanels()
+				m.resizeSessionPanels()
 
 				// Persist preference asynchronously
 				prefs := config.Prefs{Layout: m.layoutMode}
@@ -939,6 +928,15 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 					arg = "off"
 				}
 				return m, runSettlementVerb("schedule", arg)
+			}
+		case "i":
+			// 'i' launches /implement — dispatched here for the work-detail focus,
+			// mirroring 's'. The list sub-model handles it in the list focus. The
+			// host readiness gate lives in handleImplementRequest.
+			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
+				if slug := m.list.CurrentSlug(); slug != "" {
+					return m, func() tea.Msg { return work.ImplementRequestMsg{Slug: slug} }
+				}
 			}
 		case "c":
 			if m.state == stateWork && m.focusedPanel == panelRight && !m.terminalMode {
@@ -1086,7 +1084,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		wcmd := m.workPanelCallbacks().resize()
 		fcmd := m.followupPanelCallbacks().resize()
 		bcmd := m.knowledgePanelCallbacks().resize()
-		m.resizeSpecPanels()
+		m.resizeSessionPanels()
 
 		m.settlement = m.settlement.SetSize(msg.Width-2, msg.Height-4)
 		m.popup.SetSize(msg.Width, msg.Height)
@@ -1118,9 +1116,10 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		// Restore cursor to the previously selected item after rebuild.
 		m.list.SetCursorBySlug(prevSlug)
 
-		// Re-apply any active spec status indicators to the new list model.
-		for slug := range m.specPanels {
-			m.list, _ = m.list.Update(work.SpecStatusMsg{Slug: slug})
+		// Re-apply any active session status indicators to the new list model,
+		// re-tagging each with its session type so the per-type label survives.
+		for slug := range m.sessionPanels {
+			m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Type: m.sessionTypeForSlug(slug)})
 		}
 
 		var cmds []tea.Cmd
@@ -1215,14 +1214,17 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case work.SpecRequestMsg:
 		return m.handleSpecRequest(msg)
 
+	case work.ImplementRequestMsg:
+		return m.handleImplementRequest(msg)
+
 	case work.ChatRequestMsg:
 		return m.handleChatRequest(msg)
 
 	case followup.FollowupChatRequestMsg:
 		return m.handleFollowupChatRequest(msg)
 
-	case work.SpecProcessStartedMsg:
-		return m.handleSpecProcessStarted(msg)
+	case work.SessionProcessStartedMsg:
+		return m.handleSessionProcessStarted(msg)
 
 	case work.TerminalOutputMsg:
 		return m.handleTerminalOutput(msg)
@@ -1517,12 +1519,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	return m, nil
 }
 
-// resizeSpecPanels re-applies the spec panel slot size to every open spec
+// resizeSessionPanels re-applies the spec panel slot size to every open spec
 // panel and propagates it to each panel's PTY.
-func (m *model) resizeSpecPanels() {
+func (m *model) resizeSessionPanels() {
 	specH := m.detailPanelHeight()
 	specW := m.rightPanelWidth() - 2
-	for slug, panel := range m.specPanels {
+	for slug, panel := range m.sessionPanels {
 		sm, _ := panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
 		if ptmx := sm.Ptmx(); ptmx != nil {
 			_ = pty.Setsize(ptmx, &pty.Winsize{
@@ -1530,7 +1532,7 @@ func (m *model) resizeSpecPanels() {
 				Cols: uint16(specW),
 			})
 		}
-		m.specPanels[slug] = sm
+		m.sessionPanels[slug] = sm
 	}
 }
 
@@ -1675,7 +1677,7 @@ func (m *model) leaveFollowups() tea.Cmd {
 // It resets the mtime baseline, syncs terminalMode, and initiates the detail load.
 func (m *model) loadFollowupDetail(id string) tea.Cmd {
 	m.lastFollowupDetailMtime = time.Time{}
-	m.terminalMode = m.hasSpecPanel(id) && !m.preferDetailView[id]
+	m.terminalMode = m.hasSessionPanel(id) && !m.preferDetailView[id]
 	return m.followupDetail.SetID(id)
 }
 
@@ -1688,7 +1690,7 @@ func (m model) loadDetail(slug string) (model, tea.Cmd) {
 	m.lastDetailMtime = time.Time{} // reset so new item's detail files get a fresh baseline
 	m.detail = work.NewDetailModel(m.config.WorkDir, slug)
 	m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
-	m.terminalMode = m.hasSpecPanel(slug) && !m.preferDetailView[slug]
+	m.terminalMode = m.hasSessionPanel(slug) && !m.preferDetailView[slug]
 
 	var initCmd tea.Cmd
 	if m.detailCache != nil {

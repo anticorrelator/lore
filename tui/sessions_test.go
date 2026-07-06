@@ -60,7 +60,7 @@ func TestAgentClaimSpawnsWithoutStealingFocus(t *testing.T) {
 
 	m, _ = m.handleQueueTickResult(msg)
 
-	if _, ok := m.specPanels["demo"]; !ok {
+	if _, ok := m.sessionPanels["demo"]; !ok {
 		t.Fatal("no spec panel created for the claimed request")
 	}
 	meta, ok := m.pendingSpawns["demo"]
@@ -94,7 +94,7 @@ func TestSpecProcessStartedPromotesQueueSession(t *testing.T) {
 	m.pendingSpawns = map[string]liveSession{
 		"demo": {typ: "spec", initiator: "agent", requestID: "req-1"},
 	}
-	m, _ = m.handleSpecProcessStarted(work.SpecProcessStartedMsg{Slug: "demo"})
+	m, _ = m.handleSessionProcessStarted(work.SessionProcessStartedMsg{Slug: "demo"})
 
 	if _, pending := m.pendingSpawns["demo"]; pending {
 		t.Error("pending spawn was not consumed")

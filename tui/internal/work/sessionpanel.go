@@ -36,7 +36,7 @@ func resolveFollowupDir(knowledgeDir, id string) (string, bool) {
 	return "", false
 }
 
-// NeedsInputChangedMsg is sent when a spec panel's needsInput state changes.
+// NeedsInputChangedMsg is sent when a session panel's needsInput state changes.
 type NeedsInputChangedMsg struct {
 	Slug       string
 	NeedsInput bool
@@ -75,8 +75,8 @@ type TerminalOutputMsg struct {
 	Data []byte
 }
 
-// SpecProcessStartedMsg is sent after the subprocess is launched via PTY.
-type SpecProcessStartedMsg struct {
+// SessionProcessStartedMsg is sent after the subprocess is launched via PTY.
+type SessionProcessStartedMsg struct {
 	Slug   string
 	Ptmx   *os.File      // PTY master — read/write interface to subprocess
 	Cmd    *exec.Cmd     // for cmd.Wait() in cleanup
@@ -99,7 +99,7 @@ type TerminalDetachMsg struct {
 const escDetachWindow = 500 * time.Millisecond
 
 // TerminalTerminateMsg is sent when user presses Ctrl+\ to kill the subprocess
-// and close the spec panel entirely.
+// and close the session panel entirely.
 type TerminalTerminateMsg struct {
 	Slug string
 }
@@ -121,8 +121,8 @@ func writeCrashLog(label string, r interface{}) {
 	_ = os.WriteFile(crashLog, []byte(stack), 0644)
 }
 
-// SpecPanelModel is the Bubble Tea model for the interactive spec panel.
-type SpecPanelModel struct {
+// SessionPanelModel is the Bubble Tea model for the interactive session panel.
+type SessionPanelModel struct {
 	slug       string
 	width      int
 	height     int
@@ -169,11 +169,11 @@ type SpecPanelModel struct {
 	lastEscTime time.Time
 }
 
-// NewSpecPanelModel creates a spec panel model for the given work item slug.
+// NewSessionPanelModel creates a session panel model for the given work item slug.
 // The backend forwards emulator-originated device-query responses (DA1,
 // XTVERSION, DSR) to the PTY once one is attached via SetPtmx.
-func NewSpecPanelModel(slug string) SpecPanelModel {
-	return SpecPanelModel{
+func NewSessionPanelModel(slug string) SessionPanelModel {
+	return SessionPanelModel{
 		slug:    slug,
 		open:    true,
 		backend: newTerminalBackend(80, 24),
@@ -181,36 +181,36 @@ func NewSpecPanelModel(slug string) SpecPanelModel {
 }
 
 // Slug returns the work item slug this panel is running for.
-func (m SpecPanelModel) Slug() string {
+func (m SessionPanelModel) Slug() string {
 	return m.slug
 }
 
 // HasError returns true if the subprocess exited with an error.
-func (m SpecPanelModel) HasError() bool {
+func (m SessionPanelModel) HasError() bool {
 	return m.hasError
 }
 
 // IsDone returns true if the subprocess has exited (successfully or with error).
-func (m SpecPanelModel) IsDone() bool {
+func (m SessionPanelModel) IsDone() bool {
 	return m.done
 }
 
 // NeedsInput returns true if the terminal session has been quiescent long
 // enough to suggest the subprocess is waiting for user input.
-func (m SpecPanelModel) NeedsInput() bool {
+func (m SessionPanelModel) NeedsInput() bool {
 	return m.needsInput
 }
 
 // CloseRequested reports whether this panel is holding open after a consumed
 // close-request (the "done" badge state) rather than being torn down.
-func (m SpecPanelModel) CloseRequested() bool {
+func (m SessionPanelModel) CloseRequested() bool {
 	return m.closeRequested
 }
 
 // MarkCloseRequested flips the held-open badge on. The close ladder calls it
 // when it consumes a close-request for a session the initiator gate keeps open
 // instead of tearing down (value semantics — returns the updated model).
-func (m SpecPanelModel) MarkCloseRequested() SpecPanelModel {
+func (m SessionPanelModel) MarkCloseRequested() SessionPanelModel {
 	m.closeRequested = true
 	return m
 }
@@ -228,7 +228,7 @@ func (m SpecPanelModel) MarkCloseRequested() SpecPanelModel {
 // atInteractivePrompt is the readiness gate's screen classification (a
 // permission/approval modal is showing), computed by the caller from a
 // ScreenSnapshot; when it holds, an idle session is NOT considered safe to close.
-func (m SpecPanelModel) QuiescentForClose(atInteractivePrompt bool) bool {
+func (m SessionPanelModel) QuiescentForClose(atInteractivePrompt bool) bool {
 	if m.done {
 		return true
 	}
@@ -285,7 +285,7 @@ func unsafePayloadReason(body []byte, bracketed bool) string {
 // ScreenState returns a snapshot of the panel's terminal for the readiness gate
 // and peek. It reads the shared backend, so callers must invoke it from the
 // Bubble Tea goroutine (never a Cmd goroutine).
-func (m SpecPanelModel) ScreenState() (ScreenSnapshot, error) {
+func (m SessionPanelModel) ScreenState() (ScreenSnapshot, error) {
 	if m.backend == nil {
 		return ScreenSnapshot{}, errors.New("no terminal backend")
 	}
@@ -298,7 +298,7 @@ func (m SpecPanelModel) ScreenState() (ScreenSnapshot, error) {
 // writes body raw — PasteEncode neutralizes the harnesses' divergent CR/LF
 // submit semantics. bracketed is the caller-captured DECSET 2004 state (from the
 // same snapshot the gate used) so encoding matches what the gate observed.
-func (m SpecPanelModel) InjectMessage(body, submitSeq string, bracketed bool) error {
+func (m SessionPanelModel) InjectMessage(body, submitSeq string, bracketed bool) error {
 	if m.ptmx == nil {
 		return errors.New("no PTY attached")
 	}
@@ -324,7 +324,7 @@ func (m SpecPanelModel) InjectMessage(body, submitSeq string, bracketed bool) er
 // Process returns the harness subprocess handle, or nil when no process is
 // attached (never started, or already reaped). The close ladder drives it
 // through SIGTERM→Kill escalation.
-func (m SpecPanelModel) Process() *os.Process {
+func (m SessionPanelModel) Process() *os.Process {
 	if m.cmd == nil {
 		return nil
 	}
@@ -332,24 +332,24 @@ func (m SpecPanelModel) Process() *os.Process {
 }
 
 // LastOutputTime returns when the last PTY output was received.
-func (m SpecPanelModel) LastOutputTime() time.Time {
+func (m SessionPanelModel) LastOutputTime() time.Time {
 	return m.lastOutputTime
 }
 
 // Ptmx returns the PTY master file descriptor, or nil if no PTY is active.
-func (m SpecPanelModel) Ptmx() *os.File {
+func (m SessionPanelModel) Ptmx() *os.File {
 	return m.ptmx
 }
 
 // OutputChan returns the output channel for PTY polling.
-func (m SpecPanelModel) OutputChan() <-chan []byte {
+func (m SessionPanelModel) OutputChan() <-chan []byte {
 	return m.outputChan
 }
 
 // SetPtmx stores the PTY master, command, and output channel after process launch.
 // Also attaches the PTY to the backend so emulator-originated query responses
 // are forwarded to it. Returns the updated model (value semantics).
-func (m SpecPanelModel) SetPtmx(ptmx *os.File, cmd *exec.Cmd, output <-chan []byte) SpecPanelModel {
+func (m SessionPanelModel) SetPtmx(ptmx *os.File, cmd *exec.Cmd, output <-chan []byte) SessionPanelModel {
 	m.ptmx = ptmx
 	m.cmd = cmd
 	m.outputChan = output
@@ -362,7 +362,7 @@ func (m SpecPanelModel) SetPtmx(ptmx *os.File, cmd *exec.Cmd, output <-chan []by
 // Cleanup closes the PTY master, kills the subprocess, and closes the terminal
 // backend. Reaps the subprocess in a background goroutine so the caller is
 // never blocked. Safe to call multiple times (the backend close is idempotent).
-func (m SpecPanelModel) Cleanup() SpecPanelModel {
+func (m SessionPanelModel) Cleanup() SessionPanelModel {
 	if m.ptmx != nil {
 		m.ptmx.Close()
 		m.ptmx = nil
@@ -381,27 +381,27 @@ func (m SpecPanelModel) Cleanup() SpecPanelModel {
 	return m
 }
 
-func (m SpecPanelModel) Init() tea.Cmd {
+func (m SessionPanelModel) Init() tea.Cmd {
 	return nil
 }
 
 // totalLines returns the total number of lines in the terminal document
 // (scrollback history + current screen).
-func (m SpecPanelModel) totalLines() int {
+func (m SessionPanelModel) totalLines() int {
 	if m.backend == nil {
 		return 0
 	}
 	return m.backend.totalLines()
 }
 
-func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
+func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) {
 	defer func() {
 		if r := recover(); r != nil {
-			writeCrashLog(fmt.Sprintf("SpecPanelModel.Update(%T)", msg), r)
+			writeCrashLog(fmt.Sprintf("SessionPanelModel.Update(%T)", msg), r)
 		}
 	}()
 	switch msg := msg.(type) {
-	case SpecProcessStartedMsg:
+	case SessionProcessStartedMsg:
 		m.ptmx = msg.Ptmx
 		m.cmd = msg.Cmd
 		m.outputChan = msg.Output
@@ -616,7 +616,7 @@ func (m SpecPanelModel) Update(msg tea.Msg) (_ SpecPanelModel, _ tea.Cmd) {
 // writes nothing and emits a ClosedPanelInputMsg so the host surfaces a
 // status-line notice instead of dropping the input silently. Scrollback keys
 // are handled before this point, so navigating retained history still works.
-func (m SpecPanelModel) refuseClosedInput(key string) (SpecPanelModel, tea.Cmd) {
+func (m SessionPanelModel) refuseClosedInput(key string) (SessionPanelModel, tea.Cmd) {
 	slug := m.slug
 	return m, func() tea.Msg { return ClosedPanelInputMsg{Slug: slug, Key: key} }
 }
@@ -629,7 +629,7 @@ func (m SpecPanelModel) refuseClosedInput(key string) (SpecPanelModel, tea.Cmd) 
 // without killing the subprocess. The arm is cleared by any non-Esc key
 // reaching the panel; PTY output does not clear it (so a streaming subprocess
 // does not block the detach gesture).
-func (m SpecPanelModel) handleEscKey() (SpecPanelModel, tea.Cmd) {
+func (m SessionPanelModel) handleEscKey() (SessionPanelModel, tea.Cmd) {
 	now := time.Now()
 	if !m.lastEscTime.IsZero() && now.Sub(m.lastEscTime) < escDetachWindow {
 		m.lastEscTime = time.Time{}
@@ -645,10 +645,10 @@ func (m SpecPanelModel) handleEscKey() (SpecPanelModel, tea.Cmd) {
 	return m, nil
 }
 
-func (m SpecPanelModel) View() (result string) {
+func (m SessionPanelModel) View() (result string) {
 	defer func() {
 		if r := recover(); r != nil {
-			writeCrashLog("SpecPanelModel.View", r)
+			writeCrashLog("SessionPanelModel.View", r)
 			result = fmt.Sprintf("[view panic: %v]", r)
 		}
 	}()
@@ -848,54 +848,67 @@ func appendFindingContext(base string, sidecarBytes []byte, findingIndex int) st
 	return b.String()
 }
 
-// StartTerminalCmd spawns the claude subprocess for /spec inside a PTY and
-// buildInitialPrompt constructs the prompt string passed to claude at startup.
-// It encodes four modes: followup chat, regular chat, short spec, and full spec.
-// findingIndex, when >= 0 and followupMode is true, inserts "--finding <N>" after the followup ID.
+// buildInitialPrompt constructs the prompt string passed to the harness at
+// startup, branching on the descriptor's session Type: chat routes to
+// /followup-discuss (followup mode) or /work, implement to /implement, and any
+// other Type to /spec. FindingIndex, when >= 0 in followup mode, inserts
+// "--finding <N>" after the followup ID.
 //
 // Chat prompts always start with a slash command at position 0 so the Claude
 // Code harness auto-invokes the matching skill. The skill name declares the
 // entity type; the slug identifies the specific item. This gives the agent an
 // unambiguous loading pattern (via the skill's documented CLI path) rather
 // than forcing it to infer identity from prose and fall back to file search.
-func buildInitialPrompt(slug, title, extraContext string, shortMode, chatMode, skipConfirm, followupMode bool, findingIndex int) string {
-	_ = title
-	var p string
-	if chatMode {
-		if followupMode {
-			p = "/followup-discuss " + slug
-			if findingIndex >= 0 {
-				p += fmt.Sprintf(" --finding %d", findingIndex)
+func buildInitialPrompt(d SessionDescriptor) string {
+	switch d.Type {
+	case SessionChat:
+		var p string
+		if d.FollowupMode {
+			p = "/followup-discuss " + d.Slug
+			if d.FindingIndex >= 0 {
+				p += fmt.Sprintf(" --finding %d", d.FindingIndex)
 			}
 		} else {
-			p = "/work " + slug
+			p = "/work " + d.Slug
 		}
-		if extraContext != "" {
-			p += ": " + extraContext
+		if d.ExtraContext != "" {
+			p += ": " + d.ExtraContext
 		}
-	} else {
-		p = "/spec "
-		if shortMode {
-			p += "short "
-		}
-		p += slug
-		if skipConfirm {
+		return p
+	case SessionImplement:
+		p := "/implement " + d.Slug
+		if d.SkipConfirm {
 			p += " --yes"
 		}
-		if extraContext != "" {
-			p += " -- " + extraContext
+		if d.ExtraContext != "" {
+			p += " -- " + d.ExtraContext
 		}
+		return p
+	default: // SessionSpec, and the sessionType() spec fallback for any unknown Type
+		p := "/spec "
+		if d.ShortMode {
+			p += "short "
+		}
+		p += d.Slug
+		if d.SkipConfirm {
+			p += " --yes"
+		}
+		if d.ExtraContext != "" {
+			p += " -- " + d.ExtraContext
+		}
+		return p
 	}
-	return p
 }
 
-// returns SpecProcessStartedMsg with the PTY master, exec.Cmd, and a channel
-// of raw byte chunks read from the PTY. The PTY master is the read/write
-// interface — write user keystrokes, read subprocess output.
-// projectDir must be the project root (not the knowledge _work/ dir) so that
-// the /spec skill can explore the correct codebase.
-func StartTerminalCmd(slug, title, projectDir string, width, height int, extraContext string, shortMode, chatMode, skipConfirm, followupMode bool, knowledgeDir string, findingIndex int, sessionEnv SessionEnv) tea.Cmd {
+// StartTerminalCmd spawns the harness subprocess for the descriptor's session
+// inside a PTY and returns SessionProcessStartedMsg with the PTY master, exec.Cmd,
+// and a channel of raw byte chunks read from the PTY. The PTY master is the
+// read/write interface — write user keystrokes, read subprocess output.
+// projectDir must be the project root (not the knowledge _work/ dir) so the
+// launched skill explores the correct codebase.
+func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int, knowledgeDir string, sessionEnv SessionEnv) tea.Cmd {
 	return func() (result tea.Msg) {
+		slug := d.Slug
 		defer func() {
 			if r := recover(); r != nil {
 				writeCrashLog("StartTerminalCmd", r)
@@ -905,7 +918,7 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 		// Build the initial prompt to auto-submit. Passing it as a positional
 		// argument to the harness binary starts an interactive session and
 		// submits it immediately — no PTY-write timing hack needed.
-		initialPrompt := buildInitialPrompt(slug, title, extraContext, shortMode, chatMode, skipConfirm, followupMode, findingIndex)
+		initialPrompt := buildInitialPrompt(d)
 
 		// Resolve the TUI launch framework once and use it for the binary,
 		// harness-specific prepended args, and child-process environment. This
@@ -930,8 +943,8 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 		// substituting a different flag (opencode/codex would error on an
 		// unknown flag). See adapters/agents/README.md §"TUI Launch Concerns".
 		args := append([]string(nil), config.LoadHarnessConfig(activeFramework).Args...)
-		if followupMode && slug != "" {
-			if sysPrompt := loadFollowupContext(slug, knowledgeDir, findingIndex); sysPrompt != "" {
+		if d.FollowupMode && slug != "" {
+			if sysPrompt := loadFollowupContext(slug, knowledgeDir, d.FindingIndex); sysPrompt != "" {
 				flag, supported, err := config.HarnessSystemPromptFlag(activeFramework)
 				if err != nil {
 					return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve append_system_prompt flag: %w", err)}
@@ -994,7 +1007,7 @@ func StartTerminalCmd(slug, title, projectDir string, width, height int, extraCo
 			}
 		}()
 
-		return SpecProcessStartedMsg{
+		return SessionProcessStartedMsg{
 			Slug:   slug,
 			Ptmx:   ptmx,
 			Cmd:    cmd,

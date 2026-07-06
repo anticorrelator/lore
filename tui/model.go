@@ -181,11 +181,13 @@ type model struct {
 	assignNearMatch string
 	assignErr       string
 
-	// specPanels holds one SpecPanelModel per work item slug that is currently
-	// speccing (or has just completed). The spec panel for the currently
-	// selected list item is shown in the right panel when present.
-	specPanels   map[string]work.SpecPanelModel
-	terminalMode bool
+	// sessionPanels holds one SessionPanelModel per work item slug that has a
+	// live (or just-completed) session — spec, implement, or chat. The panel for
+	// the currently selected list item is shown in the right panel when present.
+	// Keyed by slug alone (one panel per subject): a second launch of any type
+	// attaches to the existing panel rather than replacing it.
+	sessionPanels map[string]work.SessionPanelModel
+	terminalMode  bool
 
 	// preferDetailView records, per work slug / follow-up ID, that the user
 	// explicitly switched the right panel to the detail view (ctrl+t) while a
@@ -194,16 +196,16 @@ type model struct {
 	// than the list models so index-reload rebuilds don't reset it.
 	preferDetailView map[string]bool
 
-	sessionConfirmActive       bool
-	sessionConfirmSlug         string
-	sessionConfirmTitle        string
-	sessionConfirmInput        textarea.Model
-	sessionConfirmShortMode    bool
-	sessionConfirmSkipConfirm  bool
-	sessionConfirmChatMode     bool
-	sessionConfirmFollowupMode bool
-	sessionConfirmFindingIndex int
-	sessionLaunchedFromModal   bool
+	// sessionConfirmActive gates the launch-confirmation modal; the textarea
+	// holds its optional context input. sessionConfirmDescriptor is the sole mode
+	// carrier — request handlers build it, the modal's checkboxes toggle its
+	// ShortMode/SkipConfirm, and Enter stamps ExtraContext and hands it to
+	// spawnSession. This mirrors the descriptor the agent queue builds, so the
+	// human and agent launch paths share one shape.
+	sessionConfirmActive     bool
+	sessionConfirmInput      textarea.Model
+	sessionConfirmDescriptor work.SessionDescriptor
+	sessionLaunchedFromModal bool
 
 	// Session substrate (_sessions/): this instance's identity, the substrate
 	// root, and the journal appender path. localSessions is the authoritative
@@ -313,7 +315,7 @@ type model struct {
 type panelCallbacks struct {
 	currentSlug     func() string
 	loadDetail      func(id string) tea.Cmd
-	specPanelFn     func() (work.SpecPanelModel, bool)
+	sessionPanelFn  func() (work.SessionPanelModel, bool)
 	listUpdate      func(msg tea.Msg) (tea.Cmd, string, string) // returns cmd, prevID, newID
 	detailUpdate    func(msg tea.Msg) tea.Cmd
 	setContentStart func()         // nil when the detail view does no mouse hit-testing
@@ -332,7 +334,7 @@ func (m *model) workPanelCallbacks() panelCallbacks {
 			*m, cmd = m.loadDetail(slug)
 			return cmd
 		},
-		specPanelFn: func() (work.SpecPanelModel, bool) { return m.currentSpecPanel() },
+		sessionPanelFn: func() (work.SessionPanelModel, bool) { return m.currentSessionPanel() },
 		listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
 			prevSlug := m.list.CurrentSlug()
 			lm, cmd := m.list.Update(lmsg)
@@ -375,7 +377,7 @@ func (m *model) followupPanelCallbacks() panelCallbacks {
 		loadDetail: func(id string) tea.Cmd {
 			return m.loadFollowupDetail(id)
 		},
-		specPanelFn: func() (work.SpecPanelModel, bool) { return m.currentFollowupPanel() },
+		sessionPanelFn: func() (work.SessionPanelModel, bool) { return m.currentFollowupPanel() },
 		listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
 			prevID := m.followupList.CurrentID()
 			fl, cmd := m.followupList.Update(lmsg)
@@ -421,9 +423,9 @@ func (m *model) knowledgePanelCallbacks() panelCallbacks {
 		return cmd
 	}
 	return panelCallbacks{
-		currentSlug: func() string { return "" },
-		loadDetail:  func(string) tea.Cmd { return nil },
-		specPanelFn: func() (work.SpecPanelModel, bool) { return work.SpecPanelModel{}, false },
+		currentSlug:    func() string { return "" },
+		loadDetail:     func(string) tea.Cmd { return nil },
+		sessionPanelFn: func() (work.SessionPanelModel, bool) { return work.SessionPanelModel{}, false },
 		listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
 			return browserUpdate(lmsg), "", ""
 		},
@@ -444,35 +446,35 @@ func (m *model) knowledgePanelCallbacks() panelCallbacks {
 	}
 }
 
-// currentSpecPanel returns the spec panel for the currently selected work item, if any.
-func (m model) currentSpecPanel() (work.SpecPanelModel, bool) {
-	if m.specPanels == nil {
-		return work.SpecPanelModel{}, false
+// currentSessionPanel returns the spec panel for the currently selected work item, if any.
+func (m model) currentSessionPanel() (work.SessionPanelModel, bool) {
+	if m.sessionPanels == nil {
+		return work.SessionPanelModel{}, false
 	}
 	slug := m.list.CurrentSlug()
 	if slug == "" {
-		return work.SpecPanelModel{}, false
+		return work.SessionPanelModel{}, false
 	}
-	panel, ok := m.specPanels[slug]
+	panel, ok := m.sessionPanels[slug]
 	return panel, ok
 }
 
 // currentFollowupPanel returns the spec panel for the currently selected follow-up item, if any.
-func (m model) currentFollowupPanel() (work.SpecPanelModel, bool) {
-	if m.specPanels == nil {
-		return work.SpecPanelModel{}, false
+func (m model) currentFollowupPanel() (work.SessionPanelModel, bool) {
+	if m.sessionPanels == nil {
+		return work.SessionPanelModel{}, false
 	}
 	id := m.followupDetail.CurrentID()
 	if id == "" {
-		return work.SpecPanelModel{}, false
+		return work.SessionPanelModel{}, false
 	}
-	panel, ok := m.specPanels[id]
+	panel, ok := m.sessionPanels[id]
 	return panel, ok
 }
 
-// hasSpecPanel reports whether a spec panel exists for the given slug.
-func (m model) hasSpecPanel(slug string) bool {
-	_, ok := m.specPanels[slug]
+// hasSessionPanel reports whether a spec panel exists for the given slug.
+func (m model) hasSessionPanel(slug string) bool {
+	_, ok := m.sessionPanels[slug]
 	return ok
 }
 
@@ -493,12 +495,12 @@ func (m *model) setPreferDetail(key string, prefer bool) {
 	m.preferDetailView[key] = true
 }
 
-// setSpecPanel stores or replaces the spec panel for the given slug.
-func (m *model) setSpecPanel(slug string, panel work.SpecPanelModel) {
-	if m.specPanels == nil {
-		m.specPanels = make(map[string]work.SpecPanelModel)
+// setSessionPanel stores or replaces the spec panel for the given slug.
+func (m *model) setSessionPanel(slug string, panel work.SessionPanelModel) {
+	if m.sessionPanels == nil {
+		m.sessionPanels = make(map[string]work.SessionPanelModel)
 	}
-	m.specPanels[slug] = panel
+	m.sessionPanels[slug] = panel
 }
 
 // cleanupAllSubprocesses cancels any running AI command, cleans up all spec
@@ -512,8 +514,8 @@ func (m *model) cleanupAllSubprocesses() {
 		m.aiCancel()
 		m.aiCancel = nil
 	}
-	for slug, panel := range m.specPanels {
-		m.specPanels[slug] = panel.Cleanup()
+	for slug, panel := range m.sessionPanels {
+		m.sessionPanels[slug] = panel.Cleanup()
 	}
 	for slug, ls := range m.localSessions {
 		_ = session.AppendEvent(m.eventScript, m.config.KnowledgeDir, m.closedEventFor(slug, ls))
@@ -531,10 +533,10 @@ type paneConfig struct {
 	listView string
 	// detailView is the pre-rendered right/bottom panel in non-terminal mode.
 	detailView string
-	// specPanel is the active spec panel for the selected item (if any).
-	specPanel work.SpecPanelModel
-	// hasSpecPanel reports whether specPanel is valid.
-	hasSpecPanel bool
+	// sessionPanel is the active spec panel for the selected item (if any).
+	sessionPanel work.SessionPanelModel
+	// hasSessionPanel reports whether sessionPanel is valid.
+	hasSessionPanel bool
 	// listTitle is the pre-rendered title shown in the list panel border
 	// (e.g. "Active (3)" composed from the TitleName/TitleCount tokens; may
 	// contain ANSI codes).
@@ -583,12 +585,12 @@ func (m model) buildPaneConfig() paneConfig {
 		}
 		filterAnnot, filterAnnotW := annotFollowupFilter.render(filterSel)
 
-		specPanel, hasSpecPanel := m.currentFollowupPanel()
+		sessionPanel, hasSessionPanel := m.currentFollowupPanel()
 		return paneConfig{
 			listView:        m.followupList.View(),
 			detailView:      m.followupDetail.View(),
-			specPanel:       specPanel,
-			hasSpecPanel:    hasSpecPanel,
+			sessionPanel:    sessionPanel,
+			hasSessionPanel: hasSessionPanel,
 			listTitle:       listTitle,
 			detailTitle:     detailTitle,
 			filterAnnot:     filterAnnot,
@@ -621,12 +623,12 @@ func (m model) buildPaneConfig() paneConfig {
 			detailTitle = slug
 		}
 
-		specPanel, hasSpecPanel := m.currentSpecPanel()
+		sessionPanel, hasSessionPanel := m.currentSessionPanel()
 		return paneConfig{
 			listView:        m.list.View(),
 			detailView:      m.detail.View(),
-			specPanel:       specPanel,
-			hasSpecPanel:    hasSpecPanel,
+			sessionPanel:    sessionPanel,
+			hasSessionPanel: hasSessionPanel,
 			listTitle:       listTitle,
 			detailTitle:     detailTitle,
 			filterAnnot:     filterAnnot,

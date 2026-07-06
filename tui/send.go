@@ -86,7 +86,7 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 		if m.pendingSend[sr.RequestID] {
 			continue // consume already in flight for this request
 		}
-		panel, ok := m.specPanels[sr.Slug]
+		panel, ok := m.sessionPanels[sr.Slug]
 		if !ok {
 			continue // slug no longer hosted here (raced teardown); leave the row
 		}
