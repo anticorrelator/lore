@@ -40,6 +40,15 @@ type liveSession struct {
 	// stamped from SessionProcessStartedMsg when the process comes up.
 	sessionID string
 	harness   string
+	// tmuxName is the hosting tmux session name (empty for direct-PTY): persisted
+	// on the registry row as the recovery manifest and the quit-path detach marker.
+	tmuxName string
+	// adopted marks a session brought up by the startup adoption scan rather than a
+	// fresh spawn; adoptedFrom names the dead instance whose row it was recovered
+	// from. Both drive the `recovered` journal row (in place of `spawned`) and are
+	// transient — not persisted onto the registry row.
+	adopted     bool
+	adoptedFrom string
 }
 
 // --- messages ---
@@ -133,6 +142,138 @@ func emitSpawnedCmd(dir, script, kdir string, ev session.Event) tea.Cmd {
 		}
 		return journalResultMsg{err: session.AppendEvent(script, kdir, ev)}
 	}
+}
+
+// emitRecoveredCmd writes this instance's registry row (now carrying the adopted
+// session) then journals `recovered` — the durable registry write is the recovery
+// manifest and must land before the history row, matching the substrate's
+// durable-before-journal ordering. Both run in one Cmd goroutine so the order is
+// guaranteed (a batched writeInstanceCmd would race the journal append).
+func emitRecoveredCmd(dir, script, kdir string, inst session.Instance, ev session.Event) tea.Cmd {
+	return func() tea.Msg {
+		if err := session.WriteInstance(dir, inst); err != nil {
+			return journalResultMsg{err: err}
+		}
+		return journalResultMsg{err: session.AppendEvent(script, kdir, ev)}
+	}
+}
+
+// adoptedSession is one still-running tmux-hosted session recovered from a dead
+// instance's registry row during startup adoption.
+type adoptedSession struct {
+	deadInstance string
+	slug         string
+	typ          string
+	initiator    string
+	started      time.Time
+	tmuxName     string
+	sessionID    string
+	harness      string
+	autoClose    *bool
+}
+
+// adoptionScanMsg carries the survivors a startup adoption scan claimed and
+// verified alive. Dead sessions (tmux gone, or a row that was never tmux-hosted)
+// are journaled `closed` inside the scan Cmd; only live ones need re-attach and a
+// `recovered` row here.
+type adoptionScanMsg struct {
+	alive []adoptedSession
+}
+
+// adoptionScanCmd is the D5 startup recovery pass. It scans the instance registry
+// for dead instances' rows (owner mtime-stale AND pid-dead), atomically claims each
+// by rename, and for every nested session decides re-attach vs. close by tmux
+// liveness. Filter inputs (repo, self name, script paths) are snapshotted at
+// Cmd-build time; the instances directory is read live inside the Cmd — the same
+// build-time-snapshot/run-time-read split the close/queue scanners use. Runs once
+// at startup, never on the poll heartbeat.
+func (m model) adoptionScanCmd() tea.Cmd {
+	dir := m.sessionsDir
+	repo := m.config.RepoIdentifier
+	self := m.instanceName
+	script, kdir := m.eventScript, m.config.KnowledgeDir
+	return func() tea.Msg {
+		var alive []adoptedSession
+		for _, inst := range session.ScanAdoptable(dir, repo, self, time.Now()) {
+			claim, claimPath, err := session.ClaimInstance(dir, inst.Name)
+			if err != nil {
+				continue // lost the claim race, or the row vanished
+			}
+			for _, s := range claim.Sessions {
+				if s.Tmux != "" && work.TmuxHasSession(s.Tmux) {
+					alive = append(alive, adoptedSession{
+						deadInstance: claim.Name,
+						slug:         s.Slug,
+						typ:          s.Type,
+						initiator:    s.Initiator,
+						started:      parseStartedISO(s.Started),
+						tmuxName:     s.Tmux,
+						sessionID:    s.SessionID,
+						harness:      s.Harness,
+						autoClose:    s.AutoClose,
+					})
+					continue
+				}
+				// tmux gone or never tmux-hosted: close the otherwise-dangling
+				// lifecycle (it dangles at `spawned` forever otherwise), duration-only.
+				ls := liveSession{
+					typ: s.Type, initiator: s.Initiator, started: parseStartedISO(s.Started),
+					sessionID: s.SessionID, harness: s.Harness,
+				}
+				_ = session.AppendEvent(script, kdir, m.closedEventFor(s.Slug, ls))
+			}
+			_ = session.DeleteClaim(claimPath)
+		}
+		return adoptionScanMsg{alive: alive}
+	}
+}
+
+// handleAdoptionScan re-attaches each recovered survivor through the normal panel
+// path: it pre-creates the panel, records the adopted metadata as a pending spawn
+// (marked adopted so the started handler journals `recovered` rather than
+// `spawned`), and dispatches the attach Cmd. Panels created here are re-sized by
+// resizeSessionPanels on the first WindowSizeMsg, so a size not yet known at
+// startup self-corrects.
+func (m model) handleAdoptionScan(msg adoptionScanMsg) (model, tea.Cmd) {
+	if len(msg.alive) == 0 {
+		return m, nil
+	}
+	specH := m.detailPanelHeight()
+	specW := m.rightPanelWidth() - 2
+	if m.pendingSpawns == nil {
+		m.pendingSpawns = make(map[string]liveSession)
+	}
+	var cmds []tea.Cmd
+	for _, a := range msg.alive {
+		m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: a.slug, Type: a.typ})
+		panel := work.NewSessionPanelModel(a.slug)
+		panel, _ = panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
+		m.setSessionPanel(a.slug, panel)
+		m.pendingSpawns[a.slug] = liveSession{
+			typ:         a.typ,
+			initiator:   a.initiator,
+			started:     a.started,
+			autoClose:   a.autoClose,
+			sessionID:   a.sessionID,
+			harness:     a.harness,
+			tmuxName:    a.tmuxName,
+			adopted:     true,
+			adoptedFrom: a.deadInstance,
+		}
+		cmds = append(cmds, work.AttachTerminalCmd(a.slug, a.tmuxName, a.sessionID, a.harness, m.config.ProjectDir, specW, specH))
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// parseStartedISO parses a registry row's `started` timestamp, falling back to now
+// (duration 0) on a malformed value so a `closed` row for an adopted-dead session
+// never emits a nonsense duration from a zero-value time.
+func parseStartedISO(iso string) time.Time {
+	t, err := time.Parse("2006-01-02T15:04:05Z", iso)
+	if err != nil {
+		return time.Now()
+	}
+	return t
 }
 
 // emitSpawnFailedCmd returns the request to pending with an incremented attempt
@@ -290,7 +431,7 @@ func (m model) spawnSession(d work.SessionDescriptor, requestID string) (model, 
 		m.sessionLaunchedFromModal = m.state == stateWork
 	}
 	env := work.SessionEnv{Instance: m.instanceName, Slug: slug, Type: sessionType(d.Type), RoutingOverrides: d.RoutingOverrides}
-	return m, work.StartTerminalCmd(d, m.config.ProjectDir, specW, specH, m.config.KnowledgeDir, env)
+	return m, work.StartTerminalCmd(d, m.config.ProjectDir, specW, specH, m.config.KnowledgeDir, env, m.tmuxEnabled)
 }
 
 // instanceRow builds this instance's registry row from its live session set.
@@ -302,6 +443,10 @@ func (m model) instanceRow() session.Instance {
 			Type:      ls.typ,
 			Initiator: ls.initiator,
 			Started:   ls.started.UTC().Format("2006-01-02T15:04:05Z"),
+			Tmux:      ls.tmuxName,
+			SessionID: ls.sessionID,
+			Harness:   ls.harness,
+			AutoClose: ls.autoClose,
 		})
 	}
 	return session.Instance{

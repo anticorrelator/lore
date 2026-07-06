@@ -129,7 +129,7 @@ func runStartTerminal(t *testing.T, slug, projectDir string, followupMode bool) 
 	// width=80, height=24 are typical PTY defaults; the values aren't
 	// load-bearing for the args we assert.
 	d := SessionDescriptor{Type: SessionSpec, Slug: slug, Title: "smoke title", SkipConfirm: true, FollowupMode: followupMode, FindingIndex: -1}
-	cmd := StartTerminalCmd(d, projectDir, 80, 24, projectDir, SessionEnv{})
+	cmd := StartTerminalCmd(d, projectDir, 80, 24, projectDir, SessionEnv{}, false)
 	msg := cmd()
 	if started, ok := msg.(SessionProcessStartedMsg); ok {
 		// Close the PTY so the stub subprocess receives EOF and exits without
@@ -177,7 +177,7 @@ func TestStartTerminalCmd_ExportsSessionIdentity(t *testing.T) {
 
 	d := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke title", SkipConfirm: true, FindingIndex: -1}
 	cmd := StartTerminalCmd(d, dir, 80, 24, dir,
-		SessionEnv{Instance: "amber-otter", Slug: "smoke-slug", Type: "spec"})
+		SessionEnv{Instance: "amber-otter", Slug: "smoke-slug", Type: "spec"}, false)
 	msg := cmd()
 	started, ok := msg.(SessionProcessStartedMsg)
 	if !ok {

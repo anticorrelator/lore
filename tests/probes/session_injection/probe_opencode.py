@@ -92,17 +92,27 @@ def make_permission_sandbox(bash_mode: str = "ask") -> str:
 # the pyte oracle is the decoded view the readiness gate inspects.
 # --------------------------------------------------------------------------- #
 class Session:
-    def __init__(self, raw_path: pathlib.Path, launch_dir: str = None):
+    def __init__(self, raw_path: pathlib.Path, launch_dir: str = None,
+                 tmux: bool = False, pane_side_path: str = None):
         raw_path.parent.mkdir(parents=True, exist_ok=True)
         self.raw_path = raw_path
         self._log = open(raw_path, "wb")
         env = dict(os.environ)
         env["TERM"] = "xterm-256color"
-        self.child = pexpect.spawn(
-            "opencode",
-            ["--model", MODEL, launch_dir or sandbox()],
-            dimensions=(ROWS, COLS), env=env, encoding=None, timeout=60,
-        )
+        argv = ["opencode", "--model", MODEL, launch_dir or sandbox()]
+        self.tmux = None
+        if tmux:
+            # opencode takes its launch dir as a positional arg, so no tmux -c.
+            self.tmux = d.TmuxHost(
+                d.tmux_session_name("oc"), argv, env=env,
+                cols=COLS, rows=ROWS, pane_side_path=pane_side_path,
+            )
+            self.child = self.tmux.child
+        else:
+            self.child = pexpect.spawn(
+                argv[0], argv[1:],
+                dimensions=(ROWS, COLS), env=env, encoding=None, timeout=60,
+            )
         self.child.logfile_read = self._log
         self.oracle = d.ScreenOracle()
 
@@ -132,6 +142,8 @@ class Session:
             self.child.close(force=True)
         except Exception:
             pass
+        if self.tmux is not None:
+            self.tmux.kill()
 
 
 def dismiss_update_modal(sess, poll_secs: float = 10.0) -> bool:
@@ -416,5 +428,117 @@ def test_p5_mid_generation_inject():
         assert observed == d.interaction_row(FRAMEWORK, "mid_generation_semantics")["value"], (
             f"mid-generation semantics observed {observed!r}"
         )
+    finally:
+        assert_graceful_exit(sess)
+
+
+# =========================================================================== #
+# tmux tier — re-verify the contract set under a tmux attach client. Each
+# assertion names the capability-row field it re-checks; divergences from the
+# direct-PTY recordings are recorded in observations/opencode.tmux.json, not
+# silently absorbed into the rows.
+# =========================================================================== #
+TMUX_RAW = RAW_DIR / "tmux"
+
+
+def _tmux_session(name, launch_dir=None, pane_side=None):
+    return Session(TMUX_RAW / f"{name}.raw", launch_dir=launch_dir,
+                   tmux=True, pane_side_path=pane_side)
+
+
+def test_tmux_composer_decset_paste():
+    """composer signature, DECSET 2004 visibility, paste-hold (no inference)."""
+    pane_side = str(TMUX_RAW / "pane_side.raw")
+    sess = _tmux_session("composer_paste", pane_side=pane_side)
+    try:
+        _settle_to_composer(sess)
+        assert _ready(sess), "composer_signature: matcher did not fire under tmux"
+
+        payload = d.decset_observation(
+            FRAMEWORK,
+            client_2004h=b"\x1b[?2004h" in sess.raw_bytes(),
+            pane_2004h=b"\x1b[?2004h" in sess.tmux.pane_side_bytes(),
+        )
+        d.record_tmux_observation(FRAMEWORK, "honors_bracketed_paste", payload)
+        # The production injection encoder reads the attach-client stream; under tmux
+        # it observes paste mode enabled (tmux advertises to any capable client), so the
+        # load-bearing signal is the client-side visibility. A pane-side mismatch (the
+        # harness defers bracketed paste to tmux) is recorded as a divergence finding.
+        assert payload["client_observes_2004h"], \
+            "honors_bracketed_paste: attach client did not observe DECSET 2004 under tmux"
+
+        before_band = _composer_band(sess.oracle)
+        sess.send(d.paste_encode(b"paste-line-one\npaste-line-two"))
+        sess.wait_idle(stable_secs=1.2, max_wait=8)
+        after_band = _composer_band(sess.oracle)
+        both = ("paste-line-one" in after_band) and ("paste-line-two" in after_band)
+        transcript = "\n".join(sess.oracle.rows()[:16])
+        in_transcript = "paste-line-one" in transcript
+        observed = ("held-multiline-needs-submit" if (both and not in_transcript)
+                    else "auto-submit-on-close" if in_transcript else "unresolved")
+        d.record_tmux_observation(FRAMEWORK, "paste_multiline_semantics", {
+            "observed": observed,
+            "capability_row_value": d.interaction_row(FRAMEWORK, "paste_multiline_semantics")["value"],
+        })
+        assert observed == d.interaction_row(FRAMEWORK, "paste_multiline_semantics")["value"], \
+            f"paste_multiline_semantics: observed {observed!r} under tmux"
+    finally:
+        assert_graceful_exit(sess)
+
+
+def test_tmux_submit_and_newline():
+    """newline_sequence (ESC-CR) inserts under escape-time 0; submit_sequence commits."""
+    submit_seq = d.sequence_bytes(FRAMEWORK, "submit_sequence")
+    newline_seq = d.sequence_bytes(FRAMEWORK, "newline_sequence")
+    sess = _tmux_session("submit_newline")
+    try:
+        _settle_to_composer(sess)
+        sess.send(b"aaa-probe")
+        sess.wait_idle(stable_secs=0.8, max_wait=6)
+
+        before = _composer_band(sess.oracle)
+        sess.send(newline_seq)
+        sess.wait_idle(stable_secs=1.0, max_wait=8)
+        after = _composer_band(sess.oracle)
+        # ESC-CR must reach the pane as ESC then CR (escape-time 0), not a held meta.
+        assert "aaa-probe" in after and after != before, \
+            "newline_sequence: ESC-CR did not insert a newline under tmux"
+
+        before_submit = _live_composer_input(sess.oracle)
+        sess.send(submit_seq)
+        sess.wait_idle(stable_secs=1.5, max_wait=25)
+        assert "aaa-probe" in before_submit and "aaa-probe" not in _live_composer_input(sess.oracle), \
+            "submit_sequence: did not submit under tmux"
+        d.record_tmux_observation(FRAMEWORK, "submit_newline", {
+            "newline_inserts": True, "submit_commits": True,
+        })
+    finally:
+        assert_graceful_exit(sess)
+
+
+def test_tmux_permission_modal():
+    """permission_prompt_signature — permission.bash=ask forces the modal."""
+    perm_dir = make_permission_sandbox(bash_mode="ask")
+    sess = _tmux_session("permission", launch_dir=perm_dir)
+    try:
+        _induce_bash(sess)
+        deadline = time.time() + 30
+        appeared = False
+        while time.time() < deadline:
+            sess.pump(0.5)
+            if "Permission required" in sess.oracle.text():
+                appeared = True
+                break
+        sess.wait_idle(stable_secs=0.8, max_wait=6)
+        rows = sess.oracle.rows()
+        assert appeared and d.opencode_permission_modal(rows), \
+            "permission_prompt_signature: modal not detected under tmux"
+        assert not d.opencode_composer_ready(rows), \
+            "composer matcher fired during a modal under tmux"
+        d.record_tmux_observation(FRAMEWORK, "permission_prompt_signature", {
+            "modal_detected": True, "composer_suppressed": True,
+        })
+        sess.send(b"\x1b")  # decline
+        sess.wait_idle(stable_secs=1.0, max_wait=8)
     finally:
         assert_graceful_exit(sess)

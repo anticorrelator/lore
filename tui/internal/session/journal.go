@@ -39,6 +39,7 @@ const (
 	EventNeedsInput       = "needs_input"
 	EventQuiescent        = "quiescent"
 	EventResumed          = "resumed"
+	EventRecovered        = "recovered"
 	EventClosed           = "closed"
 	EventStepCompleted    = "step_completed"
 	EventHarnessTurnEnded = "harness_turn_ended"

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,31 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
+
+// TestTmuxProc_SignalsRealProcess: tmuxProc's Terminate delivers a real SIGTERM to
+// its pane PID (not the attach client), the process actually dies, and Alive
+// reports dead once the pid is freed. This is the D7 guarantee that under tmux the
+// close ladder terminates the harness rather than detaching a viewer.
+func TestTmuxProc_SignalsRealProcess(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	proc := tmuxProc{pid: cmd.Process.Pid}
+	if !proc.Alive() {
+		t.Fatal("freshly started process reads dead")
+	}
+	if err := proc.Terminate(); err != nil {
+		t.Fatalf("Terminate: %v", err)
+	}
+	err := cmd.Wait() // reap so the pid is freed (a zombie would still read alive)
+	if err == nil {
+		t.Fatal("process survived SIGTERM")
+	}
+	if proc.Alive() {
+		t.Error("pane process still signalable after SIGTERM + reap")
+	}
+}
 
 // fakeProc is a scriptable harnessProc. It reports alive until
 // signalsBeforeExit termination signals (Terminate/Kill each count once) have

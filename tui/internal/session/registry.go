@@ -23,11 +23,23 @@ import (
 const LivenessTTL = 30 * time.Second
 
 // Session is one live session nested under an instance registry row.
+//
+// The tmux/SessionID/Harness/AutoClose fields are the recovery manifest: additive,
+// omit-when-empty, absent for direct-PTY sessions and for rows written by a binary
+// predating them. Tmux is the hosting tmux session name — its presence is what a
+// restarting TUI's adoption scan keys on to reattach a survivor. SessionID/Harness
+// persist the spend-probe transcript binding so an adopting instance can still
+// extract token spend at teardown; AutoClose persists the close-ladder override.
 type Session struct {
 	Slug      string `json:"slug"`
 	Type      string `json:"type"`      // spec|implement|chat
 	Initiator string `json:"initiator"` // agent|human
 	Started   string `json:"started"`   // ISO 8601 UTC
+
+	Tmux      string `json:"tmux,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Harness   string `json:"harness,omitempty"`
+	AutoClose *bool  `json:"auto_close,omitempty"`
 }
 
 // Instance is one live TUI instance's registry row, stored at

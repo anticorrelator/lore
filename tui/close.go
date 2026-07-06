@@ -52,6 +52,17 @@ func (o osProc) Terminate() error { return o.p.Signal(syscall.SIGTERM) }
 func (o osProc) Kill() error      { return o.p.Kill() }
 func (o osProc) Alive() bool      { return o.p.Signal(syscall.Signal(0)) == nil }
 
+// tmuxProc adapts a tmux pane PID to harnessProc. Under tmux the panel's own
+// Process() is the attach client, so SIGTERM there would only detach a viewer
+// while the harness runs on — the ladder must signal the pane process (the
+// harness) directly. The graceful rung is unaffected: it still writes the exit
+// sequence to the PTY, which travels through the attach client into the pane.
+type tmuxProc struct{ pid int }
+
+func (t tmuxProc) Terminate() error { return syscall.Kill(t.pid, syscall.SIGTERM) }
+func (t tmuxProc) Kill() error      { return syscall.Kill(t.pid, syscall.SIGKILL) }
+func (t tmuxProc) Alive() bool      { return syscall.Kill(t.pid, syscall.Signal(0)) == nil }
+
 // runCloseLadder drives the D5 exit ladder against proc and returns the rung it
 // reached:
 //
@@ -180,8 +191,13 @@ func (m model) closeLadderCmd(slug string, panel work.SessionPanelModel) tea.Cmd
 				exitSeq, exitSupported = seq, ok
 			}
 		}
+		// A tmux-hosted session's harness is the pane process, not the panel's
+		// attach client — target the pane PID so escalation actually terminates the
+		// harness instead of detaching a viewer.
 		var proc harnessProc
-		if p := panel.Process(); p != nil {
+		if pid := panel.PanePID(); pid != 0 {
+			proc = tmuxProc{pid: pid}
+		} else if p := panel.Process(); p != nil {
 			proc = osProc{p: p}
 		}
 		var ptmx io.Writer

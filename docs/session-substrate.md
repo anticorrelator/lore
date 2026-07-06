@@ -58,7 +58,11 @@ One file per live TUI instance at `instances/<name>.json`.
 | `repo` | string | Repo the instance is bound to. |
 | `started` | string | ISO 8601 UTC timestamp of instance start. |
 | `initiator_default` | string | `"human"` in v1 — the default initiator stamped on sessions this instance starts. |
-| `sessions` | array of objects | Live sessions nested under the instance: `[{slug, type, initiator, started}]`. |
+| `sessions` | array of objects | Live sessions nested under the instance: `[{slug, type, initiator, started}]`, each optionally carrying the recovery manifest fields `tmux`, `session_id`, `harness`, `auto_close` (below). |
+| &nbsp;&nbsp;`sessions[].tmux` | string \| absent | tmux session name (`lore-<instance>-<slug>`) hosting the harness, when the session is tmux-hosted. Omit-when-empty; absent for direct-PTY sessions (tmux unavailable / `LORE_TUI_TMUX=off`). Its presence on a dead instance's row is what a restarting TUI's adoption scan keys on to reattach rather than orphan. |
+| &nbsp;&nbsp;`sessions[].session_id` | string \| absent | Harness transcript-binding id (claude-code `--session-id`), persisted so an adopting instance can still extract token spend at teardown after the original TUI is gone. Omit-when-empty. |
+| &nbsp;&nbsp;`sessions[].harness` | string \| absent | Launch framework the session was spawned under (the spend probe's `--harness`). Omit-when-empty. |
+| &nbsp;&nbsp;`sessions[].auto_close` | boolean \| absent | The close-ladder auto-close override carried onto the live session (see [Close-request queue](#close-request-queue)), persisted so it survives adoption. Omit-when-empty: absent defers to `initiator`. |
 | `build_sha` | string \| absent | Build vintage — the short git SHA embedded at build time (`-ldflags`). Absent for `go run`/dev builds and for any binary predating this field. Omit-when-empty. |
 | `build_time` | string \| absent | Build vintage — the **orderable** quantity: the commit's committer-date (release build) or the binary's mtime (dev build), ISO 8601 UTC. Absent for a binary predating this field. Omit-when-empty. This, not `build_sha`, is what `min_vintage` filtering compares against (a SHA has no read-side ordering). |
 
@@ -72,7 +76,8 @@ rejected** by `min_vintage` filtering (see [Request queue](#request-queue)).
 
 Per nested session object: `slug` (string), `type` (string enum
 `spec|implement|chat`), `initiator` (string enum `agent|human`), `started`
-(string, ISO 8601 UTC).
+(string, ISO 8601 UTC), plus the omit-when-empty recovery-manifest fields `tmux`,
+`session_id`, `harness`, `auto_close` (above).
 
 **Write archetype.** The instance rewrites its own file via tmp + `os.Rename`
 (torn-read-proof) whenever a session starts or ends. **Heartbeat** is an
@@ -85,6 +90,26 @@ TTL) carry over from the retired `.lore-session` machinery.
 The registry is the single answer to "is instance `<name>` alive right now" — the
 queue's reclamation rules (below) reuse this liveness signal rather than growing a
 second TTL mechanism.
+
+**Crash/restart recovery (tmux adoption).** When tmux hosting is active, a
+TUI-spawned harness runs inside a tmux session (`lore-<instance>-<slug>`) on a
+dedicated server, so the harness outlives the TUI process. A dead instance's
+registry row is not deleted (mtime-TTL hides it from live snapshots but nothing
+unlinks it), which makes that row its own recovery manifest. At startup a
+replacement TUI scans `instances/*.json` **including TTL-stale files**, and a row
+is adoptable when it names this repo and its owner is dead (mtime beyond the TTL
+**and** PID not alive). The scanner claims a corpse atomically by renaming its file
+to a claim suffix — exactly one racing renamer wins, so two fresh TUIs cannot
+double-adopt (the same rename-as-claim atomicity the request queue uses). For each
+nested session with a live `tmux` session (`tmux has-session`), the adopter
+re-attaches through the normal spawn path and journals `recovered`; a session whose
+tmux is gone (or that had no `tmux` name) is journaled `closed` (duration-only) to
+close its otherwise-dangling lifecycle. The durable registry write of the adopting
+row lands before its `recovered` journal row (the substrate's durable-before-journal
+ordering). Adoption doubles as crash-corpse cleanup: the claimed file is removed
+once its sessions are handled. Recovery is tmux-gated — with tmux absent or
+`LORE_TUI_TMUX=off`, sessions are TUI-lifetime-bound exactly as before and no
+adoption runs.
 
 ## Request queue
 
@@ -326,6 +351,7 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `needs_input` | TUI | a running session is waiting on input |
 | `quiescent` | TUI | a running session went idle |
 | `resumed` | TUI | a session resumed after idle/input |
+| `recovered` | TUI | a restarted/replacement instance adopted a still-running tmux-hosted session from a dead instance's registry row; `reason` names the predecessor (`adopted from <dead-instance>`). Session-transition class — no `request_id` |
 | `closed` | TUI | a session ended (carries `spend`: token counts where the harness exposes them, else duration-only) |
 | `step_completed` | protocol terminal verbs | a protocol step finished (e.g. `/implement` phase close) |
 | `harness_turn_ended` | stop hooks | a harness turn boundary was reached |

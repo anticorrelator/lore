@@ -28,11 +28,11 @@
 #
 # Required fields:
 #   event        enum: requested | claimed | spawned | needs_input | quiescent |
-#                resumed | closed | step_completed | harness_turn_ended |
-#                spawn_failed | request_reclaimed | request_abandoned |
-#                request_cancelled | close_requested | send_requested | sent |
-#                send_refused | review_flagged | review_held | review_notified |
-#                review_released
+#                resumed | recovered | closed | step_completed |
+#                harness_turn_ended | spawn_failed | request_reclaimed |
+#                request_abandoned | request_cancelled | close_requested |
+#                send_requested | sent | send_refused | review_flagged |
+#                review_held | review_notified | review_released
 #
 # Conditional rules:
 #   Queue-lifecycle events (requested, claimed, spawned, spawn_failed,
@@ -113,7 +113,7 @@ fi
 # --- Validate event against the closed vocabulary ---
 EVENT=$(printf '%s' "$ROW" | jq -r '.event // ""')
 case "$EVENT" in
-  requested|claimed|spawned|needs_input|quiescent|resumed|closed|\
+  requested|claimed|spawned|needs_input|quiescent|resumed|recovered|closed|\
 step_completed|harness_turn_ended|spawn_failed|request_reclaimed|\
 request_abandoned|request_cancelled|close_requested|send_requested|sent|send_refused|\
 review_flagged|review_held|review_notified|review_released) ;;
@@ -121,7 +121,7 @@ review_flagged|review_held|review_notified|review_released) ;;
     fail "missing required field: event"
     ;;
   *)
-    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, closed, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, send_requested, sent, send_refused, review_flagged, review_held, review_notified, review_released)"
+    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, send_requested, sent, send_refused, review_flagged, review_held, review_notified, review_released)"
     ;;
 esac
 

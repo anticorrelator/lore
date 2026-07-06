@@ -89,6 +89,13 @@ type SessionProcessStartedMsg struct {
 	// --harness argument.
 	SessionID string
 	Harness   string
+
+	// Tmux is the hosting tmux session name when the session is tmux-hosted
+	// (empty for direct-PTY). PanePID is the harness pane process, the close
+	// ladder's signal target — under tmux Cmd/Process is the attach client, so
+	// signalling it would only detach a viewer. Both empty/zero for direct-PTY.
+	Tmux    string
+	PanePID int
 }
 
 // TerminalDetachMsg is sent when the user double-presses Esc within
@@ -175,6 +182,13 @@ type SessionPanelModel struct {
 	// Esc arriving within escDetachWindow with no intervening non-Esc KeyMsg
 	// is interpreted as the detach gesture instead of being forwarded.
 	lastEscTime time.Time
+
+	// tmuxName is the hosting tmux session name (empty for direct-PTY); panePID is
+	// the harness pane process the close ladder signals directly. Under tmux the
+	// panel's cmd/Process is the attach client, so these carry the real host so
+	// teardown and quit-detach act on the right target.
+	tmuxName string
+	panePID  int
 }
 
 // NewSessionPanelModel creates a session panel model for the given work item slug.
@@ -306,6 +320,12 @@ func (m SessionPanelModel) ScreenState() (ScreenSnapshot, error) {
 // writes body raw — PasteEncode neutralizes the harnesses' divergent CR/LF
 // submit semantics. bracketed is the caller-captured DECSET 2004 state (from the
 // same snapshot the gate used) so encoding matches what the gate observed.
+//
+// Under tmux hosting the snapshot's bracketed flag reflects tmux's client-edge
+// paste-mode negotiation, not the harness pane's own ESC[?2004h — tmux always
+// advertises bracketed paste to a capable client. That yields a bracketed wrap,
+// which all three harnesses honor under tmux (Phase 1 re-verified paste
+// hold-then-submit), so this path is unchanged for tmux vs direct-PTY.
 func (m SessionPanelModel) InjectMessage(body, submitSeq string, bracketed bool) error {
 	if m.ptmx == nil {
 		return errors.New("no PTY attached")
@@ -338,6 +358,16 @@ func (m SessionPanelModel) Process() *os.Process {
 	}
 	return m.cmd.Process
 }
+
+// TmuxName returns the hosting tmux session name, or "" for a direct-PTY session.
+// A non-empty value is the marker for the quit-detach and close-ladder branches:
+// the harness lives in a tmux pane that outlives this panel's attach client.
+func (m SessionPanelModel) TmuxName() string { return m.tmuxName }
+
+// PanePID returns the harness pane process id for a tmux-hosted session, or 0 for
+// direct-PTY. The close ladder signals this pid rather than the attach client
+// (Process()), which SIGTERM would merely detach.
+func (m SessionPanelModel) PanePID() int { return m.panePID }
 
 // LastOutputTime returns when the last PTY output was received.
 func (m SessionPanelModel) LastOutputTime() time.Time {
@@ -413,6 +443,8 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		m.ptmx = msg.Ptmx
 		m.cmd = msg.Cmd
 		m.outputChan = msg.Output
+		m.tmuxName = msg.Tmux
+		m.panePID = msg.PanePID
 		// Attach the PTY to the backend so emulator-originated query
 		// responses are forwarded to the subprocess.
 		if m.backend != nil && msg.Ptmx != nil {
@@ -914,7 +946,7 @@ func buildInitialPrompt(d SessionDescriptor) string {
 // read/write interface — write user keystrokes, read subprocess output.
 // projectDir must be the project root (not the knowledge _work/ dir) so the
 // launched skill explores the correct codebase.
-func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int, knowledgeDir string, sessionEnv SessionEnv) tea.Cmd {
+func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int, knowledgeDir string, sessionEnv SessionEnv, tmux bool) tea.Cmd {
 	return func() (result tea.Msg) {
 		slug := d.Slug
 		defer func() {
@@ -990,14 +1022,40 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 		}
 		args = append(args, initialPrompt)
 
-		cmd := exec.Command(harnessBinary, args...)
-		cmd.Dir = projectDir
-		cmd.Env = append(os.Environ(), "LORE_FRAMEWORK="+activeFramework)
-		cmd.Env = append(cmd.Env, sessionEnv.vars()...)
-		// Do NOT set cmd.Stderr = io.Discard here: with a PTY the subprocess's
-		// stdin/stdout/stderr are all wired to the PTY slave, so claude's full
-		// TUI output (including stderr) is captured by the emulator. Discarding
-		// stderr would black out parts of claude's interface.
+		// Under tmux hosting the harness runs in a detached tmux session and the
+		// panel's subprocess is a `tmux attach` client relaying it — so the harness
+		// outlives this TUI process. The PTY master stays the single read/write
+		// interface (the emulator, gate, peek, send, quiescence paths are untouched;
+		// nothing downstream learns tmux exists). tmux hosting needs an instance
+		// name to build the session name and record it for recovery; without one it
+		// degrades to direct-PTY. A tmux creation error also degrades explicitly
+		// rather than failing the spawn — the session still starts, just without
+		// crash recovery.
+		var cmd *exec.Cmd
+		var tmuxName string
+		var panePID int
+		if tmux && sessionEnv.Instance != "" && slug != "" {
+			name := TmuxSessionName(sessionEnv.Instance, slug)
+			extras := append([]string{"LORE_FRAMEWORK=" + activeFramework}, sessionEnv.vars()...)
+			pid, terr := createTmuxSession(name, width, height, extras, harnessBinary, args)
+			if terr != nil {
+				fmt.Fprintf(os.Stderr, "[lore] degraded: tmux hosting failed for %s (%v); spawning direct-PTY (session will not survive crash/restart)\n", slug, terr)
+			} else {
+				tmuxName, panePID = name, pid
+				cmd = tmuxAttachCommand(name)
+				cmd.Dir = projectDir
+			}
+		}
+		if cmd == nil {
+			cmd = exec.Command(harnessBinary, args...)
+			cmd.Dir = projectDir
+			cmd.Env = append(os.Environ(), "LORE_FRAMEWORK="+activeFramework)
+			cmd.Env = append(cmd.Env, sessionEnv.vars()...)
+			// Do NOT set cmd.Stderr = io.Discard here: with a PTY the subprocess's
+			// stdin/stdout/stderr are all wired to the PTY slave, so claude's full
+			// TUI output (including stderr) is captured by the emulator. Discarding
+			// stderr would black out parts of claude's interface.
+		}
 
 		ws := &pty.Winsize{
 			Rows: uint16(height),
@@ -1005,40 +1063,93 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 		}
 		ptmx, err := pty.StartWithSize(cmd, ws)
 		if err != nil {
+			if tmuxName != "" {
+				// The detached session is live but has no attach client and is not yet
+				// on any registry row — nothing could ever adopt it, so kill it rather
+				// than orphan it.
+				killTmuxSession(tmuxName)
+			}
 			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("pty start: %w", err)}
 		}
-
-		outputCh := make(chan []byte, 64)
-		go func() {
-			defer close(outputCh)
-			defer func() {
-				if r := recover(); r != nil {
-					writeCrashLog("PTY reader goroutine", r)
-				}
-			}()
-			buf := make([]byte, 32*1024)
-			for {
-				n, err := ptmx.Read(buf)
-				if n > 0 {
-					chunk := make([]byte, n)
-					copy(chunk, buf[:n])
-					outputCh <- chunk
-				}
-				if err != nil {
-					break // EIO on Linux, EOF on macOS after subprocess exits
-				}
-			}
-		}()
 
 		return SessionProcessStartedMsg{
 			Slug:      slug,
 			Ptmx:      ptmx,
 			Cmd:       cmd,
-			Output:    outputCh,
+			Output:    ptyReaderChan(ptmx),
 			SessionID: sessionID,
 			Harness:   activeFramework,
+			Tmux:      tmuxName,
+			PanePID:   panePID,
 		}
 	}
+}
+
+// AttachTerminalCmd re-attaches a panel to an already-running tmux-hosted session
+// during startup adoption: no harness command is built and no new tmux session is
+// created — the session survived the crashed instance. It re-queries the pane PID
+// (the original spawn's died with the crashed TUI's memory) and echoes the
+// registry-recovered sessionID/harness so teardown can still bind the spend probe.
+// A pane-PID query failure means the session died between the adoption scan and the
+// attach; that surfaces as a spawn error (the caller journals it closed).
+func AttachTerminalCmd(slug, tmuxName, sessionID, harness, projectDir string, width, height int) tea.Cmd {
+	return func() (result tea.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				writeCrashLog("AttachTerminalCmd", r)
+				result = StreamErrorMsg{Slug: slug, Err: fmt.Errorf("attach panic: %v", r)}
+			}
+		}()
+		panePID, perr := tmuxPanePID(tmuxName)
+		if perr != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("tmux pane pid: %w", perr)}
+		}
+		cmd := tmuxAttachCommand(tmuxName)
+		cmd.Dir = projectDir
+		ws := &pty.Winsize{Rows: uint16(height), Cols: uint16(width)}
+		ptmx, err := pty.StartWithSize(cmd, ws)
+		if err != nil {
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("pty start: %w", err)}
+		}
+		return SessionProcessStartedMsg{
+			Slug:      slug,
+			Ptmx:      ptmx,
+			Cmd:       cmd,
+			Output:    ptyReaderChan(ptmx),
+			SessionID: sessionID,
+			Harness:   harness,
+			Tmux:      tmuxName,
+			PanePID:   panePID,
+		}
+	}
+}
+
+// ptyReaderChan starts the goroutine that drains the PTY master into a buffered
+// channel and returns it. Closing the channel (on read error: EIO on Linux, EOF on
+// macOS after the subprocess exits) is what drives StreamComplete teardown.
+func ptyReaderChan(ptmx *os.File) <-chan []byte {
+	outputCh := make(chan []byte, 64)
+	go func() {
+		defer close(outputCh)
+		defer func() {
+			if r := recover(); r != nil {
+				writeCrashLog("PTY reader goroutine", r)
+			}
+		}()
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := ptmx.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				outputCh <- chunk
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+	return outputCh
 }
 
 // KeyToBytes converts a Bubble Tea key press into the raw byte sequence that

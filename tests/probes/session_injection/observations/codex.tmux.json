@@ -1,0 +1,27 @@
+{
+  "harness": "codex",
+  "tier": "tmux-attach-client",
+  "tty_size": "120x40",
+  "tmux_version": "tmux 3.4",
+  "probed_at": "2026-07-06T04:14:16.173805+00:00",
+  "honors_bracketed_paste": {
+    "harness_advertises_2004h_pane_side": true,
+    "client_observes_2004h": true,
+    "capability_row_value": true,
+    "pane_side_matches_capability_row": true,
+    "divergence_from_direct_tier": false,
+    "note": "client-side 2004h is tmux-mediated (tmux advertises to any capable client regardless of the pane); pane-side (pipe-pane) is the faithful harness signal. A harness that defers bracketed paste to tmux emits no pane-side 2004h even when its direct-PTY row is True."
+  },
+  "paste_multiline_semantics": {
+    "observed": "held-multiline-needs-submit",
+    "capability_row_value": "held-multiline-needs-submit"
+  },
+  "submit_newline": {
+    "newline_inserts": true,
+    "submit_commits": true
+  },
+  "permission_prompt_signature": {
+    "modal_detected": true,
+    "composer_suppressed": true
+  }
+}

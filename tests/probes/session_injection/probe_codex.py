@@ -88,7 +88,8 @@ def _clean_env():
 
 
 class Session:
-    def __init__(self, raw_log_path, prompt=None, extra_args=None):
+    def __init__(self, raw_log_path, prompt=None, extra_args=None,
+                 tmux=False, pane_side_path=None):
         self.raw_log_path = raw_log_path
         os.makedirs(os.path.dirname(raw_log_path), exist_ok=True)
         self._log = open(raw_log_path, "wb")
@@ -96,10 +97,19 @@ class Session:
         args += (extra_args or [])
         if prompt is not None:
             args.append(prompt)
-        self.child = pexpect.spawn(
-            CODEX_BIN, args, env=_clean_env(),
-            dimensions=(ROWS, COLS), encoding=None, timeout=60,
-        )
+        self.tmux = None
+        if tmux:
+            # codex takes its cwd via -C in argv, so no tmux -c start-directory.
+            self.tmux = d.TmuxHost(
+                d.tmux_session_name("cx"), [CODEX_BIN] + args, env=_clean_env(),
+                cols=COLS, rows=ROWS, pane_side_path=pane_side_path,
+            )
+            self.child = self.tmux.child
+        else:
+            self.child = pexpect.spawn(
+                CODEX_BIN, args, env=_clean_env(),
+                dimensions=(ROWS, COLS), encoding=None, timeout=60,
+            )
         self.child.logfile_read = self._log
         self.oracle = d.ScreenOracle()
 
@@ -160,6 +170,8 @@ class Session:
             self.child.close(force=True)
         except Exception:
             pass
+        if self.tmux is not None:
+            self.tmux.kill()
 
 
 def wait_for_composer(sess, timeout=45.0):
@@ -402,5 +414,137 @@ def test_p5_mid_generation_inject():
         )
         if ping_in_composer and sess.child.isalive():
             _interrupt_turn(sess)
+    finally:
+        sess.graceful_close()
+
+
+# =========================================================================== #
+# tmux tier — re-verify the contract set under a tmux attach client. Each
+# assertion names the capability-row field it re-checks; divergences from the
+# direct-PTY recordings are recorded in observations/codex.tmux.json, not
+# silently absorbed into the rows.
+# =========================================================================== #
+TMUX_RAW = os.path.join(RAW_DIR, "tmux")
+
+
+def _tmux_session(name, prompt=None, extra_args=None, pane_side=None):
+    return Session(os.path.join(TMUX_RAW, f"{name}.log"), prompt=prompt,
+                   extra_args=extra_args, tmux=True, pane_side_path=pane_side)
+
+
+def test_tmux_composer_decset_paste():
+    """composer signature, DECSET 2004 visibility, paste-hold (no inference)."""
+    pane_side = os.path.join(TMUX_RAW, "pane_side.raw")
+    sess = _tmux_session("composer_paste", pane_side=pane_side)
+    try:
+        assert wait_for_composer(sess), "composer_signature: never became ready under tmux"
+        assert d.codex_composer_ready(sess.oracle.rows()), \
+            "composer_signature: matcher did not fire under tmux"
+
+        payload = d.decset_observation(
+            FRAMEWORK,
+            client_2004h=b"\x1b[?2004h" in sess.raw_bytes(),
+            pane_2004h=b"\x1b[?2004h" in sess.tmux.pane_side_bytes(),
+        )
+        d.record_tmux_observation(FRAMEWORK, "honors_bracketed_paste", payload)
+        # The production injection encoder reads the attach-client stream; under tmux
+        # it observes paste mode enabled (tmux advertises to any capable client), so the
+        # load-bearing signal is the client-side visibility. A pane-side mismatch (the
+        # harness defers bracketed paste to tmux) is recorded as a divergence finding.
+        assert payload["client_observes_2004h"], \
+            "honors_bracketed_paste: attach client did not observe DECSET 2004 under tmux"
+
+        sess.marker("tmux bracketed paste (no trailing submit)")
+        sess.send(d.paste_encode(b"line-one\nline-two"))
+        sess.drain(1.5)
+        after_paste = _composer_text(sess.oracle) or ""
+        composer_txt = sess.oracle.text()
+        auto = ("line-one" not in after_paste) and ("line-one" in composer_txt)
+        both = ("line-one" in after_paste) and ("line-two" in after_paste)
+        observed = ("auto-submit-on-close" if auto
+                    else "held-multiline-needs-submit" if both else "unresolved")
+        d.record_tmux_observation(FRAMEWORK, "paste_multiline_semantics", {
+            "observed": observed,
+            "capability_row_value": d.interaction_row(FRAMEWORK, "paste_multiline_semantics")["value"],
+        })
+        assert observed == d.interaction_row(FRAMEWORK, "paste_multiline_semantics")["value"], \
+            f"paste_multiline_semantics: observed {observed!r} under tmux"
+    finally:
+        sess.graceful_close()
+
+
+def test_tmux_submit_and_newline():
+    """newline_sequence inserts without submitting; submit_sequence commits."""
+    submit_seq = d.sequence_bytes(FRAMEWORK, "submit_sequence")
+    newline_seq = d.sequence_bytes(FRAMEWORK, "newline_sequence")
+    sess = _tmux_session("submit_newline")
+    try:
+        assert wait_for_composer(sess), "composer never became ready under tmux"
+        sess.marker(f"tmux newline_sequence {_brepr(newline_seq)}")
+        sess.type_text("AAA")
+        sess.drain(0.6)
+        before = _composer_text(sess.oracle) or ""
+        sess.send(newline_seq)
+        sess.drain(0.8)
+        sess.type_text("BBB")
+        sess.drain(0.8)
+        after = _composer_text(sess.oracle) or ""
+        ready_after = find_composer(sess.oracle)[0]
+        submitted = ("AAA" not in after) or (not ready_after)
+        two_line = ("AAA" in after and "BBB" in after and after.count("\n") > before.count("\n"))
+        # newline_sequence (ESC-guarded LF) must survive escape-time 0 without submitting.
+        assert two_line and not submitted, \
+            f"newline_sequence {_brepr(newline_seq)}: did not insert a newline under tmux"
+
+        before_submit = _composer_text(sess.oracle) or ""
+        sess.marker(f"tmux submit_sequence {_brepr(submit_seq)}")
+        sess.send(submit_seq)
+        sess.drain(2.5)
+        composer_after = _composer_text(sess.oracle) or ""
+        assert "AAA" in before_submit and "AAA" not in composer_after, \
+            f"submit_sequence {_brepr(submit_seq)}: did not submit under tmux"
+        d.record_tmux_observation(FRAMEWORK, "submit_newline", {
+            "newline_inserts": True, "submit_commits": True,
+        })
+        _interrupt_turn(sess)
+    finally:
+        sess.graceful_close()
+
+
+def test_tmux_permission_modal():
+    """permission_prompt_signature — -a untrusted escalates a write to the modal."""
+    sess = _tmux_session(
+        "permission",
+        prompt="Run this exact shell command: touch probe-approval-tmux.txt",
+        extra_args=["-a", "untrusted"],
+    )
+    try:
+        sess.wait_idle(stable_secs=1.5, timeout=45)
+        if TRUST_RE.search(sess.oracle.text()):
+            sess.send(b"\r")
+            sess.wait_idle(stable_secs=1.5, timeout=30)
+        sess.marker("tmux await approval modal")
+        modal_seen = False
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            sess.wait_idle(stable_secs=1.5, timeout=30)
+            if d.codex_permission_modal(sess.oracle.rows()):
+                modal_seen = True
+                break
+            if find_composer(sess.oracle)[0] and re.search(r"•\s", sess.oracle.text()):
+                break
+            if not sess.child.isalive():
+                break
+        rows = sess.oracle.rows()
+        assert modal_seen and d.codex_permission_modal(rows), \
+            "permission_prompt_signature: approval modal not detected under tmux"
+        assert not d.codex_composer_ready(rows), \
+            "composer matcher fired during a modal under tmux"
+        d.record_tmux_observation(FRAMEWORK, "permission_prompt_signature", {
+            "modal_detected": True, "composer_suppressed": True,
+        })
+        sess.marker("tmux decline modal (Esc)")
+        sess.send(b"\x1b")
+        sess.drain(2)
     finally:
         sess.graceful_close()

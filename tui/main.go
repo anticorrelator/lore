@@ -100,6 +100,15 @@ func main() {
 		m.spendScript = filepath.Join(os.Getenv("HOME"), ".lore/scripts/session-spend.sh")
 		m.instanceStartedISO = time.Now().UTC().Format("2006-01-02T15:04:05Z")
 		m.buildSHA, m.buildTime = resolveBuildIdentity()
+
+		// D3 host-capability gate: probe tmux once at startup. When absent or
+		// opted out, sessions degrade to the direct-PTY path (TUI-lifetime-bound,
+		// no crash recovery), announced once via the house degradation pattern.
+		var tmuxDetail string
+		m.tmuxEnabled, tmuxDetail = work.TmuxAvailable()
+		if !m.tmuxEnabled {
+			fmt.Fprintf(os.Stderr, "[lore] degraded: tmux hosting off (%s); sessions are TUI-lifetime-bound and will not survive crash/restart\n", tmuxDetail)
+		}
 	}
 
 	// Best-effort settings panel initialization. A nil panel disables the

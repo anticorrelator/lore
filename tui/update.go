@@ -160,6 +160,13 @@ func (m model) Init() tea.Cmd {
 	// queue's own-liveness check works) from the first tick.
 	if m.instanceName != "" {
 		cmds = append(cmds, m.writeInstanceCmd())
+		// D5 crash/restart recovery: scan for dead instances' still-running
+		// tmux-hosted sessions and adopt them, once at startup (before the first
+		// poll tick, which is scheduled 5s out). tmux-gated — with tmux off,
+		// sessions were TUI-lifetime-bound and there is nothing to recover.
+		if m.tmuxEnabled {
+			cmds = append(cmds, m.adoptionScanCmd())
+		}
 	}
 	return tea.Batch(cmds...)
 }
@@ -575,6 +582,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 
 	case sessionSnapshotMsg:
 		return m.handleSessionSnapshot(msg)
+
+	case adoptionScanMsg:
+		return m.handleAdoptionScan(msg)
 
 	case queueTickResultMsg:
 		return m.handleQueueTickResult(msg)

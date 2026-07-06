@@ -24,7 +24,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import time
+import uuid
+from datetime import datetime, timezone
 
 try:  # live-probe deps only; pure tests must import this module without them
     import pyte
@@ -291,3 +295,157 @@ def wait_idle(child, oracle, stable_secs=2.0, timeout=45.0, poll=0.3):
         if time.time() - last_change >= stable_secs:
             return True
     return False
+
+
+# --------------------------------------------------------------------------- #
+# tmux hosting tier. Live-probe only. Production hosts a harness under a detached
+# session on a dedicated `-L lore-tui -f /dev/null` server and drives it through
+# an `attach-session` client running under the PTY — the PTY master stays the one
+# read/write seam, so the emulator/gate/injection stack never learns tmux exists.
+# TmuxHost reproduces that topology here: it creates the pinned session and hands
+# back a pexpect attach client the per-harness probes drive exactly like a
+# direct-PTY child.
+#
+# Each option pin removes one contract hazard, applied on the isolated server so
+# the re-verified contract is the contract production runs:
+#   prefix/prefix2 none   a C-b byte in a payload or keystroke reaches the harness
+#   status off            no synthetic status row to break bottom-anchored matchers
+#   remain-on-exit off  + pane death -> session death -> attach-client EOF (the
+#   exit-empty on         existing StreamComplete teardown fires unchanged)
+#   escape-time 0         a lone ESC (opencode's ESC-CR newline) isn't held as a
+#                         meta prefix
+#   window-size latest    the sole attached client dictates dimensions so resize
+#                         forwarding keeps working
+# --------------------------------------------------------------------------- #
+TMUX_SOCKET = "lore-tui"
+
+
+def tmux_available():
+    return shutil.which("tmux") is not None
+
+
+def tmux_version():
+    try:
+        return subprocess.run(["tmux", "-V"], capture_output=True, text=True).stdout.strip()
+    except OSError:  # pragma: no cover
+        return "unknown"
+
+
+def tmux_session_name(prefix):
+    return f"lore-{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+class TmuxHost:
+    """Host `argv` under a pinned detached tmux session; expose the attach client.
+
+    `child` is a pexpect attach-session client whose PTY master is the same
+    byte-stream seam the direct-PTY probes drive. When `pane_side_path` is given,
+    `pipe-pane` tees the harness's raw pane output there — the un-re-encoded
+    stream that answers "does the harness itself advertise ESC[?2004h under tmux",
+    which is distinct from what the (tmux-mediated) attach client observes: tmux
+    advertises bracketed paste to any capable attach client regardless of the pane.
+    """
+
+    def __init__(self, name, argv, env, cols=COLS, rows=ROWS, cwd=None,
+                 socket=TMUX_SOCKET, history_limit=2000, timeout=60,
+                 pane_side_path=None):
+        require_live_deps()
+        if not tmux_available():
+            raise RuntimeError("tmux tier requires tmux on PATH")
+        self.name = name
+        self.pane_side_path = pane_side_path
+        self._base = ["tmux", "-L", socket, "-f", "/dev/null"]
+        create = self._base + ["new-session", "-d", "-s", name,
+                               "-x", str(cols), "-y", str(rows)]
+        if cwd:
+            create += ["-c", cwd]
+        create += ["--", *argv]
+        subprocess.run(create, env=env, check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if pane_side_path:
+            os.makedirs(os.path.dirname(pane_side_path), exist_ok=True)
+            open(pane_side_path, "wb").close()
+            # Tap first (before option pins and attach) so the harness's startup
+            # mode setup — including any 2004h — lands in the pane-side capture.
+            self._tmux(["pipe-pane", "-o", "-t", name, f"cat >> {pane_side_path}"])
+        self._pin_options(history_limit)
+        self.child = pexpect.spawn(
+            self._base[0], self._base[1:] + ["attach-session", "-t", name],
+            env=env, dimensions=(rows, cols), encoding=None, timeout=timeout,
+        )
+
+    def _tmux(self, args):
+        return subprocess.run(self._base + args, check=False,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def _pin_options(self, history_limit):
+        for opt in (["set", "-s", "escape-time", "0"],
+                    ["set", "-s", "exit-empty", "on"],
+                    ["set", "-t", self.name, "prefix", "none"],
+                    ["set", "-t", self.name, "prefix2", "none"],
+                    ["set", "-t", self.name, "status", "off"],
+                    ["set", "-t", self.name, "history-limit", str(history_limit)],
+                    ["setw", "-t", self.name, "remain-on-exit", "off"],
+                    ["setw", "-t", self.name, "window-size", "latest"]):
+            self._tmux(opt)
+
+    def pane_pid(self):
+        return self._tmux(
+            ["display-message", "-p", "-t", self.name, "#{pane_pid}"]
+        ).stdout.decode().strip()
+
+    def pane_side_bytes(self):
+        if not self.pane_side_path or not os.path.exists(self.pane_side_path):
+            return b""
+        with open(self.pane_side_path, "rb") as f:
+            return f.read()
+
+    def kill(self):
+        self._tmux(["kill-session", "-t", self.name])
+
+
+def decset_observation(harness, client_2004h, pane_2004h):
+    """Both DECSET-2004 readouts plus their interpretation, for the tmux tier.
+
+    pane_2004h (pipe-pane, un-re-encoded) is the faithful harness advertisement,
+    comparable to honors_bracketed_paste. client_2004h (attach stream) is what a
+    production emulator would see, but tmux advertises bracketed paste to any
+    capable attach client regardless of the pane, so it is tmux-mediated.
+    """
+    row_val = interaction_row(harness, "honors_bracketed_paste")["value"]
+    return {
+        "harness_advertises_2004h_pane_side": pane_2004h,
+        "client_observes_2004h": client_2004h,
+        "capability_row_value": row_val,
+        "pane_side_matches_capability_row": pane_2004h == row_val,
+        "divergence_from_direct_tier": pane_2004h != row_val,
+        "note": "client-side 2004h is tmux-mediated (tmux advertises to any capable "
+                "client regardless of the pane); pane-side (pipe-pane) is the faithful "
+                "harness signal. A harness that defers bracketed paste to tmux emits no "
+                "pane-side 2004h even when its direct-PTY row is True.",
+    }
+
+
+def record_tmux_observation(harness, section, payload):
+    """Merge one section into observations/<harness>.tmux.json (evidence, not contract)."""
+    path = os.path.join(OBS_DIR, f"{harness}.tmux.json")
+    doc = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            try:
+                doc = json.load(f)
+            except ValueError:
+                doc = {}
+    doc["harness"] = harness
+    doc["tier"] = "tmux-attach-client"
+    doc["tty_size"] = f"{COLS}x{ROWS}"
+    doc["tmux_version"] = tmux_version()
+    doc["probed_at"] = _now_iso()
+    doc[section] = payload
+    with open(path, "w") as f:
+        json.dump(doc, f, indent=2)
+    return path

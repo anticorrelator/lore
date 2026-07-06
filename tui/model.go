@@ -220,8 +220,13 @@ type model struct {
 	// buildSHA/buildTime are this instance's build vintage, resolved once at
 	// startup and stamped onto its registry row (see resolveBuildIdentity).
 	// buildTime is the orderable quantity min_vintage filtering compares against.
-	buildSHA      string
-	buildTime     string
+	buildSHA  string
+	buildTime string
+	// tmuxEnabled is the D3 host-capability gate resolved once at startup: when
+	// true, sessions are hosted in tmux (survive crash/restart, adoptable); when
+	// false (tmux absent or LORE_TUI_TMUX=off), spawning/close/quit behave exactly
+	// as the direct-PTY path and no adoption scan runs.
+	tmuxEnabled   bool
 	localSessions map[string]liveSession
 	pendingSpawns map[string]liveSession
 	// sessionIdle records, per local session slug, whether we have already
@@ -510,11 +515,20 @@ func (m *model) setSessionPanel(slug string, panel work.SessionPanelModel) {
 }
 
 // cleanupAllSubprocesses cancels any running AI command, cleans up all spec
-// panels, journals each local session's close, and removes this instance's
-// registry file. Call before quitting. Journal and registry teardown are
-// best-effort and synchronous here — the program is about to exit, so any Cmd
-// returned alongside tea.Quit would not run; a missed close is recovered by the
-// registry's mtime TTL rather than left as queue debt.
+// panels, and settles this instance's registry/journal state. Call before
+// quitting. Journal and registry teardown are best-effort and synchronous here —
+// the program is about to exit, so any Cmd returned alongside tea.Quit would not
+// run; a missed close is recovered by the registry's mtime TTL rather than left as
+// queue debt.
+//
+// D8 (quit detaches and preserves tmux-hosted sessions): panel Cleanup closes the
+// PTY and kills the panel's subprocess, which for a tmux session is the attach
+// client — killing it detaches and leaves the harness pane running. So tmux-hosted
+// sessions are NOT journaled `closed` and their registry row is left on disk as the
+// recovery manifest for the next start to adopt. Direct-PTY sessions keep the old
+// kill + `closed` + row-removal behavior. When any tmux session survives, the row
+// is rewritten to list only the survivors so the direct-PTY sessions just closed
+// are not re-adopted (and double-closed) on the next start.
 func (m *model) cleanupAllSubprocesses() {
 	if m.aiCancel != nil {
 		m.aiCancel()
@@ -523,10 +537,21 @@ func (m *model) cleanupAllSubprocesses() {
 	for slug, panel := range m.sessionPanels {
 		m.sessionPanels[slug] = panel.Cleanup()
 	}
+	anyTmuxSurvives := false
 	for slug, ls := range m.localSessions {
+		if ls.tmuxName != "" {
+			anyTmuxSurvives = true
+			continue // detach-and-preserve: no closed row, keep it on the manifest
+		}
 		_ = session.AppendEvent(m.eventScript, m.config.KnowledgeDir, m.closedEventFor(slug, ls))
+		delete(m.localSessions, slug) // drop from the row we may rewrite below
 	}
-	if m.instanceName != "" && m.sessionsDir != "" {
+	if m.instanceName == "" || m.sessionsDir == "" {
+		return
+	}
+	if anyTmuxSurvives {
+		_ = session.WriteInstance(m.sessionsDir, m.instanceRow())
+	} else {
 		_ = session.RemoveInstance(m.sessionsDir, m.instanceName)
 	}
 }

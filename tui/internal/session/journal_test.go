@@ -18,7 +18,7 @@ type genEvent struct{ ev Event }
 func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 	events := []string{
 		EventRequested, EventClaimed, EventSpawned, EventNeedsInput, EventQuiescent,
-		EventResumed, EventClosed, EventStepCompleted, EventHarnessTurnEnded,
+		EventResumed, EventRecovered, EventClosed, EventStepCompleted, EventHarnessTurnEnded,
 		EventSpawnFailed, EventReclaimed, EventAbandoned, EventCancelled,
 		EventSendRequested, EventSent, EventSendRefused,
 		EventReviewFlagged, EventReviewHeld, EventReviewNotified, EventReviewReleased,
@@ -147,6 +147,7 @@ func TestScriptReviewVocabulary(t *testing.T) {
 		{"review_released with slug accepted", Event{Event: EventReviewReleased, Slug: "demo-slug"}, false},
 		{"close_requested with request_id accepted", Event{Event: "close_requested", RequestID: "20260705T000000Z-abcd1234"}, false},
 		{"requested still accepted", Event{Event: EventRequested, RequestID: "20260705T000000Z-abcd1234"}, false},
+		{"recovered accepted without request_id", Event{Event: EventRecovered, Slug: "demo-slug", Reason: "adopted from amber-otter"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

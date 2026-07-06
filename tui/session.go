@@ -182,23 +182,43 @@ func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (m
 	delete(m.pendingSpawns, slug)
 	// Stamp the spawn-time spend binding onto the live session so teardown can
 	// probe this session's transcript (empty session id → duration-only close).
+	// tmuxName marks a tmux-hosted session for the registry manifest and the
+	// quit-detach branch; it is echoed back on the started message (empty for
+	// direct-PTY).
 	meta.sessionID = msg.SessionID
 	meta.harness = msg.Harness
+	meta.tmuxName = msg.Tmux
 	if m.localSessions == nil {
 		m.localSessions = make(map[string]liveSession)
 	}
 	m.localSessions[slug] = meta
 
-	cmds := []tea.Cmd{cmd, m.writeInstanceCmd()}
-	if meta.requestID != "" {
-		cmds = append(cmds, emitSpawnedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, session.Event{
-			Event:         session.EventSpawned,
+	cmds := []tea.Cmd{cmd}
+	switch {
+	case meta.adopted:
+		// Recovery: journal `recovered`, not `spawned` — this session already had a
+		// `spawned` row under the dead instance. emitRecoveredCmd writes the durable
+		// registry row (now listing the adopted session) before the journal row.
+		cmds = append(cmds, emitRecoveredCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, m.instanceRow(), session.Event{
+			Event:         session.EventRecovered,
 			ActorInstance: session.StrPtr(m.instanceName),
 			Slug:          slug,
 			SessionType:   meta.typ,
 			Initiator:     meta.initiator,
-			RequestID:     meta.requestID,
+			Reason:        "adopted from " + meta.adoptedFrom,
 		}))
+	default:
+		cmds = append(cmds, m.writeInstanceCmd())
+		if meta.requestID != "" {
+			cmds = append(cmds, emitSpawnedCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, session.Event{
+				Event:         session.EventSpawned,
+				ActorInstance: session.StrPtr(m.instanceName),
+				Slug:          slug,
+				SessionType:   meta.typ,
+				Initiator:     meta.initiator,
+				RequestID:     meta.requestID,
+			}))
+		}
 	}
 
 	// Agent-initiated spawns never steal focus — the request row is the recorded
