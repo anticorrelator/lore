@@ -27,6 +27,20 @@
 #                      commit-ish resolved to its committer-date here at enqueue time.
 #                      Filtered read-side like --target; an instance of unknown
 #                      vintage is never rejected (additive degradation).
+#   --track <t>        Spec depth selector: short | full. Valid ONLY with --type
+#                      spec (rejected otherwise). `short` maps to the session's
+#                      short-track (/spec short); `full` is the default and stores
+#                      nothing (omit-when-empty).
+#   --model <id>       Lead-model override for the session (the top-level agent is
+#                      the session lead). Composed into the spawn as the harness's
+#                      --model flag. The id is opaque — validated only for
+#                      non-emptiness here, never against a model list (the candidate
+#                      set is coordinator policy, not schema).
+#   --yes              Run autonomously: skip the session's confirmation gates
+#                      (alias --no-confirm). This is the default for queue-spawned
+#                      sessions, so omitting all three leaves it on.
+#   --confirm          Run gated: keep every confirmation gate (each becomes a
+#                      coordinator send window). Sets skip_confirm=false.
 #   --kdir <path>      Knowledge-store override (test isolation).
 #   --json             Emit a JSON result object instead of a human line.
 #
@@ -55,6 +69,10 @@ KDIR_OVERRIDE=""
 JSON_MODE=0
 ROUTE_SPECS=()
 MIN_VINTAGE=""
+TRACK=""
+MODEL=""
+MODEL_PROVIDED=0
+SKIP_CONFIRM=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -67,12 +85,16 @@ while [[ $# -gt 0 ]]; do
     --context) CONTEXT="$2"; shift 2 ;;
     --route) ROUTE_SPECS+=("$2"); shift 2 ;;
     --min-vintage) MIN_VINTAGE="$2"; shift 2 ;;
+    --track) TRACK="$2"; shift 2 ;;
+    --model) MODEL="$2"; MODEL_PROVIDED=1; shift 2 ;;
+    --yes|--no-confirm) SKIP_CONFIRM="true"; shift ;;
+    --confirm) SKIP_CONFIRM="false"; shift ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,41p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -108,6 +130,35 @@ case "$AUTO_CLOSE" in
   true|false) AUTO_CLOSE_JSON="$AUTO_CLOSE" ;;
   *) fail "invalid --auto-close: '$AUTO_CLOSE' (must be true or false)" ;;
 esac
+
+# track selects spec depth and maps to the session's ShortMode, which only
+# affects the /spec prompt — so --track is refused on a non-spec request at write
+# time (a reader never re-checks). `short` is stored; `full` is the default and
+# stays absent (omit-when-empty, so the stored field is present only when it
+# changes behavior). Any other value is refused naming the field.
+TRACK_JSON=""
+case "$TRACK" in
+  "") ;;
+  short|full)
+    [[ "$TYPE" == "spec" ]] || fail "--track is valid only for --type spec (got --type '$TYPE')"
+    [[ "$TRACK" == "short" ]] && TRACK_JSON="$(jq -n --arg t "$TRACK" '$t')"
+    ;;
+  *) fail "invalid --track: '$TRACK' (must be short or full)" ;;
+esac
+
+# model is an opaque lead-model id: the only write-time check is non-emptiness
+# when the flag is given (an explicit --model with no value is a mistake). The id
+# is NOT validated against any list — the candidate set is coordinator policy, not
+# schema. Absent stays absent (omit-when-empty).
+if [[ $MODEL_PROVIDED -eq 1 && -z "$MODEL" ]]; then
+  fail "empty --model (a lead-model id is required when --model is given)"
+fi
+
+# skip_confirm is a nullable bool: absent (omit-when-empty) defers to the
+# queue-spawn default (autonomous — the historical always-skip behavior); true
+# (--yes/--no-confirm) forces autonomous, false (--confirm) forces gated. Emitted
+# with --argjson so the Go decoder reads a real JSON boolean.
+SKIP_CONFIRM_JSON="$SKIP_CONFIRM"
 
 # routing_overrides is a role→model object built from repeatable --route flags.
 # Each role MUST be in the adapters/roles.json closed set — the same rejection
@@ -220,6 +271,27 @@ fi
 # so an absent requirement stays absent (the Go decoder reads a nil *string).
 if [[ -n "$MIN_VINTAGE_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson mv "$MIN_VINTAGE_JSON" '. + {min_vintage: $mv}')"
+fi
+
+# track follows omit-when-empty: added only for the non-default `short` value, so
+# a full-track (or absent) request stays absent (the Go decoder reads a nil
+# *string → ShortMode false).
+if [[ -n "$TRACK_JSON" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --argjson tr "$TRACK_JSON" '. + {track: $tr}')"
+fi
+
+# model follows omit-when-empty: added only when --model carried a value, so an
+# absent override stays absent (the Go decoder reads a nil *string).
+if [[ -n "$MODEL" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --arg md "$MODEL" '. + {model: $md}')"
+fi
+
+# skip_confirm follows omit-when-empty: added only when --yes/--no-confirm or
+# --confirm forced a value, so an absent request stays absent (the Go decoder
+# reads a nil *bool → the queue-spawn autonomy default). Emitted with --argjson so
+# it lands as a real JSON boolean.
+if [[ -n "$SKIP_CONFIRM_JSON" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --argjson sc "$SKIP_CONFIRM_JSON" '. + {skip_confirm: $sc}')"
 fi
 
 # Enqueue = tmp-write + atomic rename-in. The tmp name is hidden and lacks the

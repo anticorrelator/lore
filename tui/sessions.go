@@ -400,7 +400,22 @@ func (m model) handleQueueTickResult(msg queueTickResultMsg) (model, tea.Cmd) {
 // spawnFromRequest maps a claimed request onto a session descriptor and drives
 // the shared spawn path. Agent-initiated, so it never steals focus.
 func (m model) spawnFromRequest(req session.Request) (model, tea.Cmd) {
-	d := work.SessionDescriptor{
+	return m.spawnSession(descriptorFromRequest(req), req.RequestID)
+}
+
+// descriptorFromRequest maps a claimed queue request onto the session descriptor
+// the shared spawn path consumes. It is the sole place the additive request
+// fields (track, model, skip_confirm) become descriptor state, so the mapping —
+// including the skip_confirm absent-default — is unit-testable without a spawn.
+func descriptorFromRequest(req session.Request) work.SessionDescriptor {
+	// skip_confirm defaults to true when absent — the historical queue-spawn
+	// autonomy (a claimed request runs without confirmation gates). A set field
+	// forces the outcome, letting a coordinator request a gated run (false).
+	skipConfirm := true
+	if req.SkipConfirm != nil {
+		skipConfirm = *req.SkipConfirm
+	}
+	return work.SessionDescriptor{
 		Type:             req.Type,
 		Slug:             req.SlugValue(),
 		Title:            req.SlugValue(),
@@ -408,10 +423,11 @@ func (m model) spawnFromRequest(req session.Request) (model, tea.Cmd) {
 		Initiator:        req.Initiator,
 		AutoClose:        req.AutoClose,
 		RoutingOverrides: req.RoutingOverrides,
-		SkipConfirm:      true,
+		Model:            req.ModelValue(),
+		ShortMode:        req.TrackValue() == work.SpecTrackShort,
+		SkipConfirm:      skipConfirm,
 		FindingIndex:     -1,
 	}
-	return m.spawnSession(d, req.RequestID)
 }
 
 // spawnSession is the single spawn path for both the human confirm modal and the

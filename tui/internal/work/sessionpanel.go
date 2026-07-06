@@ -1021,6 +1021,17 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 			fmt.Fprintf(os.Stderr, "[lore] degraded: inline_settings_override skipped (capability=none on framework=%s); session-scoped settings overrides unavailable\n", activeFramework)
 		}
 
+		// Lead-model override: the descriptor's Model rides the harness's universal
+		// `--model` flag — the same flag model_routing.tiers aliases feed, so a
+		// coordinator's per-dispatch lead selection lands on every framework without
+		// a per-harness spelling. The value is opaque here (validated for non-
+		// emptiness at enqueue, never against a model list): a bad id surfaces as an
+		// honest harness launch error, not a silent drop. Empty injects nothing,
+		// leaving the lead on the harness/settings default.
+		if d.Model != "" {
+			args = append(args, "--model", d.Model)
+		}
+
 		// Deterministic transcript binding: when the active harness joins its
 		// session artifact by a spawn-provided id (spend_telemetry binding
 		// `session-id-flag`, claude-code in v1), generate a UUID and pass it as
@@ -1041,24 +1052,43 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 		// panel's subprocess is a `tmux attach` client relaying it — so the harness
 		// outlives this TUI process. The PTY master stays the single read/write
 		// interface (the emulator, gate, peek, send, quiescence paths are untouched;
-		// nothing downstream learns tmux exists). tmux hosting needs an instance
-		// name to build the session name and record it for recovery; without one it
-		// degrades to direct-PTY. A tmux creation error also degrades explicitly
-		// rather than failing the spawn — the session still starts, just without
-		// crash recovery.
+		// nothing downstream learns tmux exists). ALL TUI-spawned sessions host
+		// under tmux, slugged and slugless alike: a slugless session gets a
+		// generated `chat-<short-id>` name (TmuxSessionNameSlugless) in place of the
+		// slug, carried onto the registry row so adoption re-attaches by that name.
+		// No session class silently loses crash recovery while hosting is active —
+		// the two degradations below (no instance name, or a tmux creation error)
+		// each announce the direct-PTY fallback rather than falling through quietly.
 		var cmd *exec.Cmd
 		var tmuxName string
 		var panePID int
-		if tmux && sessionEnv.Instance != "" && slug != "" {
-			name := TmuxSessionName(sessionEnv.Instance, slug)
-			extras := append([]string{"LORE_FRAMEWORK=" + activeFramework}, sessionEnv.vars()...)
-			pid, terr := createTmuxSession(name, width, height, extras, harnessBinary, args)
-			if terr != nil {
-				fmt.Fprintf(os.Stderr, "[lore] degraded: tmux hosting failed for %s (%v); spawning direct-PTY (session will not survive crash/restart)\n", slug, terr)
+		if tmux {
+			label := slug
+			if slug == "" {
+				label = "slugless session"
+			}
+			if sessionEnv.Instance != "" {
+				var name string
+				if slug != "" {
+					name = TmuxSessionName(sessionEnv.Instance, slug)
+				} else {
+					name = TmuxSessionNameSlugless(sessionEnv.Instance)
+					label = "slugless session (" + name + ")"
+				}
+				extras := append([]string{"LORE_FRAMEWORK=" + activeFramework}, sessionEnv.vars()...)
+				pid, terr := createTmuxSession(name, width, height, extras, harnessBinary, args)
+				if terr != nil {
+					fmt.Fprintf(os.Stderr, "[lore] degraded: tmux hosting failed for %s (%v); spawning direct-PTY (session will not survive crash/restart)\n", label, terr)
+				} else {
+					tmuxName, panePID = name, pid
+					cmd = tmuxAttachCommand(name)
+					cmd.Dir = projectDir
+				}
 			} else {
-				tmuxName, panePID = name, pid
-				cmd = tmuxAttachCommand(name)
-				cmd.Dir = projectDir
+				// tmux is active but this process advertises no instance name to build
+				// the session name from — host capability present, identity absent.
+				// Announce the fallback so the recovery loss is visible, never silent.
+				fmt.Fprintf(os.Stderr, "[lore] degraded: tmux hosting unavailable for %s (no instance name); spawning direct-PTY (session will not survive crash/restart)\n", label)
 			}
 		}
 		if cmd == nil {

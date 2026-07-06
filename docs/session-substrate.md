@@ -93,7 +93,12 @@ second TTL mechanism.
 
 **Crash/restart recovery (tmux adoption).** When tmux hosting is active, a
 TUI-spawned harness runs inside a tmux session (`lore-<instance>-<slug>`) on a
-dedicated server, so the harness outlives the TUI process. A dead instance's
+dedicated server, so the harness outlives the TUI process. A **slugless** session
+(a chat/work session carrying no work-item slug) hosts the same way under a
+generated `lore-<instance>-chat-<short-id>` name recorded on its registry row —
+no session class silently loses crash recovery while hosting is active; the two
+fallbacks (no instance name, or a tmux creation failure) each announce the
+direct-PTY spawn on stderr rather than degrading quietly. A dead instance's
 registry row is not deleted (mtime-TTL hides it from live snapshots but nothing
 unlinks it), which makes that row its own recovery manifest. At startup a
 replacement TUI scans `instances/*.json` **including TTL-stale files**, and a row
@@ -134,6 +139,9 @@ and, once an instance claims it, moves to `requests/claimed/<request_id>.json`.
 | `auto_close` | boolean \| absent | Override for the TUI exit-ladder auto-close gate (see [Close-request queue](#close-request-queue)). Omit-when-empty: absent defers to `initiator` (agent auto-closes, human holds open), `true` forces auto-close, `false` holds open. Carried onto the live session so the ladder can consult it at teardown. |
 | `routing_overrides` | object \| absent | Per-dispatch `{<role>: <model>}` map. Omit-when-empty. The claiming instance exports each entry as `LORE_MODEL_<ROLE>` (role uppercased, `-`→`_`) into the spawned session's PTY, riding the resolver's top-of-precedence env layer — so a coordinator's per-dispatch routing wins over settings policy with no resolver change. Roles are validated against `adapters/roles.json` at enqueue time; settings.json stays untouched durable policy (user directive > coordinator override > settings). |
 | `min_vintage` | string \| absent | Minimum build vintage (ISO 8601 UTC) the claiming instance's `build_time` must meet — the request never targets an instance built earlier. Omit-when-empty. Filtered read-side, mirroring `target_instance` (the only difference is a temporal `>=` vs a string `==`). The `session request --min-vintage` verb accepts a timestamp or a git commit-ish (resolved to its committer-date at enqueue) and stores the timestamp, so the read side never shells out to git. **Additive**: an instance of unknown vintage, or any unparseable timestamp, passes — a claim is refused only on positive evidence the instance is older. |
+| `track` | string \| absent | Spec depth selector (`short`) carried to the session's short-track (`/spec short`). Omit-when-empty: only the non-default `short` is stored (`full` is the default and stays absent), so the field is present only when it changes behavior. Set at enqueue by `session request --track short`, which **refuses the flag on a non-spec request** (`ShortMode` has no effect on implement/chat prompts). Maps to `SessionDescriptor.ShortMode` at spawn. |
+| `model` | string \| absent | Per-dispatch lead-model override — the session lead is the top-level agent, so a model chosen here is lead selection. Omit-when-empty. Composed into the spawn as the harness's universal `--model` flag (the same flag `model_routing.tiers` aliases feed). **Opaque**: validated only for non-emptiness at enqueue, never against a model list — the candidate set is coordinator policy, not schema, so a bad id surfaces as an honest harness launch error. Distinct from `routing_overrides`, which routes *sub-agent* roles via `LORE_MODEL_<ROLE>` env. |
+| `skip_confirm` | boolean \| absent | Session autonomy override. Omit-when-empty: absent defers to the queue-spawn default (**autonomous** — a claimed request historically runs without confirmation gates), `true` (`--yes`/`--no-confirm`) forces autonomous, `false` (`--confirm`) forces **gated** so every confirmation gate becomes a coordinator send window. Maps to `SessionDescriptor.SkipConfirm` at spawn. |
 
 A **claimed** file additionally carries:
 

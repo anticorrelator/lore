@@ -413,6 +413,59 @@ func TestStartTerminalCmd_NoSessionIDWithoutBinding(t *testing.T) {
 	}
 }
 
+// TestStartTerminalCmd_ComposesModelFlag asserts the lead-model override rides
+// the harness's universal `--model` flag: a descriptor carrying Model spawns with
+// `--model <id>` before the positional prompt, and an empty Model injects nothing.
+func TestStartTerminalCmd_ComposesModelFlag(t *testing.T) {
+	stageFakeBinaries(t)
+	dir := stageFakeLoreData(t, "claude-code", nil)
+
+	withModel := SessionDescriptor{Type: SessionSpec, Slug: "smoke-slug", Title: "smoke", Model: "opus", SkipConfirm: true, FindingIndex: -1}
+	cmd := StartTerminalCmd(withModel, dir, 80, 24, dir, SessionEnv{}, false)
+	msg := cmd()
+	started, ok := msg.(SessionProcessStartedMsg)
+	if !ok {
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
+	}
+	if started.Ptmx != nil {
+		_ = started.Ptmx.Close()
+	}
+	if !argsContainPair(started.Cmd.Args, "--model", "opus") {
+		t.Errorf("Cmd.Args missing `--model opus`: %v", started.Cmd.Args)
+	}
+
+	// Empty Model injects no flag.
+	msg2 := runStartTerminal(t, "smoke-slug", dir, false)
+	started2 := msg2.(SessionProcessStartedMsg)
+	if argsContains(started2.Cmd.Args, "--model") {
+		t.Errorf("Cmd.Args should not contain --model when Model is empty: %v", started2.Cmd.Args)
+	}
+}
+
+// TestTmuxSessionNameSlugless asserts the generated slugless host name mirrors the
+// `lore-<instance>-<slug>` scheme with a `chat-<short-id>` suffix, stays within
+// tmux's safe [a-z0-9-] name charset, and is unique across calls so two concurrent
+// slugless sessions never collide on their tmux host name.
+func TestTmuxSessionNameSlugless(t *testing.T) {
+	const instance = "amber-otter"
+	a := TmuxSessionNameSlugless(instance)
+	b := TmuxSessionNameSlugless(instance)
+	prefix := "lore-" + instance + "-chat-"
+	if !strings.HasPrefix(a, prefix) {
+		t.Errorf("name %q missing prefix %q", a, prefix)
+	}
+	if a == b {
+		t.Errorf("two slugless names collided: %q", a)
+	}
+	for _, name := range []string{a, b} {
+		for _, r := range name {
+			if !(r == '-' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+				t.Errorf("name %q contains tmux-unsafe rune %q", name, r)
+			}
+		}
+	}
+}
+
 func TestStartTerminalCmd_UnknownFrameworkReturnsStreamError(t *testing.T) {
 	stageFakeBinaries(t)
 	t.Setenv("LORE_DATA_DIR", stageFakeLoreDataWithLaunchFramework(t, "definitely-not-a-real-harness"))

@@ -344,6 +344,57 @@ func TestRoutingOverridesRoundTrips(t *testing.T) {
 	}
 }
 
+// TestDispatchFieldsRoundTrip guards the request-row amendment for the three
+// dispatch-expressiveness fields: track, model, and skip_confirm each decode into
+// their accessor/pointer, and an absent field stays absent on marshal
+// (omit-when-empty), so a bare row never emits any of the three keys.
+func TestDispatchFieldsRoundTrip(t *testing.T) {
+	var req Request
+	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"spec","track":"short","model":"opus","skip_confirm":false}`), &req); err != nil {
+		t.Fatalf("decode dispatch fields: %v", err)
+	}
+	if got := req.TrackValue(); got != "short" {
+		t.Errorf("TrackValue = %q, want short", got)
+	}
+	if got := req.ModelValue(); got != "opus" {
+		t.Errorf("ModelValue = %q, want opus", got)
+	}
+	if req.SkipConfirm == nil || *req.SkipConfirm != false {
+		t.Errorf("SkipConfirm = %v, want a set false", req.SkipConfirm)
+	}
+
+	data, err := json.Marshal(Request{RequestID: "x", Type: "spec"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{"track", "model", "skip_confirm"} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("absent %s should be omitted, got %s", key, data)
+		}
+	}
+}
+
+// TestSkipConfirmDistinguishesAbsentFromFalse guards the pointer semantics the
+// queue-spawn default relies on: an absent skip_confirm decodes to nil (defers to
+// the autonomous default), while an explicit false decodes to a set false (forces
+// gated). Collapsing the two would silently flip a gated request to autonomous.
+func TestSkipConfirmDistinguishesAbsentFromFalse(t *testing.T) {
+	var absent Request
+	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"spec"}`), &absent); err != nil {
+		t.Fatalf("decode absent: %v", err)
+	}
+	if absent.SkipConfirm != nil {
+		t.Errorf("absent skip_confirm should decode to nil, got %v", *absent.SkipConfirm)
+	}
+	var explicit Request
+	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"spec","skip_confirm":false}`), &explicit); err != nil {
+		t.Fatalf("decode explicit false: %v", err)
+	}
+	if explicit.SkipConfirm == nil {
+		t.Fatal("explicit skip_confirm:false should decode to a set pointer, got nil")
+	}
+}
+
 func noPlan(string) bool { return false }
 
 // ClaimRequestFixture plants a pending row and renames it into claimed/ without

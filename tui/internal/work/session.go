@@ -17,6 +17,12 @@ const (
 	SessionChat      = "chat"
 )
 
+// SpecTrackShort is the request `track` value that selects a short-track spec
+// (buildInitialPrompt composes "/spec short"). It is the only track value with a
+// descriptor effect — an absent or "full" track leaves ShortMode false. Named
+// here so the request→descriptor mapping keys off one source, not a literal.
+const SpecTrackShort = "short"
+
 // SessionDescriptor is the shape the session-spawn Cmd (StartTerminalCmd)
 // consumes: the session Type plus the target item and its launch context. The
 // human confirm modal and the agent request queue both build one and hand it to
@@ -42,6 +48,14 @@ type SessionDescriptor struct {
 	// request row to the spawn, where it becomes LORE_MODEL_<ROLE> env on the
 	// session's PTY (see SessionEnv). Empty for human-modal spawns.
 	RoutingOverrides map[string]string
+
+	// Model is the per-dispatch lead-model override: the top-level agent of a
+	// spec/implement session is the session lead, so a model chosen at spawn is
+	// lead selection. Composed into the launch command as the harness's universal
+	// `--model` flag at StartTerminalCmd (the same flag model_routing.tiers aliases
+	// feed). Distinct from RoutingOverrides, which routes *sub-agent* roles via env.
+	// Empty injects no flag, leaving the lead on the harness/settings default.
+	Model string
 
 	ShortMode    bool
 	SkipConfirm  bool

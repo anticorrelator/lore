@@ -66,6 +66,26 @@ type Request struct {
 	// absent stays distinct from an explicit value.
 	MinVintage *string `json:"min_vintage,omitempty"`
 
+	// Track is the spec depth selector carried to the descriptor's ShortMode
+	// ("short" → short-track /spec). Valid only on a spec request (enforced at
+	// enqueue). Absent (omit-when-empty) leaves the full track. Pointer so absent
+	// stays distinct from an explicit value.
+	Track *string `json:"track,omitempty"`
+
+	// Model is the per-dispatch lead-model override composed into the spawn as the
+	// harness's `--model` flag (the session lead is the top-level agent). Opaque
+	// here — the value is validated only for non-emptiness at enqueue, never
+	// against a model list (the candidate set is coordinator policy, not schema).
+	// Absent (omit-when-empty) leaves the lead on the harness/settings default.
+	Model *string `json:"model,omitempty"`
+
+	// SkipConfirm overrides the queue-spawn autonomy default: nil defers to that
+	// default (skip confirmation gates — autonomous), a set value forces the
+	// outcome (true autonomous, false gated so every confirmation gate becomes a
+	// coordinator send window). Pointer so absent stays distinct from explicit
+	// false, preserving the historical always-true queue-spawn behavior.
+	SkipConfirm *bool `json:"skip_confirm,omitempty"`
+
 	// Present only on a claimed row; a claim is not active until both are set.
 	ClaimedBy *string `json:"claimed_by,omitempty"`
 	ClaimedAt *string `json:"claimed_at,omitempty"`
@@ -93,6 +113,22 @@ func (r Request) MinVintageValue() string {
 		return ""
 	}
 	return *r.MinVintage
+}
+
+// TrackValue returns the spec track selector or "" when absent.
+func (r Request) TrackValue() string {
+	if r.Track == nil {
+		return ""
+	}
+	return *r.Track
+}
+
+// ModelValue returns the lead-model override or "" when absent.
+func (r Request) ModelValue() string {
+	if r.Model == nil {
+		return ""
+	}
+	return *r.Model
 }
 
 // ExtraContextText extracts a free-text launch context from the request's

@@ -1,6 +1,8 @@
 package work
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -50,6 +52,24 @@ func TmuxAvailable() (bool, string) {
 // registry row at spawn and treated as opaque after adoption.
 func TmuxSessionName(instance, slug string) string {
 	return "lore-" + instance + "-" + slug
+}
+
+// TmuxSessionNameSlugless is the tmux session name for a slugless session (a
+// chat/work session carrying no work-item slug): it mirrors the
+// `lore-<instance>-<slug>` scheme with a generated `chat-<short-id>` suffix in
+// the slug position, so slugless sessions host under tmux and adopt back exactly
+// like slugged ones. The suffix is [a-z0-9-] (hex), keeping the tmux name free of
+// tmux's `:`/`.` restrictions. The name is minted once here and carried onto the
+// registry row (SessionProcessStartedMsg.Tmux); adoption re-attaches by that
+// recorded name, never by the empty slug. A CSPRNG failure degrades to a
+// timestamp-free fixed suffix, still unique enough within one instance's live set
+// because concurrent slugless sessions already share the empty-slug map key.
+func TmuxSessionNameSlugless(instance string) string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "lore-" + instance + "-chat-00000000"
+	}
+	return "lore-" + instance + "-chat-" + hex.EncodeToString(b)
 }
 
 // tmuxOptionPins is the D2 pinned-option sequence applied at session creation, as
