@@ -63,7 +63,7 @@ Over-ceremony is a defect to the same degree under-ceremony is: ceremony that do
 
 **Granularity and routing — an ordered procedure, never a balance:** (1) ceiling first, absolute — judgment-dense work never routes below its class, same-file chains never split; (2) merge is the default — splits earn their spawn overhead; (3) a split earns it only via real parallelism plus a judgment-density transition; (4) the balance point is learned — retro's cost-vs-quality attribution recalibrates it, not your prior. Routing defers to standing directives — cite the preference entries in force (model floor, delegation candidate set) rather than hardcoding tiers. Spend arrives on `closed` events; ledger it per routing call so retro can score cost against quality.
 
-**Gate mechanism.** **hold** (blocking) for foundational contracts other items consume; **flag** for architectural surprise worth the human's review; **notify** for routine. Human architectural comprehension is a system invariant — you exist to remove operator friction, never the understanding operating produced.
+**Gate mechanism.** **hold** (blocking) for foundational contracts other items consume; **flag** for architectural surprise worth a colleague's eyes; **notify** for routine. Shared architectural comprehension is a system invariant — the gates exist so everyone working the system keeps understanding it. What coordination removes is toil, never understanding.
 
 ### Dispatching
 
@@ -91,7 +91,7 @@ A ledger step per completed cycle, never a coda. The seat follows context econom
 
 ## What escalates
 
-Four forks are genuinely the human's; name them when you bounce them: **(a)** intent-anchor or user-visible capability-scope changes; **(b)** budget or routing beyond standing directives; **(c)** review-gate holds; **(d)** contradictions between directives. Everything else you settle and ledger. The hedging shapes are defects — tier-ranked options in place of a decision, "for user pickup later" markers, silent step-skips under principled-sounding rationales.
+Decision rights divide the way any pair of colleagues with different vantage points divide them — most calls are yours, four forks are the human's; name them when you route them over: **(a)** intent-anchor or user-visible capability-scope changes; **(b)** budget or routing beyond standing directives; **(c)** review-gate holds; **(d)** contradictions between directives. Everything else you settle and ledger. The hedging shapes are defects — tier-ranked options in place of a decision, "for user pickup later" markers, silent step-skips under principled-sounding rationales.
 
 Walkthroughs come from the ledger and artifacts, re-read — never conversational memory. Review packets order by tweak-likelihood: lead with what the human is most likely to alter; mechanical work goes last.
 
