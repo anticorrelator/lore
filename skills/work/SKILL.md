@@ -62,6 +62,16 @@ lore work show "<slug>"
 
 ---
 
+### `path <name>`
+```bash
+lore work path "<ref>"
+```
+Prints the work item's **absolute directory** on stdout — a cwd-independent `Write`/`cp` target. `<ref>` resolves the same way as `lore work resolve` (exact slug, fuzzy prefix, title, tag), archived items included; on a miss it exits non-zero with the resolver's error (or candidate list) on stderr.
+
+Reach for this whenever you're about to add a file to a work item — a work item is a **bag of files**. `Write` a `design.md`, `evidence.md`, or any artifact straight into the printed directory and `lore work show` auto-delivers it in full, no registration step (`notes.md` stays reserved for the session log). `path` is how you name that directory safely: don't hand-assemble `$(lore resolve)/_work/<slug>/`, which keys off cwd and silently resolves the wrong store after a stray `cd`.
+
+---
+
 ### `update`
 Capture session progress — this requires judgment (session summarization).
 
@@ -217,4 +227,4 @@ fi
 
 `lore work resolve` exits 0 on a unique match (stdout: `<slug>\n<archived>\n`), 1 on no match, or 2 on ambiguity (candidates on stderr). For read-only loads, an `ARCHIVED=true` result can be surfaced silently with an `[archived]` tag in output; mutating subcommands (`archive`, `set`, `tasks`, `regen-tasks`) should treat archived items per their existing per-subcommand confirmation policy.
 
-Scripts beyond `resolve` accept exact slugs only — always pass `$SLUG` after resolution.
+`resolve` and `path` accept fuzzy references (both wrap the same resolver); every other script accepts exact slugs only — always pass `$SLUG` after resolution.

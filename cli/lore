@@ -142,6 +142,7 @@ Subcommands:
   list      List active work items
   show      Show a work item's full context
   resolve   Resolve a fuzzy work-item reference to (slug, archived)
+  path      Print a work item's absolute directory (a cwd-independent Write/cp target)
   set       Set metadata fields (issue, pr, scope, project, intent anchor) on a work item
   archive   Archive a completed work item
   delete    Permanently delete a work item
@@ -1552,6 +1553,28 @@ cmd_work() {
       ;;
     resolve)
       "$SCRIPTS_DIR/resolve-work-ref.sh" "$@"
+      ;;
+    path)
+      # Print a work item's absolute directory — a cwd-independent Write/cp target.
+      # Reuse the single fuzzy resolver (resolve-work-ref.sh): <ref> → slug (+archived),
+      # then the shared dir helper (resolve_work_item_dir): slug → absolute dir (active→archive).
+      if [[ $# -eq 0 || "$1" == --help || "$1" == -h ]]; then
+        echo "Usage: lore work path <ref>" >&2
+        echo "Print a work item's absolute directory (a cwd-independent Write/cp target)." >&2
+        echo "Accepts the same references as 'lore work resolve' (exact slug, fuzzy prefix, title, tag); resolves archived items too." >&2
+        [[ $# -eq 0 ]] && return 1 || return 0
+      fi
+      local resolved slug kdir item_dir
+      # resolve-work-ref.sh prints its own stderr (no-match / ambiguous candidates);
+      # propagate its exit code (1 no-match, 2 ambiguous) so `path` inherits the contract.
+      resolved=$("$SCRIPTS_DIR/resolve-work-ref.sh" "$@") || return $?
+      slug=$(printf '%s\n' "$resolved" | sed -n '1p')
+      kdir=$(resolve_kdir)
+      item_dir=$(resolve_work_item_dir "$kdir" "$slug") || {
+        echo "[work path] Error: Work item directory not found for slug: $slug" >&2
+        return 1
+      }
+      echo "$item_dir"
       ;;
     set)
       "$SCRIPTS_DIR/set-work-meta.sh" "$@"
