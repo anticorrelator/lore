@@ -618,6 +618,26 @@ func (m ListModel) CurrentSlug() string {
 	return m.list.CurrentID()
 }
 
+// CurrentRowID returns the raw ID of the row under the cursor, including header
+// rows — whose IDs CurrentSlug() suppresses. The host diffs cursor identity on
+// this so a rest on a project header still drives the detail pane.
+func (m ListModel) CurrentRowID() string {
+	if r, ok := m.list.CurrentRow(); ok {
+		return r.ID
+	}
+	return ""
+}
+
+// ProjectRowID reports whether a list row ID names a project header row and, if
+// so, returns the project slug it carries. The ungrouped bucket's header yields
+// ("", true) — a project row with no home, distinct from a non-header ID.
+func ProjectRowID(id string) (slug string, ok bool) {
+	if strings.HasPrefix(id, headerIDPrefix) {
+		return strings.TrimPrefix(id, headerIDPrefix), true
+	}
+	return "", false
+}
+
 // SetCursorBySlug moves the cursor to the item with the given slug.
 // Returns true if found, false if not (cursor resets to the first item row).
 func (m *ListModel) SetCursorBySlug(slug string) bool {

@@ -638,6 +638,9 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case detailMtimeCheckedMsg:
 		return m.handleDetailMtimeChecked(msg)
 
+	case projectDetailMtimeCheckedMsg:
+		return m.handleProjectDetailMtimeChecked(msg)
+
 	case followupDetailMtimeCheckedMsg:
 		return m.handleFollowupDetailMtimeChecked(msg)
 
@@ -1328,6 +1331,11 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		m.detail = dm
 		return m, cmd
 
+	case work.ProjectDetailLoadedMsg:
+		dm, cmd := m.detail.Update(msg)
+		m.detail = dm
+		return m, cmd
+
 	case work.BackToListMsg:
 		// In split-pane, just shift focus back to left
 		m.focusedPanel = panelLeft
@@ -1779,9 +1787,14 @@ func (m *model) loadFollowupDetail(id string) tea.Cmd {
 // seeds it from the detail cache when available, and revalidates from disk in
 // the background so newly created items can't get stuck on a stale cache entry.
 // renderMarkdown is synchronous and fast (<1ms), so cached content is instant.
-func (m model) loadDetail(slug string) (model, tea.Cmd) {
+func (m model) loadDetail(id string) (model, tea.Cmd) {
 	m.lastPlanMtime = time.Time{}   // reset so new item's plan.md gets a fresh baseline
 	m.lastDetailMtime = time.Time{} // reset so new item's detail files get a fresh baseline
+	// A project header row drives the project home into the same detail pane.
+	if projectSlug, ok := work.ProjectRowID(id); ok {
+		return m.loadProjectDetail(projectSlug)
+	}
+	slug := id
 	m.detail = work.NewDetailModel(m.config.WorkDir, slug)
 	m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
 	m.terminalMode = m.hasSessionPanel(slug) && !m.preferDetailView[slug]
@@ -1803,4 +1816,17 @@ func (m model) loadDetail(slug string) (model, tea.Cmd) {
 	}
 
 	return m, initCmd
+}
+
+// loadProjectDetail points the detail pane at a project home. It mirrors
+// loadDetail's sequence (fresh model, sized, load in a Cmd) but for the project
+// substrate: no session panel is possible for a header row, so terminalMode is
+// forced off, and the mtime baseline resets so the home's first stat is a clean
+// baseline. The empty slug (ungrouped bucket) loads to a no-home empty state.
+func (m model) loadProjectDetail(projectSlug string) (model, tea.Cmd) {
+	m.lastProjectDetailMtime = time.Time{}
+	m.terminalMode = false
+	m.detail = work.NewProjectDetailModel(m.config.WorkDir, projectSlug)
+	m.detail, _ = m.detail.Update(tea.WindowSizeMsg{Width: m.rightPanelWidth(), Height: m.detailPanelHeight()})
+	return m, m.detail.Init()
 }

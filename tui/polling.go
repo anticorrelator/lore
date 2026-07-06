@@ -91,6 +91,40 @@ func checkDetailMtime(workDir, slug string) tea.Cmd {
 	}
 }
 
+// projectDetailMtimeCheckedMsg carries the result of stat-ing a project home's files.
+type projectDetailMtimeCheckedMsg struct {
+	slug  string
+	mtime time.Time
+	err   error
+}
+
+// checkProjectDetailMtime stats the files under _projects/<slug>/ and sends
+// projectDetailMtimeCheckedMsg with the most recent mtime, so an external edit
+// (or a doc added/removed) to the home refreshes the open detail within a tick.
+func checkProjectDetailMtime(workDir, slug string) tea.Cmd {
+	return func() tea.Msg {
+		dir := filepath.Join(workDir, "_projects", slug)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return projectDetailMtimeCheckedMsg{slug: slug, err: err}
+		}
+		var maxMtime time.Time
+		for _, entry := range entries {
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if mt := info.ModTime(); mt.After(maxMtime) {
+				maxMtime = mt
+			}
+		}
+		if maxMtime.IsZero() {
+			return projectDetailMtimeCheckedMsg{slug: slug, err: errors.New("no project home files found")}
+		}
+		return projectDetailMtimeCheckedMsg{slug: slug, mtime: maxMtime}
+	}
+}
+
 // followupDetailMtimeCheckedMsg carries the result of stat-ing a follow-up item's detail file.
 type followupDetailMtimeCheckedMsg struct {
 	id    string
@@ -165,6 +199,14 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 	if slug := m.list.CurrentSlug(); slug != "" {
 		cmds = append(cmds, checkPlanMtime(m.config.WorkDir, slug))
 		cmds = append(cmds, checkDetailMtime(m.config.WorkDir, slug))
+	}
+	// When a project header drives the detail pane, ride the same heartbeat to
+	// stat its home so overview.md edits refresh live. No home to stat for the
+	// ungrouped bucket (empty slug), so it is skipped.
+	if m.detail.IsProject() {
+		if ps := m.detail.ProjectSlug(); ps != "" {
+			cmds = append(cmds, checkProjectDetailMtime(m.config.WorkDir, ps))
+		}
 	}
 	// Always poll the follow-up index so the tab indicator reflects external
 	// mutations even while the user is on the work tab.
@@ -297,6 +339,26 @@ func (m model) handleDetailMtimeChecked(msg detailMtimeCheckedMsg) (model, tea.C
 			delete(m.detailCache, msg.slug)
 		}
 		return m, work.LoadDetail(m.config.WorkDir, msg.slug)
+	}
+	return m, nil
+}
+
+// handleProjectDetailMtimeChecked compares the project home's mtime against the
+// baseline and reloads the project detail (preserving the active tab) when it
+// changed. Guarded on the current selection still being that project so a stale
+// stat from a prior selection is ignored.
+func (m model) handleProjectDetailMtimeChecked(msg projectDetailMtimeCheckedMsg) (model, tea.Cmd) {
+	if msg.err != nil || !m.detail.IsProject() || msg.slug != m.detail.ProjectSlug() {
+		return m, nil
+	}
+	if m.lastProjectDetailMtime.IsZero() {
+		m.lastProjectDetailMtime = msg.mtime // baseline initialization
+		return m, nil
+	}
+	if !msg.mtime.Equal(m.lastProjectDetailMtime) {
+		m.lastProjectDetailMtime = msg.mtime
+		m.detail.PreserveTab()
+		return m, work.LoadProjectDetailCmd(m.config.WorkDir, msg.slug)
 	}
 	return m, nil
 }

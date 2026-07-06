@@ -236,3 +236,95 @@ func loadWorkItemDetailDirect(workDir, slug string) (*WorkItemDetail, error) {
 func LoadWorkItemDetail(workDir, slug string) (*WorkItemDetail, error) {
 	return loadWorkItemDetailDirect(workDir, slug)
 }
+
+// projectMeta mirrors the _projects/<slug>/_meta.json schema, which differs
+// from a work item's: identity plus a free-text anchor, no branches/tags/PR.
+type projectMeta struct {
+	Slug    string `json:"slug"`
+	Title   string `json:"title"`
+	Status  string `json:"status"`
+	Anchor  string `json:"anchor"`
+	Created string `json:"created"`
+	Updated string `json:"updated"`
+}
+
+// ProjectDetail holds a project home's rendered content: identity and anchor
+// from _meta.json, the overview.md body, and any freeform project documents.
+// It is the project-mode analogue of WorkItemDetail — a distinct shape because
+// the home _meta.json schema and tab set differ from a work item's.
+type ProjectDetail struct {
+	Slug    string
+	Title   string
+	Status  string
+	Anchor  string
+	Created string
+	Updated string
+	// HomeExists is true when _projects/<slug>/_meta.json was found. A labeled
+	// project with no home dir (HomeExists false) renders the describe hint.
+	HomeExists bool
+	// Overview is overview.md's content, nil when absent. describe-project.sh
+	// deletes overview.md when its body empties, so absence is a contract; the
+	// overview tab then shows the describe hint rather than a blank pane.
+	Overview *string
+	// Docs are the home's freeform .md documents (every .md except overview.md),
+	// each rendered as its own tab through the shared markdown pipeline.
+	Docs []ExtraFile
+}
+
+// LoadProjectDetail reads a project home at _projects/<slug>/ into a
+// ProjectDetail. A missing home dir (labeled project with no record) or an
+// empty slug (the ungrouped bucket) is not an error — both return a detail with
+// HomeExists false so the caller renders an honest empty state. All disk reads
+// live here so callers invoke it inside a tea.Cmd and the DetailModel stays
+// headless-testable.
+func LoadProjectDetail(workDir, slug string) (*ProjectDetail, error) {
+	pd := &ProjectDetail{Slug: slug}
+	if slug == "" {
+		return pd, nil // ungrouped bucket: no project, no home to read
+	}
+
+	homeDir := filepath.Join(workDir, "_projects", slug)
+	metaBytes, err := os.ReadFile(filepath.Join(homeDir, "_meta.json"))
+	if err != nil {
+		return pd, nil // labeled project with no home dir yet
+	}
+
+	var meta projectMeta
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return nil, fmt.Errorf("reading _meta.json for project %s: %w", slug, err)
+	}
+	pd.HomeExists = true
+	pd.Title = meta.Title
+	pd.Status = meta.Status
+	pd.Anchor = meta.Anchor
+	pd.Created = meta.Created
+	pd.Updated = meta.Updated
+
+	if data, err := os.ReadFile(filepath.Join(homeDir, "overview.md")); err == nil {
+		s := string(data)
+		pd.Overview = &s
+	}
+
+	// Every other .md file is a project document, one tab each. Skip overview.md
+	// (the primary tab) and _-prefixed files (_meta.json and any internal marker).
+	// os.ReadDir returns lexicographic order, so tab order is stable.
+	if entries, err := os.ReadDir(homeDir); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".md") || strings.HasPrefix(name, "_") {
+				continue
+			}
+			if name == "overview.md" {
+				continue
+			}
+			if data, err := os.ReadFile(filepath.Join(homeDir, name)); err == nil {
+				pd.Docs = append(pd.Docs, ExtraFile{
+					Name:    strings.TrimSuffix(name, ".md"),
+					Content: string(data),
+				})
+			}
+		}
+	}
+
+	return pd, nil
+}

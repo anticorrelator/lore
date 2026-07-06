@@ -319,6 +319,9 @@ type model struct {
 	lastIndexMtime  time.Time
 	lastPlanMtime   time.Time
 	lastDetailMtime time.Time
+	// lastProjectDetailMtime baselines the project-home freshness poll, reset on
+	// each project-header selection so a home's first stat is a clean baseline.
+	lastProjectDetailMtime time.Time
 
 	// lastFollowupIndexMtime is the mtime of _followup_index.json from the last poll.
 	lastFollowupIndexMtime time.Time
@@ -373,10 +376,12 @@ func (m *model) workPanelCallbacks() panelCallbacks {
 		},
 		sessionPanelFn: func() (work.SessionPanelModel, bool) { return m.currentSessionPanel() },
 		listUpdate: func(lmsg tea.Msg) (tea.Cmd, string, string) {
-			prevSlug := m.list.CurrentSlug()
+			// Diff on the raw row ID (headers included) so a cursor rest on a
+			// project header drives loadDetail; CurrentSlug() blanks headers.
+			prevID := m.list.CurrentRowID()
 			lm, cmd := m.list.Update(lmsg)
 			m.list = lm
-			return cmd, prevSlug, m.list.CurrentSlug()
+			return cmd, prevID, m.list.CurrentRowID()
 		},
 		detailUpdate: func(dmsg tea.Msg) tea.Cmd {
 			var cmd tea.Cmd
@@ -767,7 +772,11 @@ func (m model) buildPaneConfig() paneConfig {
 		filterAnnot, filterAnnotW := annotWorkFilter.render(filterSel)
 
 		detailTitle := "Detail"
-		if d := m.detail.Detail(); d != nil {
+		if m.detail.IsProject() {
+			if t := m.detail.HeaderTitle(); t != "" {
+				detailTitle = t
+			}
+		} else if d := m.detail.Detail(); d != nil {
 			detailTitle = d.Title
 		} else if slug := m.list.CurrentSlug(); slug != "" {
 			detailTitle = slug

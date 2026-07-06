@@ -22,7 +22,8 @@ const (
 	TabNotes
 	TabTasks
 	TabExecLog
-	TabFile // extra document tabs; identified by a "file:<name>" host ID
+	TabFile     // extra document tabs; identified by a "file:<name>" host ID
+	TabOverview // project home's overview.md tab (project mode only)
 )
 
 // extraFileIDPrefix namespaces extra-file tab IDs in the collection.TabHost;
@@ -45,6 +46,8 @@ func (t Tab) hostID() string {
 		return "tasks"
 	case TabExecLog:
 		return "execlog"
+	case TabOverview:
+		return "overview"
 	}
 	return ""
 }
@@ -66,6 +69,8 @@ func tabFromHostID(id string) Tab {
 		return TabTasks
 	case "execlog":
 		return TabExecLog
+	case "overview":
+		return TabOverview
 	}
 	return TabMeta
 }
@@ -74,6 +79,13 @@ func tabFromHostID(id string) Tab {
 type DetailLoadedMsg struct {
 	Slug   string
 	Detail *WorkItemDetail
+	Err    error
+}
+
+// ProjectDetailLoadedMsg is sent when a project home finishes loading.
+type ProjectDetailLoadedMsg struct {
+	Slug   string
+	Detail *ProjectDetail
 	Err    error
 }
 
@@ -131,6 +143,14 @@ type DetailModel struct {
 	tasksModel     TasksModel
 	execLogModel   ExecLogModel
 	extraViewports []viewport.Model
+
+	// isProject flips the model into project-home mode: it renders project
+	// (not work-item) content — an overview tab, doc tabs, and a project-shaped
+	// meta tab — through the same TabHost + markdown pipeline. project holds the
+	// loaded home; overviewViewport renders overview.md (or the describe hint).
+	isProject        bool
+	project          *ProjectDetail
+	overviewViewport viewport.Model
 }
 
 // NewDetailModel creates a detail model for the given slug and starts loading.
@@ -143,6 +163,19 @@ func NewDetailModel(workDir, slug string) DetailModel {
 	}
 }
 
+// NewProjectDetailModel creates a detail model in project-home mode for the
+// given project slug and starts loading its home. An empty slug (the ungrouped
+// bucket) loads to an honest no-home empty state rather than a work item.
+func NewProjectDetailModel(workDir, projectSlug string) DetailModel {
+	return DetailModel{
+		slug:      projectSlug,
+		workDir:   workDir,
+		loading:   true,
+		isProject: true,
+		tabHost:   collection.NewTabHost(),
+	}
+}
+
 // LoadDetail returns a command that fetches work item detail directly from disk.
 func LoadDetail(workDir, slug string) tea.Cmd {
 	return func() tea.Msg {
@@ -151,7 +184,19 @@ func LoadDetail(workDir, slug string) tea.Cmd {
 	}
 }
 
+// LoadProjectDetailCmd fetches a project home from disk off the event loop so
+// project-home I/O never happens inside Update or View.
+func LoadProjectDetailCmd(workDir, slug string) tea.Cmd {
+	return func() tea.Msg {
+		detail, err := LoadProjectDetail(workDir, slug)
+		return ProjectDetailLoadedMsg{Slug: slug, Detail: detail, Err: err}
+	}
+}
+
 func (m DetailModel) Init() tea.Cmd {
+	if m.isProject {
+		return LoadProjectDetailCmd(m.workDir, m.slug)
+	}
 	return LoadDetail(m.workDir, m.slug)
 }
 
@@ -172,6 +217,8 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 			m.extraViewports[i].SetWidth(m.contentWidth())
 			m.extraViewports[i].SetHeight(m.contentHeight())
 		}
+		m.overviewViewport.SetWidth(m.contentWidth())
+		m.overviewViewport.SetHeight(m.contentHeight())
 		return m, nil
 
 	case DetailExternalSessionMsg:
@@ -189,6 +236,9 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 		return m, nil
 
 	case DetailLoadedMsg:
+		if m.isProject {
+			return m, nil // work-item load is not this model's mode
+		}
 		if msg.Slug != m.slug {
 			return m, nil // stale response from a previous item
 		}
@@ -234,6 +284,31 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 			vp := viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
 			vp.SetContent(rendered)
 			m.extraViewports = append(m.extraViewports, vp)
+		}
+		return m, nil
+
+	case ProjectDetailLoadedMsg:
+		if !m.isProject || msg.Slug != m.slug {
+			return m, nil // wrong mode or stale response
+		}
+		m.loading = false
+		if msg.Err != nil {
+			m.err = msg.Err
+			return m, nil
+		}
+		m.project = msg.Detail
+		m.tabHost.SetTabs(m.buildProjectTabs())
+		overview := viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
+		overview.SetContent(m.projectOverviewContent())
+		m.overviewViewport = overview
+		m.extraViewports = nil
+		if m.project != nil {
+			for _, ef := range m.project.Docs {
+				rendered := renderMarkdown(ef.Content, m.contentWidth())
+				vp := viewport.New(viewport.WithWidth(m.contentWidth()), viewport.WithHeight(m.contentHeight()))
+				vp.SetContent(rendered)
+				m.extraViewports = append(m.extraViewports, vp)
+			}
 		}
 		return m, nil
 
@@ -288,6 +363,8 @@ func (m DetailModel) Update(msg tea.Msg) (DetailModel, tea.Cmd) {
 	// Forward to active tab
 	var cmd tea.Cmd
 	switch m.ActiveTab() {
+	case TabOverview:
+		m.overviewViewport, cmd = m.overviewViewport.Update(msg)
 	case TabDigest:
 		m.digestTab, cmd = m.digestTab.Update(msg)
 	case TabPlan:
@@ -340,16 +417,32 @@ func (m DetailModel) externalBanner() string {
 // an extra-file tab.
 func (m DetailModel) activeExtraIndex() int {
 	id := m.tabHost.ActiveID()
-	if m.detail == nil || !strings.HasPrefix(id, extraFileIDPrefix) {
+	if !strings.HasPrefix(id, extraFileIDPrefix) {
 		return -1
 	}
 	name := strings.TrimPrefix(id, extraFileIDPrefix)
-	for i, ef := range m.detail.ExtraFiles {
+	files := m.extraFiles()
+	for i, ef := range files {
 		if ef.Name == name {
 			return i
 		}
 	}
 	return -1
+}
+
+// extraFiles returns the doc set backing the "file:" tabs: project docs in
+// project mode, work-item extra files otherwise.
+func (m DetailModel) extraFiles() []ExtraFile {
+	if m.isProject {
+		if m.project == nil {
+			return nil
+		}
+		return m.project.Docs
+	}
+	if m.detail == nil {
+		return nil
+	}
+	return m.detail.ExtraFiles
 }
 
 // buildTabs creates the visible tab list based on what content is available.
@@ -382,6 +475,51 @@ func (m DetailModel) buildTabs() []collection.Tab {
 	tabs = append(tabs, collection.Tab{ID: TabMeta.hostID(), Label: "Meta"})
 
 	return tabs
+}
+
+// buildProjectTabs creates the project-mode tab list: an always-present Overview
+// tab, one tab per home document, and a project-shaped Meta tab only when a home
+// record exists. A labeled project with no home (or the ungrouped bucket) shows
+// just Overview, carrying the describe hint.
+func (m DetailModel) buildProjectTabs() []collection.Tab {
+	tabs := []collection.Tab{
+		{ID: TabOverview.hostID(), Label: "Overview"},
+	}
+	if m.project == nil {
+		return tabs
+	}
+	for _, ef := range m.project.Docs {
+		tabs = append(tabs, collection.Tab{ID: extraFileIDPrefix + ef.Name, Label: extraFileLabel(ef.Name)})
+	}
+	if m.project.HomeExists {
+		tabs = append(tabs, collection.Tab{ID: TabMeta.hostID(), Label: "Meta"})
+	}
+	return tabs
+}
+
+// projectOverviewContent renders the Overview tab body: overview.md through the
+// markdown pipeline when present, or the describe hint when absent — never blank.
+func (m DetailModel) projectOverviewContent() string {
+	if m.project != nil && m.project.Overview != nil && strings.TrimSpace(*m.project.Overview) != "" {
+		return renderMarkdown(*m.project.Overview, m.contentWidth())
+	}
+	return m.projectHint()
+}
+
+// projectHint is the empty-state text shown when a project has no overview: it
+// names `lore work project describe` for a real project, and states plainly that
+// the ungrouped bucket has no home.
+func (m DetailModel) projectHint() string {
+	dim := style.Dim
+	if m.slug == "" {
+		return "  " + dim.Render("Ungrouped items have no project home.")
+	}
+	head := "No project home yet."
+	if m.project != nil && m.project.HomeExists {
+		head = "No overview yet."
+	}
+	return "  " + dim.Render(head) + "\n\n" +
+		"  " + dim.Render(fmt.Sprintf("Run `lore work project describe %s` to add one.", m.slug))
 }
 
 // extraFileLabel converts a filename stem (without .md) into a display label
@@ -469,12 +607,16 @@ func (m DetailModel) contentHeight() int {
 }
 
 func (m DetailModel) View() string {
-	if m.slug == "" {
+	if !m.isProject && m.slug == "" {
 		return "\n  Select a work item to view details.\n"
 	}
 
 	if m.loading {
-		return fmt.Sprintf("\n  Loading %s...\n", m.slug)
+		label := m.slug
+		if m.isProject && label == "" {
+			label = "project"
+		}
+		return fmt.Sprintf("\n  Loading %s...\n", label)
 	}
 
 	if m.err != nil {
@@ -505,6 +647,9 @@ func (m DetailModel) renderTabBar() string {
 }
 
 func (m DetailModel) renderTabContent(width, height int) string {
+	if m.isProject {
+		return m.renderProjectTabContent(width)
+	}
 	if m.detail == nil {
 		return ""
 	}
@@ -637,6 +782,130 @@ func (m DetailModel) renderMetaTab(width int) string {
 	}
 
 	return b.String()
+}
+
+// renderProjectTabContent dispatches the active project-mode tab to its
+// renderer: the overview viewport, a doc viewport, or the project meta tab.
+func (m DetailModel) renderProjectTabContent(width int) string {
+	switch m.ActiveTab() {
+	case TabMeta:
+		return m.renderProjectMetaTab(width)
+	case TabFile:
+		if idx := m.activeExtraIndex(); idx >= 0 && idx < len(m.extraViewports) {
+			return m.extraViewports[idx].View()
+		}
+	default: // TabOverview (and any unresolved id) shows the overview/hint body
+		return m.overviewViewport.View()
+	}
+	return ""
+}
+
+// renderProjectMetaTab shows the project home's identity fields. Anchor can be a
+// full sentence, so it wraps under its label rather than overflowing the pane.
+func (m DetailModel) renderProjectMetaTab(width int) string {
+	p := m.project
+	if p == nil {
+		return ""
+	}
+	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(style.ColorMetaKey)
+	dimStyle := style.Dim
+	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(style.ColorSuccess)
+
+	var b strings.Builder
+	field := func(label, value string) {
+		b.WriteString("  ")
+		b.WriteString(labelStyle.Render(label + ":"))
+		b.WriteString(" ")
+		if value == "" {
+			b.WriteString(dimStyle.Render("--"))
+		} else {
+			b.WriteString(value)
+		}
+		b.WriteString("\n")
+	}
+
+	field("Slug", p.Slug)
+
+	title := p.Title
+	if title == "" {
+		title = p.Slug
+	}
+	field("Title", title)
+
+	b.WriteString("  ")
+	b.WriteString(labelStyle.Render("Status:"))
+	b.WriteString(" ")
+	switch {
+	case p.Status == "":
+		b.WriteString(dimStyle.Render("--"))
+	case p.Status == "active":
+		b.WriteString(activeStyle.Render(p.Status))
+	default:
+		b.WriteString(p.Status)
+	}
+	b.WriteString("\n")
+
+	if p.Anchor != "" {
+		b.WriteString("  ")
+		b.WriteString(labelStyle.Render("Anchor:"))
+		b.WriteString("\n")
+		for _, line := range wordWrapRaw(p.Anchor, max(0, width-4)) {
+			b.WriteString("    ")
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+	} else {
+		field("Anchor", "")
+	}
+
+	field("Created", p.Created)
+
+	updatedDisplay := ""
+	if p.Updated != "" {
+		updatedDisplay = p.Updated + " " + dimStyle.Render("("+FormatRelativeTime(p.Updated)+")")
+	}
+	b.WriteString("  ")
+	b.WriteString(labelStyle.Render("Updated:"))
+	b.WriteString(" ")
+	if updatedDisplay == "" {
+		b.WriteString(dimStyle.Render("--"))
+	} else {
+		b.WriteString(updatedDisplay)
+	}
+	b.WriteString("\n")
+
+	return b.String()
+}
+
+// IsProject reports whether this model is rendering a project home.
+func (m DetailModel) IsProject() bool { return m.isProject }
+
+// ProjectSlug returns the project slug in project mode, or "" otherwise (the
+// ungrouped bucket is project mode with an empty slug).
+func (m DetailModel) ProjectSlug() string {
+	if m.isProject {
+		return m.slug
+	}
+	return ""
+}
+
+// HeaderTitle returns the title for the detail pane border: the project title in
+// project mode, the work item title otherwise, or "" when nothing is loaded.
+func (m DetailModel) HeaderTitle() string {
+	if m.isProject {
+		switch {
+		case m.project != nil && m.project.Title != "":
+			return m.project.Title
+		case m.slug != "":
+			return m.slug
+		default:
+			return "Project"
+		}
+	}
+	if m.detail != nil {
+		return m.detail.Title
+	}
+	return ""
 }
 
 // reviewDwellLine renders the review-gate summary for the meta tab:
