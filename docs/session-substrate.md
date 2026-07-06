@@ -75,7 +75,7 @@ rejected** by `min_vintage` filtering (see [Request queue](#request-queue)).
 `build_time`, else `unknown`).
 
 Per nested session object: `slug` (string), `type` (string enum
-`spec|implement|chat`), `initiator` (string enum `agent|human`), `started`
+`spec|implement|chat|worker`), `initiator` (string enum `agent|human`), `started`
 (string, ISO 8601 UTC), plus the omit-when-empty recovery-manifest fields `tmux`,
 `session_id`, `harness`, `auto_close` (above).
 
@@ -126,8 +126,8 @@ and, once an instance claims it, moves to `requests/claimed/<request_id>.json`.
 | Field | Type | Notes |
 |-------|------|-------|
 | `request_id` | string | Unique id; also the filename stem. |
-| `type` | string | Enum `spec\|implement\|chat`. |
-| `slug` | string \| null | Work-item slug the request targets, or null (e.g. a chat with no work item). |
+| `type` | string | Enum `spec\|implement\|chat\|worker`. |
+| `slug` | string \| null | Work-item slug the request targets, or null (e.g. a chat with no work item). **Required for `worker`**: a worker's slug is the derived `<work-item-slug>--w<n>` that is its session identity (see [Worker sessions](#worker-sessions)). |
 | `target_instance` | string \| null | Instance name the request is addressed to, or null for "any instance". |
 | `initiator` | string | Enum `agent\|human`. |
 | `requested_by` | string | Who enqueued it (instance name, agent id, or human). |
@@ -190,6 +190,55 @@ written leaves an incomplete claimed row handled by the recovery rule below.
 succeeds. `last_error` takes the values `"incomplete_claim"` and
 `"stale_instance"` for the two reclaim paths; spawn failures set it to the
 spawn-failure reason.
+
+## Worker sessions
+
+A **worker** session is an agent-dispatched implementation session: one is
+enqueued per dispatched task by an `/implement` lead (through a session-worker
+chaperone), runs a lead-composed brief to protocol terminus, and auto-closes.
+This half documents the substrate contract for the type; the dispatch protocol
+itself (chaperone, brief composition, per-task spend attribution) lives with
+`/implement` and is out of scope here.
+
+**Identity — a derived slug.** A worker's `slug` is a derived identifier
+`<work-item-slug>--w<n>` (`n` = per-dispatch ordinal), carried in the request's
+existing `slug` field and required at enqueue. It is deliberately *distinct* from
+the work-item slug: TUI session state (panels, tmux names, the live-session set)
+is keyed by bare slug, so a worker sharing the work-item slug would collide with
+the lead's own implement session on the same instance. `slugify` collapses any
+`--` run, so a real work-item slug can never contain `--` — the double-hyphen
+`--w<n>` suffix is therefore an unambiguous worker marker. The work-item
+association travels in every worker journal row's `links.work_item` (the sole
+writer derives it from the derived slug) and in the brief.
+
+**Spawn and prompt.** A worker request flows through the same claim → spawn path
+as every other type (no new booleans). Its brief is composed lead-side and passed
+as `--context`; the TUI's worker prompt branch emits that brief *verbatim* as the
+initial prompt — no skill invocation. An empty brief yields an empty prompt (the
+session idles), never a fall-through to `/spec`.
+
+**Queue gates.** A worker request passes the `implement`→plan-doc gate freely (it
+is not an `implement` request; the base work item's plan is guaranteed by the
+dispatcher). The per-slug eviction guard keys on the *derived* slug, so a live
+base work-item session never blocks its workers and two workers never collide.
+
+**Lifecycle and spend.** Agent-initiated, so it auto-closes at protocol terminus
+(the initiator gate) unless a request overrides `auto_close`. Its `closed` event
+carries `spend` through the *same* type-agnostic teardown enrichment as any
+session — token fields with a `basis` when a transcript binding exists, else
+duration-only. Per-task spend attribution rides the execution-log `Spend: task=`
+seam (a lead concern), **not** retro's session-spend line: retro sums `closed`
+rows by exact work-item slug, and a worker's derived slug does not match that
+join, so worker cost is not double-counted as the orchestration's own cost. This
+exclusion is intentional — session-spend measures the orchestration's cost, worker
+cost is per-task attribution.
+
+**Report landing.** A worker session writes its completion report to
+`_work/<work-item-slug>/worker-reports/<derived-slug>.md` as its final step before
+terminus (the journal has no report-bearing event, and a report must be durable
+*before* `closed` so the chaperone can read it after terminus). Being a full
+harness session with knowledge-store access, it appends its own Tier-2 rows via
+`evidence-append.sh` — no relay block.
 
 ## Close-request queue
 
@@ -352,12 +401,12 @@ protocol terminal verbs, stop hooks) appends through the one sanctioned writer,
 | `actor_instance` | string \| null | Instance that performed the transition; null when no instance did (e.g. an enqueue not created by a TUI). |
 | `target_instance` | string \| null | Instance the underlying request is addressed to; null for "any". |
 | `slug` | string | Work-item slug, when the event has one. |
-| `session_type` | string | `spec\|implement\|chat` — the session's type (the request's `type` maps to this). |
+| `session_type` | string | `spec\|implement\|chat\|worker` — the session's type (the request's `type` maps to this). |
 | `initiator` | string | `agent\|human`. |
 | `request_id` | string | The request this event concerns; required for queue-lifecycle events. |
 | `reason` | string | Failure/reclaim reason; also the review-gate rationale carried by `review_flagged`/`review_held`/`review_released`. Also carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`. |
 | `gate_id` | string | Review-gate audit join key. Omit-when-empty. A gate-open verb (`review_flagged`/`review_held`) sets it as the row's `event_id`; the `review_released` row echoes it here so a reader pairs release→open without replaying state. See [docs/review-gates.md](review-gates.md). |
-| `links` | object | `{work_item?, artifact?}` — pointers to work-item artifacts rather than duplicated progress. Review events point `artifact` at the review packet. Writer defaults to `{}`. |
+| `links` | object | `{work_item?, artifact?}` — pointers to work-item artifacts rather than duplicated progress. Review events point `artifact` at the review packet. Writer defaults to `{}`. For a worker session (derived slug `<work-item-slug>--w<n>`) the writer derives `links.work_item` = the base work-item slug when the caller did not set it, so every worker lifecycle row points back at its work item (see [Worker sessions](#worker-sessions)). |
 | `spend` | object \| null | Session token spend, on `closed`. `duration_seconds` is always present; a `basis` enum (`transcript\|rollout\|store\|duration-only`) marks how the tokens were sourced. When the harness exposes a deterministic transcript binding (claude-code, via a spawn-time `--session-id`), the TUI merges the D1 token vocabulary — `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_output_tokens`, `total_tokens`, `cost_usd`, `model`, `harness` (fields the harness does not expose are omitted, never zero-filled). Every gap — codex/opencode-hosted sessions, an absent transcript, a probe timeout, an abrupt quit — degrades to `{duration_seconds, basis:"duration-only"}`. Extraction runs at teardown via `scripts/session-spend.sh`; the row still flows only through the sole writer. |
 
 Optional fields follow **omit-when-empty** discipline: an absent optional field is
@@ -555,6 +604,13 @@ rather than growing this contract.**
   is the coordinator role's protocol home: it consumes these surfaces read-only
   through the session verbs and adds no verbs, no event vocabulary, and no TUI
   surface of its own.
+- **Worker session type — landed (substrate half).** The `worker` type, its
+  derived-slug identity, `links.work_item` derivation, verbatim-brief prompt
+  branch, and queue-gate behavior are specified above (`## Worker sessions`) and
+  wired through the enqueue gate, the TUI, and the sole journal writer. The
+  *dispatch protocol* that drives it — the session-worker chaperone, lead-side
+  brief composition, and per-task spend attribution — is an `/implement` concern,
+  not a substrate surface. Route dispatch needs there, not into this substrate.
 - **Review mechanism — landed (separate contract).** The four `review_*` events
   are journal vocabulary here, but the gate mechanism they record (flag/hold/notify
   spectrum, the `_meta.json` review block, the flag/hold/release verbs, the review

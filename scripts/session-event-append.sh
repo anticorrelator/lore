@@ -25,6 +25,9 @@
 #             it (this writer NEVER dedupes — it appends every valid row).
 #   ts        stamped with timestamp_iso when the caller omits it.
 #   links     defaulted to {} so the Go reader always decodes a nested object.
+#             links.work_item is derived from a worker session's derived slug
+#             (`<work-item-slug>--w<n>`) when the caller did not set it, so every
+#             worker lifecycle row points back at its work item.
 #
 # Required fields:
 #   event        enum: requested | claimed | spawned | needs_input | quiescent |
@@ -182,6 +185,20 @@ if ! printf '%s' "$ROW" | jq -e '(.ts // "") != ""' >/dev/null 2>&1; then
 fi
 
 ROW=$(printf '%s' "$ROW" | jq -c 'if has("links") then . else . + {links: {}} end')
+
+# Worker sessions run under a derived slug `<work-item-slug>--w<n>` (the session's
+# identity); the work-item association travels in links.work_item. slugify collapses
+# any `--*` run to a single `-`, so a real work-item slug can never contain `--` —
+# the double-hyphen `--w<n>` suffix is therefore an unambiguous worker marker. Derive
+# the base work item from that shape and stamp it here (the sole writer) so every
+# lifecycle row of a worker session carries the link without each emitter repeating
+# the derivation. A caller-supplied links.work_item is preserved.
+SLUG_VAL=$(printf '%s' "$ROW" | jq -r '.slug // ""')
+if [[ "$SLUG_VAL" =~ ^(.+)--w[0-9]+$ ]]; then
+  WORK_ITEM="${BASH_REMATCH[1]}"
+  ROW=$(printf '%s' "$ROW" | jq -c --arg wi "$WORK_ITEM" \
+    'if (.links.work_item // "") == "" then .links.work_item = $wi else . end')
+fi
 
 # --- Compact to one line and append (bare >> / O_APPEND, no read-modify-write) ---
 COMPACT=$(printf '%s' "$ROW" | jq -c '.')

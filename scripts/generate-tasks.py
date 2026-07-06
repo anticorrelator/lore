@@ -322,6 +322,41 @@ def extract_judgment_class(item_text: str) -> "str | None":
     return match.group(1) if match else None
 
 
+# Closed route vocabulary. A spec author may append a trailing [route: session]
+# marker to a task line to request the task be dispatched as a PTY-hosted worker
+# session rather than an in-harness Task-tool worker. ``session`` is the only
+# recognized value; anything else is not a marker and yields no route. Unlike
+# [class: …], the route marker is a pure dispatch signal — it is stripped from
+# the rendered task description and its value travels only in the task's
+# ``route`` field.
+_ROUTE_RE = re.compile(r"\[route:\s*(session)\s*\]")
+# Same marker plus any leading whitespace, so stripping it from rendered text
+# leaves no orphaned space.
+_ROUTE_STRIP_RE = re.compile(r"\s*" + _ROUTE_RE.pattern)
+
+
+def extract_route(item_text: str) -> "str | None":
+    """Extract the trailing [route: <value>] marker from a task line.
+
+    Returns ``session``, or ``None`` when the line carries no marker. Mirrors
+    ``extract_judgment_class``'s trailing-marker pattern and placement. An
+    absent marker (``None``) leaves the task on the default in-harness route,
+    and the ``route`` field is omitted rather than emitted null.
+    """
+    match = _ROUTE_RE.search(item_text)
+    return match.group(1) if match else None
+
+
+def strip_route_marker(text: str) -> str:
+    """Remove the [route: session] marker (with any leading space) from text.
+
+    Applied when rendering a task's description so the dispatch marker does not
+    surface as task content; the parsed value lives in the task's ``route``
+    field instead.
+    """
+    return _ROUTE_STRIP_RE.sub("", text).strip()
+
+
 def _is_file_path(candidate: str) -> bool:
     """Return True if a backtick-quoted string looks like a real file path."""
     # Must contain '/' or '.' to look like a path
@@ -1361,6 +1396,7 @@ def generate_tasks_from_plan(
             file_targets = extract_file_targets(item_text, files)
             task_backlinks = extract_task_backlinks(item_text)
             judgment_class = extract_judgment_class(item_text)
+            route = extract_route(item_text)
             parsed_items.append({
                 "task_id": task_id,
                 "subject": subject,
@@ -1368,6 +1404,7 @@ def generate_tasks_from_plan(
                 "file_targets": file_targets,
                 "task_backlinks": task_backlinks,
                 "judgment_class": judgment_class,
+                "route": route,
             })
 
         # Filter design decisions relevant to this phase
@@ -1419,6 +1456,7 @@ def generate_tasks_from_plan(
             file_targets = item["file_targets"]
             task_backlinks = item["task_backlinks"]
             judgment_class = item["judgment_class"]
+            route = item["route"]
 
             # Build stripped description: Phase line (D6), objective hint, target files,
             # task line, task-specific Scope, task-specific backlinks (annotation-only), plan reference.
@@ -1437,7 +1475,7 @@ def generate_tasks_from_plan(
                 )
             elif files_raw:
                 desc_parts.append(f"**Files:** {files_raw}")
-            desc_parts.append(f"**Task:** {subject}")
+            desc_parts.append(f"**Task:** {strip_route_marker(subject)}")
             if scope_lines:
                 desc_parts.append("")
                 desc_parts.append("**Scope:**")
@@ -1464,7 +1502,7 @@ def generate_tasks_from_plan(
                 has_advisory=has_advisory,
             )
 
-            phase_tasks.append({
+            task_payload = {
                 "id": task_id,
                 "subject": subject,
                 "description": description,
@@ -1473,7 +1511,12 @@ def generate_tasks_from_plan(
                 "file_targets": file_targets,
                 "judgment_class": judgment_class,
                 "context_cost_estimate": context_cost_estimate,
-            })
+            }
+            # Omit-when-empty: the route field is present only when the task
+            # line carried a [route: …] marker — no default synthesis.
+            if route is not None:
+                task_payload["route"] = route
+            phase_tasks.append(task_payload)
 
         # Chain tasks that share a file target (within and across phases)
         for task in phase_tasks:

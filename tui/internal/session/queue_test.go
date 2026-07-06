@@ -196,6 +196,39 @@ func TestQueueTickEvictionGuard(t *testing.T) {
 	}
 }
 
+// TestQueueTickWorkerGates: a worker request carries the derived slug
+// <work-item>--w<n>, distinct from the base work-item slug. It must be claimable
+// while the base work item's own session is live (workers run concurrently with
+// the lead), and it must NOT be plan-doc-gated (only implement is). Both follow
+// from the derived slug being distinct — this pins that a base session going live
+// never blocks its workers.
+func TestQueueTickWorkerGates(t *testing.T) {
+	dir := t.TempDir()
+	plantPending(t, dir, Request{RequestID: "w1", Type: "worker", Slug: strp("impl-foo--w1"), Initiator: "agent"})
+
+	// Base work item impl-foo is live; noPlan denies every plan-doc query. The
+	// worker is still claimed: it is not implement (so not plan-gated) and its
+	// derived slug is distinct from the live base slug (so not eviction-guarded).
+	baseLive := func(slug string) bool { return slug == "impl-foo" }
+	res, err := QueueTick(dir, "me", "", nil, noPlan, baseLive, time.Now(), ReclaimAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Claimed == nil || res.Claimed.RequestID != "w1" {
+		t.Fatalf("worker not claimed while base slug live / no plan doc: %+v", res.Claimed)
+	}
+
+	// The eviction guard still applies to the worker's own derived slug: a second
+	// live session under that exact slug leaves an identical request pending.
+	dir2 := t.TempDir()
+	plantPending(t, dir2, Request{RequestID: "w1b", Type: "worker", Slug: strp("impl-foo--w1"), Initiator: "agent"})
+	workerLive := func(slug string) bool { return slug == "impl-foo--w1" }
+	res, _ = QueueTick(dir2, "me", "", nil, noPlan, workerLive, time.Now(), ReclaimAfter)
+	if res.Claimed != nil {
+		t.Fatalf("claimed a worker whose own derived slug is live — would evict it: %+v", res.Claimed)
+	}
+}
+
 func TestQueueTickAbandonsAtAttemptCeiling(t *testing.T) {
 	dir := t.TempDir()
 	plantPending(t, dir, Request{RequestID: "dead1", Type: "spec", Slug: strp("x"), Initiator: "agent", Attempts: MaxAttempts})
@@ -320,6 +353,37 @@ func TestNumericFieldRejectsQuotedString(t *testing.T) {
 	var req Request
 	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"spec","attempts":"0"}`), &req); err == nil {
 		t.Fatal("decoding attempts from a quoted string should fail")
+	}
+}
+
+// TestExtraContextTextKeys pins the three keys ExtraContextText surfaces —
+// "prompt" and "text" (explicit JSON callers) plus "dispatch_guidance", the key
+// session-request.sh wraps a plain-text/file --context in. The last is
+// load-bearing for worker sessions, whose whole brief arrives as a plain brief
+// file. prompt wins over the others; an object with none returns "".
+func TestExtraContextTextKeys(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"prompt", `{"prompt":"p"}`, "p"},
+		{"text", `{"text":"t"}`, "t"},
+		{"dispatch_guidance", `{"dispatch_guidance":"the worker brief"}`, "the worker brief"},
+		{"prompt wins over dispatch_guidance", `{"prompt":"p","dispatch_guidance":"g"}`, "p"},
+		{"no recognized key", `{"other":"x"}`, ""},
+		{"absent", ``, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Request{}
+			if tc.raw != "" {
+				r.ExtraContext = json.RawMessage(tc.raw)
+			}
+			if got := r.ExtraContextText(); got != tc.want {
+				t.Fatalf("ExtraContextText() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

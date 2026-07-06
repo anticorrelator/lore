@@ -15,6 +15,8 @@ _spec = importlib.util.spec_from_file_location("generate_tasks", _script_path)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 generate_tasks_from_plan = _mod.generate_tasks_from_plan
+extract_route = _mod.extract_route
+strip_route_marker = _mod.strip_route_marker
 extract_task_backlinks = _mod.extract_task_backlinks
 build_context_section = _mod.build_context_section
 extract_file_targets = _mod.extract_file_targets
@@ -2579,3 +2581,123 @@ class TestConsultationsRequiredDoesNotInflateCost:
         phase_context = result["phases"][0]["phase_context"]
         assert "**Consultations required:**" in phase_context
         assert "security-review" in phase_context
+
+
+ROUTE_MARKER_PLAN = """\
+# Feature R
+
+## Goal
+Exercise the [route: session] task-line marker.
+
+## Phases
+
+### Phase 1: Dispatch
+**Objective:** Route selected tasks to worker sessions
+
+- [ ] Wire up endpoints
+- [ ] Add validation logic [route: session]
+- [ ] Refactor core module [class: judgment-dense] [route: session]
+- [ ] Tidy things up [route: session] [class: standard]
+- [ ] Document the flow [class: standard]
+"""
+
+
+def _task_by_subject_prefix(result, prefix):
+    """Return the single task whose subject starts with prefix."""
+    return next(
+        t
+        for p in result["phases"]
+        for t in p["tasks"]
+        if t["subject"].startswith(prefix)
+    )
+
+
+class TestRouteMarkerExtraction:
+    """Unit coverage for extract_route / strip_route_marker — the closed
+    [route: session] vocabulary mirroring extract_judgment_class."""
+
+    def test_extract_session_route(self):
+        assert extract_route("Add validation logic [route: session]") == "session"
+
+    def test_extract_absent_marker_returns_none(self):
+        assert extract_route("Wire up endpoints") is None
+
+    def test_extract_unknown_value_is_not_a_marker(self):
+        # Closed set: only `session` is recognized; anything else yields None.
+        assert extract_route("Do thing [route: daemon]") is None
+
+    def test_extract_tolerates_internal_whitespace(self):
+        assert extract_route("Do thing [route:   session ]") == "session"
+
+    def test_strip_removes_marker_and_leading_space(self):
+        assert strip_route_marker("Add validation logic [route: session]") == (
+            "Add validation logic"
+        )
+
+    def test_strip_no_marker_is_identity(self):
+        assert strip_route_marker("Wire up endpoints") == "Wire up endpoints"
+
+    def test_strip_leaves_class_marker_intact_either_order(self):
+        assert strip_route_marker("Tidy [route: session] [class: standard]") == (
+            "Tidy [class: standard]"
+        )
+        assert strip_route_marker("Tidy [class: standard] [route: session]") == (
+            "Tidy [class: standard]"
+        )
+
+
+class TestRouteMarkerInTasks:
+    """C: [route: session] parses into a per-task route field (omit-when-empty)
+    and is stripped from the rendered task description; the [class: …] marker
+    on the same line is unaffected."""
+
+    def test_marked_task_emits_session_route(self, tmp_path):
+        result = generate_tasks_from_plan(ROUTE_MARKER_PLAN, str(tmp_path))
+        task = _task_by_subject_prefix(result, "Add validation logic")
+        assert task["route"] == "session"
+
+    def test_unmarked_task_omits_route_field(self, tmp_path):
+        # omit-when-empty: no route key at all, not route: None.
+        result = generate_tasks_from_plan(ROUTE_MARKER_PLAN, str(tmp_path))
+        task = _task_by_subject_prefix(result, "Wire up endpoints")
+        assert "route" not in task
+
+    def test_class_only_task_omits_route_field(self, tmp_path):
+        result = generate_tasks_from_plan(ROUTE_MARKER_PLAN, str(tmp_path))
+        task = _task_by_subject_prefix(result, "Document the flow")
+        assert "route" not in task
+        assert task["judgment_class"] == "standard"
+
+    def test_route_marker_stripped_from_description(self, tmp_path):
+        result = generate_tasks_from_plan(ROUTE_MARKER_PLAN, str(tmp_path))
+        task = _task_by_subject_prefix(result, "Add validation logic")
+        task_line = next(
+            line
+            for line in task["description"].splitlines()
+            if line.startswith("**Task:**")
+        )
+        assert "[route: session]" not in task_line
+        assert task_line == "**Task:** Add validation logic"
+
+    def test_both_markers_route_parsed_class_preserved_in_description(self, tmp_path):
+        # Both orderings appear in the plan; assert route parses out and the
+        # class marker survives in the rendered description line.
+        result = generate_tasks_from_plan(ROUTE_MARKER_PLAN, str(tmp_path))
+        for prefix in ("Refactor core module", "Tidy things up"):
+            task = _task_by_subject_prefix(result, prefix)
+            assert task["route"] == "session"
+            assert task["judgment_class"] in ("judgment-dense", "standard")
+            task_line = next(
+                line
+                for line in task["description"].splitlines()
+                if line.startswith("**Task:**")
+            )
+            assert "[route: session]" not in task_line
+            assert "[class:" in task_line
+
+    def test_route_absent_leaves_no_route_keys_anywhere(self, tmp_path):
+        # A plan with no route markers produces no route field on any task.
+        result = generate_tasks_from_plan(MINIMAL_PLAN, str(tmp_path))
+        for phase in result["phases"]:
+            for task in phase["tasks"]:
+                assert "route" not in task

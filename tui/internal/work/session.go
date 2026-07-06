@@ -15,6 +15,12 @@ const (
 	SessionSpec      = "spec"
 	SessionImplement = "implement"
 	SessionChat      = "chat"
+
+	// SessionWorker is an agent-dispatched implementation session: the top-level
+	// agent runs a lead-composed brief verbatim (buildInitialPrompt emits the
+	// ExtraContext, no skill invocation). It runs under a derived slug
+	// <work-item-slug>--w<n> distinct from the work item's own slug.
+	SessionWorker = "worker"
 )
 
 // SpecTrackShort is the request `track` value that selects a short-track spec

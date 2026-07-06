@@ -2,11 +2,13 @@
 # session-request.sh — Enqueue a session spawn request into _sessions/requests/pending/
 #
 # Usage:
-#   lore session request --type <spec|implement|chat> [options]
+#   lore session request --type <spec|implement|chat|worker> [options]
 #
 # Options:
-#   --type <t>         Required. Session type: spec | implement | chat.
-#   --slug <s>         Work-item slug the request targets (default: null / no work item).
+#   --type <t>         Required. Session type: spec | implement | chat | worker.
+#   --slug <s>         Work-item slug the request targets (default: null / no work
+#                      item). REQUIRED for --type worker: a worker's slug is the
+#                      derived <work-item-slug>--w<n> that is its session identity.
 #   --target <name>    Instance name to address the request to (default: null / any instance).
 #   --initiator <i>    Who initiated the request: agent | human (default: human).
 #   --auto-close <b>   Override the TUI exit-ladder auto-close gate: true | false.
@@ -91,10 +93,10 @@ while [[ $# -gt 0 ]]; do
     --confirm) SKIP_CONFIRM="false"; shift ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat|worker> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -112,10 +114,18 @@ command -v jq &>/dev/null || fail "jq is required but not found on PATH"
 
 # --- Validate required fields at write time (sole-writer discipline) ---
 case "$TYPE" in
-  spec|implement|chat) ;;
-  "") fail "missing required field: --type (one of spec, implement, chat)" ;;
-  *) fail "invalid --type: '$TYPE' (must be one of spec, implement, chat)" ;;
+  spec|implement|chat|worker) ;;
+  "") fail "missing required field: --type (one of spec, implement, chat, worker)" ;;
+  *) fail "invalid --type: '$TYPE' (must be one of spec, implement, chat, worker)" ;;
 esac
+
+# A worker session's slug is its identity — the derived <work-item-slug>--w<n>
+# the claiming TUI keys panels, tmux names, and journal rows on. Unlike spec/chat
+# (which may run with no work item and thus a null slug), a worker with no slug
+# has no session identity, so require one at enqueue.
+if [[ "$TYPE" == "worker" && -z "$SLUG" ]]; then
+  fail "--slug is required for --type worker (the derived slug is the session identity)"
+fi
 
 case "$INITIATOR" in
   agent|human) ;;

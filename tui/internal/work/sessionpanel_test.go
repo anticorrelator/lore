@@ -178,6 +178,16 @@ func TestBuildInitialPrompt(t *testing.T) {
 			desc: SessionDescriptor{Type: SessionSpec, Slug: "my-spec", ExtraContext: "some extra", FindingIndex: -1},
 			want: "/spec my-spec -- some extra",
 		},
+		{
+			name: "worker emits the brief verbatim, no skill invocation",
+			desc: SessionDescriptor{Type: SessionWorker, Slug: "impl-foo--w1", ExtraContext: "You are worker-1. Do the thing.", FindingIndex: -1},
+			want: "You are worker-1. Do the thing.",
+		},
+		{
+			name: "worker with empty brief returns empty, never falls to /spec",
+			desc: SessionDescriptor{Type: SessionWorker, Slug: "impl-foo--w1", FindingIndex: -1},
+			want: "",
+		},
 	}
 
 	for _, tc := range tests {

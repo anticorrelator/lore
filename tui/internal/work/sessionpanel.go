@@ -905,9 +905,9 @@ func appendFindingContext(base string, sidecarBytes []byte, findingIndex int) st
 
 // buildInitialPrompt constructs the prompt string passed to the harness at
 // startup, branching on the descriptor's session Type: chat routes to
-// /followup-discuss (followup mode) or /work, implement to /implement, and any
-// other Type to /spec. FindingIndex, when >= 0 in followup mode, inserts
-// "--finding <N>" after the followup ID.
+// /followup-discuss (followup mode) or /work, implement to /implement, worker
+// runs its brief verbatim, and any other Type to /spec. FindingIndex, when >= 0
+// in followup mode, inserts "--finding <N>" after the followup ID.
 //
 // Chat prompts always start with a slash command at position 0 so the Claude
 // Code harness auto-invokes the matching skill. The skill name declares the
@@ -916,6 +916,12 @@ func appendFindingContext(base string, sidecarBytes []byte, findingIndex int) st
 // than forcing it to infer identity from prose and fall back to file search.
 func buildInitialPrompt(d SessionDescriptor) string {
 	switch d.Type {
+	case SessionWorker:
+		// A worker runs its lead-composed brief verbatim as the initial prompt —
+		// no skill invocation (the brief carries its own protocol). An empty brief
+		// yields an empty prompt (the session idles at its composer) rather than
+		// falling through to the /spec default, which would run the wrong protocol.
+		return d.ExtraContext
 	case SessionChat:
 		var p string
 		if d.FollowupMode {

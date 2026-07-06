@@ -161,6 +161,32 @@ journal_boundaries() {
   [[ "$output" == *"invalid --initiator"* ]]
 }
 
+@test "request --type worker with a derived slug writes a pending row" {
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --context "brief body" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '.type=="worker" and .slug=="impl-foo--w1"' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request --type worker without --slug refuses" {
+  run bash "$REQUEST" --type worker --initiator agent --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--slug is required for --type worker"* ]]
+}
+
+@test "request --type worker with --track refuses (track is spec-only)" {
+  run bash "$REQUEST" --type worker --slug "impl-foo--w1" --track short --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--track is valid only for --type spec"* ]]
+}
+
+@test "requested event for a worker derives links.work_item from the derived slug" {
+  bash "$REQUEST" --type worker --slug "impl-foo--w1" --initiator agent --kdir "$TEST_KDIR"
+  run jq -e 'select(.event=="requested") | .links.work_item == "impl-foo"' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
 @test "request omits auto_close when the flag is not passed" {
   bash "$REQUEST" --type spec --slug wi --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"

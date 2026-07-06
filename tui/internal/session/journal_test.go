@@ -40,7 +40,7 @@ func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 	if r.Intn(2) == 0 {
 		ev.Slug = tok()
 	}
-	ev.SessionType = []string{"", "spec", "implement", "chat"}[r.Intn(4)]
+	ev.SessionType = []string{"", "spec", "implement", "chat", "worker"}[r.Intn(5)]
 	ev.Initiator = []string{"", "agent", "human"}[r.Intn(3)]
 	if r.Intn(2) == 0 {
 		ev.RequestID = tok()
@@ -168,6 +168,47 @@ func TestScriptReviewVocabulary(t *testing.T) {
 			}
 			if rows != 1 {
 				t.Fatalf("event %q: accepted event wrote %d journal rows, want 1", tc.ev.Event, rows)
+			}
+		})
+	}
+}
+
+// TestScriptWorkerLinkStamp drives the real sole-writer script to check the
+// links.work_item derivation the roundtrip property can't exercise (that test
+// never calls the script). A worker session's derived slug <work-item>--w<n>
+// yields links.work_item = <work-item>; a plain slug yields no derivation; and a
+// caller-supplied link is preserved. Skipped when the script or jq is missing.
+func TestScriptWorkerLinkStamp(t *testing.T) {
+	script := locateAppendScript(t)
+	if script == "" {
+		t.Skip("session-event-append.sh not found; skipping link-stamp integration")
+	}
+	cases := []struct {
+		name     string
+		ev       Event
+		wantLink string // "" means links.work_item must be absent
+	}{
+		{"derived slug yields work_item", Event{Event: EventClosed, Slug: "impl-foo--w1", SessionType: "worker"}, "impl-foo"},
+		{"multi-digit ordinal", Event{Event: EventClosed, Slug: "my-item--w42", SessionType: "worker"}, "my-item"},
+		{"plain slug: no derivation", Event{Event: EventClosed, Slug: "impl-foo", SessionType: "implement"}, ""},
+		{"caller link preserved", Event{Event: EventClosed, Slug: "impl-bar--w3", SessionType: "worker", Links: map[string]string{"work_item": "explicit"}}, "explicit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kdir := t.TempDir()
+			if err := AppendEvent(script, kdir, tc.ev); err != nil {
+				t.Fatalf("AppendEvent: %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(kdir, "_sessions", "events.jsonl"))
+			if err != nil {
+				t.Fatalf("read journal: %v", err)
+			}
+			var back Event
+			if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &back); err != nil {
+				t.Fatalf("decode journal row: %v", err)
+			}
+			if got := back.Links["work_item"]; got != tc.wantLink {
+				t.Fatalf("links.work_item = %q, want %q", got, tc.wantLink)
 			}
 		})
 	}

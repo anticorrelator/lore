@@ -413,6 +413,7 @@ func TestReadinessCellRendersSessionTypeLabel(t *testing.T) {
 		{SessionSpec, "speccing"},
 		{SessionImplement, "implementing"},
 		{SessionChat, "chatting"},
+		{SessionWorker, "working"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.typ, func(t *testing.T) {

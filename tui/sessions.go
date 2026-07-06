@@ -618,7 +618,7 @@ func (m model) idleEventFor(slug, event string, ls liveSession) session.Event {
 // enum, defaulting an unknown value to "spec".
 func sessionType(t string) string {
 	switch t {
-	case work.SessionSpec, work.SessionImplement, work.SessionChat:
+	case work.SessionSpec, work.SessionImplement, work.SessionChat, work.SessionWorker:
 		return t
 	default:
 		return work.SessionSpec

@@ -32,7 +32,7 @@ const (
 // numeric attempts stays an int so a strict decoder rejects a quoted "0".
 type Request struct {
 	RequestID      string          `json:"request_id"`
-	Type           string          `json:"type"` // spec|implement|chat
+	Type           string          `json:"type"` // spec|implement|chat|worker
 	Slug           *string         `json:"slug"`
 	TargetInstance *string         `json:"target_instance"`
 	Initiator      string          `json:"initiator"` // agent|human
@@ -132,16 +132,20 @@ func (r Request) ModelValue() string {
 }
 
 // ExtraContextText extracts a free-text launch context from the request's
-// extra_context object (a "prompt" or "text" key), or "" when absent. Prompt
-// composition proper is the spawn Cmd's job; this only surfaces the string it
-// appends.
+// extra_context object, or "" when absent. It reads a "prompt" or "text" key, or
+// "dispatch_guidance" — the key session-request.sh wraps a plain-text/file
+// --context in. A worker session's whole brief arrives this way (the chaperone
+// points --context at a plain brief file), so surfacing dispatch_guidance is what
+// carries the brief to buildInitialPrompt. Prompt composition proper is the spawn
+// Cmd's job; this only surfaces the string it appends.
 func (r Request) ExtraContextText() string {
 	if len(r.ExtraContext) == 0 {
 		return ""
 	}
 	var obj struct {
-		Prompt string `json:"prompt"`
-		Text   string `json:"text"`
+		Prompt           string `json:"prompt"`
+		Text             string `json:"text"`
+		DispatchGuidance string `json:"dispatch_guidance"`
 	}
 	if err := json.Unmarshal(r.ExtraContext, &obj); err != nil {
 		return ""
@@ -149,7 +153,10 @@ func (r Request) ExtraContextText() string {
 	if obj.Prompt != "" {
 		return obj.Prompt
 	}
-	return obj.Text
+	if obj.Text != "" {
+		return obj.Text
+	}
+	return obj.DispatchGuidance
 }
 
 // RequestsDir is the queue root under a _sessions/ directory.
@@ -388,6 +395,12 @@ func QueueTick(
 		if req.Type == "implement" && !hasPlanDoc(req.SlugValue()) {
 			continue // gated: implement needs a plan doc before it can be claimed
 		}
+		// A worker request carries the derived slug <work-item-slug>--w<n>, which
+		// has no plan doc of its own — it is intentionally NOT plan-gated here (do
+		// not add "worker" to the gate above keyed on the derived slug; the base
+		// work item's plan is guaranteed by the dispatcher). The eviction guard
+		// below keys on that derived slug, distinct from the base slug, so a live
+		// base session never blocks its workers and two workers never collide.
 		if s := req.SlugValue(); s != "" && slugLive != nil && slugLive(s) {
 			continue // eviction guard: a session for this slug is already live here;
 			// claiming would silently replace it, so leave the row pending until it frees

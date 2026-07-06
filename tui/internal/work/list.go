@@ -359,6 +359,8 @@ func sessionActiveLabel(typ string) string {
 		return "implementing"
 	case SessionChat:
 		return "chatting"
+	case SessionWorker:
+		return "working"
 	default:
 		return "speccing"
 	}
