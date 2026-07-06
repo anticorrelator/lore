@@ -66,7 +66,7 @@ func TestQueueTickTargeting(t *testing.T) {
 
 	// An open request is claimable by this instance.
 	plantPending(t, dir, openReq)
-	res, err := QueueTick(dir, "me", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
+	res, err := QueueTick(dir, "me", "", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestQueueTickTargeting(t *testing.T) {
 
 	// A targeted request is claimable only by its named instance.
 	plantPending(t, dir, targetedMine)
-	res, _ = QueueTick(dir, "me", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
+	res, _ = QueueTick(dir, "me", "", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
 	if res.Claimed == nil || res.Claimed.RequestID != "mine1" {
 		t.Fatalf("targeted-to-me request not claimed: %+v", res.Claimed)
 	}
@@ -85,7 +85,7 @@ func TestQueueTickTargeting(t *testing.T) {
 
 	// A request targeted at another instance stays pending here.
 	plantPending(t, dir, targetedOther)
-	res, _ = QueueTick(dir, "me", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
+	res, _ = QueueTick(dir, "me", "", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
 	if res.Claimed != nil {
 		t.Fatalf("claimed a request targeted at another instance: %+v", res.Claimed)
 	}
@@ -94,17 +94,79 @@ func TestQueueTickTargeting(t *testing.T) {
 	}
 }
 
+// TestQueueTickMinVintage exercises the read-side vintage filter mirroring the
+// targeting filter: a request requiring a minimum vintage is claimed by an
+// instance at-or-newer, skipped by an older one, and — the additive-degradation
+// invariant — always claimed by a vintage-unknown instance.
+func TestQueueTickMinVintage(t *testing.T) {
+	const cutoff = "2026-07-06T00:00:00Z"
+	newer := "2026-07-06T12:00:00Z"
+	older := "2026-07-05T12:00:00Z"
+
+	// A new-enough instance claims a min_vintage request.
+	dir := t.TempDir()
+	plantPending(t, dir, Request{RequestID: "v1", Type: "spec", Slug: strp("a"), Initiator: "agent", MinVintage: strp(cutoff)})
+	res, err := QueueTick(dir, "me", newer, map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Claimed == nil || res.Claimed.RequestID != "v1" {
+		t.Fatalf("new-enough instance did not claim min_vintage request: %+v", res.Claimed)
+	}
+
+	// An older instance leaves the same request pending.
+	dir = t.TempDir()
+	plantPending(t, dir, Request{RequestID: "v2", Type: "spec", Slug: strp("b"), Initiator: "agent", MinVintage: strp(cutoff)})
+	res, _ = QueueTick(dir, "me", older, map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
+	if res.Claimed != nil {
+		t.Fatalf("older instance claimed a request it is too old for: %+v", res.Claimed)
+	}
+	if len(ScanPending(dir)) != 1 {
+		t.Fatal("min_vintage-gated request should remain pending for an older instance")
+	}
+
+	// A vintage-unknown instance ("" build time) is never rejected — additive
+	// degradation: an old binary predating the field still claims.
+	dir = t.TempDir()
+	plantPending(t, dir, Request{RequestID: "v3", Type: "spec", Slug: strp("c"), Initiator: "agent", MinVintage: strp(cutoff)})
+	res, _ = QueueTick(dir, "me", "", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
+	if res.Claimed == nil || res.Claimed.RequestID != "v3" {
+		t.Fatalf("vintage-unknown instance was wrongly rejected by min_vintage: %+v", res.Claimed)
+	}
+}
+
+// TestMinVintageRoundTrips guards the request-row amendment: min_vintage decodes
+// into the pointer, and an absent field stays nil (omit-when-empty, so a marshal
+// of a row without the requirement never emits the key).
+func TestMinVintageRoundTrips(t *testing.T) {
+	var req Request
+	if err := json.Unmarshal([]byte(`{"request_id":"x","type":"spec","min_vintage":"2026-07-06T00:00:00Z"}`), &req); err != nil {
+		t.Fatalf("decode min_vintage: %v", err)
+	}
+	if got := req.MinVintageValue(); got != "2026-07-06T00:00:00Z" {
+		t.Fatalf("MinVintageValue = %q, want the decoded timestamp", got)
+	}
+
+	data, err := json.Marshal(Request{RequestID: "x", Type: "spec"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "min_vintage") {
+		t.Errorf("absent min_vintage should be omitted, got %s", data)
+	}
+}
+
 func TestQueueTickImplementGate(t *testing.T) {
 	dir := t.TempDir()
 	plantPending(t, dir, Request{RequestID: "impl1", Type: "implement", Slug: strp("needs-plan"), Initiator: "agent"})
 
 	// Without a plan doc, an implement request is not claimed.
-	res, _ := QueueTick(dir, "me", nil, func(string) bool { return false }, time.Now(), ReclaimAfter)
+	res, _ := QueueTick(dir, "me", "", nil, func(string) bool { return false }, time.Now(), ReclaimAfter)
 	if res.Claimed != nil {
 		t.Fatalf("implement claimed despite no plan doc: %+v", res.Claimed)
 	}
 	// With a plan doc, it becomes claimable.
-	res, _ = QueueTick(dir, "me", nil, func(string) bool { return true }, time.Now(), ReclaimAfter)
+	res, _ = QueueTick(dir, "me", "", nil, func(string) bool { return true }, time.Now(), ReclaimAfter)
 	if res.Claimed == nil || res.Claimed.RequestID != "impl1" {
 		t.Fatalf("implement not claimed once plan doc present: %+v", res.Claimed)
 	}
@@ -113,7 +175,7 @@ func TestQueueTickImplementGate(t *testing.T) {
 func TestQueueTickAbandonsAtAttemptCeiling(t *testing.T) {
 	dir := t.TempDir()
 	plantPending(t, dir, Request{RequestID: "dead1", Type: "spec", Slug: strp("x"), Initiator: "agent", Attempts: MaxAttempts})
-	res, err := QueueTick(dir, "me", nil, noPlan, time.Now(), ReclaimAfter)
+	res, err := QueueTick(dir, "me", "", nil, noPlan, time.Now(), ReclaimAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +203,7 @@ func TestQueueTickReclaimsIncompleteClaim(t *testing.T) {
 	if err := os.Chtimes(claimedPath(dir, id), old, old); err != nil {
 		t.Fatal(err)
 	}
-	res, err := QueueTick(dir, "me", nil, noPlan, time.Now(), ReclaimAfter)
+	res, err := QueueTick(dir, "me", "", nil, noPlan, time.Now(), ReclaimAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +238,7 @@ func TestQueueTickReclaimsStaleClaimer(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Claimer "dead-instance" is absent from the live set → reclaim.
-	res, err := QueueTick(dir, "me", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
+	res, err := QueueTick(dir, "me", "", map[string]bool{"me": true}, noPlan, time.Now(), ReclaimAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +261,7 @@ func TestQueueTickLeavesLiveClaimerAlone(t *testing.T) {
 	old := time.Now().Add(-2 * ReclaimAfter).UTC().Format("2006-01-02T15:04:05Z")
 	req.ClaimedAt = &old
 	_ = writeRow(claimedPath(dir, id), req)
-	res, _ := QueueTick(dir, "me", map[string]bool{"me": true, "busy-instance": true}, noPlan, time.Now(), ReclaimAfter)
+	res, _ := QueueTick(dir, "me", "", map[string]bool{"me": true, "busy-instance": true}, noPlan, time.Now(), ReclaimAfter)
 	if len(res.Reclaimed) != 0 {
 		t.Fatalf("reclaimed a live claimer's row: %+v", res.Reclaimed)
 	}

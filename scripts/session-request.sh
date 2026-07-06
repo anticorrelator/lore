@@ -21,6 +21,12 @@
 #                      exports it as LORE_MODEL_<ROLE> into the spawned session, riding
 #                      the resolver's top-precedence env layer. role MUST be in the
 #                      adapters/roles.json closed set (unknown roles are refused).
+#   --min-vintage <v>  Minimum build vintage the claiming instance must meet: a
+#                      request never targets an instance whose build is older. Value
+#                      is an ISO-8601 UTC timestamp (2026-07-05T12:00:00Z) OR a git
+#                      commit-ish resolved to its committer-date here at enqueue time.
+#                      Filtered read-side like --target; an instance of unknown
+#                      vintage is never rejected (additive degradation).
 #   --kdir <path>      Knowledge-store override (test isolation).
 #   --json             Emit a JSON result object instead of a human line.
 #
@@ -48,6 +54,7 @@ CONTEXT=""
 KDIR_OVERRIDE=""
 JSON_MODE=0
 ROUTE_SPECS=()
+MIN_VINTAGE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -59,12 +66,13 @@ while [[ $# -gt 0 ]]; do
     --requested-by) REQUESTED_BY="$2"; shift 2 ;;
     --context) CONTEXT="$2"; shift 2 ;;
     --route) ROUTE_SPECS+=("$2"); shift 2 ;;
+    --min-vintage) MIN_VINTAGE="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,41p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -123,6 +131,24 @@ if [[ ${#ROUTE_SPECS[@]} -gt 0 ]]; then
     fi
     ROUTING_JSON="$(printf '%s' "$ROUTING_JSON" | jq -c --arg r "$route_role" --arg m "$route_model" '. + {($r): $m}')"
   done
+fi
+
+# min_vintage is an optional minimum build vintage, stored as a comparable ISO
+# timestamp so the read-side filter never shells out to git. An ISO-8601 UTC value
+# is stored verbatim; anything else is resolved as a git commit-ish to its
+# committer-date (UTC) against the lore source repo where these scripts live —
+# one-time at enqueue, mirroring the other write-time resolutions here. An
+# unresolvable value is refused (naming the field), never silently dropped.
+MIN_VINTAGE_JSON=""
+if [[ -n "$MIN_VINTAGE" ]]; then
+  if [[ "$MIN_VINTAGE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+    MIN_VINTAGE_RESOLVED="$MIN_VINTAGE"
+  else
+    MIN_VINTAGE_RESOLVED="$(TZ=UTC git -C "$SCRIPT_DIR" show -s \
+      --date=format-local:'%Y-%m-%dT%H:%M:%SZ' --format='%cd' "$MIN_VINTAGE" 2>/dev/null || true)"
+    [[ -n "$MIN_VINTAGE_RESOLVED" ]] || fail "invalid --min-vintage: '$MIN_VINTAGE' (expected an ISO-8601 UTC timestamp like 2026-07-05T12:00:00Z or a resolvable git commit-ish)"
+  fi
+  MIN_VINTAGE_JSON="$(jq -n --arg v "$MIN_VINTAGE_RESOLVED" '$v')"
 fi
 
 if [[ -z "$REQUESTED_BY" ]]; then
@@ -188,6 +214,12 @@ fi
 # so an absent map stays absent (the Go decoder reads a nil map).
 if [[ -n "$ROUTING_JSON" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --argjson ro "$ROUTING_JSON" '. + {routing_overrides: $ro}')"
+fi
+
+# min_vintage follows omit-when-empty: added only when --min-vintage was passed,
+# so an absent requirement stays absent (the Go decoder reads a nil *string).
+if [[ -n "$MIN_VINTAGE_JSON" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --argjson mv "$MIN_VINTAGE_JSON" '. + {min_vintage: $mv}')"
 fi
 
 # Enqueue = tmp-write + atomic rename-in. The tmp name is hidden and lacks the

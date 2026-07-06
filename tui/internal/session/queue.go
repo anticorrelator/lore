@@ -57,6 +57,15 @@ type Request struct {
 	// (omit-when-empty) leaves every role resolving against settings as before.
 	RoutingOverrides map[string]string `json:"routing_overrides,omitempty"`
 
+	// MinVintage is an optional minimum build vintage (ISO 8601 UTC timestamp) the
+	// claiming instance must meet: a request never targets an instance whose
+	// BuildTime is older. Filtered read-side, mirroring TargetInstance — the only
+	// difference is the comparison (temporal >= vs string ==). Absent
+	// (omit-when-empty) imposes no requirement; an instance of unknown vintage
+	// passes every requirement (additive degradation, never rejected). Pointer so
+	// absent stays distinct from an explicit value.
+	MinVintage *string `json:"min_vintage,omitempty"`
+
 	// Present only on a claimed row; a claim is not active until both are set.
 	ClaimedBy *string `json:"claimed_by,omitempty"`
 	ClaimedAt *string `json:"claimed_at,omitempty"`
@@ -76,6 +85,14 @@ func (r Request) TargetValue() string {
 		return ""
 	}
 	return *r.TargetInstance
+}
+
+// MinVintageValue returns the minimum-vintage requirement or "" for none.
+func (r Request) MinVintageValue() string {
+	if r.MinVintage == nil {
+		return ""
+	}
+	return *r.MinVintage
 }
 
 // ExtraContextText extracts a free-text launch context from the request's
@@ -285,8 +302,11 @@ type QueueTickResult struct {
 // caller's journal append (which follows) can never precede the state it
 // records. liveInstances is the set of instance names with fresh registry
 // files; hasPlanDoc reports whether a slug has a plan doc (implement gate).
+// myVintage is this instance's build vintage (BuildTime, ISO 8601 UTC), used to
+// filter out requests whose min_vintage this instance does not meet; "" means
+// vintage-unknown, which passes every requirement.
 func QueueTick(
-	sessionsDir, myName string,
+	sessionsDir, myName, myVintage string,
 	liveInstances map[string]bool,
 	hasPlanDoc func(slug string) bool,
 	now time.Time,
@@ -311,7 +331,7 @@ func QueueTick(
 	}
 
 	for _, req := range ScanPending(sessionsDir) {
-		if !claimableBy(req, myName) {
+		if !claimableBy(req, myName, myVintage) {
 			continue
 		}
 		if req.Attempts >= MaxAttempts {
@@ -347,10 +367,47 @@ func QueueTick(
 }
 
 // claimableBy reports whether an instance may attempt this pending row: a row is
-// claimable when its target is this instance or unset (any).
-func claimableBy(req Request, myName string) bool {
+// claimable when its target is this instance or unset (any) AND this instance's
+// vintage satisfies any min_vintage requirement. Both filters run read-side; the
+// targeting filter is string equality, the vintage filter a temporal comparison.
+func claimableBy(req Request, myName, myVintage string) bool {
 	target := req.TargetValue()
-	return target == "" || target == myName
+	if target != "" && target != myName {
+		return false
+	}
+	return vintageOK(req.MinVintageValue(), myVintage)
+}
+
+// vintageOK reports whether an instance whose build vintage is myVintage may
+// claim a request carrying minVintage. It refuses a claim ONLY on positive
+// evidence the instance is older: both timestamps present AND parseable AND
+// myVintage strictly before minVintage. Every uncertainty passes — an absent
+// requirement, an instance of unknown vintage, or a timestamp that fails to
+// parse — because the substrate's degradation rule is additive: a vintage-
+// unknown instance is never rejected. Both forms are parsed leniently (canonical
+// "...Z" or RFC 3339) so an offset-bearing timestamp still orders correctly.
+func vintageOK(minVintage, myVintage string) bool {
+	if minVintage == "" || myVintage == "" {
+		return true
+	}
+	minT, ok1 := parseVintage(minVintage)
+	myT, ok2 := parseVintage(myVintage)
+	if !ok1 || !ok2 {
+		return true
+	}
+	return !myT.Before(minT)
+}
+
+// parseVintage parses a vintage timestamp in the substrate's canonical UTC form
+// or RFC 3339, reporting ok=false on any other shape so callers can degrade.
+func parseVintage(s string) (time.Time, bool) {
+	if t, err := time.Parse("2006-01-02T15:04:05Z", s); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 // reclaimReason classifies a claimed row for the reclamation sweep, returning

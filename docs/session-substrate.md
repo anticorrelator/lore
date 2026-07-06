@@ -59,6 +59,16 @@ One file per live TUI instance at `instances/<name>.json`.
 | `started` | string | ISO 8601 UTC timestamp of instance start. |
 | `initiator_default` | string | `"human"` in v1 — the default initiator stamped on sessions this instance starts. |
 | `sessions` | array of objects | Live sessions nested under the instance: `[{slug, type, initiator, started}]`. |
+| `build_sha` | string \| absent | Build vintage — the short git SHA embedded at build time (`-ldflags`). Absent for `go run`/dev builds and for any binary predating this field. Omit-when-empty. |
+| `build_time` | string \| absent | Build vintage — the **orderable** quantity: the commit's committer-date (release build) or the binary's mtime (dev build), ISO 8601 UTC. Absent for a binary predating this field. Omit-when-empty. This, not `build_sha`, is what `min_vintage` filtering compares against (a SHA has no read-side ordering). |
+
+**Build vintage** stamps a live TUI's build identity onto its row at startup so a
+live-but-outdated instance — registered, claiming, but executing stale semantics —
+becomes a visible column rather than a silent behavioral skew. It is fully
+**additive**: a row with neither field reads as *vintage-unknown* and is **never
+rejected** by `min_vintage` filtering (see [Request queue](#request-queue)).
+`lore session list` renders the vintage column (`build_sha`, falling back to
+`build_time`, else `unknown`).
 
 Per nested session object: `slug` (string), `type` (string enum
 `spec|implement|chat`), `initiator` (string enum `agent|human`), `started`
@@ -98,6 +108,7 @@ and, once an instance claims it, moves to `requests/claimed/<request_id>.json`.
 | `last_attempt_at` | string \| null | ISO 8601 UTC of the most recent attempt; null until one occurs. |
 | `auto_close` | boolean \| absent | Override for the TUI exit-ladder auto-close gate (see [Close-request queue](#close-request-queue)). Omit-when-empty: absent defers to `initiator` (agent auto-closes, human holds open), `true` forces auto-close, `false` holds open. Carried onto the live session so the ladder can consult it at teardown. |
 | `routing_overrides` | object \| absent | Per-dispatch `{<role>: <model>}` map. Omit-when-empty. The claiming instance exports each entry as `LORE_MODEL_<ROLE>` (role uppercased, `-`→`_`) into the spawned session's PTY, riding the resolver's top-of-precedence env layer — so a coordinator's per-dispatch routing wins over settings policy with no resolver change. Roles are validated against `adapters/roles.json` at enqueue time; settings.json stays untouched durable policy (user directive > coordinator override > settings). |
+| `min_vintage` | string \| absent | Minimum build vintage (ISO 8601 UTC) the claiming instance's `build_time` must meet — the request never targets an instance built earlier. Omit-when-empty. Filtered read-side, mirroring `target_instance` (the only difference is a temporal `>=` vs a string `==`). The `session request --min-vintage` verb accepts a timestamp or a git commit-ish (resolved to its committer-date at enqueue) and stores the timestamp, so the read side never shells out to git. **Additive**: an instance of unknown vintage, or any unparseable timestamp, passes — a claim is refused only on positive evidence the instance is older. |
 
 A **claimed** file additionally carries:
 
@@ -116,7 +127,12 @@ it lives entirely at the queue layer. The winner then rewrites the claimed file
 active claim until both fields are present.**
 
 **Targeting** is filtered read-side: an instance only attempts to claim rows whose
-`target_instance` equals its own name or is null.
+`target_instance` equals its own name or is null. **Vintage** is filtered the same
+way, in the same pass: an instance skips a row whose `min_vintage` its own
+`build_time` demonstrably fails (both present, parseable, and older). An instance
+of unknown vintage never skips on this basis — the filter is additive, so it can
+only ever *narrow* the claim set of a vintage-advertising instance, never enlarge
+or block a legacy one.
 
 ### Request lifecycle (terminal states)
 

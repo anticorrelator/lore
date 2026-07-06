@@ -100,6 +100,7 @@ func (m model) writeInstanceCmd() tea.Cmd {
 func (m model) queueTickCmd() tea.Cmd {
 	dir := m.sessionsDir
 	name := m.instanceName
+	vintage := m.buildTime
 	planDocs := make(map[string]bool)
 	for _, it := range m.list.Items() {
 		planDocs[it.Slug] = it.HasPlanDoc
@@ -109,7 +110,7 @@ func (m model) queueTickCmd() tea.Cmd {
 		for _, inst := range session.ListInstances(dir) {
 			live[inst.Name] = true
 		}
-		res, err := session.QueueTick(dir, name, live,
+		res, err := session.QueueTick(dir, name, vintage, live,
 			func(slug string) bool { return planDocs[slug] },
 			time.Now(), session.ReclaimAfter)
 		return queueTickResultMsg{result: res, err: err}
@@ -310,6 +311,8 @@ func (m model) instanceRow() session.Instance {
 		Started:          m.instanceStartedISO,
 		InitiatorDefault: "human",
 		Sessions:         sessions,
+		BuildSHA:         m.buildSHA,
+		BuildTime:        m.buildTime,
 	}
 }
 

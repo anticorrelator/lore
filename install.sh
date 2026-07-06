@@ -737,18 +737,28 @@ fi
 # instead of a raw cgo link error mid-build.
 if command -v go >/dev/null 2>&1; then
   TUI_BUILD_TAGS="${LORE_TUI_BUILD_TAGS:-}"
+  # Build vintage embedded via -ldflags so each instance can stamp its build
+  # identity onto its registry row (see tui/buildidentity.go). BUILD_SHA is the
+  # short git SHA; BUILD_TIME is the commit's committer-date in canonical UTC form
+  # — the orderable quantity min_vintage filtering compares against. Both resolve
+  # to empty outside a git checkout, in which case the binary's mtime is the
+  # runtime fallback vintage. Values are trusted (repo-local), so no escaping
+  # beyond the quoted -ldflags string is needed.
+  BUILD_SHA="$(git -C "$LORE_REPO_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+  BUILD_TIME="$(TZ=UTC git -C "$LORE_REPO_DIR" show -s --date=format-local:'%Y-%m-%dT%H:%M:%SZ' --format='%cd' HEAD 2>/dev/null || true)"
+  TUI_LDFLAGS="-X main.buildSHA=$BUILD_SHA -X main.buildTime=$BUILD_TIME"
   if _ghostty_missing=$(tui_ghostty_preflight "$LORE_REPO_DIR/tui"); then
     if [ -n "$TUI_BUILD_TAGS" ]; then
-      info "Building TUI (-tags $TUI_BUILD_TAGS)"
+      info "Building TUI (-tags $TUI_BUILD_TAGS, build ${BUILD_SHA:-dev})"
     else
-      info "Building TUI"
+      info "Building TUI (build ${BUILD_SHA:-dev})"
     fi
     if ! $DRY_RUN; then
       (cd "$LORE_REPO_DIR/tui" && CGO_ENABLED=1 \
         PKG_CONFIG="$(tui_ghostty_pkg_config_shim "$LORE_REPO_DIR/tui")" \
-        go build ${TUI_BUILD_TAGS:+-tags "$TUI_BUILD_TAGS"} -o "$HOME/.local/bin/lore-tui" .)
+        go build ${TUI_BUILD_TAGS:+-tags "$TUI_BUILD_TAGS"} -ldflags "$TUI_LDFLAGS" -o "$HOME/.local/bin/lore-tui" .)
     else
-      echo "  [dry-run] (cd $LORE_REPO_DIR/tui && go build${TUI_BUILD_TAGS:+ -tags $TUI_BUILD_TAGS} -o ~/.local/bin/lore-tui .)"
+      echo "  [dry-run] (cd $LORE_REPO_DIR/tui && go build${TUI_BUILD_TAGS:+ -tags $TUI_BUILD_TAGS} -ldflags \"$TUI_LDFLAGS\" -o ~/.local/bin/lore-tui .)"
     fi
   else
     info "Skipping TUI build — $_ghostty_missing"

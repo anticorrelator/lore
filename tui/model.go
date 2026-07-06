@@ -217,8 +217,13 @@ type model struct {
 	eventScript        string
 	spendScript        string
 	instanceStartedISO string
-	localSessions      map[string]liveSession
-	pendingSpawns      map[string]liveSession
+	// buildSHA/buildTime are this instance's build vintage, resolved once at
+	// startup and stamped onto its registry row (see resolveBuildIdentity).
+	// buildTime is the orderable quantity min_vintage filtering compares against.
+	buildSHA      string
+	buildTime     string
+	localSessions map[string]liveSession
+	pendingSpawns map[string]liveSession
 	// sessionIdle records, per local session slug, whether we have already
 	// journaled it as idle (quiescent/needs_input). It is the transition-edge
 	// guard for the needs_input/quiescent/resumed events: emit only when the

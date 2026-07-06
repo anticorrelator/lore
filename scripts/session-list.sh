@@ -125,10 +125,19 @@ CLOSE_COUNT="$(printf '%s' "$RESULT" | jq -r '.close_requests | length')"
 echo "[session] Live instances: $INSTANCE_COUNT | pending: $PENDING_COUNT | claimed: $CLAIMED_COUNT | close-requests: $CLOSE_COUNT"
 
 if [[ "$INSTANCE_COUNT" -gt 0 ]]; then
-  printf '%s' "$RESULT" | jq -r '.instances[] | "  instance \(.name) (pid \(.pid)) — sessions: \([.sessions[]?.slug] | join(", ") // "none")"'
+  # Vintage column: prefer the embedded build SHA (release build), fall back to
+  # the build_time timestamp (dev/go-run binary mtime), else "unknown" for a row
+  # written by a binary predating the field. build_time appended in parens when a
+  # SHA is present so a coordinator sees both identity and age.
+  printf '%s' "$RESULT" | jq -r '
+    .instances[]
+    | (if .build_sha then .build_sha + (if .build_time then " (" + .build_time + ")" else "" end)
+       elif .build_time then .build_time
+       else "unknown" end) as $vintage
+    | "  instance \(.name) (pid \(.pid)) — vintage \($vintage) — sessions: \([.sessions[]?.slug] | join(", ") // "none")"'
 fi
 if [[ "$PENDING_COUNT" -gt 0 ]]; then
-  printf '%s' "$RESULT" | jq -r '.pending[] | "  pending \(.request_id) \(.type) \(.slug // "(no slug)") → \(.target_instance // "any")"'
+  printf '%s' "$RESULT" | jq -r '.pending[] | "  pending \(.request_id) \(.type) \(.slug // "(no slug)") → \(.target_instance // "any")\(if .min_vintage then " (min-vintage \(.min_vintage))" else "" end)"'
 fi
 if [[ "$CLAIMED_COUNT" -gt 0 ]]; then
   printf '%s' "$RESULT" | jq -r '.claimed[] | "  claimed \(.request_id) by \(.claimed_by // "?")"'

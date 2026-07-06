@@ -29,6 +29,36 @@ func TestWriteAndListInstance(t *testing.T) {
 	}
 }
 
+// TestBuildIdentityRoundTripAndDegradation guards the additive build-vintage
+// fields: they round-trip when present, and a row written by an older binary
+// (no build_sha/build_time keys at all) still parses, reading as vintage-unknown
+// (empty strings) rather than being rejected.
+func TestBuildIdentityRoundTripAndDegradation(t *testing.T) {
+	dir := t.TempDir()
+	stamped := Instance{
+		Name: "amber-otter", PID: 7, Started: "2026-07-06T00:00:00Z",
+		BuildSHA: "1dfdd89", BuildTime: "2026-07-06T02:12:38Z",
+	}
+	if err := WriteInstance(dir, stamped); err != nil {
+		t.Fatal(err)
+	}
+	got := ListInstances(dir)
+	if len(got) != 1 || got[0].BuildSHA != "1dfdd89" || got[0].BuildTime != "2026-07-06T02:12:38Z" {
+		t.Fatalf("build identity did not round-trip: %+v", got)
+	}
+
+	// A legacy row with no build fields decodes as vintage-unknown, not an error.
+	legacy := filepath.Join(InstancesDir(dir), "legacy-instance.json")
+	if err := os.WriteFile(legacy, []byte(`{"name":"legacy-instance","pid":9,"started":"2026-07-06T00:00:00Z","sessions":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, inst := range ListInstances(dir) {
+		if inst.Name == "legacy-instance" && (inst.BuildSHA != "" || inst.BuildTime != "") {
+			t.Fatalf("legacy row should read as vintage-unknown, got %+v", inst)
+		}
+	}
+}
+
 func TestListInstancesDropsStaleByMtime(t *testing.T) {
 	dir := t.TempDir()
 	if err := WriteInstance(dir, Instance{Name: "swift-heron", PID: 1}); err != nil {

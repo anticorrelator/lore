@@ -39,6 +39,17 @@ type Instance struct {
 	Started          string    `json:"started"`           // ISO 8601 UTC
 	InitiatorDefault string    `json:"initiator_default"` // "human" in v1
 	Sessions         []Session `json:"sessions"`
+
+	// Build identity ("vintage") — additive, omit-when-empty. BuildSHA is the
+	// short git SHA embedded at build time (empty for go-run/dev builds);
+	// BuildTime is the orderable vintage: the commit's committer-date for a
+	// release build, the binary mtime for a dev build (both ISO 8601 UTC). A row
+	// written by an older binary carries neither and reads as vintage-unknown —
+	// never rejected by min_vintage filtering (degradation is additive, not
+	// breaking). BuildTime, not BuildSHA, is the comparable quantity because a
+	// SHA has no read-side ordering.
+	BuildSHA  string `json:"build_sha,omitempty"`
+	BuildTime string `json:"build_time,omitempty"`
 }
 
 // InstancesDir is the registry directory under a _sessions/ root.

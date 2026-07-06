@@ -99,6 +99,7 @@ func main() {
 		m.eventScript = filepath.Join(os.Getenv("HOME"), ".lore/scripts/session-event-append.sh")
 		m.spendScript = filepath.Join(os.Getenv("HOME"), ".lore/scripts/session-spend.sh")
 		m.instanceStartedISO = time.Now().UTC().Format("2006-01-02T15:04:05Z")
+		m.buildSHA, m.buildTime = resolveBuildIdentity()
 	}
 
 	// Best-effort settings panel initialization. A nil panel disables the
