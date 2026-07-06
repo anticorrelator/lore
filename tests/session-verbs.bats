@@ -65,6 +65,17 @@ write_instance() {
 EOF
 }
 
+# Write a live registry instance hosting one session that carries a harness
+# session_id. Pass an empty slug ("") to model a slugless session — the case
+# only session_id can address across instances.
+write_instance_session() {
+  local name="$1" slug="$2" sid="$3"
+  mkdir -p "$TEST_KDIR/_sessions/instances"
+  cat > "$TEST_KDIR/_sessions/instances/$name.json" <<EOF
+{"name":"$name","pid":4242,"repo":"lore","started":"2026-07-05T00:00:00Z","initiator_default":"human","sessions":[{"slug":"$slug","type":"chat","initiator":"human","started":"2026-07-05T00:00:00Z","session_id":"$sid"}]}
+EOF
+}
+
 # Build events.jsonl directly from explicit compact rows so byte offsets are
 # fully controlled by the test (the reader validates JSON only, not schema).
 JOURNAL_ROWS=(
@@ -275,6 +286,31 @@ journal_boundaries() {
   echo "$output" | jq -e '(.pending|length)==1 and (.claimed|length)==1 and (.close_requests|length)==1'
 }
 
+@test "list renders a slugless session as chat:<short-id> instead of a blank slug" {
+  write_instance_session inst-b "" deadbeef-0000-0000-0000-000000000000
+  run bash "$LIST" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  # The slugless session is visible, keyed by the same short id close --session accepts.
+  [[ "$output" == *"chat:deadbeef"* ]]
+  # And never as an empty "sessions: " tail.
+  [[ "$output" != *"sessions: "$'\n'* ]]
+}
+
+@test "list renders a slugless session with no session_id as chat:?" {
+  write_instance inst-b ""   # empty slug, no session_id field
+  run bash "$LIST" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"chat:?"* ]]
+}
+
+@test "list still renders a slugged session by its slug" {
+  write_instance_session inst-a feature-x 11111111-1111-1111-1111-111111111111
+  run bash "$LIST" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sessions: feature-x"* ]]
+  [[ "$output" != *"chat:"* ]]
+}
+
 @test "list excludes a malformed row with a stderr warning, never rewriting it" {
   mkdir -p "$TEST_KDIR/_sessions/requests/pending"
   local good="$TEST_KDIR/_sessions/requests/pending/good.json"
@@ -448,6 +484,82 @@ journal_boundaries() {
   run bash "$CLOSE" feature-x --reason nonsense --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
   [[ "$output" == *"invalid --reason"* ]]
+}
+
+# --- close --session (address by harness session_id) ---
+
+@test "close --session <full-id> resolves the owning instance and enqueues" {
+  write_instance_session inst-a feature-x 11111111-1111-1111-1111-111111111111
+  run bash "$CLOSE" --session 11111111-1111-1111-1111-111111111111 --reason coordinator --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.enqueued==true and .slug=="feature-x" and .target_instance=="inst-a"'
+  run grep -c '"event":"close_requested"' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$output" = "1" ]
+}
+
+@test "close --session <prefix> resolves by an unambiguous leading prefix" {
+  write_instance_session inst-a feature-x 11111111-1111-1111-1111-111111111111
+  run bash "$CLOSE" --session 1111 --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.target_instance=="inst-a" and .slug=="feature-x"'
+}
+
+@test "close --session addresses a slugless session; the row carries a null slug" {
+  # The slugless session's own slug is empty, so the close-request row's slug is
+  # JSON null (which the Go consumer reads as "" and matches on its empty-slug key).
+  write_instance_session inst-b "" 22222222-2222-2222-2222-222222222222
+  run bash "$CLOSE" --session 2222 --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.enqueued==true and .slug==null and .target_instance=="inst-b"'
+
+  local cr; cr="$(ls "$TEST_KDIR"/_sessions/close-requests/*.json)"
+  run jq -e '.slug==null and .target_instance=="inst-b"' "$cr"
+  [ "$status" -eq 0 ]
+
+  # Human line names it as a slugless session, never "close of ''".
+  run bash "$CLOSE" --session 2222 --kdir "$TEST_KDIR"
+  [[ "$output" == *"slugless session on instance inst-b"* ]]
+}
+
+@test "close --session refuses an ambiguous prefix and names the colliding ids" {
+  write_instance_session inst-c early abcd0000-0000-0000-0000-000000000000
+  write_instance_session inst-d late  abcd1111-1111-1111-1111-111111111111
+  run bash "$CLOSE" --session abcd --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ambiguous session id 'abcd'"* ]]
+  [[ "$output" == *"abcd0000-0000-0000-0000-000000000000"* ]]
+  [[ "$output" == *"abcd1111-1111-1111-1111-111111111111"* ]]
+  [[ "$output" == *"longer prefix"* ]]
+  # Refusal writes nothing.
+  [ ! -d "$TEST_KDIR/_sessions/close-requests" ]
+}
+
+@test "close --session refuses when no live session matches" {
+  write_instance_session inst-a feature-x 11111111-1111-1111-1111-111111111111
+  run bash "$CLOSE" --session ffff --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no live session matches session id 'ffff'"* ]]
+}
+
+@test "close with no target names --session in the refusal" {
+  run bash "$CLOSE" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no target"* ]]
+  [[ "$output" == *"--session <id>"* ]]
+}
+
+@test "close with an empty --session value is refused as no target (no sentinel)" {
+  run bash "$CLOSE" --session "" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no target"* ]]
+  [[ "$output" == *"--session <id>"* ]]
+}
+
+@test "close refuses an ambiguous form (slug plus --session)" {
+  run bash "$CLOSE" feature-x --session 1111 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ambiguous"* ]]
+  [[ "$output" == *"--session <id>"* ]]
 }
 
 # =====================================================================

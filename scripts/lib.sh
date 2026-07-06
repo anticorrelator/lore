@@ -1011,6 +1011,78 @@ if os.path.isdir(instances_dir):
 PYEOF
 }
 
+# --- resolve_session_by_id ---
+# Address a live session by its harness session_id — the only stable handle a
+# slugless session carries — where resolve_session_owner keys on slug. A slugless
+# session has an empty slug, so slug is unusable as a target; session_id is not.
+# Matches the given id as a full value OR an unambiguous leading prefix across the
+# live registry, so a coordinator can paste the short form `lore session list`
+# renders (chat:<8-hex-of-id>) without the full UUID.
+#
+# The result is a single status line on stdout (exit 0 in every case — the caller
+# branches on the token, never on exit status). A richer contract than
+# resolve_session_owner's empty-means-none because this resolver must also express
+# refusal on an ambiguous prefix, which the slug resolver never had to:
+#   MATCH<TAB><instance><TAB><slug>   one live session matched; slug is the
+#                                     matched session's own slug, empty for a
+#                                     slugless session. The caller writes it
+#                                     verbatim into the close-request row so the
+#                                     TUI consumer (which keys teardown off slug)
+#                                     acts on it — session_id is resolution input,
+#                                     not a row field.
+#   NONE                              no live session matched.
+#   AMBIGUOUS<TAB><id>,<id>,...       the prefix matched more than one live
+#                                     session; the caller refuses and names the
+#                                     colliding ids. An exact full-id match is
+#                                     never ambiguous even if it is also a prefix
+#                                     of another id.
+# Requires python3.
+#
+# Args: $1 = instances dir, $2 = session_id (full or leading prefix), $3 = ttl.
+resolve_session_by_id() {
+  local instances_dir="$1"
+  local session_id="$2"
+  local ttl="$3"
+  python3 - "$instances_dir" "$session_id" "$ttl" <<'PYEOF'
+import json, os, sys, time
+
+instances_dir, sid, ttl = sys.argv[1], sys.argv[2], float(sys.argv[3])
+now = time.time()
+matches = []  # (instance_name, slug, full_session_id)
+if sid and os.path.isdir(instances_dir):
+    for name in sorted(os.listdir(instances_dir)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(instances_dir, name)
+        try:
+            if (now - os.path.getmtime(path)) > ttl:
+                continue
+            with open(path) as f:
+                row = json.load(f)
+        except (OSError, ValueError):
+            continue
+        for sess in row.get("sessions") or []:
+            row_sid = sess.get("session_id") or ""
+            if row_sid and (row_sid == sid or row_sid.startswith(sid)):
+                matches.append((row.get("name", ""), sess.get("slug") or "", row_sid))
+
+# A complete id the caller typed in full is an unambiguous target even if it is a
+# leading prefix of some other id (impossible for equal-length UUIDs, guarded
+# anyway so pasting a whole id always resolves).
+exact = [m for m in matches if m[2] == sid]
+if len(exact) == 1:
+    matches = exact
+
+if not matches:
+    print("NONE")
+elif len(matches) > 1:
+    print("AMBIGUOUS\t" + ",".join(sorted(m[2] for m in matches)))
+else:
+    inst, slug, _ = matches[0]
+    print("MATCH\t" + inst + "\t" + slug)
+PYEOF
+}
+
 # --- resolve_permission_adapter ---
 # Resolve the per-harness permission/settings policy installer for a
 # framework. The single source of truth for which adapter owns each

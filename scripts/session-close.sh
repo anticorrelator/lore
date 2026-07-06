@@ -3,6 +3,12 @@
 #
 # Usage:
 #   lore session close <slug>            Close the live session running <slug>
+#   lore session close --session <id>    Close the live session whose harness
+#                                        session_id is <id> (full, or an
+#                                        unambiguous leading prefix — the short
+#                                        form `lore session list` renders). The
+#                                        only way to address a slugless session
+#                                        from another instance.
 #   lore session close --self            Close the session named by LORE_SESSION_* env
 #   lore session close --request <id>    Cancel a pending (unclaimed) spawn request
 #
@@ -31,6 +37,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 SLUG_ARG=""
+SESSION_ID_ARG=""
 SELF=0
 CANCEL_ID=""
 REASON="human"
@@ -42,16 +49,17 @@ JSON_MODE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --self) SELF=1; shift ;;
+    --session) SESSION_ID_ARG="$2"; shift 2 ;;
     --request) CANCEL_ID="$2"; shift 2 ;;
     --reason) REASON="$2"; shift 2 ;;
     --requested-by) REQUESTED_BY="$2"; shift 2 ;;
     --ttl) TTL="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     --*)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-close.sh (<slug> | --self | --request <id>) [--reason <r>] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-close.sh (<slug> | --session <id> | --self | --request <id>) [--reason <r>] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
     *)
@@ -75,14 +83,19 @@ fail() {
 command -v jq &>/dev/null || fail "jq is required but not found on PATH"
 
 # --- Exactly one form must be selected ---
+# An empty-string target (bare `close ""` or `--session ""`) counts as no form,
+# not as a sentinel that resolves to something — explicitness over a magic empty
+# value (no-defaults house preference). The "no target" message names --session
+# so a coordinator staring at a slugless row learns the addressing verb.
 FORMS=0
 [[ -n "$SLUG_ARG" ]] && FORMS=$((FORMS + 1))
+[[ -n "$SESSION_ID_ARG" ]] && FORMS=$((FORMS + 1))
 [[ $SELF -eq 1 ]] && FORMS=$((FORMS + 1))
 [[ -n "$CANCEL_ID" ]] && FORMS=$((FORMS + 1))
 if [[ $FORMS -eq 0 ]]; then
-  fail "no target: pass a <slug>, --self, or --request <id>"
+  fail "no target: pass a <slug>, --session <id>, --self, or --request <id>"
 elif [[ $FORMS -gt 1 ]]; then
-  fail "ambiguous: pass exactly one of <slug>, --self, or --request <id>"
+  fail "ambiguous: pass exactly one of <slug>, --session <id>, --self, or --request <id>"
 fi
 
 if [[ -z "$REQUESTED_BY" ]]; then
@@ -157,6 +170,28 @@ if [[ $SELF -eq 1 ]]; then
   [[ -n "$TARGET_INSTANCE" ]] || fail "--self requires LORE_SESSION_INSTANCE (not inside a lore session)"
   SLUG="${LORE_SESSION_SLUG:-}"
   ACTOR_INSTANCE="$TARGET_INSTANCE"
+elif [[ -n "$SESSION_ID_ARG" ]]; then
+  # Session-id form: resolve (owning instance, matched slug) by session_id — the
+  # only handle that addresses a slugless session across instances. The resolver
+  # returns the matched session's own slug (empty for a slugless session); it is
+  # written into the row unchanged so the TUI consumer keys teardown off it. A
+  # coordinator addressing another session is not its actor, so ACTOR_INSTANCE
+  # stays empty.
+  command -v python3 &>/dev/null || fail "python3 is required but not found on PATH"
+  RESOLVED="$(resolve_session_by_id "$SESSIONS_DIR/instances" "$SESSION_ID_ARG" "$TTL")"
+  case "$RESOLVED" in
+    MATCH$'\t'*)
+      REST="${RESOLVED#MATCH$'\t'}"
+      TARGET_INSTANCE="${REST%%$'\t'*}"
+      SLUG="${REST#*$'\t'}"
+      ;;
+    AMBIGUOUS$'\t'*)
+      fail "ambiguous session id '$SESSION_ID_ARG' matches multiple live sessions: ${RESOLVED#AMBIGUOUS$'\t'} (pass a longer prefix)"
+      ;;
+    *)
+      fail "no live session matches session id '$SESSION_ID_ARG'"
+      ;;
+  esac
 else
   # Slug form: the owning live instance is the one whose registry row hosts the
   # slug. Exactly one live instance is eligible; a missing one is a clear error.
@@ -215,4 +250,11 @@ if [[ $JSON_MODE -eq 1 ]]; then
     '{request_id: $request_id, slug: $slug, target_instance: $target, reason: $reason, path: $path, enqueued: true}')"
 fi
 
-echo "[session] Requested close of '$SLUG' on instance $TARGET_INSTANCE (reason=$REASON) → $RELPATH"
+# A slugless session has no slug to name; describe it by its target instance so
+# the line never reads "close of ''".
+if [[ -n "$SLUG" ]]; then
+  TARGET_DESC="session '$SLUG'"
+else
+  TARGET_DESC="slugless session"
+fi
+echo "[session] Requested close of $TARGET_DESC on instance $TARGET_INSTANCE (reason=$REASON) → $RELPATH"

@@ -15,6 +15,11 @@
 # or torn row is excluded with a stderr warning and never rewritten (reader
 # contract) — validation is the writer's job, paid once at write time.
 #
+# In the human summary a slugless session renders as chat:<8-hex-of-session_id>
+# (chat:? when it carries no session_id) instead of a blank slug, so no live
+# hosted session is invisible; that short id is what `session close --session`
+# accepts. The --json envelope is unchanged (raw registry rows).
+#
 # Exit codes: 0 success; 1 error. Codes 2 and 3 are reserved (unused here) for
 # session verb family / composed-terminal-verb namespace compatibility.
 
@@ -32,7 +37,7 @@ while [[ $# -gt 0 ]]; do
     --ttl) TTL="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
       echo "Usage: session-list.sh [--ttl <seconds>] [--kdir <path>] [--json]" >&2
@@ -129,12 +134,24 @@ if [[ "$INSTANCE_COUNT" -gt 0 ]]; then
   # the build_time timestamp (dev/go-run binary mtime), else "unknown" for a row
   # written by a binary predating the field. build_time appended in parens when a
   # SHA is present so a coordinator sees both identity and age.
+  # A slugless session (chat/work session with no work-item slug) has an empty
+  # slug, so listing raw slugs renders it invisibly as a blank in the joined
+  # column. Render it instead as chat:<8-hex-of-session_id> — the same short id
+  # `lore session close --session <id>` accepts, so a coordinator can copy it
+  # straight from this line to tear the session down. A slugless session that
+  # also carries no session_id (older row / non-id-binding harness) has nothing
+  # targetable to show and renders chat:? — visible, honestly un-addressable.
   printf '%s' "$RESULT" | jq -r '
     .instances[]
     | (if .build_sha then .build_sha + (if .build_time then " (" + .build_time + ")" else "" end)
        elif .build_time then .build_time
        else "unknown" end) as $vintage
-    | "  instance \(.name) (pid \(.pid)) — vintage \($vintage) — sessions: \([.sessions[]?.slug] | join(", ") // "none")"'
+    | ([.sessions[]?
+        | if (.slug // "") != "" then .slug
+          else "chat:" + ((.session_id // "") | if . == "" then "?" else .[0:8] end)
+          end]
+       | join(", ")) as $sessions
+    | "  instance \(.name) (pid \(.pid)) — vintage \($vintage) — sessions: \(if $sessions == "" then "none" else $sessions end)"'
 fi
 if [[ "$PENDING_COUNT" -gt 0 ]]; then
   printf '%s' "$RESULT" | jq -r '.pending[] | "  pending \(.request_id) \(.type) \(.slug // "(no slug)") → \(.target_instance // "any")\(if .min_vintage then " (min-vintage \(.min_vintage))" else "" end)"'
