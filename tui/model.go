@@ -239,6 +239,12 @@ type model struct {
 	// panel's quiescence predicate reports idle. A slug is removed the moment
 	// its ladder is dispatched, so teardown fires at most once per request.
 	pendingClose map[string]bool
+	// interruptedClose records, per pending-close slug, when the interrupt-
+	// escalation rung injected the terminal interrupt (ESC) into a still-generating
+	// session bound for teardown. advanceCloseLadders bounds the post-interrupt wait:
+	// once this grace elapses without the turn ending, teardown proceeds down the exit
+	// ladder regardless (a --yes turn may never quiesce).
+	interruptedClose map[string]time.Time
 	// pendingSend and pendingPeek hold send/peek request ids whose consume is in
 	// flight, so a re-scan before the async delete lands does not double-process
 	// the same request. Keyed by request id (unlike pendingClose, which is keyed

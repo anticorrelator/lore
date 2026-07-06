@@ -114,6 +114,17 @@ func (m model) queueTickCmd() tea.Cmd {
 	for _, it := range m.list.Items() {
 		planDocs[it.Slug] = it.HasPlanDoc
 	}
+	// Eviction guard: slugs with a live or in-flight session on this instance.
+	// localSessions is the promoted-live set; pendingSpawns is claimed-but-not-yet-
+	// started. A pending request for either is left unclaimed so its spawn can never
+	// replace the running session. Snapshotted at Cmd-build time, like planDocs.
+	liveSlugs := make(map[string]bool, len(m.localSessions)+len(m.pendingSpawns))
+	for slug := range m.localSessions {
+		liveSlugs[slug] = true
+	}
+	for slug := range m.pendingSpawns {
+		liveSlugs[slug] = true
+	}
 	return func() tea.Msg {
 		live := make(map[string]bool)
 		for _, inst := range session.ListInstances(dir) {
@@ -121,6 +132,7 @@ func (m model) queueTickCmd() tea.Cmd {
 		}
 		res, err := session.QueueTick(dir, name, vintage, live,
 			func(slug string) bool { return planDocs[slug] },
+			func(slug string) bool { return liveSlugs[slug] },
 			time.Now(), session.ReclaimAfter)
 		return queueTickResultMsg{result: res, err: err}
 	}

@@ -346,40 +346,88 @@ func TestShouldAutoClose_OverrideMatrix(t *testing.T) {
 	}
 }
 
-// TestHandleCloseRequestScan_InitiatorGate: a consumed close-request tears down
-// an agent session (marked pendingClose, no badge) but holds a human session
-// open (panel badged close-requested, never marked pendingClose). Both rows are
-// consumed regardless.
-func TestHandleCloseRequestScan_InitiatorGate(t *testing.T) {
+// TestHandleCloseRequestScan_ExplicitFullDiscretion: an explicit close (reason
+// human/coordinator) always schedules teardown, regardless of initiator. A
+// generating session (human or agent) is marked pendingClose — never badged, never
+// held — and is interrupted so its turn ends; the interrupt keeps it in pendingClose
+// (advanceCloseLadders waits out the bounded grace) rather than dispatching mid-turn.
+func TestHandleCloseRequestScan_ExplicitFullDiscretion(t *testing.T) {
 	m, _ := baseSessionModel(t)
 	m.localSessions = map[string]liveSession{
-		"agent-item": {typ: "spec", initiator: "agent", started: time.Now()},
-		"human-item": {typ: "spec", initiator: "human", started: time.Now()},
+		"human-gen": {typ: "spec", initiator: "human", started: time.Now()},
+		"agent-gen": {typ: "spec", initiator: "agent", started: time.Now()},
 	}
+	// Fresh panels read as generating (not done, not awaiting input).
 	m.sessionPanels = map[string]work.SessionPanelModel{
-		"agent-item": work.NewSessionPanelModel("agent-item"),
-		"human-item": work.NewSessionPanelModel("human-item"),
+		"human-gen": work.NewSessionPanelModel("human-gen"),
+		"agent-gen": work.NewSessionPanelModel("agent-gen"),
 	}
 
 	m, cmd := m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{
-		{RequestID: "c-agent", Slug: "agent-item", TargetInstance: "me"},
-		{RequestID: "c-human", Slug: "human-item", TargetInstance: "me"},
+		{RequestID: "c-human", Slug: "human-gen", TargetInstance: "me", Reason: "human"},
+		{RequestID: "c-agent", Slug: "agent-gen", TargetInstance: "me", Reason: "coordinator"},
 	}})
 	if cmd == nil {
 		t.Fatal("expected delete Cmds for the consumed rows")
 	}
 
-	if !m.pendingClose["agent-item"] {
-		t.Error("agent session should be marked pending-close (auto-close)")
+	for _, slug := range []string{"human-gen", "agent-gen"} {
+		if !m.pendingClose[slug] {
+			t.Errorf("%s: explicit close should schedule teardown regardless of initiator", slug)
+		}
+		if m.sessionPanels[slug].CloseRequested() {
+			t.Errorf("%s: explicit close must not badge/hold the session open", slug)
+		}
+		if _, interrupted := m.interruptedClose[slug]; !interrupted {
+			t.Errorf("%s: generating session bound for teardown should be interrupted", slug)
+		}
 	}
-	if m.pendingClose["human-item"] {
-		t.Error("human session must not be scheduled for teardown")
+}
+
+// TestHandleCloseRequestScan_ProtocolTerminusGate: a protocol_terminus close keeps
+// the initiator/auto_close gate. An agent session auto-closes (pendingClose, not
+// badged); a human session and an auto_close=false session are held open (badged,
+// not scheduled for teardown).
+func TestHandleCloseRequestScan_ProtocolTerminusGate(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	hold := false
+	m.localSessions = map[string]liveSession{
+		"agent-term": {typ: "spec", initiator: "agent", started: time.Now()},
+		"human-term": {typ: "spec", initiator: "human", started: time.Now()},
+		"hold-term":  {typ: "spec", initiator: "agent", autoClose: &hold, started: time.Now()},
 	}
-	if m.sessionPanels["human-item"].CloseRequested() != true {
-		t.Error("human session panel should carry the close-requested badge")
+	m.sessionPanels = map[string]work.SessionPanelModel{
+		"agent-term": work.NewSessionPanelModel("agent-term"),
+		"human-term": work.NewSessionPanelModel("human-term"),
+		"hold-term":  work.NewSessionPanelModel("hold-term"),
 	}
-	if m.sessionPanels["agent-item"].CloseRequested() {
-		t.Error("agent session panel should not be badged — it tears down")
+
+	m, cmd := m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{
+		{RequestID: "t-agent", Slug: "agent-term", TargetInstance: "me", Reason: "protocol_terminus"},
+		{RequestID: "t-human", Slug: "human-term", TargetInstance: "me", Reason: "protocol_terminus"},
+		{RequestID: "t-hold", Slug: "hold-term", TargetInstance: "me", Reason: "protocol_terminus"},
+	}})
+	if cmd == nil {
+		t.Fatal("expected delete Cmds for the consumed rows")
+	}
+
+	if !m.pendingClose["agent-term"] {
+		t.Error("agent session should auto-close at terminus")
+	}
+	if m.sessionPanels["agent-term"].CloseRequested() {
+		t.Error("auto-closing agent session should not be badged")
+	}
+	if m.pendingClose["human-term"] {
+		t.Error("human session must be held open at terminus, not torn down")
+	}
+	if !m.sessionPanels["human-term"].CloseRequested() {
+		t.Error("human session should carry the held-open badge at terminus")
+	}
+	if m.pendingClose["hold-term"] {
+		t.Error("auto_close=false session must be held open at terminus")
+	}
+	if !m.sessionPanels["hold-term"].CloseRequested() {
+		t.Error("auto_close=false session should carry the held-open badge")
 	}
 }
 

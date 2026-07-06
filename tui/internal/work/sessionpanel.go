@@ -349,6 +349,21 @@ func (m SessionPanelModel) InjectMessage(body, submitSeq string, bracketed bool)
 	return nil
 }
 
+// Interrupt writes the terminal interrupt byte (ESC, 0x1b) to the session PTY to
+// end an in-progress harness turn — the close ladder's interrupt-escalation rung
+// for a generating session close authority permits closing. ESC is the ANSI
+// cancel every supported harness honors to abort a running turn; under tmux
+// hosting it travels through the attach client into the pane transparently, the
+// same path InjectMessage relies on. Returns an error when no PTY is attached so
+// the caller can degrade (the exit ladder still terminates the process).
+func (m SessionPanelModel) Interrupt() error {
+	if m.ptmx == nil {
+		return errors.New("no PTY attached")
+	}
+	_, err := m.ptmx.Write([]byte{0x1b})
+	return err
+}
+
 // Process returns the harness subprocess handle, or nil when no process is
 // attached (never started, or already reaped). The close ladder drives it
 // through SIGTERM→Kill escalation.

@@ -218,20 +218,37 @@ path. Enqueue emits a `close_requested` journal event; the owning instance's lat
 Because there is only ever one eligible actor, delete-on-consume keeps the
 sole-writer-per-file invariant trivially true.
 
-**Initiator-gated auto-close.** Consuming a close-request always deletes the row
-(the durable ack; `close_requested` already recorded intent), but what the TUI
-does next is gated, not unconditional. An **agent-initiated** session tears down
-as before — the ladder fires once the session is quiescent, and `closed` is
-journaled. A **human-initiated** session is instead **held open**: the panel
-shows a "done" badge and the harness keeps running so the human can read output,
-send follow-ups, or run an in-session closing-act retro; teardown stays available
-through the existing keybind (`Ctrl+\`) or a later `close` request that the
-override flips. The per-request `auto_close` field overrides the gate in either
-direction: a coordinator sets `auto_close: false` on an agent request to hold it
-open (e.g. for an in-session retro), or `auto_close: true` on a human request to
-opt into auto-close. The gate reads the session's `initiator` (which the registry
-and journal already carry) and its `auto_close` override — it introduces no new
-substrate state, and the close-request row itself is unchanged.
+**Close authority: explicit is full-discretion, protocol-terminus is gated.**
+Consuming a close-request always deletes the row (the durable ack; `close_requested`
+already recorded intent); what the TUI does next branches on the request's `reason`.
+An **explicit close** — `reason` `human` (the `session close` CLI default) or
+`coordinator` — **always acts**, regardless of initiator or session state: an idle
+session runs the exit ladder directly, a still-**generating** session gets the
+interrupt-escalation rung (below) first, and either way `closed` is journaled with
+spend. There is no authority gate and no refusal on this path — an operator's or
+coordinator's explicit close is never a silent no-op. A **protocol-terminus** close
+— `reason: protocol_terminus`, enqueued by a protocol's own finalize step
+(`spec-finalize` / `impl-close` via `session close --self --reason protocol_terminus`)
+— keeps the **initiator/`auto_close` gate**: an agent-initiated session auto-closes
+(ladder on quiescence, `closed` journaled), while a human-initiated session (or one
+carrying `auto_close: false`) is **held open** with a "done" panel badge so the human
+can read output, send follow-ups, or run an in-session closing-act retro (teardown
+stays available through `Ctrl+\` or a later explicit close). The `auto_close` field
+overrides that terminus gate in either direction (`false` holds an agent session
+open; `true` opts a human session into terminus auto-close). The gate reads the
+session's `initiator` and `auto_close` (already on the registry/journal) — it adds no
+new substrate state, and the close-request row itself is unchanged.
+
+**Interrupt-escalation rung.** A `--yes` protocol run is one unbroken turn: the
+graceful exit rung waits for a turn boundary that never comes, so a close request
+that will tear down a still-generating session (any explicit close, or an
+agent-initiated terminus close) injects the terminal interrupt (ESC) into the session
+PTY the TUI owns — which for a tmux-hosted session travels through the attach client
+into the pane transparently — to end the turn. Teardown then proceeds on the
+session's next quiescence, or, if the interrupt does not end the turn within a bounded
+grace, down the existing exit ladder (graceful → SIGTERM → KILL) regardless. A
+human-initiated session held open at terminus is not being torn down, so it is never
+interrupted.
 
 Teardown of a quiescent auto-close session is additionally held while the
 session sits at an **interactive prompt** (a harness permission/approval modal,

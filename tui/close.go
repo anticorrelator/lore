@@ -22,7 +22,20 @@ import (
 const (
 	closeGraceDefault = 5 * time.Second
 	closePollDefault  = 100 * time.Millisecond
+	// closeInterruptGraceDefault bounds how long the interrupt-escalation rung
+	// waits for an injected interrupt (ESC) to end a generating turn before it
+	// proceeds down the exit ladder regardless. A --yes protocol run is one
+	// unbroken turn, so the interrupt is the only signal that can end it; if it
+	// does not take within this window the ladder escalates (SIGTERM→KILL) rather
+	// than waiting on a boundary that never comes.
+	closeInterruptGraceDefault = 5 * time.Second
 )
+
+// closeReasonProtocolTerminus is the close-request reason a protocol's own finalize
+// step enqueues (session close --self --reason protocol_terminus). It is the only
+// reason still gated by initiator/auto_close (hold-open vs auto-close at terminus);
+// every other reason is an explicit close that acts with full discretion.
+const closeReasonProtocolTerminus = "protocol_terminus"
 
 // closeRung names the ladder step a teardown reached — useful for tests and for
 // asserting monotonic escalation (a session never regresses to a lower rung).
@@ -226,11 +239,17 @@ func shouldAutoClose(ls liveSession) bool {
 }
 
 // handleCloseRequestScan consumes each matched close-request. Consuming always
-// deletes the row (the durable ack; the journal's close_requested already
-// recorded intent). What follows is initiator-gated: an auto-close session is
-// marked awaiting-close so the ladder fires on quiescence; a held-open session
-// gets a "done" panel badge and keeps running (teardown stays available via the
-// existing keybind/verb).
+// deletes the row (the durable ack; the journal's close_requested already recorded
+// intent). What follows branches on the request's reason:
+//
+//   - explicit close (reason human — the CLI default — or coordinator): full
+//     discretion. Always schedule teardown, regardless of initiator or state; a
+//     still-generating session gets the interrupt-escalation rung (ESC injected now
+//     so its turn ends) before the quiescence-gated ladder. Never a silent no-op.
+//   - protocol-terminus close (reason protocol_terminus, enqueued by a protocol's
+//     own finalize step): the initiator/auto_close gate stands. An agent session
+//     auto-closes; a human session (or auto_close=false) is held open with a "done"
+//     panel badge, teardown available via keybind/verb or a later explicit close.
 func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) {
 	if len(msg.matched) == 0 {
 		return m, nil
@@ -242,18 +261,35 @@ func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) 
 		}
 		cmds = append(cmds, deleteCloseRequestCmd(m.sessionsDir, cr.RequestID))
 
-		if ls, tracked := m.localSessions[cr.Slug]; tracked && !shouldAutoClose(ls) {
-			// Held open: badge the panel done, do not schedule teardown.
-			if panel, ok := m.sessionPanels[cr.Slug]; ok {
-				m.sessionPanels[cr.Slug] = panel.MarkCloseRequested()
+		// Protocol-terminus is the only reason still gated by initiator/auto_close.
+		// Every explicit close acts with full discretion (falls through to teardown).
+		if cr.Reason == closeReasonProtocolTerminus {
+			if ls, tracked := m.localSessions[cr.Slug]; tracked && !shouldAutoClose(ls) {
+				// Held open at terminus: badge the panel, keep running.
+				if panel, ok := m.sessionPanels[cr.Slug]; ok {
+					m.sessionPanels[cr.Slug] = panel.MarkCloseRequested()
+				}
+				continue
 			}
-			continue
 		}
 
 		if m.pendingClose == nil {
 			m.pendingClose = make(map[string]bool)
 		}
 		m.pendingClose[cr.Slug] = true
+
+		// Interrupt-escalation rung: a session bound for teardown that is still
+		// generating gets the interrupt byte injected now, so its turn ends and the
+		// quiescence-gated ladder can proceed. Idle sessions need no interrupt.
+		// Best-effort: a missing PTY leaves the ladder to force teardown after the
+		// bounded grace.
+		if panel, ok := m.sessionPanels[cr.Slug]; ok && sessionGenerating(panel) {
+			_ = panel.Interrupt()
+			if m.interruptedClose == nil {
+				m.interruptedClose = make(map[string]time.Time)
+			}
+			m.interruptedClose[cr.Slug] = time.Now()
+		}
 	}
 	var advCmds []tea.Cmd
 	m, advCmds = m.advanceCloseLadders()
@@ -262,6 +298,27 @@ func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) 
 		return m, nil
 	}
 	return m, tea.Batch(cmds...)
+}
+
+// sessionGenerating reports whether a hosted session is actively mid-turn
+// (producing output), as opposed to idle/awaiting-input or finished. It is the
+// interrupt-escalation trigger: a session bound for teardown while generating is
+// interrupted before the ladder. A session paused on an interactive prompt reads as
+// awaiting-input (NeedsInput), so it is not "generating" here — teardown of such a
+// session is separately held by advanceCloseLadders' interactive-prompt guard.
+func sessionGenerating(panel work.SessionPanelModel) bool {
+	return !panel.IsDone() && !panel.NeedsInput()
+}
+
+// interruptGrace is how long advanceCloseLadders waits for an injected interrupt
+// to end a generating turn before forcing teardown down the exit ladder. It
+// reuses the closeGrace seam (tests inject a small value) and falls back to
+// closeInterruptGraceDefault.
+func (m model) interruptGrace() time.Duration {
+	if m.closeGrace > 0 {
+		return m.closeGrace
+	}
+	return closeInterruptGraceDefault
 }
 
 // handleCloseRequestDeleted surfaces a failed row delete. The pendingClose entry
@@ -288,6 +345,7 @@ func (m model) advanceCloseLadders() (model, []tea.Cmd) {
 		panel, ok := m.sessionPanels[slug]
 		if !ok {
 			delete(m.pendingClose, slug) // panel already gone; nothing to tear down
+			delete(m.interruptedClose, slug)
 			continue
 		}
 		// A running session paused on an interactive prompt reads as quiescent
@@ -299,9 +357,17 @@ func (m model) advanceCloseLadders() (model, []tea.Cmd) {
 			interactive = atInteractivePrompt(panel)
 		}
 		if !panel.QuiescentForClose(interactive) {
-			continue // mid-turn or mid-prompt — wait
+			// Mid-turn or mid-prompt. An interrupted session whose bounded grace has
+			// elapsed proceeds down the ladder anyway — the interrupt did not end the
+			// turn, so SIGTERM→KILL will (a --yes turn may never quiesce). Everything
+			// else keeps waiting.
+			t, interrupted := m.interruptedClose[slug]
+			if !interrupted || time.Since(t) < m.interruptGrace() {
+				continue
+			}
 		}
 		delete(m.pendingClose, slug)
+		delete(m.interruptedClose, slug)
 		cmds = append(cmds, m.closeLadderCmd(slug, panel))
 	}
 	return m, cmds

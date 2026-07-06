@@ -301,14 +301,18 @@ type QueueTickResult struct {
 // Every step's durable state change completes before it is reported, so the
 // caller's journal append (which follows) can never precede the state it
 // records. liveInstances is the set of instance names with fresh registry
-// files; hasPlanDoc reports whether a slug has a plan doc (implement gate).
-// myVintage is this instance's build vintage (BuildTime, ISO 8601 UTC), used to
-// filter out requests whose min_vintage this instance does not meet; "" means
-// vintage-unknown, which passes every requirement.
+// files; hasPlanDoc reports whether a slug has a plan doc (implement gate);
+// slugLive reports whether a slug already has a live/in-flight session on this
+// instance (the eviction guard: claiming such a row would silently replace a
+// running session, so the request is left pending until the slug frees). A nil
+// slugLive imposes no such gate. myVintage is this instance's build vintage
+// (BuildTime, ISO 8601 UTC), used to filter out requests whose min_vintage this
+// instance does not meet; "" means vintage-unknown, which passes every requirement.
 func QueueTick(
 	sessionsDir, myName, myVintage string,
 	liveInstances map[string]bool,
 	hasPlanDoc func(slug string) bool,
+	slugLive func(slug string) bool,
 	now time.Time,
 	reclaimAfter time.Duration,
 ) (QueueTickResult, error) {
@@ -347,6 +351,10 @@ func QueueTick(
 		}
 		if req.Type == "implement" && !hasPlanDoc(req.SlugValue()) {
 			continue // gated: implement needs a plan doc before it can be claimed
+		}
+		if s := req.SlugValue(); s != "" && slugLive != nil && slugLive(s) {
+			continue // eviction guard: a session for this slug is already live here;
+			// claiming would silently replace it, so leave the row pending until it frees
 		}
 		won, err := ClaimRequest(sessionsDir, req.RequestID)
 		if err != nil {
