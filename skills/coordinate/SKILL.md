@@ -124,7 +124,13 @@ When the human attaches and asks for a walkthrough, explain from the ledger and 
 
 ## Step 5: Close the arc
 
-When the feature's anchor is satisfied (or the arc is wound down): final board join; confirm every opened stream has a terminal ledger row; run or explicitly defer the batch retro over deferred cycles; sweep captures (`/remember`); commit the final checkpoint; close or archive the ledger item. The ledger's last entry states anchor-delivered vs residue, with the same honesty a closure verdict carries.
+When the feature's anchor is satisfied (or the arc is wound down): final board join; confirm every opened stream has a terminal ledger row; run or explicitly defer the batch retro over deferred cycles (dispatched to a dedicated seat, per the retro section — and have it report any dimension unscorable from artifacts alone: that list is a free measurement of the arc's evidence health); sweep captures (`/remember`); commit the final checkpoint. The ledger's last entry states anchor-delivered vs residue, with the same honesty a closure verdict carries.
+
+Four learned pieces of the ritual (from the arc that built this skill):
+- **Archive follows residue, not ritual.** A ledger item with live residue links stays active as capability-incomplete; it archives when the residue lands. And the ledger stays appendable after "closed" — a late reframe from the user is a legitimate closure shape (*dissolved-by-reframe*, when a bet's premise turns out wrong) and belongs in the record, not in chat.
+- **Check the settlement window.** An arc can run entirely inside a degraded settlement window (queued items, zero completed runs), which makes its scorecards trend-only for `/evolve`. Surface the state at close: offer the (cost-bearing) executor run to the user, or ledger the deferral explicitly.
+- **Sweep mass-mechanical debt.** Arcs that move code accrue enumerable janitorial debt — renamed files staling knowledge anchors is the canonical case. Dispatch a scoped curate for it, or carry it as a named item; never leave it implicit.
+- **Seed the successor.** If a follow-on arc is known, persist its dispatch prompt and the standing directives into the target item's notes — the handoff lives in substrate, so any fresh session can start it without this one's memory.
 
 ## The ledger
 
