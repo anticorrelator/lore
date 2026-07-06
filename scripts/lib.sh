@@ -1802,13 +1802,29 @@ update_meta_timestamp() {
 }
 
 # --- project_record_field ---
-# Read a bold field from a project record at _work/_projects/<slug>.md.
-# Usage: status=$(project_record_field "$WORK_DIR" "$slug" "Status")
-# Prints the field value (text after "**<Field>:** "), or nothing when the
-# record or the field is absent. Always returns 0 so read-only surfaces
-# (list, digest, show, archive) can call it unconditionally under set -e.
+# Read a field from a project record. The directory home
+# (_work/_projects/<slug>/_meta.json) is authoritative; a legacy flat record
+# (_work/_projects/<slug>.md) is the fallback. The field name is the bold-field
+# label ("Status", "Anchor", "Title"); for the home it maps to the lowercase
+# _meta.json key. Prints the value or nothing when the record or field is
+# absent. Always returns 0 so read-only surfaces (list, digest, show, archive)
+# can call it unconditionally under set -e.
 project_record_field() {
   local work_dir="$1" slug="$2" field="$3"
+  local home_meta="$work_dir/_projects/$slug/_meta.json"
+  if [[ -f "$home_meta" ]]; then
+    local key
+    key=$(printf '%s' "$field" | tr '[:upper:]' '[:lower:]')
+    python3 -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+v = d.get(sys.argv[2])
+if v is not None:
+    print(v)' "$home_meta" "$key"
+    return 0
+  fi
   local record="$work_dir/_projects/$slug.md"
   [[ -f "$record" ]] || return 0
   sed -n "s/^\*\*${field}:\*\*[[:space:]]*//p" "$record" | head -1
@@ -1818,8 +1834,9 @@ project_record_field() {
 # Label hygiene for project grouping: warn on stderr when a project label is
 # edit-distance-close to (but not exactly) an existing one. Existing labels
 # are the union of plans[].project and archived[].project from _index.json
-# plus _projects/*.md record basenames. Warn-only — never normalizes, merges,
-# rejects the label, or creates a record. Always returns 0.
+# plus _projects/ record names (directory homes and legacy flat files).
+# Warn-only — never normalizes, merges, rejects the label, or creates a
+# record. Always returns 0.
 # Usage: warn_near_project_label "$WORK_DIR" "$label"
 warn_near_project_label() {
   local work_dir="$1" label="$2"
@@ -1841,6 +1858,8 @@ except Exception:
     pass
 for path in glob.glob(os.path.join(work_dir, "_projects", "*.md")):
     labels.add(os.path.splitext(os.path.basename(path))[0])
+for path in glob.glob(os.path.join(work_dir, "_projects", "*", "_meta.json")):
+    labels.add(os.path.basename(os.path.dirname(path)))
 labels.discard(label)
 for match in difflib.get_close_matches(label, sorted(labels), n=3, cutoff=0.8):
     print(match)
@@ -1851,6 +1870,175 @@ PYEOF
     echo "[work] Warning: project '$label' is close to existing project '$match' — grouping matches exact labels only." >&2
   done <<<"$matches"
   return 0
+}
+
+# --- project_record_exists ---
+# True when a project has a record, in either form: the directory home
+# (_work/_projects/<slug>/_meta.json) or a legacy flat file (<slug>.md).
+# Usage: if project_record_exists "$WORK_DIR" "$slug"; then ...
+project_record_exists() {
+  local work_dir="$1" slug="$2"
+  [[ -f "$work_dir/_projects/$slug/_meta.json" || -f "$work_dir/_projects/$slug.md" ]]
+}
+
+# --- migrate_project_record ---
+# Convert a legacy flat record (_work/_projects/<slug>.md) into the directory
+# home form (_work/_projects/<slug>/ with _meta.json + overview.md). No-op when
+# the home already exists or no flat file is present. Idempotent; always
+# returns 0. Called by the mutating verbs (describe/archive) on first touch and
+# by heal-work.sh for structural repair; read surfaces never call it.
+migrate_project_record() {
+  local work_dir="$1" slug="$2"
+  local flat="$work_dir/_projects/$slug.md"
+  local home="$work_dir/_projects/$slug"
+  [[ -f "$flat" ]] || return 0
+  [[ -d "$home" ]] && return 0
+  local ts
+  ts=$(timestamp_iso)
+  python3 - "$flat" "$home" "$slug" "$ts" <<'PYEOF' || return 0
+import json, os, re, sys
+
+flat, home, slug, ts = sys.argv[1:5]
+with open(flat, encoding="utf-8") as f:
+    text = f.read()
+
+title = " ".join(w.capitalize() for w in slug.split("-"))
+m = re.search(r"^# (.+)$", text, re.MULTILINE)
+if m:
+    title = m.group(1).strip()
+m = re.search(r"^\*\*Status:\*\*[ \t]*(.*)$", text, re.MULTILINE)
+status = (m.group(1).strip() if m else "") or "active"
+m = re.search(r"^\*\*Anchor:\*\*[ \t]*(.*)$", text, re.MULTILINE)
+anchor = m.group(1).strip() if m else ""
+
+lines = text.splitlines()
+body_start = len(lines)
+for i, line in enumerate(lines):
+    s = line.strip()
+    if not s or line.startswith("# ") or line.startswith("**Status:**") or line.startswith("**Anchor:**"):
+        continue
+    body_start = i
+    break
+body = "\n".join(lines[body_start:]).strip()
+
+os.makedirs(home, exist_ok=True)
+meta = {
+    "slug": slug,
+    "title": title,
+    "status": status,
+    "anchor": anchor,
+    "created": ts,
+    "updated": ts,
+}
+with open(os.path.join(home, "_meta.json"), "w", encoding="utf-8") as f:
+    json.dump(meta, f, indent=2)
+    f.write("\n")
+if body:
+    with open(os.path.join(home, "overview.md"), "w", encoding="utf-8") as f:
+        f.write(body + "\n")
+PYEOF
+  rm -f "$flat"
+  return 0
+}
+
+# --- project_identity_state ---
+# Classify a project name as active | archived | free. A project is:
+#   - archived: its record _meta.json.status is "archived", OR no record exists
+#     but the name has archived members and zero active members in _index.json;
+#   - active: its record status is anything other than "archived", OR no record
+#     exists but the name has at least one active member;
+#   - free: no record and no members.
+# The record read dual-reads (directory home first, flat-file fallback). The
+# member read scopes to BOTH _index.json projections — plans[] alone misses the
+# archived generation the gate exists to catch. Always returns 0; echoes the
+# state. Usage: state=$(project_identity_state "$WORK_DIR" "$slug")
+project_identity_state() {
+  local work_dir="$1" slug="$2"
+  local status
+  status=$(project_record_field "$work_dir" "$slug" Status)
+  if [[ -n "$status" ]]; then
+    if [[ "$status" == "archived" ]]; then
+      echo "archived"
+    else
+      echo "active"
+    fi
+    return 0
+  fi
+  python3 - "$work_dir/_index.json" "$slug" <<'PYEOF'
+import json, sys
+
+index_path, slug = sys.argv[1], sys.argv[2]
+try:
+    with open(index_path, encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, json.JSONDecodeError):
+    data = {}
+active = archived = 0
+for item in data.get("plans") or []:
+    if isinstance(item, dict) and str(item.get("project", "") or "") == slug:
+        active += 1
+for item in data.get("archived") or []:
+    if isinstance(item, dict) and str(item.get("project", "") or "") == slug:
+        archived += 1
+if active > 0:
+    print("active")
+elif archived > 0:
+    print("archived")
+else:
+    print("free")
+PYEOF
+}
+
+# --- set_project_record_status ---
+# Set a project home's _meta.json.status (and touch updated), migrating a
+# legacy flat record to the directory home first. No-op when the project has no
+# record (a label-only project — status lives only in its members). Used by
+# archive-project.sh (archived) and the reuse-reactivation paths (active).
+# Usage: set_project_record_status "$WORK_DIR" "$slug" active
+set_project_record_status() {
+  local work_dir="$1" slug="$2" status="$3"
+  migrate_project_record "$work_dir" "$slug"
+  local meta="$work_dir/_projects/$slug/_meta.json"
+  [[ -f "$meta" ]] || return 0
+  local ts
+  ts=$(timestamp_iso)
+  python3 - "$meta" "$status" "$ts" <<'PYEOF'
+import json, sys
+
+meta_path, status, ts = sys.argv[1:4]
+with open(meta_path, encoding="utf-8") as f:
+    data = json.load(f)
+data["status"] = status
+data["updated"] = ts
+with open(meta_path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+}
+
+# --- project_record_statuses ---
+# Emit one "slug<TAB>status" line per project record, dual-reading both the
+# directory homes (_projects/<slug>/_meta.json) and any legacy flat records
+# (_projects/<slug>.md) that have not yet migrated. A home supersedes a flat
+# file of the same slug. Feeds the header status token in list-work.sh and the
+# SessionStart digest (load-work.sh). Always returns 0.
+project_record_statuses() {
+  local work_dir="$1"
+  local records_dir="$work_dir/_projects"
+  [[ -d "$records_dir" ]] || return 0
+  local home record pslug
+  for home in "$records_dir"/*/; do
+    [[ -d "$home" ]] || continue
+    pslug=$(basename "$home")
+    [[ -f "$home/_meta.json" ]] || continue
+    printf '%s\t%s\n' "$pslug" "$(project_record_field "$work_dir" "$pslug" Status)"
+  done
+  for record in "$records_dir"/*.md; do
+    [[ -f "$record" ]] || continue
+    pslug=$(basename "$record" .md)
+    [[ -d "$records_dir/$pslug" ]] && continue
+    printf '%s\t%s\n' "$pslug" "$(project_record_field "$work_dir" "$pslug" Status)"
+  done
 }
 
 # --- iso_to_epoch ---

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # create-work.sh — Create a new work item in _work/
-# Usage: bash create-work.sh --title <name> [--slug <slug>] [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--project <name>] [--json] [--detect-pr]
+# Usage: bash create-work.sh --title <name> [--slug <slug>] [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--project <name>] [--reuse-project] [--json] [--detect-pr]
 # Creates _work/<slug>/ with _meta.json and notes.md, then updates the index.
 #
 # --scope (Phase 2 — work item 02-durable-signal-foundation):
@@ -30,6 +30,9 @@ SCOPE="subsystem"
 # --project: optional grouping label. Slugified on write; the stored slug is
 # both the canonical value and the display value. "" = ungrouped.
 PROJECT=""
+# --reuse-project: knowingly reuse a name that matches an archived project
+# identity (otherwise the write-boundary gate rejects it), reactivating it.
+REUSE_PROJECT=0
 JSON_MODE=0
 DETECT_PR=0
 # --related-work: append-only references to other work items. May be passed
@@ -96,6 +99,10 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
         PROJECT="$2"
         shift 2
         ;;
+      --reuse-project)
+        REUSE_PROJECT=1
+        shift
+        ;;
       --json)
         JSON_MODE=1
         shift
@@ -110,7 +117,7 @@ if [[ $# -ge 1 && "$1" == --* ]]; then
         ;;
       *)
         echo "[work] Error: Unknown flag '$1'" >&2
-        echo "Usage: create-work.sh --title <name> [--slug <slug>] [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--project <name>] [--related-work <slug>] [--json] [--detect-pr]" >&2
+        echo "Usage: create-work.sh --title <name> [--slug <slug>] [--description <text>] [--intent-anchor <text>] [--directory <path>] [--issue <ref>] [--pr <ref>] [--tags <tag1,tag2>] [--scope <scope>] [--project <name>] [--reuse-project] [--related-work <slug>] [--json] [--detect-pr]" >&2
         exit 1
         ;;
     esac
@@ -208,6 +215,20 @@ if [[ -n "$PROJECT" ]]; then
     echo "[work] Warning: --project '$PROJECT_INPUT' produced an empty slug; item left ungrouped." >&2
   else
     warn_near_project_label "$WORK_DIR" "$PROJECT"
+    # Write-boundary uniqueness gate: joining an archived project identity
+    # requires --reuse-project (which reactivates it). Active joins pass free.
+    PROJECT_STATE=$(project_identity_state "$WORK_DIR" "$PROJECT")
+    if [[ "$PROJECT_STATE" == "archived" ]]; then
+      if [[ $REUSE_PROJECT -eq 0 ]]; then
+        MSG="Project '$PROJECT' is archived. Either pass --reuse-project to knowingly continue the archived project (reactivates it), or choose a different name."
+        if [[ $JSON_MODE -eq 1 ]]; then
+          json_error "$MSG"
+        fi
+        echo "[work] Error: $MSG" >&2
+        exit 1
+      fi
+      set_project_record_status "$WORK_DIR" "$PROJECT" active
+    fi
   fi
 fi
 

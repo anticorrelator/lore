@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# test_work_project_entity.sh — Regression tests for the project record
-# substrate (_work/_projects/) and the `lore work project` verb family:
+# test_work_project_entity.sh — Regression tests for the project home substrate
+# (_work/_projects/<slug>/) and the `lore work project` verb family:
 #
-#   1. describe-project.sh creates a record defaulting to **Status:** active;
-#      updates preserve omitted fields; --status validates the closed enum.
-#   2. show-project.sh renders record fields plus active AND archived members;
-#      a recordless project with members gets a members-only view with a
-#      no-record notice; no record and no members is a non-zero error.
+#   1. describe-project.sh creates a directory home (_meta.json + overview.md)
+#      defaulting to status active; updates preserve omitted fields; --status
+#      validates the closed enum.
+#   2. show-project.sh renders record fields plus active AND archived members
+#      and delivers every additional document in the home; a recordless project
+#      with members gets a members-only view with a no-record notice; no record
+#      and no members is a non-zero error.
 #   3. Scanner protection: heal-work.sh fabricates no _meta.json under
-#      _projects/, list-work.sh shows no _projects row, and search-work.sh
-#      returns no _projects-labeled result.
+#      _projects/ (only migrates flat records), list-work.sh shows no _projects
+#      row, and search-work.sh returns no _projects-labeled result.
 #   4. Rollup headers append the declared-status token only when a record
 #      exists with status != active.
 #   5. Near-match label guard: create-work.sh --project and set-work-meta.sh
@@ -17,8 +19,14 @@
 #      complete the mutation; distinct labels stay silent.
 #   6. archive-project.sh confirms unless --yes, archives every active member,
 #      keeps going past per-member failures (non-zero exit, record status
-#      unchanged), flips a pre-existing record to archived on a clean sweep,
-#      and never creates a record for label-only projects.
+#      unchanged), flips a pre-existing record to archived in place on a clean
+#      sweep, and never creates a record for label-only projects.
+#   7. Write-boundary identity gate: reusing a name that matches an archived
+#      project (record-backed OR label-only) is a hard error on all three write
+#      paths (create/set/describe) naming both resolution paths; --reuse-project
+#      (create/set) and --reuse (describe) proceed and reactivate.
+#   8. Migration: a legacy flat record migrates to the directory home on heal
+#      and on first mutating touch (describe); read surfaces dual-read.
 
 set -euo pipefail
 
@@ -84,9 +92,45 @@ assert_exit_nonzero() {
   fi
 }
 
+assert_file() {
+  local label="$1" path="$2"
+  if [[ -f "$path" ]]; then
+    echo "  PASS: $label"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $label"
+    echo "    Expected file to exist: $path"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_no_file() {
+  local label="$1" path="$2"
+  if [[ ! -e "$path" ]]; then
+    echo "  PASS: $label"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $label"
+    echo "    Expected path to be absent: $path"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 write_meta() {
   mkdir -p "$KDIR/_work/$1"
   cat > "$KDIR/_work/$1/_meta.json"
+}
+
+# Read a field from a project home's _meta.json.
+home_field() {
+  python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" \
+    "$KDIR/_work/_projects/$1/_meta.json" "$2"
+}
+
+# Read the project field from a work item's _meta.json (empty when unset).
+item_project() {
+  python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('project',''))" \
+    "$KDIR/_work/$1/_meta.json"
 }
 
 # --- Fixtures ----------------------------------------------------------------
@@ -138,25 +182,17 @@ JSON
 
 bash "$SCRIPTS_DIR/update-work-index.sh" "$KDIR" >/dev/null
 
-# --- 1: describe creates a record with defaults -------------------------------
+# --- 1: describe creates a directory home with defaults -----------------------
 
 bash "$SCRIPTS_DIR/describe-project.sh" "Alpha Effort" \
   --anchor "Ship the alpha" --description "Alpha body text" >/dev/null
-RECORD="$KDIR/_work/_projects/alpha-effort.md"
-if [[ -f "$RECORD" ]]; then
-  echo "  PASS: describe: record created at _projects/alpha-effort.md"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL: describe: record created at _projects/alpha-effort.md"
-  FAIL=$((FAIL + 1))
-fi
-RECORD_TEXT=$(cat "$RECORD")
-assert_contains "describe: omitted status defaults to active" \
-  "$RECORD_TEXT" "**Status:** active"
-assert_contains "describe: anchor persisted as bold field" \
-  "$RECORD_TEXT" "**Anchor:** Ship the alpha"
-assert_contains "describe: description persisted as freeform body" \
-  "$RECORD_TEXT" "Alpha body text"
+HOME="$KDIR/_work/_projects/alpha-effort"
+assert_file "describe: _meta.json created at _projects/alpha-effort/" "$HOME/_meta.json"
+assert_file "describe: overview.md created at _projects/alpha-effort/" "$HOME/overview.md"
+assert_eq "describe: omitted status defaults to active" "$(home_field alpha-effort status)" "active"
+assert_eq "describe: anchor persisted in _meta.json" "$(home_field alpha-effort anchor)" "Ship the alpha"
+assert_contains "describe: description persisted as overview.md body" \
+  "$(cat "$HOME/overview.md")" "Alpha body text"
 
 # --- 2: show renders record plus active AND archived members ------------------
 
@@ -169,13 +205,10 @@ assert_contains "show: archived member listed" "$SHOW_OUT" "member-gone: Member 
 # --- 3: describe update preserves omitted fields; enum validated ---------------
 
 bash "$SCRIPTS_DIR/describe-project.sh" alpha-effort --status done >/dev/null
-RECORD_TEXT=$(cat "$RECORD")
-assert_contains "describe update: status flipped to done" \
-  "$RECORD_TEXT" "**Status:** done"
-assert_contains "describe update: omitted anchor preserved" \
-  "$RECORD_TEXT" "**Anchor:** Ship the alpha"
+assert_eq "describe update: status flipped to done" "$(home_field alpha-effort status)" "done"
+assert_eq "describe update: omitted anchor preserved" "$(home_field alpha-effort anchor)" "Ship the alpha"
 assert_contains "describe update: omitted description preserved" \
-  "$RECORD_TEXT" "Alpha body text"
+  "$(cat "$HOME/overview.md")" "Alpha body text"
 
 set +e
 ENUM_ERR=$(bash "$SCRIPTS_DIR/describe-project.sh" alpha-effort --status bogus 2>&1)
@@ -202,13 +235,8 @@ assert_contains "digest: declared-status token on non-active record" \
 # --- 5: scanner protection for _projects/ -------------------------------------
 
 bash "$SCRIPTS_DIR/heal-work.sh" >/dev/null
-if [[ ! -f "$KDIR/_work/_projects/_meta.json" ]]; then
-  echo "  PASS: heal: no _meta.json fabricated under _projects/"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL: heal: no _meta.json fabricated under _projects/"
-  FAIL=$((FAIL + 1))
-fi
+assert_no_file "heal: no _meta.json fabricated directly under _projects/" \
+  "$KDIR/_work/_projects/_meta.json"
 LIST_OUT=$(bash "$SCRIPTS_DIR/list-work.sh" 2>&1)
 assert_absent "list: no _projects row after heal" "$LIST_OUT" "_projects"
 
@@ -247,20 +275,12 @@ CREATE_ERR=$(bash "$SCRIPTS_DIR/create-work.sh" --title "Near Item" \
   --project "alpha-efort" 2>&1 >/dev/null)
 assert_contains "create: near-match label warns on stderr" \
   "$CREATE_ERR" "[work] Warning: project 'alpha-efort' is close to existing project 'alpha-effort'"
-CREATED_PROJECT=$(python3 -c "
-import json
-print(json.load(open('$KDIR/_work/near-item/_meta.json'))['project'])
-")
-assert_eq "create: near-match mutation still completes" "$CREATED_PROJECT" "alpha-efort"
+assert_eq "create: near-match mutation still completes" "$(item_project near-item)" "alpha-efort"
 
 SET_ERR=$(bash "$SCRIPTS_DIR/set-work-meta.sh" beta-item --project "beta-sde" 2>&1 >/dev/null)
 assert_contains "set: near-match label warns on stderr" \
   "$SET_ERR" "[work] Warning: project 'beta-sde' is close to existing project 'beta-side'"
-SET_PROJECT=$(python3 -c "
-import json
-print(json.load(open('$KDIR/_work/beta-item/_meta.json'))['project'])
-")
-assert_eq "set: near-match mutation still completes" "$SET_PROJECT" "beta-sde"
+assert_eq "set: near-match mutation still completes" "$(item_project beta-item)" "beta-sde"
 
 # Restore beta-item's label for the archive tests below (warns about the
 # now-existing beta-sde near label; that noise is expected here).
@@ -299,10 +319,10 @@ else
   echo "  FAIL: archive: remaining members still attempted after a failure"
   FAIL=$((FAIL + 1))
 fi
-assert_contains "archive: record status unchanged after member failure" \
-  "$(cat "$RECORD")" "**Status:** done"
+assert_eq "archive: record status unchanged after member failure" \
+  "$(home_field alpha-effort status)" "done"
 
-# --- 10: clean sweep flips a pre-existing record to archived -------------------
+# --- 10: clean sweep flips a pre-existing record to archived in place ----------
 
 write_meta gamma-member <<'JSON'
 {
@@ -326,21 +346,187 @@ else
   echo "  FAIL: archive: active member moved to _archive"
   FAIL=$((FAIL + 1))
 fi
-assert_contains "archive: pre-existing record flipped to archived" \
-  "$(cat "$KDIR/_work/_projects/gamma-run.md")" "**Status:** archived"
+assert_eq "archive: pre-existing record flipped to archived in place" \
+  "$(home_field gamma-run status)" "archived"
+assert_file "archive: archived home stays in _projects/ (no move)" \
+  "$KDIR/_work/_projects/gamma-run/_meta.json"
 
 # --- 11: label-only project archives without creating a record -----------------
 
 BETA_ARCH=$(bash "$SCRIPTS_DIR/archive-project.sh" beta-side --yes 2>&1)
 assert_contains "archive: label-only project reports no record to update" \
   "$BETA_ARCH" "[work] No project record to update (label-only project)"
-if [[ ! -f "$KDIR/_work/_projects/beta-side.md" ]]; then
-  echo "  PASS: archive: label-only project gains no record"
-  PASS=$((PASS + 1))
-else
-  echo "  FAIL: archive: label-only project gains no record"
-  FAIL=$((FAIL + 1))
-fi
+assert_no_file "archive: label-only project gains no record" \
+  "$KDIR/_work/_projects/beta-side/_meta.json"
+assert_no_file "archive: label-only project gains no flat record" \
+  "$KDIR/_work/_projects/beta-side.md"
+
+# --- 12: write-boundary gate — record-backed archived identity -----------------
+
+# Build a project with an archived-status record.
+bash "$SCRIPTS_DIR/describe-project.sh" "Retired Effort" --description "retired body" >/dev/null
+bash "$SCRIPTS_DIR/describe-project.sh" retired-effort --status archived >/dev/null
+assert_eq "gate setup: retired-effort record is archived" "$(home_field retired-effort status)" "archived"
+
+# create: rejected without --reuse-project, before any item directory is made.
+set +e
+CREATE_GATE=$(bash "$SCRIPTS_DIR/create-work.sh" --title "Rejoin Retired" \
+  --project "retired-effort" 2>&1 >/dev/null)
+CREATE_GATE_RC=$?
+set -e
+assert_exit_nonzero "create: archived name rejected without --reuse-project" "$CREATE_GATE_RC"
+assert_contains "create: gate error names the reuse path" "$CREATE_GATE" "--reuse-project"
+assert_contains "create: gate error names the rename path" "$CREATE_GATE" "choose a different name"
+assert_no_file "create: gate blocks item creation" "$KDIR/_work/rejoin-retired/_meta.json"
+
+# create --reuse-project: proceeds and reactivates the record to active.
+bash "$SCRIPTS_DIR/create-work.sh" --title "Rejoin Retired" \
+  --project "retired-effort" --reuse-project >/dev/null 2>&1
+assert_eq "create --reuse-project: record reactivated to active" \
+  "$(home_field retired-effort status)" "active"
+assert_eq "create --reuse-project: item joined the project" \
+  "$(item_project rejoin-retired)" "retired-effort"
+
+# set: build a second archived-record project, gate the reassignment.
+bash "$SCRIPTS_DIR/describe-project.sh" "Set Gate Proj" --description "x" >/dev/null
+bash "$SCRIPTS_DIR/describe-project.sh" set-gate-proj --status archived >/dev/null
+write_meta reassign-me <<'JSON'
+{
+  "slug": "reassign-me",
+  "title": "Reassign Me",
+  "status": "active",
+  "created": "2026-06-01T00:00:00Z",
+  "updated": "2026-06-10T00:00:00Z"
+}
+JSON
+bash "$SCRIPTS_DIR/update-work-index.sh" "$KDIR" >/dev/null
+set +e
+SET_GATE=$(bash "$SCRIPTS_DIR/set-work-meta.sh" reassign-me --project "set-gate-proj" 2>&1 >/dev/null)
+SET_GATE_RC=$?
+set -e
+assert_exit_nonzero "set: archived name rejected without --reuse-project" "$SET_GATE_RC"
+assert_contains "set: gate error names the reuse path" "$SET_GATE" "--reuse-project"
+assert_eq "set: gate blocks the reassignment" "$(item_project reassign-me)" ""
+
+bash "$SCRIPTS_DIR/set-work-meta.sh" reassign-me --project "set-gate-proj" --reuse-project >/dev/null 2>&1
+assert_eq "set --reuse-project: record reactivated to active" \
+  "$(home_field set-gate-proj status)" "active"
+assert_eq "set --reuse-project: item joined the project" \
+  "$(item_project reassign-me)" "set-gate-proj"
+
+# describe: gate on the record-writing path itself.
+bash "$SCRIPTS_DIR/describe-project.sh" "Describe Gate Proj" --description "orig" >/dev/null
+bash "$SCRIPTS_DIR/describe-project.sh" describe-gate-proj --status archived >/dev/null
+set +e
+DESC_GATE=$(bash "$SCRIPTS_DIR/describe-project.sh" describe-gate-proj --description "new" 2>&1 >/dev/null)
+DESC_GATE_RC=$?
+set -e
+assert_exit_nonzero "describe: archived name rejected without --reuse" "$DESC_GATE_RC"
+assert_contains "describe: gate error names the reuse path" "$DESC_GATE" "--reuse"
+assert_eq "describe: gate blocks the update" "$(home_field describe-gate-proj status)" "archived"
+
+bash "$SCRIPTS_DIR/describe-project.sh" describe-gate-proj --description "new" --reuse >/dev/null
+assert_eq "describe --reuse: record reactivated to active" \
+  "$(home_field describe-gate-proj status)" "active"
+assert_contains "describe --reuse: update applied" \
+  "$(cat "$KDIR/_work/_projects/describe-gate-proj/overview.md")" "new"
+
+# --- 13: write-boundary gate — label-only archived identity (D2 common case) ---
+
+write_meta labelonly-member <<'JSON'
+{
+  "slug": "labelonly-member",
+  "title": "Labelonly Member",
+  "status": "active",
+  "project": "labelonly-proj",
+  "created": "2026-06-01T00:00:00Z",
+  "updated": "2026-06-10T00:00:00Z"
+}
+JSON
+bash "$SCRIPTS_DIR/update-work-index.sh" "$KDIR" >/dev/null
+bash "$SCRIPTS_DIR/archive-work.sh" labelonly-member >/dev/null
+bash "$SCRIPTS_DIR/update-work-index.sh" "$KDIR" >/dev/null
+
+set +e
+LO_GATE=$(bash "$SCRIPTS_DIR/create-work.sh" --title "Rejoin Labelonly" \
+  --project "labelonly-proj" 2>&1 >/dev/null)
+LO_GATE_RC=$?
+set -e
+assert_exit_nonzero "create: label-only archived identity rejected without --reuse-project" "$LO_GATE_RC"
+assert_contains "create: label-only gate error names the reuse path" "$LO_GATE" "--reuse-project"
+
+bash "$SCRIPTS_DIR/create-work.sh" --title "Rejoin Labelonly" \
+  --project "labelonly-proj" --reuse-project >/dev/null 2>&1
+assert_eq "create --reuse-project: item joined label-only project" \
+  "$(item_project rejoin-labelonly)" "labelonly-proj"
+assert_no_file "create --reuse-project: label-only reuse creates no record" \
+  "$KDIR/_work/_projects/labelonly-proj/_meta.json"
+
+# --- 14: migration — legacy flat record migrates on heal -----------------------
+
+write_meta legacy-member <<'JSON'
+{
+  "slug": "legacy-member",
+  "title": "Legacy Member",
+  "status": "active",
+  "project": "legacy-proj",
+  "created": "2026-06-01T00:00:00Z",
+  "updated": "2026-06-10T00:00:00Z"
+}
+JSON
+mkdir -p "$KDIR/_work/_projects"
+cat > "$KDIR/_work/_projects/legacy-proj.md" <<'EOF'
+# Legacy Proj
+
+**Status:** done
+**Anchor:** legacy anchor
+
+Legacy body text
+EOF
+bash "$SCRIPTS_DIR/update-work-index.sh" "$KDIR" >/dev/null
+bash "$SCRIPTS_DIR/heal-work.sh" >/dev/null
+assert_file "heal migration: directory home created" \
+  "$KDIR/_work/_projects/legacy-proj/_meta.json"
+assert_no_file "heal migration: flat record removed" \
+  "$KDIR/_work/_projects/legacy-proj.md"
+assert_eq "heal migration: anchor preserved" "$(home_field legacy-proj anchor)" "legacy anchor"
+assert_eq "heal migration: status preserved" "$(home_field legacy-proj status)" "done"
+assert_contains "heal migration: body preserved as overview.md" \
+  "$(cat "$KDIR/_work/_projects/legacy-proj/overview.md")" "Legacy body text"
+MIGRATED_LIST=$(bash "$SCRIPTS_DIR/list-work.sh" 2>&1)
+assert_contains "heal migration: list still renders section with status token" \
+  "$MIGRATED_LIST" "legacy-proj [done] — 1 active"
+
+# --- 15: migration — mutating touch (describe) migrates a flat record ----------
+
+cat > "$KDIR/_work/_projects/touch-proj.md" <<'EOF'
+# Touch Proj
+
+**Status:** active
+**Anchor:** old anchor
+
+old body
+EOF
+bash "$SCRIPTS_DIR/describe-project.sh" touch-proj --anchor "new anchor" >/dev/null
+assert_file "touch migration: directory home created" \
+  "$KDIR/_work/_projects/touch-proj/_meta.json"
+assert_no_file "touch migration: flat record removed" \
+  "$KDIR/_work/_projects/touch-proj.md"
+assert_eq "touch migration: update applied over migrated fields" \
+  "$(home_field touch-proj anchor)" "new anchor"
+assert_contains "touch migration: pre-existing body preserved" \
+  "$(cat "$KDIR/_work/_projects/touch-proj/overview.md")" "old body"
+
+# --- 16: show delivers every home document (bag-of-files) ----------------------
+
+bash "$SCRIPTS_DIR/describe-project.sh" "Doc Proj" --description "overview body" >/dev/null
+echo "coordination ledger content" > "$KDIR/_work/_projects/doc-proj/coordination.md"
+DOC_OUT=$(bash "$SCRIPTS_DIR/show-project.sh" doc-proj 2>&1)
+assert_contains "show: overview body delivered" "$DOC_OUT" "overview body"
+assert_contains "show: extra document header delivered" \
+  "$DOC_OUT" "--- Document: coordination.md ---"
+assert_contains "show: extra document content delivered" \
+  "$DOC_OUT" "coordination ledger content"
 
 # --- Results -----------------------------------------------------------------
 

@@ -85,14 +85,11 @@ fi
 TERM_WIDTH="$(term_width)"
 
 # Project records feed only the header status token; counts come from the
-# index projections. One "slug<TAB>status" line per record file.
+# index projections. One "slug<TAB>status" line per record, dual-reading the
+# directory homes and any unmigrated legacy flat records.
 PROJECT_RECORD_STATUSES=""
 if [[ -d "$WORK_DIR/_projects" ]]; then
-  for record in "$WORK_DIR/_projects"/*.md; do
-    [[ -f "$record" ]] || continue
-    pslug=$(basename "$record" .md)
-    PROJECT_RECORD_STATUSES+="${pslug}"$'\t'"$(project_record_field "$WORK_DIR" "$pslug" Status)"$'\n'
-  done
+  PROJECT_RECORD_STATUSES="$(project_record_statuses "$WORK_DIR")"
 fi
 
 python3 - "$INDEX" "$WORK_DIR/_archive" "$FILTER_STATUS" "$SHOW_ALL" "$TERM_WIDTH" "$PROJECT_RECORD_STATUSES" << 'PYEOF'

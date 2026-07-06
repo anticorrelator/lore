@@ -167,14 +167,18 @@ EOF
 
 work_project_usage() {
   cat >&2 <<EOF
-lore work project — project record and member management
+lore work project — project home and member management
 
 Usage: lore work project <subcommand> [args...]
 
 Subcommands:
-  show      Show a project's record (when present) and all members, active and archived
-  describe  Create or update the project record (--anchor, --status, --description)
-  archive   Archive every active member; mark a pre-existing record archived
+  show      Show a project's home (record fields + all documents) and all members, active and archived
+  describe  Create or update the project home (--anchor, --status, --description); --reuse to reactivate an archived project
+  archive   Archive every active member; mark a pre-existing record archived in place
+
+A project home lives at _work/_projects/<slug>/ (_meta.json + overview.md +
+freeform documents). Reusing a name that matches an archived project is a hard
+error unless --reuse (describe) or --reuse-project (create/set) is passed.
 
 Options:
   --help, -h    Show this help

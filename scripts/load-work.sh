@@ -43,14 +43,11 @@ WORK_COUNT=$(echo "$WORK_COUNT" | tr -d '[:space:]')
 [[ "$WORK_COUNT" -gt 0 ]] || exit 0
 
 # Project records feed only the header status token; counts come from the
-# index projections. One "slug<TAB>status" line per record file.
+# index projections. One "slug<TAB>status" line per record, dual-reading the
+# directory homes and any unmigrated legacy flat records.
 PROJECT_RECORD_STATUSES=""
 if [[ -d "$WORK_DIR/_projects" ]]; then
-  for record in "$WORK_DIR/_projects"/*.md; do
-    [[ -f "$record" ]] || continue
-    pslug=$(basename "$record" .md)
-    PROJECT_RECORD_STATUSES+="${pslug}"$'\t'"$(project_record_field "$WORK_DIR" "$pslug" Status)"$'\n'
-  done
+  PROJECT_RECORD_STATUSES="$(project_record_statuses "$WORK_DIR")"
 fi
 
 # Parse work items, calculate dates, check staleness — single python3 pass

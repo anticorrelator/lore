@@ -42,7 +42,7 @@ Do not copy emotionally loaded or conversationally pressuring user text verbatim
 
 Ask the user only at a genuine fork — two existing labels are equally plausible, or joins-existing vs. starts-new genuinely cannot be resolved from the item's scope. Everything short of that is your call to make at create time; do not create ungrouped "for now" and defer assignment to later cleanup.
 
-Pass `--issue` and `--pr` only when provided by the user; `--project` follows the grouping step above (a user-provided label always wins). Show the script output. If it exits non-zero, show the error.
+Pass `--issue` and `--pr` only when provided by the user; `--project` follows the grouping step above (a user-provided label always wins). Joining an **active** project is gate-free — that is the documented join. But naming a project whose identity is **archived** (a completed effort, surfaced only in `--all`/archive listings, not in the plain `lore work list`) is a hard error: either pass `--reuse-project` to knowingly continue it (which reactivates the project), or choose a different name. Show the script output. If it exits non-zero, show the error.
 
 ---
 
@@ -106,19 +106,23 @@ lore work set "<slug>" --issue "<value>" --pr "<value>" --project "<name>"
 ```
 All flags are optional — pass only what the user provided. Show the script output.
 
-`--project` groups the item under a project label (slugified on write; the stored slug is the display value). `--project ""` clears the item's project membership.
+`--project` groups the item under a project label (slugified on write; the stored slug is the display value). Reassigning onto an **archived** project identity is a hard error — pass `--reuse-project` to knowingly continue it (which reactivates it), or choose a different name; reassigning onto an active label is gate-free. `--project ""` clears the item's project membership and bypasses the gate entirely.
 
 ---
 
 ### `project <show|describe|archive> <slug> [...]`
 ```bash
 lore work project show "<slug>"
-lore work project describe "<slug>" [--anchor "<text>"] [--status <active|done|archived>] [--description "<text>"]
+lore work project describe "<slug>" [--anchor "<text>"] [--status <active|done|archived>] [--description "<text>"] [--reuse]
 lore work project archive "<slug>" [--yes]
 ```
-Show the script output. `show` renders the project record (when one exists) plus all members, active and archived. `describe` creates or updates the record at `_work/_projects/<slug>.md`; omitted fields keep their values. `archive` archives every active member and flips a pre-existing record to archived — confirm with the user first, then pass `--yes`.
+A project record is a **directory home** at `_work/_projects/<slug>/`, mirroring the work-item substrate: `_meta.json` (slug, title, status, anchor, timestamps — the identity source of truth) + `overview.md` (the description body) + any freeform project-level documents you add.
 
-**Records are entity-on-demand:** run `describe` only when there is a real anchor or status worth declaring — typically when a spec reveals a workstream-level anchor, or a project's status genuinely changes. Never run it automatically as a side effect of creating or grouping items: a project label works fine with no record behind it. And never create planning files for a project — plans belong to work items; a project record carries an anchor, a status, and a description, nothing more.
+Show the script output. `show` renders the home's `_meta` fields plus **every document in the home** (the same bag-of-files delivery as `lore work show`), followed by all members, active and archived. `describe` creates or updates the home — writing `_meta.json` + `overview.md`, omitted fields keeping their values; a legacy flat record migrates to the directory form on this touch. `archive` archives every active member and flips a pre-existing record's status to archived **in place** (the home does not move) — confirm with the user first, then pass `--yes`.
+
+**Archived-name gate:** `describe` on a name whose identity is archived is a hard error unless you pass `--reuse`, which reactivates the project (status → active). The same gate guards `--project` on create/set, where the flag is `--reuse-project`. Both resolve two ways: reuse the archived identity knowingly, or choose a different name.
+
+**Records are entity-on-demand:** run `describe` only when there is a real anchor or status worth declaring — typically when a spec reveals a workstream-level anchor, a project's status genuinely changes, or a multi-item arc opens and needs a home for its `/coordinate` ledger. Never run it automatically as a side effect of creating or grouping items: a project label works fine with no record behind it. And never put planning files in a project home — plans belong to work items. A project home holds **cross-item** documents (an overview, a coordination ledger spanning several items, design notes that outlive any single item); it never holds a work item's planning substrate (`plan.md`, `tasks.json`, `notes.md`). A project that needs a plan names an umbrella work item and plans there.
 
 ---
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # set-work-meta.sh — Set metadata fields on an existing work item
-# Usage: bash set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|"">]
+# Usage: bash set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--reuse-project] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|"">]
 # Updates the specified fields in _meta.json, touches the timestamp, and rebuilds the index.
 #
 # --scope (Phase 2 — work item 02-durable-signal-foundation):
@@ -20,6 +20,9 @@ PR=""
 SCOPE=""
 PROJECT=""
 INTENT_ANCHOR=""
+# --reuse-project: knowingly reassign a name that matches an archived project
+# identity (otherwise the write-boundary gate rejects it), reactivating it.
+REUSE_PROJECT=0
 HAS_ISSUE=0
 HAS_PR=0
 HAS_SCOPE=0
@@ -81,6 +84,10 @@ while [[ $# -gt 0 ]]; do
       HAS_PROJECT=1
       shift 2
       ;;
+    --reuse-project)
+      REUSE_PROJECT=1
+      shift
+      ;;
     --intent-anchor)
       INTENT_ANCHOR="$2"
       HAS_INTENT_ANCHOR=1
@@ -109,7 +116,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "[work] Error: Unknown flag '$1'" >&2
-      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|\"\">] [--detect-pr] [--json]" >&2
+      echo "Usage: set-work-meta.sh <slug> [--issue <value>] [--pr <value>] [--scope <scope>] [--project <name>] [--reuse-project] [--intent-anchor <text>] [--related-work <slug>] [--blocked-by <slug>] [--ceremony-depth <1-3|\"\">] [--detect-pr] [--json]" >&2
       exit 1
       ;;
   esac
@@ -250,6 +257,21 @@ if [[ "$HAS_PROJECT" -eq 1 ]]; then
       echo "[work] Warning: --project '$PROJECT_INPUT' produced an empty slug; clearing project." >&2
     else
       warn_near_project_label "$WORK_DIR" "$PROJECT"
+      # Write-boundary uniqueness gate: reassigning onto an archived project
+      # identity requires --reuse-project (which reactivates it). Active joins
+      # and the clear path (--project "") pass gate-free.
+      PROJECT_STATE=$(project_identity_state "$WORK_DIR" "$PROJECT")
+      if [[ "$PROJECT_STATE" == "archived" ]]; then
+        if [[ $REUSE_PROJECT -eq 0 ]]; then
+          MSG="Project '$PROJECT' is archived. Either pass --reuse-project to knowingly continue the archived project (reactivates it), or choose a different name."
+          if [[ $JSON_MODE -eq 1 ]]; then
+            json_error "$MSG"
+          fi
+          echo "[work] Error: $MSG" >&2
+          exit 1
+        fi
+        set_project_record_status "$WORK_DIR" "$PROJECT" active
+      fi
     fi
   fi
   python3 - "$META_FILE" "$PROJECT" << 'PYEOF'

@@ -457,7 +457,13 @@ class Resolver:
 
         elif source_type == "project":
             # Record-first; resolve() falls back to an _index.json member list
-            # when no record file exists.
+            # when no record file exists. The directory home's overview.md wins
+            # over a legacy flat record of the same slug.
+            home_overview = os.path.join(
+                self.knowledge_dir, "_work", "_projects", target, "overview.md"
+            )
+            if os.path.isfile(home_overview):
+                return home_overview, False
             candidate = os.path.join(self.knowledge_dir, "_work", "_projects", f"{target}.md")
             if os.path.isfile(candidate):
                 return candidate, False

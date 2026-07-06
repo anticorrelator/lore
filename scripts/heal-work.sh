@@ -150,6 +150,24 @@ for dir in "$WORK_DIR"/*/; do
   fi
 done
 
+# --- (f) Legacy flat project records ---
+# Migrate any _projects/<slug>.md flat record to the directory home form
+# (_projects/<slug>/ with _meta.json + overview.md). migrate_project_record is
+# a no-op when a home of the same slug already exists.
+if [[ -d "$WORK_DIR/_projects" ]]; then
+  for record in "$WORK_DIR/_projects"/*.md; do
+    [[ -f "$record" ]] || continue
+    PSLUG=$(basename "$record" .md)
+    if [[ ! -d "$WORK_DIR/_projects/$PSLUG" ]]; then
+      migrate_project_record "$WORK_DIR" "$PSLUG"
+      if [[ -f "$WORK_DIR/_projects/$PSLUG/_meta.json" ]]; then
+        FINDINGS+=("[heal] Migrated legacy project record '$PSLUG' to directory home")
+        FIXES=$((FIXES + 1))
+      fi
+    fi
+  done
+fi
+
 # --- Report ---
 echo "=== Work Heal Report ==="
 if [[ ${#FINDINGS[@]} -eq 0 ]]; then

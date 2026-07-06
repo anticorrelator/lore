@@ -272,6 +272,30 @@ assert_absent "digest: no-project store does not indent item lines" \
   "$PLAIN_LOAD" "  - plain-item"
 rm -rf "$KDIR2"
 
+# --- 9: directory-home record status token on BOTH grouping surfaces ----------
+
+# A project with a directory-home record (_projects/<slug>/_meta.json) whose
+# status != active must surface its declared-status token in both list-work.sh
+# and the load-work.sh digest — the dual-read the record layout depends on.
+write_meta record-member <<'JSON'
+{
+  "slug": "record-member",
+  "title": "Record Member",
+  "status": "active",
+  "project": "record-run",
+  "created": "2026-06-01T00:00:00Z",
+  "updated": "2026-06-12T00:00:00Z"
+}
+JSON
+bash "$SCRIPTS_DIR/update-work-index.sh" "$KDIR" >/dev/null
+bash "$SCRIPTS_DIR/describe-project.sh" record-run --status done >/dev/null
+RECORD_LIST=$(bash "$SCRIPTS_DIR/list-work.sh" 2>&1)
+assert_contains "list: directory-home status token surfaced" \
+  "$RECORD_LIST" "record-run [done] — 1 active"
+RECORD_LOAD=$(bash "$SCRIPTS_DIR/load-work.sh" 2>&1)
+assert_contains "digest: directory-home status token surfaced" \
+  "$RECORD_LOAD" "record-run [done] — 1 active:"
+
 # --- Results -----------------------------------------------------------------
 
 echo ""

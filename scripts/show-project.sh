@@ -69,12 +69,13 @@ INDEX="$WORK_DIR/_index.json"
 # Freshen the index so just-created or just-archived members show up.
 "$SCRIPT_DIR/update-work-index.sh" >/dev/null 2>/dev/null || true
 
-RECORD="$WORK_DIR/_projects/$SLUG.md"
+HOME_DIR="$WORK_DIR/_projects/$SLUG"
+FLAT="$WORK_DIR/_projects/$SLUG.md"
 
-python3 - "$INDEX" "$RECORD" "$SLUG" "$JSON_MODE" << 'PYEOF'
+python3 - "$INDEX" "$HOME_DIR" "$FLAT" "$SLUG" "$JSON_MODE" << 'PYEOF'
 import json, os, re, sys
 
-index_path, record_path, slug, json_mode = sys.argv[1:5]
+index_path, home_dir, flat_path, slug, json_mode = sys.argv[1:6]
 json_mode = json_mode == "1"
 
 active, archived = [], []
@@ -91,9 +92,37 @@ for item in data.get("archived") or []:
     if isinstance(item, dict) and str(item.get("project", "") or "") == slug:
         archived.append(item)
 
+# Read a file's text, or None when absent.
+def read_file(path):
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    return None
+
 record = None
-if os.path.exists(record_path):
-    with open(record_path, encoding="utf-8") as f:
+documents = []
+home_meta = os.path.join(home_dir, "_meta.json")
+if os.path.isfile(home_meta):
+    # Directory home is authoritative. overview.md is the description; every
+    # other file in the home is a project-level document, delivered in full.
+    with open(home_meta, encoding="utf-8") as f:
+        meta = json.load(f)
+    overview = read_file(os.path.join(home_dir, "overview.md")) or ""
+    record = {
+        "title": meta.get("title") or slug,
+        "status": meta.get("status") or "active",
+        "anchor": meta.get("anchor") or "",
+        "description": overview.strip(),
+    }
+    for name in sorted(os.listdir(home_dir)):
+        if name in ("_meta.json", "overview.md") or name.startswith("_"):
+            continue
+        content = read_file(os.path.join(home_dir, name))
+        if content is not None:
+            documents.append({"name": name, "content": content})
+elif os.path.isfile(flat_path):
+    # Legacy flat record (unmigrated store): parse the bold fields and body.
+    with open(flat_path, encoding="utf-8") as f:
         text = f.read()
 
     def field(name):
@@ -127,6 +156,7 @@ if json_mode:
     print(json.dumps({
         "slug": slug,
         "record": record,
+        "documents": documents,
         "active": active,
         "archived": archived,
     }, indent=2))
@@ -145,6 +175,10 @@ if record:
 else:
     print("(no project record — members only; use `lore work project describe` to add one)")
 print()
+for doc in documents:
+    print(f"--- Document: {doc['name']} ---")
+    print(doc["content"].rstrip("\n"))
+    print()
 print(f"--- Active members ({len(active)}) ---")
 for item in active:
     print(f"  {item.get('slug', '')}: {item.get('title', '')} (updated {item.get('updated', '')})")

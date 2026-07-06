@@ -71,7 +71,12 @@ if [[ ! -d "$WORK_DIR" ]]; then
 fi
 
 INDEX="$WORK_DIR/_index.json"
-RECORD="$WORK_DIR/_projects/$SLUG.md"
+
+# A record exists in either form (directory home or legacy flat file).
+RECORD_EXISTS=0
+if project_record_exists "$WORK_DIR" "$SLUG"; then
+  RECORD_EXISTS=1
+fi
 
 # Freshen the index so the member list reflects the current tree.
 "$SCRIPT_DIR/update-work-index.sh" >/dev/null 2>/dev/null || true
@@ -97,7 +102,7 @@ while IFS= read -r member; do
   [[ -n "$member" ]] && MEMBER_SLUGS+=("$member")
 done <<<"$MEMBERS"
 
-if [[ ! -f "$RECORD" && ${#MEMBER_SLUGS[@]} -eq 0 ]]; then
+if [[ $RECORD_EXISTS -eq 0 && ${#MEMBER_SLUGS[@]} -eq 0 ]]; then
   if [[ $JSON_MODE -eq 1 ]]; then
     json_error "No project record or active members found for: $SLUG"
   fi
@@ -132,11 +137,12 @@ for member in "${MEMBER_SLUGS[@]+"${MEMBER_SLUGS[@]}"}"; do
   fi
 done
 
-# Record status flips only after a clean sweep, and only on a record that
-# already exists — archiving never registers a project.
+# Record status flips in place only after a clean sweep, and only on a record
+# that already exists — archiving never registers a project. A legacy flat
+# record migrates to the directory home on this touch.
 RECORD_UPDATED=0
-if [[ ${#FAILED_MEMBERS[@]} -eq 0 && -f "$RECORD" ]]; then
-  bash "$SCRIPT_DIR/describe-project.sh" "$SLUG" --status archived >/dev/null
+if [[ ${#FAILED_MEMBERS[@]} -eq 0 && $RECORD_EXISTS -eq 1 ]]; then
+  set_project_record_status "$WORK_DIR" "$SLUG" archived
   RECORD_UPDATED=1
 fi
 
@@ -164,8 +170,8 @@ fi
 
 echo "[work] Archived project '$SLUG': ${#ARCHIVED_MEMBERS[@]} member(s) archived"
 if [[ "$RECORD_UPDATED" -eq 1 ]]; then
-  echo "[work] Project record marked archived: $RECORD"
-elif [[ ! -f "$RECORD" ]]; then
+  echo "[work] Project record marked archived: $WORK_DIR/_projects/$SLUG"
+elif [[ $RECORD_EXISTS -eq 0 ]]; then
   echo "[work] No project record to update (label-only project)"
 fi
 if [[ ${#FAILED_MEMBERS[@]} -gt 0 ]]; then
