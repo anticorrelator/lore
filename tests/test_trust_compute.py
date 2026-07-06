@@ -69,7 +69,9 @@ def _envelope(rng: random.Random, event: str, entry_path: str, payload: dict) ->
 def _gen_row(rng: random.Random, entry_pool: list[str], uniq: int) -> dict:
     """One random valid ledger row; `uniq` keeps dedupe bases distinct."""
     entry = rng.choice(entry_pool)
-    kind = rng.choice(("consumption-verification", "mechanical-check", "adjudication"))
+    kind = rng.choice(
+        ("consumption-verification", "mechanical-check", "adjudication", "trust-confirmation")
+    )
     if kind == "consumption-verification":
         payload = {
             "disposition": rng.choice(("held", "contradicted")),
@@ -77,6 +79,11 @@ def _gen_row(rng: random.Random, entry_pool: list[str], uniq: int) -> dict:
             "line_range": f"{rng.randint(1, 500)}-{rng.randint(501, 999)}",
             "exact_snippet": rng.choice(_SNIPPET_POOL),
             "normalized_snippet_hash": "0" * 64,
+        }
+    elif kind == "trust-confirmation":
+        payload = {
+            "verdict": rng.choice(("held", "contradicted")),
+            "sha": format(uniq, "07x"),
         }
     elif kind == "mechanical-check":
         payload = {
@@ -206,6 +213,27 @@ def test_fold_score_shape():
     assert tc.score_for_entry(scores, {}, "conventions/never-observed.md") is None
 
 
+def test_confirm_verdicts_fold_at_half_grounded_weight():
+    """trust-confirmation verdicts weigh +0.5 held / -1.0 contradicted."""
+    rng = random.Random(11)
+    entry = "conventions/confirmed.md"
+    rows = [
+        _envelope(rng, "trust-confirmation", entry, {"verdict": "held", "sha": "aaaaaa1"}),
+        _envelope(rng, "trust-confirmation", entry, {"verdict": "held", "sha": "aaaaaa2"}),
+        _envelope(rng, "trust-confirmation", entry, {"verdict": "contradicted", "sha": "bbbbbb1"}),
+    ]
+    scores, _, warnings = tc.fold_rows(rows)
+    summary = scores[entry]
+    assert summary["counts"]["confirm_held"] == 2
+    assert summary["counts"]["confirm_contradicted"] == 1
+    # 2*(+0.5) + 1*(-1.0) == 0.0 — a cheap confirmation is half a grounded one.
+    assert summary["signal"] == 0.0
+    assert warnings == []
+    # And the published constants are exactly half their grounded counterparts.
+    assert tc.WEIGHT_CONFIRM_HELD == tc.WEIGHT_HELD / 2
+    assert tc.WEIGHT_CONFIRM_CONTRADICTED == tc.WEIGHT_CONTRADICTED / 2
+
+
 def test_fold_excludes_malformed_with_warnings():
     rng = random.Random(7)
     good = _gen_row(rng, ["conventions/x.md"], 0)
@@ -279,7 +307,7 @@ def _writer_available() -> bool:
 
 
 @pytest.mark.skipif(not _writer_available(), reason="jq or writer script unavailable")
-@pytest.mark.parametrize("kind", ["consumption-verification", "mechanical-check", "adjudication", "provenance-migration"])
+@pytest.mark.parametrize("kind", ["consumption-verification", "mechanical-check", "adjudication", "provenance-migration", "trust-confirmation"])
 def test_event_id_matches_writer(tmp_path, kind):
     """compute_event_id reproduces the writer's dedupe basis byte-identically."""
     kdir = tmp_path / "kd"
@@ -305,6 +333,10 @@ def test_event_id_matches_writer(tmp_path, kind):
             "--from-entry-path", "conventions/e.md",
             "--to-entry-path", "conventions/e2.md",
             "--reason", "renormalize-restructure",
+        ],
+        "trust-confirmation": [
+            "--entry-path", "conventions/e.md", "--verdict", "held",
+            "--sha", "a1b2c3d",
         ],
     }[kind]
     proc = subprocess.run(common + payload_flags, capture_output=True, text=True)

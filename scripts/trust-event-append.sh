@@ -26,6 +26,8 @@
 #   provenance-migration      --from-entry-path <rel> --to-entry-path <rel>
 #                             --reason l3-supersede|renormalize-restructure
 #                             [--verdict-id <id>]
+#   trust-confirmation        --verdict held|contradicted --sha <hex>
+#                             [--note <text>]
 #
 # Common flags:
 #   --event <kind>            required
@@ -34,7 +36,7 @@
 #                             when supplied)
 #   --source <enum>           required: worker|researcher|spec-lead|
 #                             implement-lead|drift-sweep|audit|settlement|
-#                             apply-correction|renormalize
+#                             apply-correction|renormalize|interactive|coordinator
 #   [--observed-at <iso8601>] [--kdir <path>] [--json]
 #
 # Grounded-or-nothing: consumption-verification rows require file, line-range,
@@ -57,9 +59,9 @@ source "$SCRIPT_DIR/lib.sh"
 usage() {
   cat >&2 <<'EOF'
 Usage: trust-event-append.sh \
-           --event <mechanical-check|consumption-verification|adjudication|provenance-migration> \
+           --event <mechanical-check|consumption-verification|adjudication|provenance-migration|trust-confirmation> \
            --entry-path <path-relative-to-KDIR> \
-           --source <worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize> \
+           --source <worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator> \
            [--observed-at <iso8601>] [--kdir <path>] [--json] \
            <event-specific payload flags>
 
@@ -80,6 +82,8 @@ Event-specific payload flags:
   provenance-migration:
       --from-entry-path <rel> --to-entry-path <rel> \
       --reason <l3-supersede|renormalize-restructure> [--verdict-id <id>]
+  trust-confirmation:
+      --verdict <held|contradicted> --sha <hex> [--note <text>]
 
 Appends one validated row to $KDIR/_trust/trust-events.jsonl. Duplicate
 event_id is a silent no-op (exit 0). Schema and dedupe-key recipes:
@@ -123,6 +127,9 @@ FROM_ENTRY_PATH=""
 TO_ENTRY_PATH=""
 REASON=""
 VERDICT_ID=""
+# trust-confirmation payload
+SHA=""
+NOTE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -158,6 +165,8 @@ while [[ $# -gt 0 ]]; do
     --to-entry-path)            TO_ENTRY_PATH="$2";            shift 2 ;;
     --reason)                   REASON="$2";                   shift 2 ;;
     --verdict-id)               VERDICT_ID="$2";               shift 2 ;;
+    --sha)                      SHA="$2";                      shift 2 ;;
+    --note)                     NOTE="$2";                     shift 2 ;;
     --help|-h)                  usage; exit 0 ;;
     *)
       echo "[trust-event] Error: unknown flag '$1'" >&2
@@ -178,16 +187,16 @@ fail() {
 
 # --- Event-kind enum ---
 case "$EVENT" in
-  mechanical-check|consumption-verification|adjudication|provenance-migration) : ;;
+  mechanical-check|consumption-verification|adjudication|provenance-migration|trust-confirmation) : ;;
   "") fail "--event is required" ;;
-  *)  fail "--event must be 'mechanical-check', 'consumption-verification', 'adjudication', or 'provenance-migration' (got '$EVENT')" ;;
+  *)  fail "--event must be 'mechanical-check', 'consumption-verification', 'adjudication', 'provenance-migration', or 'trust-confirmation' (got '$EVENT')" ;;
 esac
 
 # --- Source enum ---
 case "$SOURCE_KIND" in
-  worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize) : ;;
+  worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator) : ;;
   "") fail "--source is required" ;;
-  *)  fail "--source must be one of worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize (got '$SOURCE_KIND')" ;;
+  *)  fail "--source must be one of worker|researcher|spec-lead|implement-lead|drift-sweep|audit|settlement|apply-correction|renormalize|interactive|coordinator (got '$SOURCE_KIND')" ;;
 esac
 
 # --- Entry-path shape: KDIR-relative, no traversal ---
@@ -263,6 +272,20 @@ case "$EVENT" in
       fail "--entry-path must equal --to-entry-path for provenance-migration (got '$ENTRY_PATH' vs '$TO_ENTRY_PATH')"
     fi
     ;;
+  trust-confirmation)
+    case "$VERDICT" in
+      held|contradicted) : ;;
+      "") fail "--verdict is required for trust-confirmation" ;;
+      *)  fail "--verdict must be 'held' or 'contradicted' (got '$VERDICT'); the confirm front maps 'holds' to 'held'" ;;
+    esac
+    if [[ -z "$SHA" ]]; then
+      fail "--sha is required for trust-confirmation"
+    fi
+    if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-fA-F]{7,}$'; then
+      fail "--sha must be a hex string of at least 7 characters (got '$SHA')"
+    fi
+    validate_rel_path "--entry-path" "$ENTRY_PATH"
+    ;;
 esac
 
 # --- jq availability ---
@@ -323,6 +346,10 @@ case "$EVENT" in
     KEY_BASIS=$(printf '%s|%s|%s|%s' \
       "$EVENT" "$FROM_ENTRY_PATH" "$TO_ENTRY_PATH" "$REASON")
     ;;
+  trust-confirmation)
+    KEY_BASIS=$(printf '%s|%s|%s|%s|%s' \
+      "$EVENT" "$ENTRY_PATH" "$VERDICT" "$SOURCE_KIND" "$SHA")
+    ;;
 esac
 
 EVENT_ID=$(printf '%s' "$KEY_BASIS" | python3 -c '
@@ -371,7 +398,8 @@ export EVENT ENTRY_PATH SOURCE_KIND OBSERVED_AT EVENT_ID \
        RATIONALE FALSIFIER HEADING TEMPLATE_VERSION \
        CHECK_NAME TARGET RESULT RUN_ID DETAIL \
        VERDICT TEMPLATE_ID \
-       FROM_ENTRY_PATH TO_ENTRY_PATH REASON VERDICT_ID
+       FROM_ENTRY_PATH TO_ENTRY_PATH REASON VERDICT_ID \
+       SHA NOTE
 
 ROW=$(python3 <<'PY_EOF'
 import json, os
@@ -436,6 +464,13 @@ elif event == "adjudication":
         "template_version": env("TEMPLATE_VERSION"),
         "run_id": env("RUN_ID"),
     }
+elif event == "trust-confirmation":
+    payload = {
+        "verdict": env("VERDICT"),
+        "sha": env("SHA"),
+    }
+    if env("NOTE"):
+        payload["note"] = env("NOTE")
 else:
     payload = {
         "from_entry_path": env("FROM_ENTRY_PATH"),

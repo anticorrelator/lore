@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test_trust_ledger.sh — Tests for the trust-ledger write surface:
-# trust-event-append.sh, trust-event-migrate.sh, verify-append.sh.
+# trust-event-append.sh, trust-event-migrate.sh, verify-append.sh, trust-confirm.sh.
 #
 # Covers:
 #   - Valid append per event kind → one line in _trust/trust-events.jsonl
@@ -12,6 +12,9 @@
 #   - verify-append contradicted → CC bridge row lands, re-run does not dup
 #   - contradicted without CC-bridge fields rejects before any disk write
 #   - migrate wrapper delegates and rejects unsanctioned source/reason
+#   - trust confirm front: holds→held mapping, source default, dedupe by sha,
+#     new-sha-new-row, usage errors leave nothing appended
+#   - trust-confirmation source-enum extension (interactive, coordinator)
 #   - Rejections leave no ledger file behind (validate-before-disk)
 
 set -euo pipefail
@@ -20,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts"
 APPEND="$SCRIPT_DIR/trust-event-append.sh"
 MIGRATE="$SCRIPT_DIR/trust-event-migrate.sh"
 VERIFY="$SCRIPT_DIR/verify-append.sh"
+CONFIRM="$SCRIPT_DIR/trust-confirm.sh"
 TEST_DIR=$(mktemp -d)
 KNOWLEDGE_DIR="$TEST_DIR/knowledge"
 SLUG="test-slug"
@@ -328,6 +332,87 @@ RC=$?
 set -e
 assert_eq "unknown flag exits 1" "$RC" "1"
 assert_contains "unknown flag message" "$OUT" "unknown flag"
+
+# =============================================
+# Test 11: trust confirm front — append, dedupe by sha, new-sha-new-row
+# =============================================
+echo ""
+echo "Test 11: trust confirm front"
+setup_store
+OUTPUT=$("$CONFIRM" "$ENTRY" --sha abc1234 --verdict holds --kdir "$KNOWLEDGE_DIR" --json)
+assert_contains "confirm reports appended" "$OUTPUT" '"appended": true'
+assert_eq "one ledger line" "$(wc -l < "$LEDGER" | tr -d ' ')" "1"
+ROW=$(head -1 "$LEDGER")
+assert_eq "event kind" "$(echo "$ROW" | jq -r '.event')" "trust-confirmation"
+assert_eq "verdict mapped holds->held" "$(echo "$ROW" | jq -r '.payload.verdict')" "held"
+assert_eq "sha recorded verbatim" "$(echo "$ROW" | jq -r '.payload.sha')" "abc1234"
+assert_eq "source defaults to interactive" "$(echo "$ROW" | jq -r '.source')" "interactive"
+assert_eq "note omitted when empty" "$(echo "$ROW" | jq -r '.payload | has("note")')" "false"
+# Identical re-run (same entry+verdict+source+sha) heals to a no-op.
+OUTPUT=$("$CONFIRM" "$ENTRY" --sha abc1234 --verdict holds --kdir "$KNOWLEDGE_DIR" --json)
+assert_contains "identical re-run dedupes" "$OUTPUT" '"appended": false'
+assert_eq "still one ledger line" "$(wc -l < "$LEDGER" | tr -d ' ')" "1"
+# A new sha is a new observation → a new row.
+OUTPUT=$("$CONFIRM" "$ENTRY" --sha def5678 --verdict contradicted \
+  --note "cheap dispute" --source coordinator --kdir "$KNOWLEDGE_DIR" --json)
+assert_contains "new sha appends" "$OUTPUT" '"appended": true'
+assert_eq "two ledger lines" "$(wc -l < "$LEDGER" | tr -d ' ')" "2"
+ROW=$(tail -1 "$LEDGER")
+assert_eq "contradicted verdict recorded" "$(echo "$ROW" | jq -r '.payload.verdict')" "contradicted"
+assert_eq "note carried" "$(echo "$ROW" | jq -r '.payload.note')" "cheap dispute"
+assert_eq "coordinator source accepted" "$(echo "$ROW" | jq -r '.source')" "coordinator"
+
+# =============================================
+# Test 12: trust confirm front — usage errors leave nothing appended
+# =============================================
+echo ""
+echo "Test 12: trust confirm usage errors"
+setup_store
+confirm_expect_fail() {
+  local label="$1" expected="$2"
+  shift 2
+  set +e
+  local out
+  out=$("$CONFIRM" "$@" 2>&1)
+  local rc=$?
+  set -e
+  assert_eq "$label exits 1" "$rc" "1"
+  assert_contains "$label message" "$out" "$expected"
+}
+confirm_expect_fail "missing --sha" "--sha is required" \
+  "$ENTRY" --verdict holds --kdir "$KNOWLEDGE_DIR"
+confirm_expect_fail "bad verdict" "--verdict must be 'holds' or 'contradicted'" \
+  "$ENTRY" --sha abc1234 --verdict maybe --kdir "$KNOWLEDGE_DIR"
+confirm_expect_fail "malformed sha" "hex string of at least 7" \
+  "$ENTRY" --sha xyz --verdict holds --kdir "$KNOWLEDGE_DIR"
+confirm_expect_fail "unknown flag" "unknown flag" \
+  "$ENTRY" --sha abc1234 --verdict holds --bogus x --kdir "$KNOWLEDGE_DIR"
+confirm_expect_fail "missing entry" "knowledge entry not found" \
+  "conventions/no-such-entry.md" --sha abc1234 --verdict holds --kdir "$KNOWLEDGE_DIR"
+assert_not_exist "no ledger created by rejections" "$LEDGER"
+
+# =============================================
+# Test 13: appender trust-confirmation validation + source-enum extension
+# =============================================
+echo ""
+echo "Test 13: appender trust-confirmation"
+setup_store
+"$APPEND" --event trust-confirmation --entry-path "$ENTRY" --source interactive \
+  --verdict held --sha abc1234 --kdir "$KNOWLEDGE_DIR" >/dev/null
+assert_eq "interactive source accepted" "$(wc -l < "$LEDGER" | tr -d ' ')" "1"
+"$APPEND" --event trust-confirmation --entry-path "$ENTRY" --source coordinator \
+  --verdict contradicted --sha def5678 --kdir "$KNOWLEDGE_DIR" >/dev/null
+assert_eq "coordinator source accepted" "$(wc -l < "$LEDGER" | tr -d ' ')" "2"
+# The appender owns the schema: unmapped surface vocab and a missing/bad sha reject.
+run_expect_fail "confirm unmapped verdict" "--verdict must be 'held' or 'contradicted'" \
+  --event trust-confirmation --entry-path "$ENTRY" --source interactive \
+  --verdict holds --sha abc1234 --kdir "$KNOWLEDGE_DIR"
+run_expect_fail "confirm missing sha" "--sha is required" \
+  --event trust-confirmation --entry-path "$ENTRY" --source interactive \
+  --verdict held --kdir "$KNOWLEDGE_DIR"
+run_expect_fail "confirm malformed sha" "hex string of at least 7" \
+  --event trust-confirmation --entry-path "$ENTRY" --source interactive \
+  --verdict held --sha nothex --kdir "$KNOWLEDGE_DIR"
 
 # =============================================
 echo ""

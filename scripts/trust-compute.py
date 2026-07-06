@@ -8,15 +8,19 @@ anyone, and this module is the single published definition of f(ledger).
 
 The fold:
 
-    signal(entry) = 1.0*held        - 2.0*contradicted
-                  + 0.25*check_pass - 0.5*check_fail
+    signal(entry) = 1.0*held         - 2.0*contradicted
+                  + 0.5*confirm_held - 1.0*confirm_contradicted
+                  + 0.25*check_pass  - 0.5*check_fail
                   + 1.0*adj_confirmed - 2.0*adj_rejected
     trust(entry)  = signal / (1 + |signal|)        # open interval (-1, 1)
 
 Negative outcomes weigh double their positive counterparts: acting on
-falsified knowledge costs more than re-verifying held knowledge. Mechanical
-checks weigh below agent verifications because they are cheap and narrow.
-The saturating map bounds any single entry's rank influence and makes each
+falsified knowledge costs more than re-verifying held knowledge. Cheap
+confirmations (a repo-state verdict without a code anchor) weigh half a
+grounded verification — above mechanical checks, below anchored testimony —
+preserving the same negative-doubles-positive symmetry. Mechanical checks
+weigh below agent verifications because they are cheap and narrow. The
+saturating map bounds any single entry's rank influence and makes each
 marginal event worth less than the last.
 
 Absence of ledger rows for an entry is an explicit unobserved state, not an
@@ -47,11 +51,14 @@ EVENT_KINDS = (
     "mechanical-check",
     "adjudication",
     "provenance-migration",
+    "trust-confirmation",
 )
 
 # Fold weights — protocol constants published here and in the contract doc.
 WEIGHT_HELD = 1.0
 WEIGHT_CONTRADICTED = -2.0
+WEIGHT_CONFIRM_HELD = 0.5
+WEIGHT_CONFIRM_CONTRADICTED = -1.0
 WEIGHT_CHECK_PASS = 0.25
 WEIGHT_CHECK_FAIL = -0.5
 WEIGHT_ADJ_CONFIRMED = 1.0
@@ -60,6 +67,8 @@ WEIGHT_ADJ_REJECTED = -2.0
 _COUNT_KEYS = (
     "held",
     "contradicted",
+    "confirm_held",
+    "confirm_contradicted",
     "check_pass",
     "check_fail",
     "check_other",
@@ -115,6 +124,14 @@ def compute_event_id(row: dict) -> str | None:
                 payload["from_entry_path"],
                 payload["to_entry_path"],
                 payload["reason"],
+            ])
+        elif event == "trust-confirmation":
+            basis = "|".join([
+                event,
+                row["entry_path"],
+                payload["verdict"],
+                row["source"],
+                payload["sha"],
             ])
         else:
             return None
@@ -279,12 +296,22 @@ def fold_rows(rows: list[dict]) -> tuple[dict[str, dict], dict[str, str], list[s
                 entry_counts["adj_rejected"] += 1
             else:
                 warnings.append(f"unknown verdict {verdict!r}; row ignored")
+        elif event == "trust-confirmation":
+            verdict = payload.get("verdict")
+            if verdict == "held":
+                entry_counts["confirm_held"] += 1
+            elif verdict == "contradicted":
+                entry_counts["confirm_contradicted"] += 1
+            else:
+                warnings.append(f"unknown confirmation verdict {verdict!r}; row ignored")
 
     scores: dict[str, dict] = {}
     for key, entry_counts in counts.items():
         signal = (
             WEIGHT_HELD * entry_counts["held"]
             + WEIGHT_CONTRADICTED * entry_counts["contradicted"]
+            + WEIGHT_CONFIRM_HELD * entry_counts["confirm_held"]
+            + WEIGHT_CONFIRM_CONTRADICTED * entry_counts["confirm_contradicted"]
             + WEIGHT_CHECK_PASS * entry_counts["check_pass"]
             + WEIGHT_CHECK_FAIL * entry_counts["check_fail"]
             + WEIGHT_ADJ_CONFIRMED * entry_counts["adj_confirmed"]
@@ -327,6 +354,7 @@ def _format_entry(key: str, summary: dict) -> str:
     c = summary["counts"]
     return (
         f"{summary['score']:+.3f}  held={c['held']} contradicted={c['contradicted']} "
+        f"confirm=+{c['confirm_held']}/-{c['confirm_contradicted']} "
         f"checks=+{c['check_pass']}/-{c['check_fail']} "
         f"adj=+{c['adj_confirmed']}/-{c['adj_rejected']}  {key}"
     )

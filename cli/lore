@@ -69,6 +69,8 @@ Commands:
                for a knowledge entry (see: lore verify --help), or report
                per-entry ledger events (lore verify --report --help)
   audit        Route a producer artifact through the settlement judges
+  trust        Trust-ledger verbs — cheaply confirm an entry's verdict
+               (see: lore trust --help)
   settlement   Durable settlement queue, processor, and status
   resolve      Resolve repo path or [[backlink]] references
   prefetch     Prefetch knowledge for agent prompts
@@ -452,6 +454,27 @@ Notes:
 EOF
 }
 
+trust_usage() {
+  cat >&2 <<EOF
+lore trust — trust-ledger verbs
+
+Usage: lore trust <subcommand> [args...]
+
+Subcommands:
+  confirm   Record a cheap held/contradicted verdict for a knowledge entry
+            (see: lore trust confirm --help)
+
+Options:
+  --help, -h    Show this help
+
+Notes:
+  'confirm' is lightweight testimony — a repo-state verdict (--sha) without a
+  code anchor, weighing below a grounded 'lore verify' in the trust fold. A
+  contradicted verdict lands in the ledger only; escalate a real dispute into
+  the judge-facing channel with 'lore verify contradicted'.
+EOF
+}
+
 impl_usage() {
   cat >&2 <<EOF
 lore impl — /implement bookkeeping verbs
@@ -674,6 +697,33 @@ cmd_scorecard() {
       echo "Error: unknown scorecard subcommand '$subcmd'" >&2
       echo "" >&2
       scorecard_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Trust subgroup (trust-ledger verbs) ---
+cmd_trust() {
+  if [[ $# -eq 0 ]]; then
+    trust_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      trust_usage
+      return 0
+      ;;
+    confirm)
+      "$SCRIPTS_DIR/trust-confirm.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown trust subcommand '$subcmd'" >&2
+      echo "" >&2
+      trust_usage
       return 1
       ;;
   esac
@@ -2013,6 +2063,10 @@ case "$1" in
   scorecard)
     shift
     cmd_scorecard "$@"
+    ;;
+  trust)
+    shift
+    cmd_trust "$@"
     ;;
   impl)
     shift
