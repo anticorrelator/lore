@@ -220,6 +220,55 @@ def scan_for_debugging(lines):
     return match_indices
 
 
+def detect_session_provenance(lines):
+    """Classify how the previous session was launched, from raw transcript lines.
+
+    Claude Code stamps every user-turn record with an ``entrypoint`` field:
+
+      - ``cli``      → an interactive session driven through the terminal/TUI.
+                       Origin may be ``human``, ``peer``, or ``task-notification``
+                       (coordinator/peer sessions), and promptSource may be
+                       ``typed`` or ``system`` — all conversational, all worth a
+                       digest.
+      - ``sdk-cli``  → a headless ``claude -p`` run (judge, worker, settlement
+                       reverse-auditor, batch-spec). These carry
+                       ``promptSource: sdk`` and no ``origin``; their transcripts
+                       are structured-output protocol traffic, not conversation.
+
+    We key on ``entrypoint`` (with ``promptSource`` as a corroborating signal)
+    rather than ``origin`` — origin is ``human`` only for typed sessions and would
+    wrongly discard legitimate peer/coordinator sessions (``origin: peer``).
+
+    Returns one of ``'interactive'``, ``'headless'``, or ``'unknown'``. Interactive
+    markers win ties, and the absence of any marker returns ``'unknown'`` — the
+    caller generates a digest in both non-``'headless'`` cases (a false junk digest
+    is recoverable; a lost conversational digest is not).
+    """
+    saw_interactive = False
+    saw_headless = False
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get('type') != 'user':
+            continue
+        entrypoint = data.get('entrypoint')
+        prompt_source = data.get('promptSource')
+        if entrypoint == 'cli' or prompt_source in ('typed', 'system'):
+            saw_interactive = True
+        elif entrypoint == 'sdk-cli' or prompt_source == 'sdk':
+            saw_headless = True
+    if saw_interactive:
+        return 'interactive'
+    if saw_headless:
+        return 'headless'
+    return 'unknown'
+
+
 def extract_topics(user_messages, top_n=8):
     """Extract top keywords from user messages."""
     # Combine all user text
@@ -436,6 +485,15 @@ def main():
 
         # Get raw lines for debugging detection (windowed adjacency requires raw lines)
         raw_lines = provider.read_raw_lines(prev_session_path)
+
+        # Skip headless sessions before writing anything. `claude -p` judge/worker/
+        # settlement/batch-spec runs produce structured-output protocol traffic, not
+        # conversation, and a junk digest OVERWRITES _pending_digest.md (single file,
+        # 'w' mode) — clobbering a real, not-yet-processed digest whenever a headless
+        # session ends between a conversational session and its digest intake. Only
+        # skip on a positive headless signal; ambiguous provenance still generates.
+        if raw_lines and detect_session_provenance(raw_lines) == 'headless':
+            sys.exit(0)
 
         # Parse the transcript via provider (replaces parse_jsonl_file)
         messages = provider.parse_transcript(prev_session_path)
