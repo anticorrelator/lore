@@ -299,6 +299,13 @@ type model struct {
 	// reset the flag so auto-process can resume. Zero value means not in flight.
 	settlementProcessStartedAt time.Time
 
+	// lastSettlementPoll is the wall-clock time of the most recent settlement
+	// status poll dispatched from handleIndexPollTick. While the panel is
+	// hidden the poll drops to a slow heartbeat gated on this timestamp so the
+	// trigger pump and auto-process dispatch keep firing without spawning the
+	// subprocess pair every tick. Zero value forces the first tick to poll.
+	lastSettlementPoll time.Time
+
 	// Confirm modal for archive/delete actions.
 	confirmAction string // "archive", "unarchive", "delete", "post_review", etc.; empty = inactive
 	confirmSlug   string

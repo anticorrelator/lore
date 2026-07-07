@@ -1347,6 +1347,101 @@ func TestHandleIndexPollTickIncludesCheckFollowupDetailMtimeInStateFollowUps(t *
 	}
 }
 
+func TestShouldPollSettlementCadence(t *testing.T) {
+	cases := []struct {
+		name     string
+		state    appState
+		lastPoll time.Time
+		wantPoll bool
+	}{
+		{"visible always polls despite a fresh last poll", stateSettlement, time.Now(), true},
+		{"hidden first tick polls (zero timestamp)", stateWork, time.Time{}, true},
+		{"hidden recent poll skips", stateWork, time.Now(), false},
+		{"hidden stale poll polls on the heartbeat", stateWork, time.Now().Add(-settlementHiddenPollInterval - time.Second), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := minimalModel(tc.state, nil, nil)
+			m.lastSettlementPoll = tc.lastPoll
+			if got := m.shouldPollSettlement(); got != tc.wantPoll {
+				t.Errorf("shouldPollSettlement() = %v, want %v", got, tc.wantPoll)
+			}
+		})
+	}
+}
+
+// pollTickBatchLen runs one poll tick and returns the count of non-nil Cmds in
+// the resulting batch. Only the outer tea.Batch Cmd is invoked, which yields the
+// child slice without executing any child — so no settlement subprocess spawns.
+func pollTickBatchLen(t *testing.T, m model) int {
+	t.Helper()
+	_, cmd := m.handleIndexPollTick()
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd from handleIndexPollTick")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected tea.BatchMsg, got %T", cmd())
+	}
+	n := 0
+	for _, c := range batch {
+		if c != nil {
+			n++
+		}
+	}
+	return n
+}
+
+func TestHandleIndexPollTickSettlementCadenceWiring(t *testing.T) {
+	// Baseline: hidden panel that polled just now — the settlement load is
+	// excluded, so this is the batch size without it.
+	base := minimalModel(stateWork, nil, nil)
+	base.lastSettlementPoll = time.Now()
+	baseLen := pollTickBatchLen(t, base)
+
+	// Every other cadence that must poll adds exactly one Cmd (the settlement
+	// load) to that same batch. State and all other fields are held constant so
+	// the size delta isolates the settlement load.
+	visible := minimalModel(stateSettlement, nil, nil)
+	visible.lastSettlementPoll = time.Now()
+	if got := pollTickBatchLen(t, visible); got != baseLen+1 {
+		t.Errorf("visible panel: batch len = %d, want %d (baseline + settlement load)", got, baseLen+1)
+	}
+
+	firstTick := minimalModel(stateWork, nil, nil) // zero lastSettlementPoll
+	if got := pollTickBatchLen(t, firstTick); got != baseLen+1 {
+		t.Errorf("hidden first tick: batch len = %d, want %d (never zero on first tick)", got, baseLen+1)
+	}
+
+	stale := minimalModel(stateWork, nil, nil)
+	stale.lastSettlementPoll = time.Now().Add(-settlementHiddenPollInterval - time.Second)
+	if got := pollTickBatchLen(t, stale); got != baseLen+1 {
+		t.Errorf("hidden stale poll: batch len = %d, want %d (heartbeat fires)", got, baseLen+1)
+	}
+}
+
+func TestHandleIndexPollTickStampsSettlementPollOnlyWhenPolling(t *testing.T) {
+	// A skipped hidden tick leaves the timestamp untouched so the heartbeat
+	// keeps counting from the last real poll.
+	recent := time.Now().Add(-time.Second)
+	skip := minimalModel(stateWork, nil, nil)
+	skip.lastSettlementPoll = recent
+	after, _ := skip.handleIndexPollTick()
+	if !after.lastSettlementPoll.Equal(recent) {
+		t.Errorf("skipped tick moved lastSettlementPoll: got %v, want unchanged %v", after.lastSettlementPoll, recent)
+	}
+
+	// A polling tick stamps the timestamp forward so the next hidden tick
+	// measures the heartbeat from now.
+	stale := minimalModel(stateWork, nil, nil)
+	stale.lastSettlementPoll = time.Now().Add(-settlementHiddenPollInterval - time.Second)
+	before := time.Now()
+	after, _ = stale.handleIndexPollTick()
+	if after.lastSettlementPoll.Before(before) {
+		t.Errorf("polling tick did not stamp lastSettlementPoll forward: got %v, want >= %v", after.lastSettlementPoll, before)
+	}
+}
+
 func TestListDismissedMsgTransitionsToStateWork(t *testing.T) {
 	m := minimalModel(stateFollowUps, nil, nil)
 	m.config.WorkDir = t.TempDir()

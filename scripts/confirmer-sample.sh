@@ -172,7 +172,14 @@ except (OSError, json.JSONDecodeError):
     pass
 
 last_run_at = {}
-for run_path in glob.glob(os.path.join(kdir, "_settlement", "runs", "*.json")):
+# Span hot and archived runs: a settled run may have been compacted into
+# archive/runs/, and its adjudication timestamp still decides whether a held
+# report has been re-audited since. The two dirs never share a run_id.
+run_globs = (
+    glob.glob(os.path.join(kdir, "_settlement", "runs", "*.json"))
+    + glob.glob(os.path.join(kdir, "_settlement", "archive", "runs", "*.json"))
+)
+for run_path in run_globs:
     try:
         with open(run_path, encoding="utf-8") as fh:
             run = json.load(fh)

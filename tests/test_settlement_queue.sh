@@ -1196,6 +1196,325 @@ assert_json_eq "cap0: manual retry-errors still resets the one run" "$CAP0_RETRY
 assert_json_eq "cap0: manual retry-errors requeues the item" "$CAP0_RETRY" '.enqueued' "1"
 
 echo ""
+echo "Test 30: infra-exhausted is reported from the persisted summary even when the failing runs predate the metrics window"
+KDIR_EXW="$TEST_DIR/kdir-exhausted-window"
+SETTINGS_EXW="$TEST_DIR/settings-exhausted-window.json"
+setup_kdir "$KDIR_EXW" "wi"
+write_settings "$SETTINGS_EXW" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false,"spot_sample_weekly_budget":12},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":3,"batch_recompute_min_interval_seconds":0,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+# Three infra-failure runs for one item, all older than the 7-day metrics
+# window by both completed_at and file mtime. A window parse would never see
+# them; the summary (a full census) must still report the item exhausted.
+python3 - "$KDIR_EXW" <<'PY'
+import json, os, pathlib, sys, time
+runs_dir = pathlib.Path(sys.argv[1]) / "_settlement" / "runs"
+runs_dir.mkdir(parents=True, exist_ok=True)
+old_mtime = time.time() - 30 * 24 * 3600
+for i in range(3):
+    name = f"run-old-infra-{i:02d}"
+    p = runs_dir / f"{name}.json"
+    p.write_text(json.dumps({
+        "version": 1,
+        "run_id": name,
+        "item_id": "item-old-exhausted",
+        "kind": "task-claim",
+        "source_id": "claim-old-exhausted",
+        "claim_id": "claim-old-exhausted",
+        "work_item": "wi",
+        "status": "failed",
+        "reason": "executor_audit_error",
+        "started_at": "2020-01-01T00:00:00Z",
+        "completed_at": f"2020-01-0{i+1}T00:00:00Z",
+        "verdict": {"verdict_format": "envelope", "verdict": "error", "evidence": "old infra failure"},
+    }))
+    os.utime(p, (old_mtime + i, old_mtime + i))
+PY
+# A process tick seeds the summary via ensure() (empty queue -> no dispatch).
+LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_EXW" bash "$QUEUE" process --kdir "$KDIR_EXW" --once --json >/dev/null
+EXW_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_EXW" bash "$QUEUE" status --kdir "$KDIR_EXW" --json)
+assert_json_eq "window: exhausted count from summary, not the window" "$EXW_STATUS" '.infra_exhausted.count' "1"
+assert_json_eq "window: exhausted preview carries the full failure_count" "$EXW_STATUS" '.infra_exhausted.items[0].failure_count' "3"
+assert_json_eq "window: exhausted preview identifies the item" "$EXW_STATUS" '.infra_exhausted.items[0].item_id' "item-old-exhausted"
+assert_json_eq "window: exhausted preview names the failure reason" "$EXW_STATUS" '.infra_exhausted.items[0].reason' "executor_audit_error"
+# The runs are outside the 7-day window, so the windowed health parse sees
+# none of them — proving infra_exhausted did not read the window.
+assert_json_eq "window: windowed health excludes the pre-window runs" "$EXW_STATUS" '.health.completions_24h' "0"
+
+echo ""
+echo "Test 31: windowed health/spot_sample equal the full-parse values on a mixed in/out-of-window substrate"
+KDIR_CONS="$TEST_DIR/kdir-window-conservation"
+SETTINGS_CONS="$TEST_DIR/settings-window-conservation.json"
+setup_kdir "$KDIR_CONS" "wi"
+write_settings "$SETTINGS_CONS" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false,"spot_sample_weekly_budget":12},"enabled":true,"max_concurrency":1,"max_auto_retry_attempts":3,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+# Recent runs (in window: mtime now, dates within 24h / this week) carry the
+# metric signal; old runs (out of window: mtime 30d ago, 2020 dates) are read
+# only by a full parse and must not change either metric. mtime >= completed_at
+# holds for every file, which is the substrate invariant the window relies on.
+python3 - "$KDIR_CONS" <<'PY'
+import json, os, pathlib, sys, time
+from datetime import datetime, timezone, timedelta
+runs_dir = pathlib.Path(sys.argv[1]) / "_settlement" / "runs"
+runs_dir.mkdir(parents=True, exist_ok=True)
+now = datetime.now(timezone.utc)
+now_z = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+recent_iso = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+now_mtime = time.time()
+old_mtime = time.time() - 30 * 24 * 3600
+
+def write(name, mtime, run):
+    p = runs_dir / f"{name}.json"
+    p.write_text(json.dumps(run))
+    os.utime(p, (mtime, mtime))
+
+# In-window: two completed audits and one failed audit today.
+for i in range(2):
+    write(f"run-recent-ok-{i}", now_mtime, {
+        "version": 1, "run_id": f"run-recent-ok-{i}", "item_id": f"item-recent-ok-{i}",
+        "work_item": "wi", "status": "completed", "completed_at": recent_iso,
+        "verdict": {"verdict": "verified", "evidence": "recent"}})
+write("run-recent-fail", now_mtime, {
+    "version": 1, "run_id": "run-recent-fail", "item_id": "item-recent-fail",
+    "work_item": "wi", "status": "failed", "completed_at": recent_iso,
+    "verdict": {"verdict": "unverified", "evidence": "recent fail"}})
+# In-window: two spot-sample runs selected this week.
+for i in range(2):
+    write(f"run-recent-spot-{i}", now_mtime, {
+        "version": 1, "run_id": f"run-recent-spot-{i}", "item_id": f"item-recent-spot-{i}",
+        "work_item": "wi", "status": "completed", "completed_at": recent_iso,
+        "selection": {"reason": "spot_sample", "selected_at": now_z},
+        "verdict": {"verdict": "verified", "evidence": "recent spot"}})
+# Out-of-window: completed + spot-sample runs from 2020. A full parse reads
+# these; neither metric filter matches them, so equality must hold.
+for i in range(2):
+    write(f"run-old-ok-{i}", old_mtime, {
+        "version": 1, "run_id": f"run-old-ok-{i}", "item_id": f"item-old-ok-{i}",
+        "work_item": "wi", "status": "completed", "completed_at": "2020-01-01T00:00:00Z",
+        "verdict": {"verdict": "verified", "evidence": "old"}})
+write("run-old-spot", old_mtime, {
+    "version": 1, "run_id": "run-old-spot", "item_id": "item-old-spot",
+    "work_item": "wi", "status": "completed", "completed_at": "2020-01-01T00:00:00Z",
+    "selection": {"reason": "spot_sample", "selected_at": "2020-01-01T00:00:00Z"},
+    "verdict": {"verdict": "verified", "evidence": "old spot"}})
+PY
+# Compare the windowed read model against a full parse directly on the code
+# under test: health_metrics and spot_sample_used_this_week must agree.
+CONS_CMP=$(python3 - "$KDIR_CONS" "$SCRIPTS_DIR/settlement-processor.py" <<'PY'
+import importlib.util, pathlib, sys
+kdir = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("settlement_processor", sys.argv[2])
+sp = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sp)
+s = sp.Settlement(kdir)
+queue = s.load_queue()
+full = s.load_runs()
+windowed, _recent = s.scan_status_runs()
+h_full = s.health_metrics(queue, full)
+h_win = s.health_metrics(queue, windowed)
+ss_full = s.spot_sample_used_this_week(full)
+ss_win = s.spot_sample_used_this_week(windowed)
+ok = (h_full == h_win) and (ss_full == ss_win)
+# Guard against a vacuous match: the metrics must carry real signal.
+nontrivial = h_win.get("completions_24h", 0) >= 1 and ss_win >= 1
+print("MATCH" if ok and nontrivial else f"MISMATCH full={h_full} win={h_win} ss_full={ss_full} ss_win={ss_win}")
+PY
+)
+assert_eq "conservation: windowed health/spot_sample equal full-parse (non-vacuous)" "$CONS_CMP" "MATCH"
+CONS_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_CONS" bash "$QUEUE" status --kdir "$KDIR_CONS" --json)
+assert_json_eq "conservation: status completions_24h counts the three in-window terminal runs" "$CONS_STATUS" '.health.completions_24h' "5"
+assert_json_eq "conservation: status failures_today counts the one in-window failure" "$CONS_STATUS" '.health.failures_today' "1"
+assert_json_eq "conservation: status spot_sample used_this_week counts the two in-window samples" "$CONS_STATUS" '.dispatch.spot_sample.used_this_week' "2"
+
+echo ""
+echo "Test 32: L3 compaction conserves every all-time census count and shrinks the hot files"
+KDIR_L3="$TEST_DIR/kdir-l3-compaction"
+setup_kdir "$KDIR_L3" "wi"
+# Mixed substrate: an old genuine-settled run and an old already-invalidated
+# run are archive-eligible; an old non-invalidated infra-failure run is the
+# live retry ledger and must stay hot; a recent settled run is too young to
+# archive. Two dead leases (released + expired) archive; one active stays.
+python3 - "$KDIR_L3" <<'PY'
+import json, os, pathlib, sys, time
+from datetime import datetime, timezone, timedelta
+state = pathlib.Path(sys.argv[1]) / "_settlement"
+runs_dir = state / "runs"
+runs_dir.mkdir(parents=True, exist_ok=True)
+now = datetime.now(timezone.utc)
+old_iso = "2020-01-01T00:00:00Z"
+recent_iso = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+old_mtime = time.time() - 30 * 24 * 3600
+now_mtime = time.time()
+
+def write(name, mtime, run):
+    p = runs_dir / f"{name}.json"
+    p.write_text(json.dumps(run))
+    os.utime(p, (mtime, mtime))
+
+write("run-settled-old", old_mtime, {
+    "version": 1, "run_id": "run-settled-old", "item_id": "item-A", "work_item": "wi",
+    "kind": "task-claim", "status": "completed", "completed_at": old_iso,
+    "verdict": {"verdict": "verified", "evidence": "old settled"}})
+write("run-invalidated-old", old_mtime, {
+    "version": 1, "run_id": "run-invalidated-old", "item_id": "item-B", "work_item": "wi",
+    "kind": "task-claim", "status": "completed", "completed_at": old_iso,
+    "invalidated_at": old_iso, "invalidated_reason": "superseded_by_settled_run",
+    "verdict": {"verdict": "verified", "evidence": "old invalidated"}})
+write("run-infra-old", old_mtime, {
+    "version": 1, "run_id": "run-infra-old", "item_id": "item-C", "work_item": "wi",
+    "kind": "task-claim", "status": "blocked", "reason": "executor_timeout",
+    "completed_at": old_iso, "source_id": "claim-C",
+    "verdict": {"verdict": "error", "verdict_format": "envelope"}})
+write("run-recent", now_mtime, {
+    "version": 1, "run_id": "run-recent", "item_id": "item-D", "work_item": "wi",
+    "kind": "task-claim", "status": "completed", "completed_at": recent_iso,
+    "verdict": {"verdict": "verified", "evidence": "recent settled"}})
+leases = {"version": 1, "leases": {
+    "lease-active": {"lease_id": "lease-active", "item_id": "item-live", "run_id": "run-live", "state": "active", "expires_at_epoch": int(time.time()) + 3600},
+    "lease-released": {"lease_id": "lease-released", "item_id": "item-A", "run_id": "run-settled-old", "state": "released", "released_at": old_iso},
+    "lease-expired": {"lease_id": "lease-expired", "item_id": "item-C", "run_id": "run-infra-old", "state": "expired", "expired_at": old_iso},
+}}
+json.dump(leases, open(state / "leases.json", "w"))
+PY
+L3_CMP=$(python3 - "$KDIR_L3" "$SCRIPTS_DIR/settlement-processor.py" <<'PY'
+import importlib.util, json, pathlib, sys
+kdir = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("settlement_processor", sys.argv[2])
+sp = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sp)
+s = sp.Settlement(kdir)
+leases = s.load_leases()
+b_settled, b_infra = s._settled_and_infra_counts()
+b_terminal = s.terminal_run_item_ids()
+b_excl = s.settled_or_exhausted_item_ids(3)
+s.rebuild_infra_exhausted_summary()
+b_exhausted = json.load(open(s.exhausted_path))["items"] if (s.exhausted_path.exists()) else {}
+counts = s.compact_substrate(leases)
+s.save_leases(leases)
+a_settled, a_infra = s._settled_and_infra_counts()
+a_terminal = s.terminal_run_item_ids()
+a_excl = s.settled_or_exhausted_item_ids(3)
+s.rebuild_infra_exhausted_summary()
+a_exhausted = json.load(open(s.exhausted_path))["items"]
+conserved = (b_settled == a_settled and b_infra == a_infra and b_terminal == a_terminal
+             and b_excl == a_excl and b_exhausted == a_exhausted)
+# The census must carry real signal: item-A settled, item-C infra, item-B skipped.
+nontrivial = ("item-A" in a_settled and a_infra.get("item-C") == 1 and "item-B" not in a_terminal)
+moved = (counts["leases_archived"] == 2 and counts["runs_archived"] == 2)
+print("MATCH" if conserved and nontrivial and moved else
+      f"MISMATCH conserved={conserved} nontrivial={nontrivial} counts={counts} "
+      f"b_settled={sorted(b_settled)} a_settled={sorted(a_settled)} b_infra={b_infra} a_infra={a_infra} "
+      f"b_excl={sorted(b_excl)} a_excl={sorted(a_excl)} b_ex={b_exhausted} a_ex={a_exhausted}")
+PY
+)
+assert_eq "L3: census counts byte-identical across a compaction pass (leases+runs archived)" "$L3_CMP" "MATCH"
+assert_eq "L3: active lease survives compaction" "$(jq -r '.leases | has("lease-active")' "$KDIR_L3/_settlement/leases.json")" "true"
+assert_eq "L3: released lease left the hot file" "$(jq -r '.leases | has("lease-released")' "$KDIR_L3/_settlement/leases.json")" "false"
+assert_eq "L3: expired lease left the hot file" "$(jq -r '.leases | has("lease-expired")' "$KDIR_L3/_settlement/leases.json")" "false"
+assert_eq "L3: two dead leases landed in the archive ledger" "$(wc -l < "$KDIR_L3/_settlement/archive/leases.jsonl" | tr -d ' ')" "2"
+assert_eq "L3: two run files moved to the archive dir" "$(ls "$KDIR_L3/_settlement/archive/runs" | wc -l | tr -d ' ')" "2"
+assert_eq "L3: archive index carries the two moved runs" "$(wc -l < "$KDIR_L3/_settlement/archive/runs-index.jsonl" | tr -d ' ')" "2"
+assert_eq "L3: non-invalidated infra run stays hot (live retry ledger)" "$([[ -f "$KDIR_L3/_settlement/runs/run-infra-old.json" ]] && echo yes || echo no)" "yes"
+assert_eq "L3: recent settled run stays hot (below retention age)" "$([[ -f "$KDIR_L3/_settlement/runs/run-recent.json" ]] && echo yes || echo no)" "yes"
+assert_eq "L3: archived settled run left the hot dir" "$([[ -f "$KDIR_L3/_settlement/runs/run-settled-old.json" ]] && echo present || echo gone)" "gone"
+
+echo ""
+echo "Test 33: crash between index-append and file-move leaves every census count unchanged (dedup by run_id)"
+KDIR_L3C="$TEST_DIR/kdir-l3-crash"
+setup_kdir "$KDIR_L3C" "wi"
+python3 - "$KDIR_L3C" <<'PY'
+import json, os, pathlib, sys, time
+runs_dir = pathlib.Path(sys.argv[1]) / "_settlement" / "runs"
+runs_dir.mkdir(parents=True, exist_ok=True)
+old_mtime = time.time() - 30 * 24 * 3600
+p = runs_dir / "run-x.json"
+p.write_text(json.dumps({
+    "version": 1, "run_id": "run-x", "item_id": "item-X", "work_item": "wi",
+    "kind": "task-claim", "status": "completed", "completed_at": "2020-01-01T00:00:00Z",
+    "verdict": {"verdict": "verified", "evidence": "settled"}}))
+os.utime(p, (old_mtime, old_mtime))
+PY
+L3_CRASH=$(python3 - "$KDIR_L3C" "$SCRIPTS_DIR/settlement-processor.py" <<'PY'
+import importlib.util, json, pathlib, sys
+kdir = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("settlement_processor", sys.argv[2])
+sp = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sp)
+s = sp.Settlement(kdir)
+
+def census():
+    settled, infra = s._settled_and_infra_counts()
+    return (sorted(settled), dict(infra), sorted(s.terminal_run_item_ids()), sorted(s.settled_or_exhausted_item_ids(3)))
+
+clean = census()
+# Simulate the crash state: the index row was appended but os.replace never
+# ran, so run-x is in BOTH the hot dir and the archive index.
+s.archive_dir.mkdir(parents=True, exist_ok=True)
+run = s.load_runs()[0]
+with s.archive_runs_index_path.open("a", encoding="utf-8") as fh:
+    fh.write(sp.compact(s._archive_run_index_row(run)) + "\n")
+crashed = census()
+# Now complete the move: run-x lives only in the archive.
+s.archive_runs_dir.mkdir(parents=True, exist_ok=True)
+import os
+os.replace(s.run_path("run-x"), s.archive_runs_dir / "run-x.json")
+completed = census()
+print("MATCH" if clean == crashed == completed and clean[0] == ["item-X"] else
+      f"MISMATCH clean={clean} crashed={crashed} completed={completed}")
+PY
+)
+assert_eq "L3 crash: census identical across clean / crash-window / completed-move states" "$L3_CRASH" "MATCH"
+
+echo ""
+echo "Test 34: compaction runs inside the process_once GC block and reports counts in the payload"
+KDIR_L3P="$TEST_DIR/kdir-l3-process"
+SETTINGS_L3P="$TEST_DIR/settings-l3-process.json"
+setup_kdir "$KDIR_L3P" "wi"
+write_settings "$SETTINGS_L3P" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false},"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+python3 - "$KDIR_L3P" <<'PY'
+import json, pathlib, sys, time
+state = pathlib.Path(sys.argv[1]) / "_settlement"
+state.mkdir(parents=True, exist_ok=True)
+# One active lease (holds the sole concurrency slot) and one released lease
+# left by a prior dispatch. The GC block must archive the released lease and
+# report the count even though the concurrency guard then short-circuits.
+json.dump({"version": 1, "items": [
+    {"id": "item-live", "status": "leased", "lease_id": "lease-active", "work_item": "wi", "kind": "task-claim"}
+]}, open(state / "queue.json", "w"))
+json.dump({"version": 1, "leases": {
+    "lease-active": {"lease_id": "lease-active", "item_id": "item-live", "run_id": "run-live", "state": "active", "expires_at_epoch": int(time.time()) + 3600},
+    "lease-released": {"lease_id": "lease-released", "item_id": "item-old", "run_id": "run-old", "state": "released", "released_at": "2020-01-01T00:00:00Z"},
+}}, open(state / "leases.json", "w"))
+PY
+L3P=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_L3P" bash "$QUEUE" process --kdir "$KDIR_L3P" --once --json)
+assert_json_eq "L3 process: concurrency guard short-circuits after GC" "$L3P" '.reason' "max_concurrency_reached"
+assert_json_eq "L3 process: short-circuit payload carries leases_archived" "$L3P" '.leases_archived' "1"
+assert_json_eq "L3 process: short-circuit payload carries runs_archived" "$L3P" '.runs_archived' "0"
+assert_eq "L3 process: released lease archived out of the hot file" "$(jq -r '.leases | has("lease-released")' "$KDIR_L3P/_settlement/leases.json")" "false"
+assert_eq "L3 process: active lease untouched by compaction" "$(jq -r '.leases | has("lease-active")' "$KDIR_L3P/_settlement/leases.json")" "true"
+
+echo ""
+echo "Test 35: apply-correction resolves a settlement verdict from the archive fallback"
+KDIR_L3A="$TEST_DIR/kdir-l3-apply"
+mkdir -p "$KDIR_L3A/_settlement/archive/runs" "$KDIR_L3A/conventions"
+ENTRY_L3A="$KDIR_L3A/conventions/sample-entry.md"
+cat > "$ENTRY_L3A" <<'MD'
+# Sample entry
+
+The head element is compared before processing.
+
+<!-- learned: 2026-01-01 | scale: implementation | source: test -->
+MD
+# The full run record lives only in the archive (compacted), not the hot dir.
+cat > "$KDIR_L3A/_settlement/archive/runs/verdict-archived.json" <<'JSON'
+{"version": 1, "run_id": "verdict-archived", "item_id": "item-Z", "status": "completed", "kind": "task-claim", "completed_at": "2020-01-01T00:00:00Z", "verdict": {"verdict": "contradicted", "evidence": "the head element is not compared", "correction": "The tail element is compared before processing."}}
+JSON
+APPLY_OUT=$(LORE_KNOWLEDGE_DIR="$KDIR_L3A" bash "$SCRIPTS_DIR/apply-correction.sh" --entry "$ENTRY_L3A" \
+  --verdict-id "verdict-archived" --verdict-source "correctness-gate" --allow-settlement-verdict \
+  --evidence "archived verdict fallback" \
+  --superseded-text "The head element is compared before processing." \
+  --replacement-text "The tail element is compared before processing." 2>&1 || true)
+assert_eq "L3 apply-correction: archived verdict resolves and mutates the entry body" \
+  "$(grep -cxF 'The tail element is compared before processing.' "$ENTRY_L3A")" "1"
+
+echo ""
 echo "=== Summary ==="
 echo "PASS: $PASS"
 echo "FAIL: $FAIL"

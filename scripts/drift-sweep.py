@@ -193,26 +193,31 @@ def load_settled_item_ids(knowledge_dir: str) -> set[str]:
     Read-only dedupe against the audit substrate: the sweep uses this to avoid
     re-enqueueing claims the gate already settled — it never makes verdicts.
     """
-    runs_dir = Path(knowledge_dir) / "_settlement" / "runs"
+    settlement = Path(knowledge_dir) / "_settlement"
+    # The census spans hot and archived runs: a settled run may have been
+    # compacted into archive/runs/, and dropping it here would re-enqueue a
+    # claim the gate already settled. The two dirs never share a run_id (the
+    # archive move is an atomic os.replace), and set membership dedupes anyway.
     out: set[str] = set()
-    if not runs_dir.is_dir():
-        return out
-    for path in sorted(runs_dir.glob("*.json")):
-        try:
-            run = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+    for runs_dir in (settlement / "runs", settlement / "archive" / "runs"):
+        if not runs_dir.is_dir():
             continue
-        if not isinstance(run, dict):
-            continue
-        if run.get("invalidated_at") or run.get("invalidated"):
-            continue
-        if run.get("status") != "completed":
-            continue
-        verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
-        if verdict.get("verdict") not in REAL_VERDICTS:
-            continue
-        if run.get("item_id"):
-            out.add(str(run["item_id"]))
+        for path in sorted(runs_dir.glob("*.json")):
+            try:
+                run = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(run, dict):
+                continue
+            if run.get("invalidated_at") or run.get("invalidated"):
+                continue
+            if run.get("status") != "completed":
+                continue
+            verdict = run.get("verdict") if isinstance(run.get("verdict"), dict) else {}
+            if verdict.get("verdict") not in REAL_VERDICTS:
+                continue
+            if run.get("item_id"):
+                out.add(str(run["item_id"]))
     return out
 
 

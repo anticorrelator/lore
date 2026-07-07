@@ -40,6 +40,20 @@ DEFAULT_MAX_AUTO_RETRY_ATTEMPTS = 3
 STATUS_RECENT_RUNS_LIMIT = 25
 STATUS_TERMINAL_PREVIEW_LIMIT = 5
 STATUS_INFRA_EXHAUSTED_PREVIEW_LIMIT = 20
+# Trailing window (by run-file mtime) for status metric parsing. A superset of
+# the 24h health window and the Monday-anchored spot-sample week: run files are
+# written at completion and invalidation only bumps mtime upward, so a run
+# relevant to either metric always falls inside this window.
+STATUS_METRICS_WINDOW_SECONDS = 7 * 24 * 3600
+# A run file leaves the hot path only after it has gone unwritten for this
+# long. It is the same span as the metric window on purpose: a run older than
+# the window is outside every live metric and — since completion and
+# invalidation are the only writes, and both bump mtime — can no longer be
+# mutated, so archiving it is safe.
+ARCHIVE_MIN_AGE_SECONDS = STATUS_METRICS_WINDOW_SECONDS
+# Cap on run files parsed-and-moved per compaction pass, so the GC block's
+# lock hold stays bounded when a large dead backlog first becomes eligible.
+ARCHIVE_RUNS_PER_PASS = 500
 
 # Source-stream registry. Each kind maps to:
 #   filename: glob-relative name under _work/<slug>/
@@ -274,6 +288,11 @@ class Settlement:
         self.usage_path = self.state / "usage.json"
         self.meta_path = self.state / "_meta.json"
         self.runs_dir = self.state / "runs"
+        self.exhausted_path = self.state / "exhausted.json"
+        self.archive_dir = self.state / "archive"
+        self.archive_leases_path = self.archive_dir / "leases.jsonl"
+        self.archive_runs_index_path = self.archive_dir / "runs-index.jsonl"
+        self.archive_runs_dir = self.archive_dir / "runs"
         self.capabilities_path = Path(__file__).resolve().parent.parent / "adapters" / "capabilities.json"
 
     def ensure(self) -> None:
@@ -285,6 +304,11 @@ class Settlement:
             self.save_leases({"version": VERSION, "leases": {}})
         if not self.usage_path.exists():
             self.save_usage({"version": VERSION, "day": utc_now()[:10], "jobs_started": 0, "runtime_seconds_reserved": 0})
+        # One-time census parse to seed the infra-exhausted summary on a
+        # substrate that predates it; steady-state maintenance is at the
+        # exhaustion-state-change points, never on the status path.
+        if not self.exhausted_path.exists():
+            self.rebuild_infra_exhausted_summary()
         self.write_meta()
 
     def write_meta(self) -> None:
@@ -304,12 +328,18 @@ class Settlement:
                 "lease": {"lease_id": "lease-<hash>", "item_id": "queue id", "run_id": "run id", "expires_at_epoch": "integer"},
                 "run": {"run_id": "run-<hash>", "item_id": "queue id", "status": "completed|failed|blocked", "framework": "chosen harness"},
                 "budget": {"day": "YYYY-MM-DD", "jobs_started": "integer", "runtime_seconds_reserved": "integer"},
+                "exhausted": {"items": "item_id -> {infra_count: integer, settled: bool, latest: {kind, work_item, source_id, reason}}", "note": "status()'s infra-exhausted summary, rebuilt from the run census at exhaustion-state-change points"},
+                "archive_run_index": {"run_id": "run id", "item_id": "queue id", "status": "completed|failed|blocked", "kind": "task-claim|omission|...", "infra_failure": "bool — retryable infra failure at archive time", "invalidated": "bool", "completed_at": "ISO-Z", "note": "one compact row per archived run in archive/runs-index.jsonl; all-time census reads union it with the hot runs deduped by run_id"},
             },
             "ownership_matrix": {
                 "queue.json": ["settlement-queue.sh", "settlement-processor.py"],
                 "leases.json": ["settlement-processor.py"],
                 "usage.json": ["settlement-processor.py"],
                 "runs/*.json": ["settlement-processor.py"],
+                "exhausted.json": ["settlement-processor.py"],
+                "archive/leases.jsonl": ["settlement-processor.py"],
+                "archive/runs-index.jsonl": ["settlement-processor.py"],
+                "archive/runs/*.json": ["settlement-processor.py"],
                 "_work/*/task-claims.jsonl": ["evidence-append.sh"],
                 "_work/*/audit-candidates.jsonl": ["audit-queue-route.sh", "audit-artifact.sh", "audit-candidate-transition.sh"],
                 "_work/*/consumption-contradictions.jsonl": ["consumption-contradiction-append.sh", "consumption-contradiction-update-status.sh"],
@@ -730,24 +760,20 @@ class Settlement:
                         })
             except OSError:
                 pass
+        # All-time census: a completed rollup run whose file has been archived
+        # must still suppress re-enqueue of its window, so union the archive
+        # index (which carries kind) rather than globbing only the hot dir.
         completed_item_ids: set[str] = set()
-        if self.runs_dir.exists():
-            for path in self.runs_dir.glob("*.json"):
-                try:
-                    run = json_load(path, {})
-                except Exception:
-                    continue
-                if not isinstance(run, dict):
-                    continue
-                if run.get("invalidated_at") or run.get("invalidated"):
-                    continue
-                if run.get("status") != "completed":
-                    continue
-                if not self.is_rollup_kind(str(run.get("kind") or "")):
-                    continue
-                item_id = run.get("item_id")
-                if isinstance(item_id, str) and item_id:
-                    completed_item_ids.add(item_id)
+        for run in self.census_runs():
+            if run.get("invalidated_at") or run.get("invalidated"):
+                continue
+            if run.get("status") != "completed":
+                continue
+            if not self.is_rollup_kind(str(run.get("kind") or "")):
+                continue
+            item_id = run.get("item_id")
+            if isinstance(item_id, str) and item_id:
+                completed_item_ids.add(item_id)
         cache = {"template_rows": template_rows, "completed_rollup_run_item_ids": completed_item_ids}
         self._rollup_existence_cache = cache
         return cache
@@ -1274,6 +1300,69 @@ class Settlement:
                 continue
         return runs
 
+    def archive_run_index(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        if not self.archive_runs_index_path.exists():
+            return rows
+        try:
+            with self.archive_runs_index_path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(row, dict) and row.get("run_id"):
+                        rows.append(row)
+        except OSError:
+            return rows
+        return rows
+
+    def census_runs(self) -> list[dict[str, Any]]:
+        """All-time run census: hot run records ∪ archived-run summary rows,
+        deduplicated by run_id (hot wins).
+
+        Every all-time census reader (settled/infra counts, the recompute
+        exclusion sets, the infra-exhausted rebuild, the rollup existence
+        cache) reads this rather than load_runs(), so a run that has been
+        moved to the archive still counts. Archive rows are the compact
+        summaries from runs-index.jsonl carrying the terminal / invalidated /
+        infra-failure determinations frozen at archive time — enough for those
+        readers without re-parsing the archived files. The dedupe makes the
+        two-phase archive move crash-idempotent: a run left in both places
+        (index appended, file not yet moved) is counted once. Bounded status
+        readers (scan_status_runs, recent_runs) stay hot-only by design.
+        """
+        hot = self.load_runs()
+        seen = {str(run.get("run_id")) for run in hot if run.get("run_id")}
+        merged = list(hot)
+        for row in self.archive_run_index():
+            run_id = str(row.get("run_id") or "")
+            if not run_id or run_id in seen:
+                continue
+            seen.add(run_id)
+            merged.append({
+                "run_id": run_id,
+                "item_id": row.get("item_id"),
+                "status": row.get("status"),
+                "kind": row.get("kind"),
+                "completed_at": row.get("completed_at"),
+                "invalidated": bool(row.get("invalidated")),
+                "_archived": True,
+                "_census_infra_failure": bool(row.get("infra_failure")),
+            })
+        return merged
+
+    def census_infra_failure(self, run: dict[str, Any]) -> bool:
+        """Infra-failure determination for a census record. Archive-derived
+        records carry the flag frozen at archive time (their verdict is not in
+        the compact index); hot records derive it from the live verdict."""
+        if run.get("_archived"):
+            return bool(run.get("_census_infra_failure"))
+        return bool(self.retryable_infrastructure_failure_reason(run))
+
     def recent_runs(self, limit: int = STATUS_RECENT_RUNS_LIMIT) -> list[dict[str, Any]]:
         runs: list[dict[str, Any]] = []
         if not self.runs_dir.exists() or limit <= 0:
@@ -1308,11 +1397,81 @@ class Settlement:
                 runs.append(run)
         return runs
 
+    def scan_status_runs(
+        self,
+        window_seconds: int = STATUS_METRICS_WINDOW_SECONDS,
+        recent_limit: int = STATUS_RECENT_RUNS_LIMIT,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """One os.scandir over runs/ feeding the two bounded status consumers.
+
+        Returns (windowed, recent). `windowed` are the run records whose file
+        mtime falls within the trailing `window_seconds` — the metric parse for
+        health_metrics and spot_sample_used_this_week, whose own completed_at /
+        selected_at filters are unchanged (the window bounds I/O, not
+        semantics). `recent` are the `recent_limit` most-recent by mtime, in
+        descending order, for the terminal preview. Files in both sets are
+        parsed once. No status path parses the full runs directory.
+        """
+        windowed: list[dict[str, Any]] = []
+        recent: list[dict[str, Any]] = []
+        if not self.runs_dir.exists():
+            return windowed, recent
+        try:
+            scanner = os.scandir(self.runs_dir)
+        except OSError:
+            return windowed, recent
+        entries: list[tuple[float, str, str]] = []
+        with scanner as it:
+            for entry in it:
+                name = entry.name
+                if not name.endswith(".json") or name.startswith("."):
+                    continue
+                try:
+                    stat = entry.stat()
+                except OSError:
+                    continue
+                if not (entry.is_file(follow_symlinks=False) or entry.is_symlink()):
+                    continue
+                entries.append((stat.st_mtime, name, entry.path))
+        if not entries:
+            return windowed, recent
+        recent_entries = (
+            heapq.nlargest(recent_limit, entries, key=lambda row: (row[0], row[1]))
+            if recent_limit > 0
+            else []
+        )
+        cutoff = time.time() - window_seconds
+        parsed: dict[str, dict[str, Any] | None] = {}
+
+        def _load(name: str, path_str: str) -> dict[str, Any] | None:
+            if path_str not in parsed:
+                try:
+                    run = json_load(Path(path_str), {})
+                except Exception:
+                    run = None
+                if isinstance(run, dict):
+                    run.setdefault("run_ref", f"_settlement/runs/{name}")
+                else:
+                    run = None
+                parsed[path_str] = run
+            return parsed[path_str]
+
+        for mtime, name, path_str in entries:
+            if mtime >= cutoff:
+                run = _load(name, path_str)
+                if run is not None:
+                    windowed.append(run)
+        for _mtime, name, path_str in recent_entries:
+            run = _load(name, path_str)
+            if run is not None:
+                recent.append(run)
+        return windowed, recent
+
     def run_invalidated(self, run: dict[str, Any]) -> bool:
         return bool(run.get("invalidated_at") or run.get("invalidated"))
 
     def terminal_run_item_ids(self) -> set[str]:
-        return {str(run.get("item_id")) for run in self.load_runs() if not self.run_invalidated(run) and run.get("status") in TERMINAL and run.get("item_id")}
+        return {str(run.get("item_id")) for run in self.census_runs() if not self.run_invalidated(run) and run.get("status") in TERMINAL and run.get("item_id")}
 
     def settled_or_exhausted_item_ids(self, cap: int, runs: list[dict[str, Any]] | None = None) -> set[str]:
         """Recompute-candidacy exclusion set replacing the existence-based
@@ -1341,7 +1500,7 @@ class Settlement:
         infrastructure-failure runs (the durable auto-retry attempt ledger)."""
         settled: set[str] = set()
         infra_counts: dict[str, int] = {}
-        for run in (self.load_runs() if runs is None else runs):
+        for run in (self.census_runs() if runs is None else runs):
             item_id = str(run.get("item_id") or "")
             if not item_id:
                 continue
@@ -1349,15 +1508,16 @@ class Settlement:
                 continue
             if run.get("status") not in TERMINAL:
                 continue
-            if self.retryable_infrastructure_failure_reason(run):
+            if self.census_infra_failure(run):
                 infra_counts[item_id] = infra_counts.get(item_id, 0) + 1
             else:
                 settled.add(item_id)
         return settled, infra_counts
 
-    def terminal_items_from_runs(self, limit: int = STATUS_TERMINAL_PREVIEW_LIMIT) -> list[dict[str, Any]]:
+    def terminal_items_from_runs(self, limit: int = STATUS_TERMINAL_PREVIEW_LIMIT, recent: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        source = self.recent_runs(STATUS_RECENT_RUNS_LIMIT) if recent is None else recent
         out: list[dict[str, Any]] = []
-        for run in self.recent_runs(STATUS_RECENT_RUNS_LIMIT):
+        for run in source:
             if self.run_invalidated(run):
                 continue
             if run.get("status") not in TERMINAL:
@@ -1544,9 +1704,14 @@ class Settlement:
             leases = self.load_leases()
             active_item_ids = {str(lease.get("item_id")) for lease in leases.get("leases", {}).values() if lease.get("state") == "active"}
             queued_item_ids = {str(item.get("id")) for item in queue.get("items", []) if item.get("status") in {"pending", "leased"}}
-            all_runs = self.load_runs()
+            # Latest-outcome-per-item spans the archive so a settled item whose
+            # terminal run was archived is not mistaken for a live retry
+            # candidate; the invalidation ledger below reads only hot runs,
+            # since those are the files it rewrites (retention keeps every
+            # non-invalidated infra-failure run hot for exactly this reason).
+            hot_runs = self.load_runs()
             latest_by_item: dict[str, dict[str, Any]] = {}
-            for run in sorted(all_runs, key=lambda r: str(r.get("completed_at") or r.get("started_at") or "")):
+            for run in sorted(self.census_runs(), key=lambda r: str(r.get("completed_at") or r.get("started_at") or "")):
                 if self.run_invalidated(run):
                     continue
                 if run.get("status") not in TERMINAL or not run.get("item_id"):
@@ -1556,7 +1721,7 @@ class Settlement:
             # ledger. Resetting the exhaustion counter invalidates every one of
             # these, not just the item's latest run.
             infra_runs_by_item: dict[str, list[dict[str, Any]]] = {}
-            for run in all_runs:
+            for run in hot_runs:
                 if not self.retryable_infrastructure_failure_reason(run):
                     continue
                 run_item_id = str(run.get("item_id") or "")
@@ -1629,6 +1794,9 @@ class Settlement:
                     run["retry_batch_id"] = batch_id
                     json_dump(self.run_path(str(run["run_id"])), run)
                 self.save_queue(queue)
+                # Invalidating the infra ledger clears these items'
+                # exhausted status; refresh the summary from the census.
+                self.rebuild_infra_exhausted_summary()
 
             # Unit contract: `matched`/`enqueued` count items, `invalidated`
             # counts run records (an exhausted item carries several).
@@ -1869,6 +2037,9 @@ class Settlement:
             queue = self.load_queue()
             leases = self.load_leases()
             healed = self.heal_queue(queue, leases, int(settings["max_auto_retry_attempts"]))
+            if healed:
+                # heal may have migrated legacy terminal queue items to runs.
+                self.rebuild_infra_exhausted_summary()
             if not self.should_recompute(queue, settings, force=force):
                 if healed:
                     self.save_queue(queue)
@@ -1896,6 +2067,120 @@ class Settlement:
                 item["reclaimed_from_lease"] = lease_id
                 expired += 1
         return expired
+
+    def compact_substrate(self, leases: dict[str, Any]) -> dict[str, int]:
+        """GC extension: move terminal state out of the hot substrate.
+
+        Released/expired leases append to archive/leases.jsonl and drop from
+        the passed `leases` dict (the caller persists it with the same
+        save_leases as the rest of the GC block). Immutable terminal run files
+        move into archive/runs/ with a compact census row in
+        archive/runs-index.jsonl. Runs under the caller's repo_lock, before the
+        dispatch guards; the archive writes precede the hot removal so an
+        interrupt can only duplicate, never lose, state.
+        """
+        return {
+            "leases_archived": self._archive_dead_leases(leases),
+            "runs_archived": self._archive_immutable_runs(),
+        }
+
+    def _archive_dead_leases(self, leases: dict[str, Any]) -> int:
+        lease_map = leases.get("leases")
+        if not isinstance(lease_map, dict):
+            return 0
+        dead = [(lid, lease) for lid, lease in lease_map.items() if lease.get("state") in ("released", "expired")]
+        if not dead:
+            return 0
+        # Append to the durable ledger before dropping from the hot file: a
+        # crash between the two steps leaves the lease in both, at worst a
+        # duplicate ledger line. The hot rewrite is the caller's atomic
+        # save_leases.
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        with self.archive_leases_path.open("a", encoding="utf-8") as fh:
+            for lid, lease in dead:
+                row = dict(lease)
+                row.setdefault("lease_id", lid)
+                fh.write(compact(row) + "\n")
+        for lid, _lease in dead:
+            lease_map.pop(lid, None)
+        return len(dead)
+
+    def _run_archive_eligible(self, run: dict[str, Any]) -> bool:
+        # Only immutable terminal state leaves the hot path. A non-invalidated
+        # infrastructure-failure run is the live retry ledger — retry-errors
+        # rewrites and settle-supersede invalidates it — so it stays hot
+        # regardless of the item's settled state. What archives is frozen:
+        # already-invalidated runs, and genuine (non-infra) terminal outcomes.
+        if run.get("status") not in TERMINAL:
+            return False
+        if self.run_invalidated(run):
+            return True
+        return not self.retryable_infrastructure_failure_reason(run)
+
+    def _archive_run_index_row(self, run: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "run_id": str(run.get("run_id") or ""),
+            "item_id": run.get("item_id"),
+            "status": run.get("status"),
+            "kind": str(run.get("kind") or KIND_TASK_CLAIM),
+            "infra_failure": bool(self.retryable_infrastructure_failure_reason(run)),
+            "invalidated": self.run_invalidated(run),
+            "completed_at": run.get("completed_at"),
+        }
+
+    def _archive_immutable_runs(self, cap: int = ARCHIVE_RUNS_PER_PASS) -> int:
+        if not self.runs_dir.exists():
+            return 0
+        cutoff = time.time() - ARCHIVE_MIN_AGE_SECONDS
+        try:
+            scanner = os.scandir(self.runs_dir)
+        except OSError:
+            return 0
+        # mtime is the immutability clock: completion and invalidation are the
+        # only writes and both bump it, so a file untouched past the window can
+        # no longer change. Stat-filter here to avoid parsing recent files.
+        candidates: list[tuple[float, str, str]] = []
+        with scanner as it:
+            for entry in it:
+                name = entry.name
+                if not name.endswith(".json") or name.startswith("."):
+                    continue
+                try:
+                    stat = entry.stat()
+                except OSError:
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if stat.st_mtime >= cutoff:
+                    continue
+                candidates.append((stat.st_mtime, name, entry.path))
+        if not candidates:
+            return 0
+        candidates.sort(key=lambda row: (row[0], row[1]))
+        archived = 0
+        for _mtime, _name, path_str in candidates:
+            if archived >= cap:
+                break
+            path = Path(path_str)
+            try:
+                run = json_load(path, None)
+            except Exception:
+                continue
+            if not isinstance(run, dict):
+                continue
+            run_id = str(run.get("run_id") or "")
+            if not run_id or not self._run_archive_eligible(run):
+                continue
+            # Two-phase, crash-idempotent move: append the compact census row,
+            # THEN os.replace the file into archive/runs/. An interrupt between
+            # the two leaves the run in both the hot dir and the index; census
+            # reads dedupe on run_id (hot wins), so no count shifts.
+            self.archive_runs_dir.mkdir(parents=True, exist_ok=True)
+            with self.archive_runs_index_path.open("a", encoding="utf-8") as fh:
+                fh.write(compact(self._archive_run_index_row(run)) + "\n")
+            os.replace(path, self.archive_runs_dir / f"{run_id}.json")
+            archived += 1
+        return archived
 
     def health_metrics(self, queue: dict[str, Any], runs: list[dict[str, Any]]) -> dict[str, Any]:
         """Operational health computed from the already-loaded queue and run
@@ -1952,38 +2237,72 @@ class Settlement:
                 seconds_since_last = None
         return {"last_ran_at": last_ran_at, "seconds_since_last": seconds_since_last}
 
-    def infra_exhausted_status(self, cap: int, runs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-        """Observational census of items excluded solely by the exhaustion arm
-        of the settled-or-exhausted predicate: no genuine settled run, but their
-        non-invalidated infra-failure count has reached `cap`. Read-only —
-        derived from the full run census grouped by item_id, never from the
-        recent-runs preview (which would drop older exhausted items). Additive
-        to `status`; `count: 0` and an empty preview when none are exhausted.
+    def rebuild_infra_exhausted_summary(self, runs: list[dict[str, Any]] | None = None) -> None:
+        """Recompute the persisted infra-exhausted summary from the full run
+        census and write it atomically. Called under repo_lock at every point
+        where exhaustion state can change — run-outcome write, invalidation
+        (settle-supersede), and retry-errors — plus a one-time seed from
+        ensure(). This moves the O(census) grouping to those rare mutation
+        points so status() can report exhausted items from the summary without
+        re-parsing the runs directory.
+
+        The summary keys each item that has >=1 non-invalidated infra-failure
+        run by its infra-failure count, whether it also has a genuine settled
+        run (invalidated is its own flag and is never counted as a failure),
+        and the latest infra run's preview fields — enough for
+        infra_exhausted_status to reproduce the cap filter and preview for any
+        cap, including exhausted items whose runs predate the metrics window.
         """
-        runs = self.load_runs() if runs is None else runs
+        runs = self.census_runs() if runs is None else runs
         settled: set[str] = set()
         infra_by_item: dict[str, list[dict[str, Any]]] = {}
         for run in runs:
             item_id = str(run.get("item_id") or "")
             if not item_id or self.run_invalidated(run) or run.get("status") not in TERMINAL:
                 continue
-            if self.retryable_infrastructure_failure_reason(run):
+            if self.census_infra_failure(run):
                 infra_by_item.setdefault(item_id, []).append(run)
             else:
                 settled.add(item_id)
-        exhausted: list[dict[str, Any]] = []
+        items: dict[str, Any] = {}
         for item_id, infra_runs in infra_by_item.items():
-            if item_id in settled:
+            latest = max(infra_runs, key=lambda r: str(r.get("completed_at") or r.get("started_at") or ""))
+            items[item_id] = {
+                "infra_count": len(infra_runs),
+                "settled": item_id in settled,
+                "latest": {
+                    "kind": str(latest.get("kind") or KIND_TASK_CLAIM),
+                    "work_item": latest.get("work_item"),
+                    "source_id": latest.get("source_id") or latest.get("claim_id"),
+                    "reason": latest.get("reason"),
+                },
+            }
+        json_dump(self.exhausted_path, {"version": VERSION, "updated_at": utc_now(), "items": items})
+
+    def infra_exhausted_status(self, cap: int) -> dict[str, Any]:
+        """Observational census of items excluded solely by the exhaustion arm
+        of the settled-or-exhausted predicate: no genuine settled run, but their
+        non-invalidated infra-failure count has reached `cap`. Read from the
+        persisted summary (rebuild_infra_exhausted_summary), never the
+        recent-runs preview, so older exhausted items are still reported.
+        Additive to `status`; `count: 0` and an empty preview when none are
+        exhausted or the summary has not been seeded.
+        """
+        summary = json_load(self.exhausted_path, {})
+        items_map = summary.get("items") if isinstance(summary.get("items"), dict) else {}
+        exhausted: list[dict[str, Any]] = []
+        for item_id, entry in items_map.items():
+            if not isinstance(entry, dict) or entry.get("settled"):
                 continue
-            count = len(infra_runs)
+            count = int(entry.get("infra_count") or 0)
             if not (count > 0 and count >= cap):
                 continue
-            latest = max(infra_runs, key=lambda r: str(r.get("completed_at") or r.get("started_at") or ""))
+            latest = entry.get("latest") if isinstance(entry.get("latest"), dict) else {}
             exhausted.append({
                 "item_id": item_id,
                 "kind": str(latest.get("kind") or KIND_TASK_CLAIM),
                 "work_item": latest.get("work_item"),
-                "source_id": latest.get("source_id") or latest.get("claim_id"),
+                "source_id": latest.get("source_id"),
                 "reason": latest.get("reason"),
                 "failure_count": count,
             })
@@ -1998,10 +2317,11 @@ class Settlement:
         queue = self.load_queue()
         leases = self.load_leases()
         usage = self.load_usage()
-        # One consolidated runs pass feeds both spot-sample budget accounting
-        # and the health metrics; terminal_items_from_runs keeps its own
-        # bounded most-recent-K scan.
-        runs = self.load_runs()
+        # One os.scandir over runs/ feeds both bounded consumers: the mtime
+        # window parse for the metrics (health + spot-sample) and the
+        # most-recent-K set for the terminal preview. Infra-exhausted reads its
+        # own persisted summary. No full runs-directory parse on this path.
+        window_runs, recent_runs = self.scan_status_runs()
         current = now_epoch()
         stale_active = sum(
             1
@@ -2013,7 +2333,7 @@ class Settlement:
             counts[item.get("status", "unknown")] = counts.get(item.get("status", "unknown"), 0) + 1
         active_lease_rows = [v for v in leases.get("leases", {}).values() if v.get("state") == "active"]
         pending_count = counts.get("pending", 0)
-        terminal_items = self.terminal_items_from_runs()
+        terminal_items = self.terminal_items_from_runs(recent=recent_runs)
         last_settled = terminal_items[0] if terminal_items else None
         for terminal in TERMINAL:
             counts.pop(terminal, None)
@@ -2051,13 +2371,13 @@ class Settlement:
                 "census_enabled": census,
                 "spot_sample": {
                     "weekly_budget": int(settings["dispatch"]["spot_sample_weekly_budget"]),
-                    "used_this_week": self.spot_sample_used_this_week(runs),
+                    "used_this_week": self.spot_sample_used_this_week(window_runs),
                     "week_start": self.spot_sample_week_start(),
                 },
                 "verify_volume": self.verify_volume(),
                 "pump": self.pump_status(queue),
             },
-            "health": self.health_metrics(queue, runs),
+            "health": self.health_metrics(queue, window_runs),
             "auditor_model": settings.get("auditor_model"),
             "queue": {
                 "pending": counts.get("pending", 0),
@@ -2115,7 +2435,7 @@ class Settlement:
             "state_dir": str(self.state),
             "terminal_items": terminal_items,
             "last_settled": last_settled,
-            "infra_exhausted": self.infra_exhausted_status(int(settings["max_auto_retry_attempts"]), runs),
+            "infra_exhausted": self.infra_exhausted_status(int(settings["max_auto_retry_attempts"])),
         }
 
     def budget_status(self, usage: dict[str, Any]) -> dict[str, Any]:
@@ -2427,27 +2747,42 @@ class Settlement:
             leases = self.load_leases()
             healed = self.heal_queue(queue, leases, int(settings["max_auto_retry_attempts"]))
             expired = self.expire_stale_leases(queue, leases)
+            # Compaction is the reclaim's next clause: like heal/expire it runs
+            # every tick inside the lock, before the dispatch guards, so a
+            # paused queue's dead state still leaves the hot path. It mutates
+            # `leases` in place (dropping the ones it archives).
+            compaction = self.compact_substrate(leases)
+            gc = {
+                "expired_leases_reclaimed": expired,
+                "healed": healed,
+                "leases_archived": compaction["leases_archived"],
+                "runs_archived": compaction["runs_archived"],
+            }
             if healed or expired:
                 self.save_queue(queue)
+            if healed or expired or compaction["leases_archived"]:
                 self.save_leases(leases)
+            if healed:
+                # heal migrates legacy terminal queue items into run records.
+                self.rebuild_infra_exhausted_summary()
 
             # Dispatch guards run after GC so the reclaim is durable
             # before any short-circuit return.
             if not settings["enabled"]:
-                return {"ok": True, "dispatched": False, "reason": "disabled", "expired_leases_reclaimed": expired, "healed": healed}
+                return {"ok": True, "dispatched": False, "reason": "disabled", **gc}
             active_hours = self.active_hours_status(settings)
             if not active_hours["allowed"]:
-                return {"ok": True, "dispatched": False, "reason": active_hours["reason"], "active_hours": active_hours, "expired_leases_reclaimed": expired, "healed": healed}
+                return {"ok": True, "dispatched": False, "reason": active_hours["reason"], "active_hours": active_hours, **gc}
             eligible, rejected = self.eligible_frameworks(settings)
             if not eligible:
-                return {"ok": True, "dispatched": False, "reason": "no_eligible_harnesses", "rejected_harnesses": rejected, "expired_leases_reclaimed": expired, "healed": healed}
+                return {"ok": True, "dispatched": False, "reason": "no_eligible_harnesses", "rejected_harnesses": rejected, **gc}
             executor = executor_command(settings)
 
             active = [lease for lease in leases.get("leases", {}).values() if lease.get("state") == "active"]
             if len(active) >= int(settings["max_concurrency"]):
                 self.save_queue(queue)
                 self.save_leases(leases)
-                return {"ok": True, "dispatched": False, "reason": "max_concurrency_reached", "active_leases": len(active), "expired_leases_reclaimed": expired}
+                return {"ok": True, "dispatched": False, "reason": "max_concurrency_reached", "active_leases": len(active), **gc}
             # Census posture gate (memo §5.2): batch recompute pulls the full
             # source-stream backlog through iter_backlog_items — that refill IS
             # the census. In the event-driven posture the queue is an inbox:
@@ -2466,18 +2801,19 @@ class Settlement:
                 elif healed:
                     self.save_queue(queue)
                     self.save_leases(leases)
-                    return {"ok": True, "dispatched": False, "reason": "empty_queue", "expired_leases_reclaimed": expired, "healed": healed}
+                    return {"ok": True, "dispatched": False, "reason": "empty_queue", **gc}
             if item is None:
                 self.save_queue(queue)
                 self.save_leases(leases)
-                return {"ok": True, "dispatched": False, "reason": "empty_queue", "expired_leases_reclaimed": expired}
+                return {"ok": True, "dispatched": False, "reason": "empty_queue", **gc}
             invalid_reason = self.item_invalid_reason(item)
             if invalid_reason:
                 run = self.write_invalid_claim_run(item, invalid_reason)
                 queue["items"] = [it for it in queue.get("items", []) if it.get("id") != item.get("id")]
                 self.save_queue(queue)
                 self.save_leases(leases)
-                return {"ok": True, "dispatched": False, "reason": "invalid_task_claim", "item_id": item.get("id"), "run": run}
+                self.rebuild_infra_exhausted_summary()
+                return {"ok": True, "dispatched": False, "reason": "invalid_task_claim", "item_id": item.get("id"), "run": run, **gc}
             # For hard-cal gates the marker for the current gate
             # template-version must read `calibrated` before dispatch. On
             # pre-calibration the runner runs once and the marker is
@@ -2494,6 +2830,7 @@ class Settlement:
                     "reason": calibration_reason,
                     "item_id": item.get("id"),
                     "calibration": calibration_telemetry,
+                    **gc,
                 }
             usage = self.load_usage()
             try:
@@ -2503,7 +2840,7 @@ class Settlement:
                 self.save_queue(queue)
                 self.save_leases(leases)
                 self.save_usage(usage)
-                return {"ok": True, "dispatched": False, "reason": str(exc), "rejected_harnesses": rejected}
+                return {"ok": True, "dispatched": False, "reason": str(exc), "rejected_harnesses": rejected, **gc}
             run_id = f"run-{hashlib.sha256((item['id'] + utc_now()).encode()).hexdigest()[:20]}"
             lease_id = f"lease-{hashlib.sha256((run_id + item['id']).encode()).hexdigest()[:20]}"
             item["status"] = "leased"
@@ -2536,7 +2873,10 @@ class Settlement:
                 leases["leases"][lease_id]["released_at"] = utc_now()
             self.save_queue(queue)
             self.save_leases(leases)
-        return {"ok": True, "dispatched": True, "item_id": item["id"], "run": run}
+            # execute_item wrote this run's outcome and may have superseded the
+            # item's prior infra failures; refresh the summary from the census.
+            self.rebuild_infra_exhausted_summary()
+        return {"ok": True, "dispatched": True, "item_id": item["id"], "run": run, **gc}
 
     def drain(self, settings: dict[str, Any], max_iterations: int = 200) -> dict[str, Any]:
         iterations = 0

@@ -374,9 +374,17 @@ fi
 KDIR=$(resolve_knowledge_dir)
 
 if [[ "$ALLOW_SETTLEMENT_VERDICT" == "1" ]]; then
+  # A settled run may have been compacted out of the hot dir into the archive
+  # (immutable terminal state, ≥7 days old). Resolve hot first, then archive.
   RUN_FILE="$KDIR/_settlement/runs/${VERDICT_ID}.json"
   if [[ ! -f "$RUN_FILE" ]]; then
-    echo "Correction rejected: --allow-settlement-verdict set but settlement run not found: $RUN_FILE" >&2
+    ARCHIVE_RUN_FILE="$KDIR/_settlement/archive/runs/${VERDICT_ID}.json"
+    if [[ -f "$ARCHIVE_RUN_FILE" ]]; then
+      RUN_FILE="$ARCHIVE_RUN_FILE"
+    fi
+  fi
+  if [[ ! -f "$RUN_FILE" ]]; then
+    echo "Correction rejected: --allow-settlement-verdict set but settlement run not found in hot or archive: _settlement/runs/${VERDICT_ID}.json" >&2
     exit 4
   fi
   # Authorization branches keyed on mode:

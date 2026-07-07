@@ -19,6 +19,13 @@ func indexPollTick() tea.Cmd {
 	return tea.Tick(5*time.Second, func(time.Time) tea.Msg { return indexPollTickMsg{} })
 }
 
+// settlementHiddenPollInterval is the background heartbeat the settlement
+// status poll drops to while its panel is hidden. It must never reach zero:
+// auto-process dispatch and the trigger pump both ride the status result, so a
+// stalled poll would halt the live drain. 60s matches the drain's own cadence,
+// so a hidden badge is at most one heartbeat stale.
+const settlementHiddenPollInterval = 60 * time.Second
+
 // indexMtimeCheckedMsg carries the result of stat-ing the index file.
 type indexMtimeCheckedMsg struct {
 	mtime time.Time
@@ -187,6 +194,22 @@ func readPlanContent(workDir, slug string) tea.Cmd {
 	}
 }
 
+// shouldPollSettlement decides whether this poll tick spawns the settlement
+// status subprocess pair. Visible panel: every tick. Hidden panel: only once
+// settlementHiddenPollInterval has elapsed since the last poll — and always on
+// the first tick, when lastSettlementPoll is still zero. It never returns a
+// standing false: the poll is the sole driver of auto-process dispatch and the
+// trigger pump, so a hidden panel throttles it but must not stop it.
+func (m model) shouldPollSettlement() bool {
+	if m.state == stateSettlement {
+		return true
+	}
+	if m.lastSettlementPoll.IsZero() {
+		return true
+	}
+	return time.Since(m.lastSettlementPoll) >= settlementHiddenPollInterval
+}
+
 // handleIndexPollTick handles the periodic poll tick: schedules mtime checks, touches
 // session files for active spec panels, and kicks off a new tick.
 func (m model) handleIndexPollTick() (model, tea.Cmd) {
@@ -194,7 +217,14 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 	// subprocess goroutine never returned. Without this, the auto-process
 	// loop would be silently gated for the rest of the TUI session.
 	m, _ = m.settlementInFlightFailsafe()
-	cmds := []tea.Cmd{checkIndexMtime(m.indexPath), loadSettlementStatus(), indexPollTick()}
+	cmds := []tea.Cmd{checkIndexMtime(m.indexPath), indexPollTick()}
+	// Settlement status rides this heartbeat on a visibility-dependent cadence
+	// (see shouldPollSettlement). The subprocess spawn and parse stay inside
+	// loadSettlementStatus's Cmd; only the cadence bookkeeping lives here.
+	if m.shouldPollSettlement() {
+		m.lastSettlementPoll = time.Now()
+		cmds = append(cmds, loadSettlementStatus())
+	}
 	// Poll plan.md and detail files for the current item on every tick.
 	if slug := m.list.CurrentSlug(); slug != "" {
 		cmds = append(cmds, checkPlanMtime(m.config.WorkDir, slug))
