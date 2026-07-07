@@ -257,8 +257,12 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 		for slug := range m.localSessions {
 			hosted[slug] = true
 		}
+		// The id→slug snapshot lets a session-addressed close-request resolve to the
+		// exact session it named (see resolveCloseTargetSlug); snapshotted here at
+		// Cmd-build time alongside hosted, read live inside the scan Cmd.
+		closeIDToSlug := sessionIDIndex(m.localSessions)
 		cmds = append(cmds, m.syncInstanceCmd(), readInstancesCmd(m.sessionsDir), m.queueTickCmd(),
-			scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted),
+			scanCloseRequestsCmd(m.sessionsDir, m.instanceName, hosted, closeIDToSlug),
 			scanSendRequestsCmd(m.sessionsDir, m.instanceName, hosted),
 			scanPeekRequestsCmd(m.sessionsDir, m.instanceName, hosted),
 			m.sessionsRefreshCmd())
@@ -266,6 +270,11 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 		var advCmds []tea.Cmd
 		m, advCmds = m.advanceCloseLadders()
 		cmds = append(cmds, advCmds...)
+		// Re-observe any gate-passing send whose outcome is deferred until it can
+		// confirm the composer submitted.
+		var sendCmds []tea.Cmd
+		m, sendCmds = m.advanceSendVerifications()
+		cmds = append(cmds, sendCmds...)
 	}
 	return m, tea.Batch(cmds...)
 }

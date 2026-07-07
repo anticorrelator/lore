@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,7 +31,46 @@ const (
 	// does not take within this window the ladder escalates (SIGTERM→KILL) rather
 	// than waiting on a boundary that never comes.
 	closeInterruptGraceDefault = 5 * time.Second
+	// closeModalHoldDefault bounds how long a close blocked by an open interactive
+	// prompt (a permission/approval modal) waits before acting. It is deliberately
+	// longer than the interrupt grace: its purpose is to let a human mid-answer
+	// finish the prompt. Once it elapses the close acts by authority — an explicit
+	// close proceeds down the exit ladder, a protocol-terminus close refuses
+	// (close_failed) and leaves the session alive.
+	closeModalHoldDefault = 30 * time.Second
 )
+
+// close_failed reason tokens — the terminal a consumed close-request emits when a
+// teardown does not (or must not) complete. interactive-prompt: a
+// protocol-terminus close hit an open modal and refused, leaving the session
+// alive. rung-exhausted: the exit ladder ran every rung and the harness process
+// was still alive. error: an operational failure during teardown.
+const (
+	closeFailedInteractivePrompt = "interactive-prompt"
+	closeFailedRungExhausted     = "rung-exhausted"
+	closeFailedError             = "error"
+)
+
+// errCloseLadderExhausted marks a teardown that ran every exit-ladder rung and
+// still could not confirm the harness process gone (it outlived SIGKILL — a
+// zombie or uninterruptible-sleep edge). It routes the consumed close-request to
+// a close_failed reason=rung-exhausted terminal instead of a false `closed`.
+var errCloseLadderExhausted = errors.New("exit ladder exhausted: harness process alive after SIGKILL")
+
+// pendingCloseState is the ladder-side record of one consumed close-request
+// awaiting teardown. requestID and reason come from the consumed row: requestID
+// is threaded onto the terminal journal row so a close requester has one match
+// key, and reason splits modal-blocked handling by authority (an explicit close
+// acts; a protocol-terminus close refuses). consumedAt bounds the modal-hold
+// grace; interruptedAt is set only when a still-generating session had the
+// interrupt (ESC) injected and bounds the post-interrupt wait (zero = never
+// interrupted).
+type pendingCloseState struct {
+	requestID     string
+	reason        string
+	consumedAt    time.Time
+	interruptedAt time.Time
+}
 
 // closeReasonProtocolTerminus is the close-request reason a protocol's own finalize
 // step enqueues (session close --self --reason protocol_terminus). It is the only
@@ -88,25 +129,34 @@ func (t tmuxProc) Alive() bool      { return syscall.Kill(t.pid, syscall.Signal(
 //  3. Kill — final fallback.
 //
 // Escalation is strictly monotonic: the ladder only moves down a rung, never
-// back up. A nil proc means there is nothing to terminate.
-func runCloseLadder(proc harnessProc, ptmx io.Writer, exitSeq string, exitSupported bool, framework string, grace, poll time.Duration) closeRung {
+// back up. A nil proc means there is nothing to terminate. The returned error is
+// non-nil only when teardown could not confirm the process gone: a SIGKILL that
+// itself failed while the process is still alive (wrapped), or a process that
+// outlived the full ladder (errCloseLadderExhausted). The caller turns a non-nil
+// error into a close_failed terminal rather than a false `closed`.
+func runCloseLadder(proc harnessProc, ptmx io.Writer, exitSeq string, exitSupported bool, framework string, grace, poll time.Duration) (closeRung, error) {
 	if proc == nil {
-		return rungNone
+		return rungNone, nil
 	}
 	if exitSupported && ptmx != nil {
 		_, _ = ptmx.Write([]byte(exitSeq))
 		if waitExit(proc, grace, poll) {
-			return rungGraceful
+			return rungGraceful, nil
 		}
 	} else if !exitSupported {
 		fmt.Fprintf(os.Stderr, "[lore] degraded: graceful_exit_sequence skipped (capability=none on framework=%s); session close escalates to SIGTERM\n", framework)
 	}
 	_ = proc.Terminate()
 	if waitExit(proc, grace, poll) {
-		return rungSIGTERM
+		return rungSIGTERM, nil
 	}
-	_ = proc.Kill()
-	return rungKill
+	if err := proc.Kill(); err != nil && proc.Alive() {
+		return rungKill, fmt.Errorf("SIGKILL failed: %w", err)
+	}
+	if proc.Alive() {
+		return rungKill, errCloseLadderExhausted
+	}
+	return rungKill, nil
 }
 
 // waitExit polls proc.Alive at poll intervals until it reports exited or grace
@@ -144,29 +194,71 @@ type closeRequestDeletedMsg struct {
 }
 
 // closeLadderDoneMsg reports that the D5 exit ladder finished terminating a
-// session's harness process; rung is the escalation step it reached.
+// session's harness process; rung is the escalation step it reached. requestID is
+// the consumed close-request's id, threaded through so the terminal journal row
+// (closed on success, close_failed on err) carries it as a match key. err is
+// non-nil only when teardown could not confirm the process gone.
 type closeLadderDoneMsg struct {
-	slug string
-	rung closeRung
-	err  error
+	slug      string
+	rung      closeRung
+	err       error
+	requestID string
 }
 
 // --- Cmds ---
 
+// sessionIDIndex maps each hosted session's harness id to its slug, skipping
+// sessions with no id binding. It is the lookup a session-addressed close-request
+// resolves through: two slugless sessions both key at "" in localSessions, but
+// their ids are distinct, so the id is the only handle that tells them apart.
+func sessionIDIndex(localSessions map[string]liveSession) map[string]string {
+	idx := make(map[string]string, len(localSessions))
+	for slug, ls := range localSessions {
+		if ls.sessionID != "" {
+			idx[ls.sessionID] = slug
+		}
+	}
+	return idx
+}
+
+// resolveCloseTargetSlug decides which hosted slug a close-request tears down.
+// A row carrying a session_id addresses one specific session: match it against
+// each hosted session's id by exact-or-leading-prefix (a coordinator may pass a
+// short prefix) and key teardown off that session's slug. A row without a
+// session_id — every legacy row — keys off its slug unchanged. A session-addressed
+// row whose id matches no hosted session and carries no slug resolves to nothing
+// (ok=false): tearing down the empty-slug session for it would be the very
+// wrong-session close the id exists to prevent.
+func resolveCloseTargetSlug(cr session.CloseRequest, idToSlug map[string]string) (string, bool) {
+	if cr.SessionID != "" {
+		for id, slug := range idToSlug {
+			if strings.HasPrefix(id, cr.SessionID) {
+				return slug, true
+			}
+		}
+		if cr.Slug == "" {
+			return "", false
+		}
+	}
+	return cr.Slug, true
+}
+
 // scanCloseRequestsCmd reads close-requests/ and returns the rows addressed to
-// this instance (target_instance == myName) for a slug it currently hosts.
-// BOTH filters must hold: a row for another instance, or for a slug this
-// instance does not host, is left untouched (neither returned nor deleted).
-// hosted is snapshotted at Cmd-build time, mirroring queueTickCmd's plan-doc
-// snapshot.
-func scanCloseRequestsCmd(sessionsDir, myName string, hosted map[string]bool) tea.Cmd {
+// this instance (target_instance == myName) for a session it currently hosts.
+// BOTH filters must hold: a row for another instance, or for a session this
+// instance does not host, is left untouched (neither returned nor deleted). A
+// row's target session is its session_id when present (see resolveCloseTargetSlug),
+// else its slug. hosted and idToSlug are snapshotted at Cmd-build time, mirroring
+// queueTickCmd's plan-doc snapshot.
+func scanCloseRequestsCmd(sessionsDir, myName string, hosted map[string]bool, idToSlug map[string]string) tea.Cmd {
 	return func() tea.Msg {
 		var matched []session.CloseRequest
 		for _, cr := range session.ScanCloseRequests(sessionsDir) {
 			if cr.RequestID == "" || cr.TargetInstance != myName {
 				continue
 			}
-			if !hosted[cr.Slug] {
+			slug, ok := resolveCloseTargetSlug(cr, idToSlug)
+			if !ok || !hosted[slug] {
 				continue
 			}
 			matched = append(matched, cr)
@@ -187,7 +279,7 @@ func deleteCloseRequestCmd(sessionsDir, requestID string) tea.Cmd {
 // closeLadderCmd resolves the active harness's graceful-exit capability, then
 // runs the D5 exit ladder against the panel's process. The ladder's process
 // operations are side effects, so they run inside the Cmd, never in Update.
-func (m model) closeLadderCmd(slug string, panel work.SessionPanelModel) tea.Cmd {
+func (m model) closeLadderCmd(slug string, panel work.SessionPanelModel, requestID string) tea.Cmd {
 	grace := m.closeGrace
 	if grace <= 0 {
 		grace = closeGraceDefault
@@ -217,8 +309,8 @@ func (m model) closeLadderCmd(slug string, panel work.SessionPanelModel) tea.Cmd
 		if f := panel.Ptmx(); f != nil {
 			ptmx = f
 		}
-		rung := runCloseLadder(proc, ptmx, exitSeq, exitSupported, framework, grace, poll)
-		return closeLadderDoneMsg{slug: slug, rung: rung}
+		rung, err := runCloseLadder(proc, ptmx, exitSeq, exitSupported, framework, grace, poll)
+		return closeLadderDoneMsg{slug: slug, rung: rung, err: err, requestID: requestID}
 	}
 }
 
@@ -254,42 +346,54 @@ func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) 
 	if len(msg.matched) == 0 {
 		return m, nil
 	}
+	idToSlug := sessionIDIndex(m.localSessions)
 	var cmds []tea.Cmd
 	for _, cr := range msg.matched {
-		if m.pendingClose[cr.Slug] {
-			continue // already consumed this slug's close-request; awaiting quiescence
+		// A session-addressed row keys off the id-resolved slug, not cr.Slug, so a
+		// slugless close reaches the one session it named. ok=false means the
+		// addressed session is no longer tracked here (torn down since the scan);
+		// consume the now-orphan row and move on.
+		slug, ok := resolveCloseTargetSlug(cr, idToSlug)
+		if !ok {
+			cmds = append(cmds, deleteCloseRequestCmd(m.sessionsDir, cr.RequestID))
+			continue
+		}
+		if _, pending := m.pendingClose[slug]; pending {
+			continue // already consumed this session's close-request; awaiting quiescence
 		}
 		cmds = append(cmds, deleteCloseRequestCmd(m.sessionsDir, cr.RequestID))
 
 		// Protocol-terminus is the only reason still gated by initiator/auto_close.
 		// Every explicit close acts with full discretion (falls through to teardown).
 		if cr.Reason == closeReasonProtocolTerminus {
-			if ls, tracked := m.localSessions[cr.Slug]; tracked && !shouldAutoClose(ls) {
+			if ls, tracked := m.localSessions[slug]; tracked && !shouldAutoClose(ls) {
 				// Held open at terminus: badge the panel, keep running.
-				if panel, ok := m.sessionPanels[cr.Slug]; ok {
-					m.sessionPanels[cr.Slug] = panel.MarkCloseRequested()
+				if panel, ok := m.sessionPanels[slug]; ok {
+					m.sessionPanels[slug] = panel.MarkCloseRequested()
 				}
 				continue
 			}
 		}
 
 		if m.pendingClose == nil {
-			m.pendingClose = make(map[string]bool)
+			m.pendingClose = make(map[string]pendingCloseState)
 		}
-		m.pendingClose[cr.Slug] = true
+		pc := pendingCloseState{
+			requestID:  cr.RequestID,
+			reason:     cr.Reason,
+			consumedAt: time.Now(),
+		}
 
 		// Interrupt-escalation rung: a session bound for teardown that is still
 		// generating gets the interrupt byte injected now, so its turn ends and the
 		// quiescence-gated ladder can proceed. Idle sessions need no interrupt.
 		// Best-effort: a missing PTY leaves the ladder to force teardown after the
 		// bounded grace.
-		if panel, ok := m.sessionPanels[cr.Slug]; ok && sessionGenerating(panel) {
+		if panel, ok := m.sessionPanels[slug]; ok && sessionGenerating(panel) {
 			_ = panel.Interrupt()
-			if m.interruptedClose == nil {
-				m.interruptedClose = make(map[string]time.Time)
-			}
-			m.interruptedClose[cr.Slug] = time.Now()
+			pc.interruptedAt = time.Now()
 		}
+		m.pendingClose[slug] = pc
 	}
 	var advCmds []tea.Cmd
 	m, advCmds = m.advanceCloseLadders()
@@ -321,6 +425,26 @@ func (m model) interruptGrace() time.Duration {
 	return closeInterruptGraceDefault
 }
 
+// modalHold is how long advanceCloseLadders holds a close blocked by an open
+// interactive prompt before acting by authority. Seam: a zero closeModalHold
+// field falls back to closeModalHoldDefault; tests inject a small value.
+func (m model) modalHold() time.Duration {
+	if m.closeModalHold > 0 {
+		return m.closeModalHold
+	}
+	return closeModalHoldDefault
+}
+
+// interactivePrompt reports whether a non-done panel is blocked on an interactive
+// prompt (a permission/approval modal). It routes through the atInteractivePromptFn
+// seam when set (tests), otherwise reads the live screen via atInteractivePrompt.
+func (m model) interactivePrompt(panel work.SessionPanelModel) bool {
+	if m.atInteractivePromptFn != nil {
+		return m.atInteractivePromptFn(panel)
+	}
+	return atInteractivePrompt(panel)
+}
+
 // handleCloseRequestDeleted surfaces a failed row delete. The pendingClose entry
 // is left in place — the ladder still fires on quiescence, and the journal
 // carries teardown history regardless of whether the row could be removed.
@@ -341,11 +465,13 @@ func (m model) advanceCloseLadders() (model, []tea.Cmd) {
 		return m, nil
 	}
 	var cmds []tea.Cmd
-	for slug := range m.pendingClose {
+	for slug, pc := range m.pendingClose {
 		panel, ok := m.sessionPanels[slug]
 		if !ok {
-			delete(m.pendingClose, slug) // panel already gone; nothing to tear down
-			delete(m.interruptedClose, slug)
+			// Panel already gone: a concurrent teardown (StreamComplete, quit,
+			// Ctrl+\) removed it and journaled the session's own `closed`. Drop the
+			// entry with no second terminal — that `closed` is the one terminal.
+			delete(m.pendingClose, slug)
 			continue
 		}
 		// A running session paused on an interactive prompt reads as quiescent
@@ -354,21 +480,38 @@ func (m model) advanceCloseLadders() (model, []tea.Cmd) {
 		// unconditionally safe there and QuiescentForClose short-circuits on it.
 		interactive := false
 		if !panel.IsDone() {
-			interactive = atInteractivePrompt(panel)
+			interactive = m.interactivePrompt(panel)
 		}
 		if !panel.QuiescentForClose(interactive) {
-			// Mid-turn or mid-prompt. An interrupted session whose bounded grace has
-			// elapsed proceeds down the ladder anyway — the interrupt did not end the
-			// turn, so SIGTERM→KILL will (a --yes turn may never quiesce). Everything
-			// else keeps waiting.
-			t, interrupted := m.interruptedClose[slug]
-			if !interrupted || time.Since(t) < m.interruptGrace() {
-				continue
+			if interactive {
+				// Blocked on an open modal. Hold up to the modal-hold bound so a human
+				// mid-answer can finish; a prompt that clears re-reads as safe next
+				// tick and closes normally.
+				if time.Since(pc.consumedAt) < m.modalHold() {
+					continue
+				}
+				// Bound elapsed: act by authority. A protocol-terminus close refuses
+				// loudly — journal close_failed and leave the session alive (no
+				// teardown). An explicit close always acts: it falls through to the
+				// exit ladder. No bytes are injected either way — the send-readiness
+				// gate is untouched.
+				if pc.reason == closeReasonProtocolTerminus {
+					delete(m.pendingClose, slug)
+					cmds = append(cmds, m.closeFailedCmd(slug, pc.requestID, closeFailedInteractivePrompt, m.localSessions[slug]))
+					continue
+				}
+			} else {
+				// Mid-turn. An interrupted session whose bounded grace has elapsed
+				// proceeds down the ladder anyway — the interrupt did not end the turn,
+				// so SIGTERM→KILL will (a --yes turn may never quiesce). Everything
+				// else keeps waiting.
+				if pc.interruptedAt.IsZero() || time.Since(pc.interruptedAt) < m.interruptGrace() {
+					continue
+				}
 			}
 		}
 		delete(m.pendingClose, slug)
-		delete(m.interruptedClose, slug)
-		cmds = append(cmds, m.closeLadderCmd(slug, panel))
+		cmds = append(cmds, m.closeLadderCmd(slug, panel, pc.requestID))
 	}
 	return m, cmds
 }
@@ -397,16 +540,31 @@ func atInteractivePrompt(panel work.SessionPanelModel) bool {
 	return mm.permission(gateRows(snap.Rows))
 }
 
-// handleCloseLadderDone finishes teardown after the ladder terminated the
-// harness process: it cleans up the panel, marks it done, and ends the local
-// session — which rewrites this instance's registry row without the slug and
-// journals `closed` through item 1's machinery. The StreamCompleteMsg the killed
-// process later produces re-enters the same teardown, but endLocalSession is
-// guarded on localSessions membership so `closed` is journaled exactly once.
+// closeFailedCmd journals one close_failed row for a consumed close-request that
+// did not tear the session down. request_id is required by the writer, so it is
+// carried from the consumed close-request; session_type/initiator come from the
+// live session (empty when it is no longer tracked, which the writer tolerates).
+func (m model) closeFailedCmd(slug, requestID, reason string, ls liveSession) tea.Cmd {
+	return journalCmd(m.eventScript, m.config.KnowledgeDir, session.Event{
+		Event:         session.EventCloseFailed,
+		ActorInstance: session.StrPtr(m.instanceName),
+		Slug:          slug,
+		SessionType:   ls.typ,
+		Initiator:     ls.initiator,
+		RequestID:     requestID,
+		Reason:        reason,
+	})
+}
+
+// handleCloseLadderDone finishes teardown after the exit ladder ran: it cleans up
+// the panel and marks it done, then emits the consumed close-request's single
+// terminal. A ladder that confirmed the process gone journals `closed` (carrying
+// the close request_id); a ladder that could not confirm it gone journals
+// `close_failed` instead — never both. Both drop the slug from this instance's
+// registry, so the StreamCompleteMsg the killed process later produces re-enters
+// teardown as a no-op (endLocalSession* is guarded on localSessions membership),
+// keeping the terminal exactly-once.
 func (m model) handleCloseLadderDone(msg closeLadderDoneMsg) (model, tea.Cmd) {
-	if msg.err != nil {
-		m.flashErr = compactErr("session close", msg.err)
-	}
 	slug := msg.slug
 	if m.sessionPanels != nil {
 		if panel, ok := m.sessionPanels[slug]; ok {
@@ -416,8 +574,19 @@ func (m model) handleCloseLadderDone(msg closeLadderDoneMsg) (model, tea.Cmd) {
 		}
 	}
 	m.list, _ = m.list.Update(work.SessionStatusMsg{Slug: slug, Done: true})
-	m, sessCmds := m.endLocalSession(slug)
-	cmds := append([]tea.Cmd(nil), sessCmds...)
+
+	var termCmds []tea.Cmd
+	if msg.err != nil {
+		m.flashErr = compactErr("session close", msg.err)
+		reason := closeFailedError
+		if errors.Is(msg.err, errCloseLadderExhausted) {
+			reason = closeFailedRungExhausted
+		}
+		m, termCmds = m.endLocalSessionFailed(slug, msg.requestID, reason)
+	} else {
+		m, termCmds = m.endLocalSessionClosed(slug, msg.requestID)
+	}
+	cmds := append([]tea.Cmd(nil), termCmds...)
 	if m.state == stateFollowUps {
 		cmds = append(cmds, followup.LoadIndexCmd(m.config.KnowledgeDir))
 	} else {

@@ -21,24 +21,72 @@ const (
 	sendReasonNoContract  = "no-contract"
 	sendReasonUnsafe      = "unsafe-payload"
 	sendReasonInternal    = "error"
+	// sendReasonUnsubmitted is the post-inject terminal: the gate passed and the
+	// paste reached the composer, but a bounded observation never confirmed the
+	// submit took (the composer still held the payload after one retry). It is a
+	// truthful refusal, not a gate decision — no message was delivered.
+	sendReasonUnsubmitted = "unsubmitted"
 )
 
-// screenMatcher pairs the two pure screen-state predicates a harness needs for
-// the readiness gate. They operate on the plain-text screen rows.
+// screenMatcher pairs the pure screen-state predicates a harness needs. composer
+// and permission drive the readiness gate; pending drives the post-inject
+// verification — it reports the composer still holding an unsent payload (the
+// paste-collapse swallow). pending is optional: a harness without one degrades to
+// the generating/empty-ready signals during verification (never guesses a
+// held-content signature).
 type screenMatcher struct {
 	composer   func(rows []string) bool
 	permission func(rows []string) bool
+	pending    func(rows []string) bool
 }
 
 // screenMatchers ports the executable matchers from
 // tests/probes/session_injection/_driver.py (the capability row's `matcher`
 // field is their human-readable description). Keyed by framework: a framework
 // absent here has no gate implementation and the send/peek path refuses with
-// no-contract rather than guessing a signature.
+// no-contract rather than guessing a signature. Only claude-code carries a
+// pending matcher — the paste-collapse swallow is a live-observed claude-code
+// behavior; codex/opencode held-content signatures are unprobed, so their
+// verification relies on the shared generating/empty-ready signals.
 var screenMatchers = map[string]screenMatcher{
-	"claude-code": {composer: ccComposerReady, permission: ccPermissionModal},
+	"claude-code": {composer: ccComposerReady, permission: ccPermissionModal, pending: ccComposerPending},
 	"codex":       {composer: cxComposerReady, permission: cxPermissionModal},
 	"opencode":    {composer: ocComposerReady, permission: ocPermissionModal},
+}
+
+// sendObs is the post-inject observation: the paste was submitted, the composer
+// still holds it, or the screen can't be classified this tick.
+type sendObs int
+
+const (
+	obsUnobservable sendObs = iota // transient repaint — no confident read yet
+	obsSubmitted                   // the turn started, or the composer is empty-ready again
+	obsPending                     // the composer still holds the unsent payload
+)
+
+// observeSend classifies a post-inject screen for the deferred-outcome loop. It
+// checks the held-payload signature first (the swallow leaves the composer
+// non-empty regardless of the quiescence timer edge), then treats a generating
+// session or a composer that re-matches its empty-ready signature as submitted.
+// quiescent is the panel's needs_input edge. A framework with no matcher, or a
+// screen that matches neither shape, reads unobservable so the caller waits
+// rather than guessing.
+func observeSend(framework string, quiescent bool, snap work.ScreenSnapshot) sendObs {
+	mm, ok := screenMatchers[framework]
+	if !ok {
+		return obsUnobservable
+	}
+	rows := gateRows(snap.Rows)
+	if mm.pending != nil && mm.pending(rows) {
+		return obsPending
+	}
+	if !quiescent {
+		return obsSubmitted
+	}
+	if mm.composer(rows) {
+		return obsSubmitted
+	}
+	return obsUnobservable
 }
 
 // sendReadiness is the strict injection gate (D2): ready only when the session is
@@ -110,11 +158,12 @@ func lastRows(rows []string, n int) []string {
 
 // --- claude-code: a '❯' prompt row flanked by two full-width '─' rules. ---
 var (
-	ccRule    = regexp.MustCompile(`─{80,}`)
-	ccPrompt  = regexp.MustCompile(`^\s*[❯>](\s|$)`)
-	ccProceed = regexp.MustCompile(`(?i)do you want to (proceed|run|allow)`)
-	ccFooter  = regexp.MustCompile(`(?i)esc to cancel|tab to amend|ctrl\+e to explain`)
-	ccOption  = regexp.MustCompile(`[❯>]?\s*\d[.)]\s`)
+	ccRule      = regexp.MustCompile(`─{80,}`)
+	ccPrompt    = regexp.MustCompile(`^\s*[❯>](\s|$)`)
+	ccProceed   = regexp.MustCompile(`(?i)do you want to (proceed|run|allow)`)
+	ccFooter    = regexp.MustCompile(`(?i)esc to cancel|tab to amend|ctrl\+e to explain`)
+	ccOption    = regexp.MustCompile(`[❯>]?\s*\d[.)]\s`)
+	ccPasteChip = regexp.MustCompile(`\[Pasted text #\d+`)
 )
 
 func ccComposerReady(rows []string) bool {
@@ -149,6 +198,38 @@ func ccPermissionModal(rows []string) bool {
 		}
 	}
 	return (proceed || footer) && options >= 2
+}
+
+// ccComposerPending reports that claude-code's composer is still holding an
+// unsent pasted payload — the paste-collapse swallow the deferred-outcome loop
+// must catch. A large paste renders as a "[Pasted text #N]" chip; once submitted
+// the chip moves up into the transcript, so the search is scoped to the composer
+// region (the bottom "rule / prompt / rule / hint" band) to tell a still-pending
+// composer from a sent chip scrolled into history.
+func ccComposerPending(rows []string) bool {
+	for _, r := range ccComposerRegion(rows) {
+		if ccPasteChip.MatchString(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// ccComposerRegion returns the bottom composer band: everything from the
+// second-to-last full-width rule onward, which spans the prompt row a pending
+// chip sits on and excludes the transcript above. With fewer than two rules
+// (a partial repaint) it falls back to the last few rows.
+func ccComposerRegion(rows []string) []string {
+	var ruleIdx []int
+	for i, r := range rows {
+		if ccRule.MatchString(r) {
+			ruleIdx = append(ruleIdx, i)
+		}
+	}
+	if len(ruleIdx) >= 2 {
+		return rows[ruleIdx[len(ruleIdx)-2]:]
+	}
+	return lastRows(rows, 4)
 }
 
 // --- codex: footer status line "<model> <effort> · <cwd>" + a '›' input row. ---

@@ -12,9 +12,18 @@ import (
 )
 
 // endLocalSession drops a torn-down session from this instance's registry row
-// and returns the Cmds that persist the removal and journal the close. It is a
-// no-op (nil Cmds) for a slug this instance was not tracking.
+// and returns the Cmds that persist the removal and journal `closed`. It is a
+// no-op (nil Cmds) for a slug this instance was not tracking. The `closed` row
+// carries the session's spawn request_id; the ladder-teardown caller overrides it
+// with the consumed close request_id via endLocalSessionClosed.
 func (m model) endLocalSession(slug string) (model, []tea.Cmd) {
+	return m.endLocalSessionClosed(slug, "")
+}
+
+// endLocalSessionClosed is endLocalSession with the consumed close-request id
+// stamped onto the `closed` row (empty leaves the spawn request_id), so a close
+// requester has a uniform match key for a ladder-driven teardown.
+func (m model) endLocalSessionClosed(slug, closeRequestID string) (model, []tea.Cmd) {
 	ls, ok := m.localSessions[slug]
 	if !ok {
 		return m, nil
@@ -23,7 +32,30 @@ func (m model) endLocalSession(slug string) (model, []tea.Cmd) {
 	delete(m.sessionIdle, slug)
 	return m, []tea.Cmd{
 		m.writeInstanceCmd(),
-		m.closedSpendJournalCmd(slug, ls),
+		m.closedSpendJournalCmd(slug, ls, closeRequestID),
+	}
+}
+
+// endLocalSessionFailed drops a torn-down session from the registry and journals
+// `close_failed` (not `closed`) — the terminal for a ladder that could not confirm
+// the process gone. Like endLocalSessionClosed it removes the slug so a later
+// StreamCompleteMsg cannot add a second terminal for the same request. The
+// close_failed row requires a request_id; the consumed close request_id supplies
+// it, falling back to the spawn id only if that were somehow empty.
+func (m model) endLocalSessionFailed(slug, closeRequestID, reason string) (model, []tea.Cmd) {
+	ls, ok := m.localSessions[slug]
+	if !ok {
+		return m, nil
+	}
+	requestID := closeRequestID
+	if requestID == "" {
+		requestID = ls.requestID
+	}
+	delete(m.localSessions, slug)
+	delete(m.sessionIdle, slug)
+	return m, []tea.Cmd{
+		m.writeInstanceCmd(),
+		m.closeFailedCmd(slug, requestID, reason, ls),
 	}
 }
 

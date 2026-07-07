@@ -251,17 +251,13 @@ type model struct {
 	// guard for the needs_input/quiescent/resumed events: emit only when the
 	// incoming needs-input state differs from what we last journaled.
 	sessionIdle map[string]bool
-	// pendingClose holds slugs with a consumed close-request awaiting teardown:
-	// the row was matched and deleted, and the D5 exit ladder fires once the
-	// panel's quiescence predicate reports idle. A slug is removed the moment
-	// its ladder is dispatched, so teardown fires at most once per request.
-	pendingClose map[string]bool
-	// interruptedClose records, per pending-close slug, when the interrupt-
-	// escalation rung injected the terminal interrupt (ESC) into a still-generating
-	// session bound for teardown. advanceCloseLadders bounds the post-interrupt wait:
-	// once this grace elapses without the turn ending, teardown proceeds down the exit
-	// ladder regardless (a --yes turn may never quiesce).
-	interruptedClose map[string]time.Time
+	// pendingClose holds slugs with a consumed close-request awaiting teardown,
+	// keyed by slug. Each entry carries the consumed request's identity (request
+	// id + reason) and its timing state; the exit ladder fires once the panel's
+	// quiescence predicate reports idle. A slug is removed the moment its ladder is
+	// dispatched (or its close resolves to a close_failed terminal), so each
+	// consumed close-request produces exactly one terminal journal row.
+	pendingClose map[string]pendingCloseState
 	// pendingSend and pendingPeek hold send/peek request ids whose consume is in
 	// flight, so a re-scan before the async delete lands does not double-process
 	// the same request. Keyed by request id (unlike pendingClose, which is keyed
@@ -269,6 +265,24 @@ type model struct {
 	// cleared when its consume Cmd reports back.
 	pendingSend map[string]bool
 	pendingPeek map[string]bool
+	// pendingSendVerify holds gate-passing sends whose paste reached the composer
+	// but whose outcome is not yet journaled: the `sent` row defers until a
+	// post-inject observation confirms the composer submitted. Keyed by request id.
+	// Each entry carries what advanceSendVerifications needs to re-observe, replay
+	// the submit sequence once, and journal the terminal (sent or send_refused
+	// reason=unsubmitted). An entry is added after a successful inject and removed
+	// the moment its terminal is journaled, so each consumed send produces exactly
+	// one outcome row.
+	pendingSendVerify map[string]pendingSendState
+	// sendVerifyGrace bounds how long a deferred send waits for an unclassifiable
+	// screen to resolve before journaling send_refused reason=unsubmitted. Seam: a
+	// zero value falls back to sendVerifyGraceDefault; tests inject a small value.
+	sendVerifyGrace time.Duration
+	// observeSendFn classifies a post-inject panel screen (submitted / still
+	// pending / unobservable) for the deferred-outcome loop. A nil value reads the
+	// live screen via observeSend; tests inject a scripted result to drive the
+	// retry-once and deadline transitions without a real emulator.
+	observeSendFn func(work.SessionPanelModel) sendObs
 	// closeGrace is the per-rung wait the close ladder allows a harness process
 	// to exit before escalating (graceful→SIGTERM→Kill); closePoll is how often
 	// it re-checks liveness within that window. Both are seams: zero values fall
@@ -276,6 +290,16 @@ type model struct {
 	// so the ladder never blocks on a real 5s wait.
 	closeGrace time.Duration
 	closePoll  time.Duration
+	// closeModalHold bounds how long advanceCloseLadders holds a close blocked by
+	// an open interactive prompt (a permission/approval modal) before acting. It is
+	// a seam: a zero value falls back to closeModalHoldDefault; tests inject a small
+	// value so the modal-hold split is exercised without a 30s wait.
+	closeModalHold time.Duration
+	// atInteractivePromptFn classifies a non-done panel as blocked on an
+	// interactive prompt (a permission/approval modal is showing). A nil value uses
+	// the live screen classification (atInteractivePrompt); tests inject a
+	// deterministic result to drive the modal-hold split without a real emulator.
+	atInteractivePromptFn func(work.SessionPanelModel) bool
 
 	showHelp bool
 	// helpViewport scrolls the help modal's keybinding list when it exceeds

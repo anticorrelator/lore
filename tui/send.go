@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -9,6 +10,14 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
+
+// sendVerifyGraceDefault bounds how long a deferred send waits for an
+// unclassifiable post-inject screen to resolve before journaling
+// send_refused reason=unsubmitted. It spans a couple of poll ticks (~5s each) so
+// the common paths — submit confirmed, or one replay of the submit sequence —
+// terminate well inside the default `session send --wait` budget (15s). Tests
+// override it through the model seam.
+const sendVerifyGraceDefault = 12 * time.Second
 
 // --- messages ---
 
@@ -18,11 +27,26 @@ type sendRequestScanMsg struct {
 	matched []session.SendRequest
 }
 
-// sendConsumedMsg reports the outcome of consuming (deleting + journaling) one
-// matched send-request.
+// sendConsumedMsg reports the outcome of consuming (deleting) one matched
+// send-request — either delete + immediate journal (a gate refusal) or a
+// delete-only ack (a gate-passing inject whose outcome journal defers).
 type sendConsumedMsg struct {
 	requestID string
 	err       error
+}
+
+// pendingSendState is the verification-side record of one gate-passing send whose
+// paste reached the composer and whose outcome journal defers until observation.
+// slug + requestID rebuild the outcome row (the requestID is the requester's
+// match key); submitSeq is replayed once as the recovery submit; injectedAt bounds
+// the unobservable wait; retried marks that the one submit-sequence replay is
+// spent.
+type pendingSendState struct {
+	slug       string
+	requestID  string
+	submitSeq  string
+	injectedAt time.Time
+	retried    bool
 }
 
 // --- Cmds ---
@@ -60,6 +84,16 @@ func consumeSendCmd(sessionsDir, script, kdir, requestID string, ev session.Even
 	}
 }
 
+// deleteSendRequestCmd consumes a gate-passing send by deleting its request file
+// with no journal row: the outcome (sent | send_refused reason=unsubmitted) is
+// deferred to the verification loop. The delete is still the durable consume and
+// lands before any outcome row, preserving the delete-before-journal ordering.
+func deleteSendRequestCmd(sessionsDir, requestID string) tea.Cmd {
+	return func() tea.Msg {
+		return sendConsumedMsg{requestID: requestID, err: session.DeleteSendRequest(sessionsDir, requestID)}
+	}
+}
+
 // --- handlers ---
 
 // handleSendRequestScan runs the readiness gate for each matched send-request
@@ -86,6 +120,9 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 		if m.pendingSend[sr.RequestID] {
 			continue // consume already in flight for this request
 		}
+		if _, verifying := m.pendingSendVerify[sr.RequestID]; verifying {
+			continue // injected already; its outcome is deferred to the verify loop
+		}
 		panel, ok := m.sessionPanels[sr.Slug]
 		if !ok {
 			continue // slug no longer hosted here (raced teardown); leave the row
@@ -95,7 +132,7 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 		}
 		m.pendingSend[sr.RequestID] = true
 
-		sent := false
+		injected := false
 		reason := sendReasonNoContract
 		if ferr != nil {
 			// framework unresolved → no contract to gate against
@@ -113,15 +150,36 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 						m.flashErr = compactErr("session send", err)
 					}
 				} else {
-					sent = true
+					injected = true
 					reason = ""
 				}
 			}
 		}
+
+		if injected {
+			// The paste reached the composer. Consume by deleting the row now, but
+			// hold the outcome: `sent` means observed-submitted, so it defers until a
+			// later tick confirms the composer submitted (or a bounded retry gives up
+			// with send_refused reason=unsubmitted). The delete still lands first.
+			if m.pendingSendVerify == nil {
+				m.pendingSendVerify = make(map[string]pendingSendState)
+			}
+			m.pendingSendVerify[sr.RequestID] = pendingSendState{
+				slug:       sr.Slug,
+				requestID:  sr.RequestID,
+				submitSeq:  submitSeq,
+				injectedAt: time.Now(),
+			}
+			cmds = append(cmds, deleteSendRequestCmd(m.sessionsDir, sr.RequestID))
+			continue
+		}
+
+		// A gate refusal (or an inject-time failure) is terminal now: no submission
+		// to verify, so delete + journal the outcome in one consume, as before.
 		if reason == sendReasonNoContract {
 			noteNoContract(framework)
 		}
-		ev := m.sendOutcomeEvent(sr, sent, reason)
+		ev := m.sendOutcomeEvent(sr, false, reason)
 		cmds = append(cmds, consumeSendCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, sr.RequestID, ev))
 	}
 	if len(cmds) == 0 {
@@ -131,12 +189,108 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 }
 
 // handleSendConsumed clears the in-flight guard and surfaces a failed consume.
+// The verify entry (added at inject time) is untouched — it owns the deferred
+// outcome regardless of whether the row delete itself succeeded.
 func (m model) handleSendConsumed(msg sendConsumedMsg) (model, tea.Cmd) {
 	delete(m.pendingSend, msg.requestID)
 	if msg.err != nil {
 		m.flashErr = compactErr("session send", msg.err)
 	}
 	return m, nil
+}
+
+// sendVerifyGrace is how long a deferred send waits for an unclassifiable
+// post-inject screen before it journals send_refused reason=unsubmitted. Seam: a
+// zero field falls back to sendVerifyGraceDefault; tests inject a small value.
+func (m model) sendVerifyGraceOr() time.Duration {
+	if m.sendVerifyGrace > 0 {
+		return m.sendVerifyGrace
+	}
+	return sendVerifyGraceDefault
+}
+
+// observeSendState classifies a panel's post-inject screen. It routes through the
+// observeSendFn seam when set (tests), otherwise resolves the active harness and
+// reads the live screen — the panel needs_input edge plus a ScreenSnapshot fed
+// through observeSend. Any failure (no framework, snapshot error) reads as
+// unobservable so a screen we cannot classify never forces a premature terminal
+// before the grace elapses.
+func (m model) observeSendState(panel work.SessionPanelModel) sendObs {
+	if m.observeSendFn != nil {
+		return m.observeSendFn(panel)
+	}
+	framework, err := config.ResolveTUILaunchFramework()
+	if err != nil {
+		return obsUnobservable
+	}
+	snap, serr := panel.ScreenState()
+	if serr != nil {
+		return obsUnobservable
+	}
+	return observeSend(framework, panel.NeedsInput(), snap)
+}
+
+// advanceSendVerifications resolves every deferred send outcome on the poll tick.
+// For each pending verification it re-observes the composer and either journals
+// the terminal or waits. It reads the shared terminal backend (via ScreenState),
+// so — like advanceCloseLadders — it runs on the Bubble Tea goroutine, never in a
+// Cmd goroutine. Each resolved entry is dropped the moment its outcome row is
+// dispatched, so every gate-passing send produces exactly one terminal.
+func (m model) advanceSendVerifications() (model, []tea.Cmd) {
+	if len(m.pendingSendVerify) == 0 {
+		return m, nil
+	}
+	var cmds []tea.Cmd
+	for reqID, ps := range m.pendingSendVerify {
+		panel, ok := m.sessionPanels[ps.slug]
+		if !ok {
+			// Panel gone (raced teardown): the submission can no longer be observed,
+			// so the honest terminal is send_refused reason=unsubmitted — the requester
+			// gets one outcome rather than timing out.
+			delete(m.pendingSendVerify, reqID)
+			cmds = append(cmds, m.sendVerifyTerminalCmd(ps, false))
+			continue
+		}
+		obs := m.observeSendState(panel)
+		switch obs {
+		case obsSubmitted:
+			delete(m.pendingSendVerify, reqID)
+			cmds = append(cmds, m.sendVerifyTerminalCmd(ps, true))
+		case obsPending:
+			if !ps.retried {
+				// The composer still holds the payload: replay the submit sequence once
+				// (a bare submit, no re-paste) to commit the already-present text — the
+				// field-precedented recovery. Best-effort; a missing PTY leaves the
+				// deadline to close it out.
+				_ = panel.SubmitSequence(ps.submitSeq)
+				ps.retried = true
+				m.pendingSendVerify[reqID] = ps
+				continue
+			}
+			// Retried and still holding content on a later tick: the submit did not
+			// take. Journal the truthful refusal.
+			delete(m.pendingSendVerify, reqID)
+			cmds = append(cmds, m.sendVerifyTerminalCmd(ps, false))
+		default: // obsUnobservable
+			if time.Since(ps.injectedAt) >= m.sendVerifyGraceOr() {
+				delete(m.pendingSendVerify, reqID)
+				cmds = append(cmds, m.sendVerifyTerminalCmd(ps, false))
+			}
+		}
+	}
+	return m, cmds
+}
+
+// sendVerifyTerminalCmd journals a deferred send's single outcome row: `sent`
+// (observed-submitted) or send_refused reason=unsubmitted. The request file is
+// already deleted, so this appends only.
+func (m model) sendVerifyTerminalCmd(ps pendingSendState, submitted bool) tea.Cmd {
+	reason := ""
+	if !submitted {
+		reason = sendReasonUnsubmitted
+	}
+	ev := m.sendOutcomeEvent(session.SendRequest{Slug: ps.slug, RequestID: ps.requestID}, submitted, reason)
+	return journalCmd(m.eventScript, m.config.KnowledgeDir, ev)
 }
 
 // sendOutcomeEvent builds the sent / send_refused journal row for one consumed

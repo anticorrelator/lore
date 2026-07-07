@@ -349,6 +349,23 @@ func (m SessionPanelModel) InjectMessage(body, submitSeq string, bracketed bool)
 	return nil
 }
 
+// SubmitSequence writes the harness submit sequence alone to the session PTY —
+// no re-paste. It is the send path's one recovery write: when a bracketed paste
+// landed in the composer but the trailing submit did not take (the composer
+// still holds the payload), replaying just the submit commits the already-present
+// text, mirroring the manual bare-Enter recovery. An empty sequence is a no-op.
+// Returns an error when no PTY is attached so the caller can degrade.
+func (m SessionPanelModel) SubmitSequence(submitSeq string) error {
+	if m.ptmx == nil {
+		return errors.New("no PTY attached")
+	}
+	if submitSeq == "" {
+		return nil
+	}
+	_, err := m.ptmx.Write([]byte(submitSeq))
+	return err
+}
+
 // Interrupt writes the terminal interrupt byte (ESC, 0x1b) to the session PTY to
 // end an in-progress harness turn — the close ladder's interrupt-escalation rung
 // for a generating session close authority permits closing. ESC is the ANSI

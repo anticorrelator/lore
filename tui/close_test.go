@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
@@ -57,9 +60,11 @@ func (f *fakeProc) Kill() error      { f.killCalls++; return nil }
 func (f *fakeProc) Alive() bool      { f.aliveCalls++; return f.signals() < f.signalsBeforeExit }
 
 // fastLadder runs runCloseLadder with a tiny grace/poll so escalation never
-// blocks on a real wait.
+// blocks on a real wait. The error return is exercised separately
+// (TestRunCloseLadder_ExhaustedIsError); the rung-only cases discard it.
 func fastLadder(proc harnessProc, ptmx io.Writer, exitSeq string, exitSupported bool, framework string) closeRung {
-	return runCloseLadder(proc, ptmx, exitSeq, exitSupported, framework, 5*time.Millisecond, time.Millisecond)
+	rung, _ := runCloseLadder(proc, ptmx, exitSeq, exitSupported, framework, 5*time.Millisecond, time.Millisecond)
+	return rung
 }
 
 // captureStderr redirects os.Stderr for the duration of fn and returns what was
@@ -249,7 +254,7 @@ func TestScanCloseRequestsCmd_TargetingMatrix(t *testing.T) {
 		})
 	}
 
-	msg := scanCloseRequestsCmd(sessionsDir, myName, hosted)().(closeRequestScanMsg)
+	msg := scanCloseRequestsCmd(sessionsDir, myName, hosted, nil)().(closeRequestScanMsg)
 	matched := map[string]bool{}
 	for _, cr := range msg.matched {
 		matched[cr.RequestID] = true
@@ -261,6 +266,128 @@ func TestScanCloseRequestsCmd_TargetingMatrix(t *testing.T) {
 	}
 }
 
+// TestScanCloseRequestsCmd_SessionIDTargeting: a row carrying a session_id is
+// matched by resolving that id against the hosted sessions (exact id or leading
+// prefix), not by its slug. A slugless row whose id names no hosted session is
+// left untouched — the id is exactly what keeps it from colliding at the empty
+// slug. A row without a session_id keeps the legacy slug-key match verbatim.
+func TestScanCloseRequestsCmd_SessionIDTargeting(t *testing.T) {
+	dir := t.TempDir()
+	sessionsDir := filepath.Join(dir, "_sessions")
+	const myName = "me"
+	// One slugless session (id sessB…) and one slugged session (alpha, id sessA…).
+	hosted := map[string]bool{"": true, "alpha": true}
+	idToSlug := map[string]string{"sessB-full-id": "", "sessA-full-id": "alpha"}
+
+	type row struct {
+		id        string
+		slug      string
+		sessionID string
+		wantMatch bool
+	}
+	rows := []row{
+		{"exact", "", "sessB-full-id", true}, // full id → slugless session
+		{"prefix", "", "sessB", true},        // leading prefix → slugless session
+		{"nomatch", "", "sessX", false},      // id names nothing hosted; slugless → skip
+		{"legacy-slugless", "", "", true},    // no id → legacy empty-slug match
+		{"legacy-slug", "alpha", "", true},   // no id → legacy slug match
+		{"id-to-slugged", "", "sessA", true}, // id resolves to the slugged session
+	}
+	for _, r := range rows {
+		plantCloseRequest(t, sessionsDir, session.CloseRequest{
+			RequestID: r.id, Slug: r.slug, SessionID: r.sessionID, TargetInstance: myName,
+		})
+	}
+
+	msg := scanCloseRequestsCmd(sessionsDir, myName, hosted, idToSlug)().(closeRequestScanMsg)
+	matched := map[string]bool{}
+	for _, cr := range msg.matched {
+		matched[cr.RequestID] = true
+	}
+	for _, r := range rows {
+		if matched[r.id] != r.wantMatch {
+			t.Errorf("row %q (slug=%q session_id=%q): matched=%v, want %v", r.id, r.slug, r.sessionID, matched[r.id], r.wantMatch)
+		}
+	}
+}
+
+// TestHandleCloseRequestScan_SessionIDDiscriminates: a close-request carrying a
+// session_id tears down exactly the session that id names — keyed off that
+// session's slug — even when a slugless session and a slugged session co-reside
+// on one instance. The unaddressed session is never scheduled for teardown.
+func TestHandleCloseRequestScan_SessionIDDiscriminates(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	m.localSessions = map[string]liveSession{
+		"":      {typ: "chat", initiator: "agent", sessionID: "sessB-full", started: time.Now()},
+		"alpha": {typ: "spec", initiator: "agent", sessionID: "sessA-full", started: time.Now()},
+	}
+	m.sessionPanels = map[string]work.SessionPanelModel{
+		"":      work.NewSessionPanelModel(""),
+		"alpha": work.NewSessionPanelModel("alpha"),
+	}
+
+	// Address the slugless session by an unambiguous leading prefix of its id.
+	m, cmd := m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{
+		{RequestID: "c1", Slug: "", SessionID: "sessB", TargetInstance: "me", Reason: "coordinator"},
+	}})
+	if cmd == nil {
+		t.Fatal("expected a delete Cmd for the consumed row")
+	}
+	if _, pending := m.pendingClose[""]; !pending {
+		t.Fatal("addressed slugless session was not scheduled for teardown")
+	}
+	if _, pending := m.pendingClose["alpha"]; pending {
+		t.Fatal("unaddressed slugged session was scheduled for teardown by the slugless close")
+	}
+}
+
+// TestHandleCloseRequestScan_UnmatchedSessionIDSparesSlugless: a session-addressed
+// row whose id names no hosted session must not fall back to the empty-slug
+// session — that fallback is the wrong-session close the id exists to prevent.
+// The orphan row is still consumed (deleted), leaving no residue.
+func TestHandleCloseRequestScan_UnmatchedSessionIDSparesSlugless(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	m.localSessions = map[string]liveSession{
+		"": {typ: "chat", initiator: "agent", sessionID: "sessB-full", started: time.Now()},
+	}
+	m.sessionPanels = map[string]work.SessionPanelModel{
+		"": work.NewSessionPanelModel(""),
+	}
+
+	m, cmd := m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{
+		{RequestID: "c1", Slug: "", SessionID: "ghost", TargetInstance: "me", Reason: "coordinator"},
+	}})
+	if cmd == nil {
+		t.Fatal("expected a delete Cmd consuming the orphan row")
+	}
+	if _, pending := m.pendingClose[""]; pending {
+		t.Fatal("a session_id naming no hosted session tore down the wrong (empty-slug) session")
+	}
+}
+
+// TestHandleCloseRequestScan_LegacySluglessRow: a legacy row (no session_id) with
+// an empty slug keys off the empty-slug session exactly as it did before the
+// field existed — the byte-for-byte backward-compatibility guarantee.
+func TestHandleCloseRequestScan_LegacySluglessRow(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	m.localSessions = map[string]liveSession{
+		"": {typ: "chat", initiator: "agent", started: time.Now()}, // no session id binding
+	}
+	m.sessionPanels = map[string]work.SessionPanelModel{
+		"": work.NewSessionPanelModel(""),
+	}
+
+	m, cmd := m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{
+		{RequestID: "c1", Slug: "", TargetInstance: "me", Reason: "coordinator"},
+	}})
+	if cmd == nil {
+		t.Fatal("expected a delete Cmd for the consumed row")
+	}
+	if _, pending := m.pendingClose[""]; !pending {
+		t.Fatal("legacy empty-slug close did not schedule teardown of the slugless session")
+	}
+}
+
 // TestAdvanceCloseLadders_QuiescenceWaitOrdering: a consumed close-request for a
 // mid-turn panel dispatches no ladder (it waits); the same slug dispatches
 // exactly one ladder once the panel reports quiescent, and is cleared from
@@ -268,14 +395,14 @@ func TestScanCloseRequestsCmd_TargetingMatrix(t *testing.T) {
 func TestAdvanceCloseLadders_QuiescenceWaitOrdering(t *testing.T) {
 	m, _ := baseSessionModel(t)
 	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
-	m.pendingClose = map[string]bool{"demo": true}
+	m.pendingClose = map[string]pendingCloseState{"demo": {requestID: "c1", consumedAt: time.Now()}}
 
 	// Mid-turn: not quiescent → no dispatch, still pending.
 	m, cmds := m.advanceCloseLadders()
 	if len(cmds) != 0 {
 		t.Fatalf("dispatched %d ladders while mid-turn, want 0", len(cmds))
 	}
-	if !m.pendingClose["demo"] {
+	if _, pending := m.pendingClose["demo"]; !pending {
 		t.Fatal("pendingClose cleared before quiescence")
 	}
 
@@ -289,7 +416,7 @@ func TestAdvanceCloseLadders_QuiescenceWaitOrdering(t *testing.T) {
 	if len(cmds) != 1 {
 		t.Fatalf("dispatched %d ladders when quiescent, want 1", len(cmds))
 	}
-	if m.pendingClose["demo"] {
+	if _, pending := m.pendingClose["demo"]; pending {
 		t.Fatal("pendingClose not cleared after dispatch")
 	}
 }
@@ -304,7 +431,7 @@ func TestHandleCloseRequestScan_MarksAndDeletes(t *testing.T) {
 	m, cmd := m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{
 		{RequestID: "c1", Slug: "demo", TargetInstance: "me"},
 	}})
-	if !m.pendingClose["demo"] {
+	if _, pending := m.pendingClose["demo"]; !pending {
 		t.Fatal("slug not marked pending-close")
 	}
 	if cmd == nil {
@@ -372,13 +499,14 @@ func TestHandleCloseRequestScan_ExplicitFullDiscretion(t *testing.T) {
 	}
 
 	for _, slug := range []string{"human-gen", "agent-gen"} {
-		if !m.pendingClose[slug] {
+		pc, pending := m.pendingClose[slug]
+		if !pending {
 			t.Errorf("%s: explicit close should schedule teardown regardless of initiator", slug)
 		}
 		if m.sessionPanels[slug].CloseRequested() {
 			t.Errorf("%s: explicit close must not badge/hold the session open", slug)
 		}
-		if _, interrupted := m.interruptedClose[slug]; !interrupted {
+		if pc.interruptedAt.IsZero() {
 			t.Errorf("%s: generating session bound for teardown should be interrupted", slug)
 		}
 	}
@@ -411,19 +539,19 @@ func TestHandleCloseRequestScan_ProtocolTerminusGate(t *testing.T) {
 		t.Fatal("expected delete Cmds for the consumed rows")
 	}
 
-	if !m.pendingClose["agent-term"] {
+	if _, pending := m.pendingClose["agent-term"]; !pending {
 		t.Error("agent session should auto-close at terminus")
 	}
 	if m.sessionPanels["agent-term"].CloseRequested() {
 		t.Error("auto-closing agent session should not be badged")
 	}
-	if m.pendingClose["human-term"] {
+	if _, pending := m.pendingClose["human-term"]; pending {
 		t.Error("human session must be held open at terminus, not torn down")
 	}
 	if !m.sessionPanels["human-term"].CloseRequested() {
 		t.Error("human session should carry the held-open badge at terminus")
 	}
-	if m.pendingClose["hold-term"] {
+	if _, pending := m.pendingClose["hold-term"]; pending {
 		t.Error("auto_close=false session must be held open at terminus")
 	}
 	if !m.sessionPanels["hold-term"].CloseRequested() {
@@ -475,5 +603,169 @@ func TestHandleCloseLadderDone_JournalsClosedExactlyOnce(t *testing.T) {
 	runJournalCmds(t, cmd)
 	if got := readEventTypes(t, kdir); len(got) != 1 {
 		t.Fatalf("closed journaled %d times, want exactly once: %v", len(got), got)
+	}
+}
+
+// readEventRows returns every events.jsonl row decoded into a session.Event, in
+// order, for assertions on reason/request_id (not just the event name).
+func readEventRows(t *testing.T, kdir string) []session.Event {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(kdir, "_sessions", "events.jsonl"))
+	if err != nil {
+		return nil
+	}
+	var rows []session.Event
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev session.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("bad events.jsonl row %q: %v", line, err)
+		}
+		rows = append(rows, ev)
+	}
+	return rows
+}
+
+// TestRunCloseLadder_ExhaustedIsError: a process that outlives the full ladder
+// (survives SIGTERM and SIGKILL) reaches rungKill but returns
+// errCloseLadderExhausted, so the caller can journal close_failed rather than a
+// false `closed`.
+func TestRunCloseLadder_ExhaustedIsError(t *testing.T) {
+	proc := &fakeProc{signalsBeforeExit: 99} // never exits
+	rung, err := runCloseLadder(proc, nil, "", false, "fw", 5*time.Millisecond, time.Millisecond)
+	if rung != rungKill {
+		t.Errorf("rung = %d, want rungKill (%d)", rung, rungKill)
+	}
+	if !errors.Is(err, errCloseLadderExhausted) {
+		t.Errorf("err = %v, want errCloseLadderExhausted", err)
+	}
+}
+
+// TestAdvanceCloseLadders_ExplicitModalHold: an explicit close on a modal-blocked
+// panel (interactive-prompt true, not done) holds within the modal-hold bound,
+// then — once the bound elapses — proceeds down the exit ladder and journals a
+// `closed` row carrying the consumed close request_id. No bytes are injected.
+func TestAdvanceCloseLadders_ExplicitModalHold(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	kdir := m.config.KnowledgeDir
+	m.atInteractivePromptFn = func(work.SessionPanelModel) bool { return true }
+	m.closeModalHold = time.Hour // long bound so the "within hold" phase holds
+	m.localSessions = map[string]liveSession{"demo": {typ: "spec", initiator: "human", started: time.Now()}}
+	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
+
+	// Within the hold: no dispatch, entry still pending, session still alive.
+	m.pendingClose = map[string]pendingCloseState{"demo": {requestID: "cr-x", reason: "human", consumedAt: time.Now()}}
+	m, cmds := m.advanceCloseLadders()
+	if len(cmds) != 0 {
+		t.Fatalf("dispatched %d ladders within the modal hold, want 0", len(cmds))
+	}
+	if _, pending := m.pendingClose["demo"]; !pending {
+		t.Fatal("explicit close dropped from pendingClose within the hold")
+	}
+
+	// Bound elapsed (consumedAt in the past): dispatch the ladder exactly once.
+	m.pendingClose = map[string]pendingCloseState{"demo": {requestID: "cr-x", reason: "human", consumedAt: time.Now().Add(-time.Hour)}}
+	m, cmds = m.advanceCloseLadders()
+	if len(cmds) != 1 {
+		t.Fatalf("dispatched %d ladders after the hold elapsed, want 1", len(cmds))
+	}
+	if _, pending := m.pendingClose["demo"]; pending {
+		t.Fatal("pendingClose not cleared after dispatch")
+	}
+
+	// Drive the ladder Cmd → handleCloseLadderDone → the closed terminal.
+	msg, ok := cmds[0]().(closeLadderDoneMsg)
+	if !ok {
+		t.Fatalf("ladder Cmd returned %T, want closeLadderDoneMsg", cmds[0]())
+	}
+	if msg.requestID != "cr-x" {
+		t.Errorf("ladder carried request_id %q, want cr-x", msg.requestID)
+	}
+	m, cmd := m.handleCloseLadderDone(msg)
+	runJournalCmds(t, cmd)
+	rows := readEventRows(t, kdir)
+	if len(rows) != 1 || rows[0].Event != session.EventClosed {
+		t.Fatalf("events = %+v, want exactly [closed]", rows)
+	}
+	if rows[0].RequestID != "cr-x" {
+		t.Errorf("closed row request_id = %q, want the consumed close request_id cr-x", rows[0].RequestID)
+	}
+}
+
+// TestAdvanceCloseLadders_TerminusModalRefuses: a protocol_terminus close on a
+// modal-blocked panel, once the hold elapses, journals close_failed
+// reason=interactive-prompt (carrying the consumed request_id) and leaves the
+// session alive — no teardown, panel still hosted.
+func TestAdvanceCloseLadders_TerminusModalRefuses(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	kdir := m.config.KnowledgeDir
+	m.atInteractivePromptFn = func(work.SessionPanelModel) bool { return true }
+	m.localSessions = map[string]liveSession{"demo": {typ: "spec", initiator: "agent", started: time.Now()}}
+	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
+	m.pendingClose = map[string]pendingCloseState{"demo": {
+		requestID: "cr-t", reason: closeReasonProtocolTerminus, consumedAt: time.Now().Add(-time.Hour),
+	}}
+
+	m, cmds := m.advanceCloseLadders()
+	if len(cmds) != 1 {
+		t.Fatalf("terminus modal refuse dispatched %d cmds, want 1 (the close_failed)", len(cmds))
+	}
+	if _, pending := m.pendingClose["demo"]; pending {
+		t.Fatal("terminus close not cleared from pendingClose after refusing")
+	}
+	// The session stays alive: still tracked, panel still hosted, not torn down.
+	if _, alive := m.localSessions["demo"]; !alive {
+		t.Fatal("terminus modal refuse must leave the session alive")
+	}
+	if _, hosted := m.sessionPanels["demo"]; !hosted {
+		t.Fatal("terminus modal refuse must not tear down the panel")
+	}
+
+	runJournalCmds(t, tea.Batch(cmds...))
+	rows := readEventRows(t, kdir)
+	if len(rows) != 1 || rows[0].Event != session.EventCloseFailed {
+		t.Fatalf("events = %+v, want exactly [close_failed]", rows)
+	}
+	if rows[0].Reason != closeFailedInteractivePrompt || rows[0].RequestID != "cr-t" {
+		t.Fatalf("close_failed row = %+v, want reason=interactive-prompt request_id=cr-t", rows[0])
+	}
+}
+
+// TestHandleCloseLadderDone_ErrorJournalsCloseFailed: a ladder that could not
+// confirm the process gone (errCloseLadderExhausted) emits close_failed
+// reason=rung-exhausted, NOT `closed` (the double-terminal trap), drops the
+// session, and a later StreamCompleteMsg adds no second terminal.
+func TestHandleCloseLadderDone_ErrorJournalsCloseFailed(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	kdir := m.config.KnowledgeDir
+	m.localSessions = map[string]liveSession{"demo": {typ: "spec", initiator: "human", started: time.Now()}}
+	panel, _ := work.NewSessionPanelModel("demo").Update(work.StreamCompleteMsg{Slug: "demo"})
+	m.sessionPanels = map[string]work.SessionPanelModel{"demo": panel}
+
+	m, cmd := m.handleCloseLadderDone(closeLadderDoneMsg{
+		slug: "demo", rung: rungKill, err: errCloseLadderExhausted, requestID: "cr-e",
+	})
+	if _, ok := m.localSessions["demo"]; ok {
+		t.Fatal("failed teardown did not drop the session from localSessions")
+	}
+	runJournalCmds(t, cmd)
+	rows := readEventRows(t, kdir)
+	if len(rows) != 1 || rows[0].Event != session.EventCloseFailed {
+		t.Fatalf("events = %+v, want exactly [close_failed]", rows)
+	}
+	if rows[0].Reason != closeFailedRungExhausted || rows[0].RequestID != "cr-e" {
+		t.Fatalf("close_failed row = %+v, want reason=rung-exhausted request_id=cr-e", rows[0])
+	}
+
+	// StreamComplete re-entry: the dropped session yields no second terminal.
+	_, cmd = m.handleStreamComplete(work.StreamCompleteMsg{Slug: "demo"})
+	runJournalCmds(t, cmd)
+	if rows := readEventRows(t, kdir); len(rows) != 1 {
+		t.Fatalf("terminal journaled %d times, want exactly once: %+v", len(rows), rows)
 	}
 }

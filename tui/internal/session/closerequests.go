@@ -11,14 +11,17 @@ import (
 // CloseRequest is one close-request row at close-requests/<request_id>.json,
 // written by scripts/session-close.sh (bash) and read here (Go). Per the
 // substrate contract the schema is {request_id, slug, target_instance, reason,
-// requested_by, requested_at}. Unlike the spawn queue there is no
-// pending/claimed split: exactly one instance (the one whose registry runs the
-// slug's session) is ever eligible, so there is no claim race — the owning
-// instance consumes the row by deleting it after initiating teardown.
+// requested_by, requested_at}, plus an optional session_id. Unlike the spawn
+// queue there is no pending/claimed split: exactly one instance (the one whose
+// registry runs the slug's session) is ever eligible, so there is no claim
+// race — the owning instance consumes the row by deleting it after initiating
+// teardown.
 //
 // Every field is a string, so a strict decoder has no numeric coercion to
 // guard; unknown fields are tolerated (default json behavior) so a
-// forward-extended writer never breaks this reader.
+// forward-extended writer never breaks this reader. An absent session_id
+// (every row written before the field existed) decodes to "", which the
+// consumer reads as the slug-key close-matching it always used.
 type CloseRequest struct {
 	RequestID      string `json:"request_id"`
 	Slug           string `json:"slug"`
@@ -26,6 +29,11 @@ type CloseRequest struct {
 	Reason         string `json:"reason"` // protocol_terminus|coordinator|human
 	RequestedBy    string `json:"requested_by"`
 	RequestedAt    string `json:"requested_at"`
+	// SessionID, when set, names the exact harness session the close addresses —
+	// the full id or the leading prefix a coordinator passed to `close --session`.
+	// It is the only handle that disambiguates a slugless session, so the consumer
+	// matches it against each hosted session's id before falling back to the slug.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // CloseRequestsDir is the close-request surface under a _sessions/ directory.

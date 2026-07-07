@@ -20,7 +20,7 @@ func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 		EventRequested, EventClaimed, EventSpawned, EventNeedsInput, EventQuiescent,
 		EventResumed, EventRecovered, EventClosed, EventStepCompleted, EventHarnessTurnEnded,
 		EventSpawnFailed, EventReclaimed, EventAbandoned, EventCancelled,
-		EventSendRequested, EventSent, EventSendRefused,
+		EventSendRequested, EventSent, EventSendRefused, EventCloseFailed,
 		EventReviewFlagged, EventReviewHeld, EventReviewNotified, EventReviewReleased,
 	}
 	tok := func() string { return string(rune('a'+r.Intn(26))) + string(rune('a'+r.Intn(26))) + "-x" }

@@ -34,13 +34,14 @@
 #                resumed | recovered | closed | step_completed |
 #                harness_turn_ended | spawn_failed | request_reclaimed |
 #                request_abandoned | request_cancelled | close_requested |
-#                send_requested | sent | send_refused | review_flagged |
-#                review_held | review_notified | review_released
+#                close_failed | send_requested | sent | send_refused |
+#                review_flagged | review_held | review_notified | review_released
 #
 # Conditional rules:
 #   Queue-lifecycle events (requested, claimed, spawned, spawn_failed,
 #   request_reclaimed, request_abandoned, request_cancelled, close_requested,
-#   send_requested, sent, send_refused) REQUIRE a non-empty request_id.
+#   close_failed, send_requested, sent, send_refused) REQUIRE a non-empty
+#   request_id.
 #   Work-item review events (review_flagged, review_held, review_notified,
 #   review_released) REQUIRE a non-empty slug — a third event class keyed to a
 #   work item rather than a queue request. gate_id (optional, omit-when-empty)
@@ -118,19 +119,19 @@ EVENT=$(printf '%s' "$ROW" | jq -r '.event // ""')
 case "$EVENT" in
   requested|claimed|spawned|needs_input|quiescent|resumed|recovered|closed|\
 step_completed|harness_turn_ended|spawn_failed|request_reclaimed|\
-request_abandoned|request_cancelled|close_requested|send_requested|sent|send_refused|\
+request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused|\
 review_flagged|review_held|review_notified|review_released) ;;
   "")
     fail "missing required field: event"
     ;;
   *)
-    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, send_requested, sent, send_refused, review_flagged, review_held, review_notified, review_released)"
+    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, review_flagged, review_held, review_notified, review_released)"
     ;;
 esac
 
 # --- Queue-lifecycle events require a non-empty request_id ---
 case "$EVENT" in
-  requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|close_requested|send_requested|sent|send_refused)
+  requested|claimed|spawned|spawn_failed|request_reclaimed|request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused)
     if ! printf '%s' "$ROW" | jq -e '(.request_id // "") != ""' >/dev/null 2>&1; then
       fail "missing required field: request_id (required for queue-lifecycle event '$EVENT')"
     fi

@@ -261,6 +261,7 @@ teardown.
 | `reason` | string | Enum `protocol_terminus\|coordinator\|human` — who/what asked for the close. |
 | `requested_by` | string | Who enqueued it (instance name, agent id, or human). |
 | `requested_at` | string | ISO 8601 UTC timestamp of enqueue. |
+| `session_id` | string \| absent | Harness session id (full or the leading prefix passed to `close --session`) naming the exact session to close. Stamped only by the `--session` form; omit-when-empty. The consumer matches it against each hosted session's id by exact-or-leading-prefix and keys teardown off that session's slug; a row without it (every other form, every legacy row) keys off `slug` unchanged. It is the only handle that disambiguates two slugless sessions, whose `slug` is both null. |
 
 **Enqueue** = write a tmp file + rename into `close-requests/<request_id>.json`
 (atomic; readers never see a torn row) — the same primitive as the spawn queue.
@@ -313,6 +314,28 @@ classified by the same screen matcher the injection readiness gate uses): a
 close-request that lands mid-prompt waits for the prompt to clear rather than
 tearing the session down on an unanswered question.
 
+**Terminal outcome — every consumed close ends in exactly one row.** Consuming a
+close request deletes the row, so the journal is the only remaining record of what
+became of the intent. Every consumed close therefore resolves to exactly one of
+two terminal events: `closed` when teardown completes, or `close_failed` when it
+does not. `close_failed` carries a `reason` from a documented set:
+`interactive-prompt` (a held prompt never cleared, so an auto-close session could
+not be torn down), `rung-exhausted` (the exit ladder ran graceful → SIGTERM → KILL
+without the session ending), or `error` (any other teardown fault). Because the
+row is already gone, `close_failed` is the only signal that an explicit close did
+not land — it keeps such a close from becoming a silent no-op. A watcher keyed on
+`closed` alone sleeps through this second terminal, so a close-outcome watcher must
+wait on `closed` **or** `close_failed`. Like `closed`, the `close_requested →
+close_failed` pair is matched by per-slug ordering, never adjacency — running-session
+transitions may fall between the request and its terminal.
+
+There is one bound. A TUI that consumes a close request and then crashes before
+emitting either terminal row leaves a `close_requested` with no terminal — no
+durable pending-close state exists to replay it, and none is added here. A reader
+treats a `close_requested` with no matching terminal as **unknown, bounded by
+instance liveness**: once the owning instance leaves the registry, the outcome will
+never arrive and the reader stops waiting on it.
+
 The cancel form `lore session close --request <id>` is unrelated to this queue: it
 deletes a still-**pending spawn** row in `requests/pending/` and emits
 `request_cancelled` (the terminal state the request lifecycle reserves for it).
@@ -362,11 +385,30 @@ would fire N partial turns.
 
 **Consume** = delete the request file, then append the outcome (`sent` /
 `send_refused`) — the delete lands first so the journal row never precedes the
-consume it records.
+consume it records. A gate refusal appends its outcome immediately (nothing was
+injected). A gate-passing injection deletes the row at once but **defers** its
+outcome: the row still lands before any journal row, only later.
+
+**`sent` means observed-submitted, not just injected.** A bracketed paste can land
+in the composer without the trailing submit taking (a large paste that collapses
+to a "pasted text" chip is the observed failure), which would make an immediate
+`sent` a lie. So after a gate-passing injection the instance holds the outcome and
+re-observes the composer on later poll ticks. When the observation confirms the
+submit took — the session is generating, or the composer returned to its empty
+ready signature — it journals `sent`. When the composer is still holding the unsent
+payload, it replays the harness `submit_sequence` **once** (a bare submit, no
+re-paste, mirroring the manual recovery), then re-observes. If the payload is still
+unsubmitted at a bounded deadline, it journals `send_refused` with the post-inject
+reason `unsubmitted` — a truthful refusal, since no message was delivered. Every
+gate-passing send ends in exactly one terminal (`sent` or `send_refused`).
 
 `lore session send --wait` polls the journal for its request id's `sent` /
-`send_refused` and maps the outcome to an exit code (0 sent, 3 refused, 1 error
-or timeout). Without `--wait` it enqueues and exits 0 with the request id.
+`send_refused` and maps the outcome to an exit code (0 sent, 3 refused — including
+`unsubmitted`, 1 error or timeout). The exit-code mapping is unchanged by the
+deferred outcome; only its timing shifts. Because verification adds one to two poll
+ticks (~5–10s) before the outcome row, pass a longer `--timeout` (e.g. `--timeout
+30`) for headroom over the default 15s when a swallow-and-retry is possible.
+Without `--wait` it enqueues and exits 0 with the request id.
 
 ## Peek request / response
 
@@ -434,9 +476,10 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `request_abandoned` | TUI | `attempts >= 3`; request dropped, journal row is the dead-letter (carries last `reason`) |
 | `request_cancelled` | `session close --request` cancel verb | a pending spawn request was cancelled |
 | `close_requested` | `session close` enqueue verb (`<slug>` / `--self`) | a close request was enqueued for the instance running a slug |
+| `close_failed` | TUI | a consumed close request did not complete teardown; `reason` names why (`interactive-prompt`/`rung-exhausted`/`error`) |
 | `send_requested` | `session send` enqueue verb | a send request was enqueued for the instance running a slug |
-| `sent` | TUI | the readiness gate passed and the message was injected into the composer |
-| `send_refused` | TUI | the readiness gate refused injection; `reason` names why (`generating`/`modal`/`no-signature`/`no-contract`/`unsafe-payload`/`error`) |
+| `sent` | TUI | the message was injected AND a later observation confirmed the composer submitted it (verified-outcome; see [Send-request queue](#send-request-queue)) |
+| `send_refused` | TUI | injection was refused, or an injected message never submitted; `reason` names why — gate refusals (`generating`/`modal`/`no-signature`/`no-contract`/`unsafe-payload`/`error`) or the post-inject `unsubmitted` |
 | `review_flagged` | `lore work flag` verb | a lightweight (async) review gate was opened on a work item; `event_id` is the gate_id |
 | `review_held` | `lore work hold` verb | a blocking review gate was opened on a work item; `event_id` is the gate_id |
 | `review_notified` | coordinator (direct append) | a stateless review notification for a work item; no gate, no verb |
@@ -444,9 +487,11 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 
 **Queue-lifecycle events** — `requested`, `claimed`, `spawned`, `spawn_failed`,
 `request_reclaimed`, `request_abandoned`, `request_cancelled`, `close_requested`,
-`send_requested`, `sent`, `send_refused` — each concern a specific request and
-MUST carry a non-empty `request_id`. The writer enforces this. (`sent` and
-`send_refused` carry it so `session send --wait` can match its outcome by id.)
+`close_failed`, `send_requested`, `sent`, `send_refused` — each concern a specific
+request and MUST carry a non-empty `request_id`. The writer enforces this. (`sent`
+and `send_refused` carry it so `session send --wait` can match its outcome by id;
+`close_failed` carries it so a close-outcome watcher can match the failure back to
+its `close_requested`.)
 
 **Work-item review events** — `review_flagged`, `review_held`, `review_notified`,
 `review_released` — form a third event class keyed to a work item rather than a
@@ -459,7 +504,8 @@ owns it, no verb); flag/hold/release are emitted by their `lore work` verbs.
 **Emitter ownership** (per the settled design): the TUI owns session transitions
 and TUI-driven queue lifecycle; the enqueue writer owns `requested`; the
 `session close` verb owns `close_requested` (its enqueue forms) and
-`request_cancelled` (its cancel form); the `session send` verb owns
+`request_cancelled` (its cancel form), while the TUI owns the `closed` /
+`close_failed` close outcomes it decides at consume; the `session send` verb owns
 `send_requested` (its enqueue), while the TUI owns the `sent` / `send_refused`
 outcomes it decides at consume; protocol terminal verbs own `step_completed`;
 stop hooks own `harness_turn_ended`. Peek has no events — it is a read.

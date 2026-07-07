@@ -547,6 +547,44 @@ journal_boundaries() {
   [[ "$output" == *"slugless session on instance inst-b"* ]]
 }
 
+@test "close --session stamps the passed session_id onto the close-request row" {
+  write_instance_session inst-a feature-x 11111111-1111-1111-1111-111111111111
+  run bash "$CLOSE" --session 11111111-1111-1111-1111-111111111111 --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  local cr; cr="$(ls "$TEST_KDIR"/_sessions/close-requests/*.json)"
+  run jq -e '.session_id=="11111111-1111-1111-1111-111111111111"' "$cr"
+  [ "$status" -eq 0 ]
+}
+
+@test "close --session stamps the leading prefix the coordinator passed, not the full id" {
+  # The producer stamps the passed value verbatim; the consumer matches it
+  # against the full hosted id by leading prefix, so the short form still resolves.
+  write_instance_session inst-a feature-x 11111111-1111-1111-1111-111111111111
+  run bash "$CLOSE" --session 1111 --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  local cr; cr="$(ls "$TEST_KDIR"/_sessions/close-requests/*.json)"
+  run jq -e '.session_id=="1111"' "$cr"
+  [ "$status" -eq 0 ]
+}
+
+@test "close <slug> omits session_id from the close-request row (legacy shape)" {
+  write_instance inst-a feature-x
+  run bash "$CLOSE" feature-x --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  local cr; cr="$(ls "$TEST_KDIR"/_sessions/close-requests/*.json)"
+  run jq -e '(has("session_id")|not)' "$cr"
+  [ "$status" -eq 0 ]
+}
+
+@test "close --self omits session_id from the close-request row" {
+  run env LORE_SESSION_INSTANCE=inst-a LORE_SESSION_SLUG=feature-x \
+    bash "$CLOSE" --self --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  local cr; cr="$(ls "$TEST_KDIR"/_sessions/close-requests/*.json)"
+  run jq -e '(has("session_id")|not)' "$cr"
+  [ "$status" -eq 0 ]
+}
+
 @test "close --session refuses an ambiguous prefix and names the colliding ids" {
   write_instance_session inst-c early abcd0000-0000-0000-0000-000000000000
   write_instance_session inst-d late  abcd1111-1111-1111-1111-111111111111
@@ -586,6 +624,31 @@ journal_boundaries() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"ambiguous"* ]]
   [[ "$output" == *"--session <id>"* ]]
+}
+
+# =====================================================================
+# session-event-append — close_failed terminal-outcome vocabulary
+# =====================================================================
+
+@test "append accepts close_failed with a non-empty request_id" {
+  run bash "$APPEND" --row '{"event":"close_failed","request_id":"r1","reason":"rung-exhausted"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run grep -c '"event":"close_failed"' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$output" = "1" ]
+}
+
+@test "append rejects close_failed without a request_id, naming the field" {
+  run bash "$APPEND" --row '{"event":"close_failed","reason":"error"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"missing required field: request_id"* ]]
+  [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
+}
+
+@test "append rejects an out-of-vocabulary event and enumerates close_failed" {
+  run bash "$APPEND" --row '{"event":"close_bogus","request_id":"r1"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid event"* ]]
+  [[ "$output" == *"close_failed"* ]]
 }
 
 # =====================================================================

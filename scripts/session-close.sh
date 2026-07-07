@@ -212,6 +212,9 @@ REQUESTED_AT="$(timestamp_iso)"
 SLUG_JSON="null"
 [[ -n "$SLUG" ]] && SLUG_JSON="$(jq -n --arg s "$SLUG" '$s')"
 
+# session_id is stamped only by the --session form (SESSION_ID_ARG is empty for
+# every other form), so the consumer can disambiguate a slugless session by its
+# harness id. Omit-when-empty keeps every non-session-form row byte-identical.
 ROW="$(jq -n \
   --arg request_id "$REQUEST_ID" \
   --argjson slug "$SLUG_JSON" \
@@ -219,7 +222,9 @@ ROW="$(jq -n \
   --arg reason "$REASON" \
   --arg requested_by "$REQUESTED_BY" \
   --arg requested_at "$REQUESTED_AT" \
-  '{request_id: $request_id, slug: $slug, target_instance: $target, reason: $reason, requested_by: $requested_by, requested_at: $requested_at}')"
+  --arg session_id "$SESSION_ID_ARG" \
+  '{request_id: $request_id, slug: $slug, target_instance: $target, reason: $reason, requested_by: $requested_by, requested_at: $requested_at}
+   + (if $session_id != "" then {session_id: $session_id} else {} end)')"
 
 TMP="$(mktemp "$CLOSE_DIR/.tmp.${REQUEST_ID}.XXXXXX")"
 printf '%s\n' "$ROW" > "$TMP"

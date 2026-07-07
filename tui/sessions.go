@@ -517,11 +517,16 @@ func (m model) closedEventFor(slug string, ls liveSession) session.Event {
 // the UI thread and the append still flows through the sole writer
 // (session-event-append.sh). A session with no deterministic transcript binding,
 // or any probe gap, closes with the duration-only spend; duration_seconds is
-// always merged TUI-side — the helper never sees it.
-func (m model) closedSpendJournalCmd(slug string, ls liveSession) tea.Cmd {
+// always merged TUI-side — the helper never sees it. A non-empty closeRequestID
+// overrides the row's request_id with the consumed close-request's id (the match
+// key a ladder-driven teardown carries); empty leaves the spawn request_id.
+func (m model) closedSpendJournalCmd(slug string, ls liveSession, closeRequestID string) tea.Cmd {
 	script, kdir := m.eventScript, m.config.KnowledgeDir
 	spendScript, cwd := m.spendScript, m.config.ProjectDir
 	ev := m.closedEventMeta(slug, ls)
+	if closeRequestID != "" {
+		ev.RequestID = closeRequestID
+	}
 	dur := sessionDurationSeconds(ls.started)
 	harness, sessionID := ls.harness, ls.sessionID
 	return func() tea.Msg {
