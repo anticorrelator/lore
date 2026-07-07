@@ -16,7 +16,7 @@
 
 ## Journal cursor
 
-`next_cursor: 0` <!-- opaque; store verbatim from `lore session events`, echo via --since, never compute -->
+`next_cursor: 0` <!-- opaque; take it from the final {"next_cursor": N} row on `lore session events` stdout (or `--cursor-only`), store verbatim, echo via --since, never compute -->
 
 ## Step Ledger
 

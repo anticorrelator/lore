@@ -24,6 +24,7 @@ EVENTS="$REPO_DIR/scripts/session-events.sh"
 CLOSE="$REPO_DIR/scripts/session-close.sh"
 SEND="$REPO_DIR/scripts/session-send.sh"
 PEEK="$REPO_DIR/scripts/session-peek.sh"
+WAIT="$REPO_DIR/scripts/session-wait.sh"
 APPEND="$REPO_DIR/scripts/session-event-append.sh"
 
 setup() {
@@ -441,6 +442,59 @@ journal_boundaries() {
   echo "$output" | jq -e '(.events|length)==0 and .next_cursor==0'
 }
 
+@test "events: plain mode emits the cursor as a final stdout row and nothing on stderr" {
+  write_journal >/dev/null
+  local -a bounds=(); local _b
+  while IFS= read -r _b; do bounds+=("$_b"); done < <(journal_boundaries)
+  local size="${bounds[${#bounds[@]}-1]}"
+  local total="${#JOURNAL_ROWS[@]}"
+
+  local err="$TEST_KDIR/err"
+  local out; out="$(bash "$EVENTS" --kdir "$TEST_KDIR" 2>"$err")"
+  # Every line is one JSON value; the last is the cursor row, the rest are events.
+  local lines; lines="$(printf '%s\n' "$out" | grep -c .)"
+  [ "$lines" -eq $(( total + 1 )) ] || { echo "lines=$lines expected=$(( total + 1 ))"; false; }
+  local last; last="$(printf '%s\n' "$out" | tail -n1)"
+  [ "$(printf '%s' "$last" | jq -r '.next_cursor')" -eq "$size" ]
+  # Event rows carry .event; the cursor row does not.
+  [ "$(printf '%s\n' "$out" | head -n"$total" | jq -rs 'map(has("event")) | all')" = "true" ]
+  # A clean read writes nothing to stderr — the cursor is data and rides stdout.
+  [ ! -s "$err" ]
+}
+
+@test "events: --cursor-only prints the bare journal byte size without replaying rows" {
+  write_journal >/dev/null
+  local size; size="$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d ' ')"
+  run bash "$EVENTS" --cursor-only --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$size" ]                       # bare integer, equal to EOF offset
+  [[ "$output" != *'{'* ]]                      # no row replayed
+}
+
+@test "events: --cursor-only on an absent journal prints 0" {
+  run bash "$EVENTS" --cursor-only --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [ "$output" = "0" ]
+}
+
+@test "events: --tail N emits the last N event rows plus the cursor row" {
+  write_journal >/dev/null
+  local size; size="$(wc -c < "$TEST_KDIR/_sessions/events.jsonl" | tr -d ' ')"
+  local out; out="$(bash "$EVENTS" --tail 2 --kdir "$TEST_KDIR" 2>/dev/null)"
+  # 2 event rows + 1 cursor row.
+  [ "$(printf '%s\n' "$out" | grep -c .)" -eq 3 ]
+  # Last two events of the fixture are spawned then closed.
+  [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("event")) | .event] | join(",")')" = "spawned,closed" ]
+  [ "$(printf '%s\n' "$out" | tail -n1 | jq -r '.next_cursor')" -eq "$size" ]
+}
+
+@test "events: --tail rejects a non-positive count" {
+  write_journal >/dev/null
+  run bash "$EVENTS" --tail 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --tail"* ]]
+}
+
 # =====================================================================
 # session close
 # =====================================================================
@@ -744,4 +798,152 @@ journal_boundaries() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"timed out"* ]]
   [ -z "$(ls "$TEST_KDIR"/_sessions/peek-requests/ 2>/dev/null)" ]
+}
+
+# =====================================================================
+# session wait
+# =====================================================================
+
+# The events wait verb keeps a static mirror of the sole writer's event
+# vocabulary (to validate --until). These two extractors read the writer's
+# accepting case-arm and the verb's mirror so the drift-guard test below can name
+# the exact token that diverged.
+writer_event_vocab() {
+  python3 - "$APPEND" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+# The writer validates .event against a case-arm whose accepting pattern ends in
+# ") ;;". Grab that pattern run, drop line continuations, split on the alternation.
+m = re.search(r'case "\$EVENT" in\n(.*?)\)\s*;;', src, re.S)
+if not m:
+    sys.exit("could not locate the writer's event case-arm")
+block = m.group(1).replace('\\\n', '').replace('\n', '')
+for tok in block.split('|'):
+    tok = tok.strip()
+    if tok:
+        print(tok)
+PY
+}
+
+mirror_event_vocab() {
+  grep -E '^SESSION_EVENT_VOCAB=' "$WAIT" | head -n1 \
+    | sed -E 's/^SESSION_EVENT_VOCAB="([^"]*)".*/\1/' \
+    | tr ' ' '\n' | grep -v '^$'
+}
+
+@test "wait: --until vocabulary mirror matches the sole writer's case-arm (drift guard)" {
+  local w m
+  w="$(writer_event_vocab | sort -u)"
+  m="$(mirror_event_vocab | sort -u)"
+  [ -n "$w" ] || { echo "writer vocabulary extraction returned nothing"; false; }
+  [ -n "$m" ] || { echo "mirror vocabulary extraction returned nothing"; false; }
+  local missing extra
+  missing="$(comm -23 <(printf '%s\n' "$w") <(printf '%s\n' "$m") | tr '\n' ' ')"
+  extra="$(comm -13 <(printf '%s\n' "$w") <(printf '%s\n' "$m") | tr '\n' ' ')"
+  [ -z "${missing// }" ] || { echo "wait mirror is MISSING tokens the writer accepts: $missing"; false; }
+  [ -z "${extra// }" ] || { echo "wait mirror has EXTRA tokens the writer rejects: $extra"; false; }
+}
+
+@test "wait: an exact-slug close matches, emitting the matched row and the cursor row in one read" {
+  write_instance inst-a feature-x
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  ( sleep 1
+    echo '{"event":"closed","request_id":"r1","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  local out code
+  out="$(bash "$WAIT" feature-x --since 0 --timeout 10 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  wait
+  [ "$code" -eq 0 ]
+  [ "$(printf '%s\n' "$out" | jq -rs 'map(select(has("event")).event) | join(",")')" = "closed" ]
+  local nc; nc="$(printf '%s\n' "$out" | jq -rs 'map(select(has("next_cursor")).next_cursor)[0]')"
+  [ -n "$nc" ] && [ "$nc" != "null" ]
+  # Re-arming from the emitted cursor does not re-match the consumed row.
+  run bash "$WAIT" feature-x --since "$nc" --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]
+}
+
+@test "wait: the default until-set also wakes on close_failed" {
+  write_instance inst-a feature-x
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  ( sleep 1
+    echo '{"event":"close_failed","request_id":"r1","slug":"feature-x","reason":"error"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  run bash "$WAIT" feature-x --since 0 --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"close_failed"'* ]]
+}
+
+@test "wait: a derived <slug>--w1 close never wakes a parent-slug wait; it times out" {
+  write_instance inst-a feature-x            # parent live, so session-gone stays quiet
+  printf '%s\n' '{"event":"closed","request_id":"r1","slug":"feature-x--w1"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  local out code
+  out="$(bash "$WAIT" feature-x --since 0 --timeout 2 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 2 ]
+  # Even on timeout the resume cursor rides stdout as a jq-parseable row.
+  [ "$(printf '%s' "$out" | jq -r '.next_cursor' | grep -c '^[0-9]\+$')" -eq 1 ]
+}
+
+@test "wait: no live instance and no matching row exits 3 (session gone) with a resume cursor" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WAIT" ghost --since 0 --timeout 30 --kdir "$TEST_KDIR"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"session gone"* ]]        # stderr diagnostic (run merges streams)
+  [[ "$output" == *'"next_cursor"'* ]]       # cursor row on stdout
+}
+
+@test "wait: a matching row already present with no live instance still matches (exit 0)" {
+  printf '%s\n' '{"event":"closed","request_id":"r1","slug":"gone-but-closed"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WAIT" gone-but-closed --since 0 --timeout 30 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"closed"'* ]]
+}
+
+@test "wait: a queue/pre-spawn --until suppresses session-gone; it times out instead of exit 3" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"     # no instance, no match
+  run bash "$WAIT" ghost --until spawned --since 0 --timeout 2 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]                          # timeout, not session-gone
+}
+
+@test "wait: an out-of-vocabulary --until event is a usage error, not a forever-wait" {
+  run bash "$WAIT" feature-x --until closd --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --until event: 'closd'"* ]]
+}
+
+@test "wait: --json surfaces an invalid --until as a JSON error" {
+  run bash "$WAIT" feature-x --until bogus --json --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '.error | test("invalid --until")'
+}
+
+@test "wait: refuses when no slug is given" {
+  run bash "$WAIT" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no target"* ]]
+}
+
+@test "wait: --json emits a result object on the timeout terminal" {
+  write_instance inst-a feature-x
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  local out code
+  out="$(bash "$WAIT" feature-x --since 0 --timeout 1 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 2 ]
+  echo "$out" | jq -e '.outcome=="timeout" and .matched==null and (.next_cursor|type=="number") and .slug=="feature-x" and (.until==["closed","close_failed"])'
+}
+
+@test "wait: --json emits the matched object on the match terminal" {
+  write_instance inst-a feature-x
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  ( sleep 1
+    echo '{"event":"closed","request_id":"r1","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  local out code
+  out="$(bash "$WAIT" feature-x --since 0 --timeout 10 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  wait
+  [ "$code" -eq 0 ]
+  echo "$out" | jq -e '.outcome=="matched" and .matched.event=="closed" and (.next_cursor|type=="number")'
+}
+
+@test "session wait routes through the dispatcher" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$LORE" session wait ghost --until spawned --since 0 --timeout 1 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]                          # pre-spawn until suppresses gone; times out
 }

@@ -2,16 +2,23 @@
 # session-events.sh — Read _sessions/events.jsonl from an opaque byte-offset cursor
 #
 # Usage:
-#   lore session events [--since <cursor>] [--kdir <path>] [--json]
+#   lore session events [--since <cursor>] [--tail <N>] [--cursor-only] [--kdir <path>] [--json]
 #
 # Options:
 #   --since <cursor>  Byte offset to resume from (default: 0). Treated as an
 #                     OPAQUE token — consumers store and echo the reported
 #                     next_cursor, never compute with it.
+#   --tail <N>        Emit only the last N event rows (plus the cursor row) instead
+#                     of every row from the cursor — a baseline snapshot without a
+#                     hand-rolled `| tail -N`. Plain mode only.
+#   --cursor-only     Print just the current end-of-journal byte offset and exit —
+#                     an O(1) stat, no rows replayed. Use it to capture a baseline
+#                     cursor before acting (e.g. close-then-wait teardown).
 #   --kdir <path>     Knowledge-store override (test isolation).
-#   --json            Emit {events: [...], next_cursor: N}. Default plain output is
-#                     NDJSON rows on stdout and a `next_cursor:` line on stderr so
-#                     stdout stays machine-consumable.
+#   --json            Emit {events: [...], next_cursor: N} on stdout. Default plain
+#                     output is one JSON value per line: the NDJSON event rows,
+#                     then a final {"next_cursor": N} row — all on stdout. Consumers
+#                     tell them apart by shape (has("event") vs has("next_cursor")).
 #
 # This is the reference reader for the cursor contract in docs/session-substrate.md:
 #   - Reads rows from the given offset and always reports next_cursor, the byte
@@ -21,6 +28,9 @@
 #   - A malformed interior row is excluded with a stderr warning, never repaired.
 #   - A cursor exceeding the file size (only possible via external tampering)
 #     resets to a full re-read with a warning.
+#
+# The cursor is data, so it rides stdout with the rows it belongs to: a consumer
+# reads the whole stream and never has to merge stderr back in to stay caught up.
 #
 # Exit codes: 0 success; 1 error. Codes 2 and 3 are reserved (unused here) for
 # session verb family / composed-terminal-verb namespace compatibility.
@@ -33,16 +43,20 @@ source "$SCRIPT_DIR/lib.sh"
 SINCE=0
 KDIR_OVERRIDE=""
 JSON_MODE=0
+CURSOR_ONLY=0
+TAIL_N=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --since) SINCE="$2"; shift 2 ;;
+    --tail) TAIL_N="$2"; shift 2 ;;
+    --cursor-only) CURSOR_ONLY=1; shift ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-events.sh [--since <cursor>] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-events.sh [--since <cursor>] [--tail <N>] [--cursor-only] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -63,6 +77,12 @@ case "$SINCE" in
   ''|*[!0-9]*) fail "invalid --since: '$SINCE' (must be a non-negative byte offset)" ;;
 esac
 
+if [[ -n "$TAIL_N" ]]; then
+  case "$TAIL_N" in
+    ''|*[!0-9]*|0) fail "invalid --tail: '$TAIL_N' (must be a positive integer)" ;;
+  esac
+fi
+
 if [[ -n "$KDIR_OVERRIDE" ]]; then
   KNOWLEDGE_DIR="$KDIR_OVERRIDE"
 else
@@ -71,6 +91,17 @@ fi
 [[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
 
 EVENTS_FILE="$KNOWLEDGE_DIR/_sessions/events.jsonl"
+
+# --cursor-only: the current end-of-journal offset is just the file size (the byte
+# after the last row), so this is an O(1) stat — no read, no row replay.
+if [[ $CURSOR_ONLY -eq 1 ]]; then
+  if [[ -f "$EVENTS_FILE" ]]; then
+    wc -c < "$EVENTS_FILE" | tr -d '[:space:]'
+  else
+    echo 0
+  fi
+  exit 0
+fi
 
 # The cursor reader is pure: it emits {events, next_cursor} on stdout and any
 # exclusion/reset warnings on stderr. Byte-offset arithmetic lives entirely here.
@@ -143,7 +174,12 @@ if [[ $JSON_MODE -eq 1 ]]; then
   json_output "$RESULT"
 fi
 
-# Plain: NDJSON rows on stdout; next_cursor on stderr so stdout stays consumable.
-printf '%s' "$RESULT" | jq -c '.events[]'
-NEXT_CURSOR="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
-echo "next_cursor: $NEXT_CURSOR" >&2
+# Plain: one JSON value per line on stdout — the event rows, then a final
+# {"next_cursor": N} row. The cursor is data, so it rides stdout with the rows;
+# stdout stays NDJSON-pure and a consumer reads the whole stream in one go.
+if [[ -n "$TAIL_N" ]]; then
+  printf '%s' "$RESULT" | jq -c ".events[-${TAIL_N}:][]?"
+else
+  printf '%s' "$RESULT" | jq -c '.events[]'
+fi
+printf '%s' "$RESULT" | jq -c '{next_cursor: .next_cursor}'

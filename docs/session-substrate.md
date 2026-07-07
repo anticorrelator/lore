@@ -563,8 +563,14 @@ cursor that exceeds the file size (impossible without external tampering) resets
 a full re-read with a warning.
 
 `session events` reports that cursor as `next_cursor`. Under `--json` it wraps
-`{events: [...], next_cursor: N}`; plain output is NDJSON rows on stdout followed by
-a `next_cursor:` line on stderr, so stdout stays machine-consumable.
+`{events: [...], next_cursor: N}`. Plain output is one JSON value per line on
+stdout: the event rows, then a final `{"next_cursor": N}` row. The cursor is data,
+so it rides stdout with the rows it belongs to — a consumer reads the whole stream
+and never has to fold stderr back in to stay caught up; it tells the rows apart by
+shape (`has("event")` vs `has("next_cursor")`). Two shortcuts serve the same
+stream: `--cursor-only` prints just the current end-of-journal offset (an O(1)
+stat, no rows replayed) for capturing a baseline before acting, and `--tail <N>`
+emits only the last N rows plus the cursor row.
 
 ### Dedupe posture
 
@@ -638,6 +644,18 @@ rather than growing this contract.**
   prepare-and-return scripts behind the `session` dispatcher subgroup. They read
   and write these surfaces per this contract; they do not spawn, wait, or touch
   the TUI. Registry and claimed-queue *writes* remain Phase 2 (TUI).
+- **Blocking read verb — landed.** `lore session wait <slug>` is the blocking
+  front on the journal: it polls `session events` from a cursor and returns when a
+  row matches `<slug>` exactly (never by substring, so a worker's `<slug>--w<n>`
+  close never wakes a parent wait) and an event in its `--until` set (default
+  `closed,close_failed`, the close-outcome pair). Exit codes carry the outcome —
+  0 matched, 2 timed out, 3 session-gone — and every non-error exit hands back a
+  resume cursor so a woken consumer re-arms with `--since` instead of replaying.
+  Session-gone reads the `close_requested`-with-no-terminal bound above (once no
+  live instance hosts the slug the outcome will never arrive); it is suppressed
+  when the `--until` set names a queue/pre-spawn event, where an unhosted slug is
+  the normal starting state. Read-side only — it adds no writer, no event, and no
+  TUI surface. See its header for the race-free close-then-wait idiom.
 - **TUI integration — landed (Phase 2).** The per-instance registry, instance
   identity/naming, the pending-queue scan, atomic-rename claim, D4 lifecycle
   handling, badging, and journal emission wiring are implemented in `tui/` per this

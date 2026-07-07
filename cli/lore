@@ -529,6 +529,8 @@ Verbs:
             gated on the session being idle at its prompt; --wait for the outcome
   peek      Snapshot a live session's rendered screen (<slug>) plus its
             readiness classification; --raw for the ANSI variant
+  wait      Block until a journal event lands for a session (<slug>), waking on
+            closed/close_failed by default; hands back a resume cursor on stdout
 
 Options:
   --help, -h    Show this help
@@ -837,6 +839,9 @@ cmd_session() {
       ;;
     peek)
       "$SCRIPTS_DIR/session-peek.sh" "$@"
+      ;;
+    wait)
+      "$SCRIPTS_DIR/session-wait.sh" "$@"
       ;;
     *)
       echo "Error: unknown session verb '$subcmd'" >&2
