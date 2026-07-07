@@ -193,9 +193,20 @@ done
 
 # Slugify the name (or use explicit --slug override)
 if [[ -n "$SLUG_OVERRIDE" ]]; then
-  SLUG=$(slugify "$SLUG_OVERRIDE")
+  SLUG_SOURCE="$SLUG_OVERRIDE"
 else
-  SLUG=$(slugify "$NAME")
+  SLUG_SOURCE="$NAME"
+fi
+SLUG=$(slugify "$SLUG_SOURCE")
+
+# Detect whether the 50-char slug cap fired. slugify truncates internally
+# (MAX_SLUG_LENGTH), so recompute without the cap and compare — the final slug
+# is otherwise only recoverable by parsing the created path, which is the round-
+# trip the slug echo below pays down. The override runs inside a subshell (the
+# command substitution), so MAX_SLUG_LENGTH is never mutated in this process.
+SLUG_TRUNCATED=0
+if [[ "$SLUG" != "$(MAX_SLUG_LENGTH=1000000 slugify "$SLUG_SOURCE")" ]]; then
+  SLUG_TRUNCATED=1
 fi
 
 if [[ -z "$SLUG" ]]; then
@@ -382,10 +393,18 @@ if [[ $DETECT_PR -eq 1 && -z "$PR" && -n "$BRANCH" ]]; then
   fi
 fi
 
+# Announce slug truncation on stderr (never on stdout — keeps --json output and
+# the machine-capturable `slug:` line below clean). The 50-char cap silently
+# rewrote the slug, so a caller that derived it from the title would be wrong.
+if [[ $SLUG_TRUNCATED -eq 1 ]]; then
+  echo "[work] Note: title exceeded the ${MAX_SLUG_LENGTH}-char slug cap; slug truncated to '$SLUG'." >&2
+fi
+
 # Update the work index
 if [[ $JSON_MODE -eq 1 ]]; then
   bash "$SCRIPT_DIR/update-work-index.sh" "$TARGET_DIR" > /dev/null 2>&1 || true
   bash "$SCRIPT_DIR/export-obsidian.sh" --work-hubs > /dev/null 2>&1 || true
+  # The final slug is a field of the emitted _meta.json — no separate slug line.
   json_output "$(cat "$WORK_DIR/$SLUG/_meta.json")"
 fi
 
@@ -393,3 +412,6 @@ bash "$SCRIPT_DIR/update-work-index.sh" "$TARGET_DIR"
 bash "$SCRIPT_DIR/export-obsidian.sh" --work-hubs > /dev/null 2>&1 || true
 
 echo "Created work item '$TITLE' at $WORK_DIR/$SLUG"
+# Machine-capturable final slug: the caller reads the (possibly truncated,
+# possibly suffixed) slug from stdout without parsing the path above.
+echo "slug: $SLUG"

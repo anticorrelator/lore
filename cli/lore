@@ -143,6 +143,7 @@ Subcommands:
   create    Create a new work item
   list      List active work items
   show      Show a work item's full context
+  note      Append a timestamped session-log entry to a work item's notes.md (--text or stdin)
   resolve   Resolve a fuzzy work-item reference to (slug, archived)
   path      Print a work item's absolute directory (a cwd-independent Write/cp target)
   set       Set metadata fields (issue, pr, scope, project, intent anchor) on a work item
@@ -1600,6 +1601,9 @@ cmd_work() {
       ;;
     show)
       "$SCRIPTS_DIR/load-work-item.sh" "$@"
+      ;;
+    note)
+      "$SCRIPTS_DIR/work-note.sh" "$@"
       ;;
     resolve)
       "$SCRIPTS_DIR/resolve-work-ref.sh" "$@"
