@@ -436,7 +436,7 @@ func (m model) modalHold() time.Duration {
 }
 
 // interactivePrompt reports whether a non-done panel is blocked on an interactive
-// prompt (a permission/approval modal). It routes through the atInteractivePromptFn
+// prompt (permission/approval or option-select). It routes through the atInteractivePromptFn
 // seam when set (tests), otherwise reads the live screen via atInteractivePrompt.
 func (m model) interactivePrompt(panel work.SessionPanelModel) bool {
 	if m.atInteractivePromptFn != nil {
@@ -516,11 +516,11 @@ func (m model) advanceCloseLadders() (model, []tea.Cmd) {
 	return m, cmds
 }
 
-// atInteractivePrompt reports whether the panel's live screen shows a
-// permission/approval modal — the interactive-prompt state the close ladder must
-// not tear down through. It resolves the active harness's screen matcher (the
-// same one the injection readiness gate uses) and reads a ScreenSnapshot; on any
-// failure (no framework, no interaction contract, snapshot error) it returns
+// atInteractivePrompt reports whether the panel's live screen shows an
+// interactive prompt — the state the close ladder must not tear down through. It
+// resolves the active harness's screen matcher (the same one the injection
+// readiness gate uses) and reads a ScreenSnapshot; on any failure (no framework,
+// no interaction contract, snapshot error) it returns
 // false so a screen we cannot classify never blocks a close indefinitely. It
 // reads the shared terminal backend, so callers must invoke it on the Bubble Tea
 // goroutine (advanceCloseLadders' two callers both do).
@@ -529,15 +529,14 @@ func atInteractivePrompt(panel work.SessionPanelModel) bool {
 	if err != nil {
 		return false
 	}
-	mm, ok := screenMatchers[framework]
-	if !ok {
+	if _, ok := screenMatchers[framework]; !ok {
 		return false
 	}
 	snap, err := panel.ScreenState()
 	if err != nil {
 		return false
 	}
-	return mm.permission(gateRows(snap.Rows))
+	return interactivePromptState(framework, snap)
 }
 
 // closeFailedCmd journals one close_failed row for a consumed close-request that

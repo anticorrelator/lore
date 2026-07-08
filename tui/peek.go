@@ -108,7 +108,7 @@ func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
 			}
 			resp.Ready = ready
 			resp.BlockedReason = reason
-			resp.Rows = snap.Rows
+			resp.Rows = peekRows(framework, snap)
 			if pr.Raw {
 				resp.ANSI = snap.ANSI
 			}

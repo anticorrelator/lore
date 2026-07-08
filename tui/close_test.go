@@ -735,6 +735,47 @@ func TestAdvanceCloseLadders_TerminusModalRefuses(t *testing.T) {
 	}
 }
 
+// TestAdvanceCloseLadders_TerminusOptionSelectRefuses pins the live defect: an
+// AskUserQuestion-style option-select modal must classify as an interactive
+// prompt, so a protocol terminus close refuses with close_failed instead of
+// silently consuming the close request and leaving no terminal outcome.
+func TestAdvanceCloseLadders_TerminusOptionSelectRefuses(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	kdir := m.config.KnowledgeDir
+	m.atInteractivePromptFn = func(work.SessionPanelModel) bool {
+		return interactivePromptState("claude-code", work.ScreenSnapshot{Rows: ccOptionSelectRows})
+	}
+	m.localSessions = map[string]liveSession{"demo": {typ: "chat", initiator: "agent", started: time.Now()}}
+	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
+	m.pendingClose = map[string]pendingCloseState{"demo": {
+		requestID: "cr-option", reason: closeReasonProtocolTerminus, consumedAt: time.Now().Add(-time.Hour),
+	}}
+
+	m, cmds := m.advanceCloseLadders()
+	if len(cmds) != 1 {
+		t.Fatalf("terminus option-select refuse dispatched %d cmds, want 1 close_failed", len(cmds))
+	}
+	if _, pending := m.pendingClose["demo"]; pending {
+		t.Fatal("terminus option-select close not cleared from pendingClose after refusing")
+	}
+	if _, alive := m.localSessions["demo"]; !alive {
+		t.Fatal("terminus option-select refuse must leave the session alive")
+	}
+	if _, hosted := m.sessionPanels["demo"]; !hosted {
+		t.Fatal("terminus option-select refuse must not tear down the panel")
+	}
+
+	runJournalCmds(t, tea.Batch(cmds...))
+	rows := readEventRows(t, kdir)
+	if len(rows) != 1 || rows[0].Event != session.EventCloseFailed {
+		t.Fatalf("events = %+v, want exactly [close_failed]", rows)
+	}
+	if rows[0].Reason != closeFailedInteractivePrompt || rows[0].RequestID != "cr-option" {
+		t.Fatalf("close_failed row = %+v, want reason=interactive-prompt request_id=cr-option", rows[0])
+	}
+}
+
 // TestHandleCloseLadderDone_ErrorJournalsCloseFailed: a ladder that could not
 // confirm the process gone (errCloseLadderExhausted) emits close_failed
 // reason=rung-exhausted, NOT `closed` (the double-terminal trap), drops the

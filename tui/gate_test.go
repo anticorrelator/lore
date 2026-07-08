@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/anticorrelator/lore/tui/internal/work"
@@ -34,6 +35,33 @@ var (
 		"Esc to cancel · Tab to amend · ctrl+e to explain",
 		rule,
 	}
+	ccOptionSelectRows = []string{
+		rule,
+		"Choose the next step",
+		"❯ 1. Run the verification",
+		"  2. Leave it for later",
+		"Enter to select",
+		rule,
+	}
+	ccGhostRows = []string{
+		rule,
+		"❯ commit this",
+		rule,
+		"  ? for shortcuts",
+	}
+	ccGhostANSI = strings.Join([]string{
+		rule,
+		"❯ \x1b[0;2mcommit this\x1b[0m",
+		rule,
+		"  ? for shortcuts",
+	}, "\n")
+	ccHeldRows = []string{
+		rule,
+		"❯ real typed input",
+		rule,
+		"  ? for shortcuts",
+	}
+	ccHeldANSI = strings.Join(ccHeldRows, "\n")
 
 	cxComposerRows = []string{
 		"› ",
@@ -82,19 +110,28 @@ func TestComposerMatchersDiscriminate(t *testing.T) {
 		if mm.composer(c.modal) {
 			t.Errorf("%s: composer matcher must NOT fire on a permission modal", c.harness)
 		}
-		if !mm.permission(c.modal) {
-			t.Errorf("%s: permission matcher should fire on modal rows", c.harness)
+		if !mm.interactive(c.modal) {
+			t.Errorf("%s: interactive matcher should fire on modal rows", c.harness)
 		}
-		if mm.permission(c.composer) {
-			t.Errorf("%s: permission matcher must NOT fire on a composer-ready screen", c.harness)
+		if mm.interactive(c.composer) {
+			t.Errorf("%s: interactive matcher must NOT fire on a composer-ready screen", c.harness)
 		}
+	}
+	if !screenMatchers["claude-code"].interactive(ccOptionSelectRows) {
+		t.Error("claude-code: interactive matcher should fire on option-select rows")
+	}
+	if screenMatchers["claude-code"].composer(ccOptionSelectRows) {
+		t.Error("claude-code: composer matcher must NOT fire on an option-select modal")
 	}
 }
 
 func TestSendReadiness(t *testing.T) {
 	snapComposer := work.ScreenSnapshot{Rows: ccComposerRows}
 	snapModal := work.ScreenSnapshot{Rows: ccModalRows}
+	snapOptionSelect := work.ScreenSnapshot{Rows: ccOptionSelectRows}
 	snapOther := work.ScreenSnapshot{Rows: []string{"thinking...", "some output"}}
+	snapGhost := work.ScreenSnapshot{Rows: ccGhostRows, ANSI: ccGhostANSI}
+	snapHeld := work.ScreenSnapshot{Rows: ccHeldRows, ANSI: ccHeldANSI}
 
 	// Live regression (real claude-code idle session): the prompt row renders as
 	// "❯ commit this" — a NBSP after the glyph plus a ghost-text suggestion.
@@ -120,6 +157,9 @@ func TestSendReadiness(t *testing.T) {
 		{"ready-nbsp-live-composer", "claude-code", true, true, snapNBSP, true, ""},
 		{"mid-generation", "claude-code", false, true, snapComposer, false, sendReasonGenerating},
 		{"permission-modal", "claude-code", true, true, snapModal, false, sendReasonModal},
+		{"option-select-modal", "claude-code", true, true, snapOptionSelect, false, sendReasonModal},
+		{"faint-placeholder-ready", "claude-code", true, true, snapGhost, true, ""},
+		{"real-held-input-not-ready", "claude-code", true, true, snapHeld, false, sendReasonNoSignature},
 		{"no-composer-signature", "claude-code", true, true, snapOther, false, sendReasonNoSignature},
 		{"no-contract", "claude-code", true, false, snapComposer, false, sendReasonNoContract},
 		{"unknown-framework", "ghostwriter", true, true, snapComposer, false, sendReasonNoContract},
@@ -130,6 +170,21 @@ func TestSendReadiness(t *testing.T) {
 			t.Errorf("%s: got (ready=%v reason=%q), want (ready=%v reason=%q)",
 				c.name, ready, reason, c.wantReady, c.wantReason)
 		}
+	}
+}
+
+func TestPeekRowsRedactsFaintPlaceholder(t *testing.T) {
+	got := peekRows("claude-code", work.ScreenSnapshot{Rows: ccGhostRows, ANSI: ccGhostANSI})
+	if strings.Contains(strings.Join(got, "\n"), "commit this") {
+		t.Fatalf("peek rows leaked faint placeholder text: %#v", got)
+	}
+	if got[1] != "❯ " {
+		t.Fatalf("peek rows prompt row = %q, want prompt only", got[1])
+	}
+
+	held := peekRows("claude-code", work.ScreenSnapshot{Rows: ccHeldRows, ANSI: ccHeldANSI})
+	if !strings.Contains(strings.Join(held, "\n"), "real typed input") {
+		t.Fatalf("peek rows redacted real held input: %#v", held)
 	}
 }
 

@@ -51,25 +51,29 @@ func TestObserveSend(t *testing.T) {
 		framework string
 		quiescent bool
 		rows      []string
+		ansi      string
 		want      sendObs
 	}{
-		{"pending-chip-quiescent", "claude-code", true, ccPasteChipComposerRows, obsPending},
+		{"pending-chip-quiescent", "claude-code", true, ccPasteChipComposerRows, "", obsPending},
 		// The swallow leaves the chip up even before the quiescence timer trips, so
 		// the pending read must not depend on the needs_input edge.
-		{"pending-chip-not-yet-quiescent", "claude-code", false, ccPasteChipComposerRows, obsPending},
-		{"submitted-generating", "claude-code", false, ccGeneratingRows, obsSubmitted},
-		{"submitted-empty-ready", "claude-code", true, ccComposerRows, obsSubmitted},
+		{"pending-chip-not-yet-quiescent", "claude-code", false, ccPasteChipComposerRows, "", obsPending},
+		{"submitted-generating", "claude-code", false, ccGeneratingRows, "", obsSubmitted},
+		{"submitted-empty-ready", "claude-code", true, ccComposerRows, "", obsSubmitted},
+		{"submitted-faint-placeholder", "claude-code", true, ccGhostRows, ccGhostANSI, obsSubmitted},
+		{"pending-real-held-input", "claude-code", true, ccHeldRows, ccHeldANSI, obsPending},
 		// A sent chip in the transcript above an empty composer is submitted, not
 		// pending (region scoping excludes the history).
-		{"submitted-sent-chip-in-history", "claude-code", false, ccSentChipHistoryRows, obsSubmitted},
-		{"unobservable-quiescent-no-signature", "claude-code", true, []string{"partial", "repaint"}, obsUnobservable},
-		{"unknown-framework", "ghostwriter", true, ccComposerRows, obsUnobservable},
+		{"submitted-sent-chip-in-history", "claude-code", false, ccSentChipHistoryRows, "", obsSubmitted},
+		{"unobservable-quiescent-no-signature", "claude-code", true, []string{"partial", "repaint"}, "", obsUnobservable},
+		{"unknown-framework", "ghostwriter", true, ccComposerRows, "", obsUnobservable},
 		// codex has no pending matcher: it degrades to the generating/empty-ready
 		// signals (a composer-ready screen reads submitted).
-		{"codex-degrades-to-composer-signal", "codex", true, cxComposerRows, obsSubmitted},
+		{"codex-degrades-to-composer-signal", "codex", true, cxComposerRows, "", obsSubmitted},
 	}
 	for _, c := range cases {
-		got := observeSend(c.framework, c.quiescent, work.ScreenSnapshot{Rows: c.rows})
+		snap := work.ScreenSnapshot{Rows: c.rows, ANSI: c.ansi}
+		got := observeSend(c.framework, c.quiescent, snap)
 		if got != c.want {
 			t.Errorf("%s: observeSend = %v, want %v", c.name, got, c.want)
 		}
