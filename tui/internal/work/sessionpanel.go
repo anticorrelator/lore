@@ -998,14 +998,18 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 		// submits it immediately — no PTY-write timing hack needed.
 		initialPrompt := buildInitialPrompt(d)
 
-		// Resolve the TUI launch framework once and use it for the binary,
-		// harness-specific prepended args, and child-process environment. This
-		// preference is intentionally TUI-scoped; shell helpers inside the
-		// spawned session see it via LORE_FRAMEWORK rather than by reading
-		// settings.json as global process truth.
-		activeFramework, err := config.ResolveTUILaunchFramework()
-		if err != nil {
-			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve TUI launch framework: %w", err)}
+		// Choose the framework once and use it for the binary, harness-specific
+		// prepended args, and child-process environment. Per-session descriptors
+		// may override the TUI preference; shell helpers inside the spawned
+		// session see the selected value via LORE_FRAMEWORK rather than by
+		// reading settings.json as global process truth.
+		activeFramework := d.Framework
+		if activeFramework == "" {
+			resolved, err := config.ResolveTUILaunchFramework()
+			if err != nil {
+				return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("resolve TUI launch framework: %w", err)}
+			}
+			activeFramework = resolved
 		}
 		harnessBinary, err := config.HarnessBinary(activeFramework)
 		if err != nil {

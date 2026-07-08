@@ -405,8 +405,9 @@ func (m model) spawnFromRequest(req session.Request) (model, tea.Cmd) {
 
 // descriptorFromRequest maps a claimed queue request onto the session descriptor
 // the shared spawn path consumes. It is the sole place the additive request
-// fields (track, model, skip_confirm) become descriptor state, so the mapping —
-// including the skip_confirm absent-default — is unit-testable without a spawn.
+// fields (track, model, framework, skip_confirm) become descriptor state, so the
+// mapping — including the skip_confirm absent-default — is unit-testable without
+// a spawn.
 func descriptorFromRequest(req session.Request) work.SessionDescriptor {
 	// skip_confirm defaults to true when absent — the historical queue-spawn
 	// autonomy (a claimed request runs without confirmation gates). A set field
@@ -424,6 +425,7 @@ func descriptorFromRequest(req session.Request) work.SessionDescriptor {
 		AutoClose:        req.AutoClose,
 		RoutingOverrides: req.RoutingOverrides,
 		Model:            req.ModelValue(),
+		Framework:        req.FrameworkValue(),
 		ShortMode:        req.TrackValue() == work.SpecTrackShort,
 		SkipConfirm:      skipConfirm,
 		FindingIndex:     -1,

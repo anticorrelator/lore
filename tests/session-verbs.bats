@@ -195,6 +195,40 @@ journal_boundaries() {
   [ "$status" -eq 0 ]
 }
 
+@test "request omits framework when the flag is not passed" {
+  bash "$REQUEST" --type spec --slug wi --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e 'has("framework") | not' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request --framework writes the framework field" {
+  bash "$REQUEST" --type implement --slug wi --framework codex --min-vintage 2026-07-05T12:00:00Z --kdir "$TEST_KDIR"
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '.framework == "codex"' "$pending"
+  [ "$status" -eq 0 ]
+}
+
+@test "request with invalid --framework refuses before enqueue" {
+  run bash "$REQUEST" --type spec --slug wi --framework bogus --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--framework"* ]]
+  [ ! -e "$TEST_KDIR/_sessions/requests" ]
+}
+
+@test "request --framework without --min-vintage emits an advisory but enqueues" {
+  local err="$TEST_KDIR/framework.err"
+  local out
+  out="$(bash "$REQUEST" --type implement --slug wi --framework codex --kdir "$TEST_KDIR" 2>"$err")"
+  [[ "$out" == *"Enqueued implement request"* ]]
+  [ "$(wc -l < "$err" | tr -d ' ')" -eq 1 ]
+  grep -q -- "--min-vintage" "$err"
+
+  local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"
+  run jq -e '.framework == "codex"' "$pending"
+  [ "$status" -eq 0 ]
+}
+
 @test "request --auto-close true writes a JSON boolean" {
   bash "$REQUEST" --type spec --slug wi --auto-close true --kdir "$TEST_KDIR"
   local pending; pending="$(ls "$TEST_KDIR"/_sessions/requests/pending/*.json)"

@@ -79,6 +79,12 @@ type Request struct {
 	// Absent (omit-when-empty) leaves the lead on the harness/settings default.
 	Model *string `json:"model,omitempty"`
 
+	// Framework is the per-request launch framework override. Opaque here — the
+	// enqueue writer validates against the framework registry; the reader preserves
+	// the supplied value and lets the spawn path decide how to consume it. Pointer
+	// so absent stays distinct from an explicit value.
+	Framework *string `json:"framework,omitempty"`
+
 	// SkipConfirm overrides the queue-spawn autonomy default: nil defers to that
 	// default (skip confirmation gates — autonomous), a set value forces the
 	// outcome (true autonomous, false gated so every confirmation gate becomes a
@@ -129,6 +135,14 @@ func (r Request) ModelValue() string {
 		return ""
 	}
 	return *r.Model
+}
+
+// FrameworkValue returns the launch framework override or "" when absent.
+func (r Request) FrameworkValue() string {
+	if r.Framework == nil {
+		return ""
+	}
+	return *r.Framework
 }
 
 // ExtraContextText extracts a free-text launch context from the request's

@@ -130,14 +130,26 @@ func TestSpawnFromRequestThreadsAutoClose(t *testing.T) {
 	}
 }
 
-// TestDescriptorFromRequestMapsDispatchFields asserts the three additive request
-// fields land on the descriptor: track "short" → ShortMode, model → Model, and an
-// explicit skip_confirm:false → SkipConfirm false (gated).
+// TestRequestFrameworkValue covers the queue row helper used by descriptor
+// mapping: absent means no override, present preserves the framework id.
+func TestRequestFrameworkValue(t *testing.T) {
+	if got := (session.Request{}).FrameworkValue(); got != "" {
+		t.Errorf("absent FrameworkValue() = %q, want empty", got)
+	}
+	if got := (session.Request{Framework: strPtr("codex")}).FrameworkValue(); got != "codex" {
+		t.Errorf("FrameworkValue() = %q, want codex", got)
+	}
+}
+
+// TestDescriptorFromRequestMapsDispatchFields asserts the additive request
+// fields land on the descriptor: track "short" → ShortMode, model → Model,
+// framework → Framework, and an explicit skip_confirm:false → SkipConfirm false
+// (gated).
 func TestDescriptorFromRequestMapsDispatchFields(t *testing.T) {
 	gated := false
 	d := descriptorFromRequest(session.Request{
 		RequestID: "r", Type: "spec", Slug: strPtr("demo"), Initiator: "agent",
-		Track: strPtr("short"), Model: strPtr("opus"), SkipConfirm: &gated,
+		Track: strPtr("short"), Model: strPtr("opus"), Framework: strPtr("codex"), SkipConfirm: &gated,
 	})
 	if !d.ShortMode {
 		t.Error("track=short did not set ShortMode")
@@ -145,14 +157,18 @@ func TestDescriptorFromRequestMapsDispatchFields(t *testing.T) {
 	if d.Model != "opus" {
 		t.Errorf("Model = %q, want opus", d.Model)
 	}
+	if d.Framework != "codex" {
+		t.Errorf("Framework = %q, want codex", d.Framework)
+	}
 	if d.SkipConfirm {
 		t.Error("skip_confirm=false did not set SkipConfirm gated (false)")
 	}
 }
 
 // TestDescriptorFromRequestDefaults asserts the absent-field behavior: no track →
-// full spec (ShortMode false), no model → empty, and — the load-bearing one —
-// absent skip_confirm preserves the historical queue-spawn autonomy (true).
+// full spec (ShortMode false), no model/framework → empty, and — the
+// load-bearing one — absent skip_confirm preserves the historical queue-spawn
+// autonomy (true).
 func TestDescriptorFromRequestDefaults(t *testing.T) {
 	d := descriptorFromRequest(session.Request{
 		RequestID: "r", Type: "spec", Slug: strPtr("demo"), Initiator: "agent",
@@ -162,6 +178,9 @@ func TestDescriptorFromRequestDefaults(t *testing.T) {
 	}
 	if d.Model != "" {
 		t.Errorf("absent model should leave Model empty, got %q", d.Model)
+	}
+	if d.Framework != "" {
+		t.Errorf("absent framework should leave Framework empty, got %q", d.Framework)
 	}
 	if !d.SkipConfirm {
 		t.Error("absent skip_confirm must default to SkipConfirm true (queue-spawn autonomy)")

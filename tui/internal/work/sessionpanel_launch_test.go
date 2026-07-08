@@ -157,6 +157,9 @@ func TestStartTerminalCmd_SpawnsClaudeBinaryWithDefaultFlags(t *testing.T) {
 	if !envContains(started.Cmd.Env, "LORE_FRAMEWORK=claude-code") {
 		t.Errorf("Cmd.Env missing LORE_FRAMEWORK=claude-code: %v", started.Cmd.Env)
 	}
+	if started.Harness != "claude-code" {
+		t.Errorf("SessionProcessStartedMsg.Harness = %q, want claude-code", started.Harness)
+	}
 	// claude-code routes inline_settings_override through the adapter →
 	// `--settings {}` should be in args. append_system_prompt is gated on
 	// followupMode (off here), so it should NOT appear.
@@ -352,6 +355,39 @@ func TestStartTerminalCmd_CodexSkipsUnsupportedConcerns(t *testing.T) {
 	if argsContains(started.Cmd.Args, "--settings") {
 		t.Errorf("Cmd.Args contains --settings on codex (should be skipped per `unsupported`): %v",
 			started.Cmd.Args)
+	}
+}
+
+func TestStartTerminalCmd_FrameworkOverrideSelectsSpawnIdentity(t *testing.T) {
+	stageFakeBinaries(t)
+	dir := stageFakeLoreData(t, "claude-code", nil)
+
+	d := SessionDescriptor{
+		Type:         SessionSpec,
+		Slug:         "smoke-slug",
+		Title:        "smoke title",
+		Framework:    "codex",
+		SkipConfirm:  true,
+		FindingIndex: -1,
+	}
+	cmd := StartTerminalCmd(d, dir, 80, 24, dir, SessionEnv{}, false)
+	msg := cmd()
+	started, ok := msg.(SessionProcessStartedMsg)
+	if !ok {
+		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
+	}
+	if started.Ptmx != nil {
+		_ = started.Ptmx.Close()
+	}
+
+	if !strings.HasSuffix(started.Cmd.Path, "/codex") {
+		t.Errorf("Cmd.Path = %q, want suffix /codex", started.Cmd.Path)
+	}
+	if !envContains(started.Cmd.Env, "LORE_FRAMEWORK=codex") {
+		t.Errorf("Cmd.Env missing LORE_FRAMEWORK=codex: %v", started.Cmd.Env)
+	}
+	if started.Harness != "codex" {
+		t.Errorf("SessionProcessStartedMsg.Harness = %q, want codex", started.Harness)
 	}
 }
 

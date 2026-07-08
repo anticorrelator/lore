@@ -63,6 +63,10 @@ type SessionDescriptor struct {
 	// Empty injects no flag, leaving the lead on the harness/settings default.
 	Model string
 
+	// Framework is the per-request launch framework override. Empty leaves the
+	// spawn path on the TUI launch-framework fallback.
+	Framework string
+
 	ShortMode    bool
 	SkipConfirm  bool
 	FollowupMode bool

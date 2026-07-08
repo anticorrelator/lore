@@ -38,6 +38,10 @@
 #                      --model flag. The id is opaque — validated only for
 #                      non-emptiness here, never against a model list (the candidate
 #                      set is coordinator policy, not schema).
+#   --framework <id>   Framework override for the spawned session: claude-code |
+#                      codex | opencode. Validated against adapters/capabilities.json
+#                      and stored only when present. Pair with --min-vintage when an
+#                      old claiming TUI must not ignore this additive field.
 #   --yes              Run autonomously: skip the session's confirmation gates
 #                      (alias --no-confirm). This is the default for queue-spawned
 #                      sessions, so omitting all three leaves it on.
@@ -74,6 +78,8 @@ MIN_VINTAGE=""
 TRACK=""
 MODEL=""
 MODEL_PROVIDED=0
+FRAMEWORK=""
+FRAMEWORK_PROVIDED=0
 SKIP_CONFIRM=""
 
 while [[ $# -gt 0 ]]; do
@@ -89,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     --min-vintage) MIN_VINTAGE="$2"; shift 2 ;;
     --track) TRACK="$2"; shift 2 ;;
     --model) MODEL="$2"; MODEL_PROVIDED=1; shift 2 ;;
+    --framework) FRAMEWORK="$2"; FRAMEWORK_PROVIDED=1; shift 2 ;;
     --yes|--no-confirm) SKIP_CONFIRM="true"; shift ;;
     --confirm) SKIP_CONFIRM="false"; shift ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
@@ -96,7 +103,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-request.sh --type <spec|implement|chat|worker> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-request.sh --type <spec|implement|chat|worker> [--slug <s>] [--target <name>] [--initiator <agent|human>] [--auto-close <true|false>] [--requested-by <who>] [--context <text|file>] [--route <role=model>]... [--min-vintage <ts|commit-ish>] [--track <short|full>] [--model <id>] [--framework <claude-code|codex|opencode>] [--yes|--no-confirm|--confirm] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
   esac
@@ -164,6 +171,21 @@ if [[ $MODEL_PROVIDED -eq 1 && -z "$MODEL" ]]; then
   fail "empty --model (a lead-model id is required when --model is given)"
 fi
 
+# framework is an optional closed-set override for the claiming TUI's launch
+# framework. Validate from the existing adapter capability registry at write time
+# so stale/invalid request rows never enter the queue.
+FRAMEWORK_JSON=""
+if [[ $FRAMEWORK_PROVIDED -eq 1 ]]; then
+  [[ -n "$FRAMEWORK" ]] || fail "empty --framework (a framework id is required when --framework is given)"
+  CAPABILITIES_FILE="$LORE_LIB_DIR/../adapters/capabilities.json"
+  [[ -f "$CAPABILITIES_FILE" ]] || fail "framework registry not found at: $CAPABILITIES_FILE (cannot validate --framework)"
+  if ! jq -e --arg fw "$FRAMEWORK" '.frameworks | has($fw)' "$CAPABILITIES_FILE" >/dev/null 2>&1; then
+    VALID_FRAMEWORKS="$(jq -r '.frameworks | keys | join(", ")' "$CAPABILITIES_FILE")"
+    fail "invalid --framework: '$FRAMEWORK' (must be one of $VALID_FRAMEWORKS)"
+  fi
+  FRAMEWORK_JSON="$(jq -n --arg fw "$FRAMEWORK" '$fw')"
+fi
+
 # skip_confirm is a nullable bool: absent (omit-when-empty) defers to the
 # queue-spawn default (autonomous — the historical always-skip behavior); true
 # (--yes/--no-confirm) forces autonomous, false (--confirm) forces gated. Emitted
@@ -210,6 +232,10 @@ if [[ -n "$MIN_VINTAGE" ]]; then
     [[ -n "$MIN_VINTAGE_RESOLVED" ]] || fail "invalid --min-vintage: '$MIN_VINTAGE' (expected an ISO-8601 UTC timestamp like 2026-07-05T12:00:00Z or a resolvable git commit-ish)"
   fi
   MIN_VINTAGE_JSON="$(jq -n --arg v "$MIN_VINTAGE_RESOLVED" '$v')"
+fi
+
+if [[ $FRAMEWORK_PROVIDED -eq 1 && -z "$MIN_VINTAGE" ]]; then
+  echo "[session] advisory: --framework was provided without --min-vintage; old claiming TUIs may ignore the framework field" >&2
 fi
 
 if [[ -z "$REQUESTED_BY" ]]; then
@@ -294,6 +320,12 @@ fi
 # absent override stays absent (the Go decoder reads a nil *string).
 if [[ -n "$MODEL" ]]; then
   ROW="$(printf '%s' "$ROW" | jq -c --arg md "$MODEL" '. + {model: $md}')"
+fi
+
+# framework follows omit-when-empty: added only when --framework carried a value,
+# so an absent override keeps the claiming TUI's launch-framework fallback.
+if [[ -n "$FRAMEWORK_JSON" ]]; then
+  ROW="$(printf '%s' "$ROW" | jq -c --argjson fw "$FRAMEWORK_JSON" '. + {framework: $fw}')"
 fi
 
 # skip_confirm follows omit-when-empty: added only when --yes/--no-confirm or

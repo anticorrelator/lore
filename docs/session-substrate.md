@@ -141,7 +141,15 @@ and, once an instance claims it, moves to `requests/claimed/<request_id>.json`.
 | `min_vintage` | string \| absent | Minimum build vintage (ISO 8601 UTC) the claiming instance's `build_time` must meet — the request never targets an instance built earlier. Omit-when-empty. Filtered read-side, mirroring `target_instance` (the only difference is a temporal `>=` vs a string `==`). The `session request --min-vintage` verb accepts a timestamp or a git commit-ish (resolved to its committer-date at enqueue) and stores the timestamp, so the read side never shells out to git. **Additive**: an instance of unknown vintage, or any unparseable timestamp, passes — a claim is refused only on positive evidence the instance is older. |
 | `track` | string \| absent | Spec depth selector (`short`) carried to the session's short-track (`/spec short`). Omit-when-empty: only the non-default `short` is stored (`full` is the default and stays absent), so the field is present only when it changes behavior. Set at enqueue by `session request --track short`, which **refuses the flag on a non-spec request** (`ShortMode` has no effect on implement/chat prompts). Maps to `SessionDescriptor.ShortMode` at spawn. |
 | `model` | string \| absent | Per-dispatch lead-model override — the session lead is the top-level agent, so a model chosen here is lead selection. Omit-when-empty. Composed into the spawn as the harness's universal `--model` flag (the same flag `model_routing.tiers` aliases feed). **Opaque**: validated only for non-emptiness at enqueue, never against a model list — the candidate set is coordinator policy, not schema, so a bad id surfaces as an honest harness launch error. Distinct from `routing_overrides`, which routes *sub-agent* roles via `LORE_MODEL_<ROLE>` env. |
+| `framework` | string \| absent | Per-request launch framework override. Accepted values are `claude-code`, `opencode`, and `codex`. Omit-when-empty: absent defers to the claiming TUI's `tui_launch_framework` setting. Validated at enqueue against the framework registry and carried to spawn so the harness binary, `LORE_FRAMEWORK`, `SessionProcessStartedMsg.Harness`, and live registry `sessions[].harness` agree. |
 | `skip_confirm` | boolean \| absent | Session autonomy override. Omit-when-empty: absent defers to the queue-spawn default (**autonomous** — a claimed request historically runs without confirmation gates), `true` (`--yes`/`--no-confirm`) forces autonomous, `false` (`--confirm`) forces **gated** so every confirmation gate becomes a coordinator send window. Maps to `SessionDescriptor.SkipConfirm` at spawn. |
+
+Because `framework` is additive, old TUI decoders ignore it. When a
+`--framework` request must not be claimed by a TUI build that predates this
+field, enqueue it with `--min-vintage <feature-sha>` so the existing vintage gate
+filters stale claimers. Prove framework identity at spawn time through the child
+environment, `SessionProcessStartedMsg.Harness`, or the live registry row; codex
+`closed` spend rows may remain duration-only and are not the routing proof.
 
 A **claimed** file additionally carries:
 
