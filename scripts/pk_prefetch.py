@@ -322,7 +322,12 @@ def run_prefetch(
             snippet = r.get("snippet", "")[:200]
             if len(r.get("snippet", "")) > 200:
                 snippet += "..."
-            print(f'- **{r["heading"]}** ({r["file_path"]}, score: {r.get("score", 0)}): {snippet}')
+            line = f'- **{r["heading"]}** ({r["file_path"]}, score: {r.get("score", 0)}): {snippet}'
+            if r.get("source_type") == "knowledge":
+                corrected = _last_corrected_line(knowledge_dir, r["file_path"])
+                if corrected:
+                    line += f" [{corrected}]"
+            print(line)
         _log_prefetch(knowledge_dir, results, caller=caller, scale_set=scale_set)
         if work_item:
             _emit_scope_pointers(knowledge_dir, work_item, query)

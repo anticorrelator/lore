@@ -123,6 +123,7 @@ NEW_TITLE=""
 NEW_BODY=""
 NEW_SCALE=""
 META_FIELDS=""
+KDIR_OVERRIDE=""
 
 usage() {
   cat >&2 <<EOF
@@ -176,6 +177,7 @@ Required (add-entry):
 
 Optional:
   --date YYYY-MM-DD            Override the correction date (default: today)
+  --kdir PATH                  Override the knowledge directory (default: lore resolve)
   --check-escalation           [mutation mode only] Evaluate L3 escalation conditions
   --backlink-threshold N       Backlink in-degree >= N triggers escalation (default: 3)
   --meta-fields key=val,...    [add-entry mode only] Additional META fields
@@ -228,6 +230,10 @@ while [[ $# -gt 0 ]]; do
     --dry-run)
       DRY_RUN=1
       shift
+      ;;
+    --kdir)
+      KDIR_OVERRIDE="$2"
+      shift 2
       ;;
     --allow-settlement-verdict)
       # Bypass the scorecard calibration_state gate; validate against
@@ -371,7 +377,11 @@ fi
 #       actually run while preserving git history + in-entry corrections[] META
 #       as the visible accountability layer.
 #   (b) default: scorecard rows.jsonl calibration_state==calibrated (task-62).
-KDIR=$(resolve_knowledge_dir)
+if [[ -n "$KDIR_OVERRIDE" ]]; then
+  KDIR="$KDIR_OVERRIDE"
+else
+  KDIR=$(resolve_knowledge_dir)
+fi
 
 if [[ "$ALLOW_SETTLEMENT_VERDICT" == "1" ]]; then
   # A settled run may have been compacted out of the hot dir into the archive
@@ -462,7 +472,9 @@ with open(rows_file, encoding="utf-8") as f:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if row.get("verdict_id") == verdict_id:
+        ids = {row.get("verdict_id"), row.get("calibrated_by_verdict_id")}
+        ids.update(row.get("verdict_ids") or [])
+        if verdict_id in ids:
             print(row.get("calibration_state", "unknown"))
             sys.exit(0)
 # Not found — treat as unknown

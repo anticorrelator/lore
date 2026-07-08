@@ -64,6 +64,7 @@ FILE_LINE=""
 LIMIT=10
 THRESHOLD=0.4
 JSON_MODE=0
+KDIR_OVERRIDE=""
 
 usage() {
   cat >&2 <<EOF
@@ -76,6 +77,7 @@ Options:
   --file-line FILE:LINE The file:line_range anchor from the verdict (optional)
   --limit N             Maximum results to return (default: 10)
   --threshold F         Minimum TF-IDF cosine similarity (default: 0.4)
+  --kdir PATH           Override the knowledge directory (default: lore resolve)
   --json                Emit a single JSON object on stdout (see header for schema)
 EOF
 }
@@ -96,6 +98,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --threshold)
       THRESHOLD="$2"
+      shift 2
+      ;;
+    --kdir)
+      KDIR_OVERRIDE="$2"
       shift 2
       ;;
     --json)
@@ -128,7 +134,11 @@ if RESOLVER_SHA=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null); then
   fi
 fi
 
-KDIR=$(resolve_knowledge_dir)
+if [[ -n "$KDIR_OVERRIDE" ]]; then
+  KDIR="$KDIR_OVERRIDE"
+else
+  KDIR=$(resolve_knowledge_dir)
+fi
 
 if [[ ! -f "$KDIR/_manifest.json" ]]; then
   if [[ "$JSON_MODE" -eq 1 ]]; then

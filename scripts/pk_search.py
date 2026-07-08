@@ -1391,6 +1391,7 @@ class Searcher:
                 "trust_score": row["trust_score"] if row["trust_score"] is not None else 0.0,
                 "score": round(score, 4),
                 "snippet": snippet,
+                "correction_recency": _parse_correction_recency(abs_path),
             }
             results.append(result)
 
