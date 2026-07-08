@@ -33,7 +33,7 @@ def make_settings(census: bool = False, budget: int = 12, enabled: bool = True) 
         "batch_recompute_min_interval_seconds": 0,
         "concordance_window_size": 8,
         "active_hours": {"enabled": False, "timezone": "local", "ranges": []},
-        "harness_selection": {"mode": "first_eligible", "eligible_frameworks": [], "random_seed": 0},
+        "harness_selection": {"mode": "first_eligible", "eligible_frameworks": ["claude-code"], "random_seed": 0},
         "dispatch": {"census_enabled": census, "spot_sample_weekly_budget": budget},
         "max_auto_retry_attempts": 3,
     }
@@ -348,6 +348,66 @@ def test_status_event_mode_backlog_not_advertised(kdir, settlement, monkeypatch,
     assert status["next_action"].startswith("idle")
     census_status = settlement.status(make_settings(census=True))
     assert census_status["next_action"] == "process once or wait for processor"
+
+
+def test_missing_and_empty_eligible_frameworks_block_status(kdir, settlement, monkeypatch, tmp_path):
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text(json.dumps({"version": 1, "harnesses": {"claude-code": {"args": []}}}), encoding="utf-8")
+    monkeypatch.setenv("LORE_SETTLEMENT_SETTINGS_FILE", str(settings_file))
+
+    missing = make_settings(census=False)
+    missing["harness_selection"].pop("eligible_frameworks", None)
+    missing_status = settlement.status(missing)
+    assert proc.ELIGIBLE_FRAMEWORKS_SETTINGS_KEY in missing_status["blocked_reason"]
+    assert proc.ELIGIBLE_FRAMEWORKS_REMEDIATION in missing_status["next_action"]
+    assert missing_status["harness"]["settings_key"] == proc.ELIGIBLE_FRAMEWORKS_SETTINGS_KEY
+
+    empty = make_settings(census=False)
+    empty["harness_selection"]["eligible_frameworks"] = []
+    empty_status = settlement.status(empty)
+    assert proc.ELIGIBLE_FRAMEWORKS_SETTINGS_KEY in empty_status["blocked_reason"]
+    assert proc.ELIGIBLE_FRAMEWORKS_REMEDIATION in empty_status["next_action"]
+
+
+def test_declared_dispatch_framework_flip_and_same_framework_quiet(kdir, settlement, monkeypatch, tmp_path):
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text(
+        json.dumps({"version": 1, "harnesses": {"claude-code": {"args": []}, "codex": {"args": []}}}),
+        encoding="utf-8",
+    )
+    executor = tmp_path / "success-exec.sh"
+    executor.write_text("#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n", encoding="utf-8")
+    executor.chmod(0o755)
+    monkeypatch.setenv("LORE_SETTLEMENT_SETTINGS_FILE", str(settings_file))
+    monkeypatch.setenv("LORE_SETTLEMENT_EXECUTOR", str(executor))
+
+    for claim_id in ("flip-1", "flip-2", "flip-3"):
+        settlement.enqueue_row("wi1", json.loads(task_claim_row(claim_id)))
+
+    first_settings = make_settings(census=False)
+    first_settings["harness_selection"]["eligible_frameworks"] = ["claude-code"]
+    first = settlement.process_once(first_settings)
+    assert first["dispatched"] is True
+    assert first["run"]["framework"] == "claude-code"
+    assert "framework_changed" not in first["run"]
+
+    second_settings = make_settings(census=False)
+    second_settings["harness_selection"]["eligible_frameworks"] = ["codex"]
+    second = settlement.process_once(second_settings)
+    assert second["dispatched"] is True
+    assert second["run"]["framework_changed"] == {"from": "claude-code", "to": "codex"}
+
+    third = settlement.process_once(second_settings)
+    assert third["dispatched"] is True
+    assert "framework_changed" not in third["run"]
+
+    pump_log = kdir / "_settlement" / "pump-log.jsonl"
+    events = [json.loads(line) for line in pump_log.read_text(encoding="utf-8").splitlines()]
+    flips = [event for event in events if event.get("event") == "framework_changed"]
+    assert len(flips) == 1
+    assert flips[0]["from"] == "claude-code"
+    assert flips[0]["to"] == "codex"
+    assert flips[0]["run_id"] == second["run"]["run_id"]
 
 
 # ---------------------------------------------------------------------------

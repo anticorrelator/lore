@@ -34,6 +34,21 @@ assert_json_eq() {
   assert_eq "$label" "$actual" "$expected"
 }
 
+assert_json_contains() {
+  local label="$1" json="$2" expr="$3" needle="$4"
+  local actual
+  actual=$(printf '%s' "$json" | jq -r "$expr")
+  if [[ "$actual" == *"$needle"* ]]; then
+    echo "  PASS: $label"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $label"
+    echo "    expected substring: $needle"
+    echo "    actual:             $actual"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 write_settings() {
   local path="$1" body="$2"
   mkdir -p "$(dirname "$path")"
@@ -226,6 +241,93 @@ assert_json_eq "counts payload drops failed key" "$STATUS" '.counts | has("faile
 assert_json_eq "counts payload drops blocked key" "$STATUS" '.counts | has("blocked")' "false"
 assert_json_eq "run ref is durable" "$STATUS" '.terminal_items[0].result.run_ref | test("^_settlement/runs/run-[a-f0-9]+\\.json$")' "true"
 assert_json_eq "verdict ref is durable" "$STATUS" '.terminal_items[0].result.verdict_ref | test("^_settlement/runs/run-[a-f0-9]+\\.json#verdict$")' "true"
+
+echo ""
+echo "Test 3b: missing eligible frameworks declaration blocks dispatch after GC"
+KDIR_DECL_MISSING="$TEST_DIR/kdir-decl-missing"
+SETTINGS_DECL_MISSING="$TEST_DIR/settings-decl-missing.json"
+setup_kdir "$KDIR_DECL_MISSING" "wi"
+write_settings "$SETTINGS_DECL_MISSING" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false},"enabled":true,"max_concurrency":1}}'
+printf '%s' "$(row_json "claim-decl-missing")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DECL_MISSING" bash "$EVIDENCE" --work-item wi --kdir "$KDIR_DECL_MISSING" >/dev/null
+DECL_MISSING=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DECL_MISSING" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" bash "$QUEUE" process --kdir "$KDIR_DECL_MISSING" --once --json)
+assert_json_eq "missing declaration does not dispatch" "$DECL_MISSING" '.dispatched' "false"
+assert_json_contains "missing declaration names settings key" "$DECL_MISSING" '.blocked_reason' "settlement.harness_selection.eligible_frameworks"
+assert_json_contains "missing declaration carries remediation" "$DECL_MISSING" '.next_action' "declare settlement.harness_selection.eligible_frameworks"
+assert_json_eq "missing declaration leaves pending item dispatchable" "$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DECL_MISSING" bash "$QUEUE" status --kdir "$KDIR_DECL_MISSING" --json)" '.queue.pending' "1"
+if compgen -G "$KDIR_DECL_MISSING/_settlement/runs/*.json" >/dev/null; then
+  echo "  FAIL: missing declaration created a run record"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: missing declaration created no run record"
+  PASS=$((PASS + 1))
+fi
+assert_eq "missing declaration appends one blocked-evaluation pump event" \
+  "$(jq -s '[.[] | select(.event=="blocked_evaluation" and .settings_key=="settlement.harness_selection.eligible_frameworks" and (.remediation | contains("declare settlement.harness_selection.eligible_frameworks")))] | length' "$KDIR_DECL_MISSING/_settlement/pump-log.jsonl")" "1"
+if [[ -e "$KDIR_DECL_MISSING/_settlement/latest-framework.json" ]]; then
+  echo "  FAIL: missing declaration touched latest-framework marker"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: missing declaration did not touch latest-framework marker"
+  PASS=$((PASS + 1))
+fi
+DECL_MISSING_STATUS=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DECL_MISSING" bash "$QUEUE" status --kdir "$KDIR_DECL_MISSING" --json)
+assert_json_contains "status blocked_reason names declaration key" "$DECL_MISSING_STATUS" '.blocked_reason' "settlement.harness_selection.eligible_frameworks"
+assert_json_contains "status next_action carries declaration remediation" "$DECL_MISSING_STATUS" '.next_action' "declare settlement.harness_selection.eligible_frameworks"
+
+echo ""
+echo "Test 3c: empty eligible frameworks declaration blocks dispatch"
+KDIR_DECL_EMPTY="$TEST_DIR/kdir-decl-empty"
+SETTINGS_DECL_EMPTY="$TEST_DIR/settings-decl-empty.json"
+setup_kdir "$KDIR_DECL_EMPTY" "wi"
+write_settings "$SETTINGS_DECL_EMPTY" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false},"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":[]}}}'
+printf '%s' "$(row_json "claim-decl-empty")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DECL_EMPTY" bash "$EVIDENCE" --work-item wi --kdir "$KDIR_DECL_EMPTY" >/dev/null
+DECL_EMPTY=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DECL_EMPTY" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" bash "$QUEUE" process --kdir "$KDIR_DECL_EMPTY" --once --json)
+assert_json_eq "empty declaration does not dispatch" "$DECL_EMPTY" '.dispatched' "false"
+assert_json_contains "empty declaration names settings key" "$DECL_EMPTY" '.blocked_reason' "settlement.harness_selection.eligible_frameworks"
+assert_json_contains "empty declaration carries remediation" "$DECL_EMPTY" '.next_action' "declare settlement.harness_selection.eligible_frameworks"
+if [[ -e "$KDIR_DECL_EMPTY/_settlement/latest-framework.json" ]]; then
+  echo "  FAIL: empty declaration touched latest-framework marker"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: empty declaration did not touch latest-framework marker"
+  PASS=$((PASS + 1))
+fi
+
+echo ""
+echo "Test 3d: declared eligible framework dispatches without declaration block"
+KDIR_DECL_OK="$TEST_DIR/kdir-decl-ok"
+SETTINGS_DECL_OK="$TEST_DIR/settings-decl-ok.json"
+setup_kdir "$KDIR_DECL_OK" "wi"
+write_settings "$SETTINGS_DECL_OK" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false},"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+printf '%s' "$(row_json "claim-decl-ok")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DECL_OK" bash "$EVIDENCE" --work-item wi --kdir "$KDIR_DECL_OK" >/dev/null
+DECL_OK=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_DECL_OK" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" bash "$QUEUE" process --kdir "$KDIR_DECL_OK" --once --json)
+assert_json_eq "declared list dispatches" "$DECL_OK" '.dispatched' "true"
+assert_json_eq "declared list selects declared framework" "$DECL_OK" '.run.framework' "claude-code"
+assert_json_eq "declared list has no declaration blocked reason" "$DECL_OK" '.blocked_reason // ""' ""
+
+echo ""
+echo "Test 3e: framework flip emits one run block and one pump-log event"
+KDIR_FLIP="$TEST_DIR/kdir-framework-flip"
+SETTINGS_FLIP="$TEST_DIR/settings-framework-flip.json"
+setup_kdir "$KDIR_FLIP" "wi"
+write_settings "$SETTINGS_FLIP" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false},"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["claude-code"]}}}'
+printf '%s' "$(row_json "claim-flip-1")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_FLIP" bash "$EVIDENCE" --work-item wi --kdir "$KDIR_FLIP" >/dev/null
+printf '%s' "$(row_json "claim-flip-2")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_FLIP" bash "$EVIDENCE" --work-item wi --kdir "$KDIR_FLIP" >/dev/null
+printf '%s' "$(row_json "claim-flip-3")" | LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_FLIP" bash "$EVIDENCE" --work-item wi --kdir "$KDIR_FLIP" >/dev/null
+printf 'not-json\n' > "$KDIR_FLIP/_settlement/latest-framework.json"
+FLIP_FIRST=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_FLIP" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" bash "$QUEUE" process --kdir "$KDIR_FLIP" --once --json)
+assert_json_eq "first framework run is quiet" "$FLIP_FIRST" '.run | has("framework_changed")' "false"
+assert_json_eq "unreadable marker is replaced after first run" "$(cat "$KDIR_FLIP/_settlement/latest-framework.json")" '.framework' "claude-code"
+write_settings "$SETTINGS_FLIP" '{"version":1,"tui_launch_framework":"claude-code","harnesses":{"claude-code":{"args":[]},"opencode":{"args":[]},"codex":{"args":[]}},"settlement":{"dispatch":{"census_enabled":false},"enabled":true,"max_concurrency":1,"harness_selection":{"mode":"first_eligible","eligible_frameworks":["codex"]}}}'
+FLIP_SECOND=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_FLIP" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" bash "$QUEUE" process --kdir "$KDIR_FLIP" --once --json)
+assert_json_eq "second framework run records flip from" "$FLIP_SECOND" '.run.framework_changed.from' "claude-code"
+assert_json_eq "second framework run records flip to" "$FLIP_SECOND" '.run.framework_changed.to' "codex"
+assert_eq "one framework_changed pump-log event after flip" \
+  "$(jq -s '[.[] | select(.event=="framework_changed" and .from=="claude-code" and .to=="codex")] | length' "$KDIR_FLIP/_settlement/pump-log.jsonl")" "1"
+FLIP_THIRD=$(LORE_SETTLEMENT_SETTINGS_FILE="$SETTINGS_FLIP" LORE_SETTLEMENT_EXECUTOR="$SUCCESS_EXEC" bash "$QUEUE" process --kdir "$KDIR_FLIP" --once --json)
+assert_json_eq "same framework run is quiet" "$FLIP_THIRD" '.run | has("framework_changed")' "false"
+assert_eq "same framework run adds no extra flip event" \
+  "$(jq -s '[.[] | select(.event=="framework_changed")] | length' "$KDIR_FLIP/_settlement/pump-log.jsonl")" "1"
 
 echo ""
 echo "Test 4: status is read-only and process reclaims expired lease"

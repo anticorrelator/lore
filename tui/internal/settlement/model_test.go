@@ -767,6 +767,32 @@ func TestPostureLineRendersControlsAndSpotDial(t *testing.T) {
 	}
 }
 
+func TestPostureLineRendersEligibleFrameworkDeclarationBlock(t *testing.T) {
+	st, err := ParseStatus([]byte(`{
+		"enabled": true,
+		"blocked_reason": "settlement.harness_selection.eligible_frameworks must be declared as a non-empty list; declare settlement.harness_selection.eligible_frameworks",
+		"next_action": "declare settlement.harness_selection.eligible_frameworks",
+		"harness": {
+			"blocked_reason": "settlement.harness_selection.eligible_frameworks must be declared as a non-empty list; declare settlement.harness_selection.eligible_frameworks",
+			"settings_key": "settlement.harness_selection.eligible_frameworks",
+			"remediation": "declare settlement.harness_selection.eligible_frameworks"
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseStatus: %v", err)
+	}
+	view := stripANSI(NewModel().ReplaceStatus(st).SetSize(180, 30).View())
+	if !strings.Contains(view, "blocked: settlement.harness selection.eligible frameworks must be declared as a non-empty list") {
+		t.Fatalf("posture line should render declaration blocked reason, got:\n%s", view)
+	}
+	if !strings.Contains(view, "declare settlement.harness selection.eligible frameworks") {
+		t.Fatalf("posture line should render declaration remediation, got:\n%s", view)
+	}
+	if !strings.Contains(st.NextAction, "settlement.harness_selection.eligible_frameworks") {
+		t.Fatalf("status should preserve declaration remediation next_action, got %+v", st)
+	}
+}
+
 func TestTrustTransitionRendersGaugesFromFeed(t *testing.T) {
 	st, err := ParseStatus([]byte(`{
 		"enabled": true,

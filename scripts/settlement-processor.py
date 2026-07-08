@@ -40,6 +40,9 @@ DEFAULT_MAX_AUTO_RETRY_ATTEMPTS = 3
 STATUS_RECENT_RUNS_LIMIT = 25
 STATUS_TERMINAL_PREVIEW_LIMIT = 5
 STATUS_INFRA_EXHAUSTED_PREVIEW_LIMIT = 20
+ELIGIBLE_FRAMEWORKS_SETTINGS_KEY = "settlement.harness_selection.eligible_frameworks"
+ELIGIBLE_FRAMEWORKS_REMEDIATION = f"declare {ELIGIBLE_FRAMEWORKS_SETTINGS_KEY}"
+ELIGIBLE_FRAMEWORKS_BLOCKED_REASON = f"{ELIGIBLE_FRAMEWORKS_SETTINGS_KEY} must be declared as a non-empty list; {ELIGIBLE_FRAMEWORKS_REMEDIATION}"
 # Trailing window (by run-file mtime) for status metric parsing. A superset of
 # the 24h health window and the Monday-anchored spot-sample week: run files are
 # written at completion and invalidation only bumps mtime upward, so a run
@@ -293,6 +296,7 @@ class Settlement:
         self.archive_leases_path = self.archive_dir / "leases.jsonl"
         self.archive_runs_index_path = self.archive_dir / "runs-index.jsonl"
         self.archive_runs_dir = self.archive_dir / "runs"
+        self.latest_framework_path = self.state / "latest-framework.json"
         self.capabilities_path = Path(__file__).resolve().parent.parent / "adapters" / "capabilities.json"
 
     def ensure(self) -> None:
@@ -335,6 +339,7 @@ class Settlement:
                 "queue.json": ["settlement-queue.sh", "settlement-processor.py"],
                 "leases.json": ["settlement-processor.py"],
                 "usage.json": ["settlement-processor.py"],
+                "latest-framework.json": ["settlement-processor.py"],
                 "runs/*.json": ["settlement-processor.py"],
                 "exhausted.json": ["settlement-processor.py"],
                 "archive/leases.jsonl": ["settlement-processor.py"],
@@ -1827,6 +1832,63 @@ class Settlement:
         json_dump(path, run)
         return run
 
+    def append_pump_log_event(self, event: dict[str, Any]) -> None:
+        self.state.mkdir(parents=True, exist_ok=True)
+        payload = {"ran_at": utc_now(), **event}
+        with (self.state / "pump-log.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, sort_keys=True) + "\n")
+
+    def read_latest_framework_marker(self) -> str:
+        try:
+            data = json_load(self.latest_framework_path, {})
+        except Exception:
+            return ""
+        if not isinstance(data, dict):
+            return ""
+        framework = data.get("framework")
+        return framework if isinstance(framework, str) and framework else ""
+
+    def update_latest_framework_marker(self, framework: str, run_id: str) -> None:
+        if not framework:
+            return
+        json_dump(self.latest_framework_path, {
+            "framework": framework,
+            "run_id": run_id,
+            "updated_at": utc_now(),
+        })
+
+    def persist_framework_marker_after_run(
+        self,
+        run: dict[str, Any],
+        created: bool,
+    ) -> None:
+        if not created:
+            return
+        current = run.get("framework")
+        if not isinstance(current, str) or not current:
+            return
+        run_id = str(run.get("run_id") or "")
+        try:
+            self.update_latest_framework_marker(current, run_id)
+        except Exception:
+            return
+        changed = run.get("framework_changed")
+        if isinstance(changed, dict):
+            try:
+                self.append_pump_log_event({
+                    "event": "framework_changed",
+                    "run_id": run_id,
+                    "from": changed.get("from"),
+                    "to": changed.get("to"),
+                })
+            except Exception:
+                pass
+
+    def framework_changed_block(self, previous_framework: str, current_framework: str) -> dict[str, str] | None:
+        if previous_framework and current_framework and previous_framework != current_framework:
+            return {"from": previous_framework, "to": current_framework}
+        return None
+
     def write_run_correction_outcome_once(self, run_id: str, outcome: dict[str, Any]) -> dict[str, Any]:
         """Identity-verified read-modify-write of `correction_outcome` on the
         existing run record. Idempotent: if the field is already present, the
@@ -2313,6 +2375,18 @@ class Settlement:
             "remedy": "lore settlement retry-errors",
         }
 
+    def harness_declaration_blocked(self, rejected: list[dict[str, str]]) -> bool:
+        return any(row.get("settings_key") == ELIGIBLE_FRAMEWORKS_SETTINGS_KEY for row in rejected)
+
+    def declaration_no_dispatch_payload(self) -> dict[str, Any]:
+        return {
+            "reason": ELIGIBLE_FRAMEWORKS_BLOCKED_REASON,
+            "blocked_reason": ELIGIBLE_FRAMEWORKS_BLOCKED_REASON,
+            "next_action": ELIGIBLE_FRAMEWORKS_REMEDIATION,
+            "settings_key": ELIGIBLE_FRAMEWORKS_SETTINGS_KEY,
+            "remediation": ELIGIBLE_FRAMEWORKS_REMEDIATION,
+        }
+
     def status(self, settings: dict[str, Any]) -> dict[str, Any]:
         queue = self.load_queue()
         leases = self.load_leases()
@@ -2340,6 +2414,7 @@ class Settlement:
         budget = self.budget_status(usage)
         active_hours = self.active_hours_status(settings)
         eligible, rejected = self.eligible_frameworks(settings)
+        declaration_blocked = self.harness_declaration_blocked(rejected)
         census = bool(settings["dispatch"]["census_enabled"])
         # The drained-batch backlog only feeds dispatch under the census
         # posture; in the event-driven posture a stale backlog_size must not
@@ -2350,12 +2425,16 @@ class Settlement:
             blocked_reason = "disabled"
         elif not active_hours["allowed"]:
             blocked_reason = active_hours["reason"]
+        elif declaration_blocked:
+            blocked_reason = ELIGIBLE_FRAMEWORKS_BLOCKED_REASON
         elif not eligible:
             blocked_reason = "no_eligible_harnesses"
         elif len(active_lease_rows) >= int(settings["max_concurrency"]):
             blocked_reason = "max_concurrency_reached"
         next_action = "idle"
-        if blocked_reason:
+        if declaration_blocked and blocked_reason == ELIGIBLE_FRAMEWORKS_BLOCKED_REASON:
+            next_action = ELIGIBLE_FRAMEWORKS_REMEDIATION
+        elif blocked_reason:
             next_action = f"blocked: {blocked_reason}"
         elif pending_count > 0 or backlog_waiting:
             next_action = "process once or wait for processor"
@@ -2414,7 +2493,9 @@ class Settlement:
                 "runtime_seconds_total": budget["runtime_seconds_per_day"],
                 "runtime_seconds_remaining": budget["runtime_seconds_remaining"],
                 "active_leases": len(active_lease_rows),
-                "blocked_reason": blocked_reason if blocked_reason == "no_eligible_harnesses" else "",
+                "blocked_reason": blocked_reason if declaration_blocked or blocked_reason == "no_eligible_harnesses" else "",
+                "settings_key": ELIGIBLE_FRAMEWORKS_SETTINGS_KEY if declaration_blocked else "",
+                "remediation": ELIGIBLE_FRAMEWORKS_REMEDIATION if declaration_blocked else "",
                 "eligible_frameworks": eligible,
                 "rejected_frameworks": rejected,
             },
@@ -2549,7 +2630,14 @@ class Settlement:
     def eligible_frameworks(self, settings: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         caps = json_load(self.capabilities_path, {})
         frameworks = caps.get("frameworks", {})
-        requested = settings["harness_selection"].get("eligible_frameworks") or sorted(frameworks.keys())
+        requested = settings["harness_selection"].get("eligible_frameworks")
+        if not isinstance(requested, list) or not requested:
+            return [], [{
+                "framework": "",
+                "reason": "missing_declaration",
+                "settings_key": ELIGIBLE_FRAMEWORKS_SETTINGS_KEY,
+                "remediation": ELIGIBLE_FRAMEWORKS_REMEDIATION,
+            }]
         out: list[dict[str, Any]] = []
         rejected: list[dict[str, str]] = []
         harnesses = read_settings_doc().get("harnesses", {})
@@ -2775,6 +2863,15 @@ class Settlement:
                 return {"ok": True, "dispatched": False, "reason": active_hours["reason"], "active_hours": active_hours, **gc}
             eligible, rejected = self.eligible_frameworks(settings)
             if not eligible:
+                if self.harness_declaration_blocked(rejected):
+                    payload = self.declaration_no_dispatch_payload()
+                    self.append_pump_log_event({
+                        "event": "blocked_evaluation",
+                        "reason": payload["blocked_reason"],
+                        "settings_key": payload["settings_key"],
+                        "remediation": payload["remediation"],
+                    })
+                    return {"ok": True, "dispatched": False, "rejected_harnesses": rejected, **payload, **gc}
                 return {"ok": True, "dispatched": False, "reason": "no_eligible_harnesses", "rejected_harnesses": rejected, **gc}
             executor = executor_command(settings)
 
@@ -2836,6 +2933,7 @@ class Settlement:
             try:
                 self.reserve_budget(settings, usage)
                 chosen = self.choose_framework(settings, eligible)
+                previous_framework = self.read_latest_framework_marker()
             except NoDispatch as exc:
                 self.save_queue(queue)
                 self.save_leases(leases)
@@ -2862,7 +2960,7 @@ class Settlement:
             self.save_leases(leases)
             self.save_usage(usage)
 
-        run = self.execute_item(item, run_id, chosen, settings, executor)
+        run = self.execute_item(item, run_id, chosen, settings, executor, previous_framework)
 
         with repo_lock(self.state):
             queue = self.load_queue()
@@ -2908,7 +3006,15 @@ class Settlement:
             "last_reason": last_reason,
         }
 
-    def execute_item(self, item: dict[str, Any], run_id: str, chosen: dict[str, Any], settings: dict[str, Any], executor: list[str]) -> dict[str, Any]:
+    def execute_item(
+        self,
+        item: dict[str, Any],
+        run_id: str,
+        chosen: dict[str, Any],
+        settings: dict[str, Any],
+        executor: list[str],
+        previous_framework: str,
+    ) -> dict[str, Any]:
         # D7: rollup items bypass settlement-audit-executor.sh entirely. They
         # have no `lore audit --kind <K> --id <ID>` shape, no per-claim verdict,
         # no aggregate gate counts — invoking the audit executor would 1) reject
@@ -2918,7 +3024,7 @@ class Settlement:
         # pipeline (_apply_correction_from_verdict + _emit_correction_evidence).
         kind = str(item.get("kind") or KIND_TASK_CLAIM)
         if self.is_rollup_kind(kind):
-            return self._execute_rollup_item(item, run_id, chosen, settings)
+            return self._execute_rollup_item(item, run_id, chosen, settings, previous_framework)
         env = os.environ.copy()
         env["LORE_FRAMEWORK"] = chosen["framework"]
         started = utc_now()
@@ -2993,7 +3099,12 @@ class Settlement:
             self._last_executor_audit = None
         if stderr:
             run["stderr_tail"] = stderr
+        changed = self.framework_changed_block(previous_framework, chosen["framework"])
+        if changed is not None:
+            run["framework_changed"] = changed
+        run_record_created = not self.run_path(run_id).exists()
         written = self.write_run_record_once(run)
+        self.persist_framework_marker_after_run(written, run_record_created)
         outcome = self._apply_correction_from_verdict(written, item)
         if isinstance(outcome, dict):
             persisted = self.write_run_correction_outcome_once(str(written.get("run_id") or ""), outcome)
@@ -3056,7 +3167,14 @@ class Settlement:
         except Exception:
             return 0
 
-    def _execute_rollup_item(self, item: dict[str, Any], run_id: str, chosen: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    def _execute_rollup_item(
+        self,
+        item: dict[str, Any],
+        run_id: str,
+        chosen: dict[str, Any],
+        settings: dict[str, Any],
+        previous_framework: str,
+    ) -> dict[str, Any]:
         # D7 rollup dispatch: shell out to the per-judge rollup script in its
         # --aggregate-window mode. Synthesize a verdict_format=rollup envelope;
         # skip _apply_correction_from_verdict / _emit_correction_evidence
@@ -3151,7 +3269,12 @@ class Settlement:
             run["stderr_tail"] = stderr
         if stdout:
             run["stdout_tail"] = stdout[-2000:]
+        changed = self.framework_changed_block(previous_framework, chosen["framework"])
+        if changed is not None:
+            run["framework_changed"] = changed
+        run_record_created = not self.run_path(run_id).exists()
         written = self.write_run_record_once(run)
+        self.persist_framework_marker_after_run(written, run_record_created)
         # Rollup runs invalidate the cached existence check: a fresh tier=template
         # row may now exist for (judge, window_start). The next scan() will
         # rebuild the cache, but if execute_item is called multiple times in one
