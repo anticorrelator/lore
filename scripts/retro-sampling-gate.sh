@@ -28,12 +28,12 @@
 #      retro_sampling.routine_rate (settings.json; default 0). coin < rate → DUE;
 #      else → DEFERRED.
 #
-# Outcome is RECORDED either way; sampled-out is never silence:
-#   DUE      → a retro-run prompt surfaced to the operator (stderr). No queue row.
-#   DEFERRED → one row appended to the deferred-batch queue via
-#              retro-deferred-append.sh (outcome=deferred). The queue is the debt.
+# Outcome is RECORDED either way; an unattended terminal is never the only trace:
+#   DUE      → one outcome=due, disposition=unhandled row appended via the
+#              queue's sole writer, plus the existing operator prompt (stderr).
+#   DEFERRED → one outcome=deferred row appended through the same writer.
 #
-# The deferred-queue outcome vocabulary (done | deferred | skipped) is the
+# The queue outcome vocabulary (done | deferred | skipped | due) extends the
 # coordinate ledger's retro-outcome grammar, reused verbatim — not reinvented.
 #
 # stdout: a machine-readable decision line (or --json object) for callers/tests.
@@ -269,11 +269,20 @@ d = json.load(sys.stdin)
 print(d["outcome"], d["reason"], d["stratum"], d["coin"])
 ')"
 
-# --- Act on the decision: surface (DUE) or record to the queue (DEFERRED) ---
+# --- Act on the decision: durably record, then surface -----------------------
 COIN_FMT=$(printf '%s' "$DECISION" | python3 -c 'import json,sys; print("%.4f" % json.load(sys.stdin)["coin"])')
 RATE_FMT=$(printf '%s' "$DECISION" | python3 -c 'import json,sys; print("%.4f" % json.load(sys.stdin)["rate"])')
 
 if [[ "$OUTCOME" == "due" ]]; then
+  APPEND_ARGS=(--cycle-id "$SLUG" --event-type "$TERMINUS" --outcome due
+               --disposition unhandled --reason "$REASON"
+               --rate "$ROUTINE_RATE" --stratum "$STRATUM" --coin "$COIN")
+  [[ -n "$TEMPLATE_VERSION" ]] && APPEND_ARGS+=(--template-version "$TEMPLATE_VERSION")
+  [[ -n "$VERDICT" ]] && APPEND_ARGS+=(--verdict "$VERDICT")
+  [[ -n "$KDIR_OVERRIDE" ]] && APPEND_ARGS+=(--kdir "$KDIR_OVERRIDE")
+  if ! bash "$SCRIPT_DIR/retro-deferred-append.sh" "${APPEND_ARGS[@]}" >/dev/null; then
+    echo "[retro] Warning: DUE outcome recording failed for cycle '$SLUG'; the terminus remains complete and the retro decision remains DUE." >&2
+  fi
   if [[ "$REASON" == "always-stratum" ]]; then
     STRATA_LIST=$(printf '%s' "$DECISION" | python3 -c 'import json,sys; print(", ".join(json.load(sys.stdin)["strata"]))')
     echo "[retro] Retro is DUE for cycle '$SLUG' ($TERMINUS) — always-strata: $STRATA_LIST (rate-exempt)." >&2

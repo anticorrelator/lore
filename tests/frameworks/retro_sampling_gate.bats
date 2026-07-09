@@ -6,9 +6,9 @@
 # and impl-close protocol termini. It evaluates deterministic always-strata
 # (new template version, first-K of a routing pair, degraded/contested closure)
 # — rate-exempt — and, for routine cycles, a mechanical coin (hash of slug+date,
-# RNG-free) against retro_sampling.routine_rate. DUE surfaces a retro-run prompt;
-# DEFERRED appends one debt row to the queue via retro-deferred-append.sh (the
-# sole writer). Outcome vocabulary is the coordinate ledger's done|deferred|skipped.
+# RNG-free) against retro_sampling.routine_rate. DUE appends an unhandled outcome
+# and surfaces a retro-run prompt; DEFERRED appends one debt row through the same
+# sole writer. Outcome vocabulary extends by addition with due.
 
 REPO_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/../.." && pwd)"
 GATE="$REPO_DIR/scripts/retro-sampling-gate.sh"
@@ -60,7 +60,17 @@ queue_rows() { [ -f "$QUEUE" ] && wc -l < "$QUEUE" | tr -d ' ' || echo 0; }
   [ "$status" -eq 0 ]
   decision | grep -q "outcome=due"
   decision | grep -q "stratum=new_template_version"
-  [ "$(queue_rows)" -eq 0 ]   # DUE never queues
+  [ "$(queue_rows)" -eq 1 ]
+  run python3 -c '
+import json, sys
+r = json.loads(open(sys.argv[1]).read().strip())
+assert r["outcome"] == "due", r
+assert r["record_type"] == "outcome", r
+assert r["disposition"] == "unhandled", r
+assert r["reason"] == "always-stratum", r
+assert r["outcome_id"].startswith("retro-due-"), r
+' "$QUEUE"
+  [ "$status" -eq 0 ]
 }
 
 @test "degraded closure verdict (partial) forces DUE at rate 0" {
@@ -186,10 +196,30 @@ assert 0.0 <= r["coin"] < 1.0, r
   [ "$status" -eq 0 ]
 }
 
-@test "a DUE cycle writes no queue row (surfaced, not deferred)" {
+@test "a routine sample-hit DUE writes one unhandled queue outcome" {
+  run bash "$GATE" --terminus spec-finalize --slug feat-x \
+    --template-version notahash --routine-rate 1 --date 2026-07-06
+  [ "$status" -eq 0 ]
+  [ "$(queue_rows)" -eq 1 ]
+  run python3 -c '
+import json, sys
+r = json.loads(open(sys.argv[1]).read().strip())
+assert r["outcome"] == "due", r
+assert r["disposition"] == "unhandled", r
+assert r["reason"] == "coin", r
+assert r["stratum"] == "routine", r
+' "$QUEUE"
+  [ "$status" -eq 0 ]
+}
+
+@test "DUE queue append failure warns but preserves decision and exit 0" {
+  mkdir "$QUEUE"
   run bash "$GATE" --terminus spec-finalize --slug feat-x \
     --template-version bbbbbbbbbbbb --routine-rate 0 --date 2026-07-06
-  [ "$(queue_rows)" -eq 0 ]
+  [ "$status" -eq 0 ]
+  decision | grep -q "outcome=due"
+  echo "$output" | grep -q "Warning: DUE outcome recording failed"
+  echo "$output" | grep -q "terminus remains complete"
 }
 
 # --- Gate usage errors -------------------------------------------------------
@@ -218,6 +248,15 @@ assert 0.0 <= r["coin"] < 1.0, r
   [ "$status" -eq 0 ]
   run bash "$APPEND" --cycle-id c1 --event-type impl-close --outcome skipped --rate 0 --stratum degraded_closure --verdict none
   [ "$status" -eq 0 ]
+}
+
+@test "appender accepts due only with complete unhandled lifecycle evidence" {
+  run bash "$APPEND" --cycle-id c-due --event-type impl-close --outcome due \
+    --disposition unhandled --reason always-stratum --rate 0 --stratum degraded_closure --verdict partial
+  [ "$status" -eq 0 ]
+  run bash "$APPEND" --cycle-id c-bad --event-type impl-close --outcome due \
+    --rate 0 --stratum routine
+  [ "$status" -eq 1 ]
 }
 
 @test "appender rejects an out-of-vocabulary outcome" {

@@ -60,7 +60,7 @@ lore resolve
 
 Set `KNOWLEDGE_DIR` to result, `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
-**Where a cycle comes from.** The retro-sampling gate (`scripts/retro-sampling-gate.sh`, consulted at the spec-finalize and impl-close termini) decides per cycle whether a retro is *due now* (surfaced to the operator) or *deferred* to a batch. Sampled-out cycles are recorded — never silence — as rows in `$KNOWLEDGE_DIR/_scorecards/retro-deferred-queue.jsonl` (outcome vocabulary `done | deferred | skipped`, the coordinate ledger's grammar). A deferred-batch retro run resolves its cycles from that queue; the gate itself neither runs nor blocks `/retro`.
+**Where a cycle comes from.** The retro-sampling gate (`scripts/retro-sampling-gate.sh`, consulted at the spec-finalize and impl-close termini) decides per cycle whether a retro is *due now* or *deferred* to a batch. Both decisions survive the terminal in `$KNOWLEDGE_DIR/_scorecards/retro-deferred-queue.jsonl`: the additive outcome vocabulary is `done | deferred | skipped | due`. A DUE outcome row has a stable `outcome_id`, `record_type=outcome`, and `disposition=unhandled`. Adjudication never rewrites it; the queue's sole appender adds a correlated `record_type=disposition`, `disposition=handled` transition with an action from `dispatched | deferred | skipped`, the handling actor, and writer-stamped time. `lore retro queue` is the narrow substrate-native fold that makes every still-unhandled DUE pull-readable without a work-item-specific file lookup. The gate records and prompts, but it neither runs nor blocks `/retro`; cadence remains the user's decision.
 
 1. Resolve the argument to a canonical slug via `lore work resolve`:
    ```bash
@@ -80,6 +80,15 @@ Set `KNOWLEDGE_DIR` to result, `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 4. No match → ask user.
 
 Report: `[retro] Evaluating: <title> (<slug>) [archived]`
+
+5. **Best-effort DUE claim.** Once `SLUG` is resolved and this retro run is actually beginning, claim every still-unhandled DUE for that cycle as dispatched. The handling front delegates to the queue's sole physical appender; an earlier coordinator disposition is an idempotent no-op. This write is observability, never a precondition for the retro itself:
+   ```bash
+   if ! lore retro handle --cycle-id "$SLUG" \
+       --action dispatched --handled-by retro-lead; then
+     echo "[retro] Warning: DUE disposition claim failed for '$SLUG'; continuing with the retro run." >&2
+   fi
+   ```
+   A claim failure MUST warn and continue. It never changes the resolved work item, forces another retro run, or places `/retro` on a protocol terminus's critical path.
 
 ### Step 2: Gather Evidence
 

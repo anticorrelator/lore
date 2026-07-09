@@ -89,7 +89,14 @@ Then: close the session (or let protocol-terminus auto-close do it); **check con
 
 ### Retro
 
-A ledger step per completed cycle, never a coda. The seat follows context economics — you consume retro's outputs, never host its ingest — and the cadence follows the user. Sampled-out, deferred, and user-skipped cycles are recorded outcomes, not silence; always-strata stay deterministic and exempt from any rate, though the user may still skip explicitly — ledgered.
+A ledger step per completed cycle, never a coda. At the ordinary retro checkpoint, run `lore retro queue` and read its narrow substrate-native fold before deciding the ledger outcome. For every `outcome=due`, `disposition=unhandled` identity, make exactly one explicit cadence decision: dispatch `/retro`, defer it, or skip it. Record that decision through the handling front, keyed by the queue's `outcome_id`:
+
+```bash
+lore retro handle --outcome-id <id> \
+  --action <dispatched|deferred|skipped> --handled-by coordinate
+```
+
+The appender records the correlated `disposition=handled` transition with action, actor, and time; identical retries are no-ops and conflicting transitions fail loudly. Then ledger the corresponding `dispatched:<ref>`, `deferred (rate, stratum)`, or `skipped (user)` outcome. Reading the queue does not auto-run `/retro`, and a DUE does not put retro on the critical path: cadence follows the user. This is only the retro substrate's own fold, not the cross-substrate coordinator state projection owned by its sibling item.
 
 ## What escalates
 
@@ -112,7 +119,7 @@ Final board join; a terminal ledger row for every opened stream; batch retro run
        step status:    pending | in-flight | blocked-on:<ref> | blocked-on-input | done | dropped
        step verdict:   full | partial | none        (anchor-relative, same vocabulary as impl closure)
        gate mechanism: hold | flag | notify
-       retro outcome:  done | deferred (rate, stratum) | skipped (user) | dispatched:<ref> -->
+       retro outcome:  due (unhandled) | done | deferred (rate, stratum) | skipped (user) | dispatched:<ref> -->
 
 ## Verbs this role wants
 

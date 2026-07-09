@@ -274,11 +274,14 @@ RC=$?
 assert_exit_nonzero "lore retro (no subcommand) exits non-zero" "$RC"
 assert_contains "lore retro usage lists export" "$RETRO_OUT" "export"
 assert_contains "lore retro usage lists backfill" "$RETRO_OUT" "backfill"
+assert_contains "lore retro usage lists queue" "$RETRO_OUT" "queue"
+assert_contains "lore retro usage lists handle" "$RETRO_OUT" "handle"
 # `lore retro --help` should print usage and exit 0.
 HELP_OUT=$(bash "$CLI" retro --help 2>&1)
 RC=$?
 assert_exit_zero "lore retro --help exits 0" "$RC"
 assert_contains "lore retro --help lists export" "$HELP_OUT" "export"
+assert_contains "lore retro --help lists queue" "$HELP_OUT" "queue"
 # `lore retro export --help` should still dispatch to the export script (unchanged).
 EXPORT_HELP=$(bash "$CLI" retro export --help 2>&1)
 assert_contains "lore retro export --help still dispatches" "$EXPORT_HELP" "retro export"
@@ -287,6 +290,10 @@ UNKNOWN=$(bash "$CLI" retro nosuchcmd 2>&1)
 RC=$?
 assert_exit_nonzero "lore retro nosuchcmd exits non-zero" "$RC"
 assert_contains "unknown retro subcommand error" "$UNKNOWN" "unknown retro subcommand"
+
+# New substrate-native operations remain thin CLI dispatches.
+assert_contains "cli/lore routes queue through retro-queue.sh" "$(cat "$CLI")" 'retro-queue.sh" queue'
+assert_contains "cli/lore routes handle through retro-queue.sh" "$(cat "$CLI")" 'retro-queue.sh" handle'
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
