@@ -59,7 +59,7 @@ One block per tripped gate × signature combination:
 [retro] pipeline-degraded: judge liveness (<signature>)
   gate=<gate-name> <metric>=<value> (threshold <pct>)
   sample=<N> window=<start>..<end>
-  see: $KDIR/_calibration/<gate>/calibration-log.jsonl (and $KDIR/_settlement/queue.json for zero-rows case)
+  see: $KDIR/_settlement/runs/*.json (and $KDIR/_settlement/queue.json for zero-rows case)
 ```
 
 <!-- "Calibration state surface" tripped-block removed: that check is demoted to a silent per-row
@@ -70,6 +70,6 @@ One block per tripped gate × signature combination:
 
 ```
 [retro] pipeline-degraded: consumer-contradiction routing
-  routed=<N>  verdicts_landed=<M>  realization=<pct> (threshold 10% at N≥10)
+  produced=<N>  verdicts_landed=<M>  realization=<pct> (threshold 10% at N≥10)
   see: $KDIR/_work/*/consumption-contradictions.jsonl and rows.jsonl
 ```

@@ -202,6 +202,10 @@ esac
 # verified/rejected are set by consumption-contradiction-update-status.sh after
 # a correctness-gate verdict; the append writer should normally see pending.
 # Legacy values (accepted|declined|remediated) are no longer accepted.
+# Cross-substrate contract: these exact spellings are keyed on by both
+# settlement-processor.py (sidecar sweep enqueues only status:pending rows)
+# and /retro Step 2b.7 (reader trio pending|verified|rejected). Changing the
+# initial-state spelling here silently breaks both readers.
 if [[ -z "$STATUS" ]]; then
   STATUS="pending"
 fi

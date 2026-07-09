@@ -495,7 +495,7 @@ fi
 CAPTURED_SHA=$(captured_at_sha)
 _LORE_BLOCKERS="$BLOCKERS" python3 - "$ITEM_DIR" "$SLUG" "$TASKS_COMPLETED" \
   "$LEAD_TV" "$WORKER_TV" "$ADVISOR_TV" "$CAPTURED_SHA" "$RUN_STARTED_AT" <<'PYEOF'
-import json, os, re, sys
+import json, os, sys
 item_dir, slug, tasks_completed, lead_tv, worker_tv, advisor_tv, sha, started = sys.argv[1:9]
 
 tier2_ids = []
@@ -530,12 +530,22 @@ if os.path.isfile(promoted_path):
             if entry:
                 tier3_ids.append(entry)
 
+# Advisor consultations = filed transcript records handled by an advisor
+# (handler:agent). Execution-log "Consultations:" header lines include
+# "Consultations: none" boilerplate and overcount.
 consultations = 0
-log_path = os.path.join(item_dir, "execution-log.md")
-if os.path.isfile(log_path):
-    with open(log_path, encoding="utf-8") as f:
+transcript_path = os.path.join(item_dir, "consultation-transcript.jsonl")
+if os.path.isfile(transcript_path):
+    with open(transcript_path, encoding="utf-8") as f:
         for line in f:
-            if re.match(r'^\s*[*_]*(Advisor consultations|Consultations):', line.strip()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("handler") == "agent":
                 consultations += 1
 
 blockers = [b for b in os.environ.get("_LORE_BLOCKERS", "").splitlines() if b.strip()]

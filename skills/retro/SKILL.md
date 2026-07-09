@@ -132,18 +132,18 @@ Aggregate channel-shopping signals per role × slot over the last 5 retro cycles
 
 ### 2b.7: Consumption-contradiction evidence
 
-**Invariant — canonical contradiction vocabulary.** The canonical lifecycle trio is `routed | verified | rejected` and future edits to this section MUST preserve it verbatim:
+**Invariant — canonical contradiction vocabulary.** The canonical lifecycle trio is `pending | verified | rejected` and future edits to this section MUST keep it in lockstep with the write-side scripts:
 
-- The lifecycle `status` field for a consumption-contradiction row is exactly the trio `routed | verified | rejected` — no other value is canonical.
-- The `dispatch_status` field is orthogonal and takes only the literal `routed`, set when `consumption-contradiction-append.sh` priority-dispatches to `lore audit`. `status: routed` (lifecycle, "awaiting verdict") and `dispatch_status: routed` (dispatch, "priority-audit was triggered") are independent — do not collapse them.
-- Drift = any row whose `status` is not in the `routed | verified | rejected` trio (e.g. legacy producer enums like `pending`, `accepted`, `declined`, `remediated` leaking into the consumer side); detect with `jq -r '.status' $KDIR/_work/*/consumption-contradictions.jsonl | sort -u` and assert the output is a subset of `{routed, verified, rejected}`.
-- Any value outside `routed | verified | rejected` silently silences the Step 3.0 `contradiction_verification_rate` gate (numerator counts only `verified`; denominator counts only `verified | rejected`) even when producer enums are correct, so prose changes that paraphrase the trio's spelling or order break the read-side invariant the gate depends on.
+- The lifecycle `status` field for a consumption-contradiction row is exactly the trio `pending | verified | rejected` — no other value is canonical. `pending` is the initial awaiting-verdict state stamped by `consumption-contradiction-append.sh`; `verified | rejected` are terminal states set only by `consumption-contradiction-update-status.sh` after a correctness-gate verdict.
+- The spelling is load-bearing on both sides: the settlement processor's sidecar sweep enqueues only `status: pending` rows, and the Step 3.0 `contradiction_verification_rate` gate counts only `verified` (numerator) and `verified | rejected` (denominator). A reader that treats `pending` as drift — as this section did before 2026-07-09, when it named a `routed` state no writer ever produced — marks every healthy row broken and reads a live channel as silent.
+- There is no `dispatch_status` field and no append-time priority-dispatch. Rows reach settlement when the queue processor sweeps pending sidecar rows into `_settlement/queue.json`; routing health is measured by Step 3.8's Consumer-contradiction routing check from produced-vs-verdict counts, not from a per-row dispatch stamp.
+- Drift = any row whose `status` is outside the trio (e.g. enums from retired designs — `routed`, `accepted`, `declined`, `remediated` — leaking back in); detect with `jq -r '.status' $KDIR/_work/*/consumption-contradictions.jsonl | sort -u` and assert the output is a subset of `{pending, verified, rejected}`.
 
 New evidence class introduced by the consumer-contradiction-channel substrate. Consumer contradictions are **observational** signals — a reader (worker, spec-lead, implement-lead) prefetched a commons entry and observed it is false in the context of their current work. They are a distinct evidence class from the adjudicative three-judge pipeline.
 
-**Enumerate `$KDIR/_work/<slug>/consumption-contradictions.jsonl`** across work items with activity in the retro window. Each row carries: `contradiction_id` (slug-form identifier unique per work item), `claim_id` (commons-entry claim being contradicted), `corrected_entry_path` (the entry the contradiction targets), `template_id` / `template_version` (the template that produced the contradicted entry, for attribution), `status` — `routed | verified | rejected` (lifecycle state from correctness-gate audit), `verified_by_verdict_id` (present when `status=verified`; the settlement record id), `dispatch_status` — `routed` when `consumption-contradiction-append.sh` priority-dispatched to `lore audit`, `captured_at_sha`, `observed_at`.
+**Enumerate `$KDIR/_work/<slug>/consumption-contradictions.jsonl`** across work items with activity in the retro window. Each row carries: `contradiction_id` (slug-form identifier unique per work item), `prefetched_commons_entry.knowledge_path` (the entry the contradiction targets), `claim_payload` (`claim_id`, `claim_text`, the grounding trio `file` / `line_range` / `exact_snippet`, and `falsifier`), `template_version` (when the producer carried one, for attribution), `status` — `pending | verified | rejected` (lifecycle state; flipped by `consumption-contradiction-update-status.sh`, which also stamps `settled_at` and, when known, `settled_by_run_id`), `captured_at_sha`, `created_at`.
 
-Count rows by status: `routed`, `verified`, `rejected`. Report shape: `Consumption contradictions: N total (R routed to audit, V verified, J rejected)` plus a `pending verdict (routed, no verdict yet): <P>` indented line. The `verified` count feeds Step 3.0 `contradiction_verification_rate` and Step 3.8 consumer-contradiction routing health. The `routed` set is already priority-dispatched to `lore audit` by `consumption-contradiction-append.sh` — a distinct channel from the proactive `commons` settlement audit enqueued at promotion time.
+Count rows by status: `pending`, `verified`, `rejected`. Report shape: `Consumption contradictions: N total (P pending verdict, V verified, J rejected)`. The `verified` count feeds Step 3.0 `contradiction_verification_rate` and Step 3.8 consumer-contradiction routing health. Pending rows are already in settlement intake — the queue processor sweeps them into `_settlement/queue.json` automatically — a distinct channel from the proactive `commons` settlement audit enqueued at promotion time.
 
 ### 2c–2e: Logs
 
@@ -173,7 +173,7 @@ Three signals:
 
 Annotation-only: wrong-path explorations prevented, first-attempt accuracy gains. Full-resolution: file reads replaced (~500-3000 tokens/file).
 
-Emit a one-block `[retro] Evidence gathered:` report covering worker observations (N tasks), context blocks (N phases, M/K resolved), surfaced concerns (N entries, M addressed / K pending), consumption contradictions (N total, R routed, V verified, J rejected), sessions (N entries), retrieval/friction events (N each), and a token-savings estimate (~Nk). When review events fell in the window (Step 2c.6), add `review gates: N released (median dwell D), P still gated` — omit the clause entirely when none did, per the silence invariant.
+Emit a one-block `[retro] Evidence gathered:` report covering worker observations (N tasks), context blocks (N phases, M/K resolved), surfaced concerns (N entries, M addressed / K pending), consumption contradictions (N total, P pending, V verified, J rejected), sessions (N entries), retrieval/friction events (N each), and a token-savings estimate (~Nk). When review events fell in the window (Step 2c.6), add `review gates: N released (median dwell D), P still gated` — omit the clause entirely when none did, per the silence invariant.
 
 **Historical-unaudited commons coverage line.** Also include one line: `historical-unaudited (outside settlement coverage): <H>` — the count of commons entries with `confidence: unaudited` frontmatter that have **no** corresponding `commons` queue entry in `$KNOWLEDGE_DIR/_settlement/queue.json` (never enqueued by the forward loop). This is the honesty companion to Step 3.8's forward-settlement coverage ratio: the ratio measures forward coverage only, so this standalone count keeps the operator from reading a clean ratio as whole-store coverage. It is evidence context, not a health-check trip — these entries are out of scope for the forward loop (Design Decision D6) and are surfaced here precisely so the silent-when-green Step 3.8 check need not break its invariant to report them.
 
@@ -680,22 +680,22 @@ Aggregate (cluster-wide totals):
 
 **Migration path.** Operators previously triggered by this check should read Grounding failure rate's per-reason breakdown for the same diagnostic signal. The `tuning signal` line ("consider enabling token-shingle fuzzy tier") remains valid but moves out of the retro pipeline-degraded surface.
 
-### Check: Judge liveness (G1 disposition: redefined per-gate against calibration logs)
+### Check: Judge liveness (disposition: redirected per-gate to settlement run envelopes)
 
-**What it measures.** Per-gate verdict distribution and recent-run liveness, read from each gate's calibration log at `_calibration/<gate>/calibration-log.jsonl`. The post-Phase-2 substrate forks the correctness-gate into three kind-specialized gates (one per kind), each with its own calibration log; this check evaluates liveness per-gate.
+**What it measures.** Per-gate verdict distribution and recent-run liveness, read from the per-run verdict envelopes in `_settlement/runs/*.json`. The post-Phase-2 substrate forks the correctness-gate into three kind-specialized gates (one per kind); this check evaluates liveness per-gate over each gate's completed runs in the window.
 
-**G1 disposition (substrate redirect).** Replaces the older `rows.jsonl` + future-trigger-telemetry pair with a single read of each gate's `_calibration/<gate>/calibration-log.jsonl`. The calibration log carries one row per gate run with the verdict and timestamp; reading per-gate logs both localizes the signal (which gate is degraded) and aligns the liveness check with the calibrated write-gate model (calibration-log is the operational truth for each gate's recent activity).
+**Read-source disposition (supersedes the G1 calibration-log redirect).** G1 pointed this check at `_calibration/<gate>/calibration-log.jsonl` on the theory that the calibration log was the operational truth for each gate's recent activity. Field evidence falsified that theory: the calibration log records fixture-calibration ceremonies — roughly one row per `lore calibrate` run, on the order of ten rows lifetime — not per-verdict activity, so it sits legitimately empty on healthy active windows. Eight retro cycles between 2026-06-10 and 2026-07-07 each found zero in-window calibration rows while hundreds of settlement runs completed in the same windows, and each had to hand-override a false `pipeline-degraded`. Operational truth is the verdict envelope every completed run writes to `_settlement/runs/*.json`; read liveness there. The calibration log remains what it actually is — the record of calibration ceremonies — and carries no liveness signal.
 
-**Three signatures (evaluated per gate):**
+**Three signatures (evaluated per gate, over the gate's completed runs in the window):**
 
-1. **Gate broken** — a gate emits `unverified` (or the gate-specific equivalent rejection verdict) on >80% of its calibration-log entries in the window.
-2. **Auditor degraded** — for gates that admit an explicit-silence verdict (`reverse-auditor`-class gates), the silence rate exceeds >90% of entries in the window.
-3. **Zero-rows-despite-routing** — any gate with **zero** entries in its calibration-log for the retro window *while* the settlement queue (`_settlement/queue.json`) shows items routed to that gate during the same window.
+1. **Gate broken** — a gate emits `unverified` (or the gate-specific equivalent rejection verdict) on >80% of its completed runs in the window.
+2. **Auditor degraded** — for gates that admit an explicit-silence verdict (`reverse-auditor`-class gates), the silence rate exceeds >90% of runs in the window.
+3. **Zero-rows-despite-routing** — any gate with **zero** completed runs in `_settlement/runs/` for the retro window *while* the settlement queue (`_settlement/queue.json`) shows items routed to that gate during the same window. The signature keeps its historical name; the "rows" it counts are run envelopes.
 
 **Thresholds (per gate).**
-- `gate_unverified_rate > 0.80` over the window → gate-broken
-- `auditor_silence_rate > 0.90` over the window → auditor-degraded
-- any gate with `calibration_log_rows_in_window == 0 AND settlement_queue_items_routed > 0` → zero-rows-despite-routing
+- `gate_unverified_rate > 0.80` over the window's completed runs → gate-broken
+- `auditor_silence_rate > 0.90` over the window's completed runs → auditor-degraded
+- any gate with `completed_runs_in_window == 0 AND settlement_queue_items_routed > 0` → zero-rows-despite-routing
 
 **When green: no prose.**
 
@@ -717,28 +717,28 @@ Genuine judge breakage (a gate emitting its rejection verdict on > 80% of runs, 
 
 ### Check: Consumer-contradiction routing
 
-**NEW check** introduced by the consumer-contradiction-channel substrate. Verifies priority-routing is actually producing verdicts.
+**NEW check** introduced by the consumer-contradiction-channel substrate. Verifies the channel is actually producing verdicts.
 
-**What it measures.** Of the consumption-contradiction rows in the retro window with `dispatch_status: routed`, the fraction with a verdict landed in `rows.jsonl` (kind == "consumption-contradiction" with `status: verified` or `status: rejected`).
+**What it measures.** Of the consumption-contradiction rows produced in the retro window (sidecar rows by `created_at`), the fraction with a verdict landed in `rows.jsonl` (kind == "consumption-contradiction" with `status: verified` or `status: rejected`).
 
-**Why it matters.** `consumption-contradiction-append.sh` priority-dispatches rows to `lore audit` bypassing probabilistic sampling. If routed rows never produce verdicts, the priority-routing path is broken (analogous to the zero-rows-despite-triggers Judge liveness signature).
+**Why it matters.** Produced rows enter settlement through the queue processor's sidecar sweep — `status: pending` intake, no append-time dispatch. If produced rows never reach verdicts, the channel is broken somewhere between sweep and gate (analogous to the zero-rows-despite-routing Judge liveness signature).
 
 **Inputs.**
-- `$KDIR/_work/*/consumption-contradictions.jsonl` — all rows in window, group by `dispatch_status`.
+- `$KDIR/_work/*/consumption-contradictions.jsonl` — rows with `created_at` in window.
 - `$KDIR/_scorecards/rows.jsonl` — rows with `kind == "consumption-contradiction"` for the window.
 
 **Computation.**
 ```
-routed = |{contradictions in window with dispatch_status: routed}|
+produced = |{contradiction rows created in window}|
 verdicts = |{kind==consumption-contradiction rows with status ∈ {verified, rejected} in window}|
 
-if routed ≥ 10 and verdicts == 0:
-    check trips — priority routing appears broken
-if routed ≥ 10 and (verdicts / routed) < 0.10:
-    check trips — routing nominally works but almost nothing is being adjudicated
+if produced ≥ 10 and verdicts == 0:
+    check trips — the sweep-to-verdict path appears broken
+if produced ≥ 10 and (verdicts / produced) < 0.10:
+    check trips — intake nominally works but almost nothing is being adjudicated
 ```
 
-**Threshold.** `routed ≥ 10 AND (verdicts / routed) < 0.10` trips.
+**Threshold.** `produced ≥ 10 AND (verdicts / produced) < 0.10` trips.
 
 **When green: no prose.**
 
