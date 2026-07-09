@@ -916,12 +916,36 @@ mirror_event_vocab() {
   [ "$(printf '%s' "$out" | jq -r '.next_cursor' | grep -c '^[0-9]\+$')" -eq 1 ]
 }
 
+@test "wait: --request-id ignores a prior same-slug terminal and matches the declared session" {
+  write_instance inst-a feature-x
+  printf '%s\n' '{"event":"closed","request_id":"prior-rid","slug":"feature-x"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  ( sleep 1
+    echo '{"event":"closed","request_id":"next-rid","slug":"feature-x"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  local out code
+  out="$(bash "$WAIT" feature-x --request-id next-rid --since 0 --timeout 10 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  wait
+  [ "$code" -eq 0 ]
+  [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("event")) | .request_id] | join(",")')" = "next-rid" ]
+}
+
 @test "wait: no live instance and no matching row exits 3 (session gone) with a resume cursor" {
   : > "$TEST_KDIR/_sessions/events.jsonl"
   run bash "$WAIT" ghost --since 0 --timeout 30 --kdir "$TEST_KDIR"
   [ "$status" -eq 3 ]
   [[ "$output" == *"session gone"* ]]        # stderr diagnostic (run merges streams)
   [[ "$output" == *'"next_cursor"'* ]]       # cursor row on stdout
+}
+
+@test "wait: a terminal landing after liveness-miss but within grace wins over session-gone" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"     # no live instance: grace starts immediately
+  ( sleep 1
+    echo '{"event":"closed","request_id":"r1","slug":"teardown-race"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  local out code
+  out="$(bash "$WAIT" teardown-race --since 0 --timeout 30 --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  wait
+  [ "$code" -eq 0 ]
+  [ "$(printf '%s\n' "$out" | jq -rs 'map(select(has("event")).event) | join(",")')" = "closed" ]
+  [ "$(printf '%s\n' "$out" | jq -rs 'map(select(has("next_cursor")).next_cursor) | length')" -eq 1 ]
 }
 
 @test "wait: a matching row already present with no live instance still matches (exit 0)" {

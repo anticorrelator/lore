@@ -7,7 +7,8 @@
 #
 # Usage:
 #   lore session wait <slug> [--until <events>] [--since <cursor>]
-#                            [--timeout <sec>] [--ttl <sec>] [--kdir <path>] [--json]
+#                            [--request-id <id>] [--timeout <sec>] [--ttl <sec>]
+#                            [--kdir <path>] [--json]
 #
 # Options:
 #   --until <events>  Comma-separated event names to wake on (default:
@@ -19,15 +20,20 @@
 #                     the journal's current end ("wake on what happens next").
 #                     Treat the value as opaque — pass back a cursor this verb or
 #                     `session events` reported, never one you computed.
+#   --request-id <id> Also require an exact request_id match. Use this when a slug
+#                     can be reused across sessions so a late row from the prior
+#                     session cannot satisfy the new wait. Omit it to preserve
+#                     slug-and-event matching; no request-id guard is inferred.
 #   --timeout <sec>   How long to wait before giving up (default: 60).
 #   --ttl <sec>       Liveness window for the owning-instance check (default: 30).
 #   --kdir <path>     Knowledge-store override (test isolation).
 #   --json            Emit one result object instead of plain rows (see below).
 #
-# A row matches when its slug equals <slug> exactly AND its event is in the
-# until-set. Slug matching is exact string equality on purpose: a worker session
-# runs under a derived slug `<slug>--w<n>`, so matching by substring would wake a
-# parent wait on its own worker's close.
+# A row matches when its slug equals <slug> exactly, its event is in the until-set,
+# and — only when --request-id is supplied — its request_id equals that value.
+# Slug matching is exact string equality on purpose: a worker session runs under
+# a derived slug `<slug>--w<n>`, so matching by substring would wake a parent wait
+# on its own worker's close.
 #
 # Output (plain):
 #   On a match: the matched event row, then a final {"next_cursor": N} row — both
@@ -46,7 +52,9 @@
 #   1  error (bad args, unknown --until event, missing store)
 #   2  timed out before any match — the expected re-arm branch for a watcher, not a
 #      failure: re-invoke with --since <emitted cursor>
-#   3  session gone: no live instance hosts <slug> and no matching row arrived.
+#   3  session gone: no live instance hosts <slug> and no matching row arrived
+#      during a two-second teardown grace followed by one final journal read.
+#      Journal rows are authoritative; liveness only starts this grace check.
 #      Suppressed when the until-set names a queue/pre-spawn event, since an
 #      unhosted slug is the normal starting state there. A crashed instance can be
 #      adopted by a replacement (which journals `recovered`), so a session-gone in
@@ -74,8 +82,11 @@ SINCE=""
 SINCE_SET=0
 TIMEOUT=60
 TTL=30
+SESSION_GONE_GRACE_SECONDS=2
 KDIR_OVERRIDE=""
 JSON_MODE=0
+REQUEST_ID=""
+REQUEST_ID_SET=0
 
 # Mirror of the sole writer's event vocabulary (session-event-append.sh's
 # validation case-arm). tests/session-verbs.bats cross-checks this list against
@@ -92,14 +103,15 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --until) UNTIL="$2"; shift 2 ;;
     --since) SINCE="$2"; SINCE_SET=1; shift 2 ;;
+    --request-id) REQUEST_ID="$2"; REQUEST_ID_SET=1; shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --ttl) TTL="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
     --json) JSON_MODE=1; shift ;;
-    -h|--help) sed -n '2,64p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,72p' "$0"; exit 0 ;;
     --*)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-wait.sh <slug> [--until <events>] [--since <cursor>] [--timeout <sec>] [--ttl <sec>] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-wait.sh <slug> [--until <events>] [--since <cursor>] [--request-id <id>] [--timeout <sec>] [--ttl <sec>] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
     *)
@@ -138,6 +150,9 @@ if [[ $SINCE_SET -eq 1 ]]; then
   case "$SINCE" in
     ''|*[!0-9]*) fail "invalid --since: '$SINCE' (must be a non-negative byte offset)" ;;
   esac
+fi
+if [[ $REQUEST_ID_SET -eq 1 && -z "$REQUEST_ID" ]]; then
+  fail "invalid --request-id: value must be non-empty"
 fi
 
 # --- Validate --until against the writer's vocabulary; build the until-set ---
@@ -185,11 +200,17 @@ read_from() {
   bash "$EVENTS_SH" --json --since "$1" --kdir "$KNOWLEDGE_DIR"
 }
 
-# First event in a read whose slug equals SLUG exactly and whose event is in the
-# until-set, or empty output. jq string equality — never substring.
+# First event in a read whose slug equals SLUG exactly, whose event is in the
+# until-set, and whose request_id equals REQUEST_ID when the caller supplied that
+# guard; or empty output. jq string equality — never substring or inferred guard.
 first_match() {
   printf '%s' "$1" | jq -c --arg slug "$SLUG" --argjson until "$UNTIL_JSON" \
-    'first(.events[] | select(.slug == $slug and (.event as $e | $until | index($e))))' 2>/dev/null || true
+    --arg request_id "$REQUEST_ID" --argjson request_id_set "$REQUEST_ID_SET" \
+    'first(.events[] | select(
+      .slug == $slug
+      and (.event as $e | $until | index($e))
+      and ($request_id_set == 0 or .request_id? == $request_id)
+    ))' 2>/dev/null || true
 }
 
 emit_matched() {
@@ -239,8 +260,10 @@ while :; do
   if [[ $LIVENESS_ENABLED -eq 1 ]]; then
     OWNER="$(resolve_session_owner "$SESSIONS_DIR/instances" "$SLUG" "$TTL")"
     if [[ -z "$OWNER" ]]; then
-      # One final read closes the race where the terminal row lands between the
-      # last read and this liveness check.
+      # Registry removal precedes the terminal journal append during teardown.
+      # Liveness is therefore only a hint: give the authoritative journal one
+      # short grace, then read exactly once more before declaring session-gone.
+      sleep "$SESSION_GONE_GRACE_SECONDS"
       RESULT="$(read_from "$CURSOR")" || fail "session-events read failed"
       MATCH="$(first_match "$RESULT")"
       NC="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"

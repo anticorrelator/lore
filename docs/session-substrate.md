@@ -670,11 +670,15 @@ rather than growing this contract.**
   front on the journal: it polls `session events` from a cursor and returns when a
   row matches `<slug>` exactly (never by substring, so a worker's `<slug>--w<n>`
   close never wakes a parent wait) and an event in its `--until` set (default
-  `closed,close_failed`, the close-outcome pair). Exit codes carry the outcome —
-  0 matched, 2 timed out, 3 session-gone — and every non-error exit hands back a
-  resume cursor so a woken consumer re-arms with `--since` instead of replaying.
-  Session-gone reads the `close_requested`-with-no-terminal bound above (once no
-  live instance hosts the slug the outcome will never arrive); it is suppressed
+  `closed,close_failed`, the close-outcome pair). Callers watching a reused slug
+  can add `--request-id <id>` to require that exact row correlation; when omitted,
+  matching remains slug-and-event only, with no inferred guard. Exit codes carry
+  the outcome — 0 matched, 2 timed out, 3 session-gone — and every non-error exit
+  hands back a resume cursor so a woken consumer re-arms with `--since` instead of
+  replaying. Instance liveness is only a session-gone hint because registry
+  removal can precede the terminal journal append: after liveness disappears,
+  `wait` gives the journal a two-second grace and reads once more before returning
+  3. The journal row wins if it lands in that window. Session-gone is suppressed
   when the `--until` set names a queue/pre-spawn event, where an unhosted slug is
   the normal starting state. Read-side only — it adds no writer, no event, and no
   TUI surface. See its header for the race-free close-then-wait idiom.

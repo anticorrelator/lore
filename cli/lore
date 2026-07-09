@@ -530,7 +530,9 @@ Verbs:
   peek      Snapshot a live session's rendered screen (<slug>) plus its
             readiness classification; --raw for the ANSI variant
   wait      Block until a journal event lands for a session (<slug>), waking on
-            closed/close_failed by default; hands back a resume cursor on stdout
+            closed/close_failed by default; --request-id narrows same-slug reuse,
+            and session-gone waits through teardown grace before returning a
+            resume cursor on stdout
 
 Options:
   --help, -h    Show this help
