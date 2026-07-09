@@ -110,7 +110,8 @@ func TestScrollOffsetClampedToDocument(t *testing.T) {
 	// An absurd offset must clamp to the document size on the next output.
 	m.scrollOffset = 10_000_000
 	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: []byte("x")})
-	maxOff := m.totalLines() - 24
+	// Scrollback reserves one of the 24 rows for its position indicator.
+	maxOff := maxScrollOffset(m.totalLines(), 24)
 	if m.scrollOffset != maxOff {
 		t.Fatalf("expected scrollOffset clamped to %d, got %d", maxOff, m.scrollOffset)
 	}

@@ -211,3 +211,25 @@ func tmuxPanePID(name string) (int, error) {
 	}
 	return pid, nil
 }
+
+// captureTmuxPaneHistory returns the pane's retained history plus its visible
+// screen as display rows, preserving ANSI attributes. A tmux attach client
+// redraws a fixed terminal screen, so the outer libghostty emulator cannot
+// reconstruct tmux's history from that redraw stream; capture-pane is the
+// authoritative read side for scrollback on a tmux-hosted session.
+func captureTmuxPaneHistory(name string) ([]string, error) {
+	if name == "" {
+		return nil, fmt.Errorf("capture tmux history: empty session name")
+	}
+	out, err := exec.Command(tmuxBinary, "-L", tmuxServerLabel,
+		"capture-pane", "-p", "-e", "-S", "-", "-t", name).Output()
+	if err != nil {
+		return nil, fmt.Errorf("tmux capture-pane: %w", err)
+	}
+	text := strings.ReplaceAll(string(out), "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines, nil
+}

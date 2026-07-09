@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -145,6 +147,54 @@ func TestSessionsDetailStatusBarKeybindContract(t *testing.T) {
 		nm, _ := updateModel(t, sessionsDetailModel(t), press('h'))
 		if nm.focusedPanel != panelLeft {
 			t.Error("h on the card should focus back to the list")
+		}
+	})
+}
+
+// TestSessionsTerminalScrollbackContract pins the terminal-history contract
+// through the first-class sessions workspace. The work view already exercises
+// the same SessionPanelModel, but the sessions view has its own list identity,
+// attachment transition, and panel callbacks — a routing regression here can
+// leave the shared backend healthy while scrollback appears dead to the user.
+func TestSessionsTerminalScrollbackContract(t *testing.T) {
+	m := sessionsContractModel(t)
+	m, _ = updateModel(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	var out strings.Builder
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&out, "session output line %02d\r\n", i)
+	}
+	m, _ = updateModel(t, m, work.TerminalOutputMsg{Slug: "impl-foo", Data: []byte(out.String())})
+
+	// Enter attaches the selected local session and focuses its terminal.
+	_, cmd := updateModel(t, m, press(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("Enter should emit a session selection")
+	}
+	m, _ = updateModel(t, m, cmd())
+	if !m.terminalMode || m.focusedPanel != panelRight {
+		t.Fatalf("session should be attached before scrollback: terminal=%v focus=%v", m.terminalMode, m.focusedPanel)
+	}
+
+	t.Run("Shift+PgUp", func(t *testing.T) {
+		nm, _ := updateModel(t, m, press(tea.KeyPgUp, tea.ModShift))
+		panel, ok := nm.currentSessionsPanel()
+		if !ok {
+			t.Fatal("attached session panel disappeared")
+		}
+		if !strings.Contains(stripANSI(panel.View()), "-- scrollback (") {
+			t.Fatal("Shift+PgUp did not enter session scrollback")
+		}
+	})
+
+	t.Run("mouse wheel", func(t *testing.T) {
+		nm, _ := updateModel(t, m, tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: 90, Y: 20})
+		panel, ok := nm.currentSessionsPanel()
+		if !ok {
+			t.Fatal("attached session panel disappeared")
+		}
+		if !strings.Contains(stripANSI(panel.View()), "-- scrollback (") {
+			t.Fatal("wheel up over sessions terminal did not enter scrollback")
 		}
 	})
 }

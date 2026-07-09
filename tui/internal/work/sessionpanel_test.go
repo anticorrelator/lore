@@ -98,6 +98,70 @@ func TestOutputClearsNeedsInput(t *testing.T) {
 	}
 }
 
+func TestTmuxHostedScrollbackUsesCapturedPaneHistory(t *testing.T) {
+	m := NewSessionPanelModel("test")
+	m.height = 4
+	m.tmuxName = "lore-test"
+
+	m, cmd := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if cmd == nil || !m.tmuxCapturePending {
+		t.Fatal("wheel up should schedule one tmux history capture")
+	}
+	if m.scrollOffset != 3 {
+		t.Fatalf("scroll offset = %d, want 3", m.scrollOffset)
+	}
+	if got := m.View(); !strings.Contains(got, "Loading session history") {
+		t.Fatalf("pending capture should render a loading state, got %q", got)
+	}
+
+	lines := []string{"history-0", "history-1", "history-2", "history-3", "screen-0", "screen-1", "screen-2", "screen-3"}
+	m, _ = m.Update(tmuxScrollbackCapturedMsg{Slug: "test", TmuxName: "lore-test", Lines: lines})
+	if m.tmuxCapturePending {
+		t.Fatal("capture result should clear pending state")
+	}
+	view := m.View()
+	if !strings.Contains(view, "history-2") || !strings.Contains(view, "-- scrollback (3 lines above) --") {
+		t.Fatalf("captured history did not back the scrollback view:\n%s", view)
+	}
+
+	m, cmd = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if cmd != nil {
+		t.Fatal("scrolling an existing snapshot should not spawn another capture")
+	}
+	if m.scrollOffset != 5 { // clamped against 8 rows - 3 content rows
+		t.Fatalf("snapshot-local scroll should clamp at history top, offset=%d want=5", m.scrollOffset)
+	}
+
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd, Mod: tea.ModShift})
+	if m.scrollOffset != 0 || len(m.tmuxHistory) != 0 {
+		t.Fatalf("Shift+End should clear the snapshot at live view: offset=%d lines=%d", m.scrollOffset, len(m.tmuxHistory))
+	}
+}
+
+func TestTmuxHostedScrollbackHomeAndEnd(t *testing.T) {
+	m := NewSessionPanelModel("test")
+	m.height = 4
+	m.tmuxName = "lore-test"
+
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyHome, Mod: tea.ModShift})
+	if cmd == nil {
+		t.Fatal("Shift+Home should request tmux history")
+	}
+	lines := []string{"oldest", "h1", "h2", "h3", "screen-0", "screen-1", "screen-2", "screen-3"}
+	m, _ = m.Update(tmuxScrollbackCapturedMsg{Slug: "test", TmuxName: "lore-test", Lines: lines})
+	if m.scrollOffset != 5 {
+		t.Fatalf("Shift+Home should clamp to history top, offset=%d want=5", m.scrollOffset)
+	}
+	if got := m.View(); !strings.Contains(got, "oldest") {
+		t.Fatalf("history top should show oldest retained row:\n%s", got)
+	}
+
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd, Mod: tea.ModShift})
+	if m.scrollOffset != 0 || len(m.tmuxHistory) != 0 {
+		t.Fatalf("Shift+End should restore live view: offset=%d lines=%d", m.scrollOffset, len(m.tmuxHistory))
+	}
+}
+
 // TestBuildInitialPrompt is a table over descriptor Types covering every prompt
 // construction path: chat (/work and /followup-discuss, with --finding and
 // extra-context variants), implement (/implement, with --yes and -- context

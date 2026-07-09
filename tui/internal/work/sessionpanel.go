@@ -19,6 +19,7 @@ import (
 	libghostty "go.mitchellh.com/libghostty"
 
 	"github.com/anticorrelator/lore/tui/internal/config"
+	"github.com/anticorrelator/lore/tui/internal/style"
 )
 
 // resolveFollowupDir mirrors followup.ResolveDir / scripts/lib.sh::resolve_followup_dir,
@@ -73,6 +74,23 @@ type StreamErrorMsg struct {
 type TerminalOutputMsg struct {
 	Slug string
 	Data []byte
+}
+
+// tmuxScrollbackCapturedMsg carries a read-only snapshot of a tmux pane's
+// retained history. tmux, not the outer terminal emulator, owns history for a
+// tmux-hosted session because the attach client redraws a fixed screen.
+type tmuxScrollbackCapturedMsg struct {
+	Slug     string
+	TmuxName string
+	Lines    []string
+	Err      error
+}
+
+func captureTmuxScrollbackCmd(slug, tmuxName string) tea.Cmd {
+	return func() tea.Msg {
+		lines, err := captureTmuxPaneHistory(tmuxName)
+		return tmuxScrollbackCapturedMsg{Slug: slug, TmuxName: tmuxName, Lines: lines, Err: err}
+	}
 }
 
 // SessionProcessStartedMsg is sent after the subprocess is launched via PTY.
@@ -160,6 +178,13 @@ type SessionPanelModel struct {
 	// scrollOffset is lines from the bottom of the terminal document
 	// (scrollback + screen); 0 = live view.
 	scrollOffset int
+
+	// tmuxHistory is a capture-pane snapshot used only while a tmux-hosted
+	// panel is scrolled. The outer emulator sees tmux's redraw stream, not the
+	// pane history, so its native scrollback is not authoritative in this mode.
+	tmuxHistory        []string
+	tmuxCapturePending bool
+	tmuxScrollError    string
 
 	// lastOutputTime records when the last TerminalOutputMsg was received.
 	// Used for quiescence detection — if no output arrives for a threshold
@@ -464,6 +489,63 @@ func (m SessionPanelModel) totalLines() int {
 	return m.backend.totalLines()
 }
 
+func (m SessionPanelModel) visibleHeight() int {
+	if m.height < 1 {
+		return 1
+	}
+	return m.height
+}
+
+func maxScrollOffset(total, visible int) int {
+	// Scrollback reserves one visible row for its position indicator, so the
+	// document window is one row shorter than the live screen. Clamp against
+	// that actual content height or Shift+Home can never expose the oldest row.
+	contentHeight := visible - 1
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+	maxOff := total - contentHeight
+	if maxOff < 0 {
+		return 0
+	}
+	return maxOff
+}
+
+// requestTmuxScrollback schedules at most one capture-pane read. Gestures may
+// continue adjusting scrollOffset while the read is in flight; the eventual
+// snapshot clamps the accumulated offset against the authoritative history.
+func (m SessionPanelModel) requestTmuxScrollback() (SessionPanelModel, tea.Cmd) {
+	if m.tmuxName == "" || m.scrollOffset <= 0 {
+		return m, nil
+	}
+	// Once a snapshot exists, navigation is purely local. TerminalOutputMsg
+	// refreshes it when the pane changes, avoiding one capture-pane subprocess
+	// per wheel notch while still keeping active history current.
+	if len(m.tmuxHistory) > 0 && m.tmuxScrollError == "" {
+		maxOff := maxScrollOffset(len(m.tmuxHistory), m.visibleHeight())
+		if m.scrollOffset > maxOff {
+			m.scrollOffset = maxOff
+		}
+		if m.scrollOffset <= 0 {
+			return m.leaveTmuxScrollback(), nil
+		}
+		return m, nil
+	}
+	if m.tmuxCapturePending {
+		return m, nil
+	}
+	m.tmuxCapturePending = true
+	m.tmuxScrollError = ""
+	return m, captureTmuxScrollbackCmd(m.slug, m.tmuxName)
+}
+
+func (m SessionPanelModel) leaveTmuxScrollback() SessionPanelModel {
+	m.scrollOffset = 0
+	m.tmuxHistory = nil
+	m.tmuxScrollError = ""
+	return m
+}
+
 func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -502,28 +584,55 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 			})
 		}
 
-		// While scrolled into history, keep the same content visible as the
-		// document grows, then clamp to the document size.
-		if m.scrollOffset > 0 {
+		// While direct-PTY scrollback is visible, keep the same content in view
+		// as the emulator document grows. Tmux-hosted panels refresh from
+		// capture-pane below because tmux owns their authoritative history.
+		if m.scrollOffset > 0 && m.tmuxName == "" {
 			if grown := m.totalLines() - prevTotal; grown > 0 {
 				m.scrollOffset += grown
 			}
-			visH := m.height
-			if visH < 1 {
-				visH = 1
-			}
-			maxOff := m.totalLines() - visH
-			if maxOff < 0 {
-				maxOff = 0
-			}
+			maxOff := maxScrollOffset(m.totalLines(), m.visibleHeight())
 			if m.scrollOffset > maxOff {
 				m.scrollOffset = maxOff
 			}
+		}
+		if m.scrollOffset > 0 && m.tmuxName != "" && !m.tmuxCapturePending {
+			m.tmuxCapturePending = true
+			cmds = append(cmds, captureTmuxScrollbackCmd(m.slug, m.tmuxName))
 		}
 
 		m.cachedRender = m.backend.renderScreen()
 		if len(cmds) > 0 {
 			return m, tea.Batch(cmds...)
+		}
+		return m, nil
+
+	case tmuxScrollbackCapturedMsg:
+		if msg.Slug != m.slug || msg.TmuxName != m.tmuxName {
+			return m, nil
+		}
+		m.tmuxCapturePending = false
+		if m.scrollOffset <= 0 {
+			return m.leaveTmuxScrollback(), nil
+		}
+		if msg.Err != nil {
+			m.tmuxScrollError = msg.Err.Error()
+			return m, nil
+		}
+		oldTotal := len(m.tmuxHistory)
+		m.tmuxHistory = msg.Lines
+		m.tmuxScrollError = ""
+		// Preserve the visible historical content when new pane rows arrived
+		// after a prior snapshot, matching the direct-emulator contract.
+		if oldTotal > 0 && len(m.tmuxHistory) > oldTotal {
+			m.scrollOffset += len(m.tmuxHistory) - oldTotal
+		}
+		maxOff := maxScrollOffset(len(m.tmuxHistory), m.visibleHeight())
+		if m.scrollOffset > maxOff {
+			m.scrollOffset = maxOff
+		}
+		if m.scrollOffset <= 0 {
+			return m.leaveTmuxScrollback(), nil
 		}
 		return m, nil
 
@@ -545,17 +654,25 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		return m, QuiescenceTickCmd(m.slug)
 
 	case tea.MouseWheelMsg:
-		visH := m.height
-		if visH < 1 {
-			visH = 1
+		if m.tmuxName != "" {
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				m.scrollOffset += 3
+				return m.requestTmuxScrollback()
+			case tea.MouseWheelDown:
+				m.scrollOffset -= 3
+				if m.scrollOffset <= 0 {
+					return m.leaveTmuxScrollback(), nil
+				}
+				return m.requestTmuxScrollback()
+			}
+			return m, nil
 		}
+		visH := m.visibleHeight()
 		switch msg.Button {
 		case tea.MouseWheelUp:
 			m.scrollOffset += 3
-			maxOff := m.totalLines() - visH
-			if maxOff < 0 {
-				maxOff = 0
-			}
+			maxOff := maxScrollOffset(m.totalLines(), visH)
 			if m.scrollOffset > maxOff {
 				m.scrollOffset = maxOff
 			}
@@ -625,14 +742,26 @@ func (m SessionPanelModel) Update(msg tea.Msg) (_ SessionPanelModel, _ tea.Cmd) 
 		// PgUp goes to the program). Matched by code+modifier because the
 		// string form of modified keys varies across input protocols.
 		if msg.Mod.Contains(tea.ModShift) {
-			visH := m.height
-			if visH < 1 {
-				visH = 1
+			visH := m.visibleHeight()
+			if m.tmuxName != "" {
+				switch msg.Code {
+				case tea.KeyPgUp:
+					m.scrollOffset += visH / 2
+					return m.requestTmuxScrollback()
+				case tea.KeyPgDown:
+					m.scrollOffset -= visH / 2
+					if m.scrollOffset <= 0 {
+						return m.leaveTmuxScrollback(), nil
+					}
+					return m.requestTmuxScrollback()
+				case tea.KeyHome:
+					m.scrollOffset = int(^uint(0) >> 1)
+					return m.requestTmuxScrollback()
+				case tea.KeyEnd:
+					return m.leaveTmuxScrollback(), nil
+				}
 			}
-			maxOff := m.totalLines() - visH
-			if maxOff < 0 {
-				maxOff = 0
-			}
+			maxOff := maxScrollOffset(m.totalLines(), visH)
 			switch msg.Code {
 			case tea.KeyPgUp: // Shift+PgUp — scroll up by half a page
 				m.scrollOffset += visH / 2
@@ -726,11 +855,8 @@ func (m SessionPanelModel) View() (result string) {
 	}()
 	// Scrollback view: render the requested window of the terminal document
 	// (native scrollback + current screen) through the backend.
-	if m.scrollOffset > 0 && m.totalLines() > 0 {
-		visH := m.height
-		if visH < 1 {
-			visH = 1
-		}
+	if m.scrollOffset > 0 {
+		visH := m.visibleHeight()
 		// Reserve last line for scroll position indicator.
 		contentH := visH - 1
 		if contentH < 1 {
@@ -738,6 +864,19 @@ func (m SessionPanelModel) View() (result string) {
 		}
 
 		total := m.totalLines()
+		var history []string
+		if m.tmuxName != "" {
+			history = m.tmuxHistory
+			total = len(history)
+			if m.tmuxScrollError != "" {
+				dimS := lipgloss.NewStyle().Foreground(style.ColorDim)
+				return "  " + dimS.Render("scrollback unavailable: "+m.tmuxScrollError)
+			}
+			if total == 0 {
+				dimS := lipgloss.NewStyle().Foreground(style.ColorDim)
+				return "  " + dimS.Render("Loading session history...")
+			}
+		}
 		endIdx := total - m.scrollOffset
 		if endIdx < 0 {
 			endIdx = 0
@@ -747,8 +886,14 @@ func (m SessionPanelModel) View() (result string) {
 			startIdx = 0
 		}
 
+		var source []string
+		if m.tmuxName != "" {
+			source = history[startIdx:endIdx]
+		} else {
+			source = m.backend.readScrollback(startIdx, endIdx)
+		}
 		var lines []string
-		for _, ln := range m.backend.readScrollback(startIdx, endIdx) {
+		for _, ln := range source {
 			lines = append(lines, "  "+ln)
 		}
 		// Pad content area then append indicator.
