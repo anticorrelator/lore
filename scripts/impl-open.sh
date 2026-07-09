@@ -257,7 +257,10 @@ if [[ -z "$TEAM_MESSAGING" ]]; then
 fi
 
 # --- Ceremony config (lead-invocation entries; [] when unconfigured) --------
-CEREMONY_JSON=$(bash "$SCRIPT_DIR/ceremony-config.sh" get implement 2>/dev/null) || CEREMONY_JSON="[]"
+if ! CEREMONY_JSON=$(bash "$SCRIPT_DIR/ceremony-config.sh" get implement --work-item "$SLUG"); then
+  echo "[impl] Warning: ceremony config lookup for 'implement' failed; treating as empty" >&2
+  CEREMONY_JSON="[]"
+fi
 if ! printf '%s' "$CEREMONY_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list)' 2>/dev/null; then
   echo "[impl] Warning: ceremony config for 'implement' is not a JSON array; treating as empty" >&2
   CEREMONY_JSON="[]"

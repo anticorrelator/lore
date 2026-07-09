@@ -67,6 +67,7 @@ setup() {
   TEST_DATA_DIR="$(mktemp -d)"
   export LORE_KNOWLEDGE_DIR="$TEST_KDIR"
   export LORE_DATA_DIR="$TEST_DATA_DIR"
+  export LORE_FRAMEWORK=claude-code
   cd "$TEST_KDIR"
 
   WORK_DIR="$TEST_KDIR/_work"
@@ -108,7 +109,7 @@ teardown() {
       rm -rf "$d"
     fi
   done
-  unset LORE_KNOWLEDGE_DIR LORE_DATA_DIR
+  unset LORE_KNOWLEDGE_DIR LORE_DATA_DIR LORE_FRAMEWORK
 }
 
 payload() {
@@ -318,6 +319,73 @@ assert re.fullmatch(r"[0-9a-f]{12}", m["pr-review"]["skill_template_version"])
 assert d["lead_inline_conditions"]["detail"]["ceremony_skills"] == ["pr-review"]
 '
   grep -q "Ceremony-injected skill: pr-review" "$ITEM_DIR/execution-log.md"
+}
+
+@test "stale ceremony registration marks the work item and remains non-blocking" {
+  mkdir -p "$TEST_DATA_DIR/config" "$BATS_TEST_TMPDIR/home/.lore"
+  ln -s "$REPO_DIR/scripts" "$BATS_TEST_TMPDIR/home/.lore/scripts"
+  printf '{"harnesses": {"opencode": {"ceremonies": {"implement": ["codex-plan-review"]}}}}\n' \
+    > "$TEST_DATA_DIR/config/settings.json"
+
+  run env LORE_FRAMEWORK=opencode HOME="$BATS_TEST_TMPDIR/home" \
+    bash "$LORE_CLI" impl open widget-pipeline --all --json
+
+  [ "$status" -eq 0 ]
+  payload | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+assert d["status"] == "ready"
+assert d["lead_inline_conditions"]["detail"]["ceremony_skills"] == []
+assert "codex-plan-review" not in d["skill_invocation_map"]
+'
+  echo "$output" | grep -q "codex-plan-review"
+  echo "$output" | grep -Fq "[ceremony] Divergence:"
+  echo "$output" | grep -q "work_item='widget-pipeline'"
+  echo "$output" | grep -q "Corrective action:"
+
+  [ "$(wc -l < "$TEST_KDIR/_scorecards/rows.jsonl")" -eq 1 ]
+  python3 - "$TEST_KDIR/_scorecards/rows.jsonl" <<'PYEOF'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+assert len(rows) == 1
+row = rows[0]
+assert row["kind"] == "telemetry"
+assert row["tier"] == "telemetry"
+assert row["event_type"] == "ceremony-resolution"
+assert row["metric"] == "ceremony_resolution_outcome"
+assert row["outcome"] == "needs-decision"
+assert row["disposition"] == "unhandled"
+assert row["ceremony"] == "implement"
+assert row["advisor"] == "codex-plan-review"
+assert row["harness"] == "opencode"
+PYEOF
+
+  grep -q "source: ceremony" "$ITEM_DIR/execution-log.md"
+  grep -q "codex-plan-review" "$ITEM_DIR/execution-log.md"
+  grep -q "source: impl-verb" "$ITEM_DIR/execution-log.md"
+}
+
+@test "stale ceremony registration stays fail-open when scorecard writing fails" {
+  mkdir -p "$TEST_DATA_DIR/config" "$BATS_TEST_TMPDIR/home/.lore"
+  ln -s "$REPO_DIR/scripts" "$BATS_TEST_TMPDIR/home/.lore/scripts"
+  printf '{"harnesses": {"opencode": {"ceremonies": {"implement": ["codex-plan-review"]}}}}\n' \
+    > "$TEST_DATA_DIR/config/settings.json"
+  printf 'blocks scorecard directory creation\n' > "$TEST_KDIR/_scorecards"
+
+  run env LORE_FRAMEWORK=opencode HOME="$BATS_TEST_TMPDIR/home" \
+    bash "$LORE_CLI" impl open widget-pipeline --all --json
+
+  [ "$status" -eq 0 ]
+  payload | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+assert d["status"] == "ready"
+assert d["lead_inline_conditions"]["detail"]["ceremony_skills"] == []
+'
+  echo "$output" | grep -Fq \
+    "[ceremony-outcome] Warning: scorecard outcome write failed; ceremony resolution continues."
+  grep -q "source: ceremony" "$ITEM_DIR/execution-log.md"
+  grep -q "source: impl-verb" "$ITEM_DIR/execution-log.md"
 }
 
 # --- Selection modes -----------------------------------------------------------

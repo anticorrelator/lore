@@ -48,6 +48,7 @@ setup() {
   command -v jq >/dev/null 2>&1 || skip "jq required for settings.sh"
 
   TEST_LORE_DATA_DIR="$(mktemp -d)"
+  TEST_HOME="$(mktemp -d)"
   mkdir -p "$TEST_LORE_DATA_DIR/config"
   ln -s "$REPO_DIR/scripts" "$TEST_LORE_DATA_DIR/scripts"
   export LORE_DATA_DIR="$TEST_LORE_DATA_DIR"
@@ -72,6 +73,9 @@ setup() {
 teardown() {
   if [ -n "${TEST_LORE_DATA_DIR:-}" ] && [ -d "$TEST_LORE_DATA_DIR" ]; then
     rm -rf "$TEST_LORE_DATA_DIR"
+  fi
+  if [ -n "${TEST_HOME:-}" ] && [ -d "$TEST_HOME" ]; then
+    rm -rf "$TEST_HOME"
   fi
 }
 
@@ -448,6 +452,20 @@ EOF
   }'
   out=$(bash -c "source '$LIB_SH' && resolve_ceremony_advisors spec-design" 2>/dev/null)
   [ "$out" = '[]' ]
+}
+
+@test "ceremony: advisor validation uses the requested harness skill surface" {
+  mkdir -p "$TEST_HOME/.agents/skills/opencode-only-review"
+
+  run env HOME="$TEST_HOME" bash -c \
+    "source '$LIB_SH' && validate_ceremony_advisors opencode test-layer '[\"opencode-only-review\"]'"
+  [ "$status" -eq 0 ]
+
+  run env HOME="$TEST_HOME" bash -c \
+    "source '$LIB_SH' && validate_ceremony_advisors codex test-layer '[\"opencode-only-review\"]'"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unknown ceremony advisor 'opencode-only-review'"* ]]
+  [[ "$output" == *"harness 'codex'"* ]]
 }
 
 # ============================================================

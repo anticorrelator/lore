@@ -46,6 +46,16 @@ Every append is validated at write time for:
 - `schema_version` — present and non-null
 - `kind` — enum: `scored | telemetry`
 - `calibration_state` — enum: `calibrated | pre-calibration | unknown`
+- `event_type: ceremony-resolution` — must be `kind: telemetry`,
+  `tier: telemetry`, `calibration_state: unknown`,
+  `outcome: needs-decision`, and `disposition: unhandled`; ceremony,
+  advisor, harness, reason, corrective action, timestamp, and any work-item
+  source-artifact linkage are validated by the same physical appender
+
+`scripts/ceremony-outcome-record.sh` is the thin operation-specific front for
+this event. It constructs the row and delegates the only physical write to
+`scripts/scorecard-append.sh`. Repeated resolution attempts are distinct
+point-in-time events and are not deduplicated.
 
 See `architecture/scorecards/row-schema.md` for the full row schema.
 

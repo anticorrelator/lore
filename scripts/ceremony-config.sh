@@ -40,17 +40,24 @@ Subcommands:
 Options:
   --harness <name>  Operate on harnesses.<name>.ceremonies.<skill>.
                     Defaults to the active harness.
+  --work-item <slug> Attach work-item context to unresolved get outcomes.
   --help, -h        Show this help
 EOF
 }
 
 HARNESS=""
+WORK_ITEM=""
 ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --harness)
       [[ -n "${2:-}" ]] || { echo "Error: --harness requires a name" >&2; exit 1; }
       HARNESS="$2"
+      shift 2
+      ;;
+    --work-item)
+      [[ -n "${2:-}" ]] || { echo "Error: --work-item requires a slug" >&2; exit 1; }
+      WORK_ITEM="$2"
       shift 2
       ;;
     --help|-h)
@@ -102,11 +109,7 @@ case "$subcmd" in
       exit 1
     fi
     CEREMONY="${ARGS[1]}"
-    if [[ -n "$HARNESS" ]]; then
-      _read_layer "$CEREMONY"
-    else
-      resolve_ceremony_advisors "$CEREMONY"
-    fi
+    resolve_ceremony_advisors "$CEREMONY" "$TARGET_HARNESS" "$WORK_ITEM"
     ;;
   add)
     if [[ ${#ARGS[@]} -lt 3 ]]; then
@@ -115,6 +118,8 @@ case "$subcmd" in
     fi
     CEREMONY="${ARGS[1]}"
     SKILL="${ARGS[2]}"
+    advisor_json=$(jq -cn --arg s "$SKILL" '[$s]')
+    validate_ceremony_advisors "$TARGET_HARNESS" "$(_ceremony_path "$CEREMONY")" "$advisor_json"
     current=$(_read_layer "$CEREMONY")
     updated=$(printf '%s' "$current" | jq -c --arg s "$SKILL" \
       'if any(.[]; . == $s) then . else . + [$s] end')

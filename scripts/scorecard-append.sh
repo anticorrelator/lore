@@ -46,6 +46,8 @@
 #                         cutover_timestamp + template_id/template_version
 #                         so /retro and /evolve can partition rows into
 #                         pre-cutover / post-cutover windows.
+#   ceremony-resolution   unresolvable registered advisor; conditionally
+#                         validated as needs-decision/unhandled telemetry.
 #
 # The row schema (see architecture/scorecards/row-schema.md) also defines:
 #   template_id, template_version, metric, value, sample_size,
@@ -277,6 +279,39 @@ if [[ "$TIER" == "correction" ]]; then
     printf '%s' "$ROW" | jq -e '((.correction_target // "") | test("^(claim|observation|doctrine)$"))' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS correction_target(claim|observation|doctrine)"
     printf '%s' "$ROW" | jq -e '((.calibrated_by_verdict_id // "") != "")' >/dev/null 2>&1 || MISSING_FIELDS="$MISSING_FIELDS calibrated_by_verdict_id"
     fail "correction row rejected: missing or invalid required fields:$MISSING_FIELDS (tier=correction requires corrected_entry_path, correction_target[claim|observation|doctrine], calibrated_by_verdict_id)"
+  fi
+fi
+
+# Registered ceremony obligations that cannot resolve are operational
+# telemetry, not advisor verdicts. Keep this conditional schema at the sole
+# physical appender so every producer path receives the same validation.
+EVENT_TYPE=$(printf '%s' "$ROW" | jq -r '.event_type // ""')
+if [[ "$EVENT_TYPE" == "ceremony-resolution" ]]; then
+  CEREMONY_OUTCOME_OK=$(printf '%s' "$ROW" | jq -e '
+    (.kind == "telemetry")
+      and (.tier == "telemetry")
+      and (.calibration_state == "unknown")
+      and (.outcome == "needs-decision")
+      and (.disposition == "unhandled")
+      and ((.ceremony // "") != "")
+      and ((.advisor // "") != "")
+      and ((.harness // "") != "")
+      and ((.reason // "") != "")
+      and ((.corrective_action // "") != "")
+      and ((.timestamp // "") != "")
+      and ((.source_artifact_ids // null) | type == "array")
+      and (
+        if has("work_item") then
+          ((.work_item | type) == "string")
+            and (.work_item != "")
+            and (.source_artifact_ids == [.work_item])
+        else
+          (.source_artifact_ids == [])
+        end
+      )
+  ' >/dev/null 2>&1 && echo "true" || echo "false")
+  if [[ "$CEREMONY_OUTCOME_OK" != "true" ]]; then
+    fail "ceremony-resolution row rejected: kind=telemetry, tier=telemetry, calibration_state=unknown, outcome=needs-decision, disposition=unhandled, ceremony, advisor, harness, reason, corrective_action, timestamp, and work-item-aligned source_artifact_ids are required"
   fi
 fi
 

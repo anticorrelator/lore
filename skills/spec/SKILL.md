@@ -358,7 +358,7 @@ Produce the conceptual frame first before committing to phase breakdown.
 **Ceremonies always run.** No flag skips this step; no flag is required to run it. Don't ask whether to invoke them — invoke. Judgment applies to acting on the output, not to running the step.
 
 ```bash
-EVALUATORS=$(lore ceremony get spec-design)
+EVALUATORS=$(lore ceremony get spec-design --work-item <slug>)
 ```
 If non-empty JSON array, for each skill name in the array:
 ```
@@ -648,7 +648,7 @@ A refused finalize emits no telemetry row and no `spec-verb` atom; re-running af
 **Ceremonies always run.** No flag skips this step; no flag is required to run it. Don't ask whether to invoke them — invoke. Judgment applies to acting on the output, not to running the step.
 
 ```bash
-EVALUATORS=$(lore ceremony get spec-post-plan)
+EVALUATORS=$(lore ceremony get spec-post-plan --work-item <slug>)
 ```
 If non-empty JSON array, for each skill name in the array:
 ```

@@ -195,6 +195,31 @@ assert_eq "value round-tripped" "$(echo "$ROW_BACK" | jq -r '.value')" "0.42"
 assert_eq "tier round-tripped" "$(echo "$ROW_BACK" | jq -r '.tier')" "telemetry"
 
 # =============================================
+# Test 4b: ceremony-resolution conditional schema is writer-enforced
+# =============================================
+echo ""
+echo "Test 4b: Reject malformed ceremony-resolution telemetry"
+setup_store
+
+BASE_CEREMONY_ROW='{"schema_version":"1","kind":"telemetry","tier":"telemetry","calibration_state":"unknown","event_type":"ceremony-resolution","metric":"ceremony_resolution_outcome","outcome":"needs-decision","disposition":"unhandled","ceremony":"spec-post-plan","advisor":"codex-plan-review","harness":"opencode","reason":"advisor missing","corrective_action":"update binding","timestamp":"2026-07-09T12:00:00Z","source_artifact_ids":[]}'
+bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$BASE_CEREMONY_ROW" >/dev/null
+assert_eq "valid ceremony-resolution row appended" "$(wc -l < "$KNOWLEDGE_DIR/_scorecards/rows.jsonl" | tr -d ' ')" "1"
+
+for mutation in \
+  '.kind = "scored"' \
+  '.outcome = "failed"' \
+  '.disposition = "handled"' \
+  '.advisor = ""' \
+  '.work_item = "item"'; do
+  BAD_ROW=$(jq -c "$mutation" <<<"$BASE_CEREMONY_ROW")
+  EXIT_CODE=0
+  STDERR=$(bash "$SCRIPT_DIR/scorecard-append.sh" --kdir "$KNOWLEDGE_DIR" --row "$BAD_ROW" 2>&1) || EXIT_CODE=$?
+  assert_eq "ceremony mutation rejected: $mutation" "$EXIT_CODE" "1"
+  assert_contains "ceremony rejection names schema" "$STDERR" "ceremony-resolution row rejected"
+done
+assert_eq "rejected ceremony rows did not append" "$(wc -l < "$KNOWLEDGE_DIR/_scorecards/rows.jsonl" | tr -d ' ')" "1"
+
+# =============================================
 # Test 5: Reject missing schema_version
 # =============================================
 echo ""
@@ -494,6 +519,13 @@ if grep -qF "Prompt-context invariant" "$README"; then
   PASS=$((PASS + 1))
 else
   echo "  FAIL: README missing 'Prompt-context invariant' section"
+  FAIL=$((FAIL + 1))
+fi
+if grep -qF 'event_type: ceremony-resolution' "$README" && grep -qF 'not deduplicated' "$README"; then
+  echo "  PASS: README documents ceremony outcome validation and point-event semantics"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: README missing ceremony outcome writer contract"
   FAIL=$((FAIL + 1))
 fi
 
