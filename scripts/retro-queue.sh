@@ -104,6 +104,8 @@ unhandled.sort(key=key)
 handled.sort(key=key)
 legacy.sort(key=key)
 print(json.dumps({
+    "fold_version": "1",
+    "vocabulary_version": "1",
     "counts": {
         "unhandled_due": len(unhandled),
         "handled_due": len(handled),

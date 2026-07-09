@@ -26,6 +26,7 @@ SEND="$REPO_DIR/scripts/session-send.sh"
 PEEK="$REPO_DIR/scripts/session-peek.sh"
 WAIT="$REPO_DIR/scripts/session-wait.sh"
 APPEND="$REPO_DIR/scripts/session-event-append.sh"
+COORDINATE="$REPO_DIR/scripts/coordinate-status.sh"
 
 setup() {
   [ -f "$REQUEST" ] || skip "session-request.sh missing"
@@ -334,6 +335,12 @@ journal_boundaries() {
   echo "$output" | jq -e '(.instances | length) == 1 and .instances[0].name == "live-inst"'
 }
 
+@test "list JSON declares its fold and vocabulary versions" {
+  run bash "$LIST" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.fold_version=="1" and .vocabulary_version=="1"'
+}
+
 @test "list surfaces pending, claimed, and close-request queues" {
   mkdir -p "$TEST_KDIR"/_sessions/requests/pending \
            "$TEST_KDIR"/_sessions/requests/claimed \
@@ -410,6 +417,13 @@ journal_boundaries() {
     # Property: next_cursor always lands at EOF once all remaining rows are read.
     [ "$nc" -eq "$size" ] || { echo "cursor=$cursor next_cursor=$nc size=$size"; false; }
   done
+}
+
+@test "events JSON declares its fold and vocabulary versions" {
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$EVENTS" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.fold_version=="1" and .vocabulary_version=="1"'
 }
 
 @test "events: a torn trailing row never disturbs the complete-row read; cursor stops before it" {
@@ -865,6 +879,12 @@ mirror_event_vocab() {
     | tr ' ' '\n' | grep -v '^$'
 }
 
+coordinate_event_vocab() {
+  grep -E '^SESSION_EVENT_VOCAB=' "$COORDINATE" | head -n1 \
+    | sed -E 's/^SESSION_EVENT_VOCAB="([^"]*)".*/\1/' \
+    | tr ' ' '\n' | grep -v '^$'
+}
+
 @test "wait: --until vocabulary mirror matches the sole writer's case-arm (drift guard)" {
   local w m
   w="$(writer_event_vocab | sort -u)"
@@ -876,6 +896,14 @@ mirror_event_vocab() {
   extra="$(comm -13 <(printf '%s\n' "$w") <(printf '%s\n' "$m") | tr '\n' ' ')"
   [ -z "${missing// }" ] || { echo "wait mirror is MISSING tokens the writer accepts: $missing"; false; }
   [ -z "${extra// }" ] || { echo "wait mirror has EXTRA tokens the writer rejects: $extra"; false; }
+}
+
+@test "coordinate: event vocabulary mirror matches the sole writer's case-arm" {
+  local w m
+  w="$(writer_event_vocab | sort -u)"
+  m="$(coordinate_event_vocab | sort -u)"
+  [ -n "$w" ]
+  [ "$w" = "$m" ]
 }
 
 @test "wait: an exact-slug close matches, emitting the matched row and the cursor row in one read" {

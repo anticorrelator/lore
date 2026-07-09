@@ -166,7 +166,12 @@ if size > 0 and since < size:
         idx = nl + 1
         pos = line_end
 
-print(json.dumps({"events": events, "next_cursor": next_cursor}))
+print(json.dumps({
+    "fold_version": "1",
+    "vocabulary_version": "1",
+    "events": events,
+    "next_cursor": next_cursor,
+}))
 PYEOF
 )"
 

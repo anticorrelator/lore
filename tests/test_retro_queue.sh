@@ -6,6 +6,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APPEND="$REPO_ROOT/scripts/retro-deferred-append.sh"
 QUEUE_FRONT="$REPO_ROOT/scripts/retro-queue.sh"
+COORDINATE="$REPO_ROOT/scripts/coordinate-status.sh"
 CLI="$REPO_ROOT/cli/lore"
 
 PASS=0
@@ -44,6 +45,10 @@ done
 STATUS=$(bash "$QUEUE_FRONT" queue --kdir "$KDIR" --json)
 RC=$?
 assert_zero "queue fold exits zero" "$RC"
+assert_eq "queue fold declares fold version" "1" \
+  "$(printf '%s' "$STATUS" | jq -r '.fold_version')"
+assert_eq "queue fold declares vocabulary version" "1" \
+  "$(printf '%s' "$STATUS" | jq -r '.vocabulary_version')"
 assert_eq "two repeated DUE decisions retain distinct identities" "2" \
   "$(printf '%s' "$STATUS" | jq -r '[.unhandled_due[].outcome_id] | unique | length')"
 assert_eq "legacy deferred row remains visible" "1" \
@@ -117,6 +122,15 @@ assert_eq "queue fold mirrors dispatched|deferred|skipped action vocabulary" \
 bash "$QUEUE_FRONT" handle --outcome-id "$OID" --action maybe \
   --handled-by coordinator --kdir "$KDIR" >/dev/null 2>&1
 assert_nonzero "appender rejects action tokens outside the closed vocabulary" "$?"
+
+WRITER_ACTIONS=$(sed -n '/case "\$ACTION" in/,/) ;;/p' "$APPEND" \
+  | grep -E 'dispatched\|deferred\|skipped' | head -1 \
+  | sed -E 's/^[[:space:]]*//; s/\).*$//' | tr '|' '\n' | sort -u | tr '\n' ' ')
+MIRROR_ACTIONS=$(grep -E '^RETRO_ACTION_VOCAB=' "$COORDINATE" | head -1 \
+  | sed -E 's/^RETRO_ACTION_VOCAB="([^"]*)".*/\1/' | tr ' ' '\n' \
+  | sort -u | tr '\n' ' ')
+assert_eq "coordinate retro action mirror matches the sole appender" \
+  "$WRITER_ACTIONS" "$MIRROR_ACTIONS"
 
 # No DUE for a cycle is a successful no-op, which keeps direct /retro claiming fail-open.
 bash "$CLI" retro handle --cycle-id absent --action dispatched \

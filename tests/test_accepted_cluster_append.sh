@@ -128,6 +128,8 @@ OUTPUT=$(valid_call 2>&1)
 assert_contains "confirmation printed" "$OUTPUT" "[accepted-cluster] Cluster"
 assert_eq "sidecar has one line" "$(wc -l < "$SIDECAR" | tr -d ' ')" "1"
 ROW=$(cat "$SIDECAR")
+assert_eq "schema_version is declared" "$(echo "$ROW" | jq -r '.schema_version')" "1"
+assert_eq "vocabulary_version is declared" "$(echo "$ROW" | jq -r '.vocabulary_version')" "1"
 assert_eq "target round-tripped" "$(echo "$ROW" | jq -r '.target')" "skills/foo/SKILL.md"
 assert_eq "change_types is a list" "$(echo "$ROW" | jq -r '.change_types | type')" "array"
 assert_eq "change_types value" "$(echo "$ROW" | jq -c '.change_types')" '["ceiling-raise"]'

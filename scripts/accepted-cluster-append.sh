@@ -9,7 +9,8 @@
 # recurring-failure gate in a later run can clear a staged suggestion.
 #
 # Row schema (skills/evolve/SKILL.md §Accepted-cluster artifact format):
-#   cluster_id, target, change_types[], work_items[], journal_row_refs[],
+#   schema_version, vocabulary_version, cluster_id, target, change_types[],
+#   work_items[], journal_row_refs[],
 #   accepted_at, accepted_at_run_id, accepted_by_maintainer_decision,
 #   consumed_at_run_id (always null at append time — the gate sets it later).
 #
@@ -196,6 +197,8 @@ key = target + "|" + "|".join(change_types) + "|" + "|".join(work_items)
 cluster_id = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 row = {
+    "schema_version": "1",
+    "vocabulary_version": "1",
     "cluster_id": cluster_id,
     "target": target,
     "change_types": change_types,
@@ -234,6 +237,8 @@ CLUSTER_ID=$(printf '%s' "$ROW" | jq -r '.cluster_id')
 # object with the schema the gate reader depends on.
 if ! printf '%s' "$ROW" | jq -e '
   type == "object"
+  and (.schema_version == "1")
+  and (.vocabulary_version == "1")
   and (.cluster_id | type == "string" and (. | length) == 16)
   and (.target | type == "string" and . != "")
   and (.change_types | type == "array" and length > 0)

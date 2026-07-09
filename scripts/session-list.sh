@@ -108,6 +108,8 @@ def load_dir(subpath, live_only=False):
 
 
 envelope = {
+    "fold_version": "1",
+    "vocabulary_version": "1",
     "instances": load_dir("instances", live_only=True),
     "pending": load_dir("requests/pending"),
     "claimed": load_dir("requests/claimed"),

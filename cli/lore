@@ -117,6 +117,7 @@ Commands:
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
   impl         /implement bookkeeping verbs (see: lore impl --help)
   spec         /spec bookkeeping verbs (see: lore spec --help)
+  coordinate   Read-only cross-substrate coordination status (see: lore coordinate --help)
   session      Multi-session coordination substrate verbs (see: lore session --help)
   retro        Federated retro pooling (see: lore retro --help)
   correction   Verdict-driven correction management (see: lore correction --help)
@@ -513,6 +514,21 @@ Options:
 EOF
 }
 
+coordinate_usage() {
+  cat >&2 <<EOF
+lore coordinate — read-only cross-substrate coordination view
+
+Usage: lore coordinate <verb> [args...]
+
+Verbs:
+  status    Project work, session, ceremony, retro, and evolve evidence into
+            Act now, Needs judgment, Waiting, and Reconcile
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
 session_usage() {
   cat >&2 <<EOF
 lore session — multi-session coordination substrate verbs
@@ -806,6 +822,33 @@ cmd_spec() {
       echo "Error: unknown spec verb '$subcmd'" >&2
       echo "" >&2
       spec_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Coordinate subgroup (read-only cross-substrate projection) ---
+cmd_coordinate() {
+  if [[ $# -eq 0 ]]; then
+    coordinate_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      coordinate_usage
+      return 0
+      ;;
+    status)
+      "$SCRIPTS_DIR/coordinate-status.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown coordinate verb '$subcmd'" >&2
+      echo "" >&2
+      coordinate_usage
       return 1
       ;;
   esac
@@ -2094,6 +2137,10 @@ case "$1" in
   spec)
     shift
     cmd_spec "$@"
+    ;;
+  coordinate)
+    shift
+    cmd_coordinate "$@"
     ;;
   session)
     shift
