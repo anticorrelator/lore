@@ -615,7 +615,7 @@ class Settlement:
         if invalid_reason:
             raise ValueError(f"invalid {kind} row: {invalid_reason}")
         if kind == KIND_CONSUMPTION_CONTRADICTION:
-            # Only `pending` CC rows are enqueue candidates. `verified`/`rejected`
+            # Only `pending` CC rows are enqueue candidates. `verified`/`contradicted`
             # are terminal states set by the update-status writer after a
             # correctness-gate verdict landed — re-enqueuing them would drive
             # duplicate adjudication. Legacy values (accepted/declined/remediated)
@@ -911,8 +911,8 @@ class Settlement:
                 "rollup_window_start": rollup_summary["window_start"],
                 "rollup_window_end": rollup_summary["window_end"],
             }
-        # Walk all three source streams. enqueue_row dispatches per-kind; CC
-        # rows that are already terminal (verified|rejected) are quietly skipped.
+        # Walk all source streams. enqueue_row dispatches per-kind; CC rows
+        # already terminal (verified|contradicted) are quietly skipped.
         skipped = 0
         for kind in KINDS:
             filename = KIND_SOURCES[kind]["filename"]
@@ -1905,6 +1905,29 @@ class Settlement:
         if isinstance(existing.get("correction_outcome"), dict):
             return existing["correction_outcome"]
         existing["correction_outcome"] = outcome
+        json_dump(path, existing)
+        return outcome
+
+    def write_run_consumption_contradiction_outcome_once(
+        self,
+        run_id: str,
+        outcome: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist a run-local sidecar-projection outcome exactly once.
+
+        The completed settlement run remains authoritative and immutable apart
+        from this additive outcome field. On retry, an existing outcome wins.
+        """
+        path = self.run_path(str(run_id))
+        if not path.exists():
+            return outcome
+        existing = json_load(path, {})
+        if not isinstance(existing, dict) or existing.get("run_id") != run_id:
+            return outcome
+        current = existing.get("consumption_contradiction_outcome")
+        if isinstance(current, dict):
+            return current
+        existing["consumption_contradiction_outcome"] = outcome
         json_dump(path, existing)
         return outcome
 
@@ -3125,6 +3148,13 @@ class Settlement:
                 and str(item.get("kind") or KIND_TASK_CLAIM) == KIND_TASK_CLAIM
             ):
                 self._emit_correction_evidence(str(written.get("run_id") or ""), persisted)
+        contradiction_outcome = self._apply_consumption_contradiction_outcome(written, item)
+        if isinstance(contradiction_outcome, dict):
+            persisted_contradiction_outcome = self.write_run_consumption_contradiction_outcome_once(
+                str(written.get("run_id") or ""),
+                contradiction_outcome,
+            )
+            written["consumption_contradiction_outcome"] = persisted_contradiction_outcome
         self._apply_audit_candidate_transition(written, item)
         self._supersede_infra_failures_on_settle(written)
         return written
@@ -3367,6 +3397,115 @@ class Settlement:
             sys.stderr.write(
                 f"[settlement] correction-evidence emission failed run_id={run_id}: {exc}\n"
             )
+
+    def _apply_consumption_contradiction_outcome(
+        self,
+        written: dict[str, Any],
+        item: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Project a completed CC verdict into its owning sidecar, fail-open.
+
+        Identity, timestamp, and transition validation belong to the updater;
+        this caller passes the durable run fields unchanged and records either
+        its applied/idempotent result or an identifying failure object.
+        """
+        if str(item.get("kind") or "") != KIND_CONSUMPTION_CONTRADICTION:
+            return None
+        if str(written.get("status") or "") != "completed":
+            return None
+        existing = written.get("consumption_contradiction_outcome")
+        if isinstance(existing, dict):
+            return existing
+
+        verdict_block = written.get("verdict") if isinstance(written.get("verdict"), dict) else {}
+        verdict = str(verdict_block.get("verdict") or "").strip()
+        if verdict not in {"verified", "contradicted"}:
+            return None
+
+        work_item = str(written.get("work_item") or item.get("work_item") or "")
+        contradiction_id = str(
+            written.get("source_id")
+            or item.get("source_id")
+            or item.get("contradiction_id")
+            or ""
+        )
+        run_id = str(written.get("run_id") or "")
+        completed_at = str(written.get("completed_at") or "")
+        context = {
+            "work_item": work_item,
+            "contradiction_id": contradiction_id,
+            "run_id": run_id,
+            "verdict": verdict,
+            "settled_at": completed_at,
+        }
+
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        cmd = [
+            "bash",
+            os.path.join(scripts_dir, "consumption-contradiction-update-status.sh"),
+            "--kdir", str(self.kdir),
+            "--work-item", work_item,
+            "--contradiction-id", contradiction_id,
+            "--status", verdict,
+            "--settled-at", completed_at,
+            "--settled-by-run-id", run_id,
+            "--json",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            outcome = {"status": "failed", "reason": "updater_unavailable", **context, "error": str(exc)}
+            sys.stderr.write(
+                f"[settlement] consumption-contradiction landing failed "
+                f"run_id={run_id} work_item={work_item} contradiction_id={contradiction_id}: {exc}\n"
+            )
+            return outcome
+
+        if proc.returncode != 0:
+            stderr_tail = (proc.stderr or proc.stdout or "")[-1000:].strip()
+            outcome = {
+                "status": "failed",
+                "reason": f"updater_exit_{proc.returncode}",
+                **context,
+                "error": stderr_tail,
+            }
+            sys.stderr.write(
+                f"[settlement] consumption-contradiction landing failed "
+                f"run_id={run_id} work_item={work_item} contradiction_id={contradiction_id} "
+                f"verdict={verdict}: {stderr_tail}\n"
+            )
+            return outcome
+
+        result: dict[str, Any] | None = None
+        for line in proc.stdout.splitlines():
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and candidate.get("status") in {"applied", "idempotent"}:
+                result = candidate
+                break
+        if result is None:
+            outcome = {"status": "failed", "reason": "invalid_updater_response", **context}
+            sys.stderr.write(
+                f"[settlement] consumption-contradiction landing failed "
+                f"run_id={run_id} work_item={work_item} contradiction_id={contradiction_id}: "
+                "updater returned no structured result\n"
+            )
+            return outcome
+
+        return {
+            "status": str(result["status"]),
+            **context,
+            "previous_status": result.get("previous_status"),
+            "sidecar_location": result.get("sidecar_location"),
+        }
 
     def _apply_audit_candidate_transition(self, written: dict[str, Any], item: dict[str, Any]) -> None:
         """Advance the audit-candidate source row through the correctness-gate
