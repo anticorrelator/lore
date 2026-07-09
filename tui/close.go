@@ -24,6 +24,13 @@ import (
 const (
 	closeGraceDefault = 5 * time.Second
 	closePollDefault  = 100 * time.Millisecond
+	// closeTerminusGraceDefault is the cooperative window a self-requested
+	// protocol terminus gets to finish its generating tail naturally. It never
+	// authorizes interruption or process signals while generation continues.
+	closeTerminusGraceDefault = 2 * time.Minute
+	// closeExplicitGraceDefault is the short natural-quiescence courtesy window
+	// before an explicit human/coordinator close injects ESC.
+	closeExplicitGraceDefault = 2 * time.Second
 	// closeInterruptGraceDefault bounds how long the interrupt-escalation rung
 	// waits for an injected interrupt (ESC) to end a generating turn before it
 	// proceeds down the exit ladder regardless. A --yes protocol run is one
@@ -42,11 +49,13 @@ const (
 
 // close_failed reason tokens — the terminal a consumed close-request emits when a
 // teardown does not (or must not) complete. interactive-prompt: a
-// protocol-terminus close hit an open modal and refused, leaving the session
-// alive. rung-exhausted: the exit ladder ran every rung and the harness process
-// was still alive. error: an operational failure during teardown.
+// protocol-terminus close hit an open modal and refused. still-generating: its
+// cooperative grace expired before the active turn ended. Both leave the
+// session alive. rung-exhausted: the exit ladder ran every rung and the harness
+// process was still alive. error: an operational failure during teardown.
 const (
 	closeFailedInteractivePrompt = "interactive-prompt"
+	closeFailedStillGenerating   = "still-generating"
 	closeFailedRungExhausted     = "rung-exhausted"
 	closeFailedError             = "error"
 )
@@ -62,9 +71,9 @@ var errCloseLadderExhausted = errors.New("exit ladder exhausted: harness process
 // is threaded onto the terminal journal row so a close requester has one match
 // key, and reason splits modal-blocked handling by authority (an explicit close
 // acts; a protocol-terminus close refuses). consumedAt bounds the modal-hold
-// grace; interruptedAt is set only when a still-generating session had the
-// interrupt (ESC) injected and bounds the post-interrupt wait (zero = never
-// interrupted).
+// grace; interruptedAt is set only after an explicit close's courtesy wait when
+// a still-generating session had ESC injected. A protocol-terminus close never
+// sets it.
 type pendingCloseState struct {
 	requestID     string
 	reason        string
@@ -336,8 +345,8 @@ func shouldAutoClose(ls liveSession) bool {
 //
 //   - explicit close (reason human — the CLI default — or coordinator): full
 //     discretion. Always schedule teardown, regardless of initiator or state; a
-//     still-generating session gets the interrupt-escalation rung (ESC injected now
-//     so its turn ends) before the quiescence-gated ladder. Never a silent no-op.
+//     still-generating session gets a short natural-quiescence opportunity before
+//     the interrupt-escalation rung. Never a silent no-op.
 //   - protocol-terminus close (reason protocol_terminus, enqueued by a protocol's
 //     own finalize step): the initiator/auto_close gate stands. An agent session
 //     auto-closes; a human session (or auto_close=false) is held open with a "done"
@@ -378,22 +387,11 @@ func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) 
 		if m.pendingClose == nil {
 			m.pendingClose = make(map[string]pendingCloseState)
 		}
-		pc := pendingCloseState{
+		m.pendingClose[slug] = pendingCloseState{
 			requestID:  cr.RequestID,
 			reason:     cr.Reason,
 			consumedAt: time.Now(),
 		}
-
-		// Interrupt-escalation rung: a session bound for teardown that is still
-		// generating gets the interrupt byte injected now, so its turn ends and the
-		// quiescence-gated ladder can proceed. Idle sessions need no interrupt.
-		// Best-effort: a missing PTY leaves the ladder to force teardown after the
-		// bounded grace.
-		if panel, ok := m.sessionPanels[slug]; ok && sessionGenerating(panel) {
-			_ = panel.Interrupt()
-			pc.interruptedAt = time.Now()
-		}
-		m.pendingClose[slug] = pc
 	}
 	var advCmds []tea.Cmd
 	m, advCmds = m.advanceCloseLadders()
@@ -402,16 +400,6 @@ func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) 
 		return m, nil
 	}
 	return m, tea.Batch(cmds...)
-}
-
-// sessionGenerating reports whether a hosted session is actively mid-turn
-// (producing output), as opposed to idle/awaiting-input or finished. It is the
-// interrupt-escalation trigger: a session bound for teardown while generating is
-// interrupted before the ladder. A session paused on an interactive prompt reads as
-// awaiting-input (NeedsInput), so it is not "generating" here — teardown of such a
-// session is separately held by advanceCloseLadders' interactive-prompt guard.
-func sessionGenerating(panel work.SessionPanelModel) bool {
-	return !panel.IsDone() && !panel.NeedsInput()
 }
 
 // interruptGrace is how long advanceCloseLadders waits for an injected interrupt
@@ -425,6 +413,20 @@ func (m model) interruptGrace() time.Duration {
 	return closeInterruptGraceDefault
 }
 
+func (m model) terminusGrace() time.Duration {
+	if m.closeTerminusGrace > 0 {
+		return m.closeTerminusGrace
+	}
+	return closeTerminusGraceDefault
+}
+
+func (m model) explicitGrace() time.Duration {
+	if m.closeExplicitGrace > 0 {
+		return m.closeExplicitGrace
+	}
+	return closeExplicitGraceDefault
+}
+
 // modalHold is how long advanceCloseLadders holds a close blocked by an open
 // interactive prompt before acting by authority. Seam: a zero closeModalHold
 // field falls back to closeModalHoldDefault; tests inject a small value.
@@ -435,14 +437,31 @@ func (m model) modalHold() time.Duration {
 	return closeModalHoldDefault
 }
 
-// interactivePrompt reports whether a non-done panel is blocked on an interactive
-// prompt (permission/approval or option-select). It routes through the atInteractivePromptFn
-// seam when set (tests), otherwise reads the live screen via atInteractivePrompt.
-func (m model) interactivePrompt(panel work.SessionPanelModel) bool {
-	if m.atInteractivePromptFn != nil {
-		return m.atInteractivePromptFn(panel)
+// observeClosePanel reads at most one ScreenSnapshot and routes it through the
+// shared classifier. Lifecycle and timer-derived quiescence remain observable
+// even when the framework or screen cannot be classified.
+func observeClosePanel(panel work.SessionPanelModel) closeObservation {
+	done, quiescent := panel.IsDone(), panel.NeedsInput()
+	base := closeObservation{done: done, quiescent: quiescent}
+	if done {
+		return base
 	}
-	return atInteractivePrompt(panel)
+	framework, err := config.ResolveTUILaunchFramework()
+	if err != nil {
+		return base
+	}
+	snap, err := panel.ScreenState()
+	if err != nil {
+		return base
+	}
+	return classifyCloseObservation(framework, done, quiescent, snap)
+}
+
+func (m model) observeClose(panel work.SessionPanelModel) closeObservation {
+	if m.observeCloseFn != nil {
+		return m.observeCloseFn(panel)
+	}
+	return observeClosePanel(panel)
 }
 
 // handleCloseRequestDeleted surfaces a failed row delete. The pendingClose entry
@@ -474,16 +493,9 @@ func (m model) advanceCloseLadders() (model, []tea.Cmd) {
 			delete(m.pendingClose, slug)
 			continue
 		}
-		// A running session paused on an interactive prompt reads as quiescent
-		// but must not be torn down mid-prompt; the screen classification tells
-		// the two apart. Skip the read for a finished process — teardown is
-		// unconditionally safe there and QuiescentForClose short-circuits on it.
-		interactive := false
-		if !panel.IsDone() {
-			interactive = m.interactivePrompt(panel)
-		}
-		if !panel.QuiescentForClose(interactive) {
-			if interactive {
+		obs := m.observeClose(panel)
+		if !obs.done {
+			if obs.interactive() {
 				// Blocked on an open modal. Hold up to the modal-hold bound so a human
 				// mid-answer can finish; a prompt that clears re-reads as safe next
 				// tick and closes normally.
@@ -500,12 +512,29 @@ func (m model) advanceCloseLadders() (model, []tea.Cmd) {
 					cmds = append(cmds, m.closeFailedCmd(slug, pc.requestID, closeFailedInteractivePrompt, m.localSessions[slug]))
 					continue
 				}
-			} else {
-				// Mid-turn. An interrupted session whose bounded grace has elapsed
-				// proceeds down the ladder anyway — the interrupt did not end the turn,
-				// so SIGTERM→KILL will (a --yes turn may never quiesce). Everything
-				// else keeps waiting.
-				if pc.interruptedAt.IsZero() || time.Since(pc.interruptedAt) < m.interruptGrace() {
+			} else if obs.generating() {
+				if pc.reason == closeReasonProtocolTerminus {
+					if time.Since(pc.consumedAt) < m.terminusGrace() {
+						continue
+					}
+					delete(m.pendingClose, slug)
+					cmds = append(cmds, m.closeFailedCmd(slug, pc.requestID, closeFailedStillGenerating, m.localSessions[slug]))
+					continue
+				}
+
+				// Explicit authority first gives the turn a courtesy window to finish
+				// naturally. Only after that bound may it inject ESC; the existing
+				// interrupt grace then leads to the force-teardown ladder if needed.
+				if pc.interruptedAt.IsZero() {
+					if time.Since(pc.consumedAt) < m.explicitGrace() {
+						continue
+					}
+					_ = panel.Interrupt()
+					pc.interruptedAt = time.Now()
+					m.pendingClose[slug] = pc
+					continue
+				}
+				if time.Since(pc.interruptedAt) < m.interruptGrace() {
 					continue
 				}
 			}
@@ -514,29 +543,6 @@ func (m model) advanceCloseLadders() (model, []tea.Cmd) {
 		cmds = append(cmds, m.closeLadderCmd(slug, panel, pc.requestID))
 	}
 	return m, cmds
-}
-
-// atInteractivePrompt reports whether the panel's live screen shows an
-// interactive prompt — the state the close ladder must not tear down through. It
-// resolves the active harness's screen matcher (the same one the injection
-// readiness gate uses) and reads a ScreenSnapshot; on any failure (no framework,
-// no interaction contract, snapshot error) it returns
-// false so a screen we cannot classify never blocks a close indefinitely. It
-// reads the shared terminal backend, so callers must invoke it on the Bubble Tea
-// goroutine (advanceCloseLadders' two callers both do).
-func atInteractivePrompt(panel work.SessionPanelModel) bool {
-	framework, err := config.ResolveTUILaunchFramework()
-	if err != nil {
-		return false
-	}
-	if _, ok := screenMatchers[framework]; !ok {
-		return false
-	}
-	snap, err := panel.ScreenState()
-	if err != nil {
-		return false
-	}
-	return interactivePromptState(framework, snap)
 }
 
 // closeFailedCmd journals one close_failed row for a consumed close-request that

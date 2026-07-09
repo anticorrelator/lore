@@ -73,6 +73,29 @@ type screenClass struct {
 	heldInput   bool
 }
 
+// closeObservation is one close tick's view of a panel: process lifecycle and
+// the timer-derived idle edge paired with one shared screen classification.
+// Keeping the full screenClass here makes composer and interactive meaning come
+// from the same matcher set used by send and peek.
+type closeObservation struct {
+	done        bool
+	quiescent   bool
+	screen      screenClass
+	screenKnown bool
+}
+
+func (o closeObservation) interactive() bool {
+	return !o.done && o.screenKnown && o.screen.interactive
+}
+
+func (o closeObservation) idleComposer() bool {
+	return !o.done && o.screenKnown && o.screen.composer && !o.screen.pending && !o.screen.heldInput
+}
+
+func (o closeObservation) generating() bool {
+	return !o.done && !o.quiescent && !o.interactive() && !o.idleComposer()
+}
+
 func classifyScreen(framework string, snap work.ScreenSnapshot) (screenClass, bool) {
 	mm, ok := screenMatchers[framework]
 	if !ok {
@@ -87,6 +110,20 @@ func classifyScreen(framework string, snap work.ScreenSnapshot) (screenClass, bo
 		placeholder: mm.placeholder != nil && mm.placeholder(rows, ansiRows),
 		heldInput:   mm.heldInput != nil && mm.heldInput(rows, ansiRows),
 	}, true
+}
+
+// classifyCloseObservation pairs the panel's lifecycle/idle state with the
+// shared harness screen classifier. Callers provide one ScreenSnapshot, so a
+// close tick cannot make its generation and prompt decisions from different
+// terminal paints.
+func classifyCloseObservation(framework string, done, quiescent bool, snap work.ScreenSnapshot) closeObservation {
+	state, ok := classifyScreen(framework, snap)
+	return closeObservation{
+		done:        done,
+		quiescent:   quiescent,
+		screen:      state,
+		screenKnown: ok,
+	}
 }
 
 // sendObs is the post-inject observation: the paste was submitted, the composer

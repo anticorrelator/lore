@@ -289,32 +289,40 @@ Consuming a close-request always deletes the row (the durable ack; `close_reques
 already recorded intent); what the TUI does next branches on the request's `reason`.
 An **explicit close** — `reason` `human` (the `session close` CLI default) or
 `coordinator` — **always acts**, regardless of initiator or session state: an idle
-session runs the exit ladder directly, a still-**generating** session gets the
-interrupt-escalation rung (below) first, and either way `closed` is journaled with
-spend. There is no authority gate and no refusal on this path — an operator's or
-coordinator's explicit close is never a silent no-op. A **protocol-terminus** close
+session runs the exit ladder directly, while a still-**generating** session gets a
+two-second natural-quiescence courtesy window before the interrupt-escalation rung
+(below), and either way `closed` is journaled with spend. There is no authority gate
+on this path — an operator's or coordinator's explicit close is never a silent
+no-op. A **protocol-terminus** close
 — `reason: protocol_terminus`, enqueued by a protocol's own finalize step
 (`spec-finalize` / `impl-close` via `session close --self --reason protocol_terminus`)
 — keeps the **initiator/`auto_close` gate**: an agent-initiated session auto-closes
-(ladder on quiescence, `closed` journaled), while a human-initiated session (or one
-carrying `auto_close: false`) is **held open** with a "done" panel badge so the human
-can read output, send follow-ups, or run an in-session closing-act retro (teardown
-stays available through `Ctrl+\` or a later explicit close). The `auto_close` field
-overrides that terminus gate in either direction (`false` holds an agent session
-open; `true` opts a human session into terminus auto-close). The gate reads the
-session's `initiator` and `auto_close` (already on the registry/journal) — it adds no
-new substrate state, and the close-request row itself is unchanged.
+(ladder after natural quiescence, `closed` journaled), while a human-initiated
+session (or one carrying `auto_close: false`) is **held open** with a "done" panel
+badge so the human can read output, send follow-ups, or run an in-session
+closing-act retro (teardown stays available through `Ctrl+\` or a later explicit
+close). The `auto_close` field overrides that terminus gate in either direction
+(`false` holds an agent session open; `true` opts a human session into terminus
+auto-close). The gate reads the session's `initiator` and `auto_close` (already on
+the registry/journal) — it adds no new substrate state, and the close-request row
+itself is unchanged.
 
-**Interrupt-escalation rung.** A `--yes` protocol run is one unbroken turn: the
-graceful exit rung waits for a turn boundary that never comes, so a close request
-that will tear down a still-generating session (any explicit close, or an
-agent-initiated terminus close) injects the terminal interrupt (ESC) into the session
-PTY the TUI owns — which for a tmux-hosted session travels through the attach client
-into the pane transparently — to end the turn. Teardown then proceeds on the
-session's next quiescence, or, if the interrupt does not end the turn within a bounded
-grace, down the existing exit ladder (graceful → SIGTERM → KILL) regardless. A
-human-initiated session held open at terminus is not being torn down, so it is never
-interrupted.
+**Reason-discriminated generation waits and interrupt escalation.** A generating
+`protocol_terminus` close is cooperative because it was requested from inside the
+turn whose completion it records. It waits up to two minutes for natural quiescence
+and never writes ESC or enters SIGTERM/KILL while that turn is generating. Natural
+quiescence proceeds into the ordinary exit ladder. If the bound expires first, the
+consumed request resolves as `close_failed` with `reason: still-generating`; only
+its pending-close state is cleared, and the live session, panel, and registry entry
+remain intact. A coordinator or operator can then reissue an explicit close as the
+sanctioned escalation path.
+
+An explicit human/coordinator close retains teardown authority. It waits two
+seconds for the turn to finish naturally, then injects ESC into the session PTY —
+which for a tmux-hosted session travels through the attach client into the pane —
+and preserves the existing bounded post-interrupt wait followed by the exit ladder
+(graceful → SIGTERM → KILL). A human-initiated session held open at protocol
+terminus is not being torn down and is never interrupted by that terminus request.
 
 Teardown of a quiescent auto-close session is additionally held while the
 session sits at an **interactive prompt** (a harness permission/approval modal,
@@ -328,14 +336,20 @@ became of the intent. Every consumed close therefore resolves to exactly one of
 two terminal events: `closed` when teardown completes, or `close_failed` when it
 does not. `close_failed` carries a `reason` from a documented set:
 `interactive-prompt` (a held prompt never cleared, so an auto-close session could
-not be torn down), `rung-exhausted` (the exit ladder ran graceful → SIGTERM → KILL
-without the session ending), or `error` (any other teardown fault). Because the
-row is already gone, `close_failed` is the only signal that an explicit close did
-not land — it keeps such a close from becoming a silent no-op. A watcher keyed on
+not be torn down), `still-generating` (a cooperative protocol-terminus wait expired;
+the session remains alive for a later explicit close), `rung-exhausted` (the exit
+ladder ran graceful → SIGTERM → KILL without the session ending), or `error` (any
+other teardown fault). Because the row is already gone, `close_failed` is the only
+signal that a consumed close did not land — it keeps the outcome from becoming a
+silent no-op. A watcher keyed on
 `closed` alone sleeps through this second terminal, so a close-outcome watcher must
 wait on `closed` **or** `close_failed`. Like `closed`, the `close_requested →
 close_failed` pair is matched by per-slug ordering, never adjacency — running-session
 transitions may fall between the request and its terminal.
+
+These close-policy changes take effect in live operator sessions only after the
+operator rebuilds the TUI; updating the source and contract does not replace an
+already-running binary.
 
 There is one bound. A TUI that consumes a close request and then crashes before
 emitting either terminal row leaves a `close_requested` with no terminal — no
@@ -484,7 +498,7 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `request_abandoned` | TUI | `attempts >= 3`; request dropped, journal row is the dead-letter (carries last `reason`) |
 | `request_cancelled` | `session close --request` cancel verb | a pending spawn request was cancelled |
 | `close_requested` | `session close` enqueue verb (`<slug>` / `--self`) | a close request was enqueued for the instance running a slug |
-| `close_failed` | TUI | a consumed close request did not complete teardown; `reason` names why (`interactive-prompt`/`rung-exhausted`/`error`) |
+| `close_failed` | TUI | a consumed close request did not complete teardown; `reason` names why (`interactive-prompt`/`still-generating`/`rung-exhausted`/`error`) |
 | `send_requested` | `session send` enqueue verb | a send request was enqueued for the instance running a slug |
 | `sent` | TUI | the message was injected AND a later observation confirmed the composer submitted it (verified-outcome; see [Send-request queue](#send-request-queue)) |
 | `send_refused` | TUI | injection was refused, or an injected message never submitted; `reason` names why — gate refusals (`generating`/`modal`/`no-signature`/`no-contract`/`unsafe-payload`/`error`) or the post-inject `unsubmitted` |

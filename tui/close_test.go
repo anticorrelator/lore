@@ -85,6 +85,44 @@ func captureStderr(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
+// panelWithInterruptCapture returns a live-looking panel whose PTY writes are
+// captured in a temporary file, so close tests can distinguish "no interrupt"
+// from a best-effort Interrupt call that failed for lack of a PTY.
+func panelWithInterruptCapture(t *testing.T, slug string) (work.SessionPanelModel, *os.File) {
+	t.Helper()
+	ptmx, err := os.CreateTemp(t.TempDir(), "close-pty-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ptmx.Close() })
+	panel, _ := work.NewSessionPanelModel(slug).Update(work.SessionProcessStartedMsg{
+		Slug: slug,
+		Ptmx: ptmx,
+	})
+	return panel, ptmx
+}
+
+func capturedPTYBytes(t *testing.T, ptmx *os.File) []byte {
+	t.Helper()
+	if err := ptmx.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(ptmx.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestCloseReasonGraceDefaults(t *testing.T) {
+	if got := (model{}).terminusGrace(); got != 2*time.Minute {
+		t.Fatalf("terminus grace = %s, want 2m", got)
+	}
+	if got := (model{}).explicitGrace(); got != 2*time.Second {
+		t.Fatalf("explicit grace = %s, want 2s", got)
+	}
+}
+
 // TestRunCloseLadder_DegradesToSIGTERM: with no capability sequence the ladder
 // skips rung 1 with an explicit degradation notice, never touches the ptmx, and
 // a process that exits on SIGTERM is never killed.
@@ -475,19 +513,20 @@ func TestShouldAutoClose_OverrideMatrix(t *testing.T) {
 
 // TestHandleCloseRequestScan_ExplicitFullDiscretion: an explicit close (reason
 // human/coordinator) always schedules teardown, regardless of initiator. A
-// generating session (human or agent) is marked pendingClose — never badged, never
-// held — and is interrupted so its turn ends; the interrupt keeps it in pendingClose
-// (advanceCloseLadders waits out the bounded grace) rather than dispatching mid-turn.
+// generating session is never badged or held: it gets a natural-quiescence
+// courtesy window, then ESC, then the existing bounded escalation path.
 func TestHandleCloseRequestScan_ExplicitFullDiscretion(t *testing.T) {
 	m, _ := baseSessionModel(t)
+	m.closeExplicitGrace = time.Hour
 	m.localSessions = map[string]liveSession{
 		"human-gen": {typ: "spec", initiator: "human", started: time.Now()},
 		"agent-gen": {typ: "spec", initiator: "agent", started: time.Now()},
 	}
-	// Fresh panels read as generating (not done, not awaiting input).
+	humanPanel, humanPTY := panelWithInterruptCapture(t, "human-gen")
+	agentPanel, agentPTY := panelWithInterruptCapture(t, "agent-gen")
 	m.sessionPanels = map[string]work.SessionPanelModel{
-		"human-gen": work.NewSessionPanelModel("human-gen"),
-		"agent-gen": work.NewSessionPanelModel("agent-gen"),
+		"human-gen": humanPanel,
+		"agent-gen": agentPanel,
 	}
 
 	m, cmd := m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{
@@ -506,9 +545,43 @@ func TestHandleCloseRequestScan_ExplicitFullDiscretion(t *testing.T) {
 		if m.sessionPanels[slug].CloseRequested() {
 			t.Errorf("%s: explicit close must not badge/hold the session open", slug)
 		}
-		if pc.interruptedAt.IsZero() {
-			t.Errorf("%s: generating session bound for teardown should be interrupted", slug)
+		if !pc.interruptedAt.IsZero() {
+			t.Errorf("%s: explicit close interrupted before the courtesy grace elapsed", slug)
 		}
+	}
+	if got := capturedPTYBytes(t, humanPTY); len(got) != 0 {
+		t.Fatalf("human explicit close wrote PTY bytes within courtesy grace: %v", got)
+	}
+	if got := capturedPTYBytes(t, agentPTY); len(got) != 0 {
+		t.Fatalf("coordinator explicit close wrote PTY bytes within courtesy grace: %v", got)
+	}
+
+	// Expire the courtesy window: exactly one ESC per generating session, but no
+	// force-teardown ladder until the existing post-interrupt grace expires.
+	for slug, pc := range m.pendingClose {
+		pc.consumedAt = time.Now().Add(-2 * time.Hour)
+		m.pendingClose[slug] = pc
+	}
+	m, cmds := m.advanceCloseLadders()
+	if len(cmds) != 0 {
+		t.Fatalf("explicit close dispatched %d ladders in the ESC tick, want 0", len(cmds))
+	}
+	for slug, ptmx := range map[string]*os.File{"human-gen": humanPTY, "agent-gen": agentPTY} {
+		if got := capturedPTYBytes(t, ptmx); !bytes.Equal(got, []byte{0x1b}) {
+			t.Errorf("%s: PTY bytes after courtesy grace = %v, want one ESC", slug, got)
+		}
+		if m.pendingClose[slug].interruptedAt.IsZero() {
+			t.Errorf("%s: interruptedAt not stamped after ESC", slug)
+		}
+	}
+
+	for slug, pc := range m.pendingClose {
+		pc.interruptedAt = time.Now().Add(-2 * time.Hour)
+		m.pendingClose[slug] = pc
+	}
+	_, cmds = m.advanceCloseLadders()
+	if len(cmds) != 2 {
+		t.Fatalf("explicit close dispatched %d ladders after interrupt grace, want 2", len(cmds))
 	}
 }
 
@@ -542,6 +615,9 @@ func TestHandleCloseRequestScan_ProtocolTerminusGate(t *testing.T) {
 	if _, pending := m.pendingClose["agent-term"]; !pending {
 		t.Error("agent session should auto-close at terminus")
 	}
+	if !m.pendingClose["agent-term"].interruptedAt.IsZero() {
+		t.Error("generating protocol terminus must never enter the interrupt rung")
+	}
 	if m.sessionPanels["agent-term"].CloseRequested() {
 		t.Error("auto-closing agent session should not be badged")
 	}
@@ -557,6 +633,90 @@ func TestHandleCloseRequestScan_ProtocolTerminusGate(t *testing.T) {
 	if !m.sessionPanels["hold-term"].CloseRequested() {
 		t.Error("auto_close=false session should carry the held-open badge")
 	}
+}
+
+// TestProtocolTerminusSelfCloseDuringGeneratingTail is the shipped regression
+// shape: a session consumes its own terminus close while still generating the
+// post-tool tail. The request never writes ESC. Natural completion produces one
+// correlated closed terminal; grace expiry produces one truthful refusal while
+// leaving the session and panel intact.
+func TestProtocolTerminusSelfCloseDuringGeneratingTail(t *testing.T) {
+	t.Run("natural quiescence closes", func(t *testing.T) {
+		m, _ := baseSessionModel(t)
+		m.eventScript = repoScriptPath(t, "session-event-append.sh")
+		kdir := m.config.KnowledgeDir
+		panel, ptmx := panelWithInterruptCapture(t, "demo")
+		m.localSessions = map[string]liveSession{
+			"demo": {typ: "implement", initiator: "agent", started: time.Now()},
+		}
+		m.sessionPanels = map[string]work.SessionPanelModel{"demo": panel}
+
+		m, _ = m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{{
+			RequestID: "self-natural", Slug: "demo", TargetInstance: "me", Reason: closeReasonProtocolTerminus,
+		}}})
+		if got := capturedPTYBytes(t, ptmx); len(got) != 0 {
+			t.Fatalf("self-close wrote interrupt bytes during its generating tail: %v", got)
+		}
+		if !m.pendingClose["demo"].interruptedAt.IsZero() {
+			t.Fatal("self-close stamped interruptedAt during its generating tail")
+		}
+
+		panel, _ = m.sessionPanels["demo"].Update(work.StreamCompleteMsg{Slug: "demo"})
+		m.sessionPanels["demo"] = panel
+		m, cmds := m.advanceCloseLadders()
+		if len(cmds) != 1 {
+			t.Fatalf("natural completion dispatched %d ladder cmds, want 1", len(cmds))
+		}
+		msg := cmds[0]().(closeLadderDoneMsg)
+		m, cmd := m.handleCloseLadderDone(msg)
+		runJournalCmds(t, cmd)
+		rows := readEventRows(t, kdir)
+		if len(rows) != 1 || rows[0].Event != session.EventClosed || rows[0].RequestID != "self-natural" {
+			t.Fatalf("natural self-close terminal = %+v, want one correlated closed", rows)
+		}
+	})
+
+	t.Run("deadline refuses alive", func(t *testing.T) {
+		m, _ := baseSessionModel(t)
+		m.eventScript = repoScriptPath(t, "session-event-append.sh")
+		kdir := m.config.KnowledgeDir
+		m.closeTerminusGrace = time.Hour
+		panel, ptmx := panelWithInterruptCapture(t, "demo")
+		m.localSessions = map[string]liveSession{
+			"demo": {typ: "implement", initiator: "agent", started: time.Now()},
+		}
+		m.sessionPanels = map[string]work.SessionPanelModel{"demo": panel}
+
+		m, _ = m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{{
+			RequestID: "self-expired", Slug: "demo", TargetInstance: "me", Reason: closeReasonProtocolTerminus,
+		}}})
+		pc := m.pendingClose["demo"]
+		pc.consumedAt = time.Now().Add(-2 * time.Hour)
+		m.pendingClose["demo"] = pc
+		m, cmds := m.advanceCloseLadders()
+		if len(cmds) != 1 {
+			t.Fatalf("expired self-close emitted %d cmds, want one close_failed Cmd", len(cmds))
+		}
+		if _, pending := m.pendingClose["demo"]; pending {
+			t.Fatal("expired self-close left pending state after its terminal decision")
+		}
+		if _, alive := m.localSessions["demo"]; !alive {
+			t.Fatal("still-generating refusal removed localSessions entry")
+		}
+		if _, hosted := m.sessionPanels["demo"]; !hosted {
+			t.Fatal("still-generating refusal removed sessionPanels entry")
+		}
+		if got := capturedPTYBytes(t, ptmx); len(got) != 0 {
+			t.Fatalf("expired self-close wrote interrupt bytes: %v", got)
+		}
+
+		runJournalCmds(t, tea.Batch(cmds...))
+		rows := readEventRows(t, kdir)
+		if len(rows) != 1 || rows[0].Event != session.EventCloseFailed ||
+			rows[0].Reason != closeFailedStillGenerating || rows[0].RequestID != "self-expired" {
+			t.Fatalf("expired self-close terminal = %+v, want one close_failed/still-generating with request id", rows)
+		}
+	})
 }
 
 // TestClosedPanelInputMsg_SetsStatusNotice is the contract for the closed-panel
@@ -651,7 +811,9 @@ func TestAdvanceCloseLadders_ExplicitModalHold(t *testing.T) {
 	m, _ := baseSessionModel(t)
 	m.eventScript = repoScriptPath(t, "session-event-append.sh")
 	kdir := m.config.KnowledgeDir
-	m.atInteractivePromptFn = func(work.SessionPanelModel) bool { return true }
+	m.observeCloseFn = func(work.SessionPanelModel) closeObservation {
+		return closeObservation{quiescent: true, screenKnown: true, screen: screenClass{interactive: true}}
+	}
 	m.closeModalHold = time.Hour // long bound so the "within hold" phase holds
 	m.localSessions = map[string]liveSession{"demo": {typ: "spec", initiator: "human", started: time.Now()}}
 	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
@@ -703,7 +865,9 @@ func TestAdvanceCloseLadders_TerminusModalRefuses(t *testing.T) {
 	m, _ := baseSessionModel(t)
 	m.eventScript = repoScriptPath(t, "session-event-append.sh")
 	kdir := m.config.KnowledgeDir
-	m.atInteractivePromptFn = func(work.SessionPanelModel) bool { return true }
+	m.observeCloseFn = func(work.SessionPanelModel) closeObservation {
+		return closeObservation{quiescent: true, screenKnown: true, screen: screenClass{interactive: true}}
+	}
 	m.localSessions = map[string]liveSession{"demo": {typ: "spec", initiator: "agent", started: time.Now()}}
 	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
 	m.pendingClose = map[string]pendingCloseState{"demo": {
@@ -743,8 +907,8 @@ func TestAdvanceCloseLadders_TerminusOptionSelectRefuses(t *testing.T) {
 	m, _ := baseSessionModel(t)
 	m.eventScript = repoScriptPath(t, "session-event-append.sh")
 	kdir := m.config.KnowledgeDir
-	m.atInteractivePromptFn = func(work.SessionPanelModel) bool {
-		return interactivePromptState("claude-code", work.ScreenSnapshot{Rows: ccOptionSelectRows})
+	m.observeCloseFn = func(work.SessionPanelModel) closeObservation {
+		return classifyCloseObservation("claude-code", false, true, work.ScreenSnapshot{Rows: ccOptionSelectRows})
 	}
 	m.localSessions = map[string]liveSession{"demo": {typ: "chat", initiator: "agent", started: time.Now()}}
 	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}

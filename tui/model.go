@@ -290,16 +290,21 @@ type model struct {
 	// so the ladder never blocks on a real 5s wait.
 	closeGrace time.Duration
 	closePoll  time.Duration
+	// closeTerminusGrace bounds how long a generating protocol-terminus close
+	// waits for natural quiescence before refusing teardown; closeExplicitGrace
+	// is the courtesy wait before an explicit close injects ESC. Zero values use
+	// the production defaults; tests inject short bounds.
+	closeTerminusGrace time.Duration
+	closeExplicitGrace time.Duration
 	// closeModalHold bounds how long advanceCloseLadders holds a close blocked by
 	// an open interactive prompt (a permission/approval modal) before acting. It is
 	// a seam: a zero value falls back to closeModalHoldDefault; tests inject a small
 	// value so the modal-hold split is exercised without a 30s wait.
 	closeModalHold time.Duration
-	// atInteractivePromptFn classifies a non-done panel as blocked on an
-	// interactive prompt (a permission/approval modal is showing). A nil value uses
-	// the live screen classification (atInteractivePrompt); tests inject a
-	// deterministic result to drive the modal-hold split without a real emulator.
-	atInteractivePromptFn func(work.SessionPanelModel) bool
+	// observeCloseFn injects one already-classified close observation in tests. A
+	// nil value reads at most one live ScreenSnapshot and routes it through
+	// classifyScreen before the close state machine advances.
+	observeCloseFn func(work.SessionPanelModel) closeObservation
 
 	showHelp bool
 	// helpViewport scrolls the help modal's keybinding list when it exceeds

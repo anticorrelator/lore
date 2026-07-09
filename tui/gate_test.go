@@ -173,6 +173,35 @@ func TestSendReadiness(t *testing.T) {
 	}
 }
 
+func TestClassifyCloseObservationUsesSharedScreenClass(t *testing.T) {
+	// The screen classifier can identify an idle composer before the timer edge
+	// flips NeedsInput, so close must not mistake that paint for active generation.
+	composer := classifyCloseObservation("claude-code", false, false, work.ScreenSnapshot{Rows: ccComposerRows})
+	if !composer.screenKnown || !composer.screen.composer || composer.interactive() || composer.generating() {
+		t.Fatalf("idle composer observation = %+v, want known composer idle", composer)
+	}
+
+	modal := classifyCloseObservation("claude-code", false, false, work.ScreenSnapshot{Rows: ccOptionSelectRows})
+	if !modal.interactive() || modal.generating() {
+		t.Fatalf("option-select observation = %+v, want interactive and not generating", modal)
+	}
+
+	generating := classifyCloseObservation("claude-code", false, false, work.ScreenSnapshot{Rows: []string{"working..."}})
+	if !generating.generating() || generating.interactive() {
+		t.Fatalf("active-turn observation = %+v, want generating", generating)
+	}
+
+	unknown := classifyCloseObservation("ghostwriter", false, false, work.ScreenSnapshot{Rows: ccComposerRows})
+	if unknown.screenKnown || !unknown.generating() {
+		t.Fatalf("unknown-framework observation = %+v, want conservative generating", unknown)
+	}
+
+	done := classifyCloseObservation("claude-code", true, false, work.ScreenSnapshot{Rows: ccOptionSelectRows})
+	if done.generating() || done.interactive() {
+		t.Fatalf("done observation = %+v, want neither generating nor interactive", done)
+	}
+}
+
 func TestPeekRowsRedactsFaintPlaceholder(t *testing.T) {
 	got := peekRows("claude-code", work.ScreenSnapshot{Rows: ccGhostRows, ANSI: ccGhostANSI})
 	if strings.Contains(strings.Join(got, "\n"), "commit this") {
