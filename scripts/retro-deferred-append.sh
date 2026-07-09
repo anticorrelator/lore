@@ -360,7 +360,7 @@ print(json.dumps({
     "verdict": verdict or None,
     "coin": float(coin_str) if coin_str else None,
     "ts": ts,
-}, ensure_ascii=False))
+}, ensure_ascii=False, separators=(",", ":")))
 ' "$CYCLE_ID" "$EVENT_TYPE" "$OUTCOME_ID" "$REASON" "$RATE" "$STRATUM" \
     "$TEMPLATE_VERSION" "$VERDICT" "$COIN" "$TS")
 else
@@ -380,7 +380,7 @@ print(json.dumps({
     "verdict": verdict or None,
     "coin": float(coin_str) if coin_str else None,
     "ts": ts,
-}, ensure_ascii=False))
+}, ensure_ascii=False, separators=(",", ":")))
 ' "$CYCLE_ID" "$EVENT_TYPE" "$OUTCOME" "$RATE" "$STRATUM" \
     "$TEMPLATE_VERSION" "$VERDICT" "$COIN" "$TS")
 fi
