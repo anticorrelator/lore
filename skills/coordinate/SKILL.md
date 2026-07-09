@@ -89,14 +89,14 @@ Then: close the session (or let protocol-terminus auto-close do it); **check con
 
 ### Retro
 
-A ledger step per completed cycle, never a coda. At the ordinary retro checkpoint, run `lore retro queue` and read its narrow substrate-native fold before deciding the ledger outcome. For every `outcome=due`, `disposition=unhandled` identity, make exactly one explicit cadence decision: dispatch `/retro`, defer it, or skip it. Record that decision through the handling front, keyed by the queue's `outcome_id`:
+A ledger step per completed cycle, never a coda. The gate's verdicts outlive their termini, so an unhandled DUE is a debt the substrate keeps visible until the seat decides it — never silence to interpret. At the ordinary retro checkpoint, read `lore retro queue` — the retro substrate's own narrow fold — before deciding the ledger outcome. Each `outcome=due`, `disposition=unhandled` identity is owed exactly one explicit cadence decision: dispatch `/retro`, defer it, or skip it. Record the decision through the handling front, keyed by the queue's `outcome_id`:
 
 ```bash
 lore retro handle --outcome-id <id> \
   --action <dispatched|deferred|skipped> --handled-by coordinate
 ```
 
-The appender records the correlated `disposition=handled` transition with action, actor, and time; identical retries are no-ops and conflicting transitions fail loudly. Then ledger the corresponding `dispatched:<ref>`, `deferred (rate, stratum)`, or `skipped (user)` outcome. Reading the queue does not auto-run `/retro`, and a DUE does not put retro on the critical path: cadence follows the user. This is only the retro substrate's own fold, not the cross-substrate coordinator state projection owned by its sibling item.
+The appender records the correlated `disposition=handled` transition with action, actor, and time; an identical retry is a no-op and a conflicting transition fails loudly, so the record is safe to write and impossible to quietly overwrite. Then ledger the matching outcome — `dispatched:<ref>`, `deferred (rate, stratum)`, or `skipped (user)`. Reading the queue does not auto-run `/retro`, and a DUE does not put retro on the critical path: cadence follows the user. Know the scope of what you read: this is the retro substrate's own fold, not the cross-substrate coordinator state projection owned by its sibling item.
 
 ## What escalates
 
