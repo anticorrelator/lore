@@ -188,7 +188,7 @@ setup_store
 EXIT_CODE=0
 STDERR=$(valid_call --status "maybe" 2>&1) || EXIT_CODE=$?
 assert_eq "invalid --status exits 1" "$EXIT_CODE" "1"
-assert_contains "stderr names pending/accepted/declined/remediated" "$STDERR" "pending"
+assert_contains "stderr names pending/verified/contradicted" "$STDERR" "contradicted"
 
 echo ""
 echo "Test 5c: Invalid --severity-hint rejected"

@@ -30,9 +30,9 @@
 #       [--normalized-snippet-hash <sha256>]
 #       [--symbol-anchor <anchor>]
 #       [--severity-hint low|medium|high]
-#       [--status pending|verified|rejected]
+#       [--status pending|verified|contradicted]
 #         # pending is the initial state at row append time.
-#         # verified|rejected are the canonical terminal states set via
+#         # verified|contradicted are the canonical terminal states set via
 #         # consumption-contradiction-update-status.sh after a
 #         # correctness-gate verdict. Legacy values (accepted|declined|
 #         # remediated) are no longer accepted — the writer rejects them.
@@ -80,7 +80,7 @@ Usage: consumption-contradiction-append.sh \
            [--normalized-snippet-hash <sha256>] \
            [--symbol-anchor <anchor>] \
            [--severity-hint low|medium|high] \
-           [--status pending|verified|rejected] \
+           [--status pending|verified|contradicted] \
            [--contradiction-id <ctr-id>] \
            [--settled-by-run-id <id>] \
            [--created-at <iso8601>] \
@@ -198,21 +198,21 @@ case "$SOURCE_KIND" in
 esac
 
 # --- Enum validation: --status (default pending) ---
-# Canonical vocabulary only: pending (initial) | verified | rejected (terminal).
-# verified/rejected are set by consumption-contradiction-update-status.sh after
+# Canonical vocabulary only: pending (initial) | verified | contradicted (terminal).
+# verified/contradicted are set by consumption-contradiction-update-status.sh after
 # a correctness-gate verdict; the append writer should normally see pending.
 # Legacy values (accepted|declined|remediated) are no longer accepted.
 # Cross-substrate contract: these exact spellings are keyed on by both
 # settlement-processor.py (sidecar sweep enqueues only status:pending rows)
-# and /retro Step 2b.7 (reader trio pending|verified|rejected). Changing the
+# and /retro Step 2b.7 (reader trio pending|verified|contradicted). Changing the
 # initial-state spelling here silently breaks both readers.
 if [[ -z "$STATUS" ]]; then
   STATUS="pending"
 fi
 case "$STATUS" in
-  pending|verified|rejected) : ;;
+  pending|verified|contradicted) : ;;
   *)
-    fail "--status must be 'pending', 'verified', or 'rejected' (got '$STATUS')"
+    fail "--status must be 'pending', 'verified', or 'contradicted' (got '$STATUS')"
     ;;
 esac
 
@@ -391,8 +391,8 @@ if nsh:
     row["claim_payload"]["normalized_snippet_hash"] = nsh
 
 # settled_by_run_id: omit-when-empty (audit-pipeline omit-when-empty convention).
-# Populated when an upstream caller — e.g. correctness-gate-rollup.sh — wants to
-# anchor a row to the run that produced its terminal verdict at create time.
+# Retained for fixture/bootstrap callers that create an already-terminal row;
+# live settlement normally stamps it through the update writer.
 sbri = env("SETTLED_BY_RUN_ID")
 if sbri:
     row["settled_by_run_id"] = sbri

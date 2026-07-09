@@ -1,41 +1,19 @@
 #!/usr/bin/env bash
-# consumption-contradiction-update-status.sh — Flip the status field on an
-# existing contradiction row in `_work/<slug>/consumption-contradictions.jsonl`.
+# consumption-contradiction-update-status.sh — Sanctioned lifecycle mutator for
+# an existing consumption-contradiction sidecar row.
 #
-# Sibling sole-update-writer to consumption-contradiction-append.sh. The
-# append script remains the sole creator of new rows (its append-only
-# invariant at :46-49 is preserved). This script is the sole sanctioned
-# mutator of the `status` field on rows that already exist.
+# Usage:
+#   consumption-contradiction-update-status.sh \
+#       --work-item <slug> \
+#       --contradiction-id <ctr-id> \
+#       --status <verified|contradicted> \
+#       --settled-at <iso8601-with-timezone> \
+#       [--settled-by-run-id <id>] [--kdir <path>] [--json]
 #
-# Sole-writer discipline is per-file, not per-script: append-writer + a
-# sibling update-writer satisfies the invariant
-# (knowledge:conventions/validation/sole-writer-discipline-across-settlement-substrate).
-#
-# Usage (see --help):
-#   consumption-contradiction-update-status.sh
-#       --contradiction-id <ctr-id>
-#       --status <verified|rejected>
-#       [--settled-by-run-id <id>]
-#       [--kdir <path>]
-#       [--json]
-#
-# Semantics:
-#   - Locates the sidecar by scanning $KDIR/_work/*/consumption-contradictions.jsonl
-#     for a row whose `contradiction_id` matches.
-#   - Identity-verified read-modify-write: re-reads the file, finds the row
-#     (verifying contradiction_id matches before mutation), then writes back.
-#   - Idempotent: if the row is already in the target status, exit 0 with a
-#     no-op log to stderr — no file mutation.
-#   - On mutation: sets `status` to the new value, `settled_at` to the current
-#     ISO-8601 UTC timestamp, and (when supplied) `settled_by_run_id`.
-#   - Post-write byte-count check: file size must equal pre-write size + the
-#     row-level delta. If it does not match, the script bails and does not
-#     attempt to repair partial state.
-#
-# Exit codes:
-#   0 — row updated, OR row already in target state (idempotent no-op)
-#   1 — validation failure, contradiction-id not found, or post-write
-#       byte-count mismatch
+# The writer owns identity, timestamp, and transition validation. It searches
+# only the exact work item's active and archived sidecars, rejects ambiguous
+# locations or duplicate identities, permits pending -> terminal and the same
+# terminal as an idempotent no-op, and refuses conflicting terminal rewrites.
 
 set -euo pipefail
 
@@ -45,30 +23,35 @@ source "$SCRIPT_DIR/lib.sh"
 usage() {
   cat >&2 <<'EOF'
 Usage: consumption-contradiction-update-status.sh \
+           --work-item <slug> \
            --contradiction-id <ctr-id> \
-           --status <verified|rejected> \
+           --status <verified|contradicted> \
+           --settled-at <iso8601-with-timezone> \
            [--settled-by-run-id <id>] \
-           [--kdir <path>] \
-           [--json]
+           [--kdir <path>] [--json]
 
-Flip the status field on an existing contradiction row to verified|rejected.
-Idempotent: re-running with the same target state exits 0 with no file change.
+Transition one exact work-item/contradiction row from pending to a correctness
+verdict. Re-running the same terminal transition is an idempotent no-op.
 EOF
 }
 
+WORK_ITEM=""
 CONTRADICTION_ID=""
 NEW_STATUS=""
+SETTLED_AT=""
 SETTLED_BY_RUN_ID=""
 KDIR_OVERRIDE=""
 JSON_MODE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --contradiction-id)     CONTRADICTION_ID="$2";    shift 2 ;;
-    --status)               NEW_STATUS="$2";          shift 2 ;;
-    --settled-by-run-id)    SETTLED_BY_RUN_ID="$2";   shift 2 ;;
-    --kdir)                 KDIR_OVERRIDE="$2";       shift 2 ;;
-    --json)                 JSON_MODE=1;              shift ;;
+    --work-item)            WORK_ITEM="$2";             shift 2 ;;
+    --contradiction-id)     CONTRADICTION_ID="$2";      shift 2 ;;
+    --status)               NEW_STATUS="$2";            shift 2 ;;
+    --settled-at)           SETTLED_AT="$2";            shift 2 ;;
+    --settled-by-run-id)    SETTLED_BY_RUN_ID="$2";     shift 2 ;;
+    --kdir)                 KDIR_OVERRIDE="$2";         shift 2 ;;
+    --json)                 JSON_MODE=1;                 shift ;;
     --help|-h)              usage; exit 0 ;;
     *)
       echo "[contradiction-update] Error: unknown flag '$1'" >&2
@@ -87,213 +70,204 @@ fail() {
   exit 1
 }
 
-# --- Required-field validation ---
+[[ -n "$WORK_ITEM" ]] || fail "--work-item is required"
 [[ -n "$CONTRADICTION_ID" ]] || fail "--contradiction-id is required"
-[[ -n "$NEW_STATUS"       ]] || fail "--status is required"
+[[ -n "$NEW_STATUS" ]] || fail "--status is required"
+[[ -n "$SETTLED_AT" ]] || fail "--settled-at is required"
 
-# --- Enum validation: --status — only the canonical terminal values are
-#     valid update targets. pending is the initial append-time state and not
-#     a re-update target. Legacy values (accepted|declined|remediated) are
-#     no longer accepted by the append writer either. ---
 case "$NEW_STATUS" in
-  verified|rejected) : ;;
-  *)
-    fail "--status must be 'verified' or 'rejected' (got '$NEW_STATUS')"
-    ;;
+  verified|contradicted) : ;;
+  *) fail "--status must be 'verified' or 'contradicted' (got '$NEW_STATUS')" ;;
 esac
 
-# --- jq availability (for the --json result envelope) ---
 if ! command -v jq &>/dev/null; then
   fail "jq is required but not found on PATH"
 fi
 
-# --- Resolve knowledge directory ---
+# Validate the caller-supplied historical completion time here, at the writer
+# boundary. Callers must not implement their own weaker timestamp grammar.
+if ! python3 - "$SETTLED_AT" <<'PY'
+from datetime import datetime
+import sys
+
+value = sys.argv[1]
+try:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if parsed.tzinfo is not None else 1)
+PY
+then
+  fail "--settled-at must be an ISO-8601 timestamp with timezone (got '$SETTLED_AT')"
+fi
+
 if [[ -n "$KDIR_OVERRIDE" ]]; then
   KNOWLEDGE_DIR="$KDIR_OVERRIDE"
 else
   KNOWLEDGE_DIR=$(resolve_knowledge_dir)
 fi
+[[ -d "$KNOWLEDGE_DIR" ]] || fail "knowledge store not found at: $KNOWLEDGE_DIR"
 
-if [[ ! -d "$KNOWLEDGE_DIR" ]]; then
-  fail "knowledge store not found at: $KNOWLEDGE_DIR"
-fi
+ACTIVE_SIDECAR="$KNOWLEDGE_DIR/_work/$WORK_ITEM/consumption-contradictions.jsonl"
+ARCHIVE_SIDECAR="$KNOWLEDGE_DIR/_work/_archive/$WORK_ITEM/consumption-contradictions.jsonl"
 
-# --- Locate the sidecar containing the target contradiction_id ---
-# Scan every work item's sidecar; the contradiction-id is the join key.
-SIDECAR=""
-shopt -s nullglob
-for candidate in "$KNOWLEDGE_DIR"/_work/*/consumption-contradictions.jsonl; do
-  if python3 -c '
+MATCHES=()
+for candidate in "$ACTIVE_SIDECAR" "$ARCHIVE_SIDECAR"; do
+  [[ -f "$candidate" ]] || continue
+  count=$(python3 - "$candidate" "$WORK_ITEM" "$CONTRADICTION_ID" <<'PY'
 import json, sys
-sidecar, want = sys.argv[1:3]
-try:
-    with open(sidecar) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if row.get("contradiction_id") == want:
-                sys.exit(0)
-    sys.exit(1)
-except FileNotFoundError:
-    sys.exit(1)
-' "$candidate" "$CONTRADICTION_ID"; then
-    SIDECAR="$candidate"
-    break
+
+path, work_item, contradiction_id = sys.argv[1:]
+count = 0
+with open(path, encoding="utf-8") as fh:
+    for raw in fh:
+        try:
+            row = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(row, dict)
+            and row.get("work_item") == work_item
+            and row.get("contradiction_id") == contradiction_id
+        ):
+            count += 1
+print(count)
+PY
+  )
+  if [[ "$count" -gt 1 ]]; then
+    fail "ambiguous row identity: work_item=$WORK_ITEM contradiction_id=$CONTRADICTION_ID appears $count times in $candidate"
+  fi
+  if [[ "$count" -eq 1 ]]; then
+    MATCHES+=("$candidate")
   fi
 done
-shopt -u nullglob
 
-if [[ -z "$SIDECAR" ]]; then
-  fail "contradiction-id $CONTRADICTION_ID not found"
+if [[ ${#MATCHES[@]} -eq 0 ]]; then
+  fail "row not found: work_item=$WORK_ITEM contradiction_id=$CONTRADICTION_ID"
+fi
+if [[ ${#MATCHES[@]} -gt 1 ]]; then
+  fail "ambiguous active/archive identity: work_item=$WORK_ITEM contradiction_id=$CONTRADICTION_ID exists in both locations"
 fi
 
-PRE_WRITE_SIZE=$(wc -c < "$SIDECAR" | tr -d ' ')
-SETTLED_AT_NOW=$(timestamp_iso)
+SIDECAR="${MATCHES[0]}"
+if [[ "$SIDECAR" == "$ARCHIVE_SIDECAR" ]]; then
+  LOCATION="archive"
+else
+  LOCATION="active"
+fi
 
-# --- Identity-verified RMW ---
-# The Python helper re-reads the sidecar, finds the matching row, and emits
-# a header line followed by the rewritten file content. Header schema:
-#
-#   noop|<previous_status>|0
-#   update|<previous_status>|<expected_delta_bytes>
-#
-# Header sentinel: we delimit header from body with a NUL byte so the body
-# is byte-preserving even when it contains newlines.
-TMP_PIPE=$(mktemp -t cc-update-XXXXXX)
-trap 'rm -f "$TMP_PIPE" "$TMP_PIPE.body"' EXIT
+TMP_BODY=$(mktemp -t cc-update-body-XXXXXX)
+TMP_META=$(mktemp -t cc-update-meta-XXXXXX)
+trap 'rm -f "$TMP_BODY" "$TMP_META"' EXIT
 
-SIDECAR="$SIDECAR" \
-CONTRADICTION_ID="$CONTRADICTION_ID" \
-NEW_STATUS="$NEW_STATUS" \
-SETTLED_BY_RUN_ID="$SETTLED_BY_RUN_ID" \
-SETTLED_AT_NOW="$SETTLED_AT_NOW" \
-HEADER_PATH="$TMP_PIPE" \
-BODY_PATH="$TMP_PIPE.body" \
-python3 <<'PY_EOF'
-import json, os, sys
+if ! SIDECAR="$SIDECAR" \
+  WORK_ITEM="$WORK_ITEM" \
+  CONTRADICTION_ID="$CONTRADICTION_ID" \
+  NEW_STATUS="$NEW_STATUS" \
+  SETTLED_AT="$SETTLED_AT" \
+  SETTLED_BY_RUN_ID="$SETTLED_BY_RUN_ID" \
+  BODY_PATH="$TMP_BODY" \
+  META_PATH="$TMP_META" \
+  python3 <<'PY'
+import json
+import os
+import sys
 
-sidecar = os.environ["SIDECAR"]
-want_id = os.environ["CONTRADICTION_ID"]
+path = os.environ["SIDECAR"]
+work_item = os.environ["WORK_ITEM"]
+contradiction_id = os.environ["CONTRADICTION_ID"]
 new_status = os.environ["NEW_STATUS"]
-settled_by = os.environ.get("SETTLED_BY_RUN_ID", "")
-settled_at = os.environ["SETTLED_AT_NOW"]
-header_path = os.environ["HEADER_PATH"]
+settled_at = os.environ["SETTLED_AT"]
+settled_by = os.environ["SETTLED_BY_RUN_ID"]
 body_path = os.environ["BODY_PATH"]
+meta_path = os.environ["META_PATH"]
 
-with open(sidecar, "rb") as f:
-    raw = f.read()
+with open(path, "rb") as fh:
+    raw = fh.read()
 trailing_nl = raw.endswith(b"\n")
-text = raw.decode("utf-8")
-lines = text.split("\n")
-if trailing_nl and lines and lines[-1] == "":
-    lines = lines[:-1]
+lines = raw.decode("utf-8").splitlines()
 
-found_idx = -1
-previous_status = ""
-target_row = None
+matches = []
 for idx, line in enumerate(lines):
-    s = line.strip()
-    if not s:
-        continue
     try:
-        row = json.loads(s)
+        row = json.loads(line)
     except json.JSONDecodeError:
         continue
-    if row.get("contradiction_id") == want_id:
-        found_idx = idx
-        previous_status = row.get("status", "")
-        target_row = row
-        break
+    if (
+        isinstance(row, dict)
+        and row.get("work_item") == work_item
+        and row.get("contradiction_id") == contradiction_id
+    ):
+        matches.append((idx, row))
 
-if found_idx == -1 or target_row is None:
-    # Should not happen — pre-locate verified presence. Surface clearly.
+if len(matches) != 1:
     sys.stderr.write(
-        "[contradiction-update] Error: contradiction-id vanished between locate and RMW\n"
+        f"[contradiction-update] Error: identity changed during update: "
+        f"work_item={work_item} contradiction_id={contradiction_id} matches={len(matches)}\n"
     )
-    sys.exit(2)
+    raise SystemExit(2)
 
-# Idempotent no-op: already in target state. Write header only; do NOT
-# rewrite the file body. Bash side will skip the file replace.
-if previous_status == new_status:
-    with open(header_path, "w") as h:
-        h.write(f"noop|{previous_status}|0\n")
-    sys.exit(0)
+idx, row = matches[0]
+previous = row.get("status")
+if previous not in {"pending", "verified", "contradicted"}:
+    sys.stderr.write(
+        f"[contradiction-update] Error: invalid existing status {previous!r}: "
+        f"work_item={work_item} contradiction_id={contradiction_id}\n"
+    )
+    raise SystemExit(3)
+if previous in {"verified", "contradicted"} and previous != new_status:
+    sys.stderr.write(
+        f"[contradiction-update] Error: conflicting terminal transition {previous}->{new_status}: "
+        f"work_item={work_item} contradiction_id={contradiction_id}\n"
+    )
+    raise SystemExit(4)
 
-# Mutate.
-target_row["status"] = new_status
-target_row["settled_at"] = settled_at
-if settled_by:
-    target_row["settled_by_run_id"] = settled_by
-# If --settled-by-run-id was not passed but the row already carried one
-# (from a prior append), leave it intact — sole-update-writer flips status;
-# it does not blank out existing provenance.
+if previous == new_status:
+    result = {"verb": "idempotent", "previous_status": previous}
+else:
+    row["status"] = new_status
+    row["settled_at"] = settled_at
+    if settled_by:
+        row["settled_by_run_id"] = settled_by
+    lines[idx] = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
+    output = "\n".join(lines) + ("\n" if trailing_nl else "")
+    with open(body_path, "wb") as fh:
+        fh.write(output.encode("utf-8"))
+    result = {"verb": "applied", "previous_status": previous}
 
-# Match the append script's `jq -c` output style: compact (no spaces
-# after , or :), unicode preserved.
-old_line = lines[found_idx]
-new_line = json.dumps(target_row, ensure_ascii=False, separators=(",", ":"))
-lines[found_idx] = new_line
-
-out = "\n".join(lines)
-if trailing_nl:
-    out += "\n"
-
-expected_delta = len(new_line.encode("utf-8")) - len(old_line.encode("utf-8"))
-
-with open(header_path, "w") as h:
-    h.write(f"update|{previous_status}|{expected_delta}\n")
-with open(body_path, "wb") as b:
-    b.write(out.encode("utf-8"))
-PY_EOF
-
-HEADER=$(cat "$TMP_PIPE")
-VERB=$(printf '%s' "$HEADER" | awk -F'|' '{print $1}')
-PREVIOUS_STATUS=$(printf '%s' "$HEADER" | awk -F'|' '{print $2}')
-EXPECTED_DELTA=$(printf '%s' "$HEADER" | awk -F'|' '{print $3}')
-
-case "$VERB" in
-  noop)
-    echo "[contradiction-update] already $NEW_STATUS: $CONTRADICTION_ID" >&2
-    if [[ $JSON_MODE -eq 1 ]]; then
-      RESULT=$(jq -n \
-        --arg cid "$CONTRADICTION_ID" \
-        --arg prev "$PREVIOUS_STATUS" \
-        --arg new "$NEW_STATUS" \
-        '{contradiction_id: $cid, previous_status: $prev, new_status: $new, noop: true}')
-      json_output "$RESULT"
-    fi
-    echo "[contradiction-update] OK: $CONTRADICTION_ID → $NEW_STATUS (no-op)"
-    exit 0
-    ;;
-  update)
-    : ;;
-  *)
-    fail "internal error: unrecognized control header '$HEADER'"
-    ;;
-esac
-
-# --- Byte-count check on the candidate body BEFORE swapping in ---
-POST_WRITE_SIZE=$(wc -c < "$TMP_PIPE.body" | tr -d ' ')
-if [[ "$POST_WRITE_SIZE" -ne $((PRE_WRITE_SIZE + EXPECTED_DELTA)) ]]; then
-  fail "post-write byte-count mismatch: pre=$PRE_WRITE_SIZE expected_delta=$EXPECTED_DELTA actual=$POST_WRITE_SIZE — refusing to leave sidecar partially written"
+with open(meta_path, "w", encoding="utf-8") as fh:
+    json.dump(result, fh)
+PY
+then
+  fail "writer refused transition: work_item=$WORK_ITEM contradiction_id=$CONTRADICTION_ID target=$NEW_STATUS"
 fi
 
-# Atomic replace.
-mv "$TMP_PIPE.body" "$SIDECAR"
+VERB=$(jq -r '.verb' "$TMP_META")
+PREVIOUS_STATUS=$(jq -r '.previous_status' "$TMP_META")
+if [[ "$VERB" == "applied" ]]; then
+  mv "$TMP_BODY" "$SIDECAR"
+elif [[ "$VERB" != "idempotent" ]]; then
+  fail "internal error: unrecognized writer result '$VERB'"
+fi
+
+RESULT=$(jq -n \
+  --arg status "$VERB" \
+  --arg work_item "$WORK_ITEM" \
+  --arg cid "$CONTRADICTION_ID" \
+  --arg previous "$PREVIOUS_STATUS" \
+  --arg new "$NEW_STATUS" \
+  --arg settled_at "$SETTLED_AT" \
+  --arg run_id "$SETTLED_BY_RUN_ID" \
+  --arg location "$LOCATION" \
+  '{status:$status,work_item:$work_item,contradiction_id:$cid,previous_status:$previous,new_status:$new,settled_at:$settled_at,sidecar_location:$location}
+   + (if ($run_id|length)>0 then {settled_by_run_id:$run_id} else {} end)')
 
 if [[ $JSON_MODE -eq 1 ]]; then
-  RESULT=$(jq -n \
-    --arg cid "$CONTRADICTION_ID" \
-    --arg prev "$PREVIOUS_STATUS" \
-    --arg new "$NEW_STATUS" \
-    --arg settled_at "$SETTLED_AT_NOW" \
-    '{contradiction_id: $cid, previous_status: $prev, new_status: $new, settled_at: $settled_at}')
-  json_output "$RESULT"
+  printf '%s\n' "$RESULT" | jq -c .
 fi
 
-echo "[contradiction-update] OK: $CONTRADICTION_ID → $NEW_STATUS"
+if [[ "$VERB" == "idempotent" ]]; then
+  echo "[contradiction-update] OK: $WORK_ITEM/$CONTRADICTION_ID already $NEW_STATUS (idempotent; $LOCATION)"
+else
+  echo "[contradiction-update] OK: $WORK_ITEM/$CONTRADICTION_ID pending → $NEW_STATUS ($LOCATION)"
+fi
