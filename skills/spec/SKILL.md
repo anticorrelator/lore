@@ -64,7 +64,7 @@ The verbs prepare evidence and persist decisions; they do not make them. Keep th
    - **`plan_state=incomplete`:** present the persisted material for discussion; offer the strategy gate before synthesis when no strategy exists.
    - **`plan_state=none`:** continue to Step 2.
 
-   When `intent_anchor` is non-null, preserve it verbatim. It is the user-visible capability boundary, not a suggestion the spec may silently narrow. Startup reports the anchor; only the lead judges whether the emerging design still covers it.
+   When `intent_anchor` is non-null, preserve it verbatim — downstream gates (the Step 5.6 verifier, `/implement` anchor prompts) detect drift by string comparison, so a paraphrase breaks the audit chain even when intent is preserved. It is the user-visible capability boundary, not a suggestion the spec may silently narrow. Startup reports the anchor; only the lead judges whether the emerging design still covers it.
 
 ### Step 1b: Goal Refinement (new work only)
 
@@ -139,9 +139,9 @@ If the user's description is already specific enough (clear scope, stated constr
    DISCOVERY=$(lore spec discover "$SLUG" --json)
    ```
 
-   Use the source manifest to see what was scanned or missing. Choose strict external-skill/agent matches and permissive preference/convention candidates yourself. Record matched external skills in `$SKILL_INVOCATION_MAP`; invoke them inline when a researcher consults that domain. `/spec` spawns no advisor agents on the default route.
+   Use the returned `coverage` to see what was scanned or missing. Choose strict external-skill/agent matches and permissive preference/convention candidates yourself. Record matched external skills in `$SKILL_INVOCATION_MAP`; invoke them inline when a researcher consults that domain. `/spec` spawns no advisor agents on the default route.
 
-8. Serialize the approved investigation plan to a temporary JSON file. The version-1 contract is exact — unknown or missing fields refuse, array order is dispatch order, and every prefetch row declares its scale rather than inheriting a default:
+8. Serialize the approved investigation plan to a temporary JSON file and hold its path as `$INVESTIGATIONS_JSON`. The version-1 contract is exact — unknown or missing fields refuse, array order is dispatch order, and every prefetch row declares its scale rather than inheriting a default:
 
    ```json
    {
@@ -170,6 +170,7 @@ If the user's description is already specific enough (clear scope, stated constr
 10. Execute the returned directives in ordinal order. This is the harness-dispatch judgment kernel: translate each directive into the active harness's native spawn call, decide when to launch it, and store returned handles only in the lead's in-memory handle map. Populate the matching teardown payload with the live handle at shutdown time; do not write handles back into `spec-dispatch.json`.
 
     `team_messaging != full` removes only shared team state. Codex still executes researcher fanout while `subagents=partial`, then its adapter teardown resolves to lead-mediated `TaskUpdate status=completed`. Collapse to the short branch only when `subagents=none`. On a full team-messaging harness, the lead may create the shared team before executing spawn directives and tear it down after researcher completion.
+
 ---
 
 ### Step 3: Collect findings and emit Tier-2 artifacts
@@ -338,7 +339,7 @@ Apply this contract after every terminal evaluator attempt in Steps 5a and 5.5. 
      --evidence-manifest "$EVIDENCE_JSON" [--reason "$REASON"]
    ```
 
-   The verb derives a stable `outcome_id`, writes through `write-execution-log.sh`, and treats exact replay as idempotent. Reusing an attempt id for different semantics is a collision. `needs-decision` additionally routes an unhandled ceremony-resolution row through `scorecard-append.sh`; a failed auxiliary append returns `status=partial`, and exact retry recovers only that sink.
+   The verb derives a stable `outcome_id`, writes through `write-execution-log.sh`, and treats exact replay as idempotent. Reusing an attempt id for different semantics is a collision the verb refuses. `needs-decision` additionally routes an unhandled ceremony-resolution row through `scorecard-append.sh`; a failed auxiliary append returns `status=partial`, and exact retry recovers only that sink.
 
 ### Step 5a: Design ceremony evaluation
 
@@ -612,7 +613,7 @@ Apply the provenance flags above on every `lore capture`.
 
 ### Step 5.5: Post-plan ceremony evaluation
 
-**Ceremonies always run before the terminal commit marker.** No flag skips this step; no flag is required to run it. Judgment applies to acting on output, not to whether the registered obligation executes.
+**Ceremonies always run before terminal finalization.** No flag skips this step; no flag is required to run it. Judgment applies to acting on output, not to whether the registered obligation executes.
 
 ```bash
 EVALUATORS=$(lore ceremony get spec-post-plan --work-item <slug>)
@@ -622,7 +623,7 @@ Invoke every registered evaluator. Present its output to the user. If the lead a
 
 Do not finalize while a post-plan result still requires a plan edit or human decision. `needs-decision` is durable evidence of that open judgment, not permission to route around it.
 
-Prepare the next step without running it yet: retain its two lead-owned preflight asserts by checking every instructed invocation against the **live script** and checking that **Tier-2 emission instructions** point to the canonical validator contract. If either check or the later verb refuses, fix `plan.md` and re-run the affected ceremony before Step 5.6 invokes `lore spec finalize`.
+Run Step 5.6's two lead-owned preflight asserts now, without finalizing: check every instructed invocation against the **live script**, and check that **Tier-2 emission instructions** point to the canonical validator contract. If either assert — or the finalize verb itself — refuses, fix `plan.md` and re-run the affected ceremony before Step 5.6 invokes `lore spec finalize`.
 
 ---
 
