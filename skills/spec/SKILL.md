@@ -91,7 +91,6 @@ If the user's description is already specific enough (clear scope, stated constr
 5. Note key findings as you go.
    - **Current-state verification (mandatory before a finding becomes a design constraint):** when a design choice hinges on a current-state claim sourced from a sibling work item's `notes.md` or other uncommitted prose (not committed code or a commons entry), verify the claim against HEAD before adopting it. Notes age faster than code; a stale note silently shapes scope.
    - **Integration-seam trace:** when the work adds a field to a shared substrate (e.g., `_meta.json`) or inserts a script into an existing control-flow gate, trace three seams before drafting: (a) does an existing gate/guard intercept the new state? (b) does the denormalized read model (e.g., `_index.json`) project the field, or is it invisible to consumers? (c) does ordering (archive/move) change where a later step finds the file?
-   <!-- Sunset: remove these two sub-checks if retro-evolution rows targeting skills/spec/SKILL.md change-type new-failure-mode citing unverified-current-state or missed-integration-seam evidence recur from ≥3 new distinct work items within the next 20 spec cycles. -->
 6. Prepare discovery evidence without assigning meaning:
 
    ```bash
@@ -163,7 +162,7 @@ If the user's description is already specific enough (clear scope, stated constr
    DISPATCH=$(lore spec open "$SLUG" --investigations "$INVESTIGATIONS_JSON" --json)
    ```
 
-   `open` validates all inputs before publication, writes canonical `spec-dispatch.json` by hidden temp plus same-directory rename, then stamps its `spec-verb` completion atom. Its statuses are `created | reused | recovered | replaced`; refusal names the repair target. The artifact carries `input_fingerprint`, `source_fingerprint`, the source manifest, ordered directives, empty lead-side handle slots, and teardown payloads. It never calls a harness tool and never persists live handles.
+   `open` returns `created | reused | recovered | replaced`, or refuses with the repair target. Its canonical `spec-dispatch.json` carries `input_fingerprint`, `source_fingerprint`, the source manifest, ordered directives, empty lead-side handle slots, and teardown payloads. It never calls a harness tool and never persists live handles.
 
    Bind `ADAPTER`, `RESEARCHER_MODEL`, and `RESEARCHER_TEMPLATE_VERSION` from the returned source manifest and directives. Do not resolve a second set after publication; that would make the executed payload differ from the artifact being resumed.
 
@@ -190,8 +189,7 @@ As researcher messages arrive (or after direct file reading in short branch):
      ```bash
      echo '<json-row>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>
      ```
-     `evidence-append.sh` validates the row via `validate-tier2.sh` before appending to `$KDIR/_work/<slug>/task-claims.jsonl`. The validator enforces that `exact_snippet` is a non-empty string, `normalized_snippet_hash` matches `^[0-9a-f]{64}$`, and the hash equals `sha256(v1_normalize(exact_snippet))` — rows that fail any check are rejected. Direct writes to `task-claims.jsonl` bypass validation and are treated as corrupt.
-   - **On validation failure:** `evidence-append.sh` exits non-zero. Either fix the row and retry, or log the failure to `execution-log.md` and proceed. Schema-valid absence is acceptable; silent corrupt writes are not.
+     `evidence-append.sh` is the sole writer for `$KDIR/_work/<slug>/task-claims.jsonl`; it rejects missing snippets and invalid or mismatched normalized hashes. On rejection, fix and retry the row or log the failure. Never write the JSONL directly.
    - After successful append, write a human-readable mirror entry to `$KDIR/_work/<slug>/evidence.md`. Do not write a mirror entry for a row that failed validation.
    - **Absence semantics:** if no assertions or lead-observed task claims exist, both `task-claims.jsonl` and `evidence.md` may be absent — absence means "no Tier-2 claims captured this session," not "work was fully verified."
 
@@ -339,7 +337,7 @@ Apply this contract after every terminal evaluator attempt in Steps 5a and 5.5. 
      --evidence-manifest "$EVIDENCE_JSON" [--reason "$REASON"]
    ```
 
-   The verb derives a stable `outcome_id`, writes through `write-execution-log.sh`, and treats exact replay as idempotent. Reusing an attempt id for different semantics is a collision the verb refuses. `needs-decision` additionally routes an unhandled ceremony-resolution row through `scorecard-append.sh`; a failed auxiliary append returns `status=partial`, and exact retry recovers only that sink.
+   Exact replay is idempotent; reusing an attempt id for different semantics is a refused collision. `needs-decision` may return `status=partial` when its auxiliary resolution row fails; exact retry recovers that sink.
 
 ### Step 5a: Design ceremony evaluation
 
@@ -360,7 +358,7 @@ After each evaluator reaches a terminal attempt, make the outcome judgment and f
 
 Draft concrete implementation sections on top of the approved abstract plan:
 
-0. **Intent anchor** — if the work item has an `intent_anchor` in `_meta.json`, render a `## Intent Anchor` section in `plan.md` immediately after `## Narrative` and before `## Strategy`/`## Context`. Write the anchor body **verbatim** from `_meta.json.intent_anchor` — no quoting, no prefix label, no paraphrase. ... Before decomposing, name the tempting narrower implementation that would appear successful while violating the anchor; ensure Exit Criteria and Verification cover the load-bearing promise or explicitly label the scope delta.
+0. **Intent anchor** — if the work item has an `intent_anchor` in `_meta.json`, render a `## Intent Anchor` section in `plan.md` immediately after `## Narrative` and before `## Strategy`/`## Context`. Write the anchor body **verbatim** from `_meta.json.intent_anchor` — no quoting, prefix label, or paraphrase. Before decomposing, name the tempting narrower implementation that would appear successful while violating the anchor; ensure the Goal, task constraints, and Verification cover the load-bearing promise or explicitly label the scope delta.
 
    Follow the anchor with a `**Scope delta:**` line (default `none — anchor preserved unchanged`; if the spec narrows the capability, name the narrowing here) and a `**Tempting narrower implementation:**` heading the spec author fills in. The anchor body and `**Scope delta:**` line are **verifier-enforced** — the Step 5.6 gate refuses to regenerate tasks if missing or divergent. The `**Tempting narrower implementation:**` body is template-prescribed but not verifier-enforced — its presence forces the author to confront the failure mode, but the content is free-text that no parser can adjudicate. For work items without an `intent_anchor` field, omit the section entirely — the Step 5.6 verifier skips with a one-line stderr info message.
 
@@ -411,7 +409,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
           - "woven norm" / "binding norm" — a surfaced norm that became a constraint clause
           - "stable label" — the entry slug/title the backlink resolves to; the
             identifier shared with the worker report and the lead comparison -->
-   **Weave binding judgment-class norms into the constraint clause.** When a preference/convention from Step 5 Discovery *binds* to a task, render it as an imperative **constraint clause** in the task line itself — the instruction the worker executes — not only as a `**Knowledge context:**` backlink the worker must choose to fetch. The clause **names the norm by its stable label** (the entry slug/title the backlink resolves to) so the worker's `Convention handling:` report and the lead's completeness comparison reference the same identifier. Keep the backlink for provenance even when the norm is woven.
+   **Weave binding judgment-class norms into the constraint clause.** When a preference/convention from Step 2 discovery *binds* to a task, render it as an imperative **constraint clause** in the task line itself — the instruction the worker executes — not only as a `**Knowledge context:**` backlink the worker must choose to fetch. The clause **names the norm by its stable label** (the entry slug/title the backlink resolves to) so the worker's `Convention handling:` report and the lead's completeness comparison reference the same identifier. Keep the backlink for provenance even when the norm is woven.
 
    A norm *binds* only when **both** hold (strict weave):
    - **Scope-overlap** — its `related_files`, file-path globs, ceremony scope, or activity domain intersect this task's owned files, objective, or surface.
@@ -442,7 +440,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    Add relevant entries as `[[knowledge:...]]` backlinks with "— why relevant" annotations. Investigation findings are the primary source; concordance is a widener.
 
-   **Distribute surfaced preferences/conventions into per-phase Knowledge context (mandatory).** The top-level `**Related preferences/conventions:**` block from Step 5 Discovery is an audit manifest — it does not reach workers. To wire into worker `{{prior_knowledge}}`, distribute each surfaced entry into `**Knowledge context:**` of every phase whose scope plausibly overlaps:
+   **Distribute surfaced preferences/conventions into per-phase Knowledge context (mandatory).** The top-level `**Related preferences/conventions:**` block from Step 2 discovery is an audit manifest — it does not reach workers. To wire into worker `{{prior_knowledge}}`, distribute each surfaced entry into `**Knowledge context:**` of every phase whose scope plausibly overlaps:
 
    - **Scope-overlap test:** an entry overlaps when its `related_files`, file-path globs, ceremony scope, or activity domain intersects the phase's `**Files:**`, objective, or owned subsystem. Apply permissively — the Step 2 surfacing gate carries through to distribution. If a reviewer would expect the worker aware of the entry while editing the phase's files, distribute.
    - **Format:** add as `[[knowledge:preferences/<entry>]]` (or `conventions/`, or `cross-cutting-conventions/`) in `**Knowledge context:**`, with a worker-facing "— what to honor at implement time" annotation. Implementation-facing means tell the worker what to *do*, not just what it says.
@@ -545,7 +543,7 @@ Before finalizing this plan, here is my understanding of the key assumptions:
 - [unverified] <claim> → Investigation: <topic>, Assertion #N
 - <decision statement> (over <rejected alternative>) → Design Decision: D1: <title>
 - <scope boundary> → Goal / user input
-- [intent anchor] <anchor body verbatim from `_meta.json.intent_anchor`> — **Scope delta:** <none — anchor preserved unchanged | named narrowing> → Step 5b.0 intent-anchor preservation (omit this bullet when the work item has no `intent_anchor`)
+- [intent anchor] <anchor body verbatim from `_meta.json.intent_anchor`> — **Scope delta:** <none — anchor preserved unchanged | named narrowing> → Step 5b item 0 intent-anchor preservation (omit this bullet when the work item has no `intent_anchor`)
 - [broken backlink] [[knowledge:path]] could not be resolved → Step 5.0a backlink check
 ...
 
@@ -631,7 +629,7 @@ Run Step 5.6's two lead-owned preflight asserts now, without finalizing: check e
 
 **Lead-owned preflight (two prose asserts the verb cannot run):** validate emitted artifacts against their live consumers, never from memory: (1) any script invocation block the plan instructs agents to run must match the live script's current flags (check `--help` or source — script schemas drift faster than plans); (2) Tier-2 emission instructions point at the validator's canonical required-field set rather than enumerating fields inline. Fix `plan.md` first if either fails — a deterministic script can assert JSON structure, but adjudicating prose against live sources is the lead's judgment.
 
-Then close the plan through the finalize verb — do NOT hand-run the anchor verifier, regen-tasks, heal, or the directive structure assert; the verb composes them in load-bearing order (backlink verify → intent-anchor hard-gate → regen-tasks → heal → emission-contract assert over every `retrieval_directive`'s `seeds`/`scale_set`), stamps one `spec-verb` execution-log atom, and emits the adoption-telemetry row as its last write:
+Then close the plan through the finalize verb. Do not hand-run its composed checks or writers; `finalize` owns backlink verification, the intent-anchor hard gate, task regeneration, healing, retrieval-directive assertions, its `spec-verb` atom, and last-write telemetry:
 
 ```bash
 lore spec finalize <slug>
@@ -645,7 +643,6 @@ Show the verb's output. The anchor gate enforces structural anchor preservation 
 - **Exit 1 (validation, precondition, or composed-script failure):** fix the named diagnostic before re-running.
 
 A refused finalize emits no telemetry row and no `spec-verb` atom; re-running after a fix appends a fresh point-event row per run — expected, not duplication.
-<!-- Sunset: remove if evidence-gap retro-evolution rows targeting skills/spec/SKILL.md citing consumer-contract drift recur from ≥3 new distinct work items within the next 20 spec cycles. -->
 
 ---
 
@@ -667,15 +664,4 @@ Consider `/retro <slug>` to evaluate knowledge system effectiveness for this spe
 
 ## Plan.md Template
 
-When emitting `plan.md` in Step 5b (and the corresponding Step 5b.0 Intent Anchor render), read `skills/spec/templates/plan.md` for the canonical plan structure. The sidecar holds the full fenced template — Goal, Narrative, Intent Anchor, Strategy, Context, Investigations, Design Decisions, Architecture Diagram, Phases, Open Questions, Related — with the inline HTML-comment guidance preserved alongside each section it governs.
-
----
-
-## Resuming a spec across sessions
-
-When `/spec` is called on a work item that already has a plan:
-- Read existing investigations/context — they are your memory (no need to re-explore).
-- If a `## Strategy` section exists, read it silently and use it as shaping context — do not re-prompt.
-- Check if synthesis (Design/Phases) is complete; if not, synthesize from existing findings.
-- Check Open Questions — dispatch follow-up investigations for unresolved items.
-- **Always run the approval gates before finalizing:** whether synthesis was just completed or carried over from a prior session, proceed through Step 5.1 (Confirm understanding) and Step 5.3 (Task review). Do not skip because the plan "already exists." Exception: if `--yes` was passed, these gates are auto-approved.
+When emitting `plan.md` in Step 5b (including item 0's Intent Anchor render), read `skills/spec/templates/plan.md` for the canonical plan structure. The sidecar holds the full fenced template — Goal, Narrative, Intent Anchor, Strategy, Context, Investigations, Design Decisions, Architecture Diagram, Phases, Open Questions, Related — with the inline HTML-comment guidance preserved alongside each section it governs.

@@ -424,29 +424,29 @@ EOF
   echo "$output" | grep -q "archived"
 }
 
-# --- SKILL.md Step 5.5 rewire ------------------------------------------------------
+# --- SKILL.md Step 5.6 finalize contract -------------------------------------------
 
-skill_step_5_5() {
-  awk '/^### Step 5\.5/,/^### Step 5\.6/' "$REPO_DIR/skills/spec/SKILL.md"
+skill_step_5_6() {
+  awk '/^### Step 5\.6/,/^### Step 6/' "$REPO_DIR/skills/spec/SKILL.md"
 }
 
-@test "spec SKILL.md Step 5.5 invokes lore spec finalize" {
-  skill_step_5_5 | grep -q "lore spec finalize"
+@test "spec SKILL.md Step 5.6 invokes lore spec finalize" {
+  skill_step_5_6 | grep -q "lore spec finalize"
 }
 
-@test "spec SKILL.md Step 5.5 no longer hand-runs the verifier or regen sequence" {
-  ! skill_step_5_5 | grep -q "verify-plan-intent-anchor.sh"
-  ! skill_step_5_5 | grep -q "lore work regen-tasks"
+@test "spec SKILL.md Step 5.6 no longer hand-runs the verifier or regen sequence" {
+  ! skill_step_5_6 | grep -q "verify-plan-intent-anchor.sh"
+  ! skill_step_5_6 | grep -q "lore work regen-tasks"
 }
 
-@test "spec SKILL.md Step 5.5 retains the two lead-owned preflight asserts" {
-  skill_step_5_5 | grep -q "live script"
-  skill_step_5_5 | grep -q "Tier-2 emission instructions"
+@test "spec SKILL.md Step 5.6 retains the two lead-owned preflight asserts" {
+  skill_step_5_6 | grep -q "live script"
+  skill_step_5_6 | grep -q "Tier-2 emission instructions"
 }
 
-@test "spec SKILL.md Step 5.5 instructs fixing plan.md and re-running on refusal" {
-  skill_step_5_5 | grep -qi "fix \`plan.md\`"
-  skill_step_5_5 | grep -q "re-run"
+@test "spec SKILL.md Step 5.6 instructs fixing plan.md and re-running on refusal" {
+  skill_step_5_6 | grep -qi "fix \`plan.md\`"
+  skill_step_5_6 | grep -q "re-run"
 }
 
 # --- D4 protocol-terminus close-request --------------------------------------
