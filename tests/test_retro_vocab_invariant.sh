@@ -27,16 +27,21 @@ assert_contains "drift guard retains retired rejected as a detection token" '`ro
 assert_contains "drift guard allows only the canonical trio" '{pending, verified, contradicted}'
 assert_contains "updater remains the terminal-state writer" 'consumption-contradiction-update-status.sh'
 
-BODY=$(awk '/^### 2b\.7:/ {capture=1; next} capture && /^### / {exit} capture {print}' "$SKILL")
-if [[ "$BODY" == *'pending | verified | rejected'* ]]; then
-  fail "Step 2b.7 carries no retired rejected lifecycle trio"
+BODY=$(awk '/^#### Consumer-contradiction vocabulary/ {capture=1; next} capture && /^### Step 3:/ {exit} capture {print}' "$SKILL")
+if [[ -z "${BODY//[[:space:]]/}" ]]; then
+  fail "live consumer-contradiction vocabulary section is non-empty"
 else
-  pass "Step 2b.7 carries no retired rejected lifecycle trio"
+  pass "live consumer-contradiction vocabulary section is non-empty"
+fi
+if [[ "$BODY" == *'pending | verified | rejected'* ]]; then
+  fail "consumer-contradiction section carries no retired rejected lifecycle trio"
+else
+  pass "consumer-contradiction section carries no retired rejected lifecycle trio"
 fi
 if [[ "$BODY" == *'J rejected'* ]]; then
-  fail "Step 2b.7 report shape carries no rejected count"
+  fail "consumer-contradiction report shape carries no rejected count"
 else
-  pass "Step 2b.7 report shape carries no rejected count"
+  pass "consumer-contradiction report shape carries no rejected count"
 fi
 
 echo "Results: $PASS passed, $FAIL failed"

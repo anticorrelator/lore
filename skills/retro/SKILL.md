@@ -134,13 +134,9 @@ Never mix tiers in one cell — the same metric measures different things at dif
 
 #### Consumer-contradiction vocabulary
 
-The lifecycle is `pending | verified | contradicted`; the terminal pair is `verified | contradicted`. A future public reader must expose the sidecar truth written by `consumption-contradiction-update-status.sh`, including `created_at` and terminal `settled_at`. Until then, pack v1 does not inspect the private lifecycle.
+The row schema names `status` — `pending | verified | contradicted`; the terminal pair is `verified | contradicted`. A future public reader must expose the sidecar truth written by `consumption-contradiction-update-status.sh`, including `created_at` and terminal `settled_at`. Until then, prepare manifests the source as `not-computable` instead of inspecting the private lifecycle.
 
 Compatibility guard: reject the retired lifecycle words `routed`, `rejected`, `accepted`, `declined`, `remediated` as status values. The allowed set is `{pending, verified, contradicted}`. When a sanctioned reader eventually exists, the narrative report shape remains `Consumption contradictions: N total (P pending verdict, V verified, C contradicted)`, and a verification denominator uses `status ∈ {verified, contradicted}`.
-
-#### Consumption-contradiction row schema reference
-
-The row schema names `status` — `pending | verified | contradicted`. This section is a vocabulary reference only; prepare currently manifests the source as `not-computable` instead of reading it directly.
 
 ### Step 3: Adjudicate the Cycle
 
@@ -219,11 +215,7 @@ Read `fixed_health` and its referenced calculation rows before reading headline 
 
 Healthy checks remain silent in the report — green narration turns to ritual and buries the one check that trips. This is load-bearing healthy silence, not permission to omit pack rows.
 
-##### Check: Judge liveness
-
-<!-- Compatibility sentinel for the settled read-source contract:
 ### Check: Judge liveness (disposition: redirected per-gate to settlement run envelopes)
--->
 
 The normative calculation reads completed envelopes from `_settlement/runs/*.json`; it does not treat fixture-calibration logs as liveness — those record calibration ceremonies, not per-verdict activity, and sit legitimately empty over healthy windows. The zero-output signature remains `completed_runs_in_window == 0 AND settlement_queue_items_routed > 0`. Pack v1 applies the registered floor before classifying rates; below-floor is `abstained`, never green or tripped.
 
@@ -287,19 +279,11 @@ lore retro file "$SLUG" \
 
 The authoritative `retro-filing.json` is a single immutable assignment for the cycle. `judgment_accepted=true` means that assignment exists and matches. `filing_complete=true` means every required sanctioned sink exists and the terminal `event_type=retro-filing` telemetry row has landed.
 
-The fanout preserves these sinks:
-
-| Sink | Exact identity |
-|---|---|
-| Primary, behavioral, escalation journal rows | `role + work_item + filing_id + sink` |
-| Each substantive proposal | the journal identity plus `proposal ordinal` |
-| Scale access | `cycle_id`, with exact equality of every writer field |
-| Channel flag | `cycle_id + role + slot + signal_type`, with exact field equality |
-| Completion telemetry | `event_type=retro-filing + filing_id` |
+The immutable assignment requires primary, behavioral, escalation, proposal, scale-access, channel-flag, and completion-telemetry sinks. Their replay identities remain, respectively, `role + work_item + filing_id + sink`; that journal identity plus `proposal ordinal`; `cycle_id` with exact writer-field equality; `cycle_id + role + slot + signal_type`; and `event_type=retro-filing + filing_id`.
 
 Every write goes through its sanctioned writer: `journal.sh`, `retro-scale-access-append.sh`, `retro-channel-flag-append.sh`, or `scorecard-append.sh`. The verb never appends their files directly. Completion telemetry is last.
 
-On `status=partial`, the judgment is accepted but the filing is incomplete. Preserve the immutable manifest, repair the named sink condition, and replay the exact same command. The verb scans exact keys and invokes only missing writers. Do not edit the manifest to work around a sink failure; a semantic difference is a collision, not a revision.
+On `status=partial`, the judgment is accepted but the filing is incomplete. Preserve the immutable manifest, repair the named sink condition, and replay the exact same command; replay invokes only missing writers. Do not edit the manifest to work around a sink failure; a semantic difference is a collision, not a revision.
 
 ### Step 6: Report
 
