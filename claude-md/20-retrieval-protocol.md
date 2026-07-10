@@ -14,7 +14,7 @@
 The full scale rubric (4 definitions + boundary tests + ±1 query pattern) lives in `/spec`, `/implement`, and `/memory` SKILL.md files.
 
 ### Knowledge Retrieval (Before Grep/Glob/Explore)
-Before searching the codebase with Grep, Glob, or Explore agents, run `lore search "<topic>"` first. The knowledge store documents conventions, architecture, past decisions, and gotchas that raw code exploration cannot surface. If the knowledge store has a relevant entry, use it — don't re-derive the same insight from source files.
+Every entry in the knowledge store carries provenance and a falsifier you can check against the code, so run `lore search "<topic>"` before Grep, Glob, or Explore agents — a verified hit is cheaper than re-deriving the same insight from source. The store documents conventions, architecture, past decisions, and gotchas that raw code exploration cannot surface; if it has a relevant entry, use it.
 - Knowledge is auto-loaded on session start (index + priority files within budget), delivered between `=== Project Knowledge ===` and `=== End Project Knowledge ===` markers
 - **Delivery check:** if session-start output has work items but NO `=== Project Knowledge ===` block, the knowledge hook failed or timed out — recover with `bash ~/.lore/scripts/load-knowledge.sh` before relying on session context
 - Domain files (`domains/`) are NOT loaded at startup — read them on-demand via the index
