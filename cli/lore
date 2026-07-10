@@ -117,6 +117,7 @@ Commands:
   scorecard    Scorecard sidecar management (see: lore scorecard --help)
   impl         /implement bookkeeping verbs (see: lore impl --help)
   spec         /spec bookkeeping verbs (see: lore spec --help)
+  evolve       /evolve review-queue and filing verbs (see: lore evolve --help)
   coordinate   Read-only cross-substrate coordination status (see: lore coordinate --help)
   session      Multi-session coordination substrate verbs (see: lore session --help)
   retro        Federated retro pooling (see: lore retro --help)
@@ -518,6 +519,21 @@ Options:
 EOF
 }
 
+evolve_usage() {
+  cat >&2 <<EOF
+lore evolve — /evolve review-queue and filing verbs
+
+Usage: lore evolve <verb> [args...]
+
+Verbs:
+  prepare    Publish a source-manifested evidence-gated review queue
+  file       Persist one lead-authored decision assignment and recover its sinks
+
+Options:
+  --help, -h    Show this help
+EOF
+}
+
 coordinate_usage() {
   cat >&2 <<EOF
 lore coordinate — read-only cross-substrate coordination view
@@ -840,6 +856,36 @@ cmd_spec() {
       echo "Error: unknown spec verb '$subcmd'" >&2
       echo "" >&2
       spec_usage
+      return 1
+      ;;
+  esac
+}
+
+# --- Evolve subgroup (/evolve review queue and filing) ---
+cmd_evolve() {
+  if [[ $# -eq 0 ]]; then
+    evolve_usage
+    return 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "$subcmd" in
+    --help|-h)
+      evolve_usage
+      return 0
+      ;;
+    prepare)
+      exec "$SCRIPTS_DIR/evolve-prepare.sh" "$@"
+      ;;
+    file)
+      exec "$SCRIPTS_DIR/evolve-file.sh" "$@"
+      ;;
+    *)
+      echo "Error: unknown evolve verb '$subcmd'" >&2
+      echo "" >&2
+      evolve_usage
       return 1
       ;;
   esac
@@ -2161,6 +2207,10 @@ case "$1" in
   spec)
     shift
     cmd_spec "$@"
+    ;;
+  evolve)
+    shift
+    cmd_evolve "$@"
     ;;
   coordinate)
     shift
