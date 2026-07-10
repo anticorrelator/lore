@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
-# implement-fabrication-guard.bats — Verdict-fabrication guard in
-# skills/implement/SKILL.md Step 4 §3 (D6).
+# implement-fabrication-guard.bats — fabrication-guard behavior from the
+# `lore impl check-report` contract in skills/implement/SKILL.md.
 #
 # The guard sits between worker-report acceptance (§1-2) and the existing
 # advisor-impact-rollup invocation (§4 after renumbering). It consumes the
@@ -21,7 +21,7 @@
 #
 # The guard is metadata-only — worker task acceptance is unaffected; only
 # the advisor scorecard attribution changes. This bats file mirrors the
-# Step 4 §3 algorithm in test-side bash helpers (same pattern as
+# check-report algorithm in test-side bash helpers (same pattern as
 # scorecard-rollup-snapshots.bats's `select_prior_snapshot`) because the
 # guard lives in skill prose, not in a standalone script.
 #
@@ -98,7 +98,7 @@ with open(fixture_path, "w") as f:
 PYEOF
 }
 
-# Test-side mirror of the Step 4 §3 guard algorithm. Returns a JSON object
+# Test-side mirror of the check-report fabrication guard. Returns a JSON object
 # on stdout: {"branch": "a"|"b"|"c", "verified": [...], "rollup_payload": [...]}
 # and emits the canonical fabrication-guard log lines to execution-log.md
 # via write-execution-log.sh.
@@ -203,7 +203,7 @@ PYEOF
 }
 
 # Helper: write the fabrication-guard log lines to execution-log.md the
-# same way Step 4 §3 prescribes (one write-execution-log.sh invocation per
+# same way the report-check contract prescribes (one write-execution-log.sh invocation per
 # line, source=implement-lead).
 write_guard_log_lines() {
   local lines_json="$1"
@@ -395,17 +395,16 @@ EOF
 }
 
 # ============================================================
-# Step 4 §3 prose anchors — guard against the SKILL.md text drifting away
-# from the three documented branches. These are doc-anchored regression
+# Step 4 report-check prose anchors — guard against the SKILL.md text drifting
+# away from the three documented branches. These are doc-anchored regression
 # guards (same shape as the README-anchored asserts in transcripts.bats).
 # ============================================================
 
 # ============================================================
 # Default-route exclusion: when no consultation has handler: agent, the
-# downstream observable of the Step 4.3 guard short-circuiting is that
-# advisor-impact-rollup.sh emits zero rows. The guard's wired filter line
-# at SKILL.md:561 reads "Verdict-fabrication guard (handler: agent only)";
-# we exercise the downstream rollup with the same default-route payload
+# downstream observable of the fabrication guard's filtering is that
+# advisor-impact-rollup.sh emits zero rows. Exercise the downstream rollup
+# with the same default-route payload
 # (handler: lead + handler: skill, no handler: agent) and assert no
 # scorecard rows land.
 # ============================================================
@@ -424,7 +423,7 @@ EOF
 EOF
 
   # Drive the rollup directly with this payload — the rollup is the
-  # observable end of the Step 4.3 short-circuit. The rollup itself filters
+  # observable end of the fabrication-guard branch. The rollup itself filters
   # to handler: agent (advisor-impact-rollup.sh:240-241), so the script
   # produces no rows.jsonl when no entry carries handler: agent.
   bash "$ROLLUP_SH" \
@@ -467,7 +466,7 @@ EOF
   # Run the test-side guard mirror first — it filters by spawned_as_name
   # for the existing branch (a) verification. We pass only the handler: agent
   # entry through to the guard (lead/skill are pre-filtered before the
-  # guard per SKILL.md:563 "Pre-filter by handler").
+  # guard by the documented metadata-only contract).
   AGENT_CONS=$(mktemp)
   jq '[.[] | select(.handler == "agent")]' "$CONS" > "$AGENT_CONS"
 
@@ -493,7 +492,7 @@ EOF
 # D1/A3 — Step 4.0 lead consultation handler documentation conformance.
 # This is a doc-anchored regression guard for the new Step 4.0 surface
 # (the runtime path is judgment-heavy SKILL.md prose, not a standalone
-# script — same pattern as the existing "SKILL.md Step 4 §3 names the
+# script — same pattern as the existing "SKILL.md report check names the
 # three branches" assert below).
 # ============================================================
 

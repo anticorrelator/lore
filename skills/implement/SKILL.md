@@ -66,25 +66,7 @@ Agent templates live in the lore repo under `agents/<name>.md` and surface via `
 
 **MANDATORY:** You MUST read the actual template files for `worker` and `advisor` when spawning agents — resolve each via `resolve_agent_template worker` and `resolve_agent_template advisor`. Do NOT skip this step. Do NOT generate inline agent prompts as a substitute. If the resolver fails or the files are missing, stop and report the error — never fall back to improvised prompts.
 
-Template versions and role→model bindings come from the `lore impl start` struct (Step 1) — `$LEAD_TEMPLATE_VERSION`, `$WORKER_TEMPLATE_VERSION`, `$ADVISOR_TEMPLATE_VERSION` tag emissions produced by their matching templates and are NOT interchangeable. A version the verb could not resolve arrives as an empty string with a stderr warning; downstream scripts treat the omitted flag as "no template version" (CC-01 legacy warn+pass). Registration into `$KDIR/_scorecards/template-registry.json` happens automatically on first use by `scripts/scorecard-append.sh`.
-
-## Protocol-to-Skill Projection (9 → 7)
-
-Proposal §9.2 describes nine logical steps. This SKILL.md presents them as seven `### Step N` sections — a compatibility-preserving projection that keeps related concerns (load vs. verify vs. promote) on clean section boundaries:
-
-| §9.2 Logical Step | SKILL.md Step |
-|---|---|
-| 1 Load tasks.json + Tier 2 evidence + prefetched commons | Step 1 |
-| 2 Dispatch workers with scope, files, acceptance checks, evidence requirements | Step 2 + Step 3 |
-| 3 Workers produce code + tests + Tier 2 + optional Tier 3 | Step 3 |
-| 4 Lead verifies work output + Tier 2 evidence | Step 4 |
-| 5 Lead separates accepted work from remembered doctrine | Step 4 |
-| 6 Lead writes/updates execution evidence | Step 4 |
-| 7 Lead runs Tier 3 promotion on accepted candidates | Step 5 |
-| 8 Stop hook lazily triggers audit; completion non-blocking | Step 6 (reference only) |
-| 9 Prepare `/retro` inputs | Step 7 |
-
-**Lead-inline route variant.** Step 3.0 introduces a pre-dispatch short-circuit with two routes. When `team_messaging` is below `full`, the capability route collapses the selection — whatever its task count — into serial direct lead execution, because TeamCreate/worker dispatch is unavailable. On a full-team harness, the efficiency route is limited to a single prescriptive task with no persistent advisor or required pre-edit orchestration. On either route the lead applies edits using its own tools, emits Tier 2 evidence with `$LEAD_TEMPLATE_VERSION`, and persists one keyed report entry per task before jumping to Step 5 → Step 6 → Step 7. No team is created and no workers spawn.
+Template versions and role→model bindings come from the `lore impl start` struct (Step 1). Keep `$LEAD_TEMPLATE_VERSION`, `$WORKER_TEMPLATE_VERSION`, and `$ADVISOR_TEMPLATE_VERSION` distinct; an unresolved version is empty and downstream writers warn-degrade to unstamped.
 
 ### Step 1: Start the run
 
@@ -96,7 +78,7 @@ Proposal §9.2 describes nine logical steps. This SKILL.md presents them as seve
    lore impl start "$INPUT" --json
    ```
 
-   Contract (`scripts/impl-start.sh`): resolves `<ref>` to a canonical slug via the canonical fuzzy resolver (`--branch <name>` influences fuzzy resolution only); validates `plan.md` has a `## Phases` section and ≥1 unchecked `- [ ]`; returns `_meta.json`'s title and `intent_anchor` VERBATIM (the verb computes facts only and never adjudicates the anchor); writes the branch cache — its only write — skipped for archived items and non-fatal on failure; parses prior `task-claims.jsonl` into `prior_claims.by_task` / `by_file` maps; resolves `models` and `template_versions` for lead/worker/advisor (each failure degrades to `""` with a stderr warning).
+   `start` resolves the work item, validates a structured plan with unchecked work, and returns the title and `intent_anchor` verbatim plus prior claims, models, template versions, and branch-cache status. It computes facts only; it never adjudicates the anchor.
 
    Exit codes: `0` start struct printed (single JSON object with `--json`); `1` no match, missing `plan.md` ("No structured plan found. Run `/spec` first…"), or no unchecked tasks ("All plan tasks are already complete.") — report the verb's message and stop, do NOT fall back to broader filesystem inspection; `2` ambiguous reference — disambiguate via `AskUserQuestion` from the candidate list and re-invoke.
 
@@ -176,12 +158,12 @@ Selection is the caller's declaration — exactly one mode is required, no defau
 Contract (`scripts/impl-open.sh`) — a prepare-and-return emitter; it never invokes harness tools, never spawns anything, never decides routes. Its only write is one execution-log attribution row. It returns:
 
 - **Checksum validation** — delegates to `load-tasks`; a `tasks.json`/`plan.md` checksum mismatch is a hard exit-1 directing to `lore work regen-tasks <slug>`. Tell the user: "plan.md was edited after tasks.json was generated. Run `/work regen-tasks <slug>` to regenerate, or edit plan.md back." Wait for the user's decision — this prompt stays interactive. If `tasks.json` does not exist, generate it with `lore work tasks "$SLUG"`, then re-run `open`. The checksum gate is owned by `open` alone — `next-batch` deliberately does not re-enforce it mid-run.
-- **`capabilities`** — the active framework's adapter gates: `completion_enforcement` ∈ `native_blocking | lead_validator | self_attestation | unavailable` (shapes the Step 4 verification fork per `adapters/agents/README.md` §"Completion Enforcement Degradation Modes" — `native_blocking` rejects malformed worker reports synchronously; `lead_validator` requires the post-hoc validator; the rest degrade further) and `team_messaging` ∈ `full | partial | fallback | none` (anything below `full` takes Step 3.0's capability-collapse route: no TeamCreate, no worker spawns, one durable report per task before the collapse commits).
+- **`capabilities.team_messaging`** — `full | partial | fallback | none`; anything below `full` takes Step 3.0's capability-collapse route: no TeamCreate, no worker spawns, and one durable report per task before the collapse commits.
 - **`manifest`** — TeamCreate first, then one TaskCreate per eligible task in `tasks.json` order, then TaskUpdate wiring ops whose `add_blocked_by` edges are complete (tasks.json edges within the selection plus collision-serialization edges). Edges pointing outside the selection surface per-task as `external_blocked_by` for the lead to wire against already-created tasks. An empty manifest is success with an explanatory `status`, not an error.
 - **`collisions`** — same-file intersections among concurrent selected tasks, already folded into the manifest as serialization edges so the wiring is collision-safe. **Cross-selection collisions are NOT detected:** when dispatching a `--phase`/`--task` subset, the lead accounts for files held by unselected or still-in-flight tasks before spawning.
 - **`phase_map`** and **`prior_knowledge`** — per-phase knowledge resolved through the 3-branch gate: a `retrieval_directive` resolves via `resolve-manifest.sh` (authoritative; v2 directives return `### Focal:`/`### Adjacent:` sectioned blocks, legacy flat directives a single section — the dispatcher does not branch on shape); task descriptions embedding `## Prior Knowledge` skip prefetch (the phase already carries resolved knowledge; appending would duplicate or conflict); otherwise the fallback `lore prefetch` runs ONLY when the caller declared `--fallback-scale-set <buckets>` (comma-separated from `abstract|architecture|subsystem|implementation`). Without a declaration the phase returns `status: needs-prefetch` with the suggested query — **scale is the caller's declaration, never a default.** On `needs-prefetch`, declare the bucket per the scale rubric (see `skills/memory/SKILL.md` § Scale-Aware Navigation) and re-run `open` with `--fallback-scale-set` — re-declare with intent, not habit. When the fallback branch ran, log one `Knowledge-delivery-path: lead-fallback-prefetch` line via `write-execution-log.sh` so the delivery gap is visible to /retro.
 - **`tier2_extracts`** — per-task prior Tier 2 rows from `task-claims.jsonl`, matched by `task_id` or file-target overlap. These feed each worker's `{{prior_knowledge}}` injection in Step 3.
-- **`skill_invocation_map`** — plan `**Related skills:**` entries (non-persistent) merged with `lore ceremony get implement` entries (tagged `source: ceremony`; the verb logs each `Ceremony-injected skill:` row), each with its `skill_template_version`. Per D3 this map is in-memory routing state for Step 4.0 — the lead invokes the skill directly; no agent spawns for these. Forward-compat: if a future ceremony schema returns `{skill, mode: "agent"}`, treat it as persistent-advisor opt-in; today no ceremony entry can request agent-mode.
+- **`skill_invocation_map`** — plan `**Related skills:**` entries merged with `lore ceremony get implement` entries, each with its `skill_template_version`. Hold this as in-memory routing state for Step 4.0; the lead invokes these skills directly.
 - **`advisors`** — `mode: persistent` declarations only. Per D1/D2, advisor declarations without `mode: persistent` (e.g. `[must-consult]`, `[on-demand]`) are lead-handled inline on the default route and do NOT spawn advisor agents.
 - **`lead_inline_conditions`** — the four gate conditions as SEPARATE fields (`single_task`, `prescriptive`, `no_persistent_advisor`, `no_required_consultation`) plus a `detail` block. Never an aggregate eligibility boolean — the lead reads conditions and decides (Step 3.0).
 
@@ -301,27 +283,22 @@ The efficiency route is eligible when **all four** conditions hold:
    - Include each assigned task's `packet_id` (carried on its TaskCreate manifest entry and in `open`'s `packets` field) as a literal `Packet-id: <packet_id>` line in that worker's Task prompt — the post-session packet assessor matches this line to confirm handoff. Omit the line for tasks without a `packet_id`.
 
    Assign only tasks from `open`'s `initial_unblocked` set. Same-file serialization is already wired into the manifest's blockedBy edges for this selection — never parallel-dispatch same-file tasks across workers; for subset selections, also account for files held by unselected tasks (the cross-selection caveat in Step 2). After claiming (`TaskUpdate(owner=…)`), a worker-side `TaskGet` ownership re-check is the backstop for claim races.
-   <!-- Sunset: remove if same-file collision / phantom-completion retro-evolution rows targeting skills/implement/SKILL.md recur from ≥3 new distinct work items within the next 20 implement cycles. -->
 
    Workers declare `--scale-set` at every `lore prefetch` and `lore search` call. **Scale rubric — declare explicitly at every retrieval surface:** for the four scale definitions (abstract / architecture / subsystem / implementation), boundary tests, multi-label encoding, and the ±1 query pattern, see `skills/memory/SKILL.md` § Scale-Aware Navigation. The full decision tree lives in the canonical `classifier` agent template (resolved via `resolve_agent_template classifier`).
 
-   The worker template documents the tier-aware emission contract. Workers are required to:
-
-   - **During task:** write each structured Tier 2 claim by piping a JSON row through `echo '<json>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>` before sending the completion report. One call per claim. `evidence-append.sh` is the sole-writer for `$KDIR/_work/<slug>/task-claims.jsonl`.
-   - **Post task:** send a completion report to the lead containing the traditional prose fields (**Task**, **Changes**, **Tests**, **Blockers**, **Surfaced concerns**, **Consultations** — with the `handler: lead|skill|agent` discriminator), a **Tier 2 evidence:** field listing `claim_id` values written during the task, and an optional **Tier 3 candidates:** YAML block (producer_role + 13-field Tier 3 shape minus `confidence`).
-   - **Naming standard:** the optional Tier 3 section MUST be labeled exactly **Tier 3 candidates:** — not "Tier 3 claims" or "Tier 3 observations". The TaskCompleted hook validates literal-prefix-match.
+   The resolved worker template owns the Tier 2 append and completion-report procedure. Preserve the exact report labels **Tier 2 evidence:** and optional **Tier 3 candidates:**; the latter is literal-prefix-matched by the TaskCompleted hook.
 
    **If `$ADVISORY_MIXIN` is non-empty (opt-in route only):** append the resolved mixin content after the fully resolved worker template content, separated by a blank line. **On the default route `$ADVISORY_MIXIN` is empty** — worker prompts end at the resolved worker template; workers still have the `**Consultations:**` reporting field and `## Consultation` request shape from the worker template's §Reporting Guidelines, so they can SendMessage the lead without the mixin. The lead's Step 4.0 handler answers on the next turn boundary.
 
-   For the spawn block (`WORKER_MODEL` resolution + Task: spawn template), read `skills/implement/templates/worker-spawn.md`. It carries three routes: the **default same-harness Claude worker**; a **codex-routed worker** that dispatches implementation to Codex through the `agents/codex-worker.md` chaperone; and a **session-routed worker** that dispatches the task to a PTY-hosted worker session through the `agents/session-worker.md` chaperone. All three resolve the worker model with the `implement` ceremony (`resolve_model_for_role worker implement`). **Neither the codex nor the session route is ever a silent default.** Select the **codex** route only on explicit user or plan direction (route implementation to Codex). Select the **session** route only on explicit selection — a `[route: session]` task-line marker (surfaced as the task's `route` field) or a user directive at dispatch — when the work wants full session observability; an in-harness Task worker is the cheaper default. For either non-default route, confirm the effective worker model against the stated intent before dispatching, surface the worker-session model to the user per [[knowledge:preferences/worker-sub-agent-model-selection-is-user-directed]], and on a `degraded` return re-dispatch the task as a default-route worker (both routes are optimizations, never dependencies).
+   For the spawn block, read `skills/implement/templates/worker-spawn.md`. It maps each task's judgment class to `worker-mechanical | worker | worker-judgment-dense`, resolves that role with the `implement` ceremony, and defines the default, codex-routed, and session-routed branches. Neither non-default route is silent: require explicit user/plan selection, confirm the effective model, surface the worker-session model, and re-dispatch a `degraded` result through the default route.
 
 ### Step 4: Collect progress
 
 As worker messages arrive (delivered automatically), branch by message kind:
 
 - **Consultation requests** — bodies whose first line is `## Consultation` and that carry `consultation-id:` route to Step 4.0 below. Mid-task questions; reply immediately so the worker resumes on the next turn boundary.
-- **Completion reports** — bodies matching `## Reporting Guidelines` shape from `agents/worker.md` route through §1–§8.
-- **Blocker messages** — anything else from a worker requiring intervention falls through to §7.
+- **Completion reports** — bodies matching the `## Reporting Guidelines` shape from `agents/worker.md` route through §1–§6.
+- **Blocker messages** — anything else from a worker requiring intervention falls through to §5.
 
 The durable consultation record is `$ITEM_DIR/consultation-transcript.jsonl` — one acknowledged-reply record per line, written ONLY by `lore impl consult-log` (the verb is its sole sanctioned writer). It replaces the old in-memory per-run transcript: §1's required-consultation check intersects against this file, so a consultation that was answered but never filed is indistinguishable from one that never happened. File every reply.
 
@@ -375,7 +352,7 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
 
 5. **Do NOT block other Step 4 sub-steps** on consultation handling — the lead may receive a consultation from worker-A while waiting for a completion report from worker-B. Reply, file, then return to whichever queue the next message arrives on.
 
-#### Step 4 §1–§8: Completion reports
+#### Step 4 §1–§6: Completion reports
 
 1. **Run the mechanical report check before accepting the task — every report, no exceptions.** Save the worker's completion report body verbatim to a file (e.g. via `mktemp`), then gather the harness facts the verb cannot read itself and invoke:
 
@@ -447,7 +424,6 @@ A worker SendMessage whose body begins with `## Consultation` and carries `consu
    **The `Spend:` line — chaperone-routed tasks only (D6).** When an accepted worker report carries a `**Spend:**` section — the `agents/codex-worker.md` and `agents/session-worker.md` chaperones each relay one; claude-native Task-tool workers do not — copy its `key=value` tokens verbatim into one `Spend: task=<task-id> <copied tokens>` line: `harness=<h> model=<m> effort=<e|none> input_tokens=<n> … duration_seconds=<n> basis=<b>`, the closed spend vocabulary flattened to `key=value`, fields omitted exactly as the report omitted them. It is a verbatim copy — the lead adds only `task=<task-id>` (the id it is logging), never rewrites, re-splits the effort suffix (already split adapter-side), or backfills a token the report did not carry. The copy mechanic is identical across both chaperones; the source differs — codex builds it from its terminal `token_count` event, the session chaperone from the worker session's `closed` event (basis `transcript`/`rollout`/`store`, or `duration-only` when degraded). A report with **no** `**Spend:**` section writes **no** `Spend:` line; `impl-close` reads that absence as `spend: null`. A degraded chaperone run relays a duration-only `**Spend:**` (`duration_seconds=<n> basis=duration-only`) — copy it the same way. The line records the *effective* model the chaperone resolved, which may differ from the class binding `impl-close` re-resolves; both stay legible. Session-routed tasks land their spend here, on the per-task line — the worker session's own `closed` row runs under a derived slug and is intentionally outside retro's session-spend line (see the `skills/retro/SKILL.md` session-spend note).
 
    **Log discipline:** one execution-log entry per task, written only after that task's worker completion report arrives — never log `pending worker report` placeholders. When a worker reports several tasks in one message, write one entry per task (batched entries lose per-task sequence and starve /retro of evidence).
-   <!-- Sunset: remove if execution-log completeness retro-evolution rows targeting skills/implement/SKILL.md change-type evidence-gap recur from ≥3 new distinct work items within the next 20 implement cycles. -->
 
 4. **Set aside Tier 3 candidates for Step 5** — if the worker report contains a `Tier 3 candidates:` YAML block, stash each entry (preserving producer_role and source_artifact_ids) for Step 5. Do NOT promote here — Step 5 is the sole promotion site.
 
@@ -549,7 +525,7 @@ closure = {
 
 [[knowledge:architecture/plan-task-models/lore-work-check-is-not-taskcompleted-acceptance|Acceptance-layer note:]] `lore work check` (task-system layer) and the closure verdict (capability-loop layer) sit at different altitudes. The task system answers "did this artifact get produced and pass per-task checks"; the closure verdict answers "did the run deliver the capability the anchor names." The closure verdict cannot override the task-system archive precondition (a `full` verdict on a task-incomplete item is refused outright — no row is recorded at all), and the task-system precondition cannot substitute for the closure verdict (every task checked is the *input* to the verdict, not its conclusion).
 
-**Lazy audit note:** per §9.2 Step 8, the Stop hook lazily triggers audit of this session's promotions; `/implement` does not invoke the audit explicitly. Completion of `/implement` is non-blocking — the audit runs opportunistically after session end.
+**Lazy audit note:** the Stop hook triggers audit of this session's promotions; `/implement` does not invoke it explicitly. Completion remains non-blocking because the audit runs opportunistically after session end.
 
 ### Step 7: Close the run
 
