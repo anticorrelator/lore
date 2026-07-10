@@ -84,7 +84,7 @@ Proposal §9.2 describes nine logical steps. This SKILL.md presents them as seve
 | 8 Stop hook lazily triggers audit; completion non-blocking | Step 6 (reference only) |
 | 9 Prepare `/retro` inputs | Step 7 |
 
-**Lead-inline route variant.** Step 3.0 introduces a pre-dispatch short-circuit. When the plan satisfies the lead-inline conditions (single prescriptive task, no persistent advisor, no required pre-edit orchestration — file count is no longer gated), §9.2 steps 2–6 collapse into direct lead execution: the lead applies edits using its own tools, emits Tier 2 evidence with `$LEAD_TEMPLATE_VERSION`, then jumps to Step 5 → Step 6 → Step 7. No team is created and no workers spawn.
+**Lead-inline route variant.** Step 3.0 introduces a pre-dispatch short-circuit. On a full-team harness, the efficiency route remains limited to a single prescriptive task with no persistent advisor or required pre-edit orchestration. When `team_messaging` is below `full`, the capability route collapses any task count into serial direct lead execution because TeamCreate/worker dispatch is unavailable. In either route the lead applies edits using its own tools, emits Tier 2 evidence with `$LEAD_TEMPLATE_VERSION`, and persists one keyed report entry per task before jumping to Step 5 → Step 6 → Step 7. No team is created and no workers spawn.
 
 ### Step 1: Start the run
 
@@ -176,7 +176,7 @@ Selection is the caller's declaration — exactly one mode is required, no defau
 Contract (`scripts/impl-open.sh`) — a prepare-and-return emitter; it never invokes harness tools, never spawns anything, never decides routes. Its only write is one execution-log attribution row. It returns:
 
 - **Checksum validation** — delegates to `load-tasks`; a `tasks.json`/`plan.md` checksum mismatch is a hard exit-1 directing to `lore work regen-tasks <slug>`. Tell the user: "plan.md was edited after tasks.json was generated. Run `/work regen-tasks <slug>` to regenerate, or edit plan.md back." Wait for the user's decision — this prompt stays interactive. If `tasks.json` does not exist, generate it with `lore work tasks "$SLUG"`, then re-run `open`. The checksum gate is owned by `open` alone — `next-batch` deliberately does not re-enforce it mid-run.
-- **`capabilities`** — the active framework's adapter gates: `completion_enforcement` ∈ `native_blocking | lead_validator | self_attestation | unavailable` (shapes the Step 4 verification fork per `adapters/agents/README.md` §"Completion Enforcement Degradation Modes" — `native_blocking` rejects malformed worker reports synchronously; `lead_validator` requires the post-hoc validator; the rest degrade further) and `team_messaging` ∈ `full | partial | fallback | none` (`none` collapses to lead-inline execution per Step 3.0: no TeamCreate, no worker spawns; the skill is gated to harnesses whose `team_messaging=full` per `adapters/capabilities.json.skills.implement.requires`).
+- **`capabilities`** — the active framework's adapter gates: `completion_enforcement` ∈ `native_blocking | lead_validator | self_attestation | unavailable` (shapes the Step 4 verification fork per `adapters/agents/README.md` §"Completion Enforcement Degradation Modes" — `native_blocking` rejects malformed worker reports synchronously; `lead_validator` requires the post-hoc validator; the rest degrade further) and `team_messaging` ∈ `full | partial | fallback | none` (anything below `full` takes Step 3.0's capability-collapse route: no TeamCreate, no worker spawns, one durable report per task before collapse completes).
 - **`manifest`** — TeamCreate first, then one TaskCreate per eligible task in `tasks.json` order, then TaskUpdate wiring ops whose `add_blocked_by` edges are complete (tasks.json edges within the selection plus collision-serialization edges). Edges pointing outside the selection surface per-task as `external_blocked_by` for the lead to wire against already-created tasks. An empty manifest is success with an explanatory `status`, not an error.
 - **`collisions`** — same-file intersections among concurrent selected tasks, already folded into the manifest as serialization edges so the wiring is collision-safe. **Cross-selection collisions are NOT detected:** when dispatching a `--phase`/`--task` subset, the lead accounts for files held by unselected or still-in-flight tasks before spawning.
 - **`phase_map`** and **`prior_knowledge`** — per-phase knowledge resolved through the 3-branch gate: a `retrieval_directive` resolves via `resolve-manifest.sh` (authoritative; v2 directives return `### Focal:`/`### Adjacent:` sectioned blocks, legacy flat directives a single section — the dispatcher does not branch on shape); task descriptions embedding `## Prior Knowledge` skip prefetch (the phase already carries resolved knowledge; appending would duplicate or conflict); otherwise the fallback `lore prefetch` runs ONLY when the caller declared `--fallback-scale-set <buckets>` (comma-separated from `abstract|architecture|subsystem|implementation`). Without a declaration the phase returns `status: needs-prefetch` with the suggested query — **scale is the caller's declaration, never a default.** On `needs-prefetch`, declare the bucket per the scale rubric (see `skills/memory/SKILL.md` § Scale-Aware Navigation) and re-run `open` with `--fallback-scale-set` — re-declare with intent, not habit. When the fallback branch ran, log one `Knowledge-delivery-path: lead-fallback-prefetch` line via `write-execution-log.sh` so the delivery gap is visible to /retro.
@@ -187,7 +187,9 @@ Contract (`scripts/impl-open.sh`) — a prepare-and-return emitter; it never inv
 
 Exit codes: `0` manifest emitted (possibly empty with explanatory status); `1` validation error / no match / missing tasks.json / checksum mismatch; `2` ambiguous reference.
 
-**The lead executes every harness tool call itself, in manifest order — TeamCreate first.** A CLI verb cannot invoke harness tools; the TeamCreate-first ordering is the orphan-task guard: TaskCreate calls go into whichever task list is active, so tasks created before TeamCreate land in the session's default list — invisible to workers who see the team's list, persisting as orphaned stale tasks for the rest of the session. Walk the manifest top-to-bottom:
+**Evaluate Step 3.0 before executing the manifest.** A selected lead-inline route consumes the manifest's task entries as its serial task list but executes none of its TeamCreate/TaskCreate/TaskUpdate operations. Only the worker-dispatch route executes harness operations.
+
+**On the worker-dispatch route, the lead executes every harness tool call itself, in manifest order — TeamCreate first.** A CLI verb cannot invoke harness tools; the TeamCreate-first ordering is the orphan-task guard: TaskCreate calls go into whichever task list is active, so tasks created before TeamCreate land in the session's default list — invisible to workers who see the team's list, persisting as orphaned stale tasks for the rest of the session. Walk the manifest top-to-bottom:
 
 1. **TeamCreate** with the manifest's `team_name` and `description="Implementing <work item title>"`. **`team_name` MUST be exactly `impl-<work-item-slug>`** — the slug suffix has to match the work item directory name in `$KDIR/_work/` byte-for-byte. The TaskCompleted hook (`scripts/task-completed-capture-check.sh`) derives the work-item slug by stripping the `impl-` prefix; `lore work check` and Tier 2 evidence reads use the same convention. On opencode/codex the adapter emits `delegate:plugin_team_init` / `delegate:codex_subagent_init`; invoke the documented translation.
 2. **TaskCreate** per manifest entry with its `subject`, `activeForm`, `description`, tracking each `local_id` → created-task ID. Per-task descriptions are lean by design — each begins with a `**Phase:** N` line (the authoritative phase-number source) followed only by the task-specific assignment; phase-level context lives in `tasks.json → phases[N-1].phase_context`, fetched lazily by the worker via `lore work phase-context <slug> <phase-number>` after `TaskGet`. The lead does NOT embed phase context into descriptions. (Legacy `tasks.json` without `phase_context` exits 0 with empty stdout there; workers fall back to inline phase context — no regen required.)
@@ -197,41 +199,70 @@ Exit codes: `0` manifest emitted (possibly empty with explanatory status); `1` v
 
 ### Step 3.0: Lead-inline gate (pre-dispatch short-circuit)
 
-**Read the four condition fields from `open`'s `lead_inline_conditions` and decide the route yourself.** The verb reports conditions as separate fields — never an aggregate boolean — because the route is a judgment, not an arithmetic AND: the `detail` block tells you *why* a condition is false, and the carve-out below turns on that distinction. Worker dispatch's value is parallelism across independent tasks plus discretion-bearing context for intent+constraints work; both vanish when the plan reduces to a single fully-determined edit. The ~22KB context tax per spawn plus TeamCreate + TaskCreate + completion round-trip is then pure overhead.
+**Read `open`'s `capabilities.team_messaging` and the four `lead_inline_conditions` fields, then decide the route yourself.** There are two routes:
 
-The gate fires when **all four** conditions hold:
+- **Capability collapse:** when `team_messaging` is below `full`, lead-inline is mandatory regardless of `single_task`; the harness cannot execute TeamCreate/worker dispatch. Execute every selected task serially in manifest dependency order. This route changes bookkeeping and coordination only — the lead still performs every discretion-bearing task judgment and declared consultation/skill obligation.
+- **Efficiency collapse:** on a full-team harness, read the four conditions as separate fields — never an aggregate boolean — because the route is a judgment, not an arithmetic AND. Worker dispatch's value is parallelism across independent tasks plus discretion-bearing context for intent+constraints work; both vanish when the plan reduces to a single fully-determined edit. The ~22KB context tax per spawn plus TeamCreate + TaskCreate + completion round-trip is then pure overhead.
+
+For either route, selecting lead-inline is provisional. The collapse fires only after the durable report read-back below proves one report key per selected task; task shape is never a substitute for report presence.
+
+The efficiency route is eligible when **all four** conditions hold:
 
 1. **`single_task`** — `tasks.json` contains exactly one task across all phases.
 2. **`prescriptive`** — the task's containing phase declares `**Task format:** prescriptive`. Intent+constraints tasks involve worker discretion; lead-inline removes that channel and is unsafe for them.
 3. **`no_persistent_advisor`** — no phase declares a `mode: persistent` advisor. Non-persistent advisor declarations are lead-handled inline and do not disqualify.
 4. **`no_required_consultation`** — no phase declares `**Consultations required:**` domains, the ceremony list is empty, AND plan.md's `**Related skills:**` block declares no entries. Each signals orchestration that has no inline analogue when no team exists.
 
-   **Lead route with a lead-invoked skill in scope.** When condition 4 is false *only* because `detail.related_skills` is non-empty (and the other three hold), the lead route remains eligible *provided* the lead first invokes each in-scope skill via the `Skill` tool and records the invocation in `execution-log.md` before applying any edits (log line format: `Lead-invoked skill: <skill-name>\nDomain: <domain>\nSkill template-version: <hash>` via `write-execution-log.sh --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"`; the skill's `skill_template_version` is already in `open`'s map). If condition 4 is false because of `**Consultations required:**` or a non-empty ceremony list, fall through to Step 3 worker dispatch.
+   **Lead route with a lead-invoked skill in scope.** On the efficiency route, when condition 4 is false *only* because `detail.related_skills` is non-empty (and the other three hold), the lead route remains eligible *provided* the lead first invokes each in-scope skill via the `Skill` tool and records the invocation in `execution-log.md` before applying any edits (log line format: `Lead-invoked skill: <skill-name>\nDomain: <domain>\nSkill template-version: <hash>` via `write-execution-log.sh --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"`; the skill's `skill_template_version` is already in `open`'s map). If condition 4 is false because of `**Consultations required:**` or a non-empty ceremony list, fall through to Step 3 worker dispatch. On the capability route, the lead invokes every related skill and satisfies every declared consultation itself before editing the affected task.
 
-**No file-count cap.** An earlier version of this gate required ≤3 files. Evidence from the scale-registry-rename cycle (single prescriptive task, 10 verbatim file edits, no discretion) showed the cap was a proxy for "discretion required" that the other conditions already cover better. A 50-file prescriptive rename is still 50 file edits with no discretion; splitting across workers pays N × ~22KB context tax for no shaping gain. `detail.file_count_diagnostic` is logged below as telemetry but does not gate.
+**No file-count cap.** An earlier version of this gate required ≤3 files. Evidence from the scale-registry-rename cycle (single prescriptive task, 10 verbatim file edits, no discretion) showed the cap was a proxy for "discretion required" that the other conditions already cover better. A 50-file prescriptive rename is still 50 file edits with no discretion; splitting across workers pays N × ~22KB context tax for no shaping gain. `detail.file_count_diagnostic` remains telemetry and does not gate.
 
-**If any condition fails (outside the carve-out):** skip Step 3.0 entirely and proceed to Step 3 (worker dispatch). Do not log a skip — the worker pipeline is the default.
+**On a full-team harness, if any condition fails (outside the carve-out):** skip Step 3.0 entirely and proceed to Step 3 (worker dispatch). Do not log a skip — the worker pipeline is the default.
 
-**If all conditions hold:** apply edits inline.
+**If either route is selected:** execute and persist each task inline.
 
-1. **Log the gate firing** — one entry to `execution-log.md` so retro can attribute the route taken:
+1. **Log route selection** — one entry to `execution-log.md`; do not claim that the collapse fired yet:
    ```bash
-   printf 'Lead-inline execution: gate fired\nConditions: single task, prescriptive, no persistent advisor, no required pre-edit orchestration\nFile count (diagnostic): %d\nTask: %s\n' \
-     "<file-count>" "<task-subject>" \
+   printf 'Lead-inline execution: route selected\nRoute: %s\nTask count: %d\n' \
+     "<capability-collapse|efficiency-collapse>" "<selected TaskCreate manifest entry count>" \
      | bash ~/.lore/scripts/write-execution-log.sh --slug "$SLUG" --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
    ```
 2. **Invoke in-scope skills before editing (if any),** per the condition-4 carve-out, logging each as above.
-3. **Apply the edits directly** using the lead's `Read` / `Edit` / `Write` / `Bash` tools, honoring the phase's `**Verification:**` objectives. Read the task description the same way a worker would, then execute the prescriptive instructions yourself. **Reviewer-facing comment discipline applies to the lead too** — apply the drop/keep rules, drift test, and worked examples from `agents/worker.md` step 5 to any comments you write into committed source.
-4. **Emit Tier 2 evidence** for any falsifiable claims the edits depend on, with `$LEAD_TEMPLATE_VERSION` — the lead is the producer:
+3. **For each selected task in manifest dependency order, apply its edits directly** using the lead's `Read` / `Edit` / `Write` / `Bash` tools and honor its phase's `**Verification:**` objectives. Read each task description the same way a worker would. **Reviewer-facing comment discipline applies to the lead too** — apply the drop/keep rules, drift test, and worked examples from `agents/worker.md` step 5 to any comments you write into committed source.
+4. **Emit that task's Tier 2 evidence** for any falsifiable claims the edits depend on, with `$LEAD_TEMPLATE_VERSION` — the lead is the producer:
    ```bash
    echo '<tier2-row-json>' | bash ~/.lore/scripts/evidence-append.sh --work-item "$SLUG"
    ```
    Every row MUST carry `exact_snippet` and `normalized_snippet_hash`. Compute via the canonical helper — do NOT inline the recipe (`python3 ~/.lore/scripts/snippet_normalize.py --hash <<<"$SNIPPET"`); the v1 normalization recipe lives only in `scripts/snippet_normalize.py`, and `evidence-append.sh` delegates to `validate-tier2.sh`, which rejects rows that omit either field or carry a hash that does not match.
-5. **Stash any Tier 3 candidates** for Step 5 (promotion still goes through `promote-batch` with `producer_role: implement-lead`).
-6. **Mark the task complete:** `lore work check "$SLUG" "<task-subject>"`.
-7. **Skip Steps 3, 4, and the batch-loop shutdown** — no team to shut down. Proceed directly to **Step 5** → **Step 6** → **Step 7**.
+5. **Persist that task's report immediately after verification.** Give every report a run-and-task key, and use the same narrative fields as Step 4 §3 so downstream retro readers receive per-task material on every route:
+   ```bash
+   REPORT_KEY="$RUN_STARTED_AT/<task-id>"
+   printf 'Report-key: %s\nTask: %s\nChanges: %s\nSkills: %s\nTier2-claims: %s\nObservations: %s\nConvention: %s\nInvestigation: %s\nBlockers: %s\nConsultations: %s\nTest result: %s\n' \
+     "$REPORT_KEY" "<task-subject>" "<lead Changes>" "<lead Skills used>" \
+     "<comma-separated claim_ids>" "<lead Observations or Tier 3 summary>" \
+     "<lead Convention handling>" "<lead Investigation>" "<lead Blockers>" \
+     "<lead Consultations>" "<passed|failed|skipped>" \
+     | bash ~/.lore/scripts/write-execution-log.sh --slug "$SLUG" --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
+   ```
+   If a field has no content, write `None`. Never batch several tasks into one entry.
+6. **Read back the durable key before accepting the task:**
+   ```bash
+   test "$(rg -Fxc "Report-key: $REPORT_KEY" "$ITEM_DIR/execution-log.md")" -eq 1
+   ```
+   A failed write or read-back halts the route before the task is checked off. Do not count a screen-rendered report or an in-memory draft.
+7. **Stash any Tier 3 candidates** for Step 5 (promotion still goes through `promote-batch` with `producer_role: implement-lead`), then mark that task complete: `lore work check "$SLUG" "<task-subject>"`.
+8. **Commit the collapse only after all selected tasks pass read-back.** Let N be the number of selected TaskCreate manifest entries, then verify and log the durable count:
+   ```bash
+   REPORT_COUNT=$(rg -Fc "Report-key: $RUN_STARTED_AT/" "$ITEM_DIR/execution-log.md")
+   test "$REPORT_COUNT" -eq "<selected TaskCreate manifest entry count>"
+   printf 'Lead-inline execution: gate fired\nDurable per-task reports: %d/%d\n' \
+     "$REPORT_COUNT" "<selected TaskCreate manifest entry count>" \
+     | bash ~/.lore/scripts/write-execution-log.sh --slug "$SLUG" --source implement-lead --template-version "$LEAD_TEMPLATE_VERSION"
+   ```
+   The per-task exact-key read-backs in §6 make those N prefix matches distinct task reports. If the count is not N, halt before Step 5; the collapse did not fire.
+9. **Skip Steps 3, 4, and the batch-loop shutdown** — no team exists to shut down. Proceed directly to **Step 5** → **Step 6** → **Step 7**.
 
-**Sanctioned pause:** if the lead is unsure whether the prescriptive task is fully determined enough to execute without discretion, fall through to Step 3. Lead-inline is a short-circuit, not a forced route.
+**Sanctioned pause (efficiency route only):** if the lead is unsure whether the prescriptive task is fully determined enough to execute without discretion, fall through to Step 3. The capability route remains mandatory because its harness has no worker-dispatch surface; uncertainty there is resolved by the lead's judgment, not by weakening report persistence.
 
 ### Step 3: Spawn agents
 
