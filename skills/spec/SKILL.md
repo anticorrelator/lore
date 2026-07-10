@@ -189,7 +189,7 @@ As researcher messages arrive (or after direct file reading in short branch):
      ```bash
      echo '<json-row>' | bash ~/.lore/scripts/evidence-append.sh --work-item <slug>
      ```
-     `evidence-append.sh` is the sole writer for `$KDIR/_work/<slug>/task-claims.jsonl`; it rejects missing snippets and invalid or mismatched normalized hashes. On rejection, fix and retry the row or log the failure. Never write the JSONL directly.
+     `evidence-append.sh` is the sole writer of `$KDIR/_work/<slug>/task-claims.jsonl`; it rejects missing snippets and invalid or mismatched normalized hashes. On rejection, fix and retry the row or log the failure to `execution-log.md`. Never write the JSONL directly — direct writes bypass validation and are treated as corrupt.
    - After successful append, write a human-readable mirror entry to `$KDIR/_work/<slug>/evidence.md`. Do not write a mirror entry for a row that failed validation.
    - **Absence semantics:** if no assertions or lead-observed task claims exist, both `task-claims.jsonl` and `evidence.md` may be absent — absence means "no Tier-2 claims captured this session," not "work was fully verified."
 
@@ -337,7 +337,7 @@ Apply this contract after every terminal evaluator attempt in Steps 5a and 5.5. 
      --evidence-manifest "$EVIDENCE_JSON" [--reason "$REASON"]
    ```
 
-   Exact replay is idempotent; reusing an attempt id for different semantics is a refused collision. `needs-decision` may return `status=partial` when its auxiliary resolution row fails; exact retry recovers that sink.
+   Exact replay is idempotent; reusing an attempt id for different semantics is a refused collision. `needs-decision` may return `status=partial` when its auxiliary resolution row fails to append; exact retry recovers only that sink.
 
 ### Step 5a: Design ceremony evaluation
 

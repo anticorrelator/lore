@@ -155,7 +155,7 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
 <why this phase splits into N tasks — the judgment-density boundary or parallelism that earns the extra worker spawns>
 **Tasks:**
 <!-- One - [ ] checkbox per phase by default. Use multiple only under Step 5b's split calculus;
-     split when Step 5b's context-envelope ceiling requires it.
+     the context-envelope ceiling forces a split regardless of the calculus.
      Valid primary verbs: Implement / Refactor / Author / Migrate / Add support for / Wire.
      Banned as primary verb: Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only.
      See Step 5b "Deliverable contract gate" for routing of invalid units.
