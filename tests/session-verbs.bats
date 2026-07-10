@@ -746,6 +746,36 @@ journal_boundaries() {
   [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
 }
 
+@test "append accepts string-valued closed.links.close_requests" {
+  run bash "$APPEND" --row '{"event":"closed","request_id":"spawn-1","links":{"close_requests":"[\"term-1\",\"explicit-2\"]"}}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run jq -er 'select(.event=="closed") | .links.close_requests == "[\"term-1\",\"explicit-2\"]"' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "append rejects closed.links.close_requests outside closed" {
+  run bash "$APPEND" --row '{"event":"close_failed","request_id":"r1","links":{"close_requests":"[\"r1\"]"}}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"links.close_requests"* ]]
+  [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
+}
+
+@test "append rejects malformed closed.links.close_requests declarations" {
+  local row
+  for row in \
+    '{"event":"closed","links":{"close_requests":["r1"]}}' \
+    '{"event":"closed","links":{"close_requests":"not-json"}}' \
+    '{"event":"closed","links":{"close_requests":"[]"}}' \
+    '{"event":"closed","links":{"close_requests":"[\"\"]"}}' \
+    '{"event":"closed","links":{"close_requests":"[ \"r1\" ]"}}' \
+    '{"event":"closed","links":{"close_requests":"[\"r1\",\"r1\"]"}}'; do
+    run bash "$APPEND" --row "$row" --kdir "$TEST_KDIR"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"links.close_requests"* ]]
+  done
+  [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
+}
+
 @test "append rejects an out-of-vocabulary event and enumerates close_failed" {
   run bash "$APPEND" --row '{"event":"close_bogus","request_id":"r1"}' --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]

@@ -84,7 +84,7 @@ RULES = {
     "act.evolve.unconsumed": "A versioned accepted cluster with consumed_at_run_id=null is staged and unconsumed.",
     "needs.ceremony.unhandled": "A ceremony-resolution row explicitly says outcome=needs-decision and disposition=unhandled.",
     "needs.retro.unhandled-due": "The retro native fold reports a DUE outcome without a handling disposition.",
-    "needs.session.unmatched-close-failed": "A close_failed event has no later closed event for the same request.",
+    "needs.session.unmatched-close-failed": "A close_failed event has no later closed event whose links.close_requests explicitly includes the failed request.",
     "waiting.session.live": "A session appears in the native live-instance fold.",
     "waiting.work.blocked-by": "A work item or pending task carries a non-empty blocked_by fact.",
     "waiting.work.not-before": "A work item declares a future not_before timestamp.",
@@ -417,6 +417,7 @@ elif session_events is not None and isinstance(session_events.get("next_cursor")
         )
 
 known_events = []
+closed_recovery_requests = {}
 if session_events is not None and isinstance(session_events.get("events"), list):
     for pos, event in enumerate(session_events["events"], 1):
         if not isinstance(event, dict):
@@ -427,6 +428,28 @@ if session_events is not None and isinstance(session_events.get("events"), list)
             session_errors.append(f"session event {pos} unknown event={token!r}")
             continue
         known_events.append((pos, event))
+        if token != "closed":
+            continue
+        links = event.get("links")
+        if not isinstance(links, dict) or "close_requests" not in links:
+            continue
+        raw_close_requests = links.get("close_requests")
+        try:
+            close_requests = json.loads(raw_close_requests) if isinstance(raw_close_requests, str) else None
+        except json.JSONDecodeError:
+            close_requests = None
+        if (
+            not isinstance(close_requests, list)
+            or not close_requests
+            or any(not isinstance(request_id, str) or not request_id for request_id in close_requests)
+            or len(set(close_requests)) != len(close_requests)
+            or json.dumps(close_requests, separators=(",", ":"), ensure_ascii=False) != raw_close_requests
+        ):
+            session_errors.append(
+                f"session event {pos} malformed closed.links.close_requests declaration"
+            )
+            continue
+        closed_recovery_requests[pos] = close_requests
 
 if session_errors:
     add_gap(
@@ -455,10 +478,15 @@ if session_list is not None and isinstance(session_list.get("instances"), list):
                 [instance_name, slug], "waiting.session.live",
             ))
 
+# Recovery is forward-only and declaration-only. In particular, the known
+# pre-extension row behind
+# [session-journal:unmatched-close-failed:1d77a8b177268b18] remains visible: a
+# matching slug, ordering, or top-level closed.request_id is never inferred into
+# a recovery fact that the historical row did not declare.
 closed_after = {}
-for pos, event in known_events:
-    if event.get("event") == "closed" and event.get("request_id"):
-        closed_after.setdefault(event["request_id"], []).append(pos)
+for pos, request_ids in closed_recovery_requests.items():
+    for request_id in request_ids:
+        closed_after.setdefault(request_id, []).append(pos)
 for pos, event in known_events:
     if event.get("event") != "close_failed":
         continue

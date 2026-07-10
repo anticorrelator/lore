@@ -119,7 +119,11 @@ JSON
   cat > "$kdir/_sessions/events.jsonl" <<'JSONL'
 {"event":"close_failed","event_id":"fail-1","request_id":"request-1","slug":"failed-work","reason":"interactive-prompt"}
 {"event":"close_failed","event_id":"fail-2","request_id":"request-2","slug":"recovered-work","reason":"transient"}
-{"event":"closed","event_id":"closed-2","request_id":"request-2","slug":"recovered-work"}
+{"event":"closed","event_id":"closed-2","request_id":"spawn-2","slug":"recovered-work","links":{"close_requests":"[\"request-2\"]"}}
+{"event":"close_failed","event_id":"fail-3","request_id":"request-3","slug":"top-level-only","reason":"transient"}
+{"event":"closed","event_id":"closed-3","request_id":"request-3","slug":"top-level-only"}
+{"event":"close_failed","event_id":"fail-4","request_id":"request-4","slug":"same-slug","session_type":"implement","reason":"transient"}
+{"event":"closed","event_id":"closed-4","request_id":"other-request","slug":"same-slug","session_type":"implement","links":{"close_requests":"[\"unrelated\"]"}}
 JSONL
 
   cat > "$kdir/_scorecards/rows.jsonl" <<'JSONL'
@@ -170,9 +174,13 @@ assert_eq "every manifest row carries the complete contract" "true" \
   "$(jq -r 'all(.source_manifest[]; (.source_id|length)>0 and (.read_status|length)>0 and (.observed_at|length)>0 and (.schema_version|length)>0 and (.vocabulary_version|length)>0 and (.locator|length)>0 and has("error"))' "$JSON_OUT")"
 
 assert_eq "Act now contains task plus unconsumed evolve cluster" "2" "$(jq -r '.bucket_counts.act_now' "$JSON_OUT")"
-assert_eq "Needs judgment contains ceremony, retro, and unmatched close failure" "3" "$(jq -r '.bucket_counts.needs_judgment' "$JSON_OUT")"
+assert_eq "Needs judgment contains ceremony, retro, and three unmatched close failures" "5" "$(jq -r '.bucket_counts.needs_judgment' "$JSON_OUT")"
 assert_eq "matched close_failed is not surfaced" "0" \
   "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.request_id?=="request-2")] | length' "$JSON_OUT")"
+assert_eq "matching top-level closed.request_id without declaration clears nothing" "1" \
+  "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.request_id?=="request-3")] | length' "$JSON_OUT")"
+assert_eq "same slug and type with unrelated declaration clears nothing" "1" \
+  "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.request_id?=="request-4")] | length' "$JSON_OUT")"
 assert_eq "Waiting contains live session, blocker, not_before, and window" "4" "$(jq -r '.bucket_counts.waiting' "$JSON_OUT")"
 assert_eq "unresolvable ceremony is visible" "1" \
   "$(jq -r '[.buckets.needs_judgment[] | select(.kind=="unhandled-ceremony")] | length' "$JSON_OUT")"
@@ -218,6 +226,19 @@ assert_eq "repeated reads produce stable row identities" \
 
 CLI_JSON=$(bash "$CLI" coordinate status --kdir "$BASE" --json)
 assert_eq "CLI dispatch reaches projection" "1" "$(printf '%s' "$CLI_JSON" | jq -r '.schema_version')"
+
+MALFORMED="$TEST_DIR/malformed"
+setup_store "$MALFORMED"
+cat >> "$MALFORMED/_sessions/events.jsonl" <<'JSONL'
+{"event":"close_failed","event_id":"fail-malformed","request_id":"request-malformed","slug":"malformed-recovery","reason":"transient"}
+{"event":"closed","event_id":"closed-malformed","request_id":"spawn-malformed","slug":"malformed-recovery","links":{"close_requests":"not-json"}}
+JSONL
+MALFORMED_JSON="$TEST_DIR/malformed.json"
+bash "$COORDINATE" --kdir "$MALFORMED" --json > "$MALFORMED_JSON"
+assert_eq "malformed close_requests is a named session-journal coverage gap" "1" \
+  "$(jq -r '[.source_manifest[] | select(.source_id=="session-journal" and .read_status=="gap" and (.error|contains("malformed closed.links.close_requests")))] | length' "$MALFORMED_JSON")"
+assert_eq "malformed declaration clears nothing" "1" \
+  "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.request_id?=="request-malformed")] | length' "$MALFORMED_JSON")"
 CLI_HELP=$(bash "$CLI" coordinate --help 2>&1)
 assert_contains "coordinate help advertises status" "$CLI_HELP" "status"
 

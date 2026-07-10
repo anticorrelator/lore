@@ -12,7 +12,8 @@ func TestWriteAndListInstance(t *testing.T) {
 	inst := Instance{
 		Name: "amber-otter", PID: 4242, Repo: "github.com/x/y",
 		Started: "2026-07-05T00:00:00Z", InitiatorDefault: "human",
-		Sessions: []Session{{Slug: "s1", Type: "spec", Initiator: "human", Started: "2026-07-05T00:00:01Z"}},
+		Sessions: []Session{{Slug: "s1", Type: "spec", Initiator: "human", Started: "2026-07-05T00:00:01Z",
+			CloseRequests: []string{"term-1", "explicit-2"}}},
 	}
 	if err := WriteInstance(dir, inst); err != nil {
 		t.Fatalf("WriteInstance: %v", err)
@@ -26,6 +27,10 @@ func TestWriteAndListInstance(t *testing.T) {
 	}
 	if got[0].Sessions[0].Slug != "s1" {
 		t.Fatalf("session slug = %q", got[0].Sessions[0].Slug)
+	}
+	if closeRequests := got[0].Sessions[0].CloseRequests; len(closeRequests) != 2 ||
+		closeRequests[0] != "term-1" || closeRequests[1] != "explicit-2" {
+		t.Fatalf("session close_requests roundtrip = %v", closeRequests)
 	}
 }
 

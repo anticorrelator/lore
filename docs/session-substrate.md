@@ -77,7 +77,11 @@ rejected** by `min_vintage` filtering (see [Request queue](#request-queue)).
 Per nested session object: `slug` (string), `type` (string enum
 `spec|implement|chat|worker`), `initiator` (string enum `agent|human`), `started`
 (string, ISO 8601 UTC), plus the omit-when-empty recovery-manifest fields `tmux`,
-`session_id`, `harness`, `auto_close` (above).
+`session_id`, `harness`, `auto_close` (above), and `close_requests` (an ordered
+array of distinct, non-empty close-request IDs already consumed during this
+session lifecycle). The close-request set survives a `close_failed` outcome and
+tmux adoption so a later successful close can declare the exact attempts it
+recovers.
 
 **Write archetype.** The instance rewrites its own file via tmp + `os.Rename`
 (torn-read-proof) whenever a session starts or ends. **Heartbeat** is an
@@ -347,6 +351,13 @@ wait on `closed` **or** `close_failed`. Like `closed`, the `close_requested →
 close_failed` pair is matched by per-slug ordering, never adjacency — running-session
 transitions may fall between the request and its terminal.
 
+The close owner also records every consumed request ID in the live session's
+ordered `close_requests` recovery manifest before it acts. A failure that leaves
+the session alive retains that set; adoption carries it forward. The eventual
+`closed` row encodes the complete set in `links.close_requests`, independently of
+the top-level `closed.request_id` (which remains the spawn request for natural
+teardown and the latest consumed close request for ladder-driven teardown).
+
 These close-policy changes take effect in live operator sessions only after the
 operator rebuilds the TUI; updating the source and contract does not replace an
 already-running binary.
@@ -470,7 +481,7 @@ protocol terminal verbs, stop hooks) appends through the one sanctioned writer,
 | `request_id` | string | The request this event concerns; required for queue-lifecycle events. |
 | `reason` | string | Failure/reclaim reason; also the review-gate rationale carried by `review_flagged`/`review_held`/`review_released`. Also carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`. |
 | `gate_id` | string | Review-gate audit join key. Omit-when-empty. A gate-open verb (`review_flagged`/`review_held`) sets it as the row's `event_id`; the `review_released` row echoes it here so a reader pairs release→open without replaying state. See [docs/review-gates.md](review-gates.md). |
-| `links` | object | `{work_item?, artifact?}` — pointers to work-item artifacts rather than duplicated progress. Review events point `artifact` at the review packet. Writer defaults to `{}`. For a worker session (derived slug `<work-item-slug>--w<n>`) the writer derives `links.work_item` = the base work-item slug when the caller did not set it, so every worker lifecycle row points back at its work item (see [Worker sessions](#worker-sessions)). |
+| `links` | object | `{work_item?, artifact?, close_requests?}` — string-valued pointers and correlations. Review events point `artifact` at the review packet. On `closed` only, `close_requests` is a string containing a compact JSON array of distinct, non-empty consumed close-request IDs in first-consumed order (for example `"[\"term-1\",\"explicit-2\"]"`); the string representation preserves existing `map[string]string` Go readers while safely carrying opaque IDs. Writer defaults to `{}`. For a worker session (derived slug `<work-item-slug>--w<n>`) the writer derives `links.work_item` = the base work-item slug when the caller did not set it, so every worker lifecycle row points back at its work item (see [Worker sessions](#worker-sessions)). |
 | `spend` | object \| null | Session token spend, on `closed`. `duration_seconds` is always present; a `basis` enum (`transcript\|rollout\|store\|duration-only`) marks how the tokens were sourced. When the harness exposes a deterministic transcript binding (claude-code, via a spawn-time `--session-id`), the TUI merges the D1 token vocabulary — `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_output_tokens`, `total_tokens`, `cost_usd`, `model`, `harness` (fields the harness does not expose are omitted, never zero-filled). Every gap — codex/opencode-hosted sessions, an absent transcript, a probe timeout, an abrupt quit — degrades to `{duration_seconds, basis:"duration-only"}`. Extraction runs at teardown via `scripts/session-spend.sh`; the row still flows only through the sole writer. |
 
 Optional fields follow **omit-when-empty** discipline: an absent optional field is
@@ -540,15 +551,24 @@ obligation on every emitter, not a convenience: the journal is designed to outli
 session transcripts, so anything not written at the transition is lost. Do not
 design any consumer around retrospective transcript reconstruction.
 
+Close-recovery correlation is prospective and forward-only. A missing
+`links.close_requests` declaration means no recovery relationship was declared;
+readers never infer one from slug, session type, adjacency, ordering, or the
+top-level `request_id`. The known pre-extension coordination row
+`[session-journal:unmatched-close-failed:1d77a8b177268b18]` therefore remains
+visible by design rather than being mutated, duplicated, or specially suppressed.
+
 ### Writer contract
 
 `session-event-append.sh` is the **sole physical writer** of `events.jsonl`. It:
 
 1. Reads one JSON object (via `--row` or stdin).
 2. Validates: object shape; `event` present and in the vocabulary; `request_id`
-   non-empty for queue-lifecycle events; `links` (if present) is an object. Any
-   failure exits non-zero with a diagnostic **naming the offending field**, and no
-   row is appended.
+   non-empty for queue-lifecycle events; `links` (if present) is an object; and
+   `links.close_requests`, when present, occurs only on `closed` and is a string
+   decoding to a non-empty array of distinct, non-empty strings. The writer never
+   derives or defaults that member. Any failure exits non-zero with a diagnostic
+   **naming the offending field**, and no row is appended.
 3. Stamps provenance: generates `event_id` and `ts` when the caller omitted them;
    defaults `links` to `{}`.
 4. Compacts to one line with `jq -c` and appends with bare `>>` (O_APPEND).

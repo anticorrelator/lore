@@ -40,6 +40,10 @@ type liveSession struct {
 	// stamped from SessionProcessStartedMsg when the process comes up.
 	sessionID string
 	harness   string
+	// closeRequests is the ordered, distinct set of close-request ids consumed
+	// during this lifecycle. It survives close_failed outcomes and adoption, then
+	// travels as a compact JSON-array string in closed.links.close_requests.
+	closeRequests []string
 	// tmuxName is the hosting tmux session name (empty for direct-PTY): persisted
 	// on the registry row as the recovery manifest and the quit-path detach marker.
 	tmuxName string
@@ -173,15 +177,16 @@ func emitRecoveredCmd(dir, script, kdir string, inst session.Instance, ev sessio
 // adoptedSession is one still-running tmux-hosted session recovered from a dead
 // instance's registry row during startup adoption.
 type adoptedSession struct {
-	deadInstance string
-	slug         string
-	typ          string
-	initiator    string
-	started      time.Time
-	tmuxName     string
-	sessionID    string
-	harness      string
-	autoClose    *bool
+	deadInstance  string
+	slug          string
+	typ           string
+	initiator     string
+	started       time.Time
+	tmuxName      string
+	sessionID     string
+	harness       string
+	autoClose     *bool
+	closeRequests []string
 }
 
 // adoptionScanMsg carries the survivors a startup adoption scan claimed and
@@ -214,15 +219,16 @@ func (m model) adoptionScanCmd() tea.Cmd {
 			for _, s := range claim.Sessions {
 				if s.Tmux != "" && work.TmuxHasSession(s.Tmux) {
 					alive = append(alive, adoptedSession{
-						deadInstance: claim.Name,
-						slug:         s.Slug,
-						typ:          s.Type,
-						initiator:    s.Initiator,
-						started:      parseStartedISO(s.Started),
-						tmuxName:     s.Tmux,
-						sessionID:    s.SessionID,
-						harness:      s.Harness,
-						autoClose:    s.AutoClose,
+						deadInstance:  claim.Name,
+						slug:          s.Slug,
+						typ:           s.Type,
+						initiator:     s.Initiator,
+						started:       parseStartedISO(s.Started),
+						tmuxName:      s.Tmux,
+						sessionID:     s.SessionID,
+						harness:       s.Harness,
+						autoClose:     s.AutoClose,
+						closeRequests: append([]string(nil), s.CloseRequests...),
 					})
 					continue
 				}
@@ -231,6 +237,7 @@ func (m model) adoptionScanCmd() tea.Cmd {
 				ls := liveSession{
 					typ: s.Type, initiator: s.Initiator, started: parseStartedISO(s.Started),
 					sessionID: s.SessionID, harness: s.Harness,
+					closeRequests: append([]string(nil), s.CloseRequests...),
 				}
 				_ = session.AppendEvent(script, kdir, m.closedEventFor(s.Slug, ls))
 			}
@@ -262,15 +269,16 @@ func (m model) handleAdoptionScan(msg adoptionScanMsg) (model, tea.Cmd) {
 		panel, _ = panel.Update(tea.WindowSizeMsg{Width: specW, Height: specH})
 		m.setSessionPanel(a.slug, panel)
 		m.pendingSpawns[a.slug] = liveSession{
-			typ:         a.typ,
-			initiator:   a.initiator,
-			started:     a.started,
-			autoClose:   a.autoClose,
-			sessionID:   a.sessionID,
-			harness:     a.harness,
-			tmuxName:    a.tmuxName,
-			adopted:     true,
-			adoptedFrom: a.deadInstance,
+			typ:           a.typ,
+			initiator:     a.initiator,
+			started:       a.started,
+			autoClose:     a.autoClose,
+			sessionID:     a.sessionID,
+			harness:       a.harness,
+			tmuxName:      a.tmuxName,
+			adopted:       true,
+			adoptedFrom:   a.deadInstance,
+			closeRequests: append([]string(nil), a.closeRequests...),
 		}
 		cmds = append(cmds, work.AttachTerminalCmd(a.slug, a.tmuxName, a.sessionID, a.harness, m.config.ProjectDir, specW, specH))
 	}
@@ -469,14 +477,15 @@ func (m model) instanceRow() session.Instance {
 	sessions := make([]session.Session, 0, len(m.localSessions))
 	for slug, ls := range m.localSessions {
 		sessions = append(sessions, session.Session{
-			Slug:      slug,
-			Type:      ls.typ,
-			Initiator: ls.initiator,
-			Started:   ls.started.UTC().Format("2006-01-02T15:04:05Z"),
-			Tmux:      ls.tmuxName,
-			SessionID: ls.sessionID,
-			Harness:   ls.harness,
-			AutoClose: ls.autoClose,
+			Slug:          slug,
+			Type:          ls.typ,
+			Initiator:     ls.initiator,
+			Started:       ls.started.UTC().Format("2006-01-02T15:04:05Z"),
+			Tmux:          ls.tmuxName,
+			SessionID:     ls.sessionID,
+			Harness:       ls.harness,
+			AutoClose:     ls.autoClose,
+			CloseRequests: append([]string(nil), ls.closeRequests...),
 		})
 	}
 	return session.Instance{
@@ -494,7 +503,7 @@ func (m model) instanceRow() session.Instance {
 // closedEventMeta builds the `closed` journal row's identity fields for a
 // torn-down local session, leaving Spend for the caller to fill.
 func (m model) closedEventMeta(slug string, ls liveSession) session.Event {
-	return session.Event{
+	ev := session.Event{
 		Event:         session.EventClosed,
 		ActorInstance: session.StrPtr(m.instanceName),
 		Slug:          slug,
@@ -502,6 +511,11 @@ func (m model) closedEventMeta(slug string, ls liveSession) session.Event {
 		Initiator:     ls.initiator,
 		RequestID:     ls.requestID,
 	}
+	if len(ls.closeRequests) > 0 {
+		encoded, _ := json.Marshal(ls.closeRequests) // []string cannot fail to marshal
+		ev.Links = map[string]string{"close_requests": string(encoded)}
+	}
+	return ev
 }
 
 // closedEventFor builds the `closed` row with the duration-only spend shape —

@@ -464,6 +464,7 @@ func TestAdvanceCloseLadders_QuiescenceWaitOrdering(t *testing.T) {
 // already-pending slug is a no-op (no duplicate work).
 func TestHandleCloseRequestScan_MarksAndDeletes(t *testing.T) {
 	m, _ := baseSessionModel(t)
+	m.localSessions = map[string]liveSession{"demo": {typ: "spec", initiator: "human", started: time.Now()}}
 	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
 
 	m, cmd := m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{
@@ -474,6 +475,9 @@ func TestHandleCloseRequestScan_MarksAndDeletes(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("expected a delete Cmd for the consumed row")
+	}
+	if got := m.localSessions["demo"].closeRequests; len(got) != 1 || got[0] != "c1" {
+		t.Fatalf("consumed close request not recorded on live session: %v", got)
 	}
 
 	// Re-scan of an already-pending slug: nothing new to do.
@@ -674,6 +678,9 @@ func TestProtocolTerminusSelfCloseDuringGeneratingTail(t *testing.T) {
 		if len(rows) != 1 || rows[0].Event != session.EventClosed || rows[0].RequestID != "self-natural" {
 			t.Fatalf("natural self-close terminal = %+v, want one correlated closed", rows)
 		}
+		if got := rows[0].Links["close_requests"]; got != `["self-natural"]` {
+			t.Fatalf("natural self-close links.close_requests = %q", got)
+		}
 	})
 
 	t.Run("deadline refuses alive", func(t *testing.T) {
@@ -690,6 +697,13 @@ func TestProtocolTerminusSelfCloseDuringGeneratingTail(t *testing.T) {
 		m, _ = m.handleCloseRequestScan(closeRequestScanMsg{matched: []session.CloseRequest{{
 			RequestID: "self-expired", Slug: "demo", TargetInstance: "me", Reason: closeReasonProtocolTerminus,
 		}}})
+		plantCloseRequest(t, m.sessionsDir, session.CloseRequest{
+			RequestID: "self-expired", Slug: "demo", TargetInstance: "me", Reason: closeReasonProtocolTerminus,
+		})
+		persisted := consumeCloseRequestCmd(m.sessionsDir, "self-expired", m.instanceRow())().(closeRequestDeletedMsg)
+		if persisted.err != nil {
+			t.Fatalf("persist consumed close request: %v", persisted.err)
+		}
 		pc := m.pendingClose["demo"]
 		pc.consumedAt = time.Now().Add(-2 * time.Hour)
 		m.pendingClose["demo"] = pc
@@ -716,7 +730,41 @@ func TestProtocolTerminusSelfCloseDuringGeneratingTail(t *testing.T) {
 			rows[0].Reason != closeFailedStillGenerating || rows[0].RequestID != "self-expired" {
 			t.Fatalf("expired self-close terminal = %+v, want one close_failed/still-generating with request id", rows)
 		}
+		instances := session.ListInstances(m.sessionsDir)
+		if len(instances) != 1 || len(instances[0].Sessions) != 1 ||
+			len(instances[0].Sessions[0].CloseRequests) != 1 || instances[0].Sessions[0].CloseRequests[0] != "self-expired" {
+			t.Fatalf("close_failed did not retain durable close_requests manifest: %+v", instances)
+		}
 	})
+}
+
+// TestCloseFailedThenExplicitRecoveryDeclaresBothRequests covers the recovery
+// join itself: the failed request remains accumulated and the eventual explicit
+// close declares both consumed ids while keeping the latest close id at the
+// top-level request_id.
+func TestCloseFailedThenExplicitRecoveryDeclaresBothRequests(t *testing.T) {
+	m, _ := baseSessionModel(t)
+	m.eventScript = repoScriptPath(t, "session-event-append.sh")
+	kdir := m.config.KnowledgeDir
+	ls := liveSession{typ: "implement", initiator: "agent", started: time.Now(),
+		requestID: "spawn-1", closeRequests: []string{"term-failed", "explicit-recovery"}}
+	m.localSessions = map[string]liveSession{"demo": ls}
+
+	runJournalCmds(t, m.closeFailedCmd("demo", "term-failed", closeFailedStillGenerating, ls))
+	var cmds []tea.Cmd
+	m, cmds = m.endLocalSessionClosed("demo", "explicit-recovery")
+	runJournalCmds(t, tea.Batch(cmds...))
+
+	rows := readEventRows(t, kdir)
+	if len(rows) != 2 || rows[0].Event != session.EventCloseFailed || rows[1].Event != session.EventClosed {
+		t.Fatalf("recovery events = %+v, want [close_failed closed]", rows)
+	}
+	if rows[1].RequestID != "explicit-recovery" {
+		t.Fatalf("recovery closed request_id = %q", rows[1].RequestID)
+	}
+	if got := rows[1].Links["close_requests"]; got != `["term-failed","explicit-recovery"]` {
+		t.Fatalf("recovery closed.links.close_requests = %q", got)
+	}
 }
 
 // TestClosedPanelInputMsg_SetsStatusNotice is the contract for the closed-panel
@@ -815,7 +863,7 @@ func TestAdvanceCloseLadders_ExplicitModalHold(t *testing.T) {
 		return closeObservation{quiescent: true, screenKnown: true, screen: screenClass{interactive: true}}
 	}
 	m.closeModalHold = time.Hour // long bound so the "within hold" phase holds
-	m.localSessions = map[string]liveSession{"demo": {typ: "spec", initiator: "human", started: time.Now()}}
+	m.localSessions = map[string]liveSession{"demo": {typ: "spec", initiator: "human", started: time.Now(), closeRequests: []string{"cr-x"}}}
 	m.sessionPanels = map[string]work.SessionPanelModel{"demo": work.NewSessionPanelModel("demo")}
 
 	// Within the hold: no dispatch, entry still pending, session still alive.
@@ -854,6 +902,9 @@ func TestAdvanceCloseLadders_ExplicitModalHold(t *testing.T) {
 	}
 	if rows[0].RequestID != "cr-x" {
 		t.Errorf("closed row request_id = %q, want the consumed close request_id cr-x", rows[0].RequestID)
+	}
+	if got := rows[0].Links["close_requests"]; got != `["cr-x"]` {
+		t.Errorf("closed links.close_requests = %q, want [cr-x]", got)
 	}
 }
 

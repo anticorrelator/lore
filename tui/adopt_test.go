@@ -47,7 +47,8 @@ func TestInstanceRow_PersistsRecoveryFields(t *testing.T) {
 	yes := true
 	m.localSessions = map[string]liveSession{
 		"demo": {typ: "spec", initiator: "human", started: time.Now(),
-			tmuxName: "lore-me-demo", sessionID: "uuid-1", harness: "claude-code", autoClose: &yes},
+			tmuxName: "lore-me-demo", sessionID: "uuid-1", harness: "claude-code", autoClose: &yes,
+			closeRequests: []string{"term-1", "explicit-2"}},
 	}
 	row := m.instanceRow()
 	if len(row.Sessions) != 1 {
@@ -56,6 +57,9 @@ func TestInstanceRow_PersistsRecoveryFields(t *testing.T) {
 	s := row.Sessions[0]
 	if s.Tmux != "lore-me-demo" || s.SessionID != "uuid-1" || s.Harness != "claude-code" || s.AutoClose == nil || !*s.AutoClose {
 		t.Fatalf("recovery fields not persisted onto row: %+v", s)
+	}
+	if len(s.CloseRequests) != 2 || s.CloseRequests[0] != "term-1" || s.CloseRequests[1] != "explicit-2" {
+		t.Fatalf("close-request recovery manifest not persisted: %+v", s)
 	}
 }
 
@@ -68,7 +72,8 @@ func TestAdoptionScan_DeadSessionJournalsClosed(t *testing.T) {
 	m.config.RepoIdentifier = "my-repo"
 	m.eventScript = repoScriptPath(t, "session-event-append.sh")
 	plantCorpse(t, sessionsDir, "dead-inst", "my-repo", deadPID(t), []session.Session{
-		{Slug: "demo", Type: "spec", Initiator: "human", Started: "2026-07-06T00:00:00Z"}, // no Tmux
+		{Slug: "demo", Type: "spec", Initiator: "human", Started: "2026-07-06T00:00:00Z",
+			CloseRequests: []string{"term-1", "explicit-2"}}, // no Tmux
 	})
 
 	msg := m.adoptionScanCmd()().(adoptionScanMsg)
@@ -77,6 +82,10 @@ func TestAdoptionScan_DeadSessionJournalsClosed(t *testing.T) {
 	}
 	if got := readEventTypes(t, kdir); len(got) != 1 || got[0] != session.EventClosed {
 		t.Fatalf("events = %v, want exactly [closed]", got)
+	}
+	rows := readEventRows(t, kdir)
+	if got := rows[0].Links["close_requests"]; got != `["term-1","explicit-2"]` {
+		t.Fatalf("adopted-dead closed.links.close_requests = %q", got)
 	}
 	// The corpse and any claim file are gone (adoption doubles as corpse cleanup).
 	leftover, _ := filepath.Glob(filepath.Join(session.InstancesDir(sessionsDir), "*"))
@@ -206,7 +215,8 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 
 	plantCorpse(t, sessionsDir, "dead-inst", "my-repo", deadPID(t), []session.Session{
 		{Slug: "demo", Type: "spec", Initiator: "human", Started: "2026-07-06T00:00:00Z",
-			Tmux: name, SessionID: "uuid-1", Harness: "claude-code"},
+			Tmux: name, SessionID: "uuid-1", Harness: "claude-code",
+			CloseRequests: []string{"term-1"}},
 	})
 
 	msg := m.adoptionScanCmd()().(adoptionScanMsg)
@@ -218,6 +228,9 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 	}
 	if msg.alive[0].sessionID != "uuid-1" || msg.alive[0].harness != "claude-code" {
 		t.Fatalf("recovered spend binding lost: %+v", msg.alive[0])
+	}
+	if len(msg.alive[0].closeRequests) != 1 || msg.alive[0].closeRequests[0] != "term-1" {
+		t.Fatalf("recovered close-request manifest lost: %+v", msg.alive[0])
 	}
 	if leftover, _ := filepath.Glob(filepath.Join(session.InstancesDir(sessionsDir), "*")); len(leftover) != 0 {
 		t.Fatalf("corpse not cleaned up: %v", leftover)

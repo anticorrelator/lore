@@ -81,6 +81,20 @@ type pendingCloseState struct {
 	interruptedAt time.Time
 }
 
+// appendCloseRequest records one consumed close-request exactly once while
+// preserving first-consumed order. Empty ids are not declarations.
+func appendCloseRequest(ids []string, requestID string) []string {
+	if requestID == "" {
+		return ids
+	}
+	for _, id := range ids {
+		if id == requestID {
+			return ids
+		}
+	}
+	return append(ids, requestID)
+}
+
 // closeReasonProtocolTerminus is the close-request reason a protocol's own finalize
 // step enqueues (session close --self --reason protocol_terminus). It is the only
 // reason still gated by initiator/auto_close (hold-open vs auto-close at terminus);
@@ -285,6 +299,17 @@ func deleteCloseRequestCmd(sessionsDir, requestID string) tea.Cmd {
 	}
 }
 
+// consumeCloseRequestCmd durably records the updated recovery manifest after
+// deleting a matched close-request. handleCloseRequestScan sequences these
+// commands before any close action it dispatches in the same update.
+func consumeCloseRequestCmd(sessionsDir, requestID string, inst session.Instance) tea.Cmd {
+	return func() tea.Msg {
+		deleteErr := session.DeleteCloseRequest(sessionsDir, requestID)
+		writeErr := session.WriteInstance(sessionsDir, inst)
+		return closeRequestDeletedMsg{requestID: requestID, err: errors.Join(deleteErr, writeErr)}
+	}
+}
+
 // closeLadderCmd resolves the active harness's graceful-exit capability, then
 // runs the D5 exit ladder against the panel's process. The ladder's process
 // operations are side effects, so they run inside the Cmd, never in Update.
@@ -370,7 +395,11 @@ func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) 
 		if _, pending := m.pendingClose[slug]; pending {
 			continue // already consumed this session's close-request; awaiting quiescence
 		}
-		cmds = append(cmds, deleteCloseRequestCmd(m.sessionsDir, cr.RequestID))
+		if ls, tracked := m.localSessions[slug]; tracked {
+			ls.closeRequests = appendCloseRequest(ls.closeRequests, cr.RequestID)
+			m.localSessions[slug] = ls
+		}
+		cmds = append(cmds, consumeCloseRequestCmd(m.sessionsDir, cr.RequestID, m.instanceRow()))
 
 		// Protocol-terminus is the only reason still gated by initiator/auto_close.
 		// Every explicit close acts with full discretion (falls through to teardown).
@@ -399,7 +428,7 @@ func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) 
 	if len(cmds) == 0 {
 		return m, nil
 	}
-	return m, tea.Batch(cmds...)
+	return m, tea.Sequence(cmds...)
 }
 
 // interruptGrace is how long advanceCloseLadders waits for an injected interrupt

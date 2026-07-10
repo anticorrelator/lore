@@ -47,6 +47,9 @@
 #   work item rather than a queue request. gate_id (optional, omit-when-empty)
 #   carries the audit join key: a gate-open verb sets it as the row's event_id
 #   and the release row echoes it in gate_id. See docs/review-gates.md.
+#   links.close_requests is optional and valid only on closed. Its value MUST be
+#   a string encoding a non-empty JSON array of distinct, non-empty strings. The
+#   writer validates but never derives it; absence declares no recovery links.
 #
 # Exit codes: 0 success; 1 validation error / refused. No child processes are
 # spawned, so no child exit code is propagated.
@@ -153,6 +156,27 @@ esac
 if printf '%s' "$ROW" | jq -e 'has("links")' >/dev/null 2>&1; then
   if ! printf '%s' "$ROW" | jq -e '.links | type == "object"' >/dev/null 2>&1; then
     fail "invalid field: links (must be a JSON object)"
+  fi
+fi
+
+# --- closed.links.close_requests is an explicit, string-valued recovery join ---
+if printf '%s' "$ROW" | jq -e '.links | type == "object" and has("close_requests")' >/dev/null 2>&1; then
+  if [[ "$EVENT" != "closed" ]]; then
+    fail "invalid field: links.close_requests (allowed only on event 'closed')"
+  fi
+  if ! printf '%s' "$ROW" | jq -e '.links.close_requests | type == "string"' >/dev/null 2>&1; then
+    fail "invalid field: links.close_requests (must be a string containing a JSON array)"
+  fi
+  if ! printf '%s' "$ROW" | jq -e '
+      (.links.close_requests) as $raw
+      | (try ($raw | fromjson) catch null) as $ids
+      | ($ids | type) == "array"
+        and ($ids | length) > 0
+        and all($ids[]; type == "string" and length > 0)
+        and (($ids | unique | length) == ($ids | length))
+        and (($ids | tojson) == $raw)
+    ' >/dev/null 2>&1; then
+    fail "invalid field: links.close_requests (must encode a canonical compact non-empty array of distinct, non-empty strings)"
   fi
 fi
 
