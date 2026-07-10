@@ -621,6 +621,8 @@ lore retro — federated retro pooling (Phase 9 of the settlement architecture)
 Usage: lore retro <subcommand> [args...]
 
 Subcommands:
+  prepare     Publish a source-manifested deterministic evidence pack for one cycle
+  file        Persist one explicit lead-authored judgment assignment and recover its sinks
   queue       Show the retro queue, including every unhandled DUE outcome
   handle      Append an explicit DUE disposition (dispatched|deferred|skipped)
   export      Export a redacted retro bundle for submission to a maintainer
@@ -929,6 +931,12 @@ cmd_retro() {
     --help|-h)
       retro_usage
       return 0
+      ;;
+    prepare)
+      exec "$SCRIPTS_DIR/retro-prepare.sh" "$@"
+      ;;
+    file)
+      exec "$SCRIPTS_DIR/retro-file.sh" "$@"
       ;;
     export)
       exec "$SCRIPTS_DIR/retro-export.sh" "$@"

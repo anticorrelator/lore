@@ -29,6 +29,33 @@ EOF
   for leaf in spec-start spec-discover spec-open spec-outcome; do
     cp "$TEST_SCRIPTS/session-wait.sh" "$TEST_SCRIPTS/$leaf.sh"
   done
+  for leaf in retro-prepare retro-file; do
+    cp "$TEST_SCRIPTS/session-wait.sh" "$TEST_SCRIPTS/$leaf.sh"
+  done
+}
+
+@test "retro prepare and file exec at their deepest external dispatch arms" {
+  local verb
+  for verb in prepare file; do
+    : > "$PID_FILE"
+    rm -f "$RELEASE_FILE"
+    HOME="$TEST_HOME" PID_FILE="$PID_FILE" RELEASE_FILE="$RELEASE_FILE" \
+      bash "$TEST_ROUTER" retro "$verb" &
+    ROUTER_PID=$!
+
+    for _ in $(seq 1 200); do
+      [[ -s "$PID_FILE" ]] && break
+      sleep 0.01
+    done
+    [[ -s "$PID_FILE" ]]
+    [[ "$(<"$PID_FILE")" == "$ROUTER_PID" ]]
+
+    touch "$RELEASE_FILE"
+    local leaf_status=0
+    wait "$ROUTER_PID" || leaf_status=$?
+    ROUTER_PID=""
+    [[ "$leaf_status" -eq 37 ]]
+  done
 }
 
 @test "all new spec leaves exec at the deepest external dispatch arm" {
