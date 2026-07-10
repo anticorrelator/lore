@@ -3,6 +3,7 @@
 # Usage: lore journal write --observation "..." --context "..." [--work-item "..."] [--role "..."] [--scores '<json>']
 #        lore journal show [--limit N] [--role <role>] [--since <date>]
 #        lore journal show --aggregate [--limit N] [--since <date>]
+#        lore journal read --since <RFC3339> --until <RFC3339> --json
 #
 # Appends JSONL entries to _meta/effectiveness-journal.jsonl.
 # In aggregate mode, interleaves entries from all three log sources.
@@ -299,6 +300,100 @@ for ts, source, entry in all_entries:
 " "$meta_dir" "$limit" "$since"
 }
 
+# --- read subcommand ---
+journal_read() {
+  local since="" until="" json_output=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --since)
+        [[ $# -ge 2 ]] || die "--since requires a value"
+        since="$2"
+        shift 2
+        ;;
+      --until)
+        [[ $# -ge 2 ]] || die "--until requires a value"
+        until="$2"
+        shift 2
+        ;;
+      --json)
+        json_output=1
+        shift
+        ;;
+      --help|-h)
+        cat >&2 <<EOF
+Usage: lore journal read --since <RFC3339> --until <RFC3339> --json
+
+Return raw journal entries in the half-open interval [since, until).
+
+Options:
+  --since <RFC3339>  Include entries at or after this timestamp (required)
+  --until <RFC3339>  Exclude entries at or after this timestamp (required)
+  --json             Emit one JSON array (required)
+  --help, -h         Show this help
+EOF
+        return 0
+        ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        echo "Usage: lore journal read --since <RFC3339> --until <RFC3339> --json" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  [[ -n "$since" ]] || die "--since is required for journal read"
+  [[ -n "$until" ]] || die "--until is required for journal read"
+  [[ "$json_output" -eq 1 ]] || die "--json is required for journal read"
+
+  local knowledge_dir logfile
+  knowledge_dir=$(resolve_knowledge_dir)
+  logfile="$knowledge_dir/_meta/effectiveness-journal.jsonl"
+
+  python3 - "$logfile" "$since" "$until" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+
+def parse_timestamp(raw):
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("timestamp must be a non-empty RFC3339 string")
+    value = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp timezone is required")
+    return parsed.astimezone(timezone.utc)
+
+
+logfile, since_raw, until_raw = sys.argv[1:]
+try:
+    since = parse_timestamp(since_raw)
+    until = parse_timestamp(until_raw)
+    if since >= until:
+        raise ValueError("--since must be earlier than --until")
+
+    entries = []
+    if os.path.isfile(logfile):
+        with open(logfile, encoding="utf-8") as journal:
+            for line_number, line in enumerate(journal, start=1):
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                if not isinstance(entry, dict):
+                    raise ValueError(f"journal line {line_number} is not a JSON object")
+                timestamp = parse_timestamp(entry.get("timestamp"))
+                if since <= timestamp < until:
+                    entries.append(entry)
+except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+    print(f"journal read failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+print(json.dumps(entries, ensure_ascii=False, separators=(",", ":")))
+PY
+}
+
 # --- query subcommand ---
 journal_query() {
   local role_filter="" extract_scores=0 since="" json_output=0
@@ -452,6 +547,7 @@ Usage: lore journal <subcommand> [args...]
 Subcommands:
   write   Record a journal observation
   show    Display journal entries (default or --aggregate)
+  read    Read raw entries for an explicit time window
   query   Extract structured data from journal entries
 
 Run 'lore journal <subcommand> --help' for details.
@@ -469,6 +565,9 @@ case "$SUBCMD" in
   show)
     journal_show "$@"
     ;;
+  read)
+    journal_read "$@"
+    ;;
   query)
     journal_query "$@"
     ;;
@@ -479,6 +578,7 @@ Usage: lore journal <subcommand> [args...]
 Subcommands:
   write   Record a journal observation
   show    Display journal entries (default or --aggregate)
+  read    Read raw entries for an explicit time window
   query   Extract structured data from journal entries
 
 Run 'lore journal <subcommand> --help' for details.

@@ -41,6 +41,63 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "journal read returns complete raw entries in the half-open window" {
+  printf '%s\n' \
+    '{"timestamp":"2026-06-30T23:59:59Z","role":"retro","observation":"before"}' \
+    '{"timestamp":"2026-07-01T00:00:00Z","role":"interactive","observation":"at start"}' \
+    '{"timestamp":"2026-07-01T12:00:00Z","role":"worker","observation":"without scores"}' \
+    '{"timestamp":"2026-07-02T00:00:00Z","role":"retro","observation":"at end","scores":{"accuracy":1}}' \
+    > "$TEST_KDIR/_meta/effectiveness-journal.jsonl"
+
+  run "$REPO_DIR/cli/lore" journal read \
+    --since 2026-07-01T00:00:00Z --until 2026-07-02T00:00:00Z --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    length == 2 and
+    .[0].role == "interactive" and .[0].observation == "at start" and
+    .[1].role == "worker" and .[1].observation == "without scores" and
+    (.[1] | has("scores") | not)
+  '
+}
+
+@test "prepare reads and registers the same bounded journal projection" {
+  printf '%s\n' \
+    '{"timestamp":"2026-06-30T23:59:59Z","role":"retro","observation":"before"}' \
+    '{"timestamp":"2026-07-01T00:00:00Z","role":"interactive","observation":"at start"}' \
+    '{"timestamp":"2026-07-01T12:00:00Z","role":"worker","observation":"without scores"}' \
+    '{"timestamp":"2026-07-02T00:00:00Z","role":"retro","observation":"at end","scores":{"accuracy":1}}' \
+    > "$TEST_KDIR/_meta/effectiveness-journal.jsonl"
+
+  run "$REPO_DIR/cli/lore" retro prepare cycle-a \
+    --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
+  [ "$status" -eq 0 ]
+  run jq -e '
+    ([.source_manifest[] | select(.source_id == "journal")][0]) as $journal |
+    $journal.coverage == "read" and
+    $journal.reader == "lore journal read --since 2026-07-01T00:00:00Z --until 2026-07-02T00:00:00Z --json" and
+    .facts.session_retrieval_friction_packets.values.journal_entries == 2 and
+    .facts.scorecard_eligibility_deltas.values.prior_retro_windows == 2
+  ' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "prepare reports malformed journal input as unreadable evidence" {
+  printf '%s\n' '{"timestamp":"2026-07-01T12:00:00Z","role":"retro"' \
+    > "$TEST_KDIR/_meta/effectiveness-journal.jsonl"
+
+  run "$REPO_DIR/cli/lore" retro prepare cycle-a \
+    --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
+  [ "$status" -eq 0 ]
+  run jq -e '
+    ([.source_manifest[] | select(.source_id == "journal")][0]) as $journal |
+    $journal.coverage == "unreadable" and
+    $journal.reason == "reader-failed" and
+    ($journal.warnings | length) == 1 and
+    .fixed_health.state != "normal"
+  ' "$TEST_KDIR/_work/cycle-a/retro-evidence-pack.json"
+  [ "$status" -eq 0 ]
+}
+
 @test "absence and below-floor evidence are never green" {
   run bash "$PREPARE" cycle-a --window-start 2026-07-01T00:00:00Z --window-end 2026-07-02T00:00:00Z --json
   [ "$status" -eq 0 ]

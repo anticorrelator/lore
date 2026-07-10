@@ -190,7 +190,9 @@ run_reader settlement bash "$SCRIPT_DIR/settlement-queue.sh" status --kdir "$KDI
 run_reader scorecard_rows "$LORE_REPO_DIR/cli/lore" scorecard rows
 run_reader scorecard_current "$LORE_REPO_DIR/cli/lore" scorecard current
 run_reader session_events bash "$SCRIPT_DIR/session-events.sh" --since 0 --kdir "$KDIR" --json
-run_reader journal bash "$SCRIPT_DIR/journal.sh" query --role retro --extract-scores --since "$(printf '%s' "$WINDOW_JSON" | jq -r .start)" --json
+run_reader journal "$LORE_REPO_DIR/cli/lore" journal read \
+  --since "$(printf '%s' "$WINDOW_JSON" | jq -r .start)" \
+  --until "$(printf '%s' "$WINDOW_JSON" | jq -r .end)" --json
 
 # The consumer lifecycle has no sanctioned public reader in v1. Its row is
 # generated inside the pack builder and no private file is touched here.
@@ -210,7 +212,7 @@ SOURCE_REGISTRY=[
  ("scorecard_rows","lore scorecard rows","_scorecards/rows.jsonl"),
  ("scorecard_current","lore scorecard current","_scorecards/_current.json"),
  ("session_events","lore session events --json","_sessions/events.jsonl"),
- ("journal","lore journal query --json","_meta/effectiveness-journal.jsonl"),
+ ("journal",f"lore journal read --since {window['start']} --until {window['end']} --json","_meta/effectiveness-journal.jsonl"),
  ("consumer_contradiction_lifecycle",None,None),
 ]
 FACT_REGISTRY={
@@ -243,8 +245,6 @@ def load_reader(source_id):
   reason="source-absent" if any(x in err.lower() for x in ("does not exist","not found","no journal")) else "reader-failed"
   return None,{"coverage":"absent" if reason=="source-absent" else "unreadable","warnings":[err] if err else [],"reason":reason,"cursor":None}
  if source_id=="scorecard_rows" and not data.strip():
-  obj=[]
- elif source_id=="journal" and data.decode(errors="replace").strip()=="No journal entries yet.":
   obj=[]
  else:
   try: obj=json.loads(data) if data.strip() else None
