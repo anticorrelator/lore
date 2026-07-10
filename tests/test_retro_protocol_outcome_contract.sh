@@ -27,7 +27,8 @@ required_step1 = [
     "lore retro queue",
     'lore retro handle --cycle-id "$SLUG"',
     "--action dispatched --handled-by retro-lead",
-    "DUE disposition claim failed",
+    "DUE queue reader failed",
+    "best-effort DUE claim failed",
     "MUST warn and continue",
     "never a precondition",
 ]

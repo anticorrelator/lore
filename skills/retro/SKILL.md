@@ -68,7 +68,7 @@ lore retro handle --cycle-id "$SLUG" \
   --action dispatched --handled-by retro-lead
 ```
 
-If that observability write fails, prepare records `DUE disposition claim failed`. It MUST warn and continue: the claim is never a precondition for the retro, never changes the selected cycle, and never creates another run obligation.
+If the queue reader fails, prepare warns `DUE queue reader failed`; if the claim write itself fails, it warns `best-effort DUE claim failed`. It MUST warn and continue in either case: the claim is never a precondition for the retro, never changes the selected cycle, and never creates another run obligation.
 
 ### Step 2: Gather Evidence
 
