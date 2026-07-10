@@ -44,7 +44,7 @@ Run these steps in order:
 5. Invoke `file`; recover an accepted partial filing by exact replay.
 6. Report the evidence state first and the qualitative coda second.
 
-Do not write journal rows or retro sidecars by hand. Do not read private storage to fill a pack gap. Do not turn absent evidence into a weak green signal.
+Do not write journal rows or retro sidecars by hand. Do not read private storage to fill a pack gap. Do not turn absent evidence into a favorable signal.
 
 ### Step 1: Resolve Work Item
 
@@ -59,7 +59,7 @@ lore retro prepare "$ARG" \
   --json
 ```
 
-Both bounds are required because Lore has no canonical retro-window inference. The returned `cycle_id` is the canonical slug. Preserve the artifact path, `pack_id`, and SHA for Step 4.
+Both bounds are required because Lore has no canonical retro-window inference. The returned `cycle_id` is the canonical slug. Preserve the artifact path, `pack_id`, and SHA for Steps 4 and 5.
 
 **DUE lifecycle compatibility.** The queue vocabulary remains `done | deferred | skipped | due`. A DUE begins as `record_type=outcome` with `disposition=unhandled`; its transition is a separate `record_type=disposition` with `disposition=handled` and an action from `dispatched | deferred | skipped`. `lore retro queue` remains the public fold. Prepare performs a best-effort DUE claim equivalent to:
 
@@ -89,7 +89,7 @@ Identity layers answer different questions:
 - `input_fingerprint` identifies the requested cycle and caller-supplied window.
 - `source_fingerprint` identifies the ordered source snapshot and calculation contract.
 - `pack_id` identifies their semantic combination.
-- `artifact_sha256` verifies the canonical pack with that top-level member removed before hashing.
+- `artifact_sha256` verifies the canonical pack; the hash is computed with that top-level member removed.
 
 Never substitute one identity for another.
 
@@ -130,7 +130,7 @@ Preserve the scorecard tier boundaries surfaced by the pack:
 | `task-evidence` | Task-local grounding evidence. |
 | `telemetry` or missing legacy tier | Observability only; never `/evolve` evidence. |
 
-Never mix tiers in one cell. Never let an improvement in one metric compensate for a regression in another. When fixed health is `pipeline-degraded`, treat headline and delta cells as non-evidentiary. When it is `not-computable`, name the missing substrate rather than manufacturing a headline.
+Never mix tiers in one cell — the same metric measures different things at different tiers. Never let an improvement in one metric compensate for a regression in another; offsetting is exactly how a regression hides. When fixed health is `pipeline-degraded`, treat headline and delta cells as non-evidentiary. When it is `not-computable`, name the missing substrate rather than manufacturing a headline.
 
 #### Consumer-contradiction vocabulary
 
@@ -158,7 +158,7 @@ Judge whether relevant knowledge reached the working agents and shaped their cho
 
 `5` every phase delivered with high completeness | `4` most phases with minor gaps | `3` low annotation quality or spec-only agents lacked available context | `2` phases missing, unresolved delivery, or a silent pipeline drop | `1` no delivery
 
-Retain D1 in this ceremony. Its delivery-plumbing half is now mechanically evidenced, but internalization remains evaluative. D1 is the named graduation candidate; removal requires a separately registered window with routed-model response variable, denominator, undefined-statistic branch, and one-direction qualitative veto. This implementation does not graduate it.
+D1 stays in the ceremony: its delivery-plumbing half is mechanically evidenced, but internalization remains evaluative. D1 is the named graduation candidate; removal requires a separately registered window with routed-model response variable, denominator, undefined-statistic branch, and one-direction qualitative veto. This implementation does not graduate it.
 
 ##### D2 — Retrieval Quality
 
@@ -188,7 +188,7 @@ Judge whether the spec reduced unnecessary exploration while leaving intended di
 
 Evaluate each branch explicitly. Use `{applicability:"not-applicable", reason}` only when the branch truly did not apply.
 
-- Escalation stays qualitative and off scorecards. If applicable, provide the lead's observation and evidence references.
+- Escalation stays qualitative and off scorecards — a scored escalation rate teaches workers to suppress or game it. If applicable, provide the lead's observation and evidence references.
 - Scale access uses the sanctioned `right-sized | too-coarse | too-fine` and `better | same | worse` vocabularies plus rationales.
 - Channel flags use `under_routing | over_capture | evidence_only_durable`. An applicable branch may return `value: []`, meaning it was evaluated and no flags were selected.
 
@@ -217,7 +217,7 @@ Read `fixed_health` and its referenced calculation rows before reading headline 
 - `pipeline-degraded`: a fixed calculation tripped. Lead with the tripped calculation IDs and withhold scorecard interpretation.
 - `not-computable`: at least one load-bearing calculation lacks a trustworthy published substrate. Lead with the missing source/reason and withhold a healthy headline.
 
-Healthy checks remain silent in the report. This is load-bearing healthy silence, not permission to omit pack rows.
+Healthy checks remain silent in the report — green narration turns to ritual and buries the one check that trips. This is load-bearing healthy silence, not permission to omit pack rows.
 
 ##### Check: Judge liveness
 
@@ -225,11 +225,11 @@ Healthy checks remain silent in the report. This is load-bearing healthy silence
 ### Check: Judge liveness (disposition: redirected per-gate to settlement run envelopes)
 -->
 
-The normative calculation reads completed envelopes from `_settlement/runs/*.json`; it does not treat fixture-calibration logs as liveness. The zero-output signature remains `completed_runs_in_window == 0 AND settlement_queue_items_routed > 0`. Pack v1 applies the registered floor before classifying rates; below-floor is `abstained`, never green or tripped.
+The normative calculation reads completed envelopes from `_settlement/runs/*.json`; it does not treat fixture-calibration logs as liveness — those record calibration ceremonies, not per-verdict activity, and sit legitimately empty over healthy windows. The zero-output signature remains `completed_runs_in_window == 0 AND settlement_queue_items_routed > 0`. Pack v1 applies the registered floor before classifying rates; below-floor is `abstained`, never green or tripped.
 
 ##### Check: Consumer-contradiction routing
 
-The source is deliberately `not-computable:no-published-reader` in pack v1. Do not reintroduce the old nonexistent scorecard-verdict source. The reader-source proposal remains live until a sanctioned public reader exposes the lifecycle.
+The source is deliberately `not-computable:no-published-reader` in pack v1. Do not reintroduce the scorecard-verdict source named by the retired design — it never existed. The reader-source proposal remains live until a sanctioned public reader exposes the lifecycle.
 
 ##### Check: Candidate backlog
 
@@ -261,7 +261,7 @@ The three conditional fields — `escalation_judgment`, `scale_access_judgment`,
 {"applicability":"not-applicable","reason":"..."}
 ```
 
-For `channel_flags`, applicable `value` is an array and may be empty. Every applicable value and every dimension, behavioral answer, diagnosis, and substantive suggestion carries at least one resolving evidence reference.
+For `channel_flags`, applicable `value` is an array and may be empty. Escalation and scale-access values, each channel-flag row, and every dimension, behavioral answer, diagnosis, and substantive suggestion carry at least one resolving evidence reference.
 
 #### Suggestion outcome
 
