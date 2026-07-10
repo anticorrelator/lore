@@ -16,6 +16,10 @@
 #   - consumed_at_run_id starts null (writer never sets it)
 #   - Append-only invariant: two distinct appends → two complete JSON lines
 #   - --json mode rejection + success shapes
+#   - Legacy reconciliation validates v1 shape, inserts only declaration bytes,
+#     preserves mode/order/newline layout, and is a byte/stat no-op on rerun
+#   - Reconciliation rejects partial/unknown/malformed/non-v1 rows atomically
+#   - The unchanged coordinate projection reports evolve-staging gap → ok → gap
 
 set -euo pipefail
 
@@ -70,6 +74,20 @@ assert_not_exist() {
   fi
 }
 
+stat_tuple() {
+  python3 - "$1" <<'PY'
+import hashlib, os, stat, sys
+path = sys.argv[1]
+st = os.stat(path)
+with open(path, "rb") as handle:
+    digest = hashlib.sha256(handle.read()).hexdigest()
+print("|".join(str(value) for value in (
+    stat.S_IMODE(st.st_mode), st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+    st.st_ino, digest,
+)))
+PY
+}
+
 setup_store() {
   rm -rf "$KNOWLEDGE_DIR"
   mkdir -p "$KNOWLEDGE_DIR"
@@ -117,6 +135,7 @@ assert_contains "usage names --change-types" "$OUTPUT" "--change-types"
 assert_contains "usage names --work-items" "$OUTPUT" "--work-items"
 assert_contains "usage names --decision" "$OUTPUT" "--decision"
 assert_contains "usage names --accepted-at-run-id" "$OUTPUT" "--accepted-at-run-id"
+assert_contains "usage names reconciliation mode" "$OUTPUT" "--reconcile-legacy-versions"
 
 # =============================================
 # Test 2: Valid append → one row with the documented schema
@@ -313,6 +332,114 @@ STDERR=$("$SCRIPT" --target t --change-types c --work-items w --decision merge \
   --accepted-at-run-id r --kdir "$TEST_DIR/does-not-exist" 2>&1) || EXIT_CODE=$?
 assert_eq "nonexistent kdir exits 1" "$EXIT_CODE" "1"
 assert_contains "stderr names knowledge store" "$STDERR" "knowledge store not found"
+
+# =============================================
+# Test 14: Reconciliation preserves bytes outside the declaration prefix,
+# file mode, row order, and newline layout; rerun is a true stat no-op.
+# The unchanged coordinate projection is the positive and negative oracle.
+# =============================================
+echo ""
+echo "Test 14: Legacy reconciliation is byte-preserving and idempotent"
+setup_store
+mkdir -p "$KNOWLEDGE_DIR/_evolve"
+
+TARGET_ONE="skills/legacy-one/SKILL.md"
+TARGET_TWO="skills/versioned-two/SKILL.md"
+TARGET_THREE="skills/legacy-three/SKILL.md"
+CID_ONE=$(expected_cluster_id "$TARGET_ONE" "evidence-gap" "wi-a,wi-b")
+CID_TWO=$(expected_cluster_id "$TARGET_TWO" "ceiling-raise" "wi-c")
+CID_THREE=$(expected_cluster_id "$TARGET_THREE" "validation-gap" "wi-d")
+
+LEGACY_ONE="{\"cluster_id\":\"$CID_ONE\", \"target\":\"$TARGET_ONE\",\"change_types\":[\"evidence-gap\"],\"work_items\":[\"wi-a\",\"wi-b\"],\"journal_row_refs\":[{\"timestamp\":\"2026-07-01T00:00:00Z\",\"work_item\":\"wi-a\"}],\"accepted_at\":\"2026-07-02T00:00:00Z\",\"accepted_at_run_id\":\"run-1\",\"accepted_by_maintainer_decision\":\"merge\",\"consumed_at_run_id\":null}"
+VERSIONED_TWO="  {\"schema_version\":\"1\",\"vocabulary_version\":\"1\",\"cluster_id\":\"$CID_TWO\",\"target\":\"$TARGET_TWO\",\"change_types\":[\"ceiling-raise\"],\"work_items\":[\"wi-c\"],\"journal_row_refs\":[],\"accepted_at\":\"2026-07-03T00:00:00Z\",\"accepted_at_run_id\":\"run-2\",\"accepted_by_maintainer_decision\":\"split\",\"consumed_at_run_id\":\"run-3\"}"
+LEGACY_THREE="{\"cluster_id\":\"$CID_THREE\",\"target\":\"$TARGET_THREE\",\"change_types\":[\"validation-gap\"],\"work_items\":[\"wi-d\"],\"journal_row_refs\":[],\"accepted_at\":\"2026-07-04T00:00:00Z\",\"accepted_at_run_id\":\"run-4\",\"accepted_by_maintainer_decision\":\"edit\",\"consumed_at_run_id\":null}"
+
+# Deliberately omit a final newline: the rewrite must retain that layout.
+printf '%s\n%s' "$LEGACY_ONE" "$VERSIONED_TWO" > "$SIDECAR"
+chmod 640 "$SIDECAR"
+EXPECTED_ONE="{\"schema_version\":\"1\",\"vocabulary_version\":\"1\",${LEGACY_ONE#\{}"
+EXPECTED_FILE="$TEST_DIR/expected-reconciled.jsonl"
+printf '%s\n%s' "$EXPECTED_ONE" "$VERSIONED_TWO" > "$EXPECTED_FILE"
+
+BEFORE_STATUS="$TEST_DIR/reconcile-before.json"
+bash "$SCRIPT_DIR/coordinate-status.sh" --kdir "$KNOWLEDGE_DIR" --json > "$BEFORE_STATUS"
+assert_eq "undeclared legacy row is a projection gap" \
+  "gap" "$(jq -r '.source_manifest[] | select(.source_id=="evolve-staging") | .read_status' "$BEFORE_STATUS")"
+assert_eq "undeclared legacy row emits one evolve source-gap" \
+  "1" "$(jq -r '[.buckets.reconcile[] | select(.source_id=="evolve-staging" and .kind=="source-gap")] | length' "$BEFORE_STATUS")"
+
+RECONCILE_JSON=$("$SCRIPT" --reconcile-legacy-versions --kdir "$KNOWLEDGE_DIR" --json)
+assert_eq "reconciliation reports one updated row" "1" "$(echo "$RECONCILE_JSON" | jq -r '.updated')"
+assert_eq "reconciliation reports one skipped v1 row" "1" "$(echo "$RECONCILE_JSON" | jq -r '.skipped')"
+assert_eq "reconciliation reports total rows" "2" "$(echo "$RECONCILE_JSON" | jq -r '.total')"
+assert_eq "reconciliation reports sidecar path" "_evolve/accepted-clusters.jsonl" "$(echo "$RECONCILE_JSON" | jq -r '.path')"
+assert_eq "only the exact declaration prefix was inserted" \
+  "same" "$(cmp -s "$SIDECAR" "$EXPECTED_FILE" && echo same || echo different)"
+assert_eq "source mode is preserved across atomic replacement" \
+  "416" "$(python3 -c 'import os,stat,sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$SIDECAR")"
+assert_eq "unconsumed lifecycle marker remains null" \
+  "null" "$(sed -n '1p' "$SIDECAR" | jq -r '.consumed_at_run_id')"
+assert_eq "consumed lifecycle marker remains populated" \
+  "run-3" "$(sed -n '2p' "$SIDECAR" | jq -r '.consumed_at_run_id')"
+
+AFTER_STATUS="$TEST_DIR/reconcile-after.json"
+bash "$SCRIPT_DIR/coordinate-status.sh" --kdir "$KNOWLEDGE_DIR" --json > "$AFTER_STATUS"
+assert_eq "fully reconciled evolve staging is ok" \
+  "ok" "$(jq -r '.source_manifest[] | select(.source_id=="evolve-staging") | .read_status' "$AFTER_STATUS")"
+assert_eq "fully reconciled evolve staging declares schema v1" \
+  "1" "$(jq -r '.source_manifest[] | select(.source_id=="evolve-staging") | .schema_version' "$AFTER_STATUS")"
+assert_eq "fully reconciled evolve staging declares vocabulary v1" \
+  "1" "$(jq -r '.source_manifest[] | select(.source_id=="evolve-staging") | .vocabulary_version' "$AFTER_STATUS")"
+assert_eq "fully reconciled evolve staging has no source-gap" \
+  "0" "$(jq -r '[.buckets.reconcile[] | select(.source_id=="evolve-staging" and .kind=="source-gap")] | length' "$AFTER_STATUS")"
+
+NOOP_BEFORE=$(stat_tuple "$SIDECAR")
+NOOP_JSON=$("$SCRIPT" --reconcile-legacy-versions --kdir "$KNOWLEDGE_DIR" --json)
+NOOP_AFTER=$(stat_tuple "$SIDECAR")
+assert_eq "second reconciliation reports zero updates" "0" "$(echo "$NOOP_JSON" | jq -r '.updated')"
+assert_eq "second reconciliation skips both v1 rows" "2" "$(echo "$NOOP_JSON" | jq -r '.skipped')"
+assert_eq "second reconciliation preserves bytes and stat tuple" "$NOOP_BEFORE" "$NOOP_AFTER"
+
+printf '\n%s\n' "$LEGACY_THREE" >> "$SIDECAR"
+NEGATIVE_STATUS="$TEST_DIR/reconcile-negative.json"
+bash "$SCRIPT_DIR/coordinate-status.sh" --kdir "$KNOWLEDGE_DIR" --json > "$NEGATIVE_STATUS"
+assert_eq "new undeclared sibling restores the projection gap" \
+  "gap" "$(jq -r '.source_manifest[] | select(.source_id=="evolve-staging") | .read_status' "$NEGATIVE_STATUS")"
+assert_eq "valid reconciled siblings remain visible through the strict reader" \
+  "1" "$(jq -r '[.buckets.act_now[] | select(.source_id=="evolve-staging" and .observed_facts.cluster_id?=="'"$CID_ONE"'")] | length' "$NEGATIVE_STATUS")"
+
+# =============================================
+# Test 15: Reconciliation validates the complete file before replacement.
+# =============================================
+echo ""
+echo "Test 15: Reconciliation rejects incompatible rows atomically"
+
+assert_atomic_rejection() {
+  local label="$1" bad_row="$2"
+  printf '%s\n%s\n' "$LEGACY_ONE" "$bad_row" > "$SIDECAR"
+  chmod 640 "$SIDECAR"
+  local before after exit_code output
+  before=$(stat_tuple "$SIDECAR")
+  exit_code=0
+  output=$("$SCRIPT" --reconcile-legacy-versions --kdir "$KNOWLEDGE_DIR" 2>&1) || exit_code=$?
+  after=$(stat_tuple "$SIDECAR")
+  assert_eq "$label exits 1" "1" "$exit_code"
+  assert_contains "$label names the second row" "$output" "line 2"
+  assert_eq "$label leaves bytes and stat unchanged" "$before" "$after"
+}
+
+PARTIAL_ROW="{\"schema_version\":\"1\",${LEGACY_THREE#\{}"
+UNKNOWN_ROW="{\"schema_version\":\"9\",\"vocabulary_version\":\"1\",${LEGACY_THREE#\{}"
+BAD_ID_ROW="${LEGACY_THREE/$CID_THREE/0000000000000000}"
+assert_atomic_rejection "partial declaration" "$PARTIAL_ROW"
+assert_atomic_rejection "unknown declaration" "$UNKNOWN_ROW"
+assert_atomic_rejection "malformed JSON" '{not-json'
+assert_atomic_rejection "non-v1 identity" "$BAD_ID_ROW"
+
+EXIT_CODE=0
+OUTPUT=$("$SCRIPT" --reconcile-legacy-versions --target forbidden --kdir "$KNOWLEDGE_DIR" 2>&1) || EXIT_CODE=$?
+assert_eq "reconciliation rejects append-only flags" "1" "$EXIT_CODE"
+assert_contains "mutually exclusive rejection names append flag" "$OUTPUT" "--target"
 
 # =============================================
 # Summary
