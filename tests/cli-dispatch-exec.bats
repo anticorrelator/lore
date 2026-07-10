@@ -25,6 +25,34 @@ done
 exit 37
 EOF
   chmod +x "$TEST_SCRIPTS/session-wait.sh"
+
+  for leaf in spec-start spec-discover spec-open spec-outcome; do
+    cp "$TEST_SCRIPTS/session-wait.sh" "$TEST_SCRIPTS/$leaf.sh"
+  done
+}
+
+@test "all new spec leaves exec at the deepest external dispatch arm" {
+  local verb
+  for verb in start discover open outcome; do
+    : > "$PID_FILE"
+    rm -f "$RELEASE_FILE"
+    HOME="$TEST_HOME" PID_FILE="$PID_FILE" RELEASE_FILE="$RELEASE_FILE" \
+      bash "$TEST_ROUTER" spec "$verb" &
+    ROUTER_PID=$!
+
+    for _ in $(seq 1 200); do
+      [[ -s "$PID_FILE" ]] && break
+      sleep 0.01
+    done
+    [[ -s "$PID_FILE" ]]
+    [[ "$(<"$PID_FILE")" == "$ROUTER_PID" ]]
+
+    touch "$RELEASE_FILE"
+    local leaf_status=0
+    wait "$ROUTER_PID" || leaf_status=$?
+    ROUTER_PID=""
+    [[ "$leaf_status" -eq 37 ]]
+  done
 }
 
 teardown() {

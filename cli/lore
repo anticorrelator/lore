@@ -505,6 +505,10 @@ lore spec — /spec bookkeeping verbs
 Usage: lore spec <verb> [args...]
 
 Verbs:
+  start       Assemble read-only branch-selection state and provenance
+  discover    Enumerate source-manifested discovery candidates without matching
+  open        Publish a reusable investigation-dispatch manifest and directives
+  outcome     File a lead-normalized ceremony outcome through existing writers
   finalize    Run the terminal gate sequence (backlink verify, intent-anchor
               gate, regen-tasks, heal, emission-contract asserts) and emit
               one adoption-telemetry scorecard row
@@ -814,6 +818,18 @@ cmd_spec() {
     --help|-h)
       spec_usage
       return 0
+      ;;
+    start)
+      exec "$SCRIPTS_DIR/spec-start.sh" "$@"
+      ;;
+    discover)
+      exec "$SCRIPTS_DIR/spec-discover.sh" "$@"
+      ;;
+    open)
+      exec "$SCRIPTS_DIR/spec-open.sh" "$@"
+      ;;
+    outcome)
+      exec "$SCRIPTS_DIR/spec-outcome.sh" "$@"
       ;;
     finalize)
       exec "$SCRIPTS_DIR/spec-finalize.sh" "$@"
