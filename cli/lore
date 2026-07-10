@@ -594,7 +594,7 @@ cmd_settlement() {
       return 0
       ;;
     status|triggers|scan|enqueue|process|enable|disable|schedule|model|retry-errors|queue|drain|enqueue-rollup-backfill)
-      "$SCRIPTS_DIR/settlement-queue.sh" "$@"
+      exec "$SCRIPTS_DIR/settlement-queue.sh" "$@"
       ;;
     *)
       echo "Error: unknown settlement subcommand '$1'" >&2
@@ -661,7 +661,7 @@ cmd_scale() {
       return 1
       ;;
     registry)
-      "$SCRIPTS_DIR/scale-registry.sh" "$@"
+      exec "$SCRIPTS_DIR/scale-registry.sh" "$@"
       ;;
     *)
       echo "Error: unknown scale subcommand '$subcmd'" >&2
@@ -688,13 +688,13 @@ cmd_scorecard() {
       return 0
       ;;
     append)
-      "$SCRIPTS_DIR/scorecard-append.sh" "$@"
+      exec "$SCRIPTS_DIR/scorecard-append.sh" "$@"
       ;;
     rollup)
-      "$SCRIPTS_DIR/scorecard-rollup.sh" "$@"
+      exec "$SCRIPTS_DIR/scorecard-rollup.sh" "$@"
       ;;
     calibrate)
-      "$SCRIPTS_DIR/scorecards-calibrate.sh" "$@"
+      exec "$SCRIPTS_DIR/scorecards-calibrate.sh" "$@"
       ;;
     current)
       local kdir current_file
@@ -741,7 +741,7 @@ cmd_trust() {
       return 0
       ;;
     confirm)
-      "$SCRIPTS_DIR/trust-confirm.sh" "$@"
+      exec "$SCRIPTS_DIR/trust-confirm.sh" "$@"
       ;;
     *)
       echo "Error: unknown trust subcommand '$subcmd'" >&2
@@ -768,28 +768,28 @@ cmd_impl() {
       return 0
       ;;
     gate-anchor)
-      "$SCRIPTS_DIR/impl-gate-anchor.sh" "$@"
+      exec "$SCRIPTS_DIR/impl-gate-anchor.sh" "$@"
       ;;
     start)
-      "$SCRIPTS_DIR/impl-start.sh" "$@"
+      exec "$SCRIPTS_DIR/impl-start.sh" "$@"
       ;;
     close)
-      "$SCRIPTS_DIR/impl-close.sh" "$@"
+      exec "$SCRIPTS_DIR/impl-close.sh" "$@"
       ;;
     open)
-      "$SCRIPTS_DIR/impl-open.sh" "$@"
+      exec "$SCRIPTS_DIR/impl-open.sh" "$@"
       ;;
     next-batch)
-      "$SCRIPTS_DIR/impl-next-batch.sh" "$@"
+      exec "$SCRIPTS_DIR/impl-next-batch.sh" "$@"
       ;;
     check-report)
-      "$SCRIPTS_DIR/impl-check-report.sh" "$@"
+      exec "$SCRIPTS_DIR/impl-check-report.sh" "$@"
       ;;
     consult-log)
-      "$SCRIPTS_DIR/impl-consult-log.sh" "$@"
+      exec "$SCRIPTS_DIR/impl-consult-log.sh" "$@"
       ;;
     promote-batch)
-      "$SCRIPTS_DIR/impl-promote-batch.sh" "$@"
+      exec "$SCRIPTS_DIR/impl-promote-batch.sh" "$@"
       ;;
     *)
       echo "Error: unknown impl verb '$subcmd'" >&2
@@ -816,7 +816,7 @@ cmd_spec() {
       return 0
       ;;
     finalize)
-      "$SCRIPTS_DIR/spec-finalize.sh" "$@"
+      exec "$SCRIPTS_DIR/spec-finalize.sh" "$@"
       ;;
     *)
       echo "Error: unknown spec verb '$subcmd'" >&2
@@ -843,7 +843,7 @@ cmd_coordinate() {
       return 0
       ;;
     status)
-      "$SCRIPTS_DIR/coordinate-status.sh" "$@"
+      exec "$SCRIPTS_DIR/coordinate-status.sh" "$@"
       ;;
     *)
       echo "Error: unknown coordinate verb '$subcmd'" >&2
@@ -870,25 +870,25 @@ cmd_session() {
       return 0
       ;;
     request)
-      "$SCRIPTS_DIR/session-request.sh" "$@"
+      exec "$SCRIPTS_DIR/session-request.sh" "$@"
       ;;
     list)
-      "$SCRIPTS_DIR/session-list.sh" "$@"
+      exec "$SCRIPTS_DIR/session-list.sh" "$@"
       ;;
     events)
-      "$SCRIPTS_DIR/session-events.sh" "$@"
+      exec "$SCRIPTS_DIR/session-events.sh" "$@"
       ;;
     close)
-      "$SCRIPTS_DIR/session-close.sh" "$@"
+      exec "$SCRIPTS_DIR/session-close.sh" "$@"
       ;;
     send)
-      "$SCRIPTS_DIR/session-send.sh" "$@"
+      exec "$SCRIPTS_DIR/session-send.sh" "$@"
       ;;
     peek)
-      "$SCRIPTS_DIR/session-peek.sh" "$@"
+      exec "$SCRIPTS_DIR/session-peek.sh" "$@"
       ;;
     wait)
-      "$SCRIPTS_DIR/session-wait.sh" "$@"
+      exec "$SCRIPTS_DIR/session-wait.sh" "$@"
       ;;
     *)
       echo "Error: unknown session verb '$subcmd'" >&2
@@ -915,25 +915,25 @@ cmd_retro() {
       return 0
       ;;
     export)
-      "$SCRIPTS_DIR/retro-export.sh" "$@"
+      exec "$SCRIPTS_DIR/retro-export.sh" "$@"
       ;;
     import)
       require_maintainer "retro import"
-      "$SCRIPTS_DIR/retro-import.sh" "$@"
+      exec "$SCRIPTS_DIR/retro-import.sh" "$@"
       ;;
     aggregate)
       require_maintainer "retro aggregate"
       "$SCRIPTS_DIR/maintainer-preflight.sh" --repo-dir "$(pwd)"
-      "$SCRIPTS_DIR/retro-aggregate.sh" "$@"
+      exec "$SCRIPTS_DIR/retro-aggregate.sh" "$@"
       ;;
     backfill)
-      "$SCRIPTS_DIR/retro-backfill.sh" "$@"
+      exec "$SCRIPTS_DIR/retro-backfill.sh" "$@"
       ;;
     queue)
-      "$SCRIPTS_DIR/retro-queue.sh" queue "$@"
+      exec "$SCRIPTS_DIR/retro-queue.sh" queue "$@"
       ;;
     handle)
-      "$SCRIPTS_DIR/retro-queue.sh" handle "$@"
+      exec "$SCRIPTS_DIR/retro-queue.sh" handle "$@"
       ;;
     *)
       echo "Error: unknown retro subcommand '$subcmd'" >&2
@@ -984,10 +984,10 @@ cmd_correction() {
       return 0
       ;;
     find)
-      "$SCRIPTS_DIR/find-correction-targets.sh" "$@"
+      exec "$SCRIPTS_DIR/find-correction-targets.sh" "$@"
       ;;
     apply)
-      KDIR="$(resolve_kdir)" "$SCRIPTS_DIR/apply-correction.sh" "$@"
+      KDIR="$(resolve_kdir)" exec "$SCRIPTS_DIR/apply-correction.sh" "$@"
       ;;
     *)
       echo "Error: unknown correction subcommand '$subcmd'" >&2
@@ -1051,7 +1051,7 @@ cmd_analyze_staleness() {
     return 1
   fi
 
-  python3 "$script" "$kdir" "$@"
+  exec python3 "$script" "$kdir" "$@"
 }
 
 cmd_drift_sweep() {
@@ -1064,7 +1064,7 @@ cmd_drift_sweep() {
     echo "  (confidence: unaudited); --unaudited-only skips purely-drifted entries." >&2
     return 0
   fi
-  "$SCRIPTS_DIR/drift-sweep.sh" "$@"
+  exec "$SCRIPTS_DIR/drift-sweep.sh" "$@"
 }
 
 cmd_analyze_usage() {
@@ -1084,7 +1084,7 @@ cmd_analyze_usage() {
     return 1
   fi
 
-  python3 "$script" "$kdir" "$@"
+  exec python3 "$script" "$kdir" "$@"
 }
 
 cmd_analyze_concordance() {
@@ -1098,7 +1098,7 @@ cmd_analyze_concordance() {
   local kdir
   kdir="$(resolve_kdir)"
 
-  python3 "$SCRIPTS_DIR/pk_cli.py" analyze-concordance "$kdir" "$@"
+  exec python3 "$SCRIPTS_DIR/pk_cli.py" analyze-concordance "$kdir" "$@"
 }
 
 cmd_analyze_merge_candidates() {
@@ -1112,7 +1112,7 @@ cmd_analyze_merge_candidates() {
   local kdir
   kdir="$(resolve_kdir)"
 
-  python3 "$SCRIPTS_DIR/pk_cli.py" analyze-merge-candidates "$kdir" "$@"
+  exec python3 "$SCRIPTS_DIR/pk_cli.py" analyze-merge-candidates "$kdir" "$@"
 }
 
 # --- Bootstrap subgroup ---
@@ -1131,7 +1131,7 @@ cmd_bootstrap() {
       return 0
       ;;
     scope)
-      "$SCRIPTS_DIR/bootstrap-scope.sh" "$@"
+      exec "$SCRIPTS_DIR/bootstrap-scope.sh" "$@"
       ;;
     *)
       echo "Error: unknown bootstrap subcommand '$subcmd'" >&2
@@ -1160,7 +1160,7 @@ cmd_backlinks() {
     generate)
       local kdir
       kdir="$(resolve_kdir)"
-      python3 "$SCRIPTS_DIR/pk_cli.py" generate-backlinks "$kdir" "$@"
+      exec python3 "$SCRIPTS_DIR/pk_cli.py" generate-backlinks "$kdir" "$@"
       ;;
     *)
       echo "Error: unknown backlinks subcommand '$subcmd'" >&2
@@ -1206,7 +1206,7 @@ cmd_ceremony() {
 
   case "$subcmd" in
     get|add|remove|list)
-      "$SCRIPTS_DIR/ceremony-config.sh" ${harness_args[@]+"${harness_args[@]}"} "$subcmd" "$@"
+      exec "$SCRIPTS_DIR/ceremony-config.sh" ${harness_args[@]+"${harness_args[@]}"} "$subcmd" "$@"
       ;;
     *)
       echo "Error: unknown ceremony subcommand '$subcmd'" >&2
@@ -1233,16 +1233,16 @@ cmd_framework() {
       return 0
       ;;
     status)
-      "$SCRIPTS_DIR/framework-status.sh" "$@"
+      exec "$SCRIPTS_DIR/framework-status.sh" "$@"
       ;;
     doctor)
-      "$SCRIPTS_DIR/framework-doctor.sh" "$@"
+      exec "$SCRIPTS_DIR/framework-doctor.sh" "$@"
       ;;
     capability-overrides)
-      "$SCRIPTS_DIR/framework-doctor.sh" capability-overrides "$@"
+      exec "$SCRIPTS_DIR/framework-doctor.sh" capability-overrides "$@"
       ;;
     set-model|unset-model)
-      "$SCRIPTS_DIR/framework-set-model.sh" "$subcmd" "$@"
+      exec "$SCRIPTS_DIR/framework-set-model.sh" "$subcmd" "$@"
       ;;
     *)
       echo "Error: unknown framework subcommand '$subcmd'" >&2
@@ -1269,7 +1269,7 @@ cmd_config() {
       return 0
       ;;
     framework|role|roles|capability-overrides|show|path)
-      "$SCRIPTS_DIR/framework-config.sh" "$subcmd" "$@"
+      exec "$SCRIPTS_DIR/framework-config.sh" "$subcmd" "$@"
       ;;
     *)
       echo "Error: unknown config subcommand '$subcmd'" >&2
@@ -1296,13 +1296,13 @@ cmd_thread() {
       return 0
       ;;
     init)
-      "$SCRIPTS_DIR/init-threads.sh" "$@"
+      exec "$SCRIPTS_DIR/init-threads.sh" "$@"
       ;;
     list|reindex)
-      "$SCRIPTS_DIR/update-thread-index.sh" "$@"
+      exec "$SCRIPTS_DIR/update-thread-index.sh" "$@"
       ;;
     migrate)
-      "$SCRIPTS_DIR/migrate-threads.sh" "$@"
+      exec "$SCRIPTS_DIR/migrate-threads.sh" "$@"
       ;;
     *)
       echo "Error: unknown thread subcommand '$subcmd'" >&2
@@ -1329,13 +1329,13 @@ cmd_harness() {
       return 0
       ;;
     enable)
-      "$SCRIPTS_DIR/harness-toggle/enable.sh" "$@"
+      exec "$SCRIPTS_DIR/harness-toggle/enable.sh" "$@"
       ;;
     disable)
-      "$SCRIPTS_DIR/harness-toggle/disable.sh" "$@"
+      exec "$SCRIPTS_DIR/harness-toggle/disable.sh" "$@"
       ;;
     status)
-      "$SCRIPTS_DIR/harness-toggle/status.sh" "$@"
+      exec "$SCRIPTS_DIR/harness-toggle/status.sh" "$@"
       ;;
     *)
       echo "Error: unknown harness subcommand '$subcmd'" >&2
@@ -1362,10 +1362,10 @@ cmd_migrate() {
       return 0
       ;;
     knowledge|format)
-      "$SCRIPTS_DIR/migrate-knowledge-format.sh" "$@"
+      exec "$SCRIPTS_DIR/migrate-knowledge-format.sh" "$@"
       ;;
     threads)
-      "$SCRIPTS_DIR/migrate-threads.sh" "$@"
+      exec "$SCRIPTS_DIR/migrate-threads.sh" "$@"
       ;;
     *)
       echo "Error: unknown migrate subcommand '$subcmd'" >&2
@@ -1392,7 +1392,7 @@ cmd_manifest() {
       return 0
       ;;
     update)
-      "$SCRIPTS_DIR/update-manifest.sh" "$@"
+      exec "$SCRIPTS_DIR/update-manifest.sh" "$@"
       ;;
     *)
       echo "Error: unknown manifest subcommand '$subcmd'" >&2
@@ -1528,7 +1528,7 @@ EOF
   [[ -n "$budget" ]] && query_args+=("--budget" "$budget")
   [[ -n "$exclude_category" ]] && query_args+=("--exclude-category" "$exclude_category")
 
-  python3 "$SCRIPTS_DIR/pk_cli.py" "${query_args[@]}"
+  exec python3 "$SCRIPTS_DIR/pk_cli.py" "${query_args[@]}"
 }
 
 # --- Search ---
@@ -1599,16 +1599,16 @@ cmd_search() {
   if [[ -n "$json_flag" ]]; then
     case "$type" in
       knowledge)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json "${args[@]:1}"
+        exec python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json "${args[@]:1}"
         ;;
       work)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json --type work "${args[@]:1}"
+        exec python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json --type work "${args[@]:1}"
         ;;
       all)
         local k_json w_json
         k_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json "${args[@]:1}")"
         w_json="$(python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" --json --type work "${args[@]:1}")"
-        python3 -c "import json,sys; a=json.loads(sys.argv[1]); b=json.loads(sys.argv[2]); print(json.dumps(a+b,indent=2))" "$k_json" "$w_json"
+        exec python3 -c "import json,sys; a=json.loads(sys.argv[1]); b=json.loads(sys.argv[2]); print(json.dumps(a+b,indent=2))" "$k_json" "$w_json"
         ;;
       *)
         echo "Error: --type must be knowledge, work, or all" >&2
@@ -1618,15 +1618,15 @@ cmd_search() {
   else
     case "$type" in
       knowledge)
-        python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" "${args[@]:1}"
+        exec python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" "${args[@]:1}"
         ;;
       work)
-        "$SCRIPTS_DIR/search-work.sh" "$query"
+        exec "$SCRIPTS_DIR/search-work.sh" "$query"
         ;;
       all)
         python3 "$SCRIPTS_DIR/pk_cli.py" search "$kdir" "$query" --scale-set "$scale_set" --caller "$caller" "${args[@]:1}"
         echo ""
-        "$SCRIPTS_DIR/search-work.sh" "$query"
+        exec "$SCRIPTS_DIR/search-work.sh" "$query"
         ;;
       *)
         echo "Error: --type must be knowledge, work, or all" >&2
@@ -1652,19 +1652,19 @@ cmd_work() {
       return 0
       ;;
     create)
-      "$SCRIPTS_DIR/create-work.sh" "$@"
+      exec "$SCRIPTS_DIR/create-work.sh" "$@"
       ;;
     list)
-      "$SCRIPTS_DIR/list-work.sh" "$@"
+      exec "$SCRIPTS_DIR/list-work.sh" "$@"
       ;;
     show)
-      "$SCRIPTS_DIR/load-work-item.sh" "$@"
+      exec "$SCRIPTS_DIR/load-work-item.sh" "$@"
       ;;
     note)
-      "$SCRIPTS_DIR/work-note.sh" "$@"
+      exec "$SCRIPTS_DIR/work-note.sh" "$@"
       ;;
     resolve)
-      "$SCRIPTS_DIR/resolve-work-ref.sh" "$@"
+      exec "$SCRIPTS_DIR/resolve-work-ref.sh" "$@"
       ;;
     path)
       # Print a work item's absolute directory — a cwd-independent Write/cp target.
@@ -1689,57 +1689,57 @@ cmd_work() {
       echo "$item_dir"
       ;;
     set)
-      "$SCRIPTS_DIR/set-work-meta.sh" "$@"
+      exec "$SCRIPTS_DIR/set-work-meta.sh" "$@"
       ;;
     archive)
-      "$SCRIPTS_DIR/archive-work.sh" "$@"
+      exec "$SCRIPTS_DIR/archive-work.sh" "$@"
       ;;
     delete)
-      "$SCRIPTS_DIR/delete-work.sh" "$@"
+      exec "$SCRIPTS_DIR/delete-work.sh" "$@"
       ;;
     unarchive)
-      "$SCRIPTS_DIR/unarchive-work.sh" "$@"
+      exec "$SCRIPTS_DIR/unarchive-work.sh" "$@"
       ;;
     search)
-      "$SCRIPTS_DIR/search-work.sh" "$@"
+      exec "$SCRIPTS_DIR/search-work.sh" "$@"
       ;;
     tasks)
       SLUG="$1"
       KDIR=$(resolve_kdir)
-      python3 "$SCRIPTS_DIR/generate-tasks.py" "$KDIR/_work/$SLUG/plan.md" --knowledge-dir "$KDIR" --slug "$SLUG"
+      exec python3 "$SCRIPTS_DIR/generate-tasks.py" "$KDIR/_work/$SLUG/plan.md" --knowledge-dir "$KDIR" --slug "$SLUG"
       ;;
     load-tasks)
-      "$SCRIPTS_DIR/load-tasks.sh" "$@"
+      exec "$SCRIPTS_DIR/load-tasks.sh" "$@"
       ;;
     regen-tasks)
-      "$SCRIPTS_DIR/regen-tasks.sh" "$@"
+      exec "$SCRIPTS_DIR/regen-tasks.sh" "$@"
       ;;
     phase-context)
-      "$SCRIPTS_DIR/phase-context.sh" "$@"
+      exec "$SCRIPTS_DIR/phase-context.sh" "$@"
       ;;
     check)
-      "$SCRIPTS_DIR/update-plan-checkbox.sh" "$@"
+      exec "$SCRIPTS_DIR/update-plan-checkbox.sh" "$@"
       ;;
     heal)
-      "$SCRIPTS_DIR/heal-work.sh" "$@"
+      exec "$SCRIPTS_DIR/heal-work.sh" "$@"
       ;;
     relate)
-      "$SCRIPTS_DIR/relate-work.sh" "$@"
+      exec "$SCRIPTS_DIR/relate-work.sh" "$@"
       ;;
     flag)
-      "$SCRIPTS_DIR/flag-work.sh" "$@" --mechanism flag
+      exec "$SCRIPTS_DIR/flag-work.sh" "$@" --mechanism flag
       ;;
     hold)
-      "$SCRIPTS_DIR/flag-work.sh" "$@" --mechanism hold
+      exec "$SCRIPTS_DIR/flag-work.sh" "$@" --mechanism hold
       ;;
     release)
-      "$SCRIPTS_DIR/release-work.sh" "$@"
+      exec "$SCRIPTS_DIR/release-work.sh" "$@"
       ;;
     ai)
-      "$SCRIPTS_DIR/work-ai.sh" "$@"
+      exec "$SCRIPTS_DIR/work-ai.sh" "$@"
       ;;
     cache-branch)
-      "$SCRIPTS_DIR/cache-branch.sh" "$@"
+      exec "$SCRIPTS_DIR/cache-branch.sh" "$@"
       ;;
     project)
       cmd_work_project "$@"
@@ -1768,13 +1768,13 @@ cmd_work_project() {
       return 0
       ;;
     show)
-      "$SCRIPTS_DIR/show-project.sh" "$@"
+      exec "$SCRIPTS_DIR/show-project.sh" "$@"
       ;;
     describe)
-      "$SCRIPTS_DIR/describe-project.sh" "$@"
+      exec "$SCRIPTS_DIR/describe-project.sh" "$@"
       ;;
     archive)
-      "$SCRIPTS_DIR/archive-project.sh" "$@"
+      exec "$SCRIPTS_DIR/archive-project.sh" "$@"
       ;;
     *)
       echo "Error: unknown work project subcommand '$subcmd'" >&2
@@ -1800,37 +1800,37 @@ cmd_followup() {
       return 0
       ;;
     create)
-      "$SCRIPTS_DIR/create-followup.sh" "$@"
+      exec "$SCRIPTS_DIR/create-followup.sh" "$@"
       ;;
     list)
-      "$SCRIPTS_DIR/list-followups.sh" "$@"
+      exec "$SCRIPTS_DIR/list-followups.sh" "$@"
       ;;
     view)
-      "$SCRIPTS_DIR/load-followup.sh" "$@"
+      exec "$SCRIPTS_DIR/load-followup.sh" "$@"
       ;;
     update)
-      "$SCRIPTS_DIR/update-followup.sh" "$@"
+      exec "$SCRIPTS_DIR/update-followup.sh" "$@"
       ;;
     promote)
-      "$SCRIPTS_DIR/promote-followup.sh" "$@"
+      exec "$SCRIPTS_DIR/promote-followup.sh" "$@"
       ;;
     dismiss)
-      "$SCRIPTS_DIR/dismiss-followup.sh" "$@"
+      exec "$SCRIPTS_DIR/dismiss-followup.sh" "$@"
       ;;
     archive)
-      "$SCRIPTS_DIR/archive-followup.sh" "$@"
+      exec "$SCRIPTS_DIR/archive-followup.sh" "$@"
       ;;
     unarchive)
-      "$SCRIPTS_DIR/unarchive-followup.sh" "$@"
+      exec "$SCRIPTS_DIR/unarchive-followup.sh" "$@"
       ;;
     delete)
-      "$SCRIPTS_DIR/delete-followup.sh" "$@"
+      exec "$SCRIPTS_DIR/delete-followup.sh" "$@"
       ;;
     post-review)
-      "$SCRIPTS_DIR/post-proposed-review.sh" "$@"
+      exec "$SCRIPTS_DIR/post-proposed-review.sh" "$@"
       ;;
     summarize)
-      "$SCRIPTS_DIR/generate-review-summary.sh" "$@"
+      exec "$SCRIPTS_DIR/generate-review-summary.sh" "$@"
       ;;
     *)
       echo "Error: unknown followup subcommand '$subcmd'" >&2
@@ -1880,7 +1880,7 @@ cmd_synopsis() {
       return 0
       ;;
     get|put|invalidate)
-      "$SCRIPTS_DIR/edge-synopsis.sh" "$subcmd" "$@"
+      exec "$SCRIPTS_DIR/edge-synopsis.sh" "$subcmd" "$@"
       ;;
     *)
       echo "Error: unknown synopsis subcommand '$subcmd'" >&2
@@ -1927,10 +1927,10 @@ cmd_off_scale() {
       return 0
       ;;
     resolve)
-      "$SCRIPTS_DIR/off-scale-resolve.sh" "$@"
+      exec "$SCRIPTS_DIR/off-scale-resolve.sh" "$@"
       ;;
     route)
-      "$SCRIPTS_DIR/route-off-scale.sh" "$@"
+      exec "$SCRIPTS_DIR/route-off-scale.sh" "$@"
       ;;
     *)
       echo "Error: unknown off-scale subcommand '$subcmd'" >&2
@@ -1957,7 +1957,7 @@ case "$1" in
     ;;
   read)
     shift
-    "$SCRIPTS_DIR/filtered-read.sh" "$@"
+    exec "$SCRIPTS_DIR/filtered-read.sh" "$@"
     ;;
   query)
     shift
@@ -1969,32 +1969,32 @@ case "$1" in
     ;;
   capture)
     shift
-    "$SCRIPTS_DIR/capture.sh" "$@"
+    exec "$SCRIPTS_DIR/capture.sh" "$@"
     ;;
   promote)
     shift
-    "$SCRIPTS_DIR/lore-promote.sh" "$@"
+    exec "$SCRIPTS_DIR/lore-promote.sh" "$@"
     ;;
   test)
     shift
-    "$SCRIPTS_DIR/lore-test.sh" "$@"
+    exec "$SCRIPTS_DIR/lore-test.sh" "$@"
     ;;
   annotate)
     shift
-    "$SCRIPTS_DIR/annotate.sh" "$@"
+    exec "$SCRIPTS_DIR/annotate.sh" "$@"
     ;;
   verify)
     shift
     if [[ "${1:-}" == "--report" ]]; then
       shift
-      "$SCRIPTS_DIR/verify-report.sh" "$@"
+      exec "$SCRIPTS_DIR/verify-report.sh" "$@"
     else
-      "$SCRIPTS_DIR/verify-append.sh" "$@"
+      exec "$SCRIPTS_DIR/verify-append.sh" "$@"
     fi
     ;;
   audit)
     shift
-    "$SCRIPTS_DIR/audit-artifact.sh" "$@"
+    exec "$SCRIPTS_DIR/audit-artifact.sh" "$@"
     ;;
   settlement)
     shift
@@ -2003,7 +2003,7 @@ case "$1" in
   resolve)
     shift
     if [[ $# -eq 0 ]]; then
-      resolve_kdir
+      exec "$SCRIPTS_DIR/resolve-repo.sh"
     else
       case "$1" in
         --help|-h)
@@ -2014,53 +2014,53 @@ case "$1" in
           ;;
         *)
           kdir="$(resolve_kdir)"
-          python3 "$SCRIPTS_DIR/pk_cli.py" resolve "$kdir" "$@"
+          exec python3 "$SCRIPTS_DIR/pk_cli.py" resolve "$kdir" "$@"
           ;;
       esac
     fi
     ;;
   prefetch)
     shift
-    "$SCRIPTS_DIR/prefetch-knowledge.sh" "$@"
+    exec "$SCRIPTS_DIR/prefetch-knowledge.sh" "$@"
     ;;
   index)
     shift
-    "$SCRIPTS_DIR/generate-index.sh" "$@"
+    exec "$SCRIPTS_DIR/generate-index.sh" "$@"
     ;;
   init)
     shift
-    "$SCRIPTS_DIR/init-repo.sh" "$@"
+    exec "$SCRIPTS_DIR/init-repo.sh" "$@"
     ;;
   init-work)
     shift
-    "$SCRIPTS_DIR/init-work.sh" "$@"
+    exec "$SCRIPTS_DIR/init-work.sh" "$@"
     ;;
   heal)
     shift
     "$SCRIPTS_DIR/heal-knowledge.sh" "$@"
-    "$SCRIPTS_DIR/heal-work.sh" "$@"
+    exec "$SCRIPTS_DIR/heal-work.sh" "$@"
     ;;
   stats)
     shift
     kdir="$(resolve_kdir)"
-    python3 "$SCRIPTS_DIR/pk_cli.py" stats "$kdir" "$@"
+    exec python3 "$SCRIPTS_DIR/pk_cli.py" stats "$kdir" "$@"
     ;;
   check-links)
     shift
     kdir="$(resolve_kdir)"
-    python3 "$SCRIPTS_DIR/pk_cli.py" check-links "$kdir" "$@"
+    exec python3 "$SCRIPTS_DIR/pk_cli.py" check-links "$kdir" "$@"
     ;;
   curate)
     shift
-    "$SCRIPTS_DIR/curate-scan.sh" "$@"
+    exec "$SCRIPTS_DIR/curate-scan.sh" "$@"
     ;;
   status)
     shift
-    "$SCRIPTS_DIR/status.sh" "$@"
+    exec "$SCRIPTS_DIR/status.sh" "$@"
     ;;
   assemble)
     shift
-    "$SCRIPTS_DIR/assemble-claude-md.sh" "$@"
+    exec "$SCRIPTS_DIR/assemble-claude-md.sh" "$@"
     ;;
   analyze)
     shift
@@ -2080,7 +2080,7 @@ case "$1" in
     ;;
   journal)
     shift
-    "$SCRIPTS_DIR/journal.sh" "$@"
+    exec "$SCRIPTS_DIR/journal.sh" "$@"
     ;;
   thread)
     shift
@@ -2160,7 +2160,7 @@ case "$1" in
     ;;
   consumption-contradiction)
     shift
-    "$SCRIPTS_DIR/consumption-contradiction-append.sh" "$@"
+    exec "$SCRIPTS_DIR/consumption-contradiction-append.sh" "$@"
     ;;
   synopsis)
     shift
@@ -2188,55 +2188,55 @@ case "$1" in
       echo "  Show correction history and supersession chain for a knowledge entry." >&2
       exit 1
     fi
-    "$SCRIPTS_DIR/show-history.sh" "$@"
+    exec "$SCRIPTS_DIR/show-history.sh" "$@"
     ;;
   expand)
     shift
-    "$SCRIPTS_DIR/expand-entry.sh" "$@"
+    exec "$SCRIPTS_DIR/expand-entry.sh" "$@"
     ;;
   descend)
     shift
-    "$SCRIPTS_DIR/descend-entry.sh" "$@"
+    exec "$SCRIPTS_DIR/descend-entry.sh" "$@"
     ;;
   neighbors)
     shift
-    "$SCRIPTS_DIR/neighbors-entry.sh" "$@"
+    exec "$SCRIPTS_DIR/neighbors-entry.sh" "$@"
     ;;
   tradeoffs)
     shift
-    "$SCRIPTS_DIR/tradeoffs-topic.sh" "$@"
+    exec "$SCRIPTS_DIR/tradeoffs-topic.sh" "$@"
     ;;
   why)
     shift
-    "$SCRIPTS_DIR/why-at-location.sh" "$@"
+    exec "$SCRIPTS_DIR/why-at-location.sh" "$@"
     ;;
   overview)
     shift
-    "$SCRIPTS_DIR/overview-subsystem.sh" "$@"
+    exec "$SCRIPTS_DIR/overview-subsystem.sh" "$@"
     ;;
   knowledge-tree)
     shift
-    "$SCRIPTS_DIR/knowledge-tree.sh" "$@"
+    exec "$SCRIPTS_DIR/knowledge-tree.sh" "$@"
     ;;
   batch-spec)
     shift
-    "$SCRIPTS_DIR/batch-spec.sh" "$@"
+    exec "$SCRIPTS_DIR/batch-spec.sh" "$@"
     ;;
   batch-implement)
     shift
-    "$SCRIPTS_DIR/batch-implement.sh" "$@"
+    exec "$SCRIPTS_DIR/batch-implement.sh" "$@"
     ;;
   batch-capture)
     shift
-    "$SCRIPTS_DIR/batch-capture.sh" "$@"
+    exec "$SCRIPTS_DIR/batch-capture.sh" "$@"
     ;;
   doctor)
     shift
-    "$SCRIPTS_DIR/doctor.sh" "$@"
+    exec "$SCRIPTS_DIR/doctor.sh" "$@"
     ;;
   export-obsidian)
     shift
-    "$SCRIPTS_DIR/export-obsidian.sh" "$@"
+    exec "$SCRIPTS_DIR/export-obsidian.sh" "$@"
     ;;
   rebuild)
     if ! command -v go >/dev/null 2>&1; then
