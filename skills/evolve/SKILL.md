@@ -7,48 +7,37 @@ argument_description: "[--since <date>]"
 
 # /evolve Skill
 
-Review evolution suggestions accumulated in the journal from `/retro` and `/self-test` runs. Present them grouped by target for human approval, apply approved suggestions as file edits, and record the outcome.
+Turn accumulated retro and self-test suggestions into evidence-gated, lead-authored protocol changes. Two deterministic verbs hold the bookkeeping envelope: `prepare` reconstructs and freezes the review queue; `file` preserves the lead's decisions and recovers their sanctioned sinks. The evolve lead alone decides what a proposal deserves and authors every target-file edit.
 
-## Role-based section routing
+The authority boundary is load-bearing:
 
-`/evolve` behaves differently for maintainers vs. contributors. Resolve the operator role first and render ONLY the section matching that role. Sections for other roles should not appear in the output shown to the operator — they are noise that enables irrelevant behavior.
+- The mechanism owns cutoff reconstruction, source coverage, parsing, grouping, eligibility arithmetic, canonical serialization, lifecycle writes, version provenance, recovery, and outcome filing.
+- The lead owns `apply | reject | escalate`, escalation judgment, recurring-cluster dispositions, edit text, and direct edit application.
+- Eligibility is evidence sufficiency, never a recommendation. Neither verb selects, ranks, synthesizes, or applies a proposal.
 
-**Resolve role:**
+## Role-based routing
+
+Resolve the operator role before rendering the workflow:
 
 ```bash
 role=$(bash -c 'source ~/.lore/scripts/lib.sh; resolve_role')
 ```
 
-`resolve_role()` returns `maintainer` or `contributor` (default `contributor`). Precedence: `$LORE_ROLE` → `$KDIR/config.json` → `~/.lore/config/settings.json` → default. See `scripts/lib.sh:112`.
-
-**Section routing table:**
-
 | Section | contributor | maintainer |
 |---|---|---|
-| Steps 1–9 (base pipeline) | render | render |
-| "Maintainer path" section (below) | **skip entirely** | render |
-| `--pooled` mode | rejects with `requires role=maintainer` | render |
-| `--shrink` mode | rejects with `requires role=maintainer` | render |
+| Base ceremony, Steps 1–9 | render | render |
+| Maintainer path | skip entirely | render |
+| `--pooled` / `--shrink` | reject: `requires role=maintainer` | render |
 
-**Contributors:** run Steps 1–9 against local-journal inputs only; never surface the "Maintainer path" section; reject `--pooled`/`--shrink` with `requires role=maintainer`.
+The base ceremony is identical across roles. Never render maintainer-only federation affordances to a contributor.
 
-**Maintainers:** run Steps 1–9, then offer the "Maintainer path" modes (`--pooled`, `--shrink`). The base pipeline is identical across roles — only the federation modes differ.
+## Base ceremony
 
-**Why skip instead of conditional execution:** contributor sessions that see the "Maintainer path" text risk agent-template drift — an agent might infer "I should consider the pooled mode" from reading it, then take an action that fails at the role gate further down. Skipping the section entirely keeps contributor prompts focused on what they can do and removes invisible affordances.
+### Step 1: Resolve the store and maintainer preflight
 
-Task-54 moves maintainer-only rejection up to `cli/lore` dispatch; this section documents the intent until then.
+Run `lore resolve` and bind the result as `KNOWLEDGE_DIR`.
 
-### Step 1: Resolve Knowledge Directory
-
-```bash
-lore resolve
-```
-
-Set `KNOWLEDGE_DIR` to the result.
-
-### 1a. Maintainer push-path preflight (maintainer only, once per session)
-
-When `role == "maintainer"`, run the safety backstop before any template-mutating work. This surfaces a non-writable `origin` (SSH key expired, remote revoked, network partition, fork-only access) *before* the operator commits edits locally that the federation will never see.
+When `role == maintainer`, run the push-path preflight once before template-mutating work:
 
 ```bash
 PREFLIGHT_MARKER="${TMPDIR:-/tmp}/lore-maintainer-preflight.$$"
@@ -57,530 +46,275 @@ bash ~/.lore/scripts/maintainer-preflight.sh \
   --repo-dir "$(pwd)" 2>&1 || true
 ```
 
-`maintainer-preflight.sh` is silent for contributors and short-circuits on re-invocation (marker file). It runs `git push --dry-run origin HEAD` and surfaces the failure verbatim. **Warns, never blocks** — a read-only origin may be intentional.
+The preflight warns but does not block. If it warns, surface the failure and confirm the maintainer wants to continue.
 
-If a warning appears, surface it and confirm the operator wants to continue before Step 2.
+### Step 2: Prepare the evidence queue
 
-### Step 2: Find the Last /evolve Run
-
-Determine the cutoff date — only suggestions logged *after* the last `/evolve` run are shown.
+Run the hands-only prepare verb. Pass `--since` only when the caller explicitly supplied an override; there is no timestamp default in the skill:
 
 ```bash
-lore journal show --role evolve --limit 1
+lore evolve prepare [--since <RFC3339>] --json
 ```
 
-Set `SINCE` to the entry's timestamp if present; otherwise to the beginning of time. If `--since <date>` was passed, override with that value.
+`prepare` resolves role first, reconstructs the exclusive prior cutoff and frozen journal EOF, reads every closed source, computes the fixed gates, and atomically publishes `_evolve/review-queues/<queue_id>.json`. A matching canonical queue is reused. A corrupt artifact, an identity collision, journal prefix drift, or an accepted-but-incomplete prior filing is refused with a named repair target.
 
-Report: `[evolve] Checking for suggestions since: <SINCE or "all time">`
+The queue-v1 top level is normative:
 
-### Step 3: Load Pending Suggestions
-
-```bash
-lore journal show --role retro-evolution --since "$SINCE"
-lore journal show --role self-test-evolution --since "$SINCE"
+```text
+schema_version, queue_id, input_fingerprint, source_fingerprint,
+artifact_sha256, run, cutoff, due_claim, source_manifest, items,
+groups, recurring_clusters, summary, provenance
 ```
 
-Each entry has the format:
+Key contracts:
 
-```
-Target: <file> | Change type: <type> | Section: <section> | Suggestion: <text> | Evidence: <retro finding>
-```
+- `cutoff = {basis, lower, upper, interval:"(lower,upper]", since_override}`. Each boundary cursor carries `timestamp`, `row_ordinal`, `row_sha256`, and journal identity. Equal timestamps remain distinct. Interior malformed rows advance only after a later valid row proves them interior; a malformed tail does not advance the upper cursor.
+- `run = {queue_run_id, role, mode:"local", predecessor}`. `predecessor` pins the latest completed filing and its cutoff, or is null on legacy migration.
+- `due_claim = {attempted:false, outcome_ids:[], disposition:"not-applicable", warning:null}`. Evolve v1 has no DUE producer; do not invent a handle call.
+- Each `source_manifest[]` row declares `{source_id, reader, resolved_source, coverage, content_identity, cursor, warnings, reason}`. Coverage is exactly `read | absent | unreadable | stale | not_computable`.
+- Each `items[]` row declares `{item_id, source_role, source_cursor, work_item, parse, proposal, group_key, gate_path, eligibility}`. Invalid proposals remain in the artifact with `parse.status=invalid`; they are never inferred from partial prose.
+- Canonical JSON recursively sorts object keys, preserves array order, uses compact UTF-8, and has no trailing newline. Hidden same-directory temp plus rename publishes the final bytes.
 
-If both commands return zero entries, report `[evolve] No pending suggestions. Run /retro or /self-test to generate suggestions.` and stop.
+The queue may contain source-authored suggestion text. It must never contain `recommended_verdict`, `recommendation`, `selected`, `approved`, `decision`, `verdict`, `edit`, `edit_text`, or `application` fields.
 
-Otherwise: `[evolve] Found N suggestions (M from retro, K from self-test)`
+### Step 3: Read eligibility as evidence state
 
-### Step 4: Parse and Group Suggestions
+Preparation reads the raw/full journal range, scorecard rows, template registry, declared-v1 accepted clusters, active and archived consumption-contradiction sidecars, degradation rows, and completed prior evolve filings. It does not use the display-limited `journal show` surface.
 
-Parse each observation by structured fields:
-- **Target** — file to edit (e.g., `skills/retro/SKILL.md`, `skills/retro/failure-modes.md`)
-- **Change type** — change category (e.g., `ceiling-raise`, `new-failure-mode`, `dead-dimension`)
-- **Section** — section or step modified
-- **Suggestion** — proposed change in plain text
-- **Evidence** — the retro/self-test finding motivating it
+Eligibility has exactly four states:
 
-Group by **Target**, then by **Change type**. Also extract journal metadata: timestamp, work-item, source role.
+| Status | Meaning | Lead action |
+|---|---|---|
+| `eligible` | Every declared evidence predicate holds. | Review in Step 6. |
+| `no_op` | Trustworthy, complete evidence definitively fails a predicate. | No verdict; retain the reason. |
+| `abstained` | Trustworthy evidence exists, but the declared sample floor is not met. | No verdict; retain the arithmetic. |
+| `not_computable` | A required source is absent, unreadable, stale, malformed, or cannot support the arithmetic. | No verdict; repair the source contract separately. |
 
-### Step 5: Scorecard citation gate (evidence filter)
+Missing, invalid, degraded, or below-floor evidence never becomes eligible. `no_op`, `abstained`, and `not_computable` are queue facts, not disguised lead decisions.
 
-Template-mutating edits require evidence that clears the gate. Apply this step *before* presenting any suggestion in Step 6. Suggestions that fail all gate paths are recorded as no-ops, not shown to the user.
-
-**Scope — which suggestions the gate applies to.** Any suggestion whose target file governs a template (skill bodies, worker prompts, agent files, ceremony scripts) is a *template-mutating* edit and must clear the gate. Documentation-only or meta edits (e.g., typo fix in an explanatory comment that does not change producer behavior) are exempt; if unsure, require the gate.
-
-**Load the scorecard.** Read `$KDIR/_scorecards/rows.jsonl` and `$KDIR/_scorecards/template-registry.json`. If `rows.jsonl` is missing or empty, no suggestion clears the gate — proceed to Step 7 with zero approved, reporting `[evolve] no scored rows available; no template edits applied`.
-
-**Load pipeline-degraded windows.** Read recent `/retro` journal entries (role `retro`) and collect the set of retro-window identifiers whose `scores.window_state == "pipeline-degraded"`. Phase-7b+ retros carry this field; earlier entries are treated as **not** degraded.
-
-**Load consumption-contradiction evidence.** For each work item in the recent window (matching `SINCE`), read `$KDIR/_work/<slug>/consumption-contradictions.jsonl` and collect rows with `status: verified` — these are the claim-retraction gate inputs.
-
-**Never-eligible rows (excluded from all gate paths).** Partition `rows.jsonl` and exclude:
-- `tier: task-evidence` — task-local claim quality, not template behavior
-- `tier: reusable` — promotion quality, not template behavior
-- `tier: telemetry` — P2.3-16 anti-coupling invariant; includes missing-tier legacy rows (rows without a `tier` field treated as `tier: telemetry`)
-- Any row from a `pipeline-degraded` window
-
-**Evidence-class matrix.** Four gate paths exist. Route each suggestion to the path matching its `change_type`:
+Gate paths remain distinct:
 
 | `change_type` | Gate path | Required evidence |
 |---|---|---|
-| Any template-behavior change (default) | Primary | `tier: template + kind: scored + calibrated + non-degraded` |
-| `doctrine-correction` | Secondary | `tier: correction + kind: scored + calibrated + non-degraded` |
-| `claim-retraction` / `falsified-doctrine` | Claim-retraction | `kind: consumption-contradiction + status: verified + non-degraded` |
-| `recurring-failure` | Recurring-failure | candidate cluster of ≥3 distinct `work_items` over `(target, change_type)` AND maintainer-accepted in a prior /evolve run (artifact: `_evolve/accepted-clusters.jsonl`) |
+| Default template-behavior change | Primary | registered `tier=template`, `kind=scored`, calibrated, non-degraded row with cited metric/sample |
+| `doctrine-correction` | Correction | `tier=correction`, `kind=scored`, permitted calibration, non-degraded row with half-floor arithmetic |
+| `claim-retraction` / `falsified-doctrine` | Claim retraction | verified active-or-archived `consumption-contradictions.jsonl` row; no synthetic `kind` projection |
+| `recurring-failure` | Recurring failure | prior unconsumed accepted-cluster evidence over `(target, change_type)` with distinct-work-item union at K≥3 |
 
-**Primary gate** (`change_type` ∉ {`doctrine-correction`, `claim-retraction`, `falsified-doctrine`, `recurring-failure`}):
+Never fall back from one gate path to another. Stable no-op reasons include `no_eligible_template_row`, `telemetry_only`, `pre_calibration_only`, `unregistered_template_only`, `pipeline_degraded_window_only`, `wrong_tier`, `no_eligible_correction_row`, `no_verified_contradiction`, and `no_accepted_cluster`. Below-floor evidence is `abstained`; unavailable or invalid sources are `not_computable`.
 
-A supporting row must satisfy ALL:
-1. `tier == "template"` (rows from rollup scripts post-migration)
-2. `kind == "scored"`
-3. `calibration_state == "calibrated"` (pre-calibration rows may *display* in the evidence block for transparency but do not satisfy the gate; `unknown` is always excluded)
-4. `template_version` is present in `template-registry.json` (unregistered hashes render as `unregistered:<hash>` and carry no weight)
-5. A specific `metric` name and `sample_size` are cited in the suggestion body
-6. Row's retro window is **not** pipeline-degraded
+Claim retraction reads the real lifecycle shape: `contradiction_id`, `status=verified`, `prefetched_commons_entry.knowledge_path`, and lifecycle timestamps across active and archived sidecars. Do not require a nonexistent `kind` field and do not project contradiction evidence into scorecard rows.
 
-If no row satisfies → `no_op` with reason `no_eligible_template_row` (or `telemetry_only`, `pre_calibration_only`, `unregistered_template_only`, `pipeline_degraded_window_only`, `wrong_tier`).
+Recurring-failure arithmetic groups strictly by `(target, change_type)` and unions distinct `work_items`; raw row count cannot inflate K. Accepted clusters are one-shot evidence.
 
-**Secondary gate** (`change_type: "doctrine-correction"`):
+**Recurring-failure gate**
 
-Row must satisfy ALL: (1) `tier == "correction"`; (2) `kind == "scored"`; (3) `calibration_state == "calibrated"` (or `pre-calibration` with caveat in citation); (4) window not pipeline-degraded; (5) sample-size minimum is half the primary gate's (correction rows reflect targeted interventions).
+- **Inputs:** raw role=`retro-evolution` journal rows, prior declared-v1 rows in `_evolve/accepted-clusters.jsonl`, and the staged `(target, change_type)` key.
+- **Success route:** read `_evolve/accepted-clusters.jsonl` directly. Group rows by the `(target, change_type)` key, take the union of distinct `work_item` values, and clear the gate only when the union size is **≥ K (K = 3)**. The proposal cites at least one row by `cluster_id`.
+- **Conservative fallback:** no prior unconsumed match yields `no_op` reason `no_accepted_cluster`; never fall back to another evidence class.
+- **Lifecycle constraints:** Run N may accept a candidate; Run N+1 may consume it. Same-run re-entry is forbidden, and a consumed row never fires again.
 
-If none → `no_op` reason `no_eligible_correction_row`.
+The raw-clustering pass excludes rows whose context starts with `retro-backfill:`. Those rows belong to the pre-clustered consumption pass, so raw and backfill populations never stack toward K. `K < 3` is sub-threshold, `K == 3` is the first candidate, and `K > 3` remains one candidate with its full distinct member set.
 
-**Claim-retraction gate** (`change_type: "claim-retraction"` or `"falsified-doctrine"`):
+**Eligibility check:** reads `_evolve/accepted-clusters.jsonl` directly. Group rows by the `(target, change_type)` key; compute the union of distinct `work_item` values; eligibility holds when the union size is **≥ K (K = 3)**; every emitted proposal cites at least one row from the sidecar.
 
-(1) ≥1 `consumption-contradictions.jsonl` row with `status: verified` for the commons entry; (2) row's window not pipeline-degraded; (3) no sample-size minimum — a single verified contradiction suffices.
+### Step 4: Present the complete queue
 
-If none → `no_op` reason `no_verified_contradiction`.
+Read the published queue artifact, not transient command output. Present eligible items grouped by target then change type, preserving source order within each group. Show each item's source identity, proposal, evidence references, arithmetic, and gate path. Separately summarize `no_op`, `abstained`, `not_computable`, invalid parses, source warnings, and recurring-cluster candidates so absence is never silent.
 
-**Recurring-failure gate** (`change_type: "recurring-failure"`):
+Do not sort by priority or invent a recommended order. Stable grouping is navigation, not ranking.
 
-A **two-state, two-run lifecycle** over retro-evolution journal rows. Acceptance in run N persists an `accepted_cluster` artifact; the gate in run N+1 reads that artifact to clear the suggestion. Same-run Step 5 re-entry is **NOT** permitted — newly accepted clusters never gate suggestions in the same /evolve invocation that accepted them (per D5e).
+### Step 5: Classify sunset obligations
 
-Routing-gate properties:
-
-- **Inputs:** `_meta/effectiveness-journal.jsonl` rows with `role == "retro-evolution"` (raw pass); `_evolve/accepted-clusters.jsonl` rows from prior runs (consumption pass); the staged suggestion's `(target, change_type)` key.
-- **Success route:** clears when `(target, change_type)` matches an `accepted_cluster` row whose `consumed_at_run_id` is unset; the row is marked consumed for this run.
-- **Conservative fallback:** no match → `no_op` reason `no_accepted_cluster`. Does NOT silently re-route to primary/secondary gate (different evidence classes by definition).
-- **Lifecycle constraints:** writes to `_evolve/accepted-clusters.jsonl` happen only in Step 6's CLUSTER REVIEW block; this gate path is read-only over that artifact. No same-run re-entry — a cluster accepted in run N is consumed no earlier than run N+1.
-
-**Eligibility check (sidecar aggregation, per D4).** The gate's K-threshold check reads `_evolve/accepted-clusters.jsonl` directly — it does not re-derive candidates from the journal on the consumption side. Procedure:
-
-1. Read every row from `_evolve/accepted-clusters.jsonl`.
-2. Group rows by the `(target, change_type)` key. Each row carries `change_types[]`; a row joins one group per distinct `change_type` it lists. Bucketing is on the pair — never `target` alone.
-3. Per group, compute the **union of distinct `work_item` values** across all `work_items[]` arrays from every row in the group. Union, not sum: a work_item appearing in two overlapping rows counts once, so partial-overlap rows cannot inflate the count past the true distinct-work_item population.
-4. The group is **eligible** when that union size is **≥ K (K = 3)**. An eligible group emits one recurring-failure proposal.
-
-Each emitted proposal **cites at least one row** from `_evolve/accepted-clusters.jsonl` — minimally the `cluster_id` of a member row plus the distinct-work_item count — so the proposal is auditable back to the persisted evidence. A group whose union is below K produces no proposal (conservative fallback, reason `no_accepted_cluster`).
-
-**K threshold (candidate-cluster formation, raw pass):**
-
-| K (distinct `work_items`) | Cluster status | /evolve action |
-|---|---|---|
-| K < 3 | sub-threshold | discard; no suggestion presented |
-| K == 3 | candidate cluster | present in Step 6 CLUSTER REVIEW for maintainer adjudication |
-| K > 3 | candidate cluster | present in Step 6 CLUSTER REVIEW (member list shows all) |
-
-K=3 is the smallest threshold deserving "recurring" — K=2 is anecdote; the scorecard primary-gate threshold (K=7) would conflate evidence classes. K counts *distinct* `work_item` values (not raw row count): one work item with 5 retro-evolution rows on the same target is K=1, not K=5.
-
-**Two-run lifecycle (state table):**
-
-| Run | Step 5 inputs | Step 6 action | Persisted artifact |
-|---|---|---|---|
-| Run N | retro-evolution rows scanned for K≥3 candidate clusters | maintainer accepts/edits/splits/rejects each candidate; accepted clusters written to `_evolve/accepted-clusters.jsonl` | `accepted_cluster` rows with `accepted_at_run_id` set, `consumed_at_run_id` unset |
-| Run N+1 | `_evolve/accepted-clusters.jsonl` rows with `consumed_at_run_id` unset | each consumed cluster gates exactly one staged `recurring-failure` suggestion | `consumed_at_run_id` populated on consumed rows |
-
-The two-run delay is load-bearing: it forces a human-in-loop pause between cluster identification and template mutation, so a same-session burst of similar retros cannot self-amplify into a binding edit.
-
-**Two-pass scan over retro-evolution rows:**
-
-1. **Raw clustering pass.** Rows whose `context` does **NOT** start with `retro-backfill:`. Bucket by `(Target, Change type)`; for each bucket count distinct `work_item` values; emit candidate when K ≥ 3.
-2. **Pre-clustered consumption pass.** Rows whose `context` starts with `retro-backfill:` (Phase 5 backfill artifacts). Each backfill row is already a cluster — treat its observation as one candidate without re-bucketing. K threshold does not re-apply.
-
-The two passes produce a unified candidate-cluster list for Step 6.
-
-**Accepted-cluster artifact format.** When the maintainer accepts a candidate in Step 6 CLUSTER REVIEW, append a row to `$KDIR/_evolve/accepted-clusters.jsonl`:
-
-```json
-{
-  "cluster_id": "<sha256[:16] of (target + change_types[] sorted + work_items[] sorted)>",
-  "target": "<file path>",
-  "change_types": ["<change_type>", ...],
-  "work_items": ["<work_item slug>", ...],
-  "journal_row_refs": [{"timestamp": "<iso>", "work_item": "<slug>"}, ...],
-  "accepted_at": "<iso8601 timestamp>",
-  "accepted_at_run_id": "<evolve run id from Step 8 journal cutoff>",
-  "accepted_by_maintainer_decision": "merge" | "edit" | "split",
-  "consumed_at_run_id": null
-}
-```
-
-`consumed_at_run_id` starts `null` and is updated to the consuming run's id when the gate fires in run N+1. Sole writer: `bash ~/.lore/scripts/accepted-cluster-append.sh` — `/evolve` does NOT write the file directly outside that script.
-
-**Do NOT:**
-- silently fall back to the primary or secondary gate when an accepted cluster is missing — emit `no_op` with reason `no_accepted_cluster` and surface the reason in Step 9 reporting.
-- re-enter Step 5 in the same invocation after Step 6 CLUSTER REVIEW writes accepted-cluster rows; the two-run lifecycle is the design.
-- treat raw-clustering pass rows whose `context` starts with `retro-backfill:` as raw — they belong to the consumption pass.
-- bucket on `target` alone; the bucketing key is `(target, change_type)`.
-
-**Attach citation.** For suggestions that clear the primary or secondary gate:
-
-```
-Citation: kind=scored | tier=<tier> | template=<template_id>@<template_version>
-          metric=<metric> | value=<value> | sample_size=<n>
-          window=<window_start>..<window_end>
-```
-
-For claim-retraction, attach the contradiction ID:
-```
-Citation: kind=consumption-contradiction | contradiction_id=<id>
-          knowledge_path=<path> | status=verified
-```
-
-For recurring-failure, attach the accepted-cluster reference:
-```
-Citation: kind=accepted-cluster | cluster_id=<id> | target=<file>
-          change_types=<comma-list> | work_items=<comma-list>
-          K=<distinct-work-item-count> | accepted_at_run_id=<run_id>
-```
-
-Report the gate outcome before Step 6:
-
-```
-[evolve] Gate: N suggestions — K cleared (M primary, C correction, R retraction, F recurring-failure), J no-op (reasons: <breakdown>)
-```
-
-**Sole-writer invariant (CC-04).** `/evolve` does not write to `rows.jsonl`. `scripts/scorecard-append.sh` is the only sanctioned writer. Any post-application telemetry row routes through that script — do not append directly.
-
-### 5a. Sunset clause requirement (additions only)
-
-This sub-step implements the maintainer default path's anti-bloat discipline: template edits that *add* new behavioral requirements must carry a sunset clause naming the metric and threshold under which the addition will be rolled back. Removals do not need a sunset clause — the asymmetric evidence rule from `_research/multi-user-evolution-design.md §6` gives the anti-bloat path lower epistemic burden than the anti-atrophy path.
-
-**Classify each gate-cleared suggestion.**
+Before deciding a proposal, classify its proposed effect:
 
 | Classification | Definition | Sunset required? |
 |---|---|---|
-| **addition** | New prose, step, agent rule, or any text adding a behavioral constraint. | yes |
-| **removal** | Deletes prose, collapses duplicates, retires a rule, or other anti-bloat work. | no |
-| **modification** | Changes existing prose without net addition of behavioral constraint (clarifying wording, field rename, threshold tightening). | yes when it strengthens a constraint; no when it loosens or clarifies. **When in doubt, require one.** |
+| addition | Adds a behavioral rule, step, or constraint. | yes |
+| removal | Deletes, collapses, or retires behavior. | no |
+| modification | Changes existing behavior. | yes when strengthening; no when loosening or clarifying |
 
-**Sunset clause shape.** A sunset clause is a single sentence inside the edit prose that names (a) the metric that motivates the addition, (b) the threshold the metric must clear, and (c) the time or sample-size horizon. Example:
+An addition or strengthening edit needs a sentence naming the motivating metric, rollback threshold, and time or sample horizon. If the lead would otherwise apply it but cannot author a defensible sunset, use `reject` or `escalate`; do not change the machine eligibility state.
 
-> "Sunset: revert this section if `factual_precision` for `template_id=worker` does not cross 0.80 after 20 scored rows in the configured measurement window."
+A verified consumption contradiction against a prior evolve addition triggers immediate sunset review. Present it before the regular queue, cite the contradiction ID and knowledge path, and treat an approved removal as a normal lead-authored removal.
 
-A sunset clause is load-bearing because `/evolve --shrink` (the maintainer's subtraction pass — see "Maintainer path" section below) reads the clause at its trial-window check. Additions without sunset clauses accumulate silently and are never subtracted — that's exactly the Goodhart failure Phase 9's federation discipline was introduced to prevent.
+### Step 6: Decide and author edits
 
-**Per-suggestion sunset check.** For each gate-cleared suggestion:
+Step 6 is the only judgment and edit-authorship seat. For every `eligible` item, the lead supplies exactly one verdict and rationale:
 
-1. Classify per the table above. `addition` or `modification-strengthening` requires a sunset clause.
-2. If absent, prompt the authoring agent (or maintainer at Step 6 review) to add one. The author composes from the gate-satisfying row — metric name and sample-size are already attached.
-3. Still absent after review → `no_op` reason `missing_sunset`; do not apply in Step 7.
+| Verdict | Use when | Prompt behavior |
+|---|---|---|
+| `apply` | The evidence and proposal scope align, and the lead can directly author the edit. | No prompt. |
+| `reject` | The evidence is real but the proposed change is wrong, premature, or poorly targeted. | No prompt. |
+| `escalate` | A destructive change, high-confidence drop, or genuine abstention prevents a confident lead decision. | Ask the human once. |
 
-Report: `[evolve] Sunset check: K approved (R removals exempt, A additions with sunset, M modifications clarifying), J no-op (missing_sunset: J)`
+Escalation reasons are exactly `destructive-change | high-confidence-drop | abstain`. Human resolution is exactly `pending | apply | reject | defer`. Preserve unresolved or deferred escalation as durable carry-forward; advancing the cutoff must not lose it.
 
-**Immediate sunset trigger (consumption-contradiction).** A verified consumption-contradiction against a claim that was *added* via a prior `/evolve` run triggers immediate sunset review for that addition, regardless of its sunset window horizon:
+The decision shape is normative:
 
-1. When loading consumption-contradiction evidence (claim-retraction gate), cross-reference each `contradiction_id` against the file's prior `/evolve`-applied additions by `knowledge_path` → target.
-2. Any match marks the addition for immediate sunset review — do not wait for the metric threshold or time horizon.
-3. Present in Step 6 under a dedicated section: `[sunset-triggered] <addition summary> — contradicted by <contradiction_id>`.
-4. Maintainer-approved removal processes in Step 7 as a removal (no sunset clause for the removal itself, per asymmetric rule).
-
-This closes the feedback loop between the claim-retraction gate and the subtraction affordance — a falsifying contradiction should not wait a full measurement window before the addition it falsifies is reviewed.
-
-**Why this lives on the default maintainer path, not just `--pooled`.** Task-56 places the requirement on the *default* path so a single-contributor edit carries the same subtraction affordance as a pooled aggregate. Local-scorecard maintainers bear the same bloat risk; sunset is evidence-coupled irrespective of input source.
-
-**Cross-reference.** The `--pooled` mode restates this requirement in its step-4 rules ("Asymmetric evidence rules"). Edits here must also update the pooled-mode restatement.
-
-### Step 6: Apply Gate-Cleared Suggestions (Agent-Primary, Human Escalation on Threshold/Abstain)
-
-For each target file, the lead is the primary applier of gate-cleared suggestions. Iterate the queue; per suggestion emit one verdict: `apply`, `reject`, or `escalate`. `apply` and `reject` proceed without `AskUserQuestion`; `escalate` routes through it for human adjudication. Report applied/rejected/escalated counts in the run summary so the user can object after the fact.
-
-**Verdict criteria:**
-
-- **`apply`** — clears Step 5, evidence cites a calibrated source, no escalation threshold crossed. Default for gate-cleared suggestions whose evidence and scope match the cited metric. Enters `approved` with rationale logged.
-- **`reject`** — clears Step 5 but the lead judges the change wrong or premature against the cited evidence (e.g., the metric trend is genuine but the proposed edit doesn't address it). Enters `rejected` with rationale logged.
-- **`escalate`** — lead cannot confidently apply or reject. Route through `AskUserQuestion` — the single canonical trigger for human prompts in Step 6.
-
-**Escalation thresholds (when `escalate` is required, not optional):** the lead MUST escalate when any of:
-
-1. **Destructive change** — removes or rewrites load-bearing prose (binding gate, contract clause, routing rule), vs. clarifying/extending. Step 4 change-type is the first-cut signal: `removal`/`rewrite` cross; `addition`/`clarification`/`re-ordering` do not by default.
-2. **High-confidence-drop** — would replace an existing canonical statement evidenced at high confidence (e.g., knowledge entry `confidence: high`, or a `/evolve` addition with an active sunset). The new evidence must exceed the existing weight; if uncertain, escalate.
-3. **Abstain** — cannot decide between apply and reject (ambiguous trend, scope spans two change types, etc.). Catch-all escalation reason; one-sentence rationale.
-
-(1) and (2) are named so a future evolution agent can predict the surface; (3) is free-form. All three feed the same `AskUserQuestion` path.
-
-**When escalating, present the suggestion in this format:**
-
-```
-─────────────────────────────────────────────
-Target:      <file>
-Change type: <type>
-Section:     <section>
-From:        <timestamp> (<source role>)
-Evidence:    <evidence text>
-Citation:    kind=scored | template=<template_id>@<template_version>
-             metric=<metric> value=<value> sample_size=<n>
-             window=<window_start>..<window_end>
-             calibration_state=<state>
-
-Suggestion:
-  <suggestion text>
-
-Escalation reason: <destructive-change | high-confidence-drop | abstain>
-Lead's reading: <one-line context the lead would offer if asked>
-─────────────────────────────────────────────
-Apply this suggestion? [y/n/skip/quit]
+```text
+{item_id, verdict, rationale, escalation, application}
 ```
 
-- **y** — approved by human, will apply
-- **n** — rejected by human, will record as rejected
-- **skip** — deferred, not recorded (will appear in next `/evolve` run)
-- **quit** — stop reviewing; apply what's been approved so far
+- `escalation` is null unless `verdict=escalate`; then it is `{reason,resolution}`.
+- `application` is present only when the effective resolution is apply; then it is `{outcome,target,pre_version,post_version}` with outcome exactly `applied | failed | deferred`.
+- A lead decision being accepted does not imply the edit landed. Keep verdict, human resolution, and application outcome as separate facts.
 
-Track: `approved`, `rejected`, `skipped`, `escalated`, `no_op` (pre-populated by Step 5). Each apply/reject without `AskUserQuestion` records the rationale; each escalate carries reason + human resolution.
-
-Multiple suggestions for the same section may conflict — warn before applying (lead-attested; not an escalation unless the conflict itself is destructive).
-
-**Sunset-triggered additions.** If Step 5a marked any existing `/evolve` addition for immediate sunset review (consumption-contradiction trigger), present these in a dedicated block before the regular queue:
-
-```
-═══════════════════════════════════════════════
-SUNSET-TRIGGERED REVIEW
-═══════════════════════════════════════════════
-[sunset-triggered] <addition summary>
-Contradicted by: contradiction_id=<id> | knowledge_path=<path>
-Original addition from: <evolve run date>
-
-Remove this addition? [y/n/skip]
-```
-
-Approved removals enter `approved` with `change_type: "removal"`. Skipped sunset items enter `skipped`. Both flow into Step 7 with normal approved suggestions.
-
-**CLUSTER REVIEW (recurring-failure candidates).** Present candidate clusters from Step 5.x (raw-pass K≥3 buckets OR consumption-pass backfill payloads) AFTER the per-suggestion queue completes. Sole human-in-loop surface for cluster identity — no separate `lore` CLI for cluster merging (per D8). One cluster at a time:
-
-```
-═══════════════════════════════════════════════
-CLUSTER REVIEW
-═══════════════════════════════════════════════
-Candidate cluster: target=<file> | change_type=<type> | K=<distinct-work-item-count>
-
-Members:
-  <timestamp> | <work_item slug> | <one-sentence excerpt from observation>
-  <timestamp> | <work_item slug> | <one-sentence excerpt from observation>
-  <timestamp> | <work_item slug> | <one-sentence excerpt from observation>
-  ...
-Representative Evidence: <Evidence line from one member, verbatim>
-
-Merge cluster as recurring-failure suggestion? [y/edit/split/n]
-```
-
-- **y** — accept verbatim; append one `accepted_cluster` row with the candidate's member list (decision: `merge`).
-- **edit** — accept a maintainer-edited member set before persisting (decision: `edit`); the edited `--work-items` list is what gets written.
-- **split** — accept as ≥2 sub-clusters; invoke the writer once per sub-cluster, each with its own `--work-items` list (decision: `split`).
-- **merge** — when the maintainer combines two presented candidates that share a `(target, change_type)`, append one `accepted_cluster` row whose `--work-items` is the union of both candidates' members (decision: `merge`).
-- **n** — reject; **do not invoke the writer**, no row written. Candidate does not re-appear unless future rows push K back above threshold from a fresh distinct work_item.
-
-Acceptance side effects and the two-run lifecycle are stated canonically in Step 5's Recurring-failure gate; writes happen here, consumption in run N+1, no same-run re-entry.
-
-On any accept decision (y / edit / split / merge), append via the sole-writer script — once per resulting cluster. `n` is the only branch that skips the call entirely:
-
-```bash
-# Canonical vocabulary consumed by accepted-cluster-append.sh — do not drift:
-#   --decision : merge | edit | split   (writer rejects any other value)
-#   bucketing  : (target, change_type)  — never target alone (matches Step 5.x)
-# A row's cluster_id is sha256(target | sorted change_types | sorted work_items)[:16];
-# re-running the same cycle re-derives the same id and the writer no-ops, so
-# repeated /evolve runs over an unchanged journal never duplicate rows.
-bash ~/.lore/scripts/accepted-cluster-append.sh \
-  --target "<file>" \
-  --change-types "<comma-list>" \
-  --work-items "<comma-list>" \
-  --decision "merge|edit|split" \
-  --accepted-at-run-id "<run_id>"
-```
-
-The writer is idempotent on `cluster_id`: a confirmed cluster persisted in a prior run that is confirmed again with the same members exits 0 without appending a second row.
-
-**Batch-confirmation mode (backfill input).** The same CLUSTER REVIEW prompt drives a one-time backfill over the accumulated retro-evolution journal. Instead of clusters formed from the current run's raw pass, the candidate source is `lore retro backfill`:
-
-```bash
-lore retro backfill --since <date> --json
-```
-
-Each emitted candidate carries `target`, a singular `change_type`, and a `work_items[]` list (already at or above `--min-cluster K`, default 3). Present **one CLUSTER REVIEW prompt per candidate**, in descending K order, using the identical `[y/edit/split/n]` grammar and the identical accept→writer / `n`→skip routing above. The only mapping needed is the candidate's singular `change_type` → a one-element `--change-types` list:
-
-```bash
-bash ~/.lore/scripts/accepted-cluster-append.sh \
-  --target "<candidate.target>" \
-  --change-types "<candidate.change_type>" \
-  --work-items "<comma-joined candidate.work_items>" \
-  --decision "merge|edit|split" \
-  --accepted-at-run-id "<backfill_run_id>"
-```
-
-Idempotency makes the batch safely re-runnable: a candidate confirmed in an earlier backfill pass re-derives the same `cluster_id` and no-ops. As the operator works the batch, tally **proposed / confirmed / merged / rejected** counts and record them in the work item's `evidence.md` closure entry — proposed = candidates presented, confirmed = `y`/`edit` accepts, merged = `merge` combines, rejected = `n` skips.
-
-This is a maintainer-operated session: each prompt is a human decision. Do not auto-confirm candidates or synthesize operator input — an empty/declined batch persists no rows, which is a valid (if non-closing) outcome.
-
-### Step 7: Apply Approved Suggestions
-
-For each approved suggestion, apply the change as a direct file edit.
-
-**Application order:** sequential per file (not parallel) to avoid conflicts.
-
-**Per suggestion:**
-1. Read the current target file
-2. Locate the **Section**
-3. Apply the **Suggestion**
-4. Confirm the edit applied cleanly
-
-If unclean (section gone, conflicting prior edit), report `[evolve] Could not apply: <summary> — <reason>. Recording as skipped.` and move to `skipped`.
-
-**Snapshot pre-edit template versions.** Before any edit, for each unique target file record:
+For an effective apply, snapshot the target's pre-edit version, read the current file, author the change directly, verify it, and compute the post-edit version:
 
 ```bash
 PRE_VERSION=$(bash ~/.lore/scripts/template-version.sh <absolute-target-path>)
+# Lead authors and applies the edit here.
+POST_VERSION=$(bash ~/.lore/scripts/template-version.sh <absolute-target-path>)
 ```
 
-Store as `pre_versions[<target>] = <hash>`. Step 7.5 needs the pre-edit hash for the before→after pair — this is the last moment the pre-edit file is on disk.
+Apply sequentially per file. A mechanism, helper, or filing verb must never supply edit text or change the target. If application fails, record `outcome=failed|deferred`; do not rewrite the verdict to hide the failure.
 
-### Step 7.5: Bump Template Versions and Register
+For each `application.outcome=applied` byte change, add one version registration:
 
-Template-mutating edits must bump the producer's `template_version` and register the new pair so next-cycle scorecard rows against this template attribute to the post-edit version. Without this step, `/evolve` edits are invisible to `/retro`'s A/B-next-window comparison — rows keep citing the pre-edit hash because registration is lazy elsewhere in the system.
-
-Track `bumps = []`.
-
-For each **target file that received at least one applied edit** (skip rejected/skipped-only files):
-
-1. **Compute post-edit version:**
-   ```bash
-   POST_VERSION=$(bash ~/.lore/scripts/template-version.sh <absolute-target-path>)
-   ```
-2. **Derive `template_id` from path:**
-   - `agents/<name>.md` → `<name>` (e.g., `agents/worker.md` → `worker`)
-   - `skills/<name>/SKILL.md` → `<name>` (e.g., `skills/retro/SKILL.md` → `retro`)
-   - Otherwise: basename stem with `.md` stripped.
-3. **If `PRE_VERSION == POST_VERSION`, skip** — no-op edits (e.g., reverted whitespace) do not bump. Record `{target, reason: "no-change"}` in `bumps`.
-4. **Register the post-edit pair:**
-   ```bash
-   bash ~/.lore/scripts/template-registry-register.sh \
-     --template-id "<template_id>" \
-     --template-version "$POST_VERSION" \
-     --template-path "<relative-to-KDIR path, or absolute if outside>" \
-     --description "Post-evolve bump: <one-line change summary from approved suggestion>" \
-     --json
-   ```
-   INSERT OR IGNORE: pre-existing pair → `status: "exists"` (handles rare revert-to-prior-hash); new pair → `status: "registered"`.
-5. **Append** `{target, template_id, pre_version, post_version, status}` to `bumps`.
-
-Report:
-```
-[evolve] Bumped N template versions:
-  - <target>: <template_id>@<pre>..<post> (registered | exists)
-  - <target>: <template_id>@<pre>..<post> (no-change)
+```text
+{item_id,target,template_id,template_path,pre_version,post_version,description}
 ```
 
-**Why this matters.** The registry bump is the link between an `/evolve` edit and the next retro window's A/B signal. `/retro` computes the non-compensatory headline per `template_version`; if the post-edit version is not registered, its rows render as `unregistered:<hash>` and carry no weight..., so the edit never gets measured for whether it improved the target metric. The bump is therefore load-bearing, not cosmetic — it is the plumbing that closes the suggest → apply → measure loop.
+No-byte-change, reject, and unresolved/deferred decisions cannot register a version.
 
-### Step 8: Write Outcome Journal Entry
+#### Recurring-cluster dispositions
 
-After all approved suggestions are applied (or the user quit early), write a summary:
+Adjudicate every `recurring_clusters[]` candidate in Step 6. The closed vocabulary is `merge | edit | split | reject | escalate`:
+
+- `merge` or `edit` yields exactly one resulting cluster.
+- `split` yields at least two resulting clusters.
+- `reject` or `escalate` yields no resulting cluster.
+
+Record `{candidate_id, disposition, rationale, resulting_clusters}`. Resulting clusters carry target, sorted unique change types, sorted unique work items, and journal row references. Do not invoke the accepted-cluster writer here; Step 7 files the lead's completed disposition. Newly accepted clusters are never consumed in this run.
+
+Present one candidate at a time. The operator-facing shorthand may remain `[y/edit/split/n]`, but normalize it before filing: `y -> merge`, `edit -> edit`, `split -> split`, and `n -> reject`. The manifest vocabulary remains `merge | edit | split | reject | escalate`.
+
+```text
+CLUSTER REVIEW
+Candidate cluster: target=<file> | change_type=<type> | K=<distinct-work-item-count>
+Members:
+  <timestamp> | <work_item slug> | <one-sentence excerpt>
+Representative Evidence: <source evidence, verbatim>
+Disposition [y/edit/split/n]:
+```
+
+`merge` may combine candidates sharing the same pair; its result carries the union of both candidates. On `n`, do not invoke the writer for cluster creation; record reject in the filing manifest instead. Canonical vocabulary consumed by accepted-cluster-append is filed only through Step 7.
+
+**Batch-confirmation mode (backfill input).** A maintainer may source pre-clustered candidates from `lore retro backfill`. Present one CLUSTER REVIEW prompt per candidate. Map the singular `change_type` to a one-element `--change-types` list in the resulting-cluster facts, tally `proposed / confirmed / merged / rejected`, and normalize the UI shorthand to the manifest vocabulary above. Do not auto-confirm operator decisions.
+
+### Step 7: File the lead commitment
+
+Assemble the lead-authored manifest:
+
+```text
+{
+  schema_version:1,
+  queue_id,
+  queue_sha256,
+  actor,
+  model,
+  decisions,
+  cluster_dispositions,
+  version_registrations,
+  summary
+}
+```
+
+Every eligible item needs exactly one decision; machine `no_op | abstained | not_computable` items need none. Every prepared cluster candidate needs exactly one disposition. Then run:
 
 ```bash
-lore journal write \
-  --observation "Evolve run: N suggestions reviewed. Applied: <count> | Rejected: <count> | Skipped: <count> | No-op (gate): <count> (<reason breakdown>). Applied to: <comma-separated target files>. Bumps: <template_id>@<pre>..<post>, <template_id>@<pre>..<post>, ... Summary: <1-2 sentences on what changed and why>." \
-  --context "evolve" \
-  --role "evolve"
+lore evolve file \
+  --queue "$KNOWLEDGE_DIR/_evolve/review-queues/<queue_id>.json" \
+  --decisions <lead-authored-manifest.json> \
+  --json
 ```
 
-The `Bumps:` field is how the next `/retro` window detects that an edit landed and has a post-edit `template_version` to A/B against. Emit one comma-separated entry per registered bump from Step 7.5; omit no-change entries. If zero bumps occurred, emit `Bumps: none`.
+`file` validates the entire queue and manifest before mutation, verifies every live post-edit hash, derives a semantic `filing_id`, acquires the portable evolve lock, enforces one successor per predecessor, and atomically publishes `_evolve/review-filings/<queue_id>.json` as the immutable lead commitment. It accepts exact replay and refuses semantic reassignment or a stale competing queue.
 
-This entry establishes the cutoff for the next `/evolve` run. Write it even if zero suggestions were approved — it records that the review happened and advances the cutoff.
+After authority publication, `file` scans exact sink keys and invokes only missing sanctioned writers:
 
-### Step 9: Report
+| Sink | Exact key | Sole writer |
+|---|---|---|
+| Accepted-cluster creation | `accepted-cluster:create:<cluster_id>` | `accepted-cluster-append.sh --append-exact` |
+| Prior cluster consumption | `accepted-cluster:consume:<cluster_id>:<run_id>` | `accepted-cluster-append.sh --consume` |
+| Template registration | `template-registry:<template_id>@<post_version>` | `template-registry-register.sh` |
+| Terminal cutoff | `journal:evolve-filing:<filing_id>` | `journal.sh` |
 
-```
+The accepted-cluster script is the sole physical writer for `_evolve/accepted-clusters.jsonl`. Exact same-ID append is reuse; changed semantics are conflict. Consumption permits only `null -> run_id`; same-run replay is reuse; a different non-null run conflicts. Every writer mode validates the complete sidecar before any mutation; replacements land by hidden same-directory temp plus atomic rename.
+
+The role=`evolve` journal row is last. Its context is `evolve-filing:<filing_id>` and its observation serializes queue, filing, run, counts, proposal IDs, version bumps, and the queue's upper cutoff. Its presence is the next-run completion/cutoff marker.
+
+### Step 8: Recover without laundering completion
+
+Keep these states separate:
+
+- `decision_accepted=true` means the immutable lead filing exists.
+- `filing_complete=true` means every required cluster/registry sink and the terminal cutoff row exists.
+
+File statuses are exactly `created | reused | recovered | partial | refused`:
+
+- `partial` means authority exists but at least one sanctioned sink is missing or conflicted. The terminal cutoff is withheld. Return non-zero and name the retry target.
+- `recovered` means an exact retry repaired one or more missing sinks and completed the filing.
+- `reused` means the exact filing and all exact sink keys were already complete.
+- `refused` means validation, lineage, identity, or semantic conflict prevented acceptance.
+
+After `partial`, replay the same queue and manifest. Do not prepare a successor: `prepare` refuses past an accepted-but-incomplete filing so unfinished work cannot disappear behind a later cutoff. There is no cross-file rollback claim.
+
+Completed filings become the sole carry-forward authority after accepted-cluster evidence is consumed. A later `prepare` carries only pending/deferred escalations and failed/deferred applications, preserving original item and filing identity. Carry-forward ends only with effective reject, or effective apply whose application landed and required registration sink completed.
+
+### Step 9: Report the run
+
+Report from the queue and filing responses:
+
+```text
 [evolve] Done
-  Reviewed:    N suggestions
-  Applied:     N (to: <files>)
-  Rejected:    N
-  Skipped:     N (will appear in next run)
-  No-op(gate): N (telemetry-only / pre-calibration / unregistered / pipeline-degraded / no scored row / no accepted cluster)
-  Bumps:       N template versions registered (K no-change)
+  Queue:              <queue_id> (<created|reused>)
+  Reviewed:           <eligible count>
+  Applied:            <count>
+  Rejected:           <count>
+  Escalated:          <count; pending/deferred called out>
+  No-op:              <count + reason breakdown>
+  Abstained:          <count + floor arithmetic>
+  Not computable:     <count + source reasons>
+  Decision accepted: <true|false>
+  Filing complete:   <true|false>
+  Filing:             <created|reused|recovered|partial|refused>
+  Bumps:              <template_id>@<pre>..<post, or none>
 ```
 
-If suggestions were applied, list each change and its template-version bump:
-```
-  Changes:
-    - skills/retro/SKILL.md: <one-line summary>  [retro@<pre>..<post>]
-    - skills/retro/failure-modes.md: <one-line summary>  [retro-failure-modes@<pre>..<post>]
-    ...
-```
+List each applied change and each missing sink. Never print a success-shaped `Done` when `filing_complete=false`.
 
-The `<template_id>@<pre>..<post>` annotation is what `/retro` reads next window to measure whether the edit improved the target metric. Missing annotations short-circuit the measurement loop.
+## Staged suggestion boundary
+
+The staged rows in `_evolve/accepted-clusters.jsonl` and the effectiveness journal are evidence inputs, not an implementation backlog to mutate during this ceremony. The active+archived claim-retraction reader semantically moots exactly the 2026-07-09T23:07:07Z suggestion targeting `skills/evolve/SKILL.md`; leave that row untouched. The other 14 staged suggestions remain live and unconsumed because they concern retro, implement, settlement, rubric, or source-contract behavior outside this queue ceremony.
 
 ## Maintainer path (role=maintainer only)
 
-The sections above apply in both roles. The two modes below apply only when role is `maintainer` — see `_research/multi-user-evolution-design.md` for the full federation design and cross-linkage with `lore retro import | aggregate`.
-
-Role resolution is inline today (`~/.lore/config/settings.json` → `.role`, then per-repo `$KDIR/config.json`, default `contributor`). Task-53 introduces `resolve_role()` in `lib.sh`; task-54 moves the gate into CLI dispatch. Until then, each mode's first action is the inline check; contributors invoking these modes hit a clear gate error.
+These existing modes remain outside the v1 `prepare`/`file` pair. They are lead-owned alternate evidence modes, not hidden branches of the new verbs. Preserve their role gate and judgment boundary.
 
 ### Mode: `/evolve --pooled <aggregate-path>`
 
-Replaces Step 3 (Load Pending Suggestions) and Step 5 (gate) inputs with a pooled aggregate. Everything else (Steps 6, 7, 7.5, 8, 9) runs identically.
+Use a `lore retro aggregate` artifact instead of the local queue inputs.
 
-1. **Role gate.** Non-maintainer → exit `requires role=maintainer`. No approval loop.
-2. **Load aggregate.** Path produced by `lore retro aggregate`. JSON: `{generated_at, source_bundles, contributors, groups: [{template_id, template_version, metric, tag, tier, total_n, contributor_count, row_weighted_mean, contributor_balanced_mean, by_contributor}, ...]}`. The `tier` field is required — `lore retro aggregate` must propagate it from source rows so filtering is tier-aware. Missing-`tier` groups are treated as `tier: telemetry` and excluded from both pools.
-3. **Filter by tag and tier.** Only `tag == "convergent"` drives edits. Within convergent:
-   - **Primary pool:** `tier == "template"` — same evidence class as Step 5 primary gate.
-   - **Correction pool:** `tier == "correction"` — same as Step 5 secondary gate (half sample-size minimum).
-   - **Excluded:** `task-evidence`, `reusable`, `telemetry`, missing-tier — never eligible even when convergent.
+1. Require `role=maintainer`.
+2. Load `{generated_at, source_bundles, contributors, groups}` and treat missing tier as telemetry.
+3. Only `tag=convergent` groups are candidates. `tier=template` uses the primary evidence class; `tier=correction` uses the correction class. Exclude task-evidence, reusable, telemetry, missing-tier, mixed, and insufficient groups.
+4. Require `total_n >= 15` and `contributor_count >= 2`.
+5. The maintainer authors any edit text during review. Pooled evidence never supplies a default edit.
+6. Additions require a failing scored metric and a sunset clause. Removals may proceed on staleness, duplication, budget, or failed-trial evidence.
+7. Each applied change carries a thin public trace naming the window, contributors, sample size, metric expectation, and sunset.
 
-   `idiosyncratic` groups go to an "ideas queue" (maintainer may investigate via deferred canary; no auto-suggestion). `mixed` and `insufficient` are informational only.
-4. **Synthesize candidates per convergent group.** Emit one with:
-   - `template_id`, `template_version` (base) from the group
-   - Citation: convergent across N contributors, n=K scored samples, mean row-weighted=M_rw, contributor-balanced=M_cb
-   - Proposed edit: **maintainer authors inline during review.** `--pooled` supplies evidence, not edit text. Invariant: evidence-cited mutation; the edit text is human judgment from the aggregated signal.
-5. **Asymmetric evidence rules (additions vs. removals).** See the anti-bloat mechanisms in `multi-user-evolution-design.md §6`: Additions — require a failing `kind == 'scored'` metric AND a sunset clause in the edit prose ("roll back if <metric> doesn't improve past <threshold> after <N> samples"). Without a sunset, mark the suggestion `no_op` with reason `missing_sunset` and skip. Removals — accepted on staleness, duplication, budget-exceeded, or failed-trial-window grounds, without a failing-metric requirement. The subtraction path is asymmetric by design.
-6. **Thresholds.** Convergent groups with `total_n < 15` or `contributor_count < 2` (research §5) → `insufficient`; excluded from approval regardless of tag.
-7. **Commit trace.** Each applied edit MUST include the thin public trace (research §8):
-   ```
-   <target-file>: <one-line summary>
-
-   Driven by <window> pooled retro evidence:
-   - convergent across <N> contributors
-   - n=<K> scored samples
-   - <metric> <value_pre> → <value_post> expected (aggregate mean)
-   - sunset: revert if <metric> regresses past <threshold> by <deadline>
-   ```
-   This is the only settlement surface contributors see on aggregate edits — substitute for peer-visible retros in the maintainer-private-pool topology.
-
-Report line adds: `Pooled: <aggregate-path> (N convergent [P primary/C correction] / M idiosyncratic / K mixed / J insufficient)`.
+Report: `Pooled: <aggregate-path> (N convergent [P primary/C correction] / M idiosyncratic / K mixed / J insufficient)`.
 
 ### Mode: `/evolve --shrink`
 
-Periodic subtraction pass. Proposes only removes and collapses — never new behavioral requirements. Anti-bloat mechanism from `multi-user-evolution-design.md §6`.
+Run a subtraction-only review.
 
-1. **Role gate.** Same as `--pooled`. Contributors cannot invoke.
-2. **Inputs, in order:**
-   - **Staleness.** Sunset-tagged entries whose evaluation window expired and whose condition was met. Extract from local journal `retro-evolution` entries; cross-reference current template content.
-   - **Duplication.** Near-identical wording across templates (similarity pass on skill/agent markdown). Propose collapse into a shared fragment or cross-reference.
-   - **Budget-exceeded.** Files past size budget (default: 300 lines per skill, 200 per agent). Propose compression or extraction.
-   - **Failed trial windows.** Bumps whose post-edit version showed metric decline over the measurement window (`_scorecards/_current.json`). **Automatic revert candidates** — sunset condition is pre-authored, revert text already in the bump commit trailer.
-3. **NO additions permitted.** This mode explicitly cannot propose new behavioral requirements, new skill steps, new agent sections, or any text that adds a behavioral constraint. To add, use plain `/evolve` or `/evolve --pooled`.
-4. **Evidence rule asymmetry.** Removals follow the asymmetric-evidence rule stated canonically in Step 5a: staleness, duplication, budget, or a failed trial window each suffice on their own; no failing `kind == "scored"` metric required. Anti-bloat has lower epistemic burden than anti-atrophy by design.
-5. **Application.** Reuses Steps 6, 7, 7.5, 8, 9. Every removal bumps the target's version like an addition — `/retro` needs the bump to measure whether the shrink helped (e.g., did the agent become more effective without the removed text?).
+1. Require `role=maintainer`.
+2. Inspect expired sunset conditions, duplicated protocol wording, skills over 300 lines, agents over 200 lines, and failed post-bump trial windows.
+3. Propose only removals, collapses, and pre-authored reverts. Never add a behavioral requirement.
+4. Staleness, duplication, budget excess, or a failed trial window each suffice; no failing scored metric is required for subtraction.
+5. The lead still decides and directly authors each change. Every applied removal receives a version bump so the next retro can measure the effect.
 
-Report line adds: `Shrink: <N> removes / <M> collapses / <K> reverts applied (budget: <file> @ <lines>/<limit>)`.
-
-### Where these modes read role
-
-Both modes open with an inline check identical to `scripts/retro-import.sh`:
-
-```
-ROLE="contributor"
-[[ -f ~/.lore/config/settings.json ]] && ROLE=$(jq -r '.role // "contributor"' ~/.lore/config/settings.json)
-[[ -f "$KDIR/config.json" ]] && ROLE=$(jq -r '.role // ""' "$KDIR/config.json" || echo "$ROLE")
-[[ "$ROLE" != "maintainer" ]] && die "requires role=maintainer"
-```
-
-Task-53 replaces this with `resolve_role()` from `lib.sh`; task-54 moves the gate into `cli/lore` dispatch. Until then, each mode performs the inline check.
+Report: `Shrink: <N> removes / <M> collapses / <K> reverts applied (budget: <file> @ <lines>/<limit>)`.
