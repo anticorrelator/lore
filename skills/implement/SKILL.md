@@ -66,7 +66,7 @@ Agent templates live in the lore repo under `agents/<name>.md` and surface via `
 
 **MANDATORY:** You MUST read the actual template files for `worker` and `advisor` when spawning agents — resolve each via `resolve_agent_template worker` and `resolve_agent_template advisor`. Do NOT skip this step. Do NOT generate inline agent prompts as a substitute. If the resolver fails or the files are missing, stop and report the error — never fall back to improvised prompts.
 
-Template versions and role→model bindings come from the `lore impl start` struct (Step 1). Keep `$LEAD_TEMPLATE_VERSION`, `$WORKER_TEMPLATE_VERSION`, and `$ADVISOR_TEMPLATE_VERSION` distinct; an unresolved version is empty and downstream writers warn-degrade to unstamped.
+Template versions and role→model bindings come from the `lore impl start` struct (Step 1). Keep `$LEAD_TEMPLATE_VERSION`, `$WORKER_TEMPLATE_VERSION`, and `$ADVISOR_TEMPLATE_VERSION` distinct — each tags emissions produced by its matching template; an unresolved version is empty and downstream writers warn-degrade to unstamped.
 
 ### Step 1: Start the run
 
@@ -290,7 +290,7 @@ The efficiency route is eligible when **all four** conditions hold:
 
    **If `$ADVISORY_MIXIN` is non-empty (opt-in route only):** append the resolved mixin content after the fully resolved worker template content, separated by a blank line. **On the default route `$ADVISORY_MIXIN` is empty** — worker prompts end at the resolved worker template; workers still have the `**Consultations:**` reporting field and `## Consultation` request shape from the worker template's §Reporting Guidelines, so they can SendMessage the lead without the mixin. The lead's Step 4.0 handler answers on the next turn boundary.
 
-   For the spawn block, read `skills/implement/templates/worker-spawn.md`. It maps each task's judgment class to `worker-mechanical | worker | worker-judgment-dense`, resolves that role with the `implement` ceremony, and defines the default, codex-routed, and session-routed branches. Neither non-default route is silent: require explicit user/plan selection, confirm the effective model, surface the worker-session model, and re-dispatch a `degraded` result through the default route.
+   For the spawn block, read `skills/implement/templates/worker-spawn.md`. It maps each task's judgment class to `worker-mechanical | worker | worker-judgment-dense`, resolves that role with the `implement` ceremony, and defines the default, codex-routed, and session-routed branches. Neither the codex nor the session route is ever a silent default: require explicit user/plan selection, confirm the effective model, surface the worker-session model, and re-dispatch a `degraded` result through the default route.
 
 ### Step 4: Collect progress
 
