@@ -529,15 +529,19 @@ assert_eq "rows under a different change_type are not pooled (K=2)" "$(echo "$RE
 assert_eq "K=2 → not eligible" "$(echo "$RESULT" | json_field eligible)" "False"
 
 echo ""
-echo "Test 17: Step 5 documentation contract — Eligibility check block (D4) present"
-# Fixed-string assertions over the documented procedure (avoids over-escaping
-# the prose's backticks/asterisks/parens).
-assert_fgrep "names Eligibility check heading" "**Eligibility check" "$SKILL_MD"
-assert_fgrep "reads sidecar directly"          "reads \`_evolve/accepted-clusters.jsonl\` directly" "$SKILL_MD"
+echo "Test 17: Step 5 documentation contract — Success route is the single eligibility seat"
+# Fixed-string assertions over the canonical Success route.
+assert_fgrep "names Success route heading" "**Success route:**" "$SKILL_MD"
+assert_fgrep "reads sidecar directly"          "read \`_evolve/accepted-clusters.jsonl\` directly" "$SKILL_MD"
 assert_fgrep "groups by (target, change_type)" "Group rows by the \`(target, change_type)\` key" "$SKILL_MD"
 assert_fgrep "union of distinct work_item"     "union of distinct \`work_item\`" "$SKILL_MD"
 assert_fgrep "K=3 eligibility threshold"       "union size is **≥ K (K = 3)**" "$SKILL_MD"
 assert_fgrep "proposal cites a sidecar row"    "cites at least one row" "$SKILL_MD"
+if grep -qF '**Eligibility check' "$SKILL_MD"; then
+  fail "duplicate Eligibility check removed" "legacy duplicate block remains"
+else
+  pass "duplicate Eligibility check removed"
+fi
 
 # =========================================================================
 # Summary

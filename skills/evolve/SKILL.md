@@ -56,7 +56,7 @@ Run the hands-only prepare verb. Pass `--since` only when the caller explicitly 
 lore evolve prepare [--since <RFC3339>] --json
 ```
 
-`prepare` resolves role first, reconstructs the exclusive prior cutoff and frozen journal EOF, reads every closed source, computes the fixed gates, and atomically publishes `_evolve/review-queues/<queue_id>.json`. A matching canonical queue is reused. A corrupt artifact, an identity collision, journal prefix drift, or an accepted-but-incomplete prior filing is refused with a named repair target.
+`prepare` returns the immutable `_evolve/review-queues/<queue_id>.json` for the reconstructed cutoff and source snapshot. A matching queue is reused; a corrupt artifact, identity collision, journal prefix drift, or accepted-but-incomplete prior filing is refused with a named repair target.
 
 The queue-v1 top level is normative:
 
@@ -73,7 +73,7 @@ Key contracts:
 - `due_claim = {attempted:false, outcome_ids:[], disposition:"not-applicable", warning:null}`. Evolve v1 has no DUE producer; do not invent a handle call.
 - Each `source_manifest[]` row declares `{source_id, reader, resolved_source, coverage, content_identity, cursor, warnings, reason}`. Coverage is exactly `read | absent | unreadable | stale | not_computable`.
 - Each `items[]` row declares `{item_id, source_role, source_cursor, work_item, parse, proposal, group_key, gate_path, eligibility}`. Invalid proposals remain in the artifact with `parse.status=invalid`; they are never inferred from partial prose.
-- Canonical JSON recursively sorts object keys, preserves array order, uses compact UTF-8, and has no trailing newline. Hidden same-directory temp plus rename publishes the final bytes.
+- Canonical JSON recursively sorts object keys, preserves array order, uses compact UTF-8, and has no trailing newline.
 
 The queue may contain source-authored suggestion text. It must never contain `recommended_verdict`, `recommendation`, `selected`, `approved`, `decision`, `verdict`, `edit`, `edit_text`, or `application` fields.
 
@@ -116,8 +116,6 @@ Recurring-failure arithmetic groups strictly by `(target, change_type)` and unio
 
 The raw-clustering pass excludes rows whose context starts with `retro-backfill:`. Those rows belong to the pre-clustered consumption pass, so raw and backfill populations never stack toward K. `K < 3` is sub-threshold, `K == 3` is the first candidate, and `K > 3` remains one candidate with its full distinct member set.
 
-**Eligibility check:** reads `_evolve/accepted-clusters.jsonl` directly. Group rows by the `(target, change_type)` key; compute the union of distinct `work_item` values; eligibility holds when the union size is **≥ K (K = 3)**; every emitted proposal cites at least one row from the sidecar.
-
 ### Step 4: Present the complete queue
 
 Read the published queue artifact, not transient command output. Present eligible items grouped by target then change type, preserving source order within each group. Show each item's source identity, proposal, evidence references, arithmetic, and gate path. Separately summarize `no_op`, `abstained`, `not_computable`, invalid parses, source warnings, and recurring-cluster candidates so absence is never silent.
@@ -135,6 +133,8 @@ Before deciding a proposal, classify its proposed effect:
 | modification | Changes existing behavior. | yes when strengthening; no when loosening or clarifying |
 
 An addition or strengthening edit needs a sentence naming the motivating metric, rollback threshold, and time or sample horizon. That clause is what `/evolve --shrink` reads at its trial-window check; an addition without one accumulates silently and is never subtracted. If the lead would otherwise apply it but cannot author a defensible sunset, use `reject` or `escalate`; do not change the machine eligibility state.
+
+When in doubt, require one.
 
 A verified consumption contradiction against a prior evolve addition triggers immediate sunset review. Present it before the regular queue, cite the contradiction ID and knowledge path, and treat an approved removal as a normal lead-authored removal.
 
@@ -199,9 +199,9 @@ Representative Evidence: <source evidence, verbatim>
 Disposition [y/edit/split/n]:
 ```
 
-`merge` may combine candidates sharing the same `(target, change_type)` pair; its result carries the union of both candidates' members. On `n`, do not invoke the writer for cluster creation; record reject in the filing manifest instead. Canonical vocabulary consumed by accepted-cluster-append is filed only through Step 7.
+`merge` may combine candidates sharing the same `(target, change_type)` pair; its result carries the union of both candidates' members. On `n`, record `reject` with no resulting cluster. Canonical vocabulary consumed by accepted-cluster-append is filed only through Step 7.
 
-**Batch-confirmation mode (backfill input).** A maintainer may source pre-clustered candidates from `lore retro backfill`. Present one CLUSTER REVIEW prompt per candidate. Map the singular `change_type` to a one-element `--change-types` list in the resulting-cluster facts, tally `proposed / confirmed / merged / rejected`, and normalize the UI shorthand to the manifest vocabulary above. Do not auto-confirm operator decisions.
+**Batch-confirmation mode (backfill input).** A maintainer may source pre-clustered candidates from `lore retro backfill`. Present one CLUSTER REVIEW prompt per candidate. Map the singular `change_type` to a one-element `change_types` list in the resulting-cluster facts, tally `proposed / confirmed / merged / rejected`, and normalize the UI shorthand to the manifest vocabulary above. Do not auto-confirm operator decisions.
 
 ### Step 7: File the lead commitment
 
@@ -230,7 +230,7 @@ lore evolve file \
   --json
 ```
 
-`file` validates the entire queue and manifest before mutation, verifies every live post-edit hash, derives a semantic `filing_id`, acquires the portable evolve lock, enforces one successor per predecessor, and atomically publishes `_evolve/review-filings/<queue_id>.json` as the immutable lead commitment. It accepts exact replay and refuses semantic reassignment or a stale competing queue.
+`file` validates the queue, manifest, live post-edit versions, and predecessor lineage before publishing `_evolve/review-filings/<queue_id>.json` as the immutable lead commitment. It accepts exact replay and refuses semantic reassignment or a stale competing queue.
 
 After authority publication, `file` scans exact sink keys and invokes only missing sanctioned writers:
 
@@ -241,7 +241,7 @@ After authority publication, `file` scans exact sink keys and invokes only missi
 | Template registration | `template-registry:<template_id>@<post_version>` | `template-registry-register.sh` |
 | Terminal cutoff | `journal:evolve-filing:<filing_id>` | `journal.sh` |
 
-The accepted-cluster script is the sole physical writer for `_evolve/accepted-clusters.jsonl`. Exact same-ID append is reuse; changed semantics are conflict. Consumption permits only `null -> run_id`; same-run replay is reuse; a different non-null run conflicts. Every writer mode validates the complete sidecar before any mutation; replacements land by hidden same-directory temp plus atomic rename.
+The accepted-cluster script is the sole physical writer for `_evolve/accepted-clusters.jsonl`. Exact same-ID append is reuse; changed semantics are conflict. Consumption permits only `null -> run_id`; same-run replay is reuse; a different non-null run conflicts.
 
 The role=`evolve` journal row is last. Its context is `evolve-filing:<filing_id>` and its observation serializes queue, filing, run, counts, proposal IDs, version bumps, and the queue's upper cutoff. Its presence is the next-run completion/cutoff marker.
 

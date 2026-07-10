@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
-# test_evolve_cluster_persistence.sh — /evolve Step 6 cluster-confirmation
+# test_evolve_cluster_persistence.sh — /evolve cluster-confirmation
 # persistence (Phase 2).
 #
-# Validates that the Step 6 CLUSTER REVIEW confirmation handler is wired to the
-# real sole-writer (scripts/accepted-cluster-append.sh) introduced in Phase 1.
+# Validates the Step 6 disposition contract and the Step 7 sole-writer behavior.
 # Two layers:
 #
-# 1. Documentation contract — the SKILL.md text wires each accept decision
-#    (y/edit/split/merge) to the writer and skips the write on `n`, no longer
-#    describing the writer as a Phase 5 stub, and carries the canonical-
-#    vocabulary invariant comment.
+# 1. Documentation contract — Step 6 records every disposition without invoking
+#    a writer; Step 7 files completed dispositions through the sole writer.
 #
-# 2. Behavioral end-to-end — drive the actual writer the way Step 6 would for
+# 2. Behavioral end-to-end — drive the actual writer the way Step 7 does for
 #    each decision branch and assert the resulting _evolve/accepted-clusters.jsonl:
 #      - y confirmation        → exactly one row
 #      - n rejection           → no row (writer never invoked)
@@ -84,7 +81,7 @@ sidecar_lines() {
   [[ -f "$SIDECAR" ]] && wc -l < "$SIDECAR" | tr -d ' ' || echo 0
 }
 
-# Drive the writer exactly as a Step 6 accept branch does.
+# Drive the writer exactly as Step 7 filing does.
 confirm_cluster() {
   local target="$1" change_types="$2" work_items="$3" decision="$4" run_id="$5"
   "$WRITER" \
@@ -104,9 +101,10 @@ echo "=== /evolve Step 6 cluster persistence (Phase 2) ==="
 # Layer 1: Documentation contract
 # =========================================================================
 echo ""
-echo "Test 1: Step 6 wires accept decisions to the writer; n skips it"
-assert_grep "writer invoked from Step 6" "accepted-cluster-append.sh" "$SKILL_MD"
-assert_grep "n branch skips the writer" "do not invoke the writer" "$SKILL_MD"
+echo "Test 1: Step 6 records dispositions; Step 7 owns persistence"
+assert_grep "Step 6 forbids the writer" "Do not invoke the accepted-cluster writer here" "$SKILL_MD"
+assert_grep "Step 7 files the completed disposition" "Step 7 files the lead's completed disposition" "$SKILL_MD"
+assert_grep "n records reject with no resulting cluster" 'On `n`, record `reject` with no resulting cluster' "$SKILL_MD"
 assert_grep "merge produces a union member row" "union of both candidates" "$SKILL_MD"
 assert_grep "canonical-vocabulary invariant comment present" "Canonical vocabulary consumed by accepted-cluster-append" "$SKILL_MD"
 # The Phase 5 "stub" caveat must be gone now that the writer exists.
@@ -208,7 +206,7 @@ echo "Test 10: Step 6 documentation contract — batch-confirmation mode (D5) pr
 assert_grep "names batch-confirmation mode" "Batch-confirmation mode \(backfill input\)" "$SKILL_MD"
 assert_grep "candidate source is lore retro backfill" "lore retro backfill" "$SKILL_MD"
 assert_grep "one prompt per candidate" "one CLUSTER REVIEW prompt per candidate" "$SKILL_MD"
-assert_grep "singular change_type → one-element list" "one-element .--change-types. list" "$SKILL_MD"
+assert_grep "singular change_type → one-element list" 'one-element `change_types` list' "$SKILL_MD"
 assert_grep "tallies proposed/confirmed/merged/rejected" "proposed / confirmed / merged / rejected" "$SKILL_MD"
 assert_grep "no auto-confirm of operator decisions" "Do not auto-confirm" "$SKILL_MD"
 

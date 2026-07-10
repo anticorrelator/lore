@@ -43,6 +43,9 @@ assert_has "$SKILL" 'accepted-cluster-append.sh --append-exact'
 assert_has "$SKILL" 'accepted-cluster-append.sh --consume'
 assert_has "$SKILL" 'template-registry-register.sh'
 assert_has "$SKILL" '`journal:evolve-filing:<filing_id>`'
+assert_has "$SKILL" 'one-element `change_types` list'
+assert_not_has "$SKILL" 'one-element `--change-types` list'
+assert_has "$SKILL" 'When in doubt, require one.'
 
 # Same-run and staged-source boundaries.
 assert_has "$SKILL" 'Newly accepted clusters are never consumed in this run.'
