@@ -16,7 +16,7 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
 
 ## Intent Anchor
 <!-- Conditional — emit this section only when the work item's `_meta.json.intent_anchor` is present.
-     For legacy or no-anchor work items, omit the section entirely; the Step 5.5 verifier skips with a stderr info message.
+     For legacy or no-anchor work items, omit the section entirely; the Step 5.6 verifier skips with a stderr info message.
 
      Three fields, in this order:
        1. The anchor body verbatim from `_meta.json.intent_anchor` (no quoting, no prefix label — just the raw text).
@@ -24,7 +24,7 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
        3. `**Tempting narrower implementation:**` heading — the spec author names the tempting narrower implementation that
           would appear successful while violating the anchor.
 
-     Verifier-enforced fields (load-bearing for Step 5.5 gate): anchor body and `**Scope delta:**` line.
+     Verifier-enforced fields (load-bearing for Step 5.6 gate): anchor body and `**Scope delta:**` line.
      Template-only field (not verifier-enforced): `**Tempting narrower implementation:**` body. -->
 <anchor body verbatim from `_meta.json.intent_anchor`>
 
@@ -150,7 +150,7 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
 **Split rationale:**
 <!-- REQUIRED when this phase has more than one task; omit entirely for a single-task phase.
      One or two sentences: name the judgment-density transition or genuine cross-file parallelism
-     that earns the split (why N tasks, not one). Step 5.5 finalize refuses a multi-task phase
+     that earns the split (why N tasks, not one). Step 5.6 finalize refuses a multi-task phase
      missing this block. -->
 <why this phase splits into N tasks — the judgment-density boundary or parallelism that earns the extra worker spawns>
 **Tasks:**
@@ -167,7 +167,7 @@ Read this template when emitting `plan.md` in Step 5b. The fenced block below is
      (after any [[knowledge:...]] backlinks) declaring the worker tier /implement routes it to.
      mechanical = deterministic sweep/substitution; standard = ordinary implementation judgment
      (the default); judgment-dense = novel design, cross-cutting reasoning, or subtle correctness.
-     Step 5.5 finalize refuses any unannotated task line.
+     Step 5.6 finalize refuses any unannotated task line.
 
      Weave binding norms into the constraint clause (Step 5b "Deliverable contract gate"): when a surfaced
      preference/convention is BOTH scope-overlapping AND judgment-class, render it as an imperative constraint

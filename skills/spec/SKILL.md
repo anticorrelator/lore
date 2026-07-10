@@ -13,7 +13,7 @@ Produces a `plan.md` inside a work item's `_work/<slug>/` directory.
 
 Single-agent path: the spec-lead reads key files directly (Step 2 `--short` branch) and drafts the plan without dispatching a researcher team. For well-understood, small-scope work where parallel investigation is unnecessary overhead.
 
-The `--short` conditional activates at Step 2 only. From Step 3 onward, short and full paths share every step: collect findings and emit Tier-2 artifacts, strategy gate, synthesis, design ceremony, task review, post-research extraction, finalization, post-plan ceremony.
+The `--short` conditional activates at Step 2 only. From Step 3 onward, short and full paths share every step: collect findings and emit Tier-2 artifacts, strategy gate, synthesis, design ceremony, task review, post-research extraction, post-plan ceremony, and terminal finalization.
 
 ## Full Flow (`/spec`)
 
@@ -21,59 +21,50 @@ Team-based divide-and-conquer: the spec-lead composes an investigation plan tabl
 
 > **Sequencing constraint:** Do not dispatch research agents before completing Step 2. The investigation plan is a completeness checklist and user approval gate, not just a dispatch list.
 
+## Judgment boundary
+
+The verbs prepare evidence and persist decisions; they do not make them. Keep these kernels in lead prose: investigation questions, complexity labels, strict/permissive applicability, synthesis, contradiction decisions, phase/task decomposition, evaluator normalization, whether feedback changes the plan, and every harness-native dispatch or teardown call. If a verb appears able to infer one of these, stop at the boundary and supply the missing judgment explicitly.
+
 ---
 
 ### Step 1: Parse and resolve (both modes)
 
 1. Parse arguments:
-   - If first arg after `/spec` is `short`, the investigation step (Step 2) uses the **short** branch.
+   - Set `TRACK=short` when the first arg after `/spec` is `short`; otherwise set `TRACK=full`. The investigation step (Step 2) follows that declared track.
    - If `--yes` is present, skip all interactive confirmation gates (auto-proceed through investigation plan confirmation, strategy gate, confirm understanding, and task review).
-   - If `--model <id>` is present, export per-role overrides for the duration of this skill: `export LORE_MODEL_LEAD=<id> LORE_MODEL_RESEARCHER=<id> LORE_MODEL_ADVISOR=<id>` (one shot — no env mutation outside the skill). Otherwise let `resolve_model_for_role` (lib.sh) pick the per-role binding from the active framework's role map. Per-role resolution honors the precedence: env override → per-repo `.lore.config` → user `settings.json` `harnesses.<active>.ceremony_roles.spec.<role>` (this ceremony) → `harnesses.<active>.roles.<role>` → `harnesses.<active>.roles.default`. Multi-provider harnesses (opencode) honor `provider/model` syntax; single-provider harnesses (claude-code, codex) accept bare model ids only — `validate_role_model_binding` rejects mismatches.
+   - If `--model <id>` is present, set `MODEL_OVERRIDE=<id>` and export the per-role overrides for this invocation: `export LORE_MODEL_LEAD=<id> LORE_MODEL_RESEARCHER=<id> LORE_MODEL_ADVISOR=<id>`. Otherwise leave `MODEL_OVERRIDE` empty and let ceremony-scoped role resolution choose each model. An explicit flag without a value is an error, not a request for the configured default.
    - The remaining text is the **input**.
 
-2. Resolve the work path:
+2. Resolve the knowledge path:
    ```bash
    lore resolve
    ```
    Set `KNOWLEDGE_DIR` to the result and `WORK_DIR` to `$KNOWLEDGE_DIR/_work`.
 
-3. Compute template versions for provenance. Resolve agent paths via `resolve_agent_template` (lib.sh) — the canonical lore-repo `agents/<name>.md` is hashed regardless of active harness. The skill path uses the harness skills install path (`~/.claude/skills/` on Claude Code, `~/.codex/skills/` on Codex; resolve via `resolve_harness_install_path skills`):
-   ```bash
-   source ~/.lore/scripts/lib.sh
-   SKILLS_DIR=$(resolve_harness_install_path skills)
-   LEAD_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$SKILLS_DIR/spec/SKILL.md")
-   RESEARCHER_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$(resolve_agent_template researcher)")
-   ADVISOR_TEMPLATE_VERSION=$(bash ~/.lore/scripts/template-version.sh "$(resolve_agent_template advisor)")
-   ```
-   On call failure, fall through with empty string. `scorecard-append.sh` registers into `$KDIR/_scorecards/template-registry.json` on first use. Missing `Template-version:` warns+passes (CC-01 backwards-compat) so legacy emitters don't block.
-
-4. Resolve input via `lore work resolve` (handles exact-slug, fuzzy, branch-matching, and archive fallback):
+3. Run the read-only startup verb. It owns work-reference resolution, plan-state classification, active-framework/model resolution, template-version stamping, and source provenance. It never creates a work item, repairs an index, or chooses a protocol route:
 
    ```bash
-   if RESULT=$(lore work resolve "$INPUT" --branch "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"); then
-     SLUG=$(printf '%s' "$RESULT" | sed -n '1p')
-     ARCHIVED=$(printf '%s' "$RESULT" | sed -n '2p')
-     # resolved → continue to the per-state branches below
-   else
-     case $? in
-       1) ;;  # no match → treat input as freeform description (see "If NOT resolved" below)
-       2) echo "Multiple work items match '$INPUT' (candidates on stderr above)." >&2
-          # disambiguate via AskUserQuestion against the resolver's candidate list, then re-invoke
-          exit 1 ;;
-     esac
-   fi
+   START_INPUT=${INPUT:-__branch_inference__}
+   START_ARGS=("$START_INPUT" --branch "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)" --json)
+   [[ "$TRACK" == "short" ]] && START_ARGS+=(--short)
+   [[ -n "$MODEL_OVERRIDE" ]] && START_ARGS+=(--model "$MODEL_OVERRIDE")
+   START=$(lore spec start "${START_ARGS[@]}")
    ```
 
-   - **If resolved item has `ARCHIVED=true`:** Warn the user and wait for explicit confirmation before continuing.
-   - **If resolved** → load the work item:
-    - Read `_meta.json.intent_anchor` when present. Treat it as the capability anchor from work-item intake — an interpreted one-sentence statement of the user-visible capability the work must deliver, audited for looseness at intake (alternatives, comparatives without targets, vague verbs) and tightened via user clarification before commit. The spec may refine implementation shape, but it must not silently narrow or remove the capability implied by this statement; any such change is a user-visible scope delta. Preserve the wording verbatim when restating it — downstream gates (Step 5.5 verifier, `/implement` anchor prompts) detect drift by string comparison, so a paraphrase here breaks the audit chain even when intent is preserved.
-     - `plan.md` with synthesis complete (Design Decisions + Phases) → skip to Step 5.1. Load any `## Strategy` silently as shaping context.
-     - `plan.md` with `## Investigations` and findings but no synthesis → skip to Step 5. Load any `## Strategy` silently; do not re-prompt.
-     - Investigations with `## Open Questions` needing follow-up → dispatch targeted follow-ups.
-     - `plan.md` incomplete → present for discussion/editing. If no `## Strategy` and synthesis has not run, offer the strategy gate (Step 4) first.
-     - No `plan.md` → continue to Step 2.
-   - **If NOT resolved** → treat input as freeform description, go to Goal Refinement.
-   - **If no input at all** → try branch inference; if no match, ask what they want to spec.
+   Required version-1 fields are `schema_version`, `resolved`, `slug`, `archived`, `plan_state`, `intent_anchor`, `strategy_present`, `active_framework`, `effective_lead_model`, `track`, `lead_template_version`, and `provenance`. Missing declarations and unknown flags are errors; there is no default route for malformed input. Exit 2 means ambiguity: ask the user to select from the ordered candidates, then re-run with the exact slug.
+
+4. Choose the route from the returned facts — this is lead judgment, not verb output:
+
+   - **`resolved=false` with user input:** treat the remaining input as a freeform description and continue to Goal Refinement.
+   - **`resolved=false` without user input:** ask what the user wants to spec; never turn the branch-inference sentinel into a work item.
+   - **`archived=true`:** warn and wait for explicit confirmation.
+   - **`plan_state=synthesis-complete`:** load `plan.md`, read any `## Strategy` silently, and continue at Step 5.1.
+   - **`plan_state=investigations-only`:** load the persisted findings and any strategy, then continue at Step 5.
+   - **`plan_state=follow-up-needed`:** read the open questions and design targeted follow-up investigations.
+   - **`plan_state=incomplete`:** present the persisted material for discussion; offer the strategy gate before synthesis when no strategy exists.
+   - **`plan_state=none`:** continue to Step 2.
+
+   When `intent_anchor` is non-null, preserve it verbatim. It is the user-visible capability boundary, not a suggestion the spec may silently narrow. Startup reports the anchor; only the lead judges whether the emerging design still covers it.
 
 ### Step 1b: Goal Refinement (new work only)
 
@@ -101,52 +92,20 @@ If the user's description is already specific enough (clear scope, stated constr
    - **Current-state verification (mandatory before a finding becomes a design constraint):** when a design choice hinges on a current-state claim sourced from a sibling work item's `notes.md` or other uncommitted prose (not committed code or a commons entry), verify the claim against HEAD before adopting it. Notes age faster than code; a stale note silently shapes scope.
    - **Integration-seam trace:** when the work adds a field to a shared substrate (e.g., `_meta.json`) or inserts a script into an existing control-flow gate, trace three seams before drafting: (a) does an existing gate/guard intercept the new state? (b) does the denormalized read model (e.g., `_index.json`) project the field, or is it invisible to consumers? (c) does ordering (archive/move) change where a later step finds the file?
    <!-- Sunset: remove these two sub-checks if retro-evolution rows targeting skills/spec/SKILL.md change-type new-failure-mode citing unverified-current-state or missed-integration-seam evidence recur from ≥3 new distinct work items within the next 20 spec cycles. -->
-6. **External skill and agent discovery (strict — exclude lore protocol toolchain)** — after reading key files, scan for relevant *external* skills and agents:
-   - Lore-managed skills (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) are **excluded** — they are protocol toolchain, not advisors. Target external skills (security review, language tooling, harness helpers, domain reviewers).
-   - Build the exclusion list from the canonical lore repo:
-     ```bash
-     source ~/.lore/scripts/lib.sh
-     LORE_SOURCE_REPO="$LORE_REPO_DIR"
-     LORE_SKILL_NAMES=$(ls "$LORE_SOURCE_REPO/skills/" 2>/dev/null | grep -v '\.md$')
-     LORE_AGENT_NAMES=$(ls "$LORE_SOURCE_REPO/agents/"*.md 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.md$//')
-     ```
-   - Glob `<skills_dir>/*/SKILL.md` (resolve via `resolve_harness_install_path skills`); skip names in `$LORE_SKILL_NAMES`; read remaining frontmatter (`name`, `description`) and first section.
-   - Glob `<agents_dir>/*.md` (resolve via `resolve_harness_install_path agents`); apply the same name filter against `$LORE_AGENT_NAMES`; read remaining template name and opening description.
-   - Match work item title, description, and key findings against the surviving (external) skill/agent names by keyword overlap. **Skill match criterion is strict:** include only when the skill's stated domain plausibly contributes to *this* work item's implementation — not "could in theory be invoked someday."
-   - Deep-read any SKILL.md or agent template with strong overlap.
-   - Emit a skill discovery block (mandatory):
-     ```
-     **External skill discovery:**
-     Considered: <comma-separated list of external skill names checked, after lore-toolchain filter>
-     Matched: <skill-name — rationale> (or "none")
-     ```
+6. Prepare discovery evidence without assigning meaning:
 
-7. **Preferences and conventions discovery (permissive — include if possibly relevant)** — after skill discovery, surface every preference or convention that *might* apply, even tangentially:
-   - **Inclusion criterion is the inverse of skill discovery.** The test is "is it *possible* the work might need this" — not "will we definitely apply it." Any topic, file pattern, ceremony, surface, or activity overlap (even loose) qualifies. Err on the side of over-inclusion; synthesis culls. Missing an applicable preference is worse than carrying an inapplicable one through review.
-   - Enumerate canonical directories so nothing is missed by ranking:
-     ```bash
-     KDIR=$(lore resolve)
-     for dir in "$KDIR/preferences" "$KDIR/conventions" "$KDIR/cross-cutting-conventions"; do
-       [[ -d "$dir" ]] && ls "$dir"
-     done
-     ```
-     Missing directories count as zero; one absent category does not fail the scan.
-   - Run BM25 queries at both altitudes to catch entries the directory walk misses by topic affinity:
-     ```bash
-     lore search "<work item topic>" --type knowledge --scale-set subsystem,implementation --limit 10
-     lore search "<work item topic>" --type knowledge --scale-set abstract,architecture --limit 5
-     ```
-     Retain results whose path is under `preferences/`, `conventions/`, or `cross-cutting-conventions/`.
-   - Read each candidate's title and lead paragraph; deep-read any with surface-level overlap.
-   - Emit a discovery block (mandatory):
-     ```
-     **Preference and convention discovery:**
-     Scanned: <count> entries across preferences/, conventions/, cross-cutting-conventions/ + <count> BM25 hits
-     Surfaced:
-       - [[knowledge:preferences/<entry>]] — why it might apply (1 line)
-       - [[knowledge:conventions/<entry>]] — why it might apply (1 line)
-     ```
-     If nothing surfaced after permissive review, write `Surfaced: none`.
+   ```bash
+   DISCOVERY=$(lore spec discover "$SLUG" --json)
+   ```
+
+   The version-1 result contains `coverage`, `candidates`, and `provenance`. Coverage names every scanned, missing, or unreadable source stratum; candidates retain each source's own rank and score. The verb excludes canonical Lore skill/agent identities structurally, but it never combines rankings or emits `matched`, `binding`, or `applicability` fields.
+
+7. Apply the two discovery judgments yourself:
+
+   - **External skills and agents — strict.** Read plausible external candidates and include only those whose stated domain materially contributes to this implementation. Lore protocol skills remain toolchain, not advisors. Emit `**External skill discovery:**` with the considered set and the matched set; `Matched: none` is valid.
+   - **Preferences and conventions — permissive.** Read the surfaced candidates and retain any entry the work might need to honor. Missing a binding preference is worse than carrying an inapplicable candidate into synthesis. Emit `**Preference and convention discovery:**` with coverage counts and the surfaced backlinks; `Surfaced: none` is valid.
+
+   Candidate enumeration is hands work; strict/permissive applicability is head work. Do not ask the verb to collapse that boundary.
 
 8. Present a context summary and offer the strategy gate (Step 4 below). **If `--yes`, skip the strategy prompt.**
 
@@ -174,48 +133,43 @@ If the user's description is already specific enough (clear scope, stated constr
    Proceed, or adjust?
    ```
 6. Wait for user confirmation. If the user requests adjustments, revise and re-present. **If `--yes`, dispatch immediately without confirmation.**
-7. **Create team via orchestration adapter.** The adapter at `adapters/agents/<framework>.sh` exposes `spawn` / `wait` / `send_message` / `collect_result` / `shutdown` as the dispatch contract; it emits `delegate:<tool> ...` directives the skill body translates into native tool calls (Claude Code: `TeamCreate` / `TaskCreate` / `SendMessage` / `TaskList` / `TaskGet`; opencode/codex: plugin-runtime / subagent-spawn APIs). Before creating the team, query capability gates:
-   ```bash
-   ADAPTER="$LORE_REPO_DIR/adapters/agents/$(resolve_active_framework).sh"
-   ENFORCEMENT=$(bash "$ADAPTER" completion_enforcement)  # native_blocking | lead_validator | self_attestation | unavailable
-   TEAM_MESSAGING=$(framework_capability team_messaging)  # full | partial | fallback | none
-   ```
-   - `ENFORCEMENT` shapes the retry/abandon decision in Step 3 (per `adapters/agents/README.md` §"Completion Enforcement Degradation Modes").
-   - `TEAM_MESSAGING != full` collapses only the shared-team layer: skip `TeamCreate`, `SendMessage`, and on-disk team config; use a lead-side handle map. Do **not** collapse to `--short` while `subagents` remains available — continue with lead-orchestrated fanout and serial collection.
-   - `subagents=none` is the `--short` collapse point: if the adapter cannot spawn isolated researcher contexts, fall back to Step 2a.
+7. Prepare discovery evidence, then make the applicability decisions in lead prose:
 
-   On Claude Code (default), team creation is the native `TeamCreate` tool:
-   ```
-   TeamCreate: team_name="spec-<slug>", description="Investigating <work item title>"
-   ```
-   When `TEAM_MESSAGING != full` (opencode/codex today), skip team creation and initialize an in-memory handle map keyed by investigation number.
-8. Read your team lead name from the active harness's teams install path (resolved via `resolve_harness_install_path teams`; typically `~/.claude/teams/` on Claude Code), at `<teams_dir>/spec-<slug>/config.json`. Frameworks where `install_paths.teams=unsupported` (e.g. codex today) cannot persist team config — use the lead-side handle map instead of on-disk config.
-9. Create investigation tasks — for each question, route through the adapter's `spawn` operation:
    ```bash
-   RESEARCHER_MODEL=$(bash "$ADAPTER" resolve_model_for_role researcher spec)
-   bash "$ADAPTER" spawn researcher "<task_prompt>" "$RESEARCHER_MODEL"
-   # → delegate:TaskCreate role=researcher model=<id>  (claude-code)
-   # The `spec` ceremony constant selects harnesses.<active>.ceremony_roles.spec.researcher
-   # ahead of the role overlay; absent that binding it falls through to roles.researcher.
+   DISCOVERY=$(lore spec discover "$SLUG" --json)
    ```
-   On Claude Code the lead invokes `TaskCreate` with the directive's role/model; one `TaskCreate` per question with full question, context, file hints, and expected report format.
-   - Mandatory **External skill and agent applicability** investigation — instructions: (a) evaluate implementation-phase applicability (not investigation phase); (b) read actual SKILL.md files; (c) **exclude lore-managed skills and agents** (exclusion list from `source ~/.lore/scripts/lib.sh; printf '%s\n' "$LORE_REPO_DIR"`, matched by parent-directory name); (d) strict match criterion — skill domain must plausibly contribute to *this* work item, not "could in theory be invoked"; (e) report `**Matched skills:**` / `**Matched agents:**` blocks after `**Implications:**`. `**Matched skills:** none` after filtering is a valid terminal.
-   - Mandatory **Preferences and conventions applicability** investigation — instructions: (a) enumerate `$KDIR/preferences/`, `$KDIR/conventions/`, `$KDIR/cross-cutting-conventions/` directly (absent = zero, not error), plus BM25 at `subsystem,implementation` and `abstract,architecture` retaining hits under those paths; (b) **permissive** inclusion — include if it is *possible* the work might need to honor the entry; (c) read title and lead paragraph, deep-read on surface overlap; (d) report `**Surfaced preferences/conventions:**` block after `**Implications:**` listing each entry as `[[knowledge:<path>]] — 1-line "why it might apply"`. Err on over-inclusion; synthesis culls. No surfaced entries → report `**Surfaced preferences/conventions:** none`.
-10. Pre-fetch knowledge for each investigation:
-    ```bash
-    PRIOR_KNOWLEDGE=$(lore prefetch "<investigation topic>" --format prompt --limit 5 --scale-set=<bucket>)
-    ```
-11. **External skill-applicability scan (strict — exclude lore protocol toolchain):** identifies skills relevant to this work item but does NOT spawn advisor agents on the default route. Per D1/D3, default-route consultations are handled inline by the spec-lead (and `/implement`'s lead at implementation time); skill-backed domains are invoked directly via the `Skill` tool when a researcher SendMessages a question. Applicable external skills are recorded in (a) an in-memory `$SKILL_INVOCATION_MAP` consulted inline if a researcher routes a question to that domain, and (b) the `**Related skills:**` block in `plan.md` (added in Step 5 Discovery findings integration).
-    a. Scan the skill list in your system prompt. **Filter out lore-managed skills** (`/spec`, `/implement`, `/work`, `/memory`, `/remember`, `/retro`, `/evolve`, `/renormalize`, `/self-test`, `/followup-discuss`, `/bootstrap`, `/pr-*`, `/codex-*`) before matching — protocol toolchain, not advisors. Apply a strict match criterion: include only when the skill's domain plausibly contributes to *this* work item's implementation. Emit a skill discovery block (mandatory):
-       ```
-       **External skill discovery:**
-       Considered: <comma-separated list of external skills checked, after lore-toolchain filter>
-       Matched: <skill-name — rationale> (or "none")
-       ```
-    b. For each matched skill, read its SKILL.md and record an entry in `$SKILL_INVOCATION_MAP` keyed by domain (skill name + scope). The lead consults this map inline when a researcher's SendMessage routes to that domain — invokes the skill via the `Skill` tool and replies with its output.
-    c. **`$ADVISORY_MIXIN` is empty on the default route.** Researcher prompts do not receive `scripts/agent-protocols/advisory-consultation.md`; the mixin is consumed only by `/implement` when a phase declares `**Advisors:** ... mode: persistent`. `/spec` neither authors nor consumes `mode: persistent` declarations. The legacy advisor-spawn / mixin-build path (`agents/advisor.md` per matched skill + `{{advisors}}` resolution) is gated behind a `SPEC_PERSISTENT_ADVISORS_OPT_IN` flag that no `/spec` surface flips today — preserved as reference for a future opt-in surface, unreachable on the default route.
-12. Spawn researcher agents — `min(investigation_count, 4)` in a single message via the adapter's `spawn` operation. Use the `researcher` agent template (`resolve_agent_template researcher`; Claude Code path `~/.claude/agents/researcher.md`) with injections: `{{team_name}}` → `spec-<slug>`, `{{team_lead}}` → lead name, `{{prior_knowledge}}` → `$PRIOR_KNOWLEDGE`, `{{template_version}}` → `$RESEARCHER_TEMPLATE_VERSION`. On the default route `$ADVISORY_MIXIN` is empty (per Step 2b.11.c) and mixin concatenation is a no-op. Concatenation is conditional: append `$ADVISORY_MIXIN` after the resolved template with a blank-line separator **only if non-empty** (opt-in path; default `/spec` never populates). Per-spawn model selection routes through `resolve_model_for_role researcher spec` (the `spec` ceremony constant, or the `--model` override from Step 1.1); the adapter validates the role→model binding against `model_routing.shape` and rejects mismatches without silent fallback.
 
+   Use the source manifest to see what was scanned or missing. Choose strict external-skill/agent matches and permissive preference/convention candidates yourself. Record matched external skills in `$SKILL_INVOCATION_MAP`; invoke them inline when a researcher consults that domain. `/spec` spawns no advisor agents on the default route.
+
+8. Serialize the approved investigation plan to a temporary JSON file. The version-1 contract is exact — unknown or missing fields refuse, array order is dispatch order, and every prefetch row declares its scale rather than inheriting a default:
+
+   ```json
+   {
+     "schema_version": 1,
+     "track": "full",
+     "investigations": [
+       {"id": "external-skills-agents", "kind": "fixed", "question": "External skill and agent applicability ...", "complexity": "simple", "prefetch": [{"query": "<topic>", "scale_set": ["subsystem", "implementation"]}]},
+       {"id": "preferences-conventions", "kind": "fixed", "question": "Preferences and conventions applicability ...", "complexity": "simple", "prefetch": [{"query": "<topic>", "scale_set": ["abstract", "architecture"]}]},
+       {"id": "<lead-authored-id>", "kind": "lead-authored", "question": "<lead-authored question>", "complexity": "simple|moderate|complex", "prefetch": [{"query": "<topic>", "scale_set": ["implementation"]}]}
+     ]
+   }
+   ```
+
+   Exactly one fixed external-skill/agent question and one fixed preference/convention question are mandatory. The lead owns every question, complexity label, prefetch query, and scale declaration; the verb validates but never invents them.
+
+9. Open the reusable dispatch artifact:
+
+   ```bash
+   DISPATCH=$(lore spec open "$SLUG" --investigations "$INVESTIGATIONS_JSON" --json)
+   ```
+
+   `open` validates all inputs before publication, writes canonical `spec-dispatch.json` by hidden temp plus same-directory rename, then stamps its `spec-verb` completion atom. Its statuses are `created | reused | recovered | replaced`; refusal names the repair target. The artifact carries `input_fingerprint`, `source_fingerprint`, the source manifest, ordered directives, empty lead-side handle slots, and teardown payloads. It never calls a harness tool and never persists live handles.
+
+   Bind `ADAPTER`, `RESEARCHER_MODEL`, and `RESEARCHER_TEMPLATE_VERSION` from the returned source manifest and directives. Do not resolve a second set after publication; that would make the executed payload differ from the artifact being resumed.
+
+10. Execute the returned directives in ordinal order. This is the harness-dispatch judgment kernel: translate each directive into the active harness's native spawn call, decide when to launch it, and store returned handles only in the lead's in-memory handle map. Populate the matching teardown payload with the live handle at shutdown time; do not write handles back into `spec-dispatch.json`.
+
+    `team_messaging != full` removes only shared team state. Codex still executes researcher fanout while `subagents=partial`, then its adapter teardown resolves to lead-mediated `TaskUpdate status=completed`. Collapse to the short branch only when `subagents=none`. On a full team-messaging harness, the lead may create the shared team before executing spawn directives and tear it down after researcher completion.
 ---
 
 ### Step 3: Collect findings and emit Tier-2 artifacts
@@ -241,7 +195,7 @@ As researcher messages arrive (or after direct file reading in short branch):
    - **Absence semantics:** if no assertions or lead-observed task claims exist, both `task-claims.jsonl` and `evidence.md` may be absent — absence means "no Tier-2 claims captured this session," not "work was fully verified."
 
 5. **Full branch only:** When all investigation tasks are complete:
-   - Send shutdown via the adapter: `bash "$ADAPTER" shutdown <handle> true` for each researcher handle, **plus each advisor handle if any were created on the opt-in path.** Default-route Step 2b.11 spawns no advisor agents (`$SPEC_PERSISTENT_ADVISORS_OPT_IN=false`), so skip the advisor-shutdown block silently; researcher shutdown always runs. On Claude Code each shutdown expands to `delegate:SendMessage handle=<id> type=shutdown_request approve=true` invoked as the native `SendMessage` tool. When `team_messaging=none` the adapter returns `unsupported` and the skill relies on harness-native session cleanup (Codex subagent-stop, OpenCode plugin-runtime kill).
+   - Execute each directive's teardown payload with its in-memory researcher handle. On Claude Code this is a shutdown request; on Codex the live adapter returns the lead-mediated `TaskUpdate task_id=<handle> status=completed` directive. Do not infer teardown from `team_messaging`: the prepared payload and current adapter are the contract.
    - Run `TeamDelete` (Claude Code only; opencode/codex adapters require no explicit teardown — runtime owns lifecycle).
 
 6. Append an investigation summary to `execution-log.md`:
@@ -353,6 +307,39 @@ Produce the conceptual frame first before committing to phase breakdown.
   Keep this block at the **full permissive surfaced set** regardless of what binds to a task. The manifest is permissive; the *weave* into task lines is strict (Step 5b "Deliverable contract gate" — only scope-overlapping judgment-class norms become constraint clauses). A backlink staying here while its norm is also woven into a task is correct: the manifest is provenance, the task line is delivery.
 - **Advisor declarations:** For each matched skill whose domain overlaps with a phase's scope, consider adding an `**Advisors:**` entry. Set mode based on phase complexity — `must-consult` if the skill defines invariants workers must respect, `on-demand` otherwise.
 
+### Ceremony outcome filing contract
+
+Apply this contract after every terminal evaluator attempt in Steps 5a and 5.5. The evaluator supplies evidence; the lead decides the normalized protocol outcome. Never parse evaluator prose into a disposition.
+
+1. Choose exactly one outcome: `completed | failed | skipped | needs-decision`. Preserve the evaluator's raw verdict byte-for-byte as `--verdict`. `skipped` and `needs-decision` require a reason; `completed` and `failed` forbid one. A registered evaluator that cannot execute is a filed `skipped` attempt, never a silent omission.
+2. Build a version-1 evidence manifest with exactly these fields:
+
+   ```json
+   {
+     "schema_version": 1,
+     "evaluator_locator": "<skill or agent locator>",
+     "evaluator_template_version": "<12-char hash>",
+     "framework": "<active framework>",
+     "model": "<effective evaluator model>",
+     "final_round": 2,
+     "disposition_ledger_sha256": "<sha256 of the round/disposition ledger>",
+     "source_plan_sha256": "<sha256 of the plan the evaluator read>"
+   }
+   ```
+
+   `completed` and `failed` require every evidence field. `skipped` and `needs-decision` keep every field present but may use explicit `null` when evidence is unavailable. Missing fields are errors, never defaults.
+3. File the already-made judgment:
+
+   ```bash
+   lore spec outcome "$SLUG" \
+     --ceremony <spec-design|spec-post-plan> \
+     --advisor "$EVALUATOR" --attempt-id "$ATTEMPT_ID" \
+     --outcome "$NORMALIZED_OUTCOME" --verdict "$RAW_VERDICT" \
+     --evidence-manifest "$EVIDENCE_JSON" [--reason "$REASON"]
+   ```
+
+   The verb derives a stable `outcome_id`, writes through `write-execution-log.sh`, and treats exact replay as idempotent. Reusing an attempt id for different semantics is a collision. `needs-decision` additionally routes an unhandled ceremony-resolution row through `scorecard-append.sh`; a failed auxiliary append returns `status=partial`, and exact retry recovers only that sink.
+
 ### Step 5a: Design ceremony evaluation
 
 **Ceremonies always run.** No flag skips this step; no flag is required to run it. Don't ask whether to invoke them — invoke. Judgment applies to acting on the output, not to running the step.
@@ -366,13 +353,15 @@ If non-empty JSON array, for each skill name in the array:
 ```
 This evaluates the abstract plan. If WEAK or MISSING areas are identified, revise the abstract plan before proceeding to Step 5b. No evaluators are registered by default — opt-in via `lore ceremony add spec-design <skill>`.
 
+After each evaluator reaches a terminal attempt, make the outcome judgment and file it under `--ceremony spec-design` using the ceremony outcome filing contract. A revision round receives a new attempt id; never overwrite the evidence identity of an earlier round.
+
 ### Step 5b: Synthesize — concrete plan
 
 Draft concrete implementation sections on top of the approved abstract plan:
 
 0. **Intent anchor** — if the work item has an `intent_anchor` in `_meta.json`, render a `## Intent Anchor` section in `plan.md` immediately after `## Narrative` and before `## Strategy`/`## Context`. Write the anchor body **verbatim** from `_meta.json.intent_anchor` — no quoting, no prefix label, no paraphrase. ... Before decomposing, name the tempting narrower implementation that would appear successful while violating the anchor; ensure Exit Criteria and Verification cover the load-bearing promise or explicitly label the scope delta.
 
-   Follow the anchor with a `**Scope delta:**` line (default `none — anchor preserved unchanged`; if the spec narrows the capability, name the narrowing here) and a `**Tempting narrower implementation:**` heading the spec author fills in. The anchor body and `**Scope delta:**` line are **verifier-enforced** — the Step 5.5 gate refuses to regenerate tasks if missing or divergent. The `**Tempting narrower implementation:**` body is template-prescribed but not verifier-enforced — its presence forces the author to confront the failure mode, but the content is free-text that no parser can adjudicate. For work items without an `intent_anchor` field, omit the section entirely — the Step 5.5 verifier skips with a one-line stderr info message.
+   Follow the anchor with a `**Scope delta:**` line (default `none — anchor preserved unchanged`; if the spec narrows the capability, name the narrowing here) and a `**Tempting narrower implementation:**` heading the spec author fills in. The anchor body and `**Scope delta:**` line are **verifier-enforced** — the Step 5.6 gate refuses to regenerate tasks if missing or divergent. The `**Tempting narrower implementation:**` body is template-prescribed but not verifier-enforced — its presence forces the author to confront the failure mode, but the content is free-text that no parser can adjudicate. For work items without an `intent_anchor` field, omit the section entirely — the Step 5.6 verifier skips with a one-line stderr info message.
 
 1. **Phases** — concrete implementation phases with tasks, file paths, objectives. Each phase includes `**Knowledge context:**`, `**Tasks:**` (checkbox lines), and optional `**Retrieval directive:**` / `**Advisors:**` / `**Verification:**` / `**Split rationale:**` (required when the phase has more than one task) / `**Scope:**` blocks.
 
@@ -401,7 +390,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
 
    **Context-envelope ceiling.** A task's owned file set plus its phase brief must fit one worker's context envelope with working room to read, reason, and edit. When they do not, the split is **forced** — regardless of judgment class or whether the four conditions hold — because an over-large task passes every structural condition above yet fails *in flight* on worker-context exhaustion, the most expensive discovery point there is. This is a level-1 correctness-of-execution constraint (execution capacity), the sibling of the capability ceiling that keeps judgment-dense work off a model that cannot hold it — **not** a weighable fifth condition and **not** an aesthetic size threshold. It bounds task size from above exactly as **no residue** bounds it from below; between that floor and this ceiling, size stays structure-gated and empirically tuned via the (class, model, size) rework attribution — never trimmed to hit a size target.
 
-   **Split rationale (required for multi-task phases).** Any phase with more than one task carries a `**Split rationale:**` block — one or two sentences naming the judgment-density transition or genuine parallelism that earned the split. The Step 5.5 finalize gate refuses a multi-task phase that lacks it. A single-task phase omits the block.
+   **Split rationale (required for multi-task phases).** Any phase with more than one task carries a `**Split rationale:**` block — one or two sentences naming the judgment-density transition or genuine parallelism that earned the split. The Step 5.6 finalize gate refuses a multi-task phase that lacks it. A single-task phase omits the block.
 
    **Deliverable contract gate.** Every task line names a durable artifact outcome — what gets built, refactored, authored, migrated, wired, or added. The valid primary verbs are: Implement / Refactor / Author / Migrate / Add support for / Wire... The following primary verbs are **never tasks** — they belong elsewhere: Verify / Check / Inspect / Run / Capture / Append / Cross-link / Note / Document-only.
 
@@ -412,7 +401,7 @@ Draft concrete implementation sections on top of the approved abstract plan:
    - **standard** — ordinary implementation judgment (the common default): local design choices a competent worker makes without novel reasoning. Routes to plain `worker`.
    - **judgment-dense** — novel design, cross-cutting reasoning, subtle correctness, or security-sensitive surface. Routes to the strongest worker binding.
 
-   The class is **explicit on every line** — the Step 5.5 finalize gate refuses an unannotated task line. An unclassed line is not treated as `standard`: a legacy plan with no markers still regenerates (routing as plain `worker`), but re-finalizing it demands annotation.
+   The class is **explicit on every line** — the Step 5.6 finalize gate refuses an unannotated task line. An unclassed line is not treated as `standard`: a legacy plan with no markers still regenerates (routing as plain `worker`), but re-finalizing it demands annotation.
 
    <!-- INVARIANT — canonical /spec weave vocabulary. Keep these terms stable; the
         /implement worker report's `Convention handling:` field and the lead's
@@ -535,7 +524,7 @@ Output: `{verified: N, corrected: [...], unresolved: [...]}`.
 - If unresolved backlinks remain: carry forward to Step 5.1 as `[broken backlink]` bullets.
 - If all resolved: proceed silently.
 
-The Step 5.5 finalize verb re-runs backlink verification terminally; this early pass exists to surface broken links before the Step 5.1 review, not to replace the terminal check.
+The Step 5.6 finalize verb re-runs backlink verification terminally; this early pass exists to surface broken links before the Step 5.1 review, not to replace the terminal check.
 
 ### Step 5.0b: Knowledge context block audit
 
@@ -621,7 +610,23 @@ Apply the provenance flags above on every `lore capture`.
 
 ---
 
-### Step 5.5: Finalize through the spec verb
+### Step 5.5: Post-plan ceremony evaluation
+
+**Ceremonies always run before the terminal commit marker.** No flag skips this step; no flag is required to run it. Judgment applies to acting on output, not to whether the registered obligation executes.
+
+```bash
+EVALUATORS=$(lore ceremony get spec-post-plan --work-item <slug>)
+```
+
+Invoke every registered evaluator. Present its output to the user. If the lead accepts changes, revise `plan.md`, repeat the affected review gates, and run a fresh evaluator attempt. After each terminal attempt, make the normalized outcome judgment and file it under `--ceremony spec-post-plan` using the ceremony outcome filing contract.
+
+Do not finalize while a post-plan result still requires a plan edit or human decision. `needs-decision` is durable evidence of that open judgment, not permission to route around it.
+
+Prepare the next step without running it yet: retain its two lead-owned preflight asserts by checking every instructed invocation against the **live script** and checking that **Tier-2 emission instructions** point to the canonical validator contract. If either check or the later verb refuses, fix `plan.md` and re-run the affected ceremony before Step 5.6 invokes `lore spec finalize`.
+
+---
+
+### Step 5.6: Finalize through the spec verb
 
 **Lead-owned preflight (two prose asserts the verb cannot run):** validate emitted artifacts against their live consumers, never from memory: (1) any script invocation block the plan instructs agents to run must match the live script's current flags (check `--help` or source — script schemas drift faster than plans); (2) Tier-2 emission instructions point at the validator's canonical required-field set rather than enumerating fields inline. Fix `plan.md` first if either fails — a deterministic script can assert JSON structure, but adjudicating prose against live sources is the lead's judgment.
 
@@ -643,25 +648,10 @@ A refused finalize emits no telemetry row and no `spec-verb` atom; re-running af
 
 ---
 
-### Step 5.6: Post-plan ceremony evaluation
-
-**Ceremonies always run.** No flag skips this step; no flag is required to run it. Don't ask whether to invoke them — invoke. Judgment applies to acting on the output, not to running the step.
-
-```bash
-EVALUATORS=$(lore ceremony get spec-post-plan --work-item <slug>)
-```
-If non-empty JSON array, for each skill name in the array:
-```
-/<skill-name> <slug>
-```
-Present the evaluator's output to the user. If WEAK or MISSING areas are identified, ask the user whether to address them before proceeding. If the user wants to address gaps, proceed to Step 6.
-
----
-
 ### Step 6: Iterate and suggest retro
 
 If gaps are identified (from evaluator feedback or user review):
-- Create a new investigation team (same pattern) for targeted follow-ups.
+- Author a targeted follow-up investigation manifest, run `lore spec open` again, and execute the returned directives.
 - Append new findings to the Investigations section.
 - Update the synthesis.
 
