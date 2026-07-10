@@ -98,11 +98,13 @@ setup_store() {
 # appending --<flag> <value> after `valid_call`.
 valid_call() {
   "$SCRIPT" \
+    --append-exact \
     --target "skills/foo/SKILL.md" \
     --change-types "ceiling-raise" \
     --work-items "wi-alpha,wi-beta,wi-gamma" \
     --decision merge \
     --accepted-at-run-id "run-N" \
+    --accepted-at "2026-07-10T00:00:00Z" \
     --kdir "$KNOWLEDGE_DIR" \
     "$@"
 }
@@ -135,6 +137,8 @@ assert_contains "usage names --change-types" "$OUTPUT" "--change-types"
 assert_contains "usage names --work-items" "$OUTPUT" "--work-items"
 assert_contains "usage names --decision" "$OUTPUT" "--decision"
 assert_contains "usage names --accepted-at-run-id" "$OUTPUT" "--accepted-at-run-id"
+assert_contains "usage names exact append mode" "$OUTPUT" "--append-exact"
+assert_contains "usage names consumption mode" "$OUTPUT" "--consume"
 assert_contains "usage names reconciliation mode" "$OUTPUT" "--reconcile-legacy-versions"
 
 # =============================================
@@ -144,7 +148,7 @@ echo ""
 echo "Test 2: Valid append"
 setup_store
 OUTPUT=$(valid_call 2>&1)
-assert_contains "confirmation printed" "$OUTPUT" "[accepted-cluster] Cluster"
+assert_contains "confirmation printed" "$OUTPUT" "[accepted-cluster] append-exact created"
 assert_eq "sidecar has one line" "$(wc -l < "$SIDECAR" | tr -d ' ')" "1"
 ROW=$(cat "$SIDECAR")
 assert_eq "schema_version is declared" "$(echo "$ROW" | jq -r '.schema_version')" "1"
@@ -193,8 +197,8 @@ echo ""
 echo "Test 6a: Missing --target rejected"
 setup_store
 EXIT_CODE=0
-STDERR=$("$SCRIPT" --change-types c --work-items w --decision merge \
-  --accepted-at-run-id r --kdir "$KNOWLEDGE_DIR" 2>&1) || EXIT_CODE=$?
+STDERR=$("$SCRIPT" --append-exact --change-types c --work-items w --decision merge \
+  --accepted-at-run-id r --accepted-at 2026-07-10T00:00:00Z --kdir "$KNOWLEDGE_DIR" 2>&1) || EXIT_CODE=$?
 assert_eq "missing --target exits 1" "$EXIT_CODE" "1"
 assert_contains "stderr has [accepted-cluster] prefix" "$STDERR" "[accepted-cluster]"
 assert_contains "stderr names --target" "$STDERR" "--target"
@@ -204,8 +208,8 @@ echo ""
 echo "Test 6b: Missing --accepted-at-run-id rejected"
 setup_store
 EXIT_CODE=0
-STDERR=$("$SCRIPT" --target t --change-types c --work-items w --decision merge \
-  --kdir "$KNOWLEDGE_DIR" 2>&1) || EXIT_CODE=$?
+STDERR=$("$SCRIPT" --append-exact --target t --change-types c --work-items w --decision merge \
+  --accepted-at 2026-07-10T00:00:00Z --kdir "$KNOWLEDGE_DIR" 2>&1) || EXIT_CODE=$?
 assert_eq "missing --accepted-at-run-id exits 1" "$EXIT_CODE" "1"
 assert_contains "stderr names --accepted-at-run-id" "$STDERR" "--accepted-at-run-id"
 assert_not_exist "sidecar not created on rejection" "$SIDECAR"
@@ -252,7 +256,7 @@ setup_store
 valid_call > /dev/null 2>&1
 # Re-run with members in a different order — same set → same cluster_id.
 OUTPUT=$(valid_call --work-items "wi-gamma,wi-beta,wi-alpha" 2>&1)
-assert_contains "second call reports no-op" "$OUTPUT" "already present"
+assert_contains "second call reports no-op" "$OUTPUT" "append-exact reused"
 assert_eq "sidecar still has one line after duplicate call" "$(wc -l < "$SIDECAR" | tr -d ' ')" "1"
 
 # Different work_item set → different cluster_id → new row appended.
@@ -311,7 +315,7 @@ echo "Test 12b: --json mode success shape"
 setup_store
 STDOUT=$(valid_call --json 2>/dev/null)
 assert_eq "appended field true" "$(echo "$STDOUT" | jq -r '.appended')" "true"
-assert_eq "deduped field false" "$(echo "$STDOUT" | jq -r '.deduped')" "false"
+assert_eq "created status returned" "$(echo "$STDOUT" | jq -r '.status')" "created"
 assert_contains "path points to sidecar" "$(echo "$STDOUT" | jq -r '.path')" "_evolve/accepted-clusters.jsonl"
 CID=$(echo "$STDOUT" | jq -r '.cluster_id')
 assert_eq "cluster_id length 16" "${#CID}" "16"
@@ -319,8 +323,8 @@ assert_eq "cluster_id length 16" "${#CID}" "16"
 echo ""
 echo "Test 12c: --json mode dedupe shape (second identical call)"
 STDOUT=$(valid_call --json 2>/dev/null)
-assert_eq "deduped field true on repeat" "$(echo "$STDOUT" | jq -r '.deduped')" "true"
 assert_eq "appended field false on repeat" "$(echo "$STDOUT" | jq -r '.appended')" "false"
+assert_eq "reused status returned" "$(echo "$STDOUT" | jq -r '.status')" "reused"
 
 # =============================================
 # Test 13: Nonexistent knowledge store rejected
@@ -328,8 +332,8 @@ assert_eq "appended field false on repeat" "$(echo "$STDOUT" | jq -r '.appended'
 echo ""
 echo "Test 13: Nonexistent knowledge store rejected"
 EXIT_CODE=0
-STDERR=$("$SCRIPT" --target t --change-types c --work-items w --decision merge \
-  --accepted-at-run-id r --kdir "$TEST_DIR/does-not-exist" 2>&1) || EXIT_CODE=$?
+STDERR=$("$SCRIPT" --append-exact --target t --change-types c --work-items w --decision merge \
+  --accepted-at-run-id r --accepted-at 2026-07-10T00:00:00Z --kdir "$TEST_DIR/does-not-exist" 2>&1) || EXIT_CODE=$?
 assert_eq "nonexistent kdir exits 1" "$EXIT_CODE" "1"
 assert_contains "stderr names knowledge store" "$STDERR" "knowledge store not found"
 
@@ -440,6 +444,33 @@ EXIT_CODE=0
 OUTPUT=$("$SCRIPT" --reconcile-legacy-versions --target forbidden --kdir "$KNOWLEDGE_DIR" 2>&1) || EXIT_CODE=$?
 assert_eq "reconciliation rejects append-only flags" "1" "$EXIT_CODE"
 assert_contains "mutually exclusive rejection names append flag" "$OUTPUT" "--target"
+
+# =============================================
+# Test 16: Same-id semantic conflict and validated consumption lifecycle.
+# =============================================
+echo ""
+echo "Test 16: Exact conflict and consumption transitions"
+setup_store
+valid_call > /dev/null
+CID=$(jq -r .cluster_id "$SIDECAR")
+BEFORE=$(stat_tuple "$SIDECAR")
+EXIT_CODE=0
+OUTPUT=$(valid_call --accepted-at-run-id different-run 2>&1) || EXIT_CODE=$?
+assert_eq "same-id changed semantics exits 1" "1" "$EXIT_CODE"
+assert_contains "same-id conflict is loud" "$OUTPUT" "different semantics"
+assert_eq "conflict leaves sidecar unchanged" "$BEFORE" "$(stat_tuple "$SIDECAR")"
+
+CONSUME_JSON=$("$SCRIPT" --consume --cluster-id "$CID" --consumed-at-run-id consume-1 --kdir "$KNOWLEDGE_DIR" --json)
+assert_eq "null to run transition updates" "updated" "$(echo "$CONSUME_JSON" | jq -r .status)"
+assert_eq "consumption persisted" "consume-1" "$(jq -r .consumed_at_run_id "$SIDECAR")"
+CONSUME_REPLAY=$("$SCRIPT" --consume --cluster-id "$CID" --consumed-at-run-id consume-1 --kdir "$KNOWLEDGE_DIR" --json)
+assert_eq "same-run consumption reuses" "reused" "$(echo "$CONSUME_REPLAY" | jq -r .status)"
+BEFORE=$(stat_tuple "$SIDECAR")
+EXIT_CODE=0
+OUTPUT=$("$SCRIPT" --consume --cluster-id "$CID" --consumed-at-run-id consume-2 --kdir "$KNOWLEDGE_DIR" 2>&1) || EXIT_CODE=$?
+assert_eq "different-run consumption conflicts" "1" "$EXIT_CODE"
+assert_contains "different-run conflict names owner" "$OUTPUT" "consume-1"
+assert_eq "different-run conflict is atomic" "$BEFORE" "$(stat_tuple "$SIDECAR")"
 
 # =============================================
 # Summary

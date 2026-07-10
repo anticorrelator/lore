@@ -88,11 +88,13 @@ sidecar_lines() {
 confirm_cluster() {
   local target="$1" change_types="$2" work_items="$3" decision="$4" run_id="$5"
   "$WRITER" \
+    --append-exact \
     --target "$target" \
     --change-types "$change_types" \
     --work-items "$work_items" \
     --decision "$decision" \
     --accepted-at-run-id "$run_id" \
+    --accepted-at "2026-07-10T00:00:00Z" \
     --kdir "$KDIR"
 }
 
@@ -151,10 +153,10 @@ echo "Test 5: rerun of the same cycle → no duplicate row (idempotency)"
 # Continuing from Test 4's state: re-confirm the identical merged cluster as if
 # a second /evolve run over an unchanged journal re-presented it. cluster_id is
 # re-derived identically, so the writer no-ops.
-confirm_cluster "skills/foo/SKILL.md" "ceiling-raise" "$UNION" "merge" "run-N+1" > /dev/null
+confirm_cluster "skills/foo/SKILL.md" "ceiling-raise" "$UNION" "merge" "run-N" > /dev/null
 assert_eq "still one row after rerun" "$(sidecar_lines)" "1"
 # Member order should not matter either — the same set in a different order.
-confirm_cluster "skills/foo/SKILL.md" "ceiling-raise" "wi-delta,wi-gamma,wi-beta,wi-alpha" "merge" "run-N+2" > /dev/null
+confirm_cluster "skills/foo/SKILL.md" "ceiling-raise" "wi-delta,wi-gamma,wi-beta,wi-alpha" "merge" "run-N" > /dev/null
 assert_eq "still one row after reordered rerun" "$(sidecar_lines)" "1"
 
 echo ""
@@ -197,8 +199,8 @@ assert_eq "two accepts → two rows; reject wrote nothing" "$(sidecar_lines)" "2
 echo ""
 echo "Test 9: batch re-run is idempotent (same candidates → no duplicate rows)"
 # Re-confirming both accepted candidates (as a second backfill pass would) adds nothing.
-confirm_cluster "skills/spec/SKILL.md" "new-failure-mode" "wi-3,wi-2,wi-1" "merge" "backfill-run-2" > /dev/null
-confirm_cluster "skills/retro/SKILL.md" "evidence-gap" "wi-6,wi-5,wi-4" "edit" "backfill-run-2" > /dev/null
+confirm_cluster "skills/spec/SKILL.md" "new-failure-mode" "wi-3,wi-2,wi-1" "merge" "backfill-run" > /dev/null
+confirm_cluster "skills/retro/SKILL.md" "evidence-gap" "wi-6,wi-5,wi-4" "edit" "backfill-run" > /dev/null
 assert_eq "still two rows after re-running the batch" "$(sidecar_lines)" "2"
 
 echo ""

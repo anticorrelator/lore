@@ -439,11 +439,13 @@ WRITER="$REPO_DIR/scripts/accepted-cluster-append.sh"
 append_accepted_cluster() {
   local target="$1" change_types="$2" work_items="$3" run_id="$4" decision="${5:-merge}"
   "$WRITER" \
+    --append-exact \
     --target "$target" \
     --change-types "$change_types" \
     --work-items "$work_items" \
     --decision "$decision" \
     --accepted-at-run-id "$run_id" \
+    --accepted-at "2026-07-10T00:00:00Z" \
     --kdir "$KDIR" >/dev/null
 }
 
