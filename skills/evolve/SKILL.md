@@ -29,7 +29,7 @@ role=$(bash -c 'source ~/.lore/scripts/lib.sh; resolve_role')
 | Maintainer path | skip entirely | render |
 | `--pooled` / `--shrink` | reject: `requires role=maintainer` | render |
 
-The base ceremony is identical across roles. Never render maintainer-only federation affordances to a contributor.
+The base ceremony is identical across roles. Never render maintainer-only federation affordances to a contributor — a rendered mode is an affordance the session may act on, only to fail later at the role gate.
 
 ## Base ceremony
 
@@ -37,7 +37,7 @@ The base ceremony is identical across roles. Never render maintainer-only federa
 
 Run `lore resolve` and bind the result as `KNOWLEDGE_DIR`.
 
-When `role == maintainer`, run the push-path preflight once before template-mutating work:
+When `role == maintainer`, run the push-path preflight once before template-mutating work — it surfaces a non-writable `origin` before the maintainer authors edits the federation will never see:
 
 ```bash
 PREFLIGHT_MARKER="${TMPDIR:-/tmp}/lore-maintainer-preflight.$$"
@@ -46,7 +46,7 @@ bash ~/.lore/scripts/maintainer-preflight.sh \
   --repo-dir "$(pwd)" 2>&1 || true
 ```
 
-The preflight warns but does not block. If it warns, surface the failure and confirm the maintainer wants to continue.
+The preflight warns but does not block; a read-only origin may be intentional. If it warns, surface the failure and confirm the maintainer wants to continue.
 
 ### Step 2: Prepare the evidence queue
 
@@ -68,7 +68,7 @@ groups, recurring_clusters, summary, provenance
 
 Key contracts:
 
-- `cutoff = {basis, lower, upper, interval:"(lower,upper]", since_override}`. Each boundary cursor carries `timestamp`, `row_ordinal`, `row_sha256`, and journal identity. Equal timestamps remain distinct. Interior malformed rows advance only after a later valid row proves them interior; a malformed tail does not advance the upper cursor.
+- `cutoff = {basis, lower, upper, interval:"(lower,upper]", since_override}`. Each boundary cursor carries `timestamp`, `row_ordinal`, `row_sha256`, and journal identity. Equal timestamps remain distinct. The upper cursor advances past a malformed row only after a later valid row proves it interior; a malformed tail never advances the cursor.
 - `run = {queue_run_id, role, mode:"local", predecessor}`. `predecessor` pins the latest completed filing and its cutoff, or is null on legacy migration.
 - `due_claim = {attempted:false, outcome_ids:[], disposition:"not-applicable", warning:null}`. Evolve v1 has no DUE producer; do not invent a handle call.
 - Each `source_manifest[]` row declares `{source_id, reader, resolved_source, coverage, content_identity, cursor, warnings, reason}`. Coverage is exactly `read | absent | unreadable | stale | not_computable`.
@@ -79,7 +79,7 @@ The queue may contain source-authored suggestion text. It must never contain `re
 
 ### Step 3: Read eligibility as evidence state
 
-Preparation reads the raw/full journal range, scorecard rows, template registry, declared-v1 accepted clusters, active and archived consumption-contradiction sidecars, degradation rows, and completed prior evolve filings. It does not use the display-limited `journal show` surface.
+Preparation reads the raw/full journal range, scorecard rows, template registry, schema-v1 accepted clusters, active and archived consumption-contradiction sidecars, degradation rows, and completed prior evolve filings. It does not use the display-limited `journal show` surface.
 
 Eligibility has exactly four states:
 
@@ -109,10 +109,10 @@ Recurring-failure arithmetic groups strictly by `(target, change_type)` and unio
 
 **Recurring-failure gate**
 
-- **Inputs:** raw role=`retro-evolution` journal rows, prior declared-v1 rows in `_evolve/accepted-clusters.jsonl`, and the staged `(target, change_type)` key.
+- **Inputs:** raw role=`retro-evolution` journal rows, prior schema-v1 rows in `_evolve/accepted-clusters.jsonl`, and the staged `(target, change_type)` key.
 - **Success route:** read `_evolve/accepted-clusters.jsonl` directly. Group rows by the `(target, change_type)` key, take the union of distinct `work_item` values, and clear the gate only when the union size is **≥ K (K = 3)**. The proposal cites at least one row by `cluster_id`.
 - **Conservative fallback:** no prior unconsumed match yields `no_op` reason `no_accepted_cluster`; never fall back to another evidence class.
-- **Lifecycle constraints:** Run N may accept a candidate; Run N+1 may consume it. Same-run re-entry is forbidden, and a consumed row never fires again.
+- **Lifecycle constraints:** Run N may accept a candidate; Run N+1 may consume it. Same-run re-entry is forbidden — the enforced pause keeps a same-session burst of similar retros from self-amplifying into a binding edit — and a consumed row never fires again.
 
 The raw-clustering pass excludes rows whose context starts with `retro-backfill:`. Those rows belong to the pre-clustered consumption pass, so raw and backfill populations never stack toward K. `K < 3` is sub-threshold, `K == 3` is the first candidate, and `K > 3` remains one candidate with its full distinct member set.
 
@@ -134,7 +134,7 @@ Before deciding a proposal, classify its proposed effect:
 | removal | Deletes, collapses, or retires behavior. | no |
 | modification | Changes existing behavior. | yes when strengthening; no when loosening or clarifying |
 
-An addition or strengthening edit needs a sentence naming the motivating metric, rollback threshold, and time or sample horizon. If the lead would otherwise apply it but cannot author a defensible sunset, use `reject` or `escalate`; do not change the machine eligibility state.
+An addition or strengthening edit needs a sentence naming the motivating metric, rollback threshold, and time or sample horizon. That clause is what `/evolve --shrink` reads at its trial-window check; an addition without one accumulates silently and is never subtracted. If the lead would otherwise apply it but cannot author a defensible sunset, use `reject` or `escalate`; do not change the machine eligibility state.
 
 A verified consumption contradiction against a prior evolve addition triggers immediate sunset review. Present it before the regular queue, cite the contradiction ID and knowledge path, and treat an approved removal as a normal lead-authored removal.
 
@@ -176,7 +176,7 @@ For each `application.outcome=applied` byte change, add one version registration
 {item_id,target,template_id,template_path,pre_version,post_version,description}
 ```
 
-No-byte-change, reject, and unresolved/deferred decisions cannot register a version.
+No-byte-change, reject, and unresolved/deferred decisions cannot register a version. Registration is what links the edit to the next retro window's A/B signal; an unregistered post-edit version renders as `unregistered:<hash>` and carries no weight, so the edit is never measured.
 
 #### Recurring-cluster dispositions
 
@@ -199,7 +199,7 @@ Representative Evidence: <source evidence, verbatim>
 Disposition [y/edit/split/n]:
 ```
 
-`merge` may combine candidates sharing the same pair; its result carries the union of both candidates. On `n`, do not invoke the writer for cluster creation; record reject in the filing manifest instead. Canonical vocabulary consumed by accepted-cluster-append is filed only through Step 7.
+`merge` may combine candidates sharing the same `(target, change_type)` pair; its result carries the union of both candidates' members. On `n`, do not invoke the writer for cluster creation; record reject in the filing manifest instead. Canonical vocabulary consumed by accepted-cluster-append is filed only through Step 7.
 
 **Batch-confirmation mode (backfill input).** A maintainer may source pre-clustered candidates from `lore retro backfill`. Present one CLUSTER REVIEW prompt per candidate. Map the singular `change_type` to a one-element `--change-types` list in the resulting-cluster facts, tally `proposed / confirmed / merged / rejected`, and normalize the UI shorthand to the manifest vocabulary above. Do not auto-confirm operator decisions.
 
