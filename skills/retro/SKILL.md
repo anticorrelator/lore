@@ -215,7 +215,7 @@ Read `fixed_health` and its referenced calculation rows before reading headline 
 
 Healthy checks remain silent in the report — green narration turns to ritual and buries the one check that trips. This is load-bearing healthy silence, not permission to omit pack rows.
 
-### Check: Judge liveness (disposition: redirected per-gate to settlement run envelopes)
+##### Check: Judge liveness (disposition: redirected per-gate to settlement run envelopes)
 
 The normative calculation reads completed envelopes from `_settlement/runs/*.json`; it does not treat fixture-calibration logs as liveness — those record calibration ceremonies, not per-verdict activity, and sit legitimately empty over healthy windows. The zero-output signature remains `completed_runs_in_window == 0 AND settlement_queue_items_routed > 0`. Pack v1 applies the registered floor before classifying rates; below-floor is `abstained`, never green or tripped.
 
@@ -279,7 +279,7 @@ lore retro file "$SLUG" \
 
 The authoritative `retro-filing.json` is a single immutable assignment for the cycle. `judgment_accepted=true` means that assignment exists and matches. `filing_complete=true` means every required sanctioned sink exists and the terminal `event_type=retro-filing` telemetry row has landed.
 
-The immutable assignment requires primary, behavioral, escalation, proposal, scale-access, channel-flag, and completion-telemetry sinks. Their replay identities remain, respectively, `role + work_item + filing_id + sink`; that journal identity plus `proposal ordinal`; `cycle_id` with exact writer-field equality; `cycle_id + role + slot + signal_type`; and `event_type=retro-filing + filing_id`.
+The immutable assignment requires primary, behavioral, escalation, proposal, scale-access, channel-flag, and completion-telemetry sinks. Their replay identities are unchanged: the primary, behavioral, and escalation journal rows match on `role + work_item + filing_id + sink`; each substantive proposal on that journal identity plus its `proposal ordinal`; scale access on `cycle_id` with exact writer-field equality; channel flags on `cycle_id + role + slot + signal_type` with exact field equality; completion telemetry on `event_type=retro-filing + filing_id`.
 
 Every write goes through its sanctioned writer: `journal.sh`, `retro-scale-access-append.sh`, `retro-channel-flag-append.sh`, or `scorecard-append.sh`. The verb never appends their files directly. Completion telemetry is last.
 
