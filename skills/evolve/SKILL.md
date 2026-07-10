@@ -56,7 +56,7 @@ Run the hands-only prepare verb. Pass `--since` only when the caller explicitly 
 lore evolve prepare [--since <RFC3339>] --json
 ```
 
-`prepare` returns the immutable `_evolve/review-queues/<queue_id>.json` for the reconstructed cutoff and source snapshot. A matching queue is reused; a corrupt artifact, identity collision, journal prefix drift, or accepted-but-incomplete prior filing is refused with a named repair target.
+`prepare` publishes the immutable `_evolve/review-queues/<queue_id>.json` for the reconstructed cutoff and source snapshot. A matching queue is reused; a corrupt artifact, identity collision, journal prefix drift, or accepted-but-incomplete prior filing is refused with a named repair target.
 
 The queue-v1 top level is normative:
 
