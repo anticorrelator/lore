@@ -43,6 +43,11 @@ var (
 	doctorWarnS = lipgloss.NewStyle().Foreground(style.ColorWarn).Bold(true)
 )
 
+// tabIdentityRightPadding keeps the right-aligned repository/instance chrome
+// visually separated from the terminal edge without letting the tab row exceed
+// its exact width budget.
+const tabIdentityRightPadding = 2
+
 // View is the single wrapping point where terminal modes (alt screen, mouse)
 // and keyboard enhancements are applied to the rendered frame. Keep mode flags
 // here — scattering tea.NewView wrappers across call sites risks silently
@@ -158,8 +163,8 @@ func (m model) viewNoRepo() string {
 // three. The sessions section carries a needs-input marker (●) when any session
 // awaits input — the persistent announcement channel for agent spawns that never
 // steal focus. identity, when non-empty and it fits, is right-aligned into the
-// same row as the instance's "<repo> · <name>" chrome; it is dropped rather than
-// wrapped when the row is too narrow.
+// same row as the instance's "<repo> · <name>" chrome, followed by a small
+// right gutter; it is dropped rather than wrapped when the row is too narrow.
 func renderTabIndicator(activeTab appState, workCount, followupCount, settlementCount, sessionsCount, sessionsNeedsInput, width int, identity string) string {
 	section := func(key, label string, count int, active bool) string {
 		text := fmt.Sprintf("%s (%d)", label, count)
@@ -183,8 +188,8 @@ func renderTabIndicator(activeTab appState, workCount, followupCount, settlement
 	lineW := lipgloss.Width(line)
 	if identity != "" {
 		idW := lipgloss.Width(identity)
-		if lineW+1+idW <= width {
-			return line + strings.Repeat(" ", width-lineW-idW) + identity
+		if lineW+1+idW+tabIdentityRightPadding <= width {
+			return line + strings.Repeat(" ", width-lineW-idW-tabIdentityRightPadding) + identity + strings.Repeat(" ", tabIdentityRightPadding)
 		}
 	}
 	if lineW < width {

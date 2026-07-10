@@ -351,9 +351,9 @@ func TestEndLocalSessionClearsIdleGuard(t *testing.T) {
 }
 
 // TestTabIndicatorIdentityRendering covers the chrome bullet: the "<repo> · name"
-// identity right-aligns into the tab row when it fits and is dropped (never
-// wrapped) when the row is too narrow, at every width the row itself stays
-// exactly `width` visible columns.
+// identity right-aligns into the tab row with a two-cell edge gutter when it
+// fits and is dropped (never wrapped) when the row is too narrow, at every
+// width the row itself stays exactly `width` visible columns.
 func TestTabIndicatorIdentityRendering(t *testing.T) {
 	identity := "github.com/x/y · amber-otter"
 	idW := lipgloss.Width(identity)
@@ -369,9 +369,10 @@ func TestTabIndicatorIdentityRendering(t *testing.T) {
 		if lipgloss.Width(out) != wantW {
 			t.Fatalf("width %d: row width = %d, want %d", width, lipgloss.Width(out), wantW)
 		}
-		if baseW+1+idW <= width {
-			if !strings.HasSuffix(out, identity) {
-				t.Errorf("width %d: identity should be right-aligned, got %q", width, out)
+		if baseW+1+idW+tabIdentityRightPadding <= width {
+			wantSuffix := identity + strings.Repeat(" ", tabIdentityRightPadding)
+			if !strings.HasSuffix(out, wantSuffix) {
+				t.Errorf("width %d: identity should have a %d-cell right gutter, got %q", width, tabIdentityRightPadding, out)
 			}
 		} else if strings.Contains(out, "amber-otter") {
 			t.Errorf("width %d: identity should have been dropped, got %q", width, out)
