@@ -251,6 +251,11 @@ type model struct {
 	// guard for the needs_input/quiescent/resumed events: emit only when the
 	// incoming needs-input state differs from what we last journaled.
 	sessionIdle map[string]bool
+	// sessionModalBlocked records the last successfully classified modal state
+	// for each local session. The heartbeat emits modal_blocked only on an
+	// unlatched→modal edge; a classified clear deletes the latch so a later entry
+	// can emit again. Unclassifiable snapshots leave the latch unchanged.
+	sessionModalBlocked map[string]bool
 	// pendingClose holds slugs with a consumed close-request awaiting teardown,
 	// keyed by slug. Each entry carries the consumed request's identity (request
 	// id + reason) and its timing state; the exit ladder fires once the panel's
@@ -305,6 +310,10 @@ type model struct {
 	// nil value reads at most one live ScreenSnapshot and routes it through
 	// classifyScreen before the close state machine advances.
 	observeCloseFn func(work.SessionPanelModel) closeObservation
+	// observeModalFn injects one already-classified modal observation in tests.
+	// A nil value reads one live ScreenSnapshot and routes it through the shared
+	// classifyScreen matcher set on the Bubble Tea goroutine.
+	observeModalFn func(work.SessionPanelModel) modalObservation
 
 	showHelp bool
 	// helpViewport scrolls the help modal's keybinding list when it exceeds

@@ -39,6 +39,7 @@ const (
 	EventNeedsInput       = "needs_input"
 	EventQuiescent        = "quiescent"
 	EventResumed          = "resumed"
+	EventModalBlocked     = "modal_blocked"
 	EventRecovered        = "recovered"
 	EventClosed           = "closed"
 	EventOrphaned         = "orphaned"

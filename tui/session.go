@@ -30,6 +30,7 @@ func (m model) endLocalSessionClosed(slug, closeRequestID string) (model, []tea.
 	}
 	delete(m.localSessions, slug)
 	delete(m.sessionIdle, slug)
+	delete(m.sessionModalBlocked, slug)
 	return m, []tea.Cmd{
 		m.writeInstanceCmd(),
 		m.closedSpendJournalCmd(slug, ls, closeRequestID),
@@ -53,6 +54,7 @@ func (m model) endLocalSessionFailed(slug, closeRequestID, reason string) (model
 	}
 	delete(m.localSessions, slug)
 	delete(m.sessionIdle, slug)
+	delete(m.sessionModalBlocked, slug)
 	return m, []tea.Cmd{
 		m.writeInstanceCmd(),
 		m.closeFailedCmd(slug, requestID, reason, ls),
@@ -226,6 +228,7 @@ func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (m
 	if m.localSessions == nil {
 		m.localSessions = make(map[string]liveSession)
 	}
+	delete(m.sessionModalBlocked, slug)
 	m.localSessions[slug] = meta
 
 	cmds := []tea.Cmd{cmd}

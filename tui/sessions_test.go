@@ -344,9 +344,71 @@ func TestNeedsInputChangedUntrackedSlug(t *testing.T) {
 func TestEndLocalSessionClearsIdleGuard(t *testing.T) {
 	m := sessionModelWithRealScript(t)
 	m.sessionIdle = map[string]bool{"demo": true}
+	m.sessionModalBlocked = map[string]bool{"demo": true}
 	m, _ = m.endLocalSession("demo")
 	if _, ok := m.sessionIdle["demo"]; ok {
 		t.Fatal("idle guard not cleared on session end")
+	}
+	if _, ok := m.sessionModalBlocked["demo"]; ok {
+		t.Fatal("modal guard not cleared on session end")
+	}
+}
+
+// TestAdvanceModalObservationsJournalsEntries drives the heartbeat observation
+// step through modal entry, persistence, an unobservable frame, classified
+// clear, and re-entry. It uses the real sole writer so the row's mandatory
+// reason and running-session identity are verified end to end.
+func TestAdvanceModalObservationsJournalsEntries(t *testing.T) {
+	m := sessionModelWithRealScript(t)
+	m.sessionPanels = map[string]work.SessionPanelModel{"demo": {}}
+	modalState, modalKnown := classifyScreen("claude-code", work.ScreenSnapshot{Rows: ccOptionSelectRows})
+	clearState, clearKnown := classifyScreen("claude-code", work.ScreenSnapshot{Rows: ccComposerRows})
+	if !modalKnown || !modalState.interactive || !clearKnown || clearState.interactive {
+		t.Fatal("shared classifier fixtures do not provide modal and clear preconditions")
+	}
+	observations := []modalObservation{
+		{known: modalKnown, blocked: modalState.interactive},
+		{known: modalKnown, blocked: modalState.interactive},
+		{},
+		{known: clearKnown, blocked: clearState.interactive},
+		{known: modalKnown, blocked: modalState.interactive},
+	}
+	m.observeModalFn = func(work.SessionPanelModel) modalObservation {
+		obs := observations[0]
+		observations = observations[1:]
+		return obs
+	}
+
+	for i := 0; i < 5; i++ {
+		var cmds []tea.Cmd
+		m, cmds = m.advanceModalObservations()
+		for _, cmd := range cmds {
+			runJournalCmds(t, cmd)
+		}
+		if i == 2 && !m.sessionModalBlocked["demo"] {
+			t.Fatal("unobservable frame cleared modal latch")
+		}
+	}
+
+	data, err := os.ReadFile(filepath.Join(m.config.KnowledgeDir, "_sessions", "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("modal entries emitted %d rows, want 2", len(lines))
+	}
+	for _, line := range lines {
+		var ev session.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatal(err)
+		}
+		if ev.Event != session.EventModalBlocked || ev.Reason != "modal" || ev.Slug != "demo" {
+			t.Fatalf("modal row = %+v", ev)
+		}
+		if ev.RequestID != "" {
+			t.Fatalf("modal row carried request_id %q", ev.RequestID)
+		}
 	}
 }
 

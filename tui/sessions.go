@@ -16,6 +16,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
@@ -154,6 +155,65 @@ func journalCmd(script, kdir string, ev session.Event) tea.Cmd {
 	return func() tea.Msg {
 		return journalResultMsg{err: session.AppendEvent(script, kdir, ev)}
 	}
+}
+
+type modalObservation struct {
+	known   bool
+	blocked bool
+}
+
+// observeModalPanel reads one screen and reuses the readiness classifier's
+// interactive predicate. Resolution or snapshot failures are unobservable, not
+// clears: callers preserve the prior latch until a successful classification.
+func observeModalPanel(panel work.SessionPanelModel) modalObservation {
+	framework, err := config.ResolveTUILaunchFramework()
+	if err != nil {
+		return modalObservation{}
+	}
+	snap, err := panel.ScreenState()
+	if err != nil {
+		return modalObservation{}
+	}
+	state, ok := classifyScreen(framework, snap)
+	return modalObservation{known: ok, blocked: ok && state.interactive}
+}
+
+func (m model) observeModal(panel work.SessionPanelModel) modalObservation {
+	if m.observeModalFn != nil {
+		return m.observeModalFn(panel)
+	}
+	return observeModalPanel(panel)
+}
+
+// advanceModalObservations emits exactly one modal_blocked row per successfully
+// observed nonmodal→modal entry. Persistent modal frames are suppressed, a
+// classified clear silently re-arms, and read/classification failures preserve
+// the latch so transient observation gaps cannot manufacture duplicate entries.
+func (m model) advanceModalObservations() (model, []tea.Cmd) {
+	var cmds []tea.Cmd
+	for slug, ls := range m.localSessions {
+		panel, ok := m.sessionPanels[slug]
+		if !ok {
+			continue
+		}
+		obs := m.observeModal(panel)
+		if !obs.known {
+			continue
+		}
+		if !obs.blocked {
+			delete(m.sessionModalBlocked, slug)
+			continue
+		}
+		if m.sessionModalBlocked[slug] {
+			continue
+		}
+		if m.sessionModalBlocked == nil {
+			m.sessionModalBlocked = make(map[string]bool)
+		}
+		m.sessionModalBlocked[slug] = true
+		cmds = append(cmds, journalCmd(m.eventScript, m.config.KnowledgeDir, m.modalBlockedEventFor(slug, ls)))
+	}
+	return m, cmds
 }
 
 // emitSpawnedCmd deletes the claimed row then journals `spawned` — the delete is
@@ -733,6 +793,20 @@ func (m model) idleEventFor(slug, event string, ls liveSession) session.Event {
 		Slug:          slug,
 		SessionType:   ls.typ,
 		Initiator:     ls.initiator,
+	}
+}
+
+// modalBlockedEventFor builds the entry-only modal classification row. Like the
+// idle transitions it describes a running session rather than a queue request,
+// so it carries no request_id; reason=modal is mandatory at the sole writer.
+func (m model) modalBlockedEventFor(slug string, ls liveSession) session.Event {
+	return session.Event{
+		Event:         session.EventModalBlocked,
+		ActorInstance: session.StrPtr(m.instanceName),
+		Slug:          slug,
+		SessionType:   ls.typ,
+		Initiator:     ls.initiator,
+		Reason:        sendReasonModal,
 	}
 }
 

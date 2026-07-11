@@ -828,6 +828,34 @@ PYEOF
   [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
 }
 
+@test "append accepts modal_blocked with slug and reason=modal" {
+  run bash "$APPEND" --row '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run jq -e 'select(.event=="modal_blocked") | .slug=="feature-x" and .reason=="modal" and (has("request_id")|not)' "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "append rejects modal_blocked without a slug" {
+  run bash "$APPEND" --row '{"event":"modal_blocked","reason":"modal"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"missing required field: slug"* ]]
+  [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
+}
+
+@test "append rejects modal_blocked without reason" {
+  run bash "$APPEND" --row '{"event":"modal_blocked","slug":"feature-x"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"missing required field: reason"* ]]
+  [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
+}
+
+@test "append rejects modal_blocked with a non-modal reason" {
+  run bash "$APPEND" --row '{"event":"modal_blocked","slug":"feature-x","reason":"generating"}' --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"modal_blocked requires reason=modal"* ]]
+  [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
+}
+
 @test "append accepts string-valued closed.links.close_requests" {
   run bash "$APPEND" --row '{"event":"closed","request_id":"spawn-1","links":{"close_requests":"[\"term-1\",\"explicit-2\"]"}}' --kdir "$TEST_KDIR"
   [ "$status" -eq 0 ]
@@ -1018,6 +1046,16 @@ coordinate_event_vocab() {
   [ "$w" = "$m" ]
 }
 
+@test "coordinate: modal_blocked is accepted without projecting a modal bucket" {
+  echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  run bash "$COORDINATE" --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '
+    (.source_manifest[] | select(.source_id=="session-journal") | .read_status) == "ok"
+    and ([.buckets[][] | select(.source_id=="session-journal")] | length) == 0
+  '
+}
+
 @test "wait: an exact-slug close matches, emitting the matched row and the cursor row in one read" {
   write_instance inst-a feature-x
   : > "$TEST_KDIR/_sessions/events.jsonl"
@@ -1044,6 +1082,26 @@ coordinate_event_vocab() {
   wait
   [ "$status" -eq 0 ]
   [[ "$output" == *'"event":"close_failed"'* ]]
+}
+
+@test "wait: --until modal_blocked wakes on the entry row" {
+  write_instance inst-a feature-x
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  ( sleep 1
+    echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  run bash "$WAIT" feature-x --until modal_blocked --since 0 --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"modal_blocked"'* ]]
+}
+
+@test "wait: modal_blocked does not change the default close wake set" {
+  write_instance inst-a feature-x
+  echo '{"event":"modal_blocked","slug":"feature-x","reason":"modal"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null
+  local out code
+  out="$(bash "$WAIT" feature-x --since 0 --timeout 1 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
+  [ "$code" -eq 2 ]
+  echo "$out" | jq -e '.outcome=="timeout" and (.until==["closed","close_failed","orphaned"])'
 }
 
 @test "wait: the default until-set wakes on orphaned" {

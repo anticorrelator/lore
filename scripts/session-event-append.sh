@@ -35,6 +35,7 @@
 #                harness_turn_ended | spawn_failed | request_reclaimed |
 #                request_abandoned | request_cancelled | close_requested |
 #                close_failed | send_requested | sent | send_refused |
+#                modal_blocked |
 #                review_flagged | review_held | review_notified | review_released
 #
 # Conditional rules:
@@ -42,6 +43,8 @@
 #   request_reclaimed, request_abandoned, request_cancelled, close_requested,
 #   close_failed, send_requested, sent, send_refused) REQUIRE a non-empty
 #   request_id.
+#   modal_blocked requires a non-empty slug and exactly reason=modal; it is a
+#   running-session transition, not a queue-lifecycle event.
 #   Work-item review events (review_flagged, review_held, review_notified,
 #   review_released) REQUIRE a non-empty slug — a third event class keyed to a
 #   work item rather than a queue request. gate_id (optional, omit-when-empty)
@@ -122,15 +125,28 @@ EVENT=$(printf '%s' "$ROW" | jq -r '.event // ""')
 case "$EVENT" in
   requested|claimed|spawned|needs_input|quiescent|resumed|recovered|closed|orphaned|\
 step_completed|harness_turn_ended|spawn_failed|request_reclaimed|\
-request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused|\
+request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused|modal_blocked|\
 review_flagged|review_held|review_notified|review_released) ;;
   "")
     fail "missing required field: event"
     ;;
   *)
-    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, orphaned, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, review_flagged, review_held, review_notified, review_released)"
+    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, orphaned, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, modal_blocked, review_flagged, review_held, review_notified, review_released)"
     ;;
 esac
+
+# --- Modal-entry classification events require session identity and evidence ---
+if [[ "$EVENT" == "modal_blocked" ]]; then
+  if ! printf '%s' "$ROW" | jq -e '(.slug // "") != ""' >/dev/null 2>&1; then
+    fail "missing required field: slug (required for modal-entry event 'modal_blocked')"
+  fi
+  if ! printf '%s' "$ROW" | jq -e 'has("reason") and .reason == "modal"' >/dev/null 2>&1; then
+    if ! printf '%s' "$ROW" | jq -e 'has("reason")' >/dev/null 2>&1; then
+      fail "missing required field: reason (modal_blocked requires reason=modal)"
+    fi
+    fail "invalid field: reason (modal_blocked requires reason=modal)"
+  fi
+fi
 
 # --- Queue-lifecycle events require a non-empty request_id ---
 case "$EVENT" in

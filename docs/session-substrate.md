@@ -499,7 +499,7 @@ protocol terminal verbs, stop hooks) appends through the one sanctioned writer,
 | `session_type` | string | `spec\|implement\|chat\|worker` — the session's type (the request's `type` maps to this). |
 | `initiator` | string | `agent\|human`. |
 | `request_id` | string | The request this event concerns; required for queue-lifecycle events. |
-| `reason` | string | Failure/reclaim reason; also the review-gate rationale carried by `review_flagged`/`review_held`/`review_released`. Also carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`. |
+| `reason` | string | Failure/reclaim reason; also the review-gate rationale carried by `review_flagged`/`review_held`/`review_released`. Also carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`; `modal_blocked` requires exactly `modal`. |
 | `gate_id` | string | Review-gate audit join key. Omit-when-empty. A gate-open verb (`review_flagged`/`review_held`) sets it as the row's `event_id`; the `review_released` row echoes it here so a reader pairs release→open without replaying state. See [docs/review-gates.md](review-gates.md). |
 | `links` | object | `{work_item?, artifact?, close_requests?}` — string-valued pointers and correlations. Review events point `artifact` at the review packet. On `closed` only, `close_requests` is a string containing a compact JSON array of distinct, non-empty consumed close-request IDs in first-consumed order (for example `"[\"term-1\",\"explicit-2\"]"`); the string representation preserves existing `map[string]string` Go readers while safely carrying opaque IDs. Writer defaults to `{}`. For a worker session (derived slug `<work-item-slug>--w<n>`) the writer derives `links.work_item` = the base work-item slug when the caller did not set it, so every worker lifecycle row points back at its work item (see [Worker sessions](#worker-sessions)). |
 | `spend` | object \| null | Session token spend, on `closed` and `orphaned`. `duration_seconds` is always present; a `basis` enum (`transcript\|rollout\|store\|duration-only`) marks how the tokens were sourced. When the harness exposes a deterministic transcript binding (claude-code, via a spawn-time `--session-id`), the TUI merges the D1 token vocabulary — `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_output_tokens`, `total_tokens`, `cost_usd`, `model`, `harness` (fields the harness does not expose are omitted, never zero-filled). Every gap — codex/opencode-hosted sessions, an absent transcript, a probe timeout, an abrupt quit — degrades to `{duration_seconds, basis:"duration-only"}`. Extraction runs at teardown or recovery via `scripts/session-spend.sh`; the row still flows only through the sole writer. |
@@ -520,6 +520,7 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `needs_input` | TUI | a running session is waiting on input |
 | `quiescent` | TUI | a running session went idle |
 | `resumed` | TUI | a session resumed after idle/input |
+| `modal_blocked` | TUI | the shared readiness classifier observed a running session enter a harness modal; carries `reason=modal`, emits once per observed entry, and carries no `request_id` |
 | `recovered` | TUI | a restarted/replacement instance adopted a still-running tmux-hosted session from a dead instance's registry row; `reason` names the predecessor (`adopted from <dead-instance>`). Session-transition class — no `request_id` |
 | `closed` | TUI | a session ended (carries `spend`: token counts where the harness exposes them, else duration-only) |
 | `orphaned` | TUI | a dead instance's atomic recovery owner found no surviving tmux session; carries `reason=instance-death`, the dead `target_instance`, persisted spawn `request_id` when available, and evidence-bounded `spend` |
@@ -743,8 +744,11 @@ rather than growing this contract.**
   when the `--until` set names a queue/pre-spawn event, where an unhosted slug is
   the normal starting state. Read-side only — it adds no writer, no event, and no
   TUI surface. See its header for the race-free close-then-wait idiom.
-  A future modal-detection journal event may join the wake set once that separate
-  event contract lands; this reader does not introduce or emit it.
+  Modal detection is an explicit opt-in wake edge: `--until modal_blocked` wakes
+  on the next shared-classifier entry row (`reason=modal`). The default remains
+  the close/recovery terminal set, and consumers re-arm from the returned cursor.
+  Because modal clear is silent, coordinate-status recognizes the token but does
+  not project a current-state bucket from it.
 - **TUI integration — landed (Phase 2).** The per-instance registry, instance
   identity/naming, the pending-queue scan, atomic-rename claim, D4 lifecycle
   handling, badging, and journal emission wiring are implemented in `tui/` per this

@@ -18,7 +18,7 @@ type genEvent struct{ ev Event }
 func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 	events := []string{
 		EventRequested, EventClaimed, EventSpawned, EventNeedsInput, EventQuiescent,
-		EventResumed, EventRecovered, EventClosed, EventStepCompleted, EventHarnessTurnEnded,
+		EventResumed, EventModalBlocked, EventRecovered, EventClosed, EventStepCompleted, EventHarnessTurnEnded,
 		EventOrphaned,
 		EventSpawnFailed, EventReclaimed, EventAbandoned, EventCancelled,
 		EventSendRequested, EventSent, EventSendRefused, EventCloseFailed,
@@ -51,6 +51,10 @@ func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 	}
 	if r.Intn(2) == 0 {
 		ev.Links = map[string]string{"work_item": tok()}
+	}
+	if ev.Event == EventModalBlocked {
+		ev.Slug = tok()
+		ev.Reason = "modal"
 	}
 	// Cover both closed-spend shapes: the duration-only degradation and the
 	// enriched D1 token vocabulary a claude-code teardown merges in.

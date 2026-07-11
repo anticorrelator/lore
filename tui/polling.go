@@ -275,6 +275,12 @@ func (m model) handleIndexPollTick() (model, tea.Cmd) {
 		var sendCmds []tea.Cmd
 		m, sendCmds = m.advanceSendVerifications()
 		cmds = append(cmds, sendCmds...)
+		// Observe modal-entry edges on the same heartbeat and Bubble Tea goroutine
+		// as the other screen consumers. The returned append commands do the disk
+		// write asynchronously through the sole journal writer.
+		var modalCmds []tea.Cmd
+		m, modalCmds = m.advanceModalObservations()
+		cmds = append(cmds, modalCmds...)
 	}
 	return m, tea.Batch(cmds...)
 }
