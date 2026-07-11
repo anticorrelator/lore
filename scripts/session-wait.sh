@@ -6,7 +6,8 @@
 # activity instead of the coordinator hand-rolling a sleep loop.
 #
 # Usage:
-#   lore session wait <slug> [--until <events>] [--since <cursor>]
+#   lore session wait (<slug> | --work-item <base-slug>)
+#                            [--until <events>] [--since <cursor>]
 #                            [--request-id <id>] [--timeout <sec>] [--ttl <sec>]
 #                            [--kdir <path>] [--json]
 #
@@ -21,19 +22,20 @@
 #                     Treat the value as opaque — pass back a cursor this verb or
 #                     `session events` reported, never one you computed.
 #   --request-id <id> Also require an exact request_id match. Use this when a slug
-#                     can be reused across sessions so a late row from the prior
-#                     session cannot satisfy the new wait. Omit it to preserve
-#                     slug-and-event matching; no request-id guard is inferred.
+#                     can be reused across sessions so a late `closed` row from
+#                     the prior session cannot satisfy the new wait. The guard
+#                     applies to `closed` only; a target-matched `close_failed`
+#                     remains a deliberately sloppy wake for an exact re-read.
+#   --work-item <slug> Match the base slug and canonical derived worker slugs
+#                     `<slug>--w<n>`. This is an alternative to positional slug.
 #   --timeout <sec>   How long to wait before giving up (default: 60).
 #   --ttl <sec>       Liveness window for the owning-instance check (default: 30).
 #   --kdir <path>     Knowledge-store override (test isolation).
 #   --json            Emit one result object instead of plain rows (see below).
 #
-# A row matches when its slug equals <slug> exactly, its event is in the until-set,
-# and — only when --request-id is supplied — its request_id equals that value.
-# Slug matching is exact string equality on purpose: a worker session runs under
-# a derived slug `<slug>--w<n>`, so matching by substring would wake a parent wait
-# on its own worker's close.
+# Positional slug matching is exact. Work-item matching accepts only the exact base
+# or its canonical `<base>--w<n>` worker form. When --request-id is supplied it
+# narrows `closed` rows only; other requested events remain loose wake edges.
 #
 # Output (plain):
 #   On a match: the matched event row, then a final {"next_cursor": N} row — both
@@ -43,8 +45,8 @@
 #   replay, and it never re-matches the row it just consumed.
 #
 # Output (--json): one object {outcome, matched, next_cursor, slug, until} on every
-#   terminal — outcome is "matched" | "timeout" | "session_gone", matched is the
-#   event row or null.
+#   terminal — outcome is "matched" | "timeout" | "session_gone" |
+#   "internal_error", matched is the event row or null.
 #
 # Exit codes (meanings are local to this verb — do not read them as a cross-verb
 # contract):
@@ -59,6 +61,8 @@
 #      unhosted slug is the normal starting state there. A crashed instance can be
 #      adopted by a replacement (which journals `recovered`), so a session-gone in
 #      that window is re-armable — retry from the emitted cursor.
+#   4  internal error: the reference reader failed on all three attempts. This is
+#      distinct from timeout 2; retry the operation after fixing the dependency.
 #
 # Watching a human-initiated session: those are held open at protocol terminus and
 # do NOT journal `closed` there — their terminus signal is `close_requested` with
@@ -77,6 +81,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 SLUG_ARG=""
+WORK_ITEM=""
+WORK_ITEM_SET=0
 UNTIL="closed,close_failed,orphaned"
 SINCE=""
 SINCE_SET=0
@@ -87,6 +93,7 @@ KDIR_OVERRIDE=""
 JSON_MODE=0
 REQUEST_ID=""
 REQUEST_ID_SET=0
+EVENTS_RETRY_DELAYS=(1 2)
 
 # Mirror of the sole writer's event vocabulary (session-event-append.sh's
 # validation case-arm). tests/session-verbs.bats cross-checks this list against
@@ -104,6 +111,7 @@ while [[ $# -gt 0 ]]; do
     --until) UNTIL="$2"; shift 2 ;;
     --since) SINCE="$2"; SINCE_SET=1; shift 2 ;;
     --request-id) REQUEST_ID="$2"; REQUEST_ID_SET=1; shift 2 ;;
+    --work-item) WORK_ITEM="$2"; WORK_ITEM_SET=1; shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --ttl) TTL="$2"; shift 2 ;;
     --kdir) KDIR_OVERRIDE="$2"; shift 2 ;;
@@ -111,7 +119,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) sed -n '2,72p' "$0"; exit 0 ;;
     --*)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-wait.sh <slug> [--until <events>] [--since <cursor>] [--request-id <id>] [--timeout <sec>] [--ttl <sec>] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-wait.sh (<slug> | --work-item <base-slug>) [--until <events>] [--since <cursor>] [--request-id <id>] [--timeout <sec>] [--ttl <sec>] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
     *)
@@ -137,8 +145,16 @@ fail() {
 command -v jq &>/dev/null || fail "jq is required but not found on PATH"
 command -v python3 &>/dev/null || fail "python3 is required but not found on PATH"
 
-[[ -n "$SLUG_ARG" ]] || fail "no target: pass a <slug>"
-SLUG="$SLUG_ARG"
+if [[ -n "$SLUG_ARG" && $WORK_ITEM_SET -eq 1 ]]; then
+  fail "multiple targets: pass either a positional <slug> or --work-item, not both"
+fi
+if [[ -z "$SLUG_ARG" && $WORK_ITEM_SET -eq 0 ]]; then
+  fail "no target: pass a positional <slug> or --work-item <base-slug>"
+fi
+if [[ $WORK_ITEM_SET -eq 1 && -z "$WORK_ITEM" ]]; then
+  fail "invalid --work-item: value must be non-empty"
+fi
+SLUG="${WORK_ITEM:-$SLUG_ARG}"
 
 if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
   fail "invalid --timeout: '$TIMEOUT' (must be a non-negative integer)"
@@ -189,6 +205,33 @@ fi
 
 SESSIONS_DIR="$KNOWLEDGE_DIR/_sessions"
 EVENTS_SH="$SCRIPT_DIR/session-events.sh"
+EVENTS_FILE="$SESSIONS_DIR/events.jsonl"
+
+# A supplied cursor is a row boundary, not an arbitrary byte offset. Reject an
+# interior offset here so the tolerant reference reader never mistakes a valid
+# row suffix for corrupt JSON. Past-EOF retains the reader's reset behavior.
+if [[ $SINCE_SET -eq 1 && "$SINCE" -gt 0 ]]; then
+  ALIGNMENT_STATUS=0
+  python3 - "$EVENTS_FILE" "$SINCE" <<'PYEOF' || ALIGNMENT_STATUS=$?
+import os, sys
+
+path, cursor = sys.argv[1], int(sys.argv[2])
+try:
+    size = os.path.getsize(path)
+except FileNotFoundError:
+    size = 0
+if cursor <= size:
+    with open(path, "rb") as f:
+        f.seek(cursor - 1)
+        if f.read(1) != b"\n":
+            raise SystemExit(2)
+PYEOF
+  case "$ALIGNMENT_STATUS" in
+    0) ;;
+    2) fail "invalid --since cursor $SINCE: cursor-not-row-aligned (preceding byte is not newline); reuse a next_cursor emitted by lore session events or lore session wait" ;;
+    *) fail "could not validate --since cursor $SINCE" ;;
+  esac
+fi
 
 # --until rendered as a JSON array — reused for matching and the --json terminal.
 UNTIL_JSON="$(printf '%s\n' "${UNTIL_TOKENS[@]}" | jq -R . | jq -s -c .)"
@@ -196,21 +239,76 @@ UNTIL_JSON="$(printf '%s\n' "${UNTIL_TOKENS[@]}" | jq -R . | jq -s -c .)"
 # One incremental read from the given cursor. Composing the reference reader means
 # torn-row, interior-malformed, and past-EOF-reset tolerance are inherited, not
 # re-derived here. Echoes the reader's {events, next_cursor} object.
-read_from() {
-  bash "$EVENTS_SH" --json --since "$1" --kdir "$KNOWLEDGE_DIR"
+# Run the reference reader at most three times. The fixed 1s/2s backoff is
+# intentionally bounded: this remains a caller-owned wait, not a supervisor.
+run_events() {
+  local output attempt
+  for attempt in 0 1 2; do
+    if output="$(bash "$EVENTS_SH" "$@")"; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+    if [[ $attempt -lt 2 ]]; then
+      sleep "${EVENTS_RETRY_DELAYS[$attempt]}"
+    fi
+  done
+  return 1
 }
 
-# First event in a read whose slug equals SLUG exactly, whose event is in the
-# until-set, and whose request_id equals REQUEST_ID when the caller supplied that
-# guard; or empty output. jq string equality — never substring or inferred guard.
+read_from() {
+  run_events --json --since "$1" --kdir "$KNOWLEDGE_DIR"
+}
+
+# First target-matched event in the until-set. Positional targets are exact;
+# work-item targets admit only the base and canonical worker suffix. A supplied
+# request ID narrows `closed` only; other requested outcomes remain loose wakes.
 first_match() {
   printf '%s' "$1" | jq -c --arg slug "$SLUG" --argjson until "$UNTIL_JSON" \
     --arg request_id "$REQUEST_ID" --argjson request_id_set "$REQUEST_ID_SET" \
-    'first(.events[] | select(
-      .slug == $slug
+    --argjson work_item_set "$WORK_ITEM_SET" \
+    'def target_matches:
+      . == $slug or (
+        $work_item_set == 1
+        and startswith($slug + "--w")
+        and (.[($slug | length) + 3:] | test("^[0-9]+$"))
+      );
+    first(.events[] | select(
+      (.slug | target_matches)
       and (.event as $e | $until | index($e))
-      and ($request_id_set == 0 or .request_id? == $request_id)
+      and ($request_id_set == 0 or .event != "closed" or .request_id? == $request_id)
     ))' 2>/dev/null || true
+}
+
+# Echo one live owner for the active target mode. Work-item mode deliberately
+# mirrors target_matches so a live derived worker suppresses session-gone.
+resolve_target_owner() {
+  if [[ $WORK_ITEM_SET -eq 0 ]]; then
+    resolve_session_owner "$SESSIONS_DIR/instances" "$SLUG" "$TTL"
+    return
+  fi
+  python3 - "$SESSIONS_DIR/instances" "$SLUG" "$TTL" <<'PYEOF'
+import json, os, re, sys, time
+
+instances_dir, base, ttl = sys.argv[1], sys.argv[2], float(sys.argv[3])
+worker = re.compile(re.escape(base) + r"--w[0-9]+\Z")
+now = time.time()
+if os.path.isdir(instances_dir):
+    for name in sorted(os.listdir(instances_dir)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(instances_dir, name)
+        try:
+            if now - os.path.getmtime(path) > ttl:
+                continue
+            with open(path) as f:
+                row = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if any((s.get("slug") == base or worker.fullmatch(s.get("slug") or ""))
+               for s in row.get("sessions") or []):
+            print(row.get("name", ""))
+            raise SystemExit(0)
+PYEOF
 }
 
 emit_matched() {
@@ -240,16 +338,29 @@ emit_terminal() {
   exit "$code"
 }
 
+emit_internal_error() {
+  local cursor="$1"
+  if [[ $JSON_MODE -eq 1 ]]; then
+    printf '%s\n' "$(jq -n --argjson nc "$cursor" --arg slug "$SLUG" \
+      --argjson until "$UNTIL_JSON" \
+      '{outcome: "internal_error", matched: null, next_cursor: $nc, slug: $slug, until: $until}')"
+  elif [[ "$cursor" != "null" ]]; then
+    jq -cn --argjson nc "$cursor" '{next_cursor: $nc}'
+  fi
+  echo "[session] internal error: session-events failed after 3 attempts; fix the reader dependency and retry" >&2
+  exit 4
+}
+
 # --- Baseline: default to the journal's current end ("wake on what happens next") ---
 if [[ $SINCE_SET -eq 1 ]]; then
   CURSOR="$SINCE"
 else
-  CURSOR="$(bash "$EVENTS_SH" --cursor-only --kdir "$KNOWLEDGE_DIR")"
+  CURSOR="$(run_events --cursor-only --kdir "$KNOWLEDGE_DIR")" || emit_internal_error null
 fi
 
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
 while :; do
-  RESULT="$(read_from "$CURSOR")" || fail "session-events read failed"
+  RESULT="$(read_from "$CURSOR")" || emit_internal_error "$CURSOR"
   MATCH="$(first_match "$RESULT")"
   if [[ -n "$MATCH" && "$MATCH" != "null" ]]; then
     NC="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
@@ -258,13 +369,13 @@ while :; do
   CURSOR="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
 
   if [[ $LIVENESS_ENABLED -eq 1 ]]; then
-    OWNER="$(resolve_session_owner "$SESSIONS_DIR/instances" "$SLUG" "$TTL")"
+    OWNER="$(resolve_target_owner)"
     if [[ -z "$OWNER" ]]; then
       # Registry removal precedes the terminal journal append during teardown.
       # Liveness is therefore only a hint: give the authoritative journal one
       # short grace, then read exactly once more before declaring session-gone.
       sleep "$SESSION_GONE_GRACE_SECONDS"
-      RESULT="$(read_from "$CURSOR")" || fail "session-events read failed"
+      RESULT="$(read_from "$CURSOR")" || emit_internal_error "$CURSOR"
       MATCH="$(first_match "$RESULT")"
       NC="$(printf '%s' "$RESULT" | jq -r '.next_cursor')"
       if [[ -n "$MATCH" && "$MATCH" != "null" ]]; then

@@ -718,19 +718,33 @@ rather than growing this contract.**
 - **Blocking read verb — landed.** `lore session wait <slug>` is the blocking
   front on the journal: it polls `session events` from a cursor and returns when a
   row matches `<slug>` exactly (never by substring, so a worker's `<slug>--w<n>`
-  close never wakes a parent wait) and an event in its `--until` set (default
-  `closed,close_failed,orphaned`, the close/recovery terminal set). Callers watching a reused slug
-  can add `--request-id <id>` to require that exact row correlation; when omitted,
-  matching remains slug-and-event only, with no inferred guard. Exit codes carry
-  the outcome — 0 matched, 2 timed out, 3 session-gone — and every non-error exit
-  hands back a resume cursor so a woken consumer re-arms with `--since` instead of
-  replaying. Instance liveness is only a session-gone hint because registry
-  removal can precede the terminal journal append: after liveness disappears,
+  close never wakes a positional parent wait) and an event in its `--until` set
+  (default `closed,close_failed,orphaned`, the close/recovery terminal set). The
+  alternate `--work-item <base-slug>` target matches both the exact base and only
+  canonical derived `<base-slug>--w<n>` worker slugs, in journal rows and the live
+  registry; supplying it together with a positional slug is a usage error. Callers
+  watching a reused slug can add `--request-id <id>` to narrow `closed` rows to
+  that exact correlation. Other requested outcomes — notably a slug-matched
+  `close_failed` carrying a distinct close-request ID — remain a deliberately
+  sloppy wake: waking ends sleep only, and the coordinator re-reads the journal
+  from the returned cursor to make its exact decision. Exit codes carry the
+  outcome: 0 matched, 1 usage/error, 2 timed out, 3 session-gone, and 4 exhausted
+  internal reader failure. Both baseline and incremental `session events` calls
+  receive three attempts with 1s then 2s backoff; exhaustion is never translated
+  into timeout 2. Every non-error exit hands back a resume cursor so a woken
+  consumer re-arms with `--since` instead of replaying. A supplied `--since`
+  cursor at or before EOF must point immediately after a newline (or be 0); an
+  interior offset fails with `cursor-not-row-aligned` and a remediation hint,
+  while past-EOF reset and the reference reader's interior-malformed/torn-tail
+  tolerance remain unchanged. Instance liveness is only a session-gone hint
+  because registry removal can precede the terminal journal append: after liveness disappears,
   `wait` gives the journal a two-second grace and reads once more before returning
   3. The journal row wins if it lands in that window. Session-gone is suppressed
   when the `--until` set names a queue/pre-spawn event, where an unhosted slug is
   the normal starting state. Read-side only — it adds no writer, no event, and no
   TUI surface. See its header for the race-free close-then-wait idiom.
+  A future modal-detection journal event may join the wake set once that separate
+  event contract lands; this reader does not introduce or emit it.
 - **TUI integration — landed (Phase 2).** The per-instance registry, instance
   identity/naming, the pending-queue scan, atomic-rename claim, D4 lifecycle
   handling, badging, and journal emission wiring are implemented in `tui/` per this

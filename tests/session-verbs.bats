@@ -1079,6 +1079,87 @@ coordinate_event_vocab() {
   [ "$(printf '%s\n' "$out" | jq -rs '[.[] | select(has("event")) | .request_id] | join(",")')" = "next-rid" ]
 }
 
+@test "wait: --request-id narrows closed only and preserves a close_failed sloppy wake" {
+  write_instance inst-a feature-x
+  printf '%s\n' \
+    '{"event":"closed","request_id":"prior-spawn","slug":"feature-x"}' \
+    '{"event":"close_failed","request_id":"close-request","slug":"feature-x","reason":"approval-required"}' \
+    > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WAIT" feature-x --request-id current-spawn --since 0 --timeout 10 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | jq -rs '[.[] | select(has("event")) | .event + ":" + .request_id] | join(",")')" = "close_failed:close-request" ]
+}
+
+@test "wait: --work-item matches exact-base and canonical workers only and is an alternate target" {
+  printf '%s\n' '{"event":"closed","request_id":"base-rid","slug":"feature-x"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WAIT" --work-item feature-x --since 0 --timeout 10 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"slug":"feature-x"'* ]]
+
+  printf '%s\n' '{"event":"closed","request_id":"worker-rid","slug":"feature-x--w12"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WAIT" --work-item feature-x --since 0 --timeout 10 --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"slug":"feature-x--w12"'* ]]
+
+  write_instance inst-a feature-x--w2
+  printf '%s\n' '{"event":"closed","request_id":"lookalike","slug":"feature-x--w2-extra"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WAIT" --work-item feature-x --since 0 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 2 ]                         # live canonical worker prevents session-gone
+
+  run bash "$WAIT" feature-x --work-item feature-x --since 0 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"either a positional <slug> or --work-item, not both"* ]]
+}
+
+@test "wait: reference-reader failures retry with 1s/2s backoff then exit internal_error 4" {
+  local fixture="$TEST_KDIR/wait-fixture" stub_bin="$TEST_KDIR/stub-bin"
+  mkdir -p "$fixture" "$stub_bin"
+  cp "$WAIT" "$fixture/session-wait.sh"
+  cp "$REPO_DIR/scripts/lib.sh" "$fixture/lib.sh"
+  cat > "$fixture/session-events.sh" <<'EOF'
+#!/usr/bin/env bash
+count_file="$(dirname "$0")/attempt-count"
+count=0
+[ ! -f "$count_file" ] || count="$(cat "$count_file")"
+count=$((count + 1))
+printf '%s\n' "$count" > "$count_file"
+if [ "${EVENTS_STUB_MODE:-}" = fail-twice ] && [ "$count" -ge 3 ]; then
+  printf '%s\n' '{"events":[{"event":"closed","request_id":"spawn-rid","slug":"retry-slug"}],"next_cursor":77}'
+  exit 0
+fi
+exit 9
+EOF
+  chmod +x "$fixture/session-events.sh"
+  cat > "$stub_bin/sleep" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$SLEEP_LOG"
+EOF
+  chmod +x "$stub_bin/sleep"
+
+  local sleep_log="$TEST_KDIR/sleeps" out err="$TEST_KDIR/retry.err" code
+  out="$(PATH="$stub_bin:$PATH" SLEEP_LOG="$sleep_log" EVENTS_STUB_MODE=fail-twice \
+    bash "$fixture/session-wait.sh" retry-slug --since 0 --timeout 0 --json --kdir "$TEST_KDIR" 2>"$err")" && code=0 || code=$?
+  [ "$code" -eq 0 ]
+  echo "$out" | jq -e '.outcome=="matched" and .matched.slug=="retry-slug" and .next_cursor==77'
+  [ "$(paste -sd, "$sleep_log")" = "1,2" ]
+
+  rm -f "$fixture/attempt-count" "$sleep_log"
+  out="$(PATH="$stub_bin:$PATH" SLEEP_LOG="$sleep_log" EVENTS_STUB_MODE=always-fail \
+    bash "$fixture/session-wait.sh" retry-slug --timeout 0 --json --kdir "$TEST_KDIR" 2>"$err")" && code=0 || code=$?
+  [ "$code" -eq 4 ]
+  echo "$out" | jq -e '.outcome=="internal_error" and .matched==null and .next_cursor==null'
+  [ "$(paste -sd, "$sleep_log")" = "1,2" ]
+  grep -q "session-events failed after 3 attempts" "$err"
+}
+
+@test "wait: a mid-row --since fails with the cursor-not-row-aligned remediation" {
+  printf '%s\n' '{"event":"closed","request_id":"r1","slug":"feature-x"}' > "$TEST_KDIR/_sessions/events.jsonl"
+  run bash "$WAIT" feature-x --since 7 --timeout 0 --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --since cursor 7: cursor-not-row-aligned (preceding byte is not newline); reuse a next_cursor emitted by lore session events or lore session wait"* ]]
+  [[ "$output" != *"corrupt"* ]]
+}
+
 @test "wait: no live instance and no matching row exits 3 (session gone) with a resume cursor" {
   : > "$TEST_KDIR/_sessions/events.jsonl"
   run bash "$WAIT" ghost --since 0 --timeout 30 --kdir "$TEST_KDIR"
