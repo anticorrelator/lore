@@ -54,10 +54,11 @@ const (
 // session alive. rung-exhausted: the exit ladder ran every rung and the harness
 // process was still alive. error: an operational failure during teardown.
 const (
-	closeFailedInteractivePrompt = "interactive-prompt"
-	closeFailedStillGenerating   = "still-generating"
-	closeFailedRungExhausted     = "rung-exhausted"
-	closeFailedError             = "error"
+	closeFailedInteractivePrompt  = "interactive-prompt"
+	closeFailedStillGenerating    = "still-generating"
+	closeFailedRungExhausted      = "rung-exhausted"
+	closeFailedError              = "error"
+	closeFailedTargetInstanceDead = "target-instance-dead"
 )
 
 // errCloseLadderExhausted marks a teardown that ran every exit-ladder rung and

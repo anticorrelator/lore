@@ -60,6 +60,7 @@ One file per live TUI instance at `instances/<name>.json`.
 | `initiator_default` | string | `"human"` in v1 — the default initiator stamped on sessions this instance starts. |
 | `sessions` | array of objects | Live sessions nested under the instance: `[{slug, type, initiator, started}]`, each optionally carrying the recovery manifest fields `tmux`, `session_id`, `harness`, `auto_close` (below). |
 | &nbsp;&nbsp;`sessions[].tmux` | string \| absent | tmux session name (`lore-<instance>-<slug>`) hosting the harness, when the session is tmux-hosted. Omit-when-empty; absent for direct-PTY sessions (tmux unavailable / `LORE_TUI_TMUX=off`). Its presence on a dead instance's row is what a restarting TUI's adoption scan keys on to reattach rather than orphan. |
+| &nbsp;&nbsp;`sessions[].request_id` | string \| absent | Spawn-request identity, persisted prospectively so recovery can correlate a terminal row to the exact spawn. Omit-when-empty for human or legacy sessions; never reconstructed from slug, time, type, or journal ordering. |
 | &nbsp;&nbsp;`sessions[].session_id` | string \| absent | Harness transcript-binding id (claude-code `--session-id`), persisted so an adopting instance can still extract token spend at teardown after the original TUI is gone. Omit-when-empty. |
 | &nbsp;&nbsp;`sessions[].harness` | string \| absent | Launch framework the session was spawned under (the spend probe's `--harness`). Omit-when-empty. |
 | &nbsp;&nbsp;`sessions[].auto_close` | boolean \| absent | The close-ladder auto-close override carried onto the live session (see [Close-request queue](#close-request-queue)), persisted so it survives adoption. Omit-when-empty: absent defers to `initiator`. |
@@ -112,8 +113,10 @@ to a claim suffix — exactly one racing renamer wins, so two fresh TUIs cannot
 double-adopt (the same rename-as-claim atomicity the request queue uses). For each
 nested session with a live `tmux` session (`tmux has-session`), the adopter
 re-attaches through the normal spawn path and journals `recovered`; a session whose
-tmux is gone (or that had no `tmux` name) is journaled `closed` (duration-only) to
-close its otherwise-dangling lifecycle. The durable registry write of the adopting
+tmux is gone (or that had no `tmux` name) is journaled `orphaned` with
+`reason=instance-death`, the dead predecessor in `target_instance`, its persisted
+spawn request ID when available, and spend bounded by the existing transcript or
+duration-only evidence. The durable registry write of the adopting
 row lands before its `recovered` journal row (the substrate's durable-before-journal
 ordering). Adoption doubles as crash-corpse cleanup: the claimed file is removed
 once its sessions are handled. Recovery is tmux-gated — with tmux absent or
@@ -351,6 +354,13 @@ wait on `closed` **or** `close_failed`. Like `closed`, the `close_requested →
 close_failed` pair is matched by per-slug ordering, never adjacency — running-session
 transitions may fall between the request and its terminal.
 
+When startup recovery confirms an instance dead, the same atomic corpse owner
+retires every pending close request whose exact `target_instance` names that
+predecessor. It first appends (or proves an idempotent replay of) a deterministic
+`close_failed` row with `reason=target-instance-dead`, then deletes the request.
+Those rows are explicit terminal dispositions and are not projected as unmatched
+teardown failures. Requests targeting any other instance remain untouched.
+
 The close owner also records every consumed request ID in the live session's
 ordered `close_requests` recovery manifest before it acts. A failure that leaves
 the session alive retains that set; adoption carries it forward. The eventual
@@ -482,7 +492,7 @@ protocol terminal verbs, stop hooks) appends through the one sanctioned writer,
 | `reason` | string | Failure/reclaim reason; also the review-gate rationale carried by `review_flagged`/`review_held`/`review_released`. Also carried by `spawn_failed`, `request_reclaimed`, `request_abandoned`. |
 | `gate_id` | string | Review-gate audit join key. Omit-when-empty. A gate-open verb (`review_flagged`/`review_held`) sets it as the row's `event_id`; the `review_released` row echoes it here so a reader pairs release→open without replaying state. See [docs/review-gates.md](review-gates.md). |
 | `links` | object | `{work_item?, artifact?, close_requests?}` — string-valued pointers and correlations. Review events point `artifact` at the review packet. On `closed` only, `close_requests` is a string containing a compact JSON array of distinct, non-empty consumed close-request IDs in first-consumed order (for example `"[\"term-1\",\"explicit-2\"]"`); the string representation preserves existing `map[string]string` Go readers while safely carrying opaque IDs. Writer defaults to `{}`. For a worker session (derived slug `<work-item-slug>--w<n>`) the writer derives `links.work_item` = the base work-item slug when the caller did not set it, so every worker lifecycle row points back at its work item (see [Worker sessions](#worker-sessions)). |
-| `spend` | object \| null | Session token spend, on `closed`. `duration_seconds` is always present; a `basis` enum (`transcript\|rollout\|store\|duration-only`) marks how the tokens were sourced. When the harness exposes a deterministic transcript binding (claude-code, via a spawn-time `--session-id`), the TUI merges the D1 token vocabulary — `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_output_tokens`, `total_tokens`, `cost_usd`, `model`, `harness` (fields the harness does not expose are omitted, never zero-filled). Every gap — codex/opencode-hosted sessions, an absent transcript, a probe timeout, an abrupt quit — degrades to `{duration_seconds, basis:"duration-only"}`. Extraction runs at teardown via `scripts/session-spend.sh`; the row still flows only through the sole writer. |
+| `spend` | object \| null | Session token spend, on `closed` and `orphaned`. `duration_seconds` is always present; a `basis` enum (`transcript\|rollout\|store\|duration-only`) marks how the tokens were sourced. When the harness exposes a deterministic transcript binding (claude-code, via a spawn-time `--session-id`), the TUI merges the D1 token vocabulary — `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_output_tokens`, `total_tokens`, `cost_usd`, `model`, `harness` (fields the harness does not expose are omitted, never zero-filled). Every gap — codex/opencode-hosted sessions, an absent transcript, a probe timeout, an abrupt quit — degrades to `{duration_seconds, basis:"duration-only"}`. Extraction runs at teardown or recovery via `scripts/session-spend.sh`; the row still flows only through the sole writer. |
 
 Optional fields follow **omit-when-empty** discipline: an absent optional field is
 simply not written (its presence is the signal), except `links`, which the writer
@@ -502,6 +512,7 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `resumed` | TUI | a session resumed after idle/input |
 | `recovered` | TUI | a restarted/replacement instance adopted a still-running tmux-hosted session from a dead instance's registry row; `reason` names the predecessor (`adopted from <dead-instance>`). Session-transition class — no `request_id` |
 | `closed` | TUI | a session ended (carries `spend`: token counts where the harness exposes them, else duration-only) |
+| `orphaned` | TUI | a dead instance's atomic recovery owner found no surviving tmux session; carries `reason=instance-death`, the dead `target_instance`, persisted spawn `request_id` when available, and evidence-bounded `spend` |
 | `step_completed` | protocol terminal verbs | a protocol step finished (e.g. `/implement` phase close) |
 | `harness_turn_ended` | stop hooks | a harness turn boundary was reached |
 | `spawn_failed` | TUI | spawn failed; request returned to pending (carries `reason`) |
@@ -509,7 +520,7 @@ The closed set. A row whose `event` is outside this set is rejected by the write
 | `request_abandoned` | TUI | `attempts >= 3`; request dropped, journal row is the dead-letter (carries last `reason`) |
 | `request_cancelled` | `session close --request` cancel verb | a pending spawn request was cancelled |
 | `close_requested` | `session close` enqueue verb (`<slug>` / `--self`) | a close request was enqueued for the instance running a slug |
-| `close_failed` | TUI | a consumed close request did not complete teardown; `reason` names why (`interactive-prompt`/`still-generating`/`rung-exhausted`/`error`) |
+| `close_failed` | TUI | a consumed close request did not complete teardown; `reason` names why (`interactive-prompt`/`still-generating`/`rung-exhausted`/`error`), or `target-instance-dead` records exact dead-target retirement |
 | `send_requested` | `session send` enqueue verb | a send request was enqueued for the instance running a slug |
 | `sent` | TUI | the message was injected AND a later observation confirmed the composer submitted it (verified-outcome; see [Send-request queue](#send-request-queue)) |
 | `send_refused` | TUI | injection was refused, or an injected message never submitted; `reason` names why — gate refusals (`generating`/`modal`/`no-signature`/`no-contract`/`unsafe-payload`/`error`) or the post-inject `unsubmitted` |
@@ -554,9 +565,15 @@ design any consumer around retrospective transcript reconstruction.
 Close-recovery correlation is prospective and forward-only. A missing
 `links.close_requests` declaration means no recovery relationship was declared;
 readers never infer one from slug, session type, adjacency, ordering, or the
-top-level `request_id`. The known pre-extension coordination row
-`[session-journal:unmatched-close-failed:1d77a8b177268b18]` therefore remains
-visible by design rather than being mutated, duplicated, or specially suppressed.
+top-level `request_id`. The complete frozen pre-extension population —
+`1889880106a9a922`, `648b75f906159750`, `1a91175bc35f694b`, and
+`1d77a8b177268b18` — therefore remains visible by design rather than being
+mutated, duplicated, or specially suppressed.
+
+An `orphaned` `spec` or `implement` row also produces exactly one deterministic
+retro outcome with `event_type=session-orphaned`, `stratum=instance_death`,
+`outcome=due`, and `disposition=unhandled`. Recovery records the obligation only;
+later `dispatched|deferred|skipped` handling remains coordinator-owned.
 
 ### Writer contract
 
@@ -569,8 +586,10 @@ visible by design rather than being mutated, duplicated, or specially suppressed
    decoding to a non-empty array of distinct, non-empty strings. The writer never
    derives or defaults that member. Any failure exits non-zero with a diagnostic
    **naming the offending field**, and no row is appended.
-3. Stamps provenance: generates `event_id` and `ts` when the caller omitted them;
-   defaults `links` to `{}`.
+3. Treats a caller-supplied `event_id` as a retry identity: exact replay succeeds
+   without another append, while different evidence under the same ID is refused.
+   Otherwise it generates `event_id` and `ts` when omitted and defaults `links`
+   to `{}`.
 4. Compacts to one line with `jq -c` and appends with bare `>>` (O_APPEND).
 
 Validation lives at the writer because the writer is the last line of defense: any
@@ -690,7 +709,7 @@ rather than growing this contract.**
   front on the journal: it polls `session events` from a cursor and returns when a
   row matches `<slug>` exactly (never by substring, so a worker's `<slug>--w<n>`
   close never wakes a parent wait) and an event in its `--until` set (default
-  `closed,close_failed`, the close-outcome pair). Callers watching a reused slug
+  `closed,close_failed,orphaned`, the close/recovery terminal set). Callers watching a reused slug
   can add `--request-id <id>` to require that exact row correlation; when omitted,
   matching remains slug-and-event only, with no inferred guard. Exit codes carry
   the outcome — 0 matched, 2 timed out, 3 session-gone — and every non-error exit

@@ -9,10 +9,10 @@
 # Outcome usage:
 #   retro-deferred-append.sh \
 #     --cycle-id <slug> \
-#     --event-type <spec-finalize|impl-close> \
+#     --event-type <spec-finalize|impl-close|session-orphaned> \
 #     [--outcome <done|deferred|skipped|due>] \
 #     --rate <float 0.0-1.0> \
-#     --stratum <routine|new_template_version|first_k_routing_pair|degraded_closure> \
+#     --stratum <routine|new_template_version|first_k_routing_pair|degraded_closure|instance_death> \
 #     [--reason <always-stratum|coin>] \
 #     [--template-version <hash>] [--verdict <full|partial|none>] \
 #     [--coin <float 0.0-1.0>] [--kdir <path>] [--json]
@@ -265,17 +265,17 @@ for _pair in "cycle-id:$CYCLE_ID" "event-type:$EVENT_TYPE" "rate:$RATE" "stratum
 done
 
 case "$EVENT_TYPE" in
-  spec-finalize|impl-close) ;;
+  spec-finalize|impl-close|session-orphaned) ;;
   *)
-    echo "Error: --event-type must be 'spec-finalize' or 'impl-close' (got '$EVENT_TYPE')" >&2
+    echo "Error: --event-type must be 'spec-finalize', 'impl-close', or 'session-orphaned' (got '$EVENT_TYPE')" >&2
     exit 1
     ;;
 esac
 
 case "$STRATUM" in
-  routine|new_template_version|first_k_routing_pair|degraded_closure) ;;
+  routine|new_template_version|first_k_routing_pair|degraded_closure|instance_death) ;;
   *)
-    echo "Error: --stratum must be one of: routine, new_template_version, first_k_routing_pair, degraded_closure (got '$STRATUM')" >&2
+    echo "Error: --stratum must be one of: routine, new_template_version, first_k_routing_pair, degraded_closure, instance_death (got '$STRATUM')" >&2
     exit 1
     ;;
 esac
@@ -331,6 +331,24 @@ if [[ "$OUTCOME" == "due" ]]; then
     exit 1
   fi
   [[ -z "$OUTCOME_ID" ]] && OUTCOME_ID=$(python3 -c 'import uuid; print("retro-due-" + uuid.uuid4().hex)')
+
+  if [[ -f "$QUEUE" ]]; then
+    EXISTING=$(jq -c --arg id "$OUTCOME_ID" 'select(.record_type == "outcome" and .outcome_id == $id)' "$QUEUE" | tail -n 1)
+    if [[ -n "$EXISTING" ]]; then
+      if ! jq -e -n --argjson existing "$EXISTING" --arg cycle "$CYCLE_ID" --arg event "$EVENT_TYPE" --arg stratum "$STRATUM" \
+        '$existing.cycle_id == $cycle and $existing.event_type == $event and $existing.stratum == $stratum and $existing.outcome == "due" and $existing.disposition == "unhandled"' >/dev/null; then
+        echo "Error: --outcome-id '$OUTCOME_ID' already names a different outcome" >&2
+        exit 1
+      fi
+      if [[ $JSON_MODE -eq 1 ]]; then
+        jq -n --arg path "$RELPATH" --arg cycle "$CYCLE_ID" --arg outcome_id "$OUTCOME_ID" \
+          '{path:$path,cycle_id:$cycle,outcome:"due",outcome_id:$outcome_id,appended:false,idempotent:true}'
+      else
+        echo "[retro-deferred] Outcome already present in $RELPATH (outcome_id=$OUTCOME_ID)"
+      fi
+      exit 0
+    fi
+  fi
 else
   if [[ -n "$OUTCOME_ID$DISPOSITION$ACTION$HANDLED_BY$REASON" ]]; then
     echo "Error: lifecycle fields are valid only for outcome=due" >&2

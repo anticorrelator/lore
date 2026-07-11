@@ -41,6 +41,7 @@ const (
 	EventResumed          = "resumed"
 	EventRecovered        = "recovered"
 	EventClosed           = "closed"
+	EventOrphaned         = "orphaned"
 	EventStepCompleted    = "step_completed"
 	EventHarnessTurnEnded = "harness_turn_ended"
 	EventSpawnFailed      = "spawn_failed"

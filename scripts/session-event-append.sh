@@ -31,7 +31,7 @@
 #
 # Required fields:
 #   event        enum: requested | claimed | spawned | needs_input | quiescent |
-#                resumed | recovered | closed | step_completed |
+#                resumed | recovered | closed | orphaned | step_completed |
 #                harness_turn_ended | spawn_failed | request_reclaimed |
 #                request_abandoned | request_cancelled | close_requested |
 #                close_failed | send_requested | sent | send_refused |
@@ -120,7 +120,7 @@ fi
 # --- Validate event against the closed vocabulary ---
 EVENT=$(printf '%s' "$ROW" | jq -r '.event // ""')
 case "$EVENT" in
-  requested|claimed|spawned|needs_input|quiescent|resumed|recovered|closed|\
+  requested|claimed|spawned|needs_input|quiescent|resumed|recovered|closed|orphaned|\
 step_completed|harness_turn_ended|spawn_failed|request_reclaimed|\
 request_abandoned|request_cancelled|close_requested|close_failed|send_requested|sent|send_refused|\
 review_flagged|review_held|review_notified|review_released) ;;
@@ -128,7 +128,7 @@ review_flagged|review_held|review_notified|review_released) ;;
     fail "missing required field: event"
     ;;
   *)
-    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, review_flagged, review_held, review_notified, review_released)"
+    fail "invalid event: '$EVENT' (must be one of requested, claimed, spawned, needs_input, quiescent, resumed, recovered, closed, orphaned, step_completed, harness_turn_ended, spawn_failed, request_reclaimed, request_abandoned, request_cancelled, close_requested, close_failed, send_requested, sent, send_refused, review_flagged, review_held, review_notified, review_released)"
     ;;
 esac
 
@@ -194,6 +194,24 @@ fi
 SESSIONS_DIR="$KNOWLEDGE_DIR/_sessions"
 EVENTS_FILE="$SESSIONS_DIR/events.jsonl"
 mkdir -p "$SESSIONS_DIR"
+
+# Caller-supplied event ids are retry identities. An exact replay succeeds
+# without appending; reusing an id for different evidence is refused.
+CALLER_EVENT_ID=$(printf '%s' "$ROW" | jq -r '.event_id // ""')
+if [[ -n "$CALLER_EVENT_ID" && -f "$EVENTS_FILE" ]]; then
+  EXISTING=$(jq -c --arg id "$CALLER_EVENT_ID" 'select(.event_id == $id)' "$EVENTS_FILE" | tail -n 1)
+  if [[ -n "$EXISTING" ]]; then
+    if ! jq -e -n --argjson incoming "$ROW" --argjson existing "$EXISTING" \
+      '$incoming | to_entries | all(.[]; $existing[.key] == .value)' >/dev/null; then
+      fail "event_id collision: '$CALLER_EVENT_ID' already names different evidence"
+    fi
+    RELPATH="${EVENTS_FILE#$KNOWLEDGE_DIR/}"
+    [[ $JSON_MODE -eq 1 ]] && jq -n --arg path "$RELPATH" --arg event "$EVENT" --arg event_id "$CALLER_EVENT_ID" \
+      '{path:$path,event:$event,event_id:$event_id,appended:false,idempotent:true}'
+    [[ $JSON_MODE -eq 0 ]] && echo "[session] Event already present in $RELPATH (event=$EVENT, event_id=$CALLER_EVENT_ID)"
+    exit 0
+  fi
+fi
 
 # --- Stamp provenance the caller did not supply ---
 # event_id: "<timestamp>-<random>", generated only when absent so a caller's

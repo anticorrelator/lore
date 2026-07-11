@@ -19,6 +19,7 @@ func (genEvent) Generate(r *rand.Rand, _ int) reflect.Value {
 	events := []string{
 		EventRequested, EventClaimed, EventSpawned, EventNeedsInput, EventQuiescent,
 		EventResumed, EventRecovered, EventClosed, EventStepCompleted, EventHarnessTurnEnded,
+		EventOrphaned,
 		EventSpawnFailed, EventReclaimed, EventAbandoned, EventCancelled,
 		EventSendRequested, EventSent, EventSendRefused, EventCloseFailed,
 		EventReviewFlagged, EventReviewHeld, EventReviewNotified, EventReviewReleased,
@@ -148,6 +149,7 @@ func TestScriptReviewVocabulary(t *testing.T) {
 		{"close_requested with request_id accepted", Event{Event: "close_requested", RequestID: "20260705T000000Z-abcd1234"}, false},
 		{"requested still accepted", Event{Event: EventRequested, RequestID: "20260705T000000Z-abcd1234"}, false},
 		{"recovered accepted without request_id", Event{Event: EventRecovered, Slug: "demo-slug", Reason: "adopted from amber-otter"}, false},
+		{"orphaned accepted with recovery evidence", Event{EventID: "orphaned-fixed", Event: EventOrphaned, Slug: "demo-slug", Reason: "instance-death"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

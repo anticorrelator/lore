@@ -27,6 +27,18 @@ QUEUE="$KDIR/_scorecards/retro-deferred-queue.jsonl"
 
 echo "=== test_retro_queue.sh ==="
 
+bash "$APPEND" --cycle-id orphaned-cycle --event-type session-orphaned --outcome due \
+  --outcome-id retro-due-orphaned-fixed --disposition unhandled --reason always-stratum \
+  --rate 1 --stratum instance_death --kdir "$KDIR" >/dev/null
+assert_zero "session-orphaned instance_death DUE is accepted" "$?"
+LINES_AFTER_ORPHAN_DUE=$(wc -l < "$QUEUE" | tr -d '[:space:]')
+bash "$APPEND" --cycle-id orphaned-cycle --event-type session-orphaned --outcome due \
+  --outcome-id retro-due-orphaned-fixed --disposition unhandled --reason always-stratum \
+  --rate 1 --stratum instance_death --kdir "$KDIR" >/dev/null
+assert_zero "session-orphaned DUE retry succeeds" "$?"
+assert_eq "session-orphaned DUE retry appends no duplicate" "$LINES_AFTER_ORPHAN_DUE" \
+  "$(wc -l < "$QUEUE" | tr -d '[:space:]')"
+
 # Legacy grammar remains accepted and readable.
 for outcome in "done" "deferred" "skipped"; do
   bash "$APPEND" --cycle-id "legacy-$outcome" --event-type spec-finalize \
@@ -50,15 +62,15 @@ assert_eq "queue fold declares fold version" "1" \
 assert_eq "queue fold declares vocabulary version" "1" \
   "$(printf '%s' "$STATUS" | jq -r '.vocabulary_version')"
 assert_eq "two repeated DUE decisions retain distinct identities" "2" \
-  "$(printf '%s' "$STATUS" | jq -r '[.unhandled_due[].outcome_id] | unique | length')"
+  "$(printf '%s' "$STATUS" | jq -r '[.unhandled_due[] | select(.cycle_id=="cycle-a") | .outcome_id] | unique | length')"
 assert_eq "legacy deferred row remains visible" "1" \
   "$(printf '%s' "$STATUS" | jq -r '.counts.deferred')"
 assert_eq "default fold reports both DUE identities unhandled" "2" \
-  "$(printf '%s' "$STATUS" | jq -r '.counts.unhandled_due')"
+  "$(printf '%s' "$STATUS" | jq -r '[.unhandled_due[] | select(.cycle_id=="cycle-a")] | length')"
 
 CLI_STATUS=$(bash "$CLI" retro queue --kdir "$KDIR" --json)
 assert_eq "lore retro queue exposes the same unhandled fold" "2" \
-  "$(printf '%s' "$CLI_STATUS" | jq -r '.counts.unhandled_due')"
+  "$(printf '%s' "$CLI_STATUS" | jq -r '[.unhandled_due[] | select(.cycle_id=="cycle-a")] | length')"
 
 OID=$(printf '%s' "$STATUS" | jq -r '.unhandled_due[0].outcome_id')
 bash "$QUEUE_FRONT" handle --outcome-id "$OID" --action dispatched \
@@ -84,7 +96,7 @@ assert_zero "cycle-wide handling claims only remaining unhandled identities" "$?
 
 STATUS=$(bash "$QUEUE_FRONT" queue --kdir "$KDIR" --json)
 assert_eq "handled identities leave the unhandled fold" "0" \
-  "$(printf '%s' "$STATUS" | jq -r '.counts.unhandled_due')"
+  "$(printf '%s' "$STATUS" | jq -r '[.unhandled_due[] | select(.cycle_id=="cycle-a")] | length')"
 assert_eq "handled fold retains both identities" "2" \
   "$(printf '%s' "$STATUS" | jq -r '.counts.handled_due')"
 printf '%s' "$STATUS" | jq -e '

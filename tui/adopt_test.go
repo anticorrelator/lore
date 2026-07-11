@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +13,28 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/session"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
+
+func readJSONLines(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var rows []map[string]any
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var row map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, row)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
 
 // deadPID runs a child to completion and reaps it, yielding a pid that reads dead
 // via signal-0 — the "owner is gone" half of the adoptability rule.
@@ -47,7 +71,7 @@ func TestInstanceRow_PersistsRecoveryFields(t *testing.T) {
 	yes := true
 	m.localSessions = map[string]liveSession{
 		"demo": {typ: "spec", initiator: "human", started: time.Now(),
-			tmuxName: "lore-me-demo", sessionID: "uuid-1", harness: "claude-code", autoClose: &yes,
+			tmuxName: "lore-me-demo", requestID: "spawn-1", sessionID: "uuid-1", harness: "claude-code", autoClose: &yes,
 			closeRequests: []string{"term-1", "explicit-2"}},
 	}
 	row := m.instanceRow()
@@ -58,21 +82,24 @@ func TestInstanceRow_PersistsRecoveryFields(t *testing.T) {
 	if s.Tmux != "lore-me-demo" || s.SessionID != "uuid-1" || s.Harness != "claude-code" || s.AutoClose == nil || !*s.AutoClose {
 		t.Fatalf("recovery fields not persisted onto row: %+v", s)
 	}
+	if s.RequestID != "spawn-1" {
+		t.Fatalf("spawn request identity not persisted: %+v", s)
+	}
 	if len(s.CloseRequests) != 2 || s.CloseRequests[0] != "term-1" || s.CloseRequests[1] != "explicit-2" {
 		t.Fatalf("close-request recovery manifest not persisted: %+v", s)
 	}
 }
 
-// TestAdoptionScan_DeadSessionJournalsClosed: a corpse whose session has no live
-// tmux (here: no tmux name at all) is journaled `closed` to end its dangling
-// lifecycle, its corpse file is removed, and nothing is returned as alive.
-func TestAdoptionScan_DeadSessionJournalsClosed(t *testing.T) {
+// TestAdoptionScan_DeadSessionJournalsOrphaned covers the no-survivor recovery
+// boundary, including persisted spawn identity and the protocol DUE.
+func TestAdoptionScan_DeadSessionJournalsOrphaned(t *testing.T) {
 	m, sessionsDir := baseSessionModel(t)
 	kdir := m.config.KnowledgeDir
 	m.config.RepoIdentifier = "my-repo"
 	m.eventScript = repoScriptPath(t, "session-event-append.sh")
 	plantCorpse(t, sessionsDir, "dead-inst", "my-repo", deadPID(t), []session.Session{
 		{Slug: "demo", Type: "spec", Initiator: "human", Started: "2026-07-06T00:00:00Z",
+			RequestID:     "spawn-1",
 			CloseRequests: []string{"term-1", "explicit-2"}}, // no Tmux
 	})
 
@@ -80,17 +107,62 @@ func TestAdoptionScan_DeadSessionJournalsClosed(t *testing.T) {
 	if len(msg.alive) != 0 {
 		t.Fatalf("dead (no-tmux) session returned as alive: %+v", msg.alive)
 	}
-	if got := readEventTypes(t, kdir); len(got) != 1 || got[0] != session.EventClosed {
-		t.Fatalf("events = %v, want exactly [closed]", got)
+	if got := readEventTypes(t, kdir); len(got) != 1 || got[0] != session.EventOrphaned {
+		t.Fatalf("events = %v, want exactly [orphaned]", got)
 	}
 	rows := readEventRows(t, kdir)
-	if got := rows[0].Links["close_requests"]; got != `["term-1","explicit-2"]` {
-		t.Fatalf("adopted-dead closed.links.close_requests = %q", got)
+	if rows[0].RequestID != "spawn-1" || rows[0].Reason != "instance-death" || rows[0].TargetInstance == nil || *rows[0].TargetInstance != "dead-inst" {
+		t.Fatalf("orphaned identity = %+v", rows[0])
+	}
+	var spend map[string]any
+	if err := json.Unmarshal(rows[0].Spend, &spend); err != nil || spend["basis"] != "duration-only" {
+		t.Fatalf("orphaned spend = %s err=%v", rows[0].Spend, err)
+	}
+	dueRows := readJSONLines(t, filepath.Join(kdir, "_scorecards", "retro-deferred-queue.jsonl"))
+	if len(dueRows) != 1 || dueRows[0]["event_type"] != "session-orphaned" || dueRows[0]["stratum"] != "instance_death" || dueRows[0]["disposition"] != "unhandled" {
+		t.Fatalf("orphan DUE rows = %+v", dueRows)
 	}
 	// The corpse and any claim file are gone (adoption doubles as corpse cleanup).
 	leftover, _ := filepath.Glob(filepath.Join(session.InstancesDir(sessionsDir), "*"))
 	if len(leftover) != 0 {
 		t.Fatalf("corpse/claim files left behind: %v", leftover)
+	}
+}
+
+func writeCloseRequestFixture(t *testing.T, sessionsDir string, cr session.CloseRequest) string {
+	t.Helper()
+	dir := session.CloseRequestsDir(sessionsDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, cr.RequestID+".json")
+	data, err := json.Marshal(cr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestRetireDeadTargetCloseRequests_AppendBeforeDeleteRetryIdempotent(t *testing.T) {
+	m, sessionsDir := baseSessionModel(t)
+	script, kdir := repoScriptPath(t, "session-event-append.sh"), m.config.KnowledgeDir
+	cr := session.CloseRequest{RequestID: "close-1", Slug: "demo", TargetInstance: "dead-inst", Reason: "coordinator"}
+	path := writeCloseRequestFixture(t, sessionsDir, cr)
+	notices, diagnostics := retireDeadTargetCloseRequests(sessionsDir, script, kdir, "me", "dead-inst")
+	if len(notices) != 0 || len(diagnostics) != 0 {
+		t.Fatalf("retirement notices=%+v diagnostics=%+v", notices, diagnostics)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("request not deleted after append: %v", err)
+	}
+	writeCloseRequestFixture(t, sessionsDir, cr)
+	retireDeadTargetCloseRequests(sessionsDir, script, kdir, "me", "dead-inst")
+	rows := readEventRows(t, kdir)
+	if len(rows) != 1 || rows[0].Event != session.EventCloseFailed || rows[0].Reason != closeFailedTargetInstanceDead || rows[0].TargetInstance == nil || *rows[0].TargetInstance != "dead-inst" {
+		t.Fatalf("retirement rows = %+v", rows)
 	}
 }
 
@@ -215,18 +287,21 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 
 	plantCorpse(t, sessionsDir, "dead-inst", "my-repo", deadPID(t), []session.Session{
 		{Slug: "demo", Type: "spec", Initiator: "human", Started: "2026-07-06T00:00:00Z",
-			Tmux: name, SessionID: "uuid-1", Harness: "claude-code",
+			Tmux: name, RequestID: "spawn-1", SessionID: "uuid-1", Harness: "claude-code",
 			CloseRequests: []string{"term-1"}},
+	})
+	retiredPath := writeCloseRequestFixture(t, sessionsDir, session.CloseRequest{
+		RequestID: "close-dead", Slug: "demo", TargetInstance: "dead-inst", Reason: "coordinator",
 	})
 
 	msg := m.adoptionScanCmd()().(adoptionScanMsg)
-	if got := readEventTypes(t, m.config.KnowledgeDir); len(got) != 0 {
-		t.Fatalf("live session must not be journaled closed, got events %v", got)
+	if got := readEventTypes(t, m.config.KnowledgeDir); len(got) != 1 || got[0] != session.EventCloseFailed {
+		t.Fatalf("survivor adoption must emit only dead-target retirement, got events %v", got)
 	}
 	if len(msg.alive) != 1 || msg.alive[0].slug != "demo" || msg.alive[0].tmuxName != name {
 		t.Fatalf("live tmux session not returned as adoptable: %+v", msg.alive)
 	}
-	if msg.alive[0].sessionID != "uuid-1" || msg.alive[0].harness != "claude-code" {
+	if msg.alive[0].requestID != "spawn-1" || msg.alive[0].sessionID != "uuid-1" || msg.alive[0].harness != "claude-code" {
 		t.Fatalf("recovered spend binding lost: %+v", msg.alive[0])
 	}
 	if len(msg.alive[0].closeRequests) != 1 || msg.alive[0].closeRequests[0] != "term-1" {
@@ -234,6 +309,9 @@ func TestAdoptionScan_LiveTmuxReattaches(t *testing.T) {
 	}
 	if leftover, _ := filepath.Glob(filepath.Join(session.InstancesDir(sessionsDir), "*")); len(leftover) != 0 {
 		t.Fatalf("corpse not cleaned up: %v", leftover)
+	}
+	if _, err := os.Stat(retiredPath); !os.IsNotExist(err) {
+		t.Fatalf("dead-target request survived adoption: %v", err)
 	}
 
 	// The attach Cmd re-hosts the survivor: it re-queries the pane PID (the crashed

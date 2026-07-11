@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -185,6 +188,7 @@ type adoptedSession struct {
 	slug          string
 	typ           string
 	initiator     string
+	requestID     string
 	started       time.Time
 	tmuxName      string
 	sessionID     string
@@ -193,12 +197,66 @@ type adoptedSession struct {
 	closeRequests []string
 }
 
-// adoptionScanMsg carries the survivors a startup adoption scan claimed and
-// verified alive. Dead sessions (tmux gone, or a row that was never tmux-hosted)
-// are journaled `closed` inside the scan Cmd; only live ones need re-attach and a
-// `recovered` row here.
+// adoptionScanMsg carries survivors plus non-fatal recovery notices. Sessions
+// with no surviving tmux are journaled `orphaned` inside the scan Cmd; only live
+// ones need re-attach and a `recovered` row here.
 type adoptionScanMsg struct {
-	alive []adoptedSession
+	alive       []adoptedSession
+	notices     []runtimeNotice
+	diagnostics []session.Diagnostic
+}
+
+func recoveryEventID(kind string, parts ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return fmt.Sprintf("%s-%x", kind, sum[:16])
+}
+
+func appendOrphanDue(script, kdir string, ev session.Event) error {
+	if ev.SessionType != "spec" && ev.SessionType != "implement" {
+		return nil
+	}
+	outcomeID := "retro-due-" + ev.EventID
+	cmd := exec.Command("bash", filepath.Join(filepath.Dir(script), "retro-deferred-append.sh"),
+		"--cycle-id", ev.Slug,
+		"--event-type", "session-orphaned",
+		"--outcome", "due",
+		"--outcome-id", outcomeID,
+		"--disposition", "unhandled",
+		"--reason", "always-stratum",
+		"--rate", "1",
+		"--stratum", "instance_death",
+		"--kdir", kdir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("append orphan retro DUE: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func retireDeadTargetCloseRequests(sessionsDir, script, kdir, actor, deadInstance string) ([]runtimeNotice, []session.Diagnostic) {
+	rows, diagnostics := session.ScanCloseRequestsWithDiagnostics(sessionsDir)
+	var notices []runtimeNotice
+	for _, cr := range rows {
+		if cr.RequestID == "" || cr.TargetInstance != deadInstance {
+			continue
+		}
+		ev := session.Event{
+			EventID:        recoveryEventID("close-failed-dead-target", deadInstance, cr.RequestID),
+			Event:          session.EventCloseFailed,
+			ActorInstance:  session.StrPtr(actor),
+			TargetInstance: session.StrPtr(deadInstance),
+			Slug:           cr.Slug,
+			RequestID:      cr.RequestID,
+			Reason:         closeFailedTargetInstanceDead,
+		}
+		if err := session.AppendEvent(script, kdir, ev); err != nil {
+			notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "dead-target-retirement-append", Message: compactErr("dead-target close retirement", err)})
+			continue
+		}
+		if err := session.DeleteCloseRequest(sessionsDir, cr.RequestID); err != nil {
+			notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "dead-target-retirement-delete", Message: compactErr("dead-target close retirement", err)})
+		}
+	}
+	return notices, diagnostics
 }
 
 // adoptionScanCmd is the D5 startup recovery pass. It scans the instance registry
@@ -215,6 +273,8 @@ func (m model) adoptionScanCmd() tea.Cmd {
 	script, kdir := m.eventScript, m.config.KnowledgeDir
 	return func() tea.Msg {
 		var alive []adoptedSession
+		var notices []runtimeNotice
+		var diagnostics []session.Diagnostic
 		for _, inst := range session.ScanAdoptable(dir, repo, self, time.Now()) {
 			claim, claimPath, err := session.ClaimInstance(dir, inst.Name)
 			if err != nil {
@@ -227,6 +287,7 @@ func (m model) adoptionScanCmd() tea.Cmd {
 						slug:          s.Slug,
 						typ:           s.Type,
 						initiator:     s.Initiator,
+						requestID:     s.RequestID,
 						started:       parseStartedISO(s.Started),
 						tmuxName:      s.Tmux,
 						sessionID:     s.SessionID,
@@ -236,18 +297,28 @@ func (m model) adoptionScanCmd() tea.Cmd {
 					})
 					continue
 				}
-				// tmux gone or never tmux-hosted: close the otherwise-dangling
-				// lifecycle (it dangles at `spawned` forever otherwise), duration-only.
+				// No survivor remains. Record the observation as its own terminal;
+				// ordinary closed is reserved for an observed teardown.
 				ls := liveSession{
-					typ: s.Type, initiator: s.Initiator, started: parseStartedISO(s.Started),
+					typ: s.Type, initiator: s.Initiator, requestID: s.RequestID, started: parseStartedISO(s.Started),
 					sessionID: s.SessionID, harness: s.Harness,
 					closeRequests: append([]string(nil), s.CloseRequests...),
 				}
-				_ = session.AppendEvent(script, kdir, m.closedEventFor(s.Slug, ls))
+				ev := m.orphanedEventFor(s.Slug, ls, claim.Name)
+				if err := session.AppendEvent(script, kdir, ev); err != nil {
+					notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "orphaned-append", Message: compactErr("orphaned session", err)})
+					continue
+				}
+				if err := appendOrphanDue(script, kdir, ev); err != nil {
+					notices = append(notices, runtimeNotice{Class: operationalFailure, Code: "orphaned-due", Message: compactErr("orphaned session", err)})
+				}
 			}
+			retirementNotices, retirementDiagnostics := retireDeadTargetCloseRequests(dir, script, kdir, self, claim.Name)
+			notices = append(notices, retirementNotices...)
+			diagnostics = append(diagnostics, retirementDiagnostics...)
 			_ = session.DeleteClaim(claimPath)
 		}
-		return adoptionScanMsg{alive: alive}
+		return adoptionScanMsg{alive: alive, notices: notices, diagnostics: diagnostics}
 	}
 }
 
@@ -258,8 +329,10 @@ func (m model) adoptionScanCmd() tea.Cmd {
 // resizeSessionPanels on the first WindowSizeMsg, so a size not yet known at
 // startup self-corrects.
 func (m model) handleAdoptionScan(msg adoptionScanMsg) (model, tea.Cmd) {
+	m = m.routeRuntimeNotices(msg.notices)
+	diagnosticCmd := appendDiagnosticsCmd(m.sessionsDir, msg.diagnostics)
 	if len(msg.alive) == 0 {
-		return m, nil
+		return m, diagnosticCmd
 	}
 	specH := m.detailPanelHeight()
 	specW := m.rightPanelWidth() - 2
@@ -275,6 +348,7 @@ func (m model) handleAdoptionScan(msg adoptionScanMsg) (model, tea.Cmd) {
 		m.pendingSpawns[a.slug] = liveSession{
 			typ:           a.typ,
 			initiator:     a.initiator,
+			requestID:     a.requestID,
 			started:       a.started,
 			autoClose:     a.autoClose,
 			sessionID:     a.sessionID,
@@ -285,6 +359,9 @@ func (m model) handleAdoptionScan(msg adoptionScanMsg) (model, tea.Cmd) {
 			closeRequests: append([]string(nil), a.closeRequests...),
 		}
 		cmds = append(cmds, work.AttachTerminalCmd(a.slug, a.tmuxName, a.sessionID, a.harness, m.config.ProjectDir, specW, specH))
+	}
+	if diagnosticCmd != nil {
+		cmds = append(cmds, diagnosticCmd)
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -489,6 +566,7 @@ func (m model) instanceRow() session.Instance {
 			Initiator:     ls.initiator,
 			Started:       ls.started.UTC().Format("2006-01-02T15:04:05Z"),
 			Tmux:          ls.tmuxName,
+			RequestID:     ls.requestID,
 			SessionID:     ls.sessionID,
 			Harness:       ls.harness,
 			AutoClose:     ls.autoClose,
@@ -532,6 +610,22 @@ func (m model) closedEventMeta(slug string, ls liveSession) session.Event {
 func (m model) closedEventFor(slug string, ls liveSession) session.Event {
 	ev := m.closedEventMeta(slug, ls)
 	ev.Spend = durationOnlySpend(sessionDurationSeconds(ls.started))
+	return ev
+}
+
+func (m model) orphanedEventFor(slug string, ls liveSession, deadInstance string) session.Event {
+	ev := session.Event{
+		EventID:        recoveryEventID("orphaned", deadInstance, slug, ls.requestID, ls.started.UTC().Format(time.RFC3339)),
+		Event:          session.EventOrphaned,
+		ActorInstance:  session.StrPtr(m.instanceName),
+		TargetInstance: session.StrPtr(deadInstance),
+		Slug:           slug,
+		SessionType:    ls.typ,
+		Initiator:      ls.initiator,
+		RequestID:      ls.requestID,
+		Reason:         "instance-death",
+	}
+	ev.Spend = closedSpend(m.spendScript, ls.harness, ls.sessionID, m.config.ProjectDir, sessionDurationSeconds(ls.started))
 	return ev
 }
 

@@ -12,7 +12,7 @@
 #
 # Options:
 #   --until <events>  Comma-separated event names to wake on (default:
-#                     closed,close_failed — the close-outcome pair, since a
+#                     closed,close_failed,orphaned — terminal close/recovery outcomes
 #                     teardown can end in either). Each name is checked against the
 #                     journal's event vocabulary up front; a name that is not in it
 #                     is a usage error, not a wait that never ends.
@@ -77,7 +77,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 SLUG_ARG=""
-UNTIL="closed,close_failed"
+UNTIL="closed,close_failed,orphaned"
 SINCE=""
 SINCE_SET=0
 TIMEOUT=60
@@ -92,7 +92,7 @@ REQUEST_ID_SET=0
 # validation case-arm). tests/session-verbs.bats cross-checks this list against
 # the writer and names any drift; if that test fails, reconcile this line with the
 # writer rather than silencing the test.
-SESSION_EVENT_VOCAB="requested claimed spawned needs_input quiescent resumed recovered closed step_completed harness_turn_ended spawn_failed request_reclaimed request_abandoned request_cancelled close_requested close_failed send_requested sent send_refused review_flagged review_held review_notified review_released"
+SESSION_EVENT_VOCAB="requested claimed spawned needs_input quiescent resumed recovered closed orphaned step_completed harness_turn_ended spawn_failed request_reclaimed request_abandoned request_cancelled close_requested close_failed send_requested sent send_refused review_flagged review_held review_notified review_released"
 
 # Waiting on any of these queue/pre-spawn events means an unhosted slug is the
 # normal starting state, so the session-gone (liveness) exit is disabled for them —

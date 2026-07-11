@@ -17,6 +17,16 @@ func ev(name, actor, target, slug string) session.Event {
 	return e
 }
 
+func TestFoldEventsOrphanedClearsDeadOwnerActivity(t *testing.T) {
+	dead := "dead-inst"
+	got := FoldEvents(map[ActivityKey]Activity{
+		{Instance: dead, Slug: "demo"}: {NeedsInput: true, ClosePending: true},
+	}, []session.Event{{Event: session.EventOrphaned, ActorInstance: session.StrPtr("adopter"), TargetInstance: &dead, Slug: "demo"}})
+	if len(got) != 0 {
+		t.Fatalf("orphaned left activity: %+v", got)
+	}
+}
+
 // TestFoldEvents_ActivityLastWins verifies per-slug activity is matched by
 // ordering: the last of needs_input/quiescent/resumed wins.
 func TestFoldEvents_ActivityLastWins(t *testing.T) {

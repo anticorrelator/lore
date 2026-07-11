@@ -24,11 +24,11 @@ const LivenessTTL = 30 * time.Second
 
 // Session is one live session nested under an instance registry row.
 //
-// The tmux/SessionID/Harness/AutoClose/CloseRequests fields are the recovery
+// The tmux/RequestID/SessionID/Harness/AutoClose/CloseRequests fields are the recovery
 // manifest: additive, omit-when-empty, absent for direct-PTY sessions and for rows
 // written by a binary predating them. Tmux is the hosting tmux session name — its
 // presence is what a restarting TUI's adoption scan keys on to reattach a
-// survivor. SessionID/Harness persist the spend-probe transcript binding so an
+// survivor. RequestID preserves the spawn identity; SessionID/Harness persist the spend-probe transcript binding so an
 // adopting instance can still extract token spend at teardown; AutoClose persists
 // the close-ladder override; CloseRequests preserves every consumed close-request
 // id so the eventual closed row can declare the exact recovery correlation.
@@ -39,6 +39,7 @@ type Session struct {
 	Started   string `json:"started"`   // ISO 8601 UTC
 
 	Tmux          string   `json:"tmux,omitempty"`
+	RequestID     string   `json:"request_id,omitempty"`
 	SessionID     string   `json:"session_id,omitempty"`
 	Harness       string   `json:"harness,omitempty"`
 	AutoClose     *bool    `json:"auto_close,omitempty"`

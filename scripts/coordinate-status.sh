@@ -12,7 +12,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 # Read-only vocabulary mirrors. Tests compare the session and retro tokens to
 # their sole appenders so producer drift fails loudly at review time.
-SESSION_EVENT_VOCAB="requested claimed spawned needs_input quiescent resumed recovered closed step_completed harness_turn_ended spawn_failed request_reclaimed request_abandoned request_cancelled close_requested close_failed send_requested sent send_refused review_flagged review_held review_notified review_released"
+SESSION_EVENT_VOCAB="requested claimed spawned needs_input quiescent resumed recovered closed orphaned step_completed harness_turn_ended spawn_failed request_reclaimed request_abandoned request_cancelled close_requested close_failed send_requested sent send_refused review_flagged review_held review_notified review_released"
 RETRO_ACTION_VOCAB="dispatched deferred skipped"
 CEREMONY_OUTCOME_VOCAB="needs-decision"
 CEREMONY_DISPOSITION_VOCAB="unhandled"
@@ -489,6 +489,8 @@ for pos, request_ids in closed_recovery_requests.items():
         closed_after.setdefault(request_id, []).append(pos)
 for pos, event in known_events:
     if event.get("event") != "close_failed":
+        continue
+    if event.get("reason") == "target-instance-dead":
         continue
     request_id = event.get("request_id")
     if request_id and any(later > pos for later in closed_after.get(request_id, [])):

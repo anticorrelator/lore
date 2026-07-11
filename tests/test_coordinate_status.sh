@@ -117,13 +117,15 @@ EOF
 {"name":"fixture-tui","pid":42,"sessions":[{"slug":"live-work","type":"implement","session_id":"sess-1"}]}
 JSON
   cat > "$kdir/_sessions/events.jsonl" <<'JSONL'
-{"event":"close_failed","event_id":"fail-1","request_id":"request-1","slug":"failed-work","reason":"interactive-prompt"}
+{"event":"close_failed","event_id":"1889880106a9a922","request_id":"request-1","slug":"failed-work","reason":"interactive-prompt"}
 {"event":"close_failed","event_id":"fail-2","request_id":"request-2","slug":"recovered-work","reason":"transient"}
 {"event":"closed","event_id":"closed-2","request_id":"spawn-2","slug":"recovered-work","links":{"close_requests":"[\"request-2\"]"}}
-{"event":"close_failed","event_id":"fail-3","request_id":"request-3","slug":"top-level-only","reason":"transient"}
+{"event":"close_failed","event_id":"648b75f906159750","request_id":"request-3","slug":"top-level-only","reason":"transient"}
 {"event":"closed","event_id":"closed-3","request_id":"request-3","slug":"top-level-only"}
-{"event":"close_failed","event_id":"fail-4","request_id":"request-4","slug":"same-slug","session_type":"implement","reason":"transient"}
+{"event":"close_failed","event_id":"1a91175bc35f694b","request_id":"request-4","slug":"same-slug","session_type":"implement","reason":"transient"}
 {"event":"closed","event_id":"closed-4","request_id":"other-request","slug":"same-slug","session_type":"implement","links":{"close_requests":"[\"unrelated\"]"}}
+{"event":"close_failed","event_id":"1d77a8b177268b18","request_id":"request-frozen-4","slug":"legacy-unmatched","reason":"transient"}
+{"event":"close_failed","event_id":"retired-dead","request_id":"request-dead","slug":"retired-work","reason":"target-instance-dead"}
 JSONL
 
   cat > "$kdir/_scorecards/rows.jsonl" <<'JSONL'
@@ -174,13 +176,17 @@ assert_eq "every manifest row carries the complete contract" "true" \
   "$(jq -r 'all(.source_manifest[]; (.source_id|length)>0 and (.read_status|length)>0 and (.observed_at|length)>0 and (.schema_version|length)>0 and (.vocabulary_version|length)>0 and (.locator|length)>0 and has("error"))' "$JSON_OUT")"
 
 assert_eq "Act now contains task plus unconsumed evolve cluster" "2" "$(jq -r '.bucket_counts.act_now' "$JSON_OUT")"
-assert_eq "Needs judgment contains ceremony, retro, and three unmatched close failures" "5" "$(jq -r '.bucket_counts.needs_judgment' "$JSON_OUT")"
+assert_eq "Needs judgment contains ceremony, retro, and four frozen unmatched close failures" "6" "$(jq -r '.bucket_counts.needs_judgment' "$JSON_OUT")"
 assert_eq "matched close_failed is not surfaced" "0" \
   "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.request_id?=="request-2")] | length' "$JSON_OUT")"
 assert_eq "matching top-level closed.request_id without declaration clears nothing" "1" \
   "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.request_id?=="request-3")] | length' "$JSON_OUT")"
 assert_eq "same slug and type with unrelated declaration clears nothing" "1" \
   "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.request_id?=="request-4")] | length' "$JSON_OUT")"
+assert_eq "dead-target retirement is not unmatched recovery" "0" \
+  "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.request_id?=="request-dead")] | length' "$JSON_OUT")"
+assert_eq "all four frozen pre-extension failures remain visible" "4" \
+  "$(jq -r '[.buckets.needs_judgment[] | select(.observed_facts.event_id? as $id | ["1889880106a9a922","648b75f906159750","1a91175bc35f694b","1d77a8b177268b18"] | index($id))] | length' "$JSON_OUT")"
 assert_eq "Waiting contains live session, blocker, not_before, and window" "4" "$(jq -r '.bucket_counts.waiting' "$JSON_OUT")"
 assert_eq "unresolvable ceremony is visible" "1" \
   "$(jq -r '[.buckets.needs_judgment[] | select(.kind=="unhandled-ceremony")] | length' "$JSON_OUT")"

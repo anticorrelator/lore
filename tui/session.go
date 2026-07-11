@@ -235,12 +235,14 @@ func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (m
 		// `spawned` row under the dead instance. emitRecoveredCmd writes the durable
 		// registry row (now listing the adopted session) before the journal row.
 		cmds = append(cmds, emitRecoveredCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, m.instanceRow(), session.Event{
-			Event:         session.EventRecovered,
-			ActorInstance: session.StrPtr(m.instanceName),
-			Slug:          slug,
-			SessionType:   meta.typ,
-			Initiator:     meta.initiator,
-			Reason:        "adopted from " + meta.adoptedFrom,
+			Event:          session.EventRecovered,
+			ActorInstance:  session.StrPtr(m.instanceName),
+			TargetInstance: session.StrPtr(meta.adoptedFrom),
+			Slug:           slug,
+			SessionType:    meta.typ,
+			Initiator:      meta.initiator,
+			RequestID:      meta.requestID,
+			Reason:         "adopted from " + meta.adoptedFrom,
 		}))
 	default:
 		cmds = append(cmds, m.writeInstanceCmd())

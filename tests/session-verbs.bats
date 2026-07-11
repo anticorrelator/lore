@@ -739,6 +739,15 @@ journal_boundaries() {
   [ "$output" = "1" ]
 }
 
+@test "append accepts orphaned and deterministic replay is idempotent" {
+  local row='{"event_id":"orphan-fixed","event":"orphaned","request_id":"spawn-1","slug":"feature-x","reason":"instance-death"}'
+  run bash "$APPEND" --row "$row" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  run bash "$APPEND" --row "$row" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '"event":"orphaned"' "$TEST_KDIR/_sessions/events.jsonl")" -eq 1 ]
+}
+
 @test "append rejects close_failed without a request_id, naming the field" {
   run bash "$APPEND" --row '{"event":"close_failed","reason":"error"}' --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
@@ -964,6 +973,17 @@ coordinate_event_vocab() {
   [[ "$output" == *'"event":"close_failed"'* ]]
 }
 
+@test "wait: the default until-set wakes on orphaned" {
+  write_instance inst-a feature-x
+  : > "$TEST_KDIR/_sessions/events.jsonl"
+  ( sleep 1
+    echo '{"event":"orphaned","request_id":"spawn-1","slug":"feature-x","reason":"instance-death"}' | bash "$APPEND" --kdir "$TEST_KDIR" >/dev/null ) &
+  run bash "$WAIT" feature-x --since 0 --timeout 10 --kdir "$TEST_KDIR"
+  wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"orphaned"'* ]]
+}
+
 @test "wait: a derived <slug>--w1 close never wakes a parent-slug wait; it times out" {
   write_instance inst-a feature-x            # parent live, so session-gone stays quiet
   printf '%s\n' '{"event":"closed","request_id":"r1","slug":"feature-x--w1"}' > "$TEST_KDIR/_sessions/events.jsonl"
@@ -1043,7 +1063,7 @@ coordinate_event_vocab() {
   local out code
   out="$(bash "$WAIT" feature-x --since 0 --timeout 1 --json --kdir "$TEST_KDIR" 2>/dev/null)" && code=0 || code=$?
   [ "$code" -eq 2 ]
-  echo "$out" | jq -e '.outcome=="timeout" and .matched==null and (.next_cursor|type=="number") and .slug=="feature-x" and (.until==["closed","close_failed"])'
+  echo "$out" | jq -e '.outcome=="timeout" and .matched==null and (.next_cursor|type=="number") and .slug=="feature-x" and (.until==["closed","close_failed","orphaned"])'
 }
 
 @test "wait: --json emits the matched object on the match terminal" {

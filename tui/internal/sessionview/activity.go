@@ -77,11 +77,12 @@ func FoldEvents(prev map[ActivityKey]Activity, events []session.Event) map[Activ
 			a := out[k]
 			a.ClosePending = true
 			out[k] = a
-		case session.EventClosed:
+		case session.EventClosed, session.EventOrphaned:
 			// The session ended: drop the whole overlay entry. close_requested
 			// keyed on target_instance and closed on actor_instance name the same
 			// owning instance, so the pending-close set clears here.
 			delete(out, ActivityKey{Instance: actor(ev), Slug: ev.Slug})
+			delete(out, ActivityKey{Instance: target(ev), Slug: ev.Slug})
 		}
 	}
 	return out
