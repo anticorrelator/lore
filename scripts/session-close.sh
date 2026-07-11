@@ -11,10 +11,13 @@
 #                                        from another instance.
 #   lore session close --self            Close the session named by LORE_SESSION_* env
 #   lore session close --request <id>    Cancel a pending (unclaimed) spawn request
+#   lore session close --retire-close-request <id>
+#                                        Retire a close request whose target
+#                                        instance is confirmed dead
 #
 # Options:
 #   --reason <r>       Close reason: protocol_terminus | coordinator | human
-#                      (default: human). Ignored by the --request cancel form.
+#                      (default: human). Ignored by the cancel/retire forms.
 #   --requested-by <w> Who requested it (default: $LORE_SESSION_INSTANCE, else $USER).
 #   --ttl <seconds>    Instance liveness TTL for slug resolution (default: 30).
 #   --kdir <path>      Knowledge-store override (test isolation).
@@ -40,6 +43,7 @@ SLUG_ARG=""
 SESSION_ID_ARG=""
 SELF=0
 CANCEL_ID=""
+RETIRE_CLOSE_ID=""
 REASON="human"
 REQUESTED_BY=""
 TTL=30
@@ -51,6 +55,7 @@ while [[ $# -gt 0 ]]; do
     --self) SELF=1; shift ;;
     --session) SESSION_ID_ARG="$2"; shift 2 ;;
     --request) CANCEL_ID="$2"; shift 2 ;;
+    --retire-close-request) RETIRE_CLOSE_ID="$2"; shift 2 ;;
     --reason) REASON="$2"; shift 2 ;;
     --requested-by) REQUESTED_BY="$2"; shift 2 ;;
     --ttl) TTL="$2"; shift 2 ;;
@@ -59,7 +64,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     --*)
       echo "Unknown argument: $1" >&2
-      echo "Usage: session-close.sh (<slug> | --session <id> | --self | --request <id>) [--reason <r>] [--kdir <path>] [--json]" >&2
+      echo "Usage: session-close.sh (<slug> | --session <id> | --self | --request <id> | --retire-close-request <id>) [--reason <r>] [--kdir <path>] [--json]" >&2
       exit 1
       ;;
     *)
@@ -92,10 +97,11 @@ FORMS=0
 [[ -n "$SESSION_ID_ARG" ]] && FORMS=$((FORMS + 1))
 [[ $SELF -eq 1 ]] && FORMS=$((FORMS + 1))
 [[ -n "$CANCEL_ID" ]] && FORMS=$((FORMS + 1))
+[[ -n "$RETIRE_CLOSE_ID" ]] && FORMS=$((FORMS + 1))
 if [[ $FORMS -eq 0 ]]; then
-  fail "no target: pass a <slug>, --session <id>, --self, or --request <id>"
+  fail "no target: pass a <slug>, --session <id>, --self, --request <id>, or --retire-close-request <id>"
 elif [[ $FORMS -gt 1 ]]; then
-  fail "ambiguous: pass exactly one of <slug>, --session <id>, --self, or --request <id>"
+  fail "ambiguous: pass exactly one of <slug>, --session <id>, --self, --request <id>, or --retire-close-request <id>"
 fi
 
 if [[ -z "$REQUESTED_BY" ]]; then
@@ -120,6 +126,82 @@ emit_event() {
     echo "[session] warning: event append failed (substrate change is durable)" >&2
   fi
 }
+
+# --- Manual retirement: caller asserts death; a fresh registry row vetoes it ---
+if [[ -n "$RETIRE_CLOSE_ID" ]]; then
+  command -v python3 &>/dev/null || fail "python3 is required but not found on PATH"
+  CLOSE_FILE="$SESSIONS_DIR/close-requests/${RETIRE_CLOSE_ID}.json"
+  [[ -f "$CLOSE_FILE" ]] || fail "no pending close request '$RETIRE_CLOSE_ID' to retire"
+  if ! jq -e --arg id "$RETIRE_CLOSE_ID" \
+    'type == "object" and .request_id == $id and (.target_instance | type == "string" and length > 0)' \
+    "$CLOSE_FILE" >/dev/null 2>&1; then
+    fail "close request '$RETIRE_CLOSE_ID' is malformed or its request_id does not match the filename"
+  fi
+
+  RETIRE_TARGET="$(jq -r '.target_instance' "$CLOSE_FILE")"
+  RETIRE_SLUG="$(jq -r '.slug // ""' "$CLOSE_FILE")"
+
+  # This is only a refusal guard: the form does not infer death from absence or
+  # staleness. The caller remains responsible for confirming the target is dead.
+  if python3 - "$SESSIONS_DIR/instances" "$RETIRE_TARGET" "$TTL" <<'PYEOF'
+import json, os, sys, time
+
+instances_dir, target, ttl = sys.argv[1], sys.argv[2], float(sys.argv[3])
+now = time.time()
+if os.path.isdir(instances_dir):
+    for name in os.listdir(instances_dir):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(instances_dir, name)
+        try:
+            if now - os.path.getmtime(path) > ttl:
+                continue
+            with open(path) as handle:
+                row = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if row.get("name") == target:
+            raise SystemExit(0)
+raise SystemExit(1)
+PYEOF
+  then
+    fail "refusing to retire close request '$RETIRE_CLOSE_ID': target instance '$RETIRE_TARGET' is currently live"
+  fi
+
+  # Match recoveryEventID("close-failed-dead-target", target, requestID):
+  # sha256(target + NUL + requestID), first 16 bytes rendered as lowercase hex.
+  RETIRE_EVENT_ID="close-failed-dead-target-$(python3 - "$RETIRE_TARGET" "$RETIRE_CLOSE_ID" <<'PYEOF'
+import hashlib, sys
+print(hashlib.sha256((sys.argv[1] + "\0" + sys.argv[2]).encode()).hexdigest()[:32])
+PYEOF
+)"
+  RETIRE_EVENT="$(jq -n \
+    --arg event_id "$RETIRE_EVENT_ID" \
+    --arg actor "$REQUESTED_BY" \
+    --arg target "$RETIRE_TARGET" \
+    --arg slug "$RETIRE_SLUG" \
+    --arg request_id "$RETIRE_CLOSE_ID" \
+    '{event_id: $event_id, event: "close_failed", actor_instance: $actor,
+      target_instance: $target, request_id: $request_id, reason: "target-instance-dead"}
+     + (if $slug != "" then {slug: $slug} else {} end)')"
+
+  # The journal disposition is the durable terminal. Never delete the queue row
+  # unless the sole writer appended it or proved an exact idempotent replay.
+  if ! printf '%s' "$RETIRE_EVENT" | bash "$SCRIPT_DIR/session-event-append.sh" --kdir "$KNOWLEDGE_DIR" >/dev/null; then
+    fail "could not append retirement for close request '$RETIRE_CLOSE_ID'; request was not deleted"
+  fi
+  rm -f "$CLOSE_FILE"
+
+  if [[ $JSON_MODE -eq 1 ]]; then
+    json_output "$(jq -n \
+      --arg request_id "$RETIRE_CLOSE_ID" \
+      --arg target "$RETIRE_TARGET" \
+      --arg event_id "$RETIRE_EVENT_ID" \
+      '{request_id: $request_id, target_instance: $target, event_id: $event_id, retired: true}')"
+  fi
+  echo "[session] Retired close request $RETIRE_CLOSE_ID for dead target $RETIRE_TARGET"
+  exit 0
+fi
 
 # --- Cancel form: delete a pending spawn row, emit request_cancelled ---
 if [[ -n "$CANCEL_ID" ]]; then

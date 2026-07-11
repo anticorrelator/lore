@@ -361,6 +361,16 @@ predecessor. It first appends (or proves an idempotent replay of) a deterministi
 Those rows are explicit terminal dispositions and are not projected as unmatched
 teardown failures. Requests targeting any other instance remain untouched.
 
+A coordinator can retire the legacy case where the target is confirmed dead but
+no registry corpse remains with
+`lore session close --retire-close-request <request_id>`. This is an assertion,
+not a death detector: the verb does not infer or auto-confirm death. It refuses a
+target that still has a live registry row, then otherwise mirrors the mechanical
+pass exactly — the same deterministic event identity, exact request and target
+fields, `reason=target-instance-dead`, and sole-writer append before queue-file
+deletion. `--requested-by` (or its normal caller default) records the asserting
+actor as `actor_instance`.
+
 The close owner also records every consumed request ID in the live session's
 ordered `close_requests` recovery manifest before it acts. A failure that leaves
 the session alive retains that set; adoption carries it forward. The eventual

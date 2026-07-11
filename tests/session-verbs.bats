@@ -601,6 +601,79 @@ journal_boundaries() {
   [[ "$output" == *"no pending request 'no-such-id'"* ]]
 }
 
+@test "close --retire-close-request appends the exact deterministic terminal before deleting" {
+  local rid="close-legacy-1" target="dead-inst"
+  mkdir -p "$TEST_KDIR/_sessions/close-requests"
+  printf '%s\n' '{"request_id":"close-legacy-1","slug":"feature-x","target_instance":"dead-inst","reason":"human","requested_by":"operator","requested_at":"2026-07-11T00:00:00Z"}' \
+    > "$TEST_KDIR/_sessions/close-requests/$rid.json"
+
+  run bash "$CLOSE" --retire-close-request "$rid" --requested-by coordinator-a --kdir "$TEST_KDIR" --json
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_KDIR/_sessions/close-requests/$rid.json" ]
+
+  local expected_id
+  expected_id="close-failed-dead-target-$(python3 - "$target" "$rid" <<'PYEOF'
+import hashlib, sys
+print(hashlib.sha256((sys.argv[1] + "\0" + sys.argv[2]).encode()).hexdigest()[:32])
+PYEOF
+)"
+  run jq -e --arg id "$expected_id" \
+    'select(.event == "close_failed")
+     | .event_id == $id and .request_id == "close-legacy-1"
+       and .target_instance == "dead-inst" and .actor_instance == "coordinator-a"
+       and .slug == "feature-x" and .reason == "target-instance-dead"' \
+    "$TEST_KDIR/_sessions/events.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "close --retire-close-request keeps the queue row when the terminal append fails" {
+  local rid="close-legacy-2" target="dead-inst" event_id
+  mkdir -p "$TEST_KDIR/_sessions/close-requests"
+  printf '%s\n' '{"request_id":"close-legacy-2","slug":"feature-x","target_instance":"dead-inst","reason":"human"}' \
+    > "$TEST_KDIR/_sessions/close-requests/$rid.json"
+  event_id="close-failed-dead-target-$(python3 - "$target" "$rid" <<'PYEOF'
+import hashlib, sys
+print(hashlib.sha256((sys.argv[1] + "\0" + sys.argv[2]).encode()).hexdigest()[:32])
+PYEOF
+)"
+  bash "$APPEND" --row "{\"event_id\":\"$event_id\",\"event\":\"close_failed\",\"request_id\":\"different\",\"reason\":\"error\"}" --kdir "$TEST_KDIR" >/dev/null
+
+  run bash "$CLOSE" --retire-close-request "$rid" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"request was not deleted"* ]]
+  [ -f "$TEST_KDIR/_sessions/close-requests/$rid.json" ]
+}
+
+@test "close --retire-close-request refuses a currently live target" {
+  local rid="close-live-1"
+  write_instance inst-a feature-x
+  mkdir -p "$TEST_KDIR/_sessions/close-requests"
+  printf '%s\n' '{"request_id":"close-live-1","slug":"feature-x","target_instance":"inst-a","reason":"human"}' \
+    > "$TEST_KDIR/_sessions/close-requests/$rid.json"
+
+  run bash "$CLOSE" --retire-close-request "$rid" --kdir "$TEST_KDIR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"target instance 'inst-a' is currently live"* ]]
+  [ -f "$TEST_KDIR/_sessions/close-requests/$rid.json" ]
+  [ ! -f "$TEST_KDIR/_sessions/events.jsonl" ]
+}
+
+@test "close --retire-close-request replays idempotently after append-before-delete interruption" {
+  local rid="close-replay-1" row
+  mkdir -p "$TEST_KDIR/_sessions/close-requests"
+  row='{"request_id":"close-replay-1","slug":"feature-x","target_instance":"dead-inst","reason":"human"}'
+  printf '%s\n' "$row" > "$TEST_KDIR/_sessions/close-requests/$rid.json"
+  run bash "$CLOSE" --retire-close-request "$rid" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+
+  # Model a crash after append but before delete by restoring the exact queue row.
+  printf '%s\n' "$row" > "$TEST_KDIR/_sessions/close-requests/$rid.json"
+  run bash "$CLOSE" --retire-close-request "$rid" --kdir "$TEST_KDIR"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEST_KDIR/_sessions/close-requests/$rid.json" ]
+  [ "$(jq -r 'select(.request_id == "close-replay-1") | .event' "$TEST_KDIR/_sessions/events.jsonl" | wc -l | tr -d ' ')" -eq 1 ]
+}
+
 @test "close refuses an ambiguous form (slug plus --self)" {
   run bash "$CLOSE" feature-x --self --kdir "$TEST_KDIR"
   [ "$status" -eq 1 ]
