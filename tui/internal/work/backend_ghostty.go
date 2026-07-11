@@ -2,7 +2,7 @@ package work
 
 import (
 	"fmt"
-	"os"
+	"io"
 	"strings"
 	"sync"
 
@@ -36,7 +36,11 @@ type terminalBackend struct {
 	// ptmx is resolved at callback-invocation time (not captured at
 	// construction) so setPtyWriter can attach the PTY after the terminal
 	// already exists. nil drops responses.
-	ptmx *os.File
+	ptyWriter io.Writer
+
+	colorPair    TerminalColorPair
+	hasColorPair bool
+	colorQueries defaultColorQueryRecognizer
 
 	closed    bool
 	closeOnce sync.Once
@@ -70,11 +74,7 @@ func newTerminalBackend(cols, rows int) *terminalBackend {
 		// slice is only valid for the call duration, so it is written
 		// (not retained) here.
 		libghostty.WithWritePty(func(_ *libghostty.Terminal, data []byte) {
-			if b.ptmx == nil {
-				writeCrashLog("ghostty WritePty", fmt.Sprintf("dropped %d response bytes: no PTY attached", len(data)))
-				return
-			}
-			b.ptmx.Write(data) //nolint:errcheck
+			b.writePty(data)
 		}),
 	)
 	if err != nil {
@@ -109,11 +109,27 @@ func newTerminalBackend(cols, rows int) *terminalBackend {
 
 // setPtyWriter attaches the PTY master so device-query responses emitted by
 // the WritePty callback reach the subprocess.
-func (b *terminalBackend) setPtyWriter(ptmx *os.File) {
+func (b *terminalBackend) setPtyWriter(writer io.Writer) {
 	if b == nil || b.closed {
 		return
 	}
-	b.ptmx = ptmx
+	b.ptyWriter = writer
+}
+
+func (b *terminalBackend) setColorPair(pair TerminalColorPair) {
+	if b == nil || b.closed {
+		return
+	}
+	b.colorPair = pair
+	b.hasColorPair = true
+}
+
+func (b *terminalBackend) writePty(data []byte) {
+	if b.ptyWriter == nil {
+		writeCrashLog("ghostty WritePty", fmt.Sprintf("dropped %d response bytes: no PTY attached", len(data)))
+		return
+	}
+	_, _ = b.ptyWriter.Write(data)
 }
 
 // write feeds raw PTY bytes through the terminal parser. Query responses may
@@ -122,7 +138,14 @@ func (b *terminalBackend) write(data []byte) {
 	if b == nil || b.closed {
 		return
 	}
+	queries := b.colorQueries.observe(data)
 	b.term.VTWrite(data)
+	if !b.hasColorPair {
+		return
+	}
+	for _, query := range queries {
+		b.writePty(b.colorPair.reply(query))
+	}
 }
 
 // resize changes the terminal dimensions, reflowing content and scrollback.
@@ -291,7 +314,7 @@ func (b *terminalBackend) readScrollback(start, end int) []string {
 func (b *terminalBackend) close() {
 	b.closeOnce.Do(func() {
 		b.closed = true
-		b.ptmx = nil
+		b.ptyWriter = nil
 		if b.rc != nil {
 			b.rc.Close()
 		}

@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"image/color"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +21,94 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/work"
 )
+
+func queryPanelDefaultColors(t *testing.T, panel work.SessionPanelModel) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	panel = panel.SetPtmx(w, nil, nil)
+	panel, _ = panel.Update(work.TerminalOutputMsg{Slug: panel.Slug(), Data: []byte("\x1b]10;?\a\x1b]11;?\x1b\\")})
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	buf, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(buf)
+}
+
+func TestTerminalColorPairPropagatesToExistingAndFuturePanels(t *testing.T) {
+	m := minimalModel(stateWork, nil, nil)
+	m.sessionModalBlocked = map[string]bool{"existing": true}
+	m.setSessionPanel("existing", work.NewSessionPanelModel("existing"))
+
+	next, _ := m.Update(tea.ForegroundColorMsg{Color: color.RGBA{R: 0xee, G: 0xdd, B: 0xcc, A: 0xff}})
+	m = next.(model)
+	if got := queryPanelDefaultColors(t, m.sessionPanels["existing"]); got != "" {
+		t.Fatalf("partial host palette produced replies: %q", got)
+	}
+
+	next, _ = m.Update(tea.BackgroundColorMsg{Color: color.RGBA{R: 0x11, G: 0x22, B: 0x33, A: 0xff}})
+	m = next.(model)
+	want := "\x1b]10;rgb:eeee/dddd/cccc\x1b\\\x1b]11;rgb:1111/2222/3333\x1b\\"
+	if got := queryPanelDefaultColors(t, m.sessionPanels["existing"]); got != want {
+		t.Fatalf("existing panel replies = %q, want %q", got, want)
+	}
+
+	m.setSessionPanel("future", work.NewSessionPanelModel("future"))
+	if got := queryPanelDefaultColors(t, m.sessionPanels["future"]); got != want {
+		t.Fatalf("future panel replies = %q, want %q", got, want)
+	}
+	if !m.sessionModalBlocked["existing"] {
+		t.Fatal("palette propagation disturbed the modal-blocked heartbeat latch")
+	}
+}
+
+func TestAdoptionCapabilityContractHarnessMatrix(t *testing.T) {
+	m := minimalModel(stateWork, nil, nil)
+	m.terminalForeground = color.RGBA{R: 0xee, G: 0xdd, B: 0xcc, A: 0xff}
+	m.terminalBackground = color.RGBA{R: 0x11, G: 0x22, B: 0x33, A: 0xff}
+	m.pendingSpawns = make(map[string]liveSession)
+
+	frameworks := []string{"claude-code", "codex", "opencode"}
+	alive := make([]adoptedSession, 0, len(frameworks))
+	for _, framework := range frameworks {
+		alive = append(alive, adoptedSession{
+			slug:         "adopt-" + framework,
+			typ:          "implement",
+			initiator:    "agent",
+			sessionID:    "session-" + framework,
+			harness:      framework,
+			tmuxName:     "tmux-" + framework,
+			deadInstance: "old-instance",
+		})
+	}
+
+	m, cmd := m.handleAdoptionScan(adoptionScanMsg{alive: alive})
+	if cmd == nil {
+		t.Fatal("adoption matrix did not schedule attach commands")
+	}
+	wantReplies := "\x1b]10;rgb:eeee/dddd/cccc\x1b\\\x1b]11;rgb:1111/2222/3333\x1b\\"
+	for _, framework := range frameworks {
+		slug := "adopt-" + framework
+		pending, ok := m.pendingSpawns[slug]
+		if !ok || !pending.adopted || pending.harness != framework || pending.tmuxName != "tmux-"+framework {
+			t.Errorf("%s adoption identity = %+v", framework, pending)
+		}
+		panel, ok := m.sessionPanels[slug]
+		if !ok {
+			t.Errorf("%s adoption panel missing", framework)
+			continue
+		}
+		if got := queryPanelDefaultColors(t, panel); got != wantReplies {
+			t.Errorf("%s adopted panel replies = %q, want %q", framework, got, wantReplies)
+		}
+	}
+}
 
 func TestClassifyStartupState_BothPresent(t *testing.T) {
 	dir := t.TempDir()

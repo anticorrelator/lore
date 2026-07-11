@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
@@ -203,8 +204,10 @@ type model struct {
 	// the currently selected list item is shown in the right panel when present.
 	// Keyed by slug alone (one panel per subject): a second launch of any type
 	// attaches to the existing panel rather than replacing it.
-	sessionPanels map[string]work.SessionPanelModel
-	terminalMode  bool
+	sessionPanels      map[string]work.SessionPanelModel
+	terminalMode       bool
+	terminalForeground color.Color
+	terminalBackground color.Color
 
 	// preferDetailView records, per work slug / follow-up ID, that the user
 	// explicitly switched the right panel to the detail view (ctrl+t) while a
@@ -657,7 +660,20 @@ func (m *model) setSessionPanel(slug string, panel work.SessionPanelModel) {
 	if m.sessionPanels == nil {
 		m.sessionPanels = make(map[string]work.SessionPanelModel)
 	}
+	if pair, ok := work.NewTerminalColorPair(m.terminalForeground, m.terminalBackground); ok {
+		panel = panel.WithTerminalColorPair(pair)
+	}
 	m.sessionPanels[slug] = panel
+}
+
+func (m *model) applyTerminalColorPair() {
+	pair, ok := work.NewTerminalColorPair(m.terminalForeground, m.terminalBackground)
+	if !ok {
+		return
+	}
+	for slug, panel := range m.sessionPanels {
+		m.sessionPanels[slug] = panel.WithTerminalColorPair(pair)
+	}
 }
 
 // cleanupAllSubprocesses cancels any running AI command, cleans up all spec

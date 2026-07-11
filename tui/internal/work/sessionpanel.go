@@ -238,6 +238,15 @@ func NewSessionPanelModel(slug string) SessionPanelModel {
 	}
 }
 
+// WithTerminalColorPair configures replies to default-color queries emitted by
+// the hosted terminal application.
+func (m SessionPanelModel) WithTerminalColorPair(pair TerminalColorPair) SessionPanelModel {
+	if m.backend != nil {
+		m.backend.setColorPair(pair)
+	}
+	return m
+}
+
 // Slug returns the work item slug this panel is running for.
 func (m SessionPanelModel) Slug() string {
 	return m.slug

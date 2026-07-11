@@ -156,6 +156,8 @@ func (m model) Init() tea.Cmd {
 		indexPollTick(),
 		followup.LoadIndexCmd(m.config.KnowledgeDir),
 		runDoctor(),
+		tea.RequestForegroundColor,
+		tea.RequestBackgroundColor,
 	}
 	// Register this instance in the substrate so other instances see it (and the
 	// queue's own-liveness check works) from the first tick.
@@ -181,6 +183,17 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 			panic(r)
 		}
 	}()
+
+	switch msg := msg.(type) {
+	case tea.ForegroundColorMsg:
+		m.terminalForeground = msg.Color
+		m.applyTerminalColorPair()
+		return m, nil
+	case tea.BackgroundColorMsg:
+		m.terminalBackground = msg.Color
+		m.applyTerminalColorPair()
+		return m, nil
+	}
 
 	// Help modal: intercept all keys; Esc or ? closes it, scroll keys move
 	// the help viewport, everything else is swallowed.

@@ -113,13 +113,18 @@ func tmuxOptionPins() []string {
 	return out
 }
 
+func tmuxRGBFeaturePin() []string {
+	return []string{"set", "-as", "terminal-features", ",*:RGB", ";"}
+}
+
 // tmuxPaneEnv builds the `-e KEY=VAL` argument pairs for a new pane's environment.
 // It carries the process base env plus the session extras (LORE_FRAMEWORK,
 // LORE_SESSION_*) explicitly rather than relying on tmux server-env inheritance:
 // the server is shared across every lore TUI on the host, so an inherited pane env
 // would be whichever instance happened to start the server. TERM and the
 // tmux-owned TMUX/TMUX_PANE vars are dropped so default-terminal wins and tmux's
-// own nesting markers are not shadowed by a stale value.
+// own nesting markers are not shadowed by a stale value. COLORTERM is replaced
+// with the capability this embedder actually provides.
 func tmuxPaneEnv(extras []string) []string {
 	var out []string
 	for _, kv := range os.Environ() {
@@ -128,14 +133,18 @@ func tmuxPaneEnv(extras []string) []string {
 			key = kv[:i]
 		}
 		switch key {
-		case "TERM", "TMUX", "TMUX_PANE":
+		case "TERM", "COLORTERM", "TMUX", "TMUX_PANE":
 			continue
 		}
 		out = append(out, "-e", kv)
 	}
 	for _, kv := range extras {
+		if strings.HasPrefix(kv, "COLORTERM=") {
+			continue
+		}
 		out = append(out, "-e", kv)
 	}
+	out = append(out, "-e", "COLORTERM=truecolor")
 	return out
 }
 
@@ -145,12 +154,7 @@ func tmuxPaneEnv(extras []string) []string {
 // the attach client). env is the per-session extra environment; harnessBin/args is
 // the exact command the direct-PTY path would have run.
 func createTmuxSession(name string, cols, rows int, env []string, harnessBin string, harnessArgs []string) (int, error) {
-	args := []string{"-L", tmuxServerLabel, "-f", "/dev/null"}
-	args = append(args, tmuxOptionPins()...)
-	args = append(args, "new-session", "-d", "-s", name, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
-	args = append(args, tmuxPaneEnv(env)...)
-	args = append(args, "-P", "-F", "#{pane_pid}", "--", harnessBin)
-	args = append(args, harnessArgs...)
+	args := tmuxSessionArgs(name, cols, rows, env, harnessBin, harnessArgs)
 
 	cmd := exec.Command(tmuxBinary, args...)
 	out, err := cmd.Output()
@@ -162,6 +166,17 @@ func createTmuxSession(name string, cols, rows int, env []string, harnessBin str
 		return 0, fmt.Errorf("parse pane pid %q: %w", strings.TrimSpace(string(out)), perr)
 	}
 	return pid, nil
+}
+
+func tmuxSessionArgs(name string, cols, rows int, env []string, harnessBin string, harnessArgs []string) []string {
+	args := []string{"-L", tmuxServerLabel, "-f", "/dev/null"}
+	args = append(args, tmuxOptionPins()...)
+	args = append(args, tmuxRGBFeaturePin()...)
+	args = append(args, "new-session", "-d", "-s", name, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
+	args = append(args, tmuxPaneEnv(env)...)
+	args = append(args, "-P", "-F", "#{pane_pid}", "--", harnessBin)
+	args = append(args, harnessArgs...)
+	return args
 }
 
 // tmuxAttachCommand builds the `tmux attach-session` client that runs under the
