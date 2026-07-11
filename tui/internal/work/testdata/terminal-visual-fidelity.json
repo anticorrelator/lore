@@ -1,0 +1,18 @@
+{
+  "encoding": "go-escaped",
+  "cols": 20,
+  "rows": 6,
+  "composer_row": 2,
+  "background_span": [0, 12],
+  "background_rgb": [30, 40, 50],
+  "faint_span": [0, 4],
+  "inverse_cells": [6],
+  "cursor": {
+    "x": 6,
+    "y": 2,
+    "shape": "bar",
+    "blink": true,
+    "color_rgb": [200, 100, 50]
+  },
+  "plain_rows": ["header", "", "ghost X", "", "", ""]
+}

@@ -27,10 +27,11 @@ const maxScrollbackBytes = 16 << 20
 // loop) — the underlying terminal is stateful and not safe for concurrent
 // use. Functional SessionPanelModel copies share one backend pointer.
 type terminalBackend struct {
-	term *libghostty.Terminal
-	rs   *libghostty.RenderState
-	ri   *libghostty.RenderStateRowIterator
-	rc   *libghostty.RenderStateRowCells
+	term   *libghostty.Terminal
+	rs     *libghostty.RenderState
+	ri     *libghostty.RenderStateRowIterator
+	rc     *libghostty.RenderStateRowCells
+	visual TerminalVisual
 
 	// ptmx is resolved at callback-invocation time (not captured at
 	// construction) so setPtyWriter can attach the PTY after the terminal
@@ -156,8 +157,10 @@ func (b *terminalBackend) renderScreen() string {
 	lines, err := b.renderViewportRows(int(rows))
 	if err != nil {
 		writeCrashLog("ghostty renderScreen", err)
+		b.visual = TerminalVisual{}
 		return ""
 	}
+	b.visual = b.readTerminalVisual()
 	return strings.Join(lines, "\n")
 }
 

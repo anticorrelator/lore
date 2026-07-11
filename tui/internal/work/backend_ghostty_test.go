@@ -1,15 +1,242 @@
 package work
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	libghostty "go.mitchellh.com/libghostty"
 )
+
+type terminalVisualFixture struct {
+	Encoding       string        `json:"encoding"`
+	Cols           int           `json:"cols"`
+	Rows           int           `json:"rows"`
+	ComposerRow    int           `json:"composer_row"`
+	BackgroundSpan [2]int        `json:"background_span"`
+	BackgroundRGB  [3]uint8      `json:"background_rgb"`
+	FaintSpan      [2]int        `json:"faint_span"`
+	InverseCells   []int         `json:"inverse_cells"`
+	Cursor         fixtureCursor `json:"cursor"`
+	PlainRows      []string      `json:"plain_rows"`
+}
+
+type fixtureCursor struct {
+	X        int      `json:"x"`
+	Y        int      `json:"y"`
+	Shape    string   `json:"shape"`
+	Blink    bool     `json:"blink"`
+	ColorRGB [3]uint8 `json:"color_rgb"`
+}
+
+func loadTerminalVisualFixture(t *testing.T) (terminalVisualFixture, []byte) {
+	t.Helper()
+	var fixture terminalVisualFixture
+	metadata, err := os.ReadFile(filepath.Join("testdata", "terminal-visual-fidelity.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(metadata, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(filepath.Join("testdata", "terminal-visual-fidelity.ansi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := strconv.Unquote(`"` + strings.TrimSpace(string(encoded)) + `"`)
+	if err != nil {
+		t.Fatalf("decode ANSI fixture: %v", err)
+	}
+	return fixture, []byte(decoded)
+}
+
+type fixtureCellState struct {
+	HasBackground bool
+	Background    [3]uint8
+	Faint         bool
+	Inverse       bool
+}
+
+func ghosttyFixtureRow(t *testing.T, b *terminalBackend, target int) []fixtureCellState {
+	t.Helper()
+	if err := b.rs.Update(b.term); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.rs.RowIterator(b.ri); err != nil {
+		t.Fatal(err)
+	}
+	row := 0
+	for b.ri.Next() {
+		if err := b.ri.Cells(b.rc); err != nil {
+			t.Fatal(err)
+		}
+		if row != target {
+			row++
+			continue
+		}
+		var cells []fixtureCellState
+		for b.rc.Next() {
+			var style libghostty.RenderCellStyle
+			if err := b.rc.StyleInto(&style); err != nil {
+				t.Fatal(err)
+			}
+			cells = append(cells, fixtureCellState{
+				HasBackground: style.HasBackground,
+				Background:    [3]uint8{style.Background.R, style.Background.G, style.Background.B},
+				Faint:         style.Faint,
+				Inverse:       style.Inverse,
+			})
+		}
+		return cells
+	}
+	t.Fatalf("fixture row %d not found", target)
+	return nil
+}
+
+func renderedFixtureRows(render string) [][]fixtureCellState {
+	rows := [][]fixtureCellState{{}}
+	state := fixtureCellState{}
+	for i := 0; i < len(render); {
+		if render[i] == '\x1b' && i+1 < len(render) && render[i+1] == '[' {
+			end := i + 2
+			for end < len(render) && render[end] != 'm' {
+				end++
+			}
+			if end < len(render) {
+				applyFixtureSGR(&state, render[i+2:end])
+				i = end + 1
+				continue
+			}
+		}
+		if render[i] == '\n' {
+			rows = append(rows, []fixtureCellState{})
+			i++
+			continue
+		}
+		rows[len(rows)-1] = append(rows[len(rows)-1], state)
+		i++
+	}
+	return rows
+}
+
+func applyFixtureSGR(state *fixtureCellState, sequence string) {
+	if sequence == "" {
+		sequence = "0"
+	}
+	parts := strings.Split(sequence, ";")
+	for i := 0; i < len(parts); i++ {
+		code, _ := strconv.Atoi(parts[i])
+		switch code {
+		case 0:
+			*state = fixtureCellState{}
+		case 2:
+			state.Faint = true
+		case 22:
+			state.Faint = false
+		case 7:
+			state.Inverse = true
+		case 27:
+			state.Inverse = false
+		case 48:
+			if i+4 < len(parts) && parts[i+1] == "2" {
+				r, _ := strconv.Atoi(parts[i+2])
+				g, _ := strconv.Atoi(parts[i+3])
+				b, _ := strconv.Atoi(parts[i+4])
+				state.HasBackground = true
+				state.Background = [3]uint8{uint8(r), uint8(g), uint8(b)}
+				i += 4
+			}
+		case 49:
+			state.HasBackground = false
+			state.Background = [3]uint8{}
+		}
+	}
+}
+
+func assertFixtureAttributes(t *testing.T, fixture terminalVisualFixture, cells []fixtureCellState) {
+	t.Helper()
+	for x := fixture.BackgroundSpan[0]; x <= fixture.BackgroundSpan[1]; x++ {
+		if x >= len(cells) {
+			t.Fatalf("background span ends at %d but row has %d cells", fixture.BackgroundSpan[1], len(cells))
+		}
+		if !cells[x].HasBackground || cells[x].Background != fixture.BackgroundRGB {
+			t.Errorf("cell %d background = present:%v rgb:%v, want %v", x, cells[x].HasBackground, cells[x].Background, fixture.BackgroundRGB)
+		}
+	}
+	for x := fixture.FaintSpan[0]; x <= fixture.FaintSpan[1]; x++ {
+		if !cells[x].Faint {
+			t.Errorf("cell %d is not faint", x)
+		}
+	}
+	for _, x := range fixture.InverseCells {
+		if x >= len(cells) || !cells[x].Inverse {
+			t.Errorf("cell %d is not inverse", x)
+		}
+	}
+}
+
+func TestTerminalVisualFidelityFixture(t *testing.T) {
+	fixture, stream := loadTerminalVisualFixture(t)
+	m := newSizedPanel(t, fixture.Cols, fixture.Rows)
+	m, _ = m.Update(TerminalOutputMsg{Slug: "test", Data: stream})
+
+	t.Run("ghostty-cell-state", func(t *testing.T) {
+		assertFixtureAttributes(t, fixture, ghosttyFixtureRow(t, m.backend, fixture.ComposerRow))
+	})
+
+	t.Run("adapter-emission", func(t *testing.T) {
+		rows := renderedFixtureRows(m.cachedRender)
+		if fixture.ComposerRow >= len(rows) {
+			t.Fatalf("rendered row %d missing from %d rows", fixture.ComposerRow, len(rows))
+		}
+		assertFixtureAttributes(t, fixture, rows[fixture.ComposerRow])
+	})
+
+	t.Run("plain-observer-and-cursor", func(t *testing.T) {
+		snapshot, err := m.ScreenState()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprint(snapshot.Rows) != fmt.Sprint(fixture.PlainRows) {
+			t.Fatalf("plain rows = %#v, want %#v", snapshot.Rows, fixture.PlainRows)
+		}
+		visual := m.TerminalVisual()
+		if visual.Cursor == nil {
+			t.Fatal("visible viewport cursor missing")
+		}
+		if visual.Cursor.X != fixture.Cursor.X || visual.Cursor.Y != fixture.Cursor.Y || visual.Cursor.Shape != TerminalCursorBar || visual.Cursor.Blink != fixture.Cursor.Blink {
+			t.Errorf("cursor = %+v, want x=%d y=%d shape=bar blink=%v", visual.Cursor, fixture.Cursor.X, fixture.Cursor.Y, fixture.Cursor.Blink)
+		}
+		if visual.Cursor.Color == nil || [3]uint8{visual.Cursor.Color.R, visual.Cursor.Color.G, visual.Cursor.Color.B} != fixture.Cursor.ColorRGB {
+			t.Errorf("cursor color = %v, want %v", visual.Cursor.Color, fixture.Cursor.ColorRGB)
+		}
+	})
+
+	t.Run("cursor-suppression", func(t *testing.T) {
+		hidden, _ := m.Update(TerminalOutputMsg{Slug: "test", Data: []byte("\x1b[?25l")})
+		if cursor := hidden.TerminalVisual().Cursor; cursor != nil {
+			t.Errorf("hidden cursor remained visible: %+v", cursor)
+		}
+
+		scrolled := m
+		scrolled.scrollOffset = 1
+		if cursor := scrolled.TerminalVisual().Cursor; cursor != nil {
+			t.Errorf("scrollback published cursor: %+v", cursor)
+		}
+
+		done, _ := m.Update(StreamCompleteMsg{Slug: "test"})
+		if cursor := done.TerminalVisual().Cursor; cursor != nil {
+			t.Errorf("completed panel published cursor: %+v", cursor)
+		}
+	})
+}
 
 // newSizedPanel creates a panel sized via the real WindowSizeMsg path so the
 // model height and backend dimensions stay in sync, as in the live TUI.

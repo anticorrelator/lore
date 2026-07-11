@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"path/filepath"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/anticorrelator/lore/tui/internal/config"
 	"github.com/anticorrelator/lore/tui/internal/settlement"
 	"github.com/anticorrelator/lore/tui/internal/style"
+	"github.com/anticorrelator/lore/tui/internal/work"
 )
 
 // Chrome styles for the hand-drawn panel compositor, constructed once at
@@ -62,7 +64,74 @@ func (m model) View() tea.View {
 	v := tea.NewView(m.viewContent())
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+	v.Cursor = m.embeddedTerminalCursor()
 	return v
+}
+
+func (m model) embeddedTerminalCursor() *tea.Cursor {
+	if !m.terminalMode || m.err != nil || m.state == stateNoRepo || m.state == stateOnboarding ||
+		m.state == stateKnowledge || m.state == stateSettlement || m.popupActive ||
+		m.sessionConfirmActive || m.aiInputActive || m.assignActive || m.confirmAction != "" ||
+		m.showHelp || (m.settingsActive && m.settingsPanel != nil) {
+		return nil
+	}
+
+	cfg := m.buildPaneConfig()
+	if !cfg.hasSessionPanel {
+		return nil
+	}
+	visual := cfg.sessionPanel.TerminalVisual()
+	if visual.Cursor == nil {
+		return nil
+	}
+
+	x, y := terminalViewportOrigin(m.layoutMode, m)
+	return projectTerminalCursor(
+		*visual.Cursor,
+		x,
+		y,
+		m.rightPanelWidth()-2,
+		m.detailPanelHeight(),
+		m.width,
+		m.height,
+	)
+}
+
+func terminalViewportOrigin(layout config.LayoutMode, m model) (int, int) {
+	if layout == config.LayoutTopBottom {
+		return 2, m.topPanelHeight() + 3
+	}
+	return leftPanelWidth + 4, 2
+}
+
+func projectTerminalCursor(cursor work.TerminalCursor, originX, originY, viewportWidth, viewportHeight, frameWidth, frameHeight int) *tea.Cursor {
+	if cursor.X < 0 || cursor.Y < 0 || cursor.X >= viewportWidth || cursor.Y >= viewportHeight {
+		return nil
+	}
+	x := originX + cursor.X
+	y := originY + cursor.Y
+	if x < 0 || y < 0 || x >= frameWidth || y >= frameHeight {
+		return nil
+	}
+
+	shape := tea.CursorBlock
+	switch cursor.Shape {
+	case work.TerminalCursorUnderline:
+		shape = tea.CursorUnderline
+	case work.TerminalCursorBar:
+		shape = tea.CursorBar
+	}
+
+	var cursorColor color.Color
+	if cursor.Color != nil {
+		cursorColor = *cursor.Color
+	}
+	return &tea.Cursor{
+		Position: tea.Position{X: x, Y: y},
+		Color:    cursorColor,
+		Shape:    shape,
+		Blink:    cursor.Blink,
+	}
 }
 
 func (m model) viewContent() string {
