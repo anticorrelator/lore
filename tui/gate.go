@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -235,15 +233,11 @@ func splitANSIRows(ansi string) []string {
 	return strings.Split(ansi, "\n")
 }
 
-// noteNoContract emits the degrade-explicitly stderr notice a send/peek refusal
-// carries when the harness has no probed interaction contract, so the refusal is
-// visible as a missing capability rather than a silent decline — the same
-// pattern the close ladder uses for an absent graceful_exit_sequence. Callers
-// invoke it once per refused request (requests are consumed once), never per tick.
-func noteNoContract(framework string) {
-	fmt.Fprintf(os.Stderr,
-		"[lore] degraded: no interaction contract for framework %q (composer/permission signature unprobed); session send/peek refused with no-contract, not guessing a signature\n",
-		framework)
+func noContractNotice(framework string) runtimeNotice {
+	return degradationNotice(
+		"interaction-contract-unavailable",
+		"no interaction contract for "+framework+"; session send/peek refused",
+	)
 }
 
 func lastRows(rows []string, n int) []string {

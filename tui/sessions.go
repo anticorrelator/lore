@@ -60,7 +60,8 @@ type liveSession struct {
 // sessionSnapshotMsg carries a full registry snapshot for external-session
 // badging. It replaces badging state wholesale, never merges.
 type sessionSnapshotMsg struct {
-	instances []session.Instance
+	instances   []session.Instance
+	diagnostics []session.Diagnostic
 }
 
 // queueTickResultMsg carries the durable transitions one queue pass performed.
@@ -84,7 +85,8 @@ type journalResultMsg struct {
 // readInstancesCmd reads the instance registry (a full snapshot).
 func readInstancesCmd(sessionsDir string) tea.Cmd {
 	return func() tea.Msg {
-		return sessionSnapshotMsg{instances: session.ListInstances(sessionsDir)}
+		instances, diagnostics := session.ListInstancesWithDiagnostics(sessionsDir)
+		return sessionSnapshotMsg{instances: instances, diagnostics: diagnostics}
 	}
 }
 
@@ -131,13 +133,15 @@ func (m model) queueTickCmd() tea.Cmd {
 	}
 	return func() tea.Msg {
 		live := make(map[string]bool)
-		for _, inst := range session.ListInstances(dir) {
+		instances, instanceDiagnostics := session.ListInstancesWithDiagnostics(dir)
+		for _, inst := range instances {
 			live[inst.Name] = true
 		}
 		res, err := session.QueueTick(dir, name, vintage, live,
 			func(slug string) bool { return planDocs[slug] },
 			func(slug string) bool { return liveSlugs[slug] },
 			time.Now(), session.ReclaimAfter)
+		res.Diagnostics = append(instanceDiagnostics, res.Diagnostics...)
 		return queueTickResultMsg{result: res, err: err}
 	}
 }
@@ -355,7 +359,7 @@ func (m model) handleSessionSnapshot(msg sessionSnapshotMsg) (model, tea.Cmd) {
 	} else {
 		m.detail, _ = m.detail.Update(work.DetailExternalSessionMsg{Active: false})
 	}
-	return m, nil
+	return m, appendDiagnosticsCmd(m.sessionsDir, msg.diagnostics)
 }
 
 // handleQueueTickResult journals every durable queue transition and spawns the
@@ -367,6 +371,9 @@ func (m model) handleQueueTickResult(msg queueTickResultMsg) (model, tea.Cmd) {
 	}
 	script, kdir := m.eventScript, m.config.KnowledgeDir
 	var cmds []tea.Cmd
+	if cmd := appendDiagnosticsCmd(m.sessionsDir, msg.result.Diagnostics); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	for _, ev := range msg.result.Reclaimed {
 		cmds = append(cmds, journalCmd(script, kdir, session.Event{
 			Event:         session.EventReclaimed,

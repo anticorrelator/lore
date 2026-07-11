@@ -63,26 +63,8 @@ func (f *fakeProc) Alive() bool      { f.aliveCalls++; return f.signals() < f.si
 // blocks on a real wait. The error return is exercised separately
 // (TestRunCloseLadder_ExhaustedIsError); the rung-only cases discard it.
 func fastLadder(proc harnessProc, ptmx io.Writer, exitSeq string, exitSupported bool, framework string) closeRung {
-	rung, _ := runCloseLadder(proc, ptmx, exitSeq, exitSupported, framework, 5*time.Millisecond, time.Millisecond)
+	rung, _, _ := runCloseLadder(proc, ptmx, exitSeq, exitSupported, framework, 5*time.Millisecond, time.Millisecond)
 	return rung
-}
-
-// captureStderr redirects os.Stderr for the duration of fn and returns what was
-// written — used to assert the explicit degradation notice.
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	orig := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w
-	fn()
-	_ = w.Close()
-	os.Stderr = orig
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	return buf.String()
 }
 
 // panelWithInterruptCapture returns a live-looking panel whose PTY writes are
@@ -129,10 +111,7 @@ func TestCloseReasonGraceDefaults(t *testing.T) {
 func TestRunCloseLadder_DegradesToSIGTERM(t *testing.T) {
 	proc := &fakeProc{signalsBeforeExit: 1}
 	var ptmx bytes.Buffer
-	var rung closeRung
-	out := captureStderr(t, func() {
-		rung = fastLadder(proc, &ptmx, "", false, "claude-code")
-	})
+	rung, notices, err := runCloseLadder(proc, &ptmx, "", false, "claude-code", 5*time.Millisecond, time.Millisecond)
 
 	if rung != rungSIGTERM {
 		t.Errorf("rung = %d, want rungSIGTERM (%d)", rung, rungSIGTERM)
@@ -143,9 +122,11 @@ func TestRunCloseLadder_DegradesToSIGTERM(t *testing.T) {
 	if ptmx.Len() != 0 {
 		t.Errorf("ptmx written %q with no capability sequence", ptmx.String())
 	}
-	if !bytes.Contains([]byte(out), []byte("graceful_exit_sequence skipped")) ||
-		!bytes.Contains([]byte(out), []byte("framework=claude-code")) {
-		t.Errorf("missing degradation notice, stderr = %q", out)
+	if err != nil {
+		t.Fatalf("runCloseLadder error: %v", err)
+	}
+	if len(notices) != 1 || notices[0].Class != operatorDegradation || notices[0].Code != "graceful-exit-unsupported" {
+		t.Errorf("notices = %#v, want one graceful-exit operator degradation", notices)
 	}
 }
 
@@ -842,7 +823,7 @@ func readEventRows(t *testing.T, kdir string) []session.Event {
 // false `closed`.
 func TestRunCloseLadder_ExhaustedIsError(t *testing.T) {
 	proc := &fakeProc{signalsBeforeExit: 99} // never exits
-	rung, err := runCloseLadder(proc, nil, "", false, "fw", 5*time.Millisecond, time.Millisecond)
+	rung, _, err := runCloseLadder(proc, nil, "", false, "fw", 5*time.Millisecond, time.Millisecond)
 	if rung != rungKill {
 		t.Errorf("rung = %d, want rungKill (%d)", rung, rungKill)
 	}

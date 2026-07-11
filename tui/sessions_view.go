@@ -35,6 +35,7 @@ type sessionsRefreshedMsg struct {
 	claimed       []session.ClaimedRow
 	events        []session.Event
 	journalCursor int64
+	diagnostics   []session.Diagnostic
 }
 
 // sessionCloseRequestedMsg reports the outcome of enqueuing a close request via
@@ -53,12 +54,16 @@ func (m model) sessionsRefreshCmd() tea.Cmd {
 	cursor := m.sessionsJournalCursor
 	return func() tea.Msg {
 		events, next := session.ReadEventsFrom(dir, cursor)
+		instances, instanceDiagnostics := session.ListInstancesWithDiagnostics(dir)
+		pending, pendingDiagnostics := session.ScanPendingWithDiagnostics(dir)
+		claimed, claimedDiagnostics := session.ScanClaimedWithDiagnostics(dir)
 		return sessionsRefreshedMsg{
-			instances:     session.ListInstances(dir),
-			pending:       session.ScanPending(dir),
-			claimed:       session.ScanClaimed(dir),
+			instances:     instances,
+			pending:       pending,
+			claimed:       claimed,
 			events:        events,
 			journalCursor: next,
+			diagnostics:   append(append(instanceDiagnostics, pendingDiagnostics...), claimedDiagnostics...),
 		}
 	}
 }
@@ -77,7 +82,7 @@ func (m model) handleSessionsRefreshed(msg sessionsRefreshedMsg) (model, tea.Cmd
 	if m.state == stateSessions {
 		m.loadSessionsDetail(m.sessionsList.CurrentKey())
 	}
-	return m, nil
+	return m, appendDiagnosticsCmd(m.sessionsDir, msg.diagnostics)
 }
 
 // buildSessionRows assembles the three-substrate union into list rows: the

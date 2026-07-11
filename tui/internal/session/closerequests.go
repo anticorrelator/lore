@@ -3,7 +3,6 @@ package session
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -45,16 +44,22 @@ func closeRequestPath(sessionsDir, id string) string {
 	return filepath.Join(CloseRequestsDir(sessionsDir), id+".json")
 }
 
-// ScanCloseRequests reads every close-request row, excluding torn/corrupt files
-// with a warning to stderr rather than aborting the scan (reader contract: a
-// malformed row is excluded-with-warning, never repaired or deleted-as-consume).
+// ScanCloseRequests reads every close-request row and discards scan diagnostics.
+// A malformed row is excluded, never repaired or deleted as a consume.
 // An absent directory yields no rows and no error.
 func ScanCloseRequests(sessionsDir string) []CloseRequest {
+	rows, _ := ScanCloseRequestsWithDiagnostics(sessionsDir)
+	return rows
+}
+
+// ScanCloseRequestsWithDiagnostics returns valid rows and corrupt-row exclusions.
+func ScanCloseRequestsWithDiagnostics(sessionsDir string) ([]CloseRequest, []Diagnostic) {
 	matches, err := filepath.Glob(filepath.Join(CloseRequestsDir(sessionsDir), "*.json"))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var out []CloseRequest
+	var diagnostics []Diagnostic
 	for _, path := range matches {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -62,12 +67,12 @@ func ScanCloseRequests(sessionsDir string) []CloseRequest {
 		}
 		var cr CloseRequest
 		if err := json.Unmarshal(data, &cr); err != nil {
-			fmt.Fprintf(os.Stderr, "[session] warning: %s corrupt — %v\n", path, err)
+			diagnostics = append(diagnostics, corruptDiagnostic("close-request", path, err))
 			continue
 		}
 		out = append(out, cr)
 	}
-	return out
+	return out, diagnostics
 }
 
 // DeleteCloseRequest removes a consumed close-request row. Idempotent: a missing

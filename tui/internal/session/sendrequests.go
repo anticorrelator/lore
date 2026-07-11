@@ -3,7 +3,6 @@ package session
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -34,15 +33,21 @@ func sendRequestPath(sessionsDir, id string) string {
 	return filepath.Join(SendRequestsDir(sessionsDir), id+".json")
 }
 
-// ScanSendRequests reads every send-request row, excluding torn/corrupt files
-// with a warning to stderr rather than aborting the scan (same reader contract
-// as close-requests). An absent directory yields no rows and no error.
+// ScanSendRequests reads every valid send-request row and discards scan
+// diagnostics. An absent directory yields no rows and no error.
 func ScanSendRequests(sessionsDir string) []SendRequest {
+	rows, _ := ScanSendRequestsWithDiagnostics(sessionsDir)
+	return rows
+}
+
+// ScanSendRequestsWithDiagnostics returns valid rows and corrupt-row exclusions.
+func ScanSendRequestsWithDiagnostics(sessionsDir string) ([]SendRequest, []Diagnostic) {
 	matches, err := filepath.Glob(filepath.Join(SendRequestsDir(sessionsDir), "*.json"))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var out []SendRequest
+	var diagnostics []Diagnostic
 	for _, path := range matches {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -50,12 +55,12 @@ func ScanSendRequests(sessionsDir string) []SendRequest {
 		}
 		var sr SendRequest
 		if err := json.Unmarshal(data, &sr); err != nil {
-			fmt.Fprintf(os.Stderr, "[session] warning: %s corrupt — %v\n", path, err)
+			diagnostics = append(diagnostics, corruptDiagnostic("send-request", path, err))
 			continue
 		}
 		out = append(out, sr)
 	}
-	return out
+	return out, diagnostics
 }
 
 // DeleteSendRequest removes a consumed send-request row. Idempotent: a missing

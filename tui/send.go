@@ -24,7 +24,8 @@ const sendVerifyGraceDefault = 12 * time.Second
 // sendRequestScanMsg carries the send-requests addressed to this instance for a
 // slug it hosts, discovered on the poll tick.
 type sendRequestScanMsg struct {
-	matched []session.SendRequest
+	matched     []session.SendRequest
+	diagnostics []session.Diagnostic
 }
 
 // sendConsumedMsg reports the outcome of consuming (deleting) one matched
@@ -58,7 +59,8 @@ type pendingSendState struct {
 func scanSendRequestsCmd(sessionsDir, myName string, hosted map[string]bool) tea.Cmd {
 	return func() tea.Msg {
 		var matched []session.SendRequest
-		for _, sr := range session.ScanSendRequests(sessionsDir) {
+		rows, diagnostics := session.ScanSendRequestsWithDiagnostics(sessionsDir)
+		for _, sr := range rows {
 			if sr.RequestID == "" || sr.TargetInstance != myName {
 				continue
 			}
@@ -67,7 +69,7 @@ func scanSendRequestsCmd(sessionsDir, myName string, hosted map[string]bool) tea
 			}
 			matched = append(matched, sr)
 		}
-		return sendRequestScanMsg{matched: matched}
+		return sendRequestScanMsg{matched: matched, diagnostics: diagnostics}
 	}
 }
 
@@ -101,8 +103,9 @@ func deleteSendRequestCmd(sessionsDir, requestID string) tea.Cmd {
 // journal consume. The gate reads the panel's live screen, so it runs here in
 // Update (the Bubble Tea goroutine), never in the consume Cmd goroutine.
 func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
+	diagnosticCmd := appendDiagnosticsCmd(m.sessionsDir, msg.diagnostics)
 	if len(msg.matched) == 0 {
-		return m, nil
+		return m, diagnosticCmd
 	}
 	framework, ferr := config.ResolveTUILaunchFramework()
 	hasContract := false
@@ -116,6 +119,9 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 		}
 	}
 	var cmds []tea.Cmd
+	if diagnosticCmd != nil {
+		cmds = append(cmds, diagnosticCmd)
+	}
 	for _, sr := range msg.matched {
 		if m.pendingSend[sr.RequestID] {
 			continue // consume already in flight for this request
@@ -177,7 +183,7 @@ func (m model) handleSendRequestScan(msg sendRequestScanMsg) (model, tea.Cmd) {
 		// A gate refusal (or an inject-time failure) is terminal now: no submission
 		// to verify, so delete + journal the outcome in one consume, as before.
 		if reason == sendReasonNoContract {
-			noteNoContract(framework)
+			m = m.routeRuntimeNotices([]runtimeNotice{noContractNotice(framework)})
 		}
 		ev := m.sendOutcomeEvent(sr, false, reason)
 		cmds = append(cmds, consumeSendCmd(m.sessionsDir, m.eventScript, m.config.KnowledgeDir, sr.RequestID, ev))

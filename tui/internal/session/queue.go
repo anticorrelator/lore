@@ -216,10 +216,15 @@ func WritePending(sessionsDir string, req Request) error {
 	return atomicWrite(pendingPath(sessionsDir, req.RequestID), data)
 }
 
-// ScanPending reads every pending row, excluding torn/corrupt files with a
-// warning rather than aborting the scan.
+// ScanPending reads every valid pending row and discards scan diagnostics.
 func ScanPending(sessionsDir string) []Request {
-	return scanDir(PendingDir(sessionsDir))
+	rows, _ := ScanPendingWithDiagnostics(sessionsDir)
+	return rows
+}
+
+// ScanPendingWithDiagnostics returns valid pending rows and corrupt exclusions.
+func ScanPendingWithDiagnostics(sessionsDir string) ([]Request, []Diagnostic) {
+	return scanDir(PendingDir(sessionsDir), "queue-pending")
 }
 
 // ClaimedRow pairs a claimed request with its file mtime — the incomplete-claim
@@ -231,23 +236,33 @@ type ClaimedRow struct {
 
 // ScanClaimed reads every claimed row with its file mtime.
 func ScanClaimed(sessionsDir string) []ClaimedRow {
+	rows, _ := ScanClaimedWithDiagnostics(sessionsDir)
+	return rows
+}
+
+// ScanClaimedWithDiagnostics returns valid claimed rows and corrupt exclusions.
+func ScanClaimedWithDiagnostics(sessionsDir string) ([]ClaimedRow, []Diagnostic) {
 	matches, err := filepath.Glob(filepath.Join(ClaimedDir(sessionsDir), "*.json"))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var out []ClaimedRow
+	var diagnostics []Diagnostic
 	for _, path := range matches {
 		fi, err := os.Stat(path)
 		if err != nil {
 			continue
 		}
-		req, ok := readRow(path)
+		req, diagnostic, ok := readRow(path, "queue-claimed")
 		if !ok {
+			if diagnostic != nil {
+				diagnostics = append(diagnostics, *diagnostic)
+			}
 			continue
 		}
 		out = append(out, ClaimedRow{Request: req, ModTime: fi.ModTime()})
 	}
-	return out
+	return out, diagnostics
 }
 
 // ClaimRequest attempts to claim a pending row by renaming it into claimed/.
@@ -272,7 +287,7 @@ func ClaimRequest(sessionsDir, id string) (bool, error) {
 // rewrites it in place (tmp+rename). Until both fields are present the claim is
 // not active; this call is what makes it so. It returns the updated row.
 func WriteClaimMetadata(sessionsDir, id, claimedBy string) (Request, error) {
-	req, ok := readRow(claimedPath(sessionsDir, id))
+	req, _, ok := readRow(claimedPath(sessionsDir, id), "queue-claimed")
 	if !ok {
 		return Request{}, fmt.Errorf("claimed row %q missing or corrupt", id)
 	}
@@ -288,7 +303,7 @@ func WriteClaimMetadata(sessionsDir, id, claimedBy string) (Request, error) {
 
 // ReadClaimed reads a single claimed row.
 func ReadClaimed(sessionsDir, id string) (Request, error) {
-	req, ok := readRow(claimedPath(sessionsDir, id))
+	req, _, ok := readRow(claimedPath(sessionsDir, id), "queue-claimed")
 	if !ok {
 		return Request{}, fmt.Errorf("claimed row %q missing or corrupt", id)
 	}
@@ -338,9 +353,10 @@ type TransitionEvent struct {
 // journals Reclaimed/Abandoned, then journals `claimed` and spawns from Claimed
 // when it is non-nil.
 type QueueTickResult struct {
-	Reclaimed []TransitionEvent
-	Abandoned []TransitionEvent
-	Claimed   *Request
+	Reclaimed   []TransitionEvent
+	Abandoned   []TransitionEvent
+	Claimed     *Request
+	Diagnostics []Diagnostic
 }
 
 // QueueTick performs one queue maintenance pass against the substrate at
@@ -375,7 +391,9 @@ func QueueTick(
 ) (QueueTickResult, error) {
 	var res QueueTickResult
 
-	for _, row := range ScanClaimed(sessionsDir) {
+	claimedRows, claimedDiagnostics := ScanClaimedWithDiagnostics(sessionsDir)
+	res.Diagnostics = append(res.Diagnostics, claimedDiagnostics...)
+	for _, row := range claimedRows {
 		reason, reclaim := reclaimReason(row, liveInstances, now, reclaimAfter)
 		if !reclaim {
 			continue
@@ -391,7 +409,9 @@ func QueueTick(
 		res.Reclaimed = append(res.Reclaimed, TransitionEvent{RequestID: req.RequestID, Reason: reason})
 	}
 
-	for _, req := range ScanPending(sessionsDir) {
+	pendingRows, pendingDiagnostics := ScanPendingWithDiagnostics(sessionsDir)
+	res.Diagnostics = append(res.Diagnostics, pendingDiagnostics...)
+	for _, req := range pendingRows {
 		if !claimableBy(req, myName, myVintage) {
 			continue
 		}
@@ -509,32 +529,35 @@ func reclaimReason(row ClaimedRow, liveInstances map[string]bool, now time.Time,
 }
 
 // scanDir reads every *.json row in dir, skipping torn/corrupt files.
-func scanDir(dir string) []Request {
+func scanDir(dir, source string) ([]Request, []Diagnostic) {
 	matches, err := filepath.Glob(filepath.Join(dir, "*.json"))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var out []Request
+	var diagnostics []Diagnostic
 	for _, path := range matches {
-		if req, ok := readRow(path); ok {
+		if req, diagnostic, ok := readRow(path, source); ok {
 			out = append(out, req)
+		} else if diagnostic != nil {
+			diagnostics = append(diagnostics, *diagnostic)
 		}
 	}
-	return out
+	return out, diagnostics
 }
 
-// readRow decodes one request file, warning-and-excluding on corruption.
-func readRow(path string) (Request, bool) {
+// readRow decodes one request file and reports corruption to its caller.
+func readRow(path, source string) (Request, *Diagnostic, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Request{}, false
+		return Request{}, nil, false
 	}
 	var req Request
 	if err := json.Unmarshal(data, &req); err != nil {
-		fmt.Fprintf(os.Stderr, "[session] warning: %s corrupt — %v\n", path, err)
-		return Request{}, false
+		diagnostic := corruptDiagnostic(source, path, err)
+		return Request{}, &diagnostic, false
 	}
-	return req, true
+	return req, nil, true
 }
 
 // writeRow marshals and atomically writes a request file.

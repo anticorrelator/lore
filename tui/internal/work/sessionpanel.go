@@ -66,8 +66,9 @@ type StreamCompleteMsg struct {
 
 // StreamErrorMsg is sent when the subprocess exits with a non-zero exit code.
 type StreamErrorMsg struct {
-	Slug string
-	Err  error
+	Slug    string
+	Err     error
+	Notices []OperatorNotice
 }
 
 // TerminalOutputMsg carries a chunk of raw bytes read from the PTY master.
@@ -114,6 +115,16 @@ type SessionProcessStartedMsg struct {
 	// signalling it would only detach a viewer. Both empty/zero for direct-PTY.
 	Tmux    string
 	PanePID int
+
+	// Notices describe non-fatal launch degradations for the host model to render.
+	Notices []OperatorNotice
+}
+
+// OperatorNotice is a non-fatal launch degradation returned to the Bubble Tea
+// host instead of being written directly to the parent terminal.
+type OperatorNotice struct {
+	Code    string
+	Message string
 }
 
 // TerminalDetachMsg is sent when the user double-presses Esc within
@@ -1132,10 +1143,11 @@ func buildInitialPrompt(d SessionDescriptor) string {
 func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int, knowledgeDir string, sessionEnv SessionEnv, tmux bool) tea.Cmd {
 	return func() (result tea.Msg) {
 		slug := d.Slug
+		var notices []OperatorNotice
 		defer func() {
 			if r := recover(); r != nil {
 				writeCrashLog("StartTerminalCmd", r)
-				result = StreamErrorMsg{Slug: slug, Err: fmt.Errorf("start panic: %v", r)}
+				result = StreamErrorMsg{Slug: slug, Err: fmt.Errorf("start panic: %v", r), Notices: notices}
 			}
 		}()
 		// Build the initial prompt to auto-submit. Passing it as a positional
@@ -1179,7 +1191,10 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 				if supported {
 					args = append(args, flag, sysPrompt)
 				} else {
-					fmt.Fprintf(os.Stderr, "[lore] degraded: append_system_prompt skipped (capability=none on framework=%s); followup-discuss context not pre-loaded\n", activeFramework)
+					notices = append(notices, OperatorNotice{
+						Code:    "append-system-prompt-unsupported",
+						Message: fmt.Sprintf("append_system_prompt skipped for %s; follow-up context was not pre-loaded", activeFramework),
+					})
 				}
 			}
 		}
@@ -1190,7 +1205,10 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 		if settingsSupported {
 			args = append(args, settingsFlag, `{}`)
 		} else {
-			fmt.Fprintf(os.Stderr, "[lore] degraded: inline_settings_override skipped (capability=none on framework=%s); session-scoped settings overrides unavailable\n", activeFramework)
+			notices = append(notices, OperatorNotice{
+				Code:    "inline-settings-unsupported",
+				Message: fmt.Sprintf("inline_settings_override skipped for %s; session settings overrides unavailable", activeFramework),
+			})
 		}
 
 		// Lead-model override: the descriptor's Model rides the harness's universal
@@ -1250,7 +1268,10 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 				extras := append([]string{"LORE_FRAMEWORK=" + activeFramework}, sessionEnv.vars()...)
 				pid, terr := createTmuxSession(name, width, height, extras, harnessBinary, args)
 				if terr != nil {
-					fmt.Fprintf(os.Stderr, "[lore] degraded: tmux hosting failed for %s (%v); spawning direct-PTY (session will not survive crash/restart)\n", label, terr)
+					notices = append(notices, OperatorNotice{
+						Code:    "tmux-hosting-failed",
+						Message: fmt.Sprintf("tmux hosting failed for %s (%v); using direct PTY", label, terr),
+					})
 				} else {
 					tmuxName, panePID = name, pid
 					cmd = tmuxAttachCommand(name)
@@ -1260,7 +1281,10 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 				// tmux is active but this process advertises no instance name to build
 				// the session name from — host capability present, identity absent.
 				// Announce the fallback so the recovery loss is visible, never silent.
-				fmt.Fprintf(os.Stderr, "[lore] degraded: tmux hosting unavailable for %s (no instance name); spawning direct-PTY (session will not survive crash/restart)\n", label)
+				notices = append(notices, OperatorNotice{
+					Code:    "tmux-instance-unavailable",
+					Message: fmt.Sprintf("tmux hosting unavailable for %s (no instance name); using direct PTY", label),
+				})
 			}
 		}
 		if cmd == nil {
@@ -1286,7 +1310,7 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 				// than orphan it.
 				killTmuxSession(tmuxName)
 			}
-			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("pty start: %w", err)}
+			return StreamErrorMsg{Slug: slug, Err: fmt.Errorf("pty start: %w", err), Notices: notices}
 		}
 
 		return SessionProcessStartedMsg{
@@ -1298,6 +1322,7 @@ func StartTerminalCmd(d SessionDescriptor, projectDir string, width, height int,
 			Harness:   activeFramework,
 			Tmux:      tmuxName,
 			PanePID:   panePID,
+			Notices:   notices,
 		}
 	}
 }

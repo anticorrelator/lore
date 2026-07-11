@@ -47,7 +47,7 @@ func TestScanCloseRequests_DecodesRows(t *testing.T) {
 }
 
 // TestScanCloseRequests_ExcludesCorruptRow: a torn/corrupt row is dropped with a
-// warning while valid siblings still return (reader tolerance, not abort).
+// diagnostic while valid siblings still return (reader tolerance, not abort).
 func TestScanCloseRequests_ExcludesCorruptRow(t *testing.T) {
 	dir := t.TempDir()
 	writeCloseRequest(t, dir, CloseRequest{RequestID: "good", Slug: "demo", TargetInstance: "me"})

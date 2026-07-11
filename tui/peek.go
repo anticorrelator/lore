@@ -19,7 +19,8 @@ const peekResponseTTL = 5 * time.Minute
 // peekRequestScanMsg carries the peek-requests addressed to this instance for a
 // slug it hosts, discovered on the poll tick.
 type peekRequestScanMsg struct {
-	matched []session.PeekRequest
+	matched     []session.PeekRequest
+	diagnostics []session.Diagnostic
 }
 
 // peekRespondedMsg reports the outcome of responding to (and consuming) one
@@ -38,7 +39,8 @@ func scanPeekRequestsCmd(sessionsDir, myName string, hosted map[string]bool) tea
 	return func() tea.Msg {
 		session.GCPeekResponses(sessionsDir, peekResponseTTL)
 		var matched []session.PeekRequest
-		for _, pr := range session.ScanPeekRequests(sessionsDir) {
+		rows, diagnostics := session.ScanPeekRequestsWithDiagnostics(sessionsDir)
+		for _, pr := range rows {
 			if pr.RequestID == "" || pr.TargetInstance != myName {
 				continue
 			}
@@ -47,7 +49,7 @@ func scanPeekRequestsCmd(sessionsDir, myName string, hosted map[string]bool) tea
 			}
 			matched = append(matched, pr)
 		}
-		return peekRequestScanMsg{matched: matched}
+		return peekRequestScanMsg{matched: matched, diagnostics: diagnostics}
 	}
 }
 
@@ -69,8 +71,9 @@ func respondPeekCmd(sessionsDir, requestID string, resp session.PeekResponse) te
 // request, classifies readiness with the same gate the send path uses, and
 // dispatches the response write-back. The screen read runs here in Update.
 func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
+	diagnosticCmd := appendDiagnosticsCmd(m.sessionsDir, msg.diagnostics)
 	if len(msg.matched) == 0 {
-		return m, nil
+		return m, diagnosticCmd
 	}
 	framework, ferr := config.ResolveTUILaunchFramework()
 	hasContract := false
@@ -80,6 +83,9 @@ func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
 		}
 	}
 	var cmds []tea.Cmd
+	if diagnosticCmd != nil {
+		cmds = append(cmds, diagnosticCmd)
+	}
 	for _, pr := range msg.matched {
 		if m.pendingPeek[pr.RequestID] {
 			continue
@@ -113,7 +119,7 @@ func (m model) handlePeekRequestScan(msg peekRequestScanMsg) (model, tea.Cmd) {
 				resp.ANSI = snap.ANSI
 			}
 			if reason == sendReasonNoContract {
-				noteNoContract(framework)
+				m = m.routeRuntimeNotices([]runtimeNotice{noContractNotice(framework)})
 			}
 		}
 		cmds = append(cmds, respondPeekCmd(m.sessionsDir, pr.RequestID, resp))

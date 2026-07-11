@@ -115,16 +115,21 @@ func RemoveInstance(sessionsDir, name string) error {
 	return err
 }
 
-// ListInstances returns every live instance: it globs instances/*.json, drops
-// files whose mtime is older than LivenessTTL, and excludes torn/corrupt rows
-// with a warning to stderr rather than aborting. The result is a full snapshot
-// — callers replace state wholesale, never merge.
+// ListInstances returns every live instance and discards scan diagnostics.
 func ListInstances(sessionsDir string) []Instance {
+	instances, _ := ListInstancesWithDiagnostics(sessionsDir)
+	return instances
+}
+
+// ListInstancesWithDiagnostics returns a full live-instance snapshot plus any
+// non-fatal corrupt-row exclusions observed while reading it.
+func ListInstancesWithDiagnostics(sessionsDir string) ([]Instance, []Diagnostic) {
 	matches, err := filepath.Glob(filepath.Join(InstancesDir(sessionsDir), "*.json"))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var out []Instance
+	var diagnostics []Diagnostic
 	for _, path := range matches {
 		fi, err := os.Stat(path)
 		if err != nil {
@@ -139,12 +144,12 @@ func ListInstances(sessionsDir string) []Instance {
 		}
 		var inst Instance
 		if err := json.Unmarshal(data, &inst); err != nil {
-			fmt.Fprintf(os.Stderr, "[session] warning: %s corrupt — %v\n", path, err)
+			diagnostics = append(diagnostics, corruptDiagnostic("instance-registry", path, err))
 			continue
 		}
 		out = append(out, inst)
 	}
-	return out
+	return out, diagnostics
 }
 
 // InstanceLive reports whether the named instance has a fresh (within-TTL)

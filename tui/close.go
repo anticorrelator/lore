@@ -157,29 +157,33 @@ func (t tmuxProc) Alive() bool      { return syscall.Kill(t.pid, syscall.Signal(
 // itself failed while the process is still alive (wrapped), or a process that
 // outlived the full ladder (errCloseLadderExhausted). The caller turns a non-nil
 // error into a close_failed terminal rather than a false `closed`.
-func runCloseLadder(proc harnessProc, ptmx io.Writer, exitSeq string, exitSupported bool, framework string, grace, poll time.Duration) (closeRung, error) {
+func runCloseLadder(proc harnessProc, ptmx io.Writer, exitSeq string, exitSupported bool, framework string, grace, poll time.Duration) (closeRung, []runtimeNotice, error) {
+	var notices []runtimeNotice
 	if proc == nil {
-		return rungNone, nil
+		return rungNone, nil, nil
 	}
 	if exitSupported && ptmx != nil {
 		_, _ = ptmx.Write([]byte(exitSeq))
 		if waitExit(proc, grace, poll) {
-			return rungGraceful, nil
+			return rungGraceful, nil, nil
 		}
 	} else if !exitSupported {
-		fmt.Fprintf(os.Stderr, "[lore] degraded: graceful_exit_sequence skipped (capability=none on framework=%s); session close escalates to SIGTERM\n", framework)
+		notices = append(notices, degradationNotice(
+			"graceful-exit-unsupported",
+			fmt.Sprintf("graceful exit unsupported for %s; session close escalated to SIGTERM", framework),
+		))
 	}
 	_ = proc.Terminate()
 	if waitExit(proc, grace, poll) {
-		return rungSIGTERM, nil
+		return rungSIGTERM, notices, nil
 	}
 	if err := proc.Kill(); err != nil && proc.Alive() {
-		return rungKill, fmt.Errorf("SIGKILL failed: %w", err)
+		return rungKill, notices, fmt.Errorf("SIGKILL failed: %w", err)
 	}
 	if proc.Alive() {
-		return rungKill, errCloseLadderExhausted
+		return rungKill, notices, errCloseLadderExhausted
 	}
-	return rungKill, nil
+	return rungKill, notices, nil
 }
 
 // waitExit polls proc.Alive at poll intervals until it reports exited or grace
@@ -206,7 +210,8 @@ func waitExit(proc harnessProc, grace, poll time.Duration) bool {
 // closeRequestScanMsg carries the close-requests addressed to this instance for
 // a slug it hosts, discovered on the poll tick.
 type closeRequestScanMsg struct {
-	matched []session.CloseRequest
+	matched     []session.CloseRequest
+	diagnostics []session.Diagnostic
 }
 
 // closeRequestDeletedMsg reports the outcome of consuming (deleting) one matched
@@ -226,6 +231,7 @@ type closeLadderDoneMsg struct {
 	rung      closeRung
 	err       error
 	requestID string
+	notices   []runtimeNotice
 }
 
 // --- Cmds ---
@@ -276,7 +282,8 @@ func resolveCloseTargetSlug(cr session.CloseRequest, idToSlug map[string]string)
 func scanCloseRequestsCmd(sessionsDir, myName string, hosted map[string]bool, idToSlug map[string]string) tea.Cmd {
 	return func() tea.Msg {
 		var matched []session.CloseRequest
-		for _, cr := range session.ScanCloseRequests(sessionsDir) {
+		rows, diagnostics := session.ScanCloseRequestsWithDiagnostics(sessionsDir)
+		for _, cr := range rows {
 			if cr.RequestID == "" || cr.TargetInstance != myName {
 				continue
 			}
@@ -286,7 +293,7 @@ func scanCloseRequestsCmd(sessionsDir, myName string, hosted map[string]bool, id
 			}
 			matched = append(matched, cr)
 		}
-		return closeRequestScanMsg{matched: matched}
+		return closeRequestScanMsg{matched: matched, diagnostics: diagnostics}
 	}
 }
 
@@ -343,8 +350,8 @@ func (m model) closeLadderCmd(slug string, panel work.SessionPanelModel, request
 		if f := panel.Ptmx(); f != nil {
 			ptmx = f
 		}
-		rung, err := runCloseLadder(proc, ptmx, exitSeq, exitSupported, framework, grace, poll)
-		return closeLadderDoneMsg{slug: slug, rung: rung, err: err, requestID: requestID}
+		rung, notices, err := runCloseLadder(proc, ptmx, exitSeq, exitSupported, framework, grace, poll)
+		return closeLadderDoneMsg{slug: slug, rung: rung, err: err, requestID: requestID, notices: notices}
 	}
 }
 
@@ -377,11 +384,15 @@ func shouldAutoClose(ls liveSession) bool {
 //     auto-closes; a human session (or auto_close=false) is held open with a "done"
 //     panel badge, teardown available via keybind/verb or a later explicit close.
 func (m model) handleCloseRequestScan(msg closeRequestScanMsg) (model, tea.Cmd) {
+	diagnosticCmd := appendDiagnosticsCmd(m.sessionsDir, msg.diagnostics)
 	if len(msg.matched) == 0 {
-		return m, nil
+		return m, diagnosticCmd
 	}
 	idToSlug := sessionIDIndex(m.localSessions)
 	var cmds []tea.Cmd
+	if diagnosticCmd != nil {
+		cmds = append(cmds, diagnosticCmd)
+	}
 	for _, cr := range msg.matched {
 		// A session-addressed row keys off the id-resolved slug, not cr.Slug, so a
 		// slugless close reaches the one session it named. ok=false means the
@@ -599,6 +610,7 @@ func (m model) closeFailedCmd(slug, requestID, reason string, ls liveSession) te
 // teardown as a no-op (endLocalSession* is guarded on localSessions membership),
 // keeping the terminal exactly-once.
 func (m model) handleCloseLadderDone(msg closeLadderDoneMsg) (model, tea.Cmd) {
+	m = m.routeRuntimeNotices(msg.notices)
 	slug := msg.slug
 	if m.sessionPanels != nil {
 		if panel, ok := m.sessionPanels[slug]; ok {

@@ -629,6 +629,12 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 		}
 		return m, nil
 
+	case diagnosticsLoggedMsg:
+		if msg.err != nil {
+			m.flashErr = diagnosticLogError(msg.err)
+		}
+		return m, nil
+
 	case planMtimeCheckedMsg:
 		return m.handlePlanMtimeChecked(msg)
 
@@ -647,6 +653,7 @@ func (m model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
 	case tea.KeyPressMsg:
 		// Clear any transient flash error on the next key press.
 		m.flashErr = ""
+		m.statusNotice = ""
 
 		// No-repo state: only accept q, ctrl+c, ctrl+d (quit).
 		if m.state == stateNoRepo {

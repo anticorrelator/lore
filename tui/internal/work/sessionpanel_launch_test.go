@@ -1,7 +1,9 @@
 package work
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,23 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 )
+
+func captureParentStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	original := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = original }()
+	fn()
+	_ = w.Close()
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	_ = r.Close()
+	return buf.String()
+}
 
 // TUI launch smoke tests (T26): assert StartTerminalCmd spawns the
 // framework-resolved binary, prepends the harness-args, and routes the two
@@ -308,7 +327,10 @@ func TestStartTerminalCmd_OpenCodeSkipsUnsupportedConcerns(t *testing.T) {
 
 	// followupMode=true → exercises the append_system_prompt path; opencode
 	// reports `unsupported` for both TUI launch flags and so should skip both.
-	msg := runStartTerminal(t, "smoke-slug", dir, true)
+	var msg tea.Msg
+	stderr := captureParentStderr(t, func() {
+		msg = runStartTerminal(t, "smoke-slug", dir, true)
+	})
 	started, ok := msg.(SessionProcessStartedMsg)
 	if !ok {
 		t.Fatalf("expected SessionProcessStartedMsg, got %T (%+v)", msg, msg)
@@ -329,6 +351,15 @@ func TestStartTerminalCmd_OpenCodeSkipsUnsupportedConcerns(t *testing.T) {
 	if argsContains(started.Cmd.Args, "--settings") {
 		t.Errorf("Cmd.Args contains --settings on opencode (should be skipped per `unsupported`): %v",
 			started.Cmd.Args)
+	}
+	if stderr != "" {
+		t.Fatalf("StartTerminalCmd wrote parent stderr: %q", stderr)
+	}
+	if len(started.Notices) != 2 {
+		t.Fatalf("Notices = %#v, want append-system-prompt and inline-settings degradations", started.Notices)
+	}
+	if started.Notices[0].Code != "append-system-prompt-unsupported" || started.Notices[1].Code != "inline-settings-unsupported" {
+		t.Errorf("notice codes = %q, %q", started.Notices[0].Code, started.Notices[1].Code)
 	}
 }
 

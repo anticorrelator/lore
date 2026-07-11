@@ -1,0 +1,11 @@
+[
+  {"code":"append-system-prompt-unsupported","class":"operator-degradation","destination":"status"},
+  {"code":"inline-settings-unsupported","class":"operator-degradation","destination":"status"},
+  {"code":"graceful-exit-unsupported","class":"operator-degradation","destination":"status"},
+  {"code":"interaction-contract-unavailable","class":"operator-degradation","destination":"status"},
+  {"code":"corrupt-instance","class":"background-diagnostic","destination":"tui-notices.jsonl"},
+  {"code":"corrupt-queue-request","class":"background-diagnostic","destination":"tui-notices.jsonl"},
+  {"code":"corrupt-close-request","class":"background-diagnostic","destination":"tui-notices.jsonl"},
+  {"code":"corrupt-send-request","class":"background-diagnostic","destination":"tui-notices.jsonl"},
+  {"code":"corrupt-peek-request","class":"background-diagnostic","destination":"tui-notices.jsonl"}
+]

@@ -369,6 +369,10 @@ type model struct {
 	// It is cleared on the next key press.
 	flashErr string
 
+	// statusNotice is a transient operator-degradation notice rendered in amber.
+	// Like flashErr, it clears on the next key press.
+	statusNotice string
+
 	// doctorBanner holds a one-line install-drift summary from
 	// `lore doctor --quiet` (e.g. "lore doctor: 1 issue(s) detected — run
 	// 'lore doctor' for details"). Populated asynchronously by runDoctor on

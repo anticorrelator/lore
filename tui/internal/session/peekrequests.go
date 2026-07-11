@@ -3,7 +3,6 @@ package session
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -56,15 +55,21 @@ func peekResponsePath(sessionsDir, id string) string {
 	return filepath.Join(PeekResponsesDir(sessionsDir), id+".json")
 }
 
-// ScanPeekRequests reads every peek-request row, excluding torn/corrupt files
-// with a warning to stderr rather than aborting the scan. An absent directory
-// yields no rows and no error.
+// ScanPeekRequests reads every valid peek-request row and discards scan
+// diagnostics. An absent directory yields no rows and no error.
 func ScanPeekRequests(sessionsDir string) []PeekRequest {
+	rows, _ := ScanPeekRequestsWithDiagnostics(sessionsDir)
+	return rows
+}
+
+// ScanPeekRequestsWithDiagnostics returns valid rows and corrupt-row exclusions.
+func ScanPeekRequestsWithDiagnostics(sessionsDir string) ([]PeekRequest, []Diagnostic) {
 	matches, err := filepath.Glob(filepath.Join(PeekRequestsDir(sessionsDir), "*.json"))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var out []PeekRequest
+	var diagnostics []Diagnostic
 	for _, path := range matches {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -72,12 +77,12 @@ func ScanPeekRequests(sessionsDir string) []PeekRequest {
 		}
 		var pr PeekRequest
 		if err := json.Unmarshal(data, &pr); err != nil {
-			fmt.Fprintf(os.Stderr, "[session] warning: %s corrupt — %v\n", path, err)
+			diagnostics = append(diagnostics, corruptDiagnostic("peek-request", path, err))
 			continue
 		}
 		out = append(out, pr)
 	}
-	return out
+	return out, diagnostics
 }
 
 // DeletePeekRequest removes a consumed peek-request row. Idempotent.

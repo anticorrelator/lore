@@ -191,6 +191,9 @@ func (m model) sessionTypeForSlug(slug string) string {
 
 func (m model) handleSessionProcessStarted(msg work.SessionProcessStartedMsg) (model, tea.Cmd) {
 	// PTY subprocess launched — attach PTY to the pre-created spec panel and start polling.
+	for _, notice := range msg.Notices {
+		m = m.routeRuntimeNotices([]runtimeNotice{degradationNotice(notice.Code, notice.Message)})
+	}
 	slug := msg.Slug
 	var panel work.SessionPanelModel
 	if existing, ok := m.sessionPanels[slug]; ok && !existing.IsDone() {
@@ -389,6 +392,9 @@ func (m model) handleStreamComplete(msg work.StreamCompleteMsg) (model, tea.Cmd)
 func (m model) handleStreamError(msg work.StreamErrorMsg) (model, tea.Cmd) {
 	// PTY error — mark done with error, cleanup PTY. Still reload list in
 	// case spec wrote partial files before failing.
+	for _, notice := range msg.Notices {
+		m = m.routeRuntimeNotices([]runtimeNotice{degradationNotice(notice.Code, notice.Message)})
+	}
 	slug := msg.Slug
 	if m.sessionPanels != nil {
 		if panel, ok := m.sessionPanels[slug]; ok {

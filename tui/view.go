@@ -568,7 +568,7 @@ func (m model) viewTopBottom(cfg paneConfig) string {
 // renderStatusBar renders a single-line context-sensitive keybinding hint
 // bar. Hint sets come from the keymap registry (keymap.go); this function
 // owns only the override ladder, whose precedence is
-// flashErr > doctorBanner > aiLoading > hints.
+// flashErr > statusNotice > doctorBanner > aiLoading > hints.
 func (m model) renderStatusBar(width int) string {
 	dimS := style.Dim
 	sep := style.Separator.Render("  ·  ")
@@ -608,6 +608,10 @@ func (m model) renderStatusBar(width int) string {
 
 	if m.flashErr != "" {
 		return pad("  " + style.SevBlocking.Render(m.flashErr))
+	}
+
+	if m.statusNotice != "" {
+		return pad("  " + doctorWarnS.Render(m.statusNotice))
 	}
 
 	if m.doctorBanner != "" {
