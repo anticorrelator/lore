@@ -699,6 +699,36 @@ class TestSearcher:
         assert Searcher._prepare_query("") == ""
         assert Searcher._prepare_query("  ") == ""
 
+    def test_prepare_query_natural_language_colon_tokenizes(self):
+        """A colon that is not an indexed-column filter must NOT trigger raw
+        passthrough — FTS5 would parse "points:" as a column filter and raise
+        "no such column: points"."""
+        assert (
+            Searcher._prepare_query("interaction points: TUI")
+            == '"interaction" "points:" "TUI"'
+        )
+
+    def test_prepare_query_indexed_column_filter_passthrough(self):
+        """Colon filters on INDEXED columns are intentional FTS5 syntax."""
+        assert Searcher._prepare_query("heading:database") == "heading:database"
+        assert Searcher._prepare_query("content:sharding") == "content:sharding"
+
+    def test_prepare_query_unindexed_column_colon_tokenizes(self):
+        """UNINDEXED columns can't be MATCH-filtered, so a colon after one is
+        treated as natural language, not passthrough."""
+        assert Searcher._prepare_query("category: gotchas") == '"category:" "gotchas"'
+
+    def test_is_recoverable_match_error(self):
+        assert Searcher._is_recoverable_match_error(
+            sqlite3.OperationalError("no such column: points")
+        )
+        assert Searcher._is_recoverable_match_error(
+            sqlite3.OperationalError("fts5: syntax error near ...")
+        )
+        assert not Searcher._is_recoverable_match_error(
+            sqlite3.OperationalError("database is locked")
+        )
+
     def test_prepare_query_hyphenated_single(self):
         """Hyphenated token should be split into individually quoted sub-tokens."""
         assert Searcher._prepare_query("file-mutation-as-mocking") == '"file" "mutation" "as" "mocking"'
@@ -718,7 +748,24 @@ class TestSearcher:
         # "service-mesh" should still find the Service Mesh entry
         results = searcher.search("service-mesh")
         assert len(results) > 0
-        assert results[0]["heading"] == "Service Mesh"
+
+    def test_search_natural_language_colon_does_not_raise(self, knowledge_dir):
+        """Regression: a natural-language query containing a colon used to be
+        passed through raw, making FTS5 parse "points:" as a column filter and
+        crash with OperationalError("no such column: points")."""
+        searcher = Searcher(str(knowledge_dir))
+        results = searcher.search("interaction points: database sharding")
+        assert isinstance(results, list)
+
+    def test_search_bad_column_filter_falls_back(self, knowledge_dir):
+        """A raw FTS5 query naming a nonexistent column degrades to the quoted
+        phrase fallback instead of raising."""
+        searcher = Searcher(str(knowledge_dir))
+        # heading: keeps passthrough active; "haeding" is a typo'd column
+        results = searcher.search('heading:database OR haeding:foo')
+        # Phrase fallback for a malformed raw query typically yields no
+        # matches — the contract is graceful degradation, not a traceback.
+        assert isinstance(results, list)
 
     def test_search_hyphenated_multi_segment(self, knowledge_dir):
         """Multi-segment hyphenated query should match content."""

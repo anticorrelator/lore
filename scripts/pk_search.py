@@ -1103,7 +1103,26 @@ class Searcher:
     # review-protocol") must NOT trigger raw passthrough — passthrough of
     # natural-language text containing path tokens (e.g. "claude-md/foo.md")
     # is an FTS5 syntax error.
-    _FTS5_OPERATORS = re.compile(r'[":*]|\b(?:AND|OR|NOT|NEAR)\b')
+    # A colon triggers passthrough only as a column filter on an INDEXED
+    # column (file_path/heading/content/source_type — UNINDEXED columns
+    # cannot be filtered in MATCH). A bare colon in natural language
+    # ("interaction points: TUI") must tokenize normally; raw passthrough
+    # would make FTS5 parse "points:" as a column filter and raise
+    # "no such column: points".
+    _FTS5_OPERATORS = re.compile(
+        r'["*]|\b(?:AND|OR|NOT|NEAR)\b'
+        r"|\b(?:file_path|heading|content|source_type)\s*:"
+    )
+
+    # OperationalError messages that mean the MATCH string itself was
+    # malformed (as opposed to a schema problem in the SELECT). Both are
+    # recoverable by retrying with an escaped query.
+    _RECOVERABLE_MATCH_ERRORS = ("fts5: syntax error", "no such column")
+
+    @classmethod
+    def _is_recoverable_match_error(cls, e: sqlite3.OperationalError) -> bool:
+        msg = str(e).lower()
+        return any(marker in msg for marker in cls._RECOVERABLE_MATCH_ERRORS)
 
     def __init__(self, knowledge_dir: str, repo_root: str | None = None):
         self.knowledge_dir = os.path.abspath(knowledge_dir)
@@ -1314,7 +1333,7 @@ class Searcher:
             ).fetchall()
         except sqlite3.OperationalError as e:
             conn.close()
-            if "fts5: syntax error" in str(e).lower():
+            if self._is_recoverable_match_error(e):
                 # Fall back to quoted phrase search
                 escaped = '"' + query.replace('"', '""') + '"'
                 fallback_params: list = [escaped] + filter_params + [limit * 3]
@@ -1488,7 +1507,7 @@ class Searcher:
             ).fetchall()
         except sqlite3.OperationalError as e:
             conn.close()
-            if "fts5: syntax error" in str(e).lower():
+            if self._is_recoverable_match_error(e):
                 escaped = '"' + query.replace('"', '""') + '"'
                 conn = sqlite3.connect(self.db_path)
                 conn.row_factory = sqlite3.Row
